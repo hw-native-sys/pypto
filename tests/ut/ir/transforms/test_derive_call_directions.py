@@ -1686,10 +1686,13 @@ class TestNoDepOverride:
     def _no_roundtrip(self):
         """Override the global roundtrip fixture for this class only.
 
-        ``pl.no_dep`` leaves an ``arg_direction_overrides`` attr that the python
-        printer does not emit, so the print -> parse -> structural_equal
-        roundtrip fails on the call's ``attrs``. Fall back to the lighter
-        BEFORE_AND_AFTER property-verification mode here.
+        The ``arg_direction_overrides`` attr left by ``pl.no_dep`` now round-trips
+        cleanly (see ``TestOutlineNoDepArgs`` which runs under full roundtrip).
+        The remaining blocker for THESE fixtures is unrelated: their ``kernel``
+        functions declare no return-type annotation, so the printed kernel has
+        no ``-> ...`` and the reparsed call's return type degrades to
+        ``UnknownType`` (TensorType on the original) — a separate print/reparse
+        gap. Fall back to the lighter BEFORE_AND_AFTER property-verification mode.
         """
         instruments: list[_core_passes.PassInstrument] = [
             _core_passes.VerificationInstrument(_core_passes.VerificationMode.BEFORE_AND_AFTER)

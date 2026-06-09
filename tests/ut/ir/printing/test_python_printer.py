@@ -1343,5 +1343,94 @@ def test_int64_const_roundtrips_in_expression_context():
     assert python_print(reparsed, format=False) == printed
 
 
+def test_generic_attr_in_attrs_dict_roundtrips():
+    """A non-bespoke attrs key (``arg_direction_overrides``) written directly in
+    DSL source survives print -> reparse via the generic attr codec.
+
+    Regression for the printer silently dropping ``arg_direction_overrides`` on
+    post-outline Calls: the printer now renders every non-sugar attr generically
+    (``PrintAttrValue``) and the parser recovers any key (``_parse_attr_value``),
+    so the round-trip preserves the attr instead of losing it.
+    """
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP32],
+            b: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            return b
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def orch(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP32],
+            b: pl.Tensor[[16, 16], pl.FP32],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            r: pl.Tensor[[16, 16], pl.FP32] = self.kernel(
+                a,
+                b,
+                attrs={
+                    "arg_directions": [pl.adir.input, pl.adir.output_existing],
+                    "arg_direction_overrides": [1],
+                },
+            )
+            return r
+
+    printed = python_print(Prog)
+    assert "arg_direction_overrides" in printed, printed
+    reparsed = pl.parse_program(printed)
+    ir.assert_structural_equal(Prog, reparsed)
+
+    # The generic attr actually survived as a typed value on the reparsed call.
+    orch = reparsed.get_function("orch")
+    assert orch is not None
+    body = orch.body
+    stmts = list(body.stmts) if isinstance(body, ir.SeqStmts) else [body]
+    call = None
+    for s in stmts:
+        value = getattr(s, "value", None)
+        if isinstance(value, ir.Call) and isinstance(value.op, ir.GlobalVar):
+            call = value
+            break
+    assert call is not None
+    assert call.attrs["arg_direction_overrides"] == [1]
+
+
+def test_attrs_structural_equality_is_order_insensitive():
+    """``structural_equal`` treats a Call's attrs as a key->value map: the same
+    keys in a different order compare equal (map-based, not positional).
+    """
+
+    def _prog(order):
+        src = textwrap.dedent(f"""\
+            @pl.program
+            class Prog:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(self, a: pl.Tensor[[16, 16], pl.FP32],
+                           b: pl.Out[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
+                    return b
+
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def orch(self, a: pl.Tensor[[16, 16], pl.FP32],
+                         b: pl.Tensor[[16, 16], pl.FP32]) -> pl.Tensor[[16, 16], pl.FP32]:
+                    r: pl.Tensor[[16, 16], pl.FP32] = self.kernel(a, b, attrs={{{order}}})
+                    return r
+        """)
+        return pl.parse_program(src)
+
+    dirs = '"arg_directions": [pl.adir.input, pl.adir.output_existing]'
+    overrides = '"arg_direction_overrides": [1]'
+    prog_ab = _prog(f"{dirs}, {overrides}")
+    prog_ba = _prog(f"{overrides}, {dirs}")
+    # Same attrs, different key order -> structurally equal under map-based compare.
+    ir.assert_structural_equal(prog_ab, prog_ba)
+    # And the hash must agree (equal nodes must hash equal): structural_hash folds
+    # attrs commutatively, so key order does not change the hash.
+    assert ir.structural_hash(prog_ab) == ir.structural_hash(prog_ba)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

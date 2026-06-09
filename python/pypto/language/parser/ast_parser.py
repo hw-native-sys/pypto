@@ -5182,6 +5182,10 @@ class ASTParser:
         # Parser/printer round-trip support for post-DeriveCallDirections IR.
         # User source should spell manual deps with pl.submit(..., deps=[...]).
         manual_dep_edges = self._extract_manual_dep_edges_from_attrs(method_name, keywords, span)
+        # Generic round-trip safety net: recover every attrs={...} key that has
+        # no dedicated extractor (arg_direction_overrides, dummy_task, ...). The
+        # printer's PrintAttrValue is the matching writer.
+        extra_attrs = self._extract_generic_call_attrs(method_name, keywords, span)
         # Detect ``pl.no_dep(...)`` wrappers at call-arg positions and collect
         # their indices for the arg_direction_overrides attr.
         unwrapped_args, no_dep_indices = self._strip_call_arg_markers(arg_nodes)
@@ -5244,6 +5248,7 @@ class ASTParser:
             augment_task_id=as_submit,
             core_num=core_num_expr,
             sync_start=sync_start,
+            extra_attrs=extra_attrs,
         )
 
     def _is_python_resolvable_ast(
@@ -5620,7 +5625,7 @@ class ASTParser:
             return None
         return self.parse_expression(device_kw.value)
 
-    def _make_call_with_return_type(  # noqa: PLR0913 — cohesive call-builder; bundling args hurts clarity
+    def _make_call_with_return_type(  # noqa: PLR0913, PLR0912 — cohesive call-builder; bundling args/branches hurts clarity
         self,
         gvar: ir.GlobalVar,
         args: list[ir.Expr],
@@ -5634,6 +5639,7 @@ class ASTParser:
         augment_task_id: bool = False,
         core_num: ir.Expr | None = None,
         sync_start: bool = False,
+        extra_attrs: dict[str, Any] | None = None,
     ) -> ir.Expr:
         """Create an ir.Call, attaching the return type, optional call-site directions
         and optional per-arg ``NoDep`` overrides.
@@ -5681,6 +5687,10 @@ class ASTParser:
                 ``augment_task_id=True``).
             sync_start: SPMD sync-start flag from ``pl.spmd_submit(...,
                 sync_start=...)``. Recorded on ``ir.Submit.sync_start``.
+            extra_attrs: Generic round-trip attrs recovered from a printed
+                ``attrs={...}`` dict that have no dedicated param above
+                (e.g. ``arg_direction_overrides``, ``dummy_task``). Merged into
+                the call's attrs without overwriting a dedicated value.
         """
         if not return_types:
             return_type: ir.Type = ir.UnknownType()
@@ -5690,10 +5700,9 @@ class ASTParser:
             return_type = ir.TupleType(return_types)
 
         attrs: dict[str, Any] | None = None
-        # dump_vars is written at parse time; arg_directions is appended later by
-        # DeriveCallDirections. Insert dump_vars first so a print -> reparse of a
-        # post-derive Call reproduces the canonical [dump_vars, arg_directions]
-        # attr order (structural_equal compares attrs positionally).
+        # Build the attrs dict from the dedicated params. Order is no longer
+        # load-bearing: structural_equal compares attrs as an order-insensitive
+        # key->value map, so the canonical order here is for readability only.
         if dump_vars:
             attrs = {"dump_vars": list(dump_vars)}
         if arg_directions:
@@ -5708,6 +5717,15 @@ class ASTParser:
         if device_expr is not None:
             attrs = attrs or {}
             attrs["device"] = device_expr
+        # Generic round-trip attrs (e.g. arg_direction_overrides from a printed
+        # attrs dict, dummy_task, future keys). setdefault so a value already
+        # supplied by a dedicated param above wins — the two sources are
+        # mutually exclusive in practice (printed IR carries no pl.no_dep
+        # wrappers), this is purely defensive.
+        if extra_attrs:
+            attrs = attrs or {}
+            for _k, _v in extra_attrs.items():
+                attrs.setdefault(_k, _v)
 
         if augment_task_id:
             # pl.submit emits a first-class Submit node (not an augmented
@@ -5862,19 +5880,116 @@ class ASTParser:
                 span=self.span_tracker.get_span(attrs_kw.value),
                 hint='e.g. attrs={"arg_directions": [pl.adir.input, ...]}',
             )
+        # No key allowlist: every attrs key round-trips. The well-known keys
+        # (arg_directions / manual_dep_edges / dump_vars) keep dedicated
+        # extractors; every other key is recovered generically by
+        # ``_extract_generic_call_attrs`` -> ``_parse_attr_value`` (the printer's
+        # ``PrintAttrValue`` is the matching writer). Only the string-literal-key
+        # invariant is enforced here.
         for key_node in attrs_kw.value.keys:
             if not (isinstance(key_node, ast.Constant) and isinstance(key_node.value, str)):
                 raise ParserSyntaxError(
                     f"'attrs=' on call to '{method_name}' must use string-literal keys",
                     span=self.span_tracker.get_span(key_node) if key_node else span,
                 )
-            if key_node.value not in {"arg_directions", "manual_dep_edges", "dump_vars"}:
-                raise ParserSyntaxError(
-                    f"Unsupported attrs key '{key_node.value}' on call to '{method_name}'",
-                    span=self.span_tracker.get_span(key_node),
-                    hint="Only 'arg_directions', 'manual_dep_edges', 'dump_vars' are currently recognized",
-                )
         return attrs_kw.value
+
+    def _parse_attr_value(self, method_name: str, key: str, value_node: ast.expr) -> Any:
+        """Reconstruct one generic ``attrs={...}`` value from its Python AST node.
+
+        The matching writer is ``PrintAttrValue`` in the C++ printer
+        (``src/ir/transforms/python_printer.cpp``). The value type is inferred
+        from syntax (the "syntax inference only" round-trip contract): scalars
+        from constants, ``[int, ...]`` -> index list, ``[pl.adir.X, ...]`` ->
+        direction list, ``[name, ...]`` / bare ``name`` -> Var(s), anything else
+        -> an IR expression. Syntactically ambiguous shapes (empty / mixed-kind
+        lists) are REJECTED rather than guessed — never silently dropped —
+        mirroring the printer's fail-loud behaviour.
+        """
+        from pypto.language.arg_direction import NAME_TO_DIRECTION  # noqa: PLC0415
+
+        node_span = self.span_tracker.get_span(value_node)
+        if isinstance(value_node, ast.Constant):
+            v = value_node.value
+            # bool is a subclass of int, so this also covers True/False.
+            if isinstance(v, (bool, int, float, str)):
+                return v
+            raise ParserSyntaxError(
+                f"attrs['{key}'] on call to '{method_name}': unsupported constant "
+                f"'{ast.unparse(value_node)}'",
+                span=node_span,
+            )
+        if isinstance(value_node, (ast.List, ast.Tuple)):
+            elts = list(value_node.elts)
+            if not elts:
+                raise ParserSyntaxError(
+                    f"attrs['{key}'] on call to '{method_name}': empty list is ambiguous "
+                    "(cannot infer element type for round-trip)",
+                    span=node_span,
+                )
+            # All integer literals -> index list (e.g. arg_direction_overrides).
+            if all(
+                isinstance(e, ast.Constant) and isinstance(e.value, int) and not isinstance(e.value, bool)
+                for e in elts
+            ):
+                return [e.value for e in elts]  # type: ignore[attr-defined]
+            # All pl.adir.<name> -> ArgDirection list.
+            if all(
+                isinstance(e, ast.Attribute)
+                and isinstance(e.value, ast.Attribute)
+                and e.value.attr == "adir"
+                and isinstance(e.value.value, ast.Name)
+                and e.value.value.id == "pl"
+                for e in elts
+            ):
+                dirs: list[ir.ArgDirection] = []
+                for e in elts:
+                    assert isinstance(e, ast.Attribute)
+                    if e.attr not in NAME_TO_DIRECTION:
+                        raise ParserSyntaxError(
+                            f"attrs['{key}'] on call to '{method_name}': unknown direction "
+                            f"'pl.adir.{e.attr}'",
+                            span=self.span_tracker.get_span(e),
+                        )
+                    dirs.append(NAME_TO_DIRECTION[e.attr])
+                return dirs
+            # All bare names -> Var list (resolved in the current scope).
+            if all(isinstance(e, ast.Name) for e in elts):
+                return [self.parse_expression(e) for e in elts]
+            raise ParserSyntaxError(
+                f"attrs['{key}'] on call to '{method_name}': list elements are mixed or of an "
+                "unsupported kind (expected all ints, all pl.adir.<name>, or all names)",
+                span=node_span,
+            )
+        # Bare name -> Var; any other expression -> the parsed IR expression.
+        return self.parse_expression(value_node)
+
+    def _extract_generic_call_attrs(
+        self,
+        method_name: str,
+        keywords: list[ast.keyword],
+        span: ir.Span,
+    ) -> dict[str, Any]:
+        """Recover every non-bespoke ``attrs={...}`` key via ``_parse_attr_value``.
+
+        The well-known keys (arg_directions / manual_dep_edges / dump_vars) keep
+        their dedicated extractors and are skipped here; this is the generic
+        round-trip path for everything else (arg_direction_overrides,
+        dummy_task, and any future attr the printer emits via ``PrintAttrValue``).
+        """
+        attrs_dict = self._get_call_attrs_dict(method_name, keywords, span)
+        if attrs_dict is None:
+            return {}
+        bespoke = {"arg_directions", "manual_dep_edges", "dump_vars"}
+        result: dict[str, Any] = {}
+        for key_node, value_node in zip(attrs_dict.keys, attrs_dict.values):
+            # _get_call_attrs_dict already validated string-literal keys.
+            assert isinstance(key_node, ast.Constant) and isinstance(key_node.value, str)
+            key = key_node.value
+            if key in bespoke:
+                continue
+            result[key] = self._parse_attr_value(method_name, key, value_node)
+        return result
 
     def _extract_arg_directions_from_attrs(
         self,

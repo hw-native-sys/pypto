@@ -45,6 +45,7 @@
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/visitor.h"
@@ -392,6 +393,16 @@ class IRPythonPrinter : public IRVisitor {
   std::string PrintTileView(const TileView& tile_view, const std::vector<ExprPtr>& tile_shape,
                             const std::optional<MemorySpace>& memory_space = std::nullopt);
   std::string PrintTensorView(const TensorView& tensor_view, const std::vector<ExprPtr>& tensor_shape);
+
+  // Render one ``attrs={...}`` value as a parseable Python DSL expression. This
+  // is the generic round-trip "safety net": every Call/Submit attr that has no
+  // bespoke kwarg surface (deps=/device=/dumps=) and is not emitted by a
+  // dedicated emitter (dump_vars/arg_directions) is rendered here, so print ->
+  // parse never silently drops an attr. Dispatches on the ``std::any`` value
+  // type and FAILS LOUD (INTERNAL_CHECK_SPAN) on a type it cannot represent in
+  // the DSL — surfacing the gap rather than dropping the attr. The matching
+  // reader is ``ast_parser._parse_attr_value``. Keep the two in sync.
+  void PrintAttrValue(const std::any& value, const Span& span);
 };
 
 // Helper function to format a float literal so it re-parses as a ``ConstFloat``.
@@ -645,6 +656,65 @@ static const char* ArgDirectionToDslName(ArgDirection dir) {
   throw pypto::TypeError("Unknown ArgDirection in printer");
 }
 
+void IRPythonPrinter::PrintAttrValue(const std::any& value, const Span& span) {
+  const std::type_info& t = value.type();
+  if (t == typeid(int)) {
+    stream_ << std::any_cast<int>(value);
+  } else if (t == typeid(bool)) {
+    stream_ << (std::any_cast<bool>(value) ? "True" : "False");
+  } else if (t == typeid(std::string)) {
+    stream_ << std::quoted(std::any_cast<std::string>(value));
+  } else if (t == typeid(double)) {
+    stream_ << FormatFloatLiteral(std::any_cast<double>(value));
+  } else if (t == typeid(DataType)) {
+    stream_ << prefix_ << "." << DataTypeToString(std::any_cast<DataType>(value));
+  } else if (t == typeid(std::vector<ArgDirection>)) {
+    const auto& dirs = std::any_cast<std::vector<ArgDirection>>(value);
+    stream_ << "[";
+    for (size_t i = 0; i < dirs.size(); ++i) {
+      if (i > 0) stream_ << ", ";
+      stream_ << prefix_ << ".adir." << ArgDirectionToDslName(dirs[i]);
+    }
+    stream_ << "]";
+  } else if (t == typeid(std::vector<int32_t>)) {
+    const auto& idxs = std::any_cast<std::vector<int32_t>>(value);
+    stream_ << "[";
+    for (size_t i = 0; i < idxs.size(); ++i) {
+      if (i > 0) stream_ << ", ";
+      stream_ << idxs[i];
+    }
+    stream_ << "]";
+  } else if (t == typeid(std::vector<VarPtr>)) {
+    const auto& vars = std::any_cast<std::vector<VarPtr>>(value);
+    stream_ << "[";
+    for (size_t i = 0; i < vars.size(); ++i) {
+      if (i > 0) stream_ << ", ";
+      INTERNAL_CHECK_SPAN(vars[i], span)
+          << "Internal error: null Var in attr list; the DSL has no null-Var syntax to round-trip";
+      stream_ << GetVarName(vars[i].get());
+    }
+    stream_ << "]";
+  } else if (t == typeid(VarPtr)) {
+    const auto& var = std::any_cast<VarPtr>(value);
+    INTERNAL_CHECK_SPAN(var, span) << "Internal error: null Var attr; no DSL syntax to round-trip";
+    stream_ << GetVarName(var.get());
+  } else if (t == typeid(ExprPtr)) {
+    const auto& expr = std::any_cast<ExprPtr>(value);
+    INTERNAL_CHECK_SPAN(expr, span) << "Internal error: null Expr attr; no DSL syntax to round-trip";
+    VisitExpr(expr);
+  } else {
+    // No silent drop: if a new attr value type reaches the printer without a
+    // codec arm here (and a matching arm in ast_parser._parse_attr_value), it
+    // is a compiler bug — surface it loudly so the round-trip gap is fixed at
+    // the source rather than masked by a dropped attr.
+    INTERNAL_CHECK_SPAN(false, span)
+        << "Internal error: no DSL attr-value codec for type '" << DemangleTypeName(t.name())
+        << "'. The python printer round-trips int/bool/str/double/DataType/vector<ArgDirection>/"
+           "vector<int32_t>/vector<VarPtr>/VarPtr/ExprPtr attrs; add a PrintAttrValue arm and a "
+           "matching _parse_attr_value case for this type instead of dropping it.";
+  }
+}
+
 void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   INTERNAL_CHECK_SPAN(op->op_, op->span_) << "Call has null op";
   // Check if this is a GlobalVar call within a Program context
@@ -718,16 +788,26 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
       }
 
       // Machine-only ``attrs={...}`` dict for IR metadata that has no user-facing
-      // call kwarg: ``arg_directions`` (post DeriveCallDirections) and
-      // ``dump_vars`` (selective dump, seeded by ``pl.dump_tag`` / ``dumps=``).
-      // A plain ``self.kernel(...)`` deliberately exposes no ``dumps=`` kwarg —
-      // the dump targets live in IR only and round-trip via this dict, exactly
-      // like ``arg_directions``. The parser recovers both keys in
-      // ``_parse_kernel_call`` (see ``_extract_dump_vars_from_attrs``).
+      // call kwarg. Two keys keep a bespoke emitter for clarity / arg-order
+      // stability: ``dump_vars`` (selective dump, seeded by ``pl.dump_tag`` /
+      // ``dumps=``) and ``arg_directions`` (post DeriveCallDirections). EVERY
+      // other attr — ``arg_direction_overrides``, ``dummy_task``, any future
+      // key — is rendered generically by ``PrintAttrValue`` into the same dict
+      // (the round-trip safety net), so nothing is silently dropped. Sugar keys
+      // already surfaced above (``manual_dep_edges`` -> ``deps=``, ``device`` ->
+      // ``device=``) are skipped here. The parser recovers the bespoke keys via
+      // dedicated extractors and the rest via ``_parse_attr_value``.
       auto call_arg_directions = op->GetArgDirections();
       const bool has_dirs = !call_arg_directions.empty();
       const bool has_dump = !dump_set.empty();
-      if (has_dirs || has_dump) {
+      std::vector<const std::pair<std::string, std::any>*> generic_attrs;
+      for (const auto& kv : op->attrs_) {
+        const std::string& k = kv.first;
+        if (k == kAttrManualDepEdges || k == kAttrDevice) continue;   // emitted as deps= / device=
+        if (k == kAttrDumpVars || k == kAttrArgDirections) continue;  // bespoke emitters below
+        generic_attrs.push_back(&kv);
+      }
+      if (has_dirs || has_dump || !generic_attrs.empty()) {
         stream_ << (need_kwarg_comma ? ", " : "") << "attrs={";
         bool first_key = true;
         if (has_dump) {
@@ -753,6 +833,13 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
             stream_ << prefix_ << ".adir." << ArgDirectionToDslName(call_arg_directions[i]);
           }
           stream_ << "]";
+          first_key = false;
+        }
+        for (const auto* kv : generic_attrs) {
+          stream_ << (first_key ? "" : ", ");
+          first_key = false;
+          stream_ << std::quoted(kv->first) << ": ";
+          PrintAttrValue(kv->second, op->span_);
         }
         stream_ << "}";
       }
@@ -1019,19 +1106,42 @@ void IRPythonPrinter::VisitExpr_(const SubmitPtr& op) {
     }
   }
 
-  // Surface ``attrs["arg_directions"]`` post-DeriveCallDirections on Submit
-  // the same way Call does, so the round-trip recovers the metadata.
+  // Surface the machine-only ``attrs={...}`` dict the same way Call does:
+  // ``arg_directions`` keeps a bespoke emitter; every other attr (e.g.
+  // ``arg_direction_overrides``) is rendered generically by ``PrintAttrValue``
+  // so nothing is silently dropped. ``dump_vars`` is skipped here — it is
+  // surfaced above as the ``dumps=`` kwarg on the submit surface.
   auto submit_arg_directions = op->GetArgDirections();
-  if (!submit_arg_directions.empty()) {
-    INTERNAL_CHECK_SPAN(submit_arg_directions.size() == op->args_.size(), op->span_)
-        << "Submit arg_directions size (" << submit_arg_directions.size() << ") must match args size ("
-        << op->args_.size() << ")";
-    stream_ << ", attrs={\"arg_directions\": [";
-    for (size_t i = 0; i < submit_arg_directions.size(); ++i) {
-      if (i > 0) stream_ << ", ";
-      stream_ << prefix_ << ".adir." << ArgDirectionToDslName(submit_arg_directions[i]);
+  const bool has_dirs = !submit_arg_directions.empty();
+  std::vector<const std::pair<std::string, std::any>*> generic_attrs;
+  for (const auto& kv : op->attrs_) {
+    const std::string& k = kv.first;
+    if (k == kAttrDumpVars) continue;       // emitted as dumps=
+    if (k == kAttrArgDirections) continue;  // bespoke emitter below
+    generic_attrs.push_back(&kv);
+  }
+  if (has_dirs || !generic_attrs.empty()) {
+    stream_ << ", attrs={";
+    bool first_key = true;
+    if (has_dirs) {
+      INTERNAL_CHECK_SPAN(submit_arg_directions.size() == op->args_.size(), op->span_)
+          << "Submit arg_directions size (" << submit_arg_directions.size() << ") must match args size ("
+          << op->args_.size() << ")";
+      stream_ << "\"arg_directions\": [";
+      for (size_t i = 0; i < submit_arg_directions.size(); ++i) {
+        if (i > 0) stream_ << ", ";
+        stream_ << prefix_ << ".adir." << ArgDirectionToDslName(submit_arg_directions[i]);
+      }
+      stream_ << "]";
+      first_key = false;
     }
-    stream_ << "]}";
+    for (const auto* kv : generic_attrs) {
+      stream_ << (first_key ? "" : ", ");
+      first_key = false;
+      stream_ << std::quoted(kv->first) << ": ";
+      PrintAttrValue(kv->second, op->span_);
+    }
+    stream_ << "}";
   }
   stream_ << ")";
 }

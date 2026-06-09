@@ -1212,12 +1212,10 @@ class TestOutlineNoDepArgs:
     ``Call.attrs[arg_direction_overrides]``, which DeriveCallDirections then
     consumes to overwrite the auto-derived direction at each slot to NoDep.
 
-    These tests use a ``PassContext`` with only ``VerificationInstrument`` —
-    the default RoundtripInstrument runs print/reparse after every pass, but
-    the Call printer does not surface ``attrs[arg_direction_overrides]`` (a
-    pre-existing limitation also affecting ``pl.submit(..., deps=)``; see
-    ``test_flatten_call_expr_pass.TestFlattenPreservesAttrs`` for the same
-    workaround).
+    These tests run under the default RoundtripInstrument (print/reparse after
+    every pass). The Call printer now surfaces ``attrs[arg_direction_overrides]``
+    generically (``PrintAttrValue``) and the parser recovers it
+    (``_parse_attr_value``), so the synthesised no-dep dispatch round-trips.
     """
 
     @staticmethod
@@ -1236,14 +1234,6 @@ class TestOutlineNoDepArgs:
                     return s.expr
         raise AssertionError(f"no outlined kernel Call found in main, stmts={stmts}")
 
-    @staticmethod
-    def _verify_only_ctx():
-        from pypto.pypto_core import passes as _core_passes  # noqa: PLC0415
-
-        return _core_passes.PassContext(
-            [_core_passes.VerificationInstrument(_core_passes.VerificationMode.BEFORE_AND_AFTER)]
-        )
-
     def test_outline_translates_no_dep_args_to_indices(self):
         """Captured-Var order → positional indices on the synthesised Call."""
 
@@ -1259,8 +1249,7 @@ class TestOutlineNoDepArgs:
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x, w)
                 return y
 
-        with self._verify_only_ctx():
-            After = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+        After = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
 
         call = self._outlined_user_call(After)
         # Captured order: x first (referenced before w), w second.
@@ -1289,9 +1278,8 @@ class TestOutlineNoDepArgs:
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x, w)
                 return y
 
-        with self._verify_only_ctx():
-            After = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
-            After = passes.derive_call_directions()(After)
+        After = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+        After = passes.derive_call_directions()(After)
 
         call = self._outlined_user_call(After)
         dirs = list(call.arg_directions)
@@ -1332,9 +1320,8 @@ class TestOutlineNoDepArgs:
                     k_cache = pl.assemble(k_cache, x, [0])
                 return k_cache
 
-        with self._verify_only_ctx():
-            After = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
-            After = passes.derive_call_directions()(After)
+        After = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+        After = passes.derive_call_directions()(After)
 
         call = self._outlined_user_call(After)
         # Locate the k_cache slot. SSA conversion renames k_cache to a

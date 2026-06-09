@@ -578,23 +578,39 @@ class StructuralEqualImpl {
       }
       return false;
     }
-    for (size_t i = 0; i < lhs.size(); ++i) {
-      if (lhs[i].first != rhs[i].first) {
+    // Attrs/kwargs are semantically a unique-keyed map, so equality is
+    // order-insensitive: match each lhs entry to the rhs entry with the same
+    // key rather than by position. A positional comparison spuriously fails
+    // when two passes append the same attrs in a different order — e.g.
+    // OutlineIncoreScopes sets ``arg_direction_overrides`` and
+    // DeriveCallDirections later appends ``arg_directions``, vs the parser's
+    // fixed [dump_vars, arg_directions, arg_direction_overrides, ...] order.
+    //
+    // Each matched rhs entry is CONSUMED (erased) so the unique-key invariant is
+    // self-enforcing: a duplicate key on either side leaves some entry unmatched
+    // and surfaces as a mismatch rather than a false positive. With equal sizes,
+    // every lhs key matching a distinct rhs key ⟹ a bijection.
+    std::unordered_map<std::string, const std::any*> rhs_by_key;
+    rhs_by_key.reserve(rhs.size());
+    for (const auto& [k, v] : rhs) rhs_by_key.emplace(k, &v);
+    for (const auto& [lhs_key, lhs_val] : lhs) {
+      auto rhs_it = rhs_by_key.find(lhs_key);
+      if (rhs_it == rhs_by_key.end()) {
+        // Key absent in rhs, or a duplicate lhs key whose rhs match was already
+        // consumed (duplicate keys violate the attrs unique-key invariant).
         if constexpr (AssertMode) {
           std::ostringstream msg;
-          msg << "Kwargs key mismatch at index " << i << " ('" << lhs[i].first << "' != '" << rhs[i].first
-              << "')";
+          msg << "Kwargs key '" << lhs_key << "' present on one side only (or duplicated)";
           ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
         }
         return false;
       }
       // Compare std::any values by type and content
-      const auto& lhs_val = lhs[i].second;
-      const auto& rhs_val = rhs[i].second;
+      const auto& rhs_val = *rhs_it->second;
       if (lhs_val.type() != rhs_val.type()) {
         if constexpr (AssertMode) {
           std::ostringstream msg;
-          msg << "Kwargs value type mismatch for key '" << lhs[i].first << "'";
+          msg << "Kwargs value type mismatch for key '" << lhs_key << "'";
           ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
         }
         return false;
@@ -602,58 +618,56 @@ class StructuralEqualImpl {
       // Type-specific comparison
       bool values_equal = true;
       if (lhs_val.type() == typeid(int)) {
-        values_equal = (AnyCast<int>(lhs_val, "comparing kwarg: " + lhs[i].first) ==
-                        AnyCast<int>(rhs_val, "comparing kwarg: " + lhs[i].first));
+        values_equal = (AnyCast<int>(lhs_val, "comparing kwarg: " + lhs_key) ==
+                        AnyCast<int>(rhs_val, "comparing kwarg: " + lhs_key));
       } else if (lhs_val.type() == typeid(bool)) {
-        values_equal = (AnyCast<bool>(lhs_val, "comparing kwarg: " + lhs[i].first) ==
-                        AnyCast<bool>(rhs_val, "comparing kwarg: " + lhs[i].first));
+        values_equal = (AnyCast<bool>(lhs_val, "comparing kwarg: " + lhs_key) ==
+                        AnyCast<bool>(rhs_val, "comparing kwarg: " + lhs_key));
       } else if (lhs_val.type() == typeid(std::string)) {
-        values_equal = (AnyCast<std::string>(lhs_val, "comparing kwarg: " + lhs[i].first) ==
-                        AnyCast<std::string>(rhs_val, "comparing kwarg: " + lhs[i].first));
+        values_equal = (AnyCast<std::string>(lhs_val, "comparing kwarg: " + lhs_key) ==
+                        AnyCast<std::string>(rhs_val, "comparing kwarg: " + lhs_key));
       } else if (lhs_val.type() == typeid(double)) {
-        values_equal = (AnyCast<double>(lhs_val, "comparing kwarg: " + lhs[i].first) ==
-                        AnyCast<double>(rhs_val, "comparing kwarg: " + lhs[i].first));
+        values_equal = (AnyCast<double>(lhs_val, "comparing kwarg: " + lhs_key) ==
+                        AnyCast<double>(rhs_val, "comparing kwarg: " + lhs_key));
       } else if (lhs_val.type() == typeid(DataType)) {
-        values_equal = (AnyCast<DataType>(lhs_val, "comparing kwarg: " + lhs[i].first) ==
-                        AnyCast<DataType>(rhs_val, "comparing kwarg: " + lhs[i].first));
+        values_equal = (AnyCast<DataType>(lhs_val, "comparing kwarg: " + lhs_key) ==
+                        AnyCast<DataType>(rhs_val, "comparing kwarg: " + lhs_key));
       } else if (lhs_val.type() == typeid(MemorySpace)) {
-        values_equal = (AnyCast<MemorySpace>(lhs_val, "comparing kwarg: " + lhs[i].first) ==
-                        AnyCast<MemorySpace>(rhs_val, "comparing kwarg: " + lhs[i].first));
+        values_equal = (AnyCast<MemorySpace>(lhs_val, "comparing kwarg: " + lhs_key) ==
+                        AnyCast<MemorySpace>(rhs_val, "comparing kwarg: " + lhs_key));
       } else if (lhs_val.type() == typeid(LoopOrigin)) {
-        values_equal = (AnyCast<LoopOrigin>(lhs_val, "comparing kwarg: " + lhs[i].first) ==
-                        AnyCast<LoopOrigin>(rhs_val, "comparing kwarg: " + lhs[i].first));
+        values_equal = (AnyCast<LoopOrigin>(lhs_val, "comparing kwarg: " + lhs_key) ==
+                        AnyCast<LoopOrigin>(rhs_val, "comparing kwarg: " + lhs_key));
       } else if (lhs_val.type() == typeid(TensorLayout)) {
-        values_equal = (AnyCast<TensorLayout>(lhs_val, "comparing kwarg: " + lhs[i].first) ==
-                        AnyCast<TensorLayout>(rhs_val, "comparing kwarg: " + lhs[i].first));
+        values_equal = (AnyCast<TensorLayout>(lhs_val, "comparing kwarg: " + lhs_key) ==
+                        AnyCast<TensorLayout>(rhs_val, "comparing kwarg: " + lhs_key));
       } else if (lhs_val.type() == typeid(TileLayout)) {
-        values_equal = (AnyCast<TileLayout>(lhs_val, "comparing kwarg: " + lhs[i].first) ==
-                        AnyCast<TileLayout>(rhs_val, "comparing kwarg: " + lhs[i].first));
+        values_equal = (AnyCast<TileLayout>(lhs_val, "comparing kwarg: " + lhs_key) ==
+                        AnyCast<TileLayout>(rhs_val, "comparing kwarg: " + lhs_key));
       } else if (lhs_val.type() == typeid(PadValue)) {
-        values_equal = (AnyCast<PadValue>(lhs_val, "comparing kwarg: " + lhs[i].first) ==
-                        AnyCast<PadValue>(rhs_val, "comparing kwarg: " + lhs[i].first));
+        values_equal = (AnyCast<PadValue>(lhs_val, "comparing kwarg: " + lhs_key) ==
+                        AnyCast<PadValue>(rhs_val, "comparing kwarg: " + lhs_key));
       } else if (lhs_val.type() == typeid(float)) {
-        values_equal = (AnyCast<float>(lhs_val, "comparing kwarg: " + lhs[i].first) ==
-                        AnyCast<float>(rhs_val, "comparing kwarg: " + lhs[i].first));
+        values_equal = (AnyCast<float>(lhs_val, "comparing kwarg: " + lhs_key) ==
+                        AnyCast<float>(rhs_val, "comparing kwarg: " + lhs_key));
       } else if (lhs_val.type() == typeid(std::vector<ArgDirection>)) {
-        const auto& lhs_dirs =
-            AnyCast<std::vector<ArgDirection>>(lhs_val, "comparing kwarg: " + lhs[i].first);
-        const auto& rhs_dirs =
-            AnyCast<std::vector<ArgDirection>>(rhs_val, "comparing kwarg: " + lhs[i].first);
+        const auto& lhs_dirs = AnyCast<std::vector<ArgDirection>>(lhs_val, "comparing kwarg: " + lhs_key);
+        const auto& rhs_dirs = AnyCast<std::vector<ArgDirection>>(rhs_val, "comparing kwarg: " + lhs_key);
         values_equal = VisitLeafField(lhs_dirs, rhs_dirs);
       } else if (lhs_val.type() == typeid(std::vector<int32_t>)) {
         // ``kAttrArgDirectionOverrides`` on synthesised Calls (the indices
         // form, after the outliner translates ScopeStmt's
         // ``kAttrArgDirOverrideVars``).
-        const auto& lhs_idxs = AnyCast<std::vector<int32_t>>(lhs_val, "comparing kwarg: " + lhs[i].first);
-        const auto& rhs_idxs = AnyCast<std::vector<int32_t>>(rhs_val, "comparing kwarg: " + lhs[i].first);
+        const auto& lhs_idxs = AnyCast<std::vector<int32_t>>(lhs_val, "comparing kwarg: " + lhs_key);
+        const auto& rhs_idxs = AnyCast<std::vector<int32_t>>(rhs_val, "comparing kwarg: " + lhs_key);
         values_equal = (lhs_idxs == rhs_idxs);
       } else if (lhs_val.type() == typeid(std::vector<VarPtr>)) {
         // ``kAttrManualDepEdges`` on Calls/ScopeStmts and
         // ``kAttrArgDirOverrideVars`` on ScopeStmts both carry Var lists.
         // Compare via the existing Var-mapping path so SSA-renamed Vars
         // still match when the IR is otherwise equivalent.
-        const auto& lhs_vars = AnyCast<std::vector<VarPtr>>(lhs_val, "comparing kwarg: " + lhs[i].first);
-        const auto& rhs_vars = AnyCast<std::vector<VarPtr>>(rhs_val, "comparing kwarg: " + lhs[i].first);
+        const auto& lhs_vars = AnyCast<std::vector<VarPtr>>(lhs_val, "comparing kwarg: " + lhs_key);
+        const auto& rhs_vars = AnyCast<std::vector<VarPtr>>(rhs_val, "comparing kwarg: " + lhs_key);
         if (lhs_vars.size() != rhs_vars.size()) {
           values_equal = false;
         } else {
@@ -667,25 +681,27 @@ class StructuralEqualImpl {
         }
       } else if (lhs_val.type() == typeid(VarPtr)) {
         // ``kAttrTaskIdVar`` on ScopeStmts.
-        const auto& lhs_var = AnyCast<VarPtr>(lhs_val, "comparing kwarg: " + lhs[i].first);
-        const auto& rhs_var = AnyCast<VarPtr>(rhs_val, "comparing kwarg: " + lhs[i].first);
+        const auto& lhs_var = AnyCast<VarPtr>(lhs_val, "comparing kwarg: " + lhs_key);
+        const auto& rhs_var = AnyCast<VarPtr>(rhs_val, "comparing kwarg: " + lhs_key);
         values_equal = Equal(lhs_var, rhs_var);
       } else if (lhs_val.type() == typeid(ExprPtr)) {
-        const auto& lhs_expr = AnyCast<ExprPtr>(lhs_val, "comparing kwarg: " + lhs[i].first);
-        const auto& rhs_expr = AnyCast<ExprPtr>(rhs_val, "comparing kwarg: " + lhs[i].first);
+        const auto& lhs_expr = AnyCast<ExprPtr>(lhs_val, "comparing kwarg: " + lhs_key);
+        const auto& rhs_expr = AnyCast<ExprPtr>(rhs_val, "comparing kwarg: " + lhs_key);
         values_equal = Equal(lhs_expr, rhs_expr);
       } else {
-        INTERNAL_CHECK(false) << "Unsupported kwargs value type for key '" << lhs[i].first
+        INTERNAL_CHECK(false) << "Unsupported kwargs value type for key '" << lhs_key
                               << "': " << DemangleTypeName(lhs_val.type().name());
       }
       if (!values_equal) {
         if constexpr (AssertMode) {
           std::ostringstream msg;
-          msg << "Kwargs value mismatch for key '" << lhs[i].first << "'";
+          msg << "Kwargs value mismatch for key '" << lhs_key << "'";
           ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
         }
         return false;
       }
+      // Consume the matched rhs entry so a duplicate lhs key cannot re-match it.
+      rhs_by_key.erase(rhs_it);
     }
     return true;
   }

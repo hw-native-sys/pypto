@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <tuple>
@@ -299,12 +300,18 @@ class StructuralHasher {
     return 0;  // Never reached
   }
 
-  // Hash kwargs (vector of pairs - order is preserved and matters)
+  // Hash kwargs/attrs (vector of pairs). ORDER-INSENSITIVE to match
+  // structural_equal, which compares attrs as a unique-keyed map (order does
+  // not affect equality). If this combined the per-pair hashes sequentially,
+  // two structurally-equal nodes whose attrs differ only in order would hash
+  // differently — violating the equal-implies-equal-hash invariant. So each
+  // pair's (key, value) hash is folded into the accumulator commutatively
+  // (addition). Order WITHIN a value (e.g. a vector) still matters and is
+  // hashed in order below, mirroring structural_equal's element-wise compare.
   result_type VisitLeafField(const std::vector<std::pair<std::string, std::any>>& kwargs) {
-    result_type h = 0;
-    // Hash keys and values in order (no need to sort since order is preserved)
+    result_type acc = 0;
     for (const auto& [key, value] : kwargs) {
-      h = hash_combine(h, std::hash<std::string>{}(key));
+      result_type h = std::hash<std::string>{}(key);
 
       // Hash value based on type
       if (value.type() == typeid(int)) {
@@ -337,12 +344,24 @@ class StructuralHasher {
       } else if (value.type() == typeid(std::vector<ArgDirection>)) {
         h = hash_combine(h,
                          VisitLeafField(AnyCast<std::vector<ArgDirection>>(value, "hashing kwarg: " + key)));
+      } else if (value.type() == typeid(std::vector<int32_t>)) {
+        // ``arg_direction_overrides`` (no_dep arg-index list). Hashed in order;
+        // structural_equal compares it element-wise.
+        const auto& idxs = AnyCast<std::vector<int32_t>>(value, "hashing kwarg: " + key);
+        for (int32_t v : idxs) h = hash_combine(h, std::hash<int32_t>{}(v));
       } else {
+        // NOTE: Var-/Expr-valued attrs (dump_vars / manual_dep_edges /
+        // task_id_var / device) are intentionally not hashed here — hashing
+        // them via HashNode is auto-mapping-counter-order-dependent, which
+        // would defeat the order-insensitivity this function guarantees. They
+        // are compared by structural_equal but not currently part of the hash;
+        // this matches the pre-existing behaviour (a throw flags any attempt).
         throw TypeError("Unsupported kwarg type for key: " + key + ": " +
                         DemangleTypeName(value.type().name()));
       }
+      acc += h;  // commutative fold — order-insensitive across pairs
     }
-    return h;
+    return acc;
   }
 
   result_type VisitLeafField(const Span& field) {
