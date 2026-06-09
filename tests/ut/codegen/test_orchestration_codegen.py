@@ -100,16 +100,21 @@ def _out_of_scope_tensor_refs(code: str) -> list[str]:
     bad: list[str] = []
     for raw in code.splitlines():
         line = raw.strip()
+        # Declarations and add_* uses are each emitted on their own line (never
+        # sharing a line with a scope brace), so resolve them against the current
+        # scope set first.
         for m in decl_re.finditer(line):
             scopes[-1].add(m.group(1))
         for m in use_re.finditer(line):
             name = m.group(1)
             if not any(name in s for s in scopes):
                 bad.append(name)
-        for _ in range(line.count("{")):
-            scopes.append(set())
-        for _ in range(line.count("}")):
-            if len(scopes) > 1:
+        # Apply braces in source order so a ``} else {`` line closes the prior
+        # block then opens a fresh one (counting separately would mis-nest it).
+        for ch in line:
+            if ch == "{":
+                scopes.append(set())
+            elif ch == "}" and len(scopes) > 1:
                 scopes.pop()
     return bad
 
@@ -858,7 +863,7 @@ class TestOrchestration:
         # The scrambled (shifted-by-one) mapping must NOT appear: combine must
         # not read inout_t, and no const-ref output alias is emitted.
         assert "add_input(ext_inout_t)" not in code
-        assert "const Tensor& o1" not in code and "const Tensor& o2" not in code
+        assert all(f"const Tensor& o{i}" not in code for i in (1, 2, 3)), code
 
     @staticmethod
     def _manual_cross_scope_code(create_inside: bool) -> str:
@@ -934,7 +939,12 @@ class TestOrchestration:
         assert _out_of_scope_tensor_refs(code) == [], code
         manual_open = code.index("PTO2_SCOPE(PTO2ScopeMode::MANUAL)")
         manual_close = code.index("}", manual_open)
-        # The buffer is declared in the enclosing scope, ahead of the block.
+        # The buffer AND the alloc handle backing it are declared in the
+        # enclosing scope, ahead of the block — if only ``const Tensor& buf`` were
+        # hoisted while ``TaskOutputTensors alloc_0 = ...`` stayed inside, ``buf``
+        # would reference an out-of-scope handle and the .cpp would not compile.
+        assert code.index("TaskOutputTensors alloc_") < manual_open, code
+        assert code.index("alloc_tensors(") < manual_open, code
         decl = code.index("const Tensor& buf = ")
         assert decl < manual_open, code
         # The after-scope consumer reads ``buf`` directly — no const-ref alias

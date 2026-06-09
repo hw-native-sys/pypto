@@ -837,10 +837,17 @@ class OrchestrationStmtCodegen : public CodegenBase {
     std::vector<std::string>* saved_sink = scope_hoist_sink_;
     std::string saved_hoist_indent = std::move(scope_hoist_indent_);
     std::set<std::string>* saved_local_names = manual_local_names_;
+    std::set<std::string>* saved_enclosing_local_names = enclosing_manual_local_names_;
     std::vector<std::string> hoisted;
     std::set<std::string> local_names;
     scope_hoist_sink_ = &hoisted;
     scope_hoist_indent_ = parent_indent;
+    // The set in scope on entry belongs to the enclosing manual scope (null when
+    // the parent is the AUTO body). A buffer this scope hoists lands in that
+    // enclosing scope's body, so it must be recorded there as scope-local
+    // (EmitBatchedAllocTensors) — otherwise nested manual scopes would treat a
+    // hoisted-one-level buffer as enclosing-valid for the outer scope too.
+    enclosing_manual_local_names_ = manual_local_names_;
     manual_local_names_ = &local_names;
 
     std::ostringstream body_buf;
@@ -857,6 +864,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     scope_hoist_sink_ = saved_sink;
     scope_hoist_indent_ = std::move(saved_hoist_indent);
     manual_local_names_ = saved_local_names;
+    enclosing_manual_local_names_ = saved_enclosing_local_names;
 
     for (const auto& line : hoisted) {
       code_ << line;
@@ -2242,10 +2250,17 @@ class OrchestrationStmtCodegen : public CodegenBase {
       indent_ = saved_indent;
       code_.swap(batch_buf);  // restore the in-block output
       scope_hoist_sink_->push_back(batch_buf.str());
-      // The hoisted buffers now live in the enclosing scope, so a const-ref
-      // alias later built on one of them is enclosing-scope-valid too.
+      // The hoisted buffers now live in the enclosing scope: drop them from this
+      // scope's local set so an output that aliases one remaps to it. If the
+      // enclosing scope is itself a manual scope, the buffer's decl landed in
+      // *its* body, so it is scope-local one level up — record it there, or a
+      // reader after the enclosing scope would wrongly treat it as enclosing-
+      // valid (nested manual scopes).
       for (const auto& c : creates) {
         manual_local_names_->erase(c.emit_name);
+        if (enclosing_manual_local_names_ != nullptr) {
+          enclosing_manual_local_names_->insert(c.emit_name);
+        }
       }
     }
   }
@@ -3083,11 +3098,15 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// tensor emit names that are scope-local — first reserved inside the block
   /// and not (yet) hoisted out of it — so ``IsEnclosingScopeValid`` (which gates
   /// both the alloc hoist and the EmitTensorAlias remap) is a single membership
-  /// test. All three are null / empty outside a manual scope and saved/restored
-  /// around nesting.
+  /// test. ``enclosing_manual_local_names_`` points to the *enclosing* manual
+  /// scope's set (null when the parent is the AUTO body); a buffer hoisted out
+  /// of a nested manual scope is recorded there, since its decl lands in the
+  /// enclosing scope's body. All are null / empty outside a manual scope and
+  /// saved/restored around nesting.
   std::vector<std::string>* scope_hoist_sink_ = nullptr;
   std::string scope_hoist_indent_;
   std::set<std::string>* manual_local_names_ = nullptr;
+  std::set<std::string>* enclosing_manual_local_names_ = nullptr;
   /// Stack of 0-based slot expressions for the enclosing ForStmts. Pushed
   /// when entering a ForStmt body and popped on exit. Used by ``YieldStmt``
   /// to emit ``arr[<slot>] = value`` for Parallel inner array writes. The
