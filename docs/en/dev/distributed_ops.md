@@ -245,12 +245,14 @@ per-window `WindowBuffer` records that the runtime binds physical buffers to.
   `tests/ut/ir/parser/test_remote_store.py`, `test_system_ops.py`,
   `test_get_op.py`, `test_put_op.py`, plus the negative verifier coverage
   in `tests/ut/ir/test_distributed_ops.py`.
-- **Codegen**: `tests/ut/codegen/distributed/test_distributed_pto_codegen.py`.
+- **Codegen**: `tests/ut/codegen/distributed/test_distributed_pto_codegen.py`,
+  `tests/ut/codegen/distributed/test_distributed_dynamic_shape.py`.
 - **End-to-end (ST)**: `tests/st/distributed/test_l3_allreduce.py` (mesh
   allreduce with dynamic rank dim `NR = pl.dynamic("NR")`; **P=2** default,
   **P=4** on any four devices (e.g. `--device=0,1,2,3` or `--device=0-3`)),
-  `test_l3_allgather.py`,
-  `test_l3_reduce_scatter.py`, `test_l3_broadcast.py`, `test_l3_gemm.py`,
+  `test_l3_allgather.py` (dynamic NR, P=2/P=4),
+  `test_l3_reduce_scatter.py` (dynamic NR, P=2/P=4),
+  `test_l3_broadcast.py` (dynamic NR, P=2/P=4), `test_l3_gemm.py`,
   `test_l3_ep_dispatch_combine.py`, `test_l3_notify_wait.py`, and related L3 STs
   under `tests/st/distributed/`. `test_l3_put.py` and `test_l3_get.py` are
   currently **skipped** pending the N7 host codegen (`add_scalar(ctx)` per
