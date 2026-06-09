@@ -2121,7 +2121,10 @@ class OutWindowExternalizer {
       bool changed = false;
       auto saved_scalar_defs = scalar_defs_;
       auto saved_tuple_result_subst = tuple_result_subst_;
+      auto saved_sibling_output_parent_counts = sibling_output_parent_counts_;
+      auto saved_sibling_output_alias_roots = sibling_output_alias_roots_;
       auto later_assemble_source_indices = CollectAssembleSourceIndices(op->stmts_);
+      sibling_output_parent_counts_ = CollectSiblingOutputParentCounts(op->stmts_);
 
       for (size_t stmt_index = 0; stmt_index < op->stmts_.size(); ++stmt_index) {
         const auto& stmt = op->stmts_[stmt_index];
@@ -2154,6 +2157,8 @@ class OutWindowExternalizer {
 
       scalar_defs_ = std::move(saved_scalar_defs);
       tuple_result_subst_ = std::move(saved_tuple_result_subst);
+      sibling_output_parent_counts_ = std::move(saved_sibling_output_parent_counts);
+      sibling_output_alias_roots_ = std::move(saved_sibling_output_alias_roots);
       if (!changed) return op;
       return SeqStmts::Flatten(std::move(new_stmts), op->span_);
     }
@@ -2224,12 +2229,13 @@ class OutWindowExternalizer {
           IsCallResultAssembledLater(call_assign->var_, assemble_source_indices, stmt_index)) {
         return std::nullopt;
       }
-      if (!ProveCallsiteDisjointness(call_assign, call, analysis)) return std::nullopt;
 
       std::unordered_map<const Var*, ExprPtr> callsite_subst;
       for (size_t i = 0; i < original_func->params_.size() && i < call->args_.size(); ++i) {
         callsite_subst[original_func->params_[i].get()] = call->args_[i];
       }
+      if (!ProveCallsiteDisjointness(call_assign, call, analysis)) return std::nullopt;
+      if (!ProveSiblingOutputWindowsDisjoint(call, analysis)) return std::nullopt;
 
       std::unordered_map<size_t, VarPtr> slices_by_in_index;
       std::unordered_map<size_t, SliceBundle> slices_by_out_index;
@@ -2454,6 +2460,116 @@ class OutWindowExternalizer {
       return attrs;
     }
 
+    const Var* ResolveOutputParentRoot(const CallPtr& call, size_t arg_index) const {
+      if (!call || arg_index >= call->args_.size()) return nullptr;
+      return ResolveOutputRootExpr(call->args_[arg_index]);
+    }
+
+    const Var* ResolveOutputRootExpr(const ExprPtr& expr) const {
+      auto parent = AsVarLike(ResolveLoopInitExpr(expr));
+      if (!parent) return nullptr;
+      const Var* root = parent.get();
+      std::unordered_set<const Var*> seen;
+      while (seen.insert(root).second) {
+        auto it = sibling_output_alias_roots_.find(root);
+        if (it == sibling_output_alias_roots_.end()) break;
+        root = it->second;
+      }
+      return root;
+    }
+
+    std::unordered_map<const Var*, size_t> CollectSiblingOutputParentCounts(
+        const std::vector<StmtPtr>& sibling_stmts) {
+      sibling_output_alias_roots_.clear();
+      std::unordered_map<const Var*, std::vector<const Var*>> sibling_tuple_output_roots;
+
+      struct SiblingOutputRoot {
+        const Var* root = nullptr;
+      };
+      std::vector<SiblingOutputRoot> output_roots;
+      output_roots.reserve(sibling_stmts.size());
+
+      for (const auto& sibling_stmt : sibling_stmts) {
+        auto assign = As<AssignStmt>(sibling_stmt);
+        CallPtr call;
+        if (assign) {
+          if (auto submit = As<Submit>(assign->value_)) {
+            call = SubmitToCallView(submit);
+          } else {
+            call = As<Call>(assign->value_);
+          }
+        }
+        if (assign) {
+          if (auto tuple_get = As<TupleGetItemExpr>(assign->value_)) {
+            auto tuple_var = AsVarLike(tuple_get->tuple_);
+            auto tuple_it = tuple_var ? sibling_tuple_output_roots.find(tuple_var.get())
+                                      : sibling_tuple_output_roots.end();
+            if (tuple_it != sibling_tuple_output_roots.end() && tuple_get->index_ >= 0 &&
+                static_cast<size_t>(tuple_get->index_) < tuple_it->second.size()) {
+              if (const Var* root = tuple_it->second[static_cast<size_t>(tuple_get->index_)]) {
+                sibling_output_alias_roots_[assign->var_.get()] = root;
+              }
+            }
+          }
+        }
+        if (!call || pypto::codegen::IsBuiltinOp(call->op_->name_)) continue;
+
+        auto callee = program_ ? program_->GetFunction(call->op_->name_) : nullptr;
+        if (!callee) continue;
+
+        const Var* single_output_root = nullptr;
+        size_t output_root_count = 0;
+        for (size_t i = 0; i < call->args_.size() && i < callee->param_directions_.size(); ++i) {
+          if (callee->param_directions_[i] != ParamDirection::Out &&
+              callee->param_directions_[i] != ParamDirection::InOut) {
+            continue;
+          }
+          if (const Var* parent_root = ResolveOutputParentRoot(call, i)) {
+            output_roots.push_back(SiblingOutputRoot{parent_root});
+            single_output_root = parent_root;
+            ++output_root_count;
+          }
+        }
+        if (assign && output_root_count == 1 && AsTensorTypeLike(assign->var_->GetType())) {
+          sibling_output_alias_roots_[assign->var_.get()] = single_output_root;
+        }
+        if (assign && output_root_count > 0 && As<TupleType>(assign->var_->GetType())) {
+          std::vector<const Var*> tuple_roots(callee->return_types_.size(), nullptr);
+          for (const auto& mapping : BuildOutParamReturnMappings(callee, /*include_inout=*/true)) {
+            if (mapping.return_index >= tuple_roots.size() || mapping.param_index >= call->args_.size()) {
+              continue;
+            }
+            tuple_roots[mapping.return_index] = ResolveOutputParentRoot(call, mapping.param_index);
+          }
+          sibling_tuple_output_roots[assign->var_.get()] = std::move(tuple_roots);
+        }
+      }
+
+      std::unordered_map<const Var*, size_t> counts;
+      counts.reserve(output_roots.size());
+      for (const auto& output_root : output_roots) {
+        const Var* root = output_root.root;
+        std::unordered_set<const Var*> seen;
+        while (root && seen.insert(root).second) {
+          auto it = sibling_output_alias_roots_.find(root);
+          if (it == sibling_output_alias_roots_.end()) break;
+          root = it->second;
+        }
+        if (root) ++counts[root];
+      }
+      return counts;
+    }
+
+    bool ProveSiblingOutputWindowsDisjoint(const CallPtr& call, const CalleeRewriteAnalysis& analysis) const {
+      for (const auto& output : analysis.outputs) {
+        const Var* parent_root = ResolveOutputParentRoot(call, output.out_param_index);
+        if (!parent_root) return false;
+        auto count_it = sibling_output_parent_counts_.find(parent_root);
+        if (count_it != sibling_output_parent_counts_.end() && count_it->second > 1) return false;
+      }
+      return true;
+    }
+
     bool ProveCallsiteDisjointness(const AssignStmtPtr& call_assign, const CallPtr& call,
                                    const CalleeRewriteAnalysis& analysis) const {
       if (while_depth_ > 0) return false;
@@ -2566,6 +2682,8 @@ class OutWindowExternalizer {
     std::unordered_map<const Var*, ExprPtr> loop_iter_init_subst_;
     std::unordered_map<const Var*, ExprPtr> scalar_defs_;
     std::unordered_map<const Var*, std::vector<ExprPtr>> tuple_result_subst_;
+    std::unordered_map<const Var*, size_t> sibling_output_parent_counts_;
+    std::unordered_map<const Var*, const Var*> sibling_output_alias_roots_;
     int while_depth_ = 0;
   };
 
