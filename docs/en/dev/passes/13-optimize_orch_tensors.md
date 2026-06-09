@@ -91,6 +91,11 @@ in_window = pl.tensor.slice(inp, shape, offset)
 result = self.consumer__windowed(in_window, ...)
 ```
 
+When a materialized slice would otherwise use a loop-return alias as its parent,
+the pass rewrites that parent to the loop's visible init tensor. This keeps
+generated orchestration C++ from referencing loop-return SSA names outside their
+scope. Loop-carried iter-args inside the loop body are not folded this way.
+
 This pass intentionally keeps window eligibility conservative. It does not special-case operator names such as `topk`; a tensor is windowed only when the callee body proves the access pattern below.
 
 Supported rewrite shapes:

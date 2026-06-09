@@ -91,6 +91,10 @@ in_window = pl.tensor.slice(inp, shape, offset)
 result = self.consumer__windowed(in_window, ...)
 ```
 
+如果待物化 slice 的 parent 是循环返回 alias，pass 会把这个 parent 改写为该循环
+codegen 可见的 init tensor，避免生成的 orchestration C++ 在作用域外引用 loop-return
+SSA 名字。循环体内部的 loop-carried iter-arg 不会被这样折叠。
+
 本 pass 有意保持保守的 window eligibility。它不会按 `topk` 等算子名字做特判；只有 callee 函数体能证明满足下面的访问模式时，才会 window 化。
 
 支持的改写形态：
