@@ -137,6 +137,7 @@ class PassManager:
             ("OutlineHierarchyScopes", lambda: passes.outline_hierarchy_scopes()),
             ("OutlineIncoreScopes", lambda: passes.outline_incore_scopes()),
             ("OutlineClusterScopes", lambda: passes.outline_cluster_scopes()),
+            ("ConvertToSSA_post_outline", lambda: passes.convert_to_ssa()),
             ("ConvertTensorToTileOps", lambda: passes.convert_tensor_to_tile_ops()),
             ("OptimizeOrchTensors", lambda: passes.optimize_orch_tensors()),
         ]

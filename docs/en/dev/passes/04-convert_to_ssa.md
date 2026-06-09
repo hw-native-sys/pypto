@@ -16,6 +16,11 @@ This pass transforms IR with multiple assignments to the same variable into SSA 
 
 **When to use**: Run this pass before any optimization or analysis that requires SSA form (e.g., OutlineIncoreScopes, memory optimization passes).
 
+**Pipeline positions**: The default tensor-optimization strategy invokes `ConvertToSSA` twice:
+
+1. **4th pass** — initial SSA conversion of user-written DSL (before any outlining).
+2. **Immediately after `OutlineClusterScopes`** (entry: `ConvertToSSA_post_outline`) — re-runs SSA on the outlined functions. Outlining lifts `tile.store` results from `EvalStmt` form into inside-loop `AssignStmt`s; the second pass uses **escaping-variable promotion** (see Algorithm step 4) to thread those defs through `IterArg` / `YieldStmt` to function scope, so the outlined `ReturnStmt` references SSA-valid Vars. This relies on the pass being **idempotent** (see "Mixed SSA/non-SSA" / "Idempotent" above): the first pass's outputs survive the second pass unchanged.
+
 ## API
 
 | C++ | Python | Level |

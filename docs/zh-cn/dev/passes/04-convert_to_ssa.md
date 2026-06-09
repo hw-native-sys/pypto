@@ -16,6 +16,11 @@
 
 **使用时机**：在任何需要 SSA 形式的优化或分析之前运行此 Pass（如 OutlineIncoreScopes、内存优化 Pass）。
 
+**Pipeline 位置**：默认的张量优化策略调用 `ConvertToSSA` 两次：
+
+1. **第 4 个 Pass** — 对用户编写的 DSL 进行初始 SSA 转换（在所有 outline 之前）。
+2. **紧接 `OutlineClusterScopes`** （入口名：`ConvertToSSA_post_outline`） — 对 outlined function 重新跑 SSA。Outlining 将 `tile.store` 的结果从 `EvalStmt` 形式提升为循环内的 `AssignStmt`；第二次 Pass 通过 **逃逸变量提升**（见算法步骤 4）将这些定义通过 `IterArg` / `YieldStmt` 串到函数作用域，使 outlined function 的 `ReturnStmt` 引用合法的 SSA Var。此机制依赖本 Pass 的 **幂等性**（见上文「混合 SSA/非 SSA」/「幂等性」条款）：第一次 Pass 的产物在第二次 Pass 中保持不变。
+
 ## API
 
 | C++ | Python | 级别 |
