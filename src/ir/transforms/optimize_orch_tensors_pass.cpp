@@ -2713,6 +2713,20 @@ class OutWindowExternalizer {
     std::vector<InputWindowUse> uses;
   };
 
+  static bool CanMaterializeWindowParamType(const std::shared_ptr<const TensorType>& tensor_type,
+                                            const std::vector<ExprPtr>& window_shape) {
+    if (!tensor_type) return false;
+    if (tensor_type->tensor_view_.has_value()) {
+      if (tensor_type->tensor_view_->stride.empty() &&
+          tensor_type->tensor_view_->layout == TensorLayout::NZ) {
+        return false;
+      }
+      return true;
+    }
+    auto parent_strides = ComputeRowMajorStrides(tensor_type->shape_);
+    return !parent_strides.empty() && parent_strides.size() == window_shape.size();
+  }
+
   static std::optional<size_t> FindReturnIndexForOutParam(const FunctionPtr& func, size_t out_param_index) {
     if (!func || out_param_index >= func->params_.size()) return std::nullopt;
     auto body_stmts = FlattenToStmts(func->body_);
@@ -2911,12 +2925,12 @@ class OutWindowExternalizer {
     return InputWindowUse{std::move(window_shape), offsets->elements_, refs_in_stmt};
   }
 
-  static std::unordered_map<const Var*, InputParamUseSummary> CollectInputParamUses(
-      const FunctionPtr& func, const std::unordered_map<const Var*, size_t>& candidate_indices) {
+  static std::unordered_map<const Var*, InputParamUseSummary> CollectInputParamUsesInStmt(
+      const StmtPtr& root, const std::unordered_map<const Var*, size_t>& candidate_indices) {
     std::unordered_map<const Var*, InputParamUseSummary> summaries;
-    if (!func || candidate_indices.empty()) return summaries;
+    if (!root || candidate_indices.empty()) return summaries;
 
-    auto body_stmts = FlattenToStmts(func->body_);
+    auto body_stmts = FlattenToStmts(root);
     class CandidateRefCollector : public IRVisitor {
      public:
       explicit CandidateRefCollector(const std::unordered_map<const Var*, size_t>& candidate_indices)
@@ -2958,6 +2972,12 @@ class OutWindowExternalizer {
     }
 
     return summaries;
+  }
+
+  static std::unordered_map<const Var*, InputParamUseSummary> CollectInputParamUses(
+      const FunctionPtr& func, const std::unordered_map<const Var*, size_t>& candidate_indices) {
+    if (!func) return {};
+    return CollectInputParamUsesInStmt(func->body_, candidate_indices);
   }
 
   static std::vector<InputRewriteInfo> AnalyzeInputWindows(const FunctionPtr& func) {
@@ -3005,6 +3025,7 @@ class OutWindowExternalizer {
           IsAllZeroOffsets(matched->offsets)) {
         continue;
       }
+      if (!CanMaterializeWindowParamType(tensor_type, matched->window_shape)) continue;
 
       bool exprs_ok = true;
       for (const auto& expr : matched->window_shape) {
@@ -3033,8 +3054,144 @@ class OutWindowExternalizer {
     return inputs;
   }
 
+  static std::optional<InputRewriteInfo> AnalyzeAggregateInputWindowInLoop(
+      const FunctionPtr& func, size_t param_index, const ForStmtPtr& loop, size_t total_refs,
+      const InputParamUseSummary& loop_summary) {
+    if (!func || param_index >= func->params_.size() || !loop) return std::nullopt;
+    auto tensor_type = As<TensorType>(func->params_[param_index]->GetType());
+    if (!tensor_type) return std::nullopt;
+
+    auto trip_count = GetKnownPositiveTripCount(loop);
+    if (!trip_count.has_value() || *trip_count <= 0) return std::nullopt;
+    auto first_loop_value = GetLoopValueAtTrip(loop, 0);
+    auto last_loop_value = GetLoopValueAtTrip(loop, *trip_count - 1);
+    if (!first_loop_value.has_value() || !last_loop_value.has_value()) return std::nullopt;
+
+    if (total_refs == 0 || total_refs != loop_summary.total_refs || loop_summary.unsupported_ref) {
+      return std::nullopt;
+    }
+
+    auto loop_body_stmts = FlattenToStmts(loop->body_);
+    std::unordered_map<const Var*, ExprPtr> scalar_defs;
+    for (const auto& stmt : loop_body_stmts) {
+      if (auto assign = As<AssignStmt>(stmt)) {
+        if (As<ScalarType>(assign->var_->GetType())) {
+          scalar_defs[assign->var_.get()] = assign->value_;
+        }
+      }
+    }
+
+    const auto& uses = loop_summary.uses;
+    size_t matched_refs = 0;
+    for (const auto& use : uses) matched_refs += use.param_refs_in_stmt;
+    if (uses.empty() || matched_refs != total_refs) return std::nullopt;
+
+    std::unordered_set<const Var*> allowed;
+    for (const auto& func_param : func->params_) allowed.insert(func_param.get());
+    allowed.insert(loop->loop_var_.get());
+
+    std::optional<InputRewriteInfo> result;
+    for (const auto& use : uses) {
+      if (use.offsets.size() != use.window_shape.size() ||
+          use.offsets.size() != tensor_type->shape_.size()) {
+        return std::nullopt;
+      }
+
+      std::vector<ExprPtr> base_offsets;
+      std::vector<ExprPtr> local_offsets;
+      std::vector<ExprPtr> window_shape;
+      bool expands_across_loop = false;
+      for (size_t i = 0; i < use.offsets.size(); ++i) {
+        auto expanded = ExpandLoopLocalExpr(use.offsets[i], scalar_defs);
+        if (!expanded.has_value()) return std::nullopt;
+        if (!ExprReferencesOnlyVarsIn(*expanded, allowed)) return std::nullopt;
+
+        auto ordered_offsets = GetOrderedLoopOffsets(*expanded, loop, *first_loop_value, *last_loop_value);
+        if (!ordered_offsets.has_value()) return std::nullopt;
+
+        auto span_expr = arith::Analyzer().Simplify(
+            MakeAdd(MakeSub(ordered_offsets->max, ordered_offsets->min, func->span_), use.window_shape[i],
+                    func->span_));
+        auto span_ci = As<ConstInt>(span_expr);
+        if (!span_ci || span_ci->value_ <= 0) return std::nullopt;
+
+        if (!AreExprsEqual(ordered_offsets->min, ordered_offsets->max)) {
+          expands_across_loop = true;
+        }
+        base_offsets.push_back(ordered_offsets->min);
+        local_offsets.push_back(arith::Analyzer().Simplify(
+            MakeSub(use.offsets[i], ordered_offsets->min, use.offsets[i]->span_)));
+        window_shape.push_back(std::make_shared<ConstInt>(span_ci->value_, DataType::INDEX, func->span_));
+      }
+      if (!expands_across_loop) return std::nullopt;
+
+      InputRewriteInfo current{param_index, tensor_type->shape_, std::move(window_shape),
+                               std::move(base_offsets), std::move(local_offsets)};
+      if (!AreExprVectorsEqual(current.window_shape, tensor_type->shape_)) {
+        return std::nullopt;
+      }
+      if (!CanMaterializeWindowParamType(tensor_type, current.window_shape)) return std::nullopt;
+
+      if (!result.has_value()) {
+        result = std::move(current);
+        continue;
+      }
+      if (!AreExprVectorsEqual(result->window_shape, current.window_shape) ||
+          !AreExprVectorsEqual(result->callsite_offsets, current.callsite_offsets) ||
+          !AreExprVectorsEqual(result->local_read_offsets, current.local_read_offsets)) {
+        return std::nullopt;
+      }
+    }
+
+    std::unordered_set<const Var*> allowed_params;
+    for (const auto& func_param : func->params_) allowed_params.insert(func_param.get());
+    for (const auto& expr : result->window_shape) {
+      if (!ExprReferencesOnlyVarsIn(expr, allowed_params)) return std::nullopt;
+    }
+    for (const auto& expr : result->callsite_offsets) {
+      if (!ExprReferencesOnlyVarsIn(expr, allowed_params)) return std::nullopt;
+    }
+    return result;
+  }
+
+  static std::vector<InputRewriteInfo> AnalyzeAggregateInputWindows(
+      const FunctionPtr& func, const std::vector<InputRewriteInfo>& existing_inputs,
+      const ForStmtPtr& loop) {
+    std::vector<InputRewriteInfo> inputs;
+    if (!func || !loop) return inputs;
+
+    std::unordered_set<size_t> existing_indices;
+    for (const auto& input : existing_inputs) existing_indices.insert(input.in_param_index);
+
+    std::unordered_map<const Var*, size_t> candidate_indices;
+    std::vector<std::pair<const Var*, size_t>> ordered_candidates;
+    for (size_t param_index = 0; param_index < func->params_.size(); ++param_index) {
+      if (existing_indices.count(param_index)) continue;
+      if (param_index >= func->param_directions_.size()) continue;
+      if (func->param_directions_[param_index] != ParamDirection::In) continue;
+      if (!As<TensorType>(func->params_[param_index]->GetType())) continue;
+      candidate_indices.emplace(func->params_[param_index].get(), param_index);
+      ordered_candidates.emplace_back(func->params_[param_index].get(), param_index);
+    }
+    if (candidate_indices.empty()) return inputs;
+
+    auto total_summaries = CollectInputParamUsesInStmt(func->body_, candidate_indices);
+    auto loop_summaries = CollectInputParamUsesInStmt(loop->body_, candidate_indices);
+    for (const auto& [param_ptr, param_index] : ordered_candidates) {
+      auto total_it = total_summaries.find(param_ptr);
+      auto loop_it = loop_summaries.find(param_ptr);
+      if (total_it == total_summaries.end() || loop_it == loop_summaries.end()) continue;
+
+      auto matched = AnalyzeAggregateInputWindowInLoop(
+          func, param_index, loop, total_it->second.total_refs, loop_it->second);
+      if (matched.has_value()) inputs.push_back(std::move(*matched));
+    }
+    return inputs;
+  }
+
   static std::optional<CalleeRewriteAnalysis> AnalyzeAggregateWindowLoop(
-      const FunctionPtr& func, const std::vector<size_t>& out_indices) {
+      const FunctionPtr& func, const std::vector<size_t>& out_indices,
+      const std::vector<InputRewriteInfo>& existing_inputs) {
     if (!func || out_indices.empty()) return std::nullopt;
 
     auto body_stmts = FlattenToStmts(func->body_);
@@ -3253,6 +3410,7 @@ class OutWindowExternalizer {
           std::move(base_offsets), std::move(local_offsets), match.iter_arg_index});
     }
 
+    analysis.inputs = AnalyzeAggregateInputWindows(func, existing_inputs, loop);
     return analysis;
   }
 
@@ -3331,7 +3489,7 @@ class OutWindowExternalizer {
         continue;
       }
 
-      auto aggregate_analysis = AnalyzeAggregateWindowLoop(func, out_indices);
+      auto aggregate_analysis = AnalyzeAggregateWindowLoop(func, out_indices, input_windows);
       if (aggregate_analysis.has_value() && !aggregate_analysis->outputs.empty()) {
         analyses.emplace(func->name_, std::move(*aggregate_analysis));
         continue;

@@ -98,6 +98,7 @@ Supported rewrite shapes:
 - `FinalStore`: the callee returns the result of a final `tile.store(...)` into one local window
 - `AggregateWindowLoop`: the callee carries one or more `Out` tensors through a loop and writes a statically provable aggregate window, such as the outlined `kv_proj` group shape
 - `PureInputWindowConsumer`: an `In` tensor parameter is used only through the same local input window
+- `AggregateInputWindowLoop`: together with an `AggregateWindowLoop` output rewrite, an `In` tensor parameter is read only through loop-local `tile.load`/`tensor.slice` windows whose offsets expand across that same internal loop into one statically provable parent-shaped region, such as q/k inputs of qk norm
 
 Output-window eligibility:
 
@@ -118,7 +119,8 @@ Input-window eligibility:
 - the `tile.load` read shape must equal the candidate window shape
 - all matched references must agree on window shape and offset
 - if any reference is unsupported, the whole input parameter stays full-tensor
-- if the matched window is full shape at zero offset, the pass skips it because slicing would not expose a narrower dependency
+- for `PureInputWindowConsumer`, if the matched window is full shape at zero offset, the pass skips it because slicing would not expose a narrower dependency
+- for `AggregateInputWindowLoop`, all references must be inside one static `ForStmt`, at least one offset dimension must vary with that loop, and the aggregate window must equal the input parent shape; partial aggregate reads such as weight sub-windows remain full-tensor
 
 Non-goals and dependence model:
 

@@ -98,6 +98,7 @@ result = self.consumer__windowed(in_window, ...)
 - `FinalStore`：callee 返回一次写入局部窗口的最终 `tile.store(...)` 结果
 - `AggregateWindowLoop`：callee 在循环中携带一个或多个 `Out`，并写入静态可证明的聚合窗口，例如 outlined `kv_proj` 分组形态
 - `PureInputWindowConsumer`：某个 `In` 张量参数只通过同一个局部输入窗口被使用
+- `AggregateInputWindowLoop`：与 `AggregateWindowLoop` 输出改写配套使用；某个 `In` 张量参数只通过内部 loop 的局部 `tile.load`/`tensor.slice` 窗口读取，并且这些 offset 能沿同一个内部 loop 展开为一个静态可证明的 parent-shaped region，例如 qk norm 的 q/k 输入
 
 输出窗口 eligibility：
 
@@ -118,7 +119,8 @@ result = self.consumer__windowed(in_window, ...)
 - `tile.load` 的 read shape 必须等于候选 window shape
 - 所有匹配引用必须具有相同 window shape 和 offset
 - 如果存在任何 unsupported ref，则整个输入参数保持 full-tensor
-- 如果匹配出的窗口其实是 zero offset 的 full shape，则跳过，因为 slice 不能暴露更窄依赖
+- 对 `PureInputWindowConsumer`，如果匹配出的窗口其实是 zero offset 的 full shape，则跳过，因为 slice 不能暴露更窄依赖
+- 对 `AggregateInputWindowLoop`，所有引用必须位于同一个静态 `ForStmt` 内，至少一个 offset 维度必须随该 loop 变化，并且聚合窗口必须等于输入 parent shape；权重子窗口这类 partial aggregate read 仍保持 full-tensor
 
 非目标与依赖模型：
 
