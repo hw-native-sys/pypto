@@ -340,6 +340,34 @@ with compiled.prepare() as rt:                  # setup runs once
 # rt.close() runs on exit
 ```
 
+#### Dispatching several programs on one worker (multi-program)
+
+Serving needs prefill and decode as separate HOST programs that share one L3
+worker and one device-resident KV cache. Pass a list of compatible
+`DistributedCompiledProgram` objects to `DistributedWorker`, or equivalently
+`prefill.prepare(extra_compiled=[decode])` — they are prepared once on the same
+worker, and `rt.run(compiled, *args)` selects which one to dispatch. Programs
+must agree on platform, runtime, and device ids. In multi-program mode the
+`rt(*args)` shortcut is disabled (the target is ambiguous) — always dispatch via
+`rt.run(...)`. A worker-resident `DeviceTensor` (e.g. the KV cache) stays valid
+across dispatches from either program.
+
+A runnable end-to-end skeleton is in
+[`examples/runtime/multi_program_kv_cache.py`](../../../examples/runtime/multi_program_kv_cache.py).
+
+```python
+from pypto.runtime import DistributedWorker
+
+prefill = ir.compile(PrefillProgram)
+decode = ir.compile(DecodeProgram)
+
+with DistributedWorker([prefill, decode]) as rt:        # one worker, one fork
+    kv_cache = rt.alloc_tensor(kv_shape, torch.float16)  # resident across both
+    rt.run(prefill, host_prompt, kv_cache)               # writes the KV cache
+    for _ in range(max_new_tokens):
+        rt.run(decode, host_token, kv_cache, host_logits)  # reads/updates it
+```
+
 ## What's Next
 
 - **[Language Guide](01-language_guide.md)** — complete reference for types, operations, control flow, memory, and compilation

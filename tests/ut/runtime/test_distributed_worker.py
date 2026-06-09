@@ -131,6 +131,17 @@ class TestPerCallValidation:
             rt(torch.zeros(128, 128), DeviceTensor(0x2000, (128, 128), torch.float32))
         rt.close()
 
+    def test_scalar_param_forwarded_as_is(self, patched_setup):
+        # Scalar params (shape=None, e.g. seq_len) bypass tensor validation and
+        # are forwarded verbatim to the entry — common in serving dispatch.
+        scalar = _ParamInfo(name="seq_len", direction=ParamDirection.In, shape=None, dtype=DataType.FP32)
+        compiled = _fake_compiled([scalar, _param("kv", [16, 16])], [])
+        rt = DistributedWorker(compiled)
+        rt(7, DeviceTensor(0x1000, (16, 16), torch.float32))
+        tensors = patched_setup["dispatch"].call_args.args[2]
+        assert tensors["seq_len"] == 7
+        rt.close()
+
     def test_rejects_wrong_arg_count(self, patched_setup):
         compiled = _fake_compiled([_param("a", [128, 128]), _param("b", [128, 128])], [])
         rt = DistributedWorker(compiled)
@@ -369,20 +380,20 @@ class TestExplicitDispatchAPI:
         rt.close()
         rt2.close()
 
-    def test_run_rejects_other_compiled(self, patched_setup):
+    def test_run_rejects_unregistered_compiled(self, patched_setup):
         compiled_a = _fake_compiled([_param("a", [4])], [])
         compiled_b = _fake_compiled([_param("a", [4])], [])
         rt = DistributedWorker(compiled_a)
         a = torch.zeros(4).share_memory_()
-        with pytest.raises(ValueError, match="prepared from"):
+        with pytest.raises(ValueError, match="registered when this worker"):
             rt.run(compiled_b, a)
         rt.close()
 
-    def test_register_rejects_other_compiled(self, patched_setup):
+    def test_register_rejects_unregistered_compiled(self, patched_setup):
         compiled_a = _fake_compiled([_param("a", [4])], [])
         compiled_b = _fake_compiled([_param("a", [4])], [])
         rt = DistributedWorker(compiled_a)
-        with pytest.raises(ValueError, match="prepared from"):
+        with pytest.raises(ValueError, match="registered when this worker"):
             rt.register(compiled_b)
         rt.close()
 
@@ -502,6 +513,198 @@ class TestLoadOrchEntry:
         )
         with pytest.raises(RuntimeError, match="exactly one entry function"):
             _load_orch_entry(root)
+
+
+class TestMultiProgram:
+    """Multiple compatible programs share one L3 worker (issue #1698).
+
+    Each program registers its own callables/entry/state; dispatch selects the
+    program via ``run(compiled, ...)``. The shared worker is constructed and
+    init()'d exactly once across all programs.
+    """
+
+    def test_prepares_multiple_programs_on_one_worker(self, patched_setup):
+        m = patched_setup
+        prog_a = _fake_compiled([_param("a", [4])], [])
+        prog_b = _fake_compiled([_param("b", [8])], [])
+
+        rt = DistributedWorker([prog_a, prog_b])
+
+        # One worker, init()'d once; per-program setup ran twice.
+        m["construct"].assert_called_once()
+        m["worker"].init.assert_called_once()
+        assert m["assemble"].call_count == 2
+        assert m["load_entry"].call_count == 2
+        assert m["register"].call_count == 2
+        # Both programs are dispatchable; the first is primary.
+        assert set(rt._states) == {prog_a, prog_b}
+        assert rt._compiled is prog_a
+        rt.close()
+
+    def test_run_selects_program_state(self, patched_setup):
+        m = patched_setup
+        # Distinct entry_fns per program so we can prove dispatch picks the
+        # selected program's state, not the primary's.
+        entry_a, entry_b = MagicMock(name="entry_a"), MagicMock(name="entry_b")
+        m["load_entry"].side_effect = [(entry_a, None), (entry_b, None)]
+        prog_a = _fake_compiled([_param("a", [4])], [])
+        prog_b = _fake_compiled([_param("b", [8])], [])
+        rt = DistributedWorker([prog_a, prog_b])
+
+        a = torch.zeros(4).share_memory_()
+        b = torch.zeros(8).share_memory_()
+
+        rt.run(prog_b, b)
+        assert m["dispatch"].call_args.args[1] is entry_b
+        rt.run(prog_a, a)
+        assert m["dispatch"].call_args.args[1] is entry_a
+        rt.close()
+
+    def test_num_sub_workers_is_max_across_programs(self, patched_setup):
+        m = patched_setup
+        m["load_subs"].side_effect = [{"s0": object()}, {"s0": object(), "s1": object()}]
+        prog_a = _fake_compiled([_param("a", [4])], [])
+        prog_b = _fake_compiled([_param("b", [8])], [])
+
+        rt = DistributedWorker([prog_a, prog_b])
+
+        # _construct_worker(dc, platform, runtime_name, num_sub) — num_sub is the
+        # max sub-worker count across all programs (2 here).
+        assert m["construct"].call_args.args[3] == 2
+        rt.close()
+
+    def test_single_program_list_keeps_call_shortcut(self, patched_setup):
+        # A one-element list is what ``compiled.prepare()`` builds; the
+        # ``rt(*args)`` shortcut must keep working for it.
+        prog = _fake_compiled([_param("a", [4])], [])
+        rt = DistributedWorker([prog])
+        assert rt._multi_program is False
+        rt(torch.zeros(4).share_memory_())
+        patched_setup["dispatch"].assert_called_once()
+        rt.close()
+
+    def test_call_raises_in_multi_program_mode(self, patched_setup):
+        prog_a = _fake_compiled([_param("a", [4])], [])
+        prog_b = _fake_compiled([_param("b", [8])], [])
+        rt = DistributedWorker([prog_a, prog_b])
+        with pytest.raises(TypeError, match="ambiguous"):
+            rt(torch.zeros(4).share_memory_())
+        rt.close()
+
+    def test_shared_device_tensor_across_programs(self, patched_setup):
+        m = patched_setup
+        # Both programs take a same-shaped KV param; one resident DeviceTensor
+        # is dispatched through both (the serving KV-cache sharing contract).
+        prog_a = _fake_compiled([_param("kv", [16, 16])], [])
+        prog_b = _fake_compiled([_param("kv", [16, 16])], [])
+        rt = DistributedWorker([prog_a, prog_b])
+
+        kv = DeviceTensor(0x5000, (16, 16), torch.float32)
+        rt.run(prog_a, kv)
+        rt.run(prog_b, kv)
+
+        assert m["dispatch"].call_count == 2
+        for call in m["dispatch"].call_args_list:
+            assert call.args[2]["kv"] is kv  # same pointer in both tensor maps
+        rt.close()
+
+    def test_register_each_program_returns_handle(self, patched_setup):
+        from pypto.runtime import RegistrationHandle  # noqa: PLC0415
+
+        m = patched_setup
+        entry_a, entry_b = MagicMock(name="entry_a"), MagicMock(name="entry_b")
+        m["load_entry"].side_effect = [(entry_a, None), (entry_b, None)]
+        prog_a = _fake_compiled([_param("a", [4])], [])
+        prog_b = _fake_compiled([_param("b", [8])], [])
+        rt = DistributedWorker([prog_a, prog_b])
+
+        h_a = rt.register(prog_a)
+        h_b = rt.register(prog_b)
+        assert isinstance(h_a, RegistrationHandle) and isinstance(h_b, RegistrationHandle)
+        assert h_a.compiled is prog_a
+        assert h_b.compiled is prog_b
+
+        # Each handle dispatches its own program's state.
+        h_a(torch.zeros(4).share_memory_())
+        assert m["dispatch"].call_args.args[1] is entry_a
+        h_b(torch.zeros(8).share_memory_())
+        assert m["dispatch"].call_args.args[1] is entry_b
+
+        # close() marks every program's handle closed and tears down the one worker.
+        rt.close()
+        assert h_a.closed is True
+        assert h_b.closed is True
+        assert m["worker"].close.call_count == 1
+
+    def test_callbacks_apply_per_program(self, patched_setup):
+        m = patched_setup
+
+        # prog_a declares sub-worker 'sample'; prog_b declares 'route'. A callback
+        # for each binds only to the program that declares it — heterogeneous
+        # sub-worker sets across programs must not raise.
+        def cb_sample(args):
+            return None
+
+        def cb_route(args):
+            return None
+
+        m["load_subs"].side_effect = [{"sample": object()}, {"route": object()}]
+        prog_a = _fake_compiled([_param("a", [4])], [])
+        prog_b = _fake_compiled([_param("b", [8])], [])
+
+        rt = DistributedWorker([prog_a, prog_b], callbacks={"sample": cb_sample, "route": cb_route})
+
+        bound_sets = [call.args[1] for call in m["register"].call_args_list]
+        assert {"sample": cb_sample} in bound_sets
+        assert {"route": cb_route} in bound_sets
+        rt.close()
+
+    def test_callback_matching_no_program_raises(self, patched_setup):
+        m = patched_setup
+        m["load_subs"].side_effect = [{"sample": object()}, {"route": object()}]
+        prog_a = _fake_compiled([_param("a", [4])], [])
+        prog_b = _fake_compiled([_param("b", [8])], [])
+        with pytest.raises(ValueError, match="not sub-workers of any prepared program"):
+            DistributedWorker([prog_a, prog_b], callbacks={"typo": lambda args: None})
+
+    def test_prepare_extra_compiled_forwards_program_list(self):
+        from pypto.ir.distributed_compiled_program import DistributedCompiledProgram  # noqa: PLC0415
+
+        primary = _fake_compiled([_param("a", [4])], [])
+        extra = _fake_compiled([_param("b", [8])], [])
+        with patch("pypto.runtime.distributed_runner.DistributedWorker") as fake_worker:
+            DistributedCompiledProgram.prepare(primary, extra_compiled=[extra])
+        # prepare() delegates to DistributedWorker([primary, *extra_compiled], ...).
+        assert fake_worker.call_args.args[0] == [primary, extra]
+
+    def test_empty_sequence_raises(self, patched_setup):
+        with pytest.raises(ValueError, match="at least one compiled program"):
+            DistributedWorker([])
+
+    def test_rejects_mismatched_platform(self, patched_setup):
+        prog_a = _fake_compiled([_param("a", [4])], [])
+        prog_b = _fake_compiled([_param("b", [8])], [])
+        prog_b.platform = "different_platform"
+        with pytest.raises(ValueError, match="same platform"):
+            DistributedWorker([prog_a, prog_b])
+
+    def test_rejects_mismatched_device_ids(self, patched_setup):
+        prog_a = _fake_compiled([_param("a", [4])], [])
+        prog_b = _fake_compiled([_param("b", [8])], [])
+        prog_b._distributed_config = DistributedConfig(device_ids=[0, 1])
+        with pytest.raises(ValueError, match="same device_ids"):
+            DistributedWorker([prog_a, prog_b])
+
+    def test_rejects_mismatched_runtime(self, patched_setup):
+        m = patched_setup
+        m["assemble"].side_effect = [
+            ({"chip_orch": object()}, "rt_name"),
+            ({"chip_orch": object()}, "other_rt"),
+        ]
+        prog_a = _fake_compiled([_param("a", [4])], [])
+        prog_b = _fake_compiled([_param("b", [8])], [])
+        with pytest.raises(ValueError, match="same runtime"):
+            DistributedWorker([prog_a, prog_b])
 
 
 if __name__ == "__main__":
