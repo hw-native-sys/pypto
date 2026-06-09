@@ -448,7 +448,15 @@ class TestFlattenTileNdTo2DErrors:
             passes.flatten_tile_nd_to_2d()(Before)
 
     def test_dynamic_shape_error(self):
-        """Dynamic (non-ConstInt) tile shape on >2D tile -> CHECK error."""
+        """Dynamic (non-ConstInt) dimension on a >2D tile -> actionable CHECK error.
+
+        A pl.dynamic dimension has no static bound, so it cannot back a fixed-size
+        hardware tile dimension. When the op is not an auto-tileable
+        load -> elementwise* -> store chain (here a bare ``tile.add``), the
+        dynamic-tile strip-mine leaves it untouched and the flatten precondition
+        must reject it with a message that names the constraint and points to the
+        two real fixes (issue #1578).
+        """
         span = ir.Span.unknown()
         n_var = ir.Var("n", ir.ScalarType(DataType.INT32), span)
         dim2 = ir.ConstInt(3, DataType.INT32, span)
@@ -461,8 +469,134 @@ class TestFlattenTileNdTo2DErrors:
         func = ir.Function("incore_func", [x_tile], [dyn_tile_type], body, span, type=ir.FunctionType.InCore)
         program = ir.Program([func], "test_dyn", span)
 
-        with pytest.raises(ValueError, match="must be static"):
+        with pytest.raises(ValueError, match="cannot be flattened to 2D") as excinfo:
             passes.flatten_tile_nd_to_2d()(program)
+        # The error must be actionable: it should point to both documented fixes.
+        message = str(excinfo.value)
+        assert "pl.parallel" in message
+        assert "reshap" in message
+
+
+# ----------------------------------------------------------------------------
+# Dynamic valid_shape through the 3D->2D flatten (issue #1578)
+# ----------------------------------------------------------------------------
+
+
+def _dyn(name: str) -> ir.Var:
+    """A dynamic (symbolic) INDEX dimension, as produced by ``pl.dynamic``."""
+    return ir.Var(name, ir.ScalarType(DataType.INDEX), ir.Span.unknown())
+
+
+def _incore_cast_chain(shapes: list, valid: list, tensor_shape: list) -> ir.Program:
+    """Bare InCore function: ``tile.load -> tile.cast -> tile.store -> return``.
+
+    ``shapes`` is the physical tile shape (the user-provided static chunk on the
+    dynamic axis); ``valid`` is the per-dim valid extent (may hold ``ir.Var``
+    entries for runtime-dynamic dimensions). Built via IRBuilder so the result is
+    well-formed SSA. ``tile.load`` is the 4-arg form (physical ``shapes`` +
+    ``valid_shapes``) the user writes when chunking a dynamic dim themselves.
+    """
+    span = ir.Span.unknown()
+    in_type = ir.TensorType(tensor_shape, DataType.BF16)
+    out_type = ir.TensorType(tensor_shape, DataType.FP32)
+    zeros = [0] * len(tensor_shape)
+
+    ib = IRBuilder()
+    with ib.function("cast_incore", type=ir.FunctionType.InCore) as f:
+        x = f.param("x", in_type)
+        out_p = f.param("out", out_type, direction=ir.ParamDirection.Out)
+        f.return_type(out_type)
+        x_tile = ib.let("x_tile", tile_ops.load(x, zeros, shapes, valid_shapes=valid, span=span))
+        y_tile = ib.let("y_tile", tile_ops.cast(x_tile, DataType.FP32, span=span))
+        out_r = ib.let("out_0", tile_ops.store(y_tile, zeros, out_p, span=span))
+        ib.return_stmt(out_r)
+    return ir.Program([f.get_result()], "test_dyn_valid", span)
+
+
+def _tile_calls(node) -> list[ir.Call]:
+    """Collect every ``ir.Call`` whose result is a ``TileType`` reachable from ``node``."""
+    out: list[ir.Call] = []
+
+    def walk(n):
+        if n is None:
+            return
+        if isinstance(n, ir.Call):
+            if isinstance(n.type, ir.TileType):
+                out.append(n)
+            for arg in n.args:
+                walk(arg)
+        elif isinstance(n, ir.SeqStmts):
+            for s in n.stmts:
+                walk(s)
+        elif isinstance(n, ir.AssignStmt):
+            walk(n.value)
+        elif isinstance(n, ir.EvalStmt):
+            walk(n.expr)
+
+    walk(node)
+    return out
+
+
+class TestFlattenTileNdTo2DDynamicValid:
+    """The user chunks a dynamic dim themselves (a static physical ``shapes`` with
+    the runtime extent in ``valid_shapes``); FlattenTileNdTo2D lowers the >2D
+    per-chunk tile to 2D while **preserving the dynamic ``valid_shape``** so the
+    runtime tail survives (issue #1578)."""
+
+    def test_static_physical_dynamic_valid_preserved(self):
+        """phys ``[1, 16, 512]`` + valid ``[1, S, 512]`` flattens to a 2D tile
+        whose merged valid_shape keeps the dynamic row extent (not reset to 16)."""
+        s = _dyn("S")
+        before = _incore_cast_chain(shapes=[1, 16, 512], valid=[1, s, 512], tensor_shape=[1, s, 512])
+
+        # Keep property verification but skip the print->parse roundtrip check:
+        # the hand-built dynamic Var does not round-trip in this minimal program
+        # (the full @pl.jit pipeline round-trips fine — see the ST test
+        # tests/st/codegen/dsl/test_flatten_dynamic_tile_3d.py).
+        ctx = passes.PassContext(
+            [passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)],
+            passes.VerificationLevel.BASIC,
+        )
+        with ctx:
+            after = passes.flatten_tile_nd_to_2d()(before)
+
+        after_func = after.get_function("cast_incore")
+        assert after_func is not None
+        loads = [c for c in _tile_calls(after_func.body) if c.op.name == "tile.load"]
+        assert loads, "expected a tile.load in the flattened body"
+        load_type = cast(ir.TileType, loads[0].type)
+        # Physical shape flattened to 2D and is fully static.
+        assert len(load_type.shape) == 2
+        assert all(isinstance(d, ir.ConstInt) for d in load_type.shape)
+        # valid_shape flattened to 2D, and its row extent stays DYNAMIC (the
+        # min(CHUNK, S-c)-style tail was preserved, not reset to the physical 16).
+        assert load_type.tile_view is not None
+        valid = load_type.tile_view.valid_shape
+        assert len(valid) == 2
+        assert not isinstance(valid[0], ir.ConstInt), (
+            f"merged valid row must stay dynamic, got static {valid[0]}"
+        )
+        assert isinstance(valid[1], ir.ConstInt) and valid[1].value == 512
+
+    def test_static_3d_flattens(self):
+        """A fully static 3D chain flattens to 2D normally."""
+        before = _incore_cast_chain(shapes=[1, 8, 512], valid=[1, 8, 512], tensor_shape=[1, 8, 512])
+        after = passes.flatten_tile_nd_to_2d()(before)
+        after_func = after.get_function("cast_incore")
+        assert after_func is not None
+        for call in _tile_calls(after_func.body):
+            assert len(cast(ir.TileType, call.type).shape) <= 2
+
+    def test_dynamic_physical_shape_errors(self):
+        """A >2D tile whose *physical* shape is dynamic (the user did not slice a
+        static chunk) is rejected with an actionable message."""
+        s = _dyn("S")
+        before = _incore_cast_chain(shapes=[1, s, 512], valid=[1, s, 512], tensor_shape=[1, s, 512])
+        with pytest.raises(ValueError, match="cannot be flattened to 2D") as excinfo:
+            passes.flatten_tile_nd_to_2d()(before)
+        message = str(excinfo.value)
+        assert "pl.parallel" in message
+        assert "reshap" in message
 
 
 # ----------------------------------------------------------------------------

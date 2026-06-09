@@ -67,8 +67,12 @@ bool IsNdTile(const TileTypePtr& tile_type) { return tile_type && tile_type->sha
  */
 int64_t GetStaticDim(const ExprPtr& expr, const std::string& context) {
   auto ci = As<ConstInt>(expr);
-  CHECK(ci) << "FlattenTileNdTo2D: all tile dimensions must be static (ConstInt), "
-            << "but found dynamic dimension in " << context;
+  CHECK(ci) << "FlattenTileNdTo2D: found a dynamic (non-constant) dimension in " << context
+            << ", but flattening >2D tiles to 2D (and unrolling batched matmul) requires every "
+               "tile dimension to be a compile-time constant. A pl.dynamic dimension has no static "
+               "bound and cannot back a tile dimension directly. Tile/iterate the dynamic dimension "
+               "with pl.range/pl.parallel, or reshape to 2D before the InCore (pl.at) scope so the "
+               "dynamic extent lands on the pl.parallel loop bound instead of inside the tile shape.";
   return ci->value_;
 }
 
@@ -111,6 +115,34 @@ ExprPtr MakeShapeTupleFromInts(const std::vector<int64_t>& dims, const Span& spa
 std::vector<ExprPtr> Make2DShapeExprs(int64_t merged, int64_t last, const Span& span) {
   return {std::make_shared<ConstInt>(merged, DataType::INDEX, span),
           std::make_shared<ConstInt>(last, DataType::INDEX, span)};
+}
+
+/// Merge an ND ``valid_shape`` into its 2D form ``[product(leading), last]``,
+/// allowing dynamic (non-ConstInt) entries — unlike ComputeMergedShape, which
+/// requires static dims. Static factors are folded into a single ConstInt; the
+/// identity factor 1 is dropped. This lets a dynamic ``valid_shape`` (e.g. the
+/// ``min(CHUNK, D - c)`` tail from the dynamic-tile strip-mine below) survive the
+/// flatten of the physical tile shape rather than being reset to the full static
+/// shape.
+std::vector<ExprPtr> ComputeMergedValidShape(const std::vector<ExprPtr>& valid, const Span& span) {
+  int64_t const_prod = 1;
+  ExprPtr dyn = nullptr;
+  for (size_t i = 0; i + 1 < valid.size(); ++i) {
+    if (auto ci = As<ConstInt>(valid[i])) {
+      const_prod *= ci->value_;
+    } else {
+      dyn = dyn ? MakeMul(dyn, valid[i], span) : valid[i];
+    }
+  }
+  ExprPtr merged;
+  if (!dyn) {
+    merged = std::make_shared<ConstInt>(const_prod, DataType::INDEX, span);
+  } else if (const_prod == 1) {
+    merged = dyn;
+  } else {
+    merged = MakeMul(std::make_shared<ConstInt>(const_prod, DataType::INDEX, span), dyn, span);
+  }
+  return {merged, valid.back()};
 }
 
 /// Build a canonical index add, folding simple ConstInt cases to avoid
@@ -253,8 +285,14 @@ class PreconditionChecker : public IRVisitor {
     if (!tile_type || tile_type->shape_.size() <= 2) return;
     for (size_t i = 0; i < tile_type->shape_.size(); ++i) {
       CHECK(As<ConstInt>(tile_type->shape_[i]))
-          << "FlattenTileNdTo2D: tile dimension " << i << " must be static (ConstInt) "
-          << "for tile op '" << op_name << "'";
+          << "FlattenTileNdTo2D: tile op '" << op_name << "' has a dynamic (non-constant) "
+          << "dimension " << i << " in its >2D tile shape, which cannot be flattened to 2D. "
+          << "Hardware tiles map to fixed-size on-chip buffers, so every tile dimension must "
+          << "be a compile-time constant; a pl.dynamic dimension has no static bound and cannot "
+          << "back a tile dimension directly. Fix by either: (1) iterating/tiling the dynamic "
+          << "dimension with pl.range/pl.parallel so each per-iteration tile slice is static, or "
+          << "(2) reshaping the tensor to 2D before the InCore (pl.at) scope so the dynamic extent "
+          << "lands on the pl.parallel loop bound instead of inside the tile shape.";
     }
   }
 
@@ -1787,8 +1825,17 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         std::optional<TileView> flat_tile_view;
         if (result_tile->tile_view_.has_value()) {
           const auto& orig_tv = *result_tile->tile_view_;
-          flat_tile_view = TileView(flat_shape_exprs, /*stride=*/{}, /*start_offset=*/nullptr,
-                                    orig_tv.blayout, orig_tv.slayout, orig_tv.fractal, orig_tv.pad);
+          // Carry the original valid_shape through the flatten. When it is a
+          // proper per-dim valid_shape (e.g. a dynamic min(CHUNK, D-c) tail from
+          // the dynamic-tile strip-mine), merge it the same way as the physical
+          // shape so the runtime tail extent survives; otherwise the flattened
+          // tile is fully valid (valid_shape == physical 2D shape).
+          std::vector<ExprPtr> flat_valid = flat_shape_exprs;
+          if (orig_tv.valid_shape.size() == result_tile->shape_.size()) {
+            flat_valid = ComputeMergedValidShape(orig_tv.valid_shape, span);
+          }
+          flat_tile_view = TileView(flat_valid, /*stride=*/{}, /*start_offset=*/nullptr, orig_tv.blayout,
+                                    orig_tv.slayout, orig_tv.fractal, orig_tv.pad);
         } else {
           flat_tile_view =
               tile_view_semantics::GetImplicitTileView(flat_shape_exprs, result_tile->memory_space_);

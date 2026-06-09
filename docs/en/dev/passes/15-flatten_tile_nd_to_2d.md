@@ -16,7 +16,8 @@ legalization point that expands them into broadcast-aware per-batch
 
 - Input IR must be in SSA form
 - Input IR must have tile ops (run `ConvertTensorToTileOps` first)
-- All tile dimensions must be static (`ConstInt`)
+- Every tile's **physical** shape must be static (`ConstInt`); a tile's `valid_shape` may be dynamic
+  and is preserved through the flatten (see [Dynamic valid_shape](#dynamic-tile-dimensions-issue-1578))
 - All tile reduce ops must reduce along the last axis
 - All tile memory must be contiguous
 
@@ -41,8 +42,8 @@ program_2d = flatten_pass(program)
 
 For each InCore function (InCore, AIC, AIV):
 
-1. **Validate preconditions**: Check static shapes, last-axis reduction, no `tile.read`/`tile.write`/`tile.slice` on >2D
-2. **Transform statements**: Walk function body and convert >2D tile ops to 2D
+1. **Validate preconditions**: Check static physical shapes, last-axis reduction, no `tile.read`/`tile.write`/`tile.slice` on >2D
+2. **Transform statements**: Walk function body and convert >2D tile ops to 2D, preserving any dynamic `valid_shape` (see [Dynamic valid_shape](#dynamic-tile-dimensions-issue-1578))
 
 Per-statement handling:
 
@@ -95,6 +96,40 @@ rank>2 tensors, the pass injects the original partition `shapes` as an extra 4th
 transformed IR (e.g. `pl.store(y_tile, [0, 0, 0], out_0, (2, 3, 4))`); this operand is only
 present in the transformed IR and is not part of the source DSL.
 
+## Dynamic tile dimensions (issue #1578)
+
+Hardware tiles map to fixed-size on-chip buffers, so every **physical** tile dimension must be a
+compile-time constant; the runtime extent lives in `TileView.valid_shape`. To process a dynamic
+dimension the user **writes the chunk loop themselves**: iterate the dynamic dim with `pl.range` in a
+static `CHUNK` step, and load each chunk as a static physical `[1, CHUNK, 512]` tile whose
+`valid_shapes` carries the runtime tail `min(CHUNK, s - c)`. The chunk size is the user's choice — it
+strongly affects performance, so it is not auto-selected by the pass.
+
+```python
+# User-written: chunk the dynamic S dim, clamp the tail in valid_shapes.
+for c, (o,) in pl.range(0, s_dim, CHUNK, init_values=(out,)):
+    valid = pl.min(CHUNK, s_dim - c)
+    t = pl.load(x, [b, c, 0], [1, CHUNK, 512], valid_shapes=[1, valid, 512])
+    t = pl.cast(t, target_type=pl.FP32)
+    o = pl.store(t, [b, c, 0], o)        # static physical [1, CHUNK, 512], dynamic valid
+    pl.yield_(o)
+```
+
+Each per-chunk tile is physically `[1, CHUNK, 512]` (static) with a dynamic `valid_shape`
+`[1, min(CHUNK, s - c), 512]`. **FlattenTileNdTo2D's only job here is to lower that >2D tile to
+`[CHUNK, 512]` while preserving the dynamic `valid_shape`** — `ComputeMergedValidShape` merges the
+leading dims of `valid_shape` the same way `ComputeMergedShape` merges the physical shape, but tolerates
+dynamic entries, so the runtime tail survives the flatten instead of being reset to the full physical
+shape. The loop itself is the user's; the pass does **not** synthesize it.
+
+> The chunk must fit on-chip Vec (UB) memory (`CHUNK * <kept dims> * <live tile bytes> <= UB capacity`),
+> otherwise `AllocateMemoryAddr` rejects the kernel with a "Vec buffer usage exceeds platform limit"
+> error. Picking the chunk is the user's responsibility.
+
+If a >2D tile reaches the pass with a **dynamic physical shape** (the user did not slice a static
+chunk), it cannot be flattened and the pass raises an actionable error pointing to the two fixes:
+chunk the dynamic dim with `pl.range`/`pl.parallel`, or reshape to 2D before the InCore (`pl.at`) scope.
+
 ## Implementation
 
 **Header**: `include/pypto/ir/transforms/passes.h`
@@ -103,7 +138,7 @@ present in the transformed IR and is not part of the source DSL.
 
 **Python binding**: `python/bindings/modules/passes.cpp`
 
-**Tests**: `tests/ut/ir/transforms/test_flatten_tile_nd_to_2d.py`
+**Tests**: `tests/ut/ir/transforms/test_flatten_tile_nd_to_2d.py`, `tests/st/codegen/dsl/test_flatten_dynamic_tile_3d.py` (issue #1578 end-to-end)
 
 ## Pass Properties
 
