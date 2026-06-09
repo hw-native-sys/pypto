@@ -111,7 +111,11 @@ def _preprocess_ptoas_body(content: str) -> str:
             continue
         filtered.append(line)
     result = "".join(filtered)
-    result = re.sub(r"(?:__global__\s+)?AICORE\s+void", "static __aicore__ void", result)
+    result = re.sub(
+        r'(?:extern\s*"C"\s*)?(?:__global__\s+)?AICORE\s+void',
+        "static __aicore__ void",
+        result,
+    )
     return re.sub(r"\bAICORE\b", "__aicore__", result)
 
 

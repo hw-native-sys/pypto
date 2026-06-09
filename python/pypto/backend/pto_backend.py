@@ -254,7 +254,7 @@ def _preprocess_ptoas_output(content: str) -> str:
     # vs. internal linkage clash that clang rejects). kernel_entry below is the sole
     # extern "C" export.
     result = re.sub(
-        r'(?:extern\s+"C"\s+)?(?:__global__\s+)?AICORE\s+void',
+        r'(?:extern\s*"C"\s*)?(?:__global__\s+)?AICORE\s+void',
         "static __aicore__ void",
         result,
     )
