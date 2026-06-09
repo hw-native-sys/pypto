@@ -106,7 +106,7 @@ Output-window eligibility:
 - offsets must be affine in the surrounding loop variables accepted by the pass
 - multi-`Out` rewrites are all-or-nothing
 - sequential-loop siblings are rewritten only when every rewritten `Out` can be proven disjoint across sibling iterations
-- same-scope sibling writers to the same parent tensor are treated conservatively; if the pass cannot prove the output window is independent from those sibling writes, it keeps the call baseline/full-tensor
+- same-scope sibling writers to the same parent or aliased parent tensor are eligible only when the pass can prove the output windows are independent; otherwise those calls stay baseline/full-tensor
 - later full-parent reads do not disable output windowing; correctness is delegated to runtime TensorMap overlap dependence once the call site exposes the actual window tensor
 
 Input-window eligibility:

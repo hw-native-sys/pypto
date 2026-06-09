@@ -106,7 +106,7 @@ result = self.consumer__windowed(in_window, ...)
 - offset 必须是该 pass 可接受的外层循环变量仿射表达式
 - multi-`Out` 改写采用全有或全无策略
 - 顺序循环 sibling 只有在每个被改写 `Out` 都能证明跨 sibling iteration 不重叠时才改写
-- 同一 scope 内如果存在写入同一 parent tensor 的 sibling writer，则采用保守策略；当 pass 不能证明当前输出 window 与这些 sibling 写彼此独立时，该 call 保持 baseline/full-tensor
+- 同一 scope 内写入同一 parent 或 alias parent tensor 的 sibling writer，只有在 pass 能证明输出 window 彼此独立时才 eligible；否则这些 call 保持 baseline/full-tensor
 - 后续 full-parent read 不会关闭输出 window；callsite 暴露真实窗口张量之后，正确性依赖 runtime TensorMap overlap dependence
 
 输入窗口 eligibility：
