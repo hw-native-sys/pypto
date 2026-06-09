@@ -2431,6 +2431,114 @@ class TestIdempotence:
         Twice = passes.convert_to_ssa()(Once)
         self._verify_ssa(Twice)
 
+    def test_rerun_propagates_renames_into_sibling_function_core_num_attr(self):
+        """ConvertToSSA is program-level: when re-running re-versions a Var in
+        function A, sibling function B's ``core_num`` attr referencing that
+        Var must follow.
+
+        Repro path: run the full default pipeline through the post-outline
+        ConvertToSSA on a program containing ``pl.spmd(cores)`` with composite
+        dynamic ``cores``. OutlineIncoreScopes lifts the SpmdScopeStmt's
+        ``core_num`` onto the outlined Spmd function as a function-level attr
+        — its ExprPtr references the Var defined in the dispatching
+        Orchestration function. After the post-outline ConvertToSSA
+        re-versions the orchestration body's ``cores`` AssignStmt LHS, the
+        sibling Spmd function's ``core_num`` attr must point at the SAME Var
+        pointer. Otherwise Simplify's ``CollectCoreNumReferencedVars``
+        cross-function DCE protection mis-fires (stale attr pointer ≠
+        AssignStmt LHS pointer) and DCE drops the ``cores`` AssignStmt,
+        breaking orchestration codegen with ``'cores' was not declared in
+        this scope``.
+        """
+        from pypto import backend  # noqa: PLC0415
+        from pypto.backend import BackendType  # noqa: PLC0415
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        B_DYN = pl.dynamic("B_DYN")
+
+        @pl.program
+        class P:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def spmd_core_num_mul(
+                self,
+                x: pl.Tensor[[B_DYN, 64, 64], pl.BF16],
+                out: pl.Out[pl.Tensor[[B_DYN, 64, 64], pl.FP32]],
+            ) -> pl.Tensor[[B_DYN, 64, 64], pl.FP32]:
+                b_dim = pl.tensor.dim(x, 0)
+                cores = b_dim * 3 // 4
+                for idx in pl.spmd(cores, name_hint="mul"):
+                    out[idx : idx + 1, :, :] = pl.cast(x[idx : idx + 1, :, :], target_type=pl.FP32)
+                return out
+
+        # The printer does not yet emit ``cores__ssa_v0`` as a top-level
+        # ``pl.dynamic`` declaration for cross-function attr Var refs, so the
+        # autouse RoundtripInstrument fails on the post-outline IR. Drop to
+        # property verification only for this test (verification is what we
+        # actually assert below — pointer identity of the cross-function ref).
+        from pypto.pypto_core import passes as _core_passes  # noqa: PLC0415
+
+        ctx = _core_passes.PassContext(
+            [_core_passes.VerificationInstrument(_core_passes.VerificationMode.BEFORE_AND_AFTER)]
+        )
+        with ctx:
+            program = passes.convert_to_ssa()(P)
+            program = passes.simplify()(program)
+            program = passes.normalize_stmt_structure()(program)
+            program = passes.flatten_call_expr()(program)
+            program = passes.split_chunked_loops()(program)
+            program = passes.interchange_chunk_loops()(program)
+            program = passes.outline_hierarchy_scopes()(program)
+            program = passes.outline_incore_scopes()(program)
+            program = passes.outline_cluster_scopes()(program)
+            program = passes.convert_to_ssa()(program)  # the re-run that triggered the bug
+
+        orch = next(f for f in program.functions.values() if f.name == "spmd_core_num_mul")
+        spmd = next(f for f in program.functions.values() if f.name == "mul_spmd")
+
+        def _walk(stmt):
+            if stmt is None:
+                return
+            yield stmt
+            if isinstance(stmt, ir.SeqStmts):
+                for s in stmt.stmts:
+                    yield from _walk(s)
+            elif isinstance(stmt, ir.RuntimeScopeStmt):
+                yield from _walk(stmt.body)
+            elif isinstance(stmt, ir.ScopeStmt):
+                yield from _walk(stmt.body)
+
+        cores_assigns = [
+            s
+            for s in _walk(orch.body)
+            if isinstance(s, ir.AssignStmt) and s.var.name_hint.startswith("cores")
+        ]
+        assert len(cores_assigns) == 1, f"expected one cores assignment in orch body, got {cores_assigns}"
+        body_cores_var = cores_assigns[0].var
+
+        attr_core_num = spmd.attrs.get("core_num")
+        assert attr_core_num is not None, "mul_spmd missing core_num attr"
+
+        # core_num may be a bare Var or a small Expr wrapping a Var. Either
+        # way the cores ref inside must point at the same Var pointer as the
+        # orchestration body's AssignStmt LHS.
+        def _walk_var_refs(expr):
+            if isinstance(expr, ir.Var):
+                yield expr
+                return
+            for child in getattr(expr, "args", []) or []:
+                yield from _walk_var_refs(child)
+
+        cores_refs = [v for v in _walk_var_refs(attr_core_num) if v.name_hint.startswith("cores")]
+        assert cores_refs, f"core_num attr must reference a cores Var, got expr={attr_core_num}"
+        for ref in cores_refs:
+            assert ref.unique_id == body_cores_var.unique_id, (
+                f"sibling Spmd's core_num attr Var ref (name={ref.name_hint}, "
+                f"unique_id={ref.unique_id}) must point at the SAME Var pointer "
+                f"as the orchestration body's cores AssignStmt LHS "
+                f"(name={body_cores_var.name_hint}, unique_id={body_cores_var.unique_id})"
+            )
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

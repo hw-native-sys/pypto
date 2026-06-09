@@ -249,6 +249,15 @@ class SSAConverter {
     return result;
   }
 
+  /// Snapshot of all Var renames performed by ConvertFunction (original Var
+  /// pointer → final SSA Var pointer). Exposed so a program-level driver can
+  /// propagate renames into sibling functions' Var-bearing attrs (e.g. an
+  /// outlined Spmd function's ``core_num`` references a Var defined in the
+  /// dispatching Orchestration function — when the latter is re-versioned,
+  /// the cross-function attr must follow). Only entries where the SSA Var
+  /// differs from the original are useful.
+  const std::unordered_map<const Var*, VarPtr>& cur() const { return cur_; }
+
  private:
   // ── Expression substitution via lightweight IRMutator ──────────────
 
@@ -1234,25 +1243,140 @@ class SSAConverter {
   std::vector<ParamDirection> orig_param_directions_;
 };
 
-FunctionPtr TransformConvertToSSA(const FunctionPtr& func) {
-  // HOST-level (Linqu >= 3) SubWorker functions carry their pure-Python body
-  // as an opaque InlineStmt. Their parameters are not used by IR statements,
-  // and SubWorker code generation references the user's original parameter
-  // names verbatim from the captured source — so SSA renaming would only
-  // desync the params from the body. Skip them.
-  if (func->role_.has_value() && *func->role_ == Role::SubWorker && func->level_.has_value() &&
-      LevelToLinquLevel(*func->level_) >= 3) {
-    return func;
+/// Should this function be skipped by ConvertToSSA?
+///
+/// HOST-level (Linqu >= 3) SubWorker functions carry their pure-Python body
+/// as an opaque InlineStmt. Their parameters are not used by IR statements,
+/// and SubWorker code generation references the user's original parameter
+/// names verbatim from the captured source — so SSA renaming would only
+/// desync the params from the body.
+bool ShouldSkipFunction(const FunctionPtr& func) {
+  return func && func->role_.has_value() && *func->role_ == Role::SubWorker && func->level_.has_value() &&
+         LevelToLinquLevel(*func->level_) >= 3;
+}
+
+/// Result of converting one function to SSA: the new function plus the rename
+/// map (original Var pointer → SSA Var) captured from the converter's ``cur_``.
+struct PerFunctionSSAResult {
+  FunctionPtr func;
+  std::unordered_map<const Var*, VarPtr> renames;
+};
+
+PerFunctionSSAResult TransformConvertToSSAFunction(const FunctionPtr& func) {
+  if (ShouldSkipFunction(func)) {
+    return {func, {}};
   }
   SSAConverter converter;
-  return converter.ConvertFunction(func);
+  auto new_func = converter.ConvertFunction(func);
+  return {new_func, converter.cur()};
+}
+
+/// Substitute Var references inside an Expr using a flat rename map. Used to
+/// propagate SSA renames from the function in which a Var was defined into
+/// sibling functions' Var-bearing attrs (cross-function references that the
+/// per-function converter cannot see).
+class ExprVarRenamer : public IRMutator {
+ public:
+  explicit ExprVarRenamer(const std::unordered_map<const Var*, VarPtr>& renames) : renames_(renames) {}
+
+ protected:
+  ExprPtr VisitExpr_(const VarPtr& op) override {
+    auto it = renames_.find(op.get());
+    return it != renames_.end() ? it->second : op;
+  }
+  ExprPtr VisitExpr_(const IterArgPtr& op) override {
+    auto it = renames_.find(op.get());
+    return it != renames_.end() ? it->second : op;
+  }
+
+ private:
+  const std::unordered_map<const Var*, VarPtr>& renames_;
+};
+
+/// Walk a function's attrs and substitute Var refs per the program-wide rename
+/// map. Returns ``true`` if any attr was rewritten.
+///
+/// Known Var-bearing function attrs:
+///   - ``core_num`` (ExprPtr): SpmdScopeStmt's dispatch core count, lifted to
+///     the outlined Spmd function by OutlineIncoreScopes/OutlineClusterScopes.
+///     References Vars defined in the *dispatching* Orchestration function.
+///
+/// Extend this enumeration if a future outline pass introduces another Var-
+/// bearing function-level attr.
+bool SubstFunctionAttrs(std::vector<std::pair<std::string, std::any>>& attrs,
+                        const std::unordered_map<const Var*, VarPtr>& renames) {
+  if (renames.empty()) return false;
+  bool changed = false;
+  for (auto& [k, v] : attrs) {
+    if (k == "core_num") {
+      const auto* expr_ptr = std::any_cast<ExprPtr>(&v);
+      if (expr_ptr && *expr_ptr) {
+        ExprVarRenamer renamer(renames);
+        auto new_expr = renamer.VisitExpr(*expr_ptr);
+        if (new_expr.get() != expr_ptr->get()) {
+          v = std::any(new_expr);
+          changed = true;
+        }
+      }
+    }
+  }
+  return changed;
+}
+
+/// Program-level ConvertToSSA driver.
+///
+/// Two phases:
+///   1. Per-function SSA conversion. Accumulate the (original Var → SSA Var)
+///      mapping into a single ``program_renames`` table.
+///   2. Walk every function's attrs and substitute cross-function Var refs
+///      using ``program_renames``. This is what keeps an outlined Spmd
+///      function's ``core_num`` attr in sync after the dispatching
+///      Orchestration function is re-versioned by Phase 1 (the per-function
+///      converter has no visibility into sibling functions' attrs).
+ProgramPtr TransformConvertToSSAProgram(const ProgramPtr& program) {
+  if (!program) return program;
+  auto new_functions = program->functions_;
+  std::unordered_map<const Var*, VarPtr> program_renames;
+  bool changed = false;
+
+  // Phase 1: per-function SSA conversion.
+  for (auto& [gvar, func] : new_functions) {
+    if (!func) continue;
+    auto result = TransformConvertToSSAFunction(func);
+    if (result.func.get() != func.get()) {
+      func = result.func;
+      changed = true;
+    }
+    for (const auto& [orig, current] : result.renames) {
+      if (orig != current.get()) {
+        program_renames[orig] = current;
+      }
+    }
+  }
+
+  // Phase 2: cross-function attrs Var substitution.
+  if (!program_renames.empty()) {
+    for (auto& [gvar, func] : new_functions) {
+      if (!func || func->attrs_.empty()) continue;
+      auto attrs_copy = func->attrs_;
+      if (SubstFunctionAttrs(attrs_copy, program_renames)) {
+        auto mutated = MutableCopy(func);
+        mutated->attrs_ = std::move(attrs_copy);
+        func = mutated;
+        changed = true;
+      }
+    }
+  }
+
+  if (!changed) return program;
+  return std::make_shared<const Program>(std::move(new_functions), program->name_, program->span_);
 }
 
 }  // namespace
 
 namespace pass {
 Pass ConvertToSSA() {
-  return CreateFunctionPass(TransformConvertToSSA, "ConvertToSSA", kConvertToSSAProperties);
+  return CreateProgramPass(TransformConvertToSSAProgram, "ConvertToSSA", kConvertToSSAProperties);
 }
 }  // namespace pass
 
