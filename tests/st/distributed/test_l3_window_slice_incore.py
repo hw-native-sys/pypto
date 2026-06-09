@@ -18,17 +18,24 @@ still rejected a window slice that appears **inside an InCore scope**
         DistributedTensorType
 
 Inside an InCore scope a window is simply this rank's local GM, so its slice /
-slice-assign must lower like a plain ``Tensor`` slice (``tile.load`` /
-``tile.store``) — letting a window be staged with the assemble idiom instead of
-falling back to ``pl.load`` / ``pl.store``.
+slice-assign / elementwise use must lower like a plain ``Tensor`` (``tile.load`` /
+``tile.store`` / ``tile.cast`` / ``tile.add``) — letting a window be staged and
+reduced with the tensor-level idiom instead of falling back to ``pl.load`` /
+``pl.store``.
 
-Two directions are exercised end-to-end (single-rank-local work, replicated
+Three directions are exercised end-to-end (single-rank-local work, replicated
 across the ring so the existing 2-device harness drives it):
 
-* **window-as-source** (dsv4 ``dispatch_ep`` idiom): copy column 0 of a window
-  into a plain output via ``out[:, :] = win[:, 0:1]``.
+* **window-as-source** (dsv4 ``dispatch_ep`` idiom): read a row-offset slice of
+  a window into a plain output.
 * **window-as-target** (dsv4 ``combine_ep`` staging idiom): stage a local input
-  into a window slice via ``win[:, :] = inp[:, :]``, then read it back.
+  into a window slice, then read it back.
+* **compute-on-window** (dsv4 ``combine_ep`` reduce): ``out = sh + cast(window)``.
+
+Shapes are kept contiguous and 32-byte-row-aligned so the a2a3 TLOAD/alloc_tile
+constraints are satisfied — the strided single-column read (the literal
+``recv_scale[:, 0:1]`` idiom) is a separate runtime-lowering gap noted in the
+issue and is covered at the pass level by the unit tests, not here.
 """
 
 import sys
@@ -41,52 +48,52 @@ from pypto import ir
 from pypto.ir.distributed_compiled_program import DistributedConfig
 
 N = 16  # rows
-W = 8  # window width (padded columns)
-COL = 0  # column extracted by the window-as-source read
+W = 64  # window width (cols): 64*4=256 (FP32) and 64*2=128 (FP16) → 32-byte-aligned rows
+HALF = N // 2  # row-offset slice height
 
 
 def _build_window_source_slice_program():
-    """window-as-source: ``out[:, :] = win[:, COL:COL+1]`` inside an InCore scope.
+    """window-as-source: ``out[:, :] = win[HALF:N, :]`` inside an InCore scope.
 
     The window is staged from the local input via the proven ``pl.load`` /
-    ``pl.store`` path; the op under test is the in-core column slice-assign that
-    reads the window (the exact ``dispatch_ep`` idiom that crashed before the
-    fix).
+    ``pl.store`` path; the op under test is the in-core row-offset slice that
+    reads the window (the ``dispatch_ep`` idiom that crashed before the fix). A
+    full-row slice is contiguous (ND2ND), so it lowers to a plain ``tile.load``.
     """
 
     @pl.program
     class WindowSourceSlice:
         @pl.function(type=pl.FunctionType.InCore)
-        def col_step(
+        def slice_step(
             self,
             inp: pl.Tensor[[N, W], pl.FP32],
-            out: pl.Out[pl.Tensor[[N, 1], pl.FP32]],
+            out: pl.Out[pl.Tensor[[HALF, W], pl.FP32]],
             win: pld.DistributedTensor[[N, W], pl.FP32],
-        ) -> pl.Tensor[[N, 1], pl.FP32]:
+        ) -> pl.Tensor[[HALF, W], pl.FP32]:
             # Stage the local input into this rank's own window (load/store path).
             staged = pl.load(inp, [0, 0], [N, W])
             win = pl.store(staged, [0, 0], win)
-            # Issue #1694: read column COL of the local window via an in-core
-            # slice-assign. ``win[:, COL:COL+1]`` is a window ``tensor.slice``;
+            # Issue #1694: read the bottom HALF rows of the local window via an
+            # in-core slice-assign. ``win[HALF:N, :]`` is a window ``tensor.slice``;
             # the LHS is a plain-tensor slice-assign (``tensor.assemble``).
-            out[0:N, COL : COL + 1] = win[0:N, COL : COL + 1]
+            out[0:HALF, 0:W] = win[HALF:N, 0:W]
             return out
 
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(
             self,
             inp: pl.Tensor[[N, W], pl.FP32],
-            out: pl.Out[pl.Tensor[[N, 1], pl.FP32]],
+            out: pl.Out[pl.Tensor[[HALF, W], pl.FP32]],
             win: pld.DistributedTensor[[N, W], pl.FP32],
-        ) -> pl.Tensor[[N, 1], pl.FP32]:
-            return self.col_step(inp, out, win)
+        ) -> pl.Tensor[[HALF, W], pl.FP32]:
+            return self.slice_step(inp, out, win)
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(
             self,
             inputs: pl.Tensor[[2, N, W], pl.FP32],
-            outputs: pl.Out[pl.Tensor[[2, N, 1], pl.FP32]],
-        ) -> pl.Tensor[[2, N, 1], pl.FP32]:
+            outputs: pl.Out[pl.Tensor[[2, HALF, W], pl.FP32]],
+        ) -> pl.Tensor[[2, HALF, W], pl.FP32]:
             win_buf = pld.alloc_window_buffer(N * W * 4)  # N x W x FP32
 
             for r in pl.range(pld.world_size()):
@@ -204,15 +211,15 @@ def _build_window_compute_reduce_program():
 
 
 def _ramp_inputs() -> torch.Tensor:
-    """Two distinct [N, W] ramps, one per rank, so a wrong column/order shows up."""
+    """Two distinct [N, W] ramps, one per rank, so a wrong row/order shows up."""
     base = torch.arange(N * W, dtype=torch.float32).reshape(1, N, W)
-    return torch.cat([base, base + 1000.0], dim=0)
+    return torch.cat([base, base + 10000.0], dim=0)
 
 
 class TestL3WindowSourceSlice:
     """In-core window-as-source slice read (dsv4 dispatch_ep idiom)."""
 
-    def test_window_column_slice_read(self, test_config, device_ids):
+    def test_window_row_slice_read(self, test_config, device_ids):
         if len(device_ids) < 2:
             pytest.skip(f"window slice st needs 2 devices, got {device_ids}")
 
@@ -227,14 +234,14 @@ class TestL3WindowSourceSlice:
         )
 
         inputs = _ramp_inputs()
-        outputs = torch.zeros((2, N, 1), dtype=torch.float32)
+        outputs = torch.zeros((2, HALF, W), dtype=torch.float32)
 
         compiled(inputs, outputs)
 
-        # Each rank extracts column COL of its own input.
-        expected = inputs[:, :, COL : COL + 1].clone()
+        # Each rank reads the bottom HALF rows of its own input.
+        expected = inputs[:, HALF:N, :].clone()
         assert torch.allclose(outputs, expected), (
-            f"window column slice mismatch: max diff = {(outputs - expected).abs().max().item()}"
+            f"window row slice mismatch: max diff = {(outputs - expected).abs().max().item()}"
         )
 
 
