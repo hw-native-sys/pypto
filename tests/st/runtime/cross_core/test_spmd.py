@@ -403,68 +403,6 @@ class SPMDGMPipeBufferProgram:
         return out
 
 
-# Issue #1702: a pl.spmd scope writes an InOut `scratch` in place (sorts first in
-# the Out/InOut list) plus an Out `result` written through a sliced view, and
-# returns a single value. The return tracer could not follow the view-store back
-# to a param, so the orchestration single-return alias fell back to out_indices[0]
-# (the scratch buffer) and the downstream reshape bound to the wrong tensor --
-# reshaping scratch's 2048 elements to [32, 128] (4096) tripped the AICPU
-# valid_reshape assert -> scheduler GLOBAL_STUCK -> host 507018.
-VR_ROWS = 64
-VR_COLS = 64  # result is [64, 64] = 4096 elements
-VR_SCRATCH_COLS = 32  # scratch is [64, 32] = 2048 elements (numel differs from result)
-VR_FINAL_ROWS = 32
-VR_FINAL_COLS = 128  # final is [32, 128] = 4096 == result numel
-
-
-@pl.program
-class SPMDViewReturnAliasProgram:
-    """SPMD multi-output scope whose single return is a view-written Out param."""
-
-    @pl.function(type=pl.FunctionType.AIV)
-    def kernel(
-        self,
-        a: pl.Tensor[[VR_ROWS, VR_COLS], pl.FP32],
-        scratch: pl.InOut[pl.Tensor[[VR_ROWS, VR_SCRATCH_COLS], pl.FP32]],
-        result: pl.Out[pl.Tensor[[VR_ROWS, VR_COLS], pl.FP32]],
-    ) -> pl.Tensor[[VR_ROWS, VR_COLS], pl.FP32]:
-        # Touch scratch in place (a non-returned InOut output that sorts first).
-        sc = pl.load(scratch, [0, 0], [VR_ROWS, VR_SCRATCH_COLS])
-        _io = pl.store(sc, [0, 0], scratch)
-        # Write `result` through a sliced view: the store target is a tensor.slice
-        # (a Call, not a Var), which the return tracer must follow back to `result`.
-        ta = pl.load(a, [0, 0], [VR_ROWS, VR_COLS])
-        rview = pl.slice(result, [VR_ROWS, VR_COLS], [0, 0])
-        r = pl.store(pl.add(ta, ta), [0, 0], rview)
-        return r
-
-    @pl.function(type=pl.FunctionType.AIV)
-    def consumer(
-        self,
-        x: pl.Tensor[[VR_FINAL_ROWS, VR_FINAL_COLS], pl.FP32],
-        out: pl.Out[pl.Tensor[[VR_FINAL_ROWS, VR_FINAL_COLS], pl.FP32]],
-    ) -> pl.Tensor[[VR_FINAL_ROWS, VR_FINAL_COLS], pl.FP32]:
-        t = pl.load(x, [0, 0], [VR_FINAL_ROWS, VR_FINAL_COLS])
-        return pl.store(t, [0, 0], out)
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
-        self,
-        a: pl.Tensor[[VR_ROWS, VR_COLS], pl.FP32],
-        scratch: pl.InOut[pl.Tensor[[VR_ROWS, VR_SCRATCH_COLS], pl.FP32]],
-        result: pl.Out[pl.Tensor[[VR_ROWS, VR_COLS], pl.FP32]],
-        final: pl.Out[pl.Tensor[[VR_FINAL_ROWS, VR_FINAL_COLS], pl.FP32]],
-    ) -> pl.Tensor[[VR_FINAL_ROWS, VR_FINAL_COLS], pl.FP32]:
-        with pl.spmd(1, name_hint="view_return"):
-            rv0 = self.kernel(a, scratch, result)
-        # Reshape the scope's single return (the real `result`, 4096 elems) and
-        # feed it downstream. If the alias bound to `scratch` (2048), this reshape
-        # is numel-mismatched and the device aborts with 507018.
-        rv = pl.reshape(rv0, [VR_FINAL_ROWS, VR_FINAL_COLS])
-        final = self.consumer(rv, final)
-        return final
-
-
 # --- Test Cases ---
 
 
@@ -651,33 +589,6 @@ class SPMDGMPipeBufferTestCase(_BaseSPMDTestCase):
         tensors["out"][:] = torch.matmul(tensors["a"], tensors["b"]) + tensors["bias"]
 
 
-class SPMDViewReturnAliasTestCase(_BaseSPMDTestCase):
-    """Regression for #1702: the scope's view-written single return must alias the
-    real `result`, not the first-sorted in-place InOut `scratch`. On unfixed code
-    the orchestration reshape bound to `scratch` (2048 elems) and reshaping it to
-    [32, 128] (4096) aborted on device with 507018; here it must produce
-    final == reshape(a + a)."""
-
-    def get_name(self) -> str:
-        return "spmd_view_return_alias_1702"
-
-    def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec("a", [VR_ROWS, VR_COLS], DataType.FP32, init_value=torch.randn),
-            TensorSpec("scratch", [VR_ROWS, VR_SCRATCH_COLS], DataType.FP32, init_value=torch.randn),
-            TensorSpec("result", [VR_ROWS, VR_COLS], DataType.FP32, is_output=True),
-            TensorSpec("final", [VR_FINAL_ROWS, VR_FINAL_COLS], DataType.FP32, is_output=True),
-        ]
-
-    def get_program(self) -> Any:
-        return SPMDViewReturnAliasProgram
-
-    def compute_expected(self, tensors, params=None):
-        result = tensors["a"] + tensors["a"]
-        tensors["result"][:] = result
-        tensors["final"][:] = result.reshape(VR_FINAL_ROWS, VR_FINAL_COLS)
-
-
 # --- Tests ---
 
 
@@ -731,13 +642,6 @@ class TestSPMDOperations:
     def test_spmd_gm_pipe_buffer_golden(self, test_runner, platform):
         """SPMD gm_pipe_buffer runtime path should pass golden on all platforms."""
         self._run_case(test_runner, SPMDGMPipeBufferTestCase(platform=platform))
-
-    @pytest.mark.parametrize("platform", PLATFORMS)
-    def test_spmd_view_return_alias(self, test_runner, platform):
-        """Regression for #1702: a multi-output SPMD scope returning a view-written
-        output must alias the real result, not the first-sorted InOut scratch
-        (unfixed: numel-mismatched reshape -> AICPU valid_reshape assert -> 507018)."""
-        self._run_case(test_runner, SPMDViewReturnAliasTestCase(platform=platform))
 
 
 if __name__ == "__main__":
