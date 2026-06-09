@@ -2095,8 +2095,8 @@ class OutWindowExternalizer {
         loop_local_allocs_.pop_back();
         sequential_loops_.pop_back();
       }
-      auto visited_loop = As<ForStmt>(result);
       loop_iter_init_subst_ = std::move(saved_loop_iter_init_subst);
+      RecordForLoopReturnInitAliases(op);
       return result;
     }
 
@@ -2178,6 +2178,20 @@ class OutWindowExternalizer {
       ForStmtPtr loop;
       const std::unordered_set<const Var*>* loop_local_allocs = nullptr;
     };
+
+    void RecordForLoopReturnInitAliases(const ForStmtPtr& loop) {
+      if (!loop) return;
+      size_t n = std::min(loop->iter_args_.size(), loop->return_vars_.size());
+      for (size_t i = 0; i < n; ++i) {
+        const auto& iter_arg = loop->iter_args_[i];
+        const auto& return_var = loop->return_vars_[i];
+        if (!iter_arg || !iter_arg->initValue_ || !return_var) continue;
+        if (!AsTensorTypeLike(return_var->GetType())) continue;
+        auto parent_expr = ResolveLoopInitExpr(iter_arg->initValue_);
+        if (!AsVarLike(parent_expr)) continue;
+        loop_iter_init_subst_[return_var.get()] = parent_expr;
+      }
+    }
 
     static std::unordered_map<const Var*, size_t> CollectAssembleSourceIndices(
         const std::vector<StmtPtr>& sibling_stmts) {
@@ -3092,8 +3106,7 @@ class OutWindowExternalizer {
 
     std::optional<InputRewriteInfo> result;
     for (const auto& use : uses) {
-      if (use.offsets.size() != use.window_shape.size() ||
-          use.offsets.size() != tensor_type->shape_.size()) {
+      if (use.offsets.size() != use.window_shape.size() || use.offsets.size() != tensor_type->shape_.size()) {
         return std::nullopt;
       }
 
@@ -3119,8 +3132,8 @@ class OutWindowExternalizer {
           expands_across_loop = true;
         }
         base_offsets.push_back(ordered_offsets->min);
-        local_offsets.push_back(arith::Analyzer().Simplify(
-            MakeSub(use.offsets[i], ordered_offsets->min, use.offsets[i]->span_)));
+        local_offsets.push_back(
+            arith::Analyzer().Simplify(MakeSub(use.offsets[i], ordered_offsets->min, use.offsets[i]->span_)));
         window_shape.push_back(std::make_shared<ConstInt>(span_ci->value_, DataType::INDEX, func->span_));
       }
       if (!expands_across_loop) return std::nullopt;
@@ -3155,8 +3168,7 @@ class OutWindowExternalizer {
   }
 
   static std::vector<InputRewriteInfo> AnalyzeAggregateInputWindows(
-      const FunctionPtr& func, const std::vector<InputRewriteInfo>& existing_inputs,
-      const ForStmtPtr& loop) {
+      const FunctionPtr& func, const std::vector<InputRewriteInfo>& existing_inputs, const ForStmtPtr& loop) {
     std::vector<InputRewriteInfo> inputs;
     if (!func || !loop) return inputs;
 
@@ -3182,8 +3194,8 @@ class OutWindowExternalizer {
       auto loop_it = loop_summaries.find(param_ptr);
       if (total_it == total_summaries.end() || loop_it == loop_summaries.end()) continue;
 
-      auto matched = AnalyzeAggregateInputWindowInLoop(
-          func, param_index, loop, total_it->second.total_refs, loop_it->second);
+      auto matched = AnalyzeAggregateInputWindowInLoop(func, param_index, loop, total_it->second.total_refs,
+                                                       loop_it->second);
       if (matched.has_value()) inputs.push_back(std::move(*matched));
     }
     return inputs;

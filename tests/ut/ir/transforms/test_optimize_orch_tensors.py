@@ -1185,10 +1185,60 @@ class TestOutWindowExternalizer:
         assert "k_proj__ssa_v0__window" in printed_main
 
         printed_windowed = ir.python_print(_get_function(After, "qk_norm_like__windowed"))
-        assert "q_proj__ssa_v0: pl.Tensor[[16, 5120], pl.FP32, pl.TensorView(stride=[5120, 1]" in printed_windowed
-        assert "k_proj__ssa_v0: pl.Tensor[[16, 1024], pl.FP32, pl.TensorView(stride=[1024, 1]" in printed_windowed
+        assert (
+            "q_proj__ssa_v0: pl.Tensor[[16, 5120], pl.FP32, pl.TensorView(stride=[5120, 1]"
+            in printed_windowed
+        )
+        assert (
+            "k_proj__ssa_v0: pl.Tensor[[16, 1024], pl.FP32, pl.TensorView(stride=[1024, 1]"
+            in printed_windowed
+        )
         assert "pl.tile.load(q_proj__ssa_v0, [0, q0__ssa_v0]" in printed_windowed
         assert "pl.tile.load(k_proj__ssa_v0, [0, k0__ssa_v0]" in printed_windowed
+
+    def test_aggregate_input_window_loop_uses_visible_loop_init_parent(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def qk_norm_like(
+                self,
+                q_out: pl.Out[pl.Tensor[[16, 5120], pl.FP32]],
+                k_out: pl.Out[pl.Tensor[[16, 1024], pl.FP32]],
+                q_proj: pl.Tensor[[16, 5120], pl.FP32],
+                k_proj: pl.Tensor[[16, 1024], pl.FP32],
+                row: pl.Scalar[pl.INDEX],
+            ) -> tuple[pl.Tensor[[16, 5120], pl.FP32], pl.Tensor[[16, 1024], pl.FP32]]:
+                for h, (q_iter, k_iter) in pl.range(8, init_values=(q_out, k_out)):
+                    q0: pl.Scalar[pl.INDEX] = h * 640
+                    k0: pl.Scalar[pl.INDEX] = h * 128
+                    q_tile: pl.Tile[[16, 640], pl.FP32] = pl.load(q_proj, [row, q0], [16, 640])
+                    k_tile: pl.Tile[[16, 128], pl.FP32] = pl.load(k_proj, [row, k0], [16, 128])
+                    q_next: pl.Tensor[[16, 5120], pl.FP32] = pl.store(q_tile, [row, q0], q_iter)
+                    k_next: pl.Tensor[[16, 1024], pl.FP32] = pl.store(k_tile, [row, k0], k_iter)
+                    q_norm, k_norm = pl.yield_(q_next, k_next)
+                return q_norm, k_norm
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                q_proj: pl.Tensor[[16, 5120], pl.FP32],
+                k_proj: pl.Tensor[[16, 1024], pl.FP32],
+                q_out: pl.Out[pl.Tensor[[16, 5120], pl.FP32]],
+                k_out: pl.Out[pl.Tensor[[16, 1024], pl.FP32]],
+            ) -> tuple[pl.Tensor[[16, 5120], pl.FP32], pl.Tensor[[16, 1024], pl.FP32]]:
+                for i, (q_iter, k_iter) in pl.range(1, init_values=(q_proj, k_proj)):
+                    q_rv, k_rv = pl.yield_(q_iter, k_iter)
+                row: pl.Scalar[pl.INDEX] = 0
+                return self.qk_norm_like(q_out, k_out, q_rv, k_rv, row)
+
+        After = _run_to_optimize_orch_tensors(Before)
+
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert "qk_norm_like__windowed" in printed_main
+        assert "pl.tensor.slice(q_proj" in printed_main
+        assert "pl.tensor.slice(k_proj" in printed_main
+        assert "pl.tensor.slice(q_rv" not in printed_main
+        assert "pl.tensor.slice(k_rv" not in printed_main
 
     def test_direct_out_call_rewrites_to_windowed_clone(self):
         @pl.program
