@@ -248,8 +248,16 @@ def _preprocess_ptoas_output(content: str) -> str:
             continue
         filtered.append(line)
     result = "".join(filtered)
-    # Non-mixed kernels: optional __global__ AICORE void -> static __aicore__ void.
-    result = re.sub(r"(?:__global__\s+)?AICORE\s+void", "static __aicore__ void", result)
+    # Non-mixed kernels: optional [extern "C"] [__global__] AICORE void -> static
+    # __aicore__ void. Newer ptoas prefixes the function with extern "C"; it must be
+    # consumed too, else the rewrite yields the illegal `extern "C" static` (external
+    # vs. internal linkage clash that clang rejects). kernel_entry below is the sole
+    # extern "C" export.
+    result = re.sub(
+        r'(?:extern\s+"C"\s+)?(?:__global__\s+)?AICORE\s+void',
+        "static __aicore__ void",
+        result,
+    )
     # Mixed-kernel sub-functions and helpers: normalize remaining AICORE qualifiers.
     result = re.sub(r"\bAICORE\b", "__aicore__", result)
     return result
