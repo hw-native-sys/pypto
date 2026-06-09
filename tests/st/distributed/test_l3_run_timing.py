@@ -94,9 +94,7 @@ def _assert_l3_semantics(timing, label: str) -> None:
     assert timing.device_wall_us == 0.0, (
         f"device_wall_us must be 0 for the L3 DAG, got {timing.device_wall_us}"
     )
-    assert timing.device_wall_ns == 0, (
-        f"device_wall_ns must be 0 for the L3 DAG, got {timing.device_wall_ns}"
-    )
+    assert timing.device_wall_ns == 0, f"device_wall_ns must be 0 for the L3 DAG, got {timing.device_wall_ns}"
 
 
 def _compile_l3(test_config, device_ids):

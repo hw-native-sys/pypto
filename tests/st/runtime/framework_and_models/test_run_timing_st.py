@@ -122,8 +122,7 @@ def _assert_l2_semantics(timing, label: str) -> None:
     # available on the default PTO2_PROFILING build (see the runtime ST
     # ``examples/workers/l2/vector_add/test_run_timing.py``).
     assert timing.device_wall_us > 0.0, (
-        f"device_wall_us must be > 0 on the default PTO2_PROFILING build, "
-        f"got {timing.device_wall_us}"
+        f"device_wall_us must be > 0 on the default PTO2_PROFILING build, got {timing.device_wall_us}"
     )
     assert timing.host_wall_us >= timing.device_wall_us, (
         f"host_wall_us ({timing.host_wall_us}) must wrap device_wall_us ({timing.device_wall_us})"
@@ -220,9 +219,7 @@ class TestL2RunTimingSurface:
         )
 
         a, b, c = _inputs()
-        orch_args, _, _, outputs = build_orch_args_from_inputs(
-            [("a", a), ("b", b), ("c", c)], {"c"}
-        )
+        orch_args, _, _, outputs = build_orch_args_from_inputs([("a", a), ("b", b), ("c", c)], {"c"})
         timing = execute_on_device(
             chip_callable,
             orch_args,
@@ -244,9 +241,7 @@ class TestL2RunTimingSurface:
         )
 
         a, b, c = _inputs()
-        orch_args, _, _, outputs = build_orch_args_from_inputs(
-            [("a", a), ("b", b), ("c", c)], {"c"}
-        )
+        orch_args, _, _, outputs = build_orch_args_from_inputs([("a", a), ("b", b), ("c", c)], {"c"})
         worker_cfg = RunConfig(platform=test_config.platform, device_id=test_config.device_id)
         with ChipWorker(config=worker_cfg, runtime=runtime_name):
             timing = execute_on_device(

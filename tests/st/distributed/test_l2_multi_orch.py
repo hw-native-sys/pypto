@@ -213,8 +213,7 @@ class TestL2MultiOrch:
         )
         assert timing.host_wall_us > 0.0, f"host_wall_us must be > 0, got {timing.host_wall_us}"
         assert timing.device_wall_us > 0.0, (
-            f"device_wall_us must be > 0 on the default PTO2_PROFILING build, "
-            f"got {timing.device_wall_us}"
+            f"device_wall_us must be > 0 on the default PTO2_PROFILING build, got {timing.device_wall_us}"
         )
         assert timing.host_wall_us >= timing.device_wall_us, (
             f"host_wall_us ({timing.host_wall_us}) must wrap device_wall_us ({timing.device_wall_us})"

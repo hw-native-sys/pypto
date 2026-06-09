@@ -25,7 +25,9 @@ surfaced (rather than silently discarded) through the pypto dispatch layers:
 """
 
 import importlib.util
+from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -165,7 +167,7 @@ def test_compiled_program_call_stores_last_run_timing():
 
     cp = CompiledProgram.__new__(CompiledProgram)  # bypass __init__/codegen layout
     cp._sub_chip_dirs = {}
-    cp._output_dir = "out"
+    cp._output_dir = Path("out")
     cp._platform = "a2a3sim"
     cp.last_run_timing = None
 
@@ -189,7 +191,7 @@ def test_sub_chip_callable_call_stores_last_run_timing():
 
     sub = _SubChipCallable.__new__(_SubChipCallable)  # bypass __init__
     sub._name = "orch0"
-    sub._output_dir = "out"
+    sub._output_dir = Path("out")
     sub._platform = "a2a3sim"
     sub._param_infos = []
     sub._output_indices = []
@@ -287,14 +289,15 @@ def test_distributed_worker_call_stores_last_run_timing():
 
     rt = DistributedWorker.__new__(DistributedWorker)  # bypass __init__/Worker setup
     rt._closed = False
-    rt._param_infos = [SimpleNamespace(name="x")]
+    # Minimal stand-in: __call__ only reads ``.name`` off each param info.
+    rt._param_infos = cast(Any, [SimpleNamespace(name="x")])
     rt._base_tensors = {}
     rt._w = MagicMock(name="worker")
     rt._entry_fn = MagicMock(name="entry_fn")
     rt._chip_cids = {}
     rt._sub_ids = {}
     rt._call_config = MagicMock(name="call_config")
-    rt.dc = SimpleNamespace(device_ids=[0])
+    rt.dc = cast(Any, SimpleNamespace(device_ids=[0]))
     rt.last_run_timing = None
 
     shared = torch.zeros(2).share_memory_()  # DistributedWorker rejects non-shared host tensors

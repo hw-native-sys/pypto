@@ -443,9 +443,7 @@ def execute_distributed(
         w = _construct_worker(dc, compiled.platform, runtime_name, num_sub)
         sub_ids, chip_cids = _register_callables(w, sub_worker_fns, chip_callables)
         w.init()
-        return _dispatch(
-            w, entry_fn, tensors, chip_cids, sub_ids, _make_call_config(dc), len(dc.device_ids)
-        )
+        return _dispatch(w, entry_fn, tensors, chip_cids, sub_ids, _make_call_config(dc), len(dc.device_ids))
     finally:
         if w is not None:
             w.close()
