@@ -1329,6 +1329,13 @@ void BindIR(nb::module_& m) {
       .value("None_", AtomicType::kNone, "Plain store — overwrite the destination")
       .value("Add", AtomicType::kAdd, "Atomically add the source data into the destination");
 
+  nb::enum_<ReduceOp>(ir, "ReduceOp", nb::is_arithmetic(),
+                      "Reduction operator for collective reductions (pld.tensor.allreduce, ...)")
+      .value("Sum", ReduceOp::kSum, "Element-wise sum across ranks")
+      .value("Max", ReduceOp::kMax, "Element-wise max across ranks (reserved; lowering pending)")
+      .value("Min", ReduceOp::kMin, "Element-wise min across ranks (reserved; lowering pending)")
+      .value("Prod", ReduceOp::kProd, "Element-wise product across ranks (reserved; lowering pending)");
+
   // ScopeStmt - abstract base class for all scope statements (issue #1047).
   auto scope_stmt_class = nb::class_<ScopeStmt, Stmt>(
       ir, "ScopeStmt", "Scope statement: marks a region with specific execution context (abstract base)");

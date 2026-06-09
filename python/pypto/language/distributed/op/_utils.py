@@ -13,6 +13,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from pypto.language.typing import IntLike, Scalar
+from pypto.pypto_core import ir as _ir
 from pypto.pypto_core.ir import Expr
 
 
@@ -33,4 +34,28 @@ def _normalize_intlike(seq: Sequence[IntLike]) -> list[int | Expr]:
     return [elem.unwrap() if isinstance(elem, Scalar) else elem for elem in seq]
 
 
-__all__ = ["_normalize_intlike", "_unwrap"]
+def _unwrap_distributed_tensors(op_name: str, **named: Any) -> tuple[Expr, ...]:
+    """Unwrap and validate DistributedTensor positional args for a ``pld.*`` op.
+
+    Each kwarg is one positional argument by name (``dst=...``, ``src=...``,
+    ``target=...``). Returns the unwrapped ``ir.Expr`` instances in the same
+    order. Raises :class:`TypeError` with an op-named, role-tagged diagnostic
+    when an argument is not a window-bound :class:`DistributedTensor`.
+
+    This is the shared validation path for ops whose operands are *all*
+    window-bound :class:`DistributedTensor`s — ``pld.tensor.get`` /
+    ``pld.tensor.allreduce`` (and future tensor-level collectives). Ops with
+    an asymmetric signature (e.g. ``pld.tensor.put``, whose ``src`` may be a
+    plain :class:`pl.Tensor`) validate inline instead.
+    """
+    exprs: list[Expr] = []
+    for role, value in named.items():
+        expr = _unwrap(value)
+        if not isinstance(expr, Expr) or not isinstance(expr.type, _ir.DistributedTensorType):
+            got = _ir.python_print_type(expr.type) if isinstance(expr, Expr) else type(expr).__name__
+            raise TypeError(f"{op_name} expects a DistributedTensor {role} (window-bound); got {got}")
+        exprs.append(expr)
+    return tuple(exprs)
+
+
+__all__ = ["_normalize_intlike", "_unwrap", "_unwrap_distributed_tensors"]

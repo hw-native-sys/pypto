@@ -44,10 +44,10 @@ from pypto.language.typing import IntLike, Ptr
 from pypto.language.typing.tensor import Tensor
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir
-from pypto.pypto_core.ir import AtomicType, Call, Expr
+from pypto.pypto_core.ir import AtomicType, Call, Expr, ReduceOp
 
 from ..typing.distributed_tensor import DistributedTensor
-from ._utils import _normalize_intlike, _unwrap
+from ._utils import _normalize_intlike, _unwrap, _unwrap_distributed_tensors
 
 
 def alloc_window_buffer(size: IntLike, *, name: str = "") -> Ptr:
@@ -235,12 +235,7 @@ def get(
     Returns:
         The underlying IR Call.
     """
-    dst_expr = _unwrap(dst)
-    src_expr = _unwrap(src)
-    for role, expr in (("dst", dst_expr), ("src", src_expr)):
-        if not isinstance(expr, Expr) or not isinstance(expr.type, _ir.DistributedTensorType):
-            got = _ir.python_print_type(expr.type) if isinstance(expr, Expr) else type(expr).__name__
-            raise TypeError(f"pld.tensor.get expects a DistributedTensor {role} (window-bound); got {got}")
+    dst_expr, src_expr = _unwrap_distributed_tensors("pld.tensor.get", dst=dst, src=src)
     has_region = dst_offsets is not None or src_offsets is not None or shape is not None
     if has_region and (dst_offsets is None or src_offsets is None or shape is None):
         raise ValueError("pld.tensor.get dst_offsets, src_offsets, and shape must be provided together")
@@ -260,4 +255,48 @@ def get(
     )
 
 
-__all__ = ["alloc_window_buffer", "get", "put", "window"]
+def allreduce(
+    target: DistributedTensor,
+    signal: DistributedTensor,
+    *,
+    op: ReduceOp = ReduceOp.Sum,
+) -> DistributedTensor:
+    """In-place cross-rank allreduce of a window-bound DistributedTensor.
+
+    After this call returns, every rank's slice of ``target`` holds the
+    reduced value. Mirrors :func:`pl.store`'s rebind idiom — users assign the
+    result back to the same name:
+
+    .. code-block:: python
+
+        pub = pld.tensor.allreduce(pub, sig, op=pld.ReduceOp.Sum)
+
+    LowerCompositeOps expands this single Call into the 4-phase
+    notify/wait/remote_load+accumulate/store decomposition; the kernel sees
+    only the lowered primitives. ``signal`` must be a window-bound INT32
+    :class:`pld.DistributedTensor` used as the cross-rank barrier (one slot
+    per rank); the host orchestrator allocates and zero-initialises it via
+    :func:`alloc_window_buffer` + :func:`window`.
+
+    Args:
+        target: Window-bound :class:`pld.DistributedTensor` holding per-rank
+            data. The C++ verifier refuses a plain :class:`pl.Tensor`.
+        signal: Window-bound INT32 :class:`pld.DistributedTensor` whose shape
+            is ``[nranks, 1]`` (or any shape providing one cell per rank).
+        op: :class:`pld.ReduceOp` selecting the reduction operator
+            (keyword-only). Defaults to :attr:`pld.ReduceOp.Sum`. First-version
+            lowering accepts only ``Sum``; ``Max`` / ``Min`` / ``Prod`` are
+            reserved enum values and will be rejected at the C++ deducer.
+
+    Returns:
+        The rebound :class:`pld.DistributedTensor` view of ``target`` —
+        identical shape / dtype / window-buffer binding, post-reduce content.
+    """
+    target_expr, signal_expr = _unwrap_distributed_tensors(
+        "pld.tensor.allreduce", target=target, signal=signal
+    )
+    call = _ir_tensor.allreduce(target_expr, signal_expr, op)
+    return DistributedTensor(expr=call)
+
+
+__all__ = ["allreduce", "alloc_window_buffer", "get", "put", "window"]

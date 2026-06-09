@@ -33,11 +33,17 @@ namespace ir {
 // - kNone : plain remote store — overwrite the peer's destination slice.
 // - kAdd  : atomically add the source data into the peer's destination slice.
 //
+// ReduceOp selects the reduction operator of pld.tensor.allreduce (and
+// future collective reductions):
+// - kSum  : element-wise sum across ranks.
+// - kMax / kMin / kProd : reserved placeholders; lowering is currently
+//   kSum-only and rejects other variants at the deducer.
+//
 // Underlying integer values are part of the IR ABI: they are stored as the
 // `int` kwarg payload of the corresponding ops (`op` for notify, `cmp` for
-// wait, `atomic` for put) and cast back to the enum at codegen time. Insert
-// new variants only at the end so existing IR / cached programs keep their
-// meaning.
+// wait, `atomic` for put, `op` for allreduce) and cast back to the enum at
+// codegen time. Insert new variants only at the end so existing IR / cached
+// programs keep their meaning.
 enum class NotifyOp : int {
   kAtomicAdd = 0,
   kSet = 1,
@@ -51,6 +57,13 @@ enum class WaitCmp : int {
 enum class AtomicType : int {
   kNone = 0,
   kAdd = 1,
+};
+
+enum class ReduceOp : int {
+  kSum = 0,
+  kMax = 1,
+  kMin = 2,
+  kProd = 3,
 };
 
 // Convert AtomicType to the matching Python enum member name. The Python

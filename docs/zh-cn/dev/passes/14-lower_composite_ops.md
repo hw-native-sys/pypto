@@ -1,6 +1,6 @@
 # LowerCompositeOps Pass
 
-把组合 (composite) tile 算子降级 (lower) 为一组基本算术 tile 算子的组合，使代码生成 (codegen) 不再需要发射高层 (high-level) 指令。当前只支持 `tile.sin` / `tile.cos`；新的组合算子只需在 Pass 文件内部的分发表 (dispatch table) 里加一条降级规则，无需改动分发器本身。
+把组合 (composite) tile / distributed 算子降级 (lower) 为一组基本算子的组合，使代码生成 (codegen) 不再需要发射高层 (high-level) 指令。当前支持 `tile.sin` / `tile.cos`（FP32 Cody-Waite + Horner）以及 `pld.tensor.allreduce`（4 阶段 notify / wait / remote_load / store）。新的组合算子只需在 Pass 文件内部的分发表 (dispatch table) 里加一条降级规则,无需改动分发器本身。
 
 ## 概览 (Overview)
 
@@ -28,16 +28,19 @@
 
 ```text
 src/ir/transforms/lower_composite_ops_pass.cpp
-  LoweringBuilder           — 单次调用的暂存区 (Bind + 基本算子构造器)
-  CompositeLoweringFn       — (args, span, builder) -> 结果表达式
-  Lower<Op>Rule             — 每个组合算子一个规则函数（如 LowerSinRule、LowerCosRule）
+  LoweringBuilder           — 单次调用的暂存区 (Bind + 基本算子构造器
+                              + 结构化控制流：EmitFor / EmitForReduce
+                              / EmitIf / EmitIfExpr + NotEq 标量比较)
+  CompositeLoweringFn       — (call, visited_args, builder) -> 结果表达式
+  Lower<Op>Rule             — 每个组合算子一个规则函数（LowerSinRule、
+                              LowerCosRule、LowerTensorAllReduceRule ...）
   LookupCompositeRule       — 文件内的「算子名 → 规则」分发表 (kRules)
   LowerCompositeOpsMutator  — 遍历函数，对每个 Call 查表
 ```
 
 新增一个组合算子的步骤（改动都留在 `lower_composite_ops_pass.cpp` 内）：
 
-1. 写一个 `Lower<Op>Rule(args, span, builder)` 函数。它接收已 visit 过的参数表达式、`Span` 和一个 `LoweringBuilder`，其 `Bind` 助手会为每个中间临时变量追加一条 `AssignStmt`。
+1. 写一个 `Lower<Op>Rule(call, args, builder)` 函数。它接收原始 `CallPtr`（按需用 `call->span_`、`call->kwargs_`、`call->op_->name_`）、已 visit 过的参数表达式（已应用 var-remap）以及一个 `LoweringBuilder`，其 `Bind` 助手会为每个中间临时变量追加一条 `AssignStmt`。需要控制流的规则可以用 `builder.EmitFor` / `builder.EmitForReduce` / `builder.EmitIf` / `builder.EmitIfExpr`——每个都接收一个 body 回调，回调里收到的嵌套 builder 与外层共享同一个 temp 计数器，因此发射的临时变量名跨任意嵌套深度都唯一。`LowerTensorAllReduceRule` 是含控制流规则的范例（4 阶段 notify / wait / remote_load+accumulate / store）。
 2. 在 `LookupCompositeRule` 的 `kRules` 里加一条 `{"<op>", &Lower<Op>Rule}`。
 
 无需修改 mutator。当分发表条目增多——或某条规则需要独立的翻译单元时——再把它拆回 `src/ir/transforms/composite_ops/` 下的独立注册表。

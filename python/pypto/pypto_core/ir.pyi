@@ -2237,6 +2237,27 @@ class AtomicType(enum.IntEnum):
     Add = 1
     """Atomically add the source data into the destination."""
 
+class ReduceOp(enum.IntEnum):
+    """Reduction operator for collective reductions — ``pld.tensor.allreduce`` and friends.
+
+    Stored as ``int`` in op kwargs; the C++ deducer validates the int falls
+    within this enum's range. First-version lowering accepts only ``Sum``;
+    ``Max`` / ``Min`` / ``Prod`` are reserved enum values and are rejected
+    at the deducer until their lowerings land.
+    """
+
+    Sum = 0
+    """Element-wise sum across ranks."""
+
+    Max = 1
+    """Element-wise max across ranks (reserved; lowering pending)."""
+
+    Min = 2
+    """Element-wise min across ranks (reserved; lowering pending)."""
+
+    Prod = 3
+    """Element-wise product across ranks (reserved; lowering pending)."""
+
 class ScopeStmt(Stmt):
     """Scope statement: marks a region with specific execution context (abstract base).
 

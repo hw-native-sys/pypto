@@ -22,7 +22,7 @@ from collections.abc import Sequence
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import AtomicType, Call, Expr, Span
+from pypto.pypto_core.ir import AtomicType, Call, Expr, ReduceOp, Span
 
 from ...utils import _get_span_or_capture, _normalize_expr, _to_make_tuple
 
@@ -156,4 +156,28 @@ def get(
     return _ir_core.create_op_call("pld.tensor.get", args, {}, actual_span)
 
 
-__all__ = ["alloc_window_buffer", "get", "put", "window"]
+def allreduce(
+    target: Expr,
+    signal: Expr,
+    op: ReduceOp,
+    *,
+    span: Span | None = None,
+) -> Call:
+    """Build a ``pld.tensor.allreduce(target, signal)`` Call.
+
+    In-place cross-rank allreduce: after the call, every rank's slice of
+    ``target`` holds the reduced value. ``signal`` is a window-bound INT32
+    matrix used as the cross-rank barrier. ``op`` (:class:`ir.ReduceOp`)
+    selects the reduction operator and is packed as an ``int`` attr. The
+    result type is ``target``'s :class:`ir.DistributedTensorType` (the rebind
+    target — same semantics as :func:`pl.store`).
+
+    LowerCompositeOps expands this into the 4-phase
+    notify/wait/remote_load+accumulate/store decomposition; this Call never
+    survives past that pass.
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call("pld.tensor.allreduce", [target, signal], {"op": int(op)}, actual_span)
+
+
+__all__ = ["allreduce", "alloc_window_buffer", "get", "put", "window"]

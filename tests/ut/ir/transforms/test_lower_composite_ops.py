@@ -21,8 +21,10 @@ as a structural diff.
 """
 
 import pypto.language as pl
+import pypto.language.distributed as pld
 import pytest
 from pypto import ir, passes
+from pypto.language.parser.diagnostics.exceptions import ParserError
 
 # Primitive tile ops the decomposition is allowed to emit (besides framework
 # infrastructure ops like tile.load / tile.store / tile.move that wrap the
@@ -453,6 +455,182 @@ def test_cos_in_return_stmt_is_decomposed():
 
     assert "tile.cos" not in op_names
     assert _DECOMP_PRIMITIVES & op_names, "lowering produced no primitive ops"
+
+
+# ============================================================================
+# pld.tensor.allreduce lowering
+#
+# The allreduce rule is the first composite-op rule that uses LoweringBuilder's
+# structured control-flow primitives (EmitFor / EmitForReduce / EmitIf /
+# EmitIfExpr). These tests pin the invariants of the lowering — primitive op
+# set, presence of For / If structure, in-place rebind semantics, and
+# idempotency — without hand-mirroring every temp name.
+# ============================================================================
+
+_ALLREDUCE_SIZE = 16
+_ALLREDUCE_NRANKS = 2
+
+# Ops the allreduce decomposition must emit (the 4-phase recipe).
+_ALLREDUCE_REQUIRED_OPS = {
+    "pld.system.get_comm_ctx",
+    "pld.system.nranks",
+    "pld.system.rank",
+    "pld.system.notify",  # Phase 2a
+    "pld.system.wait",  # Phase 2b
+    "pld.tile.remote_load",  # Phase 3 (peer slice load)
+    "tile.add",  # Phase 3 (accumulate)
+    "tile.load",  # Phase 3 (self slice load) + user-side load
+    "tile.store",  # Phase 4 + user-side store
+}
+
+
+class _StmtKindCollector(ir.IRVisitor):
+    """Walk IR and tally the kinds of every Stmt encountered."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.for_count = 0
+        self.if_count = 0
+
+    def visit_for_stmt(self, op: ir.ForStmt) -> None:
+        self.for_count += 1
+        super().visit_for_stmt(op)
+
+    def visit_if_stmt(self, op: ir.IfStmt) -> None:
+        self.if_count += 1
+        super().visit_if_stmt(op)
+
+
+def _build_allreduce_before():
+    """Build a minimal Before program that calls ``pld.tensor.allreduce``."""
+    SIZE = _ALLREDUCE_SIZE
+    nr = _ALLREDUCE_NRANKS
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def reduce_step(
+            self,
+            inp: pl.Tensor[[1, SIZE], pl.FP32],
+            out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
+            data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, SIZE], pl.FP32]:
+            local = pl.load(inp, [0, 0], [1, SIZE])
+            data = pl.store(local, [0, 0], data)
+            data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
+            acc = pl.load(data, [0, 0], [1, SIZE])
+            return pl.store(acc, [0, 0], out)
+
+    return Before
+
+
+def test_allreduce_is_decomposed_to_primitives():
+    """The composite ``pld.tensor.allreduce`` Call is replaced by its 4-phase
+    decomposition; no occurrence survives the pass."""
+    Before = _build_allreduce_before()
+    After = passes.lower_composite_ops()(Before)
+    op_names = set(_collect_op_names(After))
+
+    assert "pld.tensor.allreduce" not in op_names, (
+        "lower_composite_ops must remove the composite allreduce call entirely"
+    )
+    missing = _ALLREDUCE_REQUIRED_OPS - op_names
+    assert not missing, f"lowered IR missing expected ops: {missing}"
+
+
+def test_allreduce_emits_for_and_if_control_flow():
+    """The 4-phase recipe emits three ForStmts (notify-loop, wait-loop,
+    reduce-loop) and three IfStmts (one inside each), matching the
+    hand-written reference in ``tests/st/distributed/test_l3_allreduce.py``.
+
+    This pins the structured control-flow shape so a refactor of the rule
+    that, say, folds notify+wait into one loop surfaces here."""
+    Before = _build_allreduce_before()
+    After = passes.lower_composite_ops()(Before)
+    collector = _StmtKindCollector()
+    collector.visit_program(After)
+
+    assert collector.for_count == 3, (
+        f"expected 3 ForStmts (notify-loop, wait-loop, reduce-loop), got {collector.for_count}"
+    )
+    assert collector.if_count == 3, f"expected 3 IfStmts (one per ForStmt body), got {collector.if_count}"
+
+
+def test_allreduce_lowering_is_idempotent():
+    """Running the pass on already-lowered IR is a no-op — the second pass
+    has nothing left to rewrite."""
+    Before = _build_allreduce_before()
+    once = passes.lower_composite_ops()(Before)
+    twice = passes.lower_composite_ops()(once)
+    ir.assert_structural_equal(twice, once)
+
+
+def test_allreduce_noop_when_only_user_call_chain():
+    """Programs that never call ``pld.tensor.allreduce`` are left
+    structurally unchanged (sanity check the dispatch table)."""
+
+    @pl.program
+    class NoAllreduce:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main_incore_0(
+            self,
+            x: pl.Tensor[[1, 16], pl.FP32],
+            out_0: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
+        ) -> pl.Tensor[[1, 16], pl.FP32]:
+            tile = pl.load(x, [0, 0], [1, 16])
+            return pl.store(tile, [0, 0], out_0)
+
+        @pl.function
+        def main(self, x: pl.Tensor[[1, 16], pl.FP32]) -> pl.Tensor[[1, 16], pl.FP32]:
+            out_0: pl.Tensor[[1, 16], pl.FP32] = pl.create_tensor([1, 16], dtype=pl.FP32)
+            r: pl.Tensor[[1, 16], pl.FP32] = self.main_incore_0(x, out_0)
+            return r
+
+    After = passes.lower_composite_ops()(NoAllreduce)
+    ir.assert_structural_equal(After, NoAllreduce)
+
+
+def test_allreduce_deducer_rejects_plain_tensor():
+    """Passing a plain :class:`pl.Tensor` as the ``target`` argument must
+    fail at IR-construction time — the deducer enforces window-bound
+    semantics so misuse cannot reach the lowering pass."""
+    SIZE = _ALLREDUCE_SIZE
+
+    with pytest.raises((ValueError, TypeError, ParserError)):
+
+        @pl.program
+        class Bad:
+            @pl.function(type=pl.FunctionType.InCore)
+            def f(
+                self,
+                local: pl.Tensor[[1, SIZE], pl.FP32],  # plain tensor — not distributed
+                signal: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
+            ) -> pl.Tensor[[1, SIZE], pl.FP32]:
+                # Intentional type misuse — verifies the runtime deducer
+                # rejects a plain Tensor where a DistributedTensor is expected.
+                local = pld.tensor.allreduce(local, signal, op=pld.ReduceOp.Sum)  # pyright: ignore[reportArgumentType]
+                return local
+
+
+def test_allreduce_deducer_rejects_unsupported_reduce_op():
+    """First-version lowering supports ``ReduceOp.Sum`` only — the deducer
+    must reject other variants so users get a clear error rather than
+    silently wrong codegen."""
+    SIZE = _ALLREDUCE_SIZE
+
+    with pytest.raises((ValueError, TypeError, ParserError)):
+
+        @pl.program
+        class BadOp:
+            @pl.function(type=pl.FunctionType.InCore)
+            def f(
+                self,
+                data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+                signal: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
+            ) -> pl.Tensor[[1, SIZE], pl.FP32]:
+                data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Max)
+                return data
 
 
 if __name__ == "__main__":

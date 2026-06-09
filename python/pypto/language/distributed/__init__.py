@@ -27,14 +27,15 @@ plus 2-segment unified-dispatch short form, just like ``pl``):
   (``src/ir/op/distributed/``).
 * :mod:`pypto.language.distributed.typing` — DSL type wrappers
   (:class:`DistributedTensor`, :class:`CommCtx`).
-* :class:`NotifyOp` / :class:`WaitCmp` / :class:`AtomicType` — typed enum
-  payloads of ``pld.system.notify`` / ``pld.system.wait`` / ``pld.tensor.put``,
-  re-exported here so users can write ``pld.NotifyOp.AtomicAdd`` /
-  ``pld.WaitCmp.Ge`` / ``pld.AtomicType.Add`` without reaching into
+* :class:`NotifyOp` / :class:`WaitCmp` / :class:`AtomicType` / :class:`ReduceOp`
+  — typed enum payloads of ``pld.system.notify`` / ``pld.system.wait`` /
+  ``pld.tensor.put`` / ``pld.tensor.allreduce``, re-exported here so users
+  can write ``pld.NotifyOp.AtomicAdd`` / ``pld.WaitCmp.Ge`` /
+  ``pld.AtomicType.Add`` / ``pld.ReduceOp.Sum`` without reaching into
   ``pypto.pypto_core.ir``.
 """
 
-from pypto.pypto_core.ir import AtomicType, NotifyOp, WaitCmp
+from pypto.pypto_core.ir import AtomicType, NotifyOp, ReduceOp, WaitCmp
 
 from .op import (
     alloc_window_buffer,
@@ -56,6 +57,7 @@ __all__ = [
     "CommCtx",
     "DistributedTensor",
     "NotifyOp",
+    "ReduceOp",
     "WaitCmp",
     "alloc_window_buffer",
     "get_comm_ctx",
