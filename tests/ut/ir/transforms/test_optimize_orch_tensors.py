@@ -1088,6 +1088,34 @@ class TestOutWindowExternalizer:
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "pl.tensor.slice(score" not in printed_main
 
+    def test_no_return_input_consumer_stays_full_tensor(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fence(
+                self,
+                src: pl.Tensor[[64, 128], pl.FP32],
+                dummy: pl.Out[pl.Tensor[[64, 1], pl.FP32]],
+            ):
+                block: pl.Tile[[64, 1], pl.FP32] = pl.load(src, [0, 0], [64, 1])
+                _next: pl.Tensor[[64, 1], pl.FP32] = pl.store(block, [0, 0], dummy)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                src: pl.Tensor[[64, 128], pl.FP32],
+            ) -> pl.Scalar[pl.TASK_ID]:
+                with pl.manual_scope():
+                    dummy: pl.Tensor[[64, 1], pl.FP32] = pl.create_tensor([64, 1], dtype=pl.FP32)
+                    _tid = pl.submit(self.fence, src, dummy)
+                return _tid
+
+        After = _run_to_optimize_orch_tensors(Before)
+        assert After.get_function("fence__windowed") is None
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert "pl.tensor.slice(src" not in printed_main
+        assert "pl.submit(fence, src__ssa_v0, dummy__ssa_v0)" in printed_main
+
     def test_indexer_score_writes_window_but_topk_score_read_stays_full(self):
         @pl.program
         class Before:

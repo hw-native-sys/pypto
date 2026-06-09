@@ -3016,6 +3016,7 @@ class OutWindowExternalizer {
   static std::vector<InputRewriteInfo> AnalyzeInputWindows(const FunctionPtr& func) {
     std::vector<InputRewriteInfo> inputs;
     if (!func) return inputs;
+    if (func->return_types_.empty()) return inputs;
 
     std::unordered_set<const Var*> allowed_params;
     for (const auto& param : func->params_) allowed_params.insert(param.get());
