@@ -5922,11 +5922,12 @@ class ASTParser:
         if isinstance(value_node, (ast.List, ast.Tuple)):
             elts = list(value_node.elts)
             if not elts:
-                raise ParserSyntaxError(
-                    f"attrs['{key}'] on call to '{method_name}': empty list is ambiguous "
-                    "(cannot infer element type for round-trip)",
-                    span=node_span,
-                )
+                # Empty list: element type is not inferable from syntax, but the
+                # binding (ConvertKwargsDict) types it by attr key (e.g.
+                # arg_direction_overrides -> vector<int32_t>, the Var-list keys
+                # -> vector<VarPtr>). Return [] so a printed empty vector attr
+                # round-trips instead of raising.
+                return []
             # All integer literals -> index list (e.g. arg_direction_overrides).
             if all(
                 isinstance(e, ast.Constant) and isinstance(e.value, int) and not isinstance(e.value, bool)

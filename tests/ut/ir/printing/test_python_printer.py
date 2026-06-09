@@ -1399,6 +1399,37 @@ def test_generic_attr_in_attrs_dict_roundtrips():
     assert call.attrs["arg_direction_overrides"] == [1]
 
 
+def test_generic_empty_vector_attr_roundtrips():
+    """An empty generic vector attr (`arg_direction_overrides=[]`) round-trips.
+
+    The printer renders it as `[]`; the parser returns `[]` and the binding
+    types it by key (vector<int32_t>). Rejecting `[]` would break the round-trip
+    of a printed empty vector attr.
+    """
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[16, 16], pl.FP32],
+            b: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            return b
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def orch(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP32],
+            b: pl.Tensor[[16, 16], pl.FP32],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            r: pl.Tensor[[16, 16], pl.FP32] = self.kernel(a, b, attrs={"arg_direction_overrides": []})
+            return r
+
+    reparsed = pl.parse_program(python_print(Prog))
+    ir.assert_structural_equal(Prog, reparsed)
+
+
 def test_attrs_structural_equality_is_order_insensitive():
     """``structural_equal`` treats a Call's attrs as a key->value map: the same
     keys in a different order compare equal (map-based, not positional).
