@@ -18,6 +18,7 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -725,10 +726,37 @@ class OrchestrationStmtCodegen : public CodegenBase {
         // declared names.
         std::string carry_name = ReserveSyntheticEmitName(return_var->name_hint_);
         const std::string cpp_type = GetCppType(return_var->GetType());
-        code_ << Indent() << cpp_type << " " << carry_name << " = " << init_var_name << ";\n";
+        // When the loop sits directly in a ``pl.manual_scope`` body, hoist the
+        // carry's ``Tensor carry = init;`` decl out to the enclosing scope
+        // (issue #1713). A manual_scope is a scheduling region, not a storage
+        // scope; the decl is a one-time pre-loop copy of an enclosing-scope value
+        // (``init`` is enclosing-scope-valid by the guard), so emitting it one
+        // level out is ordering-inert — but it keeps ``carry`` in C++ scope for a
+        // task or method-receiver placed AFTER the block (the loop result escapes
+        // via ``emit_name_map_[return_var]``). Mirrors EmitBatchedAllocTensors'
+        // alloc hoist. ``Tensor`` has no public default ctor, so we hoist the
+        // whole decl (not a bare forward declaration); the in-loop ``carry = ...;``
+        // reassignments stay inside the block and resolve through the enclosing
+        // frame. Registering the carry mutable in the *enclosing* frame also lets
+        // a post-loop ``X = carry`` rebind collapse onto it (see the Var-RHS
+        // catch-all in VisitStmt_(AssignStmt)).
+        const bool hoist_carry = cpp_type == "Tensor" && scope_hoist_sink_ != nullptr &&
+                                 IsAtManualScopeBodyIndent() && IsEnclosingScopeValid(init_var_name);
+        if (hoist_carry) {
+          scope_hoist_sink_->push_back(scope_hoist_indent_ + cpp_type + " " + carry_name + " = " +
+                                       init_var_name + ";\n");
+          RegisterMutableTensorNameInEnclosingScope(carry_name);
+          hoisted_carry_names_.insert(carry_name);
+          if (manual_local_names_ != nullptr) manual_local_names_->erase(carry_name);
+          if (enclosing_manual_local_names_ != nullptr) {
+            enclosing_manual_local_names_->insert(carry_name);
+          }
+        } else {
+          code_ << Indent() << cpp_type << " " << carry_name << " = " << init_var_name << ";\n";
+          RegisterMutableTensorName(cpp_type, carry_name);
+        }
         emit_name_map_[return_var.get()] = carry_name;
         emit_name_map_[iter_arg.get()] = carry_name;
-        RegisterMutableTensorName(cpp_type, carry_name);
         // Sequential TaskId carry: register both endpoints in the task-id
         // map so EmitManualDeps and yield writes can find the carry name.
         auto sty = As<ScalarType>(iter_arg->GetType());
@@ -1097,6 +1125,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
       // about no-op aliases at all (today's Simplify only does scalar
       // constant propagation, not tensor-Var copy prop). Once such a pass
       // exists, this guard can go.
+      const std::string cpp_type = GetCppType(assign->var_->GetType());
       if (auto input_var = AsVarLike(assign->value_)) {
         auto tid_it = manual_task_id_map_.find(input_var.get());
         if (tid_it != manual_task_id_map_.end()) {
@@ -1105,8 +1134,39 @@ class OrchestrationStmtCodegen : public CodegenBase {
         if (value_expr == var_name) {
           return;
         }
+        // Inside a ``pl.manual_scope``, collapse a pure SSA tensor copy ``X = Y``
+        // by remapping ``X``'s emit name to ``Y`` instead of emitting a
+        // scope-local ``Tensor X = Y;`` decl (issue #1713). ``X`` is a fresh SSA
+        // version of the *same physical tensor* as ``Y`` (e.g. a post-loop
+        // rebind ``score = score_rv`` lowering to ``score__ssa_v1 = score``, or a
+        // windowed-assemble result rebind). The decl would die at the block's
+        // closing brace, so a task or method-receiver placed AFTER the scope
+        // would name an out-of-scope ``X`` and the orchestration ``.cpp`` fails
+        // to C++-compile. Remapping routes every reference (in-scope and
+        // after-scope) to ``Y`` — the same emit-name remap #1705 applies to
+        // kernel outputs. Guards: ``Y`` must be enclosing-scope-valid (so the
+        // after-scope reader resolves it) and must not be a scope-local mutable
+        // carry the loop/if reassigns *in this scope* (collapsing onto it would
+        // break snapshot semantics). ``X`` must not itself be a mutable carry the
+        // enclosing if/loop reassigns.
+        //
+        // A *hoisted* loop carry is mutable in an enclosing frame, so the
+        // back-frame ``IsMutableTensorNameInCurrentScope`` check does not see it.
+        // The loop body reassigns it (at its yield), so only collapse
+        // ``X = <hoisted carry>`` at the manual-scope body indent — where the
+        // carry is post-loop and stable (the canonical ``score = score_rv``
+        // rebind). Inside the loop body (a deeper indent) a copy of the carry
+        // keeps its ``Tensor X = carry;`` decl, so a pre-yield snapshot can never
+        // alias the carry's later value.
+        const bool carry_collapse_ok =
+            hoisted_carry_names_.count(value_expr) == 0 || IsAtManualScopeBodyIndent();
+        if (cpp_type == "Tensor" && manual_local_names_ != nullptr && IsEnclosingScopeValid(value_expr) &&
+            !IsMutableTensorNameInCurrentScope(value_expr) && !IsMutableTensorNameInCurrentScope(var_name) &&
+            carry_collapse_ok) {
+          emit_name_map_[assign->var_.get()] = value_expr;
+          return;
+        }
       }
-      const std::string cpp_type = GetCppType(assign->var_->GetType());
       code_ << Indent() << cpp_type << " " << var_name << " = " << value_expr << ";\n";
       RegisterMutableTensorName(cpp_type, var_name);
     }
@@ -1302,6 +1362,27 @@ class OrchestrationStmtCodegen : public CodegenBase {
     /// VarPtr identity in the param builders — no name comparison.
     bool dump = false;
   };
+
+  /// Reorder a param list so non-scalar (tensor) entries precede scalars,
+  /// preserving relative order within each group — the new PTOParam ordering
+  /// invariant (tensors must be added before scalars; see
+  /// check_add_tensor_valid() in pto_types.h). A hand-rolled two-pass stable
+  /// reorder rather than ``std::stable_partition``: libstdc++'s stable_partition
+  /// allocates a temporary buffer through the C++17-deprecated
+  /// ``std::get_temporary_buffer`` for a non-trivially-relocatable element type,
+  /// which trips ``clang-diagnostic-deprecated-declarations`` under
+  /// ``-warnings-as-errors``. Param lists are short, so the extra pass is free.
+  static std::vector<ParamEntry> ReorderTensorsBeforeScalars(const std::vector<ParamEntry>& params) {
+    std::vector<ParamEntry> ordered;
+    ordered.reserve(params.size());
+    for (const auto& p : params) {
+      if (p.direction != ArgDirection::Scalar) ordered.push_back(p);
+    }
+    for (const auto& p : params) {
+      if (p.direction == ArgDirection::Scalar) ordered.push_back(p);
+    }
+    return ordered;
+  }
 
   /// Build one ParamEntry from the call-site arg at `arg_idx`. Centralises the
   /// var/const/scalar dispatch that BuildTaskParams used to inline, so the
@@ -1525,10 +1606,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
 
     // New PTOParam API: tensors must precede scalars (see check_add_tensor_valid() in pto_types.h)
-    std::stable_partition(params.begin(), params.end(),
-                          [](const ParamEntry& p) { return p.direction != ArgDirection::Scalar; });
-
-    return params;
+    return ReorderTensorsBeforeScalars(params);
   }
 
   void GenerateTensorOpCode(const CallPtr& call, const std::string& result_var, const VarPtr& assign_var) {
@@ -1797,10 +1875,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         << inner_call->args_.size() << " inner-call args (1:1 invariant violated).";
 
     // Tensors must precede scalars
-    std::stable_partition(params.begin(), params.end(),
-                          [](const ParamEntry& p) { return p.direction != ArgDirection::Scalar; });
-
-    return params;
+    return ReorderTensorsBeforeScalars(params);
   }
 
   // Render the launched function's core_num attribute as a C++ scalar expression.
@@ -2215,8 +2290,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // is left in place. Erasing the hoisted names from ``manual_local_names_``
     // then lets a kernel output that aliases such a buffer remap to it
     // (EmitTensorAlias / IsEnclosingScopeValid).
-    const bool hoist_batch =
-        scope_hoist_sink_ != nullptr && static_cast<size_t>(indent_) == scope_hoist_indent_.size() + 4;
+    const bool hoist_batch = scope_hoist_sink_ != nullptr && IsAtManualScopeBodyIndent();
     std::ostringstream batch_buf;
     const int saved_indent = indent_;
     if (hoist_batch) {
@@ -2568,10 +2642,32 @@ class OrchestrationStmtCodegen : public CodegenBase {
     return manual_local_names_ != nullptr && manual_local_names_->count(name) == 0;
   }
 
+  /// True when the current emit indent is exactly the direct body of a
+  /// ``pl.manual_scope`` — one nesting level (``+ 4`` spaces) deeper than where
+  /// the scope-hoist sink lands (``scope_hoist_indent_``). Used to restrict
+  /// manual-scope hoisting / carry-collapse to the scope's own body, so anything
+  /// nested in a for/if *within* the scope is left in place.
+  bool IsAtManualScopeBodyIndent() const {
+    return static_cast<size_t>(indent_) == scope_hoist_indent_.size() + 4;
+  }
+
   void RegisterMutableTensorName(const std::string& cpp_type, const std::string& emit_name) {
     if (cpp_type == "Tensor") {
       mutable_tensor_name_scopes_.back().insert(emit_name);
     }
+  }
+
+  /// Register a hoisted loop carry's emit name as mutable in the scope that
+  /// ENCLOSES the current (manual-scope body) C++ frame — the frame the hoisted
+  /// ``Tensor <carry> = <init>;`` decl lands in (issue #1713). The carry's
+  /// in-loop ``<carry> = ...;`` reassignments still resolve through that
+  /// enclosing frame, and a post-loop ``X = <carry>`` rebind reads the carry as
+  /// *not* mutable-in-current-scope (it is mutable one level out), so the rebind
+  /// may collapse onto it.
+  void RegisterMutableTensorNameInEnclosingScope(const std::string& emit_name) {
+    INTERNAL_CHECK(mutable_tensor_name_scopes_.size() >= 2)
+        << "Internal error: enclosing-scope carry hoist requires an enclosing C++ frame";
+    mutable_tensor_name_scopes_[mutable_tensor_name_scopes_.size() - 2].insert(emit_name);
   }
 
   bool IsMutableTensorNameInCurrentScope(const std::string& emit_name) const {
@@ -3107,6 +3203,16 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::string scope_hoist_indent_;
   std::set<std::string>* manual_local_names_ = nullptr;
   std::set<std::string>* enclosing_manual_local_names_ = nullptr;
+  /// Emit names of loop carries whose ``Tensor carry = init;`` decl was hoisted
+  /// out of a manual-scope body (issue #1713). Such a carry is mutable in an
+  /// *enclosing* C++ frame, so ``IsMutableTensorNameInCurrentScope`` (which only
+  /// scans the back frame) does not see it. The Var-RHS collapse uses this set to
+  /// restrict ``X = <hoisted carry>`` collapse to the manual-scope body indent
+  /// (where the carry is post-loop and stable), never inside the loop body that
+  /// reassigns it — so the collapse can never alias a pre-reassignment snapshot
+  /// onto the carry's later value. Emit names are globally unique, so entries are
+  /// never cleared (a stale name cannot match a different tensor).
+  std::set<std::string> hoisted_carry_names_;
   /// Stack of 0-based slot expressions for the enclosing ForStmts. Pushed
   /// when entering a ForStmt body and popped on exit. Used by ``YieldStmt``
   /// to emit ``arr[<slot>] = value`` for Parallel inner array writes. The
