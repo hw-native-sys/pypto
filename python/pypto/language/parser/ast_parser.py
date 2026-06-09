@@ -345,6 +345,43 @@ def _normalize_inferred_type_for_annotation(
     )
 
 
+class _FirstReturnTypeCollector(ir.IRVisitor):
+    """Capture the value types of the first ``return <values>`` in a body.
+
+    Used to derive a callee's *effective* return types when it declared no
+    ``-> `` annotation but does ``return <value>``. Recording only the first
+    value-bearing return is sufficient: a function's returns are type-consistent,
+    so any of them yields the same call result type.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.types: list[ir.Type] | None = None
+
+    def visit_return_stmt(self, op: ir.ReturnStmt) -> None:
+        if self.types is None and op.value:
+            self.types = [v.type for v in op.value]
+        super().visit_return_stmt(op)
+
+
+def _derive_return_types_from_body(body: ir.Stmt | None) -> list[ir.Type]:
+    """Effective return types derived from a function body's first return.
+
+    Returns an empty list when *body* is ``None``, has no value-bearing
+    ``return`` (a void function), or the returned values are not all concretely
+    typed. In the last case there is nothing to recover — leaving the result
+    empty keeps the call's type ``UnknownType`` exactly as before.
+    """
+    if body is None:
+        return []
+    collector = _FirstReturnTypeCollector()
+    collector.visit_stmt(body)
+    types = collector.types
+    if not types or any(isinstance(t, ir.UnknownType) for t in types):
+        return []
+    return types
+
+
 @dataclass
 class _AtKwargState:
     """Mutable accumulator used while parsing pl.at() keyword arguments."""
@@ -466,6 +503,10 @@ class ASTParser:
         self.global_vars = global_vars or {}  # Track GlobalVars for cross-function calls
         self.gvar_to_func = gvar_to_func or {}  # Track parsed functions for type inference
         self.external_funcs: dict[str, ir.Function] = {}  # Track external functions referenced
+        # Cache of return types derived from a callee body (for annotation-less
+        # callees), keyed by id(Function). Avoids re-walking the body on every
+        # call site within one function's parse.
+        self._derived_return_types_cache: dict[int, list[ir.Type]] = {}
 
         # Track context for handling yields and returns
         self.in_for_loop = False
@@ -5229,6 +5270,16 @@ class ASTParser:
         if as_spmd:
             core_num_expr, sync_start = self._parse_spmd_submit_kwargs(method_name, keywords, span)
         return_types = func_obj.return_types if func_obj else []
+        # A callee that declares no ``-> `` annotation has empty ``return_types``
+        # but may ``return <value>`` (e.g. an InCore kernel returning its
+        # ``pl.Out`` tensor param). For a plain cross-function Call, derive the
+        # effective result type from the callee body so the call recovers a
+        # concrete type instead of ``UnknownType`` and the print -> parse
+        # round-trip stays symmetric. Submit return augmentation (``as_submit``)
+        # is intentionally left on the declared types only — its tuple arity is
+        # governed by pl.submit conventions, not by the callee's implicit return.
+        if func_obj is not None and not return_types and not as_submit:
+            return_types = self._effective_return_types(func_obj)
         if func_obj is not None and return_types:
             return_types = ir.deduce_call_return_type(
                 list(func_obj.params),
@@ -5624,6 +5675,28 @@ class ASTParser:
         if device_kw is None:
             return None
         return self.parse_expression(device_kw.value)
+
+    def _effective_return_types(self, func: ir.Function | None) -> list[ir.Type]:
+        """Effective callee return types for cross-function call type inference.
+
+        Returns the callee's declared ``return_types`` when present. When the
+        callee declared no ``-> `` annotation (empty ``return_types``) but its
+        body does ``return <value>``, derive the result types from the first
+        such return so a plain cross-function ``Call`` recovers a concrete value
+        type instead of ``UnknownType`` — keeping the print -> parse round-trip
+        symmetric. Derived results are cached per Function so repeated call sites
+        within one body do not re-walk the callee.
+        """
+        if func is None:
+            return []
+        declared = list(func.return_types)
+        if declared:
+            return declared
+        cached = self._derived_return_types_cache.get(id(func))
+        if cached is None:
+            cached = _derive_return_types_from_body(func.body)
+            self._derived_return_types_cache[id(func)] = cached
+        return list(cached)
 
     def _make_call_with_return_type(  # noqa: PLR0913, PLR0912 — cohesive call-builder; bundling args/branches hurts clarity
         self,
@@ -6190,7 +6263,7 @@ class ASTParser:
         return_types = ir.deduce_call_return_type(
             list(ext_func.params),
             args,
-            list(ext_func.return_types),
+            self._effective_return_types(ext_func),
         )
         return self._make_call_with_return_type(gvar, args, return_types, span)
 
