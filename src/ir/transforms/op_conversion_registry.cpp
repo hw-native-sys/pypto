@@ -366,7 +366,7 @@ void OpConversionRegistry::RegisterMemoryOps() {
           // through the same local tile.load path as a plain tensor (issue #1694).
           auto source_tensor_type = AsTensorTypeLike(source->GetType());
           INTERNAL_CHECK_SPAN(source_tensor_type, span)
-              << "tensor.assemble: source must be TensorType or TileType, but got "
+              << "tensor.assemble: source must be TensorType, DistributedTensorType or TileType, but got "
               << source->GetType()->TypeName();
           std::vector<StmtPtr> prologue;
           auto offsets_load = MakeZeroOffsets(source_tensor_type->shape_.size(), span);

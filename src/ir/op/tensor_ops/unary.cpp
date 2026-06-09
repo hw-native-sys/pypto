@@ -37,8 +37,9 @@ TypePtr DeduceTensorNegType(const std::vector<ExprPtr>& args,
   CHECK(args.size() == 1) << "tensor.neg requires exactly 1 argument, but got " << args.size();
 
   auto tensor_type = AsTensorTypeLike(args[0]->GetType());
-  CHECK(tensor_type) << "tensor.neg requires first argument to be a TensorType, but got "
-                     << args[0]->GetType()->TypeName();
+  CHECK(tensor_type)
+      << "tensor.neg requires first argument to be a TensorType or DistributedTensorType, but got "
+      << args[0]->GetType()->TypeName();
 
   // Negation preserves dtype (valid for both int and float)
   return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_);
@@ -49,8 +50,9 @@ TypePtr DeduceTensorAbsType(const std::vector<ExprPtr>& args,
   CHECK(args.size() == 1) << "tensor.abs requires exactly 1 argument, but got " << args.size();
 
   auto tensor_type = AsTensorTypeLike(args[0]->GetType());
-  CHECK(tensor_type) << "tensor.abs requires first argument to be a TensorType, but got "
-                     << args[0]->GetType()->TypeName();
+  CHECK(tensor_type)
+      << "tensor.abs requires first argument to be a TensorType or DistributedTensorType, but got "
+      << args[0]->GetType()->TypeName();
 
   // Absolute value preserves dtype (valid for both int and float)
   return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_);
@@ -61,8 +63,9 @@ TypePtr DeduceTensorRecipType(const std::vector<ExprPtr>& args,
   CHECK(args.size() == 1) << "tensor.recip requires exactly 1 argument, but got " << args.size();
 
   auto tensor_type = AsTensorTypeLike(args[0]->GetType());
-  CHECK(tensor_type) << "tensor.recip requires first argument to be a TensorType, but got "
-                     << args[0]->GetType()->TypeName();
+  CHECK(tensor_type)
+      << "tensor.recip requires first argument to be a TensorType or DistributedTensorType, but got "
+      << args[0]->GetType()->TypeName();
 
   // Reciprocal (1/x) always produces floating-point output
   DataType out_dtype = tensor_type->dtype_;
@@ -78,8 +81,9 @@ TypePtr DeduceTensorExpType(const std::vector<ExprPtr>& args,
   CHECK(args.size() == 1) << "tensor.exp requires exactly 1 argument, but got " << args.size();
 
   auto tensor_type = AsTensorTypeLike(args[0]->GetType());
-  CHECK(tensor_type) << "tensor.exp requires first argument to be a TensorType, but got "
-                     << args[0]->GetType()->TypeName();
+  CHECK(tensor_type)
+      << "tensor.exp requires first argument to be a TensorType or DistributedTensorType, but got "
+      << args[0]->GetType()->TypeName();
 
   // exp should promote to float type if input is integer
   // Exponential always produces floating-point output (e.g., exp(1) = 2.718...)
@@ -97,8 +101,9 @@ TypePtr DeduceTensorLogType(const std::vector<ExprPtr>& args,
   CHECK(args.size() == 1) << "tensor.log requires exactly 1 argument, but got " << args.size();
 
   auto tensor_type = AsTensorTypeLike(args[0]->GetType());
-  CHECK(tensor_type) << "tensor.log requires first argument to be a TensorType, but got "
-                     << args[0]->GetType()->TypeName();
+  CHECK(tensor_type)
+      << "tensor.log requires first argument to be a TensorType or DistributedTensorType, but got "
+      << args[0]->GetType()->TypeName();
 
   // log always produces floating-point output (e.g., log(1) = 0.0).
   // Promote integer inputs to FP32; preserve existing float dtype.
@@ -115,8 +120,9 @@ TypePtr DeduceTensorSqrtType(const std::vector<ExprPtr>& args,
   CHECK(args.size() == 1) << "tensor.sqrt requires exactly 1 argument, but got " << args.size();
 
   auto tensor_type = AsTensorTypeLike(args[0]->GetType());
-  CHECK(tensor_type) << "tensor.sqrt requires first argument to be a TensorType, but got "
-                     << args[0]->GetType()->TypeName();
+  CHECK(tensor_type)
+      << "tensor.sqrt requires first argument to be a TensorType or DistributedTensorType, but got "
+      << args[0]->GetType()->TypeName();
 
   // sqrt should promote to float type if input is integer
   // Square root always produces floating-point output
@@ -133,8 +139,9 @@ TypePtr DeduceTensorRsqrtType(const std::vector<ExprPtr>& args,
   CHECK(args.size() == 1) << "tensor.rsqrt requires exactly 1 argument, but got " << args.size();
 
   auto tensor_type = AsTensorTypeLike(args[0]->GetType());
-  CHECK(tensor_type) << "tensor.rsqrt requires first argument to be a TensorType, but got "
-                     << args[0]->GetType()->TypeName();
+  CHECK(tensor_type)
+      << "tensor.rsqrt requires first argument to be a TensorType or DistributedTensorType, but got "
+      << args[0]->GetType()->TypeName();
 
   // rsqrt always produces floating-point output
   DataType out_dtype = tensor_type->dtype_;
@@ -153,7 +160,8 @@ TypePtr DeduceTensorFP32OnlyType(const std::string& op_name, const std::vector<E
   CHECK(args.size() == 1) << op_name << " requires exactly 1 argument, but got " << args.size();
 
   auto tensor_type = AsTensorTypeLike(args[0]->GetType());
-  CHECK(tensor_type) << op_name << " requires first argument to be a TensorType, but got "
+  CHECK(tensor_type) << op_name
+                     << " requires first argument to be a TensorType or DistributedTensorType, but got "
                      << args[0]->GetType()->TypeName();
 
   // FP32-only: do NOT auto-promote. Reject non-FP32 inputs with an actionable error.
