@@ -28,6 +28,7 @@ import pypto.language as pl
 import pytest
 import torch
 from pypto import ir
+from pypto.runtime.task_interface import RunTiming
 
 
 @pl.program
@@ -192,9 +193,32 @@ class TestL2MultiOrch:
         b = torch.full((128, 128), 3.0, dtype=torch.float32)
         f_add = torch.zeros((128, 128), dtype=torch.float32)
 
-        compiled["chip_orch_add"](a, b, f_add, config=test_config)
+        # Bind the sub-callable first so the post-call ``last_run_timing`` is
+        # read off the same ``_SubChipCallable`` instance that dispatched.
+        add_via_sub = compiled["chip_orch_add"]
+        add_via_sub(a, b, f_add, config=test_config)
 
         torch.testing.assert_close(f_add, torch.full((128, 128), 5.0, dtype=torch.float32))
+
+        # (issue #1679) ``_SubChipCallable.__call__`` surfaces the measured
+        # ``RunTiming`` on ``last_run_timing``. L2 single-task semantics:
+        # host wall present and wrapping a nonzero on-NPU device wall.
+        timing = add_via_sub.last_run_timing
+        assert isinstance(timing, RunTiming), (
+            f"sub-orch dispatch must surface a RunTiming, got {type(timing).__name__}: {timing!r}"
+        )
+        print(
+            f"[run-timing] _SubChipCallable.__call__: host_wall_us={timing.host_wall_us:.3f} "
+            f"device_wall_us={timing.device_wall_us:.3f}"
+        )
+        assert timing.host_wall_us > 0.0, f"host_wall_us must be > 0, got {timing.host_wall_us}"
+        assert timing.device_wall_us > 0.0, (
+            f"device_wall_us must be > 0 on the default PTO2_PROFILING build, "
+            f"got {timing.device_wall_us}"
+        )
+        assert timing.host_wall_us >= timing.device_wall_us, (
+            f"host_wall_us ({timing.host_wall_us}) must wrap device_wall_us ({timing.device_wall_us})"
+        )
 
 
 if __name__ == "__main__":

@@ -1106,6 +1106,12 @@ class JITFunction:
         self._cache: dict[CacheKey, Any] = {}  # CacheKey → CompiledProgram
         self._source_hash: str | None = None
 
+        # RunTiming from the most recent __call__, forwarded from the dispatched
+        # CompiledProgram (host_wall_us / device_wall_us), or None before the
+        # first on-device run. Lets callers read timing for a plain
+        # ``kernel(*args, config=...)`` dispatch without changing its return.
+        self.last_run_timing: Any = None
+
         # Preserve function metadata
         self.__name__ = func.__name__
         self.__doc__ = func.__doc__
@@ -1397,12 +1403,17 @@ class JITFunction:
         Returns:
             ``None`` for in-place calls (output tensors modified on device),
             or ``torch.Tensor`` / ``tuple[torch.Tensor, ...]`` for return-style
-            calls.
+            calls. The on-device timing for this call is stored on
+            :attr:`last_run_timing` (a simpler ``RunTiming`` with
+            ``host_wall_us`` / ``device_wall_us``).
         """
         compiled, ordered_args, run_config = self._resolve_compiled(args, kwargs)
         if run_config is not None:
-            return compiled(*ordered_args, config=run_config)
-        return compiled(*ordered_args)
+            result = compiled(*ordered_args, config=run_config)
+        else:
+            result = compiled(*ordered_args)
+        self.last_run_timing = getattr(compiled, "last_run_timing", None)
+        return result
 
     def compile(self, *args: Any, **kwargs: Any) -> Any:
         """Specialize + compile for the shape/dtype combination implied by *args*,

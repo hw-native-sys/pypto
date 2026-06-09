@@ -352,8 +352,13 @@ def _dispatch(
     sub_ids: dict[str, int],
     call_config: Any,
     device_nums: int,
-) -> None:
-    """Build the orchestration closure and run it once on ``w``."""
+) -> Any:
+    """Build the orchestration closure and run it once on ``w``.
+
+    Returns the simpler ``RunTiming`` from ``w.run`` (``host_wall_us`` /
+    ``device_wall_us``). For an L3 DAG ``device_wall_us`` is ``0`` — only the
+    host wall around the dispatch is meaningful here.
+    """
     # Fresh _keep per dispatch: it pins per-call TaskArgs alive for the run.
     _keep: list[Any] = []
 
@@ -373,14 +378,14 @@ def _dispatch(
             world_size=device_nums,
         )
 
-    w.run(orch_fn)
+    return w.run(orch_fn)
 
 
 def execute_distributed(
     compiled: DistributedCompiledProgram,
     coerced_args: list[torch.Tensor | DeviceTensor],
     config: Any = None,
-) -> None:
+) -> Any:
     """Execute a distributed compiled program once via simpler Worker(level=3).
 
     One-shot path: runs the full setup, dispatches once, then tears the Worker
@@ -393,6 +398,11 @@ def execute_distributed(
         coerced_args: Coerced arguments — host ``torch.Tensor`` or
             worker-resident :class:`~pypto.runtime.DeviceTensor`.
         config: Optional run configuration (unused for now).
+
+    Returns:
+        The simpler ``RunTiming`` from the dispatch (``host_wall_us`` /
+        ``device_wall_us``; ``device_wall_us`` is ``0`` for the L3 DAG), or
+        ``None`` if dispatch produced no timing.
     """
     dc = compiled._distributed_config
     output_dir = compiled.output_dir
@@ -433,7 +443,9 @@ def execute_distributed(
         w = _construct_worker(dc, compiled.platform, runtime_name, num_sub)
         sub_ids, chip_cids = _register_callables(w, sub_worker_fns, chip_callables)
         w.init()
-        _dispatch(w, entry_fn, tensors, chip_cids, sub_ids, _make_call_config(dc), len(dc.device_ids))
+        return _dispatch(
+            w, entry_fn, tensors, chip_cids, sub_ids, _make_call_config(dc), len(dc.device_ids)
+        )
     finally:
         if w is not None:
             w.close()
@@ -555,6 +567,9 @@ class DistributedWorker(Worker):
         # Live RegistrationHandles so close() can mark them closed. WeakSet
         # so handles that drop out of scope first don't pin DistributedWorker.
         self._handles: weakref.WeakSet[Any] = weakref.WeakSet()
+        # RunTiming from the most recent dispatch (host_wall_us; device_wall_us
+        # is 0 for the L3 DAG), or None before the first run.
+        self.last_run_timing: Any = None
 
     # ------------------------------------------------------------------
     # Device memory primitives
@@ -675,7 +690,7 @@ class DistributedWorker(Worker):
                 )
             tensors[info.name] = arg
 
-        _dispatch(
+        self.last_run_timing = _dispatch(
             self._w,
             self._entry_fn,
             tensors,

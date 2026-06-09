@@ -33,7 +33,47 @@ Capture `<hash> | <author> | <subject>` for every commit.
 
 ## Step 3: Classify Commits
 
-For each commit, classify by subject **prefix and content**:
+> **The commit prefix is a hint, NOT the gate.** PyPTO routinely ships
+> user-facing DSL/runtime surface behind `fix(codegen)`, `fix(ir)`, and
+> `refactor(...)` prefixes. Classifying by prefix alone under-reports the most
+> important changes. The **authoritative signal is the diff touching a public
+> export surface** — run the surface check over *every* commit in range,
+> regardless of prefix.
+
+### 3a. Public-surface pre-pass (authoritative — run on ALL commits)
+
+Before applying any prefix heuristic, scan every commit's diff for additions or
+signature changes to these public surfaces. Any hit ⇒ **treat as external**,
+even if the prefix is `fix`/`refactor`/`chore`:
+
+- `python/pypto/language/__init__.py` and its `__all__`
+- `python/pypto/language/op/*.py` (new/changed `pl.*` ops)
+- `python/pypto/runtime/__init__.py` and its `__all__` (exported classes)
+- `python/pypto/distributed/__init__.py` (`pld.*` surface)
+- `python/pypto/pypto_core/*.pyi` (type stubs — but a `passes.pyi`-only change is usually an internal verifier)
+- new bindings in `python/bindings/`
+- a `RunConfig` field add/type-change in `python/pypto/runtime/runner.py`
+
+Fast batch scan over the range (adjust `<from>..<to>`):
+
+```bash
+for h in $(git log --since=... --until=... --pretty=%h); do
+  hit=$(git show --stat $h | grep -E \
+    "language/__init__|language/op/.*\.py|runtime/__init__|runtime/runner\.py|distributed/__init__|pypto_core/.*\.pyi|python/bindings/")
+  [ -n "$hit" ] && { echo "=== $h ==="; echo "$hit"; }
+done
+```
+
+For each hit, open the actual diff (`git show <hash> -- <file>`) to confirm it
+adds/renames a public symbol (not just an internal edit to that file).
+
+**Known real-world misses (do not repeat):** `fix(codegen): ...selective dump`
+introduced `pl.dump_tag` / `dumps=` and leveled `RunConfig.enable_dump_tensor`;
+`refactor(runtime): Worker ABC` changed `pypto.runtime` exports
+(`ChipWorker` / `RegistrationHandle`); `feat(ir): ...transpose` changed a DSL
+builder signature. All three would be skipped by prefix alone.
+
+### 3b. Prefix heuristic (only for commits with NO public-surface hit)
 
 | Prefix / pattern | External? | Action |
 | ---------------- | --------- | ------ |
@@ -41,17 +81,9 @@ For each commit, classify by subject **prefix and content**:
 | `feat:` with user-visible additions | Yes | Include |
 | `fix(runtime)` / `fix(language)` changing public default or signature | Yes | Include |
 | `feat`/`fix` strictly inside `src/` or `passes/` with no DSL / bindings / runtime API change | **No** | Skip |
-| `refactor`, `chore`, `test`, `docs`, `ci` | **No** | Skip |
+| `refactor`, `chore`, `test`, `docs`, `ci` with no 3a hit | **No** | Skip |
 
-When uncertain, inspect `git show --stat <hash>` and look for changes under:
-
-- `python/pypto/language/`
-- `python/pypto/distributed/`
-- `python/pypto/runtime/`
-- `python/pypto/pypto_core/*.pyi`
-- new bindings in `python/bindings/`
-
-If the diff only touches `src/` or `include/` without altering any of the above, treat as internal.
+If the diff only touches `src/` or `include/` without altering any 3a surface, treat as internal.
 
 ## Step 4: Extract Before/After Per External Commit
 
@@ -148,7 +180,8 @@ Write the file to the agreed output path with `Write`. Confirm in chat: line cou
 
 - [ ] Date range, output path, language, scope captured
 - [ ] All commits in range listed with author
-- [ ] Each commit classified external vs internal
+- [ ] Public-surface pre-pass (3a) run over EVERY commit, not just `feat` ones
+- [ ] Each commit classified external vs internal (prefix never overrides a 3a hit)
 - [ ] Before/after example extracted for every external commit
 - [ ] Author + theme bucket assigned per entry
 - [ ] Overview table + owner index + migration table all present

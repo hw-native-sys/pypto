@@ -126,6 +126,11 @@ class DistributedCompiledProgram:
         self._output_indices = None
         self._return_types = None
 
+        # RunTiming from the most recent __call__ (host_wall_us; device_wall_us
+        # is 0 for the L3 DAG), or None before the first on-device run. Surfaced
+        # as a side channel so the call return value stays outputs/None.
+        self.last_run_timing: Any = None
+
         self._emit_debug_runner()
 
     def _emit_debug_runner(self) -> None:
@@ -239,7 +244,7 @@ class DistributedCompiledProgram:
                 )
             coerced.append(arg)
 
-        execute_distributed(self, coerced, config)
+        self.last_run_timing = execute_distributed(self, coerced, config)
 
         if not return_style:
             return None

@@ -18,16 +18,25 @@ surfaced (rather than silently discarded) through the pypto dispatch layers:
    worker before returning).
 3. ``execute_compiled`` returns the ``RunTiming`` it gets back from
    ``execute_on_device`` (after the post-run DFX collection step).
+4. ``CompiledProgram.__call__`` / ``_SubChipCallable.__call__`` surface it on
+   ``last_run_timing`` while still returning outputs/None.
+5. ``JITFunction.__call__`` forwards the dispatched program's
+   ``last_run_timing`` so a plain ``kernel(*args, config=...)`` can read timing.
 """
 
+import importlib.util
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-# ``device_runner`` and ``task_interface`` eagerly import the optional
-# ``simpler`` runtime package, so these plumbing tests need simpler installed.
-_simpler_required = pytest.importorskip(
-    "simpler", reason="RunTiming plumbing tests require the simpler package"
+# ``device_runner`` / ``task_interface`` / ``worker`` eagerly import the optional
+# ``simpler`` runtime package, so the dispatch-chain tests (1–3) need it. The
+# CompiledProgram / JITFunction tests (4–5) mock ``_invoke_compiled`` and never
+# touch simpler, so they run unconditionally.
+requires_simpler = pytest.mark.skipif(
+    importlib.util.find_spec("simpler") is None,
+    reason="RunTiming dispatch-chain tests require the simpler package",
 )
 
 
@@ -41,6 +50,7 @@ _TIMING_SENTINEL = object()
 # ---------------------------------------------------------------------------
 
 
+@requires_simpler
 def test_run_chip_forwards_impl_run_result():
     """``_run_chip`` must return whatever ``self._impl.run`` returns."""
     from pypto.runtime.worker import ChipWorker  # noqa: PLC0415
@@ -65,6 +75,7 @@ def test_run_chip_forwards_impl_run_result():
 # ---------------------------------------------------------------------------
 
 
+@requires_simpler
 def test_execute_on_device_returns_timing_one_shot_path():
     """One-shot ``Worker`` path returns ``worker.run``'s timing after close()."""
     from pypto.runtime.device_runner import execute_on_device  # noqa: PLC0415
@@ -91,6 +102,7 @@ def test_execute_on_device_returns_timing_one_shot_path():
     fake_worker.close.assert_called_once()
 
 
+@requires_simpler
 def test_execute_on_device_returns_timing_reuse_path():
     """Active-ChipWorker reuse path returns ``_run_chip``'s timing."""
     from pypto.runtime.device_runner import execute_on_device  # noqa: PLC0415
@@ -116,6 +128,7 @@ def test_execute_on_device_returns_timing_reuse_path():
 # ---------------------------------------------------------------------------
 
 
+@requires_simpler
 def test_execute_compiled_returns_timing(tmp_path):
     """``execute_compiled`` must return the timing from ``execute_on_device``."""
 
@@ -139,6 +152,159 @@ def test_execute_compiled_returns_timing(tmp_path):
         timing = execute_compiled(tmp_path, [], platform="a2a3sim", device_id=0)
 
     assert timing is _TIMING_SENTINEL
+
+
+# ---------------------------------------------------------------------------
+# CompiledProgram / _SubChipCallable — store timing on last_run_timing
+# ---------------------------------------------------------------------------
+
+
+def test_compiled_program_call_stores_last_run_timing():
+    """``CompiledProgram.__call__`` returns outputs and stores the timing."""
+    from pypto.ir.compiled_program import CompiledProgram  # noqa: PLC0415
+
+    cp = CompiledProgram.__new__(CompiledProgram)  # bypass __init__/codegen layout
+    cp._sub_chip_dirs = {}
+    cp._output_dir = "out"
+    cp._platform = "a2a3sim"
+    cp.last_run_timing = None
+
+    sentinel_out = object()
+    with (
+        patch.object(CompiledProgram, "_get_metadata", return_value=([], [], [])),
+        patch(
+            "pypto.ir.compiled_program._invoke_compiled",
+            return_value=(sentinel_out, _TIMING_SENTINEL),
+        ),
+    ):
+        result = cp()
+
+    assert result is sentinel_out
+    assert cp.last_run_timing is _TIMING_SENTINEL
+
+
+def test_sub_chip_callable_call_stores_last_run_timing():
+    """``_SubChipCallable.__call__`` returns outputs and stores the timing."""
+    from pypto.ir.compiled_program import _SubChipCallable  # noqa: PLC0415
+
+    sub = _SubChipCallable.__new__(_SubChipCallable)  # bypass __init__
+    sub._name = "orch0"
+    sub._output_dir = "out"
+    sub._platform = "a2a3sim"
+    sub._param_infos = []
+    sub._output_indices = []
+    sub._return_types = []
+    sub.last_run_timing = None
+
+    sentinel_out = object()
+    with patch(
+        "pypto.ir.compiled_program._invoke_compiled",
+        return_value=(sentinel_out, _TIMING_SENTINEL),
+    ):
+        result = sub()
+
+    assert result is sentinel_out
+    assert sub.last_run_timing is _TIMING_SENTINEL
+
+
+# ---------------------------------------------------------------------------
+# JITFunction — forwards the dispatched CompiledProgram's last_run_timing
+# ---------------------------------------------------------------------------
+
+
+def test_jit_function_call_forwards_last_run_timing():
+    """``JITFunction.__call__`` mirrors the dispatched program's timing."""
+    from pypto.jit.decorator import JITFunction  # noqa: PLC0415
+
+    jf = JITFunction.__new__(JITFunction)  # bypass __init__/specialization
+    jf.last_run_timing = None
+
+    sentinel_out = object()
+    compiled = MagicMock(name="CompiledProgram", return_value=sentinel_out)
+    compiled.last_run_timing = _TIMING_SENTINEL
+
+    with patch.object(jf, "_resolve_compiled", return_value=(compiled, (), None)):
+        result = jf()
+
+    assert result is sentinel_out
+    assert jf.last_run_timing is _TIMING_SENTINEL
+    compiled.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# L3 distributed — _dispatch / DistributedCompiledProgram / DistributedWorker
+# ---------------------------------------------------------------------------
+
+
+def test_dispatch_returns_worker_run_timing():
+    """``_dispatch`` must return the ``RunTiming`` from ``w.run``."""
+    from pypto.runtime.distributed_runner import _dispatch  # noqa: PLC0415
+
+    w = MagicMock(name="worker")
+    w.run.return_value = _TIMING_SENTINEL
+
+    timing = _dispatch(
+        w,
+        MagicMock(name="entry_fn"),
+        tensors={},
+        chip_cids={},
+        sub_ids={},
+        call_config=MagicMock(name="call_config"),
+        device_nums=1,
+    )
+
+    assert timing is _TIMING_SENTINEL
+    w.run.assert_called_once()
+
+
+def test_distributed_compiled_program_call_stores_last_run_timing():
+    """``DistributedCompiledProgram.__call__`` stores execute_distributed's timing."""
+    import torch  # noqa: PLC0415
+    from pypto.ir.distributed_compiled_program import DistributedCompiledProgram  # noqa: PLC0415
+
+    dcp = DistributedCompiledProgram.__new__(DistributedCompiledProgram)  # bypass __init__
+    dcp.last_run_timing = None
+
+    info = SimpleNamespace(name="x")
+    with (
+        patch.object(DistributedCompiledProgram, "_get_metadata", return_value=([info], [], [])),
+        patch(
+            "pypto.runtime.distributed_runner.execute_distributed",
+            return_value=_TIMING_SENTINEL,
+        ),
+    ):
+        # One in-place tensor param → return_style is False, call returns None.
+        result = dcp(torch.zeros(2))
+
+    assert result is None
+    assert dcp.last_run_timing is _TIMING_SENTINEL
+
+
+def test_distributed_worker_call_stores_last_run_timing():
+    """``DistributedWorker.__call__`` stores the ``_dispatch`` timing."""
+    import torch  # noqa: PLC0415
+    from pypto.runtime.distributed_runner import DistributedWorker  # noqa: PLC0415
+
+    rt = DistributedWorker.__new__(DistributedWorker)  # bypass __init__/Worker setup
+    rt._closed = False
+    rt._param_infos = [SimpleNamespace(name="x")]
+    rt._base_tensors = {}
+    rt._w = MagicMock(name="worker")
+    rt._entry_fn = MagicMock(name="entry_fn")
+    rt._chip_cids = {}
+    rt._sub_ids = {}
+    rt._call_config = MagicMock(name="call_config")
+    rt.dc = SimpleNamespace(device_ids=[0])
+    rt.last_run_timing = None
+
+    shared = torch.zeros(2).share_memory_()  # DistributedWorker rejects non-shared host tensors
+    with patch(
+        "pypto.runtime.distributed_runner._dispatch",
+        return_value=_TIMING_SENTINEL,
+    ):
+        rt(shared)
+
+    assert rt.last_run_timing is _TIMING_SENTINEL
 
 
 if __name__ == "__main__":
