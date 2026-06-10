@@ -662,7 +662,10 @@ class SSAConverter {
       auto type_it = tc.types.find(key);
       if (type_it == tc.types.end()) continue;
       auto type = SubstType(type_it->second);
-      auto init = FindInitValue(type, before);
+      // Pass the unsubstituted ``type_it->second`` so the pointer comparison
+      // in ``FindInitValue`` stays on original TypePtr identities — see the
+      // FindInitValue docstring.
+      auto init = FindInitValue(type_it->second, before);
       if (!init) {
         // Last resort: create a placeholder using any variable with matching type
         // This covers zero-trip loop cases
@@ -822,7 +825,10 @@ class SSAConverter {
       auto type_it = tc.types.find(key);
       if (type_it == tc.types.end()) continue;
       auto type = SubstType(type_it->second);
-      auto init = FindInitValue(type, before);
+      // Pass the unsubstituted ``type_it->second`` so pointer comparison in
+      // ``FindInitValue`` stays on original TypePtr identities — see the
+      // FindInitValue docstring.
+      auto init = FindInitValue(type_it->second, before);
       if (!init) init = std::make_shared<Var>(key->name_hint_, type, op->span_);
       int iv = NextVersion(key);
       auto new_ia = std::make_shared<IterArg>(BuildAutoNamedVersion(key->name_hint_, "iter", iv), type, init,
@@ -1194,20 +1200,30 @@ class SSAConverter {
 
   // ── Helpers ────────────────────────────────────────────────────────
 
-  VarPtr FindInitValue(const TypePtr& type, const std::unordered_map<const Var*, VarPtr>& pre) {
-    // Prefer Out/InOut parameter with matching type
+  /// Find a pre-loop Var whose original type matches ``orig_type``. ``pre``
+  /// keys are the original (pre-substitution) Var pointers and values are
+  /// their current SSA versions. Caller passes the **un-substituted**
+  /// ``type_it->second`` from ``tc.types`` (not the ``SubstType``-applied
+  /// version) so this comparison stays on the original TypePtr identities —
+  /// substituting both sides via ``SubstType`` would mint fresh
+  /// shared_ptrs that compare unequal even when structurally identical,
+  /// causing escape-promotion to fall back to a ``foo__FREE_VAR`` placeholder
+  /// the SSA verifier rejects.
+  VarPtr FindInitValue(const TypePtr& orig_type, const std::unordered_map<const Var*, VarPtr>& pre) {
+    // Prefer Out/InOut parameter with matching original type.
     for (size_t i = 0; i < orig_params_.size(); ++i) {
       if (orig_param_directions_[i] == ParamDirection::Out ||
           orig_param_directions_[i] == ParamDirection::InOut) {
         auto key = orig_params_[i].get();
+        if (orig_params_[i]->GetType() != orig_type) continue;
         auto it = pre.find(key);
-        if (it != pre.end() && it->second->GetType() == type) return it->second;
+        if (it != pre.end()) return it->second;
       }
     }
-    // Fall back to any pre-loop variable with matching type (deterministic ordering by UniqueId)
+    // Fall back to any pre-loop variable with matching original type.
     std::vector<std::pair<uint64_t, VarPtr>> candidates;
     for (const auto& [key, v] : pre) {
-      if (v->GetType() == type) {
+      if (key->GetType() == orig_type) {
         candidates.emplace_back(key->UniqueId(), v);
       }
     }
