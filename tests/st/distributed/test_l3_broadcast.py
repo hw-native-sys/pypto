@@ -31,7 +31,7 @@ devices, e.g. ``--device=0,1,2,3`` or ``--device=0-3``). One program body
 for both.
 """
 
-# pyright: reportUndefinedVariable=false
+# pyright: reportUndefinedVariable=false  # NR, SIZE, ROOT_RANK are used in DSL type annotations below
 
 import sys
 

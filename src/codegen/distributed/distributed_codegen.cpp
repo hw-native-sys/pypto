@@ -835,7 +835,8 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
         } else if (auto var = std::dynamic_pointer_cast<const ir::Var>(dim)) {
           shape += SanitizeName(var->name_hint_);
         } else {
-          CHECK(false) << "Distributed callee return shape dim " << i << " must be ConstInt or Var";
+          // Composite expression (e.g. ``NR * 64``).  Lower via visitor chain.
+          shape += GetExprAsCode(dim);
         }
       }
       if (ret_type->shape_.size() == 1) shape += ",";
@@ -952,9 +953,9 @@ void DistributedCodegen::EmitTensorCreate(const ir::CallPtr& call) {
       // Dynamic shape: reference the parameter name in the generated Python.
       shape += SanitizeName(var->name_hint_);
     } else {
-      CHECK(false) << "tensor.create shape dim " << i
-                   << " must be a ConstInt or Var (dynamic shape variable), "
-                   << "got expression of unsupported kind";
+      // Composite expression (e.g. ``NR * 64`` from pl.dynamic() arithmetic).
+      // Lower to Python via the expression visitor chain.
+      shape += GetExprAsCode(dim);
     }
   }
   if (result_type->shape_.size() == 1) shape += ",";  // trailing comma for 1-tuple

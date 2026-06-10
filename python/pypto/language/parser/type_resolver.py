@@ -834,17 +834,24 @@ class TypeResolver:
             elif value.name not in self._dyn_var_cache:
                 self._dyn_var_cache[value.name] = value._ir_var
             return value._ir_var
-        if isinstance(value, Scalar) and not value._annotation_only and value.expr is not None:
-            # Composite shape dim (e.g. `m + 0`, `pl.const(32, pl.INT64) * 2`)
-            # evaluated through DSL operator overloading — keep the IR tree
-            # as-is, without constant folding, so print->parse round-trips.
-            expr_type = value.expr.type
+        # Accept Scalar expressions produced by DynVar arithmetic (e.g. ``NR * 64``
+        # where NR is a ``pl.dynamic()`` dim).  Annotation-only Scalars are skipped
+        # (they carry no runtime expression).
+        if isinstance(value, Scalar) and not value._annotation_only:
+            expr = value.unwrap()
+            if not isinstance(expr, ir.Expr):
+                raise ParserTypeError(
+                    f"Shape variable '{source_name}' is a Scalar with no underlying expression",
+                    span=span,
+                )
+            # Type-check the underlying expression (must be integer-typed).
+            expr_type = expr.type
             if not (isinstance(expr_type, ir.ScalarType) and expr_type.dtype.is_int()):
                 raise ParserTypeError(
                     f"Shape dimension '{source_name}' must be integer-typed, got {expr_type}",
                     span=span,
                 )
-            return value.expr
+            return expr
         raise ParserTypeError(
             f"Shape variable '{source_name}' must be int or pl.dynamic(), got {type(value).__name__}",
             span=span,

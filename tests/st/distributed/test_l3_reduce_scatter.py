@@ -35,7 +35,7 @@ devices, e.g. ``--device=0,1,2,3`` or ``--device=0-3``). One program body
 for both.
 """
 
-# pyright: reportUndefinedVariable=false
+# pyright: reportUndefinedVariable=false  # NR, SIZE are used in DSL type annotations below
 
 import sys
 
@@ -53,9 +53,7 @@ NR = pl.dynamic("NR")
 def _expected_reduce_scatter(inputs: torch.Tensor) -> torch.Tensor:
     """Per-rank golden: element-wise sum of chunk ``r`` across all ranks."""
     n_ranks = inputs.shape[0]
-    chunks = [
-        inputs[:, 0, r * SIZE : (r + 1) * SIZE].sum(dim=0) for r in range(n_ranks)
-    ]
+    chunks = [inputs[:, 0, r * SIZE : (r + 1) * SIZE].sum(dim=0) for r in range(n_ranks)]
     return torch.stack(chunks).reshape(n_ranks, 1, SIZE)
 
 
@@ -136,7 +134,7 @@ class ReduceScatterMesh:
     @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
     def host_orch(
         self,
-        inputs: pl.Tensor[[NR, 1, 4 * SIZE], pl.FP32],
+        inputs: pl.Tensor[[NR, 1, NR * SIZE], pl.FP32],
         outputs: pl.Out[pl.Tensor[[NR, 1, SIZE], pl.FP32]],
     ) -> pl.Tensor[[NR, 1, SIZE], pl.FP32]:
         """Launch one chip orchestration per rank with shared window buffers."""
@@ -183,6 +181,14 @@ class TestL3ReduceScatter:
         assert torch.allclose(outputs, expected), (
             f"reduce-scatter P={n_ranks} mismatch: max diff = {(outputs - expected).abs().max().item()}"
         )
+
+        # Sanity: reduce-scatter output must be cross-rank sum, not raw local chunk.
+        for r in range(n_ranks):
+            local_chunk = inputs[r, 0, r * SIZE : (r + 1) * SIZE]
+            assert not torch.allclose(outputs[r, 0], local_chunk), (
+                f"reduce-scatter P={n_ranks}: rank {r} output must not equal"
+                f" its own input chunk (reduction required)"
+            )
 
 
 if __name__ == "__main__":

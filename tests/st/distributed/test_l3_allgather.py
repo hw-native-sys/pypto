@@ -32,7 +32,7 @@ devices, e.g. ``--device=0,1,2,3`` or ``--device=0-3``). One program body
 for both.
 """
 
-# pyright: reportUndefinedVariable=false
+# pyright: reportUndefinedVariable=false  # NR, SIZE are used in DSL type annotations below
 
 import sys
 
@@ -84,7 +84,7 @@ class AllGatherMesh:
 
         # Phase 1: stage-in — local input → this rank's scratch slot.
         local = pl.load(inp, [0, 0], [1, SIZE])
-        scratch = pl.store(local, [0, 0], scratch)
+        pl.store(local, [0, 0], scratch)
 
         # Phase 2: barrier — notify every peer, wait on every peer slot.
         # ``alloc_window_buffer`` zero-initialises cells; AtomicAdd/Ge(1) is safe.
@@ -127,8 +127,8 @@ class AllGatherMesh:
     def host_orch(
         self,
         inputs: pl.Tensor[[NR, 1, SIZE], pl.FP32],
-        outputs: pl.Out[pl.Tensor[[NR, 1, 4 * SIZE], pl.FP32]],
-    ) -> pl.Tensor[[NR, 1, 4 * SIZE], pl.FP32]:
+        outputs: pl.Out[pl.Tensor[[NR, 1, NR * SIZE], pl.FP32]],
+    ) -> pl.Tensor[[NR, 1, NR * SIZE], pl.FP32]:
         """Launch one chip orchestration per rank with shared window buffers."""
         scratch_buf = pld.alloc_window_buffer(SIZE * 4)  # 1xSIZE x FP32 (4 bytes)
         signal_buf = pld.alloc_window_buffer(pld.world_size() * 4)  # NR x 1 x INT32
@@ -173,6 +173,13 @@ class TestL3AllGather:
         assert torch.allclose(outputs, expected), (
             f"allgather P={n_ranks} mismatch: max diff = {(outputs - expected).abs().max().item()}"
         )
+
+        # Sanity: output must be concatenation, not any single input passed through.
+        for r in range(n_ranks):
+            assert not torch.allclose(outputs[r, 0, :SIZE], inputs[r, 0]), (
+                f"allgather P={n_ranks}: rank {r} output[:SIZE] must not equal"
+                f" its own input (concatenation required)"
+            )
 
 
 if __name__ == "__main__":
