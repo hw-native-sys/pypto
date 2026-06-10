@@ -370,8 +370,10 @@ runtime = ir.RuntimeScopeStmt(manual=True, name_hint="", body=body, span=span)
     `Submit` node for each `pl.submit(kernel, ..., deps=[tid1, tid2])`
     call and populates its first-class `deps_` field directly from the
     user's `deps=` kwarg (each entry a `Scalar[TASK_ID]` — the producer
-    TaskId returned by a prior `pl.submit(...)`, a TaskId loop iter_arg,
-    or the literal `None`, which is dropped). The `Submit` persists through
+    TaskId returned by a prior `pl.submit(...)` or a TaskId loop iter_arg;
+    a literal `None` entry is eliminated at parse time and contributes no
+    `deps_` element — unlike unset `Array[N, TASK_ID]` slots, which stay
+    sentinel TaskIds skipped at runtime via `is_valid()`). The `Submit` persists through
     the pipeline; the orchestration codegen reads it through the transient
     `SubmitToCallView`, which folds `Submit::deps_` into a synthesised
     `attrs["manual_dep_edges"]` entry (view-only — never materialised on an

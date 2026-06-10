@@ -168,7 +168,7 @@
 | ---- | ------ | ---- |
 | `GetStructuralProperties()` | `{TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ManualDepsOnSubmitOnly}` | 在流水线启动时及每个 Pass 执行前后验证的不变量 |
 | `GetDefaultVerifyProperties()` | `{SSAForm, TypeChecked, NoNestedCalls, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore}` | `run_verifier()` 的默认属性集 |
-| `GetVerifiedProperties()` | `{SSAForm, TypeChecked, AllocatedMemoryAddr, BreakContinueValid, NoRedundantBlocks, InOutUseValid, CallDirectionsResolved, ManualDepsOnSubmitOnly}` | `PassPipeline` 自动验证的轻量级属性集 |
+| `GetVerifiedProperties()` | `{SSAForm, TypeChecked, MixedKernelExpanded, AllocatedMemoryAddr, BreakContinueValid, NoRedundantBlocks, InOutUseValid, CallDirectionsResolved, ManualDepsOnSubmitOnly}` | `PassPipeline` 自动验证的轻量级属性集 |
 
 ### RunVerifier Pass 工厂
 

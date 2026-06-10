@@ -204,8 +204,9 @@ enum class VerificationLevel {
  * @brief Get the set of properties automatically verified during compilation
  *
  * Returns {SSAForm, TypeChecked, MixedKernelExpanded, AllocatedMemoryAddr,
- * BreakContinueValid, NoRedundantBlocks} — lightweight checks that catch the
- * most common IR errors.
+ * BreakContinueValid, NoRedundantBlocks, InOutUseValid,
+ * CallDirectionsResolved, ManualDepsOnSubmitOnly} — lightweight checks that
+ * catch the most common IR errors.
  */
 const IRPropertySet& GetVerifiedProperties();
 
@@ -215,7 +216,7 @@ const IRPropertySet& GetVerifiedProperties();
  * These are verified automatically at pipeline start and never declared
  * in per-pass PassProperties. Returns {TypeChecked, BreakContinueValid,
  * NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore,
- * InOutUseValid, PipelineLoopValid}.
+ * InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly}.
  */
 const IRPropertySet& GetStructuralProperties();
 

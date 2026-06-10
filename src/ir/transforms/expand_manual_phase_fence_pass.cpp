@@ -102,7 +102,9 @@ static std::optional<VarPtr> GetSingleManualDepArray(const ExprPtr& node) {
   auto submit = As<Submit>(node);
   if (!submit) return std::nullopt;
   if (submit->deps_.size() != 1 || !submit->deps_[0]) return std::nullopt;
-  return AsVarLike(submit->deps_[0]);
+  auto var = AsVarLike(submit->deps_[0]);
+  if (!var) return std::nullopt;  // non-Var dep — never an engaged-but-null optional
+  return var;
 }
 
 static std::optional<VarPtr> GetSingleManualDepTaskIdArray(const ExprPtr& node) {
@@ -247,7 +249,7 @@ static int64_t GetArrayProducerCount(const VarPtr& array_var) {
 // Submits — GetSingleManualDepArray never selects another kind.
 static ExprPtr RewriteManualDepsToBarrier(const ExprPtr& node, const VarPtr& barrier_var) {
   auto submit = As<Submit>(node);
-  INTERNAL_CHECK(submit) << "Internal error: phase-fence consumer must be a Submit";
+  INTERNAL_CHECK_SPAN(submit, node->span_) << "Internal error: phase-fence consumer must be a Submit";
   return std::make_shared<Submit>(submit->op_, submit->args_, std::vector<ExprPtr>{barrier_var},
                                   submit->kwargs_, submit->attrs_, submit->GetType(), submit->span_,
                                   submit->core_num_, submit->sync_start_);

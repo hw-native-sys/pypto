@@ -165,7 +165,7 @@ class TestManualScopeParsing:
     def test_call_rejects_manual_dep_edges_in_attrs(self):
         """``attrs={'manual_dep_edges': ...}`` is rejected on any call — deps live
         on ``Submit::deps_`` only (ManualDepsOnSubmitOnly invariant)."""
-        with pytest.raises(Exception, match="manual_dep_edges"):
+        with pytest.raises(ParserTypeError, match="manual_dep_edges"):
 
             @pl.program
             class _Prog:
