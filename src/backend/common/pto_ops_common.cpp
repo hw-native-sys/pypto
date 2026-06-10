@@ -810,7 +810,7 @@ static std::string MakeCiCodegenPTO(const std::string& pto_op_name, const CallPt
   std::string dst = codegen.GetCurrentResultTarget();
   std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
   std::ostringstream oss;
-  oss << pto_op_name << " ins(" << src << " " << config_attr;
+  oss << pto_op_name << " ins(" << src;
   if (!src_type.empty()) {
     oss << " : " << src_type;
   }
@@ -818,7 +818,7 @@ static std::string MakeCiCodegenPTO(const std::string& pto_op_name, const CallPt
   if (!dst_type.empty()) {
     oss << " : " << dst_type;
   }
-  oss << ")";
+  oss << ")" << " " << config_attr;
   codegen.Emit(oss.str());
   return "";
 }

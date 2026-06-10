@@ -127,8 +127,8 @@ jobs:
       ASCEND_HOME_PATH: /usr/local/Ascend/cann-9.0.0
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
       PTO_ISA_ROOT: ${{ github.workspace }}/pto-isa
-      PTOAS_VERSION: v0.44
-      PTOAS_SHA256: caf5b463b2a574e1c45685ca3cea8bbfb38bc9f7d58e8158141b8b9e2eee133e
+      PTOAS_VERSION: v0.45
+      PTOAS_SHA256: d5e4380df7edd4d3eeb23502d57f923e4c912345eccceb5a9a0ec1aac3b5e7d4
       CMAKE_BUILD_PARALLEL_LEVEL: 16
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
@@ -267,8 +267,8 @@ jobs:
       ASCEND_HOME_PATH: /usr/local/Ascend/cann-9.0.0
       PTOAS_ROOT: ${{ github.workspace }}/dist-checkout/ptoas-bin
       PTO_ISA_ROOT: ${{ github.workspace }}/dist-checkout/pto-isa
-      PTOAS_VERSION: v0.44
-      PTOAS_SHA256: caf5b463b2a574e1c45685ca3cea8bbfb38bc9f7d58e8158141b8b9e2eee133e
+      PTOAS_VERSION: v0.45
+      PTOAS_SHA256: d5e4380df7edd4d3eeb23502d57f923e4c912345eccceb5a9a0ec1aac3b5e7d4
       CMAKE_BUILD_PARALLEL_LEVEL: 16
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
@@ -357,8 +357,8 @@ jobs:
       ASCEND_HOME_PATH: /usr/local/Ascend/cann-9.0.0
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
       PTO_ISA_ROOT: ${{ github.workspace }}/pto-isa
-      PTOAS_VERSION: v0.44
-      PTOAS_SHA256: caf5b463b2a574e1c45685ca3cea8bbfb38bc9f7d58e8158141b8b9e2eee133e
+      PTOAS_VERSION: v0.45
+      PTOAS_SHA256: d5e4380df7edd4d3eeb23502d57f923e4c912345eccceb5a9a0ec1aac3b5e7d4
       CMAKE_BUILD_PARALLEL_LEVEL: 16
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
@@ -469,8 +469,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
-      PTOAS_VERSION: v0.44
-      PTOAS_SHA256: e77c0fe5a5db26bf8f96406cc22a9da346dbe9f86017d87932c8988dd7ce5969
+      PTOAS_VERSION: v0.45
+      PTOAS_SHA256: 8d1c697e50de238606cec571ee5cdd31e0886476fdf62c4306d2af3bedca16b8
     container:
       image: ghcr.io/hw-native-sys/pypto/github-ci:latest
     steps:
