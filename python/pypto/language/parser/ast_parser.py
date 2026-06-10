@@ -504,9 +504,11 @@ class ASTParser:
         self.gvar_to_func = gvar_to_func or {}  # Track parsed functions for type inference
         self.external_funcs: dict[str, ir.Function] = {}  # Track external functions referenced
         # Cache of return types derived from a callee body (for annotation-less
-        # callees), keyed by id(Function). Avoids re-walking the body on every
-        # call site within one function's parse.
-        self._derived_return_types_cache: dict[int, list[ir.Type]] = {}
+        # callees), keyed by the callee Function. Avoids re-walking the body on
+        # every call site within one function's parse. Keying by the Function
+        # object (not id()) keeps a strong reference, so there is no id-reuse
+        # hazard from a collected-and-reallocated Function.
+        self._derived_return_types_cache: dict[ir.Function, list[ir.Type]] = {}
 
         # Track context for handling yields and returns
         self.in_for_loop = False
@@ -5692,10 +5694,10 @@ class ASTParser:
         declared = list(func.return_types)
         if declared:
             return declared
-        cached = self._derived_return_types_cache.get(id(func))
+        cached = self._derived_return_types_cache.get(func)
         if cached is None:
             cached = _derive_return_types_from_body(func.body)
-            self._derived_return_types_cache[id(func)] = cached
+            self._derived_return_types_cache[func] = cached
         return list(cached)
 
     def _make_call_with_return_type(  # noqa: PLR0913, PLR0912 — cohesive call-builder; bundling args/branches hurts clarity
