@@ -127,8 +127,9 @@ class SpecializeContext:
         auto_scope: Whether the compiler auto-inserts AUTO runtime scopes
             (PTO2_SCOPE). ``True`` by default; ``False`` emits
             ``@pl.function(..., auto_scope=False)`` so the body places scopes
-            by hand. Only honored for the Orchestration entry and HOST
-            orchestrator decorators (see :meth:`Specializer._build_decorator`).
+            by hand. Honored for the Orchestration entry, HOST orchestrator,
+            and inline sub-function decorators (see
+            :meth:`Specializer._build_decorator`).
     """
 
     func_name: str
@@ -1626,10 +1627,11 @@ class Specializer:
         (``include/pypto/ir/function.h``), so a HOST Opaque function keeps
         the explicit ``role=Orchestrator``.
         """
-        # auto_scope=False is only meaningful for orchestration-level entries
-        # (the Orchestration entry and the HOST orchestrator); sub-function
-        # kinds reject it at the decorator layer, so ctx.auto_scope is always
-        # True for them and the suffix stays empty.
+        # auto_scope=False is meaningful for orchestration-level entries (the
+        # Orchestration entry and the HOST orchestrator) and for inline
+        # sub-functions, whose bodies are spliced into the caller so hand-placed
+        # scopes land there. incore/opaque reject it at the decorator layer, so
+        # ctx.auto_scope is always True for them and the suffix stays empty.
         auto_scope_suffix = "" if ctx.auto_scope else ", auto_scope=False"
         if ctx.func_type == "host":
             return f"@pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator{auto_scope_suffix})"
@@ -1638,7 +1640,7 @@ class Specializer:
                 return f"@pl.function(type=pl.FunctionType.Opaque{auto_scope_suffix})"
             return f"@pl.function(type=pl.FunctionType.Orchestration{auto_scope_suffix})"
         if ctx.func_type == "inline":
-            return "@pl.function(type=pl.FunctionType.Inline)"
+            return f"@pl.function(type=pl.FunctionType.Inline{auto_scope_suffix})"
         if ctx.func_type == "opaque":
             return "@pl.function(type=pl.FunctionType.Opaque)"
         # InCore
@@ -1741,8 +1743,9 @@ def build_specialize_context(
         scalar_dtypes: DataType per scalar param name.
         dep_names: Names of @pl.jit.incore functions called from this function.
         auto_scope: Whether the compiler auto-inserts AUTO runtime scopes.
-            Forwarded to the generated ``@pl.function`` decorator; only the
-            Orchestration entry and HOST orchestrator honor ``False``.
+            Forwarded to the generated ``@pl.function`` decorator; the
+            Orchestration entry, HOST orchestrator, and inline sub-functions
+            honor ``False``.
 
     Dynamic dims live inside ``tensor_meta`` as :class:`DynDim` entries —
     no separate set is passed in.

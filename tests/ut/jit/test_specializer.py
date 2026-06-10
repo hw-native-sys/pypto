@@ -926,6 +926,43 @@ class TestSpecializer:
         )
         assert "@pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator, auto_scope=False)" in out
 
+    def test_inline_dep_emits_auto_scope_false(self):
+        """auto_scope=False on an inline sub-function emits
+        ``@pl.function(type=pl.FunctionType.Inline, auto_scope=False)`` so its
+        body can place runtime scopes by hand (#1733)."""
+        src = """
+            def kernel(a: pl.Tensor, c: pl.Tensor):
+                return c
+        """
+        out = self._specialize_simple(
+            src,
+            ["a", "c"],
+            {
+                "a": TensorMeta((128, 128), DataType.FP32),
+                "c": TensorMeta((128, 128), DataType.FP32),
+            },
+            func_type="inline",
+            auto_scope=False,
+        )
+        assert "@pl.function(type=pl.FunctionType.Inline, auto_scope=False)" in out
+
+    def test_inline_dep_default_omits_auto_scope(self):
+        """The default (auto_scope=True) inline decorator emits no auto_scope= kwarg."""
+        src = """
+            def kernel(a: pl.Tensor, c: pl.Tensor):
+                return c
+        """
+        out = self._specialize_simple(
+            src,
+            ["a", "c"],
+            {
+                "a": TensorMeta((128, 128), DataType.FP32),
+                "c": TensorMeta((128, 128), DataType.FP32),
+            },
+            func_type="inline",
+        )
+        assert "auto_scope" not in out
+
 
 # ---------------------------------------------------------------------------
 # Integration: specialize → parseable by pl.parse()
@@ -1009,6 +1046,49 @@ class TestSpecializerIntegration:
         got = pl.parse(generated_src)
 
         ir.assert_structural_equal(got, Expected)
+
+    def test_inline_dep_with_hand_scope_parseable(self):
+        """An auto_scope=False entry calling an auto_scope=False inline dep whose
+        body hand-places ``with pl.scope()`` specializes to parseable source —
+        the parser accepts hand AUTO scopes in both functions (#1733)."""
+        entry_src = textwrap.dedent("""
+            def entry(a: pl.Tensor, c: pl.Out[pl.Tensor]):
+                with pl.scope():
+                    c = inline_fn(a, c)
+                return c
+        """)
+        inline_src = textwrap.dedent("""
+            def inline_fn(a: pl.Tensor, c: pl.Tensor):
+                with pl.scope():
+                    c = pl.add(a, c)
+                return c
+        """)
+        meta = {
+            "a": TensorMeta((128, 128), DataType.FP32),
+            "c": TensorMeta((128, 128), DataType.FP32),
+        }
+        inline_ctx = _make_ctx(
+            func_name="inline_fn",
+            source=inline_src,
+            func_type="inline",
+            param_names=["a", "c"],
+            tensor_meta=meta,
+            auto_scope=False,
+        )
+        entry_ctx = _make_ctx(
+            func_name="entry",
+            source=entry_src,
+            func_type="orchestration",
+            param_names=["a", "c"],
+            tensor_meta=meta,
+            dep_names=["inline_fn"],
+            auto_scope=False,
+        )
+        out = specialize("_InlineHandScope", [inline_ctx, entry_ctx])
+        assert "@pl.function(type=pl.FunctionType.Inline, auto_scope=False)" in out
+        assert "@pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)" in out
+        prog = pl.parse(out)
+        assert isinstance(prog, ir.Program)
 
 
 # ---------------------------------------------------------------------------

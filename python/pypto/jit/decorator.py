@@ -1077,8 +1077,11 @@ class JITFunction:
             (PTO2_SCOPE) around the body and each for/if body. ``True`` by
             default; set ``False`` via ``@pl.jit(auto_scope=False)`` /
             ``@pl.jit.host(auto_scope=False)`` to place scopes by hand with
-            ``with pl.scope()``. Only meaningful for the Orchestration entry
-            and HOST orchestrator — sub-function kinds reject it.
+            ``with pl.scope()``. Also accepted on
+            ``@pl.jit.inline(auto_scope=False)`` — after the ``InlineFunctions``
+            pass splices the body, hand-placed scopes land in the caller.
+            ``incore`` / ``opaque`` kinds reject it (they outline into
+            separate kernels, so scopes never land in the caller).
         _dep_graph: Lazily-computed transitive JIT dep graph rooted here —
             ``(deps_topo, callers_by_dep_id, callees_by_func_id,
             call_args_cache)``.  ``None`` until first ``_get_dep_graph()``
@@ -1780,6 +1783,9 @@ class _SubFunctionDecorator:
 
     Every kind supports both ``@jit.kind`` (bare) and ``@jit.kind()`` (parens).
     Only ``incore`` honors a ``level=`` kwarg; passing it to other kinds raises.
+    Only ``host`` and ``inline`` honor an ``auto_scope=`` kwarg — ``inline``
+    because its body is spliced into the caller, so hand-placed scopes land
+    there; ``incore``/``opaque`` outline into separate kernels and reject it.
 
     See `_JITDecorator` for the kind semantics:
       - ``host``    → HOST Orchestrator entry (specialized to
@@ -1802,8 +1808,8 @@ class _SubFunctionDecorator:
         if auto_scope is not _AUTO_SCOPE_UNSET and not self._allow_auto_scope:
             raise TypeError(
                 f"@pl.jit.{self._func_type} does not accept an auto_scope= argument "
-                "(auto_scope is only meaningful for the Orchestration entry and the "
-                "HOST orchestrator)"
+                "(auto_scope is only meaningful for the Orchestration entry, the "
+                "HOST orchestrator, and inline sub-functions)"
             )
         resolved_auto_scope = True if auto_scope is _AUTO_SCOPE_UNSET else auto_scope
         if func is None:
@@ -1836,7 +1842,7 @@ class _JITDecorator:
     def __init__(self) -> None:
         self.host = _SubFunctionDecorator("host", allow_level=False, allow_auto_scope=True)
         self.incore = _SubFunctionDecorator("incore", allow_level=True)
-        self.inline = _SubFunctionDecorator("inline", allow_level=False)
+        self.inline = _SubFunctionDecorator("inline", allow_level=False, allow_auto_scope=True)
         self.opaque = _SubFunctionDecorator("opaque", allow_level=False)
 
     def __call__(self, func: Any = None, *, auto_scope: bool = True) -> Any:

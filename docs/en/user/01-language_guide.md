@@ -462,13 +462,22 @@ def orchestrator(a: pl.Tensor, b: pl.Tensor, out: pl.Out[pl.Tensor]):
 
 @pl.jit.host(auto_scope=False)         # HOST orchestrator
 def host_orch(...): ...
+
+@pl.jit.inline(auto_scope=False)       # inline sub-function
+def layer(...):
+    with pl.scope():                   # lands in the caller after inlining
+        ...
 ```
 
-`auto_scope=False` is only accepted on the Orchestration entry (`@pl.jit`)
-and the HOST orchestrator (`@pl.jit.host`); the sub-function kinds
-(`.incore` / `.inline` / `.opaque`) reject it. It specializes into
+`auto_scope=False` is accepted on the Orchestration entry (`@pl.jit`),
+the HOST orchestrator (`@pl.jit.host`), and inline sub-functions
+(`@pl.jit.inline`) — inline bodies are spliced into the caller, so their
+hand-placed scopes land there (the entry is usually `auto_scope=False`
+too; entry `True` + inline `False` is legal and just nests hand scopes
+inside compiler AUTO scopes). `.incore` / `.opaque` reject it — they
+outline into separate kernels. It specializes into
 `@pl.function(..., auto_scope=False)` — see the
-[MaterializeRuntimeScopes pass](../dev/passes/37-materialize_runtime_scopes.md)
+[MaterializeRuntimeScopes pass](../dev/passes/38-materialize_runtime_scopes.md)
 for the resulting scope-placement semantics.
 
 ### `@pl.inline`

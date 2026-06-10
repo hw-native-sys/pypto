@@ -181,12 +181,17 @@ class TestJitHostDecoration:
             def sub_fn(a: pl.Tensor):
                 return a
 
-    def test_jit_inline_rejects_auto_scope_kwarg(self):
-        with pytest.raises(TypeError, match="does not accept an auto_scope= argument"):
+    def test_jit_inline_accepts_auto_scope_false(self):
+        """Inline bodies are spliced into the caller, so hand-placed scopes land
+        there — @pl.jit.inline must accept auto_scope=False (#1733)."""
 
-            @jit.inline(auto_scope=False)
-            def sub_fn(a: pl.Tensor):
-                return a
+        @jit.inline(auto_scope=False)
+        def sub_fn(a: pl.Tensor):
+            return a
+
+        assert isinstance(sub_fn, JITFunction)
+        assert sub_fn._func_type == "inline"
+        assert sub_fn._auto_scope is False
 
     def test_jit_opaque_rejects_auto_scope_kwarg(self):
         with pytest.raises(TypeError, match="does not accept an auto_scope= argument"):
@@ -275,6 +280,29 @@ class TestHostDiscoversOrchestrationDep:
         contexts = host_orch._build_contexts(tensor_meta, scalar_values, scalar_dtypes, per_func_dyn)
         dep_ctx = next(ctx for ctx in contexts if ctx.func_name == "chip_orch")
         assert dep_ctx.auto_scope is False
+
+    def test_entry_forwards_inline_dep_auto_scope(self):
+        """An @pl.jit.inline(auto_scope=False) dep of a plain @pl.jit entry keeps
+        auto_scope=False in its SpecializeContext, while the entry's own flag
+        stays at its default True (#1733)."""
+        torch = pytest.importorskip("torch")
+
+        @jit.inline(auto_scope=False)
+        def inline_fn(a: pl.Tensor, c: pl.Tensor):
+            return c
+
+        @jit
+        def entry(a: pl.Tensor, c: pl.Out[pl.Tensor]):
+            return inline_fn(a, c)
+
+        a = torch.empty(128, 128)
+        c = torch.empty(128, 128)
+        _, _, tensor_meta, scalar_values, scalar_dtypes, per_func_dyn = entry._bind_args((a, c), {})
+        contexts = entry._build_contexts(tensor_meta, scalar_values, scalar_dtypes, per_func_dyn)
+        dep_ctx = next(ctx for ctx in contexts if ctx.func_name == "inline_fn")
+        assert dep_ctx.auto_scope is False
+        entry_ctx = next(ctx for ctx in contexts if ctx.func_name == "entry")
+        assert entry_ctx.auto_scope is True
 
 
 # ---------------------------------------------------------------------------
