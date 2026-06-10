@@ -2529,6 +2529,10 @@ void IRPythonPrinter::VisitProgram(const ProgramPtr& program) {
 }
 
 std::string IRPythonPrinter::PrintExprForType(const ExprPtr& expr) {
+  // Top-level static dims always print bare regardless of dtype: dim dtype is
+  // insignificant for static shapes (structural equality compares ConstInt by
+  // value) and bare literals reparse to the canonical INDEX form. Only leaves
+  // inside composite trees need pl.const typing — see typed_index_consts_.
   if (auto const_int = As<ConstInt>(expr)) {
     return std::to_string(const_int->value_);
   }

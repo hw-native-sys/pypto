@@ -158,12 +158,16 @@ class ExprEvaluator:
         """
         cached = self.dynvar_cache.get(dv.name)
         if cached is not None:
-            if dv._ir_var is None:
-                dv._ir_var = cached
+            # Always re-sync the DynVar so a stale _ir_var from an earlier
+            # parse cannot diverge from this parse's cached Var.
+            dv._ir_var = cached
+            dv.expr = cached
             return cached
         # Share the DynVar's lazily-created ir.Var so annotation shapes and
-        # call arguments resolve to the same Var instance. DynVar.unwrap()
-        # always returns the underlying ir.Var (typed Expr on Scalar).
+        # call arguments resolve to the same Var instance, creating it with
+        # the call-site span (DynVar.unwrap() would use Span.unknown()).
+        if dv._ir_var is None:
+            dv._ir_var = ir.Var(dv.name, ir.ScalarType(DataType.INDEX), span)
         var = cast(ir.Var, dv.unwrap())
         self.dynvar_cache[dv.name] = var
         return var

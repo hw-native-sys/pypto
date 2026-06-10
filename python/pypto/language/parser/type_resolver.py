@@ -838,6 +838,12 @@ class TypeResolver:
             # Composite shape dim (e.g. `m + 0`, `pl.const(32, pl.INT64) * 2`)
             # evaluated through DSL operator overloading — keep the IR tree
             # as-is, without constant folding, so print->parse round-trips.
+            expr_type = value.expr.type
+            if not (isinstance(expr_type, ir.ScalarType) and expr_type.dtype.is_int()):
+                raise ParserTypeError(
+                    f"Shape dimension '{source_name}' must be integer-typed, got {expr_type}",
+                    span=span,
+                )
             return value.expr
         raise ParserTypeError(
             f"Shape variable '{source_name}' must be int or pl.dynamic(), got {type(value).__name__}",
@@ -897,13 +903,17 @@ class TypeResolver:
 
     @staticmethod
     def _is_pl_const_call(node: ast.AST) -> bool:
-        """Check whether ``node`` is a ``pl.const(...)`` call."""
+        """Check whether ``node`` is a ``<prefix>.const(...)`` call.
+
+        Any single-name qualifier is accepted (``pl.const``, ``ir.const``, or a
+        custom alias) — the printer emits these calls under a configurable
+        module prefix.
+        """
         return (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "const"
             and isinstance(node.func.value, ast.Name)
-            and node.func.value.id == "pl"
         )
 
     @classmethod
