@@ -755,6 +755,15 @@ ExprPtr GetWriteTargetExpr(const CallPtr& call) {
   if (op_name == "pld.tile.remote_store" && call->args_.size() >= 2) {
     return call->args_[1];
   }
+  // pld.tile.put(dst, peer, src, stage[, dst_offsets, src_offsets, shape]):
+  //   the HCCL TPUT writes through `dst` (args_[0]).
+  // pld.tile.get(dst, peer, src, stage[, dst_offsets, src_offsets, shape]):
+  //   the HCCL TGET writes the pulled bytes into local `dst` (args_[0]).
+  // Both mirror the remote_store handling above so the enclosing window
+  // param is upgraded from In to Out/InOut and a later reader gets a RAW edge.
+  if ((op_name == "pld.tile.put" || op_name == "pld.tile.get") && !call->args_.empty()) {
+    return call->args_[0];
+  }
   return nullptr;
 }
 
@@ -867,6 +876,24 @@ void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, st
       MarkAccess(CollectReferencedOrigins(call->args_[0], origin_map), has_read);
     }
     for (size_t i = 2; i < call->args_.size(); ++i) {
+      MarkAccess(CollectReferencedOrigins(call->args_[i], origin_map), has_read);
+    }
+    if (auto write_target = GetWriteTargetExpr(call)) {
+      MarkAccess(GetAliasOrigins(write_target, origin_map), has_write);
+    }
+    return;
+  }
+
+  if (op_name == "pld.tile.put" || op_name == "pld.tile.get") {
+    // pld.tile.put(dst, peer, src, stage[, dst_offsets, src_offsets, shape]):
+    //   dst (args_[0]) is the cross-rank write target; peer/src/stage and any
+    //   subregion offsets are all read.
+    // pld.tile.get(dst, peer, src, stage[, dst_offsets, src_offsets, shape]):
+    //   dst (args_[0]) is the local write target (HCCL TGET lands bytes into
+    //   the local window slot); peer/src/stage and any subregion offsets are
+    //   all read.
+    // Mirrors the pld.tile.remote_store handling above.
+    for (size_t i = 1; i < call->args_.size(); ++i) {
       MarkAccess(CollectReferencedOrigins(call->args_[i], origin_map), has_read);
     }
     if (auto write_target = GetWriteTargetExpr(call)) {

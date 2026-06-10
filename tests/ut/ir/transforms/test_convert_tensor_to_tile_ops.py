@@ -406,6 +406,11 @@ class TestConvertTensorToTileOps:
         (here [16, 64] flattens to itself) with the dst's FP16 dtype, threaded as the
         4th positional arg of ``pld.tile.put``; the ``atomic`` kwarg is forwarded
         unchanged. The InCore is void (no return), so no Out param is appended.
+
+        The ``dst`` window param is upgraded from In to Out by
+        ``UpgradeWrittenTensorParamDirections`` since the HCCL TPUT writes
+        through it — without this, a downstream reader of the same window
+        gets no RAW edge from the orchestration codegen (issue #1732).
         """
 
         @pl.program
@@ -427,7 +432,7 @@ class TestConvertTensorToTileOps:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
-                dst: pld.DistributedTensor[[16, 64], pl.FP16],
+                dst: pl.Out[pld.DistributedTensor[[16, 64], pl.FP16]],
                 src: pld.DistributedTensor[[16, 64], pl.FP16],
                 peer: pl.Scalar[pl.INT32],
             ):
@@ -445,7 +450,14 @@ class TestConvertTensorToTileOps:
         ir.assert_structural_equal(After, Expected)
 
     def test_get_emits_tile_create_plus_tile_get(self):
-        """pld.tensor.get lowers to tile.create(stage) + pld.tile.get(dst, peer, src, stage)."""
+        """pld.tensor.get lowers to tile.create(stage) + pld.tile.get(dst, peer, src, stage).
+
+        The ``dst`` window param is upgraded from In to Out by
+        ``UpgradeWrittenTensorParamDirections`` since the HCCL TGET writes
+        the pulled bytes into the local window slot — without this, a
+        downstream reader of the same window gets no RAW edge from the
+        orchestration codegen (issue #1732).
+        """
 
         @pl.program
         class Before:
@@ -463,7 +475,7 @@ class TestConvertTensorToTileOps:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
-                dst: pld.DistributedTensor[[16, 64], pl.FP16],
+                dst: pl.Out[pld.DistributedTensor[[16, 64], pl.FP16]],
                 src: pld.DistributedTensor[[16, 64], pl.FP16],
                 peer: pl.Scalar[pl.INT32],
             ):
