@@ -459,6 +459,12 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/pypto-lib
         run: python models/deepseek/v4/decode_attention_hca.py -p a2a3 -d "$DEVICE_ID"
 
+      - name: Run pypto-lib DeepSeek-V4 prefill_attention_csa example
+        working-directory: ${{ github.workspace }}/pypto-lib
+        env:
+          PYTHONPATH: ${{ github.workspace }}/pypto-lib
+        run: python models/deepseek/v4/prefill_attention_csa.py -p a2a3 -d "$DEVICE_ID"
+
   system-tests-a5sim:
     runs-on: ubuntu-latest
     env:
