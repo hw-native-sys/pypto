@@ -1553,6 +1553,72 @@ class TestOutWindowExternalizer:
         assert "pl.tensor.slice(out" not in printed_main
         assert "pl.tensor.slice(first" not in printed_main
 
+    def test_nested_sibling_writer_to_same_parent_stays_baseline(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_stripe(
+                self,
+                data: pl.Tensor[[256, 64], pl.FP32],
+                row_offset: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
+            ) -> pl.Tensor[[256, 64], pl.FP32]:
+                tile: pl.Tile[[64, 64], pl.FP32] = pl.load(data, [row_offset, 0], [64, 64])
+                ret: pl.Tensor[[256, 64], pl.FP32] = pl.store(tile, [row_offset, 0], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                data: pl.Tensor[[256, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
+            ) -> pl.Tensor[[256, 64], pl.FP32]:
+                first: pl.Tensor[[256, 64], pl.FP32] = self.kernel_stripe(data, 0, out)
+                for i, (first_iter,) in pl.range(1, init_values=(first,)):
+                    second: pl.Tensor[[256, 64], pl.FP32] = self.kernel_stripe(data, 32, first_iter)
+                    second_rv = pl.yield_(second)
+                return second_rv
+
+        After = _run_to_optimize_orch_tensors(Before)
+
+        assert After.get_function("kernel_stripe__windowed") is None
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert "kernel_stripe__windowed" not in printed_main
+        assert "pl.tensor.slice(out" not in printed_main
+        assert "pl.tensor.slice(first" not in printed_main
+
+    def test_single_nested_writer_can_still_window(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_stripe(
+                self,
+                data: pl.Tensor[[256, 64], pl.FP32],
+                row_offset: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
+            ) -> pl.Tensor[[256, 64], pl.FP32]:
+                tile: pl.Tile[[64, 64], pl.FP32] = pl.load(data, [row_offset, 0], [64, 64])
+                ret: pl.Tensor[[256, 64], pl.FP32] = pl.store(tile, [row_offset, 0], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                data: pl.Tensor[[256, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
+            ) -> pl.Tensor[[256, 64], pl.FP32]:
+                for i, (out_iter,) in pl.range(1, init_values=(out,)):
+                    result: pl.Tensor[[256, 64], pl.FP32] = self.kernel_stripe(data, 64, out_iter)
+                    result_rv = pl.yield_(result)
+                return result_rv
+
+        After = _run_to_optimize_orch_tensors(Before)
+
+        assert After.get_function("kernel_stripe__windowed") is not None
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert "kernel_stripe__windowed" in printed_main
+        assert "pl.tensor.slice(out" in printed_main
+
     def test_tuple_return_sibling_writer_alias_stays_baseline(self):
         @pl.program
         class Before:
@@ -2756,6 +2822,43 @@ class TestOutWindowExternalizer:
 
         After = passes.optimize_orch_tensors()(Before)
         ir.assert_structural_equal(After, Before)
+
+    def test_while_return_parent_uses_visible_init_for_output_window(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_stripe(
+                self,
+                data: pl.Tensor[[256, 64], pl.FP32],
+                row_offset: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
+            ) -> pl.Tensor[[256, 64], pl.FP32]:
+                tile: pl.Tile[[64, 64], pl.FP32] = pl.load(data, [row_offset, 0], [64, 64])
+                ret: pl.Tensor[[256, 64], pl.FP32] = pl.store(tile, [row_offset, 0], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                data: pl.Tensor[[256, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
+                n: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[256, 64], pl.FP32]:
+                row: pl.Scalar[pl.INDEX] = 0
+                for row_iter, out_iter in pl.while_(init_values=(row, out)):
+                    pl.cond(row_iter < n)
+                    row_next: pl.Scalar[pl.INDEX] = row_iter + 1
+                    row_rv, out_rv = pl.yield_(row_next, out_iter)
+                result: pl.Tensor[[256, 64], pl.FP32] = self.kernel_stripe(data, 64, out_rv)
+                return result
+
+        After = passes.optimize_orch_tensors()(Before)
+
+        assert After.get_function("kernel_stripe__windowed") is not None
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert "kernel_stripe__windowed" in printed_main
+        assert "pl.tensor.slice(out" in printed_main
+        assert "pl.tensor.slice(out_rv" not in printed_main
 
     def test_full_shape_zero_offset_window_stays_baseline(self):
         @pl.program

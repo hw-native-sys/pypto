@@ -2096,7 +2096,7 @@ class OutWindowExternalizer {
         sequential_loops_.pop_back();
       }
       loop_iter_init_subst_ = std::move(saved_loop_iter_init_subst);
-      RecordForLoopReturnInitAliases(op);
+      RecordLoopReturnInitAliases(op);
       return result;
     }
 
@@ -2112,6 +2112,7 @@ class OutWindowExternalizer {
       --while_depth_;
       auto visited_loop = As<WhileStmt>(result);
       loop_iter_init_subst_ = std::move(saved_loop_iter_init_subst);
+      RecordLoopReturnInitAliases(visited_loop ? visited_loop : op);
       return result;
     }
 
@@ -2123,8 +2124,17 @@ class OutWindowExternalizer {
       auto saved_tuple_result_subst = tuple_result_subst_;
       auto saved_sibling_output_parent_counts = sibling_output_parent_counts_;
       auto saved_sibling_output_alias_roots = sibling_output_alias_roots_;
+      bool saved_sibling_output_summary_active = sibling_output_summary_active_;
       auto later_assemble_source_indices = CollectAssembleSourceIndices(op->stmts_);
-      sibling_output_parent_counts_ = CollectSiblingOutputParentCounts(op->stmts_);
+      if (!sibling_output_summary_active_) {
+        auto local_sibling_output_parent_counts = CollectSiblingOutputParentCounts(op->stmts_);
+        sibling_output_parent_counts_ = saved_sibling_output_parent_counts;
+        for (const auto& [root, count] : local_sibling_output_parent_counts) {
+          auto& accumulated = sibling_output_parent_counts_[root];
+          accumulated = std::max(accumulated, count);
+        }
+        sibling_output_summary_active_ = true;
+      }
 
       for (size_t stmt_index = 0; stmt_index < op->stmts_.size(); ++stmt_index) {
         const auto& stmt = op->stmts_[stmt_index];
@@ -2159,6 +2169,7 @@ class OutWindowExternalizer {
       tuple_result_subst_ = std::move(saved_tuple_result_subst);
       sibling_output_parent_counts_ = std::move(saved_sibling_output_parent_counts);
       sibling_output_alias_roots_ = std::move(saved_sibling_output_alias_roots);
+      sibling_output_summary_active_ = saved_sibling_output_summary_active;
       if (!changed) return op;
       return SeqStmts::Flatten(std::move(new_stmts), op->span_);
     }
@@ -2179,7 +2190,8 @@ class OutWindowExternalizer {
       const std::unordered_set<const Var*>* loop_local_allocs = nullptr;
     };
 
-    void RecordForLoopReturnInitAliases(const ForStmtPtr& loop) {
+    template <typename LoopPtr>
+    void RecordLoopReturnInitAliases(const LoopPtr& loop) {
       if (!loop) return;
       size_t n = std::min(loop->iter_args_.size(), loop->return_vars_.size());
       for (size_t i = 0; i < n; ++i) {
@@ -2193,6 +2205,18 @@ class OutWindowExternalizer {
         loop_iter_init_subst_[return_var.get()] = parent_expr;
         loop_return_init_subst_[return_var.get()] = parent_expr;
       }
+    }
+
+    const std::vector<OutParamReturnMapping>& GetOutParamReturnMappings(const FunctionPtr& func,
+                                                                        bool include_inout) {
+      static const std::vector<OutParamReturnMapping> kEmpty;
+      if (!func) return kEmpty;
+      auto key = func->name_ + (include_inout ? "#inout" : "#out");
+      auto it = out_param_return_mappings_cache_.find(key);
+      if (it != out_param_return_mappings_cache_.end()) return it->second;
+      auto [inserted_it, _] = out_param_return_mappings_cache_.emplace(
+          std::move(key), BuildOutParamReturnMappings(func, include_inout));
+      return inserted_it->second;
     }
 
     static std::unordered_map<const Var*, size_t> CollectAssembleSourceIndices(
@@ -2496,75 +2520,118 @@ class OutWindowExternalizer {
 
     std::unordered_map<const Var*, size_t> CollectSiblingOutputParentCounts(
         const std::vector<StmtPtr>& sibling_stmts) {
-      sibling_output_alias_roots_.clear();
       std::unordered_map<const Var*, std::vector<const Var*>> sibling_tuple_output_roots;
-
-      struct SiblingOutputRoot {
-        const Var* root = nullptr;
-      };
-      std::vector<SiblingOutputRoot> output_roots;
+      std::vector<const Var*> output_roots;
       output_roots.reserve(sibling_stmts.size());
 
-      for (const auto& sibling_stmt : sibling_stmts) {
-        auto assign = As<AssignStmt>(sibling_stmt);
-        CallPtr call;
-        if (assign) {
-          if (auto submit = As<Submit>(assign->value_)) {
+      class SiblingWriterCollector : public IRVisitor {
+       public:
+        SiblingWriterCollector(OrchRewriter* rewriter,
+                               std::unordered_map<const Var*, std::vector<const Var*>>* tuple_output_roots,
+                               std::vector<const Var*>* output_roots)
+            : rewriter_(rewriter), tuple_output_roots_(tuple_output_roots), output_roots_(output_roots) {}
+
+       protected:
+        void VisitStmt_(const AssignStmtPtr& op) override {
+          if (!op) return;
+          CallPtr call;
+          if (auto submit = As<Submit>(op->value_)) {
             call = SubmitToCallView(submit);
           } else {
-            call = As<Call>(assign->value_);
+            call = As<Call>(op->value_);
           }
-        }
-        if (assign) {
-          if (auto tuple_get = As<TupleGetItemExpr>(assign->value_)) {
+
+          if (auto tuple_get = As<TupleGetItemExpr>(op->value_)) {
             auto tuple_var = AsVarLike(tuple_get->tuple_);
-            auto tuple_it = tuple_var ? sibling_tuple_output_roots.find(tuple_var.get())
-                                      : sibling_tuple_output_roots.end();
-            if (tuple_it != sibling_tuple_output_roots.end() && tuple_get->index_ >= 0 &&
+            auto tuple_it =
+                tuple_var ? tuple_output_roots_->find(tuple_var.get()) : tuple_output_roots_->end();
+            if (tuple_it != tuple_output_roots_->end() && tuple_get->index_ >= 0 &&
                 static_cast<size_t>(tuple_get->index_) < tuple_it->second.size()) {
               if (const Var* root = tuple_it->second[static_cast<size_t>(tuple_get->index_)]) {
-                sibling_output_alias_roots_[assign->var_.get()] = root;
+                rewriter_->sibling_output_alias_roots_[op->var_.get()] = root;
               }
             }
           }
-        }
-        if (!call || pypto::codegen::IsBuiltinOp(call->op_->name_)) continue;
 
-        auto callee = program_ ? program_->GetFunction(call->op_->name_) : nullptr;
-        if (!callee) continue;
+          if (!call || pypto::codegen::IsBuiltinOp(call->op_->name_)) {
+            IRVisitor::VisitStmt_(op);
+            return;
+          }
 
-        const Var* single_output_root = nullptr;
-        size_t output_root_count = 0;
-        for (size_t i = 0; i < call->args_.size() && i < callee->param_directions_.size(); ++i) {
-          if (callee->param_directions_[i] != ParamDirection::Out &&
-              callee->param_directions_[i] != ParamDirection::InOut) {
-            continue;
+          auto callee = rewriter_->program_ ? rewriter_->program_->GetFunction(call->op_->name_) : nullptr;
+          if (!callee) {
+            IRVisitor::VisitStmt_(op);
+            return;
           }
-          if (const Var* parent_root = ResolveOutputParentRoot(call, i)) {
-            output_roots.push_back(SiblingOutputRoot{parent_root});
-            single_output_root = parent_root;
-            ++output_root_count;
-          }
-        }
-        if (assign && output_root_count == 1 && AsTensorTypeLike(assign->var_->GetType())) {
-          sibling_output_alias_roots_[assign->var_.get()] = single_output_root;
-        }
-        if (assign && output_root_count > 0 && As<TupleType>(assign->var_->GetType())) {
-          std::vector<const Var*> tuple_roots(callee->return_types_.size(), nullptr);
-          for (const auto& mapping : BuildOutParamReturnMappings(callee, /*include_inout=*/true)) {
-            if (mapping.return_index >= tuple_roots.size() || mapping.param_index >= call->args_.size()) {
+
+          const Var* single_output_root = nullptr;
+          size_t output_root_count = 0;
+          for (size_t i = 0; i < call->args_.size() && i < callee->param_directions_.size(); ++i) {
+            if (callee->param_directions_[i] != ParamDirection::Out &&
+                callee->param_directions_[i] != ParamDirection::InOut) {
               continue;
             }
-            tuple_roots[mapping.return_index] = ResolveOutputParentRoot(call, mapping.param_index);
+            if (const Var* parent_root = rewriter_->ResolveOutputParentRoot(call, i)) {
+              output_roots_->push_back(parent_root);
+              single_output_root = parent_root;
+              ++output_root_count;
+            }
           }
-          sibling_tuple_output_roots[assign->var_.get()] = std::move(tuple_roots);
+          if (output_root_count == 1 && AsTensorTypeLike(op->var_->GetType())) {
+            rewriter_->sibling_output_alias_roots_[op->var_.get()] = single_output_root;
+          }
+          if (output_root_count > 0 && As<TupleType>(op->var_->GetType())) {
+            std::vector<const Var*> tuple_roots(callee->return_types_.size(), nullptr);
+            for (const auto& mapping : rewriter_->GetOutParamReturnMappings(callee, /*include_inout=*/true)) {
+              if (mapping.return_index >= tuple_roots.size() || mapping.param_index >= call->args_.size()) {
+                continue;
+              }
+              tuple_roots[mapping.return_index] =
+                  rewriter_->ResolveOutputParentRoot(call, mapping.param_index);
+            }
+            (*tuple_output_roots_)[op->var_.get()] = std::move(tuple_roots);
+          }
+
+          IRVisitor::VisitStmt_(op);
         }
+
+        void VisitStmt_(const ForStmtPtr& op) override {
+          auto saved_loop_iter_init_subst = rewriter_->loop_iter_init_subst_;
+          for (const auto& iter_arg : op->iter_args_) {
+            if (iter_arg && iter_arg->initValue_) {
+              rewriter_->loop_iter_init_subst_[iter_arg.get()] = iter_arg->initValue_;
+            }
+          }
+          IRVisitor::VisitStmt_(op);
+          rewriter_->loop_iter_init_subst_ = std::move(saved_loop_iter_init_subst);
+        }
+
+        void VisitStmt_(const WhileStmtPtr& op) override {
+          auto saved_loop_iter_init_subst = rewriter_->loop_iter_init_subst_;
+          for (const auto& iter_arg : op->iter_args_) {
+            if (iter_arg && iter_arg->initValue_) {
+              rewriter_->loop_iter_init_subst_[iter_arg.get()] = iter_arg->initValue_;
+            }
+          }
+          IRVisitor::VisitStmt_(op);
+          rewriter_->loop_iter_init_subst_ = std::move(saved_loop_iter_init_subst);
+        }
+
+       private:
+        OrchRewriter* rewriter_;
+        std::unordered_map<const Var*, std::vector<const Var*>>* tuple_output_roots_;
+        std::vector<const Var*>* output_roots_;
+      };
+
+      SiblingWriterCollector collector(this, &sibling_tuple_output_roots, &output_roots);
+      for (const auto& sibling_stmt : sibling_stmts) {
+        collector.VisitStmt(sibling_stmt);
       }
 
       std::unordered_map<const Var*, size_t> counts;
       counts.reserve(output_roots.size());
       for (const auto& output_root : output_roots) {
-        const Var* root = output_root.root;
+        const Var* root = output_root;
         std::unordered_set<const Var*> seen;
         while (root && seen.insert(root).second) {
           auto it = sibling_output_alias_roots_.find(root);
@@ -2717,6 +2784,8 @@ class OutWindowExternalizer {
     std::unordered_map<const Var*, std::vector<ExprPtr>> tuple_result_subst_;
     std::unordered_map<const Var*, size_t> sibling_output_parent_counts_;
     std::unordered_map<const Var*, const Var*> sibling_output_alias_roots_;
+    std::unordered_map<std::string, std::vector<OutParamReturnMapping>> out_param_return_mappings_cache_;
+    bool sibling_output_summary_active_ = false;
     int while_depth_ = 0;
   };
 
@@ -2948,6 +3017,9 @@ class OutWindowExternalizer {
       offsets = As<MakeTuple>(call->args_[2]);
       auto tensor_type = As<TensorType>(call->GetType());
       if (!parent || parent.get() != param || !offsets || !tensor_type) return std::nullopt;
+      // The slice op is itself the complete access to the parent region. Any
+      // later use must reference the slice value, so total_refs accounting below
+      // rejects extra reads from the original full input.
       window_shape = tensor_type->shape_;
     } else {
       return std::nullopt;
@@ -3061,6 +3133,9 @@ class OutWindowExternalizer {
       }
       if (!CanMaterializeWindowParamType(tensor_type, matched->window_shape)) continue;
 
+      // Pure input windows must be materializable from call arguments alone.
+      // Loop-affine input windows are handled by aggregate-loop analysis, so a
+      // nested loop var here intentionally keeps the full input.
       bool exprs_ok = true;
       for (const auto& expr : matched->window_shape) {
         if (!ExprReferencesOnlyVarsIn(expr, allowed_params)) {
