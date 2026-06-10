@@ -112,7 +112,7 @@ loop-carried iter-arg 不会被这样折叠。
 - offset 必须是该 pass 可接受的外层循环变量仿射表达式
 - multi-`Out` 改写采用全有或全无策略
 - 顺序循环 sibling 只有在每个被改写 `Out` 都能证明跨 sibling iteration 不重叠时才改写
-- 同一 scope 内写入同一 parent 或 alias parent tensor 的 sibling writer，只要每个 writer 自身满足静态 output-window eligibility，仍然可以 externalize；但如果同一个 parent 还存在无法 externalize 成 window 的 sibling full-`Out` writer，则写同一 parent 的其他 writer 也保持 full-tensor，避免这个非 window writer 掩盖只被部分初始化的区域
+- 同一 scope 内写入同一 parent 或 alias parent tensor 的 sibling writer，只要每个 writer 自身满足静态 output-window eligibility，仍然可以 externalize；但如果同一个 parent 还存在无法 externalize 成 output window 的 sibling full writer（`Out` 或 `InOut`），则写同一 parent 的其他 writer 也保持 full-tensor，避免这个非 window writer 掩盖只被部分初始化的区域
 - 对剩余 windowed writer，写写/写读顺序交给 runtime TensorMap 对实际 submit 的 window descriptor 做 overlap 建边
 - sibling-writer alias 收集会递归进入嵌套 `SeqStmts`、`ForStmt`、`WhileStmt` 和 `IfStmt` body，因此 loop return、tuple projection 这类 tensor alias 会先折叠到 codegen 可见的 parent，再生成 call-site slice
 - 后续 full-parent read 不会关闭输出 window；callsite 暴露真实窗口张量之后，正确性依赖 runtime TensorMap overlap dependence

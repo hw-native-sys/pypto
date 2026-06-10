@@ -1298,6 +1298,40 @@ class TestOutWindowExternalizer:
         assert "write_prefix__windowed" not in printed_main
         assert "pl.tensor.slice(out" not in printed_main
 
+    def test_windowable_writer_blocked_by_callsite_output_sibling(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def init_row(
+                self,
+                out: pl.Out[pl.Tensor[[4, 16], pl.INT32]],
+                row: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[4, 16], pl.INT32]:
+                invalid: pl.Tile[[1, 16], pl.INT32] = pl.tile.full([1, 16], dtype=pl.INT32, value=-1)
+                result: pl.Tensor[[4, 16], pl.INT32] = pl.tile.store(invalid, [row, 0], out)
+                return result
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                out: pl.Out[pl.Tensor[[4, 16], pl.INT32]],
+            ) -> pl.Tensor[[4, 16], pl.INT32]:
+                for row, (out_iter,) in pl.parallel(4, init_values=(out,)):
+                    init_next: pl.Tensor[[4, 16], pl.INT32] = self.init_row(out_iter, row)
+                    with pl.at(level=pl.Level.CORE_GROUP, name_hint="write_prefix"):
+                        value: pl.Scalar[pl.INT32] = pl.cast(row, target_type=pl.INT32)
+                        write_next: pl.Tensor[[4, 16], pl.INT32] = pl.write(init_next, [row, 0], value)
+                    out_rv = pl.yield_(write_next)
+                return out_rv
+
+        After = _run_to_optimize_orch_tensors(Before)
+
+        assert After.get_function("init_row__windowed") is None
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert "init_row__windowed" not in printed_main
+        assert "write_prefix__windowed" not in printed_main
+        assert "pl.tensor.slice(out" not in printed_main
+
     def test_aggregate_input_window_loop_rewrites_qk_norm_shape(self):
         @pl.program
         class Before:

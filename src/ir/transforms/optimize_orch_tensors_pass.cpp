@@ -2613,14 +2613,21 @@ class OutWindowExternalizer {
 
           const Var* single_output_root = nullptr;
           size_t output_root_count = 0;
+          auto arg_directions = call->GetArgDirections();
+          bool has_callsite_directions = arg_directions.size() == call->args_.size();
           for (size_t i = 0; i < call->args_.size() && i < callee->param_directions_.size(); ++i) {
-            if (callee->param_directions_[i] != ParamDirection::Out &&
-                callee->param_directions_[i] != ParamDirection::InOut) {
+            bool is_writer = false;
+            if (has_callsite_directions) {
+              is_writer = IsWriterArgDirection(arg_directions[i]);
+            } else {
+              is_writer = callee->param_directions_[i] == ParamDirection::Out ||
+                          callee->param_directions_[i] == ParamDirection::InOut;
+            }
+            if (!is_writer) {
               continue;
             }
             if (const Var* parent_root = rewriter_->ResolveOutputParentRoot(call, i)) {
-              if (callee->param_directions_[i] == ParamDirection::Out &&
-                  !rewriter_->HasOutputWindowAnalysis(call->op_->name_, i)) {
+              if (!rewriter_->HasOutputWindowAnalysis(call->op_->name_, i)) {
                 rewriter_->sibling_unwindowable_output_roots_.insert(parent_root);
               }
               single_output_root = parent_root;
@@ -2668,6 +2675,11 @@ class OutWindowExternalizer {
       for (const auto& sibling_stmt : sibling_stmts) {
         collector.VisitStmt(sibling_stmt);
       }
+    }
+
+    static bool IsWriterArgDirection(ArgDirection direction) {
+      return direction == ArgDirection::Output || direction == ArgDirection::OutputExisting ||
+             direction == ArgDirection::InOut;
     }
 
     bool HasOutputWindowAnalysis(const std::string& callee_name, size_t out_param_index) const {
