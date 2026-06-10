@@ -97,7 +97,9 @@ The implementation falls back when it detects any of these cases:
 - a required hazard depends on a prior producer whose TaskId is not statically
   bound;
 - dynamic fan-in from a producer inside a loop, where one scalar TaskId binding
-  would not represent all runtime producer instances;
+  would not represent all runtime producer instances; a post-loop consumer may
+  still stay in manual mode when it explicitly depends on the loop-carried
+  `TaskId` that represents the last producer;
 - dynamic gather/scatter-like access where the touched roots or regions depend
   on runtime indices and cannot be summarized as a bounded static access;
 - control-flow joins whose required dependency set is not a fixed list, for
@@ -156,13 +158,18 @@ with runtime TensorMap state at a manual/auto boundary.
 - Emits compiler deps for RAW/WAR/WAW hazards when storage roots may alias and
   regions may overlap.
 - Skips read-read pairs and statically disjoint regions.
-- Preserves user deps and avoids duplicate compiler deps.
+- Preserves user deps and avoids duplicate compiler deps. `TaskId` aliases are
+  canonicalized for duplicate checks, so a user dep on a submit-return alias
+  is not repeated as an equivalent compiler dep.
 - Falls back the whole scope to auto mode when a required dependency cannot be
   represented as bounded roots plus fixed TaskId deps.
 
 ### TaskId Collection
 
 - Added collection of producer TaskId variables from `pl.submit` tuple returns.
+- Tracks simple TaskId aliases, including scalar assignments and loop-carried
+  TaskId yields, so dependency comparisons use the producer identity rather
+  than the spelling chosen at the call site.
 - Preserved submit TaskIds through relevant scalar DCE paths so generated deps
   can still reference the producer.
 - Kept support aligned with the existing scalar TaskId and fixed TaskId array

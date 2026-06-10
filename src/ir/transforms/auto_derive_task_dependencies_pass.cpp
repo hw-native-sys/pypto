@@ -746,6 +746,14 @@ class SubmitTaskIdCollector : public IRVisitor {
       }
     }
 
+    if (IsTaskIdVar(op->var_)) {
+      if (auto source_task_id = CanonicalTaskIdForExpr(op->value_)) {
+        if (source_task_id->UniqueId() != op->var_->UniqueId()) {
+          task_id_by_var_id_[op->var_->UniqueId()] = source_task_id;
+        }
+      }
+    }
+
     if (auto call = As<Call>(op->value_)) {
       RecordTaskTupleProducer(op->var_, call);
     } else if (auto submit = As<Submit>(op->value_)) {
@@ -944,7 +952,8 @@ class AutoDepMutator : public IRMutator {
       }
     }
     bool needs_fallback = false;
-    auto user_edges = CanonicalizeTaskIds(GetDepAttr(call, kAttrManualDepEdges));
+    auto raw_user_edges = GetDepAttr(call, kAttrManualDepEdges);
+    auto user_edges = CanonicalizeTaskIds(raw_user_edges);
     const bool debug_loop_carry = AutoDepsLoopCarryDebugEnabled();
     auto summary = SummarizeAccesses(call, user_edges, &needs_fallback);
     if (debug_loop_carry) {
@@ -969,15 +978,18 @@ class AutoDepMutator : public IRMutator {
         if (!storage_ || !storage_->MayAlias(access.location.root, prior.location.root)) continue;
         if (!RegionsMayOverlap(access.location.region, prior.location.region)) continue;
         if (!HasHazard(access.kind, prior.kind)) continue;
-        const bool covered_by_user_edge = ContainsVar(user_edges, prior.task_id_var);
+        VarPtr prior_edge = CanonicalTaskId(prior.task_id_var);
+        if (!prior_edge) prior_edge = prior.task_id_var;
+        const bool covered_by_user_edge = ContainsVar(user_edges, prior_edge);
         if (debug_loop_carry) {
           DebugLog("hazard call=" + call->op_->name_ + " prior_task_id=" + DebugVar(prior.task_id_var) +
+                   " prior_edge=" + DebugVar(prior_edge) +
                    " covered_by_user_edge=" + (covered_by_user_edge ? std::string("true") : "false") +
                    " dynamic_producer=" + (prior.dynamic_producer ? std::string("true") : "false") +
                    " current_task_id=" + DebugVar(task_id));
         }
-        if (covered_by_user_edge) continue;
         if (prior.dynamic_producer) {
+          if (covered_by_user_edge && loop_depth_ == 0) continue;
           if (debug_loop_carry) {
             DebugLog("fallback_reason=dynamic_prior_producer_requires_scope_lift call=" + call->op_->name_ +
                      " prior_task_id=" + DebugVar(prior.task_id_var));
@@ -985,6 +997,7 @@ class AutoDepMutator : public IRMutator {
           fallback_stack_.back() = true;
           return call;
         }
+        if (covered_by_user_edge) continue;
         if (!prior.task_id_var) {
           if (debug_loop_carry) {
             DebugLog("fallback_reason=" +
@@ -995,7 +1008,7 @@ class AutoDepMutator : public IRMutator {
           fallback_stack_.back() = true;
           return call;
         }
-        AppendUnique(&compiler_edges, prior.task_id_var);
+        AppendUnique(&compiler_edges, prior_edge);
       }
     }
 
