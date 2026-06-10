@@ -1178,6 +1178,40 @@ class TestAutoDeriveTaskDependencies:
         printed = _printed(out)
         assert '"compiler_manual_dep_edges": [produced]' in printed
 
+    def test_auto_scope_dynamic_loop_hazard_does_not_strip_encodable_edges(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill(
+                self,
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                return out
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                scratch: pl.Tensor[[64], pl.FP32],
+                other: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                produced = self.fill(other)
+                _checked = self.consume(produced)
+                carried = scratch
+                for _i in pl.range(0, 4):
+                    carried = self.fill(carried)
+                out = self.consume(carried)
+                return out
+
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
+        consume_calls = _user_calls(out, "consume")
+        assert len(consume_calls) == 2
+        assert [edge.name_hint for edge in _compiler_edges(consume_calls[0])] == ["produced"]
+        assert _compiler_edges(consume_calls[1]) == []
+
     def test_large_control_flow_root_set_falls_back_to_auto_scope(self):
         @pl.program
         class Prog:

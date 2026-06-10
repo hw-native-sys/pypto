@@ -978,6 +978,14 @@ class AutoDepMutator : public IRMutator {
         }
         if (covered_by_user_edge) continue;
         if (prior.dynamic_producer) {
+          const bool in_manual_scope = !scope_manual_stack_.empty() && scope_manual_stack_.back();
+          if (!in_manual_scope) {
+            if (debug_loop_carry) {
+              DebugLog("skip_auto_scope_dynamic_prior_producer call=" + call->op_->name_ +
+                       " prior_task_id=" + DebugVar(prior.task_id_var));
+            }
+            continue;
+          }
           if (debug_loop_carry) {
             DebugLog("fallback_reason=dynamic_prior_producer_requires_scope_lift call=" + call->op_->name_ +
                      " prior_task_id=" + DebugVar(prior.task_id_var));
