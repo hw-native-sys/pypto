@@ -11,7 +11,7 @@
 
 import pypto.language as pl
 import pytest
-from pypto import ir, passes
+from pypto import DataType, ir, passes
 
 
 class TestOutlineIncoreScopes:
@@ -848,6 +848,51 @@ class TestOutlineSubmitTaskId:
         Expected = passes.convert_to_ssa()(Expected)
         After = passes.outline_incore_scopes()(Before)
         ir.assert_structural_equal(After, Expected)
+
+    def test_outline_deps_only_scope_emits_submit(self):
+        """A ``deps=[tid0]`` scope WITHOUT ``as tid`` still outlines to an ``ir.Submit``.
+
+        The second scope consumes ``tid0`` via ``deps=[...]`` but does not bind
+        a TaskId of its own. The outliner must still emit an ``ir.Submit`` (not
+        a plain Call): its first-class ``deps_`` carries the single ``tid0``
+        edge, and the return type is augmented with the trailing
+        ``Scalar[TASK_ID]`` — the synthesized TaskId name is internal, so only
+        kind/deps/type-shape are asserted (no exact tid name).
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP) as tid0:
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                with pl.at(level=pl.Level.CORE_GROUP, deps=[tid0]):
+                    z: pl.Tensor[[64], pl.FP32] = pl.mul(y, y)
+                return z
+
+        Before = passes.convert_to_ssa()(Before)
+        After = passes.outline_incore_scopes()(Before)
+
+        submits: list[ir.Submit] = []
+
+        class _Collector(ir.IRVisitor):
+            def visit_submit(self, op):
+                submits.append(op)
+                super().visit_submit(op)
+
+        _Collector().visit_program(After)
+
+        # Both scopes outline to Submits; the deps-only scope is the second.
+        assert len(submits) == 2
+        call = submits[1]
+        assert isinstance(call, ir.Submit)
+        assert len(call.deps) == 1
+        assert call.op.name == "main_incore_1"
+        # Return type carries the trailing Scalar[TASK_ID].
+        assert isinstance(call.type, ir.TupleType)
+        tail = call.type.types[-1]
+        assert isinstance(tail, ir.ScalarType)
+        assert tail.dtype == DataType.TASK_ID
 
 
 class TestOutlineSpmdScope:

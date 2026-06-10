@@ -227,6 +227,7 @@ set(PYPTO_SOURCES
     src/ir/verifier/verify_array_not_escaped.cpp
     src/ir/verifier/verify_inout_use.cpp
     src/ir/verifier/verify_pipeline_loop_valid.cpp
+    src/ir/verifier/verify_manual_deps_on_submit_only.cpp
     src/ir/verifier/verify_pipeline_resolved.cpp
     src/ir/verifier/verify_call_directions.cpp
     src/ir/verifier/verify_tile_type_coherence.cpp

@@ -1148,32 +1148,33 @@ class TestDerivePreservesExplicit:
 # ---------------------------------------------------------------------------
 #
 # These cases exercise the dedicated VisitExpr_(SubmitPtr) handler
-# (derive_call_directions_pass.cpp:337). They are built with raw ``ir.*``
+# (derive_call_directions_pass.cpp:341). They are built with raw ``ir.*``
 # builders rather than the ``@pl.program`` DSL because the DSL frontend
 # rejects a ``pl.submit`` whose positional args are a strict *prefix* of the
 # callee signature ("Function 'stage1' expects 2 argument(s), got 1") — the
 # runtime-allocated tail Out form is synthesised by an internal IR builder
 # (e.g. ConvertTensorToTileOps appends the Out param at the tail), never
-# written by hand in the DSL. So Before is assembled directly as an
-# ``ir.Submit`` and Expected as the lowered ``ir.Call``.
+# written by hand in the DSL. So both Before and Expected are assembled
+# directly as ``ir.Submit`` nodes.
 #
 # Key semantic facts derived from the pass / the pass-submit-awareness rule:
-#   * The handler lowers Submit -> Call via SubmitToCallView, so After always
-#     carries a plain ``ir.Call`` (NOT a Submit). Submit-ness is intentionally
-#     dropped here: DeriveCallDirections is the documented lowering point
-#     (pass doc 34, "lowers Submit -> Call").
+#   * The handler PRESERVES Submit-ness (pass-submit-awareness.md rule 3):
+#     After carries an ``ir.Submit`` with ``arg_directions`` added to its
+#     attrs — never a lowered plain ``ir.Call``. The TASK_ID-augmented
+#     return tuple and ``deps_`` stay first-class on the rewritten Submit.
 #   * Submit.args_ is a positional *prefix* of callee->params_. The size guard
 #     is relaxed to ``args.size() <= params.size()`` for Submit
-#     (derive_call_directions_pass.cpp:388-389), so only the caller-supplied
+#     (derive_call_directions_pass.cpp:404-407), so only the caller-supplied
 #     prefix args receive an ArgDirection. Tail callee Out params
 #     (runtime-allocated outputs, materialised via the Submit return tuple)
 #     are NOT in args_ and therefore get NO direction — the derived
 #     ``arg_directions`` vector length equals ``len(args)``, not
 #     ``len(callee params)``.
-#   * Submit.deps_ is re-encoded as the Call ``manual_dep_edges`` attr by
-#     SubmitToCallView (expr.h:931), and DeriveDirectionsForCallLike then
-#     appends ``arg_directions`` — so the lowered Call's attr order is
-#     ``[manual_dep_edges, arg_directions]``.
+#   * Submit.deps_ is a typed field, not an attr: a Submit never stores a
+#     ``manual_dep_edges`` attr and plain GlobalVar Calls never carry one
+#     (ManualDepsOnSubmitOnly invariant), so the only attr the pass adds is
+#     ``arg_directions``. Downstream consumers that need a Call-shaped view
+#     funnel through ``SubmitToCallView``.
 
 
 _SUBMIT_SPAN = ir.Span.unknown()

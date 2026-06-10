@@ -162,6 +162,24 @@ class TestManualScopeParsing:
                         b = self.k1(x, deps=[a])
                     return b
 
+    def test_call_rejects_manual_dep_edges_in_attrs(self):
+        """``attrs={'manual_dep_edges': ...}`` is rejected on any call — deps live
+        on ``Submit::deps_`` only (ManualDepsOnSubmitOnly invariant)."""
+        with pytest.raises(Exception, match="manual_dep_edges"):
+
+            @pl.program
+            class _Prog:
+                @pl.function(type=pl.FunctionType.InCore)
+                def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                    return x
+
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                    with pl.manual_scope():
+                        a, a_tid = pl.submit(self.k1, x)
+                        b = self.k1(x, attrs={"manual_dep_edges": [a_tid]})
+                    return b
+
     def test_submit_in_auto_scope_records_manual_dep_edges(self):
         """``pl.submit(..., deps=[...])`` is orthogonal to ``manual_scope``.
 

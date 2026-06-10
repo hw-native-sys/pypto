@@ -388,7 +388,7 @@ shape (single kernel call, outlined `pl.at` region, or dependency-only fan-in).
 | ------- | -------------- | ----- |
 | `result, tid = pl.submit(kernel, *args, deps=[...])` | single kernel call | The trailing `tid` is the producer `pl.Scalar[pl.TASK_ID]`. A parser construct (like `pl.range`), not a runtime function. |
 | `result, tid = pl.spmd_submit(kernel, *args, core_num=N, sync_start=False, deps=[...])` | single SPMD task launch | The SPMD sibling of `pl.submit`: dispatches the kernel across `N` blocks (one orchestration task → one `tid`). `core_num` is a required keyword (positive int expr); `sync_start=True` forces atomic launch of all blocks. Callee may be InCore / AIC / AIV / Group. Records the launch spec on `Submit.core_num` / `Submit.sync_start`. |
-| `with pl.at(level=pl.Level.CORE_GROUP, deps=[...]) as tid:` | outlined `pl.at`-block | The whole block is outlined into an `InCore` kernel + Call; `tid` captures the synthesized call's TaskId, usable as a dep for later `pl.submit` / `pl.at` sites. |
+| `with pl.at(level=pl.Level.CORE_GROUP, deps=[...]) as tid:` | outlined `pl.at`-block | The whole block is outlined into an `InCore` kernel + `Submit`; `tid` captures the synthesized Submit's TaskId, usable as a dep for later `pl.submit` / `pl.at` sites. Without `as tid` the outliner synthesizes an unused TaskId Var — deps always travel on `Submit::deps_`. |
 | `with pl.spmd(N, deps=[...]) as tid:` | outlined SPMD dispatch | The SPMD sibling of the `pl.at ... as tid` form. The inline body is auto-outlined into an `InCore` kernel and dispatched across `N` blocks; `tid` captures the grid-wide producer TaskId. `deps=` accepted only with `as tid`. `core_num` / `sync_start` ride on the outlined `Spmd` Function attrs (the lowered `Submit.core_num` is `None`); codegen reads them via the launch-function fallback. Cannot nest inside `pl.cluster()`. |
 | `barrier = pl.system.task_dummy(deps=[...])` | dependency-only barrier | Submits no kernel. The returned TaskId is a compact fan-in point for later `deps=[barrier]`. |
 | `None` (Python literal) | seed / dep entry | The "no producer yet" sentinel. `prev_tid = None` seeds a TaskId loop iter_arg; `None` in `deps=[None]` is dropped (contributes no edge). Lowers to `system.task_invalid` → `PTO2TaskId::invalid()`. |
@@ -455,14 +455,16 @@ scratch, prod_tid = pl.submit(self.fill, x, scratch)
 out, _ = pl.submit(self.consume, scratch, out, deps=[prod_tid])
 ```
 
-`pl.submit` desugars to a single `ir.Call` whose return type is the flat
+`pl.submit` desugars to a single `ir.Submit` whose return type is the flat
 augmented `TupleType([*<kernel return types>, ScalarType(TASK_ID)])` —
 elements `0..N-1` are the kernel results, element `N` is the producer
-TaskId. The parser writes each `deps=[...]` list directly into the kernel
-`Call.attrs["manual_dep_edges"]` (a `vector<VarPtr>`). `pl.at(..., deps=)
-as tid` follows the same path: the outliner reads `attrs["task_id_var"]`
-and `attrs["manual_dep_edges"]` on the `ScopeStmt` and lifts them onto the
-synthesized Call. Codegen fills a fixed-size stack array sized to the
+TaskId. The parser writes each `deps=[...]` list directly into the typed
+`Submit::deps_` field (no plain `Call` ever carries `manual_dep_edges` —
+the ManualDepsOnSubmitOnly invariant). `pl.at(..., deps=)` follows the same
+path: the outliner reads `attrs["task_id_var"]` and `attrs["manual_dep_edges"]`
+on the `ScopeStmt` and lifts them onto a synthesized `Submit` (a scope with
+deps but no `as tid` gets a synthetic unused TaskId Var so the dispatch is
+still a Submit). Codegen fills a fixed-size stack array sized to the
 exact dep count and emits one `params.set_dependencies(arr, count);`
 call per task. The runtime's `Arg::set_dependencies(ptr, count)` accepts a
 caller-owned array of arbitrary size, so there is no per-call edge cap.

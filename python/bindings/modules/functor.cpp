@@ -50,7 +50,7 @@ using namespace pypto::ir;  // NOLINT(build/namespaces)
 
 // --- IRVisitor trampoline ---
 struct PyIRVisitor : IRVisitor {
-  NB_TRAMPOLINE(IRVisitor, 61);  // 33 base + 23 binary + 5 unary (6 scope kinds)
+  NB_TRAMPOLINE(IRVisitor, 62);  // 34 base + 23 binary + 5 unary (6 scope kinds)
 
   // Top-level entry points
   void VisitProgram(const ProgramPtr& p) override { NB_OVERRIDE_NAME("visit_program", VisitProgram, p); }
@@ -89,6 +89,7 @@ struct PyIRVisitor : IRVisitor {
   VISITOR_EXPR_TRAMPOLINE(ConstFloat, visit_const_float)
   VISITOR_EXPR_TRAMPOLINE(ConstBool, visit_const_bool)
   VISITOR_EXPR_TRAMPOLINE(Call, visit_call)
+  VISITOR_EXPR_TRAMPOLINE(Submit, visit_submit)
   VISITOR_EXPR_TRAMPOLINE(MakeTuple, visit_make_tuple)
   VISITOR_EXPR_TRAMPOLINE(TupleGetItemExpr, visit_tuple_get_item_expr)
 
@@ -145,7 +146,7 @@ struct PyIRVisitor : IRVisitor {
 
 // --- IRMutator trampoline ---
 struct PyIRMutator : IRMutator {
-  NB_TRAMPOLINE(IRMutator, 60);  // 32 base + 23 binary + 5 unary (6 scope kinds)
+  NB_TRAMPOLINE(IRMutator, 61);  // 33 base + 23 binary + 5 unary (6 scope kinds)
 
   // Top-level entry points
   ProgramPtr VisitProgram(const ProgramPtr& p) override {
@@ -185,6 +186,7 @@ struct PyIRMutator : IRMutator {
   MUTATOR_EXPR_TRAMPOLINE(ConstFloat, visit_const_float)
   MUTATOR_EXPR_TRAMPOLINE(ConstBool, visit_const_bool)
   MUTATOR_EXPR_TRAMPOLINE(Call, visit_call)
+  MUTATOR_EXPR_TRAMPOLINE(Submit, visit_submit)
   MUTATOR_EXPR_TRAMPOLINE(MakeTuple, visit_make_tuple)
   MUTATOR_EXPR_TRAMPOLINE(TupleGetItemExpr, visit_tuple_get_item_expr)
 
@@ -315,6 +317,7 @@ void BindFunctor(nb::module_& m) {
   BIND_VISITOR(visitor_cls, ConstFloat, visit_const_float);
   BIND_VISITOR(visitor_cls, ConstBool, visit_const_bool);
   BIND_VISITOR(visitor_cls, Call, visit_call);
+  BIND_VISITOR(visitor_cls, Submit, visit_submit);
   BIND_VISITOR(visitor_cls, MakeTuple, visit_make_tuple);
   BIND_VISITOR(visitor_cls, TupleGetItemExpr, visit_tuple_get_item_expr);
 
@@ -412,6 +415,7 @@ void BindFunctor(nb::module_& m) {
   BIND_MUTATOR(mutator_cls, ConstFloat, visit_const_float);
   BIND_MUTATOR(mutator_cls, ConstBool, visit_const_bool);
   BIND_MUTATOR(mutator_cls, Call, visit_call);
+  BIND_MUTATOR(mutator_cls, Submit, visit_submit);
   BIND_MUTATOR(mutator_cls, MakeTuple, visit_make_tuple);
   BIND_MUTATOR(mutator_cls, TupleGetItemExpr, visit_tuple_get_item_expr);
 

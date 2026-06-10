@@ -96,7 +96,7 @@ with pl.manual_scope():
 **没有调用参数包装** —— 普通 `self.kernel(...)` 调用点不提供 `dumps=` 入口；
 用 `pl.dump_tag` 标记它的输入，或用 `pl.submit(..., dumps=[...])` 提交它。
 两种入口都写入消费 Call / `Submit` 的同一个 `dump_vars` attr，以 **Var 身份**
-跟踪 —— 而非名字。它像 `manual_dep_edges` 一样随 SSA、内联、codegen 流动，
+跟踪 —— 而非名字。它像 `Submit::deps_` 一样随 SSA、内联、codegen 流动，
 因此没有模糊名字匹配、没有误报。这些标记仅在部分 dump（`enable_dump_tensor == 1`）
 下生效；dump 关闭（`0`）时不起作用，全量 dump（`2`）下也无意义——后者会捕获每个
 绑定。

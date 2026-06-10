@@ -256,6 +256,11 @@ inline const PassProperties kCanonicalizeIOOrderProperties{
 // PropertyVerifierRegistry), so PassPipeline auto-verifies it whenever this
 // pass produces the property — no separate verify pass is needed.
 
+// DeriveCallDirections also performs manual-scope lowering as Phase 2 (the
+// former DeriveManualScopeDeps pass). Phase 2 reads the arg_directions
+// populated by Phase 1; manual dependency edges stay in the typed
+// ``Submit::deps_`` field throughout (ManualDepsOnSubmitOnly invariant), so
+// no separate IRProperty is needed here.
 inline const PassProperties kDeriveCallDirectionsProperties{.required = {IRProperty::SplitIncoreOrch},
                                                             .produced = {IRProperty::CallDirectionsResolved}};
 

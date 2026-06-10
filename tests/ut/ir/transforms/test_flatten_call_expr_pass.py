@@ -714,7 +714,7 @@ class TestFlattenPreservesAttrs:
     user's explicit dep wiring is silently lost.
     """
 
-    def test_manual_dep_edges_survive_arg_flatten(self):
+    def test_submit_deps_survive_arg_flatten(self):
         instruments: list[_core_passes.PassInstrument] = [
             _core_passes.VerificationInstrument(_core_passes.VerificationMode.BEFORE_AND_AFTER)
         ]

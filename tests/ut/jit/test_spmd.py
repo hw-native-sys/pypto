@@ -216,11 +216,10 @@ def test_jit_spmd_with_form_as_tid_captures_and_wires_deps():
     )
 
     def _dep_count(disp):
-        # Submit carries deps in the typed deps_ field; a plain Call (legacy)
-        # would carry them as the manual_dep_edges attr.
-        if isinstance(disp, ir.Submit):
-            return len(disp.deps)
-        return len(disp.attrs.get("manual_dep_edges", []))
+        # Deps live only on Submit::deps_ (ManualDepsOnSubmitOnly invariant);
+        # a plain Call dispatch never carries dep edges.
+        assert isinstance(disp, ir.Submit), f"spmd dispatch must be a Submit, got {type(disp).__name__}"
+        return len(disp.deps)
 
     dep_counts = sorted(_dep_count(c) for c in spmd_dispatches)
     assert dep_counts == [0, 1], (

@@ -14,6 +14,25 @@ import pytest
 from pypto import ir, passes
 
 
+def _submit_program() -> ir.Program:
+    """Program with two ``pl.submit`` launches (the second depends on the first)."""
+
+    @pl.program
+    class Prog:
+        @pl.function
+        def kernel(self) -> pl.Scalar[pl.TASK_ID]:
+            return pl.system.task_invalid()
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self) -> pl.Scalar[pl.TASK_ID]:
+            with pl.manual_scope():
+                a, atid = pl.submit(self.kernel)
+                b, btid = pl.submit(self.kernel, deps=[atid])
+            return pl.system.task_invalid()
+
+    return Prog
+
+
 class TestIRVisitor:
     """Tests for the Python IRVisitor base class."""
 
@@ -116,6 +135,27 @@ class TestIRVisitor:
         counter.visit_expr(add)
         assert counter.binary_count == 1
 
+    def test_visit_submit_hook_fires_and_recurses(self):
+        """visit_submit fires per Submit; super() recurses into args and deps."""
+
+        prog = _submit_program()
+
+        class SubmitCollector(ir.IRVisitor):
+            def __init__(self):
+                super().__init__()
+                self.submits: list[ir.Submit] = []
+                self.dep_counts: list[int] = []
+
+            def visit_submit(self, op):
+                self.submits.append(op)
+                self.dep_counts.append(len(op.deps))
+                super().visit_submit(op)
+
+        collector = SubmitCollector()
+        collector.visit_program(prog)
+        assert len(collector.submits) == 2
+        assert sorted(collector.dep_counts) == [0, 1]
+
     def test_default_visitor_no_crash(self):
         """Default IRVisitor traverses without crashing."""
 
@@ -147,6 +187,28 @@ class TestIRMutator:
         mutator = ir.IRMutator()
         result = mutator.visit_program(Prog)
         assert result is Prog
+
+    def test_visit_submit_identity_preserves_kind(self):
+        """visit_submit fires in the mutator; super() preserves Submit-ness and deps."""
+
+        prog = _submit_program()
+
+        class SubmitTracer(ir.IRMutator):
+            def __init__(self):
+                super().__init__()
+                self.count = 0
+
+            def visit_submit(self, op):
+                self.count += 1
+                result = super().visit_submit(op)
+                assert isinstance(result, ir.Submit)
+                assert len(result.deps) == len(op.deps)
+                return result
+
+        tracer = SubmitTracer()
+        result = tracer.visit_program(prog)
+        assert tracer.count == 2
+        assert result is prog
 
     def test_default_mutator_no_crash(self):
         """Default IRMutator traverses complex IR without crashing."""

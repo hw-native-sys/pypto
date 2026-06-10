@@ -5222,9 +5222,9 @@ class ASTParser:
         arg_directions = self._extract_arg_directions_from_attrs(method_name, keywords, len(arg_nodes), span)
         if arg_directions is None:
             arg_directions = []
-        # Parser/printer round-trip support for post-DeriveCallDirections IR.
-        # User source should spell manual deps with pl.submit(..., deps=[...]).
-        manual_dep_edges = self._extract_manual_dep_edges_from_attrs(method_name, keywords, span)
+        # Manual deps live on Submit::deps_ only (ManualDepsOnSubmitOnly
+        # invariant): there is no attrs-dict surface for them on any call kind.
+        self._reject_manual_dep_edges_in_attrs(method_name, keywords, span)
         # Generic round-trip safety net: recover every attrs={...} key that has
         # no dedicated extractor (arg_direction_overrides, dummy_task, ...). The
         # printer's PrintAttrValue is the matching writer.
@@ -5244,8 +5244,6 @@ class ASTParser:
             user_dep_vars = self._parse_submit_deps_kwarg(method_name, keywords, span)
             explicit_dump_vars = self._parse_submit_dumps_kwarg(method_name, args, keywords, span)
         else:
-            if manual_dep_edges is not None:
-                user_dep_vars = manual_dep_edges
             explicit_dump_vars = self._extract_dump_vars_from_attrs(method_name, args, keywords, span)
         # Build the selective-dump set in arg order (stable round-trip):
         # forward-sticky ``pl.dump_tag`` matches, ``dumps=`` entries (submit),
@@ -5744,9 +5742,10 @@ class ASTParser:
                 ``Scalar[TASK_ID]`` (from a prior ``_, tid = pl.submit(...)`` /
                 a ``None`` sentinel / a loop iter_arg) or an
                 ``Array[N, TASK_ID]`` (from ``pl.array.create(N, pl.TASK_ID)``).
-                Stored directly as ``attrs['manual_dep_edges']``; codegen
-                emits a ``set_dependencies(arr, count)`` call built from the
-                entries (array entries expand to one slot each).
+                Stored in the typed ``Submit.deps`` field (only valid with
+                ``augment_task_id=True`` — ManualDepsOnSubmitOnly invariant);
+                codegen emits a ``set_dependencies(arr, count)`` call built
+                from the entries (array entries expand to one slot each).
             device_expr: Optional :class:`ir.Expr` from the ``device=`` kwarg
                 on an Orchestration dispatch call. Stored under
                 ``attrs['device']`` so the comm-collection pass can recover
@@ -5786,9 +5785,6 @@ class ASTParser:
         if no_dep_indices:
             attrs = attrs or {}
             attrs["arg_direction_overrides"] = list(no_dep_indices)
-        if user_dep_vars:
-            attrs = attrs or {}
-            attrs["manual_dep_edges"] = list(user_dep_vars)
         if device_expr is not None:
             attrs = attrs or {}
             attrs["device"] = device_expr
@@ -5811,15 +5807,9 @@ class ASTParser:
             # producer TaskId continues to work the same way as before.
             return_type = ir.TupleType([*return_types, ir.ScalarType(DataType.TASK_ID)])
             deps_list: list[ir.Expr] = list(user_dep_vars) if user_dep_vars else []
-            # manual_dep_edges lives on Submit::deps_ now; strip it from
-            # attrs so the Submit's attrs_ matches the post-flip invariant
-            # documented in include/pypto/ir/expr.h (and enforced by
-            # the pass-submit-awareness rule).
-            submit_attrs: dict[str, Any] | None = None
-            if attrs is not None:
-                submit_attrs = {k: v for k, v in attrs.items() if k != "manual_dep_edges"}
-                if not submit_attrs:
-                    submit_attrs = None
+            # deps live only on Submit::deps_; attrs never carries
+            # manual_dep_edges (ManualDepsOnSubmitOnly invariant).
+            submit_attrs: dict[str, Any] | None = attrs if attrs else None
             # pl.spmd_submit carries an SPMD launch spec (core_num/sync_start) on
             # the Submit; that requires the full ctor form even when there are
             # no attrs. A plain pl.submit with no attrs keeps the minimal form
@@ -6126,29 +6116,32 @@ class ASTParser:
             )
         return directions
 
-    def _extract_manual_dep_edges_from_attrs(
+    def _reject_manual_dep_edges_in_attrs(
         self,
         method_name: str,
         keywords: list[ast.keyword],
         span: ir.Span,
-    ) -> list[ir.Var] | None:
-        """Extract ``manual_dep_edges`` from an ``attrs={...}`` kwarg.
+    ) -> None:
+        """Reject ``manual_dep_edges`` inside an ``attrs={...}`` kwarg.
 
-        This is intentionally for printed/post-DeriveCallDirections IR shapes.
-        Source user code should continue to spell dependencies as
-        ``pl.submit(..., deps=[...])``.
+        Manual dependency edges live in the typed ``Submit::deps_`` field
+        (ManualDepsOnSubmitOnly invariant); the printer never emits the key in
+        an attrs dict, so seeing it in source is a user error — fail loudly
+        instead of silently dropping the edges.
         """
         attrs_dict = self._get_call_attrs_dict(method_name, keywords, span)
         if attrs_dict is None:
-            return None
-        for key_node, value_node in zip(attrs_dict.keys, attrs_dict.values):
-            if not (isinstance(key_node, ast.Constant) and isinstance(key_node.value, str)):
-                continue
-            if key_node.value != "manual_dep_edges":
-                continue
-            deps_kw = ast.keyword(arg="deps", value=value_node)
-            return self._parse_submit_deps_kwarg(method_name, [deps_kw], span)
-        return None
+            return
+        for key_node in attrs_dict.keys:
+            if isinstance(key_node, ast.Constant) and key_node.value == "manual_dep_edges":
+                raise ParserTypeError(
+                    f"attrs={{'manual_dep_edges': ...}} is not accepted on a call to '{method_name}'",
+                    span=span,
+                    hint=(
+                        "Dependency edges belong on a submit: "
+                        "`out, tid = pl.submit(self.kernel, ..., deps=[...])`."
+                    ),
+                )
 
     def _extract_dump_vars_from_attrs(
         self,

@@ -41,18 +41,13 @@ def _kernel_calls(program: ir.Program, callee_name: str = "kernel") -> list[ir.C
 
 
 def _submit_nodes(program: ir.Program) -> list[ir.Submit]:
-    """Collect every ``ir.Submit`` bound on an AssignStmt RHS in *program*.
-
-    There is no ``visit_submit`` Python hook, so we intercept the AssignStmt
-    that binds the submit result (same shape as test_submit_passes.py's
-    ``_find_submit_in_function``)."""
+    """Collect every ``ir.Submit`` in *program* via the ``visit_submit`` hook."""
     found: list[ir.Submit] = []
 
     class _Collector(ir.IRVisitor):
-        def visit_assign_stmt(self, op):
-            if isinstance(op.value, ir.Submit):
-                found.append(op.value)
-            super().visit_assign_stmt(op)
+        def visit_submit(self, op):
+            found.append(op)
+            super().visit_submit(op)
 
     _Collector().visit_program(program)
     return found

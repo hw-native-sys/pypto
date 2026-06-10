@@ -271,6 +271,20 @@ PropertyVerifierPtr CreateInOutUseValidPropertyVerifier();
 PropertyVerifierPtr CreatePipelineLoopValidPropertyVerifier();
 
 /**
+ * @brief Factory function for creating ManualDepsOnSubmitOnly property verifier
+ *
+ * Verifies that no plain cross-function Call (GlobalVar callee) carries
+ * ``attrs["manual_dep_edges"]`` — manual dependency edges live in the typed
+ * ``Submit::deps_`` field. Op calls (``system.task_dummy``) keep the attr as
+ * their codegen fanin contract and are exempt. Listed in
+ * ``GetStructuralProperties()``, so ``VerificationInstrument`` checks it
+ * before/after every pass.
+ *
+ * @return Shared pointer to ManualDepsOnSubmitOnly PropertyVerifier
+ */
+PropertyVerifierPtr CreateManualDepsOnSubmitOnlyPropertyVerifier();
+
+/**
  * @brief Factory function for creating PipelineResolved property verifier
  *
  * Verifies the post-canonicalize invariant: no ``ForStmt`` may carry

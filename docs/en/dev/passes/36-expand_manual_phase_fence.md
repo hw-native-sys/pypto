@@ -21,12 +21,14 @@ to one explicit phase fence:
 tids[N] -> system.task_dummy -> consumers[M]
 ```
 
-The pass does not change kernel execution semantics. It only rewrites
-`Call.attrs["manual_dep_edges"]` on selected consumer calls and adds the marked
+The pass does not change kernel execution semantics. It only rewrites the
+typed `Submit::deps_` field on selected consumer `Submit`s and adds the marked
 dummy-task call that codegen lowers to `rt_submit_dummy_task(...)`. After
-outlining, this covers manual-scope orchestration calls uniformly, including
-both `pl.submit(..., deps=[...])` and `pl.at(..., deps=[...])` shapes once they
-are represented as calls with `manual_dep_edges`.
+outlining, this covers manual-scope task launches uniformly: both
+`pl.submit(..., deps=[...])` and `pl.at(..., deps=[...])` shapes are
+represented as `Submit` nodes with typed `deps_` — a plain `Call` never
+carries `manual_dep_edges` (ManualDepsOnSubmitOnly invariant), so `Submit`s
+are the only dep consumers this pass inspects.
 
 ## Position in the pipeline
 
@@ -34,18 +36,20 @@ are represented as calls with `manual_dep_edges`.
 ... -> DeriveCallDirections -> AutoDeriveTaskDependencies -> ExpandManualPhaseFence -> MaterializeCommDomainScopes -> Simplify (final)
 ```
 
-`DeriveCallDirections` must run first so calls carry resolved
-`arg_directions` and parser/outline-produced `manual_dep_edges` are already
+`DeriveCallDirections` must run first so call-like nodes carry resolved
+`arg_directions` and parser/outline-produced `Submit::deps_` edges are already
 visible. `ExpandManualPhaseFence` runs before the final distributed metadata
-collection and before orchestration codegen observes `manual_dep_edges`.
+collection and before orchestration codegen observes the dep edges (codegen
+reads them through the transient `SubmitToCallView`, which surfaces `deps_`
+as a synthesised `manual_dep_edges` attr).
 
 ## Algorithm
 
 For each orchestration function, the pass visits `RuntimeScopeStmt(manual=true)`
 regions and analyzes each loop body:
 
-1. **Find candidate arrays.** A candidate consumer must have exactly one
-   `manual_dep_edges` entry, and that entry must be an `Array[TASK_ID]`.
+1. **Find candidate arrays.** A candidate consumer must be a `Submit` with
+   exactly one `deps_` entry, and that entry must be an `Array[TASK_ID]`.
 2. **Estimate benefit.** The pass compares direct fanout (`N * M`) with the
    barrier shape (`N + M`). Low-benefit shapes such as `N -> 1` and `2 -> 2`
    stay direct.
@@ -55,9 +59,12 @@ regions and analyzes each loop body:
    non-orchestration functions.
 4. **Insert a barrier.** For a profitable safe candidate, the pass creates a
    fresh `Scalar[TASK_ID]` variable and assigns it from `system.task_dummy` with
-   `attrs["dummy_task"] = true` and `attrs["manual_dep_edges"] = [source_array]`.
-5. **Rewrite consumers.** Covered consumer calls are rebuilt with
-   `manual_dep_edges=[barrier_tid]`, leaving all other call attrs unchanged.
+   `attrs["dummy_task"] = true` and `attrs["manual_dep_edges"] = [source_array]`
+   (the sanctioned op-call carrier of the attr — the barrier itself is never a
+   consumer).
+5. **Rewrite consumers.** Covered consumer `Submit`s are rebuilt with
+   `deps_ = [barrier_tid]`, preserving Submit-ness and leaving args and attrs
+   unchanged.
 
 For both sequential and parallel loops, accepted barriers are inserted before
 the rewritten loop. This keeps stable sequential dependencies at one dummy
@@ -105,8 +112,11 @@ After the pass:
   `attrs["dummy_task"] = true`;
 - the barrier call keeps the original full-array dependency in
   `attrs["manual_dep_edges"]`;
-- rewritten consumers depend on the barrier `TaskId`, not the original array;
-- fallback shapes retain their original `manual_dep_edges`;
+- rewritten consumers are `Submit`s whose `deps_` holds the barrier `TaskId`,
+  not the original array;
+- fallback shapes retain their original `Submit::deps_`;
+- no plain cross-function `Call` carries `manual_dep_edges`
+  (ManualDepsOnSubmitOnly holds before and after the pass);
 - `arg_directions` remain resolved and are not recomputed by this pass.
 
 ## Pass properties

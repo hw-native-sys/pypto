@@ -432,18 +432,26 @@ always-true branch for ids known valid.
 There is no `params.add_dep(...)` call any more, and there is no 16-dep cap
 — the runtime `Arg::set_dependencies` primitive has no upper bound, and the
 stack array is sized to the exact count. User edges come from the parser:
-it writes the user's `pl.submit(..., deps=[tid1, tid2])` kwarg into
-`Call.attrs["manual_dep_edges"]`. Compiler-derived manual-scope edges come
-from [`AutoDeriveTaskDependencies`](../passes/35-auto_derive_task_dependencies.md)
-in `Call.attrs["compiler_manual_dep_edges"]`. Codegen merges the two lists
-in that order and deduplicates by Var identity before emitting the stack
-array.
+it writes the user's `pl.submit(..., deps=[tid1, tid2])` kwarg into the typed
+`Submit::deps_` field; codegen reads them through the transient
+`SubmitToCallView`, which surfaces `deps_` as a synthesised
+`attrs["manual_dep_edges"]` entry (a `vector<VarPtr>` of `Scalar[TASK_ID]`
+variables). Plain `Call` carriers of `manual_dep_edges` no longer exist — the
+ManualDepsOnSubmitOnly structural property verifies that no cross-function
+`Call` carries it; only the `system.task_dummy` barrier op keeps the attr as
+its fanin contract. Compiler-derived manual-scope edges come from
+[`AutoDeriveTaskDependencies`](../passes/35-auto_derive_task_dependencies.md)
+in `Call.attrs["compiler_manual_dep_edges"]` (a separate key, allowed on plain
+calls). Codegen merges the two lists in that order and deduplicates by Var
+identity before emitting the stack array.
 
 ### TaskId sourcing
 
-Every kernel `Call` inside a manual scope carries
-`attrs["manual_dep_edges"]` — a `vector<VarPtr>` of `Scalar[TASK_ID]`
-variables. Each entry resolves at codegen time through
+Every kernel task launch inside a manual scope is a `Submit`; the
+`SubmitToCallView` adapter presents its `deps_` to codegen as
+`manual_dep_edges` — a `vector<VarPtr>` of `Scalar[TASK_ID]` variables.
+Compiler-derived edges arrive as `attrs["compiler_manual_dep_edges"]` on
+plain calls. Each entry resolves at codegen time through
 `manual_task_id_map_` to one of three forms:
 
 | Producer kind | C++ source emitted by codegen |
@@ -516,7 +524,7 @@ codegen detects this shape (Parallel kind + TaskId iter_arg) and:
    into one slot: `arr[(loop_var - start) / step] = <task_id>;`. The slot
    expression peephole-simplifies to `arr[loop_var]` when `start == 0` and
    `step == 1` (the common form).
-3. On every downstream consumer whose `manual_dep_edges` references this
+3. On every downstream consumer `Submit` whose `deps_` references this
    iter_arg, fills N guarded slots into the task's dep stack array,
    one per slot:
 
@@ -534,10 +542,11 @@ in topologies like case1 (outer SEQ × inner PARALLEL).
 ### Phase-fence dummy barriers
 
 After `DeriveCallDirections`, the `ExpandManualPhaseFence` pass may compress a
-profitable stable full-array manual dependency by rewriting selected
-`manual_dep_edges=[tids]` consumer calls to `manual_dep_edges=[barrier_tid]`.
-It inserts a marked `system.task_dummy` call whose own `manual_dep_edges` still
-references the original TaskId array. Orchestration codegen lowers that marked
+profitable stable full-array manual dependency by rewriting selected consumer
+`Submit`s from `deps_=[tids]` to `deps_=[barrier_tid]`. It inserts a marked
+`system.task_dummy` call whose own `manual_dep_edges` attr still references
+the original TaskId array (the sanctioned op-call carrier of the attr —
+plain cross-function `Call`s never carry it). Orchestration codegen lowers that marked
 call to `rt_submit_dummy_task(...)`, then emits ordinary scalar dependency
 lowering for the rewritten consumers.
 
@@ -548,7 +557,7 @@ tids[N] -> dummy barrier -> consumers[M]
 ```
 
 Shapes that are not clearly safe or profitable stay on the direct
-`manual_dep_edges` lowering path. In particular, `manual_scope` treats explicit
+`Submit::deps_` lowering path. In particular, `manual_scope` treats explicit
 deps as authoritative: a `pl.parallel` body that reads `deps=[tids]` and then
 updates `tids[branch]` is a same-carrier dependency chain, not a snapshot
 source for pre-loop compression. Users who want layer-parallel snapshot

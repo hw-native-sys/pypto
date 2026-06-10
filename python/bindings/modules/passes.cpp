@@ -99,7 +99,11 @@ void BindPass(nb::module_& m) {
       .value("AssignTypeSymmetry", IRProperty::AssignTypeSymmetry,
              "Every AssignStmt has structural_equal(var->GetType(), value->GetType()) — covers dtype, "
              "shape, tile_view/tensor_view, and TileType memory_space (memref excluded as an allocation "
-             "detail; memory_space exists only on TileType, not TensorType)");
+             "detail; memory_space exists only on TileType, not TensorType)")
+      .value("ManualDepsOnSubmitOnly", IRProperty::ManualDepsOnSubmitOnly,
+             "No plain cross-function Call (GlobalVar callee) carries attrs['manual_dep_edges'] — manual "
+             "dependency edges live in the typed Submit::deps_ field. Op calls (system.task_dummy) are "
+             "exempt");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");

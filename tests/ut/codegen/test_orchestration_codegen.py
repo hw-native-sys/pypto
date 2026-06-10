@@ -4532,22 +4532,11 @@ class TestNoOpAliasSkip:
 
 
 class TestManualScopeCodegen:
-    """Codegen for ``with pl.manual_scope():`` and the ``deps=[var]`` Call kwarg."""
+    """Codegen for ``with pl.manual_scope():`` and the ``deps=[var]`` submit kwarg.
 
-    @pytest.fixture(autouse=True)
-    def _no_roundtrip_verification(self):
-        """The python_printer doesn't surface ``Call.attrs['manual_dep_edges']``,
-        so the pipeline's print -> parse -> assert_structural_equal roundtrip
-        fails for programs that use ``deps=[...]`` inside manual_scope.
-        Property verification still runs.
-        """
-        from pypto.pypto_core import passes as _core_passes  # noqa: PLC0415
-
-        instruments: list[_core_passes.PassInstrument] = [
-            _core_passes.VerificationInstrument(_core_passes.VerificationMode.BEFORE_AND_AFTER)
-        ]
-        with _core_passes.PassContext(instruments):
-            yield
+    Runs under the default (roundtrip) verification: ``Submit::deps_`` is a
+    first-class typed field that survives print -> parse.
+    """
 
     def test_submit_dumps_emits_toggle_and_per_task_dump(self):
         """``pl.submit(..., dumps=[x])`` (explicit kwarg) marks one arg slot of
@@ -4845,11 +4834,11 @@ class TestManualScopeCodegen:
         """``with pl.at(..., deps=[tid]) as tid:`` extends the dep interface
         to the ``pl.at``-block style (no explicit ``self.kernel(...)`` calls).
 
-        The outlined kernel ``Call``'s return type is augmented with
-        ``Scalar[TASK_ID]`` so codegen's ``IsSubmitCall`` detection fires:
-        the call captures a ``TaskOutputTensors`` handle, binds the producer
-        TaskId Var, and downstream ``deps=[tid]`` flows through the same
-        stack-array + ``set_dependencies`` codegen path used by
+        Each block outlines to a first-class ``Submit`` whose return type
+        carries the trailing ``Scalar[TASK_ID]``: codegen captures a
+        ``TaskOutputTensors`` handle, binds the producer TaskId Var, and the
+        downstream ``deps=[tid]`` flows through ``Submit::deps_`` into the
+        same stack-array + ``set_dependencies`` codegen path used by
         ``pl.submit(...)``. Equivalent to writing two ``pl.submit`` calls,
         but matches the ``pl.at``-block programming style.
         """
@@ -5278,7 +5267,12 @@ class TestManualScopeCodegen:
                 return out
 
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
-        transformed = pm.run_passes(Prog)
+        # Property-only verification: AutoDeriveTaskDependencies' manual->auto
+        # fallback yields hand-placed AUTO RuntimeScopeStmts, which print as
+        # `with pl.scope():` but reparse only under auto_scope=False — a
+        # pre-existing printer/parser gap unrelated to Submit deps.
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+            transformed = pm.run_passes(Prog)
         code = _generate_orch_code(transformed)
 
         # With AutoDeriveTaskDependencies, loop-carried hazards (stage1 in the
@@ -5369,7 +5363,12 @@ class TestManualScopeCodegen:
                 return out
 
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
-        transformed = pm.run_passes(Prog)
+        # Property-only verification: AutoDeriveTaskDependencies' manual->auto
+        # fallback yields hand-placed AUTO RuntimeScopeStmts, which print as
+        # `with pl.scope():` but reparse only under auto_scope=False — a
+        # pre-existing printer/parser gap unrelated to Submit deps.
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+            transformed = pm.run_passes(Prog)
         code = _generate_orch_code(transformed)
 
         # With AutoDeriveTaskDependencies, loop-carried hazards trigger a
@@ -5707,7 +5706,12 @@ class TestManualScopeCodegen:
                 return out
 
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
-        transformed = pm.run_passes(Prog)
+        # Property-only verification: AutoDeriveTaskDependencies' manual->auto
+        # fallback yields hand-placed AUTO RuntimeScopeStmts, which print as
+        # `with pl.scope():` but reparse only under auto_scope=False — a
+        # pre-existing printer/parser gap unrelated to Submit deps.
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+            transformed = pm.run_passes(Prog)
         code = _generate_orch_code(transformed)
 
         # The producer TaskId is attached to the consumer dependency edge.
@@ -6261,14 +6265,7 @@ def _generate_orch_full_pipeline(program_cls) -> str:
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.Ascend910B)
     pm = PassManager.get_strategy(OptimizationStrategy.Default)
-    # Scope to BASIC (property) verification, overriding conftest's default
-    # roundtrip instrument. ``pl.submit(..., deps=[...])`` in an auto
-    # orchestration does not survive a print->parse roundtrip after
-    # DeriveCallDirections (a separate printer/parser bug, unrelated to the
-    # orchestration codegen behaviour under test here). Property verification
-    # still runs so real IR invariant violations are caught.
-    with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
-        optimized = pm.run_passes(program_cls)
+    optimized = pm.run_passes(program_cls)
     for func in optimized.functions.values():
         if func.func_type == ir.FunctionType.Orchestration:
             return codegen.generate_orchestration(optimized, func).code
@@ -6569,11 +6566,7 @@ def test_spmd_submit_aic_direct_dispatch():
                 out, _ = pl.spmd_submit(self.cube, a, b, out, core_num=8)
             return out
 
-    # Property-only verification: a submit's deps/launch-spec don't survive the
-    # print->parse roundtrip after DeriveCallDirections (pre-existing limitation,
-    # same reason _generate_orch_full_pipeline uses BEFORE_AND_AFTER).
-    with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
-        code = _generate_orch_code(P)
+    code = _generate_orch_code(P)
     assert "rt_submit_aic_task" in code, code
     assert "params_t0.launch_spec.set_block_num(8);" in code, code
 

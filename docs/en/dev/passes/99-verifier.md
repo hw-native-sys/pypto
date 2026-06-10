@@ -15,7 +15,7 @@ Extensible verification system for validating PyPTO IR correctness through plugg
 
 - **Pluggable Rule System**: Extend with custom verification rules
 - **Property-Based Verification**: Opt-in property sets — verify exactly what you need
-- **Structural Properties**: TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, and PipelineLoopValid are verified at pipeline start by `PassPipeline` and before/after each pass by `VerificationInstrument`
+- **Structural Properties**: TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, and ManualDepsOnSubmitOnly are verified at pipeline start by `PassPipeline` and before/after each pass by `VerificationInstrument`
 - **Dual Verification Modes**: Collect diagnostics or throw on first error
 - **Pass Integration**: Use as a Pass in optimization pipelines
 - **Comprehensive Diagnostics**: Collect all issues with source locations
@@ -26,10 +26,10 @@ Extensible verification system for validating PyPTO IR correctness through plugg
 
 | Category | Examples | Behavior |
 | -------- | -------- | -------- |
-| **Structural** | TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid | Always true. Verified at pipeline start and before/after each pass by `VerificationInstrument`. Never in PassProperties. |
+| **Structural** | TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ManualDepsOnSubmitOnly | Always true. Verified at pipeline start and before/after each pass by `VerificationInstrument`. Never in PassProperties. |
 | **Pipeline** | SSAForm, NoNestedCalls, HasMemRefs, ... | Produced/invalidated by passes. Verified per pass-declared contracts. |
 
-`GetStructuralProperties()` returns `{TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid}`. These are verified **at pipeline start** by `PassPipeline::Run()` and **before/after each pass** by `VerificationInstrument`. Since no pass declares them in `required`/`produced`/`invalidated`, `VerificationInstrument` unions them with the pass's declared properties to ensure no pass breaks these fundamental invariants.
+`GetStructuralProperties()` returns `{TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ManualDepsOnSubmitOnly}`. These are verified **at pipeline start** by `PassPipeline::Run()` and **before/after each pass** by `VerificationInstrument`. Since no pass declares them in `required`/`produced`/`invalidated`, `VerificationInstrument` unions them with the pass's declared properties to ensure no pass breaks these fundamental invariants.
 
 ### Verification Rule System
 
@@ -76,6 +76,7 @@ The `run_verifier()` utility creates a standalone `Pass` for ad-hoc use in custo
 | **NoNestedInCore** | NoNestedInCore | No nested InCore scopes (`InCoreScopeStmt` inside `InCoreScopeStmt`) |
 | **InOutUseValid** | InOutUseValid | Variables passed as InOut/Out to user-function calls are not read after the call (RFC #1026). Group-typed function bodies are skipped pending follow-up. |
 | **PipelineLoopValid** | PipelineLoopValid | Bidirectional invariant on every `ForStmt`: `kind_ == ForKind::Pipeline` ⇔ `pipeline_stages` attr present. Either direction failing means the pipeline loop is malformed. |
+| **ManualDepsOnSubmitOnly** | ManualDepsOnSubmitOnly | No plain cross-function `Call` (GlobalVar callee) carries `attrs["manual_dep_edges"]` — manual dependency edges live in the typed `Submit::deps_` field. Op calls (`system.task_dummy`) keep the attr as their codegen fanin contract and are exempt. |
 | **OrchestrationReferencesResolved** | OrchestrationReferencesResolved | Every non-builtin Call inside a `FunctionType::Orchestration` function targets a Function that exists in the surrounding Program. Replaces the codegen-side `ValidateOrchestrationReferences` walk that used to throw at codegen time. |
 | **AssignTypeSymmetry** | AssignTypeSymmetry | Every `AssignStmt(var, value)` satisfies `structural_equal(var.type, value.type)`. Covers dtype, shape, and tile_view/tensor_view; additionally TileType `memory_space` (TensorType has no `memory_space`) and DistributedTensorType `window_buffer`; tuple-typed assignments compare every element recursively. `memref_` is **excluded** — `structural_equal` treats it as an allocation detail bound to the Var, governed by `HasMemRefs` / `AllocatedMemoryAddr`. Catches passes that mutate one side of an assignment without the other (e.g. #1262 TileType memory_space, #1278 tile_view). Registered in `PropertyVerifierRegistry` but not yet in `GetStructuralProperties()` — run on demand via `PropertyVerifierRegistry::verify` or by adding the property to a `VerificationInstrument`. |
 
@@ -165,9 +166,9 @@ Singleton registry mapping `IRProperty` values to `PropertyVerifier` factories. 
 
 | Function | Returns | Description |
 | -------- | ------- | ----------- |
-| `GetStructuralProperties()` | `{TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid}` | Invariants verified at pipeline start and before/after each pass |
+| `GetStructuralProperties()` | `{TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ManualDepsOnSubmitOnly}` | Invariants verified at pipeline start and before/after each pass |
 | `GetDefaultVerifyProperties()` | `{SSAForm, TypeChecked, NoNestedCalls, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore}` | Default set for `run_verifier()` |
-| `GetVerifiedProperties()` | `{SSAForm, TypeChecked, AllocatedMemoryAddr, BreakContinueValid, NoRedundantBlocks, InOutUseValid}` | Lightweight set for `PassPipeline` auto-verify |
+| `GetVerifiedProperties()` | `{SSAForm, TypeChecked, AllocatedMemoryAddr, BreakContinueValid, NoRedundantBlocks, InOutUseValid, CallDirectionsResolved, ManualDepsOnSubmitOnly}` | Lightweight set for `PassPipeline` auto-verify |
 
 ### RunVerifier Pass Factory
 

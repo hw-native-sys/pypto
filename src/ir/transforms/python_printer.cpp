@@ -723,11 +723,10 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
       // This is a cross-function call - print as self.method_name()
       stream_ << "self." << gvar->name_ << "(";
 
-      // Selective dump (``kAttrDumpVars``) is surfaced below as a ``dumps=[...]``
-      // kwarg (symmetric with ``deps=`` and matching the Submit surface), NOT
-      // by wrapping args — there is no call-arg wrapper. Collect the marked
-      // Vars now; emit the kwarg after ``deps=`` so the round-trip recovers the
-      // same attr by VarPtr identity.
+      // Selective dump (``kAttrDumpVars``) is surfaced below inside the
+      // machine-only ``attrs={...}`` dict, NOT by wrapping args — there is no
+      // call-arg wrapper. Collect the marked Vars now so the round-trip
+      // recovers the same attr by VarPtr identity.
       std::set<const Var*> dump_set;
       for (const auto& [k, v] : op->attrs_) {
         if (k != kAttrDumpVars) continue;
@@ -743,33 +742,18 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
         VisitExpr(op->args_[i]);
       }
 
-      // Surface manual_scope dep edges so they show up in IR dumps. The
-      // parser writes ``deps=[tid, ...]`` directly into
-      // ``kAttrManualDepEdges`` (each entry a ``Scalar[TASK_ID]`` Var), and
-      // the printer round-trips it via the same ``deps=[...]`` kwarg.
-      const std::vector<VarPtr>* deps_to_print = nullptr;
-      for (const auto& [k, v] : op->attrs_) {
-        if (k != kAttrManualDepEdges) continue;
-        const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
-        if (!edges || edges->empty()) continue;
-        deps_to_print = edges;
-        break;
-      }
+      // Manual dependency edges live on ``Submit::deps_``, never on a plain
+      // cross-function Call (ManualDepsOnSubmitOnly invariant). There is no
+      // ``deps=`` surface for plain calls — the parser rejects it — so a Call
+      // carrying the attr is a compiler bug; fail loudly instead of printing
+      // unparseable text.
+      INTERNAL_CHECK_SPAN(!op->HasAttr(kAttrManualDepEdges), op->span_)
+          << "Internal error: plain cross-function Call to '" << gvar->name_
+          << "' carries attrs[\"manual_dep_edges\"]; manual deps must be on Submit::deps_";
       // Zero-arg self.fn() needs no leading comma before the first kwarg, so
       // gate every kwarg separator on a shared flag rather than hard-coding
-      // ", " — otherwise self.fn(, deps=[...]) breaks the round-trip.
+      // ", " — otherwise self.fn(, device=...) breaks the round-trip.
       bool need_kwarg_comma = !op->args_.empty();
-      if (deps_to_print) {
-        stream_ << (need_kwarg_comma ? ", " : "") << "deps=[";
-        for (size_t i = 0; i < deps_to_print->size(); ++i) {
-          if (i > 0) stream_ << ", ";
-          if ((*deps_to_print)[i]) {
-            stream_ << GetVarName((*deps_to_print)[i].get());
-          }
-        }
-        stream_ << "]";
-        need_kwarg_comma = true;
-      }
 
       // Surface ``attrs["device"]`` (set by N3 parser on host_orch → chip_orch
       // dispatches) as a ``device=<expr>`` kwarg so it round-trips through
@@ -792,17 +776,17 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
       // ``dumps=``) and ``arg_directions`` (post DeriveCallDirections). EVERY
       // other attr — ``arg_direction_overrides``, ``dummy_task``, any future
       // key — is rendered generically by ``PrintAttrValue`` into the same dict
-      // (the round-trip safety net), so nothing is silently dropped. Sugar keys
-      // already surfaced above (``manual_dep_edges`` -> ``deps=``, ``device`` ->
-      // ``device=``) are skipped here. The parser recovers the bespoke keys via
-      // dedicated extractors and the rest via ``_parse_attr_value``.
+      // (the round-trip safety net), so nothing is silently dropped. The sugar
+      // key already surfaced above (``device`` -> ``device=``) is skipped
+      // here. The parser recovers the bespoke keys via dedicated extractors
+      // and the rest via ``_parse_attr_value``.
       auto call_arg_directions = op->GetArgDirections();
       const bool has_dirs = !call_arg_directions.empty();
       const bool has_dump = !dump_set.empty();
       std::vector<const std::pair<std::string, std::any>*> generic_attrs;
       for (const auto& kv : op->attrs_) {
         const std::string& k = kv.first;
-        if (k == kAttrManualDepEdges || k == kAttrDevice) continue;   // emitted as deps= / device=
+        if (k == kAttrDevice) continue;                               // emitted as device=
         if (k == kAttrDumpVars || k == kAttrArgDirections) continue;  // bespoke emitters below
         generic_attrs.push_back(&kv);
       }

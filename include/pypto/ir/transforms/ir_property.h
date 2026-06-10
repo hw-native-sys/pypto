@@ -71,6 +71,9 @@ enum class IRProperty : uint64_t {
                                     ///< value->GetType()) — covers dtype, shape, tile_view/tensor_view, and
                                     ///< TileType memory_space (memref excluded as an allocation detail;
                                     ///< memory_space exists only on TileType, not TensorType)
+  ManualDepsOnSubmitOnly,           ///< No plain cross-function Call (GlobalVar callee) carries
+                                    ///< attrs["manual_dep_edges"] — manual dependency edges live in the
+                                    ///< typed Submit::deps_ field. Op calls (system.task_dummy) are exempt
   kCount                            ///< Sentinel (must be last)
 };
 

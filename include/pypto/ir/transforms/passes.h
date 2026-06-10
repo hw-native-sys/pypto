@@ -678,9 +678,9 @@ Pass FuseCreateAssembleToSlice();
  *
  * Builtin ops (tensor.*, tile.*, system.*) are left untouched (arg_directions empty).
  *
- * Manual-scope dependency edges (``Call.attrs[manual_dep_edges]``) are written
- * directly by the parser from a ``pl.submit(...)`` ``deps=[...]`` kwarg — this
- * pass does not synthesise or lower them.
+ * Manual-scope dependency edges (typed ``Submit::deps_``) are written directly
+ * by the parser from a ``pl.submit(...)`` ``deps=[...]`` kwarg — this pass
+ * does not synthesise or lower them (ManualDepsOnSubmitOnly invariant).
  *
  * Requirements:
  *   - InCore scopes outlined (run OutlineIncoreScopes first)
@@ -691,9 +691,9 @@ Pass DeriveCallDirections();
  * @brief Expand profitable manual_scope Array[TASK_ID] fanout deps into
  *        explicit dependency-only dummy barrier calls.
  *
- * Rewrites selected consumer ``manual_dep_edges=[source_array]`` to
- * ``manual_dep_edges=[barrier_tid]`` after inserting a marked
- * ``system.task_dummy`` assignment at the chosen phase-fence placement point.
+ * Rewrites selected consumer Submits' ``deps_=[source_array]`` to
+ * ``deps_=[barrier_tid]`` after inserting a marked ``system.task_dummy``
+ * assignment at the chosen phase-fence placement point.
  */
 Pass ExpandManualPhaseFence();
 

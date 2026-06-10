@@ -383,7 +383,7 @@ DSL 暴露**两套正交的机制**，用户可任意组合：
 | -------- | ------------- | ---- |
 | `result, tid = pl.submit(kernel, *args, deps=[...])` | 单个 kernel 调用 | 尾部 `tid` 是 producer `pl.Scalar[pl.TASK_ID]`。它是 parser construct（类似 `pl.range`），不是 runtime 函数。 |
 | `result, tid = pl.spmd_submit(kernel, *args, core_num=N, sync_start=False, deps=[...])` | 单个 SPMD task launch | `pl.submit` 的 SPMD 版本：将 kernel 在 `N` 个 block 上分发（一个 orchestration task → 一个 `tid`）。`core_num` 是必填关键字参数（正整数表达式）；`sync_start=True` 强制所有 block 原子启动。callee 可以是 InCore / AIC / AIV / Group。launch spec 记录在 `Submit.core_num` / `Submit.sync_start` 上。 |
-| `with pl.at(level=pl.Level.CORE_GROUP, deps=[...]) as tid:` | outlined `pl.at`-块 | 整块被 outline 成 InCore kernel + Call；`tid` 捕获被合成的 Call 的 TaskId，可作为后续 `pl.submit` / `pl.at` 的 dep。 |
+| `with pl.at(level=pl.Level.CORE_GROUP, deps=[...]) as tid:` | outlined `pl.at`-块 | 整块被 outline 成 InCore kernel + `Submit`；`tid` 捕获被合成的 Submit 的 TaskId，可作为后续 `pl.submit` / `pl.at` 的 dep。不写 `as tid` 时 outliner 会合成一个未使用的 TaskId Var——deps 始终走 `Submit::deps_`。 |
 | `with pl.spmd(N, deps=[...]) as tid:` | outlined SPMD 分发 | `pl.at ... as tid` 形式的 SPMD 版本。内联 body 自动外包成 InCore kernel 并在 `N` 个 block 上分发；`tid` 捕获 grid 级 producer TaskId。`deps=` 仅在带 `as tid` 时可用。`core_num` / `sync_start` 记录在外包出的 `Spmd` Function attrs 上（lower 出的 `Submit.core_num` 为 `None`）；codegen 通过 launch-function 回退读取。不能嵌套在 `pl.cluster()` 内。 |
 | `barrier = pl.system.task_dummy(deps=[...])` | dependency-only barrier | 不提交 kernel。返回的 TaskId 是一个紧凑的 fan-in 点，可供后续 `deps=[barrier]` 使用。 |
 | `None`（Python 字面量） | 种子 / dep 条目 | "暂无 producer" 的哨兵。`prev_tid = None` 用作 TaskId 循环 iter_arg 的种子；`deps=[None]` 中的 `None` 被丢弃（不贡献任何边）。下沉为 `system.task_invalid` → `PTO2TaskId::invalid()`。 |
@@ -447,13 +447,14 @@ scratch, prod_tid = pl.submit(self.fill, x, scratch)
 out, _ = pl.submit(self.consume, scratch, out, deps=[prod_tid])
 ```
 
-`pl.submit` 脱糖为单个 `ir.Call`，其返回类型是扁平的增广
+`pl.submit` 脱糖为单个 `ir.Submit`，其返回类型是扁平的增广
 `TupleType([*<kernel return types>, ScalarType(TASK_ID)])` ——
 元素 `0..N-1` 是 kernel 结果，元素 `N` 是 producer TaskId。parser 把每个
-`deps=[...]` 列表直接写入 kernel `Call.attrs["manual_dep_edges"]`（一个
-`vector<VarPtr>`）。`pl.at(..., deps=) as tid` 走相同的路径：outliner 读
-`ScopeStmt` 上的 `attrs["task_id_var"]` + `attrs["manual_dep_edges"]`，
-把它们一起搬到合成的 Call 上。codegen 填充一个按精确依赖数定长的栈数组，
+`deps=[...]` 列表直接写入类型化的 `Submit::deps_` 字段（普通 `Call` 永不
+携带 `manual_dep_edges`——ManualDepsOnSubmitOnly 不变式）。`pl.at(..., deps=)`
+走相同的路径：outliner 读 `ScopeStmt` 上的 `attrs["task_id_var"]` +
+`attrs["manual_dep_edges"]`，把它们一起搬到合成的 `Submit` 上（带 deps 但
+没写 `as tid` 的 scope 会得到一个合成的未使用 TaskId Var，使派发仍是 Submit）。codegen 填充一个按精确依赖数定长的栈数组，
 并对每个 task 发出一次 `params.set_dependencies(arr, count);` 调用。
 runtime 的 `Arg::set_dependencies(ptr, count)` 直接接收调用者持有的任意
 长度数组，所以单 call 的依赖边数没有硬上限。显式 fan-in 可写成

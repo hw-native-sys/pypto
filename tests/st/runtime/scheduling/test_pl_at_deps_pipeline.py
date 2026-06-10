@@ -18,8 +18,8 @@ used to express the dep edge:
   against pre-declared ``@pl.function(InCore)`` kernels.
 * This test uses inline ``with pl.at(level=pl.Level.CORE_GROUP, ...) as tid:``
   blocks. The outliner lifts each block into a synthesised InCore kernel
-  + Call, and the ``deps=[tid]`` / ``as tid`` plumbing hooks into the same
-  ``Call.attrs["manual_dep_edges"]`` codegen path that ``pl.submit`` uses.
+  + ``Submit``, and the ``deps=[tid]`` / ``as tid`` plumbing hooks into the
+  same ``Submit::deps_`` codegen path that ``pl.submit`` uses.
 
 The program tiles a ``[128, 128]`` matrix with a ``[32, 32]`` block grid
 (M=4, N=4). Each ``(i, j)`` tile runs the same 2-stage pipeline:
@@ -173,7 +173,7 @@ class TestPlAtDepsPipeline:
     def test_pipeline_correctness(self, test_runner, platform):
         """``out`` matches ``2 * x + 1`` after on-board execution.
 
-        Guards three regressions at once: the outliner's task_id_var/manual_dep_edges
+        Guards three regressions at once: the outliner's task_id_var/``Submit::deps_``
         plumbing on pl.at-blocks, the explicit ``set_dependencies`` edge between
         stage1/stage2, and the absence of cross-iteration serialisation (which
         would still pass numerically but show up as wrong parallelism in the

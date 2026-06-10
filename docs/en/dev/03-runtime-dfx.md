@@ -104,7 +104,7 @@ There is **no call-arg wrapper** — a plain `self.kernel(...)` call site offers
 no `dumps=` surface; use `pl.dump_tag` to mark its inputs, or submit it with
 `pl.submit(..., dumps=[...])`. Both surfaces feed the same `dump_vars` attr on
 the consuming Call / `Submit`, tracked by **Var identity** — never by name. It
-rides through SSA, inlining, and codegen the same way `manual_dep_edges` does,
+rides through SSA, inlining, and codegen the same way `Submit::deps_` does,
 so no fuzzy name matching and no false positives. The marks only take effect
 under partial dump (`enable_dump_tensor == 1`); they are inert when dump is off
 (`0`) and irrelevant under full dump (`2`), which captures every binding.

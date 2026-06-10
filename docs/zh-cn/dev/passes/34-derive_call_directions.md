@@ -15,7 +15,7 @@ PyPTO 采用**两层方向模型**（在 commit `c53dac0d` 引入）：
 
 **Submit 被保留，而非降级。** 任务发射——`pl.manual_scope` 内的 `pl.submit(...)`，或被捕获的 auto-scope 派发（`with pl.at(...) as tid:` / `with pl.spmd(...) as tid:`）——是 `ir.Submit`，与 `Call` 同级的一种 kind。`DeriveCallDirections` 为该 `Submit` 推导 `arg_directions`（通过仅用于检查实参的临时 `SubmitToCallView`），并把结果重新附加到一个**全新的 `Submit`** 上，保留其类型化的 `deps_` 字段以及 TASK_ID 增广的 `Tuple[<outputs>..., Scalar[TASK_ID]]` 返回形状（pass-submit-awareness.md 规则 3）。若在此把 `Submit → Call` 降级，会得到一个携带其 callee 从未声明的 Tuple 类型的普通 `Call`——一个无法通过 print → reparse 的非法节点。下游消费者（orchestration codegen、`ExpandManualPhaseFence`、`CollectCommGroups`、`CallDirectionsResolved` verifier）在需要 Call 形态视图时通过 `SubmitToCallView` 转接。
 
-**Manual scope 的依赖边属于独立层。** 一个 `Submit` 在其一等的 `deps_` 字段中携带 `deps=[...]` 边。旧的 attrs 编码——`Call.attrs["manual_dep_edges"]`（一个 `vector<VarPtr>`，元素为 `Scalar[TASK_ID]` / `Array[N, TASK_ID]`）——是 `SubmitToCallView` 为早于 Submit kind 的消费者从 `deps_` 合成的形状，也是手工构造的 post-derive 测试夹具所用的形状。`DeriveCallDirections` 只读写 `arg_directions`；后续 `ExpandManualPhaseFence` pass 可能把某个消费者的完整 TaskId 数组依赖改写为 dummy-barrier TaskId（并保留消费者的 kind：`Submit` 仍是 `Submit`）。
+**Manual scope 的依赖边属于独立层。** 一个 `Submit` 在其一等的 `deps_` 字段中携带 `deps=[...]` 边。attrs 编码——`Call.attrs["manual_dep_edges"]`（一个 `vector<VarPtr>`，元素为 `Scalar[TASK_ID]` / `Array[N, TASK_ID]`）——只存在于临时的 `SubmitToCallView` 内部：该 view 为需要 Call 形态的消费者从 `deps_` 合成此 attr；IR 中的普通跨函数 `Call` 永远不携带它（由 ManualDepsOnSubmitOnly 结构性属性校验）。`DeriveCallDirections` 只读写 `arg_directions`；后续 `ExpandManualPhaseFence` pass 可能把某个消费者的完整 TaskId 数组依赖改写为 dummy-barrier TaskId（并保留消费者的 kind：`Submit` 仍是 `Submit`）。
 
 **何时使用**：在 tile pipeline 稳定后运行（要求 `SplitIncoreOrch`），并在任何观察 `Call.attrs["arg_directions"]` 的消费者之前。在 `Default` 策略中它位于 `FuseCreateAssembleToSlice` 与最后一次 `Simplify` 之间。
 

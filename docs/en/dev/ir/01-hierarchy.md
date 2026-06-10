@@ -164,22 +164,23 @@ for the dispatch rule.
 | Aspect | `Call` | `Submit` |
 | ------ | ------ | -------- |
 | Semantics | Synchronous function call | Asynchronous task launch |
-| Where it appears | Anywhere | Inside `manual_scope` bodies (parser-produced; lowered to `Call` at `DeriveCallDirections`) |
+| Where it appears | Anywhere | Inside `manual_scope` bodies (parser-produced) and as the outlined dispatch of a `pl.at(..., deps=[...])` scope (a missing `as tid` binding gets a synthetic unused TaskId Var); preserved through the whole pipeline |
 | Return type | Callee's declared return | `Tuple[<callee return>..., Scalar[TASK_ID]]` |
-| Has `deps` | No (uses `attrs["manual_dep_edges"]` only on `ScopeStmt` from `pl.at`) | First-class `deps_` field — `Scalar[TASK_ID]` Vars / `Array[N, TASK_ID]` Vars |
+| Has `deps` | No — a plain `Call` never carries dep edges (`attrs["manual_dep_edges"]` appears only on `ScopeStmt` from `pl.at`, consumed at scope outlining; ManualDepsOnSubmitOnly verifies this) | First-class `deps_` field — `Scalar[TASK_ID]` Vars / `Array[N, TASK_ID]` Vars |
 | SPMD launch spec | none | `core_num_` (`optional<ExprPtr>` block count) + `sync_start_` (bool), set only by `pl.spmd_submit`; `nullopt` ⇒ plain single-block submit |
 | Use-def chain | `args_` only | `args_`, `deps_`, **and** `core_num_` |
 | Python syntax | `out = self.foo(...)` | `out, tid = pl.submit(self.foo, ...)` (or `pl.spmd_submit(self.foo, ..., core_num=N)`) |
 
 The parser emits `Submit`; printer / structural-equal / structural-hash /
-visitor / mutator / DCE / SSA all dispatch on the `Submit` kind directly.
-`DeriveCallDirections` is the lowering point: it consumes the `Submit`,
-runs the standard direction-derivation logic on a synthesised
-`SubmitToCallView` (`Submit::deps_` folded back into
-`attrs["manual_dep_edges"]`), and replaces the `Submit` in the IR with the
-resulting `Call`. Late passes and codegen see `Call` as they did before
-the Submit kind landed; the structural distinction is preserved for the
-~33 dumps captured between parse and `DeriveCallDirections`.
+visitor / mutator (Python hooks `visit_submit`) / DCE / SSA all dispatch on
+the `Submit` kind directly, and the `Submit` survives the whole pipeline —
+no pass lowers it to a plain `Call`. Call-shaped consumers
+(`DeriveCallDirections`, `ExpandManualPhaseFence`, orchestration codegen)
+inspect a `Submit` through the transient `SubmitToCallView`, which folds
+`Submit::deps_` into a synthesised `attrs["manual_dep_edges"]` entry. That
+attrs encoding is **view-only**: it never lands on an IR `Call` node, and
+the ManualDepsOnSubmitOnly structural property verifies this before/after
+every pass.
 
 ### IterArg - Loop-Carried Values
 
@@ -370,11 +371,12 @@ runtime = ir.RuntimeScopeStmt(manual=True, name_hint="", body=body, span=span)
     call and populates its first-class `deps_` field directly from the
     user's `deps=` kwarg (each entry a `Scalar[TASK_ID]` — the producer
     TaskId returned by a prior `pl.submit(...)`, a TaskId loop iter_arg,
-    or the literal `None`, which is dropped). `DeriveCallDirections`
-    lowers each `Submit` to an equivalent `Call` via `SubmitToCallView`,
-    folding `Submit::deps_` back into `Call.attrs["manual_dep_edges"]`
-    so the orchestration codegen — which still operates on `Call` —
-    fills a fixed-size stack array and emits one
+    or the literal `None`, which is dropped). The `Submit` persists through
+    the pipeline; the orchestration codegen reads it through the transient
+    `SubmitToCallView`, which folds `Submit::deps_` into a synthesised
+    `attrs["manual_dep_edges"]` entry (view-only — never materialised on an
+    IR `Call`, enforced by the ManualDepsOnSubmitOnly verifier), then fills
+    a fixed-size stack array and emits one
     `params.set_dependencies(arr, count)` call per task.
 - `RuntimeScopeStmt` lowers to `PTO2_SCOPE()` for `manual=false` and
   `PTO2_SCOPE(PTO2ScopeMode::MANUAL)` for `manual=true`. It is created by
