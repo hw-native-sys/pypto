@@ -467,10 +467,19 @@ ExprPtr LowerTensorAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>
 
   // Loop bounds: INDEX (must agree across start/stop/step). Notify's `value`
   // and wait's `expected` are INT32 per the Python builder's int_dtype
-  // override — keep separate constants for those distinct slots. The second
-  // (post-reduce) barrier reuses the same signal cells; each peer notifies
-  // twice (once in Phase 2a, once after Phase 3) so the second wait checks
-  // `cell >= 2` rather than `cell >= 1`.
+  // override — keep separate constants for those distinct slots.
+  //
+  // Signal scheme: hybrid Set / AtomicAdd. Phase 2a uses ``Set value=1``
+  // (race-free: each cell has exactly one writer, the corresponding peer);
+  // Phase 2b waits for ``== 1``. Phase 3.5 uses ``AtomicAdd 1`` for the
+  // post-reduce barrier (cell 1 → 2) with wait ``>= 2`` — the same proven
+  // path as the runtime's existing collective kernels.
+  //
+  // We avoid the symmetric ``Set value=0`` reset (which would let the buffer
+  // self-clear and enable reentrancy) because on-board ``TWAIT(==0)`` does
+  // not unblock reliably in our trials (P=4 deadlocked on AICPU stream
+  // sync). Until the runtime's TWAIT(==0) path is verified, callers needing
+  // back-to-back allreduces must allocate a fresh signal buffer per call.
   auto zero_idx = std::make_shared<ConstInt>(0, DataType::INDEX, span);
   auto one_idx = std::make_shared<ConstInt>(1, DataType::INDEX, span);
   auto one_i32 = std::make_shared<ConstInt>(1, DataType::INT32, span);
@@ -479,7 +488,7 @@ ExprPtr LowerTensorAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>
   auto shape_tuple = tile_conversion_utils::MakeShapeTuple(target_type->shape_, span);
   auto my_signal_offsets = MakeSignalOffsets(my_rank, span);
 
-  // ---- Phase 2a: notify all peers ----
+  // ---- Phase 2a: notify all peers (Set cell[my_rank, 0] on each peer to 1) ----
   b.EmitFor(
       "peer", zero_idx, nranks_idx, one_idx,
       [&](LoweringBuilder& body, const VarPtr& peer) {
@@ -488,14 +497,14 @@ ExprPtr LowerTensorAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>
             [&](LoweringBuilder& then_body) {
               auto notify_call = OpRegistry::GetInstance().Create(
                   "pld.system.notify", {signal, peer, my_signal_offsets, one_i32},
-                  {{"op", static_cast<int>(NotifyOp::kAtomicAdd)}}, span);
+                  {{"op", static_cast<int>(NotifyOp::kSet)}}, span);
               then_body.Bind("notify_ret", notify_call, span);
             },
             /*else_fn=*/nullptr, span);
       },
       span);
 
-  // ---- Phase 2b: wait on every peer's signal slot ----
+  // ---- Phase 2b: wait on every peer's signal slot (cell[src, 0] == 1) ----
   b.EmitFor(
       "src", zero_idx, nranks_idx, one_idx,
       [&](LoweringBuilder& body, const VarPtr& src) {
@@ -507,7 +516,7 @@ ExprPtr LowerTensorAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>
             [&](LoweringBuilder& then_body) {
               auto wait_call =
                   OpRegistry::GetInstance().Create("pld.system.wait", {signal, src_signal_offsets, one_i32},
-                                                   {{"cmp", static_cast<int>(WaitCmp::kGe)}}, span);
+                                                   {{"cmp", static_cast<int>(WaitCmp::kEq)}}, span);
               then_body.Bind("wait_ret", wait_call, span);
             },
             /*else_fn=*/nullptr, span);
@@ -546,14 +555,18 @@ ExprPtr LowerTensorAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>
       },
       span);
 
-  // ---- Phase 3.5: post-reduce barrier ----
+  // ---- Phase 3.5: post-reduce barrier (AtomicAdd 1 → wait ≥ 2) ----
   // Phase 4 overwrites every rank's slot of ``target``; without this barrier,
   // a fast rank could write its reduced value back to ``target`` while a slow
   // rank is still in Phase 3 reading the original Phase-1 staged data from
   // the same slot via ``pld.tile.remote_load`` — a write-after-read hazard
-  // that surfaces as wrong sums on slower ranks. Reuse the same signal cells:
-  // each peer atomic-adds 1 again, raising my cell from 1 to 2, so the wait
-  // checks ``cell >= 2``.
+  // that surfaces as wrong sums on slower ranks.
+  //
+  // Reuse the same signal cells: each peer atomic-adds 1 again, raising my
+  // cell from 1 to 2, so the second wait checks ``cell >= 2``. This matches
+  // the runtime's existing collective-kernel pattern (mono­tonic AtomicAdd
+  // + Ge); the symmetric ``Set 0 / Eq 0`` reset path is left for a future
+  // runtime change.
   b.EmitFor(
       "peer2", zero_idx, nranks_idx, one_idx,
       [&](LoweringBuilder& body, const VarPtr& peer) {
