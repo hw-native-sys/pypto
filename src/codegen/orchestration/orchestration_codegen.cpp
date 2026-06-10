@@ -2769,10 +2769,57 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // result plus per-block GM scratch tensors used by a pl.spmd-dispatched
     // mixed kernel), out_indices[0] is the scratch buffer and aliasing the
     // call site SSA to it would route every downstream consumer into the
-    // scratch instead of the actual result. Fall back to out_indices[0] only
-    // when the return cannot be traced back to a Param.
+    // scratch instead of the actual result.
     auto returned_idx = FindReturnedParamIndex(callee, program_);
-    size_t param_idx = returned_idx.value_or(out_indices[0]);
+
+    // Group/Spmd wrappers produced by the outliner end in the inner kernel
+    // call, so they have no traceable top-level ReturnStmt and
+    // FindReturnedParamIndex either returns nullopt or — when an inner kernel's
+    // return is itself untraceable — mis-traces through the FIRST Out arg and
+    // reports the wrong index. For a multi-Out wrapper either outcome aliases
+    // the result to the wrong output (e.g. a small GM scratch), mis-routing
+    // every downstream consumer (issue #1702).
+    //
+    // The returned SSA result var is an SSA rename of the OUTPUT ARG carrying
+    // the result, so the result var's SSA base is the authoritative signal for
+    // which Out/InOut arg the call actually returns. Match it against each
+    // Out/InOut arg's SSA base; when it uniquely identifies one arg, trust it
+    // over FindReturnedParamIndex (which is unreliable for these wrappers).
+    // GetSSABaseName is aggressive (strips _ssa/_rv/_out/_v<N>/numeric), so the
+    // match is only used when the result base is non-empty AND exactly one Out
+    // arg matches; on no/ambiguous match we keep FindReturnedParamIndex's
+    // result, falling back to out_indices[0] only when that is also absent
+    // (correct for genuine single-Out kernels).
+    std::optional<size_t> matched_idx;
+    if (out_indices.size() > 1 && result_var != nullptr) {
+      const std::string result_base = GetSSABaseName(result_var->name_hint_);
+      if (!result_base.empty()) {
+        for (size_t idx : out_indices) {
+          // out_indices are callee param positions; a Submit's args_ is a
+          // positional PREFIX of the callee params (tail Out params are
+          // runtime-allocated, beyond args_), so guard against OOB before
+          // indexing call->args_.
+          if (idx >= call->args_.size()) continue;
+          auto out_arg = AsVarLike(call->args_[idx]);
+          if (!out_arg) continue;
+          if (GetSSABaseName(out_arg->name_hint_) != result_base) continue;
+          if (matched_idx.has_value()) {  // ambiguous — abandon the match
+            matched_idx.reset();
+            break;
+          }
+          matched_idx = idx;
+        }
+      }
+    }
+
+    // Prefer the unique SSA-base match (authoritative for the result var); fall
+    // back to the traced returned index, then to the first output.
+    size_t param_idx = matched_idx.value_or(returned_idx.value_or(out_indices[0]));
+    // Mirror the bound check GenerateTupleReturnAliases enforces:
+    // the resolved index must stay a valid index into call->args_.
+    INTERNAL_CHECK_SPAN(param_idx < call->args_.size(), call->span_)
+        << "Internal error: single-return alias output index " << param_idx << " out of range for call '"
+        << call->op_->name_ << "' (" << call->args_.size() << " args)";
     EmitTensorAlias(result_var, var_name, call, param_idx);
   }
 

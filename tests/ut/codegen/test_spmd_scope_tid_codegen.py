@@ -349,6 +349,122 @@ class TestSpmdScopeTaskIdCodegen:
         assert re.search(rf"if \({re.escape(tid)}\.is_valid\(\)\)", code) is not None, code
         assert re.search(r"params_t1\.set_dependencies\(", code) is not None, code
 
+    def test_multi_out_spmd_nonfirst_return_feeds_downstream_correct_output(self):
+        """Regression for #1702 (lineage path): a multi-Out ``pl.spmd`` scope
+        whose returned value is a NON-first output, feeding a downstream scope,
+        must resolve to the correct output buffer — not the first Out (a scratch).
+
+        ``producer`` writes two GM outputs (``scratch`` first, ``x_mixed``
+        second) and returns a ``pl.reshape`` VIEW of ``x_mixed``. The reshape
+        makes the outlined Spmd wrapper's return untraceable, so
+        ``FindReturnedParamIndex`` yields nullopt; the pre-fix lineage resolver
+        (``VarLineageCollector``) then leaked the FIRST Out (``scratch``) onto
+        the result Var, so the consumer read ``ext_scratch`` instead of
+        ``ext_x_mixed``. The SSA-base match restores the correct buffer.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class P:
+            @pl.function(type=pl.FunctionType.InCore)
+            def producer(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                scratch: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+                x_mixed: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                t = pl.load(a, [0, 0], [512, 128])
+                scratch = pl.store(pl.add(t, t), [0, 0], scratch)
+                x_mixed = pl.store(pl.add(t, pl.add(t, t)), [0, 0], x_mixed)
+                # reshape VIEW -> untraceable return -> FindReturnedParamIndex nullopt
+                return pl.reshape(x_mixed, [512, 128])
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consumer(
+                self,
+                x_mixed: pl.Tensor[[512, 128], pl.FP32],
+                final: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                t = pl.load(x_mixed, [0, 0], [512, 128])
+                return pl.store(pl.add(t, t), [0, 0], final)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                scratch: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+                x_mixed: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+                final: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                with pl.spmd(4):
+                    x_mixed = self.producer(a, scratch, x_mixed)
+                with pl.spmd(4):
+                    final = self.consumer(x_mixed, final)
+                return final
+
+        transformed = self._mixed_spmd_pipeline(P)
+        code = self._codegen(transformed)
+        # The consumer (task 1) must read the producer's SECOND output
+        # (``x_mixed``), NOT the first Out scratch.
+        assert "params_t1.add_input(ext_x_mixed);" in code, code
+        assert "params_t1.add_input(ext_scratch);" not in code, code
+
+    def test_multi_out_spmd_nonfirst_return_host_reshape_correct_output(self):
+        """Regression for #1702 (codegen return-alias path): when the multi-Out
+        spmd result is reshaped host-side in the orchestration (as the real
+        DeepSeek-V4 hc_pre kernel does), the reshape must target the returned
+        output, not the first Out scratch. Pre-fix this emitted
+        ``ext_scratch.reshape(...)`` (a numel-mismatched view that aborts the
+        AICPU subtask and surfaces as a 507018 deadlock).
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class P:
+            @pl.function(type=pl.FunctionType.InCore)
+            def producer(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                scratch: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+                x_mixed: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                t = pl.load(a, [0, 0], [512, 128])
+                scratch = pl.store(pl.add(t, t), [0, 0], scratch)
+                x_mixed = pl.store(pl.add(t, pl.add(t, t)), [0, 0], x_mixed)
+                return pl.reshape(x_mixed, [512, 128])
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consumer(
+                self,
+                xm: pl.Tensor[[256, 256], pl.FP32],
+                final: pl.Out[pl.Tensor[[256, 256], pl.FP32]],
+            ) -> pl.Tensor[[256, 256], pl.FP32]:
+                t = pl.load(xm, [0, 0], [256, 256])
+                return pl.store(pl.add(t, t), [0, 0], final)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                scratch: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+                x_mixed: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+                final: pl.Out[pl.Tensor[[256, 256], pl.FP32]],
+            ) -> pl.Tensor[[256, 256], pl.FP32]:
+                with pl.spmd(4):
+                    x_mixed = self.producer(a, scratch, x_mixed)
+                xmr = pl.reshape(x_mixed, [256, 256])  # host-side reshape of the result
+                with pl.spmd(4):
+                    final = self.consumer(xmr, final)
+                return final
+
+        transformed = self._mixed_spmd_pipeline(P)
+        code = self._codegen(transformed)
+        # The host-side reshape must be taken on the returned output, not scratch.
+        assert "ext_x_mixed.reshape" in code, code
+        assert "ext_scratch.reshape" not in code, code
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
