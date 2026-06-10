@@ -3509,7 +3509,9 @@ class TestTensorReadWriteOffsetCodegen:
                 row: pl.Scalar[pl.INDEX],
             ) -> pl.Tensor[[N, M], pl.FP32]:
                 tile: pl.Tile[[1, M], pl.FP32] = pl.tile.load(score, [row, 0], [1, M], [1, M])
-                ret: pl.Tensor[[N, M], pl.FP32] = pl.tile.store(tile, [row, 0], probe)
+                fence: pl.Tile[[1, M], pl.FP32] = pl.tile.load(score, [0, 0], [1, M], [1, M])
+                merged: pl.Tile[[1, M], pl.FP32] = pl.tile.add(tile, fence)
+                ret: pl.Tensor[[N, M], pl.FP32] = pl.tile.store(merged, [row, 0], probe)
                 return ret
 
             @pl.function(type=pl.FunctionType.Orchestration)
