@@ -356,16 +356,17 @@ A runnable end-to-end skeleton is in
 [`examples/runtime/multi_program_kv_cache.py`](../../../examples/runtime/multi_program_kv_cache.py).
 
 ```python
-from pypto.runtime import DistributedWorker
+from pypto.runtime import DistributedWorker, RunConfig
 
-prefill = ir.compile(PrefillProgram)
-decode = ir.compile(DecodeProgram)
+cfg = RunConfig(platform="a2a3", distributed_config=dc)
+prefill_c = prefill.compile(host_prompt, kv_sample, config=cfg)   # @pl.jit.host kernels:
+decode_c = decode.compile(host_token, kv_sample, host_logits, config=cfg)  # compile, no dispatch
 
-with DistributedWorker([prefill, decode]) as rt:        # one worker, one fork
+with DistributedWorker([prefill_c, decode_c]) as rt:    # one worker, one fork
     kv_cache = rt.alloc_tensor(kv_shape, torch.float16)  # resident across both
-    rt.run(prefill, host_prompt, kv_cache)               # writes the KV cache
+    rt.run(prefill_c, host_prompt, kv_cache)             # writes the KV cache
     for _ in range(max_new_tokens):
-        rt.run(decode, host_token, kv_cache, host_logits)  # reads/updates it
+        rt.run(decode_c, host_token, kv_cache, host_logits)  # reads/updates it
 ```
 
 ## What's Next

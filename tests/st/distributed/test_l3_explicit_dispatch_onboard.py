@@ -24,6 +24,9 @@ is already covered by the mocked unit tests in
 ``tests/ut/runtime/test_distributed_worker.py``; here we verify the
 hardware-specific behaviors: real dispatch correctness, real device-memory
 auto-free, and the register-after-close guard on a genuinely closed worker.
+``test_l3_multi_program_shared_kv_cache`` additionally guards the multi-program
+serving contract demonstrated in ``examples/runtime/multi_program_kv_cache.py``:
+two compiled programs prepared on one worker sharing a resident DeviceTensor.
 
 Run on hardware via ``task-submit`` (one chip)::
 
@@ -43,7 +46,10 @@ import pypto.language as pl
 import pytest
 import torch
 from pypto import ir
-from pypto.ir.distributed_compiled_program import DistributedConfig
+from pypto.ir.distributed_compiled_program import DistributedCompiledProgram, DistributedConfig
+from pypto.runtime import DistributedWorker, RunConfig
+
+from examples.runtime.multi_program_kv_cache import TILE, decode, prefill
 
 M = 128
 _LEAK_LOGGER = "pypto.runtime.runtime_base"
@@ -214,6 +220,66 @@ def test_l3_explicit_dispatch_multi_chip(test_config, device_ids, _no_leak_warni
 
     with pytest.raises(RuntimeError, match="called after close"):
         rt.register(compiled)
+
+
+def test_l3_multi_program_shared_kv_cache(test_config, device_ids, _no_leak_warning):
+    """Two programs on one worker share a resident KV cache across repeated run() calls.
+
+    On-board guard for ``examples/runtime/multi_program_kv_cache.py``: the
+    example's ``@pl.jit.host`` kernels are imported and compiled here; prefill
+    writes a worker-resident DeviceTensor once, then several decode steps from a
+    *different* compiled program read it through ``rt.run(compiled, *args)``.
+    """
+    if not device_ids:
+        pytest.skip(f"multi-program L3 KV-cache test needs >= 1 device, got {device_ids}")
+
+    dc = DistributedConfig(
+        device_ids=device_ids[:1],
+        num_sub_workers=1,
+        block_dim=3,
+        aicpu_thread_num=4,
+    )
+    cfg = RunConfig(platform=test_config.platform, distributed_config=dc)
+
+    # Per-call IO buffers must be shared-memory host tensors allocated BEFORE
+    # the worker forks inside DistributedWorker(...).
+    host_prompt = torch.full((TILE, TILE), 2.0, dtype=torch.float32).share_memory_()
+    host_token = torch.zeros((TILE, TILE), dtype=torch.float32).share_memory_()
+    host_logits = torch.zeros((TILE, TILE), dtype=torch.float32).share_memory_()
+
+    # compile() specializes on sample shapes/dtypes without dispatching; the
+    # KV sample only provides metadata for the worker-resident DeviceTensor.
+    kv_sample = torch.zeros((TILE, TILE), dtype=torch.float32)
+    prefill_c = prefill.compile(host_prompt, kv_sample, config=cfg)
+    decode_c = decode.compile(host_token, kv_sample, host_logits, config=cfg)
+    assert isinstance(prefill_c, DistributedCompiledProgram)
+    assert isinstance(decode_c, DistributedCompiledProgram)
+
+    rt = DistributedWorker([prefill_c, decode_c])
+    try:
+        # rt(*args) is ambiguous with two programs prepared — must be rejected.
+        with pytest.raises(TypeError, match="ambiguous"):
+            rt(host_prompt, host_logits)
+
+        kv_cache = rt.alloc_tensor((TILE, TILE), torch.float32)
+        assert len(rt._owned_tensors) == 1
+
+        rt.run(prefill_c, host_prompt, kv_cache)  # kv = 2 * prompt = 4.0
+
+        for step in range(3):
+            host_token.fill_(float(step))
+            host_logits.zero_()
+            rt.run(decode_c, host_token, kv_cache, host_logits)  # logits = token + kv
+
+            expected = torch.full((TILE, TILE), float(step) + 4.0, dtype=torch.float32)
+            assert torch.allclose(host_logits, expected, rtol=1e-5, atol=1e-5), (
+                f"decode step {step} wrong: max diff {(host_logits - expected).abs().max().item()}"
+            )
+    finally:
+        rt.close()
+
+    # The KV cache was never explicitly freed; close() must reclaim it.
+    assert len(rt._owned_tensors) == 0, "close() must reclaim the resident KV cache"
 
 
 if __name__ == "__main__":
