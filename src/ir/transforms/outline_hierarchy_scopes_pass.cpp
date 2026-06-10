@@ -55,6 +55,15 @@ Pass OutlineHierarchyScopes() {
     std::vector<FunctionPtr> new_functions;
     std::vector<FunctionPtr> all_outlined_functions;
 
+    // Program-wide set of outlined function names, seeded with the existing
+    // function names, shared across each function's ScopeOutliner so duplicate
+    // `name_hint` values across functions auto-disambiguate instead of colliding
+    // at Program construction (#1711).
+    auto reserved_func_names = std::make_shared<std::unordered_set<std::string>>();
+    for (const auto& [gvar, func] : program->functions_) {
+      reserved_func_names->insert(func->name_);
+    }
+
     for (const auto& [gvar, func] : program->functions_) {
       // Only process Opaque functions (hierarchy scopes appear in user-written programs)
       if (func->func_type_ != FunctionType::Opaque) {
@@ -74,7 +83,8 @@ Pass OutlineHierarchyScopes() {
       // Outline Hierarchy scopes in this function
       outline_utils::ScopeOutliner outliner(func->name_, type_collector.var_types, type_collector.var_objects,
                                             type_collector.known_names, ScopeKind::Hierarchy,
-                                            FunctionType::Opaque, "_hierarchy_");
+                                            FunctionType::Opaque, "_hierarchy_", /*program=*/nullptr,
+                                            reserved_func_names);
       auto new_body = outliner.VisitStmt(func->body_);
 
       // Preserve parent function type (don't promote — hierarchy is orthogonal to FunctionType)

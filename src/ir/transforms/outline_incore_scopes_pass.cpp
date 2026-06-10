@@ -60,6 +60,16 @@ Pass OutlineIncoreScopes() {
     std::vector<FunctionPtr> new_functions;
     std::vector<FunctionPtr> all_outlined_functions;
 
+    // Program-wide set of outlined function names, seeded with the existing
+    // function names. Shared across each function's ScopeOutliner so that two
+    // functions outlining InCore scopes with the same `name_hint` (e.g. a
+    // shared `@pl.jit.inline` helper reused across child kernels) get
+    // suffix-disambiguated instead of colliding at Program construction (#1711).
+    auto reserved_func_names = std::make_shared<std::unordered_set<std::string>>();
+    for (const auto& [gvar, func] : program->functions_) {
+      reserved_func_names->insert(func->name_);
+    }
+
     for (const auto& [gvar, func] : program->functions_) {
       // Process Opaque and Orchestration functions; other function types
       // (InCore/Group/Spmd) are already outlined or not expected to carry
@@ -79,9 +89,9 @@ Pass OutlineIncoreScopes() {
       type_collector.VisitStmt(func->body_);
 
       // Outline InCore scopes in this function
-      outline_utils::ScopeOutliner outliner(func->name_, type_collector.var_types, type_collector.var_objects,
-                                            type_collector.known_names, ScopeKind::InCore,
-                                            FunctionType::InCore, "_incore_");
+      outline_utils::ScopeOutliner outliner(
+          func->name_, type_collector.var_types, type_collector.var_objects, type_collector.known_names,
+          ScopeKind::InCore, FunctionType::InCore, "_incore_", /*program=*/nullptr, reserved_func_names);
       auto new_body = outliner.VisitStmt(func->body_);
 
       // Create new function with transformed body.

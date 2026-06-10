@@ -54,6 +54,20 @@ program_outlined = outline_pass(program)
 - 用户自定义：当 `InCoreScopeStmt.name_hint` 非空时，直接使用该名称
   - `with pl.incore(name_hint="fused_add"):` → 函数名为 `fused_add`
 
+**命名冲突**（`name_hint` 是“提示”而非唯一标识——所有外提函数共享同一个程序级
+命名空间，因此冲突会自动消解）：
+
+- **函数内冲突**——同一函数内两个 scope 共用一个 `name_hint` 时，追加数字后缀：
+  `my_kernel`、`my_kernel_0`。
+- **跨函数冲突**——两个*不同*函数外提出同名 `name_hint` 的 scope（常见于把复用的
+  `@pl.jit.inline` helper 组合进同一个 host 程序）时，按来源函数对冲突方做命名空间
+  化。先出现的函数保留原始提示名（稳定，与其单独编译时一致），后出现的加前缀：
+  - `single_a` → `dup_scope`，`single_b` → `single_b_dup_scope`
+
+  这样无需手动重命名共享 helper 的内部 `name_hint`，即可把可独立运行的子 kernel
+  组合进一个 `@pl.jit.host` 程序。同一规则也适用于共用外提工具的兄弟 pass
+  `OutlineHierarchyScopes` 与 `OutlineClusterScopes`。
+
 ## 示例
 
 ### 基本提取

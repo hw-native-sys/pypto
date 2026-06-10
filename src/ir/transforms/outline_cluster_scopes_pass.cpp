@@ -106,6 +106,16 @@ Pass OutlineClusterScopes() {
     std::vector<FunctionPtr> new_functions;
     std::vector<FunctionPtr> all_outlined_functions;
 
+    // Program-wide set of outlined function names, seeded with the existing
+    // function names and shared across every ScopeOutliner (both the Cluster and
+    // Spmd passes, across all functions) so duplicate `name_hint` values produced
+    // from reused helpers auto-disambiguate instead of colliding at Program
+    // construction (#1711).
+    auto reserved_func_names = std::make_shared<std::unordered_set<std::string>>();
+    for (const auto& [gvar, func] : program->functions_) {
+      reserved_func_names->insert(func->name_);
+    }
+
     for (const auto& [gvar, func] : program->functions_) {
       // Only process Opaque and Orchestration functions (Group functions are already outlined)
       if (func->func_type_ != FunctionType::Opaque && func->func_type_ != FunctionType::Orchestration) {
@@ -124,7 +134,7 @@ Pass OutlineClusterScopes() {
 
       outline_utils::ScopeOutliner cluster_outliner(
           func->name_, type_collector.var_types, type_collector.var_objects, type_collector.known_names,
-          ScopeKind::Cluster, FunctionType::Group, "_cluster_", program);
+          ScopeKind::Cluster, FunctionType::Group, "_cluster_", program, reserved_func_names);
       auto body_after_cluster = cluster_outliner.VisitStmt(func->body_);
 
       const auto& cluster_outlined = cluster_outliner.GetOutlinedFunctions();
@@ -153,7 +163,8 @@ Pass OutlineClusterScopes() {
 
       outline_utils::ScopeOutliner spmd_outliner(
           func->name_, refreshed_collector.var_types, refreshed_collector.var_objects,
-          refreshed_collector.known_names, ScopeKind::Spmd, FunctionType::Spmd, "_spmd_", lookup_program);
+          refreshed_collector.known_names, ScopeKind::Spmd, FunctionType::Spmd, "_spmd_", lookup_program,
+          reserved_func_names);
       auto body_after_spmd = spmd_outliner.VisitStmt(body_after_cluster);
 
       const auto& spmd_outlined = spmd_outliner.GetOutlinedFunctions();

@@ -54,6 +54,24 @@ program_outlined = outline_pass(program)
 - User-provided: when `InCoreScopeStmt.name_hint` is non-empty, that name is used directly
   - `with pl.incore(name_hint="fused_add"):` → function named `fused_add`
 
+**Name collisions** (`name_hint` is a *hint*, not a unique identifier — outlined
+functions share one program-wide namespace, so collisions are resolved
+automatically):
+
+- **In-function** — two scopes in the same function sharing a `name_hint` get a
+  numeric suffix: `my_kernel`, `my_kernel_0`.
+- **Cross-function** — two *different* functions outlining scopes with the same
+  `name_hint` (typically a reused `@pl.jit.inline` helper composed into a host
+  program) are disambiguated by namespacing the collision under the originating
+  function. The first function keeps the bare hint (stable, matching its
+  standalone compilation); the later one is prefixed:
+  - `single_a` → `dup_scope`, `single_b` → `single_b_dup_scope`
+
+  This lets independently-runnable child kernels be composed into one
+  `@pl.jit.host` program without manually renaming shared helper internals. The
+  same rule applies to the sibling `OutlineHierarchyScopes` and
+  `OutlineClusterScopes` passes (which share the outlining utility).
+
 ## Example
 
 ### Basic Outlining

@@ -1205,6 +1205,62 @@ class TestOutlineNamedIncoreScopes:
         After = passes.outline_incore_scopes()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_outline_duplicate_name_hint_across_functions(self):
+        """Sibling functions reusing the same ``name_hint`` must not collide.
+
+        Regression test for issue #1711: composing independently-runnable child
+        kernels (e.g. two kernels reusing one ``@pl.jit.inline`` helper) yields a
+        program where multiple Orchestration functions each outline an InCore
+        scope carrying the *same* ``name_hint``. The outlined functions land in a
+        single namespace, so the bare hint would clash at Program construction.
+        The pass disambiguates a *cross-function* collision by namespacing it
+        under the originating function: ``fn_a`` keeps ``dup`` (first seen,
+        stable, matching its standalone compilation), ``fn_b`` gets the
+        source-derived ``fn_b_dup``. This differs from the *in-function* dedup
+        above, which keeps the historical numeric ``_0`` suffix.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def fn_a(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="dup"):
+                    a: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return a
+
+            @pl.function
+            def fn_b(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="dup"):
+                    b: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return b
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def dup(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                a: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return a
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def fn_b_dup(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                b: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return b
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def fn_a(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                a: pl.Tensor[[64], pl.FP32] = self.dup(x)
+                return a
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def fn_b(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                b: pl.Tensor[[64], pl.FP32] = self.fn_b_dup(x)
+                return b
+
+        Before = passes.convert_to_ssa()(Before)
+        Expected = passes.convert_to_ssa()(Expected)
+        After = passes.outline_incore_scopes()(Before)
+        ir.assert_structural_equal(After, Expected)
+
 
 class TestOutlineNoDepArgs:
     """``pl.at(no_dep_args=[t])`` lowering: ScopeStmt.attrs[arg_direction_overrides_vars]

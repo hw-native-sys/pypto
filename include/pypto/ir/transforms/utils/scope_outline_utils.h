@@ -238,7 +238,8 @@ class ScopeOutliner : public IRMutator {
   ScopeOutliner(std::string func_name, const std::unordered_map<const Var*, TypePtr>& var_types,
                 const std::unordered_map<const Var*, VarPtr>& var_objects,
                 const std::unordered_set<std::string>& known_names, ScopeKind target_scope_kind,
-                FunctionType outlined_func_type, std::string name_suffix, ProgramPtr program = nullptr)
+                FunctionType outlined_func_type, std::string name_suffix, ProgramPtr program = nullptr,
+                std::shared_ptr<std::unordered_set<std::string>> reserved_func_names = nullptr)
       : func_name_(std::move(func_name)),
         var_types_(var_types),
         var_objects_(var_objects),
@@ -246,7 +247,8 @@ class ScopeOutliner : public IRMutator {
         target_scope_kind_(target_scope_kind),
         outlined_func_type_(outlined_func_type),
         name_suffix_(std::move(name_suffix)),
-        program_(std::move(program)) {}
+        program_(std::move(program)),
+        reserved_func_names_(std::move(reserved_func_names)) {}
 
   [[nodiscard]] const std::vector<FunctionPtr>& GetOutlinedFunctions() const { return outlined_functions_; }
 
@@ -439,6 +441,54 @@ class ScopeOutliner : public IRMutator {
   StmtPtr VisitStmt_(const SpmdScopeStmtPtr& op) override { return VisitScopeKind(op); }
 
  private:
+  /// True when `name` is already claimed by this function (`known_names_`) or,
+  /// when the pass opts in, by any earlier function in the program
+  /// (`reserved_func_names_`).
+  [[nodiscard]] bool IsNameTaken(const std::string& name) const {
+    return known_names_.count(name) > 0 ||
+           (reserved_func_names_ != nullptr && reserved_func_names_->count(name) > 0);
+  }
+
+  /// Append the smallest `_<n>` suffix that makes `base` unique program-wide.
+  [[nodiscard]] std::string NumericSuffix(const std::string& base) const {
+    int dedup_counter = 0;
+    std::string disambiguated;
+    do {
+      disambiguated = base + "_" + std::to_string(dedup_counter++);
+    } while (IsNameTaken(disambiguated));
+    return disambiguated;
+  }
+
+  /**
+   * @brief Resolve an outlined-function name collision.
+   *
+   * `known_names_` is function-local; `reserved_func_names_` (when the pass
+   * provides it) is the program-wide set of outlined names already emitted by
+   * earlier functions. Two collision shapes are handled differently:
+   *
+   * - **Cross-function** (name free locally but already taken by another
+   *   function): almost always a reused `@pl.jit.inline` helper outlined from
+   *   two sibling child kernels (issue #1711). Namespace under the originating
+   *   function for a debuggable, source-derived name (`single_b_dup_scope`)
+   *   rather than an opaque numeric suffix.
+   * - **In-function** (name taken within this same function, e.g. two scopes
+   *   sharing a `name_hint`): preserve the historical numeric-suffix behavior
+   *   (`my_kernel` -> `my_kernel_0`).
+   */
+  [[nodiscard]] std::string DisambiguateOutlinedName(const std::string& candidate) const {
+    const bool taken_local = known_names_.count(candidate) > 0;
+    if (!IsNameTaken(candidate)) {
+      return candidate;
+    }
+    if (!taken_local) {
+      // Cross-function collision: namespace under the source function.
+      std::string namespaced = func_name_ + "_" + candidate;
+      return IsNameTaken(namespaced) ? NumericSuffix(namespaced) : namespaced;
+    }
+    // In-function collision: numeric suffix, matching long-standing behavior.
+    return NumericSuffix(candidate);
+  }
+
   /**
    * @brief Outline a single scope into a separate function.
    *
@@ -447,7 +497,6 @@ class ScopeOutliner : public IRMutator {
    */
   StmtPtr OutlineScope(const ScopeStmtPtr& op, const std::unordered_set<const Var*>& used_after) {
     // Generate function name: use user-provided hint when available, otherwise auto-generate.
-    // On collision, auto-deduplicate with a numeric suffix (name_hint semantics).
     std::string outlined_func_name;
     if (!op->name_hint_.empty()) {
       outlined_func_name = op->name_hint_;
@@ -461,15 +510,11 @@ class ScopeOutliner : public IRMutator {
       name_stream << func_name_ << suffix << scope_counter_++;
       outlined_func_name = name_stream.str();
     }
-    // Deduplicate: append _0, _1, ... if name already taken
-    if (known_names_.count(outlined_func_name)) {
-      std::string base = outlined_func_name;
-      int dedup_counter = 0;
-      do {
-        outlined_func_name = base + "_" + std::to_string(dedup_counter++);
-      } while (known_names_.count(outlined_func_name));
-    }
+    outlined_func_name = DisambiguateOutlinedName(outlined_func_name);
     known_names_.insert(outlined_func_name);
+    if (reserved_func_names_ != nullptr) {
+      reserved_func_names_->insert(outlined_func_name);
+    }
 
     // Analyze the scope body for inputs and outputs (before recursing).
     // A single VarDefUseCollector replaces the old VarRefCollector + VarDefCollector pair.
@@ -1256,6 +1301,12 @@ class ScopeOutliner : public IRMutator {
   FunctionType outlined_func_type_;
   std::string name_suffix_;
   ProgramPtr program_;
+  /// Program-wide set of outlined function names already emitted by earlier
+  /// functions in the same pass run. Shared (non-owning of the pass) so that
+  /// duplicate `name_hint` values across functions auto-disambiguate instead of
+  /// colliding at Program construction (issue #1711). Null when the pass does
+  /// not opt in to cross-function name reservation.
+  std::shared_ptr<std::unordered_set<std::string>> reserved_func_names_;
   int scope_counter_ = 0;
   /// True while we are visiting the body of a non-target ScopeStmt — a
   /// target-kind scope encountered here cannot leak locally-defined vars to
