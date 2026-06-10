@@ -1938,6 +1938,22 @@ class Cast(UnaryExpr):
             span: Source location
         """
 
+class DimExpr(Expr):
+    """Opaque wrapper around a composite dimension expression (e.g. NR * 64).
+
+    The SSA verifier treats DimExpr as program-scoped — it does not recurse
+    into the body.  This enables composite dim expressions in type annotations
+    at any IR function level (not just HOST).
+    """
+
+    def __init__(self, body: Expr, span: Span) -> None:
+        """Wrap an expression as a program-scoped dim expression.
+
+        Args:
+            body: The composite dimension expression (e.g. ir.Mul(…))
+            span: Source location
+        """
+
 class Stmt(IRNode):
     """Base class for all statements."""
 

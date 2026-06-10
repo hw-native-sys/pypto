@@ -605,6 +605,10 @@ DEFINE_UNARY_MUTATOR(Cast)
 
 #undef DEFINE_UNARY_MUTATOR
 
+// DimExpr is opaque to default IR traversal (body_ is IgnoreField).
+// Identity transform — specific passes may override.
+ExprPtr IRMutator::VisitExpr_(const DimExprPtr& op) { return op; }
+
 StmtPtr IRMutator::VisitStmt_(const AssignStmtPtr& op) {
   INTERNAL_CHECK_SPAN(op->var_, op->span_) << "AssignStmt has null var";
   INTERNAL_CHECK_SPAN(op->value_, op->span_) << "AssignStmt has null value";

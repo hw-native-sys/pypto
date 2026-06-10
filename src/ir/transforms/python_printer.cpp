@@ -238,6 +238,7 @@ class IRPythonPrinter : public IRVisitor {
   void VisitExpr_(const NotPtr& op) override;
   void VisitExpr_(const BitNotPtr& op) override;
   void VisitExpr_(const CastPtr& op) override;
+  void VisitExpr_(const DimExprPtr& op) override;
 
   // Statement visitors
   void VisitStmt_(const AssignStmtPtr& op) override;
@@ -1275,6 +1276,11 @@ void IRPythonPrinter::VisitExpr_(const CastPtr& op) {
   stream_ << prefix_ << ".cast(";
   VisitExpr(op->operand_);
   stream_ << ", " << prefix_ << "." << DataTypeToString(scalar_type->dtype_) << ")";
+}
+
+void IRPythonPrinter::VisitExpr_(const DimExprPtr& op) {
+  // Unwrap: print the inner dimension expression directly.
+  VisitExpr(op->body_);
 }
 
 void IRPythonPrinter::VisitExpr_(const NotPtr& op) {

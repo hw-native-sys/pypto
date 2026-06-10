@@ -1075,6 +1075,15 @@ void BindIR(nb::module_& m) {
 
 #undef BIND_UNARY_EXPR
 
+  // DimExpr - opaque wrapper around a composite dimension expression.
+  // body_ is IgnoreField so the SSA verifier treats the entire DimExpr
+  // as program-scoped.
+  auto dimexpr_class = nb::class_<DimExpr, Expr>(ir, "DimExpr",
+      "Opaque wrapper around a composite dimension expression (e.g. NR * 64)");
+  BindFields<DimExpr>(dimexpr_class);
+  dimexpr_class.def(nb::init<const ExprPtr&, const Span&>(), nb::arg("body"), nb::arg("span"),
+                    "Wrap an expression as a program-scoped dim expression");
+
   // Bind structural hash and equality functions
   // structural_hash overloads share the same auto-mapping semantics:
   //   enable_auto_mapping=True  -> variable names are ignored (x+1 and y+1 hash the same)
@@ -1806,6 +1815,8 @@ void BindIR(nb::module_& m) {
   ir.def("neg", &MakeNeg, nb::arg("operand"), nb::arg("span") = Span::unknown(), "Negation operator");
   ir.def("cast", &MakeCast, nb::arg("operand"), nb::arg("dtype"), nb::arg("span") = Span::unknown(),
          "Cast operator");
+  ir.def("dim_expr", &MakeDimExpr, nb::arg("body"), nb::arg("span") = Span::unknown(),
+         "Wrap a dimension expression so the SSA verifier treats it as program-scoped");
   ir.def("bit_and", &MakeBitAnd, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
          "Bitwise and operator");
   ir.def("bit_or", &MakeBitOr, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),

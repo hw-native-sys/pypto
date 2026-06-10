@@ -96,6 +96,12 @@ class ExprFunctor {
   virtual R VisitExpr_(const NotPtr& op, Args... args) = 0;
   virtual R VisitExpr_(const BitNotPtr& op, Args... args) = 0;
   virtual R VisitExpr_(const CastPtr& op, Args... args) = 0;
+  // DimExpr wraps composite dim expressions (e.g. NR * SIZE); default
+  // behaviour is to recurse into the body.  IRVisitor and IRMutator
+  // override with opaque / identity semantics respectively.
+  virtual R VisitExpr_(const DimExprPtr& op, Args... args) {
+    return VisitExpr(op->body_, std::forward<Args>(args)...);
+  }
 };
 
 // Macro to dispatch based on expression type
@@ -151,6 +157,7 @@ R ExprFunctor<R, Args...>::VisitExpr(const ExprPtr& expr, Args... args) {
   EXPR_FUNCTOR_DISPATCH(Not);
   EXPR_FUNCTOR_DISPATCH(BitNot);
   EXPR_FUNCTOR_DISPATCH(Cast);
+  EXPR_FUNCTOR_DISPATCH(DimExpr);
 
   // Should never reach here if all types are handled
   throw pypto::TypeError("Unknown expression type in ExprFunctor::VisitExpr");

@@ -851,7 +851,7 @@ class TypeResolver:
                     f"Shape dimension '{source_name}' must be integer-typed, got {expr_type}",
                     span=span,
                 )
-            return expr
+            return ir.dim_expr(expr, span)
         raise ParserTypeError(
             f"Shape variable '{source_name}' must be int or pl.dynamic(), got {type(value).__name__}",
             span=span,

@@ -83,6 +83,12 @@ enum class ObjectKind {
   BitNot,
   Cast,
 
+  // Dimension expression — wraps arithmetic on pl.dynamic() dims.
+  // Treated as program-scoped by the SSA verifier so composite shape
+  // expressions (e.g. ``NR * 64``) can appear in type annotations at
+  // any IR function level.
+  DimExpr,
+
   // Statement kinds
   AssignStmt,
   IfStmt,

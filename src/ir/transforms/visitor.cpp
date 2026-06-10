@@ -190,6 +190,10 @@ DEFINE_UNARY_VISITOR(Cast)
 
 #undef DEFINE_UNARY_VISITOR
 
+// DimExpr wraps program-scoped dim expressions; the SSA verifier treats it
+// as opaque.  body_ is IgnoreField so the default visitor does not recurse.
+void IRVisitor::VisitExpr_(const DimExprPtr& op) {}
+
 void IRVisitor::VisitStmt_(const AssignStmtPtr& op) {
   INTERNAL_CHECK_SPAN(op->var_, op->span_) << "AssignStmt has null var";
   INTERNAL_CHECK_SPAN(op->value_, op->span_) << "AssignStmt has null value";

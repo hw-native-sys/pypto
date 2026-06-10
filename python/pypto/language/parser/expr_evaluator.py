@@ -148,7 +148,7 @@ class ExprEvaluator:
                         f"Scalar.unwrap() returned non-Expr: {type(expr).__name__}",
                         span=span,
                     )
-                return expr
+                return ir.dim_expr(expr, span)
         if isinstance(value, (list, tuple)):
             return ir.MakeTuple([self.python_value_to_ir(elt, span) for elt in value], span)
         raise ParserTypeError(

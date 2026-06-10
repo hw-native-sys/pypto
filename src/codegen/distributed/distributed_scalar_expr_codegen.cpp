@@ -133,5 +133,8 @@ void DistributedCodegen::VisitExpr_(const ir::CastPtr& op) {
   EmitUnaryCallOp(op, py_builtin);
 }
 
+// DimExpr: unwrap to the inner dimension expression for codegen.
+void DistributedCodegen::VisitExpr_(const ir::DimExprPtr& op) { VisitExpr(op->body_); }
+
 }  // namespace codegen
 }  // namespace pypto

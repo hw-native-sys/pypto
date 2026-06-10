@@ -95,6 +95,7 @@ class IRMutator : public ExprFunctor<ExprPtr>, public StmtFunctor<StmtPtr> {
   ExprPtr VisitExpr_(const NotPtr& op) override;
   ExprPtr VisitExpr_(const BitNotPtr& op) override;
   ExprPtr VisitExpr_(const CastPtr& op) override;
+  ExprPtr VisitExpr_(const DimExprPtr& op) override;
 
   // Statement types
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override;

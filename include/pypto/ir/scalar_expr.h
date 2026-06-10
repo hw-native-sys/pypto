@@ -310,6 +310,31 @@ DEFINE_UNARY_EXPR_NODE(BitNot, "Bitwise not expression (~operand)")
 DEFINE_UNARY_EXPR_NODE(Cast, "Cast expression (cast operand to dtype)")
 
 #undef DEFINE_UNARY_EXPR_NODE
+
+// ============================================================================
+// DimExpr — wraps a composite dimension expression so the SSA verifier
+//           treats it as program-scoped (opaque to Var scope checking).
+//           Used for ``pl.dynamic()`` arithmetic in type annotations.
+// ============================================================================
+
+class DimExpr : public Expr {
+ public:
+  ExprPtr body_;  ///< The wrapped dimension expression (e.g. ir.Mul)
+
+  DimExpr(ExprPtr body, Span span)
+      : Expr(std::move(span), body->GetType()), body_(std::move(body)) {}
+
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::DimExpr; }
+  [[nodiscard]] std::string TypeName() const override { return "DimExpr"; }
+
+  static constexpr auto GetFieldDescriptors() {
+    return std::tuple_cat(Expr::GetFieldDescriptors(),
+                          std::make_tuple(reflection::IgnoreField(&DimExpr::body_, "body")));
+  }
+};
+
+using DimExprPtr = std::shared_ptr<const DimExpr>;
+
 // ========== Helper Functions for Operator Construction ==========
 
 /**
@@ -417,6 +442,10 @@ inline BinaryOperands PromoteIntBinaryOperands(const ExprPtr& left, const ExprPt
 
 inline ExprPtr MakeCast(const ExprPtr& operand, DataType dtype, const Span& span = Span::unknown()) {
   return std::make_shared<Cast>(operand, dtype, span);
+}
+
+inline ExprPtr MakeDimExpr(const ExprPtr& body, const Span& span = Span::unknown()) {
+  return std::make_shared<DimExpr>(body, span);
 }
 
 inline ExprPtr MakeAdd(const ExprPtr& left, const ExprPtr& right, const Span& span = Span::unknown()) {

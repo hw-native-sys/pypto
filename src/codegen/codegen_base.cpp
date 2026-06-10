@@ -102,6 +102,9 @@ std::string CodegenBase::GenerateExprString(const ir::ExprPtr& expr) const {
   if (auto neg = As<Neg>(expr)) {
     return "(-" + GenerateExprString(neg->operand_) + ")";
   }
+  if (auto dim_expr = As<DimExpr>(expr)) {
+    return GenerateExprString(dim_expr->body_);
+  }
   if (auto cast_expr = As<Cast>(expr)) {
     auto scalar_type = As<ScalarType>(cast_expr->GetType());
     INTERNAL_CHECK_SPAN(scalar_type, expr->span_)

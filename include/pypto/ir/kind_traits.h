@@ -81,6 +81,7 @@ DEFINE_KIND_TRAIT(Neg, ObjectKind::Neg)
 DEFINE_KIND_TRAIT(Not, ObjectKind::Not)
 DEFINE_KIND_TRAIT(BitNot, ObjectKind::BitNot)
 DEFINE_KIND_TRAIT(Cast, ObjectKind::Cast)
+DEFINE_KIND_TRAIT(DimExpr, ObjectKind::DimExpr)
 
 // Statement types
 DEFINE_KIND_TRAIT(AssignStmt, ObjectKind::AssignStmt)

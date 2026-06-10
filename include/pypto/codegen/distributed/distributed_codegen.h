@@ -126,6 +126,7 @@ class DistributedCodegen : public CodegenBase {
   void VisitExpr_(const ir::BitNotPtr& op) override;
   void VisitExpr_(const ir::AbsPtr& op) override;
   void VisitExpr_(const ir::CastPtr& op) override;
+  void VisitExpr_(const ir::DimExprPtr& op) override;
 
  private:
   // Code structure emission

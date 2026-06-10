@@ -75,9 +75,9 @@ class ReduceScatterMesh:
     @pl.function(type=pl.FunctionType.InCore)
     def reduce_scatter_step(
         self,
-        inp: pl.Tensor[[1, 4 * SIZE], pl.FP32],
+        inp: pl.Tensor[[1, NR * SIZE], pl.FP32],
         out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
-        scratch: pl.InOut[pld.DistributedTensor[[1, 4 * SIZE], pl.FP32]],
+        scratch: pl.InOut[pld.DistributedTensor[[1, NR * SIZE], pl.FP32]],
         signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
     ) -> pl.Tensor[[1, SIZE], pl.FP32]:
         """Four-phase mesh reduce-scatter on window-bound ``scratch`` / ``signal``."""
@@ -123,9 +123,9 @@ class ReduceScatterMesh:
     @pl.function(type=pl.FunctionType.Orchestration)
     def chip_orch(
         self,
-        inp: pl.Tensor[[1, 4 * SIZE], pl.FP32],
+        inp: pl.Tensor[[1, NR * SIZE], pl.FP32],
         out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
-        scratch: pl.InOut[pld.DistributedTensor[[1, 4 * SIZE], pl.FP32]],
+        scratch: pl.InOut[pld.DistributedTensor[[1, NR * SIZE], pl.FP32]],
         signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
     ) -> pl.Tensor[[1, SIZE], pl.FP32]:
         """Per-device orchestration wrapper around ``reduce_scatter_step``."""
