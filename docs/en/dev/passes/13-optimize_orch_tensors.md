@@ -113,7 +113,8 @@ Output-window eligibility:
 - offsets must be affine in the surrounding loop variables accepted by the pass
 - multi-`Out` rewrites are all-or-nothing
 - sequential-loop siblings are rewritten only when every rewritten `Out` can be proven disjoint across sibling iterations
-- same-scope sibling writers to the same parent or aliased parent tensor may still be externalized when each individual writer satisfies the static output-window eligibility rules; write/write and write/read ordering is delegated to runtime TensorMap overlap on the actually submitted window descriptors
+- same-scope sibling writers to the same parent or aliased parent tensor may still be externalized when each individual writer satisfies the static output-window eligibility rules; however, if that parent also has a sibling full-`Out` writer that cannot be externalized as a window, other writers to the same parent stay full-tensor so the non-window writer does not hide partially initialized regions
+- write/write and write/read ordering for the remaining windowed writers is delegated to runtime TensorMap overlap on the actually submitted window descriptors
 - sibling-writer alias collection descends into nested `SeqStmts`, `ForStmt`, `WhileStmt`, and `IfStmt` bodies, so tensor aliases such as loop returns and tuple projections are resolved to the visible parent before call-site slicing
 - later full-parent reads do not disable output windowing; correctness is delegated to runtime TensorMap overlap dependence once the call site exposes the actual window tensor
 

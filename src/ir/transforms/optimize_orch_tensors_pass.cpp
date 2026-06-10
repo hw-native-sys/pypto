@@ -2177,6 +2177,7 @@ class OutWindowExternalizer {
       auto saved_scalar_defs = scalar_defs_;
       auto saved_tuple_result_subst = tuple_result_subst_;
       auto saved_sibling_output_alias_roots = sibling_output_alias_roots_;
+      auto saved_sibling_unwindowable_output_roots = sibling_unwindowable_output_roots_;
       bool saved_sibling_output_summary_active = sibling_output_summary_active_;
       auto later_assemble_source_indices = CollectAssembleSourceIndices(op->stmts_);
       if (!sibling_output_summary_active_) {
@@ -2216,6 +2217,7 @@ class OutWindowExternalizer {
       scalar_defs_ = std::move(saved_scalar_defs);
       tuple_result_subst_ = std::move(saved_tuple_result_subst);
       sibling_output_alias_roots_ = std::move(saved_sibling_output_alias_roots);
+      sibling_unwindowable_output_roots_ = std::move(saved_sibling_unwindowable_output_roots);
       sibling_output_summary_active_ = saved_sibling_output_summary_active;
       if (!changed) return op;
       return SeqStmts::Flatten(std::move(new_stmts), op->span_);
@@ -2322,6 +2324,7 @@ class OutWindowExternalizer {
         callsite_subst[original_func->params_[i].get()] = call->args_[i];
       }
       if (!ProveCallsiteDisjointness(call_assign, call, analysis)) return std::nullopt;
+      if (HasUnwindowableSiblingOutputWriter(call, analysis)) return std::nullopt;
 
       std::unordered_map<size_t, VarPtr> slices_by_in_index;
       std::unordered_map<size_t, SliceBundle> slices_by_out_index;
@@ -2616,6 +2619,10 @@ class OutWindowExternalizer {
               continue;
             }
             if (const Var* parent_root = rewriter_->ResolveOutputParentRoot(call, i)) {
+              if (callee->param_directions_[i] == ParamDirection::Out &&
+                  !rewriter_->HasOutputWindowAnalysis(call->op_->name_, i)) {
+                rewriter_->sibling_unwindowable_output_roots_.insert(parent_root);
+              }
               single_output_root = parent_root;
               ++output_root_count;
             }
@@ -2661,6 +2668,25 @@ class OutWindowExternalizer {
       for (const auto& sibling_stmt : sibling_stmts) {
         collector.VisitStmt(sibling_stmt);
       }
+    }
+
+    bool HasOutputWindowAnalysis(const std::string& callee_name, size_t out_param_index) const {
+      auto analysis_it = analyses_.find(callee_name);
+      if (analysis_it == analyses_.end()) return false;
+      const auto& outputs = analysis_it->second.outputs;
+      return std::any_of(outputs.begin(), outputs.end(), [out_param_index](const OutputRewriteInfo& output) {
+        return output.out_param_index == out_param_index;
+      });
+    }
+
+    bool HasUnwindowableSiblingOutputWriter(const CallPtr& call,
+                                            const CalleeRewriteAnalysis& analysis) const {
+      for (const auto& output : analysis.outputs) {
+        const Var* parent_root = ResolveOutputParentRoot(call, output.out_param_index);
+        if (!parent_root) return true;
+        if (sibling_unwindowable_output_roots_.count(parent_root)) return true;
+      }
+      return false;
     }
 
     bool ProveCallsiteDisjointness(const AssignStmtPtr& call_assign, const CallPtr& call,
@@ -2800,6 +2826,7 @@ class OutWindowExternalizer {
     std::unordered_map<const Var*, ExprPtr> scalar_defs_;
     std::unordered_map<const Var*, std::vector<ExprPtr>> tuple_result_subst_;
     std::unordered_map<const Var*, const Var*> sibling_output_alias_roots_;
+    std::unordered_set<const Var*> sibling_unwindowable_output_roots_;
     std::unordered_map<std::string, std::vector<OutParamReturnMapping>> out_param_return_mappings_cache_;
     bool sibling_output_summary_active_ = false;
     int while_depth_ = 0;
