@@ -949,12 +949,22 @@ class SSAConverter {
       return result;
     }
 
-    // No new phis but existing return_vars (explicit SSA) — version return_vars, keep branch yields
+    // No new phis but existing return_vars (explicit SSA) — version return_vars, keep branch yields.
+    // Idempotence: an already-auto-versioned existing rv (``result__phi_v2`` from a prior
+    // ConvertToSSA run) is preserved at its original pointer identity, both to keep
+    // cross-function refs / codegen ``name_hint_`` consistent (mirrors AllocVersion) AND
+    // to keep the ``phi`` role intact — downstream tests / codegen rely on the
+    // ``__phi_v<N>`` marker for IfStmt-merge identification.
     if (phis.empty()) {
       cur_ = before;
       std::vector<VarPtr> return_vars;
       for (const auto& rv : op->return_vars_) {
         auto rv_key = rv.get();
+        if (IsAutoVersionedName(rv->name_hint_)) {
+          return_vars.push_back(rv);
+          cur_[rv_key] = rv;
+          continue;
+        }
         int v = NextVersion(rv_key);
         auto nrv = std::make_shared<Var>(BuildAutoNamedVersion(rv_key->name_hint_, "rv", v),
                                          SubstType(rv->GetType()), rv->span_);
@@ -986,7 +996,9 @@ class SSAConverter {
       cur_[key] = phi;
     }
 
-    // Preserve any existing return_vars not already handled as phis
+    // Preserve any existing return_vars not already handled as phis. Auto-versioned
+    // rvs (from a prior ConvertToSSA run) keep their pointer identity — see the
+    // companion path above for the rationale.
     for (const auto& rv : op->return_vars_) {
       auto rv_key = rv.get();
       bool handled = false;
@@ -996,13 +1008,17 @@ class SSAConverter {
           break;
         }
       }
-      if (!handled) {
-        int v = NextVersion(rv_key);
-        auto nrv = std::make_shared<Var>(BuildAutoNamedVersion(rv_key->name_hint_, "rv", v),
-                                         SubstType(rv->GetType()), rv->span_);
-        return_vars.push_back(nrv);
-        cur_[rv_key] = nrv;
+      if (handled) continue;
+      if (IsAutoVersionedName(rv->name_hint_)) {
+        return_vars.push_back(rv);
+        cur_[rv_key] = rv;
+        continue;
       }
+      int v = NextVersion(rv_key);
+      auto nrv = std::make_shared<Var>(BuildAutoNamedVersion(rv_key->name_hint_, "rv", v),
+                                       SubstType(rv->GetType()), rv->span_);
+      return_vars.push_back(nrv);
+      cur_[rv_key] = nrv;
     }
 
     // Append yields to branches
