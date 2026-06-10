@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "pypto/core/dtype.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/scalar_expr.h"
@@ -32,12 +33,8 @@ inline bool ShapeExprListsEquivalent(const std::vector<ExprPtr>& lhs, const std:
     return false;
   }
   for (size_t i = 0; i < lhs.size(); ++i) {
-    if (lhs[i] == rhs[i]) {
-      continue;
-    }
-    auto lhs_const = As<ConstInt>(lhs[i]);
-    auto rhs_const = As<ConstInt>(rhs[i]);
-    if (!lhs_const || !rhs_const || lhs_const->value_ != rhs_const->value_) {
+    // ConstInt by value, binary composites structurally, others by pointer.
+    if (!AreExprsEqual(lhs[i], rhs[i])) {
       return false;
     }
   }

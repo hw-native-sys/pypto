@@ -74,17 +74,25 @@ bool operator!=(const TileView& lhs, const TileView& rhs) { return !(lhs == rhs)
 
 namespace {
 
-// Tags distinguish the two AreExprsEqual cases so a value-equal ConstInt and a
-// pointer-equal Var can never collide on the same hash bucket by coincidence.
+// Tags distinguish the AreExprsEqual cases so a value-equal ConstInt, a
+// pointer-equal Var, and a structurally-equal binary op can never collide on
+// the same hash bucket by coincidence.
 constexpr uint64_t kConstIntHashTag = 1;
 constexpr uint64_t kExprPtrHashTag = 2;
+constexpr uint64_t kBinaryExprHashTag = 3;
 
-// Mirror AreExprsEqual: ConstInt nodes compare by value, all others by pointer
-// identity. The hash must match this granularity.
+// Mirror AreExprsEqual: ConstInt nodes compare by value, binary ops compare
+// structurally (kind + operands), all others by pointer identity. The hash
+// must match this granularity.
 inline uint64_t HashExprForAreExprsEqual(const ExprPtr& e) {
   if (!e) return 0;
   if (auto c = As<ConstInt>(e)) {
     return hash_combine(kConstIntHashTag, std::hash<int64_t>{}(c->value_));
+  }
+  if (auto b = As<BinaryExpr>(e)) {
+    uint64_t h = hash_combine(kBinaryExprHashTag, static_cast<uint64_t>(e->GetKind()));
+    h = hash_combine(h, HashExprForAreExprsEqual(b->left_));
+    return hash_combine(h, HashExprForAreExprsEqual(b->right_));
   }
   return hash_combine(kExprPtrHashTag, std::hash<const void*>{}(e.get()));
 }

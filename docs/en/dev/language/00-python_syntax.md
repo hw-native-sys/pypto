@@ -111,6 +111,10 @@ pl.const(42, pl.INT64)  # Typed integer literal (any non-INDEX dtype)
 A bare integer literal is always `INDEX`-typed. To carry any other integer
 dtype (e.g. `INT64`), use `pl.const(value, dtype)` — this is also how the
 printer renders such constants so printed IR round-trips through the parser.
+Inside composite shape dimensions and pure-constant arithmetic (e.g.
+`pl.const(32, pl.INDEX) + pl.const(32, pl.INDEX)`), the printer emits typed
+leaves even for `INDEX` so the parser rebuilds the tree verbatim instead of
+constant-folding it; simplification stays the Simplify pass's job.
 
 **Closure variables:** Names not found in the DSL scope are resolved from the enclosing Python scope. Supported types: `int`, `float`, `bool`, `list`, `tuple`, and IR expressions.
 

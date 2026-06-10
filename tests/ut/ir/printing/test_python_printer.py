@@ -15,6 +15,7 @@ import pypto.language as pl
 import pytest
 from pypto import DataType, ir
 from pypto.ir import MemorySpace
+from pypto.ir.op import tile
 from pypto.ir.printer import python_print
 
 
@@ -1341,6 +1342,93 @@ def test_int64_const_roundtrips_in_expression_context():
     # printing must be a fixed point.
     reparsed = pl.parse(printed)
     assert python_print(reparsed, format=False) == printed
+
+
+def _make_program_with_shape_dim(dim: ir.Expr) -> ir.Program:
+    """Build a one-load program whose tile shape carries ``dim`` as dim 0."""
+    span = ir.Span.unknown()
+    c64 = ir.ConstInt(64, DataType.INT64, span)
+    input_x = ir.Var("input_x", ir.TensorType([64, 64], DataType.FP32), span)
+    output_x = ir.Var("output_x", ir.TensorType([64, 64], DataType.FP32), span)
+    load = tile.load(input_x, offsets=[0, 0], shapes=[dim, c64])
+    tile_a = ir.Var("tile_a", load.type, span)
+    store_a = ir.Var("store_a", ir.TensorType([64, 64], DataType.FP32), span)
+    body = ir.SeqStmts(
+        [
+            ir.AssignStmt(tile_a, load, span),
+            ir.AssignStmt(store_a, tile.store(tile_a, offsets=[0, 0], output_tensor=output_x), span),
+            ir.ReturnStmt(span),
+        ],
+        span,
+    )
+    func = ir.Function("main", [input_x, output_x], [], body, span, ir.FunctionType.InCore)
+    return ir.Program([func], "composite_dim_roundtrip", span)
+
+
+@pytest.mark.parametrize(
+    "dim_factory",
+    [
+        pytest.param(lambda m, sp: m, id="bare_var"),
+        pytest.param(
+            lambda m, sp: ir.Add(m, ir.ConstInt(0, DataType.INDEX, sp), DataType.INDEX, sp),
+            id="var_plus_const",
+        ),
+        pytest.param(
+            lambda m, sp: ir.Mul(m, ir.ConstInt(2, DataType.INDEX, sp), DataType.INDEX, sp),
+            id="var_times_const",
+        ),
+        pytest.param(
+            lambda m, sp: ir.FloorDiv(m, ir.ConstInt(4, DataType.INDEX, sp), DataType.INDEX, sp),
+            id="var_floordiv_const",
+        ),
+        pytest.param(
+            lambda m, sp: ir.Add(
+                m, ir.Mul(m, ir.ConstInt(2, DataType.INDEX, sp), DataType.INDEX, sp), DataType.INDEX, sp
+            ),
+            id="nested_composite",
+        ),
+        pytest.param(
+            lambda m, sp: ir.Add(
+                ir.ConstInt(32, DataType.INDEX, sp), ir.ConstInt(32, DataType.INDEX, sp), DataType.INDEX, sp
+            ),
+            id="const_index_composite",
+        ),
+        pytest.param(
+            lambda m, sp: ir.Add(
+                ir.ConstInt(32, DataType.INT64, sp), ir.ConstInt(32, DataType.INT64, sp), DataType.INT64, sp
+            ),
+            id="const_int64_composite",
+        ),
+    ],
+)
+def test_composite_shape_dim_roundtrips(dim_factory):
+    """Composite (non-constant, non-Name) shape dims survive print -> reparse verbatim.
+
+    Regression: the parser either rejected composites over symbolic vars
+    ("Shape dimension must be int literal, variable, or evaluable expression")
+    or constant-folded composites over constants (``Add(32, 32)`` reparsed as
+    ``64``). Folding is the Simplify pass's job — print -> parse must be the
+    identity on the IR.
+    """
+    span = ir.Span.unknown()
+    m = ir.Var("m", ir.ScalarType(DataType.INDEX), span)
+    prog = _make_program_with_shape_dim(dim_factory(m, span))
+    printed = python_print(prog, format=False)
+    reparsed = pl.parse(printed)
+    ir.assert_structural_equal(prog, reparsed)
+    # Printing must also be a fixed point.
+    assert python_print(reparsed, format=False) == printed
+
+
+def test_pure_const_composite_prints_typed_leaves():
+    """A pure-ConstInt composite prints ``pl.const`` leaves (never bare ``32 + 32``),
+    so reparse rebuilds the tree instead of Python-eval folding it to one int."""
+    span = ir.Span.unknown()
+    c32 = ir.ConstInt(32, DataType.INDEX, span)
+    dim = ir.Add(c32, c32, DataType.INDEX, span)
+    printed = python_print(_make_program_with_shape_dim(dim), format=False)
+    assert "pl.const(32, pl.INDEX) + pl.const(32, pl.INDEX)" in printed
+    assert "32 + 32" not in printed
 
 
 def test_generic_attr_in_attrs_dict_roundtrips():

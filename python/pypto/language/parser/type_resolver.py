@@ -15,6 +15,7 @@ from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 from pypto.language.typing.dynamic import DynVar
+from pypto.language.typing.scalar import Scalar
 from pypto.pypto_core import DataType, ir
 
 from .diagnostics import ParserTypeError
@@ -833,6 +834,11 @@ class TypeResolver:
             elif value.name not in self._dyn_var_cache:
                 self._dyn_var_cache[value.name] = value._ir_var
             return value._ir_var
+        if isinstance(value, Scalar) and not value._annotation_only and value.expr is not None:
+            # Composite shape dim (e.g. `m + 0`, `pl.const(32, pl.INT64) * 2`)
+            # evaluated through DSL operator overloading — keep the IR tree
+            # as-is, without constant folding, so print->parse round-trips.
+            return value.expr
         raise ParserTypeError(
             f"Shape variable '{source_name}' must be int or pl.dynamic(), got {type(value).__name__}",
             span=span,
@@ -854,10 +860,24 @@ class TypeResolver:
             elif isinstance(elt, ast.Name):
                 dims.append(self._resolve_shape_dim(elt))
             else:
+                # Composites carrying pl.const(...) must be rebuilt from the
+                # AST: the runtime pl.const stub returns the raw number, so
+                # Python eval would constant-fold and drop the dtype.
+                if self._contains_pl_const(elt):
+                    rebuilt = self._rebuild_composite_dim(elt)
+                    if rebuilt is not None:
+                        dims.append(rebuilt)
+                        continue
                 # Try evaluating arbitrary expressions (e.g., x * 2, len(shape))
                 success, value = self.expr_evaluator.try_eval_expr(elt)
                 if success:
                     dims.append(self._validate_dim_value(value, ast.unparse(elt), self._get_span(elt)))
+                    continue
+                # Composite over scope-only vars (e.g. `s + 1` for a Scalar
+                # param `s`) — not closure-evaluable; rebuild from the AST.
+                rebuilt = self._rebuild_composite_dim(elt)
+                if rebuilt is not None:
+                    dims.append(rebuilt)
                 else:
                     raise ParserTypeError(
                         f"Shape dimension must be int literal, variable, or evaluable expression: "
@@ -866,6 +886,58 @@ class TypeResolver:
                         hint="Use integer literals, variables, or expressions for shape dimensions",
                     )
         return dims
+
+    _SHAPE_BINOPS: dict[type[ast.operator], str] = {
+        ast.Add: "add",
+        ast.Sub: "sub",
+        ast.Mult: "mul",
+        ast.FloorDiv: "floordiv",
+        ast.Mod: "mod",
+    }
+
+    @staticmethod
+    def _is_pl_const_call(node: ast.AST) -> bool:
+        """Check whether ``node`` is a ``pl.const(...)`` call."""
+        return (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "const"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "pl"
+        )
+
+    @classmethod
+    def _contains_pl_const(cls, node: ast.expr) -> bool:
+        """Check whether the subtree contains a ``pl.const(...)`` call."""
+        return any(cls._is_pl_const_call(sub) for sub in ast.walk(node))
+
+    def _rebuild_composite_dim(self, node: ast.expr) -> ir.Expr | None:
+        """Rebuild a composite shape dimension as an IR expression, no folding.
+
+        Handles int literals, names (closure/scope), ``pl.const(value, dtype)``
+        and binary +, -, *, //, % over those. Returns None for any other form.
+        """
+        span = self._get_span(node)
+        if isinstance(node, ast.Constant) and isinstance(node.value, int):
+            return ir.ConstInt(node.value, DataType.INDEX, span)
+        if isinstance(node, ast.Name):
+            resolved = self._resolve_shape_dim(node)
+            return ir.ConstInt(resolved, DataType.INDEX, span) if isinstance(resolved, int) else resolved
+        if self._is_pl_const_call(node):
+            call = cast(ast.Call, node)
+            if (
+                len(call.args) == 2
+                and isinstance(call.args[0], ast.Constant)
+                and isinstance(call.args[0].value, int)
+            ):
+                return ir.ConstInt(call.args[0].value, self.resolve_dtype(call.args[1]), span)
+        if isinstance(node, ast.BinOp) and type(node.op) in self._SHAPE_BINOPS:
+            lhs = self._rebuild_composite_dim(node.left)
+            rhs = self._rebuild_composite_dim(node.right)
+            if lhs is None or rhs is None:
+                return None
+            return getattr(ir, self._SHAPE_BINOPS[type(node.op)])(lhs, rhs, span)
+        return None
 
     def _get_span(self, node: ast.AST) -> ir.Span:
         """Get span for an AST node, falling back to unknown."""

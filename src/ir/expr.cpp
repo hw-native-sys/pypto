@@ -59,6 +59,13 @@ bool AreExprsEqual(const ExprPtr& e1, const ExprPtr& e2) {
   auto c1 = As<ConstInt>(e1);
   auto c2 = As<ConstInt>(e2);
   if (c1 && c2) return c1->value_ == c2->value_;
+  // Composite dims (e.g. two reparsed `m + 0` nodes) compare structurally:
+  // same op kind, recursively equal operands. Leaf Vars keep pointer identity.
+  auto b1 = As<BinaryExpr>(e1);
+  auto b2 = As<BinaryExpr>(e2);
+  if (b1 && b2 && e1->GetKind() == e2->GetKind()) {
+    return AreExprsEqual(b1->left_, b2->left_) && AreExprsEqual(b1->right_, b2->right_);
+  }
   return false;
 }
 

@@ -110,6 +110,10 @@ pl.const(42, pl.INT64)  # Typed integer literal (any non-INDEX dtype)
 裸整数字面量始终为 `INDEX` 类型。若需携带其他整数 dtype（如 `INT64`），
 请使用 `pl.const(value, dtype)`——打印器也以此形式渲染此类常量，
 从而保证打印出的 IR 能通过解析器正确往返。
+在复合 shape 维度和纯常量算术中（如
+`pl.const(32, pl.INDEX) + pl.const(32, pl.INDEX)`），打印器对 `INDEX`
+也会输出带类型的叶子，使解析器逐字重建表达式树而不做常量折叠；
+化简始终由 Simplify pass 负责。
 
 **闭包变量:** 在 DSL 作用域中未找到的名称会从外层 Python 作用域解析。支持的类型: `int`, `float`, `bool`, `list`, `tuple` 以及 IR 表达式。
 

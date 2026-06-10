@@ -292,6 +292,13 @@ class IRPythonPrinter : public IRVisitor {
   // When two distinct Var* share the same name_hint_, they get unique suffixed names.
   std::unordered_map<const Var*, std::string> dyn_var_rename_map_;
 
+  // When true, INDEX-typed ConstInt leaves print as pl.const(v, pl.INDEX)
+  // instead of bare literals. Enabled inside composite type-context dims
+  // (shape / valid_shape) so the parser rebuilds them verbatim instead of
+  // Python-eval folding `32 + 32` into `64`. Bare literals stay the default
+  // everywhere else.
+  bool typed_index_consts_ = false;
+
   // Helper methods
   std::string GetIndent() const;
   void IncreaseIndent();
@@ -616,7 +623,7 @@ void IRPythonPrinter::VisitExpr_(const ConstIntPtr& op) {
   // the parser (`ast_parser.parse_constant`) produces. Only INDEX may print
   // bare; every other integer dtype (INT64 included) must carry an explicit
   // `pl.const(value, pl.<DTYPE>)` annotation so print -> reparse round-trips.
-  if (op->dtype() == DataType::INDEX) {
+  if (op->dtype() == DataType::INDEX && !typed_index_consts_) {
     stream_ << op->value_;
   } else {
     stream_ << prefix_ << ".const(" << op->value_ << ", " << prefix_ << "." << DataTypeToString(op->dtype())
@@ -1193,10 +1200,29 @@ bool IRPythonPrinter::NeedsParens(const ExprPtr& parent, const ExprPtr& child, b
   return false;
 }
 
+namespace {
+// A binary tree whose leaves are all ConstInt would print as bare Python
+// arithmetic (e.g. `32 + 32`) and fold to one int on reparse. Such trees
+// must print typed const leaves so the parser rebuilds them verbatim;
+// folding is the Simplify pass's job, not the printer/parser's.
+bool IsPureConstIntTree(const ExprPtr& expr) {
+  if (As<ConstInt>(expr)) return true;
+  if (auto bin = As<BinaryExpr>(expr)) {
+    return IsPureConstIntTree(bin->left_) && IsPureConstIntTree(bin->right_);
+  }
+  return false;
+}
+}  // namespace
+
 void IRPythonPrinter::PrintBinaryOp(const BinaryExprPtr& op, const char* op_symbol) {
+  const bool saved_typed = typed_index_consts_;
+  if (!typed_index_consts_ && IsPureConstIntTree(op)) {
+    typed_index_consts_ = true;
+  }
   PrintChild(op, op->left_, true);
   stream_ << " " << op_symbol << " ";
   PrintChild(op, op->right_, false);
+  typed_index_consts_ = saved_typed;
 }
 
 void IRPythonPrinter::PrintFunctionBinaryOp(const BinaryExprPtr& op, const char* func_name) {
@@ -2511,6 +2537,10 @@ std::string IRPythonPrinter::PrintExprForType(const ExprPtr& expr) {
   }
   IRPythonPrinter temp_printer(prefix_);
   temp_printer.dyn_var_rename_map_ = dyn_var_rename_map_;
+  // Composite dims must reparse to the same tree, not Python-eval to a folded
+  // int. Typed const leaves (pl.const(v, pl.INDEX)) make them self-describing;
+  // simplification stays the Simplify pass's job.
+  temp_printer.typed_index_consts_ = true;
   return temp_printer.Print(expr);
 }
 
