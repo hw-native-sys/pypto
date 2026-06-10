@@ -5585,9 +5585,8 @@ class TestManualScopeCodegen:
         code = _generate_orch_code(transformed)
 
         assert "rt_submit_dummy_task" not in code, code
-        # 4 user deps (tids[0..3]) + 1 user dep (seed_tid) + 1 compiler dep
-        # (WAW hazard seed_tid → iter tid from prior phase) = 6
-        assert re.search(r"PTO2TaskId params_t\d+_deps\[6\];", code), code
+        # 4 user deps (tids[0..3]) + 1 user dep (seed_tid) = 5
+        assert re.search(r"PTO2TaskId params_t\d+_deps\[5\];", code), code
 
     def test_auto_scope_array_dep_does_not_emit_dummy_barrier(self):
         """Array deps outside manual_scope keep the existing explicit-deps lowering."""
