@@ -1078,8 +1078,8 @@ void BindIR(nb::module_& m) {
   // DimExpr - opaque wrapper around a composite dimension expression.
   // body_ is IgnoreField so the SSA verifier treats the entire DimExpr
   // as program-scoped.
-  auto dimexpr_class = nb::class_<DimExpr, Expr>(ir, "DimExpr",
-      "Opaque wrapper around a composite dimension expression (e.g. NR * 64)");
+  auto dimexpr_class = nb::class_<DimExpr, Expr>(
+      ir, "DimExpr", "Opaque wrapper around a composite dimension expression (e.g. NR * 64)");
   BindFields<DimExpr>(dimexpr_class);
   dimexpr_class.def(nb::init<const ExprPtr&, const Span&>(), nb::arg("body"), nb::arg("span"),
                     "Wrap an expression as a program-scoped dim expression");

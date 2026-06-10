@@ -17,6 +17,7 @@ import pypto.language as pl
 from pypto import backend, codegen, ir
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
+from pypto.pypto_core import codegen as _cg
 
 M = pl.dynamic("M")
 N = pl.dynamic("N")
@@ -218,6 +219,40 @@ def test_add_kernel_loop_dynamic_pto_codegen():
     assert "to %arg3" in mlir_code
     # offset_1 = i * 2 must appear as a real SSA value in partition_view offsets (not blank)
     assert "offsets = [, " not in mlir_code
+
+
+@pl.program
+class DimExprShapeKernel:
+    """Kernel with composite dynamic dim expressions (e.g. NR * SIZE) in shapes."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def add_kernel(
+        self,
+        inp: pl.Tensor[[M, N * 2], pl.FP32],
+        out: pl.Out[pl.Tensor[[M, N * 2], pl.FP32]],
+    ) -> pl.Tensor[[M, N * 2], pl.FP32]:
+        out_tile = pl.load(inp, [0, 0], [M, N * 2])
+        return pl.store(out_tile, [0, 0], out)
+
+
+def test_dimexpr_collect_vars_from_shape():
+    """``CollectVarsFromShapeExpr`` must unwrap DimExpr to find Var("N") inside Mul(N, 2)."""
+    func = DimExprShapeKernel.get_function("add_kernel")
+    assert func is not None
+
+    # Check that the shape dim contains DimExpr wrapping Mul
+    param_type = func.params[0].type
+    assert isinstance(param_type, ir.TensorType)
+    dim1 = param_type.shape[1]
+    assert isinstance(dim1, ir.DimExpr), f"expected DimExpr, got {type(dim1).__name__}"
+    assert isinstance(dim1.body, ir.Mul), f"expected Mul body, got {type(dim1.body).__name__}"
+
+    # Verify collect_vars_from_shape_expr finds Var("N") inside DimExpr
+    vars_ = _cg.collect_vars_from_shape_expr(dim1)
+    var_names = [v.name_hint for v in vars_]
+    assert "N" in var_names, f"collect_vars_from_shape_expr should find N inside DimExpr, got {var_names}"
+    assert "M" not in var_names, "M should not be in dim1's vars"
+    assert len(vars_) == 1, f"expected exactly 1 var (N), got {var_names}"
 
 
 if __name__ == "__main__":

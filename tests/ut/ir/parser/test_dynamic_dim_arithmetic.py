@@ -55,6 +55,7 @@ def test_dynamic_dim_add_in_shape():
     func = TestProg.get_function("func")
     assert func is not None
     return_type = func.return_types[0]
+    assert isinstance(return_type, ir.TensorType)
     dim0 = return_type.shape[0]
     assert isinstance(dim0, ir.DimExpr), f"expected ir.DimExpr, got {type(dim0).__name__}"
     assert isinstance(dim0.body, ir.Add), f"expected ir.Add body, got {type(dim0.body).__name__}"
@@ -75,6 +76,7 @@ def test_dynamic_dim_sub_in_shape():
     func = TestProg.get_function("func")
     assert func is not None
     return_type = func.return_types[0]
+    assert isinstance(return_type, ir.TensorType)
     dim0 = return_type.shape[0]
     assert isinstance(dim0, ir.DimExpr), f"expected ir.DimExpr, got {type(dim0).__name__}"
     assert isinstance(dim0.body, ir.Sub), f"expected ir.Sub body, got {type(dim0.body).__name__}"
@@ -95,6 +97,7 @@ def test_dynamic_dim_floordiv_in_shape():
     func = TestProg.get_function("func")
     assert func is not None
     return_type = func.return_types[0]
+    assert isinstance(return_type, ir.TensorType)
     dim0 = return_type.shape[0]
     assert isinstance(dim0, ir.DimExpr), f"expected ir.DimExpr, got {type(dim0).__name__}"
     assert isinstance(dim0.body, ir.FloorDiv), f"expected ir.FloorDiv body, got {type(dim0.body).__name__}"
@@ -115,6 +118,7 @@ def test_dynamic_dim_mod_in_shape():
     func = TestProg.get_function("func")
     assert func is not None
     return_type = func.return_types[0]
+    assert isinstance(return_type, ir.TensorType)
     dim0 = return_type.shape[0]
     assert isinstance(dim0, ir.DimExpr), f"expected ir.DimExpr, got {type(dim0).__name__}"
     assert isinstance(dim0.body, ir.FloorMod), f"expected ir.FloorMod body, got {type(dim0.body).__name__}"
@@ -134,6 +138,7 @@ def test_static_mul_still_works():
     func = TestProg.get_function("func")
     assert func is not None
     return_type = func.return_types[0]
+    assert isinstance(return_type, ir.TensorType)
     dim0 = return_type.shape[0]
     assert isinstance(dim0, ir.ConstInt) and dim0.value == 256
 

@@ -321,8 +321,7 @@ class DimExpr : public Expr {
  public:
   ExprPtr body_;  ///< The wrapped dimension expression (e.g. ir.Mul)
 
-  DimExpr(ExprPtr body, Span span)
-      : Expr(std::move(span), body->GetType()), body_(std::move(body)) {}
+  DimExpr(ExprPtr body, Span span) : Expr(std::move(span), body->GetType()), body_(std::move(body)) {}
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::DimExpr; }
   [[nodiscard]] std::string TypeName() const override { return "DimExpr"; }
