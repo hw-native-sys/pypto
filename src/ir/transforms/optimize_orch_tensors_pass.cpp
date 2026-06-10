@@ -2296,9 +2296,10 @@ class OutWindowExternalizer {
 
         std::vector<ExprPtr> offset_exprs;
         offset_exprs.reserve(input.callsite_offsets.size());
+        arith::Analyzer offset_analyzer;
         for (const auto& offset : input.callsite_offsets) {
           offset_exprs.push_back(
-              arith::Analyzer().Simplify(transform_utils::Substitute(offset, callsite_subst)));
+              offset_analyzer.Simplify(transform_utils::Substitute(offset, callsite_subst)));
         }
         auto offset_tuple = std::make_shared<MakeTuple>(offset_exprs, call_assign->span_);
 
@@ -2325,9 +2326,10 @@ class OutWindowExternalizer {
 
         std::vector<ExprPtr> offset_exprs;
         offset_exprs.reserve(output.callsite_offsets.size());
+        arith::Analyzer offset_analyzer;
         for (const auto& offset : output.callsite_offsets) {
           offset_exprs.push_back(
-              arith::Analyzer().Simplify(transform_utils::Substitute(offset, callsite_subst)));
+              offset_analyzer.Simplify(transform_utils::Substitute(offset, callsite_subst)));
         }
         auto offset_tuple = std::make_shared<MakeTuple>(offset_exprs, call_assign->span_);
 
@@ -3209,6 +3211,7 @@ class OutWindowExternalizer {
       std::vector<ExprPtr> local_offsets;
       std::vector<ExprPtr> window_shape;
       bool expands_across_loop = false;
+      arith::Analyzer analyzer;
       for (size_t i = 0; i < use.offsets.size(); ++i) {
         auto expanded = ExpandLoopLocalExpr(use.offsets[i], scalar_defs);
         if (!expanded.has_value()) return std::nullopt;
@@ -3217,9 +3220,9 @@ class OutWindowExternalizer {
         auto ordered_offsets = GetOrderedLoopOffsets(*expanded, loop, *first_loop_value, *last_loop_value);
         if (!ordered_offsets.has_value()) return std::nullopt;
 
-        auto span_expr = arith::Analyzer().Simplify(
-            MakeAdd(MakeSub(ordered_offsets->max, ordered_offsets->min, func->span_), use.window_shape[i],
-                    func->span_));
+        auto span_expr =
+            analyzer.Simplify(MakeAdd(MakeSub(ordered_offsets->max, ordered_offsets->min, func->span_),
+                                      use.window_shape[i], func->span_));
         auto span_ci = As<ConstInt>(span_expr);
         if (!span_ci || span_ci->value_ <= 0) return std::nullopt;
 
@@ -3228,7 +3231,7 @@ class OutWindowExternalizer {
         }
         base_offsets.push_back(ordered_offsets->min);
         local_offsets.push_back(
-            arith::Analyzer().Simplify(MakeSub(use.offsets[i], ordered_offsets->min, use.offsets[i]->span_)));
+            analyzer.Simplify(MakeSub(use.offsets[i], ordered_offsets->min, use.offsets[i]->span_)));
         window_shape.push_back(std::make_shared<ConstInt>(span_ci->value_, DataType::INDEX, func->span_));
       }
       if (!expands_across_loop) return std::nullopt;
@@ -3488,6 +3491,7 @@ class OutWindowExternalizer {
       std::vector<ExprPtr> base_offsets;
       std::vector<ExprPtr> local_offsets;
       std::vector<ExprPtr> window_shape;
+      arith::Analyzer analyzer;
       for (size_t i = 0; i < update.offsets.size(); ++i) {
         auto expanded = ExpandLoopLocalExpr(update.offsets[i], scalar_defs);
         if (!expanded.has_value()) return std::nullopt;
@@ -3496,15 +3500,15 @@ class OutWindowExternalizer {
         auto ordered_offsets = GetOrderedLoopOffsets(*expanded, loop, *first_loop_value, *last_loop_value);
         if (!ordered_offsets.has_value()) return std::nullopt;
 
-        auto span_expr = arith::Analyzer().Simplify(
-            MakeAdd(MakeSub(ordered_offsets->max, ordered_offsets->min, func->span_), update.window_shape[i],
-                    func->span_));
+        auto span_expr =
+            analyzer.Simplify(MakeAdd(MakeSub(ordered_offsets->max, ordered_offsets->min, func->span_),
+                                      update.window_shape[i], func->span_));
         auto span_ci = As<ConstInt>(span_expr);
         if (!span_ci || span_ci->value_ <= 0) return std::nullopt;
 
         base_offsets.push_back(ordered_offsets->min);
-        local_offsets.push_back(arith::Analyzer().Simplify(
-            MakeSub(update.offsets[i], ordered_offsets->min, update.offsets[i]->span_)));
+        local_offsets.push_back(
+            analyzer.Simplify(MakeSub(update.offsets[i], ordered_offsets->min, update.offsets[i]->span_)));
         window_shape.push_back(std::make_shared<ConstInt>(span_ci->value_, DataType::INDEX, func->span_));
       }
 
