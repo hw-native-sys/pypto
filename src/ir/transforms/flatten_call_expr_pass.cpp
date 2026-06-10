@@ -130,6 +130,31 @@ class FlattenCallExprMutator : public IRMutator {
   std::string GenerateTempVarName() { return auto_name::BuildName("t", "", "tmp", temp_var_counter_++); }
 
   /**
+   * @brief Flatten a scope/loop/branch body, wrapping hoisted temps when needed.
+   *
+   * Saves/restores the surrounding `pending_stmts_` so the enclosing statement's
+   * own hoisted temporaries are preserved for the parent SeqStmts. When the body
+   * is a single (non-SeqStmts) statement, its hoisted temporaries would have no
+   * SeqStmts to be spliced into, so they are wrapped together with the body into
+   * a SeqStmts here (issue #1708). Returns the new body (which may equal the
+   * original pointer if nothing changed).
+   */
+  StmtPtr FlattenScopeBody(const StmtPtr& original_body) {
+    auto outer_pending = std::move(pending_stmts_);
+    pending_stmts_.clear();
+    auto new_body = VisitStmt(original_body);
+    if (!As<SeqStmts>(original_body) && !pending_stmts_.empty()) {
+      std::vector<StmtPtr> body_stmts;
+      body_stmts.reserve(pending_stmts_.size() + 1);
+      for (const auto& p : pending_stmts_) body_stmts.push_back(p);
+      body_stmts.push_back(new_body);
+      new_body = SeqStmts::Flatten(std::move(body_stmts), original_body->span_);
+    }
+    pending_stmts_ = std::move(outer_pending);
+    return new_body;
+  }
+
+  /**
    * @brief Extract a call expression into a temporary variable
    *
    * Creates a new temporary variable, generates an assignment statement,
@@ -242,22 +267,17 @@ StmtPtr FlattenCallExprMutator::VisitStmt_(const IfStmtPtr& op) {
     new_condition = ExtractCallToTemp(new_condition);
   }
 
-  // Save condition pending stmts (will be handled by parent SeqStmts)
-  auto condition_pending = pending_stmts_;
+  // Flatten then/else through FlattenScopeBody so a single-statement
+  // (non-SeqStmts) branch still materializes its hoisted temporaries
+  // (issue #1708). FlattenScopeBody saves/restores the surrounding pending
+  // stmts, so the condition's hoisted temps are preserved for the parent
+  // SeqStmts across both branches.
+  auto new_then = FlattenScopeBody(op->then_body_);
 
-  // Process then branch (after normalization, body is SeqStmts which handles its own pending)
-  pending_stmts_.clear();
-  auto new_then = VisitStmt(op->then_body_);
-
-  // Process else branch
-  pending_stmts_.clear();
   std::optional<StmtPtr> new_else;
   if (op->else_body_.has_value()) {
-    new_else = VisitStmt(op->else_body_.value());
+    new_else = FlattenScopeBody(op->else_body_.value());
   }
-
-  // Restore condition pending for parent to handle
-  pending_stmts_ = condition_pending;
 
   auto result = MutableCopy(op);
   result->condition_ = new_condition;
@@ -284,15 +304,13 @@ StmtPtr FlattenCallExprMutator::VisitStmt_(const ForStmtPtr& op) {
     new_step = ExtractCallToTemp(new_step);
   }
 
-  // Save range pending stmts (will be handled by parent SeqStmts)
-  auto range_pending = pending_stmts_;
-
-  // Process body (after normalization, body is SeqStmts which handles its own pending)
-  pending_stmts_.clear();
-  auto new_body = VisitStmt(op->body_);
-
-  // Restore range pending for parent to handle
-  pending_stmts_ = range_pending;
+  // Flatten the body through FlattenScopeBody. It saves/restores the range's
+  // own pending stmts for the parent SeqStmts, and — when the body is a single
+  // (non-SeqStmts) statement — wraps the body's hoisted temporaries into a
+  // SeqStmts so they are not dropped. A bare-call loop body whose args needed
+  // hoisting otherwise lost the materializing AssignStmts (issue #1708:
+  // rank-slice temps became undefined free vars by codegen → runtime KeyError).
+  auto new_body = FlattenScopeBody(op->body_);
 
   auto result = MutableCopy(op);
   result->start_ = new_start;
@@ -312,15 +330,11 @@ StmtPtr FlattenCallExprMutator::VisitStmt_(const WhileStmtPtr& op) {
     new_condition = ExtractCallToTemp(new_condition);
   }
 
-  // Save condition pending stmts (will be handled by parent SeqStmts)
-  auto condition_pending = pending_stmts_;
-
-  // Process body (after normalization, body is SeqStmts which handles its own pending)
-  pending_stmts_.clear();
-  auto new_body = VisitStmt(op->body_);
-
-  // Restore condition pending for parent to handle
-  pending_stmts_ = condition_pending;
+  // Flatten the body through FlattenScopeBody so a single-statement
+  // (non-SeqStmts) loop body still materializes its hoisted temporaries
+  // (issue #1708). The condition's own pending stmts are preserved for the
+  // parent SeqStmts.
+  auto new_body = FlattenScopeBody(op->body_);
 
   auto result = MutableCopy(op);
   result->condition_ = new_condition;
@@ -361,53 +375,29 @@ StmtPtr FlattenCallExprMutator::VisitStmt_(const ReturnStmtPtr& op) {
   return result;
 }
 
-// Shared scope-body flattening: returns the new body (which may equal the
-// original pointer if no statements changed). Caller constructs the matching
-// derived ScopeStmt.
-namespace {
-StmtPtr FlattenScopeBody(FlattenCallExprMutator* self, std::vector<StmtPtr>& pending,
-                         const StmtPtr& original_body) {
-  auto outer_pending = std::move(pending);
-  pending.clear();
-
-  auto new_body = self->VisitStmt(original_body);
-
-  if (!As<SeqStmts>(original_body) && !pending.empty()) {
-    std::vector<StmtPtr> body_stmts;
-    body_stmts.reserve(pending.size() + 1);
-    for (const auto& p : pending) body_stmts.push_back(p);
-    body_stmts.push_back(new_body);
-    new_body = SeqStmts::Flatten(std::move(body_stmts), original_body->span_);
-  }
-
-  pending = std::move(outer_pending);
-  return new_body;
-}
-}  // namespace
-
 StmtPtr FlattenCallExprMutator::VisitStmt_(const InCoreScopeStmtPtr& op) {
-  auto new_body = FlattenScopeBody(this, pending_stmts_, op->body_);
+  auto new_body = FlattenScopeBody(op->body_);
   if (new_body.get() == op->body_.get()) return op;
   return std::make_shared<const InCoreScopeStmt>(op->split_, op->name_hint_, std::move(new_body), op->span_,
                                                  op->leading_comments_, op->attrs_);
 }
 
 StmtPtr FlattenCallExprMutator::VisitStmt_(const AutoInCoreScopeStmtPtr& op) {
-  auto new_body = FlattenScopeBody(this, pending_stmts_, op->body_);
+  auto new_body = FlattenScopeBody(op->body_);
   if (new_body.get() == op->body_.get()) return op;
   return std::make_shared<const AutoInCoreScopeStmt>(op->split_, op->name_hint_, std::move(new_body),
                                                      op->span_, op->leading_comments_, op->attrs_);
 }
 
 StmtPtr FlattenCallExprMutator::VisitStmt_(const ClusterScopeStmtPtr& op) {
-  auto new_body = FlattenScopeBody(this, pending_stmts_, op->body_);
+  auto new_body = FlattenScopeBody(op->body_);
   if (new_body.get() == op->body_.get()) return op;
   return std::make_shared<const ClusterScopeStmt>(op->name_hint_, std::move(new_body), op->span_,
                                                   op->leading_comments_, op->attrs_);
 }
 
 StmtPtr FlattenCallExprMutator::VisitStmt_(const HierarchyScopeStmtPtr& op) {
-  auto new_body = FlattenScopeBody(this, pending_stmts_, op->body_);
+  auto new_body = FlattenScopeBody(op->body_);
   if (new_body.get() == op->body_.get()) return op;
   return std::make_shared<const HierarchyScopeStmt>(op->level_, op->role_, op->name_hint_,
                                                     std::move(new_body), op->span_, op->leading_comments_,
@@ -415,7 +405,7 @@ StmtPtr FlattenCallExprMutator::VisitStmt_(const HierarchyScopeStmtPtr& op) {
 }
 
 StmtPtr FlattenCallExprMutator::VisitStmt_(const SpmdScopeStmtPtr& op) {
-  auto new_body = FlattenScopeBody(this, pending_stmts_, op->body_);
+  auto new_body = FlattenScopeBody(op->body_);
   if (new_body.get() == op->body_.get()) return op;
   return std::make_shared<const SpmdScopeStmt>(op->core_num_, op->sync_start_, op->name_hint_,
                                                std::move(new_body), op->span_, op->leading_comments_,
@@ -423,7 +413,7 @@ StmtPtr FlattenCallExprMutator::VisitStmt_(const SpmdScopeStmtPtr& op) {
 }
 
 StmtPtr FlattenCallExprMutator::VisitStmt_(const RuntimeScopeStmtPtr& op) {
-  auto new_body = FlattenScopeBody(this, pending_stmts_, op->body_);
+  auto new_body = FlattenScopeBody(op->body_);
   if (new_body.get() == op->body_.get()) return op;
   return std::make_shared<const RuntimeScopeStmt>(op->manual_, op->name_hint_, std::move(new_body), op->span_,
                                                   op->leading_comments_, op->attrs_);

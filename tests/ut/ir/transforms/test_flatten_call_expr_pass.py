@@ -422,6 +422,60 @@ class TestFlattenCallInForRange:
         After = passes.flatten_call_expr()(passes.convert_to_ssa()(Before))
         ir.assert_structural_equal(After, NormalizeIR(passes.convert_to_ssa()(Expected)))
 
+    def test_single_statement_for_body_hoists_into_body(self):
+        """Regression for issue #1708.
+
+        A for-loop whose body is a *single* statement (here a void call whose
+        args are rank slices) is NOT a SeqStmts. The ForStmt visitor used to
+        clear/restore ``pending_stmts_`` around the body, discarding any temps
+        hoisted while visiting that single statement — the slices became
+        undefined free vars and later distributed codegen referenced
+        ``tensors["t__tmp_v*"]`` without materializing them (runtime KeyError).
+        FlattenScopeBody now wraps the body + its pending stmts into a SeqStmts
+        so the hoisted slice assigns land inside the loop body.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def child(
+                self, a: pl.Tensor[[16, 32], pl.FP32], b: pl.Out[pl.Tensor[[16, 32], pl.FP32]]
+            ) -> pl.Tensor[[16, 32], pl.FP32]:
+                b = pl.add(a, 1.0)
+                return b
+
+            @pl.function
+            def main(
+                self, x: pl.Tensor[[2, 16, 32], pl.FP32], y: pl.Out[pl.Tensor[[2, 16, 32], pl.FP32]]
+            ) -> pl.Tensor[[2, 16, 32], pl.FP32]:
+                for r in pl.range(2):
+                    # Single-statement (non-SeqStmts) loop body; both args are
+                    # rank slices that must be hoisted into the body.
+                    self.child(x[r], y[r])
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def child(
+                self, a: pl.Tensor[[16, 32], pl.FP32], b: pl.Out[pl.Tensor[[16, 32], pl.FP32]]
+            ) -> pl.Tensor[[16, 32], pl.FP32]:
+                b = pl.add(a, 1.0)
+                return b
+
+            @pl.function
+            def main(
+                self, x: pl.Tensor[[2, 16, 32], pl.FP32], y: pl.Out[pl.Tensor[[2, 16, 32], pl.FP32]]
+            ) -> pl.Tensor[[2, 16, 32], pl.FP32]:
+                for r in pl.range(2):
+                    t__tmp_v0: pl.Tensor[[16, 32], pl.FP32] = x[r]
+                    t__tmp_v1: pl.Tensor[[16, 32], pl.FP32] = y[r]
+                    self.child(t__tmp_v0, t__tmp_v1)
+                return y
+
+        After = passes.flatten_call_expr()(passes.convert_to_ssa()(Before))
+        ir.assert_structural_equal(After, NormalizeIR(passes.convert_to_ssa()(Expected)))
+
     def test_for_with_get_block_idx_in_range(self):
         """Test get_block_idx call in for range expression"""
 
