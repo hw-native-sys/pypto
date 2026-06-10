@@ -144,7 +144,27 @@ ExprPtr RewriteSimplifier::Impl::VisitExpr_(const ConstFloatPtr& op) { return op
 ExprPtr RewriteSimplifier::Impl::VisitExpr_(const ConstBoolPtr& op) { return op; }
 ExprPtr RewriteSimplifier::Impl::VisitExpr_(const MemRefPtr& op) { return op; }
 ExprPtr RewriteSimplifier::Impl::VisitExpr_(const WindowBufferPtr& op) { return op; }
-ExprPtr RewriteSimplifier::Impl::VisitExpr_(const CallPtr& op) { return op; }
+ExprPtr RewriteSimplifier::Impl::VisitExpr_(const CallPtr& op) {
+  // Shape-position canonicalization: tensor.dim(t, axis) is by construction
+  // the value of t's static shape dim, so rewriting to that dim (often a
+  // symbolic dyn Var) lets structural equality unify runtime dim expressions
+  // with declared symbolic dims. Only valid in shape/type positions — see
+  // SetCanonicalizeTensorDim.
+  if (canonicalize_tensor_dim_ && op->op_->name_ == "tensor.dim" && op->args_.size() == 2) {
+    auto tensor_type = As<TensorType>(op->args_[0]->GetType());
+    auto axis_const = As<ConstInt>(op->args_[1]);
+    if (tensor_type && axis_const) {
+      auto rank = static_cast<int64_t>(tensor_type->shape_.size());
+      int64_t axis = axis_const->value_;
+      if (axis < 0) axis += rank;
+      if (axis >= 0 && axis < rank) {
+        // Recurse so chained dim()-of-dim() shapes resolve (depth-bounded).
+        return RecursiveRewrite(tensor_type->shape_[axis]);
+      }
+    }
+  }
+  return op;
+}
 ExprPtr RewriteSimplifier::Impl::VisitExpr_(const SubmitPtr& op) { return op; }
 ExprPtr RewriteSimplifier::Impl::VisitExpr_(const MakeTuplePtr& op) { return op; }
 ExprPtr RewriteSimplifier::Impl::VisitExpr_(const TupleGetItemExprPtr& op) { return op; }
@@ -1360,6 +1380,8 @@ RewriteSimplifier& RewriteSimplifier::operator=(RewriteSimplifier&&) noexcept = 
 ExprPtr RewriteSimplifier::operator()(const ExprPtr& expr) const { return impl_->VisitExpr(expr); }
 
 void RewriteSimplifier::Update(const VarPtr& var, const ExprPtr& new_expr) { impl_->Update(var, new_expr); }
+
+void RewriteSimplifier::SetCanonicalizeTensorDim(bool enable) { impl_->SetCanonicalizeTensorDim(enable); }
 
 std::function<void()> RewriteSimplifier::EnterConstraint(const ExprPtr& constraint) {
   return impl_->EnterConstraint(constraint);

@@ -81,6 +81,19 @@ def dynamic_kernel(
     ...
 ```
 
+以 `pl.tensor.dim(param, i)` 作为动态维度创建的张量会与参数的符号维度统一，因此循环携带的重新赋值无需 copy-back：
+
+```python
+@pl.function
+def layers(h: pl.Tensor[[M, 128], pl.BF16]) -> pl.Tensor[[M, 128], pl.BF16]:
+    tokens = pl.tensor.dim(h, 0)
+    for _ in pl.range(4):
+        nxt = pl.create_tensor([tokens, 128], dtype=pl.BF16)
+        # ... compute layer into nxt ...
+        h = nxt  # OK: dim(h, 0) matches the symbolic M
+    return h
+```
+
 ### 参数方向（Parameter Directions）
 
 默认情况下，参数为只读输入。使用包装器声明输出参数：

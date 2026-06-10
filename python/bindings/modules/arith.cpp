@@ -99,6 +99,11 @@ void BindArith(nb::module_& m) {
            "Simplify an expression by applying rewrite rules.")
       .def("update", &ir::arith::RewriteSimplifier::Update, nb::arg("var"), nb::arg("new_expr").none(),
            "Register a variable substitution. Pass None to remove a previous substitution.")
+      .def("set_canonicalize_tensor_dim", &ir::arith::RewriteSimplifier::SetCanonicalizeTensorDim,
+           nb::arg("enable"),
+           "Enable canonicalization of tensor.dim(t, axis) calls to t's static shape dim.\n\n"
+           "Off by default — only enable when simplifying shape/type-position expressions,\n"
+           "where a symbolic shape dim is a valid result.")
       .def("enter_constraint", &ir::arith::RewriteSimplifier::EnterConstraint, nb::arg("constraint"),
            "Enter a constraint scope. Returns a recovery function that restores original state.");
 

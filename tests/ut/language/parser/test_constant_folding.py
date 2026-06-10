@@ -16,6 +16,7 @@ ConstFloat IR node rather than emitting a compound expression tree.
 
 import pypto.language as pl
 import pytest
+from pypto.language.parser.diagnostics import ParserTypeError
 from pypto.pypto_core import ir
 
 
@@ -402,6 +403,48 @@ class TestSymbolicShapeEquality:
             return chunk
 
         assert isinstance(func, ir.Function)
+
+    def test_reassign_dyn_dim_create_tensor_in_loop(self):
+        """Reassigning a dynamic-shaped parameter with a created tensor whose
+        dynamic dim is ``pl.tensor.dim(param, 0)`` should succeed — the dim
+        expression canonicalizes to the parameter's symbolic dyn var."""
+        M = pl.dynamic("M")
+
+        @pl.function
+        def func(h: pl.Tensor[[M, 128], pl.BF16]) -> pl.Tensor[[M, 128], pl.BF16]:
+            for _ in pl.range(4):
+                nxt = pl.create_tensor([pl.tensor.dim(h, 0), 128], dtype=pl.BF16)
+                h = nxt
+            return h
+
+        assert isinstance(func, ir.Function)
+
+    def test_reassign_dyn_dim_negative_axis(self):
+        """Negative axis in ``pl.tensor.dim`` normalizes before canonicalization."""
+        M = pl.dynamic("M")
+
+        @pl.function
+        def func(h: pl.Tensor[[M, 128], pl.BF16]) -> pl.Tensor[[M, 128], pl.BF16]:
+            for _ in pl.range(4):
+                nxt = pl.create_tensor([pl.tensor.dim(h, -2), 128], dtype=pl.BF16)
+                h = nxt
+            return h
+
+        assert isinstance(func, ir.Function)
+
+    def test_reassign_dyn_dim_static_mismatch_still_rejected(self):
+        """Canonicalization must not weaken the check: a genuinely different
+        static dim still rejects reassignment."""
+        M = pl.dynamic("M")
+
+        with pytest.raises(ParserTypeError, match="Cannot reassign"):
+
+            @pl.function
+            def func(h: pl.Tensor[[M, 128], pl.BF16]) -> pl.Tensor[[M, 128], pl.BF16]:
+                for _ in pl.range(4):
+                    nxt = pl.create_tensor([pl.tensor.dim(h, 0), 64], dtype=pl.BF16)
+                    h = nxt
+                return h
 
     def test_symbolic_cancellation_in_broadcast_sub(self):
         """``pl.sub`` of two slices whose extents simplify to the same constant

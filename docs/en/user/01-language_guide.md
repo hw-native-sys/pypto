@@ -95,6 +95,21 @@ def dynamic_kernel(
     ...
 ```
 
+A tensor created with `pl.tensor.dim(param, i)` as a dynamic dimension unifies
+with the parameter's symbolic dim, so loop-carried reassignment works without
+copy-back:
+
+```python
+@pl.function
+def layers(h: pl.Tensor[[M, 128], pl.BF16]) -> pl.Tensor[[M, 128], pl.BF16]:
+    tokens = pl.tensor.dim(h, 0)
+    for _ in pl.range(4):
+        nxt = pl.create_tensor([tokens, 128], dtype=pl.BF16)
+        # ... compute layer into nxt ...
+        h = nxt  # OK: dim(h, 0) matches the symbolic M
+    return h
+```
+
 ### Parameter Directions
 
 By default, parameters are read-only inputs. Use wrappers for output parameters:

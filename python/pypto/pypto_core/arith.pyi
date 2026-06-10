@@ -76,6 +76,14 @@ class RewriteSimplifier:
         """
         ...
 
+    def set_canonicalize_tensor_dim(self, enable: bool) -> None:
+        """Enable canonicalization of ``tensor.dim(t, axis)`` calls to ``t``'s static shape dim.
+
+        Off by default — only enable when simplifying shape/type-position expressions,
+        where a symbolic shape dim is a valid result.
+        """
+        ...
+
     def enter_constraint(self, constraint: Expr) -> Callable[[], None]:
         """Enter a constraint scope. Returns a recovery function that restores original state."""
         ...

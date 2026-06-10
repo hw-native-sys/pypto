@@ -261,7 +261,9 @@ def _simplify_shape_dims(type_: ir.Type, analyzer: "_arith.Analyzer") -> ir.Type
     the arithmetic simplifier.
 
     Needed so that symbolic dims that reduce to the same value — e.g.
-    ``(k + C) - k`` and ``C`` — compare equal under structural ``==``.
+    ``(k + C) - k`` and ``C`` — compare equal under structural ``==``. The
+    analyzer is expected to have tensor.dim canonicalization enabled so a
+    runtime ``tensor.dim(t, i)`` dim matches ``t``'s declared symbolic dim.
 
     Scope: only the outer ``shape`` is simplified. TileView fields
     (``valid_shape``, ``stride``, ``start_offset``) and TensorView
@@ -276,7 +278,9 @@ def _simplify_shape_dims(type_: ir.Type, analyzer: "_arith.Analyzer") -> ir.Type
     return ir.TileType(simplified_shape, type_.dtype, type_.memref, type_.tile_view, type_.memory_space)
 
 
-def _types_match(lhs: ir.Type | None, rhs: ir.Type | None) -> bool:
+def _types_match(
+    lhs: ir.Type | None, rhs: ir.Type | None, var_defs: dict[int, tuple[ir.Var, ir.Expr]] | None = None
+) -> bool:
     """Return whether two IR types are structurally equal after TileView normalization.
 
     Uses C++ ``structural_equal`` (via ``==``) instead of comparing printed
@@ -302,6 +306,11 @@ def _types_match(lhs: ir.Type | None, rhs: ir.Type | None) -> bool:
         return False
     if _shape_has_symbolic_dim(lhs) or _shape_has_symbolic_dim(rhs):
         analyzer = _arith.Analyzer()
+        # Shape position: tensor.dim(t, i) canonicalizes to t's declared
+        # symbolic dim, and dim aliases substitute through their definitions.
+        analyzer.rewrite_simplify.set_canonicalize_tensor_dim(True)
+        for var, def_expr in (var_defs or {}).values():
+            analyzer.rewrite_simplify.update(var, def_expr)
         lhs = _simplify_shape_dims(lhs, analyzer)
         rhs = _simplify_shape_dims(rhs, analyzer)
     return lhs == rhs
@@ -509,6 +518,14 @@ class ASTParser:
         # object (not id()) keeps a strong reference, so there is no id-reuse
         # hazard from a collected-and-reallocated Function.
         self._derived_return_types_cache: dict[ir.Function, list[ir.Type]] = {}
+
+        # First definition of each scalar INDEX Var (keyed by Var.unique_id —
+        # Var __eq__/__hash__ are structural, so the Var itself is not a safe
+        # dict key) so shape dims spelled through aliases
+        # (``tokens = pl.tensor.dim(h, 0)``) canonicalize to the tensor's
+        # symbolic dyn dim in type matching. Entries are dropped on
+        # reassignment — a rebound alias is no longer a faithful definition.
+        self._index_var_defs: dict[int, tuple[ir.Var, ir.Expr]] = {}
 
         # Track context for handling yields and returns
         self.in_for_loop = False
@@ -1268,7 +1285,7 @@ class ASTParser:
             if (
                 not isinstance(value_type, ir.UnknownType)
                 and not isinstance(existing_var.type, ir.UnknownType)
-                and not _types_match(existing_var.type, value_type)
+                and not _types_match(existing_var.type, value_type, self._index_var_defs)
             ):
                 raise ParserTypeError(
                     f"Cannot reassign '{var_name}' with a different type: "
@@ -1277,9 +1294,17 @@ class ASTParser:
                     span=span,
                     hint="Use a different variable name for tensors with different shapes or dtypes",
                 )
+            # The var no longer holds its first definition — drop the dim alias.
+            self._index_var_defs.pop(existing_var.unique_id, None)
             self.builder.assign(existing_var, value_expr, span=span)
             return existing_var
-        return self.builder.let(var_name, value_expr, type=override_type, span=span)
+        var = self.builder.let(var_name, value_expr, type=override_type, span=span)
+        # Record scalar INDEX definitions so a shape dim spelled through an
+        # alias (``tokens = pl.tensor.dim(h, 0)``) canonicalizes to ``h``'s
+        # symbolic dyn dim during type matching.
+        if isinstance(var.type, ir.ScalarType) and var.type.dtype == DataType.INDEX:
+            self._index_var_defs[var.unique_id] = (var, value_expr)
+        return var
 
     def parse_assignment(self, stmt: ast.Assign) -> None:  # noqa: PLR0912
         """Parse regular assignment: var = value or tuple unpacking.

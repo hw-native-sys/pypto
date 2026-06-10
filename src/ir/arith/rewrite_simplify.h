@@ -41,6 +41,8 @@ class RewriteSimplifier::Impl : public ExprFunctor<ExprPtr> {
 
   void Update(const VarPtr& var, const ExprPtr& info);
 
+  void SetCanonicalizeTensorDim(bool enable) { canonicalize_tensor_dim_ = enable; }
+
   std::function<void()> EnterConstraint(const ExprPtr& constraint);
 
  protected:
@@ -128,6 +130,7 @@ class RewriteSimplifier::Impl : public ExprFunctor<ExprPtr> {
   static constexpr int kMaxRecursiveDepth = 5;
 
   Analyzer* parent_;
+  bool canonicalize_tensor_dim_{false};
   int recursive_depth_{0};
   int64_t num_attempted_rewrites_{0};
   int64_t num_rewrites_{0};

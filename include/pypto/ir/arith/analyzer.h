@@ -220,6 +220,13 @@ class RewriteSimplifier {
   /// Pass nullptr to remove a previous substitution.
   void Update(const VarPtr& var, const ExprPtr& new_expr);
 
+  /// Enable canonicalization of ``tensor.dim(t, axis)`` calls to ``t``'s
+  /// static shape dim. Off by default — only enable when simplifying
+  /// shape/type-position expressions, where a symbolic shape dim is a valid
+  /// result. Runtime value expressions must keep the ``tensor.dim`` call,
+  /// otherwise annotation-only dyn vars leak past SSA conversion.
+  void SetCanonicalizeTensorDim(bool enable);
+
   /// Enter a constraint scope (e.g., inside an if-branch where constraint is known true).
   /// Returns a recovery function that restores original state.
   std::function<void()> EnterConstraint(const ExprPtr& constraint);

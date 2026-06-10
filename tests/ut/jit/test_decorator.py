@@ -1120,6 +1120,58 @@ class TestDynamicLocalTensorMetadata:
         fwd_1524.compile_for_test(hidden, out)
 
 
+class TestLoopCarriedDynReassignment:
+    """Loop-carried reassignment of a dynamic-shaped tensor must accept a
+    created tensor whose dynamic dim is the runtime ``pl.tensor.dim(param, 0)``
+    expression — it canonicalizes to the parameter's symbolic dyn var during
+    parser type matching, so the ping-pong pattern needs no per-layer copy-back.
+    """
+
+    def test_loop_carried_reassign_with_dim_alias_compiles(self):
+        """A loop-carried tensor reassigned from a created tensor whose dynamic
+        dim is spelled through a ``tokens = pl.tensor.dim(P, 0)`` alias compiles."""
+        torch = pytest.importorskip("torch")
+
+        @jit
+        def fwd_dim_alias(
+            hidden_states: pl.Tensor[[_M_1524, _HIDDEN_1524], pl.BF16],
+            out: pl.Out[pl.Tensor[[_M_1524, _HIDDEN_1524], pl.BF16]],
+        ) -> pl.Tensor[[_M_1524, _HIDDEN_1524], pl.BF16]:
+            tokens = pl.tensor.dim(hidden_states, 0)
+            for _ in pl.range(4):
+                nxt = pl.create_tensor([tokens, _HIDDEN_1524], dtype=pl.BF16)
+                hidden_states = nxt
+            return hidden_states
+
+        hidden = torch.empty(7, _HIDDEN_1524, dtype=torch.bfloat16)
+        out = torch.empty(7, _HIDDEN_1524, dtype=torch.bfloat16)
+        # Should not raise — previously failed with
+        # "Cannot reassign 'hidden_states' with a different type".
+        fwd_dim_alias.compile_for_test(hidden, out)
+
+    def test_loop_carried_reassign_with_dynvar_shape_compiles(self):
+        """The DynVar-in-shape workaround form: pl.create_tensor([M, ...]) —
+        the specializer substitutes ``pl.tensor.dim(P, 0)``, which must also
+        unify with the parameter's symbolic dim on reassignment."""
+        torch = pytest.importorskip("torch")
+
+        @jit
+        def fwd_dynvar_shape(
+            hidden_states: pl.Tensor[[_M_1524, _HIDDEN_1524], pl.BF16],
+            out: pl.Out[pl.Tensor[[_M_1524, _HIDDEN_1524], pl.BF16]],
+        ) -> pl.Tensor[[_M_1524, _HIDDEN_1524], pl.BF16]:
+            hidden_states.bind_dynamic(0, _M_1524)
+            out.bind_dynamic(0, _M_1524)
+            for _ in pl.range(4):
+                nxt = pl.create_tensor([_M_1524, _HIDDEN_1524], dtype=pl.BF16)
+                hidden_states = nxt
+            return hidden_states
+
+        hidden = torch.empty(7, _HIDDEN_1524, dtype=torch.bfloat16)
+        out = torch.empty(7, _HIDDEN_1524, dtype=torch.bfloat16)
+        fwd_dynvar_shape.compile_for_test(hidden, out)
+
+
 # ---------------------------------------------------------------------------
 # Per-rank sliced dispatch (chip_orch(x[r], ...)) and pld.window metadata.
 # Module-level dynvar + functions so inspect.getsource / inspect.signature
