@@ -431,49 +431,21 @@ class SSAConverter {
   int NextVersion(const Var* key) { return ver_[key]++; }
 
   /// True if ``name`` is already in versioned auto-name form (e.g. ``x__ssa_v0``,
-  /// ``t__tmp_v1``, ``r__idx_v0``). Such names are produced by ConvertToSSA's
-  /// own LHS renaming and escape-promotion paths (``ssa`` / ``iter`` / ``rv`` /
-  /// ``phi`` / ``idx`` roles) as well as by upstream CSE / normalization passes
-  /// (``tmp`` role). On a second ConvertToSSA run we keep these at their
-  /// original pointer identity instead of re-minting, to avoid:
-  ///
-  ///   1. Stale cross-function references — an outlined Spmd function's
-  ///      ``core_num`` ExprPtr or a ``DistributedTensorType``'s
-  ///      ``window_buffer_`` field that the per-function ``cur_`` cannot reach.
-  ///   2. ``name_hint_`` collisions in downstream codegen that uses the raw
-  ///      name as a Python identifier (host_orch ``tensors[...]`` keys,
-  ///      ``CommBufferSpec(name=...)``) — re-versioning ``t__tmp_v1`` and
-  ///      ``t__tmp_v2`` would both produce ``name_hint_ = "t__ssa_v0"`` with
-  ///      distinct Var pointers, collapsing them into one Python slot.
-  ///
-  /// First-run user IR (vars without auto-name suffixes) is unaffected.
+  /// True if ``name`` carries an auto-name suffix with a version
+  /// (``foo__ssa_v0`` / ``foo__tmp_v1`` / ``foo__idx_v0`` etc.).
   static bool IsAutoVersionedName(const std::string& name) {
     auto parsed = auto_name::Parse(name);
     return parsed.has_auto_suffix && parsed.version.has_value();
   }
 
-  /// Allocate a fresh SSA version for ``original``. When ``original`` is
-  /// already SSA-named, preserve its pointer identity (idempotence) and
-  /// avoid minting a new Var with a colliding ``name_hint_``.
-  ///
-  /// Identity-preservation is critical for two downstream paths:
-  ///   1. Cross-function references — e.g. an outlined Spmd function's
-  ///      ``core_num`` attr ExprPtr or a ``DistributedTensorType``'s
-  ///      ``window_buffer_`` field — that hold the Var pointer directly
-  ///      and cannot be reached by per-function ``cur_`` substitution.
-  ///   2. Codegen paths that use ``name_hint_`` as a Python identifier
-  ///      (host_orch ``tensors[...]`` keys, ``CommBufferSpec(name=...)``)
-  ///      where two Vars with the same ``name_hint_`` collapse to the same
-  ///      slot.
+  /// Allocate a fresh SSA version. Idempotence: an already-auto-versioned Var
+  /// not yet seen as a write site keeps its pointer identity — this is what
+  /// prevents post-outline re-runs from corrupting cross-function refs
+  /// (sibling Spmd ``core_num`` attr) and from producing colliding
+  /// ``name_hint_`` strings that downstream codegen uses as Python idents
+  /// (host_orch ``tensors[...]`` keys).
   VarPtr AllocVersion(const VarPtr& original, const TypePtr& type, const Span& span) {
     auto key = original.get();
-    // Idempotence path: an auto-versioned Var (``foo__ssa_v0`` / ``foo__tmp_v1``
-    // / ``foo__idx_v0`` etc.) that has not been seen yet as a write site in
-    // this function is treated as already-SSA — keep its pointer identity.
-    // If we've already recorded a write through this Var pointer (e.g. an
-    // earlier AssignStmt LHS in straight-line code, or a control-flow pass
-    // emitted a multi-assigned auto-named temp), fall through to normal
-    // re-versioning so SSA's "exactly one def per Var" invariant holds.
     bool already_seen = cur_.find(key) != cur_.end();
     if (!already_seen && IsAutoVersionedName(original->name_hint_)) {
       cur_[key] = original;
@@ -950,11 +922,9 @@ class SSAConverter {
     }
 
     // No new phis but existing return_vars (explicit SSA) — version return_vars, keep branch yields.
-    // Idempotence: an already-auto-versioned existing rv (``result__phi_v2`` from a prior
-    // ConvertToSSA run) is preserved at its original pointer identity, both to keep
-    // cross-function refs / codegen ``name_hint_`` consistent (mirrors AllocVersion) AND
-    // to keep the ``phi`` role intact — downstream tests / codegen rely on the
-    // ``__phi_v<N>`` marker for IfStmt-merge identification.
+    // Idempotence: already-auto-versioned rvs (e.g. ``result__phi_v2`` from a prior run)
+    // keep their identity — preserves the ``__phi_v<N>`` role marker codegen relies on,
+    // same rationale as AllocVersion.
     if (phis.empty()) {
       cur_ = before;
       std::vector<VarPtr> return_vars;
@@ -1216,38 +1186,28 @@ class SSAConverter {
 
   // ── Helpers ────────────────────────────────────────────────────────
 
-  /// Find a pre-loop Var whose original type matches ``orig_type``. ``pre``
-  /// keys are the original (pre-substitution) Var pointers and values are
-  /// their current SSA versions. Caller passes the **un-substituted**
-  /// ``type_it->second`` from ``tc.types`` (not the ``SubstType``-applied
-  /// version) so this comparison stays on the original TypePtr identities —
-  /// substituting both sides via ``SubstType`` would mint fresh
-  /// shared_ptrs that compare unequal even when structurally identical,
-  /// causing escape-promotion to fall back to a ``foo__FREE_VAR`` placeholder
-  /// the SSA verifier rejects.
+  /// Find a pre-loop Var whose original type matches ``orig_type``. Compares on
+  /// the original (unsubstituted) TypePtr — substituting both sides via
+  /// ``SubstType`` would mint fresh shared_ptrs that fail pointer equality
+  /// even when structurally identical, dropping init candidates and forcing
+  /// escape-promotion to a ``foo__FREE_VAR`` placeholder the SSA verifier
+  /// rejects.
   VarPtr FindInitValue(const TypePtr& orig_type, const std::unordered_map<const Var*, VarPtr>& pre) {
-    // Prefer Out/InOut parameter with matching original type.
     for (size_t i = 0; i < orig_params_.size(); ++i) {
       if (orig_param_directions_[i] == ParamDirection::Out ||
           orig_param_directions_[i] == ParamDirection::InOut) {
-        auto key = orig_params_[i].get();
         if (orig_params_[i]->GetType() != orig_type) continue;
-        auto it = pre.find(key);
+        auto it = pre.find(orig_params_[i].get());
         if (it != pre.end()) return it->second;
       }
     }
-    // Fall back to any pre-loop variable with matching original type.
     std::vector<std::pair<uint64_t, VarPtr>> candidates;
     for (const auto& [key, v] : pre) {
-      if (key->GetType() == orig_type) {
-        candidates.emplace_back(key->UniqueId(), v);
-      }
+      if (key->GetType() == orig_type) candidates.emplace_back(key->UniqueId(), v);
     }
-    if (!candidates.empty()) {
-      std::sort(candidates.begin(), candidates.end());
-      return candidates.front().second;
-    }
-    return nullptr;
+    if (candidates.empty()) return nullptr;
+    std::sort(candidates.begin(), candidates.end());
+    return candidates.front().second;
   }
 
   // Invariant: a YieldStmt may appear only as the trailing statement of its
@@ -1373,31 +1333,25 @@ class ExprVarRenamer : public IRMutator {
   const std::unordered_map<const Var*, VarPtr>& renames_;
 };
 
-/// Walk a function's attrs and substitute Var refs per the program-wide rename
-/// map. Returns ``true`` if any attr was rewritten.
-///
-/// Known Var-bearing function attrs:
-///   - ``core_num`` (ExprPtr): SpmdScopeStmt's dispatch core count, lifted to
-///     the outlined Spmd function by OutlineIncoreScopes/OutlineClusterScopes.
-///     References Vars defined in the *dispatching* Orchestration function.
-///
-/// Extend this enumeration if a future outline pass introduces another Var-
-/// bearing function-level attr.
+/// Walk a function's attrs and substitute Var refs per the program-wide
+/// rename map. Generic dispatch on ``ExprPtr``: any attr stored as an
+/// ``ExprPtr`` (currently ``core_num`` from outline passes) gets its Var refs
+/// rewritten. Future ``ExprPtr`` attrs are auto-handled, no enumeration to
+/// keep in sync. Non-ExprPtr Var-bearing attrs (e.g. plain ``VarPtr`` or
+/// ``std::vector<VarPtr>``) are not covered — none exist on Functions today;
+/// extend here if one is added.
 bool SubstFunctionAttrs(std::vector<std::pair<std::string, std::any>>& attrs,
                         const std::unordered_map<const Var*, VarPtr>& renames) {
   if (renames.empty()) return false;
   bool changed = false;
+  ExprVarRenamer renamer(renames);
   for (auto& [k, v] : attrs) {
-    if (k == "core_num") {
-      const auto* expr_ptr = std::any_cast<ExprPtr>(&v);
-      if (expr_ptr && *expr_ptr) {
-        ExprVarRenamer renamer(renames);
-        auto new_expr = renamer.VisitExpr(*expr_ptr);
-        if (new_expr.get() != expr_ptr->get()) {
-          v = std::any(new_expr);
-          changed = true;
-        }
-      }
+    const auto* expr_ptr = std::any_cast<ExprPtr>(&v);
+    if (!expr_ptr || !*expr_ptr) continue;
+    auto new_expr = renamer.VisitExpr(*expr_ptr);
+    if (new_expr.get() != expr_ptr->get()) {
+      v = std::any(new_expr);
+      changed = true;
     }
   }
   return changed;

@@ -71,6 +71,7 @@ struct PassProperties {
 | OutlineIncoreScopes | TypeChecked, SSAForm | SplitIncoreOrch | — |
 | OutlineClusterScopes | TypeChecked, SSAForm | ClusterOutlined | — |
 | ConvertToSSA (post-outline) | TypeChecked | TypeChecked, SSAForm | NormalizedStmtStructure |
+| NormalizeStmtStructure (post-outline) | TypeChecked | TypeChecked, NormalizedStmtStructure | — |
 | ConvertTensorToTileOps | SplitIncoreOrch | IncoreTileOps | — |
 | LowerCompositeOps | — | — | — |
 | FlattenTileNdTo2D | SSAForm, IncoreTileOps | SSAForm, TileOps2D | — |

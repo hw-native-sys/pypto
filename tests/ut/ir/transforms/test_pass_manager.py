@@ -23,6 +23,7 @@ TENSOR_ONLY_PASSES = [
     "OutlineIncoreScopes",
     "OutlineClusterScopes",
     "ConvertToSSA_post_outline",
+    "NormalizeStmtStructure_post_outline",
     "ConvertTensorToTileOps",
     "OptimizeOrchTensors",
 ]

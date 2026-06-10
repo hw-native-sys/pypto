@@ -138,6 +138,10 @@ class PassManager:
             ("OutlineIncoreScopes", lambda: passes.outline_incore_scopes()),
             ("OutlineClusterScopes", lambda: passes.outline_cluster_scopes()),
             ("ConvertToSSA_post_outline", lambda: passes.convert_to_ssa()),
+            # Re-establish NormalizedStmtStructure that ConvertToSSA invalidates
+            # — mirrors the original 4th-position ConvertToSSA → NormalizeStmtStructure
+            # adjacency. ConvertTensorToTileOps requires NormalizedStmtStructure.
+            ("NormalizeStmtStructure_post_outline", lambda: passes.normalize_stmt_structure()),
             ("ConvertTensorToTileOps", lambda: passes.convert_tensor_to_tile_ops()),
             ("OptimizeOrchTensors", lambda: passes.optimize_orch_tensors()),
         ]
