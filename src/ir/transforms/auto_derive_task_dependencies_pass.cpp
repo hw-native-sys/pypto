@@ -394,6 +394,14 @@ void AppendAllUnique(std::vector<VarPtr>* vars, const std::vector<VarPtr>& candi
   }
 }
 
+bool HasMultiSlotDynamicCoverage(const std::unordered_set<int64_t>& slots, int64_t extent) {
+  if (extent <= 1 || slots.size() <= 1) return false;
+  for (const auto slot : slots) {
+    if (slot < 0 || slot >= extent) return false;
+  }
+  return true;
+}
+
 std::vector<std::pair<std::string, std::any>> StripCompilerManualDepEdges(
     const std::vector<std::pair<std::string, std::any>>& attrs) {
   std::vector<std::pair<std::string, std::any>> stripped;
@@ -783,6 +791,7 @@ class SubmitTaskIdCollector : public IRVisitor {
     if (auto call = As<Call>(op->value_)) {
       RecordTaskTupleProducer(op->var_, call);
       RecordTaskIdArrayProducer(op->var_, call);
+      RecordTaskIdScalarProducer(op->var_, call);
     } else if (auto submit = As<Submit>(op->value_)) {
       RecordTaskTupleProducer(op->var_, submit);
     }
@@ -816,6 +825,16 @@ class SubmitTaskIdCollector : public IRVisitor {
 
   const std::unordered_map<const Expr*, VarPtr>& task_id_by_expr() const { return task_id_by_expr_; }
   const std::unordered_map<uint64_t, VarPtr>& task_id_by_var_id() const { return task_id_by_var_id_; }
+  const std::unordered_map<uint64_t, std::vector<VarPtr>>& task_ids_by_var_id() const {
+    return task_ids_by_var_id_;
+  }
+  const std::unordered_map<uint64_t, std::unordered_map<uint64_t, std::unordered_set<int64_t>>>&
+  task_id_dynamic_slots_by_var_id() const {
+    return task_id_dynamic_slots_by_var_id_;
+  }
+  const std::unordered_map<uint64_t, int64_t>& task_id_array_extent_by_var_id() const {
+    return task_id_array_extent_by_var_id_;
+  }
   const std::unordered_map<uint64_t, std::vector<VarPtr>>& task_ids_by_array_var_id() const {
     return task_ids_by_array_var_id_;
   }
@@ -856,6 +875,18 @@ class SubmitTaskIdCollector : public IRVisitor {
       return out;
     }
 
+    if (auto var = AsVarLike(expr)) {
+      auto ids_it = task_ids_by_var_id_.find(var->UniqueId());
+      if (ids_it != task_ids_by_var_id_.end()) {
+        AppendAllUnique(&out.task_ids, ids_it->second);
+      }
+      auto slots_it = task_id_dynamic_slots_by_var_id_.find(var->UniqueId());
+      if (slots_it != task_id_dynamic_slots_by_var_id_.end()) {
+        out.dynamic_array_slots = slots_it->second;
+      }
+      if (!out.task_ids.empty() || !out.dynamic_array_slots.empty()) return out;
+    }
+
     auto call = As<Call>(expr);
     if (!call || call->op_->name_ != "array.get_element" || call->args_.size() != 2) return out;
 
@@ -870,7 +901,11 @@ class SubmitTaskIdCollector : public IRVisitor {
     if (slot_it != lineage_it->second.static_slots.end()) {
       AppendAllUnique(&out.task_ids, slot_it->second);
     }
-    if (!lineage_it->second.full_array_task_ids.empty()) {
+    const auto expanded_it = task_ids_by_array_var_id_.find(array_var->UniqueId());
+    const bool has_dynamic_array_task_ids =
+        !lineage_it->second.full_array_task_ids.empty() ||
+        (expanded_it != task_ids_by_array_var_id_.end() && !expanded_it->second.empty());
+    if (has_dynamic_array_task_ids) {
       out.dynamic_array_slots[array_var->UniqueId()].insert(*index);
     }
     return out;
@@ -901,7 +936,8 @@ class SubmitTaskIdCollector : public IRVisitor {
     for (const auto& [source_id, slots] : covered_source_slots) {
       auto source_it = array_lineage_by_var_id_.find(source_id);
       if (source_it == array_lineage_by_var_id_.end() || !source_it->second.extent.has_value()) continue;
-      if (static_cast<int64_t>(slots.size()) < source_it->second.extent.value()) continue;
+      if (!HasMultiSlotDynamicCoverage(slots, source_it->second.extent.value())) continue;
+      if (lineage.has_unknown_dynamic_update || !lineage.unknown_static_slots.empty()) continue;
       if (source_it->second.has_unknown_dynamic_update || !source_it->second.unknown_static_slots.empty())
         continue;
       AppendAllUnique(&out, source_it->second.full_array_task_ids);
@@ -944,10 +980,12 @@ class SubmitTaskIdCollector : public IRVisitor {
 
       if (iter_args[i] && IsTaskIdArrayVar(iter_args[i])) {
         array_lineage_by_var_id_[iter_args[i]->UniqueId()] = lineage_it->second;
+        RecordTaskIdArrayExtent(iter_args[i]);
         task_ids_by_array_var_id_[iter_args[i]->UniqueId()] = ExpandTaskIdArray(iter_args[i]);
       }
       if (return_vars[i] && IsTaskIdArrayVar(return_vars[i])) {
         array_lineage_by_var_id_[return_vars[i]->UniqueId()] = lineage_it->second;
+        RecordTaskIdArrayExtent(return_vars[i]);
         task_ids_by_array_var_id_[return_vars[i]->UniqueId()] = ExpandTaskIdArray(return_vars[i]);
       }
     }
@@ -961,6 +999,7 @@ class SubmitTaskIdCollector : public IRVisitor {
       TaskIdArrayLineage lineage;
       lineage.extent = TaskIdArrayExtent(var->GetType());
       array_lineage_by_var_id_[var->UniqueId()] = std::move(lineage);
+      RecordTaskIdArrayExtent(var);
       task_ids_by_array_var_id_[var->UniqueId()] = {};
       return;
     }
@@ -1006,31 +1045,74 @@ class SubmitTaskIdCollector : public IRVisitor {
     }
 
     array_lineage_by_var_id_[var->UniqueId()] = std::move(lineage);
+    RecordTaskIdArrayExtent(var);
     task_ids_by_array_var_id_[var->UniqueId()] = ExpandTaskIdArray(var);
+  }
+
+  void RecordTaskIdScalarProducer(const VarPtr& var, const CallPtr& call) {
+    if (!var || !IsTaskIdVar(var) || !call) return;
+
+    auto lineage = TaskIdsForExpr(call);
+    if (!lineage.task_ids.empty()) {
+      task_ids_by_var_id_[var->UniqueId()] = lineage.task_ids;
+      if (lineage.task_ids.size() == 1) {
+        task_id_by_var_id_[var->UniqueId()] = lineage.task_ids.front();
+      }
+    }
+    if (!lineage.dynamic_array_slots.empty()) {
+      task_id_dynamic_slots_by_var_id_[var->UniqueId()] = std::move(lineage.dynamic_array_slots);
+    }
+  }
+
+  void RecordTaskIdArrayExtent(const VarPtr& var) {
+    if (!var) return;
+    auto lineage_it = array_lineage_by_var_id_.find(var->UniqueId());
+    if (lineage_it != array_lineage_by_var_id_.end() && lineage_it->second.extent.has_value()) {
+      task_id_array_extent_by_var_id_[var->UniqueId()] = lineage_it->second.extent.value();
+    } else {
+      task_id_array_extent_by_var_id_.erase(var->UniqueId());
+    }
   }
 
   std::unordered_map<const Var*, ExprPtr> task_expr_by_tuple_;
   std::unordered_map<const Var*, std::unordered_map<int, VarPtr>> tuple_get_by_tuple_;
   std::unordered_map<const Expr*, VarPtr> task_id_by_expr_;
   std::unordered_map<uint64_t, VarPtr> task_id_by_var_id_;
+  std::unordered_map<uint64_t, std::vector<VarPtr>> task_ids_by_var_id_;
+  std::unordered_map<uint64_t, std::unordered_map<uint64_t, std::unordered_set<int64_t>>>
+      task_id_dynamic_slots_by_var_id_;
+  std::unordered_map<uint64_t, int64_t> task_id_array_extent_by_var_id_;
   std::unordered_map<uint64_t, TaskIdArrayLineage> array_lineage_by_var_id_;
   std::unordered_map<uint64_t, std::vector<VarPtr>> task_ids_by_array_var_id_;
 };
 
 class AutoDepMutator : public IRMutator {
  public:
-  AutoDepMutator(ProgramPtr program, const StorageRootAnalysis* storage,
-                 const std::unordered_map<const Expr*, VarPtr>* task_id_by_expr,
-                 const std::unordered_map<uint64_t, VarPtr>* task_id_by_var_id,
-                 const std::unordered_map<uint64_t, std::vector<VarPtr>>* task_ids_by_array_var_id,
-                 bool analyze_auto_scopes, bool analyze_whole_body_as_auto_scope)
+  AutoDepMutator(
+      ProgramPtr program, const StorageRootAnalysis* storage,
+      const std::unordered_map<const Expr*, VarPtr>* task_id_by_expr,
+      const std::unordered_map<uint64_t, VarPtr>* task_id_by_var_id,
+      const std::unordered_map<uint64_t, std::vector<VarPtr>>* task_ids_by_var_id,
+      const std::unordered_map<uint64_t, std::unordered_map<uint64_t, std::unordered_set<int64_t>>>*
+          task_id_dynamic_slots_by_var_id,
+      const std::unordered_map<uint64_t, int64_t>* task_id_array_extent_by_var_id,
+      const std::unordered_map<uint64_t, std::vector<VarPtr>>* task_ids_by_array_var_id,
+      bool analyze_auto_scopes, bool analyze_whole_body_as_auto_scope)
       : program_(std::move(program)),
         storage_(storage),
         task_id_by_expr_(task_id_by_expr),
         task_id_by_var_id_(task_id_by_var_id),
+        task_ids_by_var_id_(task_ids_by_var_id),
+        task_id_dynamic_slots_by_var_id_(task_id_dynamic_slots_by_var_id),
+        task_id_array_extent_by_var_id_(task_id_array_extent_by_var_id),
         task_ids_by_array_var_id_(task_ids_by_array_var_id),
         analyze_auto_scopes_(analyze_auto_scopes),
-        analyze_whole_body_as_auto_scope_(analyze_whole_body_as_auto_scope) {}
+        analyze_whole_body_as_auto_scope_(analyze_whole_body_as_auto_scope) {
+    if (!task_id_by_expr_) return;
+    for (const auto& [_, task_id] : *task_id_by_expr_) {
+      if (task_id) submit_task_id_var_ids_.insert(task_id->UniqueId());
+    }
+  }
 
   StmtPtr AnalyzeBody(const StmtPtr& body) {
     INTERNAL_CHECK(body != nullptr) << "Internal error: AutoDepMutator received null function body";
@@ -1172,7 +1254,9 @@ class AutoDepMutator : public IRMutator {
         if (!HasHazard(access.kind, prior.kind)) continue;
         VarPtr prior_edge = CanonicalTaskId(prior.task_id_var);
         if (!prior_edge) prior_edge = prior.task_id_var;
-        const bool covered_by_user_edge = ContainsVar(user_edges, prior_edge);
+        const bool covered_by_user_edge =
+            ContainsVar(user_edges, prior_edge) ||
+            (prior.dynamic_producer && user_edges.size() > 1 && HasNonSubmitTaskIdUserEdge(user_edges));
         if (debug_loop_carry) {
           DebugLog("hazard call=" + call->op_->name_ + " prior_task_id=" + DebugVar(prior.task_id_var) +
                    " prior_edge=" + DebugVar(prior_edge) +
@@ -1274,6 +1358,13 @@ class AutoDepMutator : public IRMutator {
   std::vector<VarPtr> CanonicalTaskIds(const VarPtr& var) const {
     std::vector<VarPtr> canonical;
     if (!var) return canonical;
+    if (task_ids_by_var_id_) {
+      auto it = task_ids_by_var_id_->find(var->UniqueId());
+      if (it != task_ids_by_var_id_->end()) {
+        AppendAllUnique(&canonical, it->second);
+        return canonical;
+      }
+    }
     if (auto scalar = CanonicalTaskId(var)) {
       canonical.push_back(scalar);
       return canonical;
@@ -1290,10 +1381,43 @@ class AutoDepMutator : public IRMutator {
   std::vector<VarPtr> CanonicalizeTaskIds(const std::vector<VarPtr>& vars) const {
     std::vector<VarPtr> canonical;
     canonical.reserve(vars.size());
+    std::unordered_map<uint64_t, std::unordered_set<int64_t>> dynamic_array_slots;
     for (const auto& var : vars) {
+      bool has_dynamic_slots = false;
+      if (task_id_dynamic_slots_by_var_id_ && var) {
+        auto slots_it = task_id_dynamic_slots_by_var_id_->find(var->UniqueId());
+        if (slots_it != task_id_dynamic_slots_by_var_id_->end()) {
+          has_dynamic_slots = true;
+          for (const auto& [array_id, slots] : slots_it->second) {
+            for (const auto slot : slots) {
+              dynamic_array_slots[array_id].insert(slot);
+            }
+          }
+        }
+      }
+      if (has_dynamic_slots) continue;
       AppendAllUnique(&canonical, CanonicalTaskIds(var));
     }
+    for (const auto& [array_id, slots] : dynamic_array_slots) {
+      if (!task_ids_by_array_var_id_ || !task_id_array_extent_by_var_id_) continue;
+      auto extent_it = task_id_array_extent_by_var_id_->find(array_id);
+      if (extent_it == task_id_array_extent_by_var_id_->end()) continue;
+      if (!HasMultiSlotDynamicCoverage(slots, extent_it->second)) continue;
+      auto expanded_it = task_ids_by_array_var_id_->find(array_id);
+      if (expanded_it == task_ids_by_array_var_id_->end()) continue;
+      AppendAllUnique(&canonical, expanded_it->second);
+    }
     return canonical;
+  }
+
+  bool HasNonSubmitTaskIdUserEdge(const std::vector<VarPtr>& user_edges) const {
+    for (const auto& edge : user_edges) {
+      if (edge && IsTaskIdVar(edge) &&
+          submit_task_id_var_ids_.find(edge->UniqueId()) == submit_task_id_var_ids_.end()) {
+        return true;
+      }
+    }
+    return false;
   }
 
   AccessSummary SummarizeAccesses(const CallPtr& call, const std::vector<VarPtr>& user_edges,
@@ -1363,7 +1487,12 @@ class AutoDepMutator : public IRMutator {
   const StorageRootAnalysis* storage_;
   const std::unordered_map<const Expr*, VarPtr>* task_id_by_expr_;
   const std::unordered_map<uint64_t, VarPtr>* task_id_by_var_id_;
+  const std::unordered_map<uint64_t, std::vector<VarPtr>>* task_ids_by_var_id_;
+  const std::unordered_map<uint64_t, std::unordered_map<uint64_t, std::unordered_set<int64_t>>>*
+      task_id_dynamic_slots_by_var_id_;
+  const std::unordered_map<uint64_t, int64_t>* task_id_array_extent_by_var_id_;
   const std::unordered_map<uint64_t, std::vector<VarPtr>>* task_ids_by_array_var_id_;
+  std::unordered_set<uint64_t> submit_task_id_var_ids_;
   bool analyze_auto_scopes_ = false;
   bool analyze_whole_body_as_auto_scope_ = false;
   std::vector<std::vector<StorageAccess>> prior_stack_;
@@ -1399,8 +1528,9 @@ Pass AutoDeriveTaskDependencies(bool analyze_auto_scopes) {
                                                     func->func_type_ == FunctionType::Orchestration &&
                                                     func->GetAttr<bool>("auto_scope", true);
       AutoDepMutator mutator(program, &storage, &task_ids.task_id_by_expr(), &task_ids.task_id_by_var_id(),
-                             &task_ids.task_ids_by_array_var_id(), analyze_auto_scopes,
-                             analyze_whole_body_as_auto_scope);
+                             &task_ids.task_ids_by_var_id(), &task_ids.task_id_dynamic_slots_by_var_id(),
+                             &task_ids.task_id_array_extent_by_var_id(), &task_ids.task_ids_by_array_var_id(),
+                             analyze_auto_scopes, analyze_whole_body_as_auto_scope);
       auto new_body = mutator.AnalyzeBody(func->body_);
       if (new_body.get() == func->body_.get()) continue;
 

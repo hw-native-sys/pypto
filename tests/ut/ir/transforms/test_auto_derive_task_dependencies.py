@@ -1120,6 +1120,42 @@ class TestAutoDeriveTaskDependencies:
         consume_call = _user_calls(out, "consume")[0]
         assert _compiler_edges(consume_call) == []
 
+    def test_loop_task_id_array_slot_temps_keep_manual_scope(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill(
+                self,
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                return out
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, scratch: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.manual_scope():
+                    tids = pl.array.create(4, pl.TASK_ID)
+                    for n in pl.parallel(4):
+                        _produced, producer_tid = pl.submit(self.fill, scratch)
+                        tids[n] = producer_tid
+                    dep0 = tids[0]
+                    dep1 = tids[1]
+                    dep2 = tids[2]
+                    dep3 = tids[3]
+                    out, _ = pl.submit(self.consume, scratch, deps=[dep0, dep1, dep2, dep3])
+                return out
+
+        out = _run_auto_deps(Prog)
+        scopes = _runtime_scopes(out)
+        assert len(scopes) == 1
+        assert scopes[0].manual is True
+
+        consume_call = _user_calls(out, "consume")[0]
+        assert _compiler_edges(consume_call) == []
+
     def test_partial_loop_task_id_array_deps_still_falls_back(self):
         @pl.program
         class Prog:
@@ -1177,8 +1213,9 @@ class TestAutoDeriveTaskDependencies:
                     carried = scratch
                     for _i in pl.range(0, 4):
                         carried, _producer_tid = pl.submit(self.fill, carried)
-                    _unrelated, unrelated_tid = pl.submit(self.unrelated, other)
-                    out, _ = pl.submit(self.consume, carried, deps=[unrelated_tid])
+                    _unrelated0, unrelated_tid0 = pl.submit(self.unrelated, other)
+                    _unrelated1, unrelated_tid1 = pl.submit(self.unrelated, other)
+                    out, _ = pl.submit(self.consume, carried, deps=[unrelated_tid0, unrelated_tid1])
                 return out
 
         out = _run_auto_deps(Prog, analyze_auto_scopes=True)
