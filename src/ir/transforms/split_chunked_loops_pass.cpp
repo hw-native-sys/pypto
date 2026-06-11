@@ -201,6 +201,18 @@ static StmtPtr MakeResultStmt(const std::vector<StmtPtr>& stmts, const Span& spa
 }
 
 /**
+ * @brief Demote ForKind::Unroll to Sequential.
+ *
+ * ForKind::Unroll is a compile-time-only marker expanded by UnrollLoops.
+ * SplitChunkedLoops is the last pass that can encounter it; after split,
+ * the generated inner/outer/remainder loops are Sequential — they were
+ * never meant to be further unrolled.
+ */
+static ForKind DemoteUnrollKind(ForKind kind) {
+  return (kind == ForKind::Unroll) ? ForKind::Sequential : kind;
+}
+
+/**
  * @brief Mutator that splits ForStmt nodes with chunk_config_ into nested loops.
  *
  * Runs after SSA conversion. Propagates iter_args through generated loops.
@@ -484,10 +496,10 @@ class ChunkedLoopSplitter : public IRMutator {
 
       auto inner_for = std::make_shared<ForStmt>(
           in_var, zero, chunk_expr, one, std::vector<IterArgPtr>{}, inner_body, std::vector<VarPtr>{}, sp,
-          op->kind_, std::nullopt, MakeLoopAttrs(op->attrs_, LoopOrigin::ChunkInner));
+          DemoteUnrollKind(op->kind_), std::nullopt, MakeLoopAttrs(op->attrs_, LoopOrigin::ChunkInner));
       auto outer_for = std::make_shared<ForStmt>(
           out_var, zero, n_full, one, std::vector<IterArgPtr>{}, inner_for, std::vector<VarPtr>{}, sp,
-          op->kind_, std::nullopt, MakeLoopAttrs(op->attrs_, LoopOrigin::ChunkOuter));
+          DemoteUnrollKind(op->kind_), std::nullopt, MakeLoopAttrs(op->attrs_, LoopOrigin::ChunkOuter));
       result_stmts.push_back(outer_for);
     }
 
@@ -507,9 +519,9 @@ class ChunkedLoopSplitter : public IRMutator {
       auto rem_body = VisitStmt(op->body_);
       RestoreSubstitutions(prev_def_subs);
 
-      auto rem_for = std::make_shared<ForStmt>(rem_var, zero, n_rem, one, std::vector<IterArgPtr>{}, rem_body,
-                                               std::vector<VarPtr>{}, sp, op->kind_, std::nullopt,
-                                               MakeLoopAttrs(op->attrs_, LoopOrigin::ChunkRemainder));
+      auto rem_for = std::make_shared<ForStmt>(
+          rem_var, zero, n_rem, one, std::vector<IterArgPtr>{}, rem_body, std::vector<VarPtr>{}, sp,
+          DemoteUnrollKind(op->kind_), std::nullopt, MakeLoopAttrs(op->attrs_, LoopOrigin::ChunkRemainder));
       result_stmts.push_back(rem_for);
     }
 
@@ -577,16 +589,16 @@ class ChunkedLoopSplitter : public IRMutator {
           MakeAdd(start_expr, MakeMul(MakeAdd(MakeMul(out_var, chunk_expr), in_var), step_expr));
       auto inner_body = VisitStmt(op->body_);
 
-      auto inner_for = std::make_shared<ForStmt>(in_var, zero, chunk_expr, one, inner_iter_args, inner_body,
-                                                 inner_return_vars, sp, op->kind_, std::nullopt,
-                                                 MakeLoopAttrs(op->attrs_, LoopOrigin::ChunkInner));
+      auto inner_for = std::make_shared<ForStmt>(
+          in_var, zero, chunk_expr, one, inner_iter_args, inner_body, inner_return_vars, sp,
+          DemoteUnrollKind(op->kind_), std::nullopt, MakeLoopAttrs(op->attrs_, LoopOrigin::ChunkInner));
       auto outer_yield = std::make_shared<YieldStmt>(
           std::vector<ExprPtr>(inner_return_vars.begin(), inner_return_vars.end()), sp);
       auto outer_body = SeqStmts::Flatten(std::vector<StmtPtr>{inner_for, outer_yield}, sp);
 
-      auto outer_for = std::make_shared<ForStmt>(out_var, zero, n_full, one, outer_iter_args, outer_body,
-                                                 outer_return_vars, sp, op->kind_, std::nullopt,
-                                                 MakeLoopAttrs(op->attrs_, LoopOrigin::ChunkOuter));
+      auto outer_for = std::make_shared<ForStmt>(
+          out_var, zero, n_full, one, outer_iter_args, outer_body, outer_return_vars, sp,
+          DemoteUnrollKind(op->kind_), std::nullopt, MakeLoopAttrs(op->attrs_, LoopOrigin::ChunkOuter));
 
       result_stmts.push_back(outer_for);
       final_return_vars = outer_return_vars;
@@ -630,7 +642,7 @@ class ChunkedLoopSplitter : public IRMutator {
       RestoreSubstitutions(prev_def_subs);
 
       auto rem_for = std::make_shared<ForStmt>(rem_var, zero, n_rem, one, rem_iter_args, rem_body,
-                                               rem_return_vars, sp, op->kind_, std::nullopt,
+                                               rem_return_vars, sp, DemoteUnrollKind(op->kind_), std::nullopt,
                                                MakeLoopAttrs(op->attrs_, LoopOrigin::ChunkRemainder));
 
       result_stmts.push_back(rem_for);
@@ -683,12 +695,12 @@ class ChunkedLoopSplitter : public IRMutator {
     auto if_stmt =
         std::make_shared<IfStmt>(cond, visited_body, std::optional<StmtPtr>{}, std::vector<VarPtr>{}, sp);
 
-    auto inner_for = std::make_shared<ForStmt>(in_var, zero, chunk_expr, one, std::vector<IterArgPtr>{},
-                                               if_stmt, std::vector<VarPtr>{}, sp, op->kind_, std::nullopt,
-                                               MakeLoopAttrs(op->attrs_, LoopOrigin::ChunkInner));
-    auto outer_for = std::make_shared<ForStmt>(out_var, zero, n_total, one, std::vector<IterArgPtr>{},
-                                               inner_for, std::vector<VarPtr>{}, sp, op->kind_, std::nullopt,
-                                               MakeLoopAttrs(op->attrs_, LoopOrigin::ChunkOuter));
+    auto inner_for = std::make_shared<ForStmt>(
+        in_var, zero, chunk_expr, one, std::vector<IterArgPtr>{}, if_stmt, std::vector<VarPtr>{}, sp,
+        DemoteUnrollKind(op->kind_), std::nullopt, MakeLoopAttrs(op->attrs_, LoopOrigin::ChunkInner));
+    auto outer_for = std::make_shared<ForStmt>(
+        out_var, zero, n_total, one, std::vector<IterArgPtr>{}, inner_for, std::vector<VarPtr>{}, sp,
+        DemoteUnrollKind(op->kind_), std::nullopt, MakeLoopAttrs(op->attrs_, LoopOrigin::ChunkOuter));
 
     RestoreSubstitution(prev_loop_sub);
     return outer_for;
@@ -775,18 +787,18 @@ class ChunkedLoopSplitter : public IRMutator {
         std::make_shared<YieldStmt>(std::vector<ExprPtr>(if_return_vars.begin(), if_return_vars.end()), sp);
     auto inner_body = SeqStmts::Flatten(std::vector<StmtPtr>{if_stmt, inner_trailing_yield}, sp);
 
-    auto inner_for = std::make_shared<ForStmt>(in_var, zero, chunk_expr, one, inner_iter_args, inner_body,
-                                               inner_return_vars, sp, op->kind_, std::nullopt,
-                                               MakeLoopAttrs(op->attrs_, LoopOrigin::ChunkInner));
+    auto inner_for = std::make_shared<ForStmt>(
+        in_var, zero, chunk_expr, one, inner_iter_args, inner_body, inner_return_vars, sp,
+        DemoteUnrollKind(op->kind_), std::nullopt, MakeLoopAttrs(op->attrs_, LoopOrigin::ChunkInner));
 
     // Outer loop body: SeqStmts { inner_for, YieldStmt(inner_return_vars) }
     auto outer_yield = std::make_shared<YieldStmt>(
         std::vector<ExprPtr>(inner_return_vars.begin(), inner_return_vars.end()), sp);
     auto outer_body = SeqStmts::Flatten(std::vector<StmtPtr>{inner_for, outer_yield}, sp);
 
-    auto outer_for = std::make_shared<ForStmt>(out_var, zero, n_total, one, outer_iter_args, outer_body,
-                                               outer_return_vars, sp, op->kind_, std::nullopt,
-                                               MakeLoopAttrs(op->attrs_, LoopOrigin::ChunkOuter));
+    auto outer_for = std::make_shared<ForStmt>(
+        out_var, zero, n_total, one, outer_iter_args, outer_body, outer_return_vars, sp,
+        DemoteUnrollKind(op->kind_), std::nullopt, MakeLoopAttrs(op->attrs_, LoopOrigin::ChunkOuter));
 
     INTERNAL_CHECK_SPAN(op->return_vars_.size() == outer_return_vars.size(), op->span_)
         << "SplitChunkedLoops guarded produced mismatched return vars";

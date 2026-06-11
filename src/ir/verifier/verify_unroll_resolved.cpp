@@ -25,23 +25,21 @@ namespace {
 
 /// Walks a function body, reporting any ForStmt that still carries the
 /// ``ForKind::Unroll`` marker. By design this marker must be gone after
-/// ``UnrollLoops`` — the pass expands every unrollable loop into a SeqStmts
-/// of N body copies. Any leftover indicates the pass silently skipped a loop
-/// (e.g. non-const bounds or chunk_config it cannot handle).
+/// ``SplitChunkedLoops`` — ``UnrollLoops`` expands non-chunked unroll loops,
+/// and ``SplitChunkedLoops`` demotes chunked unroll loops to Sequential.
+/// Any leftover indicates a pass pipeline defect.
 class UnrollKindLeftoverChecker : public IRVisitor {
  public:
   UnrollKindLeftoverChecker(std::vector<Diagnostic>& diagnostics, const std::string& func_name)
       : diagnostics_(diagnostics), func_name_(func_name) {}
 
   void VisitStmt_(const ForStmtPtr& op) override {
-    // Skip chunked unroll loops — they are valid at this pipeline position and
-    // will be transformed by SplitChunkedLoops later.
-    if (op->kind_ == ForKind::Unroll && !op->chunk_config_.has_value()) {
+    if (op->kind_ == ForKind::Unroll) {
       diagnostics_.emplace_back(DiagnosticSeverity::Error, "UnrollResolved", 0,
-                                "ForKind::Unroll survived past UnrollLoops in function '" + func_name_ +
-                                    "'. This kind is a compile-time marker — UnrollLoops must expand it "
-                                    "into a SeqStmts of N body copies. Check for non-const bounds or "
-                                    "chunk_config that the pass cannot handle.",
+                                "ForKind::Unroll survived past SplitChunkedLoops in function '" + func_name_ +
+                                    "'. This kind is a compile-time marker — UnrollLoops and "
+                                    "SplitChunkedLoops must resolve all Unroll loops. "
+                                    "Check for a pass pipeline defect.",
                                 op->span_);
     }
     IRVisitor::VisitStmt_(op);

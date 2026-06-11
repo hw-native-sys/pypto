@@ -49,7 +49,7 @@ inline const PassProperties kMaterializeRuntimeScopesProperties{
 
 // -- Loop unrolling pass (runs before SSA) ------------------------------------
 
-inline const PassProperties kUnrollLoopsProperties{.produced = {IRProperty::UnrollResolved}};
+inline const PassProperties kUnrollLoopsProperties{};
 
 // -- Control flow structuring pass (runs before SSA, after unrolling) ---------
 
@@ -59,7 +59,7 @@ inline const PassProperties kCtrlFlowTransformProperties{.produced = {IRProperty
 
 inline const PassProperties kSplitChunkedLoopsProperties{
     .required = {IRProperty::SSAForm, IRProperty::NormalizedStmtStructure},
-    .produced = {IRProperty::SSAForm, IRProperty::NormalizedStmtStructure}};
+    .produced = {IRProperty::SSAForm, IRProperty::NormalizedStmtStructure, IRProperty::UnrollResolved}};
 
 // -- Chunk loop interchange pass (runs after SplitChunkedLoops) ---------------
 

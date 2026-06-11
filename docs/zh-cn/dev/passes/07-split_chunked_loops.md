@@ -13,6 +13,8 @@
 
 **前置条件**: `TypeChecked`、`SSAForm`。
 
+**产出**: `UnrollResolved` 属性 — 此 Pass 之后不存在 `ForKind::Unroll`。
+
 **使用时机**: 在默认流水线中自动运行，位于 `FlattenCallExpr` 之后、`InterchangeChunkLoops` 之前。在 `with pl.auto_incore():` 作用域内的 `pl.range()`、`pl.parallel()`、`pl.unroll()` 上使用 `chunk=`。`auto_incore` 之外的分块循环不会被拆分。
 
 ## API

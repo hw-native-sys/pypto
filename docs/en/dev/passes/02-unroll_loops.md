@@ -6,8 +6,6 @@ Expands `ForKind::Unroll` loops at compile time by inlining the loop body for ea
 
 This pass statically unrolls for loops created with `pl.unroll()`, replacing them with repeated copies of the loop body where the loop variable is substituted with each iteration's constant value.
 
-**Produces**: UnrollResolved property — no `ForKind::Unroll` survives after this pass.
-
 **When to use**: Runs automatically in the default pipeline before `ConvertToSSA`. Use `pl.unroll()` when the loop trip count is a compile-time constant and you want the body duplicated for each iteration.
 
 ## API
