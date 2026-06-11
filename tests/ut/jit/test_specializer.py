@@ -1552,5 +1552,197 @@ class TestSpecializerSourceMap:
         assert spec.source_map == {}
 
 
+# ---------------------------------------------------------------------------
+# Array-typed parameter annotations (e.g. pl.Array[N, pl.TASK_ID])
+# ---------------------------------------------------------------------------
+
+
+class TestArrayParamAnnotation:
+    """A param that is neither a tensor nor a scalar — a fixed-size on-core
+    ``pl.Array[N, dtype]`` (the TaskId-array dependency-threading idiom) — must
+    round-trip through specialization with its annotation rendered.
+
+    Before the fix, ``_build_params`` emitted such params *bare* (just the name).
+    The generated ``@pl.function`` source then failed PyPTO parsing with
+    ``ParserTypeError: Parameter '<name>' missing type annotation``.
+    """
+
+    def _specialize_with_globals(
+        self,
+        func_source: str,
+        param_names: list[str],
+        tensor_meta: dict[str, TensorMeta],
+        py_globals: dict,
+        func_type: str = "orchestration",
+    ) -> str:
+        ctx = SpecializeContext(
+            func_name="kernel",
+            source=textwrap.dedent(func_source),
+            func_type=func_type,
+            level=None,
+            param_names=param_names,
+            tensor_meta=tensor_meta,
+            scalar_values={},
+            scalar_dtypes={},
+            py_globals=py_globals,
+        )
+        return specialize("_TestClass", [ctx])
+
+    # --- _build_params plumbing (unit) --------------------------------------
+
+    def test_build_params_renders_extra_ann(self):
+        """extra_anns entries are emitted as ``name: <annotation>``."""
+        ctx = _make_ctx(
+            param_names=["a", "tids"],
+            tensor_meta={"a": TensorMeta((4, 4), DataType.FP32)},
+        )
+        spec = Specializer("_T", [ctx])
+        params = spec._build_params(
+            all_param_names=["a", "tids"],
+            out_params=[],
+            tensor_params=["a"],
+            scalar_dtype_strs={},
+            distributed_params=set(),
+            ctx=ctx,
+            extra_anns={"tids": "pl.Array[4, pl.TASK_ID]"},
+        )
+        assert "tids: pl.Array[4, pl.TASK_ID]" in params
+
+    def test_build_params_without_extra_ann_stays_bare(self):
+        """A non-tensor, non-scalar param with no extra_anns is emitted bare —
+        documents the pre-fix behaviour that broke PyPTO parsing."""
+        ctx = _make_ctx(
+            param_names=["a", "tids"],
+            tensor_meta={"a": TensorMeta((4, 4), DataType.FP32)},
+        )
+        spec = Specializer("_T", [ctx])
+        params = spec._build_params(
+            all_param_names=["a", "tids"],
+            out_params=[],
+            tensor_params=["a"],
+            scalar_dtype_strs={},
+            distributed_params=set(),
+            ctx=ctx,
+            extra_anns=None,
+        )
+        assert "tids" in params  # bare, unannotated
+
+    # --- end-to-end rendering through specialize() --------------------------
+
+    def test_task_id_array_param_rendered(self):
+        """``tids: pl.Array[N, pl.TASK_ID]`` renders with N folded to its value."""
+        N = 4
+        src = """
+            def kernel(a: pl.Tensor, tids: pl.Array[N, pl.TASK_ID], out: pl.Out[pl.Tensor]):
+                return out
+        """
+        out = self._specialize_with_globals(
+            src,
+            ["a", "tids", "out"],
+            {
+                "a": TensorMeta((16, 16), DataType.FP32),
+                "out": TensorMeta((16, 16), DataType.FP32),
+            },
+            py_globals={"pl": pl, "N": N},
+        )
+        assert "tids: pl.Array[4, pl.TASK_ID]" in out
+
+    def test_array_param_literal_extent(self):
+        """A literal extent (no closure constant) renders unchanged."""
+        src = """
+            def kernel(a: pl.Tensor, tids: pl.Array[3, pl.TASK_ID], out: pl.Out[pl.Tensor]):
+                return out
+        """
+        out = self._specialize_with_globals(
+            src,
+            ["a", "tids", "out"],
+            {
+                "a": TensorMeta((8, 8), DataType.FP32),
+                "out": TensorMeta((8, 8), DataType.FP32),
+            },
+            py_globals={"pl": pl},
+        )
+        assert "tids: pl.Array[3, pl.TASK_ID]" in out
+
+    def test_array_param_non_task_id_dtype(self):
+        """The rendering generalises to any Array dtype, not just TASK_ID."""
+        src = """
+            def kernel(a: pl.Tensor, route: pl.Array[8, pl.INT32], out: pl.Out[pl.Tensor]):
+                return out
+        """
+        out = self._specialize_with_globals(
+            src,
+            ["a", "route", "out"],
+            {
+                "a": TensorMeta((8, 8), DataType.FP32),
+                "out": TensorMeta((8, 8), DataType.FP32),
+            },
+            py_globals={"pl": pl},
+        )
+        assert "route: pl.Array[8, pl.INT32]" in out
+
+    def test_array_param_bf16_dtype_renders_pl_constant(self):
+        """Regression: a dtype whose enum ``str`` diverges from its DSL constant
+        (``BF16`` → enum str ``bfloat16``) must render as the real ``pl.BF16``,
+        not ``pl.BFLOAT16`` (which does not exist on ``pl`` and would make the
+        generated source fail at import)."""
+        src = """
+            def kernel(a: pl.Tensor, buf: pl.Array[4, pl.BF16], out: pl.Out[pl.Tensor]):
+                return out
+        """
+        out = self._specialize_with_globals(
+            src,
+            ["a", "buf", "out"],
+            {
+                "a": TensorMeta((8, 8), DataType.FP32),
+                "out": TensorMeta((8, 8), DataType.FP32),
+            },
+            py_globals={"pl": pl},
+        )
+        assert "buf: pl.Array[4, pl.BF16]" in out
+        assert "BFLOAT16" not in out
+
+    def test_generated_source_is_parseable(self):
+        """The generated source is syntactically valid Python and carries no
+        bare (unannotated) parameter — the concrete regression guard."""
+        N = 5
+        src = """
+            def kernel(a: pl.Tensor, tids: pl.Array[N, pl.TASK_ID], out: pl.Out[pl.Tensor]):
+                return out
+        """
+        out = self._specialize_with_globals(
+            src,
+            ["a", "tids", "out"],
+            {
+                "a": TensorMeta((16, 16), DataType.FP32),
+                "out": TensorMeta((16, 16), DataType.FP32),
+            },
+            py_globals={"pl": pl, "N": N},
+        )
+        ast.parse(out)  # must be valid Python
+        # The param must be annotated, never emitted bare as ", tids,".
+        assert "tids: pl.Array[5, pl.TASK_ID]" in out
+        assert ", tids," not in out and ", tids)" not in out
+
+    def test_unevaluable_annotation_stays_bare_without_crash(self):
+        """An annotation that cannot be evaluated (unknown name, not in globals)
+        is best-effort skipped — the specializer must not raise."""
+        src = """
+            def kernel(a: pl.Tensor, weird: SomeUndefinedType, out: pl.Out[pl.Tensor]):
+                return out
+        """
+        # No exception expected; `weird` simply stays bare.
+        out = self._specialize_with_globals(
+            src,
+            ["a", "weird", "out"],
+            {
+                "a": TensorMeta((8, 8), DataType.FP32),
+                "out": TensorMeta((8, 8), DataType.FP32),
+            },
+            py_globals={"pl": pl},
+        )
+        assert "pl.Array" not in out  # not misclassified as an Array
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -42,6 +42,7 @@ import warnings
 from dataclasses import dataclass, field
 from typing import Any, cast
 
+from pypto.language.typing.array import Array as _LangArray
 from pypto.pypto_core import DataType
 
 # ---------------------------------------------------------------------------
@@ -216,6 +217,20 @@ def _dtype_str(dt: DataType) -> str:
     if dt not in _DTYPE_TO_PL:
         raise ValueError(f"Unsupported DataType: {dt}")
     return _DTYPE_TO_PL[dt]
+
+
+def _array_dtype_str(dt: DataType) -> str:
+    """Render an ``Array`` element dtype to its ``pl.<NAME>`` source form.
+
+    Prefers the canonical :data:`_DTYPE_TO_PL` mapping so dtypes whose enum
+    ``str`` diverges from the DSL constant render correctly (e.g. ``BF16`` →
+    ``pl.BF16``, not the enum's ``str`` form ``bfloat16`` → ``pl.BFLOAT16``,
+    which does not exist on ``pl``). Falls back to the upper-cased enum string
+    for dtypes outside that map — notably ``TASK_ID``, the TaskId-array element
+    type, which is intentionally absent from ``_DTYPE_TO_PL`` (it is not a
+    tensor/tile element dtype but does have a ``pl.TASK_ID`` constant).
+    """
+    return _DTYPE_TO_PL.get(dt, f"pl.{str(dt).upper()}")
 
 
 # ---------------------------------------------------------------------------
@@ -1510,6 +1525,22 @@ class Specializer:
         # Build decorator
         decorator = self._build_decorator(ctx, func_def)
 
+        # Non-tensor, non-scalar params with an evaluable typed annotation
+        # (e.g. ``tids: pl.Array[N, pl.TASK_ID]``) — render the annotation with
+        # closure constants folded so the generated source stays parseable.
+        array_param_anns: dict[str, str] = {}
+        for arg in func_def.args.args:
+            if arg.arg == "self" or arg.annotation is None:
+                continue
+            if arg.arg in tensor_params or arg.arg in scalar_dtype_strs:
+                continue
+            try:
+                ann_obj = eval(ast.unparse(arg.annotation), dict(ctx.py_globals))  # noqa: S307
+            except Exception:  # noqa: BLE001 — best effort; unrecognized stays bare
+                continue
+            if isinstance(ann_obj, _LangArray) and ann_obj.extent is not None and ann_obj.dtype is not None:
+                array_param_anns[arg.arg] = f"pl.Array[{ann_obj.extent}, {_array_dtype_str(ann_obj.dtype)}]"
+
         params = self._build_params(
             all_param_names,
             out_params,
@@ -1518,6 +1549,7 @@ class Specializer:
             distributed_params,
             ctx,
             is_inline=is_inline,
+            extra_anns=array_param_anns,
         )
 
         # Infer return type
@@ -1657,8 +1689,14 @@ class Specializer:
         distributed_params: set[str],
         ctx: SpecializeContext,
         is_inline: bool = False,
+        extra_anns: dict[str, str] | None = None,
     ) -> list[str]:
         """Build the annotated parameter strings for the function signature.
+
+        ``extra_anns`` carries pre-rendered annotations for params that are
+        neither tensors nor scalars (e.g. ``pl.Array[N, pl.TASK_ID]`` TaskId
+        arrays) — without it those params would be emitted bare and the
+        generated source would fail to parse.
 
         When ``is_inline`` is True, ``pl.Out[...]`` wrappers are stripped from
         tensor params — inline helpers don't have a calling convention boundary,
@@ -1689,6 +1727,8 @@ class Specializer:
             elif name in scalar_dtype_strs:
                 dtype_s = scalar_dtype_strs[name]
                 result.append(f"{name}: pl.Scalar[{dtype_s}]")
+            elif extra_anns and name in extra_anns:
+                result.append(f"{name}: {extra_anns[name]}")
             else:
                 result.append(name)
         return result
