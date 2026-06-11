@@ -57,6 +57,10 @@ For each function body:
 5. Treat MemRef-backed shaped values as aliases when `MemRef::MayAlias` reports
    the same base allocation with overlapping or symbolic byte ranges.
 6. Collect statically bound producer TaskIds from `pl.submit` tuple tails.
+   `Array[TASK_ID]` dependency values are expanded conservatively when their
+   lineage is known: direct scalar writes, dynamic loop writes, and synthesized
+   per-element `arr[i]` dep arrays can cover user-written hazards. Unknown array
+   sources remain unexpanded so missing dependencies still trigger fallback.
 7. Walk each `RuntimeScopeStmt` in source order, maintaining prior accesses for
    that scope only. For default `auto_scope=True` orchestration functions with
    no materialized scope yet, use the whole function body as a virtual AUTO
