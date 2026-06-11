@@ -1528,6 +1528,13 @@ class Specializer:
         # Non-tensor, non-scalar params with an evaluable typed annotation
         # (e.g. ``tids: pl.Array[N, pl.TASK_ID]``) — render the annotation with
         # closure constants folded so the generated source stays parseable.
+        #
+        # The annotation is evaluated in a builtins-free namespace: only the
+        # function's own module globals are exposed (``pl`` plus the int/float
+        # constants that fold into ``Array`` extents), never Python builtins.
+        # Type-form annotations never need builtins, so stripping them keeps the
+        # best-effort eval from running anything beyond pure type construction.
+        ann_globals = {**ctx.py_globals, "__builtins__": {}}
         array_param_anns: dict[str, str] = {}
         for arg in func_def.args.args:
             if arg.arg == "self" or arg.annotation is None:
@@ -1535,7 +1542,7 @@ class Specializer:
             if arg.arg in tensor_params or arg.arg in scalar_dtype_strs:
                 continue
             try:
-                ann_obj = eval(ast.unparse(arg.annotation), dict(ctx.py_globals))  # noqa: S307
+                ann_obj = eval(ast.unparse(arg.annotation), ann_globals)  # noqa: S307
             except Exception:  # noqa: BLE001 — best effort; unrecognized stays bare
                 continue
             if isinstance(ann_obj, _LangArray) and ann_obj.extent is not None and ann_obj.dtype is not None:

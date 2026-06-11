@@ -1743,6 +1743,27 @@ class TestArrayParamAnnotation:
         )
         assert "pl.Array" not in out  # not misclassified as an Array
 
+    def test_annotation_eval_excludes_builtins(self):
+        """The annotation-eval namespace strips Python builtins: an annotation
+        that depends on one (here ``len``) cannot evaluate, so it is silently
+        skipped (stays bare) rather than executed at specialization time."""
+        src = """
+            def kernel(a: pl.Tensor, x: pl.Array[len([0, 0, 0, 0]), pl.TASK_ID], out: pl.Out[pl.Tensor]):
+                return out
+        """
+        out = self._specialize_with_globals(
+            src,
+            ["a", "x", "out"],
+            {
+                "a": TensorMeta((8, 8), DataType.FP32),
+                "out": TensorMeta((8, 8), DataType.FP32),
+            },
+            py_globals={"pl": pl},
+        )
+        # `len(...)` is unavailable without builtins -> eval fails -> no Array
+        # annotation is emitted for `x` (best-effort, no execution, no crash).
+        assert "x: pl.Array" not in out
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
