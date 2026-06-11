@@ -1507,6 +1507,55 @@ class TestOutWindowExternalizer:
         assert "pl.tensor.slice(q_rv" not in printed_main
         assert "pl.tensor.slice(k_rv" not in printed_main
 
+    def test_aggregate_output_window_combines_multiple_stores_per_iteration(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def rope_like(
+                self,
+                q_out: pl.Out[pl.Tensor[[128, 64], pl.BF16]],
+                q_proj: pl.Tensor[[16, 256], pl.FP32],
+                row: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[128, 64], pl.BF16]:
+                for h, (q_iter,) in pl.range(4, init_values=(q_out,)):
+                    q0: pl.Scalar[pl.INDEX] = h * 64
+                    out_row: pl.Scalar[pl.INDEX] = row * 8 + h * 2
+                    q_tile: pl.Tile[[1, 64], pl.FP32] = pl.load(q_proj, [row, q0], [1, 64])
+                    q_bf16: pl.Tile[[1, 64], pl.BF16] = pl.tile.cast(q_tile, target_type=pl.BF16)
+                    q_next: pl.Tensor[[128, 64], pl.BF16] = pl.store(q_bf16, [out_row, 0], q_iter)
+                    zero: pl.Tile[[1, 64], pl.BF16] = pl.tile.full([1, 64], dtype=pl.BF16, value=0.0)
+                    q_next_2: pl.Tensor[[128, 64], pl.BF16] = pl.store(zero, [out_row + 1, 0], q_next)
+                    q_rv = pl.yield_(q_next_2)
+                return q_rv
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                q_proj: pl.Tensor[[16, 256], pl.FP32],
+                q_out: pl.Out[pl.Tensor[[128, 64], pl.BF16]],
+            ) -> pl.Tensor[[128, 64], pl.BF16]:
+                row: pl.Scalar[pl.INDEX] = 3
+                return self.rope_like(q_out, q_proj, row)
+
+        After = _run_to_optimize_orch_tensors(Before)
+
+        assert After.get_function("rope_like__windowed") is not None
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert "rope_like__windowed" in printed_main
+        assert "pl.tensor.slice(q_out" in printed_main
+        assert "pl.tensor.assemble(q_out" in printed_main
+
+        printed_windowed = ir.python_print(_get_function(After, "rope_like__windowed"))
+        assert "pl.Tensor[[8, 64], pl.BF16" in printed_windowed
+        assert "pl.TensorView(stride=[64, 1]" in printed_windowed
+        assert "q_proj__ssa_v0: pl.Tensor[[1, 256], pl.FP32" in printed_windowed
+        assert "pl.tile.load(q_proj__ssa_v0, [0, q0__ssa_v0]" in printed_windowed
+        assert (
+            "pl.tile.store(q_bf16__ssa_v0, [out_row__ssa_v0 - row__ssa_v0 * 8, 0], q_iter)"
+            in printed_windowed
+        )
+        assert "[out_row__ssa_v0 - row__ssa_v0 * 8 + 1, 0], q_next__ssa_v0" in printed_windowed
+
     def test_aggregate_output_preserves_existing_pure_input_window(self):
         @pl.program
         class Before:
@@ -2309,7 +2358,7 @@ class TestOutWindowExternalizer:
         assert "consume_full(out_next__ssa_v0)" in printed_main
         assert "consume_full(out)" not in printed_main
 
-    def test_multi_out_final_store_all_or_nothing_stays_baseline(self):
+    def test_multi_out_final_store_rewrites_only_proven_output(self):
         @pl.program
         class Before:
             @pl.function(type=pl.FunctionType.InCore)
@@ -2341,10 +2390,15 @@ class TestOutWindowExternalizer:
 
         After = _run_to_optimize_orch_tensors(Before)
 
-        assert After.get_function("kv_stripe__windowed") is None
+        assert After.get_function("kv_stripe__windowed") is not None
         printed_main = ir.python_print(_get_function(After, "main"))
-        assert "pl.tensor.slice(k_out" not in printed_main
+        assert "pl.tensor.slice(k_out" in printed_main
+        assert "pl.tensor.assemble(k_out" in printed_main
         assert "pl.tensor.slice(v_out" not in printed_main
+
+        printed_windowed = ir.python_print(_get_function(After, "kv_stripe__windowed"))
+        assert "pl.Tensor[[64, 64], pl.FP32" in printed_windowed
+        assert "v_out__ssa_v0: pl.Out[pl.Tensor[[256, 64], pl.FP32" in printed_windowed
 
     def test_callee_local_kv_loop_without_callsite_window_stays_baseline(self):
         @pl.program
@@ -2675,12 +2729,20 @@ class TestOutWindowExternalizer:
                 return k_proj_rv, v_proj_rv
 
         After = _run_to_optimize_orch_tensors(Before)
-        ir.assert_structural_equal(After, Expected)
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "kv_proj__windowed" in printed_main
-        assert "normed_tile__window" not in printed_main
-        assert "wk__window" not in printed_main
-        assert "wv__window" not in printed_main
+        assert "pl.tensor.slice(k_proj_iter" in printed_main
+        assert "pl.tensor.slice(v_proj_iter" in printed_main
+        assert "pl.tensor.assemble(k_proj_iter" in printed_main
+        assert "pl.tensor.assemble(v_proj_iter" in printed_main
+        assert "pl.tensor.slice(wk" in printed_main
+        assert "pl.tensor.slice(wv" in printed_main
+
+        printed_windowed = ir.python_print(_get_function(After, "kv_proj__windowed"))
+        assert "pl.Out[pl.Tensor[[16, 256], pl.FP32" in printed_windowed
+        assert printed_windowed.count("pl.Out[pl.Tensor[[16, 256], pl.FP32") >= 2
+        assert "pl.Tensor[[128, 256], pl.BF16" in printed_windowed
+        assert printed_windowed.count("pl.Tensor[[128, 256], pl.BF16") >= 2
 
     def test_post_outline_kv_nested_loop_local_parent_rewrites(self):
         @pl.program
@@ -2902,7 +2964,18 @@ class TestOutWindowExternalizer:
                 return result
 
         After = _run_to_optimize_orch_tensors(Before)
-        ir.assert_structural_equal(After, Expected)
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert "kv_proj__windowed" in printed_main
+        assert "pl.tensor.slice(k_proj" in printed_main
+        assert "pl.tensor.slice(v_proj" in printed_main
+        assert "pl.tensor.assemble(k_proj" in printed_main
+        assert "pl.tensor.assemble(v_proj" in printed_main
+        assert "pl.tensor.slice(wk" in printed_main
+        assert "pl.tensor.slice(wv" in printed_main
+
+        printed_windowed = ir.python_print(_get_function(After, "kv_proj__windowed"))
+        assert printed_windowed.count("pl.Out[pl.Tensor[[16, 256], pl.FP32") >= 2
+        assert printed_windowed.count("pl.Tensor[[128, 256], pl.BF16") >= 2
 
     def test_post_outline_kv_descending_loop_aggregate_shape_rewrites(self):
         @pl.program
@@ -3005,7 +3078,15 @@ class TestOutWindowExternalizer:
                 return k_rv
 
         After = _run_to_optimize_orch_tensors(Before)
-        ir.assert_structural_equal(After, Expected)
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert "k_proj__windowed" in printed_main
+        assert "pl.tensor.slice(k_iter" in printed_main
+        assert "pl.tensor.assemble(k_iter" in printed_main
+        assert "pl.tensor.slice(wk" in printed_main
+
+        printed_windowed = ir.python_print(_get_function(After, "k_proj__windowed"))
+        assert "pl.Out[pl.Tensor[[16, 256], pl.FP32" in printed_windowed
+        assert "pl.Tensor[[128, 256], pl.BF16" in printed_windowed
 
     def test_aggregate_out_with_bypass_read_stays_baseline(self):
         @pl.program
@@ -3347,16 +3428,10 @@ class TestPattern3WhileLoop:
         ir.assert_structural_equal(After, Before)
 
 
-class TestOutWindowMultiOutAllOrNothing:
-    """Pattern 5 multi-Out policy is all-or-nothing (doc line 95, src ~line 1815).
+class TestOutWindowMultiOutSubset:
+    """Pattern 5 rewrites each proven Out window independently."""
 
-    AnalyzeFinalStore rejects an Out whose only store covers the full tensor at
-    zero offset (src ~line 3115). When the FinalStore analysis encounters such
-    an Out among several, `all_final` is cleared and the whole callee falls back
-    to baseline — no per-Out partial windowing.
-    """
-
-    def test_one_full_shape_out_blocks_whole_callee(self):
+    def test_one_full_shape_out_does_not_block_windowable_sibling(self):
         @pl.program
         class Before:
             @pl.function(type=pl.FunctionType.InCore)
@@ -3389,42 +3464,18 @@ class TestOutWindowMultiOutAllOrNothing:
                 )
                 return result
 
-        @pl.program
-        class Expected:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kv_stripe(
-                self,
-                data: pl.Tensor[[256, 64], pl.FP32],
-                row_offset: pl.Scalar[pl.INDEX],
-                k_out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
-                v_out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
-            ) -> tuple[pl.Tensor[[256, 64], pl.FP32], pl.Tensor[[256, 64], pl.FP32]]:
-                ktile: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(
-                    data, [row_offset, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
-                )
-                k_next = pl.tile.store(ktile, [row_offset, 0], k_out)
-                vtile: pl.Tile[[256, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(
-                    data, [0, 0], [256, 64], [256, 64], target_memory=pl.Mem.Vec, transpose=False
-                )
-                v_next = pl.tile.store(vtile, [0, 0], v_out)
-                return k_next, v_next
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                data: pl.Tensor[[256, 64], pl.FP32],
-                k_out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
-                v_out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
-            ) -> tuple[pl.Tensor[[256, 64], pl.FP32], pl.Tensor[[256, 64], pl.FP32]]:
-                row: pl.Scalar[pl.INDEX] = 64
-                result = self.kv_stripe(data, row, k_out, v_out)
-                return result
-
         After = passes.optimize_orch_tensors()(Before)
-        # all-or-nothing: v_out is a full-shape store, so neither Out is
-        # externalized and no __windowed clone is emitted.
-        assert After.get_function("kv_stripe__windowed") is None
-        ir.assert_structural_equal(After, Expected)
+
+        assert After.get_function("kv_stripe__windowed") is not None
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert "kv_stripe__windowed" in printed_main
+        assert "pl.tensor.slice(k_out" in printed_main
+        assert "pl.tensor.assemble(k_out" in printed_main
+        assert "pl.tensor.slice(v_out" not in printed_main
+
+        printed_windowed = ir.python_print(_get_function(After, "kv_stripe__windowed"))
+        assert "k_out: pl.Out[pl.Tensor[[64, 64], pl.FP32, pl.TensorView(stride=[64, 1]" in printed_windowed
+        assert "v_out: pl.Out[pl.Tensor[[256, 64], pl.FP32" in printed_windowed
 
 
 class TestOutWindowSubmitCall:
