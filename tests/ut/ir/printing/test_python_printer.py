@@ -1347,6 +1347,11 @@ def test_int64_const_roundtrips_in_expression_context():
 def _make_program_with_shape_dim(dim: ir.Expr) -> ir.Program:
     """Build a one-load program whose tile shape carries ``dim`` as dim 0."""
     span = ir.Span.unknown()
+    # Wrap composite dims in DimExpr so print→parse round-trips are identity.
+    # Bare Vars and ConstInts are not wrapped; composite expressions (Add, Mul,
+    # FloorDiv, …) are wrapped to match what the parser produces.
+    if not isinstance(dim, (ir.Var, ir.ConstInt, ir.ConstFloat, ir.ConstBool)):
+        dim = ir.dim_expr(dim, span)
     c64 = ir.ConstInt(64, DataType.INT64, span)
     input_x = ir.Var("input_x", ir.TensorType([64, 64], DataType.FP32), span)
     output_x = ir.Var("output_x", ir.TensorType([64, 64], DataType.FP32), span)
