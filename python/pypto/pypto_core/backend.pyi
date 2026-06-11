@@ -16,6 +16,14 @@ class BackendType:
 
     Ascend910B: BackendType
     Ascend950: BackendType
+    @property
+    def name(self) -> str:
+        """The member name (e.g. ``"Ascend910B"``)."""
+        ...
+    @property
+    def value(self) -> int:
+        """The underlying integer value of the enum member."""
+        ...
 
 class Mem:
     """Memory component."""

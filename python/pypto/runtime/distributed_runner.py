@@ -124,22 +124,36 @@ def _assemble_chip_callables(compiled: DistributedCompiledProgram) -> tuple[dict
     it works identically for a freshly-compiled program and one reconstructed via
     :meth:`DistributedCompiledProgram.from_dir` (the ``runtime_dir`` replay path).
     """
-    from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
-
     chip_callables: dict[str, Any] = {}
-    runtime_name = "tensormap_and_ringbuffer"
+    runtime_name: str | None = None
     next_levels_dir = compiled.output_dir / "next_levels"
     if next_levels_dir.is_dir():
         for chip_dir in sorted(next_levels_dir.iterdir()):
-            if (chip_dir / "kernel_config.py").exists():
-                chip_callable, runtime_name, _ = compile_and_assemble(chip_dir, compiled.platform)
-                chip_callables[chip_dir.name] = chip_callable
+            if not (chip_dir / "kernel_config.py").exists():
+                continue
+            # Imported lazily — and only once there is a real chip to build — so
+            # the "no chip-level tasks" error path below stays usable without the
+            # heavy device_runner → simpler toolchain import.
+            from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
+
+            chip_callable, chip_runtime, _ = compile_and_assemble(chip_dir, compiled.platform)
+            chip_callables[chip_dir.name] = chip_callable
+            if runtime_name is None:
+                runtime_name = chip_runtime
+            elif chip_runtime != runtime_name:
+                raise RuntimeError(
+                    f"Inconsistent runtime across next_levels/ sub-builds in {next_levels_dir}: "
+                    f"{runtime_name!r} (earlier chip) vs {chip_runtime!r} (chip {chip_dir.name!r}). "
+                    f"All chip-level tasks in one distributed build must share a single runtime."
+                )
 
     if not chip_callables:
         raise RuntimeError(
             f"No chip-level tasks found in {next_levels_dir} (expected one or more "
             f"next_levels/<name>/ sub-builds each containing a kernel_config.py)."
         )
+    # Non-empty chip_callables guarantees the loop set runtime_name at least once.
+    assert runtime_name is not None
     return chip_callables, runtime_name
 
 
@@ -459,7 +473,7 @@ def execute_distributed(
 
 def execute_distributed_compiled(
     output_dir: str | Path,
-    args: Sequence[torch.Tensor | DeviceTensor],
+    args: Sequence[torch.Tensor | DeviceTensor | ctypes._SimpleCData],
     config: Any = None,
     *,
     platform: str | None = None,

@@ -350,9 +350,7 @@ def _fake_run_ptoas_by_stem(_ptoas_bin: str, pto_path: Path, out_cpp: Path) -> N
 
 def test_l3_rebuilds_each_rank_under_next_levels(tmp_path: Path, monkeypatch) -> None:
     """Stale .pto in any next_levels/{rank}/ptoas is rebuilt and spliced per rank."""
-    work_dir = _setup_l3_build_output(
-        tmp_path, {"rank0": [("aiv", "foo")], "rank1": [("aic", "bar")]}
-    )
+    work_dir = _setup_l3_build_output(tmp_path, {"rank0": [("aiv", "foo")], "rank1": [("aic", "bar")]})
     later = time.time() + 10
     os.utime(work_dir / "next_levels" / "rank0" / "ptoas" / "foo.pto", (later, later))
     os.utime(work_dir / "next_levels" / "rank1" / "ptoas" / "bar.pto", (later, later))
@@ -375,9 +373,7 @@ def test_l3_rebuilds_each_rank_under_next_levels(tmp_path: Path, monkeypatch) ->
 
 def test_l3_skips_fresh_rank_pto(tmp_path: Path, monkeypatch) -> None:
     """A rank whose .pto is older than its intermediate cpp is left untouched."""
-    work_dir = _setup_l3_build_output(
-        tmp_path, {"rank0": [("aiv", "foo")], "rank1": [("aic", "bar")]}
-    )
+    work_dir = _setup_l3_build_output(tmp_path, {"rank0": [("aiv", "foo")], "rank1": [("aic", "bar")]})
     # Pre-create rank1's intermediate cpp and make it newer than bar.pto (fresh).
     (work_dir / "next_levels" / "rank1" / "ptoas" / "bar.cpp").write_text("// up to date\n")
     later, earlier = time.time() + 10, time.time() - 10

@@ -249,6 +249,8 @@ class DistributedCompiledProgram:
         Raises:
             FileNotFoundError: ``distributed_meta.json`` is absent (the directory
                 predates this feature or is not a distributed build).
+            ValueError: ``distributed_meta.json`` records a ``schema`` version
+                incompatible with this pypto build (the metadata format changed).
         """
         meta_path = Path(output_dir).resolve() / _DISTRIBUTED_META_FILENAME
         if not meta_path.exists():
@@ -258,6 +260,13 @@ class DistributedCompiledProgram:
                 f"build. Recompile via ir.compile() to refresh."
             )
         meta = json.loads(meta_path.read_text())
+        schema = meta.get("schema")
+        if schema != _META_SCHEMA:
+            raise ValueError(
+                f"Incompatible {_DISTRIBUTED_META_FILENAME} schema {schema!r} (expected "
+                f"{_META_SCHEMA}) in {meta_path}. The metadata was written by a different "
+                f"pypto version — recompile via ir.compile() to refresh."
+            )
         param_infos = [_param_info_from_dict(p) for p in meta["params"]]
         output_indices = [i for i, p in enumerate(param_infos) if p.direction == ParamDirection.Out]
         # ``return_types`` contents are never inspected at runtime — only the

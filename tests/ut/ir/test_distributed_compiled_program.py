@@ -179,16 +179,24 @@ def test_from_dir_does_not_clobber_debug_runner(compiled, tmp_path):
 
 def test_from_dir_missing_meta_raises(tmp_path):
     """A directory without distributed_meta.json raises with a recompile hint."""
-    with pytest.raises(FileNotFoundError, match="distributed_meta.json"):
+    with pytest.raises(FileNotFoundError, match=r"distributed_meta\.json"):
+        DistributedCompiledProgram.from_dir(tmp_path)
+
+
+def test_from_dir_incompatible_schema_raises(compiled, tmp_path):
+    """A distributed_meta.json written under a different schema version is rejected."""
+    meta_path = tmp_path / _DISTRIBUTED_META_FILENAME
+    meta = json.loads(meta_path.read_text())
+    meta["schema"] = meta["schema"] + 1  # simulate an incompatible future format
+    meta_path.write_text(json.dumps(meta))
+    with pytest.raises(ValueError, match="schema"):
         DistributedCompiledProgram.from_dir(tmp_path)
 
 
 def test_from_dir_overrides_platform_and_config(compiled, tmp_path):
     """Explicit platform / distributed_config override the persisted defaults."""
     dc = DistributedConfig(device_ids=[0, 1], block_dim=8)
-    reloaded = DistributedCompiledProgram.from_dir(
-        tmp_path, platform="a2a3", distributed_config=dc
-    )
+    reloaded = DistributedCompiledProgram.from_dir(tmp_path, platform="a2a3", distributed_config=dc)
     assert reloaded.platform == "a2a3"
     assert reloaded._distributed_config.device_ids == [0, 1]
     assert reloaded._distributed_config.block_dim == 8
