@@ -1556,6 +1556,126 @@ class TestOutWindowExternalizer:
         )
         assert "[out_row__ssa_v0 - row__ssa_v0 * 8 + 1, 0], q_next__ssa_v0" in printed_windowed
 
+    def test_aggregate_output_diagonal_writes_stay_baseline(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def diagonal_like(
+                self,
+                out: pl.Out[pl.Tensor[[4, 4], pl.FP32]],
+            ) -> pl.Tensor[[4, 4], pl.FP32]:
+                for i, (out_iter,) in pl.range(4, init_values=(out,)):
+                    tile: pl.Tile[[1, 1], pl.FP32] = pl.tile.full([1, 1], dtype=pl.FP32, value=1.0)
+                    out_next: pl.Tensor[[4, 4], pl.FP32] = pl.store(tile, [i, i], out_iter)
+                    out_rv = pl.yield_(out_next)
+                return out_rv
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                out: pl.Out[pl.Tensor[[4, 4], pl.FP32]],
+            ) -> pl.Tensor[[4, 4], pl.FP32]:
+                return self.diagonal_like(out)
+
+        After = _run_to_optimize_orch_tensors(Before)
+
+        assert After.get_function("diagonal_like__windowed") is None
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert "diagonal_like__windowed" not in printed_main
+
+    def test_aggregate_output_overlap_and_hole_stays_baseline(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def overlap_hole_like(
+                self,
+                out: pl.Out[pl.Tensor[[2, 2], pl.FP32]],
+            ) -> pl.Tensor[[2, 2], pl.FP32]:
+                for i, (out_iter,) in pl.range(1, init_values=(out,)):
+                    row_tile: pl.Tile[[1, 2], pl.FP32] = pl.tile.full([1, 2], dtype=pl.FP32, value=1.0)
+                    col_tile: pl.Tile[[2, 1], pl.FP32] = pl.tile.full([2, 1], dtype=pl.FP32, value=2.0)
+                    out_next: pl.Tensor[[2, 2], pl.FP32] = pl.store(row_tile, [0, 0], out_iter)
+                    out_next_2: pl.Tensor[[2, 2], pl.FP32] = pl.store(col_tile, [0, 0], out_next)
+                    out_rv = pl.yield_(out_next_2)
+                return out_rv
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                out: pl.Out[pl.Tensor[[2, 2], pl.FP32]],
+            ) -> pl.Tensor[[2, 2], pl.FP32]:
+                return self.overlap_hole_like(out)
+
+        After = _run_to_optimize_orch_tensors(Before)
+
+        assert After.get_function("overlap_hole_like__windowed") is None
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert "overlap_hole_like__windowed" not in printed_main
+
+    def test_aggregate_output_windows_direct_outputs_when_sibling_has_nested_loop(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def rope_like(
+                self,
+                all_q: pl.Out[pl.Tensor[[128, 128], pl.BF16]],
+                k_cache: pl.Out[pl.Tensor[[1024, 128], pl.BF16]],
+                v_cache: pl.Out[pl.Tensor[[1024, 128], pl.BF16]],
+                q_proj: pl.Tensor[[1, 5120], pl.FP32],
+                ki_chunk: pl.Scalar[pl.INDEX],
+                slot_block: pl.Scalar[pl.INDEX],
+                slot_offset: pl.Scalar[pl.INDEX],
+            ) -> tuple[
+                pl.Tensor[[128, 128], pl.BF16],
+                pl.Tensor[[1024, 128], pl.BF16],
+                pl.Tensor[[1024, 128], pl.BF16],
+            ]:
+                for ki, (all_q_iter, k_iter, v_iter) in pl.range(
+                    ki_chunk, ki_chunk + 8, init_values=(all_q, k_cache, v_cache)
+                ):
+                    cache_row: pl.Scalar[pl.INDEX] = (slot_block * 8 + ki) * 128 + slot_offset
+                    k_lo: pl.Tile[[1, 64], pl.BF16] = pl.tile.full([1, 64], dtype=pl.BF16, value=1.0)
+                    k_hi: pl.Tile[[1, 64], pl.BF16] = pl.tile.full([1, 64], dtype=pl.BF16, value=2.0)
+                    v_tile: pl.Tile[[1, 128], pl.BF16] = pl.tile.full([1, 128], dtype=pl.BF16, value=3.0)
+                    k_next: pl.Tensor[[1024, 128], pl.BF16] = pl.store(k_lo, [cache_row, 0], k_iter)
+                    k_next_2: pl.Tensor[[1024, 128], pl.BF16] = pl.store(k_hi, [cache_row, 64], k_next)
+                    v_next: pl.Tensor[[1024, 128], pl.BF16] = pl.store(v_tile, [cache_row, 0], v_iter)
+                    for qi, (all_q_inner,) in pl.range(5, init_values=(all_q_iter,)):
+                        q_col: pl.Scalar[pl.INDEX] = (ki * 5 + qi) * 128
+                        q_tile_fp32: pl.Tile[[1, 128], pl.FP32] = pl.tile.load(
+                            q_proj, [0, q_col], [1, 128], [1, 128]
+                        )
+                        q_tile: pl.Tile[[1, 128], pl.BF16] = pl.tile.cast(q_tile_fp32, target_type=pl.BF16)
+                        all_q_next: pl.Tensor[[128, 128], pl.BF16] = pl.store(
+                            q_tile, [ki * 16 + qi, 0], all_q_inner
+                        )
+                        all_q_rv = pl.yield_(all_q_next)
+                    all_q_out, k_out, v_out = pl.yield_(all_q_rv, k_next_2, v_next)
+                return all_q_out, k_out, v_out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                all_q: pl.Out[pl.Tensor[[128, 128], pl.BF16]],
+                k_cache: pl.Out[pl.Tensor[[1024, 128], pl.BF16]],
+                v_cache: pl.Out[pl.Tensor[[1024, 128], pl.BF16]],
+                q_proj: pl.Tensor[[1, 5120], pl.FP32],
+            ) -> tuple[
+                pl.Tensor[[128, 128], pl.BF16],
+                pl.Tensor[[1024, 128], pl.BF16],
+                pl.Tensor[[1024, 128], pl.BF16],
+            ]:
+                return self.rope_like(all_q, k_cache, v_cache, q_proj, 0, 0, 0)
+
+        After = _run_to_optimize_orch_tensors(Before)
+
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert "rope_like__windowed" in printed_main
+        assert "pl.tensor.slice(k_cache" in printed_main
+        assert "pl.tensor.slice(v_cache" in printed_main
+        assert "pl.tensor.slice(q_proj" in printed_main
+        assert "pl.tensor.slice(all_q" not in printed_main
+
     def test_aggregate_output_preserves_existing_pure_input_window(self):
         @pl.program
         class Before:
@@ -3572,7 +3692,9 @@ class TestOutWindowSubmitCall:
         assert "kernel_stripe__windowed" in printed_main
         assert "consume__windowed" not in printed_main
         assert "pl.tensor.slice(out" in printed_main
-        assert "pl.submit(consume, _submit_tmp__assembled_0, sink" in printed_main
+        assert "pl.Scalar[pl.TASK_ID] = _submit_tmp__windowed[1]" in printed_main
+        assert "pl.submit(consume, _submit_tmp__assembled_" in printed_main
+        assert "deps=[tid]" in printed_main
         assert "pl.submit(consume, out, sink" not in printed_main
 
 
