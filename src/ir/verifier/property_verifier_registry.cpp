@@ -88,6 +88,7 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   // rank asymmetry in LowerTransposeLoadParamLayout) is fixed, so it does not
   // hard-fail that compile path.
   Register(IRProperty::AssignTypeSymmetry, CreateAssignTypeSymmetryPropertyVerifier);
+  Register(IRProperty::ReturnParamsExplicit, CreateReturnParamsExplicitPropertyVerifier);
 }
 
 void PropertyVerifierRegistry::Register(IRProperty prop, std::function<PropertyVerifierPtr()> factory) {

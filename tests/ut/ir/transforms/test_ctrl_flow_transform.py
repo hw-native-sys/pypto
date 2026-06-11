@@ -1773,8 +1773,10 @@ def test_pipeline_integration():
                 else:
                     x_new = pl.add(x_iter, x_iter)
                     phi = pl.yield_(x_new)
-                x_rv = pl.yield_(phi)
-            return x_rv
+                x_rv = pl.yield_(phi)  # noqa: F841
+            # ScopeOutliner canonicalizes the InCore return to the param Var the
+            # result writes through (IRProperty::ReturnParamsExplicit, #1702).
+            return x_0
 
         @pl.function(type=pl.FunctionType.Orchestration)
         def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:

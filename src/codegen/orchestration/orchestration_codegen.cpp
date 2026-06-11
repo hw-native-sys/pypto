@@ -2767,11 +2767,14 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // Find the Out/InOut parameter that the callee's ReturnStmt actually
     // returns. When the kernel declares multiple Out params (e.g., a real
     // result plus per-block GM scratch tensors used by a pl.spmd-dispatched
-    // mixed kernel), out_indices[0] is the scratch buffer and aliasing the
-    // call site SSA to it would route every downstream consumer into the
-    // scratch instead of the actual result. Fall back to out_indices[0] only
-    // when the return cannot be traced back to a Param.
+    // mixed kernel), guessing wrong silently routes every downstream consumer
+    // into the wrong buffer (#1702). Pipeline IR satisfies ReturnParamsExplicit
+    // so the trace is a pointer-identity lookup; the fallback is reachable
+    // only for parsed IR with a single output, where it is unambiguous.
     auto returned_idx = FindReturnedParamIndex(callee, program_);
+    INTERNAL_CHECK_SPAN(returned_idx.has_value() || out_indices.size() == 1, call->span_)
+        << "Internal error: cannot map return of callee '" << callee->name_ << "' to one of its "
+        << out_indices.size() << " Out/InOut params (no traceable ReturnStmt); aliasing would be a guess";
     size_t param_idx = returned_idx.value_or(out_indices[0]);
     EmitTensorAlias(result_var, var_name, call, param_idx);
   }

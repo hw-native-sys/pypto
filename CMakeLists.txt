@@ -202,6 +202,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/utils/normalize_stmt_structure.cpp
     src/ir/transforms/utils/op_predicates.cpp
     src/ir/transforms/utils/parent_stmt_analysis.cpp
+    src/ir/transforms/utils/return_lineage_utils.cpp
     src/ir/transforms/utils/stmt_dependency_analysis.cpp
     src/ir/transforms/utils/transform_utils.cpp
     src/ir/transforms/utils/wrapper_call_utils.cpp
@@ -226,6 +227,7 @@ set(PYPTO_SOURCES
     src/ir/verifier/verify_out_param_pass.cpp
     src/ir/verifier/verify_array_not_escaped.cpp
     src/ir/verifier/verify_inout_use.cpp
+    src/ir/verifier/verify_return_params_explicit.cpp
     src/ir/verifier/verify_pipeline_loop_valid.cpp
     src/ir/verifier/verify_manual_deps_on_submit_only.cpp
     src/ir/verifier/verify_pipeline_resolved.cpp

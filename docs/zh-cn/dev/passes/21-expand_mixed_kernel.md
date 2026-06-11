@@ -194,6 +194,12 @@ program_expanded = expand_pass(program)
 
 **拆分后的循环状态修复**：在构建 AIC/AIV 函数体时，Pass 会先保留共享的控制流骨架，因此某一侧可能暂时留下多余的 iter_args、缺失的 init value 定义，或引用已被裁剪分支局部值的 yield。Pass 会先在 DCE 前按固定顺序修复这些情况，再在 DCE 后做一次循环状态归一化，因为某些仅用于过渡的共享别名会在 DCE 后消失，进而让相应 iter_arg 变成真正可删除。最后再运行一次 DCE，清理第二次裁剪后暴露出的 init-value 链。
 
+**Group 包装函数的参数化返回**：新建的 Group 包装函数在所有
+返回位置都能追踪到参数回写（经 `return_lineage::ReturnedParamIndices`）时，
+直接返回自身参数——AIV 调用作为纯 `EvalStmt` 发出，包装函数直接
+`return out_0`，从而维持 `ReturnParamsExplicit` 不变量。只有当某个返回位置
+不是参数回写时，才回退到旧的 `result = aiv_call(); return result` 形式。
+
 ## 示例 1：InCore 没有已有 Group 调用者
 
 当 Orchestration 直接调用 InCore 时，创建新的 Group 包装函数。
@@ -248,8 +254,8 @@ class After:
     @pl.function(type=pl.FunctionType.Group)
     def compute_incore_0(self, x, y, out_0) -> pl.Tensor[[16, 128], pl.FP32]:
         self.compute_incore_0_aic(x, y, out_0)
-        result = self.compute_incore_0_aiv(x, y, out_0)
-        return result
+        self.compute_incore_0_aiv(x, y, out_0)
+        return out_0  # param-return: the AIV result writes through out_0
 
     @pl.function(type=pl.FunctionType.Orchestration)
     def main(self, x, y) -> pl.Tensor[[16, 128], pl.FP32]:

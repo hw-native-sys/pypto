@@ -10,7 +10,9 @@
  */
 
 #include <algorithm>
+#include <cstddef>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -26,6 +28,7 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -113,6 +116,59 @@ std::vector<int> BuildReturnToParamMapping(const FunctionPtr& func) {
     mapping.push_back(lookup(var_to_out_param, var.get()));
   }
   return mapping;
+}
+
+// Rewrite tensor return values to the param Var each one writes through
+// (pointer identity). Orchestration codegen aliases call results to their
+// source args via this mapping; explicit param returns make it a lookup
+// instead of a heuristic re-derivation that can mis-bind multi-output
+// kernels (#1702, #1573, #1693). Returns nullptr when nothing changes.
+FunctionPtr CanonicalizeReturnValues(const FunctionPtr& func, const ProgramPtr& program) {
+  if (!func || !func->body_) return nullptr;
+
+  auto ret_to_param = return_lineage::ReturnedParamIndices(func, program);
+  if (ret_to_param.empty()) return nullptr;
+
+  // The topmost ReturnStmt is not always the trailing statement of a
+  // top-level SeqStmts (e.g. AIV kernels keep theirs inside the split body),
+  // so rewrite it wherever it sits.
+  class ReturnRewriter : public IRMutator {
+   public:
+    ReturnRewriter(const FunctionPtr& func, const std::vector<std::optional<size_t>>& ret_to_param)
+        : func_(func), ret_to_param_(ret_to_param) {}
+    bool changed = false;
+
+   protected:
+    StmtPtr VisitStmt_(const ReturnStmtPtr& op) override {
+      if (done_ || op->value_.empty() || ret_to_param_.size() != op->value_.size()) return op;
+      done_ = true;
+      std::vector<ExprPtr> new_values = op->value_;
+      for (size_t i = 0; i < new_values.size(); ++i) {
+        if (!ret_to_param_[i]) continue;
+        const auto& param =
+            func_->params_[ret_to_param_[i].value()];  // NOLINT(bugprone-unchecked-optional-access)
+        if (!AsTensorTypeLike(param->GetType())) continue;
+        if (new_values[i].get() == param.get()) continue;
+        new_values[i] = param;
+        changed = true;
+      }
+      if (!changed) return op;
+      return std::make_shared<ReturnStmt>(new_values, op->span_);
+    }
+
+   private:
+    const FunctionPtr& func_;
+    const std::vector<std::optional<size_t>>& ret_to_param_;
+    bool done_ = false;
+  };
+
+  ReturnRewriter rewriter(func, ret_to_param);
+  auto new_body = rewriter.VisitStmt(func->body_);
+  if (!rewriter.changed) return nullptr;
+
+  auto new_func = MutableCopy(func);
+  new_func->body_ = new_body;
+  return new_func;
 }
 
 std::vector<int> CollectOutIndices(const FunctionPtr& func) {
@@ -313,15 +369,24 @@ Pass NormalizeReturnOrder() {
     bool modified = false;
 
     for (const auto& [gvar, func] : program->functions_) {
-      if (IsInCoreType(func->func_type_)) {
-        auto perm = ComputeReturnPermutation(func);
+      const bool is_wrapper =
+          func->func_type_ == FunctionType::Group || func->func_type_ == FunctionType::Spmd;
+      if (IsInCoreType(func->func_type_) || is_wrapper) {
+        // Step A0: make every tensor return an explicit param reference.
+        FunctionPtr current = func;
+        if (auto canonical = CanonicalizeReturnValues(current, program)) {
+          current = canonical;
+          modified = true;
+        }
+        std::vector<int> perm;
+        if (IsInCoreType(current->func_type_)) perm = ComputeReturnPermutation(current);
         if (!perm.empty()) {
-          auto new_func = ReorderReturns(func, perm);
-          permutations[func->name_] = std::move(perm);
+          auto new_func = ReorderReturns(current, perm);
+          permutations[current->name_] = std::move(perm);
           functions.push_back(new_func);
           modified = true;
         } else {
-          functions.push_back(func);
+          functions.push_back(current);
         }
       } else {
         functions.push_back(func);

@@ -84,8 +84,8 @@ class TestNonParallelCodeBetweenChunks:
                     2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
                 ):
                     x2: pl.Tensor[[8, 64], pl.FP32] = pl.tensor.adds(x1, 1.0)
-                    x3: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x2)
-                return x3
+                    x3: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x2)  # noqa: F841
+                return x0
 
             @pl.function(type=pl.FunctionType.InCore)
             def main_incore_1(self, x0: pl.Tensor[[8, 64], pl.FP32]) -> pl.Tensor[[8, 64], pl.FP32]:
@@ -102,8 +102,8 @@ class TestNonParallelCodeBetweenChunks:
                     2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
                 ):
                     x2: pl.Tensor[[8, 64], pl.FP32] = pl.tensor.add(x1, y0)
-                    x3: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x2)
-                return x3
+                    x3: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x2)  # noqa: F841
+                return x0
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(self, x0: pl.Tensor[[8, 64], pl.FP32]) -> pl.Tensor[[8, 64], pl.FP32]:
@@ -112,7 +112,7 @@ class TestNonParallelCodeBetweenChunks:
                         2, init_values=(x1,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
                     ):
                         x3: pl.Tensor[[8, 64], pl.FP32] = self.main_incore_0(x2)
-                        x4: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x3)
+                        x4: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x3)  # noqa: F841
                     y0: pl.Tensor[[8, 64], pl.FP32] = self.main_incore_1(x4)
                     for j0, (x5,) in pl.parallel(
                         2, init_values=(x4,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
@@ -158,8 +158,8 @@ class TestNonParallelCodeBetweenChunks:
                     2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
                 ):
                     x2: pl.Tensor[[8, 64], pl.FP32] = pl.tensor.adds(x1, 1.0)
-                    x3: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x2)
-                return x3
+                    x3: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x2)  # noqa: F841
+                return x0
 
             @pl.function(type=pl.FunctionType.InCore)
             def main_incore_1(
@@ -171,8 +171,8 @@ class TestNonParallelCodeBetweenChunks:
                     x2: pl.Tensor[[8, 64], pl.FP32] = pl.tensor.matmul(
                         x1, w0, a_trans=False, b_trans=False, c_matrix_nz=False
                     )
-                    x3: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x2)
-                return x3
+                    x3: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x2)  # noqa: F841
+                return x0
 
             @pl.function(type=pl.FunctionType.InCore)
             def main_incore_2(self, x0: pl.Tensor[[8, 64], pl.FP32]) -> pl.Tensor[[8, 64], pl.FP32]:
@@ -180,8 +180,8 @@ class TestNonParallelCodeBetweenChunks:
                     2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
                 ):
                     x2: pl.Tensor[[8, 64], pl.FP32] = pl.tensor.adds(x1, 1.0)
-                    x3: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x2)
-                return x3
+                    x3: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x2)  # noqa: F841
+                return x0
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(
@@ -194,7 +194,7 @@ class TestNonParallelCodeBetweenChunks:
                         2, init_values=(x1,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
                     ):
                         x3: pl.Tensor[[8, 64], pl.FP32] = self.main_incore_0(x2)
-                        x4: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x3)
+                        x4: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x3)  # noqa: F841
                     x5: pl.Tensor[[8, 64], pl.FP32] = self.main_incore_1(x4, w0)
                     for j0, (x6,) in pl.parallel(
                         2, init_values=(x5,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
@@ -238,8 +238,8 @@ class TestNonParallelCodeBetweenChunks:
                     2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
                 ):
                     x2: pl.Tensor[[8, 64], pl.FP32] = pl.tensor.adds(x1, 1.0)
-                    x3: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x2)
-                return x3
+                    x3: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x2)  # noqa: F841
+                return x0
 
             @pl.function(type=pl.FunctionType.InCore)
             def main_incore_1(self, x0: pl.Tensor[[8, 64], pl.FP32]) -> pl.Tensor[[8, 64], pl.FP32]:
@@ -256,8 +256,8 @@ class TestNonParallelCodeBetweenChunks:
                     2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
                 ):
                     x2: pl.Tensor[[8, 64], pl.FP32] = pl.tensor.add(x1, y0)
-                    x3: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x2)
-                return x3
+                    x3: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x2)  # noqa: F841
+                return x0
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(self, x0: pl.Tensor[[8, 64], pl.FP32]) -> pl.Tensor[[8, 64], pl.FP32]:
@@ -266,7 +266,7 @@ class TestNonParallelCodeBetweenChunks:
                         2, init_values=(x1,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
                     ):
                         x3: pl.Tensor[[8, 64], pl.FP32] = self.main_incore_0(x2)
-                        x4: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x3)
+                        x4: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x3)  # noqa: F841
                     y0: pl.Tensor[[8, 64], pl.FP32] = self.main_incore_1(x4)
                     for j0, (x5,) in pl.parallel(
                         2, init_values=(x4,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
@@ -312,8 +312,8 @@ class TestNestedForStmtRecursion:
                     2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
                 ):
                     x2: pl.Tensor[[8, 64], pl.FP32] = pl.tensor.adds(x1, 1.0)
-                    x3: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x2)
-                return x3
+                    x3: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x2)  # noqa: F841
+                return x0
 
             @pl.function(type=pl.FunctionType.InCore)
             def main_incore_1(self, x0: pl.Tensor[[8, 64], pl.FP32]) -> pl.Tensor[[8, 64], pl.FP32]:
@@ -330,8 +330,8 @@ class TestNestedForStmtRecursion:
                     2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
                 ):
                     x2: pl.Tensor[[8, 64], pl.FP32] = pl.tensor.add(x1, y0)
-                    x3: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x2)
-                return x3
+                    x3: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x2)  # noqa: F841
+                return x0
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(self, x0: pl.Tensor[[8, 64], pl.FP32]) -> pl.Tensor[[8, 64], pl.FP32]:
@@ -385,8 +385,8 @@ class TestNestedForStmtRecursion:
                     2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
                 ):
                     x2: pl.Tensor[[8, 64], pl.FP32] = pl.tensor.adds(x1, 1.0)
-                    x3: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x2)
-                return x3
+                    x3: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x2)  # noqa: F841
+                return x0
 
             @pl.function(type=pl.FunctionType.InCore)
             def main_incore_1(self, x0: pl.Tensor[[8, 64], pl.FP32]) -> pl.Tensor[[8, 64], pl.FP32]:
@@ -400,7 +400,7 @@ class TestNestedForStmtRecursion:
                         2, init_values=(x1,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
                     ):
                         x3: pl.Tensor[[8, 64], pl.FP32] = self.main_incore_0(x2)
-                        x4: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x3)
+                        x4: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x3)  # noqa: F841
                     x5: pl.Tensor[[8, 64], pl.FP32] = self.main_incore_1(x4)
                     x6: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x5)
                 return x6
@@ -437,8 +437,8 @@ class TestNestedForStmtRecursion:
                     2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
                 ):
                     x2: pl.Tensor[[8, 64], pl.FP32] = pl.tensor.adds(x1, 1.0)
-                    x3: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x2)
-                return x3
+                    x3: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x2)  # noqa: F841
+                return x0
 
             @pl.function(type=pl.FunctionType.InCore)
             def main_incore_1(self, x0: pl.Tensor[[8, 64], pl.FP32]) -> pl.Tensor[[8, 64], pl.FP32]:
@@ -453,8 +453,8 @@ class TestNestedForStmtRecursion:
                     2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
                 ):
                     x2: pl.Tensor[[8, 64], pl.FP32] = pl.tensor.adds(x1, 1.0)
-                    x3: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x2)
-                return x3
+                    x3: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x2)  # noqa: F841
+                return x0
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(self, x0: pl.Tensor[[8, 64], pl.FP32]) -> pl.Tensor[[8, 64], pl.FP32]:
@@ -463,7 +463,7 @@ class TestNestedForStmtRecursion:
                         2, init_values=(x1,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
                     ):
                         x3: pl.Tensor[[8, 64], pl.FP32] = self.main_incore_0(x2)
-                        x4: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x3)
+                        x4: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x3)  # noqa: F841
                     x5: pl.Tensor[[8, 64], pl.FP32] = self.main_incore_1(x4)
                     for j0, (x6,) in pl.parallel(
                         2, init_values=(x5,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
@@ -504,8 +504,8 @@ class TestNestedForStmtRecursion:
                 for b0, (x1,) in pl.range(0, 8, 4, init_values=(x0,)):
                     x2: pl.Tensor[[8, 64], pl.FP32] = pl.tensor.adds(x1, 1.0)
                     x3: pl.Tensor[[8, 64], pl.FP32] = pl.tensor.muls(x2, 2.0)
-                    x4: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x3)
-                return x4
+                    x4: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x3)  # noqa: F841
+                return x0
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(self, x0: pl.Tensor[[8, 64], pl.FP32]) -> pl.Tensor[[8, 64], pl.FP32]:
@@ -543,8 +543,8 @@ class TestHostSideTailOps:
                     2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
                 ):
                     x2: pl.Tensor[[4], pl.FP32] = pl.tensor.adds(x1, 1.0)
-                    x3: pl.Tensor[[4], pl.FP32] = pl.yield_(x2)
-                return x3
+                    x3: pl.Tensor[[4], pl.FP32] = pl.yield_(x2)  # noqa: F841
+                return x0
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(self, x0: pl.Tensor[[4], pl.FP32]) -> pl.Tensor[[8], pl.FP32]:
@@ -555,7 +555,7 @@ class TestHostSideTailOps:
                     2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
                 ):
                     x2: pl.Tensor[[4], pl.FP32] = self.main_incore_0(x1)
-                    x3: pl.Tensor[[4], pl.FP32] = pl.yield_(x2)
+                    x3: pl.Tensor[[4], pl.FP32] = pl.yield_(x2)  # noqa: F841
                 out_1: pl.Tensor[[8], pl.FP32] = pl.tensor.assemble(out_0, x3, [0])
                 return out_1
 

@@ -166,8 +166,8 @@ def test_v2c_boundary_uses_nz_layout_on_a2a3():
             out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
         ) -> pl.Tensor[[16, 64], pl.FP32]:
             self.main_incore_0_aic(x, y, out_0)
-            result: pl.Tensor[[16, 64], pl.FP32] = self.main_incore_0_aiv(x, y, out_0)
-            return result
+            self.main_incore_0_aiv(x, y, out_0)
+            return out_0
 
     After = _run_pipeline(Before)
     ir.assert_structural_equal(After, Expected)
@@ -263,8 +263,8 @@ def test_c2v_boundary_preserves_vec_pop_layout_on_a2a3():
             out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
         ) -> pl.Tensor[[16, 64], pl.FP32]:
             self.main_incore_0_aic(x, y, out_0)
-            result: pl.Tensor[[16, 64], pl.FP32] = self.main_incore_0_aiv(x, y, out_0)
-            return result
+            self.main_incore_0_aiv(x, y, out_0)
+            return out_0
 
     After = _run_pipeline(Before)
     ir.assert_structural_equal(After, Expected)
@@ -371,8 +371,8 @@ def test_gm_mediated_cross_lane_store_load_gets_handshake_on_a2a3():
             out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
         ) -> pl.Tensor[[16, 64], pl.FP32]:
             self.gm_relay_aic(x, y, scratch, out)
-            result: pl.Tensor[[16, 64], pl.FP32] = self.gm_relay_aiv(x, y, scratch, out)
-            return result
+            self.gm_relay_aiv(x, y, scratch, out)
+            return out
 
     After = _run_pipeline(Before)
     ir.assert_structural_equal(After, Expected)

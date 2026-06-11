@@ -48,7 +48,9 @@ class InOutUseValidPropertyVerifierImpl : public PropertyVerifier {
 
     for (const auto& [global_var, func] : program->functions_) {
       if (!func || !func->body_) continue;
-      if (func->func_type_ == FunctionType::Group) continue;
+      // Group/Spmd wrappers return their params explicitly (the inner call
+      // wrote them in place); the InOut-use discipline does not apply there.
+      if (func->func_type_ == FunctionType::Group || func->func_type_ == FunctionType::Spmd) continue;
       auto func_diags = stmt_dep::CollectInOutUseDisciplineDiagnostics(func->body_, program);
       // NOTE: cannot use vector::insert with make_move_iterator here —
       // Diagnostic holds a Span with const members, so its move-assignment is

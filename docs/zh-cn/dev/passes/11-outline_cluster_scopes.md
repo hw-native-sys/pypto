@@ -40,6 +40,12 @@ program_outlined = outline_pass(program)
 
 **命名规则**：`{原函数名}_cluster_{计数器}`（例如 `main_cluster_0`）
 
+**参数化显式返回**：与 `OutlineIncoreScopes` 相同，只要某个
+tensor 输出经由参数回写，外提的 Group/Spmd 函数就返回自身参数——store 目标
+直接返回参数，其余输出通过共享的 `return_lineage` 工具追踪；只有 kernel 内
+部分配的输出保留其 SSA 值。这维持 `ReturnParamsExplicit` 不变量，使编排代
+码生成按指针同一性建立返回值到实参的映射。
+
 ## 示例
 
 **之前**：

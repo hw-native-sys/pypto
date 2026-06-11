@@ -48,6 +48,12 @@ program_outlined = outline_pass(program)
    - 每个输出变量对应一个 AssignStmt
 6. **添加到程序**：将提取的函数添加到程序的函数列表中
 
+**参数化显式返回**：只要某个 tensor 输出是经由参数回写
+的，外提函数就返回自身的参数而非 SSA 结果变量——store 目标输出直接返回对应
+参数，其余输出通过共享的 `return_lineage` 工具追踪。kernel 内部分配的输出
+保留其 SSA 值。这使编排代码生成只需按指针同一性查表即可建立返回值到参数的
+映射（`ReturnParamsExplicit` 不变量）。
+
 **命名规则**：
 
 - 默认：`{原函数名}_incore_{计数器}`（如 `main_incore_0`、`main_incore_1`）
@@ -113,7 +119,7 @@ class After:
         tile_sq = pl.mul(tile, tile)
         result_tile = tile_sq + 1
         result = pl.store(result_tile, [0], x)
-        return result
+        return x  # store target: returns the param, not `result`
 ```
 
 ### 多输出
@@ -144,7 +150,7 @@ def main_incore_0(self, a, b, out):
     c_tile = pl.add(a_tile, b_tile)
     out_a = pl.store(c_tile, [0], out)
     out_b = pl.mul(c_tile, 2.0)
-    return (out_a, out_b)
+    return (out, out_b)  # out_a → param `out`; out_b is kernel-local, kept as-is
 ```
 
 ## 实现

@@ -412,6 +412,19 @@ PropertyVerifierPtr CreateCommDomainScopesMaterializedPropertyVerifier();
  */
 PropertyVerifierPtr CreateAssignTypeSymmetryPropertyVerifier();
 
+/**
+ * @brief Create a verifier for IRProperty::ReturnParamsExplicit
+ *
+ * Checks every InCore/Group/Spmd function: each tensor return value that is a
+ * param writeback must reference the param by pointer identity (not an SSA
+ * alias of it), and tensor-returning functions must carry a ReturnStmt.
+ * Kernel-allocated tensors (untraceable to any param) and scalars are exempt.
+ * Keeps orchestration return->arg aliasing a lookup (#1702).
+ *
+ * @return Shared pointer to ReturnParamsExplicit PropertyVerifier
+ */
+PropertyVerifierPtr CreateReturnParamsExplicitPropertyVerifier();
+
 }  // namespace ir
 }  // namespace pypto
 

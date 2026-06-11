@@ -37,7 +37,8 @@ class TestNormalizeReturnOrder:
     """Tests for the NormalizeReturnOrder pass."""
 
     def test_swapped_returns_reordered(self):
-        """Two Out params with returns in wrong order → reordered + call site TupleGetItem updated."""
+        """Two Out params with returns in wrong order → reordered + canonicalized to param Vars
+        + call site TupleGetItem updated."""
 
         @pl.program
         class Before:
@@ -79,9 +80,9 @@ class TestNormalizeReturnOrder:
                 x_tile: pl.Tile[[16], pl.FP32] = pl.load(x, [0], [16])
                 a_tile: pl.Tile[[16], pl.FP32] = pl.tile.add(x_tile, x_tile)
                 b_tile: pl.Tile[[16], pl.FP32] = pl.tile.mul(x_tile, x_tile)
-                out_b_store: pl.Tensor[[16], pl.FP32] = pl.store(b_tile, [0], out_b)
-                out_a_store: pl.Tensor[[16], pl.FP32] = pl.store(a_tile, [0], out_a)
-                return (out_a_store, out_b_store)
+                out_b_store: pl.Tensor[[16], pl.FP32] = pl.store(b_tile, [0], out_b)  # noqa: F841
+                out_a_store: pl.Tensor[[16], pl.FP32] = pl.store(a_tile, [0], out_a)  # noqa: F841
+                return (out_a, out_b)
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(
@@ -99,7 +100,8 @@ class TestNormalizeReturnOrder:
         ir.assert_structural_equal(After, Expected)
 
     def test_already_ordered_noop(self):
-        """Two Out params with returns already in Out-param order → no change."""
+        """Two Out params with returns already in Out-param order → only
+        return values canonicalized to the param Vars; call sites unchanged."""
 
         @pl.program
         class Before:
@@ -129,11 +131,39 @@ class TestNormalizeReturnOrder:
                 b: pl.Tensor[[16], pl.FP32] = ret[1]
                 return (a, b)
 
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16], pl.FP32],
+                out_a: pl.Out[pl.Tensor[[16], pl.FP32]],
+                out_b: pl.Out[pl.Tensor[[16], pl.FP32]],
+            ) -> tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.FP32]]:
+                x_tile: pl.Tile[[16], pl.FP32] = pl.load(x, [0], [16])
+                a_tile: pl.Tile[[16], pl.FP32] = pl.tile.add(x_tile, x_tile)
+                b_tile: pl.Tile[[16], pl.FP32] = pl.tile.mul(x_tile, x_tile)
+                out_a_store: pl.Tensor[[16], pl.FP32] = pl.store(a_tile, [0], out_a)  # noqa: F841
+                out_b_store: pl.Tensor[[16], pl.FP32] = pl.store(b_tile, [0], out_b)  # noqa: F841
+                return (out_a, out_b)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[16], pl.FP32],
+                out_a: pl.Out[pl.Tensor[[16], pl.FP32]],
+                out_b: pl.Out[pl.Tensor[[16], pl.FP32]],
+            ) -> tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.FP32]]:
+                ret: tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.FP32]] = self.kernel(x, out_a, out_b)
+                a: pl.Tensor[[16], pl.FP32] = ret[0]
+                b: pl.Tensor[[16], pl.FP32] = ret[1]
+                return (a, b)
+
         After = _run_normalize(Before)
-        ir.assert_structural_equal(After, Before)
+        ir.assert_structural_equal(After, Expected)
 
     def test_single_return_noop(self):
-        """Single Out param with single return → no reorder needed."""
+        """Single Out param with single return → no reorder; return canonicalized to the param Var."""
 
         @pl.program
         class Before:
@@ -157,8 +187,30 @@ class TestNormalizeReturnOrder:
                 result: pl.Tensor[[16], pl.FP32] = self.kernel(x, out_0)
                 return result
 
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[16], pl.FP32]],
+            ) -> pl.Tensor[[16], pl.FP32]:
+                x_tile: pl.Tile[[16], pl.FP32] = pl.load(x, [0], [16])
+                y_tile: pl.Tile[[16], pl.FP32] = pl.tile.add(x_tile, x_tile)
+                out_0_store: pl.Tensor[[16], pl.FP32] = pl.store(y_tile, [0], out_0)  # noqa: F841
+                return out_0
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[16], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[16], pl.FP32]],
+            ) -> pl.Tensor[[16], pl.FP32]:
+                result: pl.Tensor[[16], pl.FP32] = self.kernel(x, out_0)
+                return result
+
         After = _run_normalize(Before)
-        ir.assert_structural_equal(After, Before)
+        ir.assert_structural_equal(After, Expected)
 
     def test_non_incore_unchanged(self):
         """Program with only non-InCore functions → unchanged."""
@@ -225,10 +277,10 @@ class TestNormalizeReturnOrder:
                 a_tile: pl.Tile[[16], pl.FP32] = pl.tile.add(x_tile, x_tile)
                 b_tile: pl.Tile[[16], pl.FP32] = pl.tile.mul(x_tile, x_tile)
                 c_tile: pl.Tile[[16], pl.FP32] = pl.tile.sub(x_tile, x_tile)
-                out_c_store: pl.Tensor[[16], pl.FP32] = pl.store(c_tile, [0], out_c)
-                out_a_store: pl.Tensor[[16], pl.FP32] = pl.store(a_tile, [0], out_a)
-                out_b_store: pl.Tensor[[16], pl.FP32] = pl.store(b_tile, [0], out_b)
-                return (out_a_store, out_b_store, out_c_store)
+                out_c_store: pl.Tensor[[16], pl.FP32] = pl.store(c_tile, [0], out_c)  # noqa: F841
+                out_a_store: pl.Tensor[[16], pl.FP32] = pl.store(a_tile, [0], out_a)  # noqa: F841
+                out_b_store: pl.Tensor[[16], pl.FP32] = pl.store(b_tile, [0], out_b)  # noqa: F841
+                return (out_a, out_b, out_c)
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(
@@ -294,9 +346,9 @@ class TestNormalizeReturnOrder:
                 x_tile: pl.Tile[[4, 16], pl.FP32] = pl.load(x, [0, 0], [4, 16])
                 a_tile: pl.Tile[[4, 16], pl.FP32] = pl.tile.add(x_tile, x_tile)
                 b_tile: pl.Tile[[4, 16], pl.FP32] = pl.tile.mul(x_tile, x_tile)
-                out_b_store: pl.Tensor[[4, 16], pl.FP32] = pl.store(b_tile, [0, 0], out_b)
-                out_a_store: pl.Tensor[[4, 16], pl.FP32] = pl.store(a_tile, [0, 0], out_a)
-                return (out_a_store, out_b_store)
+                out_b_store: pl.Tensor[[4, 16], pl.FP32] = pl.store(b_tile, [0, 0], out_b)  # noqa: F841
+                out_a_store: pl.Tensor[[4, 16], pl.FP32] = pl.store(a_tile, [0, 0], out_a)  # noqa: F841
+                return (out_a, out_b)
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(
@@ -358,9 +410,9 @@ class TestNormalizeReturnOrder:
                 x_tile: pl.Tile[[16], pl.FP32] = pl.load(x, [0], [16])
                 a_tile: pl.Tile[[16], pl.FP32] = pl.tile.add(x_tile, x_tile)
                 b_tile: pl.Tile[[16], pl.FP32] = pl.tile.mul(x_tile, x_tile)
-                b_store: pl.Tensor[[16], pl.FP32] = pl.store(b_tile, [0], b)
-                a_store: pl.Tensor[[16], pl.FP32] = pl.store(a_tile, [0], a)
-                return (a_store, b_store)
+                b_store: pl.Tensor[[16], pl.FP32] = pl.store(b_tile, [0], b)  # noqa: F841
+                a_store: pl.Tensor[[16], pl.FP32] = pl.store(a_tile, [0], a)  # noqa: F841
+                return (a, b)
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(
@@ -448,9 +500,9 @@ class TestNormalizeReturnOrderSubmit:
                 x_tile: pl.Tile[[16], pl.FP32] = pl.load(x, [0], [16])
                 a_tile: pl.Tile[[16], pl.FP32] = pl.tile.add(x_tile, x_tile)
                 b_tile: pl.Tile[[16], pl.FP32] = pl.tile.mul(x_tile, x_tile)
-                out_b_store: pl.Tensor[[16], pl.FP32] = pl.store(b_tile, [0], out_b)
-                out_a_store: pl.Tensor[[16], pl.FP32] = pl.store(a_tile, [0], out_a)
-                return (out_a_store, out_b_store)
+                out_b_store: pl.Tensor[[16], pl.FP32] = pl.store(b_tile, [0], out_b)  # noqa: F841
+                out_a_store: pl.Tensor[[16], pl.FP32] = pl.store(a_tile, [0], out_a)  # noqa: F841
+                return (out_a, out_b)
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(
@@ -481,11 +533,8 @@ class TestNormalizeReturnOrderSubmit:
     def test_submit_already_ordered_noop(self):
         """A ``pl.submit`` of a kernel whose returns already match Out-param
         order needs no permutation → Step A produces no permutation, Step B
-        never fires, and the Submit-bearing caller is left untouched.
-
-        This is the positive companion to the xfail above: it confirms the
-        manual_scope/submit machinery does not spuriously change IR when no
-        reorder is required (the bug only surfaces when a permutation exists).
+        never fires, and the Submit-bearing caller is left untouched. The only
+        change is the kernel's returns being canonicalized to the param Vars.
         """
 
         @pl.program
@@ -515,8 +564,35 @@ class TestNormalizeReturnOrderSubmit:
                     (a, b), tid = pl.submit(self.kernel, x, out_a, out_b)  # noqa: F841
                 return (a, b)
 
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16], pl.FP32],
+                out_a: pl.Out[pl.Tensor[[16], pl.FP32]],
+                out_b: pl.Out[pl.Tensor[[16], pl.FP32]],
+            ) -> tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.FP32]]:
+                x_tile: pl.Tile[[16], pl.FP32] = pl.load(x, [0], [16])
+                a_tile: pl.Tile[[16], pl.FP32] = pl.tile.add(x_tile, x_tile)
+                b_tile: pl.Tile[[16], pl.FP32] = pl.tile.mul(x_tile, x_tile)
+                out_a_store: pl.Tensor[[16], pl.FP32] = pl.store(a_tile, [0], out_a)  # noqa: F841
+                out_b_store: pl.Tensor[[16], pl.FP32] = pl.store(b_tile, [0], out_b)  # noqa: F841
+                return (out_a, out_b)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[16], pl.FP32],
+                out_a: pl.Out[pl.Tensor[[16], pl.FP32]],
+                out_b: pl.Out[pl.Tensor[[16], pl.FP32]],
+            ) -> tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.FP32]]:
+                with pl.manual_scope():
+                    (a, b), tid = pl.submit(self.kernel, x, out_a, out_b)  # noqa: F841
+                return (a, b)
+
         After = _run_normalize_direct(Before)
-        ir.assert_structural_equal(After, Before)
+        ir.assert_structural_equal(After, Expected)
 
 
 class TestNormalizeReturnOrderProperties:
@@ -532,10 +608,10 @@ class TestNormalizeReturnOrderProperties:
         assert required.contains(passes.IRProperty.SplitIncoreOrch)
         assert required.contains(passes.IRProperty.IncoreTileOps)
 
-    def test_no_produced_properties(self):
+    def test_produced_properties(self):
         p = passes.normalize_return_order()
         produced = p.get_produced_properties()
-        assert produced.empty()
+        assert produced.contains(passes.IRProperty.ReturnParamsExplicit)
 
     def test_no_invalidated_properties(self):
         p = passes.normalize_return_order()

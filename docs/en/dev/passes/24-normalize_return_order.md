@@ -21,11 +21,16 @@ pass, not in codegen (see `docs/en/dev/codegen/00-pto_codegen.md`).
 This pass canonicalizes the contract so codegen can rely on
 `return[k] ↔ out_indices[k]` by position alone:
 
-1. **Step A (InCore rewrite)** — for every `InCore` function, compute a
+1. **Step A0 (param-return canonicalization)** — for every `InCore`,
+   `Group`, and `Spmd` function, rewrite each tensor return value that is a
+   param writeback to reference the parameter directly (pointer identity),
+   using the shared `return_lineage` utility. Kernel-allocated outputs (not
+   traceable to any param) and scalar returns are exempt and stay unchanged.
+2. **Step A (InCore rewrite)** — for every `InCore` function, compute a
    permutation that sorts `ReturnStmt::value_` to match the declared
    `Out`/`InOut` parameter order, then rewrite both the return values and
    `Function::return_types_` accordingly.
-2. **Step B (call-site remap)** — for every non-InCore function
+3. **Step B (call-site remap)** — for every non-InCore function
    (Orchestration / Group / Spmd / opaque), rewrite every
    `TupleGetItemExpr.index_` whose tuple operand is the result of a call
    to a function reordered in Step A. The new index is
@@ -60,17 +65,29 @@ result = passes.normalize_return_order()(program)
 | Property | Value |
 | -------- | ----- |
 | Required | `SplitIncoreOrch`, `IncoreTileOps` |
-| Produced | — |
+| Produced | `ReturnParamsExplicit` |
 | Invalidated | — |
 
 `SplitIncoreOrch` guarantees that InCore work has been outlined into its
 own functions; `IncoreTileOps` guarantees the body uses tile ops, so the
 `tile.store(_, _, out_param)` signal that drives Step A is present. The
-pass produces no new property and invalidates none — it preserves SSA
-form, normalized statement structure, memory inference, and every other
-property already established upstream.
+pass produces `ReturnParamsExplicit` (verified by
+`verify_return_params_explicit.cpp`): every InCore/Group/Spmd tensor
+return value that is a param writeback references the param by pointer
+identity, so orchestration codegen maps returns to args with a lookup.
+It invalidates nothing — SSA form, normalized statement structure, memory
+inference, and every other upstream property are preserved.
 
 ## Algorithm
+
+### Step A0 — Canonicalize return values to params
+
+For each `InCore` / `Group` / `Spmd` function, `CanonicalizeReturnValues`
+calls `return_lineage::ReturnedParamIndices` (which traces var-to-var
+aliases, loop carries, builtin writebacks, `TupleGetItem` of tuple calls,
+and Group/Spmd wrapper calls) and replaces every tensor return value that
+traces to a param with the param `Var` itself. Untraceable values
+(kernel-allocated outputs) and scalars keep their original expression.
 
 ### Step A — Compute and apply per-function permutations
 
@@ -130,7 +147,8 @@ buffer, just under a new index.
 
 | Constraint | Reason |
 | ---------- | ------ |
-| Only `InCore` functions are rewritten in Step A | Other function kinds (`Orchestration` / `Group` / `Spmd` / opaque) follow the user's declared return shape; their callers are remapped in Step B but their bodies are untouched |
+| Only `InCore` functions are rewritten in Step A | Other function kinds (`Orchestration` / `Group` / `Spmd` / opaque) follow the user's declared return shape; their callers are remapped in Step B. `Group`/`Spmd` returns are still canonicalized to params in Step A0, but never reordered |
+| Step A0 leaves kernel-allocated outputs and scalars untouched | Only param writebacks must be explicit; a return value with no param lineage has no param to reference |
 | Skips functions where `out_indices.size() > ret_to_param.size()` | An incomplete analysis must not produce an out-of-bounds permutation — leave the function as-is so the verifier can flag the inconsistency |
 | Permutation is identity ⇒ no rewrite | Avoids spurious `Function` clones and keeps the pass idempotent |
 | Step B only rewrites `TupleGetItemExpr` whose tuple operand resolves to a tracked `Var` after `VisitExpr` | The mutator preserves `Var` node identity, so the operand pointer stays valid as a key in `reordered_tuple_vars_`; if a future change ever returned a fresh node, looking up the post-visit pointer keeps the check correct |
@@ -215,6 +233,9 @@ Pass NormalizeReturnOrder();
 
 **Implementation**: `src/ir/transforms/normalize_return_order_pass.cpp`
 
+- `CanonicalizeReturnValues` — Step A0 rewriter: replaces traceable
+  tensor return values with the param `Var` (via
+  `return_lineage::ReturnedParamIndices`).
 - `BuildReturnToParamMapping` — Step A analysis: walks the function body
   to map each `ReturnStmt` value back to an Out/InOut parameter index.
 - `CollectOutIndices` — collects the parameter positions whose
@@ -231,7 +252,8 @@ Pass NormalizeReturnOrder();
 
 ```cpp
 inline const PassProperties kNormalizeReturnOrderProperties{
-    .required = {IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps}};
+    .required = {IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps},
+    .produced = {IRProperty::ReturnParamsExplicit}};
 ```
 
 **Python binding**: `python/bindings/modules/passes.cpp`

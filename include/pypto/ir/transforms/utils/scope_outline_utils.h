@@ -38,6 +38,7 @@
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
+#include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
@@ -286,7 +287,7 @@ class ScopeOutliner : public IRMutator {
    *      original defensive fallback: all defined vars + store targets are
    *      treated as outputs so the caller retains access.
    */
-  std::unordered_set<const Var*> ComputeFallbackUsedAfter(const ScopeStmtPtr& scope) const {
+  [[nodiscard]] std::unordered_set<const Var*> ComputeFallbackUsedAfter(const ScopeStmtPtr& scope) const {
     StoreTargetCollector store_collector;
     store_collector.VisitStmt(scope->body_);
     std::unordered_set<const Var*> used_after;
@@ -747,7 +748,7 @@ class ScopeOutliner : public IRMutator {
           var_remap_[k] = v;
         }
       }
-      const std::unordered_map<const Expr*, ExprPtr>& GetVarRemap() const { return var_remap_; }
+      [[nodiscard]] const std::unordered_map<const Expr*, ExprPtr>& GetVarRemap() const { return var_remap_; }
     };
     TrackingSubstituteMutator subst_mutator(var_substitution_map);
     auto transformed_body = subst_mutator.VisitStmt(pre_sub_body);
@@ -790,12 +791,36 @@ class ScopeOutliner : public IRMutator {
       return_types[i] = freshened->GetType();
     }
 
-    // Build outlined function body (transformed body + return statement)
+    // Build outlined function body (transformed body + return statement).
+    //
+    // Return params, not SSA result vars: every tensor output the scope
+    // produces is physically one of the function's params (store targets are
+    // InOut inputs; call results write through Out/InOut args). Returning
+    // the param makes the return->param mapping explicit by pointer identity
+    // so orchestration codegen never re-derives it heuristically (#1702).
     StmtPtr outlined_body;
     if (outlined_output_vars.empty()) {
       outlined_body = transformed_body;
     } else {
-      std::vector<ExprPtr> return_exprs(outlined_output_vars.begin(), outlined_output_vars.end());
+      std::unordered_map<const Var*, VarPtr> input_to_param;
+      for (size_t i = 0; i < input_vars.size(); ++i) {
+        input_to_param[input_vars[i].get()] = input_params[i];
+      }
+      std::vector<ExprPtr> return_exprs;
+      return_exprs.reserve(outlined_output_vars.size());
+      for (size_t i = 0; i < output_vars.size(); ++i) {
+        VarPtr ret = outlined_output_vars[i];
+        if (store_output_set.count(output_vars[i].get())) {
+          // Store target: also an input, so the param is known directly.
+          auto param_it = input_to_param.find(output_vars[i].get());
+          if (param_it != input_to_param.end()) ret = param_it->second;
+        } else if (AsTensorTypeLike(ret->GetType())) {
+          if (auto param = return_lineage::TraceToParam(ret, transformed_body, input_params, program_)) {
+            ret = param;
+          }
+        }
+        return_exprs.push_back(ret);
+      }
       auto return_stmt = std::make_shared<ReturnStmt>(return_exprs, op->span_);
 
       std::vector<StmtPtr> body_stmts;
@@ -1208,7 +1233,7 @@ class ScopeOutliner : public IRMutator {
   ///      keeps direction In on the shared output and the orchestration
   ///      codegen drops the SSA-result alias for the inout call)
   ///   3. Merge ``Out``/``InOut`` directions from inner GlobalVar calls
-  std::vector<ParamDirection> InferParamDirections(
+  [[nodiscard]] std::vector<ParamDirection> InferParamDirections(
       const std::vector<VarPtr>& input_vars, const StmtPtr& body,
       const std::unordered_set<const Var*>& store_output_set) const {
     std::vector<ParamDirection> directions(input_vars.size(), ParamDirection::In);

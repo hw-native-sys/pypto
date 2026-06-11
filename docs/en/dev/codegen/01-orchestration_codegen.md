@@ -4,7 +4,7 @@
 
 Orchestration codegen follows the same principle as [PTO codegen](00-pto_codegen.md#design-principle-strict-1-to-1-mapping): a **strict 1-to-1 translation** from IR to generated C++ code. The codegen should not perform optimization, analysis, or indirection — such work belongs in earlier passes.
 
-For example, return-to-parameter tracing (mapping callee return values back to `Out` parameters) is analysis that should be resolved by a pass before codegen sees the IR. The [`NormalizeReturnOrder`](../passes/23-normalize_return_order.md) pass now canonicalizes this before codegen, so orchestration codegen maps `return[i]` directly to `out_indices[i]` without tracing through `tile.store`/yield chains.
+For example, return-to-parameter tracing (mapping callee return values back to `Out` parameters) is analysis that should be resolved by a pass before codegen sees the IR. The [`NormalizeReturnOrder`](../passes/24-normalize_return_order.md) pass now canonicalizes this before codegen, so orchestration codegen maps `return[i]` directly to `out_indices[i]` without tracing through `tile.store`/yield chains.
 
 ## Overview
 
@@ -188,6 +188,17 @@ rt_submit_aiv_task(0, params_t0);
 Arg params_t1;
 params_t1.add_input(ext_output);  // `result` -> ext_output (no alias decl)
 ```
+
+Which `Out`/`InOut` param a result aliases is a lookup, not a heuristic:
+pipeline IR satisfies the `ReturnParamsExplicit` property
+([`NormalizeReturnOrder`](../passes/24-normalize_return_order.md)),
+so `FindReturnedParamIndex` resolves each return value to a param by pointer
+identity via `ir::return_lineage`. The legacy lineage tracing (var-to-var
+aliases, loop carries, builtin writebacks, `TupleGetItem` of tuple calls,
+Group/Spmd wrappers) remains only for hand-parsed IR. When no param can be
+traced, single-return aliasing falls back to the sole `Out`/`InOut` param only
+when the callee has exactly one — multiple outputs with an untraceable return
+are an internal error, never a guess.
 
 Excluded from remap: a phi/loop-carry reassignment (it rebinds an lvalue the
 enclosing `if`/loop owns) keeps its `<name> = <src>;` form; and a tensor whose

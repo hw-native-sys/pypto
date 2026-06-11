@@ -48,6 +48,13 @@ program_outlined = outline_pass(program)
    - AssignStmt for each output variable
 6. **Add to Program**: Add outlined function to program's function list
 
+**Param-explicit returns**: the outlined function returns its
+own parameters, not SSA result vars, whenever a tensor output writes through
+a parameter — store-target outputs return the param directly, other outputs
+are traced via the shared `return_lineage` utility. Kernel-allocated outputs
+keep their SSA value. This makes the return→param mapping a pointer-identity
+lookup for orchestration codegen (`ReturnParamsExplicit` invariant).
+
 **Naming**:
 
 - Default: `{original_func}_incore_{counter}` (e.g., `main_incore_0`, `main_incore_1`)
@@ -117,7 +124,7 @@ class After:
         tile_sq = pl.mul(tile, tile)
         result_tile = tile_sq + 1
         result = pl.store(result_tile, [0], x)
-        return result
+        return x  # store target: returns the param, not `result`
 ```
 
 ### Multiple Outputs
@@ -148,7 +155,7 @@ def main_incore_0(self, a, b, out):
     c_tile = pl.add(a_tile, b_tile)
     out_a = pl.store(c_tile, [0], out)
     out_b = pl.mul(c_tile, 2.0)
-    return (out_a, out_b)
+    return (out, out_b)  # out_a → param `out`; out_b is kernel-local, kept as-is
 ```
 
 ## Implementation

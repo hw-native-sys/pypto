@@ -3812,6 +3812,98 @@ class TestTensorReadWriteOffsetCodegen:
                 f"SSA alias for the multi-Out SPMD result must bind to ext_out:\n{line}\n\nFull code:\n{code}"
             )
 
+    def test_spmd_multi_out_return_value_aliases_actual_output(self):
+        """Multi-output SPMD scope whose return value is the LAST output must alias
+        to that output, never the first Out/InOut arg (issue #1702).
+
+        The kernel writes three GM tensors (two InOut + one Out, the Out last and
+        returned). After cluster outlining, the Spmd wrapper's single return must
+        be traced to the ``out`` param; pre-#1702 the wrapper's return value was a
+        TupleGetItem of the inner call, the lineage trace failed and
+        ``GenerateSingleReturnAlias`` aliased to ``out_indices[0]`` (= ``pre``).
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class SpmdMultiOutReturnLast:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                pre: pl.InOut[pl.Tensor[[64, 64], pl.FP32]],
+                post: pl.InOut[pl.Tensor[[64, 64], pl.FP32]],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> tuple[
+                pl.Tensor[[64, 64], pl.FP32],
+                pl.Tensor[[64, 64], pl.FP32],
+                pl.Tensor[[64, 64], pl.FP32],
+            ]:
+                tile = pl.load(a, [0, 0], [64, 64])
+                pre = pl.store(tile, [0, 0], pre)
+                post = pl.store(tile, [0, 0], post)
+                tile_out = pl.add(tile, tile)
+                out = pl.store(tile_out, [0, 0], out)
+                return pre, post, out
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consumer(
+                self,
+                in_buf: pl.Tensor[[64, 64], pl.FP32],
+                final: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                tile = pl.load(in_buf, [0, 0], [64, 64])
+                final = pl.store(tile, [0, 0], final)
+                return final
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                pre: pl.InOut[pl.Tensor[[64, 64], pl.FP32]],
+                post: pl.InOut[pl.Tensor[[64, 64], pl.FP32]],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+                final: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                with pl.spmd(4):
+                    pre, post, out = self.kernel(a, pre, post, out)
+                final = self.consumer(out, final)
+                return final
+
+        # VerificationLevel.NONE: tuple destructuring inside `with pl.spmd(N):`
+        # desugars to a multi-statement body the printer emits verbatim but the
+        # parser rejects (same known roundtrip gap as test_spmd_multi_assemble).
+        with passes.PassContext([], passes.VerificationLevel.NONE):
+            transformed = passes.expand_mixed_kernel()(
+                passes.infer_tile_memory_space()(
+                    passes.outline_cluster_scopes()(passes.convert_to_ssa()(SpmdMultiOutReturnLast))
+                )
+            )
+
+        code = _generate_orch_code(transformed)
+
+        # The downstream consumer must read the actually-returned output
+        # (``ext_out``), never the first InOut (``ext_pre``) or ``ext_post``.
+        consumer_input_lines = [line for line in code.splitlines() if "params_t1.add_input" in line]
+        assert consumer_input_lines, f"Expected a consumer task reading the SPMD result, got:\n{code}"
+        first_consumer_input = consumer_input_lines[0]
+        assert "ext_out" in first_consumer_input, (
+            "Consumer of the SPMD scope result must read the returned Out param (ext_out). "
+            f"Got: {first_consumer_input}\n\nFull code:\n{code}"
+        )
+        for wrong in ("ext_pre", "ext_post"):
+            assert wrong not in first_consumer_input, (
+                f"Consumer reads {wrong} — multi-output return alias bug (#1702):\n"
+                f"{first_consumer_input}\n\nFull code:\n{code}"
+            )
+
+        # Any explicit SSA alias for the result must bind to ext_out as well.
+        alias_lines = [line for line in code.splitlines() if line.lstrip().startswith("const Tensor& out")]
+        for line in alias_lines:
+            assert "ext_pre" not in line and "ext_post" not in line, (
+                f"SPMD return alias bound to the wrong output:\n{line}\n\nFull code:\n{code}"
+            )
+
     def test_spmd_multi_assemble(self):
         """SPMD multi-output call with assemble should preserve both OutputExisting tuple aliases."""
         backend.reset_for_testing()

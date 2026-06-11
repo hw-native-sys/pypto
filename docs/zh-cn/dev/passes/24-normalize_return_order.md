@@ -17,10 +17,14 @@ i 个 `Out`/`InOut` 参数，并相应地重映射非 InCore 调用方中的
 
 本 Pass 把契约规范化为「按位置 `return[k] ↔ out_indices[k]`」，分两步进行：
 
-1. **Step A（InCore 函数重写）** —— 对每个 `InCore` 函数，计算一个使
+1. **Step A0（返回值参数化规范化）** —— 对每个 `InCore`、`Group`、
+   `Spmd` 函数，把每个属于参数回写（param writeback）的 tensor 返回值改写为
+   直接引用对应参数（指针同一性），追踪由共享的 `return_lineage` 工具完成。
+   kernel 内部分配的输出（无法追踪到任何参数）和标量返回不受影响。
+2. **Step A（InCore 函数重写）** —— 对每个 `InCore` 函数，计算一个使
    `ReturnStmt::value_` 与声明的 `Out`/`InOut` 参数顺序一致的置换，然后同步
    重写返回值与 `Function::return_types_`。
-2. **Step B（调用端索引重映射）** —— 对每个非 InCore 函数（Orchestration /
+3. **Step B（调用端索引重映射）** —— 对每个非 InCore 函数（Orchestration /
    Group / Spmd / opaque），重写所有 `TupleGetItemExpr.index_`，前提是它的
    tuple 操作数来源于 Step A 中被重排序的函数调用结果。新索引为
    `permutation[old_index]`，因此调用结果上的观察者仍然把同名 SSA 变量绑
@@ -51,16 +55,26 @@ result = passes.normalize_return_order()(program)
 | 属性 | 取值 |
 | ---- | ---- |
 | 前置（Required） | `SplitIncoreOrch`、`IncoreTileOps` |
-| 产出（Produced） | — |
+| 产出（Produced） | `ReturnParamsExplicit` |
 | 失效（Invalidated） | — |
 
 `SplitIncoreOrch` 保证 InCore 工作已经被外提为独立函数；`IncoreTileOps` 保
 证函数体使用 tile 操作，从而 Step A 所依赖的
-`tile.store(_, _, out_param)` 信号一定存在。本 Pass 不产出新属性、也不使
-任何属性失效 —— 它保留 SSA、规范化语句结构、内存推断等所有上游已建立的属
-性。
+`tile.store(_, _, out_param)` 信号一定存在。本 Pass 产出
+`ReturnParamsExplicit`（由 `verify_return_params_explicit.cpp` 校验）：每个
+InCore/Group/Spmd 函数中属于参数回写的 tensor 返回值都以指针同一性引用对应
+参数，编排代码生成因此只需查表即可建立返回值到实参的映射。本 Pass 不使任何
+属性失效 —— SSA、规范化语句结构、内存推断等所有上游属性均被保留。
 
 ## 算法
+
+### Step A0 —— 把返回值规范化为参数引用
+
+对每个 `InCore` / `Group` / `Spmd` 函数，`CanonicalizeReturnValues` 调用
+`return_lineage::ReturnedParamIndices`（可追踪 Var 到 Var 别名、循环携带、
+builtin 回写、tuple 调用的 `TupleGetItem`，以及 Group/Spmd 包装函数调用），
+把每个可追踪到参数的 tensor 返回值替换为参数 `Var` 本身。无法追踪的值
+（kernel 内部分配的输出）和标量保留原表达式。
 
 ### Step A —— 计算并应用每个函数的置换
 
@@ -113,7 +127,8 @@ result = passes.normalize_return_order()(program)
 
 | 约束 | 原因 |
 | ---- | ---- |
-| Step A 仅重写 `InCore` 函数 | 其他函数类型（`Orchestration` / `Group` / `Spmd` / opaque）遵循用户声明的返回形态；它们的调用端在 Step B 中被重映射，但函数体本身不动 |
+| Step A 仅重写 `InCore` 函数 | 其他函数类型（`Orchestration` / `Group` / `Spmd` / opaque）遵循用户声明的返回形态；它们的调用端在 Step B 中被重映射。`Group`/`Spmd` 的返回值在 Step A0 中仍会被规范化为参数引用，但不会被重排 |
+| Step A0 不改动 kernel 内部分配的输出与标量 | 只有参数回写必须显式化；没有参数血缘的返回值没有可引用的参数 |
 | `out_indices.size() > ret_to_param.size()` 时跳过 | 不完整分析不能产生越界置换 —— 保留原状，让 verifier 捕获不一致 |
 | 恒等置换 ⇒ 不重写 | 避免不必要的 `Function` 克隆，使 Pass 幂等 |
 | Step B 仅改写 `VisitExpr` 后 tuple 操作数仍为已记录 `Var` 的 `TupleGetItemExpr` | Mutator 保留 `Var` 节点身份，因此操作数指针在 `reordered_tuple_vars_` 中仍是有效的查找键；即便未来某次改写返回新节点，查找 post-visit 的指针也能保证正确性 |
@@ -196,6 +211,9 @@ Pass NormalizeReturnOrder();
 
 **实现文件**: `src/ir/transforms/normalize_return_order_pass.cpp`
 
+- `CanonicalizeReturnValues` —— Step A0 改写器：通过
+  `return_lineage::ReturnedParamIndices` 把可追踪的 tensor 返回值替换为参
+  数 `Var`。
 - `BuildReturnToParamMapping` —— Step A 分析：遍历函数体，将每个
   `ReturnStmt` 值反向映射到 Out/InOut 参数下标。
 - `CollectOutIndices` —— 收集 `ParamDirection` 为 `Out` / `InOut` 的参数
@@ -211,7 +229,8 @@ Pass NormalizeReturnOrder();
 
 ```cpp
 inline const PassProperties kNormalizeReturnOrderProperties{
-    .required = {IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps}};
+    .required = {IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps},
+    .produced = {IRProperty::ReturnParamsExplicit}};
 ```
 
 **Python 绑定**: `python/bindings/modules/passes.cpp`

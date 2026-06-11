@@ -323,8 +323,8 @@ def _make_cube_bias_expected(cube_op: str):
                 out_0: pl.Out[pl.Tensor[[1, 128], pl.FP32]],
             ) -> pl.Tensor[[1, 128], pl.FP32]:
                 self.main_incore_0_aic(a, b, bias, out_0)
-                result = self.main_incore_0_aiv(a, b, bias, out_0)
-                return result
+                self.main_incore_0_aiv(a, b, bias, out_0)
+                return out_0
 
         return ExpectedMatmulBias
 
@@ -380,8 +380,8 @@ def _make_cube_bias_expected(cube_op: str):
                 out_0: pl.Out[pl.Tensor[[1, 128], pl.FP32]],
             ) -> pl.Tensor[[1, 128], pl.FP32]:
                 self.main_incore_0_aic(a, b, bias, out_0)
-                result = self.main_incore_0_aiv(a, b, bias, out_0)
-                return result
+                self.main_incore_0_aiv(a, b, bias, out_0)
+                return out_0
 
         return ExpectedGemvBias
 
@@ -501,8 +501,8 @@ def _make_cube_acc_expected(cube_op: str):
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 self.main_incore_0_aic(a, b, out_0)
-                result = self.main_incore_0_aiv(a, b, out_0)
-                return result
+                self.main_incore_0_aiv(a, b, out_0)
+                return out_0
 
         return ExpectedMatmulAcc
 
@@ -548,8 +548,8 @@ def _make_cube_acc_expected(cube_op: str):
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 self.main_incore_0_aic(a, b, out_0)
-                result = self.main_incore_0_aiv(a, b, out_0)
-                return result
+                self.main_incore_0_aiv(a, b, out_0)
+                return out_0
 
         return ExpectedGemvAcc
 
@@ -598,8 +598,8 @@ def _make_gemv_expected():
             out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
         ) -> pl.Tensor[[16, 128], pl.FP32]:
             self.main_incore_0_aic(a, b, out_0)
-            result = self.main_incore_0_aiv(a, b, out_0)
-            return result
+            self.main_incore_0_aiv(a, b, out_0)
+            return out_0
 
     return ExpectedGemv
 
@@ -677,8 +677,8 @@ def _make_post_chain_program(post_op: str):
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 self.main_incore_0_aic(x, y, out_0)
-                result = self.main_incore_0_aiv(x, y, out_0)
-                return result
+                self.main_incore_0_aiv(x, y, out_0)
+                return out_0
 
         return BeforeAdd, ExpectedAdd
 
@@ -748,8 +748,8 @@ def _make_post_chain_program(post_op: str):
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 self.main_incore_0_aic(x, y, out_0)
-                result = self.main_incore_0_aiv(x, y, out_0)
-                return result
+                self.main_incore_0_aiv(x, y, out_0)
+                return out_0
 
         return BeforeMul, ExpectedMul
 
@@ -844,8 +844,8 @@ def _make_v2c_boundary_program(vec_op: str):
                 out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
             ) -> pl.Tensor[[16, 64], pl.FP32]:
                 self.main_incore_0_aic(x, y, out_0)
-                result = self.main_incore_0_aiv(x, y, out_0)
-                return result
+                self.main_incore_0_aiv(x, y, out_0)
+                return out_0
 
         return BeforeAdd, ExpectedAdd
 
@@ -932,8 +932,8 @@ def _make_v2c_boundary_program(vec_op: str):
                 out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
             ) -> pl.Tensor[[16, 64], pl.FP32]:
                 self.main_incore_0_aic(x, y, out_0)
-                result = self.main_incore_0_aiv(x, y, out_0)
-                return result
+                self.main_incore_0_aiv(x, y, out_0)
+                return out_0
 
         return BeforeSub, ExpectedSub
 
@@ -1174,8 +1174,8 @@ class TestSplitStructure:
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 self.main_incore_0_aic(x, y, out_0)
-                result = self.main_incore_0_aiv(x, y, out_0)
-                return result
+                self.main_incore_0_aiv(x, y, out_0)
+                return out_0
 
         ir.assert_structural_equal(After, Expected)
 
@@ -1263,8 +1263,8 @@ class TestCrossCoreBoundaries:
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 self.main_incore_0_aic(x, y, out_0)
-                result = self.main_incore_0_aiv(x, y, out_0)
-                return result
+                self.main_incore_0_aiv(x, y, out_0)
+                return out_0
 
         ir.assert_structural_equal(After, Expected)
 
@@ -1361,8 +1361,8 @@ class TestCrossCoreBoundaries:
                 out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
             ) -> pl.Tensor[[16, 64], pl.FP32]:
                 self.main_incore_0_aic(x, y, out_0)
-                result = self.main_incore_0_aiv(x, y, out_0)
-                return result
+                self.main_incore_0_aiv(x, y, out_0)
+                return out_0
 
         ir.assert_structural_equal(After, Expected)
 
@@ -1452,8 +1452,8 @@ class TestCrossCoreBoundaries:
                 out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
             ) -> pl.Tensor[[16, 64], pl.FP32]:
                 self.main_incore_0_aic(x, y, out_0)
-                result = self.main_incore_0_aiv(x, y, out_0)
-                return result
+                self.main_incore_0_aiv(x, y, out_0)
+                return out_0
 
         ir.assert_structural_equal(After, Expected)
 
@@ -1611,8 +1611,8 @@ class TestVectorOpClassification:
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 self.main_incore_0_aic(x, y, out_0)
-                result = self.main_incore_0_aiv(x, y, out_0)
-                return result
+                self.main_incore_0_aiv(x, y, out_0)
+                return out_0
 
         ir.assert_structural_equal(After, Expected)
 
@@ -1733,8 +1733,8 @@ class TestMultipleInCore:
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 self.compute_a_incore_0_aic(x, y, out_0)
-                result = self.compute_a_incore_0_aiv(x, y, out_0)
-                return result
+                self.compute_a_incore_0_aiv(x, y, out_0)
+                return out_0
 
             @pl.function(type=pl.FunctionType.AIC)
             def compute_b_incore_0_aic(
@@ -1771,8 +1771,8 @@ class TestMultipleInCore:
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 self.compute_b_incore_0_aic(a, b, out_0)
-                result = self.compute_b_incore_0_aiv(a, b, out_0)
-                return result
+                self.compute_b_incore_0_aiv(a, b, out_0)
+                return out_0
 
         ir.assert_structural_equal(After, Expected)
 
@@ -1863,8 +1863,8 @@ class TestMultipleInCore:
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 self.mixed_incore_0_aic(x, y, out_0)
-                result = self.mixed_incore_0_aiv(x, y, out_0)
-                return result
+                self.mixed_incore_0_aiv(x, y, out_0)
+                return out_0
 
         ir.assert_structural_equal(After, Expected)
 
@@ -3069,8 +3069,8 @@ class TestDCERegression:
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 self.main_incore_0_aic(x, w, out_0)
-                result = self.main_incore_0_aiv(x, w, out_0)
-                return result
+                self.main_incore_0_aiv(x, w, out_0)
+                return out_0
 
         ir.assert_structural_equal(After, Expected)
 
@@ -3174,8 +3174,8 @@ class TestDCERegression:
                 out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
             ) -> pl.Tensor[[16, 64], pl.FP32]:
                 self.main_incore_0_aic(x, w, out_0)
-                result = self.main_incore_0_aiv(x, w, out_0)
-                return result
+                self.main_incore_0_aiv(x, w, out_0)
+                return out_0
 
         ir.assert_structural_equal(After, Expected)
 
@@ -3254,8 +3254,8 @@ class TestDCERegression:
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 self.main_incore_0_aic(x, w, out_0)
-                result = self.main_incore_0_aiv(x, w, out_0)
-                return result
+                self.main_incore_0_aiv(x, w, out_0)
+                return out_0
 
         ir.assert_structural_equal(After, Expected)
 
@@ -3569,8 +3569,8 @@ class TestDCERegression:
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 self.main_incore_0_aic(x, w, out_0)
-                result = self.main_incore_0_aiv(x, w, out_0)
-                return result
+                self.main_incore_0_aiv(x, w, out_0)
+                return out_0
 
         ir.assert_structural_equal(After, Expected)
 
@@ -3661,8 +3661,8 @@ class TestDCERegression:
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 self.main_incore_0_aic(x, w, out_0)
-                result = self.main_incore_0_aiv(x, w, out_0)
-                return result
+                self.main_incore_0_aiv(x, w, out_0)
+                return out_0
 
         ir.assert_structural_equal(After, Expected)
 
@@ -3918,8 +3918,8 @@ class TestDCERegression:
                 out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
             ) -> pl.Tensor[[16, 64], pl.FP32]:
                 self.main_incore_0_aic(x, w, out_0)
-                result = self.main_incore_0_aiv(x, w, out_0)
-                return result
+                self.main_incore_0_aiv(x, w, out_0)
+                return out_0
 
         ir.assert_structural_equal(After, passes.convert_to_ssa()(Expected))
 

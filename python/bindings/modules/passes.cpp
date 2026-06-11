@@ -103,7 +103,10 @@ void BindPass(nb::module_& m) {
       .value("ManualDepsOnSubmitOnly", IRProperty::ManualDepsOnSubmitOnly,
              "No plain cross-function Call (GlobalVar callee) carries attrs['manual_dep_edges'] — manual "
              "dependency edges live in the typed Submit::deps_ field. Op calls (system.task_dummy) are "
-             "exempt");
+             "exempt")
+      .value("ReturnParamsExplicit", IRProperty::ReturnParamsExplicit,
+             "InCore/Group/Spmd tensor returns reference function params by pointer identity, so the "
+             "return->param map is a lookup (#1702)");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");

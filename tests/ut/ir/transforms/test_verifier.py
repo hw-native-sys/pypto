@@ -506,5 +506,54 @@ def test_out_param_non_creating_reassignment_ok():
     assert len(diagnostics) == 0
 
 
+def test_return_params_explicit_flags_aliased_param_return():
+    """ReturnParamsExplicit flags an InCore tensor return that aliases a param
+    instead of referencing it directly, and accepts the param-identity form."""
+    dim = ir.ConstInt(64, DataType.INT64, ir.Span.unknown())
+    ttype = ir.TensorType([dim, dim], DataType.FP32)
+    a = ir.Var("a", ttype, ir.Span.unknown())
+    out = ir.Var("out", ttype, ir.Span.unknown())
+    alias = ir.Var("alias", ttype, ir.Span.unknown())
+
+    # Violating: return an SSA alias of the Out param.
+    bad_body = ir.SeqStmts(
+        [
+            ir.AssignStmt(alias, out, ir.Span.unknown()),
+            ir.ReturnStmt([alias], ir.Span.unknown()),
+        ],
+        ir.Span.unknown(),
+    )
+    bad = ir.Function(
+        "bad",
+        [(a, ir.ParamDirection.In), (out, ir.ParamDirection.Out)],
+        [ttype],
+        bad_body,
+        ir.Span.unknown(),
+        ir.FunctionType.InCore,
+    )
+    program = ir.Program([bad], "test_program", ir.Span.unknown())
+
+    props = passes.IRPropertySet()
+    props.insert(passes.IRProperty.ReturnParamsExplicit)
+    diags = passes.PropertyVerifierRegistry.verify(props, program)
+    flagged = [d for d in diags if d.rule_name == "ReturnParamsExplicit"]
+    assert len(flagged) == 1
+    assert "alias" in flagged[0].message
+
+    # Conforming: return the param itself.
+    good_body = ir.SeqStmts([ir.ReturnStmt([out], ir.Span.unknown())], ir.Span.unknown())
+    good = ir.Function(
+        "good",
+        [(a, ir.ParamDirection.In), (out, ir.ParamDirection.Out)],
+        [ttype],
+        good_body,
+        ir.Span.unknown(),
+        ir.FunctionType.InCore,
+    )
+    program_ok = ir.Program([good], "test_program", ir.Span.unknown())
+    diags_ok = passes.PropertyVerifierRegistry.verify(props, program_ok)
+    assert not [d for d in diags_ok if d.rule_name == "ReturnParamsExplicit"]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

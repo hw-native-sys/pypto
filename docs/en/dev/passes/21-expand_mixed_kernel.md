@@ -198,6 +198,14 @@ Phase 3 — Rewrite Group callers:
 
 **Loop-state repair after splitting**: mixed-loop control flow is intentionally preserved during body construction, which can leave one side with extra iter_args, missing init-value definitions, or yields that reference stripped branch-local values. The pass repairs those cases before DCE, then normalizes loop-carried state once more after DCE because dead shared aliases can disappear and make an iter_arg removable only at that stage. A final DCE pass cleans up any init-value chains that become dead after the second strip.
 
+**Group wrapper param-returns**: a newly created Group wrapper
+returns its own parameters when every return position traces to a param
+writeback (via `return_lineage::ReturnedParamIndices`) — the AIV call is
+emitted as a bare `EvalStmt` and the wrapper returns the matching Group
+params directly (e.g. `return out_0`), keeping the `ReturnParamsExplicit`
+invariant. Only when some position is not a param writeback does it fall back
+to the legacy `result = aiv_call(); return result` form.
+
 ## Example 1: InCore without existing Group caller
 
 When Orchestration calls InCore directly, a new Group wrapper is created.
@@ -252,8 +260,8 @@ class After:
     @pl.function(type=pl.FunctionType.Group)
     def compute_incore_0(self, x, y, out_0) -> pl.Tensor[[16, 128], pl.FP32]:
         self.compute_incore_0_aic(x, y, out_0)
-        result = self.compute_incore_0_aiv(x, y, out_0)
-        return result
+        self.compute_incore_0_aiv(x, y, out_0)
+        return out_0  # param-return: the AIV result writes through out_0
 
     @pl.function(type=pl.FunctionType.Orchestration)
     def main(self, x, y) -> pl.Tensor[[16, 128], pl.FP32]:

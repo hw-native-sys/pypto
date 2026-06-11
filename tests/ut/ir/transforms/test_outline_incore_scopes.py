@@ -446,7 +446,7 @@ class TestOutlineIncoreScopes:
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 tile = pl.tile.full([16, 128], dtype=pl.FP32, value=0.0)
                 buf_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(tile, [0, 0], buf)
-                return buf_store
+                return buf
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(self, x: pl.Tensor[[16, 128], pl.FP32]) -> pl.Tensor[[16, 128], pl.FP32]:
@@ -493,7 +493,7 @@ class TestOutlineIncoreScopes:
                 tile_b = pl.tile.full([16, 1], dtype=pl.FP32, value=0.0)
                 buf_a_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(tile_a, [0, 0], buf_a)
                 buf_b_store: pl.Tensor[[16, 1], pl.FP32] = pl.store(tile_b, [0, 0], buf_b)
-                return (buf_b_store, buf_a_store)
+                return (buf_b, buf_a)
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(self, x: pl.Tensor[[16, 128], pl.FP32]) -> pl.Tensor[[16, 128], pl.FP32]:
@@ -515,7 +515,8 @@ class TestOutlineIncoreScopes:
 
         Regression test for issue #1462. Each scope writing the shared store
         target ``out`` is outlined into a function that takes it as a parameter
-        and returns a fresh renamed value (``out -> out_v1 -> out_v2 -> ...``).
+        and returns that param; the call site still binds a fresh renamed value
+        (``out -> out_v1 -> out_v2 -> ...``).
         ScopeOutliner must keep every reference consistent:
 
         - the outlined body's store use-site must resolve to that function's
@@ -600,7 +601,7 @@ class TestOutlineIncoreScopes:
                 for j, (inner,) in pl.range(2, init_values=(acc,)):
                     updated: pl.Tensor[[64], pl.FP32] = pl.add(inner, y)
                     inner_rv = pl.yield_(updated)
-                return inner_rv
+                return acc
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(
@@ -689,7 +690,7 @@ class TestOutlineIncoreScopes:
                 self, dst: pl.InOut[pl.Tensor[[64], pl.FP32]], src: pl.Tensor[[32], pl.FP32]
             ) -> pl.Tensor[[64], pl.FP32]:
                 updated: pl.Tensor[[64], pl.FP32] = pl.assemble(dst, src, [0])
-                return updated
+                return dst
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(
@@ -910,8 +911,8 @@ class TestOutlineSpmdScope:
         """The inner InCore body is outlined; the SpmdScope wrapper survives.
 
         The scope body writes ``out`` via ``tile.store``, so ``out`` is a store
-        target: it becomes an ``InOut`` callee param and a returned (renamed)
-        value (``out_v1`` -> ``out_store``), mirroring
+        target: it becomes an ``InOut`` callee param and the outlined function
+        returns the param itself (param-writeback alias return), mirroring
         ``test_outline_scope_with_store_only_outputs``.
         """
 
@@ -942,7 +943,7 @@ class TestOutlineSpmdScope:
                 t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
                 out_v1: pl.Tensor[[512, 128], pl.FP32] = pl.store(t, [offset, 0], out)
                 out_store: pl.Tensor[[512, 128], pl.FP32] = out_v1
-                return out_store
+                return out
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(
@@ -1100,7 +1101,7 @@ class TestSplitIncoreOrchVerifier:
                 ):
                     x4: pl.Tensor[[64], pl.FP32] = pl.add(xi, 2.0)
                     xrv = pl.yield_(x4)
-                return xrv
+                return x
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:

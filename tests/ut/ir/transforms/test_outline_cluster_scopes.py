@@ -186,7 +186,9 @@ class TestOutlineClusterScopes:
                 x: pl.Tensor[[64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
-                out = self.kernel(x, out)
+                # Wrapper returns its own `out` param (the kernel writes through
+                # the Out arg), not the post-call SSA result var.
+                out_call = self.kernel(x, out)
                 return out
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -355,11 +357,11 @@ class TestOutlineClusterScopes:
                 i = pl.tile.get_block_idx()
                 offset = i * 128
                 tile_a: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
-                out = pl.store(tile_a, [offset, 0], out)
-                # The outline pass renames the post-store SSA result to the
-                # store target; express that explicit rename as an alias here.
-                out_final: pl.Tensor[[512, 128], pl.FP32] = out
-                return out_final
+                out_store = pl.store(tile_a, [offset, 0], out)
+                # The outline pass keeps the post-store SSA alias but returns
+                # the InOut param itself (param-identity returns, #1702).
+                out_final: pl.Tensor[[512, 128], pl.FP32] = out_store
+                return out
 
             @pl.function(type=pl.FunctionType.Spmd, attrs={"core_num": 4})
             def main_spmd_0(
@@ -367,7 +369,7 @@ class TestOutlineClusterScopes:
                 a: pl.Tensor[[512, 128], pl.FP32],
                 out: pl.InOut[pl.Tensor[[512, 128], pl.FP32]],
             ) -> pl.Tensor[[512, 128], pl.FP32]:
-                out = self.main_incore_0(a, out)
+                out_call = self.main_incore_0(a, out)
                 return out
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -416,11 +418,11 @@ class TestOutlineClusterScopes:
                 i = pl.tile.get_block_idx()
                 offset = i * 128
                 tile_a: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
-                out = pl.store(tile_a, [offset, 0], out)
-                # The outline pass renames the post-store SSA result to the
-                # store target; express that explicit rename as an alias here.
-                out_final: pl.Tensor[[512, 128], pl.FP32] = out
-                return out_final
+                out_store = pl.store(tile_a, [offset, 0], out)
+                # The outline pass keeps the post-store SSA alias but returns
+                # the InOut param itself (param-identity returns, #1702).
+                out_final: pl.Tensor[[512, 128], pl.FP32] = out_store
+                return out
 
             @pl.function(type=pl.FunctionType.Spmd, attrs={"core_num": 4})
             def q_proj_spmd(
@@ -428,7 +430,7 @@ class TestOutlineClusterScopes:
                 a: pl.Tensor[[512, 128], pl.FP32],
                 out: pl.InOut[pl.Tensor[[512, 128], pl.FP32]],
             ) -> pl.Tensor[[512, 128], pl.FP32]:
-                out = self.q_proj(a, out)
+                out_call = self.q_proj(a, out)
                 return out
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -481,7 +483,7 @@ class TestOutlineClusterScopes:
                 n0 = pl.tile.get_block_idx()
                 offset = n0 * 128
                 chunk: pl.Tensor[[128, 128], pl.FP32] = pl.slice(a, [128, 128], [offset, 0])
-                out = pl.assemble(out, chunk, [offset, 0])
+                out_asm = pl.assemble(out, chunk, [offset, 0])
                 return out
 
             @pl.function(type=pl.FunctionType.Spmd, attrs={"core_num": 4})
@@ -490,7 +492,7 @@ class TestOutlineClusterScopes:
                 a: pl.Tensor[[512, 128], pl.FP32],
                 out: pl.InOut[pl.Tensor[[512, 128], pl.FP32]],
             ) -> pl.Tensor[[512, 128], pl.FP32]:
-                out = self.main_incore_0(a, out)
+                out_call = self.main_incore_0(a, out)
                 return out
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -567,7 +569,9 @@ class TestOutlineClusterScopes:
                 x: pl.Tensor[[64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
-                out = self.kernel(x, out)
+                # Group wrapper returns its own `out` param (the kernel writes
+                # through the Out arg), not the post-call SSA result var.
+                out_call = self.kernel(x, out)
                 return out
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -638,7 +642,9 @@ class TestOutlineClusterScopes:
                 x: pl.Tensor[[64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
-                out = self.kernel(x, out)
+                # Group wrapper returns its own `out` param (the kernel writes
+                # through the Out arg), not the post-call SSA result var.
+                out_call = self.kernel(x, out)
                 return out
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -663,8 +669,9 @@ class TestOutlineClusterScopes:
         outputs (scope_outline_utils.h:560-571) and InferParamDirections Step 1
         upgrades the corresponding param to ``InOut``
         (scope_outline_utils.h:1118-1123). The store result is captured into a
-        fresh ``_store`` SSA var and returned, and the call site re-binds the
-        external tensor to that return value (``buf`` -> ``buf2``). Mirrors the
+        fresh ``_store`` SSA var, but the Group returns the InOut param itself
+        (param-identity returns, #1702); the call site re-binds the external
+        tensor to that return value (``buf`` -> ``buf2``). Mirrors the
         InCore-pass store-only case, but the parent here is NOT promoted — the
         cluster pass leaves the caller's function type unchanged.
         """
@@ -683,14 +690,15 @@ class TestOutlineClusterScopes:
         @pl.program
         class Expected:
             # buf is a tile.store target, so it becomes InOut on the Group; the
-            # store result is returned as a fresh buf_store var.
+            # store result lands in a fresh buf_store var, but the Group
+            # returns the InOut param itself (param-identity returns, #1702).
             @pl.function(type=pl.FunctionType.Group)
             def main_cluster_0(
                 self, buf: pl.InOut[pl.Tensor[[16, 128], pl.FP32]]
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 tile = pl.tile.full([16, 128], dtype=pl.FP32, value=0.0)
                 buf_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(tile, [0, 0], buf)
-                return buf_store
+                return buf
 
             @pl.function
             def main(self, x: pl.Tensor[[16, 128], pl.FP32]) -> pl.Tensor[[16, 128], pl.FP32]:
@@ -874,6 +882,112 @@ class TestOutlineSpmdScopeTaskId:
         assert isinstance(submits[1].deps[0], ir.Var)
         # Two distinct Spmd wrapper functions were synthesised.
         assert len(self._funcs_by_type(After, ir.FunctionType.Spmd)) == 2
+
+
+class TestOutlinedReturnParamsExplicit:
+    """Outlined wrapper functions return their params by pointer identity.
+
+    Param-identity returns make the return->param mapping a lookup for
+    orchestration codegen, so multi-output wrappers can never alias the
+    returned value to the wrong output (issue #1702).
+    """
+
+    @staticmethod
+    def _first_return(func):
+        ret = func.body.stmts[-1]
+        assert isinstance(ret, ir.ReturnStmt)
+        return ret
+
+    def test_spmd_wrapper_tuple_destructure_returns_param(self):
+        """Spmd wrapper around a multi-out kernel returns the actual out param.
+
+        Mirrors #1702: the kernel writes two InOut + one Out, the scope's only
+        consumed result is the Out (last). The wrapper's return must be its own
+        ``out`` param, not the TupleGetItem SSA alias.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                pre: pl.InOut[pl.Tensor[[64, 64], pl.FP32]],
+                post: pl.InOut[pl.Tensor[[64, 64], pl.FP32]],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> tuple[
+                pl.Tensor[[64, 64], pl.FP32],
+                pl.Tensor[[64, 64], pl.FP32],
+                pl.Tensor[[64, 64], pl.FP32],
+            ]:
+                tile = pl.load(a, [0, 0], [64, 64])
+                pre = pl.store(tile, [0, 0], pre)
+                post = pl.store(tile, [0, 0], post)
+                t2 = pl.add(tile, tile)
+                out = pl.store(t2, [0, 0], out)
+                return pre, post, out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                pre: pl.InOut[pl.Tensor[[64, 64], pl.FP32]],
+                post: pl.InOut[pl.Tensor[[64, 64], pl.FP32]],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                with pl.spmd(4):
+                    pre, post, out = self.kernel(a, pre, post, out)
+                return out
+
+        with passes.PassContext([], passes.VerificationLevel.NONE):
+            after = passes.outline_cluster_scopes()(passes.convert_to_ssa()(Before))
+
+        spmd_fns = [f for f in after.functions.values() if f.func_type == ir.FunctionType.Spmd]
+        assert len(spmd_fns) == 1
+        wrapper = spmd_fns[0]
+        ret = self._first_return(wrapper)
+        # Bind the projected values once: each `ret.value[i]` access creates a
+        # fresh Python wrapper, so `id()` is only stable on a held reference.
+        ret_values = list(ret.value)
+        params = list(wrapper.params)
+        assert len(ret_values) == 1
+        # Pointer identity with the wrapper's own `out` param (params are
+        # [a, pre, post, out] in first-use order).
+        param_ids = {id(p): p.name_hint for p in params}
+        assert id(ret_values[0]) in param_ids, "wrapper must return a param by identity"
+        assert param_ids[id(ret_values[0])].startswith("out")
+
+    def test_store_target_output_returns_inout_param(self):
+        """A store-target output of a cluster scope returns the InOut param itself."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                with pl.spmd(4) as tid:  # noqa: F841
+                    i = pl.tile.get_block_idx()
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [i * 128, 0], [128, 128])
+                    out = pl.store(pl.add(t, t), [i * 128, 0], out)
+                return out
+
+        after = passes.outline_cluster_scopes()(
+            passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+        )
+
+        spmd_fns = [f for f in after.functions.values() if f.func_type == ir.FunctionType.Spmd]
+        assert len(spmd_fns) == 1
+        wrapper = spmd_fns[0]
+        ret = self._first_return(wrapper)
+        # Hold references so wrapper identity (`id`) stays stable across checks.
+        ret_values = list(ret.value)
+        params = list(wrapper.params)
+        param_ids = {id(p) for p in params}
+        for value in ret_values:
+            assert id(value) in param_ids, "store-target output must be returned as the param itself"
 
 
 if __name__ == "__main__":

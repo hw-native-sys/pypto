@@ -40,6 +40,14 @@ program_outlined = outline_pass(program)
 
 **Naming**: `{original_func}_cluster_{counter}` (e.g., `main_cluster_0`)
 
+**Param-explicit returns**: like `OutlineIncoreScopes`, the
+outlined Group/Spmd functions return their own parameters whenever a tensor
+output writes through a parameter — store targets return the param directly,
+other outputs are traced via the shared `return_lineage` utility; only
+kernel-allocated outputs keep their SSA value. This keeps the
+`ReturnParamsExplicit` invariant so orchestration codegen maps returns to
+args by pointer identity.
+
 ## Example
 
 **Before**:

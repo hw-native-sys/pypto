@@ -46,6 +46,7 @@
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/scope_outline_utils.h"
 #include "pypto/ir/transforms/utils/tpop_tfree_finalizer.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
@@ -1044,11 +1045,31 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
   if (func->return_types_.empty()) {
     group_stmts.push_back(std::make_shared<EvalStmt>(aiv_call, func->span_));
   } else {
-    // Assign AIV result and return it
-    auto result_var = std::make_shared<Var>("result", aiv_return_type, func->span_);
-    group_stmts.push_back(std::make_shared<AssignStmt>(result_var, aiv_call, func->span_));
-    std::vector<ExprPtr> return_exprs = {result_var};
-    group_stmts.push_back(std::make_shared<ReturnStmt>(return_exprs, func->span_));
+    // Return the group params the kernel's returns write through (group_params
+    // is positionally 1:1 with func->params_). Explicit param returns keep the
+    // return->param mapping a pointer-identity lookup for orchestration
+    // codegen (#1702). Fall back to returning the AIV result only when some
+    // position is not a param writeback.
+    auto returned_idxs = return_lineage::ReturnedParamIndices(func, nullptr);
+    bool all_param_returns = returned_idxs.size() == func->return_types_.size();
+    for (const auto& idx : returned_idxs) {
+      all_param_returns = all_param_returns && idx.has_value() && idx.value() < group_params.size();
+    }
+    if (all_param_returns) {
+      group_stmts.push_back(std::make_shared<EvalStmt>(aiv_call, func->span_));
+      std::vector<ExprPtr> return_exprs;
+      return_exprs.reserve(returned_idxs.size());
+      for (const auto& idx : returned_idxs) {
+        // all_param_returns guarantees has_value().
+        return_exprs.push_back(group_params[idx.value()]);  // NOLINT(bugprone-unchecked-optional-access)
+      }
+      group_stmts.push_back(std::make_shared<ReturnStmt>(return_exprs, func->span_));
+    } else {
+      auto result_var = std::make_shared<Var>("result", aiv_return_type, func->span_);
+      group_stmts.push_back(std::make_shared<AssignStmt>(result_var, aiv_call, func->span_));
+      std::vector<ExprPtr> return_exprs = {result_var};
+      group_stmts.push_back(std::make_shared<ReturnStmt>(return_exprs, func->span_));
+    }
   }
 
   auto group_body = SeqStmts::Flatten(std::move(group_stmts), func->span_);

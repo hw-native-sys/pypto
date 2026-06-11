@@ -89,6 +89,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "AssignTypeSymmetry";
     case IRProperty::ManualDepsOnSubmitOnly:
       return "ManualDepsOnSubmitOnly";
+    case IRProperty::ReturnParamsExplicit:
+      return "ReturnParamsExplicit";
     default:
       return "Unknown";
   }
@@ -132,7 +134,8 @@ const IRPropertySet& GetVerifiedProperties() {
                                    IRProperty::NoRedundantBlocks,
                                    IRProperty::InOutUseValid,
                                    IRProperty::CallDirectionsResolved,
-                                   IRProperty::ManualDepsOnSubmitOnly};
+                                   IRProperty::ManualDepsOnSubmitOnly,
+                                   IRProperty::ReturnParamsExplicit};
   return props;
 }
 

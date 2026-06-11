@@ -232,7 +232,8 @@ inline const PassProperties kAllocateMemoryAddrProperties{
 // -- Return order normalization pass ------------------------------------------
 
 inline const PassProperties kNormalizeReturnOrderProperties{
-    .required = {IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps}};
+    .required = {IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps},
+    .produced = {IRProperty::ReturnParamsExplicit}};
 
 // -- Pipeline lowering + IO-order canonicalization passes (tile-level, before InitMemRef) ------
 
