@@ -1299,6 +1299,29 @@ StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const std::map<VarPtr, VarPtr>& 
           return IRMutator::VisitStmt_(op);
         }
 
+        // Rebase a sharing-group member's MemRef onto the reuse target's
+        // allocation, preserving the member's byte offset and size relative to
+        // the group representative.  Members are subviews at distinct offsets
+        // within the group's buffer; substituting the target MemRef wholesale
+        // would collapse all of them onto the target's base offset (issue
+        // #1723: all per-head row slices read row 0 after reuse).  Members at
+        // the representative's own offset/size keep the target MemRef object
+        // itself so plain reuse preserves MemRef identity.
+        const MemRefPtr curr_memref = curr_tile_type->memref_.value_or(nullptr);
+        auto rebase_memref = [&](const TileTypePtr& tile) -> std::optional<MemRefPtr> {
+          if (!tile->memref_.has_value() || !curr_memref) return source_memref;
+          const auto& old = tile->memref_.value();
+          auto old_off = As<ConstInt>(old->byte_offset_);
+          auto curr_off = As<ConstInt>(curr_memref->byte_offset_);
+          if (!old_off || !curr_off) return source_memref;
+          const int64_t rel = old_off->value_ - curr_off->value_;
+          if (rel == 0 && old->size_ == (*source_memref)->size_) return source_memref;
+          auto rel_expr = std::make_shared<ConstInt>(rel, DataType::INDEX, Span::unknown());
+          return std::make_shared<MemRef>((*source_memref)->base_,
+                                          AddByteOffsets((*source_memref)->byte_offset_, rel_expr),
+                                          old->size_, old->span_);
+        };
+
         // Create new TileType with shared MemRef
         auto new_tile_type = std::dynamic_pointer_cast<const TileType>(CloneTypeWithMemRefAndRemapExprs(
             curr_tile_type, source_memref, [this](const ExprPtr& expr) { return VisitExpr(expr); }));
@@ -1321,7 +1344,7 @@ StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const std::map<VarPtr, VarPtr>& 
               if (shared_tile_type) {
                 auto new_shared_tile_type =
                     std::dynamic_pointer_cast<const TileType>(CloneTypeWithMemRefAndRemapExprs(
-                        shared_tile_type, source_memref,
+                        shared_tile_type, rebase_memref(shared_tile_type),
                         [this](const ExprPtr& expr) { return VisitExpr(expr); }));
                 auto new_shared_var = std::make_shared<const Var>(shared_var->name_hint_,
                                                                   new_shared_tile_type, shared_var->span_);
