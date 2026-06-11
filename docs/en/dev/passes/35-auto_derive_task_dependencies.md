@@ -55,7 +55,11 @@ For each function body:
    padding fall back to an unknown region and overlap conservatively.
 5. Treat MemRef-backed shaped values as aliases when `MemRef::MayAlias` reports
    the same base allocation with overlapping or symbolic byte ranges.
-6. Collect statically bound producer TaskIds from `pl.submit` tuple tails.
+6. Collect statically bound producer TaskIds from `pl.submit` tuple tails,
+   including TaskIds routed through a `pl.array` of `TASK_ID`:
+   `array.update_element` records the producers an array carries (propagated
+   across loop boundaries), so deps written as `deps=[arr]` or `deps=[arr[i]]`
+   resolve back to those producers.
 7. Walk each `RuntimeScopeStmt` in source order, maintaining prior accesses for
    that scope only. For default `auto_scope=True` orchestration functions with
    no materialized scope yet, use the whole function body as a virtual AUTO

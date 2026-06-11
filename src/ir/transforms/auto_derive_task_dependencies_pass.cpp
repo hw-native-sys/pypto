@@ -760,6 +760,27 @@ class SubmitTaskIdCollector : public IRVisitor {
       RecordTaskTupleProducer(op->var_, submit);
     }
 
+    if (auto array_call = As<Call>(op->value_); array_call && op->var_) {
+      const std::string& array_op = array_call->op_->name_;
+      if (array_op == "array.update_element" && array_call->args_.size() == 3) {
+        std::vector<VarPtr> carried;
+        if (auto base = AsVarLike(array_call->args_[0])) {
+          auto it = task_ids_by_array_id_.find(base->UniqueId());
+          if (it != task_ids_by_array_id_.end()) carried = it->second;
+        }
+        CollectStoredTaskIds(array_call->args_[2], &carried);
+        task_ids_by_array_id_[op->var_->UniqueId()] = std::move(carried);
+      } else if (array_op == "array.get_element" && IsTaskIdVar(op->var_) && array_call->args_.size() == 2) {
+        // A scalar read from a single-producer TASK_ID array resolves to that producer.
+        if (auto src = AsVarLike(array_call->args_[0])) {
+          auto it = task_ids_by_array_id_.find(src->UniqueId());
+          if (it != task_ids_by_array_id_.end() && it->second.size() == 1) {
+            task_id_by_var_id_[op->var_->UniqueId()] = it->second.front();
+          }
+        }
+      }
+    }
+
     IRVisitor::VisitStmt_(op);
   }
 
@@ -789,8 +810,29 @@ class SubmitTaskIdCollector : public IRVisitor {
 
   const std::unordered_map<const Expr*, VarPtr>& task_id_by_expr() const { return task_id_by_expr_; }
   const std::unordered_map<uint64_t, VarPtr>& task_id_by_var_id() const { return task_id_by_var_id_; }
+  const std::unordered_map<uint64_t, std::vector<VarPtr>>& task_ids_by_array_id() const {
+    return task_ids_by_array_id_;
+  }
 
  private:
+  // Producer TaskIds contributed by a value stored into a TASK_ID array: a bare
+  // TaskId, or a nested array.get_element pulling its source array's set.
+  void CollectStoredTaskIds(const ExprPtr& value, std::vector<VarPtr>* out) const {
+    if (!value || !out) return;
+    if (auto call = As<Call>(value)) {
+      if (call->op_->name_ == "array.get_element" && !call->args_.empty()) {
+        if (auto src = AsVarLike(call->args_[0])) {
+          auto it = task_ids_by_array_id_.find(src->UniqueId());
+          if (it != task_ids_by_array_id_.end()) {
+            for (const auto& tid : it->second) AppendUnique(out, tid);
+          }
+        }
+        return;
+      }
+    }
+    AppendUnique(out, CanonicalTaskIdForExpr(value));
+  }
+
   VarPtr CanonicalTaskIdForExpr(const ExprPtr& expr) const {
     auto var = AsVarLike(expr);
     if (!var) return nullptr;
@@ -819,24 +861,37 @@ class SubmitTaskIdCollector : public IRVisitor {
         task_id_by_var_id_[return_vars[i]->UniqueId()] = task_id;
       }
     }
+
+    // Carry array TaskId lineage from the yielded array to the loop iter_arg/return Var.
+    for (size_t i = 0; i < count; ++i) {
+      auto yielded = AsVarLike(yield->value_[i]);
+      if (!yielded) continue;
+      auto it = task_ids_by_array_id_.find(yielded->UniqueId());
+      if (it == task_ids_by_array_id_.end()) continue;
+      if (iter_args[i]) task_ids_by_array_id_[iter_args[i]->UniqueId()] = it->second;
+      if (return_vars[i]) task_ids_by_array_id_[return_vars[i]->UniqueId()] = it->second;
+    }
   }
 
   std::unordered_map<const Var*, ExprPtr> task_expr_by_tuple_;
   std::unordered_map<const Var*, std::unordered_map<int, VarPtr>> tuple_get_by_tuple_;
   std::unordered_map<const Expr*, VarPtr> task_id_by_expr_;
   std::unordered_map<uint64_t, VarPtr> task_id_by_var_id_;
+  std::unordered_map<uint64_t, std::vector<VarPtr>> task_ids_by_array_id_;
 };
 
 class AutoDepMutator : public IRMutator {
  public:
   AutoDepMutator(ProgramPtr program, const StorageRootAnalysis* storage,
                  const std::unordered_map<const Expr*, VarPtr>* task_id_by_expr,
-                 const std::unordered_map<uint64_t, VarPtr>* task_id_by_var_id, bool analyze_auto_scopes,
-                 bool analyze_whole_body_as_auto_scope)
+                 const std::unordered_map<uint64_t, VarPtr>* task_id_by_var_id,
+                 const std::unordered_map<uint64_t, std::vector<VarPtr>>* task_ids_by_array_id,
+                 bool analyze_auto_scopes, bool analyze_whole_body_as_auto_scope)
       : program_(std::move(program)),
         storage_(storage),
         task_id_by_expr_(task_id_by_expr),
         task_id_by_var_id_(task_id_by_var_id),
+        task_ids_by_array_id_(task_ids_by_array_id),
         analyze_auto_scopes_(analyze_auto_scopes),
         analyze_whole_body_as_auto_scope_(analyze_whole_body_as_auto_scope) {}
 
@@ -1083,6 +1138,15 @@ class AutoDepMutator : public IRMutator {
     std::vector<VarPtr> canonical;
     canonical.reserve(vars.size());
     for (const auto& var : vars) {
+      // Expand an array-typed dep (whole array, or a synthesized per-slot dep
+      // array) into the producer TaskIds it carries.
+      if (var && task_ids_by_array_id_) {
+        auto it = task_ids_by_array_id_->find(var->UniqueId());
+        if (it != task_ids_by_array_id_->end()) {
+          for (const auto& tid : it->second) AppendUnique(&canonical, CanonicalTaskId(tid));
+          continue;
+        }
+      }
       AppendUnique(&canonical, CanonicalTaskId(var));
     }
     return canonical;
@@ -1155,6 +1219,7 @@ class AutoDepMutator : public IRMutator {
   const StorageRootAnalysis* storage_;
   const std::unordered_map<const Expr*, VarPtr>* task_id_by_expr_;
   const std::unordered_map<uint64_t, VarPtr>* task_id_by_var_id_;
+  const std::unordered_map<uint64_t, std::vector<VarPtr>>* task_ids_by_array_id_ = nullptr;
   bool analyze_auto_scopes_ = false;
   bool analyze_whole_body_as_auto_scope_ = false;
   std::vector<std::vector<StorageAccess>> prior_stack_;
@@ -1190,7 +1255,8 @@ Pass AutoDeriveTaskDependencies(bool analyze_auto_scopes) {
                                                     func->func_type_ == FunctionType::Orchestration &&
                                                     func->GetAttr<bool>("auto_scope", true);
       AutoDepMutator mutator(program, &storage, &task_ids.task_id_by_expr(), &task_ids.task_id_by_var_id(),
-                             analyze_auto_scopes, analyze_whole_body_as_auto_scope);
+                             &task_ids.task_ids_by_array_id(), analyze_auto_scopes,
+                             analyze_whole_body_as_auto_scope);
       auto new_body = mutator.AnalyzeBody(func->body_);
       if (new_body.get() == func->body_.get()) continue;
 

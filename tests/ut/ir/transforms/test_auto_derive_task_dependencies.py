@@ -1235,6 +1235,87 @@ class TestAutoDeriveTaskDependencies:
         assert len(scopes) == 1
         assert scopes[0].manual is False
 
+    def test_array_slot_deps_keep_manual_scope(self):
+        """Issue #1744: when a manual scope expresses dependencies on a
+        ``pl.parallel`` / loop producer fan-out by collecting per-iteration
+        TaskIds into a ``pl.array`` and referencing them downstream as
+        ``deps=[arr[i], ...]``, the pass must resolve the array round-trip back
+        to the producer TaskId and keep the scope MANUAL — not demote it to AUTO
+        (which re-engages runtime tracking and serializes the fan-out)."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill(
+                self,
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                return out
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, scratch: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.manual_scope():
+                    prod_tids = pl.array.create(4, pl.TASK_ID)
+                    carried = scratch
+                    for n in pl.range(0, 4):
+                        carried, p_tid = pl.submit(self.fill, carried)
+                        prod_tids[n] = p_tid
+                    out, _ = pl.submit(
+                        self.consume,
+                        carried,
+                        deps=[prod_tids[0], prod_tids[1], prod_tids[2], prod_tids[3]],
+                    )
+                return out
+
+        out = _run_auto_deps(Prog)
+        scopes = _runtime_scopes(out)
+        assert len(scopes) == 1
+        assert scopes[0].manual is True
+
+        # The user already covered the hazard via the array deps, so the pass
+        # adds no compiler edge and the explicit deps survive untouched.
+        consume_call = _user_calls(out, "consume")[0]
+        assert _compiler_edges(consume_call) == []
+        assert len(_user_edges(consume_call)) == 1
+
+    def test_whole_task_id_array_dep_keeps_manual_scope(self):
+        """Issue #1744: the whole-array fence form (``deps=[arr]`` over a loop
+        producer) must likewise keep the scope MANUAL."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill(
+                self,
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                return out
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, scratch: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.manual_scope():
+                    prod_tids = pl.array.create(4, pl.TASK_ID)
+                    carried = scratch
+                    for n in pl.range(0, 4):
+                        carried, p_tid = pl.submit(self.fill, carried)
+                        prod_tids[n] = p_tid
+                    out, _ = pl.submit(self.consume, carried, deps=[prod_tids])
+                return out
+
+        out = _run_auto_deps(Prog)
+        scopes = _runtime_scopes(out)
+        assert len(scopes) == 1
+        assert scopes[0].manual is True
+        assert _compiler_edges(_user_calls(out, "consume")[0]) == []
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
