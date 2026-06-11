@@ -18,11 +18,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from pypto import DataType, backend, ir
 from pypto.backend import BackendType
 from pypto.ir.compiled_program import CompiledProgram, _build_full_args, _extract_param_infos
 from pypto.runtime import DeviceTensor
-
-from pypto import DataType, backend, ir
 
 
 @contextlib.contextmanager
