@@ -497,6 +497,55 @@ class CompiledProgram:
         """Target execution platform (e.g. ``"a2a3sim"``, ``"a5"``)."""
         return self._platform
 
+    # --- Pre-runtime IR validation -------------------------------------------
+
+    def validate_ir(
+        self,
+        tensors: dict[str, torch.Tensor],
+        expected: dict[str, torch.Tensor],
+        *,
+        rtol: float = 5e-2,
+        atol: float = 5e-2,
+    ) -> None:
+        """Re-run ``torch_codegen`` on each dumped pass IR and numerically
+        compare against golden outputs.
+
+        This gives per-pass correctness checking before ever touching the
+        device: each ``passes_dump/`` file is re-executed via
+        :func:`pypto.debug.torch_codegen` and compared to *expected*.
+
+        Requires the program to have been compiled with ``dump_passes=True``
+        (the default), which produces ``<output_dir>/passes_dump/``.
+
+        Args:
+            tensors: Input tensors for executing generated functions, keyed
+                by function parameter name.
+            expected: Golden output tensors keyed by tensor name.
+            rtol: Relative tolerance forwarded to ``torch.allclose``.
+            atol: Absolute tolerance forwarded to ``torch.allclose``.
+
+        Raises:
+            FileNotFoundError: If no ``passes_dump/`` directory exists
+                (i.e. compiled with ``dump_passes=False``).
+            AssertionError: If any pass IR's numeric result diverges from
+                *expected*.
+
+        Example:
+            >>> compiled = ir.compile(MyProgram)        # dump_passes=True
+            >>> compiled.validate_ir(inputs, expected)  # per-pass check
+        """
+        # Lazy import keeps the core ir layer free of a debug-layer
+        # dependency at import time.
+        from pypto.debug import validate_pass_ir_codegen_results  # noqa: PLC0415
+
+        passes_dump = self._output_dir / "passes_dump"
+        if not passes_dump.is_dir():
+            raise FileNotFoundError(
+                f"No passes_dump/ under {self._output_dir}. "
+                "Compile with dump_passes=True to enable IR validation."
+            )
+        validate_pass_ir_codegen_results(str(passes_dump), tensors, expected, rtol=rtol, atol=atol)
+
     # --- Runtime artefacts (lazy) --------------------------------------------
     #
     # These three properties expose the simpler-side products of

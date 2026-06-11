@@ -18,10 +18,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from pypto import DataType, backend, ir
 from pypto.backend import BackendType
 from pypto.ir.compiled_program import CompiledProgram, _build_full_args, _extract_param_infos
 from pypto.runtime import DeviceTensor
+
+from pypto import DataType, backend, ir
 
 
 @contextlib.contextmanager
@@ -867,6 +868,29 @@ class TestSubChipCallableExtraction:
             _ = sub.chip_callable  # cache warmed
             with pytest.raises(RuntimeError, match="already loaded"):
                 sub.load(pto_isa_commit="abc1234")
+
+
+class TestValidateIr:
+    """Verify CompiledProgram.validate_ir resolves passes_dump and delegates."""
+
+    def test_missing_passes_dump_raises(self, tmp_path):
+        prog = _make_program_with_orchestration()
+        cp = CompiledProgram(prog, str(tmp_path))  # no passes_dump/ created
+        with pytest.raises(FileNotFoundError, match="passes_dump"):
+            cp.validate_ir({}, {})
+
+    def test_delegates_to_validator(self, tmp_path):
+        prog = _make_program_with_orchestration()
+        passes_dump = tmp_path / "passes_dump"
+        passes_dump.mkdir()
+        cp = CompiledProgram(prog, str(tmp_path))
+
+        tensors = {"a": torch.zeros(4)}
+        expected = {"c": torch.ones(4)}
+        with patch("pypto.debug.validate_pass_ir_codegen_results") as validator:
+            cp.validate_ir(tensors, expected, rtol=1e-3, atol=1e-4)
+
+        validator.assert_called_once_with(str(passes_dump), tensors, expected, rtol=1e-3, atol=1e-4)
 
 
 if __name__ == "__main__":

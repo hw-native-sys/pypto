@@ -9,8 +9,9 @@
 
 """PyPTO debug and verification utilities."""
 
-from .torch_codegen import torch_codegen
+from .torch_codegen import torch_codegen, validate_pass_ir_codegen_results
 
 __all__ = [
     "torch_codegen",
+    "validate_pass_ir_codegen_results",
 ]

@@ -10,7 +10,7 @@
 
 ```python
 import torch
-from pypto.debug.torch_codegen import torch_codegen, validate_pass_ir_codegen_results
+from pypto.debug import torch_codegen, validate_pass_ir_codegen_results
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.backend import BackendType, reset_for_testing, set_backend_type
 ```
@@ -181,6 +181,21 @@ validate tensor: 'out', max_abs_diff: 1.234567e-03, pass: True
 ```
 
 若某个 pass 的结果不符合预期，会抛出带 pass 文件上下文和 diff 信息的异常。
+
+### 便捷方式：`CompiledProgram.validate_ir`
+
+当你已经通过 `ir.compile(..., dump_passes=True)`（默认即为 `True`）拿到一个
+`CompiledProgram` 时，无需自己去定位 `passes_dump/`。直接在编译产物上调用
+`validate_ir` 即可——它会自动解析 `<output_dir>/passes_dump/` 并转发给
+`validate_pass_ir_codegen_results`：
+
+```python
+compiled = ir.compile(MyProgram)          # dump_passes 默认 True
+compiled.validate_ir(tensors, expected)   # 逐 pass 数值校验
+```
+
+若程序是用 `dump_passes=False` 编译的（不存在 `passes_dump/`），会抛出
+`FileNotFoundError`。`rtol` / `atol` 作为关键字参数传入，与底层函数一致。
 
 ## 如何选择这三种方式
 

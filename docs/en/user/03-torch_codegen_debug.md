@@ -10,7 +10,7 @@ Use these workflows to debug numerical correctness at different compilation stag
 
 ```python
 import torch
-from pypto.debug.torch_codegen import torch_codegen, validate_pass_ir_codegen_results
+from pypto.debug import torch_codegen, validate_pass_ir_codegen_results
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.backend import BackendType, reset_for_testing, set_backend_type
 ```
@@ -181,6 +181,22 @@ validate tensor: 'out', max_abs_diff: 1.234567e-03, pass: True
 ```
 
 If a pass result is wrong, it raises with pass file context and max diff.
+
+### Convenience: `CompiledProgram.validate_ir`
+
+When you already have a `CompiledProgram` from `ir.compile(..., dump_passes=True)`
+(the default), you do not need to locate `passes_dump/` yourself. Call
+`validate_ir` directly on the compiled artifact — it resolves
+`<output_dir>/passes_dump/` and forwards to `validate_pass_ir_codegen_results`:
+
+```python
+compiled = ir.compile(MyProgram)          # dump_passes=True by default
+compiled.validate_ir(tensors, expected)   # per-pass numeric check
+```
+
+It raises `FileNotFoundError` if the program was compiled with
+`dump_passes=False` (no `passes_dump/` exists). `rtol` / `atol` are accepted as
+keyword arguments, same as the underlying function.
 
 ## Which Workflow to Choose
 
