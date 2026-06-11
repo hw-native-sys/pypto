@@ -250,6 +250,11 @@ Pass InlineFunctions();
 Pass MaterializeCommDomainScopes();
 
 /**
+ * @brief Lower host-level ``pld.tensor.allreduce`` calls to internal builtin chip dispatches.
+ */
+Pass LowerHostTensorCollectives();
+
+/**
  * @brief Create a loop unrolling pass
  *
  * Expands ForStmt nodes with ForKind::Unroll into inlined copies of the loop

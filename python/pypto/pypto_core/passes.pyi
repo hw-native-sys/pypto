@@ -609,6 +609,9 @@ def materialize_comm_domain_scopes() -> Pass:
     never inlined into L3, so the dispatch chain survives inlining.
     """
 
+def lower_host_tensor_collectives() -> Pass:
+    """Lower host-level ``pld.tensor.allreduce`` calls to builtin collective dispatches."""
+
 def materialize_runtime_scopes() -> Pass:
     """Materialize implicit orchestration scopes as explicit RuntimeScopeStmt nodes.
 

@@ -159,7 +159,7 @@ def get(
 def allreduce(
     target: Expr,
     signal: Expr,
-    op: ReduceOp,
+    op: ReduceOp = ReduceOp.Sum,
     *,
     span: Span | None = None,
 ) -> Call:
@@ -168,9 +168,10 @@ def allreduce(
     In-place cross-rank allreduce: after the call, every rank's slice of
     ``target`` holds the reduced value. ``signal`` is a window-bound INT32
     matrix used as the cross-rank barrier. ``op`` (:class:`ir.ReduceOp`)
-    selects the reduction operator and is packed as an ``int`` attr. The
-    result type is ``target``'s :class:`ir.DistributedTensorType` (the rebind
-    target — same semantics as :func:`pl.store`).
+    selects the reduction operator, defaults to ``ReduceOp.Sum``, and is
+    packed as an ``int`` attr. The result type is ``target``'s
+    :class:`ir.DistributedTensorType` (the rebind target — same semantics as
+    :func:`pl.store`).
 
     LowerCompositeOps expands this into the 4-phase
     notify/wait/remote_load+accumulate/store decomposition; this Call never

@@ -22,17 +22,18 @@ the IR types so downstream codegen has O(1) access.
 ## Position in the pipeline
 
 ```text
-... -> DeriveCallDirections -> AutoDeriveTaskDependencies -> ExpandManualPhaseFence -> MaterializeCommDomainScopes -> Simplify (final)
+... -> DeriveCallDirections -> AutoDeriveTaskDependencies -> ExpandManualPhaseFence -> MaterializeCommDomainScopes -> LowerHostTensorCollectives -> Simplify (final)
 ```
 
-The pass runs at the very end of the default pipeline, immediately before the
-final `Simplify`. None of the intervening passes between `InlineFunctions`
-and here touches the host_orch alloc/window/dispatch chain — host_orch is
-never tile-lowered, and L2 (chip-level) orchestrations are never inlined
-into L3 — so the alloc / view / dispatch sites this pass needs are still
-discoverable. Running last keeps the producing IR fully canonicalised before
-the descriptor analysis kicks in, and any constant folding that the trailing
-`Simplify` does on the collected sizes is applied uniformly.
+The pass runs near the end of the default pipeline, immediately before
+[`LowerHostTensorCollectives`](39-lower_host_tensor_collectives.md) and the final
+`Simplify`. None of the intervening passes between `InlineFunctions` and here
+touches the host_orch alloc/window/dispatch chain: host_orch is never
+tile-lowered, and L2 (chip-level) orchestrations are never inlined into L3, so
+the alloc / view / dispatch sites this pass needs are still discoverable. Running
+late keeps the producing IR fully canonicalised before the descriptor analysis
+kicks in, and any constant folding that the trailing `Simplify` does on the
+collected sizes is applied uniformly.
 
 ## Algorithm
 

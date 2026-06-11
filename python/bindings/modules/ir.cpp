@@ -657,7 +657,7 @@ void BindIR(nb::module_& m) {
   ir.def(
       "create_op_call",
       [](const std::string& op_name, const std::vector<ExprPtr>& args, const Span& span) {
-        return OpRegistry::GetInstance().Create(op_name, args, span);
+        return OpRegistry::GetInstance().CreateUserFacing(op_name, args, span);
       },
       nb::arg("op_name"), nb::arg("args"), nb::arg("span"),
       "Create a Call expression (backward compatibility)");
@@ -668,7 +668,7 @@ void BindIR(nb::module_& m) {
          const Span& span) {
         // Convert Python dict to C++ vector<pair<string, any>> to preserve order
         auto kwargs = ConvertKwargsDict(kwargs_dict);
-        return OpRegistry::GetInstance().Create(op_name, args, kwargs, span);
+        return OpRegistry::GetInstance().CreateUserFacing(op_name, args, kwargs, span);
       },
       nb::arg("op_name"), nb::arg("args"), nb::arg("kwargs"), nb::arg("span"),
       "Create a Call expression with args and kwargs");

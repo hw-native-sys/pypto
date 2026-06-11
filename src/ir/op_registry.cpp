@@ -96,6 +96,34 @@ CallPtr OpRegistry::Create(const std::string& op_name, const std::vector<ExprPtr
 
 CallPtr OpRegistry::Create(const std::string& op_name, const std::vector<ExprPtr>& args,
                            const std::vector<std::pair<std::string, std::any>>& kwargs, Span span) const {
+  return CreateImpl(op_name, args, kwargs, std::move(span), /*allow_internal=*/true);
+}
+
+CallPtr OpRegistry::CreateUserFacing(const std::string& op_name, const std::vector<ExprPtr>& args,
+                                     Span span) const {
+  return CreateUserFacing(op_name, args, {}, std::move(span));
+}
+
+CallPtr OpRegistry::CreateUserFacing(const std::string& op_name, const std::vector<ExprPtr>& args,
+                                     const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                     Span span) const {
+  return CreateImpl(op_name, args, kwargs, std::move(span), /*allow_internal=*/false);
+}
+
+CallPtr OpRegistry::CreateInternal(const std::string& op_name, const std::vector<ExprPtr>& args,
+                                   Span span) const {
+  return CreateInternal(op_name, args, {}, std::move(span));
+}
+
+CallPtr OpRegistry::CreateInternal(const std::string& op_name, const std::vector<ExprPtr>& args,
+                                   const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                   Span span) const {
+  return CreateImpl(op_name, args, kwargs, std::move(span), /*allow_internal=*/true);
+}
+
+CallPtr OpRegistry::CreateImpl(const std::string& op_name, const std::vector<ExprPtr>& args,
+                               const std::vector<std::pair<std::string, std::any>>& kwargs, Span span,
+                               bool allow_internal) const {
   // Look up operator in registry
   auto it = registry_.find(op_name);
   if (it == registry_.end()) {
@@ -109,6 +137,10 @@ CallPtr OpRegistry::Create(const std::string& op_name, const std::vector<ExprPtr
   }
 
   const auto& entry = it->second;
+  if (entry.IsInternalOnly() && !allow_internal) {
+    throw ValueError("Operator '" + op_name +
+                     "' is internal-only and cannot be created from user-facing op creation paths");
+  }
 
   // Get operator instance (shared definition)
   OpPtr op = entry.GetOp();

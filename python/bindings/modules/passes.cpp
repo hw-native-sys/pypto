@@ -510,6 +510,8 @@ void BindPass(nb::module_& m) {
              "DistributedTensorType.window_buffer_ on view Vars, and wrap the host_orch\n"
              "body in nested CommDomainScopeStmts (one per inferred comm domain). Runs\n"
              "immediately after InlineFunctions (L2 orch is never inlined into L3).");
+  passes.def("lower_host_tensor_collectives", &pass::LowerHostTensorCollectives,
+             "Lower host-level pld.tensor.allreduce calls to builtin tensor collective dispatches.");
   passes.def("materialize_runtime_scopes", &pass::MaterializeRuntimeScopes,
              "Materialize implicit orchestration scopes as explicit RuntimeScopeStmt nodes.\n\n"
              "For every Orchestration function, inserts AUTO RuntimeScopeStmt (manual_=false)\n"

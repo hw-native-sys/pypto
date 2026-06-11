@@ -667,12 +667,15 @@ CompositeLoweringFn LookupCompositeRule(const std::string& op_name) {
 // ============================================================================
 class LowerCompositeOpsMutator : public IRMutator {
  public:
+  explicit LowerCompositeOpsMutator(bool skip_host_allreduce = false)
+      : skip_host_allreduce_(skip_host_allreduce) {}
+
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     auto call = As<Call>(op->value_);
     if (!call) {
       return IRMutator::VisitStmt_(op);
     }
-    CompositeLoweringFn rule = LookupCompositeRule(call->op_->name_);
+    CompositeLoweringFn rule = LookupRule(call);
     if (!rule) {
       return IRMutator::VisitStmt_(op);
     }
@@ -713,7 +716,7 @@ class LowerCompositeOpsMutator : public IRMutator {
       INTERNAL_CHECK_SPAN(op->value_[i], op->span_) << "ReturnStmt has null value at index " << i;
       ExprPtr value = op->value_[i];
       auto call = As<Call>(value);
-      CompositeLoweringFn rule = call ? LookupCompositeRule(call->op_->name_) : nullptr;
+      CompositeLoweringFn rule = call ? LookupRule(call) : nullptr;
       if (rule) {
         std::vector<ExprPtr> visited_args = VisitArgs(call->args_, op->span_);
         const std::string base = "ret" + std::to_string(i);
@@ -747,6 +750,13 @@ class LowerCompositeOpsMutator : public IRMutator {
   }
 
  private:
+  CompositeLoweringFn LookupRule(const CallPtr& call) const {
+    if (skip_host_allreduce_ && call && call->op_ && call->op_->name_ == "pld.tensor.allreduce") {
+      return nullptr;
+    }
+    return call && call->op_ ? LookupCompositeRule(call->op_->name_) : nullptr;
+  }
+
   std::vector<ExprPtr> VisitArgs(const std::vector<ExprPtr>& args, const Span& span) {
     std::vector<ExprPtr> out;
     out.reserve(args.size());
@@ -759,10 +769,14 @@ class LowerCompositeOpsMutator : public IRMutator {
   }
 
   std::size_t temp_counter_ = 0;
+  bool skip_host_allreduce_{false};
 };
 
 FunctionPtr TransformLowerCompositeOps(const FunctionPtr& func) {
-  LowerCompositeOpsMutator mutator;
+  const bool skip_host_allreduce = func && func->level_.has_value() && *func->level_ == Level::HOST &&
+                                   (func->func_type_ == FunctionType::Orchestration ||
+                                    (func->role_.has_value() && *func->role_ == Role::Orchestrator));
+  LowerCompositeOpsMutator mutator(skip_host_allreduce);
   return mutator.VisitFunction(func);
 }
 

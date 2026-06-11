@@ -2940,7 +2940,7 @@ def create_op_call(op_name: str, args: Sequence[Expr], span: Span) -> Call:
         Call expression with automatically deduced result type
 
     Raises:
-        Exception: If operator is not registered or type deduction fails
+        Exception: If operator is not registered, is internal-only, or type deduction fails
     """
 
 @overload
@@ -2962,7 +2962,7 @@ def create_op_call(
         Call expression with automatically deduced result type
 
     Raises:
-        Exception: If operator is not registered or type deduction fails
+        Exception: If operator is not registered, is internal-only, or type deduction fails
     """
 
 def is_incore_type(func_type: FunctionType) -> bool:

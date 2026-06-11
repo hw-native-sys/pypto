@@ -21,16 +21,16 @@
 ## 流水线位置
 
 ```text
-... -> DeriveCallDirections -> AutoDeriveTaskDependencies -> ExpandManualPhaseFence -> MaterializeCommDomainScopes -> Simplify（最终）
+... -> DeriveCallDirections -> AutoDeriveTaskDependencies -> ExpandManualPhaseFence -> MaterializeCommDomainScopes -> LowerHostTensorCollectives -> Simplify（最终）
 ```
 
-本 pass 跑在默认 pipeline 的最末尾、最后一次 `Simplify` 之前。从
-`InlineFunctions` 到这里之间的所有 pass 都不会触碰 host_orch 的
-alloc / window / dispatch 链 —— host_orch 本身不会被 tile lower，L2（chip
-级）orchestration 也永远不会被 inline 进 L3 —— 所以本 pass 需要的
-alloc / view / dispatch 点在此时仍然可见。放到末尾还能让产生 IR 在描述符
-分析之前先被充分规范化，最后的 `Simplify` 也能统一对收集到的 size 表达式
-做常量折叠。
+本 pass 跑在默认 pipeline 的末尾阶段，位于
+[`LowerHostTensorCollectives`](39-lower_host_tensor_collectives.md) 和最后一次
+`Simplify` 之前。从 `InlineFunctions` 到这里之间的所有 pass 都不会触碰
+host_orch 的 alloc / window / dispatch 链：host_orch 本身不会被 tile lower，
+L2（chip 级）orchestration 也永远不会被 inline 进 L3，所以本 pass 需要的
+alloc / view / dispatch 点在此时仍然可见。放在较晚阶段还能让产生 IR 在描述符
+分析之前先被充分规范化，最后的 `Simplify` 也能统一对收集到的 size 表达式做常量折叠。
 
 ## 算法
 

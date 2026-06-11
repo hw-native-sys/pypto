@@ -213,6 +213,83 @@ def test_world_size_rejects_kwargs():
 
 
 # ---------------------------------------------------------------------------
+# pld.tensor.allreduce op
+# ---------------------------------------------------------------------------
+
+
+def test_tensor_allreduce_returns_src_type():
+    span = ir.Span.unknown()
+    src = _make_distributed_tensor_var("src", [16], DataType.FP32, span)
+    signal = _make_distributed_tensor_var("signal", [4], DataType.INT32, span)
+    call = dist_tensor_ops.allreduce(src, signal, op=ir.ReduceOp.Sum, span=span)
+    assert call.type is src.type
+    assert call.kwargs["op"] == int(ir.ReduceOp.Sum)
+
+
+def test_tensor_allreduce_defaults_to_sum():
+    span = ir.Span.unknown()
+    src = _make_distributed_tensor_var("src", [16], DataType.FP32, span)
+    signal = _make_distributed_tensor_var("signal", [4], DataType.INT32, span)
+    call = dist_tensor_ops.allreduce(src, signal, span=span)
+    assert call.type is src.type
+    assert call.kwargs["op"] == int(ir.ReduceOp.Sum)
+
+
+def test_tensor_allreduce_accepts_dynamic_shape():
+    span = ir.Span.unknown()
+    n = ir.Var("n", ir.ScalarType(DataType.INT64), span)
+    src = ir.Var("src", ir.DistributedTensorType([n], DataType.FP32), span)
+    signal = _make_distributed_tensor_var("signal", [4], DataType.INT32, span)
+    call = dist_tensor_ops.allreduce(src, signal, op=ir.ReduceOp.Sum, span=span)
+    assert call.type is src.type
+
+
+def test_tensor_allreduce_rejects_plain_tensor_src():
+    span = ir.Span.unknown()
+    src = ir.Var("src", ir.TensorType([ir.ConstInt(16, DataType.INT64, span)], DataType.FP32), span)
+    signal = _make_distributed_tensor_var("signal", [4], DataType.INT32, span)
+    with pytest.raises(Exception, match="DistributedTensor"):
+        dist_tensor_ops.allreduce(src, signal, op=ir.ReduceOp.Sum, span=span)
+
+
+def test_tensor_allreduce_rejects_non_int32_signal():
+    span = ir.Span.unknown()
+    src = _make_distributed_tensor_var("src", [16], DataType.FP32, span)
+    signal = _make_distributed_tensor_var("signal", [4], DataType.FP32, span)
+    with pytest.raises(Exception, match="signal must have INT32 element type"):
+        dist_tensor_ops.allreduce(src, signal, op=ir.ReduceOp.Sum, span=span)
+
+
+def test_tensor_allreduce_accepts_non_rank1_signal():
+    span = ir.Span.unknown()
+    src = _make_distributed_tensor_var("src", [16], DataType.FP32, span)
+    signal = _make_distributed_tensor_var("signal", [2, 2], DataType.INT32, span)
+    call = dist_tensor_ops.allreduce(src, signal, op=ir.ReduceOp.Sum, span=span)
+    assert call.type is src.type
+
+
+def test_tensor_allreduce_accepts_non_fp32_target_dtype():
+    span = ir.Span.unknown()
+    src = _make_distributed_tensor_var("src", [16], DataType.FP16, span)
+    signal = _make_distributed_tensor_var("signal", [4], DataType.INT32, span)
+    call = dist_tensor_ops.allreduce(src, signal, op=ir.ReduceOp.Sum, span=span)
+    assert call.type is src.type
+
+
+def test_builtin_tensor_allreduce_is_internal_only():
+    span = ir.Span.unknown()
+    src = _make_distributed_tensor_var("src", [16], DataType.FP32, span)
+    signal = _make_distributed_tensor_var("signal", [4], DataType.INT32, span)
+    with pytest.raises(Exception, match="internal-only"):
+        ir.create_op_call(
+            "builtin.tensor.allreduce",
+            [src, signal],
+            {"op": int(ir.ReduceOp.Sum), "dtype": DataType.FP32},
+            span,
+        )
+
+
+# ---------------------------------------------------------------------------
 # pld.tile.remote_load op
 # ---------------------------------------------------------------------------
 

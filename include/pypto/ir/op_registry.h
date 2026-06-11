@@ -463,6 +463,21 @@ class OpRegistryEntry {
     return cross_core_role_;
   }
 
+  inline OpRegistryEntry& set_internal_only(bool value = true) {
+    internal_only_ = value;
+    return *this;
+  }
+
+  [[nodiscard]] bool IsInternalOnly() const { return internal_only_; }
+
+  inline OpRegistryEntry& set_template_dir(std::string template_dir) {
+    CHECK(!template_dir_.has_value()) << "Operator '" << name_ << "' template_dir is already set";
+    template_dir_ = std::move(template_dir);
+    return *this;
+  }
+
+  [[nodiscard]] const std::optional<std::string>& GetTemplateDir() const { return template_dir_; }
+
  private:
   void EnsureMemorySpec() {
     if (!memory_spec_.has_value()) {
@@ -498,6 +513,8 @@ class OpRegistryEntry {
   bool is_inplace_safe_{true};  ///< Whether the op supports in-place execution (src == dst buffer)
   std::optional<core_affinity::CoreAffinity> core_affinity_;     ///< Explicit core-affinity override
   std::optional<core_affinity::CrossCoreRole> cross_core_role_;  ///< Cross-core role (for predicates)
+  bool internal_only_{false};                                    ///< True for compiler-created ops only.
+  std::optional<std::string> template_dir_;                      ///< Package resource for builtin templates.
 };
 
 /**
@@ -567,6 +584,41 @@ class OpRegistry {
                                const std::vector<std::pair<std::string, std::any>>& kwargs, Span span) const;
 
   /**
+   * @brief Create a Call expression from user-facing parser/binding paths.
+   *
+   * Unlike compiler-internal ``Create`` calls, this path rejects operators
+   * marked ``internal_only`` so builtin implementation details cannot be
+   * reached by spelling their registry name in user code.
+   */
+  [[nodiscard]] CallPtr CreateUserFacing(const std::string& op_name, const std::vector<ExprPtr>& args,
+                                         Span span) const;
+
+  /**
+   * @brief Create a user-facing Call expression with kwargs.
+   */
+  [[nodiscard]] CallPtr CreateUserFacing(const std::string& op_name, const std::vector<ExprPtr>& args,
+                                         const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                         Span span) const;
+
+  /**
+   * @brief Create a Call expression for a compiler-internal operator.
+   *
+   * This explicit spelling is intended for passes that synthesize operators
+   * marked ``internal_only``. User-facing bindings and parser helpers must keep
+   * using ``CreateUserFacing`` so internal builtin ops cannot be reached by
+   * name.
+   */
+  [[nodiscard]] CallPtr CreateInternal(const std::string& op_name, const std::vector<ExprPtr>& args,
+                                       Span span) const;
+
+  /**
+   * @brief Create a compiler-internal Call expression with kwargs.
+   */
+  [[nodiscard]] CallPtr CreateInternal(const std::string& op_name, const std::vector<ExprPtr>& args,
+                                       const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                       Span span) const;
+
+  /**
    * @brief Check if an operator is registered
    *
    * @param op_name Name of the operator
@@ -609,6 +661,10 @@ class OpRegistry {
  private:
   OpRegistry() = default;
   ~OpRegistry() = default;
+
+  [[nodiscard]] CallPtr CreateImpl(const std::string& op_name, const std::vector<ExprPtr>& args,
+                                   const std::vector<std::pair<std::string, std::any>>& kwargs, Span span,
+                                   bool allow_internal) const;
 
   std::unordered_map<std::string, OpRegistryEntry> registry_;
 };

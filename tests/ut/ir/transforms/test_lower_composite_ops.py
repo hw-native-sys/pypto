@@ -539,6 +539,29 @@ def test_allreduce_is_decomposed_to_primitives():
     assert not missing, f"lowered IR missing expected ops: {missing}"
 
 
+def test_allreduce_in_host_orchestrator_is_left_for_host_collective_lowering():
+    """Host-level allreduce is lowered by LowerHostTensorCollectives, not here."""
+    SIZE = _ALLREDUCE_SIZE
+
+    @pl.program
+    class HostAllreduce:
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(
+            self,
+            data: pld.DistributedTensor[[1, SIZE], pl.FP32],
+            signal: pld.DistributedTensor[[2, 1], pl.INT32],
+        ):
+            data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
+            return 0
+
+    After = passes.lower_composite_ops()(HostAllreduce)
+    op_names = set(_collect_op_names(After))
+
+    assert "pld.tensor.allreduce" in op_names
+    assert "pld.system.notify" not in op_names
+    assert "pld.tile.remote_load" not in op_names
+
+
 def test_allreduce_emits_for_and_if_control_flow():
     """The recipe emits five ForStmts and five IfStmts:
 

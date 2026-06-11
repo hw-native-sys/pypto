@@ -197,6 +197,33 @@ def test_single_alloc_all_devices_world_size_loop():
     assert view_types[0].window_buffer is wb
 
 
+def test_allreduce_signal_inherits_data_comm_domain():
+    """Signal buffers used only by pld.tensor.allreduce still become scope slots."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            data_buf = pld.alloc_window_buffer(1024)
+            signal_buf = pld.alloc_window_buffer(16)
+            data = pld.window(data_buf, [256], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [4], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(data, device=r)
+            pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
+            return 0
+
+    result = _apply(P)
+    host = _get_func(result, "host_orch")
+    scopes = _get_comm_domain_scopes(host)
+    assert len(scopes) == 1
+    _assert_scope_fields(scopes[0], [], [_expected_slot("data_buf", 1024), _expected_slot("signal_buf", 16)])
+
+
 # ---------------------------------------------------------------------------
 # Single alloc / explicit ConstInt subset
 # ---------------------------------------------------------------------------

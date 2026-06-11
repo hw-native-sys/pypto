@@ -60,6 +60,7 @@ TENSOR_OPTIMIZATION_PASSES = [
     "AutoDeriveTaskDependencies",
     "ExpandManualPhaseFence",
     "MaterializeCommDomainScopes",
+    "LowerHostTensorCollectives",
     "Simplify",
     "MaterializeRuntimeScopes",
 ]
@@ -97,6 +98,7 @@ DEBUG_TILE_OPTIMIZATION_PASSES = [
     "AutoDeriveTaskDependencies",
     "ExpandManualPhaseFence",
     "MaterializeCommDomainScopes",
+    "LowerHostTensorCollectives",
     "Simplify",
     "MaterializeRuntimeScopes",
 ]

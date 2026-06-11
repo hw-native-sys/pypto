@@ -16,7 +16,7 @@ region for the source, so kernels can push directly from host-backed inputs
 without first staging through a window buffer; `dst` still requires a
 window-bound `DistributedTensor`.
 
-There are **six ops** and **three ABI enums**:
+There are **seven ops** and **four ABI enums**:
 
 | Op | Direction | Result | Hardware |
 | -- | --------- | ------ | -------- |
@@ -24,6 +24,7 @@ There are **six ops** and **three ABI enums**:
 | `pld.tile.remote_store` | push (write local tile → peer) | `Unknown` (side effect) | TSTORE |
 | `pld.tensor.get` | pull (read peer → local GM) | `Unknown` (side effect) | TGET |
 | `pld.tensor.put` | push (write local → peer) | `Unknown` (side effect) | TPUT |
+| `pld.tensor.allreduce` | collective reduce over window slices | `DistributedTensorType` (same as src) | builtin collective |
 | `pld.system.notify` | signal a peer's slot | `Unknown` (side effect) | TNOTIFY |
 | `pld.system.wait` | block on own slot | `Unknown` (side effect) | TWAIT |
 
@@ -59,7 +60,7 @@ The namespace encodes the IR level the op lives at, not an arbitrary grouping:
 
 ## ABI enums (`include/pypto/ir/comm.h`)
 
-The three enums are an **append-only ABI**. Their underlying `int` values are
+The four enums are an **append-only ABI**. Their underlying `int` values are
 serialised as the op's kwarg payload (`op` for notify, `cmp` for wait, `atomic`
 for put) and cast back to the enum at codegen time. New variants may only be
 added **at the end** so existing IR and cached programs keep their meaning.
@@ -68,6 +69,7 @@ added **at the end** so existing IR and cached programs keep their meaning.
 enum class NotifyOp : int { kAtomicAdd = 0, kSet = 1 };   // pld.system.notify
 enum class WaitCmp  : int { kEq = 0,        kGe = 1 };     // pld.system.wait
 enum class AtomicType : int { kNone = 0,    kAdd = 1 };    // pld.tensor.put
+enum class ReduceOp : int { kSum = 0, kMax = 1, kMin = 2, kProd = 3 };  // pld.tensor.allreduce
 ```
 
 | Enum | Variant | Meaning |
@@ -78,10 +80,14 @@ enum class AtomicType : int { kNone = 0,    kAdd = 1 };    // pld.tensor.put
 | `WaitCmp` | `kGe` | block until `*signal_slot >= expected` |
 | `AtomicType` | `kNone` | plain remote store — overwrite the peer's dst slice |
 | `AtomicType` | `kAdd` | atomically add the source data into the peer's dst slice |
+| `ReduceOp` | `kSum` | sum-reduce every participating rank's window slice |
+| `ReduceOp` | `kMax` | reserved max-reduce variant; lowering pending |
+| `ReduceOp` | `kMin` | reserved min-reduce variant; lowering pending |
+| `ReduceOp` | `kProd` | reserved product-reduce variant; lowering pending |
 
 Each enum is mirrored across three layers (C++ `enum class` → `nb::enum_` in the
 bindings → `.pyi` stub) and surfaced to the DSL as `pld.NotifyOp` /
-`pld.WaitCmp` / `pld.AtomicType`. The deducer validates the packed `int`
+`pld.WaitCmp` / `pld.AtomicType` / `pld.ReduceOp`. The deducer validates the packed `int`
 against the enum range so codegen can cast back without a second guard.
 
 ## Op reference
@@ -186,6 +192,21 @@ static** dimensions. Full-slice `get` requires identical shape; subregion `get`
 allows different full slice extents as long as the explicit transfer region is
 in bounds. `get` accepts no keyword attributes.
 
+### `pld.tensor.allreduce`
+
+```text
+pld.tensor.allreduce(src, signal, *, op: ReduceOp = ReduceOp.Sum) -> DistributedTensorType(src)
+```
+
+Reduces every participating rank's window-bound `src` slice in place and returns
+the same type as `src`. The user supplies an explicit window-bound INT32
+`signal` tensor with enough slots for the participating ranks; comm-domain
+materialisation keeps that signal buffer in the same domain as `src`, even when
+it is not passed to a user chip kernel. The public op currently accepts
+`ReduceOp.Sum` and rejects the reserved reduce variants (`Max`, `Min`, `Prod`)
+until their lowerings land. The host builtin lowering path currently supports
+the `Sum` + FP32 variant and requires a rank-1 signal tensor.
+
 ### `pld.system.notify` (TNOTIFY)
 
 ```text
@@ -235,9 +256,12 @@ The local-vs-remote split is intentional: a *local* operand (e.g. `get`'s
 ## Pipeline integration
 
 Comm domains and their slot allocations are materialised by the
-[`MaterializeCommDomainScopes`](passes/36-materialize_comm_domain_scopes.md) pass, which wraps each
+[`MaterializeCommDomainScopes`](passes/38-materialize_comm_domain_scopes.md) pass, which wraps each
 host_orch body in nested `CommDomainScopeStmt` nodes (one per inferred comm domain) and produces the
 per-window `WindowBuffer` records that the runtime binds physical buffers to.
+Host-level tensor collectives are then lowered by
+[`LowerHostTensorCollectives`](passes/39-lower_host_tensor_collectives.md) into internal builtin chip
+dispatches before the final `Simplify`.
 
 ## Testing
 

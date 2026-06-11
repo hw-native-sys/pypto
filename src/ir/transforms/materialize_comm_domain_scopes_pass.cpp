@@ -97,6 +97,12 @@ struct WindowRecord {
   AllocRecord* alloc;
 };
 
+struct AllReduceConsumer {
+  AllocRecord* data_alloc;
+  AllocRecord* signal_alloc;
+  Span span;
+};
+
 /// Scans a host_orch function body once and records every
 /// ``pld.tensor.alloc_window_buffer`` and ``pld.tensor.window`` assignment.
 class AllocAndWindowCollector : public IRVisitor {
@@ -272,8 +278,29 @@ class DispatchAnalyzer : public IRVisitor {
     }
   }
 
+  void AnalyzeAllReduce(const CallPtr& op) {
+    if (!op || !op->op_ || op->op_->name_ != "pld.tensor.allreduce") return;
+    INTERNAL_CHECK_SPAN(op->args_.size() == 2, op->span_)
+        << "MaterializeCommDomainScopes: pld.tensor.allreduce expects exactly two args";
+    auto data_var = As<Var>(op->args_[0]);
+    auto signal_var = As<Var>(op->args_[1]);
+    CHECK(data_var && signal_var)
+        << "MaterializeCommDomainScopes: pld.tensor.allreduce arguments must be window view Vars at "
+        << op->span_.to_string();
+    auto data_it = view_to_window_.find(data_var.get());
+    auto signal_it = view_to_window_.find(signal_var.get());
+    CHECK(data_it != view_to_window_.end())
+        << "MaterializeCommDomainScopes: pld.tensor.allreduce data must be produced by pld.tensor.window at "
+        << op->span_.to_string();
+    CHECK(signal_it != view_to_window_.end()) << "MaterializeCommDomainScopes: pld.tensor.allreduce signal "
+                                                 "must be produced by pld.tensor.window at "
+                                              << op->span_.to_string();
+    allreduce_consumers.push_back({data_it->second.alloc, signal_it->second.alloc, op->span_});
+  }
+
   void VisitExpr_(const CallPtr& op) override {
     AnalyzeDispatch(op);
+    AnalyzeAllReduce(op);
     IRVisitor::VisitExpr_(op);
   }
 
@@ -283,6 +310,8 @@ class DispatchAnalyzer : public IRVisitor {
     AnalyzeDispatch(SubmitToCallView(op));
     IRVisitor::VisitExpr_(op);
   }
+
+  std::vector<AllReduceConsumer> allreduce_consumers;
 
  private:
   const std::unordered_map<const Var*, WindowRecord>& view_to_window_;
@@ -349,6 +378,20 @@ FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string,
   // Phase 2: record device-descriptor evidence from dispatch sites.
   DispatchAnalyzer analyzer(collector.view_to_window, chip_orchs, collector.var_defs);
   analyzer.VisitStmt(func->body_);
+
+  // Host-level collectives do not carry their own device= selector. Their
+  // signal buffer is a user-visible window slot, so inherit the data buffer's
+  // inferred comm-domain coverage before the dead-allocation check.
+  for (const auto& consumer : analyzer.allreduce_consumers) {
+    INTERNAL_CHECK_SPAN(consumer.data_alloc && consumer.signal_alloc, consumer.span)
+        << "MaterializeCommDomainScopes: invalid pld.tensor.allreduce consumer bookkeeping";
+    CHECK(!consumer.data_alloc->seen.empty())
+        << "MaterializeCommDomainScopes: pld.tensor.allreduce data buffer has no inferred comm-domain "
+           "coverage to share with its signal buffer at "
+        << consumer.span.to_string();
+    consumer.signal_alloc->seen.insert(consumer.signal_alloc->seen.end(), consumer.data_alloc->seen.begin(),
+                                       consumer.data_alloc->seen.end());
+  }
 
   // Phase 3: each alloc must have at least one window AND at least one
   // consuming dispatch — otherwise it is dead and downstream codegen has
