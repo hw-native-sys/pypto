@@ -107,6 +107,7 @@ set(PYPTO_SOURCES
     src/ir/op/tile_ops/sort.cpp
     src/ir/op/tile_ops/gather.cpp
     src/ir/op/tile_ops/scatter.cpp
+    src/ir/op/tile_ops/interleave.cpp
     src/ir/op/sync_ops/sync.cpp
     src/ir/op/sync_ops/cross_core.cpp
     src/ir/op/sync_ops/task.cpp

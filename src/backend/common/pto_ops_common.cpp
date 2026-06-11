@@ -954,6 +954,70 @@ static std::string MakeGatherCompareCodegenPTO(const CallPtr& op, codegen::Codeg
   return "";
 }
 
+// Expected future PTOAS tile-level interleave mnemonics (issue #1325).
+// PTOAS v0.45 only ships the vector forms (pto.vintlv / pto.vdintlv), which
+// PyPTO cannot emit; the tile forms are pending. This is the SINGLE place to
+// touch when PTOAS finalizes the tile mnemonics.
+static constexpr const char* kTIntlvOp = "pto.tintlv";
+static constexpr const char* kTDintlvOp = "pto.tdintlv";
+
+// Factory for tile.interleave / tile.deinterleave (two outputs):
+//   <pto_op> ins(%lhs, %rhs : lhs_ty, rhs_ty) outs(%out0, %out1 : ty, ty)
+//
+// Op surface: 2 inputs / TupleType{TileType, TileType} output. Same DPS
+// resolution as tile.gather_compare: multi-output ops resolve their own DPS
+// targets via ResolveTupleResultElements (parser desugars `a, b = ...`).
+static BackendCodegenFunc MakeInterleaveCodegenPTO(const std::string& pto_op) {
+  return [pto_op](const CallPtr& op, codegen::CodegenBase& codegen_base) -> std::string {
+    auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+    CHECK(op->args_.size() == 2) << op->op_->name_ << " requires 2 arguments (lhs, rhs), but got "
+                                 << op->args_.size();
+
+    ir::VarPtr tuple_var = codegen.GetCurrentResultVar();
+    INTERNAL_CHECK_SPAN(tuple_var, op->span_)
+        << "Internal error: " << op->op_->name_ << " codegen requires current_result_var";
+
+    auto element_vars = codegen.ResolveTupleResultElements(tuple_var, /*arity=*/2);
+    INTERNAL_CHECK_SPAN(element_vars[0] && element_vars[1], op->span_)
+        << "Internal error: " << op->op_->name_ << " expects two TupleGetItemExpr consumers, got "
+        << (element_vars[0] ? "out0-yes" : "out0-no") << "/" << (element_vars[1] ? "out1-yes" : "out1-no");
+
+    // Eagerly emit alloc_tile for both outputs; the later `out = tuple_var[i]`
+    // AssignStmts skip re-emission via fs_.emitted_tile_alloc_vars.
+    std::array<std::shared_ptr<const ir::TileType>, 2> elem_types;
+    for (size_t i = 0; i < 2; ++i) {
+      elem_types[i] = ir::GetTileTypeWithMemRef(element_vars[i]->GetType());
+      INTERNAL_CHECK_SPAN(elem_types[i], element_vars[i]->span_)
+          << "Internal error: " << op->op_->name_ << " element var " << i
+          << " must have TileType with MemRef set by InitMemRef";
+      codegen.EmitAllocTileForVar(element_vars[i], elem_types[i]);
+    }
+
+    std::string lhs = codegen.GetExprAsCode(op->args_[0]);
+    std::string rhs = codegen.GetExprAsCode(op->args_[1]);
+    std::string lhs_ty = codegen.GetExprTypeAnnotation(op->args_[0]);
+    std::string rhs_ty = codegen.GetExprTypeAnnotation(op->args_[1]);
+    std::string out0 = codegen.GetVarName(element_vars[0]);
+    std::string out1 = codegen.GetVarName(element_vars[1]);
+    std::string out0_ty = codegen.GetTileBufTypeStringFromTileType(elem_types[0]);
+    std::string out1_ty = codegen.GetTileBufTypeStringFromTileType(elem_types[1]);
+
+    std::ostringstream oss;
+    oss << pto_op << " ins(" << lhs << ", " << rhs;
+    if (!lhs_ty.empty() || !rhs_ty.empty()) {
+      oss << " : " << lhs_ty << ", " << rhs_ty;
+    }
+    oss << ") outs(" << out0 << ", " << out1;
+    if (!out0_ty.empty() || !out1_ty.empty()) {
+      oss << " : " << out0_ty << ", " << out1_ty;
+    }
+    oss << ")";
+
+    codegen.Emit(oss.str());
+    return "";
+  };
+}
+
 // Helper for tile.scatter (TSCATTER index form, DPS):
 //   pto.tscatter ins(%src, %indexes : src_ty, idx_ty) outs(%dst : dst_ty)
 //
@@ -3305,6 +3369,13 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   reg("tile.gather_compare", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeGatherCompareCodegenPTO(op, codegen);
   });
+  // tile.interleave / tile.deinterleave (issue #1325): 2-input ops returning
+  // TupleType{out0, out1}; outs() bound to downstream TupleGetItemExpr
+  // consumers. Target mnemonics are the expected future PTOAS tile forms
+  // (kTIntlvOp / kTDintlvOp) — PTOAS v0.45 does not accept them yet, so these
+  // ops are codegen-verified only (no on-device ST until PTOAS support lands).
+  reg("tile.interleave", MakeInterleaveCodegenPTO(kTIntlvOp));
+  reg("tile.deinterleave", MakeInterleaveCodegenPTO(kTDintlvOp));
   // tile.scatter (TSCATTER index form, DPS): 3-input op (dst, src, indexes).
   reg("tile.scatter", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeScatterCodegenPTO(op, codegen);
