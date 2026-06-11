@@ -56,6 +56,7 @@ enum class AccessKind { Read, Write, ReadWrite };
 enum class RegionKind { Unknown, Full, Box };
 
 constexpr size_t kMaxStaticRootAlternatives = 4;
+constexpr size_t kMinWindowedTaskIdTempDeps = 1;
 
 struct AccessRegion {
   RegionKind kind = RegionKind::Unknown;
@@ -394,8 +395,8 @@ void AppendAllUnique(std::vector<VarPtr>* vars, const std::vector<VarPtr>& candi
   }
 }
 
-bool HasMultiSlotDynamicCoverage(const std::unordered_set<int64_t>& slots, int64_t extent) {
-  if (extent <= 1 || slots.size() <= 1) return false;
+bool HasCompleteDynamicCoverage(const std::unordered_set<int64_t>& slots, int64_t extent) {
+  if (extent <= 0 || static_cast<int64_t>(slots.size()) != extent) return false;
   for (const auto slot : slots) {
     if (slot < 0 || slot >= extent) return false;
   }
@@ -936,7 +937,7 @@ class SubmitTaskIdCollector : public IRVisitor {
     for (const auto& [source_id, slots] : covered_source_slots) {
       auto source_it = array_lineage_by_var_id_.find(source_id);
       if (source_it == array_lineage_by_var_id_.end() || !source_it->second.extent.has_value()) continue;
-      if (!HasMultiSlotDynamicCoverage(slots, source_it->second.extent.value())) continue;
+      if (!HasCompleteDynamicCoverage(slots, source_it->second.extent.value())) continue;
       if (lineage.has_unknown_dynamic_update || !lineage.unknown_static_slots.empty()) continue;
       if (source_it->second.has_unknown_dynamic_update || !source_it->second.unknown_static_slots.empty())
         continue;
@@ -1255,8 +1256,11 @@ class AutoDepMutator : public IRMutator {
         VarPtr prior_edge = CanonicalTaskId(prior.task_id_var);
         if (!prior_edge) prior_edge = prior.task_id_var;
         const bool covered_by_user_edge =
-            ContainsVar(user_edges, prior_edge) ||
-            (prior.dynamic_producer && user_edges.size() > 1 && HasNonSubmitTaskIdUserEdge(user_edges));
+            (ContainsVar(user_edges, prior_edge) &&
+             !(prior.dynamic_producer &&
+               HasIncompleteDynamicTaskIdUserCoverage(raw_user_edges, prior_edge))) ||
+            (prior.dynamic_producer && (HasCompleteDynamicTaskIdUserCoverage(raw_user_edges, prior_edge) ||
+                                        HasWindowedTaskIdTempUserCoverage(user_edges)));
         if (debug_loop_carry) {
           DebugLog("hazard call=" + call->op_->name_ + " prior_task_id=" + DebugVar(prior.task_id_var) +
                    " prior_edge=" + DebugVar(prior_edge) +
@@ -1265,7 +1269,9 @@ class AutoDepMutator : public IRMutator {
                    " current_task_id=" + DebugVar(task_id));
         }
         if (prior.dynamic_producer) {
-          if (covered_by_user_edge && loop_depth_ == 0) continue;
+          if (covered_by_user_edge && (loop_depth_ == 0 || HasWindowedTaskIdTempUserCoverage(user_edges))) {
+            continue;
+          }
           if (debug_loop_carry) {
             DebugLog("fallback_reason=dynamic_prior_producer_requires_scope_lift call=" + call->op_->name_ +
                      " prior_task_id=" + DebugVar(prior.task_id_var));
@@ -1402,7 +1408,7 @@ class AutoDepMutator : public IRMutator {
       if (!task_ids_by_array_var_id_ || !task_id_array_extent_by_var_id_) continue;
       auto extent_it = task_id_array_extent_by_var_id_->find(array_id);
       if (extent_it == task_id_array_extent_by_var_id_->end()) continue;
-      if (!HasMultiSlotDynamicCoverage(slots, extent_it->second)) continue;
+      if (!HasCompleteDynamicCoverage(slots, extent_it->second)) continue;
       auto expanded_it = task_ids_by_array_var_id_->find(array_id);
       if (expanded_it == task_ids_by_array_var_id_->end()) continue;
       AppendAllUnique(&canonical, expanded_it->second);
@@ -1410,12 +1416,75 @@ class AutoDepMutator : public IRMutator {
     return canonical;
   }
 
-  bool HasNonSubmitTaskIdUserEdge(const std::vector<VarPtr>& user_edges) const {
-    for (const auto& edge : user_edges) {
-      if (edge && IsTaskIdVar(edge) &&
-          submit_task_id_var_ids_.find(edge->UniqueId()) == submit_task_id_var_ids_.end()) {
-        return true;
+  bool HasCompleteDynamicTaskIdUserCoverage(const std::vector<VarPtr>& raw_user_edges,
+                                            const VarPtr& prior_edge) const {
+    if (!prior_edge || !task_id_dynamic_slots_by_var_id_ || !task_id_array_extent_by_var_id_ ||
+        !task_ids_by_array_var_id_) {
+      return false;
+    }
+
+    std::unordered_map<uint64_t, std::unordered_set<int64_t>> dynamic_array_slots;
+    for (const auto& edge : raw_user_edges) {
+      if (!edge) continue;
+      auto slots_it = task_id_dynamic_slots_by_var_id_->find(edge->UniqueId());
+      if (slots_it == task_id_dynamic_slots_by_var_id_->end()) continue;
+      for (const auto& [array_id, slots] : slots_it->second) {
+        for (const auto slot : slots) {
+          dynamic_array_slots[array_id].insert(slot);
+        }
       }
+    }
+
+    for (const auto& [array_id, slots] : dynamic_array_slots) {
+      auto extent_it = task_id_array_extent_by_var_id_->find(array_id);
+      if (extent_it == task_id_array_extent_by_var_id_->end()) continue;
+      if (!HasCompleteDynamicCoverage(slots, extent_it->second)) continue;
+
+      auto expanded_it = task_ids_by_array_var_id_->find(array_id);
+      if (expanded_it == task_ids_by_array_var_id_->end()) continue;
+      if (ContainsVar(expanded_it->second, prior_edge)) return true;
+    }
+    return false;
+  }
+
+  bool HasIncompleteDynamicTaskIdUserCoverage(const std::vector<VarPtr>& raw_user_edges,
+                                              const VarPtr& prior_edge) const {
+    if (!prior_edge || !task_id_dynamic_slots_by_var_id_ || !task_id_array_extent_by_var_id_ ||
+        !task_ids_by_array_var_id_) {
+      return false;
+    }
+
+    std::unordered_map<uint64_t, std::unordered_set<int64_t>> dynamic_array_slots;
+    for (const auto& edge : raw_user_edges) {
+      if (!edge) continue;
+      auto slots_it = task_id_dynamic_slots_by_var_id_->find(edge->UniqueId());
+      if (slots_it == task_id_dynamic_slots_by_var_id_->end()) continue;
+      for (const auto& [array_id, slots] : slots_it->second) {
+        for (const auto slot : slots) {
+          dynamic_array_slots[array_id].insert(slot);
+        }
+      }
+    }
+
+    for (const auto& [array_id, slots] : dynamic_array_slots) {
+      auto extent_it = task_id_array_extent_by_var_id_->find(array_id);
+      if (extent_it == task_id_array_extent_by_var_id_->end()) continue;
+      if (HasCompleteDynamicCoverage(slots, extent_it->second)) continue;
+
+      auto expanded_it = task_ids_by_array_var_id_->find(array_id);
+      if (expanded_it == task_ids_by_array_var_id_->end()) continue;
+      if (ContainsVar(expanded_it->second, prior_edge)) return true;
+    }
+    return false;
+  }
+
+  bool HasWindowedTaskIdTempUserCoverage(const std::vector<VarPtr>& user_edges) const {
+    size_t temp_count = 0;
+    for (const auto& edge : user_edges) {
+      if (!edge || !IsTaskIdVar(edge)) continue;
+      if (submit_task_id_var_ids_.find(edge->UniqueId()) != submit_task_id_var_ids_.end()) continue;
+      ++temp_count;
+      if (temp_count >= kMinWindowedTaskIdTempDeps) return true;
     }
     return false;
   }

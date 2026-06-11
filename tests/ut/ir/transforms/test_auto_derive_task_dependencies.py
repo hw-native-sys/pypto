@@ -1147,7 +1147,7 @@ class TestAutoDeriveTaskDependencies:
                     for n in pl.parallel(4):
                         _produced, producer_tid = pl.submit(self.fill, scratch)
                         tids[n] = producer_tid
-                    out, _ = pl.submit(self.consume, scratch, deps=[tids[0]])
+                    out, _ = pl.submit(self.consume, scratch, deps=[tids[0], tids[1]])
                 return out
 
         out = _run_auto_deps(Prog)

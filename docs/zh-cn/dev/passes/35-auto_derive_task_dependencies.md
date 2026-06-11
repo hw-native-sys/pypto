@@ -51,8 +51,9 @@ scope 发出 `PTO2_SCOPE()`，runtime OverlapMap/TensorMap tracking 也继续启
    且字节范围重叠或包含符号 offset，则视为可能 alias。
 6. 从 `pl.submit` tuple 尾部收集静态绑定的 producer TaskId。对于
    `Array[TASK_ID]` 依赖值，只有在 lineage 已知时才会保守展开：直接 scalar
-   写入、loop 内动态写入，以及由 per-element `arr[i]` deps 合成的数组都可以覆盖
-   用户手写 hazard；来源不清楚的数组不会展开，缺失依赖仍会触发 fallback。
+   写入、loop 内动态写入，以及由 per-element `arr[i]` deps 合成的数组，只有在覆盖
+   所有静态槽位时才可以覆盖用户手写 hazard；来源不清楚或只覆盖部分槽位的数组不会展开，
+   缺失依赖仍会触发 fallback。
 7. 按源码顺序扫描每个 `RuntimeScopeStmt`，仅在该 scope 内维护 prior accesses。
    对尚未物化 scope 的默认 `auto_scope=True` orchestration 函数，把整个函数体
    当作虚拟 AUTO 分析区域。对 AUTO scope 来说这只是分析层行为；最终 scope mode
