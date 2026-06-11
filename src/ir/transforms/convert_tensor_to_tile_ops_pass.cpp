@@ -764,6 +764,16 @@ ExprPtr GetWriteTargetExpr(const CallPtr& call) {
   if ((op_name == "pld.tile.put" || op_name == "pld.tile.get") && !call->args_.empty()) {
     return call->args_[0];
   }
+  // pld.tensor.allreduce(target, signal, *, op): the composite collective
+  // writes the reduced value back into `target` (args_[0]) — the in-place
+  // rebind idiom shared with `pl.store`. `signal` (args_[1]) is also
+  // written (Phase 2a/3.5a notify), but the marker below for
+  // ``pld.tensor.allreduce`` already records both args as InOut; this
+  // entry just identifies the primary data target for any downstream
+  // consumer that walks GetWriteTargetExpr.
+  if (op_name == "pld.tensor.allreduce" && !call->args_.empty()) {
+    return call->args_[0];
+  }
   return nullptr;
 }
 
@@ -898,6 +908,22 @@ void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, st
     }
     if (auto write_target = GetWriteTargetExpr(call)) {
       MarkAccess(GetAliasOrigins(write_target, origin_map), has_write);
+    }
+    return;
+  }
+
+  if (op_name == "pld.tensor.allreduce") {
+    // pld.tensor.allreduce(target, signal, *, op): both target (args_[0])
+    // and signal (args_[1]) are InOut — read AND written across the
+    // 4-phase decomposition (target read in Phase 3, written in Phase 4;
+    // signal written in Phase 2a/3.5a notify, read in Phase 2b/3.5b wait).
+    // Marking both args on both sides makes the enclosing window params
+    // surface as InOut without needing LowerCompositeOps to have run yet
+    // (this pass is upstream of LowerCompositeOps).
+    for (size_t i = 0; i < std::min<size_t>(2, call->args_.size()); ++i) {
+      auto origins = CollectReferencedOrigins(call->args_[i], origin_map);
+      MarkAccess(origins, has_read);
+      MarkAccess(origins, has_write);
     }
     return;
   }
