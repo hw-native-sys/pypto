@@ -297,11 +297,46 @@ void VarLineageCollector::VisitStmt_(const AssignStmtPtr& assign) {
         // returns (multi-Out kernels would otherwise be mis-traced to the
         // first Out, leaking scratch-buffer lineage onto the result Var).
         std::optional<size_t> returned_idx = FindReturnedParamIndex(callee, program_);
+
+        // Collect the Out/InOut arg positions once.
+        std::vector<size_t> out_positions;
         for (size_t i = 0; i < effective_dirs.size() && i < call->args_.size(); ++i) {
-          if (effective_dirs[i] != ParamDirection::Out && effective_dirs[i] != ParamDirection::InOut) {
-            continue;
+          if (effective_dirs[i] == ParamDirection::Out || effective_dirs[i] == ParamDirection::InOut) {
+            out_positions.push_back(i);
           }
-          if (returned_idx.has_value() && i != *returned_idx) {
+        }
+
+        // Same SSA-base disambiguation as GenerateSingleReturnAlias (issue
+        // #1702): for a multi-Out Group/Spmd wrapper FindReturnedParamIndex is
+        // unreliable — it returns nullopt (or mis-traces through the first Out)
+        // for outliner wrappers that end in the inner call, so the lineage
+        // would leak the FIRST Out (e.g. a GM scratch buffer) onto the result
+        // Var and every downstream scope reading the result would resolve to
+        // the wrong external tensor. The result Var is an SSA rename of the Out
+        // arg carrying the result, so its SSA base uniquely identifies that arg
+        // when it matches exactly one Out arg; trust that over returned_idx.
+        std::optional<size_t> matched_idx;
+        if (out_positions.size() > 1 && assign->var_) {
+          const std::string result_base = GetSSABaseName(assign->var_->name_hint_);
+          if (!result_base.empty()) {
+            for (size_t i : out_positions) {
+              auto arg_var = AsVarLike(call->args_[i]);
+              if (!arg_var) continue;
+              if (GetSSABaseName(arg_var->name_hint_) != result_base) continue;
+              if (matched_idx.has_value()) {  // ambiguous — abandon the match
+                matched_idx.reset();
+                break;
+              }
+              matched_idx = i;
+            }
+          }
+        }
+
+        // Prefer the unique SSA-base match, then the traced returned index,
+        // then (chosen == nullopt) the first Out — the legacy fallback.
+        std::optional<size_t> chosen = matched_idx.has_value() ? matched_idx : returned_idx;
+        for (size_t i : out_positions) {
+          if (chosen.has_value() && i != *chosen) {
             continue;
           }
           if (auto arg_var = AsVarLike(call->args_[i])) {
