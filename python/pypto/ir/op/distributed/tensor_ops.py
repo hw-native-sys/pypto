@@ -180,4 +180,4 @@ def allreduce(
     return _ir_core.create_op_call("pld.tensor.allreduce", [target, signal], {"op": int(op)}, actual_span)
 
 
-__all__ = ["allreduce", "alloc_window_buffer", "get", "put", "window"]
+__all__ = ["alloc_window_buffer", "allreduce", "get", "put", "window"]

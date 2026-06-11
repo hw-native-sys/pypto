@@ -552,7 +552,7 @@ def test_allreduce_emits_for_and_if_control_flow():
     (read peers via ``pld.tile.remote_load``) and Phase 4 (write reduced
     value back into ``target``). Without it, a fast rank could overwrite
     its slot while slower ranks are still reading the staged Phase-1 data
-    — a write-after-read race that manifests as off-by-N×peer drift on
+    — a write-after-read race that manifests as off-by-N*peer drift on
     slower ranks at P>=4.
 
     This pins the structured control-flow shape so a refactor that

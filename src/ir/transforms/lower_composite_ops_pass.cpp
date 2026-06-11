@@ -469,17 +469,22 @@ ExprPtr LowerTensorAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>
   // and wait's `expected` are INT32 per the Python builder's int_dtype
   // override — keep separate constants for those distinct slots.
   //
-  // Signal scheme: hybrid Set / AtomicAdd. Phase 2a uses ``Set value=1``
-  // (race-free: each cell has exactly one writer, the corresponding peer);
-  // Phase 2b waits for ``== 1``. Phase 3.5 uses ``AtomicAdd 1`` for the
-  // post-reduce barrier (cell 1 → 2) with wait ``>= 2`` — the same proven
-  // path as the runtime's existing collective kernels.
+  // Signal scheme: hybrid Set / AtomicAdd, both waits use ``WaitCmp::kEq``.
+  // Phase 2a uses ``Set value=1`` (race-free: each cell has exactly one
+  // writer, the corresponding peer); Phase 2b waits for ``== 1``. Phase 3.5
+  // uses ``AtomicAdd 1`` for the post-reduce barrier (cell 1 → 2) with wait
+  // for ``== 2``. Within a single call the cell value is fully deterministic
+  // (0 → 1 → 2, monotonic, never decreased), so ``kEq`` matches the
+  // post-notify state exactly — equivalent to ``kGe`` but tighter and
+  // symmetric with Phase 2b.
   //
-  // We avoid the symmetric ``Set value=0`` reset (which would let the buffer
-  // self-clear and enable reentrancy) because on-board ``TWAIT(==0)`` does
-  // not unblock reliably in our trials (P=4 deadlocked on AICPU stream
-  // sync). Until the runtime's TWAIT(==0) path is verified, callers needing
-  // back-to-back allreduces must allocate a fresh signal buffer per call.
+  // The cells end the call at 2, so the buffer is **not reusable** across
+  // multiple allreduce calls without per-call reallocation. The symmetric
+  // ``Set value=0`` reset path would let the buffer self-clear, but
+  // on-board ``TWAIT(==0)`` did not unblock reliably in our trials (P=4
+  // deadlocked on AICPU stream sync — see PTOAS issue #797). Until that
+  // runtime path is verified, callers needing back-to-back allreduces must
+  // allocate a fresh signal buffer per call.
   auto zero_idx = std::make_shared<ConstInt>(0, DataType::INDEX, span);
   auto one_idx = std::make_shared<ConstInt>(1, DataType::INDEX, span);
   auto one_i32 = std::make_shared<ConstInt>(1, DataType::INT32, span);
@@ -555,7 +560,7 @@ ExprPtr LowerTensorAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>
       },
       span);
 
-  // ---- Phase 3.5: post-reduce barrier (AtomicAdd 1 → wait ≥ 2) ----
+  // ---- Phase 3.5: post-reduce barrier (AtomicAdd 1 → wait == 2) ----
   // Phase 4 overwrites every rank's slot of ``target``; without this barrier,
   // a fast rank could write its reduced value back to ``target`` while a slow
   // rank is still in Phase 3 reading the original Phase-1 staged data from
@@ -563,10 +568,11 @@ ExprPtr LowerTensorAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>
   // that surfaces as wrong sums on slower ranks.
   //
   // Reuse the same signal cells: each peer atomic-adds 1 again, raising my
-  // cell from 1 to 2, so the second wait checks ``cell >= 2``. This matches
-  // the runtime's existing collective-kernel pattern (mono­tonic AtomicAdd
-  // + Ge); the symmetric ``Set 0 / Eq 0`` reset path is left for a future
-  // runtime change.
+  // cell from 1 to 2, so the second wait checks ``cell == 2``. The cell
+  // value is deterministic within a single call (monotonic 0 → 1 → 2,
+  // never decreased), so ``kEq`` is equivalent to ``kGe`` but tighter and
+  // uniform with Phase 2b. The symmetric ``Set 0 / Eq 0`` reset path is
+  // left for a future runtime change (see PTOAS issue #797).
   b.EmitFor(
       "peer2", zero_idx, nranks_idx, one_idx,
       [&](LoweringBuilder& body, const VarPtr& peer) {
