@@ -10,6 +10,7 @@
 
 ```python
 import torch
+from pypto import ir
 from pypto.debug import torch_codegen, validate_pass_ir_codegen_results
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.backend import BackendType, reset_for_testing, set_backend_type
