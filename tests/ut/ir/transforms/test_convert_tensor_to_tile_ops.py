@@ -488,6 +488,50 @@ class TestConvertTensorToTileOps:
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_allreduce_upgrades_target_and_signal_to_inout(self):
+        """``pld.tensor.allreduce(target, signal, op=...)`` upgrades both
+        ``target`` and ``signal`` params from In to InOut.
+
+        ConvertTensorToTileOps runs upstream of LowerCompositeOps (pass 14),
+        so it sees ``pld.tensor.allreduce`` as a single composite Call before
+        the 4-phase decomposition exists. Without the explicit
+        ``has_read | has_write`` marking, the param-direction analysis
+        would leave the window params as In and a downstream reader of
+        the same window slot would miss the RAW edge (issue #1732), same
+        failure mode as the put/get tests above.
+
+        The Call itself is NOT lowered by this pass — ``pld.tensor.allreduce``
+        is a composite op consumed by ``LowerCompositeOps`` later. Only the
+        param directions change.
+        """
+        SIZE = 16
+        nr = 2
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                target: pld.DistributedTensor[[1, SIZE], pl.FP32],
+                signal: pld.DistributedTensor[[nr, 1], pl.INT32],
+            ) -> pld.DistributedTensor[[1, SIZE], pl.FP32]:
+                target = pld.tensor.allreduce(target, signal, op=pld.ReduceOp.Sum)
+                return target
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                target: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+                signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+            ) -> pld.DistributedTensor[[1, SIZE], pl.FP32]:
+                target = pld.tensor.allreduce(target, signal, op=pld.ReduceOp.Sum)
+                return target
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
     def test_get_subregion_emits_transfer_shape_stage_and_forwards_offsets(self):
         """pld.tensor.get subregion lowers like put: stage sized to shape and offsets forwarded."""
 
