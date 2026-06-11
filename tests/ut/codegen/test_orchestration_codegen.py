@@ -980,6 +980,67 @@ class TestOrchestration:
         assert "ext_result.reshape(" in code, code
         assert "ext_scratch.reshape(" not in code, code
 
+    def test_single_return_input_view_keeps_out_fallback(self):
+        """Counterpart of the #1702 fix: the slice/reshape trace rules must
+        accept only Out/InOut roots. A kernel that writes its result into its
+        Out param but RETURNS a reshape view of an In param would otherwise
+        trace the return to the input, aliasing the call site to ``ext_a`` and
+        routing every downstream consumer into the input buffer. The return
+        must stay untraceable so the alias keeps the out_indices[0] fallback."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class InputViewReturnProgram:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                ta: pl.Tile[[64, 64], pl.FP32] = pl.load(a, [0, 0], [64, 64])
+                _o: pl.Tensor[[64, 64], pl.FP32] = pl.store(pl.add(ta, ta), [0, 0], out)
+                # Return a pure view of the IN param: must NOT become the alias root.
+                aview: pl.Tensor[[64, 64], pl.FP32] = pl.reshape(a, [64, 64])
+                return aview
+
+            @pl.function(type=pl.FunctionType.AIV)
+            def consumer(
+                self,
+                x: pl.Tensor[[32, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[32, 128], pl.FP32]],
+            ) -> pl.Tensor[[32, 128], pl.FP32]:
+                t: pl.Tile[[32, 128], pl.FP32] = pl.load(x, [0, 0], [32, 128])
+                return pl.store(t, [0, 0], out)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+                final: pl.Out[pl.Tensor[[32, 128], pl.FP32]],
+            ) -> pl.Tensor[[32, 128], pl.FP32]:
+                rv0 = self.kernel(a, out)
+                rv: pl.Tensor[[32, 128], pl.FP32] = pl.reshape(rv0, [32, 128])
+                final = self.consumer(rv, final)
+                return final
+
+        program = passes.materialize_runtime_scopes()(
+            passes.derive_call_directions()(
+                PassManager.get_strategy(OptimizationStrategy.Default).run_passes(InputViewReturnProgram)
+            )
+        )
+        code = None
+        for func in program.functions.values():
+            if func.func_type == ir.FunctionType.Orchestration:
+                code = codegen.generate_orchestration(program, func).code
+        assert code is not None, "no orchestration function generated"
+
+        # The kernel's single return must alias the Out param (legacy
+        # fallback), never the In param's view.
+        assert "ext_out.reshape(" in code, code
+        assert "ext_a.reshape(" not in code, code
+
     @staticmethod
     def _manual_cross_scope_code(create_inside: bool) -> str:
         """Orchestration code for a tensor written inside a ``pl.manual_scope``

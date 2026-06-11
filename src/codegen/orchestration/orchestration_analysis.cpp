@@ -357,15 +357,36 @@ class ReturnAndDefCollector : public IRVisitor {
   }
 };
 
+// The callee's Out/InOut params (effective directions for Group/Spmd
+// wrappers). Pure-view trace rules (tensor.slice / tensor.reshape) consult
+// this set so a returned view of a read-only input never resolves as the
+// returned output — aliasing the call site to an In param would route
+// consumers into the input buffer instead of the written result.
+std::unordered_set<const Var*> CollectOutLikeParams(const FunctionPtr& callee, const ProgramPtr& program) {
+  std::unordered_set<const Var*> out_like;
+  std::vector<ParamDirection> dirs = callee->param_directions_;
+  if (callee->func_type_ == FunctionType::Group || callee->func_type_ == FunctionType::Spmd) {
+    dirs = ComputeGroupEffectiveDirections(callee, program);
+  }
+  for (size_t i = 0; i < callee->params_.size() && i < dirs.size(); ++i) {
+    if (dirs[i] == ParamDirection::Out || dirs[i] == ParamDirection::InOut) {
+      out_like.insert(callee->params_[i].get());
+    }
+  }
+  return out_like;
+}
+
 // Forward declaration: lineage walk for a returned value uses both the
 // passed-in lineage map and a small inline tracer for builtin
 // tensor.assemble / tile.store rules + user-call returned-param recursion.
 const Var* TraceReturnedToParam(const ExprPtr& root_expr, const ReturnAndDefCollector& collector,
                                 const VarLineageCollector& lineage, const ProgramPtr& program,
+                                const std::unordered_set<const Var*>& out_like_params,
                                 std::unordered_set<const Var*>& visited);
 
 const Var* TraceVarToParam(const Var* var, const ReturnAndDefCollector& collector,
                            const VarLineageCollector& lineage, const ProgramPtr& program,
+                           const std::unordered_set<const Var*>& out_like_params,
                            std::unordered_set<const Var*>& visited) {
   if (!var) return nullptr;
   if (!visited.insert(var).second) return nullptr;
@@ -386,21 +407,21 @@ const Var* TraceVarToParam(const Var* var, const ReturnAndDefCollector& collecto
 
   const auto& assign = def_it->second;
   if (auto rhs_var = AsVarLike(assign->value_)) {
-    return TraceVarToParam(rhs_var.get(), collector, lineage, program, visited);
+    return TraceVarToParam(rhs_var.get(), collector, lineage, program, out_like_params, visited);
   }
   if (auto call = As<Call>(assign->value_)) {
     const std::string& op_name = call->op_->name_;
     // tensor.assemble(target, tile, offset) -> aliases target (args[0]).
     if (op_name == "tensor.assemble" && !call->args_.empty()) {
-      return TraceReturnedToParam(call->args_[0], collector, lineage, program, visited);
+      return TraceReturnedToParam(call->args_[0], collector, lineage, program, out_like_params, visited);
     }
     // tile.store(value, indices, target) -> aliases target (args[2]).
     if (op_name == "tile.store" && call->args_.size() >= 3) {
-      return TraceReturnedToParam(call->args_[2], collector, lineage, program, visited);
+      return TraceReturnedToParam(call->args_[2], collector, lineage, program, out_like_params, visited);
     }
     // tensor.set_validshape(target, rows, cols) -> aliases target.
     if (op_name == "tensor.set_validshape" && !call->args_.empty()) {
-      return TraceReturnedToParam(call->args_[0], collector, lineage, program, visited);
+      return TraceReturnedToParam(call->args_[0], collector, lineage, program, out_like_params, visited);
     }
     // tensor.slice(source, shape, offset) / tensor.reshape(source, shape[, valid])
     // are shape-only views over the source buffer (args[0]); a kernel that writes
@@ -408,9 +429,15 @@ const Var* TraceVarToParam(const Var* var, const ReturnAndDefCollector& collecto
     // leave the return untraceable, so FindReturnedParamIndex falls back to
     // out_indices[0] (the first Out/InOut, often per-block scratch) and aliases
     // the call site to the WRONG output (issue #1702). Follow the view to its
-    // source so the return resolves to the real Out param.
+    // source so the return resolves to the real Out param. Unlike the write
+    // rules above, these are pure READ views: a kernel may legitimately return
+    // a view of an In param while writing its result into out_indices[0], so
+    // accept the root only when it is an Out/InOut param — otherwise treat the
+    // return as untraceable and keep the legacy fallback.
     if ((op_name == "tensor.slice" || op_name == "tensor.reshape") && !call->args_.empty()) {
-      return TraceReturnedToParam(call->args_[0], collector, lineage, program, visited);
+      const Var* root =
+          TraceReturnedToParam(call->args_[0], collector, lineage, program, out_like_params, visited);
+      return (root && out_like_params.count(root) > 0) ? root : nullptr;
     }
   }
   return nullptr;
@@ -418,9 +445,10 @@ const Var* TraceVarToParam(const Var* var, const ReturnAndDefCollector& collecto
 
 const Var* TraceReturnedToParam(const ExprPtr& root_expr, const ReturnAndDefCollector& collector,
                                 const VarLineageCollector& lineage, const ProgramPtr& program,
+                                const std::unordered_set<const Var*>& out_like_params,
                                 std::unordered_set<const Var*>& visited) {
   if (auto var = AsVarLike(root_expr)) {
-    return TraceVarToParam(var.get(), collector, lineage, program, visited);
+    return TraceVarToParam(var.get(), collector, lineage, program, out_like_params, visited);
   }
   return nullptr;
 }
@@ -479,9 +507,10 @@ std::optional<size_t> FindReturnedParamIndex(const FunctionPtr& callee, const Pr
   lineage.Initialize(callee->params_);
   lineage.VisitStmt(callee->body_);
 
+  std::unordered_set<const Var*> out_like_params = CollectOutLikeParams(callee, program);
   std::unordered_set<const Var*> visited;
-  const Var* root =
-      TraceReturnedToParam(collector.first_return->value_[0], collector, lineage, program, visited);
+  const Var* root = TraceReturnedToParam(collector.first_return->value_[0], collector, lineage, program,
+                                         out_like_params, visited);
   if (!root) return record(std::nullopt);
 
   for (size_t i = 0; i < callee->params_.size(); ++i) {
@@ -511,11 +540,12 @@ std::vector<std::optional<size_t>> FindReturnedParamIndices(const FunctionPtr& c
   lineage.Initialize(callee->params_);
   lineage.VisitStmt(callee->body_);
 
+  std::unordered_set<const Var*> out_like_params = CollectOutLikeParams(callee, program);
   std::vector<std::optional<size_t>> result;
   result.reserve(collector.first_return->value_.size());
   for (const auto& ret_value : collector.first_return->value_) {
     std::unordered_set<const Var*> visited;
-    const Var* root = TraceReturnedToParam(ret_value, collector, lineage, program, visited);
+    const Var* root = TraceReturnedToParam(ret_value, collector, lineage, program, out_like_params, visited);
     std::optional<size_t> idx;
     if (root) {
       for (size_t i = 0; i < callee->params_.size(); ++i) {
