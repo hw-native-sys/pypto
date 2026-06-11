@@ -867,6 +867,67 @@ def _collect_tile_memref_bases(program: ir.Program) -> dict[str, str]:
 class TestViewOps:
     """Tests for view operations (reshape) with memory reuse."""
 
+    def test_subview_group_keeps_offsets_on_reuse(self):
+        """Retargeting a sharing group must preserve per-member subview offsets (issue #1723).
+
+        ``dead`` dies before ``src``, so ``src`` (and its transpose/slice/reshape
+        view group) retargets onto ``dead``'s buffer. The two per-row slices sit
+        at byte offsets 0 and 64 within the group; after reuse they must keep
+        those distinct offsets, not collapse onto the target's base offset.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                inp: pl.Tensor[[16, 8], pl.FP32],
+                dead_in: pl.Tensor[[16, 8], pl.FP32],
+                out_dead: pl.Out[pl.Tensor[[16, 8], pl.FP32]],
+                out0: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+                out1: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                dead: pl.Tile[[16, 8], pl.FP32, pl.MemorySpace.Vec] = pl.load(dead_in, [0, 0], [16, 8])
+                _sd: pl.Tensor[[16, 8], pl.FP32] = pl.store(dead, [0, 0], out_dead)
+                src: pl.Tile[[16, 8], pl.FP32, pl.MemorySpace.Vec] = pl.load(inp, [0, 0], [16, 8])
+                srcT: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.transpose(src, axis1=0, axis2=1)
+                # Slices authored as separate stmts: the isolated pipeline skips
+                # FlattenCallExpr, so an inline slice would not join the group.
+                s0: pl.Tile[[1, 16], pl.FP32, pl.MemorySpace.Vec] = pl.slice(srcT, [1, 16], [0, 0])
+                r0: pl.Tile[[16, 1], pl.FP32, pl.MemorySpace.Vec] = pl.reshape(s0, [16, 1])
+                s1: pl.Tile[[1, 16], pl.FP32, pl.MemorySpace.Vec] = pl.slice(srcT, [1, 16], [1, 0])
+                r1: pl.Tile[[16, 1], pl.FP32, pl.MemorySpace.Vec] = pl.reshape(s1, [16, 1])
+                _o0: pl.Tensor[[16, 1], pl.FP32] = pl.store(r0, [0, 0], out0)
+                result: pl.Tensor[[16, 1], pl.FP32] = pl.store(r1, [0, 0], out1)
+                return result
+
+        After = _run_pipeline(Before)
+        func = After.get_function("main")
+        assert func is not None
+        body = func.body
+        assert isinstance(body, ir.SeqStmts)
+        members = {}
+        for stmt in body.stmts:
+            if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.var.type, ir.TileType):
+                mr = stmt.var.type.memref
+                assert mr is not None
+                off = mr.byte_offset_
+                assert isinstance(off, ir.ConstInt)
+                members[stmt.var.name_hint] = (mr.base_.name_hint, off.value, mr.size_)
+
+        # src retargets onto dead's buffer (reuse actually happened).
+        assert members["src"][0] == members["dead"][0]
+        base = members["dead"][0]
+        # The whole view group lives on that one base.
+        for name in ("srcT", "s0", "r0", "s1", "r1"):
+            assert members[name][0] == base, f"{name} not on shared base {base}"
+        # Row 0 slice/reshape at offset 0; row 1 slice/reshape at offset 64 — the
+        # offsets must NOT collapse (pre-fix bug put all four at 0).
+        assert members["s0"][1] == 0 and members["r0"][1] == 0
+        assert members["s1"][1] == 64 and members["r1"][1] == 64
+        # Each member keeps its own 64-byte size, not the target's 512.
+        assert members["r0"][2] == 64 and members["r1"][2] == 64
+
     def test_reshape_chain_shares_memref(self):
         """Chained reshapes should all share the same MemRef."""
 
