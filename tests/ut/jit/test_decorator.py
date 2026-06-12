@@ -748,9 +748,10 @@ def _runtime_slice_body(src: pl.Tensor, cfg: pl.Tensor, out: pl.Out[pl.Tensor]) 
 
 def _reshape_then_dep_body(src: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
     """Plain (undecorated) function: a pl.reshape view of a parameter feeds a dep,
-    and a parameter reshaped in place keeps its new shape (issue #1755)."""
+    and a parameter reshaped in place keeps its new shape (issue #1755). The
+    keyword call form (``input=`` / ``shape=``) resolves the same as positional."""
     flat = pl.reshape(src, [16, 8])
-    out = pl.reshape(out, [16, 8])
+    out = pl.reshape(input=out, shape=[16, 8])
     out = _relu_kernel(flat, out)
     return out
 
@@ -808,10 +809,11 @@ class TestSliceAndDepReturnMetadata:
             "out": TensorMeta(shape=(2, 64, 128), dtype=DataType.BF16),
         }
         metas = _extract_local_tensor_metas(_reshape_then_dep_body, seed_meta=seed)
-        # New shape from the literal list; dtype inherited from src.
+        # Positional call: new shape from the literal list, dtype inherited from src.
         assert metas["flat"] == TensorMeta(shape=(16, 8), dtype=DataType.BF16)
-        # The reshaped ``out`` param overrides its stale (2, 64, 128) seed; the
-        # dep result then inherits that reshaped meta via the Out param.
+        # The reshaped ``out`` param overrides its stale (2, 64, 128) seed; it is
+        # written via the keyword call form (input= / shape=), proving keyword
+        # args resolve identically, and the dep result inherits it via Out.
         assert metas["out"] == TensorMeta(shape=(16, 8), dtype=DataType.BF16)
 
     def test_extract_local_tensor_metas_annotated_assignments(self):

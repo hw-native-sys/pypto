@@ -766,11 +766,14 @@ def _extract_local_tensor_metas(
         return TensorMeta(shape=tuple(dims), dtype=src_meta.dtype)
 
     def _reshape_meta(call: ast.Call) -> TensorMeta | None:
-        # pl.reshape(tensor, shape) — the new shape fully replaces the source
+        # pl.reshape(input, shape) — the new shape fully replaces the source
         # shape (unlike a slice, no per-dim parent fallback), so resolve it via
         # _resolve_shape; dtype is inherited from the source tensor. A static
         # int or a DynDim alias resolves; anything else leaves the meta unset.
-        src = call.args[0] if call.args else None
+        # Both args accept the keyword form (``input=`` / ``shape=``).
+        src = (
+            call.args[0] if call.args else next((kw.value for kw in call.keywords if kw.arg == "input"), None)
+        )
         if not isinstance(src, ast.Name) or src.id not in local:
             return None
         shape_node = (
