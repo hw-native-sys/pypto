@@ -1,0 +1,7 @@
+{
+  "metric": "makespan_us",
+  "value": 1016.66,
+  "threshold_pct": 15,
+  "pypto_ref": "1eec39f1",
+  "notes": "makespan_us = the 'Total Test Time: <X> us' line from a --enable-l2-swimlane run. Captured from: python models/qwen3/14b/decode_layer.py -p a2a3 --enable-l2-swimlane --max-seq --seed 1234. value=median of 3 device runs (1098.12 / 1016.66 / 1011.98); observed run-to-run jitter ~8.5%, so threshold_pct=15 absorbs noise with margin. Refresh via PR when a perf change is intentional, and update pypto_ref to the capturing commit."
+}

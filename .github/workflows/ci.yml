@@ -447,6 +447,35 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/pypto-lib
         run: python models/qwen3/14b/decode_layer.py -p a2a3 -d "$DEVICE_ID"
 
+      - name: Run Qwen3-14B decode perf run (L2 swimlane)
+        id: qwen3_perf_run
+        continue-on-error: true   # perf signal is advisory; never fail the job
+        working-directory: ${{ github.workspace }}/pypto-lib
+        shell: bash   # POSIX sh lacks `set -o pipefail`; bash is required below
+        env:
+          PYTHONPATH: ${{ github.workspace }}/pypto-lib
+        # tee the run's stdout (which carries the "Total Test Time: <X> us" line)
+        # to a fixed log under the pypto-github workspace for the guard to read.
+        run: >-
+          set -o pipefail;
+          python models/qwen3/14b/decode_layer.py -p a2a3 -d "$DEVICE_ID"
+          --enable-l2-swimlane --max-seq --seed 1234
+          2>&1 | tee "$GITHUB_WORKSPACE/qwen3_perf.log"
+
+      - name: Qwen3-14B decode perf guard (warn-only)
+        if: always()
+        continue-on-error: true   # regression -> yellow warning on this step, job stays green
+        # Use the $GITHUB_WORKSPACE env (container path) to match where the perf
+        # run tee'd the log. The ${{ github.workspace }} context resolves to the
+        # HOST path on self-hosted+container runners, which is absent inside the
+        # container — reading it yields an empty log ("no usable number").
+        run: >-
+          python .github/scripts/perf_guard.py
+          --log "$GITHUB_WORKSPACE/qwen3_perf.log"
+          --baseline .github/perf_baselines/qwen3_14b_decode.json
+          --name "qwen3-14b decode_layer"
+          --metric makespan_us
+
       - name: Run pypto-lib DeepSeek-V4 decode_attention_swa example
         working-directory: ${{ github.workspace }}/pypto-lib
         env:
