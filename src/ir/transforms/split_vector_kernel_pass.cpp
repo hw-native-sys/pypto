@@ -793,18 +793,21 @@ CallPtr RebuildLane1CallWithZeroValidShape(const CallPtr& call, const ExprReplac
     // emit an empty tile of the result shape instead of running the transpose.
     auto new_type = WithZeroValidShape(call->GetType(), call->span_);
     auto tile_type = std::dynamic_pointer_cast<const TileType>(new_type);
-    if (tile_type) {
-      std::vector<ExprPtr> shape_elems(tile_type->shape_.begin(), tile_type->shape_.end());
-      auto shape_tuple = std::make_shared<MakeTuple>(std::move(shape_elems), call->span_);
-      std::vector<std::pair<std::string, std::any>> kwargs;
-      kwargs.emplace_back("dtype", tile_type->dtype_);
-      if (const auto& memory_space = tile_type->memory_space_) {
-        kwargs.emplace_back("target_memory", *memory_space);
-      }
-      auto create_op = OpRegistry::GetInstance().GetOp("tile.create");
-      return std::make_shared<Call>(create_op, std::vector<ExprPtr>{shape_tuple}, std::move(kwargs), new_type,
-                                    call->span_);
+    // Fail loud (like the tile.slice branch) rather than silently fall through to
+    // the generic rebuild below, which would replay the hang-prone transpose.
+    INTERNAL_CHECK_SPAN(tile_type != nullptr, call->span_)
+        << "Internal error: tile.transpose must produce a TileType, but got "
+        << (new_type ? new_type->TypeName() : "null");
+    std::vector<ExprPtr> shape_elems(tile_type->shape_.begin(), tile_type->shape_.end());
+    auto shape_tuple = std::make_shared<MakeTuple>(std::move(shape_elems), call->span_);
+    std::vector<std::pair<std::string, std::any>> kwargs;
+    kwargs.emplace_back("dtype", tile_type->dtype_);
+    if (const auto& memory_space = tile_type->memory_space_) {
+      kwargs.emplace_back("target_memory", *memory_space);
     }
+    auto create_op = OpRegistry::GetInstance().GetOp("tile.create");
+    return std::make_shared<Call>(create_op, std::vector<ExprPtr>{shape_tuple}, std::move(kwargs), new_type,
+                                  call->span_);
   } else if (op_name == "tile.set_validshape" && new_args.size() == 3) {
     new_args[1] = MakeIndexConst(0, call->span_);
     new_args[2] = MakeIndexConst(0, call->span_);

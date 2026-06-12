@@ -37,9 +37,9 @@ K = 64
 N = 512
 N_BLOCK = 64
 N_BLOCKS = N // N_BLOCK
-# Bidirectional cube<->vec fused into one no-split pl.spmd scope. N kept small so
-# the [ROW_TILE, SPMD_N] FP32 result tile stays well under the 192KB Vec limit.
-SPMD_N = 128
+# Bidirectional cube<->vec fused into one no-split pl.spmd scope. Square per-tile
+# ([ROW_TILE, SPMD_N]) so the result can be transposed in place.
+SPMD_N = 16
 SPMD_ROW_TILE = 16
 MULTI_PIPE_DIM = 16
 MULTI_PIPE_SLOT_SIZE = MULTI_PIPE_DIM * MULTI_PIPE_DIM * 4
@@ -566,12 +566,15 @@ class BiDirectNoSplitTest(PTOTestCase):
 
 @pl.program
 class BidirectSpmdNoSplitProgram:
-    """Bidirectional cube<->vec fused into ONE no-split ``pl.spmd`` scope.
+    """Bidirectional cube<->vec + ``tile.transpose`` fused in one no-split scope.
 
-    ``out = (a + 1) @ b + 1`` per row-tile: a vector op produces the matmul
-    operand (V->C) and a vector op consumes the matmul result (C->V), so the one
-    fused scope drives a single bidirectional ``DIR_BOTH`` cube<->vec ring under
-    dual-AIV dispatch.
+    ``out = ((a + 1) @ b + 1).T`` per row-tile. A vector op produces the matmul
+    operand (V->C) and a vector op consumes the result (C->V), so the fused scope
+    runs under dual-AIV dispatch. The ``pl.transpose`` of the consumed vector tile
+    then exercises the path this test guards: on the secondary subblock that
+    transpose is replayed as a zero-valid tile, which lowers to a ``pto.ttrans``
+    that 507018-hangs the AICore unless SplitVectorKernel rewrites it to an empty
+    ``tile.create`` (#1761).
     """
 
     @pl.function(type=pl.FunctionType.Opaque)
@@ -586,13 +589,14 @@ class BidirectSpmdNoSplitProgram:
             a_slice = pl.slice(a, [SPMD_ROW_TILE, K], [m0, 0])
             a_add = pl.add(a_slice, 1.0)  # vector produces the matmul operand (V->C)
             c_tile = pl.matmul(a_add, b)  # cube
-            c_out = pl.add(c_tile, 1.0)  # vector consumes the matmul result (C->V)
-            out = pl.assemble(out, c_out, [m0, 0])
+            c_vec = pl.add(c_tile, 1.0)  # vector consumes the matmul result (C->V)
+            c_t = pl.transpose(c_vec, axis1=0, axis2=1)  # replayed zero-valid on subblock 1
+            out = pl.assemble(out, c_t, [m0, 0])
         return out
 
 
 class BidirectSpmdNoSplitTest(PTOTestCase):
-    """Cross-core V<->C bidirectional, no split, fused in one pl.spmd scope."""
+    """Cross-core V<->C bidirectional + transpose, no split, in one pl.spmd scope."""
 
     __test__ = False
 
@@ -612,7 +616,9 @@ class BidirectSpmdNoSplitTest(PTOTestCase):
     def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
         a = tensors["a"]
         b = tensors["b"]
-        tensors["out"][:] = torch.matmul(a + 1.0, b) + 1.0
+        for m0 in range(0, M, SPMD_ROW_TILE):
+            c = torch.matmul(a[m0 : m0 + SPMD_ROW_TILE] + 1.0, b) + 1.0
+            tensors["out"][m0 : m0 + SPMD_ROW_TILE] = c.t()
 
 
 @pl.program
@@ -920,7 +926,11 @@ class TestCrossCore:
         assert result.passed, f"Cross-core bidirect no-split compilation failed: {result.error}"
 
     def test_tpop_bidirect_spmd_nosplit(self, test_runner, backend_type):
-        """Bidirect cube<->vec fused in one no-split pl.spmd scope (on-board)."""
+        """Bidirect cube<->vec + transpose fused in one no-split pl.spmd scope.
+
+        On-board guard for #1761: the secondary-subblock replay of the scope's
+        ``tile.transpose`` must not 507018-hang the AICore.
+        """
         result = test_runner.run(BidirectSpmdNoSplitTest(backend_type=backend_type))
         assert result.passed, f"Cross-core bidirect spmd no-split failed: {result.error}"
 
