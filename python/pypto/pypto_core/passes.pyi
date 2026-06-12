@@ -429,7 +429,10 @@ def outline_hierarchy_scopes() -> Pass:
 def convert_tensor_to_tile_ops() -> Pass:
     """Create a pass that converts tensor ops to tile ops in InCore functions."""
 
-def optimize_orch_tensors() -> Pass:
+def optimize_orch_tensors(
+    output_window_policy: str = "exact_pieces",
+    window_rewrite_policy: str = "all",
+) -> Pass:
     """Create a pass that optimizes tensor buffer usage in orchestration and InCore functions."""
 
 def flatten_tile_nd_to_2d() -> Pass:
