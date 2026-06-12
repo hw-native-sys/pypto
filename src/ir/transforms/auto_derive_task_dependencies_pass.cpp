@@ -869,7 +869,7 @@ class AutoDepMutator : public IRMutator {
   }
 
   StmtPtr VisitStmt_(const RuntimeScopeStmtPtr& op) override {
-    if (!op->manual_ && !analyze_auto_scopes_) {
+    if (op->manual_ || !analyze_auto_scopes_) {
       return IRMutator::VisitStmt_(op);
     }
     return AnalyzeRuntimeScopeBody(op->body_, op->manual_, op->name_hint_, op->span_,

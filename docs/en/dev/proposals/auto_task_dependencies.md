@@ -2,17 +2,19 @@
 
 ## Status
 
-Implemented design for the `auto-deps` branch. The pass is now registered in
-the default pipeline after `DeriveCallDirections`. By default it analyzes
-`with pl.manual_scope():` regions. AUTO-scope analysis remains opt-in through
-the compile-time `analyze_auto_scopes_for_deps` switch.
+Implemented design for the `auto-deps` branch. The pass is registered in the
+default pipeline after `DeriveCallDirections`. Current policy keeps
+`with pl.manual_scope():` fully user-managed: the pass does not analyze or
+demote manual scopes. AUTO-scope analysis remains opt-in through the
+compile-time `analyze_auto_scopes_for_deps` switch.
 
 ## Goal
 
-Derive task-to-task dependencies in the pass layer so users do not need to
-write most `pl.submit(..., deps=[...])` edges by hand. The default pipeline
-target is correctness for `with pl.manual_scope():`; normal AUTO scope keeps
-runtime TensorMap/OverlapMap tracking unless callers explicitly enable
+Derive task-to-task dependencies in the pass layer for AUTO scopes when callers
+explicitly enable it. User-written `with pl.manual_scope():` regions remain a
+manual scheduling contract: users must write the required `deps=[...]` edges by
+hand, and the compiler does not add or infer more edges there. Normal AUTO scope
+keeps runtime TensorMap/OverlapMap tracking unless callers explicitly enable
 AUTO-scope analysis.
 
 The lowering target is the existing path:
@@ -21,10 +23,9 @@ The lowering target is the existing path:
 Call.attrs["manual_dep_edges"] -> orchestration codegen -> Arg::set_dependencies(...)
 ```
 
-No runtime implementation change is required for P0. The compiler may still
-emit additional `Arg::set_dependencies(...)` calls for MANUAL scopes, and may
-fall an unencodable MANUAL scope back to AUTO mode so runtime tracking preserves
-correctness.
+No runtime implementation change is required for the current policy. The
+compiler may emit additional `Arg::set_dependencies(...)` calls for analyzed
+AUTO scopes, but it does not rewrite user-written MANUAL scopes to AUTO.
 
 ## Current Code Touchpoints
 
@@ -82,22 +83,23 @@ Hazards:
 3. Existing `BufferRootCollector` must remain unchanged. Auto-deps needs a new
    `StorageRootAnalysis` because the correct storage semantics differ from the
    direction/codegen root semantics.
-4. Dynamic fan-in is only supported when it can be encoded as existing
-   `Scalar[TASK_ID]` or fixed-size `Array[N, TASK_ID]` carries. Unsupported
-   `manual_scope` cases fall back for the whole scope to AUTO runtime tracking
-   rather than leaving partial compiler deps inside a MANUAL region.
+4. Dynamic fan-in is only supported in analyzed AUTO scopes when it can be
+   encoded as existing `Scalar[TASK_ID]` or fixed-size `Array[N, TASK_ID]`
+   carries. Unsupported AUTO cases keep AUTO runtime tracking rather than
+   leaving partial compiler deps in place.
 
-## P0: Manual-Scope Correctness
+## P0: AUTO-Scope Opt-In Derivation
 
 Scope:
 
-- Analyze `with pl.manual_scope():` in the default pipeline.
+- Do not analyze `with pl.manual_scope():`; user-written manual scopes are
+  honored verbatim.
 - Keep AUTO-scope analysis disabled by default; callers must opt in with
   `analyze_auto_scopes_for_deps=True`.
 - Only synthesize deps when the representation is statically encodable.
 - Preserve user-written `deps=[...]` and add compiler deps after de-duplication.
-- If a MANUAL scope cannot be completely encoded as fixed TaskId deps, rewrite
-  the whole scope to AUTO so TensorMap/OverlapMap can conservatively track it.
+- If an analyzed AUTO scope cannot be completely encoded as fixed TaskId deps,
+  strip partial compiler deps and rely on AUTO TensorMap/OverlapMap tracking.
 
 Implementation checklist:
 
@@ -115,15 +117,13 @@ Implementation checklist:
 
 ## Default-Path Effects
 
-- MANUAL scopes in the default pipeline may now gain compiler-derived
-  `compiler_manual_dep_edges`, which codegen lowers to
-  `Arg::set_dependencies(...)`. This can add conservative ordering where the
-  compiler finds a RAW/WAR/WAW hazard not already covered by user deps.
-- If analysis cannot safely encode all required deps for a MANUAL scope, the
-  pass strips any partial compiler-derived deps from that whole scope and emits
-  it as `manual=false`. This is an intentional correctness fallback: it may
-  re-enable runtime TensorMap/OverlapMap overhead, but it avoids the unsafe
-  state of a MANUAL scope with incomplete static deps.
+- MANUAL scopes in the default pipeline are not analyzed by
+  `AutoDeriveTaskDependencies`; user-written `deps=[...]` remain the sole
+  dependency source and the scope stays MANUAL.
+- AUTO scopes are analyzed only when `analyze_auto_scopes_for_deps=True`. If
+  analysis cannot safely encode all required deps, the pass strips any partial
+  compiler-derived deps and leaves the scope AUTO so TensorMap/OverlapMap can
+  conservatively track it.
 - Dead scalar assignment elimination now preserves TaskId tuple-element
   extracts unconditionally. This is a small default-path change that may keep a
   cheap scalar TaskId local which was previously removed, so later dependency
@@ -157,8 +157,8 @@ enough, then defines a safe fallback when static dependency derivation cannot
 reliably encode the required dependency set.
 
 Implementation target for this phase: finite root-set lineage for `IfStmt`,
-loop, and while return variables, plus whole-scope fallback to runtime tracking
-when a required dependency cannot be encoded as fixed TaskId deps.
+loop, and while return variables, plus whole-AUTO-region fallback to runtime
+tracking when a required dependency cannot be encoded as fixed TaskId deps.
 
 Priority order:
 
@@ -197,12 +197,12 @@ Priority order:
    case must stay conservative rather than choosing one root.
 
 3. Add whole-scope fallback to the original runtime TensorMap/OverlapMap for
-   cases that cannot be recognized or are too error-prone to encode statically.
+   analyzed AUTO cases that cannot be recognized or are too error-prone to encode statically.
    Examples include dynamic fan-in with an unbounded number of producer TaskIds,
    dynamic gather/scatter-like aliasing, root-set explosion, missing producer
    TaskIds, or mixed control flow whose required deps are not a fixed list.
-   Prefer falling back for the entire `manual_scope` rather than a single call so
-   static deps and runtime TensorMap state do not disagree at segment
+   Prefer falling back for the entire AUTO analysis region rather than a single
+   call so static deps and runtime TensorMap state do not disagree at segment
    boundaries.
 
 ## Open Questions
@@ -212,5 +212,5 @@ Priority order:
   `manual_dep_edges` with provenance stored elsewhere?
 - Where should generated TaskId variables be introduced for non-`pl.submit`
   calls in normal orchestration syntax?
-- Which diagnostics should be user-facing errors in `manual_scope`, and which
-  should fall back to conservative deps?
+- Which diagnostics should be user-facing errors for opt-in AUTO derivation, and
+  which should fall back to conservative runtime tracking?

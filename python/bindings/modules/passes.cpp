@@ -524,10 +524,10 @@ void BindPass(nb::module_& m) {
              nb::arg("analyze_auto_scopes") = false,
              "Derive compiler-owned runtime-scope task dependency edges.\n\n"
              "Runs after derive_call_directions and writes "
-             "Call.attrs['compiler_manual_dep_edges'] inside runtime scopes. "
-             "By default only manual scopes are analyzed; pass analyze_auto_scopes=True "
-             "to also analyze AUTO scopes without changing their runtime scope mode. "
-             "unanalyzable hazards fall back to AUTO tracking with partial compiler deps stripped. "
+             "Call.attrs['compiler_manual_dep_edges'] inside analyzed AUTO runtime scopes. "
+             "User-written manual scopes are skipped. Pass analyze_auto_scopes=True "
+             "to analyze AUTO scopes without changing their runtime scope mode. "
+             "Unanalyzable hazards keep AUTO tracking with partial compiler deps stripped. "
              "User-provided Call.attrs['manual_dep_edges'] remain separate; orchestration "
              "codegen merges both attrs before emitting Arg::set_dependencies.");
   passes.def("expand_manual_phase_fence", &pass::ExpandManualPhaseFence,

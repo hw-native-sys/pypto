@@ -91,7 +91,7 @@ def _run_auto_deps(program: ir.Program, *, analyze_auto_scopes: bool = False) ->
 
 
 class TestAutoDeriveTaskDependencies:
-    def test_manual_scope_raw_hazard_adds_compiler_edge(self):
+    def test_manual_scope_raw_hazard_is_left_to_user_deps(self):
         @pl.program
         class Prog:
             @pl.function(type=pl.FunctionType.InCore)
@@ -108,17 +108,45 @@ class TestAutoDeriveTaskDependencies:
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(self, scratch: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.manual_scope():
+                    produced, _producer_tid = pl.submit(self.fill, scratch)
+                    out, _ = pl.submit(self.consume, produced)
+                return out
+
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
+        scopes = _runtime_scopes(out)
+        assert len(scopes) == 1
+        assert scopes[0].manual is True
+        consume_call = _user_calls(out, "consume")[0]
+        assert _compiler_edges(consume_call) == []
+
+    def test_auto_scope_raw_hazard_adds_compiler_edge_when_enabled(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill(
+                self,
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                return out
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, scratch: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.scope(mode=pl.ScopeMode.AUTO):
                     produced, producer_tid = pl.submit(self.fill, scratch)
                     out, _ = pl.submit(self.consume, produced)
                 return out
 
-        out = _run_auto_deps(Prog)
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
         consume_call = _user_calls(out, "consume")[0]
         edges = _compiler_edges(consume_call)
         assert len(edges) == 1
         assert edges[0].name_hint == "producer_tid"
 
-    def test_manual_scope_read_read_does_not_add_edge(self):
+    def test_auto_scope_read_read_does_not_add_edge_when_enabled(self):
         @pl.program
         class Prog:
             @pl.function(type=pl.FunctionType.InCore)
@@ -131,16 +159,16 @@ class TestAutoDeriveTaskDependencies:
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.manual_scope():
+                with pl.scope(mode=pl.ScopeMode.AUTO):
                     _a, _tid = pl.submit(self.read1, x)
                     b, _ = pl.submit(self.read2, x)
                 return b
 
-        out = _run_auto_deps(Prog)
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
         read2_call = _user_calls(out, "read2")[0]
         assert _compiler_edges(read2_call) == []
 
-    def test_manual_scope_waw_hazard_adds_compiler_edge(self):
+    def test_auto_scope_waw_hazard_adds_compiler_edge_when_enabled(self):
         @pl.program
         class Prog:
             @pl.function(type=pl.FunctionType.InCore)
@@ -156,18 +184,18 @@ class TestAutoDeriveTaskDependencies:
                 first: pl.Tensor[[64], pl.FP32, pl.MemRef("shared_ddr", 0, 256)],
                 second: pl.Tensor[[64], pl.FP32, pl.MemRef("shared_ddr", 0, 256)],
             ) -> pl.Tensor[[64], pl.FP32, pl.MemRef("shared_ddr", 0, 256)]:
-                with pl.manual_scope():
+                with pl.scope(mode=pl.ScopeMode.AUTO):
                     _first, first_tid = pl.submit(self.fill, first)
                     out, _ = pl.submit(self.fill, second)
                 return out
 
-        out = _run_auto_deps(Prog)
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
         second_fill = _user_calls(out, "fill")[1]
         edges = _compiler_edges(second_fill)
         assert len(edges) == 1
         assert edges[0].name_hint == "first_tid"
 
-    def test_manual_scope_war_hazard_adds_compiler_edge(self):
+    def test_auto_scope_war_hazard_adds_compiler_edge_when_enabled(self):
         @pl.program
         class Prog:
             @pl.function(type=pl.FunctionType.InCore)
@@ -183,12 +211,12 @@ class TestAutoDeriveTaskDependencies:
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(self, scratch: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.manual_scope():
+                with pl.scope(mode=pl.ScopeMode.AUTO):
                     _seen, reader_tid = pl.submit(self.read, scratch)
                     out, _ = pl.submit(self.fill, scratch)
                 return out
 
-        out = _run_auto_deps(Prog)
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
         fill_call = _user_calls(out, "fill")[0]
         edges = _compiler_edges(fill_call)
         assert len(edges) == 1
@@ -238,7 +266,7 @@ class TestAutoDeriveTaskDependencies:
                     out, _ = pl.submit(self.consume, produced)
                 return out
 
-        out = _run_auto_deps(Prog)
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
         scopes = _runtime_scopes(out)
         assert len(scopes) == 1
         assert scopes[0].manual is False
@@ -333,13 +361,13 @@ class TestAutoDeriveTaskDependencies:
                 scratch: pl.Tensor[[64], pl.FP32],
                 other: pl.Tensor[[64], pl.FP32],
             ) -> pl.Tensor[[64], pl.FP32]:
-                with pl.manual_scope():
+                with pl.scope(mode=pl.ScopeMode.AUTO):
                     produced, producer_tid = pl.submit(self.fill, scratch)
                     _unused, user_tid = pl.submit(self.unrelated, other)
                     out, _ = pl.submit(self.consume, produced, deps=[user_tid])
                 return out
 
-        out = _run_auto_deps(Prog)
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
         consume_call = _user_calls(out, "consume")[0]
         user_edges = _user_edges(consume_call)
         compiler_edges = _compiler_edges(consume_call)
@@ -385,7 +413,7 @@ class TestAutoDeriveTaskDependencies:
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(self, scratch: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[32], pl.FP32]:
-                with pl.manual_scope():
+                with pl.scope(mode=pl.ScopeMode.AUTO):
                     left = scratch[0:32]
                     right = scratch[32:64]
                     _produced, producer_tid = pl.submit(self.fill, left)
@@ -443,14 +471,14 @@ class TestAutoDeriveTaskDependencies:
                 pl.FP32,
                 pl.TensorView(stride=[32, 1], layout=pl.TensorLayout.ND),
             ]:
-                with pl.manual_scope():
+                with pl.scope(mode=pl.ScopeMode.AUTO):
                     top = scratch[0:32, 0:32]
                     bottom = scratch[32:64, 0:32]
                     _produced, producer_tid = pl.submit(self.fill, top)
                     out, _ = pl.submit(self.consume, bottom)
                 return out
 
-        out = _run_auto_deps(Prog)
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
         assert "compiler_manual_dep_edges" not in _printed(out)
 
     def test_strided_nd_tensor_view_disjoint_slices_stay_conservative(self):
@@ -501,14 +529,14 @@ class TestAutoDeriveTaskDependencies:
                 pl.FP32,
                 pl.TensorView(stride=[64, 1], layout=pl.TensorLayout.ND),
             ]:
-                with pl.manual_scope():
+                with pl.scope(mode=pl.ScopeMode.AUTO):
                     top = scratch[0:16, 0:32]
                     bottom = scratch[16:32, 0:32]
                     _produced, producer_tid = pl.submit(self.fill, top)
                     out, _ = pl.submit(self.consume, bottom)
                 return out
 
-        out = _run_auto_deps(Prog)
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
         consume_call = _user_calls(out, "consume")[0]
         edges = _compiler_edges(consume_call)
         assert len(edges) == 1
@@ -562,14 +590,14 @@ class TestAutoDeriveTaskDependencies:
                 pl.FP32,
                 pl.TensorView(stride=[1, 16], layout=pl.TensorLayout.DN),
             ]:
-                with pl.manual_scope():
+                with pl.scope(mode=pl.ScopeMode.AUTO):
                     top = scratch[0:16, 0:32]
                     bottom = scratch[16:32, 0:32]
                     _produced, producer_tid = pl.submit(self.fill, top)
                     out, _ = pl.submit(self.consume, bottom)
                 return out
 
-        out = _run_auto_deps(Prog)
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
         consume_call = _user_calls(out, "consume")[0]
         edges = _compiler_edges(consume_call)
         assert len(edges) == 1
@@ -623,14 +651,14 @@ class TestAutoDeriveTaskDependencies:
                 pl.FP32,
                 pl.TensorView(stride=[32, 1], layout=pl.TensorLayout.ND, valid_shape=[15, 32]),
             ]:
-                with pl.manual_scope():
+                with pl.scope(mode=pl.ScopeMode.AUTO):
                     top = scratch[0:16, 0:32]
                     bottom = scratch[16:32, 0:32]
                     _produced, producer_tid = pl.submit(self.fill, top)
                     out, _ = pl.submit(self.consume, bottom)
                 return out
 
-        out = _run_auto_deps(Prog)
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
         consume_call = _user_calls(out, "consume")[0]
         edges = _compiler_edges(consume_call)
         assert len(edges) == 1
@@ -652,14 +680,14 @@ class TestAutoDeriveTaskDependencies:
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(self, scratch: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[32], pl.FP32]:
-                with pl.manual_scope():
+                with pl.scope(mode=pl.ScopeMode.AUTO):
                     left = scratch[0:32]
                     mid = scratch[16:48]
                     _produced, producer_tid = pl.submit(self.fill, left)
                     out, _ = pl.submit(self.consume, mid)
                 return out
 
-        out = _run_auto_deps(Prog)
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
         consume_call = _user_calls(out, "consume")[0]
         edges = _compiler_edges(consume_call)
         assert len(edges) == 1
@@ -685,14 +713,14 @@ class TestAutoDeriveTaskDependencies:
                 scratch: pl.Tensor[[64], pl.FP32],
                 offset: pl.Scalar[pl.INDEX],
             ) -> pl.Tensor[[32], pl.FP32]:
-                with pl.manual_scope():
+                with pl.scope(mode=pl.ScopeMode.AUTO):
                     left = scratch[0:32]
                     dynamic = pl.slice(scratch, [32], [offset])
                     _produced, producer_tid = pl.submit(self.fill, left)
                     out, _ = pl.submit(self.consume, dynamic)
                 return out
 
-        out = _run_auto_deps(Prog)
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
         consume_call = _user_calls(out, "consume")[0]
         edges = _compiler_edges(consume_call)
         assert len(edges) == 1
@@ -718,7 +746,7 @@ class TestAutoDeriveTaskDependencies:
                 scratch: pl.Tensor[[64], pl.FP32],
                 cond: pl.Scalar[pl.BOOL],
             ) -> pl.Tensor[[64], pl.FP32]:
-                with pl.manual_scope():
+                with pl.scope(mode=pl.ScopeMode.AUTO):
                     produced, producer_tid = pl.submit(self.fill, scratch)
                     if cond:
                         selected = pl.yield_(produced)
@@ -727,7 +755,7 @@ class TestAutoDeriveTaskDependencies:
                     out, _ = pl.submit(self.consume, selected)
                 return out
 
-        out = _run_auto_deps(Prog)
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
         consume_call = _user_calls(out, "consume")[0]
         edges = _compiler_edges(consume_call)
         assert len(edges) == 1
@@ -754,7 +782,7 @@ class TestAutoDeriveTaskDependencies:
                 right: pl.Tensor[[64], pl.FP32],
                 cond: pl.Scalar[pl.BOOL],
             ) -> pl.Tensor[[64], pl.FP32]:
-                with pl.manual_scope():
+                with pl.scope(mode=pl.ScopeMode.AUTO):
                     produced_left, left_tid = pl.submit(self.fill, left)
                     produced_right, right_tid = pl.submit(self.fill, right)
                     if cond:
@@ -764,7 +792,7 @@ class TestAutoDeriveTaskDependencies:
                     out, _ = pl.submit(self.consume, selected)
                 return out
 
-        out = _run_auto_deps(Prog)
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
         consume_call = _user_calls(out, "consume")[0]
         edges = _compiler_edges(consume_call)
         assert [edge.name_hint for edge in edges] == ["left_tid", "right_tid"]
@@ -789,7 +817,7 @@ class TestAutoDeriveTaskDependencies:
                 left: pl.Tensor[[64], pl.FP32],
                 right: pl.Tensor[[64], pl.FP32],
             ) -> pl.Tensor[[64], pl.FP32]:
-                with pl.manual_scope():
+                with pl.scope(mode=pl.ScopeMode.AUTO):
                     produced_left, left_tid = pl.submit(self.fill, left)
                     produced_right, right_tid = pl.submit(self.fill, right)
                     for _i, (selected_iter,) in pl.range(0, 4, init_values=(produced_left,)):
@@ -797,7 +825,7 @@ class TestAutoDeriveTaskDependencies:
                     out, _ = pl.submit(self.consume, selected)
                 return out
 
-        out = _run_auto_deps(Prog)
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
         consume_call = _user_calls(out, "consume")[0]
         edges = _compiler_edges(consume_call)
         assert [edge.name_hint for edge in edges] == ["left_tid", "right_tid"]
@@ -824,7 +852,7 @@ class TestAutoDeriveTaskDependencies:
                 index: pl.Tensor[[4, 8], pl.INT32],
                 cond: pl.Scalar[pl.BOOL],
             ) -> pl.Tensor[[4, 8], pl.FP32]:
-                with pl.manual_scope():
+                with pl.scope(mode=pl.ScopeMode.AUTO):
                     produced, _producer_tid = pl.submit(self.fill, scratch)
                     dynamic = pl.tensor.gather(src, -1, index)
                     if cond:
@@ -834,7 +862,7 @@ class TestAutoDeriveTaskDependencies:
                     out, _ = pl.submit(self.consume, selected)
                 return out
 
-        out = _run_auto_deps(Prog)
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
         scopes = _runtime_scopes(out)
         assert len(scopes) == 1
         assert scopes[0].manual is False
@@ -860,7 +888,7 @@ class TestAutoDeriveTaskDependencies:
                 src: pl.Tensor[[4, 16], pl.FP32],
                 index: pl.Tensor[[4, 8], pl.INT32],
             ) -> pl.Tensor[[4, 8], pl.FP32]:
-                with pl.manual_scope():
+                with pl.scope(mode=pl.ScopeMode.AUTO):
                     produced, _producer_tid = pl.submit(self.fill, scratch)
                     dynamic = pl.tensor.gather(src, -1, index)
                     for _i, (selected_iter,) in pl.range(0, 4, init_values=(produced,)):
@@ -868,7 +896,7 @@ class TestAutoDeriveTaskDependencies:
                     out, _ = pl.submit(self.consume, selected)
                 return out
 
-        out = _run_auto_deps(Prog)
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
         scopes = _runtime_scopes(out)
         assert len(scopes) == 1
         assert scopes[0].manual is False
@@ -896,18 +924,18 @@ class TestAutoDeriveTaskDependencies:
                 left: pl.Tensor[[64], pl.FP32, pl.MemRef("shared_ddr", 0, 256)],
                 right: pl.Tensor[[64], pl.FP32, pl.MemRef("shared_ddr", 128, 256)],
             ) -> pl.Tensor[[64], pl.FP32, pl.MemRef("shared_ddr", 128, 256)]:
-                with pl.manual_scope():
+                with pl.scope(mode=pl.ScopeMode.AUTO):
                     _produced, producer_tid = pl.submit(self.fill, left)
                     out, _ = pl.submit(self.consume, right)
                 return out
 
-        out = _run_auto_deps(Prog)
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
         consume_call = _user_calls(out, "consume")[0]
         edges = _compiler_edges(consume_call)
         assert len(edges) == 1
         assert edges[0].name_hint == "producer_tid"
 
-    def test_unencodable_manual_scope_hazard_falls_back_to_auto_scope(self):
+    def test_unencodable_auto_scope_hazard_keeps_auto_scope_without_compiler_edges(self):
         @pl.program
         class Prog:
             @pl.function(type=pl.FunctionType.InCore)
@@ -923,12 +951,12 @@ class TestAutoDeriveTaskDependencies:
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(self, scratch: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.manual_scope():
+                with pl.scope(mode=pl.ScopeMode.AUTO):
                     produced = self.fill(scratch)
                     out, _ = pl.submit(self.consume, produced)
                 return out
 
-        out = _run_auto_deps(Prog)
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
         scopes = _runtime_scopes(out)
         assert len(scopes) == 1
         assert scopes[0].manual is False
@@ -948,12 +976,12 @@ class TestAutoDeriveTaskDependencies:
                 src: pl.Tensor[[4, 16], pl.FP32],
                 index: pl.Tensor[[4, 8], pl.INT32],
             ) -> pl.Tensor[[4, 8], pl.FP32]:
-                with pl.manual_scope():
+                with pl.scope(mode=pl.ScopeMode.AUTO):
                     gathered = pl.tensor.gather(src, -1, index)
                     out, _ = pl.submit(self.consume, gathered)
                 return out
 
-        out = _run_auto_deps(Prog)
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
         scopes = _runtime_scopes(out)
         assert len(scopes) == 1
         assert scopes[0].manual is False
@@ -974,14 +1002,14 @@ class TestAutoDeriveTaskDependencies:
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(self, scratch: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.manual_scope():
+                with pl.scope(mode=pl.ScopeMode.AUTO):
                     carried = scratch
                     for _i in pl.range(0, 4):
                         carried, _producer_tid = pl.submit(self.fill, carried)
                     out, _ = pl.submit(self.consume, carried)
                 return out
 
-        out = _run_auto_deps(Prog)
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
         scopes = _runtime_scopes(out)
         assert len(scopes) == 1
         assert scopes[0].manual is False
@@ -1009,7 +1037,7 @@ class TestAutoDeriveTaskDependencies:
                     out, _ = pl.submit(self.consume, carried, deps=[producer_tid])
                 return out
 
-        out = _run_auto_deps(Prog)
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
         scopes = _runtime_scopes(out)
         assert len(scopes) == 1
         assert scopes[0].manual is True
@@ -1058,7 +1086,7 @@ class TestAutoDeriveTaskDependencies:
         assert [edge.name_hint for edge in user_edges] == ["last_tid"]
         assert _compiler_edges(consume_call) == []
 
-    def test_partial_user_deps_with_dynamic_hazard_still_falls_back(self):
+    def test_partial_user_deps_with_dynamic_auto_hazard_still_falls_back(self):
         @pl.program
         class Prog:
             @pl.function(type=pl.FunctionType.InCore)
@@ -1082,7 +1110,7 @@ class TestAutoDeriveTaskDependencies:
                 scratch: pl.Tensor[[64], pl.FP32],
                 other: pl.Tensor[[64], pl.FP32],
             ) -> pl.Tensor[[64], pl.FP32]:
-                with pl.manual_scope():
+                with pl.scope(mode=pl.ScopeMode.AUTO):
                     carried = scratch
                     for _i in pl.range(0, 4):
                         carried, _producer_tid = pl.submit(self.fill, carried)
@@ -1090,7 +1118,7 @@ class TestAutoDeriveTaskDependencies:
                     out, _ = pl.submit(self.consume, carried, deps=[unrelated_tid])
                 return out
 
-        out = _run_auto_deps(Prog)
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
         scopes = _runtime_scopes(out)
         assert len(scopes) == 1
         assert scopes[0].manual is False
@@ -1116,7 +1144,7 @@ class TestAutoDeriveTaskDependencies:
                 src: pl.Tensor[[4, 16], pl.FP32],
                 index: pl.Tensor[[4, 8], pl.INT32],
             ) -> pl.Tensor[[4, 8], pl.FP32]:
-                with pl.manual_scope():
+                with pl.scope(mode=pl.ScopeMode.AUTO):
                     produced, _producer_tid = pl.submit(self.fill, scratch)
                     _first, _ = pl.submit(self.consume, produced)
                     gathered = pl.tensor.gather(src, -1, index)
@@ -1150,7 +1178,7 @@ class TestAutoDeriveTaskDependencies:
                 out = self.consume(produced)
                 return out
 
-        out = _run_auto_deps(Prog)
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
         consume_call = _user_calls(out, "consume")[0]
         assert _compiler_edges(consume_call) == []
 
@@ -1205,7 +1233,7 @@ class TestAutoDeriveTaskDependencies:
                 c2: pl.Scalar[pl.BOOL],
                 c3: pl.Scalar[pl.BOOL],
             ) -> pl.Tensor[[64], pl.FP32]:
-                with pl.manual_scope():
+                with pl.scope(mode=pl.ScopeMode.AUTO):
                     p0, _tid0 = pl.submit(self.fill, t0)
                     p1, _tid1 = pl.submit(self.fill, t1)
                     p2, _tid2 = pl.submit(self.fill, t2)
@@ -1230,7 +1258,7 @@ class TestAutoDeriveTaskDependencies:
                     out, _ = pl.submit(self.consume, selected)
                 return out
 
-        out = _run_auto_deps(Prog)
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
         scopes = _runtime_scopes(out)
         assert len(scopes) == 1
         assert scopes[0].manual is False

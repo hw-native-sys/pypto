@@ -206,7 +206,9 @@ class PassManager:
             strategy: The optimization strategy to use (default: Default)
             analyze_auto_scopes_for_deps: If True, enable compiler-derived task
                 dependency analysis for AUTO runtime scopes. The default stays
-                False so only manual scopes are analyzed.
+                False so runtime AUTO tracking remains the only AUTO-scope
+                dependency mechanism. User-written manual scopes are not
+                analyzed by this pass.
 
         Returns:
             A PassManager instance configured with the appropriate passes

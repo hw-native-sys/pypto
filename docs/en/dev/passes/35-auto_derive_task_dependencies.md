@@ -3,7 +3,7 @@
 ## Overview
 
 `AutoDeriveTaskDependencies` derives conservative task-to-task dependency
-edges inside runtime scopes. It runs after
+edges inside AUTO runtime scopes when explicitly enabled. It runs after
 [`DeriveCallDirections`](34-derive_call_directions.md), reads the resolved
 `Call.attrs["arg_directions"]`, and writes compiler-owned producer TaskId
 edges to `Call.attrs["compiler_manual_dep_edges"]`.
@@ -23,8 +23,9 @@ them immediately before emitting `Arg::set_dependencies(...)`.
     -> Simplify (final)
 ```
 
-The pass is active for MANUAL regions in the default pipeline. AUTO regions are
-different: they are analyzed only when the compile-time
+User-written MANUAL regions are skipped: explicit `deps=[...]` are the user's
+complete scheduling contract, and the pass does not add compiler deps or demote
+the scope. AUTO regions are analyzed only when the compile-time
 `analyze_auto_scopes_for_deps` switch is enabled. Hand-placed AUTO
 `RuntimeScopeStmt` nodes keep `manual=false` in the output IR. For default
 `auto_scope=True` orchestration functions, the pass runs before
@@ -70,8 +71,9 @@ For each function body:
    and not duplicated.
 
 If dependency-relevant tensor access cannot be represented as bounded static
-roots plus fixed TaskId deps, the pass strips any partial compiler-derived deps
-from the whole enclosing `RuntimeScopeStmt` and returns it as `manual=false`.
+roots plus fixed TaskId deps in an analyzed AUTO scope, the pass strips any
+partial compiler-derived deps from the whole enclosing region and leaves it as
+AUTO.
 Implemented fallback triggers include:
 
 - a required hazard whose prior producer TaskId was not statically bound;
@@ -83,21 +85,15 @@ Implemented fallback triggers include:
 - tensor arguments with read/write directions whose storage location cannot be
   resolved by the current lineage analysis.
 
-This returns the entire region to runtime OverlapMap/TensorMap tracking instead
-of mixing partial compiler deps with runtime state at scope boundaries.
-
-This fallback also applies to user-written MANUAL scopes. It is a correctness
-fallback, not a performance guarantee: a scope the user wrote as
-`pl.manual_scope()` may compile as AUTO if the compiler cannot safely encode all
-needed dependencies as fixed TaskId edges. User-written `deps=[...]` are still
-preserved, and runtime tracking supplies the missing conservative ordering.
+This leaves the entire AUTO region on runtime OverlapMap/TensorMap tracking
+instead of mixing partial compiler deps with runtime state at scope boundaries.
+The fallback does not apply to user-written MANUAL scopes because this pass does
+not analyze them.
 
 ## Default-Path Changes
 
-- MANUAL scopes are analyzed by default and may gain
-  `compiler_manual_dep_edges` that lower to `Arg::set_dependencies(...)`.
-  These edges are conservative and may add ordering not present before this
-  pass was registered.
+- MANUAL scopes are not analyzed. User-written `deps=[...]` remain the only
+  dependency source inside `pl.manual_scope()`, and the scope stays MANUAL.
 - AUTO-scope analysis is opt-in. With the default switch value, AUTO runtime
   scope mode and TensorMap/OverlapMap tracking remain unchanged.
 - Dead scalar assignment elimination preserves TaskId tuple-element extracts in

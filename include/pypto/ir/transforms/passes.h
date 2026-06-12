@@ -700,17 +700,17 @@ Pass ExpandManualPhaseFence();
 /**
  * @brief Derive explicit task-to-task dependency edges inside runtime scopes.
  *
- * Walks manual runtime scopes as dependency-analysis regions. For each submit-style
- * Call with a producer ``Scalar[TASK_ID]`` tuple element, computes a conservative
- * storage access summary from ``arg_directions`` and attaches RAW/WAR/WAW hazards
- * against prior calls in the same scope under
- * ``Call.attrs["compiler_manual_dep_edges"]``. AUTO scopes are skipped by default;
- * pass ``analyze_auto_scopes=true`` to analyze them while keeping ``manual=false``
- * in the output IR. On unanalyzable hazards, partial compiler deps are stripped
- * and the scope falls back to AUTO tracking. User-provided ``manual_dep_edges``
- * remain authoritative and separate; codegen merges both attrs before emitting
- * ``Arg::set_dependencies``.
+ * User-written manual runtime scopes are skipped: the user's explicit
+ * ``deps=[...]`` edges are treated as the complete scheduling contract. AUTO
+ * scopes are skipped by default; pass ``analyze_auto_scopes=true`` to analyze
+ * them while keeping ``manual=false`` in the output IR. For each analyzed AUTO
+ * scope, the pass computes a conservative storage access summary from
+ * ``arg_directions`` and attaches RAW/WAR/WAW hazards against prior calls in the
+ * same scope under ``Call.attrs["compiler_manual_dep_edges"]``. On unanalyzable
+ * hazards, partial compiler deps are stripped and AUTO tracking remains active.
  *
+ * User-provided ``manual_dep_edges`` remain authoritative and separate; codegen
+ * merges both attrs before emitting ``Arg::set_dependencies``.
  * Requirements:
  *   - Call directions resolved (run DeriveCallDirections first)
  */
