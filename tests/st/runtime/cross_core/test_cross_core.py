@@ -37,6 +37,10 @@ K = 64
 N = 512
 N_BLOCK = 64
 N_BLOCKS = N // N_BLOCK
+# Bidirectional cube<->vec fused into one no-split pl.spmd scope. N kept small so
+# the [ROW_TILE, SPMD_N] FP32 result tile stays well under the 192KB Vec limit.
+SPMD_N = 128
+SPMD_ROW_TILE = 16
 MULTI_PIPE_DIM = 16
 MULTI_PIPE_SLOT_SIZE = MULTI_PIPE_DIM * MULTI_PIPE_DIM * 4
 MULTI_PIPE_BUFFER_SIZE = MULTI_PIPE_SLOT_SIZE * 8
@@ -561,6 +565,57 @@ class BiDirectNoSplitTest(PTOTestCase):
 
 
 @pl.program
+class BidirectSpmdNoSplitProgram:
+    """Bidirectional cube<->vec fused into ONE no-split ``pl.spmd`` scope.
+
+    ``out = (a + 1) @ b + 1`` per row-tile: a vector op produces the matmul
+    operand (V->C) and a vector op consumes the matmul result (C->V), so the one
+    fused scope drives a single bidirectional ``DIR_BOTH`` cube<->vec ring under
+    dual-AIV dispatch.
+    """
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        a: pl.Tensor[[M, K], pl.FP32],
+        b: pl.Tensor[[K, SPMD_N], pl.FP32],
+        out: pl.Tensor[[M, SPMD_N], pl.FP32],
+    ) -> pl.Tensor[[M, SPMD_N], pl.FP32]:
+        for ob in pl.spmd(M // SPMD_ROW_TILE, name_hint="bidirect_spmd"):
+            m0 = ob * SPMD_ROW_TILE
+            a_slice = pl.slice(a, [SPMD_ROW_TILE, K], [m0, 0])
+            a_add = pl.add(a_slice, 1.0)  # vector produces the matmul operand (V->C)
+            c_tile = pl.matmul(a_add, b)  # cube
+            c_out = pl.add(c_tile, 1.0)  # vector consumes the matmul result (C->V)
+            out = pl.assemble(out, c_out, [m0, 0])
+        return out
+
+
+class BidirectSpmdNoSplitTest(PTOTestCase):
+    """Cross-core V<->C bidirectional, no split, fused in one pl.spmd scope."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "cross_core_bidirect_spmd_nosplit"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("a", [M, K], DataType.FP32, init_value=torch.randn),
+            TensorSpec("b", [K, SPMD_N], DataType.FP32, init_value=torch.randn),
+            TensorSpec("out", [M, SPMD_N], DataType.FP32, is_output=True, init_value=torch.randn),
+        ]
+
+    def get_program(self) -> Any:
+        return BidirectSpmdNoSplitProgram
+
+    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
+        a = tensors["a"]
+        b = tensors["b"]
+        tensors["out"][:] = torch.matmul(a + 1.0, b) + 1.0
+
+
+@pl.program
 class MultiPipeNoSplitProgram:
     """Explicit two-pipe no-split V2C program."""
 
@@ -863,6 +918,11 @@ class TestCrossCore:
         """Bidirect no-split pipe: compile through full pipeline and verify correctness."""
         result = test_runner.run(BiDirectNoSplitTest(backend_type=backend_type))
         assert result.passed, f"Cross-core bidirect no-split compilation failed: {result.error}"
+
+    def test_tpop_bidirect_spmd_nosplit(self, test_runner, backend_type):
+        """Bidirect cube<->vec fused in one no-split pl.spmd scope (on-board)."""
+        result = test_runner.run(BidirectSpmdNoSplitTest(backend_type=backend_type))
+        assert result.passed, f"Cross-core bidirect spmd no-split failed: {result.error}"
 
     def test_multiple_pipes_nosplit(self, test_runner, backend_type):
         """Explicit multiple pipe ids: compile through full pipeline and verify correctness."""
