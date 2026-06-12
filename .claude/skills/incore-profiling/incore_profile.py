@@ -627,6 +627,10 @@ def export_one(
         if artifacts["trace_json"] and artifacts["visualize_data_bin"]:
             result.update(artifacts)
             result["export_src"] = str(collect_out)
+            # Newer msprof writes the final traces during `collect`, so the real
+            # artifacts live under collect_out — point export_dir there too (the
+            # separate `export/` dir stays empty in this path).
+            result["export_dir"] = str(collect_out)
             warn = detect_degenerate_trace(collect_out)
             log(
                 f"[{index:02d}/{total:02d}] {'WARN' if warn else 'OK'} {func}: "

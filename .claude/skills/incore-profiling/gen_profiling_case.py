@@ -118,25 +118,44 @@ def parse_cpp(cpp_text: str) -> tuple[str, bool, list[Param]]:
 
 
 # ── Parse the sibling .pto for static buffer sizes ───────────────────────────
-def parse_pto_sizes(pto_text: str) -> dict[int, int]:
-    """Map GM arg index -> element count, from ``make_tensor_view %argN, shape=[...]``.
+def _parse_dim_list(blob: str) -> list[int]:
+    """Parse a .pto ``[%cN_index, %argM, ...]`` dim/stride list to ints.
 
-    Constant dims (``%cNNN_index``) multiply into the count; a dynamic dim
-    (``%argN``) contributes ``_DEFAULT_DYNAMIC``. When an arg has several views,
-    keep the largest (safe upper bound on the kernel's footprint).
+    A constant ``%cN_index`` yields its value; a dynamic ``%argN`` (runtime) or
+    any other non-constant token yields ``_DEFAULT_DYNAMIC``.
+    """
+    out: list[int] = []
+    for tok in blob.split(","):
+        cm = re.match(r"%c(\d+)_index", tok.strip())
+        out.append(int(cm.group(1)) if cm else _DEFAULT_DYNAMIC)
+    return out
+
+
+def parse_pto_sizes(pto_text: str) -> dict[int, int]:
+    """Map GM arg index -> element count, from ``make_tensor_view`` shape + strides.
+
+    Allocates the true linear footprint ``1 + Σ_d (shape[d]-1)*stride[d]`` rather
+    than ``prod(shape)``, so a padded/strided view (physical stride larger than
+    the shape) is not under-allocated. Constant dims use their value; a dynamic
+    dim (``%argN``) uses ``_DEFAULT_DYNAMIC``. Keeps the largest footprint across
+    an arg's views (a safe upper bound on what the kernel touches).
     """
     sizes: dict[int, int] = {}
-    for m in re.finditer(r"make_tensor_view\s+%arg(\d+),\s*shape\s*=\s*\[([^\]]*)\]", pto_text):
+    pat = re.compile(
+        r"make_tensor_view\s+%arg(\d+),\s*shape\s*=\s*\[([^\]]*)\]"
+        r"(?:,\s*strides\s*=\s*\[([^\]]*)\])?"
+    )
+    for m in pat.finditer(pto_text):
         argn = int(m.group(1))
-        elems = 1
-        for dim in m.group(2).split(","):
-            dim = dim.strip()
-            cm = re.match(r"%c(\d+)_index", dim)
-            if cm:
-                elems *= int(cm.group(1))
-            else:  # %argN (runtime) or other non-constant dim
-                elems *= _DEFAULT_DYNAMIC
-        sizes[argn] = max(sizes.get(argn, 0), elems)
+        shape = _parse_dim_list(m.group(2))
+        strides = _parse_dim_list(m.group(3)) if m.group(3) else None
+        if strides and len(strides) == len(shape):
+            footprint = 1 + sum((s - 1) * st for s, st in zip(shape, strides))
+        else:  # no/mismatched strides -> contiguous product
+            footprint = 1
+            for s in shape:
+                footprint *= s
+        sizes[argn] = max(sizes.get(argn, 0), footprint)
     return sizes
 
 

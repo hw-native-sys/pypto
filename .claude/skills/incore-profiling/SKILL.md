@@ -23,10 +23,12 @@ execute".
 
 ## Prerequisites
 
-- A built case under `build_output/<case>/` — it must contain a `ptoas/`
-  directory of generated `.cpp` kernels, each with its sibling `.pto` (the
-  testcase generator reads the `.pto`'s `make_tensor_view` shapes to size the
-  GM buffers). PyPTO emits both side by side, so this is automatic.
+- A built case under `build_output/<case>/` — it must contain generated `.cpp`
+  kernels under a `ptoas/` directory (top-level, or nested as
+  `next_levels/**/ptoas/`; the tool discovers both), each with its sibling
+  `.pto` (the testcase generator reads the `.pto`'s `make_tensor_view` shapes
+  and strides to size the GM buffers). PyPTO emits both side by side, so this
+  is automatic.
 - A working CANN installation. The tool auto-discovers `set_env.sh`; pass
   `--cann-set-env <path>` if discovery fails. **It must be TL-capable** (its
   `bisheng` accepts `--cce-aicore-enable-tl`) — `ascend-toolkit/latest` is often
@@ -124,7 +126,7 @@ reproducible. Pass `-o build_output/incore_<kernel>_<source>_<ts>/clean` to
   library. Auto-selection substring-matches `910b` and takes the first match,
   which can be bare `Ascend910B` even when the camodel ships only for
   `Ascend910B1`. List the real ones with
-  `find $ASCEND_HOME_PATH -name libruntime_camodel.so` and pass the variant
+  `find "$ASCEND_HOME_PATH" -name libruntime_camodel.so` and pass the variant
   matching your device (`npu-smi info`), e.g. `--soc-version Ascend910B1`.
 - **Trace is ~0 cycles / `CUBE=0` / only SCALAR+sync instrs** — the kernel is
   data-dependent and the auto golden zeroed its control tensor. See **Caveats**.
