@@ -1129,6 +1129,96 @@ class TestSplitVectorKernelNoSplitA2A3:
             printed,
         )
 
+    def test_no_split_dual_dispatch_rewrites_lane1_transpose_to_create(self):
+        """Lane1 replay rewrites a ``tile.transpose`` into ``tile.create``.
+
+        ``tile.transpose`` lowers to a pto-isa op that hangs the AICore (507018)
+        when every operand is a zero-valid replay tile -- the same static/zero
+        hazard gh#1649 hit for subview slices. The replay result is discarded, so
+        lane1 emits an empty tile of the transposed shape instead (gh#1761).
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        span = ir.Span.unknown()
+        zero = ir.ConstInt(0, pl.INDEX, span)
+        one = ir.ConstInt(1, pl.INDEX, span)
+        dim = ir.ConstInt(16, pl.INDEX, span)
+        offsets = ir.MakeTuple([zero, zero], span)
+        shapes = ir.MakeTuple([dim, dim], span)
+        valid_shapes = ir.MakeTuple([dim, dim], span)
+
+        data = ir.Var("data", ir.TensorType([16, 16], pl.FP32), span)
+        out = ir.Var("out", ir.TensorType([16, 16], pl.FP32), span)
+
+        load_type = ir.TileType(
+            [16, 16], pl.FP32, None, ir.TileView(valid_shape=[dim, dim]), ir.MemorySpace.Vec
+        )
+        loaded = ir.Var("loaded", load_type, span)
+        load_call = ir.Call(
+            ir.Op("tile.load"),
+            [data, offsets, shapes, valid_shapes],
+            {"target_memory": ir.MemorySpace.Vec, "transpose": False},
+            load_type,
+            span,
+        )
+
+        transpose_type = ir.TileType(
+            [16, 16], pl.FP32, None, ir.TileView(valid_shape=[dim, dim]), ir.MemorySpace.Vec
+        )
+        transposed = ir.Var("transposed", transpose_type, span)
+        transpose_call = ir.Call(ir.Op("tile.transpose"), [loaded, zero, one], {}, transpose_type, span)
+
+        tpush_call = ir.Call(ir.Op("tile.tpush_to_aic"), [transposed], {"split": 0}, ir.UnknownType(), span)
+
+        peer_buf_call = ir_op.system.import_peer_buffer(
+            name="v2c_slot_buffer", peer_func="main_aic", span=span
+        )
+        peer_buf = ir.Var("peer_buf", peer_buf_call.type, span)
+        init_pipe_call = ir_op.system.aiv_initialize_pipe(
+            v2c_consumer_buf=peer_buf, dir_mask=2, slot_size=512, span=span
+        )
+
+        body = ir.SeqStmts(
+            [
+                ir.AssignStmt(peer_buf, peer_buf_call, span),
+                ir.EvalStmt(init_pipe_call, span),
+                ir.AssignStmt(loaded, load_call, span),
+                ir.AssignStmt(transposed, transpose_call, span),
+                ir.EvalStmt(tpush_call, span),
+                ir.ReturnStmt([out], span),
+            ],
+            span,
+        )
+        func = ir.Function(
+            "main_aiv",
+            [(data, ir.ParamDirection.In), (out, ir.ParamDirection.Out)],
+            [out.type],
+            body,
+            span,
+            ir.FunctionType.AIV,
+            attrs={"dual_aiv_dispatch": True},
+        )
+
+        actual = _run_split_vector_kernel(ir.Program([func], "tile_transpose_program", span))
+        printed = python_print(actual)
+
+        assert "if subblock_idx == 0:" in printed
+        # Lane0 keeps the real transpose; lane1 replaces it (and the load) with create.
+        assert printed.count("pl.tile.transpose(") == 1
+        assert printed.count("pl.tile.create(") == 2
+        then_branch, lane1 = printed.split("else:", 1)
+        assert "pl.tile.transpose(" not in lane1
+        assert re.search(
+            r"transposed__ssa_v0_\d+: pl.Tile\[\[16, 16\], pl.FP32, pl.Mem.Vec, "
+            r"pl.TileView\(valid_shape=\[0, 0\]\)\] = pl.tile.create",
+            lane1,
+        )
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
+
     def test_no_split_dual_dispatch_hoists_import_peer_buffer_and_pipe_init(self):
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
