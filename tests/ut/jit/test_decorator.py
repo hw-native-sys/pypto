@@ -746,6 +746,15 @@ def _runtime_slice_body(src: pl.Tensor, cfg: pl.Tensor, out: pl.Out[pl.Tensor]) 
     return out
 
 
+def _reshape_then_dep_body(src: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+    """Plain (undecorated) function: a pl.reshape view of a parameter feeds a dep,
+    and a parameter reshaped in place keeps its new shape (issue #1755)."""
+    flat = pl.reshape(src, [16, 8])
+    out = pl.reshape(out, [16, 8])
+    out = _relu_kernel(flat, out)
+    return out
+
+
 def _annotated_slice_body(src: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
     """Plain (undecorated) function: pl.slice / pl.create_tensor / dep-call locals
     written with annotated assignments (``v: T = ...``), the common DSL style."""
@@ -789,6 +798,21 @@ class TestSliceAndDepReturnMetadata:
         metas = _extract_local_tensor_metas(_runtime_slice_body, seed_meta=seed)
         # Runtime-scalar 2nd dim → falls back to src's dim 1 = 64; dtype from src.
         assert metas["view"] == TensorMeta(shape=(16, 64), dtype=DataType.FP16)
+
+    def test_extract_local_tensor_metas_reshape(self):
+        """``pl.reshape`` results are tracked: a reshaped view carries the new
+        shape with the source dtype, and a reshaped parameter overrides its
+        original (pre-reshape) seed meta (issue #1755)."""
+        seed = {
+            "src": TensorMeta(shape=(2, 64, 128), dtype=DataType.BF16),
+            "out": TensorMeta(shape=(2, 64, 128), dtype=DataType.BF16),
+        }
+        metas = _extract_local_tensor_metas(_reshape_then_dep_body, seed_meta=seed)
+        # New shape from the literal list; dtype inherited from src.
+        assert metas["flat"] == TensorMeta(shape=(16, 8), dtype=DataType.BF16)
+        # The reshaped ``out`` param overrides its stale (2, 64, 128) seed; the
+        # dep result then inherits that reshaped meta via the Out param.
+        assert metas["out"] == TensorMeta(shape=(16, 8), dtype=DataType.BF16)
 
     def test_extract_local_tensor_metas_annotated_assignments(self):
         """Annotated assignments (``v: T = ...``) are tracked just like plain ones."""

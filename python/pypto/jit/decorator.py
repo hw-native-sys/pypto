@@ -607,7 +607,11 @@ def _extract_local_tensor_metas(
        as-is, and a non-static dim (e.g. a runtime ``valid_len``) falls back to
        ``src``'s corresponding dim, since a slice is bounded above by its
        parent. ``src`` dims that are themselves ``DynDim`` flow through
-       transparently.
+       transparently. ``var = pl.reshape(src, [shape])`` is the sibling case:
+       dtype is likewise inherited from ``src``, but the new shape fully
+       replaces the source shape (no per-dim parent fallback), so a caller that
+       reshapes a tensor before handing it to an inline dep propagates the
+       reshaped meta rather than the stale pre-reshape one.
     3. ``v1, ..., vk = jit_dep(args)`` where ``jit_dep`` is an
        ``@pl.jit.incore`` / ``inline`` / ``opaque`` callee with ``k``
        ``pl.Out[...]`` parameters — each ``vi`` inherits the meta of the caller
@@ -761,7 +765,35 @@ def _extract_local_tensor_metas(
             dims.append(v if v is not None else parent_dim)
         return TensorMeta(shape=tuple(dims), dtype=src_meta.dtype)
 
+    def _reshape_meta(call: ast.Call) -> TensorMeta | None:
+        # pl.reshape(tensor, shape) — the new shape fully replaces the source
+        # shape (unlike a slice, no per-dim parent fallback), so resolve it via
+        # _resolve_shape; dtype is inherited from the source tensor. A static
+        # int or a DynDim alias resolves; anything else leaves the meta unset.
+        src = call.args[0] if call.args else None
+        if not isinstance(src, ast.Name) or src.id not in local:
+            return None
+        shape_node = (
+            call.args[1]
+            if len(call.args) >= 2
+            else next((kw.value for kw in call.keywords if kw.arg == "shape"), None)
+        )
+        shape = _resolve_shape(shape_node)
+        if shape is None:
+            return None
+        return TensorMeta(shape=shape, dtype=local[src.id].dtype)
+
     dep_io = _scan_dep_io(func, caller_func_type)
+
+    # ``pl.<attr>(...)`` producers that mint a local tensor meta. Each builder
+    # takes the ast.Call and returns a TensorMeta or None (not statically
+    # resolvable → skip). A dict keeps _walk's per-statement dispatch flat.
+    attr_meta_builders = {
+        "create_tensor": _create_tensor_meta,
+        "slice": _slice_meta,
+        "window": _window_meta,
+        "reshape": _reshape_meta,
+    }
 
     def _record_dep_result_metas(call: ast.Call, dep_name: str, target: ast.expr) -> None:
         _propagate_dep_out_metas(call, dep_name, target, dep_io, local)
@@ -790,22 +822,12 @@ def _extract_local_tensor_metas(
                 isinstance(fn, ast.Attribute)
                 and isinstance(fn.value, ast.Name)
                 and isinstance(target, ast.Name)
+                and fn.attr in attr_meta_builders
             ):
-                if fn.attr == "create_tensor":
-                    meta = _create_tensor_meta(call)
-                    if meta is not None:
-                        local[target.id] = meta
-                    continue
-                if fn.attr == "slice":
-                    meta = _slice_meta(call)
-                    if meta is not None:
-                        local[target.id] = meta
-                    continue
-                if fn.attr == "window":
-                    meta = _window_meta(call)
-                    if meta is not None:
-                        local[target.id] = meta
-                    continue
+                meta = attr_meta_builders[fn.attr](call)
+                if meta is not None:
+                    local[target.id] = meta
+                continue
             if isinstance(fn, ast.Name) and fn.id in dep_io:
                 _record_dep_result_metas(call, fn.id, target)
 
