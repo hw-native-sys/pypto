@@ -490,8 +490,9 @@ leak to an enclosing scope where its identifier would be out of C++ scope. Loop
 / branch carries are declared *before* their body's `PTO2_SCOPE`, so they
 correctly survive the block.
 
-When `compiler_manual_dep_edges` reference a producer TaskId from a later
-sibling or parent scope, codegen hoists only that TaskId binding: it declares a
+When a later sibling or parent scope references a producer TaskId created in an
+earlier nested or sibling scope through `compiler_manual_dep_edges`, codegen
+hoists only that TaskId binding: it declares a
 `PTO2TaskId <name> = PTO2TaskId::invalid();` sentinel before the producer
 `PTO2_SCOPE`, assigns `<name> = task_<n>_outs.task_id();` inside the block, and
 then emits the later guarded `set_dependencies(...)` entry from the enclosing

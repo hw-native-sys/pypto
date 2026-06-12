@@ -1373,6 +1373,9 @@ class TestAutoDeriveTaskDependencies:
         assert len(scopes) == 1
         assert scopes[0].manual is False
 
+        consume_call = _user_calls(out, "consume")[0]
+        assert _compiler_edges(consume_call) == []
+
     def test_fallback_strips_previous_compiler_edges(self):
         @pl.program
         class Prog:
@@ -1694,6 +1697,9 @@ class TestAutoDeriveTaskDependencies:
         scopes = _runtime_scopes(out)
         assert len(scopes) == 1
         assert scopes[0].manual is False
+
+        consume_call = _user_calls(out, "consume")[0]
+        assert _compiler_edges(consume_call) == []
 
 
 if __name__ == "__main__":

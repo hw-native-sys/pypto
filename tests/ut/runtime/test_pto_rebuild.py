@@ -157,7 +157,6 @@ def test_preprocess_extern_c_global_aicore_entry() -> None:
         "}\n"
     )
     body = _preprocess_ptoas_body(raw)
-    assert 'extern "C" static __aicore__' not in body
     assert 'extern "C"' not in body
     assert "static __aicore__ void copy_hidden" in body
     assert _extract_func_names(raw) == ["copy_hidden"]

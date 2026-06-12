@@ -1509,10 +1509,8 @@ class AutoDepMutator : public IRMutator {
 
  private:
   void MarkCurrentScopeFallback() {
-    if (fallback_stack_.empty() || is_virtual_whole_body_stack_.empty()) return;
-    if (!is_virtual_whole_body_stack_.back()) {
-      fallback_stack_.back() = true;
-    }
+    if (fallback_stack_.empty()) return;
+    fallback_stack_.back() = true;
   }
 
   class CompilerDepStripper : public IRMutator {

@@ -5275,7 +5275,10 @@ class TestManualScopeCodegen:
         )
         assert producer_tid, code
         assert "PTO2TaskId params_t1_deps[1];" in code, code
-        assert f"params_t1_deps[params_t1_deps_count++] = {producer_tid.group(1)};" in code, code
+        assert (
+            f"if ({producer_tid.group(1)}.is_valid()) "
+            f"params_t1_deps[params_t1_deps_count++] = {producer_tid.group(1)};"
+        ) in code, code
         assert "params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);" in code, code
 
     def test_compiler_derived_deps_in_default_auto_scope_do_not_emit_set_dependencies(self):
@@ -5346,7 +5349,10 @@ class TestManualScopeCodegen:
         )
         assert producer_tid, code
         assert "PTO2TaskId params_t1_deps[1];" in code, code
-        assert f"params_t1_deps[params_t1_deps_count++] = {producer_tid.group(1)};" in code, code
+        assert (
+            f"if ({producer_tid.group(1)}.is_valid()) "
+            f"params_t1_deps[params_t1_deps_count++] = {producer_tid.group(1)};"
+        ) in code, code
         assert "params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);" in code, code
 
     def test_compiler_derived_deps_for_plain_auto_call_do_not_capture_task_id_by_default(self):
@@ -5415,7 +5421,10 @@ class TestManualScopeCodegen:
             code,
         )
         assert producer_tid, code
-        assert f"params_t1_deps[params_t1_deps_count++] = {producer_tid.group(1)};" in code, code
+        assert (
+            f"if ({producer_tid.group(1)}.is_valid()) "
+            f"params_t1_deps[params_t1_deps_count++] = {producer_tid.group(1)};"
+        ) in code, code
         assert "params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);" in code, code
 
     def test_auto_scope_task_id_array_slot_dep_uses_scalar_snapshot(self):
@@ -6508,7 +6517,12 @@ class TestScalarCarryPhiCodegen:
                 raise AssertionError(f"Wrong phi: out_b assigned from out_c value (scrambled):\n  {stripped}")
 
 
-def _generate_orch_full_pipeline(program_cls, *, analyze_auto_scopes_for_deps: bool = False) -> str:
+def _generate_orch_full_pipeline(
+    program_cls,
+    *,
+    analyze_auto_scopes_for_deps: bool = False,
+    allow_relaxed_verification: bool = False,
+) -> str:
     """Run the Default pass pipeline + orchestration codegen on the orch func.
 
     The issue #1577 witnesses use ``pl.submit`` against ``@pl.function(InCore)``
@@ -6522,13 +6536,14 @@ def _generate_orch_full_pipeline(program_cls, *, analyze_auto_scopes_for_deps: b
         OptimizationStrategy.Default,
         analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
     )
-    # Scope to BASIC (property) verification, overriding conftest's default
-    # roundtrip instrument. ``pl.submit(..., deps=[...])`` in an auto
-    # orchestration does not survive a print->parse roundtrip after
-    # DeriveCallDirections (a separate printer/parser bug, unrelated to the
-    # orchestration codegen behaviour under test here). Property verification
-    # still runs so real IR invariant violations are caught.
-    with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+    if allow_relaxed_verification:
+        # Scope to BASIC (property) verification for tests that hit the known
+        # ``pl.submit(..., deps=[...])`` print->parse roundtrip gap after
+        # DeriveCallDirections. Property verification still runs so real IR
+        # invariant violations are caught.
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+            optimized = pm.run_passes(program_cls)
+    else:
         optimized = pm.run_passes(program_cls)
     for func in optimized.functions.values():
         if func.func_type == ir.FunctionType.Orchestration:
@@ -6582,7 +6597,7 @@ def test_array_slot_task_id_usable_as_submit_dep():
             b, _ = pl.submit(self.k3, x, deps=[seed_tid, prev])
             return b
 
-    code = _generate_orch_full_pipeline(P)
+    code = _generate_orch_full_pipeline(P, allow_relaxed_verification=True)
 
     # ``prev = tids[0]`` lowers to a scalar PTO2TaskId snapshot local read from
     # the array slot (the dep site references the snapshot, not a slot re-read).
@@ -6626,7 +6641,7 @@ def test_task_id_binding_does_not_leak_past_pl_scope():
             b, _ = pl.submit(self.k2, x, deps=[scoped_tid])
             return b
 
-    code = _generate_orch_full_pipeline(P)
+    code = _generate_orch_full_pipeline(P, allow_relaxed_verification=True)
 
     # The producer tid is declared inside the inner PTO2_SCOPE block.
     m = re.search(r"PTO2TaskId\s+(\w+)\s*=\s*task_0_outs\.task_id\(\);", code)
@@ -7164,7 +7179,7 @@ def test_mixed_in_and_out_of_scope_deps_does_not_crash_codegen():
             return b
 
     # Must not raise (regression: EmitManualDeps used to INTERNAL_CHECK here).
-    code = _generate_orch_full_pipeline(P)
+    code = _generate_orch_full_pipeline(P, allow_relaxed_verification=True)
 
     # The in-scope edge is wired; the out-of-scope ``scoped_tid`` is dropped.
     assert code.count("set_dependencies(") == 1, code
@@ -7210,7 +7225,7 @@ def test_spmd_submit_emits_launch_spec_and_captures_task_id():
                 out, _ = pl.spmd_submit(self.consumer, scratch, out, core_num=2, deps=[tid])
             return out
 
-    code = _generate_orch_full_pipeline(P)
+    code = _generate_orch_full_pipeline(P, allow_relaxed_verification=True)
     # Producer carries core_num=4 + sync_start; consumer carries core_num=2.
     assert "params_t0.launch_spec.set_block_num(4);" in code, code
     assert "params_t0.launch_spec.set_require_sync_start(true);" in code, code

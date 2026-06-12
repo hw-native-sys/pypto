@@ -375,9 +375,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
           if (!edges) continue;
           for (const auto& edge : *edges) {
             if (!edge) continue;
-            const std::string key = VarKey(edge.get());
-            ref_var_by_key.emplace(key, edge.get());
-            refs[key].ref_scopes.push_back(CurrentScope());
+            const std::string var_key = VarKey(edge.get());
+            ref_var_by_key.emplace(var_key, edge.get());
+            refs[var_key].ref_scopes.push_back(CurrentScope());
           }
         }
       }
@@ -2262,7 +2262,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     std::vector<const Var*> vars;
     auto dirs = call->GetArgDirections();
     if (dirs.size() != call->args_.size()) return vars;
-    std::unordered_set<std::string> seen;
+    std::unordered_set<uint64_t> seen;
     for (size_t i = 0; i < dirs.size(); ++i) {
       if (dirs[i] != ArgDirection::OutputExisting && dirs[i] != ArgDirection::InOut) continue;
       auto var = AsVarLike(call->args_[i]);
@@ -3104,7 +3104,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     manual_task_id_map_by_key_[TaskIdHoistKey(var)] = name;
   }
 
-  static std::string TaskIdHoistKey(const Var* var) { return std::to_string(var->UniqueId()); }
+  static uint64_t TaskIdHoistKey(const Var* var) { return var->UniqueId(); }
 
   static std::string CompilerDepAliasKey(const Var* var) {
     if (!var->name_hint_.empty()) return GetSSABaseName(var->name_hint_);
@@ -3656,7 +3656,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// inner-scope adds — which reference C++ identifiers that die with the
   /// inner block — are discarded once the manual scope exits.
   std::unordered_map<const Var*, ManualTaskIdBinding> manual_task_id_map_;
-  std::unordered_map<std::string, ManualTaskIdBinding> manual_task_id_map_by_key_;
+  std::unordered_map<uint64_t, ManualTaskIdBinding> manual_task_id_map_by_key_;
   /// Records the C++ array allocation backing a TaskId carry that holds an
   /// array of task ids (not a scalar). Used by ``YieldStmt`` to decide how
   /// to write into the carry:
@@ -3719,7 +3719,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::unordered_set<std::string> compiler_dep_loop_return_task_id_keys_;
   std::unordered_map<const RuntimeScopeStmt*, std::vector<const Var*>> hoisted_task_id_vars_by_scope_;
   std::unordered_map<uint64_t, std::string> hoisted_task_id_emit_names_;
-  std::unordered_map<std::string, std::string> hoisted_task_id_emit_names_by_key_;
+  std::unordered_map<uint64_t, std::string> hoisted_task_id_emit_names_by_key_;
   bool declared_compiler_dep_task_ids_ = false;
   std::unordered_set<const Var*> declared_var_ptrs_;
   std::unordered_set<const Stmt*> batched_create_stmts_;
