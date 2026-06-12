@@ -45,10 +45,11 @@ PTOAS_BODY_END = "// --- Kernel entry point ---"
 
 # Mirror ``pto_backend._preprocess_ptoas_output``'s function-definition
 # pattern: the same regex that converts the ptoas-emitted
-# ``AICORE void <name>(...)`` qualifier into ``static __aicore__ void
-# <name>(...)``. Capturing the name here lets us discover which kernel cpps
-# each .pto feeds without persisting a map at compile time.
-_PTOAS_FUNC_DEF_RE = re.compile(r"(?:__global__\s+)?AICORE\s+void\s+(\w+)\s*\(")
+# ``extern "C" __global__ AICORE void <name>(...)`` qualifier into
+# ``static __aicore__ void <name>(...)``. Capturing the name here lets us
+# discover which kernel cpps each .pto feeds without persisting a map at
+# compile time.
+_PTOAS_FUNC_DEF_RE = re.compile(r'(?:extern\s+"C"\s+)?(?:__global__\s+)?AICORE\s+void\s+(\w+)\s*\(')
 
 
 def _ptoas_binary() -> str | None:

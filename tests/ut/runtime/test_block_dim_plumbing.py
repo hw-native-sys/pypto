@@ -101,6 +101,7 @@ def test_execute_on_device_skips_config_assignment_when_block_dim_none(patched_e
     # Neither block_dim nor aicpu_thread_num should have been written.
     assert "block_dim" not in cfg._writes
     assert "aicpu_thread_num" not in cfg._writes
+    assert cfg.enable_dump_tensor is False
     # Profiling flag is always set — sanity-check the spy is active.
     assert "enable_l2_swimlane" in cfg._writes
 

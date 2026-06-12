@@ -63,10 +63,12 @@ For each function body:
    static array slots are covered. Unknown or partially covered arrays remain
    unexpanded so missing dependencies still trigger fallback.
 7. Walk each `RuntimeScopeStmt` in source order, maintaining prior accesses for
-   that scope only. For default `auto_scope=True` orchestration functions with
-   no materialized scope yet, use the whole function body as a virtual AUTO
-   analysis region. For AUTO scopes this is analysis-only; the final scope mode
-   remains AUTO.
+   the current analyzable region. When a scope finishes without fallback, export
+   its access records to the enclosing region so later sibling or parent-scope
+   consumers can depend on the producer TaskIds. For default `auto_scope=True`
+   orchestration functions with no materialized scope yet, use the whole
+   function body as a virtual AUTO analysis region. For AUTO scopes this is
+   analysis-only; the final scope mode remains AUTO.
 8. For every non-builtin call with resolved `arg_directions`, classify tensor
    arguments as read, write, or read-write. Accesses to the same storage root,
    or to MemRef roots that may alias, are considered for region overlap.
@@ -82,8 +84,8 @@ AUTO.
 Implemented fallback triggers include:
 
 - a required hazard whose prior producer TaskId was not statically bound;
-- a prior producer inside a loop, where one scalar TaskId would not represent
-  the runtime fan-in across all iterations;
+- a prior producer inside a loop whose TaskId cannot be represented by a fixed
+  loop-return value or by a statically sized TaskId array fan-in;
 - dynamic gather/scatter-like tensor values whose accessed region depends on
   runtime indices;
 - root-set lineage that exceeds the pass cap for static alternatives;

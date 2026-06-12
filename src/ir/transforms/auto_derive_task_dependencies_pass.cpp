@@ -84,11 +84,18 @@ struct StorageAccess {
   StorageAlternative location;
   AccessKind kind = AccessKind::Read;
   VarPtr task_id_var;
+  bool task_id_var_is_direct = false;
   bool dynamic_producer = false;
+  bool from_scope_exit = false;
 };
 
 struct AccessSummary {
   std::vector<StorageAccess> accesses;
+};
+
+struct LoopCarryTaskIdMapping {
+  VarPtr target;
+  bool direct_task_id = false;
 };
 
 bool IsTensorType(const TypePtr& type) { return As<TensorType>(type) != nullptr; }
@@ -430,6 +437,28 @@ bool HasHazard(AccessKind current, AccessKind prior) {
   const bool prior_reads = prior == AccessKind::Read || prior == AccessKind::ReadWrite;
   return (current_reads && prior_writes) || (current_writes && prior_reads) ||
          (current_writes && prior_writes);
+}
+
+bool IsStaticSingleTripLoop(const ForStmtPtr& op) {
+  if (!op) return false;
+  auto start = ConstIntValue(op->start_);
+  auto stop = ConstIntValue(op->stop_);
+  auto step = ConstIntValue(op->step_);
+  if (!start.has_value() || !stop.has_value() || !step.has_value() || *step == 0) return false;
+  if (*step > 0) {
+    return *start < *stop && (*stop - *start + *step - 1) / *step == 1;
+  }
+  return *start > *stop && (*start - *stop + (-*step) - 1) / (-*step) == 1;
+}
+
+std::optional<int64_t> StaticPositiveTripCount(const ForStmtPtr& op) {
+  if (!op) return std::nullopt;
+  auto start = ConstIntValue(op->start_);
+  auto stop = ConstIntValue(op->stop_);
+  auto step = ConstIntValue(op->step_);
+  if (!start.has_value() || !stop.has_value() || !step.has_value() || *step <= 0) return std::nullopt;
+  if (*start >= *stop) return 0;
+  return (*stop - *start + *step - 1) / *step;
 }
 
 class StorageRootAnalysis : public IRVisitor {
@@ -1118,6 +1147,9 @@ class AutoDepMutator : public IRMutator {
   StmtPtr AnalyzeBody(const StmtPtr& body) {
     INTERNAL_CHECK(body != nullptr) << "Internal error: AutoDepMutator received null function body";
     if (!analyze_whole_body_as_auto_scope_ || As<RuntimeScopeStmt>(body)) {
+      if (analyze_auto_scopes_ && !analyze_whole_body_as_auto_scope_ && !As<RuntimeScopeStmt>(body)) {
+        return AnalyzeCrossScopeContainerBody(body);
+      }
       return VisitStmt(body);
     }
     return AnalyzeRuntimeScopeBody(body, /*manual=*/false, /*name_hint=*/"", body->span_,
@@ -1129,9 +1161,26 @@ class AutoDepMutator : public IRMutator {
  protected:
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
     if (prior_stack_.empty()) return IRMutator::VisitStmt_(op);
+    if (IsStaticSingleTripLoop(op)) {
+      auto result = IRMutator::VisitStmt_(op);
+      if (auto new_for = As<ForStmt>(result)) {
+        RemapSingleTripLoopAccessTaskIds(new_for);
+      }
+      return result;
+    }
+    const auto static_trip_count = StaticPositiveTripCount(op);
     ++loop_depth_;
     auto result = IRMutator::VisitStmt_(op);
     --loop_depth_;
+    if (static_trip_count.has_value() && *static_trip_count > 0) {
+      if (auto new_for = As<ForStmt>(result)) {
+        RemapFixedTripLoopAccessTaskIds(new_for);
+      }
+    } else if (!scope_manual_stack_.empty() && !scope_manual_stack_.back()) {
+      if (auto new_for = As<ForStmt>(result)) {
+        RemapDynamicTripLoopAccessTaskIds(new_for);
+      }
+    }
     return result;
   }
 
@@ -1170,14 +1219,23 @@ class AutoDepMutator : public IRMutator {
              " loop_depth=" + std::to_string(loop_depth_));
     prior_stack_.emplace_back();
     scope_manual_stack_.push_back(manual);
+    is_virtual_whole_body_stack_.push_back(is_virtual_whole_body);
     fallback_stack_.push_back(false);
     INTERNAL_CHECK_SPAN(body, span) << "RuntimeScopeStmt has null body";
     auto new_body = VisitStmt(body);
     INTERNAL_CHECK_SPAN(new_body, span) << "RuntimeScopeStmt body mutated to null";
     const bool fallback = fallback_stack_.back();
+    auto scope_accesses = std::move(prior_stack_.back());
     fallback_stack_.pop_back();
+    is_virtual_whole_body_stack_.pop_back();
     scope_manual_stack_.pop_back();
     prior_stack_.pop_back();
+    if (!fallback && !prior_stack_.empty()) {
+      for (auto& access : scope_accesses) {
+        access.from_scope_exit = true;
+        prior_stack_.back().push_back(std::move(access));
+      }
+    }
     if (fallback) {
       DebugLog("fallback_runtime_scope name_hint=" + name_hint);
       auto stripped_body = StripCompilerDeps(new_body);
@@ -1193,6 +1251,143 @@ class AutoDepMutator : public IRMutator {
                                                       std::move(leading_comments), std::move(attrs));
     }
     return original_scope ? original_scope : body;
+  }
+
+  StmtPtr AnalyzeCrossScopeContainerBody(const StmtPtr& body) {
+    prior_stack_.emplace_back();
+    auto new_body = VisitStmt(body);
+    prior_stack_.pop_back();
+    return new_body;
+  }
+
+  void RemapSingleTripLoopAccessTaskIds(const ForStmtPtr& op) {
+    if (prior_stack_.empty() || !op) return;
+    auto yield = GetTrailingYield(op->body_);
+    if (!yield) return;
+
+    auto remap = BuildLoopCarryTaskIdRemap(op, yield);
+    if (remap.empty()) return;
+
+    for (auto& access : prior_stack_.back()) {
+      if (!access.task_id_var) continue;
+      auto it = remap.find(access.task_id_var->UniqueId());
+      if (it != remap.end()) {
+        access.task_id_var = it->second.target;
+        access.task_id_var_is_direct = it->second.direct_task_id;
+      }
+    }
+  }
+
+  void RemapFixedTripLoopAccessTaskIds(const ForStmtPtr& op) {
+    if (prior_stack_.empty() || !op) return;
+    auto yield = GetTrailingYield(op->body_);
+    if (!yield) return;
+
+    auto remap = BuildLoopCarryTaskIdRemap(op, yield);
+    if (remap.empty()) return;
+
+    for (auto& access : prior_stack_.back()) {
+      if (!access.dynamic_producer || !access.task_id_var) continue;
+      auto it = remap.find(access.task_id_var->UniqueId());
+      if (it != remap.end()) {
+        access.task_id_var = it->second.target;
+        access.task_id_var_is_direct = it->second.direct_task_id;
+      } else if (auto return_var = LoopReturnVarForAccess(op, access)) {
+        access.task_id_var = return_var;
+        access.task_id_var_is_direct = false;
+      } else {
+        continue;
+      }
+      access.dynamic_producer = false;
+    }
+  }
+
+  void RemapDynamicTripLoopAccessTaskIds(const ForStmtPtr& op) {
+    if (prior_stack_.empty() || !op) return;
+    auto yield = GetTrailingYield(op->body_);
+    if (!yield) return;
+
+    auto remap = BuildLoopCarryTaskIdRemap(op, yield);
+    if (remap.empty()) return;
+
+    for (auto& access : prior_stack_.back()) {
+      if (!access.dynamic_producer || !access.task_id_var) continue;
+      auto it = remap.find(access.task_id_var->UniqueId());
+      if (it != remap.end()) {
+        access.task_id_var = it->second.target;
+        access.task_id_var_is_direct = it->second.direct_task_id;
+      } else if (auto return_var = LoopReturnVarForAccess(op, access)) {
+        access.task_id_var = return_var;
+        access.task_id_var_is_direct = false;
+      } else {
+        continue;
+      }
+      access.dynamic_producer = false;
+    }
+  }
+
+  VarPtr LoopReturnVarForAccess(const ForStmtPtr& op, const StorageAccess& access) const {
+    if (!storage_ || !op) return nullptr;
+    for (const auto& return_var : op->return_vars_) {
+      if (!return_var) continue;
+      auto resolved = storage_->ResolveExprStatus(return_var);
+      if (resolved.status != LocationStatus::Known) continue;
+      for (const auto& alternative : resolved.location.alternatives) {
+        if (!storage_->MayAlias(access.location.root, alternative.root)) continue;
+        if (!RegionsMayOverlap(access.location.region, alternative.region)) continue;
+        return return_var;
+      }
+    }
+    return nullptr;
+  }
+
+  std::unordered_map<uint64_t, LoopCarryTaskIdMapping> BuildLoopCarryTaskIdRemap(
+      const ForStmtPtr& op, const YieldStmtPtr& yield) const {
+    std::unordered_map<uint64_t, LoopCarryTaskIdMapping> remap;
+    if (!op || !yield) return remap;
+    const bool debug_loop_carry = AutoDepsLoopCarryDebugEnabled();
+    if (debug_loop_carry) {
+      DebugLog("loop_carry_remap return_vars=" + std::to_string(op->return_vars_.size()) + " yield_values=" +
+               std::to_string(yield->value_.size()) + " iter_args=" + std::to_string(op->iter_args_.size()));
+    }
+
+    auto add_mapping = [&](const VarPtr& source, const VarPtr& target) {
+      if (!source || !target) return;
+      const bool direct_task_id = IsTaskIdVar(source) || IsTaskIdVar(target);
+      auto insert_mapping = [&](uint64_t id, const VarPtr& mapped_target, bool mapped_direct) {
+        auto existing = remap.find(id);
+        if (existing != remap.end() && existing->second.direct_task_id && !mapped_direct) return;
+        remap[id] = LoopCarryTaskIdMapping{mapped_target, mapped_direct};
+      };
+
+      insert_mapping(source->UniqueId(), target, direct_task_id);
+      if (debug_loop_carry) {
+        DebugLog("loop_carry_map source=" + DebugVar(source) + " target=" + DebugVar(target) +
+                 " direct=" + (direct_task_id ? std::string("true") : "false"));
+      }
+      if (auto canonical = CanonicalTaskId(source)) {
+        insert_mapping(canonical->UniqueId(), target, direct_task_id);
+        if (debug_loop_carry) {
+          DebugLog("loop_carry_map canonical=" + DebugVar(canonical) + " target=" + DebugVar(target) +
+                   " direct=" + (direct_task_id ? std::string("true") : "false"));
+        }
+      }
+    };
+
+    const size_t yield_count = std::min(op->return_vars_.size(), yield->value_.size());
+    for (size_t i = 0; i < yield_count; ++i) {
+      const auto& return_var = op->return_vars_[i];
+      if (!return_var) continue;
+      add_mapping(AsVarLike(yield->value_[i]), return_var);
+    }
+
+    const size_t iter_arg_count = std::min(op->return_vars_.size(), op->iter_args_.size());
+    for (size_t i = 0; i < iter_arg_count; ++i) {
+      const auto& return_var = op->return_vars_[i];
+      if (!return_var) continue;
+      add_mapping(op->iter_args_[i], return_var);
+    }
+    return remap;
   }
 
   ExprPtr VisitExpr_(const CallPtr& op) override {
@@ -1216,12 +1411,12 @@ class AutoDepMutator : public IRMutator {
 
   ExprPtr AnalyzeCallLike(const CallPtr& call, const Expr* identity_key,
                           const std::vector<std::pair<std::string, std::any>>& output_attrs) {
-    if (prior_stack_.empty()) return call;
+    if (prior_stack_.empty() || scope_manual_stack_.empty()) return call;
     if (IsBuiltinOp(call->op_->name_)) return call;
 
     VarPtr task_id = LookupTaskId(identity_key);
+    const bool in_manual_scope = !scope_manual_stack_.empty() && scope_manual_stack_.back();
     if (!task_id) {
-      const bool in_manual_scope = !scope_manual_stack_.empty() && scope_manual_stack_.back();
       if (!in_manual_scope || IsTaskIdVar(current_assign_lhs_)) {
         task_id = current_assign_lhs_;
       }
@@ -1241,7 +1436,7 @@ class AutoDepMutator : public IRMutator {
       if (debug_loop_carry) {
         DebugLog("fallback_reason=summary_unknown_location call=" + call->op_->name_);
       }
-      fallback_stack_.back() = true;
+      MarkCurrentScopeFallback();
       return call;
     }
     auto& accesses = summary.accesses;
@@ -1249,53 +1444,56 @@ class AutoDepMutator : public IRMutator {
 
     std::vector<VarPtr> compiler_edges;
     for (const auto& access : accesses) {
-      for (const auto& prior : prior_stack_.back()) {
-        if (!storage_ || !storage_->MayAlias(access.location.root, prior.location.root)) continue;
-        if (!RegionsMayOverlap(access.location.region, prior.location.region)) continue;
-        if (!HasHazard(access.kind, prior.kind)) continue;
-        VarPtr prior_edge = CanonicalTaskId(prior.task_id_var);
-        if (!prior_edge) prior_edge = prior.task_id_var;
-        const bool covered_by_user_edge =
-            (ContainsVar(user_edges, prior_edge) &&
-             !(prior.dynamic_producer &&
-               HasIncompleteDynamicTaskIdUserCoverage(raw_user_edges, prior_edge))) ||
-            (prior.dynamic_producer && (HasCompleteDynamicTaskIdUserCoverage(raw_user_edges, prior_edge) ||
-                                        HasWindowedTaskIdTempUserCoverage(user_edges)));
-        if (debug_loop_carry) {
-          DebugLog("hazard call=" + call->op_->name_ + " prior_task_id=" + DebugVar(prior.task_id_var) +
-                   " prior_edge=" + DebugVar(prior_edge) +
-                   " covered_by_user_edge=" + (covered_by_user_edge ? std::string("true") : "false") +
-                   " dynamic_producer=" + (prior.dynamic_producer ? std::string("true") : "false") +
-                   " current_task_id=" + DebugVar(task_id));
-        }
-        if (prior.dynamic_producer) {
-          if (covered_by_user_edge && (loop_depth_ == 0 || HasWindowedTaskIdTempUserCoverage(user_edges))) {
-            continue;
-          }
+      for (auto frame_it = prior_stack_.rbegin(); frame_it != prior_stack_.rend(); ++frame_it) {
+        for (const auto& prior : *frame_it) {
+          if (!storage_ || !storage_->MayAlias(access.location.root, prior.location.root)) continue;
+          if (!RegionsMayOverlap(access.location.region, prior.location.region)) continue;
+          if (!HasHazard(access.kind, prior.kind)) continue;
+          VarPtr prior_edge =
+              prior.task_id_var_is_direct ? prior.task_id_var : CanonicalTaskId(prior.task_id_var);
+          if (!prior_edge) prior_edge = prior.task_id_var;
+          const bool covered_by_user_edge =
+              (ContainsVar(user_edges, prior_edge) &&
+               !(prior.dynamic_producer &&
+                 HasIncompleteDynamicTaskIdUserCoverage(raw_user_edges, prior_edge))) ||
+              (prior.dynamic_producer && (HasCompleteDynamicTaskIdUserCoverage(raw_user_edges, prior_edge) ||
+                                          HasWindowedTaskIdTempUserCoverage(user_edges)));
           if (debug_loop_carry) {
-            DebugLog("fallback_reason=dynamic_prior_producer_requires_scope_lift call=" + call->op_->name_ +
-                     " prior_task_id=" + DebugVar(prior.task_id_var));
+            DebugLog("hazard call=" + call->op_->name_ + " prior_task_id=" + DebugVar(prior.task_id_var) +
+                     " prior_edge=" + DebugVar(prior_edge) +
+                     " covered_by_user_edge=" + (covered_by_user_edge ? std::string("true") : "false") +
+                     " dynamic_producer=" + (prior.dynamic_producer ? std::string("true") : "false") +
+                     " direct_task_id=" + (prior.task_id_var_is_direct ? std::string("true") : "false") +
+                     " current_task_id=" + DebugVar(task_id));
           }
-          fallback_stack_.back() = true;
-          return call;
-        }
-        if (covered_by_user_edge) continue;
-        if (!prior.task_id_var) {
-          if (debug_loop_carry) {
-            DebugLog("fallback_reason=" +
-                     std::string(prior.dynamic_producer ? "dynamic_prior_producer_missing_task_id"
-                                                        : "missing_prior_task_id") +
-                     " call=" + call->op_->name_ + " user_edges=" + DebugVarList(user_edges));
+          if (covered_by_user_edge) continue;
+          if (prior.dynamic_producer) {
+            if (debug_loop_carry) {
+              DebugLog("fallback_reason=dynamic_prior_producer_requires_scope_lift call=" + call->op_->name_ +
+                       " prior_task_id=" + DebugVar(prior.task_id_var));
+            }
+            MarkCurrentScopeFallback();
+            return call;
           }
-          fallback_stack_.back() = true;
-          return call;
+          if (!prior.task_id_var) {
+            if (debug_loop_carry) {
+              DebugLog("fallback_reason=" +
+                       std::string(prior.dynamic_producer ? "dynamic_prior_producer_missing_task_id"
+                                                          : "missing_prior_task_id") +
+                       " call=" + call->op_->name_ + " user_edges=" + DebugVarList(user_edges));
+            }
+            MarkCurrentScopeFallback();
+            return call;
+          }
+          AppendUnique(&compiler_edges, prior_edge);
         }
-        AppendUnique(&compiler_edges, prior_edge);
       }
     }
 
     for (auto& access : accesses) {
-      access.task_id_var = task_id;
+      access.task_id_var =
+          task_id ? task_id : (in_manual_scope ? nullptr : ProducerTaskIdForAccess(call, access));
+      access.task_id_var_is_direct = access.task_id_var && IsTaskIdVar(access.task_id_var);
       access.dynamic_producer = loop_depth_ > 0;
       prior_stack_.back().push_back(std::move(access));
     }
@@ -1310,6 +1508,13 @@ class AutoDepMutator : public IRMutator {
   }
 
  private:
+  void MarkCurrentScopeFallback() {
+    if (fallback_stack_.empty() || is_virtual_whole_body_stack_.empty()) return;
+    if (!is_virtual_whole_body_stack_.back()) {
+      fallback_stack_.back() = true;
+    }
+  }
+
   class CompilerDepStripper : public IRMutator {
    protected:
     ExprPtr VisitExpr_(const CallPtr& op) override {
@@ -1402,6 +1607,7 @@ class AutoDepMutator : public IRMutator {
         }
       }
       if (has_dynamic_slots) continue;
+      if (IsTaskIdVar(var)) AppendUnique(&canonical, var);
       AppendAllUnique(&canonical, CanonicalTaskIds(var));
     }
     for (const auto& [array_id, slots] : dynamic_array_slots) {
@@ -1489,6 +1695,25 @@ class AutoDepMutator : public IRMutator {
     return false;
   }
 
+  VarPtr ProducerTaskIdForAccess(const CallPtr& call, const StorageAccess& access) const {
+    if (access.kind == AccessKind::Read) return nullptr;
+    auto dirs = call->GetArgDirections();
+    if (dirs.size() != call->args_.size()) return nullptr;
+    for (size_t i = 0; i < dirs.size(); ++i) {
+      if (dirs[i] != ArgDirection::OutputExisting && dirs[i] != ArgDirection::InOut) continue;
+      auto var = AsVarLike(call->args_[i]);
+      if (!var) continue;
+      auto resolved = storage_ ? storage_->ResolveExprStatus(call->args_[i]) : ResolvedLocation{};
+      if (resolved.status != LocationStatus::Known) continue;
+      for (const auto& alternative : resolved.location.alternatives) {
+        if (!storage_ || !storage_->MayAlias(access.location.root, alternative.root)) continue;
+        if (!RegionsMayOverlap(access.location.region, alternative.region)) continue;
+        return var;
+      }
+    }
+    return nullptr;
+  }
+
   AccessSummary SummarizeAccesses(const CallPtr& call, const std::vector<VarPtr>& user_edges,
                                   bool* needs_fallback) const {
     AccessSummary out;
@@ -1566,6 +1791,7 @@ class AutoDepMutator : public IRMutator {
   bool analyze_whole_body_as_auto_scope_ = false;
   std::vector<std::vector<StorageAccess>> prior_stack_;
   std::vector<bool> scope_manual_stack_;
+  std::vector<bool> is_virtual_whole_body_stack_;
   std::vector<bool> fallback_stack_;
   VarPtr current_assign_lhs_;
   size_t loop_depth_ = 0;

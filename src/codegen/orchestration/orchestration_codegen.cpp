@@ -198,11 +198,14 @@ int64_t ComputeGMPipeWorkspaceElements(const ProgramPtr& program, const Function
 // Template / boilerplate generation helpers
 // ---------------------------------------------------------------------------
 
-std::string GenerateIncludes(bool include_optional) {
+std::string GenerateIncludes(bool include_optional, bool include_vector = false) {
   std::ostringstream oss;
   oss << "#include <stddef.h>\n";
   oss << "#include <stdint.h>\n";
   oss << "#include <stdio.h>\n";
+  if (include_vector) {
+    oss << "#include <vector>\n";
+  }
   if (include_optional) {
     oss << "#include <optional>\n";
   }
@@ -266,6 +269,12 @@ class CodegenEffectiveUseCollector : public var_collectors::VarDefUseCollector {
 // Statement code generator for orchestration
 class OrchestrationStmtCodegen : public CodegenBase {
  public:
+  struct DynamicTaskIdCollection {
+    std::string vector_name;
+  };
+  using ManualTaskIdBinding =
+      std::variant<int, std::string, std::vector<std::string>, DynamicTaskIdCollection>;
+
   explicit OrchestrationStmtCodegen(const ProgramPtr& prog, std::map<std::string, int>* func_ids,
                                     std::map<std::string, CoreType>* core_types,
                                     std::map<std::string, std::vector<std::string>>* func_signatures,
@@ -296,8 +305,165 @@ class OrchestrationStmtCodegen : public CodegenBase {
   void SetTupleVarToKey(std::map<const Var*, std::string> mapping) { tuple_var_to_key_ = std::move(mapping); }
 
   void SetInitialIndent(int indent) { indent_ = indent; }
+  [[nodiscard]] bool NeedsVectorInclude() const { return needs_vector_include_; }
 
   void SetEffectiveUses(std::unordered_set<const Var*> uses) { effective_uses_ = std::move(uses); }
+
+  void PrepareCrossScopeTaskIdHoists(const StmtPtr& body) {
+    struct ScopeInfo {
+      std::vector<const RuntimeScopeStmt*> ref_scopes;
+    };
+
+    class Collector : public IRVisitor {
+     public:
+      Collector(const std::map<const Var*, std::string>* tuple_var_to_key,
+                const std::map<std::string, std::vector<TupleElement>>* tuple_var_to_elements)
+          : tuple_var_to_key_(tuple_var_to_key), tuple_var_to_elements_(tuple_var_to_elements) {}
+
+      std::unordered_map<const RuntimeScopeStmt*, const RuntimeScopeStmt*> parent_scope;
+      std::unordered_map<std::string, const RuntimeScopeStmt*> defining_scope;
+      std::unordered_map<std::string, const Var*> ref_var_by_key;
+      std::unordered_map<std::string, ScopeInfo> refs;
+
+     protected:
+      void VisitStmt_(const RuntimeScopeStmtPtr& scope) override {
+        const RuntimeScopeStmt* parent = CurrentScope();
+        parent_scope[scope.get()] = parent;
+        scope_stack_.push_back(scope.get());
+        IRVisitor::VisitStmt_(scope);
+        scope_stack_.pop_back();
+      }
+
+      void VisitStmt_(const AssignStmtPtr& assign) override {
+        RecordDefinition(assign->var_.get());
+        auto tuple_key_it = tuple_var_to_key_->find(assign->var_.get());
+        if (tuple_key_it != tuple_var_to_key_->end()) {
+          auto elements_it = tuple_var_to_elements_->find(tuple_key_it->second);
+          if (elements_it != tuple_var_to_elements_->end()) {
+            for (const auto& elem : elements_it->second) {
+              RecordDefinition(elem.var);
+            }
+          }
+        }
+        IRVisitor::VisitStmt_(assign);
+      }
+
+      void VisitExpr_(const CallPtr& call) override {
+        RecordCompilerDepRefs(call->attrs_);
+        IRVisitor::VisitExpr_(call);
+      }
+
+      void VisitExpr_(const SubmitPtr& submit) override {
+        RecordCompilerDepRefs(submit->attrs_);
+        IRVisitor::VisitExpr_(submit);
+      }
+
+     private:
+      const RuntimeScopeStmt* CurrentScope() const {
+        return scope_stack_.empty() ? nullptr : scope_stack_.back();
+      }
+
+      void RecordDefinition(const Var* var) {
+        if (!var) return;
+        defining_scope.emplace(VarKey(var), CurrentScope());
+      }
+
+      void RecordCompilerDepRefs(const std::vector<std::pair<std::string, std::any>>& attrs) {
+        for (const auto& [key, value] : attrs) {
+          if (key != kAttrCompilerManualDepEdges) continue;
+          const auto* edges = std::any_cast<std::vector<VarPtr>>(&value);
+          if (!edges) continue;
+          for (const auto& edge : *edges) {
+            if (!edge) continue;
+            const std::string key = VarKey(edge.get());
+            ref_var_by_key.emplace(key, edge.get());
+            refs[key].ref_scopes.push_back(CurrentScope());
+          }
+        }
+      }
+
+      static std::string VarKey(const Var* var) {
+        if (!var->name_hint_.empty()) return var->name_hint_;
+        return std::to_string(var->UniqueId());
+      }
+
+      const std::map<const Var*, std::string>* tuple_var_to_key_;
+      const std::map<std::string, std::vector<TupleElement>>* tuple_var_to_elements_;
+      std::vector<const RuntimeScopeStmt*> scope_stack_;
+    };
+
+    Collector collector(&tuple_var_to_key_, &tuple_var_to_elements_);
+    collector.VisitStmt(body);
+
+    auto parent_of = [&](const RuntimeScopeStmt* scope) -> const RuntimeScopeStmt* {
+      auto parent_it = collector.parent_scope.find(scope);
+      return parent_it != collector.parent_scope.end() ? parent_it->second : nullptr;
+    };
+
+    auto depth_of = [&](const RuntimeScopeStmt* scope) {
+      size_t depth = 0;
+      for (const RuntimeScopeStmt* cur = scope; cur != nullptr; cur = parent_of(cur)) {
+        ++depth;
+      }
+      return depth;
+    };
+
+    auto child_under_lca = [&](const RuntimeScopeStmt* descendant, const RuntimeScopeStmt* lca) {
+      const RuntimeScopeStmt* child = descendant;
+      for (const RuntimeScopeStmt* parent = parent_of(child); child != nullptr && parent != lca;
+           child = parent, parent = parent_of(child)) {
+      }
+      return child;
+    };
+
+    auto hoist_target_for_ref = [&](const RuntimeScopeStmt* defining_scope,
+                                    const RuntimeScopeStmt* ref_scope) {
+      const RuntimeScopeStmt* def_cursor = defining_scope;
+      const RuntimeScopeStmt* ref_cursor = ref_scope;
+      size_t def_depth = depth_of(def_cursor);
+      size_t ref_depth = depth_of(ref_cursor);
+
+      while (def_depth > ref_depth) {
+        def_cursor = parent_of(def_cursor);
+        --def_depth;
+      }
+      while (ref_depth > def_depth) {
+        ref_cursor = parent_of(ref_cursor);
+        --ref_depth;
+      }
+      while (def_cursor != ref_cursor) {
+        def_cursor = parent_of(def_cursor);
+        ref_cursor = parent_of(ref_cursor);
+      }
+
+      const RuntimeScopeStmt* lca = def_cursor;
+      if (lca == defining_scope) return static_cast<const RuntimeScopeStmt*>(nullptr);
+      return child_under_lca(defining_scope, lca);
+    };
+
+    for (const auto& [var_key, info] : collector.refs) {
+      auto def_it = collector.defining_scope.find(var_key);
+      if (def_it == collector.defining_scope.end()) continue;
+      const RuntimeScopeStmt* defining_scope = def_it->second;
+      if (!defining_scope) continue;
+      auto ref_var_it = collector.ref_var_by_key.find(var_key);
+      if (ref_var_it == collector.ref_var_by_key.end()) continue;
+      const RuntimeScopeStmt* hoist_scope = defining_scope;
+      size_t hoist_depth = depth_of(hoist_scope);
+      for (const RuntimeScopeStmt* ref_scope : info.ref_scopes) {
+        const RuntimeScopeStmt* target_scope = hoist_target_for_ref(defining_scope, ref_scope);
+        if (!target_scope) continue;
+        size_t target_depth = depth_of(target_scope);
+        if (target_depth < hoist_depth) {
+          hoist_scope = target_scope;
+          hoist_depth = target_depth;
+        }
+      }
+      if (hoist_scope != defining_scope || hoist_depth != depth_of(defining_scope)) {
+        hoisted_task_id_vars_by_scope_[hoist_scope].push_back(ref_var_it->second);
+      }
+    }
+  }
 
   std::string GetGeneratedCode() const { return code_.str(); }
   // --- CodegenBase pure virtual implementations ---
@@ -549,6 +715,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
         if (auto sty = As<ScalarType>(for_stmt->iter_args_[i]->GetType())) {
           if (sty->dtype_ == DataType::TASK_ID) is_rebind[i] = true;
         }
+        if (i < for_stmt->return_vars_.size() && NeedsCompilerDepTaskId(for_stmt->return_vars_[i].get())) {
+          is_rebind[i] = true;
+        }
       }
     }
 
@@ -561,11 +730,18 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
     // Per-iter-arg array-carry size (0 means non-TaskId scalar carry).
     std::vector<int64_t> array_sizes(for_stmt->iter_args_.size(), 0);
-    if (in_manual_scope_depth_ > 0) {
-      for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
-        if (is_rebind[i]) {
-          array_sizes[i] = ResolveArrayCarrySize(for_stmt, i);
-        }
+    std::vector<bool> dynamic_collection(for_stmt->iter_args_.size(), false);
+    std::vector<bool> compiler_dep_collection(for_stmt->iter_args_.size(), false);
+    for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
+      if (!is_rebind[i]) continue;
+      const bool compiler_dep_needs_loop_task_ids =
+          i < for_stmt->return_vars_.size() && NeedsCompilerDepTaskId(for_stmt->return_vars_[i].get());
+      if (compiler_dep_needs_loop_task_ids) {
+        compiler_dep_collection[i] = true;
+        array_sizes[i] = EvalConstTripCount(for_stmt);
+        dynamic_collection[i] = array_sizes[i] == 0;
+      } else if (in_manual_scope_depth_ > 0) {
+        array_sizes[i] = ResolveArrayCarrySize(for_stmt, i);
       }
     }
 
@@ -618,6 +794,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
         if (outer_init_arr && outer_init_arr->size == N) {
           code_ << Indent() << "for (int64_t __init_i = 0; __init_i < " << N << "; ++__init_i) "
                 << rv_array_name << "[__init_i] = " << outer_init_arr->array_name << "[__init_i];\n";
+        } else if (compiler_dep_collection[i]) {
+          code_ << Indent() << "for (int64_t __init_i = 0; __init_i < " << N << "; ++__init_i) "
+                << rv_array_name << "[__init_i] = PTO2TaskId::invalid();\n";
         } else {
           code_ << Indent() << "for (int64_t __init_i = 0; __init_i < " << N << "; ++__init_i) "
                 << rv_array_name << "[__init_i] = " << init_var_name << ";\n";
@@ -629,7 +808,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
           // — used as the deps source. If init is an array, alias to it; if
           // init is scalar, register the iter_arg's slot map to that scalar
           // broadcast (so EmitManualDeps emits add_dep on the same scalar).
-          if (outer_init_arr && outer_init_arr->size == N) {
+          if (compiler_dep_collection[i]) {
+            // Compiler-derived fan-in collections collect producer TaskIds
+            // yielded by the loop body. The tensor or None init value is not
+            // itself a dependency source for this collection.
+          } else if (outer_init_arr && outer_init_arr->size == N) {
             RegisterArrayCarry(iter_arg.get(), outer_init_arr->array_name, N);
           } else {
             manual_task_id_map_[iter_arg.get()] = init_var_name;
@@ -644,6 +827,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
           // updates via yield).
           RegisterArrayCarry(iter_arg.get(), rv_array_name, N);
         }
+      } else if (dynamic_collection[i]) {
+        std::string rv_vector_name = ReserveSyntheticEmitName(return_var->name_hint_);
+        needs_vector_include_ = true;
+        code_ << Indent() << "std::vector<PTO2TaskId> " << rv_vector_name << ";\n";
+        manual_task_id_map_[return_var.get()] = DynamicTaskIdCollection{rv_vector_name};
+        manual_task_id_map_by_key_[TaskIdHoistKey(return_var.get())] =
+            DynamicTaskIdCollection{rv_vector_name};
       } else if (auto array_ty = As<ArrayType>(iter_arg->GetType()); array_ty && is_rebind[i]) {
         // ArrayType iter_arg — declare a fresh C-stack array and route both
         // the iter_arg and the return_var emit names through it. The loop
@@ -786,6 +976,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 
   void VisitStmt_(const RuntimeScopeStmtPtr& scope) override {
+    DeclareCompilerDepTaskIdsAtFirstScope();
+    DeclareHoistedTaskIdsForScope(scope.get());
     // Snapshot the TaskId / array-carry bindings on entry to EVERY generated
     // PTO2_SCOPE (AUTO or MANUAL); restore on exit. A binding added inside the
     // block names a C++ local (e.g. ``PTO2TaskId tid = ...``, ``PTO2TaskId prev
@@ -1057,15 +1249,27 @@ class OrchestrationStmtCodegen : public CodegenBase {
           result_key = var_name;
         }
         int task_idx_before = task_counter_;
-        const bool capture_plain_task_id = compiler_dep_task_id_vars_.count(assign->var_.get()) > 0;
-        GenerateFunctionCallCode(call, result_key, capture_plain_task_id);
+        const bool capture_plain_task_id = NeedsCompilerDepTaskId(assign->var_.get());
+        std::vector<const Var*> dep_outputs = CompilerDepOutputArgs(call);
+        GenerateFunctionCallCode(call, result_key, capture_plain_task_id || !dep_outputs.empty());
 
         if (task_counter_ > task_idx_before && capture_plain_task_id) {
-          std::string tid_name = ReserveSyntheticEmitName(GetSSABaseName(var_name) + "_tid");
-          code_ << Indent() << "PTO2TaskId " << tid_name << " = task_" << task_idx_before
-                << "_outs.task_id();\n";
+          std::string tid_name =
+              BindSyntheticTaskId(assign->var_.get(), GetSSABaseName(var_name) + "_tid",
+                                  "task_" + std::to_string(task_idx_before) + "_outs.task_id()");
           manual_task_id_map_[assign->var_.get()] = tid_name;
-        } else if (in_manual_scope_depth_ > 0 && task_counter_ > task_idx_before) {
+          manual_task_id_map_by_key_[TaskIdHoistKey(assign->var_.get())] = tid_name;
+        }
+        if (task_counter_ > task_idx_before && !dep_outputs.empty()) {
+          const std::string value_expr = "task_" + std::to_string(task_idx_before) + "_outs.task_id()";
+          for (const Var* var : dep_outputs) {
+            if (!var) continue;
+            std::string tid_name =
+                BindSyntheticTaskId(var, GetSSABaseName(var->name_hint_) + "_tid", value_expr);
+            manual_task_id_map_[var] = tid_name;
+            manual_task_id_map_by_key_[TaskIdHoistKey(var)] = tid_name;
+          }
+        } else if (in_manual_scope_depth_ > 0 && task_counter_ > task_idx_before && !capture_plain_task_id) {
           // Bind the LHS Var to the just-emitted ``task_<n>`` so a downstream
           // sibling call inside the same manual scope can ``add_dep`` on it.
           manual_task_id_map_[assign->var_.get()] = task_idx_before;
@@ -1196,11 +1400,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
           // Scalar → array slot write (Parallel inner yielding a fresh task id
           // into its slot). The slot index is the enclosing loop's 0-based
           // ordinal, so non-trivial parallel ranges still index ``arr[0..N-1]``.
-          auto map_it = manual_task_id_map_.find(yield_var.get());
-          INTERNAL_CHECK_SPAN(map_it != manual_task_id_map_.end(), yield_stmt->span_)
+          const ManualTaskIdBinding* tid_binding = ResolveManualTaskIdBinding(yield_var.get());
+          INTERNAL_CHECK_SPAN(tid_binding != nullptr, yield_stmt->span_)
               << "Internal error: scalar yield to array carry must resolve to a "
               << "TaskId variable registered in manual_task_id_map_";
-          auto* scalar_name = std::get_if<std::string>(&map_it->second);
+          auto* scalar_name = std::get_if<std::string>(tid_binding);
           INTERNAL_CHECK_SPAN(scalar_name, yield_stmt->span_)
               << "Internal error: scalar yield to array carry expects string-variant entry";
           INTERNAL_CHECK_SPAN(!current_loop_slot_exprs_.empty(), yield_stmt->span_)
@@ -1209,6 +1413,23 @@ class OrchestrationStmtCodegen : public CodegenBase {
                 << "] = " << *scalar_name << ";\n";
         }
         continue;
+      }
+      auto rv_dynamic_it = manual_task_id_map_.find(rv.get());
+      if (rv_dynamic_it != manual_task_id_map_.end()) {
+        if (auto* collection = std::get_if<DynamicTaskIdCollection>(&rv_dynamic_it->second)) {
+          auto yield_var = AsVarLike(yield_stmt->value_[i]);
+          INTERNAL_CHECK_SPAN(yield_var, yield_stmt->span_)
+              << "Internal error: dynamic TaskId collection yield expects a Var value";
+          auto map_it = manual_task_id_map_.find(yield_var.get());
+          INTERNAL_CHECK_SPAN(map_it != manual_task_id_map_.end(), yield_stmt->span_)
+              << "Internal error: dynamic TaskId collection yield must resolve to a TaskId variable";
+          auto* scalar_name = std::get_if<std::string>(&map_it->second);
+          INTERNAL_CHECK_SPAN(scalar_name, yield_stmt->span_)
+              << "Internal error: dynamic TaskId collection yield expects string-variant entry";
+          code_ << Indent() << "if (" << *scalar_name << ".is_valid()) " << collection->vector_name
+                << ".push_back(" << *scalar_name << ");\n";
+          continue;
+        }
       }
       // Scalar rv: existing path.
       std::string value_expr = GenerateExprString(yield_stmt->value_[i]);
@@ -1252,7 +1473,19 @@ class OrchestrationStmtCodegen : public CodegenBase {
       if (IsTensorOp(op_name) || IsArrayOp(op_name)) {
         GenerateTensorOpCode(call, "", nullptr);
       } else if (!IsBuiltinOp(op_name)) {
-        GenerateFunctionCallCode(call, "");
+        int task_idx_before = task_counter_;
+        std::vector<const Var*> dep_outputs = CompilerDepOutputArgs(call);
+        GenerateFunctionCallCode(call, "", !dep_outputs.empty());
+        if (task_counter_ > task_idx_before) {
+          const std::string value_expr = "task_" + std::to_string(task_idx_before) + "_outs.task_id()";
+          for (const Var* var : dep_outputs) {
+            if (!var) continue;
+            std::string tid_name =
+                BindSyntheticTaskId(var, GetSSABaseName(var->name_hint_) + "_tid", value_expr);
+            manual_task_id_map_[var] = tid_name;
+            manual_task_id_map_by_key_[TaskIdHoistKey(var)] = tid_name;
+          }
+        }
       } else {
         INTERNAL_CHECK_SPAN(false, eval->span_)
             << "Misplaced builtin op '" << op_name
@@ -1965,8 +2198,18 @@ class OrchestrationStmtCodegen : public CodegenBase {
     class Collector : public IRVisitor {
      public:
       std::unordered_set<const Var*> vars;
+      std::unordered_set<std::string> loop_return_task_id_keys;
 
      protected:
+      void VisitStmt_(const ForStmtPtr& for_stmt) override {
+        for (const auto& return_var : for_stmt->return_vars_) {
+          if (return_var) {
+            loop_return_task_id_keys.insert(TaskIdKey(return_var.get()));
+          }
+        }
+        IRVisitor::VisitStmt_(for_stmt);
+      }
+
       void VisitExpr_(const CallPtr& call) override {
         CollectFromAttrs(call->attrs_);
         IRVisitor::VisitExpr_(call);
@@ -1988,35 +2231,79 @@ class OrchestrationStmtCodegen : public CodegenBase {
           }
         }
       }
+
+      static std::string TaskIdKey(const Var* var) {
+        if (!var->name_hint_.empty()) return GetSSABaseName(var->name_hint_);
+        return std::to_string(var->UniqueId());
+      }
     };
 
     Collector collector;
     collector.VisitProgram(program);
     compiler_dep_task_id_vars_ = std::move(collector.vars);
+    compiler_dep_loop_return_task_id_keys_ = std::move(collector.loop_return_task_id_keys);
+    compiler_dep_task_id_keys_.clear();
+    for (const Var* var : compiler_dep_task_id_vars_) {
+      compiler_dep_task_id_keys_.insert(CompilerDepAliasKey(var));
+    }
   }
 
   static bool ShouldCaptureTaskOutputs(const CallPtr& call, bool capture_plain_task_id) {
     return IsSubmitCall(call) || capture_plain_task_id;
   }
 
+  bool NeedsCompilerDepTaskId(const Var* var) const {
+    if (!var) return false;
+    if (compiler_dep_task_id_vars_.count(var) > 0) return true;
+    return compiler_dep_task_id_keys_.count(CompilerDepAliasKey(var)) > 0;
+  }
+
+  std::vector<const Var*> CompilerDepOutputArgs(const CallPtr& call) const {
+    std::vector<const Var*> vars;
+    auto dirs = call->GetArgDirections();
+    if (dirs.size() != call->args_.size()) return vars;
+    std::unordered_set<std::string> seen;
+    for (size_t i = 0; i < dirs.size(); ++i) {
+      if (dirs[i] != ArgDirection::OutputExisting && dirs[i] != ArgDirection::InOut) continue;
+      auto var = AsVarLike(call->args_[i]);
+      if (!var || !NeedsCompilerDepTaskId(var.get())) continue;
+      if (!seen.insert(TaskIdHoistKey(var.get())).second) continue;
+      vars.push_back(var.get());
+    }
+    return vars;
+  }
+
   size_t CountManualDeps(const std::vector<VarPtr>& edges, const CallPtr& call) const {
     size_t total = 0;
     for (const auto& edge : edges) {
       if (!edge) continue;
-      auto it = manual_task_id_map_.find(edge.get());
-      if (it == manual_task_id_map_.end()) continue;
-      if (std::get_if<int>(&it->second)) {
+      const auto* binding = ResolveManualTaskIdBinding(edge.get());
+      if (!binding) continue;
+      if (std::get_if<int>(binding)) {
         INTERNAL_CHECK_SPAN(false, call->span_) << "Internal error: manual_dep_edge var '" << edge->name_hint_
                                                 << "' resolves to a kernel-Call LHS (int variant). Expected "
                                                 << "a Scalar[TASK_ID] Var (string variant).";
       }
-      if (auto* names = std::get_if<std::vector<std::string>>(&it->second)) {
+      if (auto* names = std::get_if<std::vector<std::string>>(binding)) {
         total += names->size();
+      } else if (std::get_if<DynamicTaskIdCollection>(binding)) {
+        total += 1;
       } else {
         total += 1;
       }
     }
     return total;
+  }
+
+  bool HasDynamicManualDeps(const std::vector<VarPtr>& edges) const {
+    for (const auto& edge : edges) {
+      if (!edge) continue;
+      const auto* binding = ResolveManualTaskIdBinding(edge.get());
+      if (binding && std::get_if<DynamicTaskIdCollection>(binding)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /// Emit the per-task ``Arg`` declaration. Dependency edges (if any) are
@@ -2063,6 +2350,39 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// No-op when there are no edges attached.
   void EmitManualDeps(const CallPtr& call, const std::string& task_var) {
     const auto edges = GetDependencyEdges(call);
+    if (HasDynamicManualDeps(edges)) {
+      const std::string deps_vec = task_var + "_deps";
+      needs_vector_include_ = true;
+      code_ << Indent() << "std::vector<PTO2TaskId> " << deps_vec << ";\n";
+      for (const auto& edge : edges) {
+        if (!edge) continue;
+        const auto* binding = ResolveManualTaskIdBinding(edge.get());
+        if (!binding) {
+          continue;
+        }
+        if (std::get_if<int>(binding)) {
+          INTERNAL_CHECK_SPAN(false, call->span_)
+              << "Internal error: manual_dep_edge var '" << edge->name_hint_
+              << "' resolves to a kernel-Call LHS (int variant). Expected "
+              << "a Scalar[TASK_ID] Var (string variant).";
+        } else if (auto* names = std::get_if<std::vector<std::string>>(binding)) {
+          for (const auto& name : *names) {
+            code_ << Indent() << "if (" << name << ".is_valid()) " << deps_vec << ".push_back(" << name
+                  << ");\n";
+          }
+        } else if (auto* collection = std::get_if<DynamicTaskIdCollection>(binding)) {
+          code_ << Indent() << deps_vec << ".insert(" << deps_vec << ".end(), " << collection->vector_name
+                << ".begin(), " << collection->vector_name << ".end());\n";
+        } else {
+          const auto& name = std::get<std::string>(*binding);
+          code_ << Indent() << "if (" << name << ".is_valid()) " << deps_vec << ".push_back(" << name
+                << ");\n";
+        }
+      }
+      code_ << Indent() << "if (!" << deps_vec << ".empty()) " << task_var << ".set_dependencies(" << deps_vec
+            << ".data(), static_cast<uint32_t>(" << deps_vec << ".size()));\n";
+      return;
+    }
     const size_t dep_capacity = CountManualDeps(edges, call);
     if (dep_capacity == 0) return;
     const std::string deps_arr = task_var + "_deps";
@@ -2071,15 +2391,15 @@ class OrchestrationStmtCodegen : public CodegenBase {
     code_ << Indent() << "uint32_t " << deps_cnt << " = 0;\n";
     for (const auto& edge : edges) {
       if (!edge) continue;
-      auto it = manual_task_id_map_.find(edge.get());
-      if (it == manual_task_id_map_.end()) {
+      const auto* binding = ResolveManualTaskIdBinding(edge.get());
+      if (!binding) {
         // Compiler-derived edges may reference TaskIds produced inside a
         // closed ``pl.scope()`` that is no longer visible at this point in
         // the manual scope.  ``CountManualDeps`` already skips these, so
         // emit must be consistent: silently drop the out-of-scope edge.
         continue;
       }
-      if (std::get_if<int>(&it->second)) {
+      if (std::get_if<int>(binding)) {
         // Invariant: a ``manual_dep_edges`` entry should never resolve
         // directly to a kernel-Call LHS (int-variant entry). The parser
         // enforces that ``deps=[...]`` only accepts ``Scalar[TASK_ID]``
@@ -2088,14 +2408,14 @@ class OrchestrationStmtCodegen : public CodegenBase {
         INTERNAL_CHECK_SPAN(false, call->span_) << "Internal error: manual_dep_edge var '" << edge->name_hint_
                                                 << "' resolves to a kernel-Call LHS (int variant). Expected "
                                                 << "a Scalar[TASK_ID] Var (string variant).";
-      } else if (auto* names = std::get_if<std::vector<std::string>>(&it->second)) {
+      } else if (auto* names = std::get_if<std::vector<std::string>>(binding)) {
         // Array-carry iter_arg: include every valid slot.
         for (const auto& name : *names) {
           code_ << Indent() << "if (" << name << ".is_valid()) " << deps_arr << "[" << deps_cnt
                 << "++] = " << name << ";\n";
         }
       } else {
-        const auto& name = std::get<std::string>(it->second);
+        const auto& name = std::get<std::string>(*binding);
         // Any scalar TaskId may hold the ``PTO2TaskId::invalid()`` sentinel
         // — an iter_arg carry on the first loop iteration, or a ``None``
         // (``system.task_invalid``) loop-carry seed. Guard every entry with
@@ -2757,6 +3077,88 @@ class OrchestrationStmtCodegen : public CodegenBase {
     mutable_tensor_name_scopes_.pop_back();
   }
 
+  void DeclareHoistedTaskIdsForScope(const RuntimeScopeStmt* scope) {
+    auto it = hoisted_task_id_vars_by_scope_.find(scope);
+    if (it == hoisted_task_id_vars_by_scope_.end()) return;
+    for (const Var* var : it->second) {
+      DeclareHoistedTaskId(var);
+    }
+  }
+
+  void DeclareCompilerDepTaskIdsAtFirstScope() {
+    if (declared_compiler_dep_task_ids_) return;
+    declared_compiler_dep_task_ids_ = true;
+    for (const Var* var : compiler_dep_task_id_vars_) {
+      if (compiler_dep_loop_return_task_id_keys_.count(CompilerDepAliasKey(var)) > 0) continue;
+      DeclareHoistedTaskId(var);
+    }
+  }
+
+  void DeclareHoistedTaskId(const Var* var) {
+    if (!var || hoisted_task_id_emit_names_by_key_.count(TaskIdHoistKey(var))) return;
+    std::string name = ReserveSyntheticEmitName(GetSSABaseName(var->name_hint_) + "_tid");
+    code_ << Indent() << "PTO2TaskId " << name << " = PTO2TaskId::invalid();\n";
+    hoisted_task_id_emit_names_by_key_[TaskIdHoistKey(var)] = name;
+    hoisted_task_id_emit_names_[var->UniqueId()] = name;
+    manual_task_id_map_[var] = name;
+    manual_task_id_map_by_key_[TaskIdHoistKey(var)] = name;
+  }
+
+  static std::string TaskIdHoistKey(const Var* var) { return std::to_string(var->UniqueId()); }
+
+  static std::string CompilerDepAliasKey(const Var* var) {
+    if (!var->name_hint_.empty()) return GetSSABaseName(var->name_hint_);
+    return std::to_string(var->UniqueId());
+  }
+
+  const ManualTaskIdBinding* ResolveManualTaskIdBinding(const Var* var) const {
+    if (!var) return nullptr;
+    auto direct = manual_task_id_map_.find(var);
+    if (direct != manual_task_id_map_.end()) return &direct->second;
+    auto by_key = manual_task_id_map_by_key_.find(TaskIdHoistKey(var));
+    if (by_key == manual_task_id_map_by_key_.end()) return nullptr;
+    return &by_key->second;
+  }
+
+  std::string BindSyntheticTaskId(const Var* var, const std::string& base_name,
+                                  const std::string& value_expr) {
+    auto hoisted_by_key = var ? hoisted_task_id_emit_names_by_key_.find(TaskIdHoistKey(var))
+                              : hoisted_task_id_emit_names_by_key_.end();
+    if (hoisted_by_key != hoisted_task_id_emit_names_by_key_.end()) {
+      code_ << Indent() << hoisted_by_key->second << " = " << value_expr << ";\n";
+      return hoisted_by_key->second;
+    }
+    auto hoisted_it =
+        var ? hoisted_task_id_emit_names_.find(var->UniqueId()) : hoisted_task_id_emit_names_.end();
+    if (hoisted_it != hoisted_task_id_emit_names_.end()) {
+      code_ << Indent() << hoisted_it->second << " = " << value_expr << ";\n";
+      return hoisted_it->second;
+    }
+    std::string tid_name = ReserveSyntheticEmitName(base_name);
+    code_ << Indent() << "PTO2TaskId " << tid_name << " = " << value_expr << ";\n";
+    return tid_name;
+  }
+
+  std::string BindVarTaskId(const Var* var, const std::string& value_expr) {
+    auto hoisted_by_key = var ? hoisted_task_id_emit_names_by_key_.find(TaskIdHoistKey(var))
+                              : hoisted_task_id_emit_names_by_key_.end();
+    if (hoisted_by_key != hoisted_task_id_emit_names_by_key_.end()) {
+      code_ << Indent() << hoisted_by_key->second << " = " << value_expr << ";\n";
+      emit_name_map_[var] = hoisted_by_key->second;
+      return hoisted_by_key->second;
+    }
+    auto hoisted_it =
+        var ? hoisted_task_id_emit_names_.find(var->UniqueId()) : hoisted_task_id_emit_names_.end();
+    if (hoisted_it != hoisted_task_id_emit_names_.end()) {
+      code_ << Indent() << hoisted_it->second << " = " << value_expr << ";\n";
+      emit_name_map_[var] = hoisted_it->second;
+      return hoisted_it->second;
+    }
+    std::string tid_name = ReserveVarEmitName(var);
+    code_ << Indent() << "PTO2TaskId " << tid_name << " = " << value_expr << ";\n";
+    return tid_name;
+  }
+
   void GenerateSingleReturnAlias(const Var* result_var, const CallPtr& call, const std::string& var_name) {
     FunctionPtr callee = program_->GetFunction(call->op_->name_);
     if (!callee) return;
@@ -2848,6 +3250,18 @@ class OrchestrationStmtCodegen : public CodegenBase {
           << "Internal error: resolved param_idx " << param_idx << " out of range for " << call->op_->name_
           << " (has " << call->args_.size() << " args)";
 
+      const ManualTaskIdBinding* tid_binding = ResolveManualTaskIdBinding(result_var);
+      if (!tid_binding) {
+        auto arg_var = AsVarLike(call->args_[param_idx]);
+        if (arg_var) {
+          tid_binding = ResolveManualTaskIdBinding(arg_var.get());
+        }
+      }
+      if (tid_binding) {
+        manual_task_id_map_[elem.var] = *tid_binding;
+        manual_task_id_map_by_key_[TaskIdHoistKey(elem.var)] = *tid_binding;
+      }
+
       if (!effective_uses_.count(elem.var)) {
         continue;
       }
@@ -2938,8 +3352,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
         // The producer TaskId element. Bind it to ``task_<idx>_outs.task_id()``
         // and register so a downstream ``deps=[tid]`` resolves to the name.
         if (!effective_uses_.count(elem.var)) continue;  // unused (``out, _ = ...``)
-        std::string tid_name = ReserveVarEmitName(elem.var);
-        code_ << Indent() << "PTO2TaskId " << tid_name << " = task_" << task_idx << "_outs.task_id();\n";
+        std::string tid_name =
+            BindVarTaskId(elem.var, "task_" + std::to_string(task_idx) + "_outs.task_id()");
         manual_task_id_map_[elem.var] = tid_name;
         continue;
       }
@@ -3241,8 +3655,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// so the outer entries remain visible *inside* the inner scope while the
   /// inner-scope adds — which reference C++ identifiers that die with the
   /// inner block — are discarded once the manual scope exits.
-  std::unordered_map<const Var*, std::variant<int, std::string, std::vector<std::string>>>
-      manual_task_id_map_;
+  std::unordered_map<const Var*, ManualTaskIdBinding> manual_task_id_map_;
+  std::unordered_map<std::string, ManualTaskIdBinding> manual_task_id_map_by_key_;
   /// Records the C++ array allocation backing a TaskId carry that holds an
   /// array of task ids (not a scalar). Used by ``YieldStmt`` to decide how
   /// to write into the carry:
@@ -3301,6 +3715,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::map<std::string, std::vector<TupleElement>> tuple_var_to_elements_;
   std::map<const Var*, std::string> tuple_var_to_key_;
   std::unordered_set<const Var*> compiler_dep_task_id_vars_;
+  std::unordered_set<std::string> compiler_dep_task_id_keys_;
+  std::unordered_set<std::string> compiler_dep_loop_return_task_id_keys_;
+  std::unordered_map<const RuntimeScopeStmt*, std::vector<const Var*>> hoisted_task_id_vars_by_scope_;
+  std::unordered_map<uint64_t, std::string> hoisted_task_id_emit_names_;
+  std::unordered_map<std::string, std::string> hoisted_task_id_emit_names_by_key_;
+  bool declared_compiler_dep_task_ids_ = false;
   std::unordered_set<const Var*> declared_var_ptrs_;
   std::unordered_set<const Stmt*> batched_create_stmts_;
   std::unordered_set<const Var*> effective_uses_;
@@ -3312,6 +3732,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// from re-walking the same callee body and stays within the O(N log N) pass
   /// budget.
   std::unordered_map<const Function*, std::vector<std::optional<size_t>>> returned_param_indices_cache_;
+  bool needs_vector_include_ = false;
 };
 
 OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const ir::FunctionPtr& func) {
@@ -3390,13 +3811,14 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   stmt_codegen.SetCallTupleElements(info_collector.call_tuple_elements);
   stmt_codegen.SetTupleVarToKey(info_collector.tuple_var_to_key);
   stmt_codegen.SetEffectiveUses(std::move(use_collector.var_uses));
+  stmt_codegen.PrepareCrossScopeTaskIdHoists(func->body_);
   // MaterializeRuntimeScopes wraps the whole body in an AUTO RuntimeScopeStmt,
   // so the outermost ``PTO2_SCOPE()`` is now emitted by the scope handler at the
   // base indent (4) rather than by a hardcoded wrapper below; the body lands at 8.
   stmt_codegen.SetInitialIndent(4);
   stmt_codegen.VisitStmt(func->body_);
 
-  oss << GenerateIncludes(false);
+  oss << GenerateIncludes(false, stmt_codegen.NeedsVectorInclude());
 
   oss << "extern \"C\" {\n\n";
 

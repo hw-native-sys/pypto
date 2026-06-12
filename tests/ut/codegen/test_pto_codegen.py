@@ -926,6 +926,14 @@ class TestPreprocessPtoasOutput:
         assert "__global__ AICORE void" not in result
         assert "static __aicore__ void test_func" in result
 
+    def test_replaces_extern_c_global_aicore(self):
+        result = _preprocess_ptoas_output(
+            'extern "C" __global__ AICORE void copy_hidden(__gm__ bfloat16_t* v1) {\n  return;\n}\n'
+        )
+        assert 'extern "C" static __aicore__' not in result
+        assert 'extern "C"' not in result
+        assert "static __aicore__ void copy_hidden" in result
+
     def test_preserves_function_body(self):
         result = _preprocess_ptoas_output(SAMPLE_PTOAS_OUTPUT)
         assert "TLOAD(v1);" in result
