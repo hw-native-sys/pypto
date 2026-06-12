@@ -334,6 +334,152 @@ class TestScalarArithmetic:
         ir.assert_structural_equal(WithCall, WithOperator)
 
 
+class TestScalarFloorDivTruediv:
+    """Tests for // and / operators on Scalar, including reverse (literal op scalar)."""
+
+    def test_scalar_floordiv(self):
+        """a // b roundtrips through print → parse."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                config: pl.Tensor[[2], pl.INT64],
+                out: pl.Tensor[[2, 16, 128], pl.FP32],
+            ) -> pl.Tensor[[2, 16, 128], pl.FP32]:
+                a: pl.Scalar[pl.INT64] = pl.tensor.read(config, [0])
+                b: pl.Scalar[pl.INT64] = pl.tensor.read(config, [1])
+                c: pl.Scalar[pl.INT64] = a // b
+                _ = c + 1
+                return out
+
+        assert isinstance(Before, ir.Program)
+        printed = Before.as_python()
+        assert "a // b" in printed
+        ir.assert_structural_equal(Before, pl.parse_program(printed))
+
+    def test_scalar_truediv(self):
+        """a / b roundtrips through print → parse."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                config: pl.Tensor[[2], pl.FP32],
+                out: pl.Tensor[[2, 16, 128], pl.FP32],
+            ) -> pl.Tensor[[2, 16, 128], pl.FP32]:
+                a: pl.Scalar[pl.FP32] = pl.tensor.read(config, [0])
+                b: pl.Scalar[pl.FP32] = pl.tensor.read(config, [1])
+                c: pl.Scalar[pl.FP32] = a / b
+                _ = c
+                return out
+
+        assert isinstance(Before, ir.Program)
+        printed = Before.as_python()
+        assert "a / b" in printed
+        ir.assert_structural_equal(Before, pl.parse_program(printed))
+
+    def test_scalar_rfloordiv(self):
+        """literal // scalar roundtrips (exercises __rfloordiv__ at runtime)."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                config: pl.Tensor[[1], pl.INT64],
+                out: pl.Tensor[[2, 16, 128], pl.FP32],
+            ) -> pl.Tensor[[2, 16, 128], pl.FP32]:
+                a: pl.Scalar[pl.INT64] = pl.tensor.read(config, [0])
+                c: pl.Scalar[pl.INT64] = 100 // a
+                _ = c + 1
+                return out
+
+        assert isinstance(Before, ir.Program)
+        printed = Before.as_python()
+        assert "100 // a" in printed
+        ir.assert_structural_equal(Before, pl.parse_program(printed))
+
+    def test_scalar_rtruediv(self):
+        """literal / scalar roundtrips (exercises __rtruediv__ at runtime)."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                config: pl.Tensor[[1], pl.FP32],
+                out: pl.Tensor[[2, 16, 128], pl.FP32],
+            ) -> pl.Tensor[[2, 16, 128], pl.FP32]:
+                a: pl.Scalar[pl.FP32] = pl.tensor.read(config, [0])
+                c: pl.Scalar[pl.FP32] = 100.0 / a
+                _ = c
+                return out
+
+        assert isinstance(Before, ir.Program)
+        printed = Before.as_python()
+        assert "100.0 / a" in printed
+        ir.assert_structural_equal(Before, pl.parse_program(printed))
+
+    def test_floordiv_mixed_literal_positions(self):
+        """// with literal on either side roundtrips correctly."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                config: pl.Tensor[[1], pl.INT64],
+                out: pl.Tensor[[2, 16, 128], pl.FP32],
+            ) -> pl.Tensor[[2, 16, 128], pl.FP32]:
+                a: pl.Scalar[pl.INT64] = pl.tensor.read(config, [0])
+                c: pl.Scalar[pl.INT64] = 128 // a
+                d: pl.Scalar[pl.INT64] = a // 128
+                _ = c + d
+                return out
+
+        assert isinstance(Before, ir.Program)
+        printed = Before.as_python()
+        assert "128 // a" in printed
+        assert "a // 128" in printed
+        ir.assert_structural_equal(Before, pl.parse_program(printed))
+
+    def test_truediv_operator_matches_ir(self):
+        """a / b produces the same IR as pl.div(a, b)."""
+
+        @pl.program
+        class WithCall:
+            @pl.function
+            def main(
+                self,
+                config: pl.Tensor[[2], pl.FP32],
+                out: pl.Tensor[[2, 16, 128], pl.FP32],
+            ) -> pl.Tensor[[2, 16, 128], pl.FP32]:
+                a: pl.Scalar[pl.FP32] = pl.tensor.read(config, [0])
+                b: pl.Scalar[pl.FP32] = pl.tensor.read(config, [1])
+                c: pl.Scalar[pl.FP32] = pl.div(a, b)
+                _ = c
+                return out
+
+        @pl.program
+        class WithOperator:
+            @pl.function
+            def main(
+                self,
+                config: pl.Tensor[[2], pl.FP32],
+                out: pl.Tensor[[2, 16, 128], pl.FP32],
+            ) -> pl.Tensor[[2, 16, 128], pl.FP32]:
+                a: pl.Scalar[pl.FP32] = pl.tensor.read(config, [0])
+                b: pl.Scalar[pl.FP32] = pl.tensor.read(config, [1])
+                c: pl.Scalar[pl.FP32] = a / b
+                _ = c
+                return out
+
+        ir.assert_structural_equal(WithCall, WithOperator)
+
+
 class TestScalarUnsupportedOpHint:
     """Verify the catch-all error message points users at Python operators."""
 

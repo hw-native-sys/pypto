@@ -194,8 +194,14 @@ class Scalar(metaclass=ScalarMeta):
     def __truediv__(self, other: "int | float | Scalar") -> "Scalar":
         return Scalar(expr=self.unwrap() / (other.unwrap() if isinstance(other, Scalar) else other))
 
+    def __rtruediv__(self, other: "int | float | Scalar") -> "Scalar":
+        return Scalar(expr=(other.unwrap() if isinstance(other, Scalar) else other) / self.unwrap())
+
     def __floordiv__(self, other: "int | float | Scalar") -> "Scalar":
         return Scalar(expr=self.unwrap() // (other.unwrap() if isinstance(other, Scalar) else other))
+
+    def __rfloordiv__(self, other: "int | float | Scalar") -> "Scalar":
+        return Scalar(expr=(other.unwrap() if isinstance(other, Scalar) else other) // self.unwrap())
 
     def __mod__(self, other: "int | float | Scalar") -> "Scalar":
         return Scalar(expr=self.unwrap() % (other.unwrap() if isinstance(other, Scalar) else other))
