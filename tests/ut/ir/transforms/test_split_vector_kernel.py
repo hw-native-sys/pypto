@@ -1208,16 +1208,14 @@ class TestSplitVectorKernelNoSplitA2A3:
         assert printed.count("pl.tile.transpose(") == 1
         assert printed.count("pl.tile.create(") == 2
         then_branch, lane1 = printed.split("else:", 1)
+        # Lane 0 keeps the real transpose; lane 1 replaces it with an empty create.
+        assert "pl.tile.transpose(" in then_branch
         assert "pl.tile.transpose(" not in lane1
         assert re.search(
             r"transposed__ssa_v0_\d+: pl.Tile\[\[16, 16\], pl.FP32, pl.Mem.Vec, "
             r"pl.TileView\(valid_shape=\[0, 0\]\)\] = pl.tile.create",
             lane1,
         )
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
 
     def test_no_split_dual_dispatch_hoists_import_peer_buffer_and_pipe_init(self):
         backend.reset_for_testing()
@@ -1482,3 +1480,7 @@ if __name__ == "__main__":
             r"pl.TileView\(valid_shape=\[0, 0\]\)\]",
             lane1,
         )
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
