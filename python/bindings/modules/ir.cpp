@@ -567,6 +567,8 @@ void BindIR(nb::module_& m) {
       .value("Acc", MemorySpace::Acc, "Accumulator buffer")
       .value("Bias", MemorySpace::Bias, "Bias buffer")
       .value("ScalarLocal", MemorySpace::ScalarLocal, "On-core scalar register file / C stack (ArrayType)")
+      .value("TREG", MemorySpace::TREG,
+             "SuperscalarNPU register file (256 fixed 4KB blocks, addressed by block index)")
       .export_values();
 
   // Short alias: ir.Mem = ir.MemorySpace

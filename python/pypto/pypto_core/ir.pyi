@@ -1054,6 +1054,9 @@ class MemorySpace(enum.Enum):
     ScalarLocal = ...
     """On-core scalar register file / C stack (ArrayType)."""
 
+    TREG = ...
+    """SuperscalarNPU register file (256 fixed 4KB blocks, addressed by block index)."""
+
 Mem = MemorySpace
 """Short alias for MemorySpace (e.g., Mem.Vec instead of MemorySpace.Vec)."""
 

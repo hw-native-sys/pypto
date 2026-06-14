@@ -16,6 +16,7 @@ class BackendType:
 
     Ascend910B: BackendType
     Ascend950: BackendType
+    SuperscalarNPU: BackendType
     @property
     def name(self) -> str:
         """The member name (e.g. ``"Ascend910B"``)."""
@@ -94,6 +95,7 @@ class BackendHandler:
     def get_l0c_capacity_bytes(self) -> int: ...
     def get_l0_fractal_alignment(self) -> int: ...
     def get_min_l0_tile_dim(self) -> int: ...
+    def get_default_on_chip_memory_space(self) -> ir.MemorySpace: ...
 
 class Backend:
     """Abstract backend base class."""
@@ -122,6 +124,14 @@ class Backend950(Backend):
     @staticmethod
     def instance() -> Backend950:
         """Get singleton instance of 950 backend."""
+        ...
+
+class BackendSuperscalarNPU(Backend):
+    """SuperscalarNPU backend implementation (DDR + TREG register file, singleton)."""
+
+    @staticmethod
+    def instance() -> BackendSuperscalarNPU:
+        """Get singleton instance of SuperscalarNPU backend."""
         ...
 
 def set_backend_type(backend_type: BackendType) -> None:

@@ -56,7 +56,7 @@ This document provides a complete reference of all IR node types, organized by c
 
 <shape>       ::= "[" <expr_list> "]"
 <data_type>   ::= "INT32" | "INT64" | "FP16" | "FP32" | "FP64" | "BOOL" | ...
-<memory_space> ::= "DDR" | "Vec" | "Mat" | "Left" | "Right" | "Acc" | "Bias"
+<memory_space> ::= "DDR" | "Vec" | "Mat" | "Left" | "Right" | "Acc" | "Bias" | "ScalarLocal" | "TREG"
 <pipe_kind>   ::= "S" | "V" | "M" | "MTE1" | "MTE2" | "MTE3" | "ALL" | ...
 ```
 

@@ -28,6 +28,7 @@
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/backend/common/soc.h"
+#include "pypto/backend/superscalar/backend_superscalar_npu.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/pipe.h"
 
@@ -40,6 +41,7 @@ using pypto::backend::Backend;
 using pypto::backend::Backend910B;
 using pypto::backend::Backend950;
 using pypto::backend::BackendHandler;
+using pypto::backend::BackendSuperscalarNPU;
 using pypto::backend::BackendType;
 using pypto::backend::Cluster;
 using pypto::backend::Core;
@@ -56,7 +58,9 @@ void BindBackend(nb::module_& m) {
   nb::enum_<BackendType>(backend_mod, "BackendType",
                          "Backend type for passes and codegen (use Instance internally)")
       .value("Ascend910B", BackendType::Ascend910B, "910B backend (PTO assembly codegen)")
-      .value("Ascend950", BackendType::Ascend950, "950 PTO backend");
+      .value("Ascend950", BackendType::Ascend950, "950 PTO backend")
+      .value("SuperscalarNPU", BackendType::SuperscalarNPU,
+             "SuperscalarNPU backend (DDR + TREG register file; IR-only, no codegen yet)");
 
   // ========== Mem class ==========
   nb::class_<Mem>(backend_mod, "Mem", "Memory component")
@@ -158,7 +162,10 @@ void BindBackend(nb::module_& m) {
       .def("get_l0_fractal_alignment", &BackendHandler::GetL0FractalAlignment,
            "Cube fractal alignment in elements for L0 tile dimensions m, n, k")
       .def("get_min_l0_tile_dim", &BackendHandler::GetMinL0TileDim,
-           "Minimum legal value for L0 tile dimensions m, n, k");
+           "Minimum legal value for L0 tile dimensions m, n, k")
+      .def("get_default_on_chip_memory_space", &BackendHandler::GetDefaultOnChipMemorySpace,
+           "Default on-chip memory space for tiles with no op-imposed demand "
+           "(Vec on Ascend, TREG on SuperscalarNPU)");
 
   // ========== Backend abstract base class ==========
   nb::class_<Backend>(backend_mod, "Backend", "Abstract backend base class")
@@ -189,6 +196,12 @@ void BindBackend(nb::module_& m) {
   nb::class_<Backend950, Backend>(backend_mod, "Backend950", "950 PTO backend implementation")
       .def_static("instance", &Backend950::Instance, nb::rv_policy::reference,
                   "Get singleton instance of 950 backend");
+
+  // ========== BackendSuperscalarNPU concrete implementation ==========
+  nb::class_<BackendSuperscalarNPU, Backend>(backend_mod, "BackendSuperscalarNPU",
+                                             "SuperscalarNPU backend implementation (DDR + TREG)")
+      .def_static("instance", &BackendSuperscalarNPU::Instance, nb::rv_policy::reference,
+                  "Get singleton instance of SuperscalarNPU backend");
 
   // ========== Backend configuration functions ==========
   backend_mod.def("set_backend_type", &backend::BackendConfig::SetBackendType, nb::arg("backend_type"),

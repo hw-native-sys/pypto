@@ -68,6 +68,41 @@ class MemoryAllocatorPolicy {
    * @param refs Mutable vector of MemRefs to sort in-place
    */
   virtual void OrderMemRefs(std::vector<MemRefPtr>& refs) const = 0;
+
+  /**
+   * @brief Number of bytes represented by one unit of the stored MemRef address.
+   *
+   * Byte-addressed spaces (the default) return 1: the value stored in
+   * ``MemRef::byte_offset_`` is a raw byte address. Register-file spaces such as
+   * SuperscalarNPU's TREG return their block size (e.g. 4096): the stored value
+   * is then a *block index* rather than a byte address, and AllocateMemoryAddr
+   * advances/aligns the bump cursor so that each slot lands on a unit boundary.
+   *
+   * The AllocatedMemoryAddr verifier multiplies the stored value by this unit to
+   * recover the byte high-water mark before comparing against the platform
+   * buffer limit, so register pressure (too many live blocks) surfaces as a
+   * normal capacity diagnostic.
+   *
+   * @param space Memory space being allocated
+   * @return Bytes per address unit (>= 1)
+   */
+  [[nodiscard]] virtual uint64_t AddressUnitBytes([[maybe_unused]] MemorySpace space) const { return 1; }
+
+  /**
+   * @brief Maximum number of address units available in the given space.
+   *
+   * Byte-addressed spaces return ``UINT64_MAX`` (effectively unbounded here;
+   * the byte high-water check enforces the real limit). Register-file spaces
+   * return their block count (e.g. 256 TREG blocks). AllocateMemoryAddr raises
+   * a user-facing error when allocation would exceed this count, which is how
+   * SuperscalarNPU reports register pressure.
+   *
+   * @param space Memory space being allocated
+   * @return Maximum unit count for the space
+   */
+  [[nodiscard]] virtual uint64_t MaxAddressUnits([[maybe_unused]] MemorySpace space) const {
+    return UINT64_MAX;
+  }
 };
 
 using MemoryAllocatorPolicyPtr = std::unique_ptr<MemoryAllocatorPolicy>;

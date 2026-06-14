@@ -51,8 +51,9 @@ class BackendHandler;
  * @brief Backend type identifier for selecting backend instance
  */
 enum class BackendType {
-  Ascend910B,  ///< 910B backend (PTO assembly codegen)
-  Ascend950    ///< 950 PTO backend
+  Ascend910B,     ///< 910B backend (PTO assembly codegen)
+  Ascend950,      ///< 950 PTO backend
+  SuperscalarNPU  ///< SuperscalarNPU backend (DDR + TREG register file; IR-only, no codegen yet)
 };
 
 /**
