@@ -8,7 +8,7 @@
 
 旧方案对这些循环做 unroll（`pl.pipeline(stage=F)`）并由 `CanonicalizeIOOrder` 聚类跨核算子 —— 这会产生**背靠背的 `tpop`**，把消费者串行化。`SkewCrossCorePipeline` 改为对循环做软流水：
 
-- **单次往返、生产者角色** —— 恰好一个 `tpush` 和一个 `tpop`，且 `tpush` 的反向切片不通过 SSA 边喂给 body（cube：`QK → tpush`，`tpop → SV`）。两半仅通过有序的跨核 FIFO 关联，于是让生产者**提前一个迭代**运行：`produce(start)` 序言（prologue）、一个 `ForKind::Sequential` 稳态循环把 `produce(k+step)` 与 `consume(k)` 配对、以及 `consume(last)` 尾声（epilogue）。cube 发出第 k+1 次迭代的 `QK` 时，vector 正在跑第 k 次迭代的 softmax。
+- **单次往返、生产者角色** —— 恰好一个 `tpush` 和一个 `tpop`，且 `tpush` 的反向切片不通过 SSA 边喂给 body（cube：`QK → tpush`，`tpop → SV`）。两半仅通过有序的跨核 FIFO 关联，于是让生产者**提前一个迭代**运行：`produce(start)` 序言（prologue）、一个 `ForKind::Sequential` 稳态循环（其循环变量 `k` 索引 produce，把 `produce(k)` 与滞后一步的 `consume(k-step)` 配对，`k` 取值 `[start+step, start+trip*step)`）、以及 `consume(last)` 尾声（epilogue）。cube 发出第 k 次迭代的 `QK` 时，vector 正在跑第 k-step 次迭代的 softmax。
 - **消费者角色，或多次往返** —— lead 算子通过 SSA 喂给 body（vector：弹出的 scores 喂给 softmax），或某个 FIFO 方向上有多于一条消息。此时**降级为普通的 `ForKind::Sequential` 循环**（body 不变）。这消除了 unroll 的背靠背 `tpop`，同时保持 FIFO 的有序性；跨核重叠则来自**对端**核的生产者 skew —— 它提前一步把每个 tile 放入 FIFO，使本核有序的 `tpop` 不再 block。
 
 每个**非跨核**的 pipeline 循环（同核 GM→L1、L1→L0、嵌套 matmul stage 循环 —— 没有 `tpush`/`tpop`）保持不变，交给 `LowerPipelineLoops` 复制。

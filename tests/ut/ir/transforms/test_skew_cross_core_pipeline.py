@@ -14,9 +14,10 @@ The pass runs immediately before LowerPipelineLoops and rewrites mixed cube/vect
 ``tile.tpop_*``:
   - single round-trip, PRODUCE-first (one tpush before its tpop, the tpush's
     backward slice does not feed the body) -> SKEW (producer one iteration ahead:
-    produce(start) prologue + Sequential steady ``pl.range(trip-1)`` pairing
-    produce(k+step)/consume(k) + consume(last) epilogue). Core-agnostic: holds for
-    a cube ``tpush_to_aiv`` loop AND a vector ``tpush_to_aic`` loop.
+    produce(start) prologue + Sequential steady ``pl.range(start+step, start+trip*step)``
+    whose loop var k indexes the produce and pairs produce(k)/consume(k-step) +
+    consume(last) epilogue). Core-agnostic: holds for a cube ``tpush_to_aiv`` loop
+    AND a vector ``tpush_to_aic`` loop.
   - CONSUME-first, multi-round-trip, or otherwise non-skewable -> demote to a plain
     Sequential loop (body unchanged).
 Non-cross-core pipeline loops are left intact (for LowerPipelineLoops to unroll).
@@ -38,7 +39,7 @@ class TestSkewCrossCorePipeline:
     def test_single_roundtrip_producer_skews(self):
         """AIC-style (cube) produce-first body — one ``tpush_to_aiv`` then one
         ``tpop_from_aiv`` — skews: produce(0) prologue, a Sequential steady
-        ``pl.range(3)`` pairing produce(i+1)/consume(i), consume(3) epilogue."""
+        ``pl.range(1, 4)`` pairing produce(i)/consume(i-1), consume(3) epilogue."""
 
         @pl.program
         class Before:
@@ -62,14 +63,14 @@ class TestSkewCrossCorePipeline:
                 )
                 rs0: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(qa0, qa0)
                 pl.tile.tpush_to_aiv(rs0, split=0)
-                # steady: produce(i+1) ; consume(i)
-                for i in pl.range(0, 3, 1):
-                    qa1: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(q, [(i + 1) * 16, 0], [16, 64])
+                # steady: produce(i) ; consume(i-1)
+                for i in pl.range(1, 4, 1):
+                    qa1: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(q, [i * 16, 0], [16, 64])
                     rs1: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(qa1, qa1)
                     pl.tile.tpush_to_aiv(rs1, split=0)
                     e0: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0)
                     oi0: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(e0, e0)
-                    pl.tile.store(oi0, [i * 16, 0], out)
+                    pl.tile.store(oi0, [(i - 1) * 16, 0], out)
                 # epilogue: consume(3)
                 e1: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0)
                 oi1: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(e1, e1)
@@ -103,13 +104,13 @@ class TestSkewCrossCorePipeline:
                 )
                 rs0: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(qa0, qa0)
                 pl.tile.tpush_to_aic(rs0, split=0)
-                for i in pl.range(0, 3, 1):
-                    qa1: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(q, [(i + 1) * 16, 0], [16, 64])
+                for i in pl.range(1, 4, 1):
+                    qa1: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(q, [i * 16, 0], [16, 64])
                     rs1: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(qa1, qa1)
                     pl.tile.tpush_to_aic(rs1, split=0)
                     e0: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aic(split=0)
                     oi0: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(e0, e0)
-                    pl.tile.store(oi0, [i * 16, 0], out)
+                    pl.tile.store(oi0, [(i - 1) * 16, 0], out)
                 e1: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aic(split=0)
                 oi1: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(e1, e1)
                 pl.tile.store(oi1, [pl.const(3, pl.INDEX) * pl.const(16, pl.INDEX), 0], out)

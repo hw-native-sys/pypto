@@ -147,9 +147,10 @@ std::pair<StmtPtr, std::vector<ExprPtr>> SplitBodyYield(const StmtPtr& body) {
 //  - SINGLE round-trip, producer role (exactly one tpush + one tpop, the tpush's
 //    backward slice does not feed the body via SSA): the two halves are linked
 //    only by the in-order cross-core FIFO, so run the producer one iteration
-//    AHEAD — produce(start) prologue, a KEPT Sequential steady ForStmt pairing
-//    produce(k+step) with consume(k), and a consume(last) epilogue. This lets the
-//    cube issue iteration k+1's QK while the vector runs iteration k's softmax.
+//    AHEAD — produce(start) prologue, a KEPT Sequential steady ForStmt whose loop
+//    var k indexes the produce and pairs produce(k) with the trailing consume(k-step)
+//    over k in [start+step, start+trip*step), and a consume(last) epilogue. This lets
+//    the cube issue iteration k's QK while the vector runs iteration k-step's softmax.
 //  - CONSUMER role / MULTI round-trip / not statically skewable: demote to a plain
 //    Sequential loop — order-preserving; overlap comes from the peer core's
 //    producer skew.
@@ -226,41 +227,63 @@ class SkewCrossCoreMutator : public IRMutator {
     INTERNAL_CHECK_SPAN(factor >= 1, op->span_)
         << "SkewCrossCorePipeline: pipeline_stages must be >= 1, got " << factor;
 
-    // factor == 1 (user `pl.pipeline(stage=1)` or a prior run's marker): nothing to
-    // skew — recurse so nested loops are still considered, then leave the loop for
-    // LowerPipelineLoops / CanonicalizeIOOrder.
-    if (factor == 1) {
-      return IRMutator::VisitStmt_(op);
-    }
-
-    // Recurse into the body first so nested cross-core pipelines are skewed too.
+    // Recurse into the loop bounds and body first so nested cross-core pipelines
+    // are skewed and any expr-level mutations are preserved before this pass
+    // rewrites the loop kind.
+    auto inner_start = VisitExpr(op->start_);
+    auto inner_stop = VisitExpr(op->stop_);
+    auto inner_step = VisitExpr(op->step_);
     auto inner_body = VisitStmt(op->body_);
+
+    // factor == 1 (user `pl.pipeline(stage=1)` or a prior run's marker): nothing to
+    // skew. A cross-core body must STILL be demoted to Sequential here so it never
+    // reaches LowerPipelineLoops / CanonicalizeIOOrder as a Pipeline body; a
+    // same-core stage=1 body is left as Pipeline (rebuilt only if a child changed).
+    if (factor == 1) {
+      if (BodyHasCrossCorePair(inner_body)) {
+        return DemoteToSequential(op, inner_start, inner_stop, inner_step, inner_body);
+      }
+      return RebuildIfChanged(op, inner_start, inner_stop, inner_step, inner_body);
+    }
 
     // Non-cross-core (no tpush/tpop pair) — leave the Pipeline loop intact for
     // LowerPipelineLoops to replicate (same-core GM->L1 / L1->L0 / matmul stages).
     if (!BodyHasCrossCorePair(inner_body)) {
-      if (inner_body.get() == op->body_.get()) return op;
-      auto rebuilt = MutableCopy(op);
-      rebuilt->body_ = inner_body;
-      return rebuilt;
+      return RebuildIfChanged(op, inner_start, inner_stop, inner_step, inner_body);
     }
 
     // Cross-core: skew if statically skewable, otherwise demote to Sequential. A
     // cross-core loop must NEVER leave this pass as ForKind::Pipeline — the unroll
     // pass and CanonicalizeIOOrder no longer handle cross-core ops.
-    int64_t step = GetConstIntValue(op->step_, "step");
+    int64_t step = GetConstIntValue(inner_step, "step");
     INTERNAL_CHECK_SPAN(step != 0, op->span_) << "SkewCrossCorePipeline: step cannot be zero";
-    auto start_const = TryGetConstInt(op->start_);
-    auto stop_const = TryGetConstInt(op->stop_);
+    auto start_const = TryGetConstInt(inner_start);
+    auto stop_const = TryGetConstInt(inner_stop);
     if (start_const.has_value() && stop_const.has_value()) {
       if (auto skewed = LowerSkewed(op, inner_body, *start_const, *stop_const, step)) {
         return skewed;
       }
     }
-    return DemoteToSequential(op, inner_body);
+    return DemoteToSequential(op, inner_start, inner_stop, inner_step, inner_body);
   }
 
  private:
+  /// Rebuild the loop with the recursed bounds/body, preserving kind and attrs.
+  /// Returns `op` unchanged (identity fast path) when nothing changed.
+  StmtPtr RebuildIfChanged(const ForStmtPtr& op, const ExprPtr& start, const ExprPtr& stop,
+                           const ExprPtr& step, const StmtPtr& body) {
+    if (start.get() == op->start_.get() && stop.get() == op->stop_.get() && step.get() == op->step_.get() &&
+        body.get() == op->body_.get()) {
+      return op;
+    }
+    auto rebuilt = MutableCopy(op);
+    rebuilt->start_ = start;
+    rebuilt->stop_ = stop;
+    rebuilt->step_ = step;
+    rebuilt->body_ = body;
+    return rebuilt;
+  }
+
   /// Cross-core SWP (prototype): migrate a mixed cube/vector pipeline loop off the
   /// unroll+IO-cluster style. One analysis (lead = backward slice of the FIRST
   /// cross-core op), two emissions keyed on whether the lead feeds the body via an
@@ -290,6 +313,13 @@ class SkewCrossCoreMutator : public IRMutator {
     auto body_split = SplitBodyYield(body);
     const std::vector<ExprPtr>& body_yields = body_split.second;
     std::vector<StmtPtr> stmts = FlattenToStmts(body_split.first);
+    // Structural invariants (guaranteed by earlier verified passes): one
+    // return_var and one yielded value per iter_arg. Fail fast here rather than
+    // index out of bounds when seeding the epilogue from the body's yields.
+    INTERNAL_CHECK_SPAN(op->return_vars_.size() == op->iter_args_.size(), op->span_)
+        << "SkewCrossCorePipeline: ForStmt return_vars and iter_args size mismatch";
+    INTERNAL_CHECK_SPAN(op->iter_args_.empty() || body_yields.size() == op->iter_args_.size(), op->span_)
+        << "SkewCrossCorePipeline: loop body must yield one value per iter_arg";
     // Lead = backward slice of the FIRST cross-core op in program order (tpush
     // OR tpop). For the producer-role core (AIC) that is the tpush (the QK chain
     // feeding the peer); for the consumer-role core (AIV) that is the tpop (the
@@ -474,13 +504,15 @@ class SkewCrossCoreMutator : public IRMutator {
     // Sequential is order-preserving and off the unroll style; cross-core overlap
     // then comes from the PEER core's producer skew putting each tile in the FIFO a
     // step early, so the in-order tpop never blocks.
-    if (num_tpush != 1 || num_tpop != 1 || !carried.empty()) return DemoteToSequential(op, body);
+    if (num_tpush != 1 || num_tpop != 1 || !carried.empty()) {
+      return DemoteToSequential(op, op->start_, op->stop_, op->step_, body);
+    }
 
     // Producer-role single-round-trip cross-core loop (the AIC: exactly one tpush
     // + one tpop, lead = tpush, FIFO-decoupled from the body -> `carried` empty).
     // Clone the producer / consumer halves with
     // loop_var -> `lv_sub` and iter_args -> `iter_subs`. The two halves are cloned
-    // with DIFFERENT loop_var substitutes (k+step vs k) — they are SSA-independent
+    // with DIFFERENT loop_var substitutes (k vs k-step) — they are SSA-independent
     // (linked only by the in-order cross-core FIFO), so this is safe. A steady
     // ForStmt is KEPT (not fully unrolled) so the matmul Acc double-buffering
     // (running-acc / ping-pong addresses assigned by AllocateMemoryAddr) still has
@@ -513,10 +545,14 @@ class SkewCrossCoreMutator : public IRMutator {
     // can start consuming while the steady loop computes iteration 1's produce.
     auto [prologue, _pl] = clone_half(produce_set, MakeConstIndex(start, sp), init, /*with_yield=*/false);
 
-    // Steady loop: trip-1 iterations over k' = start .. start+(trip-2)*step.
-    // Body = produce(k'+step) ; consume(k') ; yield(updated iter_args). The
-    // producer running one step ahead is what overlaps the cube (QK of k'+1)
-    // with the vector (softmax of k').
+    // Steady loop: trip-1 iterations whose loop var k = start+step ..
+    // start+(trip-1)*step indexes the PRODUCE (running one step ahead); the
+    // CONSUME trails one step behind at k-step. Body = produce(k) ;
+    // consume(k-step) ; yield(updated iter_args), overlapping the cube (QK of k)
+    // with the vector (softmax of k-step). Equivalent to a produce-ahead skew
+    // with the +step offset on the consume side, so the loop ranges over the
+    // natural produce indices `[start+step, start+trip*step)` and `produce(k)`
+    // uses the bare loop var.
     VarPtr new_lv = CloneLoopVar(op->loop_var_);
     std::vector<IterArgPtr> new_iter_args;
     std::vector<ExprPtr> steady_init_subs;
@@ -525,10 +561,9 @@ class SkewCrossCoreMutator : public IRMutator {
       new_iter_args.push_back(fresh);
       steady_init_subs.push_back(fresh);
     }
-    auto [steady_prod, _sp] =
-        clone_half(produce_set, OffsetIndex(new_lv, step, sp), steady_init_subs, /*with_yield=*/false);
-    auto [steady_cons, steady_yields] =
-        clone_half(consume_set, new_lv, steady_init_subs, /*with_yield=*/true);
+    auto [steady_prod, _sp] = clone_half(produce_set, new_lv, steady_init_subs, /*with_yield=*/false);
+    auto [steady_cons, steady_yields] = clone_half(consume_set, MakeSub(new_lv, MakeConstIndex(step, sp), sp),
+                                                   steady_init_subs, /*with_yield=*/true);
     std::vector<StmtPtr> steady_body_parts = {steady_prod, steady_cons};
     if (!op->iter_args_.empty()) {
       steady_body_parts.push_back(std::make_shared<YieldStmt>(steady_yields, sp));
@@ -538,8 +573,12 @@ class SkewCrossCoreMutator : public IRMutator {
     std::vector<VarPtr> steady_rv =
         op->return_vars_.empty() ? op->return_vars_ : MakeFreshReturnVars(op->return_vars_, "_swp");
     auto steady_loop = std::make_shared<ForStmt>(
-        new_lv, MakeConstIndex(start, sp), MakeConstIndex(start + (trip - 1) * step, sp),
+        new_lv, MakeConstIndex(start + step, sp), MakeConstIndex(start + trip * step, sp),
         MakeConstIndex(step, sp), new_iter_args, steady_body, steady_rv, sp, ForKind::Sequential);
+    // Preserve loop metadata, stripping the pipeline marker (the steady loop is
+    // Sequential): any non-pipeline attrs and leading comments carry through.
+    steady_loop->attrs_ = StripAttr(op->attrs_, kPipelineStagesAttr);
+    steady_loop->leading_comments_ = op->leading_comments_;
 
     // Epilogue: consume(start+(trip-1)*step), seeded from the steady loop's final
     // iter_args (or the loop's init values when there are no iter_args).
@@ -560,8 +599,12 @@ class SkewCrossCoreMutator : public IRMutator {
   /// keep the body as-is, demote kind to Sequential and strip `pipeline_stages`
   /// together so the bidirectional invariant `kind == Pipeline ⇔ pipeline_stages
   /// attr present` stays whole and the loop is not re-sorted by CanonicalizeIOOrder.
-  StmtPtr DemoteToSequential(const ForStmtPtr& op, const StmtPtr& inner_body) {
+  StmtPtr DemoteToSequential(const ForStmtPtr& op, const ExprPtr& start, const ExprPtr& stop,
+                             const ExprPtr& step, const StmtPtr& inner_body) {
     auto cleaned = MutableCopy(op);
+    cleaned->start_ = start;
+    cleaned->stop_ = stop;
+    cleaned->step_ = step;
     cleaned->body_ = inner_body;
     cleaned->kind_ = ForKind::Sequential;
     cleaned->attrs_ = StripAttr(op->attrs_, kPipelineStagesAttr);

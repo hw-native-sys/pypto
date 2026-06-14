@@ -8,7 +8,7 @@ On A2/A3 a fused cube+vector kernel (e.g. flash-decode `qk_pv`) round-trips thro
 
 The old approach unrolled these loops (`pl.pipeline(stage=F)`) and let `CanonicalizeIOOrder` cluster the cross-core ops — which produced *back-to-back* `tpop`s that serialised the consumer. `SkewCrossCorePipeline` instead software-pipelines the loop:
 
-- **Single round-trip, producer role** — exactly one `tpush` and one `tpop`, and the `tpush`'s backward slice does not feed the body via an SSA edge (the cube: `QK → tpush`, `tpop → SV`). The two halves are linked only by the in-order cross-core FIFO, so the producer runs **one iteration ahead**: a `produce(start)` prologue, a `ForKind::Sequential` steady loop pairing `produce(k+step)` with `consume(k)`, and a `consume(last)` epilogue. The cube issues iteration k+1's `QK` while the vector runs iteration k's softmax.
+- **Single round-trip, producer role** — exactly one `tpush` and one `tpop`, and the `tpush`'s backward slice does not feed the body via an SSA edge (the cube: `QK → tpush`, `tpop → SV`). The two halves are linked only by the in-order cross-core FIFO, so the producer runs **one iteration ahead**: a `produce(start)` prologue, a `ForKind::Sequential` steady loop whose loop var `k` indexes the produce and pairs `produce(k)` with the trailing `consume(k-step)` over `k` in `[start+step, start+trip*step)`, and a `consume(last)` epilogue. The cube issues iteration k's `QK` while the vector runs iteration k-step's softmax.
 - **Consumer role, or multi-round-trip** — the lead op feeds the body via SSA (the vector: the popped scores feed softmax), or there is more than one message per FIFO direction. The loop is **demoted to a plain `ForKind::Sequential` loop** (body unchanged). This drops the unroll's back-to-back `tpop` while preserving the in-order FIFO; cross-core overlap then comes from the *peer* core's producer skew putting each tile in the FIFO a step early, so the in-order `tpop` never blocks.
 
 Every **non-cross-core** pipeline loop (same-core GM→L1, L1→L0, nested matmul stage loops — no `tpush`/`tpop`) is left untouched for `LowerPipelineLoops` to replicate.
@@ -63,8 +63,8 @@ Either way a cross-core loop **always** leaves this pass as `ForKind::Sequential
 # Before: for i in pl.pipeline(0, 4, 1, stage=2):
 #             qk = ...; tpush_to_aiv(qk); p = tpop_from_aiv(); sv = ...(p); store(sv)
 # After:  produce(0)                              # prologue
-#         for i in pl.range(0, 3, 1):             # steady (Sequential)
-#             produce(i+1); consume(i)            # cube QK[i+1] overlaps vec softmax[i]
+#         for i in pl.range(1, 4, 1):             # steady (Sequential)
+#             produce(i); consume(i-1)            # cube QK[i] overlaps vec softmax[i-1]
 #         consume(3)                              # epilogue
 ```
 

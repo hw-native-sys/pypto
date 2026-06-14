@@ -376,7 +376,7 @@ def skew_cross_core_pipeline() -> Pass:
     For a mixed cube/vector ``pl.pipeline`` loop (``F > 1``) whose body has both a
     cross-core ``tile.tpush_*`` and ``tile.tpop_*``: a single-round-trip producer-role
     loop runs the producer one iteration ahead (produce(start) prologue + a
-    ``ForKind.Sequential`` steady loop pairing produce(k+step)/consume(k) +
+    ``ForKind.Sequential`` steady loop pairing produce(k)/consume(k-step) +
     consume(last) epilogue); a consumer-role or multi-round-trip loop demotes to a
     plain ``ForKind.Sequential`` loop (order-preserving — cross-core overlap comes
     from the peer's producer skew). The output is Sequential with no

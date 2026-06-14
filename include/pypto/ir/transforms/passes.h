@@ -267,7 +267,8 @@ Pass UnrollLoops();
  *   - Single round-trip, producer role (one tpush + one tpop, the tpush's
  *     backward slice does not feed the body via SSA): run the producer one
  *     iteration ahead — produce(start) prologue, a ``ForKind::Sequential`` steady
- *     loop pairing produce(k+step) with consume(k), and a consume(last) epilogue.
+ *     loop pairing produce(k) with the trailing consume(k-step), and a
+ *     consume(last) epilogue.
  *   - Consumer role or multi-round-trip: demote to a plain ``ForKind::Sequential``
  *     loop (order-preserving; cross-core overlap comes from the peer's producer
  *     skew). Demotion avoids reordering the in-order cross-core FIFO.
