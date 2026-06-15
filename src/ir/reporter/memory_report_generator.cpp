@@ -194,7 +194,10 @@ class MemoryReportGeneratorImpl : public ReportGenerator {
                   int ra = space_rank(a.space);
                   int rb = space_rank(b.space);
                   if (ra != rb) return ra < rb;
-                  return a.offset < b.offset;
+                  if (a.offset != b.offset) return a.offset < b.offset;
+                  // Tie-break by name so the order does not depend on the
+                  // pointer-keyed map iteration (deterministic reports).
+                  return a.name < b.name;
                 });
 
       functions.push_back({func->name_, std::move(entries), std::move(buffers)});
