@@ -148,6 +148,121 @@ class TestRunConfigDfxFlags:
         assert _DfxOpts().any() is False
 
 
+class TestRunConfigRingSizing:
+    """Verify per-task ring-sizing overrides on ``RunConfig``.
+
+    ``None`` (default) means "unset" so the runtime falls back to its
+    ``PTO2_RING_*`` env var / compile-time default. Provided values must
+    satisfy the same constraints the runtime's ``RuntimeEnv::validate()``
+    enforces — ``RunConfig`` checks them early for a clear error message.
+    """
+
+    def test_ring_fields_default_none(self):
+        cfg = RunConfig(platform="a2a3sim")
+        assert cfg.ring_task_window is None
+        assert cfg.ring_heap is None
+        assert cfg.ring_dep_pool is None
+
+    def test_valid_ring_values_accepted(self):
+        cfg = RunConfig(
+            platform="a2a3sim",
+            ring_task_window=128,
+            ring_heap=8 * 1024 * 1024,
+            ring_dep_pool=256,
+        )
+        assert cfg.ring_task_window == 128
+        assert cfg.ring_heap == 8 * 1024 * 1024
+        assert cfg.ring_dep_pool == 256
+
+    def test_ring_min_boundaries_accepted(self):
+        cfg = RunConfig(
+            platform="a2a3sim",
+            ring_task_window=4,
+            ring_heap=1024,
+            ring_dep_pool=4,
+        )
+        assert cfg.ring_task_window == 4
+        assert cfg.ring_heap == 1024
+        assert cfg.ring_dep_pool == 4
+
+    @pytest.mark.parametrize("bad", [3, 5, 0, 6, 100])
+    def test_ring_task_window_must_be_pow2_ge4(self, bad):
+        with pytest.raises(ValueError, match="ring_task_window must be a power of 2 >= 4"):
+            RunConfig(platform="a2a3sim", ring_task_window=bad)
+
+    @pytest.mark.parametrize("bad", [512, 1000, 1536, 0])
+    def test_ring_heap_must_be_pow2_ge1024(self, bad):
+        with pytest.raises(ValueError, match="ring_heap must be a power of 2 >= 1024"):
+            RunConfig(platform="a2a3sim", ring_heap=bad)
+
+    @pytest.mark.parametrize("bad", [3, 0, -1, 2**31])
+    def test_ring_dep_pool_must_be_in_int32_range(self, bad):
+        with pytest.raises(ValueError, match=r"ring_dep_pool must be in \[4, INT32_MAX\]"):
+            RunConfig(platform="a2a3sim", ring_dep_pool=bad)
+
+    def test_ring_dep_pool_need_not_be_pow2(self):
+        # Unlike task_window / heap, the dep pool is a plain int range.
+        cfg = RunConfig(platform="a2a3sim", ring_dep_pool=100)
+        assert cfg.ring_dep_pool == 100
+
+
+class _SpyRuntimeEnv:
+    """Records writes to ``ring_*`` fields; defaults mirror the runtime (0)."""
+
+    def __init__(self) -> None:
+        self.ring_task_window = 0
+        self.ring_heap = 0
+        self.ring_dep_pool = 0
+
+
+class _SpyCallConfig:
+    """Stand-in for simpler's ``CallConfig`` with a nested ``runtime_env``."""
+
+    def __init__(self) -> None:
+        self.runtime_env = _SpyRuntimeEnv()
+
+
+def _build_with_fake_callconfig(run_config, monkeypatch, **kwargs):
+    """Invoke ``_build_call_config`` with a spy ``CallConfig`` so the test
+    runs without the optional ``simpler`` package installed.
+    """
+    fake_task_interface = types.SimpleNamespace(CallConfig=_SpyCallConfig)
+    monkeypatch.setitem(sys.modules, "pypto.runtime.task_interface", fake_task_interface)
+    from pypto.runtime.runner import _build_call_config  # noqa: PLC0415
+
+    return _build_call_config(run_config, runtime_config={}, **kwargs)
+
+
+class TestBuildCallConfigRing:
+    """Verify ``_build_call_config`` transcribes ring sizing into ``runtime_env``."""
+
+    def test_unset_leaves_runtime_env_at_zero(self, monkeypatch):
+        cfg = _build_with_fake_callconfig(RunConfig(platform="a2a3sim"), monkeypatch)
+        assert cfg.runtime_env.ring_task_window == 0
+        assert cfg.runtime_env.ring_heap == 0
+        assert cfg.runtime_env.ring_dep_pool == 0
+
+    def test_set_values_transcribed(self, monkeypatch):
+        run_config = RunConfig(
+            platform="a2a3sim",
+            ring_task_window=16,
+            ring_heap=1024 * 1024,
+            ring_dep_pool=64,
+        )
+        cfg = _build_with_fake_callconfig(run_config, monkeypatch)
+        assert cfg.runtime_env.ring_task_window == 16
+        assert cfg.runtime_env.ring_heap == 1024 * 1024
+        assert cfg.runtime_env.ring_dep_pool == 64
+
+    def test_partial_set_only_touches_provided_fields(self, monkeypatch):
+        run_config = RunConfig(platform="a2a3sim", ring_heap=2 * 1024 * 1024)
+        cfg = _build_with_fake_callconfig(run_config, monkeypatch)
+        assert cfg.runtime_env.ring_heap == 2 * 1024 * 1024
+        # Unset fields stay at the runtime's 0 default.
+        assert cfg.runtime_env.ring_task_window == 0
+        assert cfg.runtime_env.ring_dep_pool == 0
+
+
 class TestRunConfigCompileForwarding:
     """Compile-side RunConfig fields are forwarded into ``ir.compile``."""
 
