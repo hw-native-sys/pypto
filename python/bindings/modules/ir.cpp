@@ -1075,6 +1075,20 @@ void BindIR(nb::module_& m) {
 
 #undef BIND_UNARY_EXPR
 
+  // DimExpr — compile-time composite dimension expression in type shapes.
+  // body_ is IgnoreField so visitors and verifiers skip the wrapped expression,
+  // keeping type-annotation variables out of runtime SSA scope checks.
+  auto dimexpr_class =
+      nb::class_<DimExpr, Expr>(ir, "DimExpr",
+                                "Compile-time composite dimension expression in type shapes.\n"
+                                "\n"
+                                "Wraps arithmetic on pl.dynamic() scalars (e.g. ``N * 2``) so the\n"
+                                "compiler's visitors and SSA verifier treat them as opaque type-level\n"
+                                "annotations, not runtime SSA values. Unwrap via ``expr.body``.");
+  BindFields<DimExpr>(dimexpr_class);
+  dimexpr_class.def(nb::init<const ExprPtr&, const Span&>(), nb::arg("body"), nb::arg("span"),
+                    "Wrap an expression for use as a compile-time dimension");
+
   // Bind structural hash and equality functions
   // structural_hash overloads share the same auto-mapping semantics:
   //   enable_auto_mapping=True  -> variable names are ignored (x+1 and y+1 hash the same)
@@ -1813,6 +1827,15 @@ void BindIR(nb::module_& m) {
   ir.def("neg", &MakeNeg, nb::arg("operand"), nb::arg("span") = Span::unknown(), "Negation operator");
   ir.def("cast", &MakeCast, nb::arg("operand"), nb::arg("dtype"), nb::arg("span") = Span::unknown(),
          "Cast operator");
+  ir.def("dim_expr", &MakeDimExpr, nb::arg("body"), nb::arg("span") = Span::unknown(),
+         "Wrap an expression as a DimExpr for compile-time shape arithmetic.\n"
+         "\n"
+         "Use inside type annotations (e.g. Tensor[(N * 2,)] ) to express\n"
+         "composite dynamic dimensions. The DimExpr tells the SSA verifier\n"
+         "and all default visitors to treat the wrapped expression as an\n"
+         "opaque type-level annotation, not a runtime SSA value.\n"
+         "\n"
+         "Unwrap via ``expr.body``.");
   ir.def("bit_and", &MakeBitAnd, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
          "Bitwise and operator");
   ir.def("bit_or", &MakeBitOr, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),

@@ -138,10 +138,22 @@ class ExprEvaluator:
             return value
         if isinstance(value, DynVar):
             return self.get_or_create_dynvar(value, span)
-        if isinstance(value, Scalar) and not value._annotation_only and value.expr is not None:
-            # Composite over DynVars (e.g. `m + 0`) built via DSL operator
-            # overloading — keep the IR tree as-is (no constant folding).
-            return value.expr
+        if isinstance(value, Scalar) and not value._annotation_only:
+            # Composite over DynVars (e.g. ``m + 0``, ``NR * 64``) built via
+            # DSL operator overloading.  Wrap in DimExpr so the SSA verifier
+            # treats it as a type-level annotation.
+            expr = value.unwrap()
+            if expr is None:
+                raise ParserTypeError(
+                    f"Scalar has no underlying expression",
+                    span=span,
+                )
+            if not isinstance(expr, ir.Expr):
+                raise ParserTypeError(
+                    f"Scalar.unwrap() returned non-Expr: {type(expr).__name__}",
+                    span=span,
+                )
+            return ir.dim_expr(expr, span)
         if isinstance(value, (list, tuple)):
             return ir.MakeTuple([self.python_value_to_ir(elt, span) for elt in value], span)
         raise ParserTypeError(

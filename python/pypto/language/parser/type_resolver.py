@@ -834,17 +834,30 @@ class TypeResolver:
             elif value.name not in self._dyn_var_cache:
                 self._dyn_var_cache[value.name] = value._ir_var
             return value._ir_var
-        if isinstance(value, Scalar) and not value._annotation_only and value.expr is not None:
-            # Composite shape dim (e.g. `m + 0`, `pl.const(32, pl.INT64) * 2`)
-            # evaluated through DSL operator overloading — keep the IR tree
-            # as-is, without constant folding, so print->parse round-trips.
-            expr_type = value.expr.type
+        if isinstance(value, Scalar) and not value._annotation_only:
+            # Composite shape dim (e.g. `m + 0`, `NR * 64`) built via DSL
+            # operator overloading.  Wrap in DimExpr so the SSA verifier
+            # treats the composite as an opaque type-level annotation — the
+            # inner Vars are registered in the outermost scope but are never
+            # walked by default visitors.
+            expr = value.unwrap()
+            if expr is None:
+                raise ParserTypeError(
+                    f"Shape variable '{source_name}' is a Scalar with no underlying expression",
+                    span=span,
+                )
+            if not isinstance(expr, ir.Expr):
+                raise ParserTypeError(
+                    f"Scalar.unwrap() returned non-Expr: {type(expr).__name__}",
+                    span=span,
+                )
+            expr_type = expr.type
             if not (isinstance(expr_type, ir.ScalarType) and expr_type.dtype.is_int()):
                 raise ParserTypeError(
                     f"Shape dimension '{source_name}' must be integer-typed, got {expr_type}",
                     span=span,
                 )
-            return value.expr
+            return ir.dim_expr(expr, span)
         raise ParserTypeError(
             f"Shape variable '{source_name}' must be int or pl.dynamic(), got {type(value).__name__}",
             span=span,
