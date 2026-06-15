@@ -2216,7 +2216,19 @@ class OutWindowExternalizer {
     return cost;
   }
 
-  static bool ShouldKeepOutputInAuto(const OutputRewriteInfo& output, WindowRewriteCost* out_cost) {
+  static bool IsSingleCoalescedMultiPieceOutput(const OutputRewriteInfo& output,
+                                                const CalleeRewriteAnalysis& analysis,
+                                                const WindowRewriteCost& cost) {
+    if (!cost.is_multi_piece_output) return false;
+    if (analysis.outputs.size() != 1) return false;
+    // Exact multi-piece output expands the runtime ABI.  The only multi-piece
+    // shape auto keeps is a single coarse carrier with fine callsite assembles.
+    return cost.dense_piece_count == 1 && cost.assemble_piece_count > 1 && cost.has_callsite_assemble &&
+           cost.abi_delta == 0;
+  }
+
+  static bool ShouldKeepOutputInAuto(const OutputRewriteInfo& output, const CalleeRewriteAnalysis& analysis,
+                                     WindowRewriteCost* out_cost) {
     auto cost = EstimateOutputCost(output);
     if (cost.abi_delta > 0) {
       cost.reason = "abi_expanding";
@@ -2224,9 +2236,14 @@ class OutWindowExternalizer {
       return false;
     }
     if (cost.is_multi_piece_output) {
-      cost.reason = "multi_piece_output";
+      if (!IsSingleCoalescedMultiPieceOutput(output, analysis, cost)) {
+        cost.reason = analysis.outputs.size() == 1 ? "multi_piece_output" : "multi_output_coalescing";
+        if (out_cost) *out_cost = std::move(cost);
+        return false;
+      }
+      cost.reason = "single_coalesced_multi_piece_output";
       if (out_cost) *out_cost = std::move(cost);
-      return false;
+      return true;
     }
     if (cost.has_callsite_assemble && cost.abi_delta >= 0) {
       cost.reason = "assemble_without_abi_reduction";
@@ -2327,7 +2344,7 @@ class OutWindowExternalizer {
               std::remove_if(analysis.outputs.begin(), analysis.outputs.end(),
                              [&](const OutputRewriteInfo& output) {
                                WindowRewriteCost cost;
-                               bool keep = ShouldKeepOutputInAuto(output, &cost);
+                               bool keep = ShouldKeepOutputInAuto(output, analysis, &cost);
                                LogAutoDecision(
                                    keep, DebugParamName(callee_name, func, output.out_param_index), cost);
                                return !keep;

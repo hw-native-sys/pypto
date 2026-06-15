@@ -3249,16 +3249,21 @@ class TestOutWindowExternalizer:
             window_rewrite_policy="auto",
         )
         printed_auto_main = ir.python_print(_get_function(Auto, "main"))
-        assert "cache__ssa_v0__window" not in printed_auto_main
-        assert "pl.tensor.assemble(cache__ssa_v0" not in printed_auto_main
+        assert "cache_write__windowed" in printed_auto_main
+        assert "pl.tensor.slice(cache__ssa_v0, [385, 128], [7, 0])" in printed_auto_main
+        assert printed_auto_main.count("pl.tensor.assemble(") == 4
 
         printed_auto_windowed = ir.python_print(_get_function(Auto, "cache_write__windowed"))
-        assert "pl.Out[pl.Tensor[[385, 128], pl.FP32" not in printed_auto_windowed
+        assert "pl.Out[pl.Tensor[[385, 128], pl.FP32" in printed_auto_windowed
 
         Default = passes.optimize_orch_tensors()(Before)
         printed_default_main = ir.python_print(_get_function(Default, "main"))
-        assert "cache__ssa_v0__window" not in printed_default_main
-        assert "pl.tensor.assemble(cache__ssa_v0" not in printed_default_main
+        assert "cache_write__windowed" in printed_default_main
+        assert printed_default_main.count("pl.tensor.assemble(") == 4
+        assert "__fine_0_3" in printed_default_main
+
+        printed_default_windowed = ir.python_print(_get_function(Default, "cache_write__windowed"))
+        assert "pl.Out[pl.Tensor[[385, 128], pl.FP32" in printed_default_windowed
 
         NoMulti = _run_to_optimize_orch_tensors(
             Before,
@@ -3271,6 +3276,61 @@ class TestOutWindowExternalizer:
 
         printed_no_multi_windowed = ir.python_print(_get_function(NoMulti, "cache_write__windowed"))
         assert "pl.Out[pl.Tensor[[385, 128], pl.FP32" not in printed_no_multi_windowed
+
+    def test_auto_rejects_multi_output_coalescing(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def cache_write_pair(
+                self,
+                cache_a: pl.Out[pl.Tensor[[1024, 128], pl.FP32]],
+                cache_b: pl.Out[pl.Tensor[[1024, 128], pl.FP32]],
+                data: pl.Tensor[[4, 128], pl.FP32],
+                slot_offset: pl.Scalar[pl.INDEX],
+            ) -> tuple[pl.Tensor[[1024, 128], pl.FP32], pl.Tensor[[1024, 128], pl.FP32]]:
+                for ki, (cache_a_iter, cache_b_iter) in pl.range(0, 4, init_values=(cache_a, cache_b)):
+                    src: pl.Tile[[1, 128], pl.FP32] = pl.tile.load(data, [ki, 0], [1, 128], [1, 128])
+                    row: pl.Scalar[pl.INDEX] = slot_offset + ki * 128
+                    cache_a_next: pl.Tensor[[1024, 128], pl.FP32] = pl.tile.store(src, [row, 0], cache_a_iter)
+                    cache_b_next: pl.Tensor[[1024, 128], pl.FP32] = pl.tile.store(src, [row, 0], cache_b_iter)
+                    cache_a_rv, cache_b_rv = pl.yield_(cache_a_next, cache_b_next)
+                return cache_a_rv, cache_b_rv
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                cache_a: pl.Out[pl.Tensor[[1024, 128], pl.FP32]],
+                cache_b: pl.Out[pl.Tensor[[1024, 128], pl.FP32]],
+                data: pl.Tensor[[4, 128], pl.FP32],
+            ) -> tuple[pl.Tensor[[1024, 128], pl.FP32], pl.Tensor[[1024, 128], pl.FP32]]:
+                slot: pl.Scalar[pl.INDEX] = 7
+                result_a, result_b = self.cache_write_pair(cache_a, cache_b, data, slot)
+                return result_a, result_b
+
+        Coalesced = _run_to_optimize_orch_tensors(
+            Before,
+            output_window_policy="coalesce_pieces",
+            window_rewrite_policy="all",
+        )
+        printed_coalesced_main = ir.python_print(_get_function(Coalesced, "main"))
+        assert "cache_write_pair__windowed" in printed_coalesced_main
+        assert "pl.tensor.slice(cache_a__ssa_v0, [385, 128], [7, 0])" in printed_coalesced_main
+        assert "pl.tensor.slice(cache_b__ssa_v0, [385, 128], [7, 0])" in printed_coalesced_main
+
+        Auto = _run_to_optimize_orch_tensors(
+            Before,
+            output_window_policy="coalesce_pieces",
+            window_rewrite_policy="auto",
+        )
+        printed_auto_main = ir.python_print(_get_function(Auto, "main"))
+        assert "cache_a__ssa_v0__window" not in printed_auto_main
+        assert "cache_b__ssa_v0__window" not in printed_auto_main
+        assert "pl.tensor.assemble(cache_a__ssa_v0" not in printed_auto_main
+        assert "pl.tensor.assemble(cache_b__ssa_v0" not in printed_auto_main
+
+        printed_auto_windowed = ir.python_print(_get_function(Auto, "cache_write_pair__windowed"))
+        assert "pl.Out[pl.Tensor[[385, 128], pl.FP32" not in printed_auto_windowed
+        assert printed_auto_windowed.count("pl.Out[pl.Tensor[[1024, 128], pl.FP32") >= 2
 
     def test_post_outline_kv_nested_loop_local_parent_rewrites(self):
         @pl.program
