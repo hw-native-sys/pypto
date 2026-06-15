@@ -747,11 +747,14 @@ class TestCanonicalizeCrossCore:
 
         ir.assert_structural_equal(passes.canonicalize_io_order()(Before), Expected)
 
-    def test_pipeline_stage2_cross_core_migrates_off_unroll(self):
-        """End-to-end IR flow: a cross-core ``stage=2`` body is migrated OFF the
-        unroll path by SkewCrossCorePipeline (it demotes the loop to Sequential),
-        so LowerPipelineLoops does not replicate it and CanonicalizeIOOrder no-ops
-        on it — the body is NOT replicated, just demoted to a Sequential range."""
+    def test_pipeline_stage2_cross_core_skews_off_unroll(self):
+        """End-to-end IR flow: a producer-role cross-core ``stage=2`` body whose only
+        cross-half carry is the recomputable address scalar ``off`` is SKEWED by
+        SkewCrossCorePipeline (producer one iteration ahead: prologue + Sequential
+        steady + epilogue, ``off`` recomputed per half). The result is off the unroll
+        path (Sequential steady loop, no pipeline marker), so LowerPipelineLoops does
+        not replicate it and CanonicalizeIOOrder no-ops on it — the skew survives the
+        downstream flow unchanged."""
 
         @pl.program
         class Before:
@@ -770,14 +773,26 @@ class TestCanonicalizeCrossCore:
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, q: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]):
-                for i in pl.range(0, 2, 1):
-                    off: pl.Scalar[pl.INDEX] = i * 16
-                    qa: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(q, [off, 0], [16, 64])
-                    rs: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(qa, qa)
-                    pl.tile.tpush_to_aiv(rs, split=0)
-                    e: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0)
-                    oi: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(e, e)
-                    pl.tile.store(oi, [off, 0], out)
+                # prologue: produce(0)
+                off0: pl.Scalar[pl.INDEX] = pl.const(0, pl.INDEX) * pl.const(16, pl.INDEX)
+                qa0: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(q, [off0, 0], [16, 64])
+                rs0: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(qa0, qa0)
+                pl.tile.tpush_to_aiv(rs0, split=0)
+                # steady: produce(i) / consume(i-1), off recomputed in each half
+                for i in pl.range(1, 2, 1):
+                    offp: pl.Scalar[pl.INDEX] = i * 16
+                    qa1: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(q, [offp, 0], [16, 64])
+                    rs1: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(qa1, qa1)
+                    pl.tile.tpush_to_aiv(rs1, split=0)
+                    offc: pl.Scalar[pl.INDEX] = (i - 1) * 16
+                    e0: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0)
+                    oi0: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(e0, e0)
+                    pl.tile.store(oi0, [offc, 0], out)
+                # epilogue: consume(1)
+                off1: pl.Scalar[pl.INDEX] = pl.const(1, pl.INDEX) * pl.const(16, pl.INDEX)
+                e1: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0)
+                oi1: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(e1, e1)
+                pl.tile.store(oi1, [off1, 0], out)
 
         ir.assert_structural_equal(_run_lower_then_canon(Before), Expected)
 

@@ -144,15 +144,18 @@ std::pair<StmtPtr, std::vector<ExprPtr>> SplitBodyYield(const StmtPtr& body) {
 // consumes the peer's reply via tile.tpop_*) leaves this pass as
 // ForKind::Sequential, so no cross-core loop ever reaches LowerPipelineLoops or
 // CanonicalizeIOOrder as a Pipeline loop:
-//  - SINGLE round-trip, producer role (exactly one tpush + one tpop, the tpush's
-//    backward slice does not feed the body via SSA): the two halves are linked
-//    only by the in-order cross-core FIFO, so run the producer one iteration
-//    AHEAD — produce(start) prologue, a KEPT Sequential steady ForStmt whose loop
-//    var k indexes the produce and pairs produce(k) with the trailing consume(k-step)
-//    over k in [start+step, start+trip*step), and a consume(last) epilogue. This lets
-//    the cube issue iteration k's QK while the vector runs iteration k-step's softmax.
-//  - CONSUMER role / MULTI round-trip / not statically skewable: demote to a plain
-//    Sequential loop — order-preserving; overlap comes from the peer core's
+//  - SINGLE round-trip, producer role (exactly one tpush + one tpop): run the
+//    producer one iteration AHEAD — produce(start) prologue, a KEPT Sequential
+//    steady ForStmt whose loop var k indexes the produce and pairs produce(k) with
+//    the trailing consume(k-step) over k in [start+step, start+trip*step), and a
+//    consume(last) epilogue. This lets the cube issue iteration k's QK while the
+//    vector runs iteration k-step's softmax. A cross-half SSA carry is OK iff it is
+//    a RECOMPUTABLE ADDRESS SCALAR (pure function of the loop var + loop-invariants,
+//    e.g. K/V cache_row) — duplicated into the consume clone and re-derived at
+//    k-step rather than blocking the skew.
+//  - GENUINE carry (a tile/tensor, incl. the consumer role's popped tile, or a
+//    tpop-derived value), MULTI round-trip, or not statically skewable: demote to a
+//    plain Sequential loop — order-preserving; overlap comes from the peer core's
 //    producer skew.
 // ---------------------------------------------------------------------------
 
@@ -202,13 +205,13 @@ bool BodyHasCrossCorePair(const StmtPtr& body) {
  *
  * For a loop whose body has BOTH a cross-core `tile.tpush_*` and a `tile.tpop_*`:
  * a statically-skewable single-round-trip producer loop is rewritten to a prologue
- * + Sequential steady ForStmt + epilogue; any other cross-core loop (consumer role,
- * multi-round-trip, dynamic bounds, trip < 2) is demoted to a plain
- * `ForKind::Sequential` loop. Either way the result is `ForKind::Sequential` with
- * NO `pipeline_stages` marker, so EVERY cross-core loop leaves this pass as
- * Sequential and never reaches `LowerPipelineLoops` (trigger `kind == Pipeline`) or
- * `CanonicalizeIOOrder` (scoped to Pipeline bodies) — neither of which carries any
- * cross-core handling anymore.
+ * + Sequential steady ForStmt + epilogue (a cross-half SSA carry is allowed when it
+ * is a recomputable address scalar — recomputed in the consume half); any other
+ * cross-core loop (a genuine tile/tensor carry, multi-round-trip, dynamic bounds,
+ * trip < 2) is demoted to a plain `ForKind::Sequential` loop. Either way the result is `ForKind::Sequential`
+ * with NO `pipeline_stages` marker, so EVERY cross-core loop leaves this pass as Sequential and never reaches
+ * `LowerPipelineLoops` (trigger `kind == Pipeline`) or `CanonicalizeIOOrder` (scoped to Pipeline bodies) —
+ * neither of which carries any cross-core handling anymore.
  *
  * NON-cross-core pipeline loops (same-core GM->L1 / L1->L0 / nested matmul stage
  * loops) are left intact as `ForKind::Pipeline` for `LowerPipelineLoops` to
@@ -288,12 +291,14 @@ class SkewCrossCoreMutator : public IRMutator {
   /// unroll+IO-cluster style. One analysis (lead = backward slice of the FIRST
   /// cross-core op), two emissions keyed on whether the lead feeds the body via an
   /// SSA edge (`carried`):
-  ///  - Producer role (AIC, lead = tpush, `carried` empty): the lead and body are
-  ///    linked only by the in-order FIFO, so run the producer one iteration AHEAD
-  ///    (prologue + steady ForStmt + epilogue), overlapping QK[k+1] with the
-  ///    peer's softmax[k].
-  ///  - Consumer role (AIV, lead = tpop whose tile the body consumes, `carried`
-  ///    non-empty): demote to a plain Sequential loop. The peer's producer skew
+  ///  - Producer role (AIC, lead = tpush): run the producer one iteration AHEAD
+  ///    (prologue + steady ForStmt + epilogue), overlapping QK[k+1] with the peer's
+  ///    softmax[k]. A non-empty `carried` is OK when every carried value is a
+  ///    RECOMPUTABLE ADDRESS SCALAR (pure function of the loop var + loop-invariants,
+  ///    e.g. cache_row) — its def-slice is duplicated into the consume clone and
+  ///    re-derived at k-step (see RecomputableScalarSlice).
+  ///  - Consumer role (AIV, lead = tpop), or any GENUINE tile/tensor carry the body
+  ///    consumes: demote to a plain Sequential loop. The peer's producer skew
   ///    already puts each tile in the FIFO a step early, so the in-order tpop does
   ///    not block — and this drops the unroll's back-to-back tpop. (A real
   ///    iter-arg prefetch is rejected: it breaks codegen's tpop->tfree slot
@@ -483,29 +488,40 @@ class SkewCrossCoreMutator : public IRMutator {
       }
     }
 
-    // Fall back to a plain Sequential demotion (no skew, no unroll) for the two
-    // shapes the producer-ahead skew cannot safely handle:
+    // The producer-ahead skew advances ONLY the lead's message one iteration. Two
+    // shapes cannot be handled that way and fall back to a plain Sequential demote
+    // (order-preserving, off the unroll style; cross-core overlap then comes from
+    // the PEER core's producer skew putting each tile in the FIFO a step early).
     //
     //  - MULTI-ROUND-TRIP (num_tpush != 1 || num_tpop != 1): more than one message
-    //    per iteration on a cross-core FIFO direction. The skew advances ONLY the
-    //    lead's message one iteration ahead; any other same-direction message stays
-    //    put, which REORDERS the in-order cross-core FIFO (e.g. push p0[k+1] before
-    //    p1[k]) — the peer then pops the wrong tile. This is a SILENT wrong-data bug
-    //    because the property verifiers do not model FIFO order.
+    //    per iteration on a cross-core FIFO direction. Advancing only the lead
+    //    REORDERS the in-order FIFO (e.g. push p0[k+1] before p1[k]) — the peer
+    //    pops the wrong tile, a SILENT wrong-data bug (verifiers don't model FIFO
+    //    order).
     // TODO(crosscore-skew): skew multi-round-trip loops (e.g. C->V->C->V) by
-    // advancing every same-direction message one round-trip together so the FIFO
-    // order is preserved; until that exists, demote to Sequential.
-    //  - CONSUMER ROLE (`carried` non-empty, e.g. the AIV whose lead = tpop feeds
-    //    the body via SSA): not a producer-ahead shape, and a true iter-arg-threaded
-    //    prefetch is wrong anyway — it breaks codegen's tpop->tfree FIFO-slot
-    //    tracking (keys on SSA var identity, cannot cross an iter_arg) and a blocking
-    //    tpop issued a full iteration early just stalls.
-    //
-    // Sequential is order-preserving and off the unroll style; cross-core overlap
-    // then comes from the PEER core's producer skew putting each tile in the FIFO a
-    // step early, so the in-order tpop never blocks.
-    if (num_tpush != 1 || num_tpop != 1 || !carried.empty()) {
+    // advancing every same-direction message one round-trip together.
+    if (num_tpush != 1 || num_tpop != 1) {
       return DemoteToSequential(op, op->start_, op->stop_, op->step_, body);
+    }
+
+    //  - A genuine cross-half SSA carry (`carried`): a produce-defined value the
+    //    consume half reads. A TILE/TENSOR carry (the AIV's popped scores, or a
+    //    value derived from a tile/tpop) cannot be run a step ahead -> demote. But
+    //    an ADDRESS SCALAR that is a pure function of the loop var + loop-invariants
+    //    (e.g. fa_fused's K/V `cache_row`/`gi`) is NOT a real cross-core dependency
+    //    — only the tile through the FIFO is. Such scalars are recomputable on
+    //    either core's scalar unit, so instead of demoting we DUPLICATE their
+    //    def-slice into the consume clone (cloned with loop_var -> k-step, which
+    //    re-derives the correct value). This lets cube QK[k+1] overlap vector
+    //    softmax[k] even when QK and the trailing SV share the K/V address scalar.
+    for (const VarPtr& cv : carried) {
+      auto recompute = RecomputableScalarSlice(cv, stmts, def_idx);
+      if (!recompute.has_value()) {
+        return DemoteToSequential(op, op->start_, op->stop_, op->step_, body);
+      }
+      for (int idx : *recompute) {
+        consume_set.insert(idx);
+      }
     }
 
     // Producer-role single-round-trip cross-core loop (the AIC: exactly one tpush
@@ -634,6 +650,46 @@ class SkewCrossCoreMutator : public IRMutator {
     result.reserve(originals.size());
     for (const auto& v : originals) result.push_back(MakeFreshVar(v, suffix));
     return result;
+  }
+
+  /// If `v` is a SCALAR recomputable purely from the loop var + loop-invariant
+  /// values via scalar arithmetic, return the in-loop stmt indices that (re)compute
+  /// it and its scalar ancestors; otherwise std::nullopt. A `carried` value passes
+  /// only when its entire in-loop backward slice is scalar `AssignStmt`s with pure
+  /// arithmetic RHS (no Call: a tile.load / tensor.read / tpop RHS, or a non-scalar
+  /// LHS, makes the value non-recomputable -> the skew must demote). The returned
+  /// indices are duplicated into the consume clone so the loop-var substitution
+  /// re-derives the scalar at k-step, decoupling an address-scalar carry from the
+  /// genuine (tile-through-FIFO) cross-core dependency.
+  std::optional<std::vector<int>> RecomputableScalarSlice(
+      const VarPtr& v, const std::vector<StmtPtr>& stmts,
+      const std::unordered_map<const Var*, int>& def_idx) {
+    std::vector<int> slice;
+    std::set<int> visited;
+    std::vector<const Var*> work = {v.get()};
+    while (!work.empty()) {
+      const Var* cur = work.back();
+      work.pop_back();
+      auto it = def_idx.find(cur);
+      if (it == def_idx.end()) {
+        continue;  // loop-invariant: defined outside the loop, in scope, no recompute needed
+      }
+      int idx = it->second;
+      if (!visited.insert(idx).second) {
+        continue;
+      }
+      auto assign = As<AssignStmt>(stmts[idx]);
+      if (!assign || !As<ScalarType>(assign->var_->GetType()) || GetCallFromStmt(stmts[idx])) {
+        return std::nullopt;  // non-scalar LHS, or RHS is a tile/tensor/op Call -> not recomputable
+      }
+      slice.push_back(idx);
+      VarUseCollector c;
+      c.VisitStmt(stmts[idx]);
+      for (const Var* u : c.used) {
+        work.push_back(u);
+      }
+    }
+    return slice;
   }
 };
 

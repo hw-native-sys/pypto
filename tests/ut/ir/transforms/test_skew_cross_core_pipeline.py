@@ -117,6 +117,57 @@ class TestSkewCrossCorePipeline:
 
         ir.assert_structural_equal(_skew(Before), Expected)
 
+    def test_recomputable_scalar_carry_skews(self):
+        """Producer loop whose produce half defines an ADDRESS SCALAR (``off``) that
+        the consume half re-uses (K-load and V-load share the offset, like fa_fused's
+        ``cache_row``). The only genuine cross-core carry is the tile through the FIFO;
+        ``off`` is a pure function of the loop var, so the pass recomputes it in the
+        consume half (``off`` at i for produce, ``off`` at i-1 for consume) and SKEWS
+        rather than demoting."""
+
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(self, kv: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]):
+                for i in pl.pipeline(0, 4, 1, stage=2):
+                    off: pl.Scalar[pl.INDEX] = i * 16
+                    ka: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(kv, [off, 0], [16, 64])  # K-load (produce)
+                    rs: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(ka, ka)
+                    pl.tile.tpush_to_aiv(rs, split=0)
+                    e: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0)
+                    va: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(kv, [off, 0], [16, 64])  # V-load REUSES off
+                    oi: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(e, va)
+                    pl.tile.store(oi, [off, 0], out)
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, kv: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]):
+                # prologue: produce(0) — off recomputed at 0
+                off0: pl.Scalar[pl.INDEX] = pl.const(0, pl.INDEX) * pl.const(16, pl.INDEX)
+                ka0: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(kv, [off0, 0], [16, 64])
+                rs0: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(ka0, ka0)
+                pl.tile.tpush_to_aiv(rs0, split=0)
+                # steady: produce(i) with off=i ; consume(i-1) with off recomputed at i-1
+                for i in pl.range(1, 4, 1):
+                    offp: pl.Scalar[pl.INDEX] = i * 16
+                    ka1: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(kv, [offp, 0], [16, 64])
+                    rs1: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(ka1, ka1)
+                    pl.tile.tpush_to_aiv(rs1, split=0)
+                    offc: pl.Scalar[pl.INDEX] = (i - 1) * 16
+                    e0: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0)
+                    va0: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(kv, [offc, 0], [16, 64])
+                    oi0: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(e0, va0)
+                    pl.tile.store(oi0, [offc, 0], out)
+                # epilogue: consume(3) — off recomputed at 3
+                off3: pl.Scalar[pl.INDEX] = pl.const(3, pl.INDEX) * pl.const(16, pl.INDEX)
+                e1: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0)
+                va1: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(kv, [off3, 0], [16, 64])
+                oi1: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(e1, va1)
+                pl.tile.store(oi1, [off3, 0], out)
+
+        ir.assert_structural_equal(_skew(Before), Expected)
+
     def test_consumer_multi_roundtrip_demotes_to_sequential(self):
         """AIV->AIC->AIV (consume-first, two ``tpop_from_aic``): the lead tpop feeds
         the body and there are two pops on one FIFO. Demote to a single Sequential
