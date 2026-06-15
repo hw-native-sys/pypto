@@ -145,7 +145,7 @@ class ExprEvaluator:
             expr = value.unwrap()
             if expr is None:
                 raise ParserTypeError(
-                    f"Scalar has no underlying expression",
+                    "Scalar has no underlying expression",
                     span=span,
                 )
             if not isinstance(expr, ir.Expr):

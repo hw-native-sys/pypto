@@ -334,16 +334,14 @@ class DimExpr : public Expr {
   /// Marked IgnoreField so visitors skip it during default tree walks.
   ExprPtr body_;
 
-  DimExpr(ExprPtr body, Span span)
-      : Expr(std::move(span), body->GetType()), body_(std::move(body)) {}
+  DimExpr(ExprPtr body, Span span) : Expr(std::move(span), body->GetType()), body_(std::move(body)) {}
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::DimExpr; }
   [[nodiscard]] std::string TypeName() const override { return "DimExpr"; }
 
   static constexpr auto GetFieldDescriptors() {
-    return std::tuple_cat(
-        Expr::GetFieldDescriptors(),
-        std::make_tuple(reflection::IgnoreField(&DimExpr::body_, "body")));
+    return std::tuple_cat(Expr::GetFieldDescriptors(),
+                          std::make_tuple(reflection::IgnoreField(&DimExpr::body_, "body")));
   }
 };
 

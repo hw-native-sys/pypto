@@ -314,6 +314,10 @@ def _invert_shape_dim_for_var(
     dim_expr: object, target_var: _ir_core.Var, tensor_name: str, dim_idx: int
 ) -> str | None:
     """Return a C expression recovering target_var from shapes[dim_idx], or None if non-invertible."""
+    # Unwrap DimExpr to its body before inverting — DimExpr wraps composite
+    # dimension expressions (e.g. M * 2) to make them opaque to ConvertToSSA.
+    if isinstance(dim_expr, _ir_core.DimExpr):
+        return _invert_shape_dim_for_var(dim_expr.body, target_var, tensor_name, dim_idx)
     shape_expr = f"static_cast<int64_t>({tensor_name}_tensor->shapes[{dim_idx}])"
     if isinstance(dim_expr, _ir_core.Var) and dim_expr.same_as(target_var):
         return shape_expr

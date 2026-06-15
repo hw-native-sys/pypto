@@ -68,6 +68,10 @@ class VarDefUseCollector : public IRVisitor {
     }
   }
 
+  void VisitExpr_(const DimExprPtr& op) override {
+    if (op) VisitExpr(op->body_);
+  }
+
   void VisitStmt_(const AssignStmtPtr& op) override {
     var_defs.insert(op->var_.get());
     var_defs_ordered.push_back(op->var_.get());

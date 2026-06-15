@@ -2412,6 +2412,8 @@ static std::unordered_map<const Var*, std::string> CollectDynVarMapping(const Pr
     if (!expr) return;
     if (auto var = As<Var>(expr)) {
       try_insert(var.get());
+    } else if (auto dim_expr = As<DimExpr>(expr)) {
+      collect_vars_from_expr(dim_expr->body_);
     } else if (auto bin = As<BinaryExpr>(expr)) {
       collect_vars_from_expr(bin->left_);
       collect_vars_from_expr(bin->right_);
@@ -2466,6 +2468,15 @@ static std::unordered_map<const Var*, std::string> CollectDynVarMapping(const Pr
       // Collect dynamic dimension names from the variable's type annotation.
       // Handles TensorType/TileType shapes and their tensor_view_/tile_view_ fields.
       collect_from_type_(op->GetType());
+    }
+
+    void VisitExpr_(const DimExprPtr& op) override {
+      // Unwrap DimExpr to collect Vars from inside composite dimension
+      // expressions (e.g. M inside DimExpr(Mul(M, 2))). Without this,
+      // DynVarCollector would miss dimension Vars that only appear inside
+      // DimExpr-wrapped type shapes and would not emit pl.dynamic()
+      // declarations for them.
+      if (op) VisitExpr(op->body_);
     }
 
    private:
