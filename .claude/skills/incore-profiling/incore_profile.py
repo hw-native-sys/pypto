@@ -366,7 +366,10 @@ def resolve_symbol(kernel_lib: Path, preferred_names: list[str]) -> tuple[str, s
         candidates.append((sym, demangled))
     for name in preferred_names:
         for sym, demangled in candidates:
-            if demangled.startswith(name + "("):
+            # Mangled C++ kernels demangle to "name(...)"; extern "C" kernels
+            # (the ptoas pure-kernel convention, and the synthesized mixed
+            # dispatcher) keep the bare unmangled symbol "name".
+            if demangled.startswith(name + "(") or demangled == name:
                 return sym, demangled
     if len(candidates) == 1:
         return candidates[0]

@@ -370,8 +370,11 @@ def emit_kernel_cpp(cpp_text: str, name: str, is_mixed: bool, params: list[Param
             (f"__gm__ {p.cpp_type}* {p.name}" if p.is_ptr else f"{p.cpp_type} {p.name}") for p in params
         )
         call = ", ".join(p.name for p in params)
+        # extern "C" so the merged dispatcher's launch-ABI symbol matches the
+        # non-mangled forward decl in launch.cpp (mirrors the ptoas pure-kernel
+        # convention, which is always `extern "C" __global__`).
         out += (
-            f"\n\n__global__ AICORE void {name}({decl}) {{\n"
+            f'\n\nextern "C" __global__ AICORE void {name}({decl}) {{\n'
             f"#if defined(__DAV_CUBE__)\n  {name}_aic({call});\n#endif\n"
             f"#if defined(__DAV_VEC__)\n  {name}_aiv({call});\n#endif\n}}\n"
         )
@@ -387,9 +390,13 @@ def emit_launch_cpp(name: str, params: list[Param]) -> str:
         (f"{host_type(p.cpp_type)} *{p.name}" if p.is_ptr else f"{p.cpp_type} {p.name}") for p in params
     )
     casts = ", ".join((f"(__gm__ {p.cpp_type}*){p.name}" if p.is_ptr else p.name) for p in params)
+    # extern "C" so this forward decl resolves to the kernel's unmangled symbol.
+    # ptoas pure kernels are emitted as `extern "C" __global__ AICORE void <name>`
+    # (and the synthesized mixed dispatcher matches via emit_kernel_cpp); without
+    # extern "C" here the call mangles and fails to link (undefined reference).
     return (
         _PREAMBLE
-        + f"\n__global__ AICORE void {name}({dev_decl});\n\n"
+        + f'\nextern "C" __global__ AICORE void {name}({dev_decl});\n\n'
         + f"void {launch_name}({host_params}, void *stream) {{\n"
         + f"    {name}<<<1, nullptr, stream>>>({casts});\n}}\n"
     )
