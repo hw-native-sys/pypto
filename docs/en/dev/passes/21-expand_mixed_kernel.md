@@ -76,12 +76,42 @@ Setup is derived from the split bodies:
 - `dir_mask`: `C2V=1`, `V2C=2`, bidirectional=`3`
 - `id`: omitted for automatic setup, so PTOAS uses the default frontend pipe id `0`
 - `slot_size`: max tile byte size across all directions (`shape * dtype bits / 8`)
-- `slot_num`: `8` for unidirectional, `4` per direction for bidirectional
+- `slot_num`: ring depth — `8` for unidirectional, `4` per direction for bidirectional by default; overridable per scope (see below)
 - `buffer_size`: `slot_num * slot_size`
 - buffer names: `<func>_c2v_slot_buffer` / `<func>_v2c_slot_buffer`
 - reserve-buffer base: `AUTO` on insertion, then resolved to an explicit address by `AllocateMemoryAddr`
 
 When cross-core directions use different tile sizes, the pass picks `max(all observed tile byte sizes)` as the common `slot_size` for `initialize_pipe`. Smaller tiles leave unused bytes in each slot but hardware correctness is preserved. Explicit user-authored programs can still create multiple independent pipes by supplying different `id` values to `initialize_pipe` and matching `tpush` / `tpop` / `tfree` ops.
+
+### Overriding the ring depth (`slot_num`)
+
+The default ring depth (8 / 4) can be tuned per split scope with the optional
+`slot_num=` argument on `pl.split`:
+
+```python
+# Shrink the auto-inserted cube->vector ring to free buffer space for a larger
+# vector tile (e.g. grow the vec tile past the default-8-slot ceiling).
+with pl.spmd(4, optimizations=[pl.split(pl.SplitMode.UP_DOWN, slot_num=4)]):
+    ...
+
+# Or on the pl.at form:
+with pl.at(level=pl.Level.CORE_GROUP,
+           optimizations=[pl.split(pl.SplitMode.UP_DOWN, slot_num=16)]):
+    ...
+```
+
+The value is carried as the `slot_num` scope attr, propagated by
+`OutlineIncoreScopes` to the outlined function's `slot_num` attr, and read here.
+When set it drives **both** the reserved buffer (`slot_size * slot_num`) and the
+emitted `initialize_pipe` `slot_num` attribute, so PTOAS and the auto-reserved
+buffer stay consistent. Omitting it keeps the PTOAS-derived default. `slot_num`
+must be positive and only applies when the scope enables a cross-core split
+(`UP_DOWN` / `LEFT_RIGHT`).
+
+> Decoupling the logical ring depth from a smaller local resident window
+> (`local_slot_num < slot_num`, an a2/a3-only optimisation) is not yet exposed
+> on the automatic split path — use the manual `pl.aic_initialize_pipe` /
+> `pl.aiv_initialize_pipe` system ops for that.
 
 For consumer-side cross-core tiles, the pass also ensures each `tile.tpop_*` has a matching
 `system.tfree_*`. When an existing free is obviously too early, the pass delays it to a later statement in the same

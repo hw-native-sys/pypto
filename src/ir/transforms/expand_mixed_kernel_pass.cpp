@@ -817,8 +817,12 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
 
   const std::string aic_name = func->name_ + "_aic";
   const std::string aiv_name = func->name_ + "_aiv";
-  auto automatic_pipe_setup =
-      BuildAutomaticPipeSetup(func->name_, aic_name, aiv_name, aic_final, aiv_final, func->span_);
+  // Cross-core ring depth from pl.split(mode, slot_num=N), propagated as a
+  // function attr by the outliner. nullopt keeps the hardcoded 8/4 default.
+  std::optional<int> slot_num_override =
+      func->HasAttr("slot_num") ? std::optional<int>(func->GetAttr<int>("slot_num", 0)) : std::nullopt;
+  auto automatic_pipe_setup = BuildAutomaticPipeSetup(func->name_, aic_name, aiv_name, aic_final, aiv_final,
+                                                      slot_num_override, func->span_);
   aic_final = PrependPipeSetup(automatic_pipe_setup.aic_stmts, aic_final);
   aiv_final = PrependPipeSetup(automatic_pipe_setup.aiv_stmts, aiv_final);
 

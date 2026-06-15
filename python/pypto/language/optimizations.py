@@ -54,9 +54,17 @@ class Split(Optimization):
     Args:
         mode: Split mode (``SplitMode.NONE``, ``SplitMode.UP_DOWN``, or
             ``SplitMode.LEFT_RIGHT``).
+        slot_num: Optional cross-core ring-buffer depth for the automatic
+            cube→vector pipe inserted by ``ExpandMixedKernel``. ``None`` keeps
+            the PTOAS-derived default (8 unidirectional, 4 per direction
+            bidirectional). When set, both the reserved buffer
+            (``slot_size * slot_num``) and the emitted ``initialize_pipe``
+            ``slot_num`` attribute use this value. Only meaningful when ``mode``
+            actually enables a split (``UP_DOWN`` / ``LEFT_RIGHT``).
     """
 
     mode: SplitMode
+    slot_num: int | None = None
 
 
 @dataclass(frozen=True)
@@ -71,18 +79,25 @@ class AutoChunk(Optimization):
     """
 
 
-def split(mode: SplitMode) -> Split:
+def split(mode: SplitMode, *, slot_num: int | None = None) -> Split:
     """Create a ``Split`` optimization entry.
 
     Args:
         mode: Split mode. May be ``SplitMode.NONE``,
             ``SplitMode.UP_DOWN``, or ``SplitMode.LEFT_RIGHT``.
+        slot_num: Optional cross-core ring-buffer depth for the automatic
+            cube→vector pipe. Must be positive when set. Omit to keep the
+            PTOAS-derived default (8 unidirectional, 4 bidirectional).
 
     Returns:
         ``Split`` instance for use in ``pl.at(..., optimizations=[...])``.
 
+    Raises:
+        ValueError: If ``slot_num`` is set but not positive.
     """
-    return Split(mode=mode)
+    if slot_num is not None and slot_num <= 0:
+        raise ValueError(f"pl.split slot_num must be positive, got {slot_num}")
+    return Split(mode=mode, slot_num=slot_num)
 
 
 auto_chunk: AutoChunk = AutoChunk()

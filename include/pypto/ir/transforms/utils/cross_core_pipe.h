@@ -76,16 +76,22 @@ CallPtr CreateSystemOpCall(const std::string& op_name, const std::vector<ExprPtr
 CallPtr CreateReserveBuffer(const std::string& buffer_name, int64_t size_bytes, const Span& span);
 CallPtr CreateImportPeerBuffer(const std::string& buffer_name, const std::string& peer_func,
                                const Span& span);
+// `slot_num` overrides the ring depth emitted on the initialize_pipe op when set
+// (otherwise PTOAS derives it from `dir_mask`).
 CallPtr CreateInitializePipe(core_affinity::CoreSide side, int dir_mask, int slot_size_bytes,
                              const ExprPtr& c2v_consumer_buf, const ExprPtr& v2c_consumer_buf,
-                             const Span& span);
+                             std::optional<int> slot_num, const Span& span);
 
 void CollectCrossCorePipeMetadata(const std::vector<StmtPtr>& stmts, CrossCorePipeMetadata& metadata);
 CrossCorePipeMetadata CollectDominatingPipeSetupMetadata(const std::vector<StmtPtr>& stmts);
 
+// `slot_num_override` (from pl.split(mode, slot_num=N)) overrides the hardcoded
+// ring depth (`GetSlotNumForDirMask`) used to size the reserved buffer and the
+// emitted initialize_pipe `slot_num` attribute. nullopt keeps the default.
 AutomaticPipeSetup BuildAutomaticPipeSetup(const std::string& func_name, const std::string& aic_name,
                                            const std::string& aiv_name, const std::vector<StmtPtr>& aic_stmts,
-                                           const std::vector<StmtPtr>& aiv_stmts, const Span& span);
+                                           const std::vector<StmtPtr>& aiv_stmts,
+                                           std::optional<int> slot_num_override, const Span& span);
 
 std::vector<StmtPtr> PrependPipeSetup(const std::vector<StmtPtr>& prologue, const std::vector<StmtPtr>& body);
 

@@ -840,10 +840,20 @@ class ScopeOutliner : public IRMutator {
         outlined_attrs.emplace_back("split", static_cast<int>(split.value()));
       }
     };
+    // Propagate the optional cross-core ring depth (pl.split(mode, slot_num=N))
+    // from the scope's attrs onto the outlined function, where ExpandMixedKernel
+    // reads it to size the automatic cube->vector pipe.
+    auto append_slot_num_attr = [&]() {
+      if (op->HasAttr("slot_num")) {
+        outlined_attrs.emplace_back("slot_num", op->GetAttr<int>("slot_num", 0));
+      }
+    };
     if (auto incore = As<InCoreScopeStmt>(op)) {
       append_split_attr(incore->split_);
+      append_slot_num_attr();
     } else if (auto auto_incore = As<AutoInCoreScopeStmt>(op)) {
       append_split_attr(auto_incore->split_);
+      append_slot_num_attr();
     } else if (auto spmd = As<SpmdScopeStmt>(op)) {
       outlined_attrs.emplace_back("core_num", spmd->core_num_);
       if (spmd->sync_start_) {

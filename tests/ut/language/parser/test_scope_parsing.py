@@ -743,6 +743,120 @@ class TestSpmdOptimizations:
         incore = self._unique_descendant(spmd.body, ir.InCoreScopeStmt)
         assert incore.split is None
 
+    def test_for_spmd_split_slot_num_sets_scope_attr(self):
+        """``pl.split(mode, slot_num=N)`` records ``slot_num`` on the inner
+        ``InCoreScopeStmt`` attrs alongside the split mode."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                for i in pl.spmd(4, optimizations=[pl.split(pl.SplitMode.UP_DOWN, slot_num=16)]):
+                    offset = i * 128
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
+                    out = pl.store(t, [offset, 0], out)
+                return out
+
+        main_func = list(Prog.functions.values())[0]
+        spmd = self._unique_descendant(main_func.body, ir.SpmdScopeStmt)
+        incore = self._unique_descendant(spmd.body, ir.InCoreScopeStmt)
+        assert incore.split == ir.SplitMode.UP_DOWN
+        assert incore.attrs.get("slot_num") == 16
+
+    def test_for_spmd_split_slot_num_roundtrips(self):
+        """``slot_num`` survives a print -> reparse cycle on the for-spmd form."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                for i in pl.spmd(4, optimizations=[pl.split(pl.SplitMode.LEFT_RIGHT, slot_num=12)]):
+                    offset = i * 128
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
+                    out = pl.store(t, [offset, 0], out)
+                return out
+
+        printed = Prog.as_python()
+        assert "slot_num=12" in printed
+        assert Prog.as_python() == parse_program(printed).as_python()
+
+    def test_at_incore_split_slot_num_roundtrips(self):
+        """``slot_num`` survives a print -> reparse cycle on the pl.at form."""
+
+        @pl.program
+        class Prog:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(
+                    level=pl.Level.CORE_GROUP,
+                    optimizations=[pl.split(pl.SplitMode.UP_DOWN, slot_num=16)],
+                ):
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
+        main_func = list(Prog.functions.values())[0]
+        incore = self._unique_descendant(main_func.body, ir.InCoreScopeStmt)
+        assert incore.attrs.get("slot_num") == 16
+        printed = Prog.as_python()
+        assert "slot_num=16" in printed
+        assert Prog.as_python() == parse_program(printed).as_python()
+
+    def test_split_slot_num_requires_split_mode(self):
+        """``slot_num`` with ``SplitMode.NONE`` is rejected (no cross-core ring)."""
+        src = (
+            "import pypto.language as pl\n\n"
+            "@pl.program\n"
+            "class P:\n"
+            "    @pl.function\n"
+            "    def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:\n"
+            "        with pl.at(level=pl.Level.CORE_GROUP, "
+            "optimizations=[pl.split(pl.SplitMode.NONE, slot_num=8)]):\n"
+            "            y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)\n"
+            "        return y\n"
+        )
+        with pytest.raises(ParserSyntaxError, match="only valid with a cross-core split"):
+            parse_program(src)
+
+    def test_split_slot_num_must_be_positive(self):
+        """A non-positive ``slot_num`` literal is rejected."""
+        src = (
+            "import pypto.language as pl\n\n"
+            "@pl.program\n"
+            "class P:\n"
+            "    @pl.function\n"
+            "    def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:\n"
+            "        with pl.at(level=pl.Level.CORE_GROUP, "
+            "optimizations=[pl.split(pl.SplitMode.UP_DOWN, slot_num=0)]):\n"
+            "            y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)\n"
+            "        return y\n"
+        )
+        with pytest.raises(ParserSyntaxError, match="must be positive"):
+            parse_program(src)
+
+    def test_split_rejects_unknown_kwarg(self):
+        """``pl.split`` rejects keywords other than ``slot_num``."""
+        src = (
+            "import pypto.language as pl\n\n"
+            "@pl.program\n"
+            "class P:\n"
+            "    @pl.function\n"
+            "    def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:\n"
+            "        with pl.at(level=pl.Level.CORE_GROUP, "
+            "optimizations=[pl.split(pl.SplitMode.UP_DOWN, foo=1)]):\n"
+            "            y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)\n"
+            "        return y\n"
+        )
+        with pytest.raises(ParserSyntaxError, match="Unknown keyword argument 'foo'"):
+            parse_program(src)
+
     def test_with_spmd_split_wraps_call_in_incore(self):
         """``with pl.spmd(N, optimizations=[pl.split(mode)]):`` wraps the
         single call in an ``InCoreScopeStmt(split_=mode)`` under the spmd."""

@@ -354,6 +354,16 @@ class IRPythonPrinter : public IRVisitor {
   // scope still exists.
   bool PrintScopeDumpAttr(const ScopeStmtPtr& op);
 
+  // Emit ``pl.split(pl.SplitMode.X[, slot_num=N])`` (a single optimizations list
+  // entry, no leading comma / wrapper), reading the optional ``slot_num`` ring
+  // depth from ``slot_num_holder``'s attrs (the scope carrying it).
+  void PrintSplitCall(SplitMode split, const ScopeStmtPtr& slot_num_holder);
+
+  // Emit ``, optimizations=[pl.split(pl.SplitMode.X[, slot_num=N])]`` for a
+  // split scope. Used by the flattened spmd with-tid / for-loop forms; the
+  // nested-scope forms round-trip slot_num via the InCoreScopeStmt printer.
+  void PrintSplitOptimizations(SplitMode split, const ScopeStmtPtr& slot_num_holder);
+
   // Emit `` as <tid>`` if the scope carries ``kAttrTaskIdVar``. The caller is
   // responsible for placing the ``)`` before and the ``:\n`` after this call.
   bool PrintScopeTaskIdVarSuffix(const ScopeStmtPtr& op);
@@ -1597,6 +1607,20 @@ bool IRPythonPrinter::PrintScopeDepsAttr(const ScopeStmtPtr& op) {
   return PrintScopeVarListKwarg(op, kAttrManualDepEdges, "deps");
 }
 
+void IRPythonPrinter::PrintSplitCall(SplitMode split, const ScopeStmtPtr& slot_num_holder) {
+  stream_ << prefix_ << ".split(" << prefix_ << ".SplitMode." << SplitModeToPythonString(split);
+  if (slot_num_holder && slot_num_holder->HasAttr("slot_num")) {
+    stream_ << ", slot_num=" << slot_num_holder->GetAttr<int>("slot_num", 0);
+  }
+  stream_ << ")";
+}
+
+void IRPythonPrinter::PrintSplitOptimizations(SplitMode split, const ScopeStmtPtr& slot_num_holder) {
+  stream_ << ", optimizations=[";
+  PrintSplitCall(split, slot_num_holder);
+  stream_ << "]";
+}
+
 bool IRPythonPrinter::PrintScopeDumpAttr(const ScopeStmtPtr& op) {
   return PrintScopeVarListKwarg(op, kAttrDumpVars, "dumps");
 }
@@ -1666,7 +1690,14 @@ void IRPythonPrinter::VisitStmt_(const HierarchyScopeStmtPtr& op) {
 void IRPythonPrinter::VisitStmt_(const InCoreScopeStmtPtr& op) {
   stream_ << "with " << prefix_ << ".at(level=" << prefix_ << ".Level.CORE_GROUP";
   if (op->split_.has_value() && op->split_.value() != SplitMode::None) {
-    stream_ << ", split=" << prefix_ << ".SplitMode." << SplitModeToPythonString(op->split_.value());
+    // The deprecated ``split=`` kwarg cannot carry a ring depth, so switch to
+    // the ``optimizations=[pl.split(mode, slot_num=N)]`` form whenever slot_num
+    // is set; otherwise keep the compact ``split=`` form (no churn).
+    if (op->HasAttr("slot_num")) {
+      PrintSplitOptimizations(op->split_.value(), op);
+    } else {
+      stream_ << ", split=" << prefix_ << ".SplitMode." << SplitModeToPythonString(op->split_.value());
+    }
   }
   if (!op->name_hint_.empty()) {
     stream_ << ", name_hint=\"" << op->name_hint_ << "\"";
@@ -1683,12 +1714,23 @@ void IRPythonPrinter::VisitStmt_(const InCoreScopeStmtPtr& op) {
 }
 
 void IRPythonPrinter::VisitStmt_(const AutoInCoreScopeStmtPtr& op) {
-  stream_ << "with " << prefix_ << ".at(level=" << prefix_ << ".Level.CORE_GROUP, optimization=";
-  if (op->split_.has_value() && op->split_.value() != SplitMode::None) {
-    stream_ << prefix_ << ".chunked_loop_optimizer(split=" << prefix_ << ".SplitMode."
-            << SplitModeToPythonString(op->split_.value()) << ")";
+  const bool has_split = op->split_.has_value() && op->split_.value() != SplitMode::None;
+  if (has_split && op->HasAttr("slot_num")) {
+    // The deprecated ``optimization=chunked_loop_optimizer(split=...)`` form
+    // cannot carry a ring depth; emit the new ``optimizations=[pl.auto_chunk,
+    // pl.split(mode, slot_num=N)]`` list so slot_num round-trips.
+    stream_ << "with " << prefix_ << ".at(level=" << prefix_ << ".Level.CORE_GROUP, optimizations=["
+            << prefix_ << ".auto_chunk, ";
+    PrintSplitCall(op->split_.value(), op);
+    stream_ << "]";
   } else {
-    stream_ << prefix_ << ".chunked_loop_optimizer";
+    stream_ << "with " << prefix_ << ".at(level=" << prefix_ << ".Level.CORE_GROUP, optimization=";
+    if (has_split) {
+      stream_ << prefix_ << ".chunked_loop_optimizer(split=" << prefix_ << ".SplitMode."
+              << SplitModeToPythonString(op->split_.value()) << ")";
+    } else {
+      stream_ << prefix_ << ".chunked_loop_optimizer";
+    }
   }
   if (!op->name_hint_.empty()) {
     stream_ << ", name_hint=\"" << op->name_hint_ << "\"";
@@ -1742,8 +1784,7 @@ void IRPythonPrinter::VisitStmt_(const SpmdScopeStmtPtr& op) {
       stream_ << ", name_hint=\"" << op->name_hint_ << "\"";
     }
     if (incore && incore->split_.has_value() && incore->split_.value() != SplitMode::None) {
-      stream_ << ", optimizations=[" << prefix_ << ".split(" << prefix_ << ".SplitMode."
-              << SplitModeToPythonString(incore->split_.value()) << ")]";
+      PrintSplitOptimizations(incore->split_.value(), incore);
     }
     PrintScopeDepsAttr(op);
     stream_ << ")";
@@ -1779,6 +1820,9 @@ void IRPythonPrinter::VisitStmt_(const SpmdScopeStmtPtr& op) {
     }
     if (!op->name_hint_.empty()) {
       stream_ << ", name_hint=\"" << op->name_hint_ << "\"";
+    }
+    if (incore && incore->split_.has_value() && incore->split_.value() != SplitMode::None) {
+      PrintSplitOptimizations(incore->split_.value(), incore);
     }
     stream_ << "):\n";
     IncreaseIndent();

@@ -391,6 +391,9 @@ class _AtKwargState:
     name_hint: str = ""
     requests_auto_chunk: bool = False
     split_mode: "ir.SplitMode | None" = None
+    # Optional cross-core ring-buffer depth from ``pl.split(mode, slot_num=N)``.
+    # Stored on the scope attrs and propagated to the outlined function attr.
+    split_slot_num: "int | None" = None
     # Tracks which kwarg produced the AutoChunk / split state so the validation
     # step can reject mixing the new `optimizations=` list with the deprecated
     # `optimization=`/`split=` kwargs and emit DeprecationWarning at the end.
@@ -3090,7 +3093,11 @@ class ASTParser:
                 span=self.span_tracker.get_span(kw),
             )
         state.new_optimizations_kw = kw
-        state.requests_auto_chunk, state.split_mode = self._parse_optimizations_list(kw.value)
+        (
+            state.requests_auto_chunk,
+            state.split_mode,
+            state.split_slot_num,
+        ) = self._parse_optimizations_list(kw.value)
 
     def _handle_at_legacy_optimization_kw(self, kw: ast.keyword, state: "_AtKwargState") -> None:
         if state.legacy_optimization_kw is not None:
@@ -3161,7 +3168,7 @@ class ASTParser:
         owner: str = "pl.at",
         list_hint: str | None = None,
         entry_hint: str | None = None,
-    ) -> tuple[bool, "ir.SplitMode | None"]:
+    ) -> tuple[bool, "ir.SplitMode | None", "int | None"]:
         """Parse ``optimizations=[...]`` for ``pl.at`` or ``pl.spmd``.
 
         Each entry must be one of:
@@ -3178,7 +3185,7 @@ class ASTParser:
             entry_hint: Override hint for unsupported list entries.
 
         Returns:
-            Tuple ``(requests_auto_chunk, split_mode)``.
+            Tuple ``(requests_auto_chunk, split_mode, split_slot_num)``.
         """
         if list_hint is None:
             list_hint = (
@@ -3201,6 +3208,7 @@ class ASTParser:
 
         requests_auto_chunk = False
         split_mode: ir.SplitMode | None = None
+        split_slot_num: int | None = None
         seen_auto_chunk = False
         seen_split = False
 
@@ -3213,14 +3221,24 @@ class ASTParser:
                     )
                 seen_auto_chunk = True
                 requests_auto_chunk = True
-            elif (mode := self._try_parse_pl_split(entry)) is not None:
+            elif (parsed := self._try_parse_pl_split(entry)) is not None:
                 if seen_split:
                     raise ParserSyntaxError(
                         "Duplicate 'pl.split(...)' in optimizations=[...]",
                         span=self.span_tracker.get_span(entry),
                     )
                 seen_split = True
-                split_mode = mode
+                split_mode, slot_num = parsed
+                if slot_num is not None and (
+                    split_mode is None or split_mode == ir.SplitMode.NONE
+                ):
+                    raise ParserSyntaxError(
+                        "pl.split(slot_num=...) is only valid with a cross-core split mode",
+                        span=self.span_tracker.get_span(entry),
+                        hint="Set mode to pl.SplitMode.UP_DOWN or pl.SplitMode.LEFT_RIGHT, "
+                        "or drop slot_num=.",
+                    )
+                split_slot_num = slot_num
             else:
                 raise ParserSyntaxError(
                     f"Unsupported entry in {owner}(optimizations=[...])",
@@ -3228,18 +3246,20 @@ class ASTParser:
                     hint=entry_hint,
                 )
 
-        return requests_auto_chunk, split_mode
+        return requests_auto_chunk, split_mode, split_slot_num
 
     def _parse_spmd_optimizations_list(
         self, value: ast.expr, *, span_anchor: ast.AST
-    ) -> "ir.SplitMode | None":
+    ) -> "tuple[ir.SplitMode | None, int | None]":
         """Parse ``pl.spmd(..., optimizations=[...])`` — ``pl.split`` only.
 
         ``pl.auto_chunk`` is not supported on ``pl.spmd``; use
         ``pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk])`` inside
         the scope body instead.
+
+        Returns ``(split_mode, split_slot_num)``.
         """
-        requests_auto_chunk, split_mode = self._parse_optimizations_list(
+        requests_auto_chunk, split_mode, split_slot_num = self._parse_optimizations_list(
             value,
             owner="pl.spmd",
             list_hint="Use optimizations=[pl.split(pl.SplitMode.NONE)].",
@@ -3253,7 +3273,7 @@ class ASTParser:
                 "or move pl.auto_chunk into an inner "
                 "pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]).",
             )
-        return split_mode
+        return split_mode, split_slot_num
 
     @staticmethod
     def _is_pl_auto_chunk(node: ast.expr) -> bool:
@@ -3273,10 +3293,12 @@ class ASTParser:
             return True
         return False
 
-    def _try_parse_pl_split(self, node: ast.expr) -> "ir.SplitMode | None":
-        """Return the SplitMode if the AST node is ``pl.split(MODE)``; else None.
+    def _try_parse_pl_split(self, node: ast.expr) -> "tuple[ir.SplitMode, int | None] | None":
+        """Return ``(SplitMode, slot_num)`` if the AST node is ``pl.split(MODE)``; else None.
 
-        Also accepts the fully qualified form ``pl.optimizations.split(MODE)``.
+        ``slot_num`` is ``None`` unless the optional ``slot_num=N`` keyword is
+        given. Also accepts the fully qualified form
+        ``pl.optimizations.split(MODE)``.
         """
         if not isinstance(node, ast.Call):
             return None
@@ -3297,12 +3319,16 @@ class ASTParser:
         else:
             return None
 
-        if node.keywords:
-            raise ParserSyntaxError(
-                "pl.split() does not accept keyword arguments",
-                span=self.span_tracker.get_span(node),
-                hint="Use pl.split(pl.SplitMode.NONE).",
-            )
+        slot_num: int | None = None
+        for kw in node.keywords:
+            if kw.arg == "slot_num":
+                slot_num = self._eval_pl_split_slot_num(kw.value)
+            else:
+                raise ParserSyntaxError(
+                    f"Unknown keyword argument '{kw.arg}' in pl.split()",
+                    span=self.span_tracker.get_span(kw),
+                    hint="pl.split() accepts only the optional slot_num= keyword.",
+                )
         if len(node.args) != 1:
             raise ParserSyntaxError(
                 f"pl.split() takes exactly 1 positional argument, got {len(node.args)}",
@@ -3310,7 +3336,27 @@ class ASTParser:
                 hint="Use pl.split(pl.SplitMode.NONE).",
             )
         mode = extract_enum_value(node.args[0], SPLIT_MODE_MAP, "SplitMode", "pl.SplitMode")
-        return mode
+        return mode, slot_num
+
+    def _eval_pl_split_slot_num(self, value: ast.expr) -> int:
+        """Evaluate ``slot_num=`` in ``pl.split(...)`` as a positive int literal."""
+        # bool is a subclass of int — reject it explicitly.
+        if (
+            not isinstance(value, ast.Constant)
+            or isinstance(value.value, bool)
+            or not isinstance(value.value, int)
+        ):
+            raise ParserSyntaxError(
+                "pl.split(slot_num=...) must be an integer literal",
+                span=self.span_tracker.get_span(value),
+                hint="Use e.g. pl.split(pl.SplitMode.UP_DOWN, slot_num=16).",
+            )
+        if value.value <= 0:
+            raise ParserSyntaxError(
+                f"pl.split(slot_num=...) must be positive, got {value.value}",
+                span=self.span_tracker.get_span(value),
+            )
+        return value.value
 
     def _parse_chunked_loop_optimizer(self, value: ast.expr) -> "ir.SplitMode | None":
         """Parse pl.chunked_loop_optimizer or pl.chunked_loop_optimizer(split=...) AST node.
@@ -3643,13 +3689,13 @@ class ASTParser:
         *,
         usage_hint: str,
         allow_deps: bool = False,
-    ) -> tuple["ir.Expr", bool, str, "ir.SplitMode | None", "list[ir.Var]"]:
+    ) -> tuple["ir.Expr", bool, str, "ir.SplitMode | None", "int | None", "list[ir.Var]"]:
         """Parse ``pl.spmd(core_num, *, sync_start=, name_hint=, optimizations=, deps=)`` arguments.
 
         The first positional argument is ``core_num`` (range-like). Returns
-        ``(core_num, sync_start, name_hint, split_mode, dep_vars)`` with
-        ``sync_start`` defaulting to ``False``, ``split_mode`` to ``None``, and
-        ``dep_vars`` to ``[]``.
+        ``(core_num, sync_start, name_hint, split_mode, split_slot_num, dep_vars)``
+        with ``sync_start`` defaulting to ``False``, ``split_mode`` /
+        ``split_slot_num`` to ``None``, and ``dep_vars`` to ``[]``.
 
         ``optimizations=[...]`` accepts only ``pl.split(MODE)`` — see
         :meth:`_parse_spmd_optimizations_list`.
@@ -3672,6 +3718,7 @@ class ASTParser:
         sync_start: bool = False
         name_hint = ""
         split_mode: ir.SplitMode | None = None
+        split_slot_num: int | None = None
         deps_kw: ast.keyword | None = None
         for kw in call.keywords:
             if kw.arg is None:
@@ -3701,7 +3748,9 @@ class ASTParser:
                     )
                 sync_start = kw.value.value
             elif kw.arg == "optimizations":
-                split_mode = self._parse_spmd_optimizations_list(kw.value, span_anchor=anchor)
+                split_mode, split_slot_num = self._parse_spmd_optimizations_list(
+                    kw.value, span_anchor=anchor
+                )
             elif kw.arg == "deps":
                 if not allow_deps:
                     raise ParserSyntaxError(
@@ -3733,7 +3782,7 @@ class ASTParser:
         if deps_kw is not None:
             anchor_span = self.span_tracker.get_span(anchor)
             dep_vars = self._parse_submit_deps_kwarg("pl.spmd()", [deps_kw], anchor_span)
-        return core_num, sync_start, name_hint, split_mode, dep_vars
+        return core_num, sync_start, name_hint, split_mode, split_slot_num, dep_vars
 
     def _parse_spmd_scope(
         self,
@@ -3765,7 +3814,7 @@ class ASTParser:
         # Passing allow_deps=(optional_vars is not None) makes _parse_spmd_kwargs
         # reject any ``deps=`` on the non-capturing form (and keeps its "supported
         # keywords" hint accurate).
-        core_num, sync_start, name_hint, split_mode, dep_vars = self._parse_spmd_kwargs(
+        core_num, sync_start, name_hint, split_mode, split_slot_num, dep_vars = self._parse_spmd_kwargs(
             stmt, context_expr, usage_hint=with_hint, allow_deps=optional_vars is not None
         )
         scope_kind = scope_kind_map["spmd"]
@@ -3773,7 +3822,16 @@ class ASTParser:
 
         if optional_vars is not None:
             self._parse_spmd_scope_with_tid(
-                stmt, span, scope_kind, core_num, sync_start, name_hint, split_mode, dep_vars, optional_vars
+                stmt,
+                span,
+                scope_kind,
+                core_num,
+                sync_start,
+                name_hint,
+                split_mode,
+                split_slot_num,
+                dep_vars,
+                optional_vars,
             )
             return
 
@@ -3825,6 +3883,7 @@ class ASTParser:
             # forward-sticky pl.dump_tag tensors onto it here (see
             # _parse_spmd_for_loop for the full rationale).
             incore_attrs = self._merge_forward_sticky_dump(None, ir.ScopeKind.InCore)
+            incore_attrs = self._append_split_slot_num_attr(incore_attrs, split_slot_num)
             with self.builder.scope(
                 scope_kind,
                 span,
@@ -3857,6 +3916,7 @@ class ASTParser:
         sync_start: bool,
         name_hint: str,
         split_mode: "ir.SplitMode | None",
+        split_slot_num: "int | None",
         dep_vars: "list[ir.Var]",
         optional_vars: "ast.expr",
     ) -> None:
@@ -3941,6 +4001,7 @@ class ASTParser:
 
         spmd_name_hint, incore_name_hint = _split_spmd_for_loop_name_hints(name_hint)
         incore_attrs = self._merge_forward_sticky_dump(None, ir.ScopeKind.InCore)
+        incore_attrs = self._append_split_slot_num_attr(incore_attrs, split_slot_num)
         with self.builder.scope(
             scope_kind,
             span,
@@ -3999,7 +4060,7 @@ class ASTParser:
         # The for-form does not capture a TaskId, so it rejects deps= (allow_deps
         # defaults False): use the with-form `with pl.spmd(n, deps=[...]) as tid:`
         # to wire explicit deps. dep_vars is therefore always empty here.
-        core_num, sync_start, name_hint, split_mode, _ = self._parse_spmd_kwargs(
+        core_num, sync_start, name_hint, split_mode, split_slot_num, _ = self._parse_spmd_kwargs(
             stmt, iter_call, usage_hint=spmd_hint
         )
         spmd_name_hint, incore_name_hint = _split_spmd_for_loop_name_hints(name_hint)
@@ -4013,6 +4074,7 @@ class ASTParser:
         # the synthesised inner-kernel Call; the wrapper-dispatch codegen
         # (BuildWrapperReorderedParams) honours that inner call's dump_vars.
         incore_attrs = self._merge_forward_sticky_dump(None, ir.ScopeKind.InCore)
+        incore_attrs = self._append_split_slot_num_attr(incore_attrs, split_slot_num)
         with self.builder.scope(
             ir.ScopeKind.Spmd,
             span,
@@ -4174,6 +4236,7 @@ class ASTParser:
         # fresh ``Scalar[TASK_ID]`` Var in the outer scope; the outliner
         # later wires it to ``TupleGetItem(call_lhs, last_idx)``.
         scope_attrs = self._parse_at_meta(deps_kw, no_dep_args_kw, dumps_kw, optional_vars, span)
+        scope_attrs = self._append_split_slot_num_attr(scope_attrs, state.split_slot_num)
 
         # ``with pl.at(...) as tid:`` allocates ``tid`` as an outer-scope Var
         # whose real definition is synthesised later by ``OutlineIncoreScopes``
@@ -4237,6 +4300,23 @@ class ASTParser:
                 name_hint=name_hint,
                 attrs=scope_attrs,
             )
+
+    @staticmethod
+    def _append_split_slot_num_attr(
+        attrs: "list[tuple[str, Any]] | None", slot_num: "int | None"
+    ) -> "list[tuple[str, Any]] | None":
+        """Append the ``slot_num`` scope attr (from ``pl.split(mode, slot_num=N)``).
+
+        Appended last so a print -> reparse cycle reproduces the same attr order
+        (``optimizations=[pl.split(...)]`` is printed alongside ``deps=`` /
+        ``dumps=``, and slot_num always lands at the tail here on both passes).
+        Returns ``attrs`` unchanged when ``slot_num`` is ``None``.
+        """
+        if slot_num is None:
+            return attrs
+        result: list[tuple[str, Any]] = list(attrs) if attrs else []
+        result.append(("slot_num", slot_num))
+        return result
 
     def _parse_at_meta(
         self,
