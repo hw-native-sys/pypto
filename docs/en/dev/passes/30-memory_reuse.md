@@ -54,7 +54,7 @@ program_optimized = reuse_pass(program)
 - Non-overlapping lifetimes (no interference). Two variables do NOT overlap when `prev.last_use <= curr.def` (i.e., the source's last use can be at the same statement as the target's definition, since inputs are read before outputs are written within a single statement).
 - Same memory space
 - Compatible sizes (reuse target must be large enough)
-- **L0 cube-input exception (Left/Right)**: buffers in `Mem.Left` / `Mem.Right` hold sub-tiles produced by view ops (`tile.extract` / `tile.slice` / `tile.reshape`), which PTO codegen materialises per tile var at the buffer base. Two such buffers in the same L0 space, with non-overlapping lifetimes and sufficient **byte** size, may therefore share one slot even when their **shapes differ** — the `AreTileTypesCompatible` shape/dtype/view check below is skipped for them (gated on both producers being view ops, a subset of [`LegalizePtoBufferReuse`](31-legalize_pto_buffer_reuse.md)'s `IsLegalViewOp` so the shared MemRef survives that pass). This lets fused-attention reuse the QK `Right` buffer (`[k, SEQ]`) for the PV `Right` buffer (`[k', HEAD]`), halving peak L0B (issue #1595). All other spaces (Vec/Acc/Mat) keep the strict match:
+- **L0 cube-input exception (Left/Right)**: buffers in `Mem.Left` / `Mem.Right` hold sub-tiles produced by view ops (`tile.extract` / `tile.slice` / `tile.reshape`), which PTO codegen materialises per tile var at the buffer base. Two such buffers in the same L0 space, with non-overlapping lifetimes and sufficient **byte** size, may therefore share one slot even when their **shapes differ** — the `AreTileTypesCompatible` shape/dtype/view check below is skipped for them (gated on both producers being view ops, PTO view ops so the shared MemRef stays PTO-materialisable). This lets fused-attention reuse the QK `Right` buffer (`[k, SEQ]`) for the PV `Right` buffer (`[k', HEAD]`), halving peak L0B (issue #1595). All other spaces (Vec/Acc/Mat) keep the strict match:
 - TileType compatibility — checked by `AreTileTypesCompatible`:
   - Same shape (all dimensions must match exactly)
   - Same dtype (e.g., FP32 vs BF16 prevents reuse, handling `tile.cast` automatically)
@@ -65,6 +65,17 @@ program_optimized = reuse_pass(program)
 **Alloc cleanup**:
 
 After MemRef sharing, some MemRef objects become unreferenced (their variables now point to a different shared MemRef). The pass traverses the surrounding `SeqStmts` and removes any `tile.alloc` `AssignStmt` whose LHS MemRef pointer is not in the set of still-used MemRefs.
+
+## Ascend910B load + tpop_from_aic hazard
+
+On Ascend910B AIV functions with a non-`None` `SplitMode`, a writer that consumes **both** a `tile.load` result (or a legal-view descendant of one) **and** a `tile.tpop_from_aic` value must not place its output in the same physical buffer as that load result. Allowing the writer's output to in-place-reuse the load buffer produces silently wrong results on this hardware.
+
+MemoryReuse owns every buffer-coalescing decision, so it prevents the hazardous sharing from ever forming rather than relying on a later split. When the guard is active, the reuse decision is blocked exactly when:
+
+- the writer's defining op consumes a `tile.tpop_from_aic` value, **and**
+- the buffer member it would reuse in place (whose last use is the writer's def statement) is load-derived.
+
+The guard is gated by `BackendHandler::RequiresSplitLoadTpopWorkaround()` (true only for Ascend910B) and the function being split-AIV; on every other backend / function kind the inputs are empty and reuse behaviour is unchanged. The writer is still free to reuse any **non**-load buffer — only the load + tpop in-place combination is rejected. (This guard previously lived in a dedicated `LegalizePTOBufferReuse` pass that split the buffer after the fact; it now folds into MemoryReuse.)
 
 ## Example
 

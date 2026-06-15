@@ -54,7 +54,7 @@ program_optimized = reuse_pass(program)
 - 生命周期不重叠（无干涉）。当 `prev.last_use <= curr.def` 时，两个变量不重叠（即源的最后使用可以和目标的定义在同一语句，因为在同一语句内输入先于输出被消费）
 - 相同内存空间
 - 大小兼容（复用目标必须足够大）
-- **L0 cube 输入例外（Left/Right）**：`Mem.Left` / `Mem.Right` 的缓冲区存放的是由 view 算子（`tile.extract` / `tile.slice` / `tile.reshape`）产生的子 tile，PTO codegen 会按每个 tile 变量在缓冲区基址处单独物化。因此同一 L0 空间、生命周期不重叠、**字节**大小足够的两个这类缓冲区，即使 **shape 不同**也可以共享同一槽位 —— 对它们跳过下面的 `AreTileTypesCompatible`（shape/dtype/view）检查（前提是两端的 producer 都是 view 算子，且属于 [`LegalizePtoBufferReuse`](31-legalize_pto_buffer_reuse.md) 的 `IsLegalViewOp` 子集，从而共享的 MemRef 能在该 pass 中存活）。这使 fused-attention 能用 QK 的 `Right` 缓冲区（`[k, SEQ]`）复用 PV 的 `Right` 缓冲区（`[k', HEAD]`），将 L0B 峰值减半（issue #1595）。其它空间（Vec/Acc/Mat）仍保持严格匹配：
+- **L0 cube 输入例外（Left/Right）**：`Mem.Left` / `Mem.Right` 的缓冲区存放的是由 view 算子（`tile.extract` / `tile.slice` / `tile.reshape`）产生的子 tile，PTO codegen 会按每个 tile 变量在缓冲区基址处单独物化。因此同一 L0 空间、生命周期不重叠、**字节**大小足够的两个这类缓冲区，即使 **shape 不同**也可以共享同一槽位 —— 对它们跳过下面的 `AreTileTypesCompatible`（shape/dtype/view）检查（前提是两端的 producer 都是 view 算子，即 PTO view 算子，从而共享的 MemRef 保持可被 PTO 物化）。这使 fused-attention 能用 QK 的 `Right` 缓冲区（`[k, SEQ]`）复用 PV 的 `Right` 缓冲区（`[k', HEAD]`），将 L0B 峰值减半（issue #1595）。其它空间（Vec/Acc/Mat）仍保持严格匹配：
 - TileType 兼容性 — 由 `AreTileTypesCompatible` 检查：
   - 相同 shape（所有维度必须精确匹配）
   - 相同 dtype（例如 FP32 与 BF16 阻止复用，自动处理 `tile.cast`）
@@ -65,6 +65,17 @@ program_optimized = reuse_pass(program)
 **Alloc 清理**：
 
 MemRef 共享完成后，部分 MemRef 对象变为无引用状态（其变量现在指向不同的共享 MemRef）。该 Pass 遍历周围的 `SeqStmts`，移除所有左值 MemRef 指针不在仍使用集合中的 `tile.alloc` `AssignStmt`。
+
+## Ascend910B load + tpop_from_aic 危害
+
+在 `SplitMode` 非 `None` 的 Ascend910B AIV 函数中，如果某个 writer **同时**消费 `tile.load` 的结果（或其合法 view 派生）**和** `tile.tpop_from_aic` 的值，则它的输出不能与该 load 结果落在同一块物理 buffer 上。让 writer 的输出原地复用 load buffer 会在该硬件上产生**静默的错误结果**。
+
+MemoryReuse 掌管所有 buffer 合并决策，因此它从源头上阻止这种危害共享的形成，而不依赖后续的拆分。当 guard 生效时，复用决策在以下条件**同时满足**时被阻止：
+
+- writer 的定义 op 消费了 `tile.tpop_from_aic` 的值，**且**
+- 它将要原地复用的那个 buffer 成员（其 last use 正是该 writer 的定义语句）是 load 派生的。
+
+该 guard 由 `BackendHandler::RequiresSplitLoadTpopWorkaround()`（仅 Ascend910B 为 true）以及函数为 split-AIV 这两个条件门控；在其他任何 backend / 函数类型下输入集合为空，复用行为不变。writer 仍可自由复用任何**非** load buffer —— 只有 load + tpop 的原地组合会被拒绝。（该 guard 此前由独立的 `LegalizePTOBufferReuse` pass 在事后拆分 buffer 来实现，现已并入 MemoryReuse。）
 
 ## 示例
 

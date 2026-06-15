@@ -6,7 +6,7 @@ IR before PTO codegen.
 
 ## Overview
 
-After `LegalizePTOBufferReuse` runs, the LHS and RHS of a `tile.reshape` may
+After `MemoryReuse` runs, the LHS and RHS of a `tile.reshape` may
 already point at the same `MemRef` root *and* carry identical
 `TileBufSignature`s. In that case the reshape is a no-op at the PTO level —
 the per-var alloc model has pre-declared LHS with the same shape, layout,
@@ -37,7 +37,7 @@ cases, knowing the no-op cases were already removed upstream.
 - `IRProperty::IncoreTileOps` — InCore functions use tile types
 - `IRProperty::HasMemRefs` — `MemRef` slots populated by `InitMemRef`
 - `IRProperty::TileOps2D` — tile ops are at most 2D
-- The pass requires `LegalizePTOBufferReuse` to have run so that
+- The pass requires `MemoryReuse` to have run so that
   view-merging decisions are reflected on the canonical alloc — otherwise
   LHS and RHS may not yet share a `MemRef` even though they should.
 - Only InCore-type functions (`InCore`, `AIC`, `AIV`) are scanned; Opaque
@@ -98,7 +98,7 @@ whose LHS/RHS differ in any of those four ways — those cases require real
 
 ```python
 # Before pass (TileBufSignature equal on both sides; same MemRef R after
-# LegalizePTOBufferReuse)
+# MemoryReuse)
 @pl.function(type=pl.FunctionType.InCore)
 def kernel(x, out):
     a: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec, MemRef(R)] = pl.tile.load(x, ...)

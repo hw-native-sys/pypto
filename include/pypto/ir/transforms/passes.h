@@ -155,17 +155,6 @@ Pass InitMemRef();
 Pass MemoryReuse();
 
 /**
- * @brief Create a PTO buffer reuse legalisation pass
- *
- * After generic MemoryReuse, multiple tile variables with different
- * TileBufSignatures may share the same MemRef.  PTO codegen requires that
- * every non-view writer sharing a MemRef produces the same typed alloc_tile
- * signature.  This pass detects illegal cross-type sharing and splits the
- * offending MemRef into distinct allocations.
- */
-Pass LegalizePTOBufferReuse();
-
-/**
  * @brief Create an allocate memory address pass
  *
  * Allocates real memory addresses for existing alloc operations.
@@ -747,7 +736,7 @@ Pass AutoDeriveTaskDependencies(bool analyze_auto_scopes = false);
 /**
  * @brief Fold no-op tile.reshape assignments into Var-to-Var assignments
  *
- * After LegalizePTOBufferReuse, two TileType variables can share the same
+ * After MemoryReuse, two TileType variables can share the same
  * MemRef and the same TileBufSignature — in that case the `tile.reshape`
  * connecting them is a no-op at the PTO level. This pass rewrites such
  * `lhs = tile.reshape(rhs, shape)` AssignStmts into plain `lhs = rhs`,
@@ -756,7 +745,7 @@ Pass AutoDeriveTaskDependencies(bool analyze_auto_scopes = false);
  *
  * Requirements:
  * - InCore-type functions only (Opaque/Orchestration are unaffected)
- * - Must run after LegalizePTOBufferReuse so MemRef merging is finalized
+ * - Must run after MemoryReuse so MemRef merging is finalized
  */
 Pass FoldNoOpReshape();
 

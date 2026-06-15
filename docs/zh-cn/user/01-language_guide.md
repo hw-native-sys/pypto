@@ -459,7 +459,7 @@ orchestrator（`@pl.jit.host`）和 inline 子函数（`@pl.jit.inline`）上
 只是手放 scope 会嵌套在编译器 AUTO scope 之内）。`.incore` / `.opaque`
 仍会拒绝它——它们外提为独立 kernel。它会 specialize 成
 `@pl.function(..., auto_scope=False)`——具体的 scope 放置语义见
-[MaterializeRuntimeScopes pass](../dev/passes/40-materialize_runtime_scopes.md)。
+[MaterializeRuntimeScopes pass](../dev/passes/39-materialize_runtime_scopes.md)。
 
 ### `@pl.inline`
 
@@ -646,8 +646,7 @@ output_dir = ir.compile(
 15. **ExpandMixedKernel** —— 在需要时拆分 mixed kernel
 16. **InitMemRef** —— 分配内存空间并插入缓冲区分配
 17. **MemoryReuse** —— 共享生命周期不重叠的缓冲区
-18. **LegalizePTOBufferReuse** —— 规范化 PTO 缓冲区复用模式
-19. **AllocateMemoryAddr** —— 分配具体内存地址
+18. **AllocateMemoryAddr** —— 分配具体内存地址
 
 ### `JITFunction.compile()`（用于 `@pl.jit` 内核）
 

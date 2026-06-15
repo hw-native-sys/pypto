@@ -25,7 +25,7 @@
 ```
 
 本 pass 跑在默认 pipeline 的末尾阶段，位于
-[`LowerHostTensorCollectives`](39-lower_host_tensor_collectives.md) 和最后一次
+[`LowerHostTensorCollectives`](38-lower_host_tensor_collectives.md) 和最后一次
 `Simplify` 之前。从 `InlineFunctions` 到这里之间的所有 pass 都不会触碰
 host_orch 的 alloc / window / dispatch 链：host_orch 本身不会被 tile lower，
 L2（chip 级）orchestration 也永远不会被 inline 进 L3，所以本 pass 需要的

@@ -26,7 +26,7 @@ the IR types so downstream codegen has O(1) access.
 ```
 
 The pass runs near the end of the default pipeline, immediately before
-[`LowerHostTensorCollectives`](39-lower_host_tensor_collectives.md) and the final
+[`LowerHostTensorCollectives`](38-lower_host_tensor_collectives.md) and the final
 `Simplify`. None of the intervening passes between `InlineFunctions` and here
 touches the host_orch alloc/window/dispatch chain: host_orch is never
 tile-lowered, and L2 (chip-level) orchestrations are never inlined into L3, so

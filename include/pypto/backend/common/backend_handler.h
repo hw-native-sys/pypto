@@ -91,8 +91,8 @@ class BackendHandler {
   [[nodiscard]] virtual bool RequiresGMPipeBuffer() const = 0;
 
   /**
-   * @brief Whether this backend needs the LegalizePtoBufferReuse split-load /
-   *        tpop hazard workaround for AIV functions.
+   * @brief Whether this backend needs the MemoryReuse load + tpop_from_aic
+   *        in-place hazard guard for split-AIV functions.
    */
   [[nodiscard]] virtual bool RequiresSplitLoadTpopWorkaround() const = 0;
 

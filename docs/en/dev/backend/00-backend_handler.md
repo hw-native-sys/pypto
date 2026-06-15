@@ -56,7 +56,7 @@ to global state.
 | `GetDefaultSimPlatform()` | default simulator platform | `"a2a3sim"` | `"a5sim"` |
 | `GetExtraPtoasFlags()` | extra ptoas flags | `[]` | `["--pto-arch", "a5"]` |
 | `RequiresGMPipeBuffer()` | inject GM-backed pipe slot in `ExpandMixedKernel` | `true` | `false` |
-| `RequiresSplitLoadTpopWorkaround()` | split-load tpop hazard fix in `LegalizePtoBufferReuse` | `true` | `false` |
+| `RequiresSplitLoadTpopWorkaround()` | MemoryReuse load + tpop_from_aic in-place hazard guard | `true` | `false` |
 | `RequiresVtoCFractalAdapt()` | AIV-side V-to-C fractal adapter `tile.move` | `false` | `true` |
 | `RequiresRuntimeSubblockBridge()` | split AIV wrappers source subblock id from runtime | `true` | `false` |
 | `RequiresNoSplitDualAivDispatch()` | `no_split` mixed kernels still dispatch on both AIV lanes | `true` | `false` |

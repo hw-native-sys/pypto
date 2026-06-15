@@ -391,17 +391,16 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 15. [`MaterializeTensorStrides`](28-materialize_tensor_strides.md) —— 自 RFC #1300 P6 起接入默认 pipeline
 16. `InitMemRef`
 17. `MemoryReuse`
-18. [`LegalizePTOBufferReuse`](31-legalize_pto_buffer_reuse.md)
-19. `AllocateMemoryAddr`
-20. [`FoldNoOpReshape`](33-fold_no_op_reshape.md)
-21. [`FuseCreateAssembleToSlice`](34-fuse_create_assemble_to_slice.md)
-22. [`DeriveCallDirections`](35-derive_call_directions.md)
-23. [`AutoDeriveTaskDependencies`](36-auto_derive_task_dependencies.md)（runtime scope 编译器依赖；AUTO-scope 分析需要显式开启）
-24. [`ExpandManualPhaseFence`](37-expand_manual_phase_fence.md)（manual-scope phase-fence TaskId 依赖压缩）
-25. [`MaterializeCommDomainScopes`](38-materialize_comm_domain_scopes.md)（分布式：构造 WindowBuffer 并写 CommDomainScopeStmt wrappers in each host_orch body；无通信程序为 no-op）
-26. [`LowerHostTensorCollectives`](39-lower_host_tensor_collectives.md)（host-level tensor collectives -> internal builtin chip dispatches）
-27. `Simplify`
-28. [`MaterializeRuntimeScopes`](40-materialize_runtime_scopes.md)（插入 AUTO RuntimeScopeStmt，使 orchestration codegen 1:1 emit PTO2_SCOPE）
+18. `AllocateMemoryAddr`
+19. [`FoldNoOpReshape`](32-fold_no_op_reshape.md)
+20. [`FuseCreateAssembleToSlice`](33-fuse_create_assemble_to_slice.md)
+21. [`DeriveCallDirections`](34-derive_call_directions.md)
+22. [`AutoDeriveTaskDependencies`](35-auto_derive_task_dependencies.md)（runtime scope 编译器依赖；AUTO-scope 分析需要显式开启）
+23. [`ExpandManualPhaseFence`](36-expand_manual_phase_fence.md)（manual-scope phase-fence TaskId 依赖压缩）
+24. [`MaterializeCommDomainScopes`](37-materialize_comm_domain_scopes.md)（分布式：构造 WindowBuffer 并写 CommDomainScopeStmt wrappers in each host_orch body；无通信程序为 no-op）
+25. [`LowerHostTensorCollectives`](38-lower_host_tensor_collectives.md)（host-level tensor collectives -> internal builtin chip dispatches）
+26. `Simplify`
+27. [`MaterializeRuntimeScopes`](39-materialize_runtime_scopes.md)（插入 AUTO RuntimeScopeStmt，使 orchestration codegen 1:1 emit PTO2_SCOPE）
 
 `DebugTileOptimization` 只是用于排查 PTO tile 阶段的调试策略，会跳过
 tensor-only 前缀 pass。正常编译和非 strategy 专项测试都应优先使用

@@ -107,7 +107,7 @@ const Tensor& tmp = alloc_0.get_ref(0);
 
 All task submission is wrapped in a top-level `PTO2_SCOPE()`. Codegen no longer
 decides scope placement from the `for` / `if` structure: the
-[MaterializeRuntimeScopes](../passes/40-materialize_runtime_scopes.md) pass
+[MaterializeRuntimeScopes](../passes/39-materialize_runtime_scopes.md) pass
 inserts explicit AUTO `RuntimeScopeStmt` nodes (the function body and each
 `for` / `if` body) into the IR, and codegen emits `PTO2_SCOPE` 1:1 from those
 nodes (manual scopes lower to `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`):
@@ -451,7 +451,7 @@ variables). Plain `Call` carriers of `manual_dep_edges` no longer exist — the
 ManualDepsOnSubmitOnly structural property verifies that no cross-function
 `Call` carries it; only the `system.task_dummy` barrier op keeps the attr as
 its fanin contract. Compiler-derived manual-scope edges come from
-[`AutoDeriveTaskDependencies`](../passes/36-auto_derive_task_dependencies.md)
+[`AutoDeriveTaskDependencies`](../passes/35-auto_derive_task_dependencies.md)
 in `Call.attrs["compiler_manual_dep_edges"]` (a separate key, allowed on plain
 calls). Codegen merges the two lists in that order and deduplicates by Var
 identity before emitting the stack array.

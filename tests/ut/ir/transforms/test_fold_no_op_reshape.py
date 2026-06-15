@@ -30,7 +30,7 @@ from pypto.backend import BackendType
 
 @pytest.fixture(autouse=True)
 def _setup_backend():
-    """Configure Ascend910B backend; LegalizePTOBufferReuse needs one."""
+    """Configure Ascend910B backend; the MemoryReuse hazard guard needs one."""
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.Ascend910B)
     yield
@@ -44,7 +44,6 @@ _PREREQS = (
     passes.infer_tile_memory_space,
     passes.init_mem_ref,
     passes.memory_reuse,
-    passes.legalize_pto_buffer_reuse,
     passes.allocate_memory_addr,
 )
 
@@ -79,7 +78,7 @@ class TestFoldNoOpReshape:
                 output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(input_a, [0, 0], [64, 64])
-                # Identical shape + same MemRef after LegalizePTOBufferReuse → no-op reshape.
+                # Identical shape + same MemRef after MemoryReuse → no-op reshape.
                 tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tile.reshape(tile_a, [64, 64])
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], output)
                 return result

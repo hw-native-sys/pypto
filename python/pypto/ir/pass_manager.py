@@ -163,8 +163,10 @@ class PassManager:
             # without going through the legacy `dn_swap` codegen path.
             ("MaterializeTensorStrides", lambda: passes.materialize_tensor_strides()),
             ("InitMemRef", lambda: passes.init_mem_ref()),
+            # MemoryReuse coalesces tile buffers; on Ascend910B split-AIV it also
+            # avoids the load + tpop_from_aic in-place hazard so a separate
+            # legalisation pass is no longer needed.
             ("MemoryReuse", lambda: passes.memory_reuse()),
-            ("LegalizePTOBufferReuse", lambda: passes.legalize_pto_buffer_reuse()),
             ("AllocateMemoryAddr", lambda: passes.allocate_memory_addr()),
             ("FoldNoOpReshape", lambda: passes.fold_no_op_reshape()),
             ("FuseCreateAssembleToSlice", lambda: passes.fuse_create_assemble_to_slice()),

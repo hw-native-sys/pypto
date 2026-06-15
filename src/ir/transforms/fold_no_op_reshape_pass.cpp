@@ -49,9 +49,9 @@ bool IsNoOpReshape(const AssignStmtPtr& assign) {
   auto rhs_tile = As<TileType>(src_var->GetType());
   if (!lhs_tile || !rhs_tile) return false;
 
-  // Both sides must be backed by the same MemRef. LegalizePTOBufferReuse
-  // makes this decision; if it didn't, the reshape is a real shape change
-  // and PTO must materialize it via pto.treshape.
+  // Both sides must be backed by the same MemRef. MemoryReuse makes this
+  // decision; if it didn't, the reshape is a real shape change and PTO must
+  // materialize it via pto.treshape.
   if (!lhs_tile->memref_.has_value() || !rhs_tile->memref_.has_value()) return false;
   const auto& lhs_memref = *lhs_tile->memref_;
   const auto& rhs_memref = *rhs_tile->memref_;

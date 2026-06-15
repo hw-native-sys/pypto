@@ -19,9 +19,12 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend_config.h"
+#include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/any_cast.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -33,6 +36,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/structural_comparison.h"
@@ -1079,13 +1083,13 @@ bool AreTileTypesCompatible(const VarPtr& var1, const VarPtr& var2) {
  *
  * L0 cube-input buffers (``Mem.Left`` / ``Mem.Right``) are *only* ever produced
  * by these ops, and PTO codegen emits one ``alloc_tile`` per tile var (each
- * carrying its own shape/dtype/layout) at the buffer base — see
- * ``LegalizePtoBufferReuse``'s ``IsLegalViewOp``, which classifies the same ops
- * as views that need no MemRef split.  This means two such buffers in the same
- * L0 space, with non-overlapping lifetimes and sufficient byte size, may share
- * one L0A/L0B slot even when their *shapes* differ (e.g. fused-attention QK
- * ``Right`` ``[k, SEQ]`` reused by PV ``Right`` ``[k', HEAD]``).  Keep this set
- * a subset of ``IsLegalViewOp`` so the shared MemRef survives that pass.
+ * carrying its own shape/dtype/layout) at the buffer base.  This means two such
+ * buffers in the same L0 space, with non-overlapping lifetimes and sufficient
+ * byte size, may share one L0A/L0B slot even when their *shapes* differ (e.g.
+ * fused-attention QK ``Right`` ``[k, SEQ]`` reused by PV ``Right``
+ * ``[k', HEAD]``).  Keep this set a subset of the PTO view allowlist
+ * (``IsLegalTileViewOp``) so the shared MemRef stays expressible as per-var
+ * ``alloc_tile`` views.
  */
 static bool IsL0ViewProducerOp(const std::string& op_name) {
   return op_name == "tile.extract" || op_name == "tile.slice" || op_name == "tile.reshape";
@@ -1102,10 +1106,105 @@ static bool LifetimesOverlap(const LifetimeInterval& a, const LifetimeInterval& 
   return !(a.last_use_point <= b.def_point || b.last_use_point <= a.def_point);
 }
 
+// ---------------------------------------------------------------------------
+// Ascend910B split-AIV  load + tpop_from_aic  in-place hazard
+// ---------------------------------------------------------------------------
+//
+// On Ascend910B AIV functions with a non-None SplitMode, an op that consumes
+// BOTH a tile.load result (or a legal-view descendant of one) AND a
+// tile.tpop_from_aic value must not write its output into the same physical
+// buffer as the load result it reads.  Letting the writer's output reuse that
+// buffer (an in-place touch) yields silently wrong results on this hardware.
+//
+// MemoryReuse owns every buffer-coalescing decision, so the cleanest fix is to
+// never create the hazardous sharing in the first place.  This used to be
+// undone after the fact by a dedicated LegalizePTOBufferReuse split pass; the
+// guard below folds that responsibility into the reuse decision.
+//
+// `HazardInputs` is collected in a single forward IR walk:
+//   - load_derived: vars produced by tile.load or by a legal view op chained
+//     from a load (these alias the load's physical buffer).
+//   - reads_tpop:   vars whose defining op consumes a tile.tpop_from_aic value.
+// Membership is keyed on Var identity and checked against the reuse-decision
+// representatives (a sharing group's earliest-defined member, which for a
+// writer is the writer's own output and for a load is the load itself).
+
+/// Op names whose output aliases the input MemRef and lowers to a PTO view
+/// instruction — kept in sync with the PTO buffer-reuse view allowlist.
+static bool IsLegalTileViewOp(const std::string& op_name) {
+  return op_name == "tile.reshape" || op_name == "tile.extract" || op_name == "tile.slice" ||
+         op_name == "tile.fillpad" || op_name == "tile.fillpad_inplace" || op_name == "tensor.slice";
+}
+
+struct HazardInputs {
+  std::unordered_set<const Var*> load_derived;  ///< tile.load outputs + view descendants
+  std::unordered_set<const Var*> reads_tpop;    ///< vars whose def consumes a tpop_from_aic value
+};
+
+class HazardInputCollector : public IRVisitor {
+ public:
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    if (GetTileTypeWithMemRef(op->var_->GetType())) {
+      if (auto call = As<Call>(op->value_)) {
+        const std::string op_name = call->op_ ? call->op_->name_ : std::string();
+        std::vector<const Var*> input_vars;
+        for (const auto& arg : call->args_) {
+          if (auto v = As<Var>(arg)) input_vars.push_back(v.get());
+        }
+        // load_derived closure: defs precede uses in program order, so a view's
+        // source is already classified by the time we reach the view.
+        if (op_name == "tile.load") {
+          inputs_.load_derived.insert(op->var_.get());
+        } else if (IsLegalTileViewOp(op_name)) {
+          for (const Var* in : input_vars) {
+            if (inputs_.load_derived.count(in) != 0) {
+              inputs_.load_derived.insert(op->var_.get());
+              break;
+            }
+          }
+        }
+        if (op_name == "tile.tpop_from_aic") tpop_vars_.insert(op->var_.get());
+        for (const Var* in : input_vars) {
+          if (tpop_vars_.count(in) != 0) {
+            inputs_.reads_tpop.insert(op->var_.get());
+            break;
+          }
+        }
+      }
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
+  HazardInputs Take() { return std::move(inputs_); }
+
+ private:
+  HazardInputs inputs_;
+  std::unordered_set<const Var*> tpop_vars_;
+};
+
+/// True only for Ascend910B AIV split-mode functions, which need the load +
+/// tpop_from_aic in-place hazard guard.  All other backends / function kinds
+/// reuse buffers freely.  Defensive against unit-test contexts that run
+/// MemoryReuse without a configured backend.
+bool NeedsLoadTpopHazardGuard(const FunctionPtr& func) {
+  if (func->func_type_ != FunctionType::AIV) return false;
+  if (!backend::BackendConfig::IsConfigured()) return false;
+  const auto* ctx = PassContext::Current();
+  if (ctx == nullptr) return false;
+  if (!ctx->GetBackendHandler()->RequiresSplitLoadTpopWorkaround()) return false;
+  const auto split_mode = func->GetSplitMode();
+  return split_mode.has_value() && *split_mode != SplitMode::None;
+}
+
 /**
  * @brief Identify memory reuse opportunities from lifetime intervals
+ *
+ * @param hazard  Ascend910B load + tpop_from_aic guard inputs.  Empty when the
+ *                guard is inactive (non-910B / non-split-AIV), in which case the
+ *                hazard check below is a no-op and reuse behaviour is unchanged.
  */
-std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(const std::vector<LifetimeInterval>& lifetimes) {
+std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(const std::vector<LifetimeInterval>& lifetimes,
+                                                    const HazardInputs& hazard) {
   std::map<VarPtr, VarPtr> reuse_map;
 
   // Build a fast lookup map: VarPtr -> LifetimeInterval for O(1) access
@@ -1212,6 +1311,40 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(const std::vector<LifetimeIn
         }
 
         if (!overlaps_with_users) {
+          // Ascend910B split-AIV hazard: a writer that consumes a tile.load
+          // result (or a view of one) AND a tile.tpop_from_aic value must not
+          // place its output in the same buffer as that load result.  The
+          // occupied buffer member whose last use is curr_var's def is exactly
+          // the input the writer reads in place; if it is load-derived and
+          // curr_var's def also consumes a tpop value, block the reuse so the
+          // hazardous sharing is never formed.  `hazard` is empty off-910B, so
+          // this whole block is a no-op for every other backend.
+          if (hazard.reads_tpop.count(curr_var.get()) != 0) {
+            bool load_tpop_conflict = false;
+            const LifetimeInterval* root_lt =
+                var_to_lifetime.count(root) ? var_to_lifetime.at(root) : nullptr;
+            if (root_lt && root_lt->last_use_point == curr_lifetime.def_point &&
+                hazard.load_derived.count(root.get()) != 0) {
+              load_tpop_conflict = true;
+            }
+            if (!load_tpop_conflict && memref_users.count(root)) {
+              for (const auto& user_var : memref_users.at(root)) {
+                const LifetimeInterval* user_lt =
+                    var_to_lifetime.count(user_var) ? var_to_lifetime.at(user_var) : nullptr;
+                if (user_lt && user_lt->last_use_point == curr_lifetime.def_point &&
+                    hazard.load_derived.count(user_var.get()) != 0) {
+                  load_tpop_conflict = true;
+                  break;
+                }
+              }
+            }
+            if (load_tpop_conflict) {
+              LOG_DEBUG << "Variable " << curr_var->name_hint_ << " cannot reuse " << prev_var->name_hint_
+                        << " (Ascend910B load + tpop_from_aic in-place hazard)";
+              continue;
+            }
+          }
+
           // For inplace-unsafe ops (src buffer == dst buffer not supported), block reuse
           // whenever the buffer is still occupied at curr_var's definition statement.
           // A conflict exists if root or any variable sharing root's buffer has
@@ -1851,8 +1984,18 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
     return func;
   }
 
-  // Step 2: Identify reuse opportunities
-  auto reuse_map = IdentifyReuseOpportunities(analysis_result.lifetimes);
+  // Step 2: Identify reuse opportunities.  On Ascend910B split-AIV functions,
+  // collect the load + tpop_from_aic hazard inputs so the reuse decision never
+  // forms the hazardous in-place sharing (folds in the former
+  // LegalizePTOBufferReuse responsibility).  Off-910B the inputs stay empty and
+  // reuse behaviour is unchanged.
+  HazardInputs hazard;
+  if (NeedsLoadTpopHazardGuard(func)) {
+    HazardInputCollector collector;
+    collector.VisitStmt(new_body);
+    hazard = collector.Take();
+  }
+  auto reuse_map = IdentifyReuseOpportunities(analysis_result.lifetimes, hazard);
 
   // Step 3: Apply MemRef sharing (skip if no reuse candidates)
   if (!reuse_map.empty()) {

@@ -318,9 +318,6 @@ def init_mem_ref() -> Pass:
 def memory_reuse() -> Pass:
     """Create a memory reuse pass."""
 
-def legalize_pto_buffer_reuse() -> Pass:
-    """Create a PTO buffer reuse legalisation pass."""
-
 def allocate_memory_addr() -> Pass:
     """Create an allocate memory address pass."""
 
@@ -767,7 +764,6 @@ __all__ = [
     "PassPipeline",
     "init_mem_ref",
     "memory_reuse",
-    "legalize_pto_buffer_reuse",
     "allocate_memory_addr",
     "fuse_create_assemble_to_slice",
     "fold_no_op_reshape",

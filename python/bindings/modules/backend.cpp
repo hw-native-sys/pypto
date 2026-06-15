@@ -137,7 +137,7 @@ void BindBackend(nb::module_& m) {
       .def("requires_gm_pipe_buffer", &BackendHandler::RequiresGMPipeBuffer,
            "Whether ExpandMixedKernel must inject the GM-backed pipe slot buffer")
       .def("requires_split_load_tpop_workaround", &BackendHandler::RequiresSplitLoadTpopWorkaround,
-           "Whether LegalizePtoBufferReuse must apply the split-load tpop hazard workaround")
+           "Whether MemoryReuse must apply the load + tpop_from_aic in-place hazard guard")
       .def("requires_vto_c_fractal_adapt", &BackendHandler::RequiresVtoCFractalAdapt,
            "Whether AIV-side V-to-C tpush must materialise a fractal-layout adapter move")
       .def("requires_runtime_subblock_bridge", &BackendHandler::RequiresRuntimeSubblockBridge,

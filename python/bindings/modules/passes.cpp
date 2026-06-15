@@ -307,11 +307,6 @@ void BindPass(nb::module_& m) {
              "Variables with non-overlapping lifetimes in the same memory space can share MemRef objects.\n"
              "Handles nested control flow (for-loops, if/else branches) for accurate lifetime tracking.");
 
-  passes.def("legalize_pto_buffer_reuse", &pass::LegalizePTOBufferReuse,
-             "Create a PTO buffer reuse legalisation pass\n\n"
-             "After generic MemoryReuse, detects illegal cross-type MemRef sharing\n"
-             "that PTO codegen cannot express and splits such MemRefs.");
-
   passes.def("allocate_memory_addr", &pass::AllocateMemoryAddr,
              "Create an allocate memory address pass\n\n"
              "Allocates real memory addresses for existing alloc operations.\n"

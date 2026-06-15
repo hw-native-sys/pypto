@@ -477,7 +477,7 @@ too; entry `True` + inline `False` is legal and just nests hand scopes
 inside compiler AUTO scopes). `.incore` / `.opaque` reject it — they
 outline into separate kernels. It specializes into
 `@pl.function(..., auto_scope=False)` — see the
-[MaterializeRuntimeScopes pass](../dev/passes/40-materialize_runtime_scopes.md)
+[MaterializeRuntimeScopes pass](../dev/passes/39-materialize_runtime_scopes.md)
 for the resulting scope-placement semantics.
 
 ### `@pl.inline`
@@ -665,8 +665,7 @@ The `Default` strategy runs these passes in order:
 15. **ExpandMixedKernel** — split mixed kernels when needed
 16. **InitMemRef** — assign memory spaces and insert buffer allocations
 17. **MemoryReuse** — share buffers with non-overlapping lifetimes
-18. **LegalizePTOBufferReuse** — legalize PTO buffer reuse patterns
-19. **AllocateMemoryAddr** — assign concrete memory addresses
+18. **AllocateMemoryAddr** — assign concrete memory addresses
 
 ### `JITFunction.compile()` (for `@pl.jit` kernels)
 
