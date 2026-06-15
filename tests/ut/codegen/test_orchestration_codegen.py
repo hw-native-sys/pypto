@@ -1656,6 +1656,72 @@ class TestOrchestration:
         # tensor.dim generates int64_t assignment
         assert "int64_t d0 = 64" in code
 
+    def test_dynamic_gm_pipe_buffer_alloc_follows_its_size_local(self):
+        """A dynamically-sized injected GM pipe buffer must not be hoisted above
+        the body-local it is sized by (issue #1768).
+
+        A cube matmul feeding a vector op, fused into ONE ``pl.spmd`` scope with
+        a dynamic block count, makes ``InjectGMPipeBuffer`` add a placeholder
+        ``tensor.create([1])`` whose *real* size is ``slot_size * (m // ROW)``.
+        That size references the body-local ``m = orch_args.tensor(0).shapes[0]``.
+        The placeholder's IR shape is constant, so the generic hoist guard cannot
+        see the dependency; the size-override branch must route the alloc to the
+        per-op path so it is emitted after ``m`` rather than at the scope top
+        (which produced ``'m' was not declared in this scope``).
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        K = 64
+        SPMD_N = 16
+        ROW_TILE = 16
+        M_DYN = pl.dynamic("M_DYN")
+
+        @pl.program
+        class DynPipeProgram:
+            @pl.function(type=pl.FunctionType.Opaque)
+            def main(
+                self,
+                a: pl.Tensor[[M_DYN, K], pl.FP32],
+                b: pl.Tensor[[K, SPMD_N], pl.FP32],
+                out: pl.Tensor[[M_DYN, SPMD_N], pl.FP32],
+            ) -> pl.Tensor[[M_DYN, SPMD_N], pl.FP32]:
+                m = pl.tensor.dim(a, 0)
+                for ob in pl.spmd(m // ROW_TILE, name_hint="hc"):
+                    m0 = ob * ROW_TILE
+                    a_slice = pl.slice(a, [ROW_TILE, K], [m0, 0])
+                    a_add = pl.add(a_slice, 1.0)  # vector produces matmul operand (V->C)
+                    c_tile = pl.matmul(a_add, b)  # cube
+                    c_vec = pl.add(c_tile, 1.0)  # vector consumes matmul result (C->V)
+                    out = pl.assemble(out, c_vec, [m0, 0])
+                return out
+
+        # VerificationLevel.NONE: a dynamic ``pl.spmd`` block count lands on the
+        # outlined Spmd function as a ``core_num`` attr that references a local
+        # defined in the *caller* Orchestration function. The printer emits that
+        # attr verbatim, but the roundtrip parser rejects the standalone function
+        # (the var is out of scope) — a known print/parse gap unrelated to the
+        # codegen ordering under test here.
+        with passes.PassContext([], passes.VerificationLevel.NONE):
+            program = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(DynPipeProgram)
+        orch_func = next(
+            f for f in program.functions.values() if f.func_type == ir.FunctionType.Orchestration
+        )
+        code = codegen.generate_orchestration(program, orch_func).code
+
+        # The pipe-buffer size must genuinely be dynamic (references the local),
+        # otherwise the test would pass vacuously on a constant size.
+        size_decl = re.search(r"gm_pipe_buffer_\w+_ci_shapes\[1\] = \{(.+?)\};", code)
+        assert size_decl is not None, code
+        assert "/ 16" in size_decl.group(1), size_decl.group(1)
+
+        # The body-local that sizes the buffer must be declared before the alloc.
+        m_decl = re.search(r"int64_t (\w+) = \(int64_t\)orch_args\.tensor\(0\)\.shapes\[0\];", code)
+        assert m_decl is not None, code
+        m_name = m_decl.group(1)
+        assert m_name in size_decl.group(1), (m_name, size_decl.group(1))
+        assert code.index(f"int64_t {m_name} =") < code.index("gm_pipe_buffer"), code
+
     def test_for_loop_with_slice(self):
         """Test for loop + tensor.slice: simplified paged attention pattern.
 

@@ -2160,6 +2160,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   struct GMPipeCreateUse {
     FunctionPtr callee;
     std::string core_num_expr;
+    ExprPtr core_num_node;
   };
 
   [[nodiscard]] std::optional<GMPipeCreateUse> ResolveGMPipeCreateUse(const std::vector<StmtPtr>& stmts,
@@ -2209,7 +2210,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
       if (core_num_expr) {
         rendered_core_num = RenderLaunchCoreNum(core_num_expr);
       }
-      return GMPipeCreateUse{callee_func, rendered_core_num};
+      return GMPipeCreateUse{callee_func, rendered_core_num, core_num_expr};
     }
     return std::nullopt;
   }
@@ -2307,6 +2308,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
           size_expr = "static_cast<uint32_t>((" + size_expr + ") * (" + core_num_expr + "))";
         }
         tensor_create_size_expr_by_emit_name_[emit_var] = size_expr;
+        // Keep the create in body order when core_num is computed from a body-local.
+        if (ExprRefsAnyOf(create_use->core_num_node, locally_defined)) {
+          declared_var_ptrs_.erase(assign->var_.get());
+          locally_defined.insert(assign->var_.get());
+          continue;
+        }
       }
       creates.push_back({emit_var, call});
       batched_create_stmts_.insert(stmt.get());
