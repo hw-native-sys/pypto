@@ -872,9 +872,11 @@ class TestViewOps:
         """Retargeting a sharing group must preserve per-member subview offsets (issue #1723).
 
         ``dead`` dies before ``src``, so ``src`` (and its transpose/slice/reshape
-        view group) retargets onto ``dead``'s buffer. The two per-row slices sit
-        at byte offsets 0 and 64 within the group; after reuse they must keep
-        those distinct offsets, not collapse onto the target's base offset.
+        view group) retargets onto ``dead``'s buffer. ``srcT`` transposes the
+        *whole* ``src`` tile (input is not a sub-region), so it stays in-place and
+        joins the group. The two per-row slices sit at byte offsets 0 and 64
+        within the group; after reuse they must keep those distinct offsets, not
+        collapse onto the target's base offset.
         """
 
         @pl.program
@@ -919,7 +921,9 @@ class TestViewOps:
         # src retargets onto dead's buffer (reuse actually happened).
         assert members["src"][0] == members["dead"][0]
         base = members["dead"][0]
-        # The whole view group lives on that one base.
+        # srcT transposes the whole src tile (input is not a sub-region of a
+        # larger buffer), so it stays in-place and the whole view group lives on
+        # that one base.
         for name in ("srcT", "s0", "r0", "s1", "r1"):
             assert members[name][0] == base, f"{name} not on shared base {base}"
         # Row 0 slice/reshape at offset 0; row 1 slice/reshape at offset 64 — the

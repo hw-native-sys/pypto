@@ -58,6 +58,15 @@ bool IsViewOperation(const std::string& op_name) {
   return registry.GetEntry(op_name).OutputMemoryInheritsInput();
 }
 
+// Whether an inherit-input op *permutes* data rather than just reinterpreting
+// it (tile.transpose).  A pure metadata view (slice/reshape/extract/...) may
+// alias any sub-region of its input's buffer, but a permuting op's output must
+// not alias a sub-region of a larger live buffer: its fractal-padded write
+// would clobber the buffer's other tiles.  Whole-tile permuting inputs are
+// fine (the op's scratch tmp stages the data), so this only gates the
+// sub-region case in InitMemRef below.
+bool IsDataPermutingInheritOp(const std::string& op_name) { return op_name == "tile.transpose"; }
+
 // Check if an operation's output should reuse the MemRef of a specific input argument.
 // Returns the input arg index whose MemRef to share, or nullopt.
 std::optional<size_t> GetOutputReusesInputArg(const std::string& op_name) {
@@ -129,6 +138,10 @@ class InitMemRefMutator : public IRMutator {
 
     auto base =
         std::make_shared<Var>(BuildBasePtrName(*memory_space, next_id_++), GetPtrType(), Span::unknown());
+    // Remember the full allocation size of this base so InitMemRef can tell
+    // whether a later view is a sub-region of a larger buffer (used by the
+    // transpose in-place hazard guard below).
+    base_alloc_size_[base.get()] = size_bytes;
     return std::make_shared<MemRef>(base, static_cast<int64_t>(0), size_bytes);
   }
 
@@ -288,18 +301,31 @@ class InitMemRefMutator : public IRMutator {
       LOG_DEBUG << "Processing AssignStmt for " << op->var_->name_hint_ << " with call to "
                 << call->op_->name_;
 
-      // Handle view operations: output should share MemRef with input tile
+      // Handle view operations: output should share MemRef with input tile.
+      // A pure metadata view (slice/reshape/...) inherits unconditionally.  A
+      // permuting inherit-input op — tile.transpose — may inherit its input's
+      // buffer only when the input is a *whole* tile: if the input is a
+      // sub-region of a larger live buffer, the fractal-padded transpose write
+      // would clobber the buffer's other regions (e.g. neighbouring per-page
+      // tiles), so it falls through to a fresh buffer.  When the input is the
+      // whole buffer the in-place transpose is safe (its scratch tmp stages the
+      // data and there is no other data to clobber), preserving the memory
+      // saving.
       if (IsViewOperation(call->op_->name_) && call->args_.size() > 0) {
         LOG_DEBUG << "Detected view operation: " << call->op_->name_;
         // Get the input tile (first argument) after mutation
         auto new_call = std::dynamic_pointer_cast<const Call>(new_value);
-        if (new_call) {
-          auto result = ShareMemRefFrom(new_call->args_[0], op, new_value);
-          if (result) {
-            LOG_DEBUG << "Sharing MemRef from input tile to " << op->var_->name_hint_;
-            return result;
+        if (new_call && !new_call->args_.empty()) {
+          const bool may_inherit =
+              !IsDataPermutingInheritOp(call->op_->name_) || !InputIsSubRegion(new_call->args_[0]);
+          if (may_inherit) {
+            auto result = ShareMemRefFrom(new_call->args_[0], op, new_value);
+            if (result) {
+              LOG_DEBUG << "Sharing MemRef from input tile to " << op->var_->name_hint_;
+              return result;
+            }
+            LOG_DEBUG << "Input tile has no MemRef yet";
           }
-          LOG_DEBUG << "Input tile has no MemRef yet";
         }
       }
 
@@ -475,7 +501,27 @@ class InitMemRefMutator : public IRMutator {
     return {std::move(patched), changed};
   }
 
+  // Whether @p input is a sub-region of a larger buffer (a view/slice whose
+  // MemRef covers only part of its base allocation, or sits at a non-zero
+  // offset).  A not-in-place-safe inherit-input op (tile.transpose) may share
+  // its input's buffer only when the input is a whole tile — writing the
+  // permuted result at a sub-offset of a larger live buffer would clobber the
+  // buffer's other regions (e.g. neighbouring per-page tiles).
+  bool InputIsSubRegion(const ExprPtr& input) const {
+    auto tile = As<TileType>(input->GetType());
+    if (!tile || !tile->memref_.has_value()) return false;
+    const auto& mr = tile->memref_.value();
+    if (!mr || !mr->base_) return false;
+    if (auto off = As<ConstInt>(mr->byte_offset_)) {
+      if (off->value_ != 0) return true;
+    }
+    auto it = base_alloc_size_.find(mr->base_.get());
+    if (it == base_alloc_size_.end()) return false;  // base size unknown — assume whole
+    return mr->size_ < it->second;
+  }
+
   std::map<VarPtr, VarPtr> var_map_;
+  std::map<const Var*, uint64_t> base_alloc_size_;  ///< base ptr -> full allocation size
   uint64_t next_id_ = 0;
 };
 
