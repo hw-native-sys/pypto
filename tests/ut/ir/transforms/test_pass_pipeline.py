@@ -13,7 +13,6 @@ import re
 
 import pypto.language as pl
 import pytest
-
 from pypto import DataType, ir, passes
 
 
