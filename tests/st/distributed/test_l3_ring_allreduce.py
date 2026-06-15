@@ -94,24 +94,23 @@ def _build_ring_allreduce_program(n_ranks: int):
             """
             ctx = pld.get_comm_ctx(scratch)
             my_rank = pld.rank(ctx)
-            nranks = pld.nranks(ctx)
-            left = (my_rank - 1 + nranks) % nranks
+            left = (my_rank - 1 + n_ranks) % n_ranks
 
             # Phase 1: stage-in — copy each local input chunk into scratch.
-            for c in pl.range(nranks):
+            for c in pl.range(n_ranks):
                 src_tile = pl.load(inp, [0, c * chunk_elems], [1, chunk])
                 pl.store(src_tile, [0, c * chunk_elems], scratch)
 
             # Phase 2: reduce-scatter — (NR−1) ring steps.
             # s is 0-indexed; step = s + 1 is the 1-indexed ring step.
-            for s in pl.range(nranks - 1):
+            for s in pl.range(n_ranks - 1):
                 step = s + 1
-                recv_add_idx = (my_rank - step - 1 + nranks) % nranks
-                left_send_idx = (left - step + nranks) % nranks
+                recv_add_idx = (my_rank - step - 1 + n_ranks) % n_ranks
+                left_send_idx = (left - step + n_ranks) % n_ranks
                 rs_round = s
 
                 # Barrier — every rank notifies every peer, then waits on every peer.
-                for peer in pl.range(nranks):
+                for peer in pl.range(n_ranks):
                     if peer != my_rank:
                         pld.system.notify(
                             signal,
@@ -120,7 +119,7 @@ def _build_ring_allreduce_program(n_ranks: int):
                             value=1,
                             op=pld.NotifyOp.AtomicAdd,
                         )
-                for peer in pl.range(nranks):
+                for peer in pl.range(n_ranks):
                     if peer != my_rank:
                         pld.system.wait(
                             signal=signal,
@@ -141,14 +140,14 @@ def _build_ring_allreduce_program(n_ranks: int):
                 pl.store(acc, [0, recv_add_idx * chunk_elems], scratch)
 
             # Phase 3: allgather — (NR−1) ring steps.
-            for s in pl.range(nranks - 1):
+            for s in pl.range(n_ranks - 1):
                 step = s + 1
-                recv_idx = (my_rank - step + nranks) % nranks
-                left_send_idx = (left - step + 1 + nranks) % nranks
-                ag_round = (nranks - 1) + s
+                recv_idx = (my_rank - step + n_ranks) % n_ranks
+                left_send_idx = (left - step + 1 + n_ranks) % n_ranks
+                ag_round = (n_ranks - 1) + s
 
                 # Barrier.
-                for peer in pl.range(nranks):
+                for peer in pl.range(n_ranks):
                     if peer != my_rank:
                         pld.system.notify(
                             signal,
@@ -157,7 +156,7 @@ def _build_ring_allreduce_program(n_ranks: int):
                             value=1,
                             op=pld.NotifyOp.AtomicAdd,
                         )
-                for peer in pl.range(nranks):
+                for peer in pl.range(n_ranks):
                     if peer != my_rank:
                         pld.system.wait(
                             signal=signal,
@@ -176,7 +175,7 @@ def _build_ring_allreduce_program(n_ranks: int):
                 pl.store(recv, [0, recv_idx * chunk_elems], scratch)
 
             # Phase 4: stage-out — write concatenated chunks into output.
-            for c in pl.range(nranks):
+            for c in pl.range(n_ranks):
                 src_tile = pl.load(scratch, [0, c * chunk_elems], [1, chunk])
                 pl.store(src_tile, [0, c * chunk_elems], out)
 
