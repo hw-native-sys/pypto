@@ -103,7 +103,7 @@ Recommended layout inside that folder:
 
 ```text
 build_output/incore_<kernel>_<source>_<ts>/
-  <kernel>.json    cleaned per-pipe trace (the deliverable)
+  <kernel>.clean.json    cleaned per-pipe trace (the deliverable)
   instr_metrics.json     per-instruction pipe / cycles / vector-utilization
   raw_simulator/         visualize_data.bin + per-core *_instr_exe.csv  (for re-analysis)
   summary.txt            provenance (source script, wired workload, per-pipe breakdown)
