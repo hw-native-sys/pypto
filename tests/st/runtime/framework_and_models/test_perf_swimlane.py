@@ -17,7 +17,6 @@ Requires ``--enable-l2-swimlane`` to be set; pass ``--platform=a2a3`` (or
 automatically when ``--enable-l2-swimlane`` is not passed.
 """
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -108,7 +107,14 @@ def swimlane_file(test_runner) -> Path:
 
 @pytest.fixture(scope="session")
 def swimlane_data(swimlane_file: Path) -> dict:
-    return json.loads(swimlane_file.read_text())
+    # Runtime JSON v2 (simpler #985): the host now dumps raw cycle-domain
+    # streams (``aicore_tasks`` / ``aicpu_tasks`` + ``metadata``); the unified
+    # ``tasks`` view (cycle→us conversion, AICore/AICPU join) is rebuilt in
+    # Python by the canonical ``swimlane_converter.read_perf_data``. Validate
+    # the consumed view rather than the raw on-disk dump.
+    from simpler_setup.tools.swimlane_converter import read_perf_data  # noqa: PLC0415
+
+    return read_perf_data(str(swimlane_file))
 
 
 class TestSwimlaneOutput:
