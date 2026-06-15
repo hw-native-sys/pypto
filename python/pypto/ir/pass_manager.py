@@ -163,7 +163,11 @@ class PassManager:
             # land alongside the codegen cleanup in a later phase (P6/P7).
             ("InitMemRef", lambda: passes.init_mem_ref()),
             ("MemoryReuse", lambda: passes.memory_reuse()),
-            ("LegalizePTOBufferReuse", lambda: passes.legalize_pto_buffer_reuse()),
+            # EXPERIMENT (do not merge): temporarily disable LegalizePTOBufferReuse
+            # to discover which CI cases actually depend on it. The signature-split
+            # path is suspected unreachable given MemoryReuse's exact-shape gating;
+            # the only live job is the Ascend910B load+tpop_from_aic hazard split.
+            # ("LegalizePTOBufferReuse", lambda: passes.legalize_pto_buffer_reuse()),
             ("AllocateMemoryAddr", lambda: passes.allocate_memory_addr()),
             ("FoldNoOpReshape", lambda: passes.fold_no_op_reshape()),
             ("FuseCreateAssembleToSlice", lambda: passes.fuse_create_assemble_to_slice()),
