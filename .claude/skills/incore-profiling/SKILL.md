@@ -88,7 +88,9 @@ It writes `trace.clean.json` (pipeline lanes in dataflow order
 MTE2→MTE1→CUBE→VECTOR→FIXPIPE→MTE3, sync flags re-anchored as flow arrows) and
 `instr_metrics.json` (per-instruction pipe / cycles / vector-utilization). The
 per-pipe cycle breakdown is the fastest way to spot a degenerate trace
-(`CUBE=0` cycles — see **Caveats**).
+(`CUBE=0` cycles — see **Caveats**). Rename the cleaned trace to
+`<kernel>.clean.json` straight away (see below) so multiple profiled kernels stay
+distinguishable when downloaded side by side for Perfetto.
 
 ### Where to put the cleaned trace
 
@@ -101,16 +103,25 @@ Recommended layout inside that folder:
 
 ```text
 build_output/incore_<kernel>_<source>_<ts>/
-  clean/          trace.clean.json + instr_metrics.json   (the deliverable)
-  raw_simulator/  visualize_data.bin + per-core *_instr_exe.csv  (for re-analysis)
-  summary.txt     provenance (source script, wired workload, per-pipe breakdown)
+  <kernel>.json    cleaned per-pipe trace (the deliverable)
+  instr_metrics.json     per-instruction pipe / cycles / vector-utilization
+  raw_simulator/         visualize_data.bin + per-core *_instr_exe.csv  (for re-analysis)
+  summary.txt            provenance (source script, wired workload, per-pipe breakdown)
 ```
 
 `build_output/` is gitignored, so these artifacts stay local. The `summary.txt`
 must record the wired workload (e.g. `fa_total`, work-table, `seq_lens`, scalar
 args) when real intermediates were patched in — otherwise the numbers are not
-reproducible. Pass `-o build_output/incore_<kernel>_<source>_<ts>/clean` to
-`clean_sim_trace` directly so the output lands there in the first place.
+reproducible. Pass `-o build_output/incore_<kernel>_<source>_<ts>` to
+`clean_sim_trace` so the output lands in the run folder directly (no nested
+subfolder), then rename its `trace.clean.json` to `<kernel>.clean.json` — the
+kernel-name prefix keeps multiple profiled kernels distinguishable when several
+`.clean.json` files are downloaded together and opened in Perfetto:
+
+```bash
+mv build_output/incore_<kernel>_<source>_<ts>/trace.clean.json \
+   build_output/incore_<kernel>_<source>_<ts>/<kernel>.clean.json
+```
 
 ## Troubleshooting
 
