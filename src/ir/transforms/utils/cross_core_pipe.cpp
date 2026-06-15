@@ -299,10 +299,13 @@ AutomaticPipeSetup BuildAutomaticPipeSetup(const std::string& func_name, const s
         << "Cross-core slot_num override must be positive: " << slot_num_override.value();
   }
   const int effective_slot_num = slot_num_override.value_or(GetSlotNumForDirMask(dir_mask));
-  const int64_t buffer_size = common_slot_size.value() * effective_slot_num;
-  INTERNAL_CHECK_SPAN(common_slot_size.value() <= std::numeric_limits<int>::max(), span)
-      << "Cross-core slot_size out of range: " << common_slot_size.value();
-  const int slot_size_bytes = static_cast<int>(common_slot_size.value());
+  // Bound-check the slot size before multiplying so an oversized inferred size
+  // can't overflow the int64 buffer_size computation.
+  const int64_t slot_size_i64 = common_slot_size.value();
+  INTERNAL_CHECK_SPAN(slot_size_i64 >= 0 && slot_size_i64 <= std::numeric_limits<int>::max(), span)
+      << "Cross-core slot_size out of range: " << slot_size_i64;
+  const int slot_size_bytes = static_cast<int>(slot_size_i64);
+  const int64_t buffer_size = slot_size_i64 * effective_slot_num;
   AutomaticPipeSetup setup;
 
   std::shared_ptr<Var> aic_v2c_reserve_var;

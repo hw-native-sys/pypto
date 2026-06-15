@@ -627,9 +627,7 @@ def test_split_slot_num_override_sizes_c2v_ring_on_a2a3():
 
     @pl.program
     class Before:
-        @pl.function(
-            type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN, "slot_num": 16}
-        )
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN, "slot_num": 16})
         def main_incore_0(
             self,
             x: pl.Tensor[[16, 128], pl.BF16],
@@ -652,9 +650,7 @@ def test_split_slot_num_override_sizes_c2v_ring_on_a2a3():
 
     @pl.program
     class Expected:
-        @pl.function(
-            type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN, "slot_num": 16}
-        )
+        @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN, "slot_num": 16})
         def main_incore_0_aic(
             self,
             x: pl.Tensor[[16, 128], pl.BF16],
@@ -682,9 +678,7 @@ def test_split_slot_num_override_sizes_c2v_ring_on_a2a3():
             z_tile = pl.matmul(x_left, y_right)
             pl.tpush_to_aiv(z_tile, split=0)
 
-        @pl.function(
-            type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN, "slot_num": 16}
-        )
+        @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN, "slot_num": 16})
         def main_incore_0_aiv(
             self,
             x: pl.Tensor[[16, 128], pl.BF16],
@@ -706,9 +700,7 @@ def test_split_slot_num_override_sizes_c2v_ring_on_a2a3():
             pl.tfree_to_aic(z_vec)
             return out_0_store
 
-        @pl.function(
-            type=pl.FunctionType.Group, attrs={"split": pl.SplitMode.UP_DOWN, "slot_num": 16}
-        )
+        @pl.function(type=pl.FunctionType.Group, attrs={"split": pl.SplitMode.UP_DOWN, "slot_num": 16})
         def main_incore_0(
             self,
             x: pl.Tensor[[16, 128], pl.BF16],

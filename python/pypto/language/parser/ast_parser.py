@@ -3229,9 +3229,7 @@ class ASTParser:
                     )
                 seen_split = True
                 split_mode, slot_num = parsed
-                if slot_num is not None and (
-                    split_mode is None or split_mode == ir.SplitMode.NONE
-                ):
+                if slot_num is not None and (split_mode is None or split_mode == ir.SplitMode.NONE):
                     raise ParserSyntaxError(
                         "pl.split(slot_num=...) is only valid with a cross-core split mode",
                         span=self.span_tracker.get_span(entry),
@@ -3748,9 +3746,7 @@ class ASTParser:
                     )
                 sync_start = kw.value.value
             elif kw.arg == "optimizations":
-                split_mode, split_slot_num = self._parse_spmd_optimizations_list(
-                    kw.value, span_anchor=anchor
-                )
+                split_mode, split_slot_num = self._parse_spmd_optimizations_list(kw.value, span_anchor=anchor)
             elif kw.arg == "deps":
                 if not allow_deps:
                     raise ParserSyntaxError(
@@ -4146,7 +4142,14 @@ class ASTParser:
                         seen.add(id(t))
                 new_attrs[i] = ("dump_vars", merged)
                 return new_attrs
-        insert_at = next((i for i, (k, _) in enumerate(new_attrs) if k == "task_id_var"), len(new_attrs))
+        # Insert ``dump_vars`` before ``task_id_var`` AND before the trailing
+        # ``slot_num`` so the canonical order (dump_vars ... task_id_var,
+        # slot_num) matches what a print -> reparse rebuilds via _parse_at_meta +
+        # _append_split_slot_num_attr; structural_equal compares attrs positionally.
+        insert_at = next(
+            (i for i, (k, _) in enumerate(new_attrs) if k in {"task_id_var", "slot_num"}),
+            len(new_attrs),
+        )
         new_attrs.insert(insert_at, ("dump_vars", tagged))
         return new_attrs
 

@@ -95,8 +95,12 @@ def split(mode: SplitMode, *, slot_num: int | None = None) -> Split:
     Raises:
         ValueError: If ``slot_num`` is set but not positive.
     """
-    if slot_num is not None and slot_num <= 0:
-        raise ValueError(f"pl.split slot_num must be positive, got {slot_num}")
+    if slot_num is not None:
+        # bool is a subclass of int — reject it so True/False can't pose as a depth.
+        if not isinstance(slot_num, int) or isinstance(slot_num, bool):
+            raise ValueError(f"pl.split slot_num must be a positive integer, got {slot_num!r}")
+        if slot_num <= 0:
+            raise ValueError(f"pl.split slot_num must be a positive integer, got {slot_num}")
     return Split(mode=mode, slot_num=slot_num)
 
 
