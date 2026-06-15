@@ -257,8 +257,11 @@ def _register_callables(
     via COW (runtime PR #710); the emitted host_orch then dispatches via cids —
     ``orch.submit_sub(sub_ids[name], …)`` / ``orch.submit_next_level(callables[name], …)``.
     """
-    sub_ids: dict[str, int] = {name: w.register(fn) for name, fn in sub_worker_fns.items()}
-    chip_cids: dict[str, int] = {name: w.register(cc) for name, cc in chip_callables.items()}
+    # ``w.register`` returns an opaque ``CallableHandle`` (runtime #891); typed
+    # ``Any`` here and threaded straight back into ``submit_sub`` /
+    # ``submit_next_level``, which accept the handle.
+    sub_ids: dict[str, Any] = {name: w.register(fn) for name, fn in sub_worker_fns.items()}
+    chip_cids: dict[str, Any] = {name: w.register(cc) for name, cc in chip_callables.items()}
     return sub_ids, chip_cids
 
 
@@ -370,8 +373,8 @@ def _dispatch(
     w: Any,
     entry_fn: Any,
     tensors: dict[str, Any],
-    chip_cids: dict[str, int],
-    sub_ids: dict[str, int],
+    chip_cids: dict[str, Any],
+    sub_ids: dict[str, Any],
     call_config: Any,
     device_nums: int,
 ) -> Any:

@@ -144,12 +144,14 @@ class ChipWorker(Worker):
             runtime=runtime,
         )
         self._initialized = False
-        # Maps id(chip_callable) -> cid returned by simpler Worker.register().
-        # Simpler's L2 ABI now requires every ChipCallable to be registered
-        # before dispatch (see runtime PR #710); we cache per-callable cids
-        # so repeated runs of the same compiled program inside one
-        # `with ChipWorker:` block re-use the same registration.
-        self._cid_cache: dict[int, int] = {}
+        # Maps id(chip_callable) -> handle returned by simpler Worker.register()
+        # (an opaque ``CallableHandle`` since runtime #891; typed ``Any`` to
+        # avoid a hard import of the simpler type). Simpler's L2 ABI requires
+        # every ChipCallable to be registered before dispatch (see runtime PR
+        # #710); we cache per-callable handles so repeated runs of the same
+        # compiled program inside one `with ChipWorker:` block re-use the same
+        # registration.
+        self._cid_cache: dict[int, Any] = {}
         # Live RegistrationHandles, so close() can mark them closed
         # synchronously. Weak refs so handles GC'd before close() don't
         # keep the dict alive forever.
@@ -522,7 +524,7 @@ class RegistrationHandle:
         self,
         worker: Worker,
         compiled: Any,
-        cid: int,
+        cid: Any,
     ) -> None:
         # Strong ref to the worker so the handle stays usable across the
         # parent Worker's scope; the worker tracks the handle weakly so this
@@ -533,7 +535,7 @@ class RegistrationHandle:
         self._closed = False
 
     @property
-    def cid(self) -> int:
+    def cid(self) -> Any:
         return self._cid
 
     @property
