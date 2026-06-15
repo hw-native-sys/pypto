@@ -86,6 +86,45 @@ std::string MemoryReport::Format() const {
          << "|  " << std::setw(6) << usage_str << "  "
          << "|  " << entry.count << "\n";
     }
+
+    // Per-buffer detail: one block per space, sized buffers summing to `Used`.
+    for (const auto& entry : func.entries) {
+      bool has_any = false;
+      for (const auto& buf : func.buffers) {
+        if (buf.space == entry.space) {
+          has_any = true;
+          break;
+        }
+      }
+      if (!has_any) continue;
+
+      os << "\n  Buffers (" << MemorySpaceToString(entry.space)
+         << ")  -- base allocations making up Used (gaps between ranges = alignment)\n";
+      os << "    " << std::left << std::setw(18) << "Name"
+         << "|  " << std::setw(11) << "Size"
+         << "|  " << std::setw(25) << "Address range"
+         << "|  " << "Live range" << "\n";
+      os << "    ------------------+-------------+-------------------------+------------\n";
+
+      for (const auto& buf : func.buffers) {
+        if (buf.space != entry.space) continue;
+        std::string size_str = FormatBytes(buf.size);
+        std::string addr_str;
+        if (buf.allocated) {
+          std::ostringstream a;
+          a << "[" << buf.offset << ", " << (buf.offset + buf.size) << ")";
+          addr_str = a.str();
+        } else {
+          addr_str = "(unallocated)";
+        }
+        std::ostringstream live;
+        live << "[" << buf.live_start << ", " << buf.live_end << "]";
+
+        os << "    " << std::left << std::setw(18) << buf.name << "|  " << std::right << std::setw(9)
+           << size_str << "  "
+           << "|  " << std::left << std::setw(25) << addr_str << "|  " << live.str() << "\n";
+      }
+    }
   }
 
   return os.str();

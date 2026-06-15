@@ -9,8 +9,11 @@
 
 """Unit tests for PassPipeline and PassContext."""
 
+import re
+
 import pypto.language as pl
 import pytest
+
 from pypto import DataType, ir, passes
 
 
@@ -498,6 +501,48 @@ class TestReportInstrument:
         assert "Functions: 2 compute functions" in report_text
         assert "vector_kernel" in report_text
         assert "cube_kernel" in report_text
+
+    def test_memory_report_buffer_detail(self, tmp_path):
+        """Memory report includes a per-buffer breakdown summing to Used."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.AIV)
+            def vector_kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                x_tile = pl.load(x, [0], [64])
+                y_tile = pl.add(x_tile, x_tile)
+                z_tile = pl.add(y_tile, x_tile)
+                out_0: pl.Tensor[[64], pl.FP32] = pl.store(z_tile, [0], out_0)
+                return out_0
+
+        report_dir = str(tmp_path / "report")
+        (tmp_path / "report").mkdir()
+        instrument = passes.ReportInstrument(report_dir)
+        instrument.enable_report(passes.ReportType.Memory, "AllocateMemoryAddr")
+
+        pipeline = passes.PassPipeline()
+        pipeline.add_pass(passes.init_mem_ref())
+        pipeline.add_pass(passes.allocate_memory_addr())
+
+        with passes.PassContext([instrument]):
+            pipeline.run(Program)
+
+        report_text = (tmp_path / "report" / "memory_after_AllocateMemoryAddr.txt").read_text()
+
+        # Per-buffer detail block for the Vec space, with the header columns.
+        assert "Buffers (Vec)" in report_text
+        assert "Address range" in report_text
+        assert "Live range" in report_text
+
+        # Three Vec scratch buffers are laid out contiguously from address 0.
+        assert "[0, 256)" in report_text
+        # Each per-buffer row carries a bracketed live range (statement indices).
+        buffer_section = report_text.split("Buffers (Vec)", 1)[1]
+        assert re.search(r"\[\d+, \d+\]", buffer_section) is not None
 
 
 class TestRoundtripInstrument:

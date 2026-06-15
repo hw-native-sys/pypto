@@ -101,9 +101,26 @@ class MemoryReport : public Report {
     uint32_t count;  ///< Number of MemRef allocations
   };
 
+  /// Per-buffer (base allocation) detail. One entry per distinct `base_` Ptr;
+  /// view MemRefs sharing a base are folded into their base's slot. Buffer sizes
+  /// within a space account for that space's `used` high-water mark — they sum
+  /// to `used` for a gap-free zero-based layout, and fall short of it by the
+  /// alignment padding the allocator inserts between slots (visible as gaps
+  /// between consecutive address ranges).
+  struct BufferDetail {
+    std::string name;  ///< Base allocation name (root MemRef / base Ptr name)
+    MemorySpace space;
+    bool allocated;       ///< Whether the base address is a non-negative ConstInt
+    uint64_t offset;      ///< Base byte address (min byte_offset among members)
+    uint64_t size;        ///< Slot size in bytes (max size among members)
+    uint32_t live_start;  ///< First statement index referencing this base
+    uint32_t live_end;    ///< Last statement index referencing this base
+  };
+
   struct FunctionMemoryUsage {
     std::string function_name;
     std::vector<MemorySpaceUsage> entries;
+    std::vector<BufferDetail> buffers;  ///< Per-base detail, sorted by (space, offset)
   };
 
   MemoryReport(std::string pass_name, std::string backend_name, std::vector<FunctionMemoryUsage> functions);
