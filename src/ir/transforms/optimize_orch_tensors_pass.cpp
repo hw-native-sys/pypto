@@ -18,6 +18,7 @@
 #include <iterator>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -1906,6 +1907,7 @@ class OutWindowExternalizer {
   };
 
   enum class WindowRewritePolicy {
+    Auto,
     All,
     InputsOnly,
     OutputsOnly,
@@ -1913,18 +1915,19 @@ class OutWindowExternalizer {
     None,
   };
 
-  explicit OutWindowExternalizer(OutputWindowPolicy output_window_policy = OutputWindowPolicy::ExactPieces,
-                                 WindowRewritePolicy window_rewrite_policy = WindowRewritePolicy::All)
+  explicit OutWindowExternalizer(OutputWindowPolicy output_window_policy = OutputWindowPolicy::CoalescePieces,
+                                 WindowRewritePolicy window_rewrite_policy = WindowRewritePolicy::Auto)
       : output_window_policy_(output_window_policy), window_rewrite_policy_(window_rewrite_policy) {}
 
   ProgramPtr Run(const ProgramPtr& program) {
     auto analyses = Analyze(program);
+    ApplyDebugNameFilters(program, &analyses);
     if (output_window_policy_ == OutputWindowPolicy::CoalescePieces) {
       for (auto& [_, analysis] : analyses) {
         CoalesceOutputPieces(&analysis);
       }
     }
-    ApplyWindowRewritePolicy(&analyses);
+    ApplyWindowRewritePolicy(program, &analyses);
     if (analyses.empty()) return program;
 
     auto function_lookup = BuildFunctionLookup(program);
@@ -2012,7 +2015,122 @@ class OutWindowExternalizer {
     std::vector<InputRewriteInfo> inputs;
   };
 
+  struct WindowRewriteCost {
+    int original_tensor_args = 0;
+    int rewritten_tensor_args = 0;
+    int abi_delta = 0;
+    size_t dense_piece_count = 0;
+    size_t assemble_piece_count = 0;
+    bool is_output = false;
+    bool is_multi_piece_output = false;
+    bool has_callsite_assemble = false;
+    std::string reason;
+  };
+
   using AnalysisMap = std::unordered_map<std::string, CalleeRewriteAnalysis>;
+
+  static std::vector<std::string> SplitDebugNameList(const char* value) {
+    std::vector<std::string> result;
+    if (!value) return result;
+    std::string text(value);
+    size_t start = 0;
+    while (start <= text.size()) {
+      size_t end = text.find(',', start);
+      if (end == std::string::npos) end = text.size();
+      auto token = text.substr(start, end - start);
+      auto first = token.find_first_not_of(" \t\n\r");
+      auto last = token.find_last_not_of(" \t\n\r");
+      if (first != std::string::npos) result.push_back(token.substr(first, last - first + 1));
+      if (end == text.size()) break;
+      start = end + 1;
+    }
+    return result;
+  }
+
+  static bool DebugNameTokenMatches(const std::string& name, const std::string& token) {
+    if (name.empty() || token.empty()) return false;
+    if (token.size() >= 2 && token.front() == '*' && token.back() == '*') {
+      return name.find(token.substr(1, token.size() - 2)) != std::string::npos;
+    }
+    return name == token || name == token + "__windowed";
+  }
+
+  static bool DebugNameMatches(const std::string& callee_name, const FunctionPtr& func, size_t param_index,
+                               const std::vector<std::string>& tokens) {
+    if (tokens.empty()) return false;
+    std::string param_name;
+    if (func && param_index < func->params_.size() && func->params_[param_index]) {
+      param_name = func->params_[param_index]->name_hint_;
+    }
+    for (const auto& token : tokens) {
+      if (DebugNameTokenMatches(callee_name, token)) return true;
+      if (DebugNameTokenMatches(param_name, token)) return true;
+    }
+    return false;
+  }
+
+  static bool WindowExternalizeLogEnabled() {
+    auto value = std::getenv("PYPTO_WINDOW_EXTERNALIZE_LOG");
+    if (!value) return false;
+    std::string text(value);
+    return !text.empty() && text != "0" && text != "false" && text != "False";
+  }
+
+  static std::string DebugParamName(const std::string& callee_name, const FunctionPtr& func,
+                                    size_t param_index) {
+    if (func && param_index < func->params_.size() && func->params_[param_index]) {
+      return callee_name + "." + func->params_[param_index]->name_hint_;
+    }
+    return callee_name + ".param" + std::to_string(param_index);
+  }
+
+  static void LogAutoDecision(bool accepted, const std::string& target, const WindowRewriteCost& cost) {
+    if (!WindowExternalizeLogEnabled()) return;
+    std::ostringstream os;
+    os << "[window-auto] " << (accepted ? "accept " : "reject ") << target << ": abi_delta=" << cost.abi_delta
+       << " pieces=" << cost.dense_piece_count << " assemble_pieces=" << cost.assemble_piece_count
+       << " reason=" << cost.reason;
+    LOG_INFO << os.str();
+  }
+
+  static void ApplyDebugNameFilters(const ProgramPtr& program, AnalysisMap* analyses) {
+    if (!analyses) return;
+    auto include = SplitDebugNameList(std::getenv("PYPTO_WINDOW_EXTERNALIZE_INCLUDE"));
+    auto exclude = SplitDebugNameList(std::getenv("PYPTO_WINDOW_EXTERNALIZE_EXCLUDE"));
+    if (include.empty() && exclude.empty()) return;
+    auto function_lookup = BuildFunctionLookup(program);
+
+    for (auto it = analyses->begin(); it != analyses->end();) {
+      const auto& callee_name = it->first;
+      auto func_it = function_lookup.find(callee_name);
+      auto func = func_it == function_lookup.end() ? nullptr : func_it->second;
+      auto& analysis = it->second;
+
+      analysis.outputs.erase(
+          std::remove_if(analysis.outputs.begin(), analysis.outputs.end(),
+                         [&](const OutputRewriteInfo& output) {
+                           bool matched =
+                               DebugNameMatches(callee_name, func, output.out_param_index, include);
+                           if (!include.empty() && !matched) return true;
+                           return DebugNameMatches(callee_name, func, output.out_param_index, exclude);
+                         }),
+          analysis.outputs.end());
+      analysis.inputs.erase(
+          std::remove_if(analysis.inputs.begin(), analysis.inputs.end(),
+                         [&](const InputRewriteInfo& input) {
+                           bool matched = DebugNameMatches(callee_name, func, input.in_param_index, include);
+                           if (!include.empty() && !matched) return true;
+                           return DebugNameMatches(callee_name, func, input.in_param_index, exclude);
+                         }),
+          analysis.inputs.end());
+
+      if (analysis.outputs.empty() && analysis.inputs.empty()) {
+        it = analyses->erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
 
   static DenseRegionPiece MakeDensePiece(std::vector<ExprPtr> window_shape,
                                          std::vector<ExprPtr> callsite_offsets,
@@ -2072,6 +2190,66 @@ class OutWindowExternalizer {
 
   static bool HasCoalescedOutput(const CalleeRewriteAnalysis& analysis) {
     return std::any_of(analysis.outputs.begin(), analysis.outputs.end(), HasFineAssemblePieces);
+  }
+
+  static WindowRewriteCost EstimateOutputCost(const OutputRewriteInfo& output) {
+    WindowRewriteCost cost;
+    cost.is_output = true;
+    cost.dense_piece_count = DensePieces(output).size();
+    cost.assemble_piece_count = AssemblePieces(output).size();
+    cost.is_multi_piece_output = cost.dense_piece_count > 1 || cost.assemble_piece_count > 1;
+    cost.has_callsite_assemble = HasFineAssemblePieces(output);
+    cost.original_tensor_args = 1;
+    cost.rewritten_tensor_args = static_cast<int>(cost.dense_piece_count);
+    cost.abi_delta = cost.rewritten_tensor_args - cost.original_tensor_args;
+    return cost;
+  }
+
+  static WindowRewriteCost EstimateInputCost(const InputRewriteInfo& input) {
+    WindowRewriteCost cost;
+    cost.is_output = false;
+    cost.dense_piece_count = DensePieces(input).size();
+    cost.assemble_piece_count = cost.dense_piece_count;
+    cost.original_tensor_args = 1;
+    cost.rewritten_tensor_args = static_cast<int>(cost.dense_piece_count);
+    cost.abi_delta = cost.rewritten_tensor_args - cost.original_tensor_args;
+    return cost;
+  }
+
+  static bool ShouldKeepOutputInAuto(const OutputRewriteInfo& output, WindowRewriteCost* out_cost) {
+    auto cost = EstimateOutputCost(output);
+    if (cost.abi_delta > 0) {
+      cost.reason = "abi_expanding";
+      if (out_cost) *out_cost = std::move(cost);
+      return false;
+    }
+    if (cost.is_multi_piece_output) {
+      cost.reason = "multi_piece_output";
+      if (out_cost) *out_cost = std::move(cost);
+      return false;
+    }
+    if (cost.has_callsite_assemble && cost.abi_delta >= 0) {
+      cost.reason = "assemble_without_abi_reduction";
+      if (out_cost) *out_cost = std::move(cost);
+      return false;
+    }
+
+    cost.reason = cost.abi_delta < 0 ? "abi_reducing" : "abi_neutral_single_piece";
+    if (out_cost) *out_cost = std::move(cost);
+    return true;
+  }
+
+  static bool ShouldKeepInputInAuto(const InputRewriteInfo& input, WindowRewriteCost* out_cost) {
+    auto cost = EstimateInputCost(input);
+    if (cost.abi_delta > 0) {
+      cost.reason = "abi_expanding";
+      if (out_cost) *out_cost = std::move(cost);
+      return false;
+    }
+
+    cost.reason = cost.abi_delta < 0 ? "abi_reducing" : "abi_neutral";
+    if (out_cost) *out_cost = std::move(cost);
+    return true;
   }
 
   static bool CanUseRuntimeViewDisjointness(const CalleeRewriteAnalysis& analysis) {
@@ -2135,11 +2313,38 @@ class OutWindowExternalizer {
     }
   }
 
-  void ApplyWindowRewritePolicy(AnalysisMap* analyses) const {
+  void ApplyWindowRewritePolicy(const ProgramPtr& program, AnalysisMap* analyses) const {
     if (!analyses) return;
+    auto function_lookup = BuildFunctionLookup(program);
     for (auto it = analyses->begin(); it != analyses->end();) {
+      const auto& callee_name = it->first;
       auto& analysis = it->second;
       switch (window_rewrite_policy_) {
+        case WindowRewritePolicy::Auto: {
+          auto func_it = function_lookup.find(callee_name);
+          auto func = func_it == function_lookup.end() ? nullptr : func_it->second;
+          analysis.outputs.erase(
+              std::remove_if(analysis.outputs.begin(), analysis.outputs.end(),
+                             [&](const OutputRewriteInfo& output) {
+                               WindowRewriteCost cost;
+                               bool keep = ShouldKeepOutputInAuto(output, &cost);
+                               LogAutoDecision(
+                                   keep, DebugParamName(callee_name, func, output.out_param_index), cost);
+                               return !keep;
+                             }),
+              analysis.outputs.end());
+          analysis.inputs.erase(
+              std::remove_if(analysis.inputs.begin(), analysis.inputs.end(),
+                             [&](const InputRewriteInfo& input) {
+                               WindowRewriteCost cost;
+                               bool keep = ShouldKeepInputInAuto(input, &cost);
+                               LogAutoDecision(keep, DebugParamName(callee_name, func, input.in_param_index),
+                                               cost);
+                               return !keep;
+                             }),
+              analysis.inputs.end());
+          break;
+        }
         case WindowRewritePolicy::All:
           break;
         case WindowRewritePolicy::InputsOnly:
@@ -5632,8 +5837,8 @@ class OutWindowExternalizer {
                                       func->attrs_);
   }
 
-  OutputWindowPolicy output_window_policy_ = OutputWindowPolicy::ExactPieces;
-  WindowRewritePolicy window_rewrite_policy_ = WindowRewritePolicy::All;
+  OutputWindowPolicy output_window_policy_ = OutputWindowPolicy::CoalescePieces;
+  WindowRewritePolicy window_rewrite_policy_ = WindowRewritePolicy::Auto;
 };
 
 }  // namespace
@@ -5645,7 +5850,7 @@ class OutWindowExternalizer {
 namespace pass {
 
 Pass OptimizeOrchTensors(std::string output_window_policy, std::string window_rewrite_policy) {
-  auto parsed_output_window_policy = OutWindowExternalizer::OutputWindowPolicy::ExactPieces;
+  auto parsed_output_window_policy = OutWindowExternalizer::OutputWindowPolicy::CoalescePieces;
   if (output_window_policy == "exact_pieces") {
     parsed_output_window_policy = OutWindowExternalizer::OutputWindowPolicy::ExactPieces;
   } else if (output_window_policy == "coalesce_pieces") {
@@ -5655,8 +5860,10 @@ Pass OptimizeOrchTensors(std::string output_window_policy, std::string window_re
                  << "': expected 'exact_pieces' or 'coalesce_pieces'";
   }
 
-  auto parsed_window_rewrite_policy = OutWindowExternalizer::WindowRewritePolicy::All;
-  if (window_rewrite_policy == "all") {
+  auto parsed_window_rewrite_policy = OutWindowExternalizer::WindowRewritePolicy::Auto;
+  if (window_rewrite_policy == "auto") {
+    parsed_window_rewrite_policy = OutWindowExternalizer::WindowRewritePolicy::Auto;
+  } else if (window_rewrite_policy == "all") {
     parsed_window_rewrite_policy = OutWindowExternalizer::WindowRewritePolicy::All;
   } else if (window_rewrite_policy == "inputs_only" || window_rewrite_policy == "no_outputs") {
     parsed_window_rewrite_policy = OutWindowExternalizer::WindowRewritePolicy::InputsOnly;
@@ -5668,7 +5875,7 @@ Pass OptimizeOrchTensors(std::string output_window_policy, std::string window_re
     parsed_window_rewrite_policy = OutWindowExternalizer::WindowRewritePolicy::None;
   } else {
     CHECK(false) << "Invalid window_rewrite_policy '" << window_rewrite_policy
-                 << "': expected 'all', 'inputs_only', 'outputs_only', 'no_inputs', "
+                 << "': expected 'auto', 'all', 'inputs_only', 'outputs_only', 'no_inputs', "
                     "'no_outputs', 'no_multi_piece_outputs', or 'none'";
   }
 
