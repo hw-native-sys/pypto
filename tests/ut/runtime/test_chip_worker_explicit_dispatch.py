@@ -176,13 +176,13 @@ def test_handle_unregister_marks_closed(fake_simpler_worker):
 
 
 def test_handle_unregister_does_not_release_simpler_cid(fake_simpler_worker):
-    """unregister() must NOT call simpler.unregister_callable — that's deferred to close()."""
+    """unregister() must NOT call simpler.Worker.unregister — that's deferred to close()."""
     w = ChipWorker(config=RunConfig(platform="a2a3sim"))
     compiled = _fake_compiled()
     h = w.register(compiled)
-    n0 = fake_simpler_worker.unregister_callable.call_count
+    n0 = fake_simpler_worker.unregister.call_count
     h.unregister()
-    assert fake_simpler_worker.unregister_callable.call_count == n0
+    assert fake_simpler_worker.unregister.call_count == n0
     w.close()
 
 
@@ -210,10 +210,10 @@ def test_close_releases_all_cids(fake_simpler_worker):
     b = _fake_compiled()
     w.register(a)
     w.register(b)
-    n0 = fake_simpler_worker.unregister_callable.call_count
+    n0 = fake_simpler_worker.unregister.call_count
     w.close()
-    # Two distinct cids registered → two unregister_callable calls.
-    assert fake_simpler_worker.unregister_callable.call_count - n0 == 2
+    # Two distinct cids registered → two unregister calls.
+    assert fake_simpler_worker.unregister.call_count - n0 == 2
 
 
 # ---------------------------------------------------------------------------

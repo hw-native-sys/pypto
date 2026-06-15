@@ -155,7 +155,7 @@ def _manual_dispatch(compiled, *args, device_id, config=None, call_config=None):
     try:
         cid = w.register(cc)
         w.run(cid, orch_args, cfg)
-        w.unregister_callable(cid)
+        w.unregister(cid)
     finally:
         w.close()
     return coerced, return_style

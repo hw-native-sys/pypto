@@ -181,11 +181,13 @@ class ChipWorker(Worker):
         # cid registrations / tear down the impl so the underlying free path
         # is still live.
         self._close_owned_tensors()
-        # Drop per-cid host-side state before tearing down the device so
+        # Drop per-handle host-side state before tearing down the device so
         # the underlying ChipWorker.finalize() doesn't observe stale
-        # registrations on a re-init().
+        # registrations on a re-init(). ``unregister`` accepts the opaque
+        # ``CallableHandle`` returned by ``register`` (runtime #891 renamed
+        # ``unregister_callable(cid)`` to ``unregister(handle)``).
         for cid in self._cid_cache.values():
-            self._impl.unregister_callable(cid)
+            self._impl.unregister(cid)
         self._cid_cache.clear()
         # Mark every still-alive RegistrationHandle as closed so subsequent
         # handle(...) calls raise instead of silently dispatching to a
@@ -509,7 +511,7 @@ class RegistrationHandle:
     **cid reuse semantics (L2):** Multiple :meth:`ChipWorker.register` calls
     for the same ``compiled.chip_callable`` return aliases of the same
     underlying cid. :meth:`unregister` only marks the handle closed; it does
-    NOT call ``simpler.unregister_callable``. Real cid release happens once,
+    NOT call ``simpler.Worker.unregister``. Real cid release happens once,
     in :meth:`Worker.close`. ``cid`` is informational only.
 
     **L3 note:** ``DistributedWorker`` doesn't expose a per-callable cid the
@@ -561,7 +563,7 @@ class RegistrationHandle:
     def unregister(self) -> None:
         """Mark this handle closed. Idempotent.
 
-        Does NOT call ``simpler.unregister_callable`` — other handle aliases
+        Does NOT call ``simpler.Worker.unregister`` — other handle aliases
         for the same cid would silently break. The real reverse-registration
         happens once, in :meth:`Worker.close`.
         """
