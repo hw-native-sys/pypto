@@ -27,6 +27,33 @@ opt_pass = passes.optimize_orch_tensors()
 program_opt = opt_pass(program)
 ```
 
+默认情况下，模式 5 使用：
+
+```python
+passes.optimize_orch_tensors(
+    output_window_policy="coalesce_pieces",
+    window_rewrite_policy="auto",
+)
+```
+
+`output_window_policy` 控制已证明 output pieces 的表达方式：
+
+- `exact_pieces`：每个已证明的 dense piece 保持为独立 window。
+- `coalesce_pieces`：多个 output pieces 先合并成一个 bounding carrier window，再在 callsite 做 fine slice 和 assemble。
+
+`window_rewrite_policy` 控制哪些已证明候选能通过最后的策略门槛：
+
+- `auto`：默认保守模式。只保留 ABI-neutral 或 ABI-reducing 的候选，并拒绝 multi-piece output rewrite。
+- `all`：保留所有静态合法候选，适合 ablation 和调试。
+- `inputs_only` / `no_outputs`：只保留 input-window rewrite。
+- `outputs_only` / `no_inputs`：只保留 output-window rewrite。
+- `no_multi_piece_outputs`：拒绝仍需要多个 pieces 或 fine assemble pieces 的 output 候选。
+- `none` / `disabled`：关闭模式 5 window rewrite。
+
+调试时，`PYPTO_WINDOW_EXTERNALIZE_INCLUDE` 和
+`PYPTO_WINDOW_EXTERNALIZE_EXCLUDE` 可以按 callee 或参数名过滤候选。
+`PYPTO_WINDOW_EXTERNALIZE_LOG=1` 会打印 `auto` 的 accept/reject 决策。
+
 ## 优化模式
 
 本 pass 按顺序应用五个模式。每个模式可以看到前一个模式的结果。
@@ -97,6 +124,8 @@ orchestration C++ 在作用域外引用 loop-return SSA 名字。循环体内部
 loop-carried iter-arg 不会被这样折叠。
 
 本 pass 有意保持保守的 window eligibility。它不会按 `topk` 等算子名字做特判；只有 callee 函数体能证明满足下面的访问模式时，才会 window 化。
+
+静态 eligibility 之后，默认 `auto` 策略还会再做一层保守 cost gate。它会拒绝增加 rewritten tensor 参数数量的候选，并默认拒绝 multi-piece output rewrite。这样默认流水线不会为了局部 window 精度而换来更大的 dispatch 签名或更多 callsite orchestration。需要手动研究这些候选时，可以使用 `window_rewrite_policy="all"`。
 
 支持的改写形态：
 

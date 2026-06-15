@@ -27,6 +27,33 @@ opt_pass = passes.optimize_orch_tensors()
 program_opt = opt_pass(program)
 ```
 
+By default, Pattern 5 uses:
+
+```python
+passes.optimize_orch_tensors(
+    output_window_policy="coalesce_pieces",
+    window_rewrite_policy="auto",
+)
+```
+
+`output_window_policy` controls how proven output pieces are represented:
+
+- `exact_pieces`: keep each proven dense piece as a separate window.
+- `coalesce_pieces`: merge multiple output pieces into one bounding carrier window, then fine-slice and assemble at the call site.
+
+`window_rewrite_policy` controls which proven candidates survive the final policy gate:
+
+- `auto`: default conservative mode. It keeps only ABI-neutral or ABI-reducing candidates and rejects multi-piece output rewrites.
+- `all`: keep all statically legal candidates. This is useful for ablation and debugging.
+- `inputs_only` / `no_outputs`: keep only input-window rewrites.
+- `outputs_only` / `no_inputs`: keep only output-window rewrites.
+- `no_multi_piece_outputs`: reject output candidates that still require multiple pieces or fine assemble pieces.
+- `none` / `disabled`: disable Pattern 5 window rewrites.
+
+For debugging, `PYPTO_WINDOW_EXTERNALIZE_INCLUDE` and
+`PYPTO_WINDOW_EXTERNALIZE_EXCLUDE` filter candidates by callee or parameter
+name. `PYPTO_WINDOW_EXTERNALIZE_LOG=1` prints `auto` accept/reject decisions.
+
 ## Patterns
 
 The pass applies five patterns in sequence. Each pattern sees the results of the previous one.
@@ -98,6 +125,13 @@ referencing loop-return SSA names outside their scope. Loop-carried iter-args
 inside the loop body are not folded this way.
 
 This pass intentionally keeps window eligibility conservative. It does not special-case operator names such as `topk`; a tensor is windowed only when the callee body proves the access pattern below.
+
+After static eligibility, the default `auto` policy applies one more conservative
+cost gate. It rejects candidates that would increase the number of rewritten
+tensor arguments, and rejects multi-piece output rewrites by default. This keeps
+the default pipeline from trading local window precision for larger dispatch
+signatures or extra call-site orchestration. Use `window_rewrite_policy="all"`
+when investigating such candidates manually.
 
 Supported rewrite shapes:
 

@@ -3243,6 +3243,23 @@ class TestOutWindowExternalizer:
         assert "pl.tile.store(src" in printed_windowed
         assert "cache_iter" in printed_windowed
 
+        Auto = _run_to_optimize_orch_tensors(
+            Before,
+            output_window_policy="coalesce_pieces",
+            window_rewrite_policy="auto",
+        )
+        printed_auto_main = ir.python_print(_get_function(Auto, "main"))
+        assert "cache__ssa_v0__window" not in printed_auto_main
+        assert "pl.tensor.assemble(cache__ssa_v0" not in printed_auto_main
+
+        printed_auto_windowed = ir.python_print(_get_function(Auto, "cache_write__windowed"))
+        assert "pl.Out[pl.Tensor[[385, 128], pl.FP32" not in printed_auto_windowed
+
+        Default = passes.optimize_orch_tensors()(Before)
+        printed_default_main = ir.python_print(_get_function(Default, "main"))
+        assert "cache__ssa_v0__window" not in printed_default_main
+        assert "pl.tensor.assemble(cache__ssa_v0" not in printed_default_main
+
         NoMulti = _run_to_optimize_orch_tensors(
             Before,
             output_window_policy="coalesce_pieces",
