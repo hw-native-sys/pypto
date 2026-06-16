@@ -1694,7 +1694,7 @@ class TestOutWindowExternalizer:
         assert "cache__ssa_v0__carrier_window" not in printed_main
         assert "__carrier_scan_" not in printed_main
 
-    def test_all_dynamic_indexed_reader_without_shared_carrier_current_keeps_full_parent(self):
+    def test_exact_all_dynamic_indexed_reader_without_shared_carrier_current_uses_standalone_window(self):
         @pl.program
         class Before:
             @pl.function(type=pl.FunctionType.InCore)
@@ -1723,12 +1723,19 @@ class TestOutWindowExternalizer:
                 result: pl.Tensor[[4, 64], pl.FP32] = self.cache_read(out, cache, block_table)
                 return result
 
-        After = _run_to_optimize_orch_tensors(Before, window_rewrite_policy="all")
+        After = _run_to_optimize_orch_tensors(
+            Before, output_window_policy="exact_pieces", window_rewrite_policy="all"
+        )
 
         printed_main = ir.python_print(_get_function(After, "main"))
-        assert "cache_read__windowed" not in printed_main
-        assert "cache_read(out__ssa_v0, cache__ssa_v0, block_table__ssa_v0)" in printed_main
-        assert "pl.tensor.slice(cache__ssa_v0" not in printed_main
+        assert "cache_read__windowed" in printed_main
+        assert "pl.tensor.slice(cache__ssa_v0" in printed_main
+        assert "cache__ssa_v0__window_base" in printed_main
+        assert "cache__ssa_v0__window_extent" in printed_main
+        assert "cache_read__windowed(" in printed_main
+        assert "cache__ssa_v0__window, block_table__ssa_v0" in printed_main
+        assert "__carrier" not in printed_main
+        assert "carrier_current_remat" not in printed_main
 
     def test_dynamic_indexed_reader_unknown_trip_count_keeps_full_parent(self):
         @pl.program
@@ -3795,23 +3802,23 @@ class TestOutWindowExternalizer:
         )
         printed_auto_main = ir.python_print(_get_function(Auto, "main"))
         assert "cache_write__windowed" in printed_auto_main
-        assert (
-            "pl.tensor.slice(cache__ssa_v0, [cache__ssa_v0__window_extent_arg, 128], "
-            "[cache__ssa_v0__window_base_arg, 0])"
-        ) in printed_auto_main
-        assert printed_auto_main.count("pl.tensor.assemble(") == 4
+        assert "cache__ssa_v0__window_base_arg" not in printed_auto_main
+        assert "pl.tensor.slice(cache__ssa_v0" not in printed_auto_main
+        assert "pl.tensor.assemble(" not in printed_auto_main
 
         printed_auto_windowed = ir.python_print(_get_function(Auto, "cache_write__windowed"))
-        assert "pl.Out[pl.Tensor[[cache__ssa_v0__window_extent_dyn, 128], pl.FP32" in printed_auto_windowed
+        assert "pl.Out[pl.Tensor[[1024, 128], pl.FP32" in printed_auto_windowed
+        assert "cache__ssa_v0__window_extent_dyn" not in printed_auto_windowed
 
         Default = passes.optimize_orch_tensors()(Before)
         printed_default_main = ir.python_print(_get_function(Default, "main"))
         assert "cache_write__windowed" in printed_default_main
-        assert printed_default_main.count("pl.tensor.assemble(") == 4
-        assert "__fine_0_3" in printed_default_main
+        assert "cache__ssa_v0__window_base_arg" not in printed_default_main
+        assert "pl.tensor.assemble(" not in printed_default_main
 
         printed_default_windowed = ir.python_print(_get_function(Default, "cache_write__windowed"))
-        assert "__window_extent_dyn, 128], pl.FP32" in printed_default_windowed
+        assert "pl.Out[pl.Tensor[[1024, 128], pl.FP32" in printed_default_windowed
+        assert "cache__ssa_v0__window_extent_dyn" not in printed_default_windowed
 
         NoMulti = _run_to_optimize_orch_tensors(
             Before,
