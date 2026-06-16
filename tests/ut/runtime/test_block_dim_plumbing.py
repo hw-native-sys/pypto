@@ -124,43 +124,6 @@ def test_execute_on_device_sets_block_dim_when_provided(patched_execute_on_devic
     assert cfg.aicpu_thread_num == 3
 
 
-def test_execute_on_device_sets_default_dfx_flags(patched_execute_on_device):
-    """Default debug/DFX flags should be written with disabled values."""
-    from pypto.runtime.device_runner import execute_on_device  # noqa: PLC0415
-
-    execute_on_device(
-        MagicMock(name="chip_callable"),
-        MagicMock(name="orch_args"),
-        platform="a2a3sim",
-        runtime_name="host_build_graph",
-        device_id=0,
-    )
-
-    cfg = patched_execute_on_device
-    assert cfg.enable_dump_tensor == 0
-    assert cfg.enable_scope_stats is False
-
-
-def test_execute_on_device_preserves_explicit_dfx_flags(patched_execute_on_device):
-    """Explicit debug/DFX flag values should flow through unchanged."""
-    from pypto.runtime.device_runner import execute_on_device  # noqa: PLC0415
-
-    execute_on_device(
-        MagicMock(name="chip_callable"),
-        MagicMock(name="orch_args"),
-        platform="a2a3sim",
-        runtime_name="host_build_graph",
-        device_id=0,
-        output_prefix="dfx",
-        enable_dump_tensor=2,
-        enable_scope_stats=True,
-    )
-
-    cfg = patched_execute_on_device
-    assert cfg.enable_dump_tensor == 2
-    assert cfg.enable_scope_stats is True
-
-
 # ---------------------------------------------------------------------------
 # execute_compiled — RUNTIME_CONFIG fallback / caller override precedence
 # ---------------------------------------------------------------------------

@@ -791,7 +791,7 @@ def _build_call_config(
     cfg.enable_dump_tensor = run_config.enable_dump_tensor
     cfg.enable_pmu = run_config.enable_pmu
     cfg.enable_dep_gen = run_config.enable_dep_gen
-    cfg.enable_scope_stats = bool(run_config.enable_scope_stats)
+    cfg.enable_scope_stats = run_config.enable_scope_stats
 
     # Per-task ring sizing: leave the runtime_env field at its 0 default when
     # unset so the runtime applies its own PTO2_RING_* / compile-time fallback.

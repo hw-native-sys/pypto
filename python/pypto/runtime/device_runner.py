@@ -608,15 +608,15 @@ def execute_on_device(  # noqa: PLR0913
         cfg.block_dim = block_dim
     if aicpu_thread_num is not None:
         cfg.aicpu_thread_num = aicpu_thread_num
-    # CallConfig nanobind setters: ``enable_l2_swimlane`` / ``enable_dep_gen`` /
-    # ``enable_scope_stats`` take `bool`; ``enable_pmu`` is a raw ``int32_t``
-    # (0 disabled, >0 event type); ``enable_dump_tensor`` is a dump level
-    # (0 off, 1 partial, 2 full).
+    # CallConfig nanobind setters: ``enable_l2_swimlane`` / ``enable_dep_gen``
+    # take `bool`; ``enable_pmu`` is a raw ``int32_t`` (0 disabled, >0 event
+    # type); ``enable_dump_tensor`` is a dump level (0 off, 1 partial, 2 full)
+    # — the setter also accepts a bool (True→1 partial, False→0).
     cfg.enable_l2_swimlane = enable_l2_swimlane
     cfg.enable_dump_tensor = enable_dump_tensor
     cfg.enable_pmu = enable_pmu
     cfg.enable_dep_gen = enable_dep_gen
-    cfg.enable_scope_stats = bool(enable_scope_stats)
+    cfg.enable_scope_stats = enable_scope_stats
     if output_prefix:
         cfg.output_prefix = output_prefix
 

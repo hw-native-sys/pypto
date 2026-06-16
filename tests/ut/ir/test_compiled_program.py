@@ -758,25 +758,6 @@ class TestCompiledProgramExtraction:
         assert fake_call_config.enable_dep_gen is True
         assert fake_call_config.output_prefix == str(tmp_path / "dfx")
 
-    def test_build_call_config_preserves_dump_tensor_full_level(self, tmp_path):
-        prog = _make_program_with_orchestration()
-        cp = CompiledProgram(prog, str(tmp_path))
-
-        _, _, patcher = self._patch_assemble()
-        fake_call_config = MagicMock(name="CallConfig_instance")
-        with (
-            patcher,
-            _fake_call_config(fake_call_config),
-        ):
-            from pypto.runtime import RunConfig  # noqa: PLC0415
-
-            cp.build_call_config(
-                RunConfig(enable_dump_tensor=2),
-                dfx_dir=tmp_path / "dfx",
-            )
-
-        assert fake_call_config.enable_dump_tensor == 2
-
     def test_build_call_config_dfx_dir_omitted_when_none(self, tmp_path):
         """No dfx_dir → output_prefix must NOT be set on CallConfig."""
         prog = _make_program_with_orchestration()

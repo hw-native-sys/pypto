@@ -234,9 +234,8 @@ def _preprocess_ptoas_output(content: str) -> str:
     """Strip includes/using and make functions static in ptoas output.
 
     Removes the header lines that the wrapper already provides, and replaces
-    ``extern "C" __global__ AICORE void`` or ``__global__ AICORE void`` with
-    ``static __aicore__ void`` so the wrapper's ``kernel_entry`` is the actual
-    entry point.
+    ``__global__ AICORE void`` with ``static __aicore__ void`` so the wrapper's
+    ``kernel_entry`` is the actual entry point.
     """
     lines = content.splitlines(keepends=True)
     filtered: list[str] = []

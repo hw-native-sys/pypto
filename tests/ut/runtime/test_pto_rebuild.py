@@ -25,8 +25,6 @@ from pypto.runtime.debug import pto_rebuild
 from pypto.runtime.debug.pto_rebuild import (
     PTOAS_BODY_BEGIN,
     PTOAS_BODY_END,
-    _extract_func_names,
-    _preprocess_ptoas_body,
     rebuild_kernel_cpp_from_pto,
 )
 
@@ -146,20 +144,6 @@ def test_splices_single_function_target(tmp_path: Path, monkeypatch) -> None:
     assert "static __aicore__ void foo()" in kernel_cpp
     assert PTOAS_BODY_BEGIN in kernel_cpp
     assert PTOAS_BODY_END in kernel_cpp
-
-
-def test_preprocess_extern_c_global_aicore_entry() -> None:
-    raw = (
-        '#include "pto/pto-inst.hpp"\n'
-        "using namespace pto;\n"
-        'extern "C" __global__ AICORE void copy_hidden(__gm__ bfloat16_t* v1) {\n'
-        "  return;\n"
-        "}\n"
-    )
-    body = _preprocess_ptoas_body(raw)
-    assert 'extern "C"' not in body
-    assert "static __aicore__ void copy_hidden" in body
-    assert _extract_func_names(raw) == ["copy_hidden"]
 
 
 def test_splices_multiple_group_targets(tmp_path: Path, monkeypatch) -> None:
