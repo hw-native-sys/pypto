@@ -15,7 +15,8 @@ and Expected (optimized) programs in @pl.program style.
 
 import pypto.language as pl
 import pytest
-from pypto import ir, passes
+from pypto import backend, codegen, ir, passes
+from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
 
@@ -1049,6 +1050,48 @@ class TestOutWindowExternalizer:
 
         none_policy = _run_to_optimize_orch_tensors(Before, window_rewrite_policy="none")
         assert none_policy.get_function("consume__windowed") is None
+
+    def test_windowed_clone_remaps_composite_dim_tensor_view_stride_vars(self):
+        M = pl.dynamic("M")
+        N = pl.dynamic("N")
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def tile_add(
+                self,
+                a: pl.Tensor[[M * 2, N], pl.FP32],
+                b: pl.Tensor[[M * 2, N], pl.FP32],
+                f: pl.Out[pl.Tensor[[M * 2, N], pl.FP32]],
+            ) -> pl.Tensor[[M * 2, N], pl.FP32]:
+                tile_f = pl.add(pl.load(a, [0, 0], [128, 128]), pl.load(b, [0, 0], [128, 128]))
+                return pl.store(tile_f, [0, 0], f)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[M * 2, N], pl.FP32],
+                b: pl.Tensor[[M * 2, N], pl.FP32],
+                f: pl.Out[pl.Tensor[[M * 2, N], pl.FP32]],
+            ) -> pl.Tensor[[M * 2, N], pl.FP32]:
+                return self.tile_add(a, b, f)
+
+        After = _run_to_optimize_orch_tensors(Before, window_rewrite_policy="auto")
+        windowed = _get_function(After, "tile_add__windowed")
+        printed_windowed = ir.python_print(windowed)
+        assert "pl.Tensor[[128, 128], pl.FP32, pl.TensorView(stride=[N, 1]" in printed_windowed
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        try:
+            mlir_code = codegen.PTOCodegen().generate(
+                ir.Program([windowed], "tile_add_windowed", ir.Span.unknown())
+            )
+        finally:
+            backend.reset_for_testing()
+
+        assert "%arg3: index" in mlir_code
+        assert "strides = [%arg3, %c1_index]" in mlir_code
 
     def test_topk_name_does_not_block_eligible_input_window(self):
         @pl.program
