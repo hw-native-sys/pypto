@@ -8034,7 +8034,7 @@ class OutWindowExternalizer {
 
 namespace pass {
 
-Pass OptimizeOrchTensors(std::string output_window_policy, std::string window_rewrite_policy) {
+Pass OptimizeOrchTensors(const std::string& output_window_policy, const std::string& window_rewrite_policy) {
   auto parsed_output_window_policy = OutWindowExternalizer::OutputWindowPolicy::CoalescePieces;
   if (output_window_policy == "exact_pieces") {
     parsed_output_window_policy = OutWindowExternalizer::OutputWindowPolicy::ExactPieces;

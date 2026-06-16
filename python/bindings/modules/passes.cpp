@@ -423,8 +423,9 @@ void BindPass(nb::module_& m) {
              nb::arg("output_window_policy") = "coalesce_pieces", nb::arg("window_rewrite_policy") = "auto",
              "Create a pass that optimizes tensor buffer usage in orchestration and InCore functions\n\n"
              "Applies five patterns: iter-arg reuse (merge Out->InOut), assemble parent\n"
-             "strides (attach TensorView to Out params), and assemble-loop rewrite\n"
-             "(convert tile.assemble loops to tile.store loops). "
+             "strides (attach TensorView to Out params), assemble-loop rewrite\n"
+             "(convert tile.assemble loops to tile.store loops), slice input strides,\n"
+             "and static window externalization. "
              "output_window_policy may be 'exact_pieces' or 'coalesce_pieces'. "
              "window_rewrite_policy may be 'auto', 'all', 'inputs_only', 'outputs_only', "
              "'no_inputs', 'no_outputs', 'no_multi_piece_outputs', or 'none'.");
