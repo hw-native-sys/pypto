@@ -33,6 +33,48 @@ on the Python side and raises `ValueError` from `execute_on_device`
 *before* the C++ boundary so the failure traceback points at the
 caller.
 
+## L2 swimlane runs the kernel twice (onboard)
+
+The swimlane converter joins per-task timing against a task graph that **only
+`deps.json` carries** — the device hot path no longer records per-task fanout,
+so without a dep_gen capture the lanes degrade to anonymous `task(rXtY)` with no
+dependency arrows. But dep_gen collection has high overhead that perturbs the
+very timing the swimlane measures. The two captures therefore come from separate
+runs (Simpler's documented "capture the graph once, time many times" workflow).
+
+So enabling `enable_l2_swimlane` on an **onboard** platform runs the kernel
+twice, transparently:
+
+1. **Graph pass** — dep_gen only, producing `deps.json`. Runs in a **separate
+   subprocess** (`python -m pypto.runtime._dep_gen_capture`). This is required,
+   not just tidy: the runtime's per-run finalize does not reliably reclaim the
+   SVM host-register mappings the DFX collectors allocate, so a second DFX run
+   in the *same* process hits the registration cap (`halHostRegister` rc 8). A
+   child process fully reclaims that state on exit. The capture is best-effort —
+   if the subprocess fails, a warning is logged and the timing pass still runs
+   (lanes degrade to anonymous `task(rXtY)`).
+2. **Timing pass** — swimlane (plus any other timing-sensitive DFX such as PMU /
+   tensor-dump / scope-stats), dep_gen forced off, producing the clean
+   `l2_swimlane_records.json` whose timing is reported. Runs in-process.
+
+Both passes write into the same `dfx_outputs/`, so `swimlane_converter`
+auto-joins the sibling `deps.json` with the records. Adding `--enable-dep-gen`
+explicitly changes nothing about the passes (the graph pass already produced
+`deps.json`); it only makes the run additionally print the `deps_to_graph` render
+hint. Simulator platforms (`*sim`) stay single-pass — swimlane conversion is
+skipped there regardless.
+
+The subprocess rebuilds the orchestration arguments two ways: from `golden.py`
+when driven by the pytest harness (deterministic inputs → faithful graph), or
+from a recorded spec when driven by the compiled-program API
+(`execute_compiled`). The task graph can be routed by tensor *values*, not just
+scalars (e.g. paged-attention `block_tables` / `seq_lens`), so the spec preserves
+real data wherever it can cross the process boundary: host `torch.Tensor`s are
+saved and reloaded verbatim, scalars are preserved exactly, and only
+device-resident `DeviceTensor`s — unreachable from a fresh child — fall back to
+zero-filled tensors of the recorded shape. The capture is therefore exact unless
+a *device-resident* tensor routes the graph, in which case it is approximate.
+
 ## Usage
 
 ### From Python (`RunConfig`)

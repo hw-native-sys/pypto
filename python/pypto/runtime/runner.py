@@ -29,8 +29,9 @@ import json
 import shlex
 import subprocess
 import sys
+from collections.abc import Callable
 from ctypes import _SimpleCData
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -99,11 +100,18 @@ class RunConfig:
         enable_l2_swimlane: Capture per-task L2 perf records into
             ``<work_dir>/dfx_outputs/l2_swimlane_records.json``. On onboard
             platforms, ``swimlane_converter`` then produces
-            ``merged_swimlane_*.json`` alongside it. Simulator platforms
-            (``*sim``) only emit ``l2_swimlane_records.json`` — the merged
-            swimlane file is intentionally skipped because the simulator
-            does not yet ship the task metadata the converter needs.
-            Mirrors runtime's ``--enable-l2-swimlane`` flag.
+            ``merged_swimlane_*.json`` alongside it. Because the converter joins
+            the timing against a task graph that only ``deps.json`` carries,
+            enabling this on an onboard platform runs the kernel **twice**: a
+            first dep_gen pass to capture ``deps.json`` (run in a subprocess so
+            its device/SVM state is fully reclaimed before the timing pass — a
+            failed capture is logged, not fatal), then a clean in-process
+            swimlane pass (dep_gen off, since dep_gen collection perturbs the
+            timing). Simulator platforms (``*sim``) stay single-pass
+            and only emit ``l2_swimlane_records.json`` — the merged swimlane file
+            is intentionally skipped because the simulator does not yet ship the
+            task metadata the converter needs. Mirrors runtime's
+            ``--enable-l2-swimlane`` flag.
         enable_dump_tensor: Per-task tensor dump **level** written into
             ``<work_dir>/dfx_outputs/tensor_dump/``. Inspect with
             ``python -m simpler_setup.tools.dump_viewer``. Mirrors
@@ -491,6 +499,160 @@ class _DfxOpts:
         )
 
 
+def _execute_dfx_passes(
+    run_pass: Callable[["_DfxOpts"], "RunTiming"],
+    capture_deps: Callable[[], None],
+    dfx: "_DfxOpts",
+    platform: str,
+) -> "RunTiming":
+    """Drive device execution, splitting into two passes when swimlane is on.
+
+    The runtime swimlane converter joins per-task timing against a task graph
+    that only ``deps.json`` (a dep_gen capture) carries — the device hot path no
+    longer records per-task fanout. Because dep_gen collection perturbs timing,
+    the graph and the clean timing must come from separate runs (the converter's
+    documented "capture the graph once, time many times" workflow). So when
+    swimlane is requested on an onboard platform we run:
+
+      * Graph pass — dep_gen only, producing ``deps.json``. Run in a **separate
+        subprocess** (*capture_deps*): the runtime's per-run finalize does not
+        reliably reclaim the SVM host-register mappings the DFX collectors
+        allocate, so a second DFX run in the same process hits the registration
+        cap (``halHostRegister`` rc 8). A child process fully reclaims that
+        state on exit. Best-effort — a failed capture is logged, not fatal.
+      * Timing pass — swimlane (plus any other timing DFX), dep_gen off,
+        producing the clean ``l2_swimlane_records.json`` whose timing we return.
+        Runs in-process.
+
+    Both passes write into the same ``output_prefix`` (the subprocess is pointed
+    at the same ``dfx_outputs/``), so the converter finds ``deps.json`` and the
+    records side by side.
+
+    Simulator platforms (``*sim``) stay single-pass: swimlane conversion is
+    skipped there anyway (the simulator does not ship the task metadata the
+    converter needs), so a second run buys nothing.
+
+    Args:
+        run_pass: Executes one in-process device run with the given DFX flags
+            and returns its timing. Call-site closure over the static kwargs.
+        capture_deps: Captures ``deps.json`` in a subprocess (dep_gen only).
+            Call-site closure; invoked once before the timing pass.
+        dfx: The DFX toggles the caller requested.
+        platform: Target execution platform (used only to detect ``*sim``).
+
+    Returns:
+        The :class:`RunTiming` from the kept pass (the timing pass when
+        two-pass, otherwise the single pass).
+    """
+    if not dfx.enable_l2_swimlane or platform.endswith("sim"):
+        return run_pass(dfx)
+
+    # The two passes look like a double run, so announce what each is for.
+    print(
+        "[swimlane] L2 swimlane enabled -> running the kernel twice "
+        "(dep_gen perturbs timing, so the graph and the timing are captured separately):"
+    )
+
+    # Graph pass: capture deps.json in a subprocess so its SVM registrations are
+    # fully reclaimed before the in-process timing pass registers its own.
+    print(
+        "[swimlane] run 1/2: capturing the task dependency graph (deps.json) in a subprocess; "
+        "its timing is discarded."
+    )
+    capture_deps()
+
+    # Timing pass: clean per-task timing for the lanes (dep_gen forced off so it
+    # does not perturb the measurement). This is the timing we surface.
+    print("[swimlane] run 2/2: measuring clean per-task timing (this run's numbers are the ones reported).")
+    return run_pass(replace(dfx, enable_dep_gen=False))
+
+
+def _load_golden_module(golden_path: "Path", module_name: str = "_golden") -> Any:
+    """Import a generated ``golden.py`` from *golden_path* as a fresh module.
+
+    Shared by :func:`_execute_on_device` and the dep_gen subprocess so the load
+    semantics (and the error message) stay in one place.
+    """
+    spec = importlib.util.spec_from_file_location(module_name, str(golden_path))
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load golden.py from {golden_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _build_args_spec(
+    args: "list[torch.Tensor | DeviceTensor | _SimpleCData]",
+    save_dir: Path,
+) -> list[dict]:
+    """Describe orch arguments for the dep_gen subprocess (see below).
+
+    The captured task graph can be routed by tensor *values*, not just scalars
+    (e.g. paged-attention ``block_tables`` / ``seq_lens``), so we preserve real
+    data wherever it can cross the process boundary:
+
+    * Host ``torch.Tensor`` — saved verbatim to *save_dir* and reloaded in the
+      child, so data-as-control inputs route the same graph.
+    * :class:`DeviceTensor` — device-resident, unreachable from a fresh child
+      process, so recorded as shape + dtype and rebuilt as a zero tensor. If a
+      device-resident tensor routes the graph the capture is approximate.
+    * ctypes scalar — value preserved exactly.
+
+    Mirrors the type dispatch in :func:`_coerced_to_orch_args`.
+    """
+    spec: list[dict] = []
+    for i, arg in enumerate(args):
+        if isinstance(arg, torch.Tensor):
+            path = save_dir / f"_dep_gen_arg_{i}.pt"
+            torch.save(arg.detach().contiguous().cpu(), path)
+            spec.append({"kind": "tensor_file", "path": str(path)})
+        elif isinstance(arg, DeviceTensor):
+            dtype_name = str(arg.dtype).replace("torch.", "")
+            spec.append({"kind": "tensor_zeros", "shape": list(arg.shape), "dtype": dtype_name})
+        elif isinstance(arg, _SimpleCData):
+            spec.append({"kind": "scalar", "ctype": type(arg).__name__, "value": arg.value})
+        else:
+            raise TypeError(
+                f"Cannot describe argument {i} of type {type(arg).__name__} for dep_gen capture; "
+                f"expected torch.Tensor, DeviceTensor, or ctypes scalar."
+            )
+    return spec
+
+
+def _capture_deps_subprocess(spec: dict, dfx_dir: Path) -> None:
+    """Capture ``deps.json`` for swimlane in a child process (best-effort).
+
+    A child process is used so the SVM host-register mappings the dep_gen
+    collector allocates are fully reclaimed on exit, before the in-process
+    swimlane pass registers its own (see :func:`_execute_dfx_passes`). The spec
+    tells :mod:`pypto.runtime._dep_gen_capture` how to rebuild the orch args.
+
+    Failure is logged, not raised: the swimlane pass still runs, just without a
+    captured graph (lanes degrade to anonymous ``task(rXtY)`` with no arrows).
+    """
+    dfx_dir.mkdir(parents=True, exist_ok=True)
+    spec_path = dfx_dir / "_dep_gen_spec.json"
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    cmd = [sys.executable, "-m", "pypto.runtime._dep_gen_capture", str(spec_path)]
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as e:
+        # Keep the spec + staged arg tensors so a failed capture can be re-run
+        # and debugged by hand.
+        print(
+            f"dep_gen graph capture subprocess failed (exit {e.returncode}); the swimlane will "
+            f"render without dependency arrows / resolved kernel names (expected "
+            f"{dfx_dir / 'deps.json'}). Inputs kept at {spec_path} for re-run."
+        )
+        return
+    # Success: drop the transient staged inputs (argspec mode saves the full
+    # host tensors, which can run to gigabytes).
+    for entry in spec.get("args", []):
+        if entry.get("kind") == "tensor_file":
+            Path(entry["path"]).unlink(missing_ok=True)
+    spec_path.unlink(missing_ok=True)
+
+
 def _coerced_to_orch_args(
     coerced: list[torch.Tensor | DeviceTensor | _SimpleCData],
 ) -> Any:
@@ -645,11 +807,7 @@ def _execute_on_device(
     )
 
     # Load golden.py to get generate_inputs and compute_golden
-    spec = importlib.util.spec_from_file_location("_golden", str(golden_path))
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Cannot load golden.py from {golden_path}")
-    golden_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(golden_module)
+    golden_module = _load_golden_module(golden_path)
 
     # Generate inputs (loads from data/in/ when use_data_files golden.py)
     params: dict[str, str] = {"name": "Default"}
@@ -672,19 +830,44 @@ def _execute_on_device(
         dfx_dir = work_dir / "dfx_outputs"
         dfx_dir.mkdir(parents=True, exist_ok=True)
 
-    timing = execute_on_device(
-        chip_callable,
-        orch_args,
-        platform,
-        runtime_name,
-        device_id,
-        output_prefix=str(dfx_dir) if dfx_dir is not None else None,
-        enable_l2_swimlane=dfx.enable_l2_swimlane,
-        enable_dump_tensor=dfx.enable_dump_tensor,
-        enable_pmu=dfx.enable_pmu,
-        enable_dep_gen=dfx.enable_dep_gen,
-        enable_scope_stats=dfx.enable_scope_stats,
-    )
+    def _run_pass(pass_dfx: "_DfxOpts") -> "RunTiming":
+        return execute_on_device(
+            chip_callable,
+            orch_args,
+            platform,
+            runtime_name,
+            device_id,
+            output_prefix=str(dfx_dir) if dfx_dir is not None else None,
+            enable_l2_swimlane=pass_dfx.enable_l2_swimlane,
+            enable_dump_tensor=pass_dfx.enable_dump_tensor,
+            enable_pmu=pass_dfx.enable_pmu,
+            enable_dep_gen=pass_dfx.enable_dep_gen,
+            enable_scope_stats=pass_dfx.enable_scope_stats,
+        )
+
+    def _capture_deps() -> None:
+        # Harness path: the child regenerates inputs deterministically from
+        # golden.py, so the captured graph is faithful (no zero-tensor proxy).
+        assert dfx_dir is not None  # swimlane-on implies dfx.any() -> dfx_dir set
+        _capture_deps_subprocess(
+            {
+                "mode": "golden",
+                "golden_path": str(golden_path),
+                "work_dir": str(work_dir),
+                "platform": platform,
+                "device_id": device_id,
+                "dfx_dir": str(dfx_dir),
+                "pto_isa_commit": None,
+                "level": 2,
+            },
+            dfx_dir,
+        )
+
+    # When swimlane is on (onboard), capture deps.json in a subprocess first,
+    # then run the clean-timing swimlane pass in-process. Collection uses the
+    # original ``dfx`` so the converter joins the sibling ``deps.json`` and the
+    # deps-render hint fires only when the user explicitly asked for dep_gen.
+    timing = _execute_dfx_passes(_run_pass, _capture_deps, dfx, platform)
 
     if dfx_dir is not None:
         _collect_dfx_artifacts(dfx_dir, platform, dfx)
@@ -1045,24 +1228,53 @@ def execute_compiled(  # noqa: PLR0913
         dfx_dir = work_dir / "dfx_outputs"
         dfx_dir.mkdir(parents=True, exist_ok=True)
 
-    timing = execute_on_device(
-        chip_callable,
-        orch_args,
-        platform,
-        runtime_name,
-        device_id,
-        level=level,
-        block_dim=effective_block_dim,
-        aicpu_thread_num=effective_aicpu_thread_num,
-        output_prefix=str(dfx_dir) if dfx_dir is not None else None,
-        enable_l2_swimlane=dfx.enable_l2_swimlane,
-        enable_dump_tensor=dfx.enable_dump_tensor,
-        enable_pmu=dfx.enable_pmu,
-        enable_dep_gen=dfx.enable_dep_gen,
-        enable_scope_stats=dfx.enable_scope_stats,
-    )
+    def _run_pass(pass_dfx: "_DfxOpts") -> "RunTiming":
+        return execute_on_device(
+            chip_callable,
+            orch_args,
+            platform,
+            runtime_name,
+            device_id,
+            level=level,
+            block_dim=effective_block_dim,
+            aicpu_thread_num=effective_aicpu_thread_num,
+            output_prefix=str(dfx_dir) if dfx_dir is not None else None,
+            enable_l2_swimlane=pass_dfx.enable_l2_swimlane,
+            enable_dump_tensor=pass_dfx.enable_dump_tensor,
+            enable_pmu=pass_dfx.enable_pmu,
+            enable_dep_gen=pass_dfx.enable_dep_gen,
+            enable_scope_stats=pass_dfx.enable_scope_stats,
+        )
 
-    # Collect DFX artefacts after execution (no-op when dfx_dir is None)
+    def _capture_deps() -> None:
+        # Compiled-program path: live args may be device-resident and cannot
+        # cross the process boundary, so the child rebuilds zero tensors of the
+        # recorded shapes plus the exact scalars (graph is structural).
+        assert dfx_dir is not None  # swimlane-on implies dfx.any() -> dfx_dir set
+        _capture_deps_subprocess(
+            {
+                "mode": "argspec",
+                "args": _build_args_spec(args, dfx_dir),
+                "work_dir": str(work_dir),
+                "platform": platform,
+                "device_id": device_id,
+                "dfx_dir": str(dfx_dir),
+                "pto_isa_commit": pto_isa_commit,
+                "level": level,
+                "block_dim": effective_block_dim,
+                "aicpu_thread_num": effective_aicpu_thread_num,
+            },
+            dfx_dir,
+        )
+
+    # When swimlane is on (onboard), capture deps.json in a subprocess first,
+    # then run the clean-timing swimlane pass in-process (see _execute_dfx_passes).
+    # The kept timing is the clean pass's.
+    timing = _execute_dfx_passes(_run_pass, _capture_deps, dfx, platform)
+
+    # Collect DFX artefacts after execution (no-op when dfx_dir is None).
+    # Original ``dfx`` drives collection so swimlane conversion auto-joins
+    # ``deps.json`` and the deps-render hint fires only on explicit dep_gen.
     if dfx_dir is not None:
         _collect_dfx_artifacts(dfx_dir, platform, dfx)
 

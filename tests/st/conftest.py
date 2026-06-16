@@ -192,7 +192,9 @@ def pytest_addoption(parser):
         action="store_true",
         default=False,
         help="Capture per-task L2 perf records into <work_dir>/dfx_outputs/l2_swimlane_records.json "
-        "and render merged_swimlane_*.json after execution.",
+        "and render merged_swimlane_*.json after execution. On onboard platforms this runs the kernel "
+        "twice: a dep_gen pass to capture deps.json (the converter's task graph) then a clean swimlane "
+        "pass, since dep_gen collection perturbs the timing.",
     )
     parser.addoption(
         "--dump-tensor",
