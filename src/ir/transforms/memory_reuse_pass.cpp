@@ -1182,6 +1182,46 @@ class HazardInputCollector : public IRVisitor {
   std::unordered_set<const Var*> tpop_vars_;
 };
 
+// ---------------------------------------------------------------------------
+// Per-operand "output must not alias this input" map
+// ---------------------------------------------------------------------------
+//
+// Some ops are in-place-safe overall (output may share a buffer with a value
+// input) yet have a *specific* operand the hardware reads while writing the
+// output — aliasing the output with it corrupts results.  The canonical case is
+// tile.sel: the TSEL intrinsic reads its predicate mask (and tmp scratch) while
+// writing dst, so dst must not land on the mask/tmp buffer.  Ops declare such
+// operands via OpRegistryEntry::forbid_output_alias(arg_index).
+//
+// This walk records, per output tile var, the set of input tile vars its
+// defining op forbids the output from aliasing.  MemoryReuse then refuses to
+// place the output on any of those inputs' buffers.  Distinct from the
+// load+tpop hazard (backend-gated) — this is op-semantic and always collected.
+using ForbidAliasMap = std::map<const Var*, std::set<const Var*>>;
+
+class ForbidAliasCollector : public IRVisitor {
+ public:
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    if (auto call = As<Call>(op->value_); call && call->op_) {
+      const auto& reg = OpRegistry::GetInstance();
+      if (reg.IsRegistered(call->op_->name_)) {
+        const auto& forbid_args = reg.GetEntry(call->op_->name_).ForbidOutputAliasArgs();
+        for (size_t i : forbid_args) {
+          if (i < call->args_.size()) {
+            if (auto v = AsVarLike(call->args_[i])) forbidden_[op->var_.get()].insert(v.get());
+          }
+        }
+      }
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
+  ForbidAliasMap Take() { return std::move(forbidden_); }
+
+ private:
+  ForbidAliasMap forbidden_;
+};
+
 /// True only for Ascend910B AIV split-mode functions, which need the load +
 /// tpop_from_aic in-place hazard guard.  All other backends / function kinds
 /// reuse buffers freely.  Defensive against unit-test contexts that run
@@ -1204,7 +1244,8 @@ bool NeedsLoadTpopHazardGuard(const FunctionPtr& func) {
  *                hazard check below is a no-op and reuse behaviour is unchanged.
  */
 std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(const std::vector<LifetimeInterval>& lifetimes,
-                                                    const HazardInputs& hazard) {
+                                                    const HazardInputs& hazard,
+                                                    const ForbidAliasMap& forbid_alias) {
   std::map<VarPtr, VarPtr> reuse_map;
 
   // Build a fast lookup map: VarPtr -> LifetimeInterval for O(1) access
@@ -1376,6 +1417,33 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(const std::vector<LifetimeIn
                 LOG_DEBUG << "Variable " << curr_var->name_hint_ << " cannot reuse " << prev_var->name_hint_
                           << " (op=" << curr_lifetime.def_op_name
                           << " does not support in-place execution, buffer still occupied at def)";
+                continue;
+              }
+            }
+          }
+
+          // Per-operand no-alias guard: curr's defining op forbids its output
+          // from sharing a buffer with specific input operands (e.g. tile.sel's
+          // mask/tmp, which the TSEL intrinsic reads while writing dst).  Block
+          // reuse if curr would land on such an operand's buffer — checking the
+          // root owner and every var already sharing root's buffer.
+          {
+            auto fa_it = forbid_alias.find(curr_var.get());
+            if (fa_it != forbid_alias.end()) {
+              const auto& forbidden = fa_it->second;
+              bool alias_conflict = forbidden.count(root.get()) != 0;
+              if (!alias_conflict && memref_users.count(root)) {
+                for (const auto& user_var : memref_users.at(root)) {
+                  if (forbidden.count(user_var.get()) != 0) {
+                    alias_conflict = true;
+                    break;
+                  }
+                }
+              }
+              if (alias_conflict) {
+                LOG_DEBUG << "Variable " << curr_var->name_hint_ << " cannot reuse " << prev_var->name_hint_
+                          << " (op=" << curr_lifetime.def_op_name
+                          << " forbids its output aliasing this input operand's buffer)";
                 continue;
               }
             }
@@ -1995,7 +2063,14 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
     collector.VisitStmt(new_body);
     hazard = collector.Take();
   }
-  auto reuse_map = IdentifyReuseOpportunities(analysis_result.lifetimes, hazard);
+
+  // Per-operand no-alias map (e.g. tile.sel's mask/tmp must not share the
+  // output's buffer). Op-semantic, not backend-gated, so always collected.
+  ForbidAliasCollector forbid_collector;
+  forbid_collector.VisitStmt(new_body);
+  ForbidAliasMap forbid_alias = forbid_collector.Take();
+
+  auto reuse_map = IdentifyReuseOpportunities(analysis_result.lifetimes, hazard, forbid_alias);
 
   // Step 3: Apply MemRef sharing (skip if no reuse candidates)
   if (!reuse_map.empty()) {

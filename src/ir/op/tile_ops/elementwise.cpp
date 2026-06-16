@@ -807,6 +807,13 @@ REGISTER_OP("tile.sel")
     .set_input_memory(2, MemorySpace::Vec)
     .set_input_memory(3, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    // The TSEL intrinsic reads the predicate mask (arg 0) and the tmp scratch
+    // (arg 3) while writing dst, so dst must not share their buffers — even
+    // though tile.sel is otherwise in-place-safe w.r.t. its lhs/rhs value
+    // operands. (The mask/tmp also differ in dtype/shape from dst, so codegen
+    // could not reinterpret them in place anyway.)
+    .forbid_output_alias(0)
+    .forbid_output_alias(3)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileSelType(args, kwargs, "tile.sel");

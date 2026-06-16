@@ -26,6 +26,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <typeindex>
 #include <unordered_map>
@@ -434,6 +435,23 @@ class OpRegistryEntry {
   /// explicitly call not_inplace_safe() during registration.
   [[nodiscard]] bool IsInplaceSafe() const { return is_inplace_safe_; }
 
+  /// Mark input argument `arg_index` as one whose buffer must NOT be reused as
+  /// this op's output buffer. Unlike not_inplace_safe() (which forbids the
+  /// output aliasing ANY still-live input), this targets a *specific* operand
+  /// that the op reads while writing its output, so aliasing the output with it
+  /// corrupts results even though the op is otherwise in-place-safe — e.g.
+  /// tile.sel's mask (and tmp scratch), which the TSEL intrinsic reads while
+  /// writing dst. MemoryReuse consults this to forbid the output from landing
+  /// on such an operand's buffer.
+  inline OpRegistryEntry& forbid_output_alias(size_t arg_index) {
+    forbid_output_alias_args_.insert(arg_index);
+    return *this;
+  }
+
+  /// Input argument indices whose buffer the output must not alias. Empty for
+  /// most ops (see forbid_output_alias()).
+  [[nodiscard]] const std::set<size_t>& ForbidOutputAliasArgs() const { return forbid_output_alias_args_; }
+
   /// Declare which core executes this op. When unset, ClassifyCallAffinity
   /// derives the affinity from the op's memory spec (output memory space, or
   /// first tile input memory space for view/store ops). Use this for ops
@@ -511,6 +529,7 @@ class OpRegistryEntry {
       deduce_type_;                               ///< Type deduction function
   std::optional<OpMemorySpaceSpec> memory_spec_;  ///< Memory space specification
   bool is_inplace_safe_{true};  ///< Whether the op supports in-place execution (src == dst buffer)
+  std::set<size_t> forbid_output_alias_args_;  ///< Input args whose buffer the output must not reuse
   std::optional<core_affinity::CoreAffinity> core_affinity_;     ///< Explicit core-affinity override
   std::optional<core_affinity::CrossCoreRole> cross_core_role_;  ///< Cross-core role (for predicates)
   bool internal_only_{false};                                    ///< True for compiler-created ops only.
