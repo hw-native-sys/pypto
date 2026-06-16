@@ -260,6 +260,7 @@ set(PYPTO_SOURCES
     src/codegen/code_emitter.cpp
     src/codegen/codegen_base.cpp
     src/codegen/orchestration/orchestration_analysis.cpp
+    src/codegen/orchestration/iter_arg_carry_analyzer.cpp
     src/codegen/orchestration/orchestration_codegen.cpp
     src/codegen/orchestration_op_registry.cpp
     src/codegen/pto/pto_codegen.cpp

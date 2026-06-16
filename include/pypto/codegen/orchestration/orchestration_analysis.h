@@ -215,6 +215,10 @@ struct BodyAliases {
 /// callers run the fixpoint over ``assigns`` / ``nested_fors``.
 BodyAliases CollectBodyAliases(const ir::StmtPtr& body);
 
+/// Peek through a leading AUTO ``RuntimeScopeStmt`` (and single-statement
+/// ``SeqStmts`` wrappers) so structural analyses reach the original statements.
+ir::StmtPtr UnwrapAutoScope(const ir::StmtPtr& stmt);
+
 }  // namespace codegen
 }  // namespace pypto
 

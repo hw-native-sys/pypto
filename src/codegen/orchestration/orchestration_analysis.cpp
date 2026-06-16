@@ -448,5 +448,19 @@ BodyAliases CollectBodyAliases(const StmtPtr& body) {
   return collector.result;
 }
 
+// ---------------------------------------------------------------------------
+// UnwrapAutoScope
+// ---------------------------------------------------------------------------
+
+StmtPtr UnwrapAutoScope(const StmtPtr& stmt) {
+  if (auto scope = As<RuntimeScopeStmt>(stmt); scope && !scope->manual_) {
+    return UnwrapAutoScope(scope->body_);
+  }
+  if (auto seq = As<SeqStmts>(stmt); seq && seq->stmts_.size() == 1) {
+    return UnwrapAutoScope(seq->stmts_[0]);
+  }
+  return stmt;
+}
+
 }  // namespace codegen
 }  // namespace pypto
