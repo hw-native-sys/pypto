@@ -2377,10 +2377,27 @@ class OutWindowExternalizer {
     for (auto it = analyses->begin(); it != analyses->end();) {
       const auto& callee_name = it->first;
       auto& analysis = it->second;
+      auto func_it = function_lookup.find(callee_name);
+      auto func = func_it == function_lookup.end() ? nullptr : func_it->second;
+      analysis.outputs.erase(
+          std::remove_if(analysis.outputs.begin(), analysis.outputs.end(),
+                         [&](const OutputRewriteInfo& output) {
+                           if (!func || output.out_param_index >= func->params_.size()) return true;
+                           auto tensor_type =
+                               As<TensorType>(func->params_[output.out_param_index]->GetType());
+                           return !CanMaterializeWindowParamType(tensor_type, output.window_shape);
+                         }),
+          analysis.outputs.end());
+      analysis.inputs.erase(
+          std::remove_if(analysis.inputs.begin(), analysis.inputs.end(),
+                         [&](const InputRewriteInfo& input) {
+                           if (!func || input.in_param_index >= func->params_.size()) return true;
+                           auto tensor_type = As<TensorType>(func->params_[input.in_param_index]->GetType());
+                           return !CanMaterializeWindowParamType(tensor_type, input.window_shape);
+                         }),
+          analysis.inputs.end());
       switch (window_rewrite_policy_) {
         case WindowRewritePolicy::Auto: {
-          auto func_it = function_lookup.find(callee_name);
-          auto func = func_it == function_lookup.end() ? nullptr : func_it->second;
           analysis.outputs.erase(
               std::remove_if(analysis.outputs.begin(), analysis.outputs.end(),
                              [&](const OutputRewriteInfo& output) {
@@ -5620,16 +5637,19 @@ class OutWindowExternalizer {
   static bool CanMaterializeWindowParamType(const std::shared_ptr<const TensorType>& tensor_type,
                                             const std::vector<ExprPtr>& window_shape) {
     if (!tensor_type) return false;
-    if (tensor_type->tensor_view_.has_value()) {
-      if (tensor_type->tensor_view_->stride.empty() &&
-          tensor_type->tensor_view_->layout == TensorLayout::NZ) {
-        return false;
-      }
-      return true;
+    auto window_type = MakeWindowTensorType(tensor_type, tensor_type->shape_, window_shape);
+    if (!window_type) return false;
+    auto allowed_vars =
+        var_collectors::CollectTypeVars(std::make_shared<TensorType>(window_shape, tensor_type->dtype_));
+    auto window_tensor_type = As<TensorType>(window_type);
+    if (!window_tensor_type) return false;
+    if (!ExprsReferenceOnlyVarsIn(window_tensor_type->shape_, allowed_vars)) return false;
+    if (window_tensor_type->tensor_view_.has_value()) {
+      const auto& view = *window_tensor_type->tensor_view_;
+      if (!ExprsReferenceOnlyVarsIn(view.stride, allowed_vars)) return false;
+      if (!ExprsReferenceOnlyVarsIn(view.valid_shape, allowed_vars)) return false;
     }
-    auto parent_strides =
-        tensor_view_semantics::BuildLogicalStridesFromLayout(tensor_type->shape_, TensorLayout::ND);
-    return parent_strides.size() == window_shape.size();
+    return true;
   }
 
   static std::optional<size_t> FindReturnIndexForOutParam(const FunctionPtr& func, size_t out_param_index) {
