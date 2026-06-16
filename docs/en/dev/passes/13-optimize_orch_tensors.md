@@ -36,19 +36,33 @@ passes.optimize_orch_tensors(
 )
 ```
 
-`output_window_policy` controls how proven output pieces are represented:
+`output_window_policy` controls how proven output pieces are represented after
+the candidate has passed the rewrite policy gate:
 
 - `exact_pieces`: keep each proven dense piece as a separate window.
 - `coalesce_pieces`: merge multiple output pieces into one bounding carrier window, then fine-slice and assemble at the call site.
 
 `window_rewrite_policy` controls which proven candidates survive the final policy gate:
 
-- `auto`: default conservative mode. It keeps only ABI-neutral or ABI-reducing candidates and rejects multi-piece output rewrites.
+- `auto`: default conservative mode. It keeps only ABI-neutral or ABI-reducing simple-window candidates, and rejects multi-piece output rewrites and dynamic-indexed input windows.
 - `all`: keep all statically legal candidates. This is useful for ablation and debugging.
 - `inputs_only` / `no_outputs`: keep only input-window rewrites.
 - `outputs_only` / `no_inputs`: keep only output-window rewrites.
 - `no_multi_piece_outputs`: reject output candidates that still require multiple pieces or fine assemble pieces.
 - `none` / `disabled`: disable Pattern 5 window rewrites.
+
+The two options are intended to be orthogonal. `auto` decides whether a complex
+candidate is worth rewriting by default; `all` allows correctness-proven complex
+windows. `exact_pieces` versus `coalesce_pieces` decides how an already-allowed
+multi-piece output is expressed.
+
+For example, in a Qwen prefill-style dynamic-indexed KV-cache writer/reader
+chain, the expected boundary is:
+
+- `exact_pieces + auto`: keep local/simple windows only. In this example, the dynamic KV-cache writer and reader windows stay full-tensor, and no carrier/remat is introduced.
+- `exact_pieces + all`: rewrite correctness-proven writer windows as exact pieces, and rewrite matching dynamic readers as standalone input slices. Because multi-piece carriers are not represented in `exact_pieces`, this mode does not build carrier/remat.
+- `coalesce_pieces + auto`: remains close to `exact_pieces + auto`; choosing coalescing does not open complex windows by itself.
+- `coalesce_pieces + all`: rewrite correctness-proven complex windows, coalesce multi-piece outputs into a bounding carrier, and use that carrier to connect dynamic writer-to-reader chains.
 
 For debugging, `PYPTO_WINDOW_EXTERNALIZE_INCLUDE` and
 `PYPTO_WINDOW_EXTERNALIZE_EXCLUDE` filter candidates by callee or parameter
@@ -128,10 +142,11 @@ This pass intentionally keeps window eligibility conservative. It does not speci
 
 After static eligibility, the default `auto` policy applies one more conservative
 cost gate. It rejects candidates that would increase the number of rewritten
-tensor arguments, and rejects multi-piece output rewrites by default. This keeps
-the default pipeline from trading local window precision for larger dispatch
-signatures or extra call-site orchestration. Use `window_rewrite_policy="all"`
-when investigating such candidates manually.
+tensor arguments, rejects dynamic-indexed input windows, and rejects multi-piece
+output rewrites by default. This keeps the default pipeline from trading local
+window precision for larger dispatch signatures, extra call-site orchestration,
+or complex dynamic-window scans whose performance benefit is workload-dependent.
+Use `window_rewrite_policy="all"` when investigating such candidates manually.
 
 Supported rewrite shapes:
 
@@ -168,6 +183,7 @@ Input-window eligibility:
 - input-only `Submit` callsites stay full-tensor; inside `manual_scope`, a full input may intentionally carry a wider dependency even when the callee body reads a local window
 - when a callee also has an eligible output-window rewrite, any already proven pure input windows are preserved and materialized at the same callsite
 - for `AggregateInputWindowLoop`, all references must be inside one static `ForStmt`, at least one offset dimension must vary with that loop, and the aggregate window must equal the input parent shape; partial aggregate reads such as weight sub-windows remain full-tensor
+- dynamic-indexed reader windows require a provable min/max scan. They are rejected by `auto`. Under `all + exact_pieces`, the call site materializes a standalone dynamic input slice and passes the base/extent scalars to the windowed callee. Under `all + coalesce_pieces`, eligible writer-reader chains may instead use a coalesced carrier/remat path.
 
 Non-goals and dependence model:
 
