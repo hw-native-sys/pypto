@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <functional>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -1941,16 +1942,14 @@ class OutWindowExternalizer {
       auto cloned = RewriteCallee(program, callee, analysis);
       if (!cloned) {
         if (WindowExternalizeLogEnabled()) {
-          LOG_INFO << "[window-clone] failed func=" << func_name
-                   << " outputs=" << analysis.outputs.size()
+          LOG_INFO << "[window-clone] failed func=" << func_name << " outputs=" << analysis.outputs.size()
                    << " inputs=" << analysis.inputs.size()
                    << " dynamic_inputs=" << HasDynamicIndexedInputWindow(analysis.inputs);
         }
         continue;
       }
       if (WindowExternalizeLogEnabled()) {
-        LOG_INFO << "[window-clone] created func=" << func_name
-                 << " outputs=" << analysis.outputs.size()
+        LOG_INFO << "[window-clone] created func=" << func_name << " outputs=" << analysis.outputs.size()
                  << " inputs=" << analysis.inputs.size()
                  << " dynamic_inputs=" << HasDynamicIndexedInputWindow(analysis.inputs);
       }
@@ -2472,8 +2471,8 @@ class OutWindowExternalizer {
     return std::make_shared<TensorType>(window_shape, tensor_type->dtype_, tensor_type->memref_, new_view);
   }
 
-  static std::vector<ExprPtr> SubstituteExprVector(
-      const std::vector<ExprPtr>& exprs, const std::unordered_map<const Var*, ExprPtr>& subst) {
+  static std::vector<ExprPtr> SubstituteExprVector(const std::vector<ExprPtr>& exprs,
+                                                   const std::unordered_map<const Var*, ExprPtr>& subst) {
     std::vector<ExprPtr> result;
     result.reserve(exprs.size());
     for (const auto& expr : exprs) {
@@ -2482,8 +2481,8 @@ class OutWindowExternalizer {
     return result;
   }
 
-  static TypePtr SubstituteTypeExprs(
-      const TypePtr& type, const std::unordered_map<const Var*, ExprPtr>& subst) {
+  static TypePtr SubstituteTypeExprs(const TypePtr& type,
+                                     const std::unordered_map<const Var*, ExprPtr>& subst) {
     if (!type || subst.empty()) return type;
     if (auto tuple_type = As<TupleType>(type)) {
       std::vector<TypePtr> new_types;
@@ -2504,8 +2503,8 @@ class OutWindowExternalizer {
         new_view->stride = SubstituteExprVector(new_view->stride, subst);
         new_view->valid_shape = SubstituteExprVector(new_view->valid_shape, subst);
       }
-      return std::make_shared<TensorType>(std::move(new_shape), tensor_type->dtype_,
-                                          tensor_type->memref_, std::move(new_view));
+      return std::make_shared<TensorType>(std::move(new_shape), tensor_type->dtype_, tensor_type->memref_,
+                                          std::move(new_view));
     }
     return type;
   }
@@ -2525,11 +2524,49 @@ class OutWindowExternalizer {
     int64_t constant = 0;
   };
 
-  static void AddLinearCoeff(LinearIndexExpr* expr, const Var* var, int64_t coeff) {
-    if (!expr || !var || coeff == 0) return;
+  static std::optional<int64_t> CheckedAdd(int64_t lhs, int64_t rhs) {
+    if ((rhs > 0 && lhs > std::numeric_limits<int64_t>::max() - rhs) ||
+        (rhs < 0 && lhs < std::numeric_limits<int64_t>::min() - rhs)) {
+      return std::nullopt;
+    }
+    return lhs + rhs;
+  }
+
+  static std::optional<int64_t> CheckedSub(int64_t lhs, int64_t rhs) {
+    if (rhs == std::numeric_limits<int64_t>::min()) {
+      return std::nullopt;
+    }
+    return CheckedAdd(lhs, -rhs);
+  }
+
+  static std::optional<int64_t> CheckedMul(int64_t lhs, int64_t rhs) {
+    if (lhs == 0 || rhs == 0) return int64_t{0};
+    if (lhs == -1 && rhs == std::numeric_limits<int64_t>::min()) return std::nullopt;
+    if (rhs == -1 && lhs == std::numeric_limits<int64_t>::min()) return std::nullopt;
+    if (lhs > 0) {
+      if (rhs > 0) {
+        if (lhs > std::numeric_limits<int64_t>::max() / rhs) return std::nullopt;
+      } else if (rhs < std::numeric_limits<int64_t>::min() / lhs) {
+        return std::nullopt;
+      }
+    } else {
+      if (rhs > 0) {
+        if (lhs < std::numeric_limits<int64_t>::min() / rhs) return std::nullopt;
+      } else if (lhs < std::numeric_limits<int64_t>::max() / rhs) {
+        return std::nullopt;
+      }
+    }
+    return lhs * rhs;
+  }
+
+  static bool AddLinearCoeff(LinearIndexExpr* expr, const Var* var, int64_t coeff) {
+    if (!expr || !var || coeff == 0) return true;
     auto& slot = expr->coeffs[var];
-    slot += coeff;
+    auto sum = CheckedAdd(slot, coeff);
+    if (!sum.has_value()) return false;
+    slot = *sum;
     if (slot == 0) expr->coeffs.erase(var);
+    return true;
   }
 
   static std::optional<LinearIndexExpr> ParseLinearIndexExpr(const ExprPtr& expr) {
@@ -2546,16 +2583,26 @@ class OutWindowExternalizer {
       auto lhs = ParseLinearIndexExpr(add->left_);
       auto rhs = ParseLinearIndexExpr(add->right_);
       if (!lhs.has_value() || !rhs.has_value()) return std::nullopt;
-      lhs->constant += rhs->constant;
-      for (const auto& [var, coeff] : rhs->coeffs) AddLinearCoeff(&*lhs, var, coeff);
+      auto constant = CheckedAdd(lhs->constant, rhs->constant);
+      if (!constant.has_value()) return std::nullopt;
+      lhs->constant = *constant;
+      for (const auto& [var, coeff] : rhs->coeffs) {
+        if (!AddLinearCoeff(&*lhs, var, coeff)) return std::nullopt;
+      }
       return lhs;
     }
     if (auto sub = As<Sub>(expr)) {
       auto lhs = ParseLinearIndexExpr(sub->left_);
       auto rhs = ParseLinearIndexExpr(sub->right_);
       if (!lhs.has_value() || !rhs.has_value()) return std::nullopt;
-      lhs->constant -= rhs->constant;
-      for (const auto& [var, coeff] : rhs->coeffs) AddLinearCoeff(&*lhs, var, -coeff);
+      auto constant = CheckedSub(lhs->constant, rhs->constant);
+      if (!constant.has_value()) return std::nullopt;
+      lhs->constant = *constant;
+      for (const auto& [var, coeff] : rhs->coeffs) {
+        auto neg_coeff = CheckedSub(0, coeff);
+        if (!neg_coeff.has_value()) return std::nullopt;
+        if (!AddLinearCoeff(&*lhs, var, *neg_coeff)) return std::nullopt;
+      }
       return lhs;
     }
     if (auto mul = As<Mul>(expr)) {
@@ -2574,10 +2621,14 @@ class OutWindowExternalizer {
       }
       auto parsed = ParseLinearIndexExpr(scaled_expr);
       if (!parsed.has_value()) return std::nullopt;
-      parsed->constant *= scale;
+      auto constant = CheckedMul(parsed->constant, scale);
+      if (!constant.has_value()) return std::nullopt;
+      parsed->constant = *constant;
       std::vector<const Var*> zero_coeff_vars;
       for (auto& [var, coeff] : parsed->coeffs) {
-        coeff *= scale;
+        auto scaled_coeff = CheckedMul(coeff, scale);
+        if (!scaled_coeff.has_value()) return std::nullopt;
+        coeff = *scaled_coeff;
         if (coeff == 0) zero_coeff_vars.push_back(var);
       }
       for (const auto* var : zero_coeff_vars) parsed->coeffs.erase(var);
@@ -2591,7 +2642,7 @@ class OutWindowExternalizer {
     auto rhs_linear = ParseLinearIndexExpr(rhs);
     if (!lhs_linear.has_value() || !rhs_linear.has_value()) return std::nullopt;
     if (lhs_linear->coeffs != rhs_linear->coeffs) return std::nullopt;
-    return lhs_linear->constant - rhs_linear->constant;
+    return CheckedSub(lhs_linear->constant, rhs_linear->constant);
   }
 
   static std::optional<int64_t> GetConstantSpanValue(const ExprPtr& max_extent, const ExprPtr& min_offset,
@@ -3124,30 +3175,41 @@ class OutWindowExternalizer {
       VarPtr max_offset;
     };
 
-    bool CanProveDynamicWindowGuardNonEmpty(
+    bool CanProveDynamicWindowScanHasUpdate(
         const DynamicIndexedInputWindow& dynamic,
         const std::unordered_map<const Var*, ExprPtr>& callsite_subst) const {
-      if (!dynamic.guard_condition) return true;
-      if (!dynamic.loop_var || !dynamic.loop_start) return false;
-
-      auto guard_subst = callsite_subst;
-      guard_subst[dynamic.loop_var.get()] = dynamic.loop_start;
-      auto guard = transform_utils::Substitute(dynamic.guard_condition, guard_subst);
-
       arith::Analyzer analyzer;
       for (const auto& loop : loop_context_) {
         if (!loop.loop_var || !loop.start || !loop.stop) continue;
         analyzer.int_set.Bind(loop.loop_var, loop.start, loop.stop);
       }
+
+      if (!dynamic.loop_var || !dynamic.loop_start || !dynamic.loop_stop || !dynamic.loop_step) {
+        return false;
+      }
+      auto start = analyzer.Simplify(transform_utils::Substitute(dynamic.loop_start, callsite_subst));
+      auto stop = analyzer.Simplify(transform_utils::Substitute(dynamic.loop_stop, callsite_subst));
+      auto step = analyzer.Simplify(transform_utils::Substitute(dynamic.loop_step, callsite_subst));
+      auto step_const = GetConstIntValue(step);
+      if (!step_const.has_value() || *step_const == 0) return false;
+
+      auto non_empty =
+          *step_const > 0 ? MakeLt(start, stop, Span::unknown()) : MakeGt(start, stop, Span::unknown());
+      if (!analyzer.CanProve(non_empty)) return false;
+
+      if (!dynamic.guard_condition) return true;
+
+      auto guard_subst = callsite_subst;
+      guard_subst[dynamic.loop_var.get()] = start;
+      auto guard = analyzer.Simplify(transform_utils::Substitute(dynamic.guard_condition, guard_subst));
       return analyzer.CanProve(guard);
     }
 
-    static ExprPtr SubstituteCallsiteAndLoops(
-        const ExprPtr& expr, const std::unordered_map<const Var*, ExprPtr>& callsite_subst,
-        const std::unordered_map<const Var*, ExprPtr>& loop_subst) {
+    static ExprPtr SubstituteCallsiteAndLoops(const ExprPtr& expr,
+                                              const std::unordered_map<const Var*, ExprPtr>& callsite_subst,
+                                              const std::unordered_map<const Var*, ExprPtr>& loop_subst) {
       return arith::Analyzer().Simplify(
-          transform_utils::Substitute(transform_utils::Substitute(expr, callsite_subst),
-                                      loop_subst));
+          transform_utils::Substitute(transform_utils::Substitute(expr, callsite_subst), loop_subst));
     }
 
     static bool IsSafeInlineScalarSubstitution(const ExprPtr& expr) {
@@ -3176,14 +3238,14 @@ class OutWindowExternalizer {
       return checker.ok();
     }
 
-    ExprPtr FlattenGeneratedScalarExpr(
-        const ExprPtr& expr, const std::string& name_prefix, const Span& span,
-        std::vector<StmtPtr>* stmts) {
+    ExprPtr FlattenGeneratedScalarExpr(const ExprPtr& expr, const std::string& name_prefix, const Span& span,
+                                       std::vector<StmtPtr>* stmts) {
       class LocalFlattener : public IRMutator {
        public:
-        LocalFlattener(std::string name_prefix, size_t* counter, std::vector<StmtPtr>* stmts,
-                       Span span)
-            : name_prefix_(std::move(name_prefix)), counter_(counter), stmts_(stmts),
+        LocalFlattener(std::string name_prefix, size_t* counter, std::vector<StmtPtr>* stmts, Span span)
+            : name_prefix_(std::move(name_prefix)),
+              counter_(counter),
+              stmts_(stmts),
               span_(std::move(span)) {}
 
        protected:
@@ -3202,8 +3264,7 @@ class OutWindowExternalizer {
             new_args.push_back(visited);
           }
           if (!changed) return op;
-          return std::make_shared<Call>(op->op_, new_args, op->kwargs_, op->attrs_,
-                                        op->GetType(), op->span_);
+          return std::make_shared<Call>(op->op_, new_args, op->kwargs_, op->attrs_, op->GetType(), op->span_);
         }
 
         ExprPtr VisitExpr_(const SubmitPtr& op) override {
@@ -3221,9 +3282,8 @@ class OutWindowExternalizer {
             new_args.push_back(visited);
           }
           if (!changed) return op;
-          return std::make_shared<Submit>(op->op_, new_args, op->deps_, op->kwargs_,
-                                          op->attrs_, op->GetType(), op->span_,
-                                          op->core_num_, op->sync_start_);
+          return std::make_shared<Submit>(op->op_, new_args, op->deps_, op->kwargs_, op->attrs_,
+                                          op->GetType(), op->span_, op->core_num_, op->sync_start_);
         }
 
         ExprPtr VisitExpr_(const AddPtr& op) override { return ProcessBinaryExpr(op); }
@@ -3258,25 +3318,23 @@ class OutWindowExternalizer {
        private:
         ExprPtr ExtractCallToTemp(const ExprPtr& expr) {
           if (!As<Call>(expr) && !As<Submit>(expr)) return expr;
-          auto temp_var = std::make_shared<Var>(
-              name_prefix_ + "__expr_tmp_" + std::to_string((*counter_)++),
-              expr->GetType(), expr->span_);
+          auto temp_var = std::make_shared<Var>(name_prefix_ + "__expr_tmp_" + std::to_string((*counter_)++),
+                                                expr->GetType(), expr->span_);
           stmts_->push_back(std::make_shared<AssignStmt>(temp_var, expr, temp_var->span_));
           return temp_var;
         }
 
-#define PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(OpName)                                           \
-        ExprPtr ProcessBinaryExpr(const OpName##Ptr& op) {                                     \
-          auto new_left = VisitExpr(op->left_);                                                \
-          auto new_right = VisitExpr(op->right_);                                              \
-          if (As<Call>(new_left) || As<Submit>(new_left)) new_left = ExtractCallToTemp(new_left); \
-          if (As<Call>(new_right) || As<Submit>(new_right)) new_right = ExtractCallToTemp(new_right); \
-          if (new_left.get() == op->left_.get() && new_right.get() == op->right_.get()) return op; \
-          auto scalar_type = As<ScalarType>(op->GetType());                                    \
-          INTERNAL_CHECK_SPAN(scalar_type, op->span_)                                          \
-              << "Generated scalar binary expression must be scalar";                          \
-          return std::make_shared<const OpName>(new_left, new_right, scalar_type->dtype_, op->span_); \
-        }
+#define PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(OpName)                                                    \
+  ExprPtr ProcessBinaryExpr(const OpName##Ptr& op) {                                                    \
+    auto new_left = VisitExpr(op->left_);                                                               \
+    auto new_right = VisitExpr(op->right_);                                                             \
+    if (As<Call>(new_left) || As<Submit>(new_left)) new_left = ExtractCallToTemp(new_left);             \
+    if (As<Call>(new_right) || As<Submit>(new_right)) new_right = ExtractCallToTemp(new_right);         \
+    if (new_left.get() == op->left_.get() && new_right.get() == op->right_.get()) return op;            \
+    auto scalar_type = As<ScalarType>(op->GetType());                                                   \
+    INTERNAL_CHECK_SPAN(scalar_type, op->span_) << "Generated scalar binary expression must be scalar"; \
+    return std::make_shared<const OpName>(new_left, new_right, scalar_type->dtype_, op->span_);         \
+  }
 
         PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Add)
         PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Sub)
@@ -3303,18 +3361,17 @@ class OutWindowExternalizer {
         PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(BitShiftRight)
 #undef PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD
 
-#define PYPTO_WINDOW_PROCESS_UNARY_OVERLOAD(OpName)                                            \
-        ExprPtr ProcessUnaryExpr(const OpName##Ptr& op) {                                      \
-          auto new_operand = VisitExpr(op->operand_);                                          \
-          if (As<Call>(new_operand) || As<Submit>(new_operand)) {                              \
-            new_operand = ExtractCallToTemp(new_operand);                                      \
-          }                                                                                    \
-          if (new_operand.get() == op->operand_.get()) return op;                              \
-          auto scalar_type = As<ScalarType>(op->GetType());                                    \
-          INTERNAL_CHECK_SPAN(scalar_type, op->span_)                                          \
-              << "Generated scalar unary expression must be scalar";                           \
-          return std::make_shared<const OpName>(new_operand, scalar_type->dtype_, op->span_);  \
-        }
+#define PYPTO_WINDOW_PROCESS_UNARY_OVERLOAD(OpName)                                                    \
+  ExprPtr ProcessUnaryExpr(const OpName##Ptr& op) {                                                    \
+    auto new_operand = VisitExpr(op->operand_);                                                        \
+    if (As<Call>(new_operand) || As<Submit>(new_operand)) {                                            \
+      new_operand = ExtractCallToTemp(new_operand);                                                    \
+    }                                                                                                  \
+    if (new_operand.get() == op->operand_.get()) return op;                                            \
+    auto scalar_type = As<ScalarType>(op->GetType());                                                  \
+    INTERNAL_CHECK_SPAN(scalar_type, op->span_) << "Generated scalar unary expression must be scalar"; \
+    return std::make_shared<const OpName>(new_operand, scalar_type->dtype_, op->span_);                \
+  }
 
         PYPTO_WINDOW_PROCESS_UNARY_OVERLOAD(Abs)
         PYPTO_WINDOW_PROCESS_UNARY_OVERLOAD(Neg)
@@ -3435,8 +3492,8 @@ class OutWindowExternalizer {
     std::optional<DynamicWindowScanResult> EmitDynamicWindowScan(
         const InputRewriteInfo& input, const DenseRegionPiece& piece, const CallPtr& call,
         const AssignStmtPtr& call_assign, const VarPtr& in_arg,
-        const std::unordered_map<const Var*, ExprPtr>& callsite_subst,
-        arith::Analyzer* analyzer, std::vector<StmtPtr>* stmts) {
+        const std::unordered_map<const Var*, ExprPtr>& callsite_subst, arith::Analyzer* analyzer,
+        std::vector<StmtPtr>* stmts) {
       if (!input.dynamic_indexed_window.has_value() || !call || !call_assign || !in_arg || !analyzer ||
           !stmts) {
         return std::nullopt;
@@ -3458,10 +3515,10 @@ class OutWindowExternalizer {
           std::make_shared<Var>(in_arg->name_hint_ + "__window_min_init", index_type, call_assign->span_);
       auto scan_max_init =
           std::make_shared<Var>(in_arg->name_hint_ + "__window_max_init", index_type, call_assign->span_);
-      auto scan_min_iter = std::make_shared<IterArg>(
-          in_arg->name_hint_ + "__window_min_iter", index_type, scan_min_init, call_assign->span_);
-      auto scan_max_iter = std::make_shared<IterArg>(
-          in_arg->name_hint_ + "__window_max_iter", index_type, scan_max_init, call_assign->span_);
+      auto scan_min_iter = std::make_shared<IterArg>(in_arg->name_hint_ + "__window_min_iter", index_type,
+                                                     scan_min_init, call_assign->span_);
+      auto scan_max_iter = std::make_shared<IterArg>(in_arg->name_hint_ + "__window_max_iter", index_type,
+                                                     scan_max_init, call_assign->span_);
       auto scan_min_phi =
           std::make_shared<Var>(in_arg->name_hint_ + "__window_min_phi", index_type, call_assign->span_);
       auto scan_max_phi =
@@ -3483,21 +3540,21 @@ class OutWindowExternalizer {
       std::vector<ExprPtr> index_offset_vars;
       index_offset_vars.reserve(index_offsets.size());
       for (size_t i = 0; i < index_offsets.size(); ++i) {
-        auto index_var = std::make_shared<Var>(
-            in_arg->name_hint_ + "__window_index_" + std::to_string(i), index_type, call_assign->span_);
-        auto index_expr = FlattenGeneratedScalarExpr(index_offsets[i], in_arg->name_hint_,
-                                                     call_assign->span_, &then_stmts);
+        auto index_var = std::make_shared<Var>(in_arg->name_hint_ + "__window_index_" + std::to_string(i),
+                                               index_type, call_assign->span_);
+        auto index_expr =
+            FlattenGeneratedScalarExpr(index_offsets[i], in_arg->name_hint_, call_assign->span_, &then_stmts);
         then_stmts.push_back(std::make_shared<AssignStmt>(index_var, index_expr, call_assign->span_));
         index_offset_vars.push_back(index_var);
       }
       auto index_tuple = std::make_shared<MakeTuple>(index_offset_vars, call_assign->span_);
-      auto read_call =
-          OpRegistry::GetInstance().Create("tensor.read", {index_tensor_arg, index_tuple}, call_assign->span_);
+      auto read_call = OpRegistry::GetInstance().Create("tensor.read", {index_tensor_arg, index_tuple},
+                                                        call_assign->span_);
       auto read_var =
           std::make_shared<Var>(in_arg->name_hint_ + "__window_pbid_i32", int32_type, call_assign->span_);
       auto cast_expr = MakeCast(read_var, DataType::INDEX, call_assign->span_);
-      auto cast_var = std::make_shared<Var>(in_arg->name_hint_ + "__window_pbid", index_type,
-                                            call_assign->span_);
+      auto cast_var =
+          std::make_shared<Var>(in_arg->name_hint_ + "__window_pbid", index_type, call_assign->span_);
       auto next_min =
           std::make_shared<Var>(in_arg->name_hint_ + "__window_min_next", index_type, call_assign->span_);
       auto next_max =
@@ -3505,30 +3562,28 @@ class OutWindowExternalizer {
 
       then_stmts.push_back(std::make_shared<AssignStmt>(read_var, read_call, call_assign->span_));
       then_stmts.push_back(std::make_shared<AssignStmt>(cast_var, cast_expr, call_assign->span_));
-      auto next_min_expr = FlattenGeneratedScalarExpr(
-          MakeMin(scan_min_iter, cast_var, call_assign->span_), in_arg->name_hint_,
-          call_assign->span_, &then_stmts);
-      auto next_max_expr = FlattenGeneratedScalarExpr(
-          MakeMax(scan_max_iter, cast_var, call_assign->span_), in_arg->name_hint_,
-          call_assign->span_, &then_stmts);
+      auto next_min_expr = FlattenGeneratedScalarExpr(MakeMin(scan_min_iter, cast_var, call_assign->span_),
+                                                      in_arg->name_hint_, call_assign->span_, &then_stmts);
+      auto next_max_expr = FlattenGeneratedScalarExpr(MakeMax(scan_max_iter, cast_var, call_assign->span_),
+                                                      in_arg->name_hint_, call_assign->span_, &then_stmts);
       then_stmts.push_back(std::make_shared<AssignStmt>(next_min, next_min_expr, call_assign->span_));
       then_stmts.push_back(std::make_shared<AssignStmt>(next_max, next_max_expr, call_assign->span_));
       then_stmts.push_back(
           std::make_shared<YieldStmt>(std::vector<ExprPtr>{next_min, next_max}, call_assign->span_));
       auto then_body = std::make_shared<SeqStmts>(then_stmts, call_assign->span_);
-      auto else_body = std::make_shared<YieldStmt>(
-          std::vector<ExprPtr>{scan_min_iter, scan_max_iter}, call_assign->span_);
+      auto else_body =
+          std::make_shared<YieldStmt>(std::vector<ExprPtr>{scan_min_iter, scan_max_iter}, call_assign->span_);
 
       StmtPtr loop_body;
       if (dynamic.guard_condition) {
         auto guard = analyzer->Simplify(transform_utils::Substitute(dynamic.guard_condition, scan_subst));
-        auto if_stmt = std::make_shared<IfStmt>(
-            guard, then_body, StmtPtr(else_body), std::vector<VarPtr>{scan_min_phi, scan_max_phi},
-            call_assign->span_);
+        auto if_stmt =
+            std::make_shared<IfStmt>(guard, then_body, StmtPtr(else_body),
+                                     std::vector<VarPtr>{scan_min_phi, scan_max_phi}, call_assign->span_);
         loop_body = std::make_shared<SeqStmts>(
             std::vector<StmtPtr>{if_stmt,
-                                 std::make_shared<YieldStmt>(
-                                     std::vector<ExprPtr>{scan_min_phi, scan_max_phi}, call_assign->span_)},
+                                 std::make_shared<YieldStmt>(std::vector<ExprPtr>{scan_min_phi, scan_max_phi},
+                                                             call_assign->span_)},
             call_assign->span_);
       } else {
         loop_body = then_body;
@@ -3553,9 +3608,9 @@ class OutWindowExternalizer {
       return result;
     }
 
-    std::optional<FullOffsetScanResult> EmitFullOffsetScanPrelude(
-        const CallsiteAccessCandidate& reader, arith::Analyzer* analyzer,
-        std::vector<StmtPtr>* stmts) {
+    std::optional<FullOffsetScanResult> EmitFullOffsetScanPrelude(const CallsiteAccessCandidate& reader,
+                                                                  arith::Analyzer* analyzer,
+                                                                  std::vector<StmtPtr>* stmts) {
       if (!reader.dynamic_indexed_reader || !reader.input_info.dynamic_indexed_window.has_value() ||
           !reader.call || !reader.assign || !analyzer || !stmts) {
         return std::nullopt;
@@ -3563,8 +3618,8 @@ class OutWindowExternalizer {
       const auto& input = reader.input_info;
       const auto& dynamic = *input.dynamic_indexed_window;
       if (dynamic.index_tensor_param_index >= reader.call->args_.size() ||
-          dynamic.dynamic_dim >= reader.shape.size() ||
-          dynamic.dynamic_dim >= reader.offsets.size() || !dynamic.dynamic_index_value) {
+          dynamic.dynamic_dim >= reader.shape.size() || dynamic.dynamic_dim >= reader.offsets.size() ||
+          !dynamic.dynamic_index_value) {
         return std::nullopt;
       }
       if (dynamic.guard_condition &&
@@ -3585,8 +3640,8 @@ class OutWindowExternalizer {
         if (!loop.loop_var || !loop.start || !loop.stop || !loop.step) return std::nullopt;
         loops.push_back(ScanLoopSpec{loop.loop_var, loop.start, loop.stop, loop.step});
       }
-      loops.push_back(ScanLoopSpec{dynamic.loop_var, dynamic.loop_start, dynamic.loop_stop,
-                                   dynamic.loop_step});
+      loops.push_back(
+          ScanLoopSpec{dynamic.loop_var, dynamic.loop_start, dynamic.loop_stop, dynamic.loop_step});
 
       auto index_tensor_arg =
           MaterializeWindowParentExpr(reader.call->args_[dynamic.index_tensor_param_index]);
@@ -3596,24 +3651,18 @@ class OutWindowExternalizer {
       const std::string base_name =
           reader.parent_root ? reader.parent_root->name_hint_ : std::string("carrier");
 
-      auto scan_min_init =
-          std::make_shared<Var>(base_name + "__carrier_min_init", index_type, span);
-      auto scan_max_init =
-          std::make_shared<Var>(base_name + "__carrier_max_init", index_type, span);
-      auto scan_min_result =
-          std::make_shared<Var>(base_name + "__carrier_min", index_type, span);
-      auto scan_max_result =
-          std::make_shared<Var>(base_name + "__carrier_max", index_type, span);
+      auto scan_min_init = std::make_shared<Var>(base_name + "__carrier_min_init", index_type, span);
+      auto scan_max_init = std::make_shared<Var>(base_name + "__carrier_max_init", index_type, span);
+      auto scan_min_result = std::make_shared<Var>(base_name + "__carrier_min", index_type, span);
+      auto scan_max_result = std::make_shared<Var>(base_name + "__carrier_max", index_type, span);
 
-      auto apply_subst = [&](const ExprPtr& expr,
-                             const std::unordered_map<const Var*, ExprPtr>& loop_subst) {
+      auto apply_subst = [&](const ExprPtr& expr, const std::unordered_map<const Var*, ExprPtr>& loop_subst) {
         return SubstituteCallsiteAndLoops(expr, reader.callsite_subst, loop_subst);
       };
 
-      std::function<StmtPtr(size_t, ExprPtr, ExprPtr,
-                            std::unordered_map<const Var*, ExprPtr>)>
-          build_body = [&](size_t loop_index, ExprPtr current_min, ExprPtr current_max,
-                           std::unordered_map<const Var*, ExprPtr> loop_subst) -> StmtPtr {
+      std::function<StmtPtr(size_t, ExprPtr, ExprPtr, std::unordered_map<const Var*, ExprPtr>)> build_body =
+          [&](size_t loop_index, ExprPtr current_min, ExprPtr current_max,
+              std::unordered_map<const Var*, ExprPtr> loop_subst) -> StmtPtr {
         if (loop_index == loops.size()) {
           std::vector<ExprPtr> index_offsets;
           index_offsets.reserve(dynamic.index_offsets.size());
@@ -3625,25 +3674,19 @@ class OutWindowExternalizer {
           std::vector<ExprPtr> index_offset_vars;
           index_offset_vars.reserve(index_offsets.size());
           for (size_t i = 0; i < index_offsets.size(); ++i) {
-            auto index_var = std::make_shared<Var>(
-                base_name + "__carrier_index_" + std::to_string(i), index_type, span);
-            auto index_expr =
-                FlattenGeneratedScalarExpr(index_offsets[i], base_name, span, &then_stmts);
+            auto index_var =
+                std::make_shared<Var>(base_name + "__carrier_index_" + std::to_string(i), index_type, span);
+            auto index_expr = FlattenGeneratedScalarExpr(index_offsets[i], base_name, span, &then_stmts);
             then_stmts.push_back(std::make_shared<AssignStmt>(index_var, index_expr, span));
             index_offset_vars.push_back(index_var);
           }
           auto read_call = OpRegistry::GetInstance().Create(
-              "tensor.read",
-              {index_tensor_arg, std::make_shared<MakeTuple>(index_offset_vars, span)}, span);
-          auto read_var =
-              std::make_shared<Var>(base_name + "__carrier_pbid_i32", int32_type, span);
+              "tensor.read", {index_tensor_arg, std::make_shared<MakeTuple>(index_offset_vars, span)}, span);
+          auto read_var = std::make_shared<Var>(base_name + "__carrier_pbid_i32", int32_type, span);
           auto cast_expr = MakeCast(read_var, DataType::INDEX, span);
-          auto cast_var =
-              std::make_shared<Var>(base_name + "__carrier_pbid", index_type, span);
-          auto next_min =
-              std::make_shared<Var>(base_name + "__carrier_min_next", index_type, span);
-          auto next_max =
-              std::make_shared<Var>(base_name + "__carrier_max_next", index_type, span);
+          auto cast_var = std::make_shared<Var>(base_name + "__carrier_pbid", index_type, span);
+          auto next_min = std::make_shared<Var>(base_name + "__carrier_min_next", index_type, span);
+          auto next_max = std::make_shared<Var>(base_name + "__carrier_max_next", index_type, span);
 
           auto offset_subst = loop_subst;
           offset_subst[dynamic.dynamic_index_value] = cast_var;
@@ -3652,44 +3695,39 @@ class OutWindowExternalizer {
 
           then_stmts.push_back(std::make_shared<AssignStmt>(read_var, read_call, span));
           then_stmts.push_back(std::make_shared<AssignStmt>(cast_var, cast_expr, span));
-          auto next_min_expr = FlattenGeneratedScalarExpr(
-              MakeMin(current_min, full_offset, span), base_name, span, &then_stmts);
-          auto next_max_expr = FlattenGeneratedScalarExpr(
-              MakeMax(current_max, full_offset, span), base_name, span, &then_stmts);
+          auto next_min_expr = FlattenGeneratedScalarExpr(MakeMin(current_min, full_offset, span), base_name,
+                                                          span, &then_stmts);
+          auto next_max_expr = FlattenGeneratedScalarExpr(MakeMax(current_max, full_offset, span), base_name,
+                                                          span, &then_stmts);
           then_stmts.push_back(std::make_shared<AssignStmt>(next_min, next_min_expr, span));
           then_stmts.push_back(std::make_shared<AssignStmt>(next_max, next_max_expr, span));
-          then_stmts.push_back(
-              std::make_shared<YieldStmt>(std::vector<ExprPtr>{next_min, next_max}, span));
+          then_stmts.push_back(std::make_shared<YieldStmt>(std::vector<ExprPtr>{next_min, next_max}, span));
           auto then_body = std::make_shared<SeqStmts>(then_stmts, span);
           if (!dynamic.guard_condition) return then_body;
 
           auto guard = analyzer->Simplify(apply_subst(dynamic.guard_condition, loop_subst));
           auto min_phi = std::make_shared<Var>(base_name + "__carrier_min_phi", index_type, span);
           auto max_phi = std::make_shared<Var>(base_name + "__carrier_max_phi", index_type, span);
-          auto else_body = std::make_shared<YieldStmt>(
-              std::vector<ExprPtr>{current_min, current_max}, span);
-          auto if_stmt = std::make_shared<IfStmt>(
-              guard, then_body, StmtPtr(else_body), std::vector<VarPtr>{min_phi, max_phi}, span);
+          auto else_body = std::make_shared<YieldStmt>(std::vector<ExprPtr>{current_min, current_max}, span);
+          auto if_stmt = std::make_shared<IfStmt>(guard, then_body, StmtPtr(else_body),
+                                                  std::vector<VarPtr>{min_phi, max_phi}, span);
           return std::make_shared<SeqStmts>(
-              std::vector<StmtPtr>{
-                  if_stmt,
-                  std::make_shared<YieldStmt>(std::vector<ExprPtr>{min_phi, max_phi}, span)},
+              std::vector<StmtPtr>{if_stmt,
+                                   std::make_shared<YieldStmt>(std::vector<ExprPtr>{min_phi, max_phi}, span)},
               span);
         }
 
         const auto& loop = loops[loop_index];
-        auto scan_loop_var = std::make_shared<Var>(
-            base_name + "__carrier_scan_" + std::to_string(loop_index), index_type, span);
+        auto scan_loop_var = std::make_shared<Var>(base_name + "__carrier_scan_" + std::to_string(loop_index),
+                                                   index_type, span);
         auto min_iter = std::make_shared<IterArg>(
-            base_name + "__carrier_min_iter_" + std::to_string(loop_index), index_type,
-            current_min, span);
+            base_name + "__carrier_min_iter_" + std::to_string(loop_index), index_type, current_min, span);
         auto max_iter = std::make_shared<IterArg>(
-            base_name + "__carrier_max_iter_" + std::to_string(loop_index), index_type,
-            current_max, span);
-        auto min_out = std::make_shared<Var>(
-            base_name + "__carrier_min_out_" + std::to_string(loop_index), index_type, span);
-        auto max_out = std::make_shared<Var>(
-            base_name + "__carrier_max_out_" + std::to_string(loop_index), index_type, span);
+            base_name + "__carrier_max_iter_" + std::to_string(loop_index), index_type, current_max, span);
+        auto min_out = std::make_shared<Var>(base_name + "__carrier_min_out_" + std::to_string(loop_index),
+                                             index_type, span);
+        auto max_out = std::make_shared<Var>(base_name + "__carrier_max_out_" + std::to_string(loop_index),
+                                             index_type, span);
 
         auto nested_subst = loop_subst;
         nested_subst[loop.original_var.get()] = scan_loop_var;
@@ -3698,12 +3736,11 @@ class OutWindowExternalizer {
         auto stop = analyzer->Simplify(apply_subst(loop.stop, loop_subst));
         auto step = analyzer->Simplify(apply_subst(loop.step, loop_subst));
         auto for_stmt = std::make_shared<ForStmt>(
-            scan_loop_var, start, stop, step, std::vector<IterArgPtr>{min_iter, max_iter},
-            body, std::vector<VarPtr>{min_out, max_out}, span, ForKind::Sequential);
+            scan_loop_var, start, stop, step, std::vector<IterArgPtr>{min_iter, max_iter}, body,
+            std::vector<VarPtr>{min_out, max_out}, span, ForKind::Sequential);
         return std::make_shared<SeqStmts>(
-            std::vector<StmtPtr>{
-                for_stmt,
-                std::make_shared<YieldStmt>(std::vector<ExprPtr>{min_out, max_out}, span)},
+            std::vector<StmtPtr>{for_stmt,
+                                 std::make_shared<YieldStmt>(std::vector<ExprPtr>{min_out, max_out}, span)},
             span);
       };
 
@@ -3714,22 +3751,19 @@ class OutWindowExternalizer {
 
       if (loops.empty()) return std::nullopt;
       const auto& first_loop = loops.front();
-      auto scan_loop_var =
-          std::make_shared<Var>(base_name + "__carrier_scan_0", index_type, span);
-      auto min_iter = std::make_shared<IterArg>(base_name + "__carrier_min_iter_0",
-                                                index_type, scan_min_init, span);
-      auto max_iter = std::make_shared<IterArg>(base_name + "__carrier_max_iter_0",
-                                                index_type, scan_max_init, span);
+      auto scan_loop_var = std::make_shared<Var>(base_name + "__carrier_scan_0", index_type, span);
+      auto min_iter =
+          std::make_shared<IterArg>(base_name + "__carrier_min_iter_0", index_type, scan_min_init, span);
+      auto max_iter =
+          std::make_shared<IterArg>(base_name + "__carrier_max_iter_0", index_type, scan_max_init, span);
       std::unordered_map<const Var*, ExprPtr> loop_subst;
       loop_subst[first_loop.original_var.get()] = scan_loop_var;
       auto body = build_body(1, min_iter, max_iter, loop_subst);
       stmts->push_back(std::make_shared<ForStmt>(
           scan_loop_var, analyzer->Simplify(apply_subst(first_loop.start, {})),
           analyzer->Simplify(apply_subst(first_loop.stop, {})),
-          analyzer->Simplify(apply_subst(first_loop.step, {})),
-          std::vector<IterArgPtr>{min_iter, max_iter}, body,
-          std::vector<VarPtr>{scan_min_result, scan_max_result}, span,
-          ForKind::Sequential));
+          analyzer->Simplify(apply_subst(first_loop.step, {})), std::vector<IterArgPtr>{min_iter, max_iter},
+          body, std::vector<VarPtr>{scan_min_result, scan_max_result}, span, ForKind::Sequential));
 
       return FullOffsetScanResult{scan_min_result, scan_max_result};
     }
@@ -3758,10 +3792,8 @@ class OutWindowExternalizer {
       const auto& analysis = analysis_it->second;
       auto cloned_func = clone_it->second;
       if (WindowExternalizeLogEnabled() && HasDynamicIndexedInputWindow(analysis.inputs)) {
-        LOG_INFO << "[window-call] try func=" << callee_name
-                 << " outputs=" << analysis.outputs.size()
-                 << " inputs=" << analysis.inputs.size()
-                 << " stmt_index=" << stmt_index;
+        LOG_INFO << "[window-call] try func=" << callee_name << " outputs=" << analysis.outputs.size()
+                 << " inputs=" << analysis.inputs.size() << " stmt_index=" << stmt_index;
       }
 
       if (analysis.outputs.empty() && analysis.inputs.empty()) return std::nullopt;
@@ -3799,16 +3831,14 @@ class OutWindowExternalizer {
           return std::nullopt;
         }
       }
-      if (!analysis.outputs.empty() &&
-          !ProveCallsiteDisjointness(call_assign, call, analysis) &&
+      if (!analysis.outputs.empty() && !ProveCallsiteDisjointness(call_assign, call, analysis) &&
           !CanUseRuntimeViewDisjointness(analysis)) {
         return std::nullopt;
       }
       if (HasUnwindowableSiblingOutputWriter(call, analysis)) return std::nullopt;
       if (HasDuplicateExternalizedOutputParent(call, analysis)) return std::nullopt;
       if (HasManualDepsToMultiPieceOutput(call, analysis)) return std::nullopt;
-      if (window_rewrite_policy_ != WindowRewritePolicy::All &&
-          HasDynamicReaderCarrierRisk(call, analysis)) {
+      if (window_rewrite_policy_ != WindowRewritePolicy::All && HasDynamicReaderCarrierRisk(call, analysis)) {
         return std::nullopt;
       }
 
@@ -3838,10 +3868,10 @@ class OutWindowExternalizer {
                                  : FindCarrierUse(call, input.in_param_index, piece);
           if (WindowExternalizeLogEnabled() && input.dynamic_indexed_window.has_value()) {
             LOG_INFO << "[window-call] dynamic input func=" << callee_name
-                     << " input=" << input.in_param_index
-                     << " carrier=" << carrier_use.has_value()
-                     << " current=" << (carrier_use.has_value() && carrier_use->carrier &&
-                                         carrier_use->carrier->current_var);
+                     << " input=" << input.in_param_index << " carrier=" << carrier_use.has_value()
+                     << " current="
+                     << (carrier_use.has_value() && carrier_use->carrier &&
+                         carrier_use->carrier->current_var);
           }
           if (carrier_use.has_value()) {
             if (!carrier_use->carrier) return std::nullopt;
@@ -3852,10 +3882,9 @@ class OutWindowExternalizer {
               if (!carrier_use->carrier->current_var) {
                 return std::nullopt;
               }
-              extra_args_by_in_index.emplace(
-                  input.in_param_index,
-                  std::vector<ExprPtr>{carrier_use->carrier->dynamic_base_arg,
-                                       carrier_use->carrier->dynamic_extent_arg});
+              extra_args_by_in_index.emplace(input.in_param_index,
+                                             std::vector<ExprPtr>{carrier_use->carrier->dynamic_base_arg,
+                                                                  carrier_use->carrier->dynamic_extent_arg});
             }
             if (carrier_use->carrier->current_var) {
               input_slices.push_back(carrier_use->carrier->current_var);
@@ -3876,7 +3905,7 @@ class OutWindowExternalizer {
 
           if (input.dynamic_indexed_window.has_value()) {
             if (pieces.size() != 1) return std::nullopt;
-            if (!CanProveDynamicWindowGuardNonEmpty(*input.dynamic_indexed_window, callsite_subst)) {
+            if (!CanProveDynamicWindowScanHasUpdate(*input.dynamic_indexed_window, callsite_subst)) {
               return std::nullopt;
             }
             auto scan = EmitDynamicWindowScan(input, piece, call, call_assign, in_arg, callsite_subst,
@@ -3900,11 +3929,10 @@ class OutWindowExternalizer {
                   transform_utils::Substitute(piece.callsite_offsets[dim_i], max_offset_subst));
               auto min_offset = input_offset_analyzer.Simplify(
                   transform_utils::Substitute(piece.callsite_offsets[dim_i], min_offset_subst));
-              auto access_extent = input_offset_analyzer.Simplify(
-                  transform_utils::Substitute(dim, callsite_subst));
-              shape_exprs.push_back(input_offset_analyzer.Simplify(
-                  MakeSub(MakeAdd(max_offset, access_extent, call_assign->span_), min_offset,
-                          call_assign->span_)));
+              auto access_extent =
+                  input_offset_analyzer.Simplify(transform_utils::Substitute(dim, callsite_subst));
+              shape_exprs.push_back(input_offset_analyzer.Simplify(MakeSub(
+                  MakeAdd(max_offset, access_extent, call_assign->span_), min_offset, call_assign->span_)));
             } else {
               shape_exprs.push_back(transform_utils::Substitute(dim, callsite_subst));
             }
@@ -3918,7 +3946,8 @@ class OutWindowExternalizer {
                 offset_i == input.dynamic_indexed_window->dynamic_dim) {
               for (const auto& [var, expr] : dynamic_min_subst) offset_subst[var] = expr;
             }
-            offset_exprs.push_back(input_offset_analyzer.Simplify(transform_utils::Substitute(offset, offset_subst)));
+            offset_exprs.push_back(
+                input_offset_analyzer.Simplify(transform_utils::Substitute(offset, offset_subst)));
           }
           if (input.dynamic_indexed_window.has_value()) {
             const size_t dynamic_dim = input.dynamic_indexed_window->dynamic_dim;
@@ -3927,10 +3956,10 @@ class OutWindowExternalizer {
                                                   call_assign->span_);
             auto extent_arg = std::make_shared<Var>(in_arg->name_hint_ + "__window_extent_arg", index_type,
                                                     call_assign->span_);
-            stmts.push_back(std::make_shared<AssignStmt>(base_arg, offset_exprs[dynamic_dim],
-                                                         call_assign->span_));
-            stmts.push_back(std::make_shared<AssignStmt>(extent_arg, shape_exprs[dynamic_dim],
-                                                         call_assign->span_));
+            stmts.push_back(
+                std::make_shared<AssignStmt>(base_arg, offset_exprs[dynamic_dim], call_assign->span_));
+            stmts.push_back(
+                std::make_shared<AssignStmt>(extent_arg, shape_exprs[dynamic_dim], call_assign->span_));
             offset_exprs[dynamic_dim] = base_arg;
             shape_exprs[dynamic_dim] = extent_arg;
             input_extra_args.push_back(base_arg);
@@ -3983,81 +4012,79 @@ class OutWindowExternalizer {
             offset_exprs.push_back(
                 output_offset_analyzer.Simplify(transform_utils::Substitute(offset, callsite_subst)));
           }
-          if (carrier_use.has_value() && carrier_use->carrier &&
-              carrier_use->carrier->has_dynamic_reader) {
+          if (carrier_use.has_value() && carrier_use->carrier && carrier_use->carrier->has_dynamic_reader) {
             if (piece_index != 0 || !HasFineAssemblePieces(output) ||
                 carrier_use->carrier->dynamic_dim != 0) {
               return std::nullopt;
             }
-            if (carrier_use->carrier->dynamic_base_arg &&
-                carrier_use->carrier->dynamic_extent_arg) {
+            if (carrier_use->carrier->dynamic_base_arg && carrier_use->carrier->dynamic_extent_arg) {
               offset_exprs[0] = carrier_use->carrier->dynamic_base_arg;
               shape_exprs[0] = carrier_use->carrier->dynamic_extent_arg;
             } else {
               if (!carrier_use->carrier->reader_call || !carrier_use->carrier->reader_assign) {
                 return std::nullopt;
               }
-            auto reader_in_arg =
-                AsVarLike(carrier_use->carrier->reader_call->args_[carrier_use->carrier->reader_input.in_param_index]);
-            auto reader_func = LookupFunction(GetCallFuncName(carrier_use->carrier->reader_call));
-            if (!reader_in_arg || !reader_func) return std::nullopt;
-            std::unordered_map<const Var*, ExprPtr> reader_callsite_subst;
-            for (size_t i = 0;
-                 i < reader_func->params_.size() && i < carrier_use->carrier->reader_call->args_.size(); ++i) {
-              reader_callsite_subst[reader_func->params_[i].get()] =
-                  carrier_use->carrier->reader_call->args_[i];
-            }
-            if (!CanProveDynamicWindowGuardNonEmpty(
-                    *carrier_use->carrier->reader_input.dynamic_indexed_window, reader_callsite_subst)) {
-              return std::nullopt;
-            }
-            auto scan = EmitDynamicWindowScan(carrier_use->carrier->reader_input,
-                                              carrier_use->carrier->reader_piece,
-                                              carrier_use->carrier->reader_call, call_assign, reader_in_arg,
-                                              reader_callsite_subst, &output_offset_analyzer, &stmts);
-            if (!scan.has_value()) return std::nullopt;
+              auto reader_in_arg = AsVarLike(carrier_use->carrier->reader_call
+                                                 ->args_[carrier_use->carrier->reader_input.in_param_index]);
+              auto reader_func = LookupFunction(GetCallFuncName(carrier_use->carrier->reader_call));
+              if (!reader_in_arg || !reader_func) return std::nullopt;
+              std::unordered_map<const Var*, ExprPtr> reader_callsite_subst;
+              for (size_t i = 0;
+                   i < reader_func->params_.size() && i < carrier_use->carrier->reader_call->args_.size();
+                   ++i) {
+                reader_callsite_subst[reader_func->params_[i].get()] =
+                    carrier_use->carrier->reader_call->args_[i];
+              }
+              if (!CanProveDynamicWindowScanHasUpdate(
+                      *carrier_use->carrier->reader_input.dynamic_indexed_window, reader_callsite_subst)) {
+                return std::nullopt;
+              }
+              auto scan = EmitDynamicWindowScan(carrier_use->carrier->reader_input,
+                                                carrier_use->carrier->reader_piece,
+                                                carrier_use->carrier->reader_call, call_assign, reader_in_arg,
+                                                reader_callsite_subst, &output_offset_analyzer, &stmts);
+              if (!scan.has_value()) return std::nullopt;
 
-            auto max_offset_subst = reader_callsite_subst;
-            for (const auto& [var, expr] : scan->max_subst) max_offset_subst[var] = expr;
-            auto min_offset_subst = reader_callsite_subst;
-            for (const auto& [var, expr] : scan->min_subst) min_offset_subst[var] = expr;
-            const auto& reader_piece = carrier_use->carrier->reader_piece;
-            auto reader_min = output_offset_analyzer.Simplify(
-                transform_utils::Substitute(reader_piece.callsite_offsets[0], min_offset_subst));
-            auto reader_max = output_offset_analyzer.Simplify(
-                transform_utils::Substitute(reader_piece.callsite_offsets[0], max_offset_subst));
-            auto reader_access_extent = output_offset_analyzer.Simplify(
-                transform_utils::Substitute(reader_piece.window_shape[0], reader_callsite_subst));
-            auto reader_end = output_offset_analyzer.Simplify(
-                MakeAdd(reader_max, reader_access_extent, call_assign->span_));
-            auto writer_end = output_offset_analyzer.Simplify(
-                MakeAdd(offset_exprs[0], shape_exprs[0], call_assign->span_));
-            auto carrier_base = output_offset_analyzer.Simplify(
-                MakeMin(offset_exprs[0], reader_min, call_assign->span_));
-            auto carrier_end = output_offset_analyzer.Simplify(
-                MakeMax(writer_end, reader_end, call_assign->span_));
-            auto index_type = std::make_shared<ScalarType>(DataType::INDEX);
-            auto carrier_base_var = std::make_shared<Var>(
-                out_arg->name_hint_ + "__window_carrier_base", index_type, call_assign->span_);
-            auto carrier_end_var = std::make_shared<Var>(
-                out_arg->name_hint_ + "__window_carrier_end", index_type, call_assign->span_);
-            auto carrier_extent_var = std::make_shared<Var>(
-                out_arg->name_hint_ + "__window_carrier_extent", index_type, call_assign->span_);
-            carrier_base = FlattenGeneratedScalarExpr(carrier_base, out_arg->name_hint_,
-                                                      call_assign->span_, &stmts);
-            carrier_end = FlattenGeneratedScalarExpr(carrier_end, out_arg->name_hint_,
-                                                     call_assign->span_, &stmts);
-            stmts.push_back(std::make_shared<AssignStmt>(carrier_base_var, carrier_base,
-                                                         call_assign->span_));
-            stmts.push_back(std::make_shared<AssignStmt>(carrier_end_var, carrier_end,
-                                                         call_assign->span_));
-            stmts.push_back(std::make_shared<AssignStmt>(
-                carrier_extent_var,
-                output_offset_analyzer.Simplify(
-                    MakeSub(carrier_end_var, carrier_base_var, call_assign->span_)),
-                call_assign->span_));
-            offset_exprs[0] = carrier_base_var;
-            shape_exprs[0] = carrier_extent_var;
+              auto max_offset_subst = reader_callsite_subst;
+              for (const auto& [var, expr] : scan->max_subst) max_offset_subst[var] = expr;
+              auto min_offset_subst = reader_callsite_subst;
+              for (const auto& [var, expr] : scan->min_subst) min_offset_subst[var] = expr;
+              const auto& reader_piece = carrier_use->carrier->reader_piece;
+              auto reader_min = output_offset_analyzer.Simplify(
+                  transform_utils::Substitute(reader_piece.callsite_offsets[0], min_offset_subst));
+              auto reader_max = output_offset_analyzer.Simplify(
+                  transform_utils::Substitute(reader_piece.callsite_offsets[0], max_offset_subst));
+              auto reader_access_extent = output_offset_analyzer.Simplify(
+                  transform_utils::Substitute(reader_piece.window_shape[0], reader_callsite_subst));
+              auto reader_end = output_offset_analyzer.Simplify(
+                  MakeAdd(reader_max, reader_access_extent, call_assign->span_));
+              auto writer_end = output_offset_analyzer.Simplify(
+                  MakeAdd(offset_exprs[0], shape_exprs[0], call_assign->span_));
+              auto carrier_base =
+                  output_offset_analyzer.Simplify(MakeMin(offset_exprs[0], reader_min, call_assign->span_));
+              auto carrier_end =
+                  output_offset_analyzer.Simplify(MakeMax(writer_end, reader_end, call_assign->span_));
+              auto index_type = std::make_shared<ScalarType>(DataType::INDEX);
+              auto carrier_base_var = std::make_shared<Var>(out_arg->name_hint_ + "__window_carrier_base",
+                                                            index_type, call_assign->span_);
+              auto carrier_end_var = std::make_shared<Var>(out_arg->name_hint_ + "__window_carrier_end",
+                                                           index_type, call_assign->span_);
+              auto carrier_extent_var = std::make_shared<Var>(out_arg->name_hint_ + "__window_carrier_extent",
+                                                              index_type, call_assign->span_);
+              carrier_base =
+                  FlattenGeneratedScalarExpr(carrier_base, out_arg->name_hint_, call_assign->span_, &stmts);
+              carrier_end =
+                  FlattenGeneratedScalarExpr(carrier_end, out_arg->name_hint_, call_assign->span_, &stmts);
+              stmts.push_back(
+                  std::make_shared<AssignStmt>(carrier_base_var, carrier_base, call_assign->span_));
+              stmts.push_back(std::make_shared<AssignStmt>(carrier_end_var, carrier_end, call_assign->span_));
+              stmts.push_back(
+                  std::make_shared<AssignStmt>(carrier_extent_var,
+                                               output_offset_analyzer.Simplify(MakeSub(
+                                                   carrier_end_var, carrier_base_var, call_assign->span_)),
+                                               call_assign->span_));
+              offset_exprs[0] = carrier_base_var;
+              shape_exprs[0] = carrier_extent_var;
             }
           }
           if (piece_index == 0 && HasFineAssemblePieces(output)) {
@@ -4066,10 +4093,8 @@ class OutWindowExternalizer {
             VarPtr base_arg;
             VarPtr extent_arg;
             const bool use_existing_carrier_args =
-                carrier_use.has_value() && carrier_use->carrier &&
-                carrier_use->carrier->has_dynamic_reader &&
-                carrier_use->carrier->dynamic_base_arg &&
-                carrier_use->carrier->dynamic_extent_arg &&
+                carrier_use.has_value() && carrier_use->carrier && carrier_use->carrier->has_dynamic_reader &&
+                carrier_use->carrier->dynamic_base_arg && carrier_use->carrier->dynamic_extent_arg &&
                 offset_exprs[0].get() == carrier_use->carrier->dynamic_base_arg.get() &&
                 shape_exprs[0].get() == carrier_use->carrier->dynamic_extent_arg.get();
             if (use_existing_carrier_args) {
@@ -4077,9 +4102,9 @@ class OutWindowExternalizer {
               extent_arg = carrier_use->carrier->dynamic_extent_arg;
             } else {
               base_arg = std::make_shared<Var>(out_arg->name_hint_ + "__window_base_arg", index_type,
-                                                call_assign->span_);
+                                               call_assign->span_);
               extent_arg = std::make_shared<Var>(out_arg->name_hint_ + "__window_extent_arg", index_type,
-                                                  call_assign->span_);
+                                                 call_assign->span_);
               stmts.push_back(std::make_shared<AssignStmt>(base_arg, offset_exprs[0], call_assign->span_));
               stmts.push_back(std::make_shared<AssignStmt>(extent_arg, shape_exprs[0], call_assign->span_));
             }
@@ -4207,8 +4232,7 @@ class OutWindowExternalizer {
       if (analysis.outputs.empty()) {
         if (WindowExternalizeLogEnabled() && HasDynamicIndexedInputWindow(analysis.inputs)) {
           LOG_INFO << "[window-call] rewrite input-only func=" << callee_name
-                   << " new_args=" << new_args.size()
-                   << " stmts=" << stmts.size();
+                   << " new_args=" << new_args.size() << " stmts=" << stmts.size();
         }
         stmts.push_back(std::make_shared<AssignStmt>(call_assign->var_, new_call, call_assign->span_));
         RewriteBundle bundle;
@@ -4469,9 +4493,7 @@ class OutWindowExternalizer {
       return ResolveCarrierParentRoot(call->args_[arg_index]);
     }
 
-    const Var* ResolveOutputRootExpr(const ExprPtr& expr) const {
-      return ResolveCarrierParentRoot(expr);
-    }
+    const Var* ResolveOutputRootExpr(const ExprPtr& expr) const { return ResolveCarrierParentRoot(expr); }
 
     const Var* CanonicalizeCarrierParentRoot(const Var* root) const {
       if (!root) return nullptr;
@@ -4608,11 +4630,10 @@ class OutWindowExternalizer {
       }
     }
 
-    void AddCallsiteAccessCandidates(
-        const AssignStmtPtr& assign, size_t stmt_index,
-        const std::vector<LoopContext>& enclosing_loops,
-        const std::unordered_map<const Var*, ExprPtr>& scalar_subst,
-        std::vector<CallsiteAccessCandidate>* candidates) {
+    void AddCallsiteAccessCandidates(const AssignStmtPtr& assign, size_t stmt_index,
+                                     const std::vector<LoopContext>& enclosing_loops,
+                                     const std::unordered_map<const Var*, ExprPtr>& scalar_subst,
+                                     std::vector<CallsiteAccessCandidate>* candidates) {
       if (!assign || !candidates) return;
       CallPtr call;
       if (auto submit = As<Submit>(assign->value_)) {
@@ -4635,52 +4656,51 @@ class OutWindowExternalizer {
       const auto& analysis = analysis_it->second;
       for (const auto& output : analysis.outputs) {
         if (output.out_param_index >= call->args_.size()) continue;
-          auto root = ResolveOutputRootExpr(call->args_[output.out_param_index]);
+        auto root = ResolveOutputRootExpr(call->args_[output.out_param_index]);
         if (!root) continue;
+        CallsiteAccessCandidate candidate;
+        candidate.stmt_index = stmt_index;
+        candidate.assign = assign;
+        candidate.call = call;
+        candidate.param_index = output.out_param_index;
+        candidate.direction = ParamDirection::InOut;
+        candidate.parent_root = root;
+        candidate.parent_expr = call->args_[output.out_param_index];
+        candidate.output_writer = true;
+        candidate.output_has_fine_assemble = HasFineAssemblePieces(output);
+        candidate.enclosing_loops = enclosing_loops;
+        candidate.callsite_subst = resolved_callsite_subst;
+        if (!output.callsite_offsets.empty()) candidate.offsets = output.callsite_offsets;
+        if (!output.window_shape.empty()) candidate.shape = output.window_shape;
+        candidates->push_back(std::move(candidate));
+      }
+
+      for (const auto& input : analysis_it->second.inputs) {
+        if (input.in_param_index >= call->args_.size()) continue;
+        if (const Var* root = ResolveOutputRootExpr(call->args_[input.in_param_index])) {
           CallsiteAccessCandidate candidate;
           candidate.stmt_index = stmt_index;
           candidate.assign = assign;
           candidate.call = call;
-          candidate.param_index = output.out_param_index;
-          candidate.direction = ParamDirection::InOut;
+          candidate.param_index = input.in_param_index;
+          candidate.direction = ParamDirection::In;
           candidate.parent_root = root;
-          candidate.parent_expr = call->args_[output.out_param_index];
-          candidate.output_writer = true;
-          candidate.output_has_fine_assemble = HasFineAssemblePieces(output);
+          candidate.parent_expr = call->args_[input.in_param_index];
+          candidate.dynamic_indexed_reader = input.dynamic_indexed_window.has_value();
+          candidate.input_info = input;
           candidate.enclosing_loops = enclosing_loops;
           candidate.callsite_subst = resolved_callsite_subst;
-          if (!output.callsite_offsets.empty()) candidate.offsets = output.callsite_offsets;
-          if (!output.window_shape.empty()) candidate.shape = output.window_shape;
+          if (!input.callsite_offsets.empty()) candidate.offsets = input.callsite_offsets;
+          if (!input.window_shape.empty()) candidate.shape = input.window_shape;
           candidates->push_back(std::move(candidate));
         }
-
-        for (const auto& input : analysis_it->second.inputs) {
-        if (input.in_param_index >= call->args_.size()) continue;
-          if (const Var* root = ResolveOutputRootExpr(call->args_[input.in_param_index])) {
-            CallsiteAccessCandidate candidate;
-            candidate.stmt_index = stmt_index;
-            candidate.assign = assign;
-            candidate.call = call;
-            candidate.param_index = input.in_param_index;
-            candidate.direction = ParamDirection::In;
-            candidate.parent_root = root;
-            candidate.parent_expr = call->args_[input.in_param_index];
-            candidate.dynamic_indexed_reader = input.dynamic_indexed_window.has_value();
-            candidate.input_info = input;
-            candidate.enclosing_loops = enclosing_loops;
-            candidate.callsite_subst = resolved_callsite_subst;
-            if (!input.callsite_offsets.empty()) candidate.offsets = input.callsite_offsets;
-            if (!input.window_shape.empty()) candidate.shape = input.window_shape;
-            candidates->push_back(std::move(candidate));
-          }
-        }
+      }
     }
 
-    void CollectCallsiteAccessCandidates(
-        const StmtPtr& stmt, size_t stmt_index,
-        const std::vector<LoopContext>& enclosing_loops,
-        const std::unordered_map<const Var*, ExprPtr>& scalar_subst,
-        std::vector<CallsiteAccessCandidate>* candidates) {
+    void CollectCallsiteAccessCandidates(const StmtPtr& stmt, size_t stmt_index,
+                                         const std::vector<LoopContext>& enclosing_loops,
+                                         const std::unordered_map<const Var*, ExprPtr>& scalar_subst,
+                                         std::vector<CallsiteAccessCandidate>* candidates) {
       if (!stmt || !candidates) return;
       if (auto assign = As<AssignStmt>(stmt)) {
         AddCallsiteAccessCandidates(assign, stmt_index, enclosing_loops, scalar_subst, candidates);
@@ -4730,8 +4750,7 @@ class OutWindowExternalizer {
       candidates.reserve(sibling_stmts.size());
 
       for (size_t stmt_index = 0; stmt_index < sibling_stmts.size(); ++stmt_index) {
-        CollectCallsiteAccessCandidates(sibling_stmts[stmt_index], stmt_index, {}, scalar_defs_,
-                                        &candidates);
+        CollectCallsiteAccessCandidates(sibling_stmts[stmt_index], stmt_index, {}, scalar_defs_, &candidates);
       }
 
       std::unordered_map<const Var*, std::vector<const CallsiteAccessCandidate*>> candidates_by_root;
@@ -4777,11 +4796,13 @@ class OutWindowExternalizer {
           bool can_make_dynamic_carrier = !unsupported && writer && writer->output_has_fine_assemble &&
                                           writer->stmt_index < dynamic_reader->stmt_index &&
                                           !writer->shape.empty() && !writer->offsets.empty() &&
-                                          !dynamic_reader->shape.empty() && !dynamic_reader->offsets.empty() &&
+                                          !dynamic_reader->shape.empty() &&
+                                          !dynamic_reader->offsets.empty() &&
                                           dynamic_reader->input_info.dynamic_indexed_window.has_value();
           if (can_make_dynamic_carrier) {
             dynamic_dim = dynamic_reader->input_info.dynamic_indexed_window->dynamic_dim;
-            can_make_dynamic_carrier = dynamic_dim == 0 && writer->shape.size() == dynamic_reader->shape.size() &&
+            can_make_dynamic_carrier = dynamic_dim == 0 &&
+                                       writer->shape.size() == dynamic_reader->shape.size() &&
                                        writer->offsets.size() == dynamic_reader->offsets.size() &&
                                        dynamic_dim < writer->shape.size();
             for (size_t dim = 0; can_make_dynamic_carrier && dim < writer->shape.size(); ++dim) {
@@ -4796,38 +4817,34 @@ class OutWindowExternalizer {
                 SubstituteExprVector(writer->offsets, writer->callsite_subst), writer->enclosing_loops);
             auto writer_shape = SubstituteSingletonLoopStarts(
                 SubstituteExprVector(writer->shape, writer->callsite_subst), writer->enclosing_loops);
-            auto reader_scan = writer_offsets.has_value() && writer_shape.has_value()
-                                   ? EmitFullOffsetScanPrelude(*dynamic_reader, &carrier_analyzer,
-                                                               &plan.prelude_stmts)
-                                   : std::nullopt;
+            auto reader_scan =
+                writer_offsets.has_value() && writer_shape.has_value()
+                    ? EmitFullOffsetScanPrelude(*dynamic_reader, &carrier_analyzer, &plan.prelude_stmts)
+                    : std::nullopt;
             if (!writer_offsets.has_value() || !writer_shape.has_value() || !reader_scan.has_value()) {
               plan.fallback_parent_roots.insert(root);
               continue;
             }
             auto index_type = std::make_shared<ScalarType>(DataType::INDEX);
-            auto carrier_base_var =
-                std::make_shared<Var>(root->name_hint_ + "__carrier_base", index_type,
-                                      dynamic_reader->assign ? dynamic_reader->assign->span_
-                                                             : Span::unknown());
-            auto carrier_extent_var =
-                std::make_shared<Var>(root->name_hint_ + "__carrier_extent", index_type,
-                                      dynamic_reader->assign ? dynamic_reader->assign->span_
-                                                             : Span::unknown());
+            auto carrier_base_var = std::make_shared<Var>(
+                root->name_hint_ + "__carrier_base", index_type,
+                dynamic_reader->assign ? dynamic_reader->assign->span_ : Span::unknown());
+            auto carrier_extent_var = std::make_shared<Var>(
+                root->name_hint_ + "__carrier_extent", index_type,
+                dynamic_reader->assign ? dynamic_reader->assign->span_ : Span::unknown());
             auto writer_end = carrier_analyzer.Simplify(
                 MakeAdd((*writer_offsets)[0], (*writer_shape)[0], carrier_base_var->span_));
-            auto reader_access_extent = carrier_analyzer.Simplify(
-                SubstituteCallsiteAndLoops(dynamic_reader->shape[dynamic_dim],
-                                           dynamic_reader->callsite_subst, {}));
+            auto reader_access_extent = carrier_analyzer.Simplify(SubstituteCallsiteAndLoops(
+                dynamic_reader->shape[dynamic_dim], dynamic_reader->callsite_subst, {}));
             auto reader_end = carrier_analyzer.Simplify(
                 MakeAdd(reader_scan->max_offset, reader_access_extent, carrier_base_var->span_));
             auto carrier_base = carrier_analyzer.Simplify(
                 MakeMin((*writer_offsets)[0], reader_scan->min_offset, carrier_base_var->span_));
-            auto carrier_end = carrier_analyzer.Simplify(
-                MakeMax(writer_end, reader_end, carrier_base_var->span_));
-            auto carrier_end_var =
-                std::make_shared<Var>(root->name_hint_ + "__carrier_end", index_type,
-                                      dynamic_reader->assign ? dynamic_reader->assign->span_
-                                                             : Span::unknown());
+            auto carrier_end =
+                carrier_analyzer.Simplify(MakeMax(writer_end, reader_end, carrier_base_var->span_));
+            auto carrier_end_var = std::make_shared<Var>(
+                root->name_hint_ + "__carrier_end", index_type,
+                dynamic_reader->assign ? dynamic_reader->assign->span_ : Span::unknown());
             carrier_base = FlattenGeneratedScalarExpr(
                 carrier_base, root->name_hint_,
                 dynamic_reader->assign ? dynamic_reader->assign->span_ : Span::unknown(),
@@ -4842,8 +4859,8 @@ class OutWindowExternalizer {
                 std::make_shared<AssignStmt>(carrier_end_var, carrier_end, carrier_end_var->span_));
             plan.prelude_stmts.push_back(std::make_shared<AssignStmt>(
                 carrier_extent_var,
-                carrier_analyzer.Simplify(MakeSub(carrier_end_var, carrier_base_var,
-                                                   carrier_extent_var->span_)),
+                carrier_analyzer.Simplify(
+                    MakeSub(carrier_end_var, carrier_base_var, carrier_extent_var->span_)),
                 carrier_extent_var->span_));
 
             RuntimeObservableCarrier carrier;
@@ -4935,10 +4952,9 @@ class OutWindowExternalizer {
       return CarrierUse{parent_root, &carrier};
     }
 
-    std::optional<CarrierUse> FindDynamicReaderCarrierUse(
-        const CallPtr& call, size_t arg_index,
-        const InputRewriteInfo* input = nullptr,
-        const DenseRegionPiece* piece = nullptr) {
+    std::optional<CarrierUse> FindDynamicReaderCarrierUse(const CallPtr& call, size_t arg_index,
+                                                          const InputRewriteInfo* input = nullptr,
+                                                          const DenseRegionPiece* piece = nullptr) {
       if (!call || arg_index >= call->args_.size()) return std::nullopt;
       const Var* parent_root = ResolveCarrierParentRoot(call->args_[arg_index]);
       if (!parent_root) return std::nullopt;
@@ -4968,8 +4984,7 @@ class OutWindowExternalizer {
         }
         for (size_t dim = 0; dim < piece->callsite_offsets.size(); ++dim) {
           if (dim == carrier.dynamic_dim) continue;
-          if (!AreExprsEqual(piece->callsite_offsets[dim],
-                             carrier.reader_piece.callsite_offsets[dim])) {
+          if (!AreExprsEqual(piece->callsite_offsets[dim], carrier.reader_piece.callsite_offsets[dim])) {
             return std::nullopt;
           }
         }
@@ -5149,8 +5164,7 @@ class OutWindowExternalizer {
       return VisitExpr(ResolveLoopReturnInitExpr(expr));
     }
 
-    bool HasDynamicReaderCarrierRisk(const CallPtr& call,
-                                     const CalleeRewriteAnalysis& analysis) const {
+    bool HasDynamicReaderCarrierRisk(const CallPtr& call, const CalleeRewriteAnalysis& analysis) const {
       for (const auto& input : analysis.inputs) {
         if (!input.dynamic_indexed_window.has_value()) continue;
         if (input.in_param_index >= call->args_.size()) return true;
@@ -5624,9 +5638,8 @@ class OutWindowExternalizer {
     return use;
   }
 
-  static bool IsSafeDynamicIndexedWindowExprs(
-      const FunctionPtr& func, const InputWindowUse& use, size_t dynamic_dim,
-      const Var* dynamic_value) {
+  static bool IsSafeDynamicIndexedWindowExprs(const FunctionPtr& func, const InputWindowUse& use,
+                                              size_t dynamic_dim, const Var* dynamic_value) {
     if (!func || !dynamic_value || dynamic_dim >= use.offsets.size() ||
         use.offsets.size() != use.window_shape.size()) {
       return false;
@@ -5684,8 +5697,9 @@ class OutWindowExternalizer {
 
     if (auto cast = As<Cast>(expr)) {
       auto operand = AsVarLike(cast->operand_);
-      if (!operand) return MatchTensorReadIndexSource(cast->operand_, func, tensor_param_indices,
-                                                     scalar_index_sources, scalar_defs);
+      if (!operand)
+        return MatchTensorReadIndexSource(cast->operand_, func, tensor_param_indices, scalar_index_sources,
+                                          scalar_defs);
       auto source_it = scalar_index_sources.find(operand.get());
       if (source_it == scalar_index_sources.end()) return std::nullopt;
       return source_it->second;
@@ -5699,8 +5713,9 @@ class OutWindowExternalizer {
     return std::nullopt;
   }
 
-  static std::optional<InputRewriteInfo> AnalyzeDynamicIndexedInputWindowInLoop(
-      const FunctionPtr& func, size_t param_index, const ForStmtPtr& loop) {
+  static std::optional<InputRewriteInfo> AnalyzeDynamicIndexedInputWindowInLoop(const FunctionPtr& func,
+                                                                                size_t param_index,
+                                                                                const ForStmtPtr& loop) {
     if (!func || param_index >= func->params_.size() || !loop) return std::nullopt;
     auto tensor_type = As<TensorType>(func->params_[param_index]->GetType());
     if (!tensor_type) return std::nullopt;
@@ -5739,7 +5754,7 @@ class OutWindowExternalizer {
               if (auto assign = As<AssignStmt>(child)) {
                 if (!As<ScalarType>(assign->var_->GetType())) continue;
                 auto source = MatchTensorReadIndexSource(assign->value_, func, tensor_param_indices,
-                                                        scalar_index_sources, scalar_defs);
+                                                         scalar_index_sources, scalar_defs);
                 if (source.has_value()) {
                   scalar_index_sources[assign->var_.get()] = *source;
                   continue;
@@ -5760,9 +5775,9 @@ class OutWindowExternalizer {
             }
             auto expanded_guard =
                 arith::Analyzer().Simplify(transform_utils::Substitute(if_stmt->condition_, scalar_defs));
-            visit_stmt(if_stmt->then_body_, scalar_defs, scalar_index_sources,
-                       guard_condition ? MakeAnd(guard_condition, expanded_guard, if_stmt->span_)
-                                       : expanded_guard);
+            visit_stmt(
+                if_stmt->then_body_, scalar_defs, scalar_index_sources,
+                guard_condition ? MakeAnd(guard_condition, expanded_guard, if_stmt->span_) : expanded_guard);
             return;
           }
 
@@ -5822,7 +5837,7 @@ class OutWindowExternalizer {
       auto assign = As<AssignStmt>(stmt);
       if (!assign || !As<ScalarType>(assign->var_->GetType())) return;
       auto source = MatchTensorReadIndexSource(assign->value_, func, tensor_param_indices,
-                                              scalar_index_sources, scalar_defs);
+                                               scalar_index_sources, scalar_defs);
       if (source.has_value()) {
         scalar_index_sources[assign->var_.get()] = *source;
         return;
@@ -5869,12 +5884,8 @@ class OutWindowExternalizer {
     }
 
     auto piece = MakeDensePiece(first.use.window_shape, first.use.offsets, local_zero_offsets);
-    InputRewriteInfo info{param_index,
-                          tensor_type->shape_,
-                          first.use.window_shape,
-                          first.use.offsets,
-                          local_zero_offsets,
-                          MakeDenseRegion({std::move(piece)})};
+    InputRewriteInfo info{param_index,       tensor_type->shape_, first.use.window_shape,
+                          first.use.offsets, local_zero_offsets,  MakeDenseRegion({std::move(piece)})};
     info.dynamic_indexed_window = DynamicIndexedInputWindow{dynamic_source->index_tensor_param_index,
                                                             loop->loop_var_,
                                                             loop->start_,
@@ -7029,10 +7040,10 @@ class OutWindowExternalizer {
       if (window_rewrite_policy_ == WindowRewritePolicy::All) {
         auto dynamic_input_windows = AnalyzeDynamicIndexedInputWindows(func);
         for (auto& dynamic_input : dynamic_input_windows) {
-          auto duplicate = std::find_if(input_windows.begin(), input_windows.end(),
-                                        [&](const InputRewriteInfo& existing) {
-                                          return existing.in_param_index == dynamic_input.in_param_index;
-                                        });
+          auto duplicate =
+              std::find_if(input_windows.begin(), input_windows.end(), [&](const InputRewriteInfo& existing) {
+                return existing.in_param_index == dynamic_input.in_param_index;
+              });
           if (duplicate == input_windows.end()) input_windows.push_back(std::move(dynamic_input));
         }
       }
@@ -7212,8 +7223,8 @@ class OutWindowExternalizer {
         std::vector<ExprPtr> window_shape = pieces.front().window_shape;
         if (input_rewrite_it->dynamic_indexed_window.has_value()) {
           auto index_type = std::make_shared<ScalarType>(DataType::INDEX);
-          auto base_param = std::make_shared<Var>(func->params_[i]->name_hint_ + "__window_base",
-                                                  index_type, func->params_[i]->span_);
+          auto base_param = std::make_shared<Var>(func->params_[i]->name_hint_ + "__window_base", index_type,
+                                                  func->params_[i]->span_);
           auto extent_param = std::make_shared<Var>(func->params_[i]->name_hint_ + "__window_extent",
                                                     index_type, func->params_[i]->span_);
           auto extent_dim = std::make_shared<Var>(func->params_[i]->name_hint_ + "__window_extent_dyn",
@@ -7266,8 +7277,7 @@ class OutWindowExternalizer {
         if (output_base_it == output_dynamic_base_params_by_old_index.end() ||
             output_extent_it == output_dynamic_extent_params_by_old_index.end() ||
             output.window_shape.empty() || output.callsite_offsets.empty() ||
-            output.region.dense_pieces.empty() ||
-            output.region.dense_pieces.front().window_shape.empty() ||
+            output.region.dense_pieces.empty() || output.region.dense_pieces.front().window_shape.empty() ||
             output.region.dense_pieces.front().callsite_offsets.empty()) {
           return nullptr;
         }
