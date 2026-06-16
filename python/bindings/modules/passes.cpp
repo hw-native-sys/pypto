@@ -428,7 +428,7 @@ void BindPass(nb::module_& m) {
              "and static window externalization. "
              "output_window_policy may be 'exact_pieces' or 'coalesce_pieces'. "
              "window_rewrite_policy may be 'auto', 'all', 'inputs_only', 'outputs_only', "
-             "'no_inputs', 'no_outputs', 'no_multi_piece_outputs', or 'none'.");
+             "'no_inputs', 'no_outputs', 'no_multi_piece_outputs', 'none', or 'disabled'.");
   passes.def("flatten_tile_nd_to_2d", &pass::FlattenTileNdTo2D,
              "Create a pass that flattens ND tile ops to 2D in InCore functions\n\n"
              "Merges all dimensions except the last into a single dimension.\n"
