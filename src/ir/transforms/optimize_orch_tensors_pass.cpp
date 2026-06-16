@@ -1963,7 +1963,8 @@ class OutWindowExternalizer {
     for (const auto& [_, func] : program->functions_) {
       if (!func || func->func_type_ != FunctionType::Orchestration) continue;
       OrchRewriter rewriter(program, analyses, cloned_funcs, function_lookup,
-                            output_dynamic_extent_dims_by_func_, window_rewrite_policy_);
+                            output_dynamic_extent_dims_by_func_, output_window_policy_,
+                            window_rewrite_policy_);
       auto new_body = rewriter.VisitStmt(func->body_);
       if (new_body.get() == func->body_.get()) continue;
       changed = true;
@@ -2261,17 +2262,6 @@ class OutWindowExternalizer {
     return cost;
   }
 
-  static bool IsSingleCoalescedMultiPieceOutput(const OutputRewriteInfo& output,
-                                                const CalleeRewriteAnalysis& analysis,
-                                                const WindowRewriteCost& cost) {
-    if (!cost.is_multi_piece_output) return false;
-    if (analysis.outputs.size() != 1) return false;
-    // Exact multi-piece output expands the runtime ABI.  The only multi-piece
-    // shape auto keeps is a single coarse carrier with fine callsite assembles.
-    return cost.dense_piece_count == 1 && cost.assemble_piece_count > 1 && cost.has_callsite_assemble &&
-           cost.abi_delta == 0;
-  }
-
   static bool ShouldKeepOutputInAuto(const OutputRewriteInfo& output, const CalleeRewriteAnalysis& analysis,
                                      WindowRewriteCost* out_cost) {
     auto cost = EstimateOutputCost(output);
@@ -2281,14 +2271,9 @@ class OutWindowExternalizer {
       return false;
     }
     if (cost.is_multi_piece_output) {
-      if (!IsSingleCoalescedMultiPieceOutput(output, analysis, cost)) {
-        cost.reason = analysis.outputs.size() == 1 ? "multi_piece_output" : "multi_output_coalescing";
-        if (out_cost) *out_cost = std::move(cost);
-        return false;
-      }
-      cost.reason = "single_coalesced_multi_piece_output";
+      cost.reason = analysis.outputs.size() == 1 ? "multi_piece_output" : "multi_output_coalescing";
       if (out_cost) *out_cost = std::move(cost);
-      return true;
+      return false;
     }
     if (cost.has_callsite_assemble && cost.abi_delta >= 0) {
       cost.reason = "assemble_without_abi_reduction";
@@ -2303,6 +2288,11 @@ class OutWindowExternalizer {
 
   static bool ShouldKeepInputInAuto(const InputRewriteInfo& input, WindowRewriteCost* out_cost) {
     auto cost = EstimateInputCost(input);
+    if (input.dynamic_indexed_window.has_value()) {
+      cost.reason = "dynamic_indexed_input";
+      if (out_cost) *out_cost = std::move(cost);
+      return false;
+    }
     if (cost.abi_delta > 0) {
       cost.reason = "abi_expanding";
       if (out_cost) *out_cost = std::move(cost);
@@ -2992,12 +2982,13 @@ class OutWindowExternalizer {
                  const std::unordered_map<std::string, FunctionPtr>& function_lookup,
                  const std::unordered_map<std::string, std::unordered_map<size_t, VarPtr>>&
                      output_dynamic_extent_dims_by_func,
-                 WindowRewritePolicy window_rewrite_policy)
+                 OutputWindowPolicy output_window_policy, WindowRewritePolicy window_rewrite_policy)
         : program_(std::move(program)),
           analyses_(analyses),
           cloned_funcs_(cloned_funcs),
           function_lookup_(function_lookup),
           output_dynamic_extent_dims_by_func_(output_dynamic_extent_dims_by_func),
+          output_window_policy_(output_window_policy),
           window_rewrite_policy_(window_rewrite_policy) {}
 
     const std::unordered_set<std::string>& used_clone_names() const { return used_clone_names_; }
@@ -3780,6 +3771,87 @@ class OutWindowExternalizer {
       return result;
     }
 
+    struct DynamicInputSliceResult {
+      VarPtr slice_var;
+      VarPtr base_arg;
+      VarPtr extent_arg;
+    };
+
+    std::optional<DynamicInputSliceResult> EmitStandaloneDynamicInputSlice(
+        const InputRewriteInfo& input, const DenseRegionPiece& piece, const CallPtr& call,
+        const AssignStmtPtr& call_assign, const VarPtr& in_arg,
+        const std::unordered_map<const Var*, ExprPtr>& callsite_subst, arith::Analyzer* analyzer,
+        std::vector<StmtPtr>* stmts) {
+      if (!input.dynamic_indexed_window.has_value() || !call || !call_assign || !in_arg || !analyzer ||
+          !stmts) {
+        return std::nullopt;
+      }
+      const auto& dynamic = *input.dynamic_indexed_window;
+      if (dynamic.dynamic_dim >= piece.window_shape.size() ||
+          dynamic.dynamic_dim >= piece.callsite_offsets.size()) {
+        return std::nullopt;
+      }
+      if (!CanProveDynamicWindowScanHasUpdate(dynamic, callsite_subst)) return std::nullopt;
+
+      auto scan =
+          EmitDynamicWindowScan(input, piece, call, call_assign, in_arg, callsite_subst, analyzer, stmts);
+      if (!scan.has_value()) return std::nullopt;
+
+      auto max_offset_subst = callsite_subst;
+      for (const auto& [var, expr] : scan->max_subst) max_offset_subst[var] = expr;
+      auto min_offset_subst = callsite_subst;
+      for (const auto& [var, expr] : scan->min_subst) min_offset_subst[var] = expr;
+
+      std::vector<ExprPtr> shape_exprs;
+      shape_exprs.reserve(piece.window_shape.size());
+      for (const auto& dim : piece.window_shape) {
+        shape_exprs.push_back(analyzer->Simplify(transform_utils::Substitute(dim, callsite_subst)));
+      }
+      std::vector<ExprPtr> offset_exprs;
+      offset_exprs.reserve(piece.callsite_offsets.size());
+      for (size_t dim = 0; dim < piece.callsite_offsets.size(); ++dim) {
+        const auto& offset = piece.callsite_offsets[dim];
+        const auto& subst = dim == dynamic.dynamic_dim ? min_offset_subst : callsite_subst;
+        offset_exprs.push_back(analyzer->Simplify(transform_utils::Substitute(offset, subst)));
+      }
+
+      auto dynamic_min = analyzer->Simplify(
+          transform_utils::Substitute(piece.callsite_offsets[dynamic.dynamic_dim], min_offset_subst));
+      auto dynamic_max = analyzer->Simplify(
+          transform_utils::Substitute(piece.callsite_offsets[dynamic.dynamic_dim], max_offset_subst));
+      auto dynamic_extent = analyzer->Simplify(
+          transform_utils::Substitute(piece.window_shape[dynamic.dynamic_dim], callsite_subst));
+      auto dynamic_end = analyzer->Simplify(MakeAdd(dynamic_max, dynamic_extent, call_assign->span_));
+
+      auto index_type = std::make_shared<ScalarType>(DataType::INDEX);
+      auto base_var =
+          std::make_shared<Var>(in_arg->name_hint_ + "__window_base", index_type, call_assign->span_);
+      auto end_var =
+          std::make_shared<Var>(in_arg->name_hint_ + "__window_end", index_type, call_assign->span_);
+      auto extent_var =
+          std::make_shared<Var>(in_arg->name_hint_ + "__window_extent", index_type, call_assign->span_);
+
+      dynamic_min = FlattenGeneratedScalarExpr(dynamic_min, in_arg->name_hint_, call_assign->span_, stmts);
+      dynamic_end = FlattenGeneratedScalarExpr(dynamic_end, in_arg->name_hint_, call_assign->span_, stmts);
+      stmts->push_back(std::make_shared<AssignStmt>(base_var, dynamic_min, call_assign->span_));
+      stmts->push_back(std::make_shared<AssignStmt>(end_var, dynamic_end, call_assign->span_));
+      stmts->push_back(std::make_shared<AssignStmt>(
+          extent_var, analyzer->Simplify(MakeSub(end_var, base_var, call_assign->span_)),
+          call_assign->span_));
+
+      offset_exprs[dynamic.dynamic_dim] = base_var;
+      shape_exprs[dynamic.dynamic_dim] = extent_var;
+      auto shape_tuple = std::make_shared<MakeTuple>(shape_exprs, call_assign->span_);
+      auto offset_tuple = std::make_shared<MakeTuple>(offset_exprs, call_assign->span_);
+      auto parent_expr = MaterializeWindowParentExpr(call->args_[input.in_param_index]);
+      auto slice_call = OpRegistry::GetInstance().Create(
+          "tensor.slice", {parent_expr, shape_tuple, offset_tuple}, call_assign->span_);
+      auto slice_var =
+          std::make_shared<Var>(in_arg->name_hint_ + "__window", slice_call->GetType(), in_arg->span_);
+      stmts->push_back(std::make_shared<AssignStmt>(slice_var, slice_call, call_assign->span_));
+      return DynamicInputSliceResult{slice_var, base_var, extent_var};
+    }
+
     std::optional<FullOffsetScanResult> EmitFullOffsetScanPrelude(const CallsiteAccessCandidate& reader,
                                                                   arith::Analyzer* analyzer,
                                                                   std::vector<StmtPtr>* stmts) {
@@ -4091,7 +4163,17 @@ class OutWindowExternalizer {
           }
 
           if (input.dynamic_indexed_window.has_value()) {
-            return std::nullopt;
+            if (output_window_policy_ != OutputWindowPolicy::ExactPieces ||
+                window_rewrite_policy_ != WindowRewritePolicy::All) {
+              return std::nullopt;
+            }
+            auto standalone = EmitStandaloneDynamicInputSlice(input, piece, call, call_assign, in_arg,
+                                                              callsite_subst, &input_offset_analyzer, &stmts);
+            if (!standalone.has_value()) return std::nullopt;
+            extra_args_by_in_index.emplace(
+                input.in_param_index, std::vector<ExprPtr>{standalone->base_arg, standalone->extent_arg});
+            input_slices.push_back(standalone->slice_var);
+            continue;
           }
 
           std::vector<ExprPtr> shape_exprs;
@@ -4981,6 +5063,9 @@ class OutWindowExternalizer {
             plan.fallback_parent_roots.insert(root);
             continue;
           }
+          if (output_window_policy_ != OutputWindowPolicy::CoalescePieces) {
+            continue;
+          }
           size_t dynamic_dim = SIZE_MAX;
           bool needs_carrier_rematerialization = false;
           bool can_make_dynamic_carrier =
@@ -5439,6 +5524,7 @@ class OutWindowExternalizer {
     const std::unordered_map<std::string, FunctionPtr>& function_lookup_;
     const std::unordered_map<std::string, std::unordered_map<size_t, VarPtr>>&
         output_dynamic_extent_dims_by_func_;
+    OutputWindowPolicy output_window_policy_ = OutputWindowPolicy::CoalescePieces;
     WindowRewritePolicy window_rewrite_policy_ = WindowRewritePolicy::Auto;
     std::unordered_set<std::string> used_clone_names_;
     std::vector<ForStmtPtr> sequential_loops_;
