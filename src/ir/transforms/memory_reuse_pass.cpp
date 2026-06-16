@@ -39,7 +39,6 @@
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
-#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/memref_collectors.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
@@ -984,116 +983,15 @@ LifetimeAnalysisResult ComputeLifetimes(const StmtPtr& func_body) {
   return {lifetimes, var_sharing_groups};
 }
 
-// Expression equality via full recursive structural comparison. The shared
-// AreExprsEqual/AreExprVectorsEqual helpers fall back to pointer identity for
-// non-ConstInt expressions, which misses DeepClone-produced expressions that
-// are structurally identical but allocated fresh (e.g. two `pl.min(x, y)`
-// calls cloned from the same source). structural_equal walks the IR tree and
-// compares op kinds and children so these cases are treated as equal.
-static bool AreTileExprsEqual(const ExprPtr& e1, const ExprPtr& e2) { return structural_equal(e1, e2); }
-
-static bool AreTileExprVectorsEqual(const std::vector<ExprPtr>& v1, const std::vector<ExprPtr>& v2) {
-  if (v1.size() != v2.size()) return false;
-  for (size_t i = 0; i < v1.size(); ++i) {
-    if (!AreTileExprsEqual(v1[i], v2[i])) return false;
-  }
-  return true;
-}
-
-// Compare TileView fields that govern physical storage.  `valid_shape` is
-// intentionally excluded: it is per-use metadata that PTO codegen carries on
-// each tile var's own alloc_tile declaration.  Two reused tiles that share a
-// MemRef but differ in `valid_shape` end up as multiple alloc_tile
-// declarations aliased to the same address, each with its own static valid
-// extent — which PTO already supports for view-op chains.  See issue #1094.
-static bool AreTileViewsEqual(const TileView& a, const TileView& b) {
-  return AreTileExprVectorsEqual(a.stride, b.stride) && AreTileExprsEqual(a.start_offset, b.start_offset) &&
-         a.blayout == b.blayout && a.slayout == b.slayout && a.fractal == b.fractal && a.pad == b.pad;
-}
-
-// A tile with no TileView has default physical storage: contiguous (empty
-// stride), zero start offset, row-major / none-box layouts, default fractal,
-// no pad.  A tile that *does* carry a view whose storage-governing fields are
-// all at those defaults is physically identical to a no-view tile -- only
-// `valid_shape` (per-use metadata, excluded from storage identity) may differ.
-// Recognising this lets reuse span constructs where structurally-cloned tiles
-// end up with asymmetric views, e.g. the two arms of a dual-AIV dispatch `if`
-// where one arm's tiles carry a trivial `valid_shape` view and the other's
-// carry none.  See issue #1547.
-static bool IsStorageTrivialTileView(const TileView& v) {
-  if (!v.stride.empty()) return false;
-  if (v.start_offset) {
-    auto c = As<ConstInt>(v.start_offset);
-    if (!c || c->value_ != 0) return false;
-  }
-  static const TileView kDefault;
-  return v.blayout == kDefault.blayout && v.slayout == kDefault.slayout && v.fractal == kDefault.fractal &&
-         v.pad == kDefault.pad;
-}
-
-/**
- * @brief Check if two TileType variables have compatible storage attributes.
- *
- * PTO codegen binds an alloc_tile declaration to each tile var; multiple
- * declarations may alias the same physical buffer.  Reuse between tiles
- * with mismatched storage attributes would cause attribute conflicts in the
- * generated PTO IR.
- *
- * Checked attributes: shape, dtype, and TileView fields governing storage
- * (stride, start_offset, layouts, fractal, pad).  `valid_shape` is allowed
- * to differ for 2D tiles — each tile var keeps its own valid_shape on its
- * own alloc_tile declaration.  The 2D restriction matches `tile.set_validshape`
- * which only supports 2D tiles; for N-D tiles we keep the strict check.
- */
-bool AreTileTypesCompatible(const VarPtr& var1, const VarPtr& var2) {
-  auto t1 = As<TileType>(var1->GetType());
-  auto t2 = As<TileType>(var2->GetType());
-  if (!t1 || !t2) return true;
-
-  if (t1->dtype_ != t2->dtype_) return false;
-  if (!AreTileExprVectorsEqual(t1->shape_, t2->shape_)) return false;
-
-  bool has_view1 = t1->tile_view_.has_value();
-  bool has_view2 = t2->tile_view_.has_value();
-  if (has_view1 != has_view2) {
-    // One tile carries a view, the other does not.  They are storage-compatible
-    // only if the present view is physically equivalent to "no view" (default
-    // contiguous storage) -- see IsStorageTrivialTileView.  valid_shape is
-    // per-use metadata and is allowed to differ (the no-view side has none).
-    const TileView& present = has_view1 ? t1->tile_view_.value() : t2->tile_view_.value();
-    return IsStorageTrivialTileView(present);
-  }
-  if (has_view1) {
-    const auto& v1 = t1->tile_view_.value();
-    const auto& v2 = t2->tile_view_.value();
-    if (!AreTileViewsEqual(v1, v2)) return false;
-    // Relaxation applies only to 2D tiles.  For N-D tiles, keep the strict
-    // behaviour and require valid_shape to match.  `t1->shape_.size()` is
-    // safe to use for both tiles here because `t1->shape_ == t2->shape_`
-    // was already verified above.
-    const bool is_2d = t1->shape_.size() == 2;
-    if (!is_2d && !AreTileExprVectorsEqual(v1.valid_shape, v2.valid_shape)) return false;
-  }
-  return true;
-}
-
-/**
- * @brief PTO view ops whose result is a fresh sub-tile materialised at a buffer
- *        base address, independent of the buffer's other occupants.
- *
- * L0 cube-input buffers (``Mem.Left`` / ``Mem.Right``) are *only* ever produced
- * by these ops, and PTO codegen emits one ``alloc_tile`` per tile var (each
- * carrying its own shape/dtype/layout) at the buffer base.  This means two such
- * buffers in the same L0 space, with non-overlapping lifetimes and sufficient
- * byte size, may share one L0A/L0B slot even when their *shapes* differ (e.g.
- * fused-attention QK ``Right`` ``[k, SEQ]`` reused by PV ``Right``
- * ``[k', HEAD]``).  Keep this set a subset of the PTO view allowlist
- * (``IsLegalTileViewOp``) so the shared MemRef stays expressible as per-var
- * ``alloc_tile`` views.
- */
-static bool IsL0ViewProducerOp(const std::string& op_name) {
-  return op_name == "tile.extract" || op_name == "tile.slice" || op_name == "tile.reshape";
-}
+// NOTE: The former tile-type reuse-compatibility gate (AreTileTypesCompatible)
+// has been removed.  PTO codegen binds a per-var alloc_tile to each tile, so two
+// tiles that share a physical MemRef can legally carry different shapes, dtypes,
+// or TileView attributes (each alloc_tile aliases the same base with its own
+// static signature).  The only genuine hazard was an op that reads an operand
+// while writing its output in place onto that operand's buffer; that is now
+// handled precisely by not_inplace_safe() and the per-operand
+// forbid_output_alias() markers (see ForbidAliasCollector below), rather than by
+// a coarse whole-tile shape/dtype match.
 
 /**
  * @brief Check if two lifetimes overlap.
@@ -1183,20 +1081,29 @@ class HazardInputCollector : public IRVisitor {
 };
 
 // ---------------------------------------------------------------------------
-// Per-operand "output must not alias this input" map
+// "Output must not alias this input" map
 // ---------------------------------------------------------------------------
 //
-// Some ops are in-place-safe overall (output may share a buffer with a value
-// input) yet have a *specific* operand the hardware reads while writing the
-// output — aliasing the output with it corrupts results.  The canonical case is
-// tile.sel: the TSEL intrinsic reads its predicate mask (and tmp scratch) while
-// writing dst, so dst must not land on the mask/tmp buffer.  Ops declare such
-// operands via OpRegistryEntry::forbid_output_alias(arg_index).
+// An op may forbid its output from sharing a buffer with one or more of its
+// input operands, because the hardware reads those inputs while writing the
+// output (aliasing them corrupts results).  Two registry declarations feed the
+// same per-output forbidden-input set, unified here:
 //
-// This walk records, per output tile var, the set of input tile vars its
-// defining op forbids the output from aliasing.  MemoryReuse then refuses to
-// place the output on any of those inputs' buffers.  Distinct from the
-// load+tpop hazard (backend-gated) — this is op-semantic and always collected.
+//   * not_inplace_safe()        -> the op cannot run src == dst at all, so the
+//                                  output must not alias ANY of its inputs
+//                                  (e.g. tile.recip, tile.mrgsort_format1).
+//   * forbid_output_alias(i)    -> the op is in-place-safe w.r.t. its value
+//                                  operands but reads a *specific* operand
+//                                  while writing dst (e.g. tile.sel's predicate
+//                                  mask / tmp scratch), so dst must not alias
+//                                  that one operand's buffer.
+//
+// Because every read input of `op->var_`'s defining call appears in `args_`,
+// "forbid all inputs" is exactly "forbid every args_ entry" — so this single
+// walk records, per output tile var, the input tile vars its op forbids the
+// output from aliasing.  MemoryReuse then refuses to place the output on any of
+// those inputs' buffers.  Distinct from the load+tpop hazard (backend-gated) —
+// this is op-semantic and always collected.
 using ForbidAliasMap = std::map<const Var*, std::set<const Var*>>;
 
 class ForbidAliasCollector : public IRVisitor {
@@ -1205,11 +1112,17 @@ class ForbidAliasCollector : public IRVisitor {
     if (auto call = As<Call>(op->value_); call && call->op_) {
       const auto& reg = OpRegistry::GetInstance();
       if (reg.IsRegistered(call->op_->name_)) {
-        const auto& forbid_args = reg.GetEntry(call->op_->name_).ForbidOutputAliasArgs();
-        for (size_t i : forbid_args) {
+        const auto& entry = reg.GetEntry(call->op_->name_);
+        auto forbid_arg = [&](size_t i) {
           if (i < call->args_.size()) {
             if (auto v = AsVarLike(call->args_[i])) forbidden_[op->var_.get()].insert(v.get());
           }
+        };
+        if (!entry.IsInplaceSafe()) {
+          // src != dst required: the output must not alias any input operand.
+          for (size_t i = 0; i < call->args_.size(); ++i) forbid_arg(i);
+        } else {
+          for (size_t i : entry.ForbidOutputAliasArgs()) forbid_arg(i);
         }
       }
     }
@@ -1294,21 +1207,6 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(const std::vector<LifetimeIn
           continue;  // Cannot reuse due to overlap with source or insufficient size
         }
 
-        // Compatibility gate.  L0 cube-input buffers (Left/Right) hold sub-tiles
-        // produced by PTO view ops (tile.extract / tile.slice / tile.reshape),
-        // which codegen materialises per tile var at the buffer base — so two
-        // non-overlapping sub-tiles of *different* shapes can legally share one
-        // L0A/L0B slot (byte-size sufficiency is enforced by `size_ok` above).
-        // This lets fused-attention reuse the QK Right buffer ([k, SEQ]) for the
-        // PV Right buffer ([k', HEAD]).  All other spaces keep the strict per-var
-        // alloc_tile signature match so reuse cannot create a codegen conflict.
-        const bool l0_byte_reuse = (space == MemorySpace::Left || space == MemorySpace::Right) &&
-                                   IsL0ViewProducerOp(curr_lifetime.def_op_name) &&
-                                   IsL0ViewProducerOp(prev_lifetime.def_op_name);
-        if (!l0_byte_reuse && !AreTileTypesCompatible(curr_var, prev_var)) {
-          continue;
-        }
-
         // CRITICAL: Check if current variable's lifetime overlaps with ANY variable
         // that is already reusing the same MemRef (transitive reuse check).
         // Follow the reuse chain to the root, since all variables in the chain
@@ -1386,47 +1284,14 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(const std::vector<LifetimeIn
             }
           }
 
-          // For inplace-unsafe ops (src buffer == dst buffer not supported), block reuse
-          // whenever the buffer is still occupied at curr_var's definition statement.
-          // A conflict exists if root or any variable sharing root's buffer has
-          // last_use == curr_var.def — meaning it is still being read as an input
-          // to the inplace-unsafe op that defines curr_var (src == dst).
-          if (!curr_lifetime.def_op_name.empty()) {
-            auto& registry = OpRegistry::GetInstance();
-            if (registry.IsRegistered(curr_lifetime.def_op_name) &&
-                !registry.GetEntry(curr_lifetime.def_op_name).IsInplaceSafe()) {
-              // Check root (the ultimate buffer owner)
-              const LifetimeInterval* root_lifetime =
-                  var_to_lifetime.count(root) ? var_to_lifetime.at(root) : nullptr;
-              bool inplace_conflict =
-                  root_lifetime && root_lifetime->last_use_point == curr_lifetime.def_point;
-
-              // Check all variables sharing root's buffer
-              if (!inplace_conflict && memref_users.count(root)) {
-                for (const auto& user_var : memref_users.at(root)) {
-                  const LifetimeInterval* user_lifetime =
-                      var_to_lifetime.count(user_var) ? var_to_lifetime.at(user_var) : nullptr;
-                  if (user_lifetime && user_lifetime->last_use_point == curr_lifetime.def_point) {
-                    inplace_conflict = true;
-                    break;
-                  }
-                }
-              }
-
-              if (inplace_conflict) {
-                LOG_DEBUG << "Variable " << curr_var->name_hint_ << " cannot reuse " << prev_var->name_hint_
-                          << " (op=" << curr_lifetime.def_op_name
-                          << " does not support in-place execution, buffer still occupied at def)";
-                continue;
-              }
-            }
-          }
-
-          // Per-operand no-alias guard: curr's defining op forbids its output
-          // from sharing a buffer with specific input operands (e.g. tile.sel's
-          // mask/tmp, which the TSEL intrinsic reads while writing dst).  Block
-          // reuse if curr would land on such an operand's buffer — checking the
-          // root owner and every var already sharing root's buffer.
+          // No-alias guard: curr's defining op forbids its output from sharing a
+          // buffer with one or more input operands — either because the op is
+          // not_inplace_safe (forbids ALL inputs, e.g. tile.recip) or because it
+          // marks a specific operand via forbid_output_alias (e.g. tile.sel's
+          // mask/tmp, which the TSEL intrinsic reads while writing dst).  Both
+          // feed `forbid_alias` (see ForbidAliasCollector).  Block reuse if curr
+          // would land on a forbidden operand's buffer — checking the root owner
+          // and every var already sharing root's buffer.
           {
             auto fa_it = forbid_alias.find(curr_var.get());
             if (fa_it != forbid_alias.end()) {

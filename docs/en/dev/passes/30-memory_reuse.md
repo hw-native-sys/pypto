@@ -53,14 +53,21 @@ program_optimized = reuse_pass(program)
 
 - Non-overlapping lifetimes (no interference). Two variables do NOT overlap when `prev.last_use <= curr.def` (i.e., the source's last use can be at the same statement as the target's definition, since inputs are read before outputs are written within a single statement).
 - Same memory space
-- Compatible sizes (reuse target must be large enough)
-- **L0 cube-input exception (Left/Right)**: buffers in `Mem.Left` / `Mem.Right` hold sub-tiles produced by view ops (`tile.extract` / `tile.slice` / `tile.reshape`), which PTO codegen materialises per tile var at the buffer base. Two such buffers in the same L0 space, with non-overlapping lifetimes and sufficient **byte** size, may therefore share one slot even when their **shapes differ** — the `AreTileTypesCompatible` shape/dtype/view check below is skipped for them (gated on both producers being view ops, PTO view ops so the shared MemRef stays PTO-materialisable). This lets fused-attention reuse the QK `Right` buffer (`[k, SEQ]`) for the PV `Right` buffer (`[k', HEAD]`), halving peak L0B (issue #1595). All other spaces (Vec/Acc/Mat) keep the strict match:
-- TileType compatibility — checked by `AreTileTypesCompatible`:
-  - Same shape (all dimensions must match exactly)
-  - Same dtype (e.g., FP32 vs BF16 prevents reuse, handling `tile.cast` automatically)
-  - Same TileView storage attributes when present: `stride`, `start_offset`, `blayout`, `slayout`, `fractal`, `pad` must all match structurally (e.g., `tile.fillpad` changes `pad`, so its output cannot reuse its input — `pad` divergence alone blocks reuse)
-  - View **presence** may differ when the present view is storage-trivial: a tile with no TileView has default physical storage (contiguous, zero offset, row-major/none-box, default fractal, no pad), so it is compatible with a tile whose view sets only `valid_shape` (all storage fields at their defaults). This lets reuse span structurally-cloned tiles with asymmetric views, e.g. the two mutually-exclusive arms of a dual-AIV dispatch `if` produced by `SplitVectorKernel`, where one arm's tiles carry a trivial `valid_shape` view and the other's carry none. A view whose storage fields diverge from the defaults is still incompatible with a no-view tile.
-  - `valid_shape` is **not** required to match for 2D tiles: each reused tile keeps its own `valid_shape` in its TileType, and PTO codegen emits per-variable `alloc_tile` declarations that alias the shared buffer with each member's own static valid extent. This lets sibling-branch tiles produced by `PartialUnrollTileLoops` (differing only in boundary-guard `valid_shape`) share one backing allocation. For N-D tiles, `valid_shape` divergence still blocks reuse.
+- Compatible **byte** sizes (reuse target must be large enough)
+- **No-alias guard** (op-semantic): the op that defines the reusing variable may forbid its output from sharing a buffer with one or more of its input operands. Two registry declarations feed a single check:
+  - `not_inplace_safe()` — the op cannot run with `src == dst`, so its output must not alias **any** input operand (e.g. `tile.recip`, `tile.mrgsort_format1`).
+  - `forbid_output_alias(i)` — the op is in-place-safe w.r.t. its value operands but reads a **specific** operand while writing its output, so the output must not alias that one operand's buffer (e.g. `tile.sel`'s predicate mask (arg 0) and tmp scratch (arg 3), which the TSEL intrinsic reads while writing `dst`).
+
+  Both reduce to the same per-output set of forbidden input vars (collected by `ForbidAliasCollector`); MemoryReuse refuses to place the output on the root owner — or any variable already sharing the buffer — of a forbidden operand.
+
+**No shape / dtype / TileView compatibility gate**: tiles that share a physical MemRef may carry **different** shapes, dtypes, or `TileView` attributes. PTO codegen binds a per-variable `alloc_tile` to each tile, so each alias declares the shared base with its own static shape / dtype / layout / `valid_shape`. This permits, for example:
+
+- cross-dtype reuse — a BF16 tile reusing a dead FP32 tile's buffer (e.g. across `tile.cast`);
+- `tile.fillpad` output reusing its input, and two fillpad outputs with different `pad` sharing one buffer;
+- N-D tiles with divergent `valid_shape` sharing a buffer (each keeps its own `valid_shape` on its own `alloc_tile`);
+- L0 cube-input `Left` / `Right` sub-tiles of differing shape sharing one slot (e.g. fused-attention QK `Right` `[k, SEQ]` reused by PV `Right` `[k', HEAD]`, halving peak L0B — issue #1595).
+
+  Earlier revisions gated reuse on an `AreTileTypesCompatible` shape / dtype / view match (with a narrow L0 byte-reuse exception); that gate has been removed. Correctness for read-while-write ops is now handled precisely by the no-alias guard above rather than by a coarse whole-tile match.
 
 **Alloc cleanup**:
 
@@ -169,8 +176,9 @@ passes.def("memory_reuse", &pass::MemoryReuse, "Memory reuse optimization");
 - Tests producer-consumer reuse (last_use == def at same statement)
 - Tests overlapping lifetime no-reuse
 - Tests memory space separation
-- Tests size and shape compatibility
-- Tests dtype compatibility (cross-dtype reuse blocked, same-dtype reuse allowed)
+- Tests byte-size compatibility
+- Tests cross-dtype / cross-`TileView` reuse (now permitted: BF16↔FP32, fillpad output↔input, divergent `valid_shape`)
+- Tests the no-alias guard (`not_inplace_safe` ops and `tile.sel`'s `forbid_output_alias` mask/tmp operands)
 - Tests view operation MemRef sharing preservation
 - Tests redundant alloc statement removal
 - Tests control flow lifetime analysis (nested IfStmt in ForStmt, branch variable sharing)
