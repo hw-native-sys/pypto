@@ -429,9 +429,16 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
         return stmt;
       }
 
-      // Rank-deficient tiles (for example rank-1 loads under LEFT_RIGHT) do
-      // not carry the split axis, so they must bypass split-specific rewrites.
-      if (!tt || split_dim >= static_cast<int>(tt->shape_.size())) {
+      // Rank-1 (and rank-0) loads carry no 2D split axis: which physical axis is
+      // "the split axis" only becomes defined once the tile is reshaped to 2D.
+      // Halving them here is unsafe -- under UP_DOWN it would split a rank-1
+      // column vector along the wrong axis (e.g. a [128] scale later reshaped to
+      // [1, 128] would be halved to [64] and then fail to reshape). Bypass them
+      // under every split mode and let the consuming reshape introduce and slice
+      // the split axis (see the tile.reshape handling below). LEFT_RIGHT already
+      // bypassed rank-1 loads via split_dim >= rank; this also covers UP_DOWN.
+      if (!tt || static_cast<int>(tt->shape_.size()) < 2 ||
+          split_dim >= static_cast<int>(tt->shape_.size())) {
         return stmt;
       }
       ExprPtr half_dim_size = ComputeHalfDimSize(tt->shape_[split_dim]);
@@ -485,6 +492,65 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
           return stmt;
         }
         auto half_dim_size = ComputeHalfDimSize(tt->shape_[split_dim]);
+
+        // tile.reshape lifts a full (un-split) source tile -- typically a rank-1
+        // load that bypassed the split-specific load rewrite -- onto a 2D shape
+        // whose split axis spans the full width. Reshape is an offsetless view, so
+        // halving only its result type leaves BOTH AIV lanes reading the first
+        // half of the full buffer; lane 1 then silently reuses lane 0's data
+        // (observed as lane 1 applying the wrong half of the per-channel dequant
+        // scale in dsv4 proj_b's INT8 GEMM epilogue). Emit the reshape at full
+        // width and follow it with a per-subblock column slice so each lane reads
+        // its own half. Reshapes whose input is already split fall through to the
+        // plain result-halving below (their producer already partitioned the data).
+        if (op_name == "tile.reshape") {
+          auto input_var = AsVarLike(call->args_[0]);
+          bool input_is_split = input_var && tile_vars.count(input_var.get()) != 0;
+          auto half_const = std::dynamic_pointer_cast<const ConstInt>(half_dim_size);
+          if (!input_is_split && half_const != nullptr) {
+            auto full_var =
+                std::make_shared<Var>(assign->var_->name_hint_, call->GetType(), assign->var_->span_);
+            auto full_reshape = std::make_shared<AssignStmt>(full_var, call, assign->span_);
+
+            std::vector<ExprPtr> shape_elems;
+            std::vector<ExprPtr> offset_elems;
+            shape_elems.reserve(tt->shape_.size());
+            offset_elems.reserve(tt->shape_.size());
+            for (int d = 0; d < static_cast<int>(tt->shape_.size()); ++d) {
+              if (d == split_dim) {
+                shape_elems.push_back(MakeIndexConst(half_const->value_, assign->span_));
+                offset_elems.push_back(
+                    MakeMul(subblock_idx, MakeIndexConst(half_const->value_, assign->span_), assign->span_));
+              } else {
+                auto dim_const = std::dynamic_pointer_cast<const ConstInt>(tt->shape_[d]);
+                INTERNAL_CHECK_SPAN(dim_const != nullptr, assign->span_)
+                    << "SplitVectorKernel: tile.reshape non-split result dim " << d
+                    << " must be static to slice the split axis";
+                shape_elems.push_back(MakeIndexConst(dim_const->value_, assign->span_));
+                offset_elems.push_back(MakeIndexConst(0, assign->span_));
+              }
+            }
+            auto shape_tuple = std::make_shared<MakeTuple>(std::move(shape_elems), assign->span_);
+            auto offset_tuple = std::make_shared<MakeTuple>(std::move(offset_elems), assign->span_);
+            auto slice_call = OpRegistry::GetInstance().Create(
+                "tile.slice", {full_var, shape_tuple, offset_tuple}, {}, assign->span_);
+            auto slice_var =
+                std::make_shared<Var>(assign->var_->name_hint_, slice_call->GetType(), assign->var_->span_);
+            auto slice_assign = std::make_shared<AssignStmt>(slice_var, slice_call, assign->span_);
+
+            TileInfo info{half_dim_size};
+            // Track both the original var and the slice replacement, matching the
+            // other tile-producing branches: a later tile.store / loop init that
+            // references the original var (before the final Substitute) must still
+            // find the tile info to adjust its split-dim offset.
+            tile_vars[assign->var_.get()] = info;
+            tile_vars[slice_var.get()] = info;
+            var_replacements[assign->var_.get()] = slice_var;
+            return std::make_shared<SeqStmts>(std::vector<StmtPtr>{full_reshape, slice_assign},
+                                              assign->span_);
+          }
+        }
+
         auto new_result_type = HalveTileShape(call->GetType(), split_dim, subblock_idx);
         std::vector<ExprPtr> new_args = call->args_;
         if ((op_name == "tile.full" || op_name == "tile.create") && call->args_.size() >= 1) {

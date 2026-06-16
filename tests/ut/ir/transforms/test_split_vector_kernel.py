@@ -494,6 +494,32 @@ class TestSplitVectorKernelUpDown:
         result = _run_split_vector_kernel(Before)
         ir.assert_structural_equal(result, passes.convert_to_ssa()(Before))
 
+    def test_reshape_of_rank1_load_unchanged_when_no_split(self):
+        """A rank-1 load + reshape is left untouched when the function has no split mode."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def main_aiv(
+                self,
+                scale: pl.Tensor[[128], pl.FP32],
+                data: pl.Tensor[[16, 128], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                scale_row: pl.Tile[[128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    scale, [0], [128], target_memory=pl.MemorySpace.Vec
+                )
+                scale_2d: pl.Tile[[1, 128], pl.FP32, pl.MemorySpace.Vec] = pl.reshape(scale_row, [1, 128])
+                prev: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    data, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec
+                )
+                result: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.col_expand_mul(prev, scale_2d)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(result, [0, 0], out_0)
+                return out_0_store
+
+        result = _run_split_vector_kernel(Before)
+        ir.assert_structural_equal(result, passes.convert_to_ssa()(Before))
+
     def test_for_stmt_tile_iter_arg_fp32_store_offset_adjusted(self):
         """ForStmt tile iter_arg FP32: return_var type halved and tile.store offset adjusted."""
 
@@ -645,6 +671,124 @@ class TestSplitVectorKernelUpDown:
                     gamma, [0, 0], [1, 128], target_memory=pl.MemorySpace.Vec
                 )
                 result: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.col_expand_mul(prev, gamma_tile)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(
+                    result, [0 + subblock_idx * 8, 0], out_0
+                )
+                return out_0_store
+
+        _assert_split_matches_expected(Before, Expected)
+
+    def test_reshape_of_rank1_load_preserved_when_split_axis_singleton(self):
+        """UP_DOWN: a rank-1 load reshaped to [1, N] stays full (split axis dim0 is singleton).
+
+        The rank-1 ``scale`` load is bypassed (a rank-1 tile carries no 2D split
+        axis), and the reshape to ``[1, 128]`` is singleton on the UP_DOWN split
+        axis (dim0), so both row-lanes legitimately need the full ``[1, 128]``
+        columns -- the reshape must NOT be sliced. Only ``data`` / the store are
+        halved on dim0.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main_aiv(
+                self,
+                scale: pl.Tensor[[128], pl.FP32],
+                data: pl.Tensor[[16, 128], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                scale_row: pl.Tile[[128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    scale, [0], [128], target_memory=pl.MemorySpace.Vec
+                )
+                scale_2d: pl.Tile[[1, 128], pl.FP32, pl.MemorySpace.Vec] = pl.reshape(scale_row, [1, 128])
+                prev: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    data, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec
+                )
+                result: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.col_expand_mul(prev, scale_2d)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(result, [0, 0], out_0)
+                return out_0_store
+
+        @pl.program
+        class Expected:
+            @pl.function(
+                type=pl.FunctionType.AIV,
+                attrs={"split": pl.SplitMode.UP_DOWN, "dual_aiv_dispatch": True},
+            )
+            def main_aiv(
+                self,
+                scale: pl.Tensor[[128], pl.FP32],
+                data: pl.Tensor[[16, 128], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+                scale_row: pl.Tile[[128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    scale, [0], [128], target_memory=pl.MemorySpace.Vec
+                )
+                scale_2d: pl.Tile[[1, 128], pl.FP32, pl.MemorySpace.Vec] = pl.reshape(scale_row, [1, 128])
+                prev: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    data, [0 + subblock_idx * 8, 0], [8, 128], target_memory=pl.MemorySpace.Vec
+                )
+                result: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.col_expand_mul(prev, scale_2d)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(
+                    result, [0 + subblock_idx * 8, 0], out_0
+                )
+                return out_0_store
+
+        _assert_split_matches_expected(Before, Expected)
+
+    def test_reshape_of_full_rank1_load_is_sliced_per_subblock(self):
+        """UP_DOWN: a rank-1 load reshaped to [N, 1] is sliced per subblock on dim0.
+
+        Symmetric to the LEFT_RIGHT case: the rank-1 load is bypassed, the reshape
+        to ``[16, 1]`` lands the full extent on the UP_DOWN split axis (dim0), so
+        each lane must read its own row-half via a ``tile.slice`` at
+        ``[subblock_idx * 8, 0]``.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main_aiv(
+                self,
+                scale: pl.Tensor[[16], pl.FP32],
+                data: pl.Tensor[[16, 128], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                scale_row: pl.Tile[[16], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    scale, [0], [16], target_memory=pl.MemorySpace.Vec
+                )
+                scale_2d: pl.Tile[[16, 1], pl.FP32, pl.MemorySpace.Vec] = pl.reshape(scale_row, [16, 1])
+                prev: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    data, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec
+                )
+                result: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.row_expand_mul(prev, scale_2d)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(result, [0, 0], out_0)
+                return out_0_store
+
+        @pl.program
+        class Expected:
+            @pl.function(
+                type=pl.FunctionType.AIV,
+                attrs={"split": pl.SplitMode.UP_DOWN, "dual_aiv_dispatch": True},
+            )
+            def main_aiv(
+                self,
+                scale: pl.Tensor[[16], pl.FP32],
+                data: pl.Tensor[[16, 128], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+                scale_row: pl.Tile[[16], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    scale, [0], [16], target_memory=pl.MemorySpace.Vec
+                )
+                scale_2d: pl.Tile[[16, 1], pl.FP32, pl.MemorySpace.Vec] = pl.reshape(scale_row, [16, 1])
+                scale_half: pl.Tile[[8, 1], pl.FP32, pl.MemorySpace.Vec] = pl.slice(
+                    scale_2d, [8, 1], [subblock_idx * 8, 0]
+                )
+                prev: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    data, [0 + subblock_idx * 8, 0], [8, 128], target_memory=pl.MemorySpace.Vec
+                )
+                result: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.row_expand_mul(prev, scale_half)
                 out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(
                     result, [0 + subblock_idx * 8, 0], out_0
                 )
@@ -887,6 +1031,71 @@ class TestSplitVectorKernelLeftRight:
                 )
                 out: pl.Tensor[[128], pl.FP32] = pl.store(loaded, [0], out_0)
                 return out
+
+        _assert_split_matches_expected(Before, Expected)
+
+    def test_reshape_of_full_rank1_load_is_sliced_per_subblock(self):
+        """A reshape lifting a full (un-split) rank-1 load onto the split axis must be sliced per lane.
+
+        The rank-1 ``scale`` load legitimately bypasses the split load rewrite
+        (it carries no split axis), but the following ``reshape`` to ``[1, N]``
+        re-introduces the split (column) axis. Reshape is an offsetless view, so
+        halving only its result type would leave BOTH AIV lanes reading the first
+        half of the full buffer (lane 1 silently reusing lane 0's data -- the
+        DeepSeek-V4 ``proj_b`` per-channel dequant-scale bug). Expect the reshape
+        kept at full ``[1, 128]`` width followed by a ``tile.slice`` at
+        ``[0, subblock_idx * 64]`` so each lane reads its own half, with the
+        downstream ``col_expand_mul`` consuming the sliced half.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.LEFT_RIGHT})
+            def main_aiv(
+                self,
+                scale: pl.Tensor[[128], pl.FP32],
+                data: pl.Tensor[[16, 128], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                scale_row: pl.Tile[[128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    scale, [0], [128], target_memory=pl.MemorySpace.Vec
+                )
+                scale_2d: pl.Tile[[1, 128], pl.FP32, pl.MemorySpace.Vec] = pl.reshape(scale_row, [1, 128])
+                prev: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    data, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec
+                )
+                result: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.col_expand_mul(prev, scale_2d)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(result, [0, 0], out_0)
+                return out_0_store
+
+        @pl.program
+        class Expected:
+            @pl.function(
+                type=pl.FunctionType.AIV,
+                attrs={"split": pl.SplitMode.LEFT_RIGHT, "dual_aiv_dispatch": True},
+            )
+            def main_aiv(
+                self,
+                scale: pl.Tensor[[128], pl.FP32],
+                data: pl.Tensor[[16, 128], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+                scale_row: pl.Tile[[128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    scale, [0], [128], target_memory=pl.MemorySpace.Vec
+                )
+                scale_2d: pl.Tile[[1, 128], pl.FP32, pl.MemorySpace.Vec] = pl.reshape(scale_row, [1, 128])
+                scale_half: pl.Tile[[1, 64], pl.FP32, pl.MemorySpace.Vec] = pl.slice(
+                    scale_2d, [1, 64], [0, subblock_idx * 64]
+                )
+                prev: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    data, [0, 0 + subblock_idx * 64], [16, 64], target_memory=pl.MemorySpace.Vec
+                )
+                result: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.col_expand_mul(prev, scale_half)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(
+                    result, [0, 0 + subblock_idx * 64], out_0
+                )
+                return out_0_store
 
         _assert_split_matches_expected(Before, Expected)
 

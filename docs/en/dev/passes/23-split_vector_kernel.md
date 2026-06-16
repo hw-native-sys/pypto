@@ -2,7 +2,8 @@
 
 Splits a vector kernel along one tile axis so that two AIV lanes share the
 work, halving the per-lane tile shapes and rewriting `tile.load`,
-`tile.store`, and `tile.tpop_from_aic` to address each lane's half. On
+`tile.store`, `tile.tpop_from_aic`, and `tile.reshape` to address each
+lane's half. On
 Ascend910B, the same pass also handles the **no-split dual-AIV dispatch**
 path: when `ExpandMixedKernel` decides a mixed kernel cannot be split, it
 tags the AIV function with `dual_aiv_dispatch=True` and this pass wraps
@@ -129,13 +130,33 @@ reads only this attribute and never re-derives from `SplitMode`.
    tile.load (AIV only, ≥4-arg form):
      If the result tile's split-axis dim is singleton (e.g. [1, 128]
      under UpDown), keep the load as-is.
-     If the tile is rank-deficient (rank < split_dim+1), keep as-is.
+     If the tile is rank-1 or rank-0 (rank < 2), keep as-is under EVERY
+     split mode — a rank-1 tile carries no 2D split axis (which physical
+     axis is "the split axis" only becomes defined once it is reshaped to
+     2D), so the consuming tile.reshape introduces and slices the axis
+     instead (see below). Halving a rank-1 load directly is unsafe: under
+     UpDown it would split a rank-1 column vector along the wrong axis.
      Otherwise: halve result shape, halve the static shape arg, localize
      valid_shape, and add `subblock_idx * H/2` to the split-axis offset.
 
    tile.store (AIV only, ≥3-arg form):
      If the source tile is tracked in tile_vars (i.e. it was halved
      earlier), bump its split-axis offset by `subblock_idx * H/2`.
+
+   tile.reshape (AIV only):
+     A reshape that lifts a full (un-split) source tile onto the split
+     axis — typically a rank-1 load that bypassed the load rewrite, e.g. a
+     per-channel scale [D] -> [1, D] — must give each lane its own half.
+     Because reshape is an offsetless view, halving only its result type
+     would leave BOTH lanes reading the first half of the full buffer. So
+     when the reshape input is NOT already split and the result's split-axis
+     dim is a static non-singleton extent, emit the reshape at full width
+     and follow it with a per-subblock tile.slice selecting
+     `[..., subblock_idx * half : +half]` on the split axis (the slice
+     result, and the original var, are both tracked in tile_vars). If the
+     reshaped split-axis dim is singleton (e.g. [D] -> [1, D] under UpDown)
+     the singleton rule above keeps it full — both lanes need it. If the
+     input is already split, the reshape falls through to result-halving.
 
    any other tile.* op producing a TileType (AIV only):
      Halve the result shape on split_dim. For tile.full / tile.create the
@@ -243,7 +264,8 @@ racing garbage rows into subblock 0's slot. (Plain `split=0` without
 | Conflicting cross-core split kwargs in one body | `CrossCoreSplitCollector` raises `ValueError` |
 | Reduce on the split axis is rejected | `IsReduceOnSplitAxis` raises — partial reduction in a single subblock is semantically incorrect |
 | Singleton split-axis dim preserved as-is | broadcast tiles like `[1, 128]` under `UpDown` or `[16, 1]` under `LeftRight` still carry the full tile |
-| Rank-deficient tiles bypass split rewrites | rank-1 `tile.load` under `LeftRight` (split dim 1) is left untouched |
+| Rank-1 / rank-0 `tile.load` bypasses split rewrites under every mode | a rank-1 tile carries no 2D split axis until reshaped; the consuming `tile.reshape` introduces and slices the axis (halving a rank-1 load directly mis-splits a column vector under `UpDown`) |
+| `tile.reshape` of a full input onto the split axis is sliced per lane | reshape is an offsetless view, so the result type is kept full and a per-subblock `tile.slice` is appended; only fires when the input is un-split and the split-axis extent is a static non-singleton |
 | AIC keeps full `tile.tpop_from_aiv` shape | cube still consumes the whole matmul operand; only `split=` is synced |
 | No-split lane 1 must produce no visible writes | `tile.store` writes are dropped; tile producers are forced to `valid_shape=[0, 0]` so PTO ops run as empty tiles |
 
@@ -373,7 +395,55 @@ def main_aiv(self, data, out_0):
     return pl.store(result, [0, 0 + subblock_idx * 64], out_0)
 ```
 
-### Example 3 — Ascend910B no-split dual-AIV dispatch
+### Example 3 — LeftRight: rank-1 load reshaped onto the split axis is sliced per lane
+
+Distilled from `test_reshape_of_full_rank1_load_is_sliced_per_subblock`
+(the dsv4 `proj_b` per-channel dequant-scale shape). The rank-1 `scale`
+load is kept full; the `reshape` onto the split (column) axis is kept full
+and a per-subblock `tile.slice` gives each lane its own half. Without the
+slice both lanes would read `scale[0:64]`, so lane 1 would apply the wrong
+half of the per-channel scale to its (correctly addressed) output columns.
+
+**Before**:
+
+```python
+@pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.LEFT_RIGHT})
+def main_aiv(self, scale: pl.Tensor[[128], pl.FP32], data: pl.Tensor[[16, 128], pl.FP32],
+             out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]):
+    scale_row = pl.load(scale, [0], [128], target_memory=pl.Mem.Vec)        # rank-1
+    scale_2d: pl.Tile[[1, 128], pl.FP32, pl.Mem.Vec] = pl.reshape(scale_row, [1, 128])
+    prev = pl.load(data, [0, 0], [16, 128], target_memory=pl.Mem.Vec)
+    result = pl.col_expand_mul(prev, scale_2d)
+    return pl.store(result, [0, 0], out_0)
+```
+
+**After**:
+
+```python
+@pl.function(
+    type=pl.FunctionType.AIV,
+    attrs={"split": pl.SplitMode.LEFT_RIGHT, "dual_aiv_dispatch": True},
+)
+def main_aiv(self, scale, data, out_0):
+    subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+    scale_row: pl.Tile[[128], pl.FP32, pl.Mem.Vec] = pl.load(             # rank-1 kept full
+        scale, [0], [128], target_memory=pl.Mem.Vec)
+    scale_2d: pl.Tile[[1, 128], pl.FP32, pl.Mem.Vec] = pl.reshape(        # reshape kept full
+        scale_row, [1, 128])
+    scale_half: pl.Tile[[1, 64], pl.FP32, pl.Mem.Vec] = pl.slice(         # per-lane slice
+        scale_2d, [1, 64], [0, subblock_idx * 64])
+    prev: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.load(
+        data, [0, 0 + subblock_idx * 64], [16, 64], target_memory=pl.Mem.Vec)
+    result: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.col_expand_mul(prev, scale_half)
+    return pl.store(result, [0, 0 + subblock_idx * 64], out_0)
+```
+
+Under `UpDown` the symmetric case holds: a `[D] -> [1, D]` reshape lands on
+a singleton split axis (dim 0) and is kept full (both row-lanes need it),
+while a `[D] -> [D, 1]` reshape lands the full extent on the split axis and
+is sliced as `[..., subblock_idx * half, 0]`.
+
+### Example 4 — Ascend910B no-split dual-AIV dispatch
 
 Distilled from
 `test_no_split_dual_dispatch_producer_replays_compute_and_tpush_on_lane1`.
