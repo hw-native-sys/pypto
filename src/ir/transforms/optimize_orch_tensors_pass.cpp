@@ -2471,6 +2471,14 @@ class OutWindowExternalizer {
     return result;
   }
 
+  static bool ExprVectorsPointerEqual(const std::vector<ExprPtr>& lhs, const std::vector<ExprPtr>& rhs) {
+    if (lhs.size() != rhs.size()) return false;
+    for (size_t i = 0; i < lhs.size(); ++i) {
+      if (lhs[i].get() != rhs[i].get()) return false;
+    }
+    return true;
+  }
+
   static TypePtr SubstituteTypeExprs(const TypePtr& type,
                                      const std::unordered_map<const Var*, ExprPtr>& subst) {
     if (!type || subst.empty()) return type;
@@ -2493,10 +2501,50 @@ class OutWindowExternalizer {
         new_view->stride = SubstituteExprVector(new_view->stride, subst);
         new_view->valid_shape = SubstituteExprVector(new_view->valid_shape, subst);
       }
+      const bool shape_changed = !ExprVectorsPointerEqual(new_shape, tensor_type->shape_);
+      bool view_changed = false;
+      if (new_view.has_value() != tensor_type->tensor_view_.has_value()) {
+        view_changed = true;
+      } else if (new_view.has_value()) {
+        view_changed =
+            !ExprVectorsPointerEqual(new_view->stride, tensor_type->tensor_view_->stride) ||
+            !ExprVectorsPointerEqual(new_view->valid_shape, tensor_type->tensor_view_->valid_shape);
+      }
+      if (!shape_changed && !view_changed) return type;
       return std::make_shared<TensorType>(std::move(new_shape), tensor_type->dtype_, tensor_type->memref_,
                                           std::move(new_view));
     }
     return type;
+  }
+
+  static std::unordered_map<const Var*, VarPtr> SubstituteFunctionBoundaryTypeExprs(
+      std::vector<VarPtr>* params, std::vector<TypePtr>* return_types, StmtPtr* body,
+      std::unordered_map<const Var*, ExprPtr>* subst) {
+    std::unordered_map<const Var*, VarPtr> rebuilt_param_subst;
+    if (!params || !return_types || !body || !subst || subst->empty()) return rebuilt_param_subst;
+
+    std::unordered_map<const Var*, ExprPtr> body_rebuilt_param_subst;
+    for (auto& param : *params) {
+      auto new_type = SubstituteTypeExprs(param->GetType(), *subst);
+      if (new_type.get() == param->GetType().get()) continue;
+
+      auto rebuilt_param = std::make_shared<Var>(param->name_hint_, std::move(new_type), param->span_);
+      rebuilt_param_subst[param.get()] = rebuilt_param;
+      body_rebuilt_param_subst[param.get()] = rebuilt_param;
+      param = std::move(rebuilt_param);
+    }
+
+    if (!body_rebuilt_param_subst.empty()) {
+      *body = transform_utils::Substitute(*body, body_rebuilt_param_subst);
+      for (const auto& [old_param, new_param] : body_rebuilt_param_subst) {
+        (*subst)[old_param] = new_param;
+      }
+    }
+
+    for (auto& return_type : *return_types) {
+      return_type = SubstituteTypeExprs(return_type, *subst);
+    }
+    return rebuilt_param_subst;
   }
 
   struct AffineForm {
@@ -7570,6 +7618,36 @@ class OutWindowExternalizer {
     for (const auto& [old_var, new_var] : cloned.var_map) {
       body_subst[old_var] = new_var;
     }
+    StmtPtr new_body = cloned.cloned_body;
+    auto rebuilt_param_subst =
+        SubstituteFunctionBoundaryTypeExprs(&new_params, &new_return_types, &new_body, &body_subst);
+    auto remap_rebuilt_param = [&](VarPtr* var) {
+      if (!var || !*var || rebuilt_param_subst.empty()) return;
+      auto it = rebuilt_param_subst.find(var->get());
+      if (it != rebuilt_param_subst.end()) {
+        *var = it->second;
+      }
+    };
+    for (auto& param : primary_new_param_by_old_index) {
+      remap_rebuilt_param(&param);
+    }
+    for (auto& [_, params] : output_piece_params_by_old_index) {
+      for (auto& param : params) {
+        remap_rebuilt_param(&param);
+      }
+    }
+    for (auto& [_, param] : output_dynamic_base_params_by_old_index) {
+      remap_rebuilt_param(&param);
+    }
+    for (auto& [_, param] : output_dynamic_extent_params_by_old_index) {
+      remap_rebuilt_param(&param);
+    }
+    for (auto& [_, param] : dynamic_base_params_by_old_index) {
+      remap_rebuilt_param(&param);
+    }
+    for (auto& [_, param] : dynamic_extent_params_by_old_index) {
+      remap_rebuilt_param(&param);
+    }
 
     std::vector<OutputRewriteInfo> localized_outputs = analysis.outputs;
     for (auto& output : localized_outputs) {
@@ -7659,8 +7737,6 @@ class OutWindowExternalizer {
         }
       }
     }
-    StmtPtr new_body = cloned.cloned_body;
-
     if (analysis.kind == RewriteKind::AggregateWindowLoop) {
       auto find_aggregate_loop = [&](const StmtPtr& body) -> ForStmtPtr {
         auto body_stmts = FlattenToStmts(body);

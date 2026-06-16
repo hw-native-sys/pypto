@@ -169,9 +169,11 @@ void CollectVarsFromShapeExprImpl(const ExprPtr& expr, std::set<const ir::Var*>&
   INTERNAL_UNREACHABLE_SPAN(expr->span_) << "CollectVarsFromShapeExpr: unsupported shape expression node";
 }
 
-// Collect tensor-shape dyn Vars across a function's tensor params.
+// Collect tensor boundary dyn Vars across a function's tensor params.
 // Used both to reserve %argN names upfront (so NewNamedTemp does not collide)
-// and to emit the trailing index params on the MLIR func.func signature.
+// and to emit the trailing index params on the MLIR func.func signature. Tensor
+// view strides/valid_shapes are included because pto.make_tensor_view emits
+// them just like shape dims.
 std::vector<VarPtr> CollectTensorShapeDynVars(const FunctionPtr& func) {
   std::vector<VarPtr> dyn_vars;
   std::set<const ir::Var*> seen;
@@ -179,6 +181,14 @@ std::vector<VarPtr> CollectTensorShapeDynVars(const FunctionPtr& func) {
     if (auto tensor_type = ir::AsTensorTypeLike(param->GetType())) {
       for (const auto& dim : tensor_type->shape_) {
         CollectVarsFromShapeExprImpl(dim, seen, dyn_vars);
+      }
+      if (tensor_type->tensor_view_.has_value()) {
+        for (const auto& stride : tensor_type->tensor_view_->stride) {
+          CollectVarsFromShapeExprImpl(stride, seen, dyn_vars);
+        }
+        for (const auto& valid_dim : tensor_type->tensor_view_->valid_shape) {
+          CollectVarsFromShapeExprImpl(valid_dim, seen, dyn_vars);
+        }
       }
     }
   }
