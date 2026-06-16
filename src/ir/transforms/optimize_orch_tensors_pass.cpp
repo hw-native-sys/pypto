@@ -2903,12 +2903,22 @@ class OutWindowExternalizer {
 
       if (!changed) return IRMutator::VisitStmt_(op);
 
-      WindowWriteLocalizer nested_localizer(nested_out_info, nested_new_out_vars);
+      WindowWriteLocalizer nested_localizer(nested_out_info, nested_new_out_vars, result_var_remap_,
+                                            result_var_output_info_);
       new_loop->body_ = nested_localizer.VisitStmt(new_loop->body_);
       return new_loop;
     }
 
    private:
+    WindowWriteLocalizer(const std::unordered_map<const Var*, OutputRewriteInfo>& out_info_by_var,
+                         const std::unordered_map<const Var*, ExprPtr>& new_out_vars,
+                         std::unordered_map<const Var*, VarPtr> result_var_remap,
+                         std::unordered_map<const Var*, const OutputRewriteInfo*> result_var_output_info)
+        : out_info_by_var_(out_info_by_var),
+          new_out_vars_(new_out_vars),
+          result_var_remap_(std::move(result_var_remap)),
+          result_var_output_info_(std::move(result_var_output_info)) {}
+
     const std::unordered_map<const Var*, OutputRewriteInfo>& out_info_by_var_;
     const std::unordered_map<const Var*, ExprPtr>& new_out_vars_;
     std::unordered_map<const Var*, VarPtr> result_var_remap_;
@@ -2956,7 +2966,8 @@ class OutWindowExternalizer {
         ExprPtr base_offset = info_it->second.callsite_offsets[i];
         if (info_it->second.dynamic_indexed_window.has_value() &&
             i == info_it->second.dynamic_indexed_window->dynamic_dim) {
-          if (!info_it->second.dynamic_base_param) return assign;
+          INTERNAL_CHECK_SPAN(info_it->second.dynamic_base_param, call->span_)
+              << "Dynamic input window must have a materialized base parameter before read localization";
           base_offset = info_it->second.dynamic_base_param;
         }
         local_offsets.push_back(analyzer.Simplify(
@@ -3042,21 +3053,31 @@ class OutWindowExternalizer {
       sibling_unwindowable_output_roots_.clear();
       sequence_carrier_plan_ = SequenceCarrierPlan();
       CollectSiblingOutputAliases(op->stmts_);
-      sequence_carrier_plan_ =
-          MergeSequenceCarrierPlans(saved_sequence_carrier_plan, BuildSequenceCarrierPlan(op->stmts_));
-      if (!sequence_carrier_plan_.prelude_stmts.empty()) {
-        changed = true;
-        for (const auto& prelude_stmt : sequence_carrier_plan_.prelude_stmts) {
-          if (auto prelude_assign = As<AssignStmt>(prelude_stmt)) {
-            if (As<ScalarType>(prelude_assign->var_->GetType())) {
-              scalar_defs_[prelude_assign->var_.get()] = prelude_assign->value_;
-            }
-          }
-          new_stmts.push_back(prelude_stmt);
-        }
+      std::unordered_set<const Var*> inherited_carrier_roots;
+      inherited_carrier_roots.reserve(saved_sequence_carrier_plan.carriers_by_parent.size());
+      for (const auto& [root, carrier] : saved_sequence_carrier_plan.carriers_by_parent) {
+        if (carrier.current_var) inherited_carrier_roots.insert(root);
       }
+      auto inherited_sequence_carrier_plan = saved_sequence_carrier_plan;
+      inherited_sequence_carrier_plan.prelude_stmts_by_index.clear();
+      inherited_sequence_carrier_plan.rematerialize_parent_roots_by_stmt_index.clear();
+      sequence_carrier_plan_ =
+          MergeSequenceCarrierPlans(std::move(inherited_sequence_carrier_plan),
+                                    BuildSequenceCarrierPlan(op->stmts_, inherited_carrier_roots));
 
       for (size_t stmt_index = 0; stmt_index < op->stmts_.size(); ++stmt_index) {
+        auto prelude_it = sequence_carrier_plan_.prelude_stmts_by_index.find(stmt_index);
+        if (prelude_it != sequence_carrier_plan_.prelude_stmts_by_index.end()) {
+          changed = true;
+          for (const auto& prelude_stmt : prelude_it->second) {
+            if (auto prelude_assign = As<AssignStmt>(prelude_stmt)) {
+              if (As<ScalarType>(prelude_assign->var_->GetType())) {
+                scalar_defs_[prelude_assign->var_.get()] = prelude_assign->value_;
+              }
+            }
+            new_stmts.push_back(prelude_stmt);
+          }
+        }
         const auto& stmt = op->stmts_[stmt_index];
         auto call_assign = As<AssignStmt>(stmt);
         auto bundle = call_assign ? TryRewriteCall(call_assign, later_assemble_source_indices, stmt_index)
@@ -3075,6 +3096,17 @@ class OutWindowExternalizer {
           for (const auto& [parent, replacement] : bundle->parent_substs) {
             window_parent_subst_[parent] = replacement;
           }
+          for (const auto& [parent, current] : bundle->carrier_current_updates) {
+            if (WindowExternalizeLogEnabled()) {
+              LOG_INFO << "[window-carrier] apply current root=" << parent->name_hint_
+                       << " current=" << current->name_hint_;
+            }
+            auto carrier_it = sequence_carrier_plan_.carriers_by_parent.find(parent);
+            if (carrier_it != sequence_carrier_plan_.carriers_by_parent.end()) {
+              carrier_it->second.current_var = current;
+            }
+          }
+          MaterializeCarrierCurrentsAfterStmt(stmt_index, nullptr, &new_stmts, &changed);
           continue;
         }
 
@@ -3086,8 +3118,10 @@ class OutWindowExternalizer {
         if (visited_assign && As<ScalarType>(visited_assign->var_->GetType())) {
           scalar_defs_[visited_assign->var_.get()] = visited_assign->value_;
         }
+        MaterializeCarrierCurrentsAfterStmt(stmt_index, visited, &new_stmts, &changed);
       }
 
+      PropagateCarrierCurrents(sequence_carrier_plan_, &saved_sequence_carrier_plan);
       scalar_defs_ = std::move(saved_scalar_defs);
       tuple_result_subst_ = std::move(saved_tuple_result_subst);
       window_parent_subst_ = std::move(saved_window_parent_subst);
@@ -3102,12 +3136,14 @@ class OutWindowExternalizer {
     struct SliceBundle {
       VarPtr slice_var;
       ExprPtr parent_expr;
+      MakeTuplePtr shape_tuple;
       MakeTuplePtr offset_tuple;
     };
 
     struct RewriteBundle {
       std::vector<StmtPtr> stmts;
       std::vector<std::pair<const Var*, ExprPtr>> parent_substs;
+      std::vector<std::pair<const Var*, VarPtr>> carrier_current_updates;
     };
 
     struct RuntimeObservableCarrier {
@@ -3119,6 +3155,7 @@ class OutWindowExternalizer {
       VarPtr current_var;
       bool has_dynamic_reader = false;
       size_t dynamic_dim = SIZE_MAX;
+      bool rematerialize_after_writer_stmt = false;
       InputRewriteInfo reader_input;
       DenseRegionPiece reader_piece;
       CallPtr reader_call;
@@ -3157,7 +3194,8 @@ class OutWindowExternalizer {
       std::unordered_map<const Var*, RuntimeObservableCarrier> carriers_by_parent;
       std::unordered_set<const Var*> dynamic_reader_roots;
       std::unordered_set<const Var*> fallback_parent_roots;
-      std::vector<StmtPtr> prelude_stmts;
+      std::unordered_map<size_t, std::vector<StmtPtr>> prelude_stmts_by_index;
+      std::unordered_map<size_t, std::vector<const Var*>> rematerialize_parent_roots_by_stmt_index;
     };
 
     struct CarrierUse {
@@ -3411,21 +3449,151 @@ class OutWindowExternalizer {
       return SubstituteExprVector(exprs, subst);
     }
 
+    static bool SameCallsiteLoopContext(const std::vector<LoopContext>& lhs,
+                                        const std::vector<LoopContext>& rhs) {
+      if (lhs.size() != rhs.size()) return false;
+      for (size_t i = 0; i < lhs.size(); ++i) {
+        if (lhs[i].loop_var.get() != rhs[i].loop_var.get()) return false;
+        if (lhs[i].loop.get() != rhs[i].loop.get()) return false;
+      }
+      return true;
+    }
+
+    static bool CanUseCarrierAcrossCallsiteLoops(const std::vector<LoopContext>& writer_loops,
+                                                 const std::vector<LoopContext>& reader_loops,
+                                                 bool* needs_rematerialization) {
+      if (needs_rematerialization) *needs_rematerialization = false;
+      if (SameCallsiteLoopContext(writer_loops, reader_loops)) return true;
+
+      bool writer_has_extra_singleton_loop = false;
+      for (const auto& writer_loop : writer_loops) {
+        bool shared_with_reader = false;
+        for (const auto& reader_loop : reader_loops) {
+          if (writer_loop.loop.get() == reader_loop.loop.get() &&
+              writer_loop.loop_var.get() == reader_loop.loop_var.get()) {
+            shared_with_reader = true;
+            break;
+          }
+        }
+        if (shared_with_reader) continue;
+        auto trip_count = GetKnownPositiveTripCount(writer_loop.loop);
+        if (!trip_count.has_value() || *trip_count != 1) return false;
+        writer_has_extra_singleton_loop = true;
+      }
+
+      if (needs_rematerialization) *needs_rematerialization = writer_has_extra_singleton_loop;
+      return true;
+    }
+
     static SequenceCarrierPlan MergeSequenceCarrierPlans(SequenceCarrierPlan parent,
                                                          SequenceCarrierPlan child) {
       for (auto& [root, carrier] : child.carriers_by_parent) {
+        auto parent_it = parent.carriers_by_parent.find(root);
+        if (parent_it != parent.carriers_by_parent.end() && parent_it->second.current_var) {
+          continue;
+        }
+        parent.fallback_parent_roots.erase(root);
         parent.carriers_by_parent[root] = std::move(carrier);
       }
       parent.dynamic_reader_roots.insert(child.dynamic_reader_roots.begin(),
                                          child.dynamic_reader_roots.end());
-      parent.fallback_parent_roots.insert(child.fallback_parent_roots.begin(),
-                                          child.fallback_parent_roots.end());
-      parent.prelude_stmts.insert(parent.prelude_stmts.end(), child.prelude_stmts.begin(),
-                                  child.prelude_stmts.end());
+      for (const auto* root : child.fallback_parent_roots) {
+        if (parent.carriers_by_parent.count(root) == 0) parent.fallback_parent_roots.insert(root);
+      }
+      for (auto& [stmt_index, stmts] : child.prelude_stmts_by_index) {
+        auto& target = parent.prelude_stmts_by_index[stmt_index];
+        target.insert(target.end(), stmts.begin(), stmts.end());
+      }
+      for (auto& [stmt_index, roots] : child.rematerialize_parent_roots_by_stmt_index) {
+        auto& target = parent.rematerialize_parent_roots_by_stmt_index[stmt_index];
+        target.insert(target.end(), roots.begin(), roots.end());
+      }
       for (const auto* root : parent.fallback_parent_roots) {
         parent.carriers_by_parent.erase(root);
+        for (auto& [_, roots] : parent.rematerialize_parent_roots_by_stmt_index) {
+          roots.erase(std::remove(roots.begin(), roots.end(), root), roots.end());
+        }
       }
       return parent;
+    }
+
+    static void PropagateCarrierCurrents(const SequenceCarrierPlan& source, SequenceCarrierPlan* target) {
+      if (!target) return;
+      for (const auto& [root, carrier] : source.carriers_by_parent) {
+        if (!carrier.current_var) continue;
+        auto target_it = target->carriers_by_parent.find(root);
+        if (target_it == target->carriers_by_parent.end()) continue;
+        target_it->second.current_var = carrier.current_var;
+      }
+    }
+
+    ExprPtr FindVisibleParentAfterStmt(const StmtPtr& stmt, const Var* root) const {
+      if (!stmt || !root) return nullptr;
+      auto find_from_loop = [&](const auto& loop) -> ExprPtr {
+        if (!loop) return nullptr;
+        const size_t n = std::min(loop->iter_args_.size(), loop->return_vars_.size());
+        for (size_t i = 0; i < n; ++i) {
+          const auto& iter_arg = loop->iter_args_[i];
+          const auto& return_var = loop->return_vars_[i];
+          if (!iter_arg || !iter_arg->initValue_ || !return_var) continue;
+          if (ResolveCarrierParentRoot(iter_arg->initValue_) == root) return return_var;
+        }
+        return nullptr;
+      };
+      if (auto loop = As<ForStmt>(stmt)) {
+        if (auto parent = find_from_loop(loop)) return parent;
+      }
+      if (auto loop = As<WhileStmt>(stmt)) {
+        if (auto parent = find_from_loop(loop)) return parent;
+      }
+      auto parent_it = window_parent_subst_.find(root);
+      if (parent_it != window_parent_subst_.end()) return parent_it->second;
+      return nullptr;
+    }
+
+    void MaterializeCarrierCurrentsAfterStmt(size_t stmt_index, const StmtPtr& visible_stmt,
+                                             std::vector<StmtPtr>* new_stmts, bool* changed) {
+      auto remat_it = sequence_carrier_plan_.rematerialize_parent_roots_by_stmt_index.find(stmt_index);
+      if (remat_it == sequence_carrier_plan_.rematerialize_parent_roots_by_stmt_index.end()) return;
+      if (!new_stmts || !changed) return;
+      for (const auto* root : remat_it->second) {
+        auto carrier_it = sequence_carrier_plan_.carriers_by_parent.find(root);
+        if (carrier_it == sequence_carrier_plan_.carriers_by_parent.end()) continue;
+        auto& carrier = carrier_it->second;
+        if (!carrier.rematerialize_after_writer_stmt || carrier.offsets.empty() || carrier.shape.empty()) {
+          continue;
+        }
+        auto parent_expr = FindVisibleParentAfterStmt(visible_stmt, root);
+        if (!parent_expr) {
+          if (WindowExternalizeLogEnabled()) {
+            LOG_INFO << "[window-carrier] skip remat root=" << root->name_hint_
+                     << " reason=no-visible-parent";
+          }
+          carrier.current_var.reset();
+          continue;
+        }
+
+        std::vector<ExprPtr> shape_exprs;
+        shape_exprs.reserve(carrier.shape.size());
+        for (const auto& dim : carrier.shape) shape_exprs.push_back(VisitExpr(dim));
+        std::vector<ExprPtr> offset_exprs;
+        offset_exprs.reserve(carrier.offsets.size());
+        for (const auto& offset : carrier.offsets) offset_exprs.push_back(VisitExpr(offset));
+        auto shape_tuple = std::make_shared<MakeTuple>(std::move(shape_exprs), parent_expr->span_);
+        auto offset_tuple = std::make_shared<MakeTuple>(std::move(offset_exprs), parent_expr->span_);
+        auto slice_call = OpRegistry::GetInstance().Create(
+            "tensor.slice", {VisitExpr(parent_expr), shape_tuple, offset_tuple}, parent_expr->span_);
+        auto carrier_current_var = std::make_shared<Var>(root->name_hint_ + "__carrier_current_remat",
+                                                         slice_call->GetType(), parent_expr->span_);
+        new_stmts->push_back(
+            std::make_shared<AssignStmt>(carrier_current_var, slice_call, parent_expr->span_));
+        carrier.current_var = carrier_current_var;
+        *changed = true;
+        if (WindowExternalizeLogEnabled()) {
+          LOG_INFO << "[window-carrier] remat current root=" << root->name_hint_
+                   << " current=" << carrier_current_var->name_hint_;
+        }
+      }
     }
 
     struct LoopDisjointnessCandidate {
@@ -3592,6 +3760,10 @@ class OutWindowExternalizer {
       auto start = analyzer->Simplify(transform_utils::Substitute(dynamic.loop_start, callsite_subst));
       auto stop = analyzer->Simplify(transform_utils::Substitute(dynamic.loop_stop, callsite_subst));
       auto step = analyzer->Simplify(transform_utils::Substitute(dynamic.loop_step, callsite_subst));
+      // The sentinel initializers are safe only because callers first prove
+      // the scan has at least one statically guaranteed update. If the guard
+      // depends on runtime index values, that proof fails and the rewrite is
+      // rejected before this scan is emitted.
       stmts->push_back(std::make_shared<AssignStmt>(
           scan_min_init, std::make_shared<ConstInt>(2147483647, DataType::INDEX, call_assign->span_),
           call_assign->span_));
@@ -3624,6 +3796,8 @@ class OutWindowExternalizer {
       }
       if (dynamic.guard_condition &&
           CountVarRefsInExpr(dynamic.guard_condition, dynamic.dynamic_index_value) != 0) {
+        // Runtime-index-dependent guards need an explicit empty-scan fallback
+        // before they can safely feed the sentinel-based min/max scan.
         return std::nullopt;
       }
 
@@ -3738,12 +3912,21 @@ class OutWindowExternalizer {
         auto for_stmt = std::make_shared<ForStmt>(
             scan_loop_var, start, stop, step, std::vector<IterArgPtr>{min_iter, max_iter}, body,
             std::vector<VarPtr>{min_out, max_out}, span, ForKind::Sequential);
+        auto min_rebind = std::make_shared<Var>(
+            base_name + "__carrier_min_rebind_" + std::to_string(loop_index), index_type, span);
+        auto max_rebind = std::make_shared<Var>(
+            base_name + "__carrier_max_rebind_" + std::to_string(loop_index), index_type, span);
         return std::make_shared<SeqStmts>(
-            std::vector<StmtPtr>{for_stmt,
-                                 std::make_shared<YieldStmt>(std::vector<ExprPtr>{min_out, max_out}, span)},
+            std::vector<StmtPtr>{
+                for_stmt, std::make_shared<AssignStmt>(min_rebind, min_out, span),
+                std::make_shared<AssignStmt>(max_rebind, max_out, span),
+                std::make_shared<YieldStmt>(std::vector<ExprPtr>{min_rebind, max_rebind}, span)},
             span);
       };
 
+      // As above, the sentinel initializers are paired with
+      // CanProveDynamicWindowScanHasUpdate() in BuildSequenceCarrierPlan; if a
+      // dynamic reader cannot prove at least one update, no carrier is built.
       stmts->push_back(std::make_shared<AssignStmt>(
           scan_min_init, std::make_shared<ConstInt>(2147483647, DataType::INDEX, span), span));
       stmts->push_back(std::make_shared<AssignStmt>(
@@ -3833,11 +4016,29 @@ class OutWindowExternalizer {
       }
       if (!analysis.outputs.empty() && !ProveCallsiteDisjointness(call_assign, call, analysis) &&
           !CanUseRuntimeViewDisjointness(analysis)) {
+        if (WindowExternalizeLogEnabled()) {
+          LOG_INFO << "[window-call] reject disjointness func=" << callee_name;
+        }
         return std::nullopt;
       }
-      if (HasUnwindowableSiblingOutputWriter(call, analysis)) return std::nullopt;
-      if (HasDuplicateExternalizedOutputParent(call, analysis)) return std::nullopt;
-      if (HasManualDepsToMultiPieceOutput(call, analysis)) return std::nullopt;
+      if (HasUnwindowableSiblingOutputWriter(call, analysis)) {
+        if (WindowExternalizeLogEnabled()) {
+          LOG_INFO << "[window-call] reject unwindowable sibling func=" << callee_name;
+        }
+        return std::nullopt;
+      }
+      if (HasDuplicateExternalizedOutputParent(call, analysis)) {
+        if (WindowExternalizeLogEnabled()) {
+          LOG_INFO << "[window-call] reject duplicate output parent func=" << callee_name;
+        }
+        return std::nullopt;
+      }
+      if (HasManualDepsToMultiPieceOutput(call, analysis)) {
+        if (WindowExternalizeLogEnabled()) {
+          LOG_INFO << "[window-call] reject manual deps multi-piece func=" << callee_name;
+        }
+        return std::nullopt;
+      }
       if (window_rewrite_policy_ != WindowRewritePolicy::All && HasDynamicReaderCarrierRisk(call, analysis)) {
         return std::nullopt;
       }
@@ -3848,6 +4049,7 @@ class OutWindowExternalizer {
       std::unordered_map<size_t, std::vector<ExprPtr>> extra_args_by_out_index;
       std::unordered_map<size_t, ExprPtr> output_extent_arg_by_out_index;
       std::unordered_map<size_t, std::vector<SliceBundle>> slices_by_out_index;
+      std::vector<std::pair<const Var*, VarPtr>> carrier_current_updates;
       std::vector<StmtPtr> stmts;
       stmts.reserve((analysis.inputs.size() + analysis.outputs.size()) * 2 + 2);
 
@@ -3879,91 +4081,31 @@ class OutWindowExternalizer {
               if (!carrier_use->carrier->dynamic_base_arg || !carrier_use->carrier->dynamic_extent_arg) {
                 return std::nullopt;
               }
-              if (!carrier_use->carrier->current_var) {
-                return std::nullopt;
-              }
               extra_args_by_in_index.emplace(input.in_param_index,
                                              std::vector<ExprPtr>{carrier_use->carrier->dynamic_base_arg,
                                                                   carrier_use->carrier->dynamic_extent_arg});
             }
-            if (carrier_use->carrier->current_var) {
-              input_slices.push_back(carrier_use->carrier->current_var);
-            } else {
-              return std::nullopt;
-            }
+            if (!carrier_use->carrier->current_var) return std::nullopt;
+            input_slices.push_back(carrier_use->carrier->current_var);
             continue;
           }
 
-          if (input.dynamic_indexed_window.has_value() &&
-              window_rewrite_policy_ != WindowRewritePolicy::All) {
-            return std::nullopt;
-          }
-
-          std::unordered_map<const Var*, ExprPtr> dynamic_min_subst;
-          std::unordered_map<const Var*, ExprPtr> dynamic_max_subst;
-          std::vector<ExprPtr> input_extra_args;
-
           if (input.dynamic_indexed_window.has_value()) {
-            if (pieces.size() != 1) return std::nullopt;
-            if (!CanProveDynamicWindowScanHasUpdate(*input.dynamic_indexed_window, callsite_subst)) {
-              return std::nullopt;
-            }
-            auto scan = EmitDynamicWindowScan(input, piece, call, call_assign, in_arg, callsite_subst,
-                                              &input_offset_analyzer, &stmts);
-            if (!scan.has_value()) return std::nullopt;
-            dynamic_min_subst = std::move(scan->min_subst);
-            dynamic_max_subst = std::move(scan->max_subst);
+            return std::nullopt;
           }
 
           std::vector<ExprPtr> shape_exprs;
           shape_exprs.reserve(piece.window_shape.size());
           for (size_t dim_i = 0; dim_i < piece.window_shape.size(); ++dim_i) {
             const auto& dim = piece.window_shape[dim_i];
-            if (input.dynamic_indexed_window.has_value() &&
-                dim_i == input.dynamic_indexed_window->dynamic_dim) {
-              auto max_offset_subst = callsite_subst;
-              for (const auto& [var, expr] : dynamic_max_subst) max_offset_subst[var] = expr;
-              auto min_offset_subst = callsite_subst;
-              for (const auto& [var, expr] : dynamic_min_subst) min_offset_subst[var] = expr;
-              auto max_offset = input_offset_analyzer.Simplify(
-                  transform_utils::Substitute(piece.callsite_offsets[dim_i], max_offset_subst));
-              auto min_offset = input_offset_analyzer.Simplify(
-                  transform_utils::Substitute(piece.callsite_offsets[dim_i], min_offset_subst));
-              auto access_extent =
-                  input_offset_analyzer.Simplify(transform_utils::Substitute(dim, callsite_subst));
-              shape_exprs.push_back(input_offset_analyzer.Simplify(MakeSub(
-                  MakeAdd(max_offset, access_extent, call_assign->span_), min_offset, call_assign->span_)));
-            } else {
-              shape_exprs.push_back(transform_utils::Substitute(dim, callsite_subst));
-            }
+            shape_exprs.push_back(transform_utils::Substitute(dim, callsite_subst));
           }
           std::vector<ExprPtr> offset_exprs;
           offset_exprs.reserve(piece.callsite_offsets.size());
           for (size_t offset_i = 0; offset_i < piece.callsite_offsets.size(); ++offset_i) {
             const auto& offset = piece.callsite_offsets[offset_i];
-            auto offset_subst = callsite_subst;
-            if (input.dynamic_indexed_window.has_value() &&
-                offset_i == input.dynamic_indexed_window->dynamic_dim) {
-              for (const auto& [var, expr] : dynamic_min_subst) offset_subst[var] = expr;
-            }
             offset_exprs.push_back(
-                input_offset_analyzer.Simplify(transform_utils::Substitute(offset, offset_subst)));
-          }
-          if (input.dynamic_indexed_window.has_value()) {
-            const size_t dynamic_dim = input.dynamic_indexed_window->dynamic_dim;
-            auto index_type = std::make_shared<ScalarType>(DataType::INDEX);
-            auto base_arg = std::make_shared<Var>(in_arg->name_hint_ + "__window_base_arg", index_type,
-                                                  call_assign->span_);
-            auto extent_arg = std::make_shared<Var>(in_arg->name_hint_ + "__window_extent_arg", index_type,
-                                                    call_assign->span_);
-            stmts.push_back(
-                std::make_shared<AssignStmt>(base_arg, offset_exprs[dynamic_dim], call_assign->span_));
-            stmts.push_back(
-                std::make_shared<AssignStmt>(extent_arg, shape_exprs[dynamic_dim], call_assign->span_));
-            offset_exprs[dynamic_dim] = base_arg;
-            shape_exprs[dynamic_dim] = extent_arg;
-            input_extra_args.push_back(base_arg);
-            input_extra_args.push_back(extent_arg);
+                input_offset_analyzer.Simplify(transform_utils::Substitute(offset, callsite_subst)));
           }
           auto shape_tuple = std::make_shared<MakeTuple>(shape_exprs, call_assign->span_);
           auto offset_tuple = std::make_shared<MakeTuple>(offset_exprs, call_assign->span_);
@@ -3977,9 +4119,6 @@ class OutWindowExternalizer {
               std::make_shared<Var>(in_arg->name_hint_ + suffix, slice_call->GetType(), in_arg->span_);
           stmts.push_back(std::make_shared<AssignStmt>(slice_var, slice_call, call_assign->span_));
           input_slices.push_back(slice_var);
-          if (!input_extra_args.empty()) {
-            extra_args_by_in_index.emplace(input.in_param_index, std::move(input_extra_args));
-          }
         }
         if (input_slices.size() == 1) slices_by_in_index.emplace(input.in_param_index, input_slices[0]);
         slices_by_in_index_multi.emplace(input.in_param_index, std::move(input_slices));
@@ -4013,13 +4152,14 @@ class OutWindowExternalizer {
                 output_offset_analyzer.Simplify(transform_utils::Substitute(offset, callsite_subst)));
           }
           if (carrier_use.has_value() && carrier_use->carrier && carrier_use->carrier->has_dynamic_reader) {
-            if (piece_index != 0 || !HasFineAssemblePieces(output) ||
-                carrier_use->carrier->dynamic_dim != 0) {
+            const size_t dynamic_dim = carrier_use->carrier->dynamic_dim;
+            if (piece_index != 0 || !HasFineAssemblePieces(output) || dynamic_dim >= offset_exprs.size() ||
+                dynamic_dim >= shape_exprs.size()) {
               return std::nullopt;
             }
             if (carrier_use->carrier->dynamic_base_arg && carrier_use->carrier->dynamic_extent_arg) {
-              offset_exprs[0] = carrier_use->carrier->dynamic_base_arg;
-              shape_exprs[0] = carrier_use->carrier->dynamic_extent_arg;
+              offset_exprs[dynamic_dim] = carrier_use->carrier->dynamic_base_arg;
+              shape_exprs[dynamic_dim] = carrier_use->carrier->dynamic_extent_arg;
             } else {
               if (!carrier_use->carrier->reader_call || !carrier_use->carrier->reader_assign) {
                 return std::nullopt;
@@ -4051,17 +4191,17 @@ class OutWindowExternalizer {
               for (const auto& [var, expr] : scan->min_subst) min_offset_subst[var] = expr;
               const auto& reader_piece = carrier_use->carrier->reader_piece;
               auto reader_min = output_offset_analyzer.Simplify(
-                  transform_utils::Substitute(reader_piece.callsite_offsets[0], min_offset_subst));
+                  transform_utils::Substitute(reader_piece.callsite_offsets[dynamic_dim], min_offset_subst));
               auto reader_max = output_offset_analyzer.Simplify(
-                  transform_utils::Substitute(reader_piece.callsite_offsets[0], max_offset_subst));
+                  transform_utils::Substitute(reader_piece.callsite_offsets[dynamic_dim], max_offset_subst));
               auto reader_access_extent = output_offset_analyzer.Simplify(
-                  transform_utils::Substitute(reader_piece.window_shape[0], reader_callsite_subst));
+                  transform_utils::Substitute(reader_piece.window_shape[dynamic_dim], reader_callsite_subst));
               auto reader_end = output_offset_analyzer.Simplify(
                   MakeAdd(reader_max, reader_access_extent, call_assign->span_));
               auto writer_end = output_offset_analyzer.Simplify(
-                  MakeAdd(offset_exprs[0], shape_exprs[0], call_assign->span_));
-              auto carrier_base =
-                  output_offset_analyzer.Simplify(MakeMin(offset_exprs[0], reader_min, call_assign->span_));
+                  MakeAdd(offset_exprs[dynamic_dim], shape_exprs[dynamic_dim], call_assign->span_));
+              auto carrier_base = output_offset_analyzer.Simplify(
+                  MakeMin(offset_exprs[dynamic_dim], reader_min, call_assign->span_));
               auto carrier_end =
                   output_offset_analyzer.Simplify(MakeMax(writer_end, reader_end, call_assign->span_));
               auto index_type = std::make_shared<ScalarType>(DataType::INDEX);
@@ -4083,8 +4223,8 @@ class OutWindowExternalizer {
                                                output_offset_analyzer.Simplify(MakeSub(
                                                    carrier_end_var, carrier_base_var, call_assign->span_)),
                                                call_assign->span_));
-              offset_exprs[0] = carrier_base_var;
-              shape_exprs[0] = carrier_extent_var;
+              offset_exprs[dynamic_dim] = carrier_base_var;
+              shape_exprs[dynamic_dim] = carrier_extent_var;
             }
           }
           if (piece_index == 0 && HasFineAssemblePieces(output)) {
@@ -4092,11 +4232,18 @@ class OutWindowExternalizer {
             auto index_type = std::make_shared<ScalarType>(DataType::INDEX);
             VarPtr base_arg;
             VarPtr extent_arg;
+            const size_t output_dynamic_dim =
+                carrier_use.has_value() && carrier_use->carrier && carrier_use->carrier->has_dynamic_reader
+                    ? carrier_use->carrier->dynamic_dim
+                    : 0;
+            if (output_dynamic_dim >= offset_exprs.size() || output_dynamic_dim >= shape_exprs.size()) {
+              return std::nullopt;
+            }
             const bool use_existing_carrier_args =
                 carrier_use.has_value() && carrier_use->carrier && carrier_use->carrier->has_dynamic_reader &&
                 carrier_use->carrier->dynamic_base_arg && carrier_use->carrier->dynamic_extent_arg &&
-                offset_exprs[0].get() == carrier_use->carrier->dynamic_base_arg.get() &&
-                shape_exprs[0].get() == carrier_use->carrier->dynamic_extent_arg.get();
+                offset_exprs[output_dynamic_dim].get() == carrier_use->carrier->dynamic_base_arg.get() &&
+                shape_exprs[output_dynamic_dim].get() == carrier_use->carrier->dynamic_extent_arg.get();
             if (use_existing_carrier_args) {
               base_arg = carrier_use->carrier->dynamic_base_arg;
               extent_arg = carrier_use->carrier->dynamic_extent_arg;
@@ -4105,11 +4252,13 @@ class OutWindowExternalizer {
                                                call_assign->span_);
               extent_arg = std::make_shared<Var>(out_arg->name_hint_ + "__window_extent_arg", index_type,
                                                  call_assign->span_);
-              stmts.push_back(std::make_shared<AssignStmt>(base_arg, offset_exprs[0], call_assign->span_));
-              stmts.push_back(std::make_shared<AssignStmt>(extent_arg, shape_exprs[0], call_assign->span_));
+              stmts.push_back(std::make_shared<AssignStmt>(base_arg, offset_exprs[output_dynamic_dim],
+                                                           call_assign->span_));
+              stmts.push_back(std::make_shared<AssignStmt>(extent_arg, shape_exprs[output_dynamic_dim],
+                                                           call_assign->span_));
             }
-            offset_exprs[0] = base_arg;
-            shape_exprs[0] = extent_arg;
+            offset_exprs[output_dynamic_dim] = base_arg;
+            shape_exprs[output_dynamic_dim] = extent_arg;
             output_extra_args.push_back(base_arg);
             output_extra_args.push_back(extent_arg);
             output_extent_arg_by_out_index.emplace(output.out_param_index, extent_arg);
@@ -4134,7 +4283,7 @@ class OutWindowExternalizer {
             carrier_use->carrier->initial_var = slice_var;
             carrier_use->carrier->current_var = slice_var;
           }
-          output_slices.push_back(SliceBundle{slice_var, parent_expr, offset_tuple});
+          output_slices.push_back(SliceBundle{slice_var, parent_expr, shape_tuple, offset_tuple});
           if (!output_extra_args.empty()) {
             extra_args_by_out_index.emplace(output.out_param_index, std::move(output_extra_args));
           }
@@ -4206,6 +4355,7 @@ class OutWindowExternalizer {
       }
       auto finish_bundle = [&](RewriteBundle bundle) -> RewriteBundle {
         used_clone_names_.insert(callee_name);
+        bundle.carrier_current_updates = carrier_current_updates;
         return bundle;
       };
       TypePtr new_return_type =
@@ -4256,6 +4406,11 @@ class OutWindowExternalizer {
         if (carrier_use.has_value()) {
           if (!carrier_use->carrier || !carrier_use->carrier->current_var) return std::nullopt;
           carrier_use->carrier->current_var = tmp_result_var;
+          carrier_current_updates.emplace_back(carrier_use->parent_root, tmp_result_var);
+          if (WindowExternalizeLogEnabled()) {
+            LOG_INFO << "[window-carrier] record current root=" << carrier_use->parent_root->name_hint_
+                     << " current=" << tmp_result_var->name_hint_;
+          }
         }
         const auto& slice_bundle = slices_by_out_index.at(output.out_param_index).front();
         auto assemble_call = OpRegistry::GetInstance().Create(
@@ -4283,6 +4438,12 @@ class OutWindowExternalizer {
         const auto& slice_bundles = slices_by_out_index.at(output.out_param_index);
         const auto& assemble_pieces = AssemblePieces(output);
         const bool uses_fine_assemble = HasFineAssemblePieces(output);
+        auto output_carrier_use = FindCarrierUse(call, output.out_param_index, DensePieces(output).front());
+        if (output_carrier_use.has_value() && uses_fine_assemble) {
+          if (!output_carrier_use->carrier || !output_carrier_use->carrier->current_var) {
+            return std::nullopt;
+          }
+        }
         if (piece_return_indices.size() != slice_bundles.size()) return std::nullopt;
         if (uses_fine_assemble && piece_return_indices.empty()) return std::nullopt;
         if (!uses_fine_assemble && piece_return_indices.size() != assemble_pieces.size()) return std::nullopt;
@@ -4308,13 +4469,18 @@ class OutWindowExternalizer {
             item_expr = item_it->second;
           }
           if (piece_index == 0) {
-            auto carrier_use = FindCarrierUse(call, output.out_param_index, DensePieces(output).front());
-            if (carrier_use.has_value()) {
+            if (output_carrier_use.has_value() && !uses_fine_assemble) {
               auto item_var = AsVarLike(item_expr);
-              if (!carrier_use->carrier || !carrier_use->carrier->current_var || !item_var) {
+              if (!output_carrier_use->carrier || !output_carrier_use->carrier->current_var || !item_var) {
                 return std::nullopt;
               }
-              carrier_use->carrier->current_var = item_var;
+              output_carrier_use->carrier->current_var = item_var;
+              carrier_current_updates.emplace_back(output_carrier_use->parent_root, item_var);
+              if (WindowExternalizeLogEnabled()) {
+                LOG_INFO << "[window-carrier] record current root="
+                         << output_carrier_use->parent_root->name_hint_
+                         << " current=" << item_var->name_hint_;
+              }
             }
           }
 
@@ -4379,6 +4545,25 @@ class OutWindowExternalizer {
         }
 
         assembled_result_exprs[output.return_index] = current_parent_expr;
+        if (output_carrier_use.has_value() && uses_fine_assemble) {
+          const auto& carrier_slice_bundle = slice_bundles.front();
+          auto carrier_slice_call = OpRegistry::GetInstance().Create(
+              "tensor.slice",
+              {current_parent_expr, carrier_slice_bundle.shape_tuple, carrier_slice_bundle.offset_tuple},
+              call_assign->span_);
+          auto carrier_current_var = std::make_shared<Var>(
+              call_assign->var_->name_hint_ + "__carrier_current_" + std::to_string(output.return_index),
+              carrier_slice_call->GetType(), call_assign->var_->span_);
+          tail_stmts.push_back(
+              std::make_shared<AssignStmt>(carrier_current_var, carrier_slice_call, call_assign->span_));
+          if (!output_carrier_use->carrier) return std::nullopt;
+          output_carrier_use->carrier->current_var = carrier_current_var;
+          carrier_current_updates.emplace_back(output_carrier_use->parent_root, carrier_current_var);
+          if (WindowExternalizeLogEnabled()) {
+            LOG_INFO << "[window-carrier] record current root=" << output_carrier_use->parent_root->name_hint_
+                     << " current=" << carrier_current_var->name_hint_;
+          }
+        }
         if (auto parent_var = AsVarLike(slice_bundles.front().parent_expr)) {
           bundle_parent_substs.emplace_back(parent_var.get(), current_parent_expr);
         }
@@ -4744,7 +4929,9 @@ class OutWindowExternalizer {
       }
     }
 
-    SequenceCarrierPlan BuildSequenceCarrierPlan(const std::vector<StmtPtr>& sibling_stmts) {
+    SequenceCarrierPlan BuildSequenceCarrierPlan(
+        const std::vector<StmtPtr>& sibling_stmts,
+        const std::unordered_set<const Var*>& inherited_carrier_roots = {}) {
       SequenceCarrierPlan plan;
       std::vector<CallsiteAccessCandidate> candidates;
       candidates.reserve(sibling_stmts.size());
@@ -4760,6 +4947,7 @@ class OutWindowExternalizer {
 
       for (const auto& [root, root_candidates] : candidates_by_root) {
         if (!root) continue;
+        if (inherited_carrier_roots.count(root) != 0) continue;
 
         const CallsiteAccessCandidate* writer = nullptr;
         const CallsiteAccessCandidate* reader = nullptr;
@@ -4788,21 +4976,24 @@ class OutWindowExternalizer {
           }
         }
         if (dynamic_reader) {
-          if (window_rewrite_policy_ == WindowRewritePolicy::All) {
+          plan.dynamic_reader_roots.insert(root);
+          if (window_rewrite_policy_ != WindowRewritePolicy::All) {
+            plan.fallback_parent_roots.insert(root);
             continue;
           }
-          plan.dynamic_reader_roots.insert(root);
           size_t dynamic_dim = SIZE_MAX;
-          bool can_make_dynamic_carrier = !unsupported && writer && writer->output_has_fine_assemble &&
-                                          writer->stmt_index < dynamic_reader->stmt_index &&
-                                          !writer->shape.empty() && !writer->offsets.empty() &&
-                                          !dynamic_reader->shape.empty() &&
-                                          !dynamic_reader->offsets.empty() &&
-                                          dynamic_reader->input_info.dynamic_indexed_window.has_value();
+          bool needs_carrier_rematerialization = false;
+          bool can_make_dynamic_carrier =
+              !unsupported && writer && writer->output_has_fine_assemble &&
+              writer->stmt_index < dynamic_reader->stmt_index &&
+              CanUseCarrierAcrossCallsiteLoops(writer->enclosing_loops, dynamic_reader->enclosing_loops,
+                                               &needs_carrier_rematerialization) &&
+              !writer->shape.empty() && !writer->offsets.empty() && !dynamic_reader->shape.empty() &&
+              !dynamic_reader->offsets.empty() &&
+              dynamic_reader->input_info.dynamic_indexed_window.has_value();
           if (can_make_dynamic_carrier) {
             dynamic_dim = dynamic_reader->input_info.dynamic_indexed_window->dynamic_dim;
-            can_make_dynamic_carrier = dynamic_dim == 0 &&
-                                       writer->shape.size() == dynamic_reader->shape.size() &&
+            can_make_dynamic_carrier = writer->shape.size() == dynamic_reader->shape.size() &&
                                        writer->offsets.size() == dynamic_reader->offsets.size() &&
                                        dynamic_dim < writer->shape.size();
             for (size_t dim = 0; can_make_dynamic_carrier && dim < writer->shape.size(); ++dim) {
@@ -4817,11 +5008,15 @@ class OutWindowExternalizer {
                 SubstituteExprVector(writer->offsets, writer->callsite_subst), writer->enclosing_loops);
             auto writer_shape = SubstituteSingletonLoopStarts(
                 SubstituteExprVector(writer->shape, writer->callsite_subst), writer->enclosing_loops);
+            std::vector<StmtPtr> prelude_stmts;
             auto reader_scan =
                 writer_offsets.has_value() && writer_shape.has_value()
-                    ? EmitFullOffsetScanPrelude(*dynamic_reader, &carrier_analyzer, &plan.prelude_stmts)
+                    ? EmitFullOffsetScanPrelude(*dynamic_reader, &carrier_analyzer, &prelude_stmts)
                     : std::nullopt;
             if (!writer_offsets.has_value() || !writer_shape.has_value() || !reader_scan.has_value()) {
+              if (WindowExternalizeLogEnabled()) {
+                LOG_INFO << "[window-carrier] fallback dynamic scan root=" << root->name_hint_;
+              }
               plan.fallback_parent_roots.insert(root);
               continue;
             }
@@ -4832,14 +5027,14 @@ class OutWindowExternalizer {
             auto carrier_extent_var = std::make_shared<Var>(
                 root->name_hint_ + "__carrier_extent", index_type,
                 dynamic_reader->assign ? dynamic_reader->assign->span_ : Span::unknown());
-            auto writer_end = carrier_analyzer.Simplify(
-                MakeAdd((*writer_offsets)[0], (*writer_shape)[0], carrier_base_var->span_));
+            auto writer_end = carrier_analyzer.Simplify(MakeAdd(
+                (*writer_offsets)[dynamic_dim], (*writer_shape)[dynamic_dim], carrier_base_var->span_));
             auto reader_access_extent = carrier_analyzer.Simplify(SubstituteCallsiteAndLoops(
                 dynamic_reader->shape[dynamic_dim], dynamic_reader->callsite_subst, {}));
             auto reader_end = carrier_analyzer.Simplify(
                 MakeAdd(reader_scan->max_offset, reader_access_extent, carrier_base_var->span_));
             auto carrier_base = carrier_analyzer.Simplify(
-                MakeMin((*writer_offsets)[0], reader_scan->min_offset, carrier_base_var->span_));
+                MakeMin((*writer_offsets)[dynamic_dim], reader_scan->min_offset, carrier_base_var->span_));
             auto carrier_end =
                 carrier_analyzer.Simplify(MakeMax(writer_end, reader_end, carrier_base_var->span_));
             auto carrier_end_var = std::make_shared<Var>(
@@ -4847,17 +5042,15 @@ class OutWindowExternalizer {
                 dynamic_reader->assign ? dynamic_reader->assign->span_ : Span::unknown());
             carrier_base = FlattenGeneratedScalarExpr(
                 carrier_base, root->name_hint_,
-                dynamic_reader->assign ? dynamic_reader->assign->span_ : Span::unknown(),
-                &plan.prelude_stmts);
+                dynamic_reader->assign ? dynamic_reader->assign->span_ : Span::unknown(), &prelude_stmts);
             carrier_end = FlattenGeneratedScalarExpr(
                 carrier_end, root->name_hint_,
-                dynamic_reader->assign ? dynamic_reader->assign->span_ : Span::unknown(),
-                &plan.prelude_stmts);
-            plan.prelude_stmts.push_back(
+                dynamic_reader->assign ? dynamic_reader->assign->span_ : Span::unknown(), &prelude_stmts);
+            prelude_stmts.push_back(
                 std::make_shared<AssignStmt>(carrier_base_var, carrier_base, carrier_base_var->span_));
-            plan.prelude_stmts.push_back(
+            prelude_stmts.push_back(
                 std::make_shared<AssignStmt>(carrier_end_var, carrier_end, carrier_end_var->span_));
-            plan.prelude_stmts.push_back(std::make_shared<AssignStmt>(
+            prelude_stmts.push_back(std::make_shared<AssignStmt>(
                 carrier_extent_var,
                 carrier_analyzer.Simplify(
                     MakeSub(carrier_end_var, carrier_base_var, carrier_extent_var->span_)),
@@ -4878,13 +5071,28 @@ class OutWindowExternalizer {
             carrier.reader_assign = dynamic_reader->assign;
             carrier.dynamic_base_arg = carrier_base_var;
             carrier.dynamic_extent_arg = carrier_extent_var;
+            carrier.rematerialize_after_writer_stmt = needs_carrier_rematerialization;
+            plan.prelude_stmts_by_index[writer->stmt_index].insert(
+                plan.prelude_stmts_by_index[writer->stmt_index].end(), prelude_stmts.begin(),
+                prelude_stmts.end());
+            if (needs_carrier_rematerialization) {
+              plan.rematerialize_parent_roots_by_stmt_index[writer->stmt_index].push_back(root);
+            }
+            plan.fallback_parent_roots.erase(root);
             plan.carriers_by_parent.emplace(root, std::move(carrier));
             if (WindowExternalizeLogEnabled()) {
               LOG_INFO << "[window-carrier] create dynamic carrier root=" << root->name_hint_
                        << " writer_shape=" << ExprVectorDebugString(writer->shape)
-                       << " reader_shape=" << ExprVectorDebugString(dynamic_reader->shape);
+                       << " reader_shape=" << ExprVectorDebugString(dynamic_reader->shape)
+                       << " remat=" << needs_carrier_rematerialization;
             }
           } else {
+            if (WindowExternalizeLogEnabled()) {
+              LOG_INFO << "[window-carrier] fallback dynamic proof root=" << root->name_hint_
+                       << " unsupported=" << unsupported << " writer=" << (writer != nullptr)
+                       << " writer_fine=" << (writer && writer->output_has_fine_assemble)
+                       << " order=" << (writer && writer->stmt_index < dynamic_reader->stmt_index);
+            }
             plan.fallback_parent_roots.insert(root);
           }
           continue;
@@ -4911,6 +5119,7 @@ class OutWindowExternalizer {
         carrier.parent_expr = writer->parent_expr;
         carrier.offsets = writer->offsets;
         carrier.shape = writer->shape;
+        plan.fallback_parent_roots.erase(root);
         plan.carriers_by_parent.emplace(root, std::move(carrier));
         if (WindowExternalizeLogEnabled()) {
           LOG_INFO << "[window-carrier] create static carrier root=" << root->name_hint_
@@ -5011,8 +5220,20 @@ class OutWindowExternalizer {
       for (const auto& output : analysis.outputs) {
         const Var* parent_root = ResolveOutputParentRoot(call, output.out_param_index);
         if (!parent_root) return true;
-        if (sibling_unwindowable_output_roots_.count(parent_root)) return true;
-        if (sequence_carrier_plan_.fallback_parent_roots.count(parent_root)) return true;
+        if (sibling_unwindowable_output_roots_.count(parent_root)) {
+          if (WindowExternalizeLogEnabled()) {
+            LOG_INFO << "[window-call] unwindowable sibling root=" << parent_root->name_hint_
+                     << " func=" << GetCallFuncName(call);
+          }
+          return true;
+        }
+        if (sequence_carrier_plan_.fallback_parent_roots.count(parent_root)) {
+          if (WindowExternalizeLogEnabled()) {
+            LOG_INFO << "[window-call] fallback carrier root=" << parent_root->name_hint_
+                     << " func=" << GetCallFuncName(call);
+          }
+          return true;
+        }
       }
       return false;
     }
