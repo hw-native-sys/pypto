@@ -36,19 +36,31 @@ passes.optimize_orch_tensors(
 )
 ```
 
-`output_window_policy` 控制已证明 output pieces 的表达方式：
+`output_window_policy` 控制已通过 rewrite policy gate 的 output pieces 如何表达：
 
 - `exact_pieces`：每个已证明的 dense piece 保持为独立 window。
 - `coalesce_pieces`：多个 output pieces 先合并成一个 bounding carrier window，再在 callsite 做 fine slice 和 assemble。
 
 `window_rewrite_policy` 控制哪些已证明候选能通过最后的策略门槛：
 
-- `auto`：默认保守模式。只保留 ABI-neutral 或 ABI-reducing 的候选，并拒绝 multi-piece output rewrite。
+- `auto`：默认保守模式。只保留 ABI-neutral 或 ABI-reducing 的简单 window 候选，并拒绝 multi-piece output rewrite 和 dynamic-indexed input window。
 - `all`：保留所有静态合法候选，适合 ablation 和调试。
 - `inputs_only` / `no_outputs`：只保留 input-window rewrite。
 - `outputs_only` / `no_inputs`：只保留 output-window rewrite。
 - `no_multi_piece_outputs`：拒绝仍需要多个 pieces 或 fine assemble pieces 的 output 候选。
 - `none` / `disabled`：关闭模式 5 window rewrite。
+
+这两组选项的语义应保持正交。`auto` 决定复杂候选是否值得默认改写；
+`all` 允许所有已证明正确的复杂 window。`exact_pieces` /
+`coalesce_pieces` 只决定已经允许的 multi-piece output 如何表达。
+
+例如，在 Qwen prefill 风格的 dynamic-indexed KV-cache writer/reader 链中，
+预期边界是：
+
+- `exact_pieces + auto`：只保留局部简单 window。在这个示例中，dynamic KV-cache writer 和 reader window 保持 full-tensor，不引入 carrier/remat。
+- `exact_pieces + all`：将已证明正确的 writer window 表达为 exact pieces，并将匹配的 dynamic reader 改写为 standalone input slice。由于 `exact_pieces` 当前不表达 multi-piece carrier，该模式不构造 carrier/remat。
+- `coalesce_pieces + auto`：通常接近 `exact_pieces + auto`；选择 coalesce 本身不会打开复杂 window。
+- `coalesce_pieces + all`：改写已证明正确的复杂 window，把 multi-piece output 合并为 bounding carrier，并使用该 carrier 打通 dynamic writer-to-reader 链。
 
 调试时，`PYPTO_WINDOW_EXTERNALIZE_INCLUDE` 和
 `PYPTO_WINDOW_EXTERNALIZE_EXCLUDE` 可以按 callee 或参数名过滤候选。
@@ -125,7 +137,7 @@ loop-carried iter-arg 不会被这样折叠。
 
 本 pass 有意保持保守的 window eligibility。它不会按 `topk` 等算子名字做特判；只有 callee 函数体能证明满足下面的访问模式时，才会 window 化。
 
-静态 eligibility 之后，默认 `auto` 策略还会再做一层保守 cost gate。它会拒绝增加 rewritten tensor 参数数量的候选，并默认拒绝 multi-piece output rewrite。这样默认流水线不会为了局部 window 精度而换来更大的 dispatch 签名或更多 callsite orchestration。需要手动研究这些候选时，可以使用 `window_rewrite_policy="all"`。
+静态 eligibility 之后，默认 `auto` 策略还会再做一层保守 cost gate。它会拒绝增加 rewritten tensor 参数数量的候选，拒绝 dynamic-indexed input window，并默认拒绝 multi-piece output rewrite。这样默认流水线不会为了局部 window 精度而换来更大的 dispatch 签名、更多 callsite orchestration，或收益依赖 workload 的复杂 dynamic-window scan。需要手动研究这些候选时，可以使用 `window_rewrite_policy="all"`。
 
 支持的改写形态：
 
@@ -162,6 +174,7 @@ loop-carried iter-arg 不会被这样折叠。
 - input-only 的 `Submit` callsite 保持 full-tensor；在 `manual_scope` 中，即使 callee body 只读局部窗口，full input 也可能有意表达更宽的依赖
 - 如果同一个 callee 同时满足 output-window 改写，已经证明成立的 pure input window 会被保留，并在同一个 callsite 一起物化
 - 对 `AggregateInputWindowLoop`，所有引用必须位于同一个静态 `ForStmt` 内，至少一个 offset 维度必须随该 loop 变化，并且聚合窗口必须等于输入 parent shape；权重子窗口这类 partial aggregate read 仍保持 full-tensor
+- dynamic-indexed reader window 需要可证明的 min/max scan。`auto` 会拒绝这类候选。`all + exact_pieces` 下，callsite 会物化 standalone dynamic input slice，并把 base/extent scalar 传给 windowed callee。`all + coalesce_pieces` 下，eligible 的 writer-reader 链可以改走 coalesced carrier/remat 路径。
 
 非目标与依赖模型：
 
