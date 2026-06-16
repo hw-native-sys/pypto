@@ -26,6 +26,7 @@ def create(
     dtype: DataType,
     layout: TensorLayout = TensorLayout.ND,
     manual_dep: bool = False,
+    init_value: int | float | None = None,
     span: Span | None = None,
 ) -> Call:
     """Create a new tensor with specified shape and dtype.
@@ -34,6 +35,14 @@ def create(
         shape: List of dimension sizes (int or Expr), or a MakeTuple
         dtype: Data type of tensor elements
         layout: Tensor layout (default: ND)
+        init_value: If given, the runtime pre-fills the freshly allocated
+            buffer with this scalar on the AICPU (via the runtime's
+            ``TensorCreateInfo::set_initial_value``) before any kernel writes
+            it. ``init_value=0`` zeroes the buffer and is valid for every
+            dtype. Non-zero values are supported for integer and 32/64-bit
+            float dtypes; non-zero fills of sub-32-bit float dtypes
+            (fp16/bf16) are rejected at codegen because the orchestration
+            translation unit has no ``half``/``bfloat16`` type to pack them.
         manual_dep: Opt this tensor out of OverlapMap auto-dep tracking
             for its **entire lifetime**. When True, codegen marks the
             ``tensor.create`` call so every task that reads or writes the
@@ -63,6 +72,10 @@ def create(
     kwargs: dict[str, Any] = {"dtype": dtype, "layout": layout}
     if manual_dep:
         kwargs["manual_dep"] = True
+    if init_value is not None:
+        # Store as float so the attr type is unambiguous (Python float -> C++
+        # double); codegen casts it back to the tensor dtype's C type.
+        kwargs["init_value"] = float(init_value)
 
     return _ir_core.create_op_call("tensor.create", args, kwargs, actual_span)
 

@@ -11,9 +11,12 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <iomanip>
+#include <limits>
 #include <sstream>
 #include <string>
 
@@ -98,6 +101,46 @@ REGISTER_ORCHESTRATION_OP(tensor_create, ("tensor.create")) {
     oss << ", /*manual_dep=*/true";
   }
   oss << ");";
+
+  // Optional AICPU pre-fill of the runtime-allocated buffer. `init_value` maps
+  // to the runtime's TensorCreateInfo::set_initial_value(), executed on the
+  // AICPU when it materializes the buffer (before any kernel writes it).
+  if (op->HasKwarg("init_value")) {
+    double init_value = op->GetKwarg<double>("init_value", 0.0);
+    const DataType& dtype = result_type->dtype_;
+    if (init_value == 0.0) {
+      // Zero packs to all-zero bits for every dtype/element size, so the default
+      // uint64_t overload is universally correct and needs no half/bf16 type.
+      oss << "\n" << result_var << "_ci.set_initial_value(0);";
+    } else {
+      // Non-zero: emit a typed value so set_initial_value<T> packs the correct
+      // element bytes. The orchestration TU only has stdint + float types, so
+      // fp16/bf16 non-zero fills (which need the `half`/`bfloat16` types) are
+      // not representable there.
+      CHECK(!(dtype.IsFloat() && dtype.GetBit() < 32))
+          << "tensor.create: non-zero init_value is not supported for "
+          << dtype.ToString()
+          << " (sub-32-bit float) runtime-allocated outputs; only init_value=0 "
+             "is supported for these dtypes. Use a 32-bit dtype or init_value=0.";
+      std::string ctype = dtype.ToCTypeString();
+      oss << "\n" << result_var << "_ci.set_initial_value(static_cast<" << ctype << ">(";
+      if (dtype.IsFloat()) {
+        // Full round-trippable precision so the static_cast<float/double> keeps
+        // the intended value (std::to_string truncates to 6 fractional digits).
+        std::ostringstream val;
+        val << std::setprecision(std::numeric_limits<double>::max_digits10) << init_value;
+        oss << val.str();
+      } else {
+        // Integer dtype: a fractional init_value would be silently truncated, so
+        // reject it instead of guessing the user's intent.
+        CHECK(init_value == std::floor(init_value))
+            << "tensor.create: init_value " << init_value << " is not an integer but the tensor "
+            << "dtype is " << dtype.ToString() << "; use a whole-number init_value for integer dtypes.";
+        oss << std::to_string(static_cast<int64_t>(init_value));
+      }
+      oss << "));";
+    }
+  }
   return oss.str();
 }
 

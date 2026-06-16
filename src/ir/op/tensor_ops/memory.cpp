@@ -436,6 +436,7 @@ REGISTER_OP("tensor.create")
     .set_attr<DataType>("dtype")
     .set_attr<TensorLayout>("layout")
     .set_attr<bool>("manual_dep")
+    .set_attr<double>("init_value")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorCreateType(args, kwargs);

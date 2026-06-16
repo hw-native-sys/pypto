@@ -120,6 +120,7 @@ def create(
     dtype: DataType,
     layout: TensorLayout = TensorLayout.ND,
     manual_dep: bool = False,
+    init_value: int | float | None = None,
 ) -> Tensor:
     """Create a new tensor with specified shape and dtype.
 
@@ -127,6 +128,13 @@ def create(
         shape: List of dimension sizes (int or Expr)
         dtype: Data type of tensor elements
         layout: Tensor layout (default: ND)
+        init_value: If given, the runtime pre-fills the freshly allocated
+            buffer with this scalar on the AICPU (before any kernel writes it).
+            ``init_value=0`` zeroes the buffer and works for every dtype.
+            Non-zero values work for integer and 32/64-bit float dtypes;
+            non-zero fills of fp16/bf16 are rejected at codegen. The fill only
+            applies to this runtime-allocated buffer and is cheaper than
+            ``pl.full`` (which materializes a constant tensor via a kernel).
         manual_dep: Opt this tensor out of OverlapMap auto-dep tracking for
             its **entire lifetime**. When True, every task that reads or
             writes this tensor skips OverlapMap lookup and insert, so the
@@ -155,7 +163,9 @@ def create(
     Returns:
         Tensor wrapping the create operation
     """
-    call_expr = _ir_ops.create(_normalize_intlike(shape), dtype, layout, manual_dep=manual_dep)
+    call_expr = _ir_ops.create(
+        _normalize_intlike(shape), dtype, layout, manual_dep=manual_dep, init_value=init_value
+    )
     return Tensor(expr=call_expr)
 
 

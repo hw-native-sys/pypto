@@ -1493,6 +1493,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
     code_ << "};\n";
 
+    // No set_initial_value() here: this CI is synthesised for a callee Out param
+    // that the caller never passed (a runtime-allocated output), so there is no
+    // user-facing `pl.create_tensor(..., init_value=...)` to honour. Buffer
+    // pre-fill is emitted only on the originating `tensor.create` op (see
+    // tensor_op_codegen.cpp), which keeps its own CI on the orchestration path.
     code_ << ind << "TensorCreateInfo " << ci_var << "(" << ci_var << "_shapes, " << ndim << ", "
           << GetRuntimeDataTypeString(tensor_ty->dtype_) << ");\n";
 

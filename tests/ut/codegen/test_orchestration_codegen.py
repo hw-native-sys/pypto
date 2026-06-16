@@ -240,6 +240,97 @@ class TestOrchestration:
         """
         assert_code_equal(code, expected)
 
+    @staticmethod
+    def _init_value_program(dtype, init_value):
+        """Build a minimal orch program whose runtime-allocated output `c` is
+        created with `init_value`, then consumed by a kernel."""
+
+        @pl.program
+        class InitValueProgram:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel_add(
+                self,
+                a: pl.Tensor[[16, 16], dtype],
+                b: pl.Tensor[[16, 16], dtype],
+                output: pl.Out[pl.Tensor[[16, 16], dtype]],
+            ) -> pl.Tensor[[16, 16], dtype]:
+                a_tile: pl.Tile[[16, 16], dtype] = pl.load(a, [0, 0], [16, 16])
+                b_tile: pl.Tile[[16, 16], dtype] = pl.load(b, [0, 0], [16, 16])
+                result: pl.Tile[[16, 16], dtype] = pl.add(a_tile, b_tile)
+                out: pl.Tensor[[16, 16], dtype] = pl.store(result, [0, 0], output)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                a: pl.Tensor[[16, 16], dtype],
+                b: pl.Tensor[[16, 16], dtype],
+                d: pl.Out[pl.Tensor[[16, 16], dtype]],
+            ) -> pl.Tensor[[16, 16], dtype]:
+                c: pl.Tensor[[16, 16], dtype] = pl.create_tensor(
+                    [16, 16], dtype=dtype, init_value=init_value
+                )
+                c = self.kernel_add(a, b, c)
+                d = self.kernel_add(c, b, d)
+                return d
+
+        return InitValueProgram
+
+    def test_create_tensor_init_value_zero(self):
+        """init_value=0 emits the dtype-agnostic uint64 set_initial_value(0) call
+        right after the TensorCreateInfo declaration."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        code = _generate_orch_code(self._init_value_program(pl.FP32, 0))
+        assert "TensorCreateInfo c_ci(c_ci_shapes, 2, DataType::FLOAT32);" in code
+        assert "c_ci.set_initial_value(0);" in code
+
+    def test_create_tensor_init_value_nonzero_float(self):
+        """Non-zero fp32 init_value emits a typed static_cast so the runtime
+        packs the correct element bytes."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        code = _generate_orch_code(self._init_value_program(pl.FP32, 2.5))
+        assert "c_ci.set_initial_value(static_cast<float>(2.5" in code
+
+    def test_create_tensor_init_value_nonzero_int(self):
+        """Non-zero integer init_value truncates the stored double back to the
+        integer C type."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        code = _generate_orch_code(self._init_value_program(pl.INT32, 7))
+        assert "c_ci.set_initial_value(static_cast<int32_t>(7));" in code
+
+    def test_create_tensor_init_value_fractional_int_rejected(self):
+        """A fractional init_value into an integer dtype would be silently
+        truncated, so codegen rejects it."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        with pytest.raises(ValueError, match="is not an integer but the tensor"):
+            _generate_orch_code(self._init_value_program(pl.INT32, 2.5))
+
+    def test_create_tensor_init_value_fp16_nonzero_rejected(self):
+        """Non-zero fp16 fills are not representable in the orchestration TU
+        (no half type), so codegen raises a clear user-facing error."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        with pytest.raises(ValueError, match="non-zero init_value is not supported"):
+            _generate_orch_code(self._init_value_program(pl.FP16, 1.0))
+
+    def test_create_tensor_init_value_fp16_zero_allowed(self):
+        """init_value=0 is valid for fp16 (zero packs to zero bytes for any
+        dtype)."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        code = _generate_orch_code(self._init_value_program(pl.FP16, 0))
+        assert "c_ci.set_initial_value(0);" in code
+
     def test_tensor_read(self):
         """Test tensor.read emits get_tensor_data<T>() so the runtime spin-waits
         on the producer task before reading (no raw host buffer deref)."""
