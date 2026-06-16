@@ -22,8 +22,8 @@ from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 def _run_to_optimize_orch_tensors(
     program,
     *,
-    output_window_policy: str = "exact_pieces",
-    window_rewrite_policy: str = "all",
+    output_window_policy: str = "coalesce_pieces",
+    window_rewrite_policy: str = "auto",
 ):
     pm = PassManager.get_strategy(OptimizationStrategy.Default)
     result = program
@@ -36,6 +36,14 @@ def _run_to_optimize_orch_tensors(
             return result
         result = pass_obj(result)
     raise AssertionError("Default pipeline did not run OptimizeOrchTensors")
+
+
+def _run_aggressive_exact_to_optimize_orch_tensors(program):
+    return _run_to_optimize_orch_tensors(
+        program,
+        output_window_policy="exact_pieces",
+        window_rewrite_policy="all",
+    )
 
 
 def _get_function(program, name: str):
@@ -1175,7 +1183,7 @@ class TestOutWindowExternalizer:
                     result_rv = pl.yield_(block)
                 return result_rv
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
         ir.assert_structural_equal(After, Expected)
 
     def test_final_store_keeps_already_detected_input_window(self):
@@ -1201,7 +1209,7 @@ class TestOutWindowExternalizer:
                 row: pl.Scalar[pl.INDEX] = 32
                 return self.mix_window(data, row, out)
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "mix_window__windowed" in printed_main
@@ -1232,7 +1240,7 @@ class TestOutWindowExternalizer:
                 row: pl.Scalar[pl.INDEX] = 32
                 return self.consume(score, row)
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
 
         assert After.get_function("consume__windowed") is None
         printed_main = ir.python_print(_get_function(After, "main"))
@@ -1260,7 +1268,7 @@ class TestOutWindowExternalizer:
                     _tid = pl.submit(self.fence, src, dummy)
                 return _tid
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
         assert After.get_function("fence__windowed") is None
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "pl.tensor.slice(src" not in printed_main
@@ -1321,7 +1329,7 @@ class TestOutWindowExternalizer:
                     score_out, topk_out = pl.yield_(score_rv, topk_next)
                 return score_out, topk_out
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "score_init__windowed" in printed_main
@@ -1600,7 +1608,7 @@ class TestOutWindowExternalizer:
                 result: pl.Tensor[[1, 64], pl.FP32] = self.cache_read(out, cache_next)
                 return cache_next, result
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "cache_write__windowed" in printed_main
@@ -1751,9 +1759,7 @@ class TestOutWindowExternalizer:
                 result: pl.Tensor[[4, 64], pl.FP32] = self.cache_read(out, cache, block_table)
                 return result
 
-        After = _run_to_optimize_orch_tensors(
-            Before, output_window_policy="exact_pieces", window_rewrite_policy="all"
-        )
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "cache_read__windowed" in printed_main
@@ -1912,7 +1918,7 @@ class TestOutWindowExternalizer:
                     out_rv = pl.yield_(write_next)
                 return out_rv
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
 
         assert After.get_function("init_row__windowed") is None
         assert After.get_function("write_prefix__windowed") is None
@@ -1954,7 +1960,7 @@ class TestOutWindowExternalizer:
                 result: pl.Tensor[[4, 16], pl.INT32] = self.full_overwrite(out_rv)
                 return result
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
 
         assert After.get_function("init_row__windowed") is None
         assert After.get_function("full_overwrite__windowed") is None
@@ -1989,7 +1995,7 @@ class TestOutWindowExternalizer:
                     out_rv = pl.yield_(write_next)
                 return out_rv
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
 
         assert After.get_function("init_row__windowed") is None
         printed_main = ir.python_print(_get_function(After, "main"))
@@ -2033,7 +2039,7 @@ class TestOutWindowExternalizer:
                     out_rv = pl.yield_(residual_next)
                 return out_rv
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
 
         printed_main = ir.python_print(_get_function(After, "main"))
         printed_residual = ir.python_print(_get_function(After, "add_residual__windowed"))
@@ -2069,7 +2075,7 @@ class TestOutWindowExternalizer:
                 result: pl.Tensor[[2, 16], pl.FP32] = self.chunk_writer(out, start)
                 return result
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "chunk_writer__windowed" in printed_main
@@ -2108,7 +2114,7 @@ class TestOutWindowExternalizer:
                 row: pl.Scalar[pl.INDEX] = 0
                 return self.qk_norm_like(q_out, k_out, q_proj, k_proj, row)
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
 
         assert After.get_function("qk_norm_like__windowed") is not None
         printed_main = ir.python_print(_get_function(After, "main"))
@@ -2165,7 +2171,7 @@ class TestOutWindowExternalizer:
                 row: pl.Scalar[pl.INDEX] = 0
                 return self.qk_norm_like(q_out, k_out, q_rv, k_rv, row)
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "qk_norm_like__windowed" in printed_main
@@ -2204,7 +2210,7 @@ class TestOutWindowExternalizer:
                 row: pl.Scalar[pl.INDEX] = 3
                 return self.rope_like(q_out, q_proj, row)
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
 
         assert After.get_function("rope_like__windowed") is not None
         printed_main = ir.python_print(_get_function(After, "main"))
@@ -2244,7 +2250,7 @@ class TestOutWindowExternalizer:
             ) -> pl.Tensor[[4, 4], pl.FP32]:
                 return self.diagonal_like(out)
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
 
         assert After.get_function("diagonal_like__windowed") is None
         printed_main = ir.python_print(_get_function(After, "main"))
@@ -2273,7 +2279,7 @@ class TestOutWindowExternalizer:
             ) -> pl.Tensor[[2, 2], pl.FP32]:
                 return self.overlap_hole_like(out)
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
 
         assert After.get_function("overlap_hole_like__windowed") is None
         printed_main = ir.python_print(_get_function(After, "main"))
@@ -2334,7 +2340,7 @@ class TestOutWindowExternalizer:
             ]:
                 return self.rope_like(all_q, k_cache, v_cache, q_proj, 0, 0, 0)
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "rope_like__windowed" in printed_main
@@ -2372,7 +2378,7 @@ class TestOutWindowExternalizer:
                     out_rv = pl.yield_(out_next)
                 return out_rv
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "write_chunk__windowed" in printed_main
@@ -2413,7 +2419,7 @@ class TestOutWindowExternalizer:
                     out_outer_rv = pl.yield_(out_inner_rv)
                 return out_outer_rv
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "write_chunk__windowed" in printed_main
@@ -2454,7 +2460,7 @@ class TestOutWindowExternalizer:
                     out_outer_rv = pl.yield_(out_inner_rv)
                 return out_outer_rv
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "matmul_split__windowed" in printed_main
@@ -2487,7 +2493,7 @@ class TestOutWindowExternalizer:
                     out_rv = pl.yield_(out_next)
                 return out_rv
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "write_overlap__windowed" not in printed_main
@@ -2522,7 +2528,7 @@ class TestOutWindowExternalizer:
             ) -> pl.Tensor[[16, 64], pl.FP32]:
                 return self.matmul_like(lhs, weight, 128, out)
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "matmul_like__windowed" in printed_main
@@ -2563,7 +2569,7 @@ class TestOutWindowExternalizer:
             ) -> pl.Tensor[[16, 64], pl.FP32]:
                 return self.matmul_like(lhs, weight, 128, out)
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
 
         printed_main = ir.python_print(_get_function(After, "main"))
         printed_windowed = ir.python_print(_get_function(After, "matmul_like__windowed"))
@@ -2672,7 +2678,7 @@ class TestOutWindowExternalizer:
                 result: pl.Tensor[[16, 256], pl.FP32] = pl.tensor.assemble(out, result__windowed, [0, 0])
                 return result
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
         printed_main = ir.python_print(_get_function(After, "main"))
         printed_windowed = ir.python_print(_get_function(After, "aggregate_with_header__windowed"))
         assert "aggregate_with_header__windowed" in printed_main
@@ -2759,7 +2765,7 @@ class TestOutWindowExternalizer:
                 out_next = pl.tensor.assemble(out, out_next__windowed, [64, 0])
                 return out_next
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
         ir.assert_structural_equal(After, Expected)
 
     def test_output_window_uses_visible_loop_init_parent(self):
@@ -2834,7 +2840,7 @@ class TestOutWindowExternalizer:
                 result = pl.tensor.assemble(out, result__windowed, [64, 0])
                 return result
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
         ir.assert_structural_equal(After, Expected)
 
     def test_sibling_writers_to_same_parent_can_window_with_runtime_overlap(self):
@@ -2861,7 +2867,7 @@ class TestOutWindowExternalizer:
                 second: pl.Tensor[[256, 64], pl.FP32] = self.kernel_stripe(data, 32, first)
                 return second
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
 
         assert After.get_function("kernel_stripe__windowed") is not None
         printed_main = ir.python_print(_get_function(After, "main"))
@@ -2895,7 +2901,7 @@ class TestOutWindowExternalizer:
                     second_rv = pl.yield_(second)
                 return second_rv
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
 
         assert After.get_function("kernel_stripe__windowed") is not None
         printed_main = ir.python_print(_get_function(After, "main"))
@@ -2930,7 +2936,7 @@ class TestOutWindowExternalizer:
                     second: pl.Tensor[[256, 64], pl.FP32] = self.kernel_stripe(data, 64, first)
                 return second
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
 
         assert After.get_function("kernel_stripe__windowed") is not None
         printed_main = ir.python_print(_get_function(After, "main"))
@@ -2963,7 +2969,7 @@ class TestOutWindowExternalizer:
                     result_rv = pl.yield_(result)
                 return result_rv
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
 
         assert After.get_function("kernel_stripe__windowed") is not None
         printed_main = ir.python_print(_get_function(After, "main"))
@@ -3011,7 +3017,7 @@ class TestOutWindowExternalizer:
                 second: pl.Tensor[[256, 64], pl.FP32] = self.kernel_stripe(data, 32, first)
                 return second
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
 
         assert After.get_function("multi_stripe__windowed") is not None
         assert After.get_function("kernel_stripe__windowed") is not None
@@ -3110,7 +3116,7 @@ class TestOutWindowExternalizer:
                     out_phase_next = pl.yield_(out_branch_next)
                 return out_phase_next
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
         ir.assert_structural_equal(After, Expected)
 
     def test_multi_out_final_store_rewrites_both_outputs(self):
@@ -3216,7 +3222,7 @@ class TestOutWindowExternalizer:
                 ]
                 return result
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
         ir.assert_structural_equal(After, Expected)
 
     def test_multi_out_same_callsite_parent_stays_baseline(self):
@@ -3248,7 +3254,7 @@ class TestOutWindowExternalizer:
                 )
                 return result
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "kv_stripe__windowed" not in printed_main
@@ -3292,7 +3298,7 @@ class TestOutWindowExternalizer:
                 k_next: pl.Tensor[[256, 64], pl.FP32] = result[1]
                 return self.consume_full(k_next)
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
 
         assert After.get_function("kv_stripe__windowed") is not None
         printed_main = ir.python_print(_get_function(After, "main"))
@@ -3334,7 +3340,7 @@ class TestOutWindowExternalizer:
                 out_next: pl.Tensor[[256, 64], pl.FP32] = self.kernel_stripe(data, row, out)
                 return self.consume_full(out_next)
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
 
         assert After.get_function("kernel_stripe__windowed") is not None
         printed_main = ir.python_print(_get_function(After, "main"))
@@ -3376,7 +3382,7 @@ class TestOutWindowExternalizer:
                 out_next: pl.Tensor[[128, 64], pl.FP32] = self.kernel_rows(out, row_base, data)
                 return self.consume_full(out_next)
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
 
         assert After.get_function("kernel_rows__windowed") is not None
         printed_main = ir.python_print(_get_function(After, "main"))
@@ -3414,7 +3420,7 @@ class TestOutWindowExternalizer:
                 )
                 return result
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
 
         assert After.get_function("kv_stripe__windowed") is not None
         printed_main = ir.python_print(_get_function(After, "main"))
@@ -3587,7 +3593,7 @@ class TestOutWindowExternalizer:
                 )
                 return result
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
         ir.assert_structural_equal(After, Expected)
 
     def test_post_outline_kv_dynamic_start_aggregate_shape_rewrites(self):
@@ -3754,7 +3760,7 @@ class TestOutWindowExternalizer:
                     k_proj_rv, v_proj_rv = pl.yield_(k_proj_next, v_proj_next)
                 return k_proj_rv, v_proj_rv
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "kv_proj__windowed" in printed_main
         assert "pl.tensor.slice(k_proj_iter" in printed_main
@@ -3797,11 +3803,13 @@ class TestOutWindowExternalizer:
                 result: pl.Tensor[[1024, 128], pl.FP32] = self.cache_write(cache, data, slot)
                 return result
 
-        Exact = _run_to_optimize_orch_tensors(Before)
+        Exact = _run_aggressive_exact_to_optimize_orch_tensors(Before)
         printed_exact_main = ir.python_print(_get_function(Exact, "main"))
         assert "cache__ssa_v0__window_3" in printed_exact_main
 
-        Coalesced = _run_to_optimize_orch_tensors(Before, output_window_policy="coalesce_pieces")
+        Coalesced = _run_to_optimize_orch_tensors(
+            Before, output_window_policy="coalesce_pieces", window_rewrite_policy="all"
+        )
         printed_main = ir.python_print(_get_function(Coalesced, "main"))
         assert "cache_write__windowed" in printed_main
         assert "cache__ssa_v0__window_1" not in printed_main
@@ -3982,7 +3990,7 @@ class TestOutWindowExternalizer:
                     final_k_rv, final_v_rv = pl.yield_(final_k_next, final_v_next)
                 return final_k_rv, final_v_rv
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
 
         assert After.get_function("kv_proj__windowed") is not None
         printed_main = ir.python_print(_get_function(After, "main"))
@@ -4137,7 +4145,7 @@ class TestOutWindowExternalizer:
                 ]
                 return result
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "kv_proj__windowed" in printed_main
         assert "pl.tensor.slice(k_proj" in printed_main
@@ -4251,7 +4259,7 @@ class TestOutWindowExternalizer:
                     k_rv = pl.yield_(k_next)
                 return k_rv
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "k_proj__windowed" in printed_main
         assert "pl.tensor.slice(k_iter" in printed_main
@@ -4337,7 +4345,7 @@ class TestOutWindowExternalizer:
                     k_rv = pl.yield_(k_next)
                 return k_rv
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
         ir.assert_structural_equal(After, Expected)
 
     def test_overlapping_sequential_windows_stay_baseline(self):
@@ -4531,7 +4539,7 @@ class TestOutWindowExternalizer:
                 result = self.kernel_full(data, out)
                 return result
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
         ir.assert_structural_equal(After, Expected)
 
 
@@ -4786,7 +4794,7 @@ class TestOutWindowSubmitCall:
                         out_outer_rv = pl.yield_(out_inner_rv)
                 return out_outer_rv
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "matmul_split__windowed" in printed_main
@@ -4820,7 +4828,7 @@ class TestOutWindowSubmitCall:
                 result: pl.Tensor[[16, 64], pl.FP32] = self.overflow_store(out, data)
                 return result
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
 
         assert After.get_function("overflow_store__windowed") is None
         printed_main = ir.python_print(_get_function(After, "main"))
@@ -4849,7 +4857,7 @@ class TestOutWindowSubmitCall:
                 result: pl.Tensor[[128, 64], pl.FP32] = self.update(acc, data)
                 return result
 
-        After = _run_to_optimize_orch_tensors(Before)
+        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
 
         assert After.get_function("update__windowed") is None
         printed_main = ir.python_print(_get_function(After, "main"))
