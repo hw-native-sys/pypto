@@ -231,4 +231,4 @@ scratch tile to materialize numeric results on A2/A3.
 | `const` | `(value: int \| float, dtype: DataType) -> int \| float` | Typed constant |
 | `incore` | `() -> IncoreContext` | Context manager for InCore scope |
 | `dynamic` | `(name: str) -> DynVar` | Create dynamic dimension variable |
-| `create_tensor` | `(shape: Sequence[IntLike], dtype: DataType, layout: TensorLayout = None, init_value: int \| float \| None = None) -> Tensor` | Create tensor (promoted from `pl.tensor`; `init_value` AICPU-pre-fills the buffer, `0` zeroes any dtype) |
+| `create_tensor` | `(shape: Sequence[IntLike], dtype: DataType, layout: TensorLayout = None, init_value: int \| float \| None = None) -> Tensor` | Create tensor (promoted from `pl.tensor`; `init_value` AICPU-pre-fills the buffer — `0` zeroes any dtype, non-zero needs an int / 32-bit-or-wider float dtype) |

@@ -108,6 +108,9 @@ REGISTER_ORCHESTRATION_OP(tensor_create, ("tensor.create")) {
   if (op->HasKwarg("init_value")) {
     double init_value = op->GetKwarg<double>("init_value", 0.0);
     const DataType& dtype = result_type->dtype_;
+    // Reject NaN/Inf: they would serialize as "nan"/"inf" (invalid C++) on the
+    // float path and are UB to cast to an integer on the int path.
+    CHECK(std::isfinite(init_value)) << "tensor.create: init_value must be finite, got " << init_value << ".";
     if (init_value == 0.0) {
       // Zero packs to all-zero bits for every dtype/element size, so the default
       // uint64_t overload is universally correct and needs no half/bf16 type.
@@ -118,8 +121,7 @@ REGISTER_ORCHESTRATION_OP(tensor_create, ("tensor.create")) {
       // fp16/bf16 non-zero fills (which need the `half`/`bfloat16` types) are
       // not representable there.
       CHECK(!(dtype.IsFloat() && dtype.GetBit() < 32))
-          << "tensor.create: non-zero init_value is not supported for "
-          << dtype.ToString()
+          << "tensor.create: non-zero init_value is not supported for " << dtype.ToString()
           << " (sub-32-bit float) runtime-allocated outputs; only init_value=0 "
              "is supported for these dtypes. Use a 32-bit dtype or init_value=0.";
       std::string ctype = dtype.ToCTypeString();
@@ -136,6 +138,16 @@ REGISTER_ORCHESTRATION_OP(tensor_create, ("tensor.create")) {
         CHECK(init_value == std::floor(init_value))
             << "tensor.create: init_value " << init_value << " is not an integer but the tensor "
             << "dtype is " << dtype.ToString() << "; use a whole-number init_value for integer dtypes.";
+        // `init_value` is a double, so only integers in [-2^53, 2^53] are exactly
+        // representable. Beyond that the value is already imprecise and the
+        // `static_cast<int64_t>` below risks undefined behaviour for huge
+        // magnitudes — reject instead of emitting a silently-wrong fill. (Full
+        // uint64/int64-range fills are out of scope; init_value=0 always works.)
+        constexpr double kMaxExactInt = 9007199254740992.0;  // 2^53
+        CHECK(init_value >= -kMaxExactInt && init_value <= kMaxExactInt)
+            << "tensor.create: init_value " << init_value << " exceeds the exactly-representable "
+            << "integer range (+/-2^53); large-magnitude integer fills are not supported. "
+            << "Use init_value=0 or a smaller value.";
         oss << std::to_string(static_cast<int64_t>(init_value));
       }
       oss << "));";

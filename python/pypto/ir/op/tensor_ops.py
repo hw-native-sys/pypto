@@ -9,6 +9,7 @@
 
 """Tensor operations for PyPTO IR."""
 
+import math
 from collections.abc import Sequence
 from typing import Any
 
@@ -74,7 +75,21 @@ def create(
         kwargs["manual_dep"] = True
     if init_value is not None:
         # Store as float so the attr type is unambiguous (Python float -> C++
-        # double); codegen casts it back to the tensor dtype's C type.
+        # double); codegen casts it back to the tensor dtype's C type. Because
+        # double only represents integers exactly up to 2**53, reject larger
+        # integer inputs instead of silently corrupting the fill value.
+        # NOTE: this module defines a ``abs`` tensor op that shadows the builtin,
+        # so use an explicit range comparison rather than ``abs(...)``.
+        if isinstance(init_value, int) and not (-(2**53) <= init_value <= 2**53):
+            raise ValueError(
+                f"create_tensor: integer init_value {init_value} exceeds the exactly-representable "
+                f"range (+/-2**53); large-magnitude integer fills are not supported. "
+                f"Use init_value=0 or a smaller value."
+            )
+        # Reject NaN/Inf here so they never reach the printer (which cannot
+        # round-trip them) or codegen (where they would emit invalid C++).
+        if not math.isfinite(init_value):
+            raise ValueError(f"create_tensor: init_value must be finite, got {init_value}.")
         kwargs["init_value"] = float(init_value)
 
     return _ir_core.create_op_call("tensor.create", args, kwargs, actual_span)

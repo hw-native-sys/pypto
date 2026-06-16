@@ -267,9 +267,7 @@ class TestOrchestration:
                 b: pl.Tensor[[16, 16], dtype],
                 d: pl.Out[pl.Tensor[[16, 16], dtype]],
             ) -> pl.Tensor[[16, 16], dtype]:
-                c: pl.Tensor[[16, 16], dtype] = pl.create_tensor(
-                    [16, 16], dtype=dtype, init_value=init_value
-                )
+                c: pl.Tensor[[16, 16], dtype] = pl.create_tensor([16, 16], dtype=dtype, init_value=init_value)
                 c = self.kernel_add(a, b, c)
                 d = self.kernel_add(c, b, d)
                 return d
@@ -312,6 +310,19 @@ class TestOrchestration:
 
         with pytest.raises(ValueError, match="is not an integer but the tensor"):
             _generate_orch_code(self._init_value_program(pl.INT32, 2.5))
+
+    def test_create_tensor_init_value_large_int_rejected(self):
+        """An integer init_value beyond 2**53 loses precision through the double
+        attr, so it is rejected at the IR boundary."""
+        with pytest.raises(ValueError, match="exactly-representable"):
+            pl.create_tensor([16, 16], dtype=pl.INT64, init_value=2**53 + 1)
+
+    def test_create_tensor_init_value_nonfinite_rejected(self):
+        """NaN / Inf init_value would emit invalid C++ ("nan"/"inf") or be UB to
+        cast to an integer, so they are rejected at the IR boundary."""
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with pytest.raises(ValueError, match="must be finite"):
+                pl.create_tensor([16, 16], dtype=pl.FP32, init_value=bad)
 
     def test_create_tensor_init_value_fp16_nonzero_rejected(self):
         """Non-zero fp16 fills are not representable in the orchestration TU
