@@ -1044,11 +1044,11 @@ class TestOutWindowExternalizer:
         assert "pl.Tensor[[32, 64], pl.FP32, pl.TensorView(stride=[128, 1]" in printed_windowed
         assert "pl.tile.load(score__ssa_v0, [0, 0]" in printed_windowed
 
-        OutputsOnly = _run_to_optimize_orch_tensors(Before, window_rewrite_policy="outputs_only")
-        assert OutputsOnly.get_function("consume__windowed") is None
+        outputs_only = _run_to_optimize_orch_tensors(Before, window_rewrite_policy="outputs_only")
+        assert outputs_only.get_function("consume__windowed") is None
 
-        NonePolicy = _run_to_optimize_orch_tensors(Before, window_rewrite_policy="none")
-        assert NonePolicy.get_function("consume__windowed") is None
+        none_policy = _run_to_optimize_orch_tensors(Before, window_rewrite_policy="none")
+        assert none_policy.get_function("consume__windowed") is None
 
     def test_topk_name_does_not_block_eligible_input_window(self):
         @pl.program
