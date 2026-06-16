@@ -205,6 +205,22 @@ class TestRunConfigRingSizing:
         cfg = RunConfig(platform="a2a3sim", ring_dep_pool=100)
         assert cfg.ring_dep_pool == 100
 
+    @pytest.mark.parametrize(
+        ("field", "bad"),
+        [
+            ("ring_task_window", 16.0),  # float, even when value would be valid as int
+            ("ring_heap", 1024.0),
+            ("ring_dep_pool", 64.5),
+            ("ring_task_window", True),  # bool must not masquerade as a size
+            ("ring_dep_pool", False),
+        ],
+    )
+    def test_non_int_ring_values_rejected(self, field, bad):
+        # Reject floats / bools with a clear ValueError instead of letting the
+        # pow2 bitwise check raise TypeError or a float slip through.
+        with pytest.raises(ValueError, match=f"{field} must"):
+            RunConfig(platform="a2a3sim", **{field: bad})
+
 
 class _SpyRuntimeEnv:
     """Records writes to ``ring_*`` fields; defaults mirror the runtime (0)."""

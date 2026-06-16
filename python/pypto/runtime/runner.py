@@ -258,23 +258,29 @@ class RunConfig:
         allowed (the runtime falls back to env var / compile-time default).
         """
 
+        def _is_int(v: object) -> bool:
+            # bool is an int subtype; reject it so True/False can't masquerade
+            # as a ring size. Guards the pow2 bitwise ops below from TypeError
+            # on floats and keeps the failure a clear ValueError.
+            return isinstance(v, int) and not isinstance(v, bool)
+
         def _is_pow2(v: int) -> bool:
             return v > 0 and (v & (v - 1)) == 0
 
         if self.ring_task_window is not None and not (
-            _is_pow2(self.ring_task_window) and self.ring_task_window >= 4
+            _is_int(self.ring_task_window) and _is_pow2(self.ring_task_window) and self.ring_task_window >= 4
+        ):
+            raise ValueError(f"ring_task_window must be a power of 2 >= 4, got {self.ring_task_window!r}")
+        if self.ring_heap is not None and not (
+            _is_int(self.ring_heap) and _is_pow2(self.ring_heap) and self.ring_heap >= 1024
         ):
             raise ValueError(
-                f"ring_task_window must be a power of 2 >= 4, got {self.ring_task_window}"
+                f"ring_heap must be a power of 2 >= 1024 (bytes per ring), got {self.ring_heap!r}"
             )
-        if self.ring_heap is not None and not (_is_pow2(self.ring_heap) and self.ring_heap >= 1024):
-            raise ValueError(
-                f"ring_heap must be a power of 2 >= 1024 (bytes per ring), got {self.ring_heap}"
-            )
-        if self.ring_dep_pool is not None and not (4 <= self.ring_dep_pool <= 2**31 - 1):
-            raise ValueError(
-                f"ring_dep_pool must be in [4, INT32_MAX], got {self.ring_dep_pool}"
-            )
+        if self.ring_dep_pool is not None and not (
+            _is_int(self.ring_dep_pool) and 4 <= self.ring_dep_pool <= 2**31 - 1
+        ):
+            raise ValueError(f"ring_dep_pool must be in [4, INT32_MAX], got {self.ring_dep_pool!r}")
 
     def any_dfx_enabled(self) -> bool:
         """Return ``True`` when at least one DFX flag is enabled.
