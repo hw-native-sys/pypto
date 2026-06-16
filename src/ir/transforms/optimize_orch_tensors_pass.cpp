@@ -6277,6 +6277,11 @@ class OutWindowExternalizer {
     std::vector<InputRewriteInfo> inputs;
     if (!func || func->return_types_.empty()) return inputs;
 
+    struct LoopParamUseIndex {
+      std::vector<ForStmtPtr> loops;
+      std::unordered_map<const ForStmt*, std::unordered_set<const Var*>> params_by_loop;
+    };
+
     std::vector<ForStmtPtr> loops;
     std::function<void(const StmtPtr&)> collect_loops = [&](const StmtPtr& stmt) {
       if (!stmt) return;
@@ -6295,12 +6300,59 @@ class OutWindowExternalizer {
     };
     collect_loops(func->body_);
 
+    std::unordered_set<const Var*> tensor_in_params;
     for (size_t param_index = 0; param_index < func->params_.size(); ++param_index) {
       if (param_index >= func->param_directions_.size()) continue;
       if (func->param_directions_[param_index] != ParamDirection::In) continue;
       if (!As<TensorType>(func->params_[param_index]->GetType())) continue;
-      for (const auto& loop : loops) {
-        if (CountVarRefsInStmt(loop, func->params_[param_index].get()) == 0) continue;
+      tensor_in_params.insert(func->params_[param_index].get());
+    }
+
+    LoopParamUseIndex loop_uses;
+    loop_uses.loops = loops;
+    class LoopParamUseCollector : public IRVisitor {
+     public:
+      LoopParamUseCollector(const std::unordered_set<const Var*>& tensor_in_params,
+                            LoopParamUseIndex* loop_uses)
+          : tensor_in_params_(tensor_in_params), loop_uses_(loop_uses) {}
+
+     protected:
+      void VisitStmt_(const ForStmtPtr& op) override {
+        loop_stack_.push_back(op.get());
+        IRVisitor::VisitStmt_(op);
+        loop_stack_.pop_back();
+      }
+
+      void VisitExpr_(const VarPtr& op) override {
+        Record(op.get());
+        IRVisitor::VisitExpr_(op);
+      }
+
+      void VisitExpr_(const IterArgPtr& op) override {
+        Record(op.get());
+        IRVisitor::VisitExpr_(op);
+      }
+
+     private:
+      const std::unordered_set<const Var*>& tensor_in_params_;
+      LoopParamUseIndex* loop_uses_;
+      std::vector<const ForStmt*> loop_stack_;
+
+      void Record(const Var* var) {
+        if (!var || loop_stack_.empty() || !tensor_in_params_.count(var)) return;
+        for (const auto* loop : loop_stack_) {
+          loop_uses_->params_by_loop[loop].insert(var);
+        }
+      }
+    };
+    LoopParamUseCollector(tensor_in_params, &loop_uses).VisitStmt(func->body_);
+
+    for (size_t param_index = 0; param_index < func->params_.size(); ++param_index) {
+      const Var* param = func->params_[param_index].get();
+      if (!tensor_in_params.count(param)) continue;
+      for (const auto& loop : loop_uses.loops) {
+        auto use_it = loop_uses.params_by_loop.find(loop.get());
+        if (use_it == loop_uses.params_by_loop.end() || !use_it->second.count(param)) continue;
         auto info = AnalyzeDynamicIndexedInputWindowInLoop(func, param_index, loop);
         if (info.has_value()) {
           inputs.push_back(std::move(*info));
@@ -7304,8 +7356,8 @@ class OutWindowExternalizer {
             output_window_is_proven = false;
             break;
           }
-          int64_t expected_dense_span = *first_iter_span_value * *trip_count;
-          if (*span_value != expected_dense_span) {
+          auto expected_dense_span = CheckedMul(*first_iter_span_value, *trip_count);
+          if (!expected_dense_span.has_value() || *span_value != *expected_dense_span) {
             output_window_is_proven = false;
             break;
           }
