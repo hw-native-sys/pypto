@@ -1046,6 +1046,14 @@ static bool IsStorageTrivialTileView(const TileView& v) {
  * which only supports 2D tiles; for N-D tiles we keep the strict check.
  */
 bool AreTileTypesCompatible(const VarPtr& var1, const VarPtr& var2) {
+  // EXPERIMENT (do not merge): disable the shape/dtype/TileView reuse-compatibility
+  // gate to measure, via CI, exactly which cases depend on it. Rationale: PTO codegen
+  // now emits a per-variable `pto.alloc_tile` with each var's own address + type
+  // (EmitAllocTileForVar), so the original "one alloc_tile per buffer" constraint that
+  // motivated this gate (#331) may be over-conservative; the L0 cross-shape exception
+  // (#1601) already relies on that per-var model. Returning true here lets reuse ignore
+  // shape/dtype/view differences so the resulting failures map the gate's true coverage.
+  return true;
   auto t1 = As<TileType>(var1->GetType());
   auto t2 = As<TileType>(var2->GetType());
   if (!t1 || !t2) return true;
