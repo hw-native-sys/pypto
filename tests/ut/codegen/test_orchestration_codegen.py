@@ -6893,8 +6893,8 @@ def test_compiler_derived_deps_for_fixed_trip_loop_fan_in_capture_task_ids():
     )
 
 
-def test_compiler_derived_deps_for_dynamic_trip_loop_fan_in_capture_task_ids():
-    """Dynamic-trip loop producers should collect each valid iteration TaskId."""
+def test_compiler_derived_deps_for_dynamic_trip_loop_fan_in_falls_back():
+    """Dynamic-trip loop fan-in should fall back instead of allocating vectors."""
 
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.Ascend910B)
@@ -6932,28 +6932,13 @@ def test_compiler_derived_deps_for_dynamic_trip_loop_fan_in_capture_task_ids():
 
     code = _generate_orch_full_pipeline(P, analyze_auto_scopes_for_deps=True)
 
-    fan_in = re.search(r"std::vector<PTO2TaskId>\s+(last_tid\w*);", code)
-    assert fan_in, code
-    fan_in_name = fan_in.group(1)
-    assert re.search(
-        rf"if \(last_tid__ssa_v0\.is_valid\(\)\) {fan_in_name}\.push_back\(last_tid__ssa_v0\);", code
-    ), code
-    assert re.search(r"std::vector<PTO2TaskId> params_t\d+_deps;", code), code
-    assert re.search(
-        rf"params_t\d+_deps\.insert\(params_t\d+_deps\.end\(\), {fan_in_name}\.begin\(\), "
-        rf"{fan_in_name}\.end\(\)\);",
-        code,
-    ), code
-    assert re.search(
-        r"if \(!params_t\d+_deps\.empty\(\)\) "
-        r"params_t\d+\.set_dependencies\(params_t\d+_deps\.data\(\), "
-        r"static_cast<uint32_t>\(params_t\d+_deps\.size\(\)\)\);",
-        code,
-    ), code
+    assert "std::vector<PTO2TaskId>" not in code
+    assert "#include <vector>" not in code
+    assert ".set_dependencies(" not in code
 
 
-def test_compiler_derived_deps_for_dynamic_trip_tensor_carrier_capture_task_ids():
-    """Dynamic-trip tensor carriers should collect producer TaskIds for later consumers."""
+def test_compiler_derived_deps_for_dynamic_trip_tensor_carrier_falls_back():
+    """Dynamic-trip tensor carriers should fall back instead of allocating vectors."""
 
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.Ascend910B)
@@ -6990,29 +6975,13 @@ def test_compiler_derived_deps_for_dynamic_trip_tensor_carrier_capture_task_ids(
 
     code = _generate_orch_full_pipeline(P, analyze_auto_scopes_for_deps=True)
 
-    fan_in = re.search(r"std::vector<PTO2TaskId>\s+(carried\w*);", code)
-    assert fan_in, code
-    fan_in_name = fan_in.group(1)
-    producer_tid = re.search(r"PTO2TaskId\s+(\w+_tid)\s*=\s*task_0_outs\.task_id\(\);", code)
-    assert producer_tid, code
-    assert (
-        f"if ({producer_tid.group(1)}.is_valid()) {fan_in_name}.push_back({producer_tid.group(1)});" in code
-    ), code
-    assert re.search(
-        rf"params_t\d+_deps\.insert\(params_t\d+_deps\.end\(\), {fan_in_name}\.begin\(\), "
-        rf"{fan_in_name}\.end\(\)\);",
-        code,
-    ), code
-    assert re.search(
-        r"if \(!params_t\d+_deps\.empty\(\)\) "
-        r"params_t\d+\.set_dependencies\(params_t\d+_deps\.data\(\), "
-        r"static_cast<uint32_t>\(params_t\d+_deps\.size\(\)\)\);",
-        code,
-    ), code
+    assert "std::vector<PTO2TaskId>" not in code
+    assert "#include <vector>" not in code
+    assert ".set_dependencies(" not in code
 
 
-def test_compiler_derived_deps_for_dynamic_trip_tuple_output_tensor_carrier_capture_task_ids():
-    """Tuple-output producers inside dynamic loops should bind yielded tensors to the producer TaskId."""
+def test_compiler_derived_deps_for_dynamic_trip_tuple_output_tensor_carrier_falls_back():
+    """Dynamic-trip tuple-output tensor carriers should fall back instead of allocating vectors."""
 
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.Ascend910B)
@@ -7050,19 +7019,9 @@ def test_compiler_derived_deps_for_dynamic_trip_tuple_output_tensor_carrier_capt
 
     code = _generate_orch_full_pipeline(P, analyze_auto_scopes_for_deps=True)
 
-    fan_in = re.search(r"std::vector<PTO2TaskId>\s+(right\w*);", code)
-    assert fan_in, code
-    fan_in_name = fan_in.group(1)
-    producer_tid = re.search(r"PTO2TaskId\s+(\w+_tid)\s*=\s*task_0_outs\.task_id\(\);", code)
-    assert producer_tid, code
-    assert (
-        f"if ({producer_tid.group(1)}.is_valid()) {fan_in_name}.push_back({producer_tid.group(1)});" in code
-    ), code
-    assert re.search(
-        rf"params_t\d+_deps\.insert\(params_t\d+_deps\.end\(\), {fan_in_name}\.begin\(\), "
-        rf"{fan_in_name}\.end\(\)\);",
-        code,
-    ), code
+    assert "std::vector<PTO2TaskId>" not in code
+    assert "#include <vector>" not in code
+    assert ".set_dependencies(" not in code
 
 
 def test_compiler_derived_deps_keep_outer_tuple_producer_task_id_stable_in_dynamic_parallel_loop():

@@ -463,7 +463,7 @@ Every kernel task launch inside a manual scope is a `Submit`; the
 `manual_dep_edges` — a `vector<VarPtr>` of `Scalar[TASK_ID]` variables.
 Compiler-derived edges arrive as `attrs["compiler_manual_dep_edges"]` on
 plain calls. Each entry resolves at codegen time through
-`manual_task_id_map_` to one of three forms:
+`manual_task_id_map_` to one of the following forms:
 
 | Producer kind | C++ source emitted by codegen |
 | ------------- | ----------------------------- |

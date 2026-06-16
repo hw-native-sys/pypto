@@ -1050,7 +1050,7 @@ class TestAutoDeriveTaskDependencies:
         assert len(edges) == 1
         assert edges[0].name_hint.startswith("last_tid")
 
-    def test_dynamic_trip_loop_fan_in_producer_exports_task_id_collection(self):
+    def test_dynamic_trip_loop_fan_in_producer_falls_back(self):
         @pl.program
         class Prog:
             @pl.function(type=pl.FunctionType.InCore)
@@ -1085,10 +1085,9 @@ class TestAutoDeriveTaskDependencies:
         out = _run_auto_deps(Prog, analyze_auto_scopes=True)
         consume_call = _user_calls(out, "consume")[0]
         edges = _compiler_edges(consume_call)
-        assert len(edges) == 1
-        assert edges[0].name_hint.startswith("last_tid")
+        assert edges == []
 
-    def test_dynamic_trip_tensor_carrier_exports_task_id_collection(self):
+    def test_dynamic_trip_tensor_carrier_falls_back(self):
         @pl.program
         class Prog:
             @pl.function(type=pl.FunctionType.InCore)
@@ -1122,10 +1121,9 @@ class TestAutoDeriveTaskDependencies:
         out = _run_auto_deps(Prog, analyze_auto_scopes=True)
         consume_call = _user_calls(out, "consume")[0]
         edges = _compiler_edges(consume_call)
-        assert len(edges) == 1
-        assert edges[0].name_hint.startswith("carried")
+        assert edges == []
 
-    def test_dynamic_trip_tuple_output_tensor_carrier_exports_task_id_collection(self):
+    def test_dynamic_trip_tuple_output_tensor_carrier_falls_back(self):
         @pl.program
         class Prog:
             @pl.function(type=pl.FunctionType.InCore)
@@ -1160,8 +1158,7 @@ class TestAutoDeriveTaskDependencies:
         out = _run_auto_deps(Prog, analyze_auto_scopes=True)
         consume_call = _user_calls(out, "consume")[0]
         edges = _compiler_edges(consume_call)
-        assert len(edges) == 1
-        assert edges[0].name_hint.startswith("right")
+        assert edges == []
 
     def test_loop_direct_body_tid_dep_behavior(self):
         @pl.program

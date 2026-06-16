@@ -86,7 +86,6 @@ struct StorageAccess {
   VarPtr task_id_var;
   bool task_id_var_is_direct = false;
   bool dynamic_producer = false;
-  bool from_scope_exit = false;
 };
 
 struct AccessSummary {
@@ -1176,10 +1175,6 @@ class AutoDepMutator : public IRMutator {
       if (auto new_for = As<ForStmt>(result)) {
         RemapFixedTripLoopAccessTaskIds(new_for);
       }
-    } else if (!scope_manual_stack_.empty() && !scope_manual_stack_.back()) {
-      if (auto new_for = As<ForStmt>(result)) {
-        RemapDynamicTripLoopAccessTaskIds(new_for);
-      }
     }
     return result;
   }
@@ -1219,7 +1214,6 @@ class AutoDepMutator : public IRMutator {
              " loop_depth=" + std::to_string(loop_depth_));
     prior_stack_.emplace_back();
     scope_manual_stack_.push_back(manual);
-    is_virtual_whole_body_stack_.push_back(is_virtual_whole_body);
     fallback_stack_.push_back(false);
     INTERNAL_CHECK_SPAN(body, span) << "RuntimeScopeStmt has null body";
     auto new_body = VisitStmt(body);
@@ -1227,12 +1221,10 @@ class AutoDepMutator : public IRMutator {
     const bool fallback = fallback_stack_.back();
     auto scope_accesses = std::move(prior_stack_.back());
     fallback_stack_.pop_back();
-    is_virtual_whole_body_stack_.pop_back();
     scope_manual_stack_.pop_back();
     prior_stack_.pop_back();
     if (!fallback && !prior_stack_.empty()) {
       for (auto& access : scope_accesses) {
-        access.from_scope_exit = true;
         prior_stack_.back().push_back(std::move(access));
       }
     }
@@ -1279,30 +1271,6 @@ class AutoDepMutator : public IRMutator {
   }
 
   void RemapFixedTripLoopAccessTaskIds(const ForStmtPtr& op) {
-    if (prior_stack_.empty() || !op) return;
-    auto yield = GetTrailingYield(op->body_);
-    if (!yield) return;
-
-    auto remap = BuildLoopCarryTaskIdRemap(op, yield);
-    if (remap.empty()) return;
-
-    for (auto& access : prior_stack_.back()) {
-      if (!access.dynamic_producer || !access.task_id_var) continue;
-      auto it = remap.find(access.task_id_var->UniqueId());
-      if (it != remap.end()) {
-        access.task_id_var = it->second.target;
-        access.task_id_var_is_direct = it->second.direct_task_id;
-      } else if (auto return_var = LoopReturnVarForAccess(op, access)) {
-        access.task_id_var = return_var;
-        access.task_id_var_is_direct = false;
-      } else {
-        continue;
-      }
-      access.dynamic_producer = false;
-    }
-  }
-
-  void RemapDynamicTripLoopAccessTaskIds(const ForStmtPtr& op) {
     if (prior_stack_.empty() || !op) return;
     auto yield = GetTrailingYield(op->body_);
     if (!yield) return;
@@ -1789,7 +1757,6 @@ class AutoDepMutator : public IRMutator {
   bool analyze_whole_body_as_auto_scope_ = false;
   std::vector<std::vector<StorageAccess>> prior_stack_;
   std::vector<bool> scope_manual_stack_;
-  std::vector<bool> is_virtual_whole_body_stack_;
   std::vector<bool> fallback_stack_;
   VarPtr current_assign_lhs_;
   size_t loop_depth_ = 0;

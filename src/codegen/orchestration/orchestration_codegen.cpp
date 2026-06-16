@@ -269,11 +269,7 @@ class CodegenEffectiveUseCollector : public var_collectors::VarDefUseCollector {
 // Statement code generator for orchestration
 class OrchestrationStmtCodegen : public CodegenBase {
  public:
-  struct DynamicTaskIdCollection {
-    std::string vector_name;
-  };
-  using ManualTaskIdBinding =
-      std::variant<int, std::string, std::vector<std::string>, DynamicTaskIdCollection>;
+  using ManualTaskIdBinding = std::variant<int, std::string, std::vector<std::string>>;
 
   explicit OrchestrationStmtCodegen(const ProgramPtr& prog, std::map<std::string, int>* func_ids,
                                     std::map<std::string, CoreType>* core_types,
@@ -305,8 +301,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
   void SetTupleVarToKey(std::map<const Var*, std::string> mapping) { tuple_var_to_key_ = std::move(mapping); }
 
   void SetInitialIndent(int indent) { indent_ = indent; }
-  [[nodiscard]] bool NeedsVectorInclude() const { return needs_vector_include_; }
-
   void SetEffectiveUses(std::unordered_set<const Var*> uses) { effective_uses_ = std::move(uses); }
 
   void PrepareCrossScopeTaskIdHoists(const StmtPtr& body) {
@@ -730,16 +724,14 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
     // Per-iter-arg array-carry size (0 means non-TaskId scalar carry).
     std::vector<int64_t> array_sizes(for_stmt->iter_args_.size(), 0);
-    std::vector<bool> dynamic_collection(for_stmt->iter_args_.size(), false);
     std::vector<bool> compiler_dep_collection(for_stmt->iter_args_.size(), false);
     for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
       if (!is_rebind[i]) continue;
       const bool compiler_dep_needs_loop_task_ids =
           i < for_stmt->return_vars_.size() && NeedsCompilerDepTaskId(for_stmt->return_vars_[i].get());
       if (compiler_dep_needs_loop_task_ids) {
-        compiler_dep_collection[i] = true;
         array_sizes[i] = EvalConstTripCount(for_stmt);
-        dynamic_collection[i] = array_sizes[i] == 0;
+        compiler_dep_collection[i] = array_sizes[i] > 0;
       } else if (in_manual_scope_depth_ > 0) {
         array_sizes[i] = ResolveArrayCarrySize(for_stmt, i);
       }
@@ -827,13 +819,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
           // updates via yield).
           RegisterArrayCarry(iter_arg.get(), rv_array_name, N);
         }
-      } else if (dynamic_collection[i]) {
-        std::string rv_vector_name = ReserveSyntheticEmitName(return_var->name_hint_);
-        needs_vector_include_ = true;
-        code_ << Indent() << "std::vector<PTO2TaskId> " << rv_vector_name << ";\n";
-        manual_task_id_map_[return_var.get()] = DynamicTaskIdCollection{rv_vector_name};
-        manual_task_id_map_by_key_[TaskIdHoistKey(return_var.get())] =
-            DynamicTaskIdCollection{rv_vector_name};
       } else if (auto array_ty = As<ArrayType>(iter_arg->GetType()); array_ty && is_rebind[i]) {
         // ArrayType iter_arg — declare a fresh C-stack array and route both
         // the iter_arg and the return_var emit names through it. The loop
@@ -1413,23 +1398,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
                 << "] = " << *scalar_name << ";\n";
         }
         continue;
-      }
-      auto rv_dynamic_it = manual_task_id_map_.find(rv.get());
-      if (rv_dynamic_it != manual_task_id_map_.end()) {
-        if (auto* collection = std::get_if<DynamicTaskIdCollection>(&rv_dynamic_it->second)) {
-          auto yield_var = AsVarLike(yield_stmt->value_[i]);
-          INTERNAL_CHECK_SPAN(yield_var, yield_stmt->span_)
-              << "Internal error: dynamic TaskId collection yield expects a Var value";
-          auto map_it = manual_task_id_map_.find(yield_var.get());
-          INTERNAL_CHECK_SPAN(map_it != manual_task_id_map_.end(), yield_stmt->span_)
-              << "Internal error: dynamic TaskId collection yield must resolve to a TaskId variable";
-          auto* scalar_name = std::get_if<std::string>(&map_it->second);
-          INTERNAL_CHECK_SPAN(scalar_name, yield_stmt->span_)
-              << "Internal error: dynamic TaskId collection yield expects string-variant entry";
-          code_ << Indent() << "if (" << *scalar_name << ".is_valid()) " << collection->vector_name
-                << ".push_back(" << *scalar_name << ");\n";
-          continue;
-        }
       }
       // Scalar rv: existing path.
       std::string value_expr = GenerateExprString(yield_stmt->value_[i]);
@@ -2286,24 +2254,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
       }
       if (auto* names = std::get_if<std::vector<std::string>>(binding)) {
         total += names->size();
-      } else if (std::get_if<DynamicTaskIdCollection>(binding)) {
-        total += 1;
       } else {
         total += 1;
       }
     }
     return total;
-  }
-
-  bool HasDynamicManualDeps(const std::vector<VarPtr>& edges) const {
-    for (const auto& edge : edges) {
-      if (!edge) continue;
-      const auto* binding = ResolveManualTaskIdBinding(edge.get());
-      if (binding && std::get_if<DynamicTaskIdCollection>(binding)) {
-        return true;
-      }
-    }
-    return false;
   }
 
   /// Emit the per-task ``Arg`` declaration. Dependency edges (if any) are
@@ -2350,39 +2305,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// No-op when there are no edges attached.
   void EmitManualDeps(const CallPtr& call, const std::string& task_var) {
     const auto edges = GetDependencyEdges(call);
-    if (HasDynamicManualDeps(edges)) {
-      const std::string deps_vec = task_var + "_deps";
-      needs_vector_include_ = true;
-      code_ << Indent() << "std::vector<PTO2TaskId> " << deps_vec << ";\n";
-      for (const auto& edge : edges) {
-        if (!edge) continue;
-        const auto* binding = ResolveManualTaskIdBinding(edge.get());
-        if (!binding) {
-          continue;
-        }
-        if (std::get_if<int>(binding)) {
-          INTERNAL_CHECK_SPAN(false, call->span_)
-              << "Internal error: manual_dep_edge var '" << edge->name_hint_
-              << "' resolves to a kernel-Call LHS (int variant). Expected "
-              << "a Scalar[TASK_ID] Var (string variant).";
-        } else if (auto* names = std::get_if<std::vector<std::string>>(binding)) {
-          for (const auto& name : *names) {
-            code_ << Indent() << "if (" << name << ".is_valid()) " << deps_vec << ".push_back(" << name
-                  << ");\n";
-          }
-        } else if (auto* collection = std::get_if<DynamicTaskIdCollection>(binding)) {
-          code_ << Indent() << deps_vec << ".insert(" << deps_vec << ".end(), " << collection->vector_name
-                << ".begin(), " << collection->vector_name << ".end());\n";
-        } else {
-          const auto& name = std::get<std::string>(*binding);
-          code_ << Indent() << "if (" << name << ".is_valid()) " << deps_vec << ".push_back(" << name
-                << ");\n";
-        }
-      }
-      code_ << Indent() << "if (!" << deps_vec << ".empty()) " << task_var << ".set_dependencies(" << deps_vec
-            << ".data(), static_cast<uint32_t>(" << deps_vec << ".size()));\n";
-      return;
-    }
     const size_t dep_capacity = CountManualDeps(edges, call);
     if (dep_capacity == 0) return;
     const std::string deps_arr = task_var + "_deps";
@@ -3732,7 +3654,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// from re-walking the same callee body and stays within the O(N log N) pass
   /// budget.
   std::unordered_map<const Function*, std::vector<std::optional<size_t>>> returned_param_indices_cache_;
-  bool needs_vector_include_ = false;
 };
 
 OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const ir::FunctionPtr& func) {
@@ -3818,7 +3739,7 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   stmt_codegen.SetInitialIndent(4);
   stmt_codegen.VisitStmt(func->body_);
 
-  oss << GenerateIncludes(false, stmt_codegen.NeedsVectorInclude());
+  oss << GenerateIncludes(false);
 
   oss << "extern \"C\" {\n\n";
 

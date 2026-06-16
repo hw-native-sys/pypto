@@ -448,7 +448,7 @@ call 上）。Codegen 会按这个顺序合并两组列表，并按 Var identity
 `SubmitToCallView` 合成的 `manual_dep_edges` 或普通 call 上的
 `attrs["compiler_manual_dep_edges"]` 中的每个显式依赖条目都是 TaskId
 `VarPtr`（`Scalar[TASK_ID]` 或 `Array[N, TASK_ID]`）。每个条目在 codegen 时通过
-`manual_task_id_map_` 解析为以下三种来源之一：
+`manual_task_id_map_` 解析为以下来源之一：
 
 | Producer 种类 | codegen 发出的 C++ |
 | ------------- | ------------------ |
