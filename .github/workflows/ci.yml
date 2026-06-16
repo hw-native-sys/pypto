@@ -452,29 +452,23 @@ jobs:
       # CI only checks functional correctness; perf is noisy (~8.5% jitter) and
       # is sampled daily with multiple runs averaged to keep the signal stable.
 
-      # TEMPORARILY DISABLED: the DeepSeek-V4 attention examples fail on an
-      # external bf16 numeric regression (x_out ~17-22% mismatch) introduced in
-      # pypto-lib / pto-isa, not in pypto. decode_attention_swa and
-      # decode_attention_hca reproduce the identical ratio_reldiff failure;
-      # prefill_attention_csa is disabled alongside them as part of the same
-      # family. Re-enable once the upstream regression is fixed.
-      # - name: Run pypto-lib DeepSeek-V4 decode_attention_swa example
-      #   working-directory: ${{ github.workspace }}/pypto-lib
-      #   env:
-      #     PYTHONPATH: ${{ github.workspace }}/pypto-lib
-      #   run: python models/deepseek/v4/decode_attention_swa.py -p a2a3 -d "$DEVICE_ID"
+      - name: Run pypto-lib DeepSeek-V4 decode_attention_swa example
+        working-directory: ${{ github.workspace }}/pypto-lib
+        env:
+          PYTHONPATH: ${{ github.workspace }}/pypto-lib
+        run: python models/deepseek/v4/decode_attention_swa.py -p a2a3 -d "$DEVICE_ID"
 
-      # - name: Run pypto-lib DeepSeek-V4 decode_attention_hca example
-      #   working-directory: ${{ github.workspace }}/pypto-lib
-      #   env:
-      #     PYTHONPATH: ${{ github.workspace }}/pypto-lib
-      #   run: python models/deepseek/v4/decode_attention_hca.py -p a2a3 -d "$DEVICE_ID"
+      - name: Run pypto-lib DeepSeek-V4 decode_attention_hca example
+        working-directory: ${{ github.workspace }}/pypto-lib
+        env:
+          PYTHONPATH: ${{ github.workspace }}/pypto-lib
+        run: python models/deepseek/v4/decode_attention_hca.py -p a2a3 -d "$DEVICE_ID"
 
-      # - name: Run pypto-lib DeepSeek-V4 prefill_attention_csa example
-      #   working-directory: ${{ github.workspace }}/pypto-lib
-      #   env:
-      #     PYTHONPATH: ${{ github.workspace }}/pypto-lib
-      #   run: python models/deepseek/v4/prefill_attention_csa.py -p a2a3 -d "$DEVICE_ID"
+      - name: Run pypto-lib DeepSeek-V4 prefill_attention_csa example
+        working-directory: ${{ github.workspace }}/pypto-lib
+        env:
+          PYTHONPATH: ${{ github.workspace }}/pypto-lib
+        run: python models/deepseek/v4/prefill_attention_csa.py -p a2a3 -d "$DEVICE_ID"
 
   system-tests-a5sim:
     runs-on: ubuntu-latest
