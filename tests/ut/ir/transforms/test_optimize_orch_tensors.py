@@ -4542,6 +4542,41 @@ class TestOutWindowExternalizer:
         After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_dynamic_parent_partial_static_output_window_stays_baseline(self):
+        user_batch = pl.dynamic("USER_BATCH")
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def copy_dyn_batch(
+                self,
+                data: pl.Tensor[[32, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[user_batch, 128], pl.FP32]],
+            ) -> pl.Tensor[[user_batch, 128], pl.FP32]:
+                for b0, (out_iter,) in pl.range(0, 32, 16, init_values=(out,)):
+                    chunk: pl.Tile[[16, 128], pl.FP32] = pl.load(data, [b0, 0], [16, 128])
+                    out_next: pl.Tensor[[user_batch, 128], pl.FP32] = pl.store(chunk, [b0, 0], out_iter)
+                    out_rv = pl.yield_(out_next)
+                return out_rv
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                data: pl.Tensor[[32, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[user_batch, 128], pl.FP32]],
+            ) -> pl.Tensor[[user_batch, 128], pl.FP32]:
+                return self.copy_dyn_batch(data, out)
+
+        After = _run_to_optimize_orch_tensors(
+            Before, output_window_policy="coalesce_pieces", window_rewrite_policy="all"
+        )
+
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert "pl.tensor.slice(out" not in printed_main
+        printed_windowed = ir.python_print(_get_function(After, "copy_dyn_batch__windowed"))
+        assert "pl.Out[pl.Tensor[[USER_BATCH, 128], pl.FP32]]" in printed_windowed
+        assert "pl.Out[pl.Tensor[[32, 128], pl.FP32" not in printed_windowed
+
 
 class TestEdgeCases:
     """Edge cases: pass should not modify programs that don't match any pattern."""

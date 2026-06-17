@@ -2385,7 +2385,9 @@ class OutWindowExternalizer {
                            if (!func || output.out_param_index >= func->params_.size()) return true;
                            auto tensor_type =
                                As<TensorType>(func->params_[output.out_param_index]->GetType());
-                           return !CanMaterializeWindowParamType(tensor_type, output.window_shape);
+                           return !CanMaterializeWindowParamType(tensor_type, output.window_shape) ||
+                                  !CanWindowStaticRegionWithinParent(tensor_type, output.window_shape,
+                                                                     output.callsite_offsets);
                          }),
           analysis.outputs.end());
       analysis.inputs.erase(
@@ -5648,6 +5650,23 @@ class OutWindowExternalizer {
       const auto& view = *window_tensor_type->tensor_view_;
       if (!ExprsReferenceOnlyVarsIn(view.stride, allowed_vars)) return false;
       if (!ExprsReferenceOnlyVarsIn(view.valid_shape, allowed_vars)) return false;
+    }
+    return true;
+  }
+
+  static bool CanWindowStaticRegionWithinParent(const std::shared_ptr<const TensorType>& tensor_type,
+                                                const std::vector<ExprPtr>& window_shape,
+                                                const std::vector<ExprPtr>& offsets) {
+    if (!tensor_type || tensor_type->shape_.size() != window_shape.size() ||
+        tensor_type->shape_.size() != offsets.size()) {
+      return false;
+    }
+
+    for (size_t dim = 0; dim < tensor_type->shape_.size(); ++dim) {
+      if (As<ConstInt>(tensor_type->shape_[dim])) continue;
+      auto offset = As<ConstInt>(offsets[dim]);
+      if (!offset || offset->value_ != 0) return false;
+      if (!AreExprsEqual(window_shape[dim], tensor_type->shape_[dim])) return false;
     }
     return true;
   }
