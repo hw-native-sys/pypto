@@ -62,6 +62,11 @@ passes.optimize_orch_tensors(
 - `coalesce_pieces + auto`：通常接近 `exact_pieces + auto`；选择 coalesce 本身不会打开复杂 window。
 - `coalesce_pieces + all`：改写已证明正确的复杂 window，把 multi-piece output 合并为 bounding carrier，并使用该 carrier 打通 dynamic writer-to-reader 链。
 
+parent shape 含 dynamic dim 的 output window 会保守处理。对 dynamic parent 的
+zero-offset 静态 partial window 会保持 full-tensor，因为同一个编译图可能用更小的
+dynamic extent 运行。非零或动态 offset 的 window，例如运行时 slot 上的
+KV-cache 写入，只要静态证明和策略门槛允许，仍可以改写。
+
 调试时，`PYPTO_WINDOW_EXTERNALIZE_INCLUDE` 和
 `PYPTO_WINDOW_EXTERNALIZE_EXCLUDE` 可以按 callee 或参数名过滤候选。
 `PYPTO_WINDOW_EXTERNALIZE_LOG=1` 会打印 `auto` 的 accept/reject 决策。
