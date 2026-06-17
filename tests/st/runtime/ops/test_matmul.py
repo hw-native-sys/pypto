@@ -722,7 +722,7 @@ class TestSharedKVMatmul(PTOTestCase):
 
     A single sliced ``kv`` is consumed by both a b_trans=True and a b_trans=False
     matmul (issue #1776). The compiler must emit ONE GM->L1 load and reinterpret
-    it for the transposed use via a zero-copy ``tile.as_layout`` view (NZ<->ZN)
+    it for the transposed use via a zero-copy ``tile.transpose_view`` view (NZ<->ZN)
     aliasing the same L1 buffer. Because ``kv`` is non-square, ``qk`` and ``pv``
     have different shapes and cannot be summed, so each is a separate output.
     """
@@ -766,7 +766,7 @@ class TestSharedKVMatmul(PTOTestCase):
             ) -> tuple[pl.Tensor[[M, N], pl.FP32], pl.Tensor[[M, K], pl.FP32]]:
                 # ONE sliced NON-SQUARE KV consumed by both matmuls -> ONE GM->L1 load.
                 kv = kv_src[0:N, 0:K]
-                # b_trans=True reads kv transposed via a zero-copy tile.as_layout view.
+                # b_trans=True reads kv transposed via a zero-copy tile.transpose_view view.
                 qk = pl.matmul(q, kv, b_trans=True, out_dtype=pl.FP32)  # [M, N]
                 # b_trans=False reads the same buffer in its natural orientation.
                 pv = pl.matmul(p, kv, out_dtype=pl.FP32)  # [M, K]

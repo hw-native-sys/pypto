@@ -663,7 +663,7 @@ class TestConvertTensorToTileOps:
 
         ``lhs`` always loads with one shape arg (no valid_shape, no transpose). ``rhs``
         always loads in its NATURAL (non-transposed) orientation; a ``b_trans=True``
-        operand is then reinterpreted by a zero-copy ``tile.as_layout`` view (NZ<->ZN)
+        operand is then reinterpreted by a zero-copy ``tile.transpose_view`` view (NZ<->ZN)
         that aliases the same L1 buffer, instead of a transposed load (issue #1776).
         """
         lhs_shape = [16, 128]
@@ -684,7 +684,7 @@ class TestConvertTensorToTileOps:
                     rhs_p, [0, 0], rhs_shape, rhs_shape, target_memory=MemorySpace.Mat, transpose=False
                 ),
             )
-            rhs_operand = ib.let("rhs_mat_t", tile_ops.as_layout(rhs_mat)) if b_trans else rhs_mat
+            rhs_operand = ib.let("rhs_mat_t", tile_ops.transpose_view(rhs_mat)) if b_trans else rhs_mat
             return ib.let("y_tile", tile_ops.matmul(lhs_mat, rhs_operand))
 
         before = _make_before(in_specs=in_specs, out_shape=out_shape, out_dtype=dtype, body=before_body)
@@ -695,11 +695,11 @@ class TestConvertTensorToTileOps:
 
     def test_shared_kv_one_load_two_matmuls_b_trans(self):
         """A single sliced KV feeding a b_trans=True and a b_trans=False matmul lowers
-        to ONE GM->L1 load + ONE zero-copy tile.as_layout view, not two loads (#1776).
+        to ONE GM->L1 load + ONE zero-copy tile.transpose_view view, not two loads (#1776).
 
         ``kv`` is a tensor.slice consumed by both matmuls, so the consumer-driven
         loader emits a single natural Mat load; the b_trans=True (QK) use reinterprets
-        it via tile.as_layout (NZ<->ZN) aliasing the same buffer, while the
+        it via tile.transpose_view (NZ<->ZN) aliasing the same buffer, while the
         b_trans=False (PV) use reads the natural tile directly.
         """
         in_specs: list[InSpec] = [
@@ -721,11 +721,13 @@ class TestConvertTensorToTileOps:
         after = passes.convert_tensor_to_tile_ops()(before)
         incore = after.get_function("main_incore_0")
         assert incore is not None
-        counts = _count_calls(incore, {"tile.load", "tile.as_layout"})
+        counts = _count_calls(incore, {"tile.load", "tile.transpose_view"})
         # q, p, and kv each load exactly once — kv is NOT loaded twice.
         assert counts["tile.load"] == 3, f"expected 3 loads (q, p, kv), got {counts['tile.load']}"
         # The b_trans=True use reinterprets the shared kv tile in place.
-        assert counts["tile.as_layout"] == 1, f"expected 1 as_layout view, got {counts['tile.as_layout']}"
+        assert counts["tile.transpose_view"] == 1, (
+            f"expected 1 transpose_view, got {counts['tile.transpose_view']}"
+        )
 
     def test_matmul_acc_conversion(self):
         """tensor.matmul + tensor.matmul_acc -> tile.matmul + tile.matmul_acc.
@@ -917,9 +919,9 @@ class TestConvertTensorToTileOps:
     def test_nd_batch_matmul_b_trans_slice_bakes_transpose_not_view(self):
         """A SLICE of a 3D tensor fed to a b_trans matmul (-> tile.batch_matmul) must
         bake the transpose into the consumer-driven load (legacy ND path), NOT emit a
-        zero-copy tile.as_layout view.
+        zero-copy tile.transpose_view view.
 
-        Regression for the dsv4 proj_a bug (#1776): the as_layout view only compensates
+        Regression for the dsv4 proj_a bug (#1776): the transpose_view view only compensates
         on the 2D tile.matmul path, so ND batch_matmul operands MUST stay transpose-at-
         load. Earlier the consumer-driven load was forced natural for all dtypes/ranks,
         leaving the ND weight un-transposed (no view to fix it) -> grossly wrong matmul.
@@ -940,9 +942,9 @@ class TestConvertTensorToTileOps:
         incore = After.get_function("main_incore_0")
         assert incore is not None
 
-        # ND path must NOT use the as_layout view.
-        counts = _count_calls(incore, {"tile.as_layout"})
-        assert counts["tile.as_layout"] == 0, "ND batch_matmul must not use a tile.as_layout view"
+        # ND path must NOT use the transpose_view view.
+        counts = _count_calls(incore, {"tile.transpose_view"})
+        assert counts["tile.transpose_view"] == 0, "ND batch_matmul must not use a tile.transpose_view view"
 
         # The b_trans rhs must arrive transposed: a [1, 64, 128] slice loaded with
         # transpose=True yields a [1, 128, 64] tile feeding tile.batch_matmul.
@@ -2118,7 +2120,7 @@ class TestSliceMatmulConversion:
 
         def expected_body(ib, params):
             # The sliced operand always loads in its natural orientation; a transposed
-            # use is reinterpreted by a zero-copy tile.as_layout view aliasing the same
+            # use is reinterpreted by a zero-copy tile.transpose_view view aliasing the same
             # buffer (#1776). Statement order mirrors BridgeInputSpaces' sorted-index
             # processing: for a sliced lhs (idx 0) the view precedes the other operand's
             # load; for a sliced rhs (idx 1) it follows it.
@@ -2131,7 +2133,9 @@ class TestSliceMatmulConversion:
                     ),
                 )
                 lhs_operand = (
-                    ib.let("a_slice_tile_t", tile_ops.as_layout(sliced_tile)) if slice_trans else sliced_tile
+                    ib.let("a_slice_tile_t", tile_ops.transpose_view(sliced_tile))
+                    if slice_trans
+                    else sliced_tile
                 )
                 other_tile = ib.let(
                     "rhs_mat",
@@ -2153,7 +2157,7 @@ class TestSliceMatmulConversion:
                 ),
             )
             rhs_operand = (
-                ib.let("b_slice_tile_t", tile_ops.as_layout(sliced_tile)) if slice_trans else sliced_tile
+                ib.let("b_slice_tile_t", tile_ops.transpose_view(sliced_tile)) if slice_trans else sliced_tile
             )
             return ib.let("result_tile", tile_ops.matmul(other_tile, rhs_operand))
 

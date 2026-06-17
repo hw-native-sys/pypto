@@ -368,21 +368,22 @@ TypePtr DeduceTileTransposeType(const std::vector<ExprPtr>& args,
   return std::make_shared<TileType>(new_shape, input_type->dtype_, std::nullopt, tile_view);
 }
 
-TypePtr DeduceTileAsLayoutType(const std::vector<ExprPtr>& args,
-                               const std::vector<std::pair<std::string, std::any>>& kwargs) {
-  // tile.as_layout(input) — zero-copy fractal-layout reinterpretation that swaps
+TypePtr DeduceTileTransposeViewType(const std::vector<ExprPtr>& args,
+                                    const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  // tile.transpose_view(input) — zero-copy fractal-layout reinterpretation that swaps
   // the trailing two dims and maps the block/scatter layout to its transpose
   // dual (NZ<->ZN, NN<->ZZ, ND<->DN). A tile and its dual over the same bytes are
   // mutual transposes (docs/_build/nz_zn_layout_qa.md), so the result aliases the
   // source buffer byte-for-byte — no data movement is emitted in codegen, and
   // InitMemRef shares the source MemRef via set_output_memory_inherit_input.
-  CHECK(args.size() == 1) << "tile.as_layout requires exactly 1 argument (input), but got " << args.size();
+  CHECK(args.size() == 1) << "tile.transpose_view requires exactly 1 argument (input), but got "
+                          << args.size();
 
   auto tile_type = As<TileType>(args[0]->GetType());
-  CHECK(tile_type) << "tile.as_layout requires input to be a TileType, but got "
+  CHECK(tile_type) << "tile.transpose_view requires input to be a TileType, but got "
                    << args[0]->GetType()->TypeName();
   const size_t ndim = tile_type->shape_.size();
-  CHECK(ndim >= 2) << "tile.as_layout requires at least 2 dimensions, but got " << ndim;
+  CHECK(ndim >= 2) << "tile.transpose_view requires at least 2 dimensions, but got " << ndim;
 
   std::vector<ExprPtr> new_shape = tile_type->shape_;
   std::swap(new_shape[ndim - 2], new_shape[ndim - 1]);
@@ -476,7 +477,7 @@ REGISTER_OP("tile.transpose")
       return DeduceTileTransposeType(args, kwargs);
     });
 
-REGISTER_OP("tile.as_layout")
+REGISTER_OP("tile.transpose_view")
     .set_op_category("TileOp")
     .set_description("Zero-copy fractal-layout reinterpretation (NZ<->ZN) that aliases the source buffer")
     .add_argument("input", "Input tile (TileType, >=2D; typically Mat-resident)")
@@ -486,7 +487,7 @@ REGISTER_OP("tile.as_layout")
     .set_output_memory_inherit_input()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileAsLayoutType(args, kwargs);
+      return DeduceTileTransposeViewType(args, kwargs);
     });
 
 TypePtr DeduceTileAssembleType(const std::vector<ExprPtr>& args,

@@ -3594,8 +3594,8 @@ class TestTileLoadDistributedSrc:
                     return pl.load(tile_a, [0, 0], [32, 32])  # pyright: ignore[reportArgumentType, reportReturnType]
 
 
-class TestTileAsLayout:
-    """tile.as_layout: zero-copy fractal-layout reinterpretation (issue #1776)."""
+class TestTileTransposeView:
+    """tile.transpose_view: zero-copy fractal-layout reinterpretation (issue #1776)."""
 
     # (in_blayout, in_slayout, out_blayout, out_slayout, name). The transpose dual
     # flips each axis' major-ness independently (row<->col), leaving none_box fixed:
@@ -3611,14 +3611,14 @@ class TestTileAsLayout:
     ]
 
     @pytest.mark.parametrize(("name", "bin_", "sin", "bout", "sout"), _DUALS)
-    def test_as_layout_transpose_duality(self, name, bin_, sin, bout, sout):
+    def test_transpose_view_duality(self, name, bin_, sin, bout, sout):
         span = ir.Span.unknown()
         src_view = pl.TileView(blayout=getattr(pl.TileLayout, bin_), slayout=getattr(pl.TileLayout, sin))
         # [8, 16] -> transposed view is [16, 8].
         src_type = ir.TileType([8, 16], DataType.FP32, None, src_view)
         src = ir.Var("src", src_type, span)
 
-        result_type = tile.as_layout(src).type
+        result_type = tile.transpose_view(src).type
         assert isinstance(result_type, ir.TileType)
         # Trailing two dims are swapped.
         assert isinstance(result_type.shape[0], ir.ConstInt) and result_type.shape[0].value == 16
@@ -3632,11 +3632,11 @@ class TestTileAsLayout:
         assert eff_blayout == getattr(pl.TileLayout, bout)
         assert eff_slayout == getattr(pl.TileLayout, sout)
 
-    def test_as_layout_rejects_1d(self):
+    def test_transpose_view_rejects_1d(self):
         span = ir.Span.unknown()
         src = ir.Var("src", ir.TileType([16], DataType.FP32), span)
         with pytest.raises(Exception, match="at least 2 dimensions"):
-            tile.as_layout(src)
+            tile.transpose_view(src)
 
 
 if __name__ == "__main__":

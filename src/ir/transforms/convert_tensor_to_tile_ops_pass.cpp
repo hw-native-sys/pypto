@@ -212,7 +212,7 @@ struct ConsumerSpaceReq {
                            ///< Only set for ND (batch_matmul) b_trans operands: those
                            ///< take the legacy transpose-at-load path. A 2D tile.matmul
                            ///< b_trans operand keeps transpose=false here and is
-                           ///< reinterpreted by a zero-copy tile.as_layout view in
+                           ///< reinterpreted by a zero-copy tile.transpose_view view in
                            ///< BridgeInputSpaces instead (issue #1776).
 };
 
@@ -298,7 +298,7 @@ class ConsumerSpaceCollector : public IRVisitor {
 
     // An operand of rank > 2 makes this matmul lower to tile.batch_matmul (ND),
     // which keeps the legacy transpose-at-load path; a 2D tile.matmul instead
-    // uses a zero-copy tile.as_layout view added in BridgeInputSpaces (#1776).
+    // uses a zero-copy tile.transpose_view view added in BridgeInputSpaces (#1776).
     // So a consumer-driven load bakes the transpose ONLY for the ND case.
     bool consumer_is_nd = false;
     for (const auto& a : call->args_) {
@@ -311,7 +311,7 @@ class ConsumerSpaceCollector : public IRVisitor {
       if (idx >= call->args_.size()) continue;
       if (auto var = As<Var>(call->args_[idx])) {
         const bool want_transpose = req.trans_kwarg ? call->GetKwarg<bool>(*req.trans_kwarg, false) : false;
-        // 2D matmul: natural load (transpose=false), as_layout compensates later.
+        // 2D matmul: natural load (transpose=false), transpose_view compensates later.
         // ND batch_matmul: bake the transpose into the load (legacy), no view.
         const bool transpose = want_transpose && consumer_is_nd;
         // Prioritize non-Vec spaces: if an existing requirement is the default Vec but this
@@ -642,7 +642,7 @@ class TensorToTileMutator : public TypePropagatingMutator {
 
     // req.transpose is set only for ND (batch_matmul) b_trans operands (legacy
     // transpose-at-load); 2D matmul operands load natural here and get a
-    // zero-copy tile.as_layout view at the matmul site instead (issue #1776).
+    // zero-copy tile.transpose_view view at the matmul site instead (issue #1776).
     std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", req.space},
                                                                  {"transpose", req.transpose}};
     auto load_call = op_registry_.Create("tile.load", {input, offset_arg, shape_arg, valid_shapes},
@@ -668,7 +668,7 @@ class TensorToTileMutator : public TypePropagatingMutator {
 
     // An operand of rank > 2 means this matmul lowers to tile.batch_matmul, not
     // tile.matmul (see the rank dispatch in op_conversion_registry.cpp). The
-    // zero-copy as_layout-view rework targets 2D tile.matmul only (issue #1776);
+    // zero-copy transpose_view rework targets 2D tile.matmul only (issue #1776);
     // batch_matmul keeps the legacy transpose-at-load path.
     bool is_nd = false;
     for (const auto& a : args) {
@@ -715,7 +715,7 @@ class TensorToTileMutator : public TypePropagatingMutator {
       const bool want_transpose = req.trans_kwarg ? call->GetKwarg<bool>(*req.trans_kwarg, false) : false;
       auto tensor_type = As<TensorType>(args[idx]->GetType());
 
-      // 2D tile.matmul realises a transposed operand as a zero-copy tile.as_layout
+      // 2D tile.matmul realises a transposed operand as a zero-copy tile.transpose_view
       // view over ONE natural load, aliasing the same L1 buffer (issue #1776) — so
       // a tensor consumed by both a b_trans=True and a b_trans=False matmul loads
       // once. ND (batch_matmul) keeps the legacy transpose-at-load path: the
@@ -739,7 +739,7 @@ class TensorToTileMutator : public TypePropagatingMutator {
       if (use_view) {
         // Zero-copy reinterpret the natural Mat tile as its transpose (NZ<->ZN),
         // aliasing the SAME L1 buffer.
-        auto view = op_registry_.Create("tile.as_layout", {space_var}, {}, call->span_);
+        auto view = op_registry_.Create("tile.transpose_view", {space_var}, {}, call->span_);
         auto view_var = std::make_shared<Var>(space_var->name_hint_ + "_t", view->GetType(), call->span_);
         stmts.push_back(std::make_shared<AssignStmt>(view_var, view, call->span_));
         args[idx] = view_var;

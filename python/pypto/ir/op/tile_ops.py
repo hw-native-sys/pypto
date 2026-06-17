@@ -413,7 +413,7 @@ def concat(
     return _ir_core.create_op_call("tile.concat", [src0, src1], {}, actual_span)
 
 
-def as_layout(
+def transpose_view(
     tile: Expr,
     span: Span | None = None,
 ) -> Call:
@@ -433,7 +433,7 @@ def as_layout(
         Call expression returning the transposed-layout view tile
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.as_layout", [tile], {}, actual_span)
+    return _ir_core.create_op_call("tile.transpose_view", [tile], {}, actual_span)
 
 
 def move(
