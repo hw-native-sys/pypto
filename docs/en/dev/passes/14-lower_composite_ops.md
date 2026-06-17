@@ -1,6 +1,6 @@
 # LowerCompositeOps Pass
 
-Decomposes composite tile / distributed ops into compositions of primitive ops, so codegen never has to emit a high-level intrinsic. Today the pass handles `tile.sin` / `tile.cos` (FP32 Cody-Waite + Horner) and `pld.tensor.allreduce` (4-phase notify / wait / remote_load / store). New composite ops add a lowering rule to the dispatch table inside the pass file without touching the dispatcher.
+Decomposes composite tile / distributed ops into compositions of primitive ops, so codegen never has to emit a high-level intrinsic. Today the pass handles `tile.sin` / `tile.cos` (FP32 Cody-Waite + Horner) and `pld.tensor.*` distributed collectives (`allreduce`, `allgather`, `reduce_scatter`, `broadcast`, `barrier`). New composite ops add a lowering rule to the dispatch table inside the pass file without touching the dispatcher.
 
 ## Overview
 
@@ -182,13 +182,68 @@ All constants are FP32 literals (the `k*` literals near the top of `src/ir/trans
 
 Running `LowerCompositeOps` twice produces identical IR after the first run: the recipe emits only primitive ops (`tile.muls`, `tile.adds`, `tile.add`, `tile.sub`, `tile.mul`, `tile.cast`) and the mutator only rewrites `tile.sin` / `tile.cos` `Call`s, so the second invocation visits the body and changes nothing. This is verified by `test_sin_lowering_is_idempotent` and `test_cos_lowering_is_idempotent` in `tests/ut/ir/transforms/test_lower_composite_ops.py`.
 
-## `pld.tensor.allreduce` — signal buffer is single-shot per call
+## `pld.tensor.*` distributed collectives
+
+The pass also lowers the `pld.tensor.*` family of window-bound distributed collectives. Each collective is a single composite `Call` that expands into a notify / wait / `pld.tile.remote_load` / `tile.store` recipe. The rules share the same signal-buffer discipline: a window-bound INT32 `signal` matrix is used as a cross-rank barrier, and the buffer is **single-shot per call**.
+
+### `pld.tensor.allreduce`
 
 The allreduce rule decomposes one composite call into two cross-rank barriers reusing the same `signal` cells: Phase 2a `Set 1` + Phase 2b `wait ≥1`, then Phase 3.5a `AtomicAdd 1` + Phase 3.5b `wait ≥2`. By the time the call returns, every cell sits at `2` rather than its initial `0`.
 
 **Signal buffers must NOT be reused for back-to-back allreduce calls.** A stale `2` in any cell would let the next call's Phase 2b `wait ≥1` pass immediately on the leftover value, breaking the barrier and racing the next Phase 3 reads against the previous reduction's Phase 4 writes. Callers issuing multiple allreduces must allocate a fresh signal buffer (via `alloc_window_buffer` + `window`) for each call. The user-facing DSL docstring at `python/pypto/language/distributed/op/tensor_ops.py::allreduce` carries the same warning.
 
-`kGe` (not `kEq`) is the load-bearing choice for both wait predicates. The cell is monotonically increasing within a single call, but a slow rank's first poll may already see the cell past `1` if a faster peer has completed Phase 3 (microseconds-long remote loads) and started Phase 3.5a. `kEq(==1)` would then deadlock; `kGe(≥1)` does not. The hand-written reference at `tests/st/distributed/test_l3_allreduce.py` uses `Ge(1)` for the same reason. A self-resetting variant (Set 0 / Eq 0 at Phase 3.5) is blocked on PTOAS issue #797.
+`kGe` (not `kEq`) is the load-bearing choice for both wait predicates. The cell is monotonically increasing within a single call, but a slow rank's first poll may already see the cell past `1` if a faster peer has completed Phase 3 (microseconds-long remote loads) and started Phase 3.5a. `kEq(==1)` would then deadlock; `kGe(≥1)` does not. The hand-written reference at `tests/st/distributed/test_l3_allreduce.py` uses `Ge(1)` for the same reason.
+
+Only `ReduceOp::kSum` is supported in the first version; the C++ deducer rejects `Max` / `Min` / `Prod`.
+
+### `pld.tensor.allgather`
+
+Decomposes into a 3-phase recipe, aligned with the simpler allgather reference (`simpler/examples/workers/l3/allgather_distributed/`):
+
+- Phase 1: `tile.store(local_data, [0, 0], target)` — stage this rank's chunk into its private HCCL window at local row 0
+- Phase 2a: notify-all (`Set 1`)
+- Phase 2b: wait-all (`Ge 1`)
+- Phase 3: for `r` in `0..NR-1`, `pld.tile.remote_load(target, peer=r, [0,0], [1,SIZE])` and `tile.concat` onto accumulator; return the concatenated Tile `[1, NR*SIZE]`
+
+Self-read falls out of the same `remote_load` path via HCCL identity mapping (`CommRemotePtr` returns local pointer for `peer == my_rank`). Every rank produces the identical rank-ordered concatenation.
+
+### `pld.tensor.reduce_scatter`
+
+Decomposes into the same 5-phase shape as `allreduce`:
+
+- Phase 2a: notify-all (`Set 1`)
+- Phase 2b: wait-all (`Ge 1`)
+- Phase 3: for each peer, `remote_load` chunk `r` from peer `p` and accumulate into a local scratch with `tile.add`
+- Phase 3.5a: re-notify (`AtomicAdd 1`)
+- Phase 3.5b: re-wait (`Ge 2`)
+- Phase 4: `tile.store` the reduced chunk `r` back into `target[r, 0:SIZE]`
+
+`target` has shape `[NR, SIZE]`; each rank stages all `NR` chunks before the call. After the call, rank `r`'s row `[r, 0:SIZE]` holds the element-wise sum of chunk `r` across all ranks. The post-reduce barrier is required for the same WAR reason as `allreduce`.
+
+Only `ReduceOp::kSum` is supported in the first version; the C++ deducer rejects `Max` / `Min` / `Prod`.
+
+### `pld.tensor.broadcast`
+
+Decomposes into a 3-phase recipe:
+
+- Phase 2a: notify-all (`Set 1`)
+- Phase 2b: wait-all (`Ge 1`)
+- Phase 3: every non-root rank `remote_load`s root's slice and `tile.store`s it locally; root copies its own slice in-place
+
+`root` is a static `int` kwarg known at compile time.
+
+### `pld.tensor.barrier`
+
+Pure synchronization — no data movement. Decomposes into a 2-phase recipe:
+
+- Phase 2a: notify-all (`Set 1`)
+- Phase 2b: wait-all (`Ge 1`)
+
+The returned expression is the same `signal` tensor, enabling the rebind idiom `signal = pld.tensor.barrier(signal)`.
+
+### Signal-buffer discipline
+
+All distributed rules use `kGe` (not `kEq`) for wait predicates. The cell is monotonically increasing within a single call, but a slow rank's first poll may already see the cell past the threshold if a faster peer has finished its Phase-3 remote loads and started the next notify. `kEq` would deadlock in that case; `kGe` does not. A self-resetting variant (Set 0 / Eq 0 at the end of a call) is blocked on PTOAS issue #797.
 
 ## Implementation Notes
 

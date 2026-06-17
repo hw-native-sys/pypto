@@ -3524,6 +3524,142 @@ class TestWindowSliceIncoreConversion:
         assert _find_first_call_to(kernel, "tensor.add") is None
         assert _find_first_call_to(kernel, "tensor.slice") is None
 
+    # ------------------------------------------------------------------
+    # Composite intrinsic param-direction upgrade tests
+    # ------------------------------------------------------------------
+
+    def test_barrier_upgrades_signal_to_inout(self):
+        """``pld.tensor.barrier(signal)`` upgrades ``signal`` from In to InOut.
+
+        ConvertTensorToTileOps runs upstream of LowerCompositeOps (pass 14);
+        without the explicit has_read|has_write marking, the param-direction
+        analysis would leave the window param as In and a downstream reader
+        would miss the RAW edge."""
+        nr = 2
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                signal: pld.DistributedTensor[[nr, 1], pl.INT32],
+            ) -> pld.DistributedTensor[[nr, 1], pl.INT32]:
+                signal = pld.tensor.barrier(signal)
+                return signal
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+            ) -> pld.DistributedTensor[[nr, 1], pl.INT32]:
+                signal = pld.tensor.barrier(signal)
+                return signal
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_broadcast_upgrades_target_and_signal_to_inout(self):
+        """``pld.tensor.broadcast(target, signal, root=...)`` upgrades both
+        ``target`` and ``signal`` params from In to InOut."""
+        SIZE = 16
+        nr = 2
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                target: pld.DistributedTensor[[1, SIZE], pl.FP32],
+                signal: pld.DistributedTensor[[nr, 1], pl.INT32],
+            ) -> pld.DistributedTensor[[1, SIZE], pl.FP32]:
+                target = pld.tensor.broadcast(target, signal, root=0)
+                return target
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                target: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+                signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+            ) -> pld.DistributedTensor[[1, SIZE], pl.FP32]:
+                target = pld.tensor.broadcast(target, signal, root=0)
+                return target
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_allgather_upgrades_target_and_signal_to_inout(self):
+        """``pld.tensor.allgather(local_data, target, signal)`` upgrades both
+        ``target`` and ``signal`` params to InOut. ``local_data`` remains In
+        (read-only)."""
+        SIZE = 16
+        nr = 2
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                local_data: pl.Tensor[[1, SIZE], pl.FP32],
+                target: pld.DistributedTensor[[nr, SIZE], pl.FP32],
+                signal: pld.DistributedTensor[[nr, 1], pl.INT32],
+            ) -> pl.Tensor[[1, nr * SIZE], pl.FP32]:
+                gathered = pld.tensor.allgather(local_data, target, signal)  # type: ignore[arg-type]
+                return gathered  # type: ignore[return-type]
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        # After conversion the function has additional params (MemRef for
+        # local_data load + Out for implicit store).  Verify just the
+        # direction inference: target and signal must be InOut; local_data
+        # (an original plain-Tensor In param) stays In.
+        after_fn = After["kernel"]
+        assert after_fn is not None
+        before_fn = Before["kernel"]
+        assert before_fn is not None
+
+        for i, bp in enumerate(before_fn.params):
+            after_dir = after_fn.param_directions[i]
+            if bp.name_hint == "target":
+                assert after_dir == ir.ParamDirection.InOut, f"target must be InOut, got {after_dir}"
+            elif bp.name_hint == "signal":
+                assert after_dir == ir.ParamDirection.InOut, f"signal must be InOut, got {after_dir}"
+            elif bp.name_hint == "local_data":
+                assert after_dir == ir.ParamDirection.In, f"local_data must be In, got {after_dir}"
+
+    def test_reduce_scatter_upgrades_target_and_signal_to_inout(self):
+        """``pld.tensor.reduce_scatter(target, signal, op=...)`` upgrades both
+        params to InOut (same 5-phase pattern as allreduce)."""
+        SIZE = 16
+        nr = 2
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                target: pld.DistributedTensor[[nr, SIZE], pl.FP32],
+                signal: pld.DistributedTensor[[nr, 1], pl.INT32],
+            ) -> pld.DistributedTensor[[nr, SIZE], pl.FP32]:
+                target = pld.tensor.reduce_scatter(target, signal, op=pld.ReduceOp.Sum)
+                return target
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                target: pl.InOut[pld.DistributedTensor[[nr, SIZE], pl.FP32]],
+                signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+            ) -> pld.DistributedTensor[[nr, SIZE], pl.FP32]:
+                target = pld.tensor.reduce_scatter(target, signal, op=pld.ReduceOp.Sum)
+                return target
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

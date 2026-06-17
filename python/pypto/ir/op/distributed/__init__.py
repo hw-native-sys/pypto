@@ -27,17 +27,21 @@ Layering (mirrors the ``pl.<ns>.<op>`` stack):
 
 from . import system_ops, tensor_ops, tile_ops
 from .system_ops import get_comm_ctx, nranks, rank, world_size
-from .tensor_ops import alloc_window_buffer, allreduce, get, put, window
+from .tensor_ops import alloc_window_buffer, allgather, allreduce, barrier, broadcast, get, put, reduce_scatter, window
 from .tile_ops import remote_load
 
 __all__ = [
+    "allgather",
     "alloc_window_buffer",
     "allreduce",
+    "barrier",
+    "broadcast",
     "get",
     "get_comm_ctx",
     "nranks",
     "put",
     "rank",
+    "reduce_scatter",
     "remote_load",
     "system_ops",
     "tensor_ops",

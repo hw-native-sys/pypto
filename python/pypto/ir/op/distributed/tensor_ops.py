@@ -181,4 +181,99 @@ def allreduce(
     return _ir_core.create_op_call("pld.tensor.allreduce", [target, signal], {"op": int(op)}, actual_span)
 
 
-__all__ = ["alloc_window_buffer", "allreduce", "get", "put", "window"]
+def barrier(
+    signal: Expr,
+    *,
+    span: Span | None = None,
+) -> Call:
+    """Build a ``pld.tensor.barrier(signal)`` Call.
+
+    Cross-rank barrier: blocks until all ranks in the comm group have
+    reached the barrier. ``signal`` is a window-bound INT32 matrix used
+    as the cross-rank synchronisation. The result type is ``signal``'s
+    :class:`ir.DistributedTensorType` (the rebind target — same semantics
+    as :func:`allreduce`).
+
+    LowerCompositeOps expands this into a notify-all / wait-all sequence;
+    this Call never survives past that pass.
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call("pld.tensor.barrier", [signal], {}, actual_span)
+
+
+def broadcast(
+    target: Expr,
+    signal: Expr,
+    root: int,
+    *,
+    span: Span | None = None,
+) -> Call:
+    """Build a ``pld.tensor.broadcast(target, signal, root=...)`` Call.
+
+    Broadcast: replicate root rank's data to every rank in the comm group.
+    ``root`` is a static int selecting the source rank.  The result type is
+    ``target``'s :class:`ir.DistributedTensorType` (in-place rebind).
+
+    LowerCompositeOps expands this into notify-all / wait-all + remote_load;
+    this Call never survives past that pass.
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call("pld.tensor.broadcast", [target, signal], {"root": root}, actual_span)
+
+
+def allgather(
+    local_data: Expr,
+    target: Expr,
+    signal: Expr,
+    *,
+    span: Span | None = None,
+) -> Call:
+    """Build a ``pld.tensor.allgather(local_data, target, signal)`` Call.
+
+    All-gather: gather data from all ranks, returning the concatenated
+    result as a local Tile.  ``local_data`` is a Tile [1, SIZE] with this
+    rank's chunk.  ``target`` has shape [NR, SIZE] — used internally as
+    a staging window.  ``signal`` is a window-bound INT32 barrier tensor.
+
+    The result is a Tile (not a DistributedTensor).  LowerCompositeOps
+    expands this into tile.store + notify-all / wait-all + remote_load +
+    tile.concat; this Call never survives past that pass.
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call("pld.tensor.allgather", [local_data, target, signal], {}, actual_span)
+
+
+def reduce_scatter(
+    target: Expr,
+    signal: Expr,
+    op: ReduceOp,
+    *,
+    span: Span | None = None,
+) -> Call:
+    """Build a ``pld.tensor.reduce_scatter(target, signal, op=...)`` Call.
+
+    Reduce-scatter: element-wise reduce chunks across all ranks, scatter
+    one reduced chunk per rank.  ``op`` (:class:`ir.ReduceOp`) selects the
+    reduction operator (Sum only in first version).  Result type is
+    ``target``'s :class:`ir.DistributedTensorType` (in-place rebind).
+
+    LowerCompositeOps expands this into a 5-phase decomposition matching
+    allreduce; this Call never survives past that pass.
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call(
+        "pld.tensor.reduce_scatter", [target, signal], {"op": int(op)}, actual_span
+    )
+
+
+__all__ = [
+    "alloc_window_buffer",
+    "allgather",
+    "allreduce",
+    "barrier",
+    "broadcast",
+    "get",
+    "put",
+    "reduce_scatter",
+    "window",
+]

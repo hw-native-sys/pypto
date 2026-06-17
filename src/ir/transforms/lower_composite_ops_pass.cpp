@@ -625,6 +625,459 @@ ExprPtr LowerTensorAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>
   return target;
 }
 
+// ============================================================================
+// ``pld.tensor.broadcast`` lowering rule
+//
+// Broadcast root rank's data to every rank:
+//   Phase 2a: notify-all (Set 1)
+//   Phase 2b: wait-all  (Ge 1)
+//   Phase 3:  remote_load(target, root, ...) → store → target
+// Returns target (in-place rebind).  Single barrier — broadcast is read-only
+// after staging, no WAR hazard.
+// ============================================================================
+
+ExprPtr LowerTensorBroadcastRule(const CallPtr& call, const std::vector<ExprPtr>& args, LoweringBuilder& b) {
+  const Span& span = call->span_;
+  INTERNAL_CHECK_SPAN(args.size() == 2, span)
+      << "pld.tensor.broadcast rule expects 2 args, got " << args.size();
+  const auto& target = args[0];
+  const auto& signal = args[1];
+  auto target_type = As<DistributedTensorType>(target->GetType());
+  INTERNAL_CHECK_SPAN(target_type, span)
+      << "pld.tensor.broadcast target must be DistributedTensorType (deducer-rejected otherwise)";
+
+  auto root_value = GetRequiredKwarg<int>(call->kwargs_, "root", "pld.tensor.broadcast");
+
+  const std::size_t ndim = target_type->shape_.size();
+
+  auto& reg = OpRegistry::GetInstance();
+  auto ctx = b.Bind("ctx", reg.Create("pld.system.get_comm_ctx", {target}, {}, span), span);
+  auto nranks_i32 = b.Bind("nranks", reg.Create("pld.system.nranks", {ctx}, {}, span), span);
+  auto nranks_idx = b.Bind("nranks_idx", std::make_shared<Cast>(nranks_i32, DataType::INDEX, span), span);
+  auto my_rank = b.Bind("my_rank", reg.Create("pld.system.rank", {ctx}, {}, span), span);
+
+  auto zero_idx = std::make_shared<ConstInt>(0, DataType::INDEX, span);
+  auto one_idx = std::make_shared<ConstInt>(1, DataType::INDEX, span);
+  auto one_i32 = std::make_shared<ConstInt>(1, DataType::INT32, span);
+  auto root_expr = std::make_shared<ConstInt>(root_value, DataType::INT32, span);
+
+  auto zero_offsets = tile_conversion_utils::MakeZeroOffsets(ndim, span);
+  auto shape_tuple = tile_conversion_utils::MakeShapeTuple(target_type->shape_, span);
+
+  // Helper: build signal-slot offset [rank_expr, 0].
+  auto make_signal_offsets = [&](const ExprPtr& rank_expr) {
+    return std::make_shared<MakeTuple>(
+        std::vector<ExprPtr>{rank_expr, std::make_shared<ConstInt>(0, DataType::INDEX, span)}, span);
+  };
+
+  // ---- Phase 2a: notify-all ----
+  b.EmitFor(
+      "peer", zero_idx, nranks_idx, one_idx,
+      [&](LoweringBuilder& body, const VarPtr& peer) {
+        body.EmitIf(
+            body.NotEq(peer, my_rank, span),
+            [&](LoweringBuilder& then_body) {
+              auto notify_call = OpRegistry::GetInstance().Create(
+                  "pld.system.notify", {signal, peer, make_signal_offsets(my_rank), one_i32},
+                  {{"op", static_cast<int>(NotifyOp::kSet)}}, span);
+              then_body.Bind("notify_ret", notify_call, span);
+            },
+            /*else_fn=*/nullptr, span);
+      },
+      span);
+
+  // ---- Phase 2b: wait-all ----
+  b.EmitFor(
+      "src", zero_idx, nranks_idx, one_idx,
+      [&](LoweringBuilder& body, const VarPtr& src) {
+        auto src_offsets = make_signal_offsets(src);
+        body.EmitIf(
+            body.NotEq(src, my_rank, span),
+            [&](LoweringBuilder& then_body) {
+              auto wait_call =
+                  OpRegistry::GetInstance().Create("pld.system.wait", {signal, src_offsets, one_i32},
+                                                   {{"cmp", static_cast<int>(WaitCmp::kGe)}}, span);
+              then_body.Bind("wait_ret", wait_call, span);
+            },
+            /*else_fn=*/nullptr, span);
+      },
+      span);
+
+  // ---- Phase 3: remote_load root's data → store into own target slot ----
+  auto recv = b.Bind("recv",
+                     OpRegistry::GetInstance().Create(
+                         "pld.tile.remote_load", {target, root_expr, zero_offsets, shape_tuple}, {}, span),
+                     span);
+  b.Bind("store_ret", reg.Create("tile.store", {recv, zero_offsets, target}, {}, span), span);
+
+  // In-place rebind: return target so the LHS Var holds the post-broadcast view.
+  return target;
+}
+
+// ============================================================================
+// ``pld.tensor.allgather`` lowering rule
+//
+// All-gather: gather data from all ranks and return the concatenated result
+// as a local Tile.  Fully N-rank general — NR is read from the target's
+// compile-time shape at lowering time.
+//
+//   arg[0] = local_data  — Tile [1, SIZE], this rank's chunk
+//   arg[1] = target      — DistributedTensor [NR, SIZE], staging window
+//   arg[2] = signal      — DistributedTensor INT32, cross-rank barrier
+//
+// Phases (aligned with simpler allgather_distributed reference):
+//   1.  tile.store(local_data, [0, 0], target)   — stage-in (each rank's
+//       private HCCL window starts at local row 0)
+//   2a. notify-all (Set 1)
+//   2b. wait-all  (Ge 1)
+//   3.  for r in 0..NR-1:
+//         chunk = pld.tile.remote_load(target, peer=r, [0,0], [1,SIZE])
+//         concat onto accumulator
+//       return accumulator (Tile [1, NR*SIZE] — rank-ordered concatenation)
+//
+// Self-read falls out of the same remote_load path via HCCL identity
+// mapping (CommRemotePtr returns local ptr for peer == my_rank).
+// ============================================================================
+
+ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>& args, LoweringBuilder& b) {
+  const Span& span = call->span_;
+  INTERNAL_CHECK_SPAN(args.size() == 3, span)
+      << "pld.tensor.allgather rule expects 3 args (local_data, target, signal), got " << args.size();
+  const auto& local_data = args[0];
+  const auto& target = args[1];
+  const auto& signal = args[2];
+
+  auto local_type = As<TileType>(local_data->GetType());
+  INTERNAL_CHECK_SPAN(local_type, span) << "pld.tensor.allgather local_data must be TileType";
+  auto target_type = As<DistributedTensorType>(target->GetType());
+  INTERNAL_CHECK_SPAN(target_type, span)
+      << "pld.tensor.allgather target must be DistributedTensorType (deducer-rejected otherwise)";
+  INTERNAL_CHECK_SPAN(target_type->shape_.size() == 2, span)
+      << "pld.tensor.allgather target must be 2D [NR, SIZE]";
+
+  auto& reg = OpRegistry::GetInstance();
+  auto ctx = b.Bind("ctx", reg.Create("pld.system.get_comm_ctx", {target}, {}, span), span);
+  auto nranks_i32 = b.Bind("nranks", reg.Create("pld.system.nranks", {ctx}, {}, span), span);
+  auto nranks_idx = b.Bind("nranks_idx", std::make_shared<Cast>(nranks_i32, DataType::INDEX, span), span);
+  auto my_rank = b.Bind("my_rank", reg.Create("pld.system.rank", {ctx}, {}, span), span);
+
+  auto zero_idx = std::make_shared<ConstInt>(0, DataType::INDEX, span);
+  auto one_idx = std::make_shared<ConstInt>(1, DataType::INDEX, span);
+  auto one_i32 = std::make_shared<ConstInt>(1, DataType::INT32, span);
+
+  // Per-chunk shape: [1, SIZE] where SIZE = target.shape[1].
+  auto size_expr = target_type->shape_[1];
+  auto chunk_shape = std::make_shared<MakeTuple>(
+      std::vector<ExprPtr>{std::make_shared<ConstInt>(1, DataType::INDEX, span), size_expr}, span);
+
+  // Helper: signal-slot offset [rank_expr, 0].
+  auto make_signal_offsets = [&](const ExprPtr& rank_expr) {
+    return std::make_shared<MakeTuple>(
+        std::vector<ExprPtr>{rank_expr, std::make_shared<ConstInt>(0, DataType::INDEX, span)}, span);
+  };
+
+  // Per the simpler allgather reference (examples/workers/l3/allgather_distributed/),
+  // every rank stores its chunk at local offset [0, 0] of its private HCCL
+  // window.  The DistributedTensor shape [NR, SIZE] is a logical view;
+  // physically each rank holds one row at local row 0.
+  auto zero_row_offsets =
+      std::make_shared<MakeTuple>(std::vector<ExprPtr>{std::make_shared<ConstInt>(0, DataType::INDEX, span),
+                                                       std::make_shared<ConstInt>(0, DataType::INDEX, span)},
+                                  span);
+
+  // ---- Phase 1: stage-in (local_data → target[0, 0]) ----
+  b.Bind("stage_in", reg.Create("tile.store", {local_data, zero_row_offsets, target}, {}, span), span);
+
+  // ---- Phase 2a: notify-all ----
+  b.EmitFor(
+      "peer", zero_idx, nranks_idx, one_idx,
+      [&](LoweringBuilder& body, const VarPtr& peer) {
+        body.EmitIf(
+            body.NotEq(peer, my_rank, span),
+            [&](LoweringBuilder& then_body) {
+              auto notify_call = OpRegistry::GetInstance().Create(
+                  "pld.system.notify", {signal, peer, make_signal_offsets(my_rank), one_i32},
+                  {{"op", static_cast<int>(NotifyOp::kSet)}}, span);
+              then_body.Bind("notify_ret", notify_call, span);
+            },
+            /*else_fn=*/nullptr, span);
+      },
+      span);
+
+  // ---- Phase 2b: wait-all ----
+  b.EmitFor(
+      "src", zero_idx, nranks_idx, one_idx,
+      [&](LoweringBuilder& body, const VarPtr& src) {
+        auto src_offsets = make_signal_offsets(src);
+        body.EmitIf(
+            body.NotEq(src, my_rank, span),
+            [&](LoweringBuilder& then_body) {
+              auto wait_call =
+                  OpRegistry::GetInstance().Create("pld.system.wait", {signal, src_offsets, one_i32},
+                                                   {{"cmp", static_cast<int>(WaitCmp::kGe)}}, span);
+              then_body.Bind("wait_ret", wait_call, span);
+            },
+            /*else_fn=*/nullptr, span);
+      },
+      span);
+
+  // ---- Phase 3: gather — assemble chunks from all ranks in rank order ----
+  // Build a chain of tile.concat calls in a C++ loop over NR (compile-time
+  // constant).  Following the simpler allgather reference, use
+  // pld.tile.remote_load for every rank including self — the HCCL
+  // CommRemotePtr helper returns the local pointer unchanged for
+  // peer == my_rank, so the self-read naturally falls out of the same
+  // TLOAD path.  Every rank holds exactly one local row, so offsets
+  // [0, 0] are correct for all reads.
+  auto nr_c = As<ConstInt>(target_type->shape_[0]);
+  INTERNAL_CHECK_SPAN(nr_c, span) << "allgather: target NR must be a compile-time constant for N-rank gather";
+  int64_t nr_val = nr_c->value_;
+
+  ExprPtr gathered;
+  for (int64_t r = 0; r < nr_val; ++r) {
+    auto rank_expr = std::make_shared<ConstInt>(r, DataType::INDEX, span);
+
+    auto chunk = b.Bind(
+        "chunk_r" + std::to_string(r),
+        reg.Create("pld.tile.remote_load", {target, rank_expr, zero_row_offsets, chunk_shape}, {}, span),
+        span);
+
+    if (r == 0) {
+      gathered = chunk;
+    } else {
+      gathered = b.Bind("gathered_r" + std::to_string(r),
+                        reg.Create("tile.concat", {gathered, chunk}, {}, span), span);
+    }
+  }
+
+  return gathered;
+}
+
+// ============================================================================
+// ``pld.tensor.reduce_scatter`` lowering rule
+//
+// Reduce-scatter: each rank holds NR chunks; rank r receives reduced chunk r.
+// Target shape [NR, SIZE].  5-phase decomposition matching allreduce:
+//   Phase 2a:  notify-all (Set 1)
+//   Phase 2b:  wait-all (Ge 1)
+//   Phase 3:   acc = load(target, [my_rank, 0], [1, SIZE])
+//              for peer != my_rank:
+//                  recv = remote_load(target, peer, [my_rank, 0], [1, SIZE])
+//                  acc = add(acc, recv)
+//   Phase 3.5a: notify-all (AtomicAdd 1)  — WAR prevention
+//   Phase 3.5b: wait-all (Ge 2)
+//   Phase 4:   tile.store(acc, [my_rank, 0], target)
+// Returns target (in-place rebind).  kSum only (first version).
+// ============================================================================
+
+ExprPtr LowerTensorReduceScatterRule(const CallPtr& call, const std::vector<ExprPtr>& args,
+                                     LoweringBuilder& b) {
+  const Span& span = call->span_;
+  INTERNAL_CHECK_SPAN(args.size() == 2, span)
+      << "pld.tensor.reduce_scatter rule expects 2 args, got " << args.size();
+  const auto& target = args[0];
+  const auto& signal = args[1];
+  auto target_type = As<DistributedTensorType>(target->GetType());
+  INTERNAL_CHECK_SPAN(target_type, span)
+      << "pld.tensor.reduce_scatter target must be DistributedTensorType (deducer-rejected otherwise)";
+  INTERNAL_CHECK_SPAN(target_type->shape_.size() == 2, span)
+      << "pld.tensor.reduce_scatter target must be 2D [NR, SIZE]";
+
+  auto op_value = GetRequiredKwarg<int>(call->kwargs_, "op", "pld.tensor.reduce_scatter");
+  INTERNAL_CHECK_SPAN(op_value == static_cast<int>(ReduceOp::kSum), span)
+      << "pld.tensor.reduce_scatter lowering supports ReduceOp::kSum only (got int " << op_value << ")";
+
+  auto& reg = OpRegistry::GetInstance();
+  auto ctx = b.Bind("ctx", reg.Create("pld.system.get_comm_ctx", {target}, {}, span), span);
+  auto nranks_i32 = b.Bind("nranks", reg.Create("pld.system.nranks", {ctx}, {}, span), span);
+  auto nranks_idx = b.Bind("nranks_idx", std::make_shared<Cast>(nranks_i32, DataType::INDEX, span), span);
+  auto my_rank = b.Bind("my_rank", reg.Create("pld.system.rank", {ctx}, {}, span), span);
+
+  auto zero_idx = std::make_shared<ConstInt>(0, DataType::INDEX, span);
+  auto one_idx = std::make_shared<ConstInt>(1, DataType::INDEX, span);
+  auto one_i32 = std::make_shared<ConstInt>(1, DataType::INT32, span);
+  auto two_i32 = std::make_shared<ConstInt>(2, DataType::INT32, span);
+
+  // Per-chunk shape: [1, SIZE] where SIZE = target.shape[1].
+  auto size_expr = target_type->shape_[1];
+  auto chunk_shape = std::make_shared<MakeTuple>(
+      std::vector<ExprPtr>{std::make_shared<ConstInt>(1, DataType::INDEX, span), size_expr}, span);
+
+  // Helper: signal-slot offset [rank_expr, 0].
+  auto make_signal_offsets = [&](const ExprPtr& rank_expr) {
+    return std::make_shared<MakeTuple>(
+        std::vector<ExprPtr>{rank_expr, std::make_shared<ConstInt>(0, DataType::INDEX, span)}, span);
+  };
+
+  // Helper: data offset [my_rank, 0] — each rank reads/writes its own row.
+  auto my_data_offsets = std::make_shared<MakeTuple>(
+      std::vector<ExprPtr>{my_rank, std::make_shared<ConstInt>(0, DataType::INDEX, span)}, span);
+
+  // ---- Phase 2a: notify-all ----
+  b.EmitFor(
+      "peer", zero_idx, nranks_idx, one_idx,
+      [&](LoweringBuilder& body, const VarPtr& peer) {
+        body.EmitIf(
+            body.NotEq(peer, my_rank, span),
+            [&](LoweringBuilder& then_body) {
+              auto notify_call = OpRegistry::GetInstance().Create(
+                  "pld.system.notify", {signal, peer, make_signal_offsets(my_rank), one_i32},
+                  {{"op", static_cast<int>(NotifyOp::kSet)}}, span);
+              then_body.Bind("notify_ret", notify_call, span);
+            },
+            /*else_fn=*/nullptr, span);
+      },
+      span);
+
+  // ---- Phase 2b: wait-all ----
+  b.EmitFor(
+      "src", zero_idx, nranks_idx, one_idx,
+      [&](LoweringBuilder& body, const VarPtr& src) {
+        auto src_offsets = make_signal_offsets(src);
+        body.EmitIf(
+            body.NotEq(src, my_rank, span),
+            [&](LoweringBuilder& then_body) {
+              auto wait_call =
+                  OpRegistry::GetInstance().Create("pld.system.wait", {signal, src_offsets, one_i32},
+                                                   {{"cmp", static_cast<int>(WaitCmp::kGe)}}, span);
+              then_body.Bind("wait_ret", wait_call, span);
+            },
+            /*else_fn=*/nullptr, span);
+      },
+      span);
+
+  // ---- Phase 3: accumulate peers' chunks at [my_rank, 0] ----
+  auto acc_initial = b.Bind("acc_initial",
+                            reg.Create("tile.load", {target, my_data_offsets, chunk_shape, chunk_shape},
+                                       {{"target_memory", MemorySpace::Vec}, {"transpose", false}}, span),
+                            span);
+
+  auto acc_final = b.EmitForReduce(
+      "peer", zero_idx, nranks_idx, one_idx, acc_initial,
+      [&](LoweringBuilder& body, const VarPtr& peer, const VarPtr& acc) {
+        return body.EmitIfExpr(
+            body.NotEq(peer, my_rank, span),
+            [&](LoweringBuilder& then_body) {
+              auto recv = then_body.Bind(
+                  "recv",
+                  OpRegistry::GetInstance().Create("pld.tile.remote_load",
+                                                   {target, peer, my_data_offsets, chunk_shape}, {}, span),
+                  span);
+              return then_body.Bind("acc_next", then_body.Add(acc, recv, span), span);
+            },
+            [&](LoweringBuilder&) -> ExprPtr { return acc; }, span);
+      },
+      span);
+
+  // ---- Phase 3.5: post-reduce barrier (AtomicAdd 1 → wait Ge 2) ----
+  // Same WAR hazard as allreduce: fast rank could overwrite its row before
+  // slow rank reads it.  See allreduce lowering for full rationale.
+  b.EmitFor(
+      "peer2", zero_idx, nranks_idx, one_idx,
+      [&](LoweringBuilder& body, const VarPtr& peer) {
+        body.EmitIf(
+            body.NotEq(peer, my_rank, span),
+            [&](LoweringBuilder& then_body) {
+              auto notify_call = OpRegistry::GetInstance().Create(
+                  "pld.system.notify", {signal, peer, make_signal_offsets(my_rank), one_i32},
+                  {{"op", static_cast<int>(NotifyOp::kAtomicAdd)}}, span);
+              then_body.Bind("notify2_ret", notify_call, span);
+            },
+            /*else_fn=*/nullptr, span);
+      },
+      span);
+
+  b.EmitFor(
+      "src2", zero_idx, nranks_idx, one_idx,
+      [&](LoweringBuilder& body, const VarPtr& src) {
+        auto src_offsets = make_signal_offsets(src);
+        body.EmitIf(
+            body.NotEq(src, my_rank, span),
+            [&](LoweringBuilder& then_body) {
+              auto wait_call =
+                  OpRegistry::GetInstance().Create("pld.system.wait", {signal, src_offsets, two_i32},
+                                                   {{"cmp", static_cast<int>(WaitCmp::kGe)}}, span);
+              then_body.Bind("wait2_ret", wait_call, span);
+            },
+            /*else_fn=*/nullptr, span);
+      },
+      span);
+
+  // ---- Phase 4: store reduced chunk back into target[my_rank, 0] ----
+  b.Bind("store_ret", reg.Create("tile.store", {acc_final, my_data_offsets, target}, {}, span), span);
+
+  return target;
+}
+
+// ============================================================================
+// ``pld.tensor.barrier`` lowering rule
+//
+// Cross-rank barrier: notify-all (Set 1) then wait-all (Ge 1).  Pure
+// synchronisation — no data movement.  Returns the signal expression so the
+// rebind idiom (``sig = pld.tensor.barrier(sig)``) matches allreduce.
+// ============================================================================
+
+ExprPtr LowerTensorBarrierRule(const CallPtr& call, const std::vector<ExprPtr>& args, LoweringBuilder& b) {
+  const Span& span = call->span_;
+  INTERNAL_CHECK_SPAN(args.size() == 1, span) << "pld.tensor.barrier rule expects 1 arg, got " << args.size();
+  const auto& signal = args[0];
+  auto signal_type = As<DistributedTensorType>(signal->GetType());
+  INTERNAL_CHECK_SPAN(signal_type, span)
+      << "pld.tensor.barrier signal must be DistributedTensorType (deducer-rejected otherwise)";
+
+  auto& reg = OpRegistry::GetInstance();
+  auto ctx = b.Bind("ctx", reg.Create("pld.system.get_comm_ctx", {signal}, {}, span), span);
+  auto nranks_i32 = b.Bind("nranks", reg.Create("pld.system.nranks", {ctx}, {}, span), span);
+  auto nranks_idx = b.Bind("nranks_idx", std::make_shared<Cast>(nranks_i32, DataType::INDEX, span), span);
+  auto my_rank = b.Bind("my_rank", reg.Create("pld.system.rank", {ctx}, {}, span), span);
+
+  auto zero_idx = std::make_shared<ConstInt>(0, DataType::INDEX, span);
+  auto one_idx = std::make_shared<ConstInt>(1, DataType::INDEX, span);
+  auto one_i32 = std::make_shared<ConstInt>(1, DataType::INT32, span);
+
+  // Helper: build signal-slot offset [rank_expr, 0].
+  auto make_signal_offsets = [&](const ExprPtr& rank_expr) {
+    return std::make_shared<MakeTuple>(
+        std::vector<ExprPtr>{rank_expr, std::make_shared<ConstInt>(0, DataType::INDEX, span)}, span);
+  };
+
+  // ---- Phase 1: notify-all (Set cell[my_rank, 0] on each peer to 1) ----
+  b.EmitFor(
+      "peer", zero_idx, nranks_idx, one_idx,
+      [&](LoweringBuilder& body, const VarPtr& peer) {
+        body.EmitIf(
+            body.NotEq(peer, my_rank, span),
+            [&](LoweringBuilder& then_body) {
+              auto notify_call = OpRegistry::GetInstance().Create(
+                  "pld.system.notify", {signal, peer, make_signal_offsets(my_rank), one_i32},
+                  {{"op", static_cast<int>(NotifyOp::kSet)}}, span);
+              then_body.Bind("notify_ret", notify_call, span);
+            },
+            /*else_fn=*/nullptr, span);
+      },
+      span);
+
+  // ---- Phase 2: wait-all (cell[src, 0] >= 1) ----
+  b.EmitFor(
+      "src", zero_idx, nranks_idx, one_idx,
+      [&](LoweringBuilder& body, const VarPtr& src) {
+        auto src_offsets = make_signal_offsets(src);
+        body.EmitIf(
+            body.NotEq(src, my_rank, span),
+            [&](LoweringBuilder& then_body) {
+              auto wait_call =
+                  OpRegistry::GetInstance().Create("pld.system.wait", {signal, src_offsets, one_i32},
+                                                   {{"cmp", static_cast<int>(WaitCmp::kGe)}}, span);
+              then_body.Bind("wait_ret", wait_call, span);
+            },
+            /*else_fn=*/nullptr, span);
+      },
+      span);
+
+  // Rebind: return the signal so the LHS Var retains the DistributedTensor view.
+  return signal;
+}
+
 // ----------------------------------------------------------------------------
 // Composite-op dispatch table.
 //
@@ -632,11 +1085,6 @@ ExprPtr LowerTensorAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>
 // AssignStmt (or a composite-op Call embedded directly in a ReturnStmt) only
 // when the callee name appears here. Adding a new composite op = add a rule
 // function above + one row in ``kRules``; the mutator below needs no change.
-//
-// Today the only rules are ``tile.sin`` / ``tile.cos``. The pass is idempotent
-// provided each rule emits only ops not listed here (the sin/cos recipe emits
-// only ``tile.muls`` / ``tile.adds`` / ``tile.add`` / ``tile.sub`` / ``tile.mul`` /
-// ``tile.cast``).
 //
 // When the table grows past a handful of entries — or a rule wants its own
 // translation unit — promote this back to a standalone registry under
@@ -647,6 +1095,10 @@ CompositeLoweringFn LookupCompositeRule(const std::string& op_name) {
       {"tile.sin", &LowerSinRule},
       {"tile.cos", &LowerCosRule},
       {"pld.tensor.allreduce", &LowerTensorAllReduceRule},
+      {"pld.tensor.allgather", &LowerTensorAllGatherRule},
+      {"pld.tensor.reduce_scatter", &LowerTensorReduceScatterRule},
+      {"pld.tensor.barrier", &LowerTensorBarrierRule},
+      {"pld.tensor.broadcast", &LowerTensorBroadcastRule},
   };
   auto it = kRules.find(op_name);
   return it == kRules.end() ? nullptr : it->second;

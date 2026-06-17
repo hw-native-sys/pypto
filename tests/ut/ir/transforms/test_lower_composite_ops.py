@@ -667,5 +667,312 @@ def test_allreduce_deducer_rejects_unsupported_reduce_op():
                 return data
 
 
+# ============================================================================
+# pld.tensor.barrier lowering
+# ============================================================================
+
+_BARRIER_NRANKS = 2
+_BARRIER_REQUIRED_OPS = {
+    "pld.system.get_comm_ctx",
+    "pld.system.nranks",
+    "pld.system.rank",
+    "pld.system.notify",
+    "pld.system.wait",
+}
+
+
+def _build_barrier_before():
+    """Build a minimal Before program that calls ``pld.tensor.barrier``."""
+    nr = _BARRIER_NRANKS
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def barrier_step(
+            self,
+            signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+        ) -> pld.DistributedTensor[[nr, 1], pl.INT32]:
+            signal = pld.tensor.barrier(signal)
+            return signal
+
+    return Before
+
+
+def test_barrier_is_decomposed_to_primitives():
+    """The composite ``pld.tensor.barrier`` Call is replaced by notify-all +
+    wait-all; no occurrence survives the pass."""
+    Before = _build_barrier_before()
+    After = passes.lower_composite_ops()(Before)
+    op_names = set(_collect_op_names(After))
+
+    assert "pld.tensor.barrier" not in op_names, (
+        "lower_composite_ops must remove the composite barrier call entirely"
+    )
+    missing = _BARRIER_REQUIRED_OPS - op_names
+    assert not missing, f"lowered IR missing expected ops: {missing}"
+
+
+def test_barrier_emits_for_and_if_control_flow():
+    """Barrier emits 2 ForStmts + 2 IfStmts: notify-all + wait-all."""
+    Before = _build_barrier_before()
+    After = passes.lower_composite_ops()(Before)
+    collector = _StmtKindCollector()
+    collector.visit_program(After)
+
+    assert collector.for_count == 2, f"expected 2 ForStmts (notify, wait), got {collector.for_count}"
+    assert collector.if_count == 2, f"expected 2 IfStmts (one per ForStmt body), got {collector.if_count}"
+
+
+def test_barrier_lowering_is_idempotent():
+    """Running the pass on already-lowered barrier IR is a no-op."""
+    Before = _build_barrier_before()
+    once = passes.lower_composite_ops()(Before)
+    twice = passes.lower_composite_ops()(once)
+    ir.assert_structural_equal(twice, once)
+
+
+# ============================================================================
+# pld.tensor.broadcast lowering
+# ============================================================================
+
+_BROADCAST_SIZE = 16
+_BROADCAST_NRANKS = 2
+_BROADCAST_REQUIRED_OPS = {
+    "pld.system.get_comm_ctx",
+    "pld.system.nranks",
+    "pld.system.rank",
+    "pld.system.notify",
+    "pld.system.wait",
+    "pld.tile.remote_load",
+    "tile.store",
+}
+
+
+def _build_broadcast_before():
+    """Build a minimal Before program that calls ``pld.tensor.broadcast``."""
+    SIZE = _BROADCAST_SIZE
+    nr = _BROADCAST_NRANKS
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def broadcast_step(
+            self,
+            data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+        ) -> pld.DistributedTensor[[1, SIZE], pl.FP32]:
+            data = pld.tensor.broadcast(data, signal, root=0)
+            return data
+
+    return Before
+
+
+def test_broadcast_is_decomposed_to_primitives():
+    """The composite ``pld.tensor.broadcast`` Call is replaced by its
+    3-phase decomposition; no occurrence survives the pass."""
+    Before = _build_broadcast_before()
+    After = passes.lower_composite_ops()(Before)
+    op_names = set(_collect_op_names(After))
+
+    assert "pld.tensor.broadcast" not in op_names, (
+        "lower_composite_ops must remove the composite broadcast call entirely"
+    )
+    missing = _BROADCAST_REQUIRED_OPS - op_names
+    assert not missing, f"lowered IR missing expected ops: {missing}"
+
+
+def test_broadcast_emits_for_and_if_control_flow():
+    """Broadcast emits 2 ForStmts + 2 IfStmts: notify-all + wait-all.
+    Phase 3 (remote_load + store) has no loop."""
+    Before = _build_broadcast_before()
+    After = passes.lower_composite_ops()(Before)
+    collector = _StmtKindCollector()
+    collector.visit_program(After)
+
+    assert collector.for_count == 2, f"expected 2 ForStmts (notify, wait), got {collector.for_count}"
+    assert collector.if_count == 2, f"expected 2 IfStmts (one per ForStmt body), got {collector.if_count}"
+
+
+def test_broadcast_lowering_is_idempotent():
+    """Running the pass on already-lowered broadcast IR is a no-op."""
+    Before = _build_broadcast_before()
+    once = passes.lower_composite_ops()(Before)
+    twice = passes.lower_composite_ops()(once)
+    ir.assert_structural_equal(twice, once)
+
+
+# ============================================================================
+# pld.tensor.allgather lowering
+# ============================================================================
+
+_ALLGATHER_SIZE = 16
+_ALLGATHER_NRANKS = 2
+_ALLGATHER_REQUIRED_OPS = {
+    "pld.system.get_comm_ctx",
+    "pld.system.nranks",
+    "pld.system.rank",
+    "pld.system.notify",
+    "pld.system.wait",
+    "pld.tile.remote_load",
+    "tile.store",
+    "tile.load",
+    "tile.concat",
+}
+
+
+def _build_allgather_before():
+    """Build a minimal Before program that calls ``pld.tensor.allgather``."""
+    SIZE = _ALLGATHER_SIZE
+    nr = _ALLGATHER_NRANKS
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def gather_step(
+            self,
+            inp: pl.Tensor[[1, SIZE], pl.FP32],
+            out: pl.Out[pl.Tensor[[1, nr * SIZE], pl.FP32]],
+            data: pl.InOut[pld.DistributedTensor[[nr, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, nr * SIZE], pl.FP32]:
+            chunk = pl.load(inp, [0, 0], [1, SIZE])
+            gathered = pld.tensor.allgather(chunk, data, signal)
+            return pl.store(gathered, [0, 0], out)
+
+    return Before
+
+
+def test_allgather_is_decomposed_to_primitives():
+    """The composite ``pld.tensor.allgather`` Call is replaced by its
+    decompose; no occurrence survives the pass."""
+    Before = _build_allgather_before()
+    After = passes.lower_composite_ops()(Before)
+    op_names = set(_collect_op_names(After))
+
+    assert "pld.tensor.allgather" not in op_names, (
+        "lower_composite_ops must remove the composite allgather call entirely"
+    )
+    missing = _ALLGATHER_REQUIRED_OPS - op_names
+    assert not missing, f"lowered IR missing expected ops: {missing}"
+
+
+def test_allgather_emits_for_and_if_control_flow():
+    """Allgather emits 2 ForStmts + 2 IfStmts: notify-all, wait-all.
+
+    Phase 3 (gather) uses pld.tile.remote_load for all ranks including
+    self (following the simpler reference), so there is no per-rank
+    IfStmt — the self-read falls out of the same remote_load path
+    via HCCL identity mapping."""
+    Before = _build_allgather_before()
+    After = passes.lower_composite_ops()(Before)
+    collector = _StmtKindCollector()
+    collector.visit_program(After)
+
+    assert collector.for_count == 2, f"expected 2 ForStmts (notify, wait), got {collector.for_count}"
+    assert collector.if_count == 2, f"expected 2 IfStmts (notify-all + wait-all), got {collector.if_count}"
+
+
+def test_allgather_lowering_is_idempotent():
+    """Running the pass on already-lowered allgather IR is a no-op."""
+    Before = _build_allgather_before()
+    once = passes.lower_composite_ops()(Before)
+    twice = passes.lower_composite_ops()(once)
+    ir.assert_structural_equal(twice, once)
+
+
+# ============================================================================
+# pld.tensor.reduce_scatter lowering
+# ============================================================================
+
+_REDUCE_SCATTER_SIZE = 16
+_REDUCE_SCATTER_NRANKS = 2
+_REDUCE_SCATTER_REQUIRED_OPS = {
+    "pld.system.get_comm_ctx",
+    "pld.system.nranks",
+    "pld.system.rank",
+    "pld.system.notify",
+    "pld.system.wait",
+    "pld.tile.remote_load",
+    "tile.add",
+    "tile.load",
+    "tile.store",
+}
+
+
+def _build_reduce_scatter_before():
+    """Build a minimal Before program that calls ``pld.tensor.reduce_scatter``."""
+    SIZE = _REDUCE_SCATTER_SIZE
+    nr = _REDUCE_SCATTER_NRANKS
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def reduce_step(
+            self,
+            data: pl.InOut[pld.DistributedTensor[[nr, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+        ) -> pld.DistributedTensor[[nr, SIZE], pl.FP32]:
+            data = pld.tensor.reduce_scatter(data, signal, op=pld.ReduceOp.Sum)
+            return data
+
+    return Before
+
+
+def test_reduce_scatter_is_decomposed_to_primitives():
+    """The composite ``pld.tensor.reduce_scatter`` Call is replaced by its
+    5-phase decomposition; no occurrence survives the pass."""
+    Before = _build_reduce_scatter_before()
+    After = passes.lower_composite_ops()(Before)
+    op_names = set(_collect_op_names(After))
+
+    assert "pld.tensor.reduce_scatter" not in op_names, (
+        "lower_composite_ops must remove the composite reduce_scatter call entirely"
+    )
+    missing = _REDUCE_SCATTER_REQUIRED_OPS - op_names
+    assert not missing, f"lowered IR missing expected ops: {missing}"
+
+
+def test_reduce_scatter_emits_for_and_if_control_flow():
+    """Reduce-scatter emits 5 ForStmts + 5 IfStmts (same shape as allreduce):
+    notify, wait, reduce, re-notify, re-wait."""
+    Before = _build_reduce_scatter_before()
+    After = passes.lower_composite_ops()(Before)
+    collector = _StmtKindCollector()
+    collector.visit_program(After)
+
+    assert collector.for_count == 5, (
+        f"expected 5 ForStmts (notify, wait, reduce, re-notify, re-wait), got {collector.for_count}"
+    )
+    assert collector.if_count == 5, f"expected 5 IfStmts (one per ForStmt body), got {collector.if_count}"
+
+
+def test_reduce_scatter_lowering_is_idempotent():
+    """Running the pass on already-lowered reduce_scatter IR is a no-op."""
+    Before = _build_reduce_scatter_before()
+    once = passes.lower_composite_ops()(Before)
+    twice = passes.lower_composite_ops()(once)
+    ir.assert_structural_equal(twice, once)
+
+
+def test_reduce_scatter_deducer_rejects_unsupported_reduce_op():
+    """First-version lowering supports ``ReduceOp.Sum`` only — the deducer
+    must reject other variants."""
+    SIZE = _REDUCE_SCATTER_SIZE
+    nr = _REDUCE_SCATTER_NRANKS
+
+    with pytest.raises((ValueError, TypeError, ParserError)):
+
+        @pl.program
+        class BadOp:
+            @pl.function(type=pl.FunctionType.InCore)
+            def f(
+                self,
+                data: pl.InOut[pld.DistributedTensor[[nr, SIZE], pl.FP32]],
+                signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+            ) -> pl.Tensor[[nr, SIZE], pl.FP32]:
+                data = pld.tensor.reduce_scatter(data, signal, op=pld.ReduceOp.Max)
+                return data
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
