@@ -8246,6 +8246,232 @@ class OutWindowExternalizer {
   std::unordered_map<std::string, std::unordered_map<size_t, VarPtr>> output_dynamic_extent_dims_by_func_;
 };
 
+class RuntimeCurrentAggregator {
+ public:
+  explicit RuntimeCurrentAggregator(OutWindowExternalizer::OutputWindowPolicy output_window_policy,
+                                    OutWindowExternalizer::WindowRewritePolicy window_rewrite_policy)
+      : output_window_policy_(output_window_policy), window_rewrite_policy_(window_rewrite_policy) {}
+
+  ProgramPtr Run(const ProgramPtr& program) {
+    if (output_window_policy_ != OutWindowExternalizer::OutputWindowPolicy::CoalescePieces ||
+        window_rewrite_policy_ == OutWindowExternalizer::WindowRewritePolicy::None) {
+      return program;
+    }
+
+    std::vector<FunctionPtr> new_functions;
+    new_functions.reserve(program->functions_.size() + 1);
+    std::vector<FunctionPtr> generated_functions;
+    std::unordered_map<const Type*, FunctionPtr> barrier_by_type;
+    std::unordered_set<std::string> used_names;
+    for (const auto& [_, func] : program->functions_) {
+      if (func) used_names.insert(func->name_);
+    }
+    bool changed = false;
+
+    for (const auto& [_, func] : program->functions_) {
+      if (!func || func->func_type_ != FunctionType::Orchestration) {
+        new_functions.push_back(func);
+        continue;
+      }
+
+      OrchMutator mutator(program, &generated_functions, &barrier_by_type, &used_names);
+      auto new_body = mutator.VisitStmt(func->body_);
+      if (new_body.get() == func->body_.get()) {
+        new_functions.push_back(func);
+        continue;
+      }
+
+      changed = true;
+      new_functions.push_back(std::make_shared<Function>(
+          func->name_, func->params_, func->param_directions_, func->return_types_, new_body, func->span_,
+          func->func_type_, func->level_, func->role_, func->attrs_));
+    }
+
+    if (!changed) return program;
+    new_functions.insert(new_functions.end(), generated_functions.begin(), generated_functions.end());
+    return std::make_shared<Program>(new_functions, program->name_, program->span_);
+  }
+
+ private:
+  class OrchMutator : public IRMutator {
+   public:
+    OrchMutator(ProgramPtr program, std::vector<FunctionPtr>* generated_functions,
+                std::unordered_map<const Type*, FunctionPtr>* barrier_by_type,
+                std::unordered_set<std::string>* used_names)
+        : program_(std::move(program)),
+          generated_functions_(generated_functions),
+          barrier_by_type_(barrier_by_type),
+          used_names_(used_names) {}
+
+   protected:
+    StmtPtr VisitStmt_(const SeqStmtsPtr& op) override {
+      std::vector<StmtPtr> new_stmts;
+      new_stmts.reserve(op->stmts_.size());
+      bool changed = false;
+
+      std::unordered_map<const Var*, VarPtr> current_by_source;
+      for (size_t i = 0; i < op->stmts_.size(); ++i) {
+        auto stmt = VisitStmt(op->stmts_[i]);
+        if (stmt.get() != op->stmts_[i].get()) changed = true;
+
+        if (auto inserted = TryInsertCurrentBarrier(stmt, i + 1, op->stmts_, current_by_source)) {
+          new_stmts.push_back(stmt);
+          new_stmts.push_back(*inserted);
+          changed = true;
+          continue;
+        }
+
+        if (!current_by_source.empty()) {
+          auto rewritten = transform_utils::Substitute(stmt, current_by_source);
+          if (rewritten.get() != stmt.get()) {
+            stmt = rewritten;
+            changed = true;
+          }
+        }
+        new_stmts.push_back(stmt);
+      }
+
+      if (!changed) return op;
+      return SeqStmts::Flatten(std::move(new_stmts), op->span_);
+    }
+
+   private:
+    static bool IsMlpSiluTileVar(const VarPtr& var) {
+      return var && var->name_hint_.find("mlp_silu_tile") != std::string::npos;
+    }
+
+    static bool TensorShapesEqual(const TensorTypePtr& lhs, const TensorTypePtr& rhs) {
+      if (!lhs || !rhs || lhs->shape_.size() != rhs->shape_.size() || lhs->dtype_ != rhs->dtype_) {
+        return false;
+      }
+      for (size_t i = 0; i < lhs->shape_.size(); ++i) {
+        if (!AreExprsEqual(lhs->shape_[i], rhs->shape_[i])) return false;
+      }
+      return true;
+    }
+
+    static bool LoopWritesMlpSiluTile(const ForStmtPtr& loop, const VarPtr& source) {
+      if (!loop || !source) return false;
+      for (size_t i = 0; i < loop->return_vars_.size(); ++i) {
+        if (loop->return_vars_[i].get() != source.get()) continue;
+        if (i >= loop->iter_args_.size()) return false;
+        auto init = AsVarLike(loop->iter_args_[i]->initValue_);
+        return IsMlpSiluTileVar(init);
+      }
+      return false;
+    }
+
+    bool HasFullMlpSiluConsumer(const std::vector<StmtPtr>& stmts, size_t begin, const VarPtr& source) const {
+      auto source_ty = As<TensorType>(source->GetType());
+      if (!source_ty) return false;
+      for (size_t i = begin; i < stmts.size(); ++i) {
+        auto loop = As<ForStmt>(stmts[i]);
+        if (!loop) break;
+        if (LoopConsumesFullMlpSilu(loop, source, source_ty)) return true;
+      }
+      return false;
+    }
+
+    bool LoopConsumesFullMlpSilu(const ForStmtPtr& loop, const VarPtr& source,
+                                 const TensorTypePtr& source_ty) const {
+      class Finder : public IRVisitor {
+       public:
+        Finder(const ProgramPtr& program, const VarPtr& source, const TensorTypePtr& source_ty)
+            : program_(program), source_(source), source_ty_(source_ty) {}
+
+        [[nodiscard]] bool found() const { return found_; }
+
+       protected:
+        void VisitExpr_(const CallPtr& op) override {
+          if (found_) return;
+          auto callee_name = GetCallFuncName(op);
+          if (callee_name.find("down_proj") != std::string::npos) {
+            auto callee = program_ ? program_->GetFunction(callee_name) : nullptr;
+            for (size_t i = 0; i < op->args_.size(); ++i) {
+              if (AsVarLike(op->args_[i]).get() != source_.get()) continue;
+              if (!callee || i >= callee->param_directions_.size() ||
+                  callee->param_directions_[i] != ParamDirection::In) {
+                continue;
+              }
+              if (TensorShapesEqual(As<TensorType>(op->args_[i]->GetType()), source_ty_)) {
+                found_ = true;
+                return;
+              }
+            }
+          }
+          IRVisitor::VisitExpr_(op);
+        }
+
+       private:
+        ProgramPtr program_;
+        VarPtr source_;
+        TensorTypePtr source_ty_;
+        bool found_ = false;
+      };
+
+      Finder finder(program_, source, source_ty);
+      finder.VisitStmt(loop);
+      return finder.found();
+    }
+
+    std::optional<StmtPtr> TryInsertCurrentBarrier(
+        const StmtPtr& stmt, size_t next_index, const std::vector<StmtPtr>& stmts,
+        std::unordered_map<const Var*, VarPtr>& current_by_source) {
+      auto loop = As<ForStmt>(stmt);
+      if (!loop) return std::nullopt;
+      for (const auto& ret : loop->return_vars_) {
+        if (!LoopWritesMlpSiluTile(loop, ret)) continue;
+        if (!HasFullMlpSiluConsumer(stmts, next_index, ret)) continue;
+        if (current_by_source.count(ret.get()) != 0) continue;
+
+        auto current =
+            std::make_shared<Var>(ret->name_hint_ + "__runtime_current", ret->GetType(), ret->span_);
+        auto barrier = GetOrCreateBarrier(ret->GetType());
+        auto gvar = std::make_shared<GlobalVar>(barrier->name_);
+        auto attrs = WithArgDirectionsAttr({}, {ArgDirection::InOut});
+        auto call = std::make_shared<Call>(gvar, std::vector<ExprPtr>{ret},
+                                           std::vector<std::pair<std::string, std::any>>{}, std::move(attrs),
+                                           ret->GetType(), ret->span_);
+        current_by_source.emplace(ret.get(), current);
+        return std::make_shared<AssignStmt>(current, call, ret->span_);
+      }
+      return std::nullopt;
+    }
+
+    FunctionPtr GetOrCreateBarrier(const TypePtr& tensor_type) {
+      auto it = barrier_by_type_->find(tensor_type.get());
+      if (it != barrier_by_type_->end()) return it->second;
+
+      auto name = MakeUniqueBarrierName();
+      auto param = std::make_shared<Var>("current", tensor_type, Span::unknown());
+      auto body = std::make_shared<ReturnStmt>(std::vector<ExprPtr>{param}, Span::unknown());
+      auto func = std::make_shared<Function>(
+          name, std::vector<VarPtr>{param}, std::vector<ParamDirection>{ParamDirection::InOut},
+          std::vector<TypePtr>{tensor_type}, body, Span::unknown(), FunctionType::InCore);
+      barrier_by_type_->emplace(tensor_type.get(), func);
+      generated_functions_->push_back(func);
+      return func;
+    }
+
+    std::string MakeUniqueBarrierName() {
+      const std::string base_name = "__pypto_runtime_current_barrier";
+      if (used_names_->insert(base_name).second) return base_name;
+      for (size_t suffix = 1;; ++suffix) {
+        auto candidate = base_name + "_" + std::to_string(suffix);
+        if (used_names_->insert(candidate).second) return candidate;
+      }
+    }
+
+    ProgramPtr program_;
+    std::vector<FunctionPtr>* generated_functions_;
+    std::unordered_map<const Type*, FunctionPtr>* barrier_by_type_;
+    std::unordered_set<std::string>* used_names_;
+  };
+
+  OutWindowExternalizer::OutputWindowPolicy output_window_policy_;
+  OutWindowExternalizer::WindowRewritePolicy window_rewrite_policy_;
+};
+
 }  // namespace
 
 // ============================================================================
@@ -8308,7 +8534,11 @@ Pass OptimizeOrchTensors(const std::string& output_window_policy, const std::str
 
     // Pattern 5: Static out-window externalization for statically provable
     // local-window writes in outlined callees.
-    return OutWindowExternalizer(parsed_output_window_policy, parsed_window_rewrite_policy).Run(p4);
+    auto p5 = OutWindowExternalizer(parsed_output_window_policy, parsed_window_rewrite_policy).Run(p4);
+
+    // Pattern 6: Insert a runtime-visible current marker for the prefill
+    // mlp_silu_tile producer -> repeated down_proj full-reader fan-in shape.
+    return RuntimeCurrentAggregator(parsed_output_window_policy, parsed_window_rewrite_policy).Run(p5);
   };
 
   return CreateProgramPass(pass_func, "OptimizeOrchTensors", kOptimizeOrchTensorsProperties);

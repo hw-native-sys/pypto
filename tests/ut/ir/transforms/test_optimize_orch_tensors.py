@@ -1021,6 +1021,73 @@ class TestSliceInputStrides:
 class TestOutWindowExternalizer:
     """Pattern 5: static out-window externalization."""
 
+    def test_coalesce_inserts_mlp_silu_runtime_current_before_full_down_proj_read(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def silu(
+                self,
+                src: pl.Tensor[[64, 256], pl.FP32],
+                col: pl.Scalar[pl.INDEX],
+                mlp_silu_tile: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+            ) -> pl.Tensor[[64, 256], pl.FP32]:
+                tile: pl.Tile[[64, 128], pl.FP32] = pl.tile.load(src, [0, col], [64, 128], [64, 128])
+                return pl.tile.store(tile, [0, col], mlp_silu_tile)
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def down_proj(
+                self,
+                mlp_silu_tile: pl.Tensor[[64, 256], pl.FP32],
+                col: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+            ) -> tuple[pl.Tensor[[64, 256], pl.FP32], pl.Tensor[[64, 256], pl.FP32]]:
+                tile: pl.Tile[[64, 128], pl.FP32] = pl.tile.load(
+                    mlp_silu_tile, [0, col], [64, 128], [64, 128]
+                )
+                next_out: pl.Tensor[[64, 256], pl.FP32] = pl.tile.store(tile, [0, col], out)
+                return next_out, mlp_silu_tile
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                src: pl.Tensor[[64, 256], pl.FP32],
+                mlp_silu_tile: pl.Tensor[[64, 256], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+            ) -> pl.Tensor[[64, 256], pl.FP32]:
+                for i, (mlp_silu_tile_iter,) in pl.range(0, 2, init_values=(mlp_silu_tile,)):
+                    col: pl.Scalar[pl.INDEX] = i * 128
+                    mlp_silu_tile_next = self.silu(src, col, mlp_silu_tile_iter)
+                    mlp_silu_tile_rv = pl.yield_(mlp_silu_tile_next)
+
+                for j, (out_iter,) in pl.range(0, 2, init_values=(out,)):
+                    col: pl.Scalar[pl.INDEX] = j * 128
+                    result = self.down_proj(mlp_silu_tile_rv, col, out_iter)
+                    out_next: pl.Tensor[[64, 256], pl.FP32] = result[0]
+                    out_rv = pl.yield_(out_next)
+                return out_rv
+
+        coalesced = _run_to_optimize_orch_tensors(
+            Before,
+            output_window_policy="coalesce_pieces",
+            window_rewrite_policy="all",
+        )
+
+        barrier = coalesced.get_function("__pypto_runtime_current_barrier")
+        assert barrier is not None
+        assert barrier.param_directions[0] == ir.ParamDirection.InOut
+        printed_main = ir.python_print(_get_function(coalesced, "main"))
+        assert "__pypto_runtime_current_barrier(mlp_silu_tile_rv)" in printed_main
+        assert "mlp_silu_tile_rv__runtime_current, col__ssa_v0_1, out_iter__window" in printed_main
+
+        exact = _run_to_optimize_orch_tensors(
+            Before,
+            output_window_policy="exact_pieces",
+            window_rewrite_policy="all",
+        )
+
+        assert exact.get_function("__pypto_runtime_current_barrier") is None
+        assert "__runtime_current" not in ir.python_print(_get_function(exact, "main"))
+
     def test_pure_input_window_consumer_rewrites_to_windowed_clone(self):
         @pl.program
         class Before:
