@@ -3229,13 +3229,10 @@ class ASTParser:
                     )
                 seen_split = True
                 split_mode, slot_num = parsed
-                if slot_num is not None and (split_mode is None or split_mode == ir.SplitMode.NONE):
-                    raise ParserSyntaxError(
-                        "pl.split(slot_num=...) is only valid with a cross-core split mode",
-                        span=self.span_tracker.get_span(entry),
-                        hint="Set mode to pl.SplitMode.UP_DOWN or pl.SplitMode.LEFT_RIGHT, "
-                        "or drop slot_num=.",
-                    )
+                # slot_num is valid with any split mode, including SplitMode.NONE:
+                # a NONE mixed kernel still drives a cube->vector cross-core pipe
+                # (on a2a3 via dual-AIV dispatch), and ExpandMixedKernel sizes
+                # that ring from slot_num regardless of split mode.
                 split_slot_num = slot_num
             else:
                 raise ParserSyntaxError(

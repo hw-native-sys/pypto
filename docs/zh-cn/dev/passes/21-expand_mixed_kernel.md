@@ -103,7 +103,9 @@ with pl.at(level=pl.Level.CORE_GROUP,
 函数的 `slot_num` 属性，并在此 Pass 读取。设置后它同时决定保留 buffer 的大小
 （`slot_size * slot_num`）与发射的 `initialize_pipe` 的 `slot_num` 属性，使 PTOAS
 与自动保留的 buffer 保持一致。省略时沿用 PTOAS 推导的默认值。`slot_num` 必须为
-正数，且仅在 scope 启用跨核拆分（`UP_DOWN` / `LEFT_RIGHT`）时生效。
+正数，且适用于任意 split scope，包括 `SplitMode.NONE`：NONE mixed kernel 仍会驱动
+cube->vector pipe（a2a3 上通过双 AIV 派发——见下文），其环深同样由 `slot_num`
+决定。仅当被 outline 的 scope 最终没有跨核操作时才会被忽略。
 
 > 将逻辑环深与更小的本地驻留窗口解耦（`local_slot_num < slot_num`，仅 a2/a3 的
 > 优化）目前尚未在自动拆分路径暴露——如需该能力请使用手动的

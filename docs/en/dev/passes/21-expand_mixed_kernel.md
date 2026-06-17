@@ -105,8 +105,10 @@ The value is carried as the `slot_num` scope attr, propagated by
 When set it drives **both** the reserved buffer (`slot_size * slot_num`) and the
 emitted `initialize_pipe` `slot_num` attribute, so PTOAS and the auto-reserved
 buffer stay consistent. Omitting it keeps the PTOAS-derived default. `slot_num`
-must be positive and only applies when the scope enables a cross-core split
-(`UP_DOWN` / `LEFT_RIGHT`).
+must be positive and applies to any split scope, including `SplitMode.NONE`: a
+NONE mixed kernel still drives a cube->vector pipe (on a2a3 via dual-AIV
+dispatch — see below), so its ring is sized from `slot_num` too. It is ignored
+only when the outlined scope ends up with no cross-core ops.
 
 > Decoupling the logical ring depth from a smaller local resident window
 > (`local_slot_num < slot_num`, an a2/a3-only optimisation) is not yet exposed

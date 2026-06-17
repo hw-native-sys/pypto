@@ -59,8 +59,11 @@ class Split(Optimization):
             the PTOAS-derived default (8 unidirectional, 4 per direction
             bidirectional). When set, both the reserved buffer
             (``slot_size * slot_num``) and the emitted ``initialize_pipe``
-            ``slot_num`` attribute use this value. Only meaningful when ``mode``
-            actually enables a split (``UP_DOWN`` / ``LEFT_RIGHT``).
+            ``slot_num`` attribute use this value. Valid with any ``mode``,
+            including ``SplitMode.NONE``: a NONE mixed kernel still drives a
+            cube→vector pipe (on Ascend910B via dual-AIV dispatch), so
+            ``slot_num`` sizes that ring regardless of split mode. It is ignored
+            only when the outlined scope ends up with no cross-core ops.
     """
 
     mode: SplitMode

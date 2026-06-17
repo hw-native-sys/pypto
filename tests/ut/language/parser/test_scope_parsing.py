@@ -788,6 +788,34 @@ class TestSpmdOptimizations:
         assert "slot_num=12" in printed
         assert Prog.as_python() == parse_program(printed).as_python()
 
+    def test_for_spmd_split_none_slot_num_roundtrips(self):
+        """``slot_num`` is valid with ``SplitMode.NONE`` on the for-spmd form and
+        survives a print -> reparse cycle (NONE mixed kernel still drives a
+        cube->vector pipe)."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                for i in pl.spmd(4, optimizations=[pl.split(pl.SplitMode.NONE, slot_num=8)]):
+                    offset = i * 128
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
+                    out = pl.store(t, [offset, 0], out)
+                return out
+
+        main_func = list(Prog.functions.values())[0]
+        spmd = self._unique_descendant(main_func.body, ir.SpmdScopeStmt)
+        incore = self._unique_descendant(spmd.body, ir.InCoreScopeStmt)
+        assert incore.split == ir.SplitMode.NONE
+        assert incore.attrs.get("slot_num") == 8
+        printed = Prog.as_python()
+        assert "pl.split(pl.SplitMode.NONE, slot_num=8)" in printed
+        assert Prog.as_python() == parse_program(printed).as_python()
+
     def test_at_incore_split_slot_num_roundtrips(self):
         """``slot_num`` survives a print -> reparse cycle on the pl.at form."""
 
@@ -809,21 +837,30 @@ class TestSpmdOptimizations:
         assert "slot_num=16" in printed
         assert Prog.as_python() == parse_program(printed).as_python()
 
-    def test_split_slot_num_requires_split_mode(self):
-        """``slot_num`` with ``SplitMode.NONE`` is rejected (no cross-core ring)."""
-        src = (
-            "import pypto.language as pl\n\n"
-            "@pl.program\n"
-            "class P:\n"
-            "    @pl.function\n"
-            "    def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:\n"
-            "        with pl.at(level=pl.Level.CORE_GROUP, "
-            "optimizations=[pl.split(pl.SplitMode.NONE, slot_num=8)]):\n"
-            "            y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)\n"
-            "        return y\n"
-        )
-        with pytest.raises(ParserSyntaxError, match="only valid with a cross-core split"):
-            parse_program(src)
+    def test_split_slot_num_allowed_with_none_mode(self):
+        """``slot_num`` is valid with ``SplitMode.NONE``: a NONE mixed kernel
+        still drives a cube->vector pipe (a2a3 dual-AIV dispatch), so the
+        scope records ``slot_num`` alongside ``split=SplitMode.NONE`` and the
+        attr survives a print -> reparse cycle."""
+
+        @pl.program
+        class Prog:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(
+                    level=pl.Level.CORE_GROUP,
+                    optimizations=[pl.split(pl.SplitMode.NONE, slot_num=8)],
+                ):
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
+        main_func = list(Prog.functions.values())[0]
+        incore = self._unique_descendant(main_func.body, ir.InCoreScopeStmt)
+        assert incore.split == ir.SplitMode.NONE
+        assert incore.attrs.get("slot_num") == 8
+        printed = Prog.as_python()
+        assert "slot_num=8" in printed
+        assert Prog.as_python() == parse_program(printed).as_python()
 
     def test_split_slot_num_must_be_positive(self):
         """A non-positive ``slot_num`` literal is rejected."""

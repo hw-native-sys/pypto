@@ -73,6 +73,15 @@ std::string SplitModeToPythonString(SplitMode mode) {
   throw pypto::TypeError("Unknown SplitMode");
 }
 
+/// True when a scope must emit a ``pl.split(...)`` optimization entry: it carries
+/// a concrete split mode (UP_DOWN / LEFT_RIGHT) or a ``slot_num`` ring depth.
+/// ``slot_num`` is valid with ``SplitMode.None`` too (a NONE mixed kernel still
+/// drives a cube->vector pipe), so a bare ``slot_num`` forces the entry.
+bool ScopeHasSplitInfo(const std::optional<SplitMode>& split, const ScopeStmtPtr& slot_holder) {
+  const bool has_mode = split.has_value() && split.value() != SplitMode::None;
+  return has_mode || (slot_holder && slot_holder->HasAttr("slot_num"));
+}
+
 /// Convert cast round mode integer to its string name for printing.
 /// Inverse of the CAST_MODE_NAMES mapping in python/pypto/ir/utils.py.
 std::string CastModeToString(int mode) {
@@ -1689,15 +1698,15 @@ void IRPythonPrinter::VisitStmt_(const HierarchyScopeStmtPtr& op) {
 
 void IRPythonPrinter::VisitStmt_(const InCoreScopeStmtPtr& op) {
   stream_ << "with " << prefix_ << ".at(level=" << prefix_ << ".Level.CORE_GROUP";
-  if (op->split_.has_value() && op->split_.value() != SplitMode::None) {
-    // The deprecated ``split=`` kwarg cannot carry a ring depth, so switch to
-    // the ``optimizations=[pl.split(mode, slot_num=N)]`` form whenever slot_num
-    // is set; otherwise keep the compact ``split=`` form (no churn).
-    if (op->HasAttr("slot_num")) {
-      PrintSplitOptimizations(op->split_.value(), op);
-    } else {
-      stream_ << ", split=" << prefix_ << ".SplitMode." << SplitModeToPythonString(op->split_.value());
-    }
+  if (op->HasAttr("slot_num")) {
+    // slot_num accompanies any split mode, including SplitMode.None (a NONE mixed
+    // kernel still drives a cube->vector pipe). The deprecated ``split=`` kwarg
+    // cannot carry a ring depth, so emit the
+    // ``optimizations=[pl.split(mode, slot_num=N)]`` form whenever slot_num is set.
+    PrintSplitOptimizations(op->split_.value_or(SplitMode::None), op);
+  } else if (op->split_.has_value() && op->split_.value() != SplitMode::None) {
+    // No ring depth — keep the compact ``split=`` form (no churn).
+    stream_ << ", split=" << prefix_ << ".SplitMode." << SplitModeToPythonString(op->split_.value());
   }
   if (!op->name_hint_.empty()) {
     stream_ << ", name_hint=\"" << op->name_hint_ << "\"";
@@ -1715,13 +1724,14 @@ void IRPythonPrinter::VisitStmt_(const InCoreScopeStmtPtr& op) {
 
 void IRPythonPrinter::VisitStmt_(const AutoInCoreScopeStmtPtr& op) {
   const bool has_split = op->split_.has_value() && op->split_.value() != SplitMode::None;
-  if (has_split && op->HasAttr("slot_num")) {
-    // The deprecated ``optimization=chunked_loop_optimizer(split=...)`` form
-    // cannot carry a ring depth; emit the new ``optimizations=[pl.auto_chunk,
+  if (op->HasAttr("slot_num")) {
+    // slot_num accompanies any split mode, including SplitMode.None. The
+    // deprecated ``optimization=chunked_loop_optimizer(split=...)`` form cannot
+    // carry a ring depth; emit the new ``optimizations=[pl.auto_chunk,
     // pl.split(mode, slot_num=N)]`` list so slot_num round-trips.
     stream_ << "with " << prefix_ << ".at(level=" << prefix_ << ".Level.CORE_GROUP, optimizations=["
             << prefix_ << ".auto_chunk, ";
-    PrintSplitCall(op->split_.value(), op);
+    PrintSplitCall(op->split_.value_or(SplitMode::None), op);
     stream_ << "]";
   } else {
     stream_ << "with " << prefix_ << ".at(level=" << prefix_ << ".Level.CORE_GROUP, optimization=";
@@ -1783,8 +1793,8 @@ void IRPythonPrinter::VisitStmt_(const SpmdScopeStmtPtr& op) {
     if (!op->name_hint_.empty()) {
       stream_ << ", name_hint=\"" << op->name_hint_ << "\"";
     }
-    if (incore && incore->split_.has_value() && incore->split_.value() != SplitMode::None) {
-      PrintSplitOptimizations(incore->split_.value(), incore);
+    if (incore && ScopeHasSplitInfo(incore->split_, incore)) {
+      PrintSplitOptimizations(incore->split_.value_or(SplitMode::None), incore);
     }
     PrintScopeDepsAttr(op);
     stream_ << ")";
@@ -1821,8 +1831,8 @@ void IRPythonPrinter::VisitStmt_(const SpmdScopeStmtPtr& op) {
     if (!op->name_hint_.empty()) {
       stream_ << ", name_hint=\"" << op->name_hint_ << "\"";
     }
-    if (incore && incore->split_.has_value() && incore->split_.value() != SplitMode::None) {
-      PrintSplitOptimizations(incore->split_.value(), incore);
+    if (incore && ScopeHasSplitInfo(incore->split_, incore)) {
+      PrintSplitOptimizations(incore->split_.value_or(SplitMode::None), incore);
     }
     stream_ << "):\n";
     IncreaseIndent();
