@@ -258,11 +258,7 @@ class SkewCrossCoreMutator : public IRMutator {
     // Cross-core: skew if statically skewable, otherwise demote to Sequential. A
     // cross-core loop must NEVER leave this pass as ForKind::Pipeline — the unroll
     // pass and CanonicalizeIOOrder no longer handle cross-core ops.
-    auto step_const = TryGetConstInt(inner_step);
-    if (!step_const.has_value()) {
-      return DemoteToSequential(op, inner_start, inner_stop, inner_step, inner_body);
-    }
-    int64_t step = *step_const;
+    int64_t step = GetConstIntValue(inner_step, "step");
     INTERNAL_CHECK_SPAN(step != 0, op->span_) << "SkewCrossCorePipeline: step cannot be zero";
     auto start_const = TryGetConstInt(inner_start);
     auto stop_const = TryGetConstInt(inner_stop);

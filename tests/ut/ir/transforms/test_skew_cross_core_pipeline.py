@@ -238,46 +238,6 @@ class TestSkewCrossCorePipeline:
 
         ir.assert_structural_equal(_skew(Before), Expected)
 
-    def test_dynamic_step_cross_core_pipeline_demotes_to_sequential(self):
-        """A cross-core pipeline with a runtime step cannot be statically skewed,
-        so the pass demotes it instead of rejecting the program."""
-
-        @pl.program
-        class Before:
-            @pl.function(strict_ssa=True)
-            def main(
-                self,
-                q: pl.Tensor[[64, 64], pl.FP32],
-                out: pl.Tensor[[64, 64], pl.FP32],
-                step: pl.Scalar[pl.INDEX],
-            ):
-                for i in pl.pipeline(0, 4, step, stage=2):
-                    qa: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(q, [i * 16, 0], [16, 64])
-                    rs: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(qa, qa)
-                    pl.tile.tpush_to_aiv(rs, split=0)
-                    e: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0)
-                    oi: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(e, e)
-                    pl.tile.store(oi, [i * 16, 0], out)
-
-        @pl.program
-        class Expected:
-            @pl.function(strict_ssa=True)
-            def main(
-                self,
-                q: pl.Tensor[[64, 64], pl.FP32],
-                out: pl.Tensor[[64, 64], pl.FP32],
-                step: pl.Scalar[pl.INDEX],
-            ):
-                for i in pl.range(0, 4, step):
-                    qa: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(q, [i * 16, 0], [16, 64])
-                    rs: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(qa, qa)
-                    pl.tile.tpush_to_aiv(rs, split=0)
-                    e: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0)
-                    oi: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(e, e)
-                    pl.tile.store(oi, [i * 16, 0], out)
-
-        ir.assert_structural_equal(_skew(Before), Expected)
-
     def test_non_cross_core_pipeline_left_for_unroll(self):
         """A pipeline body with NO cross-core ops is left intact (still
         ``pl.pipeline(stage=2)``, not skewed) for LowerPipelineLoops to replicate."""
