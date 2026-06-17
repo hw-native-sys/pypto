@@ -258,6 +258,9 @@ REGISTER_OP("tile.row_sum")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    // TROW* reads the full input row + tmp scratch while writing the reduced
+    // output, so the output must not share a buffer with either input.
+    .not_inplace_safe()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRowReductionType(args, kwargs, "tile.row_sum");
@@ -271,6 +274,9 @@ REGISTER_OP("tile.row_max")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    // TROW* reads the full input row + tmp scratch while writing the reduced
+    // output, so the output must not share a buffer with either input.
+    .not_inplace_safe()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRowReductionType(args, kwargs, "tile.row_max");
@@ -284,6 +290,9 @@ REGISTER_OP("tile.row_min")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    // TROW* reads the full input row + tmp scratch while writing the reduced
+    // output, so the output must not share a buffer with either input.
+    .not_inplace_safe()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRowReductionType(args, kwargs, "tile.row_min");

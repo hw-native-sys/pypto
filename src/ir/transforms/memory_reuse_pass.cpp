@@ -14,6 +14,7 @@
 #include <climits>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -1104,7 +1105,20 @@ class HazardInputCollector : public IRVisitor {
 // output from aliasing.  MemoryReuse then refuses to place the output on any of
 // those inputs' buffers.  Distinct from the load+tpop hazard (backend-gated) —
 // this is op-semantic and always collected.
-using ForbidAliasMap = std::map<const Var*, std::set<const Var*>>;
+// Maps each output tile Var to the input operand Vars its defining op forbids
+// the output from sharing a buffer with.  Enforcement resolves each operand to
+// the *physical buffer* it ends up on (following both reuse-map reassignment and
+// VIEW inheritance) and blocks the output from landing there — see the use site.
+using ForbidAliasMap = std::map<const Var*, std::vector<VarPtr>>;
+
+// Resolve a tile Var to its MemRef base pointer (nullptr if it is not a tile or
+// has no MemRef yet).  View ops share their source's base, so a view and its
+// source resolve to the same pointer here.
+static const Var* TileMemRefBase(const VarPtr& v) {
+  auto t = As<TileType>(v->GetType());
+  if (t && t->memref_.has_value() && t->memref_.value()->base_) return t->memref_.value()->base_.get();
+  return nullptr;
+}
 
 class ForbidAliasCollector : public IRVisitor {
  public:
@@ -1115,7 +1129,7 @@ class ForbidAliasCollector : public IRVisitor {
         const auto& entry = reg.GetEntry(call->op_->name_);
         auto forbid_arg = [&](size_t i) {
           if (i < call->args_.size()) {
-            if (auto v = AsVarLike(call->args_[i])) forbidden_[op->var_.get()].insert(v.get());
+            if (auto v = AsVarLike(call->args_[i])) forbidden_[op->var_.get()].push_back(v);
           }
         };
         if (!entry.IsInplaceSafe()) {
@@ -1172,6 +1186,22 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(const std::vector<LifetimeIn
   // This is critical to avoid multiple variables with overlapping lifetimes
   // sharing the same MemRef, which would cause memory corruption
   std::map<VarPtr, std::vector<VarPtr>> memref_users;  // source_var -> list of vars reusing it
+
+  // Maps a tile's *original* MemRef base to the base its buffer is coalesced
+  // onto by a committed reuse decision.  A reuse retargets the reused var (and
+  // every VIEW that inherited its base) from its own base onto the root owner's
+  // base; resolve_base() chases that chain so the no-alias guard sees a
+  // forbidden operand's *physical* buffer even when the operand is a view whose
+  // own base is now stale.  Populated as reuse decisions are committed below.
+  std::map<const Var*, const Var*> base_remap;
+  std::function<const Var*(const Var*)> resolve_base = [&](const Var* b) -> const Var* {
+    while (b != nullptr) {
+      auto it = base_remap.find(b);
+      if (it == base_remap.end() || it->second == b) break;
+      b = it->second;
+    }
+    return b;
+  };
 
   // Group variables by memory_space (preserve order within each group)
   std::map<MemorySpace, std::vector<size_t>> groups;  // memory_space -> indices in lifetimes
@@ -1289,20 +1319,28 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(const std::vector<LifetimeIn
           // not_inplace_safe (forbids ALL inputs, e.g. tile.recip) or because it
           // marks a specific operand via forbid_output_alias (e.g. tile.sel's
           // mask/tmp, which the TSEL intrinsic reads while writing dst).  Both
-          // feed `forbid_alias` (see ForbidAliasCollector).  Block reuse if curr
-          // would land on a forbidden operand's buffer — checking the root owner
-          // and every var already sharing root's buffer.
+          // feed `forbid_alias` (see ForbidAliasCollector).  curr would land on
+          // root's physical buffer; block if any forbidden operand resolves to
+          // that same buffer.  Each operand's buffer is found by following its
+          // reuse chain to its owner, then taking the MemRef base — this catches
+          // both an operand reassigned by an earlier reuse decision AND one that
+          // occupies the buffer via VIEW inheritance (a reshape / slice / extract
+          // shares its source's base with no reuse-map entry).
           {
             auto fa_it = forbid_alias.find(curr_var.get());
-            if (fa_it != forbid_alias.end()) {
-              const auto& forbidden = fa_it->second;
-              bool alias_conflict = forbidden.count(root.get()) != 0;
-              if (!alias_conflict && memref_users.count(root)) {
-                for (const auto& user_var : memref_users.at(root)) {
-                  if (forbidden.count(user_var.get()) != 0) {
-                    alias_conflict = true;
-                    break;
-                  }
+            if (fa_it != forbid_alias.end() && resolve_base(TileMemRefBase(root)) != nullptr) {
+              const Var* root_base = resolve_base(TileMemRefBase(root));
+              bool alias_conflict = false;
+              for (const VarPtr& operand : fa_it->second) {
+                VarPtr oroot = operand;
+                while (reuse_map.count(oroot)) oroot = reuse_map.at(oroot);
+                // resolve_base also follows VIEW-inherited bases whose owning
+                // tile was reused onto another buffer (e.g. an rms-norm reshape
+                // chain coalesced onto a dead input buffer): the operand's own
+                // base is stale, but its physical buffer is the reuse target.
+                if (resolve_base(TileMemRefBase(oroot)) == root_base) {
+                  alias_conflict = true;
+                  break;
                 }
               }
               if (alias_conflict) {
@@ -1317,6 +1355,13 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(const std::vector<LifetimeIn
           // Can safely reuse!
           reuse_map[curr_var] = prev_var;
           memref_users[root].push_back(curr_var);  // Track under root MemRef owner
+          // Record the base coalescing so resolve_base() can chase a view whose
+          // owning tile is reused onto root's buffer (see the no-alias guard).
+          if (const Var* cb = TileMemRefBase(curr_var)) {
+            if (const Var* rb = resolve_base(TileMemRefBase(root))) {
+              if (cb != rb) base_remap[cb] = rb;
+            }
+          }
           LOG_DEBUG << "Variable " << curr_var->name_hint_ << " can reuse " << prev_var->name_hint_
                     << " (lifetime [" << curr_lifetime.def_point << ", " << curr_lifetime.last_use_point
                     << "]"
