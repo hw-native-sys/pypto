@@ -12,7 +12,13 @@ import re
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
-from pypto.backend import is_backend_configured, reset_for_testing
+from pypto.backend import (
+    BackendType,
+    get_backend_type,
+    is_backend_configured,
+    reset_for_testing,
+    set_backend_type,
+)
 
 
 def test_allocate_memory_addr_simple():
@@ -467,6 +473,56 @@ def test_allocated_memory_addr_verifier_via_pipeline():
     with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
         result = pipeline.run(Before)
         assert result is not None
+
+
+def test_allocated_memory_addr_verifier_errors_when_vec_exceeds_safe_cap():
+    """A Vec footprint above the safe UB cap must be rejected (pto-isa#170).
+
+    The 910B Vec UB physical size is 192KB, but only ~184KB is usable: PTO-ISA
+    reserves the top ~8KB and silently corrupts any tile placed there (pto-isa#170).
+    soc.cpp therefore caps the *safe* Vec UB at 184KB (188416 bytes), so the
+    AllocatedMemoryAddr verifier (which compares the Vec high-water against
+    backend.get_mem_size(Vec)) raises when usage exceeds the safe cap.
+
+    A single 64x752 FP32 tile is 192512 bytes: above the 184KB safe cap but below
+    the 192KB physical size. Under the old 192KB limit it passed; it must now error.
+    Regression guard so the cap is not silently raised back to 192KB without also
+    restoring the physical size in soc.cpp.
+    """
+    # 64 * 752 * 4 = 192512 bytes; 184KB = 188416, 192KB = 196608.
+    assert 184 * 1024 < 64 * 752 * 4 < 192 * 1024
+
+    was_configured = is_backend_configured()
+    prior_type = get_backend_type() if was_configured else None
+    if was_configured:
+        reset_for_testing()
+    try:
+        set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                input_a: pl.Tensor[[64, 752], pl.FP32],
+                output: pl.Tensor[[64, 752], pl.FP32],
+            ) -> pl.Tensor[[64, 752], pl.FP32]:
+                # One live Vec tile of 192512 bytes -> Vec high-water exceeds the
+                # 184KB safe cap (but not the 192KB physical size).
+                tile_a: pl.Tile[[64, 752], pl.FP32] = pl.load(input_a, [0, 0], [64, 752])
+                result: pl.Tensor[[64, 752], pl.FP32] = pl.store(tile_a, [0, 0], output)
+                return result
+
+        program = passes.init_mem_ref()(Before)
+        pipeline = passes.PassPipeline()
+        pipeline.add_pass(passes.allocate_memory_addr())
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
+            with pytest.raises(ValueError, match=r"Vec buffer usage .* exceeds platform limit"):
+                pipeline.run(program)
+    finally:
+        reset_for_testing()
+        if prior_type is not None:
+            set_backend_type(prior_type)
 
 
 def test_allocate_memory_addr_uses_default_policy_without_backend():

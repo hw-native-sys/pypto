@@ -127,10 +127,16 @@ const SoC& Create910BSoC() {
                                           Mem(ir::MemorySpace::Acc, 128ULL * 1024, 128)   // 128KB Acc
                                       });
 
-    // AIV (VECTOR) core configuration
-    Core aiv_core(ir::CoreType::VECTOR, {
-                                            Mem(ir::MemorySpace::Vec, 192ULL * 1024, 128),  // 192KB Vec
-                                        });
+    // AIV (VECTOR) core configuration.
+    // NOTE: the physical Vec UB is 192KB, but PTO-ISA reserves ~8KB at the top of the
+    // buffer that silently corrupts any tile placed there (pto-isa#170). We therefore
+    // cap the *safe* usable UB at 184KB so AllocateMemoryAddr raises an error before an
+    // allocation can reach the bad region, instead of producing NaNs on device.
+    // TODO(pto-isa#170): restore to 192ULL * 1024 (physical size) once PTO-ISA is fixed.
+    Core aiv_core(ir::CoreType::VECTOR,
+                  {
+                      Mem(ir::MemorySpace::Vec, 184ULL * 1024, 128),  // 184KB safe (192KB physical)
+                  });
 
     Cluster aic_cluster(aic_core, 1);  // 1 core per cluster
     Cluster aiv_cluster(aiv_core, 1);  // 1 core per cluster
@@ -163,10 +169,16 @@ const SoC& Create950SoC() {
                                           Mem(ir::MemorySpace::Bias, 4ULL * 1024, 64)     // 4KB Bias
                                       });
 
-    // AIV (VECTOR) core configuration
-    Core aiv_core(ir::CoreType::VECTOR, {
-                                            Mem(ir::MemorySpace::Vec, 248ULL * 1024, 128),  // 248KB Vec
-                                        });
+    // AIV (VECTOR) core configuration.
+    // NOTE: the physical Vec UB is 248KB, but PTO-ISA reserves ~8KB at the top of the
+    // buffer that silently corrupts any tile placed there (pto-isa#170). We therefore
+    // cap the *safe* usable UB at 240KB so AllocateMemoryAddr raises an error before an
+    // allocation can reach the bad region, instead of producing NaNs on device.
+    // TODO(pto-isa#170): restore to 248ULL * 1024 (physical size) once PTO-ISA is fixed.
+    Core aiv_core(ir::CoreType::VECTOR,
+                  {
+                      Mem(ir::MemorySpace::Vec, 240ULL * 1024, 128),  // 240KB safe (248KB physical)
+                  });
 
     Cluster mix_cluster({{aic_core, 1}, {aiv_core, 2}});  // 1 AIC core and 2 AIV cores per cluster
 

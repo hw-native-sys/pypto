@@ -90,7 +90,9 @@ class TestBackend910BMemorySize:
             (ir.MemorySpace.Right, 64),  # 64KB per AIC core
             (ir.MemorySpace.Acc, 128),  # 128KB per AIC core
             (ir.MemorySpace.Mat, 512),  # 512KB per AIC core
-            (ir.MemorySpace.Vec, 192),  # 192KB per AIV core
+            # Safe Vec UB is capped at 184KB (192KB physical) per pto-isa#170;
+            # restore to 192 once PTO-ISA stops reserving the top ~8KB.
+            (ir.MemorySpace.Vec, 184),  # 184KB safe per AIV core (192KB physical)
             (ir.MemorySpace.DDR, 0),  # DDR not in core memory
         ]
 

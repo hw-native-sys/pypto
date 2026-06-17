@@ -67,13 +67,15 @@ class TestBackend950MemorySize:
         # Test cases: (memory_type, expected_size_in_KB)
         # Based on Create950SoC() in soc.cpp:
         #   AIC core: Mat=512KB, Left=64KB, Right=64KB, Acc=256KB, Bias=4KB
-        #   AIV core: Vec=248KB
+        #   AIV core: Vec=240KB safe (248KB physical, capped per pto-isa#170)
         test_cases = [
             (ir.MemorySpace.Mat, 512),  # 512KB Mat per AIC core
             (ir.MemorySpace.Left, 64),  # 64KB Left per AIC core
             (ir.MemorySpace.Right, 64),  # 64KB Right per AIC core
             (ir.MemorySpace.Acc, 256),  # 256KB Acc per AIC core
-            (ir.MemorySpace.Vec, 248),  # 248KB Vec per AIV core
+            # Safe Vec UB is capped at 240KB (248KB physical) per pto-isa#170;
+            # restore to 248 once PTO-ISA stops reserving the top ~8KB.
+            (ir.MemorySpace.Vec, 240),  # 240KB safe Vec per AIV core (248KB physical)
             (ir.MemorySpace.DDR, 0),  # DDR not in core memory
         ]
 
