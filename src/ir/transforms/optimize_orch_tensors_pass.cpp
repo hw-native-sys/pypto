@@ -4376,6 +4376,14 @@ class OutWindowExternalizer {
               shape_exprs[dynamic_dim] = carrier_extent_var;
             }
           }
+          auto output_param_type = As<TensorType>(original_func->params_[output.out_param_index]->GetType());
+          if (CallsiteOutputWindowHasUnsafeStaticDynamicParent(output_param_type, shape_exprs,
+                                                               offset_exprs)) {
+            if (WindowExternalizeLogEnabled()) {
+              LOG_INFO << "[window-call] reject static dynamic-parent output window func=" << callee_name;
+            }
+            return std::nullopt;
+          }
           if (piece_index == 0 && HasFineAssemblePieces(output)) {
             if (shape_exprs.empty() || offset_exprs.empty()) return std::nullopt;
             auto index_type = std::make_shared<ScalarType>(DataType::INDEX);
@@ -5430,6 +5438,29 @@ class OutWindowExternalizer {
         }
       }
       return true;
+    }
+
+    bool CallsiteOutputWindowHasUnsafeStaticDynamicParent(
+        const std::shared_ptr<const TensorType>& tensor_type, const std::vector<ExprPtr>& window_shape,
+        const std::vector<ExprPtr>& offsets) const {
+      if (!tensor_type || tensor_type->shape_.size() != window_shape.size() ||
+          tensor_type->shape_.size() != offsets.size()) {
+        return true;
+      }
+
+      std::unordered_set<const Var*> static_loop_vars;
+      for (const auto& loop : loop_context_) {
+        if (!loop.loop_var || !loop.loop || !GetStaticTripCount(loop.loop).has_value()) continue;
+        static_loop_vars.insert(loop.loop_var.get());
+      }
+
+      for (size_t dim = 0; dim < tensor_type->shape_.size(); ++dim) {
+        if (As<ConstInt>(tensor_type->shape_[dim])) continue;
+        if (!As<ConstInt>(window_shape[dim])) continue;
+        if (AreExprsEqual(window_shape[dim], tensor_type->shape_[dim])) continue;
+        if (ExprReferencesOnlyVarsIn(offsets[dim], static_loop_vars)) return true;
+      }
+      return false;
     }
 
     bool ProveOutputDisjoint(const std::vector<LoopDisjointnessCandidate>& loops,
