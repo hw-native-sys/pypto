@@ -160,6 +160,7 @@ Supported rewrite shapes:
 - `AggregateWindowLoop`: the callee carries one or more `Out` tensors through a loop and writes a statically provable aggregate window, such as the outlined `kv_proj` group shape
 - `PureInputWindowConsumer`: an `In` tensor parameter in a data-returning callee is used only through the same local input window
 - `AggregateInputWindowLoop`: together with an `AggregateWindowLoop` output rewrite, an `In` tensor parameter is read only through loop-local `tile.load`/`tensor.slice` windows whose offsets expand across that same internal loop into one statically provable parent-shaped region, such as q/k inputs of qk norm
+- `RuntimeCurrentAggregator`: under `coalesce_pieces` and any rewrite policy except `none`, selected prefill producer/consumer pairs that write many windows and then feed repeated full-tensor readers get a small runtime-visible current marker. Current examples are `attn_tile` feeding `out_proj` and `mlp_silu_tile` feeding `down_proj`.
 
 Output-window eligibility:
 
@@ -198,6 +199,7 @@ Non-goals and dependence model:
 - the pass does not precompute global window descriptor arrays
 - the pass does not split SPMD launches or externalize per-block SPMD windows
 - unsupported consumers, including full-tensor readers, remain baseline/full-tensor inputs
+- selected prefill full-tensor readers may still receive a runtime-current marker when the producer loop is a recognized coalesced fan-in pattern; this does not narrow the reader region, but gives runtime dependency tracking one current tensor to match instead of many producer windows
 - `DeriveCallDirections` keeps its existing sound sequential `Out -> InOut` rule; Pattern 5 only exposes proven local windows before that pass runs
 
 ## Example (Pattern 1)

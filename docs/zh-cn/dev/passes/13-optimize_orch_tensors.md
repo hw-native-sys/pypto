@@ -150,6 +150,7 @@ loop-carried iter-arg 不会被这样折叠。
 - `AggregateWindowLoop`：callee 在循环中携带一个或多个 `Out`，并写入静态可证明的聚合窗口，例如 outlined `kv_proj` 分组形态
 - `PureInputWindowConsumer`：有数据返回的 callee 中，某个 `In` 张量参数只通过同一个局部输入窗口被使用
 - `AggregateInputWindowLoop`：与 `AggregateWindowLoop` 输出改写配套使用；某个 `In` 张量参数只通过内部 loop 的局部 `tile.load`/`tensor.slice` 窗口读取，并且这些 offset 能沿同一个内部 loop 展开为一个静态可证明的 parent-shaped region，例如 qk norm 的 q/k 输入
+- `RuntimeCurrentAggregator`：在 `coalesce_pieces` 且 rewrite policy 不是 `none` 时，部分 prefill producer/consumer 组合如果先写很多窗口、再喂给重复 full-tensor reader，会插入一个 runtime 可见的 current marker。当前例子是 `attn_tile` 喂给 `out_proj`，以及 `mlp_silu_tile` 喂给 `down_proj`。
 
 输出窗口 eligibility：
 
@@ -188,6 +189,7 @@ loop-carried iter-arg 不会被这样折叠。
 - pass 不预生成全局 window descriptor 数组
 - pass 不拆分 SPMD launch，也不 externalize per-block SPMD window
 - unsupported consumer，包括 full-tensor reader，保持 baseline/full-tensor input
+- 部分 prefill full-tensor reader 如果属于已识别的 coalesced fan-in producer loop，仍可能获得 runtime-current marker；这不会缩小 reader 区域，但能让 runtime 依赖追踪匹配一个 current tensor，而不是反复扫描大量 producer window
 - `DeriveCallDirections` 保持现有 sound 的顺序 `Out -> InOut` 规则；Pattern 5 只是在该 pass 运行前显式化可证明的局部窗口
 
 ## 示例（模式 1）
