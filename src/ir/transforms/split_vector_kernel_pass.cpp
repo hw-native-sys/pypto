@@ -241,10 +241,14 @@ ExprPtr LocalizeValidDimForSplit(const ExprPtr& valid_dim, const ExprPtr& origin
   return MakeMax(MakeMin(remaining, half_dim_size, span), zero, span);
 }
 
-CallPtr RebuildCallWithSplit(const CallPtr& call, int split_int) {
+// Replace (or append) the "split" kwarg with split_int, preserving order of the
+// other kwargs. Shared by every cross-core op rebuild below.
+std::vector<std::pair<std::string, std::any>> WithSplitKwarg(
+    const std::vector<std::pair<std::string, std::any>>& kwargs, int split_int) {
   std::vector<std::pair<std::string, std::any>> new_kwargs;
+  new_kwargs.reserve(kwargs.size() + 1);
   bool has_split = false;
-  for (const auto& [key, val] : call->kwargs_) {
+  for (const auto& [key, val] : kwargs) {
     if (key == "split") {
       new_kwargs.emplace_back("split", std::any(split_int));
       has_split = true;
@@ -255,29 +259,43 @@ CallPtr RebuildCallWithSplit(const CallPtr& call, int split_int) {
   if (!has_split) {
     new_kwargs.emplace_back("split", std::any(split_int));
   }
-  return std::make_shared<Call>(call->op_, call->args_, std::move(new_kwargs), call->GetType(), call->span_);
+  return new_kwargs;
 }
 
-TypePtr HalveTileShape(const TypePtr& type, int dim, const ExprPtr& subblock_idx) {
+CallPtr RebuildCallWithSplit(const CallPtr& call, int split_int) {
+  return std::make_shared<Call>(call->op_, call->args_, WithSplitKwarg(call->kwargs_, split_int),
+                                call->GetType(), call->span_);
+}
+
+// Rescale `dim` of a tile type to `half_dim_size`, keeping TileView.valid_shape
+// consistent and localizing a partial valid region to the current subblock.
+TypePtr ApplyTrackedTileShape(const TypePtr& type, int dim, const ExprPtr& half_dim_size,
+                              const ExprPtr& subblock_idx) {
   auto tt = std::dynamic_pointer_cast<const TileType>(type);
   if (!tt || dim < 0 || dim >= static_cast<int>(tt->shape_.size())) return type;
 
   std::vector<ExprPtr> new_shape = tt->shape_;
-  new_shape[dim] = ComputeHalfDimSize(tt->shape_[dim]);
+  new_shape[dim] = half_dim_size;
 
-  // Keep TileView.valid_shape consistent with halved physical shape, and for
-  // partial valid regions localize the split dimension to the current subblock.
   std::optional<TileView> new_tile_view = tt->tile_view_;
   if (const auto& tile_view = tt->tile_view_; tile_view.has_value()) {
     TileView tv = tile_view.value();
     if (dim < static_cast<int>(tv.valid_shape.size())) {
       tv.valid_shape[dim] =
-          LocalizeValidDimForSplit(tv.valid_shape[dim], tt->shape_[dim], new_shape[dim], subblock_idx);
+          LocalizeValidDimForSplit(tv.valid_shape[dim], tt->shape_[dim], half_dim_size, subblock_idx);
     }
     new_tile_view = std::move(tv);
   }
 
   return std::make_shared<TileType>(new_shape, tt->dtype_, tt->memref_, new_tile_view, tt->memory_space_);
+}
+
+// Halve `dim` of a tile type (each split lane gets half the rows/cols). Thin
+// wrapper over ApplyTrackedTileShape that derives the half extent from the full.
+TypePtr HalveTileShape(const TypePtr& type, int dim, const ExprPtr& subblock_idx) {
+  auto tt = std::dynamic_pointer_cast<const TileType>(type);
+  if (!tt || dim < 0 || dim >= static_cast<int>(tt->shape_.size())) return type;
+  return ApplyTrackedTileShape(type, dim, ComputeHalfDimSize(tt->shape_[dim]), subblock_idx);
 }
 
 ExprPtr HalveTupleElement(const ExprPtr& tuple_expr, int dim) {
@@ -301,22 +319,8 @@ ExprPtr LocalizeTupleElementForSplit(const ExprPtr& tuple_expr, int dim, const E
 CallPtr RebuildTpopWithHalvedShape(const CallPtr& call, int split_int, int split_dim,
                                    const ExprPtr& subblock_idx) {
   auto new_result_type = HalveTileShape(call->GetType(), split_dim, subblock_idx);
-
-  std::vector<std::pair<std::string, std::any>> new_kwargs;
-  bool has_split = false;
-  for (const auto& [key, val] : call->kwargs_) {
-    if (key == "split") {
-      new_kwargs.emplace_back("split", std::any(split_int));
-      has_split = true;
-    } else {
-      new_kwargs.emplace_back(key, val);
-    }
-  }
-  if (!has_split) {
-    new_kwargs.emplace_back("split", std::any(split_int));
-  }
-
-  return std::make_shared<Call>(call->op_, call->args_, std::move(new_kwargs), new_result_type, call->span_);
+  return std::make_shared<Call>(call->op_, call->args_, WithSplitKwarg(call->kwargs_, split_int),
+                                new_result_type, call->span_);
 }
 
 struct TileInfo {
@@ -355,27 +359,6 @@ ExprPtr AdjustOffsets(const ExprPtr& offsets_expr, int split_dim, const ExprPtr&
   new_elements[split_dim] = adjusted;
 
   return std::make_shared<MakeTuple>(std::move(new_elements), offsets->span_);
-}
-
-TypePtr ApplyTrackedTileShape(const TypePtr& type, int dim, const ExprPtr& half_dim_size,
-                              const ExprPtr& subblock_idx) {
-  auto tt = std::dynamic_pointer_cast<const TileType>(type);
-  if (!tt || dim < 0 || dim >= static_cast<int>(tt->shape_.size())) return type;
-
-  std::vector<ExprPtr> new_shape = tt->shape_;
-  new_shape[dim] = half_dim_size;
-
-  std::optional<TileView> new_tile_view = tt->tile_view_;
-  if (const auto& tile_view = tt->tile_view_; tile_view.has_value()) {
-    TileView tv = tile_view.value();
-    if (dim < static_cast<int>(tv.valid_shape.size())) {
-      tv.valid_shape[dim] =
-          LocalizeValidDimForSplit(tv.valid_shape[dim], tt->shape_[dim], half_dim_size, subblock_idx);
-    }
-    new_tile_view = std::move(tv);
-  }
-
-  return std::make_shared<TileType>(new_shape, tt->dtype_, tt->memref_, new_tile_view, tt->memory_space_);
 }
 
 std::vector<StmtPtr> ProcessStmts(const std::vector<StmtPtr>& stmts, SplitMode mode, int split_int,
@@ -645,17 +628,9 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
       }
     }
 
-    auto flat = std::vector<StmtPtr>();
-    if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(for_stmt->body_)) {
-      flat = seq->stmts_;
-    } else {
-      flat.push_back(for_stmt->body_);
-    }
-    auto new_body_stmts =
-        ProcessStmts(flat, mode, split_int, split_dim, tile_vars, is_aiv, subblock_idx, var_replacements);
-    StmtPtr new_body = (new_body_stmts.size() == 1)
-                           ? new_body_stmts[0]
-                           : std::make_shared<SeqStmts>(new_body_stmts, for_stmt->span_);
+    auto new_body_stmts = ProcessStmts(transform_utils::FlattenToStmts(for_stmt->body_), mode, split_int,
+                                       split_dim, tile_vars, is_aiv, subblock_idx, var_replacements);
+    StmtPtr new_body = loop_repair::MakeBody(new_body_stmts, for_stmt->span_);
 
     // Propagate tile_vars tracking from iter_args to return_vars.
     // ForStmt return_vars are the loop-exit versions of the corresponding
@@ -685,30 +660,16 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
   }
 
   if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-    auto then_flat = std::vector<StmtPtr>();
-    if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(if_stmt->then_body_)) {
-      then_flat = seq->stmts_;
-    } else {
-      then_flat.push_back(if_stmt->then_body_);
-    }
-    auto new_then = ProcessStmts(then_flat, mode, split_int, split_dim, tile_vars, is_aiv, subblock_idx,
-                                 var_replacements);
-    StmtPtr new_then_body =
-        (new_then.size() == 1) ? new_then[0] : std::make_shared<SeqStmts>(new_then, if_stmt->span_);
+    auto new_then = ProcessStmts(transform_utils::FlattenToStmts(if_stmt->then_body_), mode, split_int,
+                                 split_dim, tile_vars, is_aiv, subblock_idx, var_replacements);
+    StmtPtr new_then_body = loop_repair::MakeBody(new_then, if_stmt->span_);
 
     std::optional<StmtPtr> new_else;
     if (const auto& else_body_opt = if_stmt->else_body_; else_body_opt.has_value()) {
-      const StmtPtr& else_body = else_body_opt.value();
-      auto else_flat = std::vector<StmtPtr>();
-      if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(else_body)) {
-        else_flat = seq->stmts_;
-      } else {
-        else_flat.push_back(else_body);
-      }
-      auto new_else_stmts = ProcessStmts(else_flat, mode, split_int, split_dim, tile_vars, is_aiv,
-                                         subblock_idx, var_replacements);
-      new_else = (new_else_stmts.size() == 1) ? new_else_stmts[0]
-                                              : std::make_shared<SeqStmts>(new_else_stmts, if_stmt->span_);
+      auto new_else_stmts =
+          ProcessStmts(transform_utils::FlattenToStmts(else_body_opt.value()), mode, split_int, split_dim,
+                       tile_vars, is_aiv, subblock_idx, var_replacements);
+      new_else = loop_repair::MakeBody(new_else_stmts, if_stmt->span_);
     }
     auto new_if = MutableCopy(if_stmt);
     new_if->then_body_ = new_then_body;
@@ -754,12 +715,7 @@ std::string ReserveFreshName(std::unordered_set<std::string>& used_names, const 
 }
 
 SubblockInjectionResult InjectSubblockIdx(const FunctionPtr& func, bool is_aiv) {
-  std::vector<StmtPtr> body_stmts;
-  if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(func->body_)) {
-    body_stmts = seq->stmts_;
-  } else {
-    body_stmts.push_back(func->body_);
-  }
+  std::vector<StmtPtr> body_stmts = transform_utils::FlattenToStmts(func->body_);
 
   std::unordered_set<std::string> used_names;
   for (const auto& p : func->params_) {
@@ -801,6 +757,21 @@ StmtPtr SubstituteStmtIfNeeded(const StmtPtr& stmt, const ExprReplacementMap& re
   return transform_utils::Substitute(stmt, replacements);
 }
 
+// Materialize a fresh empty tile (tile.create) of `tile_type` sized by
+// `shape_arg`. Shared by the lane1 replay branches that must NOT replay an op
+// on a zero-valid tile (load / slice / transpose) — see gh#1649.
+CallPtr MakeZeroValidCreate(const std::shared_ptr<const TileType>& tile_type, const ExprPtr& shape_arg,
+                            const Span& span) {
+  std::vector<std::pair<std::string, std::any>> kwargs;
+  kwargs.emplace_back("dtype", tile_type->dtype_);
+  if (const auto& memory_space = tile_type->memory_space_) {
+    kwargs.emplace_back("target_memory", *memory_space);
+  }
+  auto create_op = OpRegistry::GetInstance().GetOp("tile.create");
+  return std::make_shared<Call>(create_op, std::vector<ExprPtr>{shape_arg}, std::move(kwargs), tile_type,
+                                span);
+}
+
 CallPtr RebuildLane1CallWithZeroValidShape(const CallPtr& call, const ExprReplacementMap& replacements) {
   std::vector<ExprPtr> new_args;
   new_args.reserve(call->args_.size());
@@ -813,19 +784,10 @@ CallPtr RebuildLane1CallWithZeroValidShape(const CallPtr& call, const ExprReplac
 
   const std::string& op_name = call->op_->name_;
   if (op_name == "tile.load" && new_args.size() >= 3) {
-    auto new_type = WithZeroValidShape(call->GetType(), call->span_);
-    auto tile_type = std::dynamic_pointer_cast<const TileType>(new_type);
+    auto tile_type =
+        std::dynamic_pointer_cast<const TileType>(WithZeroValidShape(call->GetType(), call->span_));
     if (!tile_type) return call;
-
-    std::vector<std::pair<std::string, std::any>> kwargs;
-    kwargs.emplace_back("dtype", tile_type->dtype_);
-    if (const auto& memory_space = tile_type->memory_space_) {
-      kwargs.emplace_back("target_memory", *memory_space);
-    }
-
-    auto create_op = OpRegistry::GetInstance().GetOp("tile.create");
-    return std::make_shared<Call>(create_op, std::vector<ExprPtr>{new_args[2]}, std::move(kwargs), new_type,
-                                  call->span_);
+    return MakeZeroValidCreate(tile_type, new_args[2], call->span_);
   } else if (op_name == "tile.slice" && new_args.size() >= 3) {
     // tile.slice is a pure view with no cross-core sync side effect, so in the
     // replay lane we only need an empty tile of the slice's result shape for the
@@ -842,16 +804,7 @@ CallPtr RebuildLane1CallWithZeroValidShape(const CallPtr& call, const ExprReplac
     INTERNAL_CHECK_SPAN(tile_type != nullptr, call->span_)
         << "Internal error: tile.slice must produce a TileType, but got "
         << (new_type ? new_type->TypeName() : "null");
-
-    std::vector<std::pair<std::string, std::any>> kwargs;
-    kwargs.emplace_back("dtype", tile_type->dtype_);
-    if (const auto& memory_space = tile_type->memory_space_) {
-      kwargs.emplace_back("target_memory", *memory_space);
-    }
-
-    auto create_op = OpRegistry::GetInstance().GetOp("tile.create");
-    return std::make_shared<Call>(create_op, std::vector<ExprPtr>{new_args[1]}, std::move(kwargs), new_type,
-                                  call->span_);
+    return MakeZeroValidCreate(tile_type, new_args[1], call->span_);
   } else if (op_name == "tile.transpose") {
     // tile.transpose lowers to a pto-isa op that hangs the AICore (507018) when
     // every operand is a zero-valid replay tile — the same static/zero-valid
@@ -866,14 +819,7 @@ CallPtr RebuildLane1CallWithZeroValidShape(const CallPtr& call, const ExprReplac
         << (new_type ? new_type->TypeName() : "null");
     std::vector<ExprPtr> shape_elems(tile_type->shape_.begin(), tile_type->shape_.end());
     auto shape_tuple = std::make_shared<MakeTuple>(std::move(shape_elems), call->span_);
-    std::vector<std::pair<std::string, std::any>> kwargs;
-    kwargs.emplace_back("dtype", tile_type->dtype_);
-    if (const auto& memory_space = tile_type->memory_space_) {
-      kwargs.emplace_back("target_memory", *memory_space);
-    }
-    auto create_op = OpRegistry::GetInstance().GetOp("tile.create");
-    return std::make_shared<Call>(create_op, std::vector<ExprPtr>{shape_tuple}, std::move(kwargs), new_type,
-                                  call->span_);
+    return MakeZeroValidCreate(tile_type, shape_tuple, call->span_);
   } else if (op_name == "tile.set_validshape" && new_args.size() == 3) {
     new_args[1] = MakeIndexConst(0, call->span_);
     new_args[2] = MakeIndexConst(0, call->span_);
@@ -894,13 +840,7 @@ bool IsNoSplitSharedPipeSetupCall(const CallPtr& call) {
 }
 
 bool IsNoSplitSharedPipeSetupStmt(const StmtPtr& stmt) {
-  CallPtr call;
-  if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
-    call = std::dynamic_pointer_cast<const Call>(assign->value_);
-  } else if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
-    call = std::dynamic_pointer_cast<const Call>(eval->expr_);
-  }
-  return IsNoSplitSharedPipeSetupCall(call);
+  return IsNoSplitSharedPipeSetupCall(transform_utils::GetCallFromStmt(stmt));
 }
 
 struct NoSplitSharedPrefix {
@@ -1124,8 +1064,7 @@ FunctionPtr ProcessFunction(const FunctionPtr& func, SplitMode mode) {
 
   auto new_stmts = ProcessStmts(injected.body_stmts, mode, split_int, split_dim, tile_vars, is_aiv,
                                 injected.subblock_idx_expr, var_replacements);
-  StmtPtr new_body =
-      (new_stmts.size() == 1) ? new_stmts[0] : std::make_shared<SeqStmts>(new_stmts, func->span_);
+  StmtPtr new_body = loop_repair::MakeBody(new_stmts, func->span_);
   if (!var_replacements.empty()) {
     new_body = transform_utils::Substitute(new_body, var_replacements);
   }
