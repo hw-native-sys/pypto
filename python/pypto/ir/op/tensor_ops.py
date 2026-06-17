@@ -1678,9 +1678,7 @@ def paged_gather(  # noqa: PLR0913
         "is_b_matrix": is_b_matrix,
         "space": space,
     }
-    return _ir_core.create_op_call(
-        "tensor.paged_gather", [src, indices, block_table], kwargs, actual_span
-    )
+    return _ir_core.create_op_call("tensor.paged_gather", [src, indices, block_table], kwargs, actual_span)
 
 
 # ============================================================================

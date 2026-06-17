@@ -837,8 +837,7 @@ static std::string MakeGatherRowCodegenPTO(const CallPtr& op, codegen::CodegenBa
   // Build the destination subview type from the accumulator's tile type, with the
   // per-row shape/valid.
   const auto dst_space = dst_tile_type->memory_space_.value_or(ir::MemorySpace::Mat);
-  auto view_info =
-      codegen::ExtractTileTypeInfo(*dst_tile_type, codegen.GetTypeString(dst_tile_type->dtype_));
+  auto view_info = codegen::ExtractTileTypeInfo(*dst_tile_type, codegen.GetTypeString(dst_tile_type->dtype_));
 
   // In a boxed (NZ/fractal) layout — i.e. an L1/Mat matmul operand — the inner
   // box has a fixed granularity, and pto.subview requires the *physical* size to
@@ -854,10 +853,10 @@ static std::string MakeGatherRowCodegenPTO(const CallPtr& op, codegen::CodegenBa
   // fractal_bytes / dtype_bytes / M0 (both collapse to 16 for fp16/bf16).
   constexpr int64_t kNZFractalRows = 16;
   const int64_t dtype_bytes = std::max<int64_t>(1, static_cast<int64_t>(dst_tile_type->dtype_.GetBit()) / 8);
-  const int64_t box_cols = view_info.fractal > 0
-                               ? std::max<int64_t>(
-                                     1, static_cast<int64_t>(view_info.fractal) / dtype_bytes / kNZFractalRows)
-                               : kNZFractalRows;
+  const int64_t box_cols =
+      view_info.fractal > 0
+          ? std::max<int64_t>(1, static_cast<int64_t>(view_info.fractal) / dtype_bytes / kNZFractalRows)
+          : kNZFractalRows;
   const int64_t phys_rows = boxed ? round_up(sv_rows, kNZFractalRows) : sv_rows;
   const int64_t phys_cols = boxed ? round_up(sv_cols, box_cols) : sv_cols;
 
@@ -891,9 +890,9 @@ static std::string MakeGatherRowCodegenPTO(const CallPtr& op, codegen::CodegenBa
   const auto& shape_elems = shapes->elements_;
   const auto& soff_elems = src_off->elements_;
   std::string partition_type = MakePartitionTensorViewType(GetDimStrings(shape_elems), dtype_str);
-  std::string src_pview =
-      EmitPartitionViewPTO(src->name_hint_, src_view, src_view_type, partition_type,
-                           GetIndexOffsetCodes(soff_elems, codegen), GetSizeCodes(shape_elems, codegen), codegen);
+  std::string src_pview = EmitPartitionViewPTO(src->name_hint_, src_view, src_view_type, partition_type,
+                                               GetIndexOffsetCodes(soff_elems, codegen),
+                                               GetSizeCodes(shape_elems, codegen), codegen);
 
   std::ostringstream tload_line;
   tload_line << "pto.tload ins(" << src_pview << " : " << partition_type << ") outs(" << dst_view;
