@@ -3216,7 +3216,7 @@ class TestForbidOutputAlias:
                 out: pl.Out[pl.Tensor[[8, 16], pl.FP32]],
             ) -> pl.Tensor[[8, 16], pl.FP32]:
                 t0: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(a, [0, 0], [8, 16])
-                dead: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.add(t0, t0)
+                _dead: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.add(t0, t0)
                 bf: pl.Tile[[8, 16], pl.BF16, pl.MemorySpace.Vec] = pl.load(b, [0, 0], [8, 16])
                 r: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.cast(bf, target_type=pl.FP32)
                 res: pl.Tensor[[8, 16], pl.FP32] = pl.store(r, [0, 0], out)
@@ -3265,8 +3265,7 @@ class TestForbidOutputAlias:
         # ``col`` is a view of ``col_src``; the expand output must not land on
         # that physical buffer (it re-reads the column for every row).
         assert bases["r"] != bases["col_src"], (
-            f"col_expand_mul output must not alias its column vector's buffer, "
-            f"but both bind to {bases['r']}"
+            f"col_expand_mul output must not alias its column vector's buffer, but both bind to {bases['r']}"
         )
 
     def test_rsqrt_output_does_not_alias_input(self):
