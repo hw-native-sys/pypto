@@ -34,6 +34,7 @@
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 
@@ -367,6 +368,57 @@ TypePtr DeduceTileTransposeType(const std::vector<ExprPtr>& args,
   return std::make_shared<TileType>(new_shape, input_type->dtype_, std::nullopt, tile_view);
 }
 
+TypePtr DeduceTileAsLayoutType(const std::vector<ExprPtr>& args,
+                               const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  // tile.as_layout(input) — zero-copy fractal-layout reinterpretation that swaps
+  // the trailing two dims and maps the block/scatter layout to its transpose
+  // dual (NZ<->ZN, NN<->ZZ, ND<->DN). A tile and its dual over the same bytes are
+  // mutual transposes (docs/_build/nz_zn_layout_qa.md), so the result aliases the
+  // source buffer byte-for-byte — no data movement is emitted in codegen, and
+  // InitMemRef shares the source MemRef via set_output_memory_inherit_input.
+  CHECK(args.size() == 1) << "tile.as_layout requires exactly 1 argument (input), but got " << args.size();
+
+  auto tile_type = As<TileType>(args[0]->GetType());
+  CHECK(tile_type) << "tile.as_layout requires input to be a TileType, but got "
+                   << args[0]->GetType()->TypeName();
+  const size_t ndim = tile_type->shape_.size();
+  CHECK(ndim >= 2) << "tile.as_layout requires at least 2 dimensions, but got " << ndim;
+
+  std::vector<ExprPtr> new_shape = tile_type->shape_;
+  std::swap(new_shape[ndim - 2], new_shape[ndim - 1]);
+
+  // The transpose dual flips the major-ness of *each* of blayout and slayout
+  // independently (row_major <-> col_major); none_box (the non-fractal ND/DN
+  // scatter axis) has no major-ness and is left unchanged. This maps each
+  // layout to its transpose dual: NZ<->ZN, NN<->ZZ, ND<->DN. (A plain swap of
+  // the two fields would be correct only for NZ/ZN, and would wrongly leave
+  // NN/ZZ fixed and produce an illegal none_box blayout for ND/DN.) fractal/pad
+  // are byte-level invariants and carry through unchanged.
+  auto flip_major = [](TileLayout l) -> TileLayout {
+    switch (l) {
+      case TileLayout::row_major:
+        return TileLayout::col_major;
+      case TileLayout::col_major:
+        return TileLayout::row_major;
+      case TileLayout::none_box:
+        return TileLayout::none_box;
+    }
+    return l;
+  };
+  const TileView src_v = tile_view_semantics::GetEffectiveTileView(*tile_type);
+  TileView tile_view;
+  tile_view.blayout = flip_major(src_v.blayout);
+  tile_view.slayout = flip_major(src_v.slayout);
+  tile_view.fractal = src_v.fractal;
+  tile_view.pad = src_v.pad;
+  std::vector<ExprPtr> valid_shape = src_v.valid_shape.empty() ? tile_type->shape_ : src_v.valid_shape;
+  std::swap(valid_shape[ndim - 2], valid_shape[ndim - 1]);
+  tile_view.valid_shape = valid_shape;
+
+  return std::make_shared<TileType>(new_shape, tile_type->dtype_, std::nullopt, tile_view,
+                                    tile_type->memory_space_);
+}
+
 // ============================================================================
 // Registration Function for Tile Transform Operations
 // ============================================================================
@@ -422,6 +474,19 @@ REGISTER_OP("tile.transpose")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileTransposeType(args, kwargs);
+    });
+
+REGISTER_OP("tile.as_layout")
+    .set_op_category("TileOp")
+    .set_description("Zero-copy fractal-layout reinterpretation (NZ<->ZN) that aliases the source buffer")
+    .add_argument("input", "Input tile (TileType, >=2D; typically Mat-resident)")
+    // Pure view: the result reinterprets the same bytes as the transposed
+    // layout, so it inherits the input's memory space and InitMemRef shares the
+    // input MemRef (same base_ -> same address). Codegen emits no data movement.
+    .set_output_memory_inherit_input()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileAsLayoutType(args, kwargs);
     });
 
 TypePtr DeduceTileAssembleType(const std::vector<ExprPtr>& args,

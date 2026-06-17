@@ -716,6 +716,86 @@ _AUTOL0_ATOL = 1e-5
 _AUTOL0_BF16_SHAPES = [(16, 128, 256)]
 
 
+class TestSharedKVMatmul(PTOTestCase):
+    """``qk = q @ kv^T`` and ``pv = p @ kv`` where a NON-SQUARE ``kv`` [N, K] is
+    one sliced, shared operand feeding both b_trans=True and b_trans=False.
+
+    A single sliced ``kv`` is consumed by both a b_trans=True and a b_trans=False
+    matmul (issue #1776). The compiler must emit ONE GM->L1 load and reinterpret
+    it for the transposed use via a zero-copy ``tile.as_layout`` view (NZ<->ZN)
+    aliasing the same L1 buffer. Because ``kv`` is non-square, ``qk`` and ``pv``
+    have different shapes and cannot be summed, so each is a separate output.
+    """
+
+    __test__ = False
+
+    def __init__(self, m: int = 16, k: int = 64, n: int = 128, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
+        self.M = m
+        self.K = k
+        self.N = n  # non-square kv [N, K]
+
+    def get_name(self) -> str:
+        return f"shared_kv_matmul_{self.M}x{self.K}x{self.N}"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        M, K, N = self.M, self.K, self.N
+        return [
+            TensorSpec("q", [M, K], DataType.FP32, init_value=torch.randn),
+            TensorSpec("p", [M, N], DataType.FP32, init_value=torch.randn),
+            # Sliced down to [N, K] so the load is a real (partial) tensor.slice.
+            TensorSpec("kv_src", [2 * N, K], DataType.FP32, init_value=torch.randn),
+            TensorSpec("c_qk", [M, N], DataType.FP32, is_output=True),
+            TensorSpec("c_pv", [M, K], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        M, K, N = self.M, self.K, self.N
+        NN = 2 * N
+
+        @pl.program
+        class SharedKVProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def shared_kv(
+                self,
+                q: pl.Tensor[[M, K], pl.FP32],
+                p: pl.Tensor[[M, N], pl.FP32],
+                kv_src: pl.Tensor[[NN, K], pl.FP32],
+                c_qk: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+                c_pv: pl.Out[pl.Tensor[[M, K], pl.FP32]],
+            ) -> tuple[pl.Tensor[[M, N], pl.FP32], pl.Tensor[[M, K], pl.FP32]]:
+                # ONE sliced NON-SQUARE KV consumed by both matmuls -> ONE GM->L1 load.
+                kv = kv_src[0:N, 0:K]
+                # b_trans=True reads kv transposed via a zero-copy tile.as_layout view.
+                qk = pl.matmul(q, kv, b_trans=True, out_dtype=pl.FP32)  # [M, N]
+                # b_trans=False reads the same buffer in its natural orientation.
+                pv = pl.matmul(p, kv, out_dtype=pl.FP32)  # [M, K]
+                c_qk = pl.assemble(c_qk, qk, offset=[0, 0])
+                c_pv = pl.assemble(c_pv, pv, offset=[0, 0])
+                return c_qk, c_pv
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                q: pl.Tensor[[M, K], pl.FP32],
+                p: pl.Tensor[[M, N], pl.FP32],
+                kv_src: pl.Tensor[[NN, K], pl.FP32],
+                out_qk: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+                out_pv: pl.Out[pl.Tensor[[M, K], pl.FP32]],
+            ) -> tuple[pl.Tensor[[M, N], pl.FP32], pl.Tensor[[M, K], pl.FP32]]:
+                out_qk, out_pv = self.shared_kv(q, p, kv_src, out_qk, out_pv)
+                return out_qk, out_pv
+
+        return SharedKVProgram
+
+    def compute_expected(self, tensors, params=None):
+        q = tensors["q"].to(torch.float32)
+        p = tensors["p"].to(torch.float32)
+        kv = tensors["kv_src"][: self.N, : self.K].to(torch.float32)
+        tensors["c_qk"][:] = torch.matmul(q, kv.T)
+        tensors["c_pv"][:] = torch.matmul(p, kv)
+
+
 class TestMatmulOperations:
     """Test suite for matrix multiplication (matmul) operations."""
 
@@ -807,6 +887,21 @@ class TestMatmulOperations:
         # matching the qwen3_32b_decode_scope3 initialization pattern.
         cfg = RunConfig(rtol=1e-3, atol=1e-3)
         result = test_runner.run(TestPipelineMatmulAccGateUp(platform=platform, config=cfg))
+        assert result.passed, f"Test failed: {result.error}"
+
+    # --- Shared-KV / NZ<->ZN b_trans view test (#1776) -------------------------
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    @pytest.mark.parametrize("m,k,n", [(16, 64, 128), (16, 128, 64)])
+    def test_shared_kv_matmul(self, test_runner, platform, m, k, n):
+        """One GM->L1 load + zero-copy NZ<->ZN view feeding QK and PV over a
+        NON-SQUARE kv [N, K]; both outputs must match.
+
+        FP32 cube matmul vs torch fp32 golden differs by accumulation-order rounding,
+        so use a realistic tolerance rather than bit-exact.
+        """
+        cfg = RunConfig(platform=platform, rtol=1e-3, atol=1e-3)
+        result = test_runner.run(TestSharedKVMatmul(m=m, k=k, n=n, platform=platform, config=cfg))
         assert result.passed, f"Test failed: {result.error}"
 
 

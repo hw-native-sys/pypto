@@ -413,6 +413,29 @@ def concat(
     return _ir_core.create_op_call("tile.concat", [src0, src1], {}, actual_span)
 
 
+def as_layout(
+    tile: Expr,
+    span: Span | None = None,
+) -> Call:
+    """Zero-copy fractal-layout reinterpretation (NZ<->ZN) of a tile.
+
+    Swaps the trailing two dims together with the block/scatter layouts, aliasing
+    the source buffer byte-for-byte (an NZ ``[..., N, K]`` tile and a ZN
+    ``[..., K, N]`` tile over the same L1 bytes are mutual transposes). Emits no
+    data movement: it lets one GM->L1 load feed both a ``b_trans=True`` and a
+    ``b_trans=False`` matmul on a shared operand.
+
+    Args:
+        tile: Input tile (TileType, >=2D; typically Mat-resident)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression returning the transposed-layout view tile
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.as_layout", [tile], {}, actual_span)
+
+
 def move(
     tile: Expr,
     target_memory: MemorySpace,

@@ -3594,5 +3594,50 @@ class TestTileLoadDistributedSrc:
                     return pl.load(tile_a, [0, 0], [32, 32])  # pyright: ignore[reportArgumentType, reportReturnType]
 
 
+class TestTileAsLayout:
+    """tile.as_layout: zero-copy fractal-layout reinterpretation (issue #1776)."""
+
+    # (in_blayout, in_slayout, out_blayout, out_slayout, name). The transpose dual
+    # flips each axis' major-ness independently (row<->col), leaving none_box fixed:
+    # NZ<->ZN, NN<->ZZ, ND<->DN. A naive swap of the two fields would be wrong for
+    # NN/ZZ (unchanged) and ND/DN (illegal none_box blayout).
+    _DUALS = [
+        ("NZ->ZN", "col_major", "row_major", "row_major", "col_major"),
+        ("ZN->NZ", "row_major", "col_major", "col_major", "row_major"),
+        ("NN->ZZ", "col_major", "col_major", "row_major", "row_major"),
+        ("ZZ->NN", "row_major", "row_major", "col_major", "col_major"),
+        ("ND->DN", "row_major", "none_box", "col_major", "none_box"),
+        ("DN->ND", "col_major", "none_box", "row_major", "none_box"),
+    ]
+
+    @pytest.mark.parametrize(("name", "bin_", "sin", "bout", "sout"), _DUALS)
+    def test_as_layout_transpose_duality(self, name, bin_, sin, bout, sout):
+        span = ir.Span.unknown()
+        src_view = pl.TileView(blayout=getattr(pl.TileLayout, bin_), slayout=getattr(pl.TileLayout, sin))
+        # [8, 16] -> transposed view is [16, 8].
+        src_type = ir.TileType([8, 16], DataType.FP32, None, src_view)
+        src = ir.Var("src", src_type, span)
+
+        result_type = tile.as_layout(src).type
+        assert isinstance(result_type, ir.TileType)
+        # Trailing two dims are swapped.
+        assert isinstance(result_type.shape[0], ir.ConstInt) and result_type.shape[0].value == 16
+        assert isinstance(result_type.shape[1], ir.ConstInt) and result_type.shape[1].value == 8
+        # Each layout axis flips its major-ness (none_box stays none_box). The
+        # default (row_major, none_box) = ND view canonicalizes to tile_view=None,
+        # so read the effective layout.
+        tv = result_type.tile_view
+        eff_blayout = tv.blayout if tv is not None else pl.TileLayout.row_major
+        eff_slayout = tv.slayout if tv is not None else pl.TileLayout.none_box
+        assert eff_blayout == getattr(pl.TileLayout, bout)
+        assert eff_slayout == getattr(pl.TileLayout, sout)
+
+    def test_as_layout_rejects_1d(self):
+        span = ir.Span.unknown()
+        src = ir.Var("src", ir.TileType([16], DataType.FP32), span)
+        with pytest.raises(Exception, match="at least 2 dimensions"):
+            tile.as_layout(src)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

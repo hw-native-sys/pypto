@@ -207,8 +207,13 @@ std::vector<TypePtr> FindYieldTypes(const std::vector<StmtPtr>& stmts) {
  * @brief Resolved consumer memory space requirement for a variable.
  */
 struct ConsumerSpaceReq {
-  MemorySpace space;  ///< Required memory space
-  bool transpose;     ///< Resolved transpose flag from the consumer's kwargs
+  MemorySpace space;       ///< Required memory space
+  bool transpose = false;  ///< Bake transpose into the consumer-driven load.
+                           ///< Only set for ND (batch_matmul) b_trans operands: those
+                           ///< take the legacy transpose-at-load path. A 2D tile.matmul
+                           ///< b_trans operand keeps transpose=false here and is
+                           ///< reinterpreted by a zero-copy tile.as_layout view in
+                           ///< BridgeInputSpaces instead (issue #1776).
 };
 
 /**
@@ -291,10 +296,24 @@ class ConsumerSpaceCollector : public IRVisitor {
       return;
     }
 
+    // An operand of rank > 2 makes this matmul lower to tile.batch_matmul (ND),
+    // which keeps the legacy transpose-at-load path; a 2D tile.matmul instead
+    // uses a zero-copy tile.as_layout view added in BridgeInputSpaces (#1776).
+    // So a consumer-driven load bakes the transpose ONLY for the ND case.
+    bool consumer_is_nd = false;
+    for (const auto& a : call->args_) {
+      if (auto tt = As<TensorType>(a->GetType()); tt && tt->shape_.size() > 2) {
+        consumer_is_nd = true;
+        break;
+      }
+    }
     for (const auto& [idx, req] : entry->input_reqs) {
       if (idx >= call->args_.size()) continue;
       if (auto var = As<Var>(call->args_[idx])) {
-        bool transpose = req.trans_kwarg ? call->GetKwarg<bool>(*req.trans_kwarg, false) : false;
+        const bool want_transpose = req.trans_kwarg ? call->GetKwarg<bool>(*req.trans_kwarg, false) : false;
+        // 2D matmul: natural load (transpose=false), as_layout compensates later.
+        // ND batch_matmul: bake the transpose into the load (legacy), no view.
+        const bool transpose = want_transpose && consumer_is_nd;
         // Prioritize non-Vec spaces: if an existing requirement is the default Vec but this
         // consumer needs a specialized space (Mat/Left/Right/Acc/Bias), override it so the
         // load-like producer can emit the specialized space directly.
@@ -621,6 +640,9 @@ class TensorToTileMutator : public TypePropagatingMutator {
     const auto& offset_arg = call->args_[2];
     ExprPtr valid_shapes = (call->args_.size() == 4) ? call->args_[3] : shape_arg;
 
+    // req.transpose is set only for ND (batch_matmul) b_trans operands (legacy
+    // transpose-at-load); 2D matmul operands load natural here and get a
+    // zero-copy tile.as_layout view at the matmul site instead (issue #1776).
     std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", req.space},
                                                                  {"transpose", req.transpose}};
     auto load_call = op_registry_.Create("tile.load", {input, offset_arg, shape_arg, valid_shapes},
@@ -644,6 +666,43 @@ class TensorToTileMutator : public TypePropagatingMutator {
     auto args = call->args_;
     std::vector<StmtPtr> stmts;
 
+    // An operand of rank > 2 means this matmul lowers to tile.batch_matmul, not
+    // tile.matmul (see the rank dispatch in op_conversion_registry.cpp). The
+    // zero-copy as_layout-view rework targets 2D tile.matmul only (issue #1776);
+    // batch_matmul keeps the legacy transpose-at-load path.
+    bool is_nd = false;
+    for (const auto& a : args) {
+      if (auto tt = As<TensorType>(a->GetType())) {
+        if (tt->shape_.size() > 2) is_nd = true;
+      } else if (auto tl = As<TileType>(a->GetType())) {
+        if (tl->shape_.size() > 2) is_nd = true;
+      }
+      if (is_nd) break;
+    }
+
+    // Emit a `tile.load` of `arg` (TensorType) into `space`, append its AssignStmt,
+    // and return the bound load Var.
+    auto emit_load = [&](const ExprPtr& arg, const TensorTypePtr& tensor_type, MemorySpace space,
+                         bool transpose, size_t idx) -> VarPtr {
+      auto offsets = MakeZeroOffsets(tensor_type->shape_.size(), call->span_);
+      auto shapes = MakeShapeTuple(tensor_type->shape_, call->span_);
+      std::vector<std::pair<std::string, std::any>> load_kw = {{"target_memory", space},
+                                                               {"transpose", transpose}};
+      auto load = op_registry_.Create("tile.load", {arg, offsets, shapes, shapes}, load_kw, call->span_);
+      std::string var_name;
+      if (auto var = As<Var>(arg)) {
+        auto space_str = MemorySpaceToString(space);
+        std::transform(space_str.begin(), space_str.end(), space_str.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+        var_name = var->name_hint_ + "_" + space_str;
+      } else {
+        var_name = "bridged_" + std::to_string(idx);
+      }
+      auto load_var = std::make_shared<Var>(var_name, load->GetType(), call->span_);
+      stmts.push_back(std::make_shared<AssignStmt>(load_var, load, call->span_));
+      return load_var;
+    };
+
     // Iterate in sorted index order to produce deterministic statement ordering.
     std::vector<size_t> sorted_indices;
     sorted_indices.reserve(input_reqs.size());
@@ -653,32 +712,40 @@ class TensorToTileMutator : public TypePropagatingMutator {
     for (size_t idx : sorted_indices) {
       const auto& req = input_reqs.at(idx);
       if (idx >= args.size()) continue;
+      const bool want_transpose = req.trans_kwarg ? call->GetKwarg<bool>(*req.trans_kwarg, false) : false;
       auto tensor_type = As<TensorType>(args[idx]->GetType());
-      if (!tensor_type) continue;  // Already TileType — pass through
 
-      bool transpose = req.trans_kwarg ? call->GetKwarg<bool>(*req.trans_kwarg, false) : false;
+      // 2D tile.matmul realises a transposed operand as a zero-copy tile.as_layout
+      // view over ONE natural load, aliasing the same L1 buffer (issue #1776) — so
+      // a tensor consumed by both a b_trans=True and a b_trans=False matmul loads
+      // once. ND (batch_matmul) keeps the legacy transpose-at-load path: the
+      // transpose is baked into the load and no view is emitted.
+      const bool use_view = want_transpose && !is_nd;
 
-      auto offsets = MakeZeroOffsets(tensor_type->shape_.size(), call->span_);
-      auto shapes = MakeShapeTuple(tensor_type->shape_, call->span_);
-      std::vector<std::pair<std::string, std::any>> load_kw = {{"target_memory", req.space},
-                                                               {"transpose", transpose}};
-      auto load =
-          op_registry_.Create("tile.load", {args[idx], offsets, shapes, shapes}, load_kw, call->span_);
-
-      // Derive name from the arg's name hint + lowercase memory space name
-      std::string var_name;
-      if (auto var = As<Var>(args[idx])) {
-        auto space_str = MemorySpaceToString(req.space);
-        std::transform(space_str.begin(), space_str.end(), space_str.begin(),
-                       [](unsigned char c) { return std::tolower(c); });
-        var_name = var->name_hint_ + "_" + space_str;
+      VarPtr space_var;
+      if (tensor_type) {
+        // Bake the transpose into the load only on the legacy ND path; the 2D
+        // path always loads naturally and lets the view supply the transpose.
+        space_var = emit_load(args[idx], tensor_type, req.space, /*transpose=*/want_transpose && is_nd, idx);
+      } else if (use_view) {
+        // Already a tile (e.g. a consumer-driven Mat load) that we reinterpret
+        // below; aliasing its buffer requires a Var.
+        space_var = As<Var>(args[idx]);
+        if (!space_var) continue;  // non-Var tile expr: leave as-is
       } else {
-        var_name = "bridged_" + std::to_string(idx);
+        continue;  // already a tile in the right orientation — pass through
       }
 
-      auto load_var = std::make_shared<Var>(var_name, load->GetType(), call->span_);
-      stmts.push_back(std::make_shared<AssignStmt>(load_var, load, call->span_));
-      args[idx] = load_var;
+      if (use_view) {
+        // Zero-copy reinterpret the natural Mat tile as its transpose (NZ<->ZN),
+        // aliasing the SAME L1 buffer.
+        auto view = op_registry_.Create("tile.as_layout", {space_var}, {}, call->span_);
+        auto view_var = std::make_shared<Var>(space_var->name_hint_ + "_t", view->GetType(), call->span_);
+        stmts.push_back(std::make_shared<AssignStmt>(view_var, view, call->span_));
+        args[idx] = view_var;
+      } else {
+        args[idx] = space_var;
+      }
     }
 
     return {std::move(args), std::move(stmts)};
