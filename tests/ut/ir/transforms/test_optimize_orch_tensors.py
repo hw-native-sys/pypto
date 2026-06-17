@@ -4577,6 +4577,51 @@ class TestOutWindowExternalizer:
         assert "pl.Out[pl.Tensor[[USER_BATCH, 128], pl.FP32]]" in printed_windowed
         assert "pl.Out[pl.Tensor[[32, 128], pl.FP32" not in printed_windowed
 
+    def test_dynamic_parent_sparse_nonzero_output_window_coalesces(self):
+        cache_rows = pl.dynamic("CACHE_ROWS")
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def cache_write(
+                self,
+                cache: pl.Out[pl.Tensor[[cache_rows, 128], pl.FP32]],
+                data: pl.Tensor[[4, 128], pl.FP32],
+                slot_offset: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[cache_rows, 128], pl.FP32]:
+                for ki, (cache_iter,) in pl.range(0, 4, init_values=(cache,)):
+                    src: pl.Tile[[1, 128], pl.FP32] = pl.tile.load(data, [ki, 0], [1, 128], [1, 128])
+                    row: pl.Scalar[pl.INDEX] = slot_offset + ki * 128
+                    cache_next: pl.Tensor[[cache_rows, 128], pl.FP32] = pl.tile.store(
+                        src, [row, 0], cache_iter
+                    )
+                    cache_rv = pl.yield_(cache_next)
+                return cache_rv
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                cache: pl.Out[pl.Tensor[[cache_rows, 128], pl.FP32]],
+                data: pl.Tensor[[4, 128], pl.FP32],
+            ) -> pl.Tensor[[cache_rows, 128], pl.FP32]:
+                slot: pl.Scalar[pl.INDEX] = 7
+                return self.cache_write(cache, data, slot)
+
+        After = _run_to_optimize_orch_tensors(
+            Before, output_window_policy="coalesce_pieces", window_rewrite_policy="all"
+        )
+
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert "cache_write__windowed" in printed_main
+        assert "cache__ssa_v0__window_base_arg: pl.Scalar[pl.INDEX] = 7" in printed_main
+        assert "cache__ssa_v0__window_extent_arg: pl.Scalar[pl.INDEX] = 385" in printed_main
+        assert "pl.tensor.slice(cache__ssa_v0, [cache__ssa_v0__window_extent_arg, 128]" in printed_main
+
+        printed_windowed = ir.python_print(_get_function(After, "cache_write__windowed"))
+        assert "cache__ssa_v0__window_extent_dyn = pl.dynamic" in ir.python_print(After)
+        assert "pl.Out[pl.Tensor[[cache__ssa_v0__window_extent_dyn, 128], pl.FP32" in printed_windowed
+        assert "pl.Out[pl.Tensor[[CACHE_ROWS, 128], pl.FP32" not in printed_windowed
+
 
 class TestEdgeCases:
     """Edge cases: pass should not modify programs that don't match any pattern."""
