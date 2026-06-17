@@ -1013,8 +1013,7 @@ static bool LifetimesOverlap(const LifetimeInterval& a, const LifetimeInterval& 
 // `HazardInputs` is collected in a single forward IR walk:
 //   - load_derived: vars produced by tile.load or by a legal view op chained
 //     from a load (these alias the load's physical buffer).
-//   - reads_tpop:   vars whose defining op consumes a tile.tpop_from_aic value
-//     or a value derived from one.
+//   - reads_tpop:   vars whose defining op consumes a tile.tpop_from_aic value.
 // Membership is keyed on Var identity and checked against the reuse-decision
 // representatives (a sharing group's earliest-defined member, which for a
 // writer is the writer's own output and for a load is the load itself).
@@ -1029,7 +1028,7 @@ static bool IsLegalTileViewOp(const std::string& op_name) {
 
 struct HazardInputs {
   std::unordered_set<const Var*> load_derived;  ///< tile.load outputs + view descendants
-  std::unordered_set<const Var*> reads_tpop;    ///< vars whose def consumes a tpop-derived value
+  std::unordered_set<const Var*> reads_tpop;    ///< vars whose def consumes a tpop_from_aic value
 };
 
 class HazardInputCollector : public IRVisitor {
@@ -1054,12 +1053,9 @@ class HazardInputCollector : public IRVisitor {
             }
           }
         }
-        if (op_name == "tile.tpop_from_aic") {
-          tpop_vars_.insert(op->var_.get());
-        }
+        if (op_name == "tile.tpop_from_aic") tpop_vars_.insert(op->var_.get());
         for (const Var* in : input_vars) {
           if (tpop_vars_.count(in) != 0) {
-            tpop_vars_.insert(op->var_.get());
             inputs_.reads_tpop.insert(op->var_.get());
             break;
           }
@@ -1069,34 +1065,9 @@ class HazardInputCollector : public IRVisitor {
     IRVisitor::VisitStmt_(op);
   }
 
-  void VisitStmt_(const ForStmtPtr& op) override {
-    IRVisitor::VisitStmt_(op);
-    PropagateReturnsFromTrailingYield(op->body_, op->return_vars_);
-  }
-
-  void VisitStmt_(const IfStmtPtr& op) override {
-    IRVisitor::VisitStmt_(op);
-    PropagateReturnsFromTrailingYield(op->then_body_, op->return_vars_);
-    if (op->else_body_.has_value()) {
-      PropagateReturnsFromTrailingYield(op->else_body_.value(), op->return_vars_);
-    }
-  }
-
   HazardInputs Take() { return std::move(inputs_); }
 
  private:
-  void PropagateReturnsFromTrailingYield(const StmtPtr& body, const std::vector<VarPtr>& return_vars) {
-    auto yield = FindYieldStmt(body);
-    if (!yield) return;
-    const size_t n = std::min(return_vars.size(), yield->value_.size());
-    for (size_t i = 0; i < n; ++i) {
-      auto value_var = As<Var>(yield->value_[i]);
-      if (!value_var || tpop_vars_.count(value_var.get()) == 0) continue;
-      tpop_vars_.insert(return_vars[i].get());
-      inputs_.reads_tpop.insert(return_vars[i].get());
-    }
-  }
-
   HazardInputs inputs_;
   std::unordered_set<const Var*> tpop_vars_;
 };
