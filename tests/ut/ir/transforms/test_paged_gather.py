@@ -26,7 +26,7 @@ data goes straight GM->L1 (never UB).
 import pypto.language as pl
 import pytest
 from pypto import DataType, ir, passes
-from pypto.backend import BackendType, set_backend_type
+from pypto.backend import BackendType, is_backend_configured, set_backend_type
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
 
@@ -162,10 +162,10 @@ def test_paged_gather_dynamic_row_count():
 @pytest.mark.parametrize("is_trans", [False, True])
 def test_paged_gather_survives_full_pipeline(is_trans):
     """The lowered loop survives the full Default pipeline through codegen lowering."""
-    try:
+    # A backend may already be configured by an earlier test in the session;
+    # only set it when unconfigured so real set_backend_type failures still surface.
+    if not is_backend_configured():
         set_backend_type(BackendType.Ascend910B)
-    except Exception:
-        pass  # A backend may already be configured by an earlier test in the session.
     program = _build_program(is_trans=is_trans)
     pm = PassManager.get_strategy(OptimizationStrategy.Default)
     result = pm.run_passes(program)

@@ -1526,6 +1526,14 @@ void OpConversionRegistry::RegisterPagedGatherOps() {
         // Read it via tensor.dim so the loop bound is a proper SSA scalar (works for
         // both static and dynamic index shapes and survives print/parse round-trip).
         const int64_t rows_axis = (idx_type->shape_.size() == 1) ? 0 : 1;
+        // Static capacity guard: the accumulator holds at most `max_indices` rows,
+        // so a compile-time-known indices length must not exceed it (otherwise
+        // tile.gather_row would write out of bounds via dst_offset).
+        if (auto rows_const = ir::As<ir::ConstInt>(idx_type->shape_[rows_axis])) {
+          CHECK_SPAN(rows_const->value_ <= max_indices, span)
+              << "tensor.paged_gather: indices length (" << rows_const->value_ << ") exceeds max_indices ("
+              << max_indices << ")";
+        }
         auto rows_call = op_reg.Create("tensor.dim", {indices, make_idx(rows_axis)}, span);
         auto rows = std::make_shared<Var>("pg_rows", rows_call->GetType(), span);
         prologue.push_back(std::make_shared<AssignStmt>(rows, rows_call, span));

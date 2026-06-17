@@ -813,8 +813,10 @@ static std::string MakeGatherRowCodegenPTO(const CallPtr& op, codegen::CodegenBa
   auto shapes = ir::As<ir::MakeTuple>(op->args_[4]);
   INTERNAL_CHECK_SPAN(dst_off && src_off && shapes, op->span_)
       << "tile.gather_row offsets and shapes must be literal tuples";
-  INTERNAL_CHECK_SPAN(dst_off->elements_.size() >= 2 && shapes->elements_.size() >= 2, op->span_)
-      << "tile.gather_row dst_offset and shapes must have at least 2 elements";
+  INTERNAL_CHECK_SPAN(
+      dst_off->elements_.size() >= 2 && src_off->elements_.size() >= 2 && shapes->elements_.size() >= 2,
+      op->span_)
+      << "tile.gather_row offsets and shapes must have at least 2 elements";
 
   bool transpose = false;
   for (const auto& [k, v] : op->kwargs_) {

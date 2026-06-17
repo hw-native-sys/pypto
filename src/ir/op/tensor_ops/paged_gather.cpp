@@ -95,6 +95,14 @@ TypePtr DeduceTensorPagedGatherType(const std::vector<ExprPtr>& args,
       << idx_type->dtype_.ToString();
   CHECK(idx_type->shape_.size() == 1 || idx_type->shape_.size() == 2)
       << "The operator " << op_name << " requires 1D or 2D indices, but got rank " << idx_type->shape_.size();
+  // Lowering reads only row 0 of a rank-2 operand (indices[0, i]); enforce the
+  // [1, n] contract so a leading dim > 1 cannot silently drop data.
+  if (idx_type->shape_.size() == 2) {
+    auto idx_rows = As<ConstInt>(idx_type->shape_[0]);
+    CHECK(idx_rows && idx_rows->value_ == 1)
+        << "The operator " << op_name << " requires 2D indices to have shape [1, n], but got first dim "
+        << (idx_rows ? std::to_string(idx_rows->value_) : "dynamic");
+  }
 
   auto bt_type = As<TensorType>(args[2]->GetType());
   CHECK(bt_type) << "The operator " << op_name << " requires block_table to be a TensorType, but got "
@@ -102,6 +110,16 @@ TypePtr DeduceTensorPagedGatherType(const std::vector<ExprPtr>& args,
   CHECK(bt_type->dtype_ == DataType::INT32)
       << "The operator " << op_name << " requires block_table dtype to be INT32, but got "
       << bt_type->dtype_.ToString();
+  CHECK(bt_type->shape_.size() == 1 || bt_type->shape_.size() == 2)
+      << "The operator " << op_name << " requires 1D or 2D block_table, but got rank "
+      << bt_type->shape_.size();
+  // Same [1, n] contract for rank-2 block_table (lowering reads block_table[0, b]).
+  if (bt_type->shape_.size() == 2) {
+    auto bt_rows = As<ConstInt>(bt_type->shape_[0]);
+    CHECK(bt_rows && bt_rows->value_ == 1)
+        << "The operator " << op_name << " requires 2D block_table to have shape [1, n], but got first dim "
+        << (bt_rows ? std::to_string(bt_rows->value_) : "dynamic");
+  }
 
   const int block_size = ReadIntAttr(kwargs, "block_size", op_name, /*required=*/true, 0);
   CHECK(block_size > 0) << "The operator " << op_name << " requires block_size > 0, but got " << block_size;
@@ -113,6 +131,14 @@ TypePtr DeduceTensorPagedGatherType(const std::vector<ExprPtr>& args,
   CHECK(max_indices > 0) << "The operator " << op_name << " requires max_indices > 0, but got "
                          << max_indices;
   const bool is_trans = ReadBoolAttr(kwargs, "is_trans", false);
+  // Surface the is_trans/space constraint as a user-facing error here rather than
+  // an INTERNAL_CHECK deep in the lowering pass.
+  MemorySpace space = MemorySpace::Mat;
+  for (const auto& [k, v] : kwargs) {
+    if (k == "space") space = AnyCast<MemorySpace>(v, "kwarg key: space");
+  }
+  CHECK(!is_trans || space == MemorySpace::Mat)
+      << "The operator " << op_name << " requires space=MemorySpace::Mat (L1) when is_trans=true";
 
   // Static bound check: col_off + size must fit within src columns when const.
   if (auto src_cols = As<ConstInt>(src_type->shape_[1])) {
