@@ -32,6 +32,7 @@ from .runtime_base import Worker
 if TYPE_CHECKING:
     from pypto.ir.distributed_compiled_program import DistributedCompiledProgram, DistributedConfig
 
+    from .runner import RunConfig
     from .worker import RegistrationHandle
 
 
@@ -360,8 +361,25 @@ def _bind_sub_workers(
     return {**loaded, **callbacks}
 
 
-def _make_call_config(dc: DistributedConfig) -> Any:
-    """Build a simpler ``CallConfig`` from the distributed config."""
+def _make_call_config(dc: DistributedConfig, run_config: RunConfig | None = None) -> Any:
+    """Build a simpler ``CallConfig`` from the distributed config.
+
+    The ``block_dim`` / ``aicpu_thread_num`` baseline always comes from the
+    program's :class:`DistributedConfig`. When *run_config* is given, its
+    per-task ring-sizing overrides (``ring_task_window`` / ``ring_heap`` /
+    ``ring_dep_pool``) are overlaid on top, so a single L3 dispatch can size the
+    runtime's ring buffers without mutating the prepared program's shared
+    config. ``None`` (the default) leaves the baseline untouched and the runtime
+    applies its own ``PTO2_RING_*`` env var / compile-time fallback.
+
+    Args:
+        dc: The program's distributed configuration (baseline).
+        run_config: Optional per-dispatch :class:`RunConfig` whose ``ring_*``
+            overrides are applied. ``None`` means no ring override.
+
+    Returns:
+        A fresh simpler ``CallConfig``.
+    """
     from simpler.task_interface import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
         CallConfig,
     )
@@ -370,6 +388,10 @@ def _make_call_config(dc: DistributedConfig) -> Any:
     if dc.block_dim is not None:
         call_config.block_dim = dc.block_dim
     call_config.aicpu_thread_num = dc.aicpu_thread_num
+    if run_config is not None:
+        from .runner import _apply_ring_overrides  # noqa: PLC0415
+
+        _apply_ring_overrides(call_config, run_config)
     return call_config
 
 
@@ -428,7 +450,7 @@ def _dispatch(
 def execute_distributed(
     compiled: DistributedCompiledProgram,
     coerced_args: list[torch.Tensor | DeviceTensor],
-    config: Any = None,
+    config: RunConfig | None = None,
 ) -> Any:
     """Execute a distributed compiled program once via simpler Worker(level=3).
 
@@ -441,7 +463,11 @@ def execute_distributed(
         compiled: The DistributedCompiledProgram instance.
         coerced_args: Coerced arguments — host ``torch.Tensor`` or
             worker-resident :class:`~pypto.runtime.DeviceTensor`.
-        config: Optional run configuration (unused for now).
+        config: Optional per-dispatch :class:`RunConfig`. Its per-task
+            ring-sizing overrides (``ring_task_window`` / ``ring_heap`` /
+            ``ring_dep_pool``) size this dispatch's runtime ring buffers; the
+            remaining (compile-side / DFX) fields are not consumed on the L3
+            dispatch path. ``None`` defers every ring field to the runtime.
 
     Returns:
         The simpler ``RunTiming`` from the dispatch (``host_wall_us`` /
@@ -487,7 +513,9 @@ def execute_distributed(
         w = _construct_worker(dc, compiled.platform, runtime_name, num_sub)
         sub_ids, chip_cids = _register_callables(w, sub_worker_fns, chip_callables)
         w.init()
-        return _dispatch(w, entry_fn, tensors, chip_cids, sub_ids, _make_call_config(dc), len(dc.device_ids))
+        return _dispatch(
+            w, entry_fn, tensors, chip_cids, sub_ids, _make_call_config(dc, config), len(dc.device_ids)
+        )
     finally:
         if w is not None:
             w.close()
@@ -496,7 +524,7 @@ def execute_distributed(
 def execute_distributed_compiled(
     output_dir: str | Path,
     args: Sequence[torch.Tensor | DeviceTensor | ctypes._SimpleCData],
-    config: Any = None,
+    config: RunConfig | None = None,
     *,
     platform: str | None = None,
     distributed_config: DistributedConfig | None = None,
@@ -517,8 +545,10 @@ def execute_distributed_compiled(
         args: Positional arguments — host ``torch.Tensor`` or worker-resident
             :class:`~pypto.runtime.DeviceTensor` — matching the orchestrator's
             parameter order (in-place, or input-only for a return-style program).
-        config: Optional run configuration (forwarded to ``__call__``; the L3
-            dispatch path does not yet consume DFX flags from it).
+        config: Optional per-dispatch :class:`RunConfig`, forwarded to
+            ``__call__``. Its per-task ring-sizing overrides size this dispatch's
+            runtime ring buffers; other (compile-side / DFX) fields are not
+            consumed on the L3 dispatch path.
         platform: Override the persisted platform (e.g. ``a2a3sim`` → ``a2a3``).
         distributed_config: Override the persisted run config (e.g. a different
             set of ``device_ids``).
@@ -812,7 +842,7 @@ class DistributedWorker(Worker):
     # Dispatch
     # ------------------------------------------------------------------
 
-    def __call__(self, *args: Any, config: Any = None) -> None:
+    def __call__(self, *args: Any, config: RunConfig | None = None) -> None:
         """Dispatch one run on the primary compiled program, reusing all setup.
 
         Pass one argument per program parameter (in-place). Each argument is
@@ -832,6 +862,12 @@ class DistributedWorker(Worker):
         Available only for single-program workers. When several programs were
         prepared together (multi-program), the target is ambiguous, so this
         raises ``TypeError`` — dispatch explicitly via ``rt.run(compiled, ...)``.
+
+        ``config`` is an optional per-dispatch :class:`RunConfig`: its per-task
+        ring-sizing overrides (``ring_task_window`` / ``ring_heap`` /
+        ``ring_dep_pool``) size this dispatch's runtime ring buffers without
+        touching the prepared program's shared config, so consecutive dispatches
+        can use different ring sizes. ``None`` reuses the program's baseline.
         """
         if self._multi_program:
             raise TypeError(
@@ -840,9 +876,18 @@ class DistributedWorker(Worker):
             )
         return self._run_compiled(self._compiled, *args, config=config)
 
-    def _run_compiled(self, compiled: DistributedCompiledProgram, *args: Any, config: Any = None) -> None:
-        """Dispatch *compiled* on the shared Worker via its per-program state."""
-        del config  # reserved for future per-call overrides
+    def _run_compiled(
+        self, compiled: DistributedCompiledProgram, *args: Any, config: RunConfig | None = None
+    ) -> None:
+        """Dispatch *compiled* on the shared Worker via its per-program state.
+
+        ``config`` is an optional per-dispatch :class:`RunConfig` whose per-task
+        ring-sizing overrides size this dispatch's runtime ring buffers. When
+        given, a fresh ``CallConfig`` is built for this dispatch only (from the
+        program's ``block_dim`` / ``aicpu_thread_num`` baseline plus the ring
+        overrides), leaving the prepared, shared ``call_config`` untouched. When
+        ``None``, the prepared baseline is reused with zero extra allocation.
+        """
         self._require_open("run")
         from pypto.ir.compiled_program import _validate_device_tensor  # noqa: PLC0415
 
@@ -852,6 +897,13 @@ class DistributedWorker(Worker):
                 "DistributedWorker.run(compiled, ...) requires a DistributedCompiledProgram "
                 "registered when this worker was constructed."
             )
+
+        # Per-task ring sizing: a per-dispatch RunConfig yields a fresh
+        # CallConfig for this call only (the prepared, shared one is never
+        # mutated). With no RunConfig the prepared baseline is reused as-is.
+        call_config = state["call_config"]
+        if config is not None:
+            call_config = _make_call_config(compiled._distributed_config, config)
 
         param_infos = state["param_infos"]
         n_params = len(param_infos)
@@ -890,7 +942,7 @@ class DistributedWorker(Worker):
             tensors,
             state["chip_cids"],
             state["sub_ids"],
-            state["call_config"],
+            call_config,
             state["device_nums"],
         )
 
@@ -934,7 +986,7 @@ class DistributedWorker(Worker):
         self,
         compiled: DistributedCompiledProgram,
         *args: Any,
-        config: Any = None,
+        config: RunConfig | None = None,
     ) -> None:
         """Dispatch *compiled* on this DistributedWorker.
 
@@ -945,6 +997,13 @@ class DistributedWorker(Worker):
         *compiled* must be one of the :class:`DistributedCompiledProgram` objects
         this worker was constructed from; passing an unregistered one raises
         ``ValueError``.
+
+        ``config`` is an optional per-dispatch :class:`RunConfig`; its per-task
+        ring-sizing overrides size this dispatch's runtime ring buffers without
+        touching the prepared program's shared config. In a multi-program worker
+        each program can therefore be dispatched with its own ring sizes (e.g.
+        a larger ``ring_task_window`` for prefill than for decode). ``None``
+        reuses the program's baseline.
         """
         return self._run_compiled(compiled, *args, config=config)
 

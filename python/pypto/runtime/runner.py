@@ -729,6 +729,28 @@ def _coerced_to_orch_args(
     return orch_args
 
 
+def _apply_ring_overrides(call_config: Any, run_config: "RunConfig") -> None:
+    """Overlay a :class:`RunConfig`'s per-task ring sizing onto a ``CallConfig``.
+
+    Each ``runtime_env`` field is left at its ``0`` default when the matching
+    ``RunConfig`` override is ``None``, so the runtime applies its own
+    ``PTO2_RING_*`` env var / compile-time fallback. Shared by the L2
+    (:func:`_build_call_config`) and L3
+    (:func:`pypto.runtime.distributed_runner._make_call_config`) dispatch paths
+    so both transcribe ring sizing identically.
+
+    Args:
+        call_config: A simpler ``CallConfig`` (mutated in place).
+        run_config: The :class:`RunConfig` whose ``ring_*`` overrides are copied.
+    """
+    if run_config.ring_task_window is not None:
+        call_config.runtime_env.ring_task_window = run_config.ring_task_window
+    if run_config.ring_heap is not None:
+        call_config.runtime_env.ring_heap = run_config.ring_heap
+    if run_config.ring_dep_pool is not None:
+        call_config.runtime_env.ring_dep_pool = run_config.ring_dep_pool
+
+
 def _build_call_config(
     run_config: "RunConfig",
     *,
@@ -773,12 +795,7 @@ def _build_call_config(
 
     # Per-task ring sizing: leave the runtime_env field at its 0 default when
     # unset so the runtime applies its own PTO2_RING_* / compile-time fallback.
-    if run_config.ring_task_window is not None:
-        cfg.runtime_env.ring_task_window = run_config.ring_task_window
-    if run_config.ring_heap is not None:
-        cfg.runtime_env.ring_heap = run_config.ring_heap
-    if run_config.ring_dep_pool is not None:
-        cfg.runtime_env.ring_dep_pool = run_config.ring_dep_pool
+    _apply_ring_overrides(cfg, run_config)
 
     if dfx_dir is not None:
         cfg.output_prefix = str(dfx_dir)

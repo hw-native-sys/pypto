@@ -279,6 +279,69 @@ class TestBuildCallConfigRing:
         assert cfg.runtime_env.ring_dep_pool == 0
 
 
+def _make_dist_call_config_with_fake(dc, run_config, monkeypatch):
+    """Invoke ``distributed_runner._make_call_config`` with a spy ``CallConfig``.
+
+    Injects a fake ``simpler.task_interface`` so the L3 config builder runs
+    without the optional ``simpler`` package installed, mirroring
+    :func:`_build_with_fake_callconfig` for the L2 path.
+    """
+    fake_task_interface = types.SimpleNamespace(CallConfig=_SpyCallConfig)
+    fake_simpler = types.ModuleType("simpler")
+    fake_simpler.task_interface = fake_task_interface  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "simpler", fake_simpler)
+    monkeypatch.setitem(sys.modules, "simpler.task_interface", fake_task_interface)
+    from pypto.runtime.distributed_runner import _make_call_config  # noqa: PLC0415
+
+    return _make_call_config(dc, run_config)
+
+
+class TestMakeCallConfigRing:
+    """Verify L3 ``_make_call_config`` overlays per-dispatch ring sizing.
+
+    The ``block_dim`` / ``aicpu_thread_num`` baseline always comes from the
+    program's :class:`DistributedConfig`; a per-dispatch :class:`RunConfig`
+    overlays the ``ring_*`` overrides on top. ``None`` leaves every ring field
+    at the runtime's ``0`` default.
+    """
+
+    def test_no_run_config_leaves_runtime_env_at_zero(self, monkeypatch):
+        from pypto.ir.distributed_compiled_program import DistributedConfig  # noqa: PLC0415
+
+        cfg = _make_dist_call_config_with_fake(DistributedConfig(), None, monkeypatch)
+        assert cfg.runtime_env.ring_task_window == 0
+        assert cfg.runtime_env.ring_heap == 0
+        assert cfg.runtime_env.ring_dep_pool == 0
+
+    def test_run_config_ring_overrides_transcribed(self, monkeypatch):
+        from pypto.ir.distributed_compiled_program import DistributedConfig  # noqa: PLC0415
+
+        run_config = RunConfig(
+            platform="a2a3sim",
+            ring_task_window=32,
+            ring_heap=2 * 1024 * 1024,
+            ring_dep_pool=128,
+        )
+        cfg = _make_dist_call_config_with_fake(DistributedConfig(), run_config, monkeypatch)
+        assert cfg.runtime_env.ring_task_window == 32
+        assert cfg.runtime_env.ring_heap == 2 * 1024 * 1024
+        assert cfg.runtime_env.ring_dep_pool == 128
+
+    def test_baseline_preserved_and_partial_ring_overlay(self, monkeypatch):
+        from pypto.ir.distributed_compiled_program import DistributedConfig  # noqa: PLC0415
+
+        dc = DistributedConfig(block_dim=8, aicpu_thread_num=3)
+        run_config = RunConfig(platform="a2a3sim", ring_heap=1024 * 1024)
+        cfg = _make_dist_call_config_with_fake(dc, run_config, monkeypatch)
+        # DistributedConfig baseline is preserved.
+        assert cfg.block_dim == 8
+        assert cfg.aicpu_thread_num == 3
+        # Only the provided ring field is written; the rest stay at 0.
+        assert cfg.runtime_env.ring_heap == 1024 * 1024
+        assert cfg.runtime_env.ring_task_window == 0
+        assert cfg.runtime_env.ring_dep_pool == 0
+
+
 class TestRunConfigCompileForwarding:
     """Compile-side RunConfig fields are forwarded into ``ir.compile``."""
 

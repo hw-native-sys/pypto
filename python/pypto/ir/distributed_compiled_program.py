@@ -48,6 +48,7 @@ _META_SCHEMA = 1
 
 if TYPE_CHECKING:
     from pypto.runtime.distributed_runner import DistributedWorker
+    from pypto.runtime.runner import RunConfig
 
 
 def _extract_param_infos_from_func(func):
@@ -343,9 +344,15 @@ class DistributedCompiledProgram:
     def __call__(
         self,
         *args: CallArg,
-        config: Any = None,
+        config: "RunConfig | None" = None,
     ) -> torch.Tensor | DeviceTensor | tuple[torch.Tensor | DeviceTensor, ...] | None:
-        """Execute the distributed program via simpler Worker(level=3)."""
+        """Execute the distributed program via simpler Worker(level=3).
+
+        ``config`` is an optional per-dispatch :class:`RunConfig`; its per-task
+        ring-sizing overrides (``ring_task_window`` / ``ring_heap`` /
+        ``ring_dep_pool``) size this dispatch's runtime ring buffers. Other
+        (compile-side / DFX) fields are not consumed on the L3 dispatch path.
+        """
         from pypto.runtime.distributed_runner import execute_distributed  # noqa: PLC0415
 
         param_infos, output_indices, return_types = self._get_metadata()

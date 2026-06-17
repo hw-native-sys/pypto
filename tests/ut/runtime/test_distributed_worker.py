@@ -64,7 +64,7 @@ def patched_setup():
         patch(f"{mod}._load_required_callbacks", return_value=set()) as load_required,
         patch(f"{mod}._construct_worker", return_value=worker) as construct,
         patch(f"{mod}._register_callables", return_value=({}, {"chip_orch": 0})) as register,
-        patch(f"{mod}._make_call_config", return_value=MagicMock(name="CallConfig")),
+        patch(f"{mod}._make_call_config", return_value=MagicMock(name="CallConfig")) as make_call_config,
         patch(f"{mod}._dispatch") as dispatch,
     ):
         yield {
@@ -75,6 +75,7 @@ def patched_setup():
             "load_required": load_required,
             "construct": construct,
             "register": register,
+            "make_call_config": make_call_config,
             "dispatch": dispatch,
         }
 
@@ -105,6 +106,70 @@ class TestSetupOnce:
         m["assemble"].assert_called_once()
         m["construct"].assert_called_once()
         assert m["worker"].init.call_count == 1
+        rt.close()
+
+
+class TestPerTaskRingSizing:
+    """A per-dispatch ``RunConfig`` sizes that dispatch's runtime ring buffers.
+
+    ``_make_call_config`` runs once at construction to build the program's
+    shared baseline. With no per-dispatch ``config`` that baseline is reused
+    (no rebuild); a ``RunConfig`` triggers a fresh rebuild from the program's
+    ``DistributedConfig`` plus the ring overrides, for this dispatch only.
+    """
+
+    # ``_dispatch(w, entry_fn, tensors, chip_cids, sub_ids, call_config, ...)``
+    _CALL_CONFIG_ARG = 5
+
+    def test_no_config_reuses_prepared_baseline(self, patched_setup):
+        m = patched_setup
+        compiled = _fake_compiled([_param("a", [16, 16])], [])
+        rt = DistributedWorker(compiled)
+        # Construction builds the baseline exactly once.
+        assert m["make_call_config"].call_count == 1
+        baseline = m["make_call_config"].return_value
+
+        rt(DeviceTensor(0x1000, (16, 16), torch.float32))
+
+        # No per-dispatch config → baseline reused, no rebuild, and the prepared
+        # config is what reaches _dispatch.
+        assert m["make_call_config"].call_count == 1
+        assert m["dispatch"].call_args.args[self._CALL_CONFIG_ARG] is baseline
+        rt.close()
+
+    def test_per_dispatch_config_rebuilds_call_config(self, patched_setup):
+        from pypto.runtime import RunConfig  # noqa: PLC0415
+
+        m = patched_setup
+        compiled = _fake_compiled([_param("a", [16, 16])], [])
+        rt = DistributedWorker(compiled)
+        assert m["make_call_config"].call_count == 1  # baseline at construction
+
+        rc = RunConfig(platform="a2a3sim", ring_task_window=64, ring_heap=4 * 1024 * 1024)
+        rt(DeviceTensor(0x1000, (16, 16), torch.float32), config=rc)
+
+        # A per-dispatch config rebuilds from (program DistributedConfig, rc).
+        assert m["make_call_config"].call_count == 2
+        rebuild = m["make_call_config"].call_args
+        assert rebuild.args[0] is compiled._distributed_config
+        assert rebuild.args[1] is rc
+        # The freshly built config (not None) is what reaches _dispatch.
+        assert m["dispatch"].call_args.args[self._CALL_CONFIG_ARG] is m["make_call_config"].return_value
+        rt.close()
+
+    def test_run_method_forwards_per_dispatch_config(self, patched_setup):
+        from pypto.runtime import RunConfig  # noqa: PLC0415
+
+        m = patched_setup
+        compiled = _fake_compiled([_param("a", [16, 16])], [])
+        rt = DistributedWorker(compiled)
+
+        rc = RunConfig(platform="a2a3sim", ring_dep_pool=256)
+        rt.run(compiled, DeviceTensor(0x1000, (16, 16), torch.float32), config=rc)
+
+        # rt.run(...) honors the same per-dispatch ring sizing as rt(...).
+        assert m["make_call_config"].call_count == 2
+        assert m["make_call_config"].call_args.args[1] is rc
         rt.close()
 
 
