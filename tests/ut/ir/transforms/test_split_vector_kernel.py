@@ -796,6 +796,53 @@ class TestSplitVectorKernelUpDown:
 
         _assert_split_matches_expected(Before, Expected)
 
+    def test_reshape_of_already_split_input_halves_shape_arg(self):
+        """UP_DOWN: a reshape whose input is already split must halve its shape argument too.
+
+        When the reshape input is split-tracked (its producer partitioned the data),
+        the reshape falls through to plain result-halving. Halving only the result
+        *type* while leaving the explicit ``[256, 1]`` shape *literal* un-rescaled
+        makes ``memory_reuse`` size the output from the stale shape (256 rows) and
+        abort fitting it into the split-sized (128-row) slot. The shape argument must
+        track the halved result: ``[256, 1]`` -> ``[128, 1]``.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main_aiv(
+                self,
+                data: pl.Tensor[[16, 16], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[256, 1], pl.FP32]],
+            ) -> pl.Tensor[[256, 1], pl.FP32]:
+                prev: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    data, [0, 0], [16, 16], target_memory=pl.MemorySpace.Vec
+                )
+                flat: pl.Tile[[256, 1], pl.FP32, pl.MemorySpace.Vec] = pl.reshape(prev, [256, 1])
+                out_0_store: pl.Tensor[[256, 1], pl.FP32] = pl.store(flat, [0, 0], out_0)
+                return out_0_store
+
+        @pl.program
+        class Expected:
+            @pl.function(
+                type=pl.FunctionType.AIV,
+                attrs={"split": pl.SplitMode.UP_DOWN, "dual_aiv_dispatch": True},
+            )
+            def main_aiv(
+                self,
+                data: pl.Tensor[[16, 16], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[256, 1], pl.FP32]],
+            ) -> pl.Tensor[[256, 1], pl.FP32]:
+                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+                prev: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    data, [0 + subblock_idx * 8, 0], [8, 16], target_memory=pl.MemorySpace.Vec
+                )
+                flat: pl.Tile[[128, 1], pl.FP32, pl.MemorySpace.Vec] = pl.reshape(prev, [128, 1])
+                out_0_store: pl.Tensor[[256, 1], pl.FP32] = pl.store(flat, [0 + subblock_idx * 128, 0], out_0)
+                return out_0_store
+
+        _assert_split_matches_expected(Before, Expected)
+
     def test_reduce_on_split_axis_rejected(self):
         """Reduce on split axis (dim0 under UP_DOWN) must raise ValueError."""
 

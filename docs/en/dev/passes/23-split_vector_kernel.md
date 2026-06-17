@@ -156,7 +156,10 @@ reads only this attribute and never re-derives from `SplitMode`.
      result, and the original var, are both tracked in tile_vars). If the
      reshaped split-axis dim is singleton (e.g. [D] -> [1, D] under UpDown)
      the singleton rule above keeps it full — both lanes need it. If the
-     input is already split, the reshape falls through to result-halving.
+     input is already split, the reshape falls through to result-halving,
+     which also halves the explicit target-shape argument on the split axis
+     (leaving the literal stale would make memory_reuse size the output from
+     the un-split shape and abort against the split-sized slot).
 
    any other tile.* op producing a TileType (AIV only):
      Halve the result shape on split_dim. For tile.full / tile.create the

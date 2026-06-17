@@ -555,6 +555,8 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
         std::vector<ExprPtr> new_args = call->args_;
         if ((op_name == "tile.full" || op_name == "tile.create") && call->args_.size() >= 1) {
           new_args[0] = HalveTupleElement(call->args_[0], split_dim);
+        } else if (op_name == "tile.reshape" && call->args_.size() >= 2) {
+          new_args[1] = HalveTupleElement(call->args_[1], split_dim);
         }
         auto new_call = std::make_shared<Call>(call->op_, std::move(new_args), call->kwargs_, new_result_type,
                                                call->span_);

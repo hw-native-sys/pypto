@@ -146,7 +146,9 @@ codegen（`src/codegen/orchestration/orchestration_codegen.cpp` 中的
      选取 `[..., subblock_idx * half : +half]`（切片结果与原变量都登记进
      tile_vars）。若 reshape 后的 split 轴是 singleton（如 UpDown 下的
      [D] -> [1, D]），由上面的 singleton 规则保持整段（两条 lane 都需要）；
-     若输入已被拆分，则落到下面的结果减半逻辑。
+     若输入已被拆分，则落到下面的结果减半逻辑，并同步在 split 轴上减半
+     显式的目标 shape 参数（若 shape 字面量保持原值，memory_reuse 会按
+     未拆分的 shape 计算输出大小，进而无法放入拆分后的复用槽而中止）。
 
    产生 TileType 的其他 tile.* op（仅 AIV）：
      在 split_dim 上减半结果 shape；tile.full / tile.create 还会减半
