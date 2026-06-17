@@ -43,13 +43,16 @@ class L3TupleReturnProgram:
     @pl.function(type=pl.FunctionType.InCore)
     def tile_sum_diff(
         self,
-        a: pl.Tensor[[128, 128], pl.FP32],
-        b: pl.Tensor[[128, 128], pl.FP32],
-        out_sum: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
-        out_diff: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
-    ) -> tuple[pl.Tensor[[128, 128], pl.FP32], pl.Tensor[[128, 128], pl.FP32]]:
-        tile_a = pl.load(a, [0, 0], [128, 128])
-        tile_b = pl.load(b, [0, 0], [128, 128])
+        a: pl.Tensor[[128, 64], pl.FP32],
+        b: pl.Tensor[[128, 64], pl.FP32],
+        out_sum: pl.Out[pl.Tensor[[128, 64], pl.FP32]],
+        out_diff: pl.Out[pl.Tensor[[128, 64], pl.FP32]],
+    ) -> tuple[pl.Tensor[[128, 64], pl.FP32], pl.Tensor[[128, 64], pl.FP32]]:
+        # Peak Vec (UB) footprint is 3 live 128x64 FP32 tiles = 96KB (a, b, and
+        # sum/diff). 128x128 would reach 192KB and is rejected by AllocateMemoryAddr
+        # after pto-isa#170 lowered the safe a2a3 UB to 184KB (see soc.cpp).
+        tile_a = pl.load(a, [0, 0], [128, 64])
+        tile_b = pl.load(b, [0, 0], [128, 64])
         tile_sum = pl.add(tile_a, tile_b)
         tile_diff = pl.sub(tile_a, tile_b)
         r_sum = pl.store(tile_sum, [0, 0], out_sum)
@@ -59,22 +62,22 @@ class L3TupleReturnProgram:
     @pl.function(type=pl.FunctionType.Orchestration)
     def chip_orch(
         self,
-        a: pl.Tensor[[128, 128], pl.FP32],
-        b: pl.Tensor[[128, 128], pl.FP32],
-        out_sum: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
-        out_diff: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
-    ) -> tuple[pl.Tensor[[128, 128], pl.FP32], pl.Tensor[[128, 128], pl.FP32]]:
+        a: pl.Tensor[[128, 64], pl.FP32],
+        b: pl.Tensor[[128, 64], pl.FP32],
+        out_sum: pl.Out[pl.Tensor[[128, 64], pl.FP32]],
+        out_diff: pl.Out[pl.Tensor[[128, 64], pl.FP32]],
+    ) -> tuple[pl.Tensor[[128, 64], pl.FP32], pl.Tensor[[128, 64], pl.FP32]]:
         s, d = self.tile_sum_diff(a, b, out_sum, out_diff)
         return s, d
 
     @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
     def host_orch(
         self,
-        a: pl.Tensor[[128, 128], pl.FP32],
-        b: pl.Tensor[[128, 128], pl.FP32],
-        out_sum: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
-        out_diff: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
-    ) -> tuple[pl.Tensor[[128, 128], pl.FP32], pl.Tensor[[128, 128], pl.FP32]]:
+        a: pl.Tensor[[128, 64], pl.FP32],
+        b: pl.Tensor[[128, 64], pl.FP32],
+        out_sum: pl.Out[pl.Tensor[[128, 64], pl.FP32]],
+        out_diff: pl.Out[pl.Tensor[[128, 64], pl.FP32]],
+    ) -> tuple[pl.Tensor[[128, 64], pl.FP32], pl.Tensor[[128, 64], pl.FP32]]:
         s, d = self.chip_orch(a, b, out_sum, out_diff)
         return s, d
 
@@ -94,15 +97,15 @@ class TestL3TupleReturn:
             ),
         )
 
-        a = torch.full((128, 128), 2.0, dtype=torch.float32)
-        b = torch.full((128, 128), 3.0, dtype=torch.float32)
-        out_sum = torch.zeros((128, 128), dtype=torch.float32)
-        out_diff = torch.zeros((128, 128), dtype=torch.float32)
+        a = torch.full((128, 64), 2.0, dtype=torch.float32)
+        b = torch.full((128, 64), 3.0, dtype=torch.float32)
+        out_sum = torch.zeros((128, 64), dtype=torch.float32)
+        out_diff = torch.zeros((128, 64), dtype=torch.float32)
 
         compiled(a, b, out_sum, out_diff)
 
-        expected_sum = torch.full((128, 128), 5.0, dtype=torch.float32)
-        expected_diff = torch.full((128, 128), -1.0, dtype=torch.float32)
+        expected_sum = torch.full((128, 64), 5.0, dtype=torch.float32)
+        expected_diff = torch.full((128, 64), -1.0, dtype=torch.float32)
         assert torch.allclose(out_sum, expected_sum, rtol=1e-5, atol=1e-5), (
             f"Tuple return sum failed: expected a + b = 5.0, "
             f"got max diff = {(out_sum - expected_sum).abs().max().item()}"
