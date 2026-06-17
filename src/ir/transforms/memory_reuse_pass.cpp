@@ -1122,14 +1122,30 @@ static const Var* TileMemRefBase(const VarPtr& v) {
 
 class ForbidAliasCollector : public IRVisitor {
  public:
+  // `sharing_groups` (from ComputeLifetimes) maps every var that shares a MemRef
+  // to its group. IdentifyReuseOpportunities keys lifetimes on each group's
+  // *representative* (`sharing_group[0]`), so the forbidden set must be keyed on
+  // the representative of the defining op's output too — otherwise a forbidden
+  // op whose output is a non-representative group member (e.g. its result is
+  // also viewed/reshaped elsewhere) would never be looked up. Forbidden input
+  // *values* need no such mapping: enforcement compares physical MemRef bases,
+  // which every group member already shares.
+  explicit ForbidAliasCollector(const std::map<VarPtr, std::vector<VarPtr>>& sharing_groups) {
+    for (const auto& [var, group] : sharing_groups) {
+      if (!group.empty()) member_to_rep_[var.get()] = group[0].get();
+    }
+  }
+
   void VisitStmt_(const AssignStmtPtr& op) override {
     if (auto call = As<Call>(op->value_); call && call->op_) {
       const auto& reg = OpRegistry::GetInstance();
       if (reg.IsRegistered(call->op_->name_)) {
         const auto& entry = reg.GetEntry(call->op_->name_);
+        auto rep_it = member_to_rep_.find(op->var_.get());
+        const Var* out_key = rep_it != member_to_rep_.end() ? rep_it->second : op->var_.get();
         auto forbid_arg = [&](size_t i) {
           if (i < call->args_.size()) {
-            if (auto v = AsVarLike(call->args_[i])) forbidden_[op->var_.get()].push_back(v);
+            if (auto v = AsVarLike(call->args_[i])) forbidden_[out_key].push_back(v);
           }
         };
         if (!entry.IsInplaceSafe()) {
@@ -1158,6 +1174,7 @@ class ForbidAliasCollector : public IRVisitor {
 
  private:
   ForbidAliasMap forbidden_;
+  std::map<const Var*, const Var*> member_to_rep_;  ///< sharing-group member -> representative
 };
 
 /// True only for Ascend910B AIV split-mode functions, which need the load +
@@ -1987,7 +2004,7 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
 
   // Per-operand no-alias map (e.g. tile.sel's mask/tmp must not share the
   // output's buffer). Op-semantic, not backend-gated, so always collected.
-  ForbidAliasCollector forbid_collector;
+  ForbidAliasCollector forbid_collector(analysis_result.var_sharing_groups);
   forbid_collector.VisitStmt(new_body);
   ForbidAliasMap forbid_alias = forbid_collector.Take();
 
