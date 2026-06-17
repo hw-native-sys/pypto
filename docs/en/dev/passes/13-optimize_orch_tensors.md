@@ -65,9 +65,9 @@ chain, the expected boundary is:
 - `coalesce_pieces + all`: rewrite correctness-proven complex windows, coalesce multi-piece outputs into a bounding carrier, and use that carrier to connect dynamic writer-to-reader chains.
 
 Output windows whose parent shape has dynamic dimensions are handled
-conservatively. A zero-offset static partial window over a dynamic parent stays
-full-tensor, because the same compiled graph may run with a smaller dynamic
-extent. Non-zero or dynamic-offset windows, such as KV-cache writes at a runtime
+conservatively. A static-offset/static-size partial window over a dynamic parent
+stays full-tensor, because the same compiled graph may run with a smaller
+dynamic extent. Dynamic-offset windows, such as KV-cache writes at a runtime
 slot, can still be rewritten when the static proof and policy gate allow them.
 
 For debugging, `PYPTO_WINDOW_EXTERNALIZE_INCLUDE` and
