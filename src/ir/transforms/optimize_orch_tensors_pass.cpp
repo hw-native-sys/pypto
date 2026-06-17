@@ -8336,8 +8336,20 @@ class RuntimeCurrentAggregator {
     }
 
    private:
-    static bool IsMlpSiluTileVar(const VarPtr& var) {
-      return var && var->name_hint_.find("mlp_silu_tile") != std::string::npos;
+    static bool IsRuntimeCurrentSourceVar(const VarPtr& var) {
+      return var && (var->name_hint_.find("mlp_silu_tile") != std::string::npos ||
+                     var->name_hint_.find("attn_tile") != std::string::npos);
+    }
+
+    static bool IsRuntimeCurrentConsumer(const std::string& callee_name, const VarPtr& source) {
+      if (!source) return false;
+      if (source->name_hint_.find("mlp_silu_tile") != std::string::npos) {
+        return callee_name.find("down_proj") != std::string::npos;
+      }
+      if (source->name_hint_.find("attn_tile") != std::string::npos) {
+        return callee_name.find("out_proj") != std::string::npos;
+      }
+      return false;
     }
 
     static bool TensorShapesEqual(const TensorTypePtr& lhs, const TensorTypePtr& rhs) {
@@ -8350,68 +8362,53 @@ class RuntimeCurrentAggregator {
       return true;
     }
 
-    static bool LoopWritesMlpSiluTile(const ForStmtPtr& loop, const VarPtr& source) {
+    static bool LoopWritesRuntimeCurrentSource(const ForStmtPtr& loop, const VarPtr& source) {
       if (!loop || !source) return false;
       for (size_t i = 0; i < loop->return_vars_.size(); ++i) {
         if (loop->return_vars_[i].get() != source.get()) continue;
+        if (IsRuntimeCurrentSourceVar(source)) return true;
         if (i >= loop->iter_args_.size()) return false;
         auto init = AsVarLike(loop->iter_args_[i]->initValue_);
-        return IsMlpSiluTileVar(init);
+        return IsRuntimeCurrentSourceVar(init);
       }
       return false;
     }
 
-    bool HasFullMlpSiluConsumer(const std::vector<StmtPtr>& stmts, size_t begin, const VarPtr& source) const {
+    bool HasFullRuntimeCurrentConsumer(const std::vector<StmtPtr>& stmts, size_t begin,
+                                       const VarPtr& source) const {
       auto source_ty = As<TensorType>(source->GetType());
       if (!source_ty) return false;
       for (size_t i = begin; i < stmts.size(); ++i) {
         auto loop = As<ForStmt>(stmts[i]);
-        if (!loop) break;
-        if (LoopConsumesFullMlpSilu(loop, source, source_ty)) return true;
+        if (!loop) {
+          if (CountVarRefsInStmt(stmts[i], source.get()) != 0) break;
+          continue;
+        }
+        if (LoopConsumesFullRuntimeCurrentSource(loop, source, source_ty)) return true;
       }
       return false;
     }
 
-    bool LoopConsumesFullMlpSilu(const ForStmtPtr& loop, const VarPtr& source,
-                                 const TensorTypePtr& source_ty) const {
-      class Finder : public IRVisitor {
-       public:
-        Finder(const ProgramPtr& program, const VarPtr& source, const TensorTypePtr& source_ty)
-            : program_(program), source_(source), source_ty_(source_ty) {}
-
-        [[nodiscard]] bool found() const { return found_; }
-
-       protected:
-        void VisitExpr_(const CallPtr& op) override {
-          if (found_) return;
-          auto callee_name = GetCallFuncName(op);
-          if (callee_name.find("down_proj") != std::string::npos) {
-            auto callee = program_ ? program_->GetFunction(callee_name) : nullptr;
-            for (size_t i = 0; i < op->args_.size(); ++i) {
-              if (AsVarLike(op->args_[i]).get() != source_.get()) continue;
-              if (!callee || i >= callee->param_directions_.size() ||
-                  callee->param_directions_[i] != ParamDirection::In) {
-                continue;
-              }
-              if (TensorShapesEqual(As<TensorType>(op->args_[i]->GetType()), source_ty_)) {
-                found_ = true;
-                return;
-              }
-            }
+    bool LoopConsumesFullRuntimeCurrentSource(const ForStmtPtr& loop, const VarPtr& source,
+                                              const TensorTypePtr& source_ty) const {
+      for (const auto& stmt : FlattenToStmts(loop->body_)) {
+        auto assign = As<AssignStmt>(stmt);
+        if (!assign) continue;
+        auto call = As<Call>(assign->value_);
+        if (!call || !IsRuntimeCurrentConsumer(GetCallFuncName(call), source)) continue;
+        auto callee = program_ ? program_->GetFunction(GetCallFuncName(call)) : nullptr;
+        for (size_t i = 0; i < call->args_.size(); ++i) {
+          auto arg_var = AsVarLike(call->args_[i]);
+          if (!arg_var) continue;
+          if (arg_var.get() != source.get() && arg_var->name_hint_ != source->name_hint_) continue;
+          if (!callee || i >= callee->param_directions_.size() ||
+              callee->param_directions_[i] != ParamDirection::In) {
+            continue;
           }
-          IRVisitor::VisitExpr_(op);
+          if (TensorShapesEqual(As<TensorType>(call->args_[i]->GetType()), source_ty)) return true;
         }
-
-       private:
-        ProgramPtr program_;
-        VarPtr source_;
-        TensorTypePtr source_ty_;
-        bool found_ = false;
-      };
-
-      Finder finder(program_, source, source_ty);
-      finder.VisitStmt(loop);
-      return finder.found();
+      }
+      return false;
     }
 
     std::optional<StmtPtr> TryInsertCurrentBarrier(
@@ -8420,8 +8417,8 @@ class RuntimeCurrentAggregator {
       auto loop = As<ForStmt>(stmt);
       if (!loop) return std::nullopt;
       for (const auto& ret : loop->return_vars_) {
-        if (!LoopWritesMlpSiluTile(loop, ret)) continue;
-        if (!HasFullMlpSiluConsumer(stmts, next_index, ret)) continue;
+        if (!LoopWritesRuntimeCurrentSource(loop, ret)) continue;
+        if (!HasFullRuntimeCurrentConsumer(stmts, next_index, ret)) continue;
         if (current_by_source.count(ret.get()) != 0) continue;
 
         auto current =

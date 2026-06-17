@@ -1088,6 +1088,74 @@ class TestOutWindowExternalizer:
         assert exact.get_function("__pypto_runtime_current_barrier") is None
         assert "__runtime_current" not in ir.python_print(_get_function(exact, "main"))
 
+    def test_coalesce_inserts_attention_runtime_current_before_full_out_proj_read(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def attention_writeback(
+                self,
+                ctx: pl.Tensor[[1, 128], pl.BF16],
+                row: pl.Scalar[pl.INDEX],
+                col: pl.Scalar[pl.INDEX],
+                attn_tile: pl.Out[pl.Tensor[[2, 256], pl.BF16]],
+            ) -> pl.Tensor[[2, 256], pl.BF16]:
+                tile: pl.Tile[[1, 128], pl.BF16] = pl.tile.load(ctx, [0, 0], [1, 128], [1, 128])
+                return pl.tile.store(tile, [row, col], attn_tile)
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def out_proj(
+                self,
+                attn_tile: pl.Tensor[[2, 256], pl.BF16],
+                col: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[2, 256], pl.FP32]],
+            ) -> tuple[pl.Tensor[[2, 256], pl.FP32], pl.Tensor[[2, 256], pl.BF16]]:
+                lhs0: pl.Tile[[2, 128], pl.BF16] = pl.tile.load(attn_tile, [0, 0], [2, 128], [2, 128])
+                lhs1: pl.Tile[[2, 128], pl.BF16] = pl.tile.load(attn_tile, [0, 128], [2, 128], [2, 128])
+                lhs: pl.Tile[[2, 128], pl.BF16] = pl.tile.add(lhs0, lhs1)
+                cast: pl.Tile[[2, 128], pl.FP32] = pl.tile.cast(lhs, target_type=pl.FP32)
+                out_next: pl.Tensor[[2, 256], pl.FP32] = pl.tile.store(cast, [0, col], out)
+                return out_next, attn_tile
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                ctx: pl.Tensor[[1, 128], pl.BF16],
+                attn_tile: pl.Tensor[[2, 256], pl.BF16],
+                out: pl.Out[pl.Tensor[[2, 256], pl.FP32]],
+            ) -> pl.Tensor[[2, 256], pl.FP32]:
+                for row, (attn_tile_iter,) in pl.range(0, 2, init_values=(attn_tile,)):
+                    col: pl.Scalar[pl.INDEX] = row * 128
+                    attn_tile_next = self.attention_writeback(ctx, row, col, attn_tile_iter)
+                    attn_tile_rv = pl.yield_(attn_tile_next)
+
+                for j, (out_iter,) in pl.range(0, 2, init_values=(out,)):
+                    col: pl.Scalar[pl.INDEX] = j * 128
+                    result = self.out_proj(attn_tile_rv, col, out_iter)
+                    out_next: pl.Tensor[[2, 256], pl.FP32] = result[0]
+                    out_rv = pl.yield_(out_next)
+                return out_rv
+
+        coalesced = _run_to_optimize_orch_tensors(
+            Before,
+            output_window_policy="coalesce_pieces",
+            window_rewrite_policy="all",
+        )
+
+        assert coalesced.get_function("__pypto_runtime_current_barrier") is not None
+        printed_main = ir.python_print(_get_function(coalesced, "main"))
+        assert "__pypto_runtime_current_barrier(attn_tile_rv)" in printed_main
+        assert "out_proj__windowed(" in printed_main
+        assert "attn_tile_rv__runtime_current" in printed_main
+
+        exact = _run_to_optimize_orch_tensors(
+            Before,
+            output_window_policy="exact_pieces",
+            window_rewrite_policy="all",
+        )
+
+        assert exact.get_function("__pypto_runtime_current_barrier") is None
+        assert "__runtime_current" not in ir.python_print(_get_function(exact, "main"))
+
     def test_pure_input_window_consumer_rewrites_to_windowed_clone(self):
         @pl.program
         class Before:
