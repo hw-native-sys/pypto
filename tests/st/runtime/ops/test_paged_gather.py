@@ -76,7 +76,20 @@ def _paged_gather_golden(
 
 @pl.program
 class PagedGatherMatProgram:
-    """Gather paged KV rows into L1 (Mem.Mat), then store the L1 tile to GM."""
+    """Gather paged KV rows into L1 (Mem.Mat), read them back via an identity
+    matmul, and store the matmul result to GM.
+
+    The gathered L1 tile carries the matmul-operand NZ (boxed) layout, so it
+    cannot be pushed straight to GM — an NZ L1 tile has no cross-core producer
+    pipe to the vector unit (ptoas: ``'pto.tpush' op tile type must map to a
+    supported producer pipe``). Instead we verify the gather the way an L1
+    operand is meant to be consumed: ``eye @ gathered``. ``eye`` is the
+    ``[N, N]`` identity (A / left operand) and ``gathered`` is the ``[N, D]``
+    right operand, so the product equals the gathered rows exactly (each
+    identity row selects one gathered row; row ids <= 255 are FP16-exact). The
+    matmul result is an Acc tile, which reaches GM through the supported
+    Acc -> Vec -> GM path.
+    """
 
     @pl.function(type=pl.FunctionType.Opaque)
     def main(
@@ -84,10 +97,11 @@ class PagedGatherMatProgram:
         src: pl.Tensor[[_POOL_ROWS, _HIDDEN], pl.FP16],
         idx: pl.Tensor[[_NUM_IDX], pl.INT32],
         bt: pl.Tensor[[_PHYS_BLOCKS], pl.INT32],
-        output: pl.Out[pl.Tensor[[_NUM_IDX, _HIDDEN], pl.FP16]],
-    ) -> pl.Tensor[[_NUM_IDX, _HIDDEN], pl.FP16]:
+        eye: pl.Tensor[[_NUM_IDX, _NUM_IDX], pl.FP16],
+        output: pl.Out[pl.Tensor[[_NUM_IDX, _HIDDEN], pl.FP32]],
+    ) -> pl.Tensor[[_NUM_IDX, _HIDDEN], pl.FP32]:
         with pl.at(level=pl.Level.CORE_GROUP):
-            out = pl.paged_gather(
+            gathered = pl.paged_gather(
                 src,
                 idx,
                 bt,
@@ -95,8 +109,10 @@ class PagedGatherMatProgram:
                 size=_HIDDEN,
                 max_indices=_NUM_IDX,
                 space=pl.MemorySpace.Mat,
+                is_b_matrix=True,
             )
-            output = pl.assemble(output, out, [0, 0])
+            result = pl.matmul(eye, gathered, out_dtype=pl.FP32)
+            output = pl.assemble(output, result, [0, 0])
         return output
 
 
@@ -156,6 +172,29 @@ class PagedGatherMatTestCase(_PagedGatherBaseTestCase):
     def get_program(self) -> Any:
         return PagedGatherMatProgram
 
+    def define_tensors(self) -> list[TensorSpec]:
+        # The Mat path reads the gathered L1 tile back via ``eye @ gathered``
+        # (see PagedGatherMatProgram), so it adds an identity operand and the
+        # matmul result is FP32.
+        return [
+            TensorSpec("src", [_POOL_ROWS, _HIDDEN], DataType.FP16, init_value=_make_src),
+            TensorSpec("idx", [_NUM_IDX], DataType.INT32, init_value=_make_indices),
+            TensorSpec("bt", [_PHYS_BLOCKS], DataType.INT32, init_value=_make_block_table),
+            TensorSpec(
+                "eye",
+                [_NUM_IDX, _NUM_IDX],
+                DataType.FP16,
+                init_value=lambda: torch.eye(_NUM_IDX, dtype=torch.float16),
+            ),
+            TensorSpec("output", [_NUM_IDX, _HIDDEN], DataType.FP32, is_output=True),
+        ]
+
+    def compute_expected(self, tensors, params=None):
+        # eye @ gathered == gathered, so the golden is the gathered rows (FP32).
+        tensors["output"][:] = _paged_gather_golden(
+            tensors["src"], tensors["idx"], tensors["bt"], _BLOCK_SIZE, _HIDDEN
+        ).to(torch.float32)
+
 
 class PagedGatherVecTestCase(_PagedGatherBaseTestCase):
     def get_name(self) -> str:
@@ -168,14 +207,6 @@ class PagedGatherVecTestCase(_PagedGatherBaseTestCase):
 class TestPagedGather:
     """On-device paged gather into L1 / UB, validated against a torch golden."""
 
-    @pytest.mark.xfail(
-        reason="paged_gather(space=Mat) now lowers to per-row tile.gather_row (pto.subview + GM->Mat "
-        "pto.tload, no tmov), but the L1 accumulator carries the matmul-operand NZ (boxed) fractal "
-        "layout, so a per-row [1, size] pto.subview is not inner-box-aligned (ptoas: 'boxed layout "
-        "subview sizes must be multiples of inner shape'). Filling L1 per-row needs CANN-style "
-        "NZ-aware / ND2ND c0-aligned loading. space=Vec passes on-device.",
-        strict=False,
-    )
     @pytest.mark.parametrize("platform", PLATFORMS)
     def test_paged_gather_mat(self, test_runner, platform):
         result = test_runner.run(PagedGatherMatTestCase(platform=platform))

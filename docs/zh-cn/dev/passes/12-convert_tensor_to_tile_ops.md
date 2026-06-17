@@ -140,12 +140,15 @@ acc  = tile.create([max_indices, size], target_memory=space)   # 静态片上 bu
 for i in [0, rows):                                    # ForStmt，iter_arg = acc
     idx   = tensor.read(indices, [i])                  # 标量读 GM（pto.load_scalar）
     phys  = block_table[idx // block_size] * block_size + idx % block_size   # 标量
-    row   = tile.load(src, [phys, col_off], [1, size], target_memory=space)  # GM->片上
-    acc   = tile.assemble(acc, row, [i, 0])            # 把第 i 行写入 buffer
+    acc   = tile.gather_row(acc, src, [i, 0], [phys, col_off], [1, size])    # GM->片上
     yield acc
 ```
 
-只有小的索引 / 页表元数据是标量读 GM；KV 大数据经 `pto.tload` 直接 `GM → L1`，**全程不经 UB**——消除了 `gather_kv → qk_pv` 流水今天付出的 GM 往返。`is_trans=True`（仅 Mat）按转置加载每行并在列偏移 `[0, i]` 处 assemble，得到 matmul B 操作数布局。`max_indices` 静态确定 L1 buffer 大小；运行期 `rows` 驱动循环上界，因此支持动态聚合行数。不新增任何 tile 算子或 codegen——循环复用 `tensor.read`（`pto.load_scalar`）、标量算术、`tile.load`（`pto.tload`）和 `tile.assemble`。
+`tile.gather_row` 是一个 DPS 算子，把一条物理 GM 行直接写入累加器的子区域：`pto.subview`（acc）+ `pto.partition_view`（src）+ `pto.tload`（`GM → 片上`）——**无 `pto.tmov`**。a2a3 上不支持 L1→L1 的 `tmov`（L1 只能经 `GM → L1` 的 `tload` 填充），因此直接把行 load 进累加器子区域,而不是 assemble。
+
+只有小的索引 / 页表元数据是标量读 GM；KV 大数据经 `pto.tload` 直接 `GM → L1`，**全程不经 UB**——消除了 `gather_kv → qk_pv` 流水今天付出的 GM 往返。`is_trans=True`（仅 Mat）按转置加载每行到列偏移 `[0, i]`，得到 matmul B 操作数布局。`max_indices` 静态确定 L1 buffer 大小；运行期 `rows` 驱动循环上界，因此支持动态聚合行数。
+
+**Boxed（NZ）子区域对齐。** L1（`Mem.Mat`）累加器带 matmul 操作数的 NZ 分形布局,`pto.subview` 的 size 必须是内层 box 的整数倍（`M0 = 16` 行；`C0 = fractal_bytes / dtype_bytes / 16` 列）。逐行 gather 只写一行,因此 `tile.gather_row` codegen 发射 **box 对齐的物理 size**（`phys_rows = round_up(1, 16)`,`phys_cols = round_up(size, C0)`），同时只把真实范围标为 valid（`valid = [1, size]`）；`tload` 仅填那一行。UB（`Mem.Vec`,`slayout = none_box`）tile 没有内层 box,使用精确的 `[1, size]` size。聚合后的 L1 tile 由 `tensor.matmul` 直接消费（作为 matmul 操作数的自然用法）。
 
 ## 示例
 

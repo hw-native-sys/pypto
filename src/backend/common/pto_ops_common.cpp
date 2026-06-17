@@ -839,8 +839,30 @@ static std::string MakeGatherRowCodegenPTO(const CallPtr& op, codegen::CodegenBa
   const auto dst_space = dst_tile_type->memory_space_.value_or(ir::MemorySpace::Mat);
   auto view_info =
       codegen::ExtractTileTypeInfo(*dst_tile_type, codegen.GetTypeString(dst_tile_type->dtype_));
-  view_info.rows = sv_rows;
-  view_info.cols = sv_cols;
+
+  // In a boxed (NZ/fractal) layout — i.e. an L1/Mat matmul operand — the inner
+  // box has a fixed granularity, and pto.subview requires the *physical* size to
+  // be a whole number of boxes per dim (ptoas: "boxed layout subview sizes must
+  // be multiples of inner shape"). A per-row gather writes a single row, so we
+  // carve a box-aligned physical sub-region (size = phys_rows x phys_cols) but
+  // mark only the real extent valid (valid = sv_rows x sv_cols); the tload then
+  // fills just that row. ND tiles (Vec, slayout=none_box) have no inner box and
+  // use the exact per-row size.
+  const bool boxed = view_info.slayout != ir::TileLayout::none_box;
+  auto round_up = [](int64_t n, int64_t mult) { return ((n + mult - 1) / mult) * mult; };
+  // NZ fractal granularity: M0 = 16 rows; the C0 lane count along columns is
+  // fractal_bytes / dtype_bytes / M0 (both collapse to 16 for fp16/bf16).
+  constexpr int64_t kNZFractalRows = 16;
+  const int64_t dtype_bytes = std::max<int64_t>(1, static_cast<int64_t>(dst_tile_type->dtype_.GetBit()) / 8);
+  const int64_t box_cols = view_info.fractal > 0
+                               ? std::max<int64_t>(
+                                     1, static_cast<int64_t>(view_info.fractal) / dtype_bytes / kNZFractalRows)
+                               : kNZFractalRows;
+  const int64_t phys_rows = boxed ? round_up(sv_rows, kNZFractalRows) : sv_rows;
+  const int64_t phys_cols = boxed ? round_up(sv_cols, box_cols) : sv_cols;
+
+  view_info.rows = phys_rows;
+  view_info.cols = phys_cols;
   view_info.v_row = sv_rows;
   view_info.v_row_dynamic = false;
   view_info.v_col = sv_cols;
@@ -854,8 +876,8 @@ static std::string MakeGatherRowCodegenPTO(const CallPtr& op, codegen::CodegenBa
   std::string valid_cols = codegen.GetOrEmitConstant(sv_cols, DataType::INDEX);
   std::string dst_view = codegen.NewNamedTemp("gather_row_view");
   std::ostringstream sv;
-  sv << dst_view << " = pto.subview " << dst << "[" << row_off << ", " << col_off << "] sizes [" << sv_rows
-     << ", " << sv_cols << "] valid [" << valid_rows << ", " << valid_cols << "]";
+  sv << dst_view << " = pto.subview " << dst << "[" << row_off << ", " << col_off << "] sizes [" << phys_rows
+     << ", " << phys_cols << "] valid [" << valid_rows << ", " << valid_cols << "]";
   if (!dst_type.empty() && !view_type.empty()) {
     sv << " : " << dst_type << " -> " << view_type;
   }

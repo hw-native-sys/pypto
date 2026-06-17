@@ -145,12 +145,19 @@ acc  = tile.create([max_indices, size], target_memory=space)   # static on-chip 
 for i in [0, rows):                                    # ForStmt, iter_arg = acc
     idx   = tensor.read(indices, [i])                  # scalar GM read (pto.load_scalar)
     phys  = block_table[idx // block_size] * block_size + idx % block_size   # scalar
-    row   = tile.load(src, [phys, col_off], [1, size], target_memory=space)  # GM->on-chip
-    acc   = tile.assemble(acc, row, [i, 0])            # write row i into the buffer
+    acc   = tile.gather_row(acc, src, [i, 0], [phys, col_off], [1, size])    # GM->on-chip
     yield acc
 ```
 
-Only the small index / page-table metadata is scalar-read from GM; the bulk KV data goes straight `GM → L1` via `pto.tload` and never touches UB — eliminating the GM round-trip that a `gather_kv → qk_pv` pipeline pays today. `is_trans=True` (Mat only) loads each row transposed and assembles at column offset `[0, i]`, giving the matmul B-operand layout. `max_indices` sizes the L1 buffer statically; the runtime `rows` count drives the loop bound, so dynamic gather counts are supported. No new tile op or codegen is added — the loop reuses `tensor.read` (`pto.load_scalar`), scalar arithmetic, `tile.load` (`pto.tload`), and `tile.assemble`.
+`tile.gather_row` is a DPS op that writes one physical GM row straight into a
+sub-region of the accumulator: `pto.subview` of `acc` + `pto.partition_view` of
+`src` + `pto.tload` (`GM → on-chip`) — **no `pto.tmov`**. An L1→L1 `tmov` is
+unsupported on a2a3 (L1 can only be filled via `GM → L1` `tload`), so the row is
+loaded straight into the accumulator's sub-region rather than assembled.
+
+Only the small index / page-table metadata is scalar-read from GM; the bulk KV data goes straight `GM → L1` via `pto.tload` and never touches UB — eliminating the GM round-trip that a `gather_kv → qk_pv` pipeline pays today. `is_trans=True` (Mat only) loads each row transposed into column offset `[0, i]`, giving the matmul B-operand layout. `max_indices` sizes the L1 buffer statically; the runtime `rows` count drives the loop bound, so dynamic gather counts are supported.
+
+**Boxed (NZ) sub-region alignment.** An L1 (`Mem.Mat`) accumulator carries the matmul-operand NZ fractal layout, where `pto.subview` sizes must be whole multiples of the inner box (`M0 = 16` rows; `C0 = fractal_bytes / dtype_bytes / 16` cols). A per-row gather writes a single row, so `tile.gather_row` codegen emits a **box-aligned physical size** (`phys_rows = round_up(1, 16)`, `phys_cols = round_up(size, C0)`) while marking only the real extent valid (`valid = [1, size]`); the `tload` then fills just that row. UB (`Mem.Vec`, `slayout = none_box`) tiles have no inner box and use the exact `[1, size]` size. The gathered L1 tile is consumed by `tensor.matmul` directly (its natural use as a matmul operand).
 
 ## Example
 
