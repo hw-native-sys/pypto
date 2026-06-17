@@ -1531,9 +1531,9 @@ void OpConversionRegistry::RegisterPagedGatherOps() {
         prologue.push_back(std::make_shared<AssignStmt>(rows, rows_call, span));
 
         // 1) Allocate the static on-chip accumulator tile.
-        std::vector<ExprPtr> acc_shape =
-            is_trans ? std::vector<ExprPtr>{make_idx(size), make_idx(max_indices)}
-                     : std::vector<ExprPtr>{make_idx(max_indices), make_idx(size)};
+        std::vector<ExprPtr> acc_shape = is_trans
+                                             ? std::vector<ExprPtr>{make_idx(size), make_idx(max_indices)}
+                                             : std::vector<ExprPtr>{make_idx(max_indices), make_idx(size)};
         std::vector<std::pair<std::string, std::any>> create_kwargs = {{"dtype", dtype},
                                                                        {"target_memory", space}};
         auto acc_create =
@@ -1543,8 +1543,7 @@ void OpConversionRegistry::RegisterPagedGatherOps() {
 
         // 2) Per-row loop carrying the accumulator tile.
         auto loop_var = std::make_shared<Var>("pg_i", std::make_shared<ScalarType>(DataType::INDEX), span);
-        auto iter_arg =
-            std::make_shared<IterArg>("paged_gather_iter", acc_create->GetType(), acc_var, span);
+        auto iter_arg = std::make_shared<IterArg>("paged_gather_iter", acc_create->GetType(), acc_var, span);
         auto return_var = std::make_shared<Var>("paged_gather_result", acc_create->GetType(), span);
 
         std::vector<StmtPtr> body;
@@ -1589,8 +1588,8 @@ void OpConversionRegistry::RegisterPagedGatherOps() {
 
         auto loop_body = SeqStmts::Flatten(std::move(body), span);
         auto for_stmt =
-            std::make_shared<ForStmt>(loop_var, zero, rows, one, std::vector<IterArgPtr>{iter_arg},
-                                      loop_body, std::vector<VarPtr>{return_var}, span);
+            std::make_shared<ForStmt>(loop_var, zero, rows, one, std::vector<IterArgPtr>{iter_arg}, loop_body,
+                                      std::vector<VarPtr>{return_var}, span);
         prologue.push_back(for_stmt);
         return ConversionResult{std::move(prologue), return_var};
       });

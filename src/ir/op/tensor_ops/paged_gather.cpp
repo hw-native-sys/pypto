@@ -94,8 +94,7 @@ TypePtr DeduceTensorPagedGatherType(const std::vector<ExprPtr>& args,
       << "The operator " << op_name << " requires indices dtype to be INT32, but got "
       << idx_type->dtype_.ToString();
   CHECK(idx_type->shape_.size() == 1 || idx_type->shape_.size() == 2)
-      << "The operator " << op_name << " requires 1D or 2D indices, but got rank "
-      << idx_type->shape_.size();
+      << "The operator " << op_name << " requires 1D or 2D indices, but got rank " << idx_type->shape_.size();
 
   auto bt_type = As<TensorType>(args[2]->GetType());
   CHECK(bt_type) << "The operator " << op_name << " requires block_table to be a TensorType, but got "
