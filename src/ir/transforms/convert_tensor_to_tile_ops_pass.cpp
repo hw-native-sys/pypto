@@ -448,6 +448,21 @@ class TypePropagatingMutator : public IRMutator {
     return result;
   }
 
+  /// Keep a Var shared_ptr alive for the lifetime of this mutator.
+  ///
+  /// ``var_remap_`` is keyed by raw ``const Expr*`` pointers (inherited from
+  /// IRMutator). Converters create temporary Vars (e.g. ``paged_gather`` builds
+  /// per-row scalars like ``pg_idx`` in its loop body); when a converter's
+  /// ``AssignStmt`` is replaced during conversion, the old Var is freed and the
+  /// allocator can hand its address to a *later* Var. A stale ``var_remap_``
+  /// entry keyed on the freed address would then mis-resolve the new Var,
+  /// silently rewriting an unrelated value (observed: a matmul result resolving
+  /// to a freed ``pg_idx`` scalar). Retaining every mapped-from Var prevents the
+  /// address reuse that triggers the collision.
+  void RetainVar(const ExprPtr& v) {
+    if (v) retained_vars_.push_back(v);
+  }
+
  private:
   /// Shared logic for ForStmt/WhileStmt: update return_vars types to match iter_arg types.
   template <typename ReconstructFn>
@@ -474,6 +489,9 @@ class TypePropagatingMutator : public IRMutator {
     if (!rv_changed) return original;
     return reconstruct(std::move(updated_rv));
   }
+
+  /// Vars kept alive for the pass lifetime — see RetainVar.
+  std::vector<ExprPtr> retained_vars_;
 };
 
 // ============================================================================
@@ -491,6 +509,9 @@ class TensorToTileMutator : public TypePropagatingMutator {
 
  protected:
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+    // Pin this Var's address for the pass so a freed-then-reused address cannot
+    // alias a stale var_remap_ entry (see TypePropagatingMutator::RetainVar).
+    RetainVar(op->var_);
     auto new_value = VisitExpr(op->value_);
     auto call = As<Call>(new_value);
 
@@ -1517,6 +1538,9 @@ class WrapperForwardMutator : public TypePropagatingMutator {
 
  protected:
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+    // Pin this Var's address for the pass so a freed-then-reused address cannot
+    // alias a stale var_remap_ entry (see TypePropagatingMutator::RetainVar).
+    RetainVar(op->var_);
     auto new_value = VisitExpr(op->value_);
     auto call = As<Call>(new_value);
     if (!call) return HandlePassThroughAssign(op, new_value);
@@ -1664,6 +1688,9 @@ class CallSiteUpdateMutator : public TypePropagatingMutator {
 
  protected:
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+    // Pin this Var's address for the pass so a freed-then-reused address cannot
+    // alias a stale var_remap_ entry (see TypePropagatingMutator::RetainVar).
+    RetainVar(op->var_);
     auto new_value = VisitExpr(op->value_);
     auto call = As<Call>(new_value);
 
