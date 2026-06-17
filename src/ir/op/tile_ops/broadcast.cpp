@@ -161,6 +161,9 @@ REGISTER_OP("tile.row_expand")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    // The broadcast vector (arg 1) is re-read for every output row/col, so the
+    // output must not alias its buffer (it would clobber the vector mid-op).
+    .forbid_output_alias(1)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRowExpandType(args, kwargs, "tile.row_expand");
@@ -174,6 +177,9 @@ REGISTER_OP("tile.row_expand_sub")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    // The broadcast vector (arg 1) is re-read for every output row/col, so the
+    // output must not alias its buffer (it would clobber the vector mid-op).
+    .forbid_output_alias(1)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRowExpandType(args, kwargs, "tile.row_expand_sub");
@@ -187,6 +193,9 @@ REGISTER_OP("tile.row_expand_div")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    // The broadcast vector (arg 1) is re-read for every output row/col, so the
+    // output must not alias its buffer (it would clobber the vector mid-op).
+    .forbid_output_alias(1)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRowExpandType(args, kwargs, "tile.row_expand_div");
@@ -200,6 +209,9 @@ REGISTER_OP("tile.row_expand_mul")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    // The broadcast vector (arg 1) is re-read for every output row/col, so the
+    // output must not alias its buffer (it would clobber the vector mid-op).
+    .forbid_output_alias(1)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRowExpandType(args, kwargs, "tile.row_expand_mul");
@@ -213,6 +225,9 @@ REGISTER_OP("tile.row_expand_add")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    // The broadcast vector (arg 1) is re-read for every output row/col, so the
+    // output must not alias its buffer (it would clobber the vector mid-op).
+    .forbid_output_alias(1)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRowExpandType(args, kwargs, "tile.row_expand_add");
@@ -226,6 +241,9 @@ REGISTER_OP("tile.col_expand")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    // The broadcast vector (arg 1) is re-read for every output row/col, so the
+    // output must not alias its buffer (it would clobber the vector mid-op).
+    .forbid_output_alias(1)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileColExpandType(args, kwargs, "tile.col_expand");
@@ -239,6 +257,9 @@ REGISTER_OP("tile.col_expand_mul")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    // The broadcast vector (arg 1) is re-read for every output row/col, so the
+    // output must not alias its buffer (it would clobber the vector mid-op).
+    .forbid_output_alias(1)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileColExpandType(args, kwargs, "tile.col_expand_mul");
@@ -252,6 +273,9 @@ REGISTER_OP("tile.col_expand_add")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    // The broadcast vector (arg 1) is re-read for every output row/col, so the
+    // output must not alias its buffer (it would clobber the vector mid-op).
+    .forbid_output_alias(1)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileColExpandType(args, kwargs, "tile.col_expand_add");
@@ -265,6 +289,9 @@ REGISTER_OP("tile.col_expand_div")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    // The broadcast vector (arg 1) is re-read for every output row/col, so the
+    // output must not alias its buffer (it would clobber the vector mid-op).
+    .forbid_output_alias(1)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileColExpandType(args, kwargs, "tile.col_expand_div");
@@ -278,6 +305,9 @@ REGISTER_OP("tile.col_expand_sub")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    // The broadcast vector (arg 1) is re-read for every output row/col, so the
+    // output must not alias its buffer (it would clobber the vector mid-op).
+    .forbid_output_alias(1)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileColExpandType(args, kwargs, "tile.col_expand_sub");

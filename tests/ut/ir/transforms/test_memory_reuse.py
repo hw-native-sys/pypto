@@ -3195,6 +3195,80 @@ class TestForbidOutputAlias:
             f"recip output must not alias its (viewed) input's buffer, but both bind to {bases['r']}"
         )
 
+    def test_widening_cast_output_does_not_alias_input(self):
+        """A dtype-widening cast output must not alias its (narrower) input.
+
+        Element i is read at ``i*in_bytes`` but written at ``i*out_bytes``; with
+        the output wider, the write cursor outruns the read cursor and clobbers
+        input elements not yet converted. The bf16 input here reuses a dead FP32
+        buffer (cross-dtype reuse) so it is large enough to hold the FP32 output,
+        making the in-place upcast reachable — the guard must forbid it.
+        Narrowing / same-width casts stay in-place-safe.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[8, 16], pl.FP32],
+                b: pl.Tensor[[8, 16], pl.BF16],
+                out: pl.Out[pl.Tensor[[8, 16], pl.FP32]],
+            ) -> pl.Tensor[[8, 16], pl.FP32]:
+                t0: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(a, [0, 0], [8, 16])
+                dead: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.add(t0, t0)
+                bf: pl.Tile[[8, 16], pl.BF16, pl.MemorySpace.Vec] = pl.load(b, [0, 0], [8, 16])
+                r: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.cast(bf, target_type=pl.FP32)
+                res: pl.Tensor[[8, 16], pl.FP32] = pl.store(r, [0, 0], out)
+                return res
+
+        After = _run_pipeline(Before)
+        bases = _collect_tile_memref_bases(After)
+        for name in ("r", "bf"):
+            assert name in bases, f"Expected {name} in After IR; got bases: {bases}"
+        assert bases["r"] != bases["bf"], (
+            f"widening cast output must not alias its input buffer, but both bind to {bases['r']}"
+        )
+
+    def test_col_expand_mul_output_does_not_alias_col_vector(self):
+        """col_expand_mul output must not alias its broadcast column vector.
+
+        ``out[i, j] = target[i, j] * col[0, j]`` re-reads the column vector for
+        every output row, so an output that aliases the column buffer overwrites
+        it after row 0 and multiplies later rows by garbage. ``col`` here is a
+        view of a dead [8, 16] tile, so its buffer is large enough for the output
+        to greedily reuse — the forbid_output_alias(1) marker must prevent it.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[8, 16], pl.FP32],
+                c: pl.Tensor[[8, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[8, 16], pl.FP32]],
+            ) -> pl.Tensor[[8, 16], pl.FP32]:
+                t0: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(a, [0, 0], [8, 16])
+                tgt: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.add(t0, t0)
+                cbig: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(c, [0, 0], [8, 16])
+                col_src: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.add(cbig, cbig)
+                col: pl.Tile[[1, 16], pl.FP32, pl.MemorySpace.Vec] = pl.slice(col_src, [1, 16], [0, 0])
+                r: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.col_expand_mul(tgt, col)
+                res: pl.Tensor[[8, 16], pl.FP32] = pl.store(r, [0, 0], out)
+                return res
+
+        After = _run_pipeline(Before)
+        bases = _collect_tile_memref_bases(After)
+        for name in ("r", "col", "col_src"):
+            assert name in bases, f"Expected {name} in After IR; got bases: {bases}"
+        # ``col`` is a view of ``col_src``; the expand output must not land on
+        # that physical buffer (it re-reads the column for every row).
+        assert bases["r"] != bases["col_src"], (
+            f"col_expand_mul output must not alias its column vector's buffer, "
+            f"but both bind to {bases['r']}"
+        )
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

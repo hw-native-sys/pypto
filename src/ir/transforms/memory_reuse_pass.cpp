@@ -1138,6 +1138,17 @@ class ForbidAliasCollector : public IRVisitor {
         } else {
           for (size_t i : entry.ForbidOutputAliasArgs()) forbid_arg(i);
         }
+        // A dtype-widening cast (output element wider than its input) cannot run
+        // in place: element i is read at i*in_bytes but written at i*out_bytes,
+        // so with out_bytes > in_bytes the write cursor outruns the read cursor
+        // and clobbers input elements not yet converted -> corrupt results.
+        // Narrowing / same-width casts are in-place-safe and keep the cross-dtype
+        // reuse the removed gate enables, so forbid only the widening direction.
+        if (call->op_->name_ == "tile.cast" && !call->args_.empty()) {
+          auto out_t = As<TileType>(op->var_->GetType());
+          auto in_t = As<TileType>(call->args_[0]->GetType());
+          if (out_t && in_t && out_t->dtype_.GetBit() > in_t->dtype_.GetBit()) forbid_arg(0);
+        }
       }
     }
     IRVisitor::VisitStmt_(op);

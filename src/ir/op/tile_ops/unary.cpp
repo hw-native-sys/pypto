@@ -236,6 +236,10 @@ REGISTER_OP("tile.rsqrt")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    // The high-precision path reads both the input and the tmp scratch while
+    // writing the output, so the output must not share a buffer with either
+    // (same constraint as tile.recip).
+    .not_inplace_safe()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRsqrtType(args, kwargs, "tile.rsqrt");
