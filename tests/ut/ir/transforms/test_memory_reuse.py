@@ -3084,6 +3084,84 @@ class TestAscend910BLoadTpopHazard:
             f"down_prev={bases['down_prev']}"
         )
 
+    def test_ascend910b_split_aiv_tracks_tpop_derived_values(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main(self, down: pl.InOut[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
+                mem_vec_0: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 4096)
+                mem_vec_1: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 4096)
+                mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 4096)
+                mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 4096)
+                down_prev: pl.Tile[[8, 128], pl.FP32, pl.MemRef(mem_vec_0, 0, 4096), pl.Mem.Vec] = (
+                    pl.tile.load(down, [0, 0], [8, 128], [8, 128], target_memory=pl.Mem.Vec, transpose=False)
+                )
+                pipe_chunk: pl.Tile[[8, 128], pl.FP32, pl.MemRef(mem_vec_1, 0, 4096), pl.Mem.Vec] = (
+                    pl.tile.tpop_from_aic(split=1)
+                )
+                pipe_scaled: pl.Tile[[8, 128], pl.FP32, pl.MemRef(mem_vec_2, 0, 4096), pl.Mem.Vec] = (
+                    pl.tile.add(pipe_chunk, pipe_chunk)
+                )
+                down_next: pl.Tile[[8, 128], pl.FP32, pl.MemRef(mem_vec_3, 0, 4096), pl.Mem.Vec] = (
+                    pl.tile.add(down_prev, pipe_scaled)
+                )
+                result: pl.Tensor[[16, 128], pl.FP32] = pl.tile.store(down_next, [0, 0], down)
+                return result
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        try:
+            After = passes.memory_reuse()(Prog)
+        finally:
+            backend.reset_for_testing()
+
+        bases = _collect_tile_memref_bases(After)
+        assert "down_prev" in bases and "down_next" in bases, f"missing tile vars; got {bases}"
+        assert bases["down_next"] != bases["down_prev"], (
+            "Ascend910B split-AIV: hazard tracking must follow values derived from "
+            "tile.tpop_from_aic before the load-consuming writer"
+        )
+
+    def test_ascend910b_split_aiv_tracks_tpop_loop_return_values(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main(self, down: pl.InOut[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
+                mem_vec_0: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 4096)
+                mem_vec_1: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 4096)
+                mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 4096)
+                pipe_init: pl.Tile[[8, 128], pl.FP32, pl.MemRef(mem_vec_0, 0, 4096), pl.Mem.Vec] = (
+                    pl.tile.tpop_from_aic(split=1)
+                )
+                for _i, (pipe_carry,) in pl.range(0, 1, 1, init_values=(pipe_init,)):
+                    pipe_next: pl.Tile[[8, 128], pl.FP32, pl.MemRef(mem_vec_0, 0, 4096), pl.Mem.Vec] = (
+                        pl.tile.add(pipe_carry, pipe_carry)
+                    )
+                    pipe_loop: pl.Tile[[8, 128], pl.FP32, pl.MemRef(mem_vec_0, 0, 4096), pl.Mem.Vec] = (
+                        pl.yield_(pipe_next)
+                    )
+                down_prev: pl.Tile[[8, 128], pl.FP32, pl.MemRef(mem_vec_1, 0, 4096), pl.Mem.Vec] = (
+                    pl.tile.load(down, [0, 0], [8, 128], [8, 128], target_memory=pl.Mem.Vec, transpose=False)
+                )
+                down_next: pl.Tile[[8, 128], pl.FP32, pl.MemRef(mem_vec_2, 0, 4096), pl.Mem.Vec] = (
+                    pl.tile.add(down_prev, pipe_loop)
+                )
+                result: pl.Tensor[[16, 128], pl.FP32] = pl.tile.store(down_next, [0, 0], down)
+                return result
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        try:
+            After = passes.memory_reuse()(Prog)
+        finally:
+            backend.reset_for_testing()
+
+        bases = _collect_tile_memref_bases(After)
+        assert "down_prev" in bases and "down_next" in bases, f"missing tile vars; got {bases}"
+        assert bases["down_next"] != bases["down_prev"], (
+            "Ascend910B split-AIV: hazard tracking must follow tpop-derived loop return values"
+        )
+
 
 class TestForbidOutputAlias:
     """A tile.sel output must not alias its mask (arg 0) or tmp (arg 3) buffer.
