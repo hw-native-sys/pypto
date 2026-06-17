@@ -3121,6 +3121,80 @@ class TestForbidOutputAlias:
             f"tile.sel output must not alias its tmp buffer, but both bind to {bases['dst']}"
         )
 
+    def test_row_sum_output_does_not_alias_input_or_tmp(self):
+        """A row reduction output must not share a buffer with its input or tmp.
+
+        ``tile.row_sum`` reads the full input row and the tmp scratch while
+        writing the reduced ``[M, 1]`` output, so it is ``not_inplace_safe``.
+        Here ``sq`` (the squared input, reusing ``t0``) and ``tmp`` both die at
+        the reduction and are large enough to hold the small output, so without
+        the marker the greedy allocator would place ``s`` on one of them.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                tmp_in: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                t0: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(a, [0, 0], [16, 16])
+                sq: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.mul(t0, t0)
+                tmp: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(tmp_in, [0, 0], [16, 16])
+                s: pl.Tile[[16, 1], pl.FP32, pl.MemorySpace.Vec] = pl.row_sum(sq, tmp)
+                res: pl.Tensor[[16, 1], pl.FP32] = pl.store(s, [0, 0], out)
+                return res
+
+        After = _run_pipeline(Before)
+        bases = _collect_tile_memref_bases(After)
+        for name in ("s", "sq", "tmp"):
+            assert name in bases, f"Expected {name} in After IR; got bases: {bases}"
+        assert bases["s"] != bases["sq"], (
+            f"row_sum output must not alias its input buffer, but both bind to {bases['s']}"
+        )
+        assert bases["s"] != bases["tmp"], (
+            f"row_sum output must not alias its tmp buffer, but both bind to {bases['s']}"
+        )
+
+    def test_forbidden_input_reached_through_view_is_honored(self):
+        """A not_inplace_safe op reading a VIEW of its input must still not alias it.
+
+        ``tile.recip`` is ``not_inplace_safe``. Its input ``v`` is a reshape
+        *view* of ``t0`` (sharing ``t0``'s MemRef base), and ``t0`` dies at the
+        recip, so the recip output ``r`` is the same size and would greedily
+        reuse ``t0``'s buffer. A Var-identity-only guard misses this (``v`` is a
+        view with no reuse-map entry); the guard must resolve the operand to its
+        physical base and keep ``r`` off it. Mirrors the on-device gather /
+        qk_recip corruption the gate removal exposed.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[8, 8], pl.FP32],
+                out: pl.Out[pl.Tensor[[8, 8], pl.FP32]],
+            ) -> pl.Tensor[[8, 8], pl.FP32]:
+                t0: pl.Tile[[8, 8], pl.FP32, pl.MemorySpace.Vec] = pl.load(x, [0, 0], [8, 8])
+                v: pl.Tile[[64, 1], pl.FP32, pl.MemorySpace.Vec] = pl.reshape(t0, [64, 1])
+                r: pl.Tile[[64, 1], pl.FP32, pl.MemorySpace.Vec] = pl.recip(v)
+                r2: pl.Tile[[8, 8], pl.FP32, pl.MemorySpace.Vec] = pl.reshape(r, [8, 8])
+                res: pl.Tensor[[8, 8], pl.FP32] = pl.store(r2, [0, 0], out)
+                return res
+
+        After = _run_pipeline(Before)
+        bases = _collect_tile_memref_bases(After)
+        for name in ("r", "t0", "v"):
+            assert name in bases, f"Expected {name} in After IR; got bases: {bases}"
+        # ``v`` shares ``t0``'s base (it is a view); the recip output must not
+        # land on that physical buffer even though ``v`` itself is the operand.
+        assert bases["r"] != bases["t0"], (
+            f"recip output must not alias its (viewed) input's buffer, but both bind to {bases['r']}"
+        )
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
