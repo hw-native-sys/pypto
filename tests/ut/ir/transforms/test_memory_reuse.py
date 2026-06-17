@@ -3269,6 +3269,38 @@ class TestForbidOutputAlias:
             f"but both bind to {bases['r']}"
         )
 
+    def test_rsqrt_output_does_not_alias_input(self):
+        """tile.rsqrt output must not alias its input (``not_inplace_safe``).
+
+        Like ``tile.recip``, ``rsqrt``'s high-precision lowering reads the input
+        while writing the output, so it is marked ``not_inplace_safe`` (the tmp
+        scratch is injected by a later pass, so at MemoryReuse the only operand
+        is the input). ``sq`` (reusing ``t0``) dies at the rsqrt and is the same
+        size as the output, so without the marker the output would reuse it.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                t0: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(a, [0, 0], [16, 16])
+                sq: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.mul(t0, t0)
+                r: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.rsqrt(sq)
+                res: pl.Tensor[[16, 16], pl.FP32] = pl.store(r, [0, 0], out)
+                return res
+
+        After = _run_pipeline(Before)
+        bases = _collect_tile_memref_bases(After)
+        for name in ("r", "sq"):
+            assert name in bases, f"Expected {name} in After IR; got bases: {bases}"
+        assert bases["r"] != bases["sq"], (
+            f"rsqrt output must not alias its input buffer, but both bind to {bases['r']}"
+        )
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

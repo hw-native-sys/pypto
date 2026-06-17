@@ -54,11 +54,23 @@ program_optimized = reuse_pass(program)
 - Non-overlapping lifetimes (no interference). Two variables do NOT overlap when `prev.last_use <= curr.def` (i.e., the source's last use can be at the same statement as the target's definition, since inputs are read before outputs are written within a single statement).
 - Same memory space
 - Compatible **byte** sizes (reuse target must be large enough)
-- **No-alias guard** (op-semantic): the op that defines the reusing variable may forbid its output from sharing a buffer with one or more of its input operands. Two registry declarations feed a single check:
-  - `not_inplace_safe()` — the op cannot run with `src == dst`, so its output must not alias **any** input operand (e.g. `tile.recip`, `tile.mrgsort_format1`).
-  - `forbid_output_alias(i)` — the op is in-place-safe w.r.t. its value operands but reads a **specific** operand while writing its output, so the output must not alias that one operand's buffer (e.g. `tile.sel`'s predicate mask (arg 0) and tmp scratch (arg 3), which the TSEL intrinsic reads while writing `dst`).
+- **No-alias guard** (op-semantic): the op that defines the reusing variable may forbid its output from sharing a buffer with one or more of its input operands, because the hardware reads those inputs *while* writing the output — an in-place write would corrupt the op mid-flight. Three sources feed one per-output forbidden-input set (`ForbidAliasCollector`):
+  - `not_inplace_safe()` — the op cannot run with `src == dst`, so its output must not alias **any** input operand.
+  - `forbid_output_alias(i)` — the op is in-place-safe w.r.t. its value operands but reads a **specific** operand while writing its output, so the output must not alias that one operand's buffer.
+  - **widening `tile.cast`** (handled directly in `ForbidAliasCollector`) — when the output dtype is *wider* than the input, the cast cannot run in place: element `i` is read at `i*in_bytes` but written at `i*out_bytes`, so the write cursor outruns the read cursor and clobbers not-yet-converted input. Narrowing / same-width casts stay in-place-safe (preserving the cross-dtype reuse below).
 
-  Both reduce to the same per-output set of forbidden input vars (collected by `ForbidAliasCollector`); MemoryReuse refuses to place the output on the root owner — or any variable already sharing the buffer — of a forbidden operand.
+  MemoryReuse refuses to place the output on a forbidden operand's **physical buffer**, resolving each operand through both reuse-map coalescing *and* VIEW inheritance (a `reshape`/`slice` shares its source's MemRef base) — so a forbidden operand reached indirectly (its owning tile reused onto another buffer, or occupied via a view) is still caught.
+
+  Ops that currently declare a no-alias constraint:
+
+  | Op(s) | Constraint | Why the output cannot alias the input |
+  | ----- | ---------- | ------------------------------------- |
+  | `tile.recip`, `tile.rsqrt` | `not_inplace_safe` | high-precision path reads the input **and** a tmp scratch while writing the output |
+  | `tile.row_sum` / `row_max` / `row_min` | `not_inplace_safe` | `TROW*` reads the full input row + tmp scratch while writing the reduced `[M, 1]` output |
+  | `tile.mrgsort_format1` | `not_inplace_safe` | merge-sort intrinsic requires `src != dst` |
+  | `tile.sel` | `forbid_output_alias(0)` (mask), `(3)` (tmp) | `TSEL` reads the predicate mask + tmp scratch while writing `dst` |
+  | `tile.{row,col}_expand{,_mul,_add,_sub,_div}` | `forbid_output_alias(1)` (broadcast vector) | the row/col vector (arg 1) is re-read for **every** output row/col, so an output aliasing it is overwritten after the first row/col |
+  | `tile.cast` (widening only) | output ≠ input buffer (conditional, in `ForbidAliasCollector`) | wider output's write cursor outruns the read cursor (see above) |
 
 **No shape / dtype / TileView compatibility gate**: tiles that share a physical MemRef may carry **different** shapes, dtypes, or `TileView` attributes. PTO codegen binds a per-variable `alloc_tile` to each tile, so each alias declares the shared base with its own static shape / dtype / layout / `valid_shape`. This permits, for example:
 
@@ -178,7 +190,12 @@ passes.def("memory_reuse", &pass::MemoryReuse, "Memory reuse optimization");
 - Tests memory space separation
 - Tests byte-size compatibility
 - Tests cross-dtype / cross-`TileView` reuse (now permitted: BF16↔FP32, fillpad output↔input, divergent `valid_shape`)
-- Tests the no-alias guard (`not_inplace_safe` ops and `tile.sel`'s `forbid_output_alias` mask/tmp operands)
+- Tests the no-alias guard (`TestForbidOutputAlias` + `TestInplaceOps`), one case per constraint above:
+  - `tile.recip` / `tile.rsqrt` / `tile.row_sum` — output must not alias input (`not_inplace_safe`)
+  - `tile.sel` — output must not alias the mask / tmp (`forbid_output_alias`)
+  - `tile.col_expand_mul` — output must not alias the broadcast vector
+  - widening `tile.cast` — output must not alias the (narrower) input
+  - a forbidden operand reached through a VIEW is still honored (physical-buffer resolution)
 - Tests view operation MemRef sharing preservation
 - Tests redundant alloc statement removal
 - Tests control flow lifetime analysis (nested IfStmt in ForStmt, branch variable sharing)

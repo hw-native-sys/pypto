@@ -54,11 +54,23 @@ program_optimized = reuse_pass(program)
 - 生命周期不重叠（无干涉）。当 `prev.last_use <= curr.def` 时，两个变量不重叠（即源的最后使用可以和目标的定义在同一语句，因为在同一语句内输入先于输出被消费）
 - 相同内存空间
 - **字节**大小兼容（复用目标必须足够大）
-- **No-alias 守护**（算子语义）：定义复用变量的算子可以禁止其输出与某些输入操作数共享缓冲区。两种 registry 声明汇入同一个检查：
-  - `not_inplace_safe()` —— 该算子无法以 `src == dst` 运行，因此其输出不得 alias **任何**输入操作数（例如 `tile.recip`、`tile.mrgsort_format1`）。
-  - `forbid_output_alias(i)` —— 该算子对其值操作数是 in-place-safe 的，但在写输出时会读取**某个特定**操作数，因此输出不得 alias 该操作数的缓冲区（例如 `tile.sel` 的谓词 mask（arg 0）与 tmp scratch（arg 3），TSEL intrinsic 在写 `dst` 时会读取它们）。
+- **No-alias 守护**（算子语义）：定义复用变量的算子可以禁止其输出与某些输入操作数共享缓冲区——因为硬件在**写输出的同时读取**这些输入,原地写会中途破坏该算子。三个来源汇入同一个"每个输出禁止 alias 的输入集合"（`ForbidAliasCollector`）：
+  - `not_inplace_safe()` —— 该算子无法以 `src == dst` 运行，因此其输出不得 alias **任何**输入操作数。
+  - `forbid_output_alias(i)` —— 该算子对其值操作数 in-place-safe，但在写输出时读取**某个特定**操作数，因此输出不得 alias 该操作数的缓冲区。
+  - **升精度 `tile.cast`**（直接在 `ForbidAliasCollector` 处理）—— 输出 dtype 比输入**更宽**时,cast 无法原地：元素 `i` 在 `i*in_bytes` 处读、`i*out_bytes` 处写,写指针超前于读指针,冲掉尚未转换的输入。降精度 / 同宽 cast 仍 in-place-safe（保留下方的跨 dtype 复用）。
 
-  两者都归结为同一个"每个输出禁止 alias 的输入变量集合"（由 `ForbidAliasCollector` 收集）；MemoryReuse 拒绝将输出放到任一禁止操作数的 root owner —— 或已共享该缓冲区的任何变量 —— 之上。
+  MemoryReuse 拒绝将输出放到任一禁止操作数的**物理缓冲区**上,并通过 reuse-map 合并**与** VIEW 继承（`reshape`/`slice` 共享其源的 MemRef base）解析每个操作数——因此间接到达的禁止操作数（其 owner tile 被复用到别的缓冲区,或经 view 占用）也能被捕获。
+
+  当前声明 no-alias 约束的算子：
+
+  | 算子 | 约束 | 为何输出不能 alias 输入 |
+  | ---- | ---- | ----------------------- |
+  | `tile.recip`、`tile.rsqrt` | `not_inplace_safe` | 高精度路径在写输出时读取输入**和** tmp scratch |
+  | `tile.row_sum` / `row_max` / `row_min` | `not_inplace_safe` | `TROW*` 在写规约输出 `[M, 1]` 时读取整行输入 + tmp scratch |
+  | `tile.mrgsort_format1` | `not_inplace_safe` | 归并排序 intrinsic 要求 `src != dst` |
+  | `tile.sel` | `forbid_output_alias(0)`（mask）、`(3)`（tmp） | `TSEL` 在写 `dst` 时读取 mask + tmp scratch |
+  | `tile.{row,col}_expand{,_mul,_add,_sub,_div}` | `forbid_output_alias(1)`（广播向量） | 行/列向量（arg 1）会被**每个**输出行/列重读,输出若 alias 它则在第一行/列后被覆盖 |
+  | `tile.cast`（仅升精度） | 输出 ≠ 输入缓冲区（条件式,在 `ForbidAliasCollector`） | 更宽的输出写指针超前于读指针（见上） |
 
 **不再有 shape / dtype / TileView 兼容性门槛**：共享同一物理 MemRef 的 tile 可以携带**不同**的 shape、dtype 或 `TileView` 属性。PTO codegen 为每个 tile 绑定一条 per-variable 的 `alloc_tile`，因此每个别名都以各自的静态 shape / dtype / layout / `valid_shape` 声明共享基址。这允许例如：
 
@@ -162,7 +174,12 @@ passes.def("memory_reuse", &pass::MemoryReuse, "Memory reuse optimization");
 - 测试内存空间隔离
 - 测试字节大小兼容性
 - 测试跨 dtype / 跨 `TileView` 复用（现已允许：BF16↔FP32、fillpad 输出↔输入、`valid_shape` 不同）
-- 测试 no-alias 守护（`not_inplace_safe` 算子，以及 `tile.sel` 的 `forbid_output_alias` mask/tmp 操作数）
+- 测试 no-alias 守护（`TestForbidOutputAlias` + `TestInplaceOps`），上表每条约束一个用例：
+  - `tile.recip` / `tile.rsqrt` / `tile.row_sum` —— 输出不得 alias 输入（`not_inplace_safe`）
+  - `tile.sel` —— 输出不得 alias mask / tmp（`forbid_output_alias`）
+  - `tile.col_expand_mul` —— 输出不得 alias 广播向量
+  - 升精度 `tile.cast` —— 输出不得 alias（更窄的）输入
+  - 经 VIEW 间接到达的禁止操作数也被遵守（物理缓冲区解析）
 - 测试切片操作的 MemRef 共享保持
 - 测试冗余 alloc 语句移除
 - 测试控制流生命周期分析（ForStmt 内嵌套 IfStmt、分支变量共享）
