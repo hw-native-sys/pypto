@@ -4577,6 +4577,37 @@ class TestOutWindowExternalizer:
         assert "pl.Out[pl.Tensor[[USER_BATCH, 128], pl.FP32]]" in printed_windowed
         assert "pl.Out[pl.Tensor[[32, 128], pl.FP32" not in printed_windowed
 
+    def test_dynamic_parent_static_nonzero_output_window_stays_baseline(self):
+        user_batch = pl.dynamic("USER_BATCH")
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def copy_second_tile(
+                self,
+                data: pl.Tensor[[16, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[user_batch, 128], pl.FP32]],
+            ) -> pl.Tensor[[user_batch, 128], pl.FP32]:
+                tile: pl.Tile[[16, 128], pl.FP32] = pl.load(data, [0, 0], [16, 128])
+                ret = pl.store(tile, [16, 0], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                data: pl.Tensor[[16, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[user_batch, 128], pl.FP32]],
+            ) -> pl.Tensor[[user_batch, 128], pl.FP32]:
+                return self.copy_second_tile(data, out)
+
+        After = _run_to_optimize_orch_tensors(
+            Before, output_window_policy="coalesce_pieces", window_rewrite_policy="all"
+        )
+
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert "pl.tensor.slice(out" not in printed_main
+        assert After.get_function("copy_second_tile__windowed") is None
+
     def test_dynamic_parent_sparse_nonzero_output_window_coalesces(self):
         cache_rows = pl.dynamic("CACHE_ROWS")
 
@@ -4603,8 +4634,8 @@ class TestOutWindowExternalizer:
                 self,
                 cache: pl.Out[pl.Tensor[[cache_rows, 128], pl.FP32]],
                 data: pl.Tensor[[4, 128], pl.FP32],
+                slot: pl.Scalar[pl.INDEX],
             ) -> pl.Tensor[[cache_rows, 128], pl.FP32]:
-                slot: pl.Scalar[pl.INDEX] = 7
                 return self.cache_write(cache, data, slot)
 
         After = _run_to_optimize_orch_tensors(
@@ -4613,7 +4644,7 @@ class TestOutWindowExternalizer:
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "cache_write__windowed" in printed_main
-        assert "cache__ssa_v0__window_base_arg: pl.Scalar[pl.INDEX] = 7" in printed_main
+        assert "cache__ssa_v0__window_base_arg: pl.Scalar[pl.INDEX] = slot" in printed_main
         assert "cache__ssa_v0__window_extent_arg: pl.Scalar[pl.INDEX] = 385" in printed_main
         assert "pl.tensor.slice(cache__ssa_v0, [cache__ssa_v0__window_extent_arg, 128]" in printed_main
 

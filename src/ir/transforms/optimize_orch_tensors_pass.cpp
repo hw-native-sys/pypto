@@ -5685,7 +5685,7 @@ class OutWindowExternalizer {
     for (size_t dim = 0; dim < tensor_type->shape_.size(); ++dim) {
       if (As<ConstInt>(tensor_type->shape_[dim])) continue;
       auto offset = As<ConstInt>(offsets[dim]);
-      if (offset && offset->value_ == 0 && As<ConstInt>(window_shape[dim]) &&
+      if (offset && As<ConstInt>(window_shape[dim]) &&
           !AreExprsEqual(window_shape[dim], tensor_type->shape_[dim])) {
         return false;
       }
