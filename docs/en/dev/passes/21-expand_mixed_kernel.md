@@ -19,6 +19,20 @@ For **non-mixed InCore functions** (pure Cube or pure Vector), the pass converts
 
 After this pass, no `FunctionType::InCore` functions remain in the program.
 
+## Unsplittable transpose: downgrade to no-split
+
+A requested `UP_DOWN` vector split is **downgraded to the no-split dual-AIV
+path** when the kernel contains a `tile.transpose` whose source rows would halve
+below the backend FP transpose row tile (16 for ≥2-byte dtypes, 32 for 1-byte).
+The pto-isa FP transpose (`TTRANS`) tiles its source rows in those units; under
+`UP_DOWN` the per-lane source row count is halved, and if it is no longer a whole
+tile the on-device transpose miscomputes (issue #1790). `TransposeSplitHazardFinder`
+detects this at the start of `ExpandMixedFunction`; on a hit it strips the
+`split` attr so `GetSplitMode()` reads `None` and the existing
+`needs_dual_aiv_dispatch` logic routes the kernel through the no-split dual-AIV
+path instead, emitting a `LOG_WARN`. A transpose whose halved source rows stay a
+multiple of the row tile (e.g. `[32, 8] → 16`) is left split.
+
 Cross-core data transfer at CV boundaries is handled by splitting explicit `tile.move` ops into `tpush`/`tpop` pairs:
 
 | Direction | AIC side | AIV side |

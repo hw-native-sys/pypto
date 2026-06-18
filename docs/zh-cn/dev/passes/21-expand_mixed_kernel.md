@@ -19,6 +19,10 @@
 
 该 Pass 执行后，程序中不再存在 `FunctionType::InCore` 函数。
 
+## 不可切分的转置：降级为不拆
+
+当内核含有一个 `tile.transpose`、且其源行数在 `UP_DOWN` 切分后会低于后端 FP 转置的行分块（≥2 字节 dtype 为 16，1 字节为 32）时，**请求的向量切分会被降级为 no-split dual-AIV 路径**。pto-isa 的 FP 转置（`TTRANS`）按这些单位对源行分块；`UP_DOWN` 把每个 lane 的源行数减半，若不再是整块，设备上的转置会算错（issue #1790）。`TransposeSplitHazardFinder` 在 `ExpandMixedFunction` 开头检测此情况，命中时剥掉 `split` 属性，使 `GetSplitMode()` 返回 `None`，从而由既有的 `needs_dual_aiv_dispatch` 逻辑改走不拆的 dual-AIV 路径，并打印 `LOG_WARN`。若减半后的源行数仍是行分块的整数倍（如 `[32, 8] → 16`），则保持切分。
+
 CV 边界的跨核心数据传输通过将显式 `tile.move` 操作拆分为 `tpush`/`tpop` 对来处理：
 
 | 方向 | AIC 侧 | AIV 侧 |

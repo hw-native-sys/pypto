@@ -715,5 +715,91 @@ def test_split_slot_num_override_sizes_c2v_ring_on_a2a3():
     ir.assert_structural_equal(After, Expected)
 
 
+def _run_to_expand_with_flatten(program: ir.Program) -> ir.Program:
+    """Run the tile-pipeline prefix needed for a tile.transpose to reach
+    ExpandMixedKernel: FlattenTileNdTo2D adds the transpose scratch arg that the
+    TileOps2D verifier (an ExpandMixedKernel prerequisite) requires.
+    """
+    p = passes.convert_to_ssa()(program)
+    p = passes.lower_composite_ops()(p)
+    p = passes.flatten_tile_nd_to_2d()(p)
+    p = passes.infer_tile_memory_space()(p)
+    return passes.expand_mixed_kernel()(p)
+
+
+def test_unsplittable_transpose_downgrades_split_to_no_split_dual_aiv():
+    """A requested UP_DOWN split is downgraded to the no-split dual-AIV path when
+    the kernel contains a tile.transpose whose source rows would halve below the
+    backend FP transpose row tile (16 for >=2-byte dtypes).
+
+    Here the transpose source is the [16, 8] FP32 matmul result; UP_DOWN would
+    halve its rows to 8 (not a multiple of 16), so the pto-isa FP transpose tail
+    path would miscompute on device. ExpandMixedKernel strips the split attr and
+    tags the AIV with ``dual_aiv_dispatch`` instead (issue #1790).
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def t_hazard(
+            self,
+            x: pl.Tensor[[16, 128], pl.BF16],
+            y: pl.Tensor[[128, 8], pl.BF16],
+            out_0: pl.Out[pl.Tensor[[8, 16], pl.FP32]],
+        ) -> pl.Tensor[[8, 16], pl.FP32]:
+            x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+            x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+            y_mat = pl.load(y, [0, 0], [128, 8], target_memory=pl.MemorySpace.Mat)
+            y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+            z = pl.matmul(x_left, y_right)  # [16, 8] (cube result, fp16 row tile = 16)
+            z_vec = pl.move(z, target_memory=pl.MemorySpace.Vec)
+            zt = pl.transpose(z_vec, axis1=0, axis2=1)  # [8, 16]; source rows 16 -> split 8 (hazard)
+            out_0 = pl.store(zt, [0, 0], out_0)
+            return out_0
+
+    After = _run_to_expand_with_flatten(Before)
+    aiv = next(f for f in After.functions.values() if f.func_type == ir.FunctionType.AIV)
+    assert aiv.attrs.get("dual_aiv_dispatch") is True, (
+        f"AIV must be downgraded to dual-AIV no-split dispatch, got attrs={dict(aiv.attrs)}"
+    )
+    assert "split" not in aiv.attrs, (
+        f"the requested split must be stripped on downgrade, got attrs={dict(aiv.attrs)}"
+    )
+
+
+def test_splittable_transpose_keeps_split():
+    """A tile.transpose whose source rows stay a multiple of the FP transpose row
+    tile after the split is NOT downgraded: a [32, 8] source halves to 16 rows
+    (16 % 16 == 0), so the split is preserved and no dual-AIV dispatch is added."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def t_safe(
+            self,
+            x: pl.Tensor[[32, 128], pl.BF16],
+            y: pl.Tensor[[128, 8], pl.BF16],
+            out_0: pl.Out[pl.Tensor[[8, 32], pl.FP32]],
+        ) -> pl.Tensor[[8, 32], pl.FP32]:
+            x_mat = pl.load(x, [0, 0], [32, 128], target_memory=pl.MemorySpace.Mat)
+            x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+            y_mat = pl.load(y, [0, 0], [128, 8], target_memory=pl.MemorySpace.Mat)
+            y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+            z = pl.matmul(x_left, y_right)  # [32, 8] (cube result)
+            z_vec = pl.move(z, target_memory=pl.MemorySpace.Vec)
+            zt = pl.transpose(z_vec, axis1=0, axis2=1)  # [8, 32]; source rows 32 -> split 16 (safe)
+            out_0 = pl.store(zt, [0, 0], out_0)
+            return out_0
+
+    After = _run_to_expand_with_flatten(Before)
+    aiv = next(f for f in After.functions.values() if f.func_type == ir.FunctionType.AIV)
+    assert aiv.attrs.get("dual_aiv_dispatch") is not True, (
+        f"a safe transpose split must not be downgraded, got attrs={dict(aiv.attrs)}"
+    )
+    assert "split" in aiv.attrs, (
+        f"the requested split must be preserved for a safe transpose, got attrs={dict(aiv.attrs)}"
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -35,6 +35,7 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
@@ -741,7 +742,75 @@ struct ExpandedKernel {
   std::optional<FunctionPtr> group_func;  // nullopt when existing Group caller will be rewritten
 };
 
-ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = true) {
+// pto-isa's FP transpose (TTRANS) tiles its source rows in units of 16
+// (>= 2-byte dtypes) or 32 (1-byte). An UP_DOWN split halves a tile.transpose
+// source's row count — its TTRANS validRow — and if that drops below a whole
+// row tile the device-side transpose silently miscomputes (only the buggy tail
+// path runs). Detect that so the split request can be downgraded to the
+// no-split dual-AIV path instead of emitting code that miscomputes.
+class TransposeSplitHazardFinder : public IRVisitor {
+ public:
+  explicit TransposeSplitHazardFinder(int split_dim) : split_dim_(split_dim) {}
+  [[nodiscard]] bool Found() const { return found_; }
+
+ protected:
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    Consider(std::dynamic_pointer_cast<const Call>(op->value_));
+    IRVisitor::VisitStmt_(op);
+  }
+  void VisitStmt_(const EvalStmtPtr& op) override {
+    Consider(std::dynamic_pointer_cast<const Call>(op->expr_));
+    IRVisitor::VisitStmt_(op);
+  }
+
+ private:
+  void Consider(const CallPtr& call) {
+    // Only UP_DOWN (row, dim0) split halves the transpose source rows that
+    // become TTRANS validRow; the column split does not affect the row tiling.
+    if (found_ || split_dim_ != 0 || !call || !call->op_ || call->op_->name_ != "tile.transpose" ||
+        call->args_.empty()) {
+      return;
+    }
+    auto tt = std::dynamic_pointer_cast<const TileType>(call->args_[0]->GetType());
+    if (!tt || tt->shape_.empty()) return;
+    auto rows = std::dynamic_pointer_cast<const ConstInt>(tt->shape_[0]);
+    if (!rows) return;  // dynamic row count: cannot prove a hazard statically
+    int bits = static_cast<int>(tt->dtype_.GetBit());
+    if (bits <= 0) return;
+    int64_t row_tile = (bits <= 8) ? 32 : 16;  // pto-isa TTRANS row tile (Y_ELEM_B8 / Y_ELEM_OTHER)
+    if ((rows->value_ / 2) % row_tile != 0) found_ = true;
+  }
+
+  int split_dim_;
+  bool found_ = false;
+};
+
+ExpandedKernel ExpandMixedFunction(const FunctionPtr& orig_func, bool create_group = true) {
+  // Downgrade an unsplittable UP_DOWN split request to the no-split dual-AIV
+  // path: a tile.transpose whose source rows halve below the backend FP
+  // transpose row tile would miscompute on device. Strip the split attr up
+  // front so GetSplitMode() reads None and needs_dual_aiv_dispatch routes to
+  // the no-split path; the stripped attrs then flow to the AIC/AIV/Group.
+  FunctionPtr func = orig_func;
+  if (auto mode = orig_func->GetSplitMode(); mode.has_value() && *mode != SplitMode::None) {
+    int split_dim = (*mode == SplitMode::UpDown) ? 0 : 1;
+    TransposeSplitHazardFinder finder(split_dim);
+    if (orig_func->body_) finder.VisitStmt(orig_func->body_);
+    if (finder.Found()) {
+      auto attrs = orig_func->attrs_;
+      attrs.erase(
+          std::remove_if(attrs.begin(), attrs.end(), [](const auto& kv) { return kv.first == "split"; }),
+          attrs.end());
+      auto downgraded = MutableCopy(orig_func);
+      downgraded->attrs_ = std::move(attrs);
+      func = downgraded;
+      LOG_WARN << "ExpandMixedKernel: disabling the requested vector split for '" << orig_func->name_
+               << "': it contains a tile.transpose whose split would violate the backend FP transpose "
+                  "row tiling (the source row count must stay a multiple of the dtype row tile); "
+                  "compiling this kernel un-split.";
+    }
+  }
+
   const bool needs_dual_aiv_dispatch =
       PassContext::Current()->GetBackendHandler()->RequiresNoSplitDualAivDispatch() &&
       (!func->GetSplitMode().has_value() || *func->GetSplitMode() == SplitMode::None);
