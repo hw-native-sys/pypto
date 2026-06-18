@@ -1709,6 +1709,77 @@ def paged_gather(  # noqa: PLR0913
     return _ir_core.create_op_call("tensor.paged_gather", [src, indices, block_table], kwargs, actual_span)
 
 
+def create_l1(
+    shape: Sequence[int | Expr] | _ir_core.MakeTuple,
+    dtype: DataType,
+    transpose: bool = False,
+    span: Span | None = None,
+) -> Call:
+    """Create an on-chip (L1/Mat) accumulator tensor (tensor-level).
+
+    Companion of :func:`gather_row`: seeds the loop-carried accumulator that a
+    kernel-driven paged gather fills row by row. Deduces a ``TensorType`` so the
+    gathered result composes with tensor-level ``matmul`` / softmax; lowered by
+    ``ConvertTensorToTileOps`` to ``tile.create(target_memory=Mat)``.
+
+    Args:
+        shape: Accumulator shape (static dims), or a MakeTuple.
+        dtype: Element dtype.
+        transpose: Allocate the transposed Mat (ZN) fractal layout — required
+            when the accumulator is filled by ``transpose=True`` gathers (a
+            ``DN2ZN`` per-row load) and consumed as a matmul ``b_trans`` B-operand.
+        span: Optional source span (auto-captured if not provided).
+
+    Returns:
+        Call expression with TensorType result ``[*shape]`` (L1-backed).
+    """
+    actual_span = _get_span_or_capture(span)
+    shape_tuple = _to_make_tuple(shape, actual_span)
+    return _ir_core.create_op_call(
+        "tensor.create_l1", [shape_tuple], {"dtype": dtype, "transpose": transpose}, actual_span
+    )
+
+
+def gather_row(  # noqa: PLR0913
+    acc: Expr,
+    src: Expr,
+    dst_offset: Sequence[int | Expr] | _ir_core.MakeTuple,
+    src_offset: Sequence[int | Expr] | _ir_core.MakeTuple,
+    shapes: Sequence[int | Expr] | _ir_core.MakeTuple,
+    transpose: bool = False,
+    span: Span | None = None,
+) -> Call:
+    """Gather one GM row into a sub-region of an on-chip accumulator (tensor-level, DPS).
+
+    Per-row primitive for a kernel-driven paged gather into L1: the caller computes
+    the physical ``src_offset`` (block-table lookup + bias) and the ``dst_offset``
+    slot, then this op DMAs ``src[src_offset : src_offset + shapes]`` straight into
+    ``acc`` at ``dst_offset``. Lowered by ``ConvertTensorToTileOps`` to the per-row
+    ``tile.gather_row`` (``pto.subview`` + ``pto.tload``, no ``pto.tmov``). DPS —
+    writes ``acc`` in place, so a loop-carried accumulator is filled row by row.
+
+    Args:
+        acc: On-chip accumulator (from :func:`create_l1`).
+        src: Source tensor in GM.
+        dst_offset: ``[row, col]`` offset within ``acc``, or a MakeTuple.
+        src_offset: ``[row, col]`` offset within the GM ``src``, or a MakeTuple.
+        shapes: GM row window shape ``[r, c]`` (typically ``[1, size]``), or a MakeTuple.
+        transpose: Place the GM row ``[r, c]`` as an L1 column ``[c, r]`` (for a
+            matmul B-operand the consumer reads with ``b_trans``).
+        span: Optional source span (auto-captured if not provided).
+
+    Returns:
+        Call expression aliasing ``acc`` (written in place).
+    """
+    actual_span = _get_span_or_capture(span)
+    dst_off = _to_make_tuple(dst_offset, actual_span)
+    src_off = _to_make_tuple(src_offset, actual_span)
+    shapes_tuple = _to_make_tuple(shapes, actual_span)
+    return _ir_core.create_op_call(
+        "tensor.gather_row", [acc, src, dst_off, src_off, shapes_tuple], {"transpose": transpose}, actual_span
+    )
+
+
 # ============================================================================
 # Scatter Operation
 # ============================================================================

@@ -264,6 +264,7 @@ def create(
     shape: Sequence[IntLike],
     dtype: DataType,
     target_memory: MemorySpace = MemorySpace.Vec,
+    transpose: bool | None = None,
 ) -> Tile:
     """Create a tile from a shape.
 
@@ -271,6 +272,9 @@ def create(
         shape: Shape of the tile
         dtype: Data type of the tile
         target_memory: Target memory space (MemorySpace.Vec, .Mat, .Left, .Right)
+        transpose: When True, allocate the transposed Mat (ZN) fractal layout for a
+            matmul ``b_trans`` B-operand (the layout a DN-source ``gather_row`` fills).
+            Default ``None`` keeps the canonical layout and is omitted from the op.
 
     Returns:
         Tile wrapping the create operation
@@ -281,6 +285,7 @@ def create(
         _normalize_intlike(shape),
         dtype,
         target_memory,
+        transpose,
     )
     return Tile(expr=call_expr)
 

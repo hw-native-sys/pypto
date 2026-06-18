@@ -1601,6 +1601,50 @@ void OpConversionRegistry::RegisterPagedGatherOps() {
         prologue.push_back(for_stmt);
         return ConversionResult{std::move(prologue), return_var};
       });
+
+  // tensor.create_l1 -> tile.create(target_memory=Mat). The on-chip accumulator
+  // for a kernel-driven paged gather_row; deduced as a TensorType at the tensor
+  // level so it composes with tensor.matmul, lowered to an L1 (Mat) tile here.
+  RegisterCustom(
+      "tensor.create_l1",
+      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+         const Span& span) -> ConversionResult {
+        INTERNAL_CHECK_SPAN(args.size() == 1, span)
+            << "tensor.create_l1 conversion expects 1 arg (shape), but got " << args.size();
+        auto& op_reg = OpRegistry::GetInstance();
+        DataType dtype = DataType::FP32;
+        bool transpose = false;
+        for (const auto& [k, v] : kwargs) {
+          if (k == "dtype") dtype = AnyCast<DataType>(v, "dtype");
+          if (k == "transpose") transpose = AnyCast<bool>(v, "transpose");
+        }
+        std::vector<std::pair<std::string, std::any>> create_kwargs = {
+            {"dtype", dtype}, {"target_memory", MemorySpace::Mat}, {"transpose", transpose}};
+        auto create_call = op_reg.Create("tile.create", {args[0]}, create_kwargs, span);
+        return ConversionResult{create_call};
+      });
+
+  // tensor.gather_row -> tile.gather_row (DPS, GM->on-chip per-row tload). The
+  // accumulator (args[0]) has already been converted to a Mat tile; src (args[1])
+  // stays GM (tensor.gather_row is in kSelfLoadingOps so it is not auto-bridged).
+  RegisterCustom(
+      "tensor.gather_row",
+      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+         const Span& span) -> ConversionResult {
+        INTERNAL_CHECK_SPAN(args.size() == 5, span)
+            << "tensor.gather_row conversion expects 5 args (acc, src, dst_offset, src_offset, shapes), "
+               "but got "
+            << args.size();
+        auto& op_reg = OpRegistry::GetInstance();
+        bool transpose = false;
+        for (const auto& [k, v] : kwargs) {
+          if (k == "transpose") transpose = AnyCast<bool>(v, "transpose");
+        }
+        std::vector<std::pair<std::string, std::any>> gr_kwargs = {{"transpose", transpose}};
+        auto gr_call =
+            op_reg.Create("tile.gather_row", {args[0], args[1], args[2], args[3], args[4]}, gr_kwargs, span);
+        return ConversionResult{gr_call};
+      });
 }
 
 // ============================================================================

@@ -82,6 +82,8 @@ __all__ = [
     "mrgsort",
     "gather",
     "paged_gather",
+    "create_l1",
+    "gather_row",
     "scatter",
     "alloc",
     "get_block_idx",
@@ -1579,6 +1581,75 @@ def paged_gather(  # noqa: PLR0913
         col_off=col_off,
         is_trans=is_trans,
         is_b_matrix=is_b_matrix,
+    )
+    return Tensor(expr=call_expr)
+
+
+def create_l1(shape: Sequence[IntLike], dtype: DataType, transpose: bool = False) -> Tensor:
+    """Create an on-chip (L1/Mat) accumulator for a kernel-driven paged gather.
+
+    Companion of :func:`gather_row`. Returns a tensor-typed value that composes
+    with ``pl.matmul`` / softmax but lowers to an L1 (``MemorySpace.Mat``) tile,
+    so a kernel can build a matmul operand directly on-chip — no GM round-trip.
+
+    Args:
+        shape: Accumulator shape (static dims). For a matmul B-operand use
+            ``[rows, size]``; for a ``b_trans`` B-operand filled by transposing
+            gathers use the transposed shape ``[size, rows]`` with ``transpose=True``.
+        dtype: Element dtype (matches the gathered ``src`` pool).
+        transpose: Allocate the transposed Mat (ZN) layout — required when filling
+            with ``pl.gather_row(..., transpose=True)`` (a ``DN2ZN`` per-row load)
+            and consuming as a ``pl.matmul(..., b_trans=True)`` B-operand.
+
+    Returns:
+        Tensor of shape ``shape`` backed by L1.
+
+    Examples:
+        kv = pl.create_l1([ATTN_K_TILE, HEAD_DIM], pl.BF16)
+        for r in pl.range(ATTN_K_TILE):
+            kv = pl.gather_row(kv, kv_pool, [r, 0], [phys, 0], [1, HEAD_DIM])
+        oi = pl.matmul(probs, kv)
+    """
+    call_expr = _ir_ops.create_l1(_normalize_intlike(shape), dtype, transpose)
+    return Tensor(expr=call_expr)
+
+
+def gather_row(
+    acc: Tensor,
+    src: Tensor,
+    dst_offset: Sequence[IntLike],
+    src_offset: Sequence[IntLike],
+    shapes: Sequence[IntLike],
+    transpose: bool = False,
+) -> Tensor:
+    """Gather one GM row into a sub-region of an on-chip accumulator (DPS).
+
+    Per-row primitive for a kernel-driven paged gather into L1 — the flexible
+    counterpart to :func:`paged_gather`: the caller computes the physical
+    ``src_offset`` (block-table lookup, multi-source selection, invalid clamping)
+    and the ``dst_offset`` slot itself, so arbitrary gather logic stays in the
+    kernel. DMAs ``src`` straight into ``acc`` (``GM -> L1``, no ``tmov``); the
+    returned tile feeds ``pl.matmul`` directly.
+
+    Args:
+        acc: On-chip accumulator from :func:`create_l1` (loop-carried).
+        src: Source pool in GM.
+        dst_offset: ``[row, col]`` slot within ``acc`` to write.
+        src_offset: ``[row, col]`` physical offset within the GM ``src``.
+        shapes: GM row window ``[r, c]`` (typically ``[1, size]``).
+        transpose: Place the GM row ``[r, c]`` as an L1 column ``[c, r]`` — use
+            for a matmul B-operand whose consumer would otherwise need ``b_trans``.
+
+    Returns:
+        Tensor aliasing ``acc`` (written in place).
+    """
+    call_expr = _ir_ops.gather_row(
+        acc.unwrap(),
+        src.unwrap(),
+        _normalize_intlike(dst_offset),
+        _normalize_intlike(src_offset),
+        _normalize_intlike(shapes),
+        transpose,
     )
     return Tensor(expr=call_expr)
 

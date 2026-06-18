@@ -378,10 +378,22 @@ TypePtr DeduceTileCreateTileType(const std::vector<ExprPtr>& args,
   }
 
   TileView tile_view;
+  // `transpose=true` requests the transposed Mat (ZN) fractal layout
+  // (blayout=row_major, slayout=col_major) — the layout a matmul B-operand
+  // carries when loaded with b_trans, and the only Mat layout a DN-source
+  // gather_row (DN2ZN tload) can fill. Default false keeps the canonical NZ.
+  bool transpose_layout = false;
+  for (const auto& [k, v] : kwargs) {
+    if (k == "transpose") transpose_layout = AnyCast<bool>(v, "transpose");
+  }
+
   if (target_memory_opt.has_value() && *target_memory_opt == MemorySpace::Acc) {
     tile_view.blayout = TileLayout::col_major;
     tile_view.slayout = TileLayout::row_major;
     tile_view.fractal = 1024;
+  } else if (transpose_layout) {
+    tile_view.blayout = TileLayout::row_major;
+    tile_view.slayout = TileLayout::col_major;
   } else if (tile_shape.size() == 2) {
     auto rows_const = As<ConstInt>(tile_shape[0]);
     auto cols_const = As<ConstInt>(tile_shape[1]);
@@ -651,6 +663,7 @@ REGISTER_OP("tile.create")
     .add_argument("shape", "Shape dimensions (TupleType of ScalarType(INT64))")
     .set_attr<DataType>("dtype")
     .set_attr<MemorySpace>("target_memory")
+    .set_attr<bool>("transpose")
     // No fallback: when target_memory is absent, memory_space stays unresolved and
     // InferTileMemorySpace picks the space from consumer demand.
     .set_output_memory_from_kwarg("target_memory")

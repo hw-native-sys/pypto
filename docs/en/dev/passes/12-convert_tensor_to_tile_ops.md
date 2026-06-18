@@ -159,6 +159,22 @@ Only the small index / page-table metadata is scalar-read from GM; the bulk KV d
 
 **Boxed (NZ) sub-region alignment.** An L1 (`Mem.Mat`) accumulator carries the matmul-operand NZ fractal layout, where `pto.subview` sizes must be whole multiples of the inner box (`M0 = 16` rows; `C0 = fractal_bytes / dtype_bytes / 16` cols). A per-row gather writes a single row, so `tile.gather_row` codegen emits a **box-aligned physical size** (`phys_rows = round_up(1, 16)`, `phys_cols = round_up(size, C0)`) while marking only the real extent valid (`valid = [1, size]`); the `tload` then fills just that row. UB (`Mem.Vec`, `slayout = none_box`) tiles have no inner box and use the exact `[1, size]` size. The gathered L1 tile is consumed by `tensor.matmul` directly (its natural use as a matmul operand).
 
+### Kernel-Driven Gather (`tensor.create_l1` + `tensor.gather_row`)
+
+`tensor.paged_gather` hardcodes its per-row source address (`block_table[idx // bs] * bs + idx % bs`). When the kernel needs arbitrary gather logic — multi-source selection, invalid-row clamping, overlay pools — it builds the same L1 accumulator itself from two tensor-level primitives, the flexible counterpart of `paged_gather`:
+
+| Op | Lowers to | Role |
+| -- | --------- | ---- |
+| `tensor.create_l1(shape, dtype, transpose=...)` | `tile.create(target_memory=Mat, transpose=...)` | seed the loop-carried L1 accumulator |
+| `tensor.gather_row(acc, src, dst_off, src_off, shapes, transpose=...)` | `tile.gather_row` (DPS) | DMA one **caller-addressed** GM row into `acc` |
+
+Both deduce a `TensorType`, so the gathered result composes with tensor-level `tensor.matmul` / softmax; both are registered self-loading (`src` stays GM). The caller computes `src_off` and the `dst_off` slot, then fills the accumulator row by row in its own loop.
+
+**Transpose (ZN) for a `b_trans` matmul operand.** `transpose=True` makes the gathered tile a transposed matmul B-operand without a GM round-trip:
+
+- `tensor.create_l1(..., transpose=True)` allocates the **transposed Mat (ZN) fractal** (`blayout = row_major`, `slayout = col_major`) — the layout a `b_trans` operand carries.
+- `tensor.gather_row(..., transpose=True)` places the GM row `[r, c]` as the L1 column `[c, r]`. `pto.tload` does not transpose, so codegen presents `src` as a **DN-strided view** (`pto.make_tensor_view ... {layout = #pto.layout<dn>}`, shape/strides swapped, same base ptr) and partitions the row as a column — the `tload` then runs `DN → NZ`, which *is* the transpose. (`paged_gather`'s `is_trans=True` shares this `tile.gather_row` path.) A straight `ND → NZ` `tload` would scramble the fractal layout.
+
 ## Example
 
 **Before**:

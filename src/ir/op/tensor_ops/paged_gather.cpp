@@ -35,6 +35,7 @@
 #include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
@@ -184,6 +185,100 @@ REGISTER_OP("tensor.paged_gather")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorPagedGatherType(args, kwargs, "tensor.paged_gather");
+    });
+
+// ============================================================================
+// tensor.create_l1 + tensor.gather_row — kernel-driven paged gather into L1.
+//
+// These two ops let a tensor-level kernel build an on-chip (L1/Mat) accumulator
+// row by row, with the kernel itself computing the physical source row per slot
+// (block-table lookups, multi-source selection, invalid clamping) — everything
+// `tensor.paged_gather` hardcodes. `tensor.create_l1` deduces a TensorType so the
+// gathered result composes with the tensor-level `tensor.matmul` / softmax ops;
+// the conversion lowers it to `tile.create(target_memory=Mat)`. `tensor.gather_row`
+// is DPS (returns its accumulator type) and lowers to the per-row `tile.gather_row`.
+// ============================================================================
+
+TypePtr DeduceTensorCreateL1Type(const std::vector<ExprPtr>& args,
+                                 const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                 const std::string& op_name) {
+  CHECK(args.size() == 1) << "The operator " << op_name << " requires 1 argument (shape), but got "
+                          << args.size();
+  auto make_tuple = As<MakeTuple>(args[0]);
+  CHECK(make_tuple) << "The operator " << op_name
+                    << " requires shape to be a MakeTuple of static ConstInt dims, but got "
+                    << args[0]->TypeName();
+  std::vector<ExprPtr> shape;
+  shape.reserve(make_tuple->elements_.size());
+  for (size_t i = 0; i < make_tuple->elements_.size(); ++i) {
+    auto c = As<ConstInt>(make_tuple->elements_[i]);
+    CHECK(c && c->value_ > 0) << "The operator " << op_name << " shape element " << i
+                              << " must be a positive compile-time ConstInt";
+    shape.push_back(make_tuple->elements_[i]);
+  }
+  CHECK(!shape.empty()) << "The operator " << op_name << " requires a non-empty shape";
+
+  DataType dtype = DataType::FP32;
+  bool has_dtype = false;
+  for (const auto& [k, v] : kwargs) {
+    if (k == "dtype") {
+      dtype = AnyCast<DataType>(v, "kwarg key: dtype");
+      has_dtype = true;
+    }
+  }
+  CHECK(has_dtype) << "The operator " << op_name << " requires a 'dtype' keyword argument";
+  return std::make_shared<TensorType>(shape, dtype);
+}
+
+TypePtr DeduceTensorGatherRowType(const std::vector<ExprPtr>& args,
+                                  const std::vector<std::pair<std::string, std::any>>& /*kwargs*/,
+                                  const std::string& op_name) {
+  CHECK(args.size() == 5) << "The operator " << op_name
+                          << " requires 5 arguments (acc, src, dst_offset, src_offset, shapes), but got "
+                          << args.size();
+  auto acc_type = As<TensorType>(args[0]->GetType());
+  CHECK(acc_type) << "The operator " << op_name
+                  << " requires acc to be a TensorType (from tensor.create_l1), but got "
+                  << args[0]->GetType()->TypeName();
+  auto src_type = As<TensorType>(args[1]->GetType());
+  CHECK(src_type) << "The operator " << op_name << " requires src to be a TensorType (GM), but got "
+                  << args[1]->GetType()->TypeName();
+  CHECK(acc_type->dtype_ == src_type->dtype_)
+      << "The operator " << op_name << " requires acc and src to share dtype, but got "
+      << acc_type->dtype_.ToString() << " and " << src_type->dtype_.ToString();
+  // DPS: result is the accumulator, written in place.
+  return args[0]->GetType();
+}
+
+REGISTER_OP("tensor.create_l1")
+    .set_op_category("TensorOp")
+    .set_description(
+        "Create an on-chip (L1/Mat) accumulator for kernel-driven paged gather_row. Deduces a "
+        "TensorType so the gathered result composes with tensor-level matmul; lowers (in "
+        "ConvertTensorToTileOps) to tile.create(target_memory=Mat).")
+    .add_argument("shape", "Shape dimensions (TupleType of static ConstInt)")
+    .set_attr<DataType>("dtype")
+    .set_attr<bool>("transpose")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorCreateL1Type(args, kwargs, "tensor.create_l1");
+    });
+
+REGISTER_OP("tensor.gather_row")
+    .set_op_category("TensorOp")
+    .set_description(
+        "Gather one GM row into a sub-region of an on-chip accumulator (DPS). Lowers (in "
+        "ConvertTensorToTileOps) to the per-row tile.gather_row (pto.subview + pto.tload, no tmov). "
+        "The caller computes the physical src_offset (block-table + bias) and the dst_offset slot.")
+    .add_argument("acc", "On-chip accumulator (TensorType, from tensor.create_l1)")
+    .add_argument("src", "Source tensor in GM (TensorType)")
+    .add_argument("dst_offset", "[row, col] offset within acc (TupleType of ScalarType)")
+    .add_argument("src_offset", "[row, col] offset within the GM src (TupleType of ScalarType)")
+    .add_argument("shapes", "GM row window shape [r, c] (TupleType of ScalarType)")
+    .set_attr<bool>("transpose")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorGatherRowType(args, kwargs, "tensor.gather_row");
     });
 
 }  // namespace ir

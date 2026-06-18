@@ -150,6 +150,22 @@ for i in [0, rows):                                    # ForStmt，iter_arg = ac
 
 **Boxed（NZ）子区域对齐。** L1（`Mem.Mat`）累加器带 matmul 操作数的 NZ 分形布局,`pto.subview` 的 size 必须是内层 box 的整数倍（`M0 = 16` 行；`C0 = fractal_bytes / dtype_bytes / 16` 列）。逐行 gather 只写一行,因此 `tile.gather_row` codegen 发射 **box 对齐的物理 size**（`phys_rows = round_up(1, 16)`,`phys_cols = round_up(size, C0)`），同时只把真实范围标为 valid（`valid = [1, size]`）；`tload` 仅填那一行。UB（`Mem.Vec`,`slayout = none_box`）tile 没有内层 box,使用精确的 `[1, size]` size。聚合后的 L1 tile 由 `tensor.matmul` 直接消费（作为 matmul 操作数的自然用法）。
 
+### 内核驱动的 Gather（`tensor.create_l1` + `tensor.gather_row`）
+
+`tensor.paged_gather` 把每行的源地址写死（`block_table[idx // bs] * bs + idx % bs`）。当内核需要任意的 gather 逻辑——多源选择、无效行 clamp、overlay 池——它可以用两个张量级原语自行构建同样的 L1 累加器，作为 `paged_gather` 的灵活对应版本：
+
+| 算子 | 下降到 | 作用 |
+| ---- | ------ | ---- |
+| `tensor.create_l1(shape, dtype, transpose=...)` | `tile.create(target_memory=Mat, transpose=...)` | 初始化循环携带的 L1 累加器 |
+| `tensor.gather_row(acc, src, dst_off, src_off, shapes, transpose=...)` | `tile.gather_row`（DPS） | 把一条**调用方寻址**的 GM 行 DMA 进 `acc` |
+
+两者都推导出 `TensorType`，因此聚合结果可与张量级 `tensor.matmul` / softmax 组合；两者都注册为 self-loading（`src` 保持为 GM）。调用方自行计算 `src_off` 与 `dst_off` 槽位，在自己的循环里逐行填充累加器。
+
+**转置（ZN）以构造 `b_trans` matmul 操作数。** `transpose=True` 让聚合后的 tile 直接成为转置的 matmul B 操作数，无需 GM 往返：
+
+- `tensor.create_l1(..., transpose=True)` 分配**转置的 Mat（ZN）分形**（`blayout = row_major`,`slayout = col_major`）——即 `b_trans` 操作数所带的布局。
+- `tensor.gather_row(..., transpose=True)` 把 GM 行 `[r, c]` 放成 L1 列 `[c, r]`。`pto.tload` 本身不转置,因此 codegen 把 `src` 表示为 **DN 跨步视图**（`pto.make_tensor_view ... {layout = #pto.layout<dn>}`,shape/strides 互换、base ptr 不变）并把该行分区成列——于是 `tload` 执行 `DN → NZ`,这*即是*转置。（`paged_gather` 的 `is_trans=True` 复用同一条 `tile.gather_row` 路径。）直接的 `ND → NZ` `tload` 会打乱分形布局。
+
 ## 示例
 
 **转换前**：
