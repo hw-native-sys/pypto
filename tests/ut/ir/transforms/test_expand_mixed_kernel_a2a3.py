@@ -729,13 +729,13 @@ def _run_to_expand_with_flatten(program: ir.Program) -> ir.Program:
 
 def test_unsplittable_transpose_downgrades_split_to_no_split_dual_aiv():
     """A requested UP_DOWN split is downgraded to the no-split dual-AIV path when
-    the kernel contains a tile.transpose whose source rows would halve below the
-    backend FP transpose row tile (16 for >=2-byte dtypes).
+    the kernel contains a tile.transpose that swaps the split axis.
 
-    Here the transpose source is the [16, 8] FP32 matmul result; UP_DOWN would
-    halve its rows to 8 (not a multiple of 16), so the pto-isa FP transpose tail
-    path would miscompute on device. ExpandMixedKernel strips the split attr and
-    tags the AIV with ``dual_aiv_dispatch`` instead (issue #1790).
+    tile.transpose swaps axes, so the per-lane split data migrates to the other
+    dim while SplitVectorKernel still halves the original split axis — it cannot
+    type such a transpose correctly. Here the [16, 8] matmul result is transposed
+    under UP_DOWN (split dim 0, non-singleton), so ExpandMixedKernel strips the
+    split attr and tags the AIV with ``dual_aiv_dispatch`` (issue #1790).
     """
 
     @pl.program
@@ -751,9 +751,9 @@ def test_unsplittable_transpose_downgrades_split_to_no_split_dual_aiv():
             x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
             y_mat = pl.load(y, [0, 0], [128, 8], target_memory=pl.MemorySpace.Mat)
             y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-            z = pl.matmul(x_left, y_right)  # [16, 8] (cube result, fp16 row tile = 16)
+            z = pl.matmul(x_left, y_right)  # [16, 8] (cube result)
             z_vec = pl.move(z, target_memory=pl.MemorySpace.Vec)
-            zt = pl.transpose(z_vec, axis1=0, axis2=1)  # [8, 16]; source rows 16 -> split 8 (hazard)
+            zt = pl.transpose(z_vec, axis1=0, axis2=1)  # source dim0=16 non-singleton -> downgrade
             out_0 = pl.store(zt, [0, 0], out_0)
             return out_0
 
@@ -767,50 +767,83 @@ def test_unsplittable_transpose_downgrades_split_to_no_split_dual_aiv():
     )
 
 
-def test_splittable_transpose_keeps_split():
-    """A tile.transpose whose source rows stay a multiple of the FP transpose row
-    tile after the split is NOT downgraded: a [32, 8] source halves to 16 rows
-    (16 % 16 == 0), so the split is preserved and no dual-AIV dispatch is added."""
+def test_left_right_transpose_also_downgrades():
+    """The downgrade is mode-independent: a LEFT_RIGHT split whose transpose
+    source is non-singleton on the split axis (dim 1) is also downgraded, because
+    the transpose migrates the column split axis just as UP_DOWN migrates rows."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.LEFT_RIGHT})
+        def t_lr(
+            self,
+            x: pl.Tensor[[16, 128], pl.BF16],
+            y: pl.Tensor[[128, 16], pl.BF16],
+            out_0: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+            x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+            y_mat = pl.load(y, [0, 0], [128, 16], target_memory=pl.MemorySpace.Mat)
+            y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+            z = pl.matmul(x_left, y_right)  # [16, 16] (cube result)
+            z_vec = pl.move(z, target_memory=pl.MemorySpace.Vec)
+            zt = pl.transpose(z_vec, axis1=0, axis2=1)  # source dim1=16 non-singleton -> downgrade
+            out_0 = pl.store(zt, [0, 0], out_0)
+            return out_0
+
+    After = _run_to_expand_with_flatten(Before)
+    aiv = next(f for f in After.functions.values() if f.func_type == ir.FunctionType.AIV)
+    assert aiv.attrs.get("dual_aiv_dispatch") is True, (
+        f"LEFT_RIGHT transpose split must also be downgraded, got attrs={dict(aiv.attrs)}"
+    )
+    assert "split" not in aiv.attrs, (
+        f"the requested split must be stripped on downgrade, got attrs={dict(aiv.attrs)}"
+    )
+
+
+def test_singleton_split_axis_transpose_keeps_split():
+    """A transpose whose source is singleton on the split axis carries no split
+    data (the no-op broadcast case), so the split is preserved. Here a [1, 16]
+    source is transposed under UP_DOWN (split dim 0 == 1), so it is NOT downgraded
+    and the AIV keeps its split attr with no dual-AIV dispatch."""
 
     @pl.program
     class Before:
         @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
-        def t_safe(
+        def t_singleton(
             self,
-            x: pl.Tensor[[32, 128], pl.BF16],
-            y: pl.Tensor[[128, 8], pl.BF16],
-            out_0: pl.Out[pl.Tensor[[8, 32], pl.FP32]],
-        ) -> pl.Tensor[[8, 32], pl.FP32]:
-            x_mat = pl.load(x, [0, 0], [32, 128], target_memory=pl.MemorySpace.Mat)
+            x: pl.Tensor[[1, 128], pl.BF16],
+            y: pl.Tensor[[128, 16], pl.BF16],
+            out_0: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+        ) -> pl.Tensor[[16, 1], pl.FP32]:
+            x_mat = pl.load(x, [0, 0], [1, 128], target_memory=pl.MemorySpace.Mat)
             x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-            y_mat = pl.load(y, [0, 0], [128, 8], target_memory=pl.MemorySpace.Mat)
+            y_mat = pl.load(y, [0, 0], [128, 16], target_memory=pl.MemorySpace.Mat)
             y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-            z = pl.matmul(x_left, y_right)  # [32, 8] (cube result)
+            z = pl.matmul(x_left, y_right)  # [1, 16] (cube result)
             z_vec = pl.move(z, target_memory=pl.MemorySpace.Vec)
-            zt = pl.transpose(z_vec, axis1=0, axis2=1)  # [8, 32]; source rows 32 -> split 16 (safe)
+            zt = pl.transpose(z_vec, axis1=0, axis2=1)  # source dim0=1 singleton -> kept split
             out_0 = pl.store(zt, [0, 0], out_0)
             return out_0
 
     After = _run_to_expand_with_flatten(Before)
     aiv = next(f for f in After.functions.values() if f.func_type == ir.FunctionType.AIV)
     assert aiv.attrs.get("dual_aiv_dispatch") is not True, (
-        f"a safe transpose split must not be downgraded, got attrs={dict(aiv.attrs)}"
+        f"a singleton-split-axis transpose must not be downgraded, got attrs={dict(aiv.attrs)}"
     )
     assert "split" in aiv.attrs, (
-        f"the requested split must be preserved for a safe transpose, got attrs={dict(aiv.attrs)}"
+        f"the requested split must be preserved when the transpose is a no-op on the split axis, "
+        f"got attrs={dict(aiv.attrs)}"
     )
 
 
 def test_unsplittable_int8_transpose_downgrades_split_to_no_split_dual_aiv():
-    """The 1-byte (int8) dtype branch of TransposeSplitHazardFinder uses a 32-row
-    FP transpose tile instead of 16, so the downgrade triggers at a different
-    boundary.
+    """The downgrade is dtype-independent: an int8 transpose that swaps a
+    non-singleton split axis is downgraded just like the fp/bf16 cases.
 
     A bf16 matmul (cube) keeps the kernel mixed; separately, an int8 [16, 32]
-    tensor is loaded into Vec and transposed. UP_DOWN would halve its 16 rows to
-    8, and 8 % 32 != 0, so the int8 transpose would miscompute on device.
-    ExpandMixedKernel strips the split attr and tags the AIV with
-    ``dual_aiv_dispatch`` instead (issue #1790).
+    tensor is loaded into Vec and transposed under UP_DOWN (source dim0=16
+    non-singleton), so ExpandMixedKernel strips the split attr (issue #1790).
     """
 
     @pl.program
@@ -832,7 +865,7 @@ def test_unsplittable_int8_transpose_downgrades_split_to_no_split_dual_aiv():
             z_vec = pl.move(z, target_memory=pl.MemorySpace.Vec)
             out_0 = pl.store(z_vec, [0, 0], out_0)
             q_vec = pl.load(q, [0, 0], [16, 32], target_memory=pl.MemorySpace.Vec)
-            qt = pl.transpose(q_vec, axis1=0, axis2=1)  # int8 rows 16 -> split 8; 8 % 32 != 0 (hazard)
+            qt = pl.transpose(q_vec, axis1=0, axis2=1)  # int8 source dim0=16 non-singleton -> downgrade
             out_1 = pl.store(qt, [0, 0], out_1)
             return out_0
 

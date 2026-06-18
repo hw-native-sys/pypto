@@ -21,17 +21,24 @@ After this pass, no `FunctionType::InCore` functions remain in the program.
 
 ## Unsplittable transpose: downgrade to no-split
 
-A requested `UP_DOWN` vector split is **downgraded to the no-split dual-AIV
-path** when the kernel contains a `tile.transpose` whose source rows would halve
-below the backend FP transpose row tile (16 for ≥2-byte dtypes, 32 for 1-byte).
-The pto-isa FP transpose (`TTRANS`) tiles its source rows in those units; under
-`UP_DOWN` the per-lane source row count is halved, and if it is no longer a whole
-tile the on-device transpose miscomputes (issue #1790). `TransposeSplitHazardFinder`
-detects this at the start of `ExpandMixedFunction`; on a hit it strips the
-`split` attr so `GetSplitMode()` reads `None` and the existing
-`needs_dual_aiv_dispatch` logic routes the kernel through the no-split dual-AIV
-path instead, emitting a `LOG_WARN`. A transpose whose halved source rows stay a
-multiple of the row tile (e.g. `[32, 8] → 16`) is left split.
+A requested vector split is **downgraded to the no-split dual-AIV path** when the
+kernel contains a `tile.transpose` that **swaps the split axis**. `tile.transpose`
+swaps two axes, so the per-lane split data migrates to the *other* dimension while
+`SplitVectorKernel` still halves the *original* split axis — it cannot type such a
+transpose correctly, so the result would be mis-shaped and miscompute (issue #1790).
+This is independent of split mode (UP_DOWN dim 0 / LEFT_RIGHT dim 1) and dtype.
+
+`TransposeSplitHazardFinder` detects this at the start of `ExpandMixedFunction`: it
+flags any `tile.transpose` whose source is **non-singleton on the split axis** (a
+source that is singleton on the split axis carries no split data — the no-op
+broadcast case — and is left split; a dynamic, non-`ConstInt` extent is treated as
+non-singleton and downgraded conservatively). On a hit it strips the `split` attr
+so `GetSplitMode()` reads `None` and the existing `needs_dual_aiv_dispatch` logic
+routes the kernel through the no-split dual-AIV path, emitting a `LOG_WARN`.
+
+(Even if the typing were fixed, the pto-isa FP transpose miscomputes on device for
+split-shrunk source rows — the original #1790 device symptom — so downgrading is
+correct regardless.)
 
 Cross-core data transfer at CV boundaries is handled by splitting explicit `tile.move` ops into `tpush`/`tpop` pairs:
 

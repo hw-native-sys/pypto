@@ -21,7 +21,11 @@
 
 ## 不可切分的转置：降级为不拆
 
-当内核含有一个 `tile.transpose`、且其源行数在 `UP_DOWN` 切分后会低于后端 FP 转置的行分块（≥2 字节 dtype 为 16，1 字节为 32）时，**请求的向量切分会被降级为 no-split dual-AIV 路径**。pto-isa 的 FP 转置（`TTRANS`）按这些单位对源行分块；`UP_DOWN` 把每个 lane 的源行数减半，若不再是整块，设备上的转置会算错（issue #1790）。`TransposeSplitHazardFinder` 在 `ExpandMixedFunction` 开头检测此情况，命中时剥掉 `split` 属性，使 `GetSplitMode()` 返回 `None`，从而由既有的 `needs_dual_aiv_dispatch` 逻辑改走不拆的 dual-AIV 路径，并打印 `LOG_WARN`。若减半后的源行数仍是行分块的整数倍（如 `[32, 8] → 16`），则保持切分。
+当内核含有一个**交换了切分轴**的 `tile.transpose` 时,**请求的向量切分会被降级为 no-split dual-AIV 路径**。`tile.transpose` 交换两个轴,于是每个 lane 的切分数据迁移到了*另一个*维度,而 `SplitVectorKernel` 仍按*原*切分轴减半 —— 它无法正确定型这种转置,结果形状错误并会算错(issue #1790)。这与切分模式(UP_DOWN dim 0 / LEFT_RIGHT dim 1)和 dtype 都无关。
+
+`TransposeSplitHazardFinder` 在 `ExpandMixedFunction` 开头检测:标记任何**在切分轴上非 singleton** 的 `tile.transpose` 源(若源在切分轴上是 singleton,则不携带切分数据 —— 即广播 no-op 情形 —— 保持切分;动态的非 `ConstInt` extent 视为非 singleton,保守降级)。命中时剥掉 `split` 属性,使 `GetSplitMode()` 返回 `None`,由既有 `needs_dual_aiv_dispatch` 逻辑改走不拆的 dual-AIV 路径,并打印 `LOG_WARN`。
+
+(即便定型修对了,pto-isa 的 FP 转置在切分缩小后的源行上仍会在设备算错 —— 这正是 #1790 最初的设备症状 —— 所以降级无论如何都是正确的。)
 
 CV 边界的跨核心数据传输通过将显式 `tile.move` 操作拆分为 `tpush`/`tpop` 对来处理：
 

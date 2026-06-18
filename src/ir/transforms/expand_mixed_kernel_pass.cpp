@@ -742,12 +742,17 @@ struct ExpandedKernel {
   std::optional<FunctionPtr> group_func;  // nullopt when existing Group caller will be rewritten
 };
 
-// pto-isa's FP transpose (TTRANS) tiles its source rows in units of 16
-// (>= 2-byte dtypes) or 32 (1-byte). An UP_DOWN split halves a tile.transpose
-// source's row count — its TTRANS validRow — and if that drops below a whole
-// row tile the device-side transpose silently miscomputes (only the buggy tail
-// path runs). Detect that so the split request can be downgraded to the
-// no-split dual-AIV path instead of emitting code that miscomputes.
+// SplitVectorKernel halves a tile on the split axis, but tile.transpose SWAPS
+// axes — so a split transpose's per-lane data migrates to the *other* dim while
+// the pass still halves the original split axis, mis-typing the result. The pass
+// cannot correctly type any split transpose whose source carries the split axis,
+// and this holds for both UP_DOWN (dim 0) and LEFT_RIGHT (dim 1). When such a
+// transpose is present the split request must be downgraded to the no-split
+// dual-AIV path. A source that is singleton on the split axis carries no split
+// data and is safe (the no-op broadcast-row/column transpose case).
+// (Even if the typing were fixed, the pto-isa FP transpose miscomputes on device
+// for split-shrunk source rows — issue #1790 — so downgrading is the correct
+// behaviour regardless.)
 class TransposeSplitHazardFinder : public IRVisitor {
  public:
   explicit TransposeSplitHazardFinder(int split_dim) : split_dim_(split_dim) {}
@@ -764,21 +769,28 @@ class TransposeSplitHazardFinder : public IRVisitor {
   }
 
  private:
+  // Whether the transpose actually swaps the split axis (so the split data
+  // migrates). tile.transpose carries the two axis indices as args[1]/args[2].
+  [[nodiscard]] bool SwapsSplitAxis(const CallPtr& call) const {
+    if (call->args_.size() < 3) return true;  // conservative if the axes are absent
+    auto a0 = std::dynamic_pointer_cast<const ConstInt>(call->args_[1]);
+    auto a1 = std::dynamic_pointer_cast<const ConstInt>(call->args_[2]);
+    if (!a0 || !a1) return true;
+    return static_cast<int>(a0->value_) == split_dim_ || static_cast<int>(a1->value_) == split_dim_;
+  }
+
   void Consider(const CallPtr& call) {
-    // Only UP_DOWN (row, dim0) split halves the transpose source rows that
-    // become TTRANS validRow; the column split does not affect the row tiling.
-    if (found_ || split_dim_ != 0 || !call || !call->op_ || call->op_->name_ != "tile.transpose" ||
-        call->args_.empty()) {
+    if (found_ || !call || !call->op_ || call->op_->name_ != "tile.transpose" || call->args_.empty()) {
       return;
     }
     auto tt = std::dynamic_pointer_cast<const TileType>(call->args_[0]->GetType());
-    if (!tt || tt->shape_.empty()) return;
-    auto rows = std::dynamic_pointer_cast<const ConstInt>(tt->shape_[0]);
-    if (!rows) return;  // dynamic row count: cannot prove a hazard statically
-    int bits = static_cast<int>(tt->dtype_.GetBit());
-    if (bits <= 0) return;
-    int64_t row_tile = (bits <= 8) ? 32 : 16;  // pto-isa TTRANS row tile (Y_ELEM_B8 / Y_ELEM_OTHER)
-    if ((rows->value_ / 2) % row_tile != 0) found_ = true;
+    if (!tt || split_dim_ < 0 || split_dim_ >= static_cast<int>(tt->shape_.size())) return;
+    if (!SwapsSplitAxis(call)) return;  // split axis not transposed -> stays put, typed correctly
+    // The split axis carries real data unless it is statically 1. A dynamic
+    // (non-ConstInt) extent is treated as non-singleton: it cannot be proven
+    // safe, so downgrade conservatively.
+    auto dim = std::dynamic_pointer_cast<const ConstInt>(tt->shape_[split_dim_]);
+    if (!dim || dim->value_ != 1) found_ = true;
   }
 
   int split_dim_;
@@ -786,11 +798,12 @@ class TransposeSplitHazardFinder : public IRVisitor {
 };
 
 ExpandedKernel ExpandMixedFunction(const FunctionPtr& orig_func, bool create_group = true) {
-  // Downgrade an unsplittable UP_DOWN split request to the no-split dual-AIV
-  // path: a tile.transpose whose source rows halve below the backend FP
-  // transpose row tile would miscompute on device. Strip the split attr up
-  // front so GetSplitMode() reads None and needs_dual_aiv_dispatch routes to
-  // the no-split path; the stripped attrs then flow to the AIC/AIV/Group.
+  // Downgrade an unsplittable split request to the no-split dual-AIV path: a
+  // tile.transpose that swaps the split axis cannot be correctly typed by
+  // SplitVectorKernel (the per-lane data migrates to the other dim), so it would
+  // miscompute. Strip the split attr up front so GetSplitMode() reads None and
+  // needs_dual_aiv_dispatch routes to the no-split path; the stripped attrs then
+  // flow to the AIC/AIV/Group.
   FunctionPtr func = orig_func;
   if (auto mode = orig_func->GetSplitMode(); mode.has_value() && *mode != SplitMode::None) {
     int split_dim = (*mode == SplitMode::UpDown) ? 0 : 1;
@@ -805,9 +818,8 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& orig_func, bool create_gro
       downgraded->attrs_ = std::move(attrs);
       func = downgraded;
       LOG_WARN << "ExpandMixedKernel: disabling the requested vector split for '" << orig_func->name_
-               << "': it contains a tile.transpose whose split would violate the backend FP transpose "
-                  "row tiling (the source row count must stay a multiple of the dtype row tile); "
-                  "compiling this kernel un-split.";
+               << "': it contains a tile.transpose that swaps the split axis, which SplitVectorKernel "
+                  "cannot split correctly; compiling this kernel un-split.";
     }
   }
 
