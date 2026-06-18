@@ -502,7 +502,7 @@ ExprPtr IRMutator::VisitExpr_(const SubmitPtr& op) {
   }
   return std::make_shared<const Submit>(op->op_, std::move(new_args), std::move(new_deps), op->kwargs_,
                                         std::move(attrs_to_use), std::move(new_type), op->span_,
-                                        std::move(new_core_num), op->sync_start_);
+                                        std::move(new_core_num), op->sync_start_, op->allow_early_resolve_);
 }
 
 ExprPtr IRMutator::VisitExpr_(const MakeTuplePtr& op) {

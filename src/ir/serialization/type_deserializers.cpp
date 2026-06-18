@@ -492,6 +492,14 @@ static IRNodePtr DeserializeSubmit(const msgpack::object& fields_obj, msgpack::z
         << "Submit sync_start must be a bool, got msgpack type " << static_cast<int>(sync_start_obj->type);
     sync_start = sync_start_obj->as<bool>();
   }
+  bool allow_early_resolve = false;
+  auto allow_early_resolve_obj = GetOptionalFieldObj(fields_obj, "allow_early_resolve", ctx);
+  if (allow_early_resolve_obj.has_value() && allow_early_resolve_obj->type != msgpack::type::NIL) {
+    CHECK_SPAN(allow_early_resolve_obj->type == msgpack::type::BOOLEAN, span)
+        << "Submit allow_early_resolve must be a bool, got msgpack type "
+        << static_cast<int>(allow_early_resolve_obj->type);
+    allow_early_resolve = allow_early_resolve_obj->as<bool>();
+  }
 
   // Generic attrs map. Submit never stores manual_dep_edges in attrs (deps_ is
   // the source of truth), so no legacy top-level arg_directions lifting is
@@ -506,7 +514,7 @@ static IRNodePtr DeserializeSubmit(const msgpack::object& fields_obj, msgpack::z
   std::vector<std::pair<std::string, std::any>> kwargs = DeserializeKwargs(kwargs_obj, "kwargs", ctx, zone);
 
   return std::make_shared<Submit>(op, args, deps, std::move(kwargs), std::move(attrs), type, span,
-                                  std::move(core_num), sync_start);
+                                  std::move(core_num), sync_start, allow_early_resolve);
 }
 
 // Macro for binary expressions

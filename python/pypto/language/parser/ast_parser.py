@@ -5213,6 +5213,7 @@ class ASTParser:
         if as_submit:
             allowed_kwargs.add("deps")
             allowed_kwargs.add("dumps")
+            allowed_kwargs.add("allow_early_resolve")
         if as_spmd:
             allowed_kwargs.update({"core_num", "sync_start"})
         if func_obj is not None and func_obj.role == ir.Role.Orchestrator:
@@ -5349,6 +5350,12 @@ class ASTParser:
         sync_start = False
         if as_spmd:
             core_num_expr, sync_start = self._parse_spmd_submit_kwargs(method_name, keywords, span)
+        # ``allow_early_resolve=True`` opts this task in as a speculative
+        # early-dispatch producer. Accepted on both pl.submit and pl.spmd_submit
+        # (recorded on the Submit; no-op for a plain self.kernel(...) call).
+        allow_early_resolve = False
+        if as_submit:
+            allow_early_resolve = self._parse_submit_allow_early_resolve_kwarg(method_name, keywords)
         return_types = func_obj.return_types if func_obj else []
         # A callee that declares no ``-> `` annotation has empty ``return_types``
         # but may ``return <value>`` (e.g. an InCore kernel returning its
@@ -5379,6 +5386,7 @@ class ASTParser:
             augment_task_id=as_submit,
             core_num=core_num_expr,
             sync_start=sync_start,
+            allow_early_resolve=allow_early_resolve,
             extra_attrs=extra_attrs,
         )
 
@@ -5723,6 +5731,25 @@ class ASTParser:
                 result.append(val)
         return result
 
+    def _parse_submit_allow_early_resolve_kwarg(self, method_name: str, keywords: list[ast.keyword]) -> bool:
+        """Extract the optional ``allow_early_resolve=True/False`` kwarg.
+
+        Accepted on ``pl.submit(...)`` and ``pl.spmd_submit(...)``. Opts this
+        task in as a speculative early-dispatch producer — the scheduler may
+        pre-stage its consumers before it completes (simpler#1065). Must be a
+        boolean literal; defaults to ``False`` when absent.
+        """
+        kw = next((k for k in keywords if k.arg == "allow_early_resolve"), None)
+        if kw is None:
+            return False
+        if not isinstance(kw.value, ast.Constant) or not isinstance(kw.value.value, bool):
+            raise ParserSyntaxError(
+                f"'{method_name}' allow_early_resolve must be a boolean literal (True/False)",
+                span=self.span_tracker.get_span(kw.value),
+                hint="Write allow_early_resolve=True to opt this submit into early-dispatch.",
+            )
+        return kw.value.value
+
     def _parse_dispatch_device_kwarg(
         self,
         keywords: list[ast.keyword],
@@ -5792,6 +5819,7 @@ class ASTParser:
         augment_task_id: bool = False,
         core_num: ir.Expr | None = None,
         sync_start: bool = False,
+        allow_early_resolve: bool = False,
         extra_attrs: dict[str, Any] | None = None,
     ) -> ir.Expr:
         """Create an ir.Call, attaching the return type, optional call-site directions
@@ -5841,6 +5869,11 @@ class ASTParser:
                 ``augment_task_id=True``).
             sync_start: SPMD sync-start flag from ``pl.spmd_submit(...,
                 sync_start=...)``. Recorded on ``ir.Submit.sync_start``.
+            allow_early_resolve: Speculative early-dispatch opt-in from
+                ``pl.submit(..., allow_early_resolve=True)`` /
+                ``pl.spmd_submit(...)``. Recorded on
+                ``ir.Submit.allow_early_resolve`` (only valid with
+                ``augment_task_id=True``).
             extra_attrs: Generic round-trip attrs recovered from a printed
                 ``attrs={...}`` dict that have no dedicated param above
                 (e.g. ``arg_direction_overrides``, ``dummy_task``). Merged into
@@ -5891,10 +5924,11 @@ class ASTParser:
             # manual_dep_edges (ManualDepsOnSubmitOnly invariant).
             submit_attrs: dict[str, Any] | None = attrs if attrs else None
             # pl.spmd_submit carries an SPMD launch spec (core_num/sync_start) on
-            # the Submit; that requires the full ctor form even when there are
-            # no attrs. A plain pl.submit with no attrs keeps the minimal form
-            # so existing golden output is byte-identical.
-            if submit_attrs is not None or core_num is not None:
+            # the Submit, and allow_early_resolve carries the early-dispatch
+            # opt-in; either requires the full ctor form even when there are no
+            # attrs. A plain pl.submit with no attrs / hints keeps the minimal
+            # form so existing golden output is byte-identical.
+            if submit_attrs is not None or core_num is not None or allow_early_resolve:
                 return ir.Submit(
                     gvar,
                     args,
@@ -5905,6 +5939,7 @@ class ASTParser:
                     span,
                     core_num=core_num,
                     sync_start=sync_start,
+                    allow_early_resolve=allow_early_resolve,
                 )
             return ir.Submit(gvar, args, deps_list, return_type, span)
 

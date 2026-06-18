@@ -1439,6 +1439,13 @@ class Submit(Expr):
     """Require all SPMD logical blocks to launch atomically. Only meaningful
     when :attr:`core_num` is set."""
 
+    allow_early_resolve: Final[bool]
+    """Speculative early-dispatch opt-in (``allow_early_resolve=True``). Flags
+    this task as a producer whose consumers the scheduler may pre-stage before
+    it completes. Independent of the SPMD launch spec — valid on a plain
+    ``pl.submit`` and on ``pl.spmd_submit``. Lowers to
+    ``Arg::set_allow_early_resolve(true)`` in orchestration codegen."""
+
     @property
     def arg_directions(self) -> Sequence[ArgDirection]:
         """Resolved per-argument call-site directions (see :attr:`Call.arg_directions`)."""
@@ -1482,6 +1489,7 @@ class Submit(Expr):
         span: Span,
         core_num: Expr | None = None,
         sync_start: bool = False,
+        allow_early_resolve: bool = False,
     ) -> None:
         """Create a Submit expression with kwargs and explicit attrs and type.
 
@@ -1498,6 +1506,8 @@ class Submit(Expr):
                 plain submit (single block).
             sync_start: Require atomic launch of all SPMD blocks. Requires
                 ``core_num`` to be set.
+            allow_early_resolve: Opt this task in as a speculative early-dispatch
+                producer (independent of the SPMD launch spec).
         """
         ...
 

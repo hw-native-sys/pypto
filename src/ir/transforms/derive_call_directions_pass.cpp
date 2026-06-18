@@ -368,7 +368,7 @@ class CallDirectionMutator : public IRMutator {
     auto new_attrs = WithArgDirectionsAttr(submit->attrs_, std::move(*dirs));
     return std::make_shared<Submit>(submit->op_, submit->args_, submit->deps_, submit->kwargs_,
                                     std::move(new_attrs), submit->GetType(), submit->span_, submit->core_num_,
-                                    submit->sync_start_);
+                                    submit->sync_start_, submit->allow_early_resolve_);
   }
 
   /// Shared core that derives the ArgDirection vector for a Call-shaped node.

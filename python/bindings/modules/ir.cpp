@@ -885,17 +885,19 @@ void BindIR(nb::module_& m) {
       "__init__",
       [](Submit* self, const OpPtr& op, const std::vector<ExprPtr>& args, const std::vector<ExprPtr>& deps,
          const nb::dict& kwargs_dict, const nb::object& attrs_or_none, const TypePtr& type, const Span& span,
-         const std::optional<ExprPtr>& core_num, bool sync_start) {
+         const std::optional<ExprPtr>& core_num, bool sync_start, bool allow_early_resolve) {
         auto kwargs = ConvertKwargsDict(kwargs_dict);
         auto attrs = ConvertAttrsFromPython(attrs_or_none);
-        new (self)
-            Submit(op, args, deps, std::move(kwargs), std::move(attrs), type, span, core_num, sync_start);
+        new (self) Submit(op, args, deps, std::move(kwargs), std::move(attrs), type, span, core_num,
+                          sync_start, allow_early_resolve);
       },
       nb::arg("op"), nb::arg("args"), nb::arg("deps"), nb::arg("kwargs"), nb::arg("attrs").none(),
       nb::arg("type"), nb::arg("span"), nb::arg("core_num") = nb::none(), nb::arg("sync_start") = false,
+      nb::arg("allow_early_resolve") = false,
       "Create a Submit expression with kwargs and explicit attrs map and type. "
       "The optional core_num (an INDEX/INT Expr) and sync_start carry the SPMD launch spec "
       "for pl.spmd_submit; omit them for a plain pl.submit. "
+      "allow_early_resolve opts this task in as a speculative early-dispatch producer. "
       "Reserved attrs keys: 'arg_directions' -> list[ArgDirection].");
 
   BindFields<Submit>(submit_class);

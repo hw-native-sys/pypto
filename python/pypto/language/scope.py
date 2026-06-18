@@ -127,6 +127,7 @@ def submit(*args: Any, **kwargs: Any) -> Any:
         out, tid    = pl.submit(self.stage1, x, scratch, deps=[prev_tid])
         (a, b), tid = pl.submit(self.multi_out_kernel, x)
         out, tid    = pl.submit(self.stage1, x, scratch, deps=[prev_tid], dumps=[x])
+        out, tid    = pl.submit(self.stage1, x, scratch, allow_early_resolve=True)
 
     The kernel-side ``ir.Submit`` natively returns
     ``Tuple[<kernel return>, TASK_ID]``; element 0 is the tensor result(s),
@@ -151,6 +152,16 @@ def submit(*args: Any, **kwargs: Any) -> Any:
     (``RunConfig.enable_dump_tensor == 1``); they are a no-op when dump is off
     (``0``) and irrelevant under full dump (``2``), which captures every
     binding regardless.
+
+    The optional ``allow_early_resolve=True`` kwarg (default ``False``) opts
+    this task in as a speculative early-dispatch producer (simpler#1065): the
+    scheduler may pre-stage this task's consumers onto idle cores before it
+    completes, releasing them with a doorbell the instant it finishes. It is a
+    producer-side hint — a consumer only pre-stages once *all* of its producers
+    are flagged (or already complete). It lowers to
+    ``Arg::set_allow_early_resolve(true)`` in orchestration codegen and is a
+    pure scheduling optimisation (no effect on results). Pays off on critical
+    paths built from many short tasks; harmless otherwise.
 
     The return annotation is ``Any`` (not ``NoReturn``) because the parser
     intercepts the call and binds a 2-tuple to the LHS — downstream code
@@ -187,8 +198,10 @@ def spmd_submit(*args: Any, **kwargs: Any) -> Any:
     ``core_num`` is a **required keyword argument** (a positive integer
     expression) — the positional slots are the kernel's own arguments.
     ``sync_start`` (default ``False``) requires all blocks to launch atomically.
-    ``deps=[...]`` works exactly as on :func:`submit`. The callee may be an
-    InCore / AIC / AIV kernel or a co-scheduled Group.
+    ``deps=[...]`` and ``allow_early_resolve=True`` work exactly as on
+    :func:`submit` (note: a ``sync_start`` task cannot itself be block-by-block
+    pre-staged, but it can still be flagged to let its consumers pre-stage). The
+    callee may be an InCore / AIC / AIV kernel or a co-scheduled Group.
 
     Like :func:`submit`, it works in both auto and manual scope; its primary use
     is explicit dependency wiring inside ``pl.manual_scope()``.

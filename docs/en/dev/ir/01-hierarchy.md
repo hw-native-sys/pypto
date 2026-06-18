@@ -73,7 +73,7 @@ is present, `memory_space` must also be present on the `TileType`.
 | **ConstBool** | `value_` | Boolean constant (always BOOL dtype) |
 | **ConstFloat** | `value_`, `dtype_` | Floating-point constant |
 | **Call** | `op_`, `args_`, `kwargs_`, `attrs_` | Function/operator call (see [Call attrs vs kwargs](#call-attrs-vs-kwargs)) |
-| **Submit** | `op_`, `args_`, `deps_`, `core_num_`, `sync_start_`, `kwargs_`, `attrs_` | Task-launch (`pl.submit(...)` / `pl.spmd_submit(...)`). `core_num_`/`sync_start_` carry the SPMD launch spec. See [Submit vs Call](#submit-vs-call). |
+| **Submit** | `op_`, `args_`, `deps_`, `core_num_`, `sync_start_`, `allow_early_resolve_`, `kwargs_`, `attrs_` | Task-launch (`pl.submit(...)` / `pl.spmd_submit(...)`). `core_num_`/`sync_start_` carry the SPMD launch spec; `allow_early_resolve_` is the speculative early-dispatch opt-in (lowers to `Arg::set_allow_early_resolve(true)`). See [Submit vs Call](#submit-vs-call). |
 | **TupleGetItemExpr** | `tuple_`, `index_` | Tuple element access |
 
 ### Var Identity

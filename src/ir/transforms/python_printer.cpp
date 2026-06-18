@@ -1115,6 +1115,13 @@ void IRPythonPrinter::VisitExpr_(const SubmitPtr& op) {
     }
   }
 
+  // Speculative early-dispatch opt-in — emitted as a kwarg so the parser
+  // recovers it via the submit/spmd_submit kwargs path. Independent of the
+  // launch spec, so emit it for a plain pl.submit too (not nested above).
+  if (op->allow_early_resolve_) {
+    stream_ << ", allow_early_resolve=True";
+  }
+
   // Surface the machine-only ``attrs={...}`` dict the same way Call does:
   // ``arg_directions`` keeps a bespoke emitter; every other attr (e.g.
   // ``arg_direction_overrides``) is rendered generically by ``PrintAttrValue``

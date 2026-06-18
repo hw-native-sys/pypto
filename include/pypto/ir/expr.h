@@ -881,6 +881,17 @@ class Submit : public Expr {
   // .claude/rules/pass-submit-awareness.md, rule 2).
   std::optional<ExprPtr> core_num_;
   bool sync_start_ = false;
+  // Speculative early-dispatch opt-in (``pl.submit(..., allow_early_resolve=True)``).
+  // Flags this task as a producer that permits the scheduler to pre-stage its
+  // consumers onto idle cores before it completes (gated on a doorbell). It is
+  // a producer-side hint: the flagged task's *consumers* may pre-stage when all
+  // of their producers are likewise flagged-or-pre-completed. Independent of the
+  // SPMD launch spec — valid on a plain ``pl.submit`` and on ``pl.spmd_submit``.
+  // Lowers to ``Arg::set_allow_early_resolve(true)`` in orchestration codegen via
+  // SubmitToCallView (attr ``"allow_early_resolve"``). A first-class field (like
+  // ``sync_start_``) because it is user-authored launch intent, not compiler
+  // metadata; it carries no SSA value so passes need not walk it.
+  bool allow_early_resolve_ = false;
   std::vector<std::pair<std::string, std::any>> attrs_;   // Compiler-internal metadata (ordered)
   std::vector<std::pair<std::string, std::any>> kwargs_;  // Keyword arguments (metadata, ordered)
 
@@ -909,13 +920,15 @@ class Submit : public Expr {
   Submit(OpPtr op, std::vector<ExprPtr> args, std::vector<ExprPtr> deps,
          std::vector<std::pair<std::string, std::any>> kwargs,
          std::vector<std::pair<std::string, std::any>> attrs, TypePtr type, Span span,
-         std::optional<ExprPtr> core_num = std::nullopt, bool sync_start = false)
+         std::optional<ExprPtr> core_num = std::nullopt, bool sync_start = false,
+         bool allow_early_resolve = false)
       : Expr(std::move(span), std::move(type)),
         op_(std::move(op)),
         args_(std::move(args)),
         deps_(std::move(deps)),
         core_num_(std::move(core_num)),
         sync_start_(sync_start),
+        allow_early_resolve_(allow_early_resolve),
         attrs_(std::move(attrs)),
         kwargs_(std::move(kwargs)) {
     ValidateArgDirectionsAttr();
@@ -970,14 +983,16 @@ class Submit : public Expr {
   [[nodiscard]] std::string TypeName() const override { return "Submit"; }
 
   static constexpr auto GetFieldDescriptors() {
-    return std::tuple_cat(Expr::GetFieldDescriptors(),
-                          std::make_tuple(reflection::UsualField(&Submit::op_, "op"),
-                                          reflection::UsualField(&Submit::args_, "args"),
-                                          reflection::UsualField(&Submit::deps_, "deps"),
-                                          reflection::UsualField(&Submit::core_num_, "core_num"),
-                                          reflection::UsualField(&Submit::sync_start_, "sync_start"),
-                                          reflection::UsualField(&Submit::attrs_, "attrs"),
-                                          reflection::UsualField(&Submit::kwargs_, "kwargs")));
+    return std::tuple_cat(
+        Expr::GetFieldDescriptors(),
+        std::make_tuple(reflection::UsualField(&Submit::op_, "op"),
+                        reflection::UsualField(&Submit::args_, "args"),
+                        reflection::UsualField(&Submit::deps_, "deps"),
+                        reflection::UsualField(&Submit::core_num_, "core_num"),
+                        reflection::UsualField(&Submit::sync_start_, "sync_start"),
+                        reflection::UsualField(&Submit::allow_early_resolve_, "allow_early_resolve"),
+                        reflection::UsualField(&Submit::attrs_, "attrs"),
+                        reflection::UsualField(&Submit::kwargs_, "kwargs")));
   }
 
  private:
@@ -1051,7 +1066,7 @@ inline CallPtr SubmitToCallView(const SubmitPtr& submit) {
     // re-emitted below from core_num_ / sync_start_. Drop any stray attr of
     // the same key so the field stays the single source of truth (Call::GetAttr
     // returns the first match, so a stale attr would otherwise shadow it).
-    if (k != kAttrManualDepEdges && k != "core_num" && k != "sync_start") {
+    if (k != kAttrManualDepEdges && k != "core_num" && k != "sync_start" && k != "allow_early_resolve") {
       attrs.emplace_back(k, v);
     }
   }
@@ -1089,6 +1104,12 @@ inline CallPtr SubmitToCallView(const SubmitPtr& submit) {
   if (submit->core_num_.has_value()) {
     attrs.emplace_back("core_num", std::any(*submit->core_num_));
     attrs.emplace_back("sync_start", std::any(submit->sync_start_));
+  }
+  // Speculative early-dispatch opt-in — surface as a Call-view attr so
+  // orchestration codegen emits ``Arg::set_allow_early_resolve(true)``. Only
+  // emit when set so a plain submit's Call view keeps its existing attrs.
+  if (submit->allow_early_resolve_) {
+    attrs.emplace_back("allow_early_resolve", std::any(true));
   }
   return std::make_shared<Call>(submit->op_, submit->args_, submit->kwargs_, std::move(attrs),
                                 submit->GetType(), submit->span_);

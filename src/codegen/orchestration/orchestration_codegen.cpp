@@ -2118,6 +2118,17 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
   }
 
+  // Speculative early-dispatch opt-in (pl.submit(..., allow_early_resolve=True)).
+  // The flag rides on the Submit and is surfaced as the ``allow_early_resolve``
+  // Call attr by SubmitToCallView; a plain submit / call lacks it, so this is a
+  // no-op there. Emitted on the producer task's Arg before its rt_submit_* —
+  // see simpler#1065 ("codegen-side emission of set_allow_early_resolve()").
+  void EmitEarlyResolveHint(const std::string& ind, const std::string& task_var, const CallPtr& call) {
+    if (call->GetAttr<bool>("allow_early_resolve", false)) {
+      code_ << ind << task_var << ".set_allow_early_resolve(true);\n";
+    }
+  }
+
   void EmitTaskSubmitAndBind(const std::string& submit_expr, bool capture_outputs) {
     if (capture_outputs) {
       // The caller will consume this task's producer TaskId — capture the
@@ -2674,6 +2685,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // has neither, so EffectiveLaunchSpec yields (nullptr, false) → no-op.
     auto [launch_core_num, launch_sync_start] = EffectiveLaunchSpec(call, callee_func);
     EmitLaunchSpec(ind, task_var, launch_core_num, launch_sync_start);
+    EmitEarlyResolveHint(ind, task_var, call);
 
     std::string submit_expr =
         CoreTypeToSubmitPrefix(core_type) + std::to_string(func_id) + ", " + task_var + ")";
@@ -2717,6 +2729,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     EmitSelectiveDumpCall(ind, task_var, params);
     auto [launch_core_num, launch_sync_start] = EffectiveLaunchSpec(call, spmd_func);
     EmitLaunchSpec(ind, task_var, launch_core_num, launch_sync_start);
+    EmitEarlyResolveHint(ind, task_var, call);
     EmitManualDeps(call, task_var);
 
     std::string submit_expr =
@@ -2761,6 +2774,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
       auto [launch_core_num, launch_sync_start] = EffectiveLaunchSpec(call, launch_func);
       EmitLaunchSpec(ind, task_var, launch_core_num, launch_sync_start);
+      EmitEarlyResolveHint(ind, task_var, call);
       EmitManualDeps(call, task_var);
 
       std::string submit_expr =
@@ -2812,6 +2826,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
     auto [launch_core_num, launch_sync_start] = EffectiveLaunchSpec(call, launch_func);
     EmitLaunchSpec(ind, task_var, launch_core_num, launch_sync_start);
+    EmitEarlyResolveHint(ind, task_var, call);
     EmitManualDeps(call, task_var);
 
     std::string submit_expr = "rt_submit_task(mixed_" + std::to_string(task_counter_) + ", " + task_var + ")";

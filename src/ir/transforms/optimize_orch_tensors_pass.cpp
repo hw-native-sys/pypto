@@ -2439,9 +2439,9 @@ class OutWindowExternalizer {
         for (const auto& [k, v] : new_attrs) {
           if (k != kAttrManualDepEdges) submit_attrs.emplace_back(k, v);
         }
-        new_call = std::make_shared<Submit>(cloned_gvar, new_args, submit->deps_, submit->kwargs_,
-                                            std::move(submit_attrs), new_return_type, submit->span_,
-                                            submit->core_num_, submit->sync_start_);
+        new_call = std::make_shared<Submit>(
+            cloned_gvar, new_args, submit->deps_, submit->kwargs_, std::move(submit_attrs), new_return_type,
+            submit->span_, submit->core_num_, submit->sync_start_, submit->allow_early_resolve_);
       } else {
         new_call = std::make_shared<Call>(cloned_gvar, new_args, call->kwargs_, new_attrs, new_return_type,
                                           call->span_);

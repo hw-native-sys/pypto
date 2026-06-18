@@ -15,12 +15,13 @@ import textwrap
 
 import pypto.language as pl
 import pytest
-from pypto import backend, codegen, passes
 from pypto.backend import BackendType
 from pypto.ir.builder import IRBuilder
 from pypto.ir.op import tensor as tensor_ops
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import DataType, ir
+
+from pypto import backend, codegen, passes
 
 
 def assert_code_equal(actual: str, expected: str) -> None:
@@ -7265,6 +7266,67 @@ def test_plain_submit_emits_no_launch_spec():
 
     code = _generate_orch_full_pipeline(P)
     assert "launch_spec" not in code, code
+
+
+def test_submit_allow_early_resolve_emits_hint():
+    """``pl.submit(..., allow_early_resolve=True)`` lowers to a
+    ``set_allow_early_resolve(true)`` call on the producer task's Arg before its
+    rt_submit_* (simpler#1065). A submit without the flag emits nothing.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def k(
+            self, x: pl.Tensor[[128], pl.FP32], out: pl.Out[pl.Tensor[[128], pl.FP32]]
+        ) -> pl.Tensor[[128], pl.FP32]:
+            t = pl.load(x, [0], [128])
+            out = pl.store(t, [0], out)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self, x: pl.Tensor[[128], pl.FP32], out: pl.Out[pl.Tensor[[128], pl.FP32]]
+        ) -> pl.Tensor[[128], pl.FP32]:
+            with pl.manual_scope():
+                # First submit opts in; second does not.
+                scratch = pl.create_tensor([128], dtype=pl.FP32)
+                scratch, tid = pl.submit(self.k, x, scratch, allow_early_resolve=True)
+                out, _ = pl.submit(self.k, scratch, out, deps=[tid])
+            return out
+
+    code = _generate_orch_full_pipeline(P, allow_relaxed_verification=True)
+    # The flagged producer (task 0) gets the hint; the plain consumer (task 1)
+    # does not — so the call appears exactly once.
+    assert "params_t0.set_allow_early_resolve(true);" in code, code
+    assert code.count("set_allow_early_resolve(true)") == 1, code
+
+
+def test_plain_submit_emits_no_allow_early_resolve():
+    """Regression: a plain ``pl.submit`` (no hint) must not emit any
+    ``set_allow_early_resolve`` call — the feature is fully opt-in.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def k(
+            self, x: pl.Tensor[[128], pl.FP32], out: pl.Out[pl.Tensor[[128], pl.FP32]]
+        ) -> pl.Tensor[[128], pl.FP32]:
+            t = pl.load(x, [0], [128])
+            out = pl.store(t, [0], out)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self, x: pl.Tensor[[128], pl.FP32], out: pl.Out[pl.Tensor[[128], pl.FP32]]
+        ) -> pl.Tensor[[128], pl.FP32]:
+            with pl.manual_scope():
+                out, _ = pl.submit(self.k, x, out)
+            return out
+
+    code = _generate_orch_full_pipeline(P)
+    assert "set_allow_early_resolve" not in code, code
 
 
 def test_spmd_submit_aic_direct_dispatch():
