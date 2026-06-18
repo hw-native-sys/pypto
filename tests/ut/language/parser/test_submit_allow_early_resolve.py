@@ -18,9 +18,8 @@ in orchestration codegen.
 
 import pypto.language as pl
 import pytest
-from pypto.language.parser.diagnostics.exceptions import ParserSyntaxError, ParserTypeError
-
 from pypto import DataType, ir
+from pypto.language.parser.diagnostics.exceptions import ParserSyntaxError, ParserTypeError
 
 
 def _flatten(stmt):

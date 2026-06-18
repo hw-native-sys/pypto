@@ -15,13 +15,12 @@ import textwrap
 
 import pypto.language as pl
 import pytest
+from pypto import backend, codegen, passes
 from pypto.backend import BackendType
 from pypto.ir.builder import IRBuilder
 from pypto.ir.op import tensor as tensor_ops
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import DataType, ir
-
-from pypto import backend, codegen, passes
 
 
 def assert_code_equal(actual: str, expected: str) -> None:
