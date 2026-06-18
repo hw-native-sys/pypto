@@ -1013,6 +1013,7 @@ class AtContext:
         deps: list[Any] | None = None,
         no_dep_args: list[Any] | None = None,
         dumps: list[Any] | None = None,
+        allow_early_resolve: bool = False,
         # Deprecated kwargs (kept for back-compat; emit DeprecationWarning at parse time):
         optimization: _ChunkedLoopOptimizer | _ChunkedLoopOptimizerCall | None = None,
         split: SplitMode | None = None,
@@ -1024,6 +1025,7 @@ class AtContext:
         self.deps = deps
         self.no_dep_args = no_dep_args
         self.dumps = dumps
+        self.allow_early_resolve = allow_early_resolve
         self.optimization = optimization
         self.split = split
         self.name_hint = name_hint
@@ -1049,6 +1051,7 @@ def at(
     deps: list[Any] | None = None,
     no_dep_args: list[Any] | None = None,
     dumps: list[Any] | None = None,
+    allow_early_resolve: bool = False,
     # Deprecated kwargs (kept for back-compat; emit DeprecationWarning at parse time):
     optimization: _ChunkedLoopOptimizer | _ChunkedLoopOptimizerCall | None = None,
     split: SplitMode | None = None,
@@ -1104,6 +1107,13 @@ def at(
             ``dump_vars`` by Var identity. Equivalent to declaring the same
             tensors with ``pl.dump_tag(t)`` before the scope; use ``dumps=``
             when you want the dump targets listed explicitly at the scope.
+        allow_early_resolve: Opt the outlined dispatch in as a speculative
+            early-dispatch producer (simpler#1065). Same hint as
+            ``pl.submit(..., allow_early_resolve=True)``: the scheduler may
+            pre-stage this task's consumers before it completes. Forces the
+            scope to lower to an ``ir.Submit`` (even without ``as tid``) so the
+            flag can ride to codegen, where it emits
+            ``Arg::set_allow_early_resolve(true)``. Pure scheduling hint.
         optimization: **Deprecated.** Use ``optimizations=[pl.auto_chunk]`` (or
             ``optimizations=[pl.auto_chunk, pl.split(mode)]``) instead.
         split: **Deprecated.** Use ``optimizations=[pl.split(mode)]`` instead.

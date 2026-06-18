@@ -389,6 +389,10 @@ class _AtKwargState:
     level: "ir.Level | None" = None
     role: "ir.Role | None" = None
     name_hint: str = ""
+    # ``allow_early_resolve=True`` — speculative early-dispatch opt-in, stored as
+    # the scope's ``allow_early_resolve`` attr and threaded onto the synthesised
+    # ``Submit`` by the outliner (mirrors ``pl.submit(..., allow_early_resolve=)``).
+    allow_early_resolve: bool = False
     requests_auto_chunk: bool = False
     split_mode: "ir.SplitMode | None" = None
     # Optional cross-core ring-buffer depth from ``pl.split(mode, slot_num=N)``.
@@ -3059,6 +3063,14 @@ class ASTParser:
             self._handle_at_legacy_split_kw(kw, state)
         elif kw.arg == "name_hint":
             state.name_hint = self._parse_scope_name_hint(kw.value, "pl.at()")
+        elif kw.arg == "allow_early_resolve":
+            if not isinstance(kw.value, ast.Constant) or not isinstance(kw.value.value, bool):
+                raise ParserSyntaxError(
+                    "pl.at() allow_early_resolve must be a boolean literal (True/False)",
+                    span=self.span_tracker.get_span(kw.value),
+                    hint="Write allow_early_resolve=True to opt this scope into early-dispatch.",
+                )
+            state.allow_early_resolve = kw.value.value
         elif kw.arg in _AT_STASH_KWARGS:
             self._stash_at_kwarg(kw, state)
         elif kw.arg is None:
@@ -3071,7 +3083,10 @@ class ASTParser:
             raise ParserSyntaxError(
                 f"Unknown keyword argument '{kw.arg}' in pl.at()",
                 span=self.span_tracker.get_span(kw),
-                hint=("Supported arguments: level, role, optimizations, deps, no_dep_args, dumps, name_hint"),
+                hint=(
+                    "Supported arguments: level, role, optimizations, deps, no_dep_args, dumps, "
+                    "allow_early_resolve, name_hint"
+                ),
             )
 
     def _stash_at_kwarg(self, kw: ast.keyword, state: "_AtKwargState") -> None:
@@ -4235,7 +4250,9 @@ class ASTParser:
         # an ``Array[N, TASK_ID]`` carry. ``with pl.at(...) as tid:`` binds a
         # fresh ``Scalar[TASK_ID]`` Var in the outer scope; the outliner
         # later wires it to ``TupleGetItem(call_lhs, last_idx)``.
-        scope_attrs = self._parse_at_meta(deps_kw, no_dep_args_kw, dumps_kw, optional_vars, span)
+        scope_attrs = self._parse_at_meta(
+            deps_kw, no_dep_args_kw, dumps_kw, optional_vars, state.allow_early_resolve, span
+        )
         scope_attrs = self._append_split_slot_num_attr(scope_attrs, state.split_slot_num)
 
         # ``with pl.at(...) as tid:`` allocates ``tid`` as an outer-scope Var
@@ -4324,6 +4341,7 @@ class ASTParser:
         no_dep_args_kw: "ast.keyword | None",
         dumps_kw: "ast.keyword | None",
         optional_vars: "ast.expr | None",
+        allow_early_resolve: bool,
         span: "ir.Span",
     ) -> "list[tuple[str, Any]] | None":
         """Build the ScopeStmt ``attrs`` list from a ``pl.at(...)`` ``deps=`` /
@@ -4363,7 +4381,13 @@ class ASTParser:
         # not consulted here.
         dump_vars: list[ir.Var] = self._parse_at_dumps_kwarg(dumps_kw) if dumps_kw else []
 
-        if deps_kw is None and no_dep_args_kw is None and not dump_vars and optional_vars is None:
+        if (
+            deps_kw is None
+            and no_dep_args_kw is None
+            and not dump_vars
+            and optional_vars is None
+            and not allow_early_resolve
+        ):
             return None
 
         attrs: list[tuple[str, Any]] = []
@@ -4395,6 +4419,11 @@ class ASTParser:
             tid_var = self.builder.var(optional_vars.id, ir.ScalarType(DataType.TASK_ID), span=span)
             self.scope_manager.define_var(optional_vars.id, tid_var, span=span)
             attrs.append(("task_id_var", tid_var))
+
+        # ``allow_early_resolve`` last (canonical order) — a plain bool the
+        # outliner reads off the scope and threads onto the synthesised Submit.
+        if allow_early_resolve:
+            attrs.append(("allow_early_resolve", True))
 
         return attrs if attrs else None
 

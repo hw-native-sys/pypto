@@ -7328,6 +7328,28 @@ def test_plain_submit_emits_no_allow_early_resolve():
     assert "set_allow_early_resolve" not in code, code
 
 
+def test_at_allow_early_resolve_emits_hint():
+    """``pl.at(..., allow_early_resolve=True)`` outlines into a Submit carrying
+    the flag, so codegen emits ``set_allow_early_resolve(true)`` on the
+    synthesized dispatch's Arg (simpler#1065).
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self, x: pl.Tensor[[512, 128], pl.FP32], out: pl.Out[pl.Tensor[[512, 128], pl.FP32]]
+        ) -> pl.Tensor[[512, 128], pl.FP32]:
+            with pl.at(level=pl.Level.CORE_GROUP, allow_early_resolve=True):
+                t = pl.load(x, [0, 0], [128, 128])
+                out = pl.store(t, [0, 0], out)
+            return out
+
+    code = _generate_orch_full_pipeline(P, allow_relaxed_verification=True)
+    assert "set_allow_early_resolve(true);" in code, code
+    assert code.count("set_allow_early_resolve(true)") == 1, code
+
+
 def test_spmd_submit_aic_direct_dispatch():
     """spmd_submit of a directly-declared AIC (cube) kernel routes through the
     direct dispatch path: rt_submit_aic_task + launch spec (910B)."""

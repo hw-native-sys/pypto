@@ -246,5 +246,64 @@ class TestAllowEarlyResolveStructuralEqual:
         assert ir.structural_hash(a) == ir.structural_hash(b)
 
 
+def _at_flag_program():
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self, x: pl.Tensor[[512, 128], pl.FP32], out: pl.Out[pl.Tensor[[512, 128], pl.FP32]]
+        ) -> pl.Tensor[[512, 128], pl.FP32]:
+            with pl.at(level=pl.Level.CORE_GROUP, allow_early_resolve=True):
+                t = pl.load(x, [0, 0], [128, 128])
+                out = pl.store(t, [0, 0], out)
+            return out
+
+    return Prog
+
+
+class TestAtAllowEarlyResolve:
+    """``pl.at(..., allow_early_resolve=True)`` on the outlined-block surface."""
+
+    def test_prints_and_round_trips(self):
+        Prog = _at_flag_program()
+        text = Prog.as_python()
+        assert "allow_early_resolve=True" in text
+        reparsed = pl.parse_program(text)
+        ir.assert_structural_equal(reparsed, Prog)
+
+    def test_default_omitted_from_print(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self, x: pl.Tensor[[512, 128], pl.FP32], out: pl.Out[pl.Tensor[[512, 128], pl.FP32]]
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    t = pl.load(x, [0, 0], [128, 128])
+                    out = pl.store(t, [0, 0], out)
+                return out
+
+        assert "allow_early_resolve" not in Prog.as_python()
+
+    def test_non_bool_literal_rejected(self):
+        with pytest.raises(ParserSyntaxError, match="allow_early_resolve must be a boolean literal"):
+
+            @pl.program
+            class Prog:
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def main(
+                    self,
+                    x: pl.Tensor[[512, 128], pl.FP32],
+                    out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+                ) -> pl.Tensor[[512, 128], pl.FP32]:
+                    # Deliberately wrong type: verifies the parser rejects a
+                    # non-bool literal at parse time (pyright would flag the
+                    # bool kwarg, so suppress that static check here).
+                    with pl.at(level=pl.Level.CORE_GROUP, allow_early_resolve=1):  # type: ignore[reportArgumentType]
+                        t = pl.load(x, [0, 0], [128, 128])
+                        out = pl.store(t, [0, 0], out)
+                    return out
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

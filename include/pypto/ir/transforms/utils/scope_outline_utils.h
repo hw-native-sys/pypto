@@ -923,13 +923,18 @@ class ScopeOutliner : public IRMutator {
     // ``kAttrDumpVars`` by Var identity, exactly as ``scope_no_dep_vars`` is
     // translated into ``kAttrArgDirectionOverrides``.
     std::vector<VarPtr> scope_dump_vars = op->GetAttr<std::vector<VarPtr>>(kAttrDumpVars);
+    // Speculative early-dispatch opt-in (``pl.at(..., allow_early_resolve=True)``).
+    // Threaded onto the synthesised Submit below — same hint as
+    // ``pl.submit(..., allow_early_resolve=True)``.
+    bool scope_allow_early_resolve = op->GetAttr<bool>("allow_early_resolve", false);
 
-    // Dependency edges force the Submit shape: deps live in the typed
-    // ``Submit::deps_`` field, never in a plain Call's attrs. A scope written
-    // without ``as tid`` gets a synthetic (unused) TaskId Var; DCE keeps the
-    // Submit itself alive (task launches are effectful) and codegen skips the
-    // unconsumed trailing tuple element.
-    if (!scope_dep_edges.empty() && !scope_task_id_var) {
+    // Dependency edges (or an early-resolve flag) force the Submit shape: deps
+    // live in the typed ``Submit::deps_`` field and the flag in
+    // ``Submit::allow_early_resolve_`` — neither has a plain-Call carrier. A
+    // scope written without ``as tid`` gets a synthetic (unused) TaskId Var; DCE
+    // keeps the Submit itself alive (task launches are effectful) and codegen
+    // skips the unconsumed trailing tuple element.
+    if ((!scope_dep_edges.empty() || scope_allow_early_resolve) && !scope_task_id_var) {
       scope_task_id_var = std::make_shared<Var>(GenerateFreshSSAName("tid"),
                                                 std::make_shared<ScalarType>(DataType::TASK_ID), op->span_);
       var_types_[scope_task_id_var.get()] = scope_task_id_var->GetType();
@@ -1043,7 +1048,8 @@ class ScopeOutliner : public IRMutator {
       synthesised_call_expr = std::make_shared<Submit>(
           global_var, call_args, std::move(submit_deps), std::vector<std::pair<std::string, std::any>>{},
           std::move(submit_attrs), call_return_type ? call_return_type : std::make_shared<UnknownType>(),
-          op->span_);
+          op->span_, /*core_num=*/std::nullopt, /*sync_start=*/false,
+          /*allow_early_resolve=*/scope_allow_early_resolve);
     } else {
       std::vector<std::pair<std::string, std::any>> call_attrs;
       // ``dump_vars`` first — see the Submit branch above for the ordering
