@@ -1916,15 +1916,15 @@ class OutWindowExternalizer {
 
   // v5 per-function effective policies resolved from global policy + kernel attrs.
   struct EffectivePolicies {
-    enum class OutputPolicy { Off, Auto, All, Coalesce };
+    enum class OutputPolicy { Off, Auto, All, Coalesce, CoalesceCarrier };
     enum class InputPolicy { Off, Auto };
     OutputPolicy output;
     InputPolicy input;
   };
 
   static EffectivePolicies ResolveEffectivePolicies(const FunctionPtr& func,
-                                                     OutputWindowPolicy global_output_policy,
-                                                     WindowRewritePolicy global_window_rewrite_policy) {
+                                                    OutputWindowPolicy global_output_policy,
+                                                    WindowRewritePolicy global_window_rewrite_policy) {
     // Global kill switch: off overrides everything, no per-kernel override.
     if (global_window_rewrite_policy == WindowRewritePolicy::None) {
       return {EffectivePolicies::OutputPolicy::Off, EffectivePolicies::InputPolicy::Off};
@@ -1953,9 +1953,11 @@ class OutWindowExternalizer {
           ep.output = EffectivePolicies::OutputPolicy::All;
         } else if (val == "coalesce") {
           ep.output = EffectivePolicies::OutputPolicy::Coalesce;
+        } else if (val == "coalesce_carrier") {
+          ep.output = EffectivePolicies::OutputPolicy::CoalesceCarrier;
         } else {
           CHECK(false) << "Invalid window_outputs attr '" << val
-                       << "': expected 'off', 'auto', 'all', or 'coalesce'";
+                       << "': expected 'off', 'auto', 'all', 'coalesce', or 'coalesce_carrier'";
         }
       }
       if (func->HasAttr("window_inputs")) {
@@ -1965,8 +1967,7 @@ class OutWindowExternalizer {
         } else if (val == "auto") {
           ep.input = EffectivePolicies::InputPolicy::Auto;
         } else {
-          CHECK(false) << "Invalid window_inputs attr '" << val
-                       << "': expected 'off' or 'auto'";
+          CHECK(false) << "Invalid window_inputs attr '" << val << "': expected 'off' or 'auto'";
         }
       }
     }
@@ -2080,6 +2081,7 @@ class OutWindowExternalizer {
     AccessRegion assemble_region;
     std::vector<size_t> piece_return_indices;
     size_t iter_arg_index = SIZE_MAX;
+    bool carrier_contract = false;
   };
 
   struct InputRewriteInfo {
@@ -2442,8 +2444,13 @@ class OutWindowExternalizer {
       }
 
       // Per-function coalesce (before type/ABI filtering).
-      if (ep.output == EffectivePolicies::OutputPolicy::Coalesce) {
+      if (ep.output == EffectivePolicies::OutputPolicy::Coalesce ||
+          ep.output == EffectivePolicies::OutputPolicy::CoalesceCarrier) {
         CoalesceOutputPieces(&analysis);
+      }
+      const bool output_carrier_contract = ep.output == EffectivePolicies::OutputPolicy::CoalesceCarrier;
+      for (auto& output : analysis.outputs) {
+        output.carrier_contract = output_carrier_contract;
       }
 
       // Type/ABI safety filter (always applies).
@@ -2470,7 +2477,8 @@ class OutWindowExternalizer {
       // v5 effective policy filtering.
       switch (ep.output) {
         case EffectivePolicies::OutputPolicy::Auto:
-        case EffectivePolicies::OutputPolicy::Coalesce: {
+        case EffectivePolicies::OutputPolicy::Coalesce:
+        case EffectivePolicies::OutputPolicy::CoalesceCarrier: {
           // Auto filter: reject ABI-expanding, multi-piece, etc.
           analysis.outputs.erase(
               std::remove_if(analysis.outputs.begin(), analysis.outputs.end(),
@@ -3305,6 +3313,7 @@ class OutWindowExternalizer {
       bool dynamic_indexed_reader = false;
       bool output_writer = false;
       bool output_has_fine_assemble = false;
+      bool output_carrier_contract = false;
       InputRewriteInfo input_info;
       std::vector<LoopContext> enclosing_loops;
       std::unordered_map<const Var*, ExprPtr> callsite_subst;
@@ -3899,7 +3908,6 @@ class OutWindowExternalizer {
       result.max_subst[dynamic.dynamic_index_value] = dynamic_max_var;
       return result;
     }
-
 
     std::optional<FullOffsetScanResult> EmitFullOffsetScanPrelude(const CallsiteAccessCandidate& reader,
                                                                   arith::Analyzer* analyzer,
@@ -4985,6 +4993,7 @@ class OutWindowExternalizer {
         candidate.parent_expr = call->args_[output.out_param_index];
         candidate.output_writer = true;
         candidate.output_has_fine_assemble = HasFineAssemblePieces(output);
+        candidate.output_carrier_contract = output.carrier_contract;
         candidate.enclosing_loops = enclosing_loops;
         candidate.callsite_subst = resolved_callsite_subst;
         if (!output.callsite_offsets.empty()) candidate.offsets = output.callsite_offsets;
@@ -5114,7 +5123,7 @@ class OutWindowExternalizer {
           size_t dynamic_dim = SIZE_MAX;
           bool needs_carrier_rematerialization = false;
           bool can_make_dynamic_carrier =
-              !unsupported && writer && writer->output_has_fine_assemble &&
+              !unsupported && writer && writer->output_has_fine_assemble && writer->output_carrier_contract &&
               writer->stmt_index < dynamic_reader->stmt_index &&
               CanUseCarrierAcrossCallsiteLoops(writer->enclosing_loops, dynamic_reader->enclosing_loops,
                                                &needs_carrier_rematerialization) &&
@@ -5221,6 +5230,7 @@ class OutWindowExternalizer {
               LOG_INFO << "[window-carrier] fallback dynamic proof root=" << root->name_hint_
                        << " unsupported=" << unsupported << " writer=" << (writer != nullptr)
                        << " writer_fine=" << (writer && writer->output_has_fine_assemble)
+                       << " writer_carrier_contract=" << (writer && writer->output_carrier_contract)
                        << " order=" << (writer && writer->stmt_index < dynamic_reader->stmt_index);
             }
             plan.fallback_parent_roots.insert(root);
@@ -8210,16 +8220,16 @@ class OutWindowExternalizer {
 class RuntimeCurrentAggregator {
  public:
   explicit RuntimeCurrentAggregator(OutWindowExternalizer::WindowRewritePolicy window_rewrite_policy,
-                                    std::unordered_set<std::string> coalesce_functions)
+                                    std::unordered_set<std::string> carrier_contract_functions)
       : window_rewrite_policy_(window_rewrite_policy),
-        coalesce_functions_(std::move(coalesce_functions)) {}
+        carrier_contract_functions_(std::move(carrier_contract_functions)) {}
 
   ProgramPtr Run(const ProgramPtr& program) {
     // v5: run if global policy is off → skip entirely.
     if (window_rewrite_policy_ == OutWindowExternalizer::WindowRewritePolicy::None) {
       return program;
     }
-    if (coalesce_functions_.empty()) return program;
+    if (carrier_contract_functions_.empty()) return program;
 
     std::vector<FunctionPtr> new_functions;
     new_functions.reserve(program->functions_.size() + 1);
@@ -8237,7 +8247,8 @@ class RuntimeCurrentAggregator {
         continue;
       }
 
-      OrchMutator mutator(program, coalesce_functions_, &generated_functions, &barrier_by_type, &used_names);
+      OrchMutator mutator(program, carrier_contract_functions_, &generated_functions, &barrier_by_type,
+                          &used_names);
       auto new_body = mutator.VisitStmt(func->body_);
       if (new_body.get() == func->body_.get()) {
         new_functions.push_back(func);
@@ -8258,12 +8269,12 @@ class RuntimeCurrentAggregator {
  private:
   class OrchMutator : public IRMutator {
    public:
-    OrchMutator(ProgramPtr program, std::unordered_set<std::string> coalesce_functions,
+    OrchMutator(ProgramPtr program, std::unordered_set<std::string> carrier_contract_functions,
                 std::vector<FunctionPtr>* generated_functions,
                 std::unordered_map<const Type*, FunctionPtr>* barrier_by_type,
                 std::unordered_set<std::string>* used_names)
         : program_(std::move(program)),
-          coalesce_functions_(std::move(coalesce_functions)),
+          carrier_contract_functions_(std::move(carrier_contract_functions)),
           generated_functions_(generated_functions),
           barrier_by_type_(barrier_by_type),
           used_names_(used_names) {}
@@ -8311,10 +8322,9 @@ class RuntimeCurrentAggregator {
       return true;
     }
 
-    bool IsCoalesceCall(const CallPtr& call) const {
+    bool IsCarrierContractCall(const CallPtr& call) const {
       if (!call) return false;
       auto callee_name = GetCallFuncName(call);
-      if (coalesce_functions_.count(callee_name) != 0) return true;
       const std::string windowed_suffix = "__windowed";
       if (callee_name.size() <= windowed_suffix.size() ||
           callee_name.compare(callee_name.size() - windowed_suffix.size(), windowed_suffix.size(),
@@ -8322,21 +8332,20 @@ class RuntimeCurrentAggregator {
         return false;
       }
       auto base_name = callee_name.substr(0, callee_name.size() - windowed_suffix.size());
-      return coalesce_functions_.count(base_name) != 0;
+      return carrier_contract_functions_.count(base_name) != 0;
     }
 
-    bool IsProducedByCoalesceCall(
-        const VarPtr& value,
-        const std::unordered_map<const Var*, AssignStmtPtr>& defs_by_var) const {
+    bool IsProducedByCarrierContractCall(
+        const VarPtr& value, const std::unordered_map<const Var*, AssignStmtPtr>& defs_by_var) const {
       if (!value) return false;
       auto def_it = defs_by_var.find(value.get());
       if (def_it == defs_by_var.end()) return false;
 
       auto call = As<Call>(def_it->second->value_);
-      if (IsCoalesceCall(call)) return true;
+      if (IsCarrierContractCall(call)) return true;
       if (call && !std::dynamic_pointer_cast<const GlobalVar>(call->op_) &&
           call->op_->name_ == "tensor.assemble" && call->args_.size() >= 2) {
-        return IsProducedByCoalesceCall(AsVarLike(call->args_[1]), defs_by_var);
+        return IsProducedByCarrierContractCall(AsVarLike(call->args_[1]), defs_by_var);
       }
 
       auto tuple_get = As<TupleGetItemExpr>(def_it->second->value_);
@@ -8345,7 +8354,7 @@ class RuntimeCurrentAggregator {
       if (!tuple_var) return false;
       auto tuple_def_it = defs_by_var.find(tuple_var.get());
       if (tuple_def_it == defs_by_var.end()) return false;
-      return IsCoalesceCall(As<Call>(tuple_def_it->second->value_));
+      return IsCarrierContractCall(As<Call>(tuple_def_it->second->value_));
     }
 
     bool LoopWritesRuntimeCurrentSource(const ForStmtPtr& loop, const VarPtr& source) const {
@@ -8364,7 +8373,7 @@ class RuntimeCurrentAggregator {
       for (size_t i = 0; i < loop->return_vars_.size(); ++i) {
         if (loop->return_vars_[i].get() != source.get()) continue;
         if (i >= yield_stmt->value_.size()) return false;
-        return IsProducedByCoalesceCall(AsVarLike(yield_stmt->value_[i]), defs_by_var);
+        return IsProducedByCarrierContractCall(AsVarLike(yield_stmt->value_[i]), defs_by_var);
       }
       return false;
     }
@@ -8455,14 +8464,14 @@ class RuntimeCurrentAggregator {
     }
 
     ProgramPtr program_;
-    std::unordered_set<std::string> coalesce_functions_;
+    std::unordered_set<std::string> carrier_contract_functions_;
     std::vector<FunctionPtr>* generated_functions_;
     std::unordered_map<const Type*, FunctionPtr>* barrier_by_type_;
     std::unordered_set<std::string>* used_names_;
   };
 
   OutWindowExternalizer::WindowRewritePolicy window_rewrite_policy_;
-  std::unordered_set<std::string> coalesce_functions_;
+  std::unordered_set<std::string> carrier_contract_functions_;
 };
 
 }  // namespace
@@ -8479,7 +8488,7 @@ Pass OptimizeOrchTensors(const std::string& window_policy) {
 
   if (window_policy == "auto") {
     // v5: auto → exact_pieces + auto (was coalesce_pieces in v4).
-    // Per-kernel coalesce is opt-in via attrs={"window_outputs": "coalesce"}.
+    // Per-kernel coalesce/carrier are opt-in via window_outputs attrs.
     parsed_output_window_policy = OutWindowExternalizer::OutputWindowPolicy::ExactPieces;
     parsed_window_rewrite_policy = OutWindowExternalizer::WindowRewritePolicy::Auto;
   } else if (window_policy == "all") {
@@ -8489,8 +8498,7 @@ Pass OptimizeOrchTensors(const std::string& window_policy) {
     parsed_output_window_policy = OutWindowExternalizer::OutputWindowPolicy::CoalescePieces;
     parsed_window_rewrite_policy = OutWindowExternalizer::WindowRewritePolicy::None;
   } else {
-    CHECK(false) << "Invalid window_policy '" << window_policy
-                 << "': expected 'auto', 'all', or 'off'";
+    CHECK(false) << "Invalid window_policy '" << window_policy << "': expected 'auto', 'all', or 'off'";
   }
 
   auto pass_func = [parsed_output_window_policy,
@@ -8515,14 +8523,14 @@ Pass OptimizeOrchTensors(const std::string& window_policy) {
     // Pattern 4: Slice input strides (propagate parent strides to In params)
     auto p4 = SliceInputStridesOptimizer().Run(p3, incore_names);
 
-    std::unordered_set<std::string> coalesce_function_names;
+    std::unordered_set<std::string> carrier_contract_function_names;
     if (parsed_window_rewrite_policy != OutWindowExternalizer::WindowRewritePolicy::None) {
       for (const auto& [_, func] : p4->functions_) {
         if (!func) continue;
         auto ep = OutWindowExternalizer::ResolveEffectivePolicies(func, parsed_output_window_policy,
-                                                                   parsed_window_rewrite_policy);
-        if (ep.output == OutWindowExternalizer::EffectivePolicies::OutputPolicy::Coalesce) {
-          coalesce_function_names.insert(func->name_);
+                                                                  parsed_window_rewrite_policy);
+        if (ep.output == OutWindowExternalizer::EffectivePolicies::OutputPolicy::CoalesceCarrier) {
+          carrier_contract_function_names.insert(func->name_);
         }
       }
     }
@@ -8531,8 +8539,9 @@ Pass OptimizeOrchTensors(const std::string& window_policy) {
     auto p5 = OutWindowExternalizer(parsed_output_window_policy, parsed_window_rewrite_policy).Run(p4);
 
     // Pattern 6: Insert a runtime-visible current marker for attrs-driven
-    // coalesced producer loops that feed later repeated full-tensor readers.
-    return RuntimeCurrentAggregator(parsed_window_rewrite_policy, std::move(coalesce_function_names)).Run(p5);
+    // carrier-contract producer loops that feed later repeated full-tensor readers.
+    return RuntimeCurrentAggregator(parsed_window_rewrite_policy, std::move(carrier_contract_function_names))
+        .Run(p5);
   };
 
   return CreateProgramPass(pass_func, "OptimizeOrchTensors", kOptimizeOrchTensorsProperties);
