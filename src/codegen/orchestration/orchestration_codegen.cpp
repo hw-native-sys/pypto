@@ -1046,6 +1046,24 @@ class OrchestrationStmtCodegen : public CodegenBase {
     code_ << body_buf.str();
     code_ << parent_indent << "}\n";
 
+    // Restore the outer scheduling bindings. A binding minted inside the block
+    // that names a manual-scope-local C++ identifier (e.g. ``PTO2TaskId prev =
+    // arr[k];``) dies at the closing brace and must not leak (issue #1577).
+    // BUT an array carry registered inside the scope can reuse a backing array
+    // declared in the ENCLOSING scope — e.g. a ``pl.parallel`` TaskId array
+    // carry threaded from an outer sequential loop's backing store. That carry
+    // survives the brace and is referenced by the enclosing loop's yield, which
+    // is emitted AFTER this block; wiping it would drop the loop-carried tids
+    // and trip the scalar-yield branch (issue #1811). Preserve such entries —
+    // identified by backing storage that is NOT this scope's local name set.
+    for (const auto& [var, entry] : array_carry_vars_) {
+      if (saved_array_carry.count(var)) continue;        // outer entry — keep outer value
+      if (local_names.count(entry.array_name)) continue; // scope-local storage — drop
+      saved_array_carry[var] = entry;                    // enclosing-valid carry — preserve
+      auto tid_it = manual_task_id_map_.find(var);       // keep its per-slot dep names in sync
+      if (tid_it != manual_task_id_map_.end()) saved_map[var] = tid_it->second;
+    }
+
     manual_task_id_map_ = std::move(saved_map);
     array_carry_vars_ = std::move(saved_array_carry);
   }

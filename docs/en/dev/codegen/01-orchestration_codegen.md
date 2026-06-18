@@ -485,10 +485,23 @@ one guarded slot per element.
 **Lexical-scope lifetime.** TaskId bindings name C++ locals (`PTO2TaskId tid
 = ...`) declared inside the generated `PTO2_SCOPE { ... }` block they are
 produced in. Each `PTO2_SCOPE` (AUTO or MANUAL) snapshots `manual_task_id_map_`
-on entry and restores it on exit, so a binding produced inside a scope does not
-leak to an enclosing scope where its identifier would be out of C++ scope. Loop
-/ branch carries are declared *before* their body's `PTO2_SCOPE`, so they
-correctly survive the block.
+and `array_carry_vars_` on entry and restores them on exit, so a binding
+produced inside a scope does not leak to an enclosing scope where its identifier
+would be out of C++ scope. Loop / branch carries are declared *before* their
+body's `PTO2_SCOPE`, so they correctly survive the block.
+
+One exception applies to the `array_carry_vars_` restore on a `MANUAL` scope: an
+array carry registered *inside* the scope whose backing array was declared in
+the *enclosing* scope must survive the restore. This is the loop-carry of a
+`manual_scope`-produced TaskId into an `Array[TASK_ID]` (issue #1811) — e.g. a
+`pl.parallel` array carry threaded from an outer `pl.range` loop's backing
+store, where each iteration writes one slot (`carry[n] = prod_tid`). The
+enclosing loop's `YieldStmt`, emitted *after* the `PTO2_SCOPE(MANUAL)` block,
+references that carry; wiping it would drop the loop-carried TaskIds and trip
+the *scalar yield to array carry* `INTERNAL_CHECK`. On exit codegen therefore
+preserves array carries whose backing storage is enclosing-scope-valid (named by
+an identifier not in the scope's local set), and reverts only the scope-local
+ones.
 
 When a later sibling or parent scope references a producer TaskId created in an
 earlier nested or sibling scope through `compiler_manual_dep_edges`, codegen

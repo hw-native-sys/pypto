@@ -5660,6 +5660,98 @@ class TestManualScopeCodegen:
         # intra-iteration one.
         assert code.count("set_dependencies(") == 1, code
 
+    def test_manual_scope_tid_loop_carried_into_array_carry(self):
+        """Regression for #1811: a ``manual_scope``-produced TaskId loop-carried
+        into an ``Array[TASK_ID]`` across an enclosing ``pl.range`` loop.
+
+        Shape: an outer ``pl.range`` carries a ``pl.array(TASK_ID)``; each
+        iteration a ``with pl.manual_scope():`` wraps a ``pl.parallel`` that
+        submits one task per slot and writes its TaskId back into the carry
+        (``carry[n] = prod_tid``). The next iteration's consumer fences on the
+        whole carry, so the carry is genuinely loop-carried.
+
+        The ``pl.parallel`` array carry registered INSIDE the manual scope
+        reuses the enclosing loop's backing array. Orchestration codegen used
+        to blindly restore ``array_carry_vars_`` at manual-scope exit, wiping
+        that registration; the enclosing loop's yield (emitted AFTER the block)
+        then could not resolve the carry and tripped an ``INTERNAL_CHECK``
+        (``scalar yield to array carry must resolve to a TaskId variable``).
+        The fix preserves array carries whose backing storage is
+        enclosing-scope-valid, so the per-slot write threads through one array.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        N, LOOP, ROWS, COLS = 4, 2, 16, 256
+        TILE = COLS // N
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def seed(
+                self,
+                x: pl.Tensor[[ROWS, COLS], pl.FP32],
+                y: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+            ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
+                t: pl.Tile[[ROWS, COLS], pl.FP32] = pl.load(x, [0, 0], [ROWS, COLS])
+                return pl.store(t, [0, 0], y)
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(
+                self, y: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]]
+            ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
+                t: pl.Tile[[ROWS, COLS], pl.FP32] = pl.load(y, [0, 0], [ROWS, COLS])
+                r: pl.Tile[[ROWS, COLS], pl.FP32] = pl.add(t, t)
+                return pl.store(r, [0, 0], y)
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def prod(
+                self,
+                y: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+                col: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
+                t: pl.Tile[[ROWS, TILE], pl.FP32] = pl.load(y, [0, col], [ROWS, TILE])
+                r: pl.Tile[[ROWS, TILE], pl.FP32] = pl.add(t, t)
+                return pl.store(r, [0, col], y)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[ROWS, COLS], pl.FP32],
+                y: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+            ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
+                carry = pl.array.create(N, pl.TASK_ID)
+                y, seed_tid = pl.submit(self.seed, x, y)
+                for s in pl.unroll(N):
+                    carry[s] = seed_tid
+                for _i in pl.range(LOOP):
+                    y, _ = pl.submit(self.consume, y, deps=[carry[i] for i in range(N)])
+                    with pl.manual_scope():
+                        for n in pl.parallel(N):
+                            col: pl.Scalar[pl.INDEX] = n * TILE
+                            y, prod_tid = pl.submit(self.prod, y, col, deps=[carry[n]])
+                            carry[n] = prod_tid
+                return y
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+            transformed = pm.run_passes(Prog)
+        code = _generate_orch_code(transformed)
+
+        # One PTO2TaskId[N] backing array, threaded through every carry rename.
+        decls = re.findall(rf"PTO2TaskId\s+(\w+)\[{N}\]", code)
+        assert decls, code
+        carry_arr = decls[0]
+        # The manual-scope parallel loop writes each producer TaskId back into
+        # its slot of the SAME backing array (the per-slot loop-carry write).
+        assert "PTO2_SCOPE(PTO2ScopeMode::MANUAL)" in code, code
+        assert re.search(rf"{carry_arr}\[\w+\]\s*=\s*\w+;", code), code
+        # The enclosing consumer reads every carry slot to fence on the
+        # previous iteration's producers — proof the carry is loop-carried
+        # (and that the per-slot writes feed the next iteration's deps).
+        slot_reads = re.findall(rf"=\s*{carry_arr}\[\w+\];", code)
+        assert len(slot_reads) >= N, code
+
     def test_manual_scope_parallel_dynamic_trip_count_rejected(self):
         """``pl.parallel(<dynamic>)`` carrying a manual_scope dep must error.
 

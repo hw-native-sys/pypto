@@ -468,9 +468,19 @@ array-carry iter_arg 则按元素逐槽生成带守卫的填充。
 
 **词法作用域生命周期。** TaskId 绑定命名的是在其产生所在的 `PTO2_SCOPE { ... }`
 块内声明的 C++ 局部变量（`PTO2TaskId tid = ...`）。每个 `PTO2_SCOPE`（AUTO 或
-MANUAL）在进入时快照 `manual_task_id_map_`、退出时恢复，因此在某作用域内产生的
-绑定不会泄漏到外层作用域（否则其标识符会超出 C++ 作用域）。循环 / 分支的 carry
-在其 body 的 `PTO2_SCOPE` *之前*声明，因此能正确地在块结束后存活。
+MANUAL）在进入时快照 `manual_task_id_map_` 与 `array_carry_vars_`、退出时恢复，
+因此在某作用域内产生的绑定不会泄漏到外层作用域（否则其标识符会超出 C++ 作用域）。
+循环 / 分支的 carry 在其 body 的 `PTO2_SCOPE` *之前*声明，因此能正确地在块结束后存活。
+
+对 `MANUAL` 作用域的 `array_carry_vars_` 恢复有一个例外：在该作用域 *内部* 注册、
+但其底层数组声明于 *外层* 作用域的 array carry 必须在恢复后存活。这就是将
+`manual_scope` 产生的 TaskId loop-carry 进 `Array[TASK_ID]` 的场景（issue #1811）——
+例如从外层 `pl.range` 循环的底层存储穿入的 `pl.parallel` array carry，每次迭代写入
+一个槽位（`carry[n] = prod_tid`）。外层循环的 `YieldStmt` 在 `PTO2_SCOPE(MANUAL)`
+块 *之后* 发出并引用该 carry；若将其抹除会丢失被 loop-carry 的 TaskId，并触发
+*scalar yield to array carry* 的 `INTERNAL_CHECK`。因此退出时 codegen 会保留底层存储
+为 enclosing-scope-valid（由不在该作用域 local 集合中的标识符命名）的 array carry，
+仅回退作用域内局部的那些。
 
 当后续 sibling scope 或父 scope 通过 `compiler_manual_dep_edges` 引用在更早的嵌套
 scope 或 sibling scope 中创建的 producer TaskId 时，codegen 只提升这个 TaskId 绑定：
