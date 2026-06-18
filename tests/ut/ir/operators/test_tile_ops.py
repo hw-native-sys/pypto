@@ -3327,6 +3327,151 @@ class TestTileMscatterOps:
             tile.mscatter(src_var, idx_var, out_var)
 
 
+class TestTileMgatherOps:
+    """Test suite for tile.mgather operation (GM-row indexed gather-load)."""
+
+    def test_tile_mgather_row_mode_basic(self):
+        """Row mode: dst = [R, mem_cols] from a [1, R] index vector."""
+        span = ir.Span.unknown()
+        mem_type = ir.TensorType(
+            [ir.ConstInt(1024, DataType.INT32, span), ir.ConstInt(64, DataType.INT32, span)],
+            DataType.FP32,
+        )
+        idx_type = ir.TileType(
+            [ir.ConstInt(1, DataType.INT32, span), ir.ConstInt(128, DataType.INT32, span)],
+            DataType.INT32,
+        )
+        mem_var = ir.Var("mem", mem_type, span)
+        idx_var = ir.Var("idx", idx_type, span)
+
+        call = tile.mgather(mem_var, idx_var)  # coalesce defaults to "row"
+        assert isinstance(call, ir.Call)
+        assert call.op.name == "tile.mgather"
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.dtype == DataType.FP32
+        # Output is [R, mem_cols] = [128, 64].
+        assert isinstance(result_type.shape[0], ir.ConstInt) and result_type.shape[0].value == 128
+        assert isinstance(result_type.shape[1], ir.ConstInt) and result_type.shape[1].value == 64
+
+    def test_tile_mgather_row_mode_col_vector(self):
+        """Row mode also accepts a [R, 1] column index vector -> dst [R, mem_cols]."""
+        span = ir.Span.unknown()
+        mem_type = ir.TensorType(
+            [ir.ConstInt(512, DataType.INT32, span), ir.ConstInt(32, DataType.INT32, span)],
+            DataType.FP16,
+        )
+        idx_type = ir.TileType(
+            [ir.ConstInt(64, DataType.INT32, span), ir.ConstInt(1, DataType.INT32, span)],
+            DataType.INT32,
+        )
+        mem_var = ir.Var("mem", mem_type, span)
+        idx_var = ir.Var("idx", idx_type, span)
+
+        call = tile.mgather(mem_var, idx_var, coalesce="row")
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.dtype == DataType.FP16
+        assert isinstance(result_type.shape[0], ir.ConstInt) and result_type.shape[0].value == 64
+        assert isinstance(result_type.shape[1], ir.ConstInt) and result_type.shape[1].value == 32
+
+    def test_tile_mgather_elem_mode(self):
+        """Elem mode: dst shape == idx shape, mem flat-indexed."""
+        span = ir.Span.unknown()
+        mem_type = ir.TensorType([ir.ConstInt(4096, DataType.INT32, span)], DataType.FP32)
+        idx_type = ir.TileType(
+            [ir.ConstInt(8, DataType.INT32, span), ir.ConstInt(32, DataType.INT32, span)],
+            DataType.INT32,
+        )
+        mem_var = ir.Var("mem", mem_type, span)
+        idx_var = ir.Var("idx", idx_type, span)
+
+        call = tile.mgather(mem_var, idx_var, coalesce="elem")
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.dtype == DataType.FP32
+        # Output matches idx shape [8, 32].
+        assert isinstance(result_type.shape[0], ir.ConstInt) and result_type.shape[0].value == 8
+        assert isinstance(result_type.shape[1], ir.ConstInt) and result_type.shape[1].value == 32
+
+    def test_tile_mgather_mem_dtype_error(self):
+        """tile.mgather rejects an unsupported mem dtype."""
+        span = ir.Span.unknown()
+        mem_type = ir.TensorType(
+            [ir.ConstInt(256, DataType.INT32, span), ir.ConstInt(16, DataType.INT32, span)],
+            DataType.UINT8,  # unsupported
+        )
+        idx_type = ir.TileType(
+            [ir.ConstInt(1, DataType.INT32, span), ir.ConstInt(8, DataType.INT32, span)],
+            DataType.INT32,
+        )
+        mem_var = ir.Var("mem", mem_type, span)
+        idx_var = ir.Var("idx", idx_type, span)
+
+        with pytest.raises(ValueError, match="mem dtype"):
+            tile.mgather(mem_var, idx_var)
+
+    def test_tile_mgather_idx_dtype_error(self):
+        """tile.mgather rejects non-INT32 idx dtype."""
+        span = ir.Span.unknown()
+        mem_type = ir.TensorType(
+            [ir.ConstInt(256, DataType.INT32, span), ir.ConstInt(16, DataType.INT32, span)],
+            DataType.FP32,
+        )
+        idx_type = ir.TileType(
+            [ir.ConstInt(1, DataType.INT32, span), ir.ConstInt(8, DataType.INT32, span)],
+            DataType.INT16,  # wrong dtype
+        )
+        mem_var = ir.Var("mem", mem_type, span)
+        idx_var = ir.Var("idx", idx_type, span)
+
+        with pytest.raises(ValueError, match="idx dtype"):
+            tile.mgather(mem_var, idx_var)
+
+    def test_tile_mgather_idx_rank_error(self):
+        """tile.mgather requires a 2D idx tile."""
+        span = ir.Span.unknown()
+        mem_type = ir.TensorType(
+            [ir.ConstInt(256, DataType.INT32, span), ir.ConstInt(16, DataType.INT32, span)],
+            DataType.FP32,
+        )
+        idx_type = ir.TileType([ir.ConstInt(8, DataType.INT32, span)], DataType.INT32)  # 1D
+        mem_var = ir.Var("mem", mem_type, span)
+        idx_var = ir.Var("idx", idx_type, span)
+
+        with pytest.raises(ValueError, match="2D idx"):
+            tile.mgather(mem_var, idx_var)
+
+    def test_tile_mgather_invalid_coalesce(self):
+        """tile.mgather rejects an unknown coalesce mode at the wrapper layer."""
+        span = ir.Span.unknown()
+        mem_type = ir.TensorType(
+            [ir.ConstInt(256, DataType.INT32, span), ir.ConstInt(16, DataType.INT32, span)],
+            DataType.FP32,
+        )
+        idx_type = ir.TileType(
+            [ir.ConstInt(1, DataType.INT32, span), ir.ConstInt(8, DataType.INT32, span)],
+            DataType.INT32,
+        )
+        mem_var = ir.Var("mem", mem_type, span)
+        idx_var = ir.Var("idx", idx_type, span)
+
+        with pytest.raises(ValueError, match="coalesce must be"):
+            tile.mgather(mem_var, idx_var, coalesce="bad")
+
+    def test_tile_mgather_arg_count_error(self):
+        """tile.mgather rejects the wrong number of arguments."""
+        span = ir.Span.unknown()
+        mem_type = ir.TensorType(
+            [ir.ConstInt(256, DataType.INT32, span), ir.ConstInt(16, DataType.INT32, span)],
+            DataType.FP32,
+        )
+        mem_var = ir.Var("mem", mem_type, span)
+
+        with pytest.raises(ValueError, match="2 arguments"):
+            ir.create_op_call("tile.mgather", [mem_var], {"coalesce": 0}, span)
+
+
 class TestTileScatterOps:
     """Test suite for tile.scatter (index form, DPS)."""
 

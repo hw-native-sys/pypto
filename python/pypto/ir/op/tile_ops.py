@@ -403,6 +403,45 @@ def mscatter(
     return _ir_core.create_op_call("tile.mscatter", [src, idx, output_tensor], {}, actual_span)
 
 
+# coalesce mode -> int enum, mirrored by the C++ op / PTO codegen (0=row, 1=elem).
+_MGATHER_COALESCE = {"row": 0, "elem": 1}
+
+
+def mgather(
+    mem: Expr,
+    idx: Expr,
+    coalesce: str = "row",
+    span: Span | None = None,
+) -> Call:
+    """Indexed gather-load from a GM table into a fresh VEC tile.
+
+    Two modes selected by ``coalesce``:
+
+    - ``"row"`` (default): ``dst[r, j] = mem[idx[r], j]``. ``idx`` is an index
+      vector ``[1, R]`` (row-major) or ``[R, 1]`` (col-major); the result is
+      ``[R, mem_cols]`` where ``mem_cols`` is ``mem``'s row width.
+    - ``"elem"``: ``dst[i, j] = mem[idx[i, j]]`` (``mem`` flat-indexed); the
+      result has the same shape as ``idx``.
+
+    Maps to the PTOAS ``pto.mgather`` instruction.
+
+    Args:
+        mem: GM source table (TensorType or DistributedTensorType).
+        idx: Index tile (INT32, 2D).
+        coalesce: ``"row"`` (default) or ``"elem"``.
+        span: Optional source span for debugging (auto-captured if not provided).
+
+    Returns:
+        Call expression returning the gathered TileType (``mem``'s dtype).
+    """
+    if coalesce not in _MGATHER_COALESCE:
+        raise ValueError(f"mgather coalesce must be 'row' or 'elem', got {coalesce!r}")
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call(
+        "tile.mgather", [mem, idx], {"coalesce": _MGATHER_COALESCE[coalesce]}, actual_span
+    )
+
+
 def concat(
     src0: Expr,
     src1: Expr,

@@ -156,6 +156,9 @@ from .op.tile_ops import (
     xors,
 )
 from .op.tile_ops import (
+    mgather as mgather,
+)
+from .op.tile_ops import (
     mscatter as mscatter,
 )
 from .op.unified_ops import (
@@ -356,6 +359,7 @@ __all__ = [
     "load",
     "store",
     "move",
+    "mgather",
     "mscatter",
     "sqrt",
     "rsqrt",

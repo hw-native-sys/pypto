@@ -1662,6 +1662,89 @@ static std::string MakeTileMscatterCodegenPTO(const CallPtr& op, codegen::Codege
   return "";
 }
 
+// tile.mgather(mem, idx) -> pto.mgather (fresh-output VEC tile dst).
+// Mirror of MakeTileMscatterCodegenPTO but reads GM -> tile. Generates:
+//   %pview = pto.partition_view %mem_view, offsets=[0,...], sizes=[shape...] : ... -> ...
+//   pto.mgather ins(%pview, %idx : !pto.partition_tensor_view<...>, !pto.tile_buf<...>)
+//               outs(%dst : !pto.tile_buf<...>) {coalesce = #pto<coalesce row|elem>}
+// The partition_view spans the whole table (mgather addresses rows/elements by
+// idx). The `coalesce` attr (0=row, 1=elem) is carried from the IR op and emits
+// the matching MGATHER<Coalesce::...> overload on the PTOAS side.
+static std::string MakeTileMgatherCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  INTERNAL_CHECK(op->args_.size() == 2)
+      << "tile.mgather requires 2 arguments (mem, idx), got " << op->args_.size();
+
+  auto mem = AsVarLike(op->args_[0]);
+  INTERNAL_CHECK(mem) << "tile.mgather mem must be a Var or IterArg";
+  auto idx = AsVarLike(op->args_[1]);
+  INTERNAL_CHECK(idx) << "tile.mgather idx must be a Var or IterArg";
+
+  auto tensor_type = As<TensorType>(mem->GetType());
+  INTERNAL_CHECK(tensor_type) << "tile.mgather mem must have TensorType";
+
+  // coalesce: 0 = row (default), 1 = elem. Mirrors the IR op's enum.
+  int coalesce = 0;
+  for (const auto& [k, v] : op->kwargs_) {
+    if (k == "coalesce") coalesce = AnyCast<int>(v, "coalesce");
+  }
+  const char* coalesce_str = (coalesce == 1) ? "elem" : "row";
+
+  std::string idx_name = codegen.GetVarName(idx);
+  std::string idx_type_annot = codegen.GetExprTypeAnnotation(op->args_[1]);
+
+  std::string dtype_str = codegen.GetTypeString(tensor_type->dtype_);
+  std::string tensor_view = codegen.GetOrCreateTensorView(mem);
+  std::string tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
+
+  // Build pto.partition_view covering the entire table (offsets all zero,
+  // sizes = shape) — mgather indexes rows/elements via idx, not the partition.
+  std::string partition_view = codegen.NewNamedTemp(mem->name_hint_ + "_pview");
+  std::ostringstream partition_line;
+  partition_line << partition_view << " = pto.partition_view " << tensor_view;
+  partition_line << ", offsets = [";
+  for (size_t i = 0; i < tensor_type->shape_.size(); ++i) {
+    if (i > 0) partition_line << ", ";
+    partition_line << codegen.GetOrEmitConstant(static_cast<int64_t>(0), DataType::INDEX);
+  }
+  partition_line << "], sizes = [";
+  std::string partition_type = "!pto.partition_tensor_view<";
+  for (size_t i = 0; i < tensor_type->shape_.size(); ++i) {
+    if (i > 0) {
+      partition_line << ", ";
+      partition_type += "x";
+    }
+    if (auto c = As<ir::ConstInt>(tensor_type->shape_[i])) {
+      partition_line << codegen.GetOrEmitConstant(c->value_, DataType::INDEX);
+      partition_type += std::to_string(c->value_);
+    } else {
+      partition_line << codegen.GetExprAsCode(tensor_type->shape_[i]);
+      partition_type += "?";
+    }
+  }
+  partition_line << "]";
+  partition_type += "x" + dtype_str + ">";
+  partition_line << " : " << tensor_view_type << " -> " << partition_type;
+  codegen.Emit(partition_line.str());
+
+  // dst is the fresh result tile allocated by PTOCodegen for this op.
+  std::string dst = codegen.GetCurrentResultTarget();
+  std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
+
+  std::ostringstream mgather_line;
+  mgather_line << "pto.mgather ins(" << partition_view << ", " << idx_name;
+  // Emit the type clause only when the idx annotation is present (the
+  // partition_view type is always known); a one-sided clause is malformed.
+  if (!idx_type_annot.empty()) {
+    mgather_line << " : " << partition_type << ", " << idx_type_annot;
+  }
+  mgather_line << ") outs(" << dst;
+  if (!dst_type.empty()) mgather_line << " : " << dst_type;
+  mgather_line << ") {coalesce = #pto<coalesce " << coalesce_str << ">}";
+  codegen.Emit(mgather_line.str());
+  return "";
+}
+
 // Helper function for tile.alloc (no-op: allocation handled elsewhere)
 static std::string MakeTileAllocCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   (void)op;
@@ -2298,8 +2381,6 @@ struct SimpleOpEntry {
 
 // clang-format off
 static const SimpleOpEntry kSimpleOps[] = {
-    // Memory operations
-    {"tile.mgather",         "pto.tmgather",         2},
     // Tile x Tile arithmetic operations
     {"tile.add",             "pto.tadd",             2},
     {"tile.sub",             "pto.tsub",             2},
@@ -3435,6 +3516,17 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
         .set_input_layout(0, ir::TileLayout::row_major)
         .set_input_layout(1, ir::TileLayout::row_major);
   }
+  // tile.mgather: GM -> fresh VEC tile gather-load. dst must be row_major per
+  // ISA; idx layout is left free (row mode accepts row_major [1,R] or
+  // col_major [R,1], elem mode is a plain tile).
+  if (exclude_ops.count("tile.mgather") == 0) {
+    backend.RegisterOp("tile.mgather")
+        .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+          return MakeTileMgatherCodegenPTO(op, codegen);
+        })
+        .set_output_layout(ir::TileLayout::row_major);
+  }
+
   reg("tile.alloc", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTileAllocCodegenPTO(op, codegen);
   });

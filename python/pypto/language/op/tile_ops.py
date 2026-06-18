@@ -142,6 +142,7 @@ __all__ = [
     "scatter",
     "scatter_mask",
     "mscatter",
+    "mgather",
     "MaskPattern",
     "mrgsort",
 ]
@@ -2326,6 +2327,38 @@ def mscatter(src: Tile, idx: Tile, output_tensor: _TensorT) -> _TensorT:
     """
     call_expr = _ir_ops.mscatter(src.unwrap(), idx.unwrap(), output_tensor.unwrap())
     return output_tensor.__class__(expr=call_expr)
+
+
+def mgather(mem: Tensor, idx: Tile, coalesce: str = "row") -> Tile:
+    """Indexed gather-load from a GM table into a fresh VEC tile.
+
+    The reverse of :func:`mscatter`: reads scattered rows / elements of a GM
+    table into an on-chip tile. Usable inside ``spmd`` / ``pl.range`` with a
+    loop-local index tile. Two modes selected by ``coalesce``:
+
+    - ``"row"`` (default): ``dst[r, j] = mem[idx[r], j]``. ``idx`` is an index
+      vector ``[1, R]`` (row-major) or ``[R, 1]`` (col-major); the result is
+      ``[R, mem_cols]`` where ``mem_cols`` is ``mem``'s row width.
+    - ``"elem"``: ``dst[i, j] = mem[idx[i, j]]`` (``mem`` flat-indexed); the
+      result has the same shape as ``idx``.
+
+    Maps to the PTOAS ``pto.mgather`` instruction.
+
+    Args:
+        mem: GM source table (Tensor; the result takes ``mem``'s dtype).
+        idx: Index tile (INT32, 2D).
+        coalesce: ``"row"`` (default) or ``"elem"``.
+
+    Returns:
+        Tile of ``mem``'s dtype holding the gathered rows (row mode) or elements
+        (elem mode).
+
+    Example:
+        >>> dst = pl.tile.mgather(kv_pool, idx_tile)                  # row mode
+        >>> dst = pl.tile.mgather(table, idx_tile, coalesce="elem")
+    """
+    call_expr = _ir_ops.mgather(mem.unwrap(), idx.unwrap(), coalesce=coalesce)
+    return Tile(expr=call_expr)
 
 
 @overload
