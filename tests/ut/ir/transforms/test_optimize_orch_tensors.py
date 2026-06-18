@@ -20,7 +20,7 @@ import pytest
 from pypto import ir, passes
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
-OptimizeWindowPolicy = Literal["auto", "all", "off"]
+OptimizeWindowPolicy = Literal["auto", "all", "none"]
 
 
 def _run_to_optimize_orch_tensors(
@@ -1019,99 +1019,97 @@ class TestSliceInputStrides:
 class TestOutWindowExternalizer:
     """Pattern 5: static out-window externalization."""
 
-    def test_coalesce_inserts_mlp_silu_runtime_current_before_full_down_proj_read(self):
+    def test_all_inserts_runtime_current_before_full_consumer_read(self):
         @pl.program
         class Before:
             @pl.function(type=pl.FunctionType.InCore)
-            def silu(
+            def produce_chunk(
                 self,
                 src: pl.Tensor[[64, 256], pl.FP32],
                 col: pl.Scalar[pl.INDEX],
-                mlp_silu_tile: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+                scratch: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
             ) -> pl.Tensor[[64, 256], pl.FP32]:
                 tile: pl.Tile[[64, 128], pl.FP32] = pl.tile.load(src, [0, col], [64, 128], [64, 128])
-                return pl.tile.store(tile, [0, col], mlp_silu_tile)
+                return pl.tile.store(tile, [0, col], scratch)
 
             @pl.function(type=pl.FunctionType.InCore)
-            def down_proj(
+            def consume_full(
                 self,
-                mlp_silu_tile: pl.Tensor[[64, 256], pl.FP32],
+                scratch: pl.Tensor[[64, 256], pl.FP32],
                 col: pl.Scalar[pl.INDEX],
                 out: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
             ) -> tuple[pl.Tensor[[64, 256], pl.FP32], pl.Tensor[[64, 256], pl.FP32]]:
-                tile: pl.Tile[[64, 128], pl.FP32] = pl.tile.load(
-                    mlp_silu_tile, [0, col], [64, 128], [64, 128]
-                )
+                tile: pl.Tile[[64, 128], pl.FP32] = pl.tile.load(scratch, [0, col], [64, 128], [64, 128])
                 next_out: pl.Tensor[[64, 256], pl.FP32] = pl.tile.store(tile, [0, col], out)
-                return next_out, mlp_silu_tile
+                return next_out, scratch
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(
                 self,
                 src: pl.Tensor[[64, 256], pl.FP32],
-                mlp_silu_tile: pl.Tensor[[64, 256], pl.FP32],
+                scratch: pl.Tensor[[64, 256], pl.FP32],
                 out: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
             ) -> pl.Tensor[[64, 256], pl.FP32]:
-                for i, (mlp_silu_tile_iter,) in pl.range(0, 2, init_values=(mlp_silu_tile,)):
+                for i, (scratch_iter,) in pl.range(0, 2, init_values=(scratch,)):
                     col: pl.Scalar[pl.INDEX] = i * 128
-                    mlp_silu_tile_next = self.silu(src, col, mlp_silu_tile_iter)
-                    mlp_silu_tile_rv = pl.yield_(mlp_silu_tile_next)
+                    scratch_next = self.produce_chunk(src, col, scratch_iter)
+                    scratch_rv = pl.yield_(scratch_next)
 
                 for j, (out_iter,) in pl.range(0, 2, init_values=(out,)):
                     col: pl.Scalar[pl.INDEX] = j * 128
-                    result = self.down_proj(mlp_silu_tile_rv, col, out_iter)
+                    result = self.consume_full(scratch_rv, col, out_iter)
                     out_next: pl.Tensor[[64, 256], pl.FP32] = result[0]
                     out_rv = pl.yield_(out_next)
                 return out_rv
 
         After = _run_to_optimize_orch_tensors(Before, window_policy="all")
 
-        assert After.get_function("__pypto_runtime_current_barrier") is None
-        assert "__runtime_current" not in ir.python_print(_get_function(After, "main"))
+        assert After.get_function("__pypto_runtime_current_barrier") is not None
+        assert "__runtime_current" in ir.python_print(_get_function(After, "main"))
 
-    def test_coalesce_inserts_attention_runtime_current_before_full_out_proj_read(self):
+    def test_all_does_not_insert_runtime_current_for_nonmatching_full_consumer(self):
         @pl.program
         class Before:
             @pl.function(type=pl.FunctionType.InCore)
-            def attention_writeback(
+            def produce_rows(
                 self,
                 ctx: pl.Tensor[[1, 128], pl.BF16],
                 row: pl.Scalar[pl.INDEX],
                 col: pl.Scalar[pl.INDEX],
-                attn_tile: pl.Out[pl.Tensor[[2, 256], pl.BF16]],
+                scratch: pl.Out[pl.Tensor[[2, 256], pl.BF16]],
             ) -> pl.Tensor[[2, 256], pl.BF16]:
                 tile: pl.Tile[[1, 128], pl.BF16] = pl.tile.load(ctx, [0, 0], [1, 128], [1, 128])
-                return pl.tile.store(tile, [row, col], attn_tile)
+                return pl.tile.store(tile, [row, col], scratch)
 
             @pl.function(type=pl.FunctionType.InCore)
-            def out_proj(
+            def consume_pair(
                 self,
-                attn_tile: pl.Tensor[[2, 256], pl.BF16],
+                scratch: pl.Tensor[[2, 256], pl.BF16],
                 col: pl.Scalar[pl.INDEX],
                 out: pl.Out[pl.Tensor[[2, 256], pl.FP32]],
             ) -> tuple[pl.Tensor[[2, 256], pl.FP32], pl.Tensor[[2, 256], pl.BF16]]:
-                lhs0: pl.Tile[[2, 128], pl.BF16] = pl.tile.load(attn_tile, [0, 0], [2, 128], [2, 128])
-                lhs1: pl.Tile[[2, 128], pl.BF16] = pl.tile.load(attn_tile, [0, 128], [2, 128], [2, 128])
+                lhs0: pl.Tile[[2, 128], pl.BF16] = pl.tile.load(scratch, [0, 0], [2, 128], [2, 128])
+                lhs1: pl.Tile[[2, 128], pl.BF16] = pl.tile.load(scratch, [0, 128], [2, 128], [2, 128])
                 lhs: pl.Tile[[2, 128], pl.BF16] = pl.tile.add(lhs0, lhs1)
                 cast: pl.Tile[[2, 128], pl.FP32] = pl.tile.cast(lhs, target_type=pl.FP32)
                 out_next: pl.Tensor[[2, 256], pl.FP32] = pl.tile.store(cast, [0, col], out)
-                return out_next, attn_tile
+                return out_next, scratch
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(
                 self,
                 ctx: pl.Tensor[[1, 128], pl.BF16],
-                attn_tile: pl.Tensor[[2, 256], pl.BF16],
+                scratch: pl.Tensor[[2, 256], pl.BF16],
                 out: pl.Out[pl.Tensor[[2, 256], pl.FP32]],
             ) -> pl.Tensor[[2, 256], pl.FP32]:
-                for row, (attn_tile_iter,) in pl.range(0, 2, init_values=(attn_tile,)):
+                for row, (scratch_iter,) in pl.range(0, 2, init_values=(scratch,)):
                     col: pl.Scalar[pl.INDEX] = row * 128
-                    attn_tile_next = self.attention_writeback(ctx, row, col, attn_tile_iter)
-                    attn_tile_rv = pl.yield_(attn_tile_next)
+                    scratch_next = self.produce_rows(ctx, row, col, scratch_iter)
+                    scratch_rv = pl.yield_(scratch_next)
 
                 for j, (out_iter,) in pl.range(0, 2, init_values=(out,)):
                     col: pl.Scalar[pl.INDEX] = j * 128
-                    result = self.out_proj(attn_tile_rv, col, out_iter)
+                    result = self.consume_pair(scratch_rv, col, out_iter)
                     out_next: pl.Tensor[[2, 256], pl.FP32] = result[0]
                     out_rv = pl.yield_(out_next)
                 return out_rv
@@ -1152,7 +1150,7 @@ class TestOutWindowExternalizer:
         assert "pl.Tensor[[32, 64], pl.FP32, pl.TensorView(stride=[128, 1]" in printed_windowed
         assert "pl.tile.load(score__ssa_v0, [0, 0]" in printed_windowed
 
-        none_policy = _run_to_optimize_orch_tensors(Before, window_policy="off")
+        none_policy = _run_to_optimize_orch_tensors(Before, window_policy="none")
         assert none_policy.get_function("consume__windowed") is None
 
     def test_input_window_rejects_unrecoverable_dynamic_tensor_view_stride(self):
@@ -1540,8 +1538,10 @@ class TestOutWindowExternalizer:
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "cache_write__windowed" in printed_main
-        assert "__carrier_scan_" not in printed_main
-        assert "__carrier_current_remat" not in printed_main
+        assert "cache_read__windowed" in printed_main
+        assert "__carrier_base" in printed_main
+        assert "__carrier_extent" in printed_main
+        assert "__carrier_scan_" in printed_main
 
     def test_dynamic_indexed_reader_after_non_singleton_loop_writer_keeps_full_parent(self):
         """v5: dynamic reader without carrier keeps full parent (no private dynamic reader)."""
@@ -1758,7 +1758,10 @@ class TestOutWindowExternalizer:
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "cache_write__windowed" in printed_main
-        assert "__carrier_scan_" not in printed_main
+        assert "cache_read__windowed" in printed_main
+        assert "__carrier_base" in printed_main
+        assert "__carrier_extent" in printed_main
+        assert "__carrier_scan_" in printed_main
 
     def test_auto_dynamic_indexed_reader_without_shared_carrier_current_keeps_full_parent(self):
         @pl.program
@@ -3884,6 +3887,8 @@ class TestOutWindowExternalizer:
         Exact = _run_aggressive_exact_to_optimize_orch_tensors(Before)
         printed_exact_main = ir.python_print(_get_function(Exact, "main"))
         assert "cache__ssa_v0__window_3" in printed_exact_main
+        assert "cache__ssa_v0__window_base_arg" not in printed_exact_main
+        assert "cache__ssa_v0__window_extent_arg" not in printed_exact_main
 
         Auto = _run_to_optimize_orch_tensors(
             Before,
@@ -4969,6 +4974,125 @@ class TestOutWindowSubmitCall:
         assert "pl.tensor.slice(lhs" in printed_main
         assert "pl.tensor.slice(weight" in printed_main
 
+    def test_submit_auto_dynamic_reader_keeps_full_parent(self):
+        """Submit path: auto does not add carrier args for dynamic readers."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def cache_write(
+                self,
+                cache: pl.Out[pl.Tensor[[1024, 64], pl.FP32]],
+                data: pl.Tensor[[2, 64], pl.FP32],
+                slot: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[1024, 64], pl.FP32]:
+                for ki, (cache_iter,) in pl.range(0, 2, init_values=(cache,)):
+                    src: pl.Tile[[1, 64], pl.FP32] = pl.tile.load(data, [ki, 0], [1, 64], [1, 64])
+                    row: pl.Scalar[pl.INDEX] = slot + ki * 128
+                    cache_next: pl.Tensor[[1024, 64], pl.FP32] = pl.tile.store(src, [row, 0], cache_iter)
+                    cache_rv = pl.yield_(cache_next)
+                return cache_rv
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def cache_read(
+                self,
+                out: pl.Out[pl.Tensor[[4, 64], pl.FP32]],
+                cache: pl.Tensor[[1024, 64], pl.FP32],
+                block_table: pl.Tensor[[4], pl.INT32],
+            ) -> pl.Tensor[[4, 64], pl.FP32]:
+                for sb, (out_iter,) in pl.range(0, 4, init_values=(out,)):
+                    pbid_i32: pl.Scalar[pl.INT32] = pl.tensor.read(block_table, [sb])
+                    pbid: pl.Scalar[pl.INDEX] = pl.cast(pbid_i32, target_type=pl.INDEX)
+                    row: pl.Scalar[pl.INDEX] = pbid * 128
+                    cache_tile: pl.Tile[[1, 64], pl.FP32] = pl.tile.load(cache, [row, 0], [1, 64], [1, 64])
+                    out_next: pl.Tensor[[4, 64], pl.FP32] = pl.tile.store(cache_tile, [sb, 0], out_iter)
+                    out_rv = pl.yield_(out_next)
+                return out_rv
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                cache: pl.Out[pl.Tensor[[1024, 64], pl.FP32]],
+                data: pl.Tensor[[2, 64], pl.FP32],
+                block_table: pl.Tensor[[4], pl.INT32],
+                out: pl.Out[pl.Tensor[[4, 64], pl.FP32]],
+            ) -> tuple[pl.Tensor[[1024, 64], pl.FP32], pl.Tensor[[4, 64], pl.FP32]]:
+                with pl.manual_scope():
+                    cache_next, writer_tid = pl.submit(self.cache_write, cache, data, 7)
+                    result, _reader_tid = pl.submit(
+                        self.cache_read, out, cache_next, block_table, deps=[writer_tid]
+                    )
+                return cache_next, result
+
+        After = _run_to_optimize_orch_tensors(Before, window_policy="auto")
+
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert "cache_read__windowed" not in printed_main
+        assert "__carrier_base" not in printed_main
+        assert "__carrier_extent" not in printed_main
+        assert "__carrier_scan_" not in printed_main
+        assert "__runtime_current" not in printed_main
+
+    def test_submit_reader_all_allows_dynamic_carrier_args(self):
+        """Submit path: reader inputs=all may add carrier args and keeps TASK_ID/deps."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore, attrs={"window_outputs": "coalesce"})
+            def cache_write(
+                self,
+                cache: pl.Out[pl.Tensor[[1024, 64], pl.FP32]],
+                data: pl.Tensor[[2, 64], pl.FP32],
+                slot: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[1024, 64], pl.FP32]:
+                for ki, (cache_iter,) in pl.range(0, 2, init_values=(cache,)):
+                    src: pl.Tile[[1, 64], pl.FP32] = pl.tile.load(data, [ki, 0], [1, 64], [1, 64])
+                    row: pl.Scalar[pl.INDEX] = slot + ki * 128
+                    cache_next: pl.Tensor[[1024, 64], pl.FP32] = pl.tile.store(src, [row, 0], cache_iter)
+                    cache_rv = pl.yield_(cache_next)
+                return cache_rv
+
+            @pl.function(type=pl.FunctionType.InCore, attrs={"window_inputs": "all"})
+            def cache_read(
+                self,
+                out: pl.Out[pl.Tensor[[4, 64], pl.FP32]],
+                cache: pl.Tensor[[1024, 64], pl.FP32],
+                block_table: pl.Tensor[[4], pl.INT32],
+            ) -> pl.Tensor[[4, 64], pl.FP32]:
+                for sb, (out_iter,) in pl.range(0, 4, init_values=(out,)):
+                    pbid_i32: pl.Scalar[pl.INT32] = pl.tensor.read(block_table, [sb])
+                    pbid: pl.Scalar[pl.INDEX] = pl.cast(pbid_i32, target_type=pl.INDEX)
+                    row: pl.Scalar[pl.INDEX] = pbid * 128
+                    cache_tile: pl.Tile[[1, 64], pl.FP32] = pl.tile.load(cache, [row, 0], [1, 64], [1, 64])
+                    out_next: pl.Tensor[[4, 64], pl.FP32] = pl.tile.store(cache_tile, [sb, 0], out_iter)
+                    out_rv = pl.yield_(out_next)
+                return out_rv
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                cache: pl.Out[pl.Tensor[[1024, 64], pl.FP32]],
+                data: pl.Tensor[[2, 64], pl.FP32],
+                block_table: pl.Tensor[[4], pl.INT32],
+                out: pl.Out[pl.Tensor[[4, 64], pl.FP32]],
+            ) -> tuple[pl.Tensor[[1024, 64], pl.FP32], pl.Tensor[[4, 64], pl.FP32]]:
+                with pl.manual_scope():
+                    cache_next, writer_tid = pl.submit(self.cache_write, cache, data, 7)
+                    result, _reader_tid = pl.submit(
+                        self.cache_read, out, cache_next, block_table, deps=[writer_tid]
+                    )
+                return cache_next, result
+
+        After = _run_to_optimize_orch_tensors(Before, window_policy="auto")
+
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert "cache_write__windowed" in printed_main
+        assert "cache_read__windowed" in printed_main
+        assert "__carrier_base" in printed_main
+        assert "__carrier_extent" in printed_main
+        assert "__carrier_scan_" in printed_main
+        assert "pl.Scalar[pl.TASK_ID]" in printed_main
+
     def test_linear_region_overflow_falls_back_to_baseline(self):
         @pl.program
         class Before:
@@ -5090,21 +5214,21 @@ class TestPerKernelAttrs:
         # Input should NOT be windowed (no data__ssa_v0__window in the call).
         assert "data__ssa_v0__window" not in printed_main
 
-    def test_global_off_overrides_kernel_attrs(self):
-        """Global off leaves kernels with attrs unwindowed."""
+    def test_global_none_kernel_policy_all_opts_in(self):
+        """Global none is a default; explicit kernel policy can opt in."""
 
         @pl.program
         class Before:
             @pl.function(
                 type=pl.FunctionType.InCore,
-                attrs={"window_outputs": "auto", "window_inputs": "auto"},
+                attrs={"window_policy": "all"},
             )
             def writer(
                 self,
                 out: pl.Out[pl.Tensor[[64], pl.FP32]],
                 data: pl.Tensor[[64], pl.FP32],
             ) -> pl.Tensor[[64], pl.FP32]:
-                t: pl.Tile[[64], pl.FP32] = pl.tile.load(data, [0], [64])
+                t: pl.Tile[[32], pl.FP32] = pl.tile.load(data, [0], [32])
                 result: pl.Tensor[[64], pl.FP32] = pl.tile.store(t, [0], out)
                 return result
 
@@ -5117,8 +5241,8 @@ class TestPerKernelAttrs:
                 result: pl.Tensor[[64], pl.FP32] = self.writer(out, data)
                 return result
 
-        After = _run_to_optimize_orch_tensors(Before, window_policy="off")
-        assert After.get_function("writer__windowed") is None
+        After = _run_to_optimize_orch_tensors(Before, window_policy="none")
+        assert After.get_function("writer__windowed") is not None
 
     def test_per_kernel_outputs_coalesce(self):
         """kernel outputs="coalesce" merges multi-piece writes into one bbox."""
@@ -5162,6 +5286,108 @@ class TestPerKernelAttrs:
         printed_windowed = ir.python_print(_get_function(After, "cache_write__windowed"))
         assert "cache__ssa_v0__window_extent_dyn = pl.dynamic" in ir.python_print(After)
         assert "pl.Out[pl.Tensor[[cache__ssa_v0__window_extent_dyn, 128], pl.FP32" in printed_windowed
+
+    def test_policy_all_without_dynamic_reader_keeps_exact_pieces(self):
+        """global all does not coalesce multi-piece output without a reader flow."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def cache_write(
+                self,
+                cache: pl.Out[pl.Tensor[[1024, 128], pl.FP32]],
+                data: pl.Tensor[[4, 128], pl.FP32],
+                slot_offset: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[1024, 128], pl.FP32]:
+                for ki, (cache_iter,) in pl.range(0, 4, init_values=(cache,)):
+                    src: pl.Tile[[1, 128], pl.FP32] = pl.tile.load(data, [ki, 0], [1, 128], [1, 128])
+                    row: pl.Scalar[pl.INDEX] = slot_offset + ki * 128
+                    cache_next: pl.Tensor[[1024, 128], pl.FP32] = pl.tile.store(src, [row, 0], cache_iter)
+                    cache_rv = pl.yield_(cache_next)
+                return cache_rv
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                cache: pl.Out[pl.Tensor[[1024, 128], pl.FP32]],
+                data: pl.Tensor[[4, 128], pl.FP32],
+            ) -> pl.Tensor[[1024, 128], pl.FP32]:
+                slot: pl.Scalar[pl.INDEX] = 7
+                result: pl.Tensor[[1024, 128], pl.FP32] = self.cache_write(cache, data, slot)
+                return result
+
+        After = _run_to_optimize_orch_tensors(Before, window_policy="all")
+
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert "cache_write__windowed" in printed_main
+        assert "cache__ssa_v0__window_3" in printed_main
+        assert "cache__ssa_v0__window_base_arg" not in printed_main
+
+    def test_policy_all_selects_coalesce_per_callsite_flow(self):
+        """One callee can stay exact at one callsite and coalesce for a reader flow."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def cache_write(
+                self,
+                cache: pl.Out[pl.Tensor[[1024, 64], pl.FP32]],
+                data: pl.Tensor[[2, 64], pl.FP32],
+                slot: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[1024, 64], pl.FP32]:
+                for ki, (cache_iter,) in pl.range(0, 2, init_values=(cache,)):
+                    src: pl.Tile[[1, 64], pl.FP32] = pl.tile.load(data, [ki, 0], [1, 64], [1, 64])
+                    row: pl.Scalar[pl.INDEX] = slot + ki * 128
+                    cache_next: pl.Tensor[[1024, 64], pl.FP32] = pl.tile.store(src, [row, 0], cache_iter)
+                    cache_rv = pl.yield_(cache_next)
+                return cache_rv
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def cache_read(
+                self,
+                out: pl.Out[pl.Tensor[[4, 64], pl.FP32]],
+                cache: pl.Tensor[[1024, 64], pl.FP32],
+                block_table: pl.Tensor[[4], pl.INT32],
+            ) -> pl.Tensor[[4, 64], pl.FP32]:
+                for sb, (out_iter,) in pl.range(0, 4, init_values=(out,)):
+                    pbid_i32: pl.Scalar[pl.INT32] = pl.tensor.read(block_table, [sb])
+                    pbid: pl.Scalar[pl.INDEX] = pl.cast(pbid_i32, target_type=pl.INDEX)
+                    row: pl.Scalar[pl.INDEX] = pbid * 128
+                    cache_tile: pl.Tile[[1, 64], pl.FP32] = pl.tile.load(cache, [row, 0], [1, 64], [1, 64])
+                    out_next: pl.Tensor[[4, 64], pl.FP32] = pl.tile.store(cache_tile, [sb, 0], out_iter)
+                    out_rv = pl.yield_(out_next)
+                return out_rv
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                cache_a: pl.Out[pl.Tensor[[1024, 64], pl.FP32]],
+                cache_b: pl.Out[pl.Tensor[[1024, 64], pl.FP32]],
+                data: pl.Tensor[[2, 64], pl.FP32],
+                block_table: pl.Tensor[[4], pl.INT32],
+                out: pl.Out[pl.Tensor[[4, 64], pl.FP32]],
+            ) -> tuple[
+                pl.Tensor[[1024, 64], pl.FP32],
+                pl.Tensor[[1024, 64], pl.FP32],
+                pl.Tensor[[4, 64], pl.FP32],
+            ]:
+                cache_a_next: pl.Tensor[[1024, 64], pl.FP32] = self.cache_write(cache_a, data, 7)
+                cache_b_next: pl.Tensor[[1024, 64], pl.FP32] = self.cache_write(cache_b, data, 9)
+                result: pl.Tensor[[4, 64], pl.FP32] = self.cache_read(out, cache_b_next, block_table)
+                return cache_a_next, cache_b_next, result
+
+        After = _run_to_optimize_orch_tensors(Before, window_policy="all")
+
+        printed_program = ir.python_print(After)
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert "cache_write__windowed" in printed_program
+        assert "cache_write__windowed__coalesced" in printed_program
+        assert "cache_write__windowed__coalesced" in printed_main
+        assert "cache_a__ssa_v0__window_1" in printed_main
+        assert "cache_a__ssa_v0__window_base_arg" not in printed_main
+        assert "cache_b__ssa_v0__window_1" not in printed_main
+        assert "cache_read__windowed" in printed_main
+        assert "__carrier_base" in printed_main
 
     def test_policy_all_no_private_dynamic(self):
         """v5: all does not window dynamic readers without a carrier."""
@@ -5237,12 +5463,70 @@ class TestPerKernelAttrs:
         assert "cache_read__windowed" not in printed_main
         assert "cache__ssa_v0__window" not in printed_main
 
-    def test_coalesce_carrier_output_derived_carrier_dynamic_reader(self):
-        """coalesce_carrier keeps dynamic reader candidates when an output carrier exists."""
+    def test_coalesce_reader_all_output_derived_carrier_dynamic_reader(self):
+        """coalesce selects writer shape; reader all opts into carrier args."""
 
         @pl.program
         class Before:
-            @pl.function(type=pl.FunctionType.InCore, attrs={"window_outputs": "coalesce_carrier"})
+            @pl.function(type=pl.FunctionType.InCore, attrs={"window_outputs": "coalesce"})
+            def cache_write(
+                self,
+                cache: pl.Out[pl.Tensor[[1024, 64], pl.FP32]],
+                data: pl.Tensor[[2, 64], pl.FP32],
+                slot: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[1024, 64], pl.FP32]:
+                for ki, (cache_iter,) in pl.range(0, 2, init_values=(cache,)):
+                    src: pl.Tile[[1, 64], pl.FP32] = pl.tile.load(data, [ki, 0], [1, 64], [1, 64])
+                    row: pl.Scalar[pl.INDEX] = slot + ki * 128
+                    cache_next: pl.Tensor[[1024, 64], pl.FP32] = pl.tile.store(src, [row, 0], cache_iter)
+                    cache_rv = pl.yield_(cache_next)
+                return cache_rv
+
+            @pl.function(type=pl.FunctionType.InCore, attrs={"window_inputs": "all"})
+            def cache_read(
+                self,
+                out: pl.Out[pl.Tensor[[4, 64], pl.FP32]],
+                cache: pl.Tensor[[1024, 64], pl.FP32],
+                block_table: pl.Tensor[[4], pl.INT32],
+            ) -> pl.Tensor[[4, 64], pl.FP32]:
+                for sb, (out_iter,) in pl.range(0, 4, init_values=(out,)):
+                    pbid_i32: pl.Scalar[pl.INT32] = pl.tensor.read(block_table, [sb])
+                    pbid: pl.Scalar[pl.INDEX] = pl.cast(pbid_i32, target_type=pl.INDEX)
+                    row: pl.Scalar[pl.INDEX] = pbid * 128
+                    cache_tile: pl.Tile[[1, 64], pl.FP32] = pl.tile.load(cache, [row, 0], [1, 64], [1, 64])
+                    out_next: pl.Tensor[[4, 64], pl.FP32] = pl.tile.store(cache_tile, [sb, 0], out_iter)
+                    out_rv = pl.yield_(out_next)
+                return out_rv
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                cache: pl.Out[pl.Tensor[[1024, 64], pl.FP32]],
+                data: pl.Tensor[[2, 64], pl.FP32],
+                block_table: pl.Tensor[[4], pl.INT32],
+                out: pl.Out[pl.Tensor[[4, 64], pl.FP32]],
+            ) -> tuple[pl.Tensor[[1024, 64], pl.FP32], pl.Tensor[[4, 64], pl.FP32]]:
+                slot: pl.Scalar[pl.INDEX] = 7
+                cache_next: pl.Tensor[[1024, 64], pl.FP32] = self.cache_write(cache, data, slot)
+                result: pl.Tensor[[4, 64], pl.FP32] = self.cache_read(out, cache_next, block_table)
+                return cache_next, result
+
+        for policy in ("auto", "none"):
+            After = _run_to_optimize_orch_tensors(Before, window_policy=policy)
+
+            printed_main = ir.python_print(_get_function(After, "main"))
+            assert "cache_write__windowed" in printed_main
+            assert "cache_read__windowed" in printed_main
+            assert "__carrier_base" in printed_main
+            assert "__carrier_extent" in printed_main
+            assert "__carrier_scan_" in printed_main
+
+    def test_policy_all_output_derived_carrier_dynamic_reader(self):
+        """all keeps correctness-proven writer/reader carrier chains."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
             def cache_write(
                 self,
                 cache: pl.Out[pl.Tensor[[1024, 64], pl.FP32]],
@@ -5285,7 +5569,7 @@ class TestPerKernelAttrs:
                 result: pl.Tensor[[4, 64], pl.FP32] = self.cache_read(out, cache_next, block_table)
                 return cache_next, result
 
-        After = _run_to_optimize_orch_tensors(Before, window_policy="auto")
+        After = _run_to_optimize_orch_tensors(Before, window_policy="all")
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "cache_write__windowed" in printed_main
@@ -5351,12 +5635,12 @@ class TestPerKernelAttrs:
         assert "__carrier_extent" not in printed_main
         assert "__carrier_scan_" not in printed_main
 
-    def test_coalesce_current_barrier_not_model_specific(self):
-        """Runtime current barrier is driven by coalesce_carrier attrs, not model-specific names."""
+    def test_all_current_barrier_not_model_specific(self):
+        """Runtime current barrier is attrs-driven, not model-specific names."""
 
         @pl.program
         class Before:
-            @pl.function(type=pl.FunctionType.InCore, attrs={"window_outputs": "coalesce_carrier"})
+            @pl.function(type=pl.FunctionType.InCore, attrs={"window_policy": "all"})
             def produce_segments(
                 self,
                 src: pl.Tensor[[64, 256], pl.FP32],
@@ -5460,12 +5744,12 @@ class TestPerKernelAttrs:
         assert "__runtime_current" not in printed_main
         assert "produce_segments__windowed" in printed_main
 
-    def test_coalesce_carrier_no_barrier_when_output_rewrite_falls_back(self):
-        """coalesce_carrier attr alone should not trigger runtime-current barrier."""
+    def test_all_no_barrier_when_output_rewrite_falls_back(self):
+        """all policy alone should not trigger runtime-current barrier after fallback."""
 
         @pl.program
         class Before:
-            @pl.function(type=pl.FunctionType.InCore, attrs={"window_outputs": "coalesce_carrier"})
+            @pl.function(type=pl.FunctionType.InCore, attrs={"window_policy": "all"})
             def produce_full_tensor(
                 self,
                 src: pl.Tensor[[64, 256], pl.FP32],
@@ -5540,12 +5824,39 @@ class TestPerKernelAttrs:
         with pytest.raises(Exception, match="window_outputs"):
             _run_to_optimize_orch_tensors(Before, window_policy="all")
 
-    def test_invalid_window_inputs_attr_raises(self):
-        """kernel attrs={"window_inputs": "all"} errors because v5 does not support it."""
+    def test_coalesce_carrier_window_outputs_attr_raises(self):
+        """coalesce_carrier is not a public v5 window_outputs value."""
 
         @pl.program
         class Before:
-            @pl.function(type=pl.FunctionType.InCore, attrs={"window_inputs": "all"})
+            @pl.function(type=pl.FunctionType.InCore, attrs={"window_outputs": "coalesce_carrier"})
+            def writer(
+                self,
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+                data: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t: pl.Tile[[64], pl.FP32] = pl.tile.load(data, [0], [64])
+                result: pl.Tensor[[64], pl.FP32] = pl.tile.store(t, [0], out)
+                return result
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+                data: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = self.writer(out, data)
+                return result
+
+        with pytest.raises(Exception, match="window_outputs"):
+            _run_to_optimize_orch_tensors(Before, window_policy="all")
+
+    def test_invalid_window_inputs_attr_raises(self):
+        """kernel attrs={"window_inputs": "unknown"} triggers a CHECK failure."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore, attrs={"window_inputs": "unknown"})
             def reader(
                 self,
                 out: pl.Out[pl.Tensor[[1, 64], pl.FP32]],

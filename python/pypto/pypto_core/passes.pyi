@@ -430,7 +430,7 @@ def convert_tensor_to_tile_ops() -> Pass:
     """Create a pass that converts tensor ops to tile ops in InCore functions."""
 
 def optimize_orch_tensors(
-    window_policy: Literal["auto", "all", "off"] = "auto",
+    window_policy: Literal["auto", "all", "none"] = "auto",
 ) -> Pass:
     """Create a pass that optimizes tensor buffer usage in orchestration and InCore functions."""
 

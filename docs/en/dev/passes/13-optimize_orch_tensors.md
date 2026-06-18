@@ -37,17 +37,17 @@ passes.optimize_orch_tensors(window_policy="auto")
 
 | Value | Output behavior | Input behavior | Notes |
 | ----- | --------------- | -------------- | ----- |
-| `"auto"` | ABI-safe single-piece windows | ABI-safe static windows + carrier-contract dynamic readers | Default; proof-based and submit-signature preserving unless an explicit carrier attr opts in |
-| `"all"` | All statically legal pieces (incl. multi-piece) | Same as `auto` | Relaxes output filtering; may expand submit signatures |
-| `"off"` | No windowing | No windowing | Kill switch; overrides kernel attrs |
+| `"auto"` | ABI-safe single-piece windows | ABI-safe static windows | Default; proof-based and submit-signature preserving |
+| `"all"` | All correctness-proven output windows | All correctness-proven input windows, including dynamic carrier readers | Aggressive mode; may expand submit signatures and carrier args |
+| `"none"` | No windowing by default | No windowing by default | Per-kernel attrs can still opt in |
 
 The global policy maps to per-kernel defaults:
 
 | Global policy | Default `window_outputs` | Default `window_inputs` |
 | ------------- | ------------------------ | ----------------------- |
 | `"auto"` | `"auto"` | `"auto"` |
-| `"all"` | `"all"` | `"auto"` |
-| `"off"` | `"off"` | `"off"` |
+| `"all"` | `"all"` | `"all"` |
+| `"none"` | `"off"` | `"off"` |
 
 **Per-kernel overrides** via function attrs:
 
@@ -55,19 +55,23 @@ The global policy maps to per-kernel defaults:
 @pl.function(
     type=pl.FunctionType.InCore,
     attrs={
-        "window_outputs": "coalesce",  # off | auto | all | coalesce | coalesce_carrier
-        "window_inputs":  "off",       # off | auto
+        "window_policy":  "auto",      # optional per-kernel default: none | auto | all
+        "window_outputs": "coalesce",  # off | auto | all | exact | coalesce
+        "window_inputs":  "off",       # off | auto | all
     }
 )
 def my_kernel(...): ...
 ```
 
-When global `window_policy != "off"`, per-kernel attrs override the global default. `"off"` is
-a global kill switch that cannot be overridden.
+Per-kernel attrs override the global default. Missing attrs inherit the global
+policy; explicit attrs win, including explicit opt-in when the global default is
+`"none"`.
 
-For `window_inputs`, `"auto"` covers both ABI-safe static input windows and
-dynamic readers that can reuse an explicit output-derived carrier. It does not
-create private dynamic reader scans without a carrier contract.
+For `window_inputs`, `"auto"` covers ABI-safe static input windows. Dynamic
+carrier readers that require extra carrier scalar/current args need effective
+`window_inputs="all"`, either from global `"all"` or from an explicit per-kernel
+attr. The pass does not create private dynamic reader scans without a proven
+writer-reader carrier flow.
 
 `window_outputs` and `window_inputs` are independent switches. Setting only
 `window_outputs="off"` disables output rewriting for that kernel, but input-side
@@ -79,17 +83,18 @@ attrs={"window_outputs": "off", "window_inputs": "off"}
 ```
 
 Use `window_outputs="coalesce"` when the caller only needs a coalesced output
-bounding box:
+bounding box. This chooses the writer output shape; it does not by itself opt a
+downstream dynamic reader into extra carrier args:
 
 ```python
 attrs={"window_outputs": "coalesce"}
 ```
 
-Use `window_outputs="coalesce_carrier"` only when downstream dynamic readers
-should be allowed to reuse an output-derived carrier:
+Use `window_inputs="all"` on a compatible downstream reader when it should be
+allowed to reuse a proven output-derived carrier:
 
 ```python
-attrs={"window_outputs": "coalesce_carrier"}
+attrs={"window_inputs": "all"}
 ```
 
 For example, in a Qwen prefill-style dynamic-indexed KV-cache writer/reader
@@ -97,21 +102,25 @@ chain, the expected boundary is:
 
 - `"auto"`: keep local/simple windows only. Dynamic KV-cache writer and reader
   windows stay full-tensor, and no carrier/remat is introduced.
-- `"all"`: rewrite correctness-proven writer windows as exact pieces. Dynamic
-  readers without a carrier keep full parent tensor (no private dynamic reader).
+- `"all"`: rewrite every correctness-proven writer/reader chain the pass can
+  prove, including output-derived carrier paths for dynamic readers such as
+  qk/sv cache reads. Dynamic readers without a proven carrier still keep the full
+  parent tensor (no private dynamic reader).
 - `window_outputs="coalesce"`: opt one writer into multi-piece output bounding-box
-  coalescing, but do not promise a downstream dynamic-reader carrier.
-- `window_outputs="coalesce_carrier"`: opt one writer into coalescing and, for a
-  compatible dynamic reader pair, generate the output-derived carrier/remat path.
-  This explicit opt-in may add carrier scalar/current arguments and therefore may
-  expand the runtime submit signature.
+  coalescing, but do not opt a downstream dynamic reader into extra carrier
+  arguments.
+- `window_outputs="coalesce"` plus reader `window_inputs="all"`: if the
+  writer/reader flow is proven compatible, generate the output-derived
+  carrier/remat path. This explicit input-side opt-in may add carrier
+  scalar/current arguments and therefore may expand the runtime submit
+  signature.
 
 The carrier path depends on all of these conditions:
 
-- global `window_policy` is not `"off"`
-- the producer's effective `window_outputs` is `"coalesce_carrier"`
+- the producer's effective `window_outputs` is not `"off"`
 - the producer output rewrite actually survives as a `__windowed` call
-- the reader's effective `window_inputs` is `"auto"`
+- the reader's effective `window_inputs` is `"all"` when the carrier path needs
+  extra runtime args
 - the writer/reader pair satisfies the shared-root, loop-order, and min/max
   proof checks
 
@@ -203,14 +212,14 @@ This pass intentionally keeps window eligibility conservative. It does not speci
 After static eligibility, the default `auto` policy applies one more conservative
 cost gate. It rejects candidates that would increase the number of rewritten
 tensor arguments and rejects multi-piece output rewrites by default. A
-dynamic-indexed input is windowed only when it can reuse an output-derived
-carrier from an explicit `window_outputs="coalesce_carrier"` writer; otherwise
-the reader keeps the full parent tensor. This keeps the
+dynamic-indexed input is windowed only when a proven writer-reader carrier flow
+exists and the reader's effective `window_inputs` policy allows any required
+extra carrier args; otherwise the reader keeps the full parent tensor. This keeps the
 default pipeline from trading local window precision for larger dispatch
 signatures, extra call-site orchestration, or private dynamic-window scans whose
-performance benefit is workload-dependent. Use `window_policy="all"` when
-investigating output candidates manually; v5 input policy still only supports
-`off` / `auto`.
+performance benefit is workload-dependent. Use `window_policy="all"` when the
+intent is "cut every correctness-proven window even if submit signatures grow";
+use reader `window_inputs="all"` for a local carrier-reader opt-in.
 
 Supported rewrite shapes:
 
@@ -218,7 +227,7 @@ Supported rewrite shapes:
 - `AggregateWindowLoop`: the callee carries one or more `Out` tensors through a loop and writes a statically provable aggregate window, such as the outlined `kv_proj` group shape
 - `PureInputWindowConsumer`: an `In` tensor parameter in a data-returning callee is used only through the same local input window
 - `AggregateInputWindowLoop`: together with an `AggregateWindowLoop` output rewrite, an `In` tensor parameter is read only through loop-local `tile.load`/`tensor.slice` windows whose offsets expand across that same internal loop into one statically provable parent-shaped region, such as q/k inputs of qk norm
-- `RuntimeCurrentAggregator`: when a surviving `coalesce_carrier` `__windowed` producer loop feeds a later repeated full-tensor `In` reader, the pass inserts a small runtime-visible current marker. Plain `coalesce` is only an output bounding-box policy. The match is attrs-driven and does not depend on model-specific callee or variable names.
+- `RuntimeCurrentAggregator`: when a surviving carrier-producing `__windowed` producer loop feeds a later repeated full-tensor `In` reader, the pass inserts a small runtime-visible current marker. Plain `coalesce` is only an output bounding-box policy. The match is attrs-driven and does not depend on model-specific callee or variable names.
 
 Output-window eligibility:
 
@@ -248,7 +257,7 @@ Input-window eligibility:
 - input-only `Submit` callsites stay full-tensor; inside `manual_scope`, a full input may intentionally carry a wider dependency even when the callee body reads a local window
 - when a callee also has an eligible output-window rewrite, any already proven pure input windows are preserved and materialized at the same callsite
 - for `AggregateInputWindowLoop`, all references must be inside one static `ForStmt`, at least one offset dimension must vary with that loop, and the aggregate window must equal the input parent shape; partial aggregate reads such as weight sub-windows remain full-tensor
-- dynamic-indexed reader windows require a provable min/max scan and an explicit `coalesce_carrier` writer whose output rewrite survives as a `__windowed` call. Eligible writer-reader chains with a carrier use the carrier/remat path; without that carrier contract, the dynamic reader keeps full parent tensor (no private dynamic reader).
+- dynamic-indexed reader windows require a provable min/max scan, a writer whose output rewrite survives as a `__windowed` call, and a reader policy that allows any required carrier args. Eligible writer-reader chains with a carrier use the carrier/remat path; without that proven flow, the dynamic reader keeps full parent tensor (no private dynamic reader).
 
 Non-goals and dependence model:
 
@@ -257,7 +266,7 @@ Non-goals and dependence model:
 - the pass does not precompute global window descriptor arrays
 - the pass does not split SPMD launches or externalize per-block SPMD windows
 - unsupported consumers, including full-tensor readers, remain baseline/full-tensor inputs
-- selected prefill full-tensor readers may still receive a runtime-current marker when the producer loop is a surviving `coalesce_carrier` fan-in pattern; this does not narrow the reader region, but gives runtime dependency tracking one current tensor to match instead of many producer windows
+- selected prefill full-tensor readers may still receive a runtime-current marker when the producer loop is a surviving carrier-producing fan-in pattern; this does not narrow the reader region, but gives runtime dependency tracking one current tensor to match instead of many producer windows
 - `DeriveCallDirections` keeps its existing sound sequential `Out -> InOut` rule; Pattern 5 only exposes proven local windows before that pass runs
 
 ## Example (Pattern 1)
