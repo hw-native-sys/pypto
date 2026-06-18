@@ -280,6 +280,30 @@ TypePtr HalveTileShape(const TypePtr& type, int dim, const ExprPtr& subblock_idx
   return std::make_shared<TileType>(new_shape, tt->dtype_, tt->memref_, new_tile_view, tt->memory_space_);
 }
 
+// Static element count of a tile, or nullopt if any dim is dynamic.
+std::optional<int64_t> TileNumelConst(const std::shared_ptr<const TileType>& tt) {
+  if (!tt) return std::nullopt;
+  int64_t n = 1;
+  for (const auto& d : tt->shape_) {
+    auto ci = std::dynamic_pointer_cast<const ConstInt>(d);
+    if (!ci) return std::nullopt;
+    n *= ci->value_;
+  }
+  return n;
+}
+
+// Static element count after halving the given axis, or nullopt if dynamic.
+std::optional<int64_t> HalvedNumelConst(const std::shared_ptr<const TileType>& tt, int axis) {
+  if (!tt || axis < 0 || axis >= static_cast<int>(tt->shape_.size())) return std::nullopt;
+  int64_t n = 1;
+  for (int i = 0; i < static_cast<int>(tt->shape_.size()); ++i) {
+    auto ci = std::dynamic_pointer_cast<const ConstInt>(tt->shape_[i]);
+    if (!ci) return std::nullopt;
+    n *= (i == axis) ? ci->value_ / 2 : ci->value_;
+  }
+  return n;
+}
+
 ExprPtr HalveTupleElement(const ExprPtr& tuple_expr, int dim) {
   auto tuple = std::dynamic_pointer_cast<const MakeTuple>(tuple_expr);
   if (!tuple || dim < 0 || dim >= static_cast<int>(tuple->elements_.size())) return tuple_expr;
@@ -321,6 +345,7 @@ CallPtr RebuildTpopWithHalvedShape(const CallPtr& call, int split_int, int split
 
 struct TileInfo {
   ExprPtr half_dim_size;
+  int split_dim = 0;
 };
 
 ExprPtr AdjustOffsets(const ExprPtr& offsets_expr, int split_dim, const ExprPtr& half_size,
@@ -378,14 +403,359 @@ TypePtr ApplyTrackedTileShape(const TypePtr& type, int dim, const ExprPtr& half_
   return std::make_shared<TileType>(new_shape, tt->dtype_, tt->memref_, new_tile_view, tt->memory_space_);
 }
 
+// ---------------------------------------------------------------------------
+// Split-axis analysis (phase 1).
+//
+// The transform halves each AIV tile on a single axis. For tiles that pass
+// through tile.transpose / numel-preserving tile.reshape the split axis
+// MIGRATES between dims (a per-row reduction transposed to a [1, N] row moves
+// the split axis from rows to columns), and input-less accumulators
+// (tile.full / tile.create / pipeline iter_arg) take their axis from a
+// consumer, not a producer. A single forward walk resolves neither, so we first
+// run a fixpoint that propagates the split axis both ways across op
+// operand<->result relations, then the transform halves each tile on its
+// resolved axis.
+//
+// SAFETY INVARIANT: a tile that never passes through transpose or a migrating
+// reshape resolves to the function default split axis, so the emitted IR is
+// byte-identical to halving on the global split_dim.
+// ---------------------------------------------------------------------------
+constexpr int kAxisUnknown = -1;
+constexpr int kAxisNotSplit = -2;
+
+std::shared_ptr<const TileType> AsTileType(const ExprPtr& expr) {
+  return expr ? std::dynamic_pointer_cast<const TileType>(expr->GetType()) : nullptr;
+}
+
+// Map a split axis across a numel-preserving reshape. A degenerate 2D shape
+// (one singleton dim) carries the split on its single non-singleton dim; an
+// otherwise-shaped reshape keeps the axis index (the already-split path, e.g.
+// [64, 8] <-> [16, 32], where the split stays a clean row-major prefix even
+// though the axis extent changes). A wrong mapping here would halve the result
+// to a numel inconsistent with the input -- caught by the numel guard in the
+// transform, not silently emitted.
+int MapReshapeAxis(const std::shared_ptr<const TileType>& to, int axis) {
+  if (axis < 0) return axis;  // kAxisUnknown / kAxisNotSplit map through unchanged
+  if (to && to->shape_.size() == 2) {
+    bool d0 = IsSingletonDim(to->shape_[0]);
+    bool d1 = IsSingletonDim(to->shape_[1]);
+    if (d0 != d1) return d0 ? 1 : 0;
+  }
+  return axis;
+}
+
+class SplitAxisAnalysis {
+ public:
+  explicit SplitAxisAnalysis(int default_axis) : default_axis_(default_axis) {}
+
+  void Run(const std::vector<StmtPtr>& stmts) {
+    for (const auto& s : stmts) Collect(s);
+    for (size_t i = 0; i < constraints_.size(); ++i) {
+      for (const Var* v : ConstraintVars(constraints_[i])) {
+        if (v) var_to_con_[v].push_back(i);
+      }
+    }
+    // Propagate the definite seeds (loads / tpop) and any migration they reach.
+    Drain();
+    // Tiles whose axis is not pinned by data flow (e.g. a full/create
+    // accumulator nothing transposes) default to the function split axis;
+    // process in definition order so a defaulted producer still migrates through
+    // its transpose/reshape consumers before they default.
+    for (const Var* v : seen_) {
+      if (Get(v) == kAxisUnknown) {
+        SetAxis(v, SingletonOnAxis(v, default_axis_) ? kAxisNotSplit : default_axis_);
+        Drain();
+      }
+    }
+  }
+
+  // Resolved split axis of a tile, or nullopt when the tile stays full.
+  std::optional<int> AxisOf(const Var* v) const {
+    auto it = axis_.find(v);
+    if (it == axis_.end() || it->second < 0) return std::nullopt;
+    return it->second;
+  }
+
+ private:
+  struct Constraint {
+    enum class Kind { Generic, Transpose, Reshape, Equality } kind;
+    const Var* result = nullptr;
+    std::vector<const Var*> operands;
+    int ti = 0, tj = 0;
+    const Var* tmp = nullptr;
+    std::shared_ptr<const TileType> in_type, out_type;
+    const Var* a = nullptr;
+    const Var* b = nullptr;
+  };
+
+  int default_axis_;
+  std::unordered_map<const Var*, int> axis_;
+  std::vector<Constraint> constraints_;
+  std::unordered_map<const Var*, std::vector<size_t>> var_to_con_;
+  std::vector<const Var*> worklist_;
+  std::vector<const Var*> seen_;  // all tile vars, in definition order
+
+  void Drain() {
+    while (!worklist_.empty()) {
+      const Var* v = worklist_.back();
+      worklist_.pop_back();
+      auto it = var_to_con_.find(v);
+      if (it == var_to_con_.end()) continue;
+      for (size_t ci : it->second) Apply(constraints_[ci]);
+    }
+  }
+
+  int Get(const Var* v) const {
+    if (!v) return kAxisUnknown;
+    auto it = axis_.find(v);
+    return it == axis_.end() ? kAxisUnknown : it->second;
+  }
+
+  void SetAxis(const Var* v, int a) {
+    if (!v) return;
+    // Bound the migration: only adopt a non-default split axis when its extent
+    // is a statically-even constant (halvable). A migration onto an odd or
+    // dynamic axis cannot be split, and forcing it would either abort the
+    // even-split check or diverge from the original single-axis behavior; leave
+    // such tiles to default to the function split axis (== original behavior).
+    if (a >= 0 && a != default_axis_ && !IsEvenConstAxis(v, a)) return;
+    auto it = axis_.find(v);
+    if (it != axis_.end()) {
+      if (it->second == a) return;
+      // A not-split seed (broadcast both lanes need) is final, and a not-split
+      // request never clears a resolved axis.
+      if (it->second == kAxisNotSplit || a == kAxisNotSplit) return;
+      INTERNAL_CHECK(false) << "SplitVectorKernel: conflicting split axes " << it->second << " vs " << a
+                            << " for tile '" << v->name_hint_ << "'";
+    }
+    axis_[v] = a;
+    if (a >= 0) worklist_.push_back(v);
+  }
+
+  static std::vector<const Var*> ConstraintVars(const Constraint& c) {
+    if (c.kind == Constraint::Kind::Equality) return {c.a, c.b};
+    std::vector<const Var*> vs = c.operands;
+    vs.push_back(c.result);
+    if (c.tmp) vs.push_back(c.tmp);
+    return vs;
+  }
+
+  void Apply(const Constraint& c) {
+    switch (c.kind) {
+      case Constraint::Kind::Generic: {
+        int known = kAxisUnknown;
+        bool has_not_split = false;
+        auto consider = [&](const Var* v) {
+          int a = Get(v);
+          if (a >= 0) {
+            if (known == kAxisUnknown) {
+              known = a;
+            } else {
+              INTERNAL_CHECK(known == a)
+                  << "SplitVectorKernel: op produces a tile with conflicting operand split axes";
+            }
+          } else if (a == kAxisNotSplit) {
+            has_not_split = true;
+          }
+        };
+        consider(c.result);
+        for (const Var* o : c.operands) consider(o);
+        if (known >= 0) {
+          SetAxis(c.result, known);
+          // Broadcast operands (singleton on the shared axis, e.g. a [1, N] bias
+          // both lanes need) stay full -- do not force them onto the split axis.
+          for (const Var* o : c.operands) {
+            if (!SingletonOnAxis(o, known)) SetAxis(o, known);
+          }
+        } else if (has_not_split) {
+          // No operand carries a split axis but at least one is explicitly full:
+          // the op stays full, so propagate not-split rather than letting the
+          // result default to the split axis (which would halve it against
+          // un-halved inputs).
+          SetAxis(c.result, kAxisNotSplit);
+          for (const Var* o : c.operands) SetAxis(o, kAxisNotSplit);
+        }
+        break;
+      }
+      case Constraint::Kind::Transpose: {
+        const Var* x = c.operands.empty() ? nullptr : c.operands[0];
+        auto sw = [&](int a) { return a == c.ti ? c.tj : (a == c.tj ? c.ti : a); };
+        int xa = Get(x), ra = Get(c.result);
+        // Propagate both a resolved axis and the not-split status (kAxisNotSplit);
+        // sw() leaves kAxisNotSplit unchanged since it matches neither swapped axis.
+        if (xa != kAxisUnknown) SetAxis(c.result, sw(xa));
+        if (ra != kAxisUnknown) SetAxis(x, sw(ra));
+        // The transpose workspace tile carries the INPUT orientation, so its
+        // split axis is the result axis swapped back (== the input axis): the
+        // halved tmp must equal the halved transposed result, and tmp/result
+        // shapes are transposes of each other.
+        int rr = Get(c.result);
+        if (rr != kAxisUnknown) SetAxis(c.tmp, sw(rr));
+        int ta = Get(c.tmp);
+        if (ta != kAxisUnknown && Get(c.result) == kAxisUnknown) SetAxis(c.result, sw(ta));
+        break;
+      }
+      case Constraint::Kind::Reshape: {
+        const Var* x = c.operands.empty() ? nullptr : c.operands[0];
+        int xa = Get(x), ra = Get(c.result);
+        // != kAxisUnknown so kAxisNotSplit also propagates; MapReshapeAxis maps a
+        // negative (unknown / not-split) axis through unchanged.
+        if (xa != kAxisUnknown) SetAxis(c.result, MapReshapeAxis(c.out_type, xa));
+        if (ra != kAxisUnknown) SetAxis(x, MapReshapeAxis(c.in_type, ra));
+        break;
+      }
+      case Constraint::Kind::Equality: {
+        int aa = Get(c.a), ba = Get(c.b);
+        if (aa >= 0) SetAxis(c.b, aa);
+        if (ba >= 0) SetAxis(c.a, ba);
+        break;
+      }
+    }
+  }
+
+  static bool IsEvenConstAxis(const Var* v, int axis) {
+    if (!v) return false;
+    auto tt = std::dynamic_pointer_cast<const TileType>(v->GetType());
+    if (!tt || axis < 0 || axis >= static_cast<int>(tt->shape_.size())) return false;
+    auto ci = std::dynamic_pointer_cast<const ConstInt>(tt->shape_[axis]);
+    return ci && (ci->value_ % 2 == 0);
+  }
+
+  static bool SingletonOnAxis(const Var* v, int axis) {
+    if (!v) return false;
+    auto tt = std::dynamic_pointer_cast<const TileType>(v->GetType());
+    if (!tt || axis < 0 || axis >= static_cast<int>(tt->shape_.size())) return false;
+    return IsSingletonDim(tt->shape_[axis]);
+  }
+
+  static std::vector<const Var*> TileOperands(const CallPtr& call) {
+    std::vector<const Var*> ops;
+    for (const auto& arg : call->args_) {
+      if (std::dynamic_pointer_cast<const TileType>(arg->GetType())) {
+        if (auto v = AsVarLike(arg)) ops.push_back(v.get());
+      }
+    }
+    return ops;
+  }
+
+  void SeedLoad(const Var* result, const std::shared_ptr<const TileType>& tt) {
+    bool not_split = !tt || static_cast<int>(tt->shape_.size()) < 2 ||
+                     default_axis_ >= static_cast<int>(tt->shape_.size()) ||
+                     IsSingletonDim(tt->shape_[default_axis_]);
+    SetAxis(result, not_split ? kAxisNotSplit : default_axis_);
+  }
+
+  void CollectCall(const Var* result, const CallPtr& call) {
+    const std::string& op = call->op_->name_;
+    auto result_tt = result ? std::dynamic_pointer_cast<const TileType>(result->GetType()) : nullptr;
+    if (result_tt) seen_.push_back(result);
+
+    if (op == "tile.load") {
+      SeedLoad(result, result_tt);
+      return;
+    }
+    if (op == "tile.tpop_from_aic") {
+      if (result_tt) SetAxis(result, default_axis_);
+      return;
+    }
+    if (op == "tile.tpop_from_aiv") {
+      if (result_tt) SetAxis(result, kAxisNotSplit);
+      return;
+    }
+    if (!result_tt) return;  // non-tile producer (store, scalar, push, ...)
+
+    if (op == "tile.transpose" && call->args_.size() >= 3) {
+      Constraint c;
+      c.kind = Constraint::Kind::Transpose;
+      c.result = result;
+      if (auto x = AsVarLike(call->args_[0])) c.operands.push_back(x.get());
+      auto ci = std::dynamic_pointer_cast<const ConstInt>(call->args_[1]);
+      auto cj = std::dynamic_pointer_cast<const ConstInt>(call->args_[2]);
+      c.ti = ci ? static_cast<int>(ci->value_) : 0;
+      c.tj = cj ? static_cast<int>(cj->value_) : 1;
+      if (call->args_.size() >= 4) {
+        if (auto tmp = AsVarLike(call->args_[3])) c.tmp = tmp.get();
+      }
+      constraints_.push_back(std::move(c));
+      return;
+    }
+    if (op == "tile.reshape" && !call->args_.empty()) {
+      Constraint c;
+      c.kind = Constraint::Kind::Reshape;
+      c.result = result;
+      if (auto x = AsVarLike(call->args_[0])) c.operands.push_back(x.get());
+      c.in_type = AsTileType(call->args_[0]);
+      c.out_type = result_tt;
+      constraints_.push_back(std::move(c));
+      return;
+    }
+
+    Constraint c;
+    c.kind = Constraint::Kind::Generic;
+    c.result = result;
+    c.operands = TileOperands(call);
+    constraints_.push_back(std::move(c));
+  }
+
+  void Collect(const StmtPtr& stmt) {
+    if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
+      if (auto call = std::dynamic_pointer_cast<const Call>(assign->value_)) {
+        if (call->op_) CollectCall(assign->var_.get(), call);
+      }
+      return;
+    }
+    if (std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
+      return;  // no tile result to track
+    }
+    if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
+      // Unify the split axis across each loop-carried triple
+      // {init value, iter_arg, return var}; the body's ops link in the yield.
+      for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
+        const auto& ia = for_stmt->iter_args_[i];
+        if (!std::dynamic_pointer_cast<const TileType>(ia->GetType())) continue;
+        seen_.push_back(ia.get());
+        if (auto init = AsVarLike(ia->initValue_)) {
+          Constraint c;
+          c.kind = Constraint::Kind::Equality;
+          c.a = ia.get();
+          c.b = init.get();
+          constraints_.push_back(std::move(c));
+        }
+        if (i < for_stmt->return_vars_.size()) {
+          Constraint c;
+          c.kind = Constraint::Kind::Equality;
+          c.a = ia.get();
+          c.b = for_stmt->return_vars_[i].get();
+          constraints_.push_back(std::move(c));
+        }
+      }
+      for (const auto& s : transform_utils::FlattenToStmts(for_stmt->body_)) Collect(s);
+      return;
+    }
+    if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
+      for (const auto& s : transform_utils::FlattenToStmts(if_stmt->then_body_)) Collect(s);
+      if (if_stmt->else_body_) {
+        for (const auto& s : transform_utils::FlattenToStmts(*if_stmt->else_body_)) Collect(s);
+      }
+      return;
+    }
+    if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(stmt)) {
+      for (const auto& s : seq->stmts_) Collect(s);
+      return;
+    }
+  }
+};
+
 std::vector<StmtPtr> ProcessStmts(const std::vector<StmtPtr>& stmts, SplitMode mode, int split_int,
-                                  int split_dim, std::unordered_map<const Var*, TileInfo>& tile_vars,
-                                  bool is_aiv, const ExprPtr& subblock_idx,
+                                  int split_dim, const SplitAxisAnalysis& axes,
+                                  std::unordered_map<const Var*, TileInfo>& tile_vars, bool is_aiv,
+                                  const ExprPtr& subblock_idx,
                                   std::unordered_map<const Var*, VarPtr>& var_replacements);
 
 StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int split_dim,
-                    std::unordered_map<const Var*, TileInfo>& tile_vars, bool is_aiv,
-                    const ExprPtr& subblock_idx, std::unordered_map<const Var*, VarPtr>& var_replacements) {
+                    const SplitAxisAnalysis& axes, std::unordered_map<const Var*, TileInfo>& tile_vars,
+                    bool is_aiv, const ExprPtr& subblock_idx,
+                    std::unordered_map<const Var*, VarPtr>& var_replacements) {
   if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
     auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
     if (!call || !call->op_) return stmt;
@@ -410,7 +780,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
       auto new_var =
           std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
       if (tt && split_dim < static_cast<int>(tt->shape_.size())) {
-        TileInfo info{ComputeHalfDimSize(tt->shape_[split_dim])};
+        TileInfo info{ComputeHalfDimSize(tt->shape_[split_dim]), split_dim};
         tile_vars[assign->var_.get()] = info;
         tile_vars[new_var.get()] = info;
       }
@@ -453,7 +823,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
       auto new_call =
           std::make_shared<Call>(call->op_, std::move(new_args), call->kwargs_, new_result_type, call->span_);
       auto new_var = std::make_shared<Var>(assign->var_->name_hint_, new_result_type, assign->var_->span_);
-      TileInfo info{half_dim_size};
+      TileInfo info{half_dim_size, split_dim};
       tile_vars[assign->var_.get()] = info;
       tile_vars[new_var.get()] = info;
       var_replacements[assign->var_.get()] = new_var;
@@ -466,7 +836,8 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
       if (tile_var) {
         auto it = tile_vars.find(tile_var.get());
         if (it != tile_vars.end()) {
-          auto new_offsets = AdjustOffsets(call->args_[1], split_dim, it->second.half_dim_size, subblock_idx);
+          auto new_offsets =
+              AdjustOffsets(call->args_[1], it->second.split_dim, it->second.half_dim_size, subblock_idx);
           std::vector<ExprPtr> new_args = call->args_;
           new_args[1] = new_offsets;
           auto new_call = std::make_shared<Call>(call->op_, std::move(new_args), call->kwargs_,
@@ -476,36 +847,42 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
       }
     }
 
-    // AIV only: any other op producing TileType — halve result shape (and static shape args when present).
-    // Reject reduce ops that reduce on the split axis (partial reduction is semantically incorrect).
-    // Skip halving when the output split-dim is singleton (broadcast / degenerate tiles).
+    // AIV only: any other op producing TileType — halve the result (and static
+    // shape args when present) on the tile's resolved split axis. Tiles that
+    // resolve to no axis (broadcasts / full tiles both lanes need) are left
+    // untouched. Reject reduce ops that reduce on their input's split axis.
     if (is_aiv) {
-      if (IsReduceOnSplitAxis(call, split_dim)) {
-        throw pypto::ValueError("SplitVectorKernel: reduce op '" + op_name +
-                                "' reduces on the split axis (dim " + std::to_string(split_dim) +
-                                "); partial reduction in a split kernel is not supported");
+      if (!call->args_.empty()) {
+        if (auto in_var = AsVarLike(call->args_[0])) {
+          if (auto in_axis = axes.AxisOf(in_var.get())) {
+            if (IsReduceOnSplitAxis(call, *in_axis)) {
+              throw pypto::ValueError("SplitVectorKernel: reduce op '" + op_name +
+                                      "' reduces on the split axis (dim " + std::to_string(*in_axis) +
+                                      "); partial reduction in a split kernel is not supported");
+            }
+          }
+        }
       }
 
       auto tt = std::dynamic_pointer_cast<const TileType>(call->GetType());
-      if (tt && split_dim < static_cast<int>(tt->shape_.size())) {
-        if (IsSingletonDim(tt->shape_[split_dim])) {
-          return stmt;
-        }
-        auto half_dim_size = ComputeHalfDimSize(tt->shape_[split_dim]);
+      auto resolved_opt = axes.AxisOf(assign->var_.get());
+      if (tt && resolved_opt.has_value()) {
+        int resolved = *resolved_opt;
+        INTERNAL_CHECK_SPAN(resolved < static_cast<int>(tt->shape_.size()), assign->span_)
+            << "Internal error: resolved split axis " << resolved << " out of range for tile rank "
+            << tt->shape_.size();
+        auto half_dim_size = ComputeHalfDimSize(tt->shape_[resolved]);
 
-        // tile.reshape lifts a full (un-split) source tile -- typically a rank-1
-        // load that bypassed the split-specific load rewrite -- onto a 2D shape
-        // whose split axis spans the full width. Reshape is an offsetless view, so
-        // halving only its result type leaves BOTH AIV lanes reading the first
-        // half of the full buffer; lane 1 then silently reuses lane 0's data
-        // (observed as lane 1 applying the wrong half of the per-channel dequant
-        // scale in dsv4 proj_b's INT8 GEMM epilogue). Emit the reshape at full
-        // width and follow it with a per-subblock column slice so each lane reads
-        // its own half. Reshapes whose input is already split fall through to the
-        // plain result-halving below (their producer already partitioned the data).
+        // A tile.reshape that lifts a full (un-split) source onto a split axis is
+        // an offsetless view: halving only the result type leaves both AIV lanes
+        // reading the first half of the full buffer. Emit the reshape at full
+        // width and follow it with a per-subblock slice on the resolved axis so
+        // each lane reads its own half. Reshapes whose input is already split
+        // migrate the axis instead (plain result-halving below, no full-width
+        // intermediate).
         if (op_name == "tile.reshape") {
           auto input_var = AsVarLike(call->args_[0]);
-          bool input_is_split = input_var && tile_vars.count(input_var.get()) != 0;
+          bool input_is_split = input_var && axes.AxisOf(input_var.get()).has_value();
           auto half_const = std::dynamic_pointer_cast<const ConstInt>(half_dim_size);
           if (!input_is_split && half_const != nullptr) {
             auto full_var =
@@ -517,7 +894,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
             shape_elems.reserve(tt->shape_.size());
             offset_elems.reserve(tt->shape_.size());
             for (int d = 0; d < static_cast<int>(tt->shape_.size()); ++d) {
-              if (d == split_dim) {
+              if (d == resolved) {
                 shape_elems.push_back(MakeIndexConst(half_const->value_, assign->span_));
                 offset_elems.push_back(
                     MakeMul(subblock_idx, MakeIndexConst(half_const->value_, assign->span_), assign->span_));
@@ -538,7 +915,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
                 std::make_shared<Var>(assign->var_->name_hint_, slice_call->GetType(), assign->var_->span_);
             auto slice_assign = std::make_shared<AssignStmt>(slice_var, slice_call, assign->span_);
 
-            TileInfo info{half_dim_size};
+            TileInfo info{half_dim_size, resolved};
             // Track both the original var and the slice replacement, matching the
             // other tile-producing branches: a later tile.store / loop init that
             // references the original var (before the final Substitute) must still
@@ -551,17 +928,57 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
           }
         }
 
-        auto new_result_type = HalveTileShape(call->GetType(), split_dim, subblock_idx);
+        auto new_result_type = HalveTileShape(call->GetType(), resolved, subblock_idx);
+
+        // Numel guard for the numel-preserving view ops: a reshape/transpose of a
+        // split input must keep element count -- if the result was halved on a
+        // different axis than its input (or the input was halved and the result
+        // was not), the counts diverge and downstream memory_reuse would size the
+        // tile wrong. Fail here, with the tile name, instead of 6 passes later.
+        if (op_name == "tile.reshape" || op_name == "tile.transpose") {
+          auto in_var = AsVarLike(call->args_[0]);
+          auto in_tt = AsTileType(call->args_[0]);
+          auto in_axis = in_var ? axes.AxisOf(in_var.get()) : std::nullopt;
+          if (in_tt && in_axis.has_value()) {
+            auto in_half = HalvedNumelConst(in_tt, *in_axis);
+            auto out_half = TileNumelConst(std::dynamic_pointer_cast<const TileType>(new_result_type));
+            if (in_half.has_value() && out_half.has_value()) {
+              INTERNAL_CHECK_SPAN(*in_half == *out_half, assign->span_)
+                  << "Internal error: SplitVectorKernel halved " << op_name << " '"
+                  << assign->var_->name_hint_ << "' to numel " << *out_half
+                  << " but its split input contributes numel " << *in_half
+                  << " (split axis mis-mapped across the view)";
+            }
+          }
+        }
+
         std::vector<ExprPtr> new_args = call->args_;
         if ((op_name == "tile.full" || op_name == "tile.create") && call->args_.size() >= 1) {
-          new_args[0] = HalveTupleElement(call->args_[0], split_dim);
-        } else if (op_name == "tile.reshape" && call->args_.size() >= 2) {
-          new_args[1] = HalveTupleElement(call->args_[1], split_dim);
+          new_args[0] = HalveTupleElement(call->args_[0], resolved);
+        } else if ((op_name == "tile.reshape" || op_name == "tile.slice") && call->args_.size() >= 2) {
+          // Keep the explicit shape literal in sync with the halved result type
+          // on the resolved (possibly migrated) axis -- a stale full-width shape
+          // arg would over-read the halved source at codegen.
+          new_args[1] = HalveTupleElement(call->args_[1], resolved);
+        } else if (op_name == "tile.set_validshape" && call->args_.size() >= 3) {
+          // args: (tile, row_extent, col_extent) -- clamp the valid extent on the
+          // resolved axis to the halved shape dim. A full valid extent (== shape
+          // dim) shrinks to the halved dim; a partial valid extent already within
+          // the halved dim is left as-is (matches the un-split lowering and avoids
+          // halving an odd partial extent). codegen only rejects valid > shape dim.
+          const ExprPtr& valid = call->args_[1 + resolved];
+          auto vci = std::dynamic_pointer_cast<const ConstInt>(valid);
+          auto hci = std::dynamic_pointer_cast<const ConstInt>(half_dim_size);
+          if (vci && hci) {
+            if (vci->value_ > hci->value_) new_args[1 + resolved] = half_dim_size;
+          } else {
+            new_args[1 + resolved] = MakeMin(valid, half_dim_size, assign->span_);
+          }
         }
         auto new_call = std::make_shared<Call>(call->op_, std::move(new_args), call->kwargs_, new_result_type,
                                                call->span_);
         auto new_var = std::make_shared<Var>(assign->var_->name_hint_, new_result_type, assign->var_->span_);
-        TileInfo info{half_dim_size};
+        TileInfo info{half_dim_size, resolved};
         tile_vars[assign->var_.get()] = info;
         tile_vars[new_var.get()] = info;
         var_replacements[assign->var_.get()] = new_var;
@@ -588,7 +1005,8 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
       if (tile_var) {
         auto it = tile_vars.find(tile_var.get());
         if (it != tile_vars.end()) {
-          auto new_offsets = AdjustOffsets(call->args_[1], split_dim, it->second.half_dim_size, subblock_idx);
+          auto new_offsets =
+              AdjustOffsets(call->args_[1], it->second.split_dim, it->second.half_dim_size, subblock_idx);
           std::vector<ExprPtr> new_args = call->args_;
           new_args[1] = new_offsets;
           auto new_call = std::make_shared<Call>(call->op_, std::move(new_args), call->kwargs_,
@@ -629,8 +1047,8 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
             has_tracked_tile = true;
             tracked_info = it->second;
             tile_vars[ia.get()] = it->second;
-            new_type =
-                ApplyTrackedTileShape(ia->GetType(), split_dim, it->second.half_dim_size, subblock_idx);
+            new_type = ApplyTrackedTileShape(ia->GetType(), it->second.split_dim, it->second.half_dim_size,
+                                             subblock_idx);
           }
         }
       }
@@ -653,8 +1071,8 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
     } else {
       flat.push_back(for_stmt->body_);
     }
-    auto new_body_stmts =
-        ProcessStmts(flat, mode, split_int, split_dim, tile_vars, is_aiv, subblock_idx, var_replacements);
+    auto new_body_stmts = ProcessStmts(flat, mode, split_int, split_dim, axes, tile_vars, is_aiv,
+                                       subblock_idx, var_replacements);
     StmtPtr new_body = (new_body_stmts.size() == 1)
                            ? new_body_stmts[0]
                            : std::make_shared<SeqStmts>(new_body_stmts, for_stmt->span_);
@@ -671,7 +1089,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
       auto it = tile_vars.find(new_iter_args[i].get());
       if (it != tile_vars.end()) {
         tile_vars[new_return_vars[i].get()] = it->second;
-        auto new_type = ApplyTrackedTileShape(new_return_vars[i]->GetType(), split_dim,
+        auto new_type = ApplyTrackedTileShape(new_return_vars[i]->GetType(), it->second.split_dim,
                                               it->second.half_dim_size, subblock_idx);
         if (new_type != new_return_vars[i]->GetType()) {
           auto new_return_var =
@@ -693,7 +1111,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
     } else {
       then_flat.push_back(if_stmt->then_body_);
     }
-    auto new_then = ProcessStmts(then_flat, mode, split_int, split_dim, tile_vars, is_aiv, subblock_idx,
+    auto new_then = ProcessStmts(then_flat, mode, split_int, split_dim, axes, tile_vars, is_aiv, subblock_idx,
                                  var_replacements);
     StmtPtr new_then_body =
         (new_then.size() == 1) ? new_then[0] : std::make_shared<SeqStmts>(new_then, if_stmt->span_);
@@ -707,7 +1125,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
       } else {
         else_flat.push_back(else_body);
       }
-      auto new_else_stmts = ProcessStmts(else_flat, mode, split_int, split_dim, tile_vars, is_aiv,
+      auto new_else_stmts = ProcessStmts(else_flat, mode, split_int, split_dim, axes, tile_vars, is_aiv,
                                          subblock_idx, var_replacements);
       new_else = (new_else_stmts.size() == 1) ? new_else_stmts[0]
                                               : std::make_shared<SeqStmts>(new_else_stmts, if_stmt->span_);
@@ -719,8 +1137,8 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
   }
 
   if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(stmt)) {
-    auto new_stmts = ProcessStmts(seq->stmts_, mode, split_int, split_dim, tile_vars, is_aiv, subblock_idx,
-                                  var_replacements);
+    auto new_stmts = ProcessStmts(seq->stmts_, mode, split_int, split_dim, axes, tile_vars, is_aiv,
+                                  subblock_idx, var_replacements);
     return std::make_shared<SeqStmts>(new_stmts, seq->span_);
   }
 
@@ -728,14 +1146,15 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
 }
 
 std::vector<StmtPtr> ProcessStmts(const std::vector<StmtPtr>& stmts, SplitMode mode, int split_int,
-                                  int split_dim, std::unordered_map<const Var*, TileInfo>& tile_vars,
-                                  bool is_aiv, const ExprPtr& subblock_idx,
+                                  int split_dim, const SplitAxisAnalysis& axes,
+                                  std::unordered_map<const Var*, TileInfo>& tile_vars, bool is_aiv,
+                                  const ExprPtr& subblock_idx,
                                   std::unordered_map<const Var*, VarPtr>& var_replacements) {
   std::vector<StmtPtr> result;
   result.reserve(stmts.size());
   for (const auto& stmt : stmts) {
-    result.push_back(
-        ProcessStmt(stmt, mode, split_int, split_dim, tile_vars, is_aiv, subblock_idx, var_replacements));
+    result.push_back(ProcessStmt(stmt, mode, split_int, split_dim, axes, tile_vars, is_aiv, subblock_idx,
+                                 var_replacements));
   }
   return result;
 }
@@ -1124,7 +1543,14 @@ FunctionPtr ProcessFunction(const FunctionPtr& func, SplitMode mode) {
 
   auto injected = InjectSubblockIdx(func, is_aiv);
 
-  auto new_stmts = ProcessStmts(injected.body_stmts, mode, split_int, split_dim, tile_vars, is_aiv,
+  // Phase 1: resolve each tile's split axis (carries the axis through transpose
+  // / migrating reshape and resolves input-less accumulators from consumers).
+  SplitAxisAnalysis axes(split_dim);
+  if (is_aiv) {
+    axes.Run(injected.body_stmts);
+  }
+
+  auto new_stmts = ProcessStmts(injected.body_stmts, mode, split_int, split_dim, axes, tile_vars, is_aiv,
                                 injected.subblock_idx_expr, var_replacements);
   StmtPtr new_body =
       (new_stmts.size() == 1) ? new_stmts[0] : std::make_shared<SeqStmts>(new_stmts, func->span_);

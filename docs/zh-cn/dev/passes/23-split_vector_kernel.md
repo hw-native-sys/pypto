@@ -111,7 +111,18 @@ codegen（`src/codegen/orchestration/orchestration_codegen.cpp` 中的
 3. （仅 AIV）InjectSubblockIdx 在函数体头部插入：
        subblock_idx = tile.get_subblock_idx()
    若 'subblock_idx' 已被占用则改用一个新名字。
-4. 通过 ProcessStmt 遍历每条语句：
+4. （仅 AIV）SplitAxisAnalysis 在任何改写前先解析每个 tile 的拆分轴
+   （phase 1）。多数 tile 在 `split_dim` 上拆分，但 tile.transpose /
+   保 numel 的 tile.reshape 会让拆分轴在维度间**迁移**（把 per-row 归约
+   转置成 `[1, N]` 行，会把拆分轴从行挪到列）；而没有生产者输入的累加器
+   （tile.full / tile.create / pipeline iter_arg）的轴只能由消费者决定，
+   不能由生产者决定。一个 fixpoint 先把 load / tpop_from_aic 以 `split_dim`
+   作种子，再沿 op 的「操作数<->结果」关系双向传播该轴（transpose 交换、
+   reshape 映射、elementwise/reduce 保持、iter_arg 统一 init/arg/return）；
+   传播后仍未定的 tile 回落到 `split_dim`。不变量：从不经过 transpose 或
+   迁移 reshape 的 tile 解析结果就是 `split_dim`，发出的 IR 与按全局轴减半
+   逐字节一致。
+5. 通过 ProcessStmt 遍历每条语句，在各 tile 的解析轴上减半：
 
    tile.tpush_to_aiv / tile.tpush_to_aic / tile.tpop_from_aiv：
      RebuildCallWithSplit —— 仅同步 `split=` kwarg。AIC 保留完整操作
@@ -142,18 +153,19 @@ codegen（`src/codegen/orchestration/orchestration_codegen.cpp` 中的
      —— 必须让每条 lane 拿到自己的那一半。由于 reshape 是无偏移的视图，
      只减半结果类型会让两条 lane 都读到整段 buffer 的前半。因此当 reshape
      的输入**未被拆分**且结果 split 轴是静态、非 singleton 的 extent 时，
-     按整宽发出 reshape，并紧跟一个 per-subblock 的 tile.slice，在 split 轴上
+     按整宽发出 reshape，并紧跟一个 per-subblock 的 tile.slice，在解析轴上
      选取 `[..., subblock_idx * half : +half]`（切片结果与原变量都登记进
-     tile_vars）。若 reshape 后的 split 轴是 singleton（如 UpDown 下的
-     [D] -> [1, D]），由上面的 singleton 规则保持整段（两条 lane 都需要）；
-     若输入已被拆分，则落到下面的结果减半逻辑，并同步在 split 轴上减半
-     显式的目标 shape 参数（若 shape 字面量保持原值，memory_reuse 会按
-     未拆分的 shape 计算输出大小，进而无法放入拆分后的复用槽而中止）。
+     tile_vars）。当输入**已被拆分**时，reshape 在解析轴上同时减半结果类型
+     与显式的目标 shape 参数 —— 该轴可能**迁移**（如 `[N, 1] -> [1, N]` 把
+     拆分从 dim0 挪到 dim1）；若改为减半未拆分的整段字面量，memory_reuse 会
+     按未拆分的 shape 计算输出大小，进而无法放入拆分后的复用槽而中止。
 
    产生 TileType 的其他 tile.* op（仅 AIV）：
-     在 split_dim 上减半结果 shape；tile.full / tile.create 还会减半
-     静态 shape 参数。命中 split 轴的 reduce op 由 IsReduceOnSplitAxis
-     拦截抛 ValueError（单 subblock 内的部分 reduce 语义不正确）。
+     在该 tile 的解析轴上减半结果 shape；tile.full / tile.create 还会减半
+     静态 shape 参数 —— 没有生产者的累加器从「与某个已拆分 tile 配对」的
+     消费者处取得轴（phase 1）。解析为无轴的 tile（两条 lane 都需要的广播）
+     保持整段。命中输入拆分轴的 reduce op 由 IsReduceOnSplitAxis 拦截抛
+     ValueError（单 subblock 内的部分 reduce 语义不正确）。
 
    ForStmt：
      若 iter_args 的 initValue 是被追踪的 halved tile，则重建 iter_arg
@@ -163,11 +175,11 @@ codegen（`src/codegen/orchestration/orchestration_codegen.cpp` 中的
    IfStmt / SeqStmts：
      递归处理分支与语句序列。
 
-5. 重写完成后，transform_utils::Substitute 应用 var_replacements，确
+6. 重写完成后，transform_utils::Substitute 应用 var_replacements，确
    保所有引用（param、iter_arg、return_var、tpop 结果）看到的是重写
    后的 Var。
-6. 调用 DeepClone，避免与共享 IR 子树纠缠。
-7. WithSplitAttrs 把解析得到的 SplitMode 写回 Function::attrs（覆盖原
+7. 调用 DeepClone，避免与共享 IR 子树纠缠。
+8. WithSplitAttrs 把解析得到的 SplitMode 写回 Function::attrs（覆盖原
    有 `split` 项）。对于解析得到非 None 模式的 AIV 函数，**还会**写入
    `dual_aiv_dispatch=true`，让 orchestration codegen 通过单一属性查询
    决策，而不再从 `SplitMode` 重新推导。
@@ -488,6 +500,9 @@ Pass SplitVectorKernel();
   `LocalizeValidDimForSplit` —— TileType 改写器。
 - `AdjustOffsets` —— `tile.load`/`tile.store` 在 split 轴上的偏移修正。
 - `IsReduceOnSplitAxis` —— 部分 reduce 错误的守卫。
+- `TileNumelConst` / `HalvedNumelConst` —— numel 一致性守卫：split 输入的
+  `reshape`/`transpose` 减半后元素数必须保持,split 轴若被错误映射会在本 pass
+  （带 tile 名）报错,而不是在后续 `memory_reuse` 才崩。
 - `RequiresNoSplitDualAivSync` / `ProcessNoSplitDualAivFunction` /
   `BuildNoSplitLane1ReplayStmts` / `RebuildLane1CallWithZeroValidShape` /
   `IsNoSplitSharedPipeSetupCall` —— Ascend910B no-split 路径。

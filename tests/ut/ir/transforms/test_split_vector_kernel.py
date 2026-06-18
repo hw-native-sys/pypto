@@ -843,6 +843,62 @@ class TestSplitVectorKernelUpDown:
 
         _assert_split_matches_expected(Before, Expected)
 
+    def test_reshape_migrates_split_axis_for_full_accumulator(self):
+        """UP_DOWN: a reshape that transposes the split axis migrates it, and an
+        input-less full accumulator inherits the migrated axis from its consumer.
+
+        ``col`` (split on dim0) is reshaped ``[16, 1] -> [1, 16]``, moving the
+        split from rows to columns. The ``acc`` accumulator has no producer tile,
+        so its split axis is resolved backward from the ``add`` that pairs it with
+        the dim1-split ``row``: both ``acc`` and the reshape must halve on dim1
+        (``[1, 16] -> [1, 8]``), not on the default dim0. The store then offsets
+        on the migrated axis.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main_aiv(
+                self,
+                data: pl.Tensor[[16, 1], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
+            ) -> pl.Tensor[[1, 16], pl.FP32]:
+                acc: pl.Tile[[1, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tile.full(
+                    [1, 16], dtype=pl.FP32, value=0.0
+                )
+                col: pl.Tile[[16, 1], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    data, [0, 0], [16, 1], target_memory=pl.MemorySpace.Vec
+                )
+                row: pl.Tile[[1, 16], pl.FP32, pl.MemorySpace.Vec] = pl.reshape(col, [1, 16])
+                acc_2: pl.Tile[[1, 16], pl.FP32, pl.MemorySpace.Vec] = pl.add(acc, row)
+                out_0_store: pl.Tensor[[1, 16], pl.FP32] = pl.store(acc_2, [0, 0], out_0)
+                return out_0_store
+
+        @pl.program
+        class Expected:
+            @pl.function(
+                type=pl.FunctionType.AIV,
+                attrs={"split": pl.SplitMode.UP_DOWN, "dual_aiv_dispatch": True},
+            )
+            def main_aiv(
+                self,
+                data: pl.Tensor[[16, 1], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
+            ) -> pl.Tensor[[1, 16], pl.FP32]:
+                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+                acc: pl.Tile[[1, 8], pl.FP32, pl.MemorySpace.Vec] = pl.tile.full(
+                    [1, 8], dtype=pl.FP32, value=0.0
+                )
+                col: pl.Tile[[8, 1], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    data, [0 + subblock_idx * 8, 0], [8, 1], target_memory=pl.MemorySpace.Vec
+                )
+                row: pl.Tile[[1, 8], pl.FP32, pl.MemorySpace.Vec] = pl.reshape(col, [1, 8])
+                acc_2: pl.Tile[[1, 8], pl.FP32, pl.MemorySpace.Vec] = pl.add(acc, row)
+                out_0_store: pl.Tensor[[1, 16], pl.FP32] = pl.store(acc_2, [0, 0 + subblock_idx * 8], out_0)
+                return out_0_store
+
+        _assert_split_matches_expected(Before, Expected)
+
     def test_reduce_on_split_axis_rejected(self):
         """Reduce on split axis (dim0 under UP_DOWN) must raise ValueError."""
 

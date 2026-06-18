@@ -117,7 +117,21 @@ reads only this attribute and never re-derives from `SplitMode`.
 3. (AIV only) InjectSubblockIdx prepends:
        subblock_idx = tile.get_subblock_idx()
    to the body, picking a fresh name if 'subblock_idx' is already taken.
-4. Walk every statement via ProcessStmt:
+4. (AIV only) SplitAxisAnalysis resolves the split axis of every tile
+   before any rewrite (phase 1). Most tiles split on `split_dim`, but a
+   tile.transpose / numel-preserving tile.reshape MIGRATES the axis between
+   dims (a per-row reduction transposed to a `[1, N]` row moves the split
+   from rows to columns), and an input-less accumulator (tile.full /
+   tile.create / pipeline iter_arg) takes its axis from a consumer, not a
+   producer. A fixpoint seeds loads / tpop_from_aic at `split_dim` and
+   propagates the axis both ways across op operand<->result relations
+   (transpose swaps it, reshape maps it, elementwise/reduce keep it,
+   iter_args unify init/arg/return); any tile left unresolved defaults to
+   `split_dim`. INVARIANT: a tile that never crosses a transpose or a
+   migrating reshape resolves to `split_dim`, so the emitted IR is
+   byte-identical to halving on the global axis.
+5. Walk every statement via ProcessStmt, halving each tile on its
+   resolved axis:
 
    tile.tpush_to_aiv / tile.tpush_to_aic / tile.tpop_from_aiv:
      RebuildCallWithSplit — sync the `split=` kwarg only. AIC keeps the
@@ -149,21 +163,23 @@ reads only this attribute and never re-derives from `SplitMode`.
      per-channel scale [D] -> [1, D] — must give each lane its own half.
      Because reshape is an offsetless view, halving only its result type
      would leave BOTH lanes reading the first half of the full buffer. So
-     when the reshape input is NOT already split and the result's split-axis
-     dim is a static non-singleton extent, emit the reshape at full width
-     and follow it with a per-subblock tile.slice selecting
-     `[..., subblock_idx * half : +half]` on the split axis (the slice
-     result, and the original var, are both tracked in tile_vars). If the
-     reshaped split-axis dim is singleton (e.g. [D] -> [1, D] under UpDown)
-     the singleton rule above keeps it full — both lanes need it. If the
-     input is already split, the reshape falls through to result-halving,
-     which also halves the explicit target-shape argument on the split axis
-     (leaving the literal stale would make memory_reuse size the output from
-     the un-split shape and abort against the split-sized slot).
+     when the reshape input is NOT split and the result's resolved-axis dim
+     is a static non-singleton extent, emit the reshape at full width and
+     follow it with a per-subblock tile.slice selecting
+     `[..., subblock_idx * half : +half]` on the resolved axis (the slice
+     result, and the original var, are both tracked in tile_vars). When the
+     input IS split, the reshape halves its result type AND its explicit
+     target-shape argument on the resolved axis — which may MIGRATE (e.g.
+     `[N, 1] -> [1, N]` moves the split from dim0 to dim1); halving the
+     stale full literal instead would make memory_reuse size the output
+     from the un-split shape and abort against the split-sized slot.
 
    any other tile.* op producing a TileType (AIV only):
-     Halve the result shape on split_dim. For tile.full / tile.create the
-     static shape arg is also halved. Reduce ops on the split axis raise
+     Halve the result shape on the tile's resolved axis. For tile.full /
+     tile.create the static shape arg is also halved — an accumulator with
+     no producer takes its axis from the consumer that pairs it with a split
+     tile (phase 1). Tiles that resolve to no axis (broadcasts both lanes
+     need) are left full. Reduce ops on the input's split axis raise
      ValueError via IsReduceOnSplitAxis (partial reduction would be
      incorrect).
 
@@ -176,11 +192,11 @@ reads only this attribute and never re-derives from `SplitMode`.
    IfStmt / SeqStmts:
      Recurse into branches and stmt sequences.
 
-5. After rewriting, transform_utils::Substitute applies var_replacements
+6. After rewriting, transform_utils::Substitute applies var_replacements
    so every reference (param, iter_arg, return_var, tpop result) sees the
    rewritten Var node.
-6. DeepClone is applied to detach from any shared IR sub-trees.
-7. WithSplitAttrs stamps the resolved SplitMode onto Function::attrs
+7. DeepClone is applied to detach from any shared IR sub-trees.
+8. WithSplitAttrs stamps the resolved SplitMode onto Function::attrs
    (overwriting any prior `split` entry). For AIV functions whose
    resolved mode is non-None it *also* writes `dual_aiv_dispatch=true`
    so orchestration codegen has a single attribute to read instead of
@@ -516,6 +532,10 @@ Pass SplitVectorKernel();
   `LocalizeValidDimForSplit` — tile type rewriters.
 - `AdjustOffsets` — split-axis offset shift on `tile.load`/`tile.store`.
 - `IsReduceOnSplitAxis` — guard for partial-reduction errors.
+- `TileNumelConst` / `HalvedNumelConst` — numel-consistency guard: a halved
+  `reshape`/`transpose` of a split input must keep its element count, so a
+  mis-mapped split axis fails here (with the tile name) rather than later in
+  `memory_reuse`.
 - `RequiresNoSplitDualAivSync` / `ProcessNoSplitDualAivFunction` /
   `BuildNoSplitLane1ReplayStmts` / `RebuildLane1CallWithZeroValidShape` /
   `IsNoSplitSharedPipeSetupCall` — Ascend910B no-split path.
