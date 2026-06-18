@@ -386,6 +386,13 @@ TypePtr DeduceTileCreateTileType(const std::vector<ExprPtr>& args,
   for (const auto& [k, v] : kwargs) {
     if (k == "transpose") transpose_layout = AnyCast<bool>(v, "transpose");
   }
+  // The transposed Mat (ZN) layout is a 2D L1 matmul-`b_trans` operand layout; it
+  // is meaningless for a non-Mat space or a non-2D shape. Fail fast rather than
+  // emit an invalid tile (mirrors tile.load's Mat-only transpose guard).
+  CHECK(!transpose_layout ||
+        (tile_shape.size() == 2 && target_memory_opt.has_value() && *target_memory_opt == MemorySpace::Mat))
+      << "The operator " << op_name
+      << " supports transpose=true only for a 2D tile with target_memory=Mat (L1)";
 
   if (target_memory_opt.has_value() && *target_memory_opt == MemorySpace::Acc) {
     tile_view.blayout = TileLayout::col_major;

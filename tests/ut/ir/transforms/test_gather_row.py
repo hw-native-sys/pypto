@@ -174,6 +174,20 @@ def test_create_l1_rejects_non_positive_shape():
                 return kv
 
 
+def test_tile_create_transpose_rejects_non_mat():
+    """tile.create transpose=True is a Mat-only (L1) layout; a non-Mat space is rejected."""
+    with pytest.raises(Exception, match="transpose=true only for a 2D tile with target_memory=Mat"):
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, src: pl.Tensor[[256, 128], pl.BF16]) -> pl.Tensor[[256, 128], pl.BF16]:
+                # transpose on a Vec tile produces invalid Mat-ZN metadata — the CHECK
+                # fires here at tile.create during tracing, before the return.
+                pl.tile.create([16, 128], dtype=pl.BF16, target_memory=pl.Mem.Vec, transpose=True)
+                return src
+
+
 @pytest.mark.parametrize("transpose", [False, True])
 def test_gather_row_survives_full_pipeline(transpose):
     """The create_l1 + per-row gather_row loop survives the full Default pipeline."""
