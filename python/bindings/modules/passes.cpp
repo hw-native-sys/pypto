@@ -420,15 +420,13 @@ void BindPass(nb::module_& m) {
   passes.def("convert_tensor_to_tile_ops", &pass::ConvertTensorToTileOps,
              "Create a pass that converts tensor ops to tile ops in InCore functions");
   passes.def("optimize_orch_tensors", &pass::OptimizeOrchTensors,
-             nb::arg("output_window_policy") = "coalesce_pieces", nb::arg("window_rewrite_policy") = "auto",
+             nb::arg("window_policy") = "auto",
              "Create a pass that optimizes tensor buffer usage in orchestration and InCore functions\n\n"
              "Applies five patterns: iter-arg reuse (merge Out->InOut), assemble parent\n"
              "strides (attach TensorView to Out params), assemble-loop rewrite\n"
              "(convert tile.assemble loops to tile.store loops), slice input strides,\n"
              "and static window externalization. "
-             "output_window_policy may be 'exact_pieces' or 'coalesce_pieces'. "
-             "window_rewrite_policy may be 'auto', 'all', 'inputs_only', 'outputs_only', "
-             "'no_inputs', 'no_outputs', 'no_multi_piece_outputs', 'none', or 'disabled'.");
+             "window_policy may be 'auto', 'all', or 'off'.");
   passes.def("flatten_tile_nd_to_2d", &pass::FlattenTileNdTo2D,
              "Create a pass that flattens ND tile ops to 2D in InCore functions\n\n"
              "Merges all dimensions except the last into a single dimension.\n"

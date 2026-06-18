@@ -27,40 +27,39 @@ opt_pass = passes.optimize_orch_tensors()
 program_opt = opt_pass(program)
 ```
 
-默认情况下，模式 5 使用：
+本 pass 接受单个 `window_policy` 参数（默认 `"auto"`）：
 
 ```python
-passes.optimize_orch_tensors(
-    output_window_policy="coalesce_pieces",
-    window_rewrite_policy="auto",
-)
+passes.optimize_orch_tensors(window_policy="auto")
 ```
 
-`output_window_policy` 控制已通过 rewrite policy gate 的 output pieces 如何表达：
+`window_policy` 控制窗口外部化策略：
 
-- `exact_pieces`：每个已证明的 dense piece 保持为独立 window。
-- `coalesce_pieces`：多个 output pieces 先合并成一个 bounding carrier window，再在 callsite 做 fine slice 和 assemble。
+| 值 | Output 行为 | Input 行为 | 说明 |
+|----|------------|-----------|------|
+| `"auto"` | ABI-safe 单 piece window | ABI-safe + carrier-based dynamic | 默认；proof-based 安全 |
+| `"all"` | 所有静态合法 piece（含多 piece） | 同 `auto` + carrier-based dynamic reader | 放宽 output 过滤 |
+| `"off"` | 不做 windowing | 不做 windowing | 全局 kill switch，覆盖 kernel attrs |
 
-`window_rewrite_policy` 控制哪些已证明候选能通过最后的策略门槛：
+**Per-kernel 覆盖**（通过 function attrs）：
 
-- `auto`：默认保守模式。只保留 ABI-neutral 或 ABI-reducing 的简单 window 候选，并拒绝 multi-piece output rewrite 和 dynamic-indexed input window。
-- `all`：保留所有静态合法候选，适合 ablation 和调试。
-- `inputs_only` / `no_outputs`：只保留 input-window rewrite。
-- `outputs_only` / `no_inputs`：只保留 output-window rewrite。
-- `no_multi_piece_outputs`：拒绝仍需要多个 pieces 或 fine assemble pieces 的 output 候选。
-- `none` / `disabled`：关闭模式 5 window rewrite。
+```python
+@pl.function(
+    type=pl.FunctionType.InCore,
+    attrs={
+        "window_outputs": "coalesce",  # off | auto | all | coalesce
+        "window_inputs":  "off",       # off | auto
+    }
+)
+def my_kernel(...): ...
+```
 
-这两组选项的语义应保持正交。`auto` 决定复杂候选是否值得默认改写；
-`all` 允许所有已证明正确的复杂 window。`exact_pieces` /
-`coalesce_pieces` 只决定已经允许的 multi-piece output 如何表达。
+当全局 `window_policy != "off"` 时，kernel attrs 覆盖全局默认值。`"off"` 是全局 kill switch，不可被覆盖。
 
-例如，在 Qwen prefill 风格的 dynamic-indexed KV-cache writer/reader 链中，
-预期边界是：
+例如，在 Qwen prefill 风格的 dynamic-indexed KV-cache writer/reader 链中：
 
-- `exact_pieces + auto`：只保留局部简单 window。在这个示例中，dynamic KV-cache writer 和 reader window 保持 full-tensor，不引入 carrier/remat。
-- `exact_pieces + all`：将已证明正确的 writer window 表达为 exact pieces，并将匹配的 dynamic reader 改写为 standalone input slice。由于 `exact_pieces` 当前不表达 multi-piece carrier，该模式不构造 carrier/remat。
-- `coalesce_pieces + auto`：通常接近 `exact_pieces + auto`；选择 coalesce 本身不会打开复杂 window。
-- `coalesce_pieces + all`：改写已证明正确的复杂 window，把 multi-piece output 合并为 bounding carrier，并使用该 carrier 打通 dynamic writer-to-reader 链。
+- `"auto"`：只保留局部简单 window。Dynamic KV-cache writer 和 reader 保持 full-tensor，不引入 carrier/remat。
+- `"all"`：重写已证明正确的 writer window 为 exact pieces。无 carrier 的 dynamic reader 保持 full parent tensor（无 private dynamic reader）。
 
 parent shape 含 dynamic dim 的 output window 会保守处理。对 dynamic parent 的
 static-offset/static-size 静态 partial window 会保持 full-tensor，因为同一个编译图可能用更小的
@@ -142,7 +141,7 @@ loop-carried iter-arg 不会被这样折叠。
 
 本 pass 有意保持保守的 window eligibility。它不会按 `topk` 等算子名字做特判；只有 callee 函数体能证明满足下面的访问模式时，才会 window 化。
 
-静态 eligibility 之后，默认 `auto` 策略还会再做一层保守 cost gate。它会拒绝增加 rewritten tensor 参数数量的候选，拒绝 dynamic-indexed input window，并默认拒绝 multi-piece output rewrite。这样默认流水线不会为了局部 window 精度而换来更大的 dispatch 签名、更多 callsite orchestration，或收益依赖 workload 的复杂 dynamic-window scan。需要手动研究这些候选时，可以使用 `window_rewrite_policy="all"`。
+静态 eligibility 之后，默认 `auto` 策略还会再做一层保守 cost gate。它会拒绝增加 rewritten tensor 参数数量的候选，并默认拒绝 multi-piece output rewrite；dynamic-indexed input 只有在能复用 output-derived carrier 时才会 window 化，否则保持 full-parent。这样默认流水线不会为了局部 window 精度而换来更大的 dispatch 签名、更多 callsite orchestration，或收益依赖 workload 的私有 dynamic-window scan。需要手动研究 output 候选时，可以使用 `window_policy="all"`；input 侧 v5 仍只有 `off` / `auto` 两档。
 
 支持的改写形态：
 
@@ -150,7 +149,7 @@ loop-carried iter-arg 不会被这样折叠。
 - `AggregateWindowLoop`：callee 在循环中携带一个或多个 `Out`，并写入静态可证明的聚合窗口，例如 outlined `kv_proj` 分组形态
 - `PureInputWindowConsumer`：有数据返回的 callee 中，某个 `In` 张量参数只通过同一个局部输入窗口被使用
 - `AggregateInputWindowLoop`：与 `AggregateWindowLoop` 输出改写配套使用；某个 `In` 张量参数只通过内部 loop 的局部 `tile.load`/`tensor.slice` 窗口读取，并且这些 offset 能沿同一个内部 loop 展开为一个静态可证明的 parent-shaped region，例如 qk norm 的 q/k 输入
-- `RuntimeCurrentAggregator`：在 `coalesce_pieces` 且 rewrite policy 不是 `none` 时，部分 prefill producer/consumer 组合如果先写很多窗口、再喂给重复 full-tensor reader，会插入一个 runtime 可见的 current marker。当前例子是 `attn_tile` 喂给 `out_proj`，以及 `mlp_silu_tile` 喂给 `down_proj`。
+- `RuntimeCurrentAggregator`：当任何函数有 `window_outputs="coalesce"`（per-kernel attr 或全局 coalesce）时，coalesced producer loop 返回的张量如果会喂给后续重复 full-tensor `In` reader，会插入一个 runtime 可见的 current marker。匹配由 attrs 驱动，不依赖模型特定的 callee 名或变量名。
 
 输出窗口 eligibility：
 
@@ -180,7 +179,7 @@ loop-carried iter-arg 不会被这样折叠。
 - input-only 的 `Submit` callsite 保持 full-tensor；在 `manual_scope` 中，即使 callee body 只读局部窗口，full input 也可能有意表达更宽的依赖
 - 如果同一个 callee 同时满足 output-window 改写，已经证明成立的 pure input window 会被保留，并在同一个 callsite 一起物化
 - 对 `AggregateInputWindowLoop`，所有引用必须位于同一个静态 `ForStmt` 内，至少一个 offset 维度必须随该 loop 变化，并且聚合窗口必须等于输入 parent shape；权重子窗口这类 partial aggregate read 仍保持 full-tensor
-- dynamic-indexed reader window 需要可证明的 min/max scan。`auto` 会拒绝这类候选。`all + exact_pieces` 下，callsite 会物化 standalone dynamic input slice，并把 base/extent scalar 传给 windowed callee。`all + coalesce_pieces` 下，eligible 的 writer-reader 链可以改走 coalesced carrier/remat 路径。
+- dynamic-indexed reader window 需要可证明的 min/max scan。`auto` 会拒绝这类候选。`all` 下，有 carrier 的 eligible writer-reader chain 走 carrier/remat 路径；无 carrier 的 dynamic reader 保持 full parent tensor（无 private dynamic reader）。
 
 非目标与依赖模型：
 

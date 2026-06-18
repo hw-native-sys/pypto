@@ -11,7 +11,7 @@
 from collections.abc import Callable
 from enum import Enum
 from types import TracebackType
-from typing import overload
+from typing import Literal, overload
 
 from pypto.pypto_core.ir import Function, Program, Span, Stmt
 
@@ -430,8 +430,7 @@ def convert_tensor_to_tile_ops() -> Pass:
     """Create a pass that converts tensor ops to tile ops in InCore functions."""
 
 def optimize_orch_tensors(
-    output_window_policy: str = "coalesce_pieces",
-    window_rewrite_policy: str = "auto",
+    window_policy: Literal["auto", "all", "off"] = "auto",
 ) -> Pass:
     """Create a pass that optimizes tensor buffer usage in orchestration and InCore functions."""
 

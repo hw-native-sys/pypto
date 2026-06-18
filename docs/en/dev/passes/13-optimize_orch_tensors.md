@@ -27,42 +27,43 @@ opt_pass = passes.optimize_orch_tensors()
 program_opt = opt_pass(program)
 ```
 
-By default, Pattern 5 uses:
+The pass accepts a single `window_policy` parameter (default `"auto"`):
 
 ```python
-passes.optimize_orch_tensors(
-    output_window_policy="coalesce_pieces",
-    window_rewrite_policy="auto",
-)
+passes.optimize_orch_tensors(window_policy="auto")
 ```
 
-`output_window_policy` controls how proven output pieces are represented after
-the candidate has passed the rewrite policy gate:
+`window_policy` controls the window externalization strategy:
 
-- `exact_pieces`: keep each proven dense piece as a separate window.
-- `coalesce_pieces`: merge multiple output pieces into one bounding carrier window, then fine-slice and assemble at the call site.
+| Value | Output behavior | Input behavior | Notes |
+|-------|----------------|----------------|-------|
+| `"auto"` | ABI-safe single-piece windows | ABI-safe + carrier-based dynamic | Default; proof-based safe |
+| `"all"` | All statically legal pieces (incl. multi-piece) | Same as `auto` + carrier-based dynamic reader | Relaxes output filtering |
+| `"off"` | No windowing | No windowing | Kill switch; overrides kernel attrs |
 
-`window_rewrite_policy` controls which proven candidates survive the final policy gate:
+**Per-kernel overrides** via function attrs:
 
-- `auto`: default conservative mode. It keeps only ABI-neutral or ABI-reducing simple-window candidates, and rejects multi-piece output rewrites and dynamic-indexed input windows.
-- `all`: keep all statically legal candidates. This is useful for ablation and debugging.
-- `inputs_only` / `no_outputs`: keep only input-window rewrites.
-- `outputs_only` / `no_inputs`: keep only output-window rewrites.
-- `no_multi_piece_outputs`: reject output candidates that still require multiple pieces or fine assemble pieces.
-- `none` / `disabled`: disable Pattern 5 window rewrites.
+```python
+@pl.function(
+    type=pl.FunctionType.InCore,
+    attrs={
+        "window_outputs": "coalesce",  # off | auto | all | coalesce
+        "window_inputs":  "off",       # off | auto
+    }
+)
+def my_kernel(...): ...
+```
 
-The two options are intended to be orthogonal. `auto` decides whether a complex
-candidate is worth rewriting by default; `all` allows correctness-proven complex
-windows. `exact_pieces` versus `coalesce_pieces` decides how an already-allowed
-multi-piece output is expressed.
+When global `window_policy != "off"`, per-kernel attrs override the global default. `"off"` is
+a global kill switch that cannot be overridden.
 
 For example, in a Qwen prefill-style dynamic-indexed KV-cache writer/reader
 chain, the expected boundary is:
 
-- `exact_pieces + auto`: keep local/simple windows only. In this example, the dynamic KV-cache writer and reader windows stay full-tensor, and no carrier/remat is introduced.
-- `exact_pieces + all`: rewrite correctness-proven writer windows as exact pieces, and rewrite matching dynamic readers as standalone input slices. Because multi-piece carriers are not represented in `exact_pieces`, this mode does not build carrier/remat.
-- `coalesce_pieces + auto`: remains close to `exact_pieces + auto`; choosing coalescing does not open complex windows by itself.
-- `coalesce_pieces + all`: rewrite correctness-proven complex windows, coalesce multi-piece outputs into a bounding carrier, and use that carrier to connect dynamic writer-to-reader chains.
+- `"auto"`: keep local/simple windows only. Dynamic KV-cache writer and reader
+  windows stay full-tensor, and no carrier/remat is introduced.
+- `"all"`: rewrite correctness-proven writer windows as exact pieces. Dynamic
+  readers without a carrier keep full parent tensor (no private dynamic reader).
 
 Output windows whose parent shape has dynamic dimensions are handled
 conservatively. A static-offset/static-size partial window over a dynamic parent
@@ -148,11 +149,14 @@ This pass intentionally keeps window eligibility conservative. It does not speci
 
 After static eligibility, the default `auto` policy applies one more conservative
 cost gate. It rejects candidates that would increase the number of rewritten
-tensor arguments, rejects dynamic-indexed input windows, and rejects multi-piece
-output rewrites by default. This keeps the default pipeline from trading local
-window precision for larger dispatch signatures, extra call-site orchestration,
-or complex dynamic-window scans whose performance benefit is workload-dependent.
-Use `window_rewrite_policy="all"` when investigating such candidates manually.
+tensor arguments and rejects multi-piece output rewrites by default. A
+dynamic-indexed input is windowed only when it can reuse an output-derived
+carrier; otherwise the reader keeps the full parent tensor. This keeps the
+default pipeline from trading local window precision for larger dispatch
+signatures, extra call-site orchestration, or private dynamic-window scans whose
+performance benefit is workload-dependent. Use `window_policy="all"` when
+investigating output candidates manually; v5 input policy still only supports
+`off` / `auto`.
 
 Supported rewrite shapes:
 
@@ -160,7 +164,7 @@ Supported rewrite shapes:
 - `AggregateWindowLoop`: the callee carries one or more `Out` tensors through a loop and writes a statically provable aggregate window, such as the outlined `kv_proj` group shape
 - `PureInputWindowConsumer`: an `In` tensor parameter in a data-returning callee is used only through the same local input window
 - `AggregateInputWindowLoop`: together with an `AggregateWindowLoop` output rewrite, an `In` tensor parameter is read only through loop-local `tile.load`/`tensor.slice` windows whose offsets expand across that same internal loop into one statically provable parent-shaped region, such as q/k inputs of qk norm
-- `RuntimeCurrentAggregator`: under `coalesce_pieces` and any rewrite policy except `none`, selected prefill producer/consumer pairs that write many windows and then feed repeated full-tensor readers get a small runtime-visible current marker. Current examples are `attn_tile` feeding `out_proj` and `mlp_silu_tile` feeding `down_proj`.
+- `RuntimeCurrentAggregator`: when any function has `window_outputs="coalesce"` (per-kernel attr or global coalesce), coalesced producer loops whose returned tensor feeds a later repeated full-tensor `In` reader get a small runtime-visible current marker. The match is attrs-driven and does not depend on model-specific callee or variable names.
 
 Output-window eligibility:
 
@@ -190,7 +194,7 @@ Input-window eligibility:
 - input-only `Submit` callsites stay full-tensor; inside `manual_scope`, a full input may intentionally carry a wider dependency even when the callee body reads a local window
 - when a callee also has an eligible output-window rewrite, any already proven pure input windows are preserved and materialized at the same callsite
 - for `AggregateInputWindowLoop`, all references must be inside one static `ForStmt`, at least one offset dimension must vary with that loop, and the aggregate window must equal the input parent shape; partial aggregate reads such as weight sub-windows remain full-tensor
-- dynamic-indexed reader windows require a provable min/max scan. They are rejected by `auto`. Under `all + exact_pieces`, the call site materializes a standalone dynamic input slice and passes the base/extent scalars to the windowed callee. Under `all + coalesce_pieces`, eligible writer-reader chains may instead use a coalesced carrier/remat path.
+- dynamic-indexed reader windows require a provable min/max scan. They are rejected by `auto`. Under `all`, eligible writer-reader chains with a carrier use the carrier/remat path; without a carrier, the dynamic reader keeps full parent tensor (no private dynamic reader).
 
 Non-goals and dependence model:
 

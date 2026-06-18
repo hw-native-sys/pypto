@@ -1911,11 +1911,67 @@ class OutWindowExternalizer {
   enum class WindowRewritePolicy {
     Auto,
     All,
-    InputsOnly,
-    OutputsOnly,
-    NoMultiPieceOutputs,
-    None,
+    None,  // Kill switch: global "off" maps here.
   };
+
+  // v5 per-function effective policies resolved from global policy + kernel attrs.
+  struct EffectivePolicies {
+    enum class OutputPolicy { Off, Auto, All, Coalesce };
+    enum class InputPolicy { Off, Auto };
+    OutputPolicy output;
+    InputPolicy input;
+  };
+
+  static EffectivePolicies ResolveEffectivePolicies(const FunctionPtr& func,
+                                                     OutputWindowPolicy global_output_policy,
+                                                     WindowRewritePolicy global_window_rewrite_policy) {
+    // Global kill switch: off overrides everything, no per-kernel override.
+    if (global_window_rewrite_policy == WindowRewritePolicy::None) {
+      return {EffectivePolicies::OutputPolicy::Off, EffectivePolicies::InputPolicy::Off};
+    }
+
+    // Map global v4 enums to v5 effective defaults.
+    EffectivePolicies ep;
+    if (global_output_policy == OutputWindowPolicy::CoalescePieces) {
+      ep.output = EffectivePolicies::OutputPolicy::Coalesce;
+    } else {
+      ep.output = (global_window_rewrite_policy == WindowRewritePolicy::All)
+                      ? EffectivePolicies::OutputPolicy::All
+                      : EffectivePolicies::OutputPolicy::Auto;
+    }
+    ep.input = EffectivePolicies::InputPolicy::Auto;
+
+    // Per-kernel attrs override (only when global is not off).
+    if (func) {
+      if (func->HasAttr("window_outputs")) {
+        auto val = func->GetAttr<std::string>("window_outputs", "");
+        if (val == "off") {
+          ep.output = EffectivePolicies::OutputPolicy::Off;
+        } else if (val == "auto") {
+          ep.output = EffectivePolicies::OutputPolicy::Auto;
+        } else if (val == "all") {
+          ep.output = EffectivePolicies::OutputPolicy::All;
+        } else if (val == "coalesce") {
+          ep.output = EffectivePolicies::OutputPolicy::Coalesce;
+        } else {
+          CHECK(false) << "Invalid window_outputs attr '" << val
+                       << "': expected 'off', 'auto', 'all', or 'coalesce'";
+        }
+      }
+      if (func->HasAttr("window_inputs")) {
+        auto val = func->GetAttr<std::string>("window_inputs", "");
+        if (val == "off") {
+          ep.input = EffectivePolicies::InputPolicy::Off;
+        } else if (val == "auto") {
+          ep.input = EffectivePolicies::InputPolicy::Auto;
+        } else {
+          CHECK(false) << "Invalid window_inputs attr '" << val
+                       << "': expected 'off' or 'auto'";
+        }
+      }
+    }
+    return ep;
+  }
 
   explicit OutWindowExternalizer(OutputWindowPolicy output_window_policy = OutputWindowPolicy::CoalescePieces,
                                  WindowRewritePolicy window_rewrite_policy = WindowRewritePolicy::Auto)
@@ -1924,11 +1980,6 @@ class OutWindowExternalizer {
   ProgramPtr Run(const ProgramPtr& program) {
     auto analyses = Analyze(program);
     ApplyDebugNameFilters(program, &analyses);
-    if (output_window_policy_ == OutputWindowPolicy::CoalescePieces) {
-      for (auto& [_, analysis] : analyses) {
-        CoalesceOutputPieces(&analysis);
-      }
-    }
     ApplyWindowRewritePolicy(program, &analyses);
     if (analyses.empty()) return program;
 
@@ -1963,8 +2014,7 @@ class OutWindowExternalizer {
     for (const auto& [_, func] : program->functions_) {
       if (!func || func->func_type_ != FunctionType::Orchestration) continue;
       OrchRewriter rewriter(program, analyses, cloned_funcs, function_lookup,
-                            output_dynamic_extent_dims_by_func_, output_window_policy_,
-                            window_rewrite_policy_);
+                            output_dynamic_extent_dims_by_func_);
       auto new_body = rewriter.VisitStmt(func->body_);
       if (new_body.get() == func->body_.get()) continue;
       changed = true;
@@ -2243,9 +2293,9 @@ class OutWindowExternalizer {
     cost.is_output = true;
     cost.dense_piece_count = DensePieces(output).size();
     cost.assemble_piece_count = AssemblePieces(output).size();
-    cost.is_multi_piece_output = cost.dense_piece_count > 1 || cost.assemble_piece_count > 1;
     cost.has_callsite_assemble = HasFineAssemblePieces(output);
-    cost.original_tensor_args = 1;
+    cost.is_multi_piece_output = cost.dense_piece_count > 1;
+    cost.original_tensor_args = cost.has_callsite_assemble ? static_cast<int>(cost.assemble_piece_count) : 1;
     cost.rewritten_tensor_args = static_cast<int>(cost.dense_piece_count);
     cost.abi_delta = cost.rewritten_tensor_args - cost.original_tensor_args;
     return cost;
@@ -2289,9 +2339,9 @@ class OutWindowExternalizer {
   static bool ShouldKeepInputInAuto(const InputRewriteInfo& input, WindowRewriteCost* out_cost) {
     auto cost = EstimateInputCost(input);
     if (input.dynamic_indexed_window.has_value()) {
-      cost.reason = "dynamic_indexed_input";
+      cost.reason = "dynamic_indexed_carrier_candidate";
       if (out_cost) *out_cost = std::move(cost);
-      return false;
+      return true;
     }
     if (cost.abi_delta > 0) {
       cost.reason = "abi_expanding";
@@ -2379,6 +2429,24 @@ class OutWindowExternalizer {
       auto& analysis = it->second;
       auto func_it = function_lookup.find(callee_name);
       auto func = func_it == function_lookup.end() ? nullptr : func_it->second;
+
+      // v5: resolve per-function effective policies from global + kernel attrs.
+      auto ep = ResolveEffectivePolicies(func, output_window_policy_, window_rewrite_policy_);
+
+      // Output off → drop all outputs; Input off → drop all inputs.
+      if (ep.output == EffectivePolicies::OutputPolicy::Off) {
+        analysis.outputs.clear();
+      }
+      if (ep.input == EffectivePolicies::InputPolicy::Off) {
+        analysis.inputs.clear();
+      }
+
+      // Per-function coalesce (before type/ABI filtering).
+      if (ep.output == EffectivePolicies::OutputPolicy::Coalesce) {
+        CoalesceOutputPieces(&analysis);
+      }
+
+      // Type/ABI safety filter (always applies).
       analysis.outputs.erase(
           std::remove_if(analysis.outputs.begin(), analysis.outputs.end(),
                          [&](const OutputRewriteInfo& output) {
@@ -2398,8 +2466,12 @@ class OutWindowExternalizer {
                            return !CanMaterializeWindowParamType(tensor_type, input.window_shape);
                          }),
           analysis.inputs.end());
-      switch (window_rewrite_policy_) {
-        case WindowRewritePolicy::Auto: {
+
+      // v5 effective policy filtering.
+      switch (ep.output) {
+        case EffectivePolicies::OutputPolicy::Auto:
+        case EffectivePolicies::OutputPolicy::Coalesce: {
+          // Auto filter: reject ABI-expanding, multi-piece, etc.
           analysis.outputs.erase(
               std::remove_if(analysis.outputs.begin(), analysis.outputs.end(),
                              [&](const OutputRewriteInfo& output) {
@@ -2410,6 +2482,15 @@ class OutWindowExternalizer {
                                return !keep;
                              }),
               analysis.outputs.end());
+          break;
+        }
+        case EffectivePolicies::OutputPolicy::All:
+        case EffectivePolicies::OutputPolicy::Off:
+          // All: no filtering beyond type/ABI safety. Off: already cleared above.
+          break;
+      }
+      switch (ep.input) {
+        case EffectivePolicies::InputPolicy::Auto: {
           analysis.inputs.erase(
               std::remove_if(analysis.inputs.begin(), analysis.inputs.end(),
                              [&](const InputRewriteInfo& input) {
@@ -2422,27 +2503,11 @@ class OutWindowExternalizer {
               analysis.inputs.end());
           break;
         }
-        case WindowRewritePolicy::All:
-          break;
-        case WindowRewritePolicy::InputsOnly:
-          analysis.outputs.clear();
-          break;
-        case WindowRewritePolicy::OutputsOnly:
-          analysis.inputs.clear();
-          break;
-        case WindowRewritePolicy::NoMultiPieceOutputs:
-          analysis.outputs.erase(std::remove_if(analysis.outputs.begin(), analysis.outputs.end(),
-                                                [](const OutputRewriteInfo& output) {
-                                                  return DensePieces(output).size() > 1 ||
-                                                         AssemblePieces(output).size() > 1;
-                                                }),
-                                 analysis.outputs.end());
-          break;
-        case WindowRewritePolicy::None:
-          analysis.outputs.clear();
-          analysis.inputs.clear();
+        case EffectivePolicies::InputPolicy::Off:
+          // Already cleared above.
           break;
       }
+
       if (analysis.outputs.empty() && analysis.inputs.empty()) {
         it = analyses->erase(it);
       } else {
@@ -3048,15 +3113,12 @@ class OutWindowExternalizer {
                  const std::unordered_map<std::string, FunctionPtr>& cloned_funcs,
                  const std::unordered_map<std::string, FunctionPtr>& function_lookup,
                  const std::unordered_map<std::string, std::unordered_map<size_t, VarPtr>>&
-                     output_dynamic_extent_dims_by_func,
-                 OutputWindowPolicy output_window_policy, WindowRewritePolicy window_rewrite_policy)
+                     output_dynamic_extent_dims_by_func)
         : program_(std::move(program)),
           analyses_(analyses),
           cloned_funcs_(cloned_funcs),
           function_lookup_(function_lookup),
-          output_dynamic_extent_dims_by_func_(output_dynamic_extent_dims_by_func),
-          output_window_policy_(output_window_policy),
-          window_rewrite_policy_(window_rewrite_policy) {}
+          output_dynamic_extent_dims_by_func_(output_dynamic_extent_dims_by_func) {}
 
     const std::unordered_set<std::string>& used_clone_names() const { return used_clone_names_; }
 
@@ -3838,86 +3900,6 @@ class OutWindowExternalizer {
       return result;
     }
 
-    struct DynamicInputSliceResult {
-      VarPtr slice_var;
-      VarPtr base_arg;
-      VarPtr extent_arg;
-    };
-
-    std::optional<DynamicInputSliceResult> EmitStandaloneDynamicInputSlice(
-        const InputRewriteInfo& input, const DenseRegionPiece& piece, const CallPtr& call,
-        const AssignStmtPtr& call_assign, const VarPtr& in_arg,
-        const std::unordered_map<const Var*, ExprPtr>& callsite_subst, arith::Analyzer* analyzer,
-        std::vector<StmtPtr>* stmts) {
-      if (!input.dynamic_indexed_window.has_value() || !call || !call_assign || !in_arg || !analyzer ||
-          !stmts) {
-        return std::nullopt;
-      }
-      const auto& dynamic = *input.dynamic_indexed_window;
-      if (dynamic.dynamic_dim >= piece.window_shape.size() ||
-          dynamic.dynamic_dim >= piece.callsite_offsets.size()) {
-        return std::nullopt;
-      }
-      if (!CanProveDynamicWindowScanHasUpdate(dynamic, callsite_subst)) return std::nullopt;
-
-      auto scan =
-          EmitDynamicWindowScan(input, piece, call, call_assign, in_arg, callsite_subst, analyzer, stmts);
-      if (!scan.has_value()) return std::nullopt;
-
-      auto max_offset_subst = callsite_subst;
-      for (const auto& [var, expr] : scan->max_subst) max_offset_subst[var] = expr;
-      auto min_offset_subst = callsite_subst;
-      for (const auto& [var, expr] : scan->min_subst) min_offset_subst[var] = expr;
-
-      std::vector<ExprPtr> shape_exprs;
-      shape_exprs.reserve(piece.window_shape.size());
-      for (const auto& dim : piece.window_shape) {
-        shape_exprs.push_back(analyzer->Simplify(transform_utils::Substitute(dim, callsite_subst)));
-      }
-      std::vector<ExprPtr> offset_exprs;
-      offset_exprs.reserve(piece.callsite_offsets.size());
-      for (size_t dim = 0; dim < piece.callsite_offsets.size(); ++dim) {
-        const auto& offset = piece.callsite_offsets[dim];
-        const auto& subst = dim == dynamic.dynamic_dim ? min_offset_subst : callsite_subst;
-        offset_exprs.push_back(analyzer->Simplify(transform_utils::Substitute(offset, subst)));
-      }
-
-      auto dynamic_min = analyzer->Simplify(
-          transform_utils::Substitute(piece.callsite_offsets[dynamic.dynamic_dim], min_offset_subst));
-      auto dynamic_max = analyzer->Simplify(
-          transform_utils::Substitute(piece.callsite_offsets[dynamic.dynamic_dim], max_offset_subst));
-      auto dynamic_extent = analyzer->Simplify(
-          transform_utils::Substitute(piece.window_shape[dynamic.dynamic_dim], callsite_subst));
-      auto dynamic_end = analyzer->Simplify(MakeAdd(dynamic_max, dynamic_extent, call_assign->span_));
-
-      auto index_type = std::make_shared<ScalarType>(DataType::INDEX);
-      auto base_var =
-          std::make_shared<Var>(in_arg->name_hint_ + "__window_base", index_type, call_assign->span_);
-      auto end_var =
-          std::make_shared<Var>(in_arg->name_hint_ + "__window_end", index_type, call_assign->span_);
-      auto extent_var =
-          std::make_shared<Var>(in_arg->name_hint_ + "__window_extent", index_type, call_assign->span_);
-
-      dynamic_min = FlattenGeneratedScalarExpr(dynamic_min, in_arg->name_hint_, call_assign->span_, stmts);
-      dynamic_end = FlattenGeneratedScalarExpr(dynamic_end, in_arg->name_hint_, call_assign->span_, stmts);
-      stmts->push_back(std::make_shared<AssignStmt>(base_var, dynamic_min, call_assign->span_));
-      stmts->push_back(std::make_shared<AssignStmt>(end_var, dynamic_end, call_assign->span_));
-      stmts->push_back(std::make_shared<AssignStmt>(
-          extent_var, analyzer->Simplify(MakeSub(end_var, base_var, call_assign->span_)),
-          call_assign->span_));
-
-      offset_exprs[dynamic.dynamic_dim] = base_var;
-      shape_exprs[dynamic.dynamic_dim] = extent_var;
-      auto shape_tuple = std::make_shared<MakeTuple>(shape_exprs, call_assign->span_);
-      auto offset_tuple = std::make_shared<MakeTuple>(offset_exprs, call_assign->span_);
-      auto parent_expr = MaterializeWindowParentExpr(call->args_[input.in_param_index]);
-      auto slice_call = OpRegistry::GetInstance().Create(
-          "tensor.slice", {parent_expr, shape_tuple, offset_tuple}, call_assign->span_);
-      auto slice_var =
-          std::make_shared<Var>(in_arg->name_hint_ + "__window", slice_call->GetType(), in_arg->span_);
-      stmts->push_back(std::make_shared<AssignStmt>(slice_var, slice_call, call_assign->span_));
-      return DynamicInputSliceResult{slice_var, base_var, extent_var};
-    }
 
     std::optional<FullOffsetScanResult> EmitFullOffsetScanPrelude(const CallsiteAccessCandidate& reader,
                                                                   arith::Analyzer* analyzer,
@@ -4178,7 +4160,8 @@ class OutWindowExternalizer {
         }
         return std::nullopt;
       }
-      if (window_rewrite_policy_ != WindowRewritePolicy::All && HasDynamicReaderCarrierRisk(call, analysis)) {
+      // v5: carrier risk check is policy-independent (always applies).
+      if (HasDynamicReaderCarrierRisk(call, analysis)) {
         return std::nullopt;
       }
 
@@ -4230,17 +4213,9 @@ class OutWindowExternalizer {
           }
 
           if (input.dynamic_indexed_window.has_value()) {
-            if (output_window_policy_ != OutputWindowPolicy::ExactPieces ||
-                window_rewrite_policy_ != WindowRewritePolicy::All) {
-              return std::nullopt;
-            }
-            auto standalone = EmitStandaloneDynamicInputSlice(input, piece, call, call_assign, in_arg,
-                                                              callsite_subst, &input_offset_analyzer, &stmts);
-            if (!standalone.has_value()) return std::nullopt;
-            extra_args_by_in_index.emplace(
-                input.in_param_index, std::vector<ExprPtr>{standalone->base_arg, standalone->extent_arg});
-            input_slices.push_back(standalone->slice_var);
-            continue;
+            // v5: no private dynamic reader fallback. Dynamic input without
+            // carrier → reject the callsite (reader keeps full parent tensor).
+            return std::nullopt;
           }
 
           std::vector<ExprPtr> shape_exprs;
@@ -5134,13 +5109,8 @@ class OutWindowExternalizer {
         }
         if (dynamic_reader) {
           plan.dynamic_reader_roots.insert(root);
-          if (window_rewrite_policy_ != WindowRewritePolicy::All) {
-            plan.fallback_parent_roots.insert(root);
-            continue;
-          }
-          if (output_window_policy_ != OutputWindowPolicy::CoalescePieces) {
-            continue;
-          }
+          // v5: always attempt carrier building regardless of global policy.
+          // Structural conditions (writer exists, same root, etc.) handle safety.
           size_t dynamic_dim = SIZE_MAX;
           bool needs_carrier_rematerialization = false;
           bool can_make_dynamic_carrier =
@@ -5387,13 +5357,6 @@ class OutWindowExternalizer {
           }
           return true;
         }
-        if (sequence_carrier_plan_.fallback_parent_roots.count(parent_root)) {
-          if (WindowExternalizeLogEnabled()) {
-            LOG_INFO << "[window-call] fallback carrier root=" << parent_root->name_hint_
-                     << " func=" << GetCallFuncName(call);
-          }
-          return true;
-        }
       }
       return false;
     }
@@ -5622,8 +5585,6 @@ class OutWindowExternalizer {
     const std::unordered_map<std::string, FunctionPtr>& function_lookup_;
     const std::unordered_map<std::string, std::unordered_map<size_t, VarPtr>>&
         output_dynamic_extent_dims_by_func_;
-    OutputWindowPolicy output_window_policy_ = OutputWindowPolicy::CoalescePieces;
-    WindowRewritePolicy window_rewrite_policy_ = WindowRewritePolicy::Auto;
     std::unordered_set<std::string> used_clone_names_;
     std::vector<ForStmtPtr> sequential_loops_;
     std::vector<LoopContext> loop_context_;
@@ -7536,7 +7497,7 @@ class OutWindowExternalizer {
 
       auto out_indices = CollectOutParamIndices(func);
       auto input_windows = AnalyzeInputWindows(func);
-      if (window_rewrite_policy_ == WindowRewritePolicy::All) {
+      if (window_rewrite_policy_ != WindowRewritePolicy::None) {
         auto dynamic_input_windows = AnalyzeDynamicIndexedInputWindows(func);
         for (auto& dynamic_input : dynamic_input_windows) {
           auto duplicate =
@@ -8248,15 +8209,17 @@ class OutWindowExternalizer {
 
 class RuntimeCurrentAggregator {
  public:
-  explicit RuntimeCurrentAggregator(OutWindowExternalizer::OutputWindowPolicy output_window_policy,
-                                    OutWindowExternalizer::WindowRewritePolicy window_rewrite_policy)
-      : output_window_policy_(output_window_policy), window_rewrite_policy_(window_rewrite_policy) {}
+  explicit RuntimeCurrentAggregator(OutWindowExternalizer::WindowRewritePolicy window_rewrite_policy,
+                                    std::unordered_set<std::string> coalesce_functions)
+      : window_rewrite_policy_(window_rewrite_policy),
+        coalesce_functions_(std::move(coalesce_functions)) {}
 
   ProgramPtr Run(const ProgramPtr& program) {
-    if (output_window_policy_ != OutWindowExternalizer::OutputWindowPolicy::CoalescePieces ||
-        window_rewrite_policy_ == OutWindowExternalizer::WindowRewritePolicy::None) {
+    // v5: run if global policy is off → skip entirely.
+    if (window_rewrite_policy_ == OutWindowExternalizer::WindowRewritePolicy::None) {
       return program;
     }
+    if (coalesce_functions_.empty()) return program;
 
     std::vector<FunctionPtr> new_functions;
     new_functions.reserve(program->functions_.size() + 1);
@@ -8274,7 +8237,7 @@ class RuntimeCurrentAggregator {
         continue;
       }
 
-      OrchMutator mutator(program, &generated_functions, &barrier_by_type, &used_names);
+      OrchMutator mutator(program, coalesce_functions_, &generated_functions, &barrier_by_type, &used_names);
       auto new_body = mutator.VisitStmt(func->body_);
       if (new_body.get() == func->body_.get()) {
         new_functions.push_back(func);
@@ -8295,10 +8258,12 @@ class RuntimeCurrentAggregator {
  private:
   class OrchMutator : public IRMutator {
    public:
-    OrchMutator(ProgramPtr program, std::vector<FunctionPtr>* generated_functions,
+    OrchMutator(ProgramPtr program, std::unordered_set<std::string> coalesce_functions,
+                std::vector<FunctionPtr>* generated_functions,
                 std::unordered_map<const Type*, FunctionPtr>* barrier_by_type,
                 std::unordered_set<std::string>* used_names)
         : program_(std::move(program)),
+          coalesce_functions_(std::move(coalesce_functions)),
           generated_functions_(generated_functions),
           barrier_by_type_(barrier_by_type),
           used_names_(used_names) {}
@@ -8336,22 +8301,6 @@ class RuntimeCurrentAggregator {
     }
 
    private:
-    static bool IsRuntimeCurrentSourceVar(const VarPtr& var) {
-      return var && (var->name_hint_.find("mlp_silu_tile") != std::string::npos ||
-                     var->name_hint_.find("attn_tile") != std::string::npos);
-    }
-
-    static bool IsRuntimeCurrentConsumer(const std::string& callee_name, const VarPtr& source) {
-      if (!source) return false;
-      if (source->name_hint_.find("mlp_silu_tile") != std::string::npos) {
-        return callee_name.find("down_proj") != std::string::npos;
-      }
-      if (source->name_hint_.find("attn_tile") != std::string::npos) {
-        return callee_name.find("out_proj") != std::string::npos;
-      }
-      return false;
-    }
-
     static bool TensorShapesEqual(const TensorTypePtr& lhs, const TensorTypePtr& rhs) {
       if (!lhs || !rhs || lhs->shape_.size() != rhs->shape_.size() || lhs->dtype_ != rhs->dtype_) {
         return false;
@@ -8362,14 +8311,60 @@ class RuntimeCurrentAggregator {
       return true;
     }
 
-    static bool LoopWritesRuntimeCurrentSource(const ForStmtPtr& loop, const VarPtr& source) {
+    bool IsCoalesceCall(const CallPtr& call) const {
+      if (!call) return false;
+      auto callee_name = GetCallFuncName(call);
+      if (coalesce_functions_.count(callee_name) != 0) return true;
+      const std::string windowed_suffix = "__windowed";
+      if (callee_name.size() <= windowed_suffix.size() ||
+          callee_name.compare(callee_name.size() - windowed_suffix.size(), windowed_suffix.size(),
+                              windowed_suffix) != 0) {
+        return false;
+      }
+      auto base_name = callee_name.substr(0, callee_name.size() - windowed_suffix.size());
+      return coalesce_functions_.count(base_name) != 0;
+    }
+
+    bool IsProducedByCoalesceCall(
+        const VarPtr& value,
+        const std::unordered_map<const Var*, AssignStmtPtr>& defs_by_var) const {
+      if (!value) return false;
+      auto def_it = defs_by_var.find(value.get());
+      if (def_it == defs_by_var.end()) return false;
+
+      auto call = As<Call>(def_it->second->value_);
+      if (IsCoalesceCall(call)) return true;
+      if (call && !std::dynamic_pointer_cast<const GlobalVar>(call->op_) &&
+          call->op_->name_ == "tensor.assemble" && call->args_.size() >= 2) {
+        return IsProducedByCoalesceCall(AsVarLike(call->args_[1]), defs_by_var);
+      }
+
+      auto tuple_get = As<TupleGetItemExpr>(def_it->second->value_);
+      if (!tuple_get) return false;
+      auto tuple_var = AsVarLike(tuple_get->tuple_);
+      if (!tuple_var) return false;
+      auto tuple_def_it = defs_by_var.find(tuple_var.get());
+      if (tuple_def_it == defs_by_var.end()) return false;
+      return IsCoalesceCall(As<Call>(tuple_def_it->second->value_));
+    }
+
+    bool LoopWritesRuntimeCurrentSource(const ForStmtPtr& loop, const VarPtr& source) const {
       if (!loop || !source) return false;
+      std::unordered_map<const Var*, AssignStmtPtr> defs_by_var;
+      YieldStmtPtr yield_stmt;
+      for (const auto& stmt : FlattenToStmts(loop->body_)) {
+        if (auto assign = As<AssignStmt>(stmt)) {
+          defs_by_var[assign->var_.get()] = assign;
+        } else if (auto yield = As<YieldStmt>(stmt)) {
+          yield_stmt = yield;
+        }
+      }
+      if (!yield_stmt) return false;
+
       for (size_t i = 0; i < loop->return_vars_.size(); ++i) {
         if (loop->return_vars_[i].get() != source.get()) continue;
-        if (IsRuntimeCurrentSourceVar(source)) return true;
-        if (i >= loop->iter_args_.size()) return false;
-        auto init = AsVarLike(loop->iter_args_[i]->initValue_);
-        return IsRuntimeCurrentSourceVar(init);
+        if (i >= yield_stmt->value_.size()) return false;
+        return IsProducedByCoalesceCall(AsVarLike(yield_stmt->value_[i]), defs_by_var);
       }
       return false;
     }
@@ -8395,12 +8390,12 @@ class RuntimeCurrentAggregator {
         auto assign = As<AssignStmt>(stmt);
         if (!assign) continue;
         auto call = As<Call>(assign->value_);
-        if (!call || !IsRuntimeCurrentConsumer(GetCallFuncName(call), source)) continue;
+        if (!call) continue;
         auto callee = program_ ? program_->GetFunction(GetCallFuncName(call)) : nullptr;
         for (size_t i = 0; i < call->args_.size(); ++i) {
           auto arg_var = AsVarLike(call->args_[i]);
           if (!arg_var) continue;
-          if (arg_var.get() != source.get() && arg_var->name_hint_ != source->name_hint_) continue;
+          if (arg_var.get() != source.get()) continue;
           if (!callee || i >= callee->param_directions_.size() ||
               callee->param_directions_[i] != ParamDirection::In) {
             continue;
@@ -8460,13 +8455,14 @@ class RuntimeCurrentAggregator {
     }
 
     ProgramPtr program_;
+    std::unordered_set<std::string> coalesce_functions_;
     std::vector<FunctionPtr>* generated_functions_;
     std::unordered_map<const Type*, FunctionPtr>* barrier_by_type_;
     std::unordered_set<std::string>* used_names_;
   };
 
-  OutWindowExternalizer::OutputWindowPolicy output_window_policy_;
   OutWindowExternalizer::WindowRewritePolicy window_rewrite_policy_;
+  std::unordered_set<std::string> coalesce_functions_;
 };
 
 }  // namespace
@@ -8477,34 +8473,24 @@ class RuntimeCurrentAggregator {
 
 namespace pass {
 
-Pass OptimizeOrchTensors(const std::string& output_window_policy, const std::string& window_rewrite_policy) {
-  auto parsed_output_window_policy = OutWindowExternalizer::OutputWindowPolicy::CoalescePieces;
-  if (output_window_policy == "exact_pieces") {
-    parsed_output_window_policy = OutWindowExternalizer::OutputWindowPolicy::ExactPieces;
-  } else if (output_window_policy == "coalesce_pieces") {
-    parsed_output_window_policy = OutWindowExternalizer::OutputWindowPolicy::CoalescePieces;
-  } else {
-    CHECK(false) << "Invalid output_window_policy '" << output_window_policy
-                 << "': expected 'exact_pieces' or 'coalesce_pieces'";
-  }
+Pass OptimizeOrchTensors(const std::string& window_policy) {
+  OutWindowExternalizer::OutputWindowPolicy parsed_output_window_policy;
+  OutWindowExternalizer::WindowRewritePolicy parsed_window_rewrite_policy;
 
-  auto parsed_window_rewrite_policy = OutWindowExternalizer::WindowRewritePolicy::Auto;
-  if (window_rewrite_policy == "auto") {
+  if (window_policy == "auto") {
+    // v5: auto → exact_pieces + auto (was coalesce_pieces in v4).
+    // Per-kernel coalesce is opt-in via attrs={"window_outputs": "coalesce"}.
+    parsed_output_window_policy = OutWindowExternalizer::OutputWindowPolicy::ExactPieces;
     parsed_window_rewrite_policy = OutWindowExternalizer::WindowRewritePolicy::Auto;
-  } else if (window_rewrite_policy == "all") {
+  } else if (window_policy == "all") {
+    parsed_output_window_policy = OutWindowExternalizer::OutputWindowPolicy::ExactPieces;
     parsed_window_rewrite_policy = OutWindowExternalizer::WindowRewritePolicy::All;
-  } else if (window_rewrite_policy == "inputs_only" || window_rewrite_policy == "no_outputs") {
-    parsed_window_rewrite_policy = OutWindowExternalizer::WindowRewritePolicy::InputsOnly;
-  } else if (window_rewrite_policy == "outputs_only" || window_rewrite_policy == "no_inputs") {
-    parsed_window_rewrite_policy = OutWindowExternalizer::WindowRewritePolicy::OutputsOnly;
-  } else if (window_rewrite_policy == "no_multi_piece_outputs") {
-    parsed_window_rewrite_policy = OutWindowExternalizer::WindowRewritePolicy::NoMultiPieceOutputs;
-  } else if (window_rewrite_policy == "none" || window_rewrite_policy == "disabled") {
+  } else if (window_policy == "off") {
+    parsed_output_window_policy = OutWindowExternalizer::OutputWindowPolicy::CoalescePieces;
     parsed_window_rewrite_policy = OutWindowExternalizer::WindowRewritePolicy::None;
   } else {
-    CHECK(false) << "Invalid window_rewrite_policy '" << window_rewrite_policy
-                 << "': expected 'auto', 'all', 'inputs_only', 'outputs_only', 'no_inputs', "
-                    "'no_outputs', 'no_multi_piece_outputs', or 'none'";
+    CHECK(false) << "Invalid window_policy '" << window_policy
+                 << "': expected 'auto', 'all', or 'off'";
   }
 
   auto pass_func = [parsed_output_window_policy,
@@ -8529,13 +8515,24 @@ Pass OptimizeOrchTensors(const std::string& output_window_policy, const std::str
     // Pattern 4: Slice input strides (propagate parent strides to In params)
     auto p4 = SliceInputStridesOptimizer().Run(p3, incore_names);
 
+    std::unordered_set<std::string> coalesce_function_names;
+    if (parsed_window_rewrite_policy != OutWindowExternalizer::WindowRewritePolicy::None) {
+      for (const auto& [_, func] : p4->functions_) {
+        if (!func) continue;
+        auto ep = OutWindowExternalizer::ResolveEffectivePolicies(func, parsed_output_window_policy,
+                                                                   parsed_window_rewrite_policy);
+        if (ep.output == OutWindowExternalizer::EffectivePolicies::OutputPolicy::Coalesce) {
+          coalesce_function_names.insert(func->name_);
+        }
+      }
+    }
     // Pattern 5: Static out-window externalization for statically provable
     // local-window writes in outlined callees.
     auto p5 = OutWindowExternalizer(parsed_output_window_policy, parsed_window_rewrite_policy).Run(p4);
 
-    // Pattern 6: Insert a runtime-visible current marker for the prefill
-    // mlp_silu_tile producer -> repeated down_proj full-reader fan-in shape.
-    return RuntimeCurrentAggregator(parsed_output_window_policy, parsed_window_rewrite_policy).Run(p5);
+    // Pattern 6: Insert a runtime-visible current marker for attrs-driven
+    // coalesced producer loops that feed later repeated full-tensor readers.
+    return RuntimeCurrentAggregator(parsed_window_rewrite_policy, std::move(coalesce_function_names)).Run(p5);
   };
 
   return CreateProgramPass(pass_func, "OptimizeOrchTensors", kOptimizeOrchTensorsProperties);
