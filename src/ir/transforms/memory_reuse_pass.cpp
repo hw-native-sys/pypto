@@ -57,7 +57,6 @@ struct LifetimeInterval {
   int last_use_point;        ///< Last use point (topological order)
   MemorySpace memory_space;  ///< Memory space
   uint64_t size;             ///< Size in bytes
-  std::string def_op_name;   ///< Op name that defines this variable (empty if unknown)
 };
 
 namespace {
@@ -961,15 +960,6 @@ LifetimeAnalysisResult ComputeLifetimes(const StmtPtr& func_body) {
     interval.memory_space = *memory_space;
     interval.size = memref->size_;
 
-    // Extract the defining op name for use in the in-place safety check
-    if (result.var_def_stmt.count(sharing_group[0])) {
-      if (auto assign = As<AssignStmt>(result.var_def_stmt.at(sharing_group[0]))) {
-        if (auto call = As<Call>(assign->value_)) {
-          interval.def_op_name = call->op_->name_;
-        }
-      }
-    }
-
     lifetimes.push_back(interval);
 
     for (const auto& group_var : sharing_group) {
@@ -1192,35 +1182,48 @@ bool NeedsLoadTpopHazardGuard(const FunctionPtr& func) {
 }
 
 /**
- * @brief Identify memory reuse opportunities from lifetime intervals
+ * @brief Identify memory reuse opportunities from lifetime intervals.
+ *
+ * Global first-fit-decreasing packing: within each memory space, intervals are
+ * placed **largest-first**, and every later interval joins the first existing
+ * buffer all of whose members it can share with (see `can_share` below).  A
+ * buffer's allocated size is fixed by its first (largest) member, so admitting a
+ * smaller member afterwards is free — which makes first-fit cost-optimal for
+ * this objective and, crucially, lets a *later, larger* interval host an
+ * *earlier, smaller* one.  The former definition-order greedy had a
+ * one-directional size gate (`source.size >= target.size`) so it could only let
+ * a smaller interval reuse an earlier, larger buffer; two lifetime-disjoint L0
+ * cube-input tiles whose small one was defined first were never coalesced.
+ *
+ * The representative (each buffer's first/largest member) is the MemRef every
+ * other member is rebased onto downstream; its alloc dominates the whole
+ * function (InitMemRef hoists every tile.alloc to the function-body head), so a
+ * representative defined *after* some of its members is safe.  Because the
+ * packer no longer processes intervals in program order, every pairwise gate
+ * below (load+tpop hazard, no-alias) is checked in **both directions**.
  *
  * @param hazard  Ascend910B load + tpop_from_aic guard inputs.  Empty when the
  *                guard is inactive (non-910B / non-split-AIV), in which case the
- *                hazard check below is a no-op and reuse behaviour is unchanged.
+ *                hazard check is a no-op and reuse behaviour is unchanged.
+ * @param forbid_alias  Per-output forbidden-input map (ForbidAliasCollector):
+ *                an op may forbid its output from sharing a buffer with specific
+ *                input operands it reads while writing the output in place.
+ *
+ * Complexity: O(M log M) sort + O(M^2) worst-case pairwise checks over the M
+ * tile intervals (M a subset of the N IR nodes) — same class as the prior
+ * greedy implementation.
  */
 std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(const std::vector<LifetimeInterval>& lifetimes,
                                                     const HazardInputs& hazard,
                                                     const ForbidAliasMap& forbid_alias) {
   std::map<VarPtr, VarPtr> reuse_map;
 
-  // Build a fast lookup map: VarPtr -> LifetimeInterval for O(1) access
-  // This avoids repeated std::find_if calls which were O(n)
-  std::map<VarPtr, const LifetimeInterval*> var_to_lifetime;
-  for (const auto& interval : lifetimes) {
-    var_to_lifetime[interval.variable] = &interval;
-  }
-
-  // Track which variables are reusing each source variable's MemRef
-  // This is critical to avoid multiple variables with overlapping lifetimes
-  // sharing the same MemRef, which would cause memory corruption
-  std::map<VarPtr, std::vector<VarPtr>> memref_users;  // source_var -> list of vars reusing it
-
   // Maps a tile's *original* MemRef base to the base its buffer is coalesced
   // onto by a committed reuse decision.  A reuse retargets the reused var (and
-  // every VIEW that inherited its base) from its own base onto the root owner's
-  // base; resolve_base() chases that chain so the no-alias guard sees a
-  // forbidden operand's *physical* buffer even when the operand is a view whose
-  // own base is now stale.  Populated as reuse decisions are committed below.
+  // every VIEW that inherited its base) from its own base onto the
+  // representative's base; resolve_base() chases that chain so the no-alias
+  // guard sees a forbidden operand's *physical* buffer even when the operand is
+  // a view whose own base is now stale.  Populated as decisions are committed.
   std::map<const Var*, const Var*> base_remap;
   std::function<const Var*(const Var*)> resolve_base = [&](const Var* b) -> const Var* {
     while (b != nullptr) {
@@ -1231,172 +1234,105 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(const std::vector<LifetimeIn
     return b;
   };
 
-  // Group variables by memory_space (preserve order within each group)
-  std::map<MemorySpace, std::vector<size_t>> groups;  // memory_space -> indices in lifetimes
-  for (size_t i = 0; i < lifetimes.size(); i++) {
-    groups[lifetimes[i].memory_space].push_back(i);
+  // The physical buffer base a tile var currently occupies: follow any committed
+  // reuse onto its representative, then chase base coalescing / VIEW inheritance.
+  auto physical_base = [&](const VarPtr& v) -> const Var* {
+    VarPtr root = v;
+    while (reuse_map.count(root)) root = reuse_map.at(root);
+    return resolve_base(TileMemRefBase(root));
+  };
+
+  // Ascend910B split-AIV hazard (directional): `writer` consumes a
+  // tile.tpop_from_aic value and is defined exactly where the load-derived
+  // `input` is last read, so placing writer's output on input's buffer forms the
+  // in-place load+tpop touch.  `hazard` is empty off-910B, so this is a no-op.
+  auto hazard_blocks = [&hazard](const LifetimeInterval& writer, const LifetimeInterval& input) {
+    return writer.def_point == input.last_use_point && hazard.reads_tpop.count(writer.variable.get()) != 0 &&
+           hazard.load_derived.count(input.variable.get()) != 0;
+  };
+
+  // No-alias guard (directional): `writer`'s defining op forbids its output from
+  // sharing a buffer with one or more input operands — either because the op is
+  // not_inplace_safe (forbids ALL inputs, e.g. tile.recip) or because it marks a
+  // specific operand via forbid_output_alias (e.g. tile.sel's mask/tmp, read by
+  // the TSEL intrinsic while writing dst).  Both feed `forbid_alias`.  Block if
+  // any forbidden operand resolves to the physical buffer `occupant` sits on.
+  // Each operand's buffer is found by following its reuse chain to its owner and
+  // taking the MemRef base — catching both an operand reassigned by an earlier
+  // reuse decision AND one occupying the buffer via VIEW inheritance (a reshape
+  // / slice / extract shares its source's base with no reuse-map entry).
+  auto forbid_blocks = [&](const LifetimeInterval& writer, const LifetimeInterval& occupant) {
+    auto fa_it = forbid_alias.find(writer.variable.get());
+    if (fa_it == forbid_alias.end()) return false;
+    const Var* occ_base = physical_base(occupant.variable);
+    if (occ_base == nullptr) return false;
+    for (const VarPtr& operand : fa_it->second) {
+      if (physical_base(operand) == occ_base) return true;
+    }
+    return false;
+  };
+
+  // Can `cand` join a single physical buffer that already holds `member`?
+  // Lifetimes must not overlap (touching is allowed: a buffer's reader is
+  // consumed before the writer at the same statement produces its output), and
+  // neither directional gate may block.  No tile-type / size check is needed:
+  // PTO binds a per-var alloc_tile so differing shapes/dtypes legally alias one
+  // base, and largest-first ordering guarantees the buffer is sized to its
+  // representative (no member is ever larger than the buffer it joins).
+  auto can_share = [&](const LifetimeInterval& cand, const LifetimeInterval& member) {
+    if (LifetimesOverlap(cand, member)) return false;
+    if (hazard_blocks(cand, member) || hazard_blocks(member, cand)) return false;
+    if (forbid_blocks(cand, member) || forbid_blocks(member, cand)) return false;
+    return true;
+  };
+
+  // Group interval indices by memory space — reuse only happens within a space.
+  std::map<MemorySpace, std::vector<size_t>> by_space;
+  for (size_t i = 0; i < lifetimes.size(); ++i) {
+    by_space[lifetimes[i].memory_space].push_back(i);
   }
 
-  // For each memory space, find reuse opportunities
-  for (auto& [space, indices] : groups) {
-    // Greedy matching: for each variable, try to reuse from previous variables
-    for (size_t i = 1; i < indices.size(); i++) {
-      size_t curr_idx = indices[i];
-      const auto& curr_lifetime = lifetimes[curr_idx];
-      VarPtr curr_var = curr_lifetime.variable;
+  for (auto& [space, indices] : by_space) {
+    (void)space;
+    // Largest-first; ties broken by definition order for determinism and so that
+    // equal-size workloads reproduce the prior definition-order grouping.
+    std::stable_sort(indices.begin(), indices.end(), [&lifetimes](size_t a, size_t b) {
+      if (lifetimes[a].size != lifetimes[b].size) return lifetimes[a].size > lifetimes[b].size;
+      return lifetimes[a].def_point < lifetimes[b].def_point;
+    });
 
-      // Find best candidate to reuse from (earliest with sufficient size)
-      for (size_t j = 0; j < i; j++) {
-        size_t prev_idx = indices[j];
-        const auto& prev_lifetime = lifetimes[prev_idx];
-        VarPtr prev_var = prev_lifetime.variable;
-
-        // Check if lifetimes overlap with source variable.
-        // Use <= to allow "touching" lifetimes (last_use == def_point) to be
-        // merged: within a single statement, inputs are consumed before outputs
-        // are produced, so a variable whose last use is in the same statement as
-        // another variable's definition can safely share the same buffer.
-        bool overlaps_with_source = LifetimesOverlap(prev_lifetime, curr_lifetime);
-
-        // Check if size is sufficient
-        bool size_ok = prev_lifetime.size >= curr_lifetime.size;
-
-        if (overlaps_with_source || !size_ok) {
-          continue;  // Cannot reuse due to overlap with source or insufficient size
-        }
-
-        // CRITICAL: Check if current variable's lifetime overlaps with ANY variable
-        // that is already reusing the same MemRef (transitive reuse check).
-        // Follow the reuse chain to the root, since all variables in the chain
-        // share the same physical MemRef.
-        VarPtr root = prev_var;
-        while (reuse_map.count(root)) {
-          root = reuse_map.at(root);
-        }
-        bool overlaps_with_users = false;
-        // When prev_var itself reuses another variable, we must also check
-        // against root (the ultimate MemRef owner) since it's not tracked
-        // in memref_users.
-        if (root != prev_var) {
-          const LifetimeInterval* root_lifetime = var_to_lifetime[root];
-          if (root_lifetime) {
-            bool overlaps = LifetimesOverlap(*root_lifetime, curr_lifetime);
-            if (overlaps) {
-              overlaps_with_users = true;
-              LOG_DEBUG << "Variable " << curr_var->name_hint_ << " cannot reuse " << prev_var->name_hint_
-                        << " due to overlap with root MemRef owner " << root->name_hint_;
-            }
+    // Each buffer is a list of interval indices sharing one MemRef; element 0 is
+    // the representative (largest, earliest on ties) every member is rebased to.
+    std::vector<std::vector<size_t>> buffers;
+    for (size_t idx : indices) {
+      const auto& cand = lifetimes[idx];
+      bool placed = false;
+      for (auto& buf : buffers) {
+        bool fits = true;
+        for (size_t member_idx : buf) {
+          if (!can_share(cand, lifetimes[member_idx])) {
+            fits = false;
+            break;
           }
         }
-        if (!overlaps_with_users && memref_users.count(root)) {
-          for (const auto& user_var : memref_users[root]) {
-            if (user_var == prev_var) continue;  // Already checked in source overlap
-            const LifetimeInterval* user_lifetime = var_to_lifetime[user_var];
-            if (user_lifetime) {
-              bool overlaps = LifetimesOverlap(*user_lifetime, curr_lifetime);
-
-              if (overlaps) {
-                overlaps_with_users = true;
-                LOG_DEBUG << "Variable " << curr_var->name_hint_ << " cannot reuse " << prev_var->name_hint_
-                          << " due to overlap with existing user " << user_var->name_hint_ << " (lifetime ["
-                          << curr_lifetime.def_point << ", " << curr_lifetime.last_use_point << "] vs ["
-                          << user_lifetime->def_point << ", " << user_lifetime->last_use_point << "])";
-                break;
-              }
-            }
+        if (!fits) continue;
+        const VarPtr& representative = lifetimes[buf.front()].variable;
+        reuse_map[cand.variable] = representative;  // member -> representative
+        // Record the base coalescing so resolve_base() can chase a view whose
+        // owning tile is reused onto the representative's buffer (no-alias guard).
+        if (const Var* cb = TileMemRefBase(cand.variable)) {
+          if (const Var* rb = physical_base(representative)) {
+            if (cb != rb) base_remap[cb] = rb;
           }
         }
-
-        if (!overlaps_with_users) {
-          // Ascend910B split-AIV hazard: a writer that consumes a tile.load
-          // result (or a view of one) AND a tile.tpop_from_aic value must not
-          // place its output in the same buffer as that load result.  The
-          // occupied buffer member whose last use is curr_var's def is exactly
-          // the input the writer reads in place; if it is load-derived and
-          // curr_var's def also consumes a tpop value, block the reuse so the
-          // hazardous sharing is never formed.  `hazard` is empty off-910B, so
-          // this whole block is a no-op for every other backend.
-          if (hazard.reads_tpop.count(curr_var.get()) != 0) {
-            bool load_tpop_conflict = false;
-            const LifetimeInterval* root_lt =
-                var_to_lifetime.count(root) ? var_to_lifetime.at(root) : nullptr;
-            if (root_lt && root_lt->last_use_point == curr_lifetime.def_point &&
-                hazard.load_derived.count(root.get()) != 0) {
-              load_tpop_conflict = true;
-            }
-            if (!load_tpop_conflict && memref_users.count(root)) {
-              for (const auto& user_var : memref_users.at(root)) {
-                const LifetimeInterval* user_lt =
-                    var_to_lifetime.count(user_var) ? var_to_lifetime.at(user_var) : nullptr;
-                if (user_lt && user_lt->last_use_point == curr_lifetime.def_point &&
-                    hazard.load_derived.count(user_var.get()) != 0) {
-                  load_tpop_conflict = true;
-                  break;
-                }
-              }
-            }
-            if (load_tpop_conflict) {
-              LOG_DEBUG << "Variable " << curr_var->name_hint_ << " cannot reuse " << prev_var->name_hint_
-                        << " (Ascend910B load + tpop_from_aic in-place hazard)";
-              continue;
-            }
-          }
-
-          // No-alias guard: curr's defining op forbids its output from sharing a
-          // buffer with one or more input operands — either because the op is
-          // not_inplace_safe (forbids ALL inputs, e.g. tile.recip) or because it
-          // marks a specific operand via forbid_output_alias (e.g. tile.sel's
-          // mask/tmp, which the TSEL intrinsic reads while writing dst).  Both
-          // feed `forbid_alias` (see ForbidAliasCollector).  curr would land on
-          // root's physical buffer; block if any forbidden operand resolves to
-          // that same buffer.  Each operand's buffer is found by following its
-          // reuse chain to its owner, then taking the MemRef base — this catches
-          // both an operand reassigned by an earlier reuse decision AND one that
-          // occupies the buffer via VIEW inheritance (a reshape / slice / extract
-          // shares its source's base with no reuse-map entry).
-          {
-            auto fa_it = forbid_alias.find(curr_var.get());
-            if (fa_it != forbid_alias.end() && resolve_base(TileMemRefBase(root)) != nullptr) {
-              const Var* root_base = resolve_base(TileMemRefBase(root));
-              bool alias_conflict = false;
-              for (const VarPtr& operand : fa_it->second) {
-                VarPtr oroot = operand;
-                while (reuse_map.count(oroot)) oroot = reuse_map.at(oroot);
-                // resolve_base also follows VIEW-inherited bases whose owning
-                // tile was reused onto another buffer (e.g. an rms-norm reshape
-                // chain coalesced onto a dead input buffer): the operand's own
-                // base is stale, but its physical buffer is the reuse target.
-                if (resolve_base(TileMemRefBase(oroot)) == root_base) {
-                  alias_conflict = true;
-                  break;
-                }
-              }
-              if (alias_conflict) {
-                LOG_DEBUG << "Variable " << curr_var->name_hint_ << " cannot reuse " << prev_var->name_hint_
-                          << " (op=" << curr_lifetime.def_op_name
-                          << " forbids its output aliasing this input operand's buffer)";
-                continue;
-              }
-            }
-          }
-
-          // Can safely reuse!
-          reuse_map[curr_var] = prev_var;
-          memref_users[root].push_back(curr_var);  // Track under root MemRef owner
-          // Record the base coalescing so resolve_base() can chase a view whose
-          // owning tile is reused onto root's buffer (see the no-alias guard).
-          if (const Var* cb = TileMemRefBase(curr_var)) {
-            if (const Var* rb = resolve_base(TileMemRefBase(root))) {
-              if (cb != rb) base_remap[cb] = rb;
-            }
-          }
-          LOG_DEBUG << "Variable " << curr_var->name_hint_ << " can reuse " << prev_var->name_hint_
-                    << " (lifetime [" << curr_lifetime.def_point << ", " << curr_lifetime.last_use_point
-                    << "]"
-                    << " vs [" << prev_lifetime.def_point << ", " << prev_lifetime.last_use_point << "])";
-          break;  // Found a reuse target, stop searching
-        }
+        buf.push_back(idx);
+        placed = true;
+        LOG_DEBUG << "Variable " << cand.variable->name_hint_ << " reuses representative "
+                  << representative->name_hint_ << " (lifetime [" << cand.def_point << ", "
+                  << cand.last_use_point << "])";
+        break;
       }
+      if (!placed) buffers.push_back({idx});
     }
   }
 

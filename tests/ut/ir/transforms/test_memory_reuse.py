@@ -2630,8 +2630,13 @@ class TestTopDownRetargeter:
 
         # tile_iter/sorted_tile/result live on mem_vec_5 (loop-carry buffer).
         # `merged` is allocated on its own buffer mem_vec_6 so src (tile_iter
-        # on mem_vec_5) and dst (merged on mem_vec_6) differ.  YieldFixup
+        # on mem_vec_5) and dst (merged on mem_vec_6) differ — the retargeter
+        # still declines because mrgsort cannot run src==dst.  YieldFixup
         # inserts merged_mv on mem_vec_5 so the yield matches the iter_arg.
+        # Global largest-first packing additionally lets the two 8 KB tiles
+        # src_tile and vals (both lifetime-disjoint from `merged`) reuse
+        # `merged`'s larger 16 KB mem_vec_6 buffer, so only three Vec buffers
+        # are allocated instead of four.
         @pl.program
         class Expected:
             @pl.function
@@ -2641,11 +2646,10 @@ class TestTopDownRetargeter:
                 idx_tensor: pl.Tensor[[1, 2048], pl.UINT32, pl.MemRef("mem_ddr_1", 0, 8192)],
                 val_output: pl.Out[pl.Tensor[[1, 2048], pl.FP32, pl.MemRef("mem_ddr_2", 0, 8192)]],
             ) -> pl.Tensor[[1, 2048], pl.FP32]:
-                mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 8192)
                 mem_vec_4: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 8192)
                 mem_vec_5: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
                 mem_vec_6: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
-                src_tile: pl.Tile[[1, 2048], pl.FP32, pl.MemRef(mem_vec_3, 0, 8192), pl.Mem.Vec] = (
+                src_tile: pl.Tile[[1, 2048], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec] = (
                     pl.tile.load(
                         src_tensor, [0, 0], [1, 2048], [1, 2048], target_memory=pl.Mem.Vec, transpose=False
                     )
@@ -2669,7 +2673,7 @@ class TestTopDownRetargeter:
                     result: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
                         pl.yield_(merged_mv)
                     )
-                vals: pl.Tile[[1, 2048], pl.FP32, pl.MemRef(mem_vec_3, 0, 8192), pl.Mem.Vec] = (
+                vals: pl.Tile[[1, 2048], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec] = (
                     pl.tile.gather_mask(result, mask_pattern=pl.tile.MaskPattern.P0101)
                 )
                 out_val: pl.Tensor[[1, 2048], pl.FP32, pl.MemRef("mem_ddr_2", 0, 8192)] = pl.tile.store(
@@ -2917,8 +2921,10 @@ class TestL0CrossShapeReuse:
     def test_right_buffers_different_shapes_reuse(self):
         """``rb`` ([64, 256] Right) is dead before ``rd`` ([128, 128] Right) is
         born; both are 32 KB extract sub-tiles, so ``rd`` reuses ``rb``'s buffer
-        despite the differing shape.  ``lc`` ([16, 128] Left) is *larger* than
-        ``la`` ([16, 64] Left), so the size gate (correctly) keeps them apart."""
+        despite the differing shape.  ``la`` ([16, 64] Left, 2 KB) is dead before
+        ``lc`` ([16, 128] Left, 4 KB) is born; global largest-first packing makes
+        the larger ``lc`` the buffer representative and lets the smaller, earlier
+        ``la`` share it — cross-shape L0 reuse is bidirectional."""
 
         @pl.program
         class Before:
@@ -2995,10 +3001,14 @@ class TestL0CrossShapeReuse:
             f"rd ([128,128] Right) must reuse rb's ([64,256] Right) buffer; "
             f"got rb@{bases['rb'].name_hint} vs rd@{bases['rd'].name_hint}"
         )
-        # lc ([16,128] Left, 4 KB) is larger than la ([16,64] Left, 2 KB), so the
-        # size gate keeps them in distinct buffers — reuse must not corrupt.
-        assert bases["la"] is not bases["lc"], (
-            "la ([16,64]) and lc ([16,128]) must NOT share — lc is larger (size gate)"
+        # la ([16,64] Left, 2 KB) is dead before lc ([16,128] Left, 4 KB) is born.
+        # Global largest-first packing makes the larger lc the representative and
+        # lets the smaller, earlier la share its buffer — the former one-directional
+        # size gate (source.size >= target.size) could never capture this. Saves 2 KB
+        # of L0A; lc's 4 KB buffer is large enough to hold la.
+        assert bases["la"] is bases["lc"], (
+            "la ([16,64]) should reuse lc's ([16,128]) larger L0A buffer under global "
+            f"packing; got la@{bases['la'].name_hint} vs lc@{bases['lc'].name_hint}"
         )
 
 
