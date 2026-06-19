@@ -127,6 +127,8 @@ __all__ = [
     "gather",
     "gather_mask",
     "gather_compare",
+    "interleave",
+    "deinterleave",
     "scatter",
     "scatter_mask",
     "mscatter",
@@ -2054,6 +2056,72 @@ def gather_compare(
         out_cols=out_cols,
         count_dtype=count_dtype,
     )
+    span = call_expr.span
+    return (
+        Tile(expr=_ir_core.TupleGetItemExpr(call_expr, 0, span)),
+        Tile(expr=_ir_core.TupleGetItemExpr(call_expr, 1, span)),
+    )
+
+
+def interleave(lhs: Tile, rhs: Tile) -> tuple[Tile, Tile]:
+    """Interleave elements of two same-typed tiles: produce ``(low, high)``.
+
+    Maps to the hardware interleave instruction. ``low`` interleaves the
+    lower halves of ``lhs``/``rhs`` (``lhs0, rhs0, lhs1, rhs1, ...``); ``high``
+    does the same over the upper halves. Both outputs have the same dtype and
+    shape as ``lhs``.
+
+    DSL form (inside ``@pl.function``)::
+
+        low, high = pl.tile.interleave(lhs, rhs)
+
+    The ``a, b = call(...)`` Python tuple unpack is desugared by the parser
+    into ``_tuple = call; a = _tuple[0]; b = _tuple[1]``. The parser consumes
+    the underlying tuple-typed :class:`ir.Call` returned by
+    :func:`pypto.ir.op.tile_ops.interleave`; the ``(Tile, Tile)`` split below
+    only runs in interactive Python contexts.
+
+    Args:
+        lhs: First source tile (8/16/32-bit dtype).
+        rhs: Second source tile (same dtype, shape, and valid_shape as ``lhs``).
+
+    Returns:
+        ``(low, high)`` tile pair, each with the same dtype/shape as ``lhs``.
+    """
+    call_expr = _ir_ops.interleave(lhs.unwrap(), rhs.unwrap())
+    span = call_expr.span
+    return (
+        Tile(expr=_ir_core.TupleGetItemExpr(call_expr, 0, span)),
+        Tile(expr=_ir_core.TupleGetItemExpr(call_expr, 1, span)),
+    )
+
+
+def deinterleave(lhs: Tile, rhs: Tile) -> tuple[Tile, Tile]:
+    """De-interleave elements of two same-typed tiles: produce ``(even, odd)``.
+
+    Maps to the hardware de-interleave instruction. ``even`` collects the
+    even-indexed elements of the ``lhs|rhs`` concatenation; ``odd`` collects
+    the odd-indexed elements. Both outputs have the same dtype and shape as
+    ``lhs``.
+
+    DSL form (inside ``@pl.function``)::
+
+        even, odd = pl.tile.deinterleave(lhs, rhs)
+
+    The ``a, b = call(...)`` Python tuple unpack is desugared by the parser
+    into ``_tuple = call; a = _tuple[0]; b = _tuple[1]``. The parser consumes
+    the underlying tuple-typed :class:`ir.Call` returned by
+    :func:`pypto.ir.op.tile_ops.deinterleave`; the ``(Tile, Tile)`` split
+    below only runs in interactive Python contexts.
+
+    Args:
+        lhs: First source tile (8/16/32-bit dtype).
+        rhs: Second source tile (same dtype, shape, and valid_shape as ``lhs``).
+
+    Returns:
+        ``(even, odd)`` tile pair, each with the same dtype/shape as ``lhs``.
+    """
+    call_expr = _ir_ops.deinterleave(lhs.unwrap(), rhs.unwrap())
     span = call_expr.span
     return (
         Tile(expr=_ir_core.TupleGetItemExpr(call_expr, 0, span)),

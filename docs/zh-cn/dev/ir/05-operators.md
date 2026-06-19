@@ -268,6 +268,8 @@ with ib.function("tensor_example") as f:
 | **规约** | `tile.sum` | 沿轴规约（axis, keepdim） |
 | **散布** | `tile.scatter` | 按行索引把 `src` 散布到 `dst`（`pto.tscatter` 索引形式；DPS：`dst` 为 in/out，结果别名为 `dst`）。`src` / `dst` dtype ∈ {I8, I16, I32, FP16, FP32, BF16}；`indexes` dtype ∈ {I16, I32}；元素宽度匹配规则：4 字节 dst ↔ INT32，2 字节 dst ↔ INT16，1 字节 dst ↔ INT16。 |
 | - | `tile.scatter_mask` | 按掩码模式把 `src` 行写入 `dst` 中由掩码选中的列（`pto.tscatter` 掩码形式；DPS）。掩码 P0101 (1) / P1010 (2) 步幅 2；P0001..P1000 (3-6) 步幅 4；P1111 (7) 不扩展。仅 A3 / CPU-sim 后端支持，A5 拒绝。 |
+| **交织** | `tile.interleave` | `low, high = pl.tile.interleave(lhs, rhs)` —— 交织两个同类型 tile：`low` = 两输入低半部的 `lhs0, rhs0, lhs1, rhs1, ...`，`high` = 高半部同样交织。`lhs`/`rhs` 的 dtype、shape、valid_shape 必须完全一致；两个输出均复制 lhs 的 tile 类型。元素位宽 8/16/32-bit。等待 PTOAS tile 形式（`pto.tintlv`）支持 —— 目前仅 codegen 验证，无在板系统测试。 |
+| - | `tile.deinterleave` | `even, odd = pl.tile.deinterleave(lhs, rhs)` —— 将 `lhs\|rhs` 拼接按偶/奇下标拆分为两个 tile。约束（同 dtype/shape/valid_shape、8/16/32-bit 位宽）与 `tile.interleave` 相同。等待 PTOAS tile 形式（`pto.tdintlv`）支持 —— 目前仅 codegen 验证，无在板系统测试。 |
 
 **数据流：** `TensorType (DDR) → tile.load → TileType (Unified Buffer) → tile.{ops} → TileType → tile.store → TensorType (DDR)`
 

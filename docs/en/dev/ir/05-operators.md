@@ -274,6 +274,8 @@ with ib.function("tensor_example") as f:
 | **Reduction** | `tile.sum` | Reduction along axis (axis, keepdim) |
 | **Scatter** | `tile.scatter` | Row-scatter `src` into `dst` at per-row indices (`pto.tscatter` index form; DPS — `dst` is in/out, the result aliases `dst`). `src`/`dst` dtype ∈ {I8, I16, I32, FP16, FP32, BF16}; `indexes` dtype ∈ {I16, I32}; element-size matching rule: 4-byte dst ↔ INT32, 2-byte dst ↔ INT16, 1-byte dst ↔ INT16. |
 | - | `tile.scatter_mask` | Mask-pattern row-scatter: write each `src` row into the mask-marked columns of `dst` (`pto.tscatter` mask form; DPS). Mask pattern selects positions: P0101 (1) / P1010 (2) — stride 2; P0001 (3) / P0010 (4) / P0100 (5) / P1000 (6) — stride 4; P1111 (7) — no expansion. Targeted at A3 / CPU-sim style backends — A5 rejects this form. |
+| **Interleave** | `tile.interleave` | `low, high = pl.tile.interleave(lhs, rhs)` — interleave two same-typed tiles: `low` = `lhs0, rhs0, lhs1, rhs1, ...` over the lower halves, `high` = same over the upper halves. `lhs`/`rhs` must have identical dtype, shape, and valid_shape; both outputs copy the lhs tile type. Element widths 8/16/32-bit. Pending PTOAS tile-form support (`pto.tintlv`) — codegen-verified only, no on-device system test yet. |
+| - | `tile.deinterleave` | `even, odd = pl.tile.deinterleave(lhs, rhs)` — split the `lhs\|rhs` concatenation into even-indexed and odd-indexed elements. Same dtype/shape/valid_shape constraints and 8/16/32-bit widths as `tile.interleave`. Pending PTOAS tile-form support (`pto.tdintlv`) — codegen-verified only, no on-device system test yet. |
 
 **Data Flow:** `TensorType (DDR) → tile.load → TileType (Unified Buffer) → tile.{ops} → TileType → tile.store → TensorType (DDR)`
 

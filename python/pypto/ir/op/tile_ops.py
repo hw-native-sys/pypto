@@ -2599,6 +2599,62 @@ def gather_compare(
 
 
 # ============================================================================
+# Interleave Operations
+# ============================================================================
+
+
+def interleave(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
+    """Interleave elements of two same-typed tiles (tile-level).
+
+    Maps to the hardware interleave instruction. Returns a single
+    :class:`Call` whose result type is a ``TupleType{low, high}``::
+
+        low  : TileType, same shape/dtype as lhs — lhs0, rhs0, lhs1, rhs1, ...
+               over the lower halves of lhs/rhs
+        high : TileType, same shape/dtype as lhs — same pattern over the
+               upper halves
+
+    The DSL form ``low, high = pl.tile.interleave(lhs, rhs)`` is desugared by
+    the parser into ``_tuple = call; low = _tuple[0]; high = _tuple[1]``.
+
+    Args:
+        lhs: First source tile (8/16/32-bit dtype).
+        rhs: Second source tile (same dtype, shape, and valid_shape as ``lhs``).
+        span: Optional source span (auto-captured if omitted).
+
+    Returns:
+        Call expression for tile.interleave (TupleType{low, high} result)
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.interleave", [lhs, rhs], {}, actual_span)
+
+
+def deinterleave(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
+    """De-interleave elements of two same-typed tiles (tile-level).
+
+    Maps to the hardware de-interleave instruction. Returns a single
+    :class:`Call` whose result type is a ``TupleType{even, odd}``::
+
+        even : TileType, same shape/dtype as lhs — even-indexed elements of
+               the lhs|rhs concatenation
+        odd  : TileType, same shape/dtype as lhs — odd-indexed elements
+
+    The DSL form ``even, odd = pl.tile.deinterleave(lhs, rhs)`` is desugared
+    by the parser into ``_tuple = call; even = _tuple[0]; odd = _tuple[1]``.
+
+    Args:
+        lhs: First source tile (8/16/32-bit dtype).
+        rhs: Second source tile (same dtype, shape, and valid_shape as ``lhs``).
+        span: Optional source span (auto-captured if omitted).
+
+    Returns:
+        Call expression for tile.deinterleave (TupleType{even, odd} result)
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.deinterleave", [lhs, rhs], {}, actual_span)
+
+
+# ============================================================================
 # Scatter Operations
 # ============================================================================
 

@@ -2230,5 +2230,87 @@ class TestScatterCodegen:
         )
 
 
+class TestInterleaveCodegen:
+    """Tests for tile.interleave / tile.deinterleave PTO code generation (issue #1325).
+
+    Codegen-level only: PTOAS v0.45 does not yet accept the tile-level
+    pto.tintlv / pto.tdintlv mnemonics, so no system test exists yet — these
+    tests pin the expected MLIR shape for the day PTOAS support lands.
+    """
+
+    def _generate_mlir(self, program_cls) -> str:
+        """Run PassManager and PTOCodegen on the given program, return MLIR string."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        optimized = pm.run_passes(program_cls)
+        codegen_instance = codegen.PTOCodegen()
+        funcs = list(optimized.functions.values())
+        assert funcs, "Program has no functions"
+        single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
+        return codegen_instance.generate(single)
+
+    def _assert_two_in_two_out(self, mlir: str, pto_op: str, out_names: tuple[str, str]) -> None:
+        op_lines = [line for line in mlir.splitlines() if pto_op in line]
+        assert len(op_lines) == 1, f"Expected exactly one {pto_op}, got {len(op_lines)}:\n{mlir}"
+        line = op_lines[0]
+        assert "ins(" in line and "outs(" in line, f"{pto_op} must use ins(...) outs(...), got:\n{line}"
+        ins_clause = line.split("ins(", 1)[1].split(")", 1)[0]
+        outs_clause = line.split("outs(", 1)[1].split(")", 1)[0]
+        assert ins_clause.count("%") >= 2, f"{pto_op} must have two ins operands, got:\n{line}"
+        assert outs_clause.count("%") >= 2, f"{pto_op} must have two outs operands, got:\n{line}"
+        for name in out_names:
+            assert f"%{name}" in outs_clause, f"{pto_op} outs must include %{name}, got:\n{line}"
+            alloc_lines = [ln for ln in mlir.splitlines() if "pto.alloc_tile" in ln and f"%{name}" in ln]
+            assert len(alloc_lines) == 1, (
+                f"Expected exactly one alloc_tile for '{name}', got {len(alloc_lines)}:\n{mlir}"
+            )
+
+    def test_tile_interleave_codegen(self):
+        """tile.interleave emits one pto.tintlv with 2 ins + 2 outs and both alloc_tiles."""
+
+        @pl.program
+        class ProgIntlv:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[32, 64], pl.FP32],
+                rhs: pl.Tensor[[32, 64], pl.FP32],
+                out_low: pl.Tensor[[32, 64], pl.FP32],
+                out_high: pl.Tensor[[32, 64], pl.FP32],
+            ):
+                a: pl.Tile[[32, 64], pl.FP32] = pl.load(lhs, [0, 0], [32, 64])
+                b: pl.Tile[[32, 64], pl.FP32] = pl.load(rhs, [0, 0], [32, 64])
+                low, high = pl.tile.interleave(a, b)
+                pl.store(low, [0, 0], out_low)
+                pl.store(high, [0, 0], out_high)
+
+        mlir = self._generate_mlir(ProgIntlv)
+        self._assert_two_in_two_out(mlir, "pto.tintlv", ("low", "high"))
+
+    def test_tile_deinterleave_codegen(self):
+        """tile.deinterleave emits one pto.tdintlv with 2 ins + 2 outs and both alloc_tiles."""
+
+        @pl.program
+        class ProgDeintlv:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[32, 64], pl.FP32],
+                rhs: pl.Tensor[[32, 64], pl.FP32],
+                out_even: pl.Tensor[[32, 64], pl.FP32],
+                out_odd: pl.Tensor[[32, 64], pl.FP32],
+            ):
+                a: pl.Tile[[32, 64], pl.FP32] = pl.load(lhs, [0, 0], [32, 64])
+                b: pl.Tile[[32, 64], pl.FP32] = pl.load(rhs, [0, 0], [32, 64])
+                even, odd = pl.tile.deinterleave(a, b)
+                pl.store(even, [0, 0], out_even)
+                pl.store(odd, [0, 0], out_odd)
+
+        mlir = self._generate_mlir(ProgDeintlv)
+        self._assert_two_in_two_out(mlir, "pto.tdintlv", ("even", "odd"))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
