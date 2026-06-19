@@ -48,22 +48,26 @@ point `clean_sim_trace` at that `OPPROF_*` directory.
 ## Usage
 
 ```bash
-python -m pypto.tools.clean_sim_trace <path> [-o OUTPUT_DIR] [--keep-scalar] [--raw-metrics]
+python -m pypto.tools.clean_sim_trace <path> [-o OUTPUT_DIR] [--keep-scalar] [--raw-metrics] [--no-copy-raw]
 ```
 
 `<path>` is a `visualize_data.bin` file or an `OPPROF_*` directory (the tool
 locates `simulator/visualize_data.bin` inside it). Two files are written next
-to the input, or to `-o` if given:
+to the input, or to `-o` if given. When `-o` points at a separate target
+directory, the raw binary trace is also copied alongside so the folder is
+self-contained:
 
-| File | Content |
-| ---- | ------- |
+| Output | Content |
+| ------ | ------- |
 | `trace.clean.json` | Rebuilt Chrome Trace Event JSON — opens in `chrome://tracing` and the Perfetto UI |
 | `instr_metrics.json` | Per-core instruction metrics from the `API_INSTR` block |
+| `raw_simulator/` | Copy of the raw `visualize_data.bin` + per-core trace data (only with `-o`; the source `OPPROF_*` dir is left intact) |
 
 | Flag | Effect |
 | ---- | ------ |
 | `--keep-scalar` | Keep the `SCALAR` setup lane (dropped by default) |
 | `--raw-metrics` | Dump the `API_INSTR` block verbatim instead of reshaping it |
+| `--no-copy-raw` | Skip copying the raw binary trace into `<output-dir>/raw_simulator/` |
 
 ## The `visualize_data.bin` format
 

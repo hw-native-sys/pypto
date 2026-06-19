@@ -35,6 +35,12 @@ execute".
   an older non-TL CANN; prefer the toolchain used for the device build (the one
   `ASCEND_HOME_PATH` points to). The tool preflights this and fails early with a
   clear message otherwise.
+- The `msprof op simulator` **worker** (`msopprof`). `msprof op` is only a launcher —
+  it execs `$ASCEND_TOOLKIT_HOME/tools/msopprof/bin/msopprof`, which some CANN 9.0
+  toolkit drops omit. The tool preflights this and, when missing, **auto-provisions**
+  one by copying a `msopprof` from another local CANN (msprof rejects symlinks).
+  Override with `--msopprof <path>`; `--no-auto-msopprof` fails early instead. A
+  cross-version fallback is warned, and any bad collect is flagged `collect_failed`.
 - The `set_env.sh` must be readable/sourceable by the current user; per-kernel
   build and collect dirs are created private (mode `0700`).
 - `ptoas-bin` installed. If missing, run the `/pto-env-setup` skill.
@@ -86,7 +92,9 @@ python -m pypto.tools.clean_sim_trace \
 
 It writes `trace.clean.json` (pipeline lanes in dataflow order
 MTE2→MTE1→CUBE→VECTOR→FIXPIPE→MTE3, sync flags re-anchored as flow arrows) and
-`instr_metrics.json` (per-instruction pipe / cycles / vector-utilization). The
+`instr_metrics.json` (per-instruction pipe / cycles / vector-utilization). With
+`-o <out>` it also copies the raw binary trace (`visualize_data.bin` + per-core
+data) into `<out>/raw_simulator/` (source left intact; `--no-copy-raw` skips). The
 per-pipe cycle breakdown is the fastest way to spot a degenerate trace
 (`CUBE=0` cycles — see **Caveats**). Rename the cleaned trace to
 `<kernel>.clean.json` straight away (see below) so multiple profiled kernels stay
@@ -105,7 +113,7 @@ Recommended layout inside that folder:
 build_output/incore_<kernel>_<source>_<ts>/
   <kernel>.clean.json    cleaned per-pipe trace (the deliverable)
   instr_metrics.json     per-instruction pipe / cycles / vector-utilization
-  raw_simulator/         visualize_data.bin + per-core *_instr_exe.csv  (for re-analysis)
+  raw_simulator/         visualize_data.bin + per-core trace data  (auto-copied by clean_sim_trace -o)
   summary.txt            provenance (source script, wired workload, per-pipe breakdown)
 ```
 
@@ -114,7 +122,8 @@ must record the wired workload (e.g. `fa_total`, work-table, `seq_lens`, scalar
 args) when real intermediates were patched in — otherwise the numbers are not
 reproducible. Pass `-o build_output/incore_<kernel>_<source>_<ts>` to
 `clean_sim_trace` so the output lands in the run folder directly (no nested
-subfolder), then rename its `trace.clean.json` to `<kernel>.clean.json` — the
+subfolder) — this also auto-copies `raw_simulator/` (the binary trace) into the
+folder — then rename its `trace.clean.json` to `<kernel>.clean.json` — the
 kernel-name prefix keeps multiple profiled kernels distinguishable when several
 `.clean.json` files are downloaded together and opened in Perfetto:
 
@@ -143,6 +152,12 @@ mv build_output/incore_<kernel>_<source>_<ts>/trace.clean.json \
   data-dependent and the auto golden zeroed its control tensor. See **Caveats**.
 - **`CANN set_env.sh not found`** — pass `--cann-set-env <path>`, or set
   `ASCEND_HOME_PATH` / `CANN_SET_ENV`.
+- **`Cannot find msopprof` / `…/tools/msopprof/bin/msopprof does not exist`** —
+  `msprof op` can't find its worker binary. The tool now preflights and
+  auto-provisions one from another local CANN (look for a `provisioned msopprof
+  worker:` log line). If none is found, it fails early naming the expected path —
+  install the matching CANN 9.0.x `msopprof` there (it ships in the complete
+  Ascend-cann-toolkit / MindStudio operator-dev tools) or pass `--msopprof <path>`.
 - **`sibling .pto not found`** — the kernel `.cpp` has no `.pto` next to it (the
   generator reads it for buffer sizes). Use a `ptoas/` dir that has both, or pass
   `--ptoas-root <PTOAS source checkout>` to fall back to the validation generator.

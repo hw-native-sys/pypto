@@ -17,6 +17,7 @@ the ``TRACE`` block into a de-cluttered Chrome Trace Event JSON and reshapes the
 
 import argparse
 import json
+import shutil
 import struct
 import sys
 from collections.abc import Iterator
@@ -46,7 +47,7 @@ def iter_blocks(data: bytes) -> Iterator[tuple[int, bytes]]:
     """
     off = 0
     while off + _HEADER.size <= len(data):
-        size, btype, padding, _instr_ver, reserve = _HEADER.unpack_from(data, off)
+        size, btype, padding, _, reserve = _HEADER.unpack_from(data, off)
         body = off + _HEADER.size
         if reserve != _MAGIC or size > len(data) - body:
             raise ValueError(f"corrupt block at offset {off}: size={size}, reserve={reserve:#x}")
@@ -426,6 +427,42 @@ def _resolve_input(path: Path) -> Path:
     )
 
 
+def _copy_raw_trace(bin_path: Path, out_dir: Path) -> Path | None:
+    """Bring the raw simulator binary trace into ``out_dir/raw_simulator/``.
+
+    The cleaned trace is the deliverable, but the target folder should be
+    self-contained for re-analysis — so the binary trace result
+    (``visualize_data.bin``) and its sibling per-core artifacts (``core*`` dirs,
+    Insight ``trace.json``) are copied next to ``trace.clean.json``. The source
+    under the run's ``OPPROF_*/simulator`` dir is left intact (copy, not move).
+
+    Returns the destination directory, or ``None`` when there is nothing to do
+    (the raw bin already lives in ``out_dir``).
+    """
+    src_dir = bin_path.parent  # the OPPROF_*/simulator directory
+    if out_dir.resolve() == src_dir.resolve():
+        return None
+    raw_dir = out_dir / "raw_simulator"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    raw_resolved = raw_dir.resolve()
+    for item in sorted(src_dir.iterdir()):
+        # Never recurse into our own destination if it sits under the source.
+        try:
+            if raw_resolved == item.resolve() or raw_resolved.is_relative_to(item.resolve()):
+                continue
+        except (OSError, ValueError):
+            pass
+        dest = raw_dir / item.name
+        try:
+            if item.is_dir():
+                shutil.copytree(item, dest, dirs_exist_ok=True)
+            else:
+                shutil.copy2(item, dest)
+        except OSError as exc:
+            print(f"warning: could not copy {item} -> {dest}: {exc}", file=sys.stderr)
+    return raw_dir
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point. Returns a process exit code."""
     parser = argparse.ArgumentParser(
@@ -444,6 +481,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--raw-metrics", action="store_true", help="dump the API_INSTR block verbatim instead of reshaping"
+    )
+    parser.add_argument(
+        "--copy-raw",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="copy the raw binary trace (visualize_data.bin + per-core artifacts) into "
+        "<output-dir>/raw_simulator/ so the target folder is self-contained alongside the "
+        "cleaned trace (default: on; --no-copy-raw to skip). No-op without -o/--output-dir.",
     )
     args = parser.parse_args(argv)
 
@@ -498,6 +543,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"wrote {metrics_path}")
     else:
         print("warning: no API_INSTR block found; skipping instr_metrics.json", file=sys.stderr)
+
+    if args.copy_raw:
+        raw_dir = _copy_raw_trace(bin_path, out_dir)
+        if raw_dir is not None:
+            print(f"copied raw binary trace into {raw_dir}")
 
     return 0
 

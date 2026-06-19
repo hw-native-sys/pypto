@@ -42,21 +42,24 @@ python .claude/skills/incore-profiling/incore_profile.py \
 ## 用法
 
 ```bash
-python -m pypto.tools.clean_sim_trace <path> [-o OUTPUT_DIR] [--keep-scalar] [--raw-metrics]
+python -m pypto.tools.clean_sim_trace <path> [-o OUTPUT_DIR] [--keep-scalar] [--raw-metrics] [--no-copy-raw]
 ```
 
 `<path>` 是一个 `visualize_data.bin` 文件或一个 `OPPROF_*` 目录（工具会在其中
-定位 `simulator/visualize_data.bin`）。会在输入旁边（或 `-o` 指定的目录）写出两个文件：
+定位 `simulator/visualize_data.bin`）。会在输入旁边（或 `-o` 指定的目录）写出两个文件。
+当 `-o` 指向一个独立的目标目录时，原始二进制 trace 也会一并拷贝过去，使该目录自包含：
 
-| 文件 | 内容 |
+| 输出 | 内容 |
 | ---- | ---- |
 | `trace.clean.json` | 重建后的 Chrome Trace Event JSON，可在 `chrome://tracing` 与 Perfetto UI 打开 |
 | `instr_metrics.json` | 来自 `API_INSTR` 块的逐核指令指标 |
+| `raw_simulator/` | 原始 `visualize_data.bin` 与逐核 trace 数据的拷贝（仅在使用 `-o` 时；源 `OPPROF_*` 目录保持不变） |
 
 | 选项 | 作用 |
 | ---- | ---- |
 | `--keep-scalar` | 保留 `SCALAR` 准备车道（默认丢弃） |
 | `--raw-metrics` | 原样输出 `API_INSTR` 块，而不做重塑 |
+| `--no-copy-raw` | 跳过将原始二进制 trace 拷贝到 `<output-dir>/raw_simulator/` |
 
 ## `visualize_data.bin` 格式
 

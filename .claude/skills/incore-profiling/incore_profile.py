@@ -747,6 +747,19 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
         help="AICore arch for generate_testcase.py; defaults from --target "
         "(a2a3 -> dav-c220, a5 -> dav-c310)",
     )
+    tool_group.add_argument(
+        "--msopprof",
+        default=None,
+        help="Path to a msopprof worker binary for `msprof op simulator`. When omitted and "
+        "the worker is missing, one is auto-provisioned from another local CANN install.",
+    )
+    tool_group.add_argument(
+        "--auto-msopprof",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Auto-provision the msopprof worker into $ASCEND_TOOLKIT_HOME/tools/msopprof/bin "
+        "when `msprof op` can't find it (copied, since msprof rejects symlinks).",
+    )
 
     out_group = parser.add_argument_group("output")
     out_group.add_argument(
@@ -837,6 +850,224 @@ def assert_bisheng_supports_tl(env: dict[str, str], aicore_arch: str) -> None:
         )
 
 
+# `msprof op [simulator]` is only a launcher: it execs the operator-profiler
+# worker binary `msopprof` at $ASCEND_TOOLKIT_HOME/tools/msopprof/bin/msopprof
+# (CANN >= 9.0 layout). 8.x CANN ships the same worker at tools/msopt/bin. Some
+# 9.0 toolkit drops ship the launcher but omit the worker, so every collect dies
+# with `Cannot find msopprof` deep in the run. We probe up front and provision a
+# worker when one is missing.
+_MSOPPROF_REL = Path("tools/msopprof/bin/msopprof")
+_MSOPPROF_WORKER_RELS = (_MSOPPROF_REL, Path("tools/msopt/bin/msopprof"))
+# Specific msprof error phrases that mean "the worker is unreachable" — kept tight
+# so a healthy `--help` (which may say e.g. "does not support" in an option blurb)
+# is never misclassified as a missing worker. "is soft link" covers the
+# symlink-rejection error in full.
+_MSOPPROF_ERROR_MARKERS = (
+    "Cannot find msopprof",
+    "does not exist or permission denied",
+    "is soft link",
+)
+
+
+def _toolkit_home(env: dict[str, str]) -> Path | None:
+    """Return the CANN toolkit root msprof appends the worker path to."""
+    for key in ("ASCEND_TOOLKIT_HOME", "ASCEND_HOME_PATH"):
+        val = env.get(key)
+        if val and Path(val).is_dir():
+            return Path(val)
+    return None
+
+
+def _safe_is_file(path: Path) -> bool:
+    """`Path.is_file()` that treats an unreadable/denied path as 'not a file'."""
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
+def _cann_version(root: Path) -> str | None:
+    for rel in ("compiler/version.info", "version.info", "opp/version.info"):
+        info = root / rel
+        if not _safe_is_file(info):
+            continue
+        try:
+            text = info.read_text(errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            if line.startswith("Version="):
+                return line.split("=", 1)[1].strip()
+    return None
+
+
+def _worker_cann_version(worker: Path) -> str | None:
+    """Best-effort CANN version of the install a worker binary belongs to."""
+    for ancestor in list(worker.parents)[:6]:
+        ver = _cann_version(ancestor)
+        if ver:
+            return ver
+    return None
+
+
+def _msopprof_smoke(env: dict[str, str]) -> tuple[bool, str]:
+    """Probe `msprof op simulator --help`; return (usable, first-line detail).
+
+    msprof prints an explicit error (and still returns rc 0 in some builds) when
+    the worker is missing or a symlink, so we classify on output content rather
+    than the exit code.
+    """
+    msprof = shutil.which("msprof", path=env.get("PATH"))
+    if not msprof:
+        return False, "msprof not on PATH"
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            cp = subprocess.run(
+                [msprof, "op", "simulator", "--help"],
+                cwd=tmp,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=120,
+                check=False,
+            )
+        out = cp.stdout or ""
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"probe failed: {exc!r}"
+    first = next((ln for ln in out.splitlines() if ln.strip()), "no output")
+    if any(marker in out for marker in _MSOPPROF_ERROR_MARKERS):
+        return False, first
+    return ("--application" in out and "Options:" in out), first
+
+
+def _find_msopprof_source(toolkit_home: Path, explicit: str | None) -> Path | None:
+    """Locate a msopprof worker to provision from (explicit path or local CANN)."""
+    if explicit:
+        worker = repo_path(explicit)
+        if not worker.is_file():
+            raise StepError(f"--msopprof not found: {worker}")
+        return worker
+    want = _cann_version(toolkit_home)
+    bases = [
+        toolkit_home.parent,
+        Path("/usr/local/Ascend/ascend-toolkit"),
+        Path.home() / "Ascend",
+        Path.home() / "Ascend/ascend-toolkit",
+        Path("/usr/local/Ascend"),
+        Path("/opt/Ascend"),
+    ]
+    roots: list[Path] = []
+    seen: set[Path] = set()
+    home_resolved = toolkit_home.resolve()
+    for base in bases:
+        try:
+            children = sorted(base.iterdir()) if base.is_dir() else []
+        except OSError:
+            continue
+        for child in children:
+            try:
+                if not child.is_dir():
+                    continue
+                root = child.resolve()
+            except OSError:
+                continue
+            if root not in seen and root != home_resolved:
+                seen.add(root)
+                roots.append(child)
+    candidates: list[tuple[int, Path]] = []
+    for root in roots:
+        for rel in _MSOPPROF_WORKER_RELS:
+            worker = root / rel
+            if not _safe_is_file(worker):
+                continue
+            ver = _cann_version(root)
+            if want and ver == want:
+                rank = 0
+            elif want and ver and ver.split(".")[:2] == want.split(".")[:2]:
+                rank = 1
+            else:
+                rank = 2
+            candidates.append((rank, worker))
+            break
+    if not candidates:
+        return None
+    candidates.sort(key=lambda t: t[0])
+    return candidates[0][1]
+
+
+def ensure_msopprof_worker(env: dict[str, str], args: argparse.Namespace) -> None:
+    """Guarantee `msprof op simulator` can find its msopprof backend.
+
+    Probe first; if the worker is reachable, do nothing. Otherwise locate a
+    msopprof binary (explicit --msopprof or another local CANN install) and
+    install it as a real *copy* (msprof rejects symlinks) at the path msprof
+    hardcodes, then re-probe. Fail early with precise remediation when no worker
+    is available or auto-provisioning is disabled.
+    """
+    ok, detail = _msopprof_smoke(env)
+    if ok:
+        return
+    toolkit_home = _toolkit_home(env)
+    if toolkit_home is None:
+        raise StepError(
+            "ASCEND_TOOLKIT_HOME / ASCEND_HOME_PATH is unset after sourcing CANN, so the "
+            "msopprof worker that `msprof op simulator` requires cannot be located. "
+            "Source a valid CANN set_env.sh (pass --cann-set-env)."
+        )
+    expected = toolkit_home / _MSOPPROF_REL
+    if not args.auto_msopprof and not args.msopprof:
+        raise StepError(
+            f"`msprof op simulator` cannot find its worker ({detail}).\n"
+            f"  Expected at: {expected}\n"
+            f"  Auto-provisioning is off (--no-auto-msopprof). Install the matching CANN "
+            f"msopprof there, or pass --msopprof <path>."
+        )
+    source = _find_msopprof_source(toolkit_home, args.msopprof)
+    if source is None:
+        raise StepError(
+            f"`msprof op simulator` cannot find its worker ({detail}).\n"
+            f"  Expected at: {expected}\n"
+            f"  No msopprof binary was found in any local CANN install to provision from.\n"
+            f"  Fix: install the matching CANN 9.0.x msopprof to that path (it ships in the "
+            f"complete Ascend-cann-toolkit / MindStudio operator-dev tools), or pass "
+            f"--msopprof <path-to-msopprof>."
+        )
+    src_ver = _worker_cann_version(source)
+    dst_ver = _cann_version(toolkit_home)
+    try:
+        expected.parent.mkdir(parents=True, exist_ok=True)
+        if expected.exists() or expected.is_symlink():
+            expected.unlink()
+        shutil.copy2(source, expected)
+        expected.chmod(0o750)
+        (expected.parent / "PROVISIONED_BY_INCORE_PROFILE.txt").write_text(
+            f"msopprof copied from {source} (CANN {src_ver}) into CANN {dst_ver}\n"
+            f"by .claude/skills/incore-profiling/incore_profile.py — safe to delete.\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        raise StepError(
+            f"could not install the msopprof worker into {expected}: {exc}. `msprof op` "
+            f"hardcodes that path, so {toolkit_home}/tools must be writable. Make it "
+            f"writable, or install the worker there manually (source: {source})."
+        ) from exc
+    log(f"provisioned msopprof worker: {source} -> {expected}")
+    if src_ver and dst_ver and src_ver != dst_ver:
+        log(
+            f"[warn] provisioned msopprof is CANN {src_ver} into CANN {dst_ver} "
+            f"(cross-version). A failed/empty collect is still flagged as collect_failed, "
+            f"never silently accepted — pass --msopprof a matching worker if traces look wrong."
+        )
+    ok, detail = _msopprof_smoke(env)
+    if not ok:
+        raise StepError(
+            f"installed a msopprof worker but `msprof op simulator --help` still fails: "
+            f"{detail}. It may be incompatible with this CANN; provide a matching worker "
+            f"via --msopprof."
+        )
+
+
 def validate_toolchain(args: argparse.Namespace) -> dict[str, str]:
     """Validate the PTOAS/CANN toolchain and return the sourced environment."""
     if args.cann_set_env is None:
@@ -890,6 +1121,7 @@ def main(argv: list[str] | None = None) -> int:
     if needs_toolchain:
         env = validate_toolchain(args)
         assert_bisheng_supports_tl(env, str(args.aicore_arch))
+        ensure_msopprof_worker(env, args)
         args.soc_version = select_soc_version(args.target, discover_camodel_socs(env), args.soc_version)
     else:
         env = os.environ.copy()

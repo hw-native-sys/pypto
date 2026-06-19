@@ -427,5 +427,51 @@ def test_build_sync_arrows_tolerates_missing_keys():
     assert isinstance(arrows, list) and isinstance(skipped, int)
 
 
+def test_main_copies_raw_into_output_dir(tmp_path):
+    # With -o <target>, the raw binary trace + per-core siblings are copied into
+    # <target>/raw_simulator so the deliverable folder is self-contained.
+    sim_dir = tmp_path / "OPPROF_x" / "simulator"
+    sim_dir.mkdir(parents=True)
+    buf = _make_bin([(clean_sim_trace._TYPE_TRACE, b'{"traceEvents":[]}')])
+    (sim_dir / "visualize_data.bin").write_bytes(buf)
+    (sim_dir / "trace.json").write_text("{}")
+    core = sim_dir / "core0.veccore0"
+    core.mkdir()
+    (core / "x_instr_exe.csv").write_text("a,b\n1,2\n")
+
+    target = tmp_path / "deliverable"
+    assert clean_sim_trace.main([str(sim_dir), "-o", str(target)]) == 0
+
+    assert (target / "trace.clean.json").is_file()
+    raw = target / "raw_simulator"
+    assert (raw / "visualize_data.bin").read_bytes() == buf
+    assert (raw / "trace.json").is_file()
+    assert (raw / "core0.veccore0" / "x_instr_exe.csv").is_file()
+    # the source simulator dir is left intact (copy, not move)
+    assert (sim_dir / "visualize_data.bin").is_file()
+    assert not (sim_dir / "raw_simulator").exists()
+
+
+def test_main_no_copy_raw_skips(tmp_path):
+    sim_dir = tmp_path / "simulator"
+    sim_dir.mkdir()
+    buf = _make_bin([(clean_sim_trace._TYPE_TRACE, b'{"traceEvents":[]}')])
+    (sim_dir / "visualize_data.bin").write_bytes(buf)
+    target = tmp_path / "out"
+    assert clean_sim_trace.main([str(sim_dir), "-o", str(target), "--no-copy-raw"]) == 0
+    assert (target / "trace.clean.json").is_file()
+    assert not (target / "raw_simulator").exists()
+
+
+def test_main_copy_raw_noop_without_output_dir(tmp_path):
+    # Default output (next to the bin) must not create a nested raw_simulator.
+    buf = _make_bin([(clean_sim_trace._TYPE_TRACE, b'{"traceEvents":[]}')])
+    bin_path = tmp_path / "visualize_data.bin"
+    bin_path.write_bytes(buf)
+    assert clean_sim_trace.main([str(bin_path)]) == 0
+    assert (tmp_path / "trace.clean.json").is_file()
+    assert not (tmp_path / "raw_simulator").exists()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
