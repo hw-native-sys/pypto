@@ -721,7 +721,8 @@ std::optional<MNFold> TryFoldMNTiling(const MatmulTiling& t, int result_uses, co
                 "tile.store — M/N direct-store fold needs `out = tile.store(c, ...)`; left untouched");
   }
   auto store_call = As<Call>(store_stmt->value_);
-  INTERNAL_CHECK(store_call) << "Internal error: SiblingIndex store_of mapped a non-Call AssignStmt";
+  INTERNAL_CHECK_SPAN(store_call, store_stmt->span_)
+      << "Internal error: SiblingIndex store_of mapped a non-Call AssignStmt";
 
   auto offs = As<MakeTuple>(store_call->args_[1]);
   if (!offs || offs->elements_.size() != 2) {
@@ -825,7 +826,7 @@ class AutoTileMutator : public IRMutator {
         if (auto tiling = AnalyzeMatmul(assign, hints)) {
           if (!tiling->needs_mn_tiling()) {
             // Whole output fits L0c — tile K only (existing behaviour).
-            INTERNAL_CHECK(tiling->K / tiling->k >= 2)
+            INTERNAL_CHECK_SPAN(tiling->K / tiling->k >= 2, tiling->assign->span_)
                 << "Internal error: K-only tiling expects K / k >= 2 (K=" << tiling->K
                 << ", k=" << tiling->k << ")";
             auto rewrite = BuildKLoopRewrite(
