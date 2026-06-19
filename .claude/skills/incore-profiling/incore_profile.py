@@ -750,8 +750,10 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     tool_group.add_argument(
         "--msopprof",
         default=None,
-        help="Path to a msopprof worker binary for `msprof op simulator`. When omitted and "
-        "the worker is missing, one is auto-provisioned from another local CANN install.",
+        help="Path to a msopprof worker binary to install. msprof hardcodes the worker "
+        "location, so this binary is copied into $ASCEND_TOOLKIT_HOME/tools/msopprof/bin "
+        "(not consumed in place). When omitted and the worker is missing, one is "
+        "auto-provisioned from another local CANN install.",
     )
     tool_group.add_argument(
         "--auto-msopprof",
@@ -1037,9 +1039,19 @@ def ensure_msopprof_worker(env: dict[str, str], args: argparse.Namespace) -> Non
     dst_ver = _cann_version(toolkit_home)
     try:
         expected.parent.mkdir(parents=True, exist_ok=True)
-        if expected.exists() or expected.is_symlink():
-            expected.unlink()
-        shutil.copy2(source, expected)
+        # Guard the self-copy case: if --msopprof points at the destination
+        # itself (a real file, not a symlink), unlinking would delete the source
+        # before copy2 runs. A symlink at `expected` is never "same file" — we
+        # still want to replace it with a real copy (msprof rejects symlinks).
+        same_file = False
+        try:
+            same_file = expected.exists() and not expected.is_symlink() and expected.samefile(source)
+        except OSError:
+            same_file = False
+        if not same_file:
+            if expected.exists() or expected.is_symlink():
+                expected.unlink()
+            shutil.copy2(source, expected)
         expected.chmod(0o750)
         (expected.parent / "PROVISIONED_BY_INCORE_PROFILE.txt").write_text(
             f"msopprof copied from {source} (CANN {src_ver}) into CANN {dst_ver}\n"
