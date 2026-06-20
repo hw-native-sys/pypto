@@ -8,7 +8,7 @@
 # -----------------------------------------------------------------------------------------------------------
 
 """Post-outline ``pl.dump_tag`` resolution for the ``@pl.jit`` +
-``@pl.jit.inline`` + ``with pl.incore()`` style (simpler#844).
+``@pl.jit.inline`` + ``with pl.at(level=pl.Level.CORE_GROUP)`` style (simpler#844).
 
 Unlike the explicit ``self.kernel(...)`` orchestration style (covered by
 ``tests/ut/language/parser/test_dump_tag_dsl.py``), here the kernel dispatches
@@ -16,7 +16,7 @@ are synthesised by the outline passes, not written at parse time. The dump
 intent therefore rides a scope-level ``kAttrDumpVars`` carrier:
 
   - ``pl.dump_tag`` inside an inline helper (forward-sticky) seeds the enclosing
-    ``with pl.incore()`` scope's dump list at parse;
+    ``with pl.at(level=pl.Level.CORE_GROUP)`` scope's dump list at parse;
   - ``pl.dump_tag`` at the inline call site lands on the
     inline call's ``dump_vars``, which ``InlineFunctions`` transfers onto the
     spliced scope;
@@ -36,10 +36,10 @@ from pypto import codegen, ir
 
 @pl.jit.inline
 def _add_inline(a: pl.Tensor, c: pl.Tensor):
-    """c = a + 1.0. Inline-scope ``pl.dump_tag(a)`` -> the incore scope's dump
+    """c = a + 1.0. Inline-scope ``pl.dump_tag(a)`` -> the core-group scope's dump
     list -> kernel1 dumps its ``a`` arg (input role)."""
     pl.dump_tag(a)
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         tile_a = pl.load(a, [0, 0], [128, 128])
         tile_c = pl.add(tile_a, 1.0)
         pl.store(tile_c, [0, 0], c)
@@ -49,7 +49,7 @@ def _add_inline(a: pl.Tensor, c: pl.Tensor):
 @pl.jit.inline
 def _mul_inline(a: pl.Tensor, c: pl.Tensor):
     """c = a * 2.0. No dump_tag — kernel2 must dump nothing."""
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         tile_a = pl.load(a, [0, 0], [128, 128])
         tile_c = pl.mul(tile_a, 2.0)
         pl.store(tile_c, [0, 0], c)
@@ -77,7 +77,7 @@ def _add_mul_no_tags(a: pl.Tensor, c: pl.Out[pl.Tensor]):
 
 @pl.jit.inline
 def _add_inline_untagged(a: pl.Tensor, c: pl.Tensor):
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         tile_a = pl.load(a, [0, 0], [128, 128])
         tile_c = pl.add(tile_a, 1.0)
         pl.store(tile_c, [0, 0], c)
@@ -199,8 +199,8 @@ def test_dump_tag_reaches_for_form_spmd_dispatch():
     Two-part regression:
       1. Parser: the for-form path (``_parse_spmd_for_loop``) built its InCore
          scope directly and skipped ``_merge_forward_sticky_dump``, so the tag
-         was dropped — unlike the ``with pl.at`` / with-form / ``pl.incore``
-         paths that route through ``_parse_scope_body``.
+         was dropped — unlike the ``with pl.at(level=pl.Level.CORE_GROUP)``
+         with-form path that routes through ``_parse_scope_body``.
       2. Codegen: ``BuildWrapperReorderedParams`` read selective-dump only from
          the outer wrapper Call, missing a tag attached to the inner kernel Call
          (where a body-local ``pl.dump_tag`` lands)."""
@@ -239,7 +239,7 @@ def _cluster_mixed_writeback(
     call into AIC/AIV — the rewrite that must carry attrs forward)."""
     pl.dump_tag(a)
     with pl.cluster():
-        with pl.incore():
+        with pl.at(level=pl.Level.CORE_GROUP):
             mm = pl.matmul(a, b, out_dtype=pl.FP32)
             c = pl.add(mm, bias)
     return c

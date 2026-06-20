@@ -29,7 +29,7 @@ from pypto.runtime import RunConfig
 
 @pl.jit
 def tile_softmax(a: pl.Tensor, output: pl.Out[pl.Tensor]):
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         tile_a = pl.load(a, [0, 0], [64, 64])
 
         # Step 1: row-wise max for numerical stability

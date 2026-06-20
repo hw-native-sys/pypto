@@ -1042,7 +1042,7 @@ class TestSplitIncoreOrchVerifier:
         passes.outline_incore_scopes()(program)
 
     def test_outline_with_compute_outside_incore_verification_passes(self):
-        """Compute ops outside incore in explicit pl.incore() usage: verification passes (warning only)."""
+        """Compute ops outside an explicit pl.at(CORE_GROUP) scope: verification passes (warning only)."""
 
         @pl.program
         class Input:
@@ -1081,7 +1081,7 @@ class TestSplitIncoreOrchVerifier:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
                     x = pl.add(x, 1.0)
                     for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
                         x = pl.add(x, 2.0)

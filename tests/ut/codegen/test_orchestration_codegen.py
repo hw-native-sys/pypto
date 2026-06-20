@@ -2372,7 +2372,7 @@ class TestOrchestration:
                 input_tensor: pl.Tensor[[1024, 256], pl.FP32],
                 output_tensor: pl.Tensor[[1024, 256], pl.FP32],
             ) -> pl.Tensor[[1024, 256], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
                     for r in pl.parallel(0, 1024, 1, chunk=64, chunk_policy="leading_full"):
                         row_tile = pl.slice(input_tensor, [1, 256], [r, 0])
                         row_result = pl.add(row_tile, 1.0)

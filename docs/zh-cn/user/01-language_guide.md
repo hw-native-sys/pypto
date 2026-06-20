@@ -501,12 +501,7 @@ class Model:
 将代码区域标记为 InCore 执行，无需创建单独的函数：
 
 ```python
-# 推荐用法（新 API）：
 with pl.at(level=pl.Level.CORE_GROUP):
-    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
-
-# 已弃用（请改用 pl.at）：
-with pl.incore():
     y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
 ```
 
@@ -514,17 +509,9 @@ with pl.incore():
 `pl.auto_chunk`：
 
 ```python
-# 推荐用法（新 API）：
 with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
     for i in pl.parallel(0, 8, 1, chunk=4):
         x = pl.add(x, x)
-
-# 已弃用（仍可用，会触发 DeprecationWarning）：
-with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
-    ...
-
-with pl.auto_incore():
-    ...
 ```
 
 如需为 `ExpandMixedKernel` Pass 指定跨核 split 模式，使用 `pl.split(...)` —— 它与
@@ -541,10 +528,6 @@ with pl.at(level=pl.Level.CORE_GROUP,
            optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.UP_DOWN)]):
     for i in pl.parallel(0, 8, 1, chunk=4):
         x = pl.add(x, x)
-
-# 已弃用的单关键字形式（仍可用，会触发 DeprecationWarning）：
-with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
-    ...
 ```
 
 ## 内存与数据搬运

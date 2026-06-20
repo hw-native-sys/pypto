@@ -43,7 +43,7 @@ class TestSingleParallelChunk:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
                     for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
                         x = pl.add(x, 1.0)
                 return x
@@ -78,7 +78,7 @@ class TestNestedParallelChunks:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
                     for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
                         for j in pl.parallel(0, 12, 1, chunk=4, chunk_policy="leading_full"):
                             x = pl.add(x, 1.0)
@@ -123,7 +123,7 @@ class TestNestedParallelChunks:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
                     for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
                         for j in pl.parallel(0, 12, 1, chunk=4, chunk_policy="leading_full"):
                             x = pl.add(x, 1.0)
@@ -172,7 +172,7 @@ class TestNestedChunkChainsInitSubstitution:
                 x: pl.Tensor[[64], pl.FP32],
                 y: pl.Tensor[[64], pl.FP32],
             ) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
                     for b in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
                         for h in pl.parallel(0, 12, 1, chunk=4, chunk_policy="leading_full"):
                             x = pl.add(x, y)
@@ -224,7 +224,7 @@ class TestNestedChunkChainsInitSubstitution:
                 x: pl.Tensor[[64], pl.FP32],
                 y: pl.Tensor[[64], pl.FP32],
             ) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
                     for b in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
                         for h in pl.parallel(0, 12, 1, chunk=4, chunk_policy="leading_full"):
                             x = pl.add(x, y)
@@ -249,7 +249,7 @@ class TestNestedChunkChainsInitSubstitution:
                 x: pl.Tensor[[64], pl.FP32],
                 y: pl.Tensor[[64], pl.FP32],
             ) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
                     for b in pl.parallel(0, 6, 1, chunk=4, chunk_policy="leading_full"):
                         for h in pl.parallel(0, 14, 1, chunk=4, chunk_policy="leading_full"):
                             x = pl.add(x, y)
@@ -276,7 +276,7 @@ class TestNestedChunksWithInterveningStatements:
                 x: pl.Tensor[[64], pl.FP32],
                 y: pl.Tensor[[64], pl.FP32],
             ) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
                     for b in pl.parallel(0, 16, 1, chunk=4, chunk_policy="leading_full"):
                         x = pl.add(x, y)
                         for h in pl.parallel(0, 8, 1, chunk=2, chunk_policy="leading_full"):
@@ -296,7 +296,7 @@ class TestNestedChunksWithInterveningStatements:
                 x: pl.Tensor[[64], pl.FP32],
                 y: pl.Tensor[[64], pl.FP32],
             ) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
                     for b in pl.parallel(0, 16, 1, chunk=4, chunk_policy="leading_full"):
                         x = pl.add(x, y)
                         for h in pl.parallel(0, 8, 1, chunk=2, chunk_policy="leading_full"):
@@ -356,7 +356,7 @@ class TestChunkWithRemainderInChain:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
                     for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
                         for j in pl.parallel(0, 1, 1, chunk=2, chunk_policy="leading_full"):
                             x = pl.add(x, 1.0)
@@ -396,7 +396,7 @@ class TestChunkWithRemainderInChain:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
                     for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
                         for j in pl.parallel(0, 1, 1, chunk=2, chunk_policy="leading_full"):
                             x = pl.add(x, 1.0)
@@ -436,7 +436,7 @@ class TestRemainderLoops:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
                     for i in pl.parallel(0, 6, 1, chunk=4, chunk_policy="leading_full"):
                         for j in pl.parallel(0, 14, 1, chunk=4, chunk_policy="leading_full"):
                             x = pl.add(x, 1.0)
@@ -532,7 +532,7 @@ class TestSequentialChunks:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
                     for i in pl.range(0, 8, 1, chunk=4, chunk_policy="leading_full"):
                         x = pl.add(x, 1.0)
                 return x
@@ -563,7 +563,7 @@ class TestSequentialChunks:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
                     for i in pl.range(0, 8, 1, chunk=4, chunk_policy="leading_full"):
                         for j in pl.range(0, 12, 1, chunk=4, chunk_policy="leading_full"):
                             x = pl.add(x, 1.0)
@@ -607,7 +607,7 @@ class TestExistingInCore:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
                     for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
                         with pl.at(level=pl.Level.CORE_GROUP):
                             x = pl.add(x, 1.0)
@@ -640,7 +640,7 @@ class TestAutoIncoreConsumed:
         """AutoInCore scope should be removed after InterchangeChunkLoops.
 
         Same Before as ``TestSingleParallelChunk::test_single_parallel_chunk_gets_incore``
-        — the Expected has no ``chunked_loop_optimizer`` marker, structurally
+        — the Expected has no AutoInCore (``auto_chunk``) marker, structurally
         asserting the AutoInCore scope was consumed.
         """
 
@@ -648,7 +648,7 @@ class TestAutoIncoreConsumed:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
                     for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
                         x = pl.add(x, 1.0)
                 return x
@@ -709,7 +709,7 @@ class TestNoNestedIncoreVerifier:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
                     for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
                         x = pl.add(x, 1.0)
                 return x
@@ -734,7 +734,7 @@ class TestNoNestedIncoreVerifier:
                 x: pl.Tensor[[64], pl.FP32],
                 y: pl.Tensor[[64], pl.FP32],
             ) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
                     for b in pl.parallel(0, 16, 1, chunk=4, chunk_policy="leading_full"):
                         x = pl.add(x, y)
                         for h in pl.parallel(0, 8, 1, chunk=2, chunk_policy="leading_full"):
@@ -761,7 +761,7 @@ class TestNonChunkStatementsWrapping:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
                     x = pl.add(x, 1.0)
                 return x
 
@@ -783,7 +783,7 @@ class TestNonChunkStatementsWrapping:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
                     x = pl.add(x, 1.0)
                     for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
                         x = pl.add(x, 2.0)
@@ -817,7 +817,7 @@ class TestNonChunkStatementsWrapping:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
                     for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
                         x = pl.add(x, 2.0)
                     x = pl.mul(x, 3.0)
@@ -854,7 +854,7 @@ class TestNonChunkStatementsWrapping:
                 out_0: pl.Tensor[[8], pl.FP32] = pl.tensor.create(
                     [8], dtype=pl.FP32, layout=pl.TensorLayout.ND
                 )
-                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
                     for i in pl.parallel(0, 4, 1, chunk=2, chunk_policy="leading_full"):
                         x = pl.tensor.adds(x, 1.0)
                     out_1: pl.Tensor[[8], pl.FP32] = pl.tensor.assemble(out_0, x, [0])
@@ -890,7 +890,7 @@ class TestNonChunkStatementsWrapping:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
                     for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
                         x = pl.add(x, 1.0)
                     for j in pl.parallel(0, 12, 1, chunk=4, chunk_policy="leading_full"):
@@ -933,7 +933,7 @@ class TestNonChunkStatementsWrapping:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
                     for i in pl.range(10):
                         x = pl.add(x, 1.0)
                 return x
@@ -958,7 +958,7 @@ class TestNonChunkStatementsWrapping:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
                     for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
                         x = pl.add(x, 1.0)
                     for j in pl.range(0, 12, 1, chunk=4, chunk_policy="leading_full"):
@@ -1005,7 +1005,7 @@ class TestScalarAssignmentNotWrapped:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
                     for ob in pl.range(0, 8):
                         offset: pl.Scalar[pl.INDEX] = ob * 4  # noqa: F841
                         x = pl.add(x, 1.0)
@@ -1044,7 +1044,7 @@ class TestScalarAssignmentNotWrapped:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
                     for ob in pl.range(0, 8):
                         offset: pl.Scalar[pl.INDEX] = ob * 4  # noqa: F841
                         for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
@@ -1102,7 +1102,7 @@ class TestEndToEndNoComputeLeaks:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
                     x = pl.add(x, 1.0)
                 return x
 
@@ -1116,7 +1116,7 @@ class TestEndToEndNoComputeLeaks:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
                     x = pl.add(x, 1.0)
                     for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
                         x = pl.add(x, 2.0)
@@ -1132,7 +1132,7 @@ class TestEndToEndNoComputeLeaks:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
                     for i in pl.range(0, 8, 1, chunk=4, chunk_policy="leading_full"):
                         x = pl.add(x, 1.0)
                 return x
@@ -1179,7 +1179,7 @@ class TestNameHintPropagation:
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(
                     level=pl.Level.CORE_GROUP,
-                    optimization=pl.chunked_loop_optimizer,
+                    optimizations=[pl.auto_chunk],
                     name_hint="my_kernel",
                 ):
                     for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
@@ -1202,7 +1202,7 @@ class TestNameHintPropagation:
             ) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(
                     level=pl.Level.CORE_GROUP,
-                    optimization=pl.chunked_loop_optimizer,
+                    optimizations=[pl.auto_chunk],
                     name_hint="nested_hint",
                 ):
                     for b in pl.parallel(0, 16, 1, chunk=4, chunk_policy="leading_full"):
@@ -1222,7 +1222,7 @@ class TestNameHintPropagation:
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(
                     level=pl.Level.CORE_GROUP,
-                    optimization=pl.chunked_loop_optimizer,
+                    optimizations=[pl.auto_chunk],
                     name_hint="wrap_hint",
                 ):
                     x = pl.add(x, 1.0)
@@ -1238,7 +1238,7 @@ class TestNameHintPropagation:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
                     for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
                         x = pl.add(x, 1.0)
                 return x
@@ -1262,7 +1262,7 @@ class TestNameHintPropagation:
             ) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(
                     level=pl.Level.CORE_GROUP,
-                    optimization=pl.chunked_loop_optimizer,
+                    optimizations=[pl.auto_chunk],
                     name_hint="remainder_hint",
                 ):
                     for b in pl.parallel(0, 6, 1, chunk=4, chunk_policy="leading_full"):

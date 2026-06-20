@@ -32,7 +32,7 @@ from pypto.runtime import RunConfig
 
 @pl.jit
 def silu(x: pl.Tensor, output: pl.Out[pl.Tensor]):
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         # SiLU(x) = x * sigmoid(x) = x / (1 + exp(-x))
         tile_x = pl.load(x, [0, 0], [32, 128])
         x_neg = pl.mul(tile_x, -1.0)
@@ -46,7 +46,7 @@ def silu(x: pl.Tensor, output: pl.Out[pl.Tensor]):
 
 @pl.jit
 def gelu(x: pl.Tensor, output: pl.Out[pl.Tensor]):
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         # GELU(x) = x * sigmoid(1.702 * x)  (fast approximation)
         tile_x = pl.load(x, [0, 0], [32, 128])
         x_scaled = pl.mul(tile_x, 1.702)
@@ -61,7 +61,7 @@ def gelu(x: pl.Tensor, output: pl.Out[pl.Tensor]):
 
 @pl.jit
 def swiglu(gate: pl.Tensor, up: pl.Tensor, output: pl.Out[pl.Tensor]):
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         # SwiGLU(gate, up) = Swish(gate) * up = gate * sigmoid(gate) * up
         tile_gate = pl.load(gate, [0, 0], [32, 128])
         tile_up = pl.load(up, [0, 0], [32, 128])
@@ -77,7 +77,7 @@ def swiglu(gate: pl.Tensor, up: pl.Tensor, output: pl.Out[pl.Tensor]):
 
 @pl.jit
 def geglu(gate: pl.Tensor, up: pl.Tensor, output: pl.Out[pl.Tensor]):
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         # GeGLU(gate, up) = GELU(gate) * up
         # GELU approximation: gate * sigmoid(1.702 * gate)
         tile_gate = pl.load(gate, [0, 0], [32, 128])

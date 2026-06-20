@@ -1902,7 +1902,7 @@ class TestTileMoveAccNoopElision:
 
         Reproduces the Qwen3-32B gate_up_silu shape that triggered the bug: two
         independent accumulators (gate, up) built with prolog-then-pipeline
-        matmul_acc under ``pl.at(CORE_GROUP, split=UP_DOWN)``.
+        matmul_acc under ``pl.at(CORE_GROUP, optimizations=[pl.split(UP_DOWN)])``.
 
         Why this shape triggers it:
         - Mat-resident inputs + K_CHUNK=128/N=256 make AutoTileMatmulL0 insert an

@@ -1718,15 +1718,13 @@ void IRPythonPrinter::VisitStmt_(const HierarchyScopeStmtPtr& op) {
 
 void IRPythonPrinter::VisitStmt_(const InCoreScopeStmtPtr& op) {
   stream_ << "with " << prefix_ << ".at(level=" << prefix_ << ".Level.CORE_GROUP";
-  if (op->HasAttr("slot_num")) {
-    // slot_num accompanies any split mode, including SplitMode.None (a NONE mixed
-    // kernel still drives a cube->vector pipe). The deprecated ``split=`` kwarg
-    // cannot carry a ring depth, so emit the
-    // ``optimizations=[pl.split(mode, slot_num=N)]`` form whenever slot_num is set.
+  // Emit the surviving ``optimizations=[pl.split(mode[, slot_num=N])]`` form
+  // whenever there is a slot_num (a NONE mixed kernel still drives a
+  // cube->vector pipe and carries a ring depth) or a non-None split mode. A
+  // plain InCore with no split prints as ``pl.at(level=...)`` with no
+  // optimizations list.
+  if (op->HasAttr("slot_num") || (op->split_.has_value() && op->split_.value() != SplitMode::None)) {
     PrintSplitOptimizations(op->split_.value_or(SplitMode::None), op);
-  } else if (op->split_.has_value() && op->split_.value() != SplitMode::None) {
-    // No ring depth — keep the compact ``split=`` form (no churn).
-    stream_ << ", split=" << prefix_ << ".SplitMode." << SplitModeToPythonString(op->split_.value());
   }
   if (!op->name_hint_.empty()) {
     stream_ << ", name_hint=\"" << op->name_hint_ << "\"";
@@ -1744,25 +1742,18 @@ void IRPythonPrinter::VisitStmt_(const InCoreScopeStmtPtr& op) {
 }
 
 void IRPythonPrinter::VisitStmt_(const AutoInCoreScopeStmtPtr& op) {
+  // Always open the surviving ``optimizations=[pl.auto_chunk, ...]`` list.
+  // Append ``pl.split(mode[, slot_num=N])`` whenever there is a slot_num (a
+  // NONE mixed kernel still carries a ring depth) or a non-None split mode;
+  // a plain AutoInCore prints as ``optimizations=[pl.auto_chunk]``.
   const bool has_split = op->split_.has_value() && op->split_.value() != SplitMode::None;
-  if (op->HasAttr("slot_num")) {
-    // slot_num accompanies any split mode, including SplitMode.None. The
-    // deprecated ``optimization=chunked_loop_optimizer(split=...)`` form cannot
-    // carry a ring depth; emit the new ``optimizations=[pl.auto_chunk,
-    // pl.split(mode, slot_num=N)]`` list so slot_num round-trips.
-    stream_ << "with " << prefix_ << ".at(level=" << prefix_ << ".Level.CORE_GROUP, optimizations=["
-            << prefix_ << ".auto_chunk, ";
+  stream_ << "with " << prefix_ << ".at(level=" << prefix_ << ".Level.CORE_GROUP, optimizations=[" << prefix_
+          << ".auto_chunk";
+  if (op->HasAttr("slot_num") || has_split) {
+    stream_ << ", ";
     PrintSplitCall(op->split_.value_or(SplitMode::None), op);
-    stream_ << "]";
-  } else {
-    stream_ << "with " << prefix_ << ".at(level=" << prefix_ << ".Level.CORE_GROUP, optimization=";
-    if (has_split) {
-      stream_ << prefix_ << ".chunked_loop_optimizer(split=" << prefix_ << ".SplitMode."
-              << SplitModeToPythonString(op->split_.value()) << ")";
-    } else {
-      stream_ << prefix_ << ".chunked_loop_optimizer";
-    }
   }
+  stream_ << "]";
   if (!op->name_hint_.empty()) {
     stream_ << ", name_hint=\"" << op->name_hint_ << "\"";
   }

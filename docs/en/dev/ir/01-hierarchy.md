@@ -32,7 +32,7 @@ This document provides a complete reference of all IR node types, organized by c
 <return_stmt> ::= "return" [ <var_list> ]
 <eval_stmt>  ::= <expr>
 <seq_stmts>  ::= <stmt> { ";" <stmt> }
-<scope_stmt> ::= "with" "pl.incore" "(" ")" ":" <stmt_list>
+<scope_stmt> ::= "with" "pl.at" "(" "level" "=" "pl.Level.CORE_GROUP" ")" ":" <stmt_list>
 <break_stmt> ::= "break"
 <continue_stmt> ::= "continue"
 
@@ -317,10 +317,10 @@ at `CORE_GROUP`. `HierarchyScopeStmt` is reserved for non-`CORE_GROUP` levels
 (host, cluster, global) and is not a general replacement for in-core scopes.
 
 ```python
-# with pl.incore(): y = pl.add(x, x)
+# with pl.at(level=Level.CORE_GROUP): y = pl.add(x, x)
 in_core = ir.InCoreScopeStmt(name_hint="", body=body, span=span)
 
-# with pl.auto_incore():       (split is optional)
+# with pl.at(level=Level.CORE_GROUP, optimizations=[pl.auto_chunk]):  (split is optional)
 auto = ir.AutoInCoreScopeStmt(name_hint="", body=body, span=span)
 
 # with pl.cluster():
@@ -358,8 +358,10 @@ runtime = ir.RuntimeScopeStmt(manual=True, name_hint="", body=body, span=span)
   expression can be any integer-typed IR value — `Simplify` folds closure
   arithmetic to `ConstInt`, and codegen resolves `Var` references against
   the enclosing function scope.
-- `InCoreScopeStmt` / `AutoInCoreScopeStmt` are scheduled for deprecation;
-  prefer `HierarchyScopeStmt` or other surviving kinds in new code.
+- `InCoreScopeStmt` / `AutoInCoreScopeStmt` are the lowering target of
+  `pl.at(level=Level.CORE_GROUP)` (the `AutoInCore` form when
+  `optimizations=[pl.auto_chunk]` is supplied); the parser rejects `role=` at
+  `CORE_GROUP`, so `HierarchyScopeStmt` is reserved for the other levels.
 - Pass behavior:
   - `InterchangeChunkLoops` consumes `AutoInCoreScopeStmt`
   - `OutlineIncoreScopes` extracts `InCoreScopeStmt` into `Function(InCore)`
@@ -388,7 +390,7 @@ runtime = ir.RuntimeScopeStmt(manual=True, name_hint="", body=body, span=span)
 **Transformation:**
 
 ```python
-# Before: with pl.incore(): y = pl.add(x, x); return y
+# Before: with pl.at(level=Level.CORE_GROUP): y = pl.add(x, x); return y
 # After: main_incore_0(x) -> y; main(x): y = main_incore_0(x); return y
 ```
 

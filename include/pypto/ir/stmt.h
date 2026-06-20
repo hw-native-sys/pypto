@@ -702,7 +702,7 @@ using WhileStmtPtr = std::shared_ptr<const WhileStmt>;
  *   - `SpmdScopeStmt`: required `core_num_`, `sync_start_` (default false)
  *
  * **Syntax:**
- * with pl.incore():    # InCore scope -> InCoreScopeStmt
+ * with pl.at(level=pl.Level.CORE_GROUP):    # InCore scope -> InCoreScopeStmt
  *     body
  * with pl.cluster():   # Cluster scope -> ClusterScopeStmt
  *     body

@@ -32,7 +32,7 @@ import pypto.language as pl
 
 @pl.jit
 def flash_attention(q_13: pl.Tensor, k_16: pl.Tensor, v_19: pl.Tensor):
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         attn_initial = pl.create_tensor([64, 128], dtype=pl.FP32)
         oi_update_initial = pl.create_tensor([64, 128], dtype=pl.FP32)
         li_update_initial = pl.create_tensor([64, 1], dtype=pl.FP32)

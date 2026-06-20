@@ -252,10 +252,10 @@ while_stmt = ir.WhileStmt(condition, [x_iter], body, [x_final], span)
 （host、cluster、global），并不是 in-core 作用域的通用替代。
 
 ```python
-# with pl.incore(): y = pl.add(x, x)
+# with pl.at(level=Level.CORE_GROUP): y = pl.add(x, x)
 in_core = ir.InCoreScopeStmt(name_hint="", body=body, span=span)
 
-# with pl.auto_incore():       (split 可选)
+# with pl.at(level=Level.CORE_GROUP, optimizations=[pl.auto_chunk]):  (split 可选)
 auto = ir.AutoInCoreScopeStmt(name_hint="", body=body, span=span)
 
 # with pl.cluster():
@@ -318,7 +318,7 @@ runtime = ir.RuntimeScopeStmt(manual=True, name_hint="", body=body, span=span)
 **变换示例：**
 
 ```python
-# Before: with pl.incore(): y = pl.add(x, x); return y
+# Before: with pl.at(level=Level.CORE_GROUP): y = pl.add(x, x); return y
 # After: main_incore_0(x) -> y; main(x): y = main_incore_0(x); return y
 ```
 

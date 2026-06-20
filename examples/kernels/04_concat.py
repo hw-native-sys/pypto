@@ -27,7 +27,7 @@ from pypto.runtime import RunConfig
 
 @pl.jit
 def tile_concat_32x32(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         tile_a = pl.load(a, [0, 0], [32, 16])
         tile_b = pl.load(b, [0, 0], [32, 16])
         tile_out: pl.Tile[[32, 32], pl.FP32] = pl.concat(tile_a, tile_b)

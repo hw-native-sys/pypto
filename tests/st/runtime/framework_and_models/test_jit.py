@@ -23,7 +23,7 @@ from pypto.ir.compiled_program import CompiledProgram
 
 @pl.jit
 def add_kernel(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         M, N = a.shape
         tile_a = pl.load(a, [0, 0], [M, N])
         tile_b = pl.load(b, [0, 0], [M, N])

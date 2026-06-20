@@ -58,7 +58,7 @@ program_outlined = outline_pass(program)
 
 - 默认：`{原函数名}_incore_{计数器}`（如 `main_incore_0`、`main_incore_1`）
 - 用户自定义：当 `InCoreScopeStmt.name_hint` 非空时，直接使用该名称
-  - `with pl.incore(name_hint="fused_add"):` → 函数名为 `fused_add`
+  - `with pl.at(level=pl.Level.CORE_GROUP, name_hint="fused_add"):` → 函数名为 `fused_add`
 
 **命名冲突**（`name_hint` 是“提示”而非唯一标识——所有外提函数共享同一个程序级
 命名空间，因此冲突会自动消解）：
@@ -87,7 +87,7 @@ class Before:
     def main(self, x: Tensor[[64], FP32]) -> Tensor[[64], FP32]:
         y = x + 1
 
-        with pl.incore():  # InCore scope
+        with pl.at(level=pl.Level.CORE_GROUP):  # InCore scope
             tile = pl.load(y, [0], [64])
             tile_sq = pl.mul(tile, tile)
             result_tile = tile_sq + 1
@@ -127,7 +127,7 @@ class After:
 **之前**：
 
 ```python
-with pl.incore():
+with pl.at(level=pl.Level.CORE_GROUP):
     a_tile = pl.load(a, [0], [64])
     b_tile = pl.load(b, [0], [64])
     c_tile = pl.add(a_tile, b_tile)

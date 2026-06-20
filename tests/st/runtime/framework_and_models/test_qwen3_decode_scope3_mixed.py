@@ -83,7 +83,9 @@ def build_qwen3_scope3_program(
             w_down: pl.Tensor[[INTER_CFG, HIDDEN_CFG], pl.BF16],
             out: pl.Tensor[[BATCH_CFG, HIDDEN_CFG], pl.BF16],
         ) -> pl.Tensor[[BATCH_CFG, HIDDEN_CFG], pl.BF16]:
-            with pl.auto_incore(split=pl.SplitMode.UP_DOWN):
+            with pl.at(
+                level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.UP_DOWN)]
+            ):
                 for b0 in pl.range(0, BATCH_CFG, BATCH_TILE):
                     resid1_tile = pl.create_tensor([BATCH_TILE, HIDDEN_CFG], dtype=pl.FP32)
                     for ob in pl.parallel(0, Q_OUT_BLOCKS):

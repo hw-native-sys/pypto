@@ -20,7 +20,7 @@ import pypto.language as pl
 
 @pl.jit
 def test_ssa_violation(x: pl.Tensor, result: pl.Out[pl.Tensor]):
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         result = pl.mul(x, 2.0)
         result = pl.add(x, 1.0)  # rebinding -- discards the prior write to result
     return result

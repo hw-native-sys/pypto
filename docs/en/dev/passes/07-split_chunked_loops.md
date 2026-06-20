@@ -15,7 +15,7 @@ Both policies run after SSA conversion and propagate `iter_args` through the gen
 
 **Produces**: `UnrollResolved` property — no `ForKind::Unroll` survives after this pass.
 
-**When to use**: Runs automatically in the default pipeline after `FlattenCallExpr` and before `InterchangeChunkLoops`. Use `chunk=` on `pl.range()`, `pl.parallel()`, or `pl.unroll()` inside a `with pl.auto_incore():` scope. Chunked loops outside `auto_incore` are not split.
+**When to use**: Runs automatically in the default pipeline after `FlattenCallExpr` and before `InterchangeChunkLoops`. Use `chunk=` on `pl.range()`, `pl.parallel()`, or `pl.unroll()` inside a `with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):` scope. Chunked loops outside an `auto_chunk` scope are not split.
 
 ## API
 
@@ -30,10 +30,10 @@ result = passes.split_chunked_loops()(program)
 
 ## DSL Syntax
 
-Chunked loops must be wrapped in `with pl.auto_incore():`:
+Chunked loops must be wrapped in `with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):`:
 
 ```python
-with pl.auto_incore():
+with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
     # Default (guarded): single kernel with if-guard
     for i in pl.range(10, chunk=5):
         x = pl.add(x, 1.0)
@@ -58,10 +58,10 @@ with pl.auto_incore():
 | --------- | ---------------- | --------------------- |
 | Dynamic bound (`stop` not a compile-time constant) | ✅ — single kernel preserves loop-carried state across the boundary | ❌ — remainder kernel receives iter_args as input-only copies, breaking cross-iteration accumulation |
 | Static bound, trip_count known divisible | Slightly redundant guard | ✅ — no guard, no remainder |
-| Want minimum kernel count under `pl.auto_incore()` | ✅ | Produces 2 kernels per chunked loop |
+| Want minimum kernel count under `pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk])` | ✅ | Produces 2 kernels per chunked loop |
 | Want to eliminate masked iterations inside the hot loop | ❌ | ✅ — full chunks run unconditionally |
 
-`guarded` is the default because (1) it preserves `add_inout()` accumulation under dynamic bounds and (2) it avoids doubling the kernel count under `pl.auto_incore()`.
+`guarded` is the default because (1) it preserves `add_inout()` accumulation under dynamic bounds and (2) it avoids doubling the kernel count under `pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk])`.
 
 ## Constraints
 
@@ -71,7 +71,7 @@ with pl.auto_incore():
 | `chunk` must be a positive integer | Non-positive sizes are invalid |
 | `step` may be negative (descending loop) | `guarded` adapts the predicate to the step sign |
 | `start`, `stop` may be dynamic expressions under `guarded` | Trip count becomes `max(abs(stop - start), 0) / abs(step)` |
-| Chunked loop must be inside `pl.auto_incore()` | Only `auto_incore`-scoped loops are split |
+| Chunked loop must be inside an `auto_chunk` scope | Only `auto_chunk`-scoped loops are split |
 | `chunk` may be combined with `init_values` | Both policies thread iter_args through the generated loops |
 
 ## Algorithm

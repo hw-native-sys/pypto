@@ -80,7 +80,7 @@ def add_inline(a: pl.Tensor, c: pl.Tensor):
     inlined call site (tracked by Var identity).
     """
     pl.dump_tag(a)
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         tile_a = pl.load(a, [0, 0], [128, 128])
         tile_c = pl.add(tile_a, 1.0)
         pl.store(tile_c, [0, 0], c)
@@ -90,7 +90,7 @@ def add_inline(a: pl.Tensor, c: pl.Tensor):
 @pl.jit.inline
 def mul_inline(a: pl.Tensor, c: pl.Tensor):
     """c = a * 2.0. No dump_tag here — its bindings should be filtered out."""
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         tile_a = pl.load(a, [0, 0], [128, 128])
         tile_c = pl.mul(tile_a, 2.0)
         pl.store(tile_c, [0, 0], c)

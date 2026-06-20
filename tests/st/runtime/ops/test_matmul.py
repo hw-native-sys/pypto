@@ -481,7 +481,7 @@ class TestPipelineMatmulAccGateUp(PTOTestCase):
 
     Reproduces the gate_up_silu pattern from the Qwen3-32B decode kernel that
     triggered the bug: two independent accumulators (gate_acc, up_acc) are built
-    inside a ``pl.at(CORE_GROUP, split=UP_DOWN)`` scope, each following the
+    inside a ``pl.at(CORE_GROUP, optimizations=[pl.split(UP_DOWN)])`` scope, each following the
     prolog-then-pipeline pattern::
 
         gate_acc = pl.matmul(x_chunk_0, wg_0, out_dtype=pl.FP32)

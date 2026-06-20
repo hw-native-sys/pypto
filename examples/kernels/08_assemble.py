@@ -67,7 +67,7 @@ def tile_assemble_acc_mat(
     b: pl.Tensor,
     y: pl.Out[pl.Tensor],
 ):
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         # Load target into Mat (L1)
         tile_x = pl.load(x, [0, 0], [32, 32], target_memory=pl.MemorySpace.Mat)
         # Produce Acc (L0C, FP32) via matmul: GM -> Mat -> Left/Right -> matmul
@@ -90,7 +90,7 @@ def tile_assemble_vec(
     src: pl.Tensor,
     y: pl.Out[pl.Tensor],
 ):
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         # Load target and source into Vec (UB) -- ND/RowMajor layout
         tile_x = pl.load(x, [0, 0], [32, 32], target_memory=pl.MemorySpace.Vec)
         tile_src = pl.load(src, [0, 0], [32, 16], target_memory=pl.MemorySpace.Vec)
@@ -106,7 +106,7 @@ def tile_assemble_row_by_row(
     src: pl.Tensor,
     y: pl.Out[pl.Tensor],
 ):
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         tile_x = pl.load(x, [0, 0], [32, 32], target_memory=pl.MemorySpace.Vec)
         tile_src = pl.load(src, [0, 0], [32, 16], target_memory=pl.MemorySpace.Vec)
         for i in pl.range(32):
@@ -122,7 +122,7 @@ def tile_assemble_double_loop(
     src: pl.Tensor,
     y: pl.Out[pl.Tensor],
 ):
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         tile_x = pl.load(x, [0, 0], [32, 32], target_memory=pl.MemorySpace.Vec)
         tile_src = pl.load(src, [0, 0], [32, 16], target_memory=pl.MemorySpace.Vec)
         for b in pl.range(4):
@@ -140,7 +140,7 @@ def tile_assemble_loop_col_broadcast(
     src: pl.Tensor,
     y: pl.Out[pl.Tensor],
 ):
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         tile_x = pl.load(x, [0, 0], [32, 32], target_memory=pl.MemorySpace.Vec)
         tile_src = pl.load(src, [0, 0], [32, 8], target_memory=pl.MemorySpace.Vec)
         for c in pl.range(4):
@@ -155,7 +155,7 @@ def tile_assemble_double_loop_broadcast(
     src: pl.Tensor,
     y: pl.Out[pl.Tensor],
 ):
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         tile_x = pl.load(x, [0, 0], [32, 32], target_memory=pl.MemorySpace.Vec)
         tile_src = pl.load(src, [0, 0], [16, 16], target_memory=pl.MemorySpace.Vec)
         for b in pl.range(2):

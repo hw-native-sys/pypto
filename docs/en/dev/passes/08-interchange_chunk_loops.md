@@ -18,7 +18,7 @@ i_out[ChunkOuter] → j_out[ChunkOuter] → InCore{ i_in[ChunkInner] → j_in[Ch
 
 **Requires**: TypeChecked, SSAForm properties.
 
-**When to use**: Runs automatically in the default pipeline after `SplitChunkedLoops` and before `OutlineIncoreScopes`. Only operates on loops inside `pl.auto_incore()` scope. The `AutoInCore` scope is consumed (removed) by this pass.
+**When to use**: Runs automatically in the default pipeline after `SplitChunkedLoops` and before `OutlineIncoreScopes`. Only operates on loops inside a `pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk])` scope. The `AutoInCore` scope is consumed (removed) by this pass.
 
 ## API
 
@@ -40,9 +40,9 @@ result = passes.interchange_chunk_loops()(program)
 | ---------- | -------- |
 | SSA-only | Runs after `SplitChunkedLoops` (requires `SSAForm`) |
 | Parallel-only interchange | Only interchanges when ALL ChunkInner loops have `ForKind::Parallel` |
-| Sequential chunked loops | Not interchanged, but wrapped in InCore if inside `auto_incore` |
+| Sequential chunked loops | Not interchanged, but wrapped in InCore if inside an `auto_chunk` scope |
 | Existing InCore | If chain body already contains `InCoreScopeStmt`, skip |
-| Requires `auto_incore` scope | Only loops inside `AutoInCoreScopeStmt` are processed; the scope is consumed |
+| Requires `auto_chunk` scope | Only loops inside `AutoInCoreScopeStmt` are processed; the scope is consumed |
 
 ## Algorithm
 
@@ -111,7 +111,7 @@ for i__co_idx_v0, (x__co_l0_iter_v1,) in pl.range(
     for j__co_idx_v0, (x__co_l1_iter_v1,) in pl.range(
         3, init_values=(x__co_l0_iter_v1,)
     ):  # ChunkOuter
-        with pl.incore():                                               # InCore inserted
+        with pl.at(level=pl.Level.CORE_GROUP):                          # InCore inserted
             for i__ci_idx_v0, (x__co_l2_iter_v1,) in pl.parallel(
                 4, init_values=(x__co_l1_iter_v1,)
             ):  # ChunkInner
@@ -133,35 +133,35 @@ For non-divisible trip counts, remainder loops get InCore wrapping:
 ```python
 for i_rem, (...) in pl.parallel(2, init_values=(...)):   # ChunkRemainder
     for j_out, (...) in pl.range(3, init_values=(...)):   # Interchange applied
-        with pl.incore():
+        with pl.at(level=pl.Level.CORE_GROUP):
             for j_in, (...) in pl.parallel(4, init_values=(...)):
                 body
-    with pl.incore():                                            # Remainder wrapped
+    with pl.at(level=pl.Level.CORE_GROUP):                       # Remainder wrapped
         for j_rem, (...) in pl.parallel(2, init_values=(...)):
             body
 ```
 
 ## Non-Chunk Statement Handling
 
-When `auto_incore` is consumed, statements that were not handled by chunk interchange (standalone tensor ops, non-chunked loops, sequential chunked loops that failed the parallel guard) are wrapped in `InCoreScopeStmt` to ensure they get outlined into InCore functions by `OutlineIncoreScopes`.
+When the `auto_chunk` scope is consumed, statements that were not handled by chunk interchange (standalone tensor ops, non-chunked loops, sequential chunked loops that failed the parallel guard) are wrapped in `InCoreScopeStmt` to ensure they get outlined into InCore functions by `OutlineIncoreScopes`.
 
 Consecutive non-InCore statements are grouped into a single `InCoreScopeStmt`. Control flow statements (`YieldStmt`, `ReturnStmt`) and pure scalar assignments (e.g., index arithmetic like `offset = ob * 32`) are never wrapped — they stay in the orchestration scope.
 
 **Example** — standalone op + parallel chunk:
 
 ```python
-# Before (inside auto_incore, after SplitChunkedLoops)
-with pl.auto_incore():
+# Before (inside auto_chunk scope, after SplitChunkedLoops)
+with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
     x = pl.add(x, 1.0)                           # standalone op
     for i_out in pl.range(2):                     # ChunkOuter (parallel inner)
         for i_in in pl.parallel(4):
             x = pl.add(x, 2.0)
 
 # After InterchangeChunkLoops
-with pl.incore():                                 # standalone wrapped
+with pl.at(level=pl.Level.CORE_GROUP):            # standalone wrapped
     x = pl.add(x, 1.0)
 for i_out in pl.range(2):                         # interchanged chunk
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         for i_in in pl.parallel(4):
             x = pl.add(x, 2.0)
 ```
@@ -170,13 +170,13 @@ for i_out in pl.range(2):                         # interchanged chunk
 
 ```python
 # Before
-with pl.auto_incore():
+with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
     for i_out in pl.range(2):                     # ChunkOuter (sequential inner)
         for i_in in pl.range(4):                  # ChunkInner, Sequential → fails guard
             x = pl.add(x, 1.0)
 
 # After — entire chain wrapped in InCore
-with pl.incore():
+with pl.at(level=pl.Level.CORE_GROUP):
     for i_out in pl.range(2):
         for i_in in pl.range(4):
             x = pl.add(x, 1.0)

@@ -149,7 +149,7 @@ def test_printer_incore_scope_with_split():
     scope = ir.InCoreScopeStmt(split=ir.SplitMode.UP_DOWN, body=body, span=_span())
     func = ir.Function("test_fn", [], [], scope, _span())
     printed = str(func)
-    assert "pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN)" in printed
+    assert "pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(pl.SplitMode.UP_DOWN)])" in printed
 
 
 def test_scope_stmt_incore_with_split():

@@ -15,7 +15,7 @@
 
 **产出**: `UnrollResolved` 属性 — 此 Pass 之后不存在 `ForKind::Unroll`。
 
-**使用时机**: 在默认流水线中自动运行，位于 `FlattenCallExpr` 之后、`InterchangeChunkLoops` 之前。在 `with pl.auto_incore():` 作用域内的 `pl.range()`、`pl.parallel()`、`pl.unroll()` 上使用 `chunk=`。`auto_incore` 之外的分块循环不会被拆分。
+**使用时机**: 在默认流水线中自动运行，位于 `FlattenCallExpr` 之后、`InterchangeChunkLoops` 之前。在 `with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):` 作用域内的 `pl.range()`、`pl.parallel()`、`pl.unroll()` 上使用 `chunk=`。该作用域之外的分块循环不会被拆分。
 
 ## API
 
@@ -30,10 +30,10 @@ result = passes.split_chunked_loops()(program)
 
 ## DSL 语法
 
-分块循环必须包裹在 `with pl.auto_incore():` 中：
+分块循环必须包裹在 `with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):` 中：
 
 ```python
-with pl.auto_incore():
+with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
     # 默认 (guarded)：单 kernel + if-guard
     for i in pl.range(10, chunk=5):
         x = pl.add(x, 1.0)
@@ -58,10 +58,10 @@ with pl.auto_incore():
 | ---- | -------------- | ------------------- |
 | 动态 bound（`stop` 非编译期常量） | ✅ —— 单 kernel 保留跨边界的 loop-carried 状态 | ❌ —— 余数 kernel 的 iter_args 只能以 input-only 拷贝方式传入，破坏跨迭代累积 |
 | 静态 bound 且可整除 | guard 稍显冗余 | ✅ —— 无 guard、无余数 |
-| 希望 `pl.auto_incore()` 下 kernel 数量最少 | ✅ | 每个分块循环会生成 2 个 kernel |
+| 希望 `pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk])` 下 kernel 数量最少 | ✅ | 每个分块循环会生成 2 个 kernel |
 | 希望热点循环内部不存在掩码迭代 | ❌ | ✅ —— 满块无条件执行 |
 
-`guarded` 被设为默认，原因在于：(1) 动态 bound 下能保留 `add_inout()` 累积；(2) 避免 `pl.auto_incore()` 下 kernel 数量翻倍。
+`guarded` 被设为默认，原因在于：(1) 动态 bound 下能保留 `add_inout()` 累积；(2) 避免 `pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk])` 下 kernel 数量翻倍。
 
 ## 约束
 
@@ -71,7 +71,7 @@ with pl.auto_incore():
 | `chunk` 必须为正整数 | 非正数的分块大小无效 |
 | `step` 可以为负（下降循环） | `guarded` 会根据步长符号选择判据 |
 | `start`、`stop` 在 `guarded` 下可以是动态表达式 | 迭代次数取 `max(abs(stop - start), 0) / abs(step)` |
-| 分块循环必须在 `pl.auto_incore()` 内 | 仅 `auto_incore` 作用域内的循环会被拆分 |
+| 分块循环必须在 `pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk])` 内 | 仅该作用域内的循环会被拆分 |
 | `chunk` 可以与 `init_values` 同时使用 | 两种策略都会将 iter_args 串联到生成的循环 |
 
 ## 算法

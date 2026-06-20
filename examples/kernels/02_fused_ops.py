@@ -36,7 +36,7 @@ from pypto.runtime import RunConfig
 @pl.jit
 def fused_add_scale(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
     """Fused: load a, b -> add -> scale by 2.0 -> store c."""
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         tile_a = pl.load(a, [0, 0], [128, 128])
         tile_b = pl.load(b, [0, 0], [128, 128])
         tile_sum = pl.add(tile_a, tile_b)
@@ -48,7 +48,7 @@ def fused_add_scale(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
 @pl.jit
 def fused_add_relu(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
     """Fused: load a, b -> add -> relu -> store c."""
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         tile_a = pl.load(a, [0, 0], [128, 128])
         tile_b = pl.load(b, [0, 0], [128, 128])
         tile_sum = pl.add(tile_a, tile_b)

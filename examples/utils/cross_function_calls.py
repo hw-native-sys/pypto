@@ -24,7 +24,7 @@ import pypto.language as pl
 @pl.jit.inline
 def add_helper(a: pl.Tensor, c: pl.Out[pl.Tensor]):
     """Tile-wise add: c = a + 1.0."""
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         tile_a = pl.load(a, [0, 0], [128, 128])
         tile_c = pl.add(tile_a, 1.0)
         pl.store(tile_c, [0, 0], c)
@@ -34,7 +34,7 @@ def add_helper(a: pl.Tensor, c: pl.Out[pl.Tensor]):
 @pl.jit.inline
 def mul_helper(a: pl.Tensor, c: pl.Out[pl.Tensor]):
     """Tile-wise multiply: c = a * 2.0."""
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         tile_a = pl.load(a, [0, 0], [128, 128])
         tile_c = pl.mul(tile_a, 2.0)
         pl.store(tile_c, [0, 0], c)

@@ -62,7 +62,7 @@ def dyn_valid_shape(
     The caller passes either the partial-block length or the full-block
     length; the kernel does not need to branch internally.
     """
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         s_tile = pl.load(
             data,
             [0, 0],

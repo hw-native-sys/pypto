@@ -32,7 +32,7 @@ from pypto.runtime import RunConfig
 
 @pl.jit
 def rms_norm(x: pl.Tensor, gamma: pl.Tensor, output: pl.Out[pl.Tensor]):
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         tile_x = pl.load(x, [0, 0], [32, 64])
         tile_gamma = pl.load(gamma, [0, 0], [1, 64])
 
@@ -72,7 +72,7 @@ def layer_norm(
     beta: pl.Tensor,
     output: pl.Out[pl.Tensor],
 ):
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         tile_x = pl.load(x, [0, 0], [32, 64])
         tile_gamma = pl.load(gamma, [0, 0], [1, 64])
         tile_beta = pl.load(beta, [0, 0], [1, 64])

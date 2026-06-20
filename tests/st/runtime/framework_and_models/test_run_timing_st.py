@@ -59,7 +59,7 @@ def add_kernel(
     b: pl.Tensor[[_M, _M], pl.FP32],
     c: pl.Out[pl.Tensor[[_M, _M], pl.FP32]],
 ):
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         ta = pl.load(a, [0, 0], [_M, _M])
         tb = pl.load(b, [0, 0], [_M, _M])
         pl.store(pl.add(ta, tb), [0, 0], c)

@@ -19,66 +19,8 @@ if TYPE_CHECKING:
     from pypto.pypto_core import ir
 
 from pypto.pypto_core import ir as _ir
-from pypto.pypto_core.ir import SplitMode
 
 from .optimizations import Optimization
-
-
-class _ChunkedLoopOptimizerCall:
-    """Result of calling chunked_loop_optimizer(split=...).
-
-    Stores the split mode to pass to the AutoInCore scope.
-
-    Bare ``pl.chunked_loop_optimizer`` intentionally maps to ``SplitMode.NONE``.
-    Callers that want explicit cross-core work splitting must pass
-    ``split=pl.SplitMode.UP_DOWN`` or ``split=pl.SplitMode.LEFT_RIGHT``.
-    """
-
-    def __init__(self, split: SplitMode = SplitMode.NONE) -> None:
-        self.split = split
-
-    def __repr__(self) -> str:
-        return f"chunked_loop_optimizer(split={self.split!r})"
-
-
-class _ChunkedLoopOptimizer:
-    """Sentinel type for optimization=pl.chunked_loop_optimizer in pl.at().
-
-    Can be used bare or called with a split mode:
-    - ``optimization=pl.chunked_loop_optimizer``
-    - ``optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.NONE)``
-
-    The bare form intentionally means "no split". Explicit splitting remains
-    opt-in via the ``split=...`` call form.
-    """
-
-    def __call__(self, *, split: SplitMode = SplitMode.NONE) -> _ChunkedLoopOptimizerCall:
-        """Create an optimizer specification with an explicit split mode.
-
-        Args:
-            split: Split mode for cross-core data transfer (default: SplitMode.NONE)
-
-        Returns:
-            Optimizer call with the given split mode
-        """
-        return _ChunkedLoopOptimizerCall(split=split)
-
-    def __repr__(self) -> str:
-        return "chunked_loop_optimizer"
-
-
-chunked_loop_optimizer: _ChunkedLoopOptimizer = _ChunkedLoopOptimizer()
-"""Sentinel for optimization=pl.chunked_loop_optimizer in pl.at().
-
-Use with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer)
-to request compiler-driven chunked loop outlining (replaces pl.auto_incore()).
-Can also be called with a split mode:
-pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.NONE))
-
-Bare ``pl.chunked_loop_optimizer`` intentionally defaults to ``SplitMode.NONE``.
-Use the call form with ``split=pl.SplitMode.UP_DOWN`` or
-``split=pl.SplitMode.LEFT_RIGHT`` when explicit cross-core splitting is desired.
-"""
 
 # Range argument type: int literal or Scalar variable
 RangeArg = Union[int, "Scalar"]
@@ -713,94 +655,6 @@ def static_assert(condition: Any, msg: str = "") -> None:
     """
 
 
-class IncoreContext:
-    """Context manager for InCore scope.
-
-    This is returned by pl.incore() and used with the 'with' statement.
-    The parser recognizes this pattern and creates a ScopeStmt(InCore).
-    """
-
-    def __init__(self, split: SplitMode = SplitMode.NONE, name_hint: str = "") -> None:
-        self.split = split
-        self.name_hint = name_hint
-
-    def __enter__(self) -> None:
-        """Enter the InCore scope context."""
-        pass
-
-    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        """Exit the InCore scope context."""
-        pass
-
-
-class AutoIncoreContext:
-    """Context manager for AutoInCore scope.
-
-    This is returned by pl.auto_incore() and used with the 'with' statement.
-    The parser recognizes this pattern and creates a ScopeStmt(AutoInCore).
-    """
-
-    def __init__(self, split: SplitMode = SplitMode.NONE, name_hint: str = "") -> None:
-        self.split = split
-        self.name_hint = name_hint
-
-    def __enter__(self) -> None:
-        """Enter the AutoInCore scope context."""
-        pass
-
-    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        """Exit the AutoInCore scope context."""
-        pass
-
-
-def auto_incore(split: SplitMode = SplitMode.NONE, *, name_hint: str = "") -> AutoIncoreContext:
-    """Mark a region of code for automatic incore chunking.
-
-    This function returns a context manager that should be used with the 'with' statement.
-    The parser recognizes this pattern and creates a ScopeStmt with ScopeKind.AutoInCore.
-
-    Args:
-        split: Split mode for cross-core data transfer (default: SplitMode.NONE)
-
-    Returns:
-        Context manager for AutoInCore scope
-
-    Examples:
-        >>> with pl.auto_incore():
-        ...     for i in pl.parallel(0, 8, 1, chunk=4):
-        ...         x = pl.add(x, x)
-        >>> with pl.auto_incore(split=pl.SplitMode.NONE):
-        ...     for i in pl.parallel(0, 8, 1, chunk=4):
-        ...         x = pl.add(x, x)
-    """
-    return AutoIncoreContext(split=split, name_hint=name_hint)
-
-
-def incore(split: SplitMode = SplitMode.NONE, *, name_hint: str = "") -> IncoreContext:
-    """Mark a region of code as belonging to the InCore execution context.
-
-    This function returns a context manager that should be used with the 'with' statement.
-    The parser recognizes this pattern and creates a ScopeStmt with ScopeKind.InCore.
-
-    Args:
-        split: Split mode for cross-core data transfer (default: SplitMode.NONE).
-            When set, the outlined InCore function will use the specified split
-            mode for data transfer between AIC and AIV cores.
-        name_hint: Optional name hint for the outlined function (must be a valid identifier)
-
-    Returns:
-        Context manager for InCore scope
-
-    Examples:
-        >>> with pl.incore():
-        ...     y = pl.ops.add(x, x)
-        ...     z = pl.ops.mul(y, y)
-        >>> with pl.incore(split=pl.SplitMode.UP_DOWN):
-        ...     y = pl.ops.add(x, x)
-    """
-    return IncoreContext(split=split, name_hint=name_hint)
-
-
 class ClusterContext:
     """Context manager for Cluster scope.
 
@@ -835,7 +689,7 @@ def cluster(*, name_hint: str = "") -> ClusterContext:
 
     Examples:
         >>> with pl.cluster():
-        ...     with pl.incore():
+        ...     with pl.at(level=pl.Level.CORE_GROUP):
         ...         y = pl.add(x, x)
     """
     return ClusterContext(name_hint=name_hint)
@@ -1014,9 +868,6 @@ class AtContext:
         no_dep_args: list[Any] | None = None,
         dumps: list[Any] | None = None,
         allow_early_resolve: bool = False,
-        # Deprecated kwargs (kept for back-compat; emit DeprecationWarning at parse time):
-        optimization: _ChunkedLoopOptimizer | _ChunkedLoopOptimizerCall | None = None,
-        split: SplitMode | None = None,
         name_hint: str = "",
     ) -> None:
         self.level = level
@@ -1026,8 +877,6 @@ class AtContext:
         self.no_dep_args = no_dep_args
         self.dumps = dumps
         self.allow_early_resolve = allow_early_resolve
-        self.optimization = optimization
-        self.split = split
         self.name_hint = name_hint
 
     def __enter__(self) -> Any:
@@ -1052,9 +901,6 @@ def at(
     no_dep_args: list[Any] | None = None,
     dumps: list[Any] | None = None,
     allow_early_resolve: bool = False,
-    # Deprecated kwargs (kept for back-compat; emit DeprecationWarning at parse time):
-    optimization: _ChunkedLoopOptimizer | _ChunkedLoopOptimizerCall | None = None,
-    split: SplitMode | None = None,
     name_hint: str = "",
 ) -> AtContext:
     """Mark a region of code for execution at a specific hierarchy level.
@@ -1114,9 +960,6 @@ def at(
             scope to lower to an ``ir.Submit`` (even without ``as tid``) so the
             flag can ride to codegen, where it emits
             ``Arg::set_allow_early_resolve(true)``. Pure scheduling hint.
-        optimization: **Deprecated.** Use ``optimizations=[pl.auto_chunk]`` (or
-            ``optimizations=[pl.auto_chunk, pl.split(mode)]``) instead.
-        split: **Deprecated.** Use ``optimizations=[pl.split(mode)]`` instead.
         name_hint: Optional name hint for the outlined function (must be a
             valid identifier).
 
@@ -1124,7 +967,7 @@ def at(
         Context manager for the appropriate scope.
 
     Examples:
-        >>> # InCore scope (replaces pl.incore()):
+        >>> # InCore scope:
         >>> with pl.at(level=pl.Level.CORE_GROUP):
         ...     y = pl.ops.add(x, x)
 
@@ -1133,7 +976,7 @@ def at(
         ...            optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):
         ...     y = pl.ops.add(x, x)
 
-        >>> # AutoInCore scope (replaces pl.auto_incore()):
+        >>> # AutoInCore scope:
         >>> with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
         ...     for i in pl.parallel(0, 8, 1, chunk=4):
         ...         x = pl.add(x, x)
@@ -1155,8 +998,6 @@ def at(
         deps=deps,
         no_dep_args=no_dep_args,
         dumps=dumps,
-        optimization=optimization,
-        split=split,
         name_hint=name_hint,
     )
 
@@ -1171,16 +1012,11 @@ __all__ = [
     "cond",
     "static_print",
     "static_assert",
-    "incore",
-    "auto_incore",
     "at",
     "cluster",
     "spmd",
-    "chunked_loop_optimizer",
     "RangeIterator",
     "WhileIterator",
-    "IncoreContext",
-    "AutoIncoreContext",
     "ClusterContext",
     "SpmdContext",
     "AtContext",

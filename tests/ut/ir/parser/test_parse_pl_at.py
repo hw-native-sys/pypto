@@ -9,7 +9,6 @@
 
 """Tests for parsing pl.at(level=..., role=...) (Step 04)."""
 
-import warnings
 from typing import Protocol, cast
 
 import pypto.language as pl
@@ -159,27 +158,13 @@ def test_parse_pl_at_unknown_kwarg():
 # ─── Backward compatibility ───────────────────────────────────────────────
 
 
-def test_backward_compat_incore():
-    """Existing pl.incore() still works."""
-
-    @pl.function
-    def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        with pl.incore():
-            y = pl.add(x, x)
-        return y
-
-    scope = _find_scope_stmt(f.body)
-    assert scope is not None
-    assert scope.scope_kind == ir.ScopeKind.InCore
-
-
 def test_backward_compat_cluster():
     """Existing pl.cluster() still works."""
 
     @pl.function
     def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
         with pl.cluster():
-            with pl.incore():
+            with pl.at(level=pl.Level.CORE_GROUP):
                 y = pl.add(x, x)
         return y
 
@@ -223,12 +208,12 @@ def test_parse_pl_at_core_group_incore():
     assert scope.scope_kind == ir.ScopeKind.InCore
 
 
-def test_parse_pl_at_core_group_chunked_loop_optimizer_bare():
-    """pl.at(level=CORE_GROUP, optimization=pl.chunked_loop_optimizer) → AutoInCore, no split."""
+def test_parse_pl_at_core_group_auto_chunk_bare():
+    """pl.at(level=CORE_GROUP, optimizations=[pl.auto_chunk]) → AutoInCore, no split."""
 
     @pl.function
     def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+        with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
             for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
                 x = pl.add(x, x)
         return x
@@ -239,14 +224,14 @@ def test_parse_pl_at_core_group_chunked_loop_optimizer_bare():
     assert cast(_HasSplit, scope).split is None
 
 
-def test_parse_pl_at_core_group_chunked_loop_optimizer_with_split():
-    """pl.at(level=CORE_GROUP, optimization=chunked_loop_optimizer(split=LEFT_RIGHT)) → AutoInCore."""
+def test_parse_pl_at_core_group_auto_chunk_with_split():
+    """pl.at(level=CORE_GROUP, optimizations=[pl.auto_chunk, pl.split(LEFT_RIGHT)]) → AutoInCore."""
 
     @pl.function
     def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
         with pl.at(
             level=pl.Level.CORE_GROUP,
-            optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.LEFT_RIGHT),
+            optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.LEFT_RIGHT)],
         ):
             for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
                 x = pl.add(x, x)
@@ -258,52 +243,14 @@ def test_parse_pl_at_core_group_chunked_loop_optimizer_with_split():
     assert cast(_HasSplit, scope).split == ir.SplitMode.LEFT_RIGHT
 
 
-def test_parse_pl_at_optimization_on_non_core_group_errors():
-    """optimization= is not supported for non-CORE_GROUP levels."""
-    with pytest.raises(ParserSyntaxError, match="CORE_GROUP"):
-
-        @pl.function
-        def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            with pl.at(level=pl.Level.HOST, optimization=pl.chunked_loop_optimizer):
-                y = pl.add(x, x)
-            return y
-
-
-def test_parse_pl_at_unknown_optimization_errors():
-    """optimization= with unsupported value raises error."""
-    with pytest.raises(ParserSyntaxError, match="chunked_loop_optimizer"):
-
-        @pl.function
-        def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            with pl.at(level=pl.Level.CORE_GROUP, optimization=42):  # type: ignore[arg-type]
-                y = pl.add(x, x)
-            return y
-
-
-def test_parse_pl_at_unknown_optimization_hint_mentions_generic_split_mode():
-    """Invalid optimization hints should describe the generic split call form."""
-    with pytest.raises(ParserSyntaxError) as exc_info:
-
-        @pl.function
-        def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            with pl.at(level=pl.Level.CORE_GROUP, optimization=42):  # type: ignore[arg-type]
-                y = pl.add(x, x)
-            return y
-
-    err = exc_info.value
-    assert "pl.chunked_loop_optimizer(split=pl.SplitMode.<MODE>)" in err.message
-    assert err.hint is not None
-    assert "pl.chunked_loop_optimizer(split=pl.SplitMode.<MODE>)" in err.hint
-
-
-def test_parse_pl_at_split_mode_none_is_explicit_nosplit():
-    """chunked_loop_optimizer(split=SplitMode.NONE) preserves explicit no-split."""
+def test_parse_pl_at_auto_chunk_none_split_is_default_nosplit():
+    """optimizations=[pl.auto_chunk] with no split entry yields no-split AutoInCore."""
 
     @pl.function
     def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
         with pl.at(
             level=pl.Level.CORE_GROUP,
-            optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.NONE),
+            optimizations=[pl.auto_chunk],
         ):
             for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
                 x = pl.add(x, x)
@@ -312,25 +259,7 @@ def test_parse_pl_at_split_mode_none_is_explicit_nosplit():
     scope = _find_scope_stmt(f.body)
     assert scope is not None
     assert scope.scope_kind == ir.ScopeKind.AutoInCore
-    assert cast(_HasSplit, scope).split == ir.SplitMode.NONE
-
-
-def test_parse_pl_at_chunked_loop_optimizer_unexpected_keyword_hint_is_generic():
-    """Unexpected keyword hints should not imply SplitMode.NONE is the only accepted mode."""
-    with pytest.raises(ParserSyntaxError) as exc_info:
-
-        @pl.function
-        def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            with pl.at(
-                level=pl.Level.CORE_GROUP,
-                optimization=pl.chunked_loop_optimizer(bogus=pl.SplitMode.NONE),  # type: ignore[call-arg]
-            ):
-                y = pl.add(x, x)
-            return y
-
-    err = exc_info.value
-    assert err.hint is not None
-    assert "pl.chunked_loop_optimizer(split=pl.SplitMode.<MODE>)" in err.hint
+    assert cast(_HasSplit, scope).split is None
 
 
 def test_parse_pl_at_role_with_core_group_errors():
@@ -344,76 +273,15 @@ def test_parse_pl_at_role_with_core_group_errors():
             return y
 
 
-def test_incore_deprecation_warning():
-    """pl.incore() emits DeprecationWarning at parse time."""
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-
-        @pl.function
-        def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            with pl.incore():
-                y = pl.add(x, x)
-            return y
-
-    assert any(issubclass(warning.category, DeprecationWarning) for warning in w)
-    assert any("pl.incore()" in str(warning.message) for warning in w)
-
-
-def test_auto_incore_deprecation_warning():
-    """pl.auto_incore() emits DeprecationWarning at parse time."""
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-
-        @pl.function
-        def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            with pl.auto_incore():
-                for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
-                    x = pl.add(x, x)
-            return x
-
-    assert any(issubclass(warning.category, DeprecationWarning) for warning in w)
-    assert any("pl.auto_incore()" in str(warning.message) for warning in w)
-
-
 # ─── InCore with split ──────────────────────────────────────────────────────
 
 
-def test_parse_pl_incore_with_split():
-    """pl.incore(split=UP_DOWN) creates InCoreScopeStmt with split."""
-
-    @pl.function
-    def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        with pl.incore(split=pl.SplitMode.UP_DOWN):
-            y = pl.add(x, x)
-        return y
-
-    scope = _find_scope_stmt(f.body)
-    assert scope is not None
-    assert scope.scope_kind == ir.ScopeKind.InCore
-    assert cast(_HasSplit, scope).split == ir.SplitMode.UP_DOWN
-
-
-def test_parse_pl_incore_with_split_left_right():
-    """pl.incore(split=LEFT_RIGHT) creates InCoreScopeStmt with LEFT_RIGHT split."""
-
-    @pl.function
-    def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        with pl.incore(split=pl.SplitMode.LEFT_RIGHT):
-            y = pl.add(x, x)
-        return y
-
-    scope = _find_scope_stmt(f.body)
-    assert scope is not None
-    assert scope.scope_kind == ir.ScopeKind.InCore
-    assert cast(_HasSplit, scope).split == ir.SplitMode.LEFT_RIGHT
-
-
 def test_parse_pl_at_core_group_with_split():
-    """pl.at(level=CORE_GROUP, split=UP_DOWN) creates InCoreScopeStmt with split."""
+    """pl.at(level=CORE_GROUP, optimizations=[pl.split(UP_DOWN)]) creates InCoreScopeStmt with split."""
 
     @pl.function
     def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+        with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):
             y = pl.add(x, x)
         return y
 
@@ -424,11 +292,11 @@ def test_parse_pl_at_core_group_with_split():
 
 
 def test_parse_pl_at_core_group_with_split_left_right():
-    """pl.at(level=CORE_GROUP, split=LEFT_RIGHT) creates InCoreScopeStmt with LEFT_RIGHT."""
+    """pl.at(CORE_GROUP, optimizations=[pl.split(LEFT_RIGHT)]) creates InCore scope with LEFT_RIGHT."""
 
     @pl.function
     def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.LEFT_RIGHT):
+        with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(pl.SplitMode.LEFT_RIGHT)]):
             y = pl.add(x, x)
         return y
 
@@ -438,28 +306,13 @@ def test_parse_pl_at_core_group_with_split_left_right():
     assert cast(_HasSplit, scope).split == ir.SplitMode.LEFT_RIGHT
 
 
-def test_parse_pl_at_optimization_and_split_conflict():
-    """Cannot use both optimization= and split= in pl.at()."""
-    with pytest.raises(ParserSyntaxError, match="Cannot use both"):
-
-        @pl.function
-        def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            with pl.at(
-                level=pl.Level.CORE_GROUP,
-                optimization=pl.chunked_loop_optimizer,
-                split=pl.SplitMode.UP_DOWN,
-            ):
-                y = pl.add(x, x)
-            return y
-
-
 def test_parse_pl_at_split_on_non_core_group_errors():
-    """split= is not supported for non-CORE_GROUP levels."""
+    """optimizations=[pl.split(...)] is not supported for non-CORE_GROUP levels."""
     with pytest.raises(ParserSyntaxError, match="CORE_GROUP"):
 
         @pl.function
         def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            with pl.at(level=pl.Level.HOST, split=pl.SplitMode.UP_DOWN):
+            with pl.at(level=pl.Level.HOST, optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):
                 y = pl.add(x, x)
             return y
 
@@ -469,12 +322,12 @@ def test_printer_incore_with_split_roundtrip():
 
     @pl.function
     def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+        with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):
             y = pl.add(x, x)
         return y
 
     printed = str(f)
-    assert "pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN)" in printed
+    assert "pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(pl.SplitMode.UP_DOWN)])" in printed
 
 
 if __name__ == "__main__":

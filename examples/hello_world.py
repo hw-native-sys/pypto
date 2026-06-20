@@ -12,7 +12,7 @@ The simplest PyPTO program: element-wise tensor addition.
 
 Concepts introduced:
   - @pl.jit decorator: function specializes on torch tensor shape/dtype, compiles, caches
-  - pl.incore() context: a single on-chip compute scope (load tiles, compute, store back)
+  - pl.at(level=pl.Level.CORE_GROUP) context: a single on-chip compute scope (load tiles, compute, store back)
   - pl.Out[] marks output tensor parameters (in-place mutation)
   - Tensor (global memory) vs Tile (on-chip register) types
 
@@ -27,7 +27,7 @@ from pypto.runtime import RunConfig
 
 @pl.jit
 def tile_add(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         tile_a = pl.load(a, [0, 0], [128, 128])
         tile_b = pl.load(b, [0, 0], [128, 128])
         tile_c = pl.add(tile_a, tile_b)

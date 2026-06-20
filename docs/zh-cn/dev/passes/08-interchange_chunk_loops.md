@@ -18,7 +18,7 @@ i_out[ChunkOuter] → j_out[ChunkOuter] → InCore{ i_in[ChunkInner] → j_in[Ch
 
 **前置条件**: TypeChecked、SSAForm 属性。
 
-**使用时机**: 在默认流水线中自动运行，位于 `SplitChunkedLoops` 之后、`OutlineIncoreScopes` 之前。仅处理 `pl.auto_incore()` 作用域内的循环。此 Pass 会消费（移除）`AutoInCore` 作用域。
+**使用时机**: 在默认流水线中自动运行，位于 `SplitChunkedLoops` 之后、`OutlineIncoreScopes` 之前。仅处理 `pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk])` 作用域内的循环。此 Pass 会消费（移除）`AutoInCore` 作用域。
 
 ## API
 
@@ -111,7 +111,7 @@ for i__co_idx_v0, (x__co_l0_iter_v1,) in pl.range(
     for j__co_idx_v0, (x__co_l1_iter_v1,) in pl.range(
         3, init_values=(x__co_l0_iter_v1,)
     ):  # ChunkOuter
-        with pl.incore():                                               # 插入 InCore
+        with pl.at(level=pl.Level.CORE_GROUP):                          # 插入 InCore
             for i__ci_idx_v0, (x__co_l2_iter_v1,) in pl.parallel(
                 4, init_values=(x__co_l1_iter_v1,)
             ):  # ChunkInner
@@ -133,10 +133,10 @@ return x__co_l0_rv_v1
 ```python
 for i_rem, (...) in pl.parallel(2, init_values=(...)):   # ChunkRemainder
     for j_out, (...) in pl.range(3, init_values=(...)):   # 已应用交换
-        with pl.incore():
+        with pl.at(level=pl.Level.CORE_GROUP):
             for j_in, (...) in pl.parallel(4, init_values=(...)):
                 body
-    with pl.incore():                                            # 余数已包裹
+    with pl.at(level=pl.Level.CORE_GROUP):                       # 余数已包裹
         for j_rem, (...) in pl.parallel(2, init_values=(...)):
             body
 ```
@@ -151,17 +151,17 @@ for i_rem, (...) in pl.parallel(2, init_values=(...)):   # ChunkRemainder
 
 ```python
 # 之前（在 auto_incore 内部，SplitChunkedLoops 之后）
-with pl.auto_incore():
+with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
     x = pl.add(x, 1.0)                           # 独立算子
     for i_out in pl.range(2):                     # ChunkOuter（并行内层）
         for i_in in pl.parallel(4):
             x = pl.add(x, 2.0)
 
 # InterchangeChunkLoops 之后
-with pl.incore():                                 # 独立算子已包裹
+with pl.at(level=pl.Level.CORE_GROUP):            # 独立算子已包裹
     x = pl.add(x, 1.0)
 for i_out in pl.range(2):                         # 已交换的分块
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         for i_in in pl.parallel(4):
             x = pl.add(x, 2.0)
 ```
@@ -170,13 +170,13 @@ for i_out in pl.range(2):                         # 已交换的分块
 
 ```python
 # 之前
-with pl.auto_incore():
+with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
     for i_out in pl.range(2):                     # ChunkOuter（顺序内层）
         for i_in in pl.range(4):                  # ChunkInner，Sequential → 未通过守卫
             x = pl.add(x, 1.0)
 
 # 之后 — 整个链被包裹在 InCore 中
-with pl.incore():
+with pl.at(level=pl.Level.CORE_GROUP):
     for i_out in pl.range(2):
         for i_in in pl.range(4):
             x = pl.add(x, 1.0)

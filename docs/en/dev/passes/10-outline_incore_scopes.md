@@ -59,7 +59,7 @@ lookup for orchestration codegen (`ReturnParamsExplicit` invariant).
 
 - Default: `{original_func}_incore_{counter}` (e.g., `main_incore_0`, `main_incore_1`)
 - User-provided: when `InCoreScopeStmt.name_hint` is non-empty, that name is used directly
-  - `with pl.incore(name_hint="fused_add"):` → function named `fused_add`
+  - `with pl.at(level=pl.Level.CORE_GROUP, name_hint="fused_add"):` → function named `fused_add`
 
 **Name collisions** (`name_hint` is a *hint*, not a unique identifier — outlined
 functions share one program-wide namespace, so collisions are resolved
@@ -92,7 +92,7 @@ class Before:
     def main(self, x: Tensor[[64], FP32]) -> Tensor[[64], FP32]:
         y = x + 1
 
-        with pl.incore():  # InCore scope
+        with pl.at(level=pl.Level.CORE_GROUP):  # InCore scope
             tile = pl.load(y, [0], [64])
             tile_sq = pl.mul(tile, tile)
             result_tile = tile_sq + 1
@@ -132,7 +132,7 @@ class After:
 **Before**:
 
 ```python
-with pl.incore():
+with pl.at(level=pl.Level.CORE_GROUP):
     a_tile = pl.load(a, [0], [64])
     b_tile = pl.load(b, [0], [64])
     c_tile = pl.add(a_tile, b_tile)

@@ -10,9 +10,10 @@
 """Tests for pl.at(..., optimizations=[...]) parsing.
 
 Covers issue #1030: the optimizations= list lets users express ``pl.split(...)``
-and ``pl.auto_chunk`` independently. The legacy ``optimization=`` and top-level
-``split=`` kwargs remain functional but emit DeprecationWarning, and mixing the
-new ``optimizations=`` with either deprecated kwarg is a hard error.
+and ``pl.auto_chunk`` independently. The legacy ``optimization=`` kwarg (and the
+``pl.chunked_loop_optimizer`` sentinel) and the legacy top-level ``split=`` kwarg
+have been removed; passing them now falls through to the generic unknown-keyword
+error from pl.at().
 """
 
 import warnings
@@ -159,86 +160,7 @@ def test_parse_optimizations_empty_list_is_plain_incore():
     assert cast(_HasSplit, scope).split is None
 
 
-# ─── Equivalence with deprecated API ──────────────────────────────────────────
-
-
-def test_legacy_chunked_loop_optimizer_matches_new_form():
-    """Legacy bare optimizer (defaults to no split) ≡ new auto_chunk only."""
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-
-        @pl.function
-        def legacy(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
-                for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
-                    x = pl.add(x, x)
-            return x
-
-    @pl.function
-    def new(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
-            for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
-                x = pl.add(x, x)
-        return x
-
-    s_legacy = _find_scope_stmt(legacy.body)
-    s_new = _find_scope_stmt(new.body)
-    assert s_legacy is not None and s_new is not None
-    assert s_legacy.scope_kind == s_new.scope_kind == ir.ScopeKind.AutoInCore
-    assert cast(_HasSplit, s_legacy).split is None
-    assert cast(_HasSplit, s_new).split is None
-
-
-def test_legacy_split_kwarg_matches_new_form():
-    """Legacy top-level split= ≡ new optimizations=[pl.split(...)]."""
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-
-        @pl.function
-        def legacy(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.LEFT_RIGHT):
-                y = pl.add(x, x)
-            return y
-
-    @pl.function
-    def new(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(pl.SplitMode.LEFT_RIGHT)]):
-            y = pl.add(x, x)
-        return y
-
-    s_legacy = _find_scope_stmt(legacy.body)
-    s_new = _find_scope_stmt(new.body)
-    assert s_legacy is not None and s_new is not None
-    assert s_legacy.scope_kind == s_new.scope_kind == ir.ScopeKind.InCore
-    assert cast(_HasSplit, s_legacy).split == cast(_HasSplit, s_new).split == ir.SplitMode.LEFT_RIGHT
-
-
 # ─── DeprecationWarning emission ──────────────────────────────────────────────
-
-
-def test_legacy_optimization_kwarg_emits_deprecation_warning():
-    """Using the legacy optimization= kwarg emits DeprecationWarning."""
-    with pytest.warns(DeprecationWarning, match="optimizations=\\[pl.auto_chunk\\]"):
-
-        @pl.function
-        def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
-                for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
-                    x = pl.add(x, x)
-            return x
-
-
-def test_legacy_split_kwarg_emits_deprecation_warning():
-    """Using the legacy top-level split= kwarg emits DeprecationWarning."""
-    with pytest.warns(DeprecationWarning, match="optimizations=\\[pl.split"):
-
-        @pl.function
-        def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
-                y = pl.add(x, x)
-            return y
 
 
 def test_new_optimizations_kwarg_emits_no_warning():
@@ -251,41 +173,6 @@ def test_new_optimizations_kwarg_emits_no_warning():
             with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):
                 y = pl.add(x, x)
             return y
-
-
-# ─── Hard errors when mixing new with deprecated kwargs ──────────────────────
-
-
-def test_mix_optimizations_with_legacy_optimization_errors():
-    """Cannot combine optimizations= with deprecated optimization=."""
-    with pytest.raises(ParserSyntaxError, match="Cannot mix"):
-
-        @pl.function
-        def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            with pl.at(
-                level=pl.Level.CORE_GROUP,
-                optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
-                optimization=pl.chunked_loop_optimizer,
-            ):
-                for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
-                    x = pl.add(x, x)
-            return x
-
-
-def test_mix_optimizations_with_legacy_split_errors():
-    """Cannot combine optimizations= with deprecated split=."""
-    with pytest.raises(ParserSyntaxError, match="Cannot mix"):
-
-        @pl.function
-        def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            with pl.at(
-                level=pl.Level.CORE_GROUP,
-                optimizations=[pl.auto_chunk],
-                split=pl.SplitMode.UP_DOWN,
-            ):
-                for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
-                    x = pl.add(x, x)
-            return x
 
 
 # ─── Validation errors on optimizations= entries ──────────────────────────────

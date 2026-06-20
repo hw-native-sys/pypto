@@ -31,7 +31,7 @@ from pypto.runtime import RunConfig
 
 @pl.jit
 def tile_add_128(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         tile_a = pl.load(a, [0, 0], [128, 128])
         tile_b = pl.load(b, [0, 0], [128, 128])
         tile_c = pl.add(tile_a, tile_b)
@@ -41,7 +41,7 @@ def tile_add_128(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
 
 @pl.jit
 def tile_mul_128(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         tile_a = pl.load(a, [0, 0], [128, 128])
         tile_b = pl.load(b, [0, 0], [128, 128])
         tile_c = pl.mul(tile_a, tile_b)
@@ -52,7 +52,7 @@ def tile_mul_128(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
 @pl.jit
 def tile_add_64(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
     """Element-wise addition on 64x64 tiles."""
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         tile_a = pl.load(a, [0, 0], [64, 64])
         tile_b = pl.load(b, [0, 0], [64, 64])
         tile_c = pl.add(tile_a, tile_b)
@@ -63,7 +63,7 @@ def tile_add_64(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
 @pl.jit
 def tile_mul_64(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
     """Element-wise multiplication on 64x64 tiles."""
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         tile_a = pl.load(a, [0, 0], [64, 64])
         tile_b = pl.load(b, [0, 0], [64, 64])
         tile_c = pl.mul(tile_a, tile_b)

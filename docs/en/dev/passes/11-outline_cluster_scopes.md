@@ -58,7 +58,7 @@ class Before:
     @pl.function
     def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
         with pl.cluster():
-            with pl.incore():
+            with pl.at(level=pl.Level.CORE_GROUP):
                 y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
         return y
 ```
@@ -70,7 +70,7 @@ class Before:
 class After:
     @pl.function(type=pl.FunctionType.Group)
     def main_cluster_0(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        with pl.incore():
+        with pl.at(level=pl.Level.CORE_GROUP):
             y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
         return y
 

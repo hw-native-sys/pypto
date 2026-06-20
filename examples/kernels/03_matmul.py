@@ -31,7 +31,7 @@ from pypto.runtime import RunConfig
 
 @pl.jit
 def matmul_64(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         tile_a_l1 = pl.load(a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
         tile_b_l1 = pl.load(b, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
         tile_a_l0a = pl.move(tile_a_l1, target_memory=pl.MemorySpace.Left)
@@ -48,7 +48,7 @@ def matmul_acc_64(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
     First chunk initialises L0C via ``matmul``; second chunk accumulates via
     ``matmul_acc``.  The final result equals the full 64x64 matrix product.
     """
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         # First K-chunk: A[:,0:32] @ B[0:32,:] -- initialises L0C via matmul
         tile_a0_l1 = pl.load(a, [0, 0], [64, 32], target_memory=pl.MemorySpace.Mat)
         tile_b0_l1 = pl.load(b, [0, 0], [32, 64], target_memory=pl.MemorySpace.Mat)

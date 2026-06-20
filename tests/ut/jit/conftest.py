@@ -34,8 +34,9 @@ def _setup_backend():
 def pass_verification_context():
     """Use default pass verification for JIT tests.
 
-    JIT-generated programs use FunctionType.Opaque for entry functions so that
-    OutlineIncoreScopes can outline ``with pl.incore():`` scopes and promote the
-    function to Orchestration.  This means pass verification now works correctly.
+    JIT-generated programs use FunctionType.Orchestration for entry functions and
+    OutlineIncoreScopes outlines the inner
+    ``with pl.at(level=pl.Level.CORE_GROUP):`` scopes into per-core kernels.  This
+    means pass verification now works correctly.
     """
     yield
