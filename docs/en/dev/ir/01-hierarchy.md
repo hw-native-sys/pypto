@@ -167,7 +167,7 @@ for the dispatch rule.
 | Where it appears | Anywhere | Inside `manual_scope` bodies (parser-produced) and as the outlined dispatch of a `pl.at(..., deps=[...])` scope (a missing `as tid` binding gets a synthetic unused TaskId Var); preserved through the whole pipeline |
 | Return type | Callee's declared return | `Tuple[<callee return>..., Scalar[TASK_ID]]` |
 | Has `deps` | No — a plain `Call` never carries dep edges (`attrs["manual_dep_edges"]` appears only on `ScopeStmt` from `pl.at`, consumed at scope outlining; ManualDepsOnSubmitOnly verifies this) | First-class `deps_` field — `Scalar[TASK_ID]` Vars / `Array[N, TASK_ID]` Vars |
-| SPMD launch spec | none | `core_num_` (`optional<ExprPtr>` block count) + `sync_start_` (bool), set only by `pl.spmd_submit`; `nullopt` ⇒ plain single-block submit |
+| SPMD launch spec | none | `core_num_` (`optional<ExprPtr>` block count) + `sync_start_` (bool), set only by `pl.spmd_submit`; `sync_start_` is meaningful only when `core_num_` is present (the constructor enforces `sync_start ⇒ core_num`); `nullopt` ⇒ plain single-block submit |
 | Use-def chain | `args_` only | `args_`, `deps_`, **and** `core_num_` |
 | Python syntax | `out = self.foo(...)` | `out, tid = pl.submit(self.foo, ...)` (or `pl.spmd_submit(self.foo, ..., core_num=N)`) |
 

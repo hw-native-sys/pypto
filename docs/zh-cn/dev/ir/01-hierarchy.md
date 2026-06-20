@@ -164,7 +164,7 @@ pass 之后是否存在。
 | 出现位置 | 任意位置 | `manual_scope` 体内（由 parser 产生），以及作为 `pl.at(..., deps=[...])` 作用域外提后的派发点（缺失 `as tid` 绑定时会得到一个合成的未使用 TaskId Var）；在整个流水线中保持不变 |
 | 返回类型 | 被调方声明的返回 | `Tuple[<callee return>..., Scalar[TASK_ID]]` |
 | 是否有 `deps` | 无 —— 普通 `Call` 从不携带依赖边（`attrs["manual_dep_edges"]` 仅出现在由 `pl.at` 产生的 `ScopeStmt` 上，在作用域外提时被消费；由 ManualDepsOnSubmitOnly 校验） | 一等的 `deps_` 字段 —— `Scalar[TASK_ID]` Var / `Array[N, TASK_ID]` Var |
-| SPMD 启动规格 | 无 | `core_num_`（`optional<ExprPtr>` 块数）+ `sync_start_`（bool），仅由 `pl.spmd_submit` 设置；`nullopt` ⇒ 普通单块 submit |
+| SPMD 启动规格 | 无 | `core_num_`（`optional<ExprPtr>` 块数）+ `sync_start_`（bool），仅由 `pl.spmd_submit` 设置；`sync_start_` 仅在 `core_num_` 存在时才有意义（构造函数强制 `sync_start ⇒ core_num`）；`nullopt` ⇒ 普通单块 submit |
 | Use-def 链 | 仅 `args_` | `args_`、`deps_`，**以及** `core_num_` |
 | Python 语法 | `out = self.foo(...)` | `out, tid = pl.submit(self.foo, ...)`（或 `pl.spmd_submit(self.foo, ..., core_num=N)`） |
 
