@@ -160,7 +160,7 @@ def test_parse_optimizations_empty_list_is_plain_incore():
     assert cast(_HasSplit, scope).split is None
 
 
-# ─── DeprecationWarning emission ──────────────────────────────────────────────
+# ─── No DeprecationWarning for the optimizations= API ─────────────────────────
 
 
 def test_new_optimizations_kwarg_emits_no_warning():

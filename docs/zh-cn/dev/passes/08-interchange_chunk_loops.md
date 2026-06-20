@@ -40,9 +40,9 @@ result = passes.interchange_chunk_loops()(program)
 | ---- | ---- |
 | 仅 SSA | 在 `SplitChunkedLoops` 之后运行（需要 `SSAForm`） |
 | 仅并行交换 | 仅当所有 ChunkInner 循环具有 `ForKind::Parallel` 时才交换 |
-| 顺序分块循环 | 不交换，但如果在 `auto_incore` 内则包裹在 InCore 中 |
+| 顺序分块循环 | 不交换，但如果在 `auto_chunk` 内则包裹在 InCore 中 |
 | 已有 InCore | 如果链体已包含 `InCoreScopeStmt`，则跳过 |
-| 需要 `auto_incore` 作用域 | 仅处理 `AutoInCoreScopeStmt` 内的循环；该作用域会被消费 |
+| 需要 `auto_chunk` 作用域 | 仅处理 `AutoInCoreScopeStmt` 内的循环；该作用域会被消费 |
 
 ## 算法
 
@@ -143,14 +143,14 @@ for i_rem, (...) in pl.parallel(2, init_values=(...)):   # ChunkRemainder
 
 ## 非分块语句处理
 
-当 `auto_incore` 被消费时，未被分块交换处理的语句（独立张量算子、非分块循环、未通过并行守卫检查的顺序分块循环）会被包裹在 `InCoreScopeStmt` 中，以确保它们被 `OutlineIncoreScopes` 提取到 InCore 函数中。
+当 `auto_chunk` 被消费时，未被分块交换处理的语句（独立张量算子、非分块循环、未通过并行守卫检查的顺序分块循环）会被包裹在 `InCoreScopeStmt` 中，以确保它们被 `OutlineIncoreScopes` 提取到 InCore 函数中。
 
 连续的非 InCore 语句会被分组到单个 `InCoreScopeStmt` 中。控制流语句（`YieldStmt`、`ReturnStmt`）和纯标量赋值（例如索引运算 `offset = ob * 32`）不会被包裹——它们留在编排作用域中。
 
 **示例** — 独立算子 + 并行分块：
 
 ```python
-# 之前（在 auto_incore 内部，SplitChunkedLoops 之后）
+# 之前（在 auto_chunk 内部，SplitChunkedLoops 之后）
 with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
     x = pl.add(x, 1.0)                           # 独立算子
     for i_out in pl.range(2):                     # ChunkOuter（并行内层）

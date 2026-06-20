@@ -32,7 +32,7 @@
 <return_stmt> ::= "return" [ <var_list> ]
 <eval_stmt>  ::= <expr>
 <seq_stmts>  ::= <stmt> { ";" <stmt> }
-<scope_stmt> ::= "with" "pl.incore" "(" ")" ":" <stmt_list>
+<scope_stmt> ::= "with" "pl.at" "(" "level" "=" "pl.Level.CORE_GROUP" ")" ":" <stmt_list>
 <break_stmt> ::= "break"
 <continue_stmt> ::= "continue"
 
