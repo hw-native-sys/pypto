@@ -15,7 +15,7 @@
 
 - **可插拔规则系统**：可通过自定义验证规则进行扩展
 - **基于属性的验证**：选择性属性集——精确验证所需内容
-- **结构性属性 (Structural Properties)**：TypeChecked、BreakContinueValid、NoRedundantBlocks、UseAfterDef、OutParamNotShadowed、NoNestedInCore、InOutUseValid、PipelineLoopValid、ArrayNotEscaped 和 ManualDepsOnSubmitOnly 在流水线启动时由 `PassPipeline` 验证，并由 `VerificationInstrument` 在每个 Pass 执行前后验证
+- **结构性属性 (Structural Properties)**：TypeChecked、BreakContinueValid、NoRedundantBlocks、UseAfterDef、OutParamNotShadowed、NoNestedInCore、InOutUseValid、PipelineLoopValid、ArrayNotEscaped 和 ManualDepsOnSubmitOnly 由 `VerificationInstrument` 在每个 Pass 执行前后验证；在流水线启动时，`PassPipeline` 仅验证与 `GetVerifiedProperties()` 共有的轻量子集
 - **双重验证模式**：收集诊断信息或在首个错误时抛出异常
 - **Pass 集成**：可作为优化流水线中的 Pass 使用
 - **全面的诊断信息**：收集所有问题及源码位置
@@ -26,10 +26,10 @@
 
 | 类别 | 示例 | 行为 |
 | ---- | ---- | ---- |
-| **结构性** | TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly | 始终为真。在流水线启动时验证，并由 `VerificationInstrument` 在每个 Pass 执行前后验证。不在 PassProperties 中声明。 |
+| **结构性** | TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly | 始终为真。由 `VerificationInstrument` 在每个 Pass 执行前后验证；与 `GetVerifiedProperties()` 共有的子集还会在流水线启动时验证。不在 PassProperties 中声明。 |
 | **流水线** | SSAForm, NoNestedCalls, HasMemRefs, ... | 由 Pass 产生/失效。按 Pass 声明的契约验证。 |
 
-`GetStructuralProperties()` 返回 `{TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly}`。这些在 `PassPipeline::Run()` 中**于流水线启动时验证**，并由 `VerificationInstrument` **在每个 Pass 执行前后验证**。由于没有 Pass 在 `required`/`produced`/`invalidated` 中声明它们，`VerificationInstrument` 将它们与 Pass 声明的属性合并，确保没有 Pass 破坏这些基本不变量。
+`GetStructuralProperties()` 返回 `{TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly}`。这些由 `VerificationInstrument` **在每个 Pass 执行前后验证**。在**流水线启动时**，`PassPipeline::Run()` 仅额外验证与 `GetVerifiedProperties()` 共有的轻量子集（`GetStructuralProperties().Intersection(GetVerifiedProperties())`）——因此例如 `ArrayNotEscaped` 会在每个 Pass 前后验证，但不会在流水线启动时验证。由于没有 Pass 在 `required`/`produced`/`invalidated` 中声明它们，`VerificationInstrument` 将它们与 Pass 声明的属性合并，确保没有 Pass 破坏这些基本不变量。
 
 ### 验证规则系统
 
@@ -52,7 +52,7 @@
 
 ### 与 Pass 系统的集成
 
-1. **自动属性验证**：`PassPipeline` 使用 `PropertyVerifierRegistry` 在每个 Pass 执行后检查产生的属性（由 `PassContext` 中的 `VerificationLevel` 控制）。结构性属性在流水线启动时检查。详见 [Pass 管理器](00-pass_manager.md)。
+1. **自动属性验证**：`PassPipeline` 使用 `PropertyVerifierRegistry` 在每个 Pass 执行后检查产生的属性（由 `PassContext` 中的 `VerificationLevel` 控制）。与 `GetVerifiedProperties()` 共有的轻量结构性属性子集在流水线启动时检查。详见 [Pass 管理器](00-pass_manager.md)。
 2. **`VerificationInstrument`**：一个 `PassInstrument`，通过 `PassContext` 验证属性。在每个 Pass 执行前，检查 Pass 声明的 `required` 属性。在每个 Pass 执行后，检查 Pass 声明的 `produced` 属性**加上所有结构性属性**——确保没有 Pass 破坏基本的 IR 不变量。
 
 `run_verifier()` 工具函数创建一个独立的 `Pass`，用于自定义流水线中的临时使用，但它**不是**默认优化策略的一部分。
@@ -76,7 +76,7 @@
 | **NoNestedInCore** | NoNestedInCore | 无嵌套 InCore 作用域（`InCoreScopeStmt` 内含 `InCoreScopeStmt`） |
 | **InOutUseValid** | InOutUseValid | 作为 InOut/Out 传入用户函数调用的变量，在调用之后不得再被读取（RFC #1026）。Group 类型函数体目前跳过，待后续完善。 |
 | **PipelineLoopValid** | PipelineLoopValid | 每个 `ForStmt` 上的双向不变量：`kind_ == ForKind::Pipeline` ⇔ 含有 `pipeline_stages` 属性。任一方向失败即表示 pipeline 循环格式错误。 |
-| **ArrayNotEscaped** | ArrayNotEscaped | `ArrayType` 不得作为任何函数参数或返回类型出现（会透过 `TupleType` 递归检查）。`ArrayType` 是归属于所在函数的片上标量寄存器堆 / C 栈存储——让它跨越函数边界会泄漏栈指针，因此只能在函数体内创建并就地使用。 |
+| **ArrayNotEscaped** | ArrayNotEscaped | `ArrayType` 不得作为任何函数参数或返回类型出现（会通过 `TupleType` 递归检查）。`ArrayType` 是归属于所在函数的片上标量寄存器堆 / C 栈存储——让它跨越函数边界会泄漏栈指针，因此只能在函数体内创建并就地使用。 |
 | **ManualDepsOnSubmitOnly** | ManualDepsOnSubmitOnly | 任何普通跨函数 `Call`（GlobalVar callee）都不得携带 `attrs["manual_dep_edges"]`——手动依赖边只存在于类型化的 `Submit::deps_` 字段中。Op call（`system.task_dummy`）作为 codegen fanin 契约保留该 attr，属于豁免。 |
 | **OrchestrationReferencesResolved** | OrchestrationReferencesResolved | `FunctionType::Orchestration` 函数体内每一个非 builtin Call 必须对应到 Program 中存在的 Function。取代 codegen 端原本在生成时抛错的 `ValidateOrchestrationReferences` 遍历。 |
 | **AssignTypeSymmetry** | AssignTypeSymmetry | 每个 `AssignStmt(var, value)` 满足 `structural_equal(var.type, value.type)`。覆盖 dtype、shape 以及 tile_view/tensor_view；此外比较 TileType 的 `memory_space`（TensorType 没有 `memory_space`）和 DistributedTensorType 的 `window_buffer`；元组赋值逐元素递归比较。**不包含** `memref_`——`structural_equal` 将其视为绑定在 Var 上的内存分配细节，由 `HasMemRefs` / `AllocatedMemoryAddr` 负责。用于捕获只修改赋值一侧类型的 Pass（例如 #1262 的 TileType memory_space、#1278 的 tile_view）。已在 `PropertyVerifierRegistry` 注册，但尚未加入 `GetStructuralProperties()`——可通过 `PropertyVerifierRegistry::verify` 或将该属性加入 `VerificationInstrument` 按需运行。 |
@@ -167,7 +167,7 @@
 
 | 函数 | 返回值 | 描述 |
 | ---- | ------ | ---- |
-| `GetStructuralProperties()` | `{TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly}` | 在流水线启动时及每个 Pass 执行前后验证的不变量 |
+| `GetStructuralProperties()` | `{TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly}` | 由 `VerificationInstrument` 在每个 Pass 执行前后验证的不变量（与 `GetVerifiedProperties()` 共有的子集还会在流水线启动时验证） |
 | `GetDefaultVerifyProperties()` | `{SSAForm, TypeChecked, NoNestedCalls, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, TileTypeCoherence, ArrayNotEscaped}` | `run_verifier()` 的默认属性集 |
 | `GetVerifiedProperties()` | `{SSAForm, TypeChecked, MixedKernelExpanded, AllocatedMemoryAddr, BreakContinueValid, NoRedundantBlocks, InOutUseValid, CallDirectionsResolved, ManualDepsOnSubmitOnly, ReturnParamsExplicit}` | `PassPipeline` 自动验证的轻量级属性集 |
 
