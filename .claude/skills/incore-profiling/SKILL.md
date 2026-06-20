@@ -158,6 +158,16 @@ mv build_output/incore_<kernel>_<source>_<ts>/trace.clean.json \
   worker:` log line). If none is found, it fails early naming the expected path —
   install the matching CANN 9.0.x `msopprof` there (it ships in the complete
   Ascend-cann-toolkit / MindStudio operator-dev tools) or pass `--msopprof <path>`.
+- **`aclInit … failed: 500000` / `init soc version failed`, preceded by
+  `…/tools/msopprof/lib64/libmsopprof_injection.so from LD_PRELOAD cannot be
+  preloaded … ignored`** — the worker was provisioned but its companion
+  injection lib is missing. `msprof op simulator` `LD_PRELOAD`s
+  `<toolkit>/tools/msopprof/lib64/libmsopprof_injection.so`; when absent, the
+  preload is silently ignored and the testcase's `aclInit` can't init the
+  simulator SoC. Auto-provisioning now copies this lib next to the worker (look
+  for a `provisioned msopprof injection lib:` log line). If you provisioned a
+  worker by hand, copy the sibling `lib64/libmsopprof_injection.so` from the same
+  CANN into `<toolkit>/tools/msopprof/lib64/` too.
 - **`sibling .pto not found`** — the kernel `.cpp` has no `.pto` next to it (the
   generator reads it for buffer sizes). Use a `ptoas/` dir that has both, or pass
   `--ptoas-root <PTOAS source checkout>` to fall back to the validation generator.

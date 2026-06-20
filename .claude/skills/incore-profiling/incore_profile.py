@@ -1053,6 +1053,35 @@ def ensure_msopprof_worker(env: dict[str, str], args: argparse.Namespace) -> Non
                 expected.unlink()
             shutil.copy2(source, expected)
         expected.chmod(0o750)
+        # msprof LD_PRELOADs the worker's companion injection lib from
+        # <toolkit>/tools/msopprof/lib64/libmsopprof_injection.so. A worker
+        # provisioned without it makes the app's aclInit fail with error 500000
+        # "init soc version failed" (the missing preload is silently ignored).
+        # Provision it from the source worker's sibling lib64 — source.parent.parent
+        # covers both the 9.0 (tools/msopprof) and 8.x (tools/msopt) layouts.
+        src_inject = source.parent.parent / "lib64" / "libmsopprof_injection.so"
+        dst_inject = expected.parent.parent / "lib64" / "libmsopprof_injection.so"
+        if src_inject.is_file():
+            dst_inject.parent.mkdir(parents=True, exist_ok=True)
+            same_inject = False
+            try:
+                same_inject = (
+                    dst_inject.exists() and not dst_inject.is_symlink() and dst_inject.samefile(src_inject)
+                )
+            except OSError:
+                same_inject = False
+            if not same_inject:
+                if dst_inject.exists() or dst_inject.is_symlink():
+                    dst_inject.unlink()
+                shutil.copy2(src_inject, dst_inject)
+                dst_inject.chmod(0o750)
+            log(f"provisioned msopprof injection lib: {src_inject} -> {dst_inject}")
+        else:
+            log(
+                f"[warn] no libmsopprof_injection.so beside worker source {source}; "
+                f"msprof's LD_PRELOAD will be missing and aclInit may fail with "
+                f"'init soc version failed'."
+            )
         (expected.parent / "PROVISIONED_BY_INCORE_PROFILE.txt").write_text(
             f"msopprof copied from {source} (CANN {src_ver}) into CANN {dst_ver}\n"
             f"by .claude/skills/incore-profiling/incore_profile.py — safe to delete.\n",
