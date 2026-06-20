@@ -998,6 +998,7 @@ def at(
         deps=deps,
         no_dep_args=no_dep_args,
         dumps=dumps,
+        allow_early_resolve=allow_early_resolve,
         name_hint=name_hint,
     )
 
