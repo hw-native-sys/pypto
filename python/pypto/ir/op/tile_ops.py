@@ -2005,6 +2005,23 @@ def row_min(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tile.row_min", [tile, tmp_tile], {}, actual_span)
 
 
+def row_prod(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
+    """Row-wise product reduction (reduces along axis=1, maps to TROWPROD).
+
+    Reduces each row to a single value, producing output shape [rows, 1].
+
+    Args:
+        tile: Input tile (TileType [M, N])
+        tmp_tile: Temporary tile (TileType)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for row-wise product reduction (TileType [M, 1])
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.row_prod", [tile, tmp_tile], {}, actual_span)
+
+
 def col_sum(tile: Expr, tmp_tile: Expr | None = None, span: Span | None = None) -> Call:
     """Column-wise sum reduction of a tile (reduces along axis=0, maps to TCOLSUM).
 
@@ -2057,6 +2074,22 @@ def col_min(tile: Expr, span: Span | None = None) -> Call:
     """
     actual_span = _get_span_or_capture(span)
     return _ir_core.create_op_call("tile.col_min", [tile], {}, actual_span)
+
+
+def col_prod(tile: Expr, span: Span | None = None) -> Call:
+    """Column-wise product reduction (reduces along axis=0, maps to TCOLPROD).
+
+    Output shape is [1, N] for an [M, N] input.
+
+    Args:
+        tile: Input tile (TileType [M, N])
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for column-wise product reduction (TileType [1, N])
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.col_prod", [tile], {}, actual_span)
 
 
 def read(tile: Expr, indices: Expr | list[int | Expr] | _ir_core.MakeTuple, span: Span | None = None) -> Call:

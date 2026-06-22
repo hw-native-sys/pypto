@@ -298,6 +298,22 @@ REGISTER_OP("tile.row_min")
       return DeduceTileRowReductionType(args, kwargs, "tile.row_min");
     });
 
+REGISTER_OP("tile.row_prod")
+    .set_op_category("TileOp")
+    .set_description("Row-wise product reduction (reduces along axis=1, maps to TROWPROD)")
+    .add_argument("tile", "Input tile (TileType)")
+    .add_argument("tmp_tile", "Temporary tile (TileType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    // TROW* reads the full input row + tmp scratch while writing the reduced
+    // output, so the output must not share a buffer with either input.
+    .not_inplace_safe()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileRowReductionType(args, kwargs, "tile.row_prod");
+    });
+
 // ============================================================================
 // Column Reduction Operations (TCOLSUM, TCOLMAX, TCOLMIN)
 // ============================================================================
@@ -351,6 +367,18 @@ REGISTER_OP("tile.col_min")
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       CHECK(args.size() == 1) << "The operator tile.col_min requires 1 argument, but got " << args.size();
       return DeduceTileColReductionType(args, kwargs, "tile.col_min");
+    });
+
+REGISTER_OP("tile.col_prod")
+    .set_op_category("TileOp")
+    .set_description("Column-wise product reduction (reduces along axis=0, maps to TCOLPROD)")
+    .add_argument("tile", "Input tile (TileType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      CHECK(args.size() == 1) << "The operator tile.col_prod requires 1 argument, but got " << args.size();
+      return DeduceTileColReductionType(args, kwargs, "tile.col_prod");
     });
 
 }  // namespace ir

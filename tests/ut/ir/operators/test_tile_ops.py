@@ -712,6 +712,47 @@ class TestTileReductionOps:
         ir_str = str(Program)
         assert "tile.col_min" in ir_str
 
+    def test_tile_row_prod(self):
+        """Test tile.row_prod operation (2 args: tile + tmp_tile)."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                input: pl.Tensor[[128, 128], pl.FP32],
+                output: pl.Tensor[[128, 1], pl.FP32],
+            ) -> pl.Tensor[[128, 1], pl.FP32]:
+                tile_in: pl.Tile[[32, 128], pl.FP32] = pl.load(input, [0, 0], [32, 128])
+                tmp_tile: pl.Tile[[32, 128], pl.FP32] = pl.tile.create(
+                    [32, 128], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                tile_row_prod: pl.Tile[[32, 1], pl.FP32] = pl.row_prod(tile_in, tmp_tile)
+                result: pl.Tensor[[128, 1], pl.FP32] = pl.store(tile_row_prod, [0, 0], output)
+                return result
+
+        ir_str = str(Program)
+        assert "tile.row_prod" in ir_str
+
+    def test_tile_col_prod(self):
+        """Test tile.col_prod operation (1 arg)."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                input: pl.Tensor[[128, 128], pl.FP32],
+                output: pl.Tensor[[1, 128], pl.FP32],
+            ) -> pl.Tensor[[1, 128], pl.FP32]:
+                tile_in: pl.Tile[[32, 128], pl.FP32] = pl.load(input, [0, 0], [32, 128])
+                tile_col_prod: pl.Tile[[1, 128], pl.FP32] = pl.tile.col_prod(tile_in)
+                result: pl.Tensor[[1, 128], pl.FP32] = pl.store(tile_col_prod, [0, 0], output)
+                return result
+
+        ir_str = str(Program)
+        assert "tile.col_prod" in ir_str
+
     def test_tile_min_axis0(self):
         """Test tile.min operator - min along axis 0 (column-wise)."""
 

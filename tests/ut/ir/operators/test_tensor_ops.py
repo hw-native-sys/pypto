@@ -277,6 +277,44 @@ def test_tensor_col_sum():
     assert len(result_type.shape) == 2
 
 
+def test_tensor_row_prod():
+    """Test tensor.row_prod reduction (reduce last axis)."""
+    span = ir.Span.unknown()
+
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP16)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    call = ir.op.tensor.row_prod(tensor_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.row_prod"
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+
+
+def test_tensor_col_prod():
+    """tensor.col_prod reduces axis=-2 (the M dim of [..., M, N]) with keepdim=True."""
+    span = ir.Span.unknown()
+
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP16)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    call = ir.op.tensor.col_prod(tensor_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.col_prod"
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP16
+    assert len(result_type.shape) == 2
+
+
 def test_tensor_col_max():
     """tensor.col_max reduces axis=-2 (the M dim of [..., M, N]) with keepdim=True."""
     span = ir.Span.unknown()

@@ -136,6 +136,17 @@ REGISTER_OP("tensor.row_min")
       return DeduceTensorReductionType(args, kwargs, "tensor.row_min");
     });
 
+REGISTER_OP("tensor.row_prod")
+    .set_op_category("TensorOp")
+    .set_description("Row-wise product reduction along specified axis")
+    .add_argument("input", "Input tensor (TensorType)")
+    .set_attr<int>("axis")
+    .set_attr<bool>("keep_dim")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorReductionType(args, kwargs, "tensor.row_prod");
+    });
+
 // Type deduction for column reduction operations. Mirrors DeduceTensorReductionType but defaults
 // the reduced axis to -2 (the column axis), matching tile.col_sum's [..., 1, N] output shape.
 TypePtr DeduceTensorColReductionType(const std::vector<ExprPtr>& args,
@@ -212,6 +223,17 @@ REGISTER_OP("tensor.col_min")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorColReductionType(args, kwargs, "tensor.col_min");
+    });
+
+REGISTER_OP("tensor.col_prod")
+    .set_op_category("TensorOp")
+    .set_description("Column-wise product reduction (reduces along axis=-2 by default)")
+    .add_argument("input", "Input tensor (TensorType)")
+    .set_attr<int>("axis")
+    .set_attr<bool>("keep_dim")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorColReductionType(args, kwargs, "tensor.col_prod");
     });
 
 }  // namespace ir

@@ -699,6 +699,20 @@ def row_min(input: Expr, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tensor.row_min", [input], {}, actual_span)
 
 
+def row_prod(input: Expr, span: Span | None = None) -> Call:
+    """Row-wise product reduction (reduces along last axis, keeps dim).
+
+    Args:
+        input: Input tensor
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for row-wise product reduction
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.row_prod", [input], {}, actual_span)
+
+
 def col_sum(input: Expr, span: Span | None = None) -> Call:
     """Column-wise sum reduction (reduces along axis=-2, keeps dim).
 
@@ -745,6 +759,22 @@ def col_min(input: Expr, span: Span | None = None) -> Call:
     """
     actual_span = _get_span_or_capture(span)
     return _ir_core.create_op_call("tensor.col_min", [input], {}, actual_span)
+
+
+def col_prod(input: Expr, span: Span | None = None) -> Call:
+    """Column-wise product reduction (reduces along axis=-2, keeps dim).
+
+    Output shape is ``[..., 1, N]`` for an input of shape ``[..., M, N]``.
+
+    Args:
+        input: Input tensor
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for column-wise product reduction
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.col_prod", [input], {}, actual_span)
 
 
 def row_expand(target: Expr, row_vec: Expr, span: Span | None = None) -> Call:

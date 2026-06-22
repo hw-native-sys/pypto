@@ -163,7 +163,7 @@ bool IsReduceOnSplitAxis(const CallPtr& call, int split_dim) {
     return std::dynamic_pointer_cast<const TileType>(call->args_[0]->GetType());
   };
 
-  if (name == "tile.row_sum" || name == "tile.row_max" || name == "tile.row_min") {
+  if (name == "tile.row_sum" || name == "tile.row_max" || name == "tile.row_min" || name == "tile.row_prod") {
     auto tt = input_tile_type();
     int last_axis = tt ? static_cast<int>(tt->shape_.size()) - 1 : 1;
     return split_dim == last_axis;

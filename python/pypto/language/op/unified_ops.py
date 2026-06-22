@@ -54,9 +54,11 @@ __all__ = [
     "row_max",
     "row_sum",
     "row_min",
+    "row_prod",
     "col_sum",
     "col_max",
     "col_min",
+    "col_prod",
     "cast",
     "cmp",
     "set_validshape",
@@ -638,6 +640,21 @@ def row_min(input: T, tmp_tile: Tile | None = None) -> T:
     raise TypeError(f"pl.row_min: expected Tensor or Tile, got {type(input).__name__}")
 
 
+def row_prod(input: T, tmp_tile: Tile | None = None) -> T:
+    """Row-wise product reduction, dispatched by input type.
+
+    For Tile inputs, tmp_tile is required as a temporary buffer.
+    For Tensor inputs, tmp_tile is ignored.
+    """
+    if isinstance(input, Tensor):
+        return _tensor.row_prod(input)
+    if isinstance(input, Tile):
+        if tmp_tile is None:
+            raise ValueError("row_prod on Tile requires tmp_tile argument")
+        return _tile.row_prod(input, tmp_tile)
+    raise TypeError(f"pl.row_prod: expected Tensor or Tile, got {type(input).__name__}")
+
+
 def col_sum(input: T, tmp_tile: Tile | None = None) -> T:
     """Column-wise sum reduction, dispatched by input type.
 
@@ -674,6 +691,18 @@ def col_min(input: T) -> T:
     if isinstance(input, Tile):
         return _tile.col_min(input)
     _raise_type_dispatch_error("col_min", input)
+
+
+def col_prod(input: T) -> T:
+    """Column-wise product reduction, dispatched by input type.
+
+    For Tensor inputs, the tensor-to-tile conversion lowers to ``tile.col_prod``.
+    """
+    if isinstance(input, Tensor):
+        return _tensor.col_prod(input)
+    if isinstance(input, Tile):
+        return _tile.col_prod(input)
+    _raise_type_dispatch_error("col_prod", input)
 
 
 @overload

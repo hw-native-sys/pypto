@@ -46,9 +46,11 @@ __all__ = [
     "row_max",
     "row_sum",
     "row_min",
+    "row_prod",
     "col_sum",
     "col_max",
     "col_min",
+    "col_prod",
     "row_expand",
     "row_expand_mul",
     "row_expand_div",
@@ -781,6 +783,20 @@ def row_min(input: Tensor) -> Tensor:
     return Tensor(expr=call_expr)
 
 
+def row_prod(input: Tensor) -> Tensor:
+    """Row-wise product reduction (reduces along last axis, keeps dim).
+
+    Args:
+        input: Input tensor
+
+    Returns:
+        Tensor wrapping the row_prod operation
+    """
+    input_expr = input.unwrap()
+    call_expr = _ir_ops.row_prod(input_expr)
+    return Tensor(expr=call_expr)
+
+
 def col_sum(input: Tensor) -> Tensor:
     """Column-wise sum reduction (reduces along axis=-2, keeps dim).
 
@@ -826,6 +842,22 @@ def col_min(input: Tensor) -> Tensor:
     """
     input_expr = input.unwrap()
     call_expr = _ir_ops.col_min(input_expr)
+    return Tensor(expr=call_expr)
+
+
+def col_prod(input: Tensor) -> Tensor:
+    """Column-wise product reduction (reduces along axis=-2, keeps dim).
+
+    Output shape is ``[..., 1, N]`` for an input of shape ``[..., M, N]``.
+
+    Args:
+        input: Input tensor
+
+    Returns:
+        Tensor wrapping the col_prod operation
+    """
+    input_expr = input.unwrap()
+    call_expr = _ir_ops.col_prod(input_expr)
     return Tensor(expr=call_expr)
 
 
