@@ -371,6 +371,11 @@ class MgatherElemFP32TestCase(PTOTestCase):
 # =============================================================================
 
 
+@pytest.mark.skip(
+    reason="BLOCKED on PTOAS hw-native-sys/PTOAS#839 (#840): pto.mgather is "
+    "A5-only in PTOAS; on a2a3 ptoas crashes (row) / 507018 (elem). Un-skip "
+    "once a2a3 mgather support lands upstream."
+)
 @pytest.mark.platforms("a2a3", "a2a3sim")
 class TestMgatherRow:
     """Row-mode tile.mgather (dst[r, :] = mem[idx[r], :])."""
@@ -412,6 +417,11 @@ class TestMgatherRow:
         assert result.passed, f"Test failed: {result.error}"
 
 
+@pytest.mark.skip(
+    reason="BLOCKED on PTOAS hw-native-sys/PTOAS#840 (#839): pto.mgather is "
+    "A5-only in PTOAS; elem on a2a3 compiles but faults at runtime (507018). "
+    "Un-skip once a2a3 mgather support lands upstream."
+)
 @pytest.mark.platforms("a2a3", "a2a3sim")
 class TestMgatherElem:
     """Elem-mode tile.mgather (dst[i, j] = mem[idx[i, j]])."""
