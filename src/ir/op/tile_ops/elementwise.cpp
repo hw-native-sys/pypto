@@ -84,6 +84,15 @@ static std::shared_ptr<TileType> MakePackedPredicateTileType(
   return std::make_shared<TileType>(mask_shape, DataType::UINT8, std::nullopt, tile_view);
 }
 
+// Forward declarations: trem/trems reuse the tmp-carrying deducers defined
+// further down (also used by xor/xors), so they must be visible here.
+TypePtr DeduceTileOpTernaryType(const std::vector<ExprPtr>& args,
+                                const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                const std::string& op_name, bool require_int);
+TypePtr DeduceTileOpXorScalarType(const std::vector<ExprPtr>& args,
+                                  const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                  const std::string& op_name);
+
 TypePtr DeduceTileOpElementwiseBinaryType(const std::vector<ExprPtr>& args,
                                           const std::vector<std::pair<std::string, std::any>>& kwargs,
                                           const std::string& op_name, bool require_int = false) {
@@ -299,12 +308,14 @@ REGISTER_OP("tile.rem")
     .set_description("Element-wise remainder (modulo) of two tiles with broadcasting")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
+    .add_argument("tmp", "Temporary tile (TileType) required by the hardware")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
+    .set_input_memory(2, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.rem");
+      return DeduceTileOpTernaryType(args, kwargs, "tile.rem", false);
     });
 
 REGISTER_OP("tile.muls")
@@ -360,11 +371,13 @@ REGISTER_OP("tile.rems")
     .set_description("Element-wise remainder (modulo) of tile and scalar")
     .add_argument("lhs", "Tile (TileType)")
     .add_argument("rhs", "Scalar (ScalarType)")
+    .add_argument("tmp", "Temporary tile (TileType) required by the hardware")
     .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(2, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileOpScalarBinaryType(args, kwargs, "tile.rems");
+      return DeduceTileOpXorScalarType(args, kwargs, "tile.rems");
     });
 
 REGISTER_OP("tile.shl")

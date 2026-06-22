@@ -718,7 +718,7 @@ def sub(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
     return _create_tile_binary_call("tile.sub", "tile.subs", lhs, rhs, actual_span)
 
 
-def rem(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
+def rem(lhs: Expr, rhs: Expr, tmp: Expr, span: Span | None = None) -> Call:
     """Element-wise remainder (modulo) of two tiles.
 
     Computes lhs % rhs element-wise. Maps to the TREM hardware intrinsic.
@@ -726,16 +726,17 @@ def rem(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
     Args:
         lhs: Left-hand side tile (TileType)
         rhs: Right-hand side tile (TileType)
+        tmp: Temporary tile (TileType) required by the hardware
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression for element-wise remainder
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.rem", [lhs, rhs], {}, actual_span)
+    return _ir_core.create_op_call("tile.rem", [lhs, rhs, tmp], {}, actual_span)
 
 
-def rems(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
+def rems(lhs: Expr, rhs: int | float | Expr, tmp: Expr, span: Span | None = None) -> Call:
     """Element-wise remainder (modulo) of tile and scalar.
 
     Computes lhs % rhs element-wise. Maps to the TREMS hardware intrinsic.
@@ -743,6 +744,7 @@ def rems(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
     Args:
         lhs: Tile (TileType)
         rhs: Scalar (int/float/Expr with ScalarType)
+        tmp: Temporary tile (TileType) required by the hardware
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -754,7 +756,7 @@ def rems(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
         if not isinstance(rhs, Expr)
         else rhs
     )
-    return _ir_core.create_op_call("tile.rems", [lhs, rhs_expr], {}, actual_span)
+    return _ir_core.create_op_call("tile.rems", [lhs, rhs_expr, tmp], {}, actual_span)
 
 
 def shl(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:

@@ -9,20 +9,20 @@
 
 """Runtime tests for tile-level integer bitwise / shift / remainder ops.
 
-Tile-tile forms:  rem, and_, or_, shl, shr   (INT32)
-Tile-scalar forms: rems, ands, ors, shls, shrs  (INT32)
-Unary:             not_                       (INT16 — TNOT only supports int16/uint16)
+Tile-tile forms:  rem, and_, or_, xor, shl, shr   (INT32)
+Tile-scalar forms: rems, ands, ors, xors, shls, shrs  (INT32)
+Unary:             not_                            (INT16 — TNOT only supports int16/uint16)
+
+``rem``/``rems``/``xor``/``xors`` map to TREM/TXOR-family intrinsics that require
+a scratch ``tmp`` tile (same shape/dtype, Vec); a single scratch tile is reused
+across the tmp-carrying ops in each program.
 
 Inputs are kept non-negative so remainder and right-shift are unambiguous, and
-shift amounts stay in [1, 4]. Each program is exercised aligned (valid_shape ==
-[M, N]) and narrow (valid_shape [VALID_M, VALID_N] < [M, N]; the invalid output
-region stays zero).
+shift amounts stay in [1, 4]. Each program runs aligned (valid_shape == [M, N])
+and narrow (valid_shape [VALID_M, VALID_N] < [M, N]; invalid output stays zero).
 
 Scope is a2a3 only (``@pytest.mark.platforms("a2a3")``); a5 coverage is a
 separate PR.
-
-(xor/xors are intentionally omitted: their 3-arg DSL form ``xor(a, b, tmp)``
-mismatches codegen ``pto.txor`` which expects 2 arguments — known gap.)
 """
 
 from typing import Any
@@ -40,6 +40,7 @@ VALID_N = 12
 REMS_RHS = 7
 ANDS_RHS = 0x0F
 ORS_RHS = 0x10
+XORS_RHS = 0xFF
 SHLS_RHS = 2
 SHRS_RHS = 1
 
@@ -74,7 +75,7 @@ def _fill_valid(tensors: dict[str, torch.Tensor], fns: dict, valid: tuple[int, i
 
 
 class BitwiseTileTestCase(PTOTestCase):
-    """Tile-tile rem/and/or/shl/shr on INT32, aligned or narrow valid_shape."""
+    """Tile-tile rem/and/or/xor/shl/shr on INT32, aligned or narrow valid_shape."""
 
     __test__ = False
 
@@ -92,6 +93,7 @@ class BitwiseTileTestCase(PTOTestCase):
             TensorSpec("rem_o", [M, N], DataType.INT32, is_output=True),
             TensorSpec("and_o", [M, N], DataType.INT32, is_output=True),
             TensorSpec("or_o", [M, N], DataType.INT32, is_output=True),
+            TensorSpec("xor_o", [M, N], DataType.INT32, is_output=True),
             TensorSpec("shl_o", [M, N], DataType.INT32, is_output=True),
             TensorSpec("shr_o", [M, N], DataType.INT32, is_output=True),
         ]
@@ -109,6 +111,7 @@ class BitwiseTileTestCase(PTOTestCase):
                 rem_o: pl.Out[pl.Tensor[[M, N], pl.INT32]],
                 and_o: pl.Out[pl.Tensor[[M, N], pl.INT32]],
                 or_o: pl.Out[pl.Tensor[[M, N], pl.INT32]],
+                xor_o: pl.Out[pl.Tensor[[M, N], pl.INT32]],
                 shl_o: pl.Out[pl.Tensor[[M, N], pl.INT32]],
                 shr_o: pl.Out[pl.Tensor[[M, N], pl.INT32]],
             ) -> tuple[
@@ -117,15 +120,20 @@ class BitwiseTileTestCase(PTOTestCase):
                 pl.Tensor[[M, N], pl.INT32],
                 pl.Tensor[[M, N], pl.INT32],
                 pl.Tensor[[M, N], pl.INT32],
+                pl.Tensor[[M, N], pl.INT32],
             ]:
                 a_tile = pl.load(a, [0, 0], [M, N], valid_shapes=vshape)
                 b_tile = pl.load(b, [0, 0], [M, N], valid_shapes=vshape)
-                rem_o = pl.store(pl.tile.rem(a_tile, b_tile), [0, 0], rem_o)
+                tmp: pl.Tile[[M, N], pl.INT32] = pl.tile.create(
+                    [M, N], dtype=pl.INT32, target_memory=pl.MemorySpace.Vec
+                )
+                rem_o = pl.store(pl.tile.rem(a_tile, b_tile, tmp), [0, 0], rem_o)
                 and_o = pl.store(pl.tile.and_(a_tile, b_tile), [0, 0], and_o)
                 or_o = pl.store(pl.tile.or_(a_tile, b_tile), [0, 0], or_o)
+                xor_o = pl.store(pl.tile.xor(a_tile, b_tile, tmp), [0, 0], xor_o)
                 shl_o = pl.store(pl.tile.shl(a_tile, b_tile), [0, 0], shl_o)
                 shr_o = pl.store(pl.tile.shr(a_tile, b_tile), [0, 0], shr_o)
-                return rem_o, and_o, or_o, shl_o, shr_o
+                return rem_o, and_o, or_o, xor_o, shl_o, shr_o
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
@@ -135,6 +143,7 @@ class BitwiseTileTestCase(PTOTestCase):
                 rem_o: pl.Out[pl.Tensor[[M, N], pl.INT32]],
                 and_o: pl.Out[pl.Tensor[[M, N], pl.INT32]],
                 or_o: pl.Out[pl.Tensor[[M, N], pl.INT32]],
+                xor_o: pl.Out[pl.Tensor[[M, N], pl.INT32]],
                 shl_o: pl.Out[pl.Tensor[[M, N], pl.INT32]],
                 shr_o: pl.Out[pl.Tensor[[M, N], pl.INT32]],
             ) -> tuple[
@@ -143,9 +152,12 @@ class BitwiseTileTestCase(PTOTestCase):
                 pl.Tensor[[M, N], pl.INT32],
                 pl.Tensor[[M, N], pl.INT32],
                 pl.Tensor[[M, N], pl.INT32],
+                pl.Tensor[[M, N], pl.INT32],
             ]:
-                rem_o, and_o, or_o, shl_o, shr_o = self.kernel(a, b, rem_o, and_o, or_o, shl_o, shr_o)
-                return rem_o, and_o, or_o, shl_o, shr_o
+                rem_o, and_o, or_o, xor_o, shl_o, shr_o = self.kernel(
+                    a, b, rem_o, and_o, or_o, xor_o, shl_o, shr_o
+                )
+                return rem_o, and_o, or_o, xor_o, shl_o, shr_o
 
         return BitwiseTileProgram
 
@@ -155,6 +167,7 @@ class BitwiseTileTestCase(PTOTestCase):
             "rem_o": lambda: torch.remainder(a, b),
             "and_o": lambda: torch.bitwise_and(a, b),
             "or_o": lambda: torch.bitwise_or(a, b),
+            "xor_o": lambda: torch.bitwise_xor(a, b),
             "shl_o": lambda: torch.bitwise_left_shift(a, b),
             "shr_o": lambda: torch.bitwise_right_shift(a, b),
         }
@@ -167,7 +180,7 @@ class BitwiseTileTestCase(PTOTestCase):
 
 
 class BitwiseScalarTestCase(PTOTestCase):
-    """Tile-scalar rems/ands/ors/shls/shrs on INT32, aligned or narrow valid_shape."""
+    """Tile-scalar rems/ands/ors/xors/shls/shrs on INT32, aligned or narrow valid_shape."""
 
     __test__ = False
 
@@ -184,6 +197,7 @@ class BitwiseScalarTestCase(PTOTestCase):
             TensorSpec("rems_o", [M, N], DataType.INT32, is_output=True),
             TensorSpec("ands_o", [M, N], DataType.INT32, is_output=True),
             TensorSpec("ors_o", [M, N], DataType.INT32, is_output=True),
+            TensorSpec("xors_o", [M, N], DataType.INT32, is_output=True),
             TensorSpec("shls_o", [M, N], DataType.INT32, is_output=True),
             TensorSpec("shrs_o", [M, N], DataType.INT32, is_output=True),
         ]
@@ -200,6 +214,7 @@ class BitwiseScalarTestCase(PTOTestCase):
                 rems_o: pl.Out[pl.Tensor[[M, N], pl.INT32]],
                 ands_o: pl.Out[pl.Tensor[[M, N], pl.INT32]],
                 ors_o: pl.Out[pl.Tensor[[M, N], pl.INT32]],
+                xors_o: pl.Out[pl.Tensor[[M, N], pl.INT32]],
                 shls_o: pl.Out[pl.Tensor[[M, N], pl.INT32]],
                 shrs_o: pl.Out[pl.Tensor[[M, N], pl.INT32]],
             ) -> tuple[
@@ -208,14 +223,19 @@ class BitwiseScalarTestCase(PTOTestCase):
                 pl.Tensor[[M, N], pl.INT32],
                 pl.Tensor[[M, N], pl.INT32],
                 pl.Tensor[[M, N], pl.INT32],
+                pl.Tensor[[M, N], pl.INT32],
             ]:
                 a_tile = pl.load(a, [0, 0], [M, N], valid_shapes=vshape)
-                rems_o = pl.store(pl.tile.rems(a_tile, REMS_RHS), [0, 0], rems_o)
+                tmp: pl.Tile[[M, N], pl.INT32] = pl.tile.create(
+                    [M, N], dtype=pl.INT32, target_memory=pl.MemorySpace.Vec
+                )
+                rems_o = pl.store(pl.tile.rems(a_tile, REMS_RHS, tmp), [0, 0], rems_o)
                 ands_o = pl.store(pl.tile.ands(a_tile, ANDS_RHS), [0, 0], ands_o)
                 ors_o = pl.store(pl.tile.ors(a_tile, ORS_RHS), [0, 0], ors_o)
+                xors_o = pl.store(pl.tile.xors(a_tile, XORS_RHS, tmp), [0, 0], xors_o)
                 shls_o = pl.store(pl.tile.shls(a_tile, SHLS_RHS), [0, 0], shls_o)
                 shrs_o = pl.store(pl.tile.shrs(a_tile, SHRS_RHS), [0, 0], shrs_o)
-                return rems_o, ands_o, ors_o, shls_o, shrs_o
+                return rems_o, ands_o, ors_o, xors_o, shls_o, shrs_o
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
@@ -224,6 +244,7 @@ class BitwiseScalarTestCase(PTOTestCase):
                 rems_o: pl.Out[pl.Tensor[[M, N], pl.INT32]],
                 ands_o: pl.Out[pl.Tensor[[M, N], pl.INT32]],
                 ors_o: pl.Out[pl.Tensor[[M, N], pl.INT32]],
+                xors_o: pl.Out[pl.Tensor[[M, N], pl.INT32]],
                 shls_o: pl.Out[pl.Tensor[[M, N], pl.INT32]],
                 shrs_o: pl.Out[pl.Tensor[[M, N], pl.INT32]],
             ) -> tuple[
@@ -232,9 +253,12 @@ class BitwiseScalarTestCase(PTOTestCase):
                 pl.Tensor[[M, N], pl.INT32],
                 pl.Tensor[[M, N], pl.INT32],
                 pl.Tensor[[M, N], pl.INT32],
+                pl.Tensor[[M, N], pl.INT32],
             ]:
-                rems_o, ands_o, ors_o, shls_o, shrs_o = self.kernel(a, rems_o, ands_o, ors_o, shls_o, shrs_o)
-                return rems_o, ands_o, ors_o, shls_o, shrs_o
+                rems_o, ands_o, ors_o, xors_o, shls_o, shrs_o = self.kernel(
+                    a, rems_o, ands_o, ors_o, xors_o, shls_o, shrs_o
+                )
+                return rems_o, ands_o, ors_o, xors_o, shls_o, shrs_o
 
         return BitwiseScalarProgram
 
@@ -244,6 +268,7 @@ class BitwiseScalarTestCase(PTOTestCase):
             "rems_o": lambda: torch.remainder(a, REMS_RHS),
             "ands_o": lambda: torch.bitwise_and(a, ANDS_RHS),
             "ors_o": lambda: torch.bitwise_or(a, ORS_RHS),
+            "xors_o": lambda: torch.bitwise_xor(a, XORS_RHS),
             "shls_o": lambda: torch.bitwise_left_shift(a, SHLS_RHS),
             "shrs_o": lambda: torch.bitwise_right_shift(a, SHRS_RHS),
         }

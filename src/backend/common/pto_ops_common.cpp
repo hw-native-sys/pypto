@@ -2247,11 +2247,11 @@ static const SimpleOpEntry kSimpleOps[] = {
     {"tile.sub",             "pto.tsub",             2},
     {"tile.mul",             "pto.tmul",             2},
     {"tile.div",             "pto.tdiv",             2},
-    {"tile.rem",             "pto.trem",             2},
+    {"tile.rem",             "pto.trem",             3},  // src0, src1, tmp
     // Tile x Tile bitwise operations
     {"tile.and",             "pto.tand",             2},
     {"tile.or",              "pto.tor",              2},
-    {"tile.xor",             "pto.txor",             2},
+    {"tile.xor",             "pto.txor",             3},  // src0, src1, tmp
     {"tile.shl",             "pto.tshl",             2},
     {"tile.shr",             "pto.tshr",             2},
     // Tile x Tile comparison/selection operations
@@ -2276,10 +2276,10 @@ static const SimpleOpEntry kSimpleOps[] = {
     {"tile.subs",            "pto.tsubs",            2},
     {"tile.muls",            "pto.tmuls",            2},
     {"tile.divs",            "pto.tdivs",            2},
-    {"tile.rems",            "pto.trems",            2},
+    {"tile.rems",            "pto.trems",            3},  // src0, scalar, tmp
     {"tile.ands",            "pto.tands",            2},
     {"tile.ors",             "pto.tors",             2},
-    {"tile.xors",            "pto.txors",            2},
+    {"tile.xors",            "pto.txors",            3},  // src0, scalar, tmp
     {"tile.shls",            "pto.tshls",            2},
     {"tile.shrs",            "pto.tshrs",            2},
     {"tile.maximums",        "pto.tmaxs",            2},
