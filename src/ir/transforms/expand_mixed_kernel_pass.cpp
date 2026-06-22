@@ -759,11 +759,11 @@ class TransposeSplitHazardFinder : public IRVisitor {
 
  protected:
   void VisitStmt_(const AssignStmtPtr& op) override {
-    Consider(std::dynamic_pointer_cast<const Call>(op->value_), op->var_ ? op->var_->name_hint_ : "");
+    Consider(As<Call>(op->value_), op->var_ ? op->var_->name_hint_ : "");
     IRVisitor::VisitStmt_(op);
   }
   void VisitStmt_(const EvalStmtPtr& op) override {
-    Consider(std::dynamic_pointer_cast<const Call>(op->expr_), "");
+    Consider(As<Call>(op->expr_), "");
     IRVisitor::VisitStmt_(op);
   }
 
