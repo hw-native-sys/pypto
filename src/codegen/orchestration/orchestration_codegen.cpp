@@ -1057,10 +1057,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // and trip the scalar-yield branch (issue #1811). Preserve such entries —
     // identified by backing storage that is NOT this scope's local name set.
     for (const auto& [var, entry] : array_carry_vars_) {
-      if (saved_array_carry.count(var)) continue;        // outer entry — keep outer value
-      if (local_names.count(entry.array_name)) continue; // scope-local storage — drop
-      saved_array_carry[var] = entry;                    // enclosing-valid carry — preserve
-      auto tid_it = manual_task_id_map_.find(var);       // keep its per-slot dep names in sync
+      if (saved_array_carry.count(var)) continue;         // outer entry — keep outer value
+      if (local_names.count(entry.array_name)) continue;  // scope-local storage — drop
+      saved_array_carry[var] = entry;                     // enclosing-valid carry — preserve
+      auto tid_it = manual_task_id_map_.find(var);        // keep its per-slot dep names in sync
       if (tid_it != manual_task_id_map_.end()) saved_map[var] = tid_it->second;
     }
 

@@ -5738,17 +5738,31 @@ class TestManualScopeCodegen:
             transformed = pm.run_passes(Prog)
         code = _generate_orch_code(transformed)
 
-        # One PTO2TaskId[N] backing array, threaded through every carry rename.
-        decls = re.findall(rf"PTO2TaskId\s+(\w+)\[{N}\]", code)
-        assert decls, code
-        carry_arr = decls[0]
+        # Identify the loop-carried array by its seed broadcast: the seed
+        # TaskId is written to every slot before the loop. Deps-buffer arrays
+        # (``params_t*_deps`` / ``_submit_deps_buf``) are also ``PTO2TaskId[N]``
+        # but are never seeded this way, so this name is unambiguous.
+        seed_writes = re.findall(r"(\w+)\[\d+\] = seed_tid;", code)
+        assert len(seed_writes) == N, code
+        carry_arr = seed_writes[0]
+        assert all(name == carry_arr for name in seed_writes), code
+        # Exactly ONE backing declaration for the carry — the single-array
+        # threading invariant is the heart of the fix. A regression that wiped
+        # the carry would either crash or allocate a distinct array.
+        assert len(re.findall(rf"PTO2TaskId\s+{carry_arr}\[{N}\]", code)) == 1, code
         # The manual-scope parallel loop writes each producer TaskId back into
         # its slot of the SAME backing array (the per-slot loop-carry write).
+        # Scope the assertion to the MANUAL block region (everything after the
+        # marker) so it cannot be satisfied by the constant-index seed writes
+        # that precede the loop, and require a variable slot index (the loop
+        # var) to pin the per-iteration write.
         assert "PTO2_SCOPE(PTO2ScopeMode::MANUAL)" in code, code
-        assert re.search(rf"{carry_arr}\[\w+\]\s*=\s*\w+;", code), code
-        # The enclosing consumer reads every carry slot to fence on the
-        # previous iteration's producers — proof the carry is loop-carried
-        # (and that the per-slot writes feed the next iteration's deps).
+        manual_region = code[code.index("PTO2_SCOPE(PTO2ScopeMode::MANUAL)") :]
+        assert re.search(rf"{carry_arr}\[[A-Za-z_]\w*\]\s*=\s*\w+;", manual_region), code
+        # The carry is consumed by per-slot reads (the consumer fences on the
+        # previous iteration's producers, and the parallel body reads its own
+        # slot for its dep) — proof the carry is genuinely loop-carried. The
+        # consumer alone contributes N reads, so require at least N.
         slot_reads = re.findall(rf"=\s*{carry_arr}\[\w+\];", code)
         assert len(slot_reads) >= N, code
 
