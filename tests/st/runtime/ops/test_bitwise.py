@@ -18,6 +18,9 @@ shift amounts stay in [1, 4]. Each program is exercised aligned (valid_shape ==
 [M, N]) and narrow (valid_shape [VALID_M, VALID_N] < [M, N]; the invalid output
 region stays zero).
 
+Scope is a2a3 only (``@pytest.mark.platforms("a2a3")``); a5 coverage is a
+separate PR.
+
 (xor/xors are intentionally omitted: their 3-arg DSL form ``xor(a, b, tmp)``
 mismatches codegen ``pto.txor`` which expects 2 arguments — known gap.)
 """
@@ -39,9 +42,6 @@ ANDS_RHS = 0x0F
 ORS_RHS = 0x10
 SHLS_RHS = 2
 SHRS_RHS = 1
-
-# This test set targets a2a3 only; a5 coverage is handled in a separate PR.
-A2A3 = [pytest.param("a2a3", id="a2a3")]
 
 
 def _a_input() -> torch.Tensor:
@@ -78,10 +78,8 @@ class BitwiseTileTestCase(PTOTestCase):
 
     __test__ = False
 
-    def __init__(
-        self, *, valid_shapes: tuple[int, int] | None = None, platform: str | None = None, config=None
-    ):
-        super().__init__(config, platform=platform)
+    def __init__(self, *, valid_shapes: tuple[int, int] | None = None, config=None):
+        super().__init__(config)
         self._valid = valid_shapes
 
     def get_name(self) -> str:
@@ -173,10 +171,8 @@ class BitwiseScalarTestCase(PTOTestCase):
 
     __test__ = False
 
-    def __init__(
-        self, *, valid_shapes: tuple[int, int] | None = None, platform: str | None = None, config=None
-    ):
-        super().__init__(config, platform=platform)
+    def __init__(self, *, valid_shapes: tuple[int, int] | None = None, config=None):
+        super().__init__(config)
         self._valid = valid_shapes
 
     def get_name(self) -> str:
@@ -264,10 +260,8 @@ class BitwiseNotTestCase(PTOTestCase):
 
     __test__ = False
 
-    def __init__(
-        self, *, valid_shapes: tuple[int, int] | None = None, platform: str | None = None, config=None
-    ):
-        super().__init__(config, platform=platform)
+    def __init__(self, *, valid_shapes: tuple[int, int] | None = None, config=None):
+        super().__init__(config)
         self._valid = valid_shapes
 
     def get_name(self) -> str:
@@ -313,34 +307,34 @@ class BitwiseNotTestCase(PTOTestCase):
 class TestBitwise:
     """Tile-level integer bitwise / shift / remainder ops on a2a3."""
 
-    @pytest.mark.parametrize("platform", A2A3)
-    def test_tile_bitwise_tile(self, test_runner, platform):
-        result = test_runner.run(BitwiseTileTestCase(platform=platform))
+    @pytest.mark.platforms("a2a3")
+    def test_tile_bitwise_tile(self, test_runner):
+        result = test_runner.run(BitwiseTileTestCase())
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.parametrize("platform", A2A3)
-    def test_tile_bitwise_tile_narrow(self, test_runner, platform):
-        result = test_runner.run(BitwiseTileTestCase(valid_shapes=(VALID_M, VALID_N), platform=platform))
+    @pytest.mark.platforms("a2a3")
+    def test_tile_bitwise_tile_narrow(self, test_runner):
+        result = test_runner.run(BitwiseTileTestCase(valid_shapes=(VALID_M, VALID_N)))
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.parametrize("platform", A2A3)
-    def test_tile_bitwise_scalar(self, test_runner, platform):
-        result = test_runner.run(BitwiseScalarTestCase(platform=platform))
+    @pytest.mark.platforms("a2a3")
+    def test_tile_bitwise_scalar(self, test_runner):
+        result = test_runner.run(BitwiseScalarTestCase())
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.parametrize("platform", A2A3)
-    def test_tile_bitwise_scalar_narrow(self, test_runner, platform):
-        result = test_runner.run(BitwiseScalarTestCase(valid_shapes=(VALID_M, VALID_N), platform=platform))
+    @pytest.mark.platforms("a2a3")
+    def test_tile_bitwise_scalar_narrow(self, test_runner):
+        result = test_runner.run(BitwiseScalarTestCase(valid_shapes=(VALID_M, VALID_N)))
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.parametrize("platform", A2A3)
-    def test_tile_bitwise_not(self, test_runner, platform):
-        result = test_runner.run(BitwiseNotTestCase(platform=platform))
+    @pytest.mark.platforms("a2a3")
+    def test_tile_bitwise_not(self, test_runner):
+        result = test_runner.run(BitwiseNotTestCase())
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.parametrize("platform", A2A3)
-    def test_tile_bitwise_not_narrow(self, test_runner, platform):
-        result = test_runner.run(BitwiseNotTestCase(valid_shapes=(VALID_M, VALID_N), platform=platform))
+    @pytest.mark.platforms("a2a3")
+    def test_tile_bitwise_not_narrow(self, test_runner):
+        result = test_runner.run(BitwiseNotTestCase(valid_shapes=(VALID_M, VALID_N)))
         assert result.passed, f"Test failed: {result.error}"
 
 

@@ -17,6 +17,9 @@ Each op is exercised twice:
   * narrow    — valid_shape [VALID_M, VALID_N] < static [M, N]; the store writes
                 only the valid sub-region, so the rest of the zero-init output
                 must stay 0.
+
+Scope is a2a3 only (``@pytest.mark.platforms("a2a3")``); a5 coverage is a
+separate PR.
 """
 
 from typing import Any
@@ -31,9 +34,6 @@ N = 16
 VALID_M = 8
 VALID_N = 12
 
-# This test set targets a2a3 only; a5 coverage is handled in a separate PR.
-A2A3 = [pytest.param("a2a3", id="a2a3")]
-
 
 def _positive_input() -> torch.Tensor:
     """Positive FP32 input in roughly [0.1, 3.1] — valid for sin/cos/sqrt alike."""
@@ -45,10 +45,8 @@ class TileUnaryMathTestCase(PTOTestCase):
 
     __test__ = False
 
-    def __init__(
-        self, *, valid_shapes: tuple[int, int] | None = None, platform: str | None = None, config=None
-    ):
-        super().__init__(config, platform=platform)
+    def __init__(self, *, valid_shapes: tuple[int, int] | None = None, config=None):
+        super().__init__(config)
         self._valid = valid_shapes
 
     def get_name(self) -> str:
@@ -119,16 +117,16 @@ class TileUnaryMathTestCase(PTOTestCase):
 class TestUnaryMath:
     """Tile-level sin/cos/sqrt on a2a3."""
 
-    @pytest.mark.parametrize("platform", A2A3)
-    def test_tile_unary_math(self, test_runner, platform):
+    @pytest.mark.platforms("a2a3")
+    def test_tile_unary_math(self, test_runner):
         """Aligned: valid_shape == static [M, N]."""
-        result = test_runner.run(TileUnaryMathTestCase(platform=platform))
+        result = test_runner.run(TileUnaryMathTestCase())
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.parametrize("platform", A2A3)
-    def test_tile_unary_math_narrow(self, test_runner, platform):
+    @pytest.mark.platforms("a2a3")
+    def test_tile_unary_math_narrow(self, test_runner):
         """Narrow valid_shape [VALID_M, VALID_N]; invalid region stays zero."""
-        result = test_runner.run(TileUnaryMathTestCase(valid_shapes=(VALID_M, VALID_N), platform=platform))
+        result = test_runner.run(TileUnaryMathTestCase(valid_shapes=(VALID_M, VALID_N)))
         assert result.passed, f"Test failed: {result.error}"
 
 

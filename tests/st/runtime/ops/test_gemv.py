@@ -22,6 +22,9 @@ dimension (so the golden is robust to the contraction-dim valid semantics):
 
 Cube accumulation reorders the K reduction relative to torch's BLAS reference,
 so a relaxed FP32 tolerance is used.
+
+Scope is a2a3 only (``@pytest.mark.platforms("a2a3")``); a5 coverage is a
+separate PR.
 """
 
 from typing import Any
@@ -41,8 +44,9 @@ VALID_M = 8
 _RTOL = 1e-3
 _ATOL = 1e-3
 
-# This test set targets a2a3 only; a5 coverage is handled in a separate PR.
-A2A3 = [pytest.param("a2a3", id="a2a3")]
+
+def _cfg() -> RunConfig:
+    return RunConfig(rtol=_RTOL, atol=_ATOL)
 
 
 # ---------------------------------------------------------------------------
@@ -53,8 +57,8 @@ A2A3 = [pytest.param("a2a3", id="a2a3")]
 class GemvTestCase(PTOTestCase):
     __test__ = False
 
-    def __init__(self, *, narrow: bool = False, platform: str | None = None, config=None):
-        super().__init__(config, platform=platform)
+    def __init__(self, *, narrow: bool = False, config=None):
+        super().__init__(config)
         self._narrow = narrow
 
     def get_name(self) -> str:
@@ -114,8 +118,8 @@ class GemvTestCase(PTOTestCase):
 class GemvAccTestCase(PTOTestCase):
     __test__ = False
 
-    def __init__(self, *, narrow: bool = False, platform: str | None = None, config=None):
-        super().__init__(config, platform=platform)
+    def __init__(self, *, narrow: bool = False, config=None):
+        super().__init__(config)
         self._narrow = narrow
 
     def get_name(self) -> str:
@@ -182,8 +186,8 @@ class GemvAccTestCase(PTOTestCase):
 class GemvBiasTestCase(PTOTestCase):
     __test__ = False
 
-    def __init__(self, *, narrow: bool = False, platform: str | None = None, config=None):
-        super().__init__(config, platform=platform)
+    def __init__(self, *, narrow: bool = False, config=None):
+        super().__init__(config)
         self._narrow = narrow
 
     def get_name(self) -> str:
@@ -250,8 +254,8 @@ class GemvBiasTestCase(PTOTestCase):
 class MatmulBiasTestCase(PTOTestCase):
     __test__ = False
 
-    def __init__(self, *, narrow: bool = False, platform: str | None = None, config=None):
-        super().__init__(config, platform=platform)
+    def __init__(self, *, narrow: bool = False, config=None):
+        super().__init__(config)
         self._narrow = narrow
 
     def get_name(self) -> str:
@@ -307,51 +311,47 @@ class MatmulBiasTestCase(PTOTestCase):
             tensors["out"][:] = full
 
 
-def _cfg(platform: str) -> RunConfig:
-    return RunConfig(platform=platform, rtol=_RTOL, atol=_ATOL)
-
-
 class TestGemv:
     """Cube gemv / gemv_acc / gemv_bias / matmul_bias on a2a3."""
 
-    @pytest.mark.parametrize("platform", A2A3)
-    def test_tile_gemv(self, test_runner, platform):
-        result = test_runner.run(GemvTestCase(platform=platform, config=_cfg(platform)))
+    @pytest.mark.platforms("a2a3")
+    def test_tile_gemv(self, test_runner):
+        result = test_runner.run(GemvTestCase(config=_cfg()))
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.parametrize("platform", A2A3)
-    def test_tile_gemv_narrow(self, test_runner, platform):
-        result = test_runner.run(GemvTestCase(narrow=True, platform=platform, config=_cfg(platform)))
+    @pytest.mark.platforms("a2a3")
+    def test_tile_gemv_narrow(self, test_runner):
+        result = test_runner.run(GemvTestCase(narrow=True, config=_cfg()))
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.parametrize("platform", A2A3)
-    def test_tile_gemv_acc(self, test_runner, platform):
-        result = test_runner.run(GemvAccTestCase(platform=platform, config=_cfg(platform)))
+    @pytest.mark.platforms("a2a3")
+    def test_tile_gemv_acc(self, test_runner):
+        result = test_runner.run(GemvAccTestCase(config=_cfg()))
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.parametrize("platform", A2A3)
-    def test_tile_gemv_acc_narrow(self, test_runner, platform):
-        result = test_runner.run(GemvAccTestCase(narrow=True, platform=platform, config=_cfg(platform)))
+    @pytest.mark.platforms("a2a3")
+    def test_tile_gemv_acc_narrow(self, test_runner):
+        result = test_runner.run(GemvAccTestCase(narrow=True, config=_cfg()))
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.parametrize("platform", A2A3)
-    def test_tile_gemv_bias(self, test_runner, platform):
-        result = test_runner.run(GemvBiasTestCase(platform=platform, config=_cfg(platform)))
+    @pytest.mark.platforms("a2a3")
+    def test_tile_gemv_bias(self, test_runner):
+        result = test_runner.run(GemvBiasTestCase(config=_cfg()))
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.parametrize("platform", A2A3)
-    def test_tile_gemv_bias_narrow(self, test_runner, platform):
-        result = test_runner.run(GemvBiasTestCase(narrow=True, platform=platform, config=_cfg(platform)))
+    @pytest.mark.platforms("a2a3")
+    def test_tile_gemv_bias_narrow(self, test_runner):
+        result = test_runner.run(GemvBiasTestCase(narrow=True, config=_cfg()))
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.parametrize("platform", A2A3)
-    def test_tile_matmul_bias(self, test_runner, platform):
-        result = test_runner.run(MatmulBiasTestCase(platform=platform, config=_cfg(platform)))
+    @pytest.mark.platforms("a2a3")
+    def test_tile_matmul_bias(self, test_runner):
+        result = test_runner.run(MatmulBiasTestCase(config=_cfg()))
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.parametrize("platform", A2A3)
-    def test_tile_matmul_bias_narrow(self, test_runner, platform):
-        result = test_runner.run(MatmulBiasTestCase(narrow=True, platform=platform, config=_cfg(platform)))
+    @pytest.mark.platforms("a2a3")
+    def test_tile_matmul_bias_narrow(self, test_runner):
+        result = test_runner.run(MatmulBiasTestCase(narrow=True, config=_cfg()))
         assert result.passed, f"Test failed: {result.error}"
 
 
