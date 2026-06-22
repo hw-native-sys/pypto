@@ -89,9 +89,9 @@ static std::shared_ptr<TileType> MakePackedPredicateTileType(
 TypePtr DeduceTileOpTernaryType(const std::vector<ExprPtr>& args,
                                 const std::vector<std::pair<std::string, std::any>>& kwargs,
                                 const std::string& op_name, bool require_int);
-TypePtr DeduceTileOpXorScalarType(const std::vector<ExprPtr>& args,
-                                  const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                  const std::string& op_name);
+TypePtr DeduceTileOpTileScalarTileType(const std::vector<ExprPtr>& args,
+                                       const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                       const std::string& op_name);
 
 TypePtr DeduceTileOpElementwiseBinaryType(const std::vector<ExprPtr>& args,
                                           const std::vector<std::pair<std::string, std::any>>& kwargs,
@@ -377,7 +377,7 @@ REGISTER_OP("tile.rems")
     .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileOpXorScalarType(args, kwargs, "tile.rems");
+      return DeduceTileOpTileScalarTileType(args, kwargs, "tile.rems");
     });
 
 REGISTER_OP("tile.shl")

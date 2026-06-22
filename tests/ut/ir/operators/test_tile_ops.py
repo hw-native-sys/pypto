@@ -2259,7 +2259,10 @@ class TestTileBitwiseArithmeticOps:
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
                 tile_b: pl.Tile[[32, 32], pl.FP32] = pl.load(b, [0, 0], [32, 32])
-                tile_c: pl.Tile[[32, 32], pl.FP32] = pl.rem(tile_a, tile_b)
+                tmp: pl.Tile[[32, 32], pl.FP32] = pl.tile.create(
+                    [32, 32], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                tile_c: pl.Tile[[32, 32], pl.FP32] = pl.rem(tile_a, tile_b, tmp)
                 result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
@@ -2278,7 +2281,10 @@ class TestTileBitwiseArithmeticOps:
                 output: pl.Tensor[[128, 128], pl.FP32],
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
-                tile_c: pl.Tile[[32, 32], pl.FP32] = pl.rems(tile_a, 3.0)
+                tmp: pl.Tile[[32, 32], pl.FP32] = pl.tile.create(
+                    [32, 32], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                tile_c: pl.Tile[[32, 32], pl.FP32] = pl.rems(tile_a, 3.0, tmp)
                 result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
