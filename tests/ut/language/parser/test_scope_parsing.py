@@ -11,10 +11,9 @@
 
 import pypto.language as pl
 import pytest
+from pypto import ir
 from pypto.language.parser.diagnostics.exceptions import ParserSyntaxError
 from pypto.language.parser.text_parser import parse_program
-
-from pypto import ir
 
 
 class TestScopeParsing:
@@ -1691,6 +1690,31 @@ class TestSpmdAllowEarlyResolve:
                 ) -> pl.Tensor[[512, 128], pl.FP32]:
                     with pl.cluster():
                         for i in pl.spmd(4, allow_early_resolve=True):  # type: ignore[call-arg]
+                            t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [i * 128, 0], [128, 128])
+                            out = pl.store(t, [i * 128, 0], out)
+                    return out
+
+    def test_cluster_nested_as_tid_form_rejected(self):
+        """A cluster-nested ``as tid`` form with the hint is rejected.
+
+        The ``as tid`` capture is already illegal inside ``pl.cluster()`` (the
+        scope is unwrapped into the Group function and produces no Submit), so
+        the as-tid cluster guard fires first regardless of ``allow_early_resolve``
+        — the combination is never silently accepted.
+        """
+        with pytest.raises(ParserSyntaxError, match="nested inside"):
+
+            @pl.program
+            class Prog:
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def main(
+                    self,
+                    a: pl.Tensor[[512, 128], pl.FP32],
+                    out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+                ) -> pl.Tensor[[512, 128], pl.FP32]:
+                    with pl.cluster():
+                        with pl.spmd(4, allow_early_resolve=True) as tid:  # type: ignore[call-arg]
+                            i = pl.tile.get_block_idx()
                             t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [i * 128, 0], [128, 128])
                             out = pl.store(t, [i * 128, 0], out)
                     return out

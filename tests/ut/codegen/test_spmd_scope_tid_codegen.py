@@ -19,10 +19,9 @@ import re
 
 import pypto.language as pl
 import pytest
+from pypto import backend, codegen, passes
 from pypto.backend import BackendType
 from pypto.pypto_core import ir
-
-from pypto import backend, codegen, passes
 
 
 class TestSpmdScopeTaskIdCodegen:

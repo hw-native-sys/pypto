@@ -11,7 +11,6 @@
 
 import pypto.language as pl
 import pytest
-
 from pypto import ir, passes
 
 
