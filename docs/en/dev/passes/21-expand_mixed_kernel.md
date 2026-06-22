@@ -19,26 +19,32 @@ For **non-mixed InCore functions** (pure Cube or pure Vector), the pass converts
 
 After this pass, no `FunctionType::InCore` functions remain in the program.
 
-## Unsplittable transpose: downgrade to no-split
+## Unsplittable transpose: reject with an actionable error
 
-A requested vector split is **downgraded to the no-split dual-AIV path** when the
-kernel contains a `tile.transpose` that **swaps the split axis**. `tile.transpose`
-swaps two axes, so the per-lane split data migrates to the *other* dimension while
+A requested vector split is **rejected with a `ValueError`** when the kernel
+contains a `tile.transpose` that **swaps the split axis**. `tile.transpose` swaps
+two axes, so the per-lane split data migrates to the *other* dimension while
 `SplitVectorKernel` still halves the *original* split axis — it cannot type such a
-transpose correctly, so the result would be mis-shaped and miscompute (issue #1790).
-This is independent of split mode (UP_DOWN dim 0 / LEFT_RIGHT dim 1) and dtype.
+transpose correctly, so the result would be mis-shaped and miscompute. This is
+independent of split mode (UP_DOWN dim 0 / LEFT_RIGHT dim 1) and dtype.
+
+The split is a performance decision the user owns, so the pass does not silently
+drop it (which would compile a slower kernel than asked for). It fails loud and
+points at the offending transpose with two fix directions:
+
+1. **Drop the split** — set `attrs={"split": pl.SplitMode.NONE}` (or remove the
+   `pl.split(...)` optimization). This is the same un-split kernel the user can
+   already request directly.
+2. **Eliminate the transpose** — e.g. replace a transpose-then-row-index with a
+   direct column slice such as `pre[:, h:h+1]`. This keeps the split, so the
+   kernel still gets the requested speedup, and also avoids the pto-isa FP
+   transpose tail-path miscompute on device.
 
 `TransposeSplitHazardFinder` detects this at the start of `ExpandMixedFunction`: it
-flags any `tile.transpose` whose source is **non-singleton on the split axis** (a
-source that is singleton on the split axis carries no split data — the no-op
-broadcast case — and is left split; a dynamic, non-`ConstInt` extent is treated as
-non-singleton and downgraded conservatively). On a hit it strips the `split` attr
-so `GetSplitMode()` reads `None` and the existing `needs_dual_aiv_dispatch` logic
-routes the kernel through the no-split dual-AIV path, emitting a `LOG_WARN`.
-
-(Even if the typing were fixed, the pto-isa FP transpose miscomputes on device for
-split-shrunk source rows — the original #1790 device symptom — so downgrading is
-correct regardless.)
+flags the first `tile.transpose` whose source is **non-singleton on the split
+axis** (a source that is singleton on the split axis carries no split data — the
+no-op broadcast case — and is left split; a dynamic, non-`ConstInt` extent is
+treated as non-singleton and flagged conservatively).
 
 Cross-core data transfer at CV boundaries is handled by splitting explicit `tile.move` ops into `tpush`/`tpop` pairs:
 

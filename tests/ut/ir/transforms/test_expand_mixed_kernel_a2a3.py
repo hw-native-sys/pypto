@@ -727,15 +727,26 @@ def _run_to_expand_with_flatten(program: ir.Program) -> ir.Program:
     return passes.expand_mixed_kernel()(p)
 
 
-def test_unsplittable_transpose_downgrades_split_to_no_split_dual_aiv():
-    """A requested UP_DOWN split is downgraded to the no-split dual-AIV path when
-    the kernel contains a tile.transpose that swaps the split axis.
+def _assert_actionable_split_error(excinfo, mode_name: str) -> None:
+    """The error must name the split mode and surface both fix directions so the
+    user can act without reading the source: drop the split, or remove the
+    transpose."""
+    msg = str(excinfo.value)
+    assert "swaps the split axis" in msg, msg
+    assert mode_name in msg, msg
+    assert "pl.SplitMode.NONE" in msg, msg  # direction 1: drop the split
+    assert "column slice" in msg, msg  # direction 2: remove the transpose
+
+
+def test_unsplittable_transpose_raises_actionable_error():
+    """A requested UP_DOWN split is rejected with a ValueError when the kernel
+    contains a tile.transpose that swaps the split axis.
 
     tile.transpose swaps axes, so the per-lane split data migrates to the other
     dim while SplitVectorKernel still halves the original split axis — it cannot
-    type such a transpose correctly. Here the [16, 8] matmul result is transposed
-    under UP_DOWN (split dim 0, non-singleton), so ExpandMixedKernel strips the
-    split attr and tags the AIV with ``dual_aiv_dispatch`` (issue #1790).
+    type such a transpose correctly. The split is a perf decision the user owns,
+    so the pass fails loud instead of silently compiling it un-split. Here the
+    [16, 8] matmul result is transposed under UP_DOWN (split dim 0, non-singleton).
     """
 
     @pl.program
@@ -753,24 +764,19 @@ def test_unsplittable_transpose_downgrades_split_to_no_split_dual_aiv():
             y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
             z = pl.matmul(x_left, y_right)  # [16, 8] (cube result)
             z_vec = pl.move(z, target_memory=pl.MemorySpace.Vec)
-            zt = pl.transpose(z_vec, axis1=0, axis2=1)  # source dim0=16 non-singleton -> downgrade
+            zt = pl.transpose(z_vec, axis1=0, axis2=1)  # source dim0=16 non-singleton -> error
             out_0 = pl.store(zt, [0, 0], out_0)
             return out_0
 
-    After = _run_to_expand_with_flatten(Before)
-    aiv = next(f for f in After.functions.values() if f.func_type == ir.FunctionType.AIV)
-    assert aiv.attrs.get("dual_aiv_dispatch") is True, (
-        f"AIV must be downgraded to dual-AIV no-split dispatch, got attrs={dict(aiv.attrs)}"
-    )
-    assert "split" not in aiv.attrs, (
-        f"the requested split must be stripped on downgrade, got attrs={dict(aiv.attrs)}"
-    )
+    with pytest.raises(ValueError) as excinfo:
+        _run_to_expand_with_flatten(Before)
+    _assert_actionable_split_error(excinfo, "UP_DOWN")
 
 
-def test_left_right_transpose_also_downgrades():
-    """The downgrade is mode-independent: a LEFT_RIGHT split whose transpose
-    source is non-singleton on the split axis (dim 1) is also downgraded, because
-    the transpose migrates the column split axis just as UP_DOWN migrates rows."""
+def test_left_right_transpose_also_raises():
+    """The error is mode-independent: a LEFT_RIGHT split whose transpose source is
+    non-singleton on the split axis (dim 1) is also rejected, because the
+    transpose migrates the column split axis just as UP_DOWN migrates rows."""
 
     @pl.program
     class Before:
@@ -787,24 +793,19 @@ def test_left_right_transpose_also_downgrades():
             y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
             z = pl.matmul(x_left, y_right)  # [16, 16] (cube result)
             z_vec = pl.move(z, target_memory=pl.MemorySpace.Vec)
-            zt = pl.transpose(z_vec, axis1=0, axis2=1)  # source dim1=16 non-singleton -> downgrade
+            zt = pl.transpose(z_vec, axis1=0, axis2=1)  # source dim1=16 non-singleton -> error
             out_0 = pl.store(zt, [0, 0], out_0)
             return out_0
 
-    After = _run_to_expand_with_flatten(Before)
-    aiv = next(f for f in After.functions.values() if f.func_type == ir.FunctionType.AIV)
-    assert aiv.attrs.get("dual_aiv_dispatch") is True, (
-        f"LEFT_RIGHT transpose split must also be downgraded, got attrs={dict(aiv.attrs)}"
-    )
-    assert "split" not in aiv.attrs, (
-        f"the requested split must be stripped on downgrade, got attrs={dict(aiv.attrs)}"
-    )
+    with pytest.raises(ValueError) as excinfo:
+        _run_to_expand_with_flatten(Before)
+    _assert_actionable_split_error(excinfo, "LEFT_RIGHT")
 
 
 def test_singleton_split_axis_transpose_keeps_split():
     """A transpose whose source is singleton on the split axis carries no split
     data (the no-op broadcast case), so the split is preserved. Here a [1, 16]
-    source is transposed under UP_DOWN (split dim 0 == 1), so it is NOT downgraded
+    source is transposed under UP_DOWN (split dim 0 == 1), so it is NOT rejected
     and the AIV keeps its split attr with no dual-AIV dispatch."""
 
     @pl.program
@@ -829,7 +830,7 @@ def test_singleton_split_axis_transpose_keeps_split():
     After = _run_to_expand_with_flatten(Before)
     aiv = next(f for f in After.functions.values() if f.func_type == ir.FunctionType.AIV)
     assert aiv.attrs.get("dual_aiv_dispatch") is not True, (
-        f"a singleton-split-axis transpose must not be downgraded, got attrs={dict(aiv.attrs)}"
+        f"a singleton-split-axis transpose must not be rejected, got attrs={dict(aiv.attrs)}"
     )
     assert "split" in aiv.attrs, (
         f"the requested split must be preserved when the transpose is a no-op on the split axis, "
@@ -837,13 +838,13 @@ def test_singleton_split_axis_transpose_keeps_split():
     )
 
 
-def test_unsplittable_int8_transpose_downgrades_split_to_no_split_dual_aiv():
-    """The downgrade is dtype-independent: an int8 transpose that swaps a
-    non-singleton split axis is downgraded just like the fp/bf16 cases.
+def test_unsplittable_int8_transpose_raises_actionable_error():
+    """The error is dtype-independent: an int8 transpose that swaps a
+    non-singleton split axis is rejected just like the fp/bf16 cases.
 
     A bf16 matmul (cube) keeps the kernel mixed; separately, an int8 [16, 32]
     tensor is loaded into Vec and transposed under UP_DOWN (source dim0=16
-    non-singleton), so ExpandMixedKernel strips the split attr (issue #1790).
+    non-singleton), so ExpandMixedKernel rejects the split.
     """
 
     @pl.program
@@ -865,18 +866,13 @@ def test_unsplittable_int8_transpose_downgrades_split_to_no_split_dual_aiv():
             z_vec = pl.move(z, target_memory=pl.MemorySpace.Vec)
             out_0 = pl.store(z_vec, [0, 0], out_0)
             q_vec = pl.load(q, [0, 0], [16, 32], target_memory=pl.MemorySpace.Vec)
-            qt = pl.transpose(q_vec, axis1=0, axis2=1)  # int8 source dim0=16 non-singleton -> downgrade
+            qt = pl.transpose(q_vec, axis1=0, axis2=1)  # int8 source dim0=16 non-singleton -> error
             out_1 = pl.store(qt, [0, 0], out_1)
             return out_0
 
-    After = _run_to_expand_with_flatten(Before)
-    aiv = next(f for f in After.functions.values() if f.func_type == ir.FunctionType.AIV)
-    assert aiv.attrs.get("dual_aiv_dispatch") is True, (
-        f"int8 transpose must be downgraded to dual-AIV no-split dispatch, got attrs={dict(aiv.attrs)}"
-    )
-    assert "split" not in aiv.attrs, (
-        f"the requested split must be stripped on downgrade, got attrs={dict(aiv.attrs)}"
-    )
+    with pytest.raises(ValueError) as excinfo:
+        _run_to_expand_with_flatten(Before)
+    _assert_actionable_split_error(excinfo, "UP_DOWN")
 
 
 if __name__ == "__main__":

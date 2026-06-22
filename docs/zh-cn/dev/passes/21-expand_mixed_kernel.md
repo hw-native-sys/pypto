@@ -19,13 +19,16 @@
 
 该 Pass 执行后，程序中不再存在 `FunctionType::InCore` 函数。
 
-## 不可切分的转置：降级为不拆
+## 不可切分的转置：报错而非降级
 
-当内核含有一个**交换了切分轴**的 `tile.transpose` 时,**请求的向量切分会被降级为 no-split dual-AIV 路径**。`tile.transpose` 交换两个轴,于是每个 lane 的切分数据迁移到了*另一个*维度,而 `SplitVectorKernel` 仍按*原*切分轴减半 —— 它无法正确定型这种转置,结果形状错误并会算错(issue #1790)。这与切分模式(UP_DOWN dim 0 / LEFT_RIGHT dim 1)和 dtype 都无关。
+当内核含有一个**交换了切分轴**的 `tile.transpose` 时,**请求的向量切分会被以 `ValueError` 拒绝**。`tile.transpose` 交换两个轴,于是每个 lane 的切分数据迁移到了*另一个*维度,而 `SplitVectorKernel` 仍按*原*切分轴减半 —— 它无法正确定型这种转置,结果形状错误并会算错。这与切分模式(UP_DOWN dim 0 / LEFT_RIGHT dim 1)和 dtype 都无关。
 
-`TransposeSplitHazardFinder` 在 `ExpandMixedFunction` 开头检测:标记任何**在切分轴上非 singleton** 的 `tile.transpose` 源(若源在切分轴上是 singleton,则不携带切分数据 —— 即广播 no-op 情形 —— 保持切分;动态的非 `ConstInt` extent 视为非 singleton,保守降级)。命中时剥掉 `split` 属性,使 `GetSplitMode()` 返回 `None`,由既有 `needs_dual_aiv_dispatch` 逻辑改走不拆的 dual-AIV 路径,并打印 `LOG_WARN`。
+切分是用户掌控的性能决策,因此 pass 不会悄悄把它丢掉(那会编译出比用户要求更慢的内核),而是 fail-loud、指出出错的那个 transpose,并给出两条修改方向:
 
-(即便定型修对了,pto-isa 的 FP 转置在切分缩小后的源行上仍会在设备算错 —— 这正是 #1790 最初的设备症状 —— 所以降级无论如何都是正确的。)
+1. **删掉切分** —— 设 `attrs={"split": pl.SplitMode.NONE}`(或移除 `pl.split(...)` 优化)。这与用户本可直接请求的不拆内核完全一致。
+2. **消除该 transpose** —— 例如把「转置后按行取」改成直接列切片 `pre[:, h:h+1]`。这样切分得以保留,内核仍拿到请求的加速,同时也避开了 pto-isa FP 转置在设备上的 tail-path 算错。
+
+`TransposeSplitHazardFinder` 在 `ExpandMixedFunction` 开头检测:标记**第一个**在切分轴上非 singleton 的 `tile.transpose` 源(若源在切分轴上是 singleton,则不携带切分数据 —— 即广播 no-op 情形 —— 保持切分;动态的非 `ConstInt` extent 视为非 singleton,保守标记)。
 
 CV 边界的跨核心数据传输通过将显式 `tile.move` 操作拆分为 `tpush`/`tpop` 对来处理：
 

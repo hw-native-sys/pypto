@@ -746,25 +746,24 @@ struct ExpandedKernel {
 // axes — so a split transpose's per-lane data migrates to the *other* dim while
 // the pass still halves the original split axis, mis-typing the result. The pass
 // cannot correctly type any split transpose whose source carries the split axis,
-// and this holds for both UP_DOWN (dim 0) and LEFT_RIGHT (dim 1). When such a
-// transpose is present the split request must be downgraded to the no-split
-// dual-AIV path. A source that is singleton on the split axis carries no split
-// data and is safe (the no-op broadcast-row/column transpose case).
-// (Even if the typing were fixed, the pto-isa FP transpose miscomputes on device
-// for split-shrunk source rows — issue #1790 — so downgrading is the correct
-// behaviour regardless.)
+// and this holds for both UP_DOWN (dim 0) and LEFT_RIGHT (dim 1). A source that
+// is singleton on the split axis carries no split data and is safe (the no-op
+// broadcast-row/column transpose case). Records the first offending transpose so
+// the caller can point the user at it.
 class TransposeSplitHazardFinder : public IRVisitor {
  public:
   explicit TransposeSplitHazardFinder(int split_dim) : split_dim_(split_dim) {}
-  [[nodiscard]] bool Found() const { return found_; }
+  [[nodiscard]] bool Found() const { return offending_ != nullptr; }
+  [[nodiscard]] const Span& OffendingSpan() const { return offending_->span_; }
+  [[nodiscard]] const std::string& ResultName() const { return result_name_; }
 
  protected:
   void VisitStmt_(const AssignStmtPtr& op) override {
-    Consider(std::dynamic_pointer_cast<const Call>(op->value_));
+    Consider(std::dynamic_pointer_cast<const Call>(op->value_), op->var_ ? op->var_->name_hint_ : "");
     IRVisitor::VisitStmt_(op);
   }
   void VisitStmt_(const EvalStmtPtr& op) override {
-    Consider(std::dynamic_pointer_cast<const Call>(op->expr_));
+    Consider(std::dynamic_pointer_cast<const Call>(op->expr_), "");
     IRVisitor::VisitStmt_(op);
   }
 
@@ -779,8 +778,8 @@ class TransposeSplitHazardFinder : public IRVisitor {
     return static_cast<int>(a0->value_) == split_dim_ || static_cast<int>(a1->value_) == split_dim_;
   }
 
-  void Consider(const CallPtr& call) {
-    if (found_ || !call || !call->op_ || call->op_->name_ != "tile.transpose" || call->args_.empty()) {
+  void Consider(const CallPtr& call, const std::string& result_name) {
+    if (offending_ || !call || !call->op_ || call->op_->name_ != "tile.transpose" || call->args_.empty()) {
       return;
     }
     auto tt = std::dynamic_pointer_cast<const TileType>(call->args_[0]->GetType());
@@ -788,38 +787,41 @@ class TransposeSplitHazardFinder : public IRVisitor {
     if (!SwapsSplitAxis(call)) return;  // split axis not transposed -> stays put, typed correctly
     // The split axis carries real data unless it is statically 1. A dynamic
     // (non-ConstInt) extent is treated as non-singleton: it cannot be proven
-    // safe, so downgrade conservatively.
+    // safe, so flag it conservatively.
     auto dim = std::dynamic_pointer_cast<const ConstInt>(tt->shape_[split_dim_]);
-    if (!dim || dim->value_ != 1) found_ = true;
+    if (!dim || dim->value_ != 1) {
+      offending_ = call;
+      result_name_ = result_name;
+    }
   }
 
   int split_dim_;
-  bool found_ = false;
+  CallPtr offending_;
+  std::string result_name_;
 };
 
-ExpandedKernel ExpandMixedFunction(const FunctionPtr& orig_func, bool create_group = true) {
-  // Downgrade an unsplittable split request to the no-split dual-AIV path: a
-  // tile.transpose that swaps the split axis cannot be correctly typed by
-  // SplitVectorKernel (the per-lane data migrates to the other dim), so it would
-  // miscompute. Strip the split attr up front so GetSplitMode() reads None and
-  // needs_dual_aiv_dispatch routes to the no-split path; the stripped attrs then
-  // flow to the AIC/AIV/Group.
-  FunctionPtr func = orig_func;
-  if (auto mode = orig_func->GetSplitMode(); mode.has_value() && *mode != SplitMode::None) {
+ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = true) {
+  // A tile.transpose that swaps the split axis cannot be split correctly:
+  // SplitVectorKernel halves the original split axis, but the transpose moves
+  // that data to the other dimension, mis-typing the result. Reject the split
+  // request with an actionable error rather than silently miscompiling — the
+  // user controls this perf decision (drop the split, or remove the transpose).
+  if (auto mode = func->GetSplitMode(); mode.has_value() && *mode != SplitMode::None) {
     int split_dim = (*mode == SplitMode::UpDown) ? 0 : 1;
     TransposeSplitHazardFinder finder(split_dim);
-    if (orig_func->body_) finder.VisitStmt(orig_func->body_);
+    if (func->body_) finder.VisitStmt(func->body_);
     if (finder.Found()) {
-      auto attrs = orig_func->attrs_;
-      attrs.erase(
-          std::remove_if(attrs.begin(), attrs.end(), [](const auto& kv) { return kv.first == "split"; }),
-          attrs.end());
-      auto downgraded = MutableCopy(orig_func);
-      downgraded->attrs_ = std::move(attrs);
-      func = downgraded;
-      LOG_WARN << "ExpandMixedKernel: disabling the requested vector split for '" << orig_func->name_
-               << "': it contains a tile.transpose that swaps the split axis, which SplitVectorKernel "
-                  "cannot split correctly; compiling this kernel un-split.";
+      const char* mode_name = (*mode == SplitMode::UpDown) ? "UP_DOWN" : "LEFT_RIGHT";
+      std::string where =
+          finder.ResultName().empty() ? std::string() : " (result '" + finder.ResultName() + "')";
+      CHECK_SPAN(false, finder.OffendingSpan())
+          << "ExpandMixedKernel: kernel '" << func->name_ << "' requests pl.split(" << mode_name
+          << ") but contains a tile.transpose" << where << " that swaps the split axis (dim " << split_dim
+          << "). SplitVectorKernel halves the split axis while the transpose moves that data to the "
+             "other dimension, so the split cannot be applied correctly. Fix it one of two ways: "
+             "(1) drop the split — set attrs={\"split\": pl.SplitMode.NONE} (or remove the pl.split "
+             "optimization); or (2) eliminate this transpose, e.g. replace a transpose-then-row-index "
+             "with a direct column slice such as pre[:, h:h+1].";
     }
   }
 
