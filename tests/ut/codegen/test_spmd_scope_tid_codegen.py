@@ -19,9 +19,10 @@ import re
 
 import pypto.language as pl
 import pytest
-from pypto import backend, codegen, passes
 from pypto.backend import BackendType
 from pypto.pypto_core import ir
+
+from pypto import backend, codegen, passes
 
 
 class TestSpmdScopeTaskIdCodegen:
@@ -348,6 +349,74 @@ class TestSpmdScopeTaskIdCodegen:
         # And the deps edge is wired from the captured producer TaskId.
         assert re.search(rf"if \({re.escape(tid)}\.is_valid\(\)\)", code) is not None, code
         assert re.search(r"params_t1\.set_dependencies\(", code) is not None, code
+
+    def test_allow_early_resolve_emits_set_allow_early_resolve(self):
+        """``pl.spmd(..., allow_early_resolve=True) as tid`` emits the codegen hint.
+
+        End-to-end proof that the parser-level scope attr threads through the Spmd
+        outliner onto the ``ir.Submit`` and surfaces in orchestration codegen as
+        ``Arg::set_allow_early_resolve(true)`` (same rail as ``pl.submit`` /
+        ``pl.at``).
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class P:
+            @pl.function(type=pl.FunctionType.InCore)
+            def vkernel(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                t = pl.load(a, [0, 0], [512, 128])
+                out = pl.store(pl.add(t, t), [0, 0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                with pl.spmd(4, name_hint="stage1", allow_early_resolve=True) as tid:
+                    out = self.vkernel(a, out)
+                return out
+
+        transformed = self._mixed_spmd_pipeline(P)
+        code = self._codegen(transformed)
+        assert re.search(r"\w+\.set_allow_early_resolve\(true\);", code) is not None, code
+
+    def test_no_allow_early_resolve_omits_hint(self):
+        """An ordinary captured Spmd dispatch never emits ``set_allow_early_resolve``."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class P:
+            @pl.function(type=pl.FunctionType.InCore)
+            def vkernel(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                t = pl.load(a, [0, 0], [512, 128])
+                out = pl.store(pl.add(t, t), [0, 0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                with pl.spmd(4, name_hint="stage1") as tid:
+                    out = self.vkernel(a, out)
+                return out
+
+        transformed = self._mixed_spmd_pipeline(P)
+        code = self._codegen(transformed)
+        assert "set_allow_early_resolve" not in code, code
 
 
 if __name__ == "__main__":

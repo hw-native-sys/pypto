@@ -713,12 +713,14 @@ class SpmdContext:
         name_hint: str = "",
         optimizations: list[Optimization] | None = None,
         deps: list[Any] | None = None,
+        allow_early_resolve: bool = False,
     ) -> None:
         self.core_num = core_num
         self.sync_start = sync_start
         self.name_hint = name_hint
         self.optimizations = optimizations
         self.deps = deps
+        self.allow_early_resolve = allow_early_resolve
 
     def __enter__(self) -> Any:
         # The parser intercepts the ``with pl.spmd(...) [as tid]:`` pattern and
@@ -754,6 +756,7 @@ def spmd(
     name_hint: str = "",
     optimizations: list[Optimization] | None = None,
     deps: list[Any] | None = None,
+    allow_early_resolve: bool = False,
 ) -> SpmdContext:
     """Dispatch a kernel with SPMD (Single Program Multiple Data) multi-block execution.
 
@@ -800,6 +803,16 @@ def spmd(
             sentinels), accepted only with the ``as tid`` form. Lowered to the
             outlined Submit's ``manual_dep_edges``; codegen packs it into a
             ``set_dependencies(...)`` invocation (union'd with auto-deps).
+        allow_early_resolve: Opt the grid dispatch in as a speculative
+            early-dispatch producer (simpler#1065). Same hint as
+            ``pl.submit(..., allow_early_resolve=True)`` / ``pl.at(...,
+            allow_early_resolve=True)``: the scheduler may pre-stage this task's
+            consumers before it completes. Forces the dispatch to lower to an
+            ``ir.Submit`` (even without ``as tid``) so the flag rides to codegen,
+            where it emits ``Arg::set_allow_early_resolve(true)``. Pure scheduling
+            hint. Rejected on a ``pl.cluster()``-nested ``pl.spmd`` (such a scope
+            is unwrapped into the Group function and never produces a Submit, so
+            the hint would be lost).
 
     Returns:
         Context manager / loop iterator for the SPMD scope.
@@ -844,6 +857,7 @@ def spmd(
         name_hint=name_hint,
         optimizations=optimizations,
         deps=deps,
+        allow_early_resolve=allow_early_resolve,
     )
 
 

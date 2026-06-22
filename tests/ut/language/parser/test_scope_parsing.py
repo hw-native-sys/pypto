@@ -11,9 +11,10 @@
 
 import pypto.language as pl
 import pytest
-from pypto import ir
 from pypto.language.parser.diagnostics.exceptions import ParserSyntaxError
 from pypto.language.parser.text_parser import parse_program
+
+from pypto import ir
 
 
 class TestScopeParsing:
@@ -1431,6 +1432,303 @@ class TestSpmdScopeTaskId:
                 with pl.cluster() as tid:  # type: ignore[misc]
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
                 return y
+
+
+class TestSpmdAllowEarlyResolve:
+    """``pl.spmd(..., allow_early_resolve=True)`` — speculative early-dispatch hint.
+
+    Mirrors ``pl.submit(..., allow_early_resolve=True)`` / ``pl.at(...,
+    allow_early_resolve=True)``: the flag is recorded as an ``allow_early_resolve``
+    attr on the ``SpmdScopeStmt`` and the Spmd outliner threads it onto the
+    synthesised ``ir.Submit`` (proven in ``test_outline_cluster_scopes.py``).
+    Accepted on all three dispatch forms (plain with-form, ``as tid`` with-form,
+    and the ``for`` loop form); rejected on a ``pl.cluster()``-nested ``pl.spmd``.
+    """
+
+    @staticmethod
+    def _spmd_scopes(node):
+        found = []
+
+        def walk(n):
+            if isinstance(n, ir.SpmdScopeStmt):
+                found.append(n)
+            if isinstance(n, ir.SeqStmts):
+                for s in n.stmts:
+                    walk(s)
+            elif hasattr(n, "body") and n.body is not None:
+                walk(n.body)
+
+        walk(node)
+        return found
+
+    def _unique_spmd(self, prog):
+        main_func = list(prog.functions.values())[-1]
+        scopes = self._spmd_scopes(main_func.body)
+        assert len(scopes) == 1, f"expected exactly one SpmdScopeStmt, got {len(scopes)}"
+        return scopes[0]
+
+    def test_dsl_forwards_flag_onto_context(self):
+        """pl.spmd(..., allow_early_resolve=True) reaches SpmdContext (kwarg-forwarding guard)."""
+        assert pl.spmd(4, allow_early_resolve=True).allow_early_resolve is True
+        assert pl.spmd(4).allow_early_resolve is False
+
+    def test_as_tid_records_flag(self):
+        """``with pl.spmd(n, allow_early_resolve=True) as tid:`` records the scope attr."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                with pl.spmd(4, name_hint="stage1", allow_early_resolve=True) as tid:
+                    i = pl.tile.get_block_idx()
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [i * 128, 0], [128, 128])
+                    out = pl.store(pl.add(t, t), [i * 128, 0], out)
+                return out
+
+        spmd = self._unique_spmd(Prog)
+        assert spmd.attrs.get("allow_early_resolve") is True
+        # Coexists with the captured producer TaskId.
+        assert "task_id_var" in spmd.attrs
+
+    def test_for_form_records_flag(self):
+        """``for i in pl.spmd(n, allow_early_resolve=True):`` records the scope attr."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                for i in pl.spmd(4, allow_early_resolve=True):
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [i * 128, 0], [128, 128])
+                    out = pl.store(pl.add(t, t), [i * 128, 0], out)
+                return out
+
+        spmd = self._unique_spmd(Prog)
+        assert spmd.attrs.get("allow_early_resolve") is True
+
+    def test_plain_with_form_records_flag(self):
+        """``with pl.spmd(n, allow_early_resolve=True):`` (single call) records the attr."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                t = pl.load(a, [0, 0], [512, 128])
+                out = pl.store(t, [0, 0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                with pl.spmd(4, allow_early_resolve=True):
+                    out = self.kernel(a, out)
+                return out
+
+        spmd = self._unique_spmd(Prog)
+        assert spmd.attrs.get("allow_early_resolve") is True
+        # No `as tid`, so no captured producer TaskId — the outliner synthesises one.
+        assert "task_id_var" not in spmd.attrs
+
+    def test_default_false_omitted_from_attrs(self):
+        """Omitting the kwarg leaves no allow_early_resolve attr on the scope."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                for i in pl.spmd(4):
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [i * 128, 0], [128, 128])
+                    out = pl.store(t, [i * 128, 0], out)
+                return out
+
+        spmd = self._unique_spmd(Prog)
+        assert "allow_early_resolve" not in spmd.attrs
+
+    def test_as_tid_round_trip(self):
+        """The ``as tid`` form survives print -> reparse with the flag preserved."""
+
+        @pl.program
+        class Original:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                with pl.spmd(4, name_hint="stage1", allow_early_resolve=True) as tid:
+                    i = pl.tile.get_block_idx()
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [i * 128, 0], [128, 128])
+                    out = pl.store(pl.add(t, t), [i * 128, 0], out)
+                return out
+
+        printed = Original.as_python()
+        assert "allow_early_resolve=True" in printed
+        ir.assert_structural_equal(Original, parse_program(printed))
+
+    def test_for_form_round_trip(self):
+        """The for-loop form survives print -> reparse with the flag preserved."""
+
+        @pl.program
+        class Original:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                for i in pl.spmd(4, allow_early_resolve=True):
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [i * 128, 0], [128, 128])
+                    out = pl.store(pl.add(t, t), [i * 128, 0], out)
+                return out
+
+        printed = Original.as_python()
+        assert "allow_early_resolve=True" in printed
+        ir.assert_structural_equal(Original, parse_program(printed))
+
+    def test_plain_with_form_round_trip(self):
+        """The plain single-call with-form survives print -> reparse with the flag preserved."""
+
+        @pl.program
+        class Original:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                t = pl.load(a, [0, 0], [512, 128])
+                out = pl.store(t, [0, 0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                with pl.spmd(4, allow_early_resolve=True):
+                    out = self.kernel(a, out)
+                return out
+
+        printed = Original.as_python()
+        assert "allow_early_resolve=True" in printed
+        ir.assert_structural_equal(Original, parse_program(printed))
+
+    def test_default_omitted_from_print(self):
+        """A scope without the hint never prints ``allow_early_resolve``."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                for i in pl.spmd(4):
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [i * 128, 0], [128, 128])
+                    out = pl.store(t, [i * 128, 0], out)
+                return out
+
+        assert "allow_early_resolve" not in Prog.as_python()
+
+    def test_cluster_nested_plain_with_form_rejected(self):
+        """``allow_early_resolve=True`` on a cluster-nested plain ``pl.spmd`` is rejected."""
+        with pytest.raises(ParserSyntaxError, match="cannot be nested inside"):
+
+            @pl.program
+            class Prog:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    a: pl.Tensor[[512, 128], pl.FP32],
+                    out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+                ) -> pl.Tensor[[512, 128], pl.FP32]:
+                    t = pl.load(a, [0, 0], [512, 128])
+                    out = pl.store(t, [0, 0], out)
+                    return out
+
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def main(
+                    self,
+                    a: pl.Tensor[[512, 128], pl.FP32],
+                    out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+                ) -> pl.Tensor[[512, 128], pl.FP32]:
+                    with pl.cluster():
+                        with pl.spmd(4, allow_early_resolve=True):  # type: ignore[call-arg]
+                            out = self.kernel(a, out)
+                    return out
+
+    def test_cluster_nested_for_form_rejected(self):
+        """``allow_early_resolve=True`` on a cluster-nested ``for ... in pl.spmd`` is rejected."""
+        with pytest.raises(ParserSyntaxError, match="cannot be nested inside"):
+
+            @pl.program
+            class Prog:
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def main(
+                    self,
+                    a: pl.Tensor[[512, 128], pl.FP32],
+                    out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+                ) -> pl.Tensor[[512, 128], pl.FP32]:
+                    with pl.cluster():
+                        for i in pl.spmd(4, allow_early_resolve=True):  # type: ignore[call-arg]
+                            t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [i * 128, 0], [128, 128])
+                            out = pl.store(t, [i * 128, 0], out)
+                    return out
+
+    def test_non_bool_literal_rejected_for_form(self):
+        """A non-bool ``allow_early_resolve`` literal is rejected at parse time (for-form)."""
+        with pytest.raises(ParserSyntaxError, match="allow_early_resolve must be a boolean literal"):
+
+            @pl.program
+            class Prog:
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def main(
+                    self,
+                    a: pl.Tensor[[512, 128], pl.FP32],
+                    out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+                ) -> pl.Tensor[[512, 128], pl.FP32]:
+                    for i in pl.spmd(4, allow_early_resolve=1):  # type: ignore[arg-type]
+                        t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [i * 128, 0], [128, 128])
+                        out = pl.store(t, [i * 128, 0], out)
+                    return out
+
+    def test_non_bool_literal_rejected_as_tid_form(self):
+        """A non-bool ``allow_early_resolve`` literal is rejected at parse time (as-tid form)."""
+        with pytest.raises(ParserSyntaxError, match="allow_early_resolve must be a boolean literal"):
+
+            @pl.program
+            class Prog:
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def main(
+                    self,
+                    a: pl.Tensor[[512, 128], pl.FP32],
+                    out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+                ) -> pl.Tensor[[512, 128], pl.FP32]:
+                    with pl.spmd(4, allow_early_resolve=1) as tid:  # type: ignore[arg-type]
+                        i = pl.tile.get_block_idx()
+                        t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [i * 128, 0], [128, 128])
+                        out = pl.store(t, [i * 128, 0], out)
+                    return out
 
 
 if __name__ == "__main__":

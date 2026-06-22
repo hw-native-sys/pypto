@@ -1810,6 +1810,7 @@ void IRPythonPrinter::VisitStmt_(const SpmdScopeStmtPtr& op) {
       PrintSplitOptimizations(incore->split_.value_or(SplitMode::None), incore);
     }
     PrintScopeDepsAttr(op);
+    PrintScopeAllowEarlyResolveAttr(op);
     stream_ << ")";
     PrintScopeTaskIdVarSuffix(op);
     stream_ << ":\n";
@@ -1847,6 +1848,7 @@ void IRPythonPrinter::VisitStmt_(const SpmdScopeStmtPtr& op) {
     if (incore && ScopeHasSplitInfo(incore->split_, incore)) {
       PrintSplitOptimizations(incore->split_.value_or(SplitMode::None), incore);
     }
+    PrintScopeAllowEarlyResolveAttr(op);
     stream_ << "):\n";
     IncreaseIndent();
     // Emit the InCore body skipping the get_block_idx binding we just
@@ -1875,6 +1877,7 @@ void IRPythonPrinter::VisitStmt_(const SpmdScopeStmtPtr& op) {
   if (!op->name_hint_.empty()) {
     stream_ << ", name_hint=\"" << op->name_hint_ << "\"";
   }
+  PrintScopeAllowEarlyResolveAttr(op);
   stream_ << "):\n";
   IncreaseIndent();
   PrintStmtBlock(op->body_);

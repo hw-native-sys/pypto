@@ -11,6 +11,7 @@
 
 import pypto.language as pl
 import pytest
+
 from pypto import ir, passes
 
 
@@ -882,6 +883,65 @@ class TestOutlineSpmdScopeTaskId:
         assert isinstance(submits[1].deps[0], ir.Var)
         # Two distinct Spmd wrapper functions were synthesised.
         assert len(self._funcs_by_type(After, ir.FunctionType.Spmd)) == 2
+
+    def test_allow_early_resolve_threads_onto_submit(self):
+        """``pl.spmd(..., allow_early_resolve=True) as tid`` sets the Submit's flag."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                with pl.spmd(4, name_hint="stage1", allow_early_resolve=True) as tid:
+                    i = pl.tile.get_block_idx()
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [i * 128, 0], [128, 128])
+                    out = pl.store(pl.add(t, t), [i * 128, 0], out)
+                return out
+
+        After = self._run(Before)
+        orch = self._funcs_by_type(After, ir.FunctionType.Orchestration)[0]
+        (submit,) = self._submit_values(orch)
+        assert submit.allow_early_resolve is True
+
+    def test_allow_early_resolve_without_as_tid_still_submits(self):
+        """A plain ``with pl.spmd(..., allow_early_resolve=True):`` forces an ``ir.Submit``.
+
+        Without ``as tid`` the dispatch would normally lower to a plain Call; the
+        early-dispatch hint forces the Submit shape (the outliner synthesises an
+        unused producer TaskId) so the flag can ride to codegen.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                t = pl.load(a, [0, 0], [512, 128])
+                out = pl.store(t, [0, 0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                with pl.spmd(4, allow_early_resolve=True):
+                    out = self.kernel(a, out)
+                return out
+
+        After = self._run(Before)
+        orch = self._funcs_by_type(After, ir.FunctionType.Orchestration)[0]
+        (submit,) = self._submit_values(orch)
+        assert submit.allow_early_resolve is True
+        # core_num rides on the Spmd Function attrs, not on the Submit.
+        assert submit.core_num is None
 
 
 class TestOutlinedReturnParamsExplicit:
