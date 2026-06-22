@@ -1666,10 +1666,10 @@ static std::string MakeTileMscatterCodegenPTO(const CallPtr& op, codegen::Codege
 // Mirror of MakeTileMscatterCodegenPTO but reads GM -> tile. Generates:
 //   %pview = pto.partition_view %mem_view, offsets=[0,...], sizes=[shape...] : ... -> ...
 //   pto.mgather ins(%pview, %idx : !pto.partition_tensor_view<...>, !pto.tile_buf<...>)
-//               outs(%dst : !pto.tile_buf<...>) {coalesce = #pto<coalesce row|elem>}
+//               outs(%dst : !pto.tile_buf<...>) [{coalesce = #pto<coalesce elem>}]
 // The partition_view spans the whole table (mgather addresses rows/elements by
-// idx). The `coalesce` attr (0=row, 1=elem) is carried from the IR op and emits
-// the matching MGATHER<Coalesce::...> overload on the PTOAS side.
+// idx). Row is the default coalesce, so only elem mode emits an explicit
+// {coalesce = #pto<coalesce elem>} attribute (row emits none).
 static std::string MakeTileMgatherCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
   INTERNAL_CHECK(op->args_.size() == 2)
@@ -1684,11 +1684,12 @@ static std::string MakeTileMgatherCodegenPTO(const CallPtr& op, codegen::Codegen
   INTERNAL_CHECK(tensor_type) << "tile.mgather mem must have TensorType";
 
   // coalesce: 0 = row (default), 1 = elem. Mirrors the IR op's enum.
+  // Row is the default MGATHER coalesce, so only the explicit elem form emits
+  // a {coalesce = #pto<coalesce elem>} attribute; row emits no attribute.
   int coalesce = 0;
   for (const auto& [k, v] : op->kwargs_) {
     if (k == "coalesce") coalesce = AnyCast<int>(v, "coalesce");
   }
-  const char* coalesce_str = (coalesce == 1) ? "elem" : "row";
 
   std::string idx_name = codegen.GetVarName(idx);
   std::string idx_type_annot = codegen.GetExprTypeAnnotation(op->args_[1]);
@@ -1740,7 +1741,9 @@ static std::string MakeTileMgatherCodegenPTO(const CallPtr& op, codegen::Codegen
   }
   mgather_line << ") outs(" << dst;
   if (!dst_type.empty()) mgather_line << " : " << dst_type;
-  mgather_line << ") {coalesce = #pto<coalesce " << coalesce_str << ">}";
+  mgather_line << ")";
+  // Row is the default; only elem mode carries an explicit coalesce attribute.
+  if (coalesce == 1) mgather_line << " {coalesce = #pto<coalesce elem>}";
   codegen.Emit(mgather_line.str());
   return "";
 }
