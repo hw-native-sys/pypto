@@ -55,7 +55,7 @@ class TileActivationTestCase(PTOTestCase):
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
-            TensorSpec("a", [M, N], DataType.FP32, init_value=_signed_input()),
+            TensorSpec("a", [M, N], DataType.FP32, init_value=_signed_input),
             TensorSpec("relu_o", [M, N], DataType.FP32, is_output=True),
             TensorSpec("lrelu_o", [M, N], DataType.FP32, is_output=True),
         ]

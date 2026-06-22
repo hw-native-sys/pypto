@@ -54,7 +54,7 @@ class TileUnaryMathTestCase(PTOTestCase):
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
-            TensorSpec("a", [M, N], DataType.FP32, init_value=_positive_input()),
+            TensorSpec("a", [M, N], DataType.FP32, init_value=_positive_input),
             TensorSpec("sin_o", [M, N], DataType.FP32, is_output=True),
             TensorSpec("cos_o", [M, N], DataType.FP32, is_output=True),
             TensorSpec("sqrt_o", [M, N], DataType.FP32, is_output=True),

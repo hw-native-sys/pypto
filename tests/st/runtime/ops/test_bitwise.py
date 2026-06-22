@@ -87,8 +87,8 @@ class BitwiseTileTestCase(PTOTestCase):
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
-            TensorSpec("a", [M, N], DataType.INT32, init_value=_a_input()),
-            TensorSpec("b", [M, N], DataType.INT32, init_value=_b_input()),
+            TensorSpec("a", [M, N], DataType.INT32, init_value=_a_input),
+            TensorSpec("b", [M, N], DataType.INT32, init_value=_b_input),
             TensorSpec("rem_o", [M, N], DataType.INT32, is_output=True),
             TensorSpec("and_o", [M, N], DataType.INT32, is_output=True),
             TensorSpec("or_o", [M, N], DataType.INT32, is_output=True),
@@ -180,7 +180,7 @@ class BitwiseScalarTestCase(PTOTestCase):
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
-            TensorSpec("a", [M, N], DataType.INT32, init_value=_a_input()),
+            TensorSpec("a", [M, N], DataType.INT32, init_value=_a_input),
             TensorSpec("rems_o", [M, N], DataType.INT32, is_output=True),
             TensorSpec("ands_o", [M, N], DataType.INT32, is_output=True),
             TensorSpec("ors_o", [M, N], DataType.INT32, is_output=True),
@@ -269,7 +269,7 @@ class BitwiseNotTestCase(PTOTestCase):
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
-            TensorSpec("a", [M, N], DataType.INT16, init_value=_a_input().to(torch.int16)),
+            TensorSpec("a", [M, N], DataType.INT16, init_value=_a_input),
             TensorSpec("not_o", [M, N], DataType.INT16, is_output=True),
         ]
 
