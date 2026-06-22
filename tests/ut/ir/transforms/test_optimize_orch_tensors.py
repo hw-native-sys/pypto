@@ -5244,8 +5244,50 @@ class TestPerKernelAttrs:
         After = _run_to_optimize_orch_tensors(Before, window_policy="none")
         assert After.get_function("writer__windowed") is not None
 
-    def test_per_kernel_outputs_coalesce(self):
-        """kernel outputs="coalesce" merges multi-piece writes into one bbox."""
+    def test_per_kernel_outputs_coalesce_dense_pieces(self):
+        """kernel outputs="coalesce" merges dense multi-piece writes into one bbox."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore, attrs={"window_outputs": "coalesce"})
+            def cache_write(
+                self,
+                cache: pl.Out[pl.Tensor[[1024, 128], pl.FP32]],
+                data: pl.Tensor[[4, 128], pl.FP32],
+                slot_offset: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[1024, 128], pl.FP32]:
+                for ki, (cache_iter,) in pl.range(0, 4, init_values=(cache,)):
+                    src: pl.Tile[[1, 128], pl.FP32] = pl.tile.load(data, [ki, 0], [1, 128], [1, 128])
+                    row: pl.Scalar[pl.INDEX] = slot_offset + ki
+                    cache_next: pl.Tensor[[1024, 128], pl.FP32] = pl.tile.store(src, [row, 0], cache_iter)
+                    cache_rv = pl.yield_(cache_next)
+                return cache_rv
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                cache: pl.Out[pl.Tensor[[1024, 128], pl.FP32]],
+                data: pl.Tensor[[4, 128], pl.FP32],
+            ) -> pl.Tensor[[1024, 128], pl.FP32]:
+                slot: pl.Scalar[pl.INDEX] = 7
+                result: pl.Tensor[[1024, 128], pl.FP32] = self.cache_write(cache, data, slot)
+                return result
+
+        After = _run_to_optimize_orch_tensors(Before, window_policy="auto")
+
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert "cache_write__windowed" in printed_main
+        assert "cache__ssa_v0__window_base_arg" not in printed_main
+        assert "cache__ssa_v0__window_extent_arg" not in printed_main
+        assert "pl.tensor.slice(cache__ssa_v0" in printed_main
+        assert "pl.tensor.assemble(" in printed_main
+        assert "cache__ssa_v0__window_3" not in printed_main
+
+        printed_windowed = ir.python_print(_get_function(After, "cache_write__windowed"))
+        assert "pl.Out[pl.Tensor[[4, 128], pl.FP32" in printed_windowed
+
+    def test_per_kernel_outputs_coalesce_sparse_pieces_falls_back_exact(self):
+        """Sparse bbox coalesce falls back to exact pieces for writer-only rewrites."""
 
         @pl.program
         class Before:
@@ -5277,15 +5319,13 @@ class TestPerKernelAttrs:
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "cache_write__windowed" in printed_main
-        assert "cache__ssa_v0__window_base_arg" in printed_main
-        assert "cache__ssa_v0__window_extent_arg" in printed_main
-        assert "pl.tensor.slice(cache__ssa_v0" in printed_main
+        assert "cache__ssa_v0__window_3" in printed_main
+        assert "cache__ssa_v0__window_base_arg" not in printed_main
+        assert "cache__ssa_v0__window_extent_arg" not in printed_main
         assert "pl.tensor.assemble(" in printed_main
-        assert "cache__ssa_v0__window_3" not in printed_main
-
-        printed_windowed = ir.python_print(_get_function(After, "cache_write__windowed"))
-        assert "cache__ssa_v0__window_extent_dyn = pl.dynamic" in ir.python_print(After)
-        assert "pl.Out[pl.Tensor[[cache__ssa_v0__window_extent_dyn, 128], pl.FP32" in printed_windowed
+        assert "[135, 0]" in printed_main
+        assert "[263, 0]" in printed_main
+        assert "[391, 0]" in printed_main
 
     def test_policy_all_without_dynamic_reader_keeps_exact_pieces(self):
         """global all does not coalesce multi-piece output without a reader flow."""

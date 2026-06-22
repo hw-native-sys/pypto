@@ -2123,6 +2123,7 @@ class OutWindowExternalizer {
     std::vector<ExprPtr> local_store_offsets;
     AccessRegion region;
     AccessRegion assemble_region;
+    bool dependency_safe_for_standalone = false;
   };
 
   struct DynamicIndexedInputWindow {
@@ -2478,12 +2479,50 @@ class OutWindowExternalizer {
     return MakeDensePiece(std::move(window_shape), std::move(min_offsets), std::move(local_offsets));
   }
 
+  static std::optional<int64_t> ConstantDensePieceVolume(const DenseRegionPiece& piece) {
+    int64_t volume = 1;
+    for (const auto& dim : piece.window_shape) {
+      auto dim_value = As<ConstInt>(dim);
+      if (!dim_value || dim_value->value_ <= 0) return std::nullopt;
+      auto product = CheckedMul(volume, dim_value->value_);
+      if (!product.has_value()) return std::nullopt;
+      volume = *product;
+    }
+    return volume;
+  }
+
+  static bool IsStandaloneCoalescedVariantDependencySafe(const std::vector<DenseRegionPiece>& original_pieces,
+                                                         const DenseRegionPiece& carrier) {
+    auto carrier_volume = ConstantDensePieceVolume(carrier);
+    if (!carrier_volume.has_value()) return false;
+
+    int64_t original_volume = 0;
+    for (const auto& piece : original_pieces) {
+      auto piece_volume = ConstantDensePieceVolume(piece);
+      if (!piece_volume.has_value()) return false;
+      auto sum = CheckedAdd(original_volume, *piece_volume);
+      if (!sum.has_value()) return false;
+      original_volume = *sum;
+    }
+    for (size_t i = 0; i < original_pieces.size(); ++i) {
+      for (size_t j = i + 1; j < original_pieces.size(); ++j) {
+        if (!DenseRectsAreDisjoint(original_pieces[i].callsite_offsets, original_pieces[i].window_shape,
+                                   original_pieces[j].callsite_offsets, original_pieces[j].window_shape)) {
+          return false;
+        }
+      }
+    }
+    return original_volume == *carrier_volume;
+  }
+
   static std::optional<OutputRewriteVariant> BuildCoalescedOutputVariant(const OutputRewriteInfo& output) {
     const auto original_pieces = output.region.dense_pieces;
     auto carrier = BuildBoundingDensePiece(original_pieces, output.parent_shape, Span::unknown());
     if (!carrier.has_value()) return std::nullopt;
 
     OutputRewriteVariant variant;
+    variant.dependency_safe_for_standalone =
+        IsStandaloneCoalescedVariantDependencySafe(original_pieces, *carrier);
     variant.assemble_region = MakeDenseRegion(original_pieces);
     variant.window_shape = carrier->window_shape;
     variant.callsite_offsets = carrier->callsite_offsets;
@@ -2503,6 +2542,7 @@ class OutWindowExternalizer {
     if (!analysis) return;
     for (auto& output : analysis->outputs) {
       if (!output.coalesced_variant.has_value()) continue;
+      if (!output.coalesced_variant->dependency_safe_for_standalone) continue;
       auto variant = std::move(*output.coalesced_variant);
       output.assemble_region = std::move(variant.assemble_region);
       output.window_shape = std::move(variant.window_shape);
@@ -2558,9 +2598,10 @@ class OutWindowExternalizer {
 
       PrepareCoalescedOutputVariants(&analysis);
 
-      // Explicit coalesce always selects the bounding-box variant. For plain
-      // all/window_outputs=all, keep exact selected until a writer-reader flow
-      // proves that the coalesced variant is needed for dynamic carrier args.
+      // Explicit coalesce selects only dependency-safe dense bounding boxes.
+      // Sparse or unproven boxes keep exact pieces for writer-only rewrites,
+      // while still leaving the coalesced variant available to proven
+      // writer-reader carrier flows below.
       if (ep.output_shape == EffectivePolicies::OutputShape::Coalesce) {
         SelectCoalescedOutputPieces(&analysis);
       }
@@ -2568,7 +2609,8 @@ class OutWindowExternalizer {
       for (auto& output : analysis.outputs) {
         output.carrier_contract = output_carrier_contract;
         output.allow_flow_coalesce =
-            output_carrier_contract && ep.output_shape == EffectivePolicies::OutputShape::Auto;
+            output_carrier_contract && (ep.output_shape == EffectivePolicies::OutputShape::Auto ||
+                                        ep.output_shape == EffectivePolicies::OutputShape::Coalesce);
       }
       for (auto& input : analysis.inputs) {
         input.allow_dynamic_carrier_args = ep.inputs == EffectivePolicies::Strength::All;
