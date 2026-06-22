@@ -7,23 +7,23 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Runtime tests for tile-level integer remainder / not ops.
+"""Runtime tests for the tile-level integer bitwise NOT op.
 
-Tile-tile:   rem     (INT32, needs a scratch tmp tile)
-Tile-scalar: rems    (INT32, needs a scratch tmp tile)
-Unary:       not_    (INT16 — TNOT only supports int16/uint16)
+Only ``not_`` (TNOT, INT16) is covered: it is the one integer bitwise/remainder
+tile op that currently assembles and runs correctly on a2a3. The rest of the
+family is blocked by a2a3 assembler/ISA defects (tracked in KNOWN_ISSUES):
+  * rem  — TREM returns wrong values on int32 (e.g. 0 where a%b != 0).
+  * rems — TREMS alloc_tile element-type error.
+  * xor/xors — TXOR/TXORS require int16/uint16 element type (int32 rejected).
+  * and_/or_/shl/shr (+scalar) — ptoas rejects pto.tand/tor/tshl/tshr
+    ("invalid kind of type specified").
 
-rem/rems map to TREM/TREMS, which take a scratch ``tmp`` tile as a third operand.
+(The tile.rem/rems DSL/codegen now carry the scratch ``tmp`` operand that the
+ISA requires — see the elementwise op registration — so they are ready to
+re-enable once the a2a3 TREM/TXOR paths are fixed.)
 
-Not covered here (assembler-side a2a3 gaps, tracked in KNOWN_ISSUES):
-  * and_/or_/shl/shr (+scalar): ptoas rejects pto.tand/tor/tshl/tshr with
-    "invalid kind of type specified".
-  * xor/xors: pto.txor/txors expect an int16/uint16 element type on a2a3
-    (the int32 form is rejected); needs an int16 test + verification.
-
-Inputs are non-negative so remainder is unambiguous. Each program runs aligned
-(valid_shape == [M, N]) and narrow (valid_shape [VALID_M, VALID_N] < [M, N];
-invalid output stays zero).
+not_ runs aligned (valid_shape == [M, N]) and narrow (valid_shape
+[VALID_M, VALID_N] < [M, N]; invalid output stays zero).
 
 Scope is a2a3 only (``@pytest.mark.platforms("a2a3")``); a5 coverage is a
 separate PR.
@@ -41,154 +41,10 @@ N = 16
 VALID_M = 8
 VALID_N = 12
 
-REMS_RHS = 7
-
 
 def _a_input() -> torch.Tensor:
-    """Non-negative INT32 spread 0..255."""
+    """Non-negative INT spread 0..255 (cast to the spec dtype by create_tensor)."""
     return torch.arange(M * N, dtype=torch.int32).reshape(M, N)
-
-
-def _b_input() -> torch.Tensor:
-    """Positive INT32 divisor in [1, 4] — non-zero for remainder."""
-    return (torch.arange(M * N, dtype=torch.int32) % 4 + 1).reshape(M, N)
-
-
-def _fill_valid(tensors: dict[str, torch.Tensor], fns: dict, valid: tuple[int, int] | None) -> None:
-    """Write each output: aligned = full op result; narrow = op result in the
-    valid sub-region only, zero elsewhere."""
-    if valid:
-        vm, vn = valid
-        for name, fn in fns.items():
-            out = torch.zeros_like(tensors[name])
-            out[:vm, :vn] = fn()[:vm, :vn]
-            tensors[name][:] = out
-    else:
-        for name, fn in fns.items():
-            tensors[name][:] = fn()
-
-
-# ---------------------------------------------------------------------------
-# Tile-tile rem (INT32, scratch tmp)
-# ---------------------------------------------------------------------------
-
-
-class BitwiseTileTestCase(PTOTestCase):
-    """Tile-tile rem on INT32, aligned or narrow valid_shape."""
-
-    __test__ = False
-
-    def __init__(self, *, valid_shapes: tuple[int, int] | None = None, config=None):
-        super().__init__(config)
-        self._valid = valid_shapes
-
-    def get_name(self) -> str:
-        return "tile_bitwise_tile_narrow" if self._valid else "tile_bitwise_tile"
-
-    def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec("a", [M, N], DataType.INT32, init_value=_a_input),
-            TensorSpec("b", [M, N], DataType.INT32, init_value=_b_input),
-            TensorSpec("rem_o", [M, N], DataType.INT32, is_output=True),
-        ]
-
-    def get_program(self) -> Any:
-        vshape = list(self._valid) if self._valid else [M, N]
-
-        @pl.program
-        class BitwiseTileProgram:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                a: pl.Tensor[[M, N], pl.INT32],
-                b: pl.Tensor[[M, N], pl.INT32],
-                rem_o: pl.Out[pl.Tensor[[M, N], pl.INT32]],
-            ) -> pl.Tensor[[M, N], pl.INT32]:
-                a_tile = pl.load(a, [0, 0], [M, N], valid_shapes=vshape)
-                b_tile = pl.load(b, [0, 0], [M, N], valid_shapes=vshape)
-                tmp: pl.Tile[[M, N], pl.INT32] = pl.tile.create(
-                    [M, N], dtype=pl.INT32, target_memory=pl.MemorySpace.Vec
-                )
-                rem_o = pl.store(pl.tile.rem(a_tile, b_tile, tmp), [0, 0], rem_o)
-                return rem_o
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def orchestrator(
-                self,
-                a: pl.Tensor[[M, N], pl.INT32],
-                b: pl.Tensor[[M, N], pl.INT32],
-                rem_o: pl.Out[pl.Tensor[[M, N], pl.INT32]],
-            ) -> pl.Tensor[[M, N], pl.INT32]:
-                rem_o = self.kernel(a, b, rem_o)
-                return rem_o
-
-        return BitwiseTileProgram
-
-    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
-        a, b = tensors["a"], tensors["b"]
-        _fill_valid(tensors, {"rem_o": lambda: torch.remainder(a, b)}, self._valid)
-
-
-# ---------------------------------------------------------------------------
-# Tile-scalar rems (INT32, scratch tmp)
-# ---------------------------------------------------------------------------
-
-
-class BitwiseScalarTestCase(PTOTestCase):
-    """Tile-scalar rems on INT32, aligned or narrow valid_shape."""
-
-    __test__ = False
-
-    def __init__(self, *, valid_shapes: tuple[int, int] | None = None, config=None):
-        super().__init__(config)
-        self._valid = valid_shapes
-
-    def get_name(self) -> str:
-        return "tile_bitwise_scalar_narrow" if self._valid else "tile_bitwise_scalar"
-
-    def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec("a", [M, N], DataType.INT32, init_value=_a_input),
-            TensorSpec("rems_o", [M, N], DataType.INT32, is_output=True),
-        ]
-
-    def get_program(self) -> Any:
-        vshape = list(self._valid) if self._valid else [M, N]
-
-        @pl.program
-        class BitwiseScalarProgram:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                a: pl.Tensor[[M, N], pl.INT32],
-                rems_o: pl.Out[pl.Tensor[[M, N], pl.INT32]],
-            ) -> pl.Tensor[[M, N], pl.INT32]:
-                a_tile = pl.load(a, [0, 0], [M, N], valid_shapes=vshape)
-                tmp: pl.Tile[[M, N], pl.INT32] = pl.tile.create(
-                    [M, N], dtype=pl.INT32, target_memory=pl.MemorySpace.Vec
-                )
-                rems_o = pl.store(pl.tile.rems(a_tile, REMS_RHS, tmp), [0, 0], rems_o)
-                return rems_o
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def orchestrator(
-                self,
-                a: pl.Tensor[[M, N], pl.INT32],
-                rems_o: pl.Out[pl.Tensor[[M, N], pl.INT32]],
-            ) -> pl.Tensor[[M, N], pl.INT32]:
-                rems_o = self.kernel(a, rems_o)
-                return rems_o
-
-        return BitwiseScalarProgram
-
-    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
-        a = tensors["a"]
-        _fill_valid(tensors, {"rems_o": lambda: torch.remainder(a, REMS_RHS)}, self._valid)
-
-
-# ---------------------------------------------------------------------------
-# Unary not_ (INT16)
-# ---------------------------------------------------------------------------
 
 
 class BitwiseNotTestCase(PTOTestCase):
@@ -237,31 +93,17 @@ class BitwiseNotTestCase(PTOTestCase):
 
     def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
         a = tensors["a"]
-        _fill_valid(tensors, {"not_o": lambda: torch.bitwise_not(a)}, self._valid)
+        if self._valid:
+            vm, vn = self._valid
+            out = torch.zeros_like(tensors["not_o"])
+            out[:vm, :vn] = torch.bitwise_not(a[:vm, :vn])
+            tensors["not_o"][:] = out
+        else:
+            tensors["not_o"][:] = torch.bitwise_not(a)
 
 
 class TestBitwise:
-    """Tile-level integer rem / xor / not ops on a2a3."""
-
-    @pytest.mark.platforms("a2a3")
-    def test_tile_bitwise_tile(self, test_runner):
-        result = test_runner.run(BitwiseTileTestCase())
-        assert result.passed, f"Test failed: {result.error}"
-
-    @pytest.mark.platforms("a2a3")
-    def test_tile_bitwise_tile_narrow(self, test_runner):
-        result = test_runner.run(BitwiseTileTestCase(valid_shapes=(VALID_M, VALID_N)))
-        assert result.passed, f"Test failed: {result.error}"
-
-    @pytest.mark.platforms("a2a3")
-    def test_tile_bitwise_scalar(self, test_runner):
-        result = test_runner.run(BitwiseScalarTestCase())
-        assert result.passed, f"Test failed: {result.error}"
-
-    @pytest.mark.platforms("a2a3")
-    def test_tile_bitwise_scalar_narrow(self, test_runner):
-        result = test_runner.run(BitwiseScalarTestCase(valid_shapes=(VALID_M, VALID_N)))
-        assert result.passed, f"Test failed: {result.error}"
+    """Tile-level integer bitwise NOT on a2a3."""
 
     @pytest.mark.platforms("a2a3")
     def test_tile_bitwise_not(self, test_runner):
