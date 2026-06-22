@@ -314,6 +314,13 @@ class RowProd8x128FP32(PTOTestCase):
 
 
 class RowProd32x64FP16(PTOTestCase):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # FP16 product over 64 elements accumulates per-element rounding;
+        # the default 1e-5 tolerance is far too tight for a running product.
+        self.config.rtol = 2e-2
+        self.config.atol = 2e-2
+
     def get_name(self) -> str:
         return "row_prod_32x64_fp16"
 
@@ -411,6 +418,12 @@ class ColProd8x128FP32(PTOTestCase):
 
 
 class ColProd32x64FP16(PTOTestCase):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # FP16 product accumulates per-element rounding; loosen the tolerance.
+        self.config.rtol = 2e-2
+        self.config.atol = 2e-2
+
     def get_name(self) -> str:
         return "col_prod_32x64_fp16"
 
