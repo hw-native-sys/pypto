@@ -32,13 +32,13 @@ from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 
 
-def _near_one(shape, dtype=torch.float32):
-    # Values in [0.5, 1.5) keep the reduced product well-conditioned.
-    return torch.rand(shape, dtype=dtype) + 0.5
+def _prod_init(shape):
+    """Return a no-arg init callable (harness calls init_value with no args).
 
-
-def _near_one_fp16(shape):
-    return _near_one(shape, torch.float16)
+    Values in [0.8, 1.2) keep the reduced product well-conditioned across the
+    reduced dimension; the harness casts the result to the spec dtype.
+    """
+    return lambda: torch.rand(shape) * 0.4 + 0.8
 
 
 # =============================================================================
@@ -256,7 +256,7 @@ class RowProd32x64FP32(PTOTestCase):
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
-            TensorSpec("input_tensor", [32, 64], DataType.FP32, init_value=_near_one),
+            TensorSpec("input_tensor", [32, 64], DataType.FP32, init_value=_prod_init([32, 64])),
             TensorSpec("output", [32, 1], DataType.FP32, is_output=True),
         ]
 
@@ -279,7 +279,7 @@ class RowProd16x16FP32(PTOTestCase):
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
-            TensorSpec("input_tensor", [16, 16], DataType.FP32, init_value=_near_one),
+            TensorSpec("input_tensor", [16, 16], DataType.FP32, init_value=_prod_init([16, 16])),
             TensorSpec("output", [16, 1], DataType.FP32, is_output=True),
         ]
 
@@ -302,7 +302,7 @@ class RowProd8x128FP32(PTOTestCase):
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
-            TensorSpec("input_tensor", [8, 128], DataType.FP32, init_value=_near_one),
+            TensorSpec("input_tensor", [8, 128], DataType.FP32, init_value=_prod_init([8, 128])),
             TensorSpec("output", [8, 1], DataType.FP32, is_output=True),
         ]
 
@@ -325,7 +325,7 @@ class RowProd32x64FP16(PTOTestCase):
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
-            TensorSpec("input_tensor", [32, 64], DataType.FP16, init_value=_near_one_fp16),
+            TensorSpec("input_tensor", [32, 64], DataType.FP16, init_value=_prod_init([32, 64])),
             TensorSpec("output", [32, 1], DataType.FP16, is_output=True),
         ]
 
@@ -353,7 +353,7 @@ class ColProd32x64FP32(PTOTestCase):
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
-            TensorSpec("input_tensor", [32, 64], DataType.FP32, init_value=_near_one),
+            TensorSpec("input_tensor", [32, 64], DataType.FP32, init_value=_prod_init([32, 64])),
             TensorSpec("output", [1, 64], DataType.FP32, is_output=True),
         ]
 
@@ -376,7 +376,7 @@ class ColProd16x16FP32(PTOTestCase):
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
-            TensorSpec("input_tensor", [16, 16], DataType.FP32, init_value=_near_one),
+            TensorSpec("input_tensor", [16, 16], DataType.FP32, init_value=_prod_init([16, 16])),
             TensorSpec("output", [1, 16], DataType.FP32, is_output=True),
         ]
 
@@ -399,7 +399,7 @@ class ColProd8x128FP32(PTOTestCase):
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
-            TensorSpec("input_tensor", [8, 128], DataType.FP32, init_value=_near_one),
+            TensorSpec("input_tensor", [8, 128], DataType.FP32, init_value=_prod_init([8, 128])),
             TensorSpec("output", [1, 128], DataType.FP32, is_output=True),
         ]
 
@@ -422,7 +422,7 @@ class ColProd32x64FP16(PTOTestCase):
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
-            TensorSpec("input_tensor", [32, 64], DataType.FP16, init_value=_near_one_fp16),
+            TensorSpec("input_tensor", [32, 64], DataType.FP16, init_value=_prod_init([32, 64])),
             TensorSpec("output", [1, 64], DataType.FP16, is_output=True),
         ]
 
