@@ -5327,6 +5327,42 @@ class TestPerKernelAttrs:
         assert "[263, 0]" in printed_main
         assert "[391, 0]" in printed_main
 
+    def test_explicit_coalesce_exact_fallback_respects_runtime_tensor_arg_limit(self):
+        """Exact fallback still rejects callsites that would exceed runtime tensor arg caps."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore, attrs={"window_outputs": "coalesce"})
+            def cache_write(
+                self,
+                cache: pl.Out[pl.Tensor[[8192, 128], pl.FP32]],
+                data: pl.Tensor[[33, 128], pl.FP32],
+                slot_offset: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[8192, 128], pl.FP32]:
+                for ki, (cache_iter,) in pl.range(0, 33, init_values=(cache,)):
+                    src: pl.Tile[[1, 128], pl.FP32] = pl.tile.load(data, [ki, 0], [1, 128], [1, 128])
+                    row: pl.Scalar[pl.INDEX] = slot_offset + ki * 128
+                    cache_next: pl.Tensor[[8192, 128], pl.FP32] = pl.tile.store(src, [row, 0], cache_iter)
+                    cache_rv = pl.yield_(cache_next)
+                return cache_rv
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                cache: pl.Out[pl.Tensor[[8192, 128], pl.FP32]],
+                data: pl.Tensor[[33, 128], pl.FP32],
+            ) -> pl.Tensor[[8192, 128], pl.FP32]:
+                slot: pl.Scalar[pl.INDEX] = 7
+                result: pl.Tensor[[8192, 128], pl.FP32] = self.cache_write(cache, data, slot)
+                return result
+
+        After = _run_to_optimize_orch_tensors(Before, window_policy="auto")
+
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert "cache_write__windowed" not in printed_main
+        assert "pl.tensor.slice(" not in printed_main
+        assert "cache_write(cache" in printed_main
+
     def test_policy_all_without_dynamic_reader_keeps_exact_pieces(self):
         """global all does not coalesce multi-piece output without a reader flow."""
 

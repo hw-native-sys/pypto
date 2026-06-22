@@ -4656,10 +4656,18 @@ class OutWindowExternalizer {
       }
 
       auto cloned_gvar = std::make_shared<GlobalVar>(cloned_func->name_);
+      auto rewritten_budget = EstimateCallLikeSubmitBudget(cloned_func, new_args, {});
+      if (!WithinRuntimeSubmitArgLimits(rewritten_budget)) {
+        if (WindowExternalizeLogEnabled()) {
+          LOG_INFO << "[window-call] reject runtime submit arg limit func=" << callee_name << " tensor_args="
+                   << (rewritten_budget.add_inout + rewritten_budget.add_input + rewritten_budget.add_output)
+                   << " scalar_args=" << rewritten_budget.add_scalar;
+        }
+        return std::nullopt;
+      }
       if (RequiresAutoSubmitBudget(analysis)) {
         auto original_budget =
             EstimateCallLikeSubmitBudget(original_func, call->args_, call->GetArgDirections());
-        auto rewritten_budget = EstimateCallLikeSubmitBudget(cloned_func, new_args, {});
         if (!BudgetPreservingForAuto(original_budget, rewritten_budget)) {
           if (WindowExternalizeLogEnabled()) {
             LOG_INFO << "[window-call] reject auto submit budget func=" << callee_name
@@ -5046,6 +5054,15 @@ class OutWindowExternalizer {
       return rewritten.Total() <= original.Total() && rewritten.add_inout <= original.add_inout &&
              rewritten.add_input <= original.add_input && rewritten.add_output <= original.add_output &&
              rewritten.add_scalar <= original.add_scalar;
+    }
+
+    static bool WithinRuntimeSubmitArgLimits(const SubmitArgBudget& budget) {
+      // Mirrors runtime/src/common/task_interface/arg_direction.h without adding
+      // a pass-layer dependency on runtime headers.
+      constexpr int kCoreMaxTensorArgs = 32;
+      constexpr int kCoreMaxScalarArgs = 16;
+      return budget.add_inout + budget.add_input + budget.add_output <= kCoreMaxTensorArgs &&
+             budget.add_scalar <= kCoreMaxScalarArgs;
     }
 
     static bool RequiresAutoSubmitBudget(const CalleeRewriteAnalysis& analysis) {
