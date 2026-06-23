@@ -2403,6 +2403,22 @@ class OutWindowExternalizer {
       if (out_cost) *out_cost = std::move(cost);
       return false;
     }
+    auto is_static_positive_shape = [](const std::vector<ExprPtr>& shape) {
+      return !shape.empty() && std::all_of(shape.begin(), shape.end(), [](const ExprPtr& dim) {
+        auto value = As<ConstInt>(dim);
+        return value && value->value_ > 0;
+      });
+    };
+    if (!is_static_positive_shape(output.parent_shape) || !is_static_positive_shape(output.window_shape)) {
+      cost.reason = "dynamic_output_shape";
+      if (out_cost) *out_cost = std::move(cost);
+      return false;
+    }
+    if (output.carrier_contract || output.coalesced_variant.has_value()) {
+      cost.reason = "carrier_or_coalesce_contract";
+      if (out_cost) *out_cost = std::move(cost);
+      return false;
+    }
 
     cost.reason = cost.abi_delta < 0 ? "abi_reducing" : "abi_neutral_single_piece";
     if (out_cost) *out_cost = std::move(cost);
