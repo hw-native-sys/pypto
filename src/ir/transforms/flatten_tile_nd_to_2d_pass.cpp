@@ -1506,10 +1506,22 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         continue;
       }
     }
-    // De-duplicate batch_matmul_operands before checking counts.
+    // A re-emitted operand load is dead once Strategy 1 reconstructs per-batch
+    // loads, so collect loads whose EVERY use is a batch_matmul operand (i.e. no
+    // other live consumer). Comparing the batch_matmul-operand use count against
+    // the total use count — rather than requiring use_count == 1 — covers the
+    // shared-operand case: e.g. a SwiGLU FFN where the activation X is the common
+    // LHS of both the gate (X@W1) and up (X@W3) matmuls (use_count > 1). Each
+    // matmul re-emits its own per-batch load, so the original shared load is
+    // fully dead; restricting to single-use would leave it dangling as dead code
+    // (and a wasted MTE2 load that pollutes the matmul kernel's load pipeline).
+    // The Mat-only guard at the drop site below still protects loads that
+    // Strategy 1 cannot re-emit.
+    std::unordered_map<const Var*, int> batch_matmul_operand_uses;
+    for (const auto* v : batch_matmul_operands) batch_matmul_operand_uses[v]++;
     std::unordered_set<const Var*> seen;
     for (const auto* v : batch_matmul_operands) {
-      if (seen.insert(v).second && use_count[v] == 1) {
+      if (seen.insert(v).second && batch_matmul_operand_uses[v] == use_count[v]) {
         batch_matmul_only_vars.insert(v);
       }
     }

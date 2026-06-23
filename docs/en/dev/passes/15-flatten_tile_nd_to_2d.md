@@ -60,6 +60,17 @@ Per-statement handling:
 | Other tile ops (>2D) | Substitute vars, re-create with 2D types |
 | 1D/2D tile ops | Unchanged |
 
+**Operand-load re-emission and dead-load elimination.** For a Mat-memory
+operand (`tile.load(target_memory=Mat)`), the per-batch expansion re-emits a
+fresh 2D load from the original tensor with batch-adjusted offsets rather than
+slicing the rank>2 source tile. That leaves the original full-batch `tile.load`
+dead, so the pass skips emitting it. A load is skip-eligible when **every** use
+is a `tile.batch_matmul[_acc]` operand — including an operand shared across
+multiple matmuls (e.g. the activation `X` feeding both the gate `X@W1` and up
+`X@W3` matmuls of a SwiGLU FFN, `use_count > 1`). Leaving such a shared load
+behind would emit a wasted MTE2 load that survives to the generated matmul
+kernel and reuses a live weight buffer, serializing it on the load pipeline.
+
 ## Example
 
 **Before**:

@@ -2709,5 +2709,124 @@ class TestFlattenTileNdTo2DStandaloneTranspose:
             passes.flatten_tile_nd_to_2d()(Before)
 
 
+class TestFlattenTileNdTo2DSharedBatchMatmulOperand:
+    """A ``tile.batch_matmul`` operand shared by multiple matmuls must not be
+    left behind as a dead ``tile.load`` once Strategy 1 re-emits per-matmul loads.
+
+    Regression for the SwiGLU / gate-up FFN pattern: the activation ``X`` is the
+    common LHS of both the gate (``X@W1``) and up (``X@W3``) matmuls, so its load
+    has ``use_count == 2``. The skip-load pre-scan previously only dropped
+    single-use operands, leaving the shared ``X`` load dangling as dead code — a
+    wasted MTE2 load that survives into the generated matmul kernel and reuses a
+    live weight buffer, serializing it on the load pipeline.
+    """
+
+    def test_shared_lhs_load_not_left_dead(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[1, 16, 128], pl.INT8],
+                w1: pl.Tensor[[1, 128, 64], pl.INT8],
+                w3: pl.Tensor[[1, 128, 64], pl.INT8],
+                gate__out: pl.Out[pl.Tensor[[1, 16, 64], pl.INT32]],
+                up__out: pl.Out[pl.Tensor[[1, 16, 64], pl.INT32]],
+            ) -> tuple[pl.Tensor[[1, 16, 64], pl.INT32], pl.Tensor[[1, 16, 64], pl.INT32]]:
+                # x_mat is the SHARED LHS of both matmuls (use_count == 2).
+                x_mat: pl.Tile[[1, 16, 128], pl.INT8, pl.Mem.Mat] = pl.load(
+                    x, [0, 0, 0], [1, 16, 128], [1, 16, 128], target_memory=pl.Mem.Mat, transpose=False
+                )
+                w1_mat: pl.Tile[
+                    [1, 128, 64],
+                    pl.INT8,
+                    pl.Mem.Mat,
+                    pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.col_major),
+                ] = pl.load(
+                    w1, [0, 0, 0], [1, 64, 128], [1, 64, 128], target_memory=pl.Mem.Mat, transpose=True
+                )
+                w3_mat: pl.Tile[
+                    [1, 128, 64],
+                    pl.INT8,
+                    pl.Mem.Mat,
+                    pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.col_major),
+                ] = pl.load(
+                    w3, [0, 0, 0], [1, 64, 128], [1, 64, 128], target_memory=pl.Mem.Mat, transpose=True
+                )
+                gate__tile = pl.tile.batch_matmul(x_mat, w1_mat)
+                up__tile = pl.tile.batch_matmul(x_mat, w3_mat)
+                gate__store = pl.store(gate__tile, [0, 0, 0], gate__out)
+                up__store = pl.store(up__tile, [0, 0, 0], up__out)
+                return gate__store, up__store
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[1, 16, 128], pl.INT8],
+                w1: pl.Tensor[[1, 128, 64], pl.INT8],
+                w3: pl.Tensor[[1, 128, 64], pl.INT8],
+            ) -> tuple[pl.Tensor[[1, 16, 64], pl.INT32], pl.Tensor[[1, 16, 64], pl.INT32]]:
+                gate__out = pl.create_tensor([1, 16, 64], dtype=pl.INT32, layout=pl.TensorLayout.ND)
+                up__out = pl.create_tensor([1, 16, 64], dtype=pl.INT32, layout=pl.TensorLayout.ND)
+                return self.main_incore_0(x, w1, w3, gate__out, up__out)
+
+        after = passes.flatten_tile_nd_to_2d()(Before)
+        fn = after.get_function("main_incore_0")
+        assert fn is not None
+
+        # Collect every tile.load AssignStmt (bound var name, source tensor name)
+        # and the set of all Var name_hints referenced anywhere in the body.
+        loads: list[tuple[str, str]] = []
+        used: set[str] = set()
+
+        def record_uses(expr) -> None:
+            if isinstance(expr, ir.Var):
+                used.add(expr.name_hint)
+            elif isinstance(expr, ir.Call):
+                for a in expr.args:
+                    record_uses(a)
+            elif isinstance(expr, ir.MakeTuple):
+                for e in expr.elements:
+                    record_uses(e)
+
+        def walk(node) -> None:
+            if isinstance(node, ir.SeqStmts):
+                for s in node.stmts:
+                    walk(s)
+            elif isinstance(node, ir.AssignStmt):
+                if isinstance(node.value, ir.Call):
+                    call = node.value
+                    if call.op.name == "tile.load":
+                        src = call.args[0]
+                        src_name = src.name_hint if isinstance(src, ir.Var) else "<expr>"
+                        loads.append((node.var.name_hint, src_name))
+                    for a in call.args:
+                        record_uses(a)
+                else:
+                    record_uses(node.value)
+            elif isinstance(node, ir.ReturnStmt):
+                for v in node.value:
+                    record_uses(v)
+            elif isinstance(node, ir.EvalStmt):
+                record_uses(node.expr)
+
+        walk(fn.body)
+
+        # 1. No tile.load result is dead: every load is consumed downstream. The
+        #    original shared `x_mat` load (use_count == 2) must be skipped, not
+        #    left as a dead load.
+        dead = [name for name, _ in loads if name not in used]
+        assert not dead, f"dead tile.load(s) left after flatten: {dead}"
+
+        # 2. The shared activation X is re-emitted exactly once per matmul (two
+        #    loads from x) — NOT three (which would include the dead original).
+        x_loads = [name for name, src in loads if src == "x"]
+        assert len(x_loads) == 2, f"expected 2 re-emitted x loads, got {len(x_loads)}: {x_loads}"
+
+        # 3. Every tile op is flattened to 2D.
+        for call in _tile_calls(fn.body):
+            assert len(cast(ir.TileType, call.type).shape) == 2
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

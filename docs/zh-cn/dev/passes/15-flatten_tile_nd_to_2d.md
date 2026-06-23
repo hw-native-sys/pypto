@@ -59,6 +59,15 @@ program_2d = flatten_pass(program)
 | 其他 Tile 操作（>2D） | 替换变量，使用 2D 类型重新创建 |
 | 1D/2D Tile 操作 | 不变 |
 
+**操作数 load 重新发射与死 load 消除。** 对于 Mat 内存的操作数
+（`tile.load(target_memory=Mat)`），逐 batch 展开会从原始张量按 batch 调整偏移后
+重新发射一个全新的 2D load，而不是对 rank>2 的源 tile 做切分。这样原始的全 batch
+`tile.load` 就变成死代码，因此 pass 跳过发射它。当一个 load 的**每一处**使用都是
+`tile.batch_matmul[_acc]` 的操作数时即可跳过 —— 包括被多个 matmul 共享的操作数
+（例如 SwiGLU FFN 中同时喂给 gate `X@W1` 与 up `X@W3` 两个 matmul 的激活 `X`，
+`use_count > 1`）。若保留这种共享 load，会在生成的 matmul kernel 中发射一次多余的
+MTE2 load，并复用一个仍存活的权重 buffer，从而在 load 流水线上对其造成串行化。
+
 ## 示例
 
 **之前**：
