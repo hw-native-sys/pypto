@@ -8,6 +8,9 @@
 # -----------------------------------------------------------------------------------------------------------
 
 """Tests for @pl.jit decorator: decoration, cache hit/miss, and bind_dynamic."""
+# pyright: reportUndefinedVariable=false
+# Rationale: @pl.inline helpers defined via exec() / @pl.jit.inline are not
+# statically visible; pyright cannot resolve these names at analysis time.
 
 import ast
 import importlib
@@ -2333,6 +2336,730 @@ class TestJitSourceProvenance:
         incore = list(prog.get_function("_provenance_kernel").body)[0]
         assert incore.span.filename == __file__
         assert incore.span.begin_line == expected_with_line
+
+
+# ===========================================================================
+# @pl.jit discovers @pl.inline helpers — the specializer must emit their
+# definitions so pl.parse() can expand them.  TODO: implement and enable.
+# ===========================================================================
+
+
+class TestJitDiscoversPlInline:
+    """@pl.jit calls @pl.inline → specializer discovers + emits the helper.
+
+    When a @pl.jit function (or any dep in its graph) calls a @pl.inline
+    helper, the specializer must walk the body AST, find the call, look up
+    the helper in py_globals, and emit its @pl.inline definition in the
+    generated @pl.program source before the class block.  pl.parse() then
+    expands the call site normally via _parse_inline_call.
+
+    The specializer discovers @pl.inline helpers by walking dep bodies for
+    calls to ``InlineFunction`` objects found in ``py_globals``.
+    """
+
+    @staticmethod
+    def _make_inline_helper(name, body_source, kwonly_args="", extra_globals=None):
+        """Create a @pl.inline function and return (InlineFunction, namespace).
+
+        Uses ``exec()`` with explicit ``linecache`` population so the
+        ``@pl.inline`` decorator can retrieve the source when decorating
+        the function.  ``exec()`` alone clears the linecache entry that
+        ``compile()`` populates.
+
+        Args:
+            name: Function name.
+            body_source: Indented body lines as a string.
+            kwonly_args: Optional kwonly parameter declarations (e.g.
+                ``", *, k_tile: int = 32"``).
+            extra_globals: Optional dict of extra names to inject into the
+                exec namespace so they are captured in the InlineFunction's
+                ``closure_vars`` (simulates module-level constants).
+        """
+        import linecache  # noqa: PLC0415 -- exec-based helper construction
+
+        ns: dict[str, object] = {"pl": pl, "__builtins__": __builtins__}
+        if extra_globals:
+            ns.update(extra_globals)
+        src = f"""
+@pl.inline
+def {name}(x: pl.Tensor[[64], pl.BF16], out: pl.Tensor[[64], pl.BF16]{kwonly_args}):
+{body_source}
+    return out
+"""
+        # Pre-populate linecache so _get_source_info can find the source
+        # when @pl.inline decorates the exec'd function.
+        src_lines = src.splitlines(keepends=True)
+        linecache.cache["<string>"] = (len(src), None, src_lines, "<string>")
+        try:
+            exec(src, ns)
+        finally:
+            linecache.cache.pop("<string>", None)
+        return ns[name], ns
+
+    # ------------------------------------------------------------------
+    # Basic: @pl.jit ⟶ @pl.inline (no CT kwargs)
+    # ------------------------------------------------------------------
+
+    def test_basic_inline_helper_discovered(self):
+        """@pl.jit calls a plain @pl.inline helper — compiles, helper not in output."""
+        helper, helper_ns = self._make_inline_helper(
+            "add_one",
+            "    tile_x = pl.load(x, [0], [64])\n"
+            "    tile_out = pl.add(tile_x, 1.0)\n"
+            "    pl.store(tile_out, [0], out)\n",
+        )
+
+        # Inject the helper into the entry function's globals.
+        jit_ns: dict[str, object] = {
+            "pl": pl,
+            "add_one": helper,
+        }
+
+        @jit
+        def entry(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                out = add_one(x, out)  # noqa: F821 — exec-defined inline helper
+            return out
+
+        # Replace __globals__ so the specializer finds add_one.
+        entry._func.__globals__.update(jit_ns)
+
+        prog = entry._compile_to_program(
+            tensor_meta={
+                "x": TensorMeta((64,), DataType.BF16),
+                "out": TensorMeta((64,), DataType.BF16),
+            },
+            scalar_values={},
+            scalar_dtypes={},
+            per_func_dyn={id(entry._func): {}},
+            pl=pl,
+        )
+        names = [f.name for f in prog.functions.values()]
+        # The inline helper must be expanded away.
+        assert "add_one" not in names, f"add_one should be expanded; functions: {names}"
+        assert "entry" in names
+
+    # ------------------------------------------------------------------
+    # CT kwargs: @pl.jit ⟶ @pl.inline with kwonly params
+    # ------------------------------------------------------------------
+
+    def test_ct_kwargs_preserved(self):
+        """@pl.inline with CT kwargs — constants propagate to generated body."""
+        helper, helper_ns = self._make_inline_helper(
+            "scale",
+            (
+                "    tile_x = pl.load(x, [0], [64])\n"
+                "    tile_out = pl.mul(tile_x, factor)\n"
+                "    pl.store(tile_out, [0], out)\n"
+            ),
+            kwonly_args=", *, factor: float = 2.0",
+        )
+
+        jit_ns: dict[str, object] = {"pl": pl, "scale": helper}
+
+        @jit
+        def entry(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                out = scale(x, out, factor=3.0)  # noqa: F821 — exec-defined inline helper
+            return out
+
+        entry._func.__globals__.update(jit_ns)
+
+        prog = entry._compile_to_program(
+            tensor_meta={
+                "x": TensorMeta((64,), DataType.BF16),
+                "out": TensorMeta((64,), DataType.BF16),
+            },
+            scalar_values={},
+            scalar_dtypes={},
+            per_func_dyn={id(entry._func): {}},
+            pl=pl,
+        )
+        names = [f.name for f in prog.functions.values()]
+        assert "scale" not in names
+
+        # Verify the generated source has the literal 3.0, not a kwarg name.
+        for fn in prog.functions.values():
+            if fn.name == "entry":
+                src = fn.as_python()
+                # The specializer's BodyTransformer won't have inlined 'factor'
+                # because it's a CT kwarg, not a scalar.  But pl.parse() will
+                # expand the @pl.inline with factor=3.0, so the entry body should
+                # NOT contain "factor" as a parameter reference.
+                assert "factor" not in src, f"'factor' should be resolved; source:\n{src}"
+                break
+
+    def test_ct_kwargs_use_default(self):
+        """@pl.inline with CT kwargs — default value used when not overridden."""
+        helper, helper_ns = self._make_inline_helper(
+            "scale",
+            (
+                "    tile_x = pl.load(x, [0], [64])\n"
+                "    tile_out = pl.mul(tile_x, factor)\n"
+                "    pl.store(tile_out, [0], out)\n"
+            ),
+            kwonly_args=", *, factor: float = 2.0",
+        )
+
+        jit_ns: dict[str, object] = {"pl": pl, "scale": helper}
+
+        @jit
+        def entry(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                out = scale(x, out)  # noqa: F821 — exec-defined inline helper  # uses default factor=2.0
+            return out
+
+        entry._func.__globals__.update(jit_ns)
+
+        prog = entry._compile_to_program(
+            tensor_meta={
+                "x": TensorMeta((64,), DataType.BF16),
+                "out": TensorMeta((64,), DataType.BF16),
+            },
+            scalar_values={},
+            scalar_dtypes={},
+            per_func_dyn={id(entry._func): {}},
+            pl=pl,
+        )
+        names = [f.name for f in prog.functions.values()]
+        assert "scale" not in names
+
+    # ------------------------------------------------------------------
+    # Multiple helpers
+    # ------------------------------------------------------------------
+
+    def test_multiple_helpers_discovered(self):
+        """Two different @pl.inline helpers called from the same @pl.jit."""
+        h1, ns1 = self._make_inline_helper(
+            "add_one",
+            "    tile_x = pl.load(x, [0], [64])\n"
+            "    tile_out = pl.add(tile_x, 1.0)\n"
+            "    pl.store(tile_out, [0], out)\n",
+        )
+        h2, ns2 = self._make_inline_helper(
+            "mul_two",
+            "    tile_x = pl.load(x, [0], [64])\n"
+            "    tile_out = pl.mul(tile_x, 2.0)\n"
+            "    pl.store(tile_out, [0], out)\n",
+        )
+
+        jit_ns: dict[str, object] = {"pl": pl, "add_one": h1, "mul_two": h2}
+
+        @jit
+        def entry(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor], d: pl.Out[pl.Tensor]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                c = add_one(a, c)  # noqa: F821 — exec-defined inline helper
+                d = mul_two(b, d)  # noqa: F821 — exec-defined inline helper
+            return c, d
+
+        entry._func.__globals__.update(jit_ns)
+
+        prog = entry._compile_to_program(
+            tensor_meta={
+                "a": TensorMeta((64,), DataType.BF16),
+                "b": TensorMeta((64,), DataType.BF16),
+                "c": TensorMeta((64,), DataType.BF16),
+                "d": TensorMeta((64,), DataType.BF16),
+            },
+            scalar_values={},
+            scalar_dtypes={},
+            per_func_dyn={id(entry._func): {}},
+            pl=pl,
+        )
+        names = [f.name for f in prog.functions.values()]
+        assert "add_one" not in names
+        assert "mul_two" not in names
+        assert "entry" in names
+
+    # ------------------------------------------------------------------
+    # Multiple call sites of the same helper
+    # ------------------------------------------------------------------
+
+    def test_same_helper_called_twice(self):
+        """Same @pl.inline called from two sites — each expands independently."""
+        helper, helper_ns = self._make_inline_helper(
+            "add_one",
+            "    tile_x = pl.load(x, [0], [64])\n"
+            "    tile_out = pl.add(tile_x, 1.0)\n"
+            "    pl.store(tile_out, [0], out)\n",
+        )
+
+        jit_ns: dict[str, object] = {"pl": pl, "add_one": helper}
+
+        @jit
+        def entry(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor], d: pl.Out[pl.Tensor]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                c = add_one(a, c)  # noqa: F821 — exec-defined inline helper
+                d = add_one(b, d)  # noqa: F821 — exec-defined inline helper
+            return c, d
+
+        entry._func.__globals__.update(jit_ns)
+
+        prog = entry._compile_to_program(
+            tensor_meta={
+                "a": TensorMeta((64,), DataType.BF16),
+                "b": TensorMeta((64,), DataType.BF16),
+                "c": TensorMeta((64,), DataType.BF16),
+                "d": TensorMeta((64,), DataType.BF16),
+            },
+            scalar_values={},
+            scalar_dtypes={},
+            per_func_dyn={id(entry._func): {}},
+            pl=pl,
+        )
+        names = [f.name for f in prog.functions.values()]
+        assert "add_one" not in names
+
+    # ------------------------------------------------------------------
+    # Transitive: @pl.jit ⟶ @pl.jit.inline ⟶ @pl.inline
+    # ------------------------------------------------------------------
+
+    def test_transitive_discovery(self):
+        """@pl.jit.inline dep calls @pl.inline — transitive discovery works."""
+        helper, helper_ns = self._make_inline_helper(
+            "add_one_inline",
+            "    tile_x = pl.load(x, [0], [64])\n"
+            "    tile_out = pl.add(tile_x, 1.0)\n"
+            "    pl.store(tile_out, [0], out)\n",
+        )
+
+        # Create a @pl.jit.inline dep that calls the @pl.inline helper.
+        # The dep is a regular Python function — it captures add_one_inline
+        # from its closure.
+        jit_dep_ns: dict[str, object] = {"pl": pl, "add_one_inline": helper}
+
+        @jit.inline
+        def dep_wrapper(a: pl.Tensor, c: pl.Out[pl.Tensor]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                c = add_one_inline(a, c)  # noqa: F821 -- exec-defined inline helper
+            return c
+
+        # Replace dep's globals so the specializer finds add_one_inline
+        # when walking dep_wrapper's body.
+        dep_wrapper._func.__globals__.update(jit_dep_ns)
+
+        jit_ns: dict[str, object] = {"pl": pl, "dep_wrapper": dep_wrapper}
+
+        @jit
+        def entry(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+            out = dep_wrapper(x, out)
+            return out
+
+        entry._func.__globals__.update(jit_ns)
+
+        prog = entry._compile_to_program(
+            tensor_meta={
+                "x": TensorMeta((64,), DataType.BF16),
+                "out": TensorMeta((64,), DataType.BF16),
+            },
+            scalar_values={},
+            scalar_dtypes={},
+            per_func_dyn={id(entry._func): {}},
+            pl=pl,
+        )
+        names = [f.name for f in prog.functions.values()]
+        assert "add_one_inline" not in names, f"transitive @pl.inline should be expanded; functions: {names}"
+        # dep_wrapper is a @pl.jit.inline dep (no CT kwargs) — it becomes
+        # @pl.function(type=Inline) and is inlined by InlineFunctions, so
+        # it appears in pre-pass IR but is eliminated later.
+        assert "dep_wrapper" in names, f"@pl.jit.inline dep should be in pre-pass IR; functions: {names}"
+
+    # ------------------------------------------------------------------
+    # Edge: helper name collides with a dep name
+    # ------------------------------------------------------------------
+
+    # ==============================================================
+    # Module-level constant resolution in @pl.inline via @pl.jit
+    #
+    # When a @pl.jit function calls a @pl.inline helper whose body
+    # references module-level constants (not CT kwargs), the specializer
+    # must preserve the original InlineFunction's closure_vars so the
+    # constants resolve during inline expansion inside pl.parse().
+    # Marked xfail pending the fix (inject InlineFunction objects into
+    # pl.parse()'s exec namespace instead of re-emitting source).
+    # ==============================================================
+
+    def test_single_module_level_constant_resolved(self):
+        """@pl.inline body references a single module-level constant → resolves.
+
+        Mirrors decode_layer.py's simplest case: a weight-shape constant
+        like ``INTERMEDIATE = 17408`` used in arithmetic expressions.
+        """
+        HEAD_DIM = 128  # model constant
+        half_dim = HEAD_DIM // 2  # derived constant
+        helper, _ = self._make_inline_helper(
+            "slice_head",
+            (
+                "    tile_x = pl.load(x, [0], [half_dim])\n"
+                "    tile_out = pl.mul(tile_x, 2.0)\n"
+                "    pl.store(tile_out, [0], out)\n"
+            ),
+            extra_globals={"HEAD_DIM": HEAD_DIM, "half_dim": half_dim},
+        )
+        jit_ns = {"pl": pl, "slice_head": helper}
+
+        @jit
+        def entry(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                out = slice_head(x, out)  # noqa: F821 -- exec-defined inline helper
+            return out
+
+        entry._func.__globals__.update(jit_ns)
+        prog = entry._compile_to_program(
+            tensor_meta={
+                "x": TensorMeta((64,), DataType.BF16),
+                "out": TensorMeta((64,), DataType.BF16),
+            },
+            scalar_values={},
+            scalar_dtypes={},
+            per_func_dyn={id(entry._func): {}},
+            pl=pl,
+        )
+        names = [f.name for f in prog.functions.values()]
+        assert "slice_head" not in names
+
+    def test_many_module_level_constants_resolved(self):
+        """@pl.inline uses many constants — simulates decode_layer.py parameter load.
+
+        Verifies that the full constant set (NUM_HEADS, HIDDEN, INTERMEDIATE,
+        HEAD_DIM, etc.) is available during inline expansion.
+        """
+        # Simulate the decode_layer.py constant group (subset).
+        HEAD_DIM = 128
+        NUM_HEADS = 40
+        NUM_KV_HEADS = 8
+        HIDDEN = NUM_HEADS * HEAD_DIM  # 5120
+        KV_HIDDEN = NUM_KV_HEADS * HEAD_DIM  # 1024
+        Q_PER_KV = NUM_HEADS // NUM_KV_HEADS  # 5
+        INTERMEDIATE = 17408
+        Q_HEAD_PAD = ((Q_PER_KV + 15) // 16) * 16  # 16
+        EPS = 1e-6
+
+        helper, _ = self._make_inline_helper(
+            "fused_params",
+            (
+                "    hidden = HIDDEN  # constant ref\n"
+                "    inter = INTERMEDIATE  # another constant ref\n"
+                "    q_per_kv = Q_PER_KV\n"
+                "    eps_val = EPS  # float constant\n"
+                "    tile_x = pl.load(x, [0], [HIDDEN])\n"
+                "    tile_out = pl.add(tile_x, EPS)\n"
+                "    pl.store(tile_out, [0], out)\n"
+            ),
+            extra_globals={
+                "HEAD_DIM": HEAD_DIM,
+                "NUM_HEADS": NUM_HEADS,
+                "NUM_KV_HEADS": NUM_KV_HEADS,
+                "HIDDEN": HIDDEN,
+                "KV_HIDDEN": KV_HIDDEN,
+                "Q_PER_KV": Q_PER_KV,
+                "INTERMEDIATE": INTERMEDIATE,
+                "Q_HEAD_PAD": Q_HEAD_PAD,
+                "EPS": EPS,
+            },
+        )
+        jit_ns = {"pl": pl, "fused_params": helper}
+
+        @jit
+        def entry(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                out = fused_params(x, out)  # noqa: F821 -- exec-defined inline helper
+            return out
+
+        entry._func.__globals__.update(jit_ns)
+        prog = entry._compile_to_program(
+            tensor_meta={
+                "x": TensorMeta((5120,), DataType.BF16),
+                "out": TensorMeta((5120,), DataType.BF16),
+            },
+            scalar_values={},
+            scalar_dtypes={},
+            per_func_dyn={id(entry._func): {}},
+            pl=pl,
+        )
+        names = [f.name for f in prog.functions.values()]
+        assert "fused_params" not in names
+
+    def test_module_constant_and_ct_kwarg_mixed(self):
+        """Module-level constant AND CT kwarg used together in the same body.
+
+        ``k_tile`` is a CT kwarg (per-call-site override); ``HEAD_DIM`` is a
+        module-level constant.  Both must resolve during expansion.
+        """
+        HEAD_DIM = 128
+        helper, _ = self._make_inline_helper(
+            "mixed",
+            (
+                "    tile_x = pl.load(x, [0], [HEAD_DIM])\n"
+                "    tile_out = pl.mul(tile_x, scale)\n"
+                "    pl.store(tile_out, [0], out)\n"
+            ),
+            kwonly_args=", *, scale: float = 2.0",
+            extra_globals={"HEAD_DIM": HEAD_DIM},
+        )
+        jit_ns = {"pl": pl, "mixed": helper}
+
+        @jit
+        def entry(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                out = mixed(x, out, scale=3.0)  # noqa: F821 -- exec-defined inline helper
+            return out
+
+        entry._func.__globals__.update(jit_ns)
+        prog = entry._compile_to_program(
+            tensor_meta={
+                "x": TensorMeta((128,), DataType.BF16),
+                "out": TensorMeta((128,), DataType.BF16),
+            },
+            scalar_values={},
+            scalar_dtypes={},
+            per_func_dyn={id(entry._func): {}},
+            pl=pl,
+        )
+        names = [f.name for f in prog.functions.values()]
+        assert "mixed" not in names
+        # Verify the body has the literal 3.0 and constant 128, not names.
+        for fn in prog.functions.values():
+            if fn.name == "entry":
+                src = fn.as_python()
+                assert "scale" not in src
+                break
+
+    def test_module_constant_in_nested_double_inline(self):
+        """Two @pl.inline helpers: inner uses constants, outer calls inner.
+
+        The JIT entry calls outer; outer calls inner.  Inner's body references
+        a module-level constant that must survive both levels of expansion.
+        """
+        HEAD_DIM = 128
+        inner, _ = self._make_inline_helper(
+            "inner_slice",
+            (
+                "    tile_x = pl.load(x, [0], [HEAD_DIM])\n"
+                "    tile_out = pl.add(tile_x, 1.0)\n"
+                "    pl.store(tile_out, [0], out)\n"
+            ),
+            extra_globals={"HEAD_DIM": HEAD_DIM},
+        )
+        outer, _ = self._make_inline_helper(
+            "outer_scale",
+            ("    # Calls inner_slice; inner uses HEAD_DIM constant\n    out = inner_slice(x, out)\n"),
+        )
+        # Both inlines must be in globals for discovery.
+        jit_ns = {"pl": pl, "outer_scale": outer, "inner_slice": inner}
+
+        @jit
+        def entry(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                out = outer_scale(x, out)  # noqa: F821 -- exec-defined inline helper
+            return out
+
+        entry._func.__globals__.update(jit_ns)
+        prog = entry._compile_to_program(
+            tensor_meta={
+                "x": TensorMeta((128,), DataType.BF16),
+                "out": TensorMeta((128,), DataType.BF16),
+            },
+            scalar_values={},
+            scalar_dtypes={},
+            per_func_dyn={id(entry._func): {}},
+            pl=pl,
+        )
+        names = [f.name for f in prog.functions.values()]
+        assert "inner_slice" not in names
+        assert "outer_scale" not in names
+
+    def test_module_constant_in_create_tensor_shape(self):
+        """Module-level constants used in pl.create_tensor shape expressions.
+
+        Mirrors decode_layer.py's ``pl.create_tensor([BATCH, HIDDEN], ...)``
+        pattern where ``BATCH`` and ``HIDDEN`` are module-level ints.
+        """
+        BATCH = 16
+        HIDDEN = 5120
+        helper, _ = self._make_inline_helper(
+            "alloc_slice",
+            (
+                "    total_elements = BATCH * HIDDEN\n"
+                "    tile_x = pl.load(x, [0], [HIDDEN])\n"
+                "    pl.store(tile_x, [0], out)\n"
+            ),
+            extra_globals={"BATCH": BATCH, "HIDDEN": HIDDEN},
+        )
+        jit_ns = {"pl": pl, "alloc_slice": helper}
+
+        @jit
+        def entry(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                out = alloc_slice(x, out)  # noqa: F821 -- exec-defined inline helper
+            return out
+
+        entry._func.__globals__.update(jit_ns)
+        prog = entry._compile_to_program(
+            tensor_meta={
+                "x": TensorMeta((HIDDEN,), DataType.BF16),
+                "out": TensorMeta((HIDDEN,), DataType.BF16),
+            },
+            scalar_values={},
+            scalar_dtypes={},
+            per_func_dyn={id(entry._func): {}},
+            pl=pl,
+        )
+        names = [f.name for f in prog.functions.values()]
+        assert "alloc_slice" not in names
+
+    def test_module_constant_in_loop_bound(self):
+        """Module-level constant used in pl.range upper bound.
+
+        ``for k in pl.range(0, N_CHUNKS):`` where ``N_CHUNKS`` is module-level.
+        """
+        N_CHUNKS = 20
+        helper, _ = self._make_inline_helper(
+            "loop_chunks",
+            (
+                "    tile_x = pl.load(x, [0], [64])\n"
+                "    for k in pl.range(N_CHUNKS):\n"
+                "        tile_x = pl.add(tile_x, tile_x)\n"
+                "    pl.store(tile_x, [0], out)\n"
+            ),
+            extra_globals={"N_CHUNKS": N_CHUNKS},
+        )
+        jit_ns = {"pl": pl, "loop_chunks": helper}
+
+        @jit
+        def entry(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                out = loop_chunks(x, out)  # noqa: F821 -- exec-defined inline helper
+            return out
+
+        entry._func.__globals__.update(jit_ns)
+        prog = entry._compile_to_program(
+            tensor_meta={
+                "x": TensorMeta((64,), DataType.BF16),
+                "out": TensorMeta((64,), DataType.BF16),
+            },
+            scalar_values={},
+            scalar_dtypes={},
+            per_func_dyn={id(entry._func): {}},
+            pl=pl,
+        )
+        names = [f.name for f in prog.functions.values()]
+        assert "loop_chunks" not in names
+
+    def test_module_constant_in_matmul_shape_expression(self):
+        """Module-level constants in weight shape arithmetic expressions.
+
+        Mirrors decode_layer.py's ``layer_hidden_base = layer_idx * HIDDEN``
+        and weight-slicing with derived constants like ``QKV_K_SLICE = HIDDEN // QKV_OK``.
+        """
+        HIDDEN = 5120
+        QKV_OK = 4
+        QKV_K_SLICE = HIDDEN // QKV_OK  # 1280
+        helper, _ = self._make_inline_helper(
+            "proj_slice",
+            (
+                "    k_base = layer_idx * QKV_K_SLICE  # constant arithmetic\n"
+                "    tile_x = pl.load(x, [0], [64])\n"
+                "    pl.store(tile_x, [0], out)\n"
+            ),
+            extra_globals={
+                "HIDDEN": HIDDEN,
+                "QKV_OK": QKV_OK,
+                "QKV_K_SLICE": QKV_K_SLICE,
+            },
+        )
+        jit_ns = {"pl": pl, "proj_slice": helper}
+
+        @jit
+        def entry(x: pl.Tensor, out: pl.Out[pl.Tensor], layer_idx: pl.Scalar[pl.INT32]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                out = proj_slice(x, out)  # noqa: F821 -- exec-defined inline helper
+            return out
+
+        entry._func.__globals__.update(jit_ns)
+        prog = entry._compile_to_program(
+            tensor_meta={
+                "x": TensorMeta((64,), DataType.BF16),
+                "out": TensorMeta((64,), DataType.BF16),
+            },
+            scalar_values={"layer_idx": 0},
+            scalar_dtypes={"layer_idx": DataType.INT32},
+            per_func_dyn={id(entry._func): {}},
+            pl=pl,
+        )
+        names = [f.name for f in prog.functions.values()]
+        assert "proj_slice" not in names
+
+    # ==============================================================
+    # Regression: helper name collides with dep name
+    # ==============================================================
+
+    def test_name_collision_with_dep_is_error(self):
+        """A @pl.inline with the same name as a @pl.jit.inline dep is rejected.
+
+        The dep graph and inline discovery look up the SAME name from
+        ``__globals__`` at different stages, so a single ``__globals__``
+        dict cannot carry both simultaneously.  The test works in two
+        phases: first let the dep graph discover the JIT dep under
+        ``"helper"``, then swap ``__globals__["helper"]`` for the
+        ``InlineFunction`` before inline discovery runs.
+        """
+        inline_helper, _ = self._make_inline_helper(
+            "helper",
+            "    tile_x = pl.load(x, [0], [64])\n"
+            "    tile_out = pl.add(tile_x, 1.0)\n"
+            "    pl.store(tile_out, [0], out)\n",
+        )
+
+        @jit.inline
+        def _helper_dep(a: pl.Tensor, c: pl.Out[pl.Tensor]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                tile_a = pl.load(a, [0], [64])
+                tile_c = pl.add(tile_a, 2.0)
+                pl.store(tile_c, [0], c)
+            return c
+
+        # Rename the JIT dep so the dep graph registers it under "helper".
+        _helper_dep.__name__ = "helper"
+
+        @jit
+        def entry(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+            out = helper(x, out)  # noqa: F821 -- exec-defined inline helper
+            return out
+
+        # Phase 1: register the JIT dep in __globals__ so the dep graph
+        # discovers it as "helper".  The InlineFunction is NOT visible yet.
+        entry._func.__globals__["helper"] = _helper_dep
+
+        tensor_meta = {
+            "x": TensorMeta((64,), DataType.BF16),
+            "out": TensorMeta((64,), DataType.BF16),
+        }
+        scalar_values = {}
+        scalar_dtypes = {}
+        per_func_dyn = {id(entry._func): {}}
+
+        # Build contexts → dep graph finds "helper" as JIT dep.
+        contexts = entry._build_contexts(
+            tensor_meta,
+            scalar_values,
+            scalar_dtypes,
+            per_func_dyn,
+        )
+
+        # Phase 2: swap __globals__["helper"] for the InlineFunction.
+        # The SpecializeContext.py_globals shares the same dict reference,
+        # so inline discovery will find the InlineFunction named "helper" —
+        # which collides with the dep name already in dep_names.
+        entry._func.__globals__["helper"] = inline_helper
+
+        from pypto.jit.specializer import Specializer  # noqa: PLC0415 -- local import avoids early import
+
+        with pytest.raises(
+            TypeError,
+            match=r"@pl.inline helper 'helper' collides",
+        ):
+            Specializer("_jit_entry", contexts).specialize()
 
 
 if __name__ == "__main__":

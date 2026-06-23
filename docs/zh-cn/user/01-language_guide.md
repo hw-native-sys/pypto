@@ -479,6 +479,32 @@ class MyProgram:
         return y
 ```
 
+**编译期关键字参数（CT kwargs）：**
+
+关键字仅参数（``*`` 之后）若标注为 ``int``、``float``、``bool`` 或 ``str`` 类型，
+将被视为 CT kwargs——它们必须在解析时求值为常量。这支持：
+
+- **CT-if**：``if use_relu:`` 配合 ``bool`` CT kwarg 只展开匹配分支
+- **参数化 tiling**：``k_tile: int = 32`` 控制循环分块大小
+- **字符串命名**：``name_hint=some_str_kwarg`` 可在 scope 构造器中使用
+
+```python
+@pl.inline
+def matmul_add(
+    a: pl.Tensor[[M, K], pl.FP16],
+    b: pl.Tensor[[K, N], pl.FP16],
+    *,
+    k_tile: int = 32,
+    use_relu: bool = False,
+) -> pl.Tensor[[M, N], pl.FP16]:
+    result: pl.Tensor[[M, N], pl.FP16]
+    for k in pl.parallel(0, M, k_tile):
+        ...
+    if use_relu:
+        result = pl.maximum(result, pl.const(0, pl.FP16))
+    return result
+```
+
 ### 外部函数调用
 
 独立的 `@pl.function` 可以在 `@pl.program` 内被调用。它会作为单独的函数添加到程序中：

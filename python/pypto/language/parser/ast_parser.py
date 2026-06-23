@@ -171,6 +171,82 @@ def _fold_const_slice_extent(upper: object, lower: object) -> int | None:
     return upper_value - lower_value
 
 
+def _fold_inline_ct_kwargs(node: ast.AST, ct_kwargs: dict[str, Any]) -> ast.AST:
+    """Fold CT-kwarg names and constant expressions in *node* to literals.
+
+    Replaces ``ast.Name(id=kw_name)`` with ``ast.Constant(value=kw_value)``
+    for every CT kwarg.  After name substitution, evaluates constant-only
+    binary and unary expressions (e.g. ``head_dim // 2`` where ``head_dim``
+    is a CT kwarg) to a single ``ast.Constant``.
+
+    Args:
+        node: An AST statement or expression from the inline body.
+        ct_kwargs: CT-kwarg name → resolved Python value.
+
+    Returns:
+        The transformed AST node.
+    """
+    transformer = _CTASTRewriter(ct_kwargs)
+    return transformer.visit(node)
+
+
+class _CTASTRewriter(ast.NodeTransformer):
+    """AST rewriter: fold CT-kwarg names to constants, then fold constant
+    expressions to single literals."""
+
+    def __init__(self, ct_kwargs: dict[str, Any]) -> None:
+        super().__init__()
+        self._ct = ct_kwargs
+
+    def visit_Name(self, node: ast.Name) -> ast.expr:
+        if isinstance(node.ctx, ast.Load) and node.id in self._ct:
+            c = ast.Constant(value=self._ct[node.id])
+            # Preserve source location from the original Name node so
+            # downstream code (error reporting, source mapping) can access
+            # .lineno / .end_lineno without crashing.
+            ast.copy_location(c, node)
+            return c
+        return node
+
+    def visit_BinOp(self, node: ast.BinOp) -> ast.expr:
+        node = self.generic_visit(node)
+        if isinstance(node.left, ast.Constant) and isinstance(node.right, ast.Constant):
+            try:
+                result = eval(
+                    compile(
+                        ast.fix_missing_locations(ast.Expression(body=node)),
+                        "<ct-fold>",
+                        "eval",
+                    ),
+                    {},
+                )
+                if isinstance(result, (int, float)):
+                    c = ast.Constant(value=result)
+                    ast.copy_location(c, node)
+                    return c
+            except Exception:
+                pass
+        return node
+
+    def visit_UnaryOp(self, node: ast.UnaryOp) -> ast.expr:
+        node = self.generic_visit(node)
+        if isinstance(node.operand, ast.Constant):
+            try:
+                result = eval(
+                    compile(
+                        ast.fix_missing_locations(ast.Expression(body=node)),
+                        "<ct-fold>",
+                        "eval",
+                    ),
+                    {},
+                )
+                if isinstance(result, (int, float)):
+                    return ast.Constant(value=result)
+            except Exception:
+                pass
+        return node
+
+
 def _get_source_valid_shape(source_type: ir.Type) -> list[ir.Expr] | None:
     """Return the source's view ``valid_shape``, or ``None`` when no view metadata.
 
@@ -536,6 +612,11 @@ class ASTParser:
         # Inline function expansion state
         self._inline_mode = False
         self._inline_return_expr: ir.Expr | None = None
+        # When @pl.inline expansion returns, the declared return type (resolved
+        # from the annotation via TypeResolver) is stored here so the caller's
+        # _assign_or_let can use it as override_type.  This preserves Var identity
+        # for dynamic dims that C++ ops like tensor.create may copy.
+        self._pending_override_type: ir.Type | None = None
 
         # Yield tracking state — None means tracking is inactive (outside loops/ifs)
         self._current_yield_vars: list[str] | None = None
@@ -1263,12 +1344,80 @@ class ASTParser:
         span: ir.Span,
         override_type: ir.Type | None = None,
     ) -> ir.Var:
-        """Assign to existing Var if possible, otherwise create a new let binding."""
+        """Emit an assignment or let-binding for ``var_name = value_expr``.
+
+        Three branches, checked in order:
+
+        1. **Reassign** — ``var_name`` is already in scope as a non-SSA
+           ``ir.Var``: emit ``assign(old_var, value_expr)``.  Skips the
+           assignment when ``existing_var is value_expr`` (same object — a
+           no-op that can arise when one inline's return feeds another's
+           parameter).  Rejects mismatched types.
+
+        2. **Name-hint elision** — ``value_expr`` is a ``Var`` whose
+           ``name_hint`` equals ``var_name`` (e.g. an inline's return whose
+           ``name_hint`` matches the caller's LHS but isn't in the caller's
+           scope due to scope isolation): reuse the ``Var`` directly instead
+           of creating a redundant ``y_1 = y`` let-binding.
+
+        3. **Fresh let** — otherwise, create a new ``ir.Var`` via
+           ``builder.let``.
+        """
+        # When the value is a DynVar with a registered tensor.dim Call
+        # (populated by tensor_ops.dim), emit AssignStmt(DynVar, Call)
+        # to preserve both Var identity and codegen correctness.
+        if isinstance(value_expr, ir.Var):
+            from pypto.language.op.tensor_ops import _pop_dim_call  # noqa: PLC0415
+
+            dim_call = _pop_dim_call(value_expr)
+            if dim_call is not None:
+                existing_var = self.scope_manager.lookup_var(var_name)
+                if (
+                    existing_var is not None
+                    and type(existing_var) is ir.Var
+                    and not self.scope_manager.strict_ssa
+                ):
+                    # Reassignment: the DynVar (or compatible) is already in scope.
+                    self.builder.assign(existing_var, dim_call, span=span)
+                    return existing_var
+                else:
+                    # Fresh let: register the DynVar in scope and emit the
+                    # tensor.dim Call as the assignment RHS.
+                    self.scope_manager.define_var(var_name, value_expr, allow_redef=True)
+                    self.builder.assign(value_expr, dim_call, span=span)
+                    return value_expr
+
         existing_var = self.scope_manager.lookup_var(var_name)
         if existing_var is not None and type(existing_var) is ir.Var and not self.scope_manager.strict_ssa:
+            if isinstance(value_expr, ir.Var) and existing_var is value_expr:
+                self._pending_override_type = None
+                return existing_var
+            # When inside an @pl.inline expansion, only consider reassignment
+            # within the inline block — parent-scope variables must not shadow
+            # the inline's locals (scope hygiene).
+            if self.scope_manager.in_scope_type("inline"):
+                found_in_inline = False
+                for scope, stype in zip(
+                    reversed(self.scope_manager.scopes),
+                    reversed(self.scope_manager.scope_types),
+                ):
+                    if var_name in scope:
+                        found_in_inline = True
+                        break
+                    if stype == "inline":
+                        break
+                if not found_in_inline:
+                    existing_var = None
+        if existing_var is not None and type(existing_var) is ir.Var and not self.scope_manager.strict_ssa:
+            if isinstance(value_expr, ir.Var) and existing_var is value_expr:
+                self._pending_override_type = None
+                return existing_var
             # Reject reassignment with a different type (#642).  Same Python
             # variable maps to the same Var node, so the type must match.
-            value_type = override_type or value_expr.type
+            # Consume any override_type set by @pl.inline expansion to reconcile
+            # dynamic-dim Var identity (C++ ops like tensor.create may copy Vars).
+            value_type = override_type or self._pending_override_type or value_expr.type
+            self._pending_override_type = None
             if (
                 not isinstance(value_type, ir.UnknownType)
                 and not isinstance(existing_var.type, ir.UnknownType)
@@ -1283,6 +1432,8 @@ class ASTParser:
                 )
             self.builder.assign(existing_var, value_expr, span=span)
             return existing_var
+        if isinstance(value_expr, ir.Var) and value_expr.name_hint == var_name:
+            return value_expr
         return self.builder.let(var_name, value_expr, type=override_type, span=span)
 
     def parse_assignment(self, stmt: ast.Assign) -> None:  # noqa: PLR0912
@@ -2924,6 +3075,11 @@ class ASTParser:
         When no yields are used (plain syntax), variables leak to outer scope
         and the C++ ConvertToSSA pass handles creating phi nodes.
 
+        When the condition resolves to ``ir.ConstBool`` (compile-time known),
+        only the matching branch is emitted — no ``IfStmt`` is produced.
+        This is the compile-time if (CT-if) mechanism used with ``bool``
+        CT kwargs in ``@pl.inline`` bodies.
+
         Args:
             stmt: If AST node
         """
@@ -2931,6 +3087,25 @@ class ASTParser:
         condition = self.parse_expression(stmt.test)
         span = self.span_tracker.get_span(stmt)
         self._check_condition_is_bool(condition, "if", span)
+
+        # Compile-time if: when condition is ConstBool (e.g. a bool CT kwarg),
+        # only emit the matching branch — no IfStmt is produced. The other
+        # branch is dead-code-eliminated at parse time.
+        if isinstance(condition, ir.ConstBool):
+            if condition.value:
+                # True: emit then-branch
+                self.scope_manager.enter_scope("if")
+                self._parse_body_siblings(stmt.body)
+                self._discard_tail_block_comments(stmt.body, upper_line=self._then_branch_tail_upper(stmt))
+                self.scope_manager.exit_scope(leak_vars=True)
+            elif stmt.orelse:
+                # False: emit else-branch (if present)
+                self.scope_manager.enter_scope("if")
+                self._parse_body_siblings(stmt.orelse)
+                self._discard_tail_block_comments(stmt.orelse, upper_line=stmt.end_lineno)
+                self.scope_manager.exit_scope(leak_vars=True)
+            # If False and no else, emit nothing
+            return
 
         # Track yield output variable names from both branches
         then_yield_vars = []
@@ -3299,6 +3474,9 @@ class ASTParser:
     def _parse_scope_name_hint(self, value: ast.expr, func_name: str) -> str:
         """Extract and validate a scope name hint from an AST expression.
 
+        Accepts both string literals and ``ast.Name`` nodes that resolve to
+        a ``str``-typed closure variable (e.g. a ``str`` CT kwarg).
+
         Args:
             value: AST expression node for the name_hint value
             func_name: Function name for error messages (e.g. "pl.at()")
@@ -3306,6 +3484,25 @@ class ASTParser:
         Returns:
             Validated name hint string.
         """
+        # Try to resolve as a Name node (e.g. str CT kwarg) first
+        if isinstance(value, ast.Name):
+            success, py_val = self.expr_evaluator.try_eval_expr(value)
+            if success and isinstance(py_val, str):
+                name_hint = py_val
+                if name_hint and (not name_hint.isidentifier() or _keyword_mod.iskeyword(name_hint)):
+                    raise ParserSyntaxError(
+                        f"{func_name} 'name_hint' must be a valid non-keyword identifier, got {name_hint!r}",
+                        span=self.span_tracker.get_span(value),
+                        hint="Use a valid Python identifier like 'fused_matmul_add'",
+                    )
+                return name_hint
+            raise ParserSyntaxError(
+                f"{func_name} 'name_hint' argument must be a string literal or "
+                f"a str-typed closure variable, got '{value.id}'",
+                span=self.span_tracker.get_span(value),
+                hint='Use name_hint="my_scope_name"',
+            )
+
         if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
             raise ParserSyntaxError(
                 f"{func_name} 'name_hint' argument must be a string literal",
@@ -4730,13 +4927,14 @@ class ASTParser:
             return var
 
         # Fall back to closure variables
+        span = self.span_tracker.get_span(name)
         result = self.expr_evaluator.try_eval_as_ir(name)
         if result is not None:
             return result
 
         raise UndefinedVariableError(
             f"Undefined variable '{var_name}'",
-            span=self.span_tracker.get_span(name),
+            span=span,
             hint="Check if the variable is defined before using it or is available in the enclosing scope",
         )
 
@@ -4758,6 +4956,11 @@ class ASTParser:
             return ir.ConstInt(value, DataType.INDEX, span)
         elif isinstance(value, float):
             return ir.ConstFloat(value, DataType.DEFAULT_CONST_FLOAT, span)
+        elif isinstance(value, str):
+            # str constants are returned as a ConstInt(0, INDEX) placeholder.
+            # They are used directly as Python strings (name_hint=, debug names)
+            # and cannot be wrapped as IR expressions.
+            return ir.ConstInt(0, DataType.INDEX, span)
         elif value is None:
             # ``None`` is the "no producer yet" TaskId sentinel — the Pythonic
             # spelling of an invalid PTO2TaskId. Used to seed a TaskId loop
@@ -6326,13 +6529,25 @@ class ASTParser:
     def _parse_inline_call(self, _local_name: str, inline_func: "InlineFunction", call: ast.Call) -> ir.Expr:
         """Parse a call to an InlineFunction, expanding its body in-place.
 
+        Keyword-only parameters (CT kwargs) are evaluated from the call site
+        against the caller's closure and injected into the inline body's
+        variable resolution. See :meth:`_eval_inline_ct_kwargs`.
+
         Args:
             _local_name: The name used in the caller's scope
             inline_func: The InlineFunction object
             call: The AST Call node
         """
         span = self.span_tracker.get_span(call)
-        self._reject_keyword_args(inline_func.name, call, span)
+
+        # Determine CT-kwarg names from the inline function's kwonly_params
+        ct_kwarg_names = set(inline_func.kwonly_params.keys())
+
+        # Allow CT kwargs as keyword args; reject any other keyword
+        if ct_kwarg_names:
+            self._reject_keyword_args(inline_func.name, call, span, allowed=ct_kwarg_names)
+        else:
+            self._reject_keyword_args(inline_func.name, call, span)
 
         expected = len(inline_func.param_names)
         got = len(call.args)
@@ -6356,7 +6571,22 @@ class ASTParser:
         self._inline_return_expr = None
 
         prev_closure_vars = self.expr_evaluator.closure_vars
-        self.expr_evaluator.closure_vars = {**inline_func.closure_vars, **prev_closure_vars}
+        # Start with the inline's definition-site closure, then overlay caller's
+        # closure so CT-kwarg values and caller-scope names are available.
+        merged_closure = {**inline_func.closure_vars, **prev_closure_vars}
+
+        # Evaluate CT kwargs and inject into closure for body parsing
+        call_ct_kwargs: dict[str, Any] = {}
+        if ct_kwarg_names:
+            call_ct_kwargs = self._eval_inline_ct_kwargs(
+                inline_func,
+                call,
+                ct_kwarg_names,
+                merged_closure,
+                span,
+            )
+
+        self.expr_evaluator.closure_vars = merged_closure
 
         prev_span_state = (
             self.span_tracker.source_file,
@@ -6369,11 +6599,44 @@ class ASTParser:
         self.span_tracker.line_offset = inline_func.line_offset
         self.span_tracker.col_offset = inline_func.col_offset
 
+        # Validate that the original body (before AST folding) does not
+        # shadow CT-kwarg names via assignments.  The validation runs on
+        # the raw func_def where CT-kwarg names are still visible as Names.
+        if ct_kwarg_names:
+            self._validate_inline_no_ct_kwarg_shadow(inline_func.func_def, ct_kwarg_names, span)
+
+        # Fold CT-kwarg names to ast.Constant in the inline body before
+        # parsing.  The parser then sees only literals, never Scalar wrappers
+        # — no rebindings needed, and pl.array.create / pl.const / subscript
+        # bounds all receive raw int/float/bool values via their normal
+        # parse_constant paths.
+        body_stmts: list[ast.stmt]
+        if ct_kwarg_names:
+            # Deep-copy each statement before folding: NodeTransformer modifies
+            # AST nodes in-place, and the same func_def.body is used across
+            # multiple call sites (each with different CT-kwarg values).
+            body_stmts = [
+                _fold_inline_ct_kwargs(copy.deepcopy(stmt), call_ct_kwargs)
+                for stmt in inline_func.func_def.body
+            ]
+        else:
+            body_stmts = inline_func.func_def.body
+
         try:
-            for i, stmt in enumerate(inline_func.func_def.body):
+            for i, stmt in enumerate(body_stmts):
                 if i == 0 and self._is_docstring(stmt):
                     continue
                 self.parse_statement(stmt)
+
+            # Resolve the declared return type from the inline's annotation
+            # while the merged closure is still active (it contains the inline's
+            # definition-site globals like HIDDEN, VOCAB, etc.).  Store it so
+            # the caller's _assign_or_let can use it as override_type, reconciling
+            # dynamic-dim Var identity when C++ ops (e.g. tensor.create) copy Vars.
+            if inline_func.func_def.returns:
+                self._pending_override_type, _ = self.type_resolver.resolve_param_type(
+                    inline_func.func_def.returns
+                )
         finally:
             # Restore parser state
             (
@@ -6385,8 +6648,8 @@ class ASTParser:
             self.expr_evaluator.closure_vars = prev_closure_vars
             return_expr = self._inline_return_expr
             self._inline_mode, self._inline_return_expr = prev_inline_state
-            # Leak vars so inlined definitions are visible to the caller
-            self.scope_manager.exit_scope(leak_vars=True)
+            # Inline scope does not leak — variables are scoped to the expansion
+            self.scope_manager.exit_scope(leak_vars=False)
 
         if return_expr is None:
             raise ParserTypeError(
@@ -6396,6 +6659,146 @@ class ASTParser:
             )
 
         return return_expr
+
+    def _eval_inline_ct_kwargs(
+        self,
+        inline_func: "InlineFunction",
+        call: ast.Call,
+        ct_kwarg_names: set[str],
+        merged_closure: dict[str, Any],
+        span: ir.Span,
+    ) -> dict[str, Any]:
+        """Evaluate CT kwargs from a call site and inject into the closure.
+
+        Evaluates each keyword-only parameter in *signature order*, type-checks
+        the resolved value, and injects it into ``merged_closure`` for fallback
+        resolution (the primary resolution path is AST constant folding — see
+        ``_fold_inline_ct_kwargs``).
+
+        Returns:
+            Dict mapping CT-kwarg name to its resolved Python value.
+        """
+        call_ct_kwargs: dict[str, Any] = {}
+
+        # Build call-site supplied keyword values
+        call_kw_by_name: dict[str, ast.expr] = {}
+        for kw in call.keywords:
+            if kw.arg is not None:
+                call_kw_by_name[kw.arg] = kw.value
+
+        # Evaluate CT kwargs in signature order
+        for kw_name, (type_name, default) in inline_func.kwonly_params.items():
+            if kw_name in call_kw_by_name:
+                # Evaluate the call-site value against caller's closure
+                # with constant folding for simple expressions
+                value_node = call_kw_by_name[kw_name]
+                # Try to evaluate as a Python expression (constant folding)
+                success, py_val = self.expr_evaluator.try_eval_expr(value_node)
+                if not success:
+                    # Fallback: handle negated numeric literal (e.g. ``k_tile=-1``)
+                    # where ast.unparse + eval may not preserve the negation.
+                    if (
+                        isinstance(value_node, ast.UnaryOp)
+                        and isinstance(value_node.op, ast.USub)
+                        and isinstance(value_node.operand, ast.Constant)
+                    ):
+                        val = value_node.operand.value
+                        assert val is not None
+                        py_val = -val
+                        success = True
+                if not success:
+                    raise ParserTypeError(
+                        f"Cannot evaluate CT kwarg '{kw_name}': expression is not a constant",
+                        span=self.span_tracker.get_span(value_node),
+                        hint="CT kwargs must resolve to constant values at parse time",
+                    )
+            else:
+                # Use default — if None, it means no default was provided
+                if default is None:
+                    raise ParserTypeError(
+                        f"Inline function '{inline_func.name}' is missing required "
+                        f"keyword-only argument '{kw_name}'",
+                        span=span,
+                    )
+                py_val = default
+
+            # Type-check
+            self._validate_ct_kwarg_type(kw_name, type_name, py_val, span)
+            call_ct_kwargs[kw_name] = py_val
+
+        # Inject CT kwargs into closure_vars (fallback path; primary is AST folding)
+        for kw_name in ct_kwarg_names:
+            merged_closure[kw_name] = call_ct_kwargs[kw_name]
+
+        return call_ct_kwargs
+
+    @staticmethod
+    def _validate_inline_no_ct_kwarg_shadow(
+        func_def: ast.FunctionDef,
+        ct_kwarg_names: set[str],
+        span: ir.Span,
+    ) -> None:
+        """Validate that no statement in the inline body shadows a CT-kwarg name.
+
+        Plain assignments (``k_tile = ...``), annotated assignments
+        (``k_tile: type = ...``), and augmented assignments (``k_tile += ...``)
+        whose target is a CT-kwarg name are rejected.
+        """
+        for node in ast.walk(func_def):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id in ct_kwarg_names:
+                        raise ParserTypeError(
+                            f"Cannot shadow CT-kwarg '{target.id}' via assignment in inline body",
+                            span=span,
+                            hint="CT kwargs cannot be reassigned inside the inline body",
+                        )
+            elif isinstance(node, ast.AnnAssign):
+                if isinstance(node.target, ast.Name) and node.target.id in ct_kwarg_names:
+                    raise ParserTypeError(
+                        f"Cannot shadow CT-kwarg '{node.target.id}' via annotated assignment in inline body",
+                        span=span,
+                        hint="CT kwargs cannot be reassigned inside the inline body",
+                    )
+            elif isinstance(node, ast.AugAssign):
+                if isinstance(node.target, ast.Name) and node.target.id in ct_kwarg_names:
+                    raise ParserTypeError(
+                        f"Cannot shadow CT-kwarg '{node.target.id}' via augmented assignment in inline body",
+                        span=span,
+                        hint="CT kwargs cannot be reassigned inside the inline body",
+                    )
+
+    def _validate_ct_kwarg_type(self, name: str, expected_type: str, value: Any, span: ir.Span) -> None:
+        """Validate that a CT-kwarg value matches the expected Python type.
+
+        Raises ParserTypeError on mismatch.
+        """
+        if expected_type == "bool":
+            # Exact type check — isinstance(True, int) is True in Python
+            if type(value) is not bool:
+                raise ParserTypeError(
+                    f"CT kwarg '{name}' expects bool, got {type(value).__name__}",
+                    span=span,
+                    hint="Use True/False, not 1/0",
+                )
+        elif expected_type == "int":
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise ParserTypeError(
+                    f"CT kwarg '{name}' expects int, got {type(value).__name__}",
+                    span=span,
+                )
+        elif expected_type == "float":
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                raise ParserTypeError(
+                    f"CT kwarg '{name}' expects float, got {type(value).__name__}",
+                    span=span,
+                )
+        elif expected_type == "str":
+            if not isinstance(value, str):
+                raise ParserTypeError(
+                    f"CT kwarg '{name}' expects str, got {type(value).__name__}",
+                    span=span,
+                )
 
     def _parse_op_positional_arg(self, arg: ast.expr) -> Any:
         """Parse a positional op argument.
@@ -6851,14 +7254,26 @@ class ASTParser:
             negate = True
             value_node = value_node.operand
 
-        if not isinstance(value_node, ast.Constant) or not isinstance(value_node.value, (int, float)):
+        value: int | float
+        if isinstance(value_node, ast.Constant) and isinstance(value_node.value, (int, float)):
+            value = value_node.value
+        elif isinstance(value_node, ast.Name) or isinstance(value_node, ast.BinOp):
+            # Resolve from closure variables (e.g. CT kwarg expressions)
+            success, py_val = self.expr_evaluator.try_eval_expr(value_node)
+            if not success or not isinstance(py_val, (int, float)):
+                raise ParserSyntaxError(
+                    f"pl.const() argument '{ast.unparse(value_node)}' must resolve to a numeric value",
+                    span=span,
+                    hint="Use an int or float literal: pl.const(42, pl.INT32)",
+                )
+            value = py_val
+        else:
             raise ParserSyntaxError(
                 "pl.const() first argument must be a numeric literal",
                 span=span,
                 hint="Use an int or float literal: pl.const(42, pl.INT32)",
             )
 
-        value = value_node.value
         if negate:
             value = -value
 

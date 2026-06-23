@@ -13,6 +13,9 @@ import pypto.language as pl
 import pytest
 from pypto import ir
 from pypto.language.parser.diagnostics import InvalidOperationError
+from pypto.language.parser.diagnostics.exceptions import (
+    UnsupportedFeatureError,
+)
 
 
 class TestForLoops:
@@ -968,6 +971,179 @@ class TestBreakContinueErrors:
     # Note: "break/continue outside loop" is caught by Python's own syntax checker
     # before the DSL parser runs, so it cannot be tested via @pl.function.
     # The C++ BreakContinueCheck verifier covers this at the IR level.
+
+
+class TestCompileTimeIf:
+    """Compile-time if: bool CT kwargs fold ``if`` statements at parse time.
+
+    When an ``if`` condition resolves to an ``ir.ConstBool`` (from a ``bool``
+    CT kwarg), the parser emits only the matching branch and produces no
+    ``ir.IfStmt`` — the dead branch is eliminated at parse time. Covers
+    True/False branches, elif chains, no-else, loop-body if, and the
+    limitation that ternary expressions (``ast.IfExp``) are not yet folded.
+    """
+
+    def test_ct_if_true_emits_then_branch_only(self):
+        """bool CT kwarg=True → only the then-branch is compiled, no IfStmt."""
+
+        @pl.inline
+        def silu_or_relu(x: pl.Tensor[[64], pl.FP32], *, use_silu: bool = True):
+            if use_silu:
+                result: pl.Tensor[[64], pl.FP32] = pl.mul(x, x)
+            else:
+                result: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+            return result
+
+        @pl.program
+        class CTIfTrue:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]):
+                y: pl.Tensor[[64], pl.FP32] = silu_or_relu(x)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]):
+                result: pl.Tensor[[64], pl.FP32] = pl.mul(x, x)
+                y: pl.Tensor[[64], pl.FP32] = result
+                return y
+
+        ir.assert_structural_equal(CTIfTrue, Expected)
+
+    def test_ct_if_false_emits_else_branch_only(self):
+        """bool CT kwarg=False → only the else-branch is compiled."""
+
+        @pl.inline
+        def silu_or_relu(x: pl.Tensor[[64], pl.FP32], *, use_silu: bool = True):
+            if use_silu:
+                result: pl.Tensor[[64], pl.FP32] = pl.mul(x, x)
+            else:
+                result: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+            return result
+
+        @pl.program
+        class CTIfFalse:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]):
+                y: pl.Tensor[[64], pl.FP32] = silu_or_relu(x, use_silu=False)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]):
+                result: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                y: pl.Tensor[[64], pl.FP32] = result
+                return y
+
+        ir.assert_structural_equal(CTIfFalse, Expected)
+
+    def test_ct_if_elif_chain_first_branch_taken(self):
+        """elif chain: first matching condition eliminates all subsequent branches."""
+
+        @pl.inline
+        def multi_cond(x: pl.Tensor[[64], pl.FP32], *, use_silu: bool = True, use_relu: bool = False):
+            if use_silu:
+                result: pl.Tensor[[64], pl.FP32] = pl.mul(x, x)  # silu approx
+            elif use_relu:
+                result: pl.Tensor[[64], pl.FP32] = pl.add(x, x)  # relu approx
+            else:
+                result: pl.Tensor[[64], pl.FP32] = x
+            return result
+
+        @pl.program
+        class CTElif:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]):
+                y: pl.Tensor[[64], pl.FP32] = multi_cond(x)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]):
+                result: pl.Tensor[[64], pl.FP32] = pl.mul(x, x)
+                y: pl.Tensor[[64], pl.FP32] = result
+                return y
+
+        ir.assert_structural_equal(CTElif, Expected)
+
+    def test_ct_if_false_no_else_emits_nothing(self):
+        """bool CT kwarg=False with no else branch → no statements emitted."""
+
+        @pl.inline
+        def maybe_silu(x: pl.Tensor[[64], pl.FP32], *, use_silu: bool = True):
+            if use_silu:
+                result: pl.Tensor[[64], pl.FP32] = pl.mul(x, x)  # noqa: F841 — DSL type inference anchor
+            return x
+
+        @pl.program
+        class CTNoElse:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]):
+                y: pl.Tensor[[64], pl.FP32] = maybe_silu(x, use_silu=False)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]):
+                y: pl.Tensor[[64], pl.FP32] = x
+                return y
+
+        ir.assert_structural_equal(CTNoElse, Expected)
+
+    def test_ct_if_ternary_not_supported_yet(self):
+        """Ternary expression (x if cond else y) with bool CT kwarg raises
+        UnsupportedFeatureError — the parser does not handle ``ast.IfExp``."""
+
+        @pl.inline
+        def ternary(x: pl.Tensor[[64], pl.FP32], *, use_silu: bool = True):
+            scale = 2.0 if use_silu else 1.0
+            result: pl.Tensor[[64], pl.FP32] = pl.mul(x, scale)
+            return result
+
+        with pytest.raises(UnsupportedFeatureError):
+
+            @pl.program
+            class TernaryTest:
+                @pl.function
+                def main(self, x: pl.Tensor[[64], pl.FP32]):
+                    y: pl.Tensor[[64], pl.FP32] = ternary(x)
+                    return y
+
+    def test_bool_ct_kwarg_in_loop_body_if(self):
+        """A bool CT kwarg controlling an if inside a for loop body still CT-eliminates."""
+
+        @pl.inline
+        def loop_with_cond(x: pl.Tensor[[128], pl.FP32], *, use_mul: bool = True):
+            result: pl.Tensor[[128], pl.FP32] = x
+            for k in pl.range(0, 128, 32):
+                if use_mul:
+                    result = pl.mul(result, result)
+                else:
+                    result = pl.add(result, result)
+            return result
+
+        @pl.program
+        class LoopCTIf:
+            @pl.function
+            def main(self, x: pl.Tensor[[128], pl.FP32]):
+                y: pl.Tensor[[128], pl.FP32] = loop_with_cond(x)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Tensor[[128], pl.FP32]):
+                result: pl.Tensor[[128], pl.FP32] = x
+                for k in pl.range(0, 128, 32):
+                    result = pl.mul(result, result)
+                y: pl.Tensor[[128], pl.FP32] = result
+                return y
+
+        ir.assert_structural_equal(LoopCTIf, Expected)
 
 
 if __name__ == "__main__":

@@ -34,6 +34,12 @@ other_jit_func(a, b)              self.other_jit_func(a, b)  (multi-function onl
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pypto.language.parser.decorator import InlineFunction
+
+
 import ast
 import functools
 import inspect
@@ -131,6 +137,14 @@ class SpecializeContext:
             by hand. Honored for the Orchestration entry, HOST orchestrator,
             and inline sub-function decorators (see
             :meth:`Specializer._build_decorator`).
+        ct_kwarg_names: Keyword-only parameter names (CT kwargs) to preserve
+            in the generated ``@pl.inline`` signature rather than pre-inlining
+            as constants. Only ``int``, ``float``, ``bool``, and ``str`` types
+            are supported.
+        ct_kwarg_defaults: Default values for CT kwargs, keyed by name.
+            ``None`` means the CT kwarg is required (no default).
+        ct_kwarg_types: Type annotations for CT kwargs, keyed by name.
+            Values are one of ``"int"``, ``"float"``, ``"bool"``, ``"str"``.
     """
 
     func_name: str
@@ -148,6 +162,15 @@ class SpecializeContext:
     orig_col_offset: int = 0
     # Appended at the tail to preserve positional construction of this exported
     # dataclass for external callers (auto_scope is keyword-only in practice).
+    # Keyword-only parameter names (CT kwargs) to preserve in the generated
+    # ``@pl.inline`` signature instead of pre-inlining as constants.
+    ct_kwarg_names: list[str] = field(default_factory=list)
+    # Default values for CT kwargs, keyed by name. ``None`` means no default
+    # (required CT kwarg).
+    ct_kwarg_defaults: dict[str, Any] = field(default_factory=dict)
+    # Annotations for CT kwargs — one of "int", "float", "bool", "str".
+    ct_kwarg_types: dict[str, str] = field(default_factory=dict)
+
     auto_scope: bool = True
 
     @property
@@ -453,11 +476,15 @@ class _BodyTransformer(ast.NodeTransformer):
         initial_used_names: set[str] | None = None,
         py_globals: dict[str, Any] | None = None,
         dep_param_names: dict[str, list[str]] | None = None,
+        no_self_dep_names: set[str] | None = None,
     ) -> None:
         super().__init__()
         self._meta = tensor_meta
         self._scalars = scalar_values
         self._dep_names = dep_names
+        self._no_self_dep_names = (
+            no_self_dep_names or set()
+        )  # deps that should NOT be rewritten to self.func()
         # DynVar name → (anchor_param, anchor_dim_idx). ``visit_Name`` uses
         # this to rewrite runtime references like ``pl.create_tensor([M, ...])``
         # via ``_dyn_dim_expr`` so the annotation-only DynVar doesn't leak past
@@ -823,6 +850,11 @@ class _BodyTransformer(ast.NodeTransformer):
         """
         if isinstance(node.func, ast.Name) and node.func.id in self._dep_names:
             dep_name = node.func.id
+            # Skip self. rewrite for inline deps with CT kwargs — they are
+            # emitted as @pl.inline and the parser handles them via bare-name
+            # call resolution (parse_call -> _parse_inline_call).
+            if dep_name in self._no_self_dep_names:
+                return cast("ast.expr", self.generic_visit(node))
             new_func = ast.Attribute(
                 value=ast.Name(id="self", ctx=ast.Load()),
                 attr=dep_name,
@@ -1353,6 +1385,9 @@ class Specializer:
         # emitted in the generated module preamble so the source is
         # self-contained (mirrors the ``import pypto.language as pl`` line).
         self._needs_pld_import: bool = False
+        # @pl.inline helpers discovered from dep bodies — emitted as module-level
+        # @pl.inline definitions before the @pl.program class.
+        self._discovered_inlines: dict[str, InlineFunction] = {}
 
     @property
     def rename_map(self) -> dict[str, str]:
@@ -1373,14 +1408,125 @@ class Specializer:
         """
         return dict(self._source_map)
 
+    @property
+    def discovered_inlines(self) -> dict[str, InlineFunction]:
+        """Discover ``@pl.inline`` helpers called from JIT-dep bodies.
+
+        Populated by ``specialize()``.  The caller must inject these
+        ``InlineFunction`` objects into ``pl.parse(extra_globals=...)``
+        so the parser can expand them at each call site with the original
+        ``closure_vars`` (module-level constants like ``INTERMEDIATE`` are
+        thereby preserved through the specialize→reparse round-trip).
+
+        Empty until ``specialize()`` has been called.
+        """
+        return dict(self._discovered_inlines)
+
+    def _discover_inline_helpers(self) -> dict[str, InlineFunction]:
+        """Walk all function bodies for calls to @pl.inline helpers.
+
+        Looks up bare-name calls in each context's ``py_globals`` (the
+        originating function's ``__globals__``).  When an ``InlineFunction``
+        is found, the caller must inject it into ``pl.parse()``'s execution
+        namespace via ``extra_globals`` so the parser can expand it at each
+        call site with the original ``closure_vars`` intact.
+
+        This is how ``@pl.jit`` and ``@pl.jit.inline`` functions call
+        ``@pl.inline`` helpers from other modules — the helper must be
+        importable in the calling module's namespace (i.e., visible in
+        ``__globals__``).  The ``InlineFunction`` objects are returned
+        as-is (no AST transformation), and the caller injects them into
+        ``pl.parse(extra_globals=...)`` so the parser uses the original
+        ``closure_vars`` — module-level constants in the inline body
+        resolve correctly from the definition-site scope.
+
+        Raises ``TypeError`` when a discovered ``@pl.inline`` name collides
+        with an existing JIT dep name.
+
+        Returns:
+            Dict mapping inline name → InlineFunction, deduplicated across
+            call sites.  Empty if no @pl.inline helpers are called.
+        """
+        from pypto.language.parser.decorator import (  # noqa: PLC0415 — runtime import avoids circular dep
+            InlineFunction,
+        )
+
+        dep_names = {ctx.func_name for ctx in self._contexts}
+        found: dict[str, InlineFunction] = {}
+        # Collect all py_globals dicts for inline lookup (some inlines may
+        # only be visible in one dep's namespace, not another's).
+        all_py_globals: list[dict] = [ctx.py_globals for ctx in self._contexts]
+
+        # Queue of contexts to walk for inline calls.  Start with dep
+        # function bodies, then transitively add discovered inlines.
+        to_walk: list[tuple[ast.FunctionDef, dict]] = []
+        for ctx in self._contexts:
+            src = textwrap.dedent(ctx.source)
+            try:
+                tree = ast.parse(src)
+            except SyntaxError:
+                continue
+            func_def = next(
+                (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == ctx.func_name),
+                None,
+            )
+            if func_def is not None:
+                to_walk.append((func_def, ctx.py_globals))
+
+        # Walk transitively: each newly-discovered inline's body is scanned
+        # for further inline calls, until no new inlines are found.
+        walked_inline_ids: set[int] = set()  # prevent re-walking detected by id
+        while to_walk:
+            func_def, py_globals = to_walk.pop()
+            for node in ast.walk(func_def):
+                if not isinstance(node, ast.Call):
+                    continue
+                if not isinstance(node.func, ast.Name):
+                    continue
+                name = node.func.id
+                obj = py_globals.get(name)
+                if not isinstance(obj, InlineFunction):
+                    # Also search across all py_globals dicts (e.g., an inline
+                    # discovered via ctx A may only be visible in ctx B).
+                    for g in all_py_globals:
+                        obj = g.get(name)
+                        if isinstance(obj, InlineFunction):
+                            break
+                if not isinstance(obj, InlineFunction):
+                    continue
+                if name in found:
+                    continue
+                # Reject collision with an existing JIT dep name.
+                if name in dep_names:
+                    raise TypeError(
+                        f"@pl.inline helper '{name}' collides with an existing "
+                        f"@pl.jit dep of the same name.  Rename one of them."
+                    )
+                found[name] = obj
+                # Transitively walk this inline's body for nested calls.
+                if id(obj) not in walked_inline_ids:
+                    walked_inline_ids.add(id(obj))
+                    to_walk.append((obj.func_def, obj.closure_vars))
+
+        return found
+
     def specialize(self) -> str:
         """Generate @pl.program source code string.
+
+        The generated source is self-contained for ``pl.parse()`` except for
+        discovered ``@pl.inline`` helpers, which must be injected via
+        ``extra_globals`` (see :attr:`discovered_inlines`).
 
         Returns:
             Python source string ready to pass to ``pl.parse()``.
         """
         self._fn_origin = []
         self._needs_pld_import = False
+
+        # Discover @pl.inline helpers called from dep bodies before
+        # specialization, so _specialize_function can pass them to
+        # no_self_dep_names (prevents self. rewrite on bare-name calls).
+        self._discovered_inlines = self._discover_inline_helpers()
 
         # Specialize bodies first so per-context state (DynVars,
         # _needs_pld_import) is fully populated before assembling the preamble.
@@ -1395,6 +1541,12 @@ class Specializer:
         if self._needs_pld_import:
             lines.append("import pypto.language.distributed as pld")
         lines.append("")
+
+        # Discovered @pl.inline helpers are NOT emitted as source text here —
+        # re-parsing would create new InlineFunction objects whose closure_vars
+        # lack the original module's globals (so module-level constants like
+        # INTERMEDIATE would be undefined).  Instead, the caller must inject
+        # the original InlineFunction objects via pl.parse(extra_globals=...).
 
         # Emit module-level DynVar declarations (deduplicated across contexts)
         dv_seen: set[str] = set()
@@ -1543,6 +1695,19 @@ class Specializer:
             for node in ast.walk(func_def)
             if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
         }
+        # Determine which deps are @pl.inline with CT kwargs (no self. rewrite)
+        no_self_dep_names: set[str] = set()
+        for other_ctx in self._contexts:
+            if (
+                other_ctx.func_name in dep_names
+                and other_ctx.func_type == "inline"
+                and other_ctx.ct_kwarg_names
+            ):
+                no_self_dep_names.add(other_ctx.func_name)
+        # Also exclude discovered @pl.inline helpers from self. rewrite —
+        # the parser resolves them via bare-name call lookup.
+        no_self_dep_names.update(self._discovered_inlines.keys())
+
         transformer = _BodyTransformer(
             tensor_meta=ctx.tensor_meta,
             scalar_values=ctx.scalar_values,
@@ -1551,6 +1716,7 @@ class Specializer:
             initial_used_names=all_defined,
             py_globals=ctx.py_globals,
             dep_param_names=self._dep_param_names,
+            no_self_dep_names=no_self_dep_names,
         )
         new_body = [transformer.visit(stmt) for stmt in func_def.body]
         # Accumulate alias→original renames for error message rewriting.
@@ -1647,6 +1813,9 @@ class Specializer:
         if ctx.func_type is None or ctx.func_type == "orchestration":
             return f"@pl.function(type=pl.FunctionType.Orchestration{auto_scope_suffix})"
         if ctx.func_type == "inline":
+            if ctx.ct_kwarg_names:
+                # With CT kwargs, emit @pl.inline
+                return "@pl.inline"
             return f"@pl.function(type=pl.FunctionType.Inline{auto_scope_suffix})"
         if ctx.func_type == "opaque":
             return "@pl.function(type=pl.FunctionType.Opaque)"
@@ -1708,6 +1877,22 @@ class Specializer:
                 result.append(f"{name}: {extra_anns[name]}")
             else:
                 result.append(name)
+        # Append CT kwargs (keyword-only parameters) to the signature
+        if ctx.ct_kwarg_names:
+            result.append("*")
+            for kw_name in ctx.ct_kwarg_names:
+                type_str = ctx.ct_kwarg_types.get(kw_name, "int")
+                default_val = ctx.ct_kwarg_defaults.get(kw_name)
+                if default_val is not None:
+                    # Format the default value: repr handles strings with quotes
+                    if isinstance(default_val, str):
+                        result.append(f"{kw_name}: {type_str} = {default_val!r}")
+                    else:
+                        result.append(f"{kw_name}: {type_str} = {default_val}")
+                else:
+                    # Required (no default) — just emit the name: type
+                    result.append(f"{kw_name}: {type_str}")
+
         return result
 
 
@@ -1735,7 +1920,7 @@ def specialize(class_name: str, contexts: list[SpecializeContext]) -> str:
     return Specializer(class_name, contexts).specialize()
 
 
-def build_specialize_context(
+def build_specialize_context(  # noqa: PLR0913 — called from @pl.jit compile path
     func: Any,
     func_name: str,
     func_type: str | None,
@@ -1745,13 +1930,16 @@ def build_specialize_context(
     scalar_dtypes: dict[str, DataType],
     dep_names: list[str],
     auto_scope: bool = True,
+    ct_kwarg_names: list[str] | None = None,
+    ct_kwarg_defaults: dict[str, Any] | None = None,
+    ct_kwarg_types: dict[str, str] | None = None,
 ) -> SpecializeContext:
     """Build a SpecializeContext from a Python function and call-site data.
 
     Args:
         func: The original Python function object.
         func_name: The function name.
-        func_type: 'orchestration', 'incore', or None.
+        func_type: 'orchestration', 'incore', 'inline', or None.
         level: pl.Level enum or None.
         tensor_meta: TensorMeta per tensor param name.
         scalar_values: Concrete scalar values from the call site.
@@ -1761,6 +1949,12 @@ def build_specialize_context(
             Forwarded to the generated ``@pl.function`` decorator; the
             Orchestration entry, HOST orchestrator, and inline sub-functions
             honor ``False``.
+        ct_kwarg_names: Optional list of keyword-only parameter names (CT
+            kwargs) to preserve in the generated ``@pl.inline`` signature.
+        ct_kwarg_defaults: Optional dict mapping CT kwarg name to its default
+            value, or None if required (no default).
+        ct_kwarg_types: Optional dict mapping CT kwarg name to its type string
+            ("int", "float", "bool", "str").
 
     Dynamic dims live inside ``tensor_meta`` as :class:`DynDim` entries —
     no separate set is passed in.
@@ -1787,7 +1981,36 @@ def build_specialize_context(
     orig_file = src_file if (src_file and not src_file.startswith("<")) else None
     orig_col_offset = (len(raw_lines[0]) - len(raw_lines[0].lstrip())) if raw_lines else 0
 
-    param_names = [p for p in inspect.signature(func).parameters if p != "self"]
+    # Detect kwonly params from the function signature
+    sig_params = list(inspect.signature(func).parameters.values())
+    all_param_names = [p.name for p in sig_params if p.name != "self"]
+
+    # If ct_kwarg_names not provided, detect kwonly params from signature
+    effective_ct_kwarg_names = list(ct_kwarg_names) if ct_kwarg_names else []
+    effective_ct_kwarg_defaults: dict[str, Any] = dict(ct_kwarg_defaults) if ct_kwarg_defaults else {}
+    effective_ct_kwarg_types: dict[str, str] = dict(ct_kwarg_types) if ct_kwarg_types else {}
+
+    if not effective_ct_kwarg_names and func_type == "inline":
+        # Auto-detect kwonly params from signature
+        for p in sig_params:
+            if p.name == "self":
+                continue
+            if p.kind == inspect.Parameter.KEYWORD_ONLY:
+                effective_ct_kwarg_names.append(p.name)
+                if p.default is not inspect.Parameter.empty:
+                    effective_ct_kwarg_defaults[p.name] = p.default
+                # Infer type from annotation
+                if p.annotation is not inspect.Parameter.empty and p.annotation in (int, float, bool, str):
+                    effective_ct_kwarg_types[p.name] = p.annotation.__name__
+                else:
+                    effective_ct_kwarg_types[p.name] = "int"
+
+    # Exclude CT kwargs from param_names (they are not positional parameters
+    # in the generated function)
+    if effective_ct_kwarg_names:
+        param_names = [n for n in all_param_names if n not in effective_ct_kwarg_names]
+    else:
+        param_names = all_param_names
 
     return SpecializeContext(
         func_name=func_name,
@@ -1799,6 +2022,9 @@ def build_specialize_context(
         scalar_values=scalar_values,
         scalar_dtypes=scalar_dtypes,
         dep_names=dep_names,
+        ct_kwarg_names=effective_ct_kwarg_names,
+        ct_kwarg_defaults=effective_ct_kwarg_defaults,
+        ct_kwarg_types=effective_ct_kwarg_types,
         auto_scope=auto_scope,
         py_globals=getattr(func, "__globals__", {}),
         orig_file=orig_file,

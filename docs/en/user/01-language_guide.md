@@ -498,6 +498,33 @@ class MyProgram:
         return y
 ```
 
+**Compile-time keyword arguments (CT kwargs):**
+
+Keyword-only parameters (after ``*``) annotated with ``int``, ``float``, ``bool``,
+or ``str`` are treated as CT kwargs — they must resolve to constant values at
+parse time. This enables:
+
+- **CT-if**: ``if use_relu:`` with a ``bool`` CT kwarg folds to only the live branch
+- **Parameterized tiling**: ``k_tile: int = 32`` controls loop chunk sizes
+- **String naming**: ``name_hint=some_str_kwarg`` works in scope constructors
+
+```python
+@pl.inline
+def matmul_add(
+    a: pl.Tensor[[M, K], pl.FP16],
+    b: pl.Tensor[[K, N], pl.FP16],
+    *,
+    k_tile: int = 32,
+    use_relu: bool = False,
+) -> pl.Tensor[[M, N], pl.FP16]:
+    result: pl.Tensor[[M, N], pl.FP16]
+    for k in pl.parallel(0, M, k_tile):
+        ...
+    if use_relu:
+        result = pl.maximum(result, pl.const(0, pl.FP16))
+    return result
+```
+
 ### External Function Calls
 
 A standalone `@pl.function` can be called from within a `@pl.program`. It is added to the program as a separate function:

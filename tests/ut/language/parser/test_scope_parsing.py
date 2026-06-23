@@ -12,7 +12,10 @@
 import pypto.language as pl
 import pytest
 from pypto import ir
-from pypto.language.parser.diagnostics.exceptions import ParserSyntaxError
+from pypto.language.parser.diagnostics.exceptions import (
+    ParserSyntaxError,
+    ParserTypeError,
+)
 from pypto.language.parser.text_parser import parse_program
 
 
@@ -1753,6 +1756,211 @@ class TestSpmdAllowEarlyResolve:
                         t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [i * 128, 0], [128, 128])
                         out = pl.store(t, [i * 128, 0], out)
                     return out
+
+
+class TestStringCTKwargsInScope:
+    """``str`` CT kwargs in scope constructors (``name_hint=``).
+
+    ``str`` CT kwargs can be passed to ``name_hint=`` in ``pl.at()``,
+    ``pl.spmd()``, and similar scope constructors. This lets callers
+    supply per-call-site scope names, making the same ``@pl.inline``
+    distinguishable in DFX traces and profiling flame graphs.
+    """
+
+    def test_str_ct_kwarg_in_pl_at_name_hint(self):
+        """A str CT kwarg passed to pl.at(..., name_hint=scope_name) works."""
+
+        @pl.inline
+        def matmul_block(
+            x: pl.Tensor[[128, 128], pl.FP32],
+            w: pl.Tensor[[128, 128], pl.FP32],
+            out: pl.Tensor[[128, 128], pl.FP32],
+            *,
+            scope_name: str = "default",
+        ):
+            with pl.at(level=pl.Level.CORE_GROUP, name_hint=scope_name):
+                out = pl.add(x, w)
+            return out
+
+        @pl.program
+        class StrCTAt:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[128, 128], pl.FP32],
+                w: pl.Tensor[[128, 128], pl.FP32],
+                out: pl.Tensor[[128, 128], pl.FP32],
+            ):
+                y: pl.Tensor[[128, 128], pl.FP32] = matmul_block(x, w, out)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[128, 128], pl.FP32],
+                w: pl.Tensor[[128, 128], pl.FP32],
+                out: pl.Tensor[[128, 128], pl.FP32],
+            ):
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="default"):
+                    out = pl.add(x, w)
+                y: pl.Tensor[[128, 128], pl.FP32] = out
+                return y
+
+        ir.assert_structural_equal(StrCTAt, Expected)
+
+    def test_str_ct_kwarg_in_pl_spmd_name_hint(self):
+        """A str CT kwarg passed to pl.spmd(..., name_hint=scope_name) works."""
+
+        @pl.inline
+        def spmd_block(x: pl.Tensor[[128], pl.FP32], *, blocks: int = 4, scope_name: str = "spmd_default"):
+            for r in pl.spmd(blocks, name_hint=scope_name):
+                out: pl.Tensor[[128], pl.FP32] = pl.add(x, x)
+            return out
+
+        @pl.program
+        class StrCTSpmd:
+            @pl.function
+            def main(self, x: pl.Tensor[[128], pl.FP32]):
+                y: pl.Tensor[[128], pl.FP32] = spmd_block(x)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Tensor[[128], pl.FP32]):
+                for r in pl.spmd(4, name_hint="spmd_default"):
+                    out: pl.Tensor[[128], pl.FP32] = pl.add(x, x)
+                y: pl.Tensor[[128], pl.FP32] = out
+                return y
+
+        ir.assert_structural_equal(StrCTSpmd, Expected)
+
+    def test_str_ct_kwarg_override_at_call_site(self):
+        """Caller overrides str CT kwarg to supply per-site names."""
+
+        @pl.inline
+        def matmul_block(
+            x: pl.Tensor[[128, 128], pl.FP32],
+            w: pl.Tensor[[128, 128], pl.FP32],
+            out: pl.Tensor[[128, 128], pl.FP32],
+            *,
+            scope_name: str = "default",
+        ):
+            with pl.at(level=pl.Level.CORE_GROUP, name_hint=scope_name):
+                out = pl.add(x, w)
+            return out
+
+        @pl.program
+        class OverrideScope:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[128, 128], pl.FP32],
+                w_q: pl.Tensor[[128, 128], pl.FP32],
+                w_k: pl.Tensor[[128, 128], pl.FP32],
+                out: pl.Tensor[[128, 128], pl.FP32],
+            ):
+                y: pl.Tensor[[128, 128], pl.FP32] = matmul_block(x, w_q, out, scope_name="q_proj")
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[128, 128], pl.FP32],
+                w_q: pl.Tensor[[128, 128], pl.FP32],
+                w_k: pl.Tensor[[128, 128], pl.FP32],
+                out: pl.Tensor[[128, 128], pl.FP32],
+            ):
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="q_proj"):
+                    out = pl.add(x, w_q)
+                y: pl.Tensor[[128, 128], pl.FP32] = out
+                return y
+
+        ir.assert_structural_equal(OverrideScope, Expected)
+
+    def test_literal_name_hint_still_works(self):
+        """String literals still work in name_hint= (backward compat)."""
+
+        @pl.inline
+        def literal_hint(x: pl.Tensor[[128, 128], pl.FP32], out: pl.Tensor[[128, 128], pl.FP32]):
+            with pl.at(level=pl.Level.CORE_GROUP, name_hint="hardcoded"):
+                out = pl.add(x, out)
+            return out
+
+        @pl.program
+        class LiteralHint:
+            @pl.function
+            def main(self, x: pl.Tensor[[128, 128], pl.FP32], out: pl.Tensor[[128, 128], pl.FP32]):
+                y: pl.Tensor[[128, 128], pl.FP32] = literal_hint(x, out)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Tensor[[128, 128], pl.FP32], out: pl.Tensor[[128, 128], pl.FP32]):
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="hardcoded"):
+                    out = pl.add(x, out)
+                y: pl.Tensor[[128, 128], pl.FP32] = out
+                return y
+
+        ir.assert_structural_equal(LiteralHint, Expected)
+
+    def test_non_string_value_in_name_hint_raises(self):
+        """Passing a non-string to name_hint= raises ParserSyntaxError."""
+
+        @pl.inline
+        def bad(x: pl.Tensor[[128, 128], pl.FP32], out: pl.Tensor[[128, 128], pl.FP32], *, num: int = 42):
+            with pl.at(level=pl.Level.CORE_GROUP, name_hint=num):  # pyright: ignore[reportArgumentType]
+                # Rationale: body is never executed; the @pl.inline definition
+                # raises ParserSyntaxError on the non-str CT kwarg before the
+                # body runs.
+                out = pl.add(x, out)
+            return out
+
+        with pytest.raises((ParserSyntaxError, ParserTypeError), match="name_hint"):
+
+            @pl.program
+            class BadHint:
+                @pl.function
+                def main(self, x: pl.Tensor[[128, 128], pl.FP32], out: pl.Tensor[[128, 128], pl.FP32]):
+                    y: pl.Tensor[[128, 128], pl.FP32] = bad(x, out)
+                    return y
+
+    def test_multi_call_site_with_different_hints(self):
+        """Same inline called twice with different str CT kwargs → different name_hints."""
+
+        @pl.inline
+        def proj(
+            x: pl.Tensor[[128, 128], pl.FP32],
+            w: pl.Tensor[[128, 128], pl.FP32],
+            out: pl.Tensor[[128, 128], pl.FP32],
+            *,
+            scope_name: str = "proj",
+        ):
+            with pl.at(level=pl.Level.CORE_GROUP, name_hint=scope_name):
+                out = pl.add(x, w)
+            return out
+
+        @pl.program
+        class MultiProj:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[128, 128], pl.FP32],
+                w_q: pl.Tensor[[128, 128], pl.FP32],
+                w_k: pl.Tensor[[128, 128], pl.FP32],
+                out: pl.Tensor[[128, 128], pl.FP32],
+            ):
+                y0: pl.Tensor[[128, 128], pl.FP32] = proj(x, w_q, out, scope_name="q_proj")
+                y1: pl.Tensor[[128, 128], pl.FP32] = proj(x, w_k, out, scope_name="k_proj")
+                r: pl.Tensor[[128, 128], pl.FP32] = pl.add(y0, y1)
+                return r
+
+        assert len(MultiProj.functions) == 1
 
 
 if __name__ == "__main__":

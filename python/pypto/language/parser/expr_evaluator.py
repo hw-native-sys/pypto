@@ -142,12 +142,18 @@ class ExprEvaluator:
             # Composite over DynVars (e.g. `m + 0`) built via DSL operator
             # overloading — keep the IR tree as-is (no constant folding).
             return value.expr
+        if isinstance(value, str):
+            # str values cannot be wrapped as IR expressions. They are only useful
+            # in non-expression positions (name_hint=, debug names) where callers
+            # access the raw Python value through try_eval_expr(), not through
+            # python_value_to_ir(). In expression positions, emit a placeholder.
+            return ir.ConstInt(0, DataType.INDEX, span)
         if isinstance(value, (list, tuple)):
             return ir.MakeTuple([self.python_value_to_ir(elt, span) for elt in value], span)
         raise ParserTypeError(
             f"Unsupported closure variable type: {type(value).__name__}",
             span=span,
-            hint="Closure variables must be int, float, bool, list, tuple, or IR expressions",
+            hint="Closure variables must be int, float, bool, str, list, tuple, or IR expressions",
         )
 
     def get_or_create_dynvar(self, dv: DynVar, span: ir.Span) -> ir.Var:

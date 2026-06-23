@@ -72,9 +72,117 @@ def _capture_subworker_source(func_def: ast.FunctionDef) -> str:
     return "\n".join(ast.unparse(stmt) for stmt in func_def.body)
 
 
+# Accepted CT-kwarg annotation types and their Python type-check functions.
+_CT_KWARG_TYPES: dict[str, type] = {
+    "int": int,
+    "float": float,
+    "bool": bool,
+    "str": str,
+}
+
+
+def _validate_kwonly_annotation(annotation: ast.expr) -> str:
+    """Validate a keyword-only parameter's annotation and return the type name.
+
+    Only int, float, bool, and str are accepted. Raises ParserSyntaxError
+    for any other annotation (including compound types, DSL types, or missing
+    annotations).
+
+    Returns:
+        The type name string ("int", "float", "bool", "str").
+    """
+    if not isinstance(annotation, ast.Name):
+        raise ParserSyntaxError(
+            f"Unsupported keyword-only parameter annotation: {ast.unparse(annotation)}",
+            hint="Only int, float, bool, and str are supported for keyword-only parameters",
+        )
+    type_name = annotation.id
+    if type_name not in _CT_KWARG_TYPES:
+        raise ParserSyntaxError(
+            f"Unsupported keyword-only parameter type: '{type_name}'",
+            hint="Only int, float, bool, and str are supported for keyword-only parameters",
+        )
+    return type_name
+
+
+def _freeze_default(default_node: ast.expr | None, closure_vars: dict[str, Any]) -> Any:
+    """Resolve a keyword-only parameter's default value at definition time.
+
+    If there is no default, returns ``None`` (no default — required param).
+    ``None`` is safe as a sentinel because it is not a valid CT-kwarg type
+    (int, float, bool, str only).
+    Name defaults (e.g. ``*, eps = DEFAULT_EPS``) resolve from the
+    definition-site closure and are frozen as Python values.
+    Constant defaults (``*, k_tile: int = 128``) are returned as-is.
+    """
+    if default_node is None:
+        return None  # sentinel: no default provided
+    if isinstance(default_node, ast.Constant):
+        return default_node.value
+    # Name default — evaluate from definition-site closure
+    from .expr_evaluator import ExprEvaluator  # noqa: PLC0415
+
+    evaluator = ExprEvaluator(closure_vars)
+    return evaluator.eval_expr(default_node)
+
+
+def _capture_kwonly_params(
+    func_def: ast.FunctionDef,
+    closure_vars: dict[str, Any],
+) -> dict[str, tuple[str, Any]]:
+    """Capture keyword-only parameter metadata from a function definition.
+
+    Keyword-only parameters (after ``*``) annotated with ``int``, ``float``,
+    ``bool``, or ``str`` are treated as compile-time (CT) kwargs.
+
+    Returns a dict mapping parameter name → (type_name, default_value).
+    ``default_value`` is the resolved Python value, or ``None`` if the parameter
+    has no default (required CT kwarg). ``None`` is safe as a sentinel because
+    it is not a valid CT-kwarg type.
+
+    Raises:
+        ParserSyntaxError: If any keyword-only param has an unsupported annotation.
+    """
+    kwonly: dict[str, tuple[str, Any]] = {}
+    for i, arg in enumerate(func_def.args.kwonlyargs):
+        name = arg.arg
+        if arg.annotation is None:
+            raise ParserSyntaxError(
+                f"Keyword-only parameter '{name}' is missing a type annotation",
+                hint=f"Add a type annotation, e.g.: {name}: int = ...",
+            )
+        type_name = _validate_kwonly_annotation(arg.annotation)
+        default = _freeze_default(
+            func_def.args.kw_defaults[i] if i < len(func_def.args.kw_defaults) else None,
+            closure_vars,
+        )
+        kwonly[name] = (type_name, default)
+    return kwonly
+
+
 @dataclasses.dataclass
 class InlineFunction:
-    """Stores AST and metadata for a function to be inlined at call sites."""
+    """Stores AST and metadata for a function to be inlined at call sites.
+
+    Attributes:
+        name: The function name.
+        func_def: The AST FunctionDef node.
+        param_names: List of positional parameter names (excluding 'self' and kwonly params).
+        source_file: Path to the source file.
+        source_lines: Dedented source lines.
+        line_offset: Starting line offset in the source file.
+        col_offset: Column offset from dedent stripping.
+        closure_vars: Closure variables captured at definition site (the
+            defining module's ``f_globals`` plus ``f_locals``).  During
+            expansion, these are merged with call-site CT kwargs and the
+            enclosing program scope.  However, the parser's expression
+            evaluator may not resolve module-level names from this dict
+            in all positions — prefer passing constants as CT kwargs.
+        kwonly_params: Keyword-only parameter (CT kwargs) metadata, mapping
+            parameter name -> (type_name, default_value). ``type_name`` is one
+            of "int", "float", "bool", "str". ``default_value`` is the resolved
+            Python value, or ``None`` if the parameter is required (no default).
+    """
 
     name: str
     func_def: ast.FunctionDef
@@ -84,6 +192,7 @@ class InlineFunction:
     line_offset: int
     col_offset: int
     closure_vars: dict[str, Any]
+    kwonly_params: dict[str, tuple[str, Any]] = dataclasses.field(default_factory=dict)
 
 
 def _strip_self_parameter(func_def: ast.FunctionDef) -> ast.FunctionDef:
@@ -830,6 +939,48 @@ def inline(func: Callable) -> InlineFunction:
     @pl.inline defers parsing until the function is called within a
     @pl.program. The body is expanded in-place at each call site.
 
+    Keyword-only parameters (after ``*``) annotated with ``int``, ``float``,
+    ``bool``, or ``str`` are treated as **compile-time (CT) kwargs** — they
+    must resolve to constant values at parse time and enable CT-if folding,
+    parameterized tiling, and string naming.
+
+    .. important::
+
+        The body is expanded in the **parser's scope**, not the definition
+        module's scope.  Every non-``pl.*`` name the body references must be
+        a positional parameter, a CT kwarg, or a locally-computed value.
+        Module-level constants from the defining file are **not** resolvable
+        at expansion time — pass them as CT kwargs instead.
+
+        **Broken** — ``K_CHUNK`` is a module-level constant::
+
+            @pl.inline
+            def helper(x, *, k_tile: int = 128):
+                for k in pl.range(0, K, K_CHUNK):  # ERROR: K_CHUNK undefined
+                    ...
+
+        **Fixed** — pass everything through the signature::
+
+            @pl.inline
+            def helper(x, *, k_tile: int = 128, k_chunk: int = 256):
+                for k in pl.range(0, K, k_chunk):    # OK: k_chunk is a CT kwarg
+                    ...
+
+    ``@pl.inline`` vs ``@pl.jit.inline``
+    -----------------------------------
+
+    ============================== ======================================== ==========================================
+    Property                       ``@pl.inline``                          ``@pl.jit.inline``
+    ============================== ======================================== ==========================================
+    Module-level constants         Must be CT kwargs (self-contained)       Resolved by specializer via ``py_globals``
+    Tensor shape inference         From concrete annotations in source     From runtime tensors via dep graph
+    Callable from ``@pl.jit``      Yes (discovery pass)                    Yes (dep graph)
+    Callable from ``@pl.jit.inline`` Yes (discovery pass)                  Yes (dep graph)
+    Callable from ``@pl.inline``   Yes (nested expansion)                  No
+    Best for                       Small helpers (< 50 lines, few consts)  Large functions (many tiling constants)
+    Per-call-site CT kwargs        Yes, natural per-call-site binding      Pre-inlined as constants (single version)
+    ============================== ======================================== ==========================================
+
     Args:
         func: Python function to capture for inlining
 
@@ -840,6 +991,22 @@ def inline(func: Callable) -> InlineFunction:
         >>> @pl.inline
         ... def normalize(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
         ...     result: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+        ...     return result
+
+    Example with CT kwargs:
+        >>> @pl.inline
+        ... def matmul_add(
+        ...     a: pl.Tensor[[M, K], pl.FP16],
+        ...     b: pl.Tensor[[K, N], pl.FP16],
+        ...     *,
+        ...     k_tile: int = 32,
+        ...     use_relu: bool = False,
+        ... ) -> pl.Tensor[[M, N], pl.FP16]:
+        ...     result: pl.Tensor[[M, N], pl.FP16]
+        ...     for k in pl.parallel(0, M, k_tile):
+        ...         ...
+        ...     if use_relu:
+        ...         result = pl.maximum(result, pl.const(0, pl.FP16))
         ...     return result
     """
     caller_frame = sys._getframe(1)
@@ -859,6 +1026,9 @@ def inline(func: Callable) -> InlineFunction:
 
     param_names = [arg.arg for arg in func_def.args.args]
 
+    # Capture keyword-only parameter metadata (CT kwargs)
+    kwonly_params = _capture_kwonly_params(func_def, closure_vars)
+
     return InlineFunction(
         name=func.__name__,
         func_def=func_def,
@@ -868,6 +1038,7 @@ def inline(func: Callable) -> InlineFunction:
         line_offset=line_offset,
         col_offset=col_offset,
         closure_vars=closure_vars,
+        kwonly_params=kwonly_params,
     )
 
 
