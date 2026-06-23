@@ -444,13 +444,15 @@ void BindPass(nb::module_& m) {
       nb::arg("window_option") = nb::none(), nb::arg("window_policy") = nb::none(),
       nb::arg("window_flow") = nb::none(),
       "Create a pass that optimizes tensor buffer usage in orchestration and InCore functions\n\n"
-      "Applies five patterns: iter-arg reuse (merge Out->InOut), assemble parent\n"
+      "Applies six patterns: iter-arg reuse (merge Out->InOut), assemble parent\n"
       "strides (attach TensorView to Out params), assemble-loop rewrite\n"
       "(convert tile.assemble loops to tile.store loops), slice input strides,\n"
-      "and static window externalization. "
+      "static window externalization, and proven runtime-current lowering. "
       "window_option may be 'none', 'stable', or 'exact'. "
       "window_policy may be 'none', 'stable', 'exact', or 'boundingBox'; "
       "window_flow may be 'local' or 'linked'. "
+      "stable does not expand submit arguments; exact and boundingBox may. "
+      "Only linked flow may emit carrier state or runtime-current barriers. "
       "Do not combine window_option with window_policy/window_flow.");
   passes.def("flatten_tile_nd_to_2d", &pass::FlattenTileNdTo2D,
              "Create a pass that flattens ND tile ops to 2D in InCore functions\n\n"

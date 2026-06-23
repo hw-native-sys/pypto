@@ -1942,7 +1942,7 @@ class OutWindowExternalizer {
     if (val == "boundingBox") return WindowCoveragePolicy::BoundingBox;
     CHECK(false) << "Invalid window_policy '" << val
                  << "': expected 'none', 'stable', 'exact', or 'boundingBox'"
-                 << (val == "all" ? "; 'all' was removed in v6, choose exact or boundingBox plus window_flow"
+                 << (val == "all" ? "; 'all' is not supported, choose exact or boundingBox plus window_flow"
                                   : "");
     return WindowCoveragePolicy::Off;
   }
@@ -1954,7 +1954,7 @@ class OutWindowExternalizer {
     if (val == "boundingBox" || val == "coalesce") return WindowCoveragePolicy::BoundingBox;
     CHECK(false) << "Invalid " << attr_name << " attr '" << val
                  << "': expected 'off', 'stable', 'exact', or 'boundingBox'"
-                 << (val == "all" ? "; 'all' was removed in v6" : "")
+                 << (val == "all" ? "; 'all' is not supported; choose exact or boundingBox" : "")
                  << (val == "carrier" || val == "coalesce_carrier"
                          ? "; carrier is not a side coverage policy, use window_flow='linked'"
                          : "");
@@ -1978,7 +1978,7 @@ class OutWindowExternalizer {
 
     if (func) {
       CHECK(!func->HasAttr("window_policy"))
-          << "kernel attr window_policy was removed in v6; use window_outputs/window_inputs/window_flow";
+          << "kernel attr window_policy is not supported; use window_outputs/window_inputs/window_flow";
       if (func->HasAttr("window_outputs")) {
         ep.outputs =
             ParseSideCoveragePolicy(func->GetAttr<std::string>("window_outputs", ""), "window_outputs");
@@ -2518,7 +2518,7 @@ class OutWindowExternalizer {
 
   static bool ShouldSelectBoundingBoxOutput(const OutputRewriteInfo& output) {
     if (!output.bounding_box_variant.has_value()) return false;
-    // v6 boundingBox is exact-first. Select it only when it reduces the number of
+    // boundingBox is exact-first. Select it only when it reduces the number of
     // runtime tensor views/params or when exact pieces no longer fit the submit/view
     // budget. The latter is represented here by a positive ABI delta for exact pieces.
     auto exact_cost = EstimateOutputCost(output);
@@ -5659,7 +5659,7 @@ class OutWindowExternalizer {
         }
         if (dynamic_reader) {
           plan.dynamic_reader_roots.insert(root);
-          // v6 linked flow is proof driven. Only a linked writer plus a linked
+          // Linked flow is proof driven. Only a linked writer plus a linked
           // boundingBox dynamic reader may lower to carrier/base/extent.
           size_t dynamic_dim = SIZE_MAX;
           bool needs_carrier_rematerialization = false;

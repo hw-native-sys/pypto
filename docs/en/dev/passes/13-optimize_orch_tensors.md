@@ -85,7 +85,19 @@ Useful global combinations:
 | `exact + local` | may expand | exact pieces | no | no | no |
 | `exact + linked` | may expand | exact pieces | no | single dense exact linked coverage only | no implicit boundingBox carrier |
 | `boundingBox + local` | may expand | exact or boundingBox | yes | no | no |
-| `boundingBox + linked` | may expand | exact or boundingBox | yes | proven writer-reader linked coverage | carrier/base/extent/remat may appear |
+| `boundingBox + linked` | may expand | exact or boundingBox | yes | proven writer-reader linked coverage | carrier/base/extent/remat and barriers may appear |
+
+Linked flow has two independent lowering outcomes:
+
+- **Dynamic range forwarding** may materialize carrier base/extent and remat a
+  continuous writer window for a dynamic reader.
+- **Aggregate current joining** may insert a runtime-current barrier between a
+  loop-produced tensor and a later full-parent or inexact consumer.
+
+An aggregate barrier does not require a dynamic carrier. Disabling one
+writer/reader carrier path does not disable unrelated proven aggregate joins.
+Neither lowering is permitted under `window_flow="local"`. Under
+`stable + linked`, any lowering that would expand submit arguments falls back.
 
 **Per-kernel overrides** via function attrs:
 
@@ -126,6 +138,12 @@ back to exact or full parent without error.
 attrs={"window_outputs": "boundingBox"}
 ```
 
+`exact` is also permission, not a force mode. Separated exact pieces may become
+separate runtime tensor arguments. The pass rejects a rewrite that would exceed
+the runtime limit of 32 tensor arguments or 16 scalar arguments, but a legal
+multi-piece rewrite can still increase scheduling overhead substantially.
+Inspect generated orchestration when opting a multi-piece kernel into `exact`.
+
 `window_flow="linked"` is not a carrier switch. It only permits a writer-reader
 edge to reuse coverage when both endpoints are effectively linked and the proof
 succeeds. The lowering may use carrier/base/extent/remat today; future lowering
@@ -159,6 +177,13 @@ The linked dynamic-reader path depends on all of these conditions:
 If any condition fails, the dynamic reader keeps the full parent tensor and the
 pass must not insert a runtime-current barrier just because coverage attrs are
 present.
+
+Legacy configuration spellings are accepted only where an unambiguous mapping
+exists: global `auto` maps to `stable`, and side `coalesce` maps to
+`boundingBox`. New code should use the canonical names. Ambiguous settings are
+rejected: `all`, `carrier`, `coalesce_carrier`, and the kernel-level
+`window_policy` attr. Replace them with explicit `window_outputs`,
+`window_inputs`, and `window_flow` settings.
 
 Output windows whose parent shape has dynamic dimensions are handled
 conservatively. A static-offset/static-size partial window over a dynamic parent

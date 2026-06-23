@@ -433,7 +433,7 @@ def convert_tensor_to_tile_ops() -> Pass:
 def optimize_orch_tensors(
     window_option: Literal["none", "stable", "exact"] | None = None,
 ) -> Pass:
-    """Create a pass using the recommended window option preset."""
+    """Create the pass using a local-flow preset: none, stable, or exact."""
 
 @overload
 def optimize_orch_tensors(
@@ -442,7 +442,7 @@ def optimize_orch_tensors(
     window_policy: Literal["none", "stable", "exact", "boundingBox"] | None = None,
     window_flow: Literal["local", "linked"] | None = None,
 ) -> Pass:
-    """Create a pass using explicit window policy and flow settings."""
+    """Create the pass using explicit coverage and cross-callsite flow settings."""
 
 def optimize_orch_tensors(
     window_option: Literal["none", "stable", "exact"] | None = None,
@@ -450,7 +450,12 @@ def optimize_orch_tensors(
     window_policy: Literal["none", "stable", "exact", "boundingBox"] | None = None,
     window_flow: Literal["local", "linked"] | None = None,
 ) -> Pass:
-    """Create a pass that optimizes tensor buffer usage in orchestration and InCore functions."""
+    """Optimize tensor buffers, call-site windows, and proven linked flow.
+
+    ``stable`` preserves the runtime submit-argument budget. ``exact`` and
+    ``boundingBox`` may expand it. Only ``window_flow="linked"`` may produce
+    carrier state or runtime-current barriers.
+    """
 
 def flatten_tile_nd_to_2d() -> Pass:
     """Create a pass that flattens ND tile ops to 2D in InCore functions."""

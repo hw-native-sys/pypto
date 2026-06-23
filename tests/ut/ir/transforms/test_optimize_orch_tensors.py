@@ -6824,7 +6824,7 @@ class TestPerKernelAttrs:
             _run_to_optimize_orch_tensors(Before, window_policy="exact")
 
     def test_coalesce_carrier_window_outputs_attr_raises(self):
-        """coalesce_carrier is not a public v6 window_outputs value."""
+        """coalesce_carrier is not a public window_outputs value."""
 
         @pl.program
         class Before:
@@ -6878,7 +6878,7 @@ class TestPerKernelAttrs:
             _run_to_optimize_orch_tensors(Before, window_policy="stable")
 
     def test_carrier_window_inputs_attr_raises(self):
-        """carrier is not a public v6 side coverage value."""
+        """carrier is not a public side coverage value."""
 
         @pl.program
         class Before:
@@ -6905,7 +6905,7 @@ class TestPerKernelAttrs:
             _run_to_optimize_orch_tensors(Before, window_policy="stable")
 
     def test_kernel_window_policy_attr_raises(self):
-        """kernel attrs={"window_policy": ...} was removed in v6."""
+        """Kernel attrs must use the independent input/output/flow controls."""
 
         @pl.program
         class Before:
@@ -6959,7 +6959,7 @@ class TestPerKernelAttrs:
             _run_to_optimize_orch_tensors(Before, window_policy="invalid")
 
     def test_global_all_window_policy_raises(self):
-        """window_policy="all" was removed in v6."""
+        """window_policy="all" is rejected in favor of explicit coverage and flow."""
 
         @pl.program
         class Before:

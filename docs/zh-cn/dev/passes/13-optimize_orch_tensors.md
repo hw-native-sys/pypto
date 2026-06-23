@@ -100,7 +100,18 @@ coverage/flow 语义时，应显式使用 `window_policy="boundingBox"` 或
   空洞；无 linked flow、无 carrier/base/extent/barrier。
 - `boundingBox + linked`：submit 参数可扩张；使用 exact 或 boundingBox；允许
   空洞；允许 proven writer-reader linked coverage；可能出现
-  carrier/base/extent/remat。
+  carrier/base/extent/remat 和 barrier。
+
+Linked flow 有两类相互独立的 lowering 结果：
+
+- **动态范围转发**可能物化 carrier base/extent，并为 dynamic reader remat
+  writer 的连续窗口。
+- **聚合 current 汇合**可能在循环产出的 tensor 与后续 full-parent 或 inexact
+  consumer 之间插入 runtime-current barrier。
+
+聚合 barrier 不要求存在 dynamic carrier。关闭一条 writer/reader carrier 路径，
+不会关闭其他已经证明成立的聚合汇合。`window_flow="local"` 下两类 lowering 都不
+允许；`stable + linked` 下，任何需要扩张 submit 参数的 lowering 都会 fallback。
 
 **Per-kernel 覆盖**（通过 function attrs）：
 
@@ -139,6 +150,11 @@ parent，不报错。
 attrs={"window_outputs": "boundingBox"}
 ```
 
+`exact` 同样是 permission，而不是强制模式。Separated exact pieces 可能分别变成
+runtime tensor 参数。Pass 会拒绝超过 runtime 32 个 tensor 参数或 16 个 scalar
+参数上限的改写，但合法的 multi-piece rewrite 仍可能显著增加调度开销。把
+multi-piece kernel 显式设为 `exact` 后，应检查生成的 orchestration。
+
 `window_flow="linked"` 不是 carrier 开关。它只允许双方都 effective linked 且
 proof 成立的 writer-reader edge 复用 coverage。当前 lowering 可能表现为
 carrier/base/extent/remat；未来也可能换成别的 lowering。
@@ -167,6 +183,11 @@ linked dynamic-reader 路径依赖以下所有条件：
 
 如果任一条件不满足，dynamic reader 会保持 full parent tensor；pass 不能仅因为
 coverage attr 存在就插入 runtime-current barrier。
+
+旧配置拼写只有在映射无歧义时才兼容：全局 `auto` 映射为 `stable`，side
+`coalesce` 映射为 `boundingBox`。新代码应使用规范名称。含义不明确的 `all`、
+`carrier`、`coalesce_carrier` 以及 kernel 级 `window_policy` attr 会直接报错；
+应改用显式的 `window_outputs`、`window_inputs` 和 `window_flow`。
 
 parent shape 含 dynamic dim 的 output window 会保守处理。对 dynamic parent 的
 static-offset/static-size 静态 partial window 会保持 full-tensor，因为同一个编译图可能用更小的
