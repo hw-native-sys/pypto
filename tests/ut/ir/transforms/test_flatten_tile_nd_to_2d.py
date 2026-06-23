@@ -2709,9 +2709,93 @@ class TestFlattenTileNdTo2DStandaloneTranspose:
             passes.flatten_tile_nd_to_2d()(Before)
 
 
+def _collect_def_use(fn) -> tuple[set[int], set[int], list[tuple[ir.Var, str]]]:
+    """Collect def/use sets and tile.load bindings of a function body.
+
+    Uses the stable ``Var.unique_id`` as identity (NOT ``name_hint``, which this
+    pass can repeat across distinct SSA values, e.g. ``lhs_load_0``). Returns:
+
+    - ``defined``: ``unique_id`` of every bound Var — params, ``AssignStmt`` LHS,
+      loop vars, iter-arg vars, and loop/if return vars (recursively).
+    - ``used``: ``unique_id`` of every Var referenced in an expression position
+      (call args, yields, returns, conditions, loop bounds, iter-arg inits),
+      recursing into nested ``ScopeStmt``/``ForStmt``/``WhileStmt``/``IfStmt`` bodies.
+    - ``loads``: ``(bound_var, source_tensor_name)`` for each ``tile.load``.
+    """
+    defined: set[int] = set()
+    used: set[int] = set()
+    loads: list[tuple[ir.Var, str]] = []
+
+    def use_expr(expr) -> None:
+        if isinstance(expr, ir.Var):
+            used.add(expr.unique_id)
+        elif isinstance(expr, ir.MakeTuple):
+            for e in expr.elements:
+                use_expr(e)
+        elif isinstance(expr, ir.Call):
+            for a in expr.args:
+                use_expr(a)
+
+    def walk_loop(node) -> None:
+        # ForStmt / WhileStmt: bind the loop var (for) + iter-arg vars + return
+        # vars; collect bound / init / condition uses; recurse into the body.
+        if isinstance(node, ir.ForStmt):
+            defined.add(node.loop_var.unique_id)
+            use_expr(node.start)
+            use_expr(node.stop)
+            use_expr(node.step)
+        else:
+            use_expr(node.condition)
+        for ia in node.iter_args:
+            defined.add(ia.unique_id)
+            use_expr(ia.initValue)
+        for rv in node.return_vars:
+            defined.add(rv.unique_id)
+        walk(node.body)
+
+    def walk_leaf(node) -> None:
+        # AssignStmt / ReturnStmt / YieldStmt / EvalStmt.
+        if isinstance(node, ir.AssignStmt):
+            defined.add(node.var.unique_id)
+            if isinstance(node.value, ir.Call) and node.value.op.name == "tile.load":
+                src = node.value.args[0]
+                loads.append((node.var, src.name_hint if isinstance(src, ir.Var) else "<expr>"))
+            use_expr(node.value)
+        elif isinstance(node, (ir.ReturnStmt, ir.YieldStmt)):
+            for v in node.value:
+                use_expr(v)
+        elif isinstance(node, ir.EvalStmt):
+            use_expr(node.expr)
+
+    def walk(node) -> None:
+        if node is None:
+            return
+        if isinstance(node, ir.SeqStmts):
+            for s in node.stmts:
+                walk(s)
+        elif isinstance(node, ir.ScopeStmt):
+            walk(node.body)
+        elif isinstance(node, (ir.ForStmt, ir.WhileStmt)):
+            walk_loop(node)
+        elif isinstance(node, ir.IfStmt):
+            for rv in node.return_vars:
+                defined.add(rv.unique_id)
+            use_expr(node.condition)
+            walk(node.then_body)
+            walk(node.else_body)
+        else:
+            walk_leaf(node)
+
+    for p in fn.params:
+        defined.add(p.unique_id)
+    walk(fn.body)
+    return defined, used, loads
+
+
 class TestFlattenTileNdTo2DSharedBatchMatmulOperand:
     """A ``tile.batch_matmul`` operand shared by multiple matmuls must not be
-    left behind as a dead ``tile.load`` once Strategy 1 re-emits per-matmul loads.
+    left behind as a dead ``tile.load`` once Strategy 1 re-emits per-matmul loads,
+    and a shared operand also consumed inside a nested block must NOT be dropped.
 
     Regression for the SwiGLU / gate-up FFN pattern: the activation ``X`` is the
     common LHS of both the gate (``X@W1``) and up (``X@W3``) matmuls, so its load
@@ -2774,58 +2858,92 @@ class TestFlattenTileNdTo2DSharedBatchMatmulOperand:
         fn = after.get_function("main_incore_0")
         assert fn is not None
 
-        # Collect every tile.load AssignStmt (bound var name, source tensor name)
-        # and the set of all Var name_hints referenced anywhere in the body.
-        loads: list[tuple[str, str]] = []
-        used: set[str] = set()
-
-        def record_uses(expr) -> None:
-            if isinstance(expr, ir.Var):
-                used.add(expr.name_hint)
-            elif isinstance(expr, ir.Call):
-                for a in expr.args:
-                    record_uses(a)
-            elif isinstance(expr, ir.MakeTuple):
-                for e in expr.elements:
-                    record_uses(e)
-
-        def walk(node) -> None:
-            if isinstance(node, ir.SeqStmts):
-                for s in node.stmts:
-                    walk(s)
-            elif isinstance(node, ir.AssignStmt):
-                if isinstance(node.value, ir.Call):
-                    call = node.value
-                    if call.op.name == "tile.load":
-                        src = call.args[0]
-                        src_name = src.name_hint if isinstance(src, ir.Var) else "<expr>"
-                        loads.append((node.var.name_hint, src_name))
-                    for a in call.args:
-                        record_uses(a)
-                else:
-                    record_uses(node.value)
-            elif isinstance(node, ir.ReturnStmt):
-                for v in node.value:
-                    record_uses(v)
-            elif isinstance(node, ir.EvalStmt):
-                record_uses(node.expr)
-
-        walk(fn.body)
+        _defined, used, loads = _collect_def_use(fn)
 
         # 1. No tile.load result is dead: every load is consumed downstream. The
         #    original shared `x_mat` load (use_count == 2) must be skipped, not
-        #    left as a dead load.
-        dead = [name for name, _ in loads if name not in used]
+        #    left as a dead load. Identity is by Var.unique_id, since name_hint
+        #    is repeated across distinct re-emitted loads.
+        dead = [v.name_hint for v, _ in loads if v.unique_id not in used]
         assert not dead, f"dead tile.load(s) left after flatten: {dead}"
 
         # 2. The shared activation X is re-emitted exactly once per matmul (two
         #    loads from x) — NOT three (which would include the dead original).
-        x_loads = [name for name, src in loads if src == "x"]
+        x_loads = [v.name_hint for v, src in loads if src == "x"]
         assert len(x_loads) == 2, f"expected 2 re-emitted x loads, got {len(x_loads)}: {x_loads}"
 
         # 3. Every tile op is flattened to 2D.
         for call in _tile_calls(fn.body):
             assert len(cast(ir.TileType, call.type).shape) == 2
+
+    def test_shared_operand_with_nested_use_not_dropped(self):
+        """A batch_matmul operand also used inside a nested loop must NOT be skipped.
+
+        The skip pre-scan counts only top-level uses; if it ignored nested uses,
+        the new shared-operand rule would drop ``x_mat``'s load even though the
+        nested ``tile.batch_matmul`` (lowered via Strategy 2 -> ``tile.slice(x_mat)``)
+        still references it, leaving a dangling Var. The fix counts uses
+        recursively and only skips a load with no nested use.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[1, 16, 128], pl.INT8],
+                w1: pl.Tensor[[1, 128, 64], pl.INT8],
+                gate__out: pl.Out[pl.Tensor[[1, 16, 64], pl.INT32]],
+            ) -> pl.Tensor[[1, 16, 64], pl.INT32]:
+                # x_mat is a top-level batch_matmul operand AND reused inside the loop.
+                x_mat: pl.Tile[[1, 16, 128], pl.INT8, pl.Mem.Mat] = pl.load(
+                    x, [0, 0, 0], [1, 16, 128], [1, 16, 128], target_memory=pl.Mem.Mat, transpose=False
+                )
+                w1_mat: pl.Tile[
+                    [1, 128, 64],
+                    pl.INT8,
+                    pl.Mem.Mat,
+                    pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.col_major),
+                ] = pl.load(
+                    w1, [0, 0, 0], [1, 64, 128], [1, 64, 128], target_memory=pl.Mem.Mat, transpose=True
+                )
+                acc_init = pl.tile.batch_matmul(x_mat, w1_mat)  # top-level use
+                for _i, (acc,) in pl.range(2, init_values=(acc_init,)):
+                    # Nested use of x_mat / w1_mat: accumulate into the carried Acc tile.
+                    acc2 = pl.tile.batch_matmul_acc(acc, x_mat, w1_mat)
+                    acc = pl.yield_(acc2)
+                return pl.store(acc, [0, 0, 0], gate__out)
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[1, 16, 128], pl.INT8],
+                w1: pl.Tensor[[1, 128, 64], pl.INT8],
+            ) -> pl.Tensor[[1, 16, 64], pl.INT32]:
+                gate__out = pl.create_tensor([1, 16, 64], dtype=pl.INT32, layout=pl.TensorLayout.ND)
+                return self.main_incore_0(x, w1, gate__out)
+
+        after = passes.flatten_tile_nd_to_2d()(Before)
+        fn = after.get_function("main_incore_0")
+        assert fn is not None
+
+        defined, used, loads = _collect_def_use(fn)
+
+        # No dangling Var: every used Var is defined. If the pre-scan ignored the
+        # nested use of x_mat/w1_mat, their loads would be dropped while the
+        # nested tile.slice still referenced them.
+        dangling = used - defined
+        assert not dangling, f"dangling Var unique_ids after flatten: {sorted(dangling)}"
+
+        # The shared operand load survives because of its nested consumer.
+        assert any(src == "x" and v.unique_id in used for v, src in loads), (
+            "x_mat load was dropped despite a nested use"
+        )
+
+        # The pass still produces only 2D tile ops.
+        props = passes.IRPropertySet()
+        props.insert(passes.IRProperty.TileOps2D)
+        passes.verify_properties(props, after, "test_shared_operand_with_nested_use_not_dropped")
 
 
 if __name__ == "__main__":

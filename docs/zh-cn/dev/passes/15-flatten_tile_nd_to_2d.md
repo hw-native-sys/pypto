@@ -67,6 +67,8 @@ program_2d = flatten_pass(program)
 （例如 SwiGLU FFN 中同时喂给 gate `X@W1` 与 up `X@W3` 两个 matmul 的激活 `X`，
 `use_count > 1`）。若保留这种共享 load，会在生成的 matmul kernel 中发射一次多余的
 MTE2 load，并复用一个仍存活的权重 buffer，从而在 load 流水线上对其造成串行化。
+使用次数按**递归**统计（含嵌套的 `If`/`For`/`While`/`Scope` 体）：若某个 load 还在
+嵌套块内被使用，则绝不跳过 —— 嵌套块中的非 batch-matmul 消费者仍然需要它。
 
 ## 示例
 

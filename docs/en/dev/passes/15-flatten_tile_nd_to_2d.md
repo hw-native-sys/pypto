@@ -70,6 +70,9 @@ multiple matmuls (e.g. the activation `X` feeding both the gate `X@W1` and up
 `X@W3` matmuls of a SwiGLU FFN, `use_count > 1`). Leaving such a shared load
 behind would emit a wasted MTE2 load that survives to the generated matmul
 kernel and reuses a live weight buffer, serializing it on the load pipeline.
+Uses are counted **recursively** (including nested `If`/`For`/`While`/`Scope`
+bodies): a load also consumed inside a nested block is never skipped, since a
+nested non-batch-matmul consumer still needs it.
 
 ## Example
 

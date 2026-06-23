@@ -1506,22 +1506,80 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         continue;
       }
     }
+    // The per-statement scan above counts only TOP-LEVEL uses (for an
+    // IfStmt/ForStmt/WhileStmt it counts the condition / loop bounds / iter_arg
+    // inits, but NOT uses inside the nested body). Separately count EVERY use of
+    // each Var, recursing into nested IfStmt/ForStmt/WhileStmt/ScopeStmt bodies.
+    // A batch_matmul operand load that is also consumed inside a nested block
+    // must NOT be skipped: dropping its definition would leave the nested use
+    // referencing an undefined Var after the nested block is rewritten.
+    std::unordered_map<const Var*, int> total_counts;
+    std::function<void(const ExprPtr&)> CountTotalExprRefs = [&](const ExprPtr& expr) {
+      if (!expr) return;
+      if (auto v = As<Var>(expr)) {
+        total_counts[v.get()]++;
+        return;
+      }
+      if (auto tup = As<MakeTuple>(expr)) {
+        for (const auto& e : tup->elements_) CountTotalExprRefs(e);
+        return;
+      }
+      if (auto call = As<Call>(expr)) {
+        for (const auto& a : call->args_) CountTotalExprRefs(a);
+        return;
+      }
+    };
+    std::function<void(const StmtPtr&)> CountTotalStmtRefs = [&](const StmtPtr& s) {
+      if (!s) return;
+      if (auto seq = As<SeqStmts>(s)) {
+        for (const auto& inner : seq->stmts_) CountTotalStmtRefs(inner);
+      } else if (auto scope = As<ScopeStmt>(s)) {
+        CountTotalStmtRefs(scope->body_);
+      } else if (auto if_stmt = As<IfStmt>(s)) {
+        CountTotalExprRefs(if_stmt->condition_);
+        CountTotalStmtRefs(if_stmt->then_body_);
+        if (if_stmt->else_body_.has_value()) CountTotalStmtRefs(*if_stmt->else_body_);
+      } else if (auto for_stmt = As<ForStmt>(s)) {
+        CountTotalExprRefs(for_stmt->start_);
+        CountTotalExprRefs(for_stmt->stop_);
+        CountTotalExprRefs(for_stmt->step_);
+        for (const auto& ia : for_stmt->iter_args_) CountTotalExprRefs(ia->initValue_);
+        CountTotalStmtRefs(for_stmt->body_);
+      } else if (auto while_stmt = As<WhileStmt>(s)) {
+        CountTotalExprRefs(while_stmt->condition_);
+        for (const auto& ia : while_stmt->iter_args_) CountTotalExprRefs(ia->initValue_);
+        CountTotalStmtRefs(while_stmt->body_);
+      } else if (auto a = As<AssignStmt>(s)) {
+        CountTotalExprRefs(a->value_);
+      } else if (auto ret = As<ReturnStmt>(s)) {
+        for (const auto& v : ret->value_) CountTotalExprRefs(v);
+      } else if (auto yield = As<YieldStmt>(s)) {
+        for (const auto& v : yield->value_) CountTotalExprRefs(v);
+      } else if (auto eval = As<EvalStmt>(s)) {
+        CountTotalExprRefs(eval->expr_);
+      }
+    };
+    for (const auto& s : stmts) CountTotalStmtRefs(s);
+
     // A re-emitted operand load is dead once Strategy 1 reconstructs per-batch
-    // loads, so collect loads whose EVERY use is a batch_matmul operand (i.e. no
-    // other live consumer). Comparing the batch_matmul-operand use count against
-    // the total use count — rather than requiring use_count == 1 — covers the
-    // shared-operand case: e.g. a SwiGLU FFN where the activation X is the common
-    // LHS of both the gate (X@W1) and up (X@W3) matmuls (use_count > 1). Each
-    // matmul re-emits its own per-batch load, so the original shared load is
-    // fully dead; restricting to single-use would leave it dangling as dead code
-    // (and a wasted MTE2 load that pollutes the matmul kernel's load pipeline).
-    // The Mat-only guard at the drop site below still protects loads that
-    // Strategy 1 cannot re-emit.
+    // loads, so collect loads whose EVERY use is a (top-level) batch_matmul
+    // operand. Two conditions: all top-level uses are batch_matmul operands
+    // (batch_matmul_operand_uses == use_count) AND the Var has no nested uses
+    // (use_count == total_counts). Comparing against the total use count —
+    // rather than requiring use_count == 1 — covers the shared-operand case:
+    // e.g. a SwiGLU FFN where the activation X is the common LHS of both the
+    // gate (X@W1) and up (X@W3) matmuls (use_count > 1). Each matmul re-emits
+    // its own per-batch load, so the original shared load is fully dead;
+    // restricting to single-use would leave it dangling as dead code (and a
+    // wasted MTE2 load that pollutes the matmul kernel's load pipeline). The
+    // Mat-only guard at the drop site below still protects loads that Strategy 1
+    // cannot re-emit.
     std::unordered_map<const Var*, int> batch_matmul_operand_uses;
     for (const auto* v : batch_matmul_operands) batch_matmul_operand_uses[v]++;
     std::unordered_set<const Var*> seen;
     for (const auto* v : batch_matmul_operands) {
-      if (seen.insert(v).second && batch_matmul_operand_uses[v] == use_count[v]) {
+      if (seen.insert(v).second && batch_matmul_operand_uses[v] == use_count[v] &&
+          use_count[v] == total_counts[v]) {
         batch_matmul_only_vars.insert(v);
       }
     }
@@ -1529,7 +1587,9 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
     // Walk back through safe peelable `tile.reshape` chains so the upstream
     // dead `tile.reshape` (and any further-upstream `tile.load`) are also
     // skipped during rewriting. Without this, the orphan reshape would emit a
-    // rank>2 tile that violates the post-pass `TileOps2D` property.
+    // rank>2 tile that violates the post-pass `TileOps2D` property. Require the
+    // input to have exactly one use across the WHOLE block (total_counts) so a
+    // load also consumed inside a nested body is never peeled away.
     auto stmt_def_map = BuildAssignDefMap(stmts);
     std::vector<const Var*> reshape_worklist(batch_matmul_only_vars.begin(), batch_matmul_only_vars.end());
     while (!reshape_worklist.empty()) {
@@ -1541,7 +1601,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       if (!IsSafePeelableBatchMatmulReshape(reshape_call)) continue;
       auto input_var = As<Var>(reshape_call->args_[0]);
       if (!input_var) continue;
-      if (use_count[input_var.get()] != 1) continue;
+      if (total_counts[input_var.get()] != 1) continue;
       if (batch_matmul_only_vars.insert(input_var.get()).second) {
         reshape_worklist.push_back(input_var.get());
       }
