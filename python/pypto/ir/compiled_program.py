@@ -648,7 +648,7 @@ class CompiledProgram:
 
     @property
     def runtime_name(self) -> str:
-        """Runtime ABI name baked into ``kernel_config.py`` (e.g. ``"host_build_graph"``)."""
+        """Runtime ABI name baked into ``kernel_config.py`` (e.g. ``"tensormap_and_ringbuffer"``)."""
         self._ensure_runtime_loaded()
         assert self._runtime_name is not None
         return self._runtime_name

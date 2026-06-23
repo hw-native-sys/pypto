@@ -77,9 +77,13 @@ _ACTIVE_WORKERS: contextvars.ContextVar[tuple[ChipWorker, ...]] = contextvars.Co
     "_pypto_active_workers", default=()
 )
 
-# Default runtime name — matches ``compile_and_assemble``'s fallback in
-# ``device_runner.py`` and the most common user-program runtime.
-_DEFAULT_RUNTIME = "host_build_graph"
+# Default runtime name — matches the runtime that ``pto_backend`` bakes into
+# every generated ``kernel_config.py`` (``RUNTIME_CONFIG["runtime"]``). That is
+# the value ``CompiledProgram.runtime_name`` reports and the one the reuse
+# lookup in ``device_runner.execute_on_device`` searches for, so a
+# default-constructed ``with ChipWorker():`` bind-matches a freshly compiled
+# program instead of silently falling through to a one-shot worker.
+_DEFAULT_RUNTIME = "tensormap_and_ringbuffer"
 
 
 class ChipWorker(Worker):
@@ -111,7 +115,8 @@ class ChipWorker(Worker):
             :class:`~pypto.runtime.distributed_runner.DistributedWorker`.
         runtime: Runtime implementation name. Must match the runtime the
             program is compiled against; otherwise reuse silently falls
-            through to the one-shot path. Defaults to ``"host_build_graph"``.
+            through to the one-shot path. Defaults to
+            ``"tensormap_and_ringbuffer"``.
         auto_init: If ``True``, call :meth:`init` from ``__init__``. Default
             is ``True``.
     """

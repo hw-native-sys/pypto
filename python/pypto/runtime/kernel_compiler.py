@@ -47,7 +47,7 @@ class KernelCompiler(_SimplerKernelCompiler):
         exists. Always appends ``common/task_interface``.
 
         Args:
-            runtime_name: Name of the runtime (e.g., ``"host_build_graph"``).
+            runtime_name: Name of the runtime (e.g., ``"tensormap_and_ringbuffer"``).
 
         Returns:
             List of absolute include directory paths.
@@ -91,7 +91,7 @@ class KernelCompiler(_SimplerKernelCompiler):
             source_path: Path to kernel source file (.cpp).
             core_type: Core type: ``"aic"`` (cube) or ``"aiv"`` (vector).
             pto_isa_root: Path to PTO-ISA root directory.
-            runtime_name: Name of the runtime (e.g., ``"host_build_graph"``).
+            runtime_name: Name of the runtime (e.g., ``"tensormap_and_ringbuffer"``).
             extra_include_dirs: Additional include directories.
             build_dir: Optional build directory for output files.
 

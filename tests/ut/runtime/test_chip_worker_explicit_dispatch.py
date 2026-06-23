@@ -34,7 +34,7 @@ def fake_simpler_worker():
         yield instance
 
 
-def _fake_compiled(platform="a2a3sim", runtime="host_build_graph"):
+def _fake_compiled(platform="a2a3sim", runtime="tensormap_and_ringbuffer"):
     """Build a CompiledProgram mock matching ChipWorker(...) bindings."""
     cc = MagicMock(name="chip_callable")
     compiled = MagicMock(name="CompiledProgram")

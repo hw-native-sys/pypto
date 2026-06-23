@@ -74,25 +74,31 @@ class TestActiveChipWorkerLookup:
     def test_no_active_worker_outside_with_block(self, fake_simpler_worker):
         ChipWorker(config=RunConfig(platform="a2a3sim"))  # constructed but not entered
         assert (
-            ChipWorker.current(level=2, platform="a2a3sim", device_id=0, runtime="host_build_graph") is None
+            ChipWorker.current(level=2, platform="a2a3sim", device_id=0, runtime="tensormap_and_ringbuffer")
+            is None
         )
 
     def test_with_block_publishes_worker(self, fake_simpler_worker):
         with ChipWorker(config=RunConfig(platform="a2a3sim")) as w:
-            found = ChipWorker.current(level=2, platform="a2a3sim", device_id=0, runtime="host_build_graph")
+            found = ChipWorker.current(
+                level=2, platform="a2a3sim", device_id=0, runtime="tensormap_and_ringbuffer"
+            )
             assert found is w
 
     def test_exit_unpublishes(self, fake_simpler_worker):
         with ChipWorker(config=RunConfig(platform="a2a3sim")):
             pass
         assert (
-            ChipWorker.current(level=2, platform="a2a3sim", device_id=0, runtime="host_build_graph") is None
+            ChipWorker.current(level=2, platform="a2a3sim", device_id=0, runtime="tensormap_and_ringbuffer")
+            is None
         )
 
     def test_device_mismatch_returns_none(self, fake_simpler_worker):
         with ChipWorker(config=RunConfig(platform="a2a3sim", device_id=0)):
             assert (
-                ChipWorker.current(level=2, platform="a2a3sim", device_id=1, runtime="host_build_graph")
+                ChipWorker.current(
+                    level=2, platform="a2a3sim", device_id=1, runtime="tensormap_and_ringbuffer"
+                )
                 is None
             )
 
@@ -114,13 +120,17 @@ class TestActiveChipWorkerLookup:
             with ChipWorker(config=RunConfig(platform="a2a3sim", device_id=1)) as inner:
                 # Lookup for device_id=1 finds inner.
                 assert (
-                    ChipWorker.current(level=2, platform="a2a3sim", device_id=1, runtime="host_build_graph")
+                    ChipWorker.current(
+                        level=2, platform="a2a3sim", device_id=1, runtime="tensormap_and_ringbuffer"
+                    )
                     is inner
                 )
                 # Lookup for device_id=0 still finds the outer ChipWorker — the
                 # filter walks the whole stack, not just the topmost entry.
                 assert (
-                    ChipWorker.current(level=2, platform="a2a3sim", device_id=0, runtime="host_build_graph")
+                    ChipWorker.current(
+                        level=2, platform="a2a3sim", device_id=0, runtime="tensormap_and_ringbuffer"
+                    )
                     is outer
                 )
 
@@ -171,7 +181,7 @@ class TestExecuteOnDeviceReuse:
                     chip_callable,
                     orch_args,
                     platform="a2a3sim",
-                    runtime_name="host_build_graph",
+                    runtime_name="tensormap_and_ringbuffer",
                     device_id=0,
                 )
 
