@@ -3559,7 +3559,7 @@ class TestTensorReadWriteOffsetCodegen:
         )
 
     def test_windowed_tuple_outputs_rebind_loop_carried_tensor_without_redeclaration(self):
-        """OutWindowExternalizer tuple outputs must rebind loop carries instead of redeclaring them."""
+        """OutWindowExternalizer tuple outputs must rebind loop-carried tensors instead of redeclaring them."""  # noqa: E501
 
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)

@@ -93,6 +93,9 @@ fixable = ["ALL"]
 # `with pl.spmd(...) as tid:` / `with pl.at(...) as tid:` capture targets are
 # intentionally unused Python bindings — the capture records an IR scope attr.
 "tests/ut/language/parser/test_scope_parsing.py" = ["F841"]
+# Docstring comparison table uses RST grid table syntax that exceeds line-length;
+# the `# noqa: E501` inside a string literal is not parsed by ruff.
+"python/pypto/language/parser/decorator.py" = ["E501"]
 "tests/ut/codegen/test_spmd_scope_tid_codegen.py" = ["F841"]
 # Embedded DSL repro deliberately collapses `with pl.at(...)` onto one line to
 # mimic @pl.jit's ast.unparse output — load-bearing, cannot be wrapped.

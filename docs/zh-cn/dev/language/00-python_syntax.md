@@ -668,6 +668,167 @@ for i, (sum,) in pl.range(10, init_values=(sum_init,)):
 sum_final: pl.INT64 = sum  # captures final value
 ```
 
+### `@pl.inline` 装饰器
+
+`@pl.inline` 捕获一个用于语句级内联的函数。该函数不会被添加到 Program 中——函数体在每个调用点展开。
+
+```python
+@pl.inline
+def normalize(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+    result: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+    return result
+
+@pl.program
+class MyModel:
+    @pl.function
+    def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        y: pl.Tensor[[64], pl.FP32] = normalize(x)  # 在此处内联展开
+        return y
+```
+
+**规则：**
+
+- 位置参数数量必须与非关键字仅参数列表精确匹配
+- 关键字仅参数（``*`` 之后）被视为**编译期（CT）kwargs**——仅支持 ``int``、``float``、``bool`` 和 ``str`` 类型，且必须在解析时求值为常量
+- CT kwargs 可以有默认值；无默认值的必须 CT kwargs 在每个调用点都需要提供
+- ``if <bool CT kwarg>:`` 在解析时被折叠（CT-if）——只发出匹配的分支，不产生 ``IfStmt``
+- ``pl.const(<CT kwarg 表达式>, dtype)`` 可将 CT kwargs 表达式折叠为常量
+- scope 构造器中的 ``name_hint=`` 接受 ``str`` 类型的 CT kwargs
+- 内联函数定义处的闭包变量可用
+- 内联函数可多次调用（每次展开独立）
+- 支持嵌套的内联调用
+
+**CT kwargs 示例：**
+
+```python
+@pl.inline
+def fused_matmul_add(
+    a: pl.Tensor[[128, 128], pl.FP16],
+    b: pl.Tensor[[128, 128], pl.FP16],
+    *,
+    k_tile: int = 32,
+    use_relu: bool = False,
+) -> pl.Tensor[[128, 128], pl.FP16]:
+    result: pl.Tensor[[128, 128], pl.FP16]
+    for k in pl.parallel(0, 128, k_tile):
+        tile_a: pl.Tensor[[128, k_tile], pl.FP16] = pl.load(a, slice(:, k:k + k_tile))
+        tile_b: pl.Tensor[[k_tile, 128], pl.FP16] = pl.load(b, slice(k:k + k_tile, :))
+        result = pl.matmul(tile_a, tile_b, acc=result)
+    if use_relu:
+        result = pl.maximum(result, pl.const(0, pl.FP16))
+    return result
+
+@pl.program
+class MyModel:
+    @pl.function
+    def main(self, x: pl.Tensor[[128, 128], pl.FP16]) -> pl.Tensor[[128, 128], pl.FP16]:
+        out: pl.Tensor[[128, 128], pl.FP16] = fused_matmul_add(x, x, use_relu=True)
+        return out
+```
+
+#### 设计与开发指南
+
+**心智模型：AST 宏，而非函数调用。** 函数体在定义时被捕获为 AST，在每个调用点处拼接进
+调用方的 IR 流中（解析期展开）。编译后的 kernel 中不存在运行时函数调用。
+
+- **同一函数体，N 次展开** — N 个独立的 IR 副本，各有自己的 Var 对象
+  （真正 hygienic——作用域隔离：函数体内的局部变量不会泄漏到调用方）。
+- **无 IR 作用域边界** — ``"inline"`` 作用域仅是一个 Python 变量名解析的屏障。
+  outliner 把展开后的语句视为外层 IR scope 的平级子节点。
+- **定义处的闭包变量可解析** — `closure_vars` 捕获了定义文件的 ``globals()`` + ``locals()``，
+  用于 import 和通用常量。
+
+**CT kwargs 运行机制（AST 折叠）：** 在每个调用点，标注为 ``int``/``float``/``bool``/``str``
+的关键字仅参数从调用方的闭包求值，并在函数体解析前折叠为 ``ast.Constant`` 字面量
+（由 ``_fold_inline_ct_kwargs`` ``NodeTransformer`` 实现）。解析器不会为它们创建 Scalar
+包装或 Var 对象。纯常量算术表达式（``head_dim // 2``）也会被折叠。默认值在定义时冻结。
+
+**`@pl.inline` vs `@pl.jit.inline`：**
+
+| 属性 | `@pl.inline` | `@pl.jit.inline` |
+|------|-------------|-------------------|
+| 阶段 | 解析期 AST 展开 | IR 期 C++ InlineFunctions 拼接 |
+| 作用域共享 | 函数体独立作用域（hygienic） | 与调用方共享 tile/spmd 上下文 |
+| 模块级常量 | 必须通过 CT kwargs（自包含） | 通过 `py_globals` 解析 |
+| 可从 `@pl.jit` 调用 | 是（发现 pass） | 是（dep 图） |
+| 可从 `@pl.inline` 调用 | 是（嵌套展开） | **否** |
+| 最适合 | 小辅助函数（<50 行，tiling 包装） | 大辅助函数（大量 tiling 常量） |
+| 每调用点 CT kwargs | 是，自然支持 | 否——常量在定义时固定 |
+
+**作用域隔离与返回值逃脱模式：** Inline 函数体使用 ``exit_scope(leak_vars=False)``——
+函数体内的局部变量不会泄漏到调用方作用域。**唯一**的逃逸路径是返回值：
+
+```python
+@pl.inline
+def compute(x: pl.Tensor[[N], pl.FP32], *, factor: float = 1.0) -> pl.Tensor[[N], pl.FP32]:
+    result: pl.Tensor[[N], pl.FP32] = pl.mul(x, factor)
+    return result                           # ← 必须 return
+
+y = compute(x, factor=2.0)                  # ✓ 正确
+compute(x, factor=2.0)                      # ✗ 抛出 "has no return value"
+```
+
+这对 ``pl.assemble`` 的输出累积尤为重要。每个通过 assemble 修改张量的 inline 必须
+``return`` 累积后的结果，且每个调用点必须捕获它：
+
+```python
+# ✓ 正确模式
+@pl.inline
+def accumulate(x: pl.Tensor, out: pl.Tensor, *, k_chunk: int = 128) -> pl.Tensor:
+    for kb in pl.range(hidden // k_chunk):
+        k0 = kb * k_chunk
+        chunk = pl.cast(pl.slice(x, [rows, k_chunk], [0, k0]), pl.FP32)
+        out = pl.assemble(out, chunk, [0, k0])
+    return out                               # ← 返回累积结果
+
+out = accumulate(x, out, k_chunk=256)        # ✓ 用展开结果重新绑定 'out'
+```
+
+**自包含要求：** 定义文件中的模块级常量可通过 ``closure_vars`` 解析，但依赖它们会
+使 inline 变得脆弱。模型特定常量（tile 大小、模型维度、epsilon）必须使用 CT kwargs。
+只有真正通用的常量（如数学常数 ``pi``）可以保留为模块级——并应记录在文档中。
+
+**应避免的反模式：**
+1. 返回 ``None``（void inline）——解析器抛出 "has no return value"。
+2. 依赖定义处的模块级常量来保存模型特定值。
+3. 使用可变对象（``list``, ``dict``）作为 CT kwargs——只支持 ``int``/``float``/``bool``/``str``。
+4. 过深的 ``@pl.inline`` 嵌套调用（>3 层）——每层都会倍增解析期 IR 大小。
+5. 为节点级大型函数（>100 行、多个 ``pl.spmd`` 区域）编写 ``@pl.inline``——
+   这些应使用 ``@pl.jit.inline``。
+
+**JIT 集成：** 当 ``@pl.jit`` 或 ``@pl.jit.inline`` 调用 ``@pl.inline`` 辅助函数时，
+specializer 通过遍历所有 dep 函数 AST 来发现 Call 节点，其被调用者名称在 ``py_globals``
+中解析为 ``InlineFunction``。它将原始的 ``InlineFunction`` 注入到
+``pl.parse(extra_globals=...)`` 中，保留 ``closure_vars``。传递性发现会递归遍历嵌套的
+inline 函数体。生成的 program 源码从不发出 inline 函数体——只有 ``@pl.inline`` 调用
+出现在源码文本中；``pl.parse()`` 直接展开它们。
+
+**共享模块组织：**
+
+```
+shared/
+├── __init__.py       # 重新导出，文档说明限制条件
+├── rmsnorm.py        # @pl.inline rmsnorm, rmsnorm_recip
+├── rope.py           # @pl.inline rope_rotate
+└── silu.py           # @pl.inline silu_activation
+```
+
+调用方按名称导入：``from shared.rmsnorm import rmsnorm``。JIT 发现 pass 会在调用方的
+``py_globals`` 中找到它们。从手写的 ``@pl.program`` 的 ``Inline`` 函数中调用的 inline
+函数必须通过 ``extra_globals`` 传入。
+
+**迁移检查清单：**
+1. 辅助函数是否是叶子（自包含、独立作用域）？如果是 node，保留 ``@pl.jit.inline``。
+2. 所有模型特定常量是否都设为 CT kwargs 并带有合理默认值？
+3. inline 是否返回其输出？不允许返回 ``None`` 的 void inline。
+4. 所有调用点是否都捕获了返回值？
+5. CT kwargs 是否属于 ``int``/``float``/``bool``/``str`` 类型（不是 list/dict）？
+6. 默认值是否在定义时冻结？
+7. 函数体是否只使用 ``pl.*`` 操作、自己的参数和 CT kwargs？
+8. inline 是否足够短，使每个调用点都可以独立解析？
+9. 如果在共享模块中，调用方是否按名称导入，且名称与 JIT 函数体中引用的名称一致？
+10. 如果 inline 在 ``pl.parallel``/``pl.spmd`` 内部使用 ``pl.cast``，是否经过测试？
+
 ## 打印 IR 节点
 
 对任意 IR 节点调用 `as_python()` 获取其 Python 表示：

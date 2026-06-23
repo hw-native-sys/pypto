@@ -6620,7 +6620,7 @@ class ASTParser:
                 for stmt in inline_func.func_def.body
             ]
         else:
-            body_stmts = list(inline_func.func_def.body)
+            body_stmts = inline_func.func_def.body
 
         try:
             for i, stmt in enumerate(body_stmts):

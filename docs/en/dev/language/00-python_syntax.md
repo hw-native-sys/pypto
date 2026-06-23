@@ -728,10 +728,151 @@ class MyModel:
 
 **Rules:**
 
-- Argument count must match parameter list exactly
+- Positional argument count must match the non-kwonly parameter list exactly
+- Keyword-only parameters (``*``-separated) are treated as **compile-time (CT) kwargs** — only ``int``, ``float``, ``bool``, and ``str`` types are supported, and they must resolve to constant values at parse time
+- CT kwargs can have defaults; required CT kwargs (no default) must be supplied at every call site
+- ``if <bool CT kwarg>:`` is folded at parse time (CT-if) — only the matching branch is emitted, and no ``IfStmt`` is produced
+- ``pl.const(<CT kwarg expression>, dtype)`` folds CT-kwarg expressions to constants
+- ``name_hint=`` in scope constructors accepts ``str`` CT kwargs
 - Closure variables from the inline definition site are available
 - Inline functions can be called multiple times (each expansion is independent)
 - Nested inline calls are supported
+
+**Example with CT kwargs:**
+
+```python
+@pl.inline
+def fused_matmul_add(
+    a: pl.Tensor[[128, 128], pl.FP16],
+    b: pl.Tensor[[128, 128], pl.FP16],
+    *,
+    k_tile: int = 32,
+    use_relu: bool = False,
+) -> pl.Tensor[[128, 128], pl.FP16]:
+    result: pl.Tensor[[128, 128], pl.FP16]
+    for k in pl.parallel(0, 128, k_tile):
+        tile_a: pl.Tensor[[128, k_tile], pl.FP16] = pl.load(a, slice(:, k:k + k_tile))
+        tile_b: pl.Tensor[[k_tile, 128], pl.FP16] = pl.load(b, slice(k:k + k_tile, :))
+        result = pl.matmul(tile_a, tile_b, acc=result)
+    if use_relu:
+        result = pl.maximum(result, pl.const(0, pl.FP16))
+    return result
+
+@pl.program
+class MyModel:
+    @pl.function
+    def main(self, x: pl.Tensor[[128, 128], pl.FP16]) -> pl.Tensor[[128, 128], pl.FP16]:
+        out: pl.Tensor[[128, 128], pl.FP16] = fused_matmul_add(x, x, use_relu=True)
+        return out
+```
+
+#### Design & Developer Guide
+
+**Mental model: AST macro, not function call.** The body is captured as AST at definition time
+and spliced into the caller's IR stream at each call site during parsing. There is no runtime
+function call in the compiled kernel.
+
+- **Same body, N expansions** — N independent copies of the body IR, each with its own Var objects
+  (true hygiene — scope-isolated: body-local variables do not leak into the caller).
+- **No IR scope boundary** — the ``"inline"`` scope is a Python-name-resolution barrier only.
+  The outliner treats expanded statements as flat children of the enclosing IR scope.
+- **Definition-site closure is available** — `closure_vars` captures the definition file's
+  ``globals()`` + ``locals()`` for imports and truly universal constants.
+
+**How CT kwargs work (AST folding):** At each call site, keyword-only parameters annotated with
+``int``/``float``/``bool``/``str`` are evaluated from the caller's closure and folded to
+``ast.Constant`` literals before the body is parsed (via ``_fold_inline_ct_kwargs``
+``NodeTransformer``). The parser never creates Scalar wrappers or Var objects for them.
+Constant-only arithmetic expressions (``head_dim // 2``) are also folded. Defaults are frozen
+at definition time.
+
+**`@pl.inline` vs `@pl.jit.inline`:**
+
+| Property | `@pl.inline` | `@pl.jit.inline` |
+|----------|-------------|-------------------|
+| Stage | Parse-time AST expansion | IR-time C++ InlineFunctions splicing |
+| Scope sharing | Body owns its own scopes (hygienic) | Shares caller's tile/spmd context |
+| Module-level constants | Must be CT kwargs (self-contained) | Resolved via `py_globals` |
+| Callable from `@pl.jit` | Yes (discovery pass) | Yes (dep graph) |
+| Callable from `@pl.inline` | Yes (nested expansion) | **No** |
+| Best for | Small helpers (<50 lines, tiling wrappers) | Large helpers (many tiling constants) |
+| Per-call-site CT kwargs | Yes, natural | No — constants fixed at definition |
+
+**Scope isolation and the return-escape pattern:** Inline bodies use
+``exit_scope(leak_vars=False)`` — body-local variables do not leak into the caller.
+The **only** escape path is the return value:
+
+```python
+@pl.inline
+def compute(x: pl.Tensor[[N], pl.FP32], *, factor: float = 1.0) -> pl.Tensor[[N], pl.FP32]:
+    result: pl.Tensor[[N], pl.FP32] = pl.mul(x, factor)
+    return result                           # ← REQUIRED
+
+y = compute(x, factor=2.0)                  # ✓ correct
+compute(x, factor=2.0)                      # ✗ raises "has no return value"
+```
+
+This is especially important for ``pl.assemble`` output accumulation. Every inline that mutates
+a tensor via assemble must ``return`` the accumulated result, and every call site must capture it:
+
+```python
+# ✓ CORRECT pattern
+@pl.inline
+def accumulate(x: pl.Tensor, out: pl.Tensor, *, k_chunk: int = 128) -> pl.Tensor:
+    for kb in pl.range(hidden // k_chunk):
+        k0 = kb * k_chunk
+        chunk = pl.cast(pl.slice(x, [rows, k_chunk], [0, k0]), pl.FP32)
+        out = pl.assemble(out, chunk, [0, k0])
+    return out                               # ← return the accumulated result
+
+out = accumulate(x, out, k_chunk=256)        # ✓ rebinds 'out' with assembled result
+```
+
+**Self-contained requirement:** Module-level constants from the definition file are resolvable
+via ``closure_vars``, but relying on them makes the inline fragile. Model-specific constants
+(tile sizes, model dimensions, epsilon) must be CT kwargs. Only truly universal constants
+(e.g., mathematical ``pi``) are acceptable as module-level — and should be documented.
+
+**Anti-patterns to avoid:**
+1. Returning ``None`` (void inline) — parser raises "has no return value".
+2. Relying on def-site module-level constants for model-specific values.
+3. Using mutable objects (``list``, ``dict``) as CT kwargs — only ``int``/``float``/``bool``/``str``.
+4. Deeply nested ``@pl.inline`` calls (>3 levels) — each level multiplies parse-time IR size.
+5. Writing ``@pl.inline`` for node-sized functions (>100 lines, multiple ``pl.spmd`` regions) —
+   these should be ``@pl.jit.inline`` instead.
+
+**JIT integration:** When ``@pl.jit`` or ``@pl.jit.inline`` calls an ``@pl.inline`` helper,
+the specializer discovers it by walking dep function ASTs for Call nodes whose callee name
+resolves to an ``InlineFunction`` in ``py_globals``. It injects the original ``InlineFunction``
+into ``pl.parse(extra_globals=...)``, preserving ``closure_vars``. Transitive discovery walks
+nested inline bodies too. The generated program source never emits the inline body — only
+the ``@pl.inline`` calls appear in the source text; ``pl.parse()`` expands them directly.
+
+**Shared module organization:**
+
+```
+shared/
+├── __init__.py       # re-exports, docstring with restrictions
+├── rmsnorm.py        # @pl.inline rmsnorm, rmsnorm_recip
+├── rope.py           # @pl.inline rope_rotate
+└── silu.py           # @pl.inline silu_activation
+```
+
+Callers import by name: ``from shared.rmsnorm import rmsnorm``. The JIT discovery pass
+finds them in the caller's ``py_globals``. Inline functions called from hand-written
+``@pl.program`` with ``Inline`` functions must be passed via ``extra_globals``.
+
+**Per-migration checklist:**
+1. Is the helper a leaf (self-contained, own scopes)? If it's a node, keep ``@pl.jit.inline``.
+2. Are all model-specific constants CT kwargs with sensible defaults?
+3. Does the inline return its output? No void inlines returning ``None``.
+4. Do all call sites capture the return value?
+5. Are CT kwargs one of ``int``/``float``/``bool``/``str`` (not lists, dicts)?
+6. Are defaults frozen at definition time?
+7. Does the body use only ``pl.*`` ops, its parameters, and CT kwargs?
+8. Is the inline short enough for each call site to parse independently?
+9. If in a shared module, do callers import by name, matching the JIT body's reference?
+10. If the inline uses ``pl.cast`` inside ``pl.parallel``/``pl.spmd``, has it been tested?
 
 ## Printing IR Nodes
 

@@ -34,6 +34,12 @@ other_jit_func(a, b)              self.other_jit_func(a, b)  (multi-function onl
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pypto.language.parser.decorator import InlineFunction
+
+
 import ast
 import functools
 import inspect
@@ -1441,7 +1447,9 @@ class Specializer:
             Dict mapping inline name → InlineFunction, deduplicated across
             call sites.  Empty if no @pl.inline helpers are called.
         """
-        from pypto.language.parser.decorator import InlineFunction
+        from pypto.language.parser.decorator import (  # noqa: PLC0415 — runtime import avoids circular dep
+            InlineFunction,
+        )
 
         dep_names = {ctx.func_name for ctx in self._contexts}
         found: dict[str, InlineFunction] = {}
