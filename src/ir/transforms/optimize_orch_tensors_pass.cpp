@@ -2207,9 +2207,9 @@ class OutWindowExternalizer {
   static void LogStableDecision(bool accepted, const std::string& target, const WindowRewriteCost& cost) {
     if (!WindowExternalizeLogEnabled()) return;
     std::ostringstream os;
-    os << "[window-stable] " << (accepted ? "accept " : "reject ") << target << ": abi_delta=" << cost.abi_delta
-       << " pieces=" << cost.dense_piece_count << " assemble_pieces=" << cost.assemble_piece_count
-       << " reason=" << cost.reason;
+    os << "[window-stable] " << (accepted ? "accept " : "reject ") << target
+       << ": abi_delta=" << cost.abi_delta << " pieces=" << cost.dense_piece_count
+       << " assemble_pieces=" << cost.assemble_piece_count << " reason=" << cost.reason;
     LOG_INFO << os.str();
   }
 
@@ -2469,8 +2469,8 @@ class OutWindowExternalizer {
     return volume;
   }
 
-  static bool IsStandaloneBoundingBoxVariantDependencySafe(const std::vector<DenseRegionPiece>& original_pieces,
-                                                         const DenseRegionPiece& carrier) {
+  static bool IsStandaloneBoundingBoxVariantDependencySafe(
+      const std::vector<DenseRegionPiece>& original_pieces, const DenseRegionPiece& carrier) {
     auto carrier_volume = ConstantDensePieceVolume(carrier);
     if (!carrier_volume.has_value()) return false;
 
@@ -2568,10 +2568,9 @@ class OutWindowExternalizer {
       analysis.requires_stable_submit_budget =
           ep.outputs == WindowCoveragePolicy::Stable && ep.inputs == WindowCoveragePolicy::Stable;
       for (auto& output : analysis.outputs) {
-        output.linked_flow_source_allowed =
-            flow_linked && ep.outputs != WindowCoveragePolicy::Off &&
-            ep.outputs != WindowCoveragePolicy::Stable &&
-            DensePieces(output).size() == 1;
+        output.linked_flow_source_allowed = flow_linked && ep.outputs != WindowCoveragePolicy::Off &&
+                                            ep.outputs != WindowCoveragePolicy::Stable &&
+                                            DensePieces(output).size() == 1;
       }
       for (auto& input : analysis.inputs) {
         input.linked_reader_allowed = flow_linked && ep.inputs != WindowCoveragePolicy::Off &&
@@ -2626,8 +2625,8 @@ class OutWindowExternalizer {
                              [&](const InputRewriteInfo& input) {
                                WindowRewriteCost cost;
                                bool keep = ShouldKeepInputInStable(input, &cost);
-                               LogStableDecision(keep, DebugParamName(callee_name, func, input.in_param_index),
-                                                 cost);
+                               LogStableDecision(
+                                   keep, DebugParamName(callee_name, func, input.in_param_index), cost);
                                return !keep;
                              }),
               analysis.inputs.end());
@@ -3263,8 +3262,8 @@ class OutWindowExternalizer {
       if (!call || active_aggregate_current_consumer_roots_.empty()) return visited;
       auto attrs = AddRuntimeCurrentConsumerAttrIfNeeded(call, call->attrs_);
       if (!attrs.has_value()) return visited;
-      return std::make_shared<Call>(call->op_, call->args_, call->kwargs_, std::move(*attrs),
-                                    call->GetType(), call->span_);
+      return std::make_shared<Call>(call->op_, call->args_, call->kwargs_, std::move(*attrs), call->GetType(),
+                                    call->span_);
     }
 
     ExprPtr VisitExpr_(const SubmitPtr& op) override {
@@ -3274,10 +3273,9 @@ class OutWindowExternalizer {
       auto call_view = SubmitToCallView(submit);
       auto attrs = AddRuntimeCurrentConsumerAttrIfNeeded(call_view, submit->attrs_);
       if (!attrs.has_value()) return visited;
-      return std::make_shared<Submit>(
-          submit->op_, submit->args_, submit->deps_, submit->kwargs_, std::move(*attrs),
-          submit->GetType(), submit->span_, submit->core_num_, submit->sync_start_,
-          submit->allow_early_resolve_);
+      return std::make_shared<Submit>(submit->op_, submit->args_, submit->deps_, submit->kwargs_,
+                                      std::move(*attrs), submit->GetType(), submit->span_, submit->core_num_,
+                                      submit->sync_start_, submit->allow_early_resolve_);
     }
 
     StmtPtr VisitStmt_(const ForStmtPtr& op) override {
@@ -3323,10 +3321,14 @@ class OutWindowExternalizer {
       auto saved_tuple_result_subst = tuple_result_subst_;
       auto saved_window_parent_subst = window_parent_subst_;
       auto saved_sibling_output_alias_roots = sibling_output_alias_roots_;
+      auto saved_sibling_carrier_alias_roots = sibling_carrier_alias_roots_;
       auto saved_sibling_unwindowable_output_roots = sibling_unwindowable_output_roots_;
       auto saved_sequence_carrier_plan = sequence_carrier_plan_;
       auto later_assemble_source_indices = CollectAssembleSourceIndices(op->stmts_);
       sibling_output_alias_roots_.clear();
+      // Carrier aliases model access-graph edges such as
+      // tensor.assemble(parent, source, offset).  They must remain visible
+      // when a nested writer is analyzed inside the source-producing loop.
       sibling_unwindowable_output_roots_.clear();
       sequence_carrier_plan_ = SequenceCarrierPlan();
       CollectSiblingOutputAliases(op->stmts_);
@@ -3343,24 +3345,24 @@ class OutWindowExternalizer {
                                     BuildSequenceCarrierPlan(op->stmts_, inherited_carrier_roots));
 
       for (size_t stmt_index = 0; stmt_index < op->stmts_.size(); ++stmt_index) {
-        auto saved_active_aggregate_current_source_roots =
-            std::move(active_aggregate_current_source_roots_);
+        auto saved_active_aggregate_current_source_roots = std::move(active_aggregate_current_source_roots_);
         auto saved_active_aggregate_current_consumer_roots =
             std::move(active_aggregate_current_consumer_roots_);
         active_aggregate_current_source_roots_ = saved_active_aggregate_current_source_roots;
         active_aggregate_current_consumer_roots_ = saved_active_aggregate_current_consumer_roots;
         auto aggregate_source_it =
             sequence_carrier_plan_.aggregate_current_source_roots_by_stmt_index.find(stmt_index);
-        if (aggregate_source_it != sequence_carrier_plan_.aggregate_current_source_roots_by_stmt_index.end()) {
+        if (aggregate_source_it !=
+            sequence_carrier_plan_.aggregate_current_source_roots_by_stmt_index.end()) {
           active_aggregate_current_source_roots_.insert(aggregate_source_it->second.begin(),
-                                                       aggregate_source_it->second.end());
+                                                        aggregate_source_it->second.end());
         }
         auto aggregate_consumer_it =
             sequence_carrier_plan_.aggregate_current_consumer_roots_by_stmt_index.find(stmt_index);
         if (aggregate_consumer_it !=
             sequence_carrier_plan_.aggregate_current_consumer_roots_by_stmt_index.end()) {
           active_aggregate_current_consumer_roots_.insert(aggregate_consumer_it->second.begin(),
-                                                         aggregate_consumer_it->second.end());
+                                                          aggregate_consumer_it->second.end());
         }
         auto prelude_it = sequence_carrier_plan_.prelude_stmts_by_index.find(stmt_index);
         if (prelude_it != sequence_carrier_plan_.prelude_stmts_by_index.end()) {
@@ -3403,10 +3405,8 @@ class OutWindowExternalizer {
             }
           }
           MaterializeCarrierCurrentsAfterStmt(stmt_index, nullptr, &new_stmts, &changed);
-          active_aggregate_current_source_roots_ =
-              std::move(saved_active_aggregate_current_source_roots);
-          active_aggregate_current_consumer_roots_ =
-              std::move(saved_active_aggregate_current_consumer_roots);
+          active_aggregate_current_source_roots_ = std::move(saved_active_aggregate_current_source_roots);
+          active_aggregate_current_consumer_roots_ = std::move(saved_active_aggregate_current_consumer_roots);
           continue;
         }
 
@@ -3419,10 +3419,8 @@ class OutWindowExternalizer {
           scalar_defs_[visited_assign->var_.get()] = visited_assign->value_;
         }
         MaterializeCarrierCurrentsAfterStmt(stmt_index, visited, &new_stmts, &changed);
-        active_aggregate_current_source_roots_ =
-            std::move(saved_active_aggregate_current_source_roots);
-        active_aggregate_current_consumer_roots_ =
-            std::move(saved_active_aggregate_current_consumer_roots);
+        active_aggregate_current_source_roots_ = std::move(saved_active_aggregate_current_source_roots);
+        active_aggregate_current_consumer_roots_ = std::move(saved_active_aggregate_current_consumer_roots);
       }
 
       PropagateCarrierCurrents(sequence_carrier_plan_, &saved_sequence_carrier_plan);
@@ -3430,6 +3428,7 @@ class OutWindowExternalizer {
       tuple_result_subst_ = std::move(saved_tuple_result_subst);
       window_parent_subst_ = std::move(saved_window_parent_subst);
       sibling_output_alias_roots_ = std::move(saved_sibling_output_alias_roots);
+      sibling_carrier_alias_roots_ = std::move(saved_sibling_carrier_alias_roots);
       sibling_unwindowable_output_roots_ = std::move(saved_sibling_unwindowable_output_roots);
       sequence_carrier_plan_ = std::move(saved_sequence_carrier_plan);
       if (!changed) return op;
@@ -3478,6 +3477,7 @@ class OutWindowExternalizer {
 
     struct CallsiteAccessCandidate {
       size_t stmt_index = 0;
+      size_t traversal_order = 0;
       AssignStmtPtr assign;
       CallPtr call;
       size_t param_index = SIZE_MAX;
@@ -3503,8 +3503,7 @@ class OutWindowExternalizer {
       std::unordered_map<const Var*, RuntimeObservableCarrier> carriers_by_parent;
       std::unordered_set<const Var*> dynamic_reader_roots;
       std::unordered_set<const Var*> fallback_parent_roots;
-      std::unordered_map<size_t, std::unordered_set<const Var*>>
-          aggregate_current_source_roots_by_stmt_index;
+      std::unordered_map<size_t, std::unordered_set<const Var*>> aggregate_current_source_roots_by_stmt_index;
       std::unordered_map<size_t, std::unordered_set<const Var*>>
           aggregate_current_consumer_roots_by_stmt_index;
       std::unordered_map<size_t, std::vector<StmtPtr>> prelude_stmts_by_index;
@@ -4272,8 +4271,8 @@ class OutWindowExternalizer {
       return FullOffsetScanResult{scan_min_result, scan_max_result};
     }
 
-    std::vector<int32_t> CallsiteAggregateCurrentReturnIndices(
-        size_t stmt_index, const CallPtr& call, const CalleeRewriteAnalysis& analysis) const {
+    std::vector<int32_t> CallsiteAggregateCurrentReturnIndices(size_t stmt_index, const CallPtr& call,
+                                                               const CalleeRewriteAnalysis& analysis) const {
       std::vector<int32_t> result;
       if (!call) return result;
       auto source_it = sequence_carrier_plan_.aggregate_current_source_roots_by_stmt_index.find(stmt_index);
@@ -4752,11 +4751,9 @@ class OutWindowExternalizer {
           result_types.size() == 1 ? result_types[0] : std::make_shared<TupleType>(result_types);
 
       auto new_attrs = RewriteCallAttrs(call, analysis, slices_by_out_index);
-      auto runtime_current_return_indices =
-          CallsiteAggregateCurrentReturnIndices(stmt_index, call, analysis);
+      auto runtime_current_return_indices = CallsiteAggregateCurrentReturnIndices(stmt_index, call, analysis);
       if (!runtime_current_return_indices.empty()) {
-        new_attrs.emplace_back(kAttrWindowRuntimeCurrentSource,
-                               std::move(runtime_current_return_indices));
+        new_attrs.emplace_back(kAttrWindowRuntimeCurrentSource, std::move(runtime_current_return_indices));
       }
       ExprPtr new_call;
       if (submit) {
@@ -5199,7 +5196,7 @@ class OutWindowExternalizer {
       return new_attrs;
     }
 
-    const Var* CanonicalizeCarrierParentRoot(const Var* root) const {
+    const Var* CanonicalizeOutputAliasRoot(const Var* root) const {
       if (!root) return nullptr;
       std::unordered_set<const Var*> seen;
       const Var* current = root;
@@ -5208,6 +5205,26 @@ class OutWindowExternalizer {
         if (it == sibling_output_alias_roots_.end()) break;
         current = it->second;
         if (!current) return nullptr;
+      }
+      return current;
+    }
+
+    const Var* CanonicalizeCarrierParentRoot(const Var* root) const {
+      if (!root) return nullptr;
+      std::unordered_set<const Var*> seen;
+      const Var* current = root;
+      while (seen.insert(current).second) {
+        if (auto it = sibling_output_alias_roots_.find(current); it != sibling_output_alias_roots_.end()) {
+          current = it->second;
+          if (!current) return nullptr;
+          continue;
+        }
+        if (auto it = sibling_carrier_alias_roots_.find(current); it != sibling_carrier_alias_roots_.end()) {
+          current = it->second;
+          if (!current) return nullptr;
+          continue;
+        }
+        break;
       }
       return current;
     }
@@ -5223,7 +5240,15 @@ class OutWindowExternalizer {
     const Var* ResolveVisibleParentRoot(const ExprPtr& expr) const {
       auto parent = AsVarLike(expr);
       if (!parent) return nullptr;
-      return CanonicalizeCarrierParentRoot(parent.get());
+      return CanonicalizeOutputAliasRoot(parent.get());
+    }
+
+    void RecordSiblingCarrierAliasRoot(const Var* alias_root, const Var* parent_root) {
+      if (!alias_root || !parent_root || alias_root == parent_root) return;
+      auto [it, inserted] = sibling_carrier_alias_roots_.emplace(alias_root, parent_root);
+      if (!inserted && it->second != parent_root) {
+        it->second = nullptr;
+      }
     }
 
     void CollectSiblingOutputAliases(const std::vector<StmtPtr>& sibling_stmts) {
@@ -5255,6 +5280,20 @@ class OutWindowExternalizer {
                 rewriter_->sibling_output_alias_roots_[op->var_.get()] = root;
               }
             }
+          }
+
+          if (call && call->op_ && call->op_->name_ == "tensor.slice" && !call->args_.empty() &&
+              AsTensorTypeLike(op->var_->GetType())) {
+            if (const Var* parent_root = rewriter_->ResolveCarrierParentRoot(call->args_[0])) {
+              rewriter_->RecordSiblingCarrierAliasRoot(op->var_.get(), parent_root);
+            }
+          }
+
+          if (call && call->op_ && call->op_->name_ == "tensor.assemble" && call->args_.size() >= 2) {
+            auto source_root_expr = rewriter_->ResolveLoopReturnInitExpr(call->args_[1]);
+            auto source_root = AsVarLike(source_root_expr);
+            const Var* parent_root = rewriter_->ResolveCarrierParentRoot(call->args_[0]);
+            if (source_root) rewriter_->RecordSiblingCarrierAliasRoot(source_root.get(), parent_root);
           }
 
           if (!call || pypto::codegen::IsBuiltinOp(call->op_->name_)) {
@@ -5340,8 +5379,8 @@ class OutWindowExternalizer {
       }
     }
 
-    const Var* ResolveAggregateWriterFlowRoot(
-        const Var* parent_root, const std::vector<LoopContext>& enclosing_loops) const {
+    const Var* ResolveAggregateWriterFlowRoot(const Var* parent_root,
+                                              const std::vector<LoopContext>& enclosing_loops) const {
       if (!parent_root) return nullptr;
       for (auto loop_it = enclosing_loops.rbegin(); loop_it != enclosing_loops.rend(); ++loop_it) {
         const auto& loop = loop_it->loop;
@@ -5360,6 +5399,7 @@ class OutWindowExternalizer {
     void AddCallsiteAccessCandidates(const AssignStmtPtr& assign, size_t stmt_index,
                                      const std::vector<LoopContext>& enclosing_loops,
                                      const std::unordered_map<const Var*, ExprPtr>& scalar_subst,
+                                     size_t traversal_order,
                                      std::vector<CallsiteAccessCandidate>* candidates) {
       if (!assign || !candidates) return;
       CallPtr call;
@@ -5388,6 +5428,7 @@ class OutWindowExternalizer {
           if (!root) continue;
           CallsiteAccessCandidate candidate;
           candidate.stmt_index = stmt_index;
+          candidate.traversal_order = traversal_order;
           candidate.assign = assign;
           candidate.call = call;
           candidate.param_index = output.out_param_index;
@@ -5411,6 +5452,7 @@ class OutWindowExternalizer {
           if (const Var* root = ResolveOutputRootExpr(call->args_[input.in_param_index])) {
             CallsiteAccessCandidate candidate;
             candidate.stmt_index = stmt_index;
+            candidate.traversal_order = traversal_order;
             candidate.assign = assign;
             candidate.call = call;
             candidate.param_index = input.in_param_index;
@@ -5452,6 +5494,7 @@ class OutWindowExternalizer {
 
         CallsiteAccessCandidate candidate;
         candidate.stmt_index = stmt_index;
+        candidate.traversal_order = traversal_order;
         candidate.assign = assign;
         candidate.call = call;
         candidate.param_index = i;
@@ -5475,17 +5518,19 @@ class OutWindowExternalizer {
     void CollectCallsiteAccessCandidates(const StmtPtr& stmt, size_t stmt_index,
                                          const std::vector<LoopContext>& enclosing_loops,
                                          const std::unordered_map<const Var*, ExprPtr>& scalar_subst,
+                                         size_t* traversal_order,
                                          std::vector<CallsiteAccessCandidate>* candidates) {
       if (!stmt || !candidates) return;
       if (auto assign = As<AssignStmt>(stmt)) {
-        AddCallsiteAccessCandidates(assign, stmt_index, enclosing_loops, scalar_subst, candidates);
+        const size_t order = traversal_order ? (*traversal_order)++ : 0;
+        AddCallsiteAccessCandidates(assign, stmt_index, enclosing_loops, scalar_subst, order, candidates);
         return;
       }
       if (auto seq = As<SeqStmts>(stmt)) {
         auto scoped_scalar_subst = scalar_subst;
         for (const auto& child : seq->stmts_) {
           CollectCallsiteAccessCandidates(child, stmt_index, enclosing_loops, scoped_scalar_subst,
-                                          candidates);
+                                          traversal_order, candidates);
           auto child_assign = As<AssignStmt>(child);
           if (child_assign && As<ScalarType>(child_assign->var_->GetType())) {
             auto substituted = arith::Analyzer().Simplify(
@@ -5501,13 +5546,14 @@ class OutWindowExternalizer {
         ScopedLoopIterInitSubst scoped_loop_iter_init_subst(&loop_iter_init_subst_, loop->iter_args_);
         auto nested_loops = enclosing_loops;
         nested_loops.push_back(LoopContext{loop, loop->loop_var_, loop->start_, loop->stop_, loop->step_});
-        CollectCallsiteAccessCandidates(loop->body_, stmt_index, nested_loops, scalar_subst, candidates);
+        CollectCallsiteAccessCandidates(loop->body_, stmt_index, nested_loops, scalar_subst, traversal_order,
+                                        candidates);
         return;
       }
       if (auto while_stmt = As<WhileStmt>(stmt)) {
         ScopedLoopIterInitSubst scoped_loop_iter_init_subst(&loop_iter_init_subst_, while_stmt->iter_args_);
         CollectCallsiteAccessCandidates(while_stmt->body_, stmt_index, enclosing_loops, scalar_subst,
-                                        candidates);
+                                        traversal_order, candidates);
         return;
       }
       if (As<IfStmt>(stmt)) {
@@ -5526,8 +5572,10 @@ class OutWindowExternalizer {
       std::vector<CallsiteAccessCandidate> candidates;
       candidates.reserve(sibling_stmts.size());
 
+      size_t traversal_order = 0;
       for (size_t stmt_index = 0; stmt_index < sibling_stmts.size(); ++stmt_index) {
-        CollectCallsiteAccessCandidates(sibling_stmts[stmt_index], stmt_index, {}, scalar_defs_, &candidates);
+        CollectCallsiteAccessCandidates(sibling_stmts[stmt_index], stmt_index, {}, scalar_defs_,
+                                        &traversal_order, &candidates);
       }
 
       std::unordered_map<const Var*, std::vector<const CallsiteAccessCandidate*>> candidates_by_root;
@@ -5544,36 +5592,34 @@ class OutWindowExternalizer {
         if (!flow_root) continue;
         if (inherited_carrier_roots.count(flow_root) != 0) continue;
 
-        const CallsiteAccessCandidate* aggregate_writer = nullptr;
-        const CallsiteAccessCandidate* aggregate_full_consumer = nullptr;
-        bool aggregate_unsupported = false;
+        std::unordered_map<const AssignStmt*, const CallsiteAccessCandidate*> aggregate_writers;
+        std::vector<const CallsiteAccessCandidate*> aggregate_full_consumers;
         for (const auto* candidate : flow_candidates) {
           if (!candidate) continue;
           if (candidate->output_writer && candidate->output_linked_flow_source_allowed &&
               !candidate->enclosing_loops.empty()) {
-            if (aggregate_writer && aggregate_writer->assign.get() != candidate->assign.get()) {
-              aggregate_unsupported = true;
-            } else {
-              aggregate_writer = candidate;
-            }
+            aggregate_writers.emplace(candidate->assign.get(), candidate);
           } else if (candidate->full_parent_consumer && candidate->linked_reader_allowed) {
-            if (aggregate_full_consumer && aggregate_full_consumer->assign.get() != candidate->assign.get()) {
-              aggregate_unsupported = true;
-            } else {
-              aggregate_full_consumer = candidate;
-            }
+            aggregate_full_consumers.push_back(candidate);
           }
         }
-        if (!aggregate_unsupported && aggregate_writer && aggregate_full_consumer &&
-            aggregate_writer->stmt_index < aggregate_full_consumer->stmt_index) {
+        if (aggregate_writers.size() == 1) {
+          const auto* aggregate_writer = aggregate_writers.begin()->second;
           plan.aggregate_current_source_roots_by_stmt_index[aggregate_writer->stmt_index].insert(
               aggregate_writer->parent_root);
+          if (WindowExternalizeLogEnabled()) {
+            LOG_INFO << "[window-flow] mark aggregate current source root=" << flow_root->name_hint_
+                     << " writer_stmt=" << aggregate_writer->stmt_index
+                     << " writer_order=" << aggregate_writer->traversal_order;
+          }
+        }
+        for (const auto* aggregate_full_consumer : aggregate_full_consumers) {
           plan.aggregate_current_consumer_roots_by_stmt_index[aggregate_full_consumer->stmt_index].insert(
               aggregate_full_consumer->parent_root);
           if (WindowExternalizeLogEnabled()) {
-            LOG_INFO << "[window-flow] create aggregate current join root=" << flow_root->name_hint_
-                     << " writer_stmt=" << aggregate_writer->stmt_index
-                     << " consumer_stmt=" << aggregate_full_consumer->stmt_index;
+            LOG_INFO << "[window-flow] mark aggregate current consumer root=" << flow_root->name_hint_
+                     << " consumer_stmt=" << aggregate_full_consumer->stmt_index
+                     << " consumer_order=" << aggregate_full_consumer->traversal_order;
           }
         }
       }
@@ -5622,7 +5668,7 @@ class OutWindowExternalizer {
           bool can_make_dynamic_carrier =
               !unsupported && writer && writer->output_has_fine_assemble &&
               writer->output_linked_flow_source_allowed && dynamic_reader->linked_dynamic_reader_allowed &&
-              writer->stmt_index < dynamic_reader->stmt_index &&
+              writer->traversal_order < dynamic_reader->traversal_order &&
               CanUseCarrierAcrossCallsiteLoops(writer->enclosing_loops, dynamic_reader->enclosing_loops,
                                                &needs_carrier_rematerialization) &&
               !writer->shape.empty() && !writer->offsets.empty() && !dynamic_reader->shape.empty() &&
@@ -5732,7 +5778,7 @@ class OutWindowExternalizer {
                        << " unsupported=" << unsupported << " writer=" << (writer != nullptr)
                        << " writer_fine=" << (writer && writer->output_has_fine_assemble)
                        << " writer_linked=" << (writer && writer->output_linked_flow_source_allowed)
-                       << " order=" << (writer && writer->stmt_index < dynamic_reader->stmt_index);
+                       << " order=" << (writer && writer->traversal_order < dynamic_reader->traversal_order);
             }
             plan.fallback_parent_roots.insert(root);
           }
@@ -5742,7 +5788,7 @@ class OutWindowExternalizer {
         if (plan.fallback_parent_roots.count(root)) continue;
         if (unsupported || !writer || !reader) continue;
         if (!writer->output_linked_flow_source_allowed || !reader->linked_reader_allowed) continue;
-        if (writer->stmt_index >= reader->stmt_index) continue;
+        if (writer->traversal_order >= reader->traversal_order) continue;
         if (writer->shape.empty() || writer->offsets.empty()) continue;
         if (!AreExprVectorsEqual(writer->shape, reader->shape) ||
             !AreExprVectorsEqual(writer->offsets, reader->offsets)) {
@@ -6115,6 +6161,7 @@ class OutWindowExternalizer {
     std::unordered_map<const Var*, std::vector<ExprPtr>> tuple_result_subst_;
     std::unordered_map<const Var*, ExprPtr> window_parent_subst_;
     std::unordered_map<const Var*, const Var*> sibling_output_alias_roots_;
+    std::unordered_map<const Var*, const Var*> sibling_carrier_alias_roots_;
     std::unordered_set<const Var*> sibling_unwindowable_output_roots_;
     SequenceCarrierPlan sequence_carrier_plan_;
     std::unordered_set<const Var*> active_aggregate_current_source_roots_;
@@ -8741,11 +8788,11 @@ class RuntimeCurrentAggregator {
     new_functions.reserve(program->functions_.size() + 1);
     std::vector<FunctionPtr> generated_functions;
     std::unordered_map<const Type*, FunctionPtr> barrier_by_type;
-  std::unordered_set<std::string> used_names;
-  for (const auto& [_, func] : program->functions_) {
-    if (func) used_names.insert(func->name_);
-  }
-  bool changed = false;
+    std::unordered_set<std::string> used_names;
+    for (const auto& [_, func] : program->functions_) {
+      if (func) used_names.insert(func->name_);
+    }
+    bool changed = false;
 
     for (const auto& [_, func] : program->functions_) {
       if (!func || func->func_type_ != FunctionType::Orchestration) {
@@ -8785,8 +8832,8 @@ class RuntimeCurrentAggregator {
         return visited;
       }
       return std::make_shared<Call>(call->op_, call->args_, call->kwargs_,
-                                    StripRuntimeCurrentSourceAttr(call->attrs_),
-                                    call->GetType(), call->span_);
+                                    StripRuntimeCurrentSourceAttr(call->attrs_), call->GetType(),
+                                    call->span_);
     }
 
     ExprPtr VisitExpr_(const SubmitPtr& op) override {
@@ -8796,10 +8843,10 @@ class RuntimeCurrentAggregator {
                       !submit->HasAttr(kAttrWindowRuntimeCurrentConsumer))) {
         return visited;
       }
-      return std::make_shared<Submit>(
-          submit->op_, submit->args_, submit->deps_, submit->kwargs_,
-          StripRuntimeCurrentSourceAttr(submit->attrs_), submit->GetType(), submit->span_,
-          submit->core_num_, submit->sync_start_, submit->allow_early_resolve_);
+      return std::make_shared<Submit>(submit->op_, submit->args_, submit->deps_, submit->kwargs_,
+                                      StripRuntimeCurrentSourceAttr(submit->attrs_), submit->GetType(),
+                                      submit->span_, submit->core_num_, submit->sync_start_,
+                                      submit->allow_early_resolve_);
     }
   };
 
@@ -8876,20 +8923,27 @@ class RuntimeCurrentAggregator {
 
     bool IsProducedByRuntimeCurrentProducerCallImpl(
         const VarPtr& value, const std::unordered_map<const Var*, AssignStmtPtr>& defs_by_var,
+        const std::unordered_set<const Var*>* nested_source_return_vars,
         std::unordered_set<const Var*>* seen) const {
       if (!value) return false;
+      if (nested_source_return_vars && nested_source_return_vars->count(value.get()) != 0) {
+        return true;
+      }
       if (!seen || !seen->insert(value.get()).second) return false;
       auto def_it = defs_by_var.find(value.get());
       if (def_it == defs_by_var.end()) return false;
 
       auto alias = AsVarLike(def_it->second->value_);
-      if (alias) return IsProducedByRuntimeCurrentProducerCallImpl(alias, defs_by_var, seen);
+      if (alias) {
+        return IsProducedByRuntimeCurrentProducerCallImpl(alias, defs_by_var, nested_source_return_vars,
+                                                          seen);
+      }
 
       auto call = AsCallLike(def_it->second->value_);
       if (IsRuntimeCurrentProducerCall(call, std::nullopt)) return true;
-      if (call && !std::dynamic_pointer_cast<const GlobalVar>(call->op_) &&
-          call->op_->name_ == "tensor.assemble" && call->args_.size() >= 2) {
-        return IsProducedByRuntimeCurrentProducerCallImpl(AsVarLike(call->args_[1]), defs_by_var, seen);
+      if (call && call->op_ && call->op_->name_ == "tensor.assemble" && call->args_.size() >= 2) {
+        return IsProducedByRuntimeCurrentProducerCallImpl(AsVarLike(call->args_[1]), defs_by_var,
+                                                          nested_source_return_vars, seen);
       }
 
       auto tuple_get = As<TupleGetItemExpr>(def_it->second->value_);
@@ -8901,38 +8955,79 @@ class RuntimeCurrentAggregator {
       if (tuple_get->index_ < 0 || tuple_get->index_ > std::numeric_limits<int32_t>::max()) return false;
       ExprPtr tuple_value = tuple_def_it->second->value_;
       while (auto alias = AsVarLike(tuple_value)) {
+        if (nested_source_return_vars && nested_source_return_vars->count(alias.get()) != 0) {
+          return true;
+        }
         if (!seen->insert(alias.get()).second) return false;
         auto alias_def_it = defs_by_var.find(alias.get());
         if (alias_def_it == defs_by_var.end()) break;
         tuple_value = alias_def_it->second->value_;
       }
-      return IsRuntimeCurrentProducerCall(AsCallLike(tuple_value),
-                                          static_cast<int32_t>(tuple_get->index_));
+      return IsRuntimeCurrentProducerCall(AsCallLike(tuple_value), static_cast<int32_t>(tuple_get->index_));
     }
 
     bool IsProducedByRuntimeCurrentProducerCall(
-        const VarPtr& value, const std::unordered_map<const Var*, AssignStmtPtr>& defs_by_var) const {
+        const VarPtr& value, const std::unordered_map<const Var*, AssignStmtPtr>& defs_by_var,
+        const std::unordered_set<const Var*>* nested_source_return_vars = nullptr) const {
       std::unordered_set<const Var*> seen;
-      return IsProducedByRuntimeCurrentProducerCallImpl(value, defs_by_var, &seen);
+      return IsProducedByRuntimeCurrentProducerCallImpl(value, defs_by_var, nested_source_return_vars, &seen);
+    }
+
+    void ScanRuntimeCurrentSourceStmt(const StmtPtr& stmt,
+                                      std::unordered_map<const Var*, AssignStmtPtr>* defs_by_var,
+                                      std::unordered_set<const Var*>* runtime_current_source_vars,
+                                      YieldStmtPtr* yield_stmt) const {
+      if (!stmt || !defs_by_var || !runtime_current_source_vars || !yield_stmt) return;
+      if (auto seq = As<SeqStmts>(stmt)) {
+        for (const auto& child : seq->stmts_) {
+          ScanRuntimeCurrentSourceStmt(child, defs_by_var, runtime_current_source_vars, yield_stmt);
+        }
+        return;
+      }
+      if (auto scope = As<ScopeStmt>(stmt)) {
+        ScanRuntimeCurrentSourceStmt(scope->body_, defs_by_var, runtime_current_source_vars, yield_stmt);
+        return;
+      }
+      if (auto if_stmt = As<IfStmt>(stmt)) {
+        ScanRuntimeCurrentSourceStmt(if_stmt->then_body_, defs_by_var, runtime_current_source_vars,
+                                     yield_stmt);
+        if (if_stmt->else_body_.has_value()) {
+          ScanRuntimeCurrentSourceStmt(*if_stmt->else_body_, defs_by_var, runtime_current_source_vars,
+                                       yield_stmt);
+        }
+        return;
+      }
+      if (auto nested_loop = As<ForStmt>(stmt)) {
+        auto nested_index = BuildRuntimeCurrentLoopSourceIndex(nested_loop);
+        runtime_current_source_vars->insert(nested_index.source_return_vars.begin(),
+                                            nested_index.source_return_vars.end());
+        return;
+      }
+      if (auto assign = As<AssignStmt>(stmt)) {
+        (*defs_by_var)[assign->var_.get()] = assign;
+        if (IsProducedByRuntimeCurrentProducerCall(assign->var_, *defs_by_var, runtime_current_source_vars)) {
+          runtime_current_source_vars->insert(assign->var_.get());
+        }
+        return;
+      }
+      if (auto yield = As<YieldStmt>(stmt)) {
+        *yield_stmt = yield;
+      }
     }
 
     RuntimeCurrentLoopSourceIndex BuildRuntimeCurrentLoopSourceIndex(const ForStmtPtr& loop) const {
       RuntimeCurrentLoopSourceIndex index;
       if (!loop) return index;
       std::unordered_map<const Var*, AssignStmtPtr> defs_by_var;
+      std::unordered_set<const Var*> runtime_current_source_vars;
       YieldStmtPtr yield_stmt;
-      for (const auto& stmt : FlattenToStmts(loop->body_)) {
-        if (auto assign = As<AssignStmt>(stmt)) {
-          defs_by_var[assign->var_.get()] = assign;
-        } else if (auto yield = As<YieldStmt>(stmt)) {
-          yield_stmt = yield;
-        }
-      }
+      ScanRuntimeCurrentSourceStmt(loop->body_, &defs_by_var, &runtime_current_source_vars, &yield_stmt);
       if (!yield_stmt) return index;
 
       for (size_t i = 0; i < loop->return_vars_.size(); ++i) {
         if (i >= yield_stmt->value_.size()) continue;
-        if (IsProducedByRuntimeCurrentProducerCall(AsVarLike(yield_stmt->value_[i]), defs_by_var)) {
+        auto yielded_var = AsVarLike(yield_stmt->value_[i]);
+        if (IsProducedByRuntimeCurrentProducerCall(yielded_var, defs_by_var, &runtime_current_source_vars)) {
           index.source_return_vars.insert(loop->return_vars_[i].get());
         }
       }
@@ -9019,8 +9114,8 @@ class RuntimeCurrentAggregator {
           auto call = As<Call>(visited);
           if (!call || !call->HasAttr(kAttrWindowRuntimeCurrentConsumer)) return visited;
 
-          auto new_args = RewriteArgs(call->args_, call->GetAttr<std::vector<int32_t>>(
-                                                       kAttrWindowRuntimeCurrentConsumer));
+          auto new_args = RewriteArgs(call->args_,
+                                      call->GetAttr<std::vector<int32_t>>(kAttrWindowRuntimeCurrentConsumer));
           if (!new_args.has_value()) return visited;
           changed_ = true;
           return std::make_shared<Call>(call->op_, std::move(*new_args), call->kwargs_, call->attrs_,
@@ -9032,14 +9127,13 @@ class RuntimeCurrentAggregator {
           auto submit = As<Submit>(visited);
           if (!submit || !submit->HasAttr(kAttrWindowRuntimeCurrentConsumer)) return visited;
 
-          auto new_args = RewriteArgs(submit->args_, submit->GetAttr<std::vector<int32_t>>(
-                                                           kAttrWindowRuntimeCurrentConsumer));
+          auto new_args = RewriteArgs(
+              submit->args_, submit->GetAttr<std::vector<int32_t>>(kAttrWindowRuntimeCurrentConsumer));
           if (!new_args.has_value()) return visited;
           changed_ = true;
-          return std::make_shared<Submit>(
-              submit->op_, std::move(*new_args), submit->deps_, submit->kwargs_, submit->attrs_,
-              submit->GetType(), submit->span_, submit->core_num_, submit->sync_start_,
-              submit->allow_early_resolve_);
+          return std::make_shared<Submit>(submit->op_, std::move(*new_args), submit->deps_, submit->kwargs_,
+                                          submit->attrs_, submit->GetType(), submit->span_, submit->core_num_,
+                                          submit->sync_start_, submit->allow_early_resolve_);
         }
 
        private:

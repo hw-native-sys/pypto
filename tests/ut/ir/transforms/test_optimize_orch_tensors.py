@@ -6308,6 +6308,124 @@ class TestPerKernelAttrs:
         assert "write_stripes__windowed" in printed_main
         assert "read_stripes__windowed" in printed_main
 
+    def test_aggregate_current_join_tracks_tensor_slice_writer_alias(self):
+        """A writer to tensor.slice(parent) joins with a later full-parent consumer."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def write_stripes(
+                self,
+                src: pl.Tensor[[64, 256], pl.FP32],
+                col: pl.Scalar[pl.INDEX],
+                scratch_window: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+            ) -> pl.Tensor[[64, 256], pl.FP32]:
+                tile: pl.Tile[[64, 128], pl.FP32] = pl.tile.load(src, [0, col], [64, 128], [64, 128])
+                return pl.tile.store(tile, [0, col], scratch_window)
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def read_parent(
+                self,
+                scratch_buffer: pl.Tensor[[64, 256], pl.FP32],
+                col: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+            ) -> tuple[pl.Tensor[[64, 256], pl.FP32], pl.Tensor[[64, 256], pl.FP32]]:
+                tile: pl.Tile[[64, 128], pl.FP32] = pl.tile.load(
+                    scratch_buffer, [0, col], [64, 128], [64, 128]
+                )
+                out_next: pl.Tensor[[64, 256], pl.FP32] = pl.tile.store(tile, [0, col], out)
+                return out_next, scratch_buffer
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                src: pl.Tensor[[64, 256], pl.FP32],
+                scratch_buffer: pl.Tensor[[64, 256], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+            ) -> pl.Tensor[[64, 256], pl.FP32]:
+                for i, (scratch_iter,) in pl.range(0, 2, init_values=(scratch_buffer,)):
+                    col: pl.Scalar[pl.INDEX] = i * 128
+                    scratch_view: pl.Tensor[[64, 256], pl.FP32] = pl.tensor.slice(
+                        scratch_iter, [64, 256], [0, 0]
+                    )
+                    scratch_next_view = self.write_stripes(src, col, scratch_view)
+                    scratch_next = pl.tensor.assemble(scratch_iter, scratch_next_view, [0, 0])
+                    scratch_rv = pl.yield_(scratch_next)
+
+                result = self.read_parent(scratch_rv, 0, out)
+                out_next: pl.Tensor[[64, 256], pl.FP32] = result[0]
+                return out_next
+
+        After = _run_to_optimize_orch_tensors(
+            Before,
+            window_policy="boundingBox",
+            window_flow="linked",
+        )
+
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert After.get_function("__pypto_runtime_current_barrier") is not None, printed_main
+        assert "scratch_rv__runtime_current" in printed_main, printed_main
+        assert re.search(r"read_parent__windowed\(\s*scratch_rv__runtime_current", printed_main), printed_main
+
+    def test_aggregate_current_join_propagates_nested_source_through_assemble(self):
+        """A nested aggregate source remains current after the outer loop assembles it."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def write_stripes(
+                self,
+                src: pl.Tensor[[64, 256], pl.FP32],
+                col: pl.Scalar[pl.INDEX],
+                row: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+            ) -> pl.Tensor[[64, 256], pl.FP32]:
+                tile: pl.Tile[[64, 128], pl.FP32] = pl.tile.load(src, [0, col], [64, 128], [64, 128])
+                return pl.tile.store(tile, [0, col], row)
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def read_parent(
+                self,
+                scratch_buffer: pl.Tensor[[64, 256], pl.FP32],
+                col: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+            ) -> tuple[pl.Tensor[[64, 256], pl.FP32], pl.Tensor[[64, 256], pl.FP32]]:
+                tile: pl.Tile[[64, 128], pl.FP32] = pl.tile.load(
+                    scratch_buffer, [0, col], [64, 128], [64, 128]
+                )
+                out_next: pl.Tensor[[64, 256], pl.FP32] = pl.tile.store(tile, [0, col], out)
+                return out_next, scratch_buffer
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                src: pl.Tensor[[64, 256], pl.FP32],
+                scratch_buffer: pl.Tensor[[64, 256], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+            ) -> pl.Tensor[[64, 256], pl.FP32]:
+                for i, (scratch_iter,) in pl.range(0, 2, init_values=(scratch_buffer,)):
+                    row: pl.Tensor[[64, 256], pl.FP32] = pl.tensor.slice(scratch_iter, [64, 256], [0, 0])
+                    for j, (row_iter,) in pl.range(0, 2, init_values=(row,)):
+                        col: pl.Scalar[pl.INDEX] = j * 128
+                        row_next = self.write_stripes(src, col, row_iter)
+                        row_rv = pl.yield_(row_next)
+                    scratch_next = pl.tensor.assemble(scratch_iter, row_rv, [0, 0])
+                    scratch_rv = pl.yield_(scratch_next)
+
+                result = self.read_parent(scratch_rv, 0, out)
+                out_next: pl.Tensor[[64, 256], pl.FP32] = result[0]
+                return out_next
+
+        After = _run_to_optimize_orch_tensors(
+            Before,
+            window_policy="boundingBox",
+            window_flow="linked",
+        )
+
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert After.get_function("__pypto_runtime_current_barrier") is not None, printed_main
+        assert "scratch_rv__runtime_current" in printed_main, printed_main
+        assert re.search(r"read_parent__windowed\(\s*scratch_rv__runtime_current", printed_main), printed_main
+
     def test_aggregate_current_marker_is_return_index_specific(self):
         """A marked multi-output producer must not taint unrelated tuple returns."""
 
@@ -6436,8 +6554,12 @@ class TestPerKernelAttrs:
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "mid_rv__runtime_current" in printed_main, printed_main
         assert "out_rv__runtime_current" in printed_main, printed_main
-        assert re.search(r"transform_stripes__windowed\(\s*mid_rv__runtime_current", printed_main), printed_main
-        assert re.search(r"transform_stripes__windowed\(\s*out_rv__runtime_current", printed_main), printed_main
+        assert re.search(r"transform_stripes__windowed\(\s*mid_rv__runtime_current", printed_main), (
+            printed_main
+        )
+        assert re.search(r"transform_stripes__windowed\(\s*out_rv__runtime_current", printed_main), (
+            printed_main
+        )
 
     def test_aggregate_current_inout_reader_participates_in_linked_flow(self):
         """An InOut param is a reader for dependency coverage and may consume current."""
@@ -6475,7 +6597,8 @@ class TestPerKernelAttrs:
                     mid_next = self.write_stripes(src, col, mid_iter)
                     mid_rv = pl.yield_(mid_next)
 
-                result = self.read_write_inout(mid_rv, 0)
+                col0: pl.Scalar[pl.INDEX] = 0
+                result = self.read_write_inout(mid_rv, col0)
                 return result[0]
 
         After = _run_to_optimize_orch_tensors(
@@ -6486,7 +6609,9 @@ class TestPerKernelAttrs:
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "mid_rv__runtime_current" in printed_main, printed_main
-        assert re.search(r"read_write_inout\(\s*mid_rv__runtime_current,\s*0\s*\)", printed_main), printed_main
+        assert re.search(r"read_write_inout\(\s*mid_rv__runtime_current,\s*0\s*\)", printed_main), (
+            printed_main
+        )
 
     def test_local_full_consumer_blocks_aggregate_current_join(self):
         """An intervening local full-parent consumer blocks linked aggregate-current lowering."""
