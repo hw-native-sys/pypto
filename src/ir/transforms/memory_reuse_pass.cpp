@@ -678,8 +678,15 @@ class RetypeApplier : public IRMutator {
     auto add0 = As<ConstInt>(additional);
     const bool pure_alias = add0 && add0->value_ == 0 && out_mr->size_ == in_new->size_;
     MemRefPtr new_mr =
-        pure_alias ? in_new : std::make_shared<MemRef>(in_new->base_, total_offset, out_mr->size_);
-    auto new_type = CloneTypeWithMemRef(op->var_->GetType(), new_mr);
+        pure_alias ? in_new
+                   : std::make_shared<MemRef>(in_new->base_, total_offset, out_mr->size_, out_mr->span_);
+    // OutputMemoryInheritsInput also requires the view's memory space to follow its
+    // input: if the retarget moved across memory spaces, carry the new space too.
+    std::optional<MemorySpace> new_memory;
+    if (auto in_new_tile = GetTileTypeWithMemRef(sub->second->GetType())) {
+      new_memory = in_new_tile->GetMemorySpace();
+    }
+    auto new_type = CloneTypeWithMemRef(op->var_->GetType(), new_mr, new_memory);
     auto follow_var = std::make_shared<Var>(op->var_->name_hint_, new_type, op->var_->span_);
     var_substitution_[op->var_] = follow_var;
     auto recursed = As<AssignStmt>(IRMutator::VisitStmt_(op));

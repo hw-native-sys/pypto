@@ -979,7 +979,7 @@ class TestViewOps:
                     ti: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(inp, [0, 0], [16, 16])
                     si: pl.Tile[[16, 8], pl.FP32, pl.MemorySpace.Vec] = pl.slice(ti, [16, 8], [0, 0])
                     acc_n: pl.Tile[[16, 8], pl.FP32, pl.MemorySpace.Vec] = pl.add(acc_c, si)
-                    t_y, acc_y = pl.yield_(ti, acc_n)
+                    _t_y, acc_y = pl.yield_(ti, acc_n)
                 result: pl.Tensor[[16, 8], pl.FP32] = pl.store(acc_y, [0, 0], out_acc)
                 return result
 
@@ -1014,7 +1014,7 @@ class TestViewOps:
                     ti: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(inp, [0, 0], [16, 16])
                     ri: pl.Tile[[256, 1], pl.FP32, pl.MemorySpace.Vec] = pl.reshape(ti, [256, 1])
                     acc_n: pl.Tile[[256, 1], pl.FP32, pl.MemorySpace.Vec] = pl.add(acc_c, ri)
-                    t_y, acc_y = pl.yield_(ti, acc_n)
+                    _t_y, acc_y = pl.yield_(ti, acc_n)
                 result: pl.Tensor[[256, 1], pl.FP32] = pl.store(acc_y, [0, 0], out_acc)
                 return result
 
