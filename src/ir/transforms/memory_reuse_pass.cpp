@@ -1156,6 +1156,9 @@ class ForbidAliasCollector : public IRVisitor {
           auto in_t = As<TileType>(call->args_[0]->GetType());
           if (out_t && in_t && out_t->dtype_.GetBit() > in_t->dtype_.GetBit()) forbid_arg(0);
         }
+        // tile.transpose is registered not_inplace_safe(), so its output is
+        // already forbidden from aliasing any input above (pto.ttrans writes
+        // dst directly from src on the scalar path — dst == src corrupts).
       }
     }
     IRVisitor::VisitStmt_(op);

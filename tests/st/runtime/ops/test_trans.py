@@ -72,6 +72,16 @@ ND3_B = 4  # leading batch dim (untouched)
 ND3_R = 24  # axis 1 (multiple of 8, not 16-aligned)
 ND3_C = 8  # axis 2 (multiple of 8, not 16-aligned)
 
+# Transpose in-place regression: pto.ttrans is not in-place safe (the a2a3
+# unaligned scalar path writes dst directly from src), so memory allocation must
+# give the transpose output a buffer distinct from the input. These cases verify
+# the transpose result stays correct for both the scalar ([8, 8], [24, 24]) and
+# aligned ([16, 8] -> [8, 16]) pto.ttrans paths.
+TT88 = 8  # square [8, 8]: scalar path
+TT16 = 16  # [16, 8] -> [8, 16]: aligned path
+TT8 = 8  # control cols
+TT2424 = 24  # [24, 24]: scalar path, like [8, 8]
+
 
 class TransposeSliceAssembleCase(PTOTestCase):
     """#1209 follow-up: orchestration ``pl.transpose`` + ``pl.slice`` + ``pl.assemble``.
@@ -374,6 +384,163 @@ class Nd3DTransposeCase(PTOTestCase):
         tensors["out"][:] = tensors["x"].transpose(1, 2)
 
 
+class Fp32Transpose88Case(PTOTestCase):
+    """In-place transpose regression: FP32 ``[8, 8]`` on-chip transpose.
+
+    Loads ``[8, 8]`` FP32 into a Vec tile, transposes to ``[8, 8]`` and stores.
+    The dst tile has 8-wide cols (not a multiple of 16), so pto.ttrans takes the
+    scalar path that writes dst directly from src without staging through tmp.
+    If memory allocation aliases the dst tile onto the src tile's buffer the
+    transpose corrupts (~28/64 elements wrong); InitMemRef / MemoryReuse must
+    give dst a distinct buffer on this path.
+    """
+
+    __test__ = False
+
+    def __init__(self, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
+
+    def get_name(self) -> str:
+        return f"fp32_transpose_{TT88}x{TT88}"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("x", [TT88, TT88], DataType.FP32, init_value=torch.randn),
+            TensorSpec("out", [TT88, TT88], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        @pl.program
+        class Fp32Transpose88:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[TT88, TT88], pl.FP32],
+                out: pl.Out[pl.Tensor[[TT88, TT88], pl.FP32]],
+            ) -> pl.Tensor[[TT88, TT88], pl.FP32]:
+                x_tile: pl.Tile[[TT88, TT88], pl.FP32] = pl.load(x, [0, 0], [TT88, TT88])
+                x_t: pl.Tile[[TT88, TT88], pl.FP32] = pl.transpose(x_tile, axis1=0, axis2=1)
+                return pl.store(x_t, [0, 0], out)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                x: pl.Tensor[[TT88, TT88], pl.FP32],
+                out: pl.Out[pl.Tensor[[TT88, TT88], pl.FP32]],
+            ) -> pl.Tensor[[TT88, TT88], pl.FP32]:
+                out = self.kernel(x, out)
+                return out
+
+        return Fp32Transpose88
+
+    def compute_expected(self, tensors, params=None):
+        tensors["out"][:] = tensors["x"].t()
+
+
+class Fp32Transpose2424Case(PTOTestCase):
+    """In-place transpose regression: FP32 ``[24, 24]`` on-chip transpose.
+
+    Loads ``[24, 24]`` FP32 into a Vec tile, transposes to ``[24, 24]`` and stores.
+    The dst tile has 24-wide cols (not a multiple of 16), so pto.ttrans takes the
+    scalar path that writes dst directly from src without staging through tmp.
+    If memory allocation aliases the dst tile onto the src tile's buffer the
+    transpose corrupts; InitMemRef / MemoryReuse must give dst a distinct buffer
+    on this path.
+    """
+
+    __test__ = False
+
+    def __init__(self, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
+
+    def get_name(self) -> str:
+        return f"fp32_transpose_{TT2424}x{TT2424}"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("x", [TT2424, TT2424], DataType.FP32, init_value=torch.randn),
+            TensorSpec("out", [TT2424, TT2424], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        @pl.program
+        class Fp32Transpose2424:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[TT2424, TT2424], pl.FP32],
+                out: pl.Out[pl.Tensor[[TT2424, TT2424], pl.FP32]],
+            ) -> pl.Tensor[[TT2424, TT2424], pl.FP32]:
+                x_tile: pl.Tile[[TT2424, TT2424], pl.FP32] = pl.load(x, [0, 0], [TT2424, TT2424])
+                x_t: pl.Tile[[TT2424, TT2424], pl.FP32] = pl.transpose(x_tile, axis1=0, axis2=1)
+                return pl.store(x_t, [0, 0], out)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                x: pl.Tensor[[TT2424, TT2424], pl.FP32],
+                out: pl.Out[pl.Tensor[[TT2424, TT2424], pl.FP32]],
+            ) -> pl.Tensor[[TT2424, TT2424], pl.FP32]:
+                out = self.kernel(x, out)
+                return out
+
+        return Fp32Transpose2424
+
+    def compute_expected(self, tensors, params=None):
+        tensors["out"][:] = tensors["x"].t()
+
+
+class Fp32Transpose168Case(PTOTestCase):
+    """In-place transpose control: FP32 ``[16, 8] -> [8, 16]`` on-chip transpose.
+
+    The dst tile has 16-wide cols, so pto.ttrans takes the aligned sub-tile
+    (vconv) path. Like the scalar cases the transpose output gets a buffer
+    distinct from the input (transpose is not in-place safe); this exercises the
+    aligned path stays correct under that allocation.
+    """
+
+    __test__ = False
+
+    def __init__(self, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
+
+    def get_name(self) -> str:
+        return f"fp32_transpose_{TT16}x{TT8}_to_{TT8}x{TT16}"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("x", [TT16, TT8], DataType.FP32, init_value=torch.randn),
+            TensorSpec("out", [TT8, TT16], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        @pl.program
+        class Fp32Transpose168:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[TT16, TT8], pl.FP32],
+                out: pl.Out[pl.Tensor[[TT8, TT16], pl.FP32]],
+            ) -> pl.Tensor[[TT8, TT16], pl.FP32]:
+                x_tile: pl.Tile[[TT16, TT8], pl.FP32] = pl.load(x, [0, 0], [TT16, TT8])
+                x_t: pl.Tile[[TT8, TT16], pl.FP32] = pl.transpose(x_tile, axis1=0, axis2=1)
+                return pl.store(x_t, [0, 0], out)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                x: pl.Tensor[[TT16, TT8], pl.FP32],
+                out: pl.Out[pl.Tensor[[TT8, TT16], pl.FP32]],
+            ) -> pl.Tensor[[TT8, TT16], pl.FP32]:
+                out = self.kernel(x, out)
+                return out
+
+        return Fp32Transpose168
+
+    def compute_expected(self, tensors, params=None):
+        tensors["out"][:] = tensors["x"].t()
+
+
 class TestTransposeColumnOperations:
     """Column-load lowering regressions."""
 
@@ -449,6 +616,38 @@ class TestTransposeColumnOperations:
         view ``nd`` and avoiding the separate 3D-output ``nz`` layout gap.
         """
         result = test_runner.run(Nd3DTransposeCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_fp32_transpose_8x8(self, test_runner, platform):
+        """FP32 ``[8, 8]`` transpose — scalar (non-tmp-staging) ttrans path.
+
+        Regression for the in-place hazard: dst cols 8 forces the scalar path, so
+        memory allocation must not alias the dst tile onto the src tile's buffer
+        (else ~28/64 elements corrupt on a2a3).
+        """
+        result = test_runner.run(Fp32Transpose88Case(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_fp32_transpose_24x24(self, test_runner, platform):
+        """FP32 ``[24, 24]`` transpose — scalar (non-tmp-staging) ttrans path.
+
+        Regression for the in-place hazard: dst cols 24 forces the scalar path, so
+        memory allocation must not alias the dst tile onto the src tile's buffer
+        (else elements corrupt on a2a3).
+        """
+        result = test_runner.run(Fp32Transpose2424Case(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_fp32_transpose_16x8(self, test_runner, platform):
+        """FP32 ``[16, 8] -> [8, 16]`` transpose — aligned (vconv) ttrans path.
+
+        Control: dst cols 16 takes the aligned path; the transpose output still
+        gets a buffer distinct from the input (transpose is not in-place safe).
+        """
+        result = test_runner.run(Fp32Transpose168Case(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 

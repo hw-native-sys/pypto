@@ -885,12 +885,12 @@ class TestViewOps:
     def test_subview_group_keeps_offsets_on_reuse(self):
         """Retargeting a sharing group must preserve per-member subview offsets (issue #1723).
 
-        ``dead`` dies before ``src``, so ``src`` (and its transpose/slice/reshape
-        view group) retargets onto ``dead``'s buffer. ``srcT`` transposes the
-        *whole* ``src`` tile (input is not a sub-region), so it stays in-place and
-        joins the group. The two per-row slices sit at byte offsets 0 and 64
-        within the group; after reuse they must keep those distinct offsets, not
-        collapse onto the target's base offset.
+        ``dead`` dies before ``src``, so ``src`` retargets onto ``dead``'s buffer.
+        ``srcT`` transposes ``src``; tile.transpose is not in-place safe, so it
+        gets a buffer distinct from ``src``, and its slice/reshape view group
+        shares that fresh base. The two per-row slices sit at byte offsets 0 and
+        64 within the group; they must keep those distinct offsets, not collapse
+        onto the base offset.
         """
 
         @pl.program
@@ -934,10 +934,13 @@ class TestViewOps:
 
         # src retargets onto dead's buffer (reuse actually happened).
         assert members["src"][0] == members["dead"][0]
-        base = members["dead"][0]
-        # srcT transposes the whole src tile (input is not a sub-region of a
-        # larger buffer), so it stays in-place and the whole view group lives on
-        # that one base.
+        # tile.transpose is not in-place safe, so srcT gets a buffer distinct
+        # from src; the whole view group (srcT + its slices/reshapes) shares
+        # that one fresh base.
+        base = members["srcT"][0]
+        assert base != members["src"][0], (
+            "srcT must not reuse the src buffer (transpose is not in-place safe)"
+        )
         for name in ("srcT", "s0", "r0", "s1", "r1"):
             assert members[name][0] == base, f"{name} not on shared base {base}"
         # Row 0 slice/reshape at offset 0; row 1 slice/reshape at offset 64 — the

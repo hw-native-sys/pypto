@@ -463,15 +463,14 @@ REGISTER_OP("tile.transpose")
     .add_argument("tmp",
                   "Optional scratch tile (same shape/dtype as input) required by the 2D pto.ttrans "
                   "codegen; materialized by FlattenTileNdTo2D, absent in the high-level 3-arg form")
-    // Transpose inherits the input's memory *space*.  Sharing the input buffer
-    // (in-place ttrans) is safe when the input is a *whole* tile — the scratch
-    // tmp stages the data — and InitMemRef keeps that sharing.  It is unsafe
-    // only when the input is a sub-region of a larger live buffer, because the
-    // fractal-padded transpose write would clobber the buffer's other tiles;
-    // InitMemRef detects that case and gives the output a fresh buffer.  The op
-    // is therefore left in-place-safe for MemoryReuse (the whole-tile sharing
-    // is intentional).
+    // Transpose inherits the input's memory *space* (Vec/Mat), but its output
+    // must NOT reuse the input's buffer.  pto.ttrans is not in-place safe: on
+    // the unaligned scalar path the a2a3 backend writes dst directly from src
+    // (no tmp staging), so dst == src corrupts the data mid-write.  Mark it
+    // not_inplace_safe so MemoryReuse never coalesces the output onto an input
+    // buffer, and InitMemRef never inherits the input's buffer for it.
     .set_output_memory_inherit_input()
+    .not_inplace_safe()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileTransposeType(args, kwargs);
