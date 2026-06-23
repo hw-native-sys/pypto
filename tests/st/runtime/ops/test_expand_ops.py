@@ -204,20 +204,15 @@ class ColExpandExpdif:
 
 
 class _ExpandCase(PTOTestCase):
+    # NOTE: the @pl.program kernels below are FP32-typed, so these cases are
+    # FP32-only. FP16 coverage would require separate FP16 @pl.program classes
+    # (dtype is fixed at parse time and cannot be parametrized at runtime).
     program: Any = None
     vec_shape: list = [M, 1]
     op_name: str = ""
 
-    def __init__(self, dtype: DataType, **kwargs):
-        super().__init__(**kwargs)
-        self._dtype = dtype
-        if dtype != DataType.FP32:
-            # FP16 accumulates per-element rounding; loosen the tolerance.
-            self.config.rtol = 2e-2
-            self.config.atol = 2e-2
-
     def get_name(self) -> str:
-        return f"{self.op_name}_{'fp32' if self._dtype == DataType.FP32 else 'fp16'}"
+        return f"{self.op_name}_fp32"
 
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
@@ -227,9 +222,9 @@ class _ExpandCase(PTOTestCase):
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
-            TensorSpec("a", [M, N], self._dtype, init_value=_near_one([M, N])),
-            TensorSpec("v", self.vec_shape, self._dtype, init_value=_near_one(self.vec_shape)),
-            TensorSpec("output", [M, N], self._dtype, is_output=True),
+            TensorSpec("a", [M, N], DataType.FP32, init_value=_near_one([M, N])),
+            TensorSpec("v", self.vec_shape, DataType.FP32, init_value=_near_one(self.vec_shape)),
+            TensorSpec("output", [M, N], DataType.FP32, is_output=True),
         ]
 
     def get_program(self) -> Any:
@@ -304,16 +299,11 @@ _CASES = [RowMaxCase, RowMinCase, RowExpdifCase, ColMaxCase, ColMinCase, ColExpd
 
 
 class TestExpandOps:
-    """row/col expand max/min/expdif on a2a3, FP32 + FP16."""
+    """row/col expand max/min/expdif on a2a3 (FP32)."""
 
     @pytest.mark.parametrize("case", _CASES, ids=[c.op_name for c in _CASES])
     def test_fp32(self, test_runner, case):
-        result = test_runner.run(case(DataType.FP32))
-        assert result.passed, f"Test failed: {result.error}"
-
-    @pytest.mark.parametrize("case", _CASES, ids=[c.op_name for c in _CASES])
-    def test_fp16(self, test_runner, case):
-        result = test_runner.run(case(DataType.FP16))
+        result = test_runner.run(case())
         assert result.passed, f"Test failed: {result.error}"
 
 
