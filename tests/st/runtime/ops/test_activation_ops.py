@@ -9,9 +9,9 @@
 
 """Runtime tests for tile-level activation ops: relu, lrelu.
 
-Both use signed inputs to exercise the negative branch. lrelu computes
-``max(t, slope*t)`` with a scalar slope (swept over identity / relu-equivalent /
-negative / >1 values).
+Both use signed inputs to exercise the negative branch. lrelu is leaky-relu
+``t if t > 0 else slope*t`` with a scalar slope (swept over identity /
+relu-equivalent / negative / >1 values).
 
 Coverage per op: multiple shapes (square/tall/wide), aligned + narrow valid_shape
 (combined / rows-only / cols-only), FP16, non-zero store offset; lrelu also sweeps
@@ -29,6 +29,7 @@ import pypto.language as pl
 import pytest
 import torch
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
+from pypto.runtime.runner import RunConfig
 
 _PL_DT = {DataType.FP32: pl.FP32, DataType.FP16: pl.FP16}
 
@@ -136,7 +137,9 @@ class TileLreluTestCase(_ActBase):
         return super().get_name() + f"_s{self._slope}"
 
     def _ref(self, a):
-        return torch.maximum(a, self._slope * a)
+        # TLRELU is true leaky-relu (x>0 ? x : slope*x); this equals
+        # max(x, slope*x) only for slope <= 1.
+        return torch.where(a > 0, a, self._slope * a)
 
     def get_program(self) -> Any:
         m, n, om, on, off = self._m, self._n, self._out_m, self._out_n, list(self._off)
@@ -195,7 +198,10 @@ class TestActivation:
 
     @pytest.mark.platforms("a2a3")
     def test_tile_lrelu_fp16(self, test_runner):
-        result = test_runner.run(TileLreluTestCase(dtype=DataType.FP16))
+        # FP16 leaky-relu (compare + scale) needs a looser tolerance than 1e-5.
+        result = test_runner.run(
+            TileLreluTestCase(dtype=DataType.FP16, config=RunConfig(rtol=2e-3, atol=2e-3))
+        )
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.platforms("a2a3")
