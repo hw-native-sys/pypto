@@ -168,9 +168,7 @@ def dump_manifest(dump_tag_run, test_config) -> tuple[list[dict], Path, Path]:
     manifest = json.loads(manifest_path.read_text())
     assert isinstance(manifest, dict), f"args_dump.json should hold a dict, got {type(manifest).__name__}"
     entries = manifest.get("args")
-    assert isinstance(entries, list), (
-        f"args_dump.json['args'] should be a list, got {type(entries).__name__}"
-    )
+    assert isinstance(entries, list), f"args_dump.json['args'] should be a list, got {type(entries).__name__}"
     assert entries, "args_dump.json['args'] is empty — dump pipeline produced no entries"
 
     bin_name = manifest.get("bin_file")
