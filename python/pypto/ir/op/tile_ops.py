@@ -1690,6 +1690,59 @@ def row_expand_add(tile: Expr, row_vec: Expr, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tile.row_expand_add", [tile, row_vec], {}, actual_span)
 
 
+def row_expand_max(tile: Expr, row_vec: Expr, span: Span | None = None) -> Call:
+    """Row-wise broadcast maximum.
+
+    Takes the element-wise maximum of each row and the row vector value.
+    max(tile[i, :], row_vec[i, 0]) for all i.
+
+    Args:
+        tile: Input tile (TileType [M, N])
+        row_vec: Row vector (TileType [M, 1])
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for row-wise broadcast maximum
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.row_expand_max", [tile, row_vec], {}, actual_span)
+
+
+def row_expand_min(tile: Expr, row_vec: Expr, span: Span | None = None) -> Call:
+    """Row-wise broadcast minimum.
+
+    Takes the element-wise minimum of each row and the row vector value.
+    min(tile[i, :], row_vec[i, 0]) for all i.
+
+    Args:
+        tile: Input tile (TileType [M, N])
+        row_vec: Row vector (TileType [M, 1])
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for row-wise broadcast minimum
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.row_expand_min", [tile, row_vec], {}, actual_span)
+
+
+def row_expand_expdif(tile: Expr, row_vec: Expr, span: Span | None = None) -> Call:
+    """Row-wise exp-diff with per-row scalar.
+
+    Computes exp(tile[i, :] - row_vec[i, 0]) for all i.
+
+    Args:
+        tile: Input tile (TileType [M, N])
+        row_vec: Row vector providing per-row scalar (TileType [M, 1])
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for row-wise exp-diff
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.row_expand_expdif", [tile, row_vec], {}, actual_span)
+
+
 def col_expand(target: Expr, col_vec: Expr, span: Span | None = None) -> Call:
     """Expand column vector [1, cols] to target shape [rows, cols].
 
@@ -1757,6 +1810,57 @@ def col_expand_sub(tile: Expr, col_vec: Expr, span: Span | None = None) -> Call:
     """
     actual_span = _get_span_or_capture(span)
     return _ir_core.create_op_call("tile.col_expand_sub", [tile, col_vec], {}, actual_span)
+
+
+def col_expand_max(tile: Expr, col_vec: Expr, span: Span | None = None) -> Call:
+    """Expand column vector and take element-wise maximum with target tile.
+
+    max(tile[:, j], col_vec[0, j]) for all j.
+
+    Args:
+        tile: Input tile (TileType [M, N])
+        col_vec: Column vector (TileType [1, N])
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for column-wise broadcast maximum
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.col_expand_max", [tile, col_vec], {}, actual_span)
+
+
+def col_expand_min(tile: Expr, col_vec: Expr, span: Span | None = None) -> Call:
+    """Expand column vector and take element-wise minimum with target tile.
+
+    min(tile[:, j], col_vec[0, j]) for all j.
+
+    Args:
+        tile: Input tile (TileType [M, N])
+        col_vec: Column vector (TileType [1, N])
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for column-wise broadcast minimum
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.col_expand_min", [tile, col_vec], {}, actual_span)
+
+
+def col_expand_expdif(tile: Expr, col_vec: Expr, span: Span | None = None) -> Call:
+    """Expand column vector and compute exp-diff with per-column scalar.
+
+    Computes exp(tile[:, j] - col_vec[0, j]) for all j.
+
+    Args:
+        tile: Input tile (TileType [M, N])
+        col_vec: Column vector providing per-column scalar (TileType [1, N])
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for column-wise exp-diff
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.col_expand_expdif", [tile, col_vec], {}, actual_span)
 
 
 def col_expand_add(tile: Expr, col_vec: Expr, span: Span | None = None) -> Call:

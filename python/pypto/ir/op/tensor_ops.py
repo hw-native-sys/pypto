@@ -864,6 +864,59 @@ def row_expand_sub(tensor: Expr, row_vec: Expr, span: Span | None = None) -> Cal
     return _ir_core.create_op_call("tensor.row_expand_sub", [tensor, row_vec], {}, actual_span)
 
 
+def row_expand_max(tensor: Expr, row_vec: Expr, span: Span | None = None) -> Call:
+    """Row-wise broadcast maximum.
+
+    Takes the element-wise maximum of each row and the row vector value.
+    max(tensor[i, :], row_vec[i, 0]) for all i.
+
+    Args:
+        tensor: Input tensor (TensorType [M, N])
+        row_vec: Row vector (TensorType [M, 1])
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for row-wise broadcast maximum
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.row_expand_max", [tensor, row_vec], {}, actual_span)
+
+
+def row_expand_min(tensor: Expr, row_vec: Expr, span: Span | None = None) -> Call:
+    """Row-wise broadcast minimum.
+
+    Takes the element-wise minimum of each row and the row vector value.
+    min(tensor[i, :], row_vec[i, 0]) for all i.
+
+    Args:
+        tensor: Input tensor (TensorType [M, N])
+        row_vec: Row vector (TensorType [M, 1])
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for row-wise broadcast minimum
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.row_expand_min", [tensor, row_vec], {}, actual_span)
+
+
+def row_expand_expdif(tensor: Expr, row_vec: Expr, span: Span | None = None) -> Call:
+    """Row-wise exp-diff with per-row scalar.
+
+    Computes exp(tensor[i, :] - row_vec[i, 0]) for all i.
+
+    Args:
+        tensor: Input tensor (TensorType [M, N])
+        row_vec: Row vector providing per-row scalar (TensorType [M, 1])
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for row-wise exp-diff
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.row_expand_expdif", [tensor, row_vec], {}, actual_span)
+
+
 def col_expand_mul(tensor: Expr, col_vec: Expr, span: Span | None = None) -> Call:
     """Column-wise broadcast multiplication.
 
@@ -913,6 +966,57 @@ def col_expand_sub(tensor: Expr, col_vec: Expr, span: Span | None = None) -> Cal
     """
     actual_span = _get_span_or_capture(span)
     return _ir_core.create_op_call("tensor.col_expand_sub", [tensor, col_vec], {}, actual_span)
+
+
+def col_expand_max(tensor: Expr, col_vec: Expr, span: Span | None = None) -> Call:
+    """Column-wise broadcast maximum.
+
+    max(tensor[:, j], col_vec[0, j]) for all j.
+
+    Args:
+        tensor: Input tensor (TensorType [M, N])
+        col_vec: Column vector (TensorType [1, N])
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for column-wise broadcast maximum
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.col_expand_max", [tensor, col_vec], {}, actual_span)
+
+
+def col_expand_min(tensor: Expr, col_vec: Expr, span: Span | None = None) -> Call:
+    """Column-wise broadcast minimum.
+
+    min(tensor[:, j], col_vec[0, j]) for all j.
+
+    Args:
+        tensor: Input tensor (TensorType [M, N])
+        col_vec: Column vector (TensorType [1, N])
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for column-wise broadcast minimum
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.col_expand_min", [tensor, col_vec], {}, actual_span)
+
+
+def col_expand_expdif(tensor: Expr, col_vec: Expr, span: Span | None = None) -> Call:
+    """Column-wise exp-diff with per-column scalar.
+
+    Computes exp(tensor[:, j] - col_vec[0, j]) for all j.
+
+    Args:
+        tensor: Input tensor (TensorType [M, N])
+        col_vec: Column vector providing per-column scalar (TensorType [1, N])
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for column-wise exp-diff
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.col_expand_expdif", [tensor, col_vec], {}, actual_span)
 
 
 def col_expand_div(tensor: Expr, col_vec: Expr, span: Span | None = None) -> Call:

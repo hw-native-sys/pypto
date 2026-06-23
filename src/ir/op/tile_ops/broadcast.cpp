@@ -233,6 +233,54 @@ REGISTER_OP("tile.row_expand_add")
       return DeduceTileRowExpandType(args, kwargs, "tile.row_expand_add");
     });
 
+REGISTER_OP("tile.row_expand_max")
+    .set_op_category("TileOp")
+    .set_description("Row-wise broadcast maximum: max(tile, row_vec broadcasted)")
+    .add_argument("tile", "Input tile (TileType, 2D [M, N])")
+    .add_argument("row_vec", "Row vector (TileType, 2D [M, 1])")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    // The broadcast vector (arg 1) is re-read for every output row/col, so the
+    // output must not alias its buffer (it would clobber the vector mid-op).
+    .forbid_output_alias(1)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileRowExpandType(args, kwargs, "tile.row_expand_max");
+    });
+
+REGISTER_OP("tile.row_expand_min")
+    .set_op_category("TileOp")
+    .set_description("Row-wise broadcast minimum: min(tile, row_vec broadcasted)")
+    .add_argument("tile", "Input tile (TileType, 2D [M, N])")
+    .add_argument("row_vec", "Row vector (TileType, 2D [M, 1])")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    // The broadcast vector (arg 1) is re-read for every output row/col, so the
+    // output must not alias its buffer (it would clobber the vector mid-op).
+    .forbid_output_alias(1)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileRowExpandType(args, kwargs, "tile.row_expand_min");
+    });
+
+REGISTER_OP("tile.row_expand_expdif")
+    .set_op_category("TileOp")
+    .set_description("Row-wise exp-diff: exp(tile - row_vec broadcasted) with per-row scalar")
+    .add_argument("tile", "Input tile (TileType, 2D [M, N])")
+    .add_argument("row_vec", "Row vector providing per-row scalar (TileType, 2D [M, 1])")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    // The broadcast vector (arg 1) is re-read for every output row/col, so the
+    // output must not alias its buffer (it would clobber the vector mid-op).
+    .forbid_output_alias(1)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileRowExpandType(args, kwargs, "tile.row_expand_expdif");
+    });
+
 REGISTER_OP("tile.col_expand")
     .set_op_category("TileOp")
     .set_description("Expand column tile [1, cols] to target shape [rows, cols]")
@@ -311,6 +359,54 @@ REGISTER_OP("tile.col_expand_sub")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileColExpandType(args, kwargs, "tile.col_expand_sub");
+    });
+
+REGISTER_OP("tile.col_expand_max")
+    .set_op_category("TileOp")
+    .set_description("Expand column tile and take element-wise maximum with target tile")
+    .add_argument("target", "Target tile (TileType)")
+    .add_argument("col_tile", "Column tile to expand and max (TileType, shape [1, cols])")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    // The broadcast vector (arg 1) is re-read for every output row/col, so the
+    // output must not alias its buffer (it would clobber the vector mid-op).
+    .forbid_output_alias(1)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileColExpandType(args, kwargs, "tile.col_expand_max");
+    });
+
+REGISTER_OP("tile.col_expand_min")
+    .set_op_category("TileOp")
+    .set_description("Expand column tile and take element-wise minimum with target tile")
+    .add_argument("target", "Target tile (TileType)")
+    .add_argument("col_tile", "Column tile to expand and min (TileType, shape [1, cols])")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    // The broadcast vector (arg 1) is re-read for every output row/col, so the
+    // output must not alias its buffer (it would clobber the vector mid-op).
+    .forbid_output_alias(1)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileColExpandType(args, kwargs, "tile.col_expand_min");
+    });
+
+REGISTER_OP("tile.col_expand_expdif")
+    .set_op_category("TileOp")
+    .set_description("Expand column tile and compute exp(target - col_vec) with per-column scalar")
+    .add_argument("target", "Target tile (TileType)")
+    .add_argument("col_tile", "Column tile providing per-column scalar (TileType, shape [1, cols])")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    // The broadcast vector (arg 1) is re-read for every output row/col, so the
+    // output must not alias its buffer (it would clobber the vector mid-op).
+    .forbid_output_alias(1)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileColExpandType(args, kwargs, "tile.col_expand_expdif");
     });
 
 REGISTER_OP("tile.expands")

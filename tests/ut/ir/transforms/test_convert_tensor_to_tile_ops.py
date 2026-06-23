@@ -269,6 +269,9 @@ _ROW_EXPAND_OPS = [
     ("row_expand_div", tensor_ops.row_expand_div, tile_ops.row_expand_div),
     ("row_expand_add", tensor_ops.row_expand_add, tile_ops.row_expand_add),
     ("row_expand_sub", tensor_ops.row_expand_sub, tile_ops.row_expand_sub),
+    ("row_expand_max", tensor_ops.row_expand_max, tile_ops.row_expand_max),
+    ("row_expand_min", tensor_ops.row_expand_min, tile_ops.row_expand_min),
+    ("row_expand_expdif", tensor_ops.row_expand_expdif, tile_ops.row_expand_expdif),
     ("row_expand", tensor_ops.row_expand, tile_ops.row_expand),
 ]
 _COL_EXPAND_OPS = [
@@ -276,6 +279,9 @@ _COL_EXPAND_OPS = [
     ("col_expand_div", tensor_ops.col_expand_div, tile_ops.col_expand_div),
     ("col_expand_sub", tensor_ops.col_expand_sub, tile_ops.col_expand_sub),
     ("col_expand_add", tensor_ops.col_expand_add, tile_ops.col_expand_add),
+    ("col_expand_max", tensor_ops.col_expand_max, tile_ops.col_expand_max),
+    ("col_expand_min", tensor_ops.col_expand_min, tile_ops.col_expand_min),
+    ("col_expand_expdif", tensor_ops.col_expand_expdif, tile_ops.col_expand_expdif),
     ("col_expand", tensor_ops.col_expand, tile_ops.col_expand),
 ]
 

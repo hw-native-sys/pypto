@@ -289,6 +289,36 @@ REGISTER_OP("tensor.row_expand_sub")
       return DeduceTensorRowExpandType(args, kwargs, "tensor.row_expand_sub");
     });
 
+REGISTER_OP("tensor.row_expand_max")
+    .set_op_category("TensorOp")
+    .set_description("Row-wise broadcast maximum: max(tensor, row_vec broadcasted)")
+    .add_argument("tensor", "Input tensor (TensorType [M, N])")
+    .add_argument("row_vec", "Row vector (TensorType [M, 1])")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorRowExpandType(args, kwargs, "tensor.row_expand_max");
+    });
+
+REGISTER_OP("tensor.row_expand_min")
+    .set_op_category("TensorOp")
+    .set_description("Row-wise broadcast minimum: min(tensor, row_vec broadcasted)")
+    .add_argument("tensor", "Input tensor (TensorType [M, N])")
+    .add_argument("row_vec", "Row vector (TensorType [M, 1])")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorRowExpandType(args, kwargs, "tensor.row_expand_min");
+    });
+
+REGISTER_OP("tensor.row_expand_expdif")
+    .set_op_category("TensorOp")
+    .set_description("Row-wise exp-diff: exp(tensor - row_vec broadcasted) with per-row scalar")
+    .add_argument("tensor", "Input tensor (TensorType [M, N])")
+    .add_argument("row_vec", "Row vector providing per-row scalar (TensorType [M, 1])")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorRowExpandType(args, kwargs, "tensor.row_expand_expdif");
+    });
+
 REGISTER_OP("tensor.col_expand")
     .set_op_category("TensorOp")
     .set_description("Column-wise expansion: expand col_vec [1,N] to target shape [M,N]")
@@ -307,6 +337,36 @@ REGISTER_OP("tensor.col_expand_sub")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorColExpandType(args, kwargs, "tensor.col_expand_sub");
+    });
+
+REGISTER_OP("tensor.col_expand_max")
+    .set_op_category("TensorOp")
+    .set_description("Column-wise broadcast maximum: max(tensor, col_vec broadcasted)")
+    .add_argument("tensor", "Input tensor (TensorType [M, N])")
+    .add_argument("col_vec", "Column vector (TensorType [1, N])")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorColExpandType(args, kwargs, "tensor.col_expand_max");
+    });
+
+REGISTER_OP("tensor.col_expand_min")
+    .set_op_category("TensorOp")
+    .set_description("Column-wise broadcast minimum: min(tensor, col_vec broadcasted)")
+    .add_argument("tensor", "Input tensor (TensorType [M, N])")
+    .add_argument("col_vec", "Column vector (TensorType [1, N])")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorColExpandType(args, kwargs, "tensor.col_expand_min");
+    });
+
+REGISTER_OP("tensor.col_expand_expdif")
+    .set_op_category("TensorOp")
+    .set_description("Column-wise exp-diff: exp(tensor - col_vec broadcasted) with per-column scalar")
+    .add_argument("tensor", "Input tensor (TensorType [M, N])")
+    .add_argument("col_vec", "Column vector providing per-column scalar (TensorType [1, N])")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorColExpandType(args, kwargs, "tensor.col_expand_expdif");
     });
 
 REGISTER_OP("tensor.col_expand_div")

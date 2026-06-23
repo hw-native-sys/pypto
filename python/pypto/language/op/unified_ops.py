@@ -37,11 +37,17 @@ __all__ = [
     "row_expand_div",
     "row_expand_add",
     "row_expand_sub",
+    "row_expand_max",
+    "row_expand_min",
+    "row_expand_expdif",
     "col_expand",
     "col_expand_mul",
     "col_expand_div",
     "col_expand_sub",
     "col_expand_add",
+    "col_expand_max",
+    "col_expand_min",
+    "col_expand_expdif",
     "concat",
     "expands",
     "reshape",
@@ -425,6 +431,60 @@ def col_expand_add(lhs: T, rhs: T) -> T:
     if isinstance(lhs, Tile) and isinstance(rhs, Tile):
         return _tile.col_expand_add(lhs, rhs)
     _raise_type_dispatch_error("col_expand_add", lhs, rhs)
+
+
+def row_expand_max(lhs: T, rhs: T) -> T:
+    """Row-wise broadcast maximum, dispatched by input type."""
+    if isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
+        return _tensor.row_expand_max(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, Tile):
+        return _tile.row_expand_max(lhs, rhs)
+    _raise_type_dispatch_error("row_expand_max", lhs, rhs)
+
+
+def row_expand_min(lhs: T, rhs: T) -> T:
+    """Row-wise broadcast minimum, dispatched by input type."""
+    if isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
+        return _tensor.row_expand_min(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, Tile):
+        return _tile.row_expand_min(lhs, rhs)
+    _raise_type_dispatch_error("row_expand_min", lhs, rhs)
+
+
+def row_expand_expdif(lhs: T, rhs: T) -> T:
+    """Row-wise exp-diff (exp(lhs - rhs) with per-row scalar), dispatched by input type."""
+    if isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
+        return _tensor.row_expand_expdif(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, Tile):
+        return _tile.row_expand_expdif(lhs, rhs)
+    _raise_type_dispatch_error("row_expand_expdif", lhs, rhs)
+
+
+def col_expand_max(lhs: T, rhs: T) -> T:
+    """Column-wise broadcast maximum, dispatched by input type."""
+    if isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
+        return _tensor.col_expand_max(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, Tile):
+        return _tile.col_expand_max(lhs, rhs)
+    _raise_type_dispatch_error("col_expand_max", lhs, rhs)
+
+
+def col_expand_min(lhs: T, rhs: T) -> T:
+    """Column-wise broadcast minimum, dispatched by input type."""
+    if isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
+        return _tensor.col_expand_min(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, Tile):
+        return _tile.col_expand_min(lhs, rhs)
+    _raise_type_dispatch_error("col_expand_min", lhs, rhs)
+
+
+def col_expand_expdif(lhs: T, rhs: T) -> T:
+    """Column-wise exp-diff (exp(lhs - rhs) with per-column scalar), dispatched by input type."""
+    if isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
+        return _tensor.col_expand_expdif(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, Tile):
+        return _tile.col_expand_expdif(lhs, rhs)
+    _raise_type_dispatch_error("col_expand_expdif", lhs, rhs)
 
 
 def expands(target: Tensor | Tile, scalar: int | float | Scalar) -> Tensor | Tile:

@@ -170,11 +170,17 @@ Transfer data between memory hierarchy levels.
 | `row_expand_sub` | `(tile: Tile, row_vec: Tile) -> Tile` | `tile - row_vec` broadcast |
 | `row_expand_mul` | `(tile: Tile, row_vec: Tile) -> Tile` | `tile * row_vec` broadcast |
 | `row_expand_div` | `(tile: Tile, row_vec: Tile) -> Tile` | `tile / row_vec` broadcast |
+| `row_expand_max` | `(tile: Tile, row_vec: Tile) -> Tile` | `max(tile, row_vec)` broadcast |
+| `row_expand_min` | `(tile: Tile, row_vec: Tile) -> Tile` | `min(tile, row_vec)` broadcast |
+| `row_expand_expdif` | `(tile: Tile, row_vec: Tile) -> Tile` | `exp(tile - row_vec[M,1])` broadcast |
 | `col_expand` | `(target: Tile, col_vec: Tile) -> Tile` | Expand `col_vec[1,N]` to `target[M,N]` |
 | `col_expand_mul` | `(tile: Tile, col_vec: Tile) -> Tile` | `tile * col_vec` broadcast |
 | `col_expand_div` | `(tile: Tile, col_vec: Tile) -> Tile` | `tile / col_vec` broadcast |
 | `col_expand_sub` | `(tile: Tile, col_vec: Tile) -> Tile` | `tile - col_vec` broadcast |
 | `col_expand_add` | `(tile: Tile, col_vec: Tile) -> Tile` | `tile + col_vec[1,N]` broadcast |
+| `col_expand_max` | `(tile: Tile, col_vec: Tile) -> Tile` | `max(tile, col_vec)` broadcast |
+| `col_expand_min` | `(tile: Tile, col_vec: Tile) -> Tile` | `min(tile, col_vec)` broadcast |
+| `col_expand_expdif` | `(tile: Tile, col_vec: Tile) -> Tile` | `exp(tile - col_vec[1,N])` broadcast |
 | `expands` | `(target: Tile, scalar: int \| float \| Scalar) -> Tile` | Expand scalar to tile shape |
 
 ## Comparison / Selection (`pl.tile.*`)

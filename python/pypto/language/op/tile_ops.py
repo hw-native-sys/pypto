@@ -82,11 +82,17 @@ __all__ = [
     "row_expand_div",
     "row_expand_mul",
     "row_expand_add",
+    "row_expand_max",
+    "row_expand_min",
+    "row_expand_expdif",
     "col_expand",
     "col_expand_mul",
     "col_expand_div",
     "col_expand_sub",
     "col_expand_add",
+    "col_expand_max",
+    "col_expand_min",
+    "col_expand_expdif",
     "expands",
     "minimum",
     "cmp",
@@ -1306,6 +1312,90 @@ def col_expand_add(tile: Tile, col_vec: Tile) -> Tile:
         Tile wrapping the col_expand_add operation
     """
     call_expr = _ir_ops.col_expand_add(tile.unwrap(), col_vec.unwrap())
+    return Tile(expr=call_expr)
+
+
+def row_expand_max(tile: Tile, row_vec: Tile) -> Tile:
+    """Row-wise broadcast maximum: max(tile, row_vec broadcasted).
+
+    Args:
+        tile: Input tile [M, N]
+        row_vec: Row vector [M, 1]
+
+    Returns:
+        Tile wrapping the row_expand_max operation
+    """
+    call_expr = _ir_ops.row_expand_max(tile.unwrap(), row_vec.unwrap())
+    return Tile(expr=call_expr)
+
+
+def row_expand_min(tile: Tile, row_vec: Tile) -> Tile:
+    """Row-wise broadcast minimum: min(tile, row_vec broadcasted).
+
+    Args:
+        tile: Input tile [M, N]
+        row_vec: Row vector [M, 1]
+
+    Returns:
+        Tile wrapping the row_expand_min operation
+    """
+    call_expr = _ir_ops.row_expand_min(tile.unwrap(), row_vec.unwrap())
+    return Tile(expr=call_expr)
+
+
+def row_expand_expdif(tile: Tile, row_vec: Tile) -> Tile:
+    """Row-wise exp-diff: exp(tile - row_vec) with per-row scalar.
+
+    Args:
+        tile: Input tile [M, N]
+        row_vec: Row vector providing per-row scalar [M, 1]
+
+    Returns:
+        Tile wrapping the row_expand_expdif operation
+    """
+    call_expr = _ir_ops.row_expand_expdif(tile.unwrap(), row_vec.unwrap())
+    return Tile(expr=call_expr)
+
+
+def col_expand_max(tile: Tile, col_vec: Tile) -> Tile:
+    """Expand column vector and take element-wise maximum with tile.
+
+    Args:
+        tile: Input tile [M, N]
+        col_vec: Column vector [1, N]
+
+    Returns:
+        Tile wrapping the col_expand_max operation
+    """
+    call_expr = _ir_ops.col_expand_max(tile.unwrap(), col_vec.unwrap())
+    return Tile(expr=call_expr)
+
+
+def col_expand_min(tile: Tile, col_vec: Tile) -> Tile:
+    """Expand column vector and take element-wise minimum with tile.
+
+    Args:
+        tile: Input tile [M, N]
+        col_vec: Column vector [1, N]
+
+    Returns:
+        Tile wrapping the col_expand_min operation
+    """
+    call_expr = _ir_ops.col_expand_min(tile.unwrap(), col_vec.unwrap())
+    return Tile(expr=call_expr)
+
+
+def col_expand_expdif(tile: Tile, col_vec: Tile) -> Tile:
+    """Expand column vector and compute exp-diff with per-column scalar.
+
+    Args:
+        tile: Input tile [M, N]
+        col_vec: Column vector providing per-column scalar [1, N]
+
+    Returns:
+        Tile wrapping the col_expand_expdif operation
+    """
+    call_expr = _ir_ops.col_expand_expdif(tile.unwrap(), col_vec.unwrap())
     return Tile(expr=call_expr)
 
 
