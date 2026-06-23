@@ -14,7 +14,7 @@ to a specific :class:`~pypto.runtime.Worker`'s address space.  Pass it to
 :class:`~pypto.ir.compiled_program.CompiledProgram` in place of a
 ``torch.Tensor`` to skip the host→device copy on entry and the device→host
 copy on exit — the runtime treats the underlying buffer as already resident
-on the worker (``ContinuousTensor.child_memory == 1``).
+on the worker (``Tensor.child_memory == 1``).
 
 Lifetime is **caller-managed**: every :meth:`~pypto.runtime.Worker.malloc`
 (or :meth:`~pypto.runtime.Worker.alloc_tensor`) must be paired with a

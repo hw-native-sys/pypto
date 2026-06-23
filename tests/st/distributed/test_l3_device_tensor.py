@@ -18,7 +18,7 @@ Per-call IO uses shared-memory host tensors allocated **before** ``prepare()``
 and reused in place — the forked chip worker reads/writes them through the
 inherited shared mapping, so the output is read straight back from ``host_out``
 (no ``copy_from``). Only the weight is device-resident
-(``ContinuousTensor.child_memory=True``). This mirrors the runtime's
+(``Tensor.child_memory=True``). This mirrors the runtime's
 ``child_memory`` example.
 
 Computation: ``f = a + b``, with ``b`` resident across both dispatches.

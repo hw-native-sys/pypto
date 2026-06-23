@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 
 
 # ---------------------------------------------------------------------------
-# ContinuousTensor → torch.Tensor conversion
+# simpler Tensor → torch.Tensor conversion
 # ---------------------------------------------------------------------------
 
 _DTYPE_MAP: dict[str, tuple[type, torch.dtype]] = {
@@ -53,9 +53,9 @@ _DTYPE_MAP: dict[str, tuple[type, torch.dtype]] = {
 
 
 def _tensor_from_continuous(ct) -> torch.Tensor:
-    """Convert a simpler ContinuousTensor to a torch.Tensor (zero-copy).
+    """Convert a simpler ``Tensor`` to a torch.Tensor (zero-copy).
 
-    The returned tensor shares the same memory as the ContinuousTensor
+    The returned tensor shares the same memory as the simpler ``Tensor``
     (via shared memory), so modifications are visible across processes.
 
     For dtypes that ``torch.from_numpy`` cannot accept directly (FP16/BF16),
@@ -71,7 +71,7 @@ def _tensor_from_continuous(ct) -> torch.Tensor:
         c_type, torch_dtype = _DTYPE_MAP[dtype_key]
     except KeyError as exc:
         raise TypeError(
-            f"Unsupported ContinuousTensor dtype: {dtype_str!r}. "
+            f"Unsupported simpler Tensor dtype: {dtype_str!r}. "
             f"Add an explicit mapping in _DTYPE_MAP. "
             f"Known dtypes: {sorted(_DTYPE_MAP)}"
         ) from exc
@@ -396,18 +396,18 @@ def _make_call_config(dc: DistributedConfig, run_config: RunConfig | None = None
 
 
 def _is_continuous_tensor(arg: Any) -> bool:
-    """True if *arg* is a simpler ``ContinuousTensor``.
+    """True if *arg* is a simpler ``Tensor``.
 
     Returns ``False`` (rather than raising) when simpler is unavailable, so the
     DeviceTensor-only path stays importable without the runtime package.
     """
     try:
         from .task_interface import (  # noqa: PLC0415
-            ContinuousTensor,  # pyright: ignore[reportAttributeAccessIssue]
+            Tensor,  # pyright: ignore[reportAttributeAccessIssue]
         )
     except ImportError:
         return False
-    return isinstance(arg, ContinuousTensor)
+    return isinstance(arg, Tensor)
 
 
 def _dispatch(
@@ -854,7 +854,7 @@ class DistributedWorker(Worker):
           worker reads/writes it through the inherited shared mapping; read
           outputs back directly from the tensor — no ``copy_from`` needed.
         - a worker-resident :class:`~pypto.runtime.DeviceTensor` (e.g. a static
-          weight from :meth:`alloc_tensor`) or a simpler ``ContinuousTensor``.
+          weight from :meth:`alloc_tensor`) or a simpler ``Tensor``.
 
         A non-shared ``torch.Tensor`` is rejected: a buffer allocated after the
         fork is invisible to the chip worker.
@@ -932,7 +932,7 @@ class DistributedWorker(Worker):
             elif not _is_continuous_tensor(arg):
                 raise TypeError(
                     f"DistributedWorker parameter {info.name!r} got {type(arg).__name__}; expected a "
-                    f"shared-memory torch.Tensor, a worker-resident DeviceTensor, or a ContinuousTensor."
+                    f"shared-memory torch.Tensor, a worker-resident DeviceTensor, or a simpler Tensor."
                 )
             tensors[info.name] = arg
 

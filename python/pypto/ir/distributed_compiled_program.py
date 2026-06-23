@@ -418,7 +418,7 @@ class DistributedCompiledProgram:
 
         Per-call inputs and outputs are reused-in-place **shared-memory** host
         ``torch.Tensor`` buffers (allocated before ``prepare()``) and/or
-        worker-resident ``DeviceTensor`` / ``ContinuousTensor`` arguments.
+        worker-resident ``DeviceTensor`` / simpler ``Tensor`` arguments.
         Non-shared host tensors are rejected (the forked chip worker cannot see
         a buffer allocated after the fork). The convenience host-to-device
         upload of arbitrary host ``torch.Tensor`` inputs is only available on

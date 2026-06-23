@@ -12,8 +12,8 @@ orchestration code.
 
 It must:
 - wrap a worker-resident :class:`DeviceTensor` as
-  ``ContinuousTensor.make(..., child_memory=True)``;
-- pass an already-built ``ContinuousTensor`` through unchanged;
+  ``Tensor.make(..., child_memory=True)``;
+- pass an already-built ``Tensor`` through unchanged;
 - delegate a host ``torch.Tensor`` to simpler's ``make_tensor_arg``.
 """
 
@@ -43,12 +43,12 @@ def test_device_tensor_produces_child_memory_true():
         captured["make_calls"].append(
             {"data": data, "shapes": tuple(shapes), "dtype": dtype, "child_memory": child_memory}
         )
-        return MagicMock(name=f"ContinuousTensor(0x{data:x})")
+        return MagicMock(name=f"Tensor(0x{data:x})")
 
     dt = DeviceTensor(0xABCD, (8, 16), torch.float16)
 
     with (
-        patch("pypto.runtime.task_interface.ContinuousTensor.make", side_effect=_make),
+        patch("pypto.runtime.task_interface.Tensor.make", side_effect=_make),
         patch(
             "pypto.runtime.task_interface.torch_dtype_to_datatype",
             side_effect=lambda d: f"<dtype:{d}>",
@@ -68,18 +68,18 @@ def test_device_tensor_produces_child_memory_true():
 
 def test_continuous_tensor_passes_through():
     from pypto.runtime.task_interface import (  # noqa: PLC0415
-        ContinuousTensor,  # pyright: ignore[reportAttributeAccessIssue]
+        Tensor,  # pyright: ignore[reportAttributeAccessIssue]
         torch_dtype_to_datatype,  # pyright: ignore[reportAttributeAccessIssue]
     )
     from pypto.runtime.tensor_arg import make_tensor_arg  # noqa: PLC0415
 
-    ct = ContinuousTensor.make(0x1000, (4,), torch_dtype_to_datatype(torch.float32), child_memory=True)
+    ct = Tensor.make(0x1000, (4,), torch_dtype_to_datatype(torch.float32), child_memory=True)
     assert make_tensor_arg(ct) is ct
 
 
 def test_host_tensor_delegates_to_simpler():
     host = torch.zeros(4, 4, dtype=torch.float32)
-    sentinel = MagicMock(name="ContinuousTensor(host)")
+    sentinel = MagicMock(name="Tensor(host)")
 
     with patch("pypto.runtime.task_interface.make_tensor_arg", return_value=sentinel) as impl:
         from pypto.runtime.tensor_arg import make_tensor_arg  # noqa: PLC0415

@@ -14,7 +14,7 @@ Covers four orthogonal pieces of the host_orch emit:
 1. Programs with at least one comm domain wrap the body in
    ``with orch.allocate_domain(name=..., workers=..., window_size=...,
    buffers=[CommBufferSpec(...)]) as __comm_d0:``.
-2. DistributedTensor formal → ``add_tensor(ContinuousTensor.make(data=__comm_d0[<r>]
+2. DistributedTensor formal → ``add_tensor(Tensor.make(data=__comm_d0[<r>]
    .buffer_ptrs["<name>"], shapes=..., dtype=..., child_memory=True), ...)``.
 3. Per-DistributedTensor trailing ctx scalar:
    ``add_scalar(__comm_d0[<r>].device_ctx)`` placed AFTER all tensor adds,
@@ -76,7 +76,7 @@ def _lower_host_collectives(program):
 
 # ---------------------------------------------------------------------------
 # Positive: DistributedTensor formals + device= → with orch.allocate_domain
-# + ContinuousTensor.make + add_scalar(ctx) + worker= + world_size lowering
+# + Tensor.make + add_scalar(ctx) + worker= + world_size lowering
 # ---------------------------------------------------------------------------
 
 
@@ -113,15 +113,15 @@ def test_dist_tensor_formal_emits_continuous_tensor_make():
 
     # for r in range(..., world_size, ...):  ← world_size lowering in loop bound.
     assert re.search(r"for \w+ in range\(.*\bworld_size\b.*\):", code), code
-    # ContinuousTensor.make for the DistributedTensor formal — keyed on
+    # Tensor.make for the DistributedTensor formal — keyed on
     # the alloc op's LHS name_hint (``data_buf``).
     assert re.search(
-        r'ContinuousTensor\.make\(data=__comm_d0\[\w+\]\.buffer_ptrs\["data_buf"\],'
+        r'Tensor\.make\(data=__comm_d0\[\w+\]\.buffer_ptrs\["data_buf"\],'
         r" shapes=\(64,\), dtype=DataType\.FLOAT32, child_memory=True\)",
         code,
     ), code
     # Trailing per-DistributedTensor ctx scalar — same rank index as
-    # the ContinuousTensor.make above.
+    # the Tensor.make above.
     assert re.search(r"\.add_scalar\(__comm_d0\[\w+\]\.device_ctx\)", code), code
     # ``device=r`` → ``worker=r`` kwarg on submit_next_level.
     assert re.search(r"submit_next_level\(callables\[\"chip_orch\"\],.*config, worker=\w+\)", code), code
@@ -155,9 +155,9 @@ def test_two_dist_tensor_formals_emit_two_ctx_scalars():
 
     code = _lower(Prog)
 
-    # Two ContinuousTensor.make lines — one per DistributedTensor formal.
+    # Two Tensor.make lines — one per DistributedTensor formal.
     cont_makes = re.findall(
-        r'ContinuousTensor\.make\(data=__comm_d0\[\w+\]\.buffer_ptrs\["([^"]+)"\],'
+        r'Tensor\.make\(data=__comm_d0\[\w+\]\.buffer_ptrs\["([^"]+)"\],'
         r" shapes=(\([^)]*\)), dtype=DataType\.([A-Z0-9]+),",
         code,
     )
@@ -276,10 +276,10 @@ def test_comm_less_dispatch_omits_worker_kwarg():
 
     code = _lower(Prog)
     # The dispatch shape stays intact; the comm-less path emits no wrapper
-    # and no ctx-scalar / ContinuousTensor.make / handle subscript.
+    # and no ctx-scalar / Tensor.make / handle subscript.
     assert "submit_next_level(" in code, code
     assert "worker=" not in code, code
-    assert "ContinuousTensor.make" not in code, code
+    assert "Tensor.make" not in code, code
     assert "__comm_d0[" not in code, code
     assert "allocate_domain" not in code, code
     assert "with orch" not in code, code
@@ -424,14 +424,14 @@ def test_two_groups_emit_nested_allocate_domain():
     assert d1_indent > d0_indent, (d0_line, d1_line)
 
     # Each dispatch's DistributedTensor arg routes through the right handle.
-    # group A dispatches: ContinuousTensor.make(... __comm_d0[...].buffer_ptrs["buf_a"] ...)
+    # group A dispatches: Tensor.make(... __comm_d0[...].buffer_ptrs["buf_a"] ...)
     # and add_scalar(__comm_d0[...].device_ctx).
     assert re.search(
-        r'ContinuousTensor\.make\(data=__comm_d0\[\w+\]\.buffer_ptrs\["buf_a"\],',
+        r'Tensor\.make\(data=__comm_d0\[\w+\]\.buffer_ptrs\["buf_a"\],',
         code,
     ), code
     assert re.search(
-        r'ContinuousTensor\.make\(data=__comm_d1\[\w+\]\.buffer_ptrs\["buf_b"\],',
+        r'Tensor\.make\(data=__comm_d1\[\w+\]\.buffer_ptrs\["buf_b"\],',
         code,
     ), code
     # The trailing per-tensor ctx scalar uses the matching handle too.
@@ -471,10 +471,10 @@ def test_two_groups_handle_routing_is_per_dispatch_not_state_bleed():
 
     code = _lower(Prog)
 
-    # Each dispatch site emits one ContinuousTensor.make line; the handle
+    # Each dispatch site emits one Tensor.make line; the handle
     # prefix uniquely identifies the group.
     cont_makes = re.findall(
-        r'ContinuousTensor\.make\(data=(__comm_d\d+)\[\w+\]\.buffer_ptrs\["([^"]+)"\],',
+        r'Tensor\.make\(data=(__comm_d\d+)\[\w+\]\.buffer_ptrs\["([^"]+)"\],',
         code,
     )
     assert cont_makes == [

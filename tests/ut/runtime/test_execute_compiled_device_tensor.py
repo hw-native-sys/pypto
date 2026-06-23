@@ -8,7 +8,7 @@
 # -----------------------------------------------------------------------------------------------------------
 
 """Verify ``execute_compiled`` translates :class:`DeviceTensor` arguments to
-``ContinuousTensor.make(..., child_memory=True)`` while ``torch.Tensor``
+``Tensor.make(..., child_memory=True)`` while ``torch.Tensor``
 arguments still take the ordinary ``make_tensor_arg`` path.
 """
 
@@ -36,12 +36,12 @@ def patched_runtime(tmp_path):
     """Patch every import inside ``execute_compiled`` so it runs without a device.
 
     Captures the per-arg list passed to ``orch_args.add_tensor`` so individual
-    tests can assert on the resulting ContinuousTensor descriptors.
+    tests can assert on the resulting Tensor descriptors.
     """
     captured: dict = {
         "tensors": [],
         "scalars": [],
-        "make_calls": [],  # ContinuousTensor.make kwargs
+        "make_calls": [],  # Tensor.make kwargs
         "make_tensor_arg_calls": [],
     }
 
@@ -65,11 +65,11 @@ def patched_runtime(tmp_path):
                 "child_memory": child_memory,
             }
         )
-        return MagicMock(name=f"ContinuousTensor(0x{data:x})")
+        return MagicMock(name=f"Tensor(0x{data:x})")
 
     def _make_tensor_arg(t):
         captured["make_tensor_arg_calls"].append(t)
-        return MagicMock(name="ContinuousTensor(host)")
+        return MagicMock(name="Tensor(host)")
 
     def _torch_dtype_to_datatype(dt):
         # Sentinel — not asserted on directly; child_memory and shape carry the signal.
@@ -85,7 +85,7 @@ def patched_runtime(tmp_path):
         patch("pypto.runtime.device_runner.ChipStorageTaskArgs", return_value=chip_args),
         patch("pypto.runtime.device_runner.make_tensor_arg", side_effect=_make_tensor_arg),
         patch("pypto.runtime.device_runner.scalar_to_uint64", side_effect=lambda s: int(s.value)),
-        patch("pypto.runtime.task_interface.ContinuousTensor.make", side_effect=_make),
+        patch("pypto.runtime.task_interface.Tensor.make", side_effect=_make),
         patch("pypto.runtime.task_interface.torch_dtype_to_datatype", side_effect=_torch_dtype_to_datatype),
     ):
         yield captured, tmp_path
@@ -117,7 +117,7 @@ class TestExecuteCompiledDeviceTensor:
 
         execute_compiled(tmp, [host], platform="a2a3sim", device_id=0)
 
-        # Host tensor goes through make_tensor_arg, NOT through ContinuousTensor.make
+        # Host tensor goes through make_tensor_arg, NOT through Tensor.make
         # (so child_memory cannot be True for it).
         assert captured["make_tensor_arg_calls"] == [host]
         assert captured["make_calls"] == []
@@ -133,7 +133,7 @@ class TestExecuteCompiledDeviceTensor:
 
         # add_tensor was called three times in order: host, device, host.
         assert len(captured["tensors"]) == 3
-        # Only the device-tensor slot uses ContinuousTensor.make with child_memory=True.
+        # Only the device-tensor slot uses Tensor.make with child_memory=True.
         assert len(captured["make_calls"]) == 1
         assert captured["make_calls"][0]["child_memory"] is True
         assert len(captured["make_tensor_arg_calls"]) == 2

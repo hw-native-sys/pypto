@@ -102,7 +102,7 @@ void EmitTensorAllReduceBuiltinDispatch(DistributedCodegen& codegen, const CallP
     const std::string name = codegen.SanitizeName(window_buffer->name_hint_);
     const std::string shape = codegen.FormatShapeTuple(dist_type->shape_);
     const std::string dtype_enum = "DataType." + DistributedCodegen::DataTypeToSimplerEnum(dist_type->dtype_);
-    codegen.Emit(ta_var + ".add_tensor(ContinuousTensor.make(data=" + arg_handle + "[" + rank_expr +
+    codegen.Emit(ta_var + ".add_tensor(Tensor.make(data=" + arg_handle + "[" + rank_expr +
                  "].buffer_ptrs[\"" + name + "\"], shapes=" + shape + ", dtype=" + dtype_enum +
                  ", child_memory=True), TensorArgType.INOUT)");
   }

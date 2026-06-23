@@ -10,7 +10,7 @@
 """End-to-end tests for the worker-resident DeviceTensor flow.
 
 Validates that ``Worker.alloc_tensor`` produces a buffer the runtime can
-consume via ``CompiledProgram(...)`` with ``ContinuousTensor.child_memory=True``
+consume via ``CompiledProgram(...)`` with ``Tensor.child_memory=True``
 -- i.e. no H2D upload of the DeviceTensor on entry, no D2H copy-back on exit.
 
 Both tests run on hardware/simulator and depend on the ``simpler`` runtime

@@ -12,8 +12,8 @@
 The generated ``orchestration/host_orch.py`` builds simpler ``TaskArgs`` by
 calling ``make_tensor_arg(tensors["<name>"])`` for every tensor parameter.
 This pypto-owned wrapper widens that conversion to also accept worker-resident
-:class:`~pypto.runtime.DeviceTensor` handles (and already-built
-``ContinuousTensor`` values), so distributed programs can be invoked with
+:class:`~pypto.runtime.DeviceTensor` handles (and already-built simpler
+``Tensor`` values), so distributed programs can be invoked with
 pre-uploaded device buffers — mirroring the L2 path in
 :func:`pypto.runtime.runner.execute_compiled`.
 
@@ -25,33 +25,33 @@ from typing import Any
 
 
 def make_tensor_arg(arg: Any) -> Any:
-    """Convert an orchestration tensor argument into a simpler ``ContinuousTensor``.
+    """Convert an orchestration tensor argument into a simpler ``Tensor``.
 
     Args:
         arg: One of:
             - ``torch.Tensor``: a CPU-contiguous host tensor (delegated to
               simpler's ``make_tensor_arg``, which performs the H2D copy).
             - :class:`~pypto.runtime.DeviceTensor`: a worker-resident buffer;
-              wrapped as ``ContinuousTensor(child_memory=True)`` so the runtime
+              wrapped as ``Tensor(child_memory=True)`` so the runtime
               skips H2D/D2H (memory is caller-managed).
-            - ``ContinuousTensor``: returned as-is (already device-side).
+            - simpler ``Tensor``: returned as-is (already device-side).
 
     Returns:
-        A simpler ``ContinuousTensor`` ready to add to ``TaskArgs``.
+        A simpler ``Tensor`` ready to add to ``TaskArgs``.
     """
     # Imports are lazy: simpler is only available in the runtime environment,
     # and pypto must remain importable without it.
     from .device_tensor import DeviceTensor  # noqa: PLC0415
     from .task_interface import (  # noqa: PLC0415
-        ContinuousTensor,  # pyright: ignore[reportAttributeAccessIssue]
-        device_tensor_to_continuous,
+        Tensor,  # pyright: ignore[reportAttributeAccessIssue]
+        device_tensor_to_tensor,
     )
     from .task_interface import (  # noqa: PLC0415
         make_tensor_arg as _impl,  # pyright: ignore[reportAttributeAccessIssue]
     )
 
-    if isinstance(arg, ContinuousTensor):
+    if isinstance(arg, Tensor):
         return arg
     if isinstance(arg, DeviceTensor):
-        return device_tensor_to_continuous(arg)
+        return device_tensor_to_tensor(arg)
     return _impl(arg)

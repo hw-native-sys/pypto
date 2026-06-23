@@ -694,7 +694,7 @@ def _coerced_to_orch_args(
         scalar_to_uint64,  # pyright: ignore[reportAttributeAccessIssue]
     )
     from .task_interface import (  # noqa: PLC0415
-        device_tensor_to_continuous,  # pyright: ignore[reportAttributeAccessIssue]
+        device_tensor_to_tensor,  # pyright: ignore[reportAttributeAccessIssue]
     )
 
     orch_args = ChipStorageTaskArgs()
@@ -713,7 +713,7 @@ def _coerced_to_orch_args(
             orch_args.add_tensor(make_tensor_arg(arg))
         elif isinstance(arg, DeviceTensor):
             try:
-                orch_args.add_tensor(device_tensor_to_continuous(arg))
+                orch_args.add_tensor(device_tensor_to_tensor(arg))
             except ValueError as e:
                 raise ValueError(f"At position {i}: {e}") from e
         elif isinstance(arg, _SimpleCData):
