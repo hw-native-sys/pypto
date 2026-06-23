@@ -743,8 +743,7 @@ _BROADCAST_REQUIRED_OPS = {
     "pld.system.rank",
     "pld.system.notify",
     "pld.system.wait",
-    "pld.tile.remote_load",
-    "tile.store",
+    "pld.tensor.get",
 }
 
 
@@ -834,8 +833,7 @@ def _build_allgather_before():
             data: pl.InOut[pld.DistributedTensor[[nr, SIZE], pl.FP32]],
             signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
         ) -> pl.Tensor[[1, nr * SIZE], pl.FP32]:
-            chunk = pl.load(inp, [0, 0], [1, SIZE])
-            result = pld.tensor.allgather(chunk, data, signal, out)
+            result = pld.tensor.allgather(inp, data, signal, out)
             return result
 
     return Before

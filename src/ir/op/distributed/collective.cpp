@@ -20,7 +20,7 @@
  *
  *   - pld.tensor.barrier(signal)                -> DistributedTensorType
  *   - pld.tensor.broadcast(target, signal, root) -> DistributedTensorType
- *   - pld.tensor.allgather(local_data, target, signal) -> TileType
+ *   - pld.tensor.allgather(local_data, target, signal, out) -> TensorType
  *   - pld.tensor.reduce_scatter(target, signal, op)    -> DistributedTensorType
  */
 
@@ -177,7 +177,7 @@ REGISTER_OP("pld.tensor.broadcast")
         "`target` is a window-bound DistributedTensor (each rank writes its own data before the "
         "call; root's data is read and replicated by all non-root ranks). `signal` is a "
         "window-bound INT32 matrix used as the cross-rank barrier. `root` (int kwarg) selects "
-        "the source rank. Lowered to notify-all / wait-all + remote_load by LowerCompositeOps; "
+        "the source rank. Lowered to notify-all / wait-all + pld.tensor.get by LowerCompositeOps; "
         "this op never survives past that pass.")
     .set_op_category("DistributedOp")
     .add_argument("target", "Window-bound DistributedTensor (InOut)")
@@ -238,14 +238,15 @@ TypePtr DeduceTensorAllGatherType(const std::vector<ExprPtr>& args,
 REGISTER_OP("pld.tensor.allgather")
     .set_description(
         "All-gather: gather data from all ranks, writing the concatenated result into "
-        "a user-provided output Tensor. `local_data` is the rank's chunk (Tile [1, SIZE]). "
+        "a user-provided output Tensor. `local_data` is the rank's chunk (Tensor or Tile [1, SIZE]). "
         "`target` is a window-bound DistributedTensor[NR, SIZE] used as the staging area. "
         "`signal` is a window-bound INT32 DistributedTensor used as the cross-rank barrier. "
         "`out` is a plain Tensor[1, NR*SIZE] that receives the rank-ordered concatenation. "
-        "Lowered to tile.store + notify-all / wait-all + per-peer remote_load + tile.store "
-        "into out by LowerCompositeOps; this op never survives past that pass.")
+        "Lowered to tile.load (when local_data is a Tensor) + tile.store + notify-all / wait-all "
+        "+ per-peer remote_load + tile.store into out by LowerCompositeOps; this op never "
+        "survives past that pass.")
     .set_op_category("DistributedOp")
-    .add_argument("local_data", "Local tile [1, SIZE] — this rank's data (Input)")
+    .add_argument("local_data", "Local Tensor or Tile [1, SIZE] — this rank's data (Input)")
     .add_argument("target", "Window-bound DistributedTensor[NR, SIZE] (InOut)")
     .add_argument("signal", "Window-bound INT32 DistributedTensor used as cross-rank barrier (InOut)")
     .add_argument("out", "Plain Tensor[1, NR*SIZE] — receives the gathered result (Output)")

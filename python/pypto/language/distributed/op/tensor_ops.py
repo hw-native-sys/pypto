@@ -45,7 +45,6 @@ from collections.abc import Sequence
 from pypto.ir.op.distributed import tensor_ops as _ir_tensor
 from pypto.language.typing import IntLike, Ptr
 from pypto.language.typing.tensor import Tensor
-from pypto.language.typing.tile import Tile
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir
 from pypto.pypto_core.ir import AtomicType, Call, Expr, ReduceOp
@@ -399,27 +398,28 @@ def broadcast(
 
 
 def allgather(
-    local_data: Tile,
+    local_data: Tensor,
     target: DistributedTensor,
     signal: DistributedTensor,
     out: Tensor,
 ) -> Tensor:
     """Gather data from all ranks, writing the concatenated result into a user-provided output Tensor.
 
-    ``local_data`` is a Tile [1, SIZE] with this rank's chunk.
-    ``target`` has shape [NR, SIZE] — used internally as a staging window
-    (the intrinsic handles the stage-in).  ``signal`` is a window-bound
-    INT32 barrier tensor.  ``out`` is a plain Tensor [1, NR*SIZE] that
-    receives the rank-ordered concatenated result.
+    ``local_data`` is a plain Tensor [1, SIZE] with this rank's chunk —
+    the intrinsic handles the ``pl.load`` internally.  ``target`` has shape
+    [NR, SIZE] — used internally as a staging window (the intrinsic handles
+    the stage-in).  ``signal`` is a window-bound INT32 barrier tensor.
+    ``out`` is a plain Tensor [1, NR*SIZE] that receives the rank-ordered
+    concatenated result.
 
     Usage::
 
-        chunk = pl.load(inp, [0, 0], [1, SIZE])
-        pld.tensor.allgather(chunk, data, sig, out)
+        result = pld.tensor.allgather(inp, data, sig, out)
         return out  # out now holds [1, NR*SIZE] of gathered data
 
     Args:
-        local_data: Tile [1, SIZE] — this rank's chunk to gather.
+        local_data: :class:`pl.Tensor` of shape [1, SIZE] — this rank's
+            chunk to gather.  The intrinsic loads it into a tile internally.
         target: Window-bound :class:`pld.DistributedTensor` of shape
             [NR, SIZE] used as the internal staging window.
         signal: Window-bound INT32 :class:`pld.DistributedTensor` for the

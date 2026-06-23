@@ -12,10 +12,10 @@
 Validates the composite allgather intrinsic produces the same rank-ordered
 concatenation on every rank as the hand-written ``test_l3_allgather.py``.
 
-The intrinsic accepts three arguments: ``local_data`` (Tile [1, SIZE]),
-``target`` (DistributedTensor [NR, SIZE] staging window), and ``signal``.
-It handles stage-in internally, synchronises, remote-loads peers, and
-returns the concatenated result as a Tile.
+The intrinsic accepts four arguments: ``local_data`` (Tensor [1, SIZE]),
+``target`` (DistributedTensor [NR, SIZE] staging window), ``signal``, and
+``out`` (plain Tensor [1, NR*SIZE]).  It handles the ``pl.load`` internally,
+synchronises, remote-loads peers, and writes directly into ``out``.
 
 ST coverage: **P=2** (default CI / 2-device hosts) and **P=4** (any four
 devices). Both use the same N-rank program body.
@@ -66,14 +66,11 @@ def _build_allgather_program(n_ranks: int):
             data: pl.InOut[pld.DistributedTensor[[nr, SIZE], pl.FP32]],
             signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
         ) -> pl.Tensor[[1, nr * SIZE], pl.FP32]:
-            # Prepare local chunk as a Tile.
-            chunk = pl.load(inp, [0, 0], [1, SIZE])
-
-            # Allgather — intrinsic handles stage-in, sync, remote-loads,
+            # Allgather — intrinsic handles load, stage-in, sync, remote-loads,
             # and writes directly into out.  Bind result to capture the
             # composite allgather Call in an AssignStmt so LowerCompositeOps
             # can find and lower it.
-            result = pld.tensor.allgather(chunk, data, signal, out)
+            result = pld.tensor.allgather(inp, data, signal, out)
             return result
 
         @pl.function(type=pl.FunctionType.Orchestration)

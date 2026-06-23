@@ -883,7 +883,7 @@ ExprPtr GetWriteTargetExpr(const CallPtr& call) {
     return call->args_[0];
   }
   // pld.tensor.broadcast(target, signal, *, root): writes root's data into
-  // target on every rank via remote_load + store.  target (args_[0]) is
+  // target on every rank via pld.tensor.get.  target (args_[0]) is
   // the primary write target.
   if (op_name == "pld.tensor.broadcast" && !call->args_.empty()) {
     return call->args_[0];
@@ -1089,10 +1089,9 @@ void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, st
 
   if (op_name == "pld.tensor.broadcast") {
     // pld.tensor.broadcast(target, signal, *, root): target (args_[0]) and
-    // signal (args_[1]) are both InOut.  Target is read via remote_load
-    // (non-root reads root's slot), written via store (all ranks write into
-    // their own slot).  Signal is written (Phase 2a notify) and read
-    // (Phase 2b wait).
+    // signal (args_[1]) are both InOut.  Target is read via pld.tensor.get
+    // (non-root reads root's slice), written via pld.tensor.get into local
+    // slot.  Signal is written (Phase 2a notify) and read (Phase 2b wait).
     for (size_t i = 0; i < std::min<size_t>(2, call->args_.size()); ++i) {
       auto origins = CollectReferencedOrigins(call->args_[i], origin_map);
       MarkAccess(origins, has_read);

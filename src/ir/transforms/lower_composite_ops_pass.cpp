@@ -631,7 +631,7 @@ ExprPtr LowerTensorAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>
 // Broadcast root rank's data to every rank:
 //   Phase 2a: notify-all (Set 1)
 //   Phase 2b: wait-all  (Ge 1)
-//   Phase 3:  remote_load(target, root, ...) → store → target
+//   Phase 3:  pld.tensor.get(target, peer=root, src=target)
 // Returns target (in-place rebind).  Single barrier — broadcast is read-only
 // after staging, no WAR hazard.
 // ============================================================================
@@ -648,8 +648,6 @@ ExprPtr LowerTensorBroadcastRule(const CallPtr& call, const std::vector<ExprPtr>
 
   auto root_value = GetRequiredKwarg<int>(call->kwargs_, "root", "pld.tensor.broadcast");
 
-  const std::size_t ndim = target_type->shape_.size();
-
   auto& reg = OpRegistry::GetInstance();
   auto ctx = b.Bind("ctx", reg.Create("pld.system.get_comm_ctx", {target}, {}, span), span);
   auto nranks_i32 = b.Bind("nranks", reg.Create("pld.system.nranks", {ctx}, {}, span), span);
@@ -660,9 +658,6 @@ ExprPtr LowerTensorBroadcastRule(const CallPtr& call, const std::vector<ExprPtr>
   auto one_idx = std::make_shared<ConstInt>(1, DataType::INDEX, span);
   auto one_i32 = std::make_shared<ConstInt>(1, DataType::INT32, span);
   auto root_expr = std::make_shared<ConstInt>(root_value, DataType::INT32, span);
-
-  auto zero_offsets = tile_conversion_utils::MakeZeroOffsets(ndim, span);
-  auto shape_tuple = tile_conversion_utils::MakeShapeTuple(target_type->shape_, span);
 
   // Helper: build signal-slot offset [rank_expr, 0].
   auto make_signal_offsets = [&](const ExprPtr& rank_expr) {
@@ -703,12 +698,10 @@ ExprPtr LowerTensorBroadcastRule(const CallPtr& call, const std::vector<ExprPtr>
       },
       span);
 
-  // ---- Phase 3: remote_load root's data → store into own target slot ----
-  auto recv = b.Bind("recv",
-                     OpRegistry::GetInstance().Create(
-                         "pld.tile.remote_load", {target, root_expr, zero_offsets, shape_tuple}, {}, span),
-                     span);
-  b.Bind("store_ret", reg.Create("tile.store", {recv, zero_offsets, target}, {}, span), span);
+  // ---- Phase 3: pld.tensor.get(root's data → local target slot) ----
+  // get(target, peer=root, src=target) copies the root rank's entire slice of
+  // target into every rank's local target slot through a VEC staging tile (TGET).
+  b.Bind("get_ret", reg.Create("pld.tensor.get", {target, root_expr, target}, {}, span), span);
 
   // In-place rebind: return target so the LHS Var holds the post-broadcast view.
   return target;
@@ -721,13 +714,15 @@ ExprPtr LowerTensorBroadcastRule(const CallPtr& call, const std::vector<ExprPtr>
 // into a user-provided output Tensor.  Fully N-rank general — NR is read from
 // the target's compile-time shape at lowering time.
 //
-//   arg[0] = local_data  — Tile [1, SIZE], this rank's chunk
+//   arg[0] = local_data  — Tensor [1, SIZE] (plain) or Tile [1, SIZE], this rank's chunk
 //   arg[1] = target      — DistributedTensor [NR, SIZE], staging window
 //   arg[2] = signal      — DistributedTensor INT32, cross-rank barrier
 //   arg[3] = out         — Tensor [1, NR*SIZE], output buffer
 //
 // Phases (aligned with simpler allgather_distributed reference):
-//   1.  tile.store(local_data, [0, 0], target)   — stage-in (each rank's
+//   0.  tile.load(local_data, [0,0], [1,SIZE])   — when local_data is a
+//       Tensor (emit a Tile from the plain input); skipped when Tile
+//   1.  tile.store(stage_tile, [0, 0], target)    — stage-in (each rank's
 //       private HCCL window starts at local row 0)
 //   2a. notify-all (Set 1)
 //   2b. wait-all  (Ge 1)
@@ -749,8 +744,13 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
   const auto& signal = args[2];
   const auto& out = args[3];
 
-  auto local_type = As<TileType>(local_data->GetType());
-  INTERNAL_CHECK_SPAN(local_type, span) << "pld.tensor.allgather local_data must be TileType";
+  // local_data may be a Tile (pre-loaded by user) or a Tensor (intrinsic
+  // handles the load internally).  Record which so we can emit tile.load
+  // after the shared setup expressions are available.
+  bool is_tensor_input = (As<TensorType>(local_data->GetType()) != nullptr);
+  INTERNAL_CHECK_SPAN(As<TileType>(local_data->GetType()) || is_tensor_input, span)
+      << "pld.tensor.allgather local_data must be TileType or TensorType, got "
+      << local_data->GetType()->TypeName();
   auto target_type = As<DistributedTensorType>(target->GetType());
   INTERNAL_CHECK_SPAN(target_type, span)
       << "pld.tensor.allgather target must be DistributedTensorType (deducer-rejected otherwise)";
@@ -787,8 +787,19 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
                                                        std::make_shared<ConstInt>(0, DataType::INDEX, span)},
                                   span);
 
-  // ---- Phase 1: stage-in (local_data → target[0, 0]) ----
-  b.Bind("stage_in", reg.Create("tile.store", {local_data, zero_row_offsets, target}, {}, span), span);
+  // ---- Phase 0: load (Tensor → Tile, when local_data is a Tensor) ----
+  ExprPtr stage_tile;
+  if (is_tensor_input) {
+    stage_tile = b.Bind("local_tile",
+                        reg.Create("tile.load", {local_data, zero_row_offsets, chunk_shape, chunk_shape},
+                                   {{"target_memory", MemorySpace::Vec}, {"transpose", false}}, span),
+                        span);
+  } else {
+    stage_tile = local_data;
+  }
+
+  // ---- Phase 1: stage-in (stage_tile → target[0, 0]) ----
+  b.Bind("stage_in", reg.Create("tile.store", {stage_tile, zero_row_offsets, target}, {}, span), span);
 
   // ---- Phase 2a: notify-all ----
   b.EmitFor(
