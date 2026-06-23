@@ -307,5 +307,234 @@ class TestExpandOps:
         assert result.passed, f"Test failed: {result.error}"
 
 
+# =============================================================================
+# Tensor-level path — pl.{row,col}_expand_* on whole Tensors, lowered to the
+# tile ops by ConvertTensorToTileOps.
+# =============================================================================
+
+
+@pl.program
+class TensorRowExpandMaxProg:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[M, N], pl.FP32],
+        v: pl.Tensor[[M, 1], pl.FP32],
+        output: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+    ) -> pl.Tensor[[M, N], pl.FP32]:
+        result: pl.Tensor[[M, N], pl.FP32] = pl.row_expand_max(a, v)
+        return pl.assemble(output, result, [0, 0])
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrator(
+        self,
+        a: pl.Tensor[[M, N], pl.FP32],
+        v: pl.Tensor[[M, 1], pl.FP32],
+        output: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+    ) -> pl.Tensor[[M, N], pl.FP32]:
+        output = self.kernel(a, v, output)
+        return output
+
+
+@pl.program
+class TensorRowExpandMinProg:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[M, N], pl.FP32],
+        v: pl.Tensor[[M, 1], pl.FP32],
+        output: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+    ) -> pl.Tensor[[M, N], pl.FP32]:
+        result: pl.Tensor[[M, N], pl.FP32] = pl.row_expand_min(a, v)
+        return pl.assemble(output, result, [0, 0])
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrator(
+        self,
+        a: pl.Tensor[[M, N], pl.FP32],
+        v: pl.Tensor[[M, 1], pl.FP32],
+        output: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+    ) -> pl.Tensor[[M, N], pl.FP32]:
+        output = self.kernel(a, v, output)
+        return output
+
+
+@pl.program
+class TensorRowExpandExpdifProg:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[M, N], pl.FP32],
+        v: pl.Tensor[[M, 1], pl.FP32],
+        output: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+    ) -> pl.Tensor[[M, N], pl.FP32]:
+        result: pl.Tensor[[M, N], pl.FP32] = pl.row_expand_expdif(a, v)
+        return pl.assemble(output, result, [0, 0])
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrator(
+        self,
+        a: pl.Tensor[[M, N], pl.FP32],
+        v: pl.Tensor[[M, 1], pl.FP32],
+        output: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+    ) -> pl.Tensor[[M, N], pl.FP32]:
+        output = self.kernel(a, v, output)
+        return output
+
+
+@pl.program
+class TensorColExpandMaxProg:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[M, N], pl.FP32],
+        v: pl.Tensor[[1, N], pl.FP32],
+        output: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+    ) -> pl.Tensor[[M, N], pl.FP32]:
+        result: pl.Tensor[[M, N], pl.FP32] = pl.col_expand_max(a, v)
+        return pl.assemble(output, result, [0, 0])
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrator(
+        self,
+        a: pl.Tensor[[M, N], pl.FP32],
+        v: pl.Tensor[[1, N], pl.FP32],
+        output: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+    ) -> pl.Tensor[[M, N], pl.FP32]:
+        output = self.kernel(a, v, output)
+        return output
+
+
+@pl.program
+class TensorColExpandMinProg:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[M, N], pl.FP32],
+        v: pl.Tensor[[1, N], pl.FP32],
+        output: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+    ) -> pl.Tensor[[M, N], pl.FP32]:
+        result: pl.Tensor[[M, N], pl.FP32] = pl.col_expand_min(a, v)
+        return pl.assemble(output, result, [0, 0])
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrator(
+        self,
+        a: pl.Tensor[[M, N], pl.FP32],
+        v: pl.Tensor[[1, N], pl.FP32],
+        output: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+    ) -> pl.Tensor[[M, N], pl.FP32]:
+        output = self.kernel(a, v, output)
+        return output
+
+
+@pl.program
+class TensorColExpandExpdifProg:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[M, N], pl.FP32],
+        v: pl.Tensor[[1, N], pl.FP32],
+        output: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+    ) -> pl.Tensor[[M, N], pl.FP32]:
+        result: pl.Tensor[[M, N], pl.FP32] = pl.col_expand_expdif(a, v)
+        return pl.assemble(output, result, [0, 0])
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrator(
+        self,
+        a: pl.Tensor[[M, N], pl.FP32],
+        v: pl.Tensor[[1, N], pl.FP32],
+        output: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+    ) -> pl.Tensor[[M, N], pl.FP32]:
+        output = self.kernel(a, v, output)
+        return output
+
+
+_TENSOR_PROGRAMS = {
+    "row_expand_max": TensorRowExpandMaxProg,
+    "row_expand_min": TensorRowExpandMinProg,
+    "row_expand_expdif": TensorRowExpandExpdifProg,
+    "col_expand_max": TensorColExpandMaxProg,
+    "col_expand_min": TensorColExpandMinProg,
+    "col_expand_expdif": TensorColExpandExpdifProg,
+}
+
+
+class _TensorExpandCase(_ExpandCase):
+    def get_name(self) -> str:
+        return f"tensor_{self.op_name}_fp32"
+
+    def get_program(self) -> Any:
+        return _TENSOR_PROGRAMS[self.op_name]
+
+
+class TensorRowMaxCase(_TensorExpandCase):
+    vec_shape = [M, 1]
+    op_name = "row_expand_max"
+
+    def _torch_op(self, a, b):
+        return torch.maximum(a, b)
+
+
+class TensorRowMinCase(_TensorExpandCase):
+    vec_shape = [M, 1]
+    op_name = "row_expand_min"
+
+    def _torch_op(self, a, b):
+        return torch.minimum(a, b)
+
+
+class TensorRowExpdifCase(_TensorExpandCase):
+    vec_shape = [M, 1]
+    op_name = "row_expand_expdif"
+
+    def _torch_op(self, a, b):
+        return torch.exp(a - b)
+
+
+class TensorColMaxCase(_TensorExpandCase):
+    vec_shape = [1, N]
+    op_name = "col_expand_max"
+
+    def _torch_op(self, a, b):
+        return torch.maximum(a, b)
+
+
+class TensorColMinCase(_TensorExpandCase):
+    vec_shape = [1, N]
+    op_name = "col_expand_min"
+
+    def _torch_op(self, a, b):
+        return torch.minimum(a, b)
+
+
+class TensorColExpdifCase(_TensorExpandCase):
+    vec_shape = [1, N]
+    op_name = "col_expand_expdif"
+
+    def _torch_op(self, a, b):
+        return torch.exp(a - b)
+
+
+_TENSOR_CASES = [
+    TensorRowMaxCase,
+    TensorRowMinCase,
+    TensorRowExpdifCase,
+    TensorColMaxCase,
+    TensorColMinCase,
+    TensorColExpdifCase,
+]
+
+
+class TestTensorExpandOps:
+    """Tensor-level pl.{row,col}_expand_* (lowered via tensor->tile)."""
+
+    @pytest.mark.parametrize("case", _TENSOR_CASES, ids=[c.op_name for c in _TENSOR_CASES])
+    def test_fp32(self, test_runner, case):
+        result = test_runner.run(case())
+        assert result.passed, f"Test failed: {result.error}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -663,5 +663,112 @@ class TestProdCoverage:
         assert result.passed, f"Test failed: {result.error}"
 
 
+# =============================================================================
+# Tensor-level path — pl.row_prod / pl.col_prod on whole Tensors, lowered to the
+# tile ops by ConvertTensorToTileOps. Exercises the tensor op + conversion +
+# orchestration codegen path that the tile-level cases above bypass.
+# =============================================================================
+
+
+@pl.program
+class TensorRowProd_32x64_FP32:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[32, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[32, 1], pl.FP32]],
+    ) -> pl.Tensor[[32, 1], pl.FP32]:
+        result: pl.Tensor[[32, 1], pl.FP32] = pl.row_prod(a)
+        return pl.assemble(output, result, [0, 0])
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrator(
+        self,
+        a: pl.Tensor[[32, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[32, 1], pl.FP32]],
+    ) -> pl.Tensor[[32, 1], pl.FP32]:
+        output = self.kernel(a, output)
+        return output
+
+
+@pl.program
+class TensorColProd_32x64_FP32:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[32, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+    ) -> pl.Tensor[[1, 64], pl.FP32]:
+        result: pl.Tensor[[1, 64], pl.FP32] = pl.col_prod(a)
+        return pl.assemble(output, result, [0, 0])
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrator(
+        self,
+        a: pl.Tensor[[32, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+    ) -> pl.Tensor[[1, 64], pl.FP32]:
+        output = self.kernel(a, output)
+        return output
+
+
+class TensorRowProd32x64FP32(PTOTestCase):
+    def get_name(self) -> str:
+        return "tensor_row_prod_32x64_fp32"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend910B
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("a", [32, 64], DataType.FP32, init_value=_prod_init([32, 64])),
+            TensorSpec("output", [32, 1], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return TensorRowProd_32x64_FP32
+
+    def compute_expected(self, tensors, params=None):
+        tensors["output"][:] = torch.prod(tensors["a"], dim=1, keepdim=True)
+
+
+class TensorColProd32x64FP32(PTOTestCase):
+    def get_name(self) -> str:
+        return "tensor_col_prod_32x64_fp32"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend910B
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("a", [32, 64], DataType.FP32, init_value=_prod_init([32, 64])),
+            TensorSpec("output", [1, 64], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return TensorColProd_32x64_FP32
+
+    def compute_expected(self, tensors, params=None):
+        tensors["output"][:] = torch.prod(tensors["a"], dim=0, keepdim=True)
+
+
+class TestTensorProd:
+    """Tensor-level pl.row_prod / pl.col_prod (lowered via tensor->tile)."""
+
+    def test_tensor_row_prod_fp32(self, test_runner):
+        result = test_runner.run(TensorRowProd32x64FP32())
+        assert result.passed, f"Test failed: {result.error}"
+
+    def test_tensor_col_prod_fp32(self, test_runner):
+        result = test_runner.run(TensorColProd32x64FP32())
+        assert result.passed, f"Test failed: {result.error}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
