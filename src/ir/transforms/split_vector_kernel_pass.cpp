@@ -168,6 +168,11 @@ bool IsReduceOnSplitAxis(const CallPtr& call, int split_dim) {
     int last_axis = tt ? static_cast<int>(tt->shape_.size()) - 1 : 1;
     return split_dim == last_axis;
   }
+  // Column reductions collapse the first axis (axis 0). Splitting on that axis
+  // (SplitMode::UpDown) would leave each lane with a partial reduction.
+  if (name == "tile.col_sum" || name == "tile.col_max" || name == "tile.col_min" || name == "tile.col_prod") {
+    return split_dim == 0;
+  }
   if (name == "tile.sum" || name == "tile.max" || name == "tile.min") {
     int axis = call->GetKwarg<int>("axis", -1);
     auto tt = input_tile_type();

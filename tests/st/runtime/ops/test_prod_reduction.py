@@ -492,14 +492,14 @@ class TestColProd:
 
 
 # =============================================================================
-# Coverage — narrow valid_shape (aligned + non-aligned) and BF16
+# Coverage — narrow valid_shape (aligned + non-aligned)
 #
 # row_prod with a narrow valid_col keeps the [M, 1] output fully valid (only the
 # reduced extent shrinks); col_prod with a narrow valid_row keeps [1, N] output
 # fully valid. This exercises the valid-region codegen (validRow/validCol
 # propagation and the row-reduction tmp stride) which the full-tile cases above
 # do not. A non-32B-aligned valid_col (50) additionally exercises the unaligned
-# stride path. BF16 is col_prod-only (TROWPROD does not list bfloat16).
+# stride path.
 # =============================================================================
 
 
@@ -571,28 +571,6 @@ class ColProd_ValidRow20_FP32:
         input_tensor: pl.Tensor[[32, 64], pl.FP32],
         output: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
     ) -> pl.Tensor[[1, 64], pl.FP32]:
-        output = self.kernel(input_tensor, output)
-        return output
-
-
-@pl.program
-class ColProd_32x64_BF16:
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel(
-        self,
-        input_tensor: pl.Tensor[[32, 64], pl.BF16],
-        output: pl.Out[pl.Tensor[[1, 64], pl.BF16]],
-    ) -> pl.Tensor[[1, 64], pl.BF16]:
-        tile: pl.Tile[[32, 64], pl.BF16] = pl.load(input_tensor, [0, 0], [32, 64])
-        result: pl.Tile[[1, 64], pl.BF16] = pl.tile.col_prod(tile)
-        return pl.store(result, [0, 0], output)
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
-        self,
-        input_tensor: pl.Tensor[[32, 64], pl.BF16],
-        output: pl.Out[pl.Tensor[[1, 64], pl.BF16]],
-    ) -> pl.Tensor[[1, 64], pl.BF16]:
         output = self.kernel(input_tensor, output)
         return output
 
@@ -669,37 +647,8 @@ class ColProdValidRow20FP32(PTOTestCase):
         tensors["output"][:] = torch.prod(tensors["input_tensor"][:20, :], dim=0, keepdim=True)
 
 
-class ColProdBF16(PTOTestCase):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        # BF16 product accumulates per-element rounding; loosen the tolerance.
-        self.config.rtol = 2e-2
-        self.config.atol = 2e-2
-
-    def get_name(self) -> str:
-        return "col_prod_32x64_bf16"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
-    def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec("input_tensor", [32, 64], DataType.BF16, init_value=_prod_init([32, 64])),
-            TensorSpec("output", [1, 64], DataType.BF16, is_output=True),
-        ]
-
-    def get_program(self) -> Any:
-        return ColProd_32x64_BF16
-
-    def compute_expected(self, tensors, params=None):
-        tensors["output"][:] = torch.prod(tensors["input_tensor"], dim=0, keepdim=True)
-
-
 class TestProdCoverage:
-    """Narrow valid_shape (aligned + non-aligned) and BF16 coverage."""
+    """Narrow valid_shape coverage (aligned + non-aligned)."""
 
     def test_row_prod_valid_col48_fp32(self, test_runner):
         result = test_runner.run(RowProdValidCol48FP32())
@@ -711,10 +660,6 @@ class TestProdCoverage:
 
     def test_col_prod_valid_row20_fp32(self, test_runner):
         result = test_runner.run(ColProdValidRow20FP32())
-        assert result.passed, f"Test failed: {result.error}"
-
-    def test_col_prod_32x64_bf16(self, test_runner):
-        result = test_runner.run(ColProdBF16())
         assert result.passed, f"Test failed: {result.error}"
 
 

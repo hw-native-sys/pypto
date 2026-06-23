@@ -868,6 +868,8 @@ def _register_reductions(m: dict, prefix: str) -> None:
     m[f"{prefix}.row_min"] = lambda a, _kw: f"{a[0]}.amin(dim=-1, keepdim=True)"
     m[f"{prefix}.row_prod"] = lambda a, _kw: f"{a[0]}.prod(dim=-1, keepdim=True)"
     m[f"{prefix}.col_sum"] = lambda a, _kw: f"{a[0]}.sum(dim=-2, keepdim=True)"
+    m[f"{prefix}.col_max"] = lambda a, _kw: f"{a[0]}.amax(dim=-2, keepdim=True)"
+    m[f"{prefix}.col_min"] = lambda a, _kw: f"{a[0]}.amin(dim=-2, keepdim=True)"
     m[f"{prefix}.col_prod"] = lambda a, _kw: f"{a[0]}.prod(dim=-2, keepdim=True)"
 
 

@@ -291,8 +291,13 @@ def test_tensor_row_prod():
     assert isinstance(call, ir.Call)
     assert call.op.name == "tensor.row_prod"
 
+    # Row reduction collapses the last axis (keepdim): [64, 128] -> [64, 1].
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP16
+    assert len(result_type.shape) == 2
+    assert isinstance(result_type.shape[0], ir.ConstInt) and result_type.shape[0].value == 64
+    assert isinstance(result_type.shape[1], ir.ConstInt) and result_type.shape[1].value == 1
 
 
 def test_tensor_col_prod():
@@ -309,10 +314,13 @@ def test_tensor_col_prod():
     assert isinstance(call, ir.Call)
     assert call.op.name == "tensor.col_prod"
 
+    # Column reduction collapses axis=-2 (keepdim): [64, 128] -> [1, 128].
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.FP16
     assert len(result_type.shape) == 2
+    assert isinstance(result_type.shape[0], ir.ConstInt) and result_type.shape[0].value == 1
+    assert isinstance(result_type.shape[1], ir.ConstInt) and result_type.shape[1].value == 128
 
 
 def test_tensor_col_max():
