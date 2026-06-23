@@ -215,6 +215,26 @@ REGISTER_OP("tensor.part_min")
       return DeduceTensorOpElementwiseBinaryType(args, kwargs, "tensor.part_min");
     });
 
+REGISTER_OP("tensor.fmod")
+    .set_op_category("TensorOp")
+    .set_description("Element-wise floating-point remainder of two tensors")
+    .add_argument("lhs", "Left-hand side tensor (TensorType)")
+    .add_argument("rhs", "Right-hand side tensor (TensorType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorOpElementwiseBinaryType(args, kwargs, "tensor.fmod");
+    });
+
+REGISTER_OP("tensor.fmods")
+    .set_op_category("TensorOp")
+    .set_description("Element-wise floating-point remainder of tensor and scalar")
+    .add_argument("lhs", "Left-hand side tensor (TensorType)")
+    .add_argument("rhs", "Right-hand side scalar (ScalarType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorOpElementwiseScalarType(args, kwargs, "tensor.fmods");
+    });
+
 REGISTER_OP("tensor.maximum")
     .set_op_category("TensorOp")
     .set_description("Element-wise maximum of tensor and tensor or scalar")

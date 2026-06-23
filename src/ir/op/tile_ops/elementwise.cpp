@@ -374,6 +374,19 @@ REGISTER_OP("tile.part_min")
       return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.part_min");
     });
 
+REGISTER_OP("tile.fmod")
+    .set_op_category("TileOp")
+    .set_description("Element-wise floating-point remainder of two tiles with broadcasting")
+    .add_argument("lhs", "Left-hand side tile (TileType)")
+    .add_argument("rhs", "Right-hand side tile (TileType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.fmod");
+    });
+
 REGISTER_OP("tile.muls")
     .set_op_category("TileOp")
     .set_description("Element-wise multiplication of tile and scalar")
@@ -434,6 +447,18 @@ REGISTER_OP("tile.rems")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpTileScalarTileType(args, kwargs, "tile.rems");
+    });
+
+REGISTER_OP("tile.fmods")
+    .set_op_category("TileOp")
+    .set_description("Element-wise floating-point remainder of tile and scalar")
+    .add_argument("lhs", "Tile (TileType)")
+    .add_argument("rhs", "Scalar (ScalarType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileOpScalarBinaryType(args, kwargs, "tile.fmods");
     });
 
 REGISTER_OP("tile.shl")

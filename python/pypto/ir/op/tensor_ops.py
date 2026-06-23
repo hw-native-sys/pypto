@@ -642,6 +642,53 @@ def part_min(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
     """
     actual_span = _get_span_or_capture(span)
     return _ir_core.create_op_call("tensor.part_min", [lhs, rhs], {}, actual_span)
+def fmod(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
+    """Element-wise floating-point remainder of tensor and tensor or scalar.
+
+    Automatically selects between tensor.fmod (tensor, tensor) and
+    tensor.fmods (tensor, scalar) based on the rhs type. The result matches
+    ``torch.fmod`` (the remainder takes the sign of the dividend).
+
+    Args:
+        lhs: Left-hand side tensor
+        rhs: Right-hand side tensor or scalar (int/float/Expr)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for element-wise floating-point remainder
+    """
+    actual_span = _get_span_or_capture(span)
+    rhs_expr = (
+        _normalize_expr(rhs, actual_span, int_dtype=DataType.FP32, float_dtype=DataType.FP32)
+        if not isinstance(rhs, Expr)
+        else rhs
+    )
+
+    rhs_type = rhs_expr.type
+    if isinstance(rhs_type, ScalarType):
+        return _ir_core.create_op_call("tensor.fmods", [lhs, rhs_expr], {}, actual_span)
+    else:
+        return _ir_core.create_op_call("tensor.fmod", [lhs, rhs_expr], {}, actual_span)
+
+
+def fmods(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
+    """Element-wise floating-point remainder of tensor and scalar.
+
+    Args:
+        lhs: Left-hand side tensor
+        rhs: Right-hand side scalar (int/float/Expr with ScalarType)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for element-wise floating-point remainder with scalar
+    """
+    actual_span = _get_span_or_capture(span)
+    rhs_expr = (
+        _normalize_expr(rhs, actual_span, int_dtype=DataType.FP32, float_dtype=DataType.FP32)
+        if not isinstance(rhs, Expr)
+        else rhs
+    )
+    return _ir_core.create_op_call("tensor.fmods", [lhs, rhs_expr], {}, actual_span)
 
 
 def maximum(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:

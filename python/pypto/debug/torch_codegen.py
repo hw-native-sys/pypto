@@ -894,6 +894,7 @@ def _register_ops() -> None:  # noqa: PLR0915
         m[f"{prefix}.div"] = _torch_fn("div", 2)
         m[f"{prefix}.maximum"] = _torch_fn("maximum", 2)
         m[f"{prefix}.minimum"] = _torch_fn("minimum", 2)
+        m[f"{prefix}.fmod"] = _torch_fn("fmod", 2)
 
         # partial-combine ops reduce to the plain op when both inputs are
         # fully valid (the reference path has no partial valid regions)
@@ -910,6 +911,7 @@ def _register_ops() -> None:  # noqa: PLR0915
         m[f"{prefix}.maximums"] = _torch_fn("maximum", 2)
         m[f"{prefix}.minimums"] = _torch_fn("minimum", 2)
         m[f"{prefix}.rems"] = _binop("%")
+        m[f"{prefix}.fmods"] = _torch_fn("fmod", 2)
 
         # unary
         m[f"{prefix}.neg"] = _torch_fn("neg")

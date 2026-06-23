@@ -2303,6 +2303,45 @@ class TestTileBitwiseArithmeticOps:
         call = getattr(tile, op_name)(var_a, var_b)
         assert isinstance(call, ir.Call)
         assert call.op.name == f"tile.{op_name}"
+    def test_tile_fmod(self):
+        """Test tile.fmod operator - element-wise floating-point remainder of two tiles."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                b: pl.Tensor[[128, 128], pl.FP32],
+                output: pl.Tensor[[128, 128], pl.FP32],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
+                tile_b: pl.Tile[[32, 32], pl.FP32] = pl.load(b, [0, 0], [32, 32])
+                tile_c: pl.Tile[[32, 32], pl.FP32] = pl.fmod(tile_a, tile_b)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
+                return result
+
+        ir_str = str(Program)
+        assert "tile.fmod" in ir_str
+
+    def test_tile_fmods(self):
+        """Test tile.fmods operator - element-wise floating-point remainder of tile and scalar."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                output: pl.Tensor[[128, 128], pl.FP32],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
+                tile_c: pl.Tile[[32, 32], pl.FP32] = pl.fmods(tile_a, 3.0)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
+                return result
+
+        ir_str = str(Program)
+        assert "tile.fmods" in ir_str
 
     def test_tile_and(self):
         """Test tile.and operator - element-wise bitwise AND of two tiles."""

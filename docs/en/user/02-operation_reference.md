@@ -18,6 +18,8 @@ Auto-selects between tensor and tile implementation based on input type.
 | `part_mul` | `(lhs: T, rhs: T) -> T` | Partial multiply (copies the only valid input) |
 | `part_max` | `(lhs: T, rhs: T) -> T` | Partial max (copies the only valid input) |
 | `part_min` | `(lhs: T, rhs: T) -> T` | Partial min (copies the only valid input) |
+| `fmod` | `(lhs: T, rhs: T \| int \| float \| Scalar) -> T` | Floating-point remainder (`torch.fmod`) |
+| `fmods` | `(lhs: T, rhs: int \| float \| Scalar) -> T` | Floating-point remainder with scalar |
 | `maximum` | `(lhs: T, rhs: T) -> T` | Element-wise maximum |
 | `exp` | `(input: T) -> T` | Element-wise exponential |
 | `cast` | `(input: T, target_type: int \| DataType, mode="round") -> T` | Type cast (`mode`: none, rint, round, floor, ceil, trunc, odd) |
@@ -65,6 +67,8 @@ Operate on `Tensor` objects (DDR memory).
 | `part_mul` | `(lhs: Tensor, rhs: Tensor) -> Tensor` | Partial multiply (copies the only valid input) |
 | `part_max` | `(lhs: Tensor, rhs: Tensor) -> Tensor` | Partial max (copies the only valid input) |
 | `part_min` | `(lhs: Tensor, rhs: Tensor) -> Tensor` | Partial min (copies the only valid input) |
+| `fmod` | `(lhs: Tensor, rhs: Tensor \| int \| float \| Scalar) -> Tensor` | Floating-point remainder (`torch.fmod`) |
+| `fmods` | `(lhs: Tensor, rhs: int \| float \| Scalar) -> Tensor` | Floating-point remainder with scalar |
 | `maximum` | `(lhs: Tensor, rhs: Tensor) -> Tensor` | Element-wise maximum |
 | `row_max` | `(input: Tensor) -> Tensor` | Row-wise max reduction |
 | `row_sum` | `(input: Tensor) -> Tensor` | Row-wise sum reduction |
@@ -225,6 +229,8 @@ scratch tile to materialize numeric results on A2/A3.
 | `part_mul` | `(lhs: Tile, rhs: Tile) -> Tile` | Partial multiply (copies the only valid input) |
 | `part_max` | `(lhs: Tile, rhs: Tile) -> Tile` | Partial max (copies the only valid input) |
 | `part_min` | `(lhs: Tile, rhs: Tile) -> Tile` | Partial min (copies the only valid input) |
+| `fmod` | `(lhs: Tile, rhs: Tile) -> Tile` | Floating-point remainder (`torch.fmod`) |
+| `fmods` | `(lhs: Tile, rhs: int \| float \| Scalar) -> Tile` | Floating-point remainder with scalar |
 
 ## Activations (`pl.tile.*`)
 

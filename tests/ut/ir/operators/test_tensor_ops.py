@@ -1145,6 +1145,8 @@ def test_tensor_div():
 @pytest.mark.parametrize("op_name", ["part_add", "part_mul", "part_max", "part_min"])
 def test_tensor_part_ops(op_name):
     """Test tensor.part_* partial-combine binary operations (tensor-tensor only)."""
+def test_tensor_fmod():
+    """Test tensor.fmod operation (tensor-tensor) and tensor.fmods (tensor-scalar dispatch)."""
     span = ir.Span.unknown()
 
     dim8 = ir.ConstInt(8, DataType.INT32, span)
@@ -1155,6 +1157,20 @@ def test_tensor_part_ops(op_name):
     call = getattr(ir.op.tensor, op_name)(var_a, var_b)
     assert isinstance(call, ir.Call)
     assert call.op.name == f"tensor.{op_name}"
+    # tensor-tensor -> tensor.fmod
+    call = ir.op.tensor.fmod(var_a, var_b)
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.fmod"
+
+    # tensor-scalar via fmod auto-dispatch -> tensor.fmods
+    call_scalar = ir.op.tensor.fmod(var_a, 3.0)
+    assert isinstance(call_scalar, ir.Call)
+    assert call_scalar.op.name == "tensor.fmods"
+
+    # explicit fmods -> tensor.fmods
+    call_fmods = ir.op.tensor.fmods(var_a, 3.0)
+    assert isinstance(call_fmods, ir.Call)
+    assert call_fmods.op.name == "tensor.fmods"
 
 
 def test_const_float():

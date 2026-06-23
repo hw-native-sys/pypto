@@ -27,6 +27,8 @@ __all__ = [
     "part_mul",
     "part_max",
     "part_min",
+    "fmod",
+    "fmods",
     "maximum",
     "minimum",
     "exp",
@@ -297,6 +299,41 @@ def part_min(lhs, rhs):
     if isinstance(lhs, Tile) and isinstance(rhs, Tile):
         return _tile.part_min(lhs, rhs)
     _raise_type_dispatch_error("part_min", lhs, rhs)
+# --- fmod ---
+
+
+@overload
+def fmod(lhs: Tensor, rhs: Tensor | int | float | Scalar) -> Tensor: ...
+@overload
+def fmod(lhs: Tile, rhs: Tile | int | float | Scalar) -> Tile: ...
+def fmod(lhs, rhs):
+    """Element-wise floating-point remainder, dispatched by input type.
+
+    Matches ``torch.fmod`` (the remainder takes the sign of the dividend).
+    """
+    if isinstance(lhs, Tensor) and isinstance(rhs, (Tensor, int, float, Scalar, _ir_core.Expr)):
+        return _tensor.fmod(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, Tile):
+        return _tile.fmod(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, (int, float, Scalar, _ir_core.Expr)):
+        return _tile.fmods(lhs, rhs)
+    _raise_type_dispatch_error("fmod", lhs, rhs)
+
+
+# --- fmods ---
+
+
+@overload
+def fmods(lhs: Tensor, rhs: int | float | Scalar) -> Tensor: ...
+@overload
+def fmods(lhs: Tile, rhs: int | float | Scalar) -> Tile: ...
+def fmods(lhs, rhs):
+    """Element-wise floating-point remainder with a scalar, dispatched by input type."""
+    if isinstance(lhs, Tensor):
+        return _tensor.fmods(lhs, rhs)
+    if isinstance(lhs, Tile):
+        return _tile.fmods(lhs, rhs)
+    _raise_type_dispatch_error("fmods", lhs, rhs)
 
 
 # ---------------------------------------------------------------------------

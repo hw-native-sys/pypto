@@ -44,6 +44,8 @@ __all__ = [
     "part_mul",
     "part_max",
     "part_min",
+    "fmod",
+    "fmods",
     "maximum",
     "minimum",
     "cmp",
@@ -749,6 +751,37 @@ def part_min(lhs: Tensor, rhs: Tensor) -> Tensor:
         Tensor wrapping the part_min operation
     """
     call_expr = _ir_ops.part_min(lhs.unwrap(), rhs.unwrap())
+def fmod(lhs: Tensor, rhs: int | float | Tensor | Scalar | Expr) -> Tensor:
+    """Element-wise floating-point remainder of tensor and tensor or scalar.
+
+    Automatically selects between tensor.fmod (tensor, tensor) and
+    tensor.fmods (tensor, scalar) based on the rhs type. The result matches
+    ``torch.fmod`` (the remainder takes the sign of the dividend).
+
+    Args:
+        lhs: Left-hand side tensor
+        rhs: Right-hand side tensor or scalar (int/float/Tensor/Scalar)
+
+    Returns:
+        Tensor wrapping the fmod operation
+    """
+    lhs_expr = lhs.unwrap()
+    call_expr = _ir_ops.fmod(lhs_expr, _unwrap_rhs(rhs))
+    return Tensor(expr=call_expr)
+
+
+def fmods(lhs: Tensor, rhs: int | float | Expr | Scalar) -> Tensor:
+    """Element-wise floating-point remainder of tensor and scalar.
+
+    Args:
+        lhs: Left-hand side tensor
+        rhs: Right-hand side scalar (int/float/Expr/Scalar)
+
+    Returns:
+        Tensor wrapping the fmods operation
+    """
+    lhs_expr = lhs.unwrap()
+    call_expr = _ir_ops.fmods(lhs_expr, _unwrap_rhs(rhs))
     return Tensor(expr=call_expr)
 
 

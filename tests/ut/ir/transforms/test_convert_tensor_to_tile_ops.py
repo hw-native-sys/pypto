@@ -367,6 +367,40 @@ class TestConvertTensorToTileOps:
         )
         _assert_convert_equal(before, expected)
 
+    @pytest.mark.parametrize(
+        ("rhs_kind", "tensor_factory", "tile_factory"),
+        [
+            (
+                "two_inputs",
+                lambda ins: tensor_ops.fmod(ins[0], ins[1]),
+                lambda ts: tile_ops.fmod(ts[0], ts[1]),
+            ),
+            (
+                "scalar_via_fmod",
+                lambda ins: tensor_ops.fmod(ins[0], 1.0),
+                lambda ts: tile_ops.fmods(ts[0], 1.0),
+            ),
+            (
+                "scalar_explicit",
+                lambda ins: tensor_ops.fmods(ins[0], 1.0),
+                lambda ts: tile_ops.fmods(ts[0], 1.0),
+            ),
+        ],
+    )
+    def test_fmod_dispatch(self, rhs_kind, tensor_factory, tile_factory):
+        """tensor.fmod/fmods lower 1:1 to tile.fmod/fmods (fmod auto-dispatches scalar rhs)."""
+        in_specs: list[InSpec] = [("x", [64], DataType.FP32)]
+        if rhs_kind == "two_inputs":
+            in_specs.append(("y", [64], DataType.FP32))
+        before, expected = _make_pair(
+            in_specs=in_specs,
+            out_shape=[64],
+            out_dtype=DataType.FP32,
+            tensor_op=tensor_factory,
+            tile_op=tile_factory,
+        )
+        _assert_convert_equal(before, expected)
+
     @pytest.mark.parametrize(("op_name", "tensor_op", "tile_op"), _UNARY_1D_OPS)
     def test_unary_op_1d(self, op_name, tensor_op, tile_op):
         """tensor.<unary>(x) -> tile.<unary>(x_tile) on 1D FP32."""

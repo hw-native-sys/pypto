@@ -829,6 +829,45 @@ def part_min(src0: Expr, src1: Expr, span: Span | None = None) -> Call:
     """
     actual_span = _get_span_or_capture(span)
     return _ir_core.create_op_call("tile.part_min", [src0, src1], {}, actual_span)
+def fmod(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
+    """Element-wise floating-point remainder of two tiles.
+
+    Computes the IEEE-style remainder of lhs / rhs element-wise (matching
+    ``torch.fmod``). Maps to the TFMOD hardware intrinsic.
+
+    Args:
+        lhs: Left-hand side tile (TileType)
+        rhs: Right-hand side tile (TileType)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for element-wise floating-point remainder
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.fmod", [lhs, rhs], {}, actual_span)
+
+
+def fmods(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
+    """Element-wise floating-point remainder of tile and scalar.
+
+    Computes the IEEE-style remainder of lhs / rhs element-wise (matching
+    ``torch.fmod``). Maps to the TFMODS hardware intrinsic.
+
+    Args:
+        lhs: Tile (TileType)
+        rhs: Scalar (int/float/Expr with ScalarType)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for element-wise floating-point remainder with scalar
+    """
+    actual_span = _get_span_or_capture(span)
+    rhs_expr = (
+        _normalize_expr(rhs, actual_span, int_dtype=DataType.INT32, float_dtype=DataType.FP32)
+        if not isinstance(rhs, Expr)
+        else rhs
+    )
+    return _ir_core.create_op_call("tile.fmods", [lhs, rhs_expr], {}, actual_span)
 
 
 def shl(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:

@@ -64,10 +64,10 @@
 | pto.tsub | TSUB | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tsubsc | TSUBSC | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 pto.tsubc 误算 a-b-c；PR #1823 ST 暂下架 |
 | pto.txor | TXOR | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 仅 int16/uint16；PR #1823 修了 tmp 操作数 |
-| pto.tfmod | TFMOD | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING |
-| pto.pow | TPOW | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING |
+| pto.tfmod | TFMOD | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | PR #1837 前端+codegen；a2a3 TFMOD 误算(全0)，ST 暂下架待 ISA |
+| pto.pow | TPOW | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (需 tmp tile) |
 | **逐元素与标量** |  |  |  |  |  |  |  |  |
-| pto.pows | TPOWS | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING |
+| pto.pows | TPOWS | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (需 tmp tile) |
 | pto.tadds | TADDS | tile+tensor | ✅ | ✅ | ✅ | ❌ | — |  |
 | pto.tands | TANDS | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 ptoas 拒绝该 op；PR #1823 ST 暂下架 |
 | pto.tcmps | TCMPS | tile | ✅ | ✅ | ❌ | ✅ | — |  |
@@ -84,7 +84,7 @@
 | pto.tshrs | TSHRS | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 ptoas 拒绝该 op；PR #1823 ST 暂下架 |
 | pto.tsubs | TSUBS | tile+tensor | ✅ | ✅ | ✅ | ❌ | — |  |
 | pto.txors | TXORS | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 仅 int16/uint16；PR #1823 修了 tmp 操作数 |
-| pto.tfmods | TFMODS | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING |
+| pto.tfmods | TFMODS | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | PR #1837 前端+codegen；a2a3 TFMODS 误算(全0)，ST 暂下架待 ISA |
 | **按轴逐元素 (reduce/expand)** |  |  |  |  |  |  |  |  |
 | pto.tcolexpand | TCOLEXPAND | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tcolmax | TCOLMAX | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |

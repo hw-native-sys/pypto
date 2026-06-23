@@ -110,6 +110,8 @@ __all__ = [
     "part_mul",
     "part_max",
     "part_min",
+    "fmod",
+    "fmods",
     "and_",
     "ands",
     "or_",
@@ -1751,6 +1753,38 @@ def part_min(src0: Tile, src1: Tile) -> Tile:
         Tile wrapping the part_min operation
     """
     call_expr = _ir_ops.part_min(src0.unwrap(), src1.unwrap())
+def fmod(lhs: Tile, rhs: Tile) -> Tile:
+    """Element-wise floating-point remainder of two tiles.
+
+    Computes the IEEE-style remainder of lhs / rhs element-wise (matching
+    ``torch.fmod``). Maps to the TFMOD hardware intrinsic.
+
+    Args:
+        lhs: Left-hand side tile
+        rhs: Right-hand side tile
+
+    Returns:
+        Tile wrapping the fmod operation
+    """
+    call_expr = _ir_ops.fmod(lhs.unwrap(), rhs.unwrap())
+    return Tile(expr=call_expr)
+
+
+def fmods(lhs: Tile, rhs: int | float | Expr | Scalar) -> Tile:
+    """Element-wise floating-point remainder of tile and scalar.
+
+    Computes the IEEE-style remainder of lhs / rhs element-wise (matching
+    ``torch.fmod``). Maps to the TFMODS hardware intrinsic.
+
+    Args:
+        lhs: Tile
+        rhs: Scalar value
+
+    Returns:
+        Tile wrapping the fmods operation
+    """
+    rhs_expr = rhs.unwrap() if isinstance(rhs, Scalar) else rhs
+    call_expr = _ir_ops.fmods(lhs.unwrap(), rhs_expr)
     return Tile(expr=call_expr)
 
 

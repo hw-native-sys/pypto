@@ -107,6 +107,10 @@ void OpConversionRegistry::RegisterScalarAndUnaryOps() {
   RegisterSimple("tensor.subs", "tile.subs");
   RegisterSimple("tensor.muls", "tile.muls");
   RegisterSimple("tensor.divs", "tile.divs");
+  // fmod has no broadcast (row-expand) form, so both the tensor-tensor and
+  // tensor-scalar variants are simple 1:1 lowerings.
+  RegisterSimple("tensor.fmod", "tile.fmod");
+  RegisterSimple("tensor.fmods", "tile.fmods");
 
   RegisterSimple("tensor.neg", "tile.neg");
   RegisterSimple("tensor.abs", "tile.abs");
