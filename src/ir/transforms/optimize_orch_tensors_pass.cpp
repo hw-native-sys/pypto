@@ -9198,6 +9198,7 @@ class RuntimeCurrentAggregator {
       auto loop = As<ForStmt>(stmt);
       if (!loop) return std::nullopt;
       auto source_index = BuildRuntimeCurrentLoopSourceIndex(loop);
+      std::vector<StmtPtr> barrier_stmts;
       for (const auto& ret : loop->return_vars_) {
         if (!ret || source_index.source_return_vars.count(ret.get()) == 0) continue;
         if (!HasIndexedFullRuntimeCurrentConsumer(index, next_index, ret)) continue;
@@ -9212,8 +9213,9 @@ class RuntimeCurrentAggregator {
                                            std::vector<std::pair<std::string, std::any>>{}, std::move(attrs),
                                            ret->GetType(), ret->span_);
         current_by_source.emplace(ret.get(), current);
-        return std::make_shared<AssignStmt>(current, call, ret->span_);
+        barrier_stmts.push_back(std::make_shared<AssignStmt>(current, call, ret->span_));
       }
+      if (!barrier_stmts.empty()) return SeqStmts::Flatten(std::move(barrier_stmts), stmt->span_);
       return std::nullopt;
     }
 

@@ -6500,6 +6500,77 @@ class TestPerKernelAttrs:
         assert "first_rv__runtime_current" in printed_main, printed_main
         assert "second_rv__runtime_current" not in printed_main, printed_main
 
+    def test_aggregate_current_inserts_barriers_for_multiple_loop_results(self):
+        """Every current-carrying loop result with a later full-parent consumer gets a barrier."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def write_both(
+                self,
+                src: pl.Tensor[[64, 256], pl.FP32],
+                col: pl.Scalar[pl.INDEX],
+                first: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+                second: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+            ) -> tuple[pl.Tensor[[64, 256], pl.FP32], pl.Tensor[[64, 256], pl.FP32]]:
+                tile: pl.Tile[[64, 128], pl.FP32] = pl.tile.load(src, [0, col], [64, 128], [64, 128])
+                first_next: pl.Tensor[[64, 256], pl.FP32] = pl.tile.store(tile, [0, col], first)
+                second_next: pl.Tensor[[64, 256], pl.FP32] = pl.tile.store(tile, [0, col], second)
+                return first_next, second_next
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def read_stripes(
+                self,
+                data: pl.Tensor[[64, 256], pl.FP32],
+                col: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+            ) -> tuple[pl.Tensor[[64, 256], pl.FP32], pl.Tensor[[64, 256], pl.FP32]]:
+                tile: pl.Tile[[64, 128], pl.FP32] = pl.tile.load(data, [0, col], [64, 128], [64, 128])
+                out_next: pl.Tensor[[64, 256], pl.FP32] = pl.tile.store(tile, [0, col], out)
+                return out_next, data
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                src: pl.Tensor[[64, 256], pl.FP32],
+                first: pl.Tensor[[64, 256], pl.FP32],
+                second: pl.Tensor[[64, 256], pl.FP32],
+                out_a: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+                out_b: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+            ) -> tuple[pl.Tensor[[64, 256], pl.FP32], pl.Tensor[[64, 256], pl.FP32]]:
+                for i, (first_iter, second_iter) in pl.range(0, 2, init_values=(first, second)):
+                    col: pl.Scalar[pl.INDEX] = i * 128
+                    pair = self.write_both(src, col, first_iter, second_iter)
+                    first_next: pl.Tensor[[64, 256], pl.FP32] = pair[0]
+                    second_next: pl.Tensor[[64, 256], pl.FP32] = pair[1]
+                    first_rv, second_rv = pl.yield_(first_next, second_next)
+
+                for j, (out_iter,) in pl.range(0, 2, init_values=(out_a,)):
+                    col: pl.Scalar[pl.INDEX] = j * 128
+                    result = self.read_stripes(first_rv, col, out_iter)
+                    out_next: pl.Tensor[[64, 256], pl.FP32] = result[0]
+                    out_a_rv = pl.yield_(out_next)
+
+                for k, (out_iter,) in pl.range(0, 2, init_values=(out_b,)):
+                    col: pl.Scalar[pl.INDEX] = k * 128
+                    result = self.read_stripes(second_rv, col, out_iter)
+                    out_next: pl.Tensor[[64, 256], pl.FP32] = result[0]
+                    out_b_rv = pl.yield_(out_next)
+                return out_a_rv, out_b_rv
+
+        After = _run_to_optimize_orch_tensors(
+            Before,
+            window_policy="boundingBox",
+            window_flow="linked",
+        )
+
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert printed_main.count("__runtime_current") >= 2, printed_main
+        assert "first_rv__runtime_current" in printed_main, printed_main
+        assert "second_rv__runtime_current" in printed_main, printed_main
+        assert re.search(r"read_stripes__windowed\(\s*first_rv__runtime_current", printed_main), printed_main
+        assert re.search(r"read_stripes__windowed\(\s*second_rv__runtime_current", printed_main), printed_main
+
     def test_chained_aggregate_current_substitutes_before_next_barrier(self):
         """A loop that both consumes and produces current must consume the prior current."""
 
