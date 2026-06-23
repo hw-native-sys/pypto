@@ -375,6 +375,7 @@ class TestCrossCoreTpushTpopCodegen:
             passes.init_mem_ref,
             passes.memory_reuse,
             passes.allocate_memory_addr,
+            passes.stamp_tfree_split,
         ]:
             pipeline.add_pass(factory())
         optimized = pipeline.run(program)

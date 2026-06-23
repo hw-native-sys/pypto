@@ -400,7 +400,8 @@ The PTO-oriented tile stage shared by `Default` and `DebugTileOptimization` is:
 24. [`MaterializeCommDomainScopes`](37-materialize_comm_domain_scopes.md) (distributed: WindowBuffer + CommDomainScopeStmt wrappers in each host_orch body; no-op for comm-less programs)
 25. [`LowerHostTensorCollectives`](38-lower_host_tensor_collectives.md) (host-level tensor collectives -> internal builtin chip dispatches)
 26. `Simplify`
-27. [`MaterializeRuntimeScopes`](39-materialize_runtime_scopes.md) (inserts AUTO RuntimeScopeStmt so orchestration codegen emits PTO2_SCOPE 1:1)
+27. [`StampTfreeSplit`](39-stamp_tfree_split.md) (copies each cross-core tpop's split/pipe-id onto its matching tfree op)
+28. [`MaterializeRuntimeScopes`](40-materialize_runtime_scopes.md) (inserts AUTO RuntimeScopeStmt so orchestration codegen emits PTO2_SCOPE 1:1)
 
 `DebugTileOptimization` is a debug-only strategy for inspecting this tile stage
 without the tensor-only prefix passes. Use `Default` for normal compilation and

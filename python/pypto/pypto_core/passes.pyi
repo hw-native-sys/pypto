@@ -609,6 +609,15 @@ def materialize_comm_domain_scopes() -> Pass:
 def lower_host_tensor_collectives() -> Pass:
     """Lower host-level ``pld.tensor.allreduce`` calls to builtin collective dispatches."""
 
+def stamp_tfree_split() -> Pass:
+    """Copy each cross-core tpop's split/pipe-id onto its matching tfree op.
+
+    A ``system.tfree_to_ai{c,v}`` carries no split/id of its own; those live on
+    the matching ``tile.tpop_from_ai{c,v}`` call. This pass stamps them onto the
+    tfree op so codegen reads them directly. Covers mixed-kernel and explicit
+    AIC/AIV tfrees. Runs late, before codegen.
+    """
+
 def materialize_runtime_scopes() -> Pass:
     """Materialize implicit orchestration scopes as explicit RuntimeScopeStmt nodes.
 
@@ -767,6 +776,7 @@ __all__ = [
     "allocate_memory_addr",
     "fuse_create_assemble_to_slice",
     "fold_no_op_reshape",
+    "stamp_tfree_split",
     "VerificationError",
     "SSAErrorType",
     "TypeCheckErrorType",

@@ -507,6 +507,9 @@ void BindPass(nb::module_& m) {
              "immediately after InlineFunctions (L2 orch is never inlined into L3).");
   passes.def("lower_host_tensor_collectives", &pass::LowerHostTensorCollectives,
              "Lower host-level pld.tensor.allreduce calls to builtin tensor collective dispatches.");
+  passes.def("stamp_tfree_split", &pass::StampTfreeSplit,
+             "Copy each cross-core tpop's split/pipe-id onto its matching tfree op so codegen\n"
+             "reads them from the op directly. Covers mixed-kernel and explicit AIC/AIV tfrees.");
   passes.def("materialize_runtime_scopes", &pass::MaterializeRuntimeScopes,
              "Materialize implicit orchestration scopes as explicit RuntimeScopeStmt nodes.\n\n"
              "For every Orchestration function, inserts AUTO RuntimeScopeStmt (manual_=false)\n"

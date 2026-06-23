@@ -303,6 +303,10 @@ inline const PassProperties kFoldNoOpReshapeProperties{
     .required = {IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps, IRProperty::HasMemRefs,
                  IRProperty::TileOps2D}};
 
+// -- Stamp tpop split/id onto tfree ops --------------------------------------
+
+inline const PassProperties kStampTfreeSplitProperties{.required = {IRProperty::SplitIncoreOrch}};
+
 }  // namespace pass
 }  // namespace ir
 }  // namespace pypto

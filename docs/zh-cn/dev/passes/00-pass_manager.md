@@ -400,7 +400,8 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 24. [`MaterializeCommDomainScopes`](37-materialize_comm_domain_scopes.md)（分布式：构造 WindowBuffer 并写 CommDomainScopeStmt wrappers in each host_orch body；无通信程序为 no-op）
 25. [`LowerHostTensorCollectives`](38-lower_host_tensor_collectives.md)（host-level tensor collectives -> internal builtin chip dispatches）
 26. `Simplify`
-27. [`MaterializeRuntimeScopes`](39-materialize_runtime_scopes.md)（插入 AUTO RuntimeScopeStmt，使 orchestration codegen 1:1 emit PTO2_SCOPE）
+27. [`StampTfreeSplit`](39-stamp_tfree_split.md)（把每个跨核 tpop 的 split/pipe-id 复制到与之配对的 tfree 算子上）
+28. [`MaterializeRuntimeScopes`](40-materialize_runtime_scopes.md)（插入 AUTO RuntimeScopeStmt，使 orchestration codegen 1:1 emit PTO2_SCOPE）
 
 `DebugTileOptimization` 只是用于排查 PTO tile 阶段的调试策略，会跳过
 tensor-only 前缀 pass。正常编译和非 strategy 专项测试都应优先使用

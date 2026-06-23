@@ -695,7 +695,6 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   // dtype 1:1 (other operands like valid_row/valid_col adapt to the
   // consumer's type via cast_to_index — see ComputeAllocTileFields).
   for (const auto& [tile_var, tile_type] : fs_.tile_var_allocs) {
-    if (fs_.tpop_result_vars.count(tile_var.get()) > 0) continue;
     auto memref = ir::GetDefinedMemRef(tile_type);
     if (auto const_offset = memref ? As<ir::ConstInt>(memref->byte_offset_) : nullptr) {
       GetOrEmitConstant(const_offset->value_, const_offset->dtype());
@@ -780,16 +779,11 @@ void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
     std::map<const ir::Var*, const ir::Var*>& var_to_memref;    ///< tile var → base_ Ptr
     std::map<const ir::Var*, std::string>& memref_to_var_name;  ///< base_ Ptr → var name
     std::vector<std::pair<VarPtr, std::shared_ptr<const TileType>>>& tile_var_allocs;
-    std::map<const ir::Var*, TpopResultInfo>& tpop_result_vars;
 
     VarMemRefMapper(std::map<const ir::Var*, const ir::Var*>& mapping,
                     std::map<const ir::Var*, std::string>& reverse_mapping,
-                    std::vector<std::pair<VarPtr, std::shared_ptr<const TileType>>>& allocs,
-                    std::map<const ir::Var*, TpopResultInfo>& tpop_vars)
-        : var_to_memref(mapping),
-          memref_to_var_name(reverse_mapping),
-          tile_var_allocs(allocs),
-          tpop_result_vars(tpop_vars) {}
+                    std::vector<std::pair<VarPtr, std::shared_ptr<const TileType>>>& allocs)
+        : var_to_memref(mapping), memref_to_var_name(reverse_mapping), tile_var_allocs(allocs) {}
 
     void VisitStmt_(const AssignStmtPtr& op) override {
       if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
@@ -800,27 +794,12 @@ void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
           memref_to_var_name[base_ptr] = op->var_->name_hint_;
         }
         tile_var_allocs.emplace_back(op->var_, tile_type);
-
-        if (auto call = As<ir::Call>(op->value_)) {
-          // Track tpop result vars with their split value so codegen can:
-          // 1. Skip alloc_tile for them
-          // 2. Propagate split and explicit pipe id to tfree
-          if (call->op_->name_ == "tile.tpop_from_aiv" || call->op_->name_ == "tile.tpop_from_aic") {
-            int split = call->GetKwarg<int>("split", 0);
-            std::optional<int> pipe_id;
-            if (call->HasKwarg("id")) {
-              pipe_id = call->GetKwarg<int>("id", 0);
-            }
-            tpop_result_vars[op->var_.get()] = TpopResultInfo{split, call->op_->name_, pipe_id};
-          }
-        }
       }
       ir::IRVisitor::VisitStmt_(op);
     }
   };
 
-  VarMemRefMapper mapper(fs_.var_to_memref, fs_.memref_to_var_name, fs_.tile_var_allocs,
-                         fs_.tpop_result_vars);
+  VarMemRefMapper mapper(fs_.var_to_memref, fs_.memref_to_var_name, fs_.tile_var_allocs);
   if (func->body_) {
     mapper.VisitStmt(func->body_);
   }
@@ -1276,24 +1255,6 @@ std::string PTOCodegen::GetGMSlotBufferSSAForPipe(int pipe_id, int dir_mask) {
   return region_ssa;
 }
 
-const TpopResultInfo& PTOCodegen::GetValidatedTpopInfo(const ir::Var* var,
-                                                       const std::string& expected_tpop_op_name,
-                                                       const std::string& tfree_op_name) const {
-  INTERNAL_CHECK(var != nullptr) << "Internal error: null var passed to GetValidatedTpopInfo";
-  auto it = fs_.tpop_result_vars.find(var);
-  INTERNAL_CHECK_SPAN(it != fs_.tpop_result_vars.end(), var->span_)
-      << "Internal error: GetValidatedTpopInfo called for var not in fs_.tpop_result_vars";
-  CHECK(it->second.op_name == expected_tpop_op_name)
-      << tfree_op_name << " requires its tile argument to come from " << expected_tpop_op_name << ", got "
-      << it->second.op_name;
-  return it->second;
-}
-
-int PTOCodegen::GetValidatedTpopSplit(const ir::Var* var, const std::string& expected_tpop_op_name,
-                                      const std::string& tfree_op_name) const {
-  return GetValidatedTpopInfo(var, expected_tpop_op_name, tfree_op_name).split;
-}
-
 bool PTOCodegen::IsAICFunction() const {
   return fs_.current_function && fs_.current_function->func_type_ == ir::FunctionType::AIC;
 }
@@ -1332,10 +1293,14 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   const bool is_set_validshape = call && call->op_->name_ == "tile.set_validshape";
   const bool alias_scatter_result_to_input = ShouldAliasScatterResultToInput(op);
   const bool alias_array_update_to_input = ShouldAliasArrayUpdateResultToInput(op);
+  // A cross-core tpop result owns no general-pool buffer (its data lives in the
+  // reserved C2V/V2C slot). InitMemRef normally leaves it MemRef-less, but guard
+  // by op name too so a tpop result that still carries a MemRef gets no alloc.
+  const bool is_tpop_result =
+      call && (call->op_->name_ == "tile.tpop_from_aic" || call->op_->name_ == "tile.tpop_from_aiv");
 
   if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
-    if (!is_set_validshape && fs_.tpop_result_vars.count(op->var_.get()) == 0 &&
-        !alias_scatter_result_to_input) {
+    if (!is_set_validshape && !alias_scatter_result_to_input && !is_tpop_result) {
       EmitAllocTileForVar(op->var_, tile_type);
     }
   }
@@ -1362,7 +1327,18 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
         }
         result_tile_type = tile_type;
       } else if (auto tile_type = As<TileType>(op->var_->GetType())) {
+        // A MemRef-less tile result (e.g. a cross-core tpop result, whose data
+        // lives in the reserved C2V/V2C slot) still needs a %-SSA name bound so
+        // consumers resolve it; its tile_buf type comes from the TileType since
+        // there is no MemRef to read. Register it before the op codegen runs so
+        // GetCurrentResultTileBufTypeString() can emit the `-> type` annotation.
         result_tile_type = tile_type;
+        result_buf = NewNamedTemp(op->var_->name_hint_);
+        BindVarToMlir(op->var_, result_buf);
+        std::string type_str = GetTileBufTypeStringFromTileType(tile_type);
+        if (!type_str.empty()) {
+          fs_.ssa_to_tile_buf_type[result_buf] = type_str;
+        }
       } else if (alias_array_update_to_input) {
         // array.update_element: alias the result Var to the input array's SSA so
         // the emitted pto.local_array_set mutates the same declare_local_array

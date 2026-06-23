@@ -186,6 +186,10 @@ class PassManager:
             ("MaterializeCommDomainScopes", lambda: passes.materialize_comm_domain_scopes()),
             ("LowerHostTensorCollectives", lambda: passes.lower_host_tensor_collectives()),
             ("Simplify", lambda: passes.simplify()),
+            # Copy each cross-core tpop's split/pipe-id onto its matching tfree op so
+            # codegen reads them from the op (no codegen-side tpop lookup table). Runs
+            # after split is finalized on tpops and after the final Simplify.
+            ("StampTfreeSplit", lambda: passes.stamp_tfree_split()),
             # Insert explicit AUTO RuntimeScopeStmt nodes (function body + for/if
             # bodies) into Orchestration functions so codegen emits PTO2_SCOPE
             # 1:1 from the IR. Runs dead last, after the final Simplify, so no

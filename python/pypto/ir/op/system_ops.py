@@ -290,35 +290,45 @@ def import_peer_buffer(*, name: str, peer_func: str, span: Span | None = None) -
 # ============================================================================
 
 
-def tfree_to_aic(tile: Expr, span: Span | None = None, *, id: int | None = None) -> Call:
+def tfree_to_aic(
+    tile: Expr, span: Span | None = None, *, split: int | None = None, id: int | None = None
+) -> Call:
     """Release ring buffer slot back to AIC producer.
 
     Called by AIV consumer after finishing with data from tpop_from_aic.
 
     Args:
         tile: Tile expression obtained from tpop_from_aic to release
+        split: Split mode, copied from the originating tpop by StampTfreeSplit.
         id: Optional frontend pipe id. Omit to use PTOAS default id 0.
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     kwargs = {}
+    if split is not None:
+        kwargs["split"] = split
     if id is not None:
         kwargs["id"] = id
     return _ir_core.create_op_call("system.tfree_to_aic", [tile], kwargs, actual_span)
 
 
-def tfree_to_aiv(tile: Expr, span: Span | None = None, *, id: int | None = None) -> Call:
+def tfree_to_aiv(
+    tile: Expr, span: Span | None = None, *, split: int | None = None, id: int | None = None
+) -> Call:
     """Release ring buffer slot back to AIV producer.
 
     Called by AIC consumer after finishing with data from tpop_from_aiv.
 
     Args:
         tile: Tile expression obtained from tpop_from_aiv to release
+        split: Split mode, copied from the originating tpop by StampTfreeSplit.
         id: Optional frontend pipe id. Omit to use PTOAS default id 0.
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     kwargs = {}
+    if split is not None:
+        kwargs["split"] = split
     if id is not None:
         kwargs["id"] = id
     return _ir_core.create_op_call("system.tfree_to_aiv", [tile], kwargs, actual_span)

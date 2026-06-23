@@ -38,12 +38,6 @@ namespace pypto {
 
 namespace codegen {
 
-struct TpopResultInfo {
-  int split = 0;
-  std::string op_name;
-  std::optional<int> pipe_id;
-};
-
 /// Order distinct DataTypes by their internal code so containers keyed on
 /// DataType (e.g. the CommRemoteOffset helper dtype set) iterate
 /// deterministically.
@@ -509,23 +503,6 @@ class PTOCodegen : public CodegenBase {
   [[nodiscard]] std::string GetGMSlotBufferSSAForPipe(int pipe_id, int dir_mask);
 
   /**
-   * @brief Get metadata for a tile var produced by a matching tpop operation
-   * @param var Raw pointer to the tile variable
-   * @param expected_tpop_op_name Expected originating tpop op name
-   * @param tfree_op_name Name of the consuming tfree op for diagnostics
-   * @return Metadata from the originating tpop
-   */
-  [[nodiscard]] const TpopResultInfo& GetValidatedTpopInfo(const ir::Var* var,
-                                                           const std::string& expected_tpop_op_name,
-                                                           const std::string& tfree_op_name) const;
-
-  /**
-   * @brief Get the split value for a tile var produced by a matching tpop operation
-   */
-  [[nodiscard]] int GetValidatedTpopSplit(const ir::Var* var, const std::string& expected_tpop_op_name,
-                                          const std::string& tfree_op_name) const;
-
-  /**
    * @brief Check if the current function is an AIC (Cube) function
    */
   [[nodiscard]] bool IsAICFunction() const;
@@ -721,7 +698,6 @@ class PTOCodegen : public CodegenBase {
     std::map<const ir::Var*, std::string> memref_to_var_name;  ///< keyed by base_ Ptr
     std::vector<std::pair<ir::VarPtr, std::shared_ptr<const ir::TileType>>> tile_var_allocs;
     std::set<const ir::Var*> emitted_tile_alloc_vars;
-    std::map<const ir::Var*, TpopResultInfo> tpop_result_vars;
 
     ir::FunctionPtr current_function;
     ir::VarPtr current_result_var;
@@ -776,7 +752,6 @@ class PTOCodegen : public CodegenBase {
       memref_to_var_name.clear();
       tile_var_allocs.clear();
       emitted_tile_alloc_vars.clear();
-      tpop_result_vars.clear();
 
       current_function.reset();
       current_result_var.reset();

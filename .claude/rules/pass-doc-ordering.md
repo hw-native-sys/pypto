@@ -51,7 +51,8 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 36 | `36-expand_manual_phase_fence.md` | 36th pass (manual-scope phase-fence TaskId dep compression; runs after AutoDeriveTaskDependencies) |
 | 37 | `37-materialize_comm_domain_scopes.md` | 37th pass (distributed: WindowBuffer + CommDomainScopeStmt wrappers in each host_orch body; runs immediately before LowerHostTensorCollectives) |
 | 38 | `38-lower_host_tensor_collectives.md` | 38th pass (host-level tensor collectives -> internal builtin chip dispatches; runs after comm-domain scopes) |
-| 39 | `39-materialize_runtime_scopes.md` | Last pass (after the final Simplify; inserts AUTO RuntimeScopeStmt so orchestration codegen emits PTO2_SCOPE 1:1) |
+| 39 | `39-stamp_tfree_split.md` | 39th pass (copies each cross-core tpop's split/pipe-id onto its matching tfree op; runs after the final Simplify, before codegen) |
+| 40 | `40-materialize_runtime_scopes.md` | Last pass (after the final Simplify; inserts AUTO RuntimeScopeStmt so orchestration codegen emits PTO2_SCOPE 1:1) |
 | 91 | `91-utility_passes.md` | Not in Default strategy |
 | 99 | `99-verifier.md` | Infrastructure (not a pipeline pass) |
 

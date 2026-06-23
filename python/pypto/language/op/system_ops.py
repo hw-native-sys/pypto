@@ -64,14 +64,18 @@ def tpush_to_aic(tile: Tile, *, split: int, id: int | None = None, span: Span | 
     return _ir_ops.tpush_to_aic(tile.unwrap(), split=split, id=id, span=span)
 
 
-def tfree_to_aic(tile: Tile, span: Span | None = None, *, id: int | None = None) -> Call:
+def tfree_to_aic(
+    tile: Tile, span: Span | None = None, *, split: int | None = None, id: int | None = None
+) -> Call:
     """Release ring buffer slot back to AIC producer."""
-    return _ir_ops.tfree_to_aic(tile.unwrap(), id=id, span=span)
+    return _ir_ops.tfree_to_aic(tile.unwrap(), split=split, id=id, span=span)
 
 
-def tfree_to_aiv(tile: Tile, span: Span | None = None, *, id: int | None = None) -> Call:
+def tfree_to_aiv(
+    tile: Tile, span: Span | None = None, *, split: int | None = None, id: int | None = None
+) -> Call:
     """Release ring buffer slot back to AIV producer."""
-    return _ir_ops.tfree_to_aiv(tile.unwrap(), id=id, span=span)
+    return _ir_ops.tfree_to_aiv(tile.unwrap(), split=split, id=id, span=span)
 
 
 def tpop_from_aic(

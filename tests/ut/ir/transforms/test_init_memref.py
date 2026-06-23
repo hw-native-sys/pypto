@@ -235,6 +235,39 @@ class TestMemRefSharing:
         After = passes.init_mem_ref()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_view_over_tpop_result_is_memref_less(self):
+        """A cross-core tpop result and any view chained off it stay MemRef-less.
+
+        The tpop's data lives in the reserved C2V slot (no general-pool buffer),
+        so InitMemRef must NOT give the tpop result or a reshape view of it a
+        MemRef (which would become a disconnected alloc_tile at codegen). A normal
+        consumer of the view still gets its own MemRef.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def consumer(self):
+                buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=buf)
+                t: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=0)
+                v: pl.Tile[[8, 32], pl.FP32, pl.MemorySpace.Vec] = pl.tile.reshape(t, [8, 32])
+                pl.tfree_to_aic(t)
+                out: pl.Tile[[8, 32], pl.FP32, pl.MemorySpace.Vec] = pl.exp(v)
+                _ = out
+
+        after = passes.init_mem_ref()(Before)
+        func = next(iter(after.functions.values()))
+
+        memref_by_name: dict[str, object] = {}
+        for stmt in cast(ir.SeqStmts, func.body).stmts:
+            if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.var.type, ir.TileType):
+                memref_by_name[stmt.var.name_hint] = stmt.var.type.memref
+
+        assert memref_by_name["t"] is None, "tpop result must be MemRef-less"
+        assert memref_by_name["v"] is None, "reshape over a tpop result must be MemRef-less"
+        assert memref_by_name["out"] is not None, "a normal consumer still gets a MemRef"
+
     def test_matmul_acc_shares_memref_with_accumulator(self):
         """tile.matmul_acc output shares MemRef with its accumulator input (arg[0])."""
 
@@ -546,8 +579,13 @@ class TestYieldMemRef:
         tile_type = ir.TileType([64, 64], ir.DataType.FP32, memory_space=MemorySpace.Vec)
 
         # seed: produced before the loop; iter_arg acc inherits its MemRef.
-        seed = ir.Var("seed", tile_type, span)
+        # A tpop result is MemRef-less by design (its data lives in the reserved
+        # cross-core slot), so route it through a MemRef-bearing tile.muls to get
+        # the buffer the loop-carry sharing invariant is about.
+        popped = ir.Var("popped", tile_type, span)
         tpop = ir.Call(ir.Op("tile.tpop_from_aic"), [], {"split": 0}, tile_type, span)
+        seed = ir.Var("seed", tile_type, span)
+        seed_def = ir.Call(ir.Op("tile.muls"), [popped], {"scalar": 1.0}, tile_type, span)
 
         acc = ir.IterArg("acc", tile_type, seed, span)
         acc_next = ir.Var("acc_next", tile_type, span)
@@ -569,7 +607,15 @@ class TestYieldMemRef:
             chunk_policy=ir.ChunkPolicy.LeadingFull,
         )
 
-        body = ir.SeqStmts([ir.AssignStmt(seed, tpop, span), for_stmt, ir.ReturnStmt([acc_out], span)], span)
+        body = ir.SeqStmts(
+            [
+                ir.AssignStmt(popped, tpop, span),
+                ir.AssignStmt(seed, seed_def, span),
+                for_stmt,
+                ir.ReturnStmt([acc_out], span),
+            ],
+            span,
+        )
         func = ir.Function("main", [], [tile_type], body, span, type=ir.FunctionType.AIV)
         program = ir.Program([func], "chunk_prog", span)
 

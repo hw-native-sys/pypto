@@ -53,6 +53,7 @@ REGISTER_OP("system.tfree_to_aic")
     .set_core_affinity(core_affinity::CoreAffinity::VECTOR)
     .set_cross_core_role(core_affinity::CrossCoreRole::TFree)
     .add_argument("tile", "Tile buffer obtained from tpop to release")
+    .set_attr<int>("split")
     .set_attr<int>("id")
     .f_deduce_type(DeduceUnknownType);
 
@@ -63,6 +64,7 @@ REGISTER_OP("system.tfree_to_aiv")
     .set_core_affinity(core_affinity::CoreAffinity::CUBE)
     .set_cross_core_role(core_affinity::CrossCoreRole::TFree)
     .add_argument("tile", "Tile buffer obtained from tpop to release")
+    .set_attr<int>("split")
     .set_attr<int>("id")
     .f_deduce_type(DeduceUnknownType);
 

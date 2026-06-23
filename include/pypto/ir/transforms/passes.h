@@ -773,6 +773,17 @@ Pass FoldNoOpReshape();
 Pass MaterializeRuntimeScopes();
 
 /**
+ * @brief Copy each cross-core tpop's split/pipe-id onto its matching tfree op
+ *
+ * A `system.tfree_to_ai{c,v}` carries no split/id of its own — those live on the
+ * matching `tile.tpop_from_ai{c,v}` call. This pass stamps them onto the tfree op
+ * so codegen reads them directly from the op (no codegen-side tpop lookup table).
+ * Covers both finalizer-created (mixed-kernel) and user-written (explicit AIC/AIV)
+ * tfrees. Runs late (after split is finalized on tpops), before codegen.
+ */
+Pass StampTfreeSplit();
+
+/**
  * @brief Verify properties on a program and throw on errors
  *
  * Uses PropertyVerifierRegistry to verify the given properties and throws

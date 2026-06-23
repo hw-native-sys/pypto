@@ -286,6 +286,29 @@ class InitMemRefMutator : public IRMutator {
     return std::make_shared<AssignStmt>(new_var, new_value, op->span_);
   }
 
+  // Rebuild an AssignStmt whose LHS tile var keeps its TileType + memory_space but
+  // carries no MemRef. Used for tiles that own no general-pool buffer: cross-core
+  // tpop results and zero-copy views over them (codegen lowers those to
+  // pto.treshape over the source rather than a fresh alloc_tile).
+  StmtPtr MakeMemRefLessAssign(const AssignStmtPtr& op, const ExprPtr& new_value) {
+    auto var_expr = std::static_pointer_cast<const Expr>(op->var_);
+    if (auto tile_type = std::dynamic_pointer_cast<const TileType>(var_expr->GetType())) {
+      for (size_t i = 0; i < tile_type->shape_.size(); ++i) {
+        INTERNAL_CHECK_SPAN(As<ConstInt>(tile_type->shape_[i]), op->var_->span_)
+            << "InitMemRef requires static shape for variable '" << op->var_->name_hint_
+            << "', but shape element " << i
+            << " is dynamic. Fix the upstream op to keep TileType.shape static and put runtime "
+               "extent in TileView.valid_shape instead.";
+      }
+    }
+    TypePtr new_type = CloneTypeWithMemRefAndRemapExprs(
+        var_expr->GetType(), std::nullopt, [this](const ExprPtr& expr) { return VisitExpr(expr); },
+        ResolveTileMemorySpace(var_expr->GetType()));
+    auto new_var = std::make_shared<Var>(op->var_->name_hint_, new_type, op->var_->span_);
+    var_map_[op->var_] = new_var;
+    return std::make_shared<AssignStmt>(new_var, new_value, op->span_);
+  }
+
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     // First visit the value (RHS)
     auto new_value = VisitExpr(op->value_);
@@ -294,6 +317,14 @@ class InitMemRefMutator : public IRMutator {
     if (auto call = std::dynamic_pointer_cast<const Call>(op->value_)) {
       LOG_DEBUG << "Processing AssignStmt for " << op->var_->name_hint_ << " with call to "
                 << call->op_->name_;
+
+      // A cross-core tpop result owns no general-pool buffer: its data is
+      // delivered into the separately reserved C2V/V2C slot, addressed via the
+      // pipe, not a tile MemRef. Leave it MemRef-less so AllocateMemoryAddr
+      // reserves no phantom buffer and a zero-copy view over it stays MemRef-less.
+      if (call->op_->name_ == "tile.tpop_from_aic" || call->op_->name_ == "tile.tpop_from_aiv") {
+        return MakeMemRefLessAssign(op, new_value);
+      }
 
       // Handle view operations: output should share MemRef with input tile.
       // A pure metadata view (slice/reshape/...) inherits its input's buffer.  A
@@ -311,6 +342,13 @@ class InitMemRefMutator : public IRMutator {
             if (result) {
               LOG_DEBUG << "Sharing MemRef from input tile to " << op->var_->name_hint_;
               return result;
+            }
+            // Input is itself MemRef-less (e.g. a view over a cross-core tpop
+            // result): the output is a zero-copy view of a buffer-less tile, so
+            // it stays MemRef-less too rather than getting a fresh, disconnected
+            // buffer.
+            if (auto in = AsVarLike(new_call->args_[0]); in && !GetTypeMemRef(in->GetType()).has_value()) {
+              return MakeMemRefLessAssign(op, new_value);
             }
             LOG_DEBUG << "Input tile has no MemRef yet";
           }
@@ -592,22 +630,38 @@ class HasMemRefsVerifier : public IRVisitor {
   explicit HasMemRefsVerifier(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
 
   void VisitStmt_(const AssignStmtPtr& op) override {
-    if (!op) return;
-    CheckVarMemRef(op->var_);
+    if (!op || !op->var_ || !op->var_->GetType()) return;
+    auto tile_type = std::dynamic_pointer_cast<const TileType>(op->var_->GetType());
+    if (tile_type && !tile_type->memref_.has_value()) {
+      if (IsBufferLessByDesign(op)) {
+        buffer_less_.insert(op->var_.get());
+      } else {
+        diagnostics_.emplace_back(
+            DiagnosticSeverity::Error, "HasMemRefs", 0,
+            "TileType variable '" + op->var_->name_hint_ + "' has no MemRef initialized", op->var_->span_);
+      }
+    }
     IRVisitor::VisitStmt_(op);
   }
 
  private:
-  void CheckVarMemRef(const VarPtr& var) {
-    if (!var || !var->GetType()) return;
-    auto tile_type = std::dynamic_pointer_cast<const TileType>(var->GetType());
-    if (tile_type && !tile_type->memref_.has_value()) {
-      diagnostics_.emplace_back(DiagnosticSeverity::Error, "HasMemRefs", 0,
-                                "TileType variable '" + var->name_hint_ + "' has no MemRef initialized",
-                                var->span_);
+  // A cross-core tpop result (its data lives in the reserved C2V/V2C slot, not a
+  // tile MemRef) and any zero-copy view chained off such a result legitimately
+  // carry no MemRef.
+  [[nodiscard]] bool IsBufferLessByDesign(const AssignStmtPtr& op) const {
+    auto call = std::dynamic_pointer_cast<const Call>(op->value_);
+    if (!call || !call->op_) return false;
+    if (call->op_->name_ == "tile.tpop_from_aic" || call->op_->name_ == "tile.tpop_from_aiv") return true;
+    if (IsViewOperation(call->op_->name_) && !call->args_.empty()) {
+      auto in = AsVarLike(call->args_[0]);
+      if (in && buffer_less_.count(in.get()) > 0) {
+        return true;
+      }
     }
+    return false;
   }
 
+  std::set<const Var*> buffer_less_;
   std::vector<Diagnostic>& diagnostics_;
 };
 
