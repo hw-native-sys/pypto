@@ -950,6 +950,80 @@ class TestViewOps:
         # Each member keeps its own 64-byte size, not the target's 512.
         assert members["r0"][2] == 64 and members["r1"][2] == 64
 
+    def test_loop_carry_retarget_keeps_slice_view_aliased(self):
+        """A sub-region view must follow its input when the input is loop-carry
+        retargeted (issue #1776 follow-up).
+
+        ``ti`` is reloaded each iteration and yielded back, so the loop-carry
+        retargeter (``PropagateFromForStmt``) aligns it onto the iter_arg buffer
+        (``t0``'s). The ``si = slice(ti)`` sub-region view is an off-chain
+        consumer: without forward propagation its declared MemRef stays on
+        ``ti``'s original (now-orphaned) buffer, so the view would read a buffer
+        the reload never wrote. After the fix ``si`` re-anchors onto ``ti``'s
+        retargeted buffer.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                inp: pl.Tensor[[16, 16], pl.FP32],
+                out_acc: pl.Out[pl.Tensor[[16, 8], pl.FP32]],
+            ) -> pl.Tensor[[16, 8], pl.FP32]:
+                t0: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(inp, [0, 0], [16, 16])
+                s0: pl.Tile[[16, 8], pl.FP32, pl.MemorySpace.Vec] = pl.slice(t0, [16, 8], [0, 0])
+                # Independent accumulator so t0's buffer is free for the reload to reuse.
+                acc0: pl.Tile[[16, 8], pl.FP32, pl.MemorySpace.Vec] = pl.add(s0, s0)
+                for _i, (t_c, acc_c) in pl.range(0, 4, init_values=(t0, acc0)):
+                    ti: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(inp, [0, 0], [16, 16])
+                    si: pl.Tile[[16, 8], pl.FP32, pl.MemorySpace.Vec] = pl.slice(ti, [16, 8], [0, 0])
+                    acc_n: pl.Tile[[16, 8], pl.FP32, pl.MemorySpace.Vec] = pl.add(acc_c, si)
+                    t_y, acc_y = pl.yield_(ti, acc_n)
+                result: pl.Tensor[[16, 8], pl.FP32] = pl.store(acc_y, [0, 0], out_acc)
+                return result
+
+        bases = _collect_tile_memref_bases(_run_pipeline(Before))
+        # The scenario is real: the reload retargeted onto the carried buffer.
+        assert bases["ti"] == bases["t0"], "expected loop-carry retarget of the reload"
+        # The fix: the sub-region view follows its retargeted input (not orphaned).
+        assert bases["si"] == bases["ti"], (
+            f"slice view orphaned: si on {bases['si']} but its input ti on {bases['ti']}"
+        )
+
+    def test_loop_carry_retarget_keeps_reshape_view_aliased(self):
+        """Full-alias view (reshape) variant of the loop-carry orphan guard.
+
+        Same shape as the slice test but the off-chain view is a whole-buffer
+        ``reshape`` (the pure-alias path shared with ``tile.transpose_view``,
+        the original #1776 regression). It must also follow the retargeted input.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                inp: pl.Tensor[[16, 16], pl.FP32],
+                out_acc: pl.Out[pl.Tensor[[256, 1], pl.FP32]],
+            ) -> pl.Tensor[[256, 1], pl.FP32]:
+                t0: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(inp, [0, 0], [16, 16])
+                r0: pl.Tile[[256, 1], pl.FP32, pl.MemorySpace.Vec] = pl.reshape(t0, [256, 1])
+                acc0: pl.Tile[[256, 1], pl.FP32, pl.MemorySpace.Vec] = pl.add(r0, r0)
+                for _i, (t_c, acc_c) in pl.range(0, 4, init_values=(t0, acc0)):
+                    ti: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(inp, [0, 0], [16, 16])
+                    ri: pl.Tile[[256, 1], pl.FP32, pl.MemorySpace.Vec] = pl.reshape(ti, [256, 1])
+                    acc_n: pl.Tile[[256, 1], pl.FP32, pl.MemorySpace.Vec] = pl.add(acc_c, ri)
+                    t_y, acc_y = pl.yield_(ti, acc_n)
+                result: pl.Tensor[[256, 1], pl.FP32] = pl.store(acc_y, [0, 0], out_acc)
+                return result
+
+        bases = _collect_tile_memref_bases(_run_pipeline(Before))
+        assert bases["ti"] == bases["t0"], "expected loop-carry retarget of the reload"
+        assert bases["ri"] == bases["ti"], (
+            f"reshape view orphaned: ri on {bases['ri']} but its input ti on {bases['ti']}"
+        )
+
     def test_reshape_chain_shares_memref(self):
         """Chained reshapes should all share the same MemRef."""
 

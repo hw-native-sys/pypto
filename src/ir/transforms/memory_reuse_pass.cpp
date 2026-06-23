@@ -625,8 +625,66 @@ class RetypeApplier : public IRMutator {
     if (rit != rewrites_.end()) {
       auto new_var = std::make_shared<Var>(op->var_->name_hint_, rit->second, op->var_->span_);
       var_substitution_[op->var_] = new_var;
+      return IRMutator::VisitStmt_(op);
     }
+    if (auto followed = FollowRetargetedViewInput(op)) return followed;
     return IRMutator::VisitStmt_(op);
+  }
+
+  /// Re-anchor an inherit-input view (tile.transpose_view / reshape / slice /
+  /// set_validshape / tensor.as_layout, ...) onto its input's reused buffer when
+  /// the input was retargeted.  The planner never retargets a view's output
+  /// directly (RetargetAssign declines OutputMemoryInheritsInput ops), so when its
+  /// input (e.g. a tile.load) is retargeted onto a reused buffer, the view's
+  /// declared MemRef is left pointing at the now-orphaned original buffer.  Codegen
+  /// then emits the view's alloc_tile at the stale address while the load writes the
+  /// reused one — the consumer reads an uninitialised buffer (qwen3 b_trans
+  /// regression, issue #1776; the sub-region tile.slice case has the same shape).
+  /// Re-derive the view's MemRef from its (retargeted) input, mirroring InitMemRef's
+  /// ShareMemRefFrom.
+  ///
+  /// Returns the rewritten AssignStmt, or nullptr when `op` is not an inherit-input
+  /// view whose input was retargeted (caller then falls back to the default visit).
+  StmtPtr FollowRetargetedViewInput(const AssignStmtPtr& op) {
+    auto orig_call = As<Call>(op->value_);
+    if (!orig_call || orig_call->args_.empty()) return nullptr;
+    const auto& reg = OpRegistry::GetInstance();
+    if (!reg.IsRegistered(orig_call->op_->name_) ||
+        !reg.GetEntry(orig_call->op_->name_).OutputMemoryInheritsInput()) {
+      return nullptr;
+    }
+    auto in_var = AsVarLike(orig_call->args_[0]);
+    if (!in_var) return nullptr;
+    auto sub = var_substitution_.find(in_var);
+    if (sub == var_substitution_.end()) return nullptr;  // input not retargeted
+    auto out_mr_opt = GetTypeMemRef(op->var_->GetType());
+    auto in_old_opt = GetTypeMemRef(in_var->GetType());
+    auto in_new_opt = GetTypeMemRef(sub->second->GetType());
+    if (!out_mr_opt || !in_old_opt || !in_new_opt) return nullptr;
+    const auto& out_mr = *out_mr_opt;
+    const auto& in_old = *in_old_opt;
+    const auto& in_new = *in_new_opt;
+    // Use the ORIGINAL (pre-mutation) types: a view inherited its input's buffer
+    // iff its output base equalled the input base in the input IR.  This naturally
+    // excludes the one inherit-input op that does NOT always inherit — a
+    // data-permuting tile.transpose over a sub-region input gets a fresh buffer
+    // (output base != input base from the start), so it is left untouched.  Fire
+    // only when the view inherited AND the input actually moved to another buffer.
+    if (out_mr->base_.get() != in_old->base_.get() || in_new->base_.get() == in_old->base_.get()) {
+      return nullptr;
+    }
+    ExprPtr additional = ComputeViewByteOffset(orig_call, in_var->GetType());
+    ExprPtr total_offset = AddByteOffsets(in_new->byte_offset_, additional);
+    auto add0 = As<ConstInt>(additional);
+    const bool pure_alias = add0 && add0->value_ == 0 && out_mr->size_ == in_new->size_;
+    MemRefPtr new_mr =
+        pure_alias ? in_new : std::make_shared<MemRef>(in_new->base_, total_offset, out_mr->size_);
+    auto new_type = CloneTypeWithMemRef(op->var_->GetType(), new_mr);
+    auto follow_var = std::make_shared<Var>(op->var_->name_hint_, new_type, op->var_->span_);
+    var_substitution_[op->var_] = follow_var;
+    auto recursed = As<AssignStmt>(IRMutator::VisitStmt_(op));
+    INTERNAL_CHECK_SPAN(recursed, op->span_) << "Internal error: AssignStmt visit must yield an AssignStmt";
+    return std::make_shared<AssignStmt>(follow_var, recursed->value_, recursed->span_);
   }
 
   StmtPtr VisitStmt_(const IfStmtPtr& op) override {
