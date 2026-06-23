@@ -395,7 +395,7 @@ def _make_call_config(dc: DistributedConfig, run_config: RunConfig | None = None
     return call_config
 
 
-def _is_continuous_tensor(arg: Any) -> bool:
+def _is_simpler_tensor(arg: Any) -> bool:
     """True if *arg* is a simpler ``Tensor``.
 
     Returns ``False`` (rather than raising) when simpler is unavailable, so the
@@ -929,7 +929,7 @@ class DistributedWorker(Worker):
                         f"reuse the same buffer across dispatches), so the forked chip worker can see "
                         f"it. Got a non-shared tensor."
                     )
-            elif not _is_continuous_tensor(arg):
+            elif not _is_simpler_tensor(arg):
                 raise TypeError(
                     f"DistributedWorker parameter {info.name!r} got {type(arg).__name__}; expected a "
                     f"shared-memory torch.Tensor, a worker-resident DeviceTensor, or a simpler Tensor."

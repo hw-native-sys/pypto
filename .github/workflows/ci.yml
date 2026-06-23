@@ -241,7 +241,7 @@ jobs:
       - name: Test dump-tensor output
         run: |
           pytest tests/st/runtime/framework_and_models/test_dump_tag.py \
-            -v --device="$DEVICE_ID" --platform=a2a3 --dump-tensor --pto-isa-commit=2c607938 --forked
+            -v --device="$DEVICE_ID" --platform=a2a3 --dump-tensor --pto-isa-commit=016396b57e2c17093f1194e6acd89bb112b0ab24 --forked
 
       - name: Test run-timing output
         # Surfaces RunTiming (host_wall_us / device_wall_us) across every L2
