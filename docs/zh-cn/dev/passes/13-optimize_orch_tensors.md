@@ -309,6 +309,7 @@ writer-reader coverage 跨 callsite 传播时才使用 `window_flow="linked"`。
 - 支持的引用只有 `tile.load` 和 `tensor.slice`
 - 拒绝 transpose load
 - `tile.load` 的 read shape 必须等于候选 window shape
+- 如果 `tile.load` 携带 `valid_shape`，它必须等于 read shape；masked load 保持 full-tensor
 - 所有匹配引用必须具有相同 window shape 和 offset
 - 如果存在任何 unsupported ref，则整个输入参数保持 full-tensor
 - pure input-window 的 shape 和 callee-local offset 表达式只能引用 callee 参数；callsite 替换后这些参数可以携带外层 loop-affine 值，windowed callee 内部再相对 `[0, ...]` 读取

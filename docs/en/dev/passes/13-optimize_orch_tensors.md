@@ -311,6 +311,7 @@ Input-window eligibility:
 - supported references are `tile.load` and `tensor.slice`
 - transpose loads are rejected
 - the `tile.load` read shape must equal the candidate window shape
+- if `tile.load` carries `valid_shape`, it must equal the read shape; masked loads stay full-tensor
 - all matched references must agree on window shape and offset
 - if any reference is unsupported, the whole input parameter stays full-tensor
 - pure input-window shape and callee-local offset expressions may reference only callee params; after call-site substitution, those params may carry outer loop-affine values, and the windowed callee reads relative to `[0, ...]`
