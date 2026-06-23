@@ -36,10 +36,10 @@
 |---|---|---|:---:|:---:|:---:|:---:|:---:|---|
 | **逐元素 (Tile-Tile)** |  |  |  |  |  |  |  |  |
 | pto.tabs | TABS | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
-| pto.taddc | TADDC | tile | ✅ | ✅ | ❌ | ❌ | — |  |
-| pto.taddsc | TADDSC | tile | ✅ | ✅ | ❌ | ❌ | — |  |
+| pto.taddc | TADDC | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 pto.tsubc 误算 a-b-c；PR #1823 ST 暂下架 |
+| pto.taddsc | TADDSC | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 pto.tsubc 误算 a-b-c；PR #1823 ST 暂下架 |
 | pto.tadd | TADD | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
-| pto.tand | TAND | tile | ✅ | ✅ | ❌ | ❌ | — |  |
+| pto.tand | TAND | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 ptoas 拒绝该 op；PR #1823 ST 暂下架 |
 | pto.tcmp | TCMP | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tcvt | TCVT | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tdiv | TDIV | tile+tensor | ✅ | ✅ | ✅ | ❌ | — |  |
@@ -49,41 +49,41 @@
 | pto.tmin | TMIN | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | binary min |
 | pto.tmul | TMUL | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tneg | TNEG | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
-| pto.tnot | TNOT | tile | ✅ | ✅ | ❌ | ❌ | — |  |
-| pto.tor | TOR | tile | ✅ | ✅ | ❌ | ❌ | — |  |
-| pto.tprelu | TPRELU | tile | ✅ | ✅ | ❌ | ❌ | — |  |
+| pto.tnot | TNOT | tile | ✅ | ✅ | ❌ | ✅ | — | ST: PR #1823 |
+| pto.tor | TOR | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 ptoas 拒绝该 op；PR #1823 ST 暂下架 |
+| pto.tprelu | TPRELU | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 3-arg DSL 与 codegen pto.tprelu 不符 |
 | pto.trecip | TRECIP | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
-| pto.trelu | TRELU | tile | ✅ | ✅ | ❌ | ❌ | — |  |
-| pto.trem | TREM | tile | ✅ | ✅ | ❌ | ❌ | — |  |
+| pto.trelu | TRELU | tile | ✅ | ✅ | ❌ | ✅ | — | ST: PR #1823 |
+| pto.trem | TREM | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 TREM int32 误算/TREMS alloc 错；PR #1823 修了 tmp 操作数, ST 待 ISA |
 | pto.trsqrt | TRSQRT | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tsel | TSEL | tile | ✅ | ✅ | ❌ | ✅ | — |  |
-| pto.tshl | TSHL | tile | ✅ | ✅ | ❌ | ❌ | — |  |
-| pto.tshr | TSHR | tile | ✅ | ✅ | ❌ | ❌ | — |  |
-| pto.tsqrt | TSQRT | tile+tensor | ✅ | ✅ | ✅ | ❌ | — |  |
-| pto.tsubc | TSUBC | tile | ✅ | ✅ | ❌ | ❌ | — |  |
+| pto.tshl | TSHL | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 ptoas 拒绝该 op；PR #1823 ST 暂下架 |
+| pto.tshr | TSHR | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 ptoas 拒绝该 op；PR #1823 ST 暂下架 |
+| pto.tsqrt | TSQRT | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | ST: PR #1823 |
+| pto.tsubc | TSUBC | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 误算 a-b-c；PR #1823 ST 暂下架 |
 | pto.tsub | TSUB | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
-| pto.tsubsc | TSUBSC | tile | ✅ | ✅ | ❌ | ❌ | — |  |
-| pto.txor | TXOR | tile | ✅ | ✅ | ❌ | ❌ | — |  |
+| pto.tsubsc | TSUBSC | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 pto.tsubc 误算 a-b-c；PR #1823 ST 暂下架 |
+| pto.txor | TXOR | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 仅 int16/uint16；PR #1823 修了 tmp 操作数 |
 | pto.tfmod | TFMOD | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING |
 | pto.pow | TPOW | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING |
 | **逐元素与标量** |  |  |  |  |  |  |  |  |
 | pto.pows | TPOWS | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING |
 | pto.tadds | TADDS | tile+tensor | ✅ | ✅ | ✅ | ❌ | — |  |
-| pto.tands | TANDS | tile | ✅ | ✅ | ❌ | ❌ | — |  |
+| pto.tands | TANDS | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 ptoas 拒绝该 op；PR #1823 ST 暂下架 |
 | pto.tcmps | TCMPS | tile | ✅ | ✅ | ❌ | ✅ | — |  |
-| pto.tdivs | TDIVS | tile+tensor | ✅ | ✅ | ✅ | ❌ | — |  |
+| pto.tdivs | TDIVS | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | ST: PR #1823 |
 | pto.texpands | TEXPANDS | tile+tensor | ✅ | ✅ | ✅ | ❌ | — |  |
-| pto.tlrelu | TLRELU | tile | ✅ | ✅ | ❌ | ❌ | — |  |
+| pto.tlrelu | TLRELU | tile | ✅ | ✅ | ❌ | ✅ | — | ST: PR #1823 |
 | pto.tmaxs | TMAXS | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.tmins | TMINS | tile | ✅ | ✅ | ❌ | ✅ | — |  |
-| pto.tmuls | TMULS | tile+tensor | ✅ | ✅ | ✅ | ❌ | — |  |
-| pto.tors | TORS | tile | ✅ | ✅ | ❌ | ❌ | — |  |
-| pto.trems | TREMS | tile | ✅ | ✅ | ❌ | ❌ | — |  |
+| pto.tmuls | TMULS | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | ST: PR #1823 |
+| pto.tors | TORS | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 ptoas 拒绝该 op；PR #1823 ST 暂下架 |
+| pto.trems | TREMS | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 TREM int32 误算/TREMS alloc 错；PR #1823 修了 tmp 操作数, ST 待 ISA |
 | pto.tsels | TSELS | tile | ✅ | ✅ | ❌ | ❌ | — |  |
-| pto.tshls | TSHLS | tile | ✅ | ✅ | ❌ | ❌ | — |  |
-| pto.tshrs | TSHRS | tile | ✅ | ✅ | ❌ | ❌ | — |  |
+| pto.tshls | TSHLS | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 ptoas 拒绝该 op；PR #1823 ST 暂下架 |
+| pto.tshrs | TSHRS | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 ptoas 拒绝该 op；PR #1823 ST 暂下架 |
 | pto.tsubs | TSUBS | tile+tensor | ✅ | ✅ | ✅ | ❌ | — |  |
-| pto.txors | TXORS | tile | ✅ | ✅ | ❌ | ❌ | — |  |
+| pto.txors | TXORS | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 仅 int16/uint16；PR #1823 修了 tmp 操作数 |
 | pto.tfmods | TFMODS | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING |
 | **按轴逐元素 (reduce/expand)** |  |  |  |  |  |  |  |  |
 | pto.tcolexpand | TCOLEXPAND | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
@@ -104,7 +104,7 @@
 | pto.trowexpandmin | TROWEXPANDMIN | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | NEW |
 | pto.trowexpandexpdif | TROWEXPANDEXPDIF | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | NEW |
 | pto.tcolexpandmul | TCOLEXPANDMUL | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
-| pto.tcolexpandadd | TCOLEXPANDADD | tile+tensor | ✅ | ✅ | ✅ | ❌ | — |  |
+| pto.tcolexpandadd | TCOLEXPANDADD | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | ST: PR #1823 |
 | pto.tcolexpanddiv | TCOLEXPANDDIV | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | codegen-incomplete |
 | pto.tcolexpandsub | TCOLEXPANDSUB | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | codegen-incomplete |
 | pto.tcolexpandmax | TCOLEXPANDMAX | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | NEW |
@@ -113,11 +113,11 @@
 | **矩阵乘** |  |  |  |  |  |  |  |  |
 | pto.tmatmul | TMATMUL | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tmatmul.acc | TMATMUL_ACC | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
-| pto.tmatmul.bias | TMATMUL_BIAS | tile | ✅ | ✅ | ❌ | ❌ | — |  |
+| pto.tmatmul.bias | TMATMUL_BIAS | tile | ✅ | ✅ | ❌ | ✅ | — | ST: PR #1823 |
 | pto.tmatmul.mx | TMATMUL_MX | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING |
-| pto.tgemv | TGEMV | tile | ✅ | ✅ | ❌ | ❌ | — |  |
-| pto.tgemv.acc | TGEMV_ACC | tile | ✅ | ✅ | ❌ | ❌ | — |  |
-| pto.tgemv.bias | TGEMV_BIAS | tile | ✅ | ✅ | ❌ | ❌ | — |  |
+| pto.tgemv | TGEMV | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 1-row TExtract dstRow%16；PR #1823 ST 暂下架 |
+| pto.tgemv.acc | TGEMV_ACC | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 acc→acc pto.tmov 未支持；PR #1823 ST 暂下架 |
+| pto.tgemv.bias | TGEMV_BIAS | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 1-row TExtract dstRow%16；PR #1823 ST 暂下架 |
 | pto.tgemv.mx | TGEMV_MX | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING |
 | **访存** |  |  |  |  |  |  |  |  |
 | pto.tload | TLOAD | tile | ✅ | ✅ | ❌ | ✅ | — |  |
@@ -195,4 +195,4 @@
 | pto.comm.build_async_session | BuildAsyncSession | comm | ✅ | — | — | — | ❌ | distributed |
 | pto.tprefetch_async | TPREFETCH_ASYNC | comm | ❌ | — | — | — | — | ptoas未实现 (ISA_ONLY) |
 
-**统计**：共 148 个 PTOAS op 行；PTOAS 提供接口 143；pypto 前端已写好 94；有 ST 测试 55。
+**统计**：共 148 个 PTOAS op 行；PTOAS 提供接口 143；pypto 前端已写好 94；有 ST 测试 63。
