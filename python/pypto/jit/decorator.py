@@ -1536,7 +1536,12 @@ class JITFunction:
         source = specializer.specialize()
         rename_map = specializer.rename_map
         try:
-            parsed = pl.parse(source, filename=self._diagnostic_filename, source_map=specializer.source_map)
+            parsed = pl.parse(
+                source,
+                filename=self._diagnostic_filename,
+                source_map=specializer.source_map,
+                extra_globals=specializer.discovered_inlines,
+            )
             skip_ptoas = not _ptoas_available()
             return ir_compile(parsed, skip_ptoas=skip_ptoas, platform=platform, **ir_compile_kwargs)
         except Exception as exc:
@@ -1565,7 +1570,12 @@ class JITFunction:
         source = specializer.specialize()
         rename_map = specializer.rename_map
         try:
-            return pl.parse(source, filename=self._diagnostic_filename, source_map=specializer.source_map)
+            return pl.parse(
+                source,
+                filename=self._diagnostic_filename,
+                source_map=specializer.source_map,
+                extra_globals=specializer.discovered_inlines,
+            )
         except Exception as exc:
             rewritten = _rewrite_jit_error(exc, rename_map)
             if rewritten is exc:

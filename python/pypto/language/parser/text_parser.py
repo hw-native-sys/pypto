@@ -13,6 +13,7 @@ import ast
 import linecache
 import sys
 import types
+from typing import Any
 
 from pypto.pypto_core import ir
 
@@ -146,6 +147,7 @@ def parse(
     code: str,
     filename: str = "<string>",
     source_map: dict[int, tuple[str, int, int]] | None = None,
+    extra_globals: dict[str, Any] | None = None,
 ) -> ir.Function | ir.Program:
     """Parse a DSL function or program from a string.
 
@@ -163,6 +165,11 @@ def parse(
             real file rather than this (possibly generated) ``code``. Used by
             ``@pl.jit`` to recover provenance through its specialize→reparse
             round-trip (issue #1612).
+        extra_globals: Optional dict of extra names to inject into the execution
+            namespace before ``exec()``.  Used by ``@pl.jit`` to preserve
+            ``@pl.inline`` helper ``InlineFunction`` objects (and their original
+            ``closure_vars``) through the specialize→reparse round-trip, so
+            module-level constants in ``@pl.inline`` bodies resolve correctly.
 
     Returns:
         Parsed ir.Function or ir.Program object (auto-detected)
@@ -235,9 +242,13 @@ def parse(
 
     # Execute the code in the module's namespace, using _AutoDynVar to handle
     # dynamic shape variable references that may not be in scope during re-parse.
+    # Inject extra_globals before exec() so they are visible during decorator
+    # execution (e.g., InlineFunction objects for @pl.jit call sites).
     # Publish the source map for the duration of the exec so each SpanTracker
     # built by the decorators (which run during exec) can remap spans (#1612).
     exec_ns = _AutoDynVar(temp_module.__dict__)
+    if extra_globals:
+        exec_ns.update(extra_globals)
     map_token = active_source_map.set(source_map)
     try:
         _prevalidate_decorator_args(code, filename)
@@ -343,7 +354,11 @@ def loads(filepath: str) -> ir.Function | ir.Program:
     return parse(code, filename=filepath)
 
 
-def parse_program(code: str, filename: str = "<string>") -> ir.Program:
+def parse_program(
+    code: str,
+    filename: str = "<string>",
+    extra_globals: dict[str, Any] | None = None,
+) -> ir.Program:
     """Parse a DSL program from a string.
 
     .. deprecated::
@@ -354,6 +369,8 @@ def parse_program(code: str, filename: str = "<string>") -> ir.Program:
     Args:
         code: Python source code containing a @pl.program decorated class
         filename: Optional filename for error reporting (default: "<string>")
+        extra_globals: Optional dict of extra names injected before execution.
+            See :func:`parse`.
 
     Returns:
         Parsed ir.Program object
@@ -362,7 +379,7 @@ def parse_program(code: str, filename: str = "<string>") -> ir.Program:
         ValueError: If the code contains a function instead of a program
         ParserError: If parsing fails (syntax errors, type errors, etc.)
     """
-    result = parse(code, filename)
+    result = parse(code, filename, extra_globals=extra_globals)
     if not isinstance(result, ir.Program):
         raise ValueError(
             f"Expected @pl.program but found @pl.function in {filename}. "

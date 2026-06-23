@@ -1379,6 +1379,9 @@ class Specializer:
         # emitted in the generated module preamble so the source is
         # self-contained (mirrors the ``import pypto.language as pl`` line).
         self._needs_pld_import: bool = False
+        # @pl.inline helpers discovered from dep bodies — emitted as module-level
+        # @pl.inline definitions before the @pl.program class.
+        self._discovered_inlines: dict[str, InlineFunction] = {}
 
     @property
     def rename_map(self) -> dict[str, str]:
@@ -1399,14 +1402,123 @@ class Specializer:
         """
         return dict(self._source_map)
 
+    @property
+    def discovered_inlines(self) -> dict[str, InlineFunction]:
+        """Discover ``@pl.inline`` helpers called from JIT-dep bodies.
+
+        Populated by ``specialize()``.  The caller must inject these
+        ``InlineFunction`` objects into ``pl.parse(extra_globals=...)``
+        so the parser can expand them at each call site with the original
+        ``closure_vars`` (module-level constants like ``INTERMEDIATE`` are
+        thereby preserved through the specialize→reparse round-trip).
+
+        Empty until ``specialize()`` has been called.
+        """
+        return dict(self._discovered_inlines)
+
+    def _discover_inline_helpers(self) -> dict[str, InlineFunction]:
+        """Walk all function bodies for calls to @pl.inline helpers.
+
+        Looks up bare-name calls in each context's ``py_globals`` (the
+        originating function's ``__globals__``).  When an ``InlineFunction``
+        is found, the caller must inject it into ``pl.parse()``'s execution
+        namespace via ``extra_globals`` so the parser can expand it at each
+        call site with the original ``closure_vars`` intact.
+
+        This is how ``@pl.jit`` and ``@pl.jit.inline`` functions call
+        ``@pl.inline`` helpers from other modules — the helper must be
+        importable in the calling module's namespace (i.e., visible in
+        ``__globals__``).  The ``InlineFunction`` objects are returned
+        as-is (no AST transformation), and the caller injects them into
+        ``pl.parse(extra_globals=...)`` so the parser uses the original
+        ``closure_vars`` — module-level constants in the inline body
+        resolve correctly from the definition-site scope.
+
+        Raises ``TypeError`` when a discovered ``@pl.inline`` name collides
+        with an existing JIT dep name.
+
+        Returns:
+            Dict mapping inline name → InlineFunction, deduplicated across
+            call sites.  Empty if no @pl.inline helpers are called.
+        """
+        from pypto.language.parser.decorator import InlineFunction
+
+        dep_names = {ctx.func_name for ctx in self._contexts}
+        found: dict[str, InlineFunction] = {}
+        # Collect all py_globals dicts for inline lookup (some inlines may
+        # only be visible in one dep's namespace, not another's).
+        all_py_globals: list[dict] = [ctx.py_globals for ctx in self._contexts]
+
+        # Queue of contexts to walk for inline calls.  Start with dep
+        # function bodies, then transitively add discovered inlines.
+        to_walk: list[tuple[ast.FunctionDef, dict]] = []
+        for ctx in self._contexts:
+            src = textwrap.dedent(ctx.source)
+            try:
+                tree = ast.parse(src)
+            except SyntaxError:
+                continue
+            func_def = next(
+                (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == ctx.func_name),
+                None,
+            )
+            if func_def is not None:
+                to_walk.append((func_def, ctx.py_globals))
+
+        # Walk transitively: each newly-discovered inline's body is scanned
+        # for further inline calls, until no new inlines are found.
+        walked_inline_ids: set[int] = set()  # prevent re-walking detected by id
+        while to_walk:
+            func_def, py_globals = to_walk.pop()
+            for node in ast.walk(func_def):
+                if not isinstance(node, ast.Call):
+                    continue
+                if not isinstance(node.func, ast.Name):
+                    continue
+                name = node.func.id
+                obj = py_globals.get(name)
+                if not isinstance(obj, InlineFunction):
+                    # Also search across all py_globals dicts (e.g., an inline
+                    # discovered via ctx A may only be visible in ctx B).
+                    for g in all_py_globals:
+                        obj = g.get(name)
+                        if isinstance(obj, InlineFunction):
+                            break
+                if not isinstance(obj, InlineFunction):
+                    continue
+                if name in found:
+                    continue
+                # Reject collision with an existing JIT dep name.
+                if name in dep_names:
+                    raise TypeError(
+                        f"@pl.inline helper '{name}' collides with an existing "
+                        f"@pl.jit dep of the same name.  Rename one of them."
+                    )
+                found[name] = obj
+                # Transitively walk this inline's body for nested calls.
+                if id(obj) not in walked_inline_ids:
+                    walked_inline_ids.add(id(obj))
+                    to_walk.append((obj.func_def, obj.closure_vars))
+
+        return found
+
     def specialize(self) -> str:
         """Generate @pl.program source code string.
+
+        The generated source is self-contained for ``pl.parse()`` except for
+        discovered ``@pl.inline`` helpers, which must be injected via
+        ``extra_globals`` (see :attr:`discovered_inlines`).
 
         Returns:
             Python source string ready to pass to ``pl.parse()``.
         """
         self._fn_origin = []
         self._needs_pld_import = False
+
+        # Discover @pl.inline helpers called from dep bodies before
+        # specialization, so _specialize_function can pass them to
+        # no_self_dep_names (prevents self. rewrite on bare-name calls).
+        self._discovered_inlines = self._discover_inline_helpers()
 
         # Specialize bodies first so per-context state (DynVars,
         # _needs_pld_import) is fully populated before assembling the preamble.
@@ -1421,6 +1533,12 @@ class Specializer:
         if self._needs_pld_import:
             lines.append("import pypto.language.distributed as pld")
         lines.append("")
+
+        # Discovered @pl.inline helpers are NOT emitted as source text here —
+        # re-parsing would create new InlineFunction objects whose closure_vars
+        # lack the original module's globals (so module-level constants like
+        # INTERMEDIATE would be undefined).  Instead, the caller must inject
+        # the original InlineFunction objects via pl.parse(extra_globals=...).
 
         # Emit module-level DynVar declarations (deduplicated across contexts)
         dv_seen: set[str] = set()
@@ -1578,6 +1696,9 @@ class Specializer:
                 and other_ctx.ct_kwarg_names
             ):
                 no_self_dep_names.add(other_ctx.func_name)
+        # Also exclude discovered @pl.inline helpers from self. rewrite —
+        # the parser resolves them via bare-name call lookup.
+        no_self_dep_names.update(self._discovered_inlines.keys())
 
         transformer = _BodyTransformer(
             tensor_meta=ctx.tensor_meta,
