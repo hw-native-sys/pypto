@@ -6368,6 +6368,38 @@ class OutWindowExternalizer {
     return transform_utils::Substitute(expr, scalar_defs);
   }
 
+  struct FixedTileLoadAccess {
+    std::vector<ExprPtr> window_shape;
+    MakeTuplePtr offsets;
+  };
+
+  static std::optional<FixedTileLoadAccess> MatchFixedTileLoadAccess(const CallPtr& call, const Var* param) {
+    if (!call || !param || call->op_->name_ != "tile.load" || call->args_.size() < 3) return std::nullopt;
+
+    auto parent = AsVarLike(call->args_[0]);
+    auto offsets = As<MakeTuple>(call->args_[1]);
+    auto tile_type = As<TileType>(call->GetType());
+    auto read_shape = As<MakeTuple>(call->args_[2]);
+    if (!parent || parent.get() != param || !offsets || !tile_type || !read_shape) return std::nullopt;
+
+    if (call->args_.size() >= 4) {
+      auto valid_shape = As<MakeTuple>(call->args_[3]);
+      if (!valid_shape || !AreExprVectorsEqual(valid_shape->elements_, read_shape->elements_)) {
+        return std::nullopt;
+      }
+    }
+
+    std::vector<ExprPtr> window_shape;
+    if (call->GetKwarg<bool>("transpose", false)) {
+      if (read_shape->elements_.size() != 2) return std::nullopt;
+      window_shape = read_shape->elements_;
+    } else {
+      window_shape = tile_type->shape_;
+      if (!AreExprVectorsEqual(window_shape, read_shape->elements_)) return std::nullopt;
+    }
+    return FixedTileLoadAccess{std::move(window_shape), offsets};
+  }
+
   static std::optional<InputWindowUse> MatchDirectTensorWindowAccess(const AssignStmtPtr& assign,
                                                                      const Var* param) {
     if (!assign || !param) return std::nullopt;
@@ -6377,19 +6409,10 @@ class OutWindowExternalizer {
     std::vector<ExprPtr> window_shape;
     MakeTuplePtr offsets;
     if (call->op_->name_ == "tile.load" && call->args_.size() >= 3) {
-      auto parent = AsVarLike(call->args_[0]);
-      offsets = As<MakeTuple>(call->args_[1]);
-      auto tile_type = As<TileType>(call->GetType());
-      if (!parent || parent.get() != param || !offsets || !tile_type) return std::nullopt;
-      auto read_shape = As<MakeTuple>(call->args_[2]);
-      if (!read_shape) return std::nullopt;
-      if (call->GetKwarg<bool>("transpose", false)) {
-        if (read_shape->elements_.size() != 2) return std::nullopt;
-        window_shape = read_shape->elements_;
-      } else {
-        window_shape = tile_type->shape_;
-        if (!AreExprVectorsEqual(window_shape, read_shape->elements_)) return std::nullopt;
-      }
+      auto access = MatchFixedTileLoadAccess(call, param);
+      if (!access.has_value()) return std::nullopt;
+      window_shape = access->window_shape;
+      offsets = access->offsets;
     } else if (call->op_->name_ == "tensor.slice" && call->args_.size() >= 3) {
       auto parent = AsVarLike(call->args_[0]);
       offsets = As<MakeTuple>(call->args_[2]);
@@ -6568,19 +6591,10 @@ class OutWindowExternalizer {
     std::vector<ExprPtr> window_shape;
     MakeTuplePtr offsets;
     if (call->op_->name_ == "tile.load" && call->args_.size() >= 3) {
-      auto parent = AsVarLike(call->args_[0]);
-      offsets = As<MakeTuple>(call->args_[1]);
-      auto tile_type = As<TileType>(call->GetType());
-      if (!parent || parent.get() != param || !offsets || !tile_type) return std::nullopt;
-      auto read_shape = As<MakeTuple>(call->args_[2]);
-      if (!read_shape) return std::nullopt;
-      if (call->GetKwarg<bool>("transpose", false)) {
-        if (read_shape->elements_.size() != 2) return std::nullopt;
-        window_shape = read_shape->elements_;
-      } else {
-        window_shape = tile_type->shape_;
-        if (!AreExprVectorsEqual(window_shape, read_shape->elements_)) return std::nullopt;
-      }
+      auto access = MatchFixedTileLoadAccess(call, param);
+      if (!access.has_value()) return std::nullopt;
+      window_shape = access->window_shape;
+      offsets = access->offsets;
     } else if (call->op_->name_ == "tensor.slice" && call->args_.size() >= 3) {
       auto parent = AsVarLike(call->args_[0]);
       offsets = As<MakeTuple>(call->args_[2]);

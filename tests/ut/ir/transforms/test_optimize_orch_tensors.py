@@ -5493,6 +5493,42 @@ class TestPerKernelAttrs:
         # Input should NOT be windowed (no data__ssa_v0__window in the call).
         assert "data__ssa_v0__window" not in printed_main
 
+    def test_masked_tile_load_blocks_input_window_rewrite(self):
+        """Masked tile.load must stay on the full parent tensor instead of windowing the input."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore, attrs={"window_outputs": "off"})
+            def reader(
+                self,
+                out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+                data: pl.Tensor[[128, 128], pl.FP32],
+                row_offset: pl.Scalar[pl.INDEX],
+                valid_rows: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                t: pl.Tile[[16, 128], pl.FP32] = pl.tile.load(
+                    data, [row_offset, 0], [16, 128], [valid_rows, 128]
+                )
+                result: pl.Tensor[[16, 128], pl.FP32] = pl.tile.store(t, [0, 0], out)
+                return result
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+                data: pl.Tensor[[128, 128], pl.FP32],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                row: pl.Scalar[pl.INDEX] = 32
+                valid_rows: pl.Scalar[pl.INDEX] = 8
+                result: pl.Tensor[[16, 128], pl.FP32] = self.reader(out, data, row, valid_rows)
+                return result
+
+        After = _run_to_optimize_orch_tensors(Before, window_policy="exact")
+        assert After.get_function("reader__windowed") is None
+
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert "data__ssa_v0__window" not in printed_main
+
     def test_global_none_side_output_exact_opts_in(self):
         """Global none is a default; explicit side coverage can opt in."""
 
