@@ -1191,6 +1191,83 @@ class TestGenerateArgUnpacking:
         with pytest.raises(ValueError, match="non-invertible"):
             _generate_arg_unpacking(func)
 
+    def test_dynamic_tensor_stride_var_extracts_from_strides(self):
+        """TensorView stride-only Vars are unpacked from runtime Tensor.strides."""
+        span = ir.Span.unknown()
+        idx = DataType.INDEX
+        stride_var = ir.Var("STRIDE", ir.ScalarType(idx), span)
+        static = ir.ConstInt(16, idx, span)
+        one = ir.ConstInt(1, idx, span)
+        tv = ir.TensorView(stride=[stride_var, one], layout=ir.TensorLayout.ND)
+        ty = ir.TensorType([static, static], DataType.FP32, memref=None, tensor_view=tv)
+
+        ib = IRBuilder()
+        with ib.function("dyn_stride_func", type=ir.FunctionType.InCore) as f:
+            t = f.param("t", ty)
+            out = f.param("out", ty)
+            tile_t = ib.let("tile_t", tile.load(t, [0, 0], [16, 16]))
+            ret = ib.let("ret", tile.store(tile_t, [0, 0], out))
+            f.return_type(ty)
+            ib.return_stmt(ret)
+        func = f.get_result()
+
+        code, names = _generate_arg_unpacking(func)
+        assert "int64_t STRIDE = static_cast<int64_t>(t_tensor->strides[0]);" in code
+        assert names == ["t", "out", "STRIDE"]
+
+    def test_dynamic_tensor_valid_shape_var_is_not_unpacked(self):
+        """TensorView valid_shape-only Vars are metadata, not wrapper ABI params."""
+        span = ir.Span.unknown()
+        idx = DataType.INDEX
+        valid_var = ir.Var("VALID", ir.ScalarType(idx), span)
+        static = ir.ConstInt(16, idx, span)
+        one = ir.ConstInt(1, idx, span)
+        tv = ir.TensorView(
+            stride=[static, one],
+            layout=ir.TensorLayout.ND,
+            valid_shape=[valid_var, static],
+        )
+        ty = ir.TensorType([static, static], DataType.FP32, memref=None, tensor_view=tv)
+
+        ib = IRBuilder()
+        with ib.function("dyn_valid_shape_func", type=ir.FunctionType.InCore) as f:
+            t = f.param("t", ty)
+            out = f.param("out", ty)
+            tile_t = ib.let("tile_t", tile.load(t, [0, 0], [16, 16]))
+            ret = ib.let("ret", tile.store(tile_t, [0, 0], out))
+            f.return_type(ty)
+            ib.return_stmt(ret)
+        func = f.get_result()
+
+        code, names = _generate_arg_unpacking(func)
+        assert "VALID" not in code
+        assert names == ["t", "out"]
+
+    def test_dynamic_tensor_shape_then_stride_order(self):
+        """Wrapper dynamic ABI order is tensor shape dims before TensorView stride dims."""
+        span = ir.Span.unknown()
+        idx = DataType.INDEX
+        shape_var = ir.Var("SHAPE", ir.ScalarType(idx), span)
+        stride_var = ir.Var("STRIDE", ir.ScalarType(idx), span)
+        static = ir.ConstInt(16, idx, span)
+        one = ir.ConstInt(1, idx, span)
+        tv = ir.TensorView(stride=[stride_var, one], layout=ir.TensorLayout.ND)
+        ty = ir.TensorType([shape_var, static], DataType.FP32, memref=None, tensor_view=tv)
+
+        ib = IRBuilder()
+        with ib.function("dyn_shape_stride_func", type=ir.FunctionType.InCore) as f:
+            t = f.param("t", ty)
+            out = f.param("out", ty)
+            tile_t = ib.let("tile_t", tile.load(t, [0, 0], [16, 16]))
+            ret = ib.let("ret", tile.store(tile_t, [0, 0], out))
+            f.return_type(ty)
+            ib.return_stmt(ret)
+        func = f.get_result()
+
+        code, names = _generate_arg_unpacking(func)
+        assert code.index("int64_t SHAPE") < code.index("int64_t STRIDE")
+        assert names == ["t", "out", "SHAPE", "STRIDE"]
+
 
 class TestGenerateKernelWrapper:
     """Tests for _generate_kernel_wrapper."""
@@ -2494,6 +2571,70 @@ def test_pto_codegen_make_tensor_view_accepts_dynamic_shape_expressions():
     assert index_cast_lines, (
         f"Expected dynamic shape/stride expressions to be cast to index. Got:\n{mlir_code}"
     )
+
+
+def test_pto_codegen_signature_includes_stride_only_dynamic_var():
+    """Stride-only TensorView Vars are trailing func args because make_tensor_view consumes strides."""
+    span = ir.Span.unknown()
+    idx = DataType.INDEX
+    stride_var = ir.Var("STRIDE", ir.ScalarType(idx), span)
+    static = ir.ConstInt(16, idx, span)
+    one = ir.ConstInt(1, idx, span)
+    tv = ir.TensorView(stride=[stride_var, one], layout=ir.TensorLayout.ND)
+    ty = ir.TensorType([static, static], DataType.FP32, memref=None, tensor_view=tv)
+
+    t = ir.Var("t", ty, span)
+    out = ir.Var("out", ty, span)
+    tile_var = ir.Var("tile_t", ir.op.tile.load(t, [0, 0], [16, 16]).type, span)
+    result_var = ir.Var("result", ty, span)
+    body = ir.SeqStmts(
+        [
+            ir.AssignStmt(tile_var, ir.op.tile.load(t, [0, 0], [16, 16]), span),
+            ir.AssignStmt(result_var, ir.op.tile.store(tile_var, [0, 0], out), span),
+            ir.ReturnStmt([result_var], span),
+        ],
+        span,
+    )
+    func = ir.Function("kernel", [t, out], [ty], body, span, ir.FunctionType.InCore)
+
+    mlir_code = _generate_mlir(ir.Program([func], "DynamicStrideSignatureTest", span))
+    func_line = _single_line(_get_mlir_lines(mlir_code), "func.func @kernel")
+    assert func_line.count(": index") == 1
+    assert "strides = [%arg2, %c1_index]" in mlir_code
+
+
+def test_pto_codegen_signature_excludes_valid_shape_only_dynamic_var():
+    """Valid-shape-only TensorView Vars stay out of func ABI because make_tensor_view does not lower them."""
+    span = ir.Span.unknown()
+    idx = DataType.INDEX
+    valid_var = ir.Var("VALID", ir.ScalarType(idx), span)
+    static = ir.ConstInt(16, idx, span)
+    one = ir.ConstInt(1, idx, span)
+    tv = ir.TensorView(
+        stride=[static, one],
+        layout=ir.TensorLayout.ND,
+        valid_shape=[valid_var, static],
+    )
+    ty = ir.TensorType([static, static], DataType.FP32, memref=None, tensor_view=tv)
+
+    t = ir.Var("t", ty, span)
+    out = ir.Var("out", ty, span)
+    tile_var = ir.Var("tile_t", ir.op.tile.load(t, [0, 0], [16, 16]).type, span)
+    result_var = ir.Var("result", ty, span)
+    body = ir.SeqStmts(
+        [
+            ir.AssignStmt(tile_var, ir.op.tile.load(t, [0, 0], [16, 16]), span),
+            ir.AssignStmt(result_var, ir.op.tile.store(tile_var, [0, 0], out), span),
+            ir.ReturnStmt([result_var], span),
+        ],
+        span,
+    )
+    func = ir.Function("kernel", [t, out], [ty], body, span, ir.FunctionType.InCore)
+
+    mlir_code = _generate_mlir(ir.Program([func], "DynamicValidShapeSignatureTest", span))
+    func_line = _single_line(_get_mlir_lines(mlir_code), "func.func @kernel")
+    assert ": index" not in func_line
+    assert "VALID" not in mlir_code
 
 
 if __name__ == "__main__":

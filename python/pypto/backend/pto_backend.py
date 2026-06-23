@@ -316,11 +316,11 @@ def _invert_var_mul_or_floordiv_const(
     return None
 
 
-def _invert_shape_dim_for_var(
-    dim_expr: object, target_var: _ir_core.Var, tensor_name: str, dim_idx: int
+def _invert_tensor_extent_for_var(
+    dim_expr: object, target_var: _ir_core.Var, tensor_name: str, field_name: str, dim_idx: int
 ) -> str | None:
-    """Return a C expression recovering target_var from shapes[dim_idx], or None if non-invertible."""
-    shape_expr = f"static_cast<int64_t>({tensor_name}_tensor->shapes[{dim_idx}])"
+    """Return a C expression recovering target_var from a tensor extent, or None if non-invertible."""
+    shape_expr = f"static_cast<int64_t>({tensor_name}_tensor->{field_name}[{dim_idx}])"
     if isinstance(dim_expr, _ir_core.Var) and dim_expr.same_as(target_var):
         return shape_expr
     if isinstance(dim_expr, _ir_core.Add):
@@ -335,12 +335,12 @@ def _invert_shape_dim_for_var(
 
 
 def _is_invertible_shape_dim_for_var(dim_expr: object, target_var: _ir_core.Var) -> bool:
-    """Return True iff ``_invert_shape_dim_for_var`` can recover ``target_var`` from this dim.
+    """Return True iff the wrapper can recover ``target_var`` from this dim.
 
     Pure predicate -- does not depend on tensor name / dim index. Use this when
     comparing source candidates (so we don't allocate a throwaway C-string).
     """
-    return _invert_shape_dim_for_var(dim_expr, target_var, "", 0) is not None
+    return _invert_tensor_extent_for_var(dim_expr, target_var, "", "shapes", 0) is not None
 
 
 def _append_dynamic_dim_unpacking(
@@ -349,7 +349,7 @@ def _append_dynamic_dim_unpacking(
     lines: list[str],
     var_names: list[str],
 ) -> None:
-    """Append C++ lines that recover dynamic shape Vars from runtime tensor shapes.
+    """Append C++ lines that recover boundary dynamic Vars from runtime tensor metadata.
 
     The per-expression walk is delegated to ``codegen.collect_vars_from_shape_expr``,
     the same C++ helper that drives the trailing ``%argN: index`` params on the
@@ -361,31 +361,37 @@ def _append_dynamic_dim_unpacking(
     per-call dedup inside ``collect_vars_from_shape_expr`` uses raw ``Var*``.
     """
     dyn_var_order: list[_ir_core.Var] = []
-    dyn_var_best: dict[int, tuple[_ir_core.Var, str, int, object]] = {}
+    dyn_var_best: dict[int, tuple[_ir_core.Var, str, str, int, object]] = {}
     for param in tensor_params:
         assert isinstance(param.type, _ir_core.TensorType)
-        for dim_idx, dim in enumerate(param.type.shape):
+        sources = [("shapes", dim_idx, dim) for dim_idx, dim in enumerate(param.type.shape)]
+        tensor_view = param.type.tensor_view
+        if tensor_view is not None:
+            sources.extend(("strides", dim_idx, dim) for dim_idx, dim in enumerate(tensor_view.stride))
+        for field_name, dim_idx, dim in sources:
             for dyn_var in _codegen_core.collect_vars_from_shape_expr(dim):
                 key = dyn_var.unique_id
                 if key not in dyn_var_best:
                     dyn_var_order.append(dyn_var)
-                    dyn_var_best[key] = (dyn_var, param.name_hint, dim_idx, dim)
+                    dyn_var_best[key] = (dyn_var, param.name_hint, field_name, dim_idx, dim)
                     continue
-                _, _, _, src_expr = dyn_var_best[key]
+                _, _, _, _, src_expr = dyn_var_best[key]
                 # Upgrade source if the previous one was non-invertible and this one is.
                 if not _is_invertible_shape_dim_for_var(
                     src_expr, dyn_var
                 ) and _is_invertible_shape_dim_for_var(dim, dyn_var):
-                    dyn_var_best[key] = (dyn_var, param.name_hint, dim_idx, dim)
+                    dyn_var_best[key] = (dyn_var, param.name_hint, field_name, dim_idx, dim)
 
     for dyn_var in dyn_var_order:
-        var_ref, source_tensor, source_dim_idx, source_expr = dyn_var_best[dyn_var.unique_id]
-        value_expr = _invert_shape_dim_for_var(source_expr, var_ref, source_tensor, source_dim_idx)
+        var_ref, source_tensor, source_field, source_dim_idx, source_expr = dyn_var_best[dyn_var.unique_id]
+        value_expr = _invert_tensor_extent_for_var(
+            source_expr, var_ref, source_tensor, source_field, source_dim_idx
+        )
         if value_expr is None:
             raise ValueError(
                 f"Cannot recover dynamic dimension '{dyn_var.name_hint}' for kernel wrapper "
                 f"codegen: it only appears inside non-invertible shape expressions "
-                f"(seen as {source_tensor}.shapes[{source_dim_idx}] = {source_expr}). "
+                f"(seen as {source_tensor}.{source_field}[{source_dim_idx}] = {source_expr}). "
                 f"Wrapper extraction supports 'var' and single-var affine forms "
                 f"(var +/-/*// const_int) shape expressions; "
                 f"at least one tensor parameter must expose the variable in one of these "

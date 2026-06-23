@@ -52,13 +52,13 @@ struct DtypeCodeLess {
 };
 
 /**
- * @brief Collect Vars referenced by a tensor-shape expression, in first-seen DFS order.
+ * @brief Collect Vars referenced by a tensor boundary expression, in first-seen DFS order.
  *
  * Used by:
  *   - PTOCodegen, to emit trailing `%argN: index` params on `func.func` signatures
  *     (see `CollectTensorShapeDynVars` in pto_codegen.cpp).
  *   - The Python kernel-wrapper codegen, to recover dynamic dims from
- *     `tensor->shapes[]` and forward them to the inner call in matching positional
+ *     `tensor->shapes[]` / `tensor->strides[]` and forward them to the inner call in matching positional
  *     order. This is the single source of truth shared by both paths: the wrapper
  *     and the compiled function signature stay in lockstep by construction.
  *

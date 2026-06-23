@@ -117,11 +117,11 @@ bool HasDynamicTileValidShape(const std::shared_ptr<const ir::TileType>& tile_ty
   return valid_row_expr || valid_col_expr;
 }
 
-// Collect Vars referenced by a shape expression in first-seen order (for trailing
-// %argN: index in MLIR). Single source of truth: both the in-translation-unit
+// Collect Vars referenced by a tensor boundary expression in first-seen order
+// (for trailing %argN: index in MLIR). Single source of truth: both the in-translation-unit
 // caller ``CollectTensorShapeDynVars`` (driving the trailing index params on the
 // emitted ``func.func`` signature) and the Python kernel-wrapper codegen
-// (recovering a Var from runtime ``tensor->shapes[]`` inside
+// (recovering a Var from runtime ``tensor->shapes[]``/``tensor->strides[]`` inside
 // ``_generate_arg_unpacking`` in python/pypto/backend/pto_backend.py) go through
 // this walker. The Python side reaches it via the public ``CollectVarsFromShapeExpr``
 // wrapper exposed through the codegen nanobind binding
@@ -172,8 +172,9 @@ void CollectVarsFromShapeExprImpl(const ExprPtr& expr, std::set<const ir::Var*>&
 // Collect tensor boundary dyn Vars across a function's tensor params.
 // Used both to reserve %argN names upfront (so NewNamedTemp does not collide)
 // and to emit the trailing index params on the MLIR func.func signature. Tensor
-// view strides/valid_shapes are included because pto.make_tensor_view emits
-// them just like shape dims.
+// view strides are included because pto.make_tensor_view emits them just like
+// shape dims. Tensor view valid_shape is intentionally excluded: it is metadata
+// on TensorType, not an operand of pto.make_tensor_view.
 std::vector<VarPtr> CollectTensorShapeDynVars(const FunctionPtr& func) {
   std::vector<VarPtr> dyn_vars;
   std::set<const ir::Var*> seen;
@@ -185,9 +186,6 @@ std::vector<VarPtr> CollectTensorShapeDynVars(const FunctionPtr& func) {
       if (tensor_type->tensor_view_.has_value()) {
         for (const auto& stride : tensor_type->tensor_view_->stride) {
           CollectVarsFromShapeExprImpl(stride, seen, dyn_vars);
-        }
-        for (const auto& valid_dim : tensor_type->tensor_view_->valid_shape) {
-          CollectVarsFromShapeExprImpl(valid_dim, seen, dyn_vars);
         }
       }
     }
