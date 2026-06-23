@@ -2204,10 +2204,10 @@ class OutWindowExternalizer {
     return callee_name + ".param" + std::to_string(param_index);
   }
 
-  static void LogAutoDecision(bool accepted, const std::string& target, const WindowRewriteCost& cost) {
+  static void LogStableDecision(bool accepted, const std::string& target, const WindowRewriteCost& cost) {
     if (!WindowExternalizeLogEnabled()) return;
     std::ostringstream os;
-    os << "[window-auto] " << (accepted ? "accept " : "reject ") << target << ": abi_delta=" << cost.abi_delta
+    os << "[window-stable] " << (accepted ? "accept " : "reject ") << target << ": abi_delta=" << cost.abi_delta
        << " pieces=" << cost.dense_piece_count << " assemble_pieces=" << cost.assemble_piece_count
        << " reason=" << cost.reason;
     LOG_INFO << os.str();
@@ -2347,8 +2347,8 @@ class OutWindowExternalizer {
     return cost;
   }
 
-  static bool ShouldKeepOutputInAuto(const OutputRewriteInfo& output, const CalleeRewriteAnalysis& analysis,
-                                     WindowRewriteCost* out_cost) {
+  static bool ShouldKeepOutputInStable(const OutputRewriteInfo& output, const CalleeRewriteAnalysis& analysis,
+                                       WindowRewriteCost* out_cost) {
     auto cost = EstimateOutputCost(output);
     if (cost.abi_delta > 0) {
       cost.reason = "abi_expanding";
@@ -2356,7 +2356,7 @@ class OutWindowExternalizer {
       return false;
     }
     if (cost.is_multi_piece_output) {
-      cost.reason = analysis.outputs.size() == 1 ? "multi_piece_output" : "multi_output_coalescing";
+      cost.reason = analysis.outputs.size() == 1 ? "multi_piece_output" : "multi_output_bounding_box";
       if (out_cost) *out_cost = std::move(cost);
       return false;
     }
@@ -2377,7 +2377,7 @@ class OutWindowExternalizer {
       return false;
     }
     if (output.linked_flow_source_allowed || output.bounding_box_variant.has_value()) {
-      cost.reason = "carrier_or_coalesce_contract";
+      cost.reason = "linked_flow_or_bounding_box_candidate";
       if (out_cost) *out_cost = std::move(cost);
       return false;
     }
@@ -2387,7 +2387,7 @@ class OutWindowExternalizer {
     return true;
   }
 
-  static bool ShouldKeepInputInAuto(const InputRewriteInfo& input, WindowRewriteCost* out_cost) {
+  static bool ShouldKeepInputInStable(const InputRewriteInfo& input, WindowRewriteCost* out_cost) {
     auto cost = EstimateInputCost(input);
     if (input.dynamic_indexed_window.has_value()) {
       cost.reason = "dynamic_indexed_carrier_candidate";
@@ -2606,8 +2606,8 @@ class OutWindowExternalizer {
               std::remove_if(analysis.outputs.begin(), analysis.outputs.end(),
                              [&](const OutputRewriteInfo& output) {
                                WindowRewriteCost cost;
-                               bool keep = ShouldKeepOutputInAuto(output, analysis, &cost);
-                               LogAutoDecision(
+                               bool keep = ShouldKeepOutputInStable(output, analysis, &cost);
+                               LogStableDecision(
                                    keep, DebugParamName(callee_name, func, output.out_param_index), cost);
                                return !keep;
                              }),
@@ -2625,9 +2625,9 @@ class OutWindowExternalizer {
               std::remove_if(analysis.inputs.begin(), analysis.inputs.end(),
                              [&](const InputRewriteInfo& input) {
                                WindowRewriteCost cost;
-                               bool keep = ShouldKeepInputInAuto(input, &cost);
-                               LogAutoDecision(keep, DebugParamName(callee_name, func, input.in_param_index),
-                                               cost);
+                               bool keep = ShouldKeepInputInStable(input, &cost);
+                               LogStableDecision(keep, DebugParamName(callee_name, func, input.in_param_index),
+                                                 cost);
                                return !keep;
                              }),
               analysis.inputs.end());
@@ -4394,7 +4394,8 @@ class OutWindowExternalizer {
         }
         return std::nullopt;
       }
-      // v5: carrier risk check is policy-independent (always applies).
+      // Dynamic linked-flow safety is policy-independent once analysis has
+      // selected candidates; unsafe callsites stay full-parent.
       if (HasDynamicReaderCarrierRisk(call, analysis)) {
         return std::nullopt;
       }
@@ -4447,8 +4448,9 @@ class OutWindowExternalizer {
           }
 
           if (input.dynamic_indexed_window.has_value()) {
-            // v5: no private dynamic reader fallback. Dynamic input without
-            // carrier → reject the callsite (reader keeps full parent tensor).
+            // Dynamic indexed readers may only be lowered through a proven
+            // linked-flow carrier. Without one, reject this callsite so the
+            // reader keeps the full parent tensor.
             return std::nullopt;
           }
 
@@ -5611,8 +5613,8 @@ class OutWindowExternalizer {
         }
         if (dynamic_reader) {
           plan.dynamic_reader_roots.insert(root);
-          // v5: always attempt carrier building regardless of global policy.
-          // Structural conditions (writer exists, same root, etc.) handle safety.
+          // v6 linked flow is proof driven. Only a linked writer plus a linked
+          // boundingBox dynamic reader may lower to carrier/base/extent.
           size_t dynamic_dim = SIZE_MAX;
           bool needs_carrier_rematerialization = false;
           std::vector<ExprPtr> writer_candidate_offsets = writer ? writer->offsets : std::vector<ExprPtr>{};
@@ -9194,8 +9196,8 @@ Pass OptimizeOrchTensors(const std::string& window_policy, const std::string& wi
     // local-window writes in outlined callees.
     auto p5 = OutWindowExternalizer(parsed_global_policy, parsed_global_flow).Run(p4);
 
-    // Pattern 6 is disabled for v6 until runtime-current markers are emitted from
-    // explicit linked-flow analysis rather than a post-pass heuristic.
+    // Pattern 6: lower explicit linked-flow runtime-current markers into
+    // runtime barriers, then strip marker calls from the program.
     return RuntimeCurrentAggregator(parsed_global_policy, parsed_global_flow).Run(p5);
   };
 

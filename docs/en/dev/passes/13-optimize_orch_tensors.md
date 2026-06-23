@@ -4,7 +4,7 @@ Optimizes tensor buffer usage across orchestration and InCore functions by elimi
 
 ## Overview
 
-After `ConvertTensorToTileOps`, orchestration functions allocate output tensors (`tensor.create`) at every InCore call site, even inside loops where the same buffer could be reused. This pass applies five optimization patterns to reduce allocations, improve buffer layout information, and make statically provable local tensor windows explicit at orchestration call sites.
+After `ConvertTensorToTileOps`, orchestration functions allocate output tensors (`tensor.create`) at every InCore call site, even inside loops where the same buffer could be reused. This pass applies six optimization/lowering patterns to reduce allocations, improve buffer layout information, make statically provable local tensor windows explicit at orchestration call sites, and lower proven linked-flow runtime-current markers.
 
 **Requirements**:
 
@@ -166,14 +166,15 @@ stays full-tensor, because the same compiled graph may run with a smaller
 dynamic extent. Dynamic-offset windows, such as KV-cache writes at a runtime
 slot, can still be rewritten when the static proof and policy gate allow them.
 
-For debugging, `PYPTO_WINDOW_EXTERNALIZE_INCLUDE` and
-`PYPTO_WINDOW_EXTERNALIZE_EXCLUDE` filter candidates by callee or parameter
-name. `PYPTO_WINDOW_EXTERNALIZE_LOG=1` prints stable/coverage accept/reject
-decisions.
+Diagnostic-only environment variables are available while debugging this pass:
+`PYPTO_WINDOW_EXTERNALIZE_INCLUDE` and `PYPTO_WINDOW_EXTERNALIZE_EXCLUDE`
+filter candidates by callee or parameter name, and
+`PYPTO_WINDOW_EXTERNALIZE_LOG=1` prints stable/coverage accept/reject
+decisions. These variables are not part of the public policy semantics.
 
 ## Patterns
 
-The pass applies five patterns in sequence. Each pattern sees the results of the previous one.
+The pass applies six patterns in sequence. Each pattern sees the results of the previous one.
 
 ### Pattern 1: Iter-Arg Reuse (IterArgReuseOptimizer)
 
@@ -261,9 +262,9 @@ Supported rewrite shapes:
 - `AggregateInputWindowLoop`: together with an `AggregateWindowLoop` output rewrite, an `In` tensor parameter is read only through loop-local `tile.load`/`tensor.slice` windows whose offsets expand across that same internal loop into one statically provable parent-shaped region, such as q/k inputs of qk norm
 - Linked-flow lowering: when both writer and reader endpoints opt into linked
   flow and proof succeeds, the pass may lower the relationship with
-  carrier/base/extent/remat. Runtime-current marker insertion is disabled unless
-  it comes from that explicit linked-flow plan; it must not be inferred from
-  callee names or from the presence of a `__windowed` clone.
+  carrier/base/extent/remat. Runtime-current markers are emitted only by that
+  explicit linked-flow plan; they must not be inferred from callee names or from
+  the presence of a `__windowed` clone.
 
 Output-window eligibility:
 
@@ -306,8 +307,9 @@ Non-goals and dependence model:
 - the pass does not precompute global window descriptor arrays
 - the pass does not split SPMD launches or externalize per-block SPMD windows
 - unsupported consumers, including full-tensor readers, remain baseline/full-tensor inputs
-- runtime-current markers are not inserted by a standalone post-pass heuristic;
-  future marker insertion must be driven by explicit linked-flow analysis
+- runtime-current markers are emitted only by explicit linked-flow analysis; the
+  follow-up lowering pass only materializes those markers into runtime barriers
+  and strips the marker calls
 - `DeriveCallDirections` keeps its existing sound sequential `Out -> InOut` rule; Pattern 5 only exposes proven local windows before that pass runs
 
 ## Example (Pattern 1)
@@ -383,6 +385,7 @@ The `tensor.create` is eliminated; the iter-arg buffer is reused across iteratio
 | `SliceInputStridesOptimizer` | Pattern 4 — attaches parent strides to In params via TensorView for slice patterns |
 | `AssembleLoopRewriter` | Pattern 3 — rewrites tile.assemble loops to tile.store loops |
 | `OutWindowExternalizer` | Pattern 5 — rewrites eligible local Out writes and eligible In-window consumers to explicit call-site slices |
+| `RuntimeCurrentAggregator` | Pattern 6 — lowers explicit linked-flow runtime-current markers to barriers and strips marker calls |
 | `BuildOutParamReturnMappings` | Shared helper — maps Out params to return indices via tile.store |
 | `ComputeRowMajorStrides` | Shared helper — computes row-major strides from a shape |
 
