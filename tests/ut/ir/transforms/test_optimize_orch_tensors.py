@@ -5420,6 +5420,13 @@ class TestPerKernelAttrs:
         with pytest.raises(Exception, match="Do not pass window_option"):
             optimize_orch_tensors(window_option="exact", window_flow="linked")
 
+    def test_explicit_axes_are_keyword_only(self):
+        """Runtime binding matches the keyword-only policy/flow stub signature."""
+
+        optimize_orch_tensors = cast(Any, passes.optimize_orch_tensors)
+        with pytest.raises(TypeError):
+            optimize_orch_tensors(None, "exact", "local")
+
     def test_explicit_two_axis_bounding_box_linked_still_allowed(self):
         """Advanced users can still use explicit boundingBox + linked."""
 

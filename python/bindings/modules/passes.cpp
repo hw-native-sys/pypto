@@ -441,7 +441,7 @@ void BindPass(nb::module_& m) {
 
         return pass::OptimizeOrchTensors(window_policy.value_or("stable"), window_flow.value_or("local"));
       },
-      nb::arg("window_option") = nb::none(), nb::arg("window_policy") = nb::none(),
+      nb::arg("window_option") = nb::none(), nb::kw_only(), nb::arg("window_policy") = nb::none(),
       nb::arg("window_flow") = nb::none(),
       "Create a pass that optimizes tensor buffer usage in orchestration and InCore functions\n\n"
       "Applies six patterns: iter-arg reuse (merge Out->InOut), assemble parent\n"
