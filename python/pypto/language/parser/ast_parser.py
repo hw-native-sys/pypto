@@ -536,6 +536,11 @@ class ASTParser:
         # Inline function expansion state
         self._inline_mode = False
         self._inline_return_expr: ir.Expr | None = None
+        # When @pl.inline expansion returns, the declared return type (resolved
+        # from the annotation via TypeResolver) is stored here so the caller's
+        # _assign_or_let can use it as override_type.  This preserves Var identity
+        # for dynamic dims that C++ ops like tensor.create may copy.
+        self._pending_override_type: ir.Type | None = None
 
         # Yield tracking state — None means tracking is inactive (outside loops/ifs)
         self._current_yield_vars: list[str] | None = None
@@ -1263,12 +1268,68 @@ class ASTParser:
         span: ir.Span,
         override_type: ir.Type | None = None,
     ) -> ir.Var:
-        """Assign to existing Var if possible, otherwise create a new let binding."""
+        """Assign to existing Var if possible, otherwise create a new let binding.
+
+        Skips the assignment when the existing variable and the value expression
+        are the same ``ir.Var`` object — this avoids ``y = y`` self-assignments
+        that can arise when one inline's return feeds another inline's parameter.
+        """
+        # When the value is a DynVar with a registered tensor.dim Call
+        # (populated by tensor_ops.dim), emit AssignStmt(DynVar, Call)
+        # to preserve both Var identity and codegen correctness.
+        if isinstance(value_expr, ir.Var):
+            from pypto.language.op.tensor_ops import _pop_dim_call  # noqa: PLC0415
+
+            dim_call = _pop_dim_call(value_expr)
+            if dim_call is not None:
+                existing_var = self.scope_manager.lookup_var(var_name)
+                if (
+                    existing_var is not None
+                    and type(existing_var) is ir.Var
+                    and not self.scope_manager.strict_ssa
+                ):
+                    # Reassignment: the DynVar (or compatible) is already in scope.
+                    self.builder.assign(existing_var, dim_call, span=span)
+                    return existing_var
+                else:
+                    # Fresh let: register the DynVar in scope and emit the
+                    # tensor.dim Call as the assignment RHS.
+                    self.scope_manager.define_var(var_name, value_expr, allow_redef=True)
+                    self.builder.assign(value_expr, dim_call, span=span)
+                    return value_expr
+
         existing_var = self.scope_manager.lookup_var(var_name)
         if existing_var is not None and type(existing_var) is ir.Var and not self.scope_manager.strict_ssa:
+            # Skip self-assignment (same Var object)
+            if isinstance(value_expr, ir.Var) and existing_var is value_expr:
+                self._pending_override_type = None
+                return existing_var
+            # When inside an @pl.inline expansion, only consider reassignment
+            # within the inline block — parent-scope variables must not shadow
+            # the inline's locals (scope hygiene).
+            if self.scope_manager.in_scope_type("inline"):
+                found_in_inline = False
+                for scope, stype in zip(
+                    reversed(self.scope_manager.scopes),
+                    reversed(self.scope_manager.scope_types),
+                ):
+                    if var_name in scope:
+                        found_in_inline = True
+                        break
+                    if stype == "inline":
+                        break
+                if not found_in_inline:
+                    existing_var = None
+        if existing_var is not None and type(existing_var) is ir.Var and not self.scope_manager.strict_ssa:
+            if isinstance(value_expr, ir.Var) and existing_var is value_expr:
+                self._pending_override_type = None
+                return existing_var
             # Reject reassignment with a different type (#642).  Same Python
             # variable maps to the same Var node, so the type must match.
-            value_type = override_type or value_expr.type
+            # Consume any override_type set by @pl.inline expansion to reconcile
+            # dynamic-dim Var identity (C++ ops like tensor.create may copy Vars).
+            value_type = override_type or self._pending_override_type or value_expr.type
+            self._pending_override_type = None
             if (
                 not isinstance(value_type, ir.UnknownType)
                 and not isinstance(existing_var.type, ir.UnknownType)
@@ -1283,6 +1344,12 @@ class ASTParser:
                 )
             self.builder.assign(existing_var, value_expr, span=span)
             return existing_var
+        # When the value is a Var with the same name_hint as the LHS, avoid
+        # creating a new Var (which would produce ``y_1 = y`` in the printer).
+        # This happens when an inline's return Var has the same name_hint as
+        # the caller's LHS but isn't in scope (scope isolation).
+        if isinstance(value_expr, ir.Var) and value_expr.name_hint == var_name:
+            return value_expr
         return self.builder.let(var_name, value_expr, type=override_type, span=span)
 
     def parse_assignment(self, stmt: ast.Assign) -> None:  # noqa: PLR0912
@@ -6374,6 +6441,16 @@ class ASTParser:
                 if i == 0 and self._is_docstring(stmt):
                     continue
                 self.parse_statement(stmt)
+
+            # Resolve the declared return type from the inline's annotation
+            # while the merged closure is still active (it contains the inline's
+            # definition-site globals like HIDDEN, VOCAB, etc.).  Store it so
+            # the caller's _assign_or_let can use it as override_type, reconciling
+            # dynamic-dim Var identity when C++ ops (e.g. tensor.create) copy Vars.
+            if inline_func.func_def.returns:
+                self._pending_override_type, _ = self.type_resolver.resolve_param_type(
+                    inline_func.func_def.returns
+                )
         finally:
             # Restore parser state
             (
@@ -6385,8 +6462,11 @@ class ASTParser:
             self.expr_evaluator.closure_vars = prev_closure_vars
             return_expr = self._inline_return_expr
             self._inline_mode, self._inline_return_expr = prev_inline_state
-            # Leak vars so inlined definitions are visible to the caller
-            self.scope_manager.exit_scope(leak_vars=True)
+            # Inline scope does not leak — variables are scoped to the expansion.
+            # Unlike for/if/while block scopes which model Python's block-visibility
+            # (``leak_vars=True``), inline expansion is a function-inlining mechanism
+            # where body-local variables should not be visible in the caller.
+            self.scope_manager.exit_scope(leak_vars=False)
 
         if return_expr is None:
             raise ParserTypeError(

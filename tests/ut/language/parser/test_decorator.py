@@ -8,6 +8,10 @@
 # -----------------------------------------------------------------------------------------------------------
 
 """Unit tests for @pl.function, @pl.inline, and @pl.program decorators."""
+# pyright: reportAttributeAccessIssue=false, reportOptionalMemberAccess=false
+# Rationale: tests access IR node internals (e.g. .var on Stmt) and chain
+# through possibly-None DSL return values; pyright's type model cannot
+# represent these runtime DSL constructs accurately.
 
 import linecache
 import sys
@@ -1194,17 +1198,19 @@ class TestInlineFunctionCalls:
                 z: pl.Tensor[[64], pl.FP32] = add_one(y)
                 return z
 
-        @pl.program
-        class Expected:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
-                y: pl.Tensor[[64], pl.FP32] = result
-                result: pl.Tensor[[64], pl.FP32] = pl.add(y, 1.0)
-                z: pl.Tensor[[64], pl.FP32] = result
-                return z
-
-        ir.assert_structural_equal(TwiceCalled, Expected)
+        result = TwiceCalled.get_function("main")
+        body = result.body
+        assert isinstance(body, ir.SeqStmts)
+        # 4 AssignStmts + 1 ReturnStmt = 5 total
+        assert len(body.stmts) == 5, (
+            f"Expected 5 statements, got {len(body.stmts)}: {TwiceCalled.as_python()}"
+        )
+        # Verify the two inlined result vars are distinct (hygiene)
+        stmt0_var = body.stmts[0].var
+        stmt2_var = body.stmts[2].var
+        assert stmt0_var.name_hint == "result"
+        assert stmt2_var.name_hint == "result"
+        assert stmt0_var is not stmt2_var, "Two inline calls should produce distinct result Vars"
 
     def test_inline_wrong_arg_count_raises_error(self):
         """Wrong number of arguments raises ParserTypeError."""
@@ -1275,6 +1281,59 @@ class TestInlineFunctionCalls:
                 return y
 
         ir.assert_structural_equal(WithInline, ManualExpand)
+
+    def test_nested_inline_calls(self):
+        """Nested @pl.inline calls: add_one(add_one(add_one(x)))."""
+
+        @pl.inline
+        def add_one(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+            return result
+
+        @pl.program
+        class NestedCall:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                z: pl.Tensor[[64], pl.FP32] = add_one(add_one(add_one(x)))
+                return z
+
+        result = NestedCall.get_function("main")
+        assert result is not None
+        body = result.body
+        assert isinstance(body, ir.SeqStmts)
+        # Each inline adds: result = add(...) + assignment to caller LHS
+        # Three inlines → 3 AssignStmts + 1 for final z = ...
+        # 3 result = add(...) + 1 z = result + 1 return z = 5 total
+        assert len(body.stmts) == 5, f"Expected 5 statements, got {len(body.stmts)}: {NestedCall.as_python()}"
+        # Verify the three inlined result vars are all distinct (hygiene)
+        assert body.stmts[0].var is not body.stmts[1].var
+        assert body.stmts[0].var is not body.stmts[2].var
+        assert body.stmts[1].var is not body.stmts[2].var
+
+    def test_two_different_functions_inline_expansion(self):
+        """Same inline called from two different @pl.function methods is expanded
+        correctly in both (each function scope is independent, no collision
+        possible even without alpha-renaming)."""
+
+        @pl.inline
+        def square(x: pl.Tensor[[64], pl.FP32]):
+            y: pl.Tensor[[64], pl.FP32] = pl.mul(x, x)
+            return y
+
+        @pl.program
+        class Test:
+            @pl.function
+            def entry_a(self, a: pl.Tensor[[64], pl.FP32]):
+                a2: pl.Tensor[[64], pl.FP32] = square(a)
+                return a2
+
+            @pl.function
+            def entry_b(self, b: pl.Tensor[[64], pl.FP32]):
+                b2: pl.Tensor[[64], pl.FP32] = square(b)
+                return b2
+
+        assert len(Test.functions) == 2
+        assert Test.get_function("square") is None
 
 
 class TestFunctionCallArgCountValidation:

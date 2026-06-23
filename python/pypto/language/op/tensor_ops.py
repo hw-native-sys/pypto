@@ -105,6 +105,18 @@ from ..typing import IntLike, Scalar, Tensor
 # DistributedTensor import is needed here.
 _TensorT = TypeVar("_TensorT", bound=Tensor)
 
+# Registry mapping DynVar id → tensor.dim Call expression.  tensor_ops.dim
+# populates this when the tensor type carries a Var at the queried axis; the
+# parser's _assign_or_let consumes it to emit AssignStmt(DynVar, Call) which
+# preserves both Var identity (DynVar in scope) and codegen correctness
+# (tensor.dim Call visible to orchestration codegen).
+_dim_call_registry: dict[int, Any] = {}
+
+
+def _pop_dim_call(var: "_ir_core.Var") -> Any:
+    """Pop the registered tensor.dim Call for *var*, if any."""
+    return _dim_call_registry.pop(id(var), None)
+
 
 def _unwrap_rhs(rhs: int | float | Expr | Tensor | Scalar) -> int | float | Expr:
     """Unwrap rhs operands into the IR-layer representation."""
@@ -366,6 +378,20 @@ def dim(tensor: Tensor, axis: int | _ir_core.ConstInt) -> Scalar:
         axis = int(axis.value)
     tensor_expr = tensor.unwrap()
     call_expr = _ir_ops.dim(tensor_expr, axis)
+
+    # When the tensor type already carries a Var at *axis* (e.g. a DynVar
+    # resolved from a pl.dynamic() annotation), register the tensor.dim Call
+    # so the parser can emit it for codegen while still using the DynVar for
+    # Var identity.  See _assign_or_let in ast_parser.py.
+    tensor_type = tensor_expr.type
+    if isinstance(tensor_type, _ir_core.TensorType):
+        shape = tensor_type.shape
+        if 0 <= axis < len(shape):
+            dim_val = shape[axis]
+            if isinstance(dim_val, _ir_core.Var):
+                _dim_call_registry[id(dim_val)] = call_expr
+                return Scalar(expr=dim_val)
+
     return Scalar(expr=call_expr)
 
 
