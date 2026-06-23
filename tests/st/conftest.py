@@ -203,7 +203,7 @@ def pytest_addoption(parser):
         type=int,
         const=1,
         default=0,
-        help="Per-task tensor dump level into <work_dir>/dfx_outputs/tensor_dump/. "
+        help="Per-task tensor dump level into <work_dir>/dfx_outputs/args_dump/. "
         "Bare flag = 1 (partial: only pl.dump_tag / dumps= marked tensors); "
         "'--dump-tensor 2' = full (every task); absent = 0 (off).",
     )

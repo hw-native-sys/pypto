@@ -114,7 +114,7 @@ class RunConfig:
             task metadata the converter needs. Mirrors runtime's
             ``--enable-l2-swimlane`` flag.
         enable_dump_tensor: Per-task tensor dump **level** written into
-            ``<work_dir>/dfx_outputs/tensor_dump/``. Inspect with
+            ``<work_dir>/dfx_outputs/args_dump/``. Inspect with
             ``python -m simpler_setup.tools.dump_viewer``. Mirrors
             ``--dump-tensor``:
 
@@ -984,13 +984,13 @@ def _collect_dfx_artifacts(
             f"  # --engine choices: dot | sfdp | fdp | neato | circo | twopi"
         )
 
-    if dfx.enable_dump_tensor > 0 and (dfx_dir / "tensor_dump" / "tensor_dump.json").exists():
+    if dfx.enable_dump_tensor > 0 and (dfx_dir / "args_dump" / "args_dump.json").exists():
         # ``dump_viewer`` is interactive; leave the artefact in place and
         # point the user at the inspection command.
         print(
-            f"tensor_dump written to {dfx_dir / 'tensor_dump'} — inspect with: "
+            f"args_dump written to {dfx_dir / 'args_dump'} — inspect with: "
             f"python -m simpler_setup.tools.dump_viewer "
-            f"{dfx_dir / 'tensor_dump'}"
+            f"{dfx_dir / 'args_dump'}"
         )
 
     if dfx.enable_pmu > 0 and (dfx_dir / "pmu.csv").exists():

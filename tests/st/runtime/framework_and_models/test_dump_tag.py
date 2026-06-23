@@ -120,10 +120,10 @@ def dump_tag_run(test_config):
     """Run the dump_tag kernel once and return ``(work_dir, c, expected)``.
 
     ``work_dir`` is pinned to ``build_output/dump_tag_test/`` so the
-    generated artefacts (compiled kernels, ``dfx_outputs/tensor_dump/``)
+    generated artefacts (compiled kernels, ``dfx_outputs/args_dump/``)
     survive across pytest sessions and can be inspected directly with
     ``python -m simpler_setup.tools.dump_viewer
-    build_output/dump_tag_test/dfx_outputs/tensor_dump``.
+    build_output/dump_tag_test/dfx_outputs/args_dump``.
 
     The directory is wiped at the start of each session so stale entries
     from a previous run can't be confused with the current one. Forced
@@ -146,11 +146,11 @@ def dump_tag_run(test_config):
 
 @pytest.fixture(scope="session")
 def dump_manifest(dump_tag_run, test_config) -> tuple[list[dict], Path, Path]:
-    """Load ``tensor_dump.json`` and resolve the companion bin path.
+    """Load ``args_dump.json`` and resolve the companion bin path.
 
     Returns ``(entries, manifest_path, bin_path)``. Mirrors how
     ``simpler_setup.tools.dump_viewer`` parses the manifest:
-    top-level is a dict with ``tensors`` (entry list) and ``bin_file``
+    top-level is a dict with ``args`` (entry list) and ``bin_file``
     (bin filename relative to the manifest directory).
 
     Skips when ``--dump-tensor`` is not set or when ``--codegen-only`` is
@@ -162,20 +162,20 @@ def dump_manifest(dump_tag_run, test_config) -> tuple[list[dict], Path, Path]:
         pytest.skip("--codegen-only skips device execution; no manifest is written")
 
     work_dir, _, _ = dump_tag_run
-    manifest_path = work_dir / "dfx_outputs" / "tensor_dump" / "tensor_dump.json"
-    assert manifest_path.exists(), f"tensor_dump.json not found at {manifest_path}"
+    manifest_path = work_dir / "dfx_outputs" / "args_dump" / "args_dump.json"
+    assert manifest_path.exists(), f"args_dump.json not found at {manifest_path}"
 
     manifest = json.loads(manifest_path.read_text())
-    assert isinstance(manifest, dict), f"tensor_dump.json should hold a dict, got {type(manifest).__name__}"
-    entries = manifest.get("tensors")
+    assert isinstance(manifest, dict), f"args_dump.json should hold a dict, got {type(manifest).__name__}"
+    entries = manifest.get("args")
     assert isinstance(entries, list), (
-        f"tensor_dump.json['tensors'] should be a list, got {type(entries).__name__}"
+        f"args_dump.json['args'] should be a list, got {type(entries).__name__}"
     )
-    assert entries, "tensor_dump.json['tensors'] is empty — dump pipeline produced no entries"
+    assert entries, "args_dump.json['args'] is empty — dump pipeline produced no entries"
 
     bin_name = manifest.get("bin_file")
     assert isinstance(bin_name, str) and bin_name, (
-        f"tensor_dump.json missing 'bin_file' key (or empty): manifest keys = {sorted(manifest)}"
+        f"args_dump.json missing 'bin_file' key (or empty): manifest keys = {sorted(manifest)}"
     )
     bin_path = manifest_path.parent / bin_name
     return entries, manifest_path, bin_path
@@ -226,7 +226,7 @@ class TestDumpTagManifest:
 
     def test_simpler_dump_viewer_can_decode_a_sample(self, dump_manifest):
         """The simpler-provided ``dump_viewer`` parses the manifest + binary."""
-        from simpler_setup.tools.dump_viewer import decode_elements, read_tensor_data  # noqa: PLC0415
+        from simpler_setup.tools.dump_viewer import decode_elements, read_arg_data  # noqa: PLC0415
 
         entries, _, bin_path = dump_manifest
 
@@ -234,11 +234,11 @@ class TestDumpTagManifest:
             (e for e in entries if e["bin_size"] > 0 and not e.get("overwritten") and not e.get("truncated")),
             None,
         )
-        assert sample is not None, "no decodable entry in tensor_dump.json (all overwritten/truncated/empty)"
+        assert sample is not None, "no decodable entry in args_dump.json (all overwritten/truncated/empty)"
 
-        data = read_tensor_data(bin_path, sample["bin_offset"], sample["bin_size"])
+        data = read_arg_data(bin_path, sample["bin_offset"], sample["bin_size"])
         assert len(data) == sample["bin_size"], (
-            f"read_tensor_data returned {len(data)} bytes, expected {sample['bin_size']}"
+            f"read_arg_data returned {len(data)} bytes, expected {sample['bin_size']}"
         )
 
         numel = 1
@@ -394,27 +394,27 @@ def submit_dumps_manifest_file(test_runner) -> Path:
     if test_runner.config.codegen_only:
         pytest.skip("--codegen-only skips device execution; no manifest is written")
 
-    pattern = "*/dfx_outputs/tensor_dump/tensor_dump.json"
+    pattern = "*/dfx_outputs/args_dump/args_dump.json"
     before: set[Path] = set(_BUILD_OUTPUT_DIR.glob(pattern))
     result = test_runner.run(_SubmitDumpsPipelinePTO())
     assert result.passed, f"submit dumps= pipeline failed: {result.error}"
 
     after: set[Path] = set(_BUILD_OUTPUT_DIR.glob(pattern))
     new_files = after - before
-    assert new_files, "No tensor_dump.json was generated for the submit dumps= run"
+    assert new_files, "No args_dump.json was generated for the submit dumps= run"
     return max(new_files, key=lambda p: p.stat().st_mtime)
 
 
 @pytest.fixture(scope="module")
 def submit_dumps_manifest(submit_dumps_manifest_file: Path) -> list[dict]:
-    """Parse ``tensor_dump.json`` and return the entry list (the ``tensors`` key)."""
+    """Parse ``args_dump.json`` and return the entry list (the ``args`` key)."""
     manifest = json.loads(submit_dumps_manifest_file.read_text())
     assert isinstance(manifest, dict), (
         f"{submit_dumps_manifest_file}: expected a dict, got {type(manifest).__name__}"
     )
-    entries = manifest.get("tensors")
+    entries = manifest.get("args")
     assert isinstance(entries, list) and entries, (
-        f"{submit_dumps_manifest_file}: 'tensors' missing or empty — dump pipeline produced no entries"
+        f"{submit_dumps_manifest_file}: 'args' missing or empty — dump pipeline produced no entries"
     )
     return entries
 
