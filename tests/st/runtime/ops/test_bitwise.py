@@ -7,23 +7,19 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Runtime tests for the tile-level integer bitwise NOT op.
+"""Runtime tests for the tile-level integer bitwise NOT op (TNOT).
 
-Only ``not_`` (TNOT, INT16) is covered: it is the one integer bitwise/remainder
-tile op that currently assembles and runs correctly on a2a3. The rest of the
-family is blocked by a2a3 assembler/ISA defects (tracked in KNOWN_ISSUES):
-  * rem  — TREM returns wrong values on int32 (e.g. 0 where a%b != 0).
+``not_`` is the only integer bitwise/remainder tile op that currently assembles
+and runs correctly on a2a3 (TNOT supports int16/uint16). Coverage: multiple
+shapes (square/tall/wide), aligned + narrow valid_shape (combined / rows-only /
+cols-only), int16 and uint16 dtypes, and non-zero store offset.
+
+Blocked on a2a3 (tracked in KNOWN_ISSUES; the tile.rem/rems DSL+codegen already
+carry the scratch tmp operand the ISA requires, ready to re-enable):
+  * rem  — TREM returns wrong values on int32.
   * rems — TREMS alloc_tile element-type error.
-  * xor/xors — TXOR/TXORS require int16/uint16 element type (int32 rejected).
-  * and_/or_/shl/shr (+scalar) — ptoas rejects pto.tand/tor/tshl/tshr
-    ("invalid kind of type specified").
-
-(The tile.rem/rems DSL/codegen now carry the scratch ``tmp`` operand that the
-ISA requires — see the elementwise op registration — so they are ready to
-re-enable once the a2a3 TREM/TXOR paths are fixed.)
-
-not_ runs aligned (valid_shape == [M, N]) and narrow (valid_shape
-[VALID_M, VALID_N] < [M, N]; invalid output stays zero).
+  * xor/xors — TXOR/TXORS require int16/uint16 element type.
+  * and_/or_/shl/shr (+scalar) — ptoas rejects pto.tand/tor/tshl/tshr.
 
 Scope is a2a3 only (``@pytest.mark.platforms("a2a3")``); a5 coverage is a
 separate PR.
@@ -36,83 +32,110 @@ import pytest
 import torch
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
 
-M = 16
-N = 16
-VALID_M = 8
-VALID_N = 12
+_PL_DT = {DataType.INT16: pl.INT16, DataType.UINT16: pl.UINT16}
+
+_SHAPE_CFGS = [
+    ("16x16", 16, 16, None),
+    ("32x64", 32, 64, None),
+    ("8x128", 8, 128, None),
+    ("16x16_narrow_both", 16, 16, (8, 12)),
+    ("16x16_narrow_rows", 16, 16, (8, 16)),
+    ("16x16_narrow_cols", 16, 16, (16, 8)),
+]
 
 
-def _a_input() -> torch.Tensor:
-    """Non-negative INT spread 0..255 (cast to the spec dtype by create_tensor)."""
-    return torch.arange(M * N, dtype=torch.int32).reshape(M, N)
+def _a_input(m, n):
+    """Non-negative spread 0..(m*n-1), cast to the spec dtype by create_tensor."""
+    return torch.arange(m * n, dtype=torch.int32).reshape(m, n)
 
 
 class BitwiseNotTestCase(PTOTestCase):
-    """Unary not_ on INT16, aligned or narrow valid_shape."""
+    """Unary not_ with shape / valid / dtype / offset config."""
 
     __test__ = False
 
-    def __init__(self, *, valid_shapes: tuple[int, int] | None = None, config=None):
+    def __init__(
+        self,
+        *,
+        m=16,
+        n=16,
+        valid_shapes=None,
+        dtype=DataType.INT16,
+        out_m=None,
+        out_n=None,
+        off=(0, 0),
+        config=None,
+    ):
         super().__init__(config)
-        self._valid = valid_shapes
+        self._m, self._n, self._valid, self._dtype = m, n, valid_shapes, dtype
+        self._out_m, self._out_n, self._off = out_m or m, out_n or n, off
 
     def get_name(self) -> str:
-        return "tile_bitwise_not_narrow" if self._valid else "tile_bitwise_not"
+        v = f"_v{self._valid[0]}x{self._valid[1]}" if self._valid else ""
+        o = f"_off{self._off[0]}x{self._off[1]}" if self._off != (0, 0) else ""
+        return f"tile_not_{self._m}x{self._n}_{self._dtype.value}{v}{o}"
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
-            TensorSpec("a", [M, N], DataType.INT16, init_value=_a_input),
-            TensorSpec("not_o", [M, N], DataType.INT16, is_output=True),
+            TensorSpec("a", [self._m, self._n], self._dtype, init_value=lambda: _a_input(self._m, self._n)),
+            TensorSpec("out", [self._out_m, self._out_n], self._dtype, is_output=True),
         ]
 
     def get_program(self) -> Any:
-        vshape = list(self._valid) if self._valid else [M, N]
+        m, n, om, on, off = self._m, self._n, self._out_m, self._out_n, list(self._off)
+        vshape = list(self._valid) if self._valid else [m, n]
+        dt = _PL_DT[self._dtype]
 
         @pl.program
         class BitwiseNotProgram:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
-                self,
-                a: pl.Tensor[[M, N], pl.INT16],
-                not_o: pl.Out[pl.Tensor[[M, N], pl.INT16]],
-            ) -> pl.Tensor[[M, N], pl.INT16]:
-                a_tile = pl.load(a, [0, 0], [M, N], valid_shapes=vshape)
-                not_o = pl.store(pl.tile.not_(a_tile), [0, 0], not_o)
-                return not_o
+                self, a: pl.Tensor[[m, n], dt], out: pl.Out[pl.Tensor[[om, on], dt]]
+            ) -> pl.Tensor[[om, on], dt]:
+                a_tile = pl.load(a, [0, 0], [m, n], valid_shapes=vshape)
+                out = pl.store(pl.tile.not_(a_tile), off, out)
+                return out
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
-                self,
-                a: pl.Tensor[[M, N], pl.INT16],
-                not_o: pl.Out[pl.Tensor[[M, N], pl.INT16]],
-            ) -> pl.Tensor[[M, N], pl.INT16]:
-                not_o = self.kernel(a, not_o)
-                return not_o
+                self, a: pl.Tensor[[m, n], dt], out: pl.Out[pl.Tensor[[om, on], dt]]
+            ) -> pl.Tensor[[om, on], dt]:
+                out = self.kernel(a, out)
+                return out
 
         return BitwiseNotProgram
 
     def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
         a = tensors["a"]
+        out = torch.zeros_like(tensors["out"])
+        r, c = self._off
         if self._valid:
             vm, vn = self._valid
-            out = torch.zeros_like(tensors["not_o"])
-            out[:vm, :vn] = torch.bitwise_not(a[:vm, :vn])
-            tensors["not_o"][:] = out
+            res = torch.zeros_like(a)
+            res[:vm, :vn] = torch.bitwise_not(a[:vm, :vn])
         else:
-            tensors["not_o"][:] = torch.bitwise_not(a)
+            res = torch.bitwise_not(a)
+        out[r : r + self._m, c : c + self._n] = res
+        tensors["out"][:] = out
 
 
 class TestBitwise:
-    """Tile-level integer bitwise NOT on a2a3."""
+    """Tile-level integer bitwise NOT on a2a3 across shapes, valid_shapes, dtypes, offset."""
 
     @pytest.mark.platforms("a2a3")
-    def test_tile_bitwise_not(self, test_runner):
-        result = test_runner.run(BitwiseNotTestCase())
+    @pytest.mark.parametrize("label,m,n,valid", _SHAPE_CFGS, ids=[c[0] for c in _SHAPE_CFGS])
+    def test_tile_not(self, test_runner, label, m, n, valid):
+        result = test_runner.run(BitwiseNotTestCase(m=m, n=n, valid_shapes=valid))
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.platforms("a2a3")
-    def test_tile_bitwise_not_narrow(self, test_runner):
-        result = test_runner.run(BitwiseNotTestCase(valid_shapes=(VALID_M, VALID_N)))
+    def test_tile_not_uint16(self, test_runner):
+        result = test_runner.run(BitwiseNotTestCase(dtype=DataType.UINT16))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.platforms("a2a3")
+    def test_tile_not_offset(self, test_runner):
+        result = test_runner.run(BitwiseNotTestCase(out_m=32, out_n=32, off=(16, 16)))
         assert result.passed, f"Test failed: {result.error}"
 
 

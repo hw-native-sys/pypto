@@ -9,14 +9,13 @@
 
 """Runtime tests for tile-level unary math ops: sin, cos, sqrt.
 
-sin/cos are FP32-only and interpret their input as radians. Inputs are kept
-positive so sqrt is well-defined on the same data.
+sin/cos are FP32-only and interpret their input as radians; they are exercised
+on both positive and signed/multi-period input. sqrt needs a non-negative
+domain and is also exercised at the exact-0 boundary and in FP16.
 
-Each op is exercised twice:
-  * aligned   — valid_shape == static tile shape [M, N]
-  * narrow    — valid_shape [VALID_M, VALID_N] < static [M, N]; the store writes
-                only the valid sub-region, so the rest of the zero-init output
-                must stay 0.
+Coverage dimensions per op: multiple shapes (square/tall/wide), aligned + narrow
+valid_shape (combined / rows-only / cols-only), non-zero store offset, dtype, and
+op-specific input ranges.
 
 Scope is a2a3 only (``@pytest.mark.platforms("a2a3")``); a5 coverage is a
 separate PR.
@@ -29,104 +28,224 @@ import pytest
 import torch
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
 
-M = 16
-N = 16
-VALID_M = 8
-VALID_N = 12
+_PL_DT = {DataType.FP32: pl.FP32, DataType.FP16: pl.FP16}
+
+# (label, m, n, valid_shapes) — reused by every unary op for the shape/valid sweep.
+_SHAPE_CFGS = [
+    ("16x16", 16, 16, None),
+    ("32x64", 32, 64, None),
+    ("8x128", 8, 128, None),
+    ("16x16_narrow_both", 16, 16, (8, 12)),
+    ("16x16_narrow_rows", 16, 16, (8, 16)),
+    ("16x16_narrow_cols", 16, 16, (16, 8)),
+]
 
 
-def _positive_input() -> torch.Tensor:
-    """Positive FP32 input in roughly [0.1, 3.1] — valid for sin/cos/sqrt alike."""
-    return torch.rand(M, N, dtype=torch.float32) * 3.0 + 0.1
+def _positive(m, n):
+    return torch.rand(m, n, dtype=torch.float32) * 3.0 + 0.1
 
 
-class TileUnaryMathTestCase(PTOTestCase):
-    """Tile sin/cos/sqrt on FP32, aligned or narrow valid_shape."""
+def _signed_periods(m, n):
+    return torch.rand(m, n, dtype=torch.float32) * 40.0 - 20.0  # negatives + several periods
+
+
+def _sqrt_domain(m, n):
+    t = torch.rand(m, n, dtype=torch.float32) * 100.0
+    t.view(-1)[0] = 0.0  # exact-0 boundary
+    return t
+
+
+class _UnaryMathBase(PTOTestCase):
+    """Shared scaffolding: load [m,n] (optionally narrow valid), apply one op, store at offset."""
 
     __test__ = False
+    op_name = ""  # subclass sets; used in get_name
 
-    def __init__(self, *, valid_shapes: tuple[int, int] | None = None, config=None):
+    def __init__(
+        self,
+        *,
+        m=16,
+        n=16,
+        valid_shapes=None,
+        dtype=DataType.FP32,
+        input_fn=None,
+        out_m=None,
+        out_n=None,
+        off=(0, 0),
+        config=None,
+    ):
         super().__init__(config)
-        self._valid = valid_shapes
+        self._m, self._n, self._valid, self._dtype = m, n, valid_shapes, dtype
+        self._input_fn = input_fn or _positive
+        self._out_m, self._out_n, self._off = out_m or m, out_n or n, off
 
     def get_name(self) -> str:
-        return "tile_unary_math_narrow" if self._valid else "tile_unary_math"
+        v = f"_v{self._valid[0]}x{self._valid[1]}" if self._valid else ""
+        o = f"_off{self._off[0]}x{self._off[1]}" if self._off != (0, 0) else ""
+        return f"tile_{self.op_name}_{self._m}x{self._n}_{self._dtype.value}{v}{o}"
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
-            TensorSpec("a", [M, N], DataType.FP32, init_value=_positive_input),
-            TensorSpec("sin_o", [M, N], DataType.FP32, is_output=True),
-            TensorSpec("cos_o", [M, N], DataType.FP32, is_output=True),
-            TensorSpec("sqrt_o", [M, N], DataType.FP32, is_output=True),
+            TensorSpec(
+                "a", [self._m, self._n], self._dtype, init_value=lambda: self._input_fn(self._m, self._n)
+            ),
+            TensorSpec("out", [self._out_m, self._out_n], self._dtype, is_output=True),
         ]
 
-    def get_program(self) -> Any:
-        vshape = list(self._valid) if self._valid else [M, N]
-
-        @pl.program
-        class TileUnaryMathProgram:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                a: pl.Tensor[[M, N], pl.FP32],
-                sin_o: pl.Out[pl.Tensor[[M, N], pl.FP32]],
-                cos_o: pl.Out[pl.Tensor[[M, N], pl.FP32]],
-                sqrt_o: pl.Out[pl.Tensor[[M, N], pl.FP32]],
-            ) -> tuple[
-                pl.Tensor[[M, N], pl.FP32],
-                pl.Tensor[[M, N], pl.FP32],
-                pl.Tensor[[M, N], pl.FP32],
-            ]:
-                a_tile = pl.load(a, [0, 0], [M, N], valid_shapes=vshape)
-                sin_o = pl.store(pl.tile.sin(a_tile), [0, 0], sin_o)
-                cos_o = pl.store(pl.tile.cos(a_tile), [0, 0], cos_o)
-                sqrt_o = pl.store(pl.tile.sqrt(a_tile), [0, 0], sqrt_o)
-                return sin_o, cos_o, sqrt_o
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def orchestrator(
-                self,
-                a: pl.Tensor[[M, N], pl.FP32],
-                sin_o: pl.Out[pl.Tensor[[M, N], pl.FP32]],
-                cos_o: pl.Out[pl.Tensor[[M, N], pl.FP32]],
-                sqrt_o: pl.Out[pl.Tensor[[M, N], pl.FP32]],
-            ) -> tuple[
-                pl.Tensor[[M, N], pl.FP32],
-                pl.Tensor[[M, N], pl.FP32],
-                pl.Tensor[[M, N], pl.FP32],
-            ]:
-                sin_o, cos_o, sqrt_o = self.kernel(a, sin_o, cos_o, sqrt_o)
-                return sin_o, cos_o, sqrt_o
-
-        return TileUnaryMathProgram
+    def _ref(self, a: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError
 
     def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
         a = tensors["a"]
-        fns = {"sin_o": torch.sin, "cos_o": torch.cos, "sqrt_o": torch.sqrt}
+        out = torch.zeros_like(tensors["out"])
+        r, c = self._off
         if self._valid:
             vm, vn = self._valid
-            for name, fn in fns.items():
-                out = torch.zeros_like(tensors[name])
-                out[:vm, :vn] = fn(a[:vm, :vn])
-                tensors[name][:] = out
+            res = torch.zeros_like(a)
+            res[:vm, :vn] = self._ref(a[:vm, :vn])
         else:
-            for name, fn in fns.items():
-                tensors[name][:] = fn(a)
+            res = self._ref(a)
+        out[r : r + self._m, c : c + self._n] = res
+        tensors["out"][:] = out
+
+
+class TileSinTestCase(_UnaryMathBase):
+    op_name = "sin"
+
+    def _ref(self, a):
+        return torch.sin(a)
+
+    def get_program(self) -> Any:
+        m, n, om, on, off = self._m, self._n, self._out_m, self._out_n, list(self._off)
+        vshape = list(self._valid) if self._valid else [m, n]
+        dt = _PL_DT[self._dtype]
+
+        @pl.program
+        class SinProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, a: pl.Tensor[[m, n], dt], out: pl.Out[pl.Tensor[[om, on], dt]]
+            ) -> pl.Tensor[[om, on], dt]:
+                a_tile = pl.load(a, [0, 0], [m, n], valid_shapes=vshape)
+                out = pl.store(pl.tile.sin(a_tile), off, out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self, a: pl.Tensor[[m, n], dt], out: pl.Out[pl.Tensor[[om, on], dt]]
+            ) -> pl.Tensor[[om, on], dt]:
+                out = self.kernel(a, out)
+                return out
+
+        return SinProgram
+
+
+class TileCosTestCase(_UnaryMathBase):
+    op_name = "cos"
+
+    def _ref(self, a):
+        return torch.cos(a)
+
+    def get_program(self) -> Any:
+        m, n, om, on, off = self._m, self._n, self._out_m, self._out_n, list(self._off)
+        vshape = list(self._valid) if self._valid else [m, n]
+        dt = _PL_DT[self._dtype]
+
+        @pl.program
+        class CosProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, a: pl.Tensor[[m, n], dt], out: pl.Out[pl.Tensor[[om, on], dt]]
+            ) -> pl.Tensor[[om, on], dt]:
+                a_tile = pl.load(a, [0, 0], [m, n], valid_shapes=vshape)
+                out = pl.store(pl.tile.cos(a_tile), off, out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self, a: pl.Tensor[[m, n], dt], out: pl.Out[pl.Tensor[[om, on], dt]]
+            ) -> pl.Tensor[[om, on], dt]:
+                out = self.kernel(a, out)
+                return out
+
+        return CosProgram
+
+
+class TileSqrtTestCase(_UnaryMathBase):
+    op_name = "sqrt"
+
+    def _ref(self, a):
+        return torch.sqrt(a)
+
+    def get_program(self) -> Any:
+        m, n, om, on, off = self._m, self._n, self._out_m, self._out_n, list(self._off)
+        vshape = list(self._valid) if self._valid else [m, n]
+        dt = _PL_DT[self._dtype]
+
+        @pl.program
+        class SqrtProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, a: pl.Tensor[[m, n], dt], out: pl.Out[pl.Tensor[[om, on], dt]]
+            ) -> pl.Tensor[[om, on], dt]:
+                a_tile = pl.load(a, [0, 0], [m, n], valid_shapes=vshape)
+                out = pl.store(pl.tile.sqrt(a_tile), off, out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self, a: pl.Tensor[[m, n], dt], out: pl.Out[pl.Tensor[[om, on], dt]]
+            ) -> pl.Tensor[[om, on], dt]:
+                out = self.kernel(a, out)
+                return out
+
+        return SqrtProgram
 
 
 class TestUnaryMath:
-    """Tile-level sin/cos/sqrt on a2a3."""
+    """Tile-level sin/cos/sqrt on a2a3 across shapes, valid_shapes, dtypes, offset, input ranges."""
 
     @pytest.mark.platforms("a2a3")
-    def test_tile_unary_math(self, test_runner):
-        """Aligned: valid_shape == static [M, N]."""
-        result = test_runner.run(TileUnaryMathTestCase())
+    @pytest.mark.parametrize("label,m,n,valid", _SHAPE_CFGS, ids=[c[0] for c in _SHAPE_CFGS])
+    def test_tile_sin(self, test_runner, label, m, n, valid):
+        result = test_runner.run(TileSinTestCase(m=m, n=n, valid_shapes=valid))
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.platforms("a2a3")
-    def test_tile_unary_math_narrow(self, test_runner):
-        """Narrow valid_shape [VALID_M, VALID_N]; invalid region stays zero."""
-        result = test_runner.run(TileUnaryMathTestCase(valid_shapes=(VALID_M, VALID_N)))
+    @pytest.mark.parametrize("label,m,n,valid", _SHAPE_CFGS, ids=[c[0] for c in _SHAPE_CFGS])
+    def test_tile_cos(self, test_runner, label, m, n, valid):
+        result = test_runner.run(TileCosTestCase(m=m, n=n, valid_shapes=valid))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.platforms("a2a3")
+    @pytest.mark.parametrize("label,m,n,valid", _SHAPE_CFGS, ids=[c[0] for c in _SHAPE_CFGS])
+    def test_tile_sqrt(self, test_runner, label, m, n, valid):
+        result = test_runner.run(TileSqrtTestCase(m=m, n=n, valid_shapes=valid))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.platforms("a2a3")
+    def test_tile_sin_signed(self, test_runner):
+        result = test_runner.run(TileSinTestCase(input_fn=_signed_periods))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.platforms("a2a3")
+    def test_tile_cos_signed(self, test_runner):
+        result = test_runner.run(TileCosTestCase(input_fn=_signed_periods))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.platforms("a2a3")
+    def test_tile_sqrt_zero_boundary(self, test_runner):
+        result = test_runner.run(TileSqrtTestCase(input_fn=_sqrt_domain))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.platforms("a2a3")
+    def test_tile_sqrt_fp16(self, test_runner):
+        result = test_runner.run(TileSqrtTestCase(m=32, n=64, dtype=DataType.FP16))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.platforms("a2a3")
+    def test_tile_sqrt_offset(self, test_runner):
+        result = test_runner.run(TileSqrtTestCase(out_m=32, out_n=32, off=(16, 16)))
         assert result.passed, f"Test failed: {result.error}"
 
 
