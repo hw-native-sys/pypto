@@ -7,19 +7,19 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Runtime tests for tile-level Cube ops: matmul_bias (active) + gemv family (skipped).
+"""Runtime tests for the tile-level Cube op matmul_bias.
 
 matmul_bias: C[M,N] = A[M,K] @ B[K,N] + bias[1,N]. Operands load to Mat (L1);
 the layout passes (AutoTileMatmulL0 / CanonicalizeTileSlice) insert the L0
 Left/Right extracts. Coverage: several M/K/N shapes (incl. non-square and a
 K=128 case that forces AutoTileMatmulL0 to K-split), BF16 inputs with an FP32
-accumulator, narrowed valid_shape on the output rows (M), output cols (N) and
-the contraction (K), and a non-zero output row offset. Cube accumulation
-reorders the K reduction vs torch, so a relaxed FP32 tolerance is used.
+accumulator, narrowed valid_shape on the output rows (M) and the contraction
+(K), and a non-zero output row offset. Cube accumulation reorders the K
+reduction vs torch, so a relaxed FP32 tolerance is used.
 
-gemv / gemv_acc / gemv_bias are @pytest.mark.skip: gemv/gemv_bias hit pto-isa
-TExtract static_assert(dstRow % 16 == 0) (1-row vector); gemv_acc hits the
-acc->acc pto.tmov gap. Tracked in KNOWN_ISSUES.
+gemv / gemv_acc / gemv_bias are not covered yet: they need pto-isa support
+(gemv/gemv_bias hit the TExtract dstRow % 16 == 0 1-row constraint; gemv_acc
+needs acc->acc pto.tmov). Will be added once the ISA path is available.
 
 Scope is a2a3 only (``@pytest.mark.platforms("a2a3")``); a5 coverage is a
 separate PR.
@@ -185,225 +185,6 @@ class TestMatmulBias:
     @pytest.mark.platforms("a2a3")
     def test_tile_matmul_bias_offset(self, test_runner):
         result = test_runner.run(MatmulBiasTestCase(out_m=2 * M, off_row=M, config=_cfg()))
-        assert result.passed, f"Test failed: {result.error}"
-
-
-# ===========================================================================
-# gemv / gemv_acc / gemv_bias (SKIPPED — a2a3 cube/PTOAS gaps, see KNOWN_ISSUES)
-# ===========================================================================
-
-_GEMV_SKIP = pytest.mark.skip(
-    reason="a2a3 cube codegen gap (gemv 1-row dstRow%16 / acc-tmov); see KNOWN_ISSUES"
-)
-
-
-class GemvTestCase(PTOTestCase):
-    __test__ = False
-
-    def __init__(self, *, narrow: bool = False, config=None):
-        super().__init__(config)
-        self._narrow = narrow
-
-    def get_name(self) -> str:
-        return "tile_gemv_narrow" if self._narrow else "tile_gemv"
-
-    def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec("a", [1, K], DataType.FP32, init_value=torch.randn),
-            TensorSpec("b", [K, N], DataType.FP32, init_value=torch.randn),
-            TensorSpec("out", [1, N], DataType.FP32, is_output=True),
-        ]
-
-    def get_program(self) -> Any:
-        b_vshape = [K, VALID_N] if self._narrow else [K, N]
-
-        @pl.program
-        class GemvProgram:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                a: pl.Tensor[[1, K], pl.FP32],
-                b: pl.Tensor[[K, N], pl.FP32],
-                out: pl.Out[pl.Tensor[[1, N], pl.FP32]],
-            ) -> pl.Tensor[[1, N], pl.FP32]:
-                tile_a = pl.load(a, [0, 0], [1, K], target_memory=pl.MemorySpace.Mat)
-                tile_b = pl.load(b, [0, 0], [K, N], valid_shapes=b_vshape, target_memory=pl.MemorySpace.Mat)
-                out = pl.store(pl.tile.gemv(tile_a, tile_b), [0, 0], out)
-                return out
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def orchestrator(
-                self,
-                a: pl.Tensor[[1, K], pl.FP32],
-                b: pl.Tensor[[K, N], pl.FP32],
-                out: pl.Out[pl.Tensor[[1, N], pl.FP32]],
-            ) -> pl.Tensor[[1, N], pl.FP32]:
-                out = self.kernel(a, b, out)
-                return out
-
-        return GemvProgram
-
-    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
-        full = torch.matmul(tensors["a"], tensors["b"])
-        if self._narrow:
-            out = torch.zeros_like(tensors["out"])
-            out[:, :VALID_N] = full[:, :VALID_N]
-            tensors["out"][:] = out
-        else:
-            tensors["out"][:] = full
-
-
-class GemvAccTestCase(PTOTestCase):
-    __test__ = False
-
-    def __init__(self, *, narrow: bool = False, config=None):
-        super().__init__(config)
-        self._narrow = narrow
-
-    def get_name(self) -> str:
-        return "tile_gemv_acc_narrow" if self._narrow else "tile_gemv_acc"
-
-    def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec("acc", [1, N], DataType.FP32, init_value=torch.randn),
-            TensorSpec("a", [1, K], DataType.FP32, init_value=torch.randn),
-            TensorSpec("b", [K, N], DataType.FP32, init_value=torch.randn),
-            TensorSpec("out", [1, N], DataType.FP32, is_output=True),
-        ]
-
-    def get_program(self) -> Any:
-        acc_vshape = [1, VALID_N] if self._narrow else [1, N]
-        b_vshape = [K, VALID_N] if self._narrow else [K, N]
-
-        @pl.program
-        class GemvAccProgram:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                acc: pl.Tensor[[1, N], pl.FP32],
-                a: pl.Tensor[[1, K], pl.FP32],
-                b: pl.Tensor[[K, N], pl.FP32],
-                out: pl.Out[pl.Tensor[[1, N], pl.FP32]],
-            ) -> pl.Tensor[[1, N], pl.FP32]:
-                tile_acc = pl.load(
-                    acc, [0, 0], [1, N], valid_shapes=acc_vshape, target_memory=pl.MemorySpace.Mat
-                )
-                tile_a = pl.load(a, [0, 0], [1, K], target_memory=pl.MemorySpace.Mat)
-                tile_b = pl.load(b, [0, 0], [K, N], valid_shapes=b_vshape, target_memory=pl.MemorySpace.Mat)
-                out = pl.store(pl.tile.gemv_acc(tile_acc, tile_a, tile_b), [0, 0], out)
-                return out
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def orchestrator(
-                self,
-                acc: pl.Tensor[[1, N], pl.FP32],
-                a: pl.Tensor[[1, K], pl.FP32],
-                b: pl.Tensor[[K, N], pl.FP32],
-                out: pl.Out[pl.Tensor[[1, N], pl.FP32]],
-            ) -> pl.Tensor[[1, N], pl.FP32]:
-                out = self.kernel(acc, a, b, out)
-                return out
-
-        return GemvAccProgram
-
-    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
-        full = tensors["acc"] + torch.matmul(tensors["a"], tensors["b"])
-        if self._narrow:
-            out = torch.zeros_like(tensors["out"])
-            out[:, :VALID_N] = full[:, :VALID_N]
-            tensors["out"][:] = out
-        else:
-            tensors["out"][:] = full
-
-
-class GemvBiasTestCase(PTOTestCase):
-    __test__ = False
-
-    def __init__(self, *, narrow: bool = False, config=None):
-        super().__init__(config)
-        self._narrow = narrow
-
-    def get_name(self) -> str:
-        return "tile_gemv_bias_narrow" if self._narrow else "tile_gemv_bias"
-
-    def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec("a", [1, K], DataType.FP32, init_value=torch.randn),
-            TensorSpec("b", [K, N], DataType.FP32, init_value=torch.randn),
-            TensorSpec("bias", [1, N], DataType.FP32, init_value=torch.randn),
-            TensorSpec("out", [1, N], DataType.FP32, is_output=True),
-        ]
-
-    def get_program(self) -> Any:
-        b_vshape = [K, VALID_N] if self._narrow else [K, N]
-        bias_vshape = [1, VALID_N] if self._narrow else [1, N]
-
-        @pl.program
-        class GemvBiasProgram:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                a: pl.Tensor[[1, K], pl.FP32],
-                b: pl.Tensor[[K, N], pl.FP32],
-                bias: pl.Tensor[[1, N], pl.FP32],
-                out: pl.Out[pl.Tensor[[1, N], pl.FP32]],
-            ) -> pl.Tensor[[1, N], pl.FP32]:
-                tile_a = pl.load(a, [0, 0], [1, K], target_memory=pl.MemorySpace.Mat)
-                tile_b = pl.load(b, [0, 0], [K, N], valid_shapes=b_vshape, target_memory=pl.MemorySpace.Mat)
-                tile_bias = pl.load(
-                    bias, [0, 0], [1, N], valid_shapes=bias_vshape, target_memory=pl.MemorySpace.Mat
-                )
-                out = pl.store(pl.tile.gemv_bias(tile_a, tile_b, tile_bias), [0, 0], out)
-                return out
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def orchestrator(
-                self,
-                a: pl.Tensor[[1, K], pl.FP32],
-                b: pl.Tensor[[K, N], pl.FP32],
-                bias: pl.Tensor[[1, N], pl.FP32],
-                out: pl.Out[pl.Tensor[[1, N], pl.FP32]],
-            ) -> pl.Tensor[[1, N], pl.FP32]:
-                out = self.kernel(a, b, bias, out)
-                return out
-
-        return GemvBiasProgram
-
-    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
-        full = torch.matmul(tensors["a"], tensors["b"]) + tensors["bias"]
-        if self._narrow:
-            out = torch.zeros_like(tensors["out"])
-            out[:, :VALID_N] = full[:, :VALID_N]
-            tensors["out"][:] = out
-        else:
-            tensors["out"][:] = full
-
-
-class TestGemvSkipped:
-    """gemv / gemv_acc / gemv_bias — skipped pending a2a3 cube 1-row / acc-tmov fixes."""
-
-    @_GEMV_SKIP
-    @pytest.mark.platforms("a2a3")
-    def test_tile_gemv(self, test_runner):
-        result = test_runner.run(GemvTestCase(config=_cfg()))
-        assert result.passed, f"Test failed: {result.error}"
-
-    @_GEMV_SKIP
-    @pytest.mark.platforms("a2a3")
-    def test_tile_gemv_narrow(self, test_runner):
-        result = test_runner.run(GemvTestCase(narrow=True, config=_cfg()))
-        assert result.passed, f"Test failed: {result.error}"
-
-    @_GEMV_SKIP
-    @pytest.mark.platforms("a2a3")
-    def test_tile_gemv_acc(self, test_runner):
-        result = test_runner.run(GemvAccTestCase(config=_cfg()))
-        assert result.passed, f"Test failed: {result.error}"
-
-    @_GEMV_SKIP
-    @pytest.mark.platforms("a2a3")
-    def test_tile_gemv_bias(self, test_runner):
-        result = test_runner.run(GemvBiasTestCase(config=_cfg()))
         assert result.passed, f"Test failed: {result.error}"
 
 
