@@ -13,6 +13,7 @@ Each test uses explicit Before (post-ConvertTensorToTileOps tile-level IR)
 and Expected (optimized) programs in @pl.program style.
 """
 
+import re
 from typing import Any, Literal, cast
 
 import pypto.language as pl
@@ -5190,6 +5191,67 @@ class TestOutWindowSubmitCall:
         assert "__carrier_scan_" in printed_main
         assert "pl.Scalar[pl.TASK_ID]" in printed_main
 
+    def test_submit_aggregate_current_join_preserves_submit_kind(self):
+        """Aggregate-current marker/barrier lowering also applies to Submit callsites."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def write_stripes(
+                self,
+                src: pl.Tensor[[64, 256], pl.FP32],
+                col: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+            ) -> pl.Tensor[[64, 256], pl.FP32]:
+                tile: pl.Tile[[64, 128], pl.FP32] = pl.tile.load(src, [0, col], [64, 128], [64, 128])
+                return pl.tile.store(tile, [0, col], out)
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def read_stripes(
+                self,
+                src: pl.Tensor[[64, 256], pl.FP32],
+                col: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+            ) -> tuple[pl.Tensor[[64, 256], pl.FP32], pl.Tensor[[64, 256], pl.FP32]]:
+                tile: pl.Tile[[64, 128], pl.FP32] = pl.tile.load(src, [0, col], [64, 128], [64, 128])
+                out_next: pl.Tensor[[64, 256], pl.FP32] = pl.tile.store(tile, [0, col], out)
+                return out_next, src
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                src: pl.Tensor[[64, 256], pl.FP32],
+                mid: pl.Tensor[[64, 256], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+            ) -> pl.Tensor[[64, 256], pl.FP32]:
+                with pl.manual_scope():
+                    for i, (mid_iter,) in pl.range(0, 2, init_values=(mid,)):
+                        col: pl.Scalar[pl.INDEX] = i * 128
+                        mid_next, _writer_tid = pl.submit(self.write_stripes, src, col, mid_iter)
+                        mid_rv = pl.yield_(mid_next)
+
+                    for j, (out_iter,) in pl.range(0, 2, init_values=(out,)):
+                        col: pl.Scalar[pl.INDEX] = j * 128
+                        (out_next, _src_passthrough), reader_tid = pl.submit(
+                            self.read_stripes, mid_rv, col, out_iter
+                        )
+                        out_rv = pl.yield_(out_next)
+                return out_rv
+
+        After = _run_to_optimize_orch_tensors(
+            Before,
+            window_policy="boundingBox",
+            window_flow="linked",
+        )
+
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert "__pypto_runtime_current_barrier" in printed_main, printed_main
+        assert "mid_rv__runtime_current" in printed_main, printed_main
+        assert re.search(r"pl.submit\(read_stripes__windowed,\s*mid_rv__runtime_current", printed_main), (
+            printed_main
+        )
+        assert "pl.Scalar[pl.TASK_ID]" in printed_main, printed_main
+
     def test_linear_region_overflow_falls_back_to_baseline(self):
         @pl.program
         class Before:
@@ -5747,8 +5809,8 @@ class TestPerKernelAttrs:
         assert "cache__ssa_v0__window_3" in printed_main
         assert "cache__ssa_v0__window_base_arg" not in printed_main
 
-    def test_bounding_box_linked_selects_bounding_box_per_callsite_flow(self):
-        """One callee can stay exact at one callsite and use boundingBox for a reader flow."""
+    def test_bounding_box_linked_uses_selected_bounding_box_coverage_for_flow(self):
+        """Linked flow consumes selected boundingBox coverage without a second linked clone."""
 
         @pl.program
         class Before:
@@ -5809,11 +5871,8 @@ class TestPerKernelAttrs:
         printed_program = ir.python_print(After)
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "cache_write__windowed" in printed_program
-        assert "cache_write__windowed__linked" in printed_program
-        assert "cache_write__windowed__linked" in printed_main
-        assert "cache_a__ssa_v0__window_1" in printed_main
-        assert "cache_a__ssa_v0__window_base_arg" not in printed_main
-        assert "cache_b__ssa_v0__window_1" not in printed_main
+        assert "cache_write__windowed__linked" not in printed_program
+        assert "cache_write__windowed__linked" not in printed_main
         assert "cache_read__windowed" in printed_main
         assert "__carrier_base" in printed_main
 
@@ -5851,6 +5910,65 @@ class TestPerKernelAttrs:
         After = _run_to_optimize_orch_tensors(Before, window_policy="exact")
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "cache_read__windowed" not in printed_main
+
+    def test_exact_linked_separated_writer_does_not_synthesize_bounding_box_carrier(self):
+        """exact + linked does not use a boundingBox carrier for separated writer pieces."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def cache_write(
+                self,
+                cache: pl.Out[pl.Tensor[[1024, 64], pl.FP32]],
+                data: pl.Tensor[[2, 64], pl.FP32],
+                slot: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[1024, 64], pl.FP32]:
+                for ki, (cache_iter,) in pl.range(0, 2, init_values=(cache,)):
+                    src: pl.Tile[[1, 64], pl.FP32] = pl.tile.load(data, [ki, 0], [1, 64], [1, 64])
+                    row: pl.Scalar[pl.INDEX] = slot + ki * 128
+                    cache_next: pl.Tensor[[1024, 64], pl.FP32] = pl.tile.store(src, [row, 0], cache_iter)
+                    cache_rv = pl.yield_(cache_next)
+                return cache_rv
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def cache_read(
+                self,
+                out: pl.Out[pl.Tensor[[4, 64], pl.FP32]],
+                cache: pl.Tensor[[1024, 64], pl.FP32],
+                block_table: pl.Tensor[[4], pl.INT32],
+            ) -> pl.Tensor[[4, 64], pl.FP32]:
+                for sb, (out_iter,) in pl.range(0, 4, init_values=(out,)):
+                    pbid_i32: pl.Scalar[pl.INT32] = pl.tensor.read(block_table, [sb])
+                    pbid: pl.Scalar[pl.INDEX] = pl.cast(pbid_i32, target_type=pl.INDEX)
+                    row: pl.Scalar[pl.INDEX] = pbid * 128
+                    cache_tile: pl.Tile[[1, 64], pl.FP32] = pl.tile.load(cache, [row, 0], [1, 64], [1, 64])
+                    out_next: pl.Tensor[[4, 64], pl.FP32] = pl.tile.store(cache_tile, [sb, 0], out_iter)
+                    out_rv = pl.yield_(out_next)
+                return out_rv
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                cache: pl.Out[pl.Tensor[[1024, 64], pl.FP32]],
+                data: pl.Tensor[[2, 64], pl.FP32],
+                block_table: pl.Tensor[[4], pl.INT32],
+                out: pl.Out[pl.Tensor[[4, 64], pl.FP32]],
+            ) -> tuple[pl.Tensor[[1024, 64], pl.FP32], pl.Tensor[[4, 64], pl.FP32]]:
+                cache_next: pl.Tensor[[1024, 64], pl.FP32] = self.cache_write(cache, data, 7)
+                result: pl.Tensor[[4, 64], pl.FP32] = self.cache_read(out, cache_next, block_table)
+                return cache_next, result
+
+        After = _run_to_optimize_orch_tensors(
+            Before,
+            window_policy="exact",
+            window_flow="linked",
+        )
+
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert "cache_write__windowed" in printed_main
+        assert "cache_read__windowed" not in printed_main
+        assert "__carrier_base" not in printed_main
+        assert "__carrier_extent" not in printed_main
 
     def test_carrier_fallback_no_private(self):
         """When linked carrier conditions fail, the reader stays full parent."""
@@ -6130,6 +6248,318 @@ class TestPerKernelAttrs:
         assert "__runtime_current" not in printed_main
         assert "produce_segments__windowed" in printed_main
         assert "combine_segments" in printed_main
+
+    def test_linked_flow_inserts_runtime_current_for_generic_aggregate_join(self):
+        """Linked flow inserts aggregate-current join barriers from typed access graph proof."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def write_stripes(
+                self,
+                src: pl.Tensor[[64, 256], pl.FP32],
+                col: pl.Scalar[pl.INDEX],
+                scratch_buffer: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+            ) -> pl.Tensor[[64, 256], pl.FP32]:
+                tile: pl.Tile[[64, 128], pl.FP32] = pl.tile.load(src, [0, col], [64, 128], [64, 128])
+                return pl.tile.store(tile, [0, col], scratch_buffer)
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def read_stripes(
+                self,
+                scratch_buffer: pl.Tensor[[64, 256], pl.FP32],
+                col: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+            ) -> tuple[pl.Tensor[[64, 256], pl.FP32], pl.Tensor[[64, 256], pl.FP32]]:
+                tile: pl.Tile[[64, 128], pl.FP32] = pl.tile.load(
+                    scratch_buffer, [0, col], [64, 128], [64, 128]
+                )
+                out_next: pl.Tensor[[64, 256], pl.FP32] = pl.tile.store(tile, [0, col], out)
+                return out_next, scratch_buffer
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                src: pl.Tensor[[64, 256], pl.FP32],
+                scratch_buffer: pl.Tensor[[64, 256], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+            ) -> pl.Tensor[[64, 256], pl.FP32]:
+                for i, (scratch_iter,) in pl.range(0, 2, init_values=(scratch_buffer,)):
+                    col: pl.Scalar[pl.INDEX] = i * 128
+                    scratch_next = self.write_stripes(src, col, scratch_iter)
+                    scratch_rv = pl.yield_(scratch_next)
+
+                for j, (out_iter,) in pl.range(0, 2, init_values=(out,)):
+                    col: pl.Scalar[pl.INDEX] = j * 128
+                    result = self.read_stripes(scratch_rv, col, out_iter)
+                    out_next: pl.Tensor[[64, 256], pl.FP32] = result[0]
+                    out_rv = pl.yield_(out_next)
+                return out_rv
+
+        After = _run_to_optimize_orch_tensors(
+            Before,
+            window_policy="boundingBox",
+            window_flow="linked",
+        )
+
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert After.get_function("__pypto_runtime_current_barrier") is not None, printed_main
+        assert "__runtime_current" in printed_main
+        assert "write_stripes__windowed" in printed_main
+        assert "read_stripes__windowed" in printed_main
+
+    def test_aggregate_current_marker_is_return_index_specific(self):
+        """A marked multi-output producer must not taint unrelated tuple returns."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def write_first(
+                self,
+                src: pl.Tensor[[64, 256], pl.FP32],
+                col: pl.Scalar[pl.INDEX],
+                first: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+                second: pl.Tensor[[64, 256], pl.FP32],
+            ) -> tuple[pl.Tensor[[64, 256], pl.FP32], pl.Tensor[[64, 256], pl.FP32]]:
+                tile: pl.Tile[[64, 128], pl.FP32] = pl.tile.load(src, [0, col], [64, 128], [64, 128])
+                first_next: pl.Tensor[[64, 256], pl.FP32] = pl.tile.store(tile, [0, col], first)
+                return first_next, second
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def read_stripes(
+                self,
+                data: pl.Tensor[[64, 256], pl.FP32],
+                col: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+            ) -> tuple[pl.Tensor[[64, 256], pl.FP32], pl.Tensor[[64, 256], pl.FP32]]:
+                tile: pl.Tile[[64, 128], pl.FP32] = pl.tile.load(data, [0, col], [64, 128], [64, 128])
+                out_next: pl.Tensor[[64, 256], pl.FP32] = pl.tile.store(tile, [0, col], out)
+                return out_next, data
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                src: pl.Tensor[[64, 256], pl.FP32],
+                first: pl.Tensor[[64, 256], pl.FP32],
+                second: pl.Tensor[[64, 256], pl.FP32],
+                out_a: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+                out_b: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+            ) -> tuple[pl.Tensor[[64, 256], pl.FP32], pl.Tensor[[64, 256], pl.FP32]]:
+                for i, (first_iter, second_iter) in pl.range(0, 2, init_values=(first, second)):
+                    col: pl.Scalar[pl.INDEX] = i * 128
+                    pair = self.write_first(src, col, first_iter, second_iter)
+                    first_next: pl.Tensor[[64, 256], pl.FP32] = pair[0]
+                    second_next: pl.Tensor[[64, 256], pl.FP32] = pair[1]
+                    first_rv, second_rv = pl.yield_(first_next, second_next)
+
+                for j, (out_iter,) in pl.range(0, 2, init_values=(out_a,)):
+                    col: pl.Scalar[pl.INDEX] = j * 128
+                    result = self.read_stripes(first_rv, col, out_iter)
+                    out_next: pl.Tensor[[64, 256], pl.FP32] = result[0]
+                    out_a_rv = pl.yield_(out_next)
+
+                for k, (out_iter,) in pl.range(0, 2, init_values=(out_b,)):
+                    col: pl.Scalar[pl.INDEX] = k * 128
+                    result = self.read_stripes(second_rv, col, out_iter)
+                    out_next: pl.Tensor[[64, 256], pl.FP32] = result[0]
+                    out_b_rv = pl.yield_(out_next)
+                return out_a_rv, out_b_rv
+
+        After = _run_to_optimize_orch_tensors(
+            Before,
+            window_policy="boundingBox",
+            window_flow="linked",
+        )
+
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert "first_rv__runtime_current" in printed_main, printed_main
+        assert "second_rv__runtime_current" not in printed_main, printed_main
+
+    def test_chained_aggregate_current_substitutes_before_next_barrier(self):
+        """A loop that both consumes and produces current must consume the prior current."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def write_stripes(
+                self,
+                src: pl.Tensor[[64, 256], pl.FP32],
+                col: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+            ) -> pl.Tensor[[64, 256], pl.FP32]:
+                tile: pl.Tile[[64, 128], pl.FP32] = pl.tile.load(src, [0, col], [64, 128], [64, 128])
+                return pl.tile.store(tile, [0, col], out)
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def transform_stripes(
+                self,
+                src: pl.Tensor[[64, 256], pl.FP32],
+                col: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+            ) -> tuple[pl.Tensor[[64, 256], pl.FP32], pl.Tensor[[64, 256], pl.FP32]]:
+                tile: pl.Tile[[64, 128], pl.FP32] = pl.tile.load(src, [0, col], [64, 128], [64, 128])
+                out_next: pl.Tensor[[64, 256], pl.FP32] = pl.tile.store(tile, [0, col], out)
+                return out_next, src
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                src: pl.Tensor[[64, 256], pl.FP32],
+                mid: pl.Tensor[[64, 256], pl.FP32],
+                out: pl.Tensor[[64, 256], pl.FP32],
+                final: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+            ) -> pl.Tensor[[64, 256], pl.FP32]:
+                for i, (mid_iter,) in pl.range(0, 2, init_values=(mid,)):
+                    col: pl.Scalar[pl.INDEX] = i * 128
+                    mid_next = self.write_stripes(src, col, mid_iter)
+                    mid_rv = pl.yield_(mid_next)
+
+                for j, (out_iter,) in pl.range(0, 2, init_values=(out,)):
+                    col: pl.Scalar[pl.INDEX] = j * 128
+                    result = self.transform_stripes(mid_rv, col, out_iter)
+                    out_next: pl.Tensor[[64, 256], pl.FP32] = result[0]
+                    out_rv = pl.yield_(out_next)
+
+                for k, (final_iter,) in pl.range(0, 2, init_values=(final,)):
+                    col: pl.Scalar[pl.INDEX] = k * 128
+                    result = self.transform_stripes(out_rv, col, final_iter)
+                    final_next: pl.Tensor[[64, 256], pl.FP32] = result[0]
+                    final_rv = pl.yield_(final_next)
+                return final_rv
+
+        After = _run_to_optimize_orch_tensors(
+            Before,
+            window_policy="boundingBox",
+            window_flow="linked",
+        )
+
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert "mid_rv__runtime_current" in printed_main, printed_main
+        assert "out_rv__runtime_current" in printed_main, printed_main
+        assert re.search(r"transform_stripes__windowed\(\s*mid_rv__runtime_current", printed_main), printed_main
+        assert re.search(r"transform_stripes__windowed\(\s*out_rv__runtime_current", printed_main), printed_main
+
+    def test_aggregate_current_inout_reader_participates_in_linked_flow(self):
+        """An InOut param is a reader for dependency coverage and may consume current."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def write_stripes(
+                self,
+                src: pl.Tensor[[64, 256], pl.FP32],
+                col: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+            ) -> pl.Tensor[[64, 256], pl.FP32]:
+                tile: pl.Tile[[64, 128], pl.FP32] = pl.tile.load(src, [0, col], [64, 128], [64, 128])
+                return pl.tile.store(tile, [0, col], out)
+
+            @pl.function(type=pl.FunctionType.InCore, attrs={"window_outputs": "off"})
+            def read_write_inout(
+                self,
+                data: pl.Tensor[[64, 256], pl.FP32],
+                col: pl.Scalar[pl.INDEX],
+            ) -> tuple[pl.Tensor[[64, 256], pl.FP32], pl.Tensor[[64, 256], pl.FP32]]:
+                tile: pl.Tile[[64, 128], pl.FP32] = pl.tile.load(data, [0, col], [64, 128], [64, 128])
+                data_next: pl.Tensor[[64, 256], pl.FP32] = pl.tile.store(tile, [0, col], data)
+                return data_next, data
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                src: pl.Tensor[[64, 256], pl.FP32],
+                mid: pl.Tensor[[64, 256], pl.FP32],
+            ) -> pl.Tensor[[64, 256], pl.FP32]:
+                for i, (mid_iter,) in pl.range(0, 2, init_values=(mid,)):
+                    col: pl.Scalar[pl.INDEX] = i * 128
+                    mid_next = self.write_stripes(src, col, mid_iter)
+                    mid_rv = pl.yield_(mid_next)
+
+                result = self.read_write_inout(mid_rv, 0)
+                return result[0]
+
+        After = _run_to_optimize_orch_tensors(
+            Before,
+            window_policy="boundingBox",
+            window_flow="linked",
+        )
+
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert "mid_rv__runtime_current" in printed_main, printed_main
+        assert re.search(r"read_write_inout\(\s*mid_rv__runtime_current,\s*0\s*\)", printed_main), printed_main
+
+    def test_local_full_consumer_blocks_aggregate_current_join(self):
+        """An intervening local full-parent consumer blocks linked aggregate-current lowering."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def write_stripes(
+                self,
+                src: pl.Tensor[[64, 256], pl.FP32],
+                col: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+            ) -> pl.Tensor[[64, 256], pl.FP32]:
+                tile: pl.Tile[[64, 128], pl.FP32] = pl.tile.load(src, [0, col], [64, 128], [64, 128])
+                return pl.tile.store(tile, [0, col], out)
+
+            @pl.function(
+                type=pl.FunctionType.InCore,
+                attrs={"window_inputs": "off", "window_flow": "local"},
+            )
+            def local_read(
+                self,
+                data: pl.Tensor[[64, 256], pl.FP32],
+                col: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+            ) -> pl.Tensor[[64, 256], pl.FP32]:
+                tile: pl.Tile[[64, 128], pl.FP32] = pl.tile.load(data, [0, col], [64, 128], [64, 128])
+                return pl.tile.store(tile, [0, col], out)
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def linked_read(
+                self,
+                data: pl.Tensor[[64, 256], pl.FP32],
+                col: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+            ) -> pl.Tensor[[64, 256], pl.FP32]:
+                tile: pl.Tile[[64, 128], pl.FP32] = pl.tile.load(data, [0, col], [64, 128], [64, 128])
+                return pl.tile.store(tile, [0, col], out)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                src: pl.Tensor[[64, 256], pl.FP32],
+                mid: pl.Tensor[[64, 256], pl.FP32],
+                local_out: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+                linked_out: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+            ) -> tuple[pl.Tensor[[64, 256], pl.FP32], pl.Tensor[[64, 256], pl.FP32]]:
+                for i, (mid_iter,) in pl.range(0, 2, init_values=(mid,)):
+                    col: pl.Scalar[pl.INDEX] = i * 128
+                    mid_next = self.write_stripes(src, col, mid_iter)
+                    mid_rv = pl.yield_(mid_next)
+
+                for j, (local_iter,) in pl.range(0, 2, init_values=(local_out,)):
+                    col: pl.Scalar[pl.INDEX] = j * 128
+                    local_next = self.local_read(mid_rv, col, local_iter)
+                    local_rv = pl.yield_(local_next)
+
+                for k, (linked_iter,) in pl.range(0, 2, init_values=(linked_out,)):
+                    col: pl.Scalar[pl.INDEX] = k * 128
+                    linked_next = self.linked_read(mid_rv, col, linked_iter)
+                    linked_rv = pl.yield_(linked_next)
+                return local_rv, linked_rv
+
+        After = _run_to_optimize_orch_tensors(
+            Before,
+            window_policy="boundingBox",
+            window_flow="linked",
+        )
+
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert "__runtime_current" not in printed_main, printed_main
+        assert "local_read__windowed" in printed_main, printed_main
+        assert "linked_read__windowed" in printed_main, printed_main
 
     def test_bounding_box_current_barrier_not_inserted_without_linked_flow(self):
         """Plain boundingBox coverage should not trigger runtime-current barrier insertion."""
