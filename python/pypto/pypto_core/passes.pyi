@@ -429,8 +429,26 @@ def outline_hierarchy_scopes() -> Pass:
 def convert_tensor_to_tile_ops() -> Pass:
     """Create a pass that converts tensor ops to tile ops in InCore functions."""
 
+@overload
 def optimize_orch_tensors(
-    window_policy: Literal["auto", "all", "none"] = "auto",
+    window_option: Literal["none", "stable", "exact"] | None = None,
+) -> Pass:
+    """Create a pass using the recommended window option preset."""
+
+@overload
+def optimize_orch_tensors(
+    window_option: None = None,
+    *,
+    window_policy: Literal["none", "stable", "exact", "boundingBox"] | None = None,
+    window_flow: Literal["local", "linked"] | None = None,
+) -> Pass:
+    """Create a pass using explicit window policy and flow settings."""
+
+def optimize_orch_tensors(
+    window_option: Literal["none", "stable", "exact"] | None = None,
+    *,
+    window_policy: Literal["none", "stable", "exact", "boundingBox"] | None = None,
+    window_flow: Literal["local", "linked"] | None = None,
 ) -> Pass:
     """Create a pass that optimizes tensor buffer usage in orchestration and InCore functions."""
 

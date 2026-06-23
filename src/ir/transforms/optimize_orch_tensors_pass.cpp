@@ -1903,123 +1903,85 @@ class SliceInputStridesOptimizer {
 
 class OutWindowExternalizer {
  public:
-  enum class OutputWindowPolicy {
-    ExactPieces,
-    CoalescePieces,
+  enum class WindowCoveragePolicy {
+    Off,
+    Stable,
+    Exact,
+    BoundingBox,
   };
 
-  enum class WindowRewritePolicy {
-    Auto,
-    All,
-    None,
+  enum class WindowFlowPolicy {
+    Local,
+    Linked,
   };
 
-  // v5 per-function effective policies resolved from global policy + kernel attrs.
-  struct EffectivePolicies {
-    enum class Strength { Off, Auto, All };
-    enum class OutputShape { Auto, Exact, Coalesce };
-    Strength outputs;
-    Strength inputs;
-    OutputShape output_shape = OutputShape::Auto;
-    bool output_shape_explicit = false;
+  struct EffectiveWindowPolicy {
+    WindowCoveragePolicy outputs = WindowCoveragePolicy::Stable;
+    WindowCoveragePolicy inputs = WindowCoveragePolicy::Stable;
+    WindowFlowPolicy flow = WindowFlowPolicy::Local;
   };
 
-  static EffectivePolicies::Strength ParseWindowPolicyStrength(const std::string& val,
-                                                               const std::string& attr_name) {
-    if (val == "none") return EffectivePolicies::Strength::Off;
-    if (val == "auto") return EffectivePolicies::Strength::Auto;
-    if (val == "all") return EffectivePolicies::Strength::All;
-    CHECK(false) << "Invalid " << attr_name << " attr '" << val << "': expected 'none', 'auto', or 'all'";
-    return EffectivePolicies::Strength::Off;
+  static WindowCoveragePolicy ParseGlobalCoveragePolicy(const std::string& val) {
+    if (val == "none") return WindowCoveragePolicy::Off;
+    if (val == "stable" || val == "auto") return WindowCoveragePolicy::Stable;
+    if (val == "exact") return WindowCoveragePolicy::Exact;
+    if (val == "boundingBox") return WindowCoveragePolicy::BoundingBox;
+    CHECK(false) << "Invalid window_policy '" << val
+                 << "': expected 'none', 'stable', 'exact', or 'boundingBox'"
+                 << (val == "all" ? "; 'all' was removed in v6, choose exact or boundingBox plus window_flow"
+                                  : "");
+    return WindowCoveragePolicy::Off;
   }
 
-  static EffectivePolicies::Strength ParseInputPolicy(const std::string& val, const std::string& attr_name) {
-    if (val == "off") return EffectivePolicies::Strength::Off;
-    if (val == "auto") return EffectivePolicies::Strength::Auto;
-    if (val == "all") return EffectivePolicies::Strength::All;
-    CHECK(false) << "Invalid " << attr_name << " attr '" << val << "': expected 'off', 'auto', or 'all'";
-    return EffectivePolicies::Strength::Off;
+  static WindowCoveragePolicy ParseSideCoveragePolicy(const std::string& val, const std::string& attr_name) {
+    if (val == "off") return WindowCoveragePolicy::Off;
+    if (val == "stable" || val == "auto") return WindowCoveragePolicy::Stable;
+    if (val == "exact") return WindowCoveragePolicy::Exact;
+    if (val == "boundingBox" || val == "coalesce") return WindowCoveragePolicy::BoundingBox;
+    CHECK(false) << "Invalid " << attr_name << " attr '" << val
+                 << "': expected 'off', 'stable', 'exact', or 'boundingBox'"
+                 << (val == "all" ? "; 'all' was removed in v6" : "")
+                 << (val == "carrier" || val == "coalesce_carrier"
+                         ? "; carrier is not a side coverage policy, use window_flow='linked'"
+                         : "");
+    return WindowCoveragePolicy::Off;
   }
 
-  static void ApplyOutputPolicyAttr(const std::string& val, EffectivePolicies* ep) {
-    if (!ep) return;
-    if (val == "off") {
-      ep->outputs = EffectivePolicies::Strength::Off;
-      return;
-    }
-    if (val == "auto") {
-      ep->outputs = EffectivePolicies::Strength::Auto;
-      ep->output_shape = EffectivePolicies::OutputShape::Auto;
-      ep->output_shape_explicit = false;
-      return;
-    }
-    if (val == "all") {
-      ep->outputs = EffectivePolicies::Strength::All;
-      ep->output_shape = EffectivePolicies::OutputShape::Auto;
-      ep->output_shape_explicit = false;
-      return;
-    }
-    if (val == "exact") {
-      ep->outputs = EffectivePolicies::Strength::All;
-      ep->output_shape = EffectivePolicies::OutputShape::Exact;
-      ep->output_shape_explicit = true;
-      return;
-    }
-    if (val == "coalesce") {
-      ep->outputs = EffectivePolicies::Strength::All;
-      ep->output_shape = EffectivePolicies::OutputShape::Coalesce;
-      ep->output_shape_explicit = true;
-      return;
-    }
-    CHECK(false) << "Invalid window_outputs attr '" << val
-                 << "': expected 'off', 'auto', 'all', 'exact', or 'coalesce'";
+  static WindowFlowPolicy ParseWindowFlowPolicy(const std::string& val, const std::string& attr_name) {
+    if (val == "local") return WindowFlowPolicy::Local;
+    if (val == "linked") return WindowFlowPolicy::Linked;
+    CHECK(false) << "Invalid " << attr_name << " '" << val << "': expected 'local' or 'linked'";
+    return WindowFlowPolicy::Local;
   }
 
-  static EffectivePolicies ResolveEffectivePolicies(const FunctionPtr& func,
-                                                    OutputWindowPolicy global_output_policy,
-                                                    WindowRewritePolicy global_window_rewrite_policy) {
-    // Map global v4 enums to v5 effective defaults.
-    EffectivePolicies ep;
-    if (global_window_rewrite_policy == WindowRewritePolicy::None) {
-      ep.outputs = EffectivePolicies::Strength::Off;
-      ep.inputs = EffectivePolicies::Strength::Off;
-    } else if (global_window_rewrite_policy == WindowRewritePolicy::All) {
-      ep.outputs = EffectivePolicies::Strength::All;
-      ep.inputs = EffectivePolicies::Strength::All;
-    } else if (global_output_policy == OutputWindowPolicy::CoalescePieces) {
-      ep.outputs = EffectivePolicies::Strength::All;
-      ep.inputs = EffectivePolicies::Strength::Auto;
-      ep.output_shape = EffectivePolicies::OutputShape::Coalesce;
-      ep.output_shape_explicit = true;
-    } else {
-      ep.outputs = EffectivePolicies::Strength::Auto;
-      ep.inputs = EffectivePolicies::Strength::Auto;
-    }
+  static EffectiveWindowPolicy ResolveEffectiveWindowPolicy(const FunctionPtr& func,
+                                                            WindowCoveragePolicy global_policy,
+                                                            WindowFlowPolicy global_flow) {
+    EffectiveWindowPolicy ep;
+    ep.outputs = global_policy;
+    ep.inputs = global_policy;
+    ep.flow = global_flow;
 
     if (func) {
-      if (func->HasAttr("window_policy")) {
-        auto val = func->GetAttr<std::string>("window_policy", "");
-        auto strength = ParseWindowPolicyStrength(val, "window_policy");
-        ep.outputs = strength;
-        ep.inputs = strength;
-        ep.output_shape = EffectivePolicies::OutputShape::Auto;
-        ep.output_shape_explicit = false;
-      }
+      CHECK(!func->HasAttr("window_policy"))
+          << "kernel attr window_policy was removed in v6; use window_outputs/window_inputs/window_flow";
       if (func->HasAttr("window_outputs")) {
-        auto val = func->GetAttr<std::string>("window_outputs", "");
-        ApplyOutputPolicyAttr(val, &ep);
+        ep.outputs =
+            ParseSideCoveragePolicy(func->GetAttr<std::string>("window_outputs", ""), "window_outputs");
       }
       if (func->HasAttr("window_inputs")) {
-        auto val = func->GetAttr<std::string>("window_inputs", "");
-        ep.inputs = ParseInputPolicy(val, "window_inputs");
+        ep.inputs = ParseSideCoveragePolicy(func->GetAttr<std::string>("window_inputs", ""), "window_inputs");
+      }
+      if (func->HasAttr("window_flow")) {
+        ep.flow = ParseWindowFlowPolicy(func->GetAttr<std::string>("window_flow", ""), "window_flow");
       }
     }
     return ep;
   }
 
-  explicit OutWindowExternalizer(OutputWindowPolicy output_window_policy = OutputWindowPolicy::CoalescePieces,
-                                 WindowRewritePolicy window_rewrite_policy = WindowRewritePolicy::Auto)
-      : output_window_policy_(output_window_policy), window_rewrite_policy_(window_rewrite_policy) {}
+  explicit OutWindowExternalizer(WindowCoveragePolicy global_policy = WindowCoveragePolicy::Stable,
+                                 WindowFlowPolicy global_flow = WindowFlowPolicy::Local)
+      : global_policy_(global_policy), global_flow_(global_flow) {}
 
   ProgramPtr Run(const ProgramPtr& program) {
     auto analyses = Analyze(program);
@@ -2059,7 +2021,7 @@ class OutWindowExternalizer {
       if (callee_it == function_lookup.end()) continue;
       auto base_clone_it = cloned_funcs.find(func_name);
       if (base_clone_it == cloned_funcs.end()) continue;
-      auto cloned = RewriteCallee(program, callee_it->second, analysis, "__windowed__coalesced");
+      auto cloned = RewriteCallee(program, callee_it->second, analysis, "__windowed__linked");
       if (cloned) coalesced_cloned_funcs.emplace(func_name, cloned);
     }
 
@@ -2149,8 +2111,8 @@ class OutWindowExternalizer {
     AccessRegion assemble_region;
     std::vector<size_t> piece_return_indices;
     size_t iter_arg_index = SIZE_MAX;
-    bool carrier_contract = false;
-    bool allow_flow_coalesce = false;
+    bool linked_flow_source_allowed = false;
+    bool linked_bounding_box_allowed = false;
     std::optional<OutputRewriteVariant> coalesced_variant = std::nullopt;
   };
 
@@ -2164,13 +2126,15 @@ class OutWindowExternalizer {
     std::optional<DynamicIndexedInputWindow> dynamic_indexed_window = std::nullopt;
     VarPtr dynamic_base_param;
     VarPtr dynamic_extent_param;
-    bool allow_dynamic_carrier_args = false;
+    bool linked_reader_allowed = false;
+    bool linked_dynamic_reader_allowed = false;
   };
 
   struct CalleeRewriteAnalysis {
     RewriteKind kind = RewriteKind::FinalStore;
     std::vector<OutputRewriteInfo> outputs;
     std::vector<InputRewriteInfo> inputs;
+    bool requires_stable_submit_budget = true;
   };
 
   struct WindowRewriteCost {
@@ -2414,7 +2378,7 @@ class OutWindowExternalizer {
       if (out_cost) *out_cost = std::move(cost);
       return false;
     }
-    if (output.carrier_contract || output.coalesced_variant.has_value()) {
+    if (output.linked_flow_source_allowed || output.coalesced_variant.has_value()) {
       cost.reason = "carrier_or_coalesce_contract";
       if (out_cost) *out_cost = std::move(cost);
       return false;
@@ -2554,11 +2518,20 @@ class OutWindowExternalizer {
     }
   }
 
-  static void SelectCoalescedOutputPieces(CalleeRewriteAnalysis* analysis) {
+  static bool ShouldSelectBoundingBoxOutput(const OutputRewriteInfo& output) {
+    if (!output.coalesced_variant.has_value()) return false;
+    // v6 boundingBox is exact-first. Select it only when it reduces the number of
+    // runtime tensor views/params or when exact pieces no longer fit the submit/view
+    // budget. The latter is represented here by a positive ABI delta for exact pieces.
+    auto exact_cost = EstimateOutputCost(output);
+    return exact_cost.dense_piece_count > 1 || exact_cost.abi_delta > 0;
+  }
+
+  static void SelectBoundingBoxOutputPieces(CalleeRewriteAnalysis* analysis) {
     if (!analysis) return;
     for (auto& output : analysis->outputs) {
       if (!output.coalesced_variant.has_value()) continue;
-      if (!output.coalesced_variant->dependency_safe_for_standalone) continue;
+      if (!ShouldSelectBoundingBoxOutput(output)) continue;
       auto variant = std::move(*output.coalesced_variant);
       output.assemble_region = std::move(variant.assemble_region);
       output.window_shape = std::move(variant.window_shape);
@@ -2577,7 +2550,7 @@ class OutWindowExternalizer {
       CalleeRewriteAnalysis coalesced = analysis;
       bool changed = false;
       for (auto& output : coalesced.outputs) {
-        if (!output.allow_flow_coalesce || !output.coalesced_variant.has_value()) continue;
+        if (!output.linked_bounding_box_allowed || !output.coalesced_variant.has_value()) continue;
         auto variant = std::move(*output.coalesced_variant);
         output.assemble_region = std::move(variant.assemble_region);
         output.window_shape = std::move(variant.window_shape);
@@ -2601,35 +2574,36 @@ class OutWindowExternalizer {
       auto func_it = function_lookup.find(callee_name);
       auto func = func_it == function_lookup.end() ? nullptr : func_it->second;
 
-      // v5: resolve per-function effective policies from global + kernel attrs.
-      auto ep = ResolveEffectivePolicies(func, output_window_policy_, window_rewrite_policy_);
+      auto ep = ResolveEffectiveWindowPolicy(func, global_policy_, global_flow_);
 
       // Output off → drop all outputs; Input off → drop all inputs.
-      if (ep.outputs == EffectivePolicies::Strength::Off) {
+      if (ep.outputs == WindowCoveragePolicy::Off) {
         analysis.outputs.clear();
       }
-      if (ep.inputs == EffectivePolicies::Strength::Off) {
+      if (ep.inputs == WindowCoveragePolicy::Off) {
         analysis.inputs.clear();
       }
 
       PrepareCoalescedOutputVariants(&analysis);
 
-      // Explicit coalesce selects only dependency-safe dense bounding boxes.
-      // Sparse or unproven boxes keep exact pieces for writer-only rewrites,
-      // while still leaving the coalesced variant available to proven
-      // writer-reader carrier flows below.
-      if (ep.output_shape == EffectivePolicies::OutputShape::Coalesce) {
-        SelectCoalescedOutputPieces(&analysis);
+      const bool flow_linked = ep.flow == WindowFlowPolicy::Linked;
+      if (ep.outputs == WindowCoveragePolicy::BoundingBox && !flow_linked) {
+        SelectBoundingBoxOutputPieces(&analysis);
       }
-      const bool output_carrier_contract = ep.outputs == EffectivePolicies::Strength::All;
+      analysis.requires_stable_submit_budget =
+          ep.outputs == WindowCoveragePolicy::Stable && ep.inputs == WindowCoveragePolicy::Stable;
       for (auto& output : analysis.outputs) {
-        output.carrier_contract = output_carrier_contract;
-        output.allow_flow_coalesce =
-            output_carrier_contract && (ep.output_shape == EffectivePolicies::OutputShape::Auto ||
-                                        ep.output_shape == EffectivePolicies::OutputShape::Coalesce);
+        output.linked_bounding_box_allowed = flow_linked && ep.outputs == WindowCoveragePolicy::BoundingBox &&
+                                             output.coalesced_variant.has_value();
+        output.linked_flow_source_allowed =
+            flow_linked && ep.outputs != WindowCoveragePolicy::Off &&
+            ep.outputs != WindowCoveragePolicy::Stable &&
+            (DensePieces(output).size() == 1 || output.linked_bounding_box_allowed);
       }
       for (auto& input : analysis.inputs) {
-        input.allow_dynamic_carrier_args = ep.inputs == EffectivePolicies::Strength::All;
+        input.linked_reader_allowed = flow_linked && ep.inputs != WindowCoveragePolicy::Off &&
+                                      ep.inputs != WindowCoveragePolicy::Stable;
+        input.linked_dynamic_reader_allowed = flow_linked && ep.inputs == WindowCoveragePolicy::BoundingBox;
       }
 
       // Type/ABI safety filter (always applies).
@@ -2653,10 +2627,8 @@ class OutWindowExternalizer {
                          }),
           analysis.inputs.end());
 
-      // v5 effective policy filtering.
       switch (ep.outputs) {
-        case EffectivePolicies::Strength::Auto: {
-          // Auto filter: reject ABI-expanding, multi-piece, etc.
+        case WindowCoveragePolicy::Stable: {
           analysis.outputs.erase(
               std::remove_if(analysis.outputs.begin(), analysis.outputs.end(),
                              [&](const OutputRewriteInfo& output) {
@@ -2669,13 +2641,13 @@ class OutWindowExternalizer {
               analysis.outputs.end());
           break;
         }
-        case EffectivePolicies::Strength::All:
-        case EffectivePolicies::Strength::Off:
-          // All: no filtering beyond type/ABI safety. Off: already cleared above.
+        case WindowCoveragePolicy::Exact:
+        case WindowCoveragePolicy::BoundingBox:
+        case WindowCoveragePolicy::Off:
           break;
       }
       switch (ep.inputs) {
-        case EffectivePolicies::Strength::Auto: {
+        case WindowCoveragePolicy::Stable: {
           analysis.inputs.erase(
               std::remove_if(analysis.inputs.begin(), analysis.inputs.end(),
                              [&](const InputRewriteInfo& input) {
@@ -2688,11 +2660,9 @@ class OutWindowExternalizer {
               analysis.inputs.end());
           break;
         }
-        case EffectivePolicies::Strength::All:
-          // All: keep correctness-proven inputs, including dynamic carrier candidates.
-          break;
-        case EffectivePolicies::Strength::Off:
-          // Already cleared above.
+        case WindowCoveragePolicy::Exact:
+        case WindowCoveragePolicy::BoundingBox:
+        case WindowCoveragePolicy::Off:
           break;
       }
 
@@ -3494,11 +3464,12 @@ class OutWindowExternalizer {
       std::vector<ExprPtr> offsets;
       std::vector<ExprPtr> shape;
       bool dynamic_indexed_reader = false;
-      bool dynamic_carrier_args_allowed = false;
+      bool linked_reader_allowed = false;
+      bool linked_dynamic_reader_allowed = false;
       bool output_writer = false;
       bool output_has_fine_assemble = false;
       bool output_has_flow_coalesced_variant = false;
-      bool output_carrier_contract = false;
+      bool output_linked_flow_source_allowed = false;
       std::vector<ExprPtr> flow_coalesced_offsets;
       std::vector<ExprPtr> flow_coalesced_shape;
       InputRewriteInfo input_info;
@@ -4277,7 +4248,7 @@ class OutWindowExternalizer {
         return false;
       }
       for (const auto& output : analysis.outputs) {
-        if (!output.allow_flow_coalesce || output.out_param_index >= call->args_.size()) continue;
+        if (!output.linked_bounding_box_allowed || output.out_param_index >= call->args_.size()) continue;
         const Var* root = ResolveOutputRootExpr(call->args_[output.out_param_index]);
         if (root && sequence_carrier_plan_.coalesced_writer_roots.count(root) != 0) return true;
       }
@@ -4681,7 +4652,7 @@ class OutWindowExternalizer {
         }
         return std::nullopt;
       }
-      if (RequiresAutoSubmitBudget(analysis)) {
+      if (analysis.requires_stable_submit_budget) {
         auto original_budget =
             EstimateCallLikeSubmitBudget(original_func, call->args_, call->GetArgDirections());
         if (!BudgetPreservingForAuto(original_budget, rewritten_budget)) {
@@ -5081,16 +5052,6 @@ class OutWindowExternalizer {
              budget.add_scalar <= kCoreMaxScalarArgs;
     }
 
-    static bool RequiresAutoSubmitBudget(const CalleeRewriteAnalysis& analysis) {
-      for (const auto& output : analysis.outputs) {
-        if (output.carrier_contract) return false;
-      }
-      for (const auto& input : analysis.inputs) {
-        if (input.allow_dynamic_carrier_args) return false;
-      }
-      return true;
-    }
-
     std::vector<std::pair<std::string, std::any>> RewriteCallAttrs(
         const CallPtr& call, const CalleeRewriteAnalysis& analysis,
         const std::unordered_map<size_t, std::vector<SliceBundle>>& slices_by_out_index) const {
@@ -5328,9 +5289,9 @@ class OutWindowExternalizer {
         candidate.parent_expr = call->args_[output.out_param_index];
         candidate.output_writer = true;
         candidate.output_has_fine_assemble = HasFineAssemblePieces(output);
-        candidate.output_carrier_contract = output.carrier_contract;
+        candidate.output_linked_flow_source_allowed = output.linked_flow_source_allowed;
         candidate.output_has_flow_coalesced_variant =
-            output.allow_flow_coalesce && output.coalesced_variant.has_value();
+            output.linked_bounding_box_allowed && output.coalesced_variant.has_value();
         candidate.enclosing_loops = enclosing_loops;
         candidate.callsite_subst = resolved_callsite_subst;
         if (!output.callsite_offsets.empty()) candidate.offsets = output.callsite_offsets;
@@ -5354,7 +5315,8 @@ class OutWindowExternalizer {
           candidate.parent_root = root;
           candidate.parent_expr = call->args_[input.in_param_index];
           candidate.dynamic_indexed_reader = input.dynamic_indexed_window.has_value();
-          candidate.dynamic_carrier_args_allowed = input.allow_dynamic_carrier_args;
+          candidate.linked_reader_allowed = input.linked_reader_allowed;
+          candidate.linked_dynamic_reader_allowed = input.linked_dynamic_reader_allowed;
           candidate.input_info = input;
           candidate.enclosing_loops = enclosing_loops;
           candidate.callsite_subst = resolved_callsite_subst;
@@ -5468,8 +5430,8 @@ class OutWindowExternalizer {
           std::vector<ExprPtr> writer_candidate_offsets = writer ? writer->offsets : std::vector<ExprPtr>{};
           std::vector<ExprPtr> writer_candidate_shape = writer ? writer->shape : std::vector<ExprPtr>{};
           bool can_make_dynamic_carrier =
-              !unsupported && writer && writer->output_has_fine_assemble && writer->output_carrier_contract &&
-              dynamic_reader->dynamic_carrier_args_allowed &&
+              !unsupported && writer && writer->output_has_fine_assemble &&
+              writer->output_linked_flow_source_allowed && dynamic_reader->linked_dynamic_reader_allowed &&
               writer->stmt_index < dynamic_reader->stmt_index &&
               CanUseCarrierAcrossCallsiteLoops(writer->enclosing_loops, dynamic_reader->enclosing_loops,
                                                &needs_carrier_rematerialization) &&
@@ -5477,8 +5439,8 @@ class OutWindowExternalizer {
               !dynamic_reader->offsets.empty() &&
               dynamic_reader->input_info.dynamic_indexed_window.has_value();
           if (!can_make_dynamic_carrier && !unsupported && writer &&
-              writer->output_has_flow_coalesced_variant && writer->output_carrier_contract &&
-              dynamic_reader->dynamic_carrier_args_allowed &&
+              writer->output_has_flow_coalesced_variant && writer->output_linked_flow_source_allowed &&
+              dynamic_reader->linked_dynamic_reader_allowed &&
               writer->stmt_index < dynamic_reader->stmt_index &&
               CanUseCarrierAcrossCallsiteLoops(writer->enclosing_loops, dynamic_reader->enclosing_loops,
                                                &needs_carrier_rematerialization) &&
@@ -5597,7 +5559,7 @@ class OutWindowExternalizer {
               LOG_INFO << "[window-carrier] fallback dynamic proof root=" << root->name_hint_
                        << " unsupported=" << unsupported << " writer=" << (writer != nullptr)
                        << " writer_fine=" << (writer && writer->output_has_fine_assemble)
-                       << " writer_carrier_contract=" << (writer && writer->output_carrier_contract)
+                       << " writer_linked=" << (writer && writer->output_linked_flow_source_allowed)
                        << " order=" << (writer && writer->stmt_index < dynamic_reader->stmt_index);
             }
             plan.fallback_parent_roots.insert(root);
@@ -5607,6 +5569,7 @@ class OutWindowExternalizer {
 
         if (plan.fallback_parent_roots.count(root)) continue;
         if (unsupported || !writer || !reader) continue;
+        if (!writer->output_linked_flow_source_allowed || !reader->linked_reader_allowed) continue;
         if (writer->stmt_index >= reader->stmt_index) continue;
         if (writer->shape.empty() || writer->offsets.empty()) continue;
         if (!AreExprVectorsEqual(writer->shape, reader->shape) ||
@@ -7874,10 +7837,10 @@ class OutWindowExternalizer {
         continue;
       }
 
-      auto effective_policy = ResolveEffectivePolicies(func, output_window_policy_, window_rewrite_policy_);
+      auto effective_policy = ResolveEffectiveWindowPolicy(func, global_policy_, global_flow_);
       auto out_indices = CollectOutParamIndices(func);
       auto input_windows = AnalyzeInputWindows(func);
-      if (effective_policy.inputs != EffectivePolicies::Strength::Off) {
+      if (effective_policy.inputs != WindowCoveragePolicy::Off) {
         auto dynamic_input_windows = AnalyzeDynamicIndexedInputWindows(func);
         for (auto& dynamic_input : dynamic_input_windows) {
           auto duplicate =
@@ -7959,8 +7922,8 @@ class OutWindowExternalizer {
         continue;
       }
 
-      if (!input_windows.empty() && effective_policy.inputs == EffectivePolicies::Strength::All &&
-          HasDynamicIndexedInputWindow(input_windows)) {
+      if (!input_windows.empty() && effective_policy.inputs == WindowCoveragePolicy::BoundingBox &&
+          effective_policy.flow == WindowFlowPolicy::Linked && HasDynamicIndexedInputWindow(input_windows)) {
         CalleeRewriteAnalysis input_only_analysis;
         input_only_analysis.kind = RewriteKind::FinalStore;
         input_only_analysis.inputs = std::move(input_windows);
@@ -8582,16 +8545,16 @@ class OutWindowExternalizer {
                                       func->attrs_);
   }
 
-  OutputWindowPolicy output_window_policy_ = OutputWindowPolicy::CoalescePieces;
-  WindowRewritePolicy window_rewrite_policy_ = WindowRewritePolicy::Auto;
+  WindowCoveragePolicy global_policy_ = WindowCoveragePolicy::Stable;
+  WindowFlowPolicy global_flow_ = WindowFlowPolicy::Local;
   std::unordered_map<std::string, std::unordered_map<size_t, VarPtr>> output_dynamic_extent_dims_by_func_;
 };
 
 class RuntimeCurrentAggregator {
  public:
-  RuntimeCurrentAggregator(OutWindowExternalizer::OutputWindowPolicy output_window_policy,
-                           OutWindowExternalizer::WindowRewritePolicy window_rewrite_policy)
-      : output_window_policy_(output_window_policy), window_rewrite_policy_(window_rewrite_policy) {}
+  RuntimeCurrentAggregator(OutWindowExternalizer::WindowCoveragePolicy global_policy,
+                           OutWindowExternalizer::WindowFlowPolicy global_flow)
+      : global_policy_(global_policy), global_flow_(global_flow) {}
 
   ProgramPtr Run(const ProgramPtr& program) {
     std::vector<FunctionPtr> new_functions;
@@ -8610,8 +8573,8 @@ class RuntimeCurrentAggregator {
         continue;
       }
 
-      OrchMutator mutator(program, output_window_policy_, window_rewrite_policy_, &generated_functions,
-                          &barrier_by_type, &used_names);
+      OrchMutator mutator(program, global_policy_, global_flow_, &generated_functions, &barrier_by_type,
+                          &used_names);
       auto new_body = mutator.VisitStmt(func->body_);
       if (new_body.get() == func->body_.get()) {
         new_functions.push_back(func);
@@ -8632,14 +8595,14 @@ class RuntimeCurrentAggregator {
  private:
   class OrchMutator : public IRMutator {
    public:
-    OrchMutator(ProgramPtr program, OutWindowExternalizer::OutputWindowPolicy output_window_policy,
-                OutWindowExternalizer::WindowRewritePolicy window_rewrite_policy,
+    OrchMutator(ProgramPtr program, OutWindowExternalizer::WindowCoveragePolicy global_policy,
+                OutWindowExternalizer::WindowFlowPolicy global_flow,
                 std::vector<FunctionPtr>* generated_functions,
                 std::unordered_map<const Type*, FunctionPtr>* barrier_by_type,
                 std::unordered_set<std::string>* used_names)
         : program_(std::move(program)),
-          output_window_policy_(output_window_policy),
-          window_rewrite_policy_(window_rewrite_policy),
+          global_policy_(global_policy),
+          global_flow_(global_flow),
           generated_functions_(generated_functions),
           barrier_by_type_(barrier_by_type),
           used_names_(used_names) {}
@@ -8684,20 +8647,10 @@ class RuntimeCurrentAggregator {
     };
 
     bool IsRuntimeCurrentProducerCall(const CallPtr& call) const {
-      if (!call) return false;
-      auto callee_name = GetCallFuncName(call);
-      const std::string windowed_suffix = "__windowed";
-      auto suffix_pos = callee_name.find(windowed_suffix);
-      if (suffix_pos == std::string::npos || suffix_pos == 0) {
-        return false;
-      }
-      auto base_name = callee_name.substr(0, suffix_pos);
-      auto base_func = program_ ? program_->GetFunction(base_name) : nullptr;
-      if (!base_func) return false;
-      auto ep = OutWindowExternalizer::ResolveEffectivePolicies(base_func, output_window_policy_,
-                                                                window_rewrite_policy_);
-      return ep.outputs == OutWindowExternalizer::EffectivePolicies::Strength::All &&
-             !ep.output_shape_explicit;
+      (void)call;
+      // v6: runtime-current barriers must come from explicit linked-flow analysis,
+      // not from a post-pass heuristic over __windowed names and coverage policy.
+      return false;
     }
 
     bool IsProducedByRuntimeCurrentProducerCall(
@@ -8870,15 +8823,15 @@ class RuntimeCurrentAggregator {
     }
 
     ProgramPtr program_;
-    OutWindowExternalizer::OutputWindowPolicy output_window_policy_;
-    OutWindowExternalizer::WindowRewritePolicy window_rewrite_policy_;
+    OutWindowExternalizer::WindowCoveragePolicy global_policy_;
+    OutWindowExternalizer::WindowFlowPolicy global_flow_;
     std::vector<FunctionPtr>* generated_functions_;
     std::unordered_map<const Type*, FunctionPtr>* barrier_by_type_;
     std::unordered_set<std::string>* used_names_;
   };
 
-  OutWindowExternalizer::OutputWindowPolicy output_window_policy_;
-  OutWindowExternalizer::WindowRewritePolicy window_rewrite_policy_;
+  OutWindowExternalizer::WindowCoveragePolicy global_policy_;
+  OutWindowExternalizer::WindowFlowPolicy global_flow_;
 };
 
 }  // namespace
@@ -8889,27 +8842,11 @@ class RuntimeCurrentAggregator {
 
 namespace pass {
 
-Pass OptimizeOrchTensors(const std::string& window_policy) {
-  OutWindowExternalizer::OutputWindowPolicy parsed_output_window_policy;
-  OutWindowExternalizer::WindowRewritePolicy parsed_window_rewrite_policy;
+Pass OptimizeOrchTensors(const std::string& window_policy, const std::string& window_flow) {
+  auto parsed_global_policy = OutWindowExternalizer::ParseGlobalCoveragePolicy(window_policy);
+  auto parsed_global_flow = OutWindowExternalizer::ParseWindowFlowPolicy(window_flow, "window_flow");
 
-  if (window_policy == "auto") {
-    // v5: auto → exact_pieces + auto (was coalesce_pieces in v4).
-    // Per-kernel coalesce/carrier are opt-in via window_outputs attrs.
-    parsed_output_window_policy = OutWindowExternalizer::OutputWindowPolicy::ExactPieces;
-    parsed_window_rewrite_policy = OutWindowExternalizer::WindowRewritePolicy::Auto;
-  } else if (window_policy == "all") {
-    parsed_output_window_policy = OutWindowExternalizer::OutputWindowPolicy::ExactPieces;
-    parsed_window_rewrite_policy = OutWindowExternalizer::WindowRewritePolicy::All;
-  } else if (window_policy == "none") {
-    parsed_output_window_policy = OutWindowExternalizer::OutputWindowPolicy::CoalescePieces;
-    parsed_window_rewrite_policy = OutWindowExternalizer::WindowRewritePolicy::None;
-  } else {
-    CHECK(false) << "Invalid window_policy '" << window_policy << "': expected 'auto', 'all', or 'none'";
-  }
-
-  auto pass_func = [parsed_output_window_policy,
-                    parsed_window_rewrite_policy](const ProgramPtr& program) -> ProgramPtr {
+  auto pass_func = [parsed_global_policy, parsed_global_flow](const ProgramPtr& program) -> ProgramPtr {
     // Collect InCore function names
     std::unordered_set<std::string> incore_names;
     for (const auto& [gvar, func] : program->functions_) {
@@ -8932,11 +8869,11 @@ Pass OptimizeOrchTensors(const std::string& window_policy) {
 
     // Pattern 5: Static out-window externalization for statically provable
     // local-window writes in outlined callees.
-    auto p5 = OutWindowExternalizer(parsed_output_window_policy, parsed_window_rewrite_policy).Run(p4);
+    auto p5 = OutWindowExternalizer(parsed_global_policy, parsed_global_flow).Run(p4);
 
-    // Pattern 6: Insert a runtime-visible current marker for attrs-driven
-    // carrier-contract producer loops that feed later repeated full-tensor readers.
-    return RuntimeCurrentAggregator(parsed_output_window_policy, parsed_window_rewrite_policy).Run(p5);
+    // Pattern 6 is disabled for v6 until runtime-current markers are emitted from
+    // explicit linked-flow analysis rather than a post-pass heuristic.
+    return RuntimeCurrentAggregator(parsed_global_policy, parsed_global_flow).Run(p5);
   };
 
   return CreateProgramPass(pass_func, "OptimizeOrchTensors", kOptimizeOrchTensorsProperties);

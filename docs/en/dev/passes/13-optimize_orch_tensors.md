@@ -27,27 +27,65 @@ opt_pass = passes.optimize_orch_tensors()
 program_opt = opt_pass(program)
 ```
 
-The pass accepts a single `window_policy` parameter (default `"auto"`):
+Most users should choose one preset with `window_option`:
 
 ```python
-passes.optimize_orch_tensors(window_policy="auto")
+passes.optimize_orch_tensors(window_option="stable")
 ```
 
-`window_policy` controls the window externalization strategy:
+| `window_option` | Expanded config | Meaning |
+| --------------- | --------------- | ------- |
+| `"none"` | `window_policy="none", window_flow="local"` | Do not window by default. Explicit kernel attrs can still opt in. |
+| `"stable"` | `window_policy="stable", window_flow="local"` | Default. Use stable exact windows without expanding runtime submit args. |
+| `"exact"` | `window_policy="exact", window_flow="local"` | Allow exact windows that expand submit args. No boundingBox holes and no linked flow. |
 
-| Value | Output behavior | Input behavior | Notes |
-| ----- | --------------- | -------------- | ----- |
-| `"auto"` | ABI-safe single-piece windows | ABI-safe static windows | Default; proof-based and submit-signature preserving |
-| `"all"` | All correctness-proven output windows | All correctness-proven input windows, including dynamic carrier readers | Aggressive mode; may expand submit signatures and carrier args |
-| `"none"` | No windowing by default | No windowing by default | Per-kernel attrs can still opt in |
+`window_option="none"` is not a kill switch; it only changes the global
+default. A kernel with explicit `window_outputs`, `window_inputs`, or
+`window_flow` attrs may still opt in.
 
-The global policy maps to per-kernel defaults:
+Advanced users can use the explicit two-axis API:
 
-| Global policy | Default `window_outputs` | Default `window_inputs` |
-| ------------- | ------------------------ | ----------------------- |
-| `"auto"` | `"auto"` | `"auto"` |
-| `"all"` | `"all"` | `"all"` |
-| `"none"` | `"off"` | `"off"` |
+```python
+passes.optimize_orch_tensors(window_policy="stable", window_flow="local")
+```
+
+Do not pass `window_option` together with `window_policy` or `window_flow`.
+Use either the preset API or the explicit two-axis API.
+
+`window_policy` controls the coverage shape and submit-argument budget for one
+call site. `window_flow` controls whether a proven coverage relationship may be
+linked across writer and reader call sites. Carrier/base/extent/current/remat
+is not a user-facing option; it is one possible lowering of a proven linked
+flow.
+
+`boundingBox` and `linked` are intentionally not `window_option` presets. Use
+explicit `window_policy="boundingBox"` and/or `window_flow="linked"` when the
+larger coverage/flow semantics are desired.
+
+| `window_policy` | Meaning |
+| --------------- | ------- |
+| `"none"` | Do not window by default. Explicit kernel attrs can still opt in. |
+| `"stable"` | Default. Use only ABI-safe exact windows; do not expand submit tensor/scalar args. |
+| `"exact"` | Use correctness-proven exact pieces; submit signatures may expand. No boundingBox holes. |
+| `"boundingBox"` | Exact-first, but may use a continuous boundingBox when it reduces view/argument count or linked proof needs continuous coverage. Holes are explicitly allowed. |
+
+| `window_flow` | Meaning |
+| ------------- | ------- |
+| `"local"` | Rewrite each call site independently. No cross-callsite current/carrier lowering. |
+| `"linked"` | Allow proven writer-reader coverage to be linked when both endpoints opt in. Proof failure falls back; it is not an error. |
+
+Useful global combinations:
+
+| Global config | Submit args | Coverage | Holes | Linked flow | Carrier/base/extent/barrier |
+| ------------- | ----------- | -------- | ----- | ----------- | --------------------------- |
+| `none + local` | unchanged by default | no default windows | no | no | no |
+| `none + linked` | unchanged by default | only explicit opt-in kernels | per opt-in | only opt-in writer/reader edges with both effective flows linked | only if the opt-in edge proves valid |
+| `stable + local` | no expansion | ABI-safe exact | no | no | no |
+| `stable + linked` | no expansion | ABI-safe exact | no | proof may run, but most dynamic readers fall back | no base/extent/barrier if new args would be needed |
+| `exact + local` | may expand | exact pieces | no | no | no |
+| `exact + linked` | may expand | exact pieces | no | single dense exact linked coverage only | no implicit boundingBox carrier |
+| `boundingBox + local` | may expand | exact or boundingBox | yes | no | no |
+| `boundingBox + linked` | may expand | exact or boundingBox | yes | proven writer-reader linked coverage | carrier/base/extent/remat may appear |
 
 **Per-kernel overrides** via function attrs:
 
@@ -55,77 +93,72 @@ The global policy maps to per-kernel defaults:
 @pl.function(
     type=pl.FunctionType.InCore,
     attrs={
-        "window_policy":  "auto",      # optional per-kernel default: none | auto | all
-        "window_outputs": "coalesce",  # off | auto | all | exact | coalesce
-        "window_inputs":  "off",       # off | auto | all
+        "window_outputs": "exact",       # off | stable | exact | boundingBox
+        "window_inputs":  "off",         # off | stable | exact | boundingBox
+        "window_flow":    "linked",      # local | linked
     }
 )
 def my_kernel(...): ...
 ```
 
-Per-kernel attrs override the global default. Missing attrs inherit the global
-policy; explicit attrs win, including explicit opt-in when the global default is
-`"none"`.
+Missing attrs inherit the global setting. Explicit side attrs win, including
+opt-in when the global default is `"none"`. `window_outputs` and
+`window_inputs` are independent coverage permissions. `InOut` dependency
+coverage may be analyzed as read coverage plus write coverage, but runtime
+submit still has one TensorView for that argument; if the read and write submit
+views conflict, the pass uses a conservative view or falls back.
 
-For `window_inputs`, `"auto"` covers ABI-safe static input windows. Dynamic
-carrier readers that require extra carrier scalar/current args need effective
-`window_inputs="all"`, either from global `"all"` or from an explicit per-kernel
-attr. The pass does not create private dynamic reader scans without a proven
-writer-reader carrier flow.
-
-`window_outputs` and `window_inputs` are independent switches. Setting only
-`window_outputs="off"` disables output rewriting for that kernel, but input-side
-windowing can still clone the callee when `window_inputs` remains `"auto"`.
-Set both attrs to `"off"` to disable all window externalization for one kernel:
+Set both side attrs to `"off"` to disable all local window externalization for
+one kernel:
 
 ```python
 attrs={"window_outputs": "off", "window_inputs": "off"}
 ```
 
-Use `window_outputs="coalesce"` when the caller only needs a coalesced output
-bounding box. This chooses the writer output shape; it does not by itself opt a
-downstream dynamic reader into extra carrier args:
+`boundingBox` is permission, not a force mode. Exact coverage is preferred by
+default. A boundingBox is selected only when exact pieces exceed the
+submit/view expression budget, linked proof needs one continuous coverage, or a
+mechanical local cost rule shows fewer runtime tensor views/params. If the
+boundingBox equals the full parent or gives no expected benefit, the pass falls
+back to exact or full parent without error.
 
 ```python
-attrs={"window_outputs": "coalesce"}
+attrs={"window_outputs": "boundingBox"}
 ```
 
-Use `window_inputs="all"` on a compatible downstream reader when it should be
-allowed to reuse a proven output-derived carrier:
+`window_flow="linked"` is not a carrier switch. It only permits a writer-reader
+edge to reuse coverage when both endpoints are effectively linked and the proof
+succeeds. The lowering may use carrier/base/extent/remat today; future lowering
+forms may differ.
 
 ```python
-attrs={"window_inputs": "all"}
+attrs={"window_inputs": "boundingBox", "window_flow": "linked"}
 ```
 
 For example, in a Qwen prefill-style dynamic-indexed KV-cache writer/reader
 chain, the expected boundary is:
 
-- `"auto"`: keep local/simple windows only. Dynamic KV-cache writer and reader
-  windows stay full-tensor, and no carrier/remat is introduced.
-- `"all"`: rewrite every correctness-proven writer/reader chain the pass can
-  prove, including output-derived carrier paths for dynamic readers such as
-  qk/sv cache reads. Dynamic readers without a proven carrier still keep the full
-  parent tensor (no private dynamic reader).
-- `window_outputs="coalesce"`: opt one writer into multi-piece output bounding-box
-  coalescing, but do not opt a downstream dynamic reader into extra carrier
-  arguments.
-- `window_outputs="coalesce"` plus reader `window_inputs="all"`: if the
-  writer/reader flow is proven compatible, generate the output-derived
-  carrier/remat path. This explicit input-side opt-in may add carrier
-  scalar/current arguments and therefore may expand the runtime submit
-  signature.
+- `stable + local`: keep ABI-safe local exact windows only. Dynamic KV-cache
+  readers stay full-tensor.
+- `exact + local`: allow exact pieces even when submit signatures grow, but do
+  not create cross-callsite carrier lowering.
+- `boundingBox + local`: allow local continuous coverage with holes, but still
+  no carrier/base/extent.
+- `boundingBox + linked`: allow qk/sv-style dynamic readers to use a proven
+  output-derived linked flow. If proof fails, the reader stays full parent.
 
-The carrier path depends on all of these conditions:
+The linked dynamic-reader path depends on all of these conditions:
 
-- the producer's effective `window_outputs` is not `"off"`
-- the producer output rewrite actually survives as a `__windowed` call
-- the reader's effective `window_inputs` is `"all"` when the carrier path needs
-  extra runtime args
+- the producer's effective `window_outputs` can provide the required exact or
+  boundingBox coverage
+- the reader's effective `window_inputs` permits the required coverage
+- both endpoints have effective `window_flow="linked"`
 - the writer/reader pair satisfies the shared-root, loop-order, and min/max
   proof checks
 
 If any condition fails, the dynamic reader keeps the full parent tensor and the
-pass must not insert a runtime-current barrier just because the attr is present.
+pass must not insert a runtime-current barrier just because coverage attrs are
+present.
 
 Output windows whose parent shape has dynamic dimensions are handled
 conservatively. A static-offset/static-size partial window over a dynamic parent
@@ -135,7 +168,8 @@ slot, can still be rewritten when the static proof and policy gate allow them.
 
 For debugging, `PYPTO_WINDOW_EXTERNALIZE_INCLUDE` and
 `PYPTO_WINDOW_EXTERNALIZE_EXCLUDE` filter candidates by callee or parameter
-name. `PYPTO_WINDOW_EXTERNALIZE_LOG=1` prints `auto` accept/reject decisions.
+name. `PYPTO_WINDOW_EXTERNALIZE_LOG=1` prints stable/coverage accept/reject
+decisions.
 
 ## Patterns
 
@@ -209,17 +243,15 @@ inside the loop body are not folded this way.
 
 This pass intentionally keeps window eligibility conservative. It does not special-case operator names such as `topk`; a tensor is windowed only when the callee body proves the access pattern below.
 
-After static eligibility, the default `auto` policy applies one more conservative
-cost gate. It rejects candidates that would increase the number of rewritten
-tensor arguments and rejects multi-piece output rewrites by default. A
-dynamic-indexed input is windowed only when a proven writer-reader carrier flow
-exists and the reader's effective `window_inputs` policy allows any required
-extra carrier args; otherwise the reader keeps the full parent tensor. This keeps the
-default pipeline from trading local window precision for larger dispatch
-signatures, extra call-site orchestration, or private dynamic-window scans whose
-performance benefit is workload-dependent. Use `window_policy="all"` when the
-intent is "cut every correctness-proven window even if submit signatures grow";
-use reader `window_inputs="all"` for a local carrier-reader opt-in.
+After static eligibility, the default `stable + local` policy applies one more
+conservative cost gate. It keeps only exact windows that do not increase
+`add_inout`, `add_input`, `add_output`, or `add_scalar` submit budgets.
+Multi-piece output rewrites, boundingBox coverage, dynamic carrier args, and
+cross-callsite current/remat are outside the stable default. Use
+`window_policy="exact"` when exact pieces may expand submit signatures. Use
+`window_policy="boundingBox"` when continuous coverage with holes is acceptable.
+Use `window_flow="linked"` only when proven writer-reader coverage may be
+propagated across call sites.
 
 Supported rewrite shapes:
 
@@ -227,7 +259,11 @@ Supported rewrite shapes:
 - `AggregateWindowLoop`: the callee carries one or more `Out` tensors through a loop and writes a statically provable aggregate window, such as the outlined `kv_proj` group shape
 - `PureInputWindowConsumer`: an `In` tensor parameter in a data-returning callee is used only through the same local input window
 - `AggregateInputWindowLoop`: together with an `AggregateWindowLoop` output rewrite, an `In` tensor parameter is read only through loop-local `tile.load`/`tensor.slice` windows whose offsets expand across that same internal loop into one statically provable parent-shaped region, such as q/k inputs of qk norm
-- `RuntimeCurrentAggregator`: when a surviving carrier-producing `__windowed` producer loop feeds a later repeated full-tensor `In` reader, the pass inserts a small runtime-visible current marker. Plain `coalesce` is only an output bounding-box policy. The match is attrs-driven and does not depend on model-specific callee or variable names.
+- Linked-flow lowering: when both writer and reader endpoints opt into linked
+  flow and proof succeeds, the pass may lower the relationship with
+  carrier/base/extent/remat. Runtime-current marker insertion is disabled unless
+  it comes from that explicit linked-flow plan; it must not be inferred from
+  callee names or from the presence of a `__windowed` clone.
 
 Output-window eligibility:
 
@@ -257,7 +293,11 @@ Input-window eligibility:
 - input-only `Submit` callsites stay full-tensor; inside `manual_scope`, a full input may intentionally carry a wider dependency even when the callee body reads a local window
 - when a callee also has an eligible output-window rewrite, any already proven pure input windows are preserved and materialized at the same callsite
 - for `AggregateInputWindowLoop`, all references must be inside one static `ForStmt`, at least one offset dimension must vary with that loop, and the aggregate window must equal the input parent shape; partial aggregate reads such as weight sub-windows remain full-tensor
-- dynamic-indexed reader windows require a provable min/max scan, a writer whose output rewrite survives as a `__windowed` call, and a reader policy that allows any required carrier args. Eligible writer-reader chains with a carrier use the carrier/remat path; without that proven flow, the dynamic reader keeps full parent tensor (no private dynamic reader).
+- dynamic-indexed reader windows require a provable min/max scan, a writer whose
+  coverage survives as a `__windowed` call or linked boundingBox variant, reader
+  coverage that allows the required shape, and effective linked flow on both
+  endpoints. Without that proven flow, the dynamic reader keeps the full parent
+  tensor (no private dynamic reader).
 
 Non-goals and dependence model:
 
@@ -266,7 +306,8 @@ Non-goals and dependence model:
 - the pass does not precompute global window descriptor arrays
 - the pass does not split SPMD launches or externalize per-block SPMD windows
 - unsupported consumers, including full-tensor readers, remain baseline/full-tensor inputs
-- selected prefill full-tensor readers may still receive a runtime-current marker when the producer loop is a surviving carrier-producing fan-in pattern; this does not narrow the reader region, but gives runtime dependency tracking one current tensor to match instead of many producer windows
+- runtime-current markers are not inserted by a standalone post-pass heuristic;
+  future marker insertion must be driven by explicit linked-flow analysis
 - `DeriveCallDirections` keeps its existing sound sequential `Out -> InOut` rule; Pattern 5 only exposes proven local windows before that pass runs
 
 ## Example (Pattern 1)

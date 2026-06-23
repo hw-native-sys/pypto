@@ -13,20 +13,23 @@ Each test uses explicit Before (post-ConvertTensorToTileOps tile-level IR)
 and Expected (optimized) programs in @pl.program style.
 """
 
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
-OptimizeWindowPolicy = Literal["auto", "all", "none"]
+OptimizeWindowPolicy = Literal["none", "stable", "exact", "boundingBox"]
+OptimizeWindowFlow = Literal["local", "linked"]
+OptimizeWindowOption = Literal["none", "stable", "exact"]
 
 
 def _run_to_optimize_orch_tensors(
     program,
     *,
-    window_policy: str = "auto",
+    window_policy: str = "stable",
+    window_flow: str = "local",
 ):
     pm = PassManager.get_strategy(OptimizationStrategy.Default)
     result = program
@@ -34,6 +37,7 @@ def _run_to_optimize_orch_tensors(
         if pass_name == "OptimizeOrchTensors":
             result = passes.optimize_orch_tensors(
                 window_policy=cast(OptimizeWindowPolicy, window_policy),
+                window_flow=cast(OptimizeWindowFlow, window_flow),
             )(result)
             return result
         result = pass_obj(result)
@@ -41,7 +45,7 @@ def _run_to_optimize_orch_tensors(
 
 
 def _run_aggressive_exact_to_optimize_orch_tensors(program):
-    return _run_to_optimize_orch_tensors(program, window_policy="all")
+    return _run_to_optimize_orch_tensors(program, window_policy="exact")
 
 
 def _get_function(program, name: str):
@@ -1019,7 +1023,7 @@ class TestSliceInputStrides:
 class TestOutWindowExternalizer:
     """Pattern 5: static out-window externalization."""
 
-    def test_all_inserts_runtime_current_before_full_consumer_read(self):
+    def test_exact_local_does_not_insert_runtime_current_before_full_consumer_read(self):
         @pl.program
         class Before:
             @pl.function(type=pl.FunctionType.InCore)
@@ -1062,12 +1066,13 @@ class TestOutWindowExternalizer:
                     out_rv = pl.yield_(out_next)
                 return out_rv
 
-        After = _run_to_optimize_orch_tensors(Before, window_policy="all")
+        After = _run_to_optimize_orch_tensors(Before, window_policy="exact")
 
-        assert After.get_function("__pypto_runtime_current_barrier") is not None
-        assert "__runtime_current" in ir.python_print(_get_function(After, "main"))
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert After.get_function("__pypto_runtime_current_barrier") is None, printed_main
+        assert "__runtime_current" not in printed_main
 
-    def test_all_does_not_insert_runtime_current_for_nonmatching_full_consumer(self):
+    def test_exact_local_does_not_insert_runtime_current_for_nonmatching_full_consumer(self):
         @pl.program
         class Before:
             @pl.function(type=pl.FunctionType.InCore)
@@ -1114,7 +1119,11 @@ class TestOutWindowExternalizer:
                     out_rv = pl.yield_(out_next)
                 return out_rv
 
-        After = _run_to_optimize_orch_tensors(Before, window_policy="all")
+        After = _run_to_optimize_orch_tensors(
+            Before,
+            window_policy="boundingBox",
+            window_flow="linked",
+        )
 
         assert After.get_function("__pypto_runtime_current_barrier") is None
         assert "__runtime_current" not in ir.python_print(_get_function(After, "main"))
@@ -1534,7 +1543,11 @@ class TestOutWindowExternalizer:
                 result: pl.Tensor[[4, 64], pl.FP32] = self.cache_read(out, cache_rv, block_table)
                 return cache_rv, result
 
-        After = _run_to_optimize_orch_tensors(Before, window_policy="all")
+        After = _run_to_optimize_orch_tensors(
+            Before,
+            window_policy="boundingBox",
+            window_flow="linked",
+        )
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "cache_write__windowed" in printed_main
@@ -1544,7 +1557,7 @@ class TestOutWindowExternalizer:
         assert "__carrier_scan_" in printed_main
 
     def test_dynamic_indexed_reader_after_non_singleton_loop_writer_keeps_full_parent(self):
-        """v5: dynamic reader without carrier keeps full parent (no private dynamic reader)."""
+        """Dynamic reader without linked carrier proof keeps full parent."""
 
         @pl.program
         class Before:
@@ -1591,10 +1604,10 @@ class TestOutWindowExternalizer:
                 result: pl.Tensor[[4, 64], pl.FP32] = self.cache_read(out, cache_rv, block_table)
                 return cache_rv, result
 
-        After = _run_to_optimize_orch_tensors(Before, window_policy="all")
+        After = _run_to_optimize_orch_tensors(Before, window_policy="exact")
 
         printed_main = ir.python_print(_get_function(After, "main"))
-        # v5: dynamic reader without carrier keeps full parent (no private dynamic reader).
+        # Dynamic reader without linked carrier proof keeps full parent.
         assert "cache_read__windowed" not in printed_main
         assert "__carrier_current_remat" not in printed_main
 
@@ -1699,7 +1712,11 @@ class TestOutWindowExternalizer:
                 result: pl.Tensor[[1, 64], pl.FP32] = self.cache_read(out, cache_next)
                 return cache_next, result
 
-        After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
+        After = _run_to_optimize_orch_tensors(
+            Before,
+            window_policy="exact",
+            window_flow="linked",
+        )
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "cache_write__windowed" in printed_main
@@ -1709,7 +1726,7 @@ class TestOutWindowExternalizer:
         assert "cache_read__windowed(out__ssa_v0, cache_next__ssa_v0__windowed)" in printed_main
         assert "pl.tensor.slice(cache_next__ssa_v0" not in printed_main
 
-    def test_dynamic_indexed_reader_reuses_coalesced_writer_carrier_current(self):
+    def test_dynamic_indexed_reader_reuses_bounding_box_writer_carrier_current(self):
         @pl.program
         class Before:
             @pl.function(type=pl.FunctionType.InCore)
@@ -1754,7 +1771,11 @@ class TestOutWindowExternalizer:
                 result: pl.Tensor[[4, 64], pl.FP32] = self.cache_read(out, cache_next, block_table)
                 return cache_next, result
 
-        After = _run_to_optimize_orch_tensors(Before, window_policy="all")
+        After = _run_to_optimize_orch_tensors(
+            Before,
+            window_policy="boundingBox",
+            window_flow="linked",
+        )
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "cache_write__windowed" in printed_main
@@ -1815,8 +1836,8 @@ class TestOutWindowExternalizer:
         assert "cache__ssa_v0__carrier_window" not in printed_main
         assert "__carrier_scan_" not in printed_main
 
-    def test_exact_all_dynamic_indexed_reader_without_shared_carrier_current_uses_standalone_window(self):
-        """v5: dynamic reader without carrier keeps full parent (no private dynamic reader)."""
+    def test_exact_dynamic_indexed_reader_without_shared_carrier_current_keeps_full_parent(self):
+        """Dynamic reader without linked carrier proof keeps full parent."""
 
         @pl.program
         class Before:
@@ -1849,7 +1870,7 @@ class TestOutWindowExternalizer:
         After = _run_aggressive_exact_to_optimize_orch_tensors(Before)
 
         printed_main = ir.python_print(_get_function(After, "main"))
-        # v5: dynamic reader without carrier keeps full parent (no private dynamic reader).
+        # Dynamic reader without linked carrier proof keeps full parent.
         assert "cache_read__windowed" not in printed_main
 
     def test_dynamic_indexed_reader_unknown_trip_count_keeps_full_parent(self):
@@ -1883,7 +1904,7 @@ class TestOutWindowExternalizer:
                 result: pl.Tensor[[4, 64], pl.FP32] = self.cache_read(out, cache, block_table, valid_blocks)
                 return result
 
-        After = _run_to_optimize_orch_tensors(Before, window_policy="all")
+        After = _run_to_optimize_orch_tensors(Before, window_policy="exact")
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "cache_read__windowed" not in printed_main
@@ -3857,7 +3878,7 @@ class TestOutWindowExternalizer:
         assert "pl.Tensor[[128, 256], pl.BF16" in printed_windowed
         assert printed_windowed.count("pl.Tensor[[128, 256], pl.BF16") >= 2
 
-        Auto = _run_to_optimize_orch_tensors(Before, window_policy="auto")
+        Auto = _run_to_optimize_orch_tensors(Before, window_policy="stable")
         printed_auto_main = ir.python_print(_get_function(Auto, "main"))
         assert "kv_proj__windowed" in printed_auto_main
         assert "pl.tensor.slice(k_proj_iter" in printed_auto_main
@@ -3865,7 +3886,7 @@ class TestOutWindowExternalizer:
         assert "pl.tensor.assemble(k_proj_iter" in printed_auto_main
         assert "pl.tensor.assemble(v_proj_iter" in printed_auto_main
 
-    def test_coalesce_output_pieces_uses_coarse_carrier_and_fine_assemble(self):
+    def test_bounding_box_output_pieces_uses_coarse_window_and_fine_assemble(self):
         @pl.program
         class Before:
             @pl.function(type=pl.FunctionType.InCore)
@@ -3898,29 +3919,31 @@ class TestOutWindowExternalizer:
         assert "cache__ssa_v0__window_base_arg" not in printed_exact_main
         assert "cache__ssa_v0__window_extent_arg" not in printed_exact_main
 
-        Auto = _run_to_optimize_orch_tensors(
+        Stable = _run_to_optimize_orch_tensors(
             Before,
-            window_policy="auto",
+            window_policy="stable",
         )
-        printed_auto_main = ir.python_print(_get_function(Auto, "main"))
-        assert "cache_write__windowed" in printed_auto_main
-        assert "cache__ssa_v0__window_base_arg" not in printed_auto_main
-        assert "pl.tensor.slice(cache__ssa_v0" not in printed_auto_main
-        assert "pl.tensor.assemble(" not in printed_auto_main
+        printed_stable_main = ir.python_print(_get_function(Stable, "main"))
+        assert "cache__ssa_v0__window_base_arg" not in printed_stable_main
+        assert "pl.tensor.slice(cache__ssa_v0" not in printed_stable_main
+        assert "pl.tensor.assemble(" not in printed_stable_main
 
-        printed_auto_windowed = ir.python_print(_get_function(Auto, "cache_write__windowed"))
-        assert "pl.Out[pl.Tensor[[1024, 128], pl.FP32" in printed_auto_windowed
-        assert "cache__ssa_v0__window_extent_dyn" not in printed_auto_windowed
+        BBox = _run_to_optimize_orch_tensors(Before, window_policy="boundingBox")
+        printed_bbox_main = ir.python_print(_get_function(BBox, "main"))
+        assert "cache_write__windowed" in printed_bbox_main
+        assert "cache__ssa_v0__window_base_arg" in printed_bbox_main
+        assert "cache__ssa_v0__window_extent_arg" in printed_bbox_main
+        assert "pl.tensor.slice(cache__ssa_v0" in printed_bbox_main
+        assert "pl.tensor.assemble(" in printed_bbox_main
+
+        printed_bbox_windowed = ir.python_print(_get_function(BBox, "cache_write__windowed"))
+        assert "pl.Out[pl.Tensor[[cache__ssa_v0__window_extent_dyn, 128], pl.FP32" in printed_bbox_windowed
+        assert "row__ssa_v0 - cache__ssa_v0__window_base" in printed_bbox_windowed
 
         Default = passes.optimize_orch_tensors()(Before)
         printed_default_main = ir.python_print(_get_function(Default, "main"))
-        assert "cache_write__windowed" in printed_default_main
         assert "cache__ssa_v0__window_base_arg" not in printed_default_main
         assert "pl.tensor.assemble(" not in printed_default_main
-
-        printed_default_windowed = ir.python_print(_get_function(Default, "cache_write__windowed"))
-        assert "pl.Out[pl.Tensor[[1024, 128], pl.FP32" in printed_default_windowed
-        assert "cache__ssa_v0__window_extent_dyn" not in printed_default_windowed
 
         NoMulti = _run_to_optimize_orch_tensors(Before)
         printed_no_multi_main = ir.python_print(_get_function(NoMulti, "main"))
@@ -3962,7 +3985,7 @@ class TestOutWindowExternalizer:
 
         Auto = _run_to_optimize_orch_tensors(
             Before,
-            window_policy="auto",
+            window_policy="stable",
         )
         printed_auto_main = ir.python_print(_get_function(Auto, "main"))
         assert "cache_a__ssa_v0__window" not in printed_auto_main
@@ -4615,7 +4638,7 @@ class TestOutWindowExternalizer:
             ) -> pl.Tensor[[user_batch, 128], pl.FP32]:
                 return self.copy_dyn_batch(data, out)
 
-        After = _run_to_optimize_orch_tensors(Before, window_policy="all")
+        After = _run_to_optimize_orch_tensors(Before, window_policy="exact")
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "pl.tensor.slice(out" not in printed_main
@@ -4646,7 +4669,7 @@ class TestOutWindowExternalizer:
             ) -> pl.Tensor[[user_batch, 128], pl.FP32]:
                 return self.copy_second_tile(data, out)
 
-        After = _run_to_optimize_orch_tensors(Before, window_policy="all")
+        After = _run_to_optimize_orch_tensors(Before, window_policy="exact")
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "pl.tensor.slice(out" not in printed_main
@@ -4679,7 +4702,7 @@ class TestOutWindowExternalizer:
                     out_rv = pl.yield_(out_next)
                 return out_rv
 
-        After = _run_to_optimize_orch_tensors(Before, window_policy="all")
+        After = _run_to_optimize_orch_tensors(Before, window_policy="exact")
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "pl.tensor.slice(out" not in printed_main
@@ -4715,13 +4738,13 @@ class TestOutWindowExternalizer:
             ) -> pl.Tensor[[cache_rows, 128], pl.FP32]:
                 return self.cache_write(cache, data, slot)
 
-        After = _run_to_optimize_orch_tensors(Before, window_policy="all")
+        After = _run_to_optimize_orch_tensors(Before, window_policy="exact")
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "cache_write__windowed" in printed_main
         assert "pl.tensor.slice(cache__ssa_v0" in printed_main
 
-        Auto = _run_to_optimize_orch_tensors(Before, window_policy="auto")
+        Auto = _run_to_optimize_orch_tensors(Before, window_policy="stable")
         printed_auto_main = ir.python_print(_get_function(Auto, "main"))
         assert "pl.tensor.slice(cache__ssa_v0" not in printed_auto_main
 
@@ -4982,7 +5005,7 @@ class TestOutWindowSubmitCall:
                     _consumed, _consumer_tid = pl.submit(self.consume, cache_next, sink, deps=[writer_tid])
                 return cache_next
 
-        Auto = _run_to_optimize_orch_tensors(Before, window_policy="auto")
+        Auto = _run_to_optimize_orch_tensors(Before, window_policy="stable")
         assert Auto.get_function("cache_write__windowed") is not None
         printed_auto_main = ir.python_print(_get_function(Auto, "main"))
         assert "pl.submit(" in printed_auto_main
@@ -4990,7 +5013,7 @@ class TestOutWindowSubmitCall:
         assert "pl.Scalar[pl.TASK_ID]" in printed_auto_main
         assert "deps=[writer_tid" in printed_auto_main
 
-        All = _run_to_optimize_orch_tensors(Before, window_policy="all")
+        All = _run_to_optimize_orch_tensors(Before, window_policy="exact")
         assert All.get_function("cache_write__windowed") is not None
         printed_main = ir.python_print(_get_function(All, "main"))
         assert "pl.submit(" in printed_main
@@ -5092,7 +5115,7 @@ class TestOutWindowSubmitCall:
                     )
                 return cache_next, result
 
-        After = _run_to_optimize_orch_tensors(Before, window_policy="auto")
+        After = _run_to_optimize_orch_tensors(Before, window_policy="stable")
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "cache_read__windowed" not in printed_main
@@ -5101,12 +5124,15 @@ class TestOutWindowSubmitCall:
         assert "__carrier_scan_" not in printed_main
         assert "__runtime_current" not in printed_main
 
-    def test_submit_reader_all_allows_dynamic_carrier_args(self):
-        """Submit path: reader inputs=all may add carrier args and keeps TASK_ID/deps."""
+    def test_submit_bounding_box_linked_allows_dynamic_carrier_args(self):
+        """Submit path: boundingBox + linked may add carrier args and keeps TASK_ID/deps."""
 
         @pl.program
         class Before:
-            @pl.function(type=pl.FunctionType.InCore, attrs={"window_outputs": "coalesce"})
+            @pl.function(
+                type=pl.FunctionType.InCore,
+                attrs={"window_outputs": "boundingBox", "window_flow": "linked"},
+            )
             def cache_write(
                 self,
                 cache: pl.Out[pl.Tensor[[1024, 64], pl.FP32]],
@@ -5120,7 +5146,10 @@ class TestOutWindowSubmitCall:
                     cache_rv = pl.yield_(cache_next)
                 return cache_rv
 
-            @pl.function(type=pl.FunctionType.InCore, attrs={"window_inputs": "all"})
+            @pl.function(
+                type=pl.FunctionType.InCore,
+                attrs={"window_inputs": "boundingBox", "window_flow": "linked"},
+            )
             def cache_read(
                 self,
                 out: pl.Out[pl.Tensor[[4, 64], pl.FP32]],
@@ -5151,7 +5180,7 @@ class TestOutWindowSubmitCall:
                     )
                 return cache_next, result
 
-        After = _run_to_optimize_orch_tensors(Before, window_policy="auto")
+        After = _run_to_optimize_orch_tensors(Before, window_policy="stable")
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "cache_write__windowed" in printed_main
@@ -5225,8 +5254,121 @@ class TestOutWindowSubmitCall:
 class TestPerKernelAttrs:
     """Phase 2: per-kernel window_outputs / window_inputs attrs."""
 
+    def test_window_option_default_matches_stable(self):
+        """No args use the stable preset."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def writer(
+                self,
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+                data: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t: pl.Tile[[32], pl.FP32] = pl.tile.load(data, [0], [32])
+                result: pl.Tensor[[64], pl.FP32] = pl.tile.store(t, [0], out)
+                return result
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+                data: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = self.writer(out, data)
+                return result
+
+        Default = passes.optimize_orch_tensors()(Before)
+        Stable = passes.optimize_orch_tensors(window_option="stable")(Before)
+        ir.assert_structural_equal(Default, Stable)
+
+    def test_window_option_none_allows_kernel_opt_in(self):
+        """window_option="none" is a default, not a kill switch."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore, attrs={"window_outputs": "exact"})
+            def writer(
+                self,
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+                data: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t: pl.Tile[[32], pl.FP32] = pl.tile.load(data, [0], [32])
+                result: pl.Tensor[[64], pl.FP32] = pl.tile.store(t, [0], out)
+                return result
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+                data: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = self.writer(out, data)
+                return result
+
+        After = passes.optimize_orch_tensors(window_option="none")(Before)
+        assert After.get_function("writer__windowed") is not None
+
+    def test_window_option_exact_expands_exact_pieces(self):
+        """window_option="exact" expands to exact + local."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def cache_write(
+                self,
+                cache: pl.Out[pl.Tensor[[1024, 128], pl.FP32]],
+                data: pl.Tensor[[4, 128], pl.FP32],
+                slot_offset: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[1024, 128], pl.FP32]:
+                for ki, (cache_iter,) in pl.range(0, 4, init_values=(cache,)):
+                    src: pl.Tile[[1, 128], pl.FP32] = pl.tile.load(data, [ki, 0], [1, 128], [1, 128])
+                    row: pl.Scalar[pl.INDEX] = slot_offset + ki * 128
+                    cache_next: pl.Tensor[[1024, 128], pl.FP32] = pl.tile.store(src, [row, 0], cache_iter)
+                    cache_rv = pl.yield_(cache_next)
+                return cache_rv
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                cache: pl.Out[pl.Tensor[[1024, 128], pl.FP32]],
+                data: pl.Tensor[[4, 128], pl.FP32],
+            ) -> pl.Tensor[[1024, 128], pl.FP32]:
+                slot: pl.Scalar[pl.INDEX] = 7
+                result: pl.Tensor[[1024, 128], pl.FP32] = self.cache_write(cache, data, slot)
+                return result
+
+        After = passes.optimize_orch_tensors(window_option="exact")(Before)
+
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert "cache_write__windowed" in printed_main
+        assert "cache__window_3" in printed_main
+        assert "__carrier_base" not in printed_main
+
+    def test_window_option_bounding_box_raises(self):
+        """boundingBox is an explicit two-axis setting, not a preset."""
+
+        with pytest.raises(Exception, match="window_option"):
+            passes.optimize_orch_tensors(window_option=cast(OptimizeWindowOption, "boundingBox"))
+
+    def test_window_option_conflicts_with_explicit_axes(self):
+        """Preset and explicit two-axis modes are mutually exclusive."""
+
+        optimize_orch_tensors = cast(Any, passes.optimize_orch_tensors)
+        with pytest.raises(Exception, match="Do not pass window_option"):
+            optimize_orch_tensors(window_option="exact", window_flow="linked")
+
+    def test_explicit_two_axis_bounding_box_linked_still_allowed(self):
+        """Advanced users can still use explicit boundingBox + linked."""
+
+        pass_obj = passes.optimize_orch_tensors(
+            window_policy="boundingBox",
+            window_flow="linked",
+        )
+        assert pass_obj.get_name() == "OptimizeOrchTensors"
+
     def test_per_kernel_outputs_off(self):
-        """Global all plus kernel outputs="off" leaves that kernel unwindowed."""
+        """Global exact plus kernel outputs="off" leaves that kernel unwindowed."""
 
         @pl.program
         class Before:
@@ -5249,11 +5391,11 @@ class TestPerKernelAttrs:
                 result: pl.Tensor[[64], pl.FP32] = self.writer(out, data)
                 return result
 
-        After = _run_to_optimize_orch_tensors(Before, window_policy="all")
+        After = _run_to_optimize_orch_tensors(Before, window_policy="exact")
         assert After.get_function("writer__windowed") is None
 
     def test_per_kernel_inputs_off(self):
-        """Global all plus kernel inputs="off" leaves that kernel input unwindowed."""
+        """Global exact plus kernel inputs="off" leaves that kernel input unwindowed."""
 
         @pl.program
         class Before:
@@ -5276,20 +5418,20 @@ class TestPerKernelAttrs:
                 result: pl.Tensor[[1, 64], pl.FP32] = self.reader(out, data)
                 return result
 
-        After = _run_to_optimize_orch_tensors(Before, window_policy="all")
+        After = _run_to_optimize_orch_tensors(Before, window_policy="exact")
         # inputs="off" means no input windowing; output may still be windowed.
         printed_main = ir.python_print(_get_function(After, "main"))
         # Input should NOT be windowed (no data__ssa_v0__window in the call).
         assert "data__ssa_v0__window" not in printed_main
 
-    def test_global_none_kernel_policy_all_opts_in(self):
-        """Global none is a default; explicit kernel policy can opt in."""
+    def test_global_none_side_output_exact_opts_in(self):
+        """Global none is a default; explicit side coverage can opt in."""
 
         @pl.program
         class Before:
             @pl.function(
                 type=pl.FunctionType.InCore,
-                attrs={"window_policy": "all"},
+                attrs={"window_outputs": "exact"},
             )
             def writer(
                 self,
@@ -5344,14 +5486,14 @@ class TestPerKernelAttrs:
                 result: pl.Tensor[[4, 128], pl.FP32] = self.q_proj(output, data, column_offset)
                 return result
 
-        After = _run_to_optimize_orch_tensors(Before, window_policy="auto")
+        After = _run_to_optimize_orch_tensors(Before, window_policy="stable")
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "q_proj__windowed" in printed_main
         assert "pl.tensor.slice(output__ssa_v0" in printed_main
         assert "pl.tensor.assemble(output__ssa_v0" in printed_main
 
-    def test_global_all_keeps_aggregate_output_windowing(self):
-        """Global all is explicit and still cuts aggregate-loop outputs."""
+    def test_global_exact_keeps_aggregate_output_windowing(self):
+        """Global exact is explicit and still cuts aggregate-loop outputs."""
 
         @pl.program
         class Before:
@@ -5379,17 +5521,17 @@ class TestPerKernelAttrs:
                 result: pl.Tensor[[1024, 128], pl.FP32] = self.cache_write(cache, data, slot)
                 return result
 
-        After = _run_to_optimize_orch_tensors(Before, window_policy="all")
+        After = _run_to_optimize_orch_tensors(Before, window_policy="exact")
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "pl.tensor.slice(cache__ssa_v0" in printed_main
         assert "pl.tensor.assemble(cache__ssa_v0" in printed_main
 
-    def test_kernel_auto_attr_opts_into_aggregate_output_windowing(self):
-        """Kernel auto uses the same static exact-output rules as global auto."""
+    def test_kernel_side_stable_attr_opts_into_aggregate_output_windowing(self):
+        """Kernel side stable uses the same static exact-output rules as global stable."""
 
         @pl.program
         class Before:
-            @pl.function(type=pl.FunctionType.InCore, attrs={"window_policy": "auto"})
+            @pl.function(type=pl.FunctionType.InCore, attrs={"window_outputs": "stable"})
             def cache_write(
                 self,
                 cache: pl.Out[pl.Tensor[[1024, 128], pl.FP32]],
@@ -5447,17 +5589,17 @@ class TestPerKernelAttrs:
                 result: pl.Tensor[[1024, 128], pl.FP32] = self.cache_write(cache, data, slot)
                 return result
 
-        After = _run_to_optimize_orch_tensors(Before, window_policy="auto")
+        After = _run_to_optimize_orch_tensors(Before, window_policy="stable")
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "pl.tensor.slice(cache__ssa_v0" in printed_main
         assert "pl.tensor.assemble(cache__ssa_v0" in printed_main
 
-    def test_per_kernel_outputs_coalesce_dense_pieces(self):
-        """kernel outputs="coalesce" merges dense multi-piece writes into one bbox."""
+    def test_per_kernel_outputs_bounding_box_dense_pieces(self):
+        """kernel outputs="boundingBox" may merge dense multi-piece writes into one window."""
 
         @pl.program
         class Before:
-            @pl.function(type=pl.FunctionType.InCore, attrs={"window_outputs": "coalesce"})
+            @pl.function(type=pl.FunctionType.InCore, attrs={"window_outputs": "boundingBox"})
             def cache_write(
                 self,
                 cache: pl.Out[pl.Tensor[[1024, 128], pl.FP32]],
@@ -5481,7 +5623,7 @@ class TestPerKernelAttrs:
                 result: pl.Tensor[[1024, 128], pl.FP32] = self.cache_write(cache, data, slot)
                 return result
 
-        After = _run_to_optimize_orch_tensors(Before, window_policy="auto")
+        After = _run_to_optimize_orch_tensors(Before, window_policy="stable")
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "cache_write__windowed" in printed_main
@@ -5494,12 +5636,12 @@ class TestPerKernelAttrs:
         printed_windowed = ir.python_print(_get_function(After, "cache_write__windowed"))
         assert "pl.Out[pl.Tensor[[4, 128], pl.FP32" in printed_windowed
 
-    def test_per_kernel_outputs_coalesce_sparse_pieces_falls_back_exact(self):
-        """Sparse bbox coalesce falls back to exact pieces for writer-only rewrites."""
+    def test_per_kernel_outputs_bounding_box_sparse_pieces_selects_bounding_box(self):
+        """Sparse boundingBox may be selected when it reduces exact piece count."""
 
         @pl.program
         class Before:
-            @pl.function(type=pl.FunctionType.InCore, attrs={"window_outputs": "coalesce"})
+            @pl.function(type=pl.FunctionType.InCore, attrs={"window_outputs": "boundingBox"})
             def cache_write(
                 self,
                 cache: pl.Out[pl.Tensor[[1024, 128], pl.FP32]],
@@ -5523,24 +5665,22 @@ class TestPerKernelAttrs:
                 result: pl.Tensor[[1024, 128], pl.FP32] = self.cache_write(cache, data, slot)
                 return result
 
-        After = _run_to_optimize_orch_tensors(Before, window_policy="auto")
+        After = _run_to_optimize_orch_tensors(Before, window_policy="stable")
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "cache_write__windowed" in printed_main
-        assert "cache__ssa_v0__window_3" in printed_main
-        assert "cache__ssa_v0__window_base_arg" not in printed_main
-        assert "cache__ssa_v0__window_extent_arg" not in printed_main
+        assert "cache__ssa_v0__window_3" not in printed_main
+        assert "cache__ssa_v0__window_base_arg" in printed_main
+        assert "cache__ssa_v0__window_extent_arg" in printed_main
         assert "pl.tensor.assemble(" in printed_main
-        assert "[135, 0]" in printed_main
-        assert "[263, 0]" in printed_main
-        assert "[391, 0]" in printed_main
+        assert "[cache__ssa_v0__window_extent_arg, 128]" in printed_main
 
-    def test_explicit_coalesce_exact_fallback_respects_runtime_tensor_arg_limit(self):
+    def test_explicit_bounding_box_exact_fallback_respects_runtime_tensor_arg_limit(self):
         """Exact fallback still rejects callsites that would exceed runtime tensor arg caps."""
 
         @pl.program
         class Before:
-            @pl.function(type=pl.FunctionType.InCore, attrs={"window_outputs": "coalesce"})
+            @pl.function(type=pl.FunctionType.InCore, attrs={"window_outputs": "boundingBox"})
             def cache_write(
                 self,
                 cache: pl.Out[pl.Tensor[[8192, 128], pl.FP32]],
@@ -5564,15 +5704,15 @@ class TestPerKernelAttrs:
                 result: pl.Tensor[[8192, 128], pl.FP32] = self.cache_write(cache, data, slot)
                 return result
 
-        After = _run_to_optimize_orch_tensors(Before, window_policy="auto")
+        After = _run_to_optimize_orch_tensors(Before, window_policy="stable")
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "cache_write__windowed" not in printed_main
         assert "pl.tensor.slice(" not in printed_main
         assert "cache_write(cache" in printed_main
 
-    def test_policy_all_without_dynamic_reader_keeps_exact_pieces(self):
-        """global all does not coalesce multi-piece output without a reader flow."""
+    def test_exact_local_without_dynamic_reader_keeps_exact_pieces(self):
+        """global exact keeps exact pieces without synthesizing a boundingBox."""
 
         @pl.program
         class Before:
@@ -5600,15 +5740,15 @@ class TestPerKernelAttrs:
                 result: pl.Tensor[[1024, 128], pl.FP32] = self.cache_write(cache, data, slot)
                 return result
 
-        After = _run_to_optimize_orch_tensors(Before, window_policy="all")
+        After = _run_to_optimize_orch_tensors(Before, window_policy="exact")
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "cache_write__windowed" in printed_main
         assert "cache__ssa_v0__window_3" in printed_main
         assert "cache__ssa_v0__window_base_arg" not in printed_main
 
-    def test_policy_all_selects_coalesce_per_callsite_flow(self):
-        """One callee can stay exact at one callsite and coalesce for a reader flow."""
+    def test_bounding_box_linked_selects_bounding_box_per_callsite_flow(self):
+        """One callee can stay exact at one callsite and use boundingBox for a reader flow."""
 
         @pl.program
         class Before:
@@ -5660,21 +5800,25 @@ class TestPerKernelAttrs:
                 result: pl.Tensor[[4, 64], pl.FP32] = self.cache_read(out, cache_b_next, block_table)
                 return cache_a_next, cache_b_next, result
 
-        After = _run_to_optimize_orch_tensors(Before, window_policy="all")
+        After = _run_to_optimize_orch_tensors(
+            Before,
+            window_policy="boundingBox",
+            window_flow="linked",
+        )
 
         printed_program = ir.python_print(After)
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "cache_write__windowed" in printed_program
-        assert "cache_write__windowed__coalesced" in printed_program
-        assert "cache_write__windowed__coalesced" in printed_main
+        assert "cache_write__windowed__linked" in printed_program
+        assert "cache_write__windowed__linked" in printed_main
         assert "cache_a__ssa_v0__window_1" in printed_main
         assert "cache_a__ssa_v0__window_base_arg" not in printed_main
         assert "cache_b__ssa_v0__window_1" not in printed_main
         assert "cache_read__windowed" in printed_main
         assert "__carrier_base" in printed_main
 
-    def test_policy_all_no_private_dynamic(self):
-        """v5: all does not window dynamic readers without a carrier."""
+    def test_exact_local_no_private_dynamic(self):
+        """exact local does not window dynamic readers without a linked carrier."""
 
         @pl.program
         class Before:
@@ -5704,12 +5848,12 @@ class TestPerKernelAttrs:
                 result: pl.Tensor[[4, 64], pl.FP32] = self.cache_read(out, cache, block_table)
                 return result
 
-        After = _run_to_optimize_orch_tensors(Before, window_policy="all")
+        After = _run_to_optimize_orch_tensors(Before, window_policy="exact")
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "cache_read__windowed" not in printed_main
 
     def test_carrier_fallback_no_private(self):
-        """v5: when carrier conditions fail, the reader stays full parent."""
+        """When linked carrier conditions fail, the reader stays full parent."""
 
         @pl.program
         class Before:
@@ -5741,18 +5885,21 @@ class TestPerKernelAttrs:
                 result: pl.Tensor[[4, 64], pl.FP32] = self.cache_read(out, cache, block_table, valid_blocks)
                 return result
 
-        After = _run_to_optimize_orch_tensors(Before, window_policy="all")
+        After = _run_to_optimize_orch_tensors(Before, window_policy="exact")
         printed_main = ir.python_print(_get_function(After, "main"))
         # Dynamic reader with unknown trip count → no carrier, no private → full parent.
         assert "cache_read__windowed" not in printed_main
         assert "cache__ssa_v0__window" not in printed_main
 
-    def test_coalesce_reader_all_output_derived_carrier_dynamic_reader(self):
-        """coalesce selects writer shape; reader all opts into carrier args."""
+    def test_bounding_box_linked_output_derived_carrier_dynamic_reader(self):
+        """boundingBox selects writer coverage; linked flow may lower to carrier args."""
 
         @pl.program
         class Before:
-            @pl.function(type=pl.FunctionType.InCore, attrs={"window_outputs": "coalesce"})
+            @pl.function(
+                type=pl.FunctionType.InCore,
+                attrs={"window_outputs": "boundingBox", "window_flow": "linked"},
+            )
             def cache_write(
                 self,
                 cache: pl.Out[pl.Tensor[[1024, 64], pl.FP32]],
@@ -5766,7 +5913,10 @@ class TestPerKernelAttrs:
                     cache_rv = pl.yield_(cache_next)
                 return cache_rv
 
-            @pl.function(type=pl.FunctionType.InCore, attrs={"window_inputs": "all"})
+            @pl.function(
+                type=pl.FunctionType.InCore,
+                attrs={"window_inputs": "boundingBox", "window_flow": "linked"},
+            )
             def cache_read(
                 self,
                 out: pl.Out[pl.Tensor[[4, 64], pl.FP32]],
@@ -5795,7 +5945,7 @@ class TestPerKernelAttrs:
                 result: pl.Tensor[[4, 64], pl.FP32] = self.cache_read(out, cache_next, block_table)
                 return cache_next, result
 
-        for policy in ("auto", "none"):
+        for policy in ("stable", "none"):
             After = _run_to_optimize_orch_tensors(Before, window_policy=policy)
 
             printed_main = ir.python_print(_get_function(After, "main"))
@@ -5805,8 +5955,8 @@ class TestPerKernelAttrs:
             assert "__carrier_extent" in printed_main
             assert "__carrier_scan_" in printed_main
 
-    def test_policy_all_output_derived_carrier_dynamic_reader(self):
-        """all keeps correctness-proven writer/reader carrier chains."""
+    def test_bounding_box_linked_output_derived_carrier_dynamic_reader_global(self):
+        """global boundingBox + linked keeps correctness-proven writer/reader chains."""
 
         @pl.program
         class Before:
@@ -5853,7 +6003,11 @@ class TestPerKernelAttrs:
                 result: pl.Tensor[[4, 64], pl.FP32] = self.cache_read(out, cache_next, block_table)
                 return cache_next, result
 
-        After = _run_to_optimize_orch_tensors(Before, window_policy="all")
+        After = _run_to_optimize_orch_tensors(
+            Before,
+            window_policy="boundingBox",
+            window_flow="linked",
+        )
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "cache_write__windowed" in printed_main
@@ -5862,12 +6016,12 @@ class TestPerKernelAttrs:
         assert "__carrier_extent" in printed_main
         assert "__carrier_scan_" in printed_main
 
-    def test_coalesce_output_no_carrier_contract_dynamic_reader_stays_full_parent(self):
-        """coalesce only means output bbox; it does not force a dynamic reader carrier."""
+    def test_bounding_box_output_local_dynamic_reader_stays_full_parent(self):
+        """boundingBox coverage alone does not force a dynamic reader carrier."""
 
         @pl.program
         class Before:
-            @pl.function(type=pl.FunctionType.InCore, attrs={"window_outputs": "coalesce"})
+            @pl.function(type=pl.FunctionType.InCore, attrs={"window_outputs": "boundingBox"})
             def cache_write(
                 self,
                 cache: pl.Out[pl.Tensor[[1024, 64], pl.FP32]],
@@ -5910,7 +6064,7 @@ class TestPerKernelAttrs:
                 result: pl.Tensor[[4, 64], pl.FP32] = self.cache_read(out, cache_next, block_table)
                 return cache_next, result
 
-        After = _run_to_optimize_orch_tensors(Before, window_policy="auto")
+        After = _run_to_optimize_orch_tensors(Before, window_policy="stable")
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "cache_write__windowed" in printed_main
@@ -5919,12 +6073,15 @@ class TestPerKernelAttrs:
         assert "__carrier_extent" not in printed_main
         assert "__carrier_scan_" not in printed_main
 
-    def test_all_current_barrier_not_model_specific(self):
-        """Runtime current barrier is attrs-driven, not model-specific names."""
+    def test_linked_flow_does_not_use_runtime_current_name_heuristic(self):
+        """Runtime-current barriers are not inserted by producer/consumer name heuristics."""
 
         @pl.program
         class Before:
-            @pl.function(type=pl.FunctionType.InCore, attrs={"window_policy": "all"})
+            @pl.function(
+                type=pl.FunctionType.InCore,
+                attrs={"window_outputs": "exact", "window_flow": "linked"},
+            )
             def produce_segments(
                 self,
                 src: pl.Tensor[[64, 256], pl.FP32],
@@ -5966,20 +6123,20 @@ class TestPerKernelAttrs:
                     out_rv = pl.yield_(out_next)
                 return out_rv
 
-        After = _run_to_optimize_orch_tensors(Before, window_policy="auto")
+        After = _run_to_optimize_orch_tensors(Before, window_policy="stable")
 
         printed_main = ir.python_print(_get_function(After, "main"))
-        assert After.get_function("__pypto_runtime_current_barrier") is not None, printed_main
-        assert "__runtime_current" in printed_main
+        assert After.get_function("__pypto_runtime_current_barrier") is None, printed_main
+        assert "__runtime_current" not in printed_main
         assert "produce_segments__windowed" in printed_main
         assert "combine_segments" in printed_main
 
-    def test_coalesce_current_barrier_not_inserted_without_carrier_contract(self):
-        """Plain coalesce should not trigger runtime-current barrier insertion."""
+    def test_bounding_box_current_barrier_not_inserted_without_linked_flow(self):
+        """Plain boundingBox coverage should not trigger runtime-current barrier insertion."""
 
         @pl.program
         class Before:
-            @pl.function(type=pl.FunctionType.InCore, attrs={"window_outputs": "coalesce"})
+            @pl.function(type=pl.FunctionType.InCore, attrs={"window_outputs": "boundingBox"})
             def produce_segments(
                 self,
                 src: pl.Tensor[[64, 256], pl.FP32],
@@ -6021,19 +6178,22 @@ class TestPerKernelAttrs:
                     out_rv = pl.yield_(out_next)
                 return out_rv
 
-        After = _run_to_optimize_orch_tensors(Before, window_policy="auto")
+        After = _run_to_optimize_orch_tensors(Before, window_policy="stable")
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert After.get_function("__pypto_runtime_current_barrier") is None, printed_main
         assert "__runtime_current" not in printed_main
         assert "produce_segments__windowed" in printed_main
 
-    def test_all_no_barrier_when_output_rewrite_falls_back(self):
-        """all policy alone should not trigger runtime-current barrier after fallback."""
+    def test_linked_no_barrier_when_output_rewrite_falls_back(self):
+        """linked flow alone should not trigger runtime-current barrier after fallback."""
 
         @pl.program
         class Before:
-            @pl.function(type=pl.FunctionType.InCore, attrs={"window_policy": "all"})
+            @pl.function(
+                type=pl.FunctionType.InCore,
+                attrs={"window_outputs": "exact", "window_flow": "linked"},
+            )
             def produce_full_tensor(
                 self,
                 src: pl.Tensor[[64, 256], pl.FP32],
@@ -6073,7 +6233,7 @@ class TestPerKernelAttrs:
                     out_rv = pl.yield_(out_next)
                 return out_rv
 
-        After = _run_to_optimize_orch_tensors(Before, window_policy="auto")
+        After = _run_to_optimize_orch_tensors(Before, window_policy="stable")
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert After.get_function("__pypto_runtime_current_barrier") is None, printed_main
@@ -6106,10 +6266,10 @@ class TestPerKernelAttrs:
                 return result
 
         with pytest.raises(Exception, match="window_outputs"):
-            _run_to_optimize_orch_tensors(Before, window_policy="all")
+            _run_to_optimize_orch_tensors(Before, window_policy="exact")
 
     def test_coalesce_carrier_window_outputs_attr_raises(self):
-        """coalesce_carrier is not a public v5 window_outputs value."""
+        """coalesce_carrier is not a public v6 window_outputs value."""
 
         @pl.program
         class Before:
@@ -6133,7 +6293,7 @@ class TestPerKernelAttrs:
                 return result
 
         with pytest.raises(Exception, match="window_outputs"):
-            _run_to_optimize_orch_tensors(Before, window_policy="all")
+            _run_to_optimize_orch_tensors(Before, window_policy="exact")
 
     def test_invalid_window_inputs_attr_raises(self):
         """kernel attrs={"window_inputs": "unknown"} triggers a CHECK failure."""
@@ -6160,7 +6320,61 @@ class TestPerKernelAttrs:
                 return result
 
         with pytest.raises(Exception, match="window_inputs"):
-            _run_to_optimize_orch_tensors(Before, window_policy="auto")
+            _run_to_optimize_orch_tensors(Before, window_policy="stable")
+
+    def test_carrier_window_inputs_attr_raises(self):
+        """carrier is not a public v6 side coverage value."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore, attrs={"window_inputs": "carrier"})
+            def reader(
+                self,
+                out: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+                data: pl.Tensor[[128, 64], pl.FP32],
+            ) -> pl.Tensor[[1, 64], pl.FP32]:
+                t: pl.Tile[[1, 64], pl.FP32] = pl.tile.load(data, [7, 0], [1, 64], [128, 64])
+                result: pl.Tensor[[1, 64], pl.FP32] = pl.tile.store(t, [0, 0], out)
+                return result
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                out: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+                data: pl.Tensor[[128, 64], pl.FP32],
+            ) -> pl.Tensor[[1, 64], pl.FP32]:
+                result: pl.Tensor[[1, 64], pl.FP32] = self.reader(out, data)
+                return result
+
+        with pytest.raises(Exception, match="window_inputs"):
+            _run_to_optimize_orch_tensors(Before, window_policy="stable")
+
+    def test_kernel_window_policy_attr_raises(self):
+        """kernel attrs={"window_policy": ...} was removed in v6."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore, attrs={"window_policy": "stable"})
+            def writer(
+                self,
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+                data: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t: pl.Tile[[64], pl.FP32] = pl.tile.load(data, [0], [64])
+                result: pl.Tensor[[64], pl.FP32] = pl.tile.store(t, [0], out)
+                return result
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+                data: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = self.writer(out, data)
+                return result
+
+        with pytest.raises(Exception, match="window_policy"):
+            _run_to_optimize_orch_tensors(Before, window_policy="stable")
 
     def test_invalid_window_policy_raises(self):
         """window_policy="invalid" triggers a CHECK failure."""
@@ -6188,6 +6402,33 @@ class TestPerKernelAttrs:
 
         with pytest.raises(Exception, match="window_policy"):
             _run_to_optimize_orch_tensors(Before, window_policy="invalid")
+
+    def test_global_all_window_policy_raises(self):
+        """window_policy="all" was removed in v6."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def writer(
+                self,
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+                data: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t: pl.Tile[[64], pl.FP32] = pl.tile.load(data, [0], [64])
+                result: pl.Tensor[[64], pl.FP32] = pl.tile.store(t, [0], out)
+                return result
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+                data: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = self.writer(out, data)
+                return result
+
+        with pytest.raises(Exception, match="all"):
+            _run_to_optimize_orch_tensors(Before, window_policy="all")
 
 
 if __name__ == "__main__":

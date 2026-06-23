@@ -13,10 +13,12 @@
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/function.h>
+#include <nanobind/stl/optional.h>
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -419,13 +421,37 @@ void BindPass(nb::module_& m) {
              "Create a pass that outlines Hierarchy scopes into separate level/role functions");
   passes.def("convert_tensor_to_tile_ops", &pass::ConvertTensorToTileOps,
              "Create a pass that converts tensor ops to tile ops in InCore functions");
-  passes.def("optimize_orch_tensors", &pass::OptimizeOrchTensors, nb::arg("window_policy") = "auto",
-             "Create a pass that optimizes tensor buffer usage in orchestration and InCore functions\n\n"
-             "Applies five patterns: iter-arg reuse (merge Out->InOut), assemble parent\n"
-             "strides (attach TensorView to Out params), assemble-loop rewrite\n"
-             "(convert tile.assemble loops to tile.store loops), slice input strides,\n"
-             "and static window externalization. "
-             "window_policy may be 'auto', 'all', or 'none'.");
+  passes.def(
+      "optimize_orch_tensors",
+      [](std::optional<std::string> window_option, std::optional<std::string> window_policy,
+         std::optional<std::string> window_flow) {
+        if (window_option.has_value() && (window_policy.has_value() || window_flow.has_value())) {
+          CHECK(false) << "Do not pass window_option together with window_policy/window_flow. "
+                       << "Use either the preset API or the explicit two-axis API.";
+        }
+
+        if (window_option.has_value()) {
+          if (*window_option == "none" || *window_option == "stable" || *window_option == "exact") {
+            return pass::OptimizeOrchTensors(*window_option, "local");
+          }
+          CHECK(false) << "Invalid window_option '" << *window_option
+                       << "': expected 'none', 'stable', or 'exact'. "
+                       << "Use window_policy/window_flow for advanced boundingBox or linked settings.";
+        }
+
+        return pass::OptimizeOrchTensors(window_policy.value_or("stable"), window_flow.value_or("local"));
+      },
+      nb::arg("window_option") = nb::none(), nb::arg("window_policy") = nb::none(),
+      nb::arg("window_flow") = nb::none(),
+      "Create a pass that optimizes tensor buffer usage in orchestration and InCore functions\n\n"
+      "Applies five patterns: iter-arg reuse (merge Out->InOut), assemble parent\n"
+      "strides (attach TensorView to Out params), assemble-loop rewrite\n"
+      "(convert tile.assemble loops to tile.store loops), slice input strides,\n"
+      "and static window externalization. "
+      "window_option may be 'none', 'stable', or 'exact'. "
+      "window_policy may be 'none', 'stable', 'exact', or 'boundingBox'; "
+      "window_flow may be 'local' or 'linked'. "
+      "Do not combine window_option with window_policy/window_flow.");
   passes.def("flatten_tile_nd_to_2d", &pass::FlattenTileNdTo2D,
              "Create a pass that flattens ND tile ops to 2D in InCore functions\n\n"
              "Merges all dimensions except the last into a single dimension.\n"

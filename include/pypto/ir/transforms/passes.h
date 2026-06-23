@@ -400,7 +400,8 @@ Pass ConvertTensorToTileOps();
  * Requirements:
  * - Input IR must have tile ops in InCore functions (run ConvertTensorToTileOps first)
  */
-Pass OptimizeOrchTensors(const std::string& window_policy = "auto");
+Pass OptimizeOrchTensors(const std::string& window_policy = "stable",
+                         const std::string& window_flow = "local");
 
 /**
  * @brief Flatten ND tile ops to 2D in InCore functions

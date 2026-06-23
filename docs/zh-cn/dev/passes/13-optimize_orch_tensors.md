@@ -27,27 +27,80 @@ opt_pass = passes.optimize_orch_tensors()
 program_opt = opt_pass(program)
 ```
 
-本 pass 接受单个 `window_policy` 参数（默认 `"auto"`）：
+多数用户应先用 `window_option` 选择一个 preset：
 
 ```python
-passes.optimize_orch_tensors(window_policy="auto")
+passes.optimize_orch_tensors(window_option="stable")
 ```
 
-`window_policy` 控制窗口外部化策略：
+`window_option` 取值：
 
-| Value | Output | Input | Notes |
-| ----- | ------ | ----- | ----- |
-| `"auto"` | ABI-safe 单 piece window | ABI-safe 静态 window | 默认；proof-based 且不扩张 submit 签名 |
-| `"all"` | 所有可证明正确的 output window | 所有可证明正确的 input window，包含 dynamic carrier reader | 激进模式；允许扩张 submit 签名和 carrier 参数 |
-| `"none"` | 默认不做 windowing | 默认不做 windowing | kernel attrs 可显式 opt in |
+- `"none"`：展开为 `window_policy="none", window_flow="local"`。默认不
+  window；显式 kernel attrs 仍可 opt in。
+- `"stable"`：展开为 `window_policy="stable", window_flow="local"`。默认值；
+  使用稳定 exact window，不扩张 runtime submit 实参。
+- `"exact"`：展开为 `window_policy="exact", window_flow="local"`。允许会扩张
+  submit 实参的 exact window；不允许 boundingBox 空洞，也不启用 linked flow。
 
-全局策略会映射为 per-kernel 默认值：
+`window_option="none"` 不是 kill switch；它只改变全局默认。带有显式
+`window_outputs`、`window_inputs` 或 `window_flow` attrs 的 kernel 仍可 opt in。
 
-| Global policy | Default `window_outputs` | Default `window_inputs` |
-| ------------- | ------------------------ | ----------------------- |
-| `"auto"` | `"auto"` | `"auto"` |
-| `"all"` | `"all"` | `"all"` |
-| `"none"` | `"off"` | `"off"` |
+高级用户可以使用显式两轴 API：
+
+```python
+passes.optimize_orch_tensors(window_policy="stable", window_flow="local")
+```
+
+不要同时传 `window_option` 和 `window_policy` / `window_flow`。二者分别表示
+preset API 和显式两轴 API，混用会报错。
+
+`window_policy` 控制单个 callsite 的 coverage 形状和 submit 参数预算。
+`window_flow` 控制可证明的 coverage 关系能否跨 writer/reader callsite 传播。
+Carrier/base/extent/current/remat 不是用户配置项，只是某些 proven linked flow
+的 lowering 结果。
+
+`boundingBox` 和 `linked` 故意不放进 `window_option`。需要更大的
+coverage/flow 语义时，应显式使用 `window_policy="boundingBox"` 或
+`window_flow="linked"`。
+
+`window_policy` 取值：
+
+- `"none"`：默认不 window；显式 kernel attrs 仍可 opt in。
+- `"stable"`：默认值。只做 ABI-safe exact window；不扩张 submit
+  tensor/scalar 参数。
+- `"exact"`：使用可证明正确的 exact pieces；submit 签名可以扩张；不允许
+  boundingBox 空洞。
+- `"boundingBox"`：exact-first，但当 exact pieces 超过表达预算、linked proof
+  需要连续 coverage，或机械 cost 规则证明 view/参数数量下降时，允许连续
+  boundingBox。用户显式接受空洞覆盖。
+
+`window_flow` 取值：
+
+- `"local"`：每个 callsite 独立改写，不产生跨 callsite current/carrier
+  lowering。
+- `"linked"`：当 writer 和 reader 两端都 opt in 且 proof 成立时，允许跨
+  callsite 复用 coverage；proof 失败自动 fallback，不报错。
+
+常用全局组合：
+
+- `none + local`：默认不改；默认不 window；无空洞、无 linked flow、无
+  carrier/base/extent/barrier。
+- `none + linked`：默认不改；只影响显式 opt-in kernel。只有 writer/reader
+  双方 effective flow 都是 linked 的 opt-in edge 才可能在 proof 成立后出现
+  linked lowering。
+- `stable + local`：不扩张 submit 参数；只做 ABI-safe exact；无空洞、无
+  linked flow、无 carrier/base/extent/barrier。
+- `stable + linked`：不扩张 submit 参数；只做 ABI-safe exact；可尝试 proof，
+  但多数 dynamic reader fallback；需要新增 base/extent/barrier 时 fallback。
+- `exact + local`：submit 参数可扩张；使用 exact pieces；无空洞、无 linked
+  flow、无 carrier/base/extent/barrier。
+- `exact + linked`：submit 参数可扩张；使用 exact pieces；只允许 single
+  dense exact linked coverage；不会偷偷合成 boundingBox carrier。
+- `boundingBox + local`：submit 参数可扩张；使用 exact 或 boundingBox；允许
+  空洞；无 linked flow、无 carrier/base/extent/barrier。
+- `boundingBox + linked`：submit 参数可扩张；使用 exact 或 boundingBox；允许
+  空洞；允许 proven writer-reader linked coverage；可能出现
+  carrier/base/extent/remat。
 
 **Per-kernel 覆盖**（通过 function attrs）：
 
@@ -55,63 +108,65 @@ passes.optimize_orch_tensors(window_policy="auto")
 @pl.function(
     type=pl.FunctionType.InCore,
     attrs={
-        "window_policy":  "auto",      # 可选 kernel 默认值：none | auto | all
-        "window_outputs": "coalesce",  # off | auto | all | exact | coalesce
-        "window_inputs":  "off",       # off | auto | all
+        "window_outputs": "exact",       # off | stable | exact | boundingBox
+        "window_inputs":  "off",         # off | stable | exact | boundingBox
+        "window_flow":    "linked",      # local | linked
     }
 )
 def my_kernel(...): ...
 ```
 
-Kernel attrs 覆盖全局默认值；缺失的 attr 才继承全局。即使全局默认是
-`"none"`，显式 kernel attr 也可以 opt in。
+缺失 attrs 继承全局设置。显式 side attrs 优先，包括全局默认为 `"none"` 时的
+显式 opt-in。`window_outputs` 和 `window_inputs` 是相互独立的 coverage
+permission。`InOut` 的依赖 coverage 可以拆成 read coverage 和 write coverage
+分析，但 runtime submit 仍只能给这个参数一个 TensorView；如果读写 submit
+view 冲突，pass 会选择保守 view 或 fallback。
 
-对 `window_inputs` 来说，`"auto"` 覆盖 ABI-safe 静态 input window。需要新增
-carrier scalar/current 参数的 dynamic carrier reader 必须有有效
-`window_inputs="all"`，可以来自全局 `"all"`，也可以来自显式 per-kernel attr。
-没有可证明 writer-reader carrier flow 时，pass 不会创建 private dynamic reader
-scan。
-
-`window_outputs` 和 `window_inputs` 是相互独立的开关。只设置
-`window_outputs="off"` 只会关闭该 kernel 的 output rewrite；如果
-`window_inputs` 仍是 `"auto"`，input 侧 windowing 仍可能克隆 callee。
-如果要完全关闭某个 kernel 的 window externalization，需要两个 attr 都设为
-`"off"`：
+如果要完全关闭某个 kernel 的本地 window externalization，需要两个 side attr
+都设为 `"off"`：
 
 ```python
 attrs={"window_outputs": "off", "window_inputs": "off"}
 ```
 
-如果 caller 只需要合并后的 output bounding box，使用
-`window_outputs="coalesce"`。它只选择 writer output 形状，不会单独让下游
-dynamic reader 增加 carrier 参数：
+`boundingBox` 是 permission，不是强制模式。Pass 默认优先 exact。只有当 exact
+pieces 超出 submit/view 表达预算、linked proof 需要连续 coverage，或机械 cost
+规则证明 runtime tensor view/参数数量下降时，才会选择 boundingBox。如果
+boundingBox 等于 full parent 或没有预期收益，pass 会 fallback 到 exact 或 full
+parent，不报错。
 
 ```python
-attrs={"window_outputs": "coalesce"}
+attrs={"window_outputs": "boundingBox"}
 ```
 
-当兼容的下游 dynamic reader 应该允许复用 output-derived carrier 时，在 reader
-侧使用 `window_inputs="all"`：
+`window_flow="linked"` 不是 carrier 开关。它只允许双方都 effective linked 且
+proof 成立的 writer-reader edge 复用 coverage。当前 lowering 可能表现为
+carrier/base/extent/remat；未来也可能换成别的 lowering。
 
 ```python
-attrs={"window_inputs": "all"}
+attrs={"window_inputs": "boundingBox", "window_flow": "linked"}
 ```
 
 例如，在 Qwen prefill 风格的 dynamic-indexed KV-cache writer/reader 链中：
 
-- `"auto"`：只保留局部简单 window。Dynamic KV-cache writer 和 reader 保持 full-tensor，不引入 carrier/remat。
-- `"all"`：重写 pass 能证明正确的 writer/reader 链，包括 qk/sv 这类 dynamic cache reader 所需的 output-derived carrier 路径。没有可证明 carrier 的 dynamic reader 仍保持 full parent tensor（无 private dynamic reader）。
-- `window_outputs="coalesce"`：显式让某个 writer 做 multi-piece output bounding-box 合并，但不会让下游 dynamic reader 增加 carrier 参数。
-- `window_outputs="coalesce"` 加 reader `window_inputs="all"`：如果 writer/reader flow 证明兼容，则生成 output-derived carrier/remat 路径。这个 input 侧 opt-in 可能新增 carrier scalar/current 参数，因此可能扩张 runtime submit 签名。
+- `stable + local`：只保留 ABI-safe local exact window。Dynamic KV-cache
+  reader 保持 full tensor。
+- `exact + local`：允许 exact pieces 扩张 submit 签名，但不产生跨 callsite
+  carrier lowering。
+- `boundingBox + local`：允许本地连续 coverage 和空洞，但仍不会有
+  carrier/base/extent。
+- `boundingBox + linked`：允许 qk/sv 风格 dynamic reader 使用可证明的
+  output-derived linked flow。Proof 失败时 reader 保持 full parent。
 
-carrier 路径依赖以下所有条件：
+linked dynamic-reader 路径依赖以下所有条件：
 
-- producer 的有效 `window_outputs` 不是 `"off"`
-- producer output rewrite 实际保留下来，生成了 `__windowed` 调用
-- 如果 carrier 路径需要新增 runtime 参数，reader 的有效 `window_inputs` 是 `"all"`
+- producer 的有效 `window_outputs` 能提供需要的 exact 或 boundingBox coverage
+- reader 的有效 `window_inputs` 允许需要的 coverage
+- writer 和 reader 两端 effective `window_flow` 都是 `"linked"`
 - writer/reader pair 满足 shared-root、loop-order 和 min/max proof 检查
 
-如果任一条件不满足，dynamic reader 会保持 full parent tensor；pass 不能仅因为 attr 存在就插入 runtime-current barrier。
+如果任一条件不满足，dynamic reader 会保持 full parent tensor；pass 不能仅因为
+coverage attr 存在就插入 runtime-current barrier。
 
 parent shape 含 dynamic dim 的 output window 会保守处理。对 dynamic parent 的
 static-offset/static-size 静态 partial window 会保持 full-tensor，因为同一个编译图可能用更小的
@@ -120,7 +175,7 @@ dynamic extent 运行。动态 offset 的 window，例如运行时 slot 上的 K
 
 调试时，`PYPTO_WINDOW_EXTERNALIZE_INCLUDE` 和
 `PYPTO_WINDOW_EXTERNALIZE_EXCLUDE` 可以按 callee 或参数名过滤候选。
-`PYPTO_WINDOW_EXTERNALIZE_LOG=1` 会打印 `auto` 的 accept/reject 决策。
+`PYPTO_WINDOW_EXTERNALIZE_LOG=1` 会打印 stable/coverage accept/reject 决策。
 
 ## 优化模式
 
@@ -193,7 +248,13 @@ loop-carried iter-arg 不会被这样折叠。
 
 本 pass 有意保持保守的 window eligibility。它不会按 `topk` 等算子名字做特判；只有 callee 函数体能证明满足下面的访问模式时，才会 window 化。
 
-静态 eligibility 之后，默认 `auto` 策略还会再做一层保守 cost gate。它会拒绝增加 rewritten tensor 参数数量的候选，并默认拒绝 multi-piece output rewrite；dynamic-indexed input 只有在存在可证明的 writer-reader carrier flow，并且 reader 的有效 `window_inputs` 允许所需额外 carrier 参数时才会 window 化，否则保持 full-parent。这样默认流水线不会为了局部 window 精度而换来更大的 dispatch 签名、更多 callsite orchestration，或收益依赖 workload 的私有 dynamic-window scan。需要“只要能证明切对就切，即使 submit 签名变大”的模式时，使用 `window_policy="all"`；需要局部打开 carrier reader 时，使用 reader `window_inputs="all"`。
+静态 eligibility 之后，默认 `stable + local` 策略还会再做一层保守 cost gate。
+它只保留不会增加 `add_inout`、`add_input`、`add_output` 或 `add_scalar`
+submit 预算的 exact window。Multi-piece output rewrite、boundingBox coverage、
+dynamic carrier args 和跨 callsite current/remat 都不属于 stable 默认行为。
+如果 exact pieces 可以扩张 submit 签名，使用 `window_policy="exact"`；如果可以
+接受带空洞的连续 coverage，使用 `window_policy="boundingBox"`；只有在允许
+writer-reader coverage 跨 callsite 传播时才使用 `window_flow="linked"`。
 
 支持的改写形态：
 
@@ -201,7 +262,10 @@ loop-carried iter-arg 不会被这样折叠。
 - `AggregateWindowLoop`：callee 在循环中携带一个或多个 `Out`，并写入静态可证明的聚合窗口，例如 outlined `kv_proj` 分组形态
 - `PureInputWindowConsumer`：有数据返回的 callee 中，某个 `In` 张量参数只通过同一个局部输入窗口被使用
 - `AggregateInputWindowLoop`：与 `AggregateWindowLoop` 输出改写配套使用；某个 `In` 张量参数只通过内部 loop 的局部 `tile.load`/`tensor.slice` 窗口读取，并且这些 offset 能沿同一个内部 loop 展开为一个静态可证明的 parent-shaped region，例如 qk norm 的 q/k 输入
-- `RuntimeCurrentAggregator`：当实际保留下来的 carrier-producing `__windowed` producer loop 会喂给后续重复 full-tensor `In` reader 时，pass 会插入一个 runtime 可见的 current marker。普通 `coalesce` 只是 output bounding-box 策略。匹配由 attrs 驱动，不依赖模型特定的 callee 名或变量名。
+- Linked-flow lowering：当 writer 和 reader 两端都 opt into linked flow 且
+  proof 成立时，pass 可能用 carrier/base/extent/remat lowering 这条关系。
+  Runtime-current marker 只有来自显式 linked-flow plan 时才允许插入；不能根据
+  callee 名称或 `__windowed` clone 的存在做 post-pass heuristic 推断。
 
 输出窗口 eligibility：
 
@@ -231,7 +295,11 @@ loop-carried iter-arg 不会被这样折叠。
 - input-only 的 `Submit` callsite 保持 full-tensor；在 `manual_scope` 中，即使 callee body 只读局部窗口，full input 也可能有意表达更宽的依赖
 - 如果同一个 callee 同时满足 output-window 改写，已经证明成立的 pure input window 会被保留，并在同一个 callsite 一起物化
 - 对 `AggregateInputWindowLoop`，所有引用必须位于同一个静态 `ForStmt` 内，至少一个 offset 维度必须随该 loop 变化，并且聚合窗口必须等于输入 parent shape；权重子窗口这类 partial aggregate read 仍保持 full-tensor
-- dynamic-indexed reader window 需要可证明的 min/max scan、output rewrite 实际保留为 `__windowed` 调用的 writer，以及允许所需 carrier 参数的 reader policy。有 carrier flow 的 eligible writer-reader chain 走 carrier/remat 路径；没有该 proven flow 时，dynamic reader 保持 full parent tensor（无 private dynamic reader）。
+- dynamic-indexed reader window 需要可证明的 min/max scan、coverage 实际保留为
+  `__windowed` 调用或 linked boundingBox variant 的 writer、允许所需 coverage
+  的 reader policy，以及 writer/reader 两端 effective linked flow。没有该
+  proven flow 时，dynamic reader 保持 full parent tensor（无 private dynamic
+  reader）。
 
 非目标与依赖模型：
 
@@ -240,7 +308,8 @@ loop-carried iter-arg 不会被这样折叠。
 - pass 不预生成全局 window descriptor 数组
 - pass 不拆分 SPMD launch，也不 externalize per-block SPMD window
 - unsupported consumer，包括 full-tensor reader，保持 baseline/full-tensor input
-- 部分 prefill full-tensor reader 如果属于实际保留下来的 carrier-producing fan-in producer loop，仍可能获得 runtime-current marker；这不会缩小 reader 区域，但能让 runtime 依赖追踪匹配一个 current tensor，而不是反复扫描大量 producer window
+- runtime-current marker 不由独立 post-pass heuristic 插入；未来如需插入，必须由
+  显式 linked-flow analysis 驱动
 - `DeriveCallDirections` 保持现有 sound 的顺序 `Out -> InOut` 规则；Pattern 5 只是在该 pass 运行前显式化可证明的局部窗口
 
 ## 示例（模式 1）
