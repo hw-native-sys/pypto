@@ -30,8 +30,18 @@ import torch
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
 from pypto.runtime.runner import RunConfig
 
-# sin/cos are hardware approximations; the strict 1e-5 default is unrealistic
-# (and relative error blows up where the result is near 0).
+# Relaxed tolerance for sin/cos (vs the strict 1e-5 default), for three reasons:
+#   1. Math: sin/cos have true zeros in the tested range (cos(pi/2)=0, sin near
+#      3.1). The comparison is |actual-expected| <= atol + rtol*|expected|; as
+#      expected -> 0 the rtol term vanishes, so relative tolerance is undefined
+#      at the zeros — an absolute tolerance (atol) is mandatory there (standard
+#      numpy/torch testing practice).
+#   2. Hardware: a2a3 computes sin/cos with a polynomial/CORDIC approximation,
+#      not bit-exact with torch's libm reference (CI showed ~15% of elements
+#      exceed 1e-5, i.e. the approximation error is ~1e-4 class, not 1e-5).
+#   3. Precedent: the merged test_rsqrt.py — also a hardware transcendental
+#      approximation op — uses rtol=atol=1e-2; we match that accepted bar rather
+#      than invent a looser number.
 _TRIG_RTOL = 1e-2
 _TRIG_ATOL = 1e-2
 

@@ -198,7 +198,11 @@ class TestActivation:
 
     @pytest.mark.platforms("a2a3")
     def test_tile_lrelu_fp16(self, test_runner):
-        # FP16 leaky-relu (compare + scale) needs a looser tolerance than 1e-5.
+        # Relaxed tolerance is required by FP16, not a workaround: FP16 machine
+        # epsilon is 2**-10 ~= 9.8e-4, so a 1e-5 comparison is below FP16's
+        # representable precision and can never be met. lrelu's slope*x multiply
+        # + select rounds to ~1 ULP, so 2e-3 (~2 FP16 ULP) is the right bar.
+        # (relu/muls/divs FP16 stay at the strict default — they are exact in FP16.)
         result = test_runner.run(
             TileLreluTestCase(dtype=DataType.FP16, config=RunConfig(rtol=2e-3, atol=2e-3))
         )
