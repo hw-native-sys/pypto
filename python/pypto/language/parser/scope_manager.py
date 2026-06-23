@@ -114,6 +114,16 @@ class ScopeManager:
             self.assignments[name] = 0
         self.assignments[name] += 1
 
+    def remove_var(self, name: str) -> None:
+        """Remove a variable from the current scope (no-op if absent).
+
+        Used to clean up transient bindings such as CT-kwarg shadow vars
+        before exiting the inline scope. Does not unwind ``assignments``
+        tracking because the removed var was never a user-defined binding.
+        """
+        self.scopes[-1].pop(name, None)
+        self.var_spans[-1].pop(name, None)
+
     def lookup_var(self, name: str) -> Any | None:
         """Lookup variable in scope chain.
 

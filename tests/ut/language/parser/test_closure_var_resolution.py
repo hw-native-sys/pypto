@@ -140,8 +140,12 @@ class TestClosureVarErrors:
                 return result
 
     def test_unsupported_closure_type_raises(self):
-        """Unsupported closure variable type raises ParserTypeError."""
-        BAD_VALUE = "not_a_number"
+        """Unsupported closure variable type raises ParserTypeError.
+
+        Note: ``str`` is no longer unsupported (it was added for CT kwargs
+        in @pl.inline). Use a bytes value instead.
+        """
+        BAD_VALUE = b"not_supported"
 
         with pytest.raises(ParserTypeError, match="Unsupported closure variable type"):
 

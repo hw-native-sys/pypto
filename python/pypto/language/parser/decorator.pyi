@@ -35,6 +35,7 @@ class InlineFunction:
     line_offset: int
     col_offset: int
     closure_vars: dict[str, Any]
+    kwonly_params: dict[str, tuple[str, Any]]
 
 class DSLFunction(ir.Function, Generic[_R_co]):
     """Typing-only view of a decorated DSL function.
