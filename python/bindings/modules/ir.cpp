@@ -674,6 +674,20 @@ void BindIR(nb::module_& m) {
       "Create a Call expression with args and kwargs");
 
   ir.def(
+      "set_call_attrs",
+      [](const CallPtr& call, const nb::dict& attrs_dict) -> CallPtr {
+        // Return a copy of `call` with compiler-internal `attrs_` set from a
+        // Python dict. Used by the round-trip parser to re-attach generic
+        // op-call attrs (e.g. `pipeline_membership`) that the printer surfaced
+        // as `attrs={...}`; op DSL wrappers / IR builders take no attrs param,
+        // so the parser builds the call first, then layers attrs on here.
+        auto attrs = ConvertAttrsFromPython(attrs_dict);
+        return std::make_shared<Call>(call->op_, call->args_, call->kwargs_, attrs, call->GetType(),
+                                      call->span_);
+      },
+      nb::arg("call"), nb::arg("attrs"), "Return a copy of a Call with compiler-internal attrs set");
+
+  ir.def(
       "is_op_registered",
       [](const std::string& op_name) { return OpRegistry::GetInstance().IsRegistered(op_name); },
       nb::arg("op_name"), "Check if an operator is registered");

@@ -111,6 +111,48 @@ VarPtr MakeFreshVar(const VarPtr& original, const std::string& suffix) {
 /// `SeqStmts`), strip it and return its values. Otherwise return the body unchanged
 /// and an empty value list. Always pass through — callers that have no iter_args
 /// simply see an empty yield vector and treat `stmts` as the whole body.
+/// Tag every tile-producing ``Call`` in a cloned pipeline-stage body with one
+/// ``(group, stage)`` pipeline-membership pair. The pair is *appended* to any
+/// membership already present, so a tile inside an already-lowered inner
+/// pipeline accumulates both its inner and this (enclosing) membership — which
+/// keeps nested same-core pipelines separated at every level. MemoryReuse later
+/// uses this with role-aware granularity: it blocks a cross-stage buffer share
+/// only when at least one side is a load buffer (compute intermediates of
+/// different stages may still coalesce) — see kPipelineMembershipAttr.
+///
+/// Only the LHS-defining ``Call`` of a TileType ``AssignStmt`` is tagged — that
+/// is exactly the set of tile *definitions* MemoryReuse keys its reuse decision
+/// on. Non-tile assigns and non-Call tile defs (e.g. a bare Var alias) carry no
+/// membership and simply fall through unconstrained.
+class PipelineMembershipTagger : public IRMutator {
+ public:
+  PipelineMembershipTagger(int32_t group, int32_t stage) : group_(group), stage_(stage) {}
+
+  StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+    // Recurse first so nested control flow (e.g. an inner lowered pipeline) is
+    // visited; AssignStmt itself carries no child statements, but keeping the
+    // default traversal makes the tagger robust to future stmt nesting.
+    auto visited = IRMutator::VisitStmt_(op);
+    auto assign = std::dynamic_pointer_cast<const AssignStmt>(visited);
+    if (!assign) return visited;
+    if (!std::dynamic_pointer_cast<const TileType>(assign->var_->GetType())) return visited;
+    auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
+    if (!call) return visited;
+
+    auto packed = call->GetAttr<std::string>(kPipelineMembershipAttr, std::string());
+    packed = AppendPipelineMembership(packed, group_, stage_);
+    auto new_attrs = StripAttr(call->attrs_, kPipelineMembershipAttr);
+    new_attrs.emplace_back(kPipelineMembershipAttr, std::move(packed));
+    auto new_call = std::make_shared<Call>(call->op_, call->args_, call->kwargs_, std::move(new_attrs),
+                                           call->GetType(), call->span_);
+    return std::make_shared<AssignStmt>(assign->var_, new_call, assign->span_);
+  }
+
+ private:
+  int32_t group_;
+  int32_t stage_;
+};
+
 std::pair<StmtPtr, std::vector<ExprPtr>> SplitBodyYield(const StmtPtr& body) {
   if (auto yield = std::dynamic_pointer_cast<const YieldStmt>(body)) {
     return {std::make_shared<SeqStmts>(std::vector<StmtPtr>{}, body->span_), yield->value_};
@@ -200,6 +242,11 @@ class LowerPipelineMutator : public IRMutator {
   }
 
  private:
+  /// Monotonic id assigned per replicated region (one per ReplicateBody call).
+  /// Distinct regions get distinct ids so MemoryReuse only forbids cross-stage
+  /// reuse *within* a region, never between unrelated pipelines.
+  int32_t next_pipeline_group_ = 0;
+
   /// Empty static trip-count path — no replication needed and nothing for
   /// CanonicalizeIOOrder to cluster (the loop never executes). Demote kind to
   /// Sequential and strip `pipeline_stages` together so the bidirectional
@@ -238,6 +285,13 @@ class LowerPipelineMutator : public IRMutator {
     INTERNAL_CHECK_SPAN(initial_iter_substitutes.size() == op->iter_args_.size(), sp)
         << "Internal error: iter substitute count mismatch";
 
+    // One replicated region == one pipeline group: its clones run concurrently
+    // under the event scheduler, so their tiles must occupy distinct buffers.
+    // The main loop and each (static / dynamic-cascade) tail are separate
+    // ReplicateBody calls and thus separate groups — main-loop and tail tiles
+    // are temporally disjoint and may freely reuse across the group boundary.
+    const int32_t group = next_pipeline_group_++;
+
     std::vector<StmtPtr> clones;
     clones.reserve(static_cast<size_t>(n_clones));
     std::vector<ExprPtr> prev_yields;
@@ -252,6 +306,10 @@ class LowerPipelineMutator : public IRMutator {
       INTERNAL_CHECK_SPAN(cloned_yields.size() == op->iter_args_.size(), sp)
           << "Internal error: loop body must yield " << op->iter_args_.size() << " values for iter_args, got "
           << cloned_yields.size();
+      // Tag this clone's tile definitions with (group, stage=k) so MemoryReuse
+      // keeps the F clones' buffers apart (explicit ping-pong constraint).
+      PipelineMembershipTagger tagger(group, static_cast<int32_t>(k));
+      cloned_stmts = tagger.VisitStmt(cloned_stmts);
       clones.push_back(cloned_stmts);
       prev_yields = std::move(cloned_yields);
     }

@@ -13,6 +13,8 @@
 #define PYPTO_IR_TRANSFORMS_UTILS_ATTRS_H_
 
 #include <any>
+#include <cstddef>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -51,6 +53,77 @@ inline constexpr const char* kPipelineStagesAttr = "pipeline_stages";
 /// accumulator. Consumed (stripped) by ``CanonicalizeIOOrder`` alongside
 /// ``pipeline_stages``.
 inline constexpr const char* kPipelineOverlapStoresAttr = "pipeline_overlap_stores";
+
+/// Attribute key marking a tile-producing ``Call`` with the pipeline-stage
+/// membership(s) of the tile it defines. ``LowerPipelineLoops`` sets it when it
+/// replicates a ``pl.pipeline`` body: every clone of a replicated region is one
+/// pipeline *stage*, and the clones must occupy *distinct* physical buffers so
+/// the event-based scheduler can overlap stage k of iteration i+1 with stage
+/// k+1 of iteration i (the ping-pong that pipelining exists to expose).
+///
+/// ``MemoryReuse`` reads this attr and refuses to coalesce two tiles that share
+/// a common pipeline *group* with *different* stage indices **when at least one
+/// of them is a load buffer** — making stage separation an explicit reuse
+/// constraint rather than a fragile side effect of ``CanonicalizeIOOrder``
+/// statement clustering (which only induces separation when the dependency graph
+/// happens to let it cluster sibling-clone loads). The constraint is role-aware:
+/// only load buffers need per-stage privacy (so iteration i+1's prefetch overlaps
+/// iteration i's compute); compute intermediates of different stages may still
+/// coalesce, because forbidding *all* cross-stage reuse (depth = F) overflows the
+/// on-chip budget on real kernels (e.g. stage=4 RMSNorm). The L0 matmul spaces
+/// (Left/Right/Acc/Bias) are exempt entirely — they are matmul-managed and
+/// capacity-bound.
+///
+/// Value encoding (``std::string`` — round-trip-safe via the existing
+/// python-printer / ast-parser string-attr codec, with no integer-width
+/// ambiguity): semicolon-separated ``"group:stage"`` pairs, e.g. ``"0:1"`` or
+/// ``"3:0;0:1"``. A tile carries one pair per enclosing replicated region, so
+/// nested same-core pipelines (e.g. an L1→L0 pipeline inside a GM→L1 pipeline)
+/// record both memberships and stay separated at every level.
+inline constexpr const char* kPipelineMembershipAttr = "pipeline_membership";
+
+/// Append a ``group:stage`` membership pair to a ``pipeline_membership`` string,
+/// preserving any memberships already present (an inner-loop tag survives when
+/// an enclosing loop re-tags the same tile).
+inline std::string AppendPipelineMembership(const std::string& packed, int32_t group, int32_t stage) {
+  std::string pair = std::to_string(group) + ":" + std::to_string(stage);
+  return packed.empty() ? pair : packed + ";" + pair;
+}
+
+/// Parse a ``pipeline_membership`` string into ``(group, stage)`` pairs.
+inline std::vector<std::pair<int32_t, int32_t>> ParsePipelineMembership(const std::string& packed) {
+  std::vector<std::pair<int32_t, int32_t>> out;
+  size_t i = 0;
+  while (i < packed.size()) {
+    size_t semi = packed.find(';', i);
+    std::string tok = packed.substr(i, semi == std::string::npos ? std::string::npos : semi - i);
+    size_t colon = tok.find(':');
+    if (colon != std::string::npos) {
+      out.emplace_back(static_cast<int32_t>(std::stol(tok.substr(0, colon))),
+                       static_cast<int32_t>(std::stol(tok.substr(colon + 1))));
+    }
+    if (semi == std::string::npos) break;
+    i = semi + 1;
+  }
+  return out;
+}
+
+/// True when two ``pipeline_membership`` strings conflict: they share a common
+/// group id with *different* stage indices. Such tiles belong to the same
+/// replicated region but to clones meant to run concurrently, so they must not
+/// share a buffer. O(A·B) over the (tiny — bounded by pipeline nesting depth)
+/// member lists.
+inline bool PipelineMembershipsConflict(const std::string& a, const std::string& b) {
+  if (a.empty() || b.empty()) return false;
+  auto pa = ParsePipelineMembership(a);
+  auto pb = ParsePipelineMembership(b);
+  for (const auto& [ga, sa] : pa) {
+    for (const auto& [gb, sb] : pb) {
+      if (ga == gb && sa != sb) return true;
+    }
+  }
+  return false;
+}
 
 /// Return a copy of `attrs` with any entry matching `key` removed. The order of
 /// the remaining entries is preserved.

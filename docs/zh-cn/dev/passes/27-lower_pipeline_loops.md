@@ -6,7 +6,13 @@
 
 `pl.unroll(N)` 在 SSA 之前的 slot #1 完整展开循环为 `N` 份副本。用户使用它通常并非需要 `N` 份副本，而是希望获得不同的 tile MemRef —— 否则 `MemoryReuse` 会把生命周期相邻的 tile 合并为同一缓冲区，导致 ping-pong 失效。
 
-`LowerPipelineLoops` 提供更精细的开关：在 tile 层级把循环体复制 `F` 份（典型值 2–4），保留外层 `N/F` 次顺序迭代。每个副本获得独立的定义变量（保持 SSA），各自操作独立的 tile，下游 `MemoryReuse` 无法将其合并。
+`LowerPipelineLoops` 提供更精细的开关：在 tile 层级把循环体复制 `F` 份（典型值 2–4），保留外层 `N/F` 次顺序迭代。每个副本获得独立的定义变量（保持 SSA），各自操作独立的 tile。
+
+仅有新鲜 SSA 变量并不足以让各副本占用独立缓冲：`F` 份副本在程序序上是顺序的，它们的 per-clone tile 生命周期**不相交**——这恰好是 `MemoryReuse` 会将其合并为同一缓冲（破坏 ping-pong）的条件。为使 stage 分离显式化，本 pass 给副本 `k` 的每个产生 tile 的 `Call` 打上 `pipeline_membership` 属性记录 `(group, stage=k)`（见 `include/pypto/ir/transforms/utils/attrs.h`）。嵌套 pipeline 的 tile 会按每层复制区域各携带一个 membership 对，从而在每一层都保持分离。
+
+`MemoryReuse` 以**角色感知**的粒度消费该属性——禁止*所有*跨 stage 复用（depth = `F`）会让每个中间结果都需要 `F` 份独立拷贝，在真实 kernel 上超出片上预算（例如 `stage=4` 的 RMSNorm 需要 `4 × 67 KB > 188 KB` UB）。只有 **load 缓冲**真正需要 per-stage 私有（以便第 `i+1` 次迭代的预取与第 `i` 次的计算重叠）。因此规则为：当两个 tile 同 group、不同 stage **且至少有一个是 load**（`tile.load` / `tile.read`）时，禁止它们共享缓冲；不同 stage 的计算中间结果仍可合并。L0 matmul 空间（Left/Right/Acc/Bias）完全豁免——其 ping-pong 由 `AutoTileMatmulL0` / `CanonicalizeIOOrder` 的 extract 聚类管理，且容量受限。
+
+由于该标记是通用的 op-call 属性，它会经 python printer/parser（`attrs={"pipeline_membership": "..."}`）序列化，以便在测试框架每个 pass 后执行的 print→parse 往返中存活。
 
 `pl.pipeline(...)` 在内部生成 `ForStmt(kind=ForKind::Pipeline, attrs={"pipeline_stages": F})`。结构性不变量 `kind == Pipeline ⇔ pipeline_stages 属性存在`（双向；由 `PipelineLoopValid` 验证器强制）保证 kind 与属性始终成对存在。`LowerPipelineLoops` 在 `F > 1` 时触发：复制循环体并把属性下调为 `1` 作为降级后的标记位，保留 `ForKind::Pipeline` 让下游 `CanonicalizeIOOrder` 继续作用。再次运行 `LowerPipelineLoops` 看到 `factor == 1` 即跳过（自然幂等）。
 

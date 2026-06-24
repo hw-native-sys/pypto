@@ -1037,6 +1037,33 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
     }
   }
 
+  // Serialize ONLY op-call attrs that genuinely need to survive print -> parse,
+  // via an explicit allowlist. Most op-call attrs are either re-derived by the
+  // parser (e.g. ``dummy_task`` on ``system.task_dummy``) or surfaced through a
+  // bespoke kwarg (``deps=`` / ``device=``), so emitting them generically would
+  // either duplicate that surface or expose an internal marker the round-trip
+  // tests don't expect. ``pipeline_membership`` (set by LowerPipelineLoops, read
+  // by MemoryReuse) has no such surface and MUST round-trip, else the structural
+  // equality check after those passes fails. The matching reader is
+  // ``ast_parser`` (``_parse_op_attrs`` -> ``set_call_attrs``).
+  {
+    std::vector<const std::pair<std::string, std::any>*> serialized_attrs;
+    for (const auto& kv : op->attrs_) {
+      if (kv.first == kPipelineMembershipAttr) serialized_attrs.push_back(&kv);
+    }
+    if (!serialized_attrs.empty()) {
+      stream_ << (need_comma ? ", " : "") << "attrs={";
+      bool first_key = true;
+      for (const auto* kv : serialized_attrs) {
+        stream_ << (first_key ? "" : ", ");
+        first_key = false;
+        stream_ << std::quoted(kv->first) << ": ";
+        PrintAttrValue(kv->second, op->span_);
+      }
+      stream_ << "}";
+    }
+  }
+
   stream_ << ")";
 }
 

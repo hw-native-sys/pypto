@@ -6429,6 +6429,13 @@ class ASTParser:
             key = keyword.arg
             value = keyword.value
 
+            # ``attrs={...}`` is a generic compiler-internal attr dict (e.g.
+            # ``pipeline_membership``), NOT an op kwarg. The dispatch helpers
+            # extract it via ``_parse_op_attrs`` and re-attach it to the built
+            # Call, so skip it here.
+            if key == "attrs":
+                continue
+
             # Handle dtype specially
             if key == "dtype":
                 kwargs[key] = self.type_resolver.resolve_dtype(value)
@@ -6445,6 +6452,33 @@ class ASTParser:
             else:
                 kwargs[key] = self.parse_expression(value)
         return kwargs
+
+    def _parse_op_attrs(self, call: ast.Call) -> dict[str, object] | None:
+        """Extract a generic ``attrs={...}`` kwarg from an op call, if present.
+
+        The python printer surfaces compiler-internal op-call attrs (e.g.
+        ``pipeline_membership``) as a trailing ``attrs={...}`` dict. The op DSL
+        wrappers / IR builders take no attrs parameter, so the dispatch helpers
+        parse it here and re-attach it via ``ir.set_call_attrs`` after building
+        the call. Returns ``None`` when no ``attrs=`` kwarg is present.
+        """
+        for keyword in call.keywords:
+            if keyword.arg != "attrs":
+                continue
+            if not isinstance(keyword.value, ast.Dict):
+                raise ParserSyntaxError(
+                    "op attrs must be a dict literal",
+                    span=self.span_tracker.get_span(keyword.value),
+                )
+            return self._parse_attrs_dict(keyword.value)
+        return None
+
+    @staticmethod
+    def _attach_op_attrs(result: ir.Expr, attrs: dict[str, object] | None) -> ir.Expr:
+        """Re-attach parsed generic attrs to a freshly built op Call."""
+        if attrs and isinstance(result, ir.Call):
+            return ir.set_call_attrs(result, attrs)
+        return result
 
     def _resolve_unary_kwarg(self, value: ast.UnaryOp) -> Any:
         """Resolve a unary op kwarg value (e.g., -1)."""
@@ -6556,10 +6590,11 @@ class ASTParser:
             )
         args = [self._parse_op_positional_arg(arg) for arg in call.args]
         kwargs = self._parse_op_kwargs(call)
+        attrs = self._parse_op_attrs(call)
         op_func = getattr(module, op_name)
         span = self.span_tracker.get_span(call)
         try:
-            return invoke_dsl(op_func, args, kwargs, span)
+            return self._attach_op_attrs(invoke_dsl(op_func, args, kwargs, span), attrs)
         except ParserError:
             raise
         except (TypeError, ValueError) as e:
@@ -6631,10 +6666,11 @@ class ASTParser:
             )
         args = [self._parse_op_positional_arg(arg) for arg in call.args]
         kwargs = self._parse_op_kwargs(call)
+        attrs = self._parse_op_attrs(call)
         op_func = getattr(module, op_name)
         span = self.span_tracker.get_span(call)
         try:
-            return op_func(*args, **kwargs, span=span)
+            return self._attach_op_attrs(op_func(*args, **kwargs, span=span), attrs)
         except ParserError:
             raise
         except Exception as e:

@@ -3467,5 +3467,168 @@ class TestForbidOutputAlias:
         )
 
 
+class TestPipelineStageSeparation:
+    """``pl.pipeline`` stage tiles must stay on distinct buffers (ping-pong).
+
+    ``LowerPipelineLoops`` tags each replicated clone's tile-producing ``Call``
+    with a ``pipeline_membership`` ``(group, stage)`` attr; ``MemoryReuse`` then
+    refuses to coalesce two tiles that share a group with different stages, even
+    when their program-order lifetimes are disjoint (the disjointness pipelining
+    deliberately hides). These tests run the lower → reuse chain WITHOUT
+    ``CanonicalizeIOOrder`` so the separation is attributable to the explicit
+    constraint alone, not to clustering-induced lifetime overlap.
+    """
+
+    @staticmethod
+    def _lower_then_reuse(program: ir.Program) -> ir.Program:
+        # Deliberately skip CanonicalizeIOOrder: the two clones' loads are then
+        # NOT co-live (program-order-disjoint lifetimes), the exact condition
+        # under which MemoryReuse would otherwise coalesce them into one buffer.
+        p = passes.lower_pipeline_loops()(program)
+        p = passes.materialize_tensor_strides()(p)
+        p = passes.init_mem_ref()(p)
+        return passes.memory_reuse()(p)
+
+    @staticmethod
+    def _tile_def_bases(program: ir.Program) -> list[str]:
+        """Return the MemRef base name of every tile-typed AssignStmt, in order.
+
+        Unlike ``_collect_tile_memref_bases``, this keeps duplicates: the two
+        pipeline clones share a ``name_hint`` (``t``) — the printer only adds the
+        ``_1`` suffix for display — so a name-keyed dict would collapse them.
+        """
+        bases: list[str] = []
+        main_func = next(iter(program.functions.values()))
+
+        class _Collector(ir.IRVisitor):
+            def visit_assign_stmt(self, stmt):  # type: ignore[override]
+                var_type = stmt.var.type
+                if isinstance(var_type, ir.TileType) and var_type.memref is not None:
+                    bases.append(var_type.memref.base_.name_hint)
+                super().visit_assign_stmt(stmt)
+
+        _Collector().visit_stmt(main_func.body)
+        return bases
+
+    def test_stage_tiles_get_distinct_buffers(self):
+        """The two stage clones of a ``stage=2`` pipeline never share a buffer."""
+
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(
+                self,
+                x: pl.Tensor[[512], pl.FP32],
+                out: pl.Out[pl.Tensor[[512], pl.FP32]],
+            ) -> pl.Tensor[[512], pl.FP32]:
+                for i in pl.pipeline(0, 4, 1, stage=2):
+                    t: pl.Tile[[128], pl.FP32, pl.MemorySpace.Vec] = pl.tile.load(
+                        x, [i * 128], [128], [128], target_memory=pl.MemorySpace.Vec
+                    )
+                    _r: pl.Tensor[[512], pl.FP32] = pl.tile.store(t, [i * 128], out)
+                return x
+
+        After = self._lower_then_reuse(Before)
+        bases = self._tile_def_bases(After)
+        # Two clones (stage 0 and stage 1) → two tile defs on distinct buffers.
+        assert len(bases) == 2, f"expected two tile defs (one per stage clone), got {bases}"
+        assert len(set(bases)) == 2, (
+            f"pipeline stage clones must occupy distinct buffers, but bind to {bases}"
+        )
+
+    @staticmethod
+    def _tile_defs_with_role(program: ir.Program) -> list[tuple[bool, str]]:
+        """Return ``(is_load, memref_base_name)`` for every tile-typed AssignStmt.
+
+        ``is_load`` is True when the defining op is ``tile.load`` / ``tile.read``.
+        """
+        defs: list[tuple[bool, str]] = []
+        main_func = next(iter(program.functions.values()))
+
+        class _Collector(ir.IRVisitor):
+            def visit_assign_stmt(self, stmt):  # type: ignore[override]
+                var_type = stmt.var.type
+                if isinstance(var_type, ir.TileType) and var_type.memref is not None:
+                    val = stmt.value
+                    is_load = isinstance(val, ir.Call) and val.op.name in ("tile.load", "tile.read")
+                    defs.append((is_load, var_type.memref.base_.name_hint))
+                super().visit_assign_stmt(stmt)
+
+        _Collector().visit_stmt(main_func.body)
+        return defs
+
+    def test_load_buffers_separate_but_compute_may_coalesce(self):
+        """Role-aware granularity: load buffers stay per-stage; compute relaxes.
+
+        Forbidding *all* cross-stage reuse (depth = F) overflows real kernels, so
+        only load buffers are kept private. Here a ``stage=2`` body has one load
+        and one compute per clone: the two load buffers must differ (ping-pong),
+        but the total buffer count stays below ``depth = F`` because the compute
+        tile coalesces (here in-place onto its own stage's load) instead of
+        demanding a fourth independent buffer.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(
+                self,
+                x: pl.Tensor[[512], pl.FP32],
+                out: pl.Out[pl.Tensor[[512], pl.FP32]],
+            ) -> pl.Tensor[[512], pl.FP32]:
+                for i in pl.pipeline(0, 4, 1, stage=2):
+                    ld: pl.Tile[[128], pl.FP32, pl.MemorySpace.Vec] = pl.tile.load(
+                        x, [i * 128], [128], [128], target_memory=pl.MemorySpace.Vec
+                    )
+                    c: pl.Tile[[128], pl.FP32, pl.MemorySpace.Vec] = pl.tile.exp(ld)
+                    _r: pl.Tensor[[512], pl.FP32] = pl.tile.store(c, [i * 128], out)
+                return x
+
+        After = self._lower_then_reuse(Before)
+        defs = self._tile_defs_with_role(After)
+        load_bases = [base for is_load, base in defs if is_load]
+        all_bases = [base for _, base in defs]
+        # Both stage loads present and on distinct buffers (ping-pong preserved).
+        assert len(load_bases) == 2, f"expected one load per stage, got {defs}"
+        assert len(set(load_bases)) == 2, f"stage load buffers must differ, got {load_bases}"
+        # Compute relaxation: fewer buffers than depth = F (4 tile defs → 4 buffers).
+        assert len(set(all_bases)) < len(defs), (
+            f"compute tiles should coalesce instead of forcing depth=F separation, got {defs}"
+        )
+
+    def test_disjoint_non_pipeline_tiles_still_merge(self):
+        """Control: identical disjoint tiles WITHOUT pipeline tags do coalesce.
+
+        Confirms the harness merges lifetime-disjoint tiles by default, so the
+        separation asserted above is the pipeline constraint at work — not an
+        artifact of the tiles being inherently unmergeable.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(
+                self,
+                x: pl.Tensor[[512], pl.FP32],
+                out: pl.Out[pl.Tensor[[512], pl.FP32]],
+            ) -> pl.Tensor[[512], pl.FP32]:
+                a: pl.Tile[[128], pl.FP32, pl.MemorySpace.Vec] = pl.tile.load(
+                    x, [0], [128], [128], target_memory=pl.MemorySpace.Vec
+                )
+                _r0: pl.Tensor[[512], pl.FP32] = pl.tile.store(a, [0], out)
+                b: pl.Tile[[128], pl.FP32, pl.MemorySpace.Vec] = pl.tile.load(
+                    x, [128], [128], [128], target_memory=pl.MemorySpace.Vec
+                )
+                _r1: pl.Tensor[[512], pl.FP32] = pl.tile.store(b, [128], out)
+                return x
+
+        After = passes.memory_reuse()(passes.init_mem_ref()(passes.materialize_tensor_strides()(Before)))
+        bases = _collect_tile_memref_bases(After)
+        assert "a" in bases and "b" in bases, f"Expected both tiles; got {bases}"
+        assert bases["a"] == bases["b"], (
+            f"disjoint non-pipeline tiles should merge, but bind to {bases['a']} and {bases['b']}"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

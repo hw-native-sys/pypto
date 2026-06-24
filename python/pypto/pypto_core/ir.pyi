@@ -2975,6 +2975,22 @@ def create_op_call(
         Exception: If operator is not registered, is internal-only, or type deduction fails
     """
 
+def set_call_attrs(call: Call, attrs: Mapping[str, object]) -> Call:
+    """Return a copy of ``call`` with compiler-internal ``attrs_`` set.
+
+    Used by the round-trip parser to re-attach generic op-call attrs (e.g.
+    ``pipeline_membership``) surfaced by the printer as ``attrs={...}``; op DSL
+    wrappers / IR builders take no attrs parameter, so the call is built first
+    and attrs are layered on here.
+
+    Args:
+        call: The Call to copy
+        attrs: Compiler-internal metadata to attach
+
+    Returns:
+        A new Call with the given attrs
+    """
+
 def is_incore_type(func_type: FunctionType) -> bool:
     """Check if a FunctionType is an InCore variant (InCore, AIC, or AIV).
 
