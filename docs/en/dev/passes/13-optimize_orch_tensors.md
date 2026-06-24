@@ -74,6 +74,10 @@ for i in pl.range(N, init_values=[init_buf]):
 
 ### Pattern 5: Static Window Externalization (OutWindowExternalizer)
 
+Window externalization is disabled by default. An outlined InCore scope must
+explicitly opt in with `pl.at(..., windowize=True)`; the other four patterns
+are unaffected by this option.
+
 **Problem**: An outlined callee may write only a statically provable local window of a large `Out` tensor, or consume only a statically provable local window of a large `In` tensor, but the call site still passes the whole tensor. Downstream dependence analysis then sees whole-buffer accesses and may add unnecessary serialization.
 
 **Solution**: Clone the callee to a `__windowed` variant with narrowed rewritten tensor parameter types and localized internal offsets. Rewrite the orchestration call site to explicit local slices. Output windows use `slice + __windowed call + assemble`:
@@ -97,7 +101,7 @@ the pass rewrites that parent to the loop's visible init tensor for both
 referencing loop-return SSA names outside their scope. Loop-carried iter-args
 inside the loop body are not folded this way.
 
-This pass intentionally keeps window eligibility conservative. It does not special-case operator names such as `topk`; a tensor is windowed only when the callee body proves the access pattern below.
+Window eligibility remains conservative after opt-in. The pass does not special-case operator names such as `topk`; a tensor is windowed only when the callee body proves the access pattern below.
 
 Supported rewrite shapes:
 
@@ -111,7 +115,7 @@ Output-window eligibility:
 - the write must be a statically provable local `tile.store` window or aggregate window loop
 - window shape and offset must be statically known enough to materialize a `tensor.slice`
 - offsets must be affine in the surrounding loop variables accepted by the pass
-- multi-`Out` rewrites are all-or-nothing
+- each proven multi-`Out` result is rewritten independently; unproven results remain full-tensor
 - if multiple externalized `Out` params at the same callsite resolve to the same parent tensor, that callsite stays full-tensor; Pattern 5 does not chain multiple `tensor.assemble` updates into one parent state
 - sequential-loop siblings are rewritten only when every rewritten `Out` can be proven disjoint across sibling iterations
 - same-scope sibling writers to the same parent or aliased parent tensor may still be externalized when each individual writer satisfies the static output-window eligibility rules; however, if that parent also has a sibling full writer (`Out` or `InOut`) that cannot be externalized as an output window, other writers to the same parent stay full-tensor so the non-window writer does not hide partially initialized regions

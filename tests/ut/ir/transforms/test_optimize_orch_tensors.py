@@ -3252,6 +3252,35 @@ class TestOutWindowSubmitCall:
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "overflow_store(out__ssa_v0, data__ssa_v0)" in printed_main
 
+    def test_dense_region_volume_overflow_falls_back_to_baseline(self):
+        huge_extent = 9223372036854775807
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def overflow_volume(
+                self,
+                out: pl.Out[pl.Tensor[[8, huge_extent], pl.FP32]],
+                data: pl.Tensor[[2, huge_extent], pl.FP32],
+            ) -> pl.Tensor[[8, huge_extent], pl.FP32]:
+                for i, (out_iter,) in pl.range(0, 2, init_values=(out,)):
+                    tile = pl.tile.load(data, [0, 0], [2, huge_extent], [2, huge_extent])
+                    out_next = pl.tile.store(tile, [i * 2, 0], out_iter)
+                    out_rv = pl.yield_(out_next)
+                return out_rv
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                out: pl.Out[pl.Tensor[[8, huge_extent], pl.FP32]],
+                data: pl.Tensor[[2, huge_extent], pl.FP32],
+            ) -> pl.Tensor[[8, huge_extent], pl.FP32]:
+                return self.overflow_volume(out, data)
+
+        After = passes.optimize_orch_tensors()(_with_incore_windowize(Before))
+
+        assert After.get_function("overflow_volume__windowed") is None
+
     def test_inout_full_read_before_subset_write_stays_baseline(self):
         @pl.program
         class Before:

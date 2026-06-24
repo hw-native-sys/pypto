@@ -369,6 +369,9 @@ class IRPythonPrinter : public IRVisitor {
   // it must survive a print/reparse roundtrip while the scope still exists.
   bool PrintScopeAllowEarlyResolveAttr(const ScopeStmtPtr& op);
 
+  // Emit ``windowize=True`` for an explicitly opted-in InCore scope.
+  bool PrintScopeWindowizeAttr(const ScopeStmtPtr& op);
+
   // Emit ``pl.split(pl.SplitMode.X[, slot_num=N])`` (a single optimizations list
   // entry, no leading comma / wrapper), reading the optional ``slot_num`` ring
   // depth from ``slot_num_holder``'s attrs (the scope carrying it).
@@ -1680,6 +1683,12 @@ bool IRPythonPrinter::PrintScopeAllowEarlyResolveAttr(const ScopeStmtPtr& op) {
   return true;
 }
 
+bool IRPythonPrinter::PrintScopeWindowizeAttr(const ScopeStmtPtr& op) {
+  if (!op->GetAttr<bool>("windowize", false)) return false;
+  stream_ << ", windowize=True";
+  return true;
+}
+
 bool IRPythonPrinter::PrintScopeTaskIdVarSuffix(const ScopeStmtPtr& op) {
   for (const auto& [k, v] : op->attrs_) {
     if (k != kAttrTaskIdVar) continue;
@@ -1735,6 +1744,7 @@ void IRPythonPrinter::VisitStmt_(const HierarchyScopeStmtPtr& op) {
   PrintScopeNoDepsAttr(op);
   PrintScopeDumpAttr(op);
   PrintScopeAllowEarlyResolveAttr(op);
+  PrintScopeWindowizeAttr(op);
   stream_ << ")";
   PrintScopeTaskIdVarSuffix(op);
   stream_ << ":\n";
@@ -1760,6 +1770,7 @@ void IRPythonPrinter::VisitStmt_(const InCoreScopeStmtPtr& op) {
   PrintScopeNoDepsAttr(op);
   PrintScopeDumpAttr(op);
   PrintScopeAllowEarlyResolveAttr(op);
+  PrintScopeWindowizeAttr(op);
   stream_ << ")";
   PrintScopeTaskIdVarSuffix(op);
   stream_ << ":\n";
@@ -1788,6 +1799,7 @@ void IRPythonPrinter::VisitStmt_(const AutoInCoreScopeStmtPtr& op) {
   PrintScopeNoDepsAttr(op);
   PrintScopeDumpAttr(op);
   PrintScopeAllowEarlyResolveAttr(op);
+  PrintScopeWindowizeAttr(op);
   stream_ << ")";
   PrintScopeTaskIdVarSuffix(op);
   stream_ << ":\n";

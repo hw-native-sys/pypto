@@ -16,7 +16,8 @@ silently dropped because the flag was not forwarded into the returned
 
 import pypto.language as pl
 import pytest
-from pypto import ir
+from pypto import ir, passes
+from pypto.language.parser.diagnostics.exceptions import ParserSyntaxError
 
 
 def test_at_forwards_allow_early_resolve():
@@ -35,6 +36,63 @@ def test_at_forwards_name_hint():
     """pl.at(..., name_hint=...) reaches AtContext (sibling-kwarg forwarding guard)."""
     ctx = pl.at(ir.Level.CORE_GROUP, name_hint="fused_scope")
     assert ctx.name_hint == "fused_scope"
+
+
+def test_at_forwards_windowize():
+    """pl.at(..., windowize=True) carries the flag onto AtContext."""
+    ctx = pl.at(ir.Level.CORE_GROUP, windowize=True)
+    assert ctx.windowize is True
+
+
+def test_at_windowize_defaults_false():
+    """windowize defaults to False on AtContext when omitted."""
+    ctx = pl.at(ir.Level.CORE_GROUP)
+    assert ctx.windowize is False
+
+
+def test_windowize_reaches_outlined_incore_function():
+    """The parser and scope outliners preserve the explicit opt-in."""
+    program = pl.parse_program(
+        """
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        x: pl.Tensor[[128, 128], pl.FP32],
+        out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+    ) -> pl.Tensor[[128, 128], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP, windowize=True):
+            tile = pl.load(x, [0, 0], [128, 128])
+            result = pl.store(tile, [0, 0], out)
+        return result
+"""
+    )
+
+    for outline_pass in (
+        passes.outline_hierarchy_scopes(),
+        passes.outline_incore_scopes(),
+        passes.outline_cluster_scopes(),
+    ):
+        program = outline_pass(program)
+
+    outlined = program.get_function("main_incore_0")
+    assert outlined is not None
+    assert outlined.attrs["windowize"] is True
+
+
+def test_windowize_requires_boolean_literal():
+    with pytest.raises(ParserSyntaxError, match="windowize must be a boolean literal"):
+        pl.parse_program(
+            """
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self):
+        with pl.at(level=pl.Level.CORE_GROUP, windowize=1):
+            pass
+"""
+        )
 
 
 if __name__ == "__main__":

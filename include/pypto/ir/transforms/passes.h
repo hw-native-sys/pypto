@@ -386,7 +386,7 @@ Pass ConvertTensorToTileOps();
 /**
  * @brief Optimize tensor buffer usage in orchestration and InCore functions
  *
- * Six optimization and lowering patterns, applied in order:
+ * Five optimization and lowering patterns, applied in order:
  * - Pattern 1 (iter-arg reuse): Merges Out params into In params (promoted
  *   to InOut) when the InCore result feeds back as a ForStmt/WhileStmt
  *   iter-arg, eliminating redundant tensor.create per iteration.
