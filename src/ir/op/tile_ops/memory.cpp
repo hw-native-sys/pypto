@@ -176,6 +176,22 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
       if (transpose != source_is_dn) {
         std::swap(tile_view.blayout, tile_view.slayout);
       }
+      // A single-row 2-D Mat operand (cube gemv lhs / bias) is an ND row-vector,
+      // not the NZ fractal multi-row matmul operands use. pto-isa's RunTGEMV
+      // declares it as Tile<Mat, 1, K, BLayout::RowMajor, ..., SLayout::NoneBox>:
+      // the row_major + none_box pair routes the Mat->Left move through the pto
+      // TMovToLeft rows==1 vector path (TExtractToAVector) instead of TExtractToA,
+      // whose srcRow/dstRow % 16 == 0 static_assert rejects the 1-row lhs. Scope
+      // to 2-D loads: in a rank-3+ (batched) Mat load shp[0] is the batch dim,
+      // not the matrix row count, so it must keep the canonical NZ view.
+      const auto& shp = shapes_tuple->elements_;
+      if (shp.size() == 2) {
+        ExprPtr row_dim = transpose ? shp[1] : shp[0];
+        if (auto first_dim = As<ConstInt>(row_dim); first_dim && first_dim->value_ == 1) {
+          tile_view.blayout = TileLayout::row_major;
+          tile_view.slayout = TileLayout::none_box;
+        }
+      }
     } else if (auto last_dim = As<ConstInt>(shapes_tuple->elements_.back());
                last_dim && last_dim->value_ == 1) {
       tile_view.blayout = TileLayout::col_major;
