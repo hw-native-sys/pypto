@@ -49,7 +49,7 @@ jobs:
           timeout 60 git clone https://github.com/hw-native-sys/pto-isa.git $GITHUB_WORKSPACE/pto-isa \
             || { rm -rf $GITHUB_WORKSPACE/pto-isa; timeout 300 git clone https://gitcode.com/luohuan40/pto-isa.git $GITHUB_WORKSPACE/pto-isa; }
           cd $GITHUB_WORKSPACE/pto-isa
-          git checkout 016396b57e2c17093f1194e6acd89bb112b0ab24
+          git checkout 1ba8f54b950d296826d63d75f5dd79e20c495eae
 
       - name: Install simpler
         run: |
@@ -59,7 +59,7 @@ jobs:
       - name: Run A5 system tests
         run: |
           task-submit --timeout 1800 --max-time 1800 --device 6 \
-            --run "pytest tests/st/runtime/ops/test_assemble.py tests/st/runtime/ops/test_mscatter.py tests/st/runtime/framework_and_models/test_qwen3_decode_scope3_mixed.py tests/st/runtime/control_flow/test_dyn_orch_shape.py::TestDynOrchShapeOperations::test_dyn_orch_paged_attention -v --forked --platform=a5 --device=6 --pto-isa-commit=016396b57e2c17093f1194e6acd89bb112b0ab24 \
+            --run "pytest tests/st/runtime/ops/test_assemble.py tests/st/runtime/ops/test_mscatter.py tests/st/runtime/framework_and_models/test_qwen3_decode_scope3_mixed.py tests/st/runtime/control_flow/test_dyn_orch_shape.py::TestDynOrchShapeOperations::test_dyn_orch_paged_attention -v --forked --platform=a5 --device=6 --pto-isa-commit=1ba8f54b950d296826d63d75f5dd79e20c495eae \
               -k 'not (test_tile_row_expand or test_fillpad_zero or test_fillpad_max or test_fillpad_min or TestMscatter)'"
 
   qwen3-perf:
@@ -139,7 +139,7 @@ jobs:
           timeout 60 git clone https://github.com/hw-native-sys/pto-isa.git $GITHUB_WORKSPACE/pto-isa \
             || { rm -rf $GITHUB_WORKSPACE/pto-isa; timeout 300 git clone https://gitcode.com/luohuan40/pto-isa.git $GITHUB_WORKSPACE/pto-isa; }
           cd $GITHUB_WORKSPACE/pto-isa
-          git checkout 016396b57e2c17093f1194e6acd89bb112b0ab24
+          git checkout 1ba8f54b950d296826d63d75f5dd79e20c495eae
 
       - name: Install simpler
         run: |
