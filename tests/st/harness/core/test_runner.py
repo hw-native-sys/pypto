@@ -661,6 +661,22 @@ class TestRunner:
             chip_callable, runtime_name, _ = compile_and_assemble(
                 work_dir, resolved_platform, pto_isa_commit=self.config.pto_isa_commit
             )
+            # Per-test ring sizing: forward RunConfig.ring_* (case config takes
+            # precedence, else runner config) as runtime_env overrides so a
+            # high-task-volume program can enlarge the task window from the front
+            # end without an env var or recompile.
+            ring_env: dict[str, str] = {}
+            for env_name, attr in (
+                ("PTO2_RING_TASK_WINDOW", "ring_task_window"),
+                ("PTO2_RING_DEP_POOL", "ring_dep_pool"),
+                ("PTO2_RING_HEAP", "ring_heap"),
+            ):
+                val = getattr(test_case.config, attr, None)
+                if val is None:
+                    val = getattr(self.config, attr, None)
+                if val is not None:
+                    ring_env[env_name] = str(val)
+
             timing = _execute_on_device(
                 work_dir,
                 golden_path,
@@ -669,6 +685,7 @@ class TestRunner:
                 resolved_platform,
                 self.config.device_id,
                 dfx=_DfxOpts.from_run_config(self.config),
+                runtime_env=ring_env or None,
             )
 
             return RunResult(

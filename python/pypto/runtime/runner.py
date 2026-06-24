@@ -810,6 +810,7 @@ def _execute_on_device(
     platform: str,
     device_id: int,
     dfx: _DfxOpts = _DfxOpts(),
+    runtime_env: dict[str, str] | None = None,
 ) -> "RunTiming":
     """Load inputs, execute on device, and validate against golden.
 
@@ -880,6 +881,7 @@ def _execute_on_device(
             enable_pmu=pass_dfx.enable_pmu,
             enable_dep_gen=pass_dfx.enable_dep_gen,
             enable_scope_stats=pass_dfx.enable_scope_stats,
+            runtime_env=runtime_env,
         )
 
     def _capture_deps() -> None:
