@@ -1999,7 +1999,6 @@ class OutWindowExternalizer {
 
   ProgramPtr Run(const ProgramPtr& program) {
     auto analyses = Analyze(program);
-    ApplyDebugNameFilters(program, &analyses);
     ApplyWindowRewritePolicy(program, &analyses);
     if (analyses.empty()) return program;
 
@@ -2029,6 +2028,9 @@ class OutWindowExternalizer {
     }
     if (cloned_funcs.empty()) return program;
 
+    // RewriteCallee() also records dynamic extent parameters for rewritten
+    // outputs. Keep all callee rewrites complete before rewriting orchestration
+    // calls so each callsite sees the full ABI side table.
     std::unordered_map<const Function*, FunctionPtr> rewritten_orch_funcs;
     std::unordered_set<std::string> used_clone_names;
     bool changed = false;
@@ -2149,46 +2151,6 @@ class OutWindowExternalizer {
 
   using AnalysisMap = std::unordered_map<std::string, CalleeRewriteAnalysis>;
 
-  static std::vector<std::string> SplitDebugNameList(const char* value) {
-    std::vector<std::string> result;
-    if (!value) return result;
-    std::string text(value);
-    size_t start = 0;
-    while (start <= text.size()) {
-      size_t end = text.find(',', start);
-      if (end == std::string::npos) end = text.size();
-      auto token = text.substr(start, end - start);
-      auto first = token.find_first_not_of(" \t\n\r");
-      auto last = token.find_last_not_of(" \t\n\r");
-      if (first != std::string::npos) result.push_back(token.substr(first, last - first + 1));
-      if (end == text.size()) break;
-      start = end + 1;
-    }
-    return result;
-  }
-
-  static bool DebugNameTokenMatches(const std::string& name, const std::string& token) {
-    if (name.empty() || token.empty()) return false;
-    if (token.size() >= 2 && token.front() == '*' && token.back() == '*') {
-      return name.find(token.substr(1, token.size() - 2)) != std::string::npos;
-    }
-    return name == token || name == token + "__windowed";
-  }
-
-  static bool DebugNameMatches(const std::string& callee_name, const FunctionPtr& func, size_t param_index,
-                               const std::vector<std::string>& tokens) {
-    if (tokens.empty()) return false;
-    std::string param_name;
-    if (func && param_index < func->params_.size() && func->params_[param_index]) {
-      param_name = func->params_[param_index]->name_hint_;
-    }
-    for (const auto& token : tokens) {
-      if (DebugNameTokenMatches(callee_name, token)) return true;
-      if (DebugNameTokenMatches(param_name, token)) return true;
-    }
-    return false;
-  }
-
   static bool WindowExternalizeLogEnabled() {
     auto value = std::getenv("PYPTO_WINDOW_EXTERNALIZE_LOG");
     if (!value) return false;
@@ -2222,45 +2184,6 @@ class OutWindowExternalizer {
     }
     os << "]";
     return os.str();
-  }
-
-  static void ApplyDebugNameFilters(const ProgramPtr& program, AnalysisMap* analyses) {
-    if (!analyses) return;
-    auto include = SplitDebugNameList(std::getenv("PYPTO_WINDOW_EXTERNALIZE_INCLUDE"));
-    auto exclude = SplitDebugNameList(std::getenv("PYPTO_WINDOW_EXTERNALIZE_EXCLUDE"));
-    if (include.empty() && exclude.empty()) return;
-    auto function_lookup = BuildFunctionLookup(program);
-
-    for (auto it = analyses->begin(); it != analyses->end();) {
-      const auto& callee_name = it->first;
-      auto func_it = function_lookup.find(callee_name);
-      auto func = func_it == function_lookup.end() ? nullptr : func_it->second;
-      auto& analysis = it->second;
-
-      analysis.outputs.erase(
-          std::remove_if(analysis.outputs.begin(), analysis.outputs.end(),
-                         [&](const OutputRewriteInfo& output) {
-                           bool matched =
-                               DebugNameMatches(callee_name, func, output.out_param_index, include);
-                           if (!include.empty() && !matched) return true;
-                           return DebugNameMatches(callee_name, func, output.out_param_index, exclude);
-                         }),
-          analysis.outputs.end());
-      analysis.inputs.erase(
-          std::remove_if(analysis.inputs.begin(), analysis.inputs.end(),
-                         [&](const InputRewriteInfo& input) {
-                           bool matched = DebugNameMatches(callee_name, func, input.in_param_index, include);
-                           if (!include.empty() && !matched) return true;
-                           return DebugNameMatches(callee_name, func, input.in_param_index, exclude);
-                         }),
-          analysis.inputs.end());
-
-      if (analysis.outputs.empty() && analysis.inputs.empty()) {
-        it = analyses->erase(it);
-      } else {
-        ++it;
-      }
-    }
   }
 
   static DenseRegionPiece MakeDensePiece(std::vector<ExprPtr> window_shape,
@@ -2559,6 +2482,10 @@ class OutWindowExternalizer {
         analysis.inputs.clear();
       }
 
+      // Stable filtering uses the presence of a boundingBox variant to reject
+      // multi-piece outputs that would need coarse coverage. Build variants
+      // before the stable filter even when the effective policy is not
+      // boundingBox.
       PrepareBoundingBoxOutputVariants(&analysis);
 
       const bool flow_linked = ep.flow == WindowFlowPolicy::Linked;
@@ -4081,9 +4008,10 @@ class OutWindowExternalizer {
       auto stop = analyzer->Simplify(transform_utils::Substitute(dynamic.loop_stop, callsite_subst));
       auto step = analyzer->Simplify(transform_utils::Substitute(dynamic.loop_step, callsite_subst));
       // The sentinel initializers are safe only because callers first prove
-      // the scan has at least one statically guaranteed update. If the guard
-      // depends on runtime index values, that proof fails and the rewrite is
-      // rejected before this scan is emitted.
+      // this exact scan range has at least one statically guaranteed update.
+      // If the guard depends on runtime index values, or the first scan
+      // iteration cannot be proven to update, that proof fails and the rewrite
+      // is rejected before this scan is emitted.
       stmts->push_back(std::make_shared<AssignStmt>(
           scan_min_init, std::make_shared<ConstInt>(2147483647, DataType::INDEX, call_assign->span_),
           call_assign->span_));
@@ -8793,10 +8721,6 @@ class OutWindowExternalizer {
 
 class RuntimeCurrentAggregator {
  public:
-  RuntimeCurrentAggregator(OutWindowExternalizer::WindowCoveragePolicy global_policy,
-                           OutWindowExternalizer::WindowFlowPolicy global_flow)
-      : global_policy_(global_policy), global_flow_(global_flow) {}
-
   ProgramPtr Run(const ProgramPtr& program) {
     std::vector<FunctionPtr> new_functions;
     new_functions.reserve(program->functions_.size() + 1);
@@ -8814,8 +8738,7 @@ class RuntimeCurrentAggregator {
         continue;
       }
 
-      OrchMutator mutator(program, global_policy_, global_flow_, &generated_functions, &barrier_by_type,
-                          &used_names);
+      OrchMutator mutator(program, &generated_functions, &barrier_by_type, &used_names);
       auto aggregated_body = mutator.VisitStmt(func->body_);
       MarkerStripper stripper;
       auto new_body = stripper.VisitStmt(aggregated_body);
@@ -8866,14 +8789,10 @@ class RuntimeCurrentAggregator {
 
   class OrchMutator : public IRMutator {
    public:
-    OrchMutator(ProgramPtr program, OutWindowExternalizer::WindowCoveragePolicy global_policy,
-                OutWindowExternalizer::WindowFlowPolicy global_flow,
-                std::vector<FunctionPtr>* generated_functions,
+    OrchMutator(ProgramPtr program, std::vector<FunctionPtr>* generated_functions,
                 std::unordered_map<const Type*, FunctionPtr>* barrier_by_type,
                 std::unordered_set<std::string>* used_names)
         : program_(std::move(program)),
-          global_policy_(global_policy),
-          global_flow_(global_flow),
           generated_functions_(generated_functions),
           barrier_by_type_(barrier_by_type),
           used_names_(used_names) {}
@@ -9258,15 +9177,10 @@ class RuntimeCurrentAggregator {
     }
 
     ProgramPtr program_;
-    OutWindowExternalizer::WindowCoveragePolicy global_policy_;
-    OutWindowExternalizer::WindowFlowPolicy global_flow_;
     std::vector<FunctionPtr>* generated_functions_;
     std::unordered_map<const Type*, FunctionPtr>* barrier_by_type_;
     std::unordered_set<std::string>* used_names_;
   };
-
-  OutWindowExternalizer::WindowCoveragePolicy global_policy_;
-  OutWindowExternalizer::WindowFlowPolicy global_flow_;
 };
 
 }  // namespace
@@ -9308,7 +9222,7 @@ Pass OptimizeOrchTensors(const std::string& window_policy, const std::string& wi
 
     // Pattern 6: lower explicit linked-flow runtime-current markers into
     // runtime barriers, then strip marker calls from the program.
-    return RuntimeCurrentAggregator(parsed_global_policy, parsed_global_flow).Run(p5);
+    return RuntimeCurrentAggregator().Run(p5);
   };
 
   return CreateProgramPass(pass_func, "OptimizeOrchTensors", kOptimizeOrchTensorsProperties);

@@ -17,6 +17,7 @@ After `ConvertTensorToTileOps`, orchestration functions allocate output tensors 
 | C++ | Python | Level |
 | --- | ------ | ----- |
 | `pass::OptimizeOrchTensors()` | `passes.optimize_orch_tensors()` | Program-level |
+| `pass::OptimizeOrchTensors("exact", "local")` | `passes.optimize_orch_tensors(window_policy="exact", window_flow="local")` | Program-level |
 
 **Python usage**:
 
@@ -76,16 +77,16 @@ larger coverage/flow semantics are desired.
 
 Useful global combinations:
 
-| Global config | Submit args | Coverage | Holes | Linked flow | Carrier/base/extent/barrier |
-| ------------- | ----------- | -------- | ----- | ----------- | --------------------------- |
-| `none + local` | unchanged by default | no default windows | no | no | no |
-| `none + linked` | unchanged by default | only explicit opt-in kernels | per opt-in | only opt-in writer/reader edges with both effective flows linked | only if the opt-in edge proves valid |
-| `stable + local` | no expansion | ABI-safe exact | no | no | no |
-| `stable + linked` | no expansion | ABI-safe exact | no | proof may run, but most dynamic readers fall back | no base/extent/barrier if new args would be needed |
-| `exact + local` | may expand | exact pieces | no | no | no |
-| `exact + linked` | may expand | exact pieces | no | single dense exact linked coverage only | no implicit boundingBox carrier |
-| `boundingBox + local` | may expand | exact or boundingBox | yes | no | no |
-| `boundingBox + linked` | may expand | exact or boundingBox | yes | proven writer-reader linked coverage | carrier/base/extent/remat and barriers may appear |
+| Global config | Submit args | Coverage | Holes | Linked flow | Dynamic carrier/base/extent | Aggregate barrier |
+| ------------- | ----------- | -------- | ----- | ----------- | --------------------------- | ----------------- |
+| `none + local` | unchanged by default | no default windows | no | no | no | no |
+| `none + linked` | unchanged by default | only explicit opt-in kernels | per opt-in | only opt-in writer/reader edges with both effective flows linked | only if the opt-in edge proves valid | only if the opt-in edge proves valid |
+| `stable + local` | no expansion | ABI-safe exact | no | no | no | no |
+| `stable + linked` | no expansion | ABI-safe exact | no | proof may run, but most dynamic readers fall back | no if new args would be needed | no if new args would be needed |
+| `exact + local` | may expand | exact pieces | no | no | no | no |
+| `exact + linked` | may expand | exact pieces | no | single dense exact linked coverage only | no implicit boundingBox carrier | may appear for proven aggregate-current joins |
+| `boundingBox + local` | may expand | exact or boundingBox | yes | no | no | no |
+| `boundingBox + linked` | may expand | exact or boundingBox | yes | proven writer-reader linked coverage | may appear | may appear |
 
 Linked flow has two independent lowering outcomes:
 
@@ -178,6 +179,33 @@ If any condition fails, the dynamic reader keeps the full parent tensor and the
 pass must not insert a runtime-current barrier just because coverage attrs are
 present.
 
+### Swimlane-guided tuning
+
+Window externalization is a scheduling trade-off, not a monotonic speed switch.
+Use swimlane traces to decide whether the bottleneck is device-side dependency
+serialization or host-side dispatch overhead:
+
+| Swimlane symptom | Likely bottleneck | Try |
+| ---------------- | ----------------- | --- |
+| Device tasks that should overlap are serialized by broad tensor dependencies | Dependency coverage is too coarse | Enable windowing, usually starting with `window_option="stable"` and then `window_option="exact"` or selected kernel attrs. |
+| Dynamic readers remain full-parent after local windows | The useful relationship is cross-callsite | Try `window_policy="boundingBox", window_flow="linked"` on the whole pass or on the producer/consumer kernels that need linked coverage. |
+| After windowing, the orchestrator lane becomes dense and dispatches later tasks slowly | The rewrite introduced too many slices, assembles, tensor views, scalar args, carriers, or barriers | Step back to `stable`, set noisy kernels to `window_outputs="off"` / `window_inputs="off"`, or keep `window_flow="local"`. |
+| A multi-piece kernel improves dependency precision but adds many submit args in the generated `build_output/.../orchestration/*.cpp` (`add_input`, `add_inout`, `add_output`, or `add_scalar`) | Exact pieces are too fragmented for this workload. The rewrite may exceed the runtime `MaxSig` limits, or remain legal but make the orchestrator spend too much time preparing dispatches. | Use a targeted `boundingBox` permission if a continuous range with holes is acceptable and reduces the submit signature; otherwise disable that kernel's windowing. |
+
+Prefer the least aggressive configuration that fixes the observed swimlane
+serialization. `stable + local` is the safe default; `exact + local` is useful
+when fragmented exact coverage removes real dependencies. After enabling exact
+multi-piece windows, inspect the generated orchestration C++ in
+`build_output/.../orchestration/`: if the rewritten call sites add many
+`add_input`, `add_inout`, `add_output`, or `add_scalar` entries, the runtime
+signature may exceed `MaxSig` limits, or the orchestrator may become the timing
+bottleneck even when the signature is still legal. In that case, either allow
+`boundingBox` for the noisy kernel to collapse pieces into fewer runtime views,
+or disable that kernel's input/output windowing. `boundingBox + linked` is for
+proven writer-reader flows where wider continuous coverage and linked lowering
+are worth the extra orchestration work. If a single kernel creates orchestrator
+pressure, override that kernel instead of disabling useful windows globally.
+
 Legacy configuration spellings are accepted only where an unambiguous mapping
 exists: global `auto` maps to `stable`, and side `coalesce` maps to
 `boundingBox`. New code should use the canonical names. Ambiguous settings are
@@ -192,10 +220,9 @@ dynamic extent. Dynamic-offset windows, such as KV-cache writes at a runtime
 slot, can still be rewritten when the static proof and policy gate allow them.
 
 Diagnostic-only environment variables are available while debugging this pass:
-`PYPTO_WINDOW_EXTERNALIZE_INCLUDE` and `PYPTO_WINDOW_EXTERNALIZE_EXCLUDE`
-filter candidates by callee or parameter name, and
 `PYPTO_WINDOW_EXTERNALIZE_LOG=1` prints stable/coverage accept/reject
-decisions. These variables are not part of the public policy semantics.
+decisions. This variable is not part of the public policy semantics and does
+not change which candidates are rewritten.
 
 ## Patterns
 

@@ -17,6 +17,7 @@
 | C++ | Python | 级别 |
 | --- | ------ | ---- |
 | `pass::OptimizeOrchTensors()` | `passes.optimize_orch_tensors()` | Program 级 |
+| `pass::OptimizeOrchTensors("exact", "local")` | `passes.optimize_orch_tensors(window_policy="exact", window_flow="local")` | Program 级 |
 
 **Python 用法**：
 
@@ -83,24 +84,16 @@ coverage/flow 语义时，应显式使用 `window_policy="boundingBox"` 或
 
 常用全局组合：
 
-- `none + local`：默认不改；默认不 window；无空洞、无 linked flow、无
-  carrier/base/extent/barrier。
-- `none + linked`：默认不改；只影响显式 opt-in kernel。只有 writer/reader
-  双方 effective flow 都是 linked 的 opt-in edge 才可能在 proof 成立后出现
-  linked lowering。
-- `stable + local`：不扩张 submit 参数；只做 ABI-safe exact；无空洞、无
-  linked flow、无 carrier/base/extent/barrier。
-- `stable + linked`：不扩张 submit 参数；只做 ABI-safe exact；可尝试 proof，
-  但多数 dynamic reader fallback；需要新增 base/extent/barrier 时 fallback。
-- `exact + local`：submit 参数可扩张；使用 exact pieces；无空洞、无 linked
-  flow、无 carrier/base/extent/barrier。
-- `exact + linked`：submit 参数可扩张；使用 exact pieces；只允许 single
-  dense exact linked coverage；不会偷偷合成 boundingBox carrier。
-- `boundingBox + local`：submit 参数可扩张；使用 exact 或 boundingBox；允许
-  空洞；无 linked flow、无 carrier/base/extent/barrier。
-- `boundingBox + linked`：submit 参数可扩张；使用 exact 或 boundingBox；允许
-  空洞；允许 proven writer-reader linked coverage；可能出现
-  carrier/base/extent/remat 和 barrier。
+| 全局配置 | Submit 参数 | Coverage | 空洞 | Linked flow | Dynamic carrier/base/extent | Aggregate barrier |
+| -------- | ----------- | -------- | ---- | ----------- | --------------------------- | ----------------- |
+| `none + local` | 默认不变 | 默认不 window | 否 | 否 | 否 | 否 |
+| `none + linked` | 默认不变 | 只影响显式 opt-in kernel | 取决于 opt-in | 只有 writer/reader 双方 effective flow 都是 linked 的 opt-in edge | 仅 proof 成立时可能出现 | 仅 proof 成立时可能出现 |
+| `stable + local` | 不扩张 | ABI-safe exact | 否 | 否 | 否 | 否 |
+| `stable + linked` | 不扩张 | ABI-safe exact | 否 | 可尝试 proof，但多数 dynamic reader fallback | 需要新增参数时不会出现 | 需要新增参数时不会出现 |
+| `exact + local` | 可扩张 | exact pieces | 否 | 否 | 否 | 否 |
+| `exact + linked` | 可扩张 | exact pieces | 否 | 只允许 single dense exact linked coverage | 不会偷偷合成 boundingBox carrier | proven aggregate-current join 可出现 |
+| `boundingBox + local` | 可扩张 | exact 或 boundingBox | 是 | 否 | 否 | 否 |
+| `boundingBox + linked` | 可扩张 | exact 或 boundingBox | 是 | 允许 proven writer-reader linked coverage | 可能出现 | 可能出现 |
 
 Linked flow 有两类相互独立的 lowering 结果：
 
@@ -184,6 +177,30 @@ linked dynamic-reader 路径依赖以下所有条件：
 如果任一条件不满足，dynamic reader 会保持 full parent tensor；pass 不能仅因为
 coverage attr 存在就插入 runtime-current barrier。
 
+### 根据泳道图调参
+
+Window externalization 是调度 trade-off，不是单调加速开关。建议用泳道图判断
+瓶颈到底来自设备侧依赖串行，还是来自 host 侧 orchestration dispatch 开销：
+
+| 泳道图现象 | 可能瓶颈 | 可以尝试 |
+| ---------- | -------- | -------- |
+| 理论上应并发的 device tasks 被粗粒度 tensor 依赖串行化 | 依赖 coverage 太粗 | 开启 window，通常先试 `window_option="stable"`，再试 `window_option="exact"` 或局部 kernel attrs。 |
+| 本地 window 后 dynamic reader 仍是 full-parent | 真正有用的是跨 callsite 关系 | 对全局或相关 producer/consumer kernel 尝试 `window_policy="boundingBox", window_flow="linked"`。 |
+| 开 window 后 orchestrator 泳道变密，后续 task dispatch 变慢 | 改写引入了太多 slice、assemble、tensor view、scalar arg、carrier 或 barrier | 回退到 `stable`，把噪声 kernel 设为 `window_outputs="off"` / `window_inputs="off"`，或保持 `window_flow="local"`。 |
+| Multi-piece kernel 改善了依赖精度，但生成的 `build_output/.../orchestration/*.cpp` 里 submit 实参数量明显增加（`add_input`、`add_inout`、`add_output` 或 `add_scalar`） | exact pieces 对该 workload 太碎。改写可能超过 runtime 侧 `MaxSig` 限制，也可能虽然合法但让 orchestrator 花太多时间准备 dispatch。 | 如果可接受带空洞的连续 range，并且能减少 submit 签名，局部允许 `boundingBox`；否则关闭该 kernel 的 window。 |
+
+调参时优先选择能解决泳道图串行问题的最保守配置。`stable + local` 是安全默认；
+`exact + local` 适合 fragmented exact coverage 能真实移除依赖的场景；
+启用 exact multi-piece window 后，应检查 `build_output/.../orchestration/` 下生成的
+C++：如果改写后的 callsite 新增大量 `add_input`、`add_inout`、`add_output` 或
+`add_scalar`，runtime 签名可能超过 `MaxSig` 限制；即使仍然合法，也可能让
+orchestrator 成为新的计时瓶颈。这时可以对噪声 kernel 局部允许 `boundingBox`，
+用一个带空洞的连续 range 合并 pieces、减少 runtime views；如果空洞不可接受或仍无
+收益，则关闭该 kernel 的 input/output window。`boundingBox + linked` 适合已证明的
+writer-reader flow，并且可以接受更宽连续 coverage 与 linked lowering 带来的额外
+orchestration 工作。如果只有单个 kernel 造成 orchestrator 压力，优先对该 kernel
+做覆盖，而不是全局关闭仍有收益的 window。
+
 旧配置拼写只有在映射无歧义时才兼容：全局 `auto` 映射为 `stable`，side
 `coalesce` 映射为 `boundingBox`。新代码应使用规范名称。含义不明确的 `all`、
 `carrier`、`coalesce_carrier` 以及 kernel 级 `window_policy` attr 会直接报错；
@@ -195,9 +212,8 @@ dynamic extent 运行。动态 offset 的 window，例如运行时 slot 上的 K
 只要静态证明和策略门槛允许，仍可以改写。
 
 调试本 pass 时，可以使用诊断专用环境变量：
-`PYPTO_WINDOW_EXTERNALIZE_INCLUDE` 和 `PYPTO_WINDOW_EXTERNALIZE_EXCLUDE`
-按 callee 或参数名过滤候选，`PYPTO_WINDOW_EXTERNALIZE_LOG=1` 会打印
-stable/coverage accept/reject 决策。这些变量不是公开 policy 语义的一部分。
+`PYPTO_WINDOW_EXTERNALIZE_LOG=1` 打印 stable/coverage accept/reject 决策。这个变量
+不是公开 policy 语义的一部分，也不会改变哪些候选会被改写。
 
 ## 优化模式
 
