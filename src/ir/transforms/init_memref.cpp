@@ -40,6 +40,7 @@
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/normalize_stmt_structure.h"
+#include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
 
@@ -78,8 +79,7 @@ bool ProducesBufferLessTile(const ExprPtr& value, const SourceBufferLess& source
     if (call->op_->name_ == "tile.tpop_from_aic" || call->op_->name_ == "tile.tpop_from_aiv") {
       return true;
     }
-    if (IsViewOperation(call->op_->name_) && !IsDataPermutingInheritOp(call->op_->name_) &&
-        !call->args_.empty()) {
+    if (op_predicates::IsBufferAliasingViewOp(call->op_->name_) && !call->args_.empty()) {
       auto in = AsVarLike(call->args_[0]);
       return in && source_buffer_less(in.get());
     }

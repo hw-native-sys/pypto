@@ -180,11 +180,103 @@ class TestTensorMatmulAcc2dBy3d(PTOTestCase):
         tensors["c"][:] = torch.matmul(a.unsqueeze(0), b.transpose(-2, -1))
 
 
+class TestTensorBatchMatmulMixedAddBTrans(PTOTestCase):
+    """Mixed-kernel probe: a Vec compute result feeds a ``b_trans=True`` ND matmul.
+
+    ``bt = b0 + b1`` is a vector (Vec/UB) op result over 3D operands;
+    ``c[i] = a[i] @ bt[i]^T``. The transposed operand of the resulting
+    ``tile.batch_matmul`` originates from a compute op, NOT a load — so the
+    legacy transpose-at-load path has no transposed load to ride on. This
+    probes the CURRENT (pre-migration) ND behavior for a compute-sourced
+    transposed batch_matmul operand: silently dropped transpose, wrong
+    numerics, or a compile-time failure.
+    """
+
+    __test__ = False
+
+    def __init__(
+        self,
+        b: int = 2,
+        m: int = 16,
+        k: int = 64,
+        n: int = 64,
+        *,
+        platform: str | None = None,
+        config=None,
+    ):
+        super().__init__(config, platform=platform)
+        self.B = b
+        self.M = m
+        self.K = k
+        self.N = n
+
+    def get_name(self) -> str:
+        return f"tensor_batch_matmul_mixed_add_btrans_{self.B}x{self.M}x{self.K}x{self.N}"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        B, M, K, N = self.B, self.M, self.K, self.N
+        return [
+            TensorSpec("a", [B, M, K], DataType.FP32, init_value=torch.randn),
+            TensorSpec("b0", [B, N, K], DataType.FP32, init_value=torch.randn),
+            TensorSpec("b1", [B, N, K], DataType.FP32, init_value=torch.randn),
+            TensorSpec("c", [B, M, N], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        B, M, K, N = self.B, self.M, self.K, self.N
+
+        @pl.program
+        class TensorBatchMatmulMixedAddBTransProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def mixed_add_btrans_nd(
+                self,
+                a: pl.Tensor[[B, M, K], pl.FP32],
+                b0: pl.Tensor[[B, N, K], pl.FP32],
+                b1: pl.Tensor[[B, N, K], pl.FP32],
+                c: pl.Out[pl.Tensor[[B, M, N], pl.FP32]],
+            ) -> pl.Tensor[[B, M, N], pl.FP32]:
+                bt = pl.add(b0, b1)  # Vec compute -> [B, N, K]
+                # rank-3 operands -> tile.batch_matmul; bt is the b_trans operand.
+                cm = pl.matmul(a, bt, b_trans=True, out_dtype=pl.FP32)  # batch a @ bt^T -> [B, M, N]
+                out_c = pl.assemble(c, cm, offset=[0, 0, 0])
+                return out_c
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                a: pl.Tensor[[B, M, K], pl.FP32],
+                b0: pl.Tensor[[B, N, K], pl.FP32],
+                b1: pl.Tensor[[B, N, K], pl.FP32],
+                out_c: pl.Out[pl.Tensor[[B, M, N], pl.FP32]],
+            ) -> pl.Tensor[[B, M, N], pl.FP32]:
+                out_c = self.mixed_add_btrans_nd(a, b0, b1, out_c)
+                return out_c
+
+        return TensorBatchMatmulMixedAddBTransProgram
+
+    def compute_expected(self, tensors, params=None):
+        a = tensors["a"].to(torch.float32)
+        bt = tensors["b0"].to(torch.float32) + tensors["b1"].to(torch.float32)
+        tensors["c"][:] = torch.matmul(a, bt.transpose(-2, -1))
+
+
 _ND_SHAPES = [(16, 64, 64), (16, 128, 64)]
 
 
 class TestTensorBatchMatmulOperations:
     """Test suite for ND ``pl.matmul`` / ``pl.matmul_acc`` lowering."""
+
+    @pytest.mark.xfail(
+        reason="ND mixed-kernel (Vec-sourced b_trans batch_matmul) not yet supported; "
+        "convert drops the transpose for ND tile operands. 2D is fixed; ND deferred.",
+        strict=False,
+    )
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    @pytest.mark.parametrize("b,m,k,n", [(2, 16, 64, 128)])
+    def test_tensor_batch_matmul_mixed_add_btrans(self, test_runner, platform, b, m, k, n):
+        """Mixed-kernel: a Vec compute (add) result feeds a b_trans=True ND matmul (deferred)."""
+        result = test_runner.run(TestTensorBatchMatmulMixedAddBTrans(b=b, m=m, k=k, n=n, platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.parametrize("platform", PLATFORMS)
     @pytest.mark.parametrize("m,k,n", _ND_SHAPES)

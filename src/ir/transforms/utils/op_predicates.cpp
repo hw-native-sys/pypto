@@ -12,6 +12,7 @@
 #include "pypto/ir/transforms/utils/op_predicates.h"
 
 #include <memory>
+#include <string>
 
 #include "pypto/ir/core_affinity_kind.h"
 #include "pypto/ir/expr.h"
@@ -41,6 +42,17 @@ bool IsTPop(const CallPtr& call) { return HasRole(call, CrossCoreRole::TPop); }
 bool IsTPush(const CallPtr& call) { return HasRole(call, CrossCoreRole::TPush); }
 bool IsTFree(const CallPtr& call) { return HasRole(call, CrossCoreRole::TFree); }
 bool IsInitializePipe(const CallPtr& call) { return HasRole(call, CrossCoreRole::InitializePipe); }
+
+bool IsBufferAliasingViewOp(const std::string& op_name) {
+  auto& registry = OpRegistry::GetInstance();
+  if (!registry.IsRegistered(op_name)) return false;
+  const auto& entry = registry.GetEntry(op_name);
+  // An inherit-input op aliases its input buffer only if it is also in-place
+  // safe. tile.transpose inherits input memory but PERMUTES data into a fresh
+  // buffer (pto.ttrans, registered not_inplace_safe()), so its output does NOT
+  // alias the input — IsInplaceSafe() excludes it without hardcoding op names.
+  return entry.OutputMemoryInheritsInput() && entry.IsInplaceSafe();
+}
 
 }  // namespace op_predicates
 }  // namespace ir

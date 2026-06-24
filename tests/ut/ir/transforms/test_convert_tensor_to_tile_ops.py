@@ -716,6 +716,85 @@ class TestConvertTensorToTileOps:
         )
         _assert_convert_equal(before, expected)
 
+    def test_mixed_kernel_vec_btrans_moves_to_mat_then_views(self):
+        """A Vec compute result (add) feeding a b_trans=True 2D matmul is bridged to Mat
+        via a NATURAL tile.move, then transposed by a zero-copy tile.transpose_view — NOT
+        a real tile.transpose (ttrans).
+
+        The Vec tile cannot carry the col_major layout a view needs (and a col_major Vec
+        tile is not V2C-pushable on a2a3), so the operand is moved to Mat in its original
+        shape first and reinterpreted as its transpose on the Mat side. Saves the extra
+        UB transpose a real ttrans would cost.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                a: pl.Tensor[[16, 64], pl.FP32],
+                b0: pl.Tensor[[128, 64], pl.FP32],
+                b1: pl.Tensor[[128, 64], pl.FP32],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                bt: pl.Tensor[[128, 64], pl.FP32] = pl.add(b0, b1)  # Vec compute result
+                y: pl.Tensor[[16, 128], pl.FP32] = pl.matmul(a, bt, b_trans=True, out_dtype=pl.FP32)
+                return y
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.FP32],
+                b0: pl.Tensor[[128, 64], pl.FP32],
+                b1: pl.Tensor[[128, 64], pl.FP32],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                y: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(a, b0, b1)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                a: pl.Tensor[[16, 64], pl.FP32],
+                b0: pl.Tensor[[128, 64], pl.FP32],
+                b1: pl.Tensor[[128, 64], pl.FP32],
+                ret0_out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                # add operands load naturally to Vec; the add stays in Vec.
+                b0_vec: pl.Tile[[128, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    b0, [0, 0], [128, 64], [128, 64], target_memory=pl.MemorySpace.Vec, transpose=False
+                )
+                b1_vec: pl.Tile[[128, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    b1, [0, 0], [128, 64], [128, 64], target_memory=pl.MemorySpace.Vec, transpose=False
+                )
+                bt_vec: pl.Tile[[128, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tile.add(b0_vec, b1_vec)
+                # a loads natural to Mat; the Vec add result is moved to Mat in its
+                # natural shape, then reinterpreted as its transpose via a zero-copy view.
+                a_mat: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Mat] = pl.load(
+                    a, [0, 0], [16, 64], [16, 64], target_memory=pl.MemorySpace.Mat, transpose=False
+                )
+                bt_mat: pl.Tile[[128, 64], pl.FP32, pl.MemorySpace.Mat] = pl.tile.move(
+                    bt_vec, target_memory=pl.MemorySpace.Mat
+                )
+                bt_mat_t = pl.tile.transpose_view(bt_mat)  # NZ->ZN [64, 128]
+                y_tile: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Acc] = pl.tile.matmul(a_mat, bt_mat_t)
+                out_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(y_tile, [0, 0], ret0_out)
+                return out_store
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.FP32],
+                b0: pl.Tensor[[128, 64], pl.FP32],
+                b1: pl.Tensor[[128, 64], pl.FP32],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                ret0_out: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
+                y: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(a, b0, b1, ret0_out)
+                return y
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
     def test_shared_kv_one_load_two_matmuls_b_trans(self):
         """A single sliced KV feeding a b_trans=True and a b_trans=False matmul lowers
         to ONE GM->L1 load + ONE zero-copy tile.transpose_view view, not two loads (#1776).
@@ -725,32 +804,74 @@ class TestConvertTensorToTileOps:
         it via tile.transpose_view (NZ<->ZN) aliasing the same buffer, while the
         b_trans=False (PV) use reads the natural tile directly.
         """
-        in_specs: list[InSpec] = [
-            ("q", [16, 64], DataType.BF16),
-            ("p", [16, 64], DataType.BF16),
-            ("kv_src", [128, 64], DataType.BF16),
-        ]
 
-        def before_body(ib, ins):
-            q, p, kv_src = ins
-            kv = ib.let("kv", tensor_ops.slice(kv_src, [64, 64], [0, 0]))
-            qk = ib.let("qk", tensor_ops.matmul(q, kv, b_trans=True, out_dtype=DataType.FP32))
-            pv = ib.let("pv", tensor_ops.matmul(p, kv, out_dtype=DataType.FP32))
-            return ib.let("out", tensor_ops.add(qk, pv))
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                q: pl.Tensor[[16, 64], pl.BF16],
+                p: pl.Tensor[[16, 64], pl.BF16],
+                kv_src: pl.Tensor[[128, 64], pl.BF16],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                kv: pl.Tensor[[64, 64], pl.BF16] = pl.slice(kv_src, [64, 64], [0, 0])
+                qk: pl.Tensor[[16, 64], pl.FP32] = pl.matmul(q, kv, b_trans=True, out_dtype=pl.FP32)
+                pv: pl.Tensor[[16, 64], pl.FP32] = pl.matmul(p, kv, out_dtype=pl.FP32)
+                out: pl.Tensor[[16, 64], pl.FP32] = pl.add(qk, pv)
+                return out
 
-        before = _make_before(
-            in_specs=in_specs, out_shape=[16, 64], out_dtype=DataType.FP32, body=before_body
-        )
-        after = passes.convert_tensor_to_tile_ops()(before)
-        incore = after.get_function("main_incore_0")
-        assert incore is not None
-        counts = _count_calls(incore, {"tile.load", "tile.transpose_view"})
-        # q, p, and kv each load exactly once — kv is NOT loaded twice.
-        assert counts["tile.load"] == 3, f"expected 3 loads (q, p, kv), got {counts['tile.load']}"
-        # The b_trans=True use reinterprets the shared kv tile in place.
-        assert counts["tile.transpose_view"] == 1, (
-            f"expected 1 transpose_view, got {counts['tile.transpose_view']}"
-        )
+            @pl.function
+            def main(
+                self,
+                q: pl.Tensor[[16, 64], pl.BF16],
+                p: pl.Tensor[[16, 64], pl.BF16],
+                kv_src: pl.Tensor[[128, 64], pl.BF16],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                out: pl.Tensor[[16, 64], pl.FP32] = self.main_incore_0(q, p, kv_src)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                q: pl.Tensor[[16, 64], pl.BF16],
+                p: pl.Tensor[[16, 64], pl.BF16],
+                kv_src: pl.Tensor[[128, 64], pl.BF16],
+                ret0_out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                # The sliced kv loads ONCE to Mat (consumer-driven), shared by both matmuls.
+                kv_tile: pl.Tile[[64, 64], pl.BF16, pl.MemorySpace.Mat] = pl.load(
+                    kv_src, [0, 0], [64, 64], [64, 64], target_memory=pl.MemorySpace.Mat, transpose=False
+                )
+                q_mat: pl.Tile[[16, 64], pl.BF16, pl.MemorySpace.Mat] = pl.load(
+                    q, [0, 0], [16, 64], [16, 64], target_memory=pl.MemorySpace.Mat, transpose=False
+                )
+                # b_trans=True reinterprets the SAME kv buffer in place (NZ<->ZN).
+                kv_tile_t = pl.tile.transpose_view(kv_tile)
+                qk_tile: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Acc] = pl.tile.matmul(q_mat, kv_tile_t)
+                p_mat: pl.Tile[[16, 64], pl.BF16, pl.MemorySpace.Mat] = pl.load(
+                    p, [0, 0], [16, 64], [16, 64], target_memory=pl.MemorySpace.Mat, transpose=False
+                )
+                # b_trans=False reads the natural kv tile directly.
+                pv_tile: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Acc] = pl.tile.matmul(p_mat, kv_tile)
+                out_tile = pl.tile.add(qk_tile, pv_tile)
+                out_store: pl.Tensor[[16, 64], pl.FP32] = pl.store(out_tile, [0, 0], ret0_out)
+                return out_store
+
+            @pl.function
+            def main(
+                self,
+                q: pl.Tensor[[16, 64], pl.BF16],
+                p: pl.Tensor[[16, 64], pl.BF16],
+                kv_src: pl.Tensor[[128, 64], pl.BF16],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                ret0_out: pl.Tensor[[16, 64], pl.FP32] = pl.create_tensor([16, 64], dtype=pl.FP32)
+                out: pl.Tensor[[16, 64], pl.FP32] = self.main_incore_0(q, p, kv_src, ret0_out)
+                return out
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
 
     def test_matmul_acc_conversion(self):
         """tensor.matmul + tensor.matmul_acc -> tile.matmul + tile.matmul_acc.

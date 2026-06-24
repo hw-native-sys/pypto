@@ -103,6 +103,7 @@ __all__ = [
     "slice",
     "reshape",
     "transpose",
+    "transpose_view",
     "set_validshape",
     "rem",
     "rems",
@@ -1626,6 +1627,26 @@ def transpose(tile: Tile, axis1: int, axis2: int, tmp_tile: Tile | None = None) 
     tile_expr = tile.unwrap()
     tmp_expr = tmp_tile.unwrap() if tmp_tile is not None else None
     call_expr = _ir_ops.transpose(tile_expr, axis1, axis2, tmp=tmp_expr)
+    return Tile(expr=call_expr)
+
+
+def transpose_view(tile: Tile) -> Tile:
+    """Zero-copy fractal-layout reinterpretation (NZ<->ZN) of a tile.
+
+    Swaps the trailing two dims together with the block/scatter layouts, aliasing
+    the source buffer byte-for-byte: an NZ ``[..., N, K]`` tile and a ZN
+    ``[..., K, N]`` tile over the same L1 bytes are mutual transposes. Emits no
+    data movement, so one GM->L1 load can feed both a ``b_trans=True`` and a
+    ``b_trans=False`` matmul on a shared operand.
+
+    Args:
+        tile: Input tile (TileType, >=2D; typically Mat-resident).
+
+    Returns:
+        Tile wrapping the transposed-layout view.
+    """
+    tile_expr = tile.unwrap()
+    call_expr = _ir_ops.transpose_view(tile_expr)
     return Tile(expr=call_expr)
 
 

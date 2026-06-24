@@ -3076,6 +3076,36 @@ static std::string EmitLoadRankPair(codegen::PTOCodegen& cg, const std::string& 
   return rk_pair;
 }
 
+// Emit a metadata-only `pto.treshape` reinterpret of `src_arg` into the current
+// result. Shared by the tile.reshape and tile.transpose_view codegen lambdas:
+// both lower a MemRef-less view (e.g. over a cross-core tpop slot) to a
+// pto.treshape that READS the source SSA — no data movement. `result_type` is the
+// result var's TileType buf-type (empty if none); when present a fresh temp
+// buffer is bound so the view gets its own SSA name and `: src -> dst` annotation
+// (the MemRef-less source's type comes from the TileType, not a MemRef).
+static void EmitTreshapeView(codegen::PTOCodegen& codegen, const ir::ExprPtr& src_arg,
+                             std::string result_target, const std::string& result_type,
+                             const std::string& temp_prefix) {
+  std::string src = codegen.GetExprAsCode(src_arg);
+  std::string src_type;
+  if (auto src_var = AsVarLike(src_arg)) {
+    if (auto tile_type = As<ir::TileType>(src_var->GetType())) {
+      src_type = codegen.GetTileBufTypeStringFromTileType(tile_type);
+    }
+  }
+  if (!result_type.empty()) {
+    result_target = codegen.NewNamedTemp(temp_prefix);
+    codegen.SetCurrentResultBuf(result_target);
+    codegen.RegisterTileBufType(result_target, result_type);
+  }
+  std::ostringstream oss;
+  oss << result_target << " = pto.treshape " << src;
+  if (!src_type.empty() && !result_type.empty()) {
+    oss << " : " << src_type << " -> " << result_type;
+  }
+  codegen.Emit(oss.str());
+}
+
 void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exclude_ops) {
   // Register simple N-ary ops
   for (const auto& entry : kSimpleOps) {
@@ -3891,38 +3921,41 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
       return std::string("");
     }
 
-    // Fallback: emit pto.treshape. Derive the source type from its TileType so a
-    // MemRef-less source (a tpop result) still gets its `: src -> dst` annotation.
-    std::string src = codegen.GetExprAsCode(op->args_[0]);
-    std::string src_type;
-    if (auto src_var = AsVarLike(op->args_[0])) {
-      if (auto tile_type = ir::As<ir::TileType>(src_var->GetType())) {
-        src_type = codegen.GetTileBufTypeStringFromTileType(tile_type);
-      }
-    }
-
-    if (!result_type.empty()) {
-      result_target = codegen.NewNamedTemp("reshape_buf");
-      codegen.SetCurrentResultBuf(result_target);
-      codegen.RegisterTileBufType(result_target, result_type);
-    }
-    std::ostringstream oss;
-    oss << result_target << " = pto.treshape " << src;
-    if (!src_type.empty() && !result_type.empty()) {
-      oss << " : " << src_type << " -> " << result_type;
-    }
-    codegen.Emit(oss.str());
+    // Fallback: emit pto.treshape reading the source SSA.
+    EmitTreshapeView(codegen, op->args_[0], result_target, result_type, "reshape_buf");
     return std::string("");
   });
   reg("tile.transpose_view", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
-    // Zero-copy fractal-layout reinterpretation (NZ<->ZN). The result var owns a
-    // pre-declared pto.alloc_tile carrying the transposed (ZN) type, aliased to
-    // the source buffer's address through the shared MemRef. The two alloc_tile
-    // declarations at the same addr ARE the whole mechanism — there is no
-    // data-movement instruction to emit (issue #1776).
+    // Zero-copy fractal-layout reinterpretation (NZ<->ZN).
+    //  - Alloc-backed result (the #1776 case): the result var owns a pre-declared
+    //    pto.alloc_tile carrying the transposed (ZN) type, aliased to the source
+    //    buffer's address through the shared MemRef. The two alloc_tile decls at
+    //    the same addr ARE the whole mechanism — emit nothing.
+    //  - MemRef-less result (a view over a cross-core tpop slot, which owns no
+    //    buffer): there is no alloc to alias, so reinterpret the slot in place
+    //    with pto.treshape reading the source SSA (a metadata-only op — no data
+    //    movement), exactly like tile.reshape over a tpop.
     CHECK(op->args_.size() == 1) << "Operation:[tile.transpose_view] requires 1 argument (tile), but got "
                                  << op->args_.size();
-    (void)codegen_base;
+    auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+    std::string result_target = codegen.GetCurrentResultTarget();
+
+    std::string result_type;
+    bool result_has_memref = false;
+    if (auto result_var = codegen.GetCurrentResultVar()) {
+      if (auto result_tile = ir::As<ir::TileType>(result_var->GetType())) {
+        result_type = codegen.GetTileBufTypeStringFromTileType(result_tile);
+        result_has_memref = result_tile->memref_.has_value();
+      }
+    }
+    // Alloc-backed: the pre-declared alloc_tile at the shared addr is the view.
+    if (result_has_memref) {
+      return std::string("");
+    }
+
+    // MemRef-less: reinterpret the slot in place via pto.treshape reading the
+    // source SSA — exactly like tile.reshape over a tpop.
+    EmitTreshapeView(codegen, op->args_[0], result_target, result_type, "transpose_view_buf");
     return std::string("");
   });
   reg("tile.set_validshape", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {

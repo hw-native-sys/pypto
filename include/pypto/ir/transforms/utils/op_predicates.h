@@ -12,6 +12,8 @@
 #ifndef PYPTO_IR_TRANSFORMS_UTILS_OP_PREDICATES_H_
 #define PYPTO_IR_TRANSFORMS_UTILS_OP_PREDICATES_H_
 
+#include <string>
+
 #include "pypto/ir/expr.h"
 
 namespace pypto {
@@ -31,6 +33,18 @@ bool IsTFree(const CallPtr& call);
 /// True if the Call targets an initialize_pipe op
 /// (system.aic_initialize_pipe / system.aiv_initialize_pipe).
 bool IsInitializePipe(const CallPtr& call);
+
+/// True if `op_name` is an inherit-input view op whose output ALIASES its input's
+/// buffer in place — a zero-copy reinterpretation (slice / reshape / extract /
+/// transpose_view / ...). Decided by the registry:
+/// `OutputMemoryInheritsInput() && IsInplaceSafe()`.
+/// Excludes `tile.transpose`: it permutes data into a FRESH buffer (pto.ttrans is
+/// registered not_inplace_safe()), so its output does NOT alias the input.
+///
+/// Used wherever a view over a buffer-less tile (e.g. a cross-core tpop result)
+/// must be treated as the SAME underlying buffer: InitMemRef's buffer-less
+/// propagation and the tpop lifetime / tfree finalizer.
+bool IsBufferAliasingViewOp(const std::string& op_name);
 
 }  // namespace op_predicates
 }  // namespace ir

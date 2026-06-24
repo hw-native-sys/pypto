@@ -710,43 +710,61 @@ class TensorToTileMutator : public TypePropagatingMutator {
     for (const auto& [idx, _] : input_reqs) sorted_indices.push_back(idx);
     std::sort(sorted_indices.begin(), sorted_indices.end());
 
+    // Zero-copy reinterpret a Mat-resident tile as its transpose (NZ<->ZN),
+    // aliasing the SAME L1 buffer (issue #1776). Valid only for Mat tiles.
+    auto emit_view = [&](const VarPtr& v) -> VarPtr {
+      auto view = op_registry_.Create("tile.transpose_view", {v}, {}, call->span_);
+      auto view_var = std::make_shared<Var>(v->name_hint_ + "_t", view->GetType(), call->span_);
+      stmts.push_back(std::make_shared<AssignStmt>(view_var, view, call->span_));
+      return view_var;
+    };
+
+    // Bridge a non-Mat (e.g. Vec) tile to Mat in its NATURAL orientation via a
+    // V2C move. transpose_view needs a Mat-resident tile (a col_major Vec tile
+    // cannot be pushed V2C — a2a3 TPUSH transfers only ND/NZ tiles), so a Vec
+    // compute result feeding a b_trans matmul (mixed kernel) is moved to Mat with
+    // its original shape first, then reinterpreted as its transpose on the Mat side.
+    auto emit_move_to_mat = [&](const VarPtr& v) -> VarPtr {
+      std::vector<std::pair<std::string, std::any>> move_kw = {{"target_memory", MemorySpace::Mat}};
+      auto mv = op_registry_.Create("tile.move", {v}, move_kw, call->span_);
+      auto mv_var = std::make_shared<Var>(v->name_hint_ + "_mat", mv->GetType(), call->span_);
+      stmts.push_back(std::make_shared<AssignStmt>(mv_var, mv, call->span_));
+      return mv_var;
+    };
+
     for (size_t idx : sorted_indices) {
       const auto& req = input_reqs.at(idx);
       if (idx >= args.size()) continue;
       const bool want_transpose = req.trans_kwarg ? call->GetKwarg<bool>(*req.trans_kwarg, false) : false;
       auto tensor_type = As<TensorType>(args[idx]->GetType());
 
-      // 2D tile.matmul realises a transposed operand as a zero-copy tile.transpose_view
-      // view over ONE natural load, aliasing the same L1 buffer (issue #1776) — so
-      // a tensor consumed by both a b_trans=True and a b_trans=False matmul loads
-      // once. ND (batch_matmul) keeps the legacy transpose-at-load path: the
-      // transpose is baked into the load and no view is emitted.
+      // 2D tile.matmul realises a transposed Mat operand as a zero-copy
+      // tile.transpose_view over ONE natural load (issue #1776). ND
+      // (batch_matmul) keeps the legacy transpose-at-load path for GM operands.
       const bool use_view = want_transpose && !is_nd;
 
-      VarPtr space_var;
       if (tensor_type) {
-        // Bake the transpose into the load only on the legacy ND path; the 2D
-        // path always loads naturally and lets the view supply the transpose.
-        space_var = emit_load(args[idx], tensor_type, req.space, /*transpose=*/want_transpose && is_nd, idx);
-      } else if (use_view) {
-        // Already a tile (e.g. a consumer-driven Mat load) that we reinterpret
-        // below; aliasing its buffer requires a Var.
-        space_var = As<Var>(args[idx]);
-        if (!space_var) continue;  // non-Var tile expr: leave as-is
-      } else {
-        continue;  // already a tile in the right orientation — pass through
+        // GM operand: 2D loads natural then views; ND bakes the transpose into
+        // the load. (no transpose -> natural load, passed through.)
+        auto loaded =
+            emit_load(args[idx], tensor_type, req.space, /*transpose=*/want_transpose && is_nd, idx);
+        args[idx] = use_view ? emit_view(loaded) : loaded;
+        continue;
       }
 
-      if (use_view) {
-        // Zero-copy reinterpret the natural Mat tile as its transpose (NZ<->ZN),
-        // aliasing the SAME L1 buffer.
-        auto view = op_registry_.Create("tile.transpose_view", {space_var}, {}, call->span_);
-        auto view_var = std::make_shared<Var>(space_var->name_hint_ + "_t", view->GetType(), call->span_);
-        stmts.push_back(std::make_shared<AssignStmt>(view_var, view, call->span_));
-        args[idx] = view_var;
-      } else {
-        args[idx] = space_var;
-      }
+      // Tile operand. Only the 2D view path rewrites a transposed tile operand
+      // here; ND tile operands are left untouched (out of scope for now). A
+      // non-transposed operand also passes through.
+      if (!use_view) continue;
+      auto var = As<Var>(args[idx]);
+      if (!var) continue;  // non-Var tile expr: leave as-is
+      auto tile_ty = As<TileType>(var->GetType());
+      const bool mat_resident =
+          tile_ty && tile_ty->memory_space_.value_or(MemorySpace::Vec) == MemorySpace::Mat;
+      // Mat-resident operand (e.g. a consumer-driven Mat load): zero-copy view.
+      // Non-Mat operand (Vec compute result, mixed kernel): move to Mat in its
+      // natural shape first, then view the Mat tile.
+      args[idx] = mat_resident ? emit_view(var) : emit_view(emit_move_to_mat(var));
     }
 
     return {std::move(args), std::move(stmts)};

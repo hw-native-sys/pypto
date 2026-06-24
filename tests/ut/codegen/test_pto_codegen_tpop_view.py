@@ -127,5 +127,80 @@ def test_pto_codegen_reshape_over_tpop_lowers_to_treshape():
             )
 
 
+@pl.program
+class TpopTransposeView:
+    """Vector consumer that transpose_views a popped (cross-core) tile in place."""
+
+    @pl.function(type=pl.FunctionType.AIV)
+    def vector_consumer(
+        self,
+        a: pl.Tensor[[16, 32], pl.FP32],
+        output: pl.Out[pl.Tensor[[32, 16], pl.FP32]],
+    ) -> pl.Tensor[[32, 16], pl.FP32]:
+        c2v_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x2000)
+        v2c_peer = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="cube_producer")
+        pl.aiv_initialize_pipe(
+            dir_mask=3, slot_size=1024, c2v_consumer_buf=c2v_buf, v2c_consumer_buf=v2c_peer
+        )
+
+        tile_a: pl.Tile[[16, 32], pl.FP32] = pl.load(a, [0, 0], [16, 32])
+        pl.tpush_to_aic(tile_a, split=0)
+
+        # Popped tile: lives in the reserved C2V slot, no general-pool address.
+        t: pl.Tile[[16, 32], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=0)
+
+        # Zero-copy NZ<->ZN reinterpret of the popped tile (DSL-exposed op).
+        vt: pl.Tile[[32, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tile.transpose_view(t)
+        out: pl.Tile[[32, 16], pl.FP32] = pl.exp(vt)
+        pl.tfree_to_aic(t)
+
+        updated: pl.Tensor[[32, 16], pl.FP32] = pl.store(out, [0, 0], output)
+        return updated
+
+    @pl.function(type=pl.FunctionType.AIC)
+    def cube_producer(self, arg: pl.Tensor[[16, 32], pl.FP32]):
+        v2c_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=0x1000)
+        c2v_peer = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="vector_consumer")
+        pl.aic_initialize_pipe(
+            dir_mask=3, slot_size=1024, c2v_consumer_buf=c2v_peer, v2c_consumer_buf=v2c_buf
+        )
+        received: pl.Tile[[16, 32], pl.FP32, pl.MemorySpace.Mat] = pl.tpop_from_aiv(split=0)
+        pl.tpush_to_aiv(received, split=0)
+        pl.tfree_to_aiv(received)
+
+
+def test_pto_codegen_transpose_view_over_tpop_lowers_to_treshape():
+    mlir = _generate_default_mlir(TpopTransposeView)
+    consumer = _function_body(mlir, "vector_consumer")
+
+    assert "pto.tpop_from_aic" in consumer, consumer
+
+    # The transpose_view over the MemRef-less popped tile reinterprets the slot in
+    # place via pto.treshape reading the source SSA — NOT a real data-moving
+    # transpose (pto.ttrans) and NOT a fresh, disconnected alloc_tile.
+    assert "pto.treshape" in consumer, "transpose_view over a tpop must lower to pto.treshape:\n" + consumer
+    assert "pto.ttrans" not in consumer, "must not materialise a real transpose:\n" + consumer
+
+    # The view owns no buffer: its result comes from pto.treshape, not a fresh
+    # (disconnected) alloc_tile. The treshape must READ the popped tile's SSA so
+    # the data is connected, and carry its `: src -> dst` type annotation
+    # (the MemRef-less source's type comes from the TileType, not a MemRef).
+    tpop_lines = [ln for ln in consumer.splitlines() if "= pto.tpop_from_aic" in ln]
+    assert len(tpop_lines) == 1, consumer
+    tpop_ssa = tpop_lines[0].split("=", 1)[0].strip()
+    treshape_lines = [ln for ln in consumer.splitlines() if "pto.treshape" in ln]
+    assert treshape_lines, consumer
+    for line in treshape_lines:
+        assert "pto.alloc_tile" not in line, "view must not allocate a buffer:\n" + line
+        assert f"pto.treshape {tpop_ssa}" in line, "treshape must read the popped tile:\n" + line
+        assert " : " in line and " -> " in line, "pto.treshape needs src/dst annotation:\n" + line
+
+    # tfree must follow the consuming op (lifetime extended through the view),
+    # else the FIFO slot is freed before the transpose view is read.
+    assert consumer.find("pto.tfree_from_aic") > consumer.find("pto.treshape") > 0, (
+        "tfree must come after the treshape view:\n" + consumer
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -861,6 +861,73 @@ class TestATransMatmul(PTOTestCase):
         tensors["c"][:] = torch.matmul(a.T, b)
 
 
+class TestMixedAddBTrans(PTOTestCase):
+    """Mixed-kernel probe: a Vec compute result feeds a ``b_trans=True`` 2D matmul.
+
+    ``bt = b0 + b1`` is a vector (Vec/UB) op result; ``c = a @ bt^T``. The
+    transposed operand originates from a compute op, NOT a load, so the
+    transpose cannot ride a transposed load. This exercises whether the 2D
+    ``tile.transpose_view`` + Vec->Mat ``tile.move`` path transposes a
+    compute-sourced operand correctly. Probe for the ND batch_matmul migration.
+    """
+
+    __test__ = False
+
+    def __init__(self, m: int = 16, k: int = 64, n: int = 128, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
+        self.M = m
+        self.K = k
+        self.N = n
+
+    def get_name(self) -> str:
+        return f"mixed_add_btrans_{self.M}x{self.K}x{self.N}"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        M, K, N = self.M, self.K, self.N
+        return [
+            TensorSpec("a", [M, K], DataType.FP32, init_value=torch.randn),
+            TensorSpec("b0", [N, K], DataType.FP32, init_value=torch.randn),
+            TensorSpec("b1", [N, K], DataType.FP32, init_value=torch.randn),
+            TensorSpec("c", [M, N], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        M, K, N = self.M, self.K, self.N
+
+        @pl.program
+        class MixedAddBTransProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def mixed_add_btrans(
+                self,
+                a: pl.Tensor[[M, K], pl.FP32],
+                b0: pl.Tensor[[N, K], pl.FP32],
+                b1: pl.Tensor[[N, K], pl.FP32],
+                c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+            ) -> pl.Tensor[[M, N], pl.FP32]:
+                bt = pl.add(b0, b1)  # Vec compute -> [N, K]
+                cm = pl.matmul(a, bt, b_trans=True, out_dtype=pl.FP32)  # a @ bt^T -> [M, N]
+                out_c = pl.assemble(c, cm, offset=[0, 0])
+                return out_c
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                a: pl.Tensor[[M, K], pl.FP32],
+                b0: pl.Tensor[[N, K], pl.FP32],
+                b1: pl.Tensor[[N, K], pl.FP32],
+                out_c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+            ) -> pl.Tensor[[M, N], pl.FP32]:
+                out_c = self.mixed_add_btrans(a, b0, b1, out_c)
+                return out_c
+
+        return MixedAddBTransProgram
+
+    def compute_expected(self, tensors, params=None):
+        a = tensors["a"].to(torch.float32)
+        bt = tensors["b0"].to(torch.float32) + tensors["b1"].to(torch.float32)
+        tensors["c"][:] = torch.matmul(a, bt.T)
+
+
 class TestMatmulOperations:
     """Test suite for matrix multiplication (matmul) operations."""
 
@@ -890,6 +957,13 @@ class TestMatmulOperations:
     def test_matmul_abtranspose(self, test_runner, platform, m, k, n):
         """Test matmul with both A and B transposed (C = A^T @ B^T)."""
         result = test_runner.run(TestMatmulABTranspose(m=m, k=k, n=n, platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    @pytest.mark.parametrize("m,k,n", [(16, 64, 128)])
+    def test_matmul_mixed_add_btranspose(self, test_runner, platform, m, k, n):
+        """Mixed-kernel: a Vec compute (add) result feeds a b_trans=True 2D matmul."""
+        result = test_runner.run(TestMixedAddBTrans(m=m, k=k, n=n, platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
     def test_matmulacc(self, test_config):
