@@ -2113,9 +2113,9 @@ void OpConversionRegistry::RegisterDistributedOps() {
         INTERNAL_CHECK_SPAN(kwargs.empty(), span) << "pld.tensor.get conversion expects no kwargs";
         auto& op_reg = OpRegistry::GetInstance();
 
-        auto dst_type = As<DistributedTensorType>(args[0]->GetType());
+        auto dst_type = AsTensorTypeLike(args[0]->GetType());
         INTERNAL_CHECK_SPAN(dst_type, span)
-            << "pld.tensor.get conversion: dst must be DistributedTensorType, got "
+            << "pld.tensor.get conversion: dst must be Tensor or DistributedTensor, got "
             << args[0]->GetType()->TypeName();
         std::vector<ExprPtr> transfer_shape = dst_type->shape_;
         if (args.size() == 6) {
