@@ -195,4 +195,4 @@
 | pto.comm.build_async_session | BuildAsyncSession | comm | ✅ | — | — | — | ❌ | distributed |
 | pto.tprefetch_async | TPREFETCH_ASYNC | comm | ❌ | — | — | — | — | ptoas未实现 (ISA_ONLY) |
 
-**统计**：共 148 个 PTOAS op 行；PTOAS 提供接口 143；pypto 前端已写好 94；有 ST 测试 63。
+**统计**：共 148 个 PTOAS op 行；PTOAS 提供接口 143；pypto 前端已写好 98；有 ST 测试 67。
