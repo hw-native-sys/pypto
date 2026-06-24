@@ -1348,6 +1348,7 @@ class TestExpandMixedKernelCodegen:
         pipeline.add_pass(passes.flatten_tile_nd_to_2d())
         pipeline.add_pass(passes.infer_tile_memory_space())
         pipeline.add_pass(passes.expand_mixed_kernel())
+        pipeline.add_pass(passes.stamp_tfree_split())
         pipeline.add_pass(passes.init_mem_ref())
         pipeline.add_pass(passes.memory_reuse())
         pipeline.add_pass(passes.allocate_memory_addr())

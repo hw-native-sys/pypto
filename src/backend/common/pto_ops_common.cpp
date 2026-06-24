@@ -2086,6 +2086,9 @@ static std::string MakeTfreeToAicCodegenPTO(const CallPtr& op, codegen::CodegenB
 
   CHECK(op->args_.size() == 1) << "tfree_to_aic requires 1 argument (tile from tpop), got "
                                << op->args_.size();
+  INTERNAL_CHECK_SPAN(op->HasKwarg("split"), op->span_)
+      << "Internal error: system.tfree_to_aic is missing its 'split' kwarg; StampTfreeSplit must "
+         "run before codegen to copy it from the originating tpop";
   const int split = op->GetKwarg<int>("split", 0);
 
   std::ostringstream oss;
@@ -2101,6 +2104,9 @@ static std::string MakeTfreeToAivCodegenPTO(const CallPtr& op, codegen::CodegenB
 
   CHECK(op->args_.size() == 1) << "tfree_to_aiv requires 1 argument (tile from tpop), got "
                                << op->args_.size();
+  INTERNAL_CHECK_SPAN(op->HasKwarg("split"), op->span_)
+      << "Internal error: system.tfree_to_aiv is missing its 'split' kwarg; StampTfreeSplit must "
+         "run before codegen to copy it from the originating tpop";
   const int split = op->GetKwarg<int>("split", 0);
 
   std::ostringstream oss;
