@@ -662,10 +662,8 @@ class HasMemRefsVerifier : public IRVisitor {
     auto call = std::dynamic_pointer_cast<const Call>(op->value_);
     if (!call || !call->op_) return false;
     if (call->op_->name_ == "tile.tpop_from_aic" || call->op_->name_ == "tile.tpop_from_aiv") return true;
-    // A zero-copy view chained off a buffer-less tile stays buffer-less, except a
-    // data-permuting view (tile.transpose) — pto.ttrans needs a distinct buffer.
-    if (IsViewOperation(call->op_->name_) && !IsDataPermutingInheritOp(call->op_->name_) &&
-        !call->args_.empty()) {
+    // A zero-copy view chained off a buffer-less tile stays buffer-less.
+    if (IsViewOperation(call->op_->name_) && !call->args_.empty()) {
       auto in = AsVarLike(call->args_[0]);
       if (in && buffer_less_.count(in.get()) > 0) {
         return true;
