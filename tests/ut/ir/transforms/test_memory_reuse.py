@@ -2324,6 +2324,85 @@ class TestControlFlow:
         After = _run_pipeline(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_if_phi_read_after_branch_blocks_reuse(self):
+        """An scf.if return_var (phi) read *after* the branch keeps its buffer
+        live; a later temporary must not be packed onto it.
+
+        Regression test for issue #1821: the lifetime analyzer did not track
+        IfStmt return_vars, so reads of a phi after the if were dropped and its
+        buffer's live range collapsed at the yield.  A later temporary (`e`) was
+        then packed onto the still-live phi buffer, corrupting the value `f`
+        reads (manifested as ~17.5% wrong output in the dsv4 prefill_sparse_attn
+        merge_norm kernel).
+
+        Here `a` stays live across the whole body (used by `e` and `g`), so its
+        buffer is occupied and `e` would otherwise fall back onto the phi's
+        buffer.  Pre-fix, `e` took the phi buffer `mem_vec_3` (clobbering `r`
+        before `f = r + e` read it); post-fix, `e` gets its own `mem_vec_6`.  The
+        branch-local sources `b`/`c` still share one buffer (`mem_vec_3`),
+        proving the fix keeps legitimate mutually-exclusive branch sharing.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                input_a: pl.Tensor[[64, 64], pl.FP32],
+                cond_param: pl.Scalar[pl.INDEX],
+                output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                a: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(input_a, [0, 0], [64, 64])
+                if cond_param < 2:
+                    b: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.add(a, a)
+                    r = pl.yield_(b)
+                else:
+                    c: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.mul(a, a)
+                    r = pl.yield_(c)
+                e: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.add(a, a)
+                f: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.add(r, e)
+                g: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.add(a, f)
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(g, [0, 0], output)
+                return result
+
+        # a → mem_vec_2 (live to the end). b/c/r (phi) share mem_vec_3. e must
+        # NOT take mem_vec_3 (the phi is live until f reads it) → e gets mem_vec_6.
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                input_a: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_0", 0, 16384)],
+                cond_param: pl.Scalar[pl.INDEX],
+                output: pl.Out[pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+                mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+                mem_vec_6: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+                a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.load(
+                    input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+                )
+                if cond_param < 2:
+                    b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = pl.tile.add(
+                        a, a
+                    )
+                    r: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = pl.yield_(b)
+                else:
+                    c: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = pl.tile.mul(
+                        a, a
+                    )
+                    r: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = pl.yield_(c)
+                e: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec] = pl.tile.add(a, a)
+                f: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = pl.tile.add(r, e)
+                g: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.add(a, f)
+                result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
+                    g, [0, 0], output
+                )
+                return result
+
+        After = _run_pipeline(Before)
+        ir.assert_structural_equal(After, Expected)
+
     def test_loop_return_var_blocks_init_memref_reuse(self):
         """Return_var used after loop must block reuse of initValue's MemRef.
 

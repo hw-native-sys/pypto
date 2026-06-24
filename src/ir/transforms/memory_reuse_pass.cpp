@@ -67,6 +67,11 @@ namespace {
 struct LifetimeAnalysisResult {
   std::vector<LifetimeInterval> lifetimes;
   std::map<VarPtr, std::vector<VarPtr>> var_sharing_groups;
+  // var -> per-(scf.if, slot) phi family ids (see LifetimeAnalyzer).
+  std::map<const Var*, std::set<int>> phi_family_ids;
+  // var -> its individual [def, last_use] interval (with phi/loop extension), for
+  // the precise per-var pairwise interference check in the reuse packer.
+  std::map<const Var*, std::pair<int, int>> var_liveness;
 };
 
 /**
@@ -751,6 +756,12 @@ class LifetimeAnalyzer : public IRVisitor {
     std::map<VarPtr, int> var_def_order;     // var -> def order
     std::map<VarPtr, int> var_last_use;      // var -> effective last use (with loop extension)
     std::map<VarPtr, StmtPtr> var_def_stmt;  // var -> defining AssignStmt (for op name extraction)
+    // Phi families, keyed per (scf.if, return-slot): each family id groups one
+    // phi return_var with its branch-local yield-sources (the same logical value
+    // across mutually-exclusive paths), so they may always share a buffer.  A
+    // var may belong to several families (e.g. a source yielded at >1 slot)
+    // without those families merging, so we store a *set* of ids per var.
+    std::map<const Var*, std::set<int>> phi_family_ids;
   };
 
   Result Analyze(const StmtPtr& func_body) {
@@ -763,7 +774,7 @@ class LifetimeAnalyzer : public IRVisitor {
     auto effective_last_use = ComputeEffectiveLastUse();
 
     return {std::move(ordered_defs_), std::move(var_def_order_), std::move(effective_last_use),
-            std::move(var_def_stmt_)};
+            std::move(var_def_stmt_), std::move(var_family_ids_)};
   }
 
  protected:
@@ -810,10 +821,80 @@ class LifetimeAnalyzer : public IRVisitor {
     // Visit condition uses at the current order point (before branches)
     CollectUsesFromExpr(op->condition_, current_order_);
 
-    // Visit then body first, else body second (sequential ordering)
+    // Visit then body first, else body second (sequential ordering), recording
+    // each branch's order range so we can tell branch-local yield-sources apart.
+    int then_start = current_order_;
     VisitStmt(op->then_body_);
+    int then_end = current_order_ - 1;
+    int else_start = -1;
+    int else_end = -1;
     if (op->else_body_.has_value()) {
+      else_start = current_order_;
       VisitStmt(*op->else_body_);
+      else_end = current_order_ - 1;
+    }
+
+    // An scf.if return_var (phi) is NOT itself a tracked def -- it is materialized
+    // by YieldFixup into a branch yield-source's buffer downstream, and tracking
+    // it here would perturb that lowering.  But reads of the phi *after* the if
+    // keep that buffer live; if we drop them (RecordRawUse early-returns on
+    // untracked vars), the buffer's live range collapses at the yield and a later
+    // temporary is packed onto the still-live phi value (merge_norm mi/li/oi,
+    // #1821).  So we redirect the phi's reads onto its *branch-local* yield-
+    // sources (the tiles actually holding the value), recorded in
+    // `phi_local_sources_`.  A source defined OUTSIDE the branch (loaded before
+    // the if and live elsewhere) is left alone -- it genuinely conflicts and
+    // YieldFixup moves it into the phi buffer.
+    //
+    // Extending both branch sources to the phi's last read makes the two
+    // mutually-exclusive sources overlap, so we also tag them with a fresh
+    // per-slot family id; the reuse packer exempts intra-family pairs from the
+    // interference check.  Ids are *per return slot* (not a transitive union): a
+    // source shared across slots joins several families without merging them, so
+    // two distinct phi results are never exempted.
+    auto then_yield = transform_utils::GetLastYieldStmt(op->then_body_);
+    auto else_yield =
+        op->else_body_.has_value() ? transform_utils::GetLastYieldStmt(*op->else_body_) : nullptr;
+    auto branch_local = [this](const VarPtr& v, int start, int end) {
+      if (start < 0) return false;
+      auto it = var_def_order_.find(v);
+      return it != var_def_order_.end() && it->second >= start && it->second <= end;
+    };
+    for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+      const auto& rv = op->return_vars_[i];
+      auto tile_type = As<TileType>(rv->GetType());
+      if (!tile_type || !tile_type->memref_.has_value()) continue;
+      int family_id = next_family_id_++;
+      std::vector<VarPtr> local_sources;
+      std::set<const Var*> seen_phi;
+      // Flatten a nested-if phi source down to its terminal tracked tiles, and
+      // tag THOSE with this (outer) slot's family id -- otherwise the terminals
+      // only carry the inner slot's id and `overlap_blocks_sharing` (which sees
+      // terminal vars, not the untracked phi wrapper) would reject safe nested
+      // mutually-exclusive sharing.
+      std::function<void(const VarPtr&, int, int)> add_source_var = [&](const VarPtr& src, int start,
+                                                                        int end) {
+        auto pit = phi_local_sources_.find(src.get());
+        if (pit != phi_local_sources_.end()) {
+          if (!seen_phi.insert(src.get()).second) return;
+          for (const auto& nested : pit->second) add_source_var(nested, start, end);
+          return;
+        }
+        if (!branch_local(src, start, end)) return;
+        local_sources.push_back(src);
+        var_family_ids_[src.get()].insert(family_id);
+      };
+      auto add_source = [&](const ExprPtr& val, int start, int end) {
+        if (auto src = AsVarLike(val)) add_source_var(src, start, end);
+      };
+      if (then_yield && i < then_yield->value_.size())
+        add_source(then_yield->value_[i], then_start, then_end);
+      if (else_yield && i < else_yield->value_.size())
+        add_source(else_yield->value_[i], else_start, else_end);
+      if (!local_sources.empty()) {
+        var_family_ids_[rv.get()].insert(family_id);
+        phi_local_sources_[rv.get()] = std::move(local_sources);
+      }
     }
   }
 
@@ -847,6 +928,14 @@ class LifetimeAnalyzer : public IRVisitor {
   // YieldFixup will place return_vars into initValue's MemRef buffer,
   // so any post-loop use of a return_var must extend the initValue's lifetime.
   std::map<VarPtr, VarPtr> return_var_to_init_var_;
+
+  // Per-slot phi families: var -> set of family ids (see VisitStmt_(IfStmtPtr)).
+  std::map<const Var*, std::set<int>> var_family_ids_;
+  int next_family_id_ = 0;
+
+  // scf.if phi return_var -> its branch-local yield-sources, so RecordRawUse can
+  // redirect phi reads onto the tiles that actually hold the value.
+  std::map<const Var*, std::vector<VarPtr>> phi_local_sources_;
 
   void CollectUsesFromExpr(const ExprPtr& expr, int use_order) {
     if (!expr) return;
@@ -895,6 +984,16 @@ class LifetimeAnalyzer : public IRVisitor {
   }
 
   void RecordRawUse(const VarPtr& var, int use_order) {
+    // If var is an scf.if phi return_var, redirect the use to its branch-local
+    // yield-sources (the tiles holding the value), keeping their buffers live to
+    // the phi's last read.  Sources may themselves be phis (chained scf.if), so
+    // recurse.
+    auto pit = phi_local_sources_.find(var.get());
+    if (pit != phi_local_sources_.end()) {
+      for (const auto& src : pit->second) RecordRawUse(src, use_order);
+      return;
+    }
+
     // If var is a loop return_var, redirect the use to its initValue var.
     // YieldFixup will alias the return_var to the initValue's MemRef,
     // so keeping the initValue live prevents premature buffer reuse.
@@ -1036,7 +1135,15 @@ LifetimeAnalysisResult ComputeLifetimes(const StmtPtr& func_body) {
               << " space=" << static_cast<int>(interval.memory_space) << " size=" << interval.size;
   }
 
-  return {lifetimes, var_sharing_groups};
+  // Per-var individual liveness (def + effective last use, including phi/loop
+  // extension) for the packer's precise pairwise interference check.
+  std::map<const Var*, std::pair<int, int>> var_liveness;
+  for (const auto& [var, def_point] : result.var_def_order) {
+    int last_use = result.var_last_use.count(var) ? result.var_last_use.at(var) : def_point;
+    var_liveness[var.get()] = {def_point, last_use};
+  }
+
+  return {lifetimes, var_sharing_groups, std::move(result.phi_family_ids), std::move(var_liveness)};
 }
 
 // NOTE: The former tile-type reuse-compatibility gate (AreTileTypesCompatible)
@@ -1282,10 +1389,74 @@ bool NeedsLoadTpopHazardGuard(const FunctionPtr& func) {
  * tile intervals (M a subset of the N IR nodes) — same class as the prior
  * greedy implementation.
  */
-std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(const std::vector<LifetimeInterval>& lifetimes,
-                                                    const HazardInputs& hazard,
-                                                    const ForbidAliasMap& forbid_alias) {
+std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
+    const std::vector<LifetimeInterval>& lifetimes, const HazardInputs& hazard,
+    const ForbidAliasMap& forbid_alias, const std::map<const Var*, std::set<int>>& phi_family_ids,
+    const std::map<VarPtr, std::vector<VarPtr>>& sharing_groups,
+    const std::map<const Var*, std::pair<int, int>>& var_liveness) {
   std::map<VarPtr, VarPtr> reuse_map;
+
+  // Members of a sharing group (the vars that already physically share one base).
+  // Returns a pointer (or nullptr) to avoid copying the vector in the O(M^2) loop.
+  auto group_members = [&sharing_groups](const VarPtr& rep) -> const std::vector<VarPtr>* {
+    auto it = sharing_groups.find(rep);
+    return it != sharing_groups.end() ? &it->second : nullptr;
+  };
+  auto ids_intersect = [](const std::set<int>& x, const std::set<int>& y) {
+    auto ix = x.begin();
+    auto iy = y.begin();
+    while (ix != x.end() && iy != y.end()) {
+      if (*ix < *iy) {
+        ++ix;
+      } else if (*iy < *ix) {
+        ++iy;
+      } else {
+        return true;
+      }
+    }
+    return false;
+  };
+  // Two vars are in the same phi family (the same logical value across
+  // mutually-exclusive scf.if paths for one return slot) -> they never conflict.
+  auto same_phi_family_var = [&](const Var* x, const Var* y) {
+    auto ix = phi_family_ids.find(x);
+    auto iy = phi_family_ids.find(y);
+    return ix != phi_family_ids.end() && iy != phi_family_ids.end() && ids_intersect(ix->second, iy->second);
+  };
+  // Precise per-var overlap (touching allowed: last_use == def is fine).
+  auto var_overlap = [&](const Var* x, const Var* y) {
+    auto ix = var_liveness.find(x);
+    auto iy = var_liveness.find(y);
+    if (ix == var_liveness.end() || iy == var_liveness.end()) return true;  // unknown -> conservative
+    return !(ix->second.second <= iy->second.first || iy->second.second <= ix->second.first);
+  };
+  // Decide whether a group-interval overlap between two intervals actually
+  // blocks sharing.  This is invoked ONLY when their merged intervals overlap.
+  //
+  // To keep behaviour identical to the prior coarse gate for everything that is
+  // not phi-related, we block unless a phi family makes the overlap spurious:
+  // some cross-group var pair must be phi-family-related (the same value across
+  // mutually-exclusive scf.if paths), AND no *non*-family cross-group pair may
+  // truly overlap.  The latter still catches a real conflict hidden behind a
+  // branch-local alias of an outside-live buffer (e.g. `result = seed` aliasing
+  // a `seed` that overlaps the sibling branch).
+  auto overlap_blocks_sharing = [&](const LifetimeInterval& a, const LifetimeInterval& b) {
+    const auto* ga = group_members(a.variable);
+    const auto* gb = group_members(b.variable);
+    const std::vector<VarPtr> sa = ga ? std::vector<VarPtr>{} : std::vector<VarPtr>{a.variable};
+    const std::vector<VarPtr> sb = gb ? std::vector<VarPtr>{} : std::vector<VarPtr>{b.variable};
+    bool family_pair = false;
+    for (const auto& x : (ga ? *ga : sa)) {
+      for (const auto& y : (gb ? *gb : sb)) {
+        if (same_phi_family_var(x.get(), y.get())) {
+          family_pair = true;
+        } else if (var_overlap(x.get(), y.get())) {
+          return true;  // genuine non-family conflict
+        }
+      }
+    }
+    return !family_pair;  // no phi relation -> block exactly as the coarse gate did
+  };
 
   // Maps a tile's *original* MemRef base to the base its buffer is coalesced
   // onto by a committed reuse decision.  A reuse retargets the reused var (and
@@ -1349,7 +1520,11 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(const std::vector<LifetimeIn
   // base, and largest-first ordering guarantees the buffer is sized to its
   // representative (no member is ever larger than the buffer it joins).
   auto can_share = [&](const LifetimeInterval& cand, const LifetimeInterval& member) {
-    if (LifetimesOverlap(cand, member)) return false;
+    // Group-interval overlap is a fast reject; when it fires, fall back to the
+    // precise per-var check so mutually-exclusive / same-value phi-family tiles
+    // may still share while a genuine conflict (incl. one hidden behind a
+    // branch-local alias of an outside-live buffer) is still caught.
+    if (LifetimesOverlap(cand, member) && overlap_blocks_sharing(cand, member)) return false;
     if (hazard_blocks(cand, member) || hazard_blocks(member, cand)) return false;
     if (forbid_blocks(cand, member) || forbid_blocks(member, cand)) return false;
     return true;
@@ -2013,7 +2188,9 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   forbid_collector.VisitStmt(new_body);
   ForbidAliasMap forbid_alias = forbid_collector.Take();
 
-  auto reuse_map = IdentifyReuseOpportunities(analysis_result.lifetimes, hazard, forbid_alias);
+  auto reuse_map = IdentifyReuseOpportunities(
+      analysis_result.lifetimes, hazard, forbid_alias, analysis_result.phi_family_ids,
+      analysis_result.var_sharing_groups, analysis_result.var_liveness);
 
   // Step 3: Apply MemRef sharing (skip if no reuse candidates)
   if (!reuse_map.empty()) {
