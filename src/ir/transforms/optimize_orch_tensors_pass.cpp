@@ -1927,7 +1927,7 @@ class OutWindowExternalizer {
       auto callee_it = function_lookup.find(func_name);
       if (callee_it == function_lookup.end()) continue;
       auto callee = callee_it->second;
-      auto cloned = RewriteCallee(program, callee, analysis, "__windowed", &rewrite_context);
+      auto cloned = RewriteCallee(program, callee, analysis, "__windowed", rewrite_context);
       if (!cloned) {
         continue;
       }
@@ -1944,7 +1944,7 @@ class OutWindowExternalizer {
     bool changed = false;
     for (const auto& [_, func] : program->functions_) {
       if (!func || func->func_type_ != FunctionType::Orchestration) continue;
-      OrchRewriter rewriter(program, analyses, cloned_funcs, function_lookup, &rewrite_context);
+      OrchRewriter rewriter(program, analyses, cloned_funcs, function_lookup, rewrite_context);
       auto new_body = rewriter.VisitStmt(func->body_);
       if (new_body.get() == func->body_.get()) continue;
       changed = true;
@@ -2000,6 +2000,167 @@ class OutWindowExternalizer {
     size_t next_scalar_temp_id = 0;
     std::unordered_map<std::string, std::unordered_map<size_t, VarPtr>> output_dynamic_extent_dims_by_func;
   };
+
+  class GeneratedScalarLocalFlattener : public IRMutator {
+   public:
+    GeneratedScalarLocalFlattener(std::string name_prefix, WindowRewriteContext& rewrite_context,
+                                  std::vector<StmtPtr>* stmts, Span span)
+        : name_prefix_(std::move(name_prefix)),
+          rewrite_context_(rewrite_context),
+          stmts_(stmts),
+          span_(std::move(span)) {}
+
+    ExprPtr Flatten(const ExprPtr& expr) {
+      auto visited = VisitExpr(expr);
+      if (As<Call>(visited) || As<Submit>(visited)) return ExtractCallToTemp(visited);
+      return visited;
+    }
+
+   protected:
+    ExprPtr VisitExpr_(const CallPtr& op) override {
+      std::vector<ExprPtr> new_args;
+      new_args.reserve(op->args_.size());
+      bool changed = false;
+      for (const auto& arg : op->args_) {
+        auto visited = VisitExpr(arg);
+        if (As<Call>(visited) || As<Submit>(visited)) {
+          visited = ExtractCallToTemp(visited);
+          changed = true;
+        } else if (visited.get() != arg.get()) {
+          changed = true;
+        }
+        new_args.push_back(visited);
+      }
+      if (!changed) return op;
+      return std::make_shared<Call>(op->op_, new_args, op->kwargs_, op->attrs_, op->GetType(), op->span_);
+    }
+
+    ExprPtr VisitExpr_(const SubmitPtr& op) override {
+      std::vector<ExprPtr> new_args;
+      new_args.reserve(op->args_.size());
+      bool changed = false;
+      for (const auto& arg : op->args_) {
+        auto visited = VisitExpr(arg);
+        if (As<Call>(visited) || As<Submit>(visited)) {
+          visited = ExtractCallToTemp(visited);
+          changed = true;
+        } else if (visited.get() != arg.get()) {
+          changed = true;
+        }
+        new_args.push_back(visited);
+      }
+      if (!changed) return op;
+      return std::make_shared<Submit>(op->op_, new_args, op->deps_, op->kwargs_, op->attrs_, op->GetType(),
+                                      op->span_, op->core_num_, op->sync_start_, op->allow_early_resolve_);
+    }
+
+    ExprPtr VisitExpr_(const AddPtr& op) override { return ProcessBinaryExpr(op); }
+    ExprPtr VisitExpr_(const SubPtr& op) override { return ProcessBinaryExpr(op); }
+    ExprPtr VisitExpr_(const MulPtr& op) override { return ProcessBinaryExpr(op); }
+    ExprPtr VisitExpr_(const FloorDivPtr& op) override { return ProcessBinaryExpr(op); }
+    ExprPtr VisitExpr_(const FloorModPtr& op) override { return ProcessBinaryExpr(op); }
+    ExprPtr VisitExpr_(const FloatDivPtr& op) override { return ProcessBinaryExpr(op); }
+    ExprPtr VisitExpr_(const MinPtr& op) override { return ProcessBinaryExpr(op); }
+    ExprPtr VisitExpr_(const MaxPtr& op) override { return ProcessBinaryExpr(op); }
+    ExprPtr VisitExpr_(const PowPtr& op) override { return ProcessBinaryExpr(op); }
+    ExprPtr VisitExpr_(const EqPtr& op) override { return ProcessBinaryExpr(op); }
+    ExprPtr VisitExpr_(const NePtr& op) override { return ProcessBinaryExpr(op); }
+    ExprPtr VisitExpr_(const LtPtr& op) override { return ProcessBinaryExpr(op); }
+    ExprPtr VisitExpr_(const LePtr& op) override { return ProcessBinaryExpr(op); }
+    ExprPtr VisitExpr_(const GtPtr& op) override { return ProcessBinaryExpr(op); }
+    ExprPtr VisitExpr_(const GePtr& op) override { return ProcessBinaryExpr(op); }
+    ExprPtr VisitExpr_(const AndPtr& op) override { return ProcessBinaryExpr(op); }
+    ExprPtr VisitExpr_(const OrPtr& op) override { return ProcessBinaryExpr(op); }
+    ExprPtr VisitExpr_(const XorPtr& op) override { return ProcessBinaryExpr(op); }
+    ExprPtr VisitExpr_(const BitAndPtr& op) override { return ProcessBinaryExpr(op); }
+    ExprPtr VisitExpr_(const BitOrPtr& op) override { return ProcessBinaryExpr(op); }
+    ExprPtr VisitExpr_(const BitXorPtr& op) override { return ProcessBinaryExpr(op); }
+    ExprPtr VisitExpr_(const BitShiftLeftPtr& op) override { return ProcessBinaryExpr(op); }
+    ExprPtr VisitExpr_(const BitShiftRightPtr& op) override { return ProcessBinaryExpr(op); }
+    ExprPtr VisitExpr_(const AbsPtr& op) override { return ProcessUnaryExpr(op); }
+    ExprPtr VisitExpr_(const NegPtr& op) override { return ProcessUnaryExpr(op); }
+    ExprPtr VisitExpr_(const NotPtr& op) override { return ProcessUnaryExpr(op); }
+    ExprPtr VisitExpr_(const BitNotPtr& op) override { return ProcessUnaryExpr(op); }
+    ExprPtr VisitExpr_(const CastPtr& op) override { return ProcessUnaryExpr(op); }
+
+   private:
+    ExprPtr ExtractCallToTemp(const ExprPtr& expr) {
+      if (!As<Call>(expr) && !As<Submit>(expr)) return expr;
+      auto temp_var = std::make_shared<Var>(rewrite_context_.NextScalarTempName(name_prefix_),
+                                            expr->GetType(), expr->span_);
+      stmts_->push_back(std::make_shared<AssignStmt>(temp_var, expr, temp_var->span_));
+      return temp_var;
+    }
+
+#define PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(OpName)                                                    \
+  ExprPtr ProcessBinaryExpr(const OpName##Ptr& op) {                                                    \
+    auto new_left = VisitExpr(op->left_);                                                               \
+    auto new_right = VisitExpr(op->right_);                                                             \
+    if (As<Call>(new_left) || As<Submit>(new_left)) new_left = ExtractCallToTemp(new_left);             \
+    if (As<Call>(new_right) || As<Submit>(new_right)) new_right = ExtractCallToTemp(new_right);         \
+    if (new_left.get() == op->left_.get() && new_right.get() == op->right_.get()) return op;            \
+    auto scalar_type = As<ScalarType>(op->GetType());                                                   \
+    INTERNAL_CHECK_SPAN(scalar_type, op->span_) << "Generated scalar binary expression must be scalar"; \
+    return std::make_shared<const OpName>(new_left, new_right, scalar_type->dtype_, op->span_);         \
+  }
+
+    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Add)
+    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Sub)
+    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Mul)
+    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(FloorDiv)
+    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(FloorMod)
+    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(FloatDiv)
+    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Min)
+    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Max)
+    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Pow)
+    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Eq)
+    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Ne)
+    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Lt)
+    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Le)
+    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Gt)
+    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Ge)
+    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(And)
+    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Or)
+    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Xor)
+    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(BitAnd)
+    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(BitOr)
+    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(BitXor)
+    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(BitShiftLeft)
+    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(BitShiftRight)
+#undef PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD
+
+#define PYPTO_WINDOW_PROCESS_UNARY_OVERLOAD(OpName)                                                    \
+  ExprPtr ProcessUnaryExpr(const OpName##Ptr& op) {                                                    \
+    auto new_operand = VisitExpr(op->operand_);                                                        \
+    if (As<Call>(new_operand) || As<Submit>(new_operand)) {                                            \
+      new_operand = ExtractCallToTemp(new_operand);                                                    \
+    }                                                                                                  \
+    if (new_operand.get() == op->operand_.get()) return op;                                            \
+    auto scalar_type = As<ScalarType>(op->GetType());                                                  \
+    INTERNAL_CHECK_SPAN(scalar_type, op->span_) << "Generated scalar unary expression must be scalar"; \
+    return std::make_shared<const OpName>(new_operand, scalar_type->dtype_, op->span_);                \
+  }
+
+    PYPTO_WINDOW_PROCESS_UNARY_OVERLOAD(Abs)
+    PYPTO_WINDOW_PROCESS_UNARY_OVERLOAD(Neg)
+    PYPTO_WINDOW_PROCESS_UNARY_OVERLOAD(Not)
+    PYPTO_WINDOW_PROCESS_UNARY_OVERLOAD(BitNot)
+    PYPTO_WINDOW_PROCESS_UNARY_OVERLOAD(Cast)
+#undef PYPTO_WINDOW_PROCESS_UNARY_OVERLOAD
+
+    std::string name_prefix_;
+    WindowRewriteContext& rewrite_context_;
+    std::vector<StmtPtr>* stmts_;
+    Span span_;
+  };
+
+  static ExprPtr FlattenGeneratedScalarExprWithLocalTemps(const ExprPtr& expr, const std::string& name_prefix,
+                                                          const Span& span, std::vector<StmtPtr>* stmts,
+                                                          WindowRewriteContext& rewrite_context) {
+    if (!expr || !stmts) return expr;
+    GeneratedScalarLocalFlattener flattener(name_prefix, rewrite_context, stmts, span);
+    return flattener.Flatten(expr);
+  }
 
   struct VarUseIndex {
     std::unordered_map<const Var*, size_t> counts;
@@ -2621,7 +2782,7 @@ class OutWindowExternalizer {
    public:
     WindowWriteLocalizer(const std::unordered_map<const Var*, OutputRewriteInfo>& out_info_by_var,
                          const std::unordered_map<const Var*, ExprPtr>& new_out_vars,
-                         WindowRewriteContext* rewrite_context)
+                         WindowRewriteContext& rewrite_context)
         : out_info_by_var_(out_info_by_var), new_out_vars_(new_out_vars), rewrite_context_(rewrite_context) {}
 
    protected:
@@ -2807,120 +2968,14 @@ class OutWindowExternalizer {
    private:
     ExprPtr FlattenGeneratedScalarExpr(const ExprPtr& expr, const std::string& name_prefix, const Span& span,
                                        std::vector<StmtPtr>* stmts) {
-      class LocalFlattener : public IRMutator {
-       public:
-        LocalFlattener(std::string name_prefix, WindowRewriteContext* rewrite_context,
-                       std::vector<StmtPtr>* stmts, Span span)
-            : name_prefix_(std::move(name_prefix)),
-              rewrite_context_(rewrite_context),
-              stmts_(stmts),
-              span_(std::move(span)) {}
-
-        ExprPtr Flatten(const ExprPtr& expr) {
-          auto visited = VisitExpr(expr);
-          if (As<Call>(visited) || As<Submit>(visited)) return ExtractCallToTemp(visited);
-          return visited;
-        }
-
-       protected:
-        ExprPtr VisitExpr_(const CallPtr& op) override {
-          std::vector<ExprPtr> new_args;
-          new_args.reserve(op->args_.size());
-          bool changed = false;
-          for (const auto& arg : op->args_) {
-            auto visited = VisitExpr(arg);
-            if (As<Call>(visited) || As<Submit>(visited)) {
-              visited = ExtractCallToTemp(visited);
-              changed = true;
-            } else if (visited.get() != arg.get()) {
-              changed = true;
-            }
-            new_args.push_back(visited);
-          }
-          if (!changed) return op;
-          return std::make_shared<Call>(op->op_, new_args, op->kwargs_, op->attrs_, op->GetType(), op->span_);
-        }
-
-        ExprPtr VisitExpr_(const SubmitPtr& op) override {
-          std::vector<ExprPtr> new_args;
-          new_args.reserve(op->args_.size());
-          bool changed = false;
-          for (const auto& arg : op->args_) {
-            auto visited = VisitExpr(arg);
-            if (As<Call>(visited) || As<Submit>(visited)) {
-              visited = ExtractCallToTemp(visited);
-              changed = true;
-            } else if (visited.get() != arg.get()) {
-              changed = true;
-            }
-            new_args.push_back(visited);
-          }
-          if (!changed) return op;
-          return std::make_shared<Submit>(op->op_, new_args, op->deps_, op->kwargs_, op->attrs_,
-                                          op->GetType(), op->span_, op->core_num_, op->sync_start_,
-                                          op->allow_early_resolve_);
-        }
-
-#define PYPTO_WINDOW_LOCALIZER_PROCESS_BINARY_OVERLOAD(OpName)                                   \
-  ExprPtr VisitExpr_(const OpName##Ptr& op) override {                                           \
-    auto new_left = VisitExpr(op->left_);                                                        \
-    auto new_right = VisitExpr(op->right_);                                                      \
-    if (As<Call>(new_left) || As<Submit>(new_left)) new_left = ExtractCallToTemp(new_left);      \
-    if (As<Call>(new_right) || As<Submit>(new_right)) new_right = ExtractCallToTemp(new_right);  \
-    if (new_left.get() == op->left_.get() && new_right.get() == op->right_.get()) return op;     \
-    auto scalar_type = As<ScalarType>(op->GetType());                                            \
-    INTERNAL_CHECK_SPAN(scalar_type, op->span_) << "Generated scalar expression must be scalar"; \
-    return std::make_shared<const OpName>(new_left, new_right, scalar_type->dtype_, op->span_);  \
-  }
-
-        PYPTO_WINDOW_LOCALIZER_PROCESS_BINARY_OVERLOAD(Add)
-        PYPTO_WINDOW_LOCALIZER_PROCESS_BINARY_OVERLOAD(Sub)
-        PYPTO_WINDOW_LOCALIZER_PROCESS_BINARY_OVERLOAD(Mul)
-        PYPTO_WINDOW_LOCALIZER_PROCESS_BINARY_OVERLOAD(FloorDiv)
-        PYPTO_WINDOW_LOCALIZER_PROCESS_BINARY_OVERLOAD(FloorMod)
-        PYPTO_WINDOW_LOCALIZER_PROCESS_BINARY_OVERLOAD(Min)
-        PYPTO_WINDOW_LOCALIZER_PROCESS_BINARY_OVERLOAD(Max)
-#undef PYPTO_WINDOW_LOCALIZER_PROCESS_BINARY_OVERLOAD
-
-#define PYPTO_WINDOW_LOCALIZER_PROCESS_UNARY_OVERLOAD(OpName)                                           \
-  ExprPtr VisitExpr_(const OpName##Ptr& op) override {                                                  \
-    auto new_operand = VisitExpr(op->operand_);                                                         \
-    if (As<Call>(new_operand) || As<Submit>(new_operand)) new_operand = ExtractCallToTemp(new_operand); \
-    if (new_operand.get() == op->operand_.get()) return op;                                             \
-    auto scalar_type = As<ScalarType>(op->GetType());                                                   \
-    INTERNAL_CHECK_SPAN(scalar_type, op->span_) << "Generated scalar expression must be scalar";        \
-    return std::make_shared<const OpName>(new_operand, scalar_type->dtype_, op->span_);                 \
-  }
-
-        PYPTO_WINDOW_LOCALIZER_PROCESS_UNARY_OVERLOAD(Cast)
-        PYPTO_WINDOW_LOCALIZER_PROCESS_UNARY_OVERLOAD(Neg)
-#undef PYPTO_WINDOW_LOCALIZER_PROCESS_UNARY_OVERLOAD
-
-       private:
-        ExprPtr ExtractCallToTemp(const ExprPtr& expr) {
-          INTERNAL_CHECK(rewrite_context_) << "Internal error: missing window rewrite context";
-          auto temp_var = std::make_shared<Var>(rewrite_context_->NextScalarTempName(name_prefix_),
-                                                expr->GetType(), span_);
-          stmts_->push_back(std::make_shared<AssignStmt>(temp_var, expr, temp_var->span_));
-          return temp_var;
-        }
-
-        std::string name_prefix_;
-        WindowRewriteContext* rewrite_context_;
-        std::vector<StmtPtr>* stmts_;
-        Span span_;
-      };
-
-      if (!expr || !stmts) return expr;
-      LocalFlattener flattener(name_prefix, rewrite_context_, stmts, span);
-      return flattener.Flatten(expr);
+      return FlattenGeneratedScalarExprWithLocalTemps(expr, name_prefix, span, stmts, rewrite_context_);
     }
 
     WindowWriteLocalizer(const std::unordered_map<const Var*, OutputRewriteInfo>& out_info_by_var,
                          const std::unordered_map<const Var*, ExprPtr>& new_out_vars,
                          std::unordered_map<const Var*, VarPtr> result_var_remap,
                          std::unordered_map<const Var*, const OutputRewriteInfo*> result_var_output_info,
-                         WindowRewriteContext* rewrite_context)
+                         WindowRewriteContext& rewrite_context)
         : out_info_by_var_(out_info_by_var),
           new_out_vars_(new_out_vars),
           result_var_remap_(std::move(result_var_remap)),
@@ -2931,13 +2986,13 @@ class OutWindowExternalizer {
     const std::unordered_map<const Var*, ExprPtr>& new_out_vars_;
     std::unordered_map<const Var*, VarPtr> result_var_remap_;
     std::unordered_map<const Var*, const OutputRewriteInfo*> result_var_output_info_;
-    WindowRewriteContext* rewrite_context_;
+    WindowRewriteContext& rewrite_context_;
   };
 
   class WindowReadLocalizer : public IRMutator {
    public:
     WindowReadLocalizer(const std::unordered_map<const Var*, InputRewriteInfo>& in_info_by_var,
-                        WindowRewriteContext* rewrite_context)
+                        WindowRewriteContext& rewrite_context)
         : in_info_by_var_(in_info_by_var), rewrite_context_(rewrite_context) {}
 
    protected:
@@ -2995,117 +3050,11 @@ class OutWindowExternalizer {
    private:
     ExprPtr FlattenGeneratedScalarExpr(const ExprPtr& expr, const std::string& name_prefix, const Span& span,
                                        std::vector<StmtPtr>* stmts) {
-      class LocalFlattener : public IRMutator {
-       public:
-        LocalFlattener(std::string name_prefix, WindowRewriteContext* rewrite_context,
-                       std::vector<StmtPtr>* stmts, Span span)
-            : name_prefix_(std::move(name_prefix)),
-              rewrite_context_(rewrite_context),
-              stmts_(stmts),
-              span_(std::move(span)) {}
-
-        ExprPtr Flatten(const ExprPtr& expr) {
-          auto visited = VisitExpr(expr);
-          if (As<Call>(visited) || As<Submit>(visited)) return ExtractCallToTemp(visited);
-          return visited;
-        }
-
-       protected:
-        ExprPtr VisitExpr_(const CallPtr& op) override {
-          std::vector<ExprPtr> new_args;
-          new_args.reserve(op->args_.size());
-          bool changed = false;
-          for (const auto& arg : op->args_) {
-            auto visited = VisitExpr(arg);
-            if (As<Call>(visited) || As<Submit>(visited)) {
-              visited = ExtractCallToTemp(visited);
-              changed = true;
-            } else if (visited.get() != arg.get()) {
-              changed = true;
-            }
-            new_args.push_back(visited);
-          }
-          if (!changed) return op;
-          return std::make_shared<Call>(op->op_, new_args, op->kwargs_, op->attrs_, op->GetType(), op->span_);
-        }
-
-        ExprPtr VisitExpr_(const SubmitPtr& op) override {
-          std::vector<ExprPtr> new_args;
-          new_args.reserve(op->args_.size());
-          bool changed = false;
-          for (const auto& arg : op->args_) {
-            auto visited = VisitExpr(arg);
-            if (As<Call>(visited) || As<Submit>(visited)) {
-              visited = ExtractCallToTemp(visited);
-              changed = true;
-            } else if (visited.get() != arg.get()) {
-              changed = true;
-            }
-            new_args.push_back(visited);
-          }
-          if (!changed) return op;
-          return std::make_shared<Submit>(op->op_, new_args, op->deps_, op->kwargs_, op->attrs_,
-                                          op->GetType(), op->span_, op->core_num_, op->sync_start_,
-                                          op->allow_early_resolve_);
-        }
-
-#define PYPTO_WINDOW_READ_LOCALIZER_PROCESS_BINARY_OVERLOAD(OpName)                              \
-  ExprPtr VisitExpr_(const OpName##Ptr& op) override {                                           \
-    auto new_left = VisitExpr(op->left_);                                                        \
-    auto new_right = VisitExpr(op->right_);                                                      \
-    if (As<Call>(new_left) || As<Submit>(new_left)) new_left = ExtractCallToTemp(new_left);      \
-    if (As<Call>(new_right) || As<Submit>(new_right)) new_right = ExtractCallToTemp(new_right);  \
-    if (new_left.get() == op->left_.get() && new_right.get() == op->right_.get()) return op;     \
-    auto scalar_type = As<ScalarType>(op->GetType());                                            \
-    INTERNAL_CHECK_SPAN(scalar_type, op->span_) << "Generated scalar expression must be scalar"; \
-    return std::make_shared<const OpName>(new_left, new_right, scalar_type->dtype_, op->span_);  \
-  }
-
-        PYPTO_WINDOW_READ_LOCALIZER_PROCESS_BINARY_OVERLOAD(Add)
-        PYPTO_WINDOW_READ_LOCALIZER_PROCESS_BINARY_OVERLOAD(Sub)
-        PYPTO_WINDOW_READ_LOCALIZER_PROCESS_BINARY_OVERLOAD(Mul)
-        PYPTO_WINDOW_READ_LOCALIZER_PROCESS_BINARY_OVERLOAD(FloorDiv)
-        PYPTO_WINDOW_READ_LOCALIZER_PROCESS_BINARY_OVERLOAD(FloorMod)
-        PYPTO_WINDOW_READ_LOCALIZER_PROCESS_BINARY_OVERLOAD(Min)
-        PYPTO_WINDOW_READ_LOCALIZER_PROCESS_BINARY_OVERLOAD(Max)
-#undef PYPTO_WINDOW_READ_LOCALIZER_PROCESS_BINARY_OVERLOAD
-
-#define PYPTO_WINDOW_READ_LOCALIZER_PROCESS_UNARY_OVERLOAD(OpName)                                      \
-  ExprPtr VisitExpr_(const OpName##Ptr& op) override {                                                  \
-    auto new_operand = VisitExpr(op->operand_);                                                         \
-    if (As<Call>(new_operand) || As<Submit>(new_operand)) new_operand = ExtractCallToTemp(new_operand); \
-    if (new_operand.get() == op->operand_.get()) return op;                                             \
-    auto scalar_type = As<ScalarType>(op->GetType());                                                   \
-    INTERNAL_CHECK_SPAN(scalar_type, op->span_) << "Generated scalar expression must be scalar";        \
-    return std::make_shared<const OpName>(new_operand, scalar_type->dtype_, op->span_);                 \
-  }
-
-        PYPTO_WINDOW_READ_LOCALIZER_PROCESS_UNARY_OVERLOAD(Cast)
-        PYPTO_WINDOW_READ_LOCALIZER_PROCESS_UNARY_OVERLOAD(Neg)
-#undef PYPTO_WINDOW_READ_LOCALIZER_PROCESS_UNARY_OVERLOAD
-
-       private:
-        ExprPtr ExtractCallToTemp(const ExprPtr& expr) {
-          INTERNAL_CHECK(rewrite_context_) << "Internal error: missing window rewrite context";
-          auto temp_var = std::make_shared<Var>(rewrite_context_->NextScalarTempName(name_prefix_),
-                                                expr->GetType(), span_);
-          stmts_->push_back(std::make_shared<AssignStmt>(temp_var, expr, temp_var->span_));
-          return temp_var;
-        }
-
-        std::string name_prefix_;
-        WindowRewriteContext* rewrite_context_;
-        std::vector<StmtPtr>* stmts_;
-        Span span_;
-      };
-
-      if (!expr || !stmts) return expr;
-      LocalFlattener flattener(name_prefix, rewrite_context_, stmts, span);
-      return flattener.Flatten(expr);
+      return FlattenGeneratedScalarExprWithLocalTemps(expr, name_prefix, span, stmts, rewrite_context_);
     }
 
     const std::unordered_map<const Var*, InputRewriteInfo>& in_info_by_var_;
-    WindowRewriteContext* rewrite_context_;
+    WindowRewriteContext& rewrite_context_;
   };
 
   class OrchRewriter : public IRMutator {
@@ -3113,7 +3062,7 @@ class OutWindowExternalizer {
     OrchRewriter(ProgramPtr program, const AnalysisMap& analyses,
                  const std::unordered_map<std::string, FunctionPtr>& cloned_funcs,
                  const std::unordered_map<std::string, FunctionPtr>& function_lookup,
-                 WindowRewriteContext* rewrite_context)
+                 WindowRewriteContext& rewrite_context)
         : program_(std::move(program)),
           analyses_(analyses),
           cloned_funcs_(cloned_funcs),
@@ -3267,164 +3216,7 @@ class OutWindowExternalizer {
 
     ExprPtr FlattenGeneratedScalarExpr(const ExprPtr& expr, const std::string& name_prefix, const Span& span,
                                        std::vector<StmtPtr>* stmts) {
-      class LocalFlattener : public IRMutator {
-       public:
-        LocalFlattener(std::string name_prefix, WindowRewriteContext* rewrite_context,
-                       std::vector<StmtPtr>* stmts, Span span)
-            : name_prefix_(std::move(name_prefix)),
-              rewrite_context_(rewrite_context),
-              stmts_(stmts),
-              span_(std::move(span)) {}
-
-        ExprPtr Flatten(const ExprPtr& expr) {
-          auto visited = VisitExpr(expr);
-          if (As<Call>(visited) || As<Submit>(visited)) return ExtractCallToTemp(visited);
-          return visited;
-        }
-
-       protected:
-        ExprPtr VisitExpr_(const CallPtr& op) override {
-          std::vector<ExprPtr> new_args;
-          new_args.reserve(op->args_.size());
-          bool changed = false;
-          for (const auto& arg : op->args_) {
-            auto visited = VisitExpr(arg);
-            if (As<Call>(visited) || As<Submit>(visited)) {
-              visited = ExtractCallToTemp(visited);
-              changed = true;
-            } else if (visited.get() != arg.get()) {
-              changed = true;
-            }
-            new_args.push_back(visited);
-          }
-          if (!changed) return op;
-          return std::make_shared<Call>(op->op_, new_args, op->kwargs_, op->attrs_, op->GetType(), op->span_);
-        }
-
-        ExprPtr VisitExpr_(const SubmitPtr& op) override {
-          std::vector<ExprPtr> new_args;
-          new_args.reserve(op->args_.size());
-          bool changed = false;
-          for (const auto& arg : op->args_) {
-            auto visited = VisitExpr(arg);
-            if (As<Call>(visited) || As<Submit>(visited)) {
-              visited = ExtractCallToTemp(visited);
-              changed = true;
-            } else if (visited.get() != arg.get()) {
-              changed = true;
-            }
-            new_args.push_back(visited);
-          }
-          if (!changed) return op;
-          return std::make_shared<Submit>(op->op_, new_args, op->deps_, op->kwargs_, op->attrs_,
-                                          op->GetType(), op->span_, op->core_num_, op->sync_start_,
-                                          op->allow_early_resolve_);
-        }
-
-        ExprPtr VisitExpr_(const AddPtr& op) override { return ProcessBinaryExpr(op); }
-        ExprPtr VisitExpr_(const SubPtr& op) override { return ProcessBinaryExpr(op); }
-        ExprPtr VisitExpr_(const MulPtr& op) override { return ProcessBinaryExpr(op); }
-        ExprPtr VisitExpr_(const FloorDivPtr& op) override { return ProcessBinaryExpr(op); }
-        ExprPtr VisitExpr_(const FloorModPtr& op) override { return ProcessBinaryExpr(op); }
-        ExprPtr VisitExpr_(const FloatDivPtr& op) override { return ProcessBinaryExpr(op); }
-        ExprPtr VisitExpr_(const MinPtr& op) override { return ProcessBinaryExpr(op); }
-        ExprPtr VisitExpr_(const MaxPtr& op) override { return ProcessBinaryExpr(op); }
-        ExprPtr VisitExpr_(const PowPtr& op) override { return ProcessBinaryExpr(op); }
-        ExprPtr VisitExpr_(const EqPtr& op) override { return ProcessBinaryExpr(op); }
-        ExprPtr VisitExpr_(const NePtr& op) override { return ProcessBinaryExpr(op); }
-        ExprPtr VisitExpr_(const LtPtr& op) override { return ProcessBinaryExpr(op); }
-        ExprPtr VisitExpr_(const LePtr& op) override { return ProcessBinaryExpr(op); }
-        ExprPtr VisitExpr_(const GtPtr& op) override { return ProcessBinaryExpr(op); }
-        ExprPtr VisitExpr_(const GePtr& op) override { return ProcessBinaryExpr(op); }
-        ExprPtr VisitExpr_(const AndPtr& op) override { return ProcessBinaryExpr(op); }
-        ExprPtr VisitExpr_(const OrPtr& op) override { return ProcessBinaryExpr(op); }
-        ExprPtr VisitExpr_(const XorPtr& op) override { return ProcessBinaryExpr(op); }
-        ExprPtr VisitExpr_(const BitAndPtr& op) override { return ProcessBinaryExpr(op); }
-        ExprPtr VisitExpr_(const BitOrPtr& op) override { return ProcessBinaryExpr(op); }
-        ExprPtr VisitExpr_(const BitXorPtr& op) override { return ProcessBinaryExpr(op); }
-        ExprPtr VisitExpr_(const BitShiftLeftPtr& op) override { return ProcessBinaryExpr(op); }
-        ExprPtr VisitExpr_(const BitShiftRightPtr& op) override { return ProcessBinaryExpr(op); }
-        ExprPtr VisitExpr_(const AbsPtr& op) override { return ProcessUnaryExpr(op); }
-        ExprPtr VisitExpr_(const NegPtr& op) override { return ProcessUnaryExpr(op); }
-        ExprPtr VisitExpr_(const NotPtr& op) override { return ProcessUnaryExpr(op); }
-        ExprPtr VisitExpr_(const BitNotPtr& op) override { return ProcessUnaryExpr(op); }
-        ExprPtr VisitExpr_(const CastPtr& op) override { return ProcessUnaryExpr(op); }
-
-       private:
-        ExprPtr ExtractCallToTemp(const ExprPtr& expr) {
-          if (!As<Call>(expr) && !As<Submit>(expr)) return expr;
-          INTERNAL_CHECK(rewrite_context_) << "Internal error: missing window rewrite context";
-          auto temp_var = std::make_shared<Var>(rewrite_context_->NextScalarTempName(name_prefix_),
-                                                expr->GetType(), expr->span_);
-          stmts_->push_back(std::make_shared<AssignStmt>(temp_var, expr, temp_var->span_));
-          return temp_var;
-        }
-
-#define PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(OpName)                                                    \
-  ExprPtr ProcessBinaryExpr(const OpName##Ptr& op) {                                                    \
-    auto new_left = VisitExpr(op->left_);                                                               \
-    auto new_right = VisitExpr(op->right_);                                                             \
-    if (As<Call>(new_left) || As<Submit>(new_left)) new_left = ExtractCallToTemp(new_left);             \
-    if (As<Call>(new_right) || As<Submit>(new_right)) new_right = ExtractCallToTemp(new_right);         \
-    if (new_left.get() == op->left_.get() && new_right.get() == op->right_.get()) return op;            \
-    auto scalar_type = As<ScalarType>(op->GetType());                                                   \
-    INTERNAL_CHECK_SPAN(scalar_type, op->span_) << "Generated scalar binary expression must be scalar"; \
-    return std::make_shared<const OpName>(new_left, new_right, scalar_type->dtype_, op->span_);         \
-  }
-
-        PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Add)
-        PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Sub)
-        PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Mul)
-        PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(FloorDiv)
-        PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(FloorMod)
-        PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(FloatDiv)
-        PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Min)
-        PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Max)
-        PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Pow)
-        PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Eq)
-        PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Ne)
-        PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Lt)
-        PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Le)
-        PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Gt)
-        PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Ge)
-        PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(And)
-        PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Or)
-        PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Xor)
-        PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(BitAnd)
-        PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(BitOr)
-        PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(BitXor)
-        PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(BitShiftLeft)
-        PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(BitShiftRight)
-#undef PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD
-
-#define PYPTO_WINDOW_PROCESS_UNARY_OVERLOAD(OpName)                                                    \
-  ExprPtr ProcessUnaryExpr(const OpName##Ptr& op) {                                                    \
-    auto new_operand = VisitExpr(op->operand_);                                                        \
-    if (As<Call>(new_operand) || As<Submit>(new_operand)) {                                            \
-      new_operand = ExtractCallToTemp(new_operand);                                                    \
-    }                                                                                                  \
-    if (new_operand.get() == op->operand_.get()) return op;                                            \
-    auto scalar_type = As<ScalarType>(op->GetType());                                                  \
-    INTERNAL_CHECK_SPAN(scalar_type, op->span_) << "Generated scalar unary expression must be scalar"; \
-    return std::make_shared<const OpName>(new_operand, scalar_type->dtype_, op->span_);                \
-  }
-
-        PYPTO_WINDOW_PROCESS_UNARY_OVERLOAD(Abs)
-        PYPTO_WINDOW_PROCESS_UNARY_OVERLOAD(Neg)
-        PYPTO_WINDOW_PROCESS_UNARY_OVERLOAD(Not)
-        PYPTO_WINDOW_PROCESS_UNARY_OVERLOAD(BitNot)
-        PYPTO_WINDOW_PROCESS_UNARY_OVERLOAD(Cast)
-#undef PYPTO_WINDOW_PROCESS_UNARY_OVERLOAD
-
-        std::string name_prefix_;
-        WindowRewriteContext* rewrite_context_;
-        std::vector<StmtPtr>* stmts_;
-        Span span_;
-      };
-
-      if (!expr || !stmts) return expr;
-      LocalFlattener flattener(name_prefix, rewrite_context_, stmts, span);
-      return flattener.Flatten(expr);
+      return FlattenGeneratedScalarExprWithLocalTemps(expr, name_prefix, span, stmts, rewrite_context_);
     }
 
     static std::optional<std::vector<ExprPtr>> SubstituteSingletonLoopStarts(
@@ -3753,9 +3545,8 @@ class OutWindowExternalizer {
       for (size_t i = 0; i < cloned_func->params_.size() && i < new_args.size(); ++i) {
         cloned_param_callsite_subst[cloned_func->params_[i].get()] = new_args[i];
       }
-      if (!rewrite_context_) return std::nullopt;
-      auto dynamic_dim_it = rewrite_context_->output_dynamic_extent_dims_by_func.find(callee_name);
-      if (dynamic_dim_it != rewrite_context_->output_dynamic_extent_dims_by_func.end()) {
+      auto dynamic_dim_it = rewrite_context_.output_dynamic_extent_dims_by_func.find(callee_name);
+      if (dynamic_dim_it != rewrite_context_.output_dynamic_extent_dims_by_func.end()) {
         for (const auto& [out_param_index, extent_dim] : dynamic_dim_it->second) {
           auto extent_arg_it = output_extent_arg_by_out_index.find(out_param_index);
           if (extent_dim && extent_arg_it != output_extent_arg_by_out_index.end()) {
@@ -4573,7 +4364,7 @@ class OutWindowExternalizer {
     const AnalysisMap& analyses_;
     const std::unordered_map<std::string, FunctionPtr>& cloned_funcs_;
     const std::unordered_map<std::string, FunctionPtr>& function_lookup_;
-    WindowRewriteContext* rewrite_context_;
+    WindowRewriteContext& rewrite_context_;
     std::unordered_set<std::string> used_clone_names_;
     std::vector<ForStmtPtr> sequential_loops_;
     std::vector<LoopContext> loop_context_;
@@ -6211,8 +6002,7 @@ class OutWindowExternalizer {
 
   FunctionPtr RewriteCallee(const ProgramPtr& program, const FunctionPtr& func,
                             const CalleeRewriteAnalysis& analysis, const std::string& clone_suffix,
-                            WindowRewriteContext* rewrite_context) {
-    if (!rewrite_context) return nullptr;
+                            WindowRewriteContext& rewrite_context) {
     if (!func) return nullptr;
 
     std::vector<VarPtr> new_params;
@@ -6311,10 +6101,10 @@ class OutWindowExternalizer {
       seed[func->params_[i].get()] = new_param;
     }
     if (!output_dynamic_extent_dims_by_old_index.empty()) {
-      rewrite_context->output_dynamic_extent_dims_by_func[func->name_] =
+      rewrite_context.output_dynamic_extent_dims_by_func[func->name_] =
           output_dynamic_extent_dims_by_old_index;
     } else {
-      rewrite_context->output_dynamic_extent_dims_by_func.erase(func->name_);
+      rewrite_context.output_dynamic_extent_dims_by_func.erase(func->name_);
     }
 
     auto cloned_name = MakeUniqueFunctionName(program, func->name_ + clone_suffix);
@@ -6520,7 +6310,7 @@ class OutWindowExternalizer {
           StaticPieceLoopExternalizer(
               ForStmtPtr target_loop, std::vector<OutputRewriteInfo> outputs,
               std::unordered_map<size_t, std::vector<VarPtr>> piece_params_by_old_index,
-              WindowRewriteContext* rewrite_context)
+              WindowRewriteContext& rewrite_context)
               : target_loop_(std::move(target_loop)),
                 outputs_(std::move(outputs)),
                 piece_params_by_old_index_(std::move(piece_params_by_old_index)),
@@ -6723,7 +6513,7 @@ class OutWindowExternalizer {
           std::unordered_map<size_t, size_t> multi_output_by_return_index_;
           std::unordered_map<const Var*, ExprPtr> return_var_remap_;
           std::unordered_map<size_t, std::vector<ExprPtr>> final_piece_values_;
-          WindowRewriteContext* rewrite_context_;
+          WindowRewriteContext& rewrite_context_;
           bool failed_ = false;
           bool rewrote_loop_ = false;
         };
