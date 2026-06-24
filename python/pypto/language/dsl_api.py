@@ -883,6 +883,7 @@ class AtContext:
         dumps: list[Any] | None = None,
         allow_early_resolve: bool = False,
         name_hint: str = "",
+        windowize: bool = False,
     ) -> None:
         self.level = level
         self.role = role
@@ -892,6 +893,7 @@ class AtContext:
         self.dumps = dumps
         self.allow_early_resolve = allow_early_resolve
         self.name_hint = name_hint
+        self.windowize = windowize
 
     def __enter__(self) -> Any:
         # The parser intercepts the ``with pl.at(...) [as tid]:`` pattern and
@@ -916,6 +918,7 @@ def at(
     dumps: list[Any] | None = None,
     allow_early_resolve: bool = False,
     name_hint: str = "",
+    windowize: bool = False,
 ) -> AtContext:
     """Mark a region of code for execution at a specific hierarchy level.
 
@@ -976,6 +979,8 @@ def at(
             ``Arg::set_allow_early_resolve(true)``. Pure scheduling hint.
         name_hint: Optional name hint for the outlined function (must be a
             valid identifier).
+        windowize: Explicitly allow exact local windowization for the outlined
+            InCore kernel. The default is False.
 
     Returns:
         Context manager for the appropriate scope.
@@ -1014,6 +1019,7 @@ def at(
         dumps=dumps,
         allow_early_resolve=allow_early_resolve,
         name_hint=name_hint,
+        windowize=windowize,
     )
 
 

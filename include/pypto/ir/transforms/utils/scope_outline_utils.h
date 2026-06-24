@@ -848,12 +848,19 @@ class ScopeOutliner : public IRMutator {
         outlined_attrs.emplace_back("slot_num", op->GetAttr<int>("slot_num", 0));
       }
     };
+    auto append_windowize_attr = [&]() {
+      if (op->GetAttr<bool>("windowize", false)) {
+        outlined_attrs.emplace_back("windowize", true);
+      }
+    };
     if (auto incore = As<InCoreScopeStmt>(op)) {
       append_split_attr(incore->split_);
       append_slot_num_attr();
+      append_windowize_attr();
     } else if (auto auto_incore = As<AutoInCoreScopeStmt>(op)) {
       append_split_attr(auto_incore->split_);
       append_slot_num_attr();
+      append_windowize_attr();
     } else if (auto spmd = As<SpmdScopeStmt>(op)) {
       outlined_attrs.emplace_back("core_num", spmd->core_num_);
       if (spmd->sync_start_) {

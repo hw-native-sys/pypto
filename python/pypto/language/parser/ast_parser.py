@@ -417,6 +417,7 @@ class _AtKwargState:
     # ``dump_vars`` transfer), and the outliner translates it into the
     # synthesised dispatch's ``kAttrDumpVars``.
     dumps_kw: "ast.keyword | None" = field(default=None)
+    windowize: bool = False
 
 
 _SPMD_SCOPE_NAME_SUFFIX = "_spmd"
@@ -3061,6 +3062,14 @@ class ASTParser:
                     hint="Write allow_early_resolve=True to opt this scope into early-dispatch.",
                 )
             state.allow_early_resolve = kw.value.value
+        elif kw.arg == "windowize":
+            if not isinstance(kw.value, ast.Constant) or not isinstance(kw.value.value, bool):
+                raise ParserSyntaxError(
+                    "pl.at() windowize must be a boolean literal (True/False)",
+                    span=self.span_tracker.get_span(kw.value),
+                    hint="Write windowize=True to allow exact local windowization for this InCore scope.",
+                )
+            state.windowize = kw.value.value
         elif kw.arg in _AT_STASH_KWARGS:
             self._stash_at_kwarg(kw, state)
         elif kw.arg is None:
@@ -3075,7 +3084,7 @@ class ASTParser:
                 span=self.span_tracker.get_span(kw),
                 hint=(
                     "Supported arguments: level, role, optimizations, deps, no_dep_args, dumps, "
-                    "allow_early_resolve, name_hint"
+                    "allow_early_resolve, name_hint, windowize"
                 ),
             )
 
@@ -4165,6 +4174,7 @@ class ASTParser:
             deps_kw, no_dep_args_kw, dumps_kw, optional_vars, state.allow_early_resolve, span
         )
         scope_attrs = self._append_split_slot_num_attr(scope_attrs, state.split_slot_num)
+        scope_attrs = self._append_windowize_attr(scope_attrs, state.windowize)
 
         # ``with pl.at(...) as tid:`` allocates ``tid`` as an outer-scope Var
         # whose real definition is synthesised later by ``OutlineIncoreScopes``
@@ -4244,6 +4254,17 @@ class ASTParser:
             return attrs
         result: list[tuple[str, Any]] = list(attrs) if attrs else []
         result.append(("slot_num", slot_num))
+        return result
+
+    @staticmethod
+    def _append_windowize_attr(
+        attrs: "list[tuple[str, Any]] | None", windowize: bool
+    ) -> "list[tuple[str, Any]] | None":
+        """Append ``windowize`` only for explicit opt-in scopes."""
+        if not windowize:
+            return attrs
+        result: list[tuple[str, Any]] = list(attrs) if attrs else []
+        result.append(("windowize", True))
         return result
 
     def _parse_at_meta(
