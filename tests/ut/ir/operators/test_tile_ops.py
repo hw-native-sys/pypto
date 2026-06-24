@@ -2291,6 +2291,19 @@ class TestTileBitwiseArithmeticOps:
         ir_str = str(Program)
         assert "tile.rems" in ir_str
 
+    @pytest.mark.parametrize("op_name", ["part_add", "part_mul", "part_max", "part_min"])
+    def test_tile_part_ops(self, op_name):
+        """Test tile.part_* partial-combine binary operators (tile-tile only)."""
+        span = ir.Span.unknown()
+        dim = ir.ConstInt(16, DataType.INT32, span)
+        tile_type = ir.TileType([dim, dim], DataType.FP32)
+        var_a = ir.Var("a", tile_type, span)
+        var_b = ir.Var("b", tile_type, span)
+
+        call = getattr(tile, op_name)(var_a, var_b)
+        assert isinstance(call, ir.Call)
+        assert call.op.name == f"tile.{op_name}"
+
     def test_tile_and(self):
         """Test tile.and operator - element-wise bitwise AND of two tiles."""
 

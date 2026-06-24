@@ -318,6 +318,62 @@ REGISTER_OP("tile.rem")
       return DeduceTileOpTernaryType(args, kwargs, "tile.rem", false);
     });
 
+// Partial-combine binary ops: elementwise over dst's valid region, but where
+// only one source is valid at an element the result copies that source. Shape
+// is identical to a plain elementwise binary op; the "partial" behaviour is a
+// runtime valid-region effect, so type deduction is the standard binary one.
+REGISTER_OP("tile.part_add")
+    .set_op_category("TileOp")
+    .set_description("Partial element-wise add of two tiles (copies the lone valid input)")
+    .add_argument("src0", "First source tile (TileType)")
+    .add_argument("src1", "Second source tile (TileType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.part_add");
+    });
+
+REGISTER_OP("tile.part_mul")
+    .set_op_category("TileOp")
+    .set_description("Partial element-wise multiply of two tiles (copies the lone valid input)")
+    .add_argument("src0", "First source tile (TileType)")
+    .add_argument("src1", "Second source tile (TileType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.part_mul");
+    });
+
+REGISTER_OP("tile.part_max")
+    .set_op_category("TileOp")
+    .set_description("Partial element-wise max of two tiles (copies the lone valid input)")
+    .add_argument("src0", "First source tile (TileType)")
+    .add_argument("src1", "Second source tile (TileType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.part_max");
+    });
+
+REGISTER_OP("tile.part_min")
+    .set_op_category("TileOp")
+    .set_description("Partial element-wise min of two tiles (copies the lone valid input)")
+    .add_argument("src0", "First source tile (TileType)")
+    .add_argument("src1", "Second source tile (TileType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.part_min");
+    });
+
 REGISTER_OP("tile.muls")
     .set_op_category("TileOp")
     .set_description("Element-wise multiplication of tile and scalar")

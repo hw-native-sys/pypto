@@ -135,10 +135,10 @@
 | pto.tfillpad | TFILLPAD | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tfillpad_inpace | TFILLPAD_INPLACE | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.tfillpad_expand | TFILLPAD_EXPAND | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING |
-| pto.tpartadd | TPARTADD | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING |
-| pto.tpartmul | TPARTMUL | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING |
-| pto.tpartmax | TPARTMAX | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING |
-| pto.tpartmin | TPARTMIN | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING |
+| pto.tpartadd | TPARTADD | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | NEW 前端+codegen+ST；a2a3 真机待 CI（irregular 家族留意 ISA 缺陷） |
+| pto.tpartmul | TPARTMUL | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | NEW 前端+codegen+ST；a2a3 真机待 CI（irregular 家族留意 ISA 缺陷） |
+| pto.tpartmax | TPARTMAX | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | NEW 前端+codegen+ST；a2a3 真机待 CI（irregular 家族留意 ISA 缺陷） |
+| pto.tpartmin | TPARTMIN | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | NEW 前端+codegen+ST；a2a3 真机待 CI（irregular 家族留意 ISA 缺陷） |
 | pto.tprint | TPRINT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (debug, skip) |
 | **量化** |  |  |  |  |  |  |  |  |
 | pto.tquant | TQUANT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING |

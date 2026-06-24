@@ -106,6 +106,10 @@ __all__ = [
     "set_validshape",
     "rem",
     "rems",
+    "part_add",
+    "part_mul",
+    "part_max",
+    "part_min",
     "and_",
     "ands",
     "or_",
@@ -1679,6 +1683,74 @@ def rems(lhs: Tile, rhs: int | float | Expr | Scalar, tmp: Tile) -> Tile:
     """
     rhs_expr = rhs.unwrap() if isinstance(rhs, Scalar) else rhs
     call_expr = _ir_ops.rems(lhs.unwrap(), rhs_expr, tmp.unwrap())
+    return Tile(expr=call_expr)
+
+
+def part_add(src0: Tile, src1: Tile) -> Tile:
+    """Partial element-wise add of two tiles.
+
+    Adds over the destination valid region; where only one source is valid the
+    result copies that source. Maps to the TPARTADD hardware intrinsic.
+
+    Args:
+        src0: First source tile
+        src1: Second source tile
+
+    Returns:
+        Tile wrapping the part_add operation
+    """
+    call_expr = _ir_ops.part_add(src0.unwrap(), src1.unwrap())
+    return Tile(expr=call_expr)
+
+
+def part_mul(src0: Tile, src1: Tile) -> Tile:
+    """Partial element-wise multiply of two tiles.
+
+    Multiplies over the destination valid region; where only one source is valid
+    the result copies that source. Maps to the TPARTMUL hardware intrinsic.
+
+    Args:
+        src0: First source tile
+        src1: Second source tile
+
+    Returns:
+        Tile wrapping the part_mul operation
+    """
+    call_expr = _ir_ops.part_mul(src0.unwrap(), src1.unwrap())
+    return Tile(expr=call_expr)
+
+
+def part_max(src0: Tile, src1: Tile) -> Tile:
+    """Partial element-wise max of two tiles.
+
+    Takes the max over the destination valid region; where only one source is
+    valid the result copies that source. Maps to the TPARTMAX hardware intrinsic.
+
+    Args:
+        src0: First source tile
+        src1: Second source tile
+
+    Returns:
+        Tile wrapping the part_max operation
+    """
+    call_expr = _ir_ops.part_max(src0.unwrap(), src1.unwrap())
+    return Tile(expr=call_expr)
+
+
+def part_min(src0: Tile, src1: Tile) -> Tile:
+    """Partial element-wise min of two tiles.
+
+    Takes the min over the destination valid region; where only one source is
+    valid the result copies that source. Maps to the TPARTMIN hardware intrinsic.
+
+    Args:
+        src0: First source tile
+        src1: Second source tile
+
+    Returns:
+        Tile wrapping the part_min operation
+    """
+    call_expr = _ir_ops.part_min(src0.unwrap(), src1.unwrap())
     return Tile(expr=call_expr)
 
 

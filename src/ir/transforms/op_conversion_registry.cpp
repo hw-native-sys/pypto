@@ -258,6 +258,13 @@ void OpConversionRegistry::RegisterElementwiseBinaryOps() {
   };
   RegisterCustom("tensor.maximum", MakeMinMaxConv("tile.maximum", "tile.maximums"));
   RegisterCustom("tensor.minimum", MakeMinMaxConv("tile.minimum", "tile.minimums"));
+
+  // Partial-combine ops have no broadcast (row-expand) or scalar form, so each
+  // is a simple 1:1 lowering.
+  RegisterSimple("tensor.part_add", "tile.part_add");
+  RegisterSimple("tensor.part_mul", "tile.part_mul");
+  RegisterSimple("tensor.part_max", "tile.part_max");
+  RegisterSimple("tensor.part_min", "tile.part_min");
 }
 
 // ============================================================================

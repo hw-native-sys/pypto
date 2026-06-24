@@ -40,6 +40,10 @@ __all__ = [
     "subs",
     "div",
     "divs",
+    "part_add",
+    "part_mul",
+    "part_max",
+    "part_min",
     "maximum",
     "minimum",
     "cmp",
@@ -689,6 +693,62 @@ def divs(lhs: Tensor, rhs: int | float | Expr | Scalar) -> Tensor:
     """
     lhs_expr = lhs.unwrap()
     call_expr = _ir_ops.divs(lhs_expr, _unwrap_rhs(rhs))
+    return Tensor(expr=call_expr)
+
+
+def part_add(lhs: Tensor, rhs: Tensor) -> Tensor:
+    """Partial element-wise add of two tensors.
+
+    Args:
+        lhs: First source tensor
+        rhs: Second source tensor
+
+    Returns:
+        Tensor wrapping the part_add operation
+    """
+    call_expr = _ir_ops.part_add(lhs.unwrap(), rhs.unwrap())
+    return Tensor(expr=call_expr)
+
+
+def part_mul(lhs: Tensor, rhs: Tensor) -> Tensor:
+    """Partial element-wise multiply of two tensors.
+
+    Args:
+        lhs: First source tensor
+        rhs: Second source tensor
+
+    Returns:
+        Tensor wrapping the part_mul operation
+    """
+    call_expr = _ir_ops.part_mul(lhs.unwrap(), rhs.unwrap())
+    return Tensor(expr=call_expr)
+
+
+def part_max(lhs: Tensor, rhs: Tensor) -> Tensor:
+    """Partial element-wise max of two tensors.
+
+    Args:
+        lhs: First source tensor
+        rhs: Second source tensor
+
+    Returns:
+        Tensor wrapping the part_max operation
+    """
+    call_expr = _ir_ops.part_max(lhs.unwrap(), rhs.unwrap())
+    return Tensor(expr=call_expr)
+
+
+def part_min(lhs: Tensor, rhs: Tensor) -> Tensor:
+    """Partial element-wise min of two tensors.
+
+    Args:
+        lhs: First source tensor
+        rhs: Second source tensor
+
+    Returns:
+        Tensor wrapping the part_min operation
+    """
+    call_expr = _ir_ops.part_min(lhs.unwrap(), rhs.unwrap())
     return Tensor(expr=call_expr)
 
 

@@ -350,6 +350,23 @@ class TestConvertTensorToTileOps:
         )
         _assert_convert_equal(before, expected)
 
+    @pytest.mark.parametrize(
+        "op_name",
+        ["part_add", "part_mul", "part_max", "part_min"],
+    )
+    def test_part_ops_dispatch(self, op_name):
+        """tensor.part_* lowers 1:1 to tile.part_* (tensor-tensor only)."""
+        tensor_op = getattr(tensor_ops, op_name)
+        tile_op = getattr(tile_ops, op_name)
+        before, expected = _make_pair(
+            in_specs=[("x", [64], DataType.FP32), ("y", [64], DataType.FP32)],
+            out_shape=[64],
+            out_dtype=DataType.FP32,
+            tensor_op=lambda ins: tensor_op(ins[0], ins[1]),
+            tile_op=lambda ts: tile_op(ts[0], ts[1]),
+        )
+        _assert_convert_equal(before, expected)
+
     @pytest.mark.parametrize(("op_name", "tensor_op", "tile_op"), _UNARY_1D_OPS)
     def test_unary_op_1d(self, op_name, tensor_op, tile_op):
         """tensor.<unary>(x) -> tile.<unary>(x_tile) on 1D FP32."""

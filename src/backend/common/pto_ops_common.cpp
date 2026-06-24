@@ -71,6 +71,10 @@ static bool RequiresRowMajorLayout(std::string_view op_name) {
       "tile.minimum",
       "tile.mul",
       "tile.or",
+      "tile.part_add",
+      "tile.part_max",
+      "tile.part_min",
+      "tile.part_mul",
       "tile.rem",
       "tile.shl",
       "tile.shr",
@@ -2248,6 +2252,11 @@ static const SimpleOpEntry kSimpleOps[] = {
     {"tile.mul",             "pto.tmul",             2},
     {"tile.div",             "pto.tdiv",             2},
     {"tile.rem",             "pto.trem",             3},  // src0, src1, tmp
+    // Tile x Tile partial-combine operations
+    {"tile.part_add",        "pto.tpartadd",         2},
+    {"tile.part_mul",        "pto.tpartmul",         2},
+    {"tile.part_max",        "pto.tpartmax",         2},
+    {"tile.part_min",        "pto.tpartmin",         2},
     // Tile x Tile bitwise operations
     {"tile.and",             "pto.tand",             2},
     {"tile.or",              "pto.tor",              2},

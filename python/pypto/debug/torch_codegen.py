@@ -895,6 +895,13 @@ def _register_ops() -> None:  # noqa: PLR0915
         m[f"{prefix}.maximum"] = _torch_fn("maximum", 2)
         m[f"{prefix}.minimum"] = _torch_fn("minimum", 2)
 
+        # partial-combine ops reduce to the plain op when both inputs are
+        # fully valid (the reference path has no partial valid regions)
+        m[f"{prefix}.part_add"] = _torch_fn("add", 2)
+        m[f"{prefix}.part_mul"] = _torch_fn("mul", 2)
+        m[f"{prefix}.part_max"] = _torch_fn("maximum", 2)
+        m[f"{prefix}.part_min"] = _torch_fn("minimum", 2)
+
         # scalar variants: same math, torch broadcasting handles it
         m[f"{prefix}.adds"] = _binop("+")
         m[f"{prefix}.subs"] = _binop("-")

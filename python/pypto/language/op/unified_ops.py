@@ -23,6 +23,10 @@ __all__ = [
     "sub",
     "mul",
     "div",
+    "part_add",
+    "part_mul",
+    "part_max",
+    "part_min",
     "maximum",
     "minimum",
     "exp",
@@ -237,6 +241,62 @@ def div(lhs, rhs):
     if _is_scalar_like(lhs) and _is_scalar_like(rhs):
         return Scalar(expr=_to_scalar_expr(lhs) / _to_scalar_expr(rhs))
     _raise_type_dispatch_error("div", lhs, rhs)
+
+
+# --- part_add / part_mul / part_max / part_min ---
+# Partial-combine binary ops: tensor-tensor or tile-tile only (no scalar form).
+
+
+@overload
+def part_add(lhs: Tensor, rhs: Tensor) -> Tensor: ...
+@overload
+def part_add(lhs: Tile, rhs: Tile) -> Tile: ...
+def part_add(lhs, rhs):
+    """Partial element-wise add, dispatched by input type."""
+    if isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
+        return _tensor.part_add(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, Tile):
+        return _tile.part_add(lhs, rhs)
+    _raise_type_dispatch_error("part_add", lhs, rhs)
+
+
+@overload
+def part_mul(lhs: Tensor, rhs: Tensor) -> Tensor: ...
+@overload
+def part_mul(lhs: Tile, rhs: Tile) -> Tile: ...
+def part_mul(lhs, rhs):
+    """Partial element-wise multiply, dispatched by input type."""
+    if isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
+        return _tensor.part_mul(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, Tile):
+        return _tile.part_mul(lhs, rhs)
+    _raise_type_dispatch_error("part_mul", lhs, rhs)
+
+
+@overload
+def part_max(lhs: Tensor, rhs: Tensor) -> Tensor: ...
+@overload
+def part_max(lhs: Tile, rhs: Tile) -> Tile: ...
+def part_max(lhs, rhs):
+    """Partial element-wise max, dispatched by input type."""
+    if isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
+        return _tensor.part_max(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, Tile):
+        return _tile.part_max(lhs, rhs)
+    _raise_type_dispatch_error("part_max", lhs, rhs)
+
+
+@overload
+def part_min(lhs: Tensor, rhs: Tensor) -> Tensor: ...
+@overload
+def part_min(lhs: Tile, rhs: Tile) -> Tile: ...
+def part_min(lhs, rhs):
+    """Partial element-wise min, dispatched by input type."""
+    if isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
+        return _tensor.part_min(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, Tile):
+        return _tile.part_min(lhs, rhs)
+    _raise_type_dispatch_error("part_min", lhs, rhs)
 
 
 # ---------------------------------------------------------------------------

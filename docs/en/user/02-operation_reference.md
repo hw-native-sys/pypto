@@ -14,6 +14,10 @@ Auto-selects between tensor and tile implementation based on input type.
 | `sub` | `(lhs: T, rhs: T \| int \| float \| Scalar) -> T` | Element-wise subtraction |
 | `mul` | `(lhs: T, rhs: T \| int \| float \| Scalar) -> T` | Element-wise multiplication |
 | `div` | `(lhs: T, rhs: T \| int \| float \| Scalar) -> T` | Element-wise division |
+| `part_add` | `(lhs: T, rhs: T) -> T` | Partial add (copies the lone valid input) |
+| `part_mul` | `(lhs: T, rhs: T) -> T` | Partial multiply (copies the lone valid input) |
+| `part_max` | `(lhs: T, rhs: T) -> T` | Partial max (copies the lone valid input) |
+| `part_min` | `(lhs: T, rhs: T) -> T` | Partial min (copies the lone valid input) |
 | `maximum` | `(lhs: T, rhs: T) -> T` | Element-wise maximum |
 | `exp` | `(input: T) -> T` | Element-wise exponential |
 | `cast` | `(input: T, target_type: int \| DataType, mode="round") -> T` | Type cast (`mode`: none, rint, round, floor, ceil, trunc, odd) |
@@ -57,6 +61,10 @@ Operate on `Tensor` objects (DDR memory).
 | `subs` | `(lhs: Tensor, rhs: int \| float \| Scalar) -> Tensor` | Subtract scalar |
 | `muls` | `(lhs: Tensor, rhs: int \| float \| Scalar) -> Tensor` | Multiply by scalar |
 | `divs` | `(lhs: Tensor, rhs: int \| float \| Scalar) -> Tensor` | Divide by scalar |
+| `part_add` | `(lhs: Tensor, rhs: Tensor) -> Tensor` | Partial add (copies the lone valid input) |
+| `part_mul` | `(lhs: Tensor, rhs: Tensor) -> Tensor` | Partial multiply (copies the lone valid input) |
+| `part_max` | `(lhs: Tensor, rhs: Tensor) -> Tensor` | Partial max (copies the lone valid input) |
+| `part_min` | `(lhs: Tensor, rhs: Tensor) -> Tensor` | Partial min (copies the lone valid input) |
 | `maximum` | `(lhs: Tensor, rhs: Tensor) -> Tensor` | Element-wise maximum |
 | `row_max` | `(input: Tensor) -> Tensor` | Row-wise max reduction |
 | `row_sum` | `(input: Tensor) -> Tensor` | Row-wise sum reduction |
@@ -213,6 +221,10 @@ scratch tile to materialize numeric results on A2/A3.
 | `shrs` | `(lhs: Tile, rhs: int \| Scalar) -> Tile` | Right shift by scalar |
 | `rem` | `(lhs: Tile, rhs: Tile) -> Tile` | Remainder / modulo |
 | `rems` | `(lhs: Tile, rhs: int \| float \| Scalar) -> Tile` | Remainder with scalar |
+| `part_add` | `(lhs: Tile, rhs: Tile) -> Tile` | Partial add (copies the lone valid input) |
+| `part_mul` | `(lhs: Tile, rhs: Tile) -> Tile` | Partial multiply (copies the lone valid input) |
+| `part_max` | `(lhs: Tile, rhs: Tile) -> Tile` | Partial max (copies the lone valid input) |
+| `part_min` | `(lhs: Tile, rhs: Tile) -> Tile` | Partial min (copies the lone valid input) |
 
 ## Activations (`pl.tile.*`)
 

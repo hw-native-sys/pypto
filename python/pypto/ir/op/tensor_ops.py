@@ -584,6 +584,66 @@ def divs(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tensor.divs", [lhs, rhs_expr], {}, actual_span)
 
 
+def part_add(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
+    """Partial element-wise add of two tensors.
+
+    Args:
+        lhs: First source tensor
+        rhs: Second source tensor
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for partial element-wise add
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.part_add", [lhs, rhs], {}, actual_span)
+
+
+def part_mul(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
+    """Partial element-wise multiply of two tensors.
+
+    Args:
+        lhs: First source tensor
+        rhs: Second source tensor
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for partial element-wise multiply
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.part_mul", [lhs, rhs], {}, actual_span)
+
+
+def part_max(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
+    """Partial element-wise max of two tensors.
+
+    Args:
+        lhs: First source tensor
+        rhs: Second source tensor
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for partial element-wise max
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.part_max", [lhs, rhs], {}, actual_span)
+
+
+def part_min(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
+    """Partial element-wise min of two tensors.
+
+    Args:
+        lhs: First source tensor
+        rhs: Second source tensor
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for partial element-wise min
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.part_min", [lhs, rhs], {}, actual_span)
+
+
 def maximum(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
     """Element-wise maximum of tensor and tensor or scalar.
 

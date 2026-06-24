@@ -759,6 +759,78 @@ def rems(lhs: Expr, rhs: int | float | Expr, tmp: Expr, span: Span | None = None
     return _ir_core.create_op_call("tile.rems", [lhs, rhs_expr, tmp], {}, actual_span)
 
 
+def part_add(src0: Expr, src1: Expr, span: Span | None = None) -> Call:
+    """Partial element-wise add of two tiles.
+
+    Adds over the destination valid region; where only one source is valid the
+    result copies that source. Maps to the TPARTADD hardware intrinsic.
+
+    Args:
+        src0: First source tile (TileType)
+        src1: Second source tile (TileType)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for partial element-wise add
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.part_add", [src0, src1], {}, actual_span)
+
+
+def part_mul(src0: Expr, src1: Expr, span: Span | None = None) -> Call:
+    """Partial element-wise multiply of two tiles.
+
+    Multiplies over the destination valid region; where only one source is valid
+    the result copies that source. Maps to the TPARTMUL hardware intrinsic.
+
+    Args:
+        src0: First source tile (TileType)
+        src1: Second source tile (TileType)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for partial element-wise multiply
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.part_mul", [src0, src1], {}, actual_span)
+
+
+def part_max(src0: Expr, src1: Expr, span: Span | None = None) -> Call:
+    """Partial element-wise max of two tiles.
+
+    Takes the max over the destination valid region; where only one source is
+    valid the result copies that source. Maps to the TPARTMAX hardware intrinsic.
+
+    Args:
+        src0: First source tile (TileType)
+        src1: Second source tile (TileType)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for partial element-wise max
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.part_max", [src0, src1], {}, actual_span)
+
+
+def part_min(src0: Expr, src1: Expr, span: Span | None = None) -> Call:
+    """Partial element-wise min of two tiles.
+
+    Takes the min over the destination valid region; where only one source is
+    valid the result copies that source. Maps to the TPARTMIN hardware intrinsic.
+
+    Args:
+        src0: First source tile (TileType)
+        src1: Second source tile (TileType)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for partial element-wise min
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.part_min", [src0, src1], {}, actual_span)
+
+
 def shl(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
     """Element-wise bitwise left shift of two tiles.
 

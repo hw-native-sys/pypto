@@ -1142,6 +1142,21 @@ def test_tensor_div():
     assert call.op.name == "tensor.div"
 
 
+@pytest.mark.parametrize("op_name", ["part_add", "part_mul", "part_max", "part_min"])
+def test_tensor_part_ops(op_name):
+    """Test tensor.part_* partial-combine binary operations (tensor-tensor only)."""
+    span = ir.Span.unknown()
+
+    dim8 = ir.ConstInt(8, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim8], DataType.FP32)
+    var_a = ir.Var("a", tensor_type, span)
+    var_b = ir.Var("b", tensor_type, span)
+
+    call = getattr(ir.op.tensor, op_name)(var_a, var_b)
+    assert isinstance(call, ir.Call)
+    assert call.op.name == f"tensor.{op_name}"
+
+
 def test_const_float():
     """Test ConstFloat expression creation and usage."""
     span = ir.Span.unknown()
