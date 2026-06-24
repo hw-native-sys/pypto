@@ -1293,14 +1293,9 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   const bool is_set_validshape = call && call->op_->name_ == "tile.set_validshape";
   const bool alias_scatter_result_to_input = ShouldAliasScatterResultToInput(op);
   const bool alias_array_update_to_input = ShouldAliasArrayUpdateResultToInput(op);
-  // A cross-core tpop result owns no general-pool buffer (its data lives in the
-  // reserved C2V/V2C slot). InitMemRef normally leaves it MemRef-less, but guard
-  // by op name too so a tpop result that still carries a MemRef gets no alloc.
-  const bool is_tpop_result =
-      call && (call->op_->name_ == "tile.tpop_from_aic" || call->op_->name_ == "tile.tpop_from_aiv");
 
   if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
-    if (!is_set_validshape && !alias_scatter_result_to_input && !is_tpop_result) {
+    if (!is_set_validshape && !alias_scatter_result_to_input) {
       EmitAllocTileForVar(op->var_, tile_type);
     }
   }
