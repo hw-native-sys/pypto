@@ -1,6 +1,6 @@
 # SkewCrossCorePipeline Pass
 
-对 cube/vector 混合（跨核）的 `pl.pipeline` 循环做软流水（skew），使两个核相互重叠，替代旧的「unroll + IO 聚类」跨核处理方式。紧接在 [`LowerPipelineLoops`](26-lower_pipeline_loops.md) 之前运行。
+对 cube/vector 混合（跨核）的 `pl.pipeline` 循环做软流水（skew），使两个核相互重叠，替代旧的「unroll + IO 聚类」跨核处理方式。紧接在 [`LowerPipelineLoops`](27-lower_pipeline_loops.md) 之前运行。
 
 ## 概述
 
@@ -17,7 +17,7 @@
 
 **Requires**: SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred, NormalizedStmtStructure.
 
-**流水线位置**: 在 [`NormalizeReturnOrder`](24-normalize_return_order.md) 之后，紧接在 [`LowerPipelineLoops`](26-lower_pipeline_loops.md) 之前。两者之间没有其他 pass，因此跨核循环会先被 skew（→ Sequential），unroll pass 没有机会复制它。
+**流水线位置**: 在 [`NormalizeReturnOrder`](25-normalize_return_order.md) 之后，紧接在 [`LowerPipelineLoops`](27-lower_pipeline_loops.md) 之前。两者之间没有其他 pass，因此跨核循环会先被 skew（→ Sequential），unroll pass 没有机会复制它。
 
 ## API
 
@@ -56,6 +56,6 @@ p = passes.skew_cross_core_pipeline()
 
 ## 相关
 
-- [`LowerPipelineLoops`](26-lower_pipeline_loops.md) —— 复制其余（同核）pipeline 循环以实现 ping-pong。
-- [`CanonicalizeIOOrder`](27-canonicalize_io_order.md) —— 在 pipeline body 内聚类同核 IO（跨核循环到这里已是 Sequential，不再进入此 pass）。
+- [`LowerPipelineLoops`](27-lower_pipeline_loops.md) —— 复制其余（同核）pipeline 循环以实现 ping-pong。
+- [`CanonicalizeIOOrder`](28-canonicalize_io_order.md) —— 在 pipeline body 内聚类同核 IO（跨核循环到这里已是 Sequential，不再进入此 pass）。
 - [`SplitVectorKernel`](23-split_vector_kernel.md) —— `UP_DOWN` vector 切分，与 skew 正交且可组合。

@@ -4,7 +4,7 @@
 
 编排代码生成遵循与 [PTO 代码生成](00-pto_codegen.md#设计原则严格的-1-to-1-映射)相同的原则：从 IR 到生成 C++ 代码的**严格 1-to-1 转换**。代码生成不应执行优化、分析或间接转换——此类工作属于前置 Pass。
 
-例如，返回值到参数的追踪（将被调用者返回值映射回 `Out` 参数）是分析工作，应由代码生成之前的 Pass 解决。[`NormalizeReturnOrder`](../passes/24-normalize_return_order.md) pass 现在会在代码生成之前完成此规范化，使编排代码生成可以直接将 `return[i]` 映射到 `out_indices[i]`，无需追踪 `tile.store`/yield 链。
+例如，返回值到参数的追踪（将被调用者返回值映射回 `Out` 参数）是分析工作，应由代码生成之前的 Pass 解决。[`NormalizeReturnOrder`](../passes/25-normalize_return_order.md) pass 现在会在代码生成之前完成此规范化，使编排代码生成可以直接将 `return[i]` 映射到 `out_indices[i]`，无需追踪 `tile.store`/yield 链。
 
 ## 概述
 
@@ -188,7 +188,7 @@ params_t1.add_input(ext_output);  // result -> ext_output（无别名声明）
 
 结果别名到哪个 `Out`/`InOut` 参数是查表而非启发式：流水线 IR 满足
 `ReturnParamsExplicit` 属性
-（[`NormalizeReturnOrder`](../passes/24-normalize_return_order.md)），
+（[`NormalizeReturnOrder`](../passes/25-normalize_return_order.md)），
 `FindReturnedParamIndex` 通过 `ir::return_lineage` 以指针同一性把每个返回值解析到参数。旧的血缘追踪（Var 到 Var 别名、循环 carry、builtin 回
 写、tuple 调用的 `TupleGetItem`、Group/Spmd 包装函数）仅保留给手工解析的
 IR。当追踪不到任何参数时，仅在被调用者恰好只有一个 `Out`/`InOut` 时单返回
@@ -438,7 +438,7 @@ kwarg 写入类型化的 `Submit::deps_` 字段；codegen 通过临时的 `Submi
 `manual_dep_edges` 的形态已不存在——ManualDepsOnSubmitOnly 结构性属性会校验
 任何跨函数 `Call` 都不携带它；只有 `system.task_dummy` barrier op 作为 fanin
 契约保留该 attr。编译器推导的 manual-scope 依赖来自
-[`AutoDeriveTaskDependencies`](../passes/35-auto_derive_task_dependencies.md)，
+[`AutoDeriveTaskDependencies`](../passes/36-auto_derive_task_dependencies.md)，
 保存在 `Call.attrs["compiler_manual_dep_edges"]`（独立的 key，允许出现在普通
 call 上）。Codegen 会按这个顺序合并两组列表，并按 Var identity 去重后再发出
 栈数组。

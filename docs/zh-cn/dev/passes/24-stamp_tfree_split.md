@@ -11,11 +11,12 @@
 ## 在流水线中的位置
 
 ```text
-... -> SplitVectorKernel -> ... -> Simplify(最后一次) -> StampTfreeSplit -> MaterializeRuntimeScopes
+... -> SplitVectorKernel -> StampTfreeSplit -> NormalizeReturnOrder -> SkewCrossCorePipeline -> ...
 ```
 
-它运行在 `SplitVectorKernel` 把 tpop 的 `split` 定稿之后、跨核流水 pass 把 tpop/tfree 的位置settle
-之后、以及最后一次 `Simplify` 之后,从而保证在 codegen 之前没有 pass 会抹掉所盖的 kwargs。
+它紧跟在 `SplitVectorKernel` 把 tpop 的 `split` 定稿之后运行,并在 `SkewCrossCorePipeline` 把
+tpop/tfree 配对克隆进软件流水的 prologue/epilogue 之前 —— 这样每个克隆都带上已盖好的 `split`,
+而且查表时每个 `tfree` 的实参仍是它直接的 tpop 结果 var(还没被流水改成循环 carry 值)。
 
 ## 行为
 

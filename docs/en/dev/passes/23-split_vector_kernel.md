@@ -554,5 +554,5 @@ def split_vector_kernel() -> Pass:
   AIC/AIV functions and of the `dual_aiv_dispatch` marker.
 - [`InjectGMPipeBuffer`](22-inject_gm_pipe_buffer.md) — runs immediately
   before; backend-gated GM pipe buffer wiring this pass relies on.
-- [`NormalizeReturnOrder`](24-normalize_return_order.md) — runs immediately
+- [`NormalizeReturnOrder`](25-normalize_return_order.md) — runs immediately
   after; sees the per-lane tile shapes produced here.

@@ -526,5 +526,5 @@ def split_vector_kernel() -> Pass:
   AIC/AIV 函数和 `dual_aiv_dispatch` 标记。
 - [`InjectGMPipeBuffer`](22-inject_gm_pipe_buffer.md) —— 紧邻上游；本
   Pass 依赖它布置好的 backend-gated GM pipe buffer。
-- [`NormalizeReturnOrder`](24-normalize_return_order.md) —— 紧邻下游；
+- [`NormalizeReturnOrder`](25-normalize_return_order.md) —— 紧邻下游；
   会观察到本 Pass 产出的 per-lane tile 形状。

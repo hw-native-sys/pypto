@@ -1,6 +1,6 @@
 # CanonicalizeIOOrder Pass
 
-仅限于 **`ForKind::Pipeline` 循环体内部** 的 `SeqStmts`，沿**同核硬件单元阶段阶梯**（标量 → load → compute → store）重排语句 —— 受 SSA 依赖图约束 —— 使每个阶段在 `LowerPipelineLoops` 产生的各克隆间聚集。聚集让相邻迭代的 tile 同时活跃，正是 ping-pong（双缓冲）得以成立的前提。跨核（cube/vector）流水线由 [`SkewCrossCorePipeline`](25-skew_cross_core_pipeline.md) 在上游软流水，到达本 pass 时已是 `ForKind::Sequential`，故此处不含跨核处理。非流水线循环则保持不变。
+仅限于 **`ForKind::Pipeline` 循环体内部** 的 `SeqStmts`，沿**同核硬件单元阶段阶梯**（标量 → load → compute → store）重排语句 —— 受 SSA 依赖图约束 —— 使每个阶段在 `LowerPipelineLoops` 产生的各克隆间聚集。聚集让相邻迭代的 tile 同时活跃，正是 ping-pong（双缓冲）得以成立的前提。跨核（cube/vector）流水线由 [`SkewCrossCorePipeline`](26-skew_cross_core_pipeline.md) 在上游软流水，到达本 pass 时已是 `ForKind::Sequential`，故此处不含跨核处理。非流水线循环则保持不变。
 
 ## 概述
 
@@ -19,7 +19,7 @@
 
 ### 跨核（AIC↔AIV）—— 由上游处理
 
-跨核（cube/vector）pipeline 循环由 [`SkewCrossCorePipeline`](25-skew_cross_core_pipeline.md) 软流水：它在 `LowerPipelineLoops` *之前*运行，把每个跨核循环改写为 `ForKind::Sequential`。因此它们永远不会以 `ForKind::Pipeline` body 进入本 pass，`CanonicalizeIOOrder` 也**不含任何跨核处理** —— 这里 `tpush`/`tpop` 只是普通 tile 计算，不会被重排进任何跨核阶段。本 pass 只对剩余的同核 pipeline 循环（GM→L1、L1→L0、嵌套 matmul）聚集**同核**阶段（标量 → load → compute → store）以实现 ping-pong。
+跨核（cube/vector）pipeline 循环由 [`SkewCrossCorePipeline`](26-skew_cross_core_pipeline.md) 软流水：它在 `LowerPipelineLoops` *之前*运行，把每个跨核循环改写为 `ForKind::Sequential`。因此它们永远不会以 `ForKind::Pipeline` body 进入本 pass，`CanonicalizeIOOrder` 也**不含任何跨核处理** —— 这里 `tpush`/`tpop` 只是普通 tile 计算，不会被重排进任何跨核阶段。本 pass 只对剩余的同核 pipeline 循环（GM→L1、L1→L0、嵌套 matmul）聚集**同核**阶段（标量 → load → compute → store）以实现 ping-pong。
 
 **前置条件**: SSAForm、SplitIncoreOrch、IncoreTileOps、TileOps2D、TileMemoryInferred、NormalizedStmtStructure。
 
@@ -49,7 +49,7 @@ result = passes.canonicalize_io_order()(program)
 
 `tile.read` 虽然产出标量，但仍归为 `Load` —— 它是针对 tile 的 I/O，与 `tile.load` 同属 load 层。LHS 类型检查仅在 RHS 不是已识别的 I/O op 时生效。
 
-跨核 `tpush`/`tpop` 不带任何特殊类别 —— 它们落入 `TileCompute`，在兄弟语句间保持程序顺序（跨核软流水由上游的 [`SkewCrossCorePipeline`](25-skew_cross_core_pipeline.md) 完成；见上文「跨核（AIC↔AIV）」）。
+跨核 `tpush`/`tpop` 不带任何特殊类别 —— 它们落入 `TileCompute`，在兄弟语句间保持程序顺序（跨核软流水由上游的 [`SkewCrossCorePipeline`](26-skew_cross_core_pipeline.md) 完成；见上文「跨核（AIC↔AIV）」）。
 
 每一步在 `ready`（所有前驱已发射）的语句中，发射 `(category, original_index)` 最小者。Store 因 `Store` 是最大类别而自然排在最后 —— 只有当没有其他可发射时才会被选中。
 
@@ -125,7 +125,7 @@ for i in pl.range(0, 8, 4):
 
 ## 相关
 
-- [`LowerPipelineLoops`](26-lower_pipeline_loops.md) —— 上游复制区域生成者；保留 `ForKind::Pipeline` 标记供本 Pass 识别
-- [`MaterializeTensorStrides`](28-materialize_tensor_strides.md) —— 接入默认流水线后紧随本 Pass 运行；在 `InitMemRef` 消费前补全隐式 `TensorView` stride
-- [`MemoryReuse`](30-memory_reuse.md) —— 在本 Pass 之后运行；受益于复制区域中同时活跃的 tile
+- [`LowerPipelineLoops`](27-lower_pipeline_loops.md) —— 上游复制区域生成者；保留 `ForKind::Pipeline` 标记供本 Pass 识别
+- [`MaterializeTensorStrides`](29-materialize_tensor_strides.md) —— 接入默认流水线后紧随本 Pass 运行；在 `InitMemRef` 消费前补全隐式 `TensorView` stride
+- [`MemoryReuse`](31-memory_reuse.md) —— 在本 Pass 之后运行；受益于复制区域中同时活跃的 tile
 - RFC #1026 / PR #1029 —— InOut-use 规约 + 依赖分析工具

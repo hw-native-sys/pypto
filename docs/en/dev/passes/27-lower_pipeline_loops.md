@@ -12,7 +12,7 @@ Internally, `pl.pipeline(...)` emits `ForStmt(kind=ForKind::Pipeline, attrs={"pi
 
 **Requires**: SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred, NormalizedStmtStructure.
 
-**Pipeline position**: After [`SkewCrossCorePipeline`](25-skew_cross_core_pipeline.md) (and [`NormalizeReturnOrder`](24-normalize_return_order.md)), before `CanonicalizeIOOrder` and `InitMemRef`. Cross-core (cube/vector) pipeline loops are skewed to `ForKind::Sequential` by the upstream skew pass, so by here only **same-core** pipeline loops (GM→L1, L1→L0, nested matmul stage loops) remain `ForKind::Pipeline` for this pass to replicate. Late enough that all tile-structural decisions are made; early enough that `CanonicalizeIOOrder` / `InitMemRef` / `MemoryReuse` see distinct tile vars per clone.
+**Pipeline position**: After [`SkewCrossCorePipeline`](26-skew_cross_core_pipeline.md) (and [`NormalizeReturnOrder`](25-normalize_return_order.md)), before `CanonicalizeIOOrder` and `InitMemRef`. Cross-core (cube/vector) pipeline loops are skewed to `ForKind::Sequential` by the upstream skew pass, so by here only **same-core** pipeline loops (GM→L1, L1→L0, nested matmul stage loops) remain `ForKind::Pipeline` for this pass to replicate. Late enough that all tile-structural decisions are made; early enough that `CanonicalizeIOOrder` / `InitMemRef` / `MemoryReuse` see distinct tile vars per clone.
 
 ## API
 
@@ -133,5 +133,5 @@ After this pass, `CanonicalizeIOOrder` runs scoped to the pipeline loop's body, 
 
 ## Related
 
-- [`CanonicalizeIOOrder`](27-canonicalize_io_order.md) — the IO-order canonicalization pass that runs next, scoped to pipeline bodies
+- [`CanonicalizeIOOrder`](28-canonicalize_io_order.md) — the IO-order canonicalization pass that runs next, scoped to pipeline bodies
 - [`UnrollLoops`](02-unroll_loops.md) — full-unroll pass at slot #1, kept as the primary `pl.unroll(N)` lowering

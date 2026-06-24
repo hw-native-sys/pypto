@@ -13,12 +13,14 @@ call. This pass makes that data explicit on the IR node.
 ## Position in the pipeline
 
 ```text
-... -> SplitVectorKernel -> ... -> Simplify (final) -> StampTfreeSplit -> MaterializeRuntimeScopes
+... -> SplitVectorKernel -> StampTfreeSplit -> NormalizeReturnOrder -> SkewCrossCorePipeline -> ...
 ```
 
-It runs after `SplitVectorKernel` finalizes the `split` value on tpops, after the
-cross-core pipeline passes have settled tpop/tfree placement, and after the final
-`Simplify`, so nothing strips the stamped kwargs before codegen.
+It runs immediately after `SplitVectorKernel` finalizes the `split` value on
+tpops, and before `SkewCrossCorePipeline` clones tpop/tfree pairs into the
+software-pipeline prologue/epilogue — so each clone carries the already-stamped
+`split`, and the lookup still sees every `tfree` arg as its direct tpop result
+var (not a pipelined loop carry).
 
 ## Behavior
 

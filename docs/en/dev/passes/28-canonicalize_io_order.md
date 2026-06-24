@@ -1,6 +1,6 @@
 # CanonicalizeIOOrder Pass
 
-Scoped to `SeqStmts` **inside a `ForKind::Pipeline` body**, reorders statements along a **same-core hardware-unit stage ladder** (scalar → load → compute → store) — subject to the SSA dependency graph — so that each stage clusters across the replicated clones produced by `LowerPipelineLoops`. Clustering keeps sibling-iteration tiles co-live, which is what enables ping-pong (double-buffering). Cross-core (cube/vector) pipelines are software-pipelined upstream by [`SkewCrossCorePipeline`](25-skew_cross_core_pipeline.md) and reach this pass as `ForKind::Sequential`, so there is no cross-core handling here. Loops that are not pipelined are left untouched.
+Scoped to `SeqStmts` **inside a `ForKind::Pipeline` body**, reorders statements along a **same-core hardware-unit stage ladder** (scalar → load → compute → store) — subject to the SSA dependency graph — so that each stage clusters across the replicated clones produced by `LowerPipelineLoops`. Clustering keeps sibling-iteration tiles co-live, which is what enables ping-pong (double-buffering). Cross-core (cube/vector) pipelines are software-pipelined upstream by [`SkewCrossCorePipeline`](26-skew_cross_core_pipeline.md) and reach this pass as `ForKind::Sequential`, so there is no cross-core handling here. Loops that are not pipelined are left untouched.
 
 ## Overview
 
@@ -19,7 +19,7 @@ Lifting scalar compute is what unlocks the load cluster: without it, each clone'
 
 ### Cross-core (AIC↔AIV) — handled upstream
 
-Cross-core (cube/vector) pipeline loops are software-pipelined by [`SkewCrossCorePipeline`](25-skew_cross_core_pipeline.md), which runs *before* `LowerPipelineLoops` and rewrites every cross-core loop to `ForKind::Sequential`. They therefore never reach this pass as a `ForKind::Pipeline` body, and `CanonicalizeIOOrder` has **no cross-core handling** — `tpush`/`tpop` are ordinary tile compute here, not reordered into any cross-core tier. This pass only clusters the **same-core** stages (scalar → load → compute → store) of the remaining same-core pipeline loops (GM→L1, L1→L0, nested matmul) for ping-pong.
+Cross-core (cube/vector) pipeline loops are software-pipelined by [`SkewCrossCorePipeline`](26-skew_cross_core_pipeline.md), which runs *before* `LowerPipelineLoops` and rewrites every cross-core loop to `ForKind::Sequential`. They therefore never reach this pass as a `ForKind::Pipeline` body, and `CanonicalizeIOOrder` has **no cross-core handling** — `tpush`/`tpop` are ordinary tile compute here, not reordered into any cross-core tier. This pass only clusters the **same-core** stages (scalar → load → compute → store) of the remaining same-core pipeline loops (GM→L1, L1→L0, nested matmul) for ping-pong.
 
 **Requires**: SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred, NormalizedStmtStructure.
 
@@ -49,7 +49,7 @@ A priority-aware stable topological sort applied to every `SeqStmts` of two or m
 
 `tile.read` is classified as `Load` even though it produces a scalar — it's I/O against a tile and belongs in the load tier alongside `tile.load`. The LHS-type check only applies once the RHS is determined not to be a recognized I/O op.
 
-Cross-core `tpush`/`tpop` carry no special category — they fall through to `TileCompute` and keep their program order among siblings (cross-core software-pipelining is done upstream by [`SkewCrossCorePipeline`](25-skew_cross_core_pipeline.md); see *Cross-core (AIC↔AIV)* above).
+Cross-core `tpush`/`tpop` carry no special category — they fall through to `TileCompute` and keep their program order among siblings (cross-core software-pipelining is done upstream by [`SkewCrossCorePipeline`](26-skew_cross_core_pipeline.md); see *Cross-core (AIC↔AIV)* above).
 
 At each step, among statements whose predecessors are all already emitted (`ready`), the pass emits the one with the smallest `(category, original_index)`. Stores naturally sort last because `Store` is the largest category — they are only emitted once nothing else is ready.
 
@@ -125,7 +125,7 @@ All four `off_k` lift first to unblock the loads. All four `tile_x_k` are now co
 
 ## Related
 
-- [`LowerPipelineLoops`](26-lower_pipeline_loops.md) — upstream producer of replicated regions that benefit from this pass; leaves `ForKind::Pipeline` as the scope marker this pass consumes
-- [`MaterializeTensorStrides`](28-materialize_tensor_strides.md) — runs immediately after this pass (when inserted into the default pipeline); fills implicit `TensorView` strides before `InitMemRef` consumes them
-- [`MemoryReuse`](30-memory_reuse.md) — runs after this pass; benefits from the co-live tiles in replicated regions
+- [`LowerPipelineLoops`](27-lower_pipeline_loops.md) — upstream producer of replicated regions that benefit from this pass; leaves `ForKind::Pipeline` as the scope marker this pass consumes
+- [`MaterializeTensorStrides`](29-materialize_tensor_strides.md) — runs immediately after this pass (when inserted into the default pipeline); fills implicit `TensorView` strides before `InitMemRef` consumes them
+- [`MemoryReuse`](31-memory_reuse.md) — runs after this pass; benefits from the co-live tiles in replicated regions
 - RFC #1026 / PR #1029 — InOut-use discipline + dependency analysis utility

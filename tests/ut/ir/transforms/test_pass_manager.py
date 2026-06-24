@@ -45,6 +45,7 @@ TENSOR_OPTIMIZATION_PASSES = [
     "ExpandMixedKernel",
     "InjectGMPipeBuffer",
     "SplitVectorKernel",
+    "StampTfreeSplit",
     "NormalizeReturnOrder",
     "SkewCrossCorePipeline",
     "LowerPipelineLoops",
@@ -61,7 +62,6 @@ TENSOR_OPTIMIZATION_PASSES = [
     "MaterializeCommDomainScopes",
     "LowerHostTensorCollectives",
     "Simplify",
-    "StampTfreeSplit",
     "MaterializeRuntimeScopes",
 ]
 
@@ -83,6 +83,7 @@ DEBUG_TILE_OPTIMIZATION_PASSES = [
     "ExpandMixedKernel",
     "InjectGMPipeBuffer",
     "SplitVectorKernel",
+    "StampTfreeSplit",
     "NormalizeReturnOrder",
     "SkewCrossCorePipeline",
     "LowerPipelineLoops",
@@ -99,7 +100,6 @@ DEBUG_TILE_OPTIMIZATION_PASSES = [
     "MaterializeCommDomainScopes",
     "LowerHostTensorCollectives",
     "Simplify",
-    "StampTfreeSplit",
     "MaterializeRuntimeScopes",
 ]
 

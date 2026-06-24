@@ -1,6 +1,6 @@
 # SkewCrossCorePipeline Pass
 
-Software-pipelines mixed cube/vector (cross-core) `pl.pipeline` loops so the two cores overlap, replacing the legacy unroll+IO-cluster handling of cross-core loops. Runs immediately before [`LowerPipelineLoops`](26-lower_pipeline_loops.md).
+Software-pipelines mixed cube/vector (cross-core) `pl.pipeline` loops so the two cores overlap, replacing the legacy unroll+IO-cluster handling of cross-core loops. Runs immediately before [`LowerPipelineLoops`](27-lower_pipeline_loops.md).
 
 ## Overview
 
@@ -17,7 +17,7 @@ The output is `ForKind::Sequential` with no `pipeline_stages` marker, so `LowerP
 
 **Requires**: SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred, NormalizedStmtStructure.
 
-**Pipeline position**: After [`NormalizeReturnOrder`](24-normalize_return_order.md), immediately before [`LowerPipelineLoops`](26-lower_pipeline_loops.md). Nothing runs between them, so a cross-core loop is skewed (→ Sequential) before the unroll pass can replicate it.
+**Pipeline position**: After [`NormalizeReturnOrder`](25-normalize_return_order.md), immediately before [`LowerPipelineLoops`](27-lower_pipeline_loops.md). Nothing runs between them, so a cross-core loop is skewed (→ Sequential) before the unroll pass can replicate it.
 
 ## API
 
@@ -76,6 +76,6 @@ Either way a cross-core loop **always** leaves this pass as `ForKind::Sequential
 
 ## Related
 
-- [`LowerPipelineLoops`](26-lower_pipeline_loops.md) — replicates the remaining (same-core) pipeline loops for ping-pong.
-- [`CanonicalizeIOOrder`](27-canonicalize_io_order.md) — clusters same-core IO within pipeline bodies (cross-core loops no longer reach it; they are Sequential by here).
+- [`LowerPipelineLoops`](27-lower_pipeline_loops.md) — replicates the remaining (same-core) pipeline loops for ping-pong.
+- [`CanonicalizeIOOrder`](28-canonicalize_io_order.md) — clusters same-core IO within pipeline bodies (cross-core loops no longer reach it; they are Sequential by here).
 - [`SplitVectorKernel`](23-split_vector_kernel.md) — `UP_DOWN` vector split, orthogonal to the skew and composable with it.

@@ -4,7 +4,7 @@ L0 tiling for `tile.matmul` / `tile.matmul_acc` ops with a Mat right operand (an
 
 ## Overview
 
-Mat-resident matmuls produced upstream by `ConvertTensorToTileOps` + [`FlattenTileNdTo2D`](15-flatten_tile_nd_to_2d.md) carry full `(M, N, K)` operand shapes — almost always larger than the cube unit's L0a/L0b/L0c capacity. This pass picks an L0-fitting `(m, n, k)` and rewrites the matmul into a K-loop whose body extracts `[m, k]` and `[k, n]` slabs into `Left` / `Right` and accumulates into an `Acc`-resident iter-arg. The loop is marked `ForKind::Pipeline` with `pipeline_stages=2` so the downstream [`LowerPipelineLoops`](26-lower_pipeline_loops.md) pass produces a 2-deep ping-pong on the per-iter operand extracts.
+Mat-resident matmuls produced upstream by `ConvertTensorToTileOps` + [`FlattenTileNdTo2D`](15-flatten_tile_nd_to_2d.md) carry full `(M, N, K)` operand shapes — almost always larger than the cube unit's L0a/L0b/L0c capacity. This pass picks an L0-fitting `(m, n, k)` and rewrites the matmul into a K-loop whose body extracts `[m, k]` and `[k, n]` slabs into `Left` / `Right` and accumulates into an `Acc`-resident iter-arg. The loop is marked `ForKind::Pipeline` with `pipeline_stages=2` so the downstream [`LowerPipelineLoops`](27-lower_pipeline_loops.md) pass produces a 2-deep ping-pong on the per-iter operand extracts.
 
 **K-tiling vs M/N-tiling.** When the chooser returns `m == M` and `n == N` the output already fits L0c, so only the K dimension is tiled (one K-loop). When it returns `m < M` or `n < N` the `[M, N]` output Acc would overflow L0c. The operands are already Mat-resident, so *only* the output overflows: the pass tiles the **output** into a `ceil(M/m) × ceil(N/n)` grid of `[m, n]` sub-tiles (partial on the boundary — `m`/`n` need not divide `M`/`N`), computes each with the same pipelined K-loop, and stores each `[m, n]` Acc sub-tile straight to `out[mi:, ni:]` (the direct-store / DDR-output path). Every Acc tile is then ≤ L0c, so the matmul lowers through `AllocateMemoryAddr` with no overflow. The output tensor is chained through the per-sub-tile stores in SSA form (`out → out_t0 → out_t1 → …`).
 
@@ -200,4 +200,4 @@ The pass emits `PerfHint` diagnostics rather than failing when it declines to re
 
 - [`FlattenTileNdTo2D`](15-flatten_tile_nd_to_2d.md) — upstream pass; produces the static-2D Mat-resident tile shapes this pass consumes
 - [`InferTileMemorySpace`](18-infer_tile_memory_space.md) — downstream pass; bridges Vec/Acc accumulators that this pass deliberately leaves alone
-- [`LowerPipelineLoops`](26-lower_pipeline_loops.md) — consumes the `ForKind::Pipeline` + `pipeline_stages=2` produced here
+- [`LowerPipelineLoops`](27-lower_pipeline_loops.md) — consumes the `ForKind::Pipeline` + `pipeline_stages=2` produced here
