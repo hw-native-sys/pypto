@@ -691,35 +691,85 @@ class TileMemorySpaceMutator : public IRMutator {
     INTERNAL_CHECK_SPAN(mutated_producer_var, span)
         << "Internal error: inferred tile-memory producer is not a Var expression";
 
-    // Create tile.move call via OpRegistry
-    auto& op_reg = OpRegistry::GetInstance();
-    std::vector<std::pair<std::string, std::any>> kwargs = {{"target_memory", std::any(target)}};
-    if (required_blayout.has_value()) {
-      kwargs.emplace_back("blayout", std::any(*required_blayout));
+    // Some destination memory spaces are not directly reachable from the
+    // producer's space in hardware -- e.g. on a2a3 the cube's L0C output
+    // (Acc) cannot tmov directly into Left or Right; it must route via Mat.
+    // See backend/common/soc.cpp:
+    //   mem_graph[Acc] = {Mat, DDR}
+    //   mem_graph[Mat] = {Left, Right}
+    // PTOAS's TMovOp::verify enforces the same constraint and rejects a
+    // direct Acc->Left/Right tmov with
+    //   "'pto.tmov' op expects a supported tmov address-space pair".
+    // For those pairs we emit an intermediate move through Mat so each hop
+    // is in mem_graph.
+    //
+    // Narrow rewrite (not a universal mem_graph BFS): the graph models
+    // *physical TMOV edges*, but codegen additionally supports several pairs
+    // not in the graph (e.g. Mat->Vec for pre-pop staging), so a universal
+    // FindMemPath would CHECK-fail on those benign pairs.  We only insert
+    // the intermediate hop for the pairs PTOAS actually rejects.
+    std::vector<MemorySpace> path;
+    auto src_tile_type = As<TileType>(mutated_producer_var->GetType());
+    if (src_tile_type && src_tile_type->memory_space_.has_value()) {
+      MemorySpace src_space = *src_tile_type->memory_space_;
+      const bool needs_mat_hop =
+          (src_space == MemorySpace::Acc) &&
+          (target == MemorySpace::Left || target == MemorySpace::Right);
+      if (needs_mat_hop) {
+        path = {src_space, MemorySpace::Mat, target};
+      }
     }
-    if (required_slayout.has_value()) {
-      kwargs.emplace_back("slayout", std::any(*required_slayout));
-    }
-    auto move_call = op_reg.Create("tile.move", {mutated_producer}, kwargs, span);
 
-    // Create moved var with memory_space_ set
-    auto move_type = As<TileType>(move_call->GetType());
-    INTERNAL_CHECK_SPAN(move_type, span) << "Internal error: tile.move return type is not TileType";
-    auto moved_type = std::make_shared<TileType>(move_type->shape_, move_type->dtype_, move_type->memref_,
-                                                 move_type->tile_view_, target);
-    auto moved_var = std::make_shared<Var>(
-        mutated_producer_var->name_hint_ + "_" + MemorySpaceToString(target), std::move(moved_type), span);
+    auto& op_reg = OpRegistry::GetInstance();
+
+    // Helper to emit a single tile.move and the resulting Var/AssignStmt.
+    // Returns the new VarPtr that holds the moved tile.
+    auto emit_one_move = [&](const ExprPtr& producer, MemorySpace hop_target,
+                             std::optional<TileLayout> blay,
+                             std::optional<TileLayout> slay) -> VarPtr {
+      auto producer_var = As<Var>(producer);
+      INTERNAL_CHECK_SPAN(producer_var, span) << "Internal error: tile.move producer is not a Var";
+      std::vector<std::pair<std::string, std::any>> kwargs = {{"target_memory", std::any(hop_target)}};
+      if (blay.has_value()) kwargs.emplace_back("blayout", std::any(*blay));
+      if (slay.has_value()) kwargs.emplace_back("slayout", std::any(*slay));
+      auto move_call = op_reg.Create("tile.move", {producer}, kwargs, span);
+      auto move_type = As<TileType>(move_call->GetType());
+      INTERNAL_CHECK_SPAN(move_type, span) << "Internal error: tile.move return type is not TileType";
+      auto moved_type = std::make_shared<TileType>(move_type->shape_, move_type->dtype_, move_type->memref_,
+                                                   move_type->tile_view_, hop_target);
+      auto new_var = std::make_shared<Var>(producer_var->name_hint_ + "_" + MemorySpaceToString(hop_target),
+                                           std::move(moved_type), span);
+      var_cache_[new_var] = new_var;
+      stmts.push_back(std::make_shared<AssignStmt>(new_var, move_call, span));
+      return new_var;
+    };
+
+    VarPtr final_moved_var;
+    if (path.size() > 2) {
+      // Multi-hop: emit one intermediate tile.move per hop.  Intermediate hops
+      // get no blayout/slayout overrides (use default for the intermediate
+      // memory space); only the FINAL hop carries the consumer's required
+      // layout so that the consumer sees the expected tile shape/layout.
+      ExprPtr cur = mutated_producer;
+      // path[0] == src_space, path.back() == target; iterate hops [1..size).
+      for (size_t i = 1; i + 1 < path.size(); ++i) {
+        auto inter_var = emit_one_move(cur, path[i], std::nullopt, std::nullopt);
+        cur = inter_var;
+      }
+      final_moved_var = emit_one_move(cur, target, required_blayout, required_slayout);
+    } else {
+      // Direct move (path.empty() means direct edge or src == target; treat
+      // both as single-hop fall-through to the original behaviour).
+      final_moved_var = emit_one_move(mutated_producer, target, required_blayout, required_slayout);
+    }
 
     // Register for substitution and in var_cache_ so VisitExpr_(VarPtr) returns it as-is.
     // Record the key in the current scope so it is erased when the SeqStmts exits.
     MoveKey key = {original_var, target};
-    created_moves_[key] = moved_var;
+    created_moves_[key] = final_moved_var;
     if (!scope_inserted_stack_.empty()) {
       scope_inserted_stack_.back().push_back(key);
     }
-    var_cache_[moved_var] = moved_var;
-
-    stmts.push_back(std::make_shared<AssignStmt>(moved_var, move_call, span));
   }
 };
 
