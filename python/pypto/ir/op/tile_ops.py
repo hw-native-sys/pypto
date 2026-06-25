@@ -2851,11 +2851,13 @@ def scatter_mask(
 ) -> Call:
     """Scatter ``src`` rows into mask-marked columns of ``dst`` (mask form).
 
-    Maps to PTOAS ``pto.tscatter`` mask form. DPS — ``dst`` is the first (in/out)
-    argument, rewritten in place on mask-selected positions, and the call result
-    aliases ``dst``.
+    DPS — ``dst`` is the first (in/out) argument, rewritten in place on
+    mask-selected positions, and the call result aliases ``dst``.
 
-    This form is targeted at A3 / CPU-sim style backends; A5 rejects it.
+    Unlike :func:`gather_mask` (a real ``pto.tgather`` ISA op on A2/A3 and A5),
+    mask-pattern scatter is not a distinct pto-isa instruction — PyPTO emits it
+    as a ``pto.tscatter`` mask-form construct for A2/A3 / CPU-sim style lowering
+    paths.
 
     Args:
         dst: Destination tile (rewritten on positions selected by ``mask_pattern``)

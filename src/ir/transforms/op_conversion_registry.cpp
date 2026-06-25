@@ -1673,10 +1673,10 @@ void OpConversionRegistry::RegisterPagedGatherOps() {
 //   select blend. The surrounding pass wraps the tile result in a tile.store to
 //   the output tensor param.
 //
-// tensor.scatter_mask: same idea — pto.tscatter (mask form) zero-fills the whole
-//   dst before writing the selected columns, so it does not preserve dst either.
-//   We reconstruct DPS preserve with the same zeroed-scatter + mask + select
-//   blend, which also makes chaining two patterns into one dst sound.
+// tensor.scatter_mask: same idea — the mask-form scatter emission zero-fills the
+//   whole dst before writing the selected columns, so it does not preserve dst
+//   either. We reconstruct DPS preserve with the same zeroed-scatter + mask +
+//   select blend, which also makes chaining two patterns into one dst sound.
 // ============================================================================
 
 void OpConversionRegistry::RegisterScatterOps() {
@@ -1884,9 +1884,9 @@ void OpConversionRegistry::RegisterScatterOps() {
         INTERNAL_CHECK_SPAN(input_tile && dst_tile, span)
             << "tensor.scatter_mask conversion: input/dst must be Vec tiles after bridge";
 
-        // pto.tscatter (mask form) zero-fills the entire dst tile before writing
-        // the mask-selected columns (TScatterMaskImpl calls InitUBBuffer), so it
-        // does NOT preserve dst's unselected columns — they read back as 0. To
+        // The mask-form scatter emission zero-fills the entire dst tile before
+        // writing the mask-selected columns, so it does NOT preserve dst's
+        // unselected columns — they read back as 0. To
         // honour the DPS preserve contract (and make chaining two patterns into
         // one dst sound), reconstruct preserve on the PyPTO side with the same
         // zeroed-scatter + mask + select blend as the index form:

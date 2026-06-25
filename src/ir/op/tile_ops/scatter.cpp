@@ -15,7 +15,8 @@
  *
  * Mirrors the gather family but writes per-row instead of reading per-row:
  * - tile.scatter:      index-based row scatter (pto.tscatter index form)
- * - tile.scatter_mask: mask-pattern row scatter (pto.tscatter mask form)
+ * - tile.scatter_mask: mask-pattern row scatter (PyPTO codegen form; no
+ *                      pto.tscatter mask ISA op — unlike tile.gather_mask)
  *
  * Both ops are DPS — `dst` is the in/out buffer; the IR result aliases `dst`
  * via `set_output_reuses_input(...)`. There is no compare form for scatter.
@@ -275,9 +276,10 @@ static TypePtr DeduceTileScatterMaskType(const std::vector<ExprPtr>& args,
 REGISTER_OP("tile.scatter_mask")
     .set_op_category("TileOp")
     .set_description(
-        "Scatter src rows into dst columns selected by a hardware mask pattern "
-        "(maps to pto.tscatter mask form; DPS: dst is in/out). "
-        "Targeted at A3 / CPU-sim style backends — A5 rejects this form.")
+        "Scatter src rows into dst columns selected by a mask pattern (DPS: dst "
+        "is in/out). PyPTO codegen-level form lowered to a pto.tscatter mask "
+        "emission — not a distinct pto-isa instruction (unlike tile.gather_mask); "
+        "emitted for A2/A3 / CPU-sim style lowering paths.")
     .add_argument("dst", "Destination tile (DPS; columns are rewritten on mask-marked positions)")
     .add_argument("src", "Source tile (compact rows; same dtype as dst)")
     .set_attr<int>("mask_pattern")

@@ -1167,7 +1167,7 @@ static std::string MakeScatterCodegenPTO(const CallPtr& op, codegen::CodegenBase
   return "";
 }
 
-// Helper for tile.scatter_mask (TSCATTER mask form, DPS):
+// Helper for tile.scatter_mask (DPS; PyPTO codegen mask form, not a real ISA op):
 //   pto.tscatter ins(%src, {maskPattern = #pto.mask_pattern<Pxxxx>} : src_ty)
 //                outs(%dst : dst_ty)
 //
@@ -1177,8 +1177,10 @@ static std::string MakeScatterCodegenPTO(const CallPtr& op, codegen::CodegenBase
 // The type annotation follows the attr dict, still inside ins().
 //
 // IR surface: 2-input op (dst, src) + mask_pattern attr; dst aliased via
-// set_output_reuses_input(0). Mask form is targeted at A2/A3 backends; A5
-// (Ascend950) rejects it on the PTOAS side.
+// set_output_reuses_input(0). NOTE: pto-isa/PTOAS expose a maskPattern form
+// only for tgather, not tscatter — this tscatter mask emission is a PyPTO
+// codegen construct, not a distinct ISA instruction. Emitted for A2/A3 /
+// CPU-sim style lowering paths.
 static std::string MakeScatterMaskCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
   CHECK(op->args_.size() == 2) << "tile.scatter_mask requires 2 arguments (dst, src), but got "
@@ -3482,8 +3484,9 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   reg("tile.scatter", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeScatterCodegenPTO(op, codegen);
   });
-  // tile.scatter_mask (TSCATTER mask form, DPS): 2-input op (dst, src) +
-  // maskPattern attr. A3 / CPU-sim style backends only.
+  // tile.scatter_mask (DPS): 2-input op (dst, src) + maskPattern attr. PyPTO
+  // codegen form lowered to a pto.tscatter mask emission — not a distinct ISA
+  // instruction (see MakeScatterMaskCodegenPTO).
   reg("tile.scatter_mask", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeScatterMaskCodegenPTO(op, codegen);
   });

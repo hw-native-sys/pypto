@@ -1886,7 +1886,10 @@ def scatter(
         Writes each row of ``input`` into the columns of ``dst`` selected by the
         hardware mask pattern. ``dst.cols`` equals ``input.cols * stride``
         (stride = 2 for P0101/P1010, 4 for P0001..P1000, 1 for P1111).
-        Targeted at A3 / CPU-sim style backends — A5 rejects this form.
+        Unlike the gather mask form (a real ``pto.tgather`` ISA op on A2/A3 and
+        A5), mask-pattern scatter is not a distinct pto-isa instruction — PyPTO
+        emits it as a ``pto.tscatter`` mask-form construct for A2/A3 / CPU-sim
+        style lowering paths.
 
     Args:
         input: Base tensor (FP16/FP32/BF16/INT8/INT16/INT32, 2D).
