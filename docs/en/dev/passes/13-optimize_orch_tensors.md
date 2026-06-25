@@ -154,20 +154,23 @@ def my_kernel(...):
     ...
 ```
 
-Only kernels explicitly annotated with `windowize=True` are candidates for Pattern 5. The opt-in is per-kernel and binary; there is no global switch, no per-direction override, and no strategy parameter (these were part of the v6 experimental API and are **not** included in the stable interface).
+Only kernels explicitly annotated with `windowize=True` are candidates for Pattern 5. The opt-in is per-kernel and binary; there is no global switch or per-direction override.
 
-**When to opt in**: Window externalization is most beneficial when an orchestration task operates on only a small statically-provable window of a large tensor, yet the dependence analysis (TensorMap auto-dependency) sees the full tensor and introduces unnecessary serialization with sibling tasks. By making the local window explicit, the compiler can express narrower dependencies and reduce or eliminate the serialization, improving pipeline utilization.
+**When to opt in**: Examine the swimlane timeline of your model. If you observe serialization between sibling orchestration tasks — where one task waits for another despite operating on different regions of the same buffer — the serialization is often caused by dependence analysis seeing the full tensor instead of the narrow region actually accessed. By making the local window explicit (through a `slice → windowed callee → assemble` pattern), the compiler can express narrower dependencies and reduce or eliminate the serialization, improving pipeline utilization.
+
+Typical clues in the swimlane:
+- Adjacent tasks on the same core that could overlap but do not
+- Task durations much shorter than the gap between them
+- TensorMap auto-dependency edges linking tasks that access disjoint parts of the same buffer
 
 **Risks and trade-offs**:
 
 - **Increased orchestrator overhead**: Finer-grained task dependencies mean the TensorMap auto-dependency mechanism has more edges to compute, increasing orchestration compilation time.
-- **Increased scheduler overhead**: Tasks may complete at different times, making the dispatch and completion phases more fragmented (more individual dispatch calls and more frequent completion notifications), increasing runtime scheduling overhead.
+- **Increased scheduler overhead**: Tasks may complete at different times, making dispatch and completion phases more fragmented (more individual dispatch calls and more frequent completion notifications), increasing runtime scheduling overhead.
 
-If either of these overheads dominates the performance benefit for your model, **do not enable** `windowize=True` for the affected kernels. There is no automated heuristic — the decision is based on measuring swimlane results with and without the annotation.
+If these overheads dominate the performance benefit — visible as increased idle time in the swimlane that outweighs the serialization saved — **do not enable** `windowize=True` for the affected kernels. Evaluate each annotation by comparing swimlane results with and without it.
 
-**First-time users**: Start by annotating kernels where the v6 `01_option_stable` evidence showed a clear win (e.g., rmsnorm, q_proj, kv_proj in transformer prefill). Verify the generated orchestration C++ and swimlane performance before adding more annotations. Each new annotation should be evaluated independently; a kernel that wins in one model may regress in another.
-
-**Backward compatibility**: If you pass `window_option`, `window_policy`, `window_outputs`, `window_inputs`, `window_flow` as pass arguments or kernel-level attributes, the pass explicitly rejects these with a diagnostic message pointing to `windowize=True`. These attributes belong to the v6 experimental API and are not supported in the stable interface.
+**First-time users**: Start with a small set of kernels whose local-window access pattern is clear and stable (e.g., rmsnorm, q_proj, kv_proj in transformer prefill). Verify the generated orchestration C++ and swimlane performance before adding more annotations. Each annotation should be evaluated independently; a kernel that benefits one model may regress in another.
 
 ## Example (Pattern 1)
 

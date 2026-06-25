@@ -153,20 +153,23 @@ def my_kernel(...):
     ...
 ```
 
-只有显式标注 `windowize=True` 的 InCore function 才能进入 Pattern 5 的候选。这是一个 per-kernel 的二值开关，没有全局开关、没有方向级覆盖、没有策略参数（这些属于 v6 实验 API，**不包含**在稳定接口中）。
+只有显式标注 `windowize=True` 的 InCore function 才能进入 Pattern 5 的候选。这是一个 per-kernel 的二值开关，没有全局开关或方向级覆盖参数。
 
-**何时启用**：当一个 orchestration task 操作的只是某个大张量的局部窗口，但依赖分析（TensorMap auto-dependency）看到的是全张量，从而在 sibling tasks 之间引入了不必要的串行化。显式化局部窗口后，编译器能表达更窄的依赖关系，减少或消除串行，提高流水线利用率。
+**何时启用**：观察模型的 swimlane 时间线。如果发现 sibling orchestration tasks 之间有串行化——一个 task 等另一个虽然它们操作同一 buffer 的不同区域——串行化往往是因为依赖分析看到的是全张量而非实际访问的局部窗口。通过显式化局部窗口（`slice → windowed callee → assemble` 模式），编译器能表达更窄的依赖关系，减少或消除串行，提高流水线利用率。
+
+泳道图中典型的线索：
+- 同 core 上的相邻 task 本可重叠但实际没有
+- task 执行时间远短于它们之间的间隔
+- TensorMap auto-dependency edges 出现在操作同一 buffer 不同区域的 tasks 之间
 
 **风险和权衡**：
 
-- **增大 orchestrator 开销**：任务依赖粒度更细 → TensorMap 自动建立依赖的边数增多 → 编排编译阶段开销增大。
-- **增大 scheduler 开销**：tasks 的 complete 不同时 → dispatch 和 complete 变碎（更多的单独 dispatch 调用、更频繁的 complete 通知）→ 运行时调度开销增大。
+- **增大 orchestrator 开销**：任务依赖粒度更细 → TensorMap 自动建依赖的边数增多 → 编排编译阶段开销增大。
+- **增大 scheduler 开销**：tasks 的 complete 不同时 → dispatch 和 complete 变碎（更多单独 dispatch 调用、更频繁的 complete 通知）→ 运行时调度开销增大。
 
-如果这两类开销主导了性能收益，则**不建议**对该 kernel 开启 `windowize=True`。没有自动启发式判断——需要对比开启前后的 swimlane 效果来决定。
+如果这些开销主导了性能收益——表现在泳道图中空闲时间增加，超过了节省的串行化开销——则**不建议**对该 kernel 开启 `windowize=True`。每个标注应通过对比开关前后的 swimlane 效果来单独评估。
 
-**首次使用**：可以从 v6 `01_option_stable` 证据中明确受益的 kernel 开始标注（例如 transformer prefill 中的 rmsnorm、q_proj、kv_proj）。验证生成的 orchestration C++ 代码和 swimlane 性能后再增加更多标注。每个新标注应单独评估；在一个模型上收益的 kernel 在另一个模型上可能回退。
-
-**向后兼容**：如果将 `window_option`、`window_policy`、`window_outputs`、`window_inputs`、`window_flow` 作为 pass 参数或 kernel 级属性传入，pass 会显式报错并提示使用 `windowize=True`。这些属于 v6 实验 API，稳定接口不支持。
+**首次使用**：从局部窗口访问模式清晰稳定的小集合 kernel 开始（例如 transformer prefill 中的 rmsnorm、q_proj、kv_proj）。验证生成的 orchestration C++ 和 swimlane 效果后再增加更多标注。每个 kernel 单独评估；在一个模型上收益的 kernel 在另一个模型上可能回退。
 
 ## 示例（模式 1）
 
