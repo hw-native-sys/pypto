@@ -289,6 +289,40 @@ for batch in stream:
 See `examples/runtime/explicit_dispatch.py` for three end-to-end patterns
 (inference service, training loop, register/dispatch overhead check).
 
+### Reading per-launch timing (`run_timed`, `benchmark`)
+
+`worker.run` / `handle(...)` return tensor outputs only. To read the per-launch
+`RunTiming` (`host_wall_us` / `device_wall_us`) on the register-once path, use
+the opt-in `run_timed`, which returns `(outputs, timing)`:
+
+```python
+with ChipWorker(config=RunConfig(platform="a2a3sim")) as worker:
+    handle = worker.register(compiled)
+    out, timing = handle.run_timed(a, b, c)          # register once, timed launch
+    print(timing.device_wall_us)                     # on-NPU orchestrator wall
+```
+
+For benchmarking, `pypto.runtime.benchmark` owns the loop and aggregation — it
+registers once and dispatches `rounds` cheap launches (no per-round
+register/load), returning a `BenchmarkStats`:
+
+```python
+from pypto.runtime import benchmark
+
+stats = benchmark(compiled, [a, b, c], rounds=100, warmup=3,
+                  platform="a2a3", device_id=0)
+print(stats.device_wall_us_median, stats.device_wall_us_min, len(stats.samples))
+```
+
+Pass `platform=` / `device_id=` for the common case, or a full `RunConfig` via
+`config=` for `block_dim` / `aicpu_thread_num` control (not both). Aggregates are
+exposed under both `device_wall_us_*` (issue-aligned) and shorter `device_us_*`
+names, with `samples` aliasing the raw `device_wall_us` list.
+
+`device_wall_us` is a real on-NPU wall only for L2 single-chip runs; it is `0`
+on a runtime built without `PTO2_PROFILING` (check `stats.all_zero_device`) and
+for L3+ DAG runs (read `host_wall_us` there).
+
 ### Distributed (L3+) programs
 
 L3+ distributed programs returned by `ir.compile` (a `DistributedCompiledProgram`)

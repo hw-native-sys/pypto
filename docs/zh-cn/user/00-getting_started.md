@@ -281,6 +281,39 @@ for batch in stream:
 完整三种使用模式（推理服务、训练循环、register/dispatch 开销验证）见
 `examples/runtime/explicit_dispatch.py`。
 
+### 读取单次 launch 的计时（`run_timed`、`benchmark`）
+
+`worker.run` / `handle(...)` 只返回张量输出。要在 register-once 路径上读取单次
+launch 的 `RunTiming`（`host_wall_us` / `device_wall_us`），使用可选的
+`run_timed`，它返回 `(outputs, timing)`：
+
+```python
+with ChipWorker(config=RunConfig(platform="a2a3sim")) as worker:
+    handle = worker.register(compiled)
+    out, timing = handle.run_timed(a, b, c)          # 注册一次，计时 launch
+    print(timing.device_wall_us)                     # NPU 上的 orchestrator 墙钟
+```
+
+做 benchmark 时，`pypto.runtime.benchmark` 封装了循环与聚合——它注册一次并发起
+`rounds` 次廉价 launch（不再每轮重付 register/load），返回 `BenchmarkStats`：
+
+```python
+from pypto.runtime import benchmark
+
+stats = benchmark(compiled, [a, b, c], rounds=100, warmup=3,
+                  platform="a2a3", device_id=0)
+print(stats.device_wall_us_median, stats.device_wall_us_min, len(stats.samples))
+```
+
+常见情况传 `platform=` / `device_id=`；需要 `block_dim` / `aicpu_thread_num` 等
+精细控制时传完整的 `RunConfig`（通过 `config=`）——两者不能同时给。聚合指标同时
+以 `device_wall_us_*`（与 issue 对齐）和更短的 `device_us_*` 两套命名暴露，`samples`
+是原始 `device_wall_us` 列表的别名。
+
+`device_wall_us` 仅在 L2 单芯片运行时是真实的 NPU 墙钟；在未开启
+`PTO2_PROFILING` 的 runtime 上为 `0`（用 `stats.all_zero_device` 判断），L3+
+DAG 运行同样为 `0`（此时读 `host_wall_us`）。
+
 ### 分布式（L3+）程序
 
 `ir.compile` 对 L3+ 分布式程序返回的 `DistributedCompiledProgram` 与 `CompiledProgram`

@@ -42,7 +42,7 @@ import pypto.language as pl
 import pytest
 import torch
 from pypto import ir
-from pypto.runtime import ChipWorker, RunConfig, RunTiming, execute_compiled
+from pypto.runtime import ChipWorker, RunConfig, RunTiming, benchmark, execute_compiled
 from pypto.runtime.device_runner import (
     build_orch_args_from_inputs,
     compile_and_assemble,
@@ -318,6 +318,36 @@ class TestL2RunTimingSurface:
         assert result.device_wall_us == timing.device_wall_us
         assert result.host_wall_us == timing.host_wall_us
         assert result.device_wall_us is not None and result.device_wall_us > 0.0
+
+    def test_benchmark_helper_register_once_surfaces_timing(self, test_config, tmp_path):
+        """(H) ``benchmark`` registers once and surfaces per-launch device time (#1858).
+
+        The register-once + rounds path is the benchmark consumer of
+        ``run_timed``: one ``ChipWorker`` / one ``register``, then several cheap
+        launches whose ``device_wall_us`` are aggregated. Asserts each measured
+        sample is a real L2 device wall (default ``PTO2_PROFILING`` build) and
+        that warmup launches are excluded from the sample count.
+        """
+        compiled, _ = _compile_add(test_config, tmp_path)
+
+        a, b, c = _inputs()
+        worker_cfg = RunConfig(platform=test_config.platform, device_id=test_config.device_id)
+        rounds, warmup = 5, 2
+        stats = benchmark(compiled, [a, b, c], rounds=rounds, warmup=warmup, config=worker_cfg)
+
+        # Output is correct after the final measured launch.
+        torch.testing.assert_close(c, _EXPECTED, rtol=1e-5, atol=1e-5)
+
+        assert len(stats.device_wall_us) == rounds, (
+            f"expected {rounds} measured samples (warmup excluded), got {len(stats.device_wall_us)}"
+        )
+        assert stats.rounds == rounds and stats.warmup == warmup
+        assert not stats.all_zero_device, (
+            "device_wall_us must be > 0 on the default PTO2_PROFILING build"
+        )
+        assert stats.device_us_min > 0.0
+        assert stats.device_us_max >= stats.device_us_min
+        assert stats.device_us_min <= stats.device_us_median <= stats.device_us_max
 
 
 if __name__ == "__main__":
