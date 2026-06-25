@@ -217,16 +217,18 @@ class V2SetValidShapeOnVectorTestCase(PTOTestCase):
 
                 subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
                 popped: pl.Tile[[ROWS, COLS], pl.FP32, pl.Mem.Vec, pl.TileView()] = pl.tpop_from_aic(split=1)
+                # set_validshape requires a locally allocated source tile (PTOAS
+                # rejects a raw tpop/FIFO-slot tile), so narrow a compute result.
+                incremented: pl.Tile[[ROWS, COLS], pl.FP32, pl.Mem.Vec] = pl.add(popped, 1.0)
                 # Row operand = full ROWS (the regression trigger); narrow columns.
                 narrowed: pl.Tile[
                     [ROWS, COLS],
                     pl.FP32,
                     pl.Mem.Vec,
                     pl.TileView(valid_shape=[ROWS, SV_VALID_COLS]),
-                ] = pl.tile.set_validshape(popped, ROWS, SV_VALID_COLS)
-                incremented: pl.Tile[[ROWS, COLS], pl.FP32] = pl.add(narrowed, 1.0)
+                ] = pl.tile.set_validshape(incremented, ROWS, SV_VALID_COLS)
                 pl.tfree_to_aic(popped)
-                return pl.store(incremented, [subblock_idx * SV_HALF_ROWS, 0], output)
+                return pl.store(narrowed, [subblock_idx * SV_HALF_ROWS, 0], output)
 
             @pl.function(type=pl.FunctionType.Group, attrs={"split": pl.SplitMode.UP_DOWN})
             def group_func(
