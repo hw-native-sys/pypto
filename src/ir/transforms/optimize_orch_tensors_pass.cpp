@@ -1883,7 +1883,7 @@ class OutWindowExternalizer {
   static bool HasWindowizeEnabledFunction(const ProgramPtr& program) {
     if (!program) return false;
     for (const auto& [_, func] : program->functions_) {
-      if (func && func->func_type_ == FunctionType::InCore && IsWindowizeEnabled(func)) {
+      if (func && IsInCoreType(func->func_type_) && IsWindowizeEnabled(func)) {
         return true;
       }
     }
