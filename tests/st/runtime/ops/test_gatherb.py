@@ -11,22 +11,27 @@
 
 ``gatherb`` reads ``dst[i, j] = *(src_base + offset[i, j])`` where ``offset`` is a
 per-element **byte** offset into the source tile (UINT32). The destination is a
-fresh tile shaped like ``offset`` with the source dtype.
+fresh tile shaped like ``offset`` with the source dtype; the output valid region
+follows ``offset``'s valid region.
 
 The source tile is ``[16, 16]`` so each row is a whole number of 32-byte blocks
-for every dtype tested (FP16=32B, FP32/INT32=64B) — no row padding — so the
-flat byte offset of element ``k`` is exactly ``k * elem_size``. The golden is
+for every dtype tested (FP16=32B, FP32/INT32=64B) — no row padding — so the flat
+byte offset of physical element ``k`` is exactly ``k * elem_size``. The golden is
 derived straight from the offset tensor: ``out_flat[k] = src_flat[offset[k] /
-elem_size]``, which is independent of the chosen permutation.
+elem_size]``, independent of the chosen permutation.
 
-Two permutations exercise non-trivial addressing:
-- ``reverse`` - gather the source in reverse flat order.
-- ``roll7``   - gather rotated by 7 elements (wraps across rows).
+Coverage (two scenarios per op, multiple dtypes):
+- **full valid** — offset fully valid; the whole output is gathered. Two
+  permutations exercise non-trivial addressing: ``reverse`` (reverse flat order)
+  and ``roll7`` (rotate by 7, wraps across rows).
+- **narrow valid_shape** — ``offset`` is loaded with ``valid_shapes=[vr, vc]`` so
+  only the ``[:vr, :vc]`` sub-block is gathered (the rest of the output stays
+  zero). ``vrows`` (vr<16) stresses the validRow<16 tail path; ``vcols`` uses a
+  non-32B-aligned valid column count (vc=10).
 
 Each dtype needs its own ``@pl.program`` (a program hardcodes its dtype at parse
-time), and the op call must be a literal ``pl.tile.gatherb`` (the DSL parser
-rejects aliases), so there is one program factory per dtype with a distinct
-class name.
+time) and the op call must be a literal ``pl.tile.gatherb``; the dtype is
+hardcoded per factory while ``vr``/``vc`` are passed as closure values.
 """
 
 from typing import Any
@@ -47,7 +52,7 @@ _DTYPES = {
 }
 
 
-def _prog_fp16():
+def _prog_fp16(vr: int, vc: int):
     @pl.program
     class GatherbFP16:
         @pl.function(type=pl.FunctionType.InCore)
@@ -58,7 +63,7 @@ def _prog_fp16():
             out: pl.Out[pl.Tensor[[M, N], pl.FP16]],
         ) -> pl.Tensor[[M, N], pl.FP16]:
             t_src: pl.Tile[[M, N], pl.FP16] = pl.load(src, [0, 0], [M, N])
-            t_off: pl.Tile[[M, N], pl.UINT32] = pl.load(offset, [0, 0], [M, N])
+            t_off: pl.Tile[[M, N], pl.UINT32] = pl.load(offset, [0, 0], [M, N], valid_shapes=[vr, vc])
             out_tile: pl.Tile[[M, N], pl.FP16] = pl.tile.gatherb(t_src, t_off)
             out = pl.store(out_tile, [0, 0], out)
             return out
@@ -76,7 +81,7 @@ def _prog_fp16():
     return GatherbFP16
 
 
-def _prog_fp32():
+def _prog_fp32(vr: int, vc: int):
     @pl.program
     class GatherbFP32:
         @pl.function(type=pl.FunctionType.InCore)
@@ -87,7 +92,7 @@ def _prog_fp32():
             out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
         ) -> pl.Tensor[[M, N], pl.FP32]:
             t_src: pl.Tile[[M, N], pl.FP32] = pl.load(src, [0, 0], [M, N])
-            t_off: pl.Tile[[M, N], pl.UINT32] = pl.load(offset, [0, 0], [M, N])
+            t_off: pl.Tile[[M, N], pl.UINT32] = pl.load(offset, [0, 0], [M, N], valid_shapes=[vr, vc])
             out_tile: pl.Tile[[M, N], pl.FP32] = pl.tile.gatherb(t_src, t_off)
             out = pl.store(out_tile, [0, 0], out)
             return out
@@ -105,7 +110,7 @@ def _prog_fp32():
     return GatherbFP32
 
 
-def _prog_int32():
+def _prog_int32(vr: int, vc: int):
     @pl.program
     class GatherbInt32:
         @pl.function(type=pl.FunctionType.InCore)
@@ -116,7 +121,7 @@ def _prog_int32():
             out: pl.Out[pl.Tensor[[M, N], pl.INT32]],
         ) -> pl.Tensor[[M, N], pl.INT32]:
             t_src: pl.Tile[[M, N], pl.INT32] = pl.load(src, [0, 0], [M, N])
-            t_off: pl.Tile[[M, N], pl.UINT32] = pl.load(offset, [0, 0], [M, N])
+            t_off: pl.Tile[[M, N], pl.UINT32] = pl.load(offset, [0, 0], [M, N], valid_shapes=[vr, vc])
             out_tile: pl.Tile[[M, N], pl.INT32] = pl.tile.gatherb(t_src, t_off)
             out = pl.store(out_tile, [0, 0], out)
             return out
@@ -158,18 +163,25 @@ def _offset(pattern: str, elem_size: int) -> torch.Tensor:
 
 
 class GatherbTestCase(PTOTestCase):
-    """tile.gatherb over a fixed flat permutation expressed as byte offsets."""
+    """tile.gatherb over a fixed flat permutation expressed as byte offsets.
+
+    With ``valid=(vr, vc)`` only the ``[:vr, :vc]`` sub-block of the output is
+    gathered (offset loaded narrow-valid); the rest stays zero.
+    """
 
     __test__ = False
 
-    def __init__(self, dtype_key: str, pattern: str, *, platform=None, config=None):
+    def __init__(self, dtype_key, pattern, vr, vc, label, *, platform=None, config=None):
         super().__init__(config, platform=platform)
         self._dtype_key = dtype_key
         self._pattern = pattern
+        self._vr = vr
+        self._vc = vc
+        self._label = label
         _, _, _, self._elem_size = _DTYPES[dtype_key]
 
     def get_name(self) -> str:
-        return f"gatherb_{self._dtype_key}_{self._pattern}"
+        return f"gatherb_{self._dtype_key}_{self._label}"
 
     def define_tensors(self) -> list[TensorSpec]:
         _, hdtype, tdtype, elem = _DTYPES[self._dtype_key]
@@ -180,26 +192,35 @@ class GatherbTestCase(PTOTestCase):
         ]
 
     def get_program(self) -> Any:
-        return _PROG_FACTORY[self._dtype_key]()
+        return _PROG_FACTORY[self._dtype_key](self._vr, self._vc)
 
     def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
         src_flat = tensors["src"].reshape(-1)
-        idx = (tensors["offset"].reshape(-1).to(torch.int64)) // self._elem_size
-        tensors["out"][:] = src_flat[idx].reshape(M, N)
+        out = torch.zeros_like(tensors["out"])
+        vr, vc = self._vr, self._vc
+        idx = (tensors["offset"][:vr, :vc].reshape(-1).to(torch.int64)) // self._elem_size
+        out[:vr, :vc] = src_flat[idx].reshape(vr, vc)
+        tensors["out"][:] = out
 
 
 _DTYPE_KEYS = ["fp16", "fp32", "int32"]
-_PATTERNS = ["reverse", "roll7"]
+# (label, pattern, vr, vc)
+_CASES = [
+    ("reverse_full", "reverse", M, N),
+    ("roll7_full", "roll7", M, N),
+    ("reverse_vcols10", "reverse", M, 10),  # narrow valid cols (non-32B-aligned)
+    ("roll7_vrows8", "roll7", 8, N),  # narrow valid rows (validRow<16 tail path)
+]
 
 
 class TestGatherb:
-    """Test tile.gatherb across supported platforms, dtypes, and patterns."""
+    """Test tile.gatherb across supported platforms, dtypes, patterns, and valid_shapes."""
 
     @pytest.mark.parametrize("platform", ONBOARD_PLATFORMS)
     @pytest.mark.parametrize("dtype_key", _DTYPE_KEYS)
-    @pytest.mark.parametrize("pattern", _PATTERNS)
-    def test_gatherb(self, test_runner, platform, dtype_key, pattern):
-        result = test_runner.run(GatherbTestCase(dtype_key, pattern, platform=platform))
+    @pytest.mark.parametrize(("label", "pattern", "vr", "vc"), _CASES)
+    def test_gatherb(self, test_runner, platform, dtype_key, label, pattern, vr, vc):
+        result = test_runner.run(GatherbTestCase(dtype_key, pattern, vr, vc, label, platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 

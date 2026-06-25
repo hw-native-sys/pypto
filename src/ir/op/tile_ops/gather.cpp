@@ -134,9 +134,12 @@ static TypePtr DeduceTileGatherbType(const std::vector<ExprPtr>& args,
       << "The operator " << op_name << " requires offset dtype to be UINT32, but got "
       << offset_type->dtype_.ToString();
 
-  // Output: shape from offset tile, dtype from src tile, propagate tile_view.
+  // Output: shape from offset tile, dtype from src tile. The output is valid
+  // wherever offset is valid (dst[i,j] is gathered per offset[i,j]), so the
+  // output valid region follows the offset tile's valid_shape (propagated
+  // dynamically so a narrow-valid offset narrows the gathered region).
   TileView tile_view;
-  tile_view.valid_shape = offset_type->shape_;
+  tile_view.valid_shape = GetValidShape(offset_type);
   InheritTileViewLayout(tile_view, src_type);
   return std::make_shared<TileType>(offset_type->shape_, src_type->dtype_, std::nullopt, tile_view);
 }
