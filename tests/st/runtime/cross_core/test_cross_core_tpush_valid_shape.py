@@ -203,7 +203,15 @@ class V2SetValidShapeOnVectorTestCase(PTOTestCase):
                     b_mat, target_memory=pl.MemorySpace.Right
                 )
                 acc: pl.Tile[[ROWS, COLS], pl.FP32] = pl.matmul(a_left, b_right)
-                pl.tpush_to_aiv(acc, split=1)
+                # Set the producer valid_shape before tpush so the split
+                # transport carries both row halves to the two AIV subblocks.
+                acc_full: pl.Tile[
+                    [ROWS, COLS],
+                    pl.FP32,
+                    pl.Mem.Acc,
+                    pl.TileView(valid_shape=[ROWS, COLS]),
+                ] = pl.tile.set_validshape(acc, ROWS, COLS)
+                pl.tpush_to_aiv(acc_full, split=1)
 
             @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
             def vector_consumer(
