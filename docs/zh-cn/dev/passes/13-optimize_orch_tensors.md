@@ -74,6 +74,8 @@ for i in pl.range(N, init_values=[init_buf]):
 
 ### 模式 5：静态窗口外提（OutWindowExternalizer）
 
+模式 5 **仅**对显式标注了 `windowize=True` 的 InCore function 生效。未标注的 kernel 无论访问模式如何都不会被 windowize。
+
 **问题**：某些 outlined callee 实际只写入大 `Out` 张量中的一个静态可证明局部窗口，或只消费大 `In` 张量中的一个静态可证明局部窗口，但调用点仍传入整块张量。后续依赖分析会把它视为整块缓冲区访问，从而引入不必要的串行化。
 
 **方案**：为 callee 克隆出 `__windowed` 版本，收窄被改写的张量参数类型，并局部化内部 offset。然后在 orchestration callsite 物化局部 slice。输出窗口使用 `slice + __windowed call + assemble`：

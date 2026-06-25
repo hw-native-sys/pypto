@@ -74,6 +74,8 @@ for i in pl.range(N, init_values=[init_buf]):
 
 ### Pattern 5: Static Window Externalization (OutWindowExternalizer)
 
+Pattern 5 runs **only** on InCore functions explicitly annotated with `windowize=True`. Unannotated kernels are never windowed regardless of access pattern.
+
 **Problem**: An outlined callee may write only a statically provable local window of a large `Out` tensor, or consume only a statically provable local window of a large `In` tensor, but the call site still passes the whole tensor. Downstream dependence analysis then sees whole-buffer accesses and may add unnecessary serialization.
 
 **Solution**: Clone the callee to a `__windowed` variant with narrowed rewritten tensor parameter types and localized internal offsets. Rewrite the orchestration call site to explicit local slices. Output windows use `slice + __windowed call + assemble`:
