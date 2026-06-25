@@ -73,7 +73,7 @@ program_optimized = reuse_pass(program)
   | `tile.{row,col}_expand{,_mul,_add,_sub,_div}` | `forbid_output_alias(1)`（广播向量） | 行/列向量（arg 1）会被**每个**输出行/列重读,输出若 alias 它则在第一行/列后被覆盖 |
   | `tile.cast`（仅升精度） | 输出 ≠ 输入缓冲区（条件式,在 `ForbidAliasCollector`） | 更宽的输出写指针超前于读指针（见上） |
 
-- **流水线 stage 守卫**（角色感知）：`pl.pipeline(stage=F)` 将循环体复制 `F` 份以实现 ping-pong，`LowerPipelineLoops` 给每个副本产生 tile 的 `Call` 打上 `pipeline_membership` `(group, stage)`（见 [26-lower_pipeline_loops.md](26-lower_pipeline_loops.md)）。`F` 份副本在调度器下并发执行，因此它们程序序不相交的生命周期**不是**安全的复用信号。MemoryReuse 因此在两个 tile 同 group、不同 stage **且至少有一个是 load**（`tile.load` / `tile.read`）时禁止它们共享缓冲——只有 load 缓冲需要 per-stage 私有。不同 stage 的计算中间结果仍可合并,因为禁止*所有*跨 stage 复用（depth = `F`）会超出片上预算（例如 `stage=4` 的 RMSNorm：`4 × 67 KB > 188 KB` UB）。L0 matmul 空间（Left/Right/Acc/Bias）豁免——其缓冲由 `AutoTileMatmulL0` / `CanonicalizeIOOrder` 的 extract 聚类管理,且容量受限。
+- **流水线 stage 守卫**（角色感知）：`pl.pipeline(stage=F)` 将循环体复制 `F` 份以实现 ping-pong，`LowerPipelineLoops` 给每个副本产生 tile 的 `Call` 打上 `pipeline_membership` `(group, stage)`（见 [26-lower_pipeline_loops.md](26-lower_pipeline_loops.md)）。`F` 份副本在调度器下并发执行，因此它们程序序不相交的生命周期**不是**安全的复用信号。MemoryReuse 因此在两个 tile 同 group、不同 stage **且至少有一个是 load**（`tile.load` / `tile.read`）时禁止它们共享缓冲——只有 load 缓冲需要 per-stage 私有。不同 stage 的计算中间结果仍可合并,因为禁止*所有*跨 stage 复用（depth = `F`）会超出片上预算（例如 `stage=4` 的 RMSNorm：`4 × 67 KB > 188 KB` UB）。L0 matmul 空间（Left/Right/Acc/Bias）豁免——其缓冲由 `AutoTileMatmulL0` / `CanonicalizeIOOrder` 的 extract 聚类管理,且容量受限。复用决策完成后,MemoryReuse 会剥离已消费的 `pipeline_membership` attr,使其不会带到下游 pass 或 codegen。
 
 **不再有 shape / dtype / TileView 兼容性门槛**：共享同一物理 MemRef 的 tile 可以携带**不同**的 shape、dtype 或 `TileView` 属性。PTO codegen 为每个 tile 绑定一条 per-variable 的 `alloc_tile`，因此每个别名都以各自的静态 shape / dtype / layout / `valid_shape` 声明共享基址。这允许例如：
 

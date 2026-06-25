@@ -3535,6 +3535,11 @@ class TestPipelineStageSeparation:
         assert len(set(bases)) == 2, (
             f"pipeline stage clones must occupy distinct buffers, but bind to {bases}"
         )
+        # MemoryReuse consumes pipeline_membership and must strip it so the attr
+        # does not ride downstream into codegen.
+        assert "pipeline_membership" not in ir.python_print(After), (
+            "pipeline_membership attr must be stripped after MemoryReuse"
+        )
 
     @staticmethod
     def _tile_defs_with_role(program: ir.Program) -> list[tuple[bool, str]]:

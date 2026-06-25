@@ -2222,6 +2222,23 @@ StmtPtr RemoveUnusedAllocStatements(const StmtPtr& body, const std::set<const Va
   return SeqStmts::Flatten(std::move(new_seq_stmts), body->span_);
 }
 
+/// Strip the transient ``pipeline_membership`` attr from every Call once
+/// MemoryReuse has consumed it (in ComputeLifetimes). The attr exists only to
+/// carry pipeline-stage identity from LowerPipelineLoops to here; leaving it on
+/// the IR would ride downstream into later passes and codegen. Stripping at the
+/// end of MemoryReuse keeps the post-reuse IR clean.
+class StripPipelineMembershipMutator : public IRMutator {
+ public:
+  ExprPtr VisitExpr_(const CallPtr& op) override {
+    auto visited = IRMutator::VisitExpr_(op);
+    auto call = As<Call>(visited);
+    if (!call || !call->HasAttr(kPipelineMembershipAttr)) return visited;
+    auto new_attrs = StripAttr(call->attrs_, kPipelineMembershipAttr);
+    return std::make_shared<Call>(call->op_, call->args_, call->kwargs_, std::move(new_attrs),
+                                  call->GetType(), call->span_);
+  }
+};
+
 /**
  * @brief Transform a function by identifying and applying memory reuse
  *
@@ -2301,6 +2318,11 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   // Step 5: Remove alloc statements for MemRefs no longer in use
   auto used_bases = memref_collectors::CollectUsedBasePtrs(new_body);
   new_body = RemoveUnusedAllocStatements(new_body, used_bases);
+
+  // Step 6: Strip the now-consumed pipeline_membership attr so it does not ride
+  // downstream into later passes / codegen. It was only needed to carry stage
+  // identity from LowerPipelineLoops to the reuse decision above.
+  new_body = StripPipelineMembershipMutator().VisitStmt(new_body);
 
   auto result = std::make_shared<const Function>(func->name_, func->params_, func->param_directions_,
                                                  func->return_types_, new_body, func->span_, func->func_type_,
