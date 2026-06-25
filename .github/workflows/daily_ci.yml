@@ -6,7 +6,33 @@ on:
   workflow_dispatch:
 
 jobs:
+  toolchain:
+    # ptoas from toolchain/versions.env; pto-isa derived from the pinned runtime
+    # submodule's runtime/pto_isa.pin — see the matching job in ci.yml.
+    runs-on: ubuntu-latest
+    outputs:
+      pto_isa_commit: ${{ steps.read.outputs.PTO_ISA_COMMIT }}
+      ptoas_version: ${{ steps.read.outputs.PTOAS_VERSION }}
+      ptoas_sha256_aarch64: ${{ steps.read.outputs.PTOAS_SHA256_AARCH64 }}
+      ptoas_sha256_x86_64: ${{ steps.read.outputs.PTOAS_SHA256_X86_64 }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Read pinned toolchain versions
+        id: read
+        run: |
+          grep -E '^[A-Z0-9_]+=' toolchain/versions.env >> "$GITHUB_OUTPUT"
+          commit="$(tr -d '[:space:]' < runtime/pto_isa.pin)"
+          if ! printf '%s' "$commit" | grep -qE '^[0-9a-f]{40}$'; then
+            echo "::error file=runtime/pto_isa.pin::expected a 40-char hex commit, got '$commit'"
+            exit 1
+          fi
+          echo "PTO_ISA_COMMIT=$commit" >> "$GITHUB_OUTPUT"
+
   a5-system-tests:
+    needs: toolchain
     runs-on: [self-hosted, a5-device6]
     defaults:
       run:
@@ -14,8 +40,8 @@ jobs:
     env:
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
       PTO_ISA_ROOT: ${{ github.workspace }}/pto-isa
-      PTOAS_VERSION: v0.45
-      PTOAS_SHA256: d5e4380df7edd4d3eeb23502d57f923e4c912345eccceb5a9a0ec1aac3b5e7d4
+      PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
+      PTOAS_SHA256: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -49,7 +75,7 @@ jobs:
           timeout 60 git clone https://github.com/hw-native-sys/pto-isa.git $GITHUB_WORKSPACE/pto-isa \
             || { rm -rf $GITHUB_WORKSPACE/pto-isa; timeout 300 git clone https://gitcode.com/luohuan40/pto-isa.git $GITHUB_WORKSPACE/pto-isa; }
           cd $GITHUB_WORKSPACE/pto-isa
-          git checkout 016396b57e2c17093f1194e6acd89bb112b0ab24
+          git checkout ${{ needs.toolchain.outputs.pto_isa_commit }}
 
       - name: Install simpler
         run: |
@@ -59,20 +85,21 @@ jobs:
       - name: Run A5 system tests
         run: |
           task-submit --timeout 1800 --max-time 1800 --device 6 \
-            --run "pytest tests/st/runtime/ops/test_assemble.py tests/st/runtime/ops/test_mscatter.py tests/st/runtime/framework_and_models/test_qwen3_decode_scope3_mixed.py tests/st/runtime/control_flow/test_dyn_orch_shape.py::TestDynOrchShapeOperations::test_dyn_orch_paged_attention -v --forked --platform=a5 --device=6 --pto-isa-commit=016396b57e2c17093f1194e6acd89bb112b0ab24 \
+            --run "pytest tests/st/runtime/ops/test_assemble.py tests/st/runtime/ops/test_mscatter.py tests/st/runtime/framework_and_models/test_qwen3_decode_scope3_mixed.py tests/st/runtime/control_flow/test_dyn_orch_shape.py::TestDynOrchShapeOperations::test_dyn_orch_paged_attention -v --forked --platform=a5 --device=6 --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }} \
               -k 'not (test_tile_row_expand or test_fillpad_zero or test_fillpad_max or test_fillpad_min or TestMscatter)'"
 
   qwen3-perf:
     # Qwen3-14B decode performance monitoring (moved out of per-PR ci.yml).
     # Samples the L2-swimlane makespan several times and averages to absorb the
     # ~8.5% run-to-run jitter, then compares against the committed baseline.
+    needs: toolchain
     runs-on: [self-hosted, linux, arm64, npu-1-device]
     env:
       ASCEND_HOME_PATH: /usr/local/Ascend/cann-9.0.0
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
       PTO_ISA_ROOT: ${{ github.workspace }}/pto-isa
-      PTOAS_VERSION: v0.45
-      PTOAS_SHA256: d5e4380df7edd4d3eeb23502d57f923e4c912345eccceb5a9a0ec1aac3b5e7d4
+      PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
+      PTOAS_SHA256: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
       CMAKE_BUILD_PARALLEL_LEVEL: 16
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
@@ -139,7 +166,7 @@ jobs:
           timeout 60 git clone https://github.com/hw-native-sys/pto-isa.git $GITHUB_WORKSPACE/pto-isa \
             || { rm -rf $GITHUB_WORKSPACE/pto-isa; timeout 300 git clone https://gitcode.com/luohuan40/pto-isa.git $GITHUB_WORKSPACE/pto-isa; }
           cd $GITHUB_WORKSPACE/pto-isa
-          git checkout 016396b57e2c17093f1194e6acd89bb112b0ab24
+          git checkout ${{ needs.toolchain.outputs.pto_isa_commit }}
 
       - name: Install simpler
         run: |
