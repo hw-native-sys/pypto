@@ -2707,6 +2707,27 @@ def gather(
     return _ir_core.create_op_call("tile.gather", [src, indices, tmp], {}, actual_span)
 
 
+def gatherb(
+    src: Expr,
+    offset: Expr,
+    span: Span | None = None,
+) -> Call:
+    """Gather elements from src by per-element byte offset.
+
+    Computes ``dst[i, j] = *(src_base + offset[i, j])``. Maps to PTOAS ``pto.tgatherb``.
+
+    Args:
+        src: Source tile (8/16/32-bit int/uint or FP16/BF16/FP32)
+        offset: Byte-offset tile (UINT32)
+        span: Optional source span
+
+    Returns:
+        Call expression returning gathered tile (offset shape, src dtype)
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.gatherb", [src, offset], {}, actual_span)
+
+
 def gather_mask(
     src: Expr,
     mask_pattern: int,

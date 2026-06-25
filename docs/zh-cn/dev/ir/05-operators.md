@@ -266,6 +266,7 @@ with ib.function("tensor_example") as f:
 | - | `tile.set_validshape` | 更新 valid_shape 元数据，不搬移数据 |
 | - | `tile.ci` | 生成连续整数序列（升序 start+k 或降序 start-k）；dtype ∈ {INT16, INT32}；最内维 != 1 |
 | **规约** | `tile.sum` | 沿轴规约（axis, keepdim） |
+| **聚集** | `tile.gatherb` | 按逐元素字节偏移聚集（`pto.tgatherb`）：`dst[i, j] = *(src_base + offset[i, j])`。`src` / `dst` dtype ∈ {I8/U8, I16/U16, I32/U32, FP16, BF16, FP32}；`offset` dtype = UINT32（字节偏移）；输出 shape = `offset` shape，dst 行主序。 |
 | **散布** | `tile.scatter` | 按行索引把 `src` 散布到 `dst`（`pto.tscatter` 索引形式；DPS：`dst` 为 in/out，结果别名为 `dst`）。`src` / `dst` dtype ∈ {I8, I16, I32, FP16, FP32, BF16}；`indexes` dtype ∈ {I16, I32}；元素宽度匹配规则：4 字节 dst ↔ INT32，2 字节 dst ↔ INT16，1 字节 dst ↔ INT16。 |
 | - | `tile.scatter_mask` | 按掩码模式把 `src` 行写入 `dst` 中由掩码选中的列（`pto.tscatter` 掩码形式；DPS）。掩码 P0101 (1) / P1010 (2) 步幅 2；P0001..P1000 (3-6) 步幅 4；P1111 (7) 不扩展。仅 A3 / CPU-sim 后端支持，A5 拒绝。 |
 

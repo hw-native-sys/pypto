@@ -2158,6 +2158,24 @@ def gather(src: Tile, indices: Tile, tmp: Tile) -> Tile:
     return Tile(expr=call_expr)
 
 
+def gatherb(src: Tile, offset: Tile) -> Tile:
+    """Gather elements from src tile by per-element byte offset.
+
+    Computes ``dst[i, j] = *(src_base + offset[i, j])``. Maps to PTOAS
+    ``pto.tgatherb``. Unlike :func:`gather` (which takes element indices and a
+    scratch tile), the offsets are raw byte offsets and no workspace is needed.
+
+    Args:
+        src: Source tile (8/16/32-bit int/uint or FP16/BF16/FP32)
+        offset: Byte-offset tile (UINT32) — byte offset of each gathered element
+
+    Returns:
+        Tile with gathered elements (offset shape, same dtype as ``src``)
+    """
+    call_expr = _ir_ops.gatherb(src.unwrap(), offset.unwrap())
+    return Tile(expr=call_expr)
+
+
 def gather_mask(
     src: Tile,
     mask_pattern: int,

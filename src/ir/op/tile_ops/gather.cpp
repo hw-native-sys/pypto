@@ -104,6 +104,58 @@ REGISTER_OP("tile.gather")
     });
 
 // ============================================================================
+// GatherB: byte-offset form of gather (pto.tgatherb)
+// ============================================================================
+
+static TypePtr DeduceTileGatherbType(const std::vector<ExprPtr>& args,
+                                     const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                     const std::string& op_name) {
+  CHECK(args.size() == 2) << "The operator " << op_name << " requires 2 arguments (src, offset), but got "
+                          << args.size();
+
+  // First arg: src tile. Byte element size must be 1, 2, or 4 (A2/A3 + A5).
+  auto src_type = As<TileType>(args[0]->GetType());
+  CHECK(src_type) << "The operator " << op_name << " requires first argument to be a TileType, but got "
+                  << args[0]->GetType()->TypeName();
+  CHECK(src_type->dtype_ == DataType::INT8 || src_type->dtype_ == DataType::UINT8 ||
+        src_type->dtype_ == DataType::INT16 || src_type->dtype_ == DataType::UINT16 ||
+        src_type->dtype_ == DataType::INT32 || src_type->dtype_ == DataType::UINT32 ||
+        src_type->dtype_ == DataType::FP16 || src_type->dtype_ == DataType::BF16 ||
+        src_type->dtype_ == DataType::FP32)
+      << "The operator " << op_name
+      << " requires src dtype to be an 8/16/32-bit int/uint or FP16/BF16/FP32, but got "
+      << src_type->dtype_.ToString();
+
+  // Second arg: offset tile (byte offsets, must be UINT32).
+  auto offset_type = As<TileType>(args[1]->GetType());
+  CHECK(offset_type) << "The operator " << op_name << " requires second argument to be a TileType, but got "
+                     << args[1]->GetType()->TypeName();
+  CHECK(offset_type->dtype_ == DataType::UINT32)
+      << "The operator " << op_name << " requires offset dtype to be UINT32, but got "
+      << offset_type->dtype_.ToString();
+
+  // Output: shape from offset tile, dtype from src tile, propagate tile_view.
+  TileView tile_view;
+  tile_view.valid_shape = offset_type->shape_;
+  InheritTileViewLayout(tile_view, src_type);
+  return std::make_shared<TileType>(offset_type->shape_, src_type->dtype_, std::nullopt, tile_view);
+}
+
+REGISTER_OP("tile.gatherb")
+    .set_op_category("TileOp")
+    .set_description("Gather elements by per-element byte offset (maps to pto.tgatherb)")
+    .add_argument("src", "Source tile (8/16/32-bit int/uint or FP16/BF16/FP32)")
+    .add_argument("offset", "Byte-offset tile (UINT32)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    .not_inplace_safe()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileGatherbType(args, kwargs, "tile.gatherb");
+    });
+
+// ============================================================================
 // Gather Mask: mask-pattern form of pto.tgather
 // ============================================================================
 

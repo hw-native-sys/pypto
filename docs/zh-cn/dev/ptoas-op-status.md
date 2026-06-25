@@ -128,7 +128,7 @@
 | **复杂操作** |  |  |  |  |  |  |  |  |
 | pto.tci | TCI | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tgather | TGATHER | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
-| pto.tgatherb | TGATHERB | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING |
+| pto.tgatherb | TGATHERB | tile | ✅ | ✅ | ❌ | ✅ | — | 前端+codegen+ST；a2a3 真机待 CI（tile-only byte-offset gather） |
 | pto.tscatter | TSCATTER | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tsort32 | TSORT32 | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tmrgsort | TMRGSORT | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | reg as mrgsort_format1/2 |

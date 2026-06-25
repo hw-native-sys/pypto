@@ -3540,6 +3540,46 @@ class TestTileScatterMaskOps:
             )
 
 
+class TestTileGatherbOps:
+    """Test suite for tile.gatherb (byte-offset gather)."""
+
+    @pytest.mark.parametrize(
+        "dtype",
+        [DataType.FP32, DataType.FP16, DataType.BF16, DataType.INT32, DataType.INT16, DataType.INT8],
+        ids=["fp32", "fp16", "bf16", "i32", "i16", "i8"],
+    )
+    def test_tile_gatherb_valid(self, dtype):
+        """tile.gatherb returns a TileType shaped like offset with the src dtype."""
+        span = ir.Span.unknown()
+        src_type = ir.TileType(_const_dims(span, 8, 32), dtype)
+        offset_type = ir.TileType(_const_dims(span, 4, 16), DataType.UINT32)
+
+        call = tile.gatherb(
+            ir.Var("src", src_type, span),
+            ir.Var("offset", offset_type, span),
+        )
+
+        assert isinstance(call, ir.Call)
+        assert call.op.name == "tile.gatherb"
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.dtype == dtype
+        const_dims = [dim.value for dim in result_type.shape if isinstance(dim, ir.ConstInt)]
+        assert const_dims == [4, 16]
+
+    def test_tile_gatherb_rejects_non_uint32_offset(self):
+        """tile.gatherb requires the offset tile to be UINT32."""
+        span = ir.Span.unknown()
+        src_type = ir.TileType(_const_dims(span, 8, 32), DataType.FP32)
+        offset_type = ir.TileType(_const_dims(span, 4, 16), DataType.INT32)
+
+        with pytest.raises(ValueError, match="offset dtype to be UINT32"):
+            tile.gatherb(
+                ir.Var("src", src_type, span),
+                ir.Var("offset", offset_type, span),
+            )
+
+
 class TestTileConcatOps:
     """Test suite for tile.concat operation."""
 
