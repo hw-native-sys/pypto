@@ -774,6 +774,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
               if (trip > 0) carry_plans[i].array_size = trip;
             }
           }
+          carry_plans[i].array_size = EvalConstTripCount(for_stmt);
         }
       }
       for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {

@@ -16,6 +16,7 @@
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "pypto/codegen/orchestration/orchestration_analysis.h"
@@ -36,20 +37,6 @@ namespace codegen {
 using namespace pypto::ir;  // NOLINT(build/namespaces)
 
 namespace {
-
-std::optional<int64_t> EvalConstInt(const ExprPtr& expr) {
-  if (auto ci = As<ConstInt>(expr)) return ci->value_;
-  return std::nullopt;
-}
-
-int64_t EvalConstTripCount(const ForStmtPtr& for_stmt) {
-  auto start = EvalConstInt(for_stmt->start_);
-  auto stop = EvalConstInt(for_stmt->stop_);
-  auto step = EvalConstInt(for_stmt->step_);
-  if (!start || !stop || !step || *step <= 0) return 0;
-  int64_t trip = (*stop - *start + *step - 1) / *step;
-  return trip > 0 ? trip : 0;
-}
 
 /// Find a ForStmt within ``body`` whose ``return_vars_`` contains ``target``.
 /// Returns nullptr if none. Used to chase Sequential→Parallel array threading.
@@ -178,6 +165,7 @@ std::vector<std::unordered_set<const Var*>> ComputeAliasClasses(const ForStmtPtr
         if (As<ArrayType>(nf->iter_args_[k]->GetType())) continue;
         auto init_var = AsVarLike(nf->iter_args_[k]->initValue_);
         if (!init_var) continue;
+        if (k >= nf->return_vars_.size()) continue;
         const auto* rv = nf->return_vars_[k].get();
         for (auto& cls : aliases) {
           if (cls.count(init_var.get()) && !cls.count(rv)) {
@@ -193,8 +181,8 @@ std::vector<std::unordered_set<const Var*>> ComputeAliasClasses(const ForStmtPtr
 
 }  // namespace
 
-IterArgCarryAnalyzer::IterArgCarryAnalyzer(const ProgramPtr& program, int manual_scope_depth)
-    : program_(program), manual_scope_depth_(manual_scope_depth) {}
+IterArgCarryAnalyzer::IterArgCarryAnalyzer(ProgramPtr program, int manual_scope_depth)
+    : program_(std::move(program)), manual_scope_depth_(manual_scope_depth) {}
 
 std::vector<IterArgCarryPlan> IterArgCarryAnalyzer::Analyze(const ForStmtPtr& for_stmt) {
   std::vector<IterArgCarryPlan> plans(for_stmt->iter_args_.size());

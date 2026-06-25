@@ -86,6 +86,20 @@ int GetOrCreateFuncId(const std::string& func_name, std::map<std::string, int>* 
   return (*func_name_to_id)[func_name];
 }
 
+std::optional<int64_t> EvalConstInt(const ExprPtr& expr) {
+  if (auto ci = As<ConstInt>(expr)) return ci->value_;
+  return std::nullopt;
+}
+
+int64_t EvalConstTripCount(const ForStmtPtr& for_stmt) {
+  auto start = EvalConstInt(for_stmt->start_);
+  auto stop = EvalConstInt(for_stmt->stop_);
+  auto step = EvalConstInt(for_stmt->step_);
+  if (!start || !stop || !step || *step <= 0) return 0;
+  int64_t trip = (*stop - *start + *step - 1) / *step;
+  return trip > 0 ? trip : 0;
+}
+
 // ---------------------------------------------------------------------------
 // OrchestrationInfoCollector
 // ---------------------------------------------------------------------------
