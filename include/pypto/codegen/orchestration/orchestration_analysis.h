@@ -54,6 +54,12 @@ std::string FormatConstFloatValue(const ir::ConstFloatPtr& c, const std::string&
 int GetOrCreateFuncId(const std::string& func_name, std::map<std::string, int>* func_name_to_id,
                       int* next_func_id);
 
+/// Evaluate ``expr`` when it is a ``ConstInt``; returns nullopt otherwise.
+std::optional<int64_t> EvalConstInt(const ir::ExprPtr& expr);
+/// Compute the const trip count of ``for_stmt`` when start/stop/step are all const
+/// non-negative; returns 0 otherwise (dynamic loop).
+int64_t EvalConstTripCount(const ir::ForStmtPtr& for_stmt);
+
 // ---------------------------------------------------------------------------
 // Supporting types
 // ---------------------------------------------------------------------------

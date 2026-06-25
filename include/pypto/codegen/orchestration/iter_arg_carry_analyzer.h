@@ -37,7 +37,7 @@ struct IterArgCarryPlan {
 /// Classifies ForStmt iter_args (trivial vs rebind) and sizes TaskId array carries.
 class IterArgCarryAnalyzer {
  public:
-  IterArgCarryAnalyzer(const ir::ProgramPtr& program, int manual_scope_depth);
+  IterArgCarryAnalyzer(ir::ProgramPtr program, int manual_scope_depth);
 
   /// Analyze ``for_stmt`` iter_args. Runs the parallel TaskId const-trip CHECK when
   /// applicable. Must be called before visiting the loop body.
@@ -46,7 +46,7 @@ class IterArgCarryAnalyzer {
  private:
   int64_t ResolveArrayCarrySize(const ir::ForStmtPtr& for_stmt, size_t idx) const;
 
-  const ir::ProgramPtr& program_;  ///< Must outlive the analyzer (stack allocation assumed).
+  ir::ProgramPtr program_;
   int manual_scope_depth_;
 };
 

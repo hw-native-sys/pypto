@@ -523,66 +523,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
     IterArgCarryAnalyzer carry_analyzer(program_, in_manual_scope_depth_);
     auto carry_plans = carry_analyzer.Analyze(for_stmt);
 
-<<<<<<< HEAD
-      bool changed = true;
-      while (changed) {
-        changed = false;
-        for (const auto& assign : body_aliases.assigns) {
-          // (d) TupleGetItemExpr: climb to the tuple-producing call and resolve
-          // the corresponding output arg. Multi-output InCore kernels return
-          // tuples; each `var = ret_tuple[i]` extract should alias the i-th
-          // output-side arg of the call (using the codegen's own indexing).
-          if (auto tge = As<TupleGetItemExpr>(assign->value_)) {
-            auto tuple_var = AsVarLike(tge->tuple_);
-            if (tuple_var) {
-              auto it = var_to_assign.find(tuple_var.get());
-              if (it != var_to_assign.end()) {
-                // The tuple producer may be a Submit (pl.submit / `as tid`);
-                // view it as a Call so its output args alias identically.
-                auto tcall = AsCallOrSubmitView(it->second->value_);
-                if (tcall) {
-                  auto tdirs = tcall->GetArgDirections();
-                  if (tdirs.size() == tcall->args_.size()) {
-                    int64_t out_seen = 0;
-                    int64_t target_idx = static_cast<int64_t>(tge->index_);
-                    for (size_t a = 0; a < tdirs.size(); ++a) {
-                      if (tdirs[a] != ArgDirection::OutputExisting && tdirs[a] != ArgDirection::InOut &&
-                          tdirs[a] != ArgDirection::Output) {
-                        continue;
-                      }
-                      if (out_seen == target_idx) {
-                        auto out_arg = AsVarLike(tcall->args_[a]);
-                        if (out_arg) {
-                          for (auto& cls : aliases) {
-                            if (cls.count(out_arg.get()) && !cls.count(assign->var_.get())) {
-                              cls.insert(assign->var_.get());
-                              changed = true;
-                            }
-                          }
-                        }
-                        break;
-                      }
-                      ++out_seen;
-                    }
-                  }
-                }
-              }
-            }
-            continue;
-          }
-          auto call = AsCallOrSubmitView(assign->value_);
-          if (!call) continue;
-          // (a) tensor.assemble: result var aliases its first arg (the target).
-          if (IsOp(call, "tensor.assemble") && !call->args_.empty()) {
-            auto first_arg = AsVarLike(call->args_[0]);
-            if (first_arg) {
-              for (auto& cls : aliases) {
-                if (cls.count(first_arg.get()) && !cls.count(assign->var_.get())) {
-                  cls.insert(assign->var_.get());
-                  changed = true;
-                }
-              }
-=======
     // Post-process: compiler-derived dep collections use NeedsCompilerDepTaskId,
     // which lives on the codegen class (not the analyzer). Mark these iter_args
     // as rebind and set the array-carry size from the const trip count.
@@ -591,16 +531,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         carry_plans[i].is_rebind = true;
         carry_plans[i].compiler_dep_collection = true;
         if (carry_plans[i].array_size == 0) {
-          // EvalConstTripCount (mirrors the copy in iter_arg_carry_analyzer.cpp).
-          if (auto start_ci = As<ConstInt>(for_stmt->start_)) {
-            auto stop_ci = As<ConstInt>(for_stmt->stop_);
-            auto step_ci = As<ConstInt>(for_stmt->step_);
-            if (stop_ci && step_ci && step_ci->value_ > 0) {
-              int64_t trip = (stop_ci->value_ - start_ci->value_ + step_ci->value_ - 1) / step_ci->value_;
-              if (trip > 0) carry_plans[i].array_size = trip;
->>>>>>> 4de04d94 (refactor(codegen): extract IterArgCarryAnalyzer from ForStmt visitor)
-            }
-          }
+          carry_plans[i].array_size = EvalConstTripCount(for_stmt);
         }
       }
     }
