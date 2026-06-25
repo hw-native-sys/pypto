@@ -275,7 +275,7 @@ with ib.function("tensor_example") as f:
 
 `*.gather_mask` / `*.scatter_mask` 使用编译期 `MaskPattern`（`pl.tile.MaskPattern`，整数取值 1–7，与硬件 `VREDUCEv2` 的 pattern mode 一致）按行标记列的一个子集（模式名**从右往左**读，最右位对应列 0）。同一标记集合驱动两个算子做**相反方向**的操作。**`gather_mask`** *选择并紧凑*：从宽输入中读取被标记的列，紧凑写入较窄输出的前若干列（`out_cols = cols / stride`）；这是真实的 pto-isa 指令（`pto.tgather` 掩码形式），A2/A3 **与 A5** 均支持。**`scatter_mask`** *放置并扩展*：把紧凑输入写入更宽 `dst` 的被标记列（`dst_cols = cols * stride`），未标记列保留 `dst` 原值（DPS）；这是 **PyPTO codegen 层形式，并非独立的 pto-isa 指令** —— 不存在 `pto.tscatter` 掩码指令（与 gather 不同）—— PyPTO 为 A2/A3 / CPU-sim 类下降路径发射它。例如对 `[a0 a1 a2 a3 a4 a5 a6 a7]`：gather `P0101 → [a0 a2 a4 a6]`；对 `[s0 s1 s2 s3]` 做 scatter `P0101 → [s0 · s1 · s2 · s3 ·]`（`·` 表示保留的 `dst`）。
 
-| 模式 | 整数 | 标记列 `c` 的条件 | 被标记的列 | 步幅 |
+| 模式 | 整数 | 标记列 `c` 的条件 | 被标记的列 | 步长 |
 | ---- | ---- | ----------------- | ---------- | ---- |
 | `P0101` | 1 | `c % 2 == 0` | 0, 2, 4, … | 2 |
 | `P1010` | 2 | `c % 2 == 1` | 1, 3, 5, … | 2 |
@@ -285,7 +285,7 @@ with ib.function("tensor_example") as f:
 | `P1000` | 6 | `c % 4 == 3` | 3, 7, 11, … | 4 |
 | `P1111` | 7 | 全选 | 全部 | 1 |
 
-最后一维须能被步幅整除。`gather_mask` 另接受可选的同位宽 `output_dtype`（按位重解释，而非数值转换）。参考：gather 的选择语义见 `pto-isa` 的 `MaskSelect`（`include/pto/cpu/TGather.hpp`）；pypto 类型推导见 `src/ir/op/tile_ops/gather.cpp`（gather）/ `src/ir/op/tile_ops/scatter.cpp`（scatter）。
+最后一维须能被步长整除。`gather_mask` 另接受可选的同位宽 `output_dtype`（按位重解释，而非数值转换）。参考：gather 的选择语义见 `pto-isa` 的 `MaskSelect`（`include/pto/cpu/TGather.hpp`）；pypto 类型推导见 `src/ir/op/tile_ops/gather.cpp`（gather）/ `src/ir/op/tile_ops/scatter.cpp`（scatter）。
 
 ### 使用示例
 

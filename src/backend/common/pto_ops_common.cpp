@@ -1195,9 +1195,11 @@ static std::string MakeScatterMaskCodegenPTO(const CallPtr& op, codegen::Codegen
   std::string dst = codegen.GetCurrentResultTarget();
   std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
 
-  // DPS in-place contract (mirror of tile.scatter): result must alias the `dst`
-  // input tile (args_[0]) so mask-marked columns are written in-place and the
-  // unselected columns keep `dst`'s values.
+  // DPS in-place contract (mirror of tile.scatter): the result must alias the
+  // `dst` input tile (args_[0]). NOTE: the mask-form emission zero-fills dst and
+  // writes only the mask-marked columns, so it does NOT itself preserve dst's
+  // unselected columns — DPS preserve is reconstructed upstream by the
+  // tensor.scatter_mask lowering (sel-blend); see op_conversion_registry.cpp.
   std::string input_ssa = codegen.GetExprAsCode(op->args_[0]);
   INTERNAL_CHECK(!dst.empty() && dst == input_ssa)
       << "Internal error: tile.scatter_mask result SSA must alias the dst input tile SSA, got dst=" << dst
