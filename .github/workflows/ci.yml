@@ -20,6 +20,8 @@ jobs:
     # consumed via `needs.toolchain.outputs.*`. Bumping the runtime submodule
     # moves pypto's pto-isa in lockstep.
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       pto_isa_commit: ${{ steps.read.outputs.PTO_ISA_COMMIT }}
       ptoas_version: ${{ steps.read.outputs.PTOAS_VERSION }}

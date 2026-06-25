@@ -10,6 +10,8 @@ jobs:
     # ptoas from toolchain/versions.env; pto-isa derived from the pinned runtime
     # submodule's runtime/pto_isa.pin — see the matching job in ci.yml.
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       pto_isa_commit: ${{ steps.read.outputs.PTO_ISA_COMMIT }}
       ptoas_version: ${{ steps.read.outputs.PTOAS_VERSION }}
