@@ -22,11 +22,11 @@ enum class ReduceOp : int32_t {
 };
 
 template <ReduceOp Op, typename DType>
-void submit_allreduce_kernel(const ChipStorageTaskArgs &orch_args) {
-  Tensor data = from_tensor_arg(orch_args.tensor(0));
-  Tensor signal = from_tensor_arg(orch_args.tensor(1));
+void submit_allreduce_kernel(const L2TaskArgs &orch_args) {
+  const Tensor &data = orch_args.tensor(0).ref();
+  const Tensor &signal = orch_args.tensor(1).ref();
 
-  Arg params;
+  L0TaskArgs params;
   params.add_inout(data);
   params.add_inout(signal);
   params.add_scalar(orch_args.scalar(0));  // nranks
@@ -39,21 +39,21 @@ void submit_allreduce_kernel(const ChipStorageTaskArgs &orch_args) {
 extern "C" {
 
 __attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(
-    const ChipStorageTaskArgs &orch_args) {
+    const L2TaskArgs &orch_args) {
   (void)orch_args;
   return PTO2OrchestrationConfig{
       .expected_arg_count = 4,
   };
 }
 
-__attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipStorageTaskArgs &orch_args) {
+__attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
   submit_allreduce_kernel<{{op_cpp}}, {{dtype_cpp}}>(orch_args);
 }
 
 // The sanitized builtin symbol is kept as an alias-like wrapper for easier
 // debugging of materialized sources; kernel_config.py still uses the standard
 // aicpu_orchestration_entry symbol expected by compile_and_assemble.
-__attribute__((visibility("default"))) void {{entry}}(const ChipStorageTaskArgs &orch_args) {
+__attribute__((visibility("default"))) void {{entry}}(const L2TaskArgs &orch_args) {
   aicpu_orchestration_entry(orch_args);
 }
 

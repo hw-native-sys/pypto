@@ -200,7 +200,7 @@ class TestOrchestration:
             extern "C" {
 
             __attribute__((visibility("default")))
-            PTO2OrchestrationConfig aicpu_orchestration_config(const ChipStorageTaskArgs& orch_args) {
+            PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs& orch_args) {
                 (void)orch_args;
                 return PTO2OrchestrationConfig{
                     .expected_arg_count = 3,
@@ -208,11 +208,11 @@ class TestOrchestration:
             }
 
             __attribute__((visibility("default")))
-            void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args) {
+            void aicpu_orchestration_entry(const L2TaskArgs& orch_args) {
                 // External tensors
-                Tensor ext_a = from_tensor_arg(orch_args.tensor(0));
-                Tensor ext_b = from_tensor_arg(orch_args.tensor(1));
-                Tensor ext_d = from_tensor_arg(orch_args.tensor(2));
+                const Tensor& ext_a = orch_args.tensor(0).ref();
+                const Tensor& ext_b = orch_args.tensor(1).ref();
+                const Tensor& ext_d = orch_args.tensor(2).ref();
 
                 PTO2_SCOPE() {
                     uint32_t c_ci_shapes[2] = {16, 16};
@@ -221,14 +221,14 @@ class TestOrchestration:
                     const Tensor& c = alloc_0.get_ref(0);
 
                     // Task 0: kernel_add
-                    Arg params_t0;
+                    L0TaskArgs params_t0;
                     params_t0.add_input(ext_a);
                     params_t0.add_input(ext_b);
                     params_t0.add_output(c);
                     rt_submit_aiv_task(0, params_t0);
 
                     // Task 1: kernel_add
-                    Arg params_t1;
+                    L0TaskArgs params_t1;
                     params_t1.add_input(c);
                     params_t1.add_input(ext_b);
                     params_t1.add_output(ext_d);
@@ -555,7 +555,7 @@ class TestOrchestration:
         # Two return tensors: c and d are both external
         assert "ext_c" in code
         assert "ext_d" in code
-        assert "from_tensor_arg(" in code
+        assert ".ref()" in code
 
         # Two tasks submitted
         assert code.count("rt_submit_aiv_task") == 2
@@ -647,7 +647,7 @@ class TestOrchestration:
             extern "C" {
 
             __attribute__((visibility("default")))
-            PTO2OrchestrationConfig aicpu_orchestration_config(const ChipStorageTaskArgs& orch_args) {
+            PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs& orch_args) {
                 (void)orch_args;
                 return PTO2OrchestrationConfig{
                     .expected_arg_count = 3,
@@ -655,11 +655,11 @@ class TestOrchestration:
             }
 
             __attribute__((visibility("default")))
-            void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args) {
+            void aicpu_orchestration_entry(const L2TaskArgs& orch_args) {
                 // External tensors
-                Tensor ext_a = from_tensor_arg(orch_args.tensor(0));
-                Tensor ext_b = from_tensor_arg(orch_args.tensor(1));
-                Tensor ext_f = from_tensor_arg(orch_args.tensor(2));
+                const Tensor& ext_a = orch_args.tensor(0).ref();
+                const Tensor& ext_b = orch_args.tensor(1).ref();
+                const Tensor& ext_f = orch_args.tensor(2).ref();
 
                 PTO2_SCOPE() {
                     uint32_t c_ci_shapes[2] = {16, 16};
@@ -677,35 +677,35 @@ class TestOrchestration:
                     const Tensor& g = alloc_0.get_ref(3);
 
                     // Task 0: kernel_add
-                    Arg params_t0;
+                    L0TaskArgs params_t0;
                     params_t0.add_input(ext_a);
                     params_t0.add_input(ext_b);
                     params_t0.add_output(c);
                     rt_submit_aiv_task(0, params_t0);
 
                     // Task 1: kernel_add_scalar
-                    Arg params_t1;
+                    L0TaskArgs params_t1;
                     params_t1.add_input(c);
                     params_t1.add_output(d);
                     params_t1.add_scalar(to_u64(1.000000f));
                     rt_submit_aiv_task(1, params_t1);
 
                     // Task 2: kernel_add_scalar
-                    Arg params_t2;
+                    L0TaskArgs params_t2;
                     params_t2.add_input(c);
                     params_t2.add_output(e);
                     params_t2.add_scalar(to_u64(2.000000f));
                     rt_submit_aiv_task(1, params_t2);
 
                     // Task 3: kernel_mul
-                    Arg params_t3;
+                    L0TaskArgs params_t3;
                     params_t3.add_input(d);
                     params_t3.add_input(e);
                     params_t3.add_output(g);
                     rt_submit_aiv_task(2, params_t3);
 
                     // Task 4: kernel_add
-                    Arg params_t4;
+                    L0TaskArgs params_t4;
                     params_t4.add_input(g);
                     params_t4.add_input(c);
                     params_t4.add_output(ext_f);
@@ -774,7 +774,7 @@ class TestOrchestration:
         assert "DataType::FLOAT32" in code
 
         # Return tensor result is external
-        assert "from_tensor_arg(orch_args.tensor(2))" in code
+        assert "orch_args.tensor(2).ref()" in code
 
         # Two tasks: kernel_pair + kernel_add
         assert code.count("rt_submit_aiv_task") == 2
@@ -818,11 +818,11 @@ class TestOrchestration:
 
         code = _generate_orch_code(TupleOutputProgram)
 
-        # Both x and y are return tensors: from_tensor_arg(orch_args.tensor())
+        # Both x and y are return tensors: orch_args.tensor(i).ref()
         assert "ext_x" in code
         assert "ext_y" in code
-        assert "from_tensor_arg(orch_args.tensor(2))" in code
-        assert "from_tensor_arg(orch_args.tensor(3))" in code
+        assert "orch_args.tensor(2).ref()" in code
+        assert "orch_args.tensor(3).ref()" in code
 
         # Only one task: kernel_pair
         assert code.count("rt_submit_aiv_task") == 1
@@ -898,13 +898,13 @@ class TestOrchestration:
 
         # All orch params are external tensors:
         # mij=0, lij=1, oi_new=2, mi_in=3, li_in=4, oi_in=5, dst_in=6, final=7
-        assert "Tensor ext_mi_in = from_tensor_arg(orch_args.tensor(3))" in code
-        assert "Tensor ext_li_in = from_tensor_arg(orch_args.tensor(4))" in code
-        assert "Tensor ext_oi_in = from_tensor_arg(orch_args.tensor(5))" in code
-        assert "Tensor ext_dst_in = from_tensor_arg(orch_args.tensor(6))" in code
+        assert "const Tensor& ext_mi_in = orch_args.tensor(3).ref()" in code
+        assert "const Tensor& ext_li_in = orch_args.tensor(4).ref()" in code
+        assert "const Tensor& ext_oi_in = orch_args.tensor(5).ref()" in code
+        assert "const Tensor& ext_dst_in = orch_args.tensor(6).ref()" in code
 
         # Final return tensor is external
-        assert "Tensor ext_final = from_tensor_arg(orch_args.tensor(7))" in code
+        assert "const Tensor& ext_final = orch_args.tensor(7).ref()" in code
 
         # Two tasks: online_update + kernel_add
         assert code.count("rt_submit_aiv_task") == 2
@@ -1685,7 +1685,7 @@ class TestOrchestration:
             extern "C" {
 
             __attribute__((visibility("default")))
-            PTO2OrchestrationConfig aicpu_orchestration_config(const ChipStorageTaskArgs& orch_args) {
+            PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs& orch_args) {
                 (void)orch_args;
                 return PTO2OrchestrationConfig{
                     .expected_arg_count = 7,
@@ -1693,20 +1693,20 @@ class TestOrchestration:
             }
 
             __attribute__((visibility("default")))
-            void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args) {
+            void aicpu_orchestration_entry(const L2TaskArgs& orch_args) {
                 // External tensors
-                Tensor ext_mij = from_tensor_arg(orch_args.tensor(0));
-                Tensor ext_lij = from_tensor_arg(orch_args.tensor(1));
-                Tensor ext_oi_new = from_tensor_arg(orch_args.tensor(2));
-                Tensor ext_mi = from_tensor_arg(orch_args.tensor(3));
-                Tensor ext_li = from_tensor_arg(orch_args.tensor(4));
-                Tensor ext_oi = from_tensor_arg(orch_args.tensor(5));
-                Tensor ext_dst = from_tensor_arg(orch_args.tensor(6));
+                const Tensor& ext_mij = orch_args.tensor(0).ref();
+                const Tensor& ext_lij = orch_args.tensor(1).ref();
+                const Tensor& ext_oi_new = orch_args.tensor(2).ref();
+                const Tensor& ext_mi = orch_args.tensor(3).ref();
+                const Tensor& ext_li = orch_args.tensor(4).ref();
+                const Tensor& ext_oi = orch_args.tensor(5).ref();
+                const Tensor& ext_dst = orch_args.tensor(6).ref();
 
                 PTO2_SCOPE() {
 
                     // Task 0: online_update
-                    Arg params_t0;
+                    L0TaskArgs params_t0;
                     params_t0.add_input(ext_mij);
                     params_t0.add_input(ext_lij);
                     params_t0.add_input(ext_oi_new);
@@ -1765,7 +1765,7 @@ class TestOrchestration:
         A cube matmul feeding a vector op, fused into ONE ``pl.spmd`` scope with
         a dynamic block count, makes ``InjectGMPipeBuffer`` add a placeholder
         ``tensor.create([1])`` whose *real* size is ``slot_size * (m // ROW)``.
-        That size references the body-local ``m = orch_args.tensor(0).shapes[0]``.
+        That size references the body-local ``m = orch_args.tensor(0).ref().shapes[0]``.
         The placeholder's IR shape is constant, so the generic hoist guard cannot
         see the dependency; the size-override branch must route the alloc to the
         per-op path so it is emitted after ``m`` rather than at the scope top
@@ -1818,7 +1818,7 @@ class TestOrchestration:
         assert "/ 16" in size_decl.group(1), size_decl.group(1)
 
         # The body-local that sizes the buffer must be declared before the alloc.
-        m_decl = re.search(r"int64_t (\w+) = \(int64_t\)orch_args\.tensor\(0\)\.shapes\[0\];", code)
+        m_decl = re.search(r"int64_t (\w+) = \(int64_t\)orch_args\.tensor\(0\)\.ref\(\)\.shapes\[0\];", code)
         assert m_decl is not None, code
         m_name = m_decl.group(1)
         assert m_name in size_decl.group(1), (m_name, size_decl.group(1))
@@ -2289,8 +2289,8 @@ class TestOrchestration:
         assert "b_acc = b_acc;" not in code
 
         # TensorCreateInfo declarations exist (exactly once each)
-        # a_acc is a return value → external (from_tensor_arg(orch_args.tensor()))
-        assert code.count("Tensor ext_a_acc = from_tensor_arg(orch_args.tensor(1))") == 1
+        # a_acc is a return value → external (orch_args.tensor(i).ref())
+        assert code.count("const Tensor& ext_a_acc = orch_args.tensor(1).ref()") == 1
         assert code.count("TensorCreateInfo b_acc_ci(") == 1
 
         # For loop exists with correct structure
@@ -2388,8 +2388,8 @@ class TestOrchestration:
         # Inplace detection: output_tensor return var should match the param,
         # so only 2 orch arg slots (input_tensor + output_tensor), not 3
         assert "expected_arg_count = 2" in code
-        assert "from_tensor_arg(orch_args.tensor(0))" in code  # input_tensor
-        assert "from_tensor_arg(orch_args.tensor(1))" in code  # output_tensor
+        assert "orch_args.tensor(0).ref()" in code  # input_tensor
+        assert "orch_args.tensor(1).ref()" in code  # output_tensor
 
         # No third orch entry for the compound-named return var
         assert "orch_args.tensor(2)" not in code
@@ -2551,9 +2551,9 @@ class TestOrchestration:
         code = _generate_orch_code(NumericSuffixProgram)
 
         # Each param must get a distinct orch index
-        assert "from_tensor_arg(orch_args.tensor(0))" in code  # x
-        assert "from_tensor_arg(orch_args.tensor(1))" in code  # out_0
-        assert "from_tensor_arg(orch_args.tensor(2))" in code  # out_1
+        assert "orch_args.tensor(0).ref()" in code  # x
+        assert "orch_args.tensor(1).ref()" in code  # out_0
+        assert "orch_args.tensor(2).ref()" in code  # out_1
 
         # No collapsed names
         assert "ARG_PTR" not in code
@@ -2866,7 +2866,7 @@ class TestOrchestration:
         assert t2_alloc_line > n_line, "t2 alloc must come after n definition"
 
     def test_scalar_taskarg(self):
-        """Scalar params get ChipStorageTaskArgs scalar slots (0-indexed) via from_u64<T>()."""
+        """Scalar params get L2TaskArgs scalar slots (0-indexed) via from_u64<T>()."""
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
 
@@ -2900,8 +2900,8 @@ class TestOrchestration:
         code = _generate_orch_code(MultiScalarProgram)
 
         # Tensors at orch_args.tensor(0..1), scalars at orch_args.scalar(0..2)
-        assert "from_tensor_arg(orch_args.tensor(0))" in code
-        assert "from_tensor_arg(orch_args.tensor(1))" in code
+        assert "orch_args.tensor(0).ref()" in code
+        assert "orch_args.tensor(1).ref()" in code
         assert "from_u64<int64_t>(orch_args.scalar(0))" in code
         assert "from_u64<int32_t>(orch_args.scalar(1))" in code
         assert "from_u64<float>(orch_args.scalar(2))" in code
@@ -4911,7 +4911,7 @@ class TestManualScopeCodegen:
         # attached with a single ``set_dependencies(arr, count)`` call. Both
         # entries are unconditionally filled (plain TaskId bindings, not
         # iter-arg carries, so no is_valid() guard).
-        assert "Arg params_t2;" in code
+        assert "L0TaskArgs params_t2;" in code
         assert "PTO2TaskId params_t2_deps[2];" in code
         assert "params_t2_deps[params_t2_deps_count++] = a_tid;" in code
         assert "params_t2_deps[params_t2_deps_count++] = b_tid;" in code
@@ -6021,7 +6021,7 @@ class TestManualScopeCodegen:
             out, _       = pl.submit(self.stage2, scratch, out, row, col, deps=[tid])
 
         Expected codegen for the dep chain:
-            Arg params_t1;
+            L0TaskArgs params_t1;
             PTO2TaskId params_t1_deps[1];
             uint32_t params_t1_deps_count = 0;
             params_t1_deps[params_t1_deps_count++] = <producer TaskId>;
@@ -6215,7 +6215,7 @@ class TestManualScopeCodegen:
         # this is what the bug used to silently drop. Without these lines the
         # inner ``rt_submit_*_task`` would have no explicit fence on the outer
         # task and the regression would re-emerge.
-        assert "Arg params_t1;" in code, code
+        assert "L0TaskArgs params_t1;" in code, code
         assert "PTO2TaskId params_t1_deps[1];" in code, code
         assert (
             f"if ({producer_tid.group(1)}.is_valid()) params_t1_deps[params_t1_deps_count++] = {producer_tid.group(1)};"  # noqa: E501
@@ -6335,9 +6335,9 @@ class TestTupleReturnNoDepAliasing:
         )
         # Both x and y must have aliases bound (otherwise the consume call
         # below would reference undeclared symbols). The aliasing path uses
-        # ``from_tensor_arg(...)`` on the args array.
-        assert code.count("from_tensor_arg(") >= 2, (
-            "expected at least two from_tensor_arg(...) bindings (one per "
+        # ``orch_args.tensor(i).ref()`` on the args array.
+        assert code.count(".ref()") >= 2, (
+            "expected at least two orch_args.tensor(i).ref() bindings (one per "
             f"tuple element); generated code:\n{code}"
         )
         # Both tasks must submit.

@@ -279,7 +279,7 @@ dispatches before the final `Simplify`.
   `test_l3_ep_dispatch_combine.py`, `test_l3_notify_wait.py`, and related L3 STs
   under `tests/st/distributed/`. `test_l3_put.py` and `test_l3_get.py` are
   currently **skipped** pending the N7 host codegen (`add_scalar(ctx)` per
-  `DistributedTensor`, `ContinuousTensor.make(..., child_memory=True)`) and N8
+  `DistributedTensor`, `Tensor.make(..., child_memory=True)`) and N8
   driver glue (`HostBufferStaging` window wiring on the codegen-emitted
   `orch.allocate_domain(...)` block). The embedded programs and golden checks
   are the canonical e2e contracts — drop the skip markers once that host-side

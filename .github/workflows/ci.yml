@@ -199,7 +199,7 @@ jobs:
           timeout 60 git clone https://github.com/hw-native-sys/pto-isa.git $GITHUB_WORKSPACE/pto-isa \
             || { rm -rf $GITHUB_WORKSPACE/pto-isa; timeout 300 git clone https://gitcode.com/luohuan40/pto-isa.git $GITHUB_WORKSPACE/pto-isa; }
           cd $GITHUB_WORKSPACE/pto-isa
-          git checkout 016396b57e2c17093f1194e6acd89bb112b0ab24
+          git checkout ddafa8da9c760ecd13fe9fe2833d6ee55fb20bd8
 
       - name: Install simpler
         run: |
@@ -222,7 +222,7 @@ jobs:
         # test_run_timing_st.py is ignored here and runs in its own
         # "Test run-timing output" step below (with -s, to surface the
         # measured host/device wall times in the log).
-        run: pytest tests/st tests/st/codegen/torch/test_torch_codegen_paged_attention.py -v --device="$DEVICE_RANGE" --precompile-workers=128 --pto-isa-commit=016396b57e2c17093f1194e6acd89bb112b0ab24 --ignore=tests/st/distributed --ignore=tests/st/codegen --ignore=tests/st/runtime/framework_and_models/test_run_timing_st.py
+        run: pytest tests/st tests/st/codegen/torch/test_torch_codegen_paged_attention.py -v --device="$DEVICE_RANGE" --precompile-workers=128 --pto-isa-commit=ddafa8da9c760ecd13fe9fe2833d6ee55fb20bd8 --ignore=tests/st/distributed --ignore=tests/st/codegen --ignore=tests/st/runtime/framework_and_models/test_run_timing_st.py
 
       - name: Test multi-orch L2 (isolated pytest invocation)
         # A ``Worker(level=2)`` device session currently leaves runtime
@@ -231,17 +231,17 @@ jobs:
         # isolation bug). Running this file in its own pytest process
         # keeps the L2 leak from poisoning ``test_l3_distributed``.
         timeout-minutes: 3
-        run: pytest tests/st/distributed/test_l2_multi_orch.py -v --device="$DEVICE_RANGE" --pto-isa-commit=016396b57e2c17093f1194e6acd89bb112b0ab24
+        run: pytest tests/st/distributed/test_l2_multi_orch.py -v --device="$DEVICE_RANGE" --pto-isa-commit=ddafa8da9c760ecd13fe9fe2833d6ee55fb20bd8
 
       - name: Test swimlane output
         run: |
           pytest tests/st/runtime/framework_and_models/test_perf_swimlane.py \
-            -v --device="$DEVICE_ID" --platform=a2a3 --enable-l2-swimlane --forked --pto-isa-commit=016396b57e2c17093f1194e6acd89bb112b0ab24
+            -v --device="$DEVICE_ID" --platform=a2a3 --enable-l2-swimlane --forked --pto-isa-commit=ddafa8da9c760ecd13fe9fe2833d6ee55fb20bd8
 
       - name: Test dump-tensor output
         run: |
           pytest tests/st/runtime/framework_and_models/test_dump_tag.py \
-            -v --device="$DEVICE_ID" --platform=a2a3 --dump-tensor --pto-isa-commit=016396b57e2c17093f1194e6acd89bb112b0ab24 --forked
+            -v --device="$DEVICE_ID" --platform=a2a3 --dump-tensor --pto-isa-commit=ddafa8da9c760ecd13fe9fe2833d6ee55fb20bd8 --forked
 
       - name: Test run-timing output
         # Surfaces RunTiming (host_wall_us / device_wall_us) across every L2
@@ -249,7 +249,7 @@ jobs:
         # the per-path "[run-timing] ..." lines show in the log.
         run: |
           pytest tests/st/runtime/framework_and_models/test_run_timing_st.py \
-            -v -s --device="$DEVICE_ID" --platform=a2a3 --pto-isa-commit=016396b57e2c17093f1194e6acd89bb112b0ab24
+            -v -s --device="$DEVICE_ID" --platform=a2a3 --pto-isa-commit=ddafa8da9c760ecd13fe9fe2833d6ee55fb20bd8
 
   dist-system-tests:
     # No container: HCCL needs host-only env (HCCL_LOGIC_SUPERPOD_ID, plugin
@@ -312,7 +312,7 @@ jobs:
           timeout 60 git clone https://github.com/hw-native-sys/pto-isa.git "$PTO_ISA_ROOT" \
             || { rm -rf "$PTO_ISA_ROOT"; timeout 300 git clone https://gitcode.com/luohuan40/pto-isa.git "$PTO_ISA_ROOT"; }
           cd "$PTO_ISA_ROOT"
-          git checkout 016396b57e2c17093f1194e6acd89bb112b0ab24
+          git checkout ddafa8da9c760ecd13fe9fe2833d6ee55fb20bd8
 
       - name: Bootstrap conda + per-job venv + write activate.sh
         # Set up a per-job venv layered on conda py310 and generate
@@ -349,7 +349,7 @@ jobs:
         timeout-minutes: 10
         run: |
           source activate.sh
-          python -m pytest tests/st/distributed -v --device="$DEVICE_RANGE" --pto-isa-commit=016396b57e2c17093f1194e6acd89bb112b0ab24 --ignore=tests/st/distributed/test_l2_multi_orch.py
+          python -m pytest tests/st/distributed -v --device="$DEVICE_RANGE" --pto-isa-commit=ddafa8da9c760ecd13fe9fe2833d6ee55fb20bd8 --ignore=tests/st/distributed/test_l2_multi_orch.py
 
   pypto-lib-model:
     runs-on: [self-hosted, linux, arm64, npu-1-device]
@@ -425,7 +425,7 @@ jobs:
           timeout 60 git clone https://github.com/hw-native-sys/pto-isa.git $GITHUB_WORKSPACE/pto-isa \
             || { rm -rf $GITHUB_WORKSPACE/pto-isa; timeout 300 git clone https://gitcode.com/luohuan40/pto-isa.git $GITHUB_WORKSPACE/pto-isa; }
           cd $GITHUB_WORKSPACE/pto-isa
-          git checkout 016396b57e2c17093f1194e6acd89bb112b0ab24
+          git checkout ddafa8da9c760ecd13fe9fe2833d6ee55fb20bd8
 
       - name: Install simpler
         run: |
@@ -529,10 +529,10 @@ jobs:
         # against the runtime's bundled pto-isa, which still clones from the
         # stale PTO-ISA/pto-isa mirror (lacks pto::Coalesce) until the runtime
         # submodule is bumped past simpler #806. Re-enable once that lands.
-        run: pytest tests/st/runtime/ops/test_assemble.py tests/st/runtime/ops/test_mscatter.py tests/st/runtime/framework_and_models/test_qwen3_decode_scope3_mixed.py tests/st/runtime/control_flow/test_dyn_orch_shape.py::TestDynOrchShapeOperations::test_dyn_orch_paged_attention -v --platform=a5sim --forked --pto-isa-commit=016396b57e2c17093f1194e6acd89bb112b0ab24 -k "not TestMscatter"
+        run: pytest tests/st/runtime/ops/test_assemble.py tests/st/runtime/ops/test_mscatter.py tests/st/runtime/framework_and_models/test_qwen3_decode_scope3_mixed.py tests/st/runtime/control_flow/test_dyn_orch_shape.py::TestDynOrchShapeOperations::test_dyn_orch_paged_attention -v --platform=a5sim --forked --pto-isa-commit=ddafa8da9c760ecd13fe9fe2833d6ee55fb20bd8 -k "not TestMscatter"
 
       - name: Test A5 cross-core system tests (simulator)
-        run: pytest tests/st/runtime/cross_core/test_cross_core.py -v --forked --platform=a5sim --pto-isa-commit=016396b57e2c17093f1194e6acd89bb112b0ab24
+        run: pytest tests/st/runtime/cross_core/test_cross_core.py -v --forked --platform=a5sim --pto-isa-commit=ddafa8da9c760ecd13fe9fe2833d6ee55fb20bd8
 
       - name: Test A2A3 cross-core system tests (simulator)
-        run: pytest tests/st/runtime/cross_core/test_cross_core.py -v --forked --platform=a2a3sim --pto-isa-commit=016396b57e2c17093f1194e6acd89bb112b0ab24
+        run: pytest tests/st/runtime/cross_core/test_cross_core.py -v --forked --platform=a2a3sim --pto-isa-commit=ddafa8da9c760ecd13fe9fe2833d6ee55fb20bd8
