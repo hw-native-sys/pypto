@@ -110,7 +110,7 @@ loop-carried iter-arg 不会被这样折叠。
 - 写入必须是静态可证明的局部 `tile.store` 窗口或聚合窗口循环
 - window shape 和 offset 必须足够静态，能够物化为 `tensor.slice`
 - offset 必须是该 pass 可接受的外层循环变量仿射表达式
-- multi-`Out` 改写采用全有或全无策略
+- multi-`Out` 改写采用逐输出策略：每个 `Out` 参数独立评估 window eligibility，不满足条件的输出保持 full-tensor baseline 参数
 - 如果同一 callsite 中多个被 externalize 的 `Out` 参数解析到同一个 parent tensor，该 callsite 保持 full-tensor；Pattern 5 不尝试把多个 `tensor.assemble` 串成同一个 parent state
 - 顺序循环 sibling 只有在每个被改写 `Out` 都能证明跨 sibling iteration 不重叠时才改写
 - 同一 scope 内写入同一 parent 或 alias parent tensor 的 sibling writer，只要每个 writer 自身满足静态 output-window eligibility，仍然可以 externalize；但如果同一个 parent 还存在无法 externalize 成 output window 的 sibling full writer（`Out` 或 `InOut`），则写同一 parent 的其他 writer 也保持 full-tensor，避免这个非 window writer 掩盖只被部分初始化的区域
