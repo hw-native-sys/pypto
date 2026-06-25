@@ -2369,10 +2369,6 @@ static const SimpleOpEntry kSimpleOps[] = {
     // tile.scatter and tile.scatter_mask are registered with custom codegen
     // handlers below (DPS — dst is `args_[0]`, aliased to the result via
     // set_output_reuses_input(0)).
-    // Partial reduction operations
-    {"tile.partadd",         "pto.tpartadd",         2},
-    {"tile.partmax",         "pto.tpartmax",         2},
-    {"tile.partmin",         "pto.tpartmin",         2},
 };
 // clang-format on
 
