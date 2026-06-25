@@ -74,7 +74,7 @@ for i in pl.range(N, init_values=[init_buf]):
 
 ### 模式 5：静态窗口外提（OutWindowExternalizer）
 
-模式 5 **仅**对显式标注了 `windowize=True` 的 InCore function 生效。未标注的 kernel 无论访问模式如何都不会被 windowize。
+模式 5 **仅**对显式标注了 `windowize=True` 的 InCore-type function（`InCore`、`AIC` 或 `AIV`）生效。未标注的 kernel 无论访问模式如何都不会被 windowize。
 
 **问题**：某些 outlined callee 实际只写入大 `Out` 张量中的一个静态可证明局部窗口，或只消费大 `In` 张量中的一个静态可证明局部窗口，但调用点仍传入整块张量。后续依赖分析会把它视为整块缓冲区访问，从而引入不必要的串行化。
 
@@ -147,32 +147,50 @@ loop-carried iter-arg 不会被这样折叠。
 
 ### Windowize Opt-in 使用方法
 
-Pattern 5（window externalization）**默认关闭**。要给某个 kernel 启用，在 kernel 装饰器上添加 `windowize=True`：
+Pattern 5（window externalization）**默认关闭**。它只对带有 IR 属性
+`windowize = true` 的 InCore-type function（`InCore`、`AIC` 或 `AIV`）
+生效。Python DSL 当前通过 `pl.at(...)` 暴露这个属性：
 
 ```python
-@pypto.kernel(windowize=True)
-def my_kernel(...):
+with pl.at(level=pl.Level.CORE_GROUP, windowize=True):
+    out = self.my_kernel(...)
+```
+
+测试、工具或手写 DSL/IR 也可以直接给 function 加同一个 attr：
+
+```python
+@pl.function(type=pl.FunctionType.InCore, attrs={"windowize": True})
+def kernel(...):
     ...
 ```
 
-只有显式标注 `windowize=True` 的 InCore function 才能进入 Pattern 5 的候选。这是一个 per-kernel 的二值开关，没有全局开关或方向级覆盖参数。
+只有显式标注 `windowize=True` 的 InCore-type function 才能进入 Pattern 5
+候选。这是局部二值开关，没有全局开关、policy 字符串或方向级覆盖参数。其他
+frontend 或手写 IR 也可以直接使用同一个 function 属性。function 上已有该属性时，
+parser/printer round-trip 也会保留它。
 
-**何时启用**：观察模型的 swimlane 时间线。如果发现 sibling orchestration tasks 之间有串行化——一个 task 等另一个虽然它们操作同一 buffer 的不同区域——串行化往往是因为依赖分析看到的是全张量而非实际访问的局部窗口。通过显式化局部窗口（`slice → windowed callee → assemble` 模式），编译器能表达更窄的依赖关系，减少或消除串行，提高流水线利用率。
+仅在 kernel 的局部窗口访问模式稳定、并且额外 call-site slice 预计能暴露更窄
+runtime 依赖时使用 `windowize=True`。pass 会把 unsupported cases 保持在
+baseline full-tensor 路径，但这个标注仍然是专家 opt-in，因为它可能增加
+orchestration 和 scheduling 开销。
 
-泳道图中典型的线索：
+一个实用的候选判断方式是看 swimlane 时间线。如果 sibling orchestration tasks
+操作同一 tensor 的不同区域，却仍然互相等待，那么这个 kernel 可能受益。常见
+线索包括：
 
-- 同 core 上的相邻 task 本可重叠但实际没有
-- task 执行时间远短于它们之间的间隔
-- TensorMap auto-dependency edges 出现在操作同一 buffer 不同区域的 tasks 之间
+- 相邻 tasks 理论上可以重叠，但实际互相等待
+- task 之间的空档相对 task 自身执行时间很大
+- TensorMap auto-dependency edges 出现在只应访问同一 parent tensor 不同窗口的
+  tasks 之间
 
-**风险和权衡**：
+windowization 会通过 call-site slice 和 `__windowed` callee 显式化这些局部
+区域，使 runtime dependency analysis 能基于真实 window descriptor 而不是整块
+parent tensor 建依赖。代价是更细粒度的依赖也可能增加 orchestration 工作量，并让
+scheduler dispatch/complete 更碎。如果新增开销超过节省的串行化开销，就不应对该
+kernel 开启 `windowize=True`。
 
-- **增大 orchestrator 开销**：任务依赖粒度更细 → TensorMap 自动建依赖的边数增多 → 编排编译阶段开销增大。
-- **增大 scheduler 开销**：tasks 的 complete 不同时 → dispatch 和 complete 变碎（更多单独 dispatch 调用、更频繁的 complete 通知）→ 运行时调度开销增大。
-
-如果这些开销主导了性能收益——表现在泳道图中空闲时间增加，超过了节省的串行化开销——则**不建议**对该 kernel 开启 `windowize=True`。每个标注应通过对比开关前后的 swimlane 效果来单独评估。
-
-**首次使用**：从局部窗口访问模式清晰稳定的小集合 kernel 开始（例如 transformer prefill 中的 rmsnorm、q_proj、kv_proj）。验证生成的 orchestration C++ 和 swimlane 效果后再增加更多标注。每个 kernel 单独评估；在一个模型上收益的 kernel 在另一个模型上可能回退。
+启用后，应检查生成的 orchestration 中是否出现 `__windowed` callee 和局部
+`.view(...)`/slice 参数，并对比开启前后的 runtime 行为。
 
 ## 示例（模式 1）
 

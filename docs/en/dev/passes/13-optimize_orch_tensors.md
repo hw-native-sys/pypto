@@ -74,7 +74,7 @@ for i in pl.range(N, init_values=[init_buf]):
 
 ### Pattern 5: Static Window Externalization (OutWindowExternalizer)
 
-Pattern 5 runs **only** on InCore functions explicitly annotated with `windowize=True`. Unannotated kernels are never windowed regardless of access pattern.
+Pattern 5 runs **only** on InCore-type functions (`InCore`, `AIC`, or `AIV`) explicitly annotated with `windowize=True`. Unannotated kernels are never windowed regardless of access pattern.
 
 **Problem**: An outlined callee may write only a statically provable local window of a large `Out` tensor, or consume only a statically provable local window of a large `In` tensor, but the call site still passes the whole tensor. Downstream dependence analysis then sees whole-buffer accesses and may add unnecessary serialization.
 
@@ -146,34 +146,57 @@ Non-goals and dependence model:
 - unsupported consumers, including full-tensor readers, remain baseline/full-tensor inputs
 - `DeriveCallDirections` keeps its existing sound sequential `Out -> InOut` rule; Pattern 5 only exposes proven local windows before that pass runs
 
-### Windowize Opt-in (Usage)
+### Windowize Opt-in
 
-Pattern 5 (window externalization) is **disabled by default**. To enable it for a specific kernel, add `windowize=True` to the kernel decorator:
+Pattern 5 is **disabled by default**. It only runs for InCore-type functions
+(`InCore`, `AIC`, or `AIV`) that carry the IR attribute `windowize = true`. The
+Python DSL currently exposes this attribute through `pl.at(...)`:
 
 ```python
-@pypto.kernel(windowize=True)
-def my_kernel(...):
+with pl.at(level=pl.Level.CORE_GROUP, windowize=True):
+    out = self.my_kernel(...)
+```
+
+Tests, tools, or handwritten DSL/IR may also attach the same function attr
+directly:
+
+```python
+@pl.function(type=pl.FunctionType.InCore, attrs={"windowize": True})
+def kernel(...):
     ...
 ```
 
-Only kernels explicitly annotated with `windowize=True` are candidates for Pattern 5. The opt-in is per-kernel and binary; there is no global switch or per-direction override.
+Only functions explicitly annotated with `windowize=True` are candidates for
+Pattern 5. The opt-in is binary and local to that outlined function; there is no
+global switch, policy string, or per-direction override. Other frontends or
+hand-written IR may use the same function attribute directly. For example,
+parser/printer round-trips preserve the attr once it is present on the function.
 
-**When to opt in**: Examine the swimlane timeline of your model. If you observe serialization between sibling orchestration tasks — where one task waits for another despite operating on different regions of the same buffer — the serialization is often caused by dependence analysis seeing the full tensor instead of the narrow region actually accessed. By making the local window explicit (through a `slice → windowed callee → assemble` pattern), the compiler can express narrower dependencies and reduce or eliminate the serialization, improving pipeline utilization.
+Use `windowize=True` only when the kernel has a stable local-window access
+pattern and the extra call-site slices are expected to expose narrower runtime
+dependencies. The pass keeps unsupported cases on the baseline full-tensor path,
+but the annotation is still an expert opt-in because it can increase
+orchestration and scheduling overhead.
 
-Typical clues in the swimlane:
+One practical way to find candidates is to inspect the swimlane timeline. A
+kernel may benefit when sibling orchestration tasks serialize even though they
+operate on different regions of the same tensor. Typical clues are:
 
-- Adjacent tasks on the same core that could overlap but do not
-- Task durations much shorter than the gap between them
-- TensorMap auto-dependency edges linking tasks that access disjoint parts of the same buffer
+- adjacent tasks that could overlap but instead wait on each other
+- task gaps that are large compared with the task duration itself
+- TensorMap auto-dependency edges between tasks that should only touch disjoint
+  windows of the same parent tensor
 
-**Risks and trade-offs**:
+Windowization makes those local regions explicit with call-site slices and
+`__windowed` callees, so runtime dependency analysis can reason about the
+actual window descriptors instead of the full parent tensor. The trade-off is
+that finer dependencies can also add orchestration work and fragment scheduler
+dispatch/completion. If the new overhead dominates the saved serialization, do
+not enable `windowize=True` for that kernel.
 
-- **Increased orchestrator overhead**: Finer-grained task dependencies mean the TensorMap auto-dependency mechanism has more edges to compute, increasing orchestration compilation time.
-- **Increased scheduler overhead**: Tasks may complete at different times, making dispatch and completion phases more fragmented (more individual dispatch calls and more frequent completion notifications), increasing runtime scheduling overhead.
-
-If these overheads dominate the performance benefit — visible as increased idle time in the swimlane that outweighs the serialization saved — **do not enable** `windowize=True` for the affected kernels. Evaluate each annotation by comparing swimlane results with and without it.
-
-**First-time users**: Start with a small set of kernels whose local-window access pattern is clear and stable (e.g., rmsnorm, q_proj, kv_proj in transformer prefill). Verify the generated orchestration C++ and swimlane performance before adding more annotations. Each annotation should be evaluated independently; a kernel that benefits one model may regress in another.
+After enabling it, inspect the generated orchestration for `__windowed` callees
+and local `.view(...)`/slice arguments, then compare runtime behavior with and
+without the annotation.
 
 ## Example (Pattern 1)
 
