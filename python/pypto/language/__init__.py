@@ -153,6 +153,7 @@ from .op.tile_ops import (
     subc,
     subsc,
     sum,
+    tri,
     xor,
     xors,
 )
@@ -428,6 +429,7 @@ __all__ = [
     "arange",
     "gather",
     "gatherb",
+    "tri",
     "paged_gather",
     "create_l1",
     "gather_row",

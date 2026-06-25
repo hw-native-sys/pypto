@@ -983,6 +983,27 @@ static std::string MakeCiCodegenPTO(const std::string& pto_op_name, const CallPt
   return "";
 }
 
+// Helper function for Tri: emits pto.ttri in generic form so the compile-time
+// `upperOrLower` template selector can be carried as an attribute. ptoas only
+// accepts the selector via the generic op syntax — the pretty `ins/outs` form
+// hard-codes the lower-triangular (0) variant.
+// Generic form: "pto.ttri"(%diagonal, %dst) {upperOrLower = N : i32} : (i32, dst_type) -> ()
+static std::string MakeTriCodegenPTO(const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 2) << "Operation:[pto.ttri] requires 2 arguments (diagonal, shape), but got "
+                               << op->args_.size();
+  bool upper = op->GetKwarg<bool>("upper");
+  std::string diag = codegen.GetExprAsCode(op->args_[0]);
+  std::string diag_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+  std::string dst = codegen.GetCurrentResultTarget();
+  std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
+  std::ostringstream oss;
+  oss << "\"pto.ttri\"(" << diag << ", " << dst << ") {upperOrLower = " << (upper ? 1 : 0) << " : i32} : ("
+      << diag_type << ", " << dst_type << ") -> ()";
+  codegen.Emit(oss.str());
+  return "";
+}
+
 // Helper function for Sort32: emits pto.tsort32
 // PTOAS expects: ins(src, idx : src_type, idx_type) outs(dst : dst_type)
 static std::string MakeSort32CodegenPTO(const std::string& pto_op_name, const CallPtr& op,
@@ -3458,6 +3479,8 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   reg("tile.ci", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeCiCodegenPTO("pto.tci", op, codegen);
   });
+  reg("tile.tri",
+      [](const ir::CallPtr& op, codegen::CodegenBase& codegen) { return MakeTriCodegenPTO(op, codegen); });
   // tile.sort32 (TSORT32): all inputs and output must be row_major per ISA
   if (exclude_ops.count("tile.sort32") == 0) {
     backend.RegisterOp("tile.sort32")

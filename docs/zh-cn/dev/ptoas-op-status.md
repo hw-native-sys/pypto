@@ -163,7 +163,7 @@
 | pto.taxpy | TAXPY | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (王淼) |
 | pto.thistogram | THISTOGRAM | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (王淼) |
 | pto.trandom | TRANDOM | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (王淼) |
-| pto.ttri | TTRI | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (王淼) |
+| pto.ttri | TTRI | tile | ✅ | ✅ | ❌ | ✅ | — | 前端+codegen+ST；a2a3 真机待 CI（生成三角 mask，upper 经 generic 形式传 upperOrLower） |
 | pto.tget_scale_addr | TGET_SCALE_ADDR | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (王淼) |
 | pto.tprefetch | TPREFETCH | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (infra, skip) |
 | pto.trowargmax | TROWARGMAX | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (王淼) |

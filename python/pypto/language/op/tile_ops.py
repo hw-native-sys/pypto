@@ -578,6 +578,32 @@ def ci(
 arange = ci
 
 
+def tri(
+    diagonal: int | Scalar,
+    shape: Sequence[int],
+    dtype: DataType = DataType.INT32,
+    upper: bool = False,
+) -> Tile:
+    """Generate a lower/upper triangular mask tile. Maps to ``pto.ttri``.
+
+    Over the destination region ``[R, C]`` with diagonal offset ``d``:
+    - Lower (``upper=False``): ``dst[i, j] = 1`` if ``j <= i + d`` else ``0``
+    - Upper (``upper=True``):  ``dst[i, j] = 1`` if ``j >= i + d`` else ``0``
+
+    Args:
+        diagonal: Diagonal offset (plain int or a Scalar); an INT32 index.
+        shape: Shape of the destination tile (static 2D ``[rows, cols]``).
+        dtype: Mask dtype. One of {INT16, INT32, UINT16, UINT32, FP16, FP32}.
+        upper: If True, produce an upper-triangular mask; otherwise lower.
+
+    Returns:
+        Tile wrapping the tri operation.
+    """
+    diag_expr = diagonal.unwrap() if isinstance(diagonal, Scalar) else diagonal
+    call_expr = _ir_ops.tri(diag_expr, list(shape), dtype=dtype, upper=upper)
+    return Tile(expr=call_expr)
+
+
 def fillpad(tile: Tile, pad_value: PadValue | int | float = PadValue.zero) -> Tile:
     """Fill remaining tile elements with specified padding value.
 

@@ -3727,6 +3727,51 @@ class TestTileCiOp:
         assert pl.tile.arange is pl.tile.ci
 
 
+class TestTileTriOps:
+    """Tests for tile.tri (triangular mask generation, pto.ttri)."""
+
+    def test_tile_tri_lower(self):
+        """tile.tri returns a TileType with requested 2D shape / dtype."""
+        call = tile.tri(0, [16, 16], dtype=DataType.INT32)
+        t = call.type
+        assert isinstance(t, ir.TileType)
+        assert t.dtype == DataType.INT32
+        const_dims = [d.value for d in t.shape if isinstance(d, ir.ConstInt)]
+        assert const_dims == [16, 16]
+        assert "tile.tri" in str(call)
+        assert "upper=False" in str(call)
+
+    def test_tile_tri_upper_kwarg_printed(self):
+        """upper=True should appear in the printed IR."""
+        call = tile.tri(1, [8, 8], dtype=DataType.FP16, upper=True)
+        assert "upper=True" in str(call)
+
+    def test_tile_tri_accepts_supported_dtypes(self):
+        for dt in (
+            DataType.INT16,
+            DataType.INT32,
+            DataType.UINT16,
+            DataType.UINT32,
+            DataType.FP16,
+            DataType.FP32,
+        ):
+            assert tile.tri(0, [16, 16], dtype=dt) is not None
+
+    def test_tile_tri_rejects_unsupported_dtype(self):
+        with pytest.raises(ValueError, match=r"INT16.*INT32.*UINT16.*UINT32.*FP16.*FP32"):
+            tile.tri(0, [16, 16], dtype=DataType.INT8)
+
+    def test_tile_tri_rejects_non_2d_shape(self):
+        with pytest.raises(ValueError, match="2D shape"):
+            tile.tri(0, [1, 8, 8], dtype=DataType.INT32)
+
+    def test_tile_tri_rejects_non_int32_diagonal(self):
+        span = ir.Span.unknown()
+        diag = ir.Var("d", ir.ScalarType(DataType.INT16), span)
+        with pytest.raises(ValueError, match=r"diagonal.*INT32"):
+            tile.tri(diag, [16, 16], dtype=DataType.INT32)
+
+
 class TestTileStoreDistributedDest:
     """``tile.store`` accepts ``DistributedTensorType`` as the destination.
 

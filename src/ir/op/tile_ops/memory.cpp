@@ -849,5 +849,72 @@ REGISTER_OP("tile.ci")
       return DeduceTileCiType(args, kwargs, "tile.ci");
     });
 
+static TypePtr DeduceTileTriType(const std::vector<ExprPtr>& args,
+                                 const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                 const std::string& op_name) {
+  // tile.tri signature: (diagonal, shape) with attrs {dtype, upper}
+  CHECK(args.size() == 2) << "The operator " << op_name
+                          << " requires exactly 2 arguments (diagonal, shape), but got " << args.size();
+
+  // Extract dtype and validate it is one of the supported mask element types.
+  DataType dtype = GetKwarg<DataType>(kwargs, "dtype");
+  CHECK(dtype == DataType::INT16 || dtype == DataType::INT32 || dtype == DataType::UINT16 ||
+        dtype == DataType::UINT32 || dtype == DataType::FP16 || dtype == DataType::FP32)
+      << "The operator " << op_name
+      << " requires dtype to be one of {INT16, INT32, UINT16, UINT32, FP16, FP32}, but got "
+      << dtype.ToString();
+
+  // First argument is the diagonal offset; it is an INT32 index, independent of the mask dtype.
+  auto diag_scalar_type = As<ScalarType>(args[0]->GetType());
+  CHECK(diag_scalar_type) << "The operator " << op_name
+                          << " requires first argument 'diagonal' to be a scalar, but got "
+                          << args[0]->GetType()->TypeName();
+  CHECK(diag_scalar_type->dtype_ == DataType::INT32)
+      << "The operator " << op_name << " requires 'diagonal' to be an INT32 scalar, but got "
+      << diag_scalar_type->dtype_.ToString();
+
+  // Second argument must be a 2D MakeTuple of static ConstInt elements (rows, cols).
+  auto make_tuple = As<MakeTuple>(args[1]);
+  CHECK(make_tuple)
+      << "The operator " << op_name
+      << " requires second argument 'shape' to be a MakeTuple of compile-time constants, but got "
+      << args[1]->TypeName();
+  CHECK(make_tuple->elements_.size() == 2)
+      << "The operator " << op_name << " requires a 2D shape (rows, cols), but got rank "
+      << make_tuple->elements_.size();
+
+  std::vector<ExprPtr> tile_shape;
+  tile_shape.reserve(make_tuple->elements_.size());
+  for (size_t i = 0; i < make_tuple->elements_.size(); ++i) {
+    auto const_int = As<ConstInt>(make_tuple->elements_[i]);
+    CHECK(const_int) << "The operator " << op_name << " shape element " << i
+                     << " must be a compile-time constant (ConstInt), but got "
+                     << make_tuple->elements_[i]->TypeName();
+    CHECK(const_int->value_ > 0) << "The operator " << op_name << " shape element " << i
+                                 << " must be positive, got " << const_int->value_;
+    tile_shape.push_back(make_tuple->elements_[i]);
+  }
+
+  // upper kwarg is optional and defaults to false (lower-triangular).
+  (void)GetKwarg<bool>(kwargs, "upper", false);
+
+  TileView tile_view;
+  tile_view.valid_shape = tile_shape;
+  return std::make_shared<TileType>(tile_shape, dtype, std::nullopt, tile_view);
+}
+
+REGISTER_OP("tile.tri")
+    .set_op_category("TileOp")
+    .set_description("Generate a lower/upper triangular mask tile (pto.ttri)")
+    .add_argument("diagonal", "Diagonal offset scalar (INT32)")
+    .add_argument("shape", "Destination shape (TupleType of ConstInt, 2D)")
+    .set_attr<DataType>("dtype")
+    .set_attr<bool>("upper")
+    .set_output_memory(MemorySpace::Vec)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileTriType(args, kwargs, "tile.tri");
+    });
+
 }  // namespace ir
 }  // namespace pypto
