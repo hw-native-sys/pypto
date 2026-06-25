@@ -623,11 +623,21 @@ def tri(
         Call expression that returns a TileType holding the triangular mask.
     """
     actual_span = _get_span_or_capture(span)
-    if isinstance(diagonal, Expr):
-        if isinstance(diagonal, ConstInt) and diagonal.dtype != DataType.INT32:
-            diag_expr: Expr = ConstInt(diagonal.value, DataType.INT32, actual_span)
-        else:
-            diag_expr = diagonal
+    if isinstance(diagonal, ConstInt):
+        # Normalize any integer constant to the INT32 the op requires.
+        diag_expr: Expr = (
+            diagonal
+            if diagonal.dtype == DataType.INT32
+            else ConstInt(diagonal.value, DataType.INT32, actual_span)
+        )
+    elif isinstance(diagonal, Expr):
+        # A dynamic scalar must already be INT32 — there is no scalar cast here,
+        # so reject other dtypes (e.g. INDEX from a loop var) with a clear error
+        # instead of letting the C++ type deducer fail downstream.
+        diag_type = diagonal.type
+        if not (isinstance(diag_type, ScalarType) and diag_type.dtype == DataType.INT32):
+            raise ValueError(f"tile.tri diagonal must be a plain int or an INT32 scalar, got {diag_type}")
+        diag_expr = diagonal
     else:
         diag_expr = ConstInt(diagonal, DataType.INT32, actual_span)
     shape_tuple = _to_make_tuple(shape, actual_span)

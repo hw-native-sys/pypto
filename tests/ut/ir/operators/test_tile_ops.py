@@ -3771,6 +3771,13 @@ class TestTileTriOps:
         with pytest.raises(ValueError, match=r"diagonal.*INT32"):
             tile.tri(diag, [16, 16], dtype=DataType.INT32)
 
+    def test_tile_tri_rejects_index_scalar_diagonal(self):
+        """An INDEX-typed dynamic scalar (e.g. a loop var) is rejected at the wrapper."""
+        span = ir.Span.unknown()
+        diag = ir.Var("d", ir.ScalarType(DataType.INDEX), span)
+        with pytest.raises(ValueError, match=r"diagonal must be a plain int or an INT32 scalar"):
+            tile.tri(diag, [16, 16], dtype=DataType.INT32)
+
 
 class TestTileStoreDistributedDest:
     """``tile.store`` accepts ``DistributedTensorType`` as the destination.

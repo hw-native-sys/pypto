@@ -97,6 +97,8 @@ static bool RequiresRowMajorLayout(std::string_view op_name) {
       // Ternary scalar ops (Tile x Scalar x Tile)
       "tile.addsc",
       "tile.subsc",
+      // Irregular ops: byte-offset gather requires a row-major src/dst per ISA
+      "tile.gatherb",
   };
   return kRowMajorOps.count(op_name) > 0;
 }
@@ -992,9 +994,14 @@ static std::string MakeTriCodegenPTO(const ir::CallPtr& op, codegen::CodegenBase
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
   CHECK(op->args_.size() == 2) << "Operation:[pto.ttri] requires 2 arguments (diagonal, shape), but got "
                                << op->args_.size();
-  bool upper = op->GetKwarg<bool>("upper");
+  bool upper = op->GetKwarg<bool>("upper", false);
   std::string diag = codegen.GetExprAsCode(op->args_[0]);
   std::string diag_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+  // The diagonal is always an INT32 scalar (enforced by the type deducer); fall
+  // back to "i32" if the annotation is empty so the generic op never emits "(,".
+  if (diag_type.empty()) {
+    diag_type = "i32";
+  }
   std::string dst = codegen.GetCurrentResultTarget();
   std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
   std::ostringstream oss;
@@ -3475,8 +3482,14 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   reg("tile.ci", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeCiCodegenPTO("pto.tci", op, codegen);
   });
-  reg("tile.tri",
-      [](const ir::CallPtr& op, codegen::CodegenBase& codegen) { return MakeTriCodegenPTO(op, codegen); });
+  // tile.tri (TTRI): destination triangular mask must be row-major per ISA.
+  if (exclude_ops.count("tile.tri") == 0) {
+    backend.RegisterOp("tile.tri")
+        .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+          return MakeTriCodegenPTO(op, codegen);
+        })
+        .set_output_layout(ir::TileLayout::row_major);
+  }
   // tile.sort32 (TSORT32): all inputs and output must be row_major per ISA
   if (exclude_ops.count("tile.sort32") == 0) {
     backend.RegisterOp("tile.sort32")
