@@ -32,6 +32,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memory_space.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
@@ -1445,7 +1446,7 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
     const std::map<VarPtr, std::vector<VarPtr>>& sharing_groups,
     const std::map<const Var*, std::pair<int, int>>& var_liveness,
     const std::map<const Var*, std::vector<std::pair<int32_t, int32_t>>>& pipeline_membership,
-    const std::set<const Var*>& pipeline_load_tiles) {
+    const std::set<const Var*>& pipeline_load_tiles, const std::string& func_name) {
   std::map<VarPtr, VarPtr> reuse_map;
 
   // Members of a sharing group (the vars that already physically share one base).
@@ -1703,10 +1704,20 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
         uint64_t footprint = 0;
         for (const auto& buf : buffers) footprint += lifetimes[buf.front()].size;
         if (footprint > budget) {
-          LOG_DEBUG << "MemoryReuse: space " << static_cast<int>(space) << " footprint " << footprint
-                    << " > budget " << budget << " with pipeline separation; falling back to coalescing";
           rollback();
           buffers = pack(/*use_pipeline=*/false);
+          uint64_t relaxed = 0;
+          for (const auto& buf : buffers) relaxed += lifetimes[buf.front()].size;
+          // Only warn when relaxing the ping-pong guard actually shrank the
+          // footprint — i.e. pipeline-stage separation was the cause. A space
+          // that overflows with no pipeline tiles repacks identically and is a
+          // pre-existing condition, not something this guard introduced.
+          if (relaxed < footprint) {
+            LOG_WARN << "MemoryReuse: function '" << func_name << "': pipeline-stage buffer separation for "
+                     << MemorySpaceToString(space) << " needs " << footprint << " bytes (> " << budget
+                     << " platform budget); coalescing buffers to fit — ping-pong pipelining is "
+                        "reduced for this space.";
+          }
         }
       }
     }
@@ -2341,7 +2352,7 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   auto reuse_map = IdentifyReuseOpportunities(
       analysis_result.lifetimes, hazard, forbid_alias, analysis_result.phi_family_ids,
       analysis_result.var_sharing_groups, analysis_result.var_liveness, analysis_result.pipeline_membership,
-      analysis_result.pipeline_load_tiles);
+      analysis_result.pipeline_load_tiles, func->name_);
 
   // Step 3: Apply MemRef sharing (skip if no reuse candidates)
   if (!reuse_map.empty()) {
