@@ -562,6 +562,15 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
           new_args[0] = HalveTupleElement(call->args_[0], split_dim);
         } else if (op_name == "tile.reshape" && call->args_.size() >= 2) {
           new_args[1] = HalveTupleElement(call->args_[1], split_dim);
+        } else if (op_name == "tile.set_validshape" && call->args_.size() == 3) {
+          // args = (tile, valid_row, valid_col). Halving the result type alone
+          // leaves the split-dim valid operand at its full pre-split extent, so
+          // the operand exceeds the halved physical box (PTOAS rejects it with
+          // "row/col operand <= shape dim"). Localize the split-dim operand the
+          // same way HalveTileShape localizes the type's valid_shape.
+          const int operand_idx = 1 + split_dim;  // split_dim 0 -> row, 1 -> col
+          new_args[operand_idx] = LocalizeValidDimForSplit(call->args_[operand_idx], tt->shape_[split_dim],
+                                                           half_dim_size, subblock_idx);
         }
         auto new_call = std::make_shared<Call>(call->op_, std::move(new_args), call->kwargs_, new_result_type,
                                                call->span_);

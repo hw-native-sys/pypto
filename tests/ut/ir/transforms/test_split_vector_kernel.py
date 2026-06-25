@@ -255,6 +255,82 @@ class TestSplitVectorKernelUpDown:
 
         _assert_split_matches_expected(Before, Expected)
 
+    def test_set_validshape_split_dim_operand_localized(self):
+        """set_validshape: the split-dim valid operand is localized to the halved box.
+
+        Halving only the result type left the explicit row operand at its full
+        pre-split extent (e.g. 16 on an 8-row physical tile), which PTOAS rejects
+        with 'set_validshape op expects row operand <= shape dim'. The split-dim
+        operand must be localized exactly like the result type's valid_shape; the
+        non-split col operand is left untouched.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
+                peer_buf = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="main_aiv")
+                pl.aic_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=peer_buf)
+                x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile = pl.matmul(x_left, y_right)
+                pl.tpush_to_aiv(z_tile, split=1)
+
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
+                z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
+                    split=1
+                )
+                pl.tfree_to_aic(z_vec)
+                narrowed: pl.Tile[
+                    [16, 128],
+                    pl.FP32,
+                    pl.MemorySpace.Vec,
+                    pl.TileView(valid_shape=[16, 64]),
+                ] = pl.tile.set_validshape(z_vec, 16, 64)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(narrowed, [0, 0], out_0)
+                return out_0_store
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
+                peer_buf = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="main_aiv")
+                pl.aic_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=peer_buf)
+                x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile = pl.matmul(x_left, y_right)
+                pl.tpush_to_aiv(z_tile, split=1)
+
+            @pl.function(
+                type=pl.FunctionType.AIV,
+                attrs={"split": pl.SplitMode.UP_DOWN, "dual_aiv_dispatch": True},
+            )
+            def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
+                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
+                z_vec: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=1)
+                pl.tfree_to_aic(z_vec)
+                narrowed: pl.Tile[
+                    [8, 128],
+                    pl.FP32,
+                    pl.MemorySpace.Vec,
+                    pl.TileView(valid_shape=[8, 64]),
+                ] = pl.tile.set_validshape(z_vec, 8, 64)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(
+                    narrowed, [0 + subblock_idx * 8, 0], out_0
+                )
+                return out_0_store
+
+        _assert_split_matches_expected(Before, Expected)
+
     def test_load_shape_halved_and_offset_adjusted(self):
         """tile.load in AIV: shape halved, offset adjusted in split dim (includes add of halved tiles)."""
 
