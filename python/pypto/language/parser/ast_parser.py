@@ -4175,7 +4175,7 @@ class ASTParser:
         )
         scope_attrs = self._append_split_slot_num_attr(scope_attrs, state.split_slot_num)
         if state.windowize:
-            scope_attrs = list(scope_attrs) if scope_attrs else []
+            scope_attrs = list(scope_attrs or [])
             scope_attrs.append(("windowize", True))
 
         # ``with pl.at(...) as tid:`` allocates ``tid`` as an outer-scope Var

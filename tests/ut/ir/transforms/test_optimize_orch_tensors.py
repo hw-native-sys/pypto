@@ -19,14 +19,17 @@ from pypto import ir, passes
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
 
-def _with_incore_windowize(program):
+def _modify_incore_windowize(program, *, enable: bool):
     functions = []
     for func in program.functions.values():
         if not ir.is_incore_type(func.func_type):
             functions.append(func)
             continue
         attrs = dict(func.attrs)
-        attrs["windowize"] = True
+        if enable:
+            attrs["windowize"] = True
+        else:
+            attrs.pop("windowize", None)
         params = list(zip(func.params, func.param_directions, strict=True))
         functions.append(
             ir.Function(
@@ -43,32 +46,14 @@ def _with_incore_windowize(program):
             )
         )
     return ir.Program(functions, program.name, program.span)
+
+
+def _with_incore_windowize(program):
+    return _modify_incore_windowize(program, enable=True)
 
 
 def _strip_windowize_attrs(program):
-    functions = []
-    for func in program.functions.values():
-        if "windowize" not in func.attrs:
-            functions.append(func)
-            continue
-        attrs = dict(func.attrs)
-        del attrs["windowize"]
-        params = list(zip(func.params, func.param_directions, strict=True))
-        functions.append(
-            ir.Function(
-                func.name,
-                params,
-                func.return_types,
-                func.body,
-                func.span,
-                type=func.func_type,
-                level=func.level,
-                role=func.role,
-                attrs=attrs,
-                requires_runtime_binding=func.requires_runtime_binding,
-            )
-        )
-    return ir.Program(functions, program.name, program.span)
+    return _modify_incore_windowize(program, enable=False)
 
 
 def _run_to_optimize_orch_tensors(program, *, windowize=True):
