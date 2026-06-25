@@ -204,4 +204,3 @@ coverage.xml
 # Package distributions
 dist/
 wheelhouse/
-.ccache/
