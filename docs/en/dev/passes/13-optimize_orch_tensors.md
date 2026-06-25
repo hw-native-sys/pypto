@@ -144,6 +144,31 @@ Non-goals and dependence model:
 - unsupported consumers, including full-tensor readers, remain baseline/full-tensor inputs
 - `DeriveCallDirections` keeps its existing sound sequential `Out -> InOut` rule; Pattern 5 only exposes proven local windows before that pass runs
 
+### Windowize Opt-in (Usage)
+
+Pattern 5 (window externalization) is **disabled by default**. To enable it for a specific kernel, add `windowize=True` to the kernel decorator:
+
+```python
+@pypto.kernel(windowize=True)
+def my_kernel(...):
+    ...
+```
+
+Only kernels explicitly annotated with `windowize=True` are candidates for Pattern 5. The opt-in is per-kernel and binary; there is no global switch, no per-direction override, and no strategy parameter (these were part of the v6 experimental API and are **not** included in the stable interface).
+
+**When to opt in**: Window externalization is most beneficial when an orchestration task operates on only a small statically-provable window of a large tensor, yet the dependence analysis (TensorMap auto-dependency) sees the full tensor and introduces unnecessary serialization with sibling tasks. By making the local window explicit, the compiler can express narrower dependencies and reduce or eliminate the serialization, improving pipeline utilization.
+
+**Risks and trade-offs**:
+
+- **Increased orchestrator overhead**: Finer-grained task dependencies mean the TensorMap auto-dependency mechanism has more edges to compute, increasing orchestration compilation time.
+- **Increased scheduler overhead**: Tasks may complete at different times, making the dispatch and completion phases more fragmented (more individual dispatch calls and more frequent completion notifications), increasing runtime scheduling overhead.
+
+If either of these overheads dominates the performance benefit for your model, **do not enable** `windowize=True` for the affected kernels. There is no automated heuristic — the decision is based on measuring swimlane results with and without the annotation.
+
+**First-time users**: Start by annotating kernels where the v6 `01_option_stable` evidence showed a clear win (e.g., rmsnorm, q_proj, kv_proj in transformer prefill). Verify the generated orchestration C++ and swimlane performance before adding more annotations. Each new annotation should be evaluated independently; a kernel that wins in one model may regress in another.
+
+**Backward compatibility**: If you pass `window_option`, `window_policy`, `window_outputs`, `window_inputs`, `window_flow` as pass arguments or kernel-level attributes, the pass explicitly rejects these with a diagnostic message pointing to `windowize=True`. These attributes belong to the v6 experimental API and are not supported in the stable interface.
+
 ## Example (Pattern 1)
 
 **Before**:

@@ -143,6 +143,31 @@ loop-carried iter-arg 不会被这样折叠。
 - unsupported consumer，包括 full-tensor reader，保持 baseline/full-tensor input
 - `DeriveCallDirections` 保持现有 sound 的顺序 `Out -> InOut` 规则；Pattern 5 只是在该 pass 运行前显式化可证明的局部窗口
 
+### Windowize Opt-in 使用方法
+
+Pattern 5（window externalization）**默认关闭**。要给某个 kernel 启用，在 kernel 装饰器上添加 `windowize=True`：
+
+```python
+@pypto.kernel(windowize=True)
+def my_kernel(...):
+    ...
+```
+
+只有显式标注 `windowize=True` 的 InCore function 才能进入 Pattern 5 的候选。这是一个 per-kernel 的二值开关，没有全局开关、没有方向级覆盖、没有策略参数（这些属于 v6 实验 API，**不包含**在稳定接口中）。
+
+**何时启用**：当一个 orchestration task 操作的只是某个大张量的局部窗口，但依赖分析（TensorMap auto-dependency）看到的是全张量，从而在 sibling tasks 之间引入了不必要的串行化。显式化局部窗口后，编译器能表达更窄的依赖关系，减少或消除串行，提高流水线利用率。
+
+**风险和权衡**：
+
+- **增大 orchestrator 开销**：任务依赖粒度更细 → TensorMap 自动建立依赖的边数增多 → 编排编译阶段开销增大。
+- **增大 scheduler 开销**：tasks 的 complete 不同时 → dispatch 和 complete 变碎（更多的单独 dispatch 调用、更频繁的 complete 通知）→ 运行时调度开销增大。
+
+如果这两类开销主导了性能收益，则**不建议**对该 kernel 开启 `windowize=True`。没有自动启发式判断——需要对比开启前后的 swimlane 效果来决定。
+
+**首次使用**：可以从 v6 `01_option_stable` 证据中明确受益的 kernel 开始标注（例如 transformer prefill 中的 rmsnorm、q_proj、kv_proj）。验证生成的 orchestration C++ 代码和 swimlane 性能后再增加更多标注。每个新标注应单独评估；在一个模型上收益的 kernel 在另一个模型上可能回退。
+
+**向后兼容**：如果将 `window_option`、`window_policy`、`window_outputs`、`window_inputs`、`window_flow` 作为 pass 参数或 kernel 级属性传入，pass 会显式报错并提示使用 `windowize=True`。这些属于 v6 实验 API，稳定接口不支持。
+
 ## 示例（模式 1）
 
 **优化前**：
