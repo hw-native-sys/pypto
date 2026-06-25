@@ -103,7 +103,7 @@ inline std::vector<std::pair<int32_t, int32_t>> ParsePipelineMembership(const st
   auto try_parse_int = [](const std::string& s, int32_t* out_val) -> bool {
     try {
       size_t consumed = 0;
-      long v = std::stol(s, &consumed);
+      int64_t v = std::stol(s, &consumed);
       if (consumed != s.size()) return false;  // reject trailing garbage (e.g. "12abc")
       *out_val = static_cast<int32_t>(v);
       return true;

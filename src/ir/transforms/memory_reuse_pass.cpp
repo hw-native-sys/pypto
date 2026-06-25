@@ -24,6 +24,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/any_cast.h"
@@ -1610,7 +1611,9 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
   // PTO binds a per-var alloc_tile so differing shapes/dtypes legally alias one
   // base, and largest-first ordering guarantees the buffer is sized to its
   // representative (no member is ever larger than the buffer it joins).
-  auto can_share = [&](const LifetimeInterval& cand, const LifetimeInterval& member) {
+  // ``use_pipeline`` toggles the ping-pong guard so a space can be re-packed
+  // without it when stage separation would overflow the on-chip budget.
+  auto can_share = [&](const LifetimeInterval& cand, const LifetimeInterval& member, bool use_pipeline) {
     // Group-interval overlap is a fast reject; when it fires, fall back to the
     // precise per-var check so mutually-exclusive / same-value phi-family tiles
     // may still share while a genuine conflict (incl. one hidden behind a
@@ -1618,7 +1621,7 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
     if (LifetimesOverlap(cand, member) && overlap_blocks_sharing(cand, member)) return false;
     if (hazard_blocks(cand, member) || hazard_blocks(member, cand)) return false;
     if (forbid_blocks(cand, member) || forbid_blocks(member, cand)) return false;
-    if (pipeline_blocks(cand, member)) return false;  // symmetric — one call suffices
+    if (use_pipeline && pipeline_blocks(cand, member)) return false;  // symmetric — one call suffices
     return true;
   };
 
@@ -1628,8 +1631,11 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
     by_space[lifetimes[i].memory_space].push_back(i);
   }
 
+  // Per-space hardware budget for the capacity-aware fallback below (0 = unknown
+  // / no configured backend → never fall back, behave as a pure separator).
+  const backend::Backend* be = backend::BackendConfig::IsConfigured() ? backend::GetBackend() : nullptr;
+
   for (auto& [space, indices] : by_space) {
-    (void)space;
     // Largest-first; ties broken by definition order for determinism and so that
     // equal-size workloads reproduce the prior definition-order grouping.
     std::stable_sort(indices.begin(), indices.end(), [&lifetimes](size_t a, size_t b) {
@@ -1637,39 +1643,74 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
       return lifetimes[a].def_point < lifetimes[b].def_point;
     });
 
-    // Each buffer is a list of interval indices sharing one MemRef; element 0 is
-    // the representative (largest, earliest on ties) every member is rebased to.
-    std::vector<std::vector<size_t>> buffers;
-    for (size_t idx : indices) {
-      const auto& cand = lifetimes[idx];
-      bool placed = false;
-      for (auto& buf : buffers) {
-        bool fits = true;
-        for (size_t member_idx : buf) {
-          if (!can_share(cand, lifetimes[member_idx])) {
-            fits = false;
-            break;
+    // First-fit-decreasing packing of this space. Each buffer is a list of
+    // interval indices sharing one MemRef; element 0 is the representative
+    // (largest, earliest on ties) every member is rebased to. Commits into
+    // reuse_map / base_remap; returns the buffer grouping so the caller can
+    // measure the footprint.
+    auto pack = [&](bool use_pipeline) {
+      std::vector<std::vector<size_t>> buffers;
+      for (size_t idx : indices) {
+        const auto& cand = lifetimes[idx];
+        bool placed = false;
+        for (auto& buf : buffers) {
+          bool fits = true;
+          for (size_t member_idx : buf) {
+            if (!can_share(cand, lifetimes[member_idx], use_pipeline)) {
+              fits = false;
+              break;
+            }
           }
-        }
-        if (!fits) continue;
-        const VarPtr& representative = lifetimes[buf.front()].variable;
-        reuse_map[cand.variable] = representative;  // member -> representative
-        // Record the base coalescing so resolve_base() can chase a view whose
-        // owning tile is reused onto the representative's buffer (no-alias guard).
-        if (const Var* cb = TileMemRefBase(cand.variable)) {
-          if (const Var* rb = physical_base(representative)) {
-            if (cb != rb) base_remap[cb] = rb;
+          if (!fits) continue;
+          const VarPtr& representative = lifetimes[buf.front()].variable;
+          reuse_map[cand.variable] = representative;  // member -> representative
+          // Record the base coalescing so resolve_base() can chase a view whose
+          // owning tile is reused onto the representative's buffer (no-alias guard).
+          if (const Var* cb = TileMemRefBase(cand.variable)) {
+            if (const Var* rb = physical_base(representative)) {
+              if (cb != rb) base_remap[cb] = rb;
+            }
           }
+          buf.push_back(idx);
+          placed = true;
+          break;
         }
-        buf.push_back(idx);
-        placed = true;
-        LOG_DEBUG << "Variable " << cand.variable->name_hint_ << " reuses representative "
-                  << representative->name_hint_ << " (lifetime [" << cand.def_point << ", "
-                  << cand.last_use_point << "])";
-        break;
+        if (!placed) buffers.push_back({idx});
       }
-      if (!placed) buffers.push_back({idx});
+      return buffers;
+    };
+
+    // Discard this space's committed decisions so it can be re-packed cleanly.
+    auto rollback = [&]() {
+      for (size_t idx : indices) {
+        reuse_map.erase(lifetimes[idx].variable);
+        if (const Var* cb = TileMemRefBase(lifetimes[idx].variable)) base_remap.erase(cb);
+      }
+    };
+
+    auto buffers = pack(/*use_pipeline=*/true);
+
+    // Capacity-aware fallback: pipeline-stage separation raises the buffer count,
+    // and on real kernels that can push a space past its hardware budget (e.g.
+    // stage=4 RMSNorm or nested stage=2 qproj overflow Vec / Mat). The footprint
+    // a space needs is the sum of its distinct buffers' sizes (each buffer is
+    // sized to its largest member); when that exceeds the budget, re-pack the
+    // space WITHOUT the ping-pong guard — the original coalescing, which fits.
+    // Pipelining yields to correctness; spaces that fit keep their separation.
+    if (be != nullptr) {
+      const uint64_t budget = be->GetMemSize(space);
+      if (budget > 0) {
+        uint64_t footprint = 0;
+        for (const auto& buf : buffers) footprint += lifetimes[buf.front()].size;
+        if (footprint > budget) {
+          LOG_DEBUG << "MemoryReuse: space " << static_cast<int>(space) << " footprint " << footprint
+                    << " > budget " << budget << " with pipeline separation; falling back to coalescing";
+          rollback();
+          buffers = pack(/*use_pipeline=*/false);
+        }
+      }
     }
+    (void)buffers;
   }
 
   return reuse_map;
@@ -2299,8 +2340,8 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
 
   auto reuse_map = IdentifyReuseOpportunities(
       analysis_result.lifetimes, hazard, forbid_alias, analysis_result.phi_family_ids,
-      analysis_result.var_sharing_groups, analysis_result.var_liveness,
-      analysis_result.pipeline_membership, analysis_result.pipeline_load_tiles);
+      analysis_result.var_sharing_groups, analysis_result.var_liveness, analysis_result.pipeline_membership,
+      analysis_result.pipeline_load_tiles);
 
   // Step 3: Apply MemRef sharing (skip if no reuse candidates)
   if (!reuse_map.empty()) {
