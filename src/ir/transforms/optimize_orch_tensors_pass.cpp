@@ -98,59 +98,38 @@ std::string MakeUniqueFunctionName(const ProgramPtr& program, const std::string&
   }
 }
 
+/// Count Var/IterArg references to `target` inside an IR node.
+class VarRefCounter : public IRVisitor {
+ public:
+  explicit VarRefCounter(const Var* target) : target_(target) {}
+
+  [[nodiscard]] size_t count() const { return count_; }
+
+ protected:
+  void VisitExpr_(const VarPtr& op) override {
+    if (op.get() == target_) ++count_;
+    IRVisitor::VisitExpr_(op);
+  }
+
+  void VisitExpr_(const IterArgPtr& op) override {
+    if (op.get() == target_) ++count_;
+    IRVisitor::VisitExpr_(op);
+  }
+
+ private:
+  const Var* target_;
+  size_t count_ = 0;
+};
+
 /// Count Var/IterArg references to `target` inside a statement subtree.
 size_t CountVarRefsInStmt(const StmtPtr& stmt, const Var* target) {
-  class Counter : public IRVisitor {
-   public:
-    explicit Counter(const Var* target) : target_(target) {}
-
-    [[nodiscard]] size_t count() const { return count_; }
-
-   protected:
-    void VisitExpr_(const VarPtr& op) override {
-      if (op.get() == target_) ++count_;
-      IRVisitor::VisitExpr_(op);
-    }
-
-    void VisitExpr_(const IterArgPtr& op) override {
-      if (op.get() == target_) ++count_;
-      IRVisitor::VisitExpr_(op);
-    }
-
-   private:
-    const Var* target_;
-    size_t count_ = 0;
-  };
-
-  Counter counter(target);
+  VarRefCounter counter(target);
   counter.VisitStmt(stmt);
   return counter.count();
 }
 
 size_t CountVarRefsInExpr(const ExprPtr& expr, const Var* target) {
-  class Counter : public IRVisitor {
-   public:
-    explicit Counter(const Var* target) : target_(target) {}
-
-    [[nodiscard]] size_t count() const { return count_; }
-
-   protected:
-    void VisitExpr_(const VarPtr& op) override {
-      if (op.get() == target_) ++count_;
-      IRVisitor::VisitExpr_(op);
-    }
-
-    void VisitExpr_(const IterArgPtr& op) override {
-      if (op.get() == target_) ++count_;
-      IRVisitor::VisitExpr_(op);
-    }
-
-   private:
-    const Var* target_;
-    size_t count_ = 0;
-  };
-
-  Counter counter(target);
+  VarRefCounter counter(target);
   counter.VisitExpr(expr);
   return counter.count();
 }
@@ -2052,7 +2031,6 @@ class OutWindowExternalizer {
     std::vector<ExprPtr> callsite_offsets;
     std::vector<ExprPtr> local_store_offsets;
     AccessRegion region;
-    AccessRegion assemble_region;
     std::vector<size_t> piece_return_indices;
     size_t iter_arg_index = SIZE_MAX;
   };
@@ -2110,15 +2088,6 @@ class OutWindowExternalizer {
 
   static const std::vector<DenseRegionPiece>& DensePieces(const OutputRewriteInfo& info) {
     return info.region.dense_pieces;
-  }
-
-  static const std::vector<DenseRegionPiece>& AssemblePieces(const OutputRewriteInfo& info) {
-    return info.assemble_region.dense_pieces.empty() ? info.region.dense_pieces
-                                                     : info.assemble_region.dense_pieces;
-  }
-
-  static bool HasFineAssemblePieces(const OutputRewriteInfo& info) {
-    return !info.assemble_region.dense_pieces.empty();
   }
 
   static const std::vector<DenseRegionPiece>& DensePieces(const InputRewriteInfo& info) {
@@ -3348,31 +3317,6 @@ class OutWindowExternalizer {
                                                                offset_exprs)) {
             return std::nullopt;
           }
-          if (piece_index == 0 && HasFineAssemblePieces(output)) {
-            if (shape_exprs.empty() || offset_exprs.empty()) return std::nullopt;
-            auto index_type = std::make_shared<ScalarType>(DataType::INDEX);
-            VarPtr base_arg;
-            VarPtr extent_arg;
-            const size_t output_dynamic_dim = 0;
-            if (output_dynamic_dim >= offset_exprs.size() || output_dynamic_dim >= shape_exprs.size()) {
-              return std::nullopt;
-            }
-            base_arg = std::make_shared<Var>(out_arg->name_hint_ + "__window_base_arg", index_type,
-                                             call_assign->span_);
-            extent_arg = std::make_shared<Var>(out_arg->name_hint_ + "__window_extent_arg", index_type,
-                                               call_assign->span_);
-            auto base_value = FlattenGeneratedScalarExpr(offset_exprs[output_dynamic_dim],
-                                                         out_arg->name_hint_, call_assign->span_, &stmts);
-            auto extent_value = FlattenGeneratedScalarExpr(shape_exprs[output_dynamic_dim],
-                                                           out_arg->name_hint_, call_assign->span_, &stmts);
-            stmts.push_back(std::make_shared<AssignStmt>(base_arg, base_value, call_assign->span_));
-            stmts.push_back(std::make_shared<AssignStmt>(extent_arg, extent_value, call_assign->span_));
-            offset_exprs[output_dynamic_dim] = base_arg;
-            shape_exprs[output_dynamic_dim] = extent_arg;
-            output_extra_args.push_back(base_arg);
-            output_extra_args.push_back(extent_arg);
-            output_extent_arg_by_out_index.emplace(output.out_param_index, extent_arg);
-          }
           auto shape_tuple = std::make_shared<MakeTuple>(shape_exprs, call_assign->span_);
           auto offset_tuple = std::make_shared<MakeTuple>(offset_exprs, call_assign->span_);
 
@@ -3489,13 +3433,11 @@ class OutWindowExternalizer {
       stmts.push_back(std::make_shared<AssignStmt>(tmp_result_var, new_call, call_assign->span_));
 
       size_t total_output_pieces = 0;
-      bool has_fine_assemble_output = false;
       for (const auto& output : analysis.outputs) {
-        total_output_pieces += AssemblePieces(output).size();
-        has_fine_assemble_output = has_fine_assemble_output || HasFineAssemblePieces(output);
+        total_output_pieces += DensePieces(output).size();
       }
       if (!is_submit_call && analysis.outputs.size() == 1 && total_output_pieces == 1 &&
-          result_types.size() == 1 && !has_fine_assemble_output) {
+          result_types.size() == 1) {
         const auto& output = analysis.outputs[0];
         const auto& slice_bundle = slices_by_out_index.at(output.out_param_index).front();
         auto assemble_call = OpRegistry::GetInstance().Create(
@@ -3521,16 +3463,13 @@ class OutWindowExternalizer {
       for (const auto& output : analysis.outputs) {
         const auto& piece_return_indices = piece_return_indices_by_out_param.at(output.out_param_index);
         const auto& slice_bundles = slices_by_out_index.at(output.out_param_index);
-        const auto& assemble_pieces = AssemblePieces(output);
-        const bool uses_fine_assemble = HasFineAssemblePieces(output);
+        const auto& assemble_pieces = DensePieces(output);
         if (piece_return_indices.size() != slice_bundles.size()) return std::nullopt;
-        if (uses_fine_assemble && piece_return_indices.empty()) return std::nullopt;
-        if (!uses_fine_assemble && piece_return_indices.size() != assemble_pieces.size()) return std::nullopt;
+        if (piece_return_indices.size() != assemble_pieces.size()) return std::nullopt;
 
         ExprPtr current_parent_expr = slice_bundles.front().parent_expr;
         for (size_t piece_index = 0; piece_index < assemble_pieces.size(); ++piece_index) {
-          const size_t piece_return_index =
-              uses_fine_assemble ? piece_return_indices.front() : piece_return_indices[piece_index];
+          const size_t piece_return_index = piece_return_indices[piece_index];
           ExprPtr item_expr;
           if (result_types.size() == 1) {
             item_expr = tmp_result_var;
@@ -3547,59 +3486,10 @@ class OutWindowExternalizer {
             }
             item_expr = item_it->second;
           }
-          const SliceBundle& slice_bundle =
-              uses_fine_assemble ? slice_bundles.front() : slice_bundles[piece_index];
+          const SliceBundle& slice_bundle = slice_bundles[piece_index];
           const auto& assemble_piece = assemble_pieces[piece_index];
           auto assemble_item_expr = item_expr;
           auto assemble_offset_tuple = slice_bundle.offset_tuple;
-          if (uses_fine_assemble) {
-            if (assemble_piece.callsite_offsets.size() != slice_bundle.offset_tuple->elements_.size()) {
-              return std::nullopt;
-            }
-            arith::Analyzer fine_offset_analyzer;
-
-            std::vector<ExprPtr> fine_shape_exprs;
-            fine_shape_exprs.reserve(assemble_piece.window_shape.size());
-            for (const auto& dim : assemble_piece.window_shape) {
-              auto fine_shape = transform_utils::Substitute(dim, callsite_subst);
-              fine_shape_exprs.push_back(FlattenGeneratedScalarExpr(fine_shape, call_assign->var_->name_hint_,
-                                                                    call_assign->span_, &tail_stmts));
-            }
-            auto fine_shape_tuple = std::make_shared<MakeTuple>(fine_shape_exprs, call_assign->span_);
-
-            std::vector<ExprPtr> fine_local_offsets;
-            fine_local_offsets.reserve(assemble_piece.callsite_offsets.size());
-            for (size_t dim = 0; dim < assemble_piece.callsite_offsets.size(); ++dim) {
-              auto fine_offset = fine_offset_analyzer.Simplify(
-                  transform_utils::Substitute(assemble_piece.callsite_offsets[dim], callsite_subst));
-              auto carrier_offset = slice_bundle.offset_tuple->elements_[dim];
-              auto fine_local_offset =
-                  fine_offset_analyzer.Simplify(MakeSub(fine_offset, carrier_offset, call_assign->span_));
-              fine_local_offsets.push_back(FlattenGeneratedScalarExpr(
-                  fine_local_offset, call_assign->var_->name_hint_, call_assign->span_, &tail_stmts));
-            }
-            auto fine_local_offset_tuple =
-                std::make_shared<MakeTuple>(fine_local_offsets, call_assign->span_);
-            auto fine_slice_call = OpRegistry::GetInstance().Create(
-                "tensor.slice", {item_expr, fine_shape_tuple, fine_local_offset_tuple}, call_assign->span_);
-            auto fine_slice_var = std::make_shared<Var>(call_assign->var_->name_hint_ + "__fine_" +
-                                                            std::to_string(output.return_index) + "_" +
-                                                            std::to_string(piece_index),
-                                                        fine_slice_call->GetType(), call_assign->var_->span_);
-            tail_stmts.push_back(
-                std::make_shared<AssignStmt>(fine_slice_var, fine_slice_call, call_assign->span_));
-            assemble_item_expr = fine_slice_var;
-
-            std::vector<ExprPtr> fine_global_offsets;
-            fine_global_offsets.reserve(assemble_piece.callsite_offsets.size());
-            for (const auto& offset : assemble_piece.callsite_offsets) {
-              auto fine_global_offset =
-                  fine_offset_analyzer.Simplify(transform_utils::Substitute(offset, callsite_subst));
-              fine_global_offsets.push_back(FlattenGeneratedScalarExpr(
-                  fine_global_offset, call_assign->var_->name_hint_, call_assign->span_, &tail_stmts));
-            }
-            assemble_offset_tuple = std::make_shared<MakeTuple>(fine_global_offsets, call_assign->span_);
-          }
           auto assemble_call = OpRegistry::GetInstance().Create(
               "tensor.assemble", {current_parent_expr, assemble_item_expr, assemble_offset_tuple},
               call_assign->span_);
@@ -4014,10 +3904,6 @@ class OutWindowExternalizer {
     static bool IsWriterArgDirection(ArgDirection direction) {
       return direction == ArgDirection::Output || direction == ArgDirection::OutputExisting ||
              direction == ArgDirection::InOut;
-    }
-
-    static bool IsReaderArgDirection(ArgDirection direction) {
-      return direction == ArgDirection::Input || direction == ArgDirection::InOut;
     }
 
     bool HasOutputWindowAnalysis(const std::string& callee_name, size_t out_param_index) const {
@@ -5658,7 +5544,6 @@ class OutWindowExternalizer {
                                                      pieces.front().local_offsets,
                                                      MakeDenseRegion(std::move(pieces)),
                                                      {},
-                                                     {},
                                                      match.iter_arg_index});
         continue;
       }
@@ -5734,7 +5619,6 @@ class OutWindowExternalizer {
                                                      pieces.front().local_offsets,
                                                      MakeDenseRegion(std::move(pieces)),
                                                      {},
-                                                     {},
                                                      match.iter_arg_index});
         continue;
       }
@@ -5755,7 +5639,6 @@ class OutWindowExternalizer {
                                                    std::move(output_base_offsets),
                                                    std::move(output_local_offsets),
                                                    MakeDenseRegion({std::move(output_piece)}),
-                                                   {},
                                                    {},
                                                    match.iter_arg_index});
     }
@@ -5848,7 +5731,6 @@ class OutWindowExternalizer {
                                                      local_zero_offsets,
                                                      MakeDenseRegion({std::move(output_piece)}),
                                                      {},
-                                                     {},
                                                      SIZE_MAX});
       }
       if (!analysis.outputs.empty()) {
@@ -5913,24 +5795,6 @@ class OutWindowExternalizer {
         for (size_t piece_index = 0; piece_index < pieces.size(); ++piece_index) {
           const auto& piece = pieces[piece_index];
           std::vector<ExprPtr> piece_window_shape = piece.window_shape;
-          if (piece_index == 0 && HasFineAssemblePieces(*rewrite_it)) {
-            auto index_type = std::make_shared<ScalarType>(DataType::INDEX);
-            auto base_param = std::make_shared<Var>(func->params_[i]->name_hint_ + "__window_base",
-                                                    index_type, func->params_[i]->span_);
-            auto extent_param = std::make_shared<Var>(func->params_[i]->name_hint_ + "__window_extent",
-                                                      index_type, func->params_[i]->span_);
-            auto extent_dim = std::make_shared<Var>(func->params_[i]->name_hint_ + "__window_extent_dyn",
-                                                    index_type, func->params_[i]->span_);
-            new_params.push_back(base_param);
-            new_param_directions.push_back(ParamDirection::In);
-            new_params.push_back(extent_param);
-            new_param_directions.push_back(ParamDirection::In);
-            output_dynamic_base_params_by_old_index.emplace(i, base_param);
-            output_dynamic_extent_params_by_old_index.emplace(i, extent_param);
-            output_dynamic_extent_dims_by_old_index.emplace(i, extent_dim);
-            if (piece_window_shape.empty()) return nullptr;
-            piece_window_shape[0] = extent_dim;
-          }
           auto piece_type =
               MakeWindowTensorType(out_tensor_type, rewrite_it->parent_shape, piece_window_shape);
           if (!piece_type) return nullptr;
@@ -6042,18 +5906,10 @@ class OutWindowExternalizer {
       for (auto& offset : output.local_store_offsets) {
         offset = transform_utils::Substitute(offset, body_subst);
       }
-      for (auto& piece : output.region.dense_pieces) {
-        for (auto& dim : piece.window_shape) {
-          dim = transform_utils::Substitute(dim, body_subst);
-        }
-        for (auto& offset : piece.callsite_offsets) {
-          offset = transform_utils::Substitute(offset, body_subst);
-        }
-        for (auto& offset : piece.local_offsets) {
-          offset = transform_utils::Substitute(offset, body_subst);
-        }
+      for (auto& dim : output.window_shape) {
+        dim = transform_utils::Substitute(dim, body_subst);
       }
-      for (auto& piece : output.assemble_region.dense_pieces) {
+      for (auto& piece : output.region.dense_pieces) {
         for (auto& dim : piece.window_shape) {
           dim = transform_utils::Substitute(dim, body_subst);
         }
