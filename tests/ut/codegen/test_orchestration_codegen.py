@@ -1233,7 +1233,6 @@ class TestOrchestration:
         collapses onto it, so the reader resolves a single enclosing name."""
         code = self._manual_scope_loop_carry_code(fresh_carry=True)
         assert _out_of_scope_tensor_refs(code) == [], code
-        assert _out_of_scope_tensor_refs(code) == [], code
         # The windowed externalization actually fired (exercises Pattern-5).
         assert "produce__windowed" in code, code
         manual_open = code.index("PTO2_SCOPE(PTO2ScopeMode::MANUAL)")
