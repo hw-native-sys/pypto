@@ -158,6 +158,7 @@ def my_kernel(...):
 **何时启用**：观察模型的 swimlane 时间线。如果发现 sibling orchestration tasks 之间有串行化——一个 task 等另一个虽然它们操作同一 buffer 的不同区域——串行化往往是因为依赖分析看到的是全张量而非实际访问的局部窗口。通过显式化局部窗口（`slice → windowed callee → assemble` 模式），编译器能表达更窄的依赖关系，减少或消除串行，提高流水线利用率。
 
 泳道图中典型的线索：
+
 - 同 core 上的相邻 task 本可重叠但实际没有
 - task 执行时间远短于它们之间的间隔
 - TensorMap auto-dependency edges 出现在操作同一 buffer 不同区域的 tasks 之间

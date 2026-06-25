@@ -159,6 +159,7 @@ Only kernels explicitly annotated with `windowize=True` are candidates for Patte
 **When to opt in**: Examine the swimlane timeline of your model. If you observe serialization between sibling orchestration tasks — where one task waits for another despite operating on different regions of the same buffer — the serialization is often caused by dependence analysis seeing the full tensor instead of the narrow region actually accessed. By making the local window explicit (through a `slice → windowed callee → assemble` pattern), the compiler can express narrower dependencies and reduce or eliminate the serialization, improving pipeline utilization.
 
 Typical clues in the swimlane:
+
 - Adjacent tasks on the same core that could overlap but do not
 - Task durations much shorter than the gap between them
 - TensorMap auto-dependency edges linking tasks that access disjoint parts of the same buffer
