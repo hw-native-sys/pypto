@@ -979,8 +979,8 @@ def at(
             ``Arg::set_allow_early_resolve(true)``. Pure scheduling hint.
         name_hint: Optional name hint for the outlined function (must be a
             valid identifier).
-        windowize: Explicitly allow exact local windowization for the outlined
-            InCore kernel. The default is False.
+        windowize: Explicitly allow local windowization for the outlined InCore
+            kernel. The default is False.
 
     Returns:
         Context manager for the appropriate scope.

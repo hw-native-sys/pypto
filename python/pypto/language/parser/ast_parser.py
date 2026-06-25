@@ -3067,7 +3067,7 @@ class ASTParser:
                 raise ParserSyntaxError(
                     "pl.at() windowize must be a boolean literal (True/False)",
                     span=self.span_tracker.get_span(kw.value),
-                    hint="Write windowize=True to allow exact local windowization for this InCore scope.",
+                    hint="Write windowize=True to allow local windowization for this InCore scope.",
                 )
             state.windowize = kw.value.value
         elif kw.arg in _AT_STASH_KWARGS:
