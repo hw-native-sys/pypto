@@ -1061,6 +1061,36 @@ class TestSliceInputStrides:
 class TestOutWindowExternalizer:
     """Pattern 5: static out-window externalization."""
 
+    def test_pl_at_windowize_marks_only_outlined_incore_function(self):
+        program = pl.parse_program(
+            """
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        x: pl.Tensor[[128, 128], pl.FP32],
+        out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+    ) -> pl.Tensor[[128, 128], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP, windowize=True):
+            tile = pl.load(x, [0, 0], [128, 128])
+            result = pl.store(tile, [0, 0], out)
+        return result
+"""
+        )
+
+        for outline_pass in (
+            passes.outline_hierarchy_scopes(),
+            passes.outline_incore_scopes(),
+            passes.outline_cluster_scopes(),
+        ):
+            program = outline_pass(program)
+
+        main = _get_function(program, "main")
+        outlined = _get_function(program, "main_incore_0")
+        assert "windowize" not in main.attrs
+        assert outlined.attrs["windowize"] is True
+
     def test_default_does_not_windowize_without_kernel_attr(self):
         @pl.program
         class Before:

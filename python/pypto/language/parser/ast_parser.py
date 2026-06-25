@@ -4174,7 +4174,9 @@ class ASTParser:
             deps_kw, no_dep_args_kw, dumps_kw, optional_vars, state.allow_early_resolve, span
         )
         scope_attrs = self._append_split_slot_num_attr(scope_attrs, state.split_slot_num)
-        scope_attrs = self._append_windowize_attr(scope_attrs, state.windowize)
+        if state.windowize:
+            scope_attrs = list(scope_attrs) if scope_attrs else []
+            scope_attrs.append(("windowize", True))
 
         # ``with pl.at(...) as tid:`` allocates ``tid`` as an outer-scope Var
         # whose real definition is synthesised later by ``OutlineIncoreScopes``
@@ -4254,17 +4256,6 @@ class ASTParser:
             return attrs
         result: list[tuple[str, Any]] = list(attrs) if attrs else []
         result.append(("slot_num", slot_num))
-        return result
-
-    @staticmethod
-    def _append_windowize_attr(
-        attrs: "list[tuple[str, Any]] | None", windowize: bool
-    ) -> "list[tuple[str, Any]] | None":
-        """Append ``windowize`` only for explicit opt-in scopes."""
-        if not windowize:
-            return attrs
-        result: list[tuple[str, Any]] = list(attrs) if attrs else []
-        result.append(("windowize", True))
         return result
 
     def _parse_at_meta(

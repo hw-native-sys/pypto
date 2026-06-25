@@ -386,7 +386,7 @@ Pass ConvertTensorToTileOps();
 /**
  * @brief Optimize tensor buffer usage in orchestration and InCore functions
  *
- * Five optimization and lowering patterns, applied in order:
+ * Three optimization patterns, applied in order:
  * - Pattern 1 (iter-arg reuse): Merges Out params into In params (promoted
  *   to InOut) when the InCore result feeds back as a ForStmt/WhileStmt
  *   iter-arg, eliminating redundant tensor.create per iteration.
@@ -396,10 +396,6 @@ Pass ConvertTensorToTileOps();
  * - Pattern 3 (assemble-loop rewrite): Rewrites InCore ForStmt loops that
  *   accumulate via tile.assemble to use tile.store directly, initializing
  *   the iter-arg from the Out param.
- * - Pattern 4 (slice input strides): Preserves parent strides when a sliced
- *   tensor is passed to an InCore input.
- * - Pattern 5 (window externalization): Materializes proven local tensor
- *   coverage at call sites for functions explicitly marked windowize.
  *
  * Requirements:
  * - Input IR must have tile ops in InCore functions (run ConvertTensorToTileOps first)

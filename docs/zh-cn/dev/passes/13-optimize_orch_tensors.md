@@ -74,9 +74,6 @@ for i in pl.range(N, init_values=[init_buf]):
 
 ### 模式 5：静态窗口外提（OutWindowExternalizer）
 
-窗口外提默认关闭。Outlined InCore scope 必须通过
-`pl.at(..., windowize=True)` 显式开启；该选项不影响前四个模式。
-
 **问题**：某些 outlined callee 实际只写入大 `Out` 张量中的一个静态可证明局部窗口，或只消费大 `In` 张量中的一个静态可证明局部窗口，但调用点仍传入整块张量。后续依赖分析会把它视为整块缓冲区访问，从而引入不必要的串行化。
 
 **方案**：为 callee 克隆出 `__windowed` 版本，收窄被改写的张量参数类型，并局部化内部 offset。然后在 orchestration callsite 物化局部 slice。输出窗口使用 `slice + __windowed call + assemble`：
@@ -99,7 +96,7 @@ result = self.consumer__windowed(in_window, ...)
 orchestration C++ 在作用域外引用 loop-return SSA 名字。循环体内部的
 loop-carried iter-arg 不会被这样折叠。
 
-显式开启后，本 pass 仍保持保守的 window eligibility。它不会按 `topk` 等算子名字做特判；只有 callee 函数体能证明满足下面的访问模式时，才会 window 化。
+本 pass 有意保持保守的 window eligibility。它不会按 `topk` 等算子名字做特判；只有 callee 函数体能证明满足下面的访问模式时，才会 window 化。
 
 支持的改写形态：
 
@@ -113,7 +110,7 @@ loop-carried iter-arg 不会被这样折叠。
 - 写入必须是静态可证明的局部 `tile.store` 窗口或聚合窗口循环
 - window shape 和 offset 必须足够静态，能够物化为 `tensor.slice`
 - offset 必须是该 pass 可接受的外层循环变量仿射表达式
-- multi-`Out` 中每个可证明的结果独立改写；无法证明的结果保持 full-tensor
+- multi-`Out` 改写采用全有或全无策略
 - 如果同一 callsite 中多个被 externalize 的 `Out` 参数解析到同一个 parent tensor，该 callsite 保持 full-tensor；Pattern 5 不尝试把多个 `tensor.assemble` 串成同一个 parent state
 - 顺序循环 sibling 只有在每个被改写 `Out` 都能证明跨 sibling iteration 不重叠时才改写
 - 同一 scope 内写入同一 parent 或 alias parent tensor 的 sibling writer，只要每个 writer 自身满足静态 output-window eligibility，仍然可以 externalize；但如果同一个 parent 还存在无法 externalize 成 output window 的 sibling full writer（`Out` 或 `InOut`），则写同一 parent 的其他 writer 也保持 full-tensor，避免这个非 window writer 掩盖只被部分初始化的区域

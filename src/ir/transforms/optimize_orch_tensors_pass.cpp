@@ -1898,16 +1898,15 @@ class SliceInputStridesOptimizer {
 class OutWindowExternalizer {
  public:
   static bool IsWindowizeEnabled(const FunctionPtr& func) {
-    if (func) {
-      CHECK(!func->HasAttr("window_policy")) << "kernel attr window_policy belongs to the old window "
-                                                "externalization experiment; use windowize=True";
-      CHECK(!func->HasAttr("window_outputs")) << "kernel attr window_outputs belongs to the old window "
-                                                 "externalization experiment; use windowize=True";
-      CHECK(!func->HasAttr("window_inputs")) << "kernel attr window_inputs belongs to the old window "
-                                                "externalization experiment; use windowize=True";
-      CHECK(!func->HasAttr("window_flow")) << "kernel attr window_flow belongs to the old window "
-                                              "externalization experiment; use windowize=True";
-      return func->GetAttr<bool>("windowize", false);
+    return func && func->GetAttr<bool>("windowize", false);
+  }
+
+  static bool HasWindowizeEnabledFunction(const ProgramPtr& program) {
+    if (!program) return false;
+    for (const auto& [_, func] : program->functions_) {
+      if (func && func->func_type_ == FunctionType::InCore && IsWindowizeEnabled(func)) {
+        return true;
+      }
     }
     return false;
   }
@@ -2010,78 +2009,12 @@ class OutWindowExternalizer {
           stmts_(stmts),
           span_(std::move(span)) {}
 
-    ExprPtr Flatten(const ExprPtr& expr) {
-      auto visited = VisitExpr(expr);
-      if (As<Call>(visited) || As<Submit>(visited)) return ExtractCallToTemp(visited);
-      return visited;
-    }
+    ExprPtr Flatten(const ExprPtr& expr) { return VisitExpr(expr); }
 
    protected:
-    ExprPtr VisitExpr_(const CallPtr& op) override {
-      std::vector<ExprPtr> new_args;
-      new_args.reserve(op->args_.size());
-      bool changed = false;
-      for (const auto& arg : op->args_) {
-        auto visited = VisitExpr(arg);
-        if (As<Call>(visited) || As<Submit>(visited)) {
-          visited = ExtractCallToTemp(visited);
-          changed = true;
-        } else if (visited.get() != arg.get()) {
-          changed = true;
-        }
-        new_args.push_back(visited);
-      }
-      if (!changed) return op;
-      return std::make_shared<Call>(op->op_, new_args, op->kwargs_, op->attrs_, op->GetType(), op->span_);
-    }
+    ExprPtr VisitExpr_(const CallPtr& op) override { return ExtractCallToTemp(IRMutator::VisitExpr_(op)); }
 
-    ExprPtr VisitExpr_(const SubmitPtr& op) override {
-      std::vector<ExprPtr> new_args;
-      new_args.reserve(op->args_.size());
-      bool changed = false;
-      for (const auto& arg : op->args_) {
-        auto visited = VisitExpr(arg);
-        if (As<Call>(visited) || As<Submit>(visited)) {
-          visited = ExtractCallToTemp(visited);
-          changed = true;
-        } else if (visited.get() != arg.get()) {
-          changed = true;
-        }
-        new_args.push_back(visited);
-      }
-      if (!changed) return op;
-      return std::make_shared<Submit>(op->op_, new_args, op->deps_, op->kwargs_, op->attrs_, op->GetType(),
-                                      op->span_, op->core_num_, op->sync_start_, op->allow_early_resolve_);
-    }
-
-    ExprPtr VisitExpr_(const AddPtr& op) override { return ProcessBinaryExpr(op); }
-    ExprPtr VisitExpr_(const SubPtr& op) override { return ProcessBinaryExpr(op); }
-    ExprPtr VisitExpr_(const MulPtr& op) override { return ProcessBinaryExpr(op); }
-    ExprPtr VisitExpr_(const FloorDivPtr& op) override { return ProcessBinaryExpr(op); }
-    ExprPtr VisitExpr_(const FloorModPtr& op) override { return ProcessBinaryExpr(op); }
-    ExprPtr VisitExpr_(const FloatDivPtr& op) override { return ProcessBinaryExpr(op); }
-    ExprPtr VisitExpr_(const MinPtr& op) override { return ProcessBinaryExpr(op); }
-    ExprPtr VisitExpr_(const MaxPtr& op) override { return ProcessBinaryExpr(op); }
-    ExprPtr VisitExpr_(const PowPtr& op) override { return ProcessBinaryExpr(op); }
-    ExprPtr VisitExpr_(const EqPtr& op) override { return ProcessBinaryExpr(op); }
-    ExprPtr VisitExpr_(const NePtr& op) override { return ProcessBinaryExpr(op); }
-    ExprPtr VisitExpr_(const LtPtr& op) override { return ProcessBinaryExpr(op); }
-    ExprPtr VisitExpr_(const LePtr& op) override { return ProcessBinaryExpr(op); }
-    ExprPtr VisitExpr_(const GtPtr& op) override { return ProcessBinaryExpr(op); }
-    ExprPtr VisitExpr_(const GePtr& op) override { return ProcessBinaryExpr(op); }
-    ExprPtr VisitExpr_(const AndPtr& op) override { return ProcessBinaryExpr(op); }
-    ExprPtr VisitExpr_(const OrPtr& op) override { return ProcessBinaryExpr(op); }
-    ExprPtr VisitExpr_(const XorPtr& op) override { return ProcessBinaryExpr(op); }
-    ExprPtr VisitExpr_(const BitAndPtr& op) override { return ProcessBinaryExpr(op); }
-    ExprPtr VisitExpr_(const BitOrPtr& op) override { return ProcessBinaryExpr(op); }
-    ExprPtr VisitExpr_(const BitXorPtr& op) override { return ProcessBinaryExpr(op); }
-    ExprPtr VisitExpr_(const BitShiftLeftPtr& op) override { return ProcessBinaryExpr(op); }
-    ExprPtr VisitExpr_(const BitShiftRightPtr& op) override { return ProcessBinaryExpr(op); }
-    ExprPtr VisitExpr_(const AbsPtr& op) override { return ProcessUnaryExpr(op); }
-    ExprPtr VisitExpr_(const NegPtr& op) override { return ProcessUnaryExpr(op); }
-    ExprPtr VisitExpr_(const NotPtr& op) override { return ProcessUnaryExpr(op); }
-    ExprPtr VisitExpr_(const BitNotPtr& op) override { return ProcessUnaryExpr(op); }
-    ExprPtr VisitExpr_(const CastPtr& op) override { return ProcessUnaryExpr(op); }
+    ExprPtr VisitExpr_(const SubmitPtr& op) override { return ExtractCallToTemp(IRMutator::VisitExpr_(op)); }
 
    private:
     ExprPtr ExtractCallToTemp(const ExprPtr& expr) {
@@ -2091,62 +2024,6 @@ class OutWindowExternalizer {
       stmts_->push_back(std::make_shared<AssignStmt>(temp_var, expr, temp_var->span_));
       return temp_var;
     }
-
-#define PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(OpName)                                                    \
-  ExprPtr ProcessBinaryExpr(const OpName##Ptr& op) {                                                    \
-    auto new_left = VisitExpr(op->left_);                                                               \
-    auto new_right = VisitExpr(op->right_);                                                             \
-    if (As<Call>(new_left) || As<Submit>(new_left)) new_left = ExtractCallToTemp(new_left);             \
-    if (As<Call>(new_right) || As<Submit>(new_right)) new_right = ExtractCallToTemp(new_right);         \
-    if (new_left.get() == op->left_.get() && new_right.get() == op->right_.get()) return op;            \
-    auto scalar_type = As<ScalarType>(op->GetType());                                                   \
-    INTERNAL_CHECK_SPAN(scalar_type, op->span_) << "Generated scalar binary expression must be scalar"; \
-    return std::make_shared<const OpName>(new_left, new_right, scalar_type->dtype_, op->span_);         \
-  }
-
-    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Add)
-    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Sub)
-    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Mul)
-    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(FloorDiv)
-    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(FloorMod)
-    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(FloatDiv)
-    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Min)
-    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Max)
-    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Pow)
-    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Eq)
-    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Ne)
-    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Lt)
-    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Le)
-    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Gt)
-    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Ge)
-    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(And)
-    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Or)
-    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(Xor)
-    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(BitAnd)
-    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(BitOr)
-    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(BitXor)
-    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(BitShiftLeft)
-    PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD(BitShiftRight)
-#undef PYPTO_WINDOW_PROCESS_BINARY_OVERLOAD
-
-#define PYPTO_WINDOW_PROCESS_UNARY_OVERLOAD(OpName)                                                    \
-  ExprPtr ProcessUnaryExpr(const OpName##Ptr& op) {                                                    \
-    auto new_operand = VisitExpr(op->operand_);                                                        \
-    if (As<Call>(new_operand) || As<Submit>(new_operand)) {                                            \
-      new_operand = ExtractCallToTemp(new_operand);                                                    \
-    }                                                                                                  \
-    if (new_operand.get() == op->operand_.get()) return op;                                            \
-    auto scalar_type = As<ScalarType>(op->GetType());                                                  \
-    INTERNAL_CHECK_SPAN(scalar_type, op->span_) << "Generated scalar unary expression must be scalar"; \
-    return std::make_shared<const OpName>(new_operand, scalar_type->dtype_, op->span_);                \
-  }
-
-    PYPTO_WINDOW_PROCESS_UNARY_OVERLOAD(Abs)
-    PYPTO_WINDOW_PROCESS_UNARY_OVERLOAD(Neg)
-    PYPTO_WINDOW_PROCESS_UNARY_OVERLOAD(Not)
-    PYPTO_WINDOW_PROCESS_UNARY_OVERLOAD(BitNot)
-    PYPTO_WINDOW_PROCESS_UNARY_OVERLOAD(Cast)
-#undef PYPTO_WINDOW_PROCESS_UNARY_OVERLOAD
 
     std::string name_prefix_;
     WindowRewriteContext& rewrite_context_;
@@ -6602,8 +6479,8 @@ Pass OptimizeOrchTensors() {
     // Pattern 4: Slice input strides (propagate parent strides to In params)
     auto p4 = SliceInputStridesOptimizer().Run(p3, incore_names);
 
-    // Pattern 5: Static out-window externalization for statically provable
-    // local-window writes in explicitly opted-in outlined callees.
+    // Optional Pattern 5 module: default off unless a kernel explicitly opts in.
+    if (!OutWindowExternalizer::HasWindowizeEnabledFunction(p4)) return p4;
     return OutWindowExternalizer().Run(p4);
   };
 
