@@ -75,9 +75,11 @@ struct LifetimeAnalysisResult {
   std::map<const Var*, std::pair<int, int>> var_liveness;
   /// Pipeline-stage membership per reuse-interval representative
   /// (``LifetimeInterval::variable``), read from the defining ``Call``'s
-  /// ``pipeline_membership`` attr. Empty for non-pipelined tiles. Consumed by
-  /// ``IdentifyReuseOpportunities`` to forbid cross-stage buffer coalescing.
-  std::map<const Var*, std::string> pipeline_membership;
+  /// ``pipeline_membership`` attr, parsed once into ``(group, stage)`` pairs so
+  /// the O(N²) reuse packer never re-parses strings. Empty for non-pipelined
+  /// tiles. Consumed by ``IdentifyReuseOpportunities`` to forbid cross-stage
+  /// buffer coalescing.
+  std::map<const Var*, std::vector<std::pair<int32_t, int32_t>>> pipeline_membership;
   /// Subset of ``pipeline_membership`` keys whose tile is produced by a *load*
   /// (``tile.load`` / ``tile.read``) rather than a compute op. Cross-stage reuse
   /// is forbidden whenever *either* tile is a load (a load buffer must stay
@@ -1090,10 +1092,10 @@ LifetimeAnalysisResult ComputeLifetimes(const StmtPtr& func_body) {
   // Step 3: Compute lifetime intervals (with MemRef sharing group merging)
   std::set<VarPtr> processed_vars;
 
-  // Pipeline-stage membership per interval representative (read from the
+  // Pipeline-stage membership per interval representative (parsed once from the
   // defining Call's pipeline_membership attr, set by LowerPipelineLoops), plus
   // the subset whose defining op is a load (vs compute).
-  std::map<const Var*, std::string> pipeline_membership;
+  std::map<const Var*, std::vector<std::pair<int32_t, int32_t>>> pipeline_membership;
   std::set<const Var*> pipeline_load_tiles;
 
   for (const auto& var : result.ordered_defs) {
@@ -1157,7 +1159,9 @@ LifetimeAnalysisResult ComputeLifetimes(const StmtPtr& func_body) {
       if (!call) continue;
       auto packed = call->GetAttr<std::string>(kPipelineMembershipAttr, std::string());
       if (!packed.empty()) {
-        pipeline_membership[interval.variable.get()] = std::move(packed);
+        // Parse the membership string once here; the packer compares pre-parsed
+        // vectors so it never re-parses in its O(N²) pairwise loop.
+        pipeline_membership[interval.variable.get()] = ParsePipelineMembership(packed);
         const std::string& op_name = call->op_ ? call->op_->name_ : std::string();
         if (op_name == "tile.load" || op_name == "tile.read") {
           pipeline_load_tiles.insert(interval.variable.get());
@@ -1439,7 +1443,7 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
     const ForbidAliasMap& forbid_alias, const std::map<const Var*, std::set<int>>& phi_family_ids,
     const std::map<VarPtr, std::vector<VarPtr>>& sharing_groups,
     const std::map<const Var*, std::pair<int, int>>& var_liveness,
-    const std::map<const Var*, std::string>& pipeline_membership,
+    const std::map<const Var*, std::vector<std::pair<int32_t, int32_t>>>& pipeline_membership,
     const std::set<const Var*>& pipeline_load_tiles) {
   std::map<VarPtr, VarPtr> reuse_map;
 

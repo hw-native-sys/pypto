@@ -15,6 +15,7 @@
 #include <any>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -91,16 +92,35 @@ inline std::string AppendPipelineMembership(const std::string& packed, int32_t g
 }
 
 /// Parse a ``pipeline_membership`` string into ``(group, stage)`` pairs.
+///
+/// Non-throwing: a token that is not exactly ``<int>:<int>`` is skipped rather
+/// than aborting. The strings this pass emits are always well-formed, but the
+/// attr can be re-attached from a hand-written ``attrs={...}`` on round-trip, so
+/// a malformed value degrades gracefully instead of terminating the compiler
+/// with an uncaught ``std::stol`` exception.
 inline std::vector<std::pair<int32_t, int32_t>> ParsePipelineMembership(const std::string& packed) {
   std::vector<std::pair<int32_t, int32_t>> out;
+  auto try_parse_int = [](const std::string& s, int32_t* out_val) -> bool {
+    try {
+      size_t consumed = 0;
+      long v = std::stol(s, &consumed);
+      if (consumed != s.size()) return false;  // reject trailing garbage (e.g. "12abc")
+      *out_val = static_cast<int32_t>(v);
+      return true;
+    } catch (const std::exception&) {
+      return false;  // empty / non-numeric / out-of-range
+    }
+  };
   size_t i = 0;
   while (i < packed.size()) {
     size_t semi = packed.find(';', i);
     std::string tok = packed.substr(i, semi == std::string::npos ? std::string::npos : semi - i);
     size_t colon = tok.find(':');
-    if (colon != std::string::npos) {
-      out.emplace_back(static_cast<int32_t>(std::stol(tok.substr(0, colon))),
-                       static_cast<int32_t>(std::stol(tok.substr(colon + 1))));
+    int32_t g = 0;
+    int32_t s = 0;
+    if (colon != std::string::npos && try_parse_int(tok.substr(0, colon), &g) &&
+        try_parse_int(tok.substr(colon + 1), &s)) {
+      out.emplace_back(g, s);
     }
     if (semi == std::string::npos) break;
     i = semi + 1;
@@ -108,15 +128,14 @@ inline std::vector<std::pair<int32_t, int32_t>> ParsePipelineMembership(const st
   return out;
 }
 
-/// True when two ``pipeline_membership`` strings conflict: they share a common
-/// group id with *different* stage indices. Such tiles belong to the same
+/// True when two pre-parsed ``pipeline_membership`` lists conflict: they share a
+/// common group id with *different* stage indices. Such tiles belong to the same
 /// replicated region but to clones meant to run concurrently, so they must not
-/// share a buffer. O(A·B) over the (tiny — bounded by pipeline nesting depth)
-/// member lists.
-inline bool PipelineMembershipsConflict(const std::string& a, const std::string& b) {
-  if (a.empty() || b.empty()) return false;
-  auto pa = ParsePipelineMembership(a);
-  auto pb = ParsePipelineMembership(b);
+/// share a buffer. Takes pre-parsed vectors (parsed once in ComputeLifetimes) so
+/// the O(N²) reuse packer never re-parses strings. O(A·B) over the (tiny —
+/// bounded by pipeline nesting depth) member lists.
+inline bool PipelineMembershipsConflict(const std::vector<std::pair<int32_t, int32_t>>& pa,
+                                        const std::vector<std::pair<int32_t, int32_t>>& pb) {
   for (const auto& [ga, sa] : pa) {
     for (const auto& [gb, sb] : pb) {
       if (ga == gb && sa != sb) return true;

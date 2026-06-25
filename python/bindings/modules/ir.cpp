@@ -681,6 +681,7 @@ void BindIR(nb::module_& m) {
         // op-call attrs (e.g. `pipeline_membership`) that the printer surfaced
         // as `attrs={...}`; op DSL wrappers / IR builders take no attrs param,
         // so the parser builds the call first, then layers attrs on here.
+        if (!call) throw pypto::ValueError("set_call_attrs: call must not be None");
         auto attrs = ConvertAttrsFromPython(attrs_dict);
         return std::make_shared<Call>(call->op_, call->args_, call->kwargs_, attrs, call->GetType(),
                                       call->span_);
