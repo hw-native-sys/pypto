@@ -32,6 +32,20 @@ def _run_pass(program: ir.Program) -> ir.Program:
     return passes.canonicalize_io_order()(program)
 
 
+def _loop_op_order(program: ir.Program) -> list[str]:
+    """Return the load/compute/store op sequence of the (single) tile loop body."""
+    txt = ir.python_print(program)
+    order: list[str] = []
+    for line in txt.splitlines():
+        if "pl.tile.load(" in line:
+            order.append("load")
+        elif "pl.tile.add(" in line:
+            order.append("compute")
+        elif "pl.tile.store(" in line:
+            order.append("store")
+    return order
+
+
 class TestCanonicalizeIOOrder:
     """Before/Expected pairs verifying the priority-aware topological reorder."""
 
@@ -65,6 +79,36 @@ class TestCanonicalizeIOOrder:
 
         After = _run_pass(Before)
         ir.assert_structural_equal(After, Expected)
+
+    def test_lowered_pipeline_orders_compute_store_per_stage(self):
+        """Once LowerPipelineLoops tags each clone with ``pipeline_membership``,
+        the compute/store tier emits *per stage* — ``load load compute store
+        compute store`` — so each stage stores its output right after its compute
+        (freeing the buffer before the next stage) rather than the stage-blind
+        ``load load compute compute store store``."""
+
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(
+                self,
+                x: pl.Tensor[[512], pl.FP32],
+                out: pl.Out[pl.Tensor[[512], pl.FP32]],
+            ) -> pl.Tensor[[512], pl.FP32]:
+                for i in pl.pipeline(0, 4, 1, stage=2):
+                    t: pl.Tile[[128], pl.FP32, pl.MemorySpace.Vec] = pl.tile.load(
+                        x, [i * 128], [128], [128], target_memory=pl.MemorySpace.Vec
+                    )
+                    u: pl.Tile[[128], pl.FP32, pl.MemorySpace.Vec] = pl.tile.add(t, t)
+                    _r: pl.Tensor[[512], pl.FP32] = pl.tile.store(u, [i * 128], out)
+                return x
+
+        # LowerPipelineLoops replicates + tags the two clones; CanonicalizeIOOrder
+        # then orders the compute/store tier by stage.
+        After = passes.canonicalize_io_order()(passes.lower_pipeline_loops()(Before))
+        assert _loop_op_order(After) == ["load", "load", "compute", "store", "compute", "store"], (
+            _loop_op_order(After)
+        )
 
     def test_scalar_offset_lifts_above_independent_load(self):
         """Scalar compute lifts above loads (cat 0 < cat 1) while still preceding

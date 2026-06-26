@@ -1,10 +1,10 @@
 # CanonicalizeIOOrder Pass
 
-Scoped to `SeqStmts` **inside a `ForKind::Pipeline` body**, reorders statements along a **same-core hardware-unit stage ladder** (scalar → load → compute → store) — subject to the SSA dependency graph — so that each stage clusters across the replicated clones produced by `LowerPipelineLoops`. Clustering keeps sibling-iteration tiles co-live, which is what enables ping-pong (double-buffering). Cross-core (cube/vector) pipelines are software-pipelined upstream by [`SkewCrossCorePipeline`](26-skew_cross_core_pipeline.md) and reach this pass as `ForKind::Sequential`, so there is no cross-core handling here. Loops that are not pipelined are left untouched.
+Scoped to `SeqStmts` **inside a `ForKind::Pipeline` body**, reorders statements along a **same-core hardware-unit stage ladder** (scalar → load → compute → store) — subject to the SSA dependency graph. Clustering the replicated clones' loads up front issues both stages' prefetches before the computes, so the MTE load engine runs ahead of the Vector/Cube compute engine (double-buffer overlap); the compute/store tier is then ordered by pipeline **stage** so each stage stores its output right after its compute. Note: buffer *separation* between stages is no longer a side effect of this clustering — it is an explicit [`MemoryReuse`](31-memory_reuse.md) constraint (`pipeline_membership`); this pass only shapes the **schedule**. Cross-core (cube/vector) pipelines are software-pipelined upstream by [`SkewCrossCorePipeline`](26-skew_cross_core_pipeline.md) and reach this pass as `ForKind::Sequential`, so there is no cross-core handling here. Loops that are not pipelined are left untouched.
 
 ## Overview
 
-After `LowerPipelineLoops` produces an outer `ForStmt` (kind=Pipeline marker) whose body is a `SeqStmts` of `F` cloned bodies, the natural emission order is `[scalar_0, load_0, compute_0, store_0, scalar_1, load_1, compute_1, store_1, …]` (each clone's address arithmetic precedes its own load). With this layout, sibling clones' tile live ranges are sequential — `MemoryReuse` happily coalesces them into a single buffer, defeating ping-pong.
+After `LowerPipelineLoops` produces an outer `ForStmt` (kind=Pipeline marker) whose body is a `SeqStmts` of `F` cloned bodies, the natural emission order is `[scalar_0, load_0, compute_0, store_0, scalar_1, load_1, compute_1, store_1, …]` (each clone's address arithmetic precedes its own load). In that layout each clone's load is issued only after the previous clone's store, so the MTE load engine cannot run ahead of the compute engine — no prefetch overlap.
 
 This pass reorders `SeqStmts` **inside a `ForKind::Pipeline` body** (including nested `IfStmt` branch bodies inside the pipeline scope) so:
 
@@ -13,7 +13,7 @@ This pass reorders `SeqStmts` **inside a `ForKind::Pipeline` body** (including n
 - Tile compute statements settle in the middle.
 - Each `tile.store` / `tile.write` sinks to the latest position the dependency graph permits.
 
-The result is `[scalars…, loads…, tile compute…, stores…]` whenever the dataflow allows. Within replicated regions, sibling clones' input tiles become co-live near the top and output tiles become co-live near the bottom — `MemoryReuse` cannot coalesce them, so each clone keeps its own MemRef and ping-pong buffering becomes possible.
+The result is `[scalars…, loads…, per-stage (compute, store)…]` whenever the dataflow allows — e.g. a `stage=2` body emits `load load compute_s0 store_s0 compute_s1 store_s1`. Clustering the loads gives prefetch overlap (the MTE engine runs ahead); ordering the compute/store tier by stage means each stage's output is stored right after its compute, freeing that buffer before the next stage and cutting both on-chip pressure and the cross-iteration load↔store coupling. Buffer separation between stages is enforced separately by `MemoryReuse` (see [31-memory_reuse.md](31-memory_reuse.md)).
 
 Lifting scalar compute is what unlocks the load cluster: without it, each clone's address-arithmetic assign would be classified as ordinary compute and rank by original position — interleaving between sibling loads and pinning them in their original groups. With scalar compute as the highest-priority category, all sibling clones' address arithmetic emits first, all dependent loads become ready together, and the loads naturally cluster.
 
@@ -51,7 +51,7 @@ A priority-aware stable topological sort applied to every `SeqStmts` of two or m
 
 Cross-core `tpush`/`tpop` carry no special category — they fall through to `TileCompute` and keep their program order among siblings (cross-core software-pipelining is done upstream by [`SkewCrossCorePipeline`](26-skew_cross_core_pipeline.md); see *Cross-core (AIC↔AIV)* above).
 
-At each step, among statements whose predecessors are all already emitted (`ready`), the pass emits the one with the smallest `(category, original_index)`. Stores naturally sort last because `Store` is the largest category — they are only emitted once nothing else is ready.
+At each step, among statements whose predecessors are all already emitted (`ready`), the pass emits the one with the smallest `(tier, stage, sub, original_index)` — where `tier` is 0 for scalar compute, 1 for load, 2 for tile-compute/store; `stage` is the statement's `pipeline_membership` (so a tile def, and the store that consumes it, share a stage); and `sub` is 0 for compute, 1 for store. Loads (tier 1) thus cluster before all compute/store, and within the compute/store tier each stage's compute precedes its store before the next stage begins. Non-pipeline regions carry no membership (`stage` empty), so the tier/sub ordering reduces to the prior scalar → load → compute → store ladder.
 
 Worked example — input `[scalar_0, load_0, compute_0, store_0, scalar_1, load_1, compute_1, store_1]` with each clone's load reading its scalar, each compute reading its load, each store reading both its scalar and compute:
 
@@ -112,20 +112,20 @@ for i in pl.range(0, 8, 4):  # kind=Sequential
     tile_x_2 = pl.tile.load(input_a, [off_2], [128])
     tile_x_3 = pl.tile.load(input_a, [off_3], [128])
     tile_y_0 = pl.tile.add(tile_x_0, 1.0)
-    tile_y_1 = pl.tile.add(tile_x_1, 1.0)
-    tile_y_2 = pl.tile.add(tile_x_2, 1.0)
-    tile_y_3 = pl.tile.add(tile_x_3, 1.0)
     pl.tile.store(tile_y_0, [off_0], output)
+    tile_y_1 = pl.tile.add(tile_x_1, 1.0)
     pl.tile.store(tile_y_1, [off_1], output)
+    tile_y_2 = pl.tile.add(tile_x_2, 1.0)
     pl.tile.store(tile_y_2, [off_2], output)
+    tile_y_3 = pl.tile.add(tile_x_3, 1.0)
     pl.tile.store(tile_y_3, [off_3], output)
 ```
 
-All four `off_k` lift first to unblock the loads. All four `tile_x_k` are now co-live up to the last load, and all four `tile_y_k` are co-live up to the first store. `MemoryReuse` (running next) cannot merge them — each gets a distinct MemRef.
+All four `off_k` lift first to unblock the loads, which then cluster (prefetch overlap — the MTE engine runs ahead of compute). The compute/store tier is ordered by stage, so each `tile_y_k` is stored right after its compute, freeing that output buffer before the next stage. The buffers' stage *separation* (each clone keeping a distinct MemRef) is enforced by `MemoryReuse` via `pipeline_membership`, not by this ordering.
 
 ## Related
 
 - [`LowerPipelineLoops`](27-lower_pipeline_loops.md) — upstream producer of replicated regions that benefit from this pass; leaves `ForKind::Pipeline` as the scope marker this pass consumes
 - [`MaterializeTensorStrides`](29-materialize_tensor_strides.md) — runs immediately after this pass (when inserted into the default pipeline); fills implicit `TensorView` strides before `InitMemRef` consumes them
-- [`MemoryReuse`](31-memory_reuse.md) — runs after this pass; benefits from the co-live tiles in replicated regions
+- [`MemoryReuse`](31-memory_reuse.md) — runs after this pass; enforces stage buffer separation explicitly via `pipeline_membership` (this pass only shapes the schedule)
 - RFC #1026 / PR #1029 — InOut-use discipline + dependency analysis utility

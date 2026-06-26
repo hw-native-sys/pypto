@@ -15,6 +15,7 @@
 #include <memory>
 #include <queue>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -23,6 +24,7 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
@@ -43,15 +45,18 @@ namespace {
 ///
 /// This is a **hardware-unit stage ladder** for SAME-CORE pipelines: statements
 /// are ordered by the unit they cross along the dataflow, scalar → MTE-load →
-/// CUBE/Vec compute → MTE-store. Clustering same-stage statements across the
-/// replicated clones of a pipeline body keeps sibling-iteration tiles *co-live*,
-/// which is exactly what prevents ``MemoryReuse`` from coalescing them into a
-/// single buffer — preserving the ping-pong (double-buffering) the event-based
-/// scheduler needs to run iteration ``i+1``'s stage-k concurrently with iteration
-/// ``i``'s stage-(k+1). Cross-core (cube/vector) pipelines are software-pipelined
-/// upstream by ``SkewCrossCorePipeline`` (which leaves them ``ForKind::Sequential``,
-/// so this pass never sees a cross-core Pipeline body); there is no cross-core
-/// tier here.
+/// CUBE/Vec compute → MTE-store. Clustering the loads of a replicated pipeline
+/// body up front issues both stages' prefetches before the computes, so the
+/// MTE load engine runs ahead of the Vector/Cube compute engine (double-buffer
+/// overlap). The compute/store tier additionally orders by pipeline *stage*
+/// (see ``ReorderRegion``) so each stage stores its output right after its
+/// compute, freeing that buffer before the next stage. Stage *separation* of
+/// the buffers themselves is no longer a side effect of this clustering — it is
+/// now an explicit ``MemoryReuse`` constraint (``pipeline_membership``); this
+/// pass only shapes the *schedule*. Cross-core (cube/vector) pipelines are
+/// software-pipelined upstream by ``SkewCrossCorePipeline`` (which leaves them
+/// ``ForKind::Sequential``, so this pass never sees a cross-core Pipeline body);
+/// there is no cross-core tier here.
 ///
 /// ``ScalarCompute`` sits above ``Load`` so that address-arithmetic assigns
 /// (e.g. ``k = i * 512``) — the typical predecessors of a tile.load offset —
@@ -163,12 +168,14 @@ bool IsTerminator(const StmtPtr& stmt) {
  * @brief Mutator that reorders every multi-stmt ``SeqStmts`` in the program.
  *
  * Layered priority (top → bottom) is a same-core hardware-unit stage ladder:
- * scalar compute, loads, tile compute, stores — all subject to the dependency
- * graph. Lifting scalar compute (typically address arithmetic) above loads
- * ensures sibling clones' loads become ready together and cluster at the top —
- * the layout ``MemoryReuse`` needs for ping-pong. (Cross-core cube/vector
- * pipelines are software-pipelined upstream by ``SkewCrossCorePipeline`` and reach
- * this pass as ``ForKind::Sequential``, so there is no cross-core handling here.)
+ * scalar compute, loads, then tile compute / stores ordered per pipeline stage
+ * — all subject to the dependency graph. Lifting scalar compute (typically
+ * address arithmetic) above loads ensures sibling clones' loads become ready
+ * together and cluster at the top (prefetch overlap); ordering compute/store by
+ * stage keeps each stage's output store next to its compute. (Cross-core
+ * cube/vector pipelines are software-pipelined upstream by ``SkewCrossCorePipeline``
+ * and reach this pass as ``ForKind::Sequential``, so there is no cross-core
+ * handling here.)
  *
  * Soundness precondition (InOut-use discipline) is validated once per function
  * by the driver before the mutator runs, so per-region checks are unnecessary
@@ -243,7 +250,7 @@ class CanonicalizeIOOrderMutator : public IRMutator {
   ///
   /// Complexity: O(N log N + E) per region — the dependency graph is built
   /// once, successors/in-degrees are filled in a single linear pass, and the
-  /// ready set is maintained as a min-heap keyed by (category, index).
+  /// ready set is maintained as a min-heap keyed by (tier, stage, sub, index).
   /// N is the number of top-level stmts in the region; E is the number of
   /// def-use edges produced by ``BuildStmtDependencyGraph`` (equal to the
   /// region's total variable uses, and so O(N²) in the pathological worst
@@ -291,14 +298,64 @@ class CanonicalizeIOOrderMutator : public IRMutator {
       }
     }
 
-    // Ready-set as a min-heap keyed by (category, original_index). Emitting the
-    // smallest category first gives the hardware-unit stage layout top-to-bottom:
-    // ``ScalarCompute`` (0), ``Load`` (1), ``TileCompute`` (2), ``Store`` (3).
-    // Using the original index as the tiebreaker keeps the sort stable within each
-    // tier (which preserves per-pipe FIFO order among sibling loads/stores).
-    using HeapKey = std::pair<int, size_t>;
+    // Per-statement pipeline stage, read from the ``pipeline_membership`` attr
+    // LowerPipelineLoops puts on each clone's tile-producing Call (still present
+    // here — MemoryReuse strips it later). A statement's stage is the membership
+    // of the tile it defines, or — for a store / non-tagged compute — the
+    // membership of the first tile operand it reads. Empty for non-pipeline code.
+    std::unordered_map<const Var*, std::string> tile_stage;
+    for (size_t i = 0; i < sort_count; ++i) {
+      if (auto a = std::dynamic_pointer_cast<const AssignStmt>(stmts[i])) {
+        if (auto c = std::dynamic_pointer_cast<const Call>(a->value_)) {
+          auto m = c->GetAttr<std::string>(kPipelineMembershipAttr, std::string());
+          if (!m.empty()) tile_stage[a->var_.get()] = std::move(m);
+        }
+      }
+    }
+    auto stage_of_call_inputs = [&](const Call& c) -> std::string {
+      for (const auto& arg : c.args_) {
+        if (auto v = AsVarLike(arg)) {
+          auto it = tile_stage.find(v.get());
+          if (it != tile_stage.end()) return it->second;
+        }
+      }
+      return {};
+    };
+    auto stage_key = [&](const StmtPtr& s) -> std::string {
+      if (auto a = std::dynamic_pointer_cast<const AssignStmt>(s)) {
+        auto it = tile_stage.find(a->var_.get());
+        if (it != tile_stage.end()) return it->second;  // tile def carries its own
+        if (auto c = std::dynamic_pointer_cast<const Call>(a->value_)) return stage_of_call_inputs(*c);
+        return {};
+      }
+      if (auto e = std::dynamic_pointer_cast<const EvalStmt>(s)) {
+        if (auto c = std::dynamic_pointer_cast<const Call>(e->expr_)) return stage_of_call_inputs(*c);
+      }
+      return {};
+    };
+
+    // Ready-set as a min-heap keyed by (tier, stage, sub, original_index):
+    //   tier 0 ScalarCompute, tier 1 Load, tier 2 TileCompute/Store.
+    // Scalars (address arith) lift to the top so sibling-clone loads become
+    // ready together; loads then cluster (prefetch / double-buffering). Within
+    // the compute/store tier we order by *stage* first, then compute (sub 0)
+    // before store (sub 1) — so a replicated ``pl.pipeline`` body emits
+    // ``load… compute_s0 store_s0 compute_s1 store_s1`` rather than
+    // ``load… compute_s0 compute_s1 store_s0 store_s1``. Storing each stage's
+    // output right after its compute frees that output buffer before the next
+    // stage, cutting on-chip pressure and the cross-iteration load↔store
+    // coupling. The original index is the final tiebreaker (stable FIFO).
+    using HeapKey = std::tuple<int, std::string, int, size_t>;
     std::priority_queue<HeapKey, std::vector<HeapKey>, std::greater<>> ready;
-    auto key_for = [&](size_t i) -> HeapKey { return {static_cast<int>(cats[i]), i}; };
+    std::vector<int> tier(sort_count);
+    std::vector<int> sub(sort_count);
+    std::vector<std::string> stage(sort_count);
+    for (size_t i = 0; i < sort_count; ++i) {
+      tier[i] = (cats[i] == IOCategory::ScalarCompute) ? 0 : (cats[i] == IOCategory::Load) ? 1 : 2;
+      sub[i] = (cats[i] == IOCategory::Store) ? 1 : 0;
+      if (tier[i] == 2) stage[i] = stage_key(stmts[i]);
+    }
+    auto key_for = [&](size_t i) -> HeapKey { return {tier[i], stage[i], sub[i], i}; };
     for (size_t i = 0; i < sort_count; ++i) {
       if (remaining[i] == 0) ready.push(key_for(i));
     }
@@ -306,7 +363,7 @@ class CanonicalizeIOOrderMutator : public IRMutator {
     std::vector<StmtPtr> out;
     out.reserve(N);
     while (!ready.empty()) {
-      size_t i = ready.top().second;
+      size_t i = std::get<3>(ready.top());
       ready.pop();
       out.push_back(stmts[i]);
       for (size_t j : successors[i]) {
