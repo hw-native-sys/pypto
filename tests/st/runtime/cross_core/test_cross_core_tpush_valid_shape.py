@@ -153,7 +153,6 @@ class C2VTpushValidShapeTestCase(PTOTestCase):
 
 
 SV_VALID_COLS = 8  # vector-side set_validshape narrows columns; rows stay full (= ROWS)
-SV_HALF_ROWS = ROWS // 2  # UP_DOWN split: each AIV subblock owns half the rows
 
 
 class V2SetValidShapeOnVectorTestCase(PTOTestCase):
@@ -223,7 +222,6 @@ class V2SetValidShapeOnVectorTestCase(PTOTestCase):
                 c2v_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=BUFFER_SIZE_BYTES, base=0x2000)
                 pl.aiv_initialize_pipe(dir_mask=1, slot_size=SLOT_SIZE_BYTES, c2v_consumer_buf=c2v_buf)
 
-                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
                 popped: pl.Tile[[ROWS, COLS], pl.FP32, pl.Mem.Vec, pl.TileView()] = pl.tpop_from_aic(split=1)
                 # set_validshape requires a locally allocated source tile (PTOAS
                 # rejects a raw tpop/FIFO-slot tile), so narrow a compute result.
@@ -236,7 +234,10 @@ class V2SetValidShapeOnVectorTestCase(PTOTestCase):
                     pl.TileView(valid_shape=[ROWS, SV_VALID_COLS]),
                 ] = pl.tile.set_validshape(incremented, ROWS, SV_VALID_COLS)
                 pl.tfree_to_aic(popped)
-                return pl.store(narrowed, [subblock_idx * SV_HALF_ROWS, 0], output)
+                # Offset [0, 0]: SplitVectorKernel adds the per-subblock row
+                # offset, so lane 0 writes rows [0,8) and lane 1 writes [8,16).
+                out_store: pl.Tensor[[ROWS, COLS], pl.FP32] = pl.store(narrowed, [0, 0], output)
+                return out_store
 
             @pl.function(type=pl.FunctionType.Group, attrs={"split": pl.SplitMode.UP_DOWN})
             def group_func(
