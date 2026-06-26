@@ -565,13 +565,15 @@ output_dir/
 | `TensorType` | `Tensor*` -> `buffer.addr` -> 带类型指针 |
 | `ScalarType` | `uint64_t` -> 联合体解码 -> 带类型值 |
 
-### SPMD Block 身份参数
+### SPMD 身份参数
 
-`tile.get_block_idx()` 和 `tile.get_block_num()` 在 codegen 阶段被降阶为两个
-合成 `i32` 形参，PTOCodegen 把它们**追加到** `func.func` 签名末尾，并使用
-有意义的命名 SSA(`%__pypto_spmd_block_idx`、`%__pypto_spmd_block_num`)。
-这两个 op 的 IR 契约不变 -- 合成形参只出现在生成的 MLIR / C++ 中，绝不进入
-`Function.params`。
+`tile.get_block_idx()`、`tile.get_block_num()` 和 `tile.get_subblock_idx()`
+在 codegen 阶段被降阶为合成 `i32` 形参，PTOCodegen 把它们**追加到**
+`func.func` 签名末尾，并使用有意义的命名 SSA(`%__pypto_spmd_block_idx`、
+`%__pypto_spmd_block_num`、`%__pypto_spmd_subblock_idx`)。这些 op 的 IR
+契约不变 -- 合成形参只出现在生成的 MLIR / C++ 中，绝不进入
+`Function.params`。追加顺序固定为 `block_idx, block_num, subblock_idx`，
+并各自根据函数实际使用的 op 独立决定是否追加。
 
 ```mlir
 func.func @spmd_kernel(%arg0: !pto.ptr<f32>, %arg1: !pto.ptr<f32>,
@@ -601,12 +603,25 @@ void kernel_entry(__gm__ int64_t* args) {
 }
 ```
 
+**subblock_idx(AIV lane)。** `tile.get_subblock_idx()` 走相同的合成形参通道:
+wrapper 从 `intrinsic.h::get_sub_block_id(args)`(调度器写入
+`GlobalContext.sub_block_id` 的运行时 per-core lane id)解析出值,并把
+`__pypto_spmd_subblock_idx` 追加在 block 身份实参之后。它刻意读取运行时
+lane id,而非 ccec `get_subblockid()` 寄存器 -- 后者在
+`tensormap_and_ringbuffer` 调度下返回过期值。这与 A2A3 dual-AIV wrapper 为
+ptoas **内部** pipe-slot 偏移安装的 `get_subblockid()` 宏桥接
+(`pypto_runtime_subblock_id`)相互独立、并存。与 block 身份一样,它无条件发射
+(无 `__CPU_SIM` 分叉),因为 `GlobalContext.sub_block_id` 在每个平台都由调度器
+填充。
+
 **检测范围。** 两层各自基于函数体独立检测 SPMD usage:
 
-- `FunctionUsesSpmdBlockOps`(C++，位于 `src/codegen/pto/pto_codegen.cpp`)
-  决定 PTOCodegen 是否给该函数签名追加两个形参。
-- `_uses_spmd_block_ops`(Python，位于 `python/pypto/backend/pto_backend.py`)
-  决定 wrapper 是否把这两个局部变量追加到对内函数调用末尾。
+- `MemRefCollectorVisitor::UsesSpmdBlockOps` / `UsesSubblockOp`(C++，位于
+  `src/codegen/pto/pto_codegen.cpp`)决定 PTOCodegen 是否给该函数签名追加
+  block / subblock 形参。
+- `_uses_spmd_block_ops` / `_uses_dynamic_subblock_id`(Python，位于
+  `python/pypto/backend/pto_backend.py`)决定 wrapper 是否把相应局部变量追加到
+  对内函数调用末尾。
 
 对于 SPMD 组内自身不调用 `tile.get_block_*` 的 sibling 函数
 (`group_uses_spmd=True` 但函数本身不用 SPMD ops)，wrapper 仍会声明这两个

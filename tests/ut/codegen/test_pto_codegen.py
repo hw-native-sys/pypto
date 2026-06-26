@@ -32,6 +32,7 @@ from pypto.backend.pto_backend import (
     _generate_kernel_wrapper,
     _get_error_summary,
     _preprocess_ptoas_output,
+    _uses_dynamic_subblock_id,
     generate,
 )
 from pypto.ir import OptimizationStrategy, PassManager
@@ -1415,6 +1416,35 @@ class TestGenerateKernelWrapper:
         # Call site does not append block args.
         assert "__pypto_spmd_block_idx" not in wrapper.split("plain_kernel(", 1)[1].split(");")[0]
 
+    def test_subblock_wrapper_reads_runtime_lane_and_appends_subblock_arg(self):
+        # tile.get_subblock_idx now flows through the synthetic-param channel:
+        # the wrapper reads the runtime lane id via get_sub_block_id(args) and
+        # appends it as a trailing call arg — independent of (and in addition
+        # to) the get_subblockid() macro bridge used for ptoas-internal pipe
+        # slot offsets.
+        @pl.program
+        class SubblockWrapperProgram:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"dual_aiv_dispatch": True})
+            def subblock_vec(
+                self,
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                pl.tile.get_subblock_idx()
+                zero_tile: pl.Tile[[16, 16], pl.FP32] = pl.tile.full([16, 16], dtype=pl.FP32, value=0.0)
+                updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(zero_tile, [0, 0], out)
+                return updated
+
+        func = SubblockWrapperProgram.get_function("subblock_vec")
+        assert func is not None
+
+        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
+        # Plain local sourced from the runtime lane accessor (no __CPU_SIM fork,
+        # no [[block_local]] storage for the op's own value).
+        assert "int32_t __pypto_spmd_subblock_idx = get_sub_block_id(args);" in wrapper
+        # Appended as the trailing call arg.
+        assert "__pypto_spmd_subblock_idx);" in wrapper
+        assert "subblock_vec(" in wrapper
+
 
 def test_pto_codegen_spmd_block_params_appended_with_named_ssas():
     """tile.get_block_idx/num lower to arith.index_cast of two named i32 params
@@ -1455,6 +1485,67 @@ def test_pto_codegen_spmd_block_params_appended_with_named_ssas():
     spmd_idx_pos = signature_line.find("%__pypto_spmd_block_idx")
     assert arg0_pos != -1 and spmd_idx_pos != -1
     assert spmd_idx_pos > arg0_pos, f"SPMD param must come after user params: {signature_line}"
+
+
+def test_pto_codegen_spmd_subblock_param_appended_with_named_ssa():
+    """tile.get_subblock_idx lowers to arith.index_cast of a named i32 param
+    appended at the end of the func.func signature (sourced at runtime from
+    intrinsic.h::get_sub_block_id(args)), NOT the ccec pto.get_subblock_idx."""
+
+    @pl.program
+    class SubblockCodegenProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def subblock_func(
+            self,
+            a: pl.Tensor[[32, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[32, 16], pl.FP32]],
+        ) -> pl.Tensor[[32, 16], pl.FP32]:
+            lane = pl.tile.get_subblock_idx()
+            offset = lane * 16
+            tile_a = pl.load(a, [offset, 0], [16, 16])
+            out = pl.store(tile_a, [offset, 0], out)
+            return out
+
+    mlir = _generate_default_mlir(SubblockCodegenProgram)
+    # The synthetic subblock param is appended with a named SSA.
+    assert "%__pypto_spmd_subblock_idx: i32" in mlir
+    # The op lowers to arith.index_cast of that param.
+    assert "arith.index_cast %__pypto_spmd_subblock_idx : i32 to index" in mlir
+    # The ccec pto.get_subblock_idx pseudo-op is gone.
+    assert "pto.get_subblock_idx" not in mlir
+    # The param comes AFTER the user-defined params in textual signature order.
+    signature_line = next(line for line in mlir.splitlines() if "func.func @subblock_func(" in line)
+    arg0_pos = signature_line.find("%arg0")
+    subblock_pos = signature_line.find("%__pypto_spmd_subblock_idx")
+    assert arg0_pos != -1 and subblock_pos != -1
+    assert subblock_pos > arg0_pos, f"subblock param must come after user params: {signature_line}"
+
+
+def test_uses_dynamic_subblock_id_detects_op_nested_in_expression():
+    """Detection must fire when tile.get_subblock_idx is nested inside a larger
+    expression, not only as a direct assignment. The wrapper's call-arg
+    forwarding is driven by this helper and must stay in lockstep with the C++
+    MemRefCollectorVisitor that appends the signature param; a flat
+    direct-assignment-only check would desync the two and corrupt the call."""
+
+    @pl.program
+    class NestedSubblockProgram:
+        @pl.function(type=pl.FunctionType.AIV, attrs={"dual_aiv_dispatch": True})
+        def vec(
+            self,
+            a: pl.Tensor[[32, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[32, 16], pl.FP32]],
+        ) -> pl.Tensor[[32, 16], pl.FP32]:
+            off: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx() * 16
+            t: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [off, 0], [16, 16])
+            updated: pl.Tensor[[32, 16], pl.FP32] = pl.store(t, [0, 0], out)
+            return updated
+
+    func = NestedSubblockProgram.get_function("vec")
+    assert func is not None
+    # ``off = get_subblock_idx() * 16`` keeps the call nested in a BinaryExpr;
+    # the recursive visitor must still detect it.
+    assert _uses_dynamic_subblock_id(func) is True
 
 
 _SPMD_BLOCK_ROWS = 128

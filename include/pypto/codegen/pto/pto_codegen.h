@@ -377,22 +377,34 @@ class PTOCodegen : public CodegenBase {
   [[nodiscard]] std::string GetGMSlotBufferSSA() const;
 
   /**
-   * @brief SSA name of the synthetic SPMD block_idx prefix param.
+   * @brief SSA name of the synthetic SPMD block_idx param.
    *
    * When the current function uses tile.get_block_idx / tile.get_block_num,
-   * PTOCodegen prepends two i32 prefix params (%arg0, %arg1) to the emitted
-   * func.func signature. The kernel wrapper resolves the runtime values via
+   * PTOCodegen appends two i32 params to the end of the emitted func.func
+   * signature. The kernel wrapper resolves the runtime values via
    * intrinsic.h::get_block_idx(args) / get_block_num(args) and forwards them
-   * as the first two call args. Returns empty when the function does not use
+   * as trailing call args. Returns empty when the function does not use
    * SPMD block ops.
    */
   [[nodiscard]] std::string GetSpmdBlockIdxArgSSA() const { return fs_.spmd_block_idx_arg; }
 
   /**
-   * @brief SSA name of the synthetic SPMD block_num prefix param. See
+   * @brief SSA name of the synthetic SPMD block_num param. See
    * GetSpmdBlockIdxArgSSA() for the surrounding mechanism.
    */
   [[nodiscard]] std::string GetSpmdBlockNumArgSSA() const { return fs_.spmd_block_num_arg; }
+
+  /**
+   * @brief SSA name of the synthetic SPMD subblock_idx (AIV lane) param.
+   *
+   * Mirrors GetSpmdBlockIdxArgSSA(): when the function uses
+   * tile.get_subblock_idx, PTOCodegen appends one i32 param to the func.func
+   * signature and the kernel wrapper resolves it from
+   * intrinsic.h::get_sub_block_id(args) (the runtime's per-core lane id),
+   * rather than reading the ccec get_subblockid() register. Returns empty when
+   * the function does not use the op.
+   */
+  [[nodiscard]] std::string GetSpmdSubblockIdxArgSSA() const { return fs_.spmd_subblock_idx_arg; }
 
   /**
    * @brief SSA name of the CommContext pointer arg appended for a
@@ -708,11 +720,15 @@ class PTOCodegen : public CodegenBase {
     DataType gm_slot_buffer_dtype = DataType::FP32;
     std::map<std::pair<int, int>, std::string> gm_slot_buffer_region_by_pipe;
 
-    /// SSA names of the synthetic SPMD block_idx/block_num prefix params.
-    /// Empty when the current function does not use tile.get_block_idx /
-    /// tile.get_block_num.
+    /// SSA names of the synthetic SPMD block_idx/block_num params, appended at
+    /// the func.func signature tail. Empty when the current function does not
+    /// use tile.get_block_idx / tile.get_block_num.
     std::string spmd_block_idx_arg;
     std::string spmd_block_num_arg;
+
+    /// SSA name of the synthetic SPMD subblock_idx (AIV lane) param.
+    /// Empty when the current function does not use tile.get_subblock_idx.
+    std::string spmd_subblock_idx_arg;
 
     /// Mapping from DistributedTensor parameter Var → CommContext pointer
     /// arg SSA name. Populated in GenerateFunction when appending the
@@ -764,6 +780,7 @@ class PTOCodegen : public CodegenBase {
 
       spmd_block_idx_arg.clear();
       spmd_block_num_arg.clear();
+      spmd_subblock_idx_arg.clear();
       dist_tensor_to_ctx.clear();
 
       current_expr_value.clear();

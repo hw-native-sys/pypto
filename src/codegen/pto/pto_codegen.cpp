@@ -271,8 +271,8 @@ std::vector<VarPtr> CollectVarsFromShapeExpr(const ExprPtr& expr) {
 }
 
 // Visitor to collect all MemRef objects from TileType variables. Also
-// piggy-backs SPMD block-identity detection (tile.get_block_idx /
-// tile.get_block_num) on the same body walk so callers do not need a
+// piggy-backs SPMD identity detection (tile.get_block_idx / tile.get_block_num
+// / tile.get_subblock_idx) on the same body walk so callers do not need a
 // separate IR traversal.
 class MemRefCollectorVisitor : public ir::IRVisitor {
  public:
@@ -290,6 +290,13 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
   /// get_block_num(args) at dispatch time.
   [[nodiscard]] bool UsesSpmdBlockOps() const { return uses_spmd_block_ops_; }
 
+  /// Returns true when the visited body invokes tile.get_subblock_idx. Drives
+  /// PTOCodegen's decision to append a synthetic i32 param to the func.func
+  /// signature; the kernel wrapper resolves it from
+  /// intrinsic.h::get_sub_block_id(args) at dispatch time, rather than reading
+  /// the ccec get_subblockid() register.
+  [[nodiscard]] bool UsesSubblockOp() const { return uses_subblock_op_; }
+
   void VisitExpr_(const VarPtr& op) override {
     if (iter_arg_ids_.count(op->UniqueId())) return;
     if (auto tile_type = ir::GetTileTypeWithMemRef(op->GetType())) {
@@ -303,9 +310,14 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
   }
 
   void VisitExpr_(const ir::CallPtr& op) override {
-    if (!uses_spmd_block_ops_ && op->op_ &&
-        (op->op_->name_ == "tile.get_block_idx" || op->op_->name_ == "tile.get_block_num")) {
-      uses_spmd_block_ops_ = true;
+    if (op->op_) {
+      if (!uses_spmd_block_ops_ &&
+          (op->op_->name_ == "tile.get_block_idx" || op->op_->name_ == "tile.get_block_num")) {
+        uses_spmd_block_ops_ = true;
+      }
+      if (!uses_subblock_op_ && op->op_->name_ == "tile.get_subblock_idx") {
+        uses_subblock_op_ = true;
+      }
     }
     ir::IRVisitor::VisitExpr_(op);
   }
@@ -316,6 +328,7 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
   std::map<const ir::Var*, std::shared_ptr<const TileType>> memref_tile_types_;
   std::set<uint64_t> iter_arg_ids_;
   bool uses_spmd_block_ops_ = false;
+  bool uses_subblock_op_ = false;
 
   void AddMemRefIfUnique(const MemRefPtr& memref, const std::shared_ptr<const TileType>& tile_type) {
     const ir::Var* base_ptr = memref->base_.get();
@@ -541,21 +554,26 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
 
   BuildVarToMemRefMapping(func);
 
-  // One body walk: collects MemRefs and detects SPMD block-identity usage.
-  // SPMD block identity params are injected at codegen time (not at IR level)
-  // when the function body invokes tile.get_block_idx / tile.get_block_num;
-  // they are appended at the end of the func.func signature with named SSAs,
-  // and the two ops lower to arith.index_cast of those params (the kernel
-  // wrapper supplies the runtime values via intrinsic.h::get_block_idx(args) /
-  // get_block_num(args)).
+  // One body walk: collects MemRefs and detects SPMD identity usage. SPMD
+  // identity params are injected at codegen time (not at IR level) when the
+  // function body invokes tile.get_block_idx / tile.get_block_num /
+  // tile.get_subblock_idx; they are appended at the end of the func.func
+  // signature with named SSAs, and the ops lower to arith.index_cast of those
+  // params (the kernel wrapper supplies the runtime values via
+  // intrinsic.h::get_block_idx(args) / get_block_num(args) /
+  // get_sub_block_id(args)).
   MemRefCollectorVisitor collector;
   if (func->body_) {
     collector.VisitStmt(func->body_);
   }
   const bool uses_spmd_params = collector.UsesSpmdBlockOps();
+  const bool uses_subblock_param = collector.UsesSubblockOp();
   if (uses_spmd_params) {
     fs_.used_ssa_names.insert("__pypto_spmd_block_idx");
     fs_.used_ssa_names.insert("__pypto_spmd_block_num");
+  }
+  if (uses_subblock_param) {
+    fs_.used_ssa_names.insert("__pypto_spmd_subblock_idx");
   }
 
   // Still collect fs_.memref_to_tile_type for GetTileBufTypeString fallback paths
@@ -665,13 +683,20 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
     BindVarToMlir(dyn_var, arg_name);
   }
 
-  // Append SPMD block identity params after dynamic-dim args. Named SSAs make
-  // the synthetic origin obvious in the emitted MLIR and let lowerings refer
-  // to them via PTOCodegen::GetSpmdBlock{Idx,Num}ArgSSA().
+  // Append SPMD identity params after dynamic-dim args, in canonical order
+  // (block_idx, block_num, subblock_idx). Each is appended independently based
+  // on the ops the function actually uses; the Python kernel wrapper
+  // (pto_backend.py) mirrors this exact order when forwarding the call args.
+  // Named SSAs make the synthetic origin obvious in the emitted MLIR and let
+  // lowerings refer to them via PTOCodegen::GetSpmd{Block,Subblock}*ArgSSA().
   if (uses_spmd_params) {
     fs_.spmd_block_idx_arg = "%__pypto_spmd_block_idx";
     fs_.spmd_block_num_arg = "%__pypto_spmd_block_num";
     stream_ << ", " << fs_.spmd_block_idx_arg << ": i32, " << fs_.spmd_block_num_arg << ": i32";
+  }
+  if (uses_subblock_param) {
+    fs_.spmd_subblock_idx_arg = "%__pypto_spmd_subblock_idx";
+    stream_ << ", " << fs_.spmd_subblock_idx_arg << ": i32";
   }
 
   stream_ << ")";

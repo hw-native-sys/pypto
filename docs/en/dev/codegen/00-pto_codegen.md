@@ -573,14 +573,16 @@ The wrapper unpacks `int64_t* args` following the standard convention:
 | `TensorType` | `Tensor*` → `buffer.addr` → typed pointer |
 | `ScalarType` | `uint64_t` → union decode → typed value |
 
-### SPMD Block Identity Parameters
+### SPMD Identity Parameters
 
-`tile.get_block_idx()` and `tile.get_block_num()` lower to two synthetic
-`i32` parameters that PTOCodegen appends at the **end** of the `func.func`
-signature using named SSAs (`%__pypto_spmd_block_idx`,
-`%__pypto_spmd_block_num`). The IR contract for these ops is unchanged —
-the synthetic params live only in the generated MLIR / C++ and never appear
-in `Function.params`.
+`tile.get_block_idx()`, `tile.get_block_num()`, and `tile.get_subblock_idx()`
+lower to synthetic `i32` parameters that PTOCodegen appends at the **end** of
+the `func.func` signature using named SSAs (`%__pypto_spmd_block_idx`,
+`%__pypto_spmd_block_num`, `%__pypto_spmd_subblock_idx`). The IR contract for
+these ops is unchanged — the synthetic params live only in the generated
+MLIR / C++ and never appear in `Function.params`. They are appended in the
+canonical order `block_idx, block_num, subblock_idx`, each gated
+independently on the ops the function actually uses.
 
 ```mlir
 func.func @spmd_kernel(%arg0: !pto.ptr<f32>, %arg1: !pto.ptr<f32>,
@@ -610,16 +612,31 @@ void kernel_entry(__gm__ int64_t* args) {
 }
 ```
 
+**subblock_idx (AIV lane).** `tile.get_subblock_idx()` uses the same
+synthetic-param channel: the wrapper resolves it from
+`intrinsic.h::get_sub_block_id(args)` (the runtime per-core lane id the
+scheduler stores in `GlobalContext.sub_block_id`) and appends
+`__pypto_spmd_subblock_idx` after any block-identity args. It deliberately
+reads the runtime lane id rather than the ccec `get_subblockid()` register,
+which returns a stale value under the `tensormap_and_ringbuffer` dispatch.
+This is independent of — and coexists with — the `get_subblockid()` macro
+bridge (`pypto_runtime_subblock_id`) that A2A3 dual-AIV wrappers install for
+ptoas-*internal* pipe-slot offsets. Like block identity, it is emitted
+unconditionally (no `__CPU_SIM` fork) because `GlobalContext.sub_block_id` is
+populated by the scheduler on every platform.
+
 **Detection scope.** Both layers detect SPMD usage on a per-function basis:
 
-- `FunctionUsesSpmdBlockOps` (C++, `src/codegen/pto/pto_codegen.cpp`) drives
-  whether PTOCodegen appends the two params to a given function's signature.
-- `_uses_spmd_block_ops` (Python, `python/pypto/backend/pto_backend.py`)
-  drives whether the wrapper appends the two locals to the inner call site.
+- `MemRefCollectorVisitor::UsesSpmdBlockOps` / `UsesSubblockOp` (C++,
+  `src/codegen/pto/pto_codegen.cpp`) drive whether PTOCodegen appends the
+  block / subblock params to a given function's signature.
+- `_uses_spmd_block_ops` / `_uses_dynamic_subblock_id` (Python,
+  `python/pypto/backend/pto_backend.py`) drive whether the wrapper appends the
+  matching locals to the inner call site.
 
 For non-SPMD sibling functions in an SPMD group (`group_uses_spmd=True` but
 the function itself does not call `tile.get_block_*`), the wrapper still
-declares the two locals because the `__gm_pipe_buffer` sharding logic in
+declares the two block locals because the `__gm_pipe_buffer` sharding logic in
 `_generate_arg_unpacking` consumes them — but it does **not** append them to
 the inner call, matching the function's MLIR signature.
 

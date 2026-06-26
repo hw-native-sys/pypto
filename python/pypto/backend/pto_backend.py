@@ -522,21 +522,51 @@ def _get_fixed_subblock_id(func: _ir_core.Function) -> int | None:
     return 1 if func.name.endswith("__aiv1") else None
 
 
+# Op-name sets for SPMD identity detection. Detection must stay in lockstep
+# with the C++ MemRefCollectorVisitor (src/codegen/pto/pto_codegen.cpp), which
+# decides which synthetic params to append to the func.func signature — a
+# mismatch would desync the wrapper's forwarded call args from the callee
+# signature.
+_SPMD_BLOCK_OPS = frozenset({"tile.get_block_idx", "tile.get_block_num"})
+_SUBBLOCK_OPS = frozenset({"tile.get_subblock_idx"})
+
+
+def _function_uses_ops(func: _ir_core.Function, op_names: frozenset[str]) -> bool:
+    """Return whether the function body invokes any op in ``op_names``.
+
+    Uses a recursive ``IRVisitor`` so calls nested inside expressions, branches,
+    and loops are detected — mirroring the C++ ``MemRefCollectorVisitor`` so
+    both layers see the same call shapes.
+    """
+
+    class _OpFinder(_ir_core.IRVisitor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.found = False
+
+        def visit_call(self, op: _ir_core.Call) -> None:
+            if self.found:
+                return
+            ir_op = getattr(op, "op", None)
+            if isinstance(ir_op, _ir_core.Op) and ir_op.name in op_names:
+                self.found = True
+                return
+            super().visit_call(op)
+
+    finder = _OpFinder()
+    finder.visit_stmt(func.body)
+    return finder.found
+
+
 def _uses_dynamic_subblock_id(func: _ir_core.Function) -> bool:
-    """Return whether the function reads subblock id from the runtime lane context."""
-    stmts = _ir_core.flatten_to_stmts(func.body)
-    for stmt in stmts:
-        call = None
-        if isinstance(stmt, _ir_core.EvalStmt):
-            call = stmt.expr
-        elif isinstance(stmt, _ir_core.AssignStmt):
-            call = stmt.value
-        if not isinstance(call, _ir_core.Call):
-            continue
-        op = getattr(call, "op", None)
-        if isinstance(op, _ir_core.Op) and op.name == "tile.get_subblock_idx":
-            return True
-    return False
+    """Return whether the function reads subblock id from the runtime lane context.
+
+    Drives both the runtime-subblock macro bridge and the synthetic
+    ``%__pypto_spmd_subblock_idx`` param forwarded by the kernel wrapper, so it
+    must detect ``tile.get_subblock_idx`` wherever it appears (including nested
+    in larger expressions) to stay consistent with the C++ signature emission.
+    """
+    return _function_uses_ops(func, _SUBBLOCK_OPS)
 
 
 def _requires_dual_aiv_dispatch(func: _ir_core.Function) -> bool:
@@ -547,9 +577,6 @@ def _requires_dual_aiv_dispatch(func: _ir_core.Function) -> bool:
     return bool(getattr(func, "attrs", {}).get("dual_aiv_dispatch", False))
 
 
-_SPMD_BLOCK_OPS = frozenset({"tile.get_block_idx", "tile.get_block_num"})
-
-
 def _uses_spmd_block_ops(func: _ir_core.Function) -> bool:
     """Return whether the function uses SPMD block identity ops (get_block_idx/num).
 
@@ -558,24 +585,7 @@ def _uses_spmd_block_ops(func: _ir_core.Function) -> bool:
     read from the dispatch payload via ``get_block_idx(args)`` / ``get_block_num(args)``
     (defined in ``intrinsic.h``), so the wrapper needs a macro bridge.
     """
-
-    class _SpmdOpFinder(_ir_core.IRVisitor):
-        def __init__(self) -> None:
-            super().__init__()
-            self.found = False
-
-        def visit_call(self, op: _ir_core.Call) -> None:
-            if self.found:
-                return
-            ir_op = getattr(op, "op", None)
-            if isinstance(ir_op, _ir_core.Op) and ir_op.name in _SPMD_BLOCK_OPS:
-                self.found = True
-                return
-            super().visit_call(op)
-
-    finder = _SpmdOpFinder()
-    finder.visit_stmt(func.body)
-    return finder.found
+    return _function_uses_ops(func, _SPMD_BLOCK_OPS)
 
 
 def _needs_runtime_subblock_bridge(func: _ir_core.Function) -> bool:
@@ -589,7 +599,9 @@ def _needs_runtime_subblock_bridge(func: _ir_core.Function) -> bool:
     return _uses_dynamic_subblock_id(func)
 
 
-def _generate_kernel_header(func: _ir_core.Function, *, uses_spmd: bool | None = None) -> str:
+def _generate_kernel_header(
+    func: _ir_core.Function, *, uses_spmd: bool | None = None, uses_subblock: bool | None = None
+) -> str:
     """Generate the wrapper header, including split lane overrides when needed."""
     fixed_subblock_id = _get_fixed_subblock_id(func)
     subblock_override = ""
@@ -620,12 +632,17 @@ def _generate_kernel_header(func: _ir_core.Function, *, uses_spmd: bool | None =
         )
 
     # SPMD: include intrinsic.h so the wrapper can call get_block_idx(args) /
-    # get_block_num(args). Block identity now flows into the kernel as the
-    # first two wrapper-passed parameters, so there is no macro shadow, no
-    # [[block_local]] static / thread_local storage, and no __CPU_SIM fork.
+    # get_block_num(args) / get_sub_block_id(args). The identity values flow
+    # into the kernel as trailing wrapper-passed parameters, so there is no
+    # macro shadow, no [[block_local]] static / thread_local storage, and no
+    # __CPU_SIM fork. subblock_idx needs the include even when the function
+    # uses no block ops.
     if uses_spmd is None:
         uses_spmd = _uses_spmd_block_ops(func)
-    spmd_override = '#include "intrinsic.h"\n' if uses_spmd else ""
+    if uses_subblock is None:
+        uses_subblock = _uses_dynamic_subblock_id(func)
+    needs_intrinsic = uses_spmd or uses_subblock
+    spmd_override = '#include "intrinsic.h"\n' if needs_intrinsic else ""
 
     return _KERNEL_HEADER.format(
         func_name=func.name,
@@ -649,7 +666,8 @@ def _generate_kernel_wrapper(
     """
     func_uses_spmd = _uses_spmd_block_ops(func)
     uses_spmd = group_uses_spmd or func_uses_spmd
-    header = _generate_kernel_header(func, uses_spmd=uses_spmd)
+    func_uses_subblock = _uses_dynamic_subblock_id(func)
+    header = _generate_kernel_header(func, uses_spmd=uses_spmd, uses_subblock=func_uses_subblock)
     ptoas_body = _preprocess_ptoas_output(ptoas_code)
     unpacking_code, var_names = _generate_arg_unpacking(func, uses_spmd=uses_spmd)
     runtime_subblock_setup = ""
@@ -673,12 +691,29 @@ def _generate_kernel_wrapper(
             "    int32_t __pypto_spmd_block_num = get_block_num(args);\n\n"
         )
 
-    # PTOCodegen appends two synthetic i32 params (block_idx, block_num) at
-    # the end of the func.func signature when func itself uses
-    # tile.get_block_idx / tile.get_block_num. Mirror that order in the call.
+    # subblock_idx (AIV lane) flows through the same synthetic-param channel as
+    # block identity. It reads the runtime per-core lane id via
+    # get_sub_block_id(args) — NOT the ccec get_subblockid() register, which is
+    # stale under the tensormap_and_ringbuffer dispatch (see intrinsic.h). The
+    # value is valid under both onboard and __CPU_SIM (the scheduler populates
+    # GlobalContext.sub_block_id on every platform), so no __CPU_SIM fork.
+    # (func_uses_subblock is computed once above, before the header call.)
+    subblock_arg_setup = ""
+    if func_uses_subblock:
+        subblock_arg_setup = (
+            "    // Read SPMD subblock (AIV lane) id from runtime dispatch payload\n"
+            "    int32_t __pypto_spmd_subblock_idx = get_sub_block_id(args);\n\n"
+        )
+
+    # PTOCodegen appends the synthetic i32 identity params at the end of the
+    # func.func signature in canonical order (block_idx, block_num,
+    # subblock_idx), each gated on the ops func itself uses. Mirror that exact
+    # order here when forwarding the call.
     call_args_list = list(var_names)
     if func_uses_spmd:
         call_args_list = call_args_list + ["__pypto_spmd_block_idx", "__pypto_spmd_block_num"]
+    if func_uses_subblock:
+        call_args_list = call_args_list + ["__pypto_spmd_subblock_idx"]
     call_args = ", ".join(call_args_list)
 
     wrapper_func = (
@@ -688,6 +723,7 @@ def _generate_kernel_wrapper(
         "{\n"
         f"{runtime_subblock_setup}"
         f"{spmd_args_setup}"
+        f"{subblock_arg_setup}"
         f"{unpacking_code}\n"
         f"    // Forward to ptoas-generated function\n"
         f"    {func.name}({call_args});\n"
