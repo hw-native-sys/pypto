@@ -19,6 +19,8 @@ Kernel examples — single-kernel programs, ordered by complexity.
   07_normalization.py  — RMSNorm, LayerNorm
   08_assemble.py       — tile assembly patterns (Acc->Mat, Vec->Vec)
   09_dyn_valid_shape.py — dynamic valid_shape via if/else and loop patterns
+  10_split_k.py        — split-K matmul (parallel K reduction, atomic-add)
+  11_auto_tile_matmul.py — compiler-driven L0 matmul tiling (DDR/Mat-scratch x full-K/split-K)
 """
 
 import importlib
@@ -34,6 +36,7 @@ _ALIASES = {
     "normalization": "07_normalization",
     "assemble": "08_assemble",
     "dyn_valid_shape": "09_dyn_valid_shape",
+    "auto_tile_matmul": "11_auto_tile_matmul",
 }
 
 for _alias, _numbered in _ALIASES.items():
