@@ -578,6 +578,32 @@ def ci(
 arange = ci
 
 
+def tri(
+    diagonal: int | Scalar,
+    shape: Sequence[int],
+    dtype: DataType = DataType.INT32,
+    upper: bool = False,
+) -> Tile:
+    """Generate a lower/upper triangular mask tile. Maps to ``pto.ttri``.
+
+    Over the destination region ``[R, C]`` with diagonal offset ``d``:
+    - Lower (``upper=False``): ``dst[i, j] = 1`` if ``j <= i + d`` else ``0``
+    - Upper (``upper=True``):  ``dst[i, j] = 1`` if ``j >= i + d`` else ``0``
+
+    Args:
+        diagonal: Diagonal offset (plain int or a Scalar); an INT32 index.
+        shape: Shape of the destination tile (static 2D ``[rows, cols]``).
+        dtype: Mask dtype. One of {INT16, INT32, UINT16, UINT32, FP16, FP32}.
+        upper: If True, produce an upper-triangular mask; otherwise lower.
+
+    Returns:
+        Tile wrapping the tri operation.
+    """
+    diag_expr = diagonal.unwrap() if isinstance(diagonal, Scalar) else diagonal
+    call_expr = _ir_ops.tri(diag_expr, list(shape), dtype=dtype, upper=upper)
+    return Tile(expr=call_expr)
+
+
 def fillpad(tile: Tile, pad_value: PadValue | int | float = PadValue.zero) -> Tile:
     """Fill remaining tile elements with specified padding value.
 
@@ -2155,6 +2181,24 @@ def gather(src: Tile, indices: Tile, tmp: Tile) -> Tile:
         Tile with gathered elements (same dtype as ``src``)
     """
     call_expr = _ir_ops.gather(src.unwrap(), indices.unwrap(), tmp.unwrap())
+    return Tile(expr=call_expr)
+
+
+def gatherb(src: Tile, offset: Tile) -> Tile:
+    """Gather elements from src tile by per-element byte offset.
+
+    Computes ``dst[i, j] = *(src_base + offset[i, j])``. Maps to PTOAS
+    ``pto.tgatherb``. Unlike :func:`gather` (which takes element indices and a
+    scratch tile), the offsets are raw byte offsets and no workspace is needed.
+
+    Args:
+        src: Source tile (8/16/32-bit int/uint or FP16/BF16/FP32)
+        offset: Byte-offset tile (UINT32) — byte offset of each gathered element
+
+    Returns:
+        Tile with gathered elements (offset shape, same dtype as ``src``)
+    """
+    call_expr = _ir_ops.gatherb(src.unwrap(), offset.unwrap())
     return Tile(expr=call_expr)
 
 

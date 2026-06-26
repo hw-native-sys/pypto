@@ -599,6 +599,52 @@ def ci(
 arange = ci
 
 
+def tri(
+    diagonal: int | Expr,
+    shape: Sequence[int | Expr] | _ir_core.MakeTuple,
+    dtype: DataType = DataType.INT32,
+    upper: bool = False,
+    span: Span | None = None,
+) -> Call:
+    """Generate a lower/upper triangular mask tile (pto.ttri).
+
+    Over the destination valid region ``[R, C]`` with diagonal offset ``d``:
+    - Lower (``upper=False``): ``dst[i, j] = 1`` if ``j <= i + d`` else ``0``
+    - Upper (``upper=True``):  ``dst[i, j] = 1`` if ``j >= i + d`` else ``0``
+
+    Args:
+        diagonal: Diagonal offset (plain int or a scalar Expr); an INT32 index.
+        shape: Destination tile shape (static 2D ``[rows, cols]``).
+        dtype: Mask dtype. One of {INT16, INT32, UINT16, UINT32, FP16, FP32}.
+        upper: If True, produce an upper-triangular mask; otherwise lower.
+        span: Optional source span for debugging (auto-captured if not provided).
+
+    Returns:
+        Call expression that returns a TileType holding the triangular mask.
+    """
+    actual_span = _get_span_or_capture(span)
+    if isinstance(diagonal, ConstInt):
+        # Normalize any integer constant to the INT32 the op requires.
+        diag_expr: Expr = (
+            diagonal
+            if diagonal.dtype == DataType.INT32
+            else ConstInt(diagonal.value, DataType.INT32, actual_span)
+        )
+    elif isinstance(diagonal, Expr):
+        # A dynamic scalar must already be INT32 — there is no scalar cast here,
+        # so reject other dtypes (e.g. INDEX from a loop var) with a clear error
+        # instead of letting the C++ type deducer fail downstream.
+        diag_type = diagonal.type
+        if not (isinstance(diag_type, ScalarType) and diag_type.dtype == DataType.INT32):
+            raise ValueError(f"tile.tri diagonal must be a plain int or an INT32 scalar, got {diag_type}")
+        diag_expr = diagonal
+    else:
+        diag_expr = ConstInt(diagonal, DataType.INT32, actual_span)
+    shape_tuple = _to_make_tuple(shape, actual_span)
+    kwargs: dict[str, Any] = {"dtype": dtype, "upper": upper}
+    return _ir_core.create_op_call("tile.tri", [diag_expr, shape_tuple], kwargs, actual_span)
+
+
 def fillpad(tile: Expr, pad_value: PadValue | int | float = PadValue.zero, span: Span | None = None) -> Call:
     """Fill remaining tile elements with specified padding value.
 
@@ -2705,6 +2751,27 @@ def gather(
     """
     actual_span = _get_span_or_capture(span)
     return _ir_core.create_op_call("tile.gather", [src, indices, tmp], {}, actual_span)
+
+
+def gatherb(
+    src: Expr,
+    offset: Expr,
+    span: Span | None = None,
+) -> Call:
+    """Gather elements from src by per-element byte offset.
+
+    Computes ``dst[i, j] = *(src_base + offset[i, j])``. Maps to PTOAS ``pto.tgatherb``.
+
+    Args:
+        src: Source tile (8/16/32-bit int/uint or FP16/BF16/FP32)
+        offset: Byte-offset tile (UINT32)
+        span: Optional source span
+
+    Returns:
+        Call expression returning gathered tile (offset shape, src dtype)
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.gatherb", [src, offset], {}, actual_span)
 
 
 def gather_mask(

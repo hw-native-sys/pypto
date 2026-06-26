@@ -99,6 +99,14 @@ _pipeline_ctx: dict = {}
 # runs concurrently.
 _get_program_lock = threading.Lock()
 
+# Golden writing (materialise tensors + compute_expected + torch.save) is torch
+# work.  Running it across the full compile pool means up to ``compile_workers``
+# threads call into torch concurrently, which is not thread-safe on every torch
+# build (some aarch64/device builds corrupt the heap -> SIGSEGV/SIGABRT under
+# high concurrency).  Serialise only this phase; the heavy compile_program()
+# stays parallel, so the wall-clock cost is just the (usually cheap) golden tail.
+_golden_write_lock = threading.Lock()
+
 # Map BackendType to the architecture prefix used by the platform string.
 # "a2a3" covers Ascend 910B; "a5" covers Ascend 950.
 _BACKEND_TO_ARCH: dict[BackendType, str] = {
@@ -260,7 +268,8 @@ def _compile_for_cache(
             "Ensure your @pl.program includes an orchestration function "
             "(decorated with @pl.function(type=pl.FunctionType.Orchestration))."
         )
-    _write_golden_for_test_case(test_case, work_dir / "golden.py")
+    with _golden_write_lock:
+        _write_golden_for_test_case(test_case, work_dir / "golden.py")
 
 
 @dataclass

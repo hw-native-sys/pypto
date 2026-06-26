@@ -3540,6 +3540,46 @@ class TestTileScatterMaskOps:
             )
 
 
+class TestTileGatherbOps:
+    """Test suite for tile.gatherb (byte-offset gather)."""
+
+    @pytest.mark.parametrize(
+        "dtype",
+        [DataType.FP32, DataType.FP16, DataType.BF16, DataType.INT32, DataType.INT16, DataType.INT8],
+        ids=["fp32", "fp16", "bf16", "i32", "i16", "i8"],
+    )
+    def test_tile_gatherb_valid(self, dtype):
+        """tile.gatherb returns a TileType shaped like offset with the src dtype."""
+        span = ir.Span.unknown()
+        src_type = ir.TileType(_const_dims(span, 8, 32), dtype)
+        offset_type = ir.TileType(_const_dims(span, 4, 16), DataType.UINT32)
+
+        call = tile.gatherb(
+            ir.Var("src", src_type, span),
+            ir.Var("offset", offset_type, span),
+        )
+
+        assert isinstance(call, ir.Call)
+        assert call.op.name == "tile.gatherb"
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.dtype == dtype
+        const_dims = [dim.value for dim in result_type.shape if isinstance(dim, ir.ConstInt)]
+        assert const_dims == [4, 16]
+
+    def test_tile_gatherb_rejects_non_uint32_offset(self):
+        """tile.gatherb requires the offset tile to be UINT32."""
+        span = ir.Span.unknown()
+        src_type = ir.TileType(_const_dims(span, 8, 32), DataType.FP32)
+        offset_type = ir.TileType(_const_dims(span, 4, 16), DataType.INT32)
+
+        with pytest.raises(ValueError, match="offset dtype to be UINT32"):
+            tile.gatherb(
+                ir.Var("src", src_type, span),
+                ir.Var("offset", offset_type, span),
+            )
+
+
 class TestTileConcatOps:
     """Test suite for tile.concat operation."""
 
@@ -3685,6 +3725,58 @@ class TestTileCiOp:
 
     def test_tile_arange_alias_is_ci(self):
         assert pl.tile.arange is pl.tile.ci
+
+
+class TestTileTriOps:
+    """Tests for tile.tri (triangular mask generation, pto.ttri)."""
+
+    def test_tile_tri_lower(self):
+        """tile.tri returns a TileType with requested 2D shape / dtype."""
+        call = tile.tri(0, [16, 16], dtype=DataType.INT32)
+        t = call.type
+        assert isinstance(t, ir.TileType)
+        assert t.dtype == DataType.INT32
+        const_dims = [d.value for d in t.shape if isinstance(d, ir.ConstInt)]
+        assert const_dims == [16, 16]
+        assert "tile.tri" in str(call)
+        assert "upper=False" in str(call)
+
+    def test_tile_tri_upper_kwarg_printed(self):
+        """upper=True should appear in the printed IR."""
+        call = tile.tri(1, [8, 8], dtype=DataType.FP16, upper=True)
+        assert "upper=True" in str(call)
+
+    def test_tile_tri_accepts_supported_dtypes(self):
+        for dt in (
+            DataType.INT16,
+            DataType.INT32,
+            DataType.UINT16,
+            DataType.UINT32,
+            DataType.FP16,
+            DataType.FP32,
+        ):
+            assert tile.tri(0, [16, 16], dtype=dt) is not None
+
+    def test_tile_tri_rejects_unsupported_dtype(self):
+        with pytest.raises(ValueError, match=r"INT16.*INT32.*UINT16.*UINT32.*FP16.*FP32"):
+            tile.tri(0, [16, 16], dtype=DataType.INT8)
+
+    def test_tile_tri_rejects_non_2d_shape(self):
+        with pytest.raises(ValueError, match="2D shape"):
+            tile.tri(0, [1, 8, 8], dtype=DataType.INT32)
+
+    def test_tile_tri_rejects_non_int32_diagonal(self):
+        span = ir.Span.unknown()
+        diag = ir.Var("d", ir.ScalarType(DataType.INT16), span)
+        with pytest.raises(ValueError, match=r"diagonal.*INT32"):
+            tile.tri(diag, [16, 16], dtype=DataType.INT32)
+
+    def test_tile_tri_rejects_index_scalar_diagonal(self):
+        """An INDEX-typed dynamic scalar (e.g. a loop var) is rejected at the wrapper."""
+        span = ir.Span.unknown()
+        diag = ir.Var("d", ir.ScalarType(DataType.INDEX), span)
+        with pytest.raises(ValueError, match=r"diagonal must be a plain int or an INT32 scalar"):
+            tile.tri(diag, [16, 16], dtype=DataType.INT32)
 
 
 class TestTileStoreDistributedDest:

@@ -271,7 +271,9 @@ with ib.function("tensor_example") as f:
 | - | `tile.transpose` | Swap two axes of a tile |
 | - | `tile.set_validshape` | Update valid-shape metadata without data movement |
 | - | `tile.ci` | Generate contiguous integer sequence (start + k / start - k); dtype ∈ {INT16, INT32}; innermost dim != 1 |
+| - | `tile.tri` | Generate a lower/upper triangular 0/1 mask (`pto.ttri`): lower `dst[i,j]=1` iff `j<=i+d`, upper iff `j>=i+d` (diagonal `d`). 2D shape; dtype ∈ {INT16, INT32, UINT16, UINT32, FP16, FP32} |
 | **Reduction** | `tile.sum` | Reduction along axis (axis, keepdim) |
+| **Gather** | `tile.gatherb` | Gather elements by per-element byte offset (`pto.tgatherb`): `dst[i, j] = *(src_base + offset[i, j])`. `src`/`dst` dtype ∈ {I8/U8, I16/U16, I32/U32, FP16, BF16, FP32}; `offset` dtype = UINT32 (byte offsets); output shape = `offset` shape, dst row-major. |
 | **Scatter** | `tile.scatter` | Row-scatter `src` into `dst` at per-row indices (`pto.tscatter` index form; DPS — `dst` is in/out, the result aliases `dst`). `src`/`dst` dtype ∈ {I8, I16, I32, FP16, FP32, BF16}; `indexes` dtype ∈ {I16, I32}; element-size matching rule: 4-byte dst ↔ INT32, 2-byte dst ↔ INT16, 1-byte dst ↔ INT16. |
 | - | `tile.scatter_mask` | Mask-pattern row-scatter: write each `src` row into the mask-marked columns of `dst` (DPS — `dst` is in/out). A PyPTO codegen form lowered to a `pto.tscatter` mask emission — **not** a distinct pto-isa instruction (unlike `tile.gather_mask`). See [Mask patterns](#mask-patterns). |
 
