@@ -856,18 +856,20 @@ def test_allgather_is_decomposed_to_primitives():
 
 
 def test_allgather_emits_for_and_if_control_flow():
-    """Allgather emits 2 ForStmts + 2 IfStmts: notify-all, wait-all.
+    """Allgather emits 3 ForStmts + 2 IfStmts: notify-all, wait-all, gather.
 
-    Phase 3 (gather) uses pld.tile.get for all ranks including
-    self (following the simpler reference), so there is no per-rank
-    IfStmt — the self-read falls out of the same get path
-    via HCCL identity mapping."""
+    Phase 3 (gather) now uses a runtime ForStmt over nranks_idx (matching
+    the barrier phases) instead of a compile-time unrolled loop — this
+    keeps the gather consistent with the notify/wait bounds regardless of
+    the actual comm-group size.  The gather ForStmt body emits pld.tile.get
+    for every peer (self-read via HCCL identity mapping), so there is no
+    per-rank IfStmt inside the gather loop."""
     Before = _build_allgather_before()
     After = passes.lower_composite_ops()(Before)
     collector = _StmtKindCollector()
     collector.visit_program(After)
 
-    assert collector.for_count == 2, f"expected 2 ForStmts (notify, wait), got {collector.for_count}"
+    assert collector.for_count == 3, f"expected 3 ForStmts (notify, wait, gather), got {collector.for_count}"
     assert collector.if_count == 2, f"expected 2 IfStmts (notify-all + wait-all), got {collector.if_count}"
 
 

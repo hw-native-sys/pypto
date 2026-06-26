@@ -14,6 +14,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include "pypto/core/dtype.h"
@@ -36,6 +37,13 @@ inline ExprPtr MakeZeroOffsets(size_t ndim, const Span& span) {
 /// Build a MakeTuple from a shape vector.
 inline ExprPtr MakeShapeTuple(const std::vector<ExprPtr>& shape, const Span& span) {
   return std::make_shared<MakeTuple>(shape, span);
+}
+
+/// Build a signal-slot offset tuple [rank_expr, 0] for notify/wait ops.
+/// The signal matrix is shape [nranks, 1], so two INDEX elements suffice.
+inline ExprPtr MakeSignalOffsets(const ExprPtr& rank_expr, const Span& span) {
+  std::vector<ExprPtr> elements = {rank_expr, std::make_shared<ConstInt>(0, DataType::INDEX, span)};
+  return std::make_shared<MakeTuple>(std::move(elements), span);
 }
 
 }  // namespace pypto::ir::tile_conversion_utils
