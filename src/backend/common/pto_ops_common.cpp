@@ -1481,6 +1481,23 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   }
   if (is_nz_mat_load && ndim > 2) {
     const ir::Span& span = op->span_;
+    // The leading-dim collapse folds dims [0, ndim-1) into one contiguous row
+    // axis. That is sound only when every MIDDLE dim (indices 1..ndim-2) spans
+    // its full tensor extent at zero offset: the outermost (batch) dim may be a
+    // sub-range — its offset folds into row_offset — and the last dim is sliced
+    // via the partition columns, but a partial middle dim makes the valid rows
+    // non-contiguous in the flattened space, silently misaligning the read.
+    // Matmul lowering only ever feeds full middle dims here; guard so any future
+    // partial-middle NZ load fails loudly instead of miscomputing.
+    for (size_t i = 1; i + 1 < ndim; ++i) {
+      auto off_i = ir::As<ir::ConstInt>(offsets_tuple->elements_[i]);
+      INTERNAL_CHECK_SPAN(off_i && off_i->value_ == 0 &&
+                              ir::AreExprsEqual(valid_shapes_tuple->elements_[i], tensor_type->shape_[i]),
+                          span)
+          << "tile.load NZ 2D source-window collapse requires middle dim " << i
+          << " to span the full tensor extent at zero offset (a partial middle dim breaks the "
+             "contiguous leading-dim merge)";
+    }
     // ConstInt-folding index arithmetic: a static window (the common matmul case)
     // folds to clean constants, while a dynamic dim/offset/valid stays symbolic and
     // is materialized by GetSizeCodes / GetIndexOffsetCodes (arith.muli/addi) below

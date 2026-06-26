@@ -708,8 +708,8 @@ BatchPageResult ExtractBatchPage(const BatchOperandInfo& info, const std::vector
     auto load_tensor = info.base_load->args_[0];
     auto load_tensor_type = As<TensorType>(load_tensor->GetType());
     auto base_offsets = As<MakeTuple>(info.base_load->args_[1]);
-    INTERNAL_CHECK_SPAN(load_tensor_type && base_offsets, span)
-        << "FlattenTileNdTo2D: !fit per-batch load expects a tensor-backed tile.load";
+    INTERNAL_CHECK_SPAN(load_tensor_type && base_offsets && load_tensor_type->shape_.size() >= 2, span)
+        << "FlattenTileNdTo2D: !fit per-batch load expects a tensor-backed tile.load with rank >= 2";
     const size_t tensor_rank = load_tensor_type->shape_.size();
     auto x_dim = As<ConstInt>(load_tensor_type->shape_[tensor_rank - 2]);
     auto y_dim = As<ConstInt>(load_tensor_type->shape_.back());
@@ -1592,7 +1592,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       auto it = stmt_def_map.find(v);
       if (it == stmt_def_map.end()) return;
       auto c = As<Call>(it->second->value_);
-      if (!c || c->args_.empty()) return;
+      if (!c || !c->op_ || c->args_.empty()) return;
       const std::string& n = c->op_->name_;
       if (n == "tile.transpose_view" || n == "tile.reshape") {
         if (auto in = As<Var>(c->args_[0])) MarkChain(in.get(), fits);
@@ -1601,7 +1601,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
     for (const auto& s : stmts) {
       auto a = As<AssignStmt>(s);
       auto c = a ? As<Call>(a->value_) : nullptr;
-      if (!c) continue;
+      if (!c || !c->op_) continue;
       const std::string& n = c->op_->name_;
       const bool is_bmm = (n == "tile.batch_matmul");
       const bool is_bmm_acc = (n == "tile.batch_matmul_acc");

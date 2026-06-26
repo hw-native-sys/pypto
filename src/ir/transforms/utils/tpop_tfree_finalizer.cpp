@@ -178,17 +178,26 @@ std::vector<StmtPtr> FinalizeTpopTfrees(const std::vector<StmtPtr>& stmts, core_
 
   auto try_resolve_canonical_tpop = [&](const ExprPtr& expr, const TpopVarRemap& remap,
                                         VarPtr* canonical_var) -> bool {
-    auto src_var = AsVarLike(expr);
     // A zero-copy view that inherits its input's buffer (slice / reshape /
     // transpose_view / ... — any IsBufferAliasingViewOp) over a popped tile
     // aliases that buffer, so the view's own uses must extend the tpop's
-    // lifetime. Resolve through such a view to the underlying tile.
-    if (!src_var) {
-      if (auto call = std::dynamic_pointer_cast<const Call>(expr);
-          call && call->op_ && !call->args_.empty() &&
-          op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
-        src_var = AsVarLike(call->args_[0]);
+    // lifetime. Peel through a *chain* of such views (e.g.
+    // slice(transpose_view(tpop))) down to the underlying tile — a single-level
+    // unwrap would leave a stacked-view return var unresolved and let the tpop
+    // be freed before later uses of the returned view.
+    ExprPtr alias_src = expr;
+    VarPtr src_var;
+    while (alias_src) {
+      src_var = AsVarLike(alias_src);
+      if (src_var) {
+        break;
       }
+      auto call = std::dynamic_pointer_cast<const Call>(alias_src);
+      if (!call || !call->op_ || call->args_.empty() ||
+          !op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
+        break;
+      }
+      alias_src = call->args_[0];
     }
     if (!src_var) {
       return false;
