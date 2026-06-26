@@ -1114,6 +1114,48 @@ class Program:
         ir.assert_structural_equal(After, Before)
         assert After.get_function("kernel_stripe__windowed") is None
 
+    def test_non_incore_type_attr_does_not_windowize(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore, attrs={"windowize": True})
+            def eligible_kernel(
+                self,
+                data: pl.Tensor[[256, 64], pl.FP32],
+                row_offset: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
+            ) -> pl.Tensor[[256, 64], pl.FP32]:
+                tile: pl.Tile[[64, 64], pl.FP32] = pl.load(data, [row_offset, 0], [64, 64])
+                ret: pl.Tensor[[256, 64], pl.FP32] = pl.store(tile, [row_offset, 0], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Opaque, attrs={"windowize": True})
+            def opaque_kernel(
+                self,
+                data: pl.Tensor[[256, 64], pl.FP32],
+                row_offset: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
+            ) -> pl.Tensor[[256, 64], pl.FP32]:
+                tile: pl.Tile[[64, 64], pl.FP32] = pl.load(data, [row_offset, 0], [64, 64])
+                ret: pl.Tensor[[256, 64], pl.FP32] = pl.store(tile, [row_offset, 0], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                data: pl.Tensor[[256, 64], pl.FP32],
+                out0: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
+                out1: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
+            ) -> tuple[pl.Tensor[[256, 64], pl.FP32], pl.Tensor[[256, 64], pl.FP32]]:
+                row: pl.Scalar[pl.INDEX] = 64
+                out0_next: pl.Tensor[[256, 64], pl.FP32] = self.eligible_kernel(data, row, out0)
+                out1_next: pl.Tensor[[256, 64], pl.FP32] = self.opaque_kernel(data, row, out1)
+                return out0_next, out1_next
+
+        After = passes.optimize_orch_tensors()(Before)
+
+        assert After.get_function("eligible_kernel__windowed") is not None
+        assert After.get_function("opaque_kernel__windowed") is None
+
     def test_input_window_rejects_unrecoverable_dynamic_tensor_view_stride(self):
         M = pl.dynamic("M")
         N = pl.dynamic("N")
