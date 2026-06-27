@@ -898,6 +898,9 @@ REGISTER_OP("tile.mgather")
     .set_attr<int>("coalesce")
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    // dst must not reuse the idx tile's UB buffer: the per-row gather reads the
+    // whole idx vector while writing dst, so aliasing corrupts indices mid-loop.
+    .not_inplace_safe()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileMgatherType(args, kwargs, "tile.mgather");
