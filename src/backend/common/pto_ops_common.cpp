@@ -1481,22 +1481,28 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   }
   if (is_nz_mat_load && ndim > 2) {
     const ir::Span& span = op->span_;
-    // The leading-dim collapse folds dims [0, ndim-1) into one contiguous row
-    // axis. That is sound only when every MIDDLE dim (indices 1..ndim-2) spans
-    // its full tensor extent at zero offset: the outermost (batch) dim may be a
-    // sub-range — its offset folds into row_offset — and the last dim is sliced
-    // via the partition columns, but a partial middle dim makes the valid rows
-    // non-contiguous in the flattened space, silently misaligning the read.
-    // Matmul lowering only ever feeds full middle dims here; guard so any future
-    // partial-middle NZ load fails loudly instead of miscomputing.
-    for (size_t i = 1; i + 1 < ndim; ++i) {
-      auto off_i = ir::As<ir::ConstInt>(offsets_tuple->elements_[i]);
-      INTERNAL_CHECK_SPAN(off_i && off_i->value_ == 0 &&
-                              ir::AreExprsEqual(valid_shapes_tuple->elements_[i], tensor_type->shape_[i]),
-                          span)
-          << "tile.load NZ 2D source-window collapse requires middle dim " << i
-          << " to span the full tensor extent at zero offset (a partial middle dim breaks the "
-             "contiguous leading-dim merge)";
+    // The leading-dim collapse folds the row dims [0, ndim-1) into one axis with
+    // a contiguous row stride, so it is sound only when the valid sub-box of
+    // those dims is contiguous in row-major order. Scanning the row dims from
+    // outermost in: any number of leading singleton (extent-1) dims, then at most
+    // one partial "boundary" dim, after which every dim must span its full tensor
+    // extent. (A whole load, a batch sub-range, and batch-1 M/N tiling all
+    // satisfy this; only a partial dim *under a non-singleton outer dim* — e.g.
+    // tiling M/N with batch>1 — would make the rows non-contiguous.) Offsets do
+    // not affect contiguity — they fold into row_offset — so they are not checked.
+    bool past_boundary = false;
+    for (size_t i = 0; i + 1 < ndim; ++i) {
+      const bool is_full = ir::AreExprsEqual(valid_shapes_tuple->elements_[i], tensor_type->shape_[i]);
+      if (past_boundary) {
+        INTERNAL_CHECK_SPAN(is_full, span)
+            << "tile.load NZ 2D source-window collapse: row dim " << i
+            << " is a partial sub-range under a non-singleton outer dim, so the flattened rows are "
+               "not contiguous (the collapse cannot legalize this to a 2D ND2NZ load)";
+        continue;
+      }
+      auto val_i = ir::As<ir::ConstInt>(valid_shapes_tuple->elements_[i]);
+      const bool is_singleton = val_i && val_i->value_ == 1;
+      if (!is_singleton) past_boundary = true;
     }
     // ConstInt-folding index arithmetic: a static window (the common matmul case)
     // folds to clean constants, while a dynamic dim/offset/valid stays symbolic and
