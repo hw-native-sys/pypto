@@ -78,7 +78,7 @@ def _load_golden_from_data_dir(out_dir: Path, output_names: set[str]) -> dict[st
 
 # Number of scope-depth rings the runtime sizes independently. Mirrors
 # RUNTIME_ENV_RING_COUNT in the runtime's task_interface/call_config.h. A
-# per-ring RunConfig override (a list) must supply exactly this many entries.
+# per-ring RunConfig override (list/tuple) must supply exactly this many entries.
 _RING_DEPTH = 4
 
 
@@ -178,21 +178,21 @@ class RunConfig:
         ring_task_window: Optional per-invocation override of the runtime
             ring's task-slot window (number of in-flight tasks). Forwarded to
             ``CallConfig.runtime_env.ring_task_window``. A scalar (broadcast to
-            all scope-depth rings) or a list of exactly 4 ints sizing rings
-            0..3 independently; each entry must be a power of two ``>= 4`` (a
+            all scope-depth rings) or a list/tuple of exactly 4 ints sizing
+            rings 0..3 independently; each entry must be a power of two ``>= 4`` (a
             ``0`` list-entry leaves that ring at its default). ``None`` (default)
             leaves the field unset so the runtime falls back to its
             ``PTO2_RING_TASK_WINDOW`` env var or compile-time default.
         ring_heap: Optional per-invocation override of the per-ring output-heap
             size in **bytes**. Forwarded to ``CallConfig.runtime_env.ring_heap``.
-            A scalar or a list of 4 ints (per ring 0..3); each entry must be a
-            power of two ``>= 1024`` (a ``0`` list-entry leaves that ring at its
+            A scalar or a list/tuple of 4 ints (per ring 0..3); each entry must
+            be a power of two ``>= 1024`` (a ``0`` list-entry leaves that ring at its
             default). ``None`` defers to the runtime's ``PTO2_RING_HEAP`` env var
             or compile-time default.
         ring_dep_pool: Optional per-invocation override of the per-ring
             dependency-edge pool capacity. Forwarded to
-            ``CallConfig.runtime_env.ring_dep_pool``. A scalar or a list of 4
-            ints (per ring 0..3); each entry must be in ``[4, INT32_MAX]`` (a
+            ``CallConfig.runtime_env.ring_dep_pool``. A scalar or a list/tuple
+            of 4 ints (per ring 0..3); each entry must be in ``[4, INT32_MAX]`` (a
             ``0`` list-entry leaves that ring at its default). ``None`` defers
             to the runtime's
             ``PTO2_RING_DEP_POOL`` env var or compile-time default.
@@ -237,12 +237,13 @@ class RunConfig:
     golden_data_dir: str | None = None
     block_dim: int | None = None
     aicpu_thread_num: int | None = None
-    # Each accepts a scalar (broadcast to all scope-depth rings) or a list of
-    # exactly ``_RING_DEPTH`` ints sizing rings 0..3 independently; a 0 entry in
-    # a list leaves that ring at its env/compile-time default.
-    ring_task_window: int | list[int] | None = None
-    ring_heap: int | list[int] | None = None
-    ring_dep_pool: int | list[int] | None = None
+    # Each accepts a scalar (broadcast to all scope-depth rings) or a list/tuple
+    # of exactly ``_RING_DEPTH`` ints sizing rings 0..3 independently; a 0 entry
+    # leaves that ring at its env/compile-time default. A tuple is normalized to
+    # a list during validation.
+    ring_task_window: int | list[int] | tuple[int, ...] | None = None
+    ring_heap: int | list[int] | tuple[int, ...] | None = None
+    ring_dep_pool: int | list[int] | tuple[int, ...] | None = None
     distributed_config: "DistributedConfig | None" = None
     analyze_auto_scopes_for_deps: bool = False
 
@@ -298,34 +299,36 @@ class RunConfig:
         def _is_pow2(v: int) -> bool:
             return v > 0 and (v & (v - 1)) == 0
 
-        # (field, value, human-readable constraint, scalar predicate). A scalar
-        # is validated directly; a list must have exactly ``_RING_DEPTH`` entries
-        # and every entry obeys the predicate (a ``0`` entry is the runtime's
-        # "leave this ring at its default" sentinel).
+        # (field, human-readable constraint, scalar predicate). A scalar is
+        # validated directly; a list/tuple must have exactly ``_RING_DEPTH``
+        # entries and every entry obeys the predicate (a ``0`` entry is the
+        # runtime's "leave this ring at its default" sentinel).
         specs = (
-            ("ring_task_window", self.ring_task_window, "be a power of 2 >= 4",
-             lambda v: _is_int(v) and _is_pow2(v) and v >= 4),
-            ("ring_heap", self.ring_heap, "be a power of 2 >= 1024 (bytes per ring)",
-             lambda v: _is_int(v) and _is_pow2(v) and v >= 1024),
-            ("ring_dep_pool", self.ring_dep_pool, "be in [4, INT32_MAX]",
-             lambda v: _is_int(v) and 4 <= v <= 2**31 - 1),
+            ("ring_task_window", "be a power of 2 >= 4", lambda v: _is_int(v) and _is_pow2(v) and v >= 4),
+            (
+                "ring_heap",
+                "be a power of 2 >= 1024 (bytes per ring)",
+                lambda v: _is_int(v) and _is_pow2(v) and v >= 1024,
+            ),
+            ("ring_dep_pool", "be in [4, INT32_MAX]", lambda v: _is_int(v) and 4 <= v <= 2**31 - 1),
         )
-        for name, value, phrase, ok in specs:
+        for name, phrase, ok in specs:
+            value = getattr(self, name)
             if value is None:
                 continue
-            if isinstance(value, list):
+            if isinstance(value, (list, tuple)):
+                value = list(value)  # normalize tuple -> list for downstream use
                 if len(value) != _RING_DEPTH:
                     raise ValueError(
-                        f"{name} list must have exactly {_RING_DEPTH} entries "
+                        f"{name} must have exactly {_RING_DEPTH} entries "
                         f"(one per scope-depth ring), got {len(value)}"
                     )
                 for v in value:
                     # Reject non-ints (incl. bool) before the 0 sentinel check so
                     # ``False`` can't masquerade as "leave at default".
                     if not _is_int(v) or (v != 0 and not ok(v)):
-                        raise ValueError(
-                            f"{name} entries must {phrase} (or 0 to keep default), got {v!r}"
-                        )
+                        raise ValueError(f"{name} entries must {phrase} (or 0 to keep default), got {v!r}")
+                setattr(self, name, value)
             elif not ok(value):
                 raise ValueError(f"{name} must {phrase}, got {value!r}")
 

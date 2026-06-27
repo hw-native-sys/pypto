@@ -246,13 +246,20 @@ class TestRunConfigPerRingList:
         cfg = RunConfig(platform="a2a3sim", ring_task_window=[16, 0, 0, 256])
         assert cfg.ring_task_window == [16, 0, 0, 256]
 
+    def test_tuple_accepted_and_normalized_to_list(self):
+        # A tuple is a valid per-ring form and is normalized to a list so
+        # downstream transcription always sees a list.
+        cfg = RunConfig(platform="a2a3sim", ring_heap=(1024, 2048, 4096, 8192))
+        assert cfg.ring_heap == [1024, 2048, 4096, 8192]
+        assert isinstance(cfg.ring_heap, list)
+
     @pytest.mark.parametrize(
         "field",
         ["ring_task_window", "ring_heap", "ring_dep_pool"],
     )
     @pytest.mark.parametrize("length", [0, 1, 3, 5])
     def test_wrong_length_list_rejected(self, field, length):
-        with pytest.raises(ValueError, match=f"{field} list must have exactly 4 entries"):
+        with pytest.raises(ValueError, match=f"{field} must have exactly 4 entries"):
             RunConfig(platform="a2a3sim", **{field: [4] * length})
 
     @pytest.mark.parametrize(
