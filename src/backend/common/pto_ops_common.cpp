@@ -2898,9 +2898,12 @@ static std::string MakeWaitCodegenPTO(const CallPtr& op, codegen::CodegenBase& c
 //
 // Full-slice tile.put (4 args) uses zero offsets and the full dst/src shape.
 // Subregion tile.put (7 args) uses the explicit offsets and transfer shape that
-// ConvertTensorToTileOps forwarded from user-facing pld.tensor.put. PTOAS
-// validates the stage tile type against the partition views, so the IR verifier
-// also checks that stage elements equal prod(transfer_shape).
+// ConvertTensorToTileOps forwarded from user-facing pld.tensor.put. The stage
+// tile carries the full transfer extent OR (when chunk_rows/chunk_cols were
+// supplied) a sub-tile of it; pto-isa TPUT reads the full extent from the
+// partition views and 2-D-slides the transfer through the stage tile, so the
+// stage only has to fit within the flattened transfer (verified by
+// DeducePutTileType), not equal it.
 static std::string MakePutCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
   CHECK(op->args_.size() == 4 || op->args_.size() == 7)
@@ -3007,6 +3010,20 @@ static std::string MakePutCodegenPTO(const CallPtr& op, codegen::CodegenBase& co
        << ", " << partition_type << ", " << stage_type << ") {atomicType = #pto<atomic_type " << atomic_attr
        << ">}";
   codegen.Emit(tput.str());
+
+  // Drain TPUT's writes before returning, so a following `pld.system.notify`
+  // (cross-rank signal that the data has landed) does not race ahead of them.
+  // Emitted unconditionally: the chunked sliding path strictly requires it (its
+  // last chunk's MTE3 store is otherwise still in-flight, a deterministic stale
+  // read), and the single-shot path — though self-draining for that store — has
+  // the same cross-rank data-before-signal obligation, so the extra barrier is
+  // harmless there.
+  //
+  // WORKAROUND for PTOAS#872: the proper fix drains prior stores inside
+  // TNOTIFY_IMPL (`pipe_barrier(PIPE_ALL); dsb(DSB_DDR)` before the signal),
+  // which also adds the DDR-observability fence a pipe barrier alone can't give.
+  // Remove this once that lands.
+  codegen.Emit("pto.barrier <PIPE_ALL>");
   return "";
 }
 
@@ -3110,6 +3127,15 @@ static std::string MakeGetCodegenPTO(const CallPtr& op, codegen::CodegenBase& co
   tget << "pto.comm.tget(" << dst_pview << ", " << src_pview << ", buf(" << stage << ") : " << partition_type
        << ", " << partition_type << ", " << stage_type << ")";
   codegen.Emit(tget.str());
+
+  // Drain TGET's writes into the local dst before returning. As with TPUT, when
+  // the staging tile is smaller than the transfer pto-isa TGET 2-D-slides the
+  // transfer through multiple chunks; a following local read of `dst` must not
+  // race ahead of the last chunk's MTE3 store.
+  //
+  // WORKAROUND for PTOAS#872 (TGET counterpart): remove once PTOAS drains a
+  // chunked tget itself.
+  codegen.Emit("pto.barrier <PIPE_ALL>");
   return "";
 }
 

@@ -79,6 +79,8 @@ def put(
     dst_offsets: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     src_offsets: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     shape: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
+    chunk_rows: int = 0,
+    chunk_cols: int = 0,
     span: Span | None = None,
 ) -> Call:
     """Build a ``pld.tensor.put(dst, peer, src)`` Call.
@@ -92,6 +94,12 @@ def put(
     into the full destination slice. When offsets and shape are provided it
     writes ``src[src_offsets:src_offsets+shape]`` into the peer rank's
     ``dst[dst_offsets:dst_offsets+shape]``.
+
+    ``chunk_rows`` / ``chunk_cols`` (``0`` = full) size the VEC staging tile that
+    ``ConvertTensorToTileOps`` allocates to a sub-tile of the flattened transfer
+    ``[rows, cols]`` extent (``rows`` = product of leading dims, ``cols`` =
+    innermost dim); pto-isa TPUT then auto-chunks the full transfer through it.
+    Packed as ``int`` attrs only when non-zero.
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     peer_expr = _normalize_expr(peer, actual_span, int_dtype=DataType.INT32)
@@ -110,7 +118,12 @@ def put(
                 _to_make_tuple(shape, actual_span),
             ]
         )
-    return _ir_core.create_op_call("pld.tensor.put", args, {"atomic": int(atomic)}, actual_span)
+    attrs: dict[str, int] = {"atomic": int(atomic)}
+    if chunk_rows:
+        attrs["chunk_rows"] = int(chunk_rows)
+    if chunk_cols:
+        attrs["chunk_cols"] = int(chunk_cols)
+    return _ir_core.create_op_call("pld.tensor.put", args, attrs, actual_span)
 
 
 def get(
@@ -121,6 +134,8 @@ def get(
     dst_offsets: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     src_offsets: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     shape: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
+    chunk_rows: int = 0,
+    chunk_cols: int = 0,
     span: Span | None = None,
 ) -> Call:
     """Build a ``pld.tensor.get(dst, peer, src)`` Call.
@@ -135,6 +150,11 @@ def get(
     provided it reads
     ``src[src_offsets:src_offsets+shape]`` from the peer rank into local
     ``dst[dst_offsets:dst_offsets+shape]``.
+
+    ``chunk_rows`` / ``chunk_cols`` (``0`` = full) size the VEC staging tile to a
+    sub-tile of the flattened transfer ``[rows, cols]`` extent so pto-isa TGET
+    auto-chunks the full transfer through it. Packed as ``int`` attrs only when
+    non-zero.
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     peer_expr = _normalize_expr(peer, actual_span, int_dtype=DataType.INT32)
@@ -153,7 +173,12 @@ def get(
                 _to_make_tuple(shape, actual_span),
             ]
         )
-    return _ir_core.create_op_call("pld.tensor.get", args, {}, actual_span)
+    attrs: dict[str, int] = {}
+    if chunk_rows:
+        attrs["chunk_rows"] = int(chunk_rows)
+    if chunk_cols:
+        attrs["chunk_cols"] = int(chunk_cols)
+    return _ir_core.create_op_call("pld.tensor.get", args, attrs, actual_span)
 
 
 def allreduce(

@@ -73,6 +73,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -180,6 +181,44 @@ std::vector<ExprPtr> ValidatePutRegionArgs(const std::vector<ExprPtr>& args, siz
   return transfer_shape->elements_;
 }
 
+// Flatten an N-D static transfer shape to its 2-D [rows, cols] extent
+// (rows = prod(leading dims), cols = innermost dim) and confirm the 2-D VEC
+// stage tile fits within it in both dims. pto-isa TPUT/TGET auto-chunks the
+// transfer through a smaller stage, so the stage is allowed to be smaller than
+// the transfer; it must only not exceed it.
+//
+// NOTE: kept identical to the copy in get.cpp (mirrors the existing per-file
+// Validate*Contract / Validate*RegionArgs duplication between these two TUs).
+void ValidateStageFitsTransfer(const std::vector<ExprPtr>& stage_shape,
+                               const std::vector<ExprPtr>& transfer_shape, const Span& transfer_span,
+                               const Span& stage_span, const std::string& op_name) {
+  int64_t transfer_cols = 1;
+  int64_t transfer_rows = 1;
+  for (size_t i = 0; i < transfer_shape.size(); ++i) {
+    auto d = As<ConstInt>(transfer_shape[i]);
+    INTERNAL_CHECK_SPAN(d, transfer_span)
+        << "Internal error: " << op_name << " transfer shape was not static after validation";
+    if (i + 1 == transfer_shape.size()) {
+      transfer_cols = d->value_;
+    } else {
+      transfer_rows *= d->value_;
+    }
+  }
+  auto stage_rows_c = As<ConstInt>(stage_shape[0]);
+  auto stage_cols_c = As<ConstInt>(stage_shape[1]);
+  INTERNAL_CHECK_SPAN(stage_rows_c && stage_cols_c, stage_span)
+      << "Internal error: " << op_name << " stage dims must be static ConstInt";
+  const int64_t stage_rows = stage_rows_c->value_;
+  const int64_t stage_cols = stage_cols_c->value_;
+  INTERNAL_CHECK_SPAN(stage_rows > 0 && stage_cols > 0, stage_span)
+      << "Internal error: " << op_name << " stage dims must be positive, got [" << stage_rows << ", "
+      << stage_cols << "]";
+  INTERNAL_CHECK_SPAN(stage_rows <= transfer_rows && stage_cols <= transfer_cols, stage_span)
+      << "Internal error: " << op_name << " stage [" << stage_rows << ", " << stage_cols
+      << "] must fit within flattened transfer [" << transfer_rows << ", " << transfer_cols
+      << "] (pto-isa auto-chunks a smaller stage)";
+}
+
 TypePtr DeducePutType(const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
   CHECK(args.size() == 3 || args.size() == 6)
@@ -225,27 +264,14 @@ TypePtr DeducePutTileType(const std::vector<ExprPtr>& args,
     transfer_shape = ValidatePutRegionArgs(args, 4, dst_type->shape_, src_type->shape_, "pld.tile.put");
   }
 
-  // The explicit stage tile is allocated by ConvertTensorToTileOps. Its element
-  // count must match the actual transfer shape, not necessarily the full dst
-  // shape when subregion arguments are present.
-  int64_t expected_elems = 1;
-  for (const auto& dim : transfer_shape) {
-    auto d = As<ConstInt>(dim);
-    INTERNAL_CHECK_SPAN(d, args[0]->span_)
-        << "Internal error: pld.tile.put transfer shape was not static after validation";
-    expected_elems *= d->value_;
-  }
-  int64_t stage_elems = 1;
-  for (const auto& dim : stage_type->shape_) {
-    auto d = As<ConstInt>(dim);
-    INTERNAL_CHECK_SPAN(d, args[3]->span_) << "Internal error: pld.tile.put stage dim is not ConstInt";
-    INTERNAL_CHECK_SPAN(d->value_ > 0, args[3]->span_)
-        << "Internal error: pld.tile.put stage dim not positive (" << d->value_ << ")";
-    stage_elems *= d->value_;
-  }
-  INTERNAL_CHECK_SPAN(stage_elems == expected_elems, args[3]->span_)
-      << "Internal error: pld.tile.put stage holds " << stage_elems << " elements, expected "
-      << expected_elems << " (prod(transfer shape))";
+  // The explicit stage tile (allocated by ConvertTensorToTileOps) is the 2-D VEC
+  // bounce buffer that pto-isa TPUT streams the transfer through. TPUT reads the
+  // full transfer extent from the partition views and uses the stage tile's
+  // rows/cols as its 2-D sliding chunk size, so the stage may be SMALLER than
+  // the transfer (a single chunk). It must only not EXCEED the transfer in
+  // either flattened dim (rows = prod(leading dims), cols = innermost dim).
+  ValidateStageFitsTransfer(stage_type->shape_, transfer_shape, args[0]->span_, args[3]->span_,
+                            "pld.tile.put");
 
   return GetUnknownType();
 }
@@ -263,13 +289,18 @@ REGISTER_OP("pld.tensor.put")
         "the window-bound DistributedTensor `dst`. `atomic` selects plain-store vs atomic-add "
         "combine semantics. Lowered by ConvertTensorToTileOps to a `tile.create`-allocated "
         "VEC staging tile plus a `pld.tile.put` call, so the staging tile flows through "
-        "PyPTO's memory allocator (required at --pto-level=level3).")
+        "PyPTO's memory allocator (required at --pto-level=level3). Optional `chunk_rows` / "
+        "`chunk_cols` (0 = full) size that staging tile to a sub-tile of the flattened "
+        "transfer [rows, cols] extent; pto-isa TPUT then auto-chunks the full transfer "
+        "through it, so transfers larger than UB no longer need to fit in one staging tile.")
     .set_op_category("DistributedOp")
     .add_argument("dst", "Remote (peer) window-bound DistributedTensor destination")
     .add_argument("peer", "Peer rank index (ScalarType, integer)")
     .add_argument("src",
                   "Local source — DistributedTensor (window-bound) or plain Tensor (same dtype as dst)")
     .set_attr<int>("atomic")
+    .set_attr<int>("chunk_rows")
+    .set_attr<int>("chunk_cols")
     .no_memory_spec()
     .f_deduce_type(DeducePutType);
 
@@ -286,7 +317,7 @@ REGISTER_OP("pld.tile.put")
     .add_argument("peer", "Peer rank index (ScalarType, integer)")
     .add_argument("src",
                   "Local source — DistributedTensor (window-bound) or plain Tensor (same dtype as dst)")
-    .add_argument("stage", "VEC staging TileType (rows x cols == prod(transfer shape))")
+    .add_argument("stage", "VEC staging TileType (rows x cols <= flattened transfer; auto-chunked by TPUT)")
     .set_attr<int>("atomic")
     .no_memory_spec()
     .f_deduce_type(DeducePutTileType);

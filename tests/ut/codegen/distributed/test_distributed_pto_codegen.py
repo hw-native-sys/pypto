@@ -544,6 +544,44 @@ def test_put_emits_comm_tput_with_attr_and_staging_tile():
     assert "_local_pview" in mlir
 
 
+def test_put_chunk_shrinks_staging_tile_keeping_full_partition_view():
+    """``chunk_rows`` / ``chunk_cols`` shrink the VEC staging tile while the
+    partition views keep the full transfer extent — pto-isa TPUT then 2-D-slides
+    the full transfer through the sub-tile, so transfers larger than UB no longer
+    need a full tile."""
+
+    @pl.program
+    class PChunk:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[16, 64], pl.FP16],
+            src: pld.DistributedTensor[[16, 64], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            pld.tensor.put(dst, peer=peer, src=src, atomic=pld.AtomicType.None_, chunk_rows=4, chunk_cols=32)
+
+    mlir = _generate_mlir(PChunk)
+    tput_line = next(line for line in mlir.splitlines() if "pto.comm.tput(" in line)
+    # Partition views still describe the FULL 16x64 transfer (TPUT reads the full
+    # extent from these and chunks internally).
+    assert tput_line.count("!pto.partition_tensor_view<16x64xf16>") == 2
+    # The staging tile is the [4, 32] chunk, not the full [16, 64] transfer.
+    stage_alloc_line = next(
+        line for line in mlir.splitlines() if "pto.alloc_tile" in line and "tput_stage" in line
+    )
+    assert "rows=4" in stage_alloc_line and "cols=32" in stage_alloc_line, (
+        f"staging tile must be the [4, 32] chunk, got: {stage_alloc_line}"
+    )
+    # A drain barrier is emitted immediately after the tput so a following
+    # cross-rank notify can't race the chunked stores (PTOAS#872 workaround).
+    lines = mlir.splitlines()
+    tput_idx = next(i for i, line in enumerate(lines) if "pto.comm.tput(" in line)
+    assert "pto.barrier <PIPE_ALL>" in lines[tput_idx + 1], (
+        f"expected a PIPE_ALL drain right after tput, got: {lines[tput_idx + 1]}"
+    )
+
+
 def test_put_atomic_add_variant():
     """put with AtomicType.Add lowers to the atomic_add combine attr."""
 

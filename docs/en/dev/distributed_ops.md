@@ -150,8 +150,9 @@ positional, matching `tile.store`.
 ### `pld.tensor.put` (TPUT)
 
 ```text
-pld.tensor.put(dst, peer, src, *, atomic: int) -> Unknown
-pld.tensor.put(dst, peer, src, dst_offsets, src_offsets, shape, *, atomic: int) -> Unknown
+pld.tensor.put(dst, peer, src, *, atomic: int, chunk_rows: int = 0, chunk_cols: int = 0) -> Unknown
+pld.tensor.put(dst, peer, src, dst_offsets, src_offsets, shape,
+               *, atomic: int, chunk_rows: int = 0, chunk_cols: int = 0) -> Unknown
 ```
 
 Synchronously writes local `src` data into the `peer` rank's slice of the
@@ -167,19 +168,32 @@ With no offsets/shape this writes the full local `src` slice to the full peer
 `dst` slice. Supplying `dst_offsets`, `src_offsets`, and `shape` narrows the
 transfer to matching subregions; all three must be provided together.
 
+**Staging-tile chunking.** By default the staging tile spans the whole
+flattened transfer `[rows, cols]` extent (`rows` = product of the leading dims,
+`cols` = the innermost dim), so a transfer must fit in UB. The optional
+`chunk_rows` / `chunk_cols` attrs (`0` = full) shrink the staging tile to a
+sub-tile of that extent; the codegen keeps the `pto.comm.tput` partition views
+at the **full** transfer extent and pto-isa TPUT 2-D-slides the transfer through
+the smaller stage. This lets a single `put` move data larger than UB without the
+caller writing an explicit chunk loop. Oversized chunk values are clamped to the
+transfer extent.
+
 Verifier: `dst` must be `DistributedTensorType`; `src` must be either
 `TensorType` or `DistributedTensorType` (matched via `AsTensorTypeLike`);
 `peer` must be a `ScalarType`; `dst` and `src` must share element type, rank,
 and **positive static** dimensions. Full-slice `put` requires identical shape;
 subregion `put` allows different full slice extents as long as the explicit
 transfer region is in bounds. `atomic` selects overwrite vs atomic-add (see
-`AtomicType`).
+`AtomicType`). The lowered `pld.tile.put` verifier requires the staging tile to
+**fit within** the flattened transfer in both dims (it may be smaller — a chunk
+— but never larger).
 
 ### `pld.tensor.get` (TGET)
 
 ```text
-pld.tensor.get(dst, peer, src) -> Unknown
-pld.tensor.get(dst, peer, src, dst_offsets, src_offsets, shape) -> Unknown
+pld.tensor.get(dst, peer, src, *, chunk_rows: int = 0, chunk_cols: int = 0) -> Unknown
+pld.tensor.get(dst, peer, src, dst_offsets, src_offsets, shape,
+               *, chunk_rows: int = 0, chunk_cols: int = 0) -> Unknown
 ```
 
 Synchronously reads the `peer` rank's slice of the window-bound `src` into the
@@ -191,14 +205,18 @@ never appears on the DSL surface.
 
 With no offsets/shape this reads the full peer `src` slice into the full local
 `dst` slice. Supplying `dst_offsets`, `src_offsets`, and `shape` narrows the
-transfer to matching subregions; all three must be provided together.
+transfer to matching subregions; all three must be provided together. The
+optional `chunk_rows` / `chunk_cols` attrs (`0` = full) shrink the staging tile
+to a sub-tile of the flattened transfer extent so pto-isa TGET auto-chunks the
+full transfer through it — same contract as `put` above.
 
 Verifier: `dst` must be either `TensorType` or `DistributedTensorType` (matched
 via `AsTensorTypeLike`); `src` must be `DistributedTensorType`; `peer` must be a
 `ScalarType`; `dst` and `src` must share element type, rank, and **positive
 static** dimensions. Full-slice `get` requires identical shape; subregion `get`
 allows different full slice extents as long as the explicit transfer region is
-in bounds. `get` accepts no keyword attributes.
+in bounds. Besides `chunk_rows` / `chunk_cols`, `get` accepts no keyword
+attributes.
 
 ### `pld.tensor.allreduce`
 

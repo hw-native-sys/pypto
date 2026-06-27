@@ -392,5 +392,126 @@ class TestL3PutSubregion:
         )
 
 
+CHUNK_ROWS = 8
+CHUNK_COLS = 64
+
+
+def _build_chunked_ring_put_program():
+    """Build a ring-put program whose staging tile is smaller than the transfer.
+
+    The ``[CHUNK_ROWS, CHUNK_COLS]`` window is pushed with ``chunk_rows=2,
+    chunk_cols=32`` so ``ConvertTensorToTileOps`` allocates a ``[2, 32]`` VEC
+    staging tile while the ``pto.comm.tput`` partition views keep the full
+    ``[8, 64]`` extent. pto-isa TPUT must therefore 2-D-slide the full transfer
+    through the sub-tile (4 row-chunks × 2 col-chunks). The end-to-end result
+    must equal the unchunked ring shuffle — this is the device-level proof that
+    the auto-chunk path is correct, not just that the codegen is well-formed.
+    """
+
+    @pl.program
+    class ChunkedRingPut:
+        @pl.function(type=pl.FunctionType.InCore)
+        def ring_step(
+            self,
+            inp: pl.Tensor[[CHUNK_ROWS, CHUNK_COLS], pl.FP32],
+            out: pl.Out[pl.Tensor[[CHUNK_ROWS, CHUNK_COLS], pl.FP32]],
+            src: pld.DistributedTensor[[CHUNK_ROWS, CHUNK_COLS], pl.FP32],
+            dst: pld.DistributedTensor[[CHUNK_ROWS, CHUNK_COLS], pl.FP32],
+            signal: pld.DistributedTensor[[1, 1], pl.INT32],
+            peer: pl.Scalar[pl.INT32],
+        ) -> pl.Tensor[[CHUNK_ROWS, CHUNK_COLS], pl.FP32]:
+            # Phase 1: stage-in — local input → this rank's own src window slice.
+            local = pl.load(inp, [0, 0], [CHUNK_ROWS, CHUNK_COLS])
+            src = pl.store(local, [0, 0], src)
+
+            # Phase 2: push our full src into the peer's dst slice, but force the
+            # VEC staging tile down to [2, 32] so TPUT auto-chunks the transfer.
+            pld.tensor.put(
+                dst,
+                peer=peer,
+                src=src,
+                atomic=pld.AtomicType.None_,
+                chunk_rows=2,
+                chunk_cols=32,
+            )
+
+            # Phase 3: handshake — signal the peer, wait for the rank targeting us.
+            pld.system.notify(signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
+            pld.system.wait(signal=signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Ge)
+
+            # Phase 4: read our own dst slice back — written by the rank whose peer is us.
+            recv = pl.load(dst, [0, 0], [CHUNK_ROWS, CHUNK_COLS])
+            return pl.store(recv, [0, 0], out)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self,
+            inp: pl.Tensor[[CHUNK_ROWS, CHUNK_COLS], pl.FP32],
+            out: pl.Out[pl.Tensor[[CHUNK_ROWS, CHUNK_COLS], pl.FP32]],
+            src: pld.DistributedTensor[[CHUNK_ROWS, CHUNK_COLS], pl.FP32],
+            dst: pld.DistributedTensor[[CHUNK_ROWS, CHUNK_COLS], pl.FP32],
+            signal: pld.DistributedTensor[[1, 1], pl.INT32],
+            peer: pl.Scalar[pl.INT32],
+        ) -> pl.Tensor[[CHUNK_ROWS, CHUNK_COLS], pl.FP32]:
+            return self.ring_step(inp, out, src, dst, signal, peer)
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(
+            self,
+            inputs: pl.Tensor[[2, CHUNK_ROWS, CHUNK_COLS], pl.FP32],
+            outputs: pl.Out[pl.Tensor[[2, CHUNK_ROWS, CHUNK_COLS], pl.FP32]],
+        ) -> pl.Tensor[[2, CHUNK_ROWS, CHUNK_COLS], pl.FP32]:
+            src_buf = pld.alloc_window_buffer(CHUNK_ROWS * CHUNK_COLS * 4)
+            dst_buf = pld.alloc_window_buffer(CHUNK_ROWS * CHUNK_COLS * 4)
+            signal_buf = pld.alloc_window_buffer(4)
+
+            for r in pl.range(pld.world_size()):
+                src = pld.window(src_buf, [CHUNK_ROWS, CHUNK_COLS], dtype=pl.FP32)
+                dst = pld.window(dst_buf, [CHUNK_ROWS, CHUNK_COLS], dtype=pl.FP32)
+                signal = pld.window(signal_buf, [1, 1], dtype=pl.INT32)
+                self.chip_orch(inputs[r], outputs[r], src, dst, signal, (r + 1) % pld.world_size(), device=r)
+            return outputs
+
+    return ChunkedRingPut
+
+
+class TestL3PutChunked:
+    """L3 distributed runtime: cross-rank write whose staging tile is sub-tiled,
+    exercising pto-isa TPUT's auto-chunk (2-D sliding) path on device."""
+
+    def test_chunked_ring_shuffle(self, test_config, device_ids):
+        """A sub-tile staging buffer must still move the full transfer correctly."""
+        if len(device_ids) < 2:
+            pytest.skip(f"chunked ring put needs 2 devices, got {device_ids}")
+
+        program = _build_chunked_ring_put_program()
+        compiled = ir.compile(
+            program,
+            platform=test_config.platform,
+            distributed_config=DistributedConfig(
+                device_ids=device_ids[:2],
+                num_sub_workers=0,
+            ),
+        )
+
+        # rank 0 holds 0..511; rank 1 holds 1000..1511 (reshaped to [8, 64]).
+        n = CHUNK_ROWS * CHUNK_COLS
+        inputs = torch.stack(
+            [
+                torch.arange(n, dtype=torch.float32).reshape(CHUNK_ROWS, CHUNK_COLS),
+                torch.arange(1000.0, 1000.0 + n, dtype=torch.float32).reshape(CHUNK_ROWS, CHUNK_COLS),
+            ]
+        )
+        outputs = torch.zeros((2, CHUNK_ROWS, CHUNK_COLS), dtype=torch.float32)
+
+        compiled(inputs, outputs)
+
+        # Same ring contract as the unchunked case: outputs[r] = inputs[(r - 1) % nranks].
+        expected = torch.stack([inputs[1], inputs[0]])
+        assert torch.allclose(outputs, expected), (
+            f"chunked ring put mismatch: max diff = {(outputs - expected).abs().max().item()}"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", *sys.argv[1:]])

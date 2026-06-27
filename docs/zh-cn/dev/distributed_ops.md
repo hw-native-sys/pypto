@@ -137,8 +137,9 @@ DSL（`python/pypto/language/distributed/op/tile_ops.py`）把 `target` / `peer`
 ### `pld.tensor.put`（TPUT）
 
 ```text
-pld.tensor.put(dst, peer, src, *, atomic: int) -> Unknown
-pld.tensor.put(dst, peer, src, dst_offsets, src_offsets, shape, *, atomic: int) -> Unknown
+pld.tensor.put(dst, peer, src, *, atomic: int, chunk_rows: int = 0, chunk_cols: int = 0) -> Unknown
+pld.tensor.put(dst, peer, src, dst_offsets, src_offsets, shape,
+               *, atomic: int, chunk_rows: int = 0, chunk_cols: int = 0) -> Unknown
 ```
 
 同步地把本地 `src` 数据写入 `peer` rank 的窗口绑定 `dst` 切片。`dst` 是 GM
@@ -152,18 +153,27 @@ PyPTO 的内存分配器,但不出现在 DSL 表面。
 切片。提供 `dst_offsets`、`src_offsets` 和 `shape` 时,传输会缩小到匹配的
 subregion；三者必须一起提供。
 
+**staging tile 分块。** 默认 staging tile 覆盖整个展平后的传输 `[rows, cols]`
+范围（`rows` = 前导维之积,`cols` = 最内维），因此一次传输必须放得进 UB。可选的
+`chunk_rows` / `chunk_cols`（`0` = 全量）把 staging tile 缩成该范围的子块；codegen
+仍让 `pto.comm.tput` 的 partition view 保持**完整**传输范围,由 pto-isa TPUT 在
+更小的 stage 上做 2D 滑窗。这样单个 `put` 即可搬运大于 UB 的数据,无需调用方手写
+分块循环。超出范围的 chunk 值会被钳到传输范围内。
+
 Verifier：`dst` 必须是 `DistributedTensorType`；`src` 必须是 `TensorType` 或
 `DistributedTensorType`（通过 `AsTensorTypeLike` 匹配）；`peer` 必须是
 `ScalarType`；`dst` 与 `src` 必须 element type 相同、rank 相同,且各维都是
 **正的静态（positive static）**维度。full-slice `put` 要求形状完全相同；
 subregion `put` 允许完整切片尺寸不同,只要显式传输区域不越界。`atomic` 选择覆盖
-还是原子加（见 `AtomicType`）。
+还是原子加（见 `AtomicType`）。下降出的 `pld.tile.put` verifier 要求 staging tile
+在两个维度上都**不超过**展平后的传输范围（可以更小 —— 即一个 chunk —— 但不能更大）。
 
 ### `pld.tensor.get`（TGET）
 
 ```text
-pld.tensor.get(dst, peer, src) -> Unknown
-pld.tensor.get(dst, peer, src, dst_offsets, src_offsets, shape) -> Unknown
+pld.tensor.get(dst, peer, src, *, chunk_rows: int = 0, chunk_cols: int = 0) -> Unknown
+pld.tensor.get(dst, peer, src, dst_offsets, src_offsets, shape,
+               *, chunk_rows: int = 0, chunk_cols: int = 0) -> Unknown
 ```
 
 同步地把 `peer` rank 的窗口绑定 `src` 切片读入本地 `dst`。`dst` 可以是窗口绑
@@ -174,14 +184,16 @@ pld.tensor.get(dst, peer, src, dst_offsets, src_offsets, shape) -> Unknown
 
 不提供 offsets/shape 时,该操作把完整的 peer `src` 切片读入完整的本地 `dst`
 切片。提供 `dst_offsets`、`src_offsets` 和 `shape` 时,传输会缩小到匹配的
-subregion；三者必须一起提供。
+subregion；三者必须一起提供。可选的 `chunk_rows` / `chunk_cols`（`0` = 全量）把
+staging tile 缩成展平后传输范围的子块,由 pto-isa TGET 自动分块搬运 —— 与上面
+`put` 的契约一致。
 
 Verifier：`dst` 可以是 `DistributedTensorType` 或普通 `TensorType`（通过
 `AsTensorTypeLike` 匹配）；`src` 必须是 `DistributedTensorType`；`peer` 必须是
 `ScalarType`；`dst` 与 `src` 必须 element type 相同、rank 相同,且各维都是
 **正的静态（positive static）**维度。full-slice `get` 要求形状完全相同；
-subregion `get` 允许完整切片尺寸不同,只要显式传输区域不越界。`get` 不接受
-keyword attributes。
+subregion `get` 允许完整切片尺寸不同,只要显式传输区域不越界。除
+`chunk_rows` / `chunk_cols` 外,`get` 不接受 keyword attributes。
 
 ### `pld.tensor.allreduce`
 

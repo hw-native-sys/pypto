@@ -11,6 +11,7 @@
 
 #include "pypto/ir/transforms/op_conversion_registry.h"
 
+#include <algorithm>
 #include <any>
 #include <cstddef>
 #include <cstdint>
@@ -2083,6 +2084,53 @@ void OpConversionRegistry::RegisterCmpOps() {
 // memory allocator assigns UB addresses before codegen (--pto-level=level3)
 // ============================================================================
 
+namespace {
+
+// Build the 2-D [rows, cols] VEC staging-tile shape tuple for a put/get
+// transfer. Flattens the N-D transfer shape (rows = product(leading dims),
+// cols = innermost dim). When the user supplied chunk_rows / chunk_cols attrs
+// (0 = unset), caps the staging tile to that sub-tile so pto-isa TPUT/TGET
+// auto-chunks the full transfer through it — transfers larger than UB no longer
+// need a full-size staging tile. Oversized chunk values are clamped to the
+// flattened extent (a no-op single transfer).
+ExprPtr MakeTputStageShape(const std::vector<ExprPtr>& transfer_shape,
+                           const std::vector<std::pair<std::string, std::any>>& kwargs, const Span& span,
+                           const char* op_name) {
+  auto last = As<ConstInt>(transfer_shape.back());
+  INTERNAL_CHECK_SPAN(last, span) << op_name << ": transfer innermost dimension must be ConstInt";
+  int64_t cols_val = last->value_;
+  int64_t rows_val = 1;
+  for (size_t i = 0; i + 1 < transfer_shape.size(); ++i) {
+    auto d = As<ConstInt>(transfer_shape[i]);
+    INTERNAL_CHECK_SPAN(d, span) << op_name << ": transfer dimension " << i << " must be ConstInt";
+    rows_val *= d->value_;
+  }
+  const int chunk_rows = GetKwargOr<int>(kwargs, "chunk_rows", 0);
+  const int chunk_cols = GetKwargOr<int>(kwargs, "chunk_cols", 0);
+  if (chunk_rows > 0) rows_val = std::min<int64_t>(rows_val, chunk_rows);
+  if (chunk_cols > 0) cols_val = std::min<int64_t>(cols_val, chunk_cols);
+  auto rows_expr = std::make_shared<ConstInt>(rows_val, DataType::INDEX, span);
+  auto cols_expr = std::make_shared<ConstInt>(cols_val, DataType::INDEX, span);
+  return std::make_shared<MakeTuple>(std::vector<ExprPtr>{rows_expr, cols_expr}, span);
+}
+
+// Drop the staging-only chunk_rows / chunk_cols attrs before forwarding the
+// remaining kwargs (e.g. put's `atomic`) to the tile-level op — the stage
+// tile's shape already encodes the chunk, so the tile-level op needs no chunk
+// attr of its own.
+std::vector<std::pair<std::string, std::any>> StripChunkKwargs(
+    const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  std::vector<std::pair<std::string, std::any>> out;
+  out.reserve(kwargs.size());
+  for (const auto& kv : kwargs) {
+    if (kv.first == "chunk_rows" || kv.first == "chunk_cols") continue;
+    out.push_back(kv);
+  }
+  return out;
+}
+
+}  // namespace
+
 void OpConversionRegistry::RegisterDistributedOps() {
   // pld.tensor.put -> tile.create(stage) + pld.tile.put(dst, peer, src, stage).
   // Stage shape is [rows, cols] with rows = product(leading dims), cols =
@@ -2113,24 +2161,9 @@ void OpConversionRegistry::RegisterDistributedOps() {
         INTERNAL_CHECK_SPAN(!transfer_shape.empty(), span)
             << "pld.tensor.put conversion: transfer shape requires rank >= 1";
 
-        // Flatten N-D to [rows, cols]: rows = ∏ leading dims, cols = innermost.
-        int64_t cols_val = 0;
-        {
-          auto last = As<ConstInt>(transfer_shape.back());
-          INTERNAL_CHECK_SPAN(last, span)
-              << "pld.tensor.put conversion: transfer innermost dimension must be ConstInt";
-          cols_val = last->value_;
-        }
-        int64_t rows_val = 1;
-        for (size_t i = 0; i + 1 < transfer_shape.size(); ++i) {
-          auto d = As<ConstInt>(transfer_shape[i]);
-          INTERNAL_CHECK_SPAN(d, span)
-              << "pld.tensor.put conversion: transfer dimension " << i << " must be ConstInt";
-          rows_val *= d->value_;
-        }
-        auto rows_expr = std::make_shared<ConstInt>(rows_val, DataType::INDEX, span);
-        auto cols_expr = std::make_shared<ConstInt>(cols_val, DataType::INDEX, span);
-        auto shape_tuple = std::make_shared<MakeTuple>(std::vector<ExprPtr>{rows_expr, cols_expr}, span);
+        // Flatten N-D to [rows, cols] and (optionally) cap to the chunk attrs so
+        // pto-isa TPUT auto-chunks the full transfer through a sub-tile.
+        auto shape_tuple = MakeTputStageShape(transfer_shape, kwargs, span, "pld.tensor.put conversion");
 
         std::vector<std::pair<std::string, std::any>> create_kwargs = {{"dtype", dst_type->dtype_},
                                                                        {"target_memory", MemorySpace::Vec}};
@@ -2143,7 +2176,9 @@ void OpConversionRegistry::RegisterDistributedOps() {
         if (args.size() == 6) {
           put_args.insert(put_args.end(), args.begin() + 3, args.end());
         }
-        auto put_call = op_reg.Create("pld.tile.put", put_args, kwargs, span);
+        // chunk_* attrs are consumed by the stage sizing above; forward only the
+        // tile-level op's own attrs (atomic).
+        auto put_call = op_reg.Create("pld.tile.put", put_args, StripChunkKwargs(kwargs), span);
         return ConversionResult{std::move(prologue), put_call};
       });
 
@@ -2159,7 +2194,8 @@ void OpConversionRegistry::RegisterDistributedOps() {
             << "pld.tensor.get conversion expects 3 args (dst, peer, src) or 6 "
                "(dst, peer, src, dst_offsets, src_offsets, shape), got "
             << args.size();
-        INTERNAL_CHECK_SPAN(kwargs.empty(), span) << "pld.tensor.get conversion expects no kwargs";
+        // Only the optional chunk_rows / chunk_cols staging attrs are accepted
+        // here; they are consumed by the stage sizing below (not forwarded).
         auto& op_reg = OpRegistry::GetInstance();
 
         auto dst_type = AsTensorTypeLike(args[0]->GetType());
@@ -2175,23 +2211,9 @@ void OpConversionRegistry::RegisterDistributedOps() {
         INTERNAL_CHECK_SPAN(!transfer_shape.empty(), span)
             << "pld.tensor.get conversion: transfer shape requires rank >= 1";
 
-        int64_t cols_val = 0;
-        {
-          auto last = As<ConstInt>(transfer_shape.back());
-          INTERNAL_CHECK_SPAN(last, span)
-              << "pld.tensor.get conversion: transfer innermost dimension must be ConstInt";
-          cols_val = last->value_;
-        }
-        int64_t rows_val = 1;
-        for (size_t i = 0; i + 1 < transfer_shape.size(); ++i) {
-          auto d = As<ConstInt>(transfer_shape[i]);
-          INTERNAL_CHECK_SPAN(d, span)
-              << "pld.tensor.get conversion: transfer dimension " << i << " must be ConstInt";
-          rows_val *= d->value_;
-        }
-        auto rows_expr = std::make_shared<ConstInt>(rows_val, DataType::INDEX, span);
-        auto cols_expr = std::make_shared<ConstInt>(cols_val, DataType::INDEX, span);
-        auto shape_tuple = std::make_shared<MakeTuple>(std::vector<ExprPtr>{rows_expr, cols_expr}, span);
+        // Flatten N-D to [rows, cols] and (optionally) cap to the chunk attrs so
+        // pto-isa TGET auto-chunks the full transfer through a sub-tile.
+        auto shape_tuple = MakeTputStageShape(transfer_shape, kwargs, span, "pld.tensor.get conversion");
 
         std::vector<std::pair<std::string, std::any>> create_kwargs = {{"dtype", dst_type->dtype_},
                                                                        {"target_memory", MemorySpace::Vec}};
@@ -2204,6 +2226,9 @@ void OpConversionRegistry::RegisterDistributedOps() {
         if (args.size() == 6) {
           get_args.insert(get_args.end(), args.begin() + 3, args.end());
         }
+        // No kwargs forwarded: pld.tensor.get's only attrs are chunk_rows/
+        // chunk_cols, already consumed by the stage sizing above; pld.tile.get
+        // registers no attrs. (put forwards `atomic` via StripChunkKwargs.)
         auto get_call = op_reg.Create("pld.tile.get", get_args, span);
         return ConversionResult{std::move(prologue), get_call};
       });

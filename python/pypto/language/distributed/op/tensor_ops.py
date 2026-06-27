@@ -53,6 +53,21 @@ from ..typing.distributed_tensor import DistributedTensor
 from ._utils import _normalize_intlike, _unwrap, _unwrap_distributed_tensors
 
 
+def _validate_chunk(chunk_rows: int, chunk_cols: int, op_name: str) -> None:
+    """Validate the put/get staging-tile chunk dims (``0`` = full, else positive int).
+
+    ``chunk_rows`` / ``chunk_cols`` size the VEC staging tile to a sub-tile of the
+    flattened transfer ``[rows, cols]`` extent so pto-isa auto-chunks the full
+    transfer through it. The staging-tile shape is a compile-time constant, so the
+    dims must be non-negative Python ints (``0`` meaning "full extent").
+    """
+    for name, value in (("chunk_rows", chunk_rows), ("chunk_cols", chunk_cols)):
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise TypeError(f"{op_name} {name} must be an int (static), got {type(value).__name__}")
+        if value < 0:
+            raise ValueError(f"{op_name} {name} must be non-negative (0 = full), got {value}")
+
+
 def alloc_window_buffer(size: IntLike, *, name: str = "") -> Ptr:
     """Declare a per-rank HCCL window-buffer in a comm-domain scope slot of ``size`` bytes.
 
@@ -136,6 +151,8 @@ def put(
     shape: Sequence[IntLike] | None = None,
     *,
     atomic: AtomicType = AtomicType.None_,
+    chunk_rows: int = 0,
+    chunk_cols: int = 0,
 ) -> Call:
     """Cross-rank put: write the local slice ``src`` into the peer rank's slice of ``dst``.
 
@@ -174,7 +191,16 @@ def put(
         atomic: :class:`pld.AtomicType` selecting plain-store
             (``AtomicType.None_``, the default) vs atomic-add
             (``AtomicType.Add``) combine semantics (keyword-only).
+        chunk_rows: Optional VEC staging-tile row extent (keyword-only,
+            ``0`` = full). Sizes the staging tile to a sub-tile of the flattened
+            transfer (``rows`` = product of leading dims), so pto-isa TPUT
+            auto-chunks the full transfer through it — transfers larger than UB
+            no longer need to fit in one staging tile. Oversized values are
+            clamped to the transfer extent.
+        chunk_cols: Optional VEC staging-tile column extent (keyword-only,
+            ``0`` = full innermost dim). Pairs with ``chunk_rows``.
     """
+    _validate_chunk(chunk_rows, chunk_cols, "pld.tensor.put")
     dst_expr = _unwrap(dst)
     src_expr = _unwrap(src)
     if not isinstance(dst_expr, Expr) or not isinstance(dst_expr.type, _ir.DistributedTensorType):
@@ -190,7 +216,9 @@ def put(
         raise ValueError("pld.tensor.put dst_offsets, src_offsets, and shape must be provided together")
 
     if not has_region:
-        return _ir_tensor.put(dst_expr, _unwrap(peer), src_expr, atomic=atomic)
+        return _ir_tensor.put(
+            dst_expr, _unwrap(peer), src_expr, atomic=atomic, chunk_rows=chunk_rows, chunk_cols=chunk_cols
+        )
     assert dst_offsets is not None
     assert src_offsets is not None
     assert shape is not None
@@ -202,6 +230,8 @@ def put(
         src_offsets=_normalize_intlike(src_offsets),
         shape=_normalize_intlike(shape),
         atomic=atomic,
+        chunk_rows=chunk_rows,
+        chunk_cols=chunk_cols,
     )
 
 
@@ -212,6 +242,9 @@ def get(
     dst_offsets: Sequence[IntLike] | None = None,
     src_offsets: Sequence[IntLike] | None = None,
     shape: Sequence[IntLike] | None = None,
+    *,
+    chunk_rows: int = 0,
+    chunk_cols: int = 0,
 ) -> Call:
     """Cross-rank get: read the peer rank's slice of ``src`` into local ``dst``.
 
@@ -237,10 +270,17 @@ def get(
         src_offsets: Optional offsets into the peer ``src`` slice.
         shape: Optional static transfer shape. Required when either offset
             argument is provided.
+        chunk_rows: Optional VEC staging-tile row extent (keyword-only,
+            ``0`` = full) sizing the staging tile to a sub-tile of the flattened
+            transfer so pto-isa TGET auto-chunks the full transfer through it.
+            Oversized values are clamped to the transfer extent.
+        chunk_cols: Optional VEC staging-tile column extent (keyword-only,
+            ``0`` = full innermost dim). Pairs with ``chunk_rows``.
 
     Returns:
         The underlying IR Call.
     """
+    _validate_chunk(chunk_rows, chunk_cols, "pld.tensor.get")
     dst_expr = _unwrap(dst)
     src_expr = _unwrap(src)
     if not isinstance(dst_expr, Expr) or not isinstance(
@@ -256,7 +296,7 @@ def get(
         raise ValueError("pld.tensor.get dst_offsets, src_offsets, and shape must be provided together")
 
     if not has_region:
-        return _ir_tensor.get(dst_expr, _unwrap(peer), src_expr)
+        return _ir_tensor.get(dst_expr, _unwrap(peer), src_expr, chunk_rows=chunk_rows, chunk_cols=chunk_cols)
     assert dst_offsets is not None
     assert src_offsets is not None
     assert shape is not None
@@ -267,6 +307,8 @@ def get(
         dst_offsets=_normalize_intlike(dst_offsets),
         src_offsets=_normalize_intlike(src_offsets),
         shape=_normalize_intlike(shape),
+        chunk_rows=chunk_rows,
+        chunk_cols=chunk_cols,
     )
 
 

@@ -28,6 +28,7 @@ import pytest
 from pypto import DataType, ir
 from pypto.ir.op.distributed import tensor_ops as dist_tensor_ops
 from pypto.ir.op.distributed import tile_ops as dist_tile_ops
+from pypto.language.distributed.op.tensor_ops import _validate_chunk
 
 
 def _make_shape_tuple(values: list[int], span: ir.Span) -> ir.MakeTuple:
@@ -788,6 +789,50 @@ def test_put_ir_builder_accepts_positional_atomic_compat():
     assert call.kwargs["atomic"] == int(ir.AtomicType.Add)
 
 
+def test_put_ir_builder_packs_chunk_attrs():
+    """The raw IR builder packs chunk_rows/chunk_cols int attrs, only when non-zero."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+
+    call = dist_tensor_ops.put(dst, peer, src, ir.AtomicType.Add, chunk_rows=4, chunk_cols=32, span=span)
+    assert call.kwargs["chunk_rows"] == 4
+    assert call.kwargs["chunk_cols"] == 32
+
+    plain = dist_tensor_ops.put(dst, peer, src, span=span)
+    assert "chunk_rows" not in plain.kwargs
+    assert "chunk_cols" not in plain.kwargs
+
+
+def test_get_ir_builder_packs_chunk_attrs():
+    """get packs only the chunk attrs that are set (row-only chunk omits chunk_cols)."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+
+    call = dist_tensor_ops.get(dst, peer, src, chunk_rows=8, span=span)
+    assert call.kwargs["chunk_rows"] == 8
+    assert "chunk_cols" not in call.kwargs
+
+    plain = dist_tensor_ops.get(dst, peer, src, span=span)
+    assert plain.kwargs == {}
+
+
+def test_dsl_validate_chunk():
+    """The DSL chunk_rows/chunk_cols accept non-negative static ints (0 = full)."""
+    # Valid: 0 (full), positive ints — no exception.
+    _validate_chunk(0, 0, "pld.tensor.put")
+    _validate_chunk(4, 0, "pld.tensor.put")
+    _validate_chunk(4, 32, "pld.tensor.put")
+
+    with pytest.raises(ValueError, match="must be non-negative"):
+        _validate_chunk(-1, 0, "pld.tensor.put")
+    with pytest.raises(TypeError, match="static"):
+        _validate_chunk(1.5, 0, "pld.tensor.put")  # type: ignore[arg-type]
+
+
 def test_tile_put_ir_builder_accepts_positional_atomic_compat():
     """Compatibility: raw tile builder still accepts the old positional atomic arg."""
     span = ir.Span.unknown()
@@ -818,6 +863,31 @@ def test_tile_put_rejects_non_2d_stage():
     stage = _make_tile_var("stage", [1, 1, 64], DataType.FP16, span)
 
     with pytest.raises(Exception, match="stage must be a 2D VEC staging tile"):
+        dist_tile_ops.put(dst, peer, src, stage, atomic=ir.AtomicType.None_, span=span)
+
+
+def test_tile_put_accepts_stage_smaller_than_transfer():
+    """Positive: a sub-tile stage is a valid chunk — pto-isa TPUT auto-chunks it."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+    stage = _make_tile_var("stage", [4, 32], DataType.FP16, span)
+
+    call = dist_tile_ops.put(dst, peer, src, stage, atomic=ir.AtomicType.None_, span=span)
+    assert isinstance(call.type, ir.UnknownType)
+
+
+def test_tile_put_rejects_stage_larger_than_transfer():
+    """Negative: a stage exceeding the flattened transfer in either dim is rejected."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+    # 128 cols > 64 transfer cols.
+    stage = _make_tile_var("stage", [16, 128], DataType.FP16, span)
+
+    with pytest.raises(Exception, match="must fit within flattened transfer"):
         dist_tile_ops.put(dst, peer, src, stage, atomic=ir.AtomicType.None_, span=span)
 
 
@@ -1067,15 +1137,29 @@ def test_tile_get_rejects_stage_dtype_mismatch():
         dist_tile_ops.get(dst, peer, src, stage, span=span)
 
 
-def test_tile_get_rejects_stage_element_count_mismatch():
-    """Negative: post-conversion get stage elements must match the transfer shape."""
+def test_tile_get_accepts_stage_smaller_than_transfer():
+    """Positive: a sub-tile stage is a valid chunk — pto-isa TGET auto-chunks it."""
     span = ir.Span.unknown()
     dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
     peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
     src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+    # Stage holds 8x64 < transfer 16x64 — fits in both flattened dims.
     stage = _make_tile_var("stage", [8, 64], DataType.FP16, span)
 
-    with pytest.raises(Exception, match="stage holds"):
+    call = dist_tile_ops.get(dst, peer, src, stage, span=span)
+    assert isinstance(call.type, ir.UnknownType)
+
+
+def test_tile_get_rejects_stage_larger_than_transfer():
+    """Negative: a stage exceeding the flattened transfer in either dim is rejected."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+    # 32 rows > 16 transfer rows.
+    stage = _make_tile_var("stage", [32, 64], DataType.FP16, span)
+
+    with pytest.raises(Exception, match="must fit within flattened transfer"):
         dist_tile_ops.get(dst, peer, src, stage, span=span)
 
 
@@ -1092,13 +1176,13 @@ def test_tile_get_rejects_non_2d_stage():
 
 
 def test_get_rejects_unexpected_kwargs():
-    """Negative: get does not accept keyword attributes."""
+    """Negative: get accepts only chunk_rows/chunk_cols attrs — others are rejected."""
     span = ir.Span.unknown()
     dst = _make_distributed_tensor_var("dst", [16], DataType.FP16, span)
     peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
     src = _make_distributed_tensor_var("src", [16], DataType.FP16, span)
 
-    with pytest.raises(Exception, match="does not accept keyword"):
+    with pytest.raises(Exception, match="Unknown kwarg 'atomic'"):
         ir.create_op_call(
             "pld.tensor.get",
             [dst, peer, src],

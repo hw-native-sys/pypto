@@ -526,6 +526,44 @@ class TestConvertTensorToTileOps:
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_put_chunk_sizes_staging_tile_to_subtile(self):
+        """``chunk_rows`` / ``chunk_cols`` size the VEC staging tile to a sub-tile
+        of the flattened [rows, cols] transfer; pto-isa TPUT auto-chunks the rest,
+        so the staging tile no longer has to hold the whole transfer."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                dst: pld.DistributedTensor[[16, 64], pl.FP16],
+                src: pld.DistributedTensor[[16, 64], pl.FP16],
+                peer: pl.Scalar[pl.INT32],
+            ):
+                pld.tensor.put(
+                    dst, peer=peer, src=src, atomic=pld.AtomicType.None_, chunk_rows=4, chunk_cols=32
+                )
+
+        # Stage is [4, 32] (capped from the full [16, 64]); pld.tile.put carries no
+        # chunk attr — the stage tile shape encodes the chunk.
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                dst: pl.Out[pld.DistributedTensor[[16, 64], pl.FP16]],
+                src: pld.DistributedTensor[[16, 64], pl.FP16],
+                peer: pl.Scalar[pl.INT32],
+            ):
+                tput_stage: pl.Tile[[4, 32], pl.FP16, pl.Mem.Vec] = pl.tile.create(
+                    [4, 32], dtype=pl.FP16, target_memory=pl.Mem.Vec
+                )
+                pld.tile.put(dst, peer, src, tput_stage, atomic=pld.AtomicType.None_)
+                return  # noqa: PLR1711  (DSL return terminator, not a Python no-op)
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
     def test_get_emits_tile_create_plus_tile_get(self):
         """pld.tensor.get lowers to tile.create(stage) + pld.tile.get(dst, peer, src, stage).
 
