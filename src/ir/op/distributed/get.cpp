@@ -41,12 +41,13 @@
  *   cross-rank read must be window-bound (the remote peer needs a window
  *   slot to read from).
  * * ``peer`` must be a :class:`ScalarType` expression (rank index).
- * * ``dst`` and ``src`` must share element type, rank, and positive static
- *   dimensions.
- * * Full-slice gets require identical static shape. Subregion gets may use
- *   different per-rank slice extents, but ``dst_offsets``, ``src_offsets``,
- *   and ``shape`` must be rank-matched static tuples and are provided
- *   together.
+ * * ``dst`` and ``src`` must share element type, rank, and positive dimensions
+ *   (positivity checked on static dims; dims may be dynamic — a dynamic transfer
+ *   extent then requires a static ``chunk_rows`` / ``chunk_cols``).
+ * * Full-slice gets require matching ``dst`` / ``src`` shape (by value when
+ *   static, structurally when dynamic). Subregion gets may use different per-rank
+ *   slice extents; ``dst_offsets``, ``src_offsets``, and ``shape`` are
+ *   rank-matched tuples (``shape`` may be dynamic) and are provided together.
  */
 
 #include <any>
@@ -98,15 +99,30 @@ void ValidateGetContract(const ExprPtr& dst, const ExprPtr& peer, const ExprPtr&
   CHECK(dst_shape.size() == src_shape.size())
       << op_name << " dst rank (" << dst_shape.size() << ") must match src rank (" << src_shape.size() << ")";
   for (size_t i = 0; i < dst_shape.size(); ++i) {
+    // Window dims may be dynamic (a runtime-sized window). Static positivity
+    // applies only to ConstInt dims; a dynamic transfer extent needs a static
+    // chunk to bound the VEC staging tile (enforced by
+    // ValidateDynamicTransferHasChunk in the deducer). For full-slice the
+    // dst/src dims must still match — by value when static, structurally when
+    // dynamic (the codegen drives both partition views from one extent).
     auto d = As<ConstInt>(dst_shape[i]);
     auto s = As<ConstInt>(src_shape[i]);
-    CHECK(d && s) << op_name << " requires static (compile-time constant) shapes on dst and src; dimension "
-                  << i << " is dynamic";
-    CHECK(d->value_ > 0) << op_name << " shape dimension " << i << " must be positive, got " << d->value_;
-    CHECK(s->value_ > 0) << op_name << " src shape dimension " << i << " must be positive, got " << s->value_;
+    if (d) {
+      CHECK(d->value_ > 0) << op_name << " shape dimension " << i << " must be positive, got " << d->value_;
+    }
+    if (s) {
+      CHECK(s->value_ > 0) << op_name << " src shape dimension " << i << " must be positive, got "
+                           << s->value_;
+    }
     if (require_same_shape) {
-      CHECK(d->value_ == s->value_) << op_name << " dst and src must have the same static shape; dimension "
-                                    << i << " differs (dst=" << d->value_ << ", src=" << s->value_ << ")";
+      if (d && s) {
+        CHECK(d->value_ == s->value_) << op_name << " dst and src must have the same static shape; dimension "
+                                      << i << " differs (dst=" << d->value_ << ", src=" << s->value_ << ")";
+      } else {
+        CHECK(AreExprsEqual(dst_shape[i], src_shape[i]))
+            << op_name << " full-slice dst and src must have the same shape; dimension " << i
+            << " differs (dynamic dims must match structurally)";
+      }
     }
   }
 }
@@ -140,14 +156,15 @@ void ValidateGetRegionArgs(const std::vector<ExprPtr>& args, size_t region_arg_b
       CHECK(dim->value_ > 0) << op_name << " shape dimension " << i << " must be positive, got "
                              << dim->value_;
     }
+    // The window dims may also be dynamic; the subregion bounds check only runs
+    // when both the transfer dim and the window dim are static ConstInts.
     auto dst_dim = As<ConstInt>(dst_shape[i]);
     auto src_dim = As<ConstInt>(src_shape[i]);
-    INTERNAL_CHECK(dst_dim && src_dim) << op_name << " tensor shapes must be static before region validation";
 
     if (auto dst_offset = As<ConstInt>(dst_offsets->elements_[i])) {
       CHECK(dst_offset->value_ >= 0) << op_name << " dst_offsets dimension " << i
                                      << " must be non-negative, got " << dst_offset->value_;
-      if (dim) {
+      if (dim && dst_dim) {
         CHECK(dst_offset->value_ + dim->value_ <= dst_dim->value_)
             << op_name << " dst subregion dimension " << i
             << " exceeds dst shape (offset=" << dst_offset->value_ << ", shape=" << dim->value_
@@ -157,7 +174,7 @@ void ValidateGetRegionArgs(const std::vector<ExprPtr>& args, size_t region_arg_b
     if (auto src_offset = As<ConstInt>(src_offsets->elements_[i])) {
       CHECK(src_offset->value_ >= 0) << op_name << " src_offsets dimension " << i
                                      << " must be non-negative, got " << src_offset->value_;
-      if (dim) {
+      if (dim && src_dim) {
         CHECK(src_offset->value_ + dim->value_ <= src_dim->value_)
             << op_name << " src subregion dimension " << i
             << " exceeds src shape (offset=" << src_offset->value_ << ", shape=" << dim->value_
@@ -259,13 +276,15 @@ TypePtr DeduceGetType(const std::vector<ExprPtr>& args,
   }
 
   ValidateGetContract(args[0], args[1], args[2], "pld.tensor.get", args.size() == 3);
+  auto dst_type = AsTensorTypeLike(args[0]->GetType());
+  // Transfer extent = the explicit subregion shape, or the full dst window shape
+  // for a full-slice get. Either may be dynamic, which then requires a static chunk.
+  std::vector<ExprPtr> transfer_shape = dst_type->shape_;
   if (args.size() == 6) {
-    auto dst_type = AsTensorTypeLike(args[0]->GetType());
     auto src_type = As<DistributedTensorType>(args[2]->GetType());
-    std::vector<ExprPtr> transfer_shape;
     ValidateGetRegionArgs(args, 3, dst_type->shape_, src_type->shape_, "pld.tensor.get", &transfer_shape);
-    ValidateDynamicTransferHasChunk(transfer_shape, kwargs, "pld.tensor.get");
   }
+  ValidateDynamicTransferHasChunk(transfer_shape, kwargs, "pld.tensor.get");
 
   return GetUnknownType();
 }

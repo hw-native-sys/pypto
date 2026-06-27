@@ -804,6 +804,38 @@ def test_put_subregion_dynamic_shape_requires_chunk():
     assert isinstance(call.type, ir.UnknownType)
 
 
+def _make_dynamic_window_var(name: str, dim0: ir.Expr, span: ir.Span) -> ir.Var:
+    """A DistributedTensor whose leading window dim is a dynamic (runtime) expr."""
+    return ir.Var(
+        name,
+        ir.DistributedTensorType([dim0, ir.ConstInt(64, DataType.INT64, span)], DataType.FP16),
+        span,
+    )
+
+
+def test_put_full_slice_dynamic_window_requires_chunk():
+    """Full-slice put with a dynamic-shaped window (dst/src) is allowed with a
+    static chunk; dst/src dynamic dims must match structurally."""
+    span = ir.Span.unknown()
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    n = ir.Var("n", ir.ScalarType(DataType.INT32), span)
+    dst = _make_dynamic_window_var("dst", n, span)
+    src = _make_dynamic_window_var("src", n, span)  # same dynamic extent
+
+    # Dynamic leading window dim, no chunk_rows → rejected.
+    with pytest.raises(Exception, match="dynamic leading transfer dim needs a static chunk_rows"):
+        ir.create_op_call("pld.tensor.put", [dst, peer, src], {"atomic": 0}, span)
+
+    # With chunk_rows → accepted.
+    call = ir.create_op_call("pld.tensor.put", [dst, peer, src], {"atomic": 0, "chunk_rows": 4}, span)
+    assert isinstance(call.type, ir.UnknownType)
+
+    # Mismatched dynamic dst/src extents → rejected by the full-slice same-shape check.
+    src_mismatch = _make_dynamic_window_var("src2", ir.Var("m", ir.ScalarType(DataType.INT32), span), span)
+    with pytest.raises(Exception, match="must have the same shape"):
+        ir.create_op_call("pld.tensor.put", [dst, peer, src_mismatch], {"atomic": 0, "chunk_rows": 4}, span)
+
+
 def test_put_ir_builder_accepts_positional_atomic_compat():
     """Compatibility: raw IR builder still accepts the old positional atomic arg."""
     span = ir.Span.unknown()
@@ -1139,6 +1171,22 @@ def test_get_subregion_dynamic_shape_requires_chunk():
         {"chunk_cols": 32},
         span,
     )
+    assert isinstance(call.type, ir.UnknownType)
+
+
+def test_get_full_slice_dynamic_window_requires_chunk():
+    """Full-slice get with a dynamic-shaped window (dst/src) is allowed with a
+    static chunk to bound the staging tile."""
+    span = ir.Span.unknown()
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    n = ir.Var("n", ir.ScalarType(DataType.INT32), span)
+    dst = _make_dynamic_window_var("dst", n, span)
+    src = _make_dynamic_window_var("src", n, span)
+
+    with pytest.raises(Exception, match="dynamic leading transfer dim needs a static chunk_rows"):
+        ir.create_op_call("pld.tensor.get", [dst, peer, src], {}, span)
+
+    call = ir.create_op_call("pld.tensor.get", [dst, peer, src], {"chunk_rows": 4}, span)
     assert isinstance(call.type, ir.UnknownType)
 
 

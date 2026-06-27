@@ -160,19 +160,22 @@ subregion；三者必须一起提供。
 更小的 stage 上做 2D 滑窗。这样单个 `put` 即可搬运大于 UB 的数据,无需调用方手写
 分块循环。超出范围的 chunk 值会被钳到传输范围内。
 
-**动态传输范围。** subregion 的 `shape` 可以是**动态**的（固定窗口内一段运行时
-子范围）—— pto-isa 在运行时从 partition view 读取范围,因此 codegen 发出动态
-partition view（`<?x…>`）并对其分块。动态的展平维必须由对应的静态 chunk 约束,
-因为 VEC staging tile 是静态分配的:动态最内维需要 `chunk_cols`,动态前导维需要
-`chunk_rows`。窗口（`dst` / `src` 的 `DistributedTensorType`）本身仍是静态的。
+**动态传输范围。** 传输范围可以是**动态**的 —— 既可以是 subregion 的 `shape`
+（窗口内一段运行时子范围）,也可以是 full-slice 时 `dst` / `src` 窗口
+（`DistributedTensorType`）本身的维度。pto-isa 在运行时从 partition view 读取
+范围,因此 codegen 发出动态 partition view（`<?x…>`）并对其分块。动态的展平维
+必须由对应的静态 chunk 约束,因为 VEC staging tile 是静态分配的:动态最内维需要
+`chunk_cols`,动态前导维需要 `chunk_rows`。full-slice 时 `dst` 与 `src` 的维度
+必须一致 —— 静态维按值比较,动态维按结构（structural）比较。
 
 Verifier：`dst` 必须是 `DistributedTensorType`；`src` 必须是 `TensorType` 或
 `DistributedTensorType`（通过 `AsTensorTypeLike` 匹配）；`peer` 必须是
-`ScalarType`；`dst` 与 `src` 必须 element type 相同、rank 相同,且各窗口维都是
-**正的静态（positive static）**维度。full-slice `put` 要求形状完全相同；
-subregion `put` 允许完整切片尺寸不同,只要显式传输区域不越界（仅校验静态维）；
-传输 `shape` 可以是动态的（需配套静态 chunk,见上）。`atomic` 选择覆盖还是原子加
-（见 `AtomicType`）。下降出的 `pld.tile.put` verifier 要求 staging tile 在两个
+`ScalarType`；`dst` 与 `src` 必须 element type 相同、rank 相同,且各维都是
+**正（positive）**维度（正性仅对静态维校验；动态维允许,由 chunk 约束）。
+full-slice `put` 要求 `dst` / `src` 形状一致；subregion `put` 允许完整切片尺寸
+不同,只要显式传输区域不越界（仅校验静态维）；任何动态传输维都需配套静态 chunk
+（见上）。`atomic` 选择覆盖还是原子加（见 `AtomicType`）。下降出的
+`pld.tile.put` verifier 要求 staging tile 在两个
 **静态**维度上都**不超过**展平后的传输范围（可以更小 —— 即一个 chunk —— 但不能
 更大；动态维由 chunk 在运行时约束）。
 
@@ -194,16 +197,17 @@ pld.tensor.get(dst, peer, src, dst_offsets, src_offsets, shape,
 切片。提供 `dst_offsets`、`src_offsets` 和 `shape` 时,传输会缩小到匹配的
 subregion；三者必须一起提供。可选的 `chunk_rows` / `chunk_cols`（`0` = 全量）把
 staging tile 缩成展平后传输范围的子块,由 pto-isa TGET 自动分块搬运 —— 与上面
-`put` 的契约一致,**包括动态的 subregion `shape`**（需配套静态 chunk:动态最内维
-需 `chunk_cols`,动态前导维需 `chunk_rows`；窗口仍是静态）。
+`put` 的契约一致,**包括动态传输**（subregion 的 `shape`,或 full-slice 时
+`dst` / `src` 窗口维度）,需配套静态 chunk（动态最内维需 `chunk_cols`,动态前导维
+需 `chunk_rows`）。
 
 Verifier：`dst` 可以是 `DistributedTensorType` 或普通 `TensorType`（通过
 `AsTensorTypeLike` 匹配）；`src` 必须是 `DistributedTensorType`；`peer` 必须是
-`ScalarType`；`dst` 与 `src` 必须 element type 相同、rank 相同,且各窗口维都是
-**正的静态（positive static）**维度。full-slice `get` 要求形状完全相同；
-subregion `get` 允许完整切片尺寸不同,只要显式传输区域不越界（仅校验静态维）；
-传输 `shape` 可以是动态的（需配套静态 chunk）。除
-`chunk_rows` / `chunk_cols` 外,`get` 不接受 keyword attributes。
+`ScalarType`；`dst` 与 `src` 必须 element type 相同、rank 相同,且各维都是
+**正（positive）**维度（正性仅对静态维校验；动态维允许,由 chunk 约束）。
+full-slice `get` 要求 `dst` / `src` 形状一致；subregion `get` 允许完整切片尺寸
+不同,只要显式传输区域不越界（仅校验静态维）；任何动态传输维都需配套静态 chunk。
+除 `chunk_rows` / `chunk_cols` 外,`get` 不接受 keyword attributes。
 
 ### `pld.tensor.allreduce`
 

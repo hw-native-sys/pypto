@@ -178,21 +178,25 @@ the smaller stage. This lets a single `put` move data larger than UB without the
 caller writing an explicit chunk loop. Oversized chunk values are clamped to the
 transfer extent.
 
-**Dynamic transfer extent.** The subregion `shape` may be **dynamic** (a runtime
-sub-extent of the fixed window) — pto-isa reads the extent from the partition
-views at runtime, so the codegen emits a dynamic partition view (`<?x…>`) and
-chunks it. A dynamic flattened dim must be bounded by the corresponding static
-chunk, because the VEC staging tile is statically allocated: a dynamic innermost
-dim requires `chunk_cols`, a dynamic leading dim requires `chunk_rows`. The
-window (`dst` / `src` `DistributedTensorType`) itself stays static.
+**Dynamic transfer extent.** The transfer may be **dynamic** — either the
+subregion `shape` (a runtime sub-extent of the window) or the `dst` / `src`
+window (`DistributedTensorType`) dims themselves, for a full-slice transfer.
+pto-isa reads the extent from the partition views at runtime, so the codegen
+emits a dynamic partition view (`<?x…>`) and chunks it. A dynamic flattened
+transfer dim must be bounded by the corresponding static chunk, because the VEC
+staging tile is statically allocated: a dynamic innermost dim requires
+`chunk_cols`, a dynamic leading dim requires `chunk_rows`. For a full-slice
+transfer the `dst` and `src` dims must match — by value when static, structurally
+when dynamic.
 
 Verifier: `dst` must be `DistributedTensorType`; `src` must be either
 `TensorType` or `DistributedTensorType` (matched via `AsTensorTypeLike`);
 `peer` must be a `ScalarType`; `dst` and `src` must share element type, rank,
-and **positive static** window dimensions. Full-slice `put` requires identical
-shape; subregion `put` allows different full slice extents as long as the
-explicit transfer region is in bounds (static dims only). The transfer `shape`
-may be dynamic (requires a matching static chunk; see above). `atomic` selects
+and **positive** dimensions (positivity checked on static dims; dynamic dims are
+allowed and bounded by the chunk). Full-slice `put` requires matching `dst` /
+`src` shape; subregion `put` allows different full slice extents as long as the
+explicit transfer region is in bounds (checked on static dims). Any dynamic
+transfer dim requires a matching static chunk (see above). `atomic` selects
 overwrite vs atomic-add (see `AtomicType`). The lowered `pld.tile.put` verifier
 requires the staging tile to **fit within** the flattened transfer in both
 **static** dims (it may be smaller — a chunk — but never larger; dynamic dims
@@ -219,15 +223,17 @@ transfer to matching subregions; all three must be provided together. The
 optional `chunk_rows` / `chunk_cols` attrs (`0` = full) shrink the staging tile
 to a sub-tile of the flattened transfer extent so pto-isa TGET auto-chunks the
 full transfer through it — same contract as `put` above, including a **dynamic
-subregion `shape`** bounded by a matching static chunk (dynamic innermost needs
-`chunk_cols`, dynamic leading needs `chunk_rows`; the window stays static).
+transfer** (the subregion `shape` or the full-slice `dst` / `src` window dims)
+bounded by a matching static chunk (dynamic innermost needs `chunk_cols`,
+dynamic leading needs `chunk_rows`).
 
 Verifier: `dst` must be either `TensorType` or `DistributedTensorType` (matched
 via `AsTensorTypeLike`); `src` must be `DistributedTensorType`; `peer` must be a
-`ScalarType`; `dst` and `src` must share element type, rank, and **positive
-static** window dimensions. Full-slice `get` requires identical shape; subregion
+`ScalarType`; `dst` and `src` must share element type, rank, and **positive**
+dimensions (positivity checked on static dims; dynamic dims allowed, bounded by
+the chunk). Full-slice `get` requires matching `dst` / `src` shape; subregion
 `get` allows different full slice extents as long as the explicit transfer
-region is in bounds (static dims only); the transfer `shape` may be dynamic with
+region is in bounds (checked on static dims); any dynamic transfer dim requires
 a matching static chunk. Besides `chunk_rows` / `chunk_cols`, `get` accepts no
 keyword attributes.
 
