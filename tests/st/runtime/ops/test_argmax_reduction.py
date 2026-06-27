@@ -7,19 +7,32 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""
-Test argmax/argmin reductions: row_argmax (TROWARGMAX), row_argmin (TROWARGMIN),
-col_argmax (TCOLARGMAX), col_argmin (TCOLARGMIN).
+"""Runtime tests for tile argmax/argmin reductions.
 
-row_argmax/argmin reduce along axis=1 ([M, N] -> [M, 1]) and yield, for each row,
-the column index of the max/min. col_argmax/argmin reduce along axis=0
-([M, N] -> [1, N]) and yield, for each column, the row index of the max/min. The
-index output dtype is INT32. All four require a tmp scratch tile (unlike
-col_max/col_min, the column argmax/argmin variants also need one).
+Covers four tile-level ops (and the tensor-level mirrors of the max variants):
+- ``tile.row_argmax`` / ``tile.row_argmin`` -> ``pto.trowargmax`` / ``pto.trowargmin``
+- ``tile.col_argmax`` / ``tile.col_argmin`` -> ``pto.tcolargmax`` / ``pto.tcolargmin``
 
-Inputs use a continuous random distribution so each row/column has a unique
-extremum — this avoids tie-break ambiguity between the golden (torch first-index)
-and the device, and keeps the integer index comparison exact (rtol/atol default).
+row variants reduce the last axis ([M, N] -> [M, 1]) and return, per row, the
+column index of the max/min. col variants reduce axis 0 ([M, N] -> [1, N]) and
+return, per column, the row index of the max/min. The index output dtype is
+INT32. All four require a tmp scratch tile (unlike col_max/col_min).
+
+Coverage per op: an ``aligned`` (fully valid) case AND a ``valid_shape`` case, in
+both FP32 and FP16. The valid_shape case narrows the *reduced* dimension only
+(columns for the row ops, rows for the col ops) so the output region stays fully
+valid and exactly comparable, while still exercising the partial-reduction /
+tail path (e.g. FP32 valid cols 72 > the 64-element repeat -> the tmp scratch is
+actually used).
+
+Inputs are a random permutation of distinct integers (``torch.randperm``), so
+every row/column has a unique extremum (no tie-break ambiguity vs torch) and the
+values are exactly representable in FP16 (all < 2048). The integer index outputs
+are compared exactly under the default tolerance.
+
+The DSL parser requires a literal ``pl.tile.<op>`` call, so there is one TestCase
+subclass per op (the op name cannot be an alias); the dtype and valid_shape are
+closure vars in a ``get_program``-nested ``@pl.program``.
 """
 
 from typing import Any
@@ -29,410 +42,266 @@ import pytest
 import torch
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
 from pypto.backend import BackendType
-from pypto.ir.pass_manager import OptimizationStrategy
+
+_PL_DT = {DataType.FP32: pl.FP32, DataType.FP16: pl.FP16}
+
+M = 16
+N = 128
 
 
-def _rand_init(shape):
-    """No-arg init callable returning continuous values with unique extrema."""
-    return lambda: torch.randn(shape)
+def _distinct(m: int, n: int):
+    """No-arg init: a permutation of 0..m*n-1 (distinct -> unique extrema, FP16-exact)."""
+    return lambda: torch.randperm(m * n).reshape(m, n).to(torch.float32)
 
 
-# =============================================================================
-# Programs — row_argmax / row_argmin (require tmp_tile, like row_max)
-# =============================================================================
+# ---------------------------------------------------------------------------
+# Tile-level base + one subclass per op (literal pl.tile.<op> call).
+# valid narrows only the reduced dim, so the output stays fully valid.
+#   row ops: valid = (M, vc)   -> reduce cols, output [M, 1]
+#   col ops: valid = (vr, N)   -> reduce rows, output [1, N]
+# ---------------------------------------------------------------------------
 
 
-@pl.program
-class RowArgmax_32x64_FP32:
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel(
-        self,
-        input_tensor: pl.Tensor[[32, 64], pl.FP32],
-        output: pl.Out[pl.Tensor[[32, 1], pl.INT32]],
-    ) -> pl.Tensor[[32, 1], pl.INT32]:
-        tile: pl.Tile[[32, 64], pl.FP32] = pl.load(input_tensor, [0, 0], [32, 64])
-        tmp: pl.Tile[[32, 64], pl.FP32] = pl.tile.create(
-            [32, 64], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
-        )
-        result: pl.Tile[[32, 1], pl.INT32] = pl.tile.row_argmax(tile, tmp)
-        return pl.store(result, [0, 0], output)
+class _ArgBase(PTOTestCase):
+    __test__ = False
+    op_name = ""
+    reduce_dim = 1  # 1 = row (reduce cols), 0 = col (reduce rows)
+    is_max = True
 
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
-        self,
-        input_tensor: pl.Tensor[[32, 64], pl.FP32],
-        output: pl.Out[pl.Tensor[[32, 1], pl.INT32]],
-    ) -> pl.Tensor[[32, 1], pl.INT32]:
-        output = self.kernel(input_tensor, output)
-        return output
+    def __init__(self, *, valid=None, dtype=DataType.FP32, config=None):
+        super().__init__(config)
+        self._valid = valid
+        self._dtype = dtype
 
-
-@pl.program
-class RowArgmin_16x16_FP32:
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel(
-        self,
-        input_tensor: pl.Tensor[[16, 16], pl.FP32],
-        output: pl.Out[pl.Tensor[[16, 1], pl.INT32]],
-    ) -> pl.Tensor[[16, 1], pl.INT32]:
-        tile: pl.Tile[[16, 16], pl.FP32] = pl.load(input_tensor, [0, 0], [16, 16])
-        tmp: pl.Tile[[16, 16], pl.FP32] = pl.tile.create(
-            [16, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
-        )
-        result: pl.Tile[[16, 1], pl.INT32] = pl.tile.row_argmin(tile, tmp)
-        return pl.store(result, [0, 0], output)
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
-        self,
-        input_tensor: pl.Tensor[[16, 16], pl.FP32],
-        output: pl.Out[pl.Tensor[[16, 1], pl.INT32]],
-    ) -> pl.Tensor[[16, 1], pl.INT32]:
-        output = self.kernel(input_tensor, output)
-        return output
-
-
-@pl.program
-class RowArgmax_32x64_FP16:
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel(
-        self,
-        input_tensor: pl.Tensor[[32, 64], pl.FP16],
-        output: pl.Out[pl.Tensor[[32, 1], pl.INT32]],
-    ) -> pl.Tensor[[32, 1], pl.INT32]:
-        tile: pl.Tile[[32, 64], pl.FP16] = pl.load(input_tensor, [0, 0], [32, 64])
-        tmp: pl.Tile[[32, 64], pl.FP16] = pl.tile.create(
-            [32, 64], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec
-        )
-        result: pl.Tile[[32, 1], pl.INT32] = pl.tile.row_argmax(tile, tmp)
-        return pl.store(result, [0, 0], output)
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
-        self,
-        input_tensor: pl.Tensor[[32, 64], pl.FP16],
-        output: pl.Out[pl.Tensor[[32, 1], pl.INT32]],
-    ) -> pl.Tensor[[32, 1], pl.INT32]:
-        output = self.kernel(input_tensor, output)
-        return output
-
-
-# =============================================================================
-# Programs — col_argmax / col_argmin (also require tmp_tile)
-# =============================================================================
-
-
-@pl.program
-class ColArgmax_32x64_FP32:
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel(
-        self,
-        input_tensor: pl.Tensor[[32, 64], pl.FP32],
-        output: pl.Out[pl.Tensor[[1, 64], pl.INT32]],
-    ) -> pl.Tensor[[1, 64], pl.INT32]:
-        tile: pl.Tile[[32, 64], pl.FP32] = pl.load(input_tensor, [0, 0], [32, 64])
-        tmp: pl.Tile[[32, 64], pl.FP32] = pl.tile.create(
-            [32, 64], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
-        )
-        result: pl.Tile[[1, 64], pl.INT32] = pl.tile.col_argmax(tile, tmp)
-        return pl.store(result, [0, 0], output)
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
-        self,
-        input_tensor: pl.Tensor[[32, 64], pl.FP32],
-        output: pl.Out[pl.Tensor[[1, 64], pl.INT32]],
-    ) -> pl.Tensor[[1, 64], pl.INT32]:
-        output = self.kernel(input_tensor, output)
-        return output
-
-
-@pl.program
-class ColArgmin_8x128_FP32:
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel(
-        self,
-        input_tensor: pl.Tensor[[8, 128], pl.FP32],
-        output: pl.Out[pl.Tensor[[1, 128], pl.INT32]],
-    ) -> pl.Tensor[[1, 128], pl.INT32]:
-        tile: pl.Tile[[8, 128], pl.FP32] = pl.load(input_tensor, [0, 0], [8, 128])
-        tmp: pl.Tile[[8, 128], pl.FP32] = pl.tile.create(
-            [8, 128], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
-        )
-        result: pl.Tile[[1, 128], pl.INT32] = pl.tile.col_argmin(tile, tmp)
-        return pl.store(result, [0, 0], output)
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
-        self,
-        input_tensor: pl.Tensor[[8, 128], pl.FP32],
-        output: pl.Out[pl.Tensor[[1, 128], pl.INT32]],
-    ) -> pl.Tensor[[1, 128], pl.INT32]:
-        output = self.kernel(input_tensor, output)
-        return output
-
-
-# =============================================================================
-# Programs — tensor-level (lowered via tensor->tile, tmp injected by conversion)
-# =============================================================================
-
-
-@pl.program
-class TensorRowArgmax_32x64_FP32:
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel(
-        self,
-        a: pl.Tensor[[32, 64], pl.FP32],
-        output: pl.Out[pl.Tensor[[32, 1], pl.INT32]],
-    ) -> pl.Tensor[[32, 1], pl.INT32]:
-        result: pl.Tensor[[32, 1], pl.INT32] = pl.row_argmax(a)
-        return pl.assemble(output, result, [0, 0])
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
-        self,
-        a: pl.Tensor[[32, 64], pl.FP32],
-        output: pl.Out[pl.Tensor[[32, 1], pl.INT32]],
-    ) -> pl.Tensor[[32, 1], pl.INT32]:
-        output = self.kernel(a, output)
-        return output
-
-
-@pl.program
-class TensorColArgmax_32x64_FP32:
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel(
-        self,
-        a: pl.Tensor[[32, 64], pl.FP32],
-        output: pl.Out[pl.Tensor[[1, 64], pl.INT32]],
-    ) -> pl.Tensor[[1, 64], pl.INT32]:
-        result: pl.Tensor[[1, 64], pl.INT32] = pl.col_argmax(a)
-        return pl.assemble(output, result, [0, 0])
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
-        self,
-        a: pl.Tensor[[32, 64], pl.FP32],
-        output: pl.Out[pl.Tensor[[1, 64], pl.INT32]],
-    ) -> pl.Tensor[[1, 64], pl.INT32]:
-        output = self.kernel(a, output)
-        return output
-
-
-# =============================================================================
-# Test Cases — row argmax/argmin
-# =============================================================================
-
-
-class RowArgmax32x64FP32(PTOTestCase):
     def get_name(self) -> str:
-        return "row_argmax_32x64_fp32"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
+        v = f"_v{self._valid[0]}x{self._valid[1]}" if self._valid else "_aligned"
+        return f"{self.op_name}_{M}x{N}_{self._dtype.value}{v}"
 
     def get_backend_type(self) -> BackendType:
         return BackendType.Ascend910B
 
-    def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec("input_tensor", [32, 64], DataType.FP32, init_value=_rand_init([32, 64])),
-            TensorSpec("output", [32, 1], DataType.INT32, is_output=True),
-        ]
-
-    def get_program(self) -> Any:
-        return RowArgmax_32x64_FP32
-
-    def compute_expected(self, tensors, params=None):
-        tensors["output"][:] = torch.argmax(tensors["input_tensor"], dim=1, keepdim=True).to(torch.int32)
-
-
-class RowArgmin16x16FP32(PTOTestCase):
-    def get_name(self) -> str:
-        return "row_argmin_16x16_fp32"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
+    def _out_shape(self) -> list[int]:
+        return [M, 1] if self.reduce_dim == 1 else [1, N]
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
-            TensorSpec("input_tensor", [16, 16], DataType.FP32, init_value=_rand_init([16, 16])),
-            TensorSpec("output", [16, 1], DataType.INT32, is_output=True),
+            TensorSpec("a", [M, N], self._dtype, init_value=_distinct(M, N)),
+            TensorSpec("out", self._out_shape(), DataType.INT32, is_output=True),
         ]
 
-    def get_program(self) -> Any:
-        return RowArgmin_16x16_FP32
+    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
+        a = tensors["a"]
+        vr, vc = self._valid if self._valid else (M, N)
+        sub = a[:vr, :vc]
+        fn = torch.argmax if self.is_max else torch.argmin
+        tensors["out"][:] = fn(sub, dim=self.reduce_dim, keepdim=True).to(torch.int32)
 
-    def compute_expected(self, tensors, params=None):
-        tensors["output"][:] = torch.argmin(tensors["input_tensor"], dim=1, keepdim=True).to(torch.int32)
 
-
-class RowArgmax32x64FP16(PTOTestCase):
-    def get_name(self) -> str:
-        return "row_argmax_32x64_fp16"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
-    def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec("input_tensor", [32, 64], DataType.FP16, init_value=_rand_init([32, 64])),
-            TensorSpec("output", [32, 1], DataType.INT32, is_output=True),
-        ]
+class TileRowArgmax(_ArgBase):
+    op_name = "row_argmax"
+    reduce_dim = 1
+    is_max = True
 
     def get_program(self) -> Any:
-        return RowArgmax_32x64_FP16
+        dt = _PL_DT[self._dtype]
+        vshape = list(self._valid) if self._valid else [M, N]
 
-    def compute_expected(self, tensors, params=None):
-        tensors["output"][:] = torch.argmax(tensors["input_tensor"], dim=1, keepdim=True).to(torch.int32)
+        @pl.program
+        class RowArgmaxProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, a: pl.Tensor[[M, N], dt], out: pl.Out[pl.Tensor[[M, 1], pl.INT32]]
+            ) -> pl.Tensor[[M, 1], pl.INT32]:
+                t: pl.Tile[[M, N], dt] = pl.load(a, [0, 0], [M, N], valid_shapes=vshape)
+                tmp: pl.Tile[[M, N], dt] = pl.tile.create([M, N], dtype=dt, target_memory=pl.MemorySpace.Vec)
+                r: pl.Tile[[M, 1], pl.INT32] = pl.tile.row_argmax(t, tmp)
+                return pl.store(r, [0, 0], out)
 
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self, a: pl.Tensor[[M, N], dt], out: pl.Out[pl.Tensor[[M, 1], pl.INT32]]
+            ) -> pl.Tensor[[M, 1], pl.INT32]:
+                return self.kernel(a, out)
 
-# =============================================================================
-# Test Cases — col argmax/argmin
-# =============================================================================
-
-
-class ColArgmax32x64FP32(PTOTestCase):
-    def get_name(self) -> str:
-        return "col_argmax_32x64_fp32"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
-    def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec("input_tensor", [32, 64], DataType.FP32, init_value=_rand_init([32, 64])),
-            TensorSpec("output", [1, 64], DataType.INT32, is_output=True),
-        ]
-
-    def get_program(self) -> Any:
-        return ColArgmax_32x64_FP32
-
-    def compute_expected(self, tensors, params=None):
-        tensors["output"][:] = torch.argmax(tensors["input_tensor"], dim=0, keepdim=True).to(torch.int32)
+        return RowArgmaxProgram
 
 
-class ColArgmin8x128FP32(PTOTestCase):
-    def get_name(self) -> str:
-        return "col_argmin_8x128_fp32"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
-    def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec("input_tensor", [8, 128], DataType.FP32, init_value=_rand_init([8, 128])),
-            TensorSpec("output", [1, 128], DataType.INT32, is_output=True),
-        ]
+class TileRowArgmin(_ArgBase):
+    op_name = "row_argmin"
+    reduce_dim = 1
+    is_max = False
 
     def get_program(self) -> Any:
-        return ColArgmin_8x128_FP32
+        dt = _PL_DT[self._dtype]
+        vshape = list(self._valid) if self._valid else [M, N]
 
-    def compute_expected(self, tensors, params=None):
-        tensors["output"][:] = torch.argmin(tensors["input_tensor"], dim=0, keepdim=True).to(torch.int32)
+        @pl.program
+        class RowArgminProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, a: pl.Tensor[[M, N], dt], out: pl.Out[pl.Tensor[[M, 1], pl.INT32]]
+            ) -> pl.Tensor[[M, 1], pl.INT32]:
+                t: pl.Tile[[M, N], dt] = pl.load(a, [0, 0], [M, N], valid_shapes=vshape)
+                tmp: pl.Tile[[M, N], dt] = pl.tile.create([M, N], dtype=dt, target_memory=pl.MemorySpace.Vec)
+                r: pl.Tile[[M, 1], pl.INT32] = pl.tile.row_argmin(t, tmp)
+                return pl.store(r, [0, 0], out)
 
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self, a: pl.Tensor[[M, N], dt], out: pl.Out[pl.Tensor[[M, 1], pl.INT32]]
+            ) -> pl.Tensor[[M, 1], pl.INT32]:
+                return self.kernel(a, out)
 
-# =============================================================================
-# Test Cases — tensor level
-# =============================================================================
-
-
-class TensorRowArgmax32x64FP32(PTOTestCase):
-    def get_name(self) -> str:
-        return "tensor_row_argmax_32x64_fp32"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
-    def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec("a", [32, 64], DataType.FP32, init_value=_rand_init([32, 64])),
-            TensorSpec("output", [32, 1], DataType.INT32, is_output=True),
-        ]
-
-    def get_program(self) -> Any:
-        return TensorRowArgmax_32x64_FP32
-
-    def compute_expected(self, tensors, params=None):
-        tensors["output"][:] = torch.argmax(tensors["a"], dim=1, keepdim=True).to(torch.int32)
+        return RowArgminProgram
 
 
-class TensorColArgmax32x64FP32(PTOTestCase):
-    def get_name(self) -> str:
-        return "tensor_col_argmax_32x64_fp32"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
-    def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec("a", [32, 64], DataType.FP32, init_value=_rand_init([32, 64])),
-            TensorSpec("output", [1, 64], DataType.INT32, is_output=True),
-        ]
+class TileColArgmax(_ArgBase):
+    op_name = "col_argmax"
+    reduce_dim = 0
+    is_max = True
 
     def get_program(self) -> Any:
-        return TensorColArgmax_32x64_FP32
+        dt = _PL_DT[self._dtype]
+        vshape = list(self._valid) if self._valid else [M, N]
 
-    def compute_expected(self, tensors, params=None):
-        tensors["output"][:] = torch.argmax(tensors["a"], dim=0, keepdim=True).to(torch.int32)
+        @pl.program
+        class ColArgmaxProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, a: pl.Tensor[[M, N], dt], out: pl.Out[pl.Tensor[[1, N], pl.INT32]]
+            ) -> pl.Tensor[[1, N], pl.INT32]:
+                t: pl.Tile[[M, N], dt] = pl.load(a, [0, 0], [M, N], valid_shapes=vshape)
+                tmp: pl.Tile[[M, N], dt] = pl.tile.create([M, N], dtype=dt, target_memory=pl.MemorySpace.Vec)
+                r: pl.Tile[[1, N], pl.INT32] = pl.tile.col_argmax(t, tmp)
+                return pl.store(r, [0, 0], out)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self, a: pl.Tensor[[M, N], dt], out: pl.Out[pl.Tensor[[1, N], pl.INT32]]
+            ) -> pl.Tensor[[1, N], pl.INT32]:
+                return self.kernel(a, out)
+
+        return ColArgmaxProgram
 
 
-# =============================================================================
-# pytest entry points
-# =============================================================================
+class TileColArgmin(_ArgBase):
+    op_name = "col_argmin"
+    reduce_dim = 0
+    is_max = False
+
+    def get_program(self) -> Any:
+        dt = _PL_DT[self._dtype]
+        vshape = list(self._valid) if self._valid else [M, N]
+
+        @pl.program
+        class ColArgminProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, a: pl.Tensor[[M, N], dt], out: pl.Out[pl.Tensor[[1, N], pl.INT32]]
+            ) -> pl.Tensor[[1, N], pl.INT32]:
+                t: pl.Tile[[M, N], dt] = pl.load(a, [0, 0], [M, N], valid_shapes=vshape)
+                tmp: pl.Tile[[M, N], dt] = pl.tile.create([M, N], dtype=dt, target_memory=pl.MemorySpace.Vec)
+                r: pl.Tile[[1, N], pl.INT32] = pl.tile.col_argmin(t, tmp)
+                return pl.store(r, [0, 0], out)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self, a: pl.Tensor[[M, N], dt], out: pl.Out[pl.Tensor[[1, N], pl.INT32]]
+            ) -> pl.Tensor[[1, N], pl.INT32]:
+                return self.kernel(a, out)
+
+        return ColArgminProgram
+
+
+# ---------------------------------------------------------------------------
+# Tensor-level (lowered by ConvertTensorToTileOps, which injects the tmp tile).
+# Aligned only: DDR tensors cannot express a partial valid region.
+# ---------------------------------------------------------------------------
+
+
+class TensorRowArgmax(_ArgBase):
+    op_name = "tensor_row_argmax"
+    reduce_dim = 1
+    is_max = True
+
+    def get_program(self) -> Any:
+        @pl.program
+        class TensorRowArgmaxProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, a: pl.Tensor[[M, N], pl.FP32], out: pl.Out[pl.Tensor[[M, 1], pl.INT32]]
+            ) -> pl.Tensor[[M, 1], pl.INT32]:
+                r: pl.Tensor[[M, 1], pl.INT32] = pl.row_argmax(a)
+                return pl.assemble(out, r, [0, 0])
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self, a: pl.Tensor[[M, N], pl.FP32], out: pl.Out[pl.Tensor[[M, 1], pl.INT32]]
+            ) -> pl.Tensor[[M, 1], pl.INT32]:
+                return self.kernel(a, out)
+
+        return TensorRowArgmaxProgram
+
+
+class TensorColArgmax(_ArgBase):
+    op_name = "tensor_col_argmax"
+    reduce_dim = 0
+    is_max = True
+
+    def get_program(self) -> Any:
+        @pl.program
+        class TensorColArgmaxProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, a: pl.Tensor[[M, N], pl.FP32], out: pl.Out[pl.Tensor[[1, N], pl.INT32]]
+            ) -> pl.Tensor[[1, N], pl.INT32]:
+                r: pl.Tensor[[1, N], pl.INT32] = pl.col_argmax(a)
+                return pl.assemble(out, r, [0, 0])
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self, a: pl.Tensor[[M, N], pl.FP32], out: pl.Out[pl.Tensor[[1, N], pl.INT32]]
+            ) -> pl.Tensor[[1, N], pl.INT32]:
+                return self.kernel(a, out)
+
+        return TensorColArgmaxProgram
+
+
+_DTYPES = [DataType.FP32, DataType.FP16]
+_ROW_OPS = [TileRowArgmax, TileRowArgmin]
+_COL_OPS = [TileColArgmax, TileColArgmin]
+# (label, valid) — narrow the reduced dim only so the output stays fully valid.
+_ROW_CASES = [("aligned", None), ("valid_cols", (M, 72))]
+_COL_CASES = [("aligned", None), ("valid_rows", (10, N))]
 
 
 class TestTileArgReduce:
-    """Tile-level row/col argmax/argmin."""
+    """Tile-level row/col argmax/argmin: aligned + valid_shape, FP32 + FP16."""
 
-    def test_row_argmax_fp32(self, test_runner):
-        result = test_runner.run(RowArgmax32x64FP32())
+    @pytest.mark.parametrize("dtype", _DTYPES, ids=[d.value for d in _DTYPES])
+    @pytest.mark.parametrize("label,valid", _ROW_CASES, ids=[c[0] for c in _ROW_CASES])
+    @pytest.mark.parametrize("op_cls", _ROW_OPS, ids=[c.op_name for c in _ROW_OPS])
+    def test_row(self, test_runner, op_cls, label, valid, dtype):
+        result = test_runner.run(op_cls(valid=valid, dtype=dtype))
         assert result.passed, f"Test failed: {result.error}"
 
-    def test_row_argmin_fp32(self, test_runner):
-        result = test_runner.run(RowArgmin16x16FP32())
-        assert result.passed, f"Test failed: {result.error}"
-
-    def test_row_argmax_fp16(self, test_runner):
-        result = test_runner.run(RowArgmax32x64FP16())
-        assert result.passed, f"Test failed: {result.error}"
-
-    def test_col_argmax_fp32(self, test_runner):
-        result = test_runner.run(ColArgmax32x64FP32())
-        assert result.passed, f"Test failed: {result.error}"
-
-    def test_col_argmin_fp32(self, test_runner):
-        result = test_runner.run(ColArgmin8x128FP32())
+    @pytest.mark.parametrize("dtype", _DTYPES, ids=[d.value for d in _DTYPES])
+    @pytest.mark.parametrize("label,valid", _COL_CASES, ids=[c[0] for c in _COL_CASES])
+    @pytest.mark.parametrize("op_cls", _COL_OPS, ids=[c.op_name for c in _COL_OPS])
+    def test_col(self, test_runner, op_cls, label, valid, dtype):
+        result = test_runner.run(op_cls(valid=valid, dtype=dtype))
         assert result.passed, f"Test failed: {result.error}"
 
 
 class TestTensorArgReduce:
     """Tensor-level pl.row_argmax / pl.col_argmax (lowered via tensor->tile)."""
 
-    def test_tensor_row_argmax_fp32(self, test_runner):
-        result = test_runner.run(TensorRowArgmax32x64FP32())
+    def test_tensor_row_argmax(self, test_runner):
+        result = test_runner.run(TensorRowArgmax())
         assert result.passed, f"Test failed: {result.error}"
 
-    def test_tensor_col_argmax_fp32(self, test_runner):
-        result = test_runner.run(TensorColArgmax32x64FP32())
+    def test_tensor_col_argmax(self, test_runner):
+        result = test_runner.run(TensorColArgmax())
         assert result.passed, f"Test failed: {result.error}"
 
 
