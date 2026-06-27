@@ -2344,9 +2344,19 @@ def mgather(mem: Tensor, idx: Tile, coalesce: str = "row") -> Tile:
 
     Maps to the PTOAS ``pto.mgather`` instruction.
 
+    .. note::
+        PTOAS requires the index tile's row byte size to be 32-byte aligned
+        (a ``none_box`` VEC tile constraint): ``idx_cols * sizeof(idx_dtype)``
+        must be a multiple of 32. For INT32 indices this means the index width
+        must be a multiple of 8 (e.g. ``[1, 8]``, ``[1, 16]``, ``[1, 32]``);
+        a width like ``[1, 20]`` (80 bytes) is rejected at compile time. To
+        gather a count that is not a multiple of 8, pad the index tile to the
+        next aligned width and load only the valid rows (``valid_shapes``).
+
     Args:
         mem: GM source table (Tensor; the result takes ``mem``'s dtype).
-        idx: Index tile (INT32, 2D).
+        idx: Index tile (INT32, 2D). Its row byte size must be 32-byte aligned
+            (INT32 width a multiple of 8) — see the note above.
         coalesce: ``"row"`` (default) or ``"elem"``.
 
     Returns:

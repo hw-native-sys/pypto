@@ -269,7 +269,7 @@ with ib.function("tensor_example") as f:
 | **散布** | `tile.scatter` | 按行索引把 `src` 散布到 `dst`（`pto.tscatter` 索引形式；DPS：`dst` 为 in/out，结果别名为 `dst`）。`src` / `dst` dtype ∈ {I8, I16, I32, FP16, FP32, BF16}；`indexes` dtype ∈ {I16, I32}；元素宽度匹配规则：4 字节 dst ↔ INT32，2 字节 dst ↔ INT16，1 字节 dst ↔ INT16。 |
 | - | `tile.scatter_mask` | 按掩码模式把 `src` 行写入 `dst` 中由掩码选中的列（DPS：`dst` 为 in/out）。这是 PyPTO codegen 层形式，下降为 `pto.tscatter` 掩码发射 —— **并非**独立的 pto-isa 指令（与 `tile.gather_mask` 不同）。掩码语义见[掩码模式](#掩码模式)。 |
 | - | `tile.mscatter` | 按逐元素索引把 tile 元素散布写入 GM tensor（`pto.mscatter`）：`out[idx[i, j]] = src[i, j]`。`src` dtype ∈ {FP16, FP32, INT16, INT32}；`idx` 为 INT32（与 `src` 同形状）。 |
-| **Gather** | `tile.mgather` | 按索引从 GM 表 gather-load 到新建的 VEC tile（`pto.mgather`）；是 `tile.mscatter` 的读侧镜像。通过 `coalesce` 属性选两种模式：**row**（默认）`dst[r, j] = mem[idx[r], j]`，`idx` 为 `[1, R]`（row_major）/ `[R, 1]`（col_major）索引向量，输出 `[R, mem_cols]`；**elem** `dst[i, j] = mem[idx[i, j]]`（mem 按平铺索引），输出 = `idx` 形状。`mem`/`dst` dtype ∈ {I8, I16, I32, FP16, BF16, FP32}；`idx` 为 INT32。可在 `spmd` / `pl.range` 内用 loop-local `idx`。 |
+| **Gather** | `tile.mgather` | 按索引从 GM 表 gather-load 到新建的 VEC tile（`pto.mgather`）；是 `tile.mscatter` 的读侧镜像。通过 `coalesce` 属性选两种模式：**row**（默认）`dst[r, j] = mem[idx[r], j]`，`idx` 为 `[1, R]`（row_major）/ `[R, 1]`（col_major）索引向量，输出 `[R, mem_cols]`；**elem** `dst[i, j] = mem[idx[i, j]]`（mem 按平铺索引），输出 = `idx` 形状。`mem`/`dst` dtype ∈ {I8, I16, I32, FP16, BF16, FP32}；`idx` 为 INT32。可在 `spmd` / `pl.range` 内用 loop-local `idx`。索引 tile 的行字节数必须 32 字节对齐(PTOAS `none_box` 约束)—— INT32 索引宽度须为 8 的倍数;要 gather 非 8 倍数的行数,把索引 tile 补齐到下一个对齐宽度并配 `valid_shapes`。 |
 
 **数据流：** `TensorType (DDR) → tile.load → TileType (Unified Buffer) → tile.{ops} → TileType → tile.store → TensorType (DDR)`
 
