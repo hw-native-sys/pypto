@@ -7,28 +7,31 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""L3 distributed st: per-rank DFX artifact isolation.
+"""L3 distributed st: per-dispatch DFX artifact isolation.
 
 A rank-pinned chip dispatch (``self.add_one(x[r], y[r], device=r)``) runs with a
 :class:`~pypto.runtime.RunConfig` that enables the runtime diagnostics
 (``enable_dep_gen`` / ``enable_scope_stats``). Each chip collects its own DFX
-buffers and the L3 driver namespaces them per rank, so the artifacts land under
-``<output_dir>/dfx_outputs/rank{r}/`` with no cross-rank collisions:
+buffers and the L3 driver namespaces them per dispatch, so the artifacts land
+under ``<output_dir>/dfx_outputs/rank{r}/d{k}/`` with no collisions — ``d{k}``
+is the card's k-th dispatch, so even multiple dispatches to one card stay
+separate. Each rank here runs exactly one dispatch, so the dir is ``d0``:
 
     dfx_outputs/
-      rank0/deps.json
-      rank0/scope_stats/scope_stats.jsonl
-      rank1/deps.json
-      rank1/scope_stats/scope_stats.jsonl
+      rank0/d0/deps.json
+      rank0/d0/scope_stats/scope_stats.jsonl
+      rank1/d0/deps.json
+      rank1/d0/scope_stats/scope_stats.jsonl
 
 This exercises the driver wiring (``_make_call_config`` setting the DFX flags +
 base ``output_prefix``) and the codegen wiring (``_submit_chip`` appending the
-``/rank{worker}`` suffix per dispatch).
+``/rank{worker}/d{k}`` suffix per dispatch).
 
 ``enable_l2_swimlane`` is also covered: on L3 it co-enables dep_gen and emits
-``rank{r}/l2_swimlane_records.json`` + ``rank{r}/deps.json`` per chip; onboard it
-is additionally converted to ``rank{r}/merged_swimlane_*.json`` (conversion is
-skipped on the simulator, which does not ship the converter's task metadata).
+``rank{r}/d{k}/l2_swimlane_records.json`` + ``rank{r}/d{k}/deps.json`` per
+dispatch; onboard it is additionally converted to
+``rank{r}/d{k}/merged_swimlane_*.json`` (conversion is skipped on the simulator,
+which does not ship the converter's task metadata).
 """
 
 import sys
@@ -78,7 +81,7 @@ def _build_per_rank_program():
             y: pl.Out[pl.Tensor[[pl.dynamic("NR"), ROWS, COLS], pl.FP32]],
         ):
             # One rank-pinned child dispatch per rank — the ``device=r`` path the
-            # codegen routes through ``_submit_chip`` for per-rank DFX dirs.
+            # codegen routes through ``_submit_chip`` for per-dispatch DFX dirs.
             for r in pl.range(pld.world_size()):
                 self.child(x[r], y[r], device=r)
 
@@ -86,7 +89,7 @@ def _build_per_rank_program():
 
 
 class TestL3DfxPerRank:
-    """L3 distributed runtime: DFX artifacts are isolated per rank."""
+    """L3 distributed runtime: DFX artifacts are isolated per dispatch."""
 
     @pytest.mark.parametrize("n_ranks", [2, 4])
     def test_dfx_artifacts_isolated_per_rank(self, test_config, device_ids, n_ranks):
@@ -118,26 +121,27 @@ class TestL3DfxPerRank:
             f"per-rank DFX P={n_ranks} mismatch: max diff = {(outputs - inputs).abs().max().item()}"
         )
 
-        # Each rank owns a distinct DFX subdir with non-empty diagnostic artifacts.
+        # Each rank's single dispatch owns a distinct ``rank{r}/d0`` subdir with
+        # non-empty diagnostic artifacts.
         dfx_base = compiled.output_dir / "dfx_outputs"
         assert dfx_base.is_dir(), f"missing DFX base dir: {dfx_base}"
         for r in range(n_ranks):
-            rank_dir = dfx_base / f"rank{r}"
-            assert rank_dir.is_dir(), f"missing per-rank DFX dir: {rank_dir}"
+            disp_dir = dfx_base / f"rank{r}" / "d0"
+            assert disp_dir.is_dir(), f"missing per-dispatch DFX dir: {disp_dir}"
 
-            deps = rank_dir / "deps.json"
+            deps = disp_dir / "deps.json"
             assert deps.is_file() and deps.stat().st_size > 0, f"empty/missing deps.json for rank {r}: {deps}"
 
-            scope_stats = rank_dir / "scope_stats" / "scope_stats.jsonl"
+            scope_stats = disp_dir / "scope_stats" / "scope_stats.jsonl"
             assert scope_stats.is_file() and scope_stats.stat().st_size > 0, (
                 f"empty/missing scope_stats.jsonl for rank {r}: {scope_stats}"
             )
 
     def test_swimlane_per_rank(self, test_config, device_ids):
-        """Swimlane on L3 co-enables dep_gen and produces per-rank records.
+        """Swimlane on L3 co-enables dep_gen and produces per-dispatch records.
 
         On a real device the records are additionally converted to
-        ``rank{r}/merged_swimlane_*.json``; on the simulator conversion is
+        ``rank{r}/d0/merged_swimlane_*.json``; on the simulator conversion is
         skipped (no task metadata), so only the raw records are asserted.
         """
         n_ranks = 2
@@ -166,19 +170,19 @@ class TestL3DfxPerRank:
         is_sim = test_config.platform.endswith("sim")
         dfx_base = compiled.output_dir / "dfx_outputs"
         for r in range(n_ranks):
-            rank_dir = dfx_base / f"rank{r}"
-            records = rank_dir / "l2_swimlane_records.json"
+            disp_dir = dfx_base / f"rank{r}" / "d0"
+            records = disp_dir / "l2_swimlane_records.json"
             assert records.is_file() and records.stat().st_size > 0, (
                 f"empty/missing l2_swimlane_records.json for rank {r}: {records}"
             )
             # dep_gen is co-enabled so the converter has a task graph.
-            deps = rank_dir / "deps.json"
+            deps = disp_dir / "deps.json"
             assert deps.is_file() and deps.stat().st_size > 0, f"empty/missing deps.json for rank {r}: {deps}"
 
             if not is_sim:
-                merged = list(rank_dir.glob("merged_swimlane_*.json"))
+                merged = list(disp_dir.glob("merged_swimlane_*.json"))
                 assert merged and merged[0].stat().st_size > 0, (
-                    f"missing merged_swimlane_*.json for rank {r} in {rank_dir}"
+                    f"missing merged_swimlane_*.json for rank {r} in {disp_dir}"
                 )
 
 

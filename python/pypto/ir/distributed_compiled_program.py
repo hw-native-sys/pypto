@@ -353,9 +353,11 @@ class DistributedCompiledProgram:
         ``ring_dep_pool``) size this dispatch's runtime ring buffers, and its
         runtime-diagnostic DFX flags (``enable_dump_tensor`` / ``enable_pmu`` /
         ``enable_dep_gen`` / ``enable_scope_stats`` / ``enable_l2_swimlane``) are
-        written per rank under ``<output_dir>/dfx_outputs/rank{r}/`` (swimlane
-        co-enables dep_gen and emits ``merged_swimlane_*.json`` per rank, onboard
-        only). Other compile-side fields are not consumed on the dispatch path.
+        written per dispatch under ``<output_dir>/dfx_outputs/rank{r}/d{k}/``
+        (``d{k}`` is the card's k-th dispatch, so multiple dispatches to one card
+        keep separate artifacts; swimlane co-enables dep_gen and emits
+        ``merged_swimlane_*.json`` per dispatch, onboard only). Other compile-side
+        fields are not consumed on the dispatch path.
         """
         from pypto.runtime.distributed_runner import execute_distributed  # noqa: PLC0415
 
