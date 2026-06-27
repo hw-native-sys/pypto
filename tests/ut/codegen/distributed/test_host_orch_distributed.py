@@ -42,6 +42,12 @@ from pypto.pypto_core import passes  # match the import path used by ut/conftest
 
 SIZE = 64
 
+# Runtime-only dynamic dims for the #1873 host-orch dynamic-dim recovery tests.
+M = pl.dynamic("M")
+N = pl.dynamic("N")
+NR = pl.dynamic("NR")
+NRANKS = 2
+
 
 @pytest.fixture(autouse=True)
 def pass_verification_context():
@@ -599,6 +605,81 @@ def test_backend_materializes_builtin_next_level_files(tmp_path):
     kernel_cpp = files[f"{base}/kernels/aiv/builtin_tensor_allreduce__sum__fp32_kernel.cpp"]
     assert "platform_comm/comm_context.h" in kernel_cpp
     assert "data_tensor->ndims" in kernel_cpp
+
+
+# ---------------------------------------------------------------------------
+# Dynamic-dim recovery preamble (issue #1873). A HOST orchestrator that slices a
+# per-rank sub-tensor whose bound uses a ``pl.dynamic()`` dim must bind that dim
+# from a runtime tensor shape at the top of the body — otherwise the bare symbol
+# is a free name and executing ``host_orch`` raises ``NameError``. Mirrors the
+# device-side ``_append_dynamic_dim_unpacking``, sharing
+# ``collect_vars_from_shape_expr`` as the single source of truth.
+# ---------------------------------------------------------------------------
+
+
+def test_host_orch_binds_bare_dynamic_dims_from_shape():
+    """Bare dynamic dims (``M``, ``N``) carried by a per-rank-sliced param are
+    recovered from ``tensors["x"].shape[<i>]`` before the loop references them."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip(
+            self,
+            x: pl.Tensor[[M, N], pl.FP32],
+            y: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+        ) -> pl.Tensor[[M, N], pl.FP32]:
+            return y
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(
+            self,
+            x: pl.Tensor[[NRANKS, M, N], pl.FP32],
+            y: pl.Out[pl.Tensor[[NRANKS, M, N], pl.FP32]],
+        ):
+            for r in pl.range(NRANKS):
+                # Manually hoist the per-rank slices into AssignStmt position
+                # (FlattenCallExpr does this in the full pipeline) so the slice
+                # bounds ``0:M, 0:N`` land in the emitted host_orch body.
+                x_r = x[r]
+                y_r = y[r]
+                self.chip(x_r, y_r, device=r)
+
+    code = _lower(Prog)
+
+    # Each dim is recovered from the first param that exposes it (``x``),
+    # at the matching shape index.
+    assert re.search(r'^\s*M = tensors\["x"\]\.shape\[1\]\s*$', code, re.M), code
+    assert re.search(r'^\s*N = tensors\["x"\]\.shape\[2\]\s*$', code, re.M), code
+    # The per-rank slice that uses the symbols must come AFTER the bindings —
+    # i.e. ``M`` / ``N`` are no longer free names at the point of use.
+    assert "0:M, 0:N]" in code, code
+    assert code.index('M = tensors["x"].shape[1]') < code.index("0:M, 0:N]"), code
+
+
+def test_host_orch_binds_composite_dynamic_dim_from_shape():
+    """A composite dim ``NR * 64`` in a per-rank-sliced param is recovered by
+    inverting the affine form to ``NR = (tensors["outputs"].shape[2] // 64)``
+    (regression for #1803). Integer ``//`` keeps the slice bound int-typed."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip(self, o: pl.Out[pl.Tensor[[1, NR * 64], pl.FP32]]) -> pl.Tensor[[1, NR * 64], pl.FP32]:
+            return o
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self, outputs: pl.Out[pl.Tensor[[NRANKS, 1, NR * 64], pl.FP32]]):
+            for r in pl.range(NRANKS):
+                o_r = outputs[r]
+                self.chip(o_r, device=r)
+
+    code = _lower(Prog)
+
+    assert re.search(r'^\s*NR = \(tensors\["outputs"\]\.shape\[2\] // 64\)\s*$', code, re.M), code
+    # The raw symbol is bound before the composite slice bound consumes it.
+    assert "0:(NR * 64)" in code, code
+    assert code.index("NR = (tensors") < code.index("0:(NR * 64)"), code
 
 
 if __name__ == "__main__":
