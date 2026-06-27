@@ -382,6 +382,10 @@ REGISTER_OP("tile.fmod")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    // The hardware kernel overwrites src0 mid-computation (dst=src0/src1) but
+    // still needs the original src0 for the final subtraction, so dst must not
+    // alias any input buffer.
+    .not_inplace_safe()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.fmod");
@@ -456,6 +460,9 @@ REGISTER_OP("tile.fmods")
     .add_argument("rhs", "Scalar (ScalarType)")
     .set_input_memory(0, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    // Same hazard as tile.fmod: the kernel clobbers src0 before its final use,
+    // so dst must not alias the input buffer.
+    .not_inplace_safe()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpScalarBinaryType(args, kwargs, "tile.fmods");
