@@ -751,6 +751,9 @@ def part_min(lhs: Tensor, rhs: Tensor) -> Tensor:
         Tensor wrapping the part_min operation
     """
     call_expr = _ir_ops.part_min(lhs.unwrap(), rhs.unwrap())
+    return Tensor(expr=call_expr)
+
+
 def fmod(lhs: Tensor, rhs: int | float | Tensor | Scalar | Expr) -> Tensor:
     """Element-wise floating-point remainder of tensor and tensor or scalar.
 

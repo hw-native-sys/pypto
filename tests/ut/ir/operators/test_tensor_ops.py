@@ -1145,8 +1145,6 @@ def test_tensor_div():
 @pytest.mark.parametrize("op_name", ["part_add", "part_mul", "part_max", "part_min"])
 def test_tensor_part_ops(op_name):
     """Test tensor.part_* partial-combine binary operations (tensor-tensor only)."""
-def test_tensor_fmod():
-    """Test tensor.fmod operation (tensor-tensor) and tensor.fmods (tensor-scalar dispatch)."""
     span = ir.Span.unknown()
 
     dim8 = ir.ConstInt(8, DataType.INT32, span)
@@ -1157,6 +1155,17 @@ def test_tensor_fmod():
     call = getattr(ir.op.tensor, op_name)(var_a, var_b)
     assert isinstance(call, ir.Call)
     assert call.op.name == f"tensor.{op_name}"
+
+
+def test_tensor_fmod():
+    """Test tensor.fmod operation (tensor-tensor) and tensor.fmods (tensor-scalar dispatch)."""
+    span = ir.Span.unknown()
+
+    dim8 = ir.ConstInt(8, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim8], DataType.FP32)
+    var_a = ir.Var("a", tensor_type, span)
+    var_b = ir.Var("b", tensor_type, span)
+
     # tensor-tensor -> tensor.fmod
     call = ir.op.tensor.fmod(var_a, var_b)
     assert isinstance(call, ir.Call)

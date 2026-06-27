@@ -299,6 +299,8 @@ def part_min(lhs, rhs):
     if isinstance(lhs, Tile) and isinstance(rhs, Tile):
         return _tile.part_min(lhs, rhs)
     _raise_type_dispatch_error("part_min", lhs, rhs)
+
+
 # --- fmod ---
 
 

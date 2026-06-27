@@ -1753,6 +1753,9 @@ def part_min(src0: Tile, src1: Tile) -> Tile:
         Tile wrapping the part_min operation
     """
     call_expr = _ir_ops.part_min(src0.unwrap(), src1.unwrap())
+    return Tile(expr=call_expr)
+
+
 def fmod(lhs: Tile, rhs: Tile) -> Tile:
     """Element-wise floating-point remainder of two tiles.
 

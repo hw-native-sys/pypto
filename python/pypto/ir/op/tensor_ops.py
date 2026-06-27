@@ -642,6 +642,8 @@ def part_min(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
     """
     actual_span = _get_span_or_capture(span)
     return _ir_core.create_op_call("tensor.part_min", [lhs, rhs], {}, actual_span)
+
+
 def fmod(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
     """Element-wise floating-point remainder of tensor and tensor or scalar.
 

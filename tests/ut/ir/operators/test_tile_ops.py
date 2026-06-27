@@ -2303,6 +2303,7 @@ class TestTileBitwiseArithmeticOps:
         call = getattr(tile, op_name)(var_a, var_b)
         assert isinstance(call, ir.Call)
         assert call.op.name == f"tile.{op_name}"
+
     def test_tile_fmod(self):
         """Test tile.fmod operator - element-wise floating-point remainder of two tiles."""
 

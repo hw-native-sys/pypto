@@ -829,6 +829,8 @@ def part_min(src0: Expr, src1: Expr, span: Span | None = None) -> Call:
     """
     actual_span = _get_span_or_capture(span)
     return _ir_core.create_op_call("tile.part_min", [src0, src1], {}, actual_span)
+
+
 def fmod(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
     """Element-wise floating-point remainder of two tiles.
 
