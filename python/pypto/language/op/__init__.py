@@ -70,6 +70,8 @@ from .tensor_ops import create as create_tensor
 from .tile_ops import (
     addc,
     addsc,
+    aic_gather,
+    aiv_shard,
     and_,
     ands,
     cmps,
@@ -314,4 +316,6 @@ __all__ = [
     "tpop_from_aiv",
     "tpush_to_aic",
     "tpush_to_aiv",
+    "aiv_shard",
+    "aic_gather",
 ]

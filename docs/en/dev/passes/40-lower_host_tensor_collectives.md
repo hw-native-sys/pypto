@@ -4,7 +4,7 @@
 
 `LowerHostTensorCollectives` rewrites host-orchestrator calls to
 `pld.tensor.allreduce` into compiler-internal builtin chip dispatches. It runs
-after [`MaterializeCommDomainScopes`](38-materialize_comm_domain_scopes.md), so
+after [`MaterializeCommDomainScopes`](39-materialize_comm_domain_scopes.md), so
 each window-bound data tensor and explicit signal tensor already has a
 `WindowBuffer` back-reference and belongs to an inferred communication domain.
 

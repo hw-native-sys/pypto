@@ -459,7 +459,7 @@ orchestrator（`@pl.jit.host`）和 inline 子函数（`@pl.jit.inline`）上
 只是手放 scope 会嵌套在编译器 AUTO scope 之内）。`.incore` / `.opaque`
 仍会拒绝它——它们外提为独立 kernel。它会 specialize 成
 `@pl.function(..., auto_scope=False)`——具体的 scope 放置语义见
-[MaterializeRuntimeScopes pass](../dev/passes/40-materialize_runtime_scopes.md)。
+[MaterializeRuntimeScopes pass](../dev/passes/41-materialize_runtime_scopes.md)。
 
 ### `@pl.inline`
 

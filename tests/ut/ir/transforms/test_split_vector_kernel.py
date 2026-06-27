@@ -49,581 +49,23 @@ def _run_split_vector_kernel(program):
     return pipeline.run(ssa)
 
 
-def _assert_roundtrip_structural_equal(program, printed: str | None = None):
-    """Print, reparse, and assert the reparsed program is structurally equal.
-
-    Catches both parser issues (printed text doesn't reparse) and producer
-    issues (def-use closure violations that produce two Vars where one is
-    expected). Used by tests that exercise passes producing non-trivial IR
-    shapes (e.g. TileView fields with dynamic expressions).
-    """
-    text = printed if printed is not None else python_print(program)
-    reparsed = pl.parse(text)
-    ir.assert_structural_equal(reparsed, program)
-
-
 def _assert_split_matches_expected(before_program, expected_program):
     actual = _run_split_vector_kernel(before_program)
     ir.assert_structural_equal(actual, passes.convert_to_ssa()(expected_program))
 
 
-class TestSplitVectorKernelUpDown:
-    """Tests for SplitMode.UP_DOWN (halve height, dim 0)."""
+class TestSplitVectorKernelNoSplitPassthrough:
+    """SplitVectorKernel leaves non-split AIV functions untouched.
 
-    def test_infers_split_mode_from_cross_core_pipe_ops(self):
-        """Cross-core pipe split=1 should infer function split and trigger updown lowering."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.AIC)
-            def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
-                peer_buf = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="main_aiv")
-                pl.aic_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=peer_buf)
-                x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
-                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
-                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                z_tile = pl.matmul(x_left, y_right)
-                pl.tpush_to_aiv(z_tile, split=1)
-
-            @pl.function(type=pl.FunctionType.AIV)
-            def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
-                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
-                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
-                z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
-                    split=1
-                )
-                pl.tfree_to_aic(z_vec)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
-                return out_0_store
-
-        @pl.program
-        class Expected:
-            @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
-            def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
-                peer_buf = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="main_aiv")
-                pl.aic_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=peer_buf)
-                x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
-                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
-                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                z_tile = pl.matmul(x_left, y_right)
-                pl.tpush_to_aiv(z_tile, split=1)
-
-            @pl.function(
-                type=pl.FunctionType.AIV,
-                attrs={"split": pl.SplitMode.UP_DOWN, "dual_aiv_dispatch": True},
-            )
-            def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
-                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
-                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
-                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
-                z_vec: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=1)
-                pl.tfree_to_aic(z_vec)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0 + subblock_idx * 8, 0], out_0)
-                return out_0_store
-
-        _assert_split_matches_expected(Before, Expected)
-
-    def test_tpop_shape_halved_and_store_offset_adjusted(self):
-        """tpop result shape height halved and store offset dim0 adjusted."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
-            def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
-                peer_buf = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="main_aiv")
-                pl.aic_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=peer_buf)
-                x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
-                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
-                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                z_tile = pl.matmul(x_left, y_right)
-                pl.tpush_to_aiv(z_tile, split=0)
-
-            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
-            def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
-                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
-                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
-                z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
-                    split=0
-                )
-                pl.tfree_to_aic(z_vec)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
-                return out_0_store
-
-        @pl.program
-        class Expected:
-            @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
-            def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
-                peer_buf = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="main_aiv")
-                pl.aic_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=peer_buf)
-                x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
-                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
-                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                z_tile = pl.matmul(x_left, y_right)
-                pl.tpush_to_aiv(z_tile, split=1)
-
-            @pl.function(
-                type=pl.FunctionType.AIV,
-                attrs={"split": pl.SplitMode.UP_DOWN, "dual_aiv_dispatch": True},
-            )
-            def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
-                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
-                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
-                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
-                z_vec: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=1)
-                pl.tfree_to_aic(z_vec)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0 + subblock_idx * 8, 0], out_0)
-                return out_0_store
-
-        _assert_split_matches_expected(Before, Expected)
-
-    def test_tpop_dynamic_valid_shape_is_localized_per_subblock(self):
-        """Dynamic valid_shape on split dim is localized to each AIV subblock."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
-            def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
-                peer_buf = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="main_aiv")
-                pl.aic_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=peer_buf)
-                x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
-                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
-                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                z_tile = pl.matmul(x_left, y_right)
-                pl.tpush_to_aiv(z_tile, split=1)
-
-            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
-            def main_aiv(
-                self,
-                valid_rows: pl.Scalar[pl.INDEX],
-                valid_cols: pl.Scalar[pl.INDEX],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
-                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
-                z_vec: pl.Tile[
-                    [16, 128],
-                    pl.FP32,
-                    pl.MemorySpace.Vec,
-                    pl.TileView(valid_shape=[valid_rows, valid_cols]),
-                ] = pl.tpop_from_aic(split=1)
-                pl.tfree_to_aic(z_vec)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
-                return out_0_store
-
-        @pl.program
-        class Expected:
-            @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
-            def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
-                peer_buf = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="main_aiv")
-                pl.aic_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=peer_buf)
-                x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
-                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
-                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                z_tile = pl.matmul(x_left, y_right)
-                pl.tpush_to_aiv(z_tile, split=1)
-
-            @pl.function(
-                type=pl.FunctionType.AIV,
-                attrs={"split": pl.SplitMode.UP_DOWN, "dual_aiv_dispatch": True},
-            )
-            def main_aiv(
-                self,
-                valid_rows: pl.Scalar[pl.INDEX],
-                valid_cols: pl.Scalar[pl.INDEX],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
-                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
-                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
-                z_vec: pl.Tile[
-                    [8, 128],
-                    pl.FP32,
-                    pl.MemorySpace.Vec,
-                    pl.TileView(
-                        valid_shape=[pl.max(pl.min(valid_rows - subblock_idx * 8, 8), 0), valid_cols]
-                    ),
-                ] = pl.tpop_from_aic(split=1)
-                pl.tfree_to_aic(z_vec)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0 + subblock_idx * 8, 0], out_0)
-                return out_0_store
-
-        _assert_split_matches_expected(Before, Expected)
-
-    def test_set_validshape_split_dim_operand_localized(self):
-        """set_validshape: the split-dim valid operand is localized to the halved box.
-
-        Halving only the result type left the explicit row operand at its full
-        pre-split extent (e.g. 16 on an 8-row physical tile), which PTOAS rejects
-        with 'set_validshape op expects row operand <= shape dim'. The split-dim
-        operand must be localized exactly like the result type's valid_shape; the
-        non-split col operand is left untouched.
-        """
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
-            def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
-                peer_buf = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="main_aiv")
-                pl.aic_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=peer_buf)
-                x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
-                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
-                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                z_tile = pl.matmul(x_left, y_right)
-                pl.tpush_to_aiv(z_tile, split=1)
-
-            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
-            def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
-                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
-                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
-                z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
-                    split=1
-                )
-                pl.tfree_to_aic(z_vec)
-                narrowed: pl.Tile[
-                    [16, 128],
-                    pl.FP32,
-                    pl.MemorySpace.Vec,
-                    pl.TileView(valid_shape=[16, 64]),
-                ] = pl.tile.set_validshape(z_vec, 16, 64)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(narrowed, [0, 0], out_0)
-                return out_0_store
-
-        @pl.program
-        class Expected:
-            @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
-            def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
-                peer_buf = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="main_aiv")
-                pl.aic_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=peer_buf)
-                x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
-                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
-                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                z_tile = pl.matmul(x_left, y_right)
-                pl.tpush_to_aiv(z_tile, split=1)
-
-            @pl.function(
-                type=pl.FunctionType.AIV,
-                attrs={"split": pl.SplitMode.UP_DOWN, "dual_aiv_dispatch": True},
-            )
-            def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
-                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
-                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
-                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
-                z_vec: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=1)
-                pl.tfree_to_aic(z_vec)
-                narrowed: pl.Tile[
-                    [8, 128],
-                    pl.FP32,
-                    pl.MemorySpace.Vec,
-                    pl.TileView(valid_shape=[8, 64]),
-                ] = pl.tile.set_validshape(z_vec, 8, 64)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(
-                    narrowed, [0 + subblock_idx * 8, 0], out_0
-                )
-                return out_0_store
-
-        _assert_split_matches_expected(Before, Expected)
-
-    def test_set_validshape_replicated_operand_not_localized(self):
-        """set_validshape: a replicated valid operand (< half the physical box) is preserved.
-
-        When the valid extent is smaller than the halved physical dim it is a
-        replicated extent both AIV lanes share (e.g. a fused-attention head count,
-        valid_row=5 on a [16]->[8] split), not a row partition. Localizing it would
-        subtract half on lane 1 and collapse it to 0, silently corrupting that
-        lane. The operand must stay verbatim on both lanes; only the result type's
-        valid_shape is localized (a harmless annotation on a non-subview tile).
-        """
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
-            def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
-                peer_buf = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="main_aiv")
-                pl.aic_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=peer_buf)
-                x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
-                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
-                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                z_tile = pl.matmul(x_left, y_right)
-                pl.tpush_to_aiv(z_tile, split=1)
-
-            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
-            def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
-                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
-                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
-                z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
-                    split=1
-                )
-                pl.tfree_to_aic(z_vec)
-                narrowed: pl.Tile[
-                    [16, 128],
-                    pl.FP32,
-                    pl.MemorySpace.Vec,
-                    pl.TileView(valid_shape=[5, 64]),
-                ] = pl.tile.set_validshape(z_vec, 5, 64)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(narrowed, [0, 0], out_0)
-                return out_0_store
-
-        @pl.program
-        class Expected:
-            @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
-            def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
-                peer_buf = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="main_aiv")
-                pl.aic_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=peer_buf)
-                x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
-                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
-                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                z_tile = pl.matmul(x_left, y_right)
-                pl.tpush_to_aiv(z_tile, split=1)
-
-            @pl.function(
-                type=pl.FunctionType.AIV,
-                attrs={"split": pl.SplitMode.UP_DOWN, "dual_aiv_dispatch": True},
-            )
-            def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
-                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
-                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
-                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
-                z_vec: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=1)
-                pl.tfree_to_aic(z_vec)
-                narrowed: pl.Tile[
-                    [8, 128],
-                    pl.FP32,
-                    pl.MemorySpace.Vec,
-                    pl.TileView(valid_shape=[pl.max(pl.min(5 - subblock_idx * 8, 8), 0), 64]),
-                ] = pl.tile.set_validshape(z_vec, 5, 64)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(
-                    narrowed, [0 + subblock_idx * 8, 0], out_0
-                )
-                return out_0_store
-
-        _assert_split_matches_expected(Before, Expected)
-
-    def test_load_shape_halved_and_offset_adjusted(self):
-        """tile.load in AIV: shape halved, offset adjusted in split dim (includes add of halved tiles)."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
-            def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
-                peer_buf = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="main_aiv")
-                pl.aic_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=peer_buf)
-                x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
-                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
-                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                z_tile = pl.matmul(x_left, y_right)
-                pl.tpush_to_aiv(z_tile, split=0)
-
-            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
-            def main_aiv(
-                self, data: pl.Tensor[[16, 128], pl.FP32], out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
-                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
-                prev: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    data, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec
-                )
-                pop_tile: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
-                    split=0
-                )
-                pl.tfree_to_aic(pop_tile)
-                result: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.add(prev, pop_tile)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(result, [0, 0], out_0)
-                return out_0_store
-
-        @pl.program
-        class Expected:
-            @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
-            def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
-                peer_buf = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="main_aiv")
-                pl.aic_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=peer_buf)
-                x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
-                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
-                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                z_tile = pl.matmul(x_left, y_right)
-                pl.tpush_to_aiv(z_tile, split=1)
-
-            @pl.function(
-                type=pl.FunctionType.AIV,
-                attrs={"split": pl.SplitMode.UP_DOWN, "dual_aiv_dispatch": True},
-            )
-            def main_aiv(
-                self, data: pl.Tensor[[16, 128], pl.FP32], out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
-                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
-                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
-                prev: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    data, [0 + subblock_idx * 8, 0], [8, 128], target_memory=pl.MemorySpace.Vec
-                )
-                pop_tile: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=1)
-                pl.tfree_to_aic(pop_tile)
-                result: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.add(prev, pop_tile)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(
-                    result, [0 + subblock_idx * 8, 0], out_0
-                )
-                return out_0_store
-
-        _assert_split_matches_expected(Before, Expected)
-
-    def test_loop_iter_arg_keeps_split_tracking(self):
-        """Loop iter_args seeded by halved tiles must keep split-aware store offsets."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
-            def main_aiv(
-                self, data: pl.Tensor[[16, 128], pl.FP32], out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
-                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
-                accum: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    data, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec
-                )
-                for i in pl.range(2):
-                    out_0 = pl.store(accum, [0, 0], out_0)
-                    pop_tile: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = (
-                        pl.tpop_from_aic(split=0)
-                    )
-                    pl.tfree_to_aic(pop_tile)
-                    accum = pl.add(accum, pop_tile)
-                return out_0
-
-        @pl.program
-        class Expected:
-            @pl.function(
-                type=pl.FunctionType.AIV,
-                attrs={"split": pl.SplitMode.UP_DOWN, "dual_aiv_dispatch": True},
-            )
-            def main_aiv(
-                self, data: pl.Tensor[[16, 128], pl.FP32], out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
-                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
-                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
-                accum: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    data, [0 + subblock_idx * 8, 0], [8, 128], target_memory=pl.MemorySpace.Vec
-                )
-                for i in pl.range(2):
-                    out_0 = pl.store(accum, [0 + subblock_idx * 8, 0], out_0)
-                    pop_tile: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=1)
-                    pl.tfree_to_aic(pop_tile)
-                    accum = pl.add(accum, pop_tile)
-                return out_0
-
-        _assert_split_matches_expected(Before, Expected)
-
-    def test_loop_return_var_keeps_split_tracking(self):
-        """Loop return_vars fed by split tiles must keep split-aware store offsets after the loop."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
-            def main_aiv(
-                self, data: pl.Tensor[[16, 128], pl.FP32], out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
-                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
-                accum: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    data, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec
-                )
-                for i in pl.range(2):
-                    pop_tile: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = (
-                        pl.tpop_from_aic(split=0)
-                    )
-                    pl.tfree_to_aic(pop_tile)
-                    accum = pl.add(accum, pop_tile)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(accum, [0, 0], out_0)
-                return out_0_store
-
-        @pl.program
-        class Expected:
-            @pl.function(
-                type=pl.FunctionType.AIV,
-                attrs={"split": pl.SplitMode.UP_DOWN, "dual_aiv_dispatch": True},
-            )
-            def main_aiv(
-                self, data: pl.Tensor[[16, 128], pl.FP32], out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
-                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
-                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
-                accum: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    data, [0 + subblock_idx * 8, 0], [8, 128], target_memory=pl.MemorySpace.Vec
-                )
-                for i in pl.range(2):
-                    pop_tile: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=1)
-                    pl.tfree_to_aic(pop_tile)
-                    accum = pl.add(accum, pop_tile)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(accum, [0 + subblock_idx * 8, 0], out_0)
-                return out_0_store
-
-        _assert_split_matches_expected(Before, Expected)
-
-    def test_injected_subblock_idx_avoids_name_collision(self):
-        """Injected lane temp should pick a fresh name when subblock_idx already exists."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
-            def main_aiv(
-                self,
-                subblock_idx: pl.Tensor[[16, 128], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
-                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
-                prev: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    subblock_idx, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec
-                )
-                pop_tile: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
-                    split=0
-                )
-                pl.tfree_to_aic(pop_tile)
-                result: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.add(prev, pop_tile)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(result, [0, 0], out_0)
-                return out_0_store
-
-        @pl.program
-        class Expected:
-            @pl.function(
-                type=pl.FunctionType.AIV,
-                attrs={"split": pl.SplitMode.UP_DOWN, "dual_aiv_dispatch": True},
-            )
-            def main_aiv(
-                self,
-                subblock_idx: pl.Tensor[[16, 128], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                subblock_idx__ssa_v0: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
-                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
-                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
-                prev: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    subblock_idx,
-                    [0 + subblock_idx__ssa_v0 * 8, 0],
-                    [8, 128],
-                    target_memory=pl.MemorySpace.Vec,
-                )
-                pop_tile: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=1)
-                pl.tfree_to_aic(pop_tile)
-                result: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.add(prev, pop_tile)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(
-                    result, [0 + subblock_idx__ssa_v0 * 8, 0], out_0
-                )
-                return out_0_store
-
-        _assert_split_matches_expected(Before, Expected)
+    After the convergence refactor, SplitVectorKernel no longer halves bodies:
+    LowerAutoVectorSplit converts AUTO ``pl.split`` mixed InCore functions into
+    the explicit ``split_aiv`` form upstream, and SplitVectorKernel only stamps
+    attrs for those (see TestSplitVectorKernelExplicitSplitAivBypass). A function
+    with no split mode (and no no-split dual-AIV marker) is passed through
+    structurally unchanged. The per-op halving tests these classes used to hold
+    moved to ``test_lower_auto_vector_split.py`` (they assert the same facts via
+    the shared ``split_axis`` machinery, now reached through LowerAutoVectorSplit).
+    """
 
     def test_no_split_when_none(self):
         """Functions with no split should not be modified."""
@@ -672,632 +114,6 @@ class TestSplitVectorKernelUpDown:
 
         result = _run_split_vector_kernel(Before)
         ir.assert_structural_equal(result, passes.convert_to_ssa()(Before))
-
-    def test_for_stmt_tile_iter_arg_fp32_store_offset_adjusted(self):
-        """ForStmt tile iter_arg FP32: return_var type halved and tile.store offset adjusted."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
-            def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]]) -> pl.Tensor[[16, 64], pl.FP32]:
-                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
-                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
-                acc: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tile.full(
-                    [16, 64], dtype=pl.FP32, value=0.0
-                )
-                for _, (acc_iter,) in pl.range(4, init_values=(acc,)):
-                    pop_tile: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = (
-                        pl.tpop_from_aic(split=0)
-                    )
-                    pl.tfree_to_aic(pop_tile)
-                    new_acc: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.add(acc_iter, pop_tile)
-                    acc_rv = pl.yield_(new_acc)
-                out = pl.store(acc_rv, [0, 0], out_0)
-                return out
-
-        @pl.program
-        class Expected:
-            @pl.function(
-                type=pl.FunctionType.AIV,
-                attrs={"split": pl.SplitMode.UP_DOWN, "dual_aiv_dispatch": True},
-            )
-            def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]]) -> pl.Tensor[[16, 64], pl.FP32]:
-                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
-                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
-                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
-                acc: pl.Tile[[8, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tile.full(
-                    [8, 64], dtype=pl.FP32, value=0.0
-                )
-                for _, (acc_iter,) in pl.range(4, init_values=(acc,)):
-                    pop_tile: pl.Tile[[8, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=1)
-                    pl.tfree_to_aic(pop_tile)
-                    new_acc: pl.Tile[[8, 64], pl.FP32, pl.MemorySpace.Vec] = pl.add(acc_iter, pop_tile)
-                    acc_rv = pl.yield_(new_acc)
-                out = pl.store(acc_rv, [0 + subblock_idx * 8, 0], out_0)
-                return out
-
-        _assert_split_matches_expected(Before, Expected)
-
-    def test_for_stmt_tile_iter_arg_store_inside_loop_offset_adjusted(self):
-        """ForStmt tile iter_arg: tile.store inside loop body on iter_arg has offset adjusted."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
-            def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]]) -> pl.Tensor[[16, 64], pl.FP32]:
-                acc: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tile.full(
-                    [16, 64], dtype=pl.FP32, value=0.0
-                )
-                for _, (acc_iter,) in pl.range(4, init_values=(acc,)):
-                    pl.store(acc_iter, [0, 0], out_0)
-                    new_acc: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.add(acc_iter, acc_iter)
-                    acc_rv = pl.yield_(new_acc)
-                out = pl.store(acc_rv, [0, 0], out_0)
-                return out
-
-        @pl.program
-        class Expected:
-            @pl.function(
-                type=pl.FunctionType.AIV,
-                attrs={"split": pl.SplitMode.UP_DOWN, "dual_aiv_dispatch": True},
-            )
-            def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]]) -> pl.Tensor[[16, 64], pl.FP32]:
-                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
-                acc: pl.Tile[[8, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tile.full(
-                    [8, 64], dtype=pl.FP32, value=0.0
-                )
-                for _, (acc_iter,) in pl.range(4, init_values=(acc,)):
-                    pl.store(acc_iter, [0 + subblock_idx * 8, 0], out_0)
-                    new_acc: pl.Tile[[8, 64], pl.FP32, pl.MemorySpace.Vec] = pl.add(acc_iter, acc_iter)
-                    acc_rv = pl.yield_(new_acc)
-                out = pl.store(acc_rv, [0 + subblock_idx * 8, 0], out_0)
-                return out
-
-        _assert_split_matches_expected(Before, Expected)
-
-    def test_aic_tpop_from_aiv_keeps_full_tile_shape(self):
-        """AIC tpop_from_aiv must not halve tile shape (cube still consumes full operand)."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
-            def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16]):
-                slot_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=0x1000)
-                pl.aic_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=slot_buf)
-                a_tile: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Mat, pl.TileView()] = pl.tpop_from_aiv(
-                    split=0
-                )
-                pl.tfree_to_aiv(a_tile)
-
-        @pl.program
-        class Expected:
-            @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
-            def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16]):
-                slot_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=0x1000)
-                pl.aic_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=slot_buf)
-                a_tile: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Mat, pl.TileView()] = pl.tpop_from_aiv(
-                    split=1
-                )
-                pl.tfree_to_aiv(a_tile)
-
-        _assert_split_matches_expected(Before, Expected)
-
-    def test_singleton_broadcast_tile_preserved(self):
-        """Broadcast tile [1, 128] on split axis dim0 must stay unchanged under UP_DOWN."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
-            def main_aiv(
-                self,
-                data: pl.Tensor[[16, 128], pl.FP32],
-                gamma: pl.Tensor[[1, 128], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                prev: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    data, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec
-                )
-                gamma_tile: pl.Tile[[1, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    gamma, [0, 0], [1, 128], target_memory=pl.MemorySpace.Vec
-                )
-                result: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.col_expand_mul(prev, gamma_tile)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(result, [0, 0], out_0)
-                return out_0_store
-
-        @pl.program
-        class Expected:
-            @pl.function(
-                type=pl.FunctionType.AIV,
-                attrs={"split": pl.SplitMode.UP_DOWN, "dual_aiv_dispatch": True},
-            )
-            def main_aiv(
-                self,
-                data: pl.Tensor[[16, 128], pl.FP32],
-                gamma: pl.Tensor[[1, 128], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
-                prev: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    data, [0 + subblock_idx * 8, 0], [8, 128], target_memory=pl.MemorySpace.Vec
-                )
-                gamma_tile: pl.Tile[[1, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    gamma, [0, 0], [1, 128], target_memory=pl.MemorySpace.Vec
-                )
-                result: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.col_expand_mul(prev, gamma_tile)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(
-                    result, [0 + subblock_idx * 8, 0], out_0
-                )
-                return out_0_store
-
-        _assert_split_matches_expected(Before, Expected)
-
-    def test_reshape_of_rank1_load_preserved_when_split_axis_singleton(self):
-        """UP_DOWN: a rank-1 load reshaped to [1, N] stays full (split axis dim0 is singleton).
-
-        The rank-1 ``scale`` load is bypassed (a rank-1 tile carries no 2D split
-        axis), and the reshape to ``[1, 128]`` is singleton on the UP_DOWN split
-        axis (dim0), so both row-lanes legitimately need the full ``[1, 128]``
-        columns -- the reshape must NOT be sliced. Only ``data`` / the store are
-        halved on dim0.
-        """
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
-            def main_aiv(
-                self,
-                scale: pl.Tensor[[128], pl.FP32],
-                data: pl.Tensor[[16, 128], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                scale_row: pl.Tile[[128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    scale, [0], [128], target_memory=pl.MemorySpace.Vec
-                )
-                scale_2d: pl.Tile[[1, 128], pl.FP32, pl.MemorySpace.Vec] = pl.reshape(scale_row, [1, 128])
-                prev: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    data, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec
-                )
-                result: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.col_expand_mul(prev, scale_2d)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(result, [0, 0], out_0)
-                return out_0_store
-
-        @pl.program
-        class Expected:
-            @pl.function(
-                type=pl.FunctionType.AIV,
-                attrs={"split": pl.SplitMode.UP_DOWN, "dual_aiv_dispatch": True},
-            )
-            def main_aiv(
-                self,
-                scale: pl.Tensor[[128], pl.FP32],
-                data: pl.Tensor[[16, 128], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
-                scale_row: pl.Tile[[128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    scale, [0], [128], target_memory=pl.MemorySpace.Vec
-                )
-                scale_2d: pl.Tile[[1, 128], pl.FP32, pl.MemorySpace.Vec] = pl.reshape(scale_row, [1, 128])
-                prev: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    data, [0 + subblock_idx * 8, 0], [8, 128], target_memory=pl.MemorySpace.Vec
-                )
-                result: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.col_expand_mul(prev, scale_2d)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(
-                    result, [0 + subblock_idx * 8, 0], out_0
-                )
-                return out_0_store
-
-        _assert_split_matches_expected(Before, Expected)
-
-    def test_reshape_of_full_rank1_load_is_sliced_per_subblock(self):
-        """UP_DOWN: a rank-1 load reshaped to [N, 1] is sliced per subblock on dim0.
-
-        Symmetric to the LEFT_RIGHT case: the rank-1 load is bypassed, the reshape
-        to ``[16, 1]`` lands the full extent on the UP_DOWN split axis (dim0), so
-        each lane must read its own row-half via a ``tile.slice`` at
-        ``[subblock_idx * 8, 0]``.
-        """
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
-            def main_aiv(
-                self,
-                scale: pl.Tensor[[16], pl.FP32],
-                data: pl.Tensor[[16, 128], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                scale_row: pl.Tile[[16], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    scale, [0], [16], target_memory=pl.MemorySpace.Vec
-                )
-                scale_2d: pl.Tile[[16, 1], pl.FP32, pl.MemorySpace.Vec] = pl.reshape(scale_row, [16, 1])
-                prev: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    data, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec
-                )
-                result: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.row_expand_mul(prev, scale_2d)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(result, [0, 0], out_0)
-                return out_0_store
-
-        @pl.program
-        class Expected:
-            @pl.function(
-                type=pl.FunctionType.AIV,
-                attrs={"split": pl.SplitMode.UP_DOWN, "dual_aiv_dispatch": True},
-            )
-            def main_aiv(
-                self,
-                scale: pl.Tensor[[16], pl.FP32],
-                data: pl.Tensor[[16, 128], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
-                scale_row: pl.Tile[[16], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    scale, [0], [16], target_memory=pl.MemorySpace.Vec
-                )
-                scale_2d: pl.Tile[[16, 1], pl.FP32, pl.MemorySpace.Vec] = pl.reshape(scale_row, [16, 1])
-                scale_half: pl.Tile[[8, 1], pl.FP32, pl.MemorySpace.Vec] = pl.slice(
-                    scale_2d, [8, 1], [subblock_idx * 8, 0]
-                )
-                prev: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    data, [0 + subblock_idx * 8, 0], [8, 128], target_memory=pl.MemorySpace.Vec
-                )
-                result: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.row_expand_mul(prev, scale_half)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(
-                    result, [0 + subblock_idx * 8, 0], out_0
-                )
-                return out_0_store
-
-        _assert_split_matches_expected(Before, Expected)
-
-    def test_reshape_of_already_split_input_halves_shape_arg(self):
-        """UP_DOWN: a reshape whose input is already split must halve its shape argument too.
-
-        When the reshape input is split-tracked (its producer partitioned the data),
-        the reshape falls through to plain result-halving. Halving only the result
-        *type* while leaving the explicit ``[256, 1]`` shape *literal* un-rescaled
-        makes ``memory_reuse`` size the output from the stale shape (256 rows) and
-        abort fitting it into the split-sized (128-row) slot. The shape argument must
-        track the halved result: ``[256, 1]`` -> ``[128, 1]``.
-        """
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
-            def main_aiv(
-                self,
-                data: pl.Tensor[[16, 16], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[256, 1], pl.FP32]],
-            ) -> pl.Tensor[[256, 1], pl.FP32]:
-                prev: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    data, [0, 0], [16, 16], target_memory=pl.MemorySpace.Vec
-                )
-                flat: pl.Tile[[256, 1], pl.FP32, pl.MemorySpace.Vec] = pl.reshape(prev, [256, 1])
-                out_0_store: pl.Tensor[[256, 1], pl.FP32] = pl.store(flat, [0, 0], out_0)
-                return out_0_store
-
-        @pl.program
-        class Expected:
-            @pl.function(
-                type=pl.FunctionType.AIV,
-                attrs={"split": pl.SplitMode.UP_DOWN, "dual_aiv_dispatch": True},
-            )
-            def main_aiv(
-                self,
-                data: pl.Tensor[[16, 16], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[256, 1], pl.FP32]],
-            ) -> pl.Tensor[[256, 1], pl.FP32]:
-                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
-                prev: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    data, [0 + subblock_idx * 8, 0], [8, 16], target_memory=pl.MemorySpace.Vec
-                )
-                flat: pl.Tile[[128, 1], pl.FP32, pl.MemorySpace.Vec] = pl.reshape(prev, [128, 1])
-                out_0_store: pl.Tensor[[256, 1], pl.FP32] = pl.store(flat, [0 + subblock_idx * 128, 0], out_0)
-                return out_0_store
-
-        _assert_split_matches_expected(Before, Expected)
-
-    def test_reduce_on_split_axis_rejected(self):
-        """Reduce on split axis (dim0 under UP_DOWN) must raise ValueError."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
-            def main_aiv(
-                self,
-                data: pl.Tensor[[16, 128], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                prev: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    data, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec
-                )
-                reduced: pl.Tile[[1, 128], pl.FP32, pl.MemorySpace.Vec] = pl.sum(prev, axis=0, keepdim=True)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(reduced, [0, 0], out_0)
-                return out_0_store
-
-        with pytest.raises(ValueError, match="reduces on the split axis"):
-            _run_split_vector_kernel(Before)
-
-
-class TestSplitVectorKernelLeftRight:
-    """Tests for SplitMode.LEFT_RIGHT (halve width, dim 1)."""
-
-    def test_tpop_shape_halved_and_store_offset_adjusted(self):
-        """tpop result shape width halved and store offset dim1 adjusted."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.LEFT_RIGHT})
-            def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
-                peer_buf = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="main_aiv")
-                pl.aic_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=peer_buf)
-                x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
-                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
-                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                z_tile = pl.matmul(x_left, y_right)
-                pl.tpush_to_aiv(z_tile, split=0)
-
-            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.LEFT_RIGHT})
-            def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
-                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
-                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
-                z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
-                    split=0
-                )
-                pl.tfree_to_aic(z_vec)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
-                return out_0_store
-
-        @pl.program
-        class Expected:
-            @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.LEFT_RIGHT})
-            def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
-                peer_buf = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="main_aiv")
-                pl.aic_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=peer_buf)
-                x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
-                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
-                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                z_tile = pl.matmul(x_left, y_right)
-                pl.tpush_to_aiv(z_tile, split=2)
-
-            @pl.function(
-                type=pl.FunctionType.AIV,
-                attrs={"split": pl.SplitMode.LEFT_RIGHT, "dual_aiv_dispatch": True},
-            )
-            def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
-                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
-                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
-                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
-                z_vec: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=2)
-                pl.tfree_to_aic(z_vec)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(
-                    z_vec, [0, 0 + subblock_idx * 64], out_0
-                )
-                return out_0_store
-
-        _assert_split_matches_expected(Before, Expected)
-
-    def test_load_shape_halved_left_right(self):
-        """tile.load in AIV with LEFT_RIGHT: dim1 halved, offset dim1 adjusted."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.LEFT_RIGHT})
-            def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
-                peer_buf = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="main_aiv")
-                pl.aic_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=peer_buf)
-                x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
-                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
-                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                z_tile = pl.matmul(x_left, y_right)
-                pl.tpush_to_aiv(z_tile, split=0)
-
-            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.LEFT_RIGHT})
-            def main_aiv(
-                self, data: pl.Tensor[[16, 128], pl.FP32], out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
-                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
-                prev: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    data, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec
-                )
-                pop_tile: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
-                    split=0
-                )
-                pl.tfree_to_aic(pop_tile)
-                result: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.add(prev, pop_tile)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(result, [0, 0], out_0)
-                return out_0_store
-
-        @pl.program
-        class Expected:
-            @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.LEFT_RIGHT})
-            def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
-                peer_buf = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="main_aiv")
-                pl.aic_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=peer_buf)
-                x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
-                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
-                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                z_tile = pl.matmul(x_left, y_right)
-                pl.tpush_to_aiv(z_tile, split=2)
-
-            @pl.function(
-                type=pl.FunctionType.AIV,
-                attrs={"split": pl.SplitMode.LEFT_RIGHT, "dual_aiv_dispatch": True},
-            )
-            def main_aiv(
-                self, data: pl.Tensor[[16, 128], pl.FP32], out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
-                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
-                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
-                prev: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    data, [0, 0 + subblock_idx * 64], [16, 64], target_memory=pl.MemorySpace.Vec
-                )
-                pop_tile: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=2)
-                pl.tfree_to_aic(pop_tile)
-                result: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.add(prev, pop_tile)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(
-                    result, [0, 0 + subblock_idx * 64], out_0
-                )
-                return out_0_store
-
-        _assert_split_matches_expected(Before, Expected)
-
-    def test_singleton_broadcast_tile_preserved_left_right(self):
-        """Broadcast tile [128, 1] on split axis dim1 must stay unchanged under LEFT_RIGHT."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.LEFT_RIGHT})
-            def main_aiv(
-                self,
-                data: pl.Tensor[[16, 128], pl.FP32],
-                gamma: pl.Tensor[[16, 1], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                prev: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    data, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec
-                )
-                gamma_tile: pl.Tile[[16, 1], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    gamma, [0, 0], [16, 1], target_memory=pl.MemorySpace.Vec
-                )
-                result: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.row_expand_mul(prev, gamma_tile)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(result, [0, 0], out_0)
-                return out_0_store
-
-        @pl.program
-        class Expected:
-            @pl.function(
-                type=pl.FunctionType.AIV,
-                attrs={"split": pl.SplitMode.LEFT_RIGHT, "dual_aiv_dispatch": True},
-            )
-            def main_aiv(
-                self,
-                data: pl.Tensor[[16, 128], pl.FP32],
-                gamma: pl.Tensor[[16, 1], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
-                prev: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    data, [0, 0 + subblock_idx * 64], [16, 64], target_memory=pl.MemorySpace.Vec
-                )
-                gamma_tile: pl.Tile[[16, 1], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    gamma, [0, 0], [16, 1], target_memory=pl.MemorySpace.Vec
-                )
-                result: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.row_expand_mul(prev, gamma_tile)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(
-                    result, [0, 0 + subblock_idx * 64], out_0
-                )
-                return out_0_store
-
-        _assert_split_matches_expected(Before, Expected)
-
-    def test_rank1_load_is_preserved_when_left_right_split_axis_is_absent(self):
-        """Rank-1 tile.load must not be rewritten for LEFT_RIGHT split.
-
-        The function still gains the ``dual_aiv_dispatch`` attr and the
-        injected ``subblock_idx`` temp, but the rank-1 load/store offsets
-        must stay unscaled because the split axis (dim1) is absent.
-        """
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.LEFT_RIGHT})
-            def main_aiv(
-                self, data: pl.Tensor[[128], pl.FP32], out_0: pl.Out[pl.Tensor[[128], pl.FP32]]
-            ) -> pl.Tensor[[128], pl.FP32]:
-                loaded: pl.Tile[[128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    data, [0], [128], target_memory=pl.MemorySpace.Vec
-                )
-                out: pl.Tensor[[128], pl.FP32] = pl.store(loaded, [0], out_0)
-                return out
-
-        @pl.program
-        class Expected:
-            @pl.function(
-                type=pl.FunctionType.AIV,
-                attrs={"split": pl.SplitMode.LEFT_RIGHT, "dual_aiv_dispatch": True},
-            )
-            def main_aiv(
-                self, data: pl.Tensor[[128], pl.FP32], out_0: pl.Out[pl.Tensor[[128], pl.FP32]]
-            ) -> pl.Tensor[[128], pl.FP32]:
-                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
-                loaded: pl.Tile[[128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    data, [0], [128], target_memory=pl.MemorySpace.Vec
-                )
-                out: pl.Tensor[[128], pl.FP32] = pl.store(loaded, [0], out_0)
-                return out
-
-        _assert_split_matches_expected(Before, Expected)
-
-    def test_reshape_of_full_rank1_load_is_sliced_per_subblock(self):
-        """A reshape lifting a full (un-split) rank-1 load onto the split axis must be sliced per lane.
-
-        The rank-1 ``scale`` load legitimately bypasses the split load rewrite
-        (it carries no split axis), but the following ``reshape`` to ``[1, N]``
-        re-introduces the split (column) axis. Reshape is an offsetless view, so
-        halving only its result type would leave BOTH AIV lanes reading the first
-        half of the full buffer (lane 1 silently reusing lane 0's data -- the
-        DeepSeek-V4 ``proj_b`` per-channel dequant-scale bug). Expect the reshape
-        kept at full ``[1, 128]`` width followed by a ``tile.slice`` at
-        ``[0, subblock_idx * 64]`` so each lane reads its own half, with the
-        downstream ``col_expand_mul`` consuming the sliced half.
-        """
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.LEFT_RIGHT})
-            def main_aiv(
-                self,
-                scale: pl.Tensor[[128], pl.FP32],
-                data: pl.Tensor[[16, 128], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                scale_row: pl.Tile[[128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    scale, [0], [128], target_memory=pl.MemorySpace.Vec
-                )
-                scale_2d: pl.Tile[[1, 128], pl.FP32, pl.MemorySpace.Vec] = pl.reshape(scale_row, [1, 128])
-                prev: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    data, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec
-                )
-                result: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.col_expand_mul(prev, scale_2d)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(result, [0, 0], out_0)
-                return out_0_store
-
-        @pl.program
-        class Expected:
-            @pl.function(
-                type=pl.FunctionType.AIV,
-                attrs={"split": pl.SplitMode.LEFT_RIGHT, "dual_aiv_dispatch": True},
-            )
-            def main_aiv(
-                self,
-                scale: pl.Tensor[[128], pl.FP32],
-                data: pl.Tensor[[16, 128], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
-                scale_row: pl.Tile[[128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    scale, [0], [128], target_memory=pl.MemorySpace.Vec
-                )
-                scale_2d: pl.Tile[[1, 128], pl.FP32, pl.MemorySpace.Vec] = pl.reshape(scale_row, [1, 128])
-                scale_half: pl.Tile[[1, 64], pl.FP32, pl.MemorySpace.Vec] = pl.slice(
-                    scale_2d, [1, 64], [0, subblock_idx * 64]
-                )
-                prev: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    data, [0, 0 + subblock_idx * 64], [16, 64], target_memory=pl.MemorySpace.Vec
-                )
-                result: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.col_expand_mul(prev, scale_half)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(
-                    result, [0, 0 + subblock_idx * 64], out_0
-                )
-                return out_0_store
-
-        _assert_split_matches_expected(Before, Expected)
 
 
 class TestSplitVectorKernelNoSplitA2A3:
@@ -1889,6 +705,296 @@ class TestSplitVectorKernelNoSplitA2A3:
             r"pl.TileView\(valid_shape=\[0, 0\]\)\]",
             lane1,
         )
+
+
+def _count_op_calls(stmt, op_name: str) -> int:
+    """Recursively count Call expressions to ``op_name`` in a statement tree."""
+    count = 0
+
+    def visit_expr(expr):
+        nonlocal count
+        if expr is None:
+            return
+        if isinstance(expr, ir.Call) and expr.op is not None and expr.op.name == op_name:
+            count += 1
+
+    def visit_stmt(s):
+        nonlocal count
+        if s is None:
+            return
+        if isinstance(s, ir.SeqStmts):
+            for child in s.stmts:
+                visit_stmt(child)
+        elif isinstance(s, ir.AssignStmt):
+            visit_expr(s.value)
+        elif isinstance(s, ir.EvalStmt):
+            visit_expr(s.expr)
+        elif isinstance(s, ir.ForStmt):
+            visit_stmt(s.body)
+        elif isinstance(s, ir.WhileStmt):
+            visit_stmt(s.body)
+        elif isinstance(s, ir.IfStmt):
+            visit_stmt(s.then_body)
+            if s.else_body is not None:
+                visit_stmt(s.else_body)
+
+    visit_stmt(stmt)
+    return count
+
+
+def _find_assign_tile_shape(stmt, var_name_prefix: str) -> list[int] | None:
+    """Return the static tile shape of the first AssignStmt whose Var name starts with prefix."""
+    result: list[int] | None = None
+
+    def visit_stmt(s):
+        nonlocal result
+        if result is not None or s is None:
+            return
+        if isinstance(s, ir.SeqStmts):
+            for child in s.stmts:
+                visit_stmt(child)
+        elif isinstance(s, ir.AssignStmt):
+            if s.var.name_hint.startswith(var_name_prefix) and isinstance(s.var.type, ir.TileType):
+                dims: list[int] = []
+                for d in s.var.type.shape:
+                    assert isinstance(d, ir.ConstInt)
+                    dims.append(int(d.value))
+                result = dims
+        elif isinstance(s, ir.ForStmt):
+            visit_stmt(s.body)
+        elif isinstance(s, ir.WhileStmt):
+            visit_stmt(s.body)
+        elif isinstance(s, ir.IfStmt):
+            visit_stmt(s.then_body)
+            if s.else_body is not None:
+                visit_stmt(s.else_body)
+
+    visit_stmt(stmt)
+    return result
+
+
+class TestSplitVectorKernelExplicitSplitAivBypass:
+    """SplitVectorKernel stamps attrs for split_aiv kernels and passes them through.
+
+    This is the SOLE split path through SplitVectorKernel after the convergence
+    refactor (the per-op halving driver was deleted). A ``split_aiv`` kernel —
+    hand-written, or produced upstream by LowerAutoVectorSplit — has already
+    lowered its explicit ``tile.aiv_shard`` / ``tile.aic_gather`` into
+    split-stamped tpush/tpop and carries already-halved compute tiles plus its
+    own ``get_subblock_idx``. The ``split_aiv`` marker must make SplitVectorKernel
+    leave the body untouched: it only stamps ``split`` + ``dual_aiv_dispatch``.
+    """
+
+    def test_split_aiv_bypass_keeps_half_tiles_and_single_subblock_idx(self):
+        @pl.program
+        class Before:
+            @pl.function(
+                type=pl.FunctionType.AIC,
+                attrs={"split": pl.SplitMode.UP_DOWN, "split_aiv": True},
+            )
+            def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
+                peer_buf = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="main_aiv")
+                pl.aic_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=peer_buf)
+                x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile = pl.matmul(x_left, y_right)
+                pl.tpush_to_aiv(z_tile, split=1)
+
+            # AIV body is already in the post-split form: half [8, 128] tiles, one
+            # hand-written get_subblock_idx, and a store offset that already uses it.
+            @pl.function(
+                type=pl.FunctionType.AIV,
+                attrs={"split": pl.SplitMode.UP_DOWN, "split_aiv": True},
+            )
+            def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
+                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
+                z_vec: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=1)
+                pl.tfree_to_aic(z_vec)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0 + subblock_idx * 8, 0], out_0)
+                return out_0_store
+
+        actual = _run_split_vector_kernel(Before)
+        aiv = actual.get_function("main_aiv")
+        assert aiv is not None
+
+        # (i) split + dual_aiv_dispatch stamped; split_aiv marker preserved.
+        assert aiv.attrs["split"] == pl.SplitMode.UP_DOWN.value
+        assert aiv.attrs["dual_aiv_dispatch"] is True
+        assert aiv.attrs["split_aiv"] is True
+
+        # (ii) compute tile UNCHANGED — still [8, 128], not re-halved to [4, 128].
+        assert _find_assign_tile_shape(aiv.body, "z_vec") == [8, 128]
+
+        # (iii) exactly one get_subblock_idx — no second one injected.
+        assert _count_op_calls(aiv.body, "tile.get_subblock_idx") == 1
+
+
+class TestSplitVectorKernelStandaloneSetValidshape:
+    """set_validshape split-axis operand localization on the standalone split path.
+
+    The input is already-split AIC/AIV functions carrying a function-level
+    ``split`` attr (not the ``split_aiv`` marker), so SplitVectorKernel's
+    standalone arm (ProcessStandaloneSplitFunction -> split_axis::ProcessStmts)
+    halves them -- the same localization the auto ``pl.split`` path gets via
+    LowerAutoVectorSplit.
+    """
+
+    def test_set_validshape_split_dim_operand_localized(self):
+        """set_validshape: the split-dim valid operand is localized to the halved box.
+
+        Halving only the result type left the explicit row operand at its full
+        pre-split extent (e.g. 16 on an 8-row physical tile), which PTOAS rejects
+        with 'set_validshape op expects row operand <= shape dim'. The split-dim
+        operand must be localized exactly like the result type's valid_shape; the
+        non-split col operand is left untouched.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
+                peer_buf = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="main_aiv")
+                pl.aic_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=peer_buf)
+                x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile = pl.matmul(x_left, y_right)
+                pl.tpush_to_aiv(z_tile, split=1)
+
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
+                z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
+                    split=1
+                )
+                pl.tfree_to_aic(z_vec)
+                narrowed: pl.Tile[
+                    [16, 128],
+                    pl.FP32,
+                    pl.MemorySpace.Vec,
+                    pl.TileView(valid_shape=[16, 64]),
+                ] = pl.tile.set_validshape(z_vec, 16, 64)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(narrowed, [0, 0], out_0)
+                return out_0_store
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
+                peer_buf = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="main_aiv")
+                pl.aic_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=peer_buf)
+                x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile = pl.matmul(x_left, y_right)
+                pl.tpush_to_aiv(z_tile, split=1)
+
+            @pl.function(
+                type=pl.FunctionType.AIV,
+                attrs={"split": pl.SplitMode.UP_DOWN, "dual_aiv_dispatch": True},
+            )
+            def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
+                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
+                z_vec: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=1)
+                pl.tfree_to_aic(z_vec)
+                narrowed: pl.Tile[
+                    [8, 128],
+                    pl.FP32,
+                    pl.MemorySpace.Vec,
+                    pl.TileView(valid_shape=[8, 64]),
+                ] = pl.tile.set_validshape(z_vec, 8, 64)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(
+                    narrowed, [0 + subblock_idx * 8, 0], out_0
+                )
+                return out_0_store
+
+        _assert_split_matches_expected(Before, Expected)
+
+    def test_set_validshape_replicated_operand_not_localized(self):
+        """set_validshape: a replicated valid operand (< half the physical box) is preserved.
+
+        When the valid extent is smaller than the halved physical dim it is a
+        replicated extent both AIV lanes share (e.g. a fused-attention head count,
+        valid_row=5 on a [16]->[8] split), not a row partition. Localizing it would
+        subtract half on lane 1 and collapse it to 0, silently corrupting that
+        lane. The operand must stay verbatim on both lanes; only the result type's
+        valid_shape is localized (a harmless annotation on a non-subview tile).
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
+                peer_buf = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="main_aiv")
+                pl.aic_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=peer_buf)
+                x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile = pl.matmul(x_left, y_right)
+                pl.tpush_to_aiv(z_tile, split=1)
+
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
+                z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
+                    split=1
+                )
+                pl.tfree_to_aic(z_vec)
+                narrowed: pl.Tile[
+                    [16, 128],
+                    pl.FP32,
+                    pl.MemorySpace.Vec,
+                    pl.TileView(valid_shape=[5, 64]),
+                ] = pl.tile.set_validshape(z_vec, 5, 64)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(narrowed, [0, 0], out_0)
+                return out_0_store
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
+                peer_buf = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="main_aiv")
+                pl.aic_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=peer_buf)
+                x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile = pl.matmul(x_left, y_right)
+                pl.tpush_to_aiv(z_tile, split=1)
+
+            @pl.function(
+                type=pl.FunctionType.AIV,
+                attrs={"split": pl.SplitMode.UP_DOWN, "dual_aiv_dispatch": True},
+            )
+            def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
+                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
+                z_vec: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=1)
+                pl.tfree_to_aic(z_vec)
+                narrowed: pl.Tile[
+                    [8, 128],
+                    pl.FP32,
+                    pl.MemorySpace.Vec,
+                    pl.TileView(valid_shape=[pl.max(pl.min(5 - subblock_idx * 8, 8), 0), 64]),
+                ] = pl.tile.set_validshape(z_vec, 5, 64)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(
+                    narrowed, [0 + subblock_idx * 8, 0], out_0
+                )
+                return out_0_store
+
+        _assert_split_matches_expected(Before, Expected)
 
 
 if __name__ == "__main__":

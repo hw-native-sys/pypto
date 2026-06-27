@@ -854,10 +854,20 @@ class ScopeOutliner : public IRMutator {
         outlined_attrs.emplace_back("windowize", true);
       }
     };
+    // Propagate the manual AIV-split marker (pl.split(..., split_aiv=True)) from
+    // the scope onto the outlined function. ExpandMixedKernel copies it to both
+    // the AIC and AIV lanes; SplitVectorKernel reads it to bypass its automatic
+    // per-op halving for hand-written split_aiv kernels.
+    auto append_split_aiv_attr = [&]() {
+      if (op->HasAttr("split_aiv") && op->GetAttr<bool>("split_aiv", false)) {
+        outlined_attrs.emplace_back("split_aiv", true);
+      }
+    };
     if (auto incore = As<InCoreScopeStmt>(op)) {
       append_split_attr(incore->split_);
       append_slot_num_attr();
       append_windowize_attr();
+      append_split_aiv_attr();
     } else if (auto auto_incore = As<AutoInCoreScopeStmt>(op)) {
       append_split_attr(auto_incore->split_);
       append_slot_num_attr();

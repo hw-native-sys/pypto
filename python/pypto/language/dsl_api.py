@@ -861,6 +861,70 @@ def spmd(
     )
 
 
+class SplitAivContext:
+    """Loop iterator for the explicit AIV-split scope.
+
+    The parser recognizes ``for aiv_id in pl.split_aiv(2, mode=...):`` and opens
+    a single bare ``InCoreScopeStmt`` marking an explicit AIV-split body (it
+    carries the requested ``SplitMode`` and a ``("split_aiv", True)`` attr). The
+    loop variable is bound to ``pl.tile.get_subblock_idx()`` — the AIV lane /
+    sub-core index.
+    """
+
+    def __init__(self, n: int, mode: ir.SplitMode) -> None:
+        self.n = n
+        self.mode = mode
+
+    def __iter__(self) -> Iterator[Any]:
+        # Lets `for aiv_id in pl.split_aiv(...)` type-check and parse at the
+        # Python level. The @pl.program / @pl.function decorators intercept the
+        # AST, so this should never actually run — if it does, the caller is
+        # using pl.split_aiv() outside the DSL interception path. Raise loudly
+        # rather than silently yielding zero iterations (mirrors SpmdContext).
+        raise RuntimeError(
+            "pl.split_aiv(...) loop form is only valid inside a @pl.program / "
+            "@pl.function body; the parser replaces the for-loop with an explicit "
+            "AIV-split InCoreScopeStmt. If you're seeing this, the surrounding "
+            "function was not decorated."
+        )
+
+
+def split_aiv(n: int, *, mode: ir.SplitMode) -> SplitAivContext:
+    """Open an explicit AIV-split scope as an SPMD-style loop.
+
+    Usage::
+
+        for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+            ...  # body runs per AIV lane; aiv_id = pl.tile.get_subblock_idx()
+
+    The loop opens exactly ONE bare ``InCore`` scope (unlike ``pl.spmd``, which
+    wraps an InCore body in a Spmd scope). The scope carries the requested
+    ``SplitMode`` (same mechanism as ``pl.split``) plus a ``("split_aiv", True)``
+    attr so later passes can identify the explicit-split body. The loop variable
+    binds the AIV lane index (equivalent to ``pl.tile.get_subblock_idx()``).
+
+    Args:
+        n: The AIV sub-core count. Positional; hardware-fixed at 2 (the two AIV
+            lanes of one AICore). Any other value is rejected by the parser.
+        mode: Required split mode (``pl.SplitMode.UP_DOWN`` or
+            ``pl.SplitMode.LEFT_RIGHT``). No silent default.
+
+    Returns:
+        Loop iterator for the explicit AIV-split scope.
+
+    Examples:
+        >>> for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+        ...     offset = aiv_id * 128
+        ...     t = pl.load(a, [offset, 0], [128, 128])
+        ...     out = pl.store(t, [offset, 0], out)
+    """
+    if isinstance(n, bool) or not isinstance(n, int):
+        raise ValueError(f"pl.split_aiv(n): n must be the integer 2, got {n!r}")
+    if not isinstance(mode, _ir.SplitMode):
+        raise ValueError(f"pl.split_aiv(mode=...): mode must be a pl.SplitMode, got {mode!r}")
+    return SplitAivContext(n=n, mode=mode)
+
+
 class AtContext:
     """Context manager for hierarchy-level scope.
 
@@ -1036,10 +1100,12 @@ __all__ = [
     "at",
     "cluster",
     "spmd",
+    "split_aiv",
     "RangeIterator",
     "WhileIterator",
     "ClusterContext",
     "SpmdContext",
+    "SplitAivContext",
     "AtContext",
     "RangeArg",
     "CondArg",

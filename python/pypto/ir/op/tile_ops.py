@@ -2742,6 +2742,34 @@ def tpush_to_aic(tile: Expr, *, split: int, id: int | None = None, span: Span | 
     return _ir_core.create_op_call("tile.tpush_to_aic", [tile], kwargs, actual_span)
 
 
+def aiv_shard(tile: Expr, *, split: int, span: Span | None = None) -> Call:
+    """Shard a 2D tile into half along the split axis (full -> half).
+
+    The result is a TileType with the split axis halved.
+
+    Args:
+        tile: Input tile (TileType, 2D)
+        split: Split mode (1=up-down/axis0, 2=left-right/axis1)
+        span: Optional source span
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call("tile.aiv_shard", [tile], {"split": split}, actual_span)
+
+
+def aic_gather(tile: Expr, *, split: int, span: Span | None = None) -> Call:
+    """Gather a 2D tile into full along the split axis (half -> full).
+
+    Inverse of :func:`aiv_shard`: the result is a TileType with the split axis doubled.
+
+    Args:
+        tile: Input tile (TileType, 2D)
+        split: Split mode (1=up-down/axis0, 2=left-right/axis1)
+        span: Optional source span
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call("tile.aic_gather", [tile], {"split": split}, actual_span)
+
+
 def tpop_from_aic(
     *,
     result_type: _ir_core.Type | None = None,

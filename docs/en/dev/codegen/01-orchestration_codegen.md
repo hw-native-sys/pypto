@@ -4,7 +4,7 @@
 
 Orchestration codegen follows the same principle as [PTO codegen](00-pto_codegen.md#design-principle-strict-1-to-1-mapping): a **strict 1-to-1 translation** from IR to generated C++ code. The codegen should not perform optimization, analysis, or indirection — such work belongs in earlier passes.
 
-For example, return-to-parameter tracing (mapping callee return values back to `Out` parameters) is analysis that should be resolved by a pass before codegen sees the IR. The [`NormalizeReturnOrder`](../passes/25-normalize_return_order.md) pass now canonicalizes this before codegen, so orchestration codegen maps `return[i]` directly to `out_indices[i]` without tracing through `tile.store`/yield chains.
+For example, return-to-parameter tracing (mapping callee return values back to `Out` parameters) is analysis that should be resolved by a pass before codegen sees the IR. The [`NormalizeReturnOrder`](../passes/26-normalize_return_order.md) pass now canonicalizes this before codegen, so orchestration codegen maps `return[i]` directly to `out_indices[i]` without tracing through `tile.store`/yield chains.
 
 ## Overview
 
@@ -107,7 +107,7 @@ const Tensor& tmp = alloc_0.get_ref(0);
 
 All task submission is wrapped in a top-level `PTO2_SCOPE()`. Codegen no longer
 decides scope placement from the `for` / `if` structure: the
-[MaterializeRuntimeScopes](../passes/40-materialize_runtime_scopes.md) pass
+[MaterializeRuntimeScopes](../passes/41-materialize_runtime_scopes.md) pass
 inserts explicit AUTO `RuntimeScopeStmt` nodes (the function body and each
 `for` / `if` body) into the IR, and codegen emits `PTO2_SCOPE` 1:1 from those
 nodes (manual scopes lower to `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`):
@@ -191,7 +191,7 @@ params_t1.add_input(ext_output);  // `result` -> ext_output (no alias decl)
 
 Which `Out`/`InOut` param a result aliases is a lookup, not a heuristic:
 pipeline IR satisfies the `ReturnParamsExplicit` property
-([`NormalizeReturnOrder`](../passes/25-normalize_return_order.md)),
+([`NormalizeReturnOrder`](../passes/26-normalize_return_order.md)),
 so `FindReturnedParamIndex` resolves each return value to a param by pointer
 identity via `ir::return_lineage`. The legacy lineage tracing (var-to-var
 aliases, loop carries, builtin writebacks, `TupleGetItem` of tuple calls,
@@ -451,7 +451,7 @@ variables). Plain `Call` carriers of `manual_dep_edges` no longer exist — the
 ManualDepsOnSubmitOnly structural property verifies that no cross-function
 `Call` carries it; only the `system.task_dummy` barrier op keeps the attr as
 its fanin contract. Compiler-derived manual-scope edges come from
-[`AutoDeriveTaskDependencies`](../passes/36-auto_derive_task_dependencies.md)
+[`AutoDeriveTaskDependencies`](../passes/37-auto_derive_task_dependencies.md)
 in `Call.attrs["compiler_manual_dep_edges"]` (a separate key, allowed on plain
 calls). Codegen merges the two lists in that order and deduplicates by Var
 identity before emitting the stack array.

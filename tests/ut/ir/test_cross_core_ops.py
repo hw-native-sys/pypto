@@ -11,6 +11,7 @@
 
 import pytest
 from pypto import DataType, ir, passes
+from pypto import language as pl
 from pypto.pypto_core.ir import ConstInt
 
 
@@ -110,6 +111,123 @@ def test_cross_core_ops_registered():
     ]
     for name in op_names:
         assert ir.is_op_registered(name), f"{name} should be registered"
+
+
+def test_aiv_shard_halves_split_axis():
+    """tile.aiv_shard halves the split axis: UP_DOWN -> axis0, LEFT_RIGHT -> axis1."""
+    span = ir.Span.unknown()
+    tile_var = ir.Var("t", ir.TileType([16, 128], DataType.FP32), span)
+
+    up_down = ir.create_op_call("tile.aiv_shard", [tile_var], {"split": 1}, span)
+    assert isinstance(up_down.type, ir.TileType)
+    assert up_down.type.shape == [8, 128]
+    assert up_down.type.dtype == DataType.FP32
+
+    left_right = ir.create_op_call("tile.aiv_shard", [tile_var], {"split": 2}, span)
+    assert isinstance(left_right.type, ir.TileType)
+    assert left_right.type.shape == [16, 64]
+    assert left_right.type.dtype == DataType.FP32
+
+
+def test_aic_gather_doubles_split_axis():
+    """tile.aic_gather is the inverse of aiv_shard: it doubles the split axis."""
+    span = ir.Span.unknown()
+
+    up_down = ir.create_op_call(
+        "tile.aic_gather", [ir.Var("t", ir.TileType([8, 128], DataType.FP32), span)], {"split": 1}, span
+    )
+    assert isinstance(up_down.type, ir.TileType)
+    assert up_down.type.shape == [16, 128]
+
+    left_right = ir.create_op_call(
+        "tile.aic_gather", [ir.Var("t", ir.TileType([16, 64], DataType.FP32), span)], {"split": 2}, span
+    )
+    assert isinstance(left_right.type, ir.TileType)
+    assert left_right.type.shape == [16, 128]
+
+
+def test_split_reshape_rejects_non_2d_tile():
+    """aiv_shard / aic_gather require a 2D tile."""
+    span = ir.Span.unknown()
+    tile_var = ir.Var("t", ir.TileType([2, 16, 128], DataType.FP32), span)
+
+    with pytest.raises(Exception, match="2D tile"):
+        ir.create_op_call("tile.aiv_shard", [tile_var], {"split": 1}, span)
+    with pytest.raises(Exception, match="2D tile"):
+        ir.create_op_call("tile.aic_gather", [tile_var], {"split": 1}, span)
+
+
+def test_split_reshape_rejects_bad_split_attr():
+    """split must be 1 or 2 (0 and out-of-range rejected)."""
+    span = ir.Span.unknown()
+    tile_var = ir.Var("t", ir.TileType([16, 128], DataType.FP32), span)
+
+    for bad in (0, 3):
+        with pytest.raises(Exception, match="split must be"):
+            ir.create_op_call("tile.aiv_shard", [tile_var], {"split": bad}, span)
+
+
+def test_aiv_shard_rejects_odd_split_axis():
+    """aiv_shard requires the static split-axis extent to be even."""
+    span = ir.Span.unknown()
+    tile_var = ir.Var("t", ir.TileType([15, 128], DataType.FP32), span)
+
+    with pytest.raises(Exception, match="must be even"):
+        ir.create_op_call("tile.aiv_shard", [tile_var], {"split": 1}, span)
+
+
+def test_aiv_shard_allows_even_physical_with_odd_valid_shape():
+    """The even-extent guard applies to the physical split axis, not a partial valid_shape.
+
+    A tile whose physical split extent is even (16) but whose valid_shape is an odd
+    partial (15) must be accepted; the result valid_shape is ceil-halved (8) and stays
+    consistent with the halved physical extent (8). Per-lane valid localization happens
+    later at lowering time, which knows the subblock index.
+    """
+    span = ir.Span.unknown()
+    tile_view = ir.TileView(
+        valid_shape=[ir.ConstInt(13, DataType.INDEX, span), ir.ConstInt(128, DataType.INDEX, span)]
+    )
+    tile_type = ir.TileType([16, 128], DataType.FP32, memref=None, tile_view=tile_view, memory_space=None)
+    tile_var = ir.Var("t", tile_type, span)
+
+    # Physical extent 16 is even, so the shard is accepted even though valid (13) is odd.
+    sharded = ir.create_op_call("tile.aiv_shard", [tile_var], {"split": 1}, span)
+    sharded_type = sharded.type
+    assert isinstance(sharded_type, ir.TileType)
+    assert sharded_type.shape == [8, 128]
+    # Result valid (7 = ceil(13/2)) differs from the halved physical (8), so the view is observable.
+    assert sharded_type.tile_view is not None
+    valid_0 = sharded_type.tile_view.valid_shape[0]
+    valid_1 = sharded_type.tile_view.valid_shape[1]
+    assert isinstance(valid_0, ir.ConstInt)
+    assert isinstance(valid_1, ir.ConstInt)
+    assert valid_0.value == 7  # ceil(13 / 2)
+    assert valid_1.value == 128
+
+
+def test_aic_gather_allows_odd_split_axis():
+    """aic_gather doubles the axis, so an odd extent is fine (no even constraint)."""
+    span = ir.Span.unknown()
+    tile_var = ir.Var("t", ir.TileType([15, 128], DataType.FP32), span)
+
+    call = ir.create_op_call("tile.aic_gather", [tile_var], {"split": 1}, span)
+    assert isinstance(call.type, ir.TileType)
+    assert call.type.shape == [30, 128]
+
+
+def test_dsl_aiv_shard_aic_gather_require_split_aiv_scope():
+    """The eager pl.aiv_shard / pl.aic_gather DSL wrappers raise: the split mode is
+    inherited from the enclosing pl.split_aiv scope, which only exists during a
+    @pl.program parse, so they cannot be constructed eagerly."""
+    span = ir.Span.unknown()
+    tile = pl.Tile(expr=ir.Var("t", ir.TileType([16, 128], DataType.FP32), span))
+
+    with pytest.raises(RuntimeError, match="pl.split_aiv"):
+        pl.aiv_shard(tile)
+
+    with pytest.raises(RuntimeError, match="pl.split_aiv"):
+        pl.aic_gather(tile)
 
 
 def test_mixed_kernel_expanded_property():

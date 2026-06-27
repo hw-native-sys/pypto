@@ -83,6 +83,95 @@ using tpop_tfree::FinalizeTpopTfrees;
 const auto& FlattenBody = transform_utils::FlattenToStmts;
 
 // ============================================================================
+// Explicit split-reshape op helpers (tile.aiv_shard / tile.aic_gather)
+// ============================================================================
+//
+// These ops are folded into ExpandMixedKernel's cross-core boundary machinery:
+// aiv_shard (cube -> vector, full -> half) becomes a CUBE_TO_VECTOR boundary,
+// aic_gather (vector -> cube, half -> full) a VECTOR_TO_CUBE boundary. The
+// direction is authoritative by op name — both ops keep the input's memory
+// space (set_output_memory_inherit_input), so it cannot be derived from memory.
+
+const std::string* GetSplitReshapeOpName(const CallPtr& call) {
+  if (!call) return nullptr;
+  auto op = std::dynamic_pointer_cast<const Op>(call->op_);
+  if (!op) return nullptr;
+  if (op->name_ == "tile.aiv_shard" || op->name_ == "tile.aic_gather") return &op->name_;
+  return nullptr;
+}
+
+bool IsSplitReshapeOp(const CallPtr& call) { return GetSplitReshapeOpName(call) != nullptr; }
+
+CVDirection SplitReshapeDirection(const std::string& op_name) {
+  // aiv_shard pushes from the cube lane into the vector lane; aic_gather is its
+  // inverse (vector lane pushes into the cube lane).
+  return (op_name == "tile.aiv_shard") ? CVDirection::CUBE_TO_VECTOR : CVDirection::VECTOR_TO_CUBE;
+}
+
+/// Verify no explicit split-reshape op (tile.aiv_shard / tile.aic_gather)
+/// survives in a finalized AIC/AIV body — they must all be folded into
+/// cross-core tpush/tpop boundaries.
+void AssertNoSplitReshapeSurvives(const std::vector<StmtPtr>& stmts, const std::string& func_name) {
+  std::function<void(const std::vector<StmtPtr>&)> walk = [&](const std::vector<StmtPtr>& ss) {
+    for (const auto& stmt : ss) {
+      CallPtr call;
+      if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
+        call = std::dynamic_pointer_cast<const Call>(assign->value_);
+      } else if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
+        call = std::dynamic_pointer_cast<const Call>(eval->expr_);
+      }
+      if (call) {
+        INTERNAL_CHECK_SPAN(!IsSplitReshapeOp(call), call->span_)
+            << "Internal error: explicit split-reshape op survived ExpandMixedKernel in '" << func_name
+            << "' — boundary folding failed to recognise it.";
+      }
+      if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
+        walk(FlattenBody(for_stmt->body_));
+      } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
+        walk(FlattenBody(if_stmt->then_body_));
+        if (if_stmt->else_body_.has_value()) walk(FlattenBody(if_stmt->else_body_.value()));
+      } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
+        walk(FlattenBody(while_stmt->body_));
+      }
+    }
+  };
+  walk(stmts);
+}
+
+// True iff `stmt` binds `var = tile.get_subblock_idx()`. The auto pl.split path
+// (LowerAutoVectorSplit) injects this binding at the top of the mixed body BEFORE
+// ExpandMixedKernel, so it surfaces as the first AIV-lane statement here. The
+// standalone split_aiv path (SplitVectorKernel) injects the identical binding at
+// the very top of the AIV body AFTER the pipe setup already exists — i.e. ABOVE
+// it. To keep the two paths byte-identical we must hoist this binding above the
+// prepended pipe setup here too (see PrependPipeSetupKeepingSubblockIdx).
+bool IsGetSubblockIdxBinding(const StmtPtr& stmt) {
+  auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt);
+  if (!assign) return false;
+  auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
+  if (!call) return false;
+  auto op = std::dynamic_pointer_cast<const Op>(call->op_);
+  return op && op->name_ == "tile.get_subblock_idx";
+}
+
+// Like PrependPipeSetup, but if `body` begins with a get_subblock_idx binding the
+// pipe setup is inserted directly AFTER it, so the subblock-index binding stays at
+// the absolute top of the lane body. This matches the standalone split_aiv
+// (SplitVectorKernel) placement exactly, keeping both paths' .pto byte-identical.
+std::vector<StmtPtr> PrependPipeSetupKeepingSubblockIdx(const std::vector<StmtPtr>& prologue,
+                                                        const std::vector<StmtPtr>& body) {
+  if (prologue.empty() || body.empty() || !IsGetSubblockIdxBinding(body.front())) {
+    return PrependPipeSetup(prologue, body);
+  }
+  std::vector<StmtPtr> result;
+  result.reserve(prologue.size() + body.size());
+  result.push_back(body.front());
+  result.insert(result.end(), prologue.begin(), prologue.end());
+  result.insert(result.end(), body.begin() + 1, body.end());
+  return result;
+}
+
+// ============================================================================
 // Recursive Affinity Analysis
 // ============================================================================
 
@@ -97,7 +186,12 @@ TpopDefs CollectTpopDefs(const std::vector<StmtPtr>& stmts) {
     for (const auto& stmt : ss) {
       if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
         if (auto call = std::dynamic_pointer_cast<const Call>(assign->value_)) {
-          if (op_predicates::IsTPop(call)) {
+          // Treat explicit split-reshape results like tpop results: a follow-on
+          // tile.move that places an aic_gather result for the cube (Vec -> Left)
+          // must NOT be re-detected as a second cross-core boundary — the data
+          // already crosses via the gather's own tpush/tpop, so the move is just
+          // internal cube placement on the consuming lane.
+          if (op_predicates::IsTPop(call) || IsSplitReshapeOp(call)) {
             result[assign->var_.get()] = call;
           }
         }
@@ -198,7 +292,21 @@ void CollectCVBoundaryMoves(const std::vector<StmtPtr>& stmts,
   for (const auto& stmt : stmts) {
     if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
       auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
-      if (call) {
+      // Explicit split-reshape ops are op-driven boundaries. The direction is
+      // authoritative by op name (both sides keep the input memory), the
+      // half/full shape lives in the op result type, and the split axis is
+      // stamped onto the generated tpush/tpop.
+      if (const std::string* reshape_name = GetSplitReshapeOpName(call)) {
+        INTERNAL_CHECK_SPAN(call->args_.size() == 1, call->span_)
+            << "Internal error: " << *reshape_name << " must carry exactly one tile argument, got "
+            << call->args_.size();
+        boundary_moves[stmt.get()] = CVBoundaryMove{SplitReshapeDirection(*reshape_name),
+                                                    assign->var_,
+                                                    call->args_[0],
+                                                    call->GetType(),
+                                                    /*op_driven=*/true,
+                                                    call->GetKwarg<int>("split", 0)};
+      } else if (call) {
         auto dir = ClassifyMoveDirection(call);
         if (dir != CVDirection::NONE) {
           INTERNAL_CHECK_SPAN(!call->args_.empty(), call->span_)
@@ -234,10 +342,12 @@ void CollectCVBoundaryMoves(const std::vector<StmtPtr>& stmts,
 // TPUSH / TPOP creation helpers
 // ============================================================================
 
-std::vector<std::pair<std::string, std::any>> MakeSplitKwargs() { return {{"split", std::any(0)}}; }
+std::vector<std::pair<std::string, std::any>> MakeSplitKwargs(int split = 0) {
+  return {{"split", std::any(split)}};
+}
 
-CallPtr CreateTpush(const std::string& op_name, const ExprPtr& tile, const Span& span) {
-  return OpRegistry::GetInstance().Create(op_name, {tile}, MakeSplitKwargs(), span);
+CallPtr CreateTpush(const std::string& op_name, const ExprPtr& tile, const Span& span, int split = 0) {
+  return OpRegistry::GetInstance().Create(op_name, {tile}, MakeSplitKwargs(split), span);
 }
 
 CallPtr CreateTpop(const std::string& op_name, const TypePtr& result_type, const Span& span,
@@ -584,6 +694,13 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
     if (bm_it != boundary_moves.end()) {
       {
         const auto& bm = bm_it->second;
+        // The cross-core transfer memory FOR THIS SIDE: AIC drains into Mat,
+        // AIV into Vec. Op-driven boundaries (aiv_shard / aic_gather) keep the
+        // input memory on both sides, so the fractal view and tpop type must
+        // key off this transfer memory rather than the op's inherited result
+        // memory (which is Vec on both lanes).
+        const MemorySpace xfer_ms = GetBoundaryTpopMemory(side);
+        const int op_split = bm.op_driven ? bm.split : 0;
         if (bm.direction == push_direction) {
           ExprPtr push_source = bm.source_tile;
           // AIV V->C push: insert tile.move (tmov) to adapt the source into
@@ -592,16 +709,27 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
           // On Ascend910B: don't need to adapt layout! push/pop will be ub -> gm -> mat, ub -> gm can
           // directly use nd
           if (side == CoreSide::AIV && handler->RequiresVtoCFractalAdapt()) {
-            auto push_dest_type = std::dynamic_pointer_cast<const TileType>(bm.dest_var->GetType());
-            INTERNAL_CHECK_SPAN(push_dest_type && push_dest_type->memory_space_.has_value(), stmt->span_)
-                << "Boundary move destination must have TileType and MemSpace";
-
-            auto fractal_view = BuildCrossCoreTransferView(
-                push_dest_type->memory_space_.value(),  // NOLINT(bugprone-unchecked-optional-access)
-                tile_view_semantics::GetEffectiveTileView(*push_dest_type));
-
             auto src_type = std::dynamic_pointer_cast<const TileType>(bm.source_tile->GetType());
             INTERNAL_CHECK_SPAN(src_type, stmt->span_) << "V->C tpush source must have TileType";
+            // For op-driven boundaries the cube-side transfer memory is Mat
+            // (aic_gather gathers into Mat); the fractal adapter keys off it and
+            // off the half source's own view. For tile.move boundaries the
+            // destination is the cube tile itself (Mat/Left/Right), so key off
+            // its memory and view as before.
+            TileView fractal_view;
+            if (bm.op_driven) {
+              fractal_view = BuildCrossCoreTransferView(
+                  GetBoundaryTpopMemory(CoreSide::AIC),  // cube-side transfer memory (Mat)
+                  tile_view_semantics::GetEffectiveTileView(*src_type));
+            } else {
+              auto push_dest_type = std::dynamic_pointer_cast<const TileType>(bm.dest_var->GetType());
+              INTERNAL_CHECK_SPAN(push_dest_type && push_dest_type->memory_space_.has_value(), stmt->span_)
+                  << "Boundary move destination must have TileType and MemSpace";
+              fractal_view = BuildCrossCoreTransferView(
+                  push_dest_type->memory_space_.value(),  // NOLINT(bugprone-unchecked-optional-access)
+                  tile_view_semantics::GetEffectiveTileView(*push_dest_type));
+            }
+
             auto tmov_type = std::make_shared<TileType>(src_type->shape_, src_type->dtype_, std::nullopt,
                                                         fractal_view, MemorySpace::Vec);
             std::string src_name = "tile";
@@ -614,17 +742,45 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
             result.push_back(std::make_shared<AssignStmt>(tmov_var, tmov_call, stmt->span_));
             push_source = tmov_var;
           }
-          result.push_back(
-              std::make_shared<EvalStmt>(CreateTpush(push_op, push_source, stmt->span_), stmt->span_));
+          result.push_back(std::make_shared<EvalStmt>(
+              CreateTpush(push_op, push_source, stmt->span_, op_split), stmt->span_));
         } else {
-          auto dest_tile_type = std::dynamic_pointer_cast<const TileType>(bm.dest_var->GetType());
-          INTERNAL_CHECK_SPAN(dest_tile_type && dest_tile_type->memory_space_.has_value(), stmt->span_)
-              << "Boundary move destination must have TileType and MemSpace";
-          auto tpop_type = BuildBoundaryTpopType(side, bm.dest_var->GetType());
-          auto fractal_view = BuildCrossCoreTransferView(
-              dest_tile_type->memory_space_.value(),  // NOLINT(bugprone-unchecked-optional-access)
-              tile_view_semantics::GetEffectiveTileView(*dest_tile_type));
-          bool needs_post_move = NeedsPostTpopMove(side, *dest_tile_type);
+          // Op-driven pop: the half/full shape comes from the op result type and
+          // the memory from this side's transfer memory; the explicit follow-on
+          // tile.move owns any cube placement, so no synthesized post-tpop move.
+          // tile.move boundaries instead carry their destination memory on
+          // dest_var and may need a post-tpop move to that memory.
+          TypePtr shape_source = bm.op_driven ? bm.result_type : bm.dest_var->GetType();
+          auto shape_tt = std::dynamic_pointer_cast<const TileType>(shape_source);
+          INTERNAL_CHECK_SPAN(shape_tt, stmt->span_) << "Boundary pop requires a TileType result/destination";
+          MemorySpace view_ms;
+          bool needs_post_move = false;
+          if (bm.op_driven) {
+            view_ms = xfer_ms;
+          } else {
+            INTERNAL_CHECK_SPAN(shape_tt->memory_space_.has_value(), stmt->span_)
+                << "Boundary move destination must have TileType and MemSpace";
+            view_ms = shape_tt->memory_space_.value();  // NOLINT(bugprone-unchecked-optional-access)
+            needs_post_move = NeedsPostTpopMove(side, *shape_tt);
+          }
+          auto tpop_type = BuildBoundaryTpopType(side, shape_source);
+          // Consumer-side transfer view. For op-driven boundaries the cross-core
+          // data lands in a FRESH transfer tile of this side's memory (Vec on
+          // AIV, Mat on AIC) — exactly like a plain move-boundary destination —
+          // so the layout must be the implicit view of the transfer memory, NOT
+          // the split-reshape op result's input-inherited (cube) layout. This is
+          // what SplitVectorKernel's RebuildTpopWithHalvedShape preserves on the
+          // OFF path; keying off the op result here would print a divergent
+          // col_major/row_major Vec tpop. The op deducer's reshaped valid_shape
+          // is kept so per-lane valid extents survive.
+          TileView boundary_view;
+          if (bm.op_driven) {
+            boundary_view = tile_view_semantics::GetImplicitTileView(shape_tt->shape_, view_ms);
+            boundary_view.valid_shape = tile_view_semantics::GetEffectiveTileView(*shape_tt).valid_shape;
+          } else {
+            boundary_view = tile_view_semantics::GetEffectiveTileView(*shape_tt);
+          }
+          auto fractal_view = BuildCrossCoreTransferView(view_ms, boundary_view);
           std::string tpop_name = needs_post_move ? BuildBoundaryTpopName(side, bm.dest_var->name_hint_)
                                                   : bm.dest_var->name_hint_;
           auto tt = std::dynamic_pointer_cast<const TileType>(tpop_type);
@@ -634,16 +790,23 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
           if (!needs_post_move) {
             tpop_var_remap[bm.dest_var.get()] = tpop_var;
           }
-          if (auto source_var = std::dynamic_pointer_cast<const Var>(bm.source_tile)) {
-            tpop_var_remap[source_var.get()] = tpop_var;
+          // Op-driven boundaries reuse the op's source on the producer lane only;
+          // do NOT alias the source Var to the tpop result on the consumer lane
+          // (the source is the cross-lane half/full, not a renamed copy).
+          if (!bm.op_driven) {
+            if (auto source_var = std::dynamic_pointer_cast<const Var>(bm.source_tile)) {
+              tpop_var_remap[source_var.get()] = tpop_var;
+            }
           }
           tpop_var_remap[tpop_var.get()] = tpop_var;
-          // Boundary-generated tpops carry no kwargs by default — kwargs like
-          // `split=1` are added later by passes such as SplitVectorKernel.
+          // tile.move boundary tpops carry no split kwarg here (assigned later by
+          // SplitVectorKernel); op-driven tpops stamp the op's split now.
+          auto pop_kwargs =
+              bm.op_driven ? MakeSplitKwargs(op_split) : std::vector<std::pair<std::string, std::any>>{};
           result.push_back(std::make_shared<AssignStmt>(
-              tpop_var, CreateTpop(pop_op, tpop_result_type, stmt->span_, /*kwargs=*/{}), stmt->span_));
+              tpop_var, CreateTpop(pop_op, tpop_result_type, stmt->span_, pop_kwargs), stmt->span_));
           if (needs_post_move) {
-            auto target_memory = dest_tile_type->memory_space_;
+            auto target_memory = shape_tt->memory_space_;
             INTERNAL_CHECK_SPAN(target_memory.has_value(), stmt->span_)
                 << "Boundary move destination must have memory_space before post-tpop move emission";
             result.push_back(std::make_shared<AssignStmt>(
@@ -891,6 +1054,12 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
       FinalizeTpopTfrees(FinalizeSplitCoreBody(aiv_stmts, original_def_map, remap_keys(aiv_tpop_remap)),
                          CoreSide::AIV, aiv_tpop_remap);
 
+  // Every explicit split-reshape op must have been folded into a cross-core
+  // tpush/tpop boundary on both lanes. A survivor means the boundary machinery
+  // failed to recognise it — fail loudly here, not later in codegen.
+  AssertNoSplitReshapeSurvives(aic_final, func->name_ + "_aic");
+  AssertNoSplitReshapeSurvives(aiv_final, func->name_ + "_aiv");
+
   const std::string aic_name = func->name_ + "_aic";
   const std::string aiv_name = func->name_ + "_aiv";
   // Cross-core ring depth from pl.split(mode, slot_num=N), propagated as a
@@ -900,7 +1069,10 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
   auto automatic_pipe_setup = BuildAutomaticPipeSetup(func->name_, aic_name, aiv_name, aic_final, aiv_final,
                                                       slot_num_override, func->span_);
   aic_final = PrependPipeSetup(automatic_pipe_setup.aic_stmts, aic_final);
-  aiv_final = PrependPipeSetup(automatic_pipe_setup.aiv_stmts, aiv_final);
+  // Keep a leading get_subblock_idx binding (injected by the auto pl.split
+  // LowerAutoVectorSplit path) above the pipe setup, matching the standalone
+  // split_aiv SplitVectorKernel placement for byte-identical output.
+  aiv_final = PrependPipeSetupKeepingSubblockIdx(automatic_pipe_setup.aiv_stmts, aiv_final);
 
   // Helper to create fresh params and build a DeepClone var_map
   auto make_param_map = [&]() {

@@ -4,7 +4,7 @@
 
 `AutoDeriveTaskDependencies` derives conservative task-to-task dependency
 edges inside AUTO runtime scopes when explicitly enabled. It runs after
-[`DeriveCallDirections`](35-derive_call_directions.md), reads the resolved
+[`DeriveCallDirections`](36-derive_call_directions.md), reads the resolved
 `Call.attrs["arg_directions"]`, and writes compiler-owned producer TaskId
 edges to `Call.attrs["compiler_manual_dep_edges"]`.
 

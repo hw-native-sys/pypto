@@ -80,6 +80,7 @@
 | **ManualDepsOnSubmitOnly** | ManualDepsOnSubmitOnly | 任何普通跨函数 `Call`（GlobalVar callee）都不得携带 `attrs["manual_dep_edges"]`——手动依赖边只存在于类型化的 `Submit::deps_` 字段中。Op call（`system.task_dummy`）作为 codegen fanin 契约保留该 attr，属于豁免。 |
 | **OrchestrationReferencesResolved** | OrchestrationReferencesResolved | `FunctionType::Orchestration` 函数体内每一个非 builtin Call 必须对应到 Program 中存在的 Function。取代 codegen 端原本在生成时抛错的 `ValidateOrchestrationReferences` 遍历。 |
 | **AssignTypeSymmetry** | AssignTypeSymmetry | 每个 `AssignStmt(var, value)` 满足 `structural_equal(var.type, value.type)`。覆盖 dtype、shape 以及 tile_view/tensor_view；此外比较 TileType 的 `memory_space`（TensorType 没有 `memory_space`）和 DistributedTensorType 的 `window_buffer`；元组赋值逐元素递归比较。**不包含** `memref_`——`structural_equal` 将其视为绑定在 Var 上的内存分配细节，由 `HasMemRefs` / `AllocatedMemoryAddr` 负责。用于捕获只修改赋值一侧类型的 Pass（例如 #1262 的 TileType memory_space、#1278 的 tile_view）。已在 `PropertyVerifierRegistry` 注册，但尚未加入 `GetStructuralProperties()`——可通过 `PropertyVerifierRegistry::verify` 或将该属性加入 `VerificationInstrument` 按需运行。 |
+| **AivSplitValid** | AivSplitValid | 携带显式 `split_aiv` 标记且具有非 None split 模式的 AIV/AIC 函数，其函数体不得包含在**切分轴**上做归约的向量归约算子（`tile.row_*` / `tile.col_*` / `tile.sum` / `tile.max` / `tile.min`）。切分后每个 AIV lane 只持有半块 tile，对切分轴归约会得到部分结果——这是一个错误编译。AUTO `SplitVectorKernel` 路径在逐算子折半时内联拒绝此情况；而显式 `split_aiv` 路径会绕过该重写，因此本验证器填补了这一缺口。**由** `SplitVectorKernel` **产生**并列入 `GetVerifiedProperties()`，因此 `PassPipeline` 在该 Pass 之后立即自动验证——正是内联抛错本会触发的程序点。`split_aiv` 门控将检查精确限定在被绕过的子集；AUTO 路径已保证干净。归约算子是带非空 `op_` 的普通 `Call`；`Submit` 会被正确跳过。**修复方式**：在非切分轴上归约，或在归约前先用 `tile.aic_gather` 将各 lane 汇聚回完整 tile。 |
 
 ### SSAVerify
 
@@ -169,7 +170,7 @@
 | ---- | ------ | ---- |
 | `GetStructuralProperties()` | `{TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly}` | 由 `VerificationInstrument` 在每个 Pass 执行前后验证的不变量（与 `GetVerifiedProperties()` 共有的子集还会在流水线启动时验证） |
 | `GetDefaultVerifyProperties()` | `{SSAForm, TypeChecked, NoNestedCalls, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, TileTypeCoherence, ArrayNotEscaped}` | `run_verifier()` 的默认属性集 |
-| `GetVerifiedProperties()` | `{SSAForm, TypeChecked, MixedKernelExpanded, AllocatedMemoryAddr, BreakContinueValid, NoRedundantBlocks, InOutUseValid, CallDirectionsResolved, ManualDepsOnSubmitOnly, ReturnParamsExplicit}` | `PassPipeline` 自动验证的轻量级属性集 |
+| `GetVerifiedProperties()` | `{SSAForm, TypeChecked, MixedKernelExpanded, AllocatedMemoryAddr, BreakContinueValid, NoRedundantBlocks, InOutUseValid, CallDirectionsResolved, ManualDepsOnSubmitOnly, ReturnParamsExplicit, AivSplitValid}` | `PassPipeline` 自动验证的轻量级属性集 |
 
 ### RunVerifier Pass 工厂
 

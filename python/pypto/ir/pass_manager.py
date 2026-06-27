@@ -148,6 +148,13 @@ class PassManager:
             ("InferTileMemorySpace", lambda: passes.infer_tile_memory_space()),
             ("LowerTransposeLoadParamLayout", lambda: passes.lower_transpose_load_param_layout()),
             ("ResolveBackendOpLayouts", lambda: passes.resolve_backend_op_layouts()),
+            # RFC #1300: convert AUTO pl.split mixed InCore functions into the explicit
+            # split_aiv form (aiv_shard/aic_gather + halved vector sub-region) so
+            # ExpandMixedKernel folds them into split-stamped tpush/tpop uniformly. This
+            # is the live auto-split lowering path; after it runs every split function
+            # reaches SplitVectorKernel already split_aiv-marked, so SplitVectorKernel
+            # only stamps attrs. Runs immediately before ExpandMixedKernel.
+            ("LowerAutoVectorSplit", lambda: passes.lower_auto_vector_split()),
             ("ExpandMixedKernel", lambda: passes.expand_mixed_kernel()),
             ("InjectGMPipeBuffer", lambda: passes.inject_gm_pipe_buffer()),
             ("SplitVectorKernel", lambda: passes.split_vector_kernel()),
@@ -224,7 +231,10 @@ class PassManager:
         """
         if not cls._strategy_passes:
             cls._register_passes()
-        return cls(strategy, analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps)
+        return cls(
+            strategy,
+            analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
+        )
 
     def __init__(
         self,

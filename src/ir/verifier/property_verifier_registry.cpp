@@ -50,6 +50,7 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   Register(IRProperty::HasMemRefs, CreateHasMemRefsPropertyVerifier);
   Register(IRProperty::IncoreTileOps, CreateIncoreTileOpsPropertyVerifier);
   Register(IRProperty::MixedKernelExpanded, CreateMixedKernelExpandedPropertyVerifier);
+  Register(IRProperty::AivSplitValid, CreateAivSplitValidPropertyVerifier);
   Register(IRProperty::AllocatedMemoryAddr, CreateAllocatedMemoryAddrPropertyVerifier);
   Register(IRProperty::TileOps2D, CreateTileOps2DPropertyVerifier);
   Register(IRProperty::TileMemoryInferred, CreateTileMemoryInferredPropertyVerifier);

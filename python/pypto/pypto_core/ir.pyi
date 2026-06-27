@@ -3318,6 +3318,21 @@ class IRBuilder:
                 auto dependency tracking. Must be None for other scope kinds.
         """
 
+    def mark_current_scope_split_aiv(self, split: SplitMode) -> None:
+        """Stamp the explicit AIV-split marker onto the currently-open scope.
+
+        Sets the enclosing open InCore scope's split mode to ``split`` and
+        appends a ``("split_aiv", True)`` attr. Used by the parser to flatten a
+        ``for aiv_id in pl.split_aiv(...)`` loop nested inside a CORE_GROUP
+        InCore scope (the body is emitted inline, with no nested sub-scope).
+
+        Args:
+            split: Split mode declared by ``pl.split_aiv(..., mode=...)``
+
+        Raises:
+            ValueError: If the current context is not an open InCore scope.
+        """
+
     def end_scope(self, end_span: Span) -> ScopeStmt:
         """End building a scope statement.
 

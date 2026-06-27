@@ -45,6 +45,15 @@ struct CVBoundaryMove {
   VarPtr dest_var;
   ExprPtr source_tile;
   TypePtr result_type;
+  // True when this boundary originates from an explicit split-reshape op
+  // (tile.aiv_shard / tile.aic_gather) rather than a cross-C/V tile.move. The
+  // op already encodes the half/full shape in result_type and the cross-core
+  // fractal/post-move behaviour differs (see ExpandMixedKernel's boundary arm).
+  bool op_driven = false;
+  // Split axis carried by the originating op (1 = UP_DOWN/axis0,
+  // 2 = LEFT_RIGHT/axis1). Stamped onto the generated tpush/tpop. 0 for
+  // tile.move boundaries (split assigned later by SplitVectorKernel).
+  int split = 0;
 };
 
 }  // namespace core_affinity

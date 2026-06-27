@@ -91,6 +91,15 @@ CoreAffinity ClassifyCallAffinity(const CallPtr& call) {
     return (ms && IsCubeMemorySpace(*ms)) ? CoreAffinity::CUBE : CoreAffinity::VECTOR;
   }
 
+  // 2b. Explicit split-reshape ops are cross-C/V boundaries (the data crosses
+  // the cube/vector divide as a tpush on the producer plus a tpop on the
+  // consumer), so they roll up as MIXED exactly like a boundary tile.move.
+  // ExpandMixedKernel's boundary arm folds them into tpush/tpop with the
+  // op-driven fractal/post-move rules. aiv_shard = C->V, aic_gather = V->C.
+  if (op->name_ == "tile.aiv_shard" || op->name_ == "tile.aic_gather") {
+    return CoreAffinity::MIXED;
+  }
+
   // 3. Output memory — set_output_memory(...) / set_output_memory_from_kwarg(...).
   // Covers matmul family (Acc -> CUBE), vector elementwise (Vec -> VECTOR),
   // tile.load / tile.full / tile.create target_memory dispatch, and so on.

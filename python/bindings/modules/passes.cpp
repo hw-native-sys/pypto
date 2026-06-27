@@ -108,7 +108,10 @@ void BindPass(nb::module_& m) {
              "exempt")
       .value("ReturnParamsExplicit", IRProperty::ReturnParamsExplicit,
              "InCore/Group/Spmd tensor returns reference function params by pointer identity, so the "
-             "return->param map is a lookup (#1702)");
+             "return->param map is a lookup (#1702)")
+      .value("AivSplitValid", IRProperty::AivSplitValid,
+             "Split-mode AIV/AIC functions (explicit split_aiv marker + non-None split mode) have no "
+             "vector reduce op that collapses the split axis (partial-reduction miscompile)");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");
@@ -475,6 +478,11 @@ void BindPass(nb::module_& m) {
              "into `[1,N]` row-major views before the consumer and reshaping the output back when needed.");
   passes.def("expand_mixed_kernel", &pass::ExpandMixedKernel,
              "Create a pass that expands mixed InCore functions into AIC + AIV + Group");
+  passes.def("lower_auto_vector_split", &pass::LowerAutoVectorSplit,
+             "Create a pass that lowers AUTO pl.split mixed InCore functions into the explicit\n"
+             "split_aiv form (tile.aiv_shard at C->V, tile.aic_gather at V->C, halved vector\n"
+             "sub-region, get_subblock_idx) BEFORE ExpandMixedKernel. This is the live auto-split\n"
+             "lowering path; SplitVectorKernel then only stamps attrs for the split_aiv functions.");
   passes.def("inject_gm_pipe_buffer", &pass::InjectGMPipeBuffer,
              "Create a backend-gated pass that injects the __gm_pipe_buffer workspace parameter\n"
              "into functions containing cross-core initialize_pipe ops, propagating the parameter\n"

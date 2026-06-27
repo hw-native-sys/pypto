@@ -368,6 +368,19 @@ class IRBuilder:
 
     # ========== Single-line Methods with Optional Explicit Span ==========
 
+    def mark_current_scope_split_aiv(self, split: ir.SplitMode) -> None:
+        """Stamp the explicit AIV-split marker onto the currently-open scope.
+
+        Sets the enclosing open InCore scope's split mode to ``split`` and
+        appends a ``("split_aiv", True)`` attr. Used by the parser to flatten a
+        ``for aiv_id in pl.split_aiv(...)`` loop nested inside a CORE_GROUP
+        InCore scope, emitting the body inline with no nested sub-scope.
+
+        Args:
+            split: Split mode declared by ``pl.split_aiv(..., mode=...)``.
+        """
+        self._builder.mark_current_scope_split_aiv(split)
+
     def var(self, name: str, type: ir.Type, span: ir.Span | None = None) -> ir.Var:
         """Create a variable with span from call site or explicit span.
 

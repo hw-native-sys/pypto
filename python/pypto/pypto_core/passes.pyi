@@ -53,6 +53,7 @@ class IRProperty(Enum):
     AssignTypeSymmetry = ...
     ManualDepsOnSubmitOnly = ...
     ReturnParamsExplicit = ...
+    AivSplitValid = ...
 
 class IRPropertySet:
     """A set of IR properties backed by a bitset."""
@@ -514,6 +515,19 @@ def resolve_backend_op_layouts() -> Pass:
 def expand_mixed_kernel() -> Pass:
     """Create a pass that expands mixed InCore functions into AIC + AIV + Group."""
 
+def lower_auto_vector_split() -> Pass:
+    """Lower AUTO ``pl.split`` mixed InCore functions into the explicit ``split_aiv`` form.
+
+    Inserts ``tile.aiv_shard`` at C->V boundaries and ``tile.aic_gather`` at V->C
+    boundaries, halves only the vector sub-region (affinity-gated), injects
+    ``get_subblock_idx``, and stamps ``split`` + ``split_aiv`` — all BEFORE
+    ExpandMixedKernel folds the reshape ops into split-stamped tpush/tpop.
+
+    This is the live auto-split lowering path: it always runs immediately before
+    ExpandMixedKernel, so SplitVectorKernel only stamps attrs for the resulting
+    ``split_aiv`` functions.
+    """
+
 def inject_gm_pipe_buffer() -> Pass:
     """Create a backend-gated pass that injects ``__gm_pipe_buffer`` for cross-core pipes.
 
@@ -799,6 +813,7 @@ __all__ = [
     "resolve_backend_op_layouts",
     "normalize_return_order",
     "expand_mixed_kernel",
+    "lower_auto_vector_split",
     "inject_gm_pipe_buffer",
     "split_vector_kernel",
     "simplify",

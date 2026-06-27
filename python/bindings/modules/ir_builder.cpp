@@ -276,6 +276,16 @@ void BindIRBuilder(nb::module_& m) {
           "        ``Call``.\n\n"
           "Raises:\n"
           "    RuntimeError: If not inside a function or loop")
+      .def("mark_current_scope_split_aiv", &IRBuilder::MarkCurrentScopeSplitAiv, nb::arg("split"),
+           "Stamp the explicit AIV-split marker onto the currently-open scope.\n\n"
+           "Sets the enclosing open InCore scope's split mode to ``split`` and\n"
+           "appends a ``(\"split_aiv\", True)`` attr. Used by the parser to flatten\n"
+           "a ``for aiv_id in pl.split_aiv(...)`` loop nested inside a CORE_GROUP\n"
+           "InCore scope (the body is then emitted inline, no nested sub-scope).\n\n"
+           "Args:\n"
+           "    split: Split mode declared by pl.split_aiv(..., mode=...)\n\n"
+           "Raises:\n"
+           "    ValueError: If the current context is not an open InCore scope")
       .def("end_scope", &IRBuilder::EndScope, nb::arg("end_span"),
            "End building a scope statement.\n\n"
            "Finalizes the scope statement and returns it.\n\n"

@@ -77,6 +77,7 @@ enum class IRProperty : uint64_t {
   ReturnParamsExplicit,             ///< InCore/Group/Spmd tensor returns reference function params by
                                     ///< pointer identity, so the return->param map is a lookup (#1702)
   UnrollResolved,                   ///< No ForKind::Unroll survives; produced by UnrollLoops
+  AivSplitValid,                    ///< Split-mode AIV/AIC functions have no vector reduce on the split axis
   kCount                            ///< Sentinel (must be last)
 };
 
@@ -208,8 +209,8 @@ enum class VerificationLevel {
  *
  * Returns {SSAForm, TypeChecked, MixedKernelExpanded, AllocatedMemoryAddr,
  * BreakContinueValid, NoRedundantBlocks, InOutUseValid,
- * CallDirectionsResolved, ManualDepsOnSubmitOnly} — lightweight checks that
- * catch the most common IR errors.
+ * CallDirectionsResolved, ManualDepsOnSubmitOnly, ReturnParamsExplicit,
+ * AivSplitValid} — lightweight checks that catch the most common IR errors.
  */
 const IRPropertySet& GetVerifiedProperties();
 

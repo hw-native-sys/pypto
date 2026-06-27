@@ -147,6 +147,19 @@ PropertyVerifierPtr CreateIncoreTileOpsPropertyVerifier();
 PropertyVerifierPtr CreateMixedKernelExpandedPropertyVerifier();
 
 /**
+ * @brief Factory function for creating AivSplitValid property verifier
+ *
+ * Verifies that no split-mode AIV/AIC function (one carrying the explicit
+ * ``split_aiv`` marker plus a non-None split mode) contains a vector reduce op
+ * that collapses the split axis. Each AIV lane holds only half the tile, so a
+ * reduction over the split axis yields a partial result — a miscompile. The
+ * AUTO SplitVectorKernel path catches this inline; this verifier closes the
+ * gap for the EXPLICIT ``split_aiv`` path, which bypasses that rewrite.
+ * @return Shared pointer to AivSplitValid PropertyVerifier
+ */
+PropertyVerifierPtr CreateAivSplitValidPropertyVerifier();
+
+/**
  * @brief Factory function for creating AllocatedMemoryAddr property verifier
  *
  * Verifies that all non-DDR MemRefs have valid allocated addresses and

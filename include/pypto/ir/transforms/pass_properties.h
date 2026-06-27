@@ -196,6 +196,20 @@ inline const PassProperties kResolveBackendOpLayoutsProperties{
     .produced = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::SplitIncoreOrch,
                  IRProperty::TileOps2D, IRProperty::NormalizedStmtStructure}};
 
+// -- Auto vector-split lowering pass (RFC #1300; live, always-on) --------------
+//
+// Converts AUTO pl.split mixed InCore functions into the explicit split_aiv form
+// (aiv_shard / aic_gather + halved vector sub-region) BEFORE ExpandMixedKernel.
+// Runs unconditionally in the Default strategy. Same pre/post properties as
+// ExpandMixedKernel's required set: it rewrites the still-mixed InCore body in
+// place without changing the structural property set (and is a no-op for
+// functions with no split mode or already in explicit split_aiv form).
+inline const PassProperties kLowerAutoVectorSplitProperties{
+    .required = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::SplitIncoreOrch,
+                 IRProperty::TileOps2D, IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure},
+    .produced = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::SplitIncoreOrch,
+                 IRProperty::TileOps2D, IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure}};
+
 // -- Mixed kernel expansion pass ----------------------------------------------
 
 inline const PassProperties kExpandMixedKernelProperties{
@@ -213,7 +227,8 @@ inline const PassProperties kInjectGMPipeBufferProperties{
 
 inline const PassProperties kSplitVectorKernelProperties{
     .required = {IRProperty::SSAForm, IRProperty::MixedKernelExpanded},
-    .produced = {IRProperty::SSAForm, IRProperty::VectorKernelSplit, IRProperty::NormalizedStmtStructure}};
+    .produced = {IRProperty::SSAForm, IRProperty::VectorKernelSplit, IRProperty::AivSplitValid,
+                 IRProperty::NormalizedStmtStructure}};
 
 // -- Memory / codegen passes --------------------------------------------------
 

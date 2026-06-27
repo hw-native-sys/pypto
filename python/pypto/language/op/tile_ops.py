@@ -33,6 +33,8 @@ __all__ = [
     "scatter_update",
     "concat",
     "move",
+    "aiv_shard",
+    "aic_gather",
     "full",
     "ci",
     "arange",
@@ -158,7 +160,15 @@ from pypto.ir.op import tile_ops as _ir_ops
 from pypto.ir.utils import _get_span_or_capture, _normalize_expr
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import AtomicType, Expr, MemorySpace, PadValue, PtrType, TileLayout
+from pypto.pypto_core.ir import (
+    AtomicType,
+    Expr,
+    MemorySpace,
+    PadValue,
+    PtrType,
+    Span,
+    TileLayout,
+)
 
 from ..typing import IntLike, Scalar, Tensor, Tile
 from .system_ops import (  # noqa: F401
@@ -551,6 +561,50 @@ def move(
     """
     call_expr = _ir_ops.move(tile.unwrap(), target_memory, blayout=blayout, slayout=slayout)
     return Tile(expr=call_expr)
+
+
+def aiv_shard(tile: Tile, span: Span | None = None) -> Tile:
+    """Shard a 2D tile into half along the split axis (full -> half).
+
+    The split mode is **inherited** from the enclosing
+    ``for aiv_id in pl.split_aiv(mode=...)`` scope — it is not passed here.
+    This wrapper therefore only resolves inside a ``@pl.program`` parse, where
+    the parser intercepts the call and fills the inherited mode. Calling it
+    eagerly (outside a parsed program) raises, since there is no scope to read
+    the mode from.
+
+    Args:
+        tile: Input tile (2D)
+        span: Optional source span
+
+    Returns:
+        Tile with the split axis halved.
+    """
+    raise RuntimeError(
+        "pl.aiv_shard must be used inside a @pl.program 'for aiv_id in pl.split_aiv(...)' "
+        "loop, which supplies the split mode"
+    )
+
+
+def aic_gather(tile: Tile, span: Span | None = None) -> Tile:
+    """Gather a 2D tile into full along the split axis (half -> full).
+
+    Inverse of :func:`aiv_shard`. Like :func:`aiv_shard`, the split mode is
+    **inherited** from the enclosing ``for aiv_id in pl.split_aiv(mode=...)``
+    scope and must not be passed here. Calling it eagerly (outside a parsed
+    ``@pl.program``) raises, since there is no scope to read the mode from.
+
+    Args:
+        tile: Input tile (2D)
+        span: Optional source span
+
+    Returns:
+        Tile with the split axis doubled.
+    """
+    raise RuntimeError(
+        "pl.aic_gather must be used inside a @pl.program 'for aiv_id in pl.split_aiv(...)' "
+        "loop, which supplies the split mode"
+    )
 
 
 def full(shape: list[int], dtype: DataType, value: int | float) -> Tile:

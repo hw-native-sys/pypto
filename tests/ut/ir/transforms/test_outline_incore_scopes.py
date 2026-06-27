@@ -1470,6 +1470,44 @@ class TestOutlineNoDepArgs:
             f"expected InOut at outlined callee param {k_cache_idx}, got {list(outlined.param_directions)}"
         )
 
+    def test_outline_propagates_split_aiv_attr(self):
+        """A pl.split_aiv InCore scope carries split + split_aiv onto the outlined function.
+
+        OutlineIncoreScopes must propagate the manual AIV-split marker
+        (``split_aiv``) — not just the ``split`` mode — so the downstream
+        SplitVectorKernel bypass can find it on the
+        outlined function.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                b: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                    offset = aiv_id * 128
+                    tile_a: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
+                    tile_b: pl.Tile[[128, 128], pl.FP32] = pl.load(b, [offset, 0], [128, 128])
+                    out = pl.store(pl.add(tile_a, tile_b), [offset, 0], out)
+                return out
+
+        # Use BEFORE_AND_AFTER property verification (not the default `roundtrip`
+        # level): the python printer does not yet emit the InCoreScopeStmt
+        # `split_aiv` marker, so a print->parse roundtrip of a split_aiv program
+        # spuriously fails on the scope's attrs. That printer gap is unrelated to
+        # the outliner propagation this test exercises.
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+            Before = passes.convert_to_ssa()(Before)
+            After = passes.outline_incore_scopes()(Before)
+
+        outlined = next(f for gv, f in After.functions.items() if f.func_type == ir.FunctionType.InCore)
+        assert outlined.attrs["split"] == pl.SplitMode.UP_DOWN.value
+        assert outlined.attrs["split_aiv"] is True
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

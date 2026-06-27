@@ -317,6 +317,23 @@ class IRBuilder {
    */
   StmtPtr EndScope(const Span& end_span);
 
+  /**
+   * @brief Stamp the explicit AIV-split marker onto the currently-open scope.
+   *
+   * Used by the parser to flatten a ``for aiv_id in pl.split_aiv(...)`` loop
+   * that is already nested inside an InCore (CORE_GROUP) scope: instead of
+   * opening a nested InCore sub-scope (which OutlineIncoreScopes would outline
+   * as a separate tile-I/O sub-function and break ConvertTensorToTileOps /
+   * InferTileMemorySpace), the loop's split mode and ``("split_aiv", true)``
+   * attr are stamped directly onto the enclosing InCore scope and the body is
+   * emitted inline. Sets ``split_`` to ``split`` and appends the
+   * ``("split_aiv", true)`` attr on the current scope context.
+   *
+   * @param split The split mode declared by ``pl.split_aiv(..., mode=...)``
+   * @throws ValueError if the current context is not an open InCore scope
+   */
+  void MarkCurrentScopeSplitAiv(SplitMode split);
+
   // ========== Statement Recording ==========
 
   /**
@@ -748,6 +765,8 @@ class ScopeContext : public BuildContext {
   [[nodiscard]] std::optional<Level> GetLevel() const { return level_; }
   [[nodiscard]] std::optional<Role> GetRole() const { return role_; }
   [[nodiscard]] std::optional<SplitMode> GetSplit() const { return split_; }
+  void SetSplit(std::optional<SplitMode> split) { split_ = split; }
+  void AddAttr(std::pair<std::string, std::any> attr) { attrs_.push_back(std::move(attr)); }
   [[nodiscard]] const std::string& GetNameHint() const { return name_hint_; }
   [[nodiscard]] const ExprPtr& GetCoreNum() const { return core_num_; }
   [[nodiscard]] std::optional<bool> GetSyncStart() const { return sync_start_; }

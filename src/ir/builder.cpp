@@ -306,6 +306,21 @@ void IRBuilder::BeginScope(ScopeKind scope_kind, const Span& span, std::optional
                                                           sync_start, manual, std::move(attrs)));
 }
 
+void IRBuilder::MarkCurrentScopeSplitAiv(SplitMode split) {
+  CHECK(!context_stack_.empty() && CurrentContext()->GetType() == BuildContext::Type::SCOPE)
+      << "pl.split_aiv must appear directly inside a pl.at(...) scope (e.g. "
+         "'with pl.at(level=pl.Level.CORE_GROUP): ... for aiv_id in pl.split_aiv(2, mode=...)'), "
+         "not nested within an intervening loop or conditional.";
+  auto* scope_ctx = static_cast<ScopeContext*>(CurrentContext());
+  CHECK(scope_ctx->GetScopeKind() == ScopeKind::InCore)
+      << "pl.split_aiv must appear directly inside a pl.at(...) InCore scope, but the enclosing "
+         "open scope is "
+      << ScopeKindToString(scope_ctx->GetScopeKind())
+      << ". Place the split_aiv loop as a direct child of the pl.at(level=pl.Level.CORE_GROUP) scope.";
+  scope_ctx->SetSplit(split);
+  scope_ctx->AddAttr({"split_aiv", true});
+}
+
 StmtPtr IRBuilder::EndScope(const Span& end_span) {
   CHECK(!context_stack_.empty() && CurrentContext()->GetType() == BuildContext::Type::SCOPE)
       << "Cannot end scope: not inside a scope context at " << end_span.to_string();
