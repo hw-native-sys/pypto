@@ -366,6 +366,7 @@ def _make_call_config(
     run_config: RunConfig | None = None,
     *,
     dfx_base: Path | None = None,
+    co_enable_swimlane_dep_gen: bool = True,
 ) -> Any:
     """Build a simpler ``CallConfig`` from the distributed config.
 
@@ -422,12 +423,15 @@ def _make_call_config(
             call_config.enable_dump_tensor = dfx.enable_dump_tensor
             call_config.enable_pmu = dfx.enable_pmu
             # Swimlane needs ``deps.json`` so the converter can resolve task
-            # arrows / kernel names, so co-enable dep_gen whenever swimlane is on.
-            # Single pass: each L3 chip emits both ``l2_swimlane_records.json`` and
-            # ``deps.json`` in one dispatch (dep_gen collection perturbs timing —
-            # the L2 path runs two passes to avoid this; L3 trades that fidelity
-            # for a single dispatch that works uniformly across both entry points).
-            call_config.enable_dep_gen = dfx.enable_dep_gen or dfx.enable_l2_swimlane
+            # arrows / kernel names. The one-shot path runs a clean two-pass
+            # (pass 1 dep_gen → deps.json, pass 2 swimlane → clean records) and
+            # sets ``co_enable_swimlane_dep_gen=False`` on the timing pass so
+            # dep_gen does not perturb it. Everywhere else (the timing-pass-less
+            # single-pass: prepared worker, or sim where conversion is skipped)
+            # co-enable dep_gen so swimlane still has a graph in one dispatch.
+            call_config.enable_dep_gen = dfx.enable_dep_gen or (
+                co_enable_swimlane_dep_gen and dfx.enable_l2_swimlane
+            )
             call_config.enable_scope_stats = dfx.enable_scope_stats
             call_config.enable_l2_swimlane = dfx.enable_l2_swimlane
             # Base dir shared by every chip; ``_submit_chip`` namespaces it per
@@ -597,10 +601,12 @@ def execute_distributed(
             ``ring_dep_pool``) size this dispatch's runtime ring buffers, and its
             runtime-diagnostic DFX flags (``enable_dump_tensor`` / ``enable_pmu``
             / ``enable_dep_gen`` / ``enable_scope_stats`` / ``enable_l2_swimlane``)
-            are written per rank under ``<output_dir>/dfx_outputs/rank{r}/``;
-            swimlane additionally produces ``merged_swimlane_*.json`` per rank
-            (onboard only). The remaining compile-side fields are not consumed on
-            the dispatch path. ``None`` defers every ring field to the runtime and
+            are written per rank under ``<output_dir>/dfx_outputs/rank{r}/``.
+            Onboard, ``enable_l2_swimlane`` runs a clean two-pass dispatch
+            (pass 1 dep_gen → ``deps.json``, pass 2 swimlane → records with
+            unperturbed timing) and additionally produces ``merged_swimlane_*.json``
+            per rank. The remaining compile-side fields are not consumed on the
+            dispatch path. ``None`` defers every ring field to the runtime and
             leaves DFX off.
 
     Returns:
@@ -640,28 +646,64 @@ def execute_distributed(
 
     num_sub = max(dc.num_sub_workers, len(sub_worker_fns))
 
-    # Construct/register/init inside the try so a failure in any setup step still
-    # closes the worker and unlinks the rootinfo temp file — none of these leak.
-    w = None
-    try:
-        w = _construct_worker(dc, compiled.platform, runtime_name, num_sub)
-        sub_ids, chip_cids = _register_callables(w, sub_worker_fns, chip_callables)
-        w.init()
-        timing = _dispatch(
-            w,
-            entry_fn,
-            tensors,
-            chip_cids,
-            sub_ids,
-            _make_call_config(dc, config, dfx_base=output_dir / "dfx_outputs"),
-            len(dc.device_ids),
-        )
-    finally:
-        if w is not None:
-            w.close()
+    def _run_once(call_config: Any) -> Any:
+        """One full worker lifecycle (construct → register → init → dispatch → close).
 
-    # Offline post-pass (reads the per-rank records on disk; no worker needed).
-    if config is not None and config.enable_l2_swimlane:
+        Each call forks fresh chip workers and closes them, so the per-pass DFX
+        collectors — which live in the forked children, not this host process —
+        get clean SVM state every pass. That is why the L3 two-pass below does
+        not need the subprocess the in-process L2 path uses to dodge the
+        ``halHostRegister`` cap (rc 8).
+
+        Construct/register/init run inside the try so a failure in any setup step
+        still closes the worker and unlinks the rootinfo temp file.
+        """
+        w = None
+        try:
+            w = _construct_worker(dc, compiled.platform, runtime_name, num_sub)
+            sub_ids, chip_cids = _register_callables(w, sub_worker_fns, chip_callables)
+            w.init()
+            return _dispatch(
+                w, entry_fn, tensors, chip_cids, sub_ids, call_config, len(dc.device_ids)
+            )
+        finally:
+            if w is not None:
+                w.close()
+
+    dfx_base = output_dir / "dfx_outputs"
+    swimlane = config is not None and config.enable_l2_swimlane
+
+    if swimlane and not compiled.platform.endswith("sim"):
+        # Two-pass for clean timing, mirroring the L2 swimlane workflow: dep_gen
+        # collection perturbs timing, so the per-rank task graph and the kept
+        # timing come from separate dispatches.
+        import dataclasses  # noqa: PLC0415
+
+        print(
+            "[swimlane] L3 swimlane enabled -> running the dispatch twice "
+            "(dep_gen perturbs timing, so the graph and the timing are captured separately):"
+        )
+        print("[swimlane] run 1/2: capturing the per-rank task graph (deps.json); its timing is discarded.")
+        deps_cfg = dataclasses.replace(
+            config,
+            enable_l2_swimlane=False,
+            enable_dep_gen=True,
+            enable_pmu=0,
+            enable_scope_stats=False,
+            enable_dump_tensor=0,
+        )
+        _run_once(_make_call_config(dc, deps_cfg, dfx_base=dfx_base))
+
+        print("[swimlane] run 2/2: measuring clean per-task timing (these are the reported numbers).")
+        timing_cfg = dataclasses.replace(config, enable_dep_gen=False)
+        timing = _run_once(
+            _make_call_config(dc, timing_cfg, dfx_base=dfx_base, co_enable_swimlane_dep_gen=False)
+        )
+    else:
+        timing = _run_once(_make_call_config(dc, config, dfx_base=dfx_base))
+
+    # Offline post-pass (reads the per-rank deps.json + records on disk).
+    if swimlane:
         _collect_l3_swimlane(output_dir, len(dc.device_ids), compiled.platform)
     return timing
 
