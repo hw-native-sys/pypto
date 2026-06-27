@@ -373,7 +373,8 @@ def _make_call_config(
     The ``block_dim`` / ``aicpu_thread_num`` baseline always comes from the
     program's :class:`DistributedConfig`. When *run_config* is given, its
     per-task ring-sizing overrides (``ring_task_window`` / ``ring_heap`` /
-    ``ring_dep_pool``) are overlaid on top, so a single L3 dispatch can size the
+    ``ring_dep_pool``, each a scalar or a per-ring list of 4 ints) are overlaid
+    on top, so a single L3 dispatch can size the
     runtime's ring buffers without mutating the prepared program's shared
     config. ``None`` (the default) leaves the baseline untouched and the runtime
     applies its own ``PTO2_RING_*`` env var / compile-time fallback.
@@ -604,7 +605,8 @@ def execute_distributed(
             worker-resident :class:`~pypto.runtime.DeviceTensor`.
         config: Optional per-dispatch :class:`RunConfig`. Its per-task
             ring-sizing overrides (``ring_task_window`` / ``ring_heap`` /
-            ``ring_dep_pool``) size this dispatch's runtime ring buffers, and its
+            ``ring_dep_pool``, each a scalar or a per-ring list of 4 ints) size
+            this dispatch's runtime ring buffers, and its
             runtime-diagnostic DFX flags (``enable_dump_tensor`` / ``enable_pmu``
             / ``enable_dep_gen`` / ``enable_scope_stats`` / ``enable_l2_swimlane``)
             are written per rank under ``<output_dir>/dfx_outputs/rank{r}/``.
@@ -1059,7 +1061,8 @@ class DistributedWorker(Worker):
 
         ``config`` is an optional per-dispatch :class:`RunConfig`: its per-task
         ring-sizing overrides (``ring_task_window`` / ``ring_heap`` /
-        ``ring_dep_pool``) size this dispatch's runtime ring buffers without
+        ``ring_dep_pool``, each a scalar or a per-ring list of 4 ints) size this
+        dispatch's runtime ring buffers without
         touching the prepared program's shared config, so consecutive dispatches
         can use different ring sizes. ``None`` reuses the program's baseline.
         """

@@ -222,6 +222,64 @@ class TestRunConfigRingSizing:
             RunConfig(platform="a2a3sim", **{field: bad})
 
 
+class TestRunConfigPerRingList:
+    """Verify the per-scope-depth ring list form of the ring overrides.
+
+    A list sizes rings 0..3 independently; a ``0`` entry means "leave that ring
+    at its env/compile-time default". A scalar (validated elsewhere) is broadcast
+    to every ring by the runtime.
+    """
+
+    def test_valid_per_ring_lists_accepted(self):
+        cfg = RunConfig(
+            platform="a2a3sim",
+            ring_task_window=[16, 32, 128, 256],
+            ring_heap=[1024, 2048, 4096, 8192],
+            ring_dep_pool=[8, 16, 100, 256],
+        )
+        assert cfg.ring_task_window == [16, 32, 128, 256]
+        assert cfg.ring_heap == [1024, 2048, 4096, 8192]
+        assert cfg.ring_dep_pool == [8, 16, 100, 256]
+
+    def test_zero_entry_is_per_ring_unset_sentinel(self):
+        # 0 = leave that ring at its default; other entries still validated.
+        cfg = RunConfig(platform="a2a3sim", ring_task_window=[16, 0, 0, 256])
+        assert cfg.ring_task_window == [16, 0, 0, 256]
+
+    @pytest.mark.parametrize(
+        "field",
+        ["ring_task_window", "ring_heap", "ring_dep_pool"],
+    )
+    @pytest.mark.parametrize("length", [0, 1, 3, 5])
+    def test_wrong_length_list_rejected(self, field, length):
+        with pytest.raises(ValueError, match=f"{field} list must have exactly 4 entries"):
+            RunConfig(platform="a2a3sim", **{field: [4] * length})
+
+    @pytest.mark.parametrize(
+        ("field", "bad_list"),
+        [
+            ("ring_task_window", [16, 32, 48, 64]),  # 48 not a power of 2
+            ("ring_heap", [1024, 2048, 512, 4096]),  # 512 < 1024
+            ("ring_dep_pool", [8, 16, 2, 256]),  # 2 < 4
+        ],
+    )
+    def test_invalid_entry_rejected(self, field, bad_list):
+        with pytest.raises(ValueError, match=f"{field} entries must"):
+            RunConfig(platform="a2a3sim", **{field: bad_list})
+
+    @pytest.mark.parametrize(
+        ("field", "bad_list"),
+        [
+            ("ring_task_window", [16, 32, True, 64]),  # bool must not pass as 0/size
+            ("ring_dep_pool", [8, False, 16, 32]),  # False must not pass as the 0 sentinel
+            ("ring_heap", [1024, 2048.0, 4096, 8192]),  # float entry
+        ],
+    )
+    def test_non_int_entry_rejected(self, field, bad_list):
+        with pytest.raises(ValueError, match=f"{field} entries must"):
+            RunConfig(platform="a2a3sim", **{field: bad_list})
+
+
 class _SpyRuntimeEnv:
     """Records writes to ``ring_*`` fields; defaults mirror the runtime (0)."""
 
@@ -289,6 +347,19 @@ class TestBuildCallConfigRing:
         assert cfg.runtime_env.ring_task_window == 0
         assert cfg.runtime_env.ring_dep_pool == 0
 
+    def test_per_ring_list_transcribed_unchanged(self, monkeypatch):
+        # A per-ring list flows straight through to runtime_env; the runtime's
+        # RuntimeEnv setter accepts both a scalar (broadcast) and a 4-list.
+        run_config = RunConfig(
+            platform="a2a3sim",
+            ring_task_window=[16, 32, 128, 256],
+            ring_dep_pool=[8, 0, 0, 64],
+        )
+        cfg = _build_with_fake_callconfig(run_config, monkeypatch)
+        assert cfg.runtime_env.ring_task_window == [16, 32, 128, 256]
+        assert cfg.runtime_env.ring_dep_pool == [8, 0, 0, 64]
+        assert cfg.runtime_env.ring_heap == 0
+
 
 def _make_dist_call_config_with_fake(dc, run_config, monkeypatch, *, dfx_base=None):
     """Invoke ``distributed_runner._make_call_config`` with a spy ``CallConfig``.
@@ -350,6 +421,17 @@ class TestMakeCallConfigRing:
         # Only the provided ring field is written; the rest stay at 0.
         assert cfg.runtime_env.ring_heap == 1024 * 1024
         assert cfg.runtime_env.ring_task_window == 0
+        assert cfg.runtime_env.ring_dep_pool == 0
+
+    def test_per_ring_list_overlaid_on_l3_dispatch(self, monkeypatch):
+        # A per-program L3 dispatch can size each scope-depth ring independently
+        # (e.g. a wider task window for prefill than decode).
+        from pypto.ir.distributed_compiled_program import DistributedConfig  # noqa: PLC0415
+
+        run_config = RunConfig(platform="a2a3sim", ring_task_window=[16, 32, 128, 256])
+        cfg = _make_dist_call_config_with_fake(DistributedConfig(), run_config, monkeypatch)
+        assert cfg.runtime_env.ring_task_window == [16, 32, 128, 256]
+        assert cfg.runtime_env.ring_heap == 0
         assert cfg.runtime_env.ring_dep_pool == 0
 
 
