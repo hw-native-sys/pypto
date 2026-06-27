@@ -246,6 +246,23 @@ ExprPtr LocalizeValidDimForSplit(const ExprPtr& valid_dim, const ExprPtr& origin
   return MakeMax(MakeMin(remaining, half_dim_size, span), zero, span);
 }
 
+// Whether a tile.set_validshape split-axis operand must be localized to the
+// current subblock. Localization (subtracting half on lane 1) is only correct
+// when the valid extent genuinely spans both lanes -- i.e. it equals the full
+// pre-split extent, or it provably overflows the halved physical box (in which
+// case leaving it unlocalized would also trip the PTOAS "operand <= shape dim"
+// verifier). A smaller operand is a *replicated* valid extent both AIV lanes
+// share (e.g. a fused-attention head count, valid_row=5 on a [16]->[8] split):
+// localizing it would collapse lane 1 to 0 and silently corrupt that lane.
+bool ValidOperandNeedsLocalize(const ExprPtr& valid_dim, const ExprPtr& original_dim,
+                               const ExprPtr& half_dim_size) {
+  if (!valid_dim) return false;
+  if (AreExprsEqual(valid_dim, original_dim)) return true;
+  auto valid_const = std::dynamic_pointer_cast<const ConstInt>(valid_dim);
+  auto half_const = std::dynamic_pointer_cast<const ConstInt>(half_dim_size);
+  return valid_const != nullptr && half_const != nullptr && valid_const->value_ > half_const->value_;
+}
+
 CallPtr RebuildCallWithSplit(const CallPtr& call, int split_int) {
   std::vector<std::pair<std::string, std::any>> new_kwargs;
   bool has_split = false;
@@ -565,12 +582,17 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
         } else if (op_name == "tile.set_validshape" && call->args_.size() == 3) {
           // args = (tile, valid_row, valid_col). Halving the result type alone
           // leaves the split-dim valid operand at its full pre-split extent, so
-          // the operand exceeds the halved physical box (PTOAS rejects it with
-          // "row/col operand <= shape dim"). Localize the split-dim operand the
-          // same way HalveTileShape localizes the type's valid_shape.
+          // a full/overflowing operand exceeds the halved physical box (PTOAS
+          // rejects it with "row/col operand <= shape dim"). Localize the
+          // split-dim operand the same way HalveTileShape localizes the type's
+          // valid_shape -- but ONLY when it genuinely spans both lanes. A smaller
+          // operand is a replicated extent both AIV lanes share; localizing it
+          // would collapse lane 1 to 0 and silently corrupt that lane.
           const int operand_idx = 1 + split_dim;  // split_dim 0 -> row, 1 -> col
-          new_args[operand_idx] = LocalizeValidDimForSplit(call->args_[operand_idx], tt->shape_[split_dim],
-                                                           half_dim_size, subblock_idx);
+          if (ValidOperandNeedsLocalize(call->args_[operand_idx], tt->shape_[split_dim], half_dim_size)) {
+            new_args[operand_idx] = LocalizeValidDimForSplit(call->args_[operand_idx], tt->shape_[split_dim],
+                                                             half_dim_size, subblock_idx);
+          }
         }
         auto new_call = std::make_shared<Call>(call->op_, std::move(new_args), call->kwargs_, new_result_type,
                                                call->span_);
