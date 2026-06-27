@@ -582,6 +582,43 @@ def test_put_chunk_shrinks_staging_tile_keeping_full_partition_view():
     )
 
 
+def test_put_subregion_dynamic_shape_with_chunk():
+    """A dynamic subregion transfer extent emits a dynamic partition view while
+    the staging tile stays statically sized from the chunk — pto-isa chunks the
+    runtime extent. The fixed window stays static; only the transfer is dynamic."""
+
+    @pl.program
+    class PDyn:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[16, 64], pl.FP16],
+            src: pld.DistributedTensor[[16, 64], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+            n: pl.Scalar[pl.INT32],
+        ):
+            pld.tensor.put(
+                dst,
+                peer=peer,
+                src=src,
+                dst_offsets=[0, 0],
+                src_offsets=[0, 0],
+                shape=[n, 64],
+                chunk_rows=4,
+                chunk_cols=32,
+            )
+
+    mlir = _generate_mlir(PDyn)
+    tput_line = next(line for line in mlir.splitlines() if "pto.comm.tput(" in line)
+    # Dynamic rows in the partition view (the `n` runtime extent), static cols.
+    assert tput_line.count("!pto.partition_tensor_view<?x64xf16>") == 2, tput_line
+    # Staging tile is the static [4, 32] chunk (UB allocation is static).
+    stage_alloc_line = next(
+        line for line in mlir.splitlines() if "pto.alloc_tile" in line and "tput_stage" in line
+    )
+    assert "rows=4" in stage_alloc_line and "cols=32" in stage_alloc_line, stage_alloc_line
+
+
 def test_put_atomic_add_variant():
     """put with AtomicType.Add lowers to the atomic_add combine attr."""
 

@@ -2093,22 +2093,48 @@ namespace {
 // auto-chunks the full transfer through it — transfers larger than UB no longer
 // need a full-size staging tile. Oversized chunk values are clamped to the
 // flattened extent (a no-op single transfer).
+//
+// The transfer extent may be dynamic (a runtime sub-extent of the fixed
+// window). A dynamic flattened dim must be bounded by the corresponding static
+// chunk (the staging tile is statically allocated in UB) — the deducer's
+// ValidateDynamicTransferHasChunk has already enforced this, so a missing chunk
+// here is a compiler bug.
 ExprPtr MakeTputStageShape(const std::vector<ExprPtr>& transfer_shape,
                            const std::vector<std::pair<std::string, std::any>>& kwargs, const Span& span,
                            const char* op_name) {
-  auto last = As<ConstInt>(transfer_shape.back());
-  INTERNAL_CHECK_SPAN(last, span) << op_name << ": transfer innermost dimension must be ConstInt";
-  int64_t cols_val = last->value_;
-  int64_t rows_val = 1;
-  for (size_t i = 0; i + 1 < transfer_shape.size(); ++i) {
-    auto d = As<ConstInt>(transfer_shape[i]);
-    INTERNAL_CHECK_SPAN(d, span) << op_name << ": transfer dimension " << i << " must be ConstInt";
-    rows_val *= d->value_;
-  }
   const int chunk_rows = GetKwargOr<int>(kwargs, "chunk_rows", 0);
   const int chunk_cols = GetKwargOr<int>(kwargs, "chunk_cols", 0);
-  if (chunk_rows > 0) rows_val = std::min<int64_t>(rows_val, chunk_rows);
-  if (chunk_cols > 0) cols_val = std::min<int64_t>(cols_val, chunk_cols);
+
+  // cols = innermost dim (chunk_cols caps it; chunk_cols bounds it when dynamic).
+  int64_t cols_val;
+  if (auto last = As<ConstInt>(transfer_shape.back())) {
+    cols_val = (chunk_cols > 0) ? std::min<int64_t>(last->value_, chunk_cols) : last->value_;
+  } else {
+    INTERNAL_CHECK_SPAN(chunk_cols > 0, span)
+        << op_name << ": dynamic innermost transfer dim requires a static chunk_cols";
+    cols_val = chunk_cols;
+  }
+
+  // rows = product(leading dims) (chunk_rows caps it; bounds it when any leading
+  // dim is dynamic).
+  int64_t rows_prod = 1;
+  bool rows_static = true;
+  for (size_t i = 0; i + 1 < transfer_shape.size(); ++i) {
+    if (auto d = As<ConstInt>(transfer_shape[i])) {
+      rows_prod *= d->value_;
+    } else {
+      rows_static = false;
+    }
+  }
+  int64_t rows_val;
+  if (rows_static) {
+    rows_val = (chunk_rows > 0) ? std::min<int64_t>(rows_prod, chunk_rows) : rows_prod;
+  } else {
+    INTERNAL_CHECK_SPAN(chunk_rows > 0, span)
+        << op_name << ": dynamic leading transfer dim requires a static chunk_rows";
+    rows_val = chunk_rows;
+  }
+
   auto rows_expr = std::make_shared<ConstInt>(rows_val, DataType::INDEX, span);
   auto cols_expr = std::make_shared<ConstInt>(cols_val, DataType::INDEX, span);
   return std::make_shared<MakeTuple>(std::vector<ExprPtr>{rows_expr, cols_expr}, span);

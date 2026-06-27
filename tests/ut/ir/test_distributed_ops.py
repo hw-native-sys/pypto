@@ -776,6 +776,34 @@ def test_put_subregion_returns_unknown_type():
     assert isinstance(call.type, ir.UnknownType)
 
 
+def test_put_subregion_dynamic_shape_requires_chunk():
+    """A dynamic subregion transfer extent is allowed, but needs a static chunk
+    to bound the VEC staging tile — a dynamic leading dim needs chunk_rows."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+    n = ir.Var("n", ir.ScalarType(DataType.INT32), span)  # dynamic transfer rows
+    dst_offsets = _make_shape_tuple([0, 0], span)
+    src_offsets = _make_shape_tuple([0, 0], span)
+    dyn_shape = ir.MakeTuple([n, ir.ConstInt(64, DataType.INT64, span)], span)
+
+    # Without chunk_rows → rejected (can't size the staging tile).
+    with pytest.raises(Exception, match="dynamic leading transfer dim needs a static chunk_rows"):
+        ir.create_op_call(
+            "pld.tensor.put", [dst, peer, src, dst_offsets, src_offsets, dyn_shape], {"atomic": 0}, span
+        )
+
+    # With chunk_rows → accepted.
+    call = ir.create_op_call(
+        "pld.tensor.put",
+        [dst, peer, src, dst_offsets, src_offsets, dyn_shape],
+        {"atomic": 0, "chunk_rows": 4},
+        span,
+    )
+    assert isinstance(call.type, ir.UnknownType)
+
+
 def test_put_ir_builder_accepts_positional_atomic_compat():
     """Compatibility: raw IR builder still accepts the old positional atomic arg."""
     span = ir.Span.unknown()
@@ -887,7 +915,7 @@ def test_tile_put_rejects_stage_larger_than_transfer():
     # 128 cols > 64 transfer cols.
     stage = _make_tile_var("stage", [16, 128], DataType.FP16, span)
 
-    with pytest.raises(Exception, match="must fit within flattened transfer"):
+    with pytest.raises(Exception, match="must fit within"):
         dist_tile_ops.put(dst, peer, src, stage, atomic=ir.AtomicType.None_, span=span)
 
 
@@ -1088,6 +1116,32 @@ def test_get_subregion_returns_unknown_type():
     assert isinstance(call.type, ir.UnknownType)
 
 
+def test_get_subregion_dynamic_shape_requires_chunk():
+    """A dynamic subregion transfer extent is allowed with a static chunk — a
+    dynamic innermost dim needs chunk_cols to bound the VEC staging tile."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+    m = ir.Var("m", ir.ScalarType(DataType.INT32), span)  # dynamic transfer cols
+    dst_offsets = _make_shape_tuple([0, 0], span)
+    src_offsets = _make_shape_tuple([0, 0], span)
+    dyn_shape = ir.MakeTuple([ir.ConstInt(16, DataType.INT64, span), m], span)
+
+    # Without chunk_cols → rejected.
+    with pytest.raises(Exception, match="dynamic innermost transfer dim needs a static chunk_cols"):
+        ir.create_op_call("pld.tensor.get", [dst, peer, src, dst_offsets, src_offsets, dyn_shape], {}, span)
+
+    # With chunk_cols → accepted.
+    call = ir.create_op_call(
+        "pld.tensor.get",
+        [dst, peer, src, dst_offsets, src_offsets, dyn_shape],
+        {"chunk_cols": 32},
+        span,
+    )
+    assert isinstance(call.type, ir.UnknownType)
+
+
 def test_tile_get_returns_unknown_type():
     """Positive: tile get is the post-conversion form with an explicit stage tile."""
     span = ir.Span.unknown()
@@ -1159,7 +1213,7 @@ def test_tile_get_rejects_stage_larger_than_transfer():
     # 32 rows > 16 transfer rows.
     stage = _make_tile_var("stage", [32, 64], DataType.FP16, span)
 
-    with pytest.raises(Exception, match="must fit within flattened transfer"):
+    with pytest.raises(Exception, match="must fit within"):
         dist_tile_ops.get(dst, peer, src, stage, span=span)
 
 

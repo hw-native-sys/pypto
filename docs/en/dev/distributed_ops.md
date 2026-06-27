@@ -178,15 +178,25 @@ the smaller stage. This lets a single `put` move data larger than UB without the
 caller writing an explicit chunk loop. Oversized chunk values are clamped to the
 transfer extent.
 
+**Dynamic transfer extent.** The subregion `shape` may be **dynamic** (a runtime
+sub-extent of the fixed window) — pto-isa reads the extent from the partition
+views at runtime, so the codegen emits a dynamic partition view (`<?x…>`) and
+chunks it. A dynamic flattened dim must be bounded by the corresponding static
+chunk, because the VEC staging tile is statically allocated: a dynamic innermost
+dim requires `chunk_cols`, a dynamic leading dim requires `chunk_rows`. The
+window (`dst` / `src` `DistributedTensorType`) itself stays static.
+
 Verifier: `dst` must be `DistributedTensorType`; `src` must be either
 `TensorType` or `DistributedTensorType` (matched via `AsTensorTypeLike`);
 `peer` must be a `ScalarType`; `dst` and `src` must share element type, rank,
-and **positive static** dimensions. Full-slice `put` requires identical shape;
-subregion `put` allows different full slice extents as long as the explicit
-transfer region is in bounds. `atomic` selects overwrite vs atomic-add (see
-`AtomicType`). The lowered `pld.tile.put` verifier requires the staging tile to
-**fit within** the flattened transfer in both dims (it may be smaller — a chunk
-— but never larger).
+and **positive static** window dimensions. Full-slice `put` requires identical
+shape; subregion `put` allows different full slice extents as long as the
+explicit transfer region is in bounds (static dims only). The transfer `shape`
+may be dynamic (requires a matching static chunk; see above). `atomic` selects
+overwrite vs atomic-add (see `AtomicType`). The lowered `pld.tile.put` verifier
+requires the staging tile to **fit within** the flattened transfer in both
+**static** dims (it may be smaller — a chunk — but never larger; dynamic dims
+are bounded by the chunk at runtime).
 
 ### `pld.tensor.get` (TGET)
 
@@ -208,15 +218,18 @@ With no offsets/shape this reads the full peer `src` slice into the full local
 transfer to matching subregions; all three must be provided together. The
 optional `chunk_rows` / `chunk_cols` attrs (`0` = full) shrink the staging tile
 to a sub-tile of the flattened transfer extent so pto-isa TGET auto-chunks the
-full transfer through it — same contract as `put` above.
+full transfer through it — same contract as `put` above, including a **dynamic
+subregion `shape`** bounded by a matching static chunk (dynamic innermost needs
+`chunk_cols`, dynamic leading needs `chunk_rows`; the window stays static).
 
 Verifier: `dst` must be either `TensorType` or `DistributedTensorType` (matched
 via `AsTensorTypeLike`); `src` must be `DistributedTensorType`; `peer` must be a
 `ScalarType`; `dst` and `src` must share element type, rank, and **positive
-static** dimensions. Full-slice `get` requires identical shape; subregion `get`
-allows different full slice extents as long as the explicit transfer region is
-in bounds. Besides `chunk_rows` / `chunk_cols`, `get` accepts no keyword
-attributes.
+static** window dimensions. Full-slice `get` requires identical shape; subregion
+`get` allows different full slice extents as long as the explicit transfer
+region is in bounds (static dims only); the transfer `shape` may be dynamic with
+a matching static chunk. Besides `chunk_rows` / `chunk_cols`, `get` accepts no
+keyword attributes.
 
 ### `pld.tensor.allreduce`
 
