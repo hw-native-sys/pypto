@@ -686,11 +686,6 @@ class MgatherElemValidFP32TestCase(PTOTestCase):
 # =============================================================================
 
 
-# @pytest.mark.skip(
-#     reason="BLOCKED on PTOAS hw-native-sys/PTOAS#839 (#840): pto.mgather is "
-#     "A5-only in PTOAS; on a2a3 ptoas crashes (row) / 507018 (elem). Un-skip "
-#     "once a2a3 mgather support lands upstream."
-# )
 @pytest.mark.platforms("a2a3", "a2a3sim")
 class TestMgatherRow:
     """Row-mode tile.mgather (dst[r, :] = mem[idx[r], :])."""
@@ -733,22 +728,18 @@ class TestMgatherRow:
 
     @pytest.mark.parametrize("platform", PLATFORMS)
     def test_fewer_rows_16x64(self, test_runner, platform):
-        """Diagnostic: 16 rows x 64 cols (isolate row count)."""
+        """16 rows x 64 cols — regression for the not_inplace_safe dst/idx fix."""
         result = test_runner.run(MgatherRowFewerRowsTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.parametrize("platform", PLATFORMS)
     def test_narrow_cols_32x32(self, test_runner, platform):
-        """Diagnostic: 32 rows x 32 cols (isolate col width)."""
+        """32 rows x 32 cols — regression for the not_inplace_safe fix (was a
+        deterministic 507018 when dst aliased idx)."""
         result = test_runner.run(MgatherRowNarrowColsTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 
-# @pytest.mark.skip(
-#     reason="BLOCKED on PTOAS hw-native-sys/PTOAS#840 (#839): pto.mgather is "
-#     "A5-only in PTOAS; elem on a2a3 compiles but faults at runtime (507018). "
-#     "Un-skip once a2a3 mgather support lands upstream."
-# )
 @pytest.mark.platforms("a2a3", "a2a3sim")
 class TestMgatherElem:
     """Elem-mode tile.mgather (dst[i, j] = mem[idx[i, j]])."""
