@@ -398,6 +398,9 @@ REGISTER_OP("tile.row_argmax")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    // The TROWARGMAX path reads the full source/tmp while producing a smaller
+    // index output, so the output must not alias an input (mirrors row_max).
+    .not_inplace_safe()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRowReductionType(args, kwargs, "tile.row_argmax", DataType(DataType::INT32));
@@ -411,6 +414,7 @@ REGISTER_OP("tile.row_argmin")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    .not_inplace_safe()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRowReductionType(args, kwargs, "tile.row_argmin", DataType(DataType::INT32));
@@ -424,6 +428,10 @@ REGISTER_OP("tile.col_argmax")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    // TCOLARGMAX reads the full source/tmp into a smaller index output — the
+    // output must not alias an input (the tmp-bearing column variants share the
+    // row-reduction in-place hazard, unlike the 1-arg col_max/col_min).
+    .not_inplace_safe()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       CHECK(args.size() == 2) << "The operator tile.col_argmax requires 2 arguments, but got " << args.size();
@@ -438,6 +446,7 @@ REGISTER_OP("tile.col_argmin")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    .not_inplace_safe()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       CHECK(args.size() == 2) << "The operator tile.col_argmin requires 2 arguments, but got " << args.size();
