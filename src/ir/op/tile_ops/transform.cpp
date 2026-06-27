@@ -511,8 +511,17 @@ TypePtr DeduceTileAssembleType(const std::vector<ExprPtr>& args,
 
   ValidateIndexTupleElements(offset_tuple_type, "tile.assemble", "offset");
 
-  CHECK(target_type->dtype_ == source_type->dtype_)
-      << "tile.assemble requires target and source to have the same dtype, but got "
+  // A converting Acc->Mat FIXPIPE downcast is permitted: the cube drains its f32
+  // L0C accumulator into an L1/Mat scratch at the cube's low-precision operand
+  // dtype (bf16/f16) — the only offset Acc->Mat path on A2/A3 (pto.tinsert /
+  // mte_l0c_l1). Memory spaces aren't inferred yet here, so gate on the dtype
+  // (f32 source -> bf16/f16 target); every other assemble stays same-dtype.
+  const bool fixpipe_downcast =
+      source_type->dtype_ == DataType::FP32 &&
+      (target_type->dtype_ == DataType::BF16 || target_type->dtype_ == DataType::FP16);
+  CHECK(target_type->dtype_ == source_type->dtype_ || fixpipe_downcast)
+      << "tile.assemble requires target and source to have the same dtype (or an "
+         "Acc->Mat FIXPIPE downcast to bf16/f16), but got "
       << target_type->dtype_.ToString() << " and " << source_type->dtype_.ToString();
 
   // Inherit the target's TileView *and its optionality*.  When the target carries

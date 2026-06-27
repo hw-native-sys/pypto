@@ -1520,81 +1520,62 @@ class TestTileAssembleCodegen:
         )
 
     def test_chained_matmul_mat_scratch_codegen(self):
-        """End-to-end: an oversized chained matmul whose result is consumed on-chip
-        tiles into an L1/Mat scratch via Acc->Mat ``tile.assemble`` (the Mat-scratch
-        ``AutoTileMatmulL0`` path). The assemble chain merges in place, so the whole
-        program lowers to valid PTO — every assemble subview is a Mat view and there
-        is **no** out-of-window Mat->Mat preservation copy. (PTOAS's verifier accepts
-        the result as-is; confirmed out-of-band with pto-verify.)"""
+        """End-to-end: an oversized chained matmul whose bf16 result is consumed on-chip
+        tiles into an L1/Mat scratch via the Acc->Mat **FIXPIPE writeback** — each
+        per-sub-tile assemble lowers to ``pto.tinsert`` (the offset Acc->Mat path on
+        A2/A3, which downcasts f32->bf16), filling a bf16 Mat scratch. (Assembles green
+        through ptoas v0.45.)"""
 
         @pl.program
         class Prog:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
-                a: pl.Tensor[[256, 128], pl.FP32],
-                b: pl.Tensor[[128, 256], pl.FP32],
-                e: pl.Tensor[[256, 64], pl.FP32],
+                a: pl.Tensor[[256, 128], pl.BF16],
+                b: pl.Tensor[[128, 256], pl.BF16],
+                e: pl.Tensor[[256, 64], pl.BF16],
                 out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
             ) -> pl.Tensor[[256, 64], pl.FP32]:
-                c = pl.matmul(a, b)  # [256, 256] > L0c, consumed only by a matmul -> Mat scratch
-                d = pl.matmul(c, e)
+                c = pl.matmul(a, b, out_dtype=pl.FP32)  # [256, 256] > L0c, consumed on-chip
+                cb = pl.cast(c, pl.BF16)  # FIXPIPE downcast -> bf16 Mat scratch
+                d = pl.matmul(cb, e, out_dtype=pl.FP32)
                 out = pl.assemble(out, d, [0, 0])
                 return out
 
         mlir = self._generate_mlir_all_incore(Prog)
-        subviews = [line for line in mlir.splitlines() if "pto.subview" in line and "->" in line]
-        assert subviews, f"expected Acc->Mat assemble subviews for the Mat scratch, got:\n{mlir}"
-        assert all("loc=mat" in s.split("->", 1)[1] for s in subviews), (
-            "every Mat-scratch assemble subview must be a Mat view:\n" + "\n".join(subviews)
-        )
-        mat_to_mat = [
-            line
-            for line in mlir.splitlines()
-            if "pto.tmov" in line
-            and "loc=mat" in line.split("ins(", 1)[-1].split(")", 1)[0]
-            and "loc=mat" in line.split("outs(", 1)[-1]
-        ]
-        assert not mat_to_mat, (
-            "in-place Mat-scratch must not emit a Mat->Mat preservation copy, got:\n" + "\n".join(mat_to_mat)
+        tinserts = [line for line in mlir.splitlines() if "pto.tinsert" in line]
+        assert len(tinserts) == 4, f"2x2 grid -> 4 Acc->Mat tinserts, got {len(tinserts)}:\n{mlir}"
+        assert "loc=mat, dtype=bf16" in mlir, (
+            f"the chained-matmul intermediate must be a bf16 Mat scratch:\n{mlir}"
         )
 
     def test_chained_matmul_full_k_mat_scratch_codegen(self):
-        """End-to-end full-K Mat-scratch: a K-fits-L0 oversized chained matmul tiles
-        into a Mat scratch via the *pipelined* emitter; the loop-variable-offset
-        Acc->Mat assembles merge in place and lower to valid PTO — Mat-view subviews,
-        no out-of-window Mat->Mat preservation copy. (pto-verify accepts it as-is.)"""
+        """End-to-end full-K Mat-scratch: a K-fits-L0 oversized chained matmul (bf16
+        intermediate) tiles into a Mat scratch via the *pipelined* emitter; the
+        loop-variable-offset Acc->Mat assembles lower to ``pto.tinsert`` filling a bf16
+        Mat scratch. (Assembles green through ptoas v0.45.)"""
 
         @pl.program
         class Prog:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
-                a: pl.Tensor[[256, 32], pl.FP32],
-                b: pl.Tensor[[32, 256], pl.FP32],
-                e: pl.Tensor[[256, 64], pl.FP32],
+                a: pl.Tensor[[256, 32], pl.BF16],
+                b: pl.Tensor[[32, 256], pl.BF16],
+                e: pl.Tensor[[256, 64], pl.BF16],
                 out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
             ) -> pl.Tensor[[256, 64], pl.FP32]:
-                c = pl.matmul(a, b)  # [256, 256] > L0c, K=32 fits L0 (k == K) -> full-K; consumed on-chip
-                d = pl.matmul(c, e)
+                c = pl.matmul(a, b, out_dtype=pl.FP32)  # K=32 fits L0 (k == K) -> full-K; on-chip
+                cb = pl.cast(c, pl.BF16)  # FIXPIPE downcast -> bf16 Mat scratch
+                d = pl.matmul(cb, e, out_dtype=pl.FP32)
                 out = pl.assemble(out, d, [0, 0])
                 return out
 
         mlir = self._generate_mlir_all_incore(Prog)
-        subviews = [line for line in mlir.splitlines() if "pto.subview" in line and "->" in line]
-        assert subviews and all("loc=mat" in s.split("->", 1)[1] for s in subviews), (
-            "full-K Mat-scratch assemble subviews must be Mat views:\n" + "\n".join(subviews)
-        )
-        mat_to_mat = [
-            line
-            for line in mlir.splitlines()
-            if "pto.tmov" in line
-            and "loc=mat" in line.split("ins(", 1)[-1].split(")", 1)[0]
-            and "loc=mat" in line.split("outs(", 1)[-1]
-        ]
-        assert not mat_to_mat, (
-            "full-K in-place Mat-scratch must not emit a Mat->Mat preservation copy, got:\n"
-            + "\n".join(mat_to_mat)
+        tinserts = [line for line in mlir.splitlines() if "pto.tinsert" in line]
+        assert len(tinserts) == 4, f"2x2 grid -> 4 Acc->Mat tinserts, got {len(tinserts)}:\n{mlir}"
+        assert "loc=mat, dtype=bf16" in mlir, (
+            f"the full-K chained-matmul intermediate must be a bf16 Mat scratch:\n{mlir}"
         )
 
 

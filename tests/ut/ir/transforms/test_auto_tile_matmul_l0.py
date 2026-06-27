@@ -1487,13 +1487,14 @@ class TestAutoTileMatmulL0MatScratch:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
-                a: pl.Tensor[[256, 128], pl.FP32],
-                b: pl.Tensor[[128, 256], pl.FP32],
-                e: pl.Tensor[[256, 64], pl.FP32],
+                a: pl.Tensor[[256, 128], pl.BF16],
+                b: pl.Tensor[[128, 256], pl.BF16],
+                e: pl.Tensor[[256, 64], pl.BF16],
                 out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
             ) -> pl.Tensor[[256, 64], pl.FP32]:
-                c = pl.matmul(a, b)  # [256, 256] FP32 > L0c → on-chip consumer → Mat scratch
-                d = pl.matmul(c, e)  # consumes c only as a matmul operand
+                c = pl.matmul(a, b, out_dtype=pl.FP32)  # [256, 256] f32 > L0c → on-chip consumer
+                cb = pl.cast(c, pl.BF16)  # FIXPIPE downcast → bf16 Mat scratch (cast fused into assemble)
+                d = pl.matmul(cb, e, out_dtype=pl.FP32)  # consumes the scratch only as a matmul operand
                 out = pl.assemble(out, d, [0, 0])
                 return out
 
@@ -1505,31 +1506,36 @@ class TestAutoTileMatmulL0MatScratch:
         assert "pl.tile.matmul(a__ssa_v0_mat, b__ssa_v0_mat)" not in printed, (
             "the oversized producer must be tiled, not left whole"
         )
+        assert "pl.tile.cast(" not in printed, "the downcast must be fused into the Mat scratch"
         _assert_ssa_valid(After, "test_mat_scratch_chained")
 
-        # Numerically correct vs (a @ b) @ e, executed through torch_codegen.
+        # Numerically correct vs the bf16 chain, executed through torch_codegen. The
+        # reference does block-wise bf16 matmuls with the intermediate downcast to bf16
+        # (the FIXPIPE writeback), so it carries real bf16 rounding; with random data,
+        # near-zero cancellation elements make element-wise allclose hopeless. The
+        # Frobenius relative error (dominated by the large entries) is the robust metric.
         torch = pytest.importorskip("torch")
         from pypto.debug import torch_codegen  # noqa: PLC0415
 
         torch.manual_seed(0)
-        a = torch.randn(256, 128)
-        b = torch.randn(128, 256)
-        e = torch.randn(256, 64)
+        a = torch.randn(256, 128, dtype=torch.bfloat16)
+        b = torch.randn(128, 256, dtype=torch.bfloat16)
+        e = torch.randn(256, 64, dtype=torch.bfloat16)
         out = torch.zeros(256, 64)
         ns: dict = {}
         exec(torch_codegen(After), ns)  # noqa: S102 — executing generated reference code is the point
         ns["kernel"](a, b, e, out)
-        expected = (a @ b) @ e
-        assert torch.allclose(out, expected, rtol=1e-3, atol=1e-3), (
-            f"split-K Mat-scratch chained mismatch: max abs diff {(out - expected).abs().max().item():.3e}"
-        )
+        c_bf16 = (a.float() @ b.float()).to(torch.bfloat16).float()  # FIXPIPE downcast
+        expected = c_bf16 @ e.float()
+        rel_err = ((out - expected).norm() / expected.norm()).item()
+        assert rel_err < 5e-2, f"split-K Mat-scratch chained bf16 rel_err {rel_err:.3e} exceeds 5e-2"
 
     def test_chained_matmul_exceeding_mat_capacity_deferred(self):
-        """The conservative Mat-capacity gate: a chained matmul whose result is consumed
-        entirely as a matmul operand WOULD take the Mat-scratch path, but its ``[512, 512]``
-        FP32 scratch (1 MiB) exceeds the backend's Mat/L1 capacity (512 KiB on Ascend910B).
-        The pass leaves the producer on the deferred ``PH-AT-006`` path (left whole, no
-        Acc->Mat assemble) instead of emitting an impossible on-chip allocation."""
+        """The conservative Mat-capacity gate: a bf16 chained matmul whose result is
+        consumed entirely as a matmul operand WOULD take the Mat-scratch path, but its
+        ``[512, 1024]`` bf16 scratch (1 MiB) exceeds the backend's Mat/L1 capacity (512
+        KiB on Ascend910B). The pass leaves the producer on the deferred ``PH-AT-006``
+        path (left whole, no Acc->Mat assemble) instead of an impossible allocation."""
         _backend.reset_for_testing()
         _backend.set_backend_type(BackendType.Ascend910B)
 
@@ -1538,13 +1544,14 @@ class TestAutoTileMatmulL0MatScratch:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
-                a: pl.Tensor[[512, 512], pl.FP32],
-                b: pl.Tensor[[512, 512], pl.FP32],
-                e: pl.Tensor[[512, 64], pl.FP32],
+                a: pl.Tensor[[512, 512], pl.BF16],
+                b: pl.Tensor[[512, 1024], pl.BF16],
+                e: pl.Tensor[[1024, 64], pl.BF16],
                 out: pl.Out[pl.Tensor[[512, 64], pl.FP32]],
             ) -> pl.Tensor[[512, 64], pl.FP32]:
-                c = pl.matmul(a, b)  # [512, 512] FP32 = 1 MiB Mat scratch → exceeds Mat capacity
-                d = pl.matmul(c, e)  # consumes c only as a matmul operand
+                c = pl.matmul(a, b, out_dtype=pl.FP32)  # [512, 1024] → 1 MiB bf16 scratch > Mat cap
+                cb = pl.cast(c, pl.BF16)  # would feed a bf16 Mat scratch, but it exceeds capacity
+                d = pl.matmul(cb, e, out_dtype=pl.FP32)  # consumes c only as a matmul operand
                 out = pl.assemble(out, d, [0, 0])
                 return out
 
@@ -1571,19 +1578,21 @@ class TestAutoTileMatmulL0MatScratch:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
-                a: pl.Tensor[[256, 32], pl.FP32],
-                b: pl.Tensor[[32, 256], pl.FP32],
-                e: pl.Tensor[[256, 64], pl.FP32],
+                a: pl.Tensor[[256, 32], pl.BF16],
+                b: pl.Tensor[[32, 256], pl.BF16],
+                e: pl.Tensor[[256, 64], pl.BF16],
                 out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
             ) -> pl.Tensor[[256, 64], pl.FP32]:
-                c = pl.matmul(a, b)  # [256, 256] > L0c, K=32 fits L0 (k == K) -> full-K; consumed on-chip
-                d = pl.matmul(c, e)
+                c = pl.matmul(a, b, out_dtype=pl.FP32)  # [256, 256] > L0c, K=32 fits L0 -> full-K
+                cb = pl.cast(c, pl.BF16)  # FIXPIPE downcast -> bf16 Mat scratch (cast fused)
+                d = pl.matmul(cb, e, out_dtype=pl.FP32)
                 out = pl.assemble(out, d, [0, 0])
                 return out
 
         After = passes.auto_tile_matmul_l0()(_lower_to_tile_ops(Before))
         printed = ir.python_print(After)
         assert "tile.create" in printed and "Mem.Mat" in printed, "expected a Mat output scratch"
+        assert "pl.tile.cast(" not in printed, "the downcast must be fused into the Mat scratch"
         assemble_lines = [line for line in printed.splitlines() if "pl.tile.assemble(" in line]
         assert assemble_lines, "the Mat scratch is filled by Acc->Mat assembles"
 
@@ -1601,22 +1610,24 @@ class TestAutoTileMatmulL0MatScratch:
         )
         _assert_ssa_valid(After, "test_full_k_mat_scratch_chained")
 
-        # Numerically correct vs (a @ b) @ e, executed through torch_codegen.
+        # Numerically correct vs the bf16 chain, executed through torch_codegen. As in the
+        # split-K case the reference carries real bf16 rounding (block-wise bf16 matmuls +
+        # the FIXPIPE downcast), so the Frobenius relative error is the robust metric.
         torch = pytest.importorskip("torch")
         from pypto.debug import torch_codegen  # noqa: PLC0415
 
         torch.manual_seed(0)
-        a = torch.randn(256, 32)
-        b = torch.randn(32, 256)
-        e = torch.randn(256, 64)
+        a = torch.randn(256, 32, dtype=torch.bfloat16)
+        b = torch.randn(32, 256, dtype=torch.bfloat16)
+        e = torch.randn(256, 64, dtype=torch.bfloat16)
         out = torch.zeros(256, 64)
         ns: dict = {}
         exec(torch_codegen(After), ns)  # noqa: S102 — executing generated reference code is the point
         ns["kernel"](a, b, e, out)
-        expected = (a @ b) @ e
-        assert torch.allclose(out, expected, rtol=1e-3, atol=1e-3), (
-            f"full-K Mat-scratch chained mismatch: max abs diff {(out - expected).abs().max().item():.3e}"
-        )
+        c_bf16 = (a.float() @ b.float()).to(torch.bfloat16).float()  # FIXPIPE downcast
+        expected = c_bf16 @ e.float()
+        rel_err = ((out - expected).norm() / expected.norm()).item()
+        assert rel_err < 5e-2, f"full-K Mat-scratch chained bf16 rel_err {rel_err:.3e} exceeds 5e-2"
 
 
 if __name__ == "__main__":

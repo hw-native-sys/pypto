@@ -65,22 +65,30 @@ def ddr_full_k(a: pl.Tensor, b: pl.Tensor, out: pl.Out[pl.Tensor]):
 def mat_split_k(a: pl.Tensor, b: pl.Tensor, e: pl.Tensor, out: pl.Out[pl.Tensor]):
     """``(a @ b) @ e`` -> **Mat/L1 scratch**, **split-K**. The ``[256,256]`` intermediate
     (> L0c) is consumed on-chip by the second matmul, so it is M/N-tiled into an L1/Mat
-    scratch (Acc->Mat assemble) instead of spilling to DDR; ``K=128`` splits."""
+    scratch instead of spilling to DDR; ``K=128`` splits.
+
+    The intermediate is **bf16** — the cube accumulates in f32 (L0C) and the FIXPIPE
+    writeback to L1 downcasts to bf16/f16 (the only offset Acc->Mat path on A2/A3), which
+    is also the cube's native matmul-operand precision. The explicit ``pl.cast`` is the
+    standard idiom (cf. deepseek); the autotiler fuses it into the per-sub-tile Acc->Mat
+    ``pto.tinsert`` that fills the scratch."""
     with pl.at(level=pl.Level.CORE_GROUP, name_hint="mat_split_k"):
-        c = pl.matmul(a, b, out_dtype=pl.FP32)  # [256, 256] -> Mat scratch (compiler-tiled)
-        d = pl.matmul(c, e, out_dtype=pl.FP32)  # consumes c on-chip
+        c = pl.matmul(a, b, out_dtype=pl.FP32)  # bf16 @ bf16 -> f32 [256, 256] (> L0c)
+        cb = pl.cast(c, pl.BF16)                # FIXPIPE downcast -> bf16 Mat scratch
+        d = pl.matmul(cb, e, out_dtype=pl.FP32)  # consumes the scratch on-chip
         out = pl.assemble(out, d, [0, 0])
     return out
 
 
 @pl.jit
 def mat_full_k(a: pl.Tensor, b: pl.Tensor, e: pl.Tensor, out: pl.Out[pl.Tensor]):
-    """``(a @ b) @ e`` -> **Mat/L1 scratch**, **full-K**. Same chain but ``[256,32] @
-    [32,256]``; ``K=32`` fits L0 (``k == K``), so the Mat-scratch assembles land inside the
-    pipelined full-K nest with loop-variable offsets."""
+    """``(a @ b) @ e`` -> **Mat/L1 scratch**, **full-K**. Same bf16 chain but ``[256,32] @
+    [32,256]``; ``K=32`` fits L0 (``k == K``), so the Mat-scratch ``tinsert``s land inside
+    the pipelined full-K nest with loop-variable offsets."""
     with pl.at(level=pl.Level.CORE_GROUP, name_hint="mat_full_k"):
-        c = pl.matmul(a, b, out_dtype=pl.FP32)
-        d = pl.matmul(c, e, out_dtype=pl.FP32)
+        c = pl.matmul(a, b, out_dtype=pl.FP32)  # bf16 @ bf16 -> f32 [256, 256] (> L0c)
+        cb = pl.cast(c, pl.BF16)                # FIXPIPE downcast -> bf16 Mat scratch
+        d = pl.matmul(cb, e, out_dtype=pl.FP32)
         out = pl.assemble(out, d, [0, 0])
     return out
 
@@ -97,13 +105,17 @@ if __name__ == "__main__":
         fn(a, b, out, config=cfg)
         assert torch.allclose(out, a @ b, rtol=1e-3, atol=1e-3), f"{fn.__name__} mismatch"
 
-    # Mat/L1 scratch: (a @ b) @ e -> [256, 64]; K picks split-K (128) vs full-K (32).
+    # Mat/L1 scratch: (a @ b) @ e -> [256, 64]; bf16 operands, bf16 on-chip intermediate.
+    # K picks split-K (128) vs full-K (32). Golden models the FIXPIPE bf16 downcast of the
+    # intermediate (f32 accumulate -> bf16 L1 -> f32 accumulate), so the tolerance is bf16.
     for fn, K in ((mat_split_k, 128), (mat_full_k, 32)):
-        a = torch.randn(256, K, dtype=torch.float32)
-        b = torch.randn(K, 256, dtype=torch.float32)
-        e = torch.randn(256, 64, dtype=torch.float32)
+        a = torch.randn(256, K, dtype=torch.bfloat16)
+        b = torch.randn(K, 256, dtype=torch.bfloat16)
+        e = torch.randn(256, 64, dtype=torch.bfloat16)
         out = torch.zeros((256, 64), dtype=torch.float32)
         fn(a, b, e, out, config=cfg)
-        assert torch.allclose(out, (a @ b) @ e, rtol=1e-3, atol=1e-3), f"{fn.__name__} mismatch"
+        c_bf16 = (a.float() @ b.float()).to(torch.bfloat16).float()  # FIXPIPE downcast
+        golden = c_bf16 @ e.float()
+        assert torch.allclose(out, golden, rtol=2e-2, atol=2e-2), f"{fn.__name__} mismatch"
 
     print("OK")

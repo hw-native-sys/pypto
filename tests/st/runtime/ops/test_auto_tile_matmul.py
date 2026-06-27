@@ -47,18 +47,23 @@ class TestAutoTileMatmulL0:
 
     @pytest.mark.parametrize("kernel, K", [(mat_split_k, 128), (mat_full_k, 32)])
     def test_mat_scratch(self, test_config, kernel, K):
-        """``(a @ b) @ e`` -> ``[256, 256]`` intermediate kept on-chip in an L1/Mat scratch;
-        split-K (K=128) and full-K (K=32)."""
+        """``(a @ b) @ e`` with a bf16 ``[256, 256]`` intermediate kept on-chip in an
+        L1/Mat scratch (Acc->Mat ``pto.tinsert``); split-K (K=128) and full-K (K=32).
+
+        Operands are bf16 and the on-chip intermediate is bf16 — the cube's FIXPIPE
+        writeback to L1 downcasts the f32 accumulator, which is also the cube's native
+        operand precision. The golden models that downcast, so the tolerance is bf16."""
         kernel._cache.clear()
         torch.manual_seed(0)
-        a = torch.randn(256, K, dtype=torch.float32)
-        b = torch.randn(K, 256, dtype=torch.float32)
-        e = torch.randn(256, 64, dtype=torch.float32)
+        a = torch.randn(256, K, dtype=torch.bfloat16)
+        b = torch.randn(K, 256, dtype=torch.bfloat16)
+        e = torch.randn(256, 64, dtype=torch.bfloat16)
         out = torch.zeros((256, 64), dtype=torch.float32)
 
         kernel(a, b, e, out, config=test_config)
 
-        expected = (a @ b) @ e
-        assert torch.allclose(out, expected, rtol=1e-3, atol=1e-3), (
+        c_bf16 = (a.float() @ b.float()).to(torch.bfloat16).float()  # FIXPIPE downcast
+        expected = c_bf16 @ e.float()
+        assert torch.allclose(out, expected, rtol=2e-2, atol=2e-2), (
             f"{kernel.__name__} (Mat-scratch) max abs diff = {(out - expected).abs().max().item():.3e}"
         )

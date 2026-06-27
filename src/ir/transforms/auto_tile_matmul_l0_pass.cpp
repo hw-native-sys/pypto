@@ -117,6 +117,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -691,6 +692,7 @@ struct SiblingIndex {
   std::unordered_map<const Var*, int> use_counts;
   std::unordered_map<const Var*, int> matmul_operand_uses;  ///< reads at a matmul-operand position
   std::unordered_map<const Var*, const AssignStmt*> store_of;
+  std::unordered_map<const Var*, const AssignStmt*> cast_of;  ///< ``cb = tile.cast(v, dtype)`` by source
 };
 
 SiblingIndex BuildSiblingIndex(const std::vector<StmtPtr>& stmts) {
@@ -701,9 +703,16 @@ SiblingIndex BuildSiblingIndex(const std::vector<StmtPtr>& stmts) {
     auto as = std::dynamic_pointer_cast<const AssignStmt>(s);
     if (!as) continue;
     auto call = As<Call>(as->value_);
+    if (!call || !call->op_) continue;
     // Record top-level 2D ``tile.store(src, offsets, out)`` by source operand.
-    if (!call || !call->op_ || !IsOp(call, "tile.store") || call->args_.size() != 3) continue;
-    if (auto src = AsVarLike(call->args_[0])) idx.store_of.emplace(src.get(), as.get());
+    if (IsOp(call, "tile.store") && call->args_.size() == 3) {
+      if (auto src = AsVarLike(call->args_[0])) idx.store_of.emplace(src.get(), as.get());
+    } else if (IsOp(call, "tile.cast") && !call->args_.empty()) {
+      // Record ``cb = tile.cast(src, dtype)`` by source: a chained matmul whose
+      // result is downcast (Acc f32 -> bf16/f16) before the consumer matmul is
+      // foldable into a low-precision Mat scratch (the cast = FIXPIPE writeback).
+      if (auto src = AsVarLike(call->args_[0])) idx.cast_of.emplace(src.get(), as.get());
+    }
   }
   idx.use_counts = std::move(counter.counts);
   idx.matmul_operand_uses = std::move(counter.matmul_operand_uses);
@@ -1097,6 +1106,7 @@ std::optional<MNFold> TryFoldMNTiling(const MatmulTiling& t, int result_uses, co
 /// stay deferred.
 std::optional<std::pair<std::vector<StmtPtr>, VarPtr>> TryFoldMatScratch(const MatmulTiling& t,
                                                                          int result_uses, int operand_uses,
+                                                                         DataType scratch_dtype,
                                                                          std::vector<Diagnostic>& hints) {
   const Span sp = t.assign->span_;
   // matmul_acc / Vec-left are deferred (the direct-store path already hinted these).
@@ -1104,6 +1114,27 @@ std::optional<std::pair<std::vector<StmtPtr>, VarPtr>> TryFoldMatScratch(const M
   // Every use must be a matmul operand: a non-operand use (store, elementwise,
   // matmul_acc accumulator) means substituting an upstream Mat scratch is illegal.
   if (result_uses < 1 || operand_uses != result_uses) return std::nullopt;
+  // On backends whose only offset Acc->Mat path is the FIXPIPE writeback
+  // (`pto.tinsert`), that path downcasts f32 -> bf16/f16 and cannot keep f32 — a
+  // same-dtype f32 Acc->Mat assemble lowers to subview+tmov, which the assembler
+  // rejects for a partial window. So an oversized chained-matmul scratch must be
+  // bf16/f16 there (the dtype comes from a `tile.cast(result, bf16/f16)` fused
+  // into the assemble, the cube's native operand precision); without it, defer
+  // (left whole) rather than emit an unassemblable f32 Mat scratch. A5's tinsert
+  // accepts dst=f32, so its handler returns false and an f32 scratch is kept.
+  const auto* ctx = PassContext::Current();
+  const auto* handler = ctx ? ctx->GetBackendHandler() : pypto::backend::GetBackend()->GetHandler();
+  const bool requires_low_precision = handler && handler->RequiresLowPrecisionMatScratch();
+  if (requires_low_precision && scratch_dtype != DataType::BF16 && scratch_dtype != DataType::FP16) {
+    hints.emplace_back(DiagnosticSeverity::PerfHint, kPassName, 0, "PH-AT-007",
+                       "chained-matmul [" + std::to_string(t.M) + ", " + std::to_string(t.N) +
+                           "] intermediate is " + scratch_dtype.ToString() +
+                           "; this backend's oversized on-chip Mat scratch needs a bf16/f16 "
+                           "intermediate (cast the matmul result to bf16 before the consumer "
+                           "matmul, the cube's native operand precision) — left on the deferred path",
+                       sp);
+    return std::nullopt;
+  }
   auto result_ty = As<TileType>(t.assign->var_->GetType());
   INTERNAL_CHECK_SPAN(result_ty, sp) << "Internal error: matmul result is not a TileType";
   // Conservative Mat-capacity gate (necessary condition).  MatScratchPlacer::Init
@@ -1115,7 +1146,7 @@ std::optional<std::pair<std::vector<StmtPtr>, VarPtr>> TryFoldMatScratch(const M
   if (pypto::backend::BackendConfig::IsConfigured()) {
     const uint64_t mat_capacity = pypto::backend::GetBackend()->GetMemSize(ir::MemorySpace::Mat);
     const uint64_t scratch_bytes =
-        static_cast<uint64_t>(t.M) * static_cast<uint64_t>(t.N) * DTypeBytes(result_ty->dtype_);
+        static_cast<uint64_t>(t.M) * static_cast<uint64_t>(t.N) * DTypeBytes(scratch_dtype);
     if (mat_capacity > 0 && scratch_bytes > mat_capacity) {
       hints.emplace_back(DiagnosticSeverity::PerfHint, kPassName, 0, "PH-AT-006",
                          "chained-matmul [" + std::to_string(t.M) + ", " + std::to_string(t.N) +
@@ -1127,7 +1158,7 @@ std::optional<std::pair<std::vector<StmtPtr>, VarPtr>> TryFoldMatScratch(const M
     }
   }
   const std::string base = t.assign->var_->name_hint_ + "_mat";
-  MatScratchPlacer placer(t.M, t.N, result_ty->dtype_, base, sp);
+  MatScratchPlacer placer(t.M, t.N, scratch_dtype, base, sp);
   // K-split (K spans >= 2 L0 blocks) → unrolled per-sub-tile K-loop grid; full-K →
   // the pipelined interior + straight-line tail.  Both drive MatScratchPlacer,
   // which assembles each sub-tile into the L1/Mat scratch (tile.assemble accepts
@@ -1148,6 +1179,10 @@ class AutoTileMutator : public IRMutator {
     // return_var.  Scoped to this SeqStmts so substitutions don't leak into
     // sibling regions.
     std::unordered_map<const Var*, VarPtr> remap;
+    // Defs to drop: a downcast ``cb = tile.cast(c, bf16)`` whose matmul+cast was
+    // folded into a low-precision Mat scratch — the scratch already holds the
+    // bf16 intermediate, so the now same-dtype cast is a dead no-op to remove.
+    std::unordered_set<const Var*> dropped;
     // M/N tiling folds the matmul's consumer store into the per-sub-tile
     // rewrite.  We drop the matmul at its own position and emit the sub-tile
     // stmts where the store was (preserving the order of any statements between
@@ -1186,6 +1221,14 @@ class AutoTileMutator : public IRMutator {
         continue;
       }
 
+      // A downcast whose matmul+cast was folded into a Mat scratch (its def is in
+      // ``dropped``): skip it — the scratch already holds the bf16 intermediate and
+      // re-emitting ``cb = tile.cast(scratch_bf16, bf16)`` is an invalid no-op cast.
+      if (auto as = std::dynamic_pointer_cast<const AssignStmt>(child); as && dropped.count(as->var_.get())) {
+        changed = true;
+        continue;
+      }
+
       // Apply the running remap to redirect prior rewrites' downstream uses.
       StmtPtr current = remap.empty() ? child : transform_utils::Substitute(child, remap);
 
@@ -1215,17 +1258,51 @@ class AutoTileMutator : public IRMutator {
           if (!sibling_index) sibling_index = BuildSiblingIndex(op->stmts_);
           const Var* result = assign->var_.get();
           auto uc_it = sibling_index->use_counts.find(result);
-          const int result_uses = uc_it == sibling_index->use_counts.end() ? 0 : uc_it->second;
+          int result_uses = uc_it == sibling_index->use_counts.end() ? 0 : uc_it->second;
           auto mo_it = sibling_index->matmul_operand_uses.find(result);
-          const int operand_uses = mo_it == sibling_index->matmul_operand_uses.end() ? 0 : mo_it->second;
+          int operand_uses = mo_it == sibling_index->matmul_operand_uses.end() ? 0 : mo_it->second;
+          // Mat-scratch dtype + remap target. Default: the matmul result itself at
+          // its own dtype. Chained-matmul-with-downcast — `c -> tile.cast(c,
+          // bf16/f16) -> matmul` — fuses the cast (the cube FIXPIPE writeback,
+          // pto.tinsert) into the scratch: the scratch holds the bf16/f16
+          // intermediate, the per-sub-tile assemble downcasts Acc f32 -> Mat bf16,
+          // and the cast result is remapped to the scratch so the consumer matmul
+          // reads it on-chip (the cast op then goes dead).
+          auto result_tile_ty = As<TileType>(result->GetType());
+          DataType scratch_dtype = result_tile_ty->dtype_;
+          const Var* remap_target = result;
+          const Var* extra_remap = nullptr;
+          if (auto cast_it = sibling_index->cast_of.find(result); cast_it != sibling_index->cast_of.end()) {
+            const Var* cb = cast_it->second->var_.get();
+            auto cb_ty = As<TileType>(cb->GetType());
+            if (cb_ty && (cb_ty->dtype_ == DataType::BF16 || cb_ty->dtype_ == DataType::FP16)) {
+              auto cb_uc = sibling_index->use_counts.find(cb);
+              auto cb_mo = sibling_index->matmul_operand_uses.find(cb);
+              const int cb_uses = cb_uc == sibling_index->use_counts.end() ? 0 : cb_uc->second;
+              const int cb_mm = cb_mo == sibling_index->matmul_operand_uses.end() ? 0 : cb_mo->second;
+              // `c`'s sole use is the cast, whose result is consumed entirely as
+              // matmul operands — fold the matmul+cast into a low-precision scratch.
+              if (result_uses == 1 && cb_uses >= 1 && cb_uses == cb_mm) {
+                scratch_dtype = cb_ty->dtype_;
+                remap_target = cb;     // consumer matmul reads the scratch
+                extra_remap = result;  // c -> scratch too; the cast op goes dead
+                result_uses = cb_uses;
+                operand_uses = cb_mm;
+              }
+            }
+          }
           // Mat-scratch: result consumed entirely on-chip at matmul-operand
           // positions — assemble the sub-tiles into an L1/Mat scratch and remap the
-          // matmul result to it.  Emitted at the matmul site (like the K-only
-          // rewrite), with no store to defer.  Checked before the direct-store fold
-          // so its hints stay clean (a stored result has a non-operand use here).
-          if (auto ms = TryFoldMatScratch(*tiling, result_uses, operand_uses, hints)) {
+          // matmul result (or its downcast) to it.  Emitted at the matmul site
+          // (like the K-only rewrite), with no store to defer.  Checked before the
+          // direct-store fold so its hints stay clean.
+          if (auto ms = TryFoldMatScratch(*tiling, result_uses, operand_uses, scratch_dtype, hints)) {
             for (auto& s : ms->first) out.push_back(std::move(s));
-            remap[assign->var_.get()] = ms->second;
+            remap[remap_target] = ms->second;
+            if (extra_remap) {
+              remap[extra_remap] = ms->second;  // c -> scratch (cast reads the scratch)
+              dropped.insert(remap_target);     // ... and drop the now-dead cast def
+            }
             changed = true;
             continue;
           }
