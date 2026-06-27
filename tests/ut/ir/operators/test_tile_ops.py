@@ -753,6 +753,94 @@ class TestTileReductionOps:
         ir_str = str(Program)
         assert "tile.col_prod" in ir_str
 
+    def test_tile_row_argmax(self):
+        """Test tile.row_argmax (2 args, int32 index output)."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                input: pl.Tensor[[128, 128], pl.FP32],
+                output: pl.Tensor[[128, 1], pl.INT32],
+            ) -> pl.Tensor[[128, 1], pl.INT32]:
+                tile_in: pl.Tile[[32, 128], pl.FP32] = pl.load(input, [0, 0], [32, 128])
+                tmp_tile: pl.Tile[[32, 128], pl.FP32] = pl.tile.create(
+                    [32, 128], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                tile_argmax: pl.Tile[[32, 1], pl.INT32] = pl.row_argmax(tile_in, tmp_tile)
+                result: pl.Tensor[[128, 1], pl.INT32] = pl.store(tile_argmax, [0, 0], output)
+                return result
+
+        ir_str = str(Program)
+        assert "tile.row_argmax" in ir_str
+
+    def test_tile_row_argmin(self):
+        """Test tile.row_argmin (2 args, int32 index output)."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                input: pl.Tensor[[128, 128], pl.FP32],
+                output: pl.Tensor[[128, 1], pl.INT32],
+            ) -> pl.Tensor[[128, 1], pl.INT32]:
+                tile_in: pl.Tile[[32, 128], pl.FP32] = pl.load(input, [0, 0], [32, 128])
+                tmp_tile: pl.Tile[[32, 128], pl.FP32] = pl.tile.create(
+                    [32, 128], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                tile_argmin: pl.Tile[[32, 1], pl.INT32] = pl.row_argmin(tile_in, tmp_tile)
+                result: pl.Tensor[[128, 1], pl.INT32] = pl.store(tile_argmin, [0, 0], output)
+                return result
+
+        ir_str = str(Program)
+        assert "tile.row_argmin" in ir_str
+
+    def test_tile_col_argmax(self):
+        """Test tile.col_argmax (2 args incl. tmp, int32 index output)."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                input: pl.Tensor[[128, 128], pl.FP32],
+                output: pl.Tensor[[1, 128], pl.INT32],
+            ) -> pl.Tensor[[1, 128], pl.INT32]:
+                tile_in: pl.Tile[[32, 128], pl.FP32] = pl.load(input, [0, 0], [32, 128])
+                tmp_tile: pl.Tile[[32, 128], pl.FP32] = pl.tile.create(
+                    [32, 128], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                tile_argmax: pl.Tile[[1, 128], pl.INT32] = pl.col_argmax(tile_in, tmp_tile)
+                result: pl.Tensor[[1, 128], pl.INT32] = pl.store(tile_argmax, [0, 0], output)
+                return result
+
+        ir_str = str(Program)
+        assert "tile.col_argmax" in ir_str
+
+    def test_tile_col_argmin(self):
+        """Test tile.col_argmin (2 args incl. tmp, int32 index output)."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                input: pl.Tensor[[128, 128], pl.FP32],
+                output: pl.Tensor[[1, 128], pl.INT32],
+            ) -> pl.Tensor[[1, 128], pl.INT32]:
+                tile_in: pl.Tile[[32, 128], pl.FP32] = pl.load(input, [0, 0], [32, 128])
+                tmp_tile: pl.Tile[[32, 128], pl.FP32] = pl.tile.create(
+                    [32, 128], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                tile_argmin: pl.Tile[[1, 128], pl.INT32] = pl.col_argmin(tile_in, tmp_tile)
+                result: pl.Tensor[[1, 128], pl.INT32] = pl.store(tile_argmin, [0, 0], output)
+                return result
+
+        ir_str = str(Program)
+        assert "tile.col_argmin" in ir_str
+
     def test_tile_min_axis0(self):
         """Test tile.min operator - min along axis 0 (column-wise)."""
 

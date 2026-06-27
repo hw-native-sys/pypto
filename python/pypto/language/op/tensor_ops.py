@@ -57,6 +57,10 @@ __all__ = [
     "col_max",
     "col_min",
     "col_prod",
+    "row_argmax",
+    "row_argmin",
+    "col_argmax",
+    "col_argmin",
     "row_expand",
     "row_expand_mul",
     "row_expand_div",
@@ -960,6 +964,70 @@ def col_prod(input: Tensor) -> Tensor:
     """
     input_expr = input.unwrap()
     call_expr = _ir_ops.col_prod(input_expr)
+    return Tensor(expr=call_expr)
+
+
+def row_argmax(input: Tensor) -> Tensor:
+    """Row-wise argmax: index of the per-row maximum (int32, reduces along last axis).
+
+    Output shape is ``[..., M, 1]`` for an input of shape ``[..., M, N]``.
+
+    Args:
+        input: Input tensor
+
+    Returns:
+        Tensor wrapping the row_argmax operation
+    """
+    input_expr = input.unwrap()
+    call_expr = _ir_ops.row_argmax(input_expr)
+    return Tensor(expr=call_expr)
+
+
+def row_argmin(input: Tensor) -> Tensor:
+    """Row-wise argmin: index of the per-row minimum (int32, reduces along last axis).
+
+    Output shape is ``[..., M, 1]`` for an input of shape ``[..., M, N]``.
+
+    Args:
+        input: Input tensor
+
+    Returns:
+        Tensor wrapping the row_argmin operation
+    """
+    input_expr = input.unwrap()
+    call_expr = _ir_ops.row_argmin(input_expr)
+    return Tensor(expr=call_expr)
+
+
+def col_argmax(input: Tensor) -> Tensor:
+    """Column-wise argmax: index of the per-column maximum (int32, reduces along axis=-2).
+
+    Output shape is ``[..., 1, N]`` for an input of shape ``[..., M, N]``.
+
+    Args:
+        input: Input tensor
+
+    Returns:
+        Tensor wrapping the col_argmax operation
+    """
+    input_expr = input.unwrap()
+    call_expr = _ir_ops.col_argmax(input_expr)
+    return Tensor(expr=call_expr)
+
+
+def col_argmin(input: Tensor) -> Tensor:
+    """Column-wise argmin: index of the per-column minimum (int32, reduces along axis=-2).
+
+    Output shape is ``[..., 1, N]`` for an input of shape ``[..., M, N]``.
+
+    Args:
+        input: Input tensor
+
+    Returns:
+        Tensor wrapping the col_argmin operation
+    """
+    input_expr = input.unwrap()
+    call_expr = _ir_ops.col_argmin(input_expr)
     return Tensor(expr=call_expr)
 
 

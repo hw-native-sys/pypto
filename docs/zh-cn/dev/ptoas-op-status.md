@@ -166,10 +166,10 @@
 | pto.ttri | TTRI | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (王淼) |
 | pto.tget_scale_addr | TGET_SCALE_ADDR | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (王淼) |
 | pto.tprefetch | TPREFETCH | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (infra, skip) |
-| pto.trowargmax | TROWARGMAX | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (王淼) |
-| pto.trowargmin | TROWARGMIN | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (王淼) |
-| pto.tcolargmax | TCOLARGMAX | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (王淼) |
-| pto.tcolargmin | TCOLARGMIN | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (王淼) |
+| pto.trowargmax | TROWARGMAX | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | int32 索引输出 + tmp tile；真机 a2a3 已验证 (feat-add-ptoas-argmax) |
+| pto.trowargmin | TROWARGMIN | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | int32 索引输出 + tmp tile；真机 a2a3 已验证 (feat-add-ptoas-argmax) |
+| pto.tcolargmax | TCOLARGMAX | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | int32 索引输出 + tmp tile（tmp 必须与 src 同形，不可补到 128）；真机 a2a3 已验证 (feat-add-ptoas-argmax) |
+| pto.tcolargmin | TCOLARGMIN | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | int32 索引输出 + tmp tile（tmp 必须与 src 同形）；真机 a2a3 已验证 (feat-add-ptoas-argmax) |
 | pto.tpartargmax | TPARTARGMAX | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (方锐) |
 | pto.tpartargmin | TPARTARGMIN | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (方锐) |
 | **手动模式** |  |  |  |  |  |  |  |  |

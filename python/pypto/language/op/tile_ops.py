@@ -76,6 +76,10 @@ __all__ = [
     "col_max",
     "col_min",
     "col_prod",
+    "row_argmax",
+    "row_argmin",
+    "col_argmax",
+    "col_argmin",
     "maximum",
     "row_expand",
     "row_expand_sub",
@@ -1164,6 +1168,62 @@ def col_prod(tile: Tile) -> Tile:
         Tile wrapping the col_prod operation
     """
     call_expr = _ir_ops.col_prod(tile.unwrap())
+    return Tile(expr=call_expr)
+
+
+def row_argmax(tile: Tile, tmp_tile: Tile) -> Tile:
+    """Row-wise argmax (column index of the per-row maximum, int32 output).
+
+    Args:
+        tile: Input tile
+        tmp_tile: Temporary tile
+
+    Returns:
+        Tile wrapping the row_argmax operation
+    """
+    call_expr = _ir_ops.row_argmax(tile.unwrap(), tmp_tile.unwrap())
+    return Tile(expr=call_expr)
+
+
+def row_argmin(tile: Tile, tmp_tile: Tile) -> Tile:
+    """Row-wise argmin (column index of the per-row minimum, int32 output).
+
+    Args:
+        tile: Input tile
+        tmp_tile: Temporary tile
+
+    Returns:
+        Tile wrapping the row_argmin operation
+    """
+    call_expr = _ir_ops.row_argmin(tile.unwrap(), tmp_tile.unwrap())
+    return Tile(expr=call_expr)
+
+
+def col_argmax(tile: Tile, tmp_tile: Tile) -> Tile:
+    """Column-wise argmax (row index of the per-column maximum, int32 output).
+
+    Args:
+        tile: Input tile
+        tmp_tile: Temporary tile
+
+    Returns:
+        Tile wrapping the col_argmax operation
+    """
+    call_expr = _ir_ops.col_argmax(tile.unwrap(), tmp_tile.unwrap())
+    return Tile(expr=call_expr)
+
+
+def col_argmin(tile: Tile, tmp_tile: Tile) -> Tile:
+    """Column-wise argmin (row index of the per-column minimum, int32 output).
+
+    Args:
+        tile: Input tile
+        tmp_tile: Temporary tile
+
+    Returns:
+        Tile wrapping the col_argmin operation
+    """
+    call_expr = _ir_ops.col_argmin(tile.unwrap(), tmp_tile.unwrap())
     return Tile(expr=call_expr)
 
 

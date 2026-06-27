@@ -323,6 +323,88 @@ def test_tensor_col_prod():
     assert isinstance(result_type.shape[1], ir.ConstInt) and result_type.shape[1].value == 128
 
 
+def test_tensor_row_argmax():
+    """tensor.row_argmax reduces the last axis (keepdim) with an int32 index output."""
+    span = ir.Span.unknown()
+
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP16)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    call = ir.op.tensor.row_argmax(tensor_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.row_argmax"
+
+    # Row reduction collapses the last axis (keepdim): [64, 128] -> [64, 1]; dtype -> int32.
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.INT32
+    assert len(result_type.shape) == 2
+    assert isinstance(result_type.shape[0], ir.ConstInt) and result_type.shape[0].value == 64
+    assert isinstance(result_type.shape[1], ir.ConstInt) and result_type.shape[1].value == 1
+
+
+def test_tensor_row_argmin():
+    """tensor.row_argmin mirrors row_argmax: last-axis reduce, int32 index output."""
+    span = ir.Span.unknown()
+
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP32)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    call = ir.op.tensor.row_argmin(tensor_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.row_argmin"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.INT32
+
+
+def test_tensor_col_argmax():
+    """tensor.col_argmax reduces axis=-2 (keepdim) with an int32 index output."""
+    span = ir.Span.unknown()
+
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP16)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    call = ir.op.tensor.col_argmax(tensor_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.col_argmax"
+
+    # Column reduction collapses axis=-2 (keepdim): [64, 128] -> [1, 128]; dtype -> int32.
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.INT32
+    assert len(result_type.shape) == 2
+    assert isinstance(result_type.shape[0], ir.ConstInt) and result_type.shape[0].value == 1
+    assert isinstance(result_type.shape[1], ir.ConstInt) and result_type.shape[1].value == 128
+
+
+def test_tensor_col_argmin():
+    """tensor.col_argmin mirrors col_argmax: axis=-2 reduce, int32 index output."""
+    span = ir.Span.unknown()
+
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP32)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    call = ir.op.tensor.col_argmin(tensor_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.col_argmin"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.INT32
+
+
 def test_tensor_col_max():
     """tensor.col_max reduces axis=-2 (the M dim of [..., M, N]) with keepdim=True."""
     span = ir.Span.unknown()

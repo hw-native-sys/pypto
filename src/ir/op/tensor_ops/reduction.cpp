@@ -20,6 +20,7 @@
 #include <any>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -48,9 +49,11 @@ T GetKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs, const st
   return default_value;
 }
 
+// `out_dtype` overrides the output element type — used by argmax/argmin index output (int32).
 TypePtr DeduceTensorReductionType(const std::vector<ExprPtr>& args,
                                   const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                  const std::string& op_name) {
+                                  const std::string& op_name,
+                                  std::optional<DataType> out_dtype = std::nullopt) {
   // Reduction operations require exactly 1 argument (input tensor)
   CHECK(args.size() == 1) << "The operator " << op_name << " requires exactly 1 argument, but got "
                           << args.size();
@@ -93,10 +96,10 @@ TypePtr DeduceTensorReductionType(const std::vector<ExprPtr>& args,
 
   // If output shape is empty (all dimensions reduced and keep_dim=false), return ScalarType
   if (output_shape.empty()) {
-    return std::make_shared<ScalarType>(tensor_type->dtype_);
+    return std::make_shared<ScalarType>(out_dtype.value_or(tensor_type->dtype_));
   }
 
-  return std::make_shared<TensorType>(output_shape, tensor_type->dtype_);
+  return std::make_shared<TensorType>(output_shape, out_dtype.value_or(tensor_type->dtype_));
 }
 
 // ============================================================================
@@ -151,7 +154,8 @@ REGISTER_OP("tensor.row_prod")
 // the reduced axis to -2 (the column axis), matching tile.col_sum's [..., 1, N] output shape.
 TypePtr DeduceTensorColReductionType(const std::vector<ExprPtr>& args,
                                      const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                     const std::string& op_name) {
+                                     const std::string& op_name,
+                                     std::optional<DataType> out_dtype = std::nullopt) {
   CHECK(args.size() == 1) << "The operator " << op_name << " requires exactly 1 argument, but got "
                           << args.size();
 
@@ -187,9 +191,9 @@ TypePtr DeduceTensorColReductionType(const std::vector<ExprPtr>& args,
   }
 
   if (output_shape.empty()) {
-    return std::make_shared<ScalarType>(tensor_type->dtype_);
+    return std::make_shared<ScalarType>(out_dtype.value_or(tensor_type->dtype_));
   }
-  return std::make_shared<TensorType>(output_shape, tensor_type->dtype_);
+  return std::make_shared<TensorType>(output_shape, out_dtype.value_or(tensor_type->dtype_));
 }
 
 REGISTER_OP("tensor.col_sum")
@@ -234,6 +238,54 @@ REGISTER_OP("tensor.col_prod")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorColReductionType(args, kwargs, "tensor.col_prod");
+    });
+
+// ============================================================================
+// Argmax / argmin reductions (index-typed int32 output)
+// ============================================================================
+
+REGISTER_OP("tensor.row_argmax")
+    .set_op_category("TensorOp")
+    .set_description("Row-wise argmax: index of the per-row maximum along specified axis")
+    .add_argument("input", "Input tensor (TensorType)")
+    .set_attr<int>("axis")
+    .set_attr<bool>("keep_dim")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorReductionType(args, kwargs, "tensor.row_argmax", DataType(DataType::INT32));
+    });
+
+REGISTER_OP("tensor.row_argmin")
+    .set_op_category("TensorOp")
+    .set_description("Row-wise argmin: index of the per-row minimum along specified axis")
+    .add_argument("input", "Input tensor (TensorType)")
+    .set_attr<int>("axis")
+    .set_attr<bool>("keep_dim")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorReductionType(args, kwargs, "tensor.row_argmin", DataType(DataType::INT32));
+    });
+
+REGISTER_OP("tensor.col_argmax")
+    .set_op_category("TensorOp")
+    .set_description("Column-wise argmax: index of the per-column maximum (reduces along axis=-2 by default)")
+    .add_argument("input", "Input tensor (TensorType)")
+    .set_attr<int>("axis")
+    .set_attr<bool>("keep_dim")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorColReductionType(args, kwargs, "tensor.col_argmax", DataType(DataType::INT32));
+    });
+
+REGISTER_OP("tensor.col_argmin")
+    .set_op_category("TensorOp")
+    .set_description("Column-wise argmin: index of the per-column minimum (reduces along axis=-2 by default)")
+    .add_argument("input", "Input tensor (TensorType)")
+    .set_attr<int>("axis")
+    .set_attr<bool>("keep_dim")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorColReductionType(args, kwargs, "tensor.col_argmin", DataType(DataType::INT32));
     });
 
 }  // namespace ir

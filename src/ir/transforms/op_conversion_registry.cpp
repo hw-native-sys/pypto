@@ -948,6 +948,37 @@ void OpConversionRegistry::RegisterReductionOps() {
     };
   };
 
+  // Argmax/argmin require a tmp tile shaped EXACTLY like the source (the pto-isa
+  // TROWARGMAX/TCOLARGMAX kernels read the column count from the tmp/src extent).
+  // Unlike the row_sum-style scratch above, the last dim must NOT be padded to
+  // 128 — a wider tmp makes the column argmax iterate past the valid columns and
+  // return the last-row index for every column.
+  auto MakeArgReductionConv = [](const std::string& tile_op) -> ConversionFunc {
+    return [tile_op](const std::vector<ExprPtr>& args,
+                     const std::vector<std::pair<std::string, std::any>>& kwargs,
+                     const Span& span) -> ConversionResult {
+      INTERNAL_CHECK_SPAN(args.size() == 1, span) << tile_op << " conversion expects 1 arg (input tile)";
+      auto& op_reg = OpRegistry::GetInstance();
+
+      const auto& input = args[0];
+      auto tile_type = As<TileType>(input->GetType());
+      INTERNAL_CHECK_SPAN(tile_type, span)
+          << tile_op << " conversion: input must be TileType, got " << input->GetType()->TypeName();
+
+      auto shape_tuple = std::make_shared<MakeTuple>(tile_type->shape_, span);
+      std::vector<std::pair<std::string, std::any>> create_kwargs = {{"dtype", tile_type->dtype_},
+                                                                     {"target_memory", MemorySpace::Vec}};
+      auto create_call = op_reg.Create("tile.create", {shape_tuple}, create_kwargs, span);
+
+      auto tmp_var = std::make_shared<Var>("tmp_tile", create_call->GetType(), span);
+      std::vector<StmtPtr> prologue;
+      prologue.push_back(std::make_shared<AssignStmt>(tmp_var, create_call, span));
+
+      auto reduction_call = op_reg.Create(tile_op, {input, tmp_var}, span);
+      return ConversionResult{std::move(prologue), reduction_call};
+    };
+  };
+
   RegisterCustom("tensor.row_max", MakeReductionConv("tile.row_max"));
   RegisterCustom("tensor.row_sum", MakeReductionConv("tile.row_sum"));
   RegisterCustom("tensor.row_min", MakeReductionConv("tile.row_min"));
@@ -960,6 +991,13 @@ void OpConversionRegistry::RegisterReductionOps() {
   RegisterSimple("tensor.col_max", "tile.col_max");
   RegisterSimple("tensor.col_min", "tile.col_min");
   RegisterSimple("tensor.col_prod", "tile.col_prod");
+
+  // Argmax/argmin all require a tmp scratch tile (including the column variants,
+  // unlike col_max/col_min), sized exactly like the source (no 128 padding).
+  RegisterCustom("tensor.row_argmax", MakeArgReductionConv("tile.row_argmax"));
+  RegisterCustom("tensor.row_argmin", MakeArgReductionConv("tile.row_argmin"));
+  RegisterCustom("tensor.col_argmax", MakeArgReductionConv("tile.col_argmax"));
+  RegisterCustom("tensor.col_argmin", MakeArgReductionConv("tile.col_argmin"));
 }
 
 // ============================================================================

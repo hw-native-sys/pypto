@@ -2364,6 +2364,11 @@ static const SimpleOpEntry kSimpleOps[] = {
     {"tile.col_max",         "pto.tcolmax",          1},
     {"tile.col_min",         "pto.tcolmin",          1},
     {"tile.col_prod",        "pto.tcolprod",         1},
+    // Argmax/argmin reductions — int32 index output, require a tmp scratch tile.
+    {"tile.row_argmax",      "pto.trowargmax",       2},
+    {"tile.row_argmin",      "pto.trowargmin",       2},
+    {"tile.col_argmax",      "pto.tcolargmax",       2},
+    {"tile.col_argmin",      "pto.tcolargmin",       2},
     {"tile.col_expand_mul",  "pto.tcolexpandmul",    2},
     {"tile.col_expand_add",  "pto.tcolexpandadd",    2},
     {"tile.col_expand_max",  "pto.tcolexpandmax",    2},

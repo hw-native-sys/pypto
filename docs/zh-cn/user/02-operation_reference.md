@@ -35,6 +35,10 @@
 | `col_max` | `(input: T) -> T` | 列最大值 |
 | `col_min` | `(input: T) -> T` | 列最小值 |
 | `col_prod` | `(input: T) -> T` | 列乘积 |
+| `row_argmax` | `(input: T, tmp_tile: Tile \| None = None) -> T` | 行 argmax（每行最大值的列索引，int32 输出；tile 路径需要 `tmp_tile`） |
+| `row_argmin` | `(input: T, tmp_tile: Tile \| None = None) -> T` | 行 argmin（每行最小值的列索引，int32 输出；tile 路径需要 `tmp_tile`） |
+| `col_argmax` | `(input: T, tmp_tile: Tile \| None = None) -> T` | 列 argmax（每列最大值的行索引，int32 输出；tile 路径需要 `tmp_tile`） |
+| `col_argmin` | `(input: T, tmp_tile: Tile \| None = None) -> T` | 列 argmin（每列最小值的行索引，int32 输出；tile 路径需要 `tmp_tile`） |
 | `rsqrt` | `(input: T, high_precision: bool = False) -> T` | 倒数平方根；`high_precision=True` 选择高精度路径（仅对 Tensor 输入生效，Tile 路径需要改用 `pl.tile.rsqrt(src, tmp=...)`） |
 | `create` / `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: Mem) -> Tile` | 在指定内存空间创建 tile（tile-only，对应 `pl.tile.create`） |
 
@@ -74,6 +78,10 @@
 | `col_max` | `(input: Tensor) -> Tensor` | 列最大值归约（沿 axis=-2） |
 | `col_min` | `(input: Tensor) -> Tensor` | 列最小值归约（沿 axis=-2） |
 | `col_prod` | `(input: Tensor) -> Tensor` | 列乘积归约（沿 axis=-2） |
+| `row_argmax` | `(input: Tensor) -> Tensor` | 行 argmax 归约（int32 索引输出） |
+| `row_argmin` | `(input: Tensor) -> Tensor` | 行 argmin 归约（int32 索引输出） |
+| `col_argmax` | `(input: Tensor) -> Tensor` | 列 argmax 归约（沿 axis=-2，int32 索引输出） |
+| `col_argmin` | `(input: Tensor) -> Tensor` | 列 argmin 归约（沿 axis=-2，int32 索引输出） |
 | `rsqrt` | `(input: Tensor, high_precision: bool = False) -> Tensor` | 逐元素倒数平方根；`high_precision=True` 时编译器在下沉阶段分配临时 tile，启用高精度 PTO 路径（要求 tile 形状是编译期常量，与 `row_max`/`row_sum` 限制一致） |
 | `exp` | `(input: Tensor) -> Tensor` | 逐元素指数 |
 | `cast` | `(input: Tensor, target_type: DataType, mode="round") -> Tensor` | 类型转换 |
@@ -153,6 +161,10 @@
 | `col_max` | `(tile: Tile) -> Tile` | 列最大值 |
 | `col_min` | `(tile: Tile) -> Tile` | 列最小值 |
 | `col_prod` | `(tile: Tile) -> Tile` | 列乘积 |
+| `row_argmax` | `(tile: Tile, tmp_tile: Tile) -> Tile` | 行 argmax，每行最大值的列索引（需要临时缓冲区，int32 输出） |
+| `row_argmin` | `(tile: Tile, tmp_tile: Tile) -> Tile` | 行 argmin，每行最小值的列索引（需要临时缓冲区，int32 输出） |
+| `col_argmax` | `(tile: Tile, tmp_tile: Tile) -> Tile` | 列 argmax，每列最大值的行索引（需要临时缓冲区，int32 输出） |
+| `col_argmin` | `(tile: Tile, tmp_tile: Tile) -> Tile` | 列 argmin，每列最小值的行索引（需要临时缓冲区，int32 输出） |
 | `sum` | `(tile: Tile, axis: int, keepdim: bool = False) -> Tile` | 沿轴求和 |
 | `max` | `(tile: Tile \| Scalar, axis: int \| Scalar = 0, keepdim: bool = False) -> Tile \| Scalar` | 沿轴取最大值 |
 | `min` | `(tile: Tile \| Scalar, axis: int \| Scalar = 0, keepdim: bool = False) -> Tile \| Scalar` | 沿轴取最小值 |

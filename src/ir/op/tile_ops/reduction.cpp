@@ -128,10 +128,13 @@ TypePtr DeduceTileReductionType(const std::vector<ExprPtr>& args,
                                     std::move(tile_view));
 }
 
-// Type deduction for row reduction operations (reduces along last axis with keepdim=True)
+// Type deduction for row reduction operations (reduces along last axis with keepdim=True).
+// `out_dtype` overrides the output element type — used by argmax/argmin, whose index output
+// is int32 rather than the source dtype.
 TypePtr DeduceTileRowReductionType(const std::vector<ExprPtr>& args,
                                    const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                   const std::string& op_name) {
+                                   const std::string& op_name,
+                                   std::optional<DataType> out_dtype = std::nullopt) {
   // tile.row_max and tile.row_sum require 2 arguments (tile and tmp_tile)
   CHECK(args.size() == 2) << "The operator " << op_name << " requires 2 arguments, but got " << args.size();
 
@@ -162,16 +165,18 @@ TypePtr DeduceTileRowReductionType(const std::vector<ExprPtr>& args,
   TileView tile_view;
   tile_view.blayout = TileLayout::col_major;
   tile_view.valid_shape = std::move(output_valid);
-  return std::make_shared<TileType>(std::move(output_shape), tile_type->dtype_, std::nullopt,
-                                    std::move(tile_view));
+  return std::make_shared<TileType>(std::move(output_shape), out_dtype.value_or(tile_type->dtype_),
+                                    std::nullopt, std::move(tile_view));
 }
 
-// Type deduction for column reduction operations (reduces along first axis with keepdim=True)
+// Type deduction for column reduction operations (reduces along first axis with keepdim=True).
+// `out_dtype` overrides the output element type — used by argmax/argmin index output (int32).
 // col_sum accepts 1 arg (sequential) or 2 args (tile + tmp_tile for binary-tree reduction).
 // col_max and col_min require 1 argument.
 TypePtr DeduceTileColReductionType(const std::vector<ExprPtr>& args,
                                    const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                   const std::string& op_name) {
+                                   const std::string& op_name,
+                                   std::optional<DataType> out_dtype = std::nullopt) {
   // First argument must be TileType
   auto tile_type = As<TileType>(args[0]->GetType());
   CHECK(tile_type) << "The operator " << op_name << " requires first argument to be a TileType, but got "
@@ -198,8 +203,8 @@ TypePtr DeduceTileColReductionType(const std::vector<ExprPtr>& args,
   TileView tile_view;
   tile_view.blayout = TileLayout::row_major;
   tile_view.valid_shape = std::move(output_valid);
-  return std::make_shared<TileType>(std::move(output_shape), tile_type->dtype_, std::nullopt,
-                                    std::move(tile_view));
+  return std::make_shared<TileType>(std::move(output_shape), out_dtype.value_or(tile_type->dtype_),
+                                    std::nullopt, std::move(tile_view));
 }
 
 // ============================================================================
@@ -379,6 +384,64 @@ REGISTER_OP("tile.col_prod")
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       CHECK(args.size() == 1) << "The operator tile.col_prod requires 1 argument, but got " << args.size();
       return DeduceTileColReductionType(args, kwargs, "tile.col_prod");
+    });
+
+// ============================================================================
+// Argmax / argmin reductions (index-typed int32 output, requires a tmp tile)
+// ============================================================================
+
+REGISTER_OP("tile.row_argmax")
+    .set_op_category("TileOp")
+    .set_description("Row-wise argmax: column index of the per-row maximum (maps to TROWARGMAX)")
+    .add_argument("tile", "Input tile (TileType)")
+    .add_argument("tmp_tile", "Temporary tile (TileType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileRowReductionType(args, kwargs, "tile.row_argmax", DataType(DataType::INT32));
+    });
+
+REGISTER_OP("tile.row_argmin")
+    .set_op_category("TileOp")
+    .set_description("Row-wise argmin: column index of the per-row minimum (maps to TROWARGMIN)")
+    .add_argument("tile", "Input tile (TileType)")
+    .add_argument("tmp_tile", "Temporary tile (TileType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileRowReductionType(args, kwargs, "tile.row_argmin", DataType(DataType::INT32));
+    });
+
+REGISTER_OP("tile.col_argmax")
+    .set_op_category("TileOp")
+    .set_description("Column-wise argmax: row index of the per-column maximum (maps to TCOLARGMAX)")
+    .add_argument("tile", "Input tile (TileType)")
+    .add_argument("tmp_tile", "Temporary tile (TileType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      CHECK(args.size() == 2) << "The operator tile.col_argmax requires 2 arguments, but got " << args.size();
+      return DeduceTileColReductionType(args, kwargs, "tile.col_argmax", DataType(DataType::INT32));
+    });
+
+REGISTER_OP("tile.col_argmin")
+    .set_op_category("TileOp")
+    .set_description("Column-wise argmin: row index of the per-column minimum (maps to TCOLARGMIN)")
+    .add_argument("tile", "Input tile (TileType)")
+    .add_argument("tmp_tile", "Temporary tile (TileType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      CHECK(args.size() == 2) << "The operator tile.col_argmin requires 2 arguments, but got " << args.size();
+      return DeduceTileColReductionType(args, kwargs, "tile.col_argmin", DataType(DataType::INT32));
     });
 
 }  // namespace ir

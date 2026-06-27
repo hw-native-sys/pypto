@@ -71,6 +71,10 @@ __all__ = [
     "col_max",
     "col_min",
     "col_prod",
+    "row_argmax",
+    "row_argmin",
+    "col_argmax",
+    "col_argmin",
     "cast",
     "cmp",
     "set_validshape",
@@ -862,6 +866,66 @@ def col_prod(input: T) -> T:
     if isinstance(input, Tile):
         return _tile.col_prod(input)
     _raise_type_dispatch_error("col_prod", input)
+
+
+def row_argmax(input: T, tmp_tile: Tile | None = None) -> T:
+    """Row-wise argmax (per-row max index, int32), dispatched by input type.
+
+    For Tile inputs, tmp_tile is required as a temporary buffer.
+    For Tensor inputs, tmp_tile is ignored.
+    """
+    if isinstance(input, Tensor):
+        return _tensor.row_argmax(input)
+    if isinstance(input, Tile):
+        if tmp_tile is None:
+            raise ValueError("row_argmax on Tile requires tmp_tile argument")
+        return _tile.row_argmax(input, tmp_tile)
+    raise TypeError(f"pl.row_argmax: expected Tensor or Tile, got {type(input).__name__}")
+
+
+def row_argmin(input: T, tmp_tile: Tile | None = None) -> T:
+    """Row-wise argmin (per-row min index, int32), dispatched by input type.
+
+    For Tile inputs, tmp_tile is required as a temporary buffer.
+    For Tensor inputs, tmp_tile is ignored.
+    """
+    if isinstance(input, Tensor):
+        return _tensor.row_argmin(input)
+    if isinstance(input, Tile):
+        if tmp_tile is None:
+            raise ValueError("row_argmin on Tile requires tmp_tile argument")
+        return _tile.row_argmin(input, tmp_tile)
+    raise TypeError(f"pl.row_argmin: expected Tensor or Tile, got {type(input).__name__}")
+
+
+def col_argmax(input: T, tmp_tile: Tile | None = None) -> T:
+    """Column-wise argmax (per-column max index, int32), dispatched by input type.
+
+    For Tile inputs, tmp_tile is required (unlike col_max). For Tensor inputs,
+    the conversion injects the tmp tile.
+    """
+    if isinstance(input, Tensor):
+        return _tensor.col_argmax(input)
+    if isinstance(input, Tile):
+        if tmp_tile is None:
+            raise ValueError("col_argmax on Tile requires tmp_tile argument")
+        return _tile.col_argmax(input, tmp_tile)
+    raise TypeError(f"pl.col_argmax: expected Tensor or Tile, got {type(input).__name__}")
+
+
+def col_argmin(input: T, tmp_tile: Tile | None = None) -> T:
+    """Column-wise argmin (per-column min index, int32), dispatched by input type.
+
+    For Tile inputs, tmp_tile is required (unlike col_min). For Tensor inputs,
+    the conversion injects the tmp tile.
+    """
+    if isinstance(input, Tensor):
+        return _tensor.col_argmin(input)
+    if isinstance(input, Tile):
+        if tmp_tile is None:
+            raise ValueError("col_argmin on Tile requires tmp_tile argument")
+        return _tile.col_argmin(input, tmp_tile)
+    raise TypeError(f"pl.col_argmin: expected Tensor or Tile, got {type(input).__name__}")
 
 
 @overload

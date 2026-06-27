@@ -163,14 +163,16 @@ bool IsReduceOnSplitAxis(const CallPtr& call, int split_dim) {
     return std::dynamic_pointer_cast<const TileType>(call->args_[0]->GetType());
   };
 
-  if (name == "tile.row_sum" || name == "tile.row_max" || name == "tile.row_min" || name == "tile.row_prod") {
+  if (name == "tile.row_sum" || name == "tile.row_max" || name == "tile.row_min" || name == "tile.row_prod" ||
+      name == "tile.row_argmax" || name == "tile.row_argmin") {
     auto tt = input_tile_type();
     int last_axis = tt ? static_cast<int>(tt->shape_.size()) - 1 : 1;
     return split_dim == last_axis;
   }
   // Column reductions collapse the first axis (axis 0). Splitting on that axis
   // (SplitMode::UpDown) would leave each lane with a partial reduction.
-  if (name == "tile.col_sum" || name == "tile.col_max" || name == "tile.col_min" || name == "tile.col_prod") {
+  if (name == "tile.col_sum" || name == "tile.col_max" || name == "tile.col_min" || name == "tile.col_prod" ||
+      name == "tile.col_argmax" || name == "tile.col_argmin") {
     return split_dim == 0;
   }
   if (name == "tile.sum" || name == "tile.max" || name == "tile.min") {

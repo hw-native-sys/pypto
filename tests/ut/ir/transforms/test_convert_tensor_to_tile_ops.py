@@ -684,6 +684,42 @@ class TestConvertTensorToTileOps:
         )
         _assert_convert_equal(before, expected)
 
+    @pytest.mark.parametrize(
+        ("op_name", "tensor_op", "tile_op"),
+        [
+            ("row_argmax", tensor_ops.row_argmax, tile_ops.row_argmax),
+            ("row_argmin", tensor_ops.row_argmin, tile_ops.row_argmin),
+            ("col_argmax", tensor_ops.col_argmax, tile_ops.col_argmax),
+            ("col_argmin", tensor_ops.col_argmin, tile_ops.col_argmin),
+        ],
+    )
+    def test_argmax_family_injects_tmp(self, op_name, tensor_op, tile_op):
+        """tensor.<arg*> lowers to a tmp-tile create + 2-arg tile.<arg*> with int32 output.
+
+        Unlike col_max/col_min, the column argmax/argmin variants also require the
+        tmp scratch tile. The tmp is sized exactly like the input (NOT padded to
+        128 like the row_sum-style scratch), dtype matching the input (FP32).
+        """
+        out_shape = [32, 1] if op_name.startswith("row") else [1, 64]
+
+        def expected_body(ib, tiles):
+            tmp = ib.let("tmp_tile", tile_ops.create([32, 64], DataType.FP32))
+            return ib.let("y_tile", tile_op(tiles[0], tmp))
+
+        before = _make_before(
+            in_specs=[("x", [32, 64], DataType.FP32)],
+            out_shape=out_shape,
+            out_dtype=DataType.INT32,
+            body=lambda ib, ins: ib.let("y", tensor_op(ins[0])),
+        )
+        expected = _make_expected(
+            in_specs=[("x", [32, 64], DataType.FP32)],
+            out_shape=out_shape,
+            out_dtype=DataType.INT32,
+            body=expected_body,
+        )
+        _assert_convert_equal(before, expected)
+
     @pytest.mark.parametrize(("op_name", "tensor_op", "tile_op"), _ROW_EXPAND_OPS)
     def test_row_expand_family(self, op_name, tensor_op, tile_op):
         """tensor.<row_expand*>(x, rv) -> load(x) + load(rv) + tile.<row_expand*> + store."""

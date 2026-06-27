@@ -2311,6 +2311,76 @@ def col_prod(tile: Expr, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tile.col_prod", [tile], {}, actual_span)
 
 
+def row_argmax(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
+    """Row-wise argmax (column index of the per-row maximum, maps to TROWARGMAX).
+
+    Output shape is [rows, 1] with int32 index dtype.
+
+    Args:
+        tile: Input tile (TileType [M, N])
+        tmp_tile: Temporary tile (TileType)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for row-wise argmax (TileType [M, 1], int32)
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.row_argmax", [tile, tmp_tile], {}, actual_span)
+
+
+def row_argmin(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
+    """Row-wise argmin (column index of the per-row minimum, maps to TROWARGMIN).
+
+    Output shape is [rows, 1] with int32 index dtype.
+
+    Args:
+        tile: Input tile (TileType [M, N])
+        tmp_tile: Temporary tile (TileType)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for row-wise argmin (TileType [M, 1], int32)
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.row_argmin", [tile, tmp_tile], {}, actual_span)
+
+
+def col_argmax(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
+    """Column-wise argmax (row index of the per-column maximum, maps to TCOLARGMAX).
+
+    Output shape is [1, N] with int32 index dtype. Unlike col_max, the column
+    argmax requires a tmp scratch tile.
+
+    Args:
+        tile: Input tile (TileType [M, N])
+        tmp_tile: Temporary tile (TileType)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for column-wise argmax (TileType [1, N], int32)
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.col_argmax", [tile, tmp_tile], {}, actual_span)
+
+
+def col_argmin(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
+    """Column-wise argmin (row index of the per-column minimum, maps to TCOLARGMIN).
+
+    Output shape is [1, N] with int32 index dtype. Unlike col_min, the column
+    argmin requires a tmp scratch tile.
+
+    Args:
+        tile: Input tile (TileType [M, N])
+        tmp_tile: Temporary tile (TileType)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for column-wise argmin (TileType [1, N], int32)
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.col_argmin", [tile, tmp_tile], {}, actual_span)
+
+
 def read(tile: Expr, indices: Expr | list[int | Expr] | _ir_core.MakeTuple, span: Span | None = None) -> Call:
     """Read a scalar value from a tile at given indices.
 

@@ -886,6 +886,70 @@ def col_prod(input: Expr, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tensor.col_prod", [input], {}, actual_span)
 
 
+def row_argmax(input: Expr, span: Span | None = None) -> Call:
+    """Row-wise argmax: index of the per-row maximum (reduces along last axis, keeps dim).
+
+    Output dtype is int32. Output shape is ``[..., M, 1]`` for input ``[..., M, N]``.
+
+    Args:
+        input: Input tensor
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for row-wise argmax
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.row_argmax", [input], {}, actual_span)
+
+
+def row_argmin(input: Expr, span: Span | None = None) -> Call:
+    """Row-wise argmin: index of the per-row minimum (reduces along last axis, keeps dim).
+
+    Output dtype is int32. Output shape is ``[..., M, 1]`` for input ``[..., M, N]``.
+
+    Args:
+        input: Input tensor
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for row-wise argmin
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.row_argmin", [input], {}, actual_span)
+
+
+def col_argmax(input: Expr, span: Span | None = None) -> Call:
+    """Column-wise argmax: index of the per-column maximum (reduces along axis=-2, keeps dim).
+
+    Output dtype is int32. Output shape is ``[..., 1, N]`` for input ``[..., M, N]``.
+
+    Args:
+        input: Input tensor
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for column-wise argmax
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.col_argmax", [input], {}, actual_span)
+
+
+def col_argmin(input: Expr, span: Span | None = None) -> Call:
+    """Column-wise argmin: index of the per-column minimum (reduces along axis=-2, keeps dim).
+
+    Output dtype is int32. Output shape is ``[..., 1, N]`` for input ``[..., M, N]``.
+
+    Args:
+        input: Input tensor
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for column-wise argmin
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.col_argmin", [input], {}, actual_span)
+
+
 def row_expand(target: Expr, row_vec: Expr, span: Span | None = None) -> Call:
     """Row-wise expansion: expand row_vec [M, 1] to target shape [M, N].
 
