@@ -3471,6 +3471,70 @@ class TestTileMgatherOps:
         with pytest.raises(ValueError, match="2 arguments"):
             ir.create_op_call("tile.mgather", [mem_var], {"coalesce": 0}, span)
 
+    def test_tile_mgather_elem_valid_lt_physical(self):
+        """Elem mode propagates the idx tile's valid_shape to the output.
+
+        A partially-valid idx (valid [4, 16] inside physical [8, 32]) must yield
+        an output with physical [8, 32] but valid_shape [4, 16] — so a dynamic /
+        partial gather does not over-gather the idx padding region.
+        """
+        span = ir.Span.unknown()
+        mem_type = ir.TensorType([ir.ConstInt(256, DataType.INT32, span)], DataType.FP32)
+        idx_view = ir.TileView(
+            valid_shape=[ir.ConstInt(4, DataType.INT32, span), ir.ConstInt(16, DataType.INT32, span)]
+        )
+        idx_type = ir.TileType(
+            [ir.ConstInt(8, DataType.INT32, span), ir.ConstInt(32, DataType.INT32, span)],
+            DataType.INT32,
+            None,
+            idx_view,
+        )
+        mem_var = ir.Var("mem", mem_type, span)
+        idx_var = ir.Var("idx", idx_type, span)
+
+        result_type = tile.mgather(mem_var, idx_var, coalesce="elem").type
+        assert isinstance(result_type, ir.TileType)
+        # Physical shape follows idx physical [8, 32].
+        assert isinstance(result_type.shape[0], ir.ConstInt) and result_type.shape[0].value == 8
+        assert isinstance(result_type.shape[1], ir.ConstInt) and result_type.shape[1].value == 32
+        # valid_shape follows idx valid [4, 16].
+        assert result_type.tile_view is not None
+        valid = result_type.tile_view.valid_shape
+        assert isinstance(valid[0], ir.ConstInt) and valid[0].value == 4
+        assert isinstance(valid[1], ir.ConstInt) and valid[1].value == 16
+
+    def test_tile_mgather_row_valid_lt_physical(self):
+        """Row mode: dst valid_row follows the idx valid extent; valid_col = mem width.
+
+        idx physical [1, 16] valid [1, 8], mem [64, 32] -> output physical
+        [16, 32] but valid_shape [8, 32] (only 8 rows gathered, each full width).
+        """
+        span = ir.Span.unknown()
+        mem_type = ir.TensorType(
+            [ir.ConstInt(64, DataType.INT32, span), ir.ConstInt(32, DataType.INT32, span)],
+            DataType.FP32,
+        )
+        idx_view = ir.TileView(
+            valid_shape=[ir.ConstInt(1, DataType.INT32, span), ir.ConstInt(8, DataType.INT32, span)]
+        )
+        idx_type = ir.TileType(
+            [ir.ConstInt(1, DataType.INT32, span), ir.ConstInt(16, DataType.INT32, span)],
+            DataType.INT32,
+            None,
+            idx_view,
+        )
+        mem_var = ir.Var("mem", mem_type, span)
+        idx_var = ir.Var("idx", idx_type, span)
+
+        result_type = tile.mgather(mem_var, idx_var, coalesce="row").type
+        assert isinstance(result_type, ir.TileType)
+        assert isinstance(result_type.shape[0], ir.ConstInt) and result_type.shape[0].value == 16
+        assert isinstance(result_type.shape[1], ir.ConstInt) and result_type.shape[1].value == 32
+        assert result_type.tile_view is not None
+        valid = result_type.tile_view.valid_shape
+        assert isinstance(valid[0], ir.ConstInt) and valid[0].value == 8
+        assert isinstance(valid[1], ir.ConstInt) and valid[1].value == 32
+
 
 class TestTileScatterOps:
     """Test suite for tile.scatter (index form, DPS)."""
