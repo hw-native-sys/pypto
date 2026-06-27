@@ -321,6 +321,7 @@ with ib.function("tile_computation") as f:
 | `system.bar_all` | 全局屏障 | 无 |
 | `system.bar_v` | 向量屏障 | 无 |
 | `system.bar_m` | 矩阵屏障 | 无 |
+| `system.syncall` | 跨核全员屏障（`pto::SYNCALL`，hard/FFTS 形态） | `core_type`（`"aiv_only"` \| `"aic_only"` \| `"mix"`） |
 | `system.sync_src` | 设置同步标志 | `set_pipe`, `wait_pipe`, `event_id` |
 | `system.sync_dst` | 等待同步标志 | `set_pipe`, `wait_pipe`, `event_id` |
 | `system.task_invalid` | `PTO2TaskId::invalid()` 哨兵——TaskId carry 的 "暂无 producer" 种子 | 无 |

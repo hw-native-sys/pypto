@@ -327,6 +327,7 @@ with ib.function("tile_computation") as f:
 | `system.bar_all` | Global barrier | None |
 | `system.bar_v` | Vector barrier | None |
 | `system.bar_m` | Matrix barrier | None |
+| `system.syncall` | Cross-core all-participant barrier (`pto::SYNCALL`, hard/FFTS form) | `core_type` (`"aiv_only"` \| `"aic_only"` \| `"mix"`) |
 | `system.sync_src` | Set sync flag | `set_pipe`, `wait_pipe`, `event_id` |
 | `system.sync_dst` | Wait sync flag | `set_pipe`, `wait_pipe`, `event_id` |
 | `system.task_invalid` | Sentinel `PTO2TaskId::invalid()` — "no producer" seed for a TaskId carry | None |

@@ -2339,5 +2339,43 @@ class TestScatterCodegen:
         )
 
 
+class TestSyncAllCodegen:
+    """Tests that pl.system.syncall lowers to pto.syncall (hard/FFTS form)."""
+
+    def _generate_mlir(self, program_cls) -> str:
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        optimized = pm.run_passes(program_cls)
+        codegen_instance = codegen.PTOCodegen()
+        funcs = list(optimized.functions.values())
+        assert funcs, "Program has no functions"
+        single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
+        return codegen_instance.generate(single)
+
+    def test_syncall_emits_hard_barrier_with_core_type(self):
+        """pl.system.syncall(core_type=...) emits pto.syncall() mode=<hard>."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_syncall(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                tile: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
+                pl.system.syncall(core_type="aiv_only")
+                updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(tile, [0, 0], out)
+                return updated
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.syncall()" in mlir, f"pto.syncall not found in MLIR:\n{mlir}"
+        line = next((ln for ln in mlir.splitlines() if "pto.syncall" in ln), "")
+        assert "mode = #pto.sync_all_mode<hard>" in line, f"hard mode missing:\n{line}"
+        assert "core_type = #pto.sync_core_type<aiv_only>" in line, f"core_type missing:\n{line}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

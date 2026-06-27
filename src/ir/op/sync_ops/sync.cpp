@@ -81,5 +81,16 @@ REGISTER_OP("system.bar_all")
     .no_argument()
     .f_deduce_type(DeduceUnknownType);
 
+// Register system.syncall (Cross-core all-participant barrier, hard/FFTS form)
+// Models pto::SYNCALL. The hard form takes no operands; only the participating
+// core set (core_type) is selected. Codegen emits `pto.syncall() mode = <hard>`.
+// Attribute: core_type ("aiv_only" | "aic_only" | "mix")
+REGISTER_OP("system.syncall")
+    .set_description("Cross-core all-participant barrier (pto::SYNCALL, hard form)")
+    .set_op_category("SyncOp")
+    .no_argument()
+    .set_attr<std::string>("core_type")
+    .f_deduce_type(DeduceUnknownType);
+
 }  // namespace ir
 }  // namespace pypto

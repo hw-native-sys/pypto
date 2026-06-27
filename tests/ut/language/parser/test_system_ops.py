@@ -105,6 +105,45 @@ class TestSystemOpsParsing:
         assert isinstance(reparsed, ir.Program)
         ir.assert_structural_equal(Before, reparsed)
 
+    def test_syncall_round_trip(self):
+        """Test round-trip for pl.system.syncall with an explicit core_type."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                pl.system.syncall(core_type="aiv_only")
+                return x
+
+        printed = Before.as_python()
+        assert 'pl.system.syncall(core_type="aiv_only")' in printed
+
+        reparsed = pl.parse_program(printed)
+        assert isinstance(reparsed, ir.Program)
+        ir.assert_structural_equal(Before, reparsed)
+
+    def test_syncall_default_core_type_round_trip(self):
+        """Test round-trip for pl.system.syncall with the default core_type."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                pl.system.syncall()
+                return x
+
+        printed = Before.as_python()
+        assert 'pl.system.syncall(core_type="mix")' in printed
+
+        reparsed = pl.parse_program(printed)
+        assert isinstance(reparsed, ir.Program)
+        ir.assert_structural_equal(Before, reparsed)
+
+    def test_syncall_invalid_core_type_raises(self):
+        """syncall rejects an unknown core_type at construction time."""
+        with pytest.raises(ValueError, match="core_type"):
+            pl.system.syncall(core_type="bogus")
+
     def test_multiple_system_ops_round_trip(self):
         """Test round-trip with multiple system ops in a single function."""
 

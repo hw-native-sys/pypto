@@ -26,6 +26,7 @@ from pypto.ir.op.system_ops import (
     bar_v,
     sync_dst,
     sync_src,
+    syncall,
 )
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import Call, Span
@@ -39,6 +40,7 @@ __all__ = [
     "bar_v",
     "bar_m",
     "bar_all",
+    "syncall",
     "tpush_to_aiv",
     "tpush_to_aic",
     "tpop_from_aic",
