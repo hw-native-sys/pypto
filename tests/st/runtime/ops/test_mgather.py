@@ -686,6 +686,13 @@ class MgatherElemValidFP32TestCase(PTOTestCase):
 # =============================================================================
 
 
+@pytest.mark.skip(
+    reason="a2a3 mgather needs a toolchain newer than CI currently pins: PTOAS "
+    "0.47 (row MTE2->S idx sync, PTOAS#861 — 0.47 not yet officially released) "
+    "plus a pto-isa with the templated MGATHER<Coalesce> (e722679b) and its "
+    "matching runtime. The op + in-place fix are verified locally on that "
+    "toolchain; un-skip once CI's ptoas/pto-isa/runtime are bumped in lockstep."
+)
 @pytest.mark.platforms("a2a3", "a2a3sim")
 class TestMgatherRow:
     """Row-mode tile.mgather (dst[r, :] = mem[idx[r], :])."""
@@ -740,6 +747,13 @@ class TestMgatherRow:
         assert result.passed, f"Test failed: {result.error}"
 
 
+@pytest.mark.skip(
+    reason="a2a3 mgather needs a toolchain newer than CI currently pins: PTOAS "
+    "0.47 (row MTE2->S idx sync, PTOAS#861 — 0.47 not yet officially released) "
+    "plus a pto-isa with the templated MGATHER<Coalesce> (e722679b) and its "
+    "matching runtime. The op + in-place fix are verified locally on that "
+    "toolchain; un-skip once CI's ptoas/pto-isa/runtime are bumped in lockstep."
+)
 @pytest.mark.platforms("a2a3", "a2a3sim")
 class TestMgatherElem:
     """Elem-mode tile.mgather (dst[i, j] = mem[idx[i, j]])."""
