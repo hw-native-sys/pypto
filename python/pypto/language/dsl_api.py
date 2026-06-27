@@ -920,6 +920,8 @@ def split_aiv(n: int, *, mode: ir.SplitMode) -> SplitAivContext:
     """
     if isinstance(n, bool) or not isinstance(n, int):
         raise ValueError(f"pl.split_aiv(n): n must be the integer 2, got {n!r}")
+    if n != 2:
+        raise ValueError(f"pl.split_aiv(n): n must be the integer 2 (the two AIV lanes), got {n}")
     if not isinstance(mode, _ir.SplitMode):
         raise ValueError(f"pl.split_aiv(mode=...): mode must be a pl.SplitMode, got {mode!r}")
     return SplitAivContext(n=n, mode=mode)

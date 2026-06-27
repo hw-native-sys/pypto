@@ -151,9 +151,9 @@ def test_split_reshape_rejects_non_2d_tile():
     span = ir.Span.unknown()
     tile_var = ir.Var("t", ir.TileType([2, 16, 128], DataType.FP32), span)
 
-    with pytest.raises(Exception, match="2D tile"):
+    with pytest.raises(ValueError, match="2D tile"):
         ir.create_op_call("tile.aiv_shard", [tile_var], {"split": 1}, span)
-    with pytest.raises(Exception, match="2D tile"):
+    with pytest.raises(ValueError, match="2D tile"):
         ir.create_op_call("tile.aic_gather", [tile_var], {"split": 1}, span)
 
 
@@ -163,7 +163,7 @@ def test_split_reshape_rejects_bad_split_attr():
     tile_var = ir.Var("t", ir.TileType([16, 128], DataType.FP32), span)
 
     for bad in (0, 3):
-        with pytest.raises(Exception, match="split must be"):
+        with pytest.raises(ValueError, match="split must be"):
             ir.create_op_call("tile.aiv_shard", [tile_var], {"split": bad}, span)
 
 
@@ -172,7 +172,7 @@ def test_aiv_shard_rejects_odd_split_axis():
     span = ir.Span.unknown()
     tile_var = ir.Var("t", ir.TileType([15, 128], DataType.FP32), span)
 
-    with pytest.raises(Exception, match="must be even"):
+    with pytest.raises(ValueError, match="must be even"):
         ir.create_op_call("tile.aiv_shard", [tile_var], {"split": 1}, span)
 
 
@@ -204,6 +204,43 @@ def test_aiv_shard_allows_even_physical_with_odd_valid_shape():
     assert isinstance(valid_1, ir.ConstInt)
     assert valid_0.value == 7  # ceil(13 / 2)
     assert valid_1.value == 128
+
+
+def test_split_reshape_halves_dynamic_physical_extent_symbolically():
+    """A dynamic (non-ConstInt) split-axis physical extent is reshaped to a
+    symbolic floordiv (shard) / mul (gather), not left as an identity reshape."""
+    span = ir.Span.unknown()
+    n = ir.Var("n", ir.ScalarType(DataType.INDEX), span)
+    tile_type = ir.TileType([n, ir.ConstInt(128, DataType.INDEX, span)], DataType.FP32)
+    tile_var = ir.Var("t", tile_type, span)
+
+    sharded = ir.create_op_call("tile.aiv_shard", [tile_var], {"split": 1}, span)
+    assert isinstance(sharded.type, ir.TileType)
+    half0 = sharded.type.shape[0]
+    assert not isinstance(half0, ir.ConstInt)  # symbolic floordiv(n, 2)
+    assert half0 is not n  # transformed, not an identity passthrough
+
+    gathered = ir.create_op_call("tile.aic_gather", [tile_var], {"split": 1}, span)
+    assert isinstance(gathered.type, ir.TileType)
+    assert gathered.type.shape[0] is not n  # symbolic n * 2
+
+
+def test_split_reshape_halves_dynamic_valid_shape_symbolically():
+    """A dynamic split-axis valid_shape is reshaped symbolically instead of
+    passing through unchanged (the static physical extent is still halved)."""
+    span = ir.Span.unknown()
+    valid_n = ir.Var("valid_n", ir.ScalarType(DataType.INDEX), span)
+    tile_view = ir.TileView(valid_shape=[valid_n, ir.ConstInt(128, DataType.INDEX, span)])
+    tile_type = ir.TileType([16, 128], DataType.FP32, memref=None, tile_view=tile_view, memory_space=None)
+    tile_var = ir.Var("t", tile_type, span)
+
+    sharded = ir.create_op_call("tile.aiv_shard", [tile_var], {"split": 1}, span)
+    assert isinstance(sharded.type, ir.TileType)
+    assert sharded.type.shape == [8, 128]  # static physical still halved
+    assert sharded.type.tile_view is not None
+    valid_0 = sharded.type.tile_view.valid_shape[0]
+    assert not isinstance(valid_0, ir.ConstInt)  # symbolic ceil-div
+    assert valid_0 is not valid_n  # transformed, not an identity passthrough
 
 
 def test_aic_gather_allows_odd_split_axis():

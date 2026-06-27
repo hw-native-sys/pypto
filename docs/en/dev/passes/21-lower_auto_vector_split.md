@@ -209,7 +209,9 @@ Pass LowerAutoVectorSplit();
 
 **Shared machinery**: `src/ir/transforms/utils/split_axis_utils.cpp`
 (`ProcessStmts`, `InjectSubblockIdx`, `SplitDimension`, `IsReduceOnSplitAxis`)
-— the per-op vector halving, shared with no other live caller.
+— the per-op vector halving, shared with `SplitVectorKernel`'s standalone-split
+arm (`ProcessStandaloneSplitFunction`) and the `AivSplitValid` verifier
+(`SplitDimension` / `IsReduceOnSplitAxis`).
 
 **Python binding**: `python/bindings/modules/passes.cpp`
 

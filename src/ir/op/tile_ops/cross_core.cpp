@@ -47,7 +47,8 @@ TypePtr DeduceUnknownType(const std::vector<ExprPtr>& args,
 //
 // 2D-vocab constraint: the input must be rank-2 and the split attr must be 1 or 2.
 // For the halving direction a static (ConstInt) split-axis extent must be even;
-// dynamic (non-ConstInt) extents pass through unchanged.
+// dynamic (non-ConstInt) extents are reshaped symbolically (floordiv(dim, 2) on
+// shard, dim * 2 on gather).
 TypePtr DeduceSplitReshape(const std::vector<ExprPtr>& args,
                            const std::vector<std::pair<std::string, std::any>>& kwargs,
                            const std::string& op_name, bool halve) {
@@ -77,8 +78,11 @@ TypePtr DeduceSplitReshape(const std::vector<ExprPtr>& args,
   const size_t axis = (split == 1) ? 0 : 1;
 
   // Reshape the physical shape and the valid_shape along the split axis so
-  // downstream codegen sees a consistent view. Static extents are halved/doubled;
-  // dynamic extents pass through unchanged.
+  // downstream codegen sees a consistent view. Static (ConstInt) extents are
+  // halved/doubled directly; dynamic extents become symbolic floordiv(dim, 2) /
+  // dim * 2 so the result type reflects the shard/gather along the split axis
+  // (ExpandMixedKernel consumes it as the authoritative half/full boundary size)
+  // rather than typing as an identity reshape.
   std::vector<ExprPtr> new_shape = tile_type->shape_;
   std::vector<ExprPtr> new_valid = GetValidShape(tile_type);
 
@@ -95,11 +99,30 @@ TypePtr DeduceSplitReshape(const std::vector<ExprPtr>& args,
     } else {
       new_shape[axis] = std::make_shared<ConstInt>(c->value_ * 2, c->dtype(), new_shape[axis]->span_);
     }
+  } else {
+    // Dynamic split-axis extent: symbolic half / double. Per-lane evenness is
+    // resolved at lowering time, which knows the subblock index.
+    auto two = std::make_shared<ConstInt>(2, GetScalarDtype(new_shape[axis]), new_shape[axis]->span_);
+    new_shape[axis] = halve ? MakeFloorDiv(new_shape[axis], two, new_shape[axis]->span_)
+                            : MakeMul(new_shape[axis], two, new_shape[axis]->span_);
   }
   if (axis < new_valid.size()) {
     if (auto vc = As<ConstInt>(new_valid[axis])) {
       const auto new_extent = halve ? (vc->value_ + 1) / 2 : vc->value_ * 2;
       new_valid[axis] = std::make_shared<ConstInt>(new_extent, vc->dtype(), new_valid[axis]->span_);
+    } else {
+      // Dynamic valid extent: ceil-div on halve (floordiv(dim + 1, 2)), double on
+      // gather — mirroring the physical reshape; the exact per-lane valid region
+      // is re-derived at lowering time.
+      auto vspan = new_valid[axis]->span_;
+      auto dt = GetScalarDtype(new_valid[axis]);
+      auto two = std::make_shared<ConstInt>(2, dt, vspan);
+      if (halve) {
+        auto one = std::make_shared<ConstInt>(1, dt, vspan);
+        new_valid[axis] = MakeFloorDiv(MakeAdd(new_valid[axis], one, vspan), two, vspan);
+      } else {
+        new_valid[axis] = MakeMul(new_valid[axis], two, vspan);
+      }
     }
   }
 

@@ -135,6 +135,15 @@ class TestSplitAivForLoopParsing:
                     _ = aiv_id
                 return a
 
+    def test_split_aiv_api_rejects_non_two_count_directly(self):
+        """pl.split_aiv(n != 2) called directly (outside the parser) raises ValueError.
+
+        Defense-in-depth: the parser intercepts the loop form with ParserSyntaxError,
+        but the public API guard must also reject it when called outside a program.
+        """
+        with pytest.raises(ValueError, match="must be the integer 2"):
+            pl.split_aiv(4, mode=pl.SplitMode.UP_DOWN)
+
     def test_split_aiv_requires_mode(self):
         """mode= is required — no silent default."""
         with pytest.raises(ParserSyntaxError, match="requires mode="):

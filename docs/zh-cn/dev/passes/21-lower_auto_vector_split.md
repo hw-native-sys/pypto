@@ -187,7 +187,9 @@ Pass LowerAutoVectorSplit();
 
 **共享机制**：`src/ir/transforms/utils/split_axis_utils.cpp`
 （`ProcessStmts`、`InjectSubblockIdx`、`SplitDimension`、`IsReduceOnSplitAxis`）
-—— 逐算子向量折半，无其他在用调用方。
+—— 逐算子向量折半，与 `SplitVectorKernel` 的独立拆分分支
+（`ProcessStandaloneSplitFunction`）以及 `AivSplitValid` 校验器
+（`SplitDimension` / `IsReduceOnSplitAxis`）共享。
 
 **Python 绑定**：`python/bindings/modules/passes.cpp`
 

@@ -39,7 +39,12 @@ namespace pypto {
 namespace ir {
 namespace split_axis {
 
-int SplitDimension(SplitMode mode) { return (mode == SplitMode::UpDown) ? 0 : 1; }
+int SplitDimension(SplitMode mode) {
+  INTERNAL_CHECK(mode == SplitMode::UpDown || mode == SplitMode::LeftRight)
+      << "Internal error: SplitDimension expects UpDown or LeftRight, got SplitMode("
+      << static_cast<int>(mode) << ")";
+  return (mode == SplitMode::UpDown) ? 0 : 1;
+}
 
 bool IsReduceOnSplitAxis(const CallPtr& call, int split_dim) {
   // Submits carry a GlobalVar callee and no op_; reduce ops are always plain
