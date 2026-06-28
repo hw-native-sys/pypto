@@ -8,6 +8,8 @@ Mat-resident matmuls produced upstream by `ConvertTensorToTileOps` + [`FlattenTi
 
 **K-tiling vs M/N-tiling.** When the chooser returns `m == M` and `n == N` the output already fits L0c, so only the K dimension is tiled (one K-loop). When it returns `m < M` or `n < N` the `[M, N]` output Acc would overflow L0c. The operands are already Mat-resident, so *only* the output overflows: the pass tiles the **output** into a `ceil(M/m) × ceil(N/n)` grid of `[m, n]` sub-tiles (partial on the boundary — `m`/`n` need not divide `M`/`N`), computes each with the same pipelined K-loop, and stores each `[m, n]` Acc sub-tile straight to `out[mi:, ni:]` (the direct-store / DDR-output path). Every Acc tile is then ≤ L0c, so the matmul lowers through `AllocateMemoryAddr` with no overflow. The output tensor is chained through the per-sub-tile stores in SSA form (`out → out_t0 → out_t1 → …`).
 
+**Fits-L0c chained cast-fold.** A chained matmul whose `[M, N]` result *fits* L0c (no M/N tiling) but feeds a second matmul through a downcast — `c = matmul(a, b); cb = cast(c, bf16); d = matmul(cb, e)` — needs the bf16 intermediate in **Mat** (L1) for the consumer. Left alone, `tile.cast` lowers to a **Vector** `pto.tcvt` (a cube→vector→cube round-trip that overflows the Vec buffer at `[128, 128]`). Instead the pass folds the cast into a **single full-window** Acc→Mat `tile.assemble` — the same `MatScratchPlacer` as the oversized Mat-scratch path, but one `PlaceAt` at offset `(0, 0)` rather than a grid — so the downcast stays on the cube as a FIXPIPE `pto.tinsert`. This is a cast-peephole independent of K tiling: it fires whether the producer was left whole (`k == K`) or K-looped (`k < K`), and only when every use of the cast result is a matmul operand (a non-matmul consumer keeps the Vector cast). Oversized results never reach it — their cast is folded per sub-tile by the M/N path above.
+
 **Pipeline position**: After [`FlattenTileNdTo2D`](15-flatten_tile_nd_to_2d.md), before [`InferTileMemorySpace`](18-infer_tile_memory_space.md). All tile ops are already 2D and memory spaces have not yet been inferred.
 
 **Requirements**: `SSAForm`, `SplitIncoreOrch`, `IncoreTileOps`, `TileOps2D`, `NormalizedStmtStructure`.
@@ -136,6 +138,29 @@ out_t1 = pl.store(c_t1, [256, 0], out_t0)  # store sub-tile to out[256:512, 0:25
 
 Boundary sub-tiles (when `m`/`n` do not divide `M`/`N`) use static partial extents `[min(m, M-mi), min(n, N-ni)]` — e.g. a 256×256 FP32 matmul on Ascend910B (chooser picks `m = 192, n = 160`) tiles into sub-tiles of `192×160`, `192×96`, `64×160`, `64×96`.
 
+### Fits-L0c chained matmul (cast-fold)
+
+**Before** (`[128, 128]` intermediate fits L0c; `K = 64` fits L0, so the producer is a single matmul):
+
+```python
+c  = pl.tile.matmul(a_mat, b_mat)          # [128, 128] Acc f32 — fits L0c
+cb = pl.tile.cast(c, pl.BF16)              # would lower to a Vector pto.tcvt
+d  = pl.tile.matmul(cb, e_mat)             # consumes the bf16 intermediate on-chip
+out = pl.tile.store(d, [0, 0], out)
+```
+
+**After** (the cast is folded into one full-window Acc→Mat assemble; `cb`'s consumer reads the Mat scratch):
+
+```python
+c       = pl.tile.matmul(a_mat, b_mat)                       # unchanged (fits L0c)
+c_mat   = pl.tile.create([128, 128], dtype=pl.BF16, target_memory=Mat)  # the L1/Mat scratch
+c_mat_t0 = pl.tile.assemble(c_mat, c, [0, 0])                # Acc f32 → Mat bf16 (cube pto.tinsert)
+d       = pl.tile.matmul(c_mat_t0, e_mat)                    # reads the scratch on-chip
+out     = pl.tile.store(d, [0, 0], out)
+```
+
+The `tile.cast` is dropped. When the producer needs a K-loop (`k < K`), the K-loop is emitted as usual and its Acc result feeds the *same* single `tile.assemble` — the fold is independent of K tiling.
+
 ## Backend constraints
 
 L0 capacities and fractal alignment come from the active `BackendHandler`. The pass reads from `PassContext::Current()->GetBackendHandler()` when a context is active, and falls back to `pypto::backend::GetBackend()->GetHandler()` for direct callers (e.g. tests that don't wrap in a `PassContext`).
@@ -179,6 +204,7 @@ Adding a new backend therefore only needs to provide these handler hooks — the
 | `tile.matmul` over static-2D operands (Mat left, or Vec left for PV) + Mat right, output fits L0c | Rewritten to 2-stage pipelined K-loop; a Vec left operand is staged to Mat first |
 | `tile.matmul` (plain, Mat left, Mat right) whose output exceeds L0c, consumed by one 2D `tile.store` | M/N-tiled: `ceil(M/m) × ceil(N/n)` grid of sub-tile K-loops, each stored straight to the output (direct-store) |
 | `tile.matmul` (plain) whose output exceeds L0c, consumed *entirely* as a matmul operand (chained matmul), and whose `[M, N]` scratch fits Mat/L1 | M/N-tiled into an L1/**Mat** scratch (per-sub-tile Acc→Mat `tile.assemble`), kept on-chip for the consumer (Mat-scratch) |
+| `tile.matmul` whose output *fits* L0c, downcast via `tile.cast(c, bf16/f16)` whose result is consumed *entirely* as a matmul operand (chained) | Cast-fold: one full-window Acc→Mat `tile.assemble` (cube `pto.tinsert`); the cast is dropped — no Vector `pto.tcvt` round-trip |
 | `tile.matmul_acc` over static-2D operands (Mat left, or Vec left for PV) + Mat right, output fits L0c | Rewritten to 2-stage pipelined K-loop (uniform `matmul_acc` body) |
 | `tile.matmul[_acc]` with a Vec **right** operand | Skipped (the B operand must feed L0B from L1) |
 | `tile.matmul_bias` | Skipped (deferred — bias-add-only-after-final-iter rewrite not yet implemented) |

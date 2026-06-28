@@ -1232,6 +1232,64 @@ class AutoTileMutator : public IRMutator {
       // Apply the running remap to redirect prior rewrites' downstream uses.
       StmtPtr current = remap.empty() ? child : transform_utils::Substitute(child, remap);
 
+      // Fits-L0c chained-matmul cast-fold: rewrite ``cb = tile.cast(src_acc,
+      // bf16/f16)`` into a full-window Acc->Mat scratch (``tile.create`` +
+      // ``tile.assemble``) when every use of ``cb`` is a matmul operand.  This
+      // routes the f32->bf16 downcast through the cube FIXPIPE (``pto.tinsert``)
+      // instead of the Vector (``pto.tcvt``) — the fits-L0c analogue of the
+      // oversized per-sub-tile Mat-scratch fold (``TryFoldMatScratch``).  The
+      // matmul producing ``src`` is K-tiled (or left untouched) by the dispatch
+      // below; here we only redirect the cast's result onto a Mat scratch and
+      // drop the now-dead cast.  Oversized chains never reach here — their cast
+      // is dropped via ``dropped`` at the matmul site (see ``TryFoldMatScratch``
+      // remap above), so this only fires for results that fit L0c.
+      if (auto cast_as = std::dynamic_pointer_cast<const AssignStmt>(current)) {
+        auto cast = As<Call>(cast_as->value_);
+        auto cb_ty = As<TileType>(cast_as->var_->GetType());
+        if (cast && IsOp(cast, "tile.cast") && !cast->args_.empty() && cb_ty &&
+            (cb_ty->dtype_ == DataType::BF16 || cb_ty->dtype_ == DataType::FP16)) {
+          auto src = AsVarLike(cast->args_[0]);
+          auto src_ty = src ? As<TileType>(src->GetType()) : nullptr;
+          const bool src_acc = src_ty && src_ty->memory_space_ == MemorySpace::Acc;
+          // Static [M, N] — a fits-L0c chained matmul result is always static here.
+          auto m_ci = cb_ty->shape_.size() == 2 ? As<ConstInt>(cb_ty->shape_[0]) : nullptr;
+          auto n_ci = cb_ty->shape_.size() == 2 ? As<ConstInt>(cb_ty->shape_[1]) : nullptr;
+          // Only fold when the Acc result fits L0c.  An oversized result is
+          // Case 2's domain: ``TryFoldMatScratch`` folds the cast into per-sub-tile
+          // assembles (and drops it), or defers it when the scratch exceeds Mat
+          // capacity — in which case the cast must stay (we must not collapse an
+          // oversized [M, N] into one impossible full-window assemble here).
+          const auto* bh_ctx = PassContext::Current();
+          const auto* bh = bh_ctx ? bh_ctx->GetBackendHandler() : pypto::backend::GetBackend()->GetHandler();
+          const uint64_t l0c_bytes = bh ? bh->GetL0cCapacityBytes() : 0;
+          const uint64_t acc_bytes = src_acc && m_ci && n_ci ? static_cast<uint64_t>(m_ci->value_) *
+                                                                   static_cast<uint64_t>(n_ci->value_) *
+                                                                   DTypeBytes(src_ty->dtype_)
+                                                             : 0;
+          if (src_acc && m_ci && n_ci && l0c_bytes && acc_bytes <= l0c_bytes) {
+            if (!sibling_index) sibling_index = BuildSiblingIndex(op->stmts_);
+            const Var* cb = cast_as->var_.get();
+            auto uc = sibling_index->use_counts.find(cb);
+            auto mo = sibling_index->matmul_operand_uses.find(cb);
+            const int cb_uses = uc == sibling_index->use_counts.end() ? 0 : uc->second;
+            const int cb_mm = mo == sibling_index->matmul_operand_uses.end() ? 0 : mo->second;
+            // Fold only when every use of ``cb`` is a matmul operand: the bf16
+            // value can then live entirely in Mat (a store / elementwise consumer
+            // could not read it there, so those keep the Vector cast path).
+            if (cb_uses >= 1 && cb_uses == cb_mm) {
+              MatScratchPlacer placer(m_ci->value_, n_ci->value_, cb_ty->dtype_, src->name_hint_ + "_mat",
+                                      cast_as->span_);
+              VarPtr scratch = placer.Init(out);
+              VarPtr cmat = placer.PlaceAt(out, src, MakeIndex(0, cast_as->span_),
+                                           MakeIndex(0, cast_as->span_), scratch, /*step=*/0);
+              remap[cb] = cmat;  // the consumer matmul now reads the Mat scratch
+              changed = true;
+              continue;  // drop the dead tile.cast
+            }
+          }
+        }
+      }
+
       // Check if this is a matmul we rewrite *at this SeqStmts level*.  We
       // try this before recursive visitation so the rewrite — which produces
       // a sequence of stmts — lands in this enclosing SeqStmts.  Recursive

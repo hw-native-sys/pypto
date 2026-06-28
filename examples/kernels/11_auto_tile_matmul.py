@@ -27,10 +27,18 @@ Orthogonally, the K (reduction) dimension picks the **K-strategy**:
   - **split-K** -- K spans >= 2 L0 blocks; each ``[m, n]`` sub-tile is its own pipelined
     K-loop (BuildSplitKGrid).
 
-The four kernels below are the 2x2 matrix. The K-strategy is **shape-driven**: for an
-``[M, N] = [256, 256]`` FP32 output the L0 chooser caps ``k = 32``, so ``K = 32`` fits L0 in
-one pass (full-K) while ``K = 128`` splits into 4 K-blocks (split-K). No manual tiling --
+The first four kernels are the oversized 2x2 matrix. The K-strategy is **shape-driven**: for
+an ``[M, N] = [256, 256]`` FP32 output the L0 chooser caps ``k = 32``, so ``K = 32`` fits L0
+in one pass (full-K) while ``K = 128`` splits into 4 K-blocks (split-K). No manual tiling --
 the compiler picks the path from the shapes and the consumer.
+
+**Fits-L0c chained matmul (cast-fold).** When the chained ``[M, N]`` intermediate *fits* L0c
+(no M/N tiling), the same Mat/L1 placement applies as a **single full-window** Acc->Mat
+``tile.assemble``: the autotiler folds the ``pl.cast(c, bf16)`` into one cube FIXPIPE
+``pto.tinsert``, so the downcast stays on the cube. Without the fold the standalone ``pl.cast``
+lowers to a Vector ``pto.tcvt`` (a cube->vector->cube round-trip that overflows the Vec buffer
+at ``[128, 128]``). The last two kernels are the full-K (no K-loop) and split-K (K-loop)
+fits-L0c cases.
 
 Run:  python examples/kernels/11_auto_tile_matmul.py
 """
@@ -93,6 +101,34 @@ def mat_full_k(a: pl.Tensor, b: pl.Tensor, e: pl.Tensor, out: pl.Out[pl.Tensor])
     return out
 
 
+@pl.jit
+def fits_l0c_full_k(a: pl.Tensor, b: pl.Tensor, e: pl.Tensor, out: pl.Out[pl.Tensor]):
+    """``(a @ b) @ e`` -> **Mat/L1 scratch**, **fits-L0c full-K**. The ``[128, 128]``
+    intermediate *fits* L0c (no M/N tiling), and ``K=64`` fits L0 (``k == K``), so the
+    producer is a single matmul. The autotiler folds ``pl.cast`` into ONE full-window
+    Acc->Mat ``tile.assemble`` (cube ``pto.tinsert``) — no Vector ``tcvt``, no round-trip."""
+    with pl.at(level=pl.Level.CORE_GROUP, name_hint="fits_l0c_full_k"):
+        c = pl.matmul(a, b, out_dtype=pl.FP32)  # [128, 128] f32, fits L0c
+        cb = pl.cast(c, pl.BF16)  # folded into a single cube Acc->Mat tinsert
+        d = pl.matmul(cb, e, out_dtype=pl.FP32)  # consumes the bf16 Mat scratch on-chip
+        out = pl.assemble(out, d, [0, 0])
+    return out
+
+
+@pl.jit
+def fits_l0c_split_k(a: pl.Tensor, b: pl.Tensor, e: pl.Tensor, out: pl.Out[pl.Tensor]):
+    """``(a @ b) @ e`` -> **Mat/L1 scratch**, **fits-L0c split-K**. Same ``[128, 128]``
+    fits-L0c intermediate, but ``[128, 512] @ [512, 128]`` overflows L0a/L0b, so the
+    producer is K-looped. The K-loop's Acc result is folded into the *same* single
+    full-window Acc->Mat assemble — the cast-fold is independent of the K tiling."""
+    with pl.at(level=pl.Level.CORE_GROUP, name_hint="fits_l0c_split_k"):
+        c = pl.matmul(a, b, out_dtype=pl.FP32)  # [128, 128] f32, fits L0c; K=512 splits
+        cb = pl.cast(c, pl.BF16)  # folded into a single cube Acc->Mat tinsert
+        d = pl.matmul(cb, e, out_dtype=pl.FP32)
+        out = pl.assemble(out, d, [0, 0])
+    return out
+
+
 if __name__ == "__main__":
     cfg = RunConfig()
     torch.manual_seed(0)
@@ -117,5 +153,21 @@ if __name__ == "__main__":
         c_bf16 = (a.float() @ b.float()).to(torch.bfloat16).float()  # FIXPIPE downcast
         golden = c_bf16 @ e.float()
         assert torch.allclose(out, golden, rtol=2e-2, atol=2e-2), f"{fn.__name__} mismatch"
+
+    # Fits-L0c chained (cast-fold): (a @ b) @ e -> [128, 64] with a [128, 128] intermediate
+    # that FITS L0c. full-K (K=64, no K-loop) vs split-K (K=512, K-loop). Same bf16 golden.
+    # Frobenius relative error (not allclose): the bf16 chain has near-zero cancellation
+    # elements where a per-element atol fails on a numerically-correct result (K=512's larger
+    # intermediate magnitudes make this bite); the global relative norm is the robust metric.
+    for fn, K in ((fits_l0c_full_k, 64), (fits_l0c_split_k, 512)):
+        a = torch.randn(128, K, dtype=torch.bfloat16)
+        b = torch.randn(K, 128, dtype=torch.bfloat16)
+        e = torch.randn(128, 64, dtype=torch.bfloat16)
+        out = torch.zeros((128, 64), dtype=torch.float32)
+        fn(a, b, e, out, config=cfg)
+        c_bf16 = (a.float() @ b.float()).to(torch.bfloat16).float()  # FIXPIPE downcast
+        golden = c_bf16 @ e.float()
+        rel_err = ((out - golden).norm() / golden.norm()).item()
+        assert rel_err < 5e-2, f"{fn.__name__} Frobenius rel_err {rel_err:.3e} exceeds 5e-2"
 
     print("OK")

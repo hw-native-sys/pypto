@@ -1630,5 +1630,144 @@ class TestAutoTileMatmulL0MatScratch:
         assert rel_err < 5e-2, f"full-K Mat-scratch chained bf16 rel_err {rel_err:.3e} exceeds 5e-2"
 
 
+class TestAutoTileMatmulL0FitsL0cCastFold:
+    """Fits-L0c chained-matmul cast-fold: a ``matmul -> cast(bf16) -> matmul`` whose
+    ``[M, N]`` result *fits* L0c routes the bf16 downcast through the cube FIXPIPE
+    (``tile.assemble`` -> ``pto.tinsert``) instead of the Vector (``pto.tcvt``). The
+    cast is folded into a single full-window Acc->Mat assemble and dropped — the
+    fits-L0c analogue of the oversized per-sub-tile Mat-scratch fold. Without it the
+    standalone Vector cast overflows the Vec buffer at ``[128, 128]``."""
+
+    def _chain(self, k_first):
+        """``[128, k_first] @ [k_first, 128] -> [128, 128]`` (fits L0c), cast to bf16,
+        fed to ``@ [128, 64]``. ``k_first=64`` keeps the producer un-split (corner C);
+        ``k_first=512`` overflows L0a/L0b and forces a K-loop (corner D)."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[128, k_first], pl.BF16],
+                b: pl.Tensor[[k_first, 128], pl.BF16],
+                e: pl.Tensor[[128, 64], pl.BF16],
+                out: pl.Out[pl.Tensor[[128, 64], pl.FP32]],
+            ) -> pl.Tensor[[128, 64], pl.FP32]:
+                c = pl.matmul(a, b, out_dtype=pl.FP32)  # [128, 128] f32, fits L0c
+                cb = pl.cast(c, pl.BF16)  # FIXPIPE downcast -> bf16 Mat scratch (folded)
+                d = pl.matmul(cb, e, out_dtype=pl.FP32)  # consumes the scratch on-chip
+                out = pl.assemble(out, d, [0, 0])
+                return out
+
+        return Before
+
+    def _assert_numerics(self, after, k_first):
+        """The fold's FIXPIPE bf16 downcast must match the bf16 chain. As in the
+        Mat-scratch tests the reference carries real bf16 rounding, so the Frobenius
+        relative error (dominated by the large entries) is the robust metric."""
+        torch = pytest.importorskip("torch")
+        from pypto.debug import torch_codegen  # noqa: PLC0415
+
+        torch.manual_seed(0)
+        a = torch.randn(128, k_first, dtype=torch.bfloat16)
+        b = torch.randn(k_first, 128, dtype=torch.bfloat16)
+        e = torch.randn(128, 64, dtype=torch.bfloat16)
+        out = torch.zeros(128, 64)
+        ns: dict = {}
+        exec(torch_codegen(after), ns)  # noqa: S102 — executing generated reference code is the point
+        ns["kernel"](a, b, e, out)
+        c_bf16 = (a.float() @ b.float()).to(torch.bfloat16).float()  # FIXPIPE downcast
+        expected = c_bf16 @ e.float()
+        rel_err = ((out - expected).norm() / expected.norm()).item()
+        assert rel_err < 5e-2, f"fits-L0c cast-fold chained bf16 rel_err {rel_err:.3e} exceeds 5e-2"
+
+    def test_no_ksplit_cast_folds_to_full_window_assemble(self):
+        """Corner C: the producer fits L0a/L0b (no K-loop). The cast becomes a single
+        full-window Acc->Mat ``tile.assemble`` into a bf16 Mat scratch, the cast op is
+        dropped, and the consumer matmul reads the scratch on-chip."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+
+        After = passes.auto_tile_matmul_l0()(_lower_to_tile_ops(self._chain(k_first=64)))
+        printed = ir.python_print(After)
+
+        assert "tile.create" in printed and "Mem.Mat" in printed, "expected a bf16 Mat scratch"
+        assert printed.count("pl.tile.assemble(") == 1, "a single full-window Acc->Mat assemble"
+        assert "pl.tile.cast(" not in printed, "the downcast must be folded into the assemble"
+        assert "pl.pipeline(" not in printed, "the producer fits L0 (corner C) — no K-loop"
+        _assert_ssa_valid(After, "fits_l0c_no_ksplit_cast_fold")
+        self._assert_numerics(After, k_first=64)
+
+    def test_ksplit_cast_folds_to_full_window_assemble(self):
+        """Corner D: the producer needs a K-loop (``[128, 512] @ [512, 128]``). The
+        K-loop's Acc result is folded into the *same* single full-window Acc->Mat
+        assemble (cast dropped) — the fold is independent of whether the producer was
+        K-tiled."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+
+        After = passes.auto_tile_matmul_l0()(_lower_to_tile_ops(self._chain(k_first=512)))
+        printed = ir.python_print(After)
+
+        assert "tile.create" in printed and "Mem.Mat" in printed, "expected a bf16 Mat scratch"
+        assert printed.count("pl.tile.assemble(") == 1, "a single full-window Acc->Mat assemble"
+        assert "pl.tile.cast(" not in printed, "the downcast must be folded into the assemble"
+        assert "pl.pipeline(" in printed, "the producer overflows L0a/L0b (corner D) — K-loop emitted"
+        _assert_ssa_valid(After, "fits_l0c_ksplit_cast_fold")
+        self._assert_numerics(After, k_first=512)
+
+    def test_cast_to_non_matmul_consumer_not_folded(self):
+        """Guard: a fits-L0c matmul whose cast result is consumed by a store (not a
+        matmul operand) must keep the Vector cast path — a non-matmul consumer cannot
+        read the bf16 value from Mat, so the fold must not fire."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[128, 64], pl.BF16],
+                b: pl.Tensor[[64, 128], pl.BF16],
+                out: pl.Out[pl.Tensor[[128, 128], pl.BF16]],
+            ) -> pl.Tensor[[128, 128], pl.BF16]:
+                c = pl.matmul(a, b, out_dtype=pl.FP32)  # [128, 128] f32, fits L0c
+                cb = pl.cast(c, pl.BF16)  # consumed by a store, not a matmul operand
+                out = pl.assemble(out, cb, [0, 0])
+                return out
+
+        After = passes.auto_tile_matmul_l0()(_lower_to_tile_ops(Before))
+        printed = ir.python_print(After)
+
+        assert "pl.tile.cast(" in printed, "a non-matmul (store) consumer must keep the Vector cast"
+        assert "pl.tile.assemble(" not in printed, "the fold must not assemble into a Mat scratch"
+
+    @pytest.mark.parametrize("backend", [BackendType.Ascend910B, BackendType.Ascend950])
+    def test_cast_fold_lowers_cube_only_no_vector(self, backend):
+        """End-to-end: the folded fits-L0c chain generates a cube-only kernel —
+        ``pto.tinsert`` (FIXPIPE downcast) and zero ``pto.tcvt`` (Vector cast), with no
+        ``_aiv`` Vector function. Without the fold this overflows the Vec buffer at
+        ``[128, 128]``; with it the intermediate never leaves the cube."""
+        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+        from pypto.pypto_core import codegen as _codegen_core  # noqa: PLC0415
+        from pypto.pypto_core import ir as _ir_core  # noqa: PLC0415
+
+        _backend.reset_for_testing()
+        _backend.set_backend_type(backend)
+
+        prog = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(self._chain(k_first=64))
+        names = [f.name for f in prog.functions.values()]
+        assert not any(n.endswith("_aiv") for n in names), f"no Vector kernel expected, got {names}"
+
+        tinsert = tcvt = 0
+        for _name, func in prog.functions.items():
+            mlir = _codegen_core.PTOCodegen().generate(_ir_core.Program([func], func.name, prog.span))
+            tinsert += mlir.count("pto.tinsert")
+            tcvt += mlir.count("pto.tcvt")
+        assert tinsert >= 1, "the bf16 downcast must lower to the cube FIXPIPE pto.tinsert"
+        assert tcvt == 0, "no Vector pto.tcvt — the cast is folded into the cube writeback"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
