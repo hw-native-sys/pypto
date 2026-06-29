@@ -213,6 +213,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/utils/stmt_dependency_analysis.cpp
     src/ir/transforms/utils/transform_utils.cpp
     src/ir/transforms/utils/wrapper_call_utils.cpp
+    src/ir/transforms/utils/window_externalization.cpp
     src/ir/transforms/visitor.cpp
 
     # IR - Reporter
