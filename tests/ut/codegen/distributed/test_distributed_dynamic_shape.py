@@ -155,3 +155,168 @@ def test_nranks_range_bound_auto_cast_to_index():
     assert index_result in bounds, (
         f"arith.index_cast result {index_result!r} must be a scf.for bound operand; got {bounds}"
     )
+
+
+# ---------------------------------------------------------------------------
+# scf.for bound auto-cast: non-index start bound
+# ---------------------------------------------------------------------------
+
+
+@pl.program
+class DistStartBoundLoop:
+    """InCore kernel with a non-index (i32) start bound on pl.range()."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def scan(
+        self,
+        signal: pld.DistributedTensor[[NR, 1], pl.INT32],
+        out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+    ) -> pl.Tensor[[1, 1], pl.INT32]:
+        ctx = pld.get_comm_ctx(signal)
+        my_rank = pld.rank(ctx)
+        nranks = pld.nranks(ctx)
+        for src in pl.range(my_rank, nranks):
+            pld.system.wait(signal, offsets=[src, 0], expected=1, cmp=pld.WaitCmp.Ge)
+        return out
+
+
+def _generate_start_bound_mlir() -> str:
+    func = DistStartBoundLoop.get_function("scan")
+    assert func is not None
+    program = ir.Program([func], "test_start_bound", ir.Span.unknown())
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
+    ctx = _core_passes.PassContext(
+        [_core_passes.VerificationInstrument(_core_passes.VerificationMode.BEFORE_AND_AFTER)]
+    )
+    with ctx:
+        optimized = pm.run_passes(program)
+    return codegen.PTOCodegen().generate(optimized)
+
+
+def test_non_index_start_bound_auto_cast_to_index():
+    """Non-index start bound (pld.rank → i32) must produce arith.index_cast."""
+    mlir_code = _generate_start_bound_mlir()
+
+    assert "arith.index_cast" in mlir_code
+    assert "scf.for" in mlir_code
+    # Both start and stop should have index_cast if non-index.
+    casts = re.findall(r"(%\S+) = arith\.index_cast %\S+ : i32 to index", mlir_code)
+    assert len(casts) >= 2, (
+        f"expected ≥2 arith.index_cast for start+stop bounds; got {len(casts)}"
+    )
+    scf_for_match = re.search(r"scf\.for \S+ = (\S+) to (\S+) step (\S+)", mlir_code)
+    assert scf_for_match is not None, "expected scf.for in generated MLIR"
+    bounds = scf_for_match.groups()
+    for cast_result in casts:
+        assert cast_result in bounds, (
+            f"arith.index_cast result {cast_result!r} must be a scf.for bound operand; got {bounds}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# scf.for bound auto-cast: non-index step bound
+# ---------------------------------------------------------------------------
+
+
+@pl.program
+class DistStepBoundLoop:
+    """InCore kernel with a non-index (i32) step bound on pl.range()."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def scan(
+        self,
+        signal: pld.DistributedTensor[[NR, 1], pl.INT32],
+        out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+    ) -> pl.Tensor[[1, 1], pl.INT32]:
+        ctx = pld.get_comm_ctx(signal)
+        my_rank = pld.rank(ctx)
+        nranks = pld.nranks(ctx)
+        step_size: pl.Scalar[pl.INT32] = pl.const(1, pl.INT32)
+        for src in pl.range(my_rank, nranks, step_size):
+            pld.system.wait(signal, offsets=[src, 0], expected=1, cmp=pld.WaitCmp.Ge)
+        return out
+
+
+def _generate_step_bound_mlir() -> str:
+    func = DistStepBoundLoop.get_function("scan")
+    assert func is not None
+    program = ir.Program([func], "test_step_bound", ir.Span.unknown())
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
+    ctx = _core_passes.PassContext(
+        [_core_passes.VerificationInstrument(_core_passes.VerificationMode.BEFORE_AND_AFTER)]
+    )
+    with ctx:
+        optimized = pm.run_passes(program)
+    return codegen.PTOCodegen().generate(optimized)
+
+
+def test_non_index_step_bound_auto_cast_to_index():
+    """Non-index step bound (i32) must produce arith.index_cast for the step."""
+    mlir_code = _generate_step_bound_mlir()
+
+    assert "arith.index_cast" in mlir_code
+    assert "scf.for" in mlir_code
+    # All three bounds may have index_cast.
+    casts = re.findall(r"(%\S+) = arith\.index_cast %\S+ : i32 to index", mlir_code)
+    assert len(casts) >= 3, (
+        f"expected ≥3 arith.index_cast for start+stop+step bounds; got {len(casts)}"
+    )
+    scf_for_match = re.search(r"scf\.for \S+ = (\S+) to (\S+) step (\S+)", mlir_code)
+    assert scf_for_match is not None, "expected scf.for in generated MLIR"
+    bounds = scf_for_match.groups()
+    for cast_result in casts:
+        assert cast_result in bounds, (
+            f"arith.index_cast result {cast_result!r} must be a scf.for bound operand; got {bounds}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# scf.for bound: index-typed constant → no unnecessary cast
+# ---------------------------------------------------------------------------
+
+
+@pl.program
+class DistIndexConstLoop:
+    """InCore kernel with index-typed start → codegen must NOT insert extra cast."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def scan(
+        self,
+        signal: pld.DistributedTensor[[NR, 1], pl.INT32],
+        out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+    ) -> pl.Tensor[[1, 1], pl.INT32]:
+        ctx = pld.get_comm_ctx(signal)
+        nranks = pld.nranks(ctx)
+        start: pl.Scalar[pl.INDEX] = pl.const(0, pl.INDEX)
+        for src in pl.range(start, nranks):
+            pld.system.wait(signal, offsets=[src, 0], expected=1, cmp=pld.WaitCmp.Ge)
+        return out
+
+
+def _generate_index_const_mlir() -> str:
+    func = DistIndexConstLoop.get_function("scan")
+    assert func is not None
+    program = ir.Program([func], "test_index_const", ir.Span.unknown())
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
+    ctx = _core_passes.PassContext(
+        [_core_passes.VerificationInstrument(_core_passes.VerificationMode.BEFORE_AND_AFTER)]
+    )
+    with ctx:
+        optimized = pm.run_passes(program)
+    return codegen.PTOCodegen().generate(optimized)
+
+
+def test_index_const_start_no_unnecessary_cast():
+    """Index-typed start constant must NOT introduce a redundant arith.index_cast.
+
+    The start is already index; only the stop (nranks → i32) needs a cast.
+    """
+    mlir_code = _generate_index_const_mlir()
+
+    assert "arith.index_cast" in mlir_code, "stop bound should have index_cast"
+    assert "scf.for" in mlir_code
+    casts = re.findall(r"(%\S+) = arith\.index_cast %\S+ : i32 to index", mlir_code)
+    # Only the stop bound should be cast; start is already index.
+    assert len(casts) == 1, (
+        f"expected exactly 1 arith.index_cast (stop only); got {len(casts)}: {casts}"
+    )

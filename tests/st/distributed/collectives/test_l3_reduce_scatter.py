@@ -7,29 +7,34 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""L3 distributed st: 2-rank reduce-scatter — PyPTO port of
+"""L3 distributed st: N-rank reduce-scatter — PyPTO port of
 ``examples/workers/l3/reduce_scatter_distributed``.
 
 Mirrors the 4-phase pattern of the runtime example's
 ``kernels/aiv/reduce_scatter_kernel.cpp`` (simpler ``reduce_scatter_distributed``, PR #842):
 
-* **Phase 1 (stage-in)** — copy both local chunks (``2*SIZE`` floats) into the
-  window-bound ``scratch`` buffer so every peer can read the full staged input.
-* **Phase 2 (barrier)** — each rank ``AtomicAdd``s the peer's ``signal`` cell
-  via ``pld.system.notify`` and ``pld.system.wait``s on its own cell until
-  the peer has finished staging.
-* **Phase 3 (reduce)** — load this rank's chunk ``scratch[chunk_col:…]`` (``chunk_col`` is
-  ``r*SIZE`` from HOST),
-  ``pld.tile.remote_load`` the peer's slice at the **same chunk offset**, and
-  ``pl.add`` them. For ``nranks=2`` a single peer add is sufficient.
+* **Phase 1 (stage-in)** — copy this rank's local chunk into the window-bound
+  ``scratch`` buffer so every peer can read the staged input.
+* **Phase 2 (barrier)** — each rank ``AtomicAdd``s every peer's ``signal``
+  cell via ``pld.system.notify`` and ``pld.system.wait``s on each peer slot
+  until all ranks have staged (``signal`` shape ``[NR, 1]``).
+* **Phase 3 (reduce)** — load this rank's own chunk from scratch, then for
+  every ``peer != my_rank`` ``pld.tile.remote_load`` the peer's chunk and
+  ``pl.add`` into an accumulator.
 * **Phase 4 (stage-out)** — ``pl.store`` the accumulator into local ``out``.
 
 Golden: rank ``r`` output is the element-wise sum of chunk ``r`` across all ranks:
-``outputs[r][j] = inputs[0][r*SIZE+j] + inputs[1][r*SIZE+j]``.
+``outputs[r][c][j] = sum over k of inputs[k][c][r*SIZE+j]``.
 
-Driven by 2 devices via ``DistributedConfig(device_ids=device_ids[:2], ...)``,
-matching the example's hardcoded 2-rank requirement.
+Rank count uses ``NR = pl.dynamic("NR")`` in host tensor shapes; runtime
+``inputs.shape[0]`` must match ``len(device_ids)`` / ``pld.world_size()``.
+
+ST coverage: **P=2** (default CI / 2-device hosts) and **P=4** (any four
+devices, e.g. ``--device=0,1,2,3`` or ``--device=0-3``). One program body
+for both.
 """
+
+# pyright: reportUndefinedVariable=false
 
 import sys
 
@@ -41,138 +46,144 @@ from pypto import ir
 from pypto.ir.distributed_compiled_program import DistributedConfig
 
 SIZE = 64  # matches COUNT_PER_RANK in simpler reduce_scatter_kernel.cpp
-NRANKS = 2
+NR = pl.dynamic("NR")
 
 
 def _expected_reduce_scatter(inputs: torch.Tensor) -> torch.Tensor:
-    """Per-rank golden: sum of chunk ``r`` across all ranks."""
+    """Per-rank golden: element-wise sum of chunk ``r`` across all ranks."""
+    n_ranks = inputs.shape[0]
     chunks = [
-        inputs[0, 0, r * SIZE : (r + 1) * SIZE] + inputs[1, 0, r * SIZE : (r + 1) * SIZE]
-        for r in range(NRANKS)
+        sum(inputs[k, 0, r * SIZE : (r + 1) * SIZE] for k in range(n_ranks))
+        for r in range(n_ranks)
     ]
-    return torch.stack(chunks).reshape(NRANKS, 1, SIZE)
+    return torch.stack(chunks).reshape(n_ranks, 1, SIZE)
 
 
-def _build_reduce_scatter_program():
-    """Build the 2-rank reduce-scatter program at call time.
+def _make_rank_inputs(n_ranks: int) -> torch.Tensor:
+    """Distinct per-rank tensors so the golden reduction is non-trivial."""
+    rows = [
+        torch.arange(r * 100.0, r * 100.0 + n_ranks * SIZE, dtype=torch.float32).reshape(1, n_ranks * SIZE)
+        for r in range(n_ranks)
+    ]
+    return torch.stack(rows)
 
-    Deferred construction lets this file collect even if the embedded body
-    is rejected by the parser.
-    """
 
-    @pl.program
-    class ReduceScatterTwoRank:
-        @pl.function(type=pl.FunctionType.InCore)
-        def reduce_scatter_step(
-            self,
-            inp: pl.Tensor[[1, 2 * SIZE], pl.FP32],
-            out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
-            scratch: pl.InOut[pld.DistributedTensor[[1, 2 * SIZE], pl.FP32]],
-            signal: pl.InOut[pld.DistributedTensor[[1, 1], pl.INT32]],
-            chunk_col: pl.Scalar[pl.INDEX],
-            peer: pl.Scalar[pl.INT32],
-        ) -> pl.Tensor[[1, SIZE], pl.FP32]:
-            # Phase 1: stage-in — copy both local chunks into scratch.
-            chunk0 = pl.load(inp, [0, 0], [1, SIZE])
-            pl.store(chunk0, [0, 0], scratch)
-            chunk1 = pl.load(inp, [0, SIZE], [1, SIZE])
-            pl.store(chunk1, [0, SIZE], scratch)
+@pl.program
+class ReduceScatterMesh:
+    """Mesh reduce-scatter with dynamic rank count ``NR``."""
 
-            # Phase 2: barrier — AtomicAdd the peer's signal cell, then
-            # wait for ours to be bumped by the rank that targets us.
-            pld.system.notify(
-                signal,
-                peer=peer,
-                offsets=[0, 0],
-                value=1,
-                op=pld.NotifyOp.AtomicAdd,
-            )
-            pld.system.wait(
-                signal=signal,
-                offsets=[0, 0],
-                expected=1,
-                cmp=pld.WaitCmp.Ge,
-            )
+    @pl.function(type=pl.FunctionType.InCore)
+    def reduce_scatter_step(
+        self,
+        inp: pl.Tensor[[1, SIZE], pl.FP32],
+        out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
+        scratch: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+        signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+        chunk_idx: pl.Scalar[pl.INDEX],
+    ) -> pl.Tensor[[1, SIZE], pl.FP32]:
+        """Per-chunk reduce-scatter with stage-in + barrier gated on first call."""
+        ctx = pld.get_comm_ctx(scratch)
+        my_rank = pld.rank(ctx)
+        nranks = pld.nranks(ctx)
 
-            # Phase 3: reduce — sum this rank's chunk (chunk_col is 0 or SIZE) across peers.
-            acc = pl.load(scratch, [0, chunk_col], [1, SIZE])
-            recv = pld.tile.remote_load(scratch, peer=peer, offsets=[0, chunk_col], shape=[1, SIZE])
-            acc = pl.add(acc, recv)
+        # Phase 1: stage-in — copy this rank's chunk into scratch (once, on first call).
+        if chunk_idx == 0:
+            local = pl.load(inp, [0, 0], [1, SIZE])
+            pl.store(local, [0, 0], scratch)
 
-            # Phase 4: stage-out — reduced chunk → local output.
-            return pl.store(acc, [0, 0], out)
+        # Phase 2: dual-loop barrier — notify every peer, wait on every peer (once).
+        if chunk_idx == 0:
+            for peer in pl.range(nranks):
+                if peer != my_rank:
+                    pld.system.notify(
+                        signal,
+                        peer=peer,
+                        offsets=[my_rank, 0],
+                        value=1,
+                        op=pld.NotifyOp.AtomicAdd,
+                    )
+            for src in pl.range(nranks):
+                if src != my_rank:
+                    pld.system.wait(
+                        signal=signal,
+                        offsets=[src, 0],
+                        expected=1,
+                        cmp=pld.WaitCmp.Ge,
+                    )
 
-        @pl.function(type=pl.FunctionType.Orchestration)
-        def chip_orch(
-            self,
-            inp: pl.Tensor[[1, 2 * SIZE], pl.FP32],
-            out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
-            scratch: pl.InOut[pld.DistributedTensor[[1, 2 * SIZE], pl.FP32]],
-            signal: pl.InOut[pld.DistributedTensor[[1, 1], pl.INT32]],
-            chunk_col: pl.Scalar[pl.INDEX],
-            peer: pl.Scalar[pl.INT32],
-        ) -> pl.Tensor[[1, SIZE], pl.FP32]:
-            return self.reduce_scatter_step(inp, out, scratch, signal, chunk_col, peer)
+        # Phase 3: reduce — sum chunk_idx across all peers.
+        acc = pl.load(scratch, [0, 0], [1, SIZE])
+        for peer in pl.range(nranks):
+            if peer != my_rank:
+                recv = pld.tile.remote_load(scratch, peer=peer, offsets=[0, 0], shape=[1, SIZE])
+                acc = pl.add(acc, recv)
 
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(
-            self,
-            inputs: pl.Tensor[[2, 1, 2 * SIZE], pl.FP32],
-            outputs: pl.Out[pl.Tensor[[2, 1, SIZE], pl.FP32]],
-        ) -> pl.Tensor[[2, 1, SIZE], pl.FP32]:
-            # 2xSIZE FP32 staging (2 ranks x SIZE elements x 4 bytes).
-            scratch_buf = pld.alloc_window_buffer(2 * SIZE * 4)
-            signal_buf = pld.alloc_window_buffer(4)  # 1x1 x INT32
+        # Phase 4: stage-out — reduced chunk → local output.
+        return pl.store(acc, [0, 0], out)
 
-            for r in pl.range(pld.world_size()):
-                scratch = pld.window(scratch_buf, [1, 2 * SIZE], dtype=pl.FP32)
-                signal = pld.window(signal_buf, [1, 1], dtype=pl.INT32)
-                # Ring partner: rank r notifies peer = (r + 1) % nranks; chunk_col = r * SIZE.
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def chip_orch(
+        self,
+        inp: pl.Tensor[[1, SIZE], pl.FP32],
+        out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
+        scratch: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+        signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+        chunk_idx: pl.Scalar[pl.INDEX],
+    ) -> pl.Tensor[[1, SIZE], pl.FP32]:
+        """Per-device orchestration wrapper around ``reduce_scatter_step``."""
+        return self.reduce_scatter_step(inp, out, scratch, signal, chunk_idx)
+
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def host_orch(
+        self,
+        inputs: pl.Tensor[[NR, 1, NR * SIZE], pl.FP32],
+        outputs: pl.Out[pl.Tensor[[NR, 1, SIZE], pl.FP32]],
+    ) -> pl.Tensor[[NR, 1, SIZE], pl.FP32]:
+        """Launch one chip orchestration per rank per chunk with shared window buffers."""
+        scratch_buf = pld.alloc_window_buffer(SIZE * 4)  # 1xSIZE x FP32 (4 bytes)
+        signal_buf = pld.alloc_window_buffer(pld.world_size() * 4)  # NR x 1 x INT32
+
+        for r in pl.range(pld.world_size()):
+            scratch = pld.window(scratch_buf, [1, SIZE], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [pld.world_size(), 1], dtype=pl.INT32)
+            for c in pl.range(pld.world_size()):
                 self.chip_orch(
-                    inputs[r],
-                    outputs[r],
+                    inputs[r, 0:1, c * SIZE : (c + 1) * SIZE],
+                    outputs[r, 0:1, c * SIZE : (c + 1) * SIZE],
                     scratch,
                     signal,
-                    r * SIZE,
-                    (r + 1) % pld.world_size(),
+                    c,
                     device=r,
                 )
-            return outputs
-
-    return ReduceScatterTwoRank
+        return outputs
 
 
 class TestL3ReduceScatter:
-    """L3 distributed runtime: 2-rank reduce-scatter via stage-in + notify/wait + remote_load."""
+    """L3 distributed runtime: N-rank reduce-scatter via stage-in + notify/wait + remote_load."""
 
-    def test_reduce_scatter(self, test_config, device_ids):
-        if len(device_ids) < 2:
-            pytest.skip(f"reduce-scatter needs 2 devices, got {device_ids}")
+    @pytest.mark.parametrize("n_ranks", [2, 4])
+    def test_reduce_scatter(self, test_config, device_ids, n_ranks):
+        """Compile and run mesh reduce-scatter for P=2 or P=4; skip when devices are scarce."""
+        if len(device_ids) < n_ranks:
+            pytest.skip(f"reduce-scatter P={n_ranks} needs {n_ranks} devices, got {device_ids}")
 
-        program = _build_reduce_scatter_program()
         compiled = ir.compile(
-            program,
+            ReduceScatterMesh,
             platform=test_config.platform,
             distributed_config=DistributedConfig(
-                device_ids=device_ids[:2],
+                device_ids=device_ids[:n_ranks],
                 num_sub_workers=0,
             ),
         )
 
-        # Each rank stages nranks*SIZE floats: rank r uses i + r*100 for i in 0..2*SIZE-1.
-        inputs = torch.stack(
-            [
-                torch.arange(2 * SIZE, dtype=torch.float32).reshape(1, 2 * SIZE),
-                torch.arange(100.0, 100.0 + 2 * SIZE, dtype=torch.float32).reshape(1, 2 * SIZE),
-            ]
-        )
-        outputs = torch.zeros((2, 1, SIZE), dtype=torch.float32)
+        inputs = _make_rank_inputs(n_ranks)
+        outputs = torch.zeros((n_ranks, 1, SIZE), dtype=torch.float32)
 
         compiled(inputs, outputs)
 
         expected = _expected_reduce_scatter(inputs)
         assert torch.allclose(outputs, expected), (
-            f"reduce-scatter mismatch: max diff = {(outputs - expected).abs().max().item()}"
+            f"reduce-scatter P={n_ranks} mismatch: max diff = {(outputs - expected).abs().max().item()}"
         )
 
 
