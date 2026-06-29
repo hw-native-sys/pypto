@@ -61,20 +61,17 @@
 
 #include <any>
 #include <cstddef>
-#include <cstdint>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
-#include "pypto/ir/scalar_expr.h"
-#include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
+#include "src/ir/op/distributed/comm_op_utils.h"
 
 namespace pypto {
 namespace ir {
@@ -101,212 +98,7 @@ void ValidateGetContract(const ExprPtr& dst, const ExprPtr& peer, const ExprPtr&
   CHECK(dst_type->dtype_ == src_type->dtype_)
       << op_name << " dst and src must have the same element type, got dst " << dst->GetType()->TypeName()
       << " vs src " << src->GetType()->TypeName();
-
-  const auto& dst_shape = dst_type->shape_;
-  const auto& src_shape = src_type->shape_;
-  CHECK(!dst_shape.empty()) << op_name << " requires at least one dimension on dst/src";
-  CHECK(dst_shape.size() == src_shape.size())
-      << op_name << " dst rank (" << dst_shape.size() << ") must match src rank (" << src_shape.size() << ")";
-  for (size_t i = 0; i < dst_shape.size(); ++i) {
-    // Window dims may be dynamic (a runtime-sized window). Static positivity
-    // applies only to ConstInt dims; a dynamic transfer extent needs a static
-    // chunk to bound the VEC staging tile (enforced by
-    // ValidateDynamicTransferHasChunk in the deducer). For full-slice the
-    // dst/src dims must still match — by value when static, structurally when
-    // dynamic (the codegen drives both partition views from one extent).
-    auto d = As<ConstInt>(dst_shape[i]);
-    auto s = As<ConstInt>(src_shape[i]);
-    if (d) {
-      CHECK(d->value_ > 0) << op_name << " shape dimension " << i << " must be positive, got " << d->value_;
-    }
-    if (s) {
-      CHECK(s->value_ > 0) << op_name << " src shape dimension " << i << " must be positive, got "
-                           << s->value_;
-    }
-    if (require_same_shape) {
-      if (d && s) {
-        CHECK(d->value_ == s->value_) << op_name << " dst and src must have the same static shape; dimension "
-                                      << i << " differs (dst=" << d->value_ << ", src=" << s->value_ << ")";
-      } else {
-        CHECK(AreExprsEqual(dst_shape[i], src_shape[i]))
-            << op_name << " full-slice dst and src must have the same shape; dimension " << i
-            << " differs (dynamic dims must match structurally)";
-      }
-    }
-  }
-}
-
-void ValidateGetRegionArgs(const std::vector<ExprPtr>& args, size_t region_arg_base,
-                           const std::vector<ExprPtr>& dst_shape, const std::vector<ExprPtr>& src_shape,
-                           const std::string& op_name, std::vector<ExprPtr>* out_transfer_shape = nullptr) {
-  auto dst_offsets = As<MakeTuple>(args[region_arg_base]);
-  auto src_offsets = As<MakeTuple>(args[region_arg_base + 1]);
-  auto transfer_shape = As<MakeTuple>(args[region_arg_base + 2]);
-  CHECK(dst_offsets) << op_name << " dst_offsets must be a tuple";
-  CHECK(src_offsets) << op_name << " src_offsets must be a tuple";
-  CHECK(transfer_shape) << op_name << " shape must be a tuple";
-  CHECK(dst_offsets->elements_.size() == dst_shape.size())
-      << op_name << " dst_offsets rank must match dst rank";
-  CHECK(src_offsets->elements_.size() == src_shape.size())
-      << op_name << " src_offsets rank must match src rank";
-  CHECK(transfer_shape->elements_.size() == dst_shape.size())
-      << op_name << " shape rank must match tensor rank";
-  if (out_transfer_shape) {
-    *out_transfer_shape = transfer_shape->elements_;
-  }
-
-  for (size_t i = 0; i < transfer_shape->elements_.size(); ++i) {
-    // The transfer extent may be dynamic (a runtime sub-extent of the fixed
-    // window). A dynamic dim requires a static chunk to bound the staging tile
-    // (enforced by ValidateDynamicTransferHasChunk in the deducer). The static
-    // positivity / bounds checks below only apply when the dim is a ConstInt.
-    auto dim = As<ConstInt>(transfer_shape->elements_[i]);
-    if (dim) {
-      CHECK(dim->value_ > 0) << op_name << " shape dimension " << i << " must be positive, got "
-                             << dim->value_;
-    }
-    // The window dims may also be dynamic; the subregion bounds check only runs
-    // when both the transfer dim and the window dim are static ConstInts.
-    auto dst_dim = As<ConstInt>(dst_shape[i]);
-    auto src_dim = As<ConstInt>(src_shape[i]);
-
-    if (auto dst_offset = As<ConstInt>(dst_offsets->elements_[i])) {
-      CHECK(dst_offset->value_ >= 0) << op_name << " dst_offsets dimension " << i
-                                     << " must be non-negative, got " << dst_offset->value_;
-      if (dim && dst_dim) {
-        CHECK(dst_offset->value_ + dim->value_ <= dst_dim->value_)
-            << op_name << " dst subregion dimension " << i
-            << " exceeds dst shape (offset=" << dst_offset->value_ << ", shape=" << dim->value_
-            << ", dst_dim=" << dst_dim->value_ << ")";
-      }
-    }
-    if (auto src_offset = As<ConstInt>(src_offsets->elements_[i])) {
-      CHECK(src_offset->value_ >= 0) << op_name << " src_offsets dimension " << i
-                                     << " must be non-negative, got " << src_offset->value_;
-      if (dim && src_dim) {
-        CHECK(src_offset->value_ + dim->value_ <= src_dim->value_)
-            << op_name << " src subregion dimension " << i
-            << " exceeds src shape (offset=" << src_offset->value_ << ", shape=" << dim->value_
-            << ", src_dim=" << src_dim->value_ << ")";
-      }
-    }
-  }
-}
-
-// Read an optional int attr (chunk_rows / chunk_cols / pipeline), defaulting to
-// 0 (unset).
-int ReadIntKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs, const std::string& key) {
-  for (const auto& [k, v] : kwargs) {
-    if (k == key) return AnyCast<int>(v, key);
-  }
-  return 0;
-}
-
-// Read an optional bool attr (pipeline), defaulting to false (unset). Mirrors put.cpp.
-bool ReadBoolKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs, const std::string& key) {
-  for (const auto& [k, v] : kwargs) {
-    if (k == key) return AnyCast<bool>(v, key);
-  }
-  return false;
-}
-
-// Double-buffering (ping-pong) only helps a chunked transfer — pto-isa slides
-// the transfer through two staging tiles with overlapped TLOAD/TSTORE. Require
-// both chunk dims so the staging tile is fully bounded. Mirrors put.cpp.
-void ValidatePipelineHasChunk(const std::vector<std::pair<std::string, std::any>>& kwargs,
-                              const std::string& op_name) {
-  if (!ReadBoolKwarg(kwargs, "pipeline")) return;
-  const int chunk_rows = ReadIntKwarg(kwargs, "chunk_rows");
-  const int chunk_cols = ReadIntKwarg(kwargs, "chunk_cols");
-  CHECK(chunk_rows > 0 && chunk_cols > 0)
-      << op_name
-      << ": pipeline=True requires both chunk_rows>0 and chunk_cols>0 (double-buffering needs a "
-         "chunked transfer to ping-pong through two staging tiles)";
-}
-
-// Validate one VEC staging tile: a 2D TileType whose dtype matches the local
-// dst. Returns the TileType for downstream extent checks. Shared by the single
-// stage and the optional ping-pong second stage. Mirrors put.cpp.
-TileTypePtr ValidateStageTile(const ExprPtr& stage, const DataType& dst_dtype, const std::string& what) {
-  auto stage_type = As<TileType>(stage->GetType());
-  CHECK(stage_type) << what << " must be a TileType, got " << stage->GetType()->TypeName();
-  CHECK(stage_type->dtype_ == dst_dtype)
-      << what << " dtype must match dst dtype, got stage=" << stage_type->dtype_.ToString()
-      << " dst=" << dst_dtype.ToString();
-  CHECK(stage_type->shape_.size() == 2)
-      << what << " must be a 2D VEC staging tile, got rank " << stage_type->shape_.size();
-  return stage_type;
-}
-
-// A dynamic transfer extent (a runtime sub-extent of the fixed window) needs a
-// static chunk to bound the VEC staging tile (UB allocation is static). The
-// flattened transfer is [rows = prod(leading dims), cols = innermost dim]: a
-// dynamic innermost requires chunk_cols, a dynamic leading dim requires
-// chunk_rows. Fully-static transfers need no chunk. User-facing.
-void ValidateDynamicTransferHasChunk(const std::vector<ExprPtr>& transfer_shape,
-                                     const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                     const std::string& op_name) {
-  if (transfer_shape.empty()) return;
-  const bool innermost_dynamic = !As<ConstInt>(transfer_shape.back());
-  bool leading_dynamic = false;
-  for (size_t i = 0; i + 1 < transfer_shape.size(); ++i) {
-    if (!As<ConstInt>(transfer_shape[i])) leading_dynamic = true;
-  }
-  if (!innermost_dynamic && !leading_dynamic) return;
-  const int chunk_rows = ReadIntKwarg(kwargs, "chunk_rows");
-  const int chunk_cols = ReadIntKwarg(kwargs, "chunk_cols");
-  CHECK(!leading_dynamic || chunk_rows > 0)
-      << op_name
-      << ": a dynamic leading transfer dim needs a static chunk_rows to bound the VEC staging tile";
-  CHECK(!innermost_dynamic || chunk_cols > 0)
-      << op_name
-      << ": a dynamic innermost transfer dim needs a static chunk_cols to bound the VEC staging tile";
-}
-
-// Flatten an N-D transfer shape to its 2-D [rows, cols] extent
-// (rows = prod(leading dims), cols = innermost dim) and confirm the 2-D VEC
-// stage tile fits within it. pto-isa TPUT/TGET auto-chunks the transfer through
-// a smaller stage, so the stage is allowed to be smaller than the transfer; it
-// must only not exceed it. Dynamic transfer dims can't be compared statically
-// (the chunk bounds them at runtime), so they are skipped here.
-//
-// NOTE: kept identical to the copy in put.cpp (mirrors the existing per-file
-// Validate*Contract / Validate*RegionArgs duplication between these two TUs).
-void ValidateStageFitsTransfer(const std::vector<ExprPtr>& stage_shape,
-                               const std::vector<ExprPtr>& transfer_shape, const Span& transfer_span,
-                               const Span& stage_span, const std::string& op_name) {
-  (void)transfer_span;
-  int64_t transfer_cols = 1;
-  bool cols_static = false;
-  int64_t transfer_rows = 1;
-  bool rows_static = true;
-  for (size_t i = 0; i < transfer_shape.size(); ++i) {
-    auto d = As<ConstInt>(transfer_shape[i]);
-    if (i + 1 == transfer_shape.size()) {
-      cols_static = static_cast<bool>(d);
-      if (d) transfer_cols = d->value_;
-    } else if (d) {
-      transfer_rows *= d->value_;
-    } else {
-      rows_static = false;
-    }
-  }
-  auto stage_rows_c = As<ConstInt>(stage_shape[0]);
-  auto stage_cols_c = As<ConstInt>(stage_shape[1]);
-  INTERNAL_CHECK_SPAN(stage_rows_c && stage_cols_c, stage_span)
-      << "Internal error: " << op_name << " stage dims must be static ConstInt";
-  const int64_t stage_rows = stage_rows_c->value_;
-  const int64_t stage_cols = stage_cols_c->value_;
-  INTERNAL_CHECK_SPAN(stage_rows > 0 && stage_cols > 0, stage_span)
-      << "Internal error: " << op_name << " stage dims must be positive, got [" << stage_rows << ", "
-      << stage_cols << "]";
-  INTERNAL_CHECK_SPAN(!rows_static || stage_rows <= transfer_rows, stage_span)
-      << "Internal error: " << op_name << " stage rows " << stage_rows
-      << " must fit within flattened transfer rows " << transfer_rows
-      << " (pto-isa auto-chunks a smaller stage)";
-  INTERNAL_CHECK_SPAN(!cols_static || stage_cols <= transfer_cols, stage_span)
-      << "Internal error: " << op_name << " stage cols " << stage_cols << " must fit within transfer cols "
-      << transfer_cols << " (pto-isa auto-chunks a smaller stage)";
+  comm_op::ValidateTransferShapeContract(dst_type->shape_, src_type->shape_, op_name, require_same_shape);
 }
 
 TypePtr DeduceGetType(const std::vector<ExprPtr>& args,
@@ -328,10 +120,11 @@ TypePtr DeduceGetType(const std::vector<ExprPtr>& args,
   std::vector<ExprPtr> transfer_shape = dst_type->shape_;
   if (args.size() == 6) {
     auto src_type = As<DistributedTensorType>(args[2]->GetType());
-    ValidateGetRegionArgs(args, 3, dst_type->shape_, src_type->shape_, "pld.tensor.get", &transfer_shape);
+    transfer_shape =
+        comm_op::ValidateRegionArgs(args, 3, dst_type->shape_, src_type->shape_, "pld.tensor.get");
   }
-  ValidateDynamicTransferHasChunk(transfer_shape, kwargs, "pld.tensor.get");
-  ValidatePipelineHasChunk(kwargs, "pld.tensor.get");
+  comm_op::ValidateDynamicTransferHasChunk(transfer_shape, kwargs, "pld.tensor.get");
+  comm_op::ValidatePipelineHasChunk(kwargs, "pld.tensor.get");
 
   return GetUnknownType();
 }
@@ -354,10 +147,10 @@ TypePtr DeduceGetTileType(const std::vector<ExprPtr>& args,
   ValidateGetContract(args[0], args[1], args[2], "pld.tile.get", !has_region);
 
   auto dst_type = AsTensorTypeLike(args[0]->GetType());
-  auto stage_type = ValidateStageTile(args[3], dst_type->dtype_, "pld.tile.get stage");
+  auto stage_type = comm_op::ValidateStageTile(args[3], dst_type->dtype_, "pld.tile.get stage");
   TileTypePtr stage2_type;
   if (has_stage2) {
-    stage2_type = ValidateStageTile(args[4], dst_type->dtype_, "pld.tile.get stage2");
+    stage2_type = comm_op::ValidateStageTile(args[4], dst_type->dtype_, "pld.tile.get stage2");
     // pto-isa ping/pong contract: identical-shape staging tiles.
     CHECK(AreExprsEqual(stage_type->shape_[0], stage2_type->shape_[0]) &&
           AreExprsEqual(stage_type->shape_[1], stage2_type->shape_[1]))
@@ -367,19 +160,19 @@ TypePtr DeduceGetTileType(const std::vector<ExprPtr>& args,
   auto src_type = As<DistributedTensorType>(args[2]->GetType());
   std::vector<ExprPtr> transfer_shape = dst_type->shape_;
   if (has_region) {
-    ValidateGetRegionArgs(args, region_base, dst_type->shape_, src_type->shape_, "pld.tile.get",
-                          &transfer_shape);
+    transfer_shape =
+        comm_op::ValidateRegionArgs(args, region_base, dst_type->shape_, src_type->shape_, "pld.tile.get");
   }
 
   // The explicit stage tile is the 2-D VEC bounce buffer that pto-isa TGET
   // streams the transfer through; it may be smaller than the transfer (a single
   // chunk) but must not exceed the flattened [rows, cols] transfer extent. A
   // second stage (ping/pong double-buffering) shares the same extent.
-  ValidateStageFitsTransfer(stage_type->shape_, transfer_shape, args[0]->span_, args[3]->span_,
-                            "pld.tile.get");
+  comm_op::ValidateStageFitsTransfer(stage_type->shape_, transfer_shape, args[0]->span_, args[3]->span_,
+                                     "pld.tile.get");
   if (has_stage2) {
-    ValidateStageFitsTransfer(stage2_type->shape_, transfer_shape, args[0]->span_, args[4]->span_,
-                              "pld.tile.get");
+    comm_op::ValidateStageFitsTransfer(stage2_type->shape_, transfer_shape, args[0]->span_, args[4]->span_,
+                                       "pld.tile.get");
   }
 
   return GetUnknownType();
