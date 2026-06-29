@@ -317,6 +317,27 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
     for (const Var* base_key : base_order) {
       const auto& group = base_groups.at(base_key);
 
+      // User-managed (pinned) buffer: the address is user-assigned and already
+      // baked into each MemRef's byte_offset_ (root = the user's address, views
+      // = user address + view offset, via ShareMemRefFrom). Honor it verbatim —
+      // only canonicalize the dtype to INT64 for PTO codegen — and do NOT bump
+      // current_addr. In a whole-space-manual space every base is pinned, so the
+      // auto bump path never runs; cross-buffer overlap was already validated in
+      // MemoryReuse, so independent pinned buffers may legally co-locate addresses.
+      if (IsUserPinnedBase(base_key)) {
+        for (const auto& old_memref : group) {
+          int64_t addr = 0;
+          if (auto off = std::dynamic_pointer_cast<const ConstInt>(old_memref->byte_offset_)) {
+            addr = off->value_;
+          }
+          auto addr_expr = std::make_shared<ConstInt>(addr, DataType::INT64, Span::unknown());
+          auto new_memref = std::make_shared<MemRef>(old_memref->name_hint_, old_memref->base_, addr_expr,
+                                                     old_memref->size_, old_memref->span_);
+          memref_pairs.emplace_back(old_memref.get(), new_memref);
+        }
+        continue;
+      }
+
       // Slot size = max member.size_.  The root MemRef (byte_offset == 0) is
       // sized to the full alloc; views are sub-regions and never exceed it.
       uint64_t slot_size = 0;
