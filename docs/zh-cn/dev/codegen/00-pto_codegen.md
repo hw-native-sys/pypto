@@ -174,6 +174,7 @@ print(pto_code)
 | `system.reserve_buffer(...)` | `%name = pto.reserve_buffer {name = "N", size = S, location = #pto.address_space<loc>, auto = false, base = B} -> i32` | 预留缓冲区 |
 | `system.import_peer_buffer(...)` | `%name = pto.import_reserved_buffer {name = "N", peer_func = @F} -> i32` | 导入对等缓冲区 |
 | `system.syncall(core_type=C)` | `pto.syncall() mode = #pto.sync_all_mode<hard>, core_type = #pto.sync_core_type<C>` | 跨核全员屏障（hard/FFTS 形态） |
+| `system.syncall(mode="soft", core_type="aiv_only", gm_workspace=ws, used_cores=N)` | `pto.syncall(%gm_pview, %scratch, %used : !pto.partition_tensor_view<...xi32>, !pto.tile_buf<loc=vec, ...i32>, i32) mode = #pto.sync_all_mode<soft>, core_type = #pto.sync_core_type<aiv_only>` | soft/GM 轮询屏障（部分占用即可；`gm_workspace` 下沉为 `pto.partition_view`，scratch tile 由编译器合成） |
 
 **说明：**
 

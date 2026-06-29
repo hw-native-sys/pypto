@@ -144,6 +144,42 @@ class TestSystemOpsParsing:
         with pytest.raises(ValueError, match="core_type"):
             pl.system.syncall(core_type="bogus")
 
+    def test_syncall_soft_round_trip(self):
+        """Round-trip for the soft (GM-polling) form of pl.system.syncall."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                x: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Tensor[[512, 128], pl.FP32],
+                ws: pl.Tensor[[32], pl.INT32],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                off = pl.tile.get_block_idx() * 128
+                t = pl.load(x, [off, 0], [128, 128])
+                pl.system.syncall(mode="soft", core_type="aiv_only", gm_workspace=ws, used_cores=4)
+                return pl.store(t, [off, 0], out)
+
+        printed = Before.as_python()
+        # The high-level surface (mode/core_type/gm_workspace/used_cores) round-trips;
+        # the synthesized scratch is threaded back via the internal scratch= kwarg.
+        assert 'pl.system.syncall(mode="soft", core_type="aiv_only", gm_workspace=ws, used_cores=4' in printed
+
+        reparsed = pl.parse_program(printed)
+        assert isinstance(reparsed, ir.Program)
+        ir.assert_structural_equal(Before, reparsed)
+
+    def test_syncall_soft_validation(self):
+        """Soft syncall validates mode, core_type, gm_workspace, and used_cores."""
+        with pytest.raises(ValueError, match="mode"):
+            pl.system.syncall(mode="bogus")
+        # aic_only / mix soft not yet supported.
+        with pytest.raises(ValueError, match="aiv_only"):
+            pl.system.syncall(mode="soft", core_type="aic_only", used_cores=4)
+        with pytest.raises(ValueError, match="gm_workspace"):
+            pl.system.syncall(mode="soft", core_type="aiv_only", used_cores=4)
+
     def test_multiple_system_ops_round_trip(self):
         """Test round-trip with multiple system ops in a single function."""
 

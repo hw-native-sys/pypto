@@ -2376,6 +2376,36 @@ class TestSyncAllCodegen:
         assert "mode = #pto.sync_all_mode<hard>" in line, f"hard mode missing:\n{line}"
         assert "core_type = #pto.sync_core_type<aiv_only>" in line, f"core_type missing:\n{line}"
 
+    def test_syncall_soft_emits_gm_polling_barrier(self):
+        """soft syncall emits pto.syncall(%gm_pview, %scratch, %used : ...) mode=<soft>."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_syncall_soft(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Tensor[[16, 16], pl.FP32],
+                ws: pl.Tensor[[32], pl.INT32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                tile: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
+                pl.system.syncall(mode="soft", core_type="aiv_only", gm_workspace=ws, used_cores=4)
+                updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(tile, [0, 0], out)
+                return updated
+
+        mlir = self._generate_mlir(Prog)
+        line = next((ln for ln in mlir.splitlines() if "pto.syncall(" in ln), "")
+        assert line, f"soft pto.syncall not found in MLIR:\n{mlir}"
+        assert "mode = #pto.sync_all_mode<soft>" in line, f"soft mode missing:\n{line}"
+        assert "core_type = #pto.sync_core_type<aiv_only>" in line, f"core_type missing:\n{line}"
+        # 3 operands: gm partition_view, scratch tile_buf, used_cores i32.
+        assert "partition_tensor_view<32xi32>" in line, f"gm partition_view missing:\n{line}"
+        assert "tile_buf<loc=vec" in line and "i32" in line, f"scratch tile_buf missing:\n{line}"
+        # The GM workspace is lowered to a partition_view over all 32 slots.
+        assert any("partition_view" in ln and "syncgm" in ln for ln in mlir.splitlines()), (
+            f"gm workspace partition_view not emitted:\n{mlir}"
+        )
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

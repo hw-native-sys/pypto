@@ -164,6 +164,32 @@ def syncall(*, core_type: str = "mix", span: Span | None = None) -> Call:
     return _ir_core.create_op_call("system.syncall", [], {"core_type": core_type}, actual_span)
 
 
+def syncall_soft(core_type: str, args: list[Expr], *, span: Span | None = None) -> Call:
+    """Soft (GM-polling) form of ``system.syncall``.
+
+    Unlike the hard/FFTS form, the soft form polls a shared GM workspace and so
+    works at partial occupancy. ``args`` is the positional operand list, already
+    assembled by the DSL layer:
+
+    - aiv_only / aic_only: ``[gm_workspace, scratch_tile, used_cores]``
+    - mix: ``[gm_workspace, ub_scratch, l1_scratch, used_cores]``
+
+    Args:
+        core_type: Participant set, one of "aiv_only", "aic_only", or "mix".
+        args: Positional operand Exprs (see above).
+        span: Optional source span for debugging (auto-captured if not provided).
+
+    Returns:
+        Call expression for the soft-mode system.syncall.
+    """
+    if core_type not in _SYNCALL_CORE_TYPES:
+        raise ValueError(f"syncall core_type must be one of {_SYNCALL_CORE_TYPES}, got {core_type!r}")
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call(
+        "system.syncall", args, {"core_type": core_type, "mode": "soft"}, actual_span
+    )
+
+
 # Sentinel value: compiler auto-assigns the buffer base address
 AUTO: int = -1
 

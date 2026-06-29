@@ -327,13 +327,13 @@ with ib.function("tile_computation") as f:
 | `system.bar_all` | Global barrier | None |
 | `system.bar_v` | Vector barrier | None |
 | `system.bar_m` | Matrix barrier | None |
-| `system.syncall` | Cross-core all-participant barrier (`pto::SYNCALL`, hard/FFTS form) | `core_type` (`"aiv_only"` \| `"aic_only"` \| `"mix"`) |
+| `system.syncall` | Cross-core all-participant barrier (`pto::SYNCALL`). `mode="hard"` (FFTS, no operands) or `mode="soft"` (GM-polling, operands) | `core_type` (`"aiv_only"` \| `"aic_only"` \| `"mix"`), `mode` (`"hard"` \| `"soft"`) |
 | `system.sync_src` | Set sync flag | `set_pipe`, `wait_pipe`, `event_id` |
 | `system.sync_dst` | Wait sync flag | `set_pipe`, `wait_pipe`, `event_id` |
 | `system.task_invalid` | Sentinel `PTO2TaskId::invalid()` — "no producer" seed for a TaskId carry | None |
 | `system.task_is_valid` | Test whether a `TASK_ID` value is a valid (non-sentinel) handle | None; sole positional arg is the TaskId Var |
 
-`system.syncall` emits the hard/FFTS form of `pto::SYNCALL`, which waits for **all** physical cores of the selected `core_type` to arrive. The kernel must be launched at full occupancy (one block per physical core); a partial-occupancy launch deadlocks the barrier (AICore error 507018). Use a full-core SPMD/grid dispatch.
+`system.syncall` has two modes. The **hard** form (`mode="hard"`, default) emits an FFTS barrier that waits for **all** physical cores of the selected `core_type`; the kernel must be launched at full occupancy (one block per physical core), or the barrier deadlocks (AICore error 507018). The **soft** form (`mode="soft"`) polls a shared GM workspace and so works at **partial** occupancy. Soft mode carries operands `[gm_workspace, scratch, used_cores]`: `gm_workspace` is a shared, zero-initialized GM `INT32` tensor with `used_cores * 8` slots (pass it as a kernel parameter so all blocks share one buffer); `scratch` is a compiler-synthesized local staging tile; `used_cores` is the participant count. Soft mode currently supports `core_type="aiv_only"` only.
 
 `system.task_invalid` returns [`ScalarType(DataType::TASK_ID)`](02-types.md#scalartype). It is the lowering target of the Python literal `None` when `None` appears in a TaskId position (a `deps=[None]` entry or a TaskId loop iter_arg seed) inside `with pl.manual_scope():` regions. There is no `system.task_id_of` op — producer task ids are obtained from the second tuple element returned by the `pl.submit(...)` parser construct, not from a builtin. Source: `src/ir/op/sync_ops/task.cpp`.
 

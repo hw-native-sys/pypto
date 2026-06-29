@@ -321,13 +321,13 @@ with ib.function("tile_computation") as f:
 | `system.bar_all` | 全局屏障 | 无 |
 | `system.bar_v` | 向量屏障 | 无 |
 | `system.bar_m` | 矩阵屏障 | 无 |
-| `system.syncall` | 跨核全员屏障（`pto::SYNCALL`，hard/FFTS 形态） | `core_type`（`"aiv_only"` \| `"aic_only"` \| `"mix"`） |
+| `system.syncall` | 跨核全员屏障（`pto::SYNCALL`）。`mode="hard"`（FFTS，无 operand）或 `mode="soft"`（GM 轮询，带 operand） | `core_type`（`"aiv_only"` \| `"aic_only"` \| `"mix"`）、`mode`（`"hard"` \| `"soft"`） |
 | `system.sync_src` | 设置同步标志 | `set_pipe`, `wait_pipe`, `event_id` |
 | `system.sync_dst` | 等待同步标志 | `set_pipe`, `wait_pipe`, `event_id` |
 | `system.task_invalid` | `PTO2TaskId::invalid()` 哨兵——TaskId carry 的 "暂无 producer" 种子 | 无 |
 | `system.task_is_valid` | 测试某个 `TASK_ID` 值是否为有效（非哨兵）handle | 无；唯一位置参数是 TaskId Var |
 
-`system.syncall` 下沉为 `pto::SYNCALL` 的 hard/FFTS 形态，会等待所选 `core_type` 的**全部**物理核到达。因此 kernel 必须以满占用方式启动（每个物理核一个 block）；部分占用启动会令该屏障死锁（AICore 错误 507018）。请使用满核 SPMD/grid 分发。
+`system.syncall` 有两种 mode。**hard** 形态（`mode="hard"`，默认）下沉为 FFTS 屏障，等待所选 `core_type` 的**全部**物理核到达；kernel 必须以满占用方式启动（每个物理核一个 block），否则屏障死锁（AICore 错误 507018）。**soft** 形态（`mode="soft"`）轮询一段共享 GM workspace，因此可在**部分**占用下工作。soft 形态带 operand `[gm_workspace, scratch, used_cores]`：`gm_workspace` 是共享、清零的 GM `INT32` tensor，含 `used_cores * 8` 个 slot（请作为 kernel 参数传入，使所有 block 共享同一缓冲）；`scratch` 是编译器合成的本地暂存 tile；`used_cores` 是参与核数。soft 形态目前仅支持 `core_type="aiv_only"`。
 
 `system.task_invalid` 返回类型为 [`ScalarType(DataType::TASK_ID)`](02-types.md#scalartype)。当 Python 字面量 `None` 出现在 TaskId 位置（`deps=[None]` 条目或 TaskId 循环 iter_arg 种子）时，它就是 `None` 在 `with pl.manual_scope():` 区域内的下沉目标。不存在 `system.task_id_of` op —— producer task id 由 `pl.submit(...)` parser construct 返回的二元组第二个元素获得，而非来自 builtin。源码：`src/ir/op/sync_ops/task.cpp`。
 

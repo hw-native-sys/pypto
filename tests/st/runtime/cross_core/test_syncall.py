@@ -63,6 +63,14 @@ TOTAL_ROWS = CORE_NUM * TILE_ROWS  # 48 * 128 = 6144 on 910B
 # restrict this test to the a2a3 (910B) profile it was validated against.
 A2A3_PLATFORMS = ("a2a3", "a2a3sim")
 
+# Soft-form SYNCALL polls a shared GM workspace, so it works at *partial*
+# occupancy. Use a small block count to exercise that (a hard barrier would
+# deadlock here). The GM workspace needs used_cores * 8 zero-initialized int32
+# slots, shared across all blocks (passed as a kernel parameter).
+SOFT_CORE_NUM = 4
+SOFT_TOTAL_ROWS = SOFT_CORE_NUM * TILE_ROWS  # 512
+SOFT_WS_SLOTS = SOFT_CORE_NUM * 8
+
 
 @pl.program
 class SPMDSyncAllProgram:
@@ -122,6 +130,68 @@ class SPMDSyncAllTestCase(PTOTestCase):
         tensors["out"][:] = tensors["a"] + tensors["b"]
 
 
+@pl.program
+class SPMDSyncAllSoftProgram:
+    """SPMD add with an AIV-only *soft* (GM-polling) barrier at partial occupancy."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def spmd_syncall_soft_add(
+        self,
+        a: pl.Tensor[[SOFT_TOTAL_ROWS, TILE_COLS], pl.FP32],
+        b: pl.Tensor[[SOFT_TOTAL_ROWS, TILE_COLS], pl.FP32],
+        sync_ws: pl.Tensor[[SOFT_WS_SLOTS], pl.INT32],
+        out: pl.Out[pl.Tensor[[SOFT_TOTAL_ROWS, TILE_COLS], pl.FP32]],
+    ) -> pl.Tensor[[SOFT_TOTAL_ROWS, TILE_COLS], pl.FP32]:
+        block_idx = pl.tile.get_block_idx()
+        offset = block_idx * TILE_ROWS
+        tile_a = pl.load(a, [offset, 0], [TILE_ROWS, TILE_COLS])
+        tile_b = pl.load(b, [offset, 0], [TILE_ROWS, TILE_COLS])
+        # GM-polling barrier across the SOFT_CORE_NUM participating AIV cores.
+        pl.system.syncall(mode="soft", core_type="aiv_only", gm_workspace=sync_ws, used_cores=SOFT_CORE_NUM)
+        tile_c = pl.add(tile_a, tile_b)
+        out = pl.store(tile_c, [offset, 0], out)
+        return out
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrator(
+        self,
+        a: pl.Tensor[[SOFT_TOTAL_ROWS, TILE_COLS], pl.FP32],
+        b: pl.Tensor[[SOFT_TOTAL_ROWS, TILE_COLS], pl.FP32],
+        sync_ws: pl.Tensor[[SOFT_WS_SLOTS], pl.INT32],
+        out: pl.Out[pl.Tensor[[SOFT_TOTAL_ROWS, TILE_COLS], pl.FP32]],
+    ) -> pl.Tensor[[SOFT_TOTAL_ROWS, TILE_COLS], pl.FP32]:
+        with pl.spmd(SOFT_CORE_NUM):
+            out = self.spmd_syncall_soft_add(a, b, sync_ws, out)
+        return out
+
+
+class SPMDSyncAllSoftTestCase(PTOTestCase):
+    """SPMD add + aiv_only soft syncall at partial occupancy (4 blocks)."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "spmd_syncall_soft_aiv_512x128"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("a", [SOFT_TOTAL_ROWS, TILE_COLS], DataType.FP32, init_value=torch.randn),
+            TensorSpec("b", [SOFT_TOTAL_ROWS, TILE_COLS], DataType.FP32, init_value=torch.randn),
+            # Shared GM workspace: zero-initialized int32 counter slots.
+            TensorSpec("sync_ws", [SOFT_WS_SLOTS], DataType.INT32, init_value=torch.zeros),
+            TensorSpec("out", [SOFT_TOTAL_ROWS, TILE_COLS], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return SPMDSyncAllSoftProgram
+
+    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
+        tensors["out"][:] = tensors["a"] + tensors["b"]
+
+
 class TestSyncAll:
     """Cross-core all-participant barrier (pl.system.syncall) system test."""
 
@@ -130,6 +200,12 @@ class TestSyncAll:
         """SPMD add with an aiv_only syncall barrier: compile, run, and verify out = a + b."""
         result = test_runner.run(SPMDSyncAllTestCase(platform=platform))
         assert result.passed, f"SPMD aiv_only syncall failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", A2A3_PLATFORMS)
+    def test_spmd_syncall_soft_aiv_only(self, test_runner, platform):
+        """SPMD add with an aiv_only *soft* barrier at partial occupancy: verify out = a + b."""
+        result = test_runner.run(SPMDSyncAllSoftTestCase(platform=platform))
+        assert result.passed, f"SPMD aiv_only soft syncall failed: {result.error}"
 
 
 if __name__ == "__main__":

@@ -926,6 +926,36 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
     return;
   }
 
+  // system.syncall soft form: args_ = [gm_workspace, scratch, used_cores]. The
+  // scratch tile (args_[1]) is a compiler-synthesized staging buffer, so print
+  // the high-level DSL surface (mode=/core_type=/gm_workspace=/used_cores=) and
+  // let the parser re-synthesize the scratch on reparse.
+  if (IsOp(op, "system.syncall") && op->args_.size() == 3) {
+    std::string core_type = "mix";
+    std::string mode = "soft";
+    for (const auto& [key, val] : op->kwargs_) {
+      if (key == "core_type")
+        core_type = AnyCast<std::string>(val, "syncall core_type");
+      else if (key == "mode")
+        mode = AnyCast<std::string>(val, "syncall mode");
+    }
+    stream_ << "mode=\"" << mode << "\", core_type=\"" << core_type << "\", gm_workspace=";
+    VisitExpr(op->args_[0]);
+    stream_ << ", used_cores=";
+    if (auto ci = As<ConstInt>(op->args_[2])) {
+      stream_ << ci->value_;
+    } else {
+      VisitExpr(op->args_[2]);
+    }
+    // Print the synthesized scratch tile so the IR round-trips faithfully once a
+    // pass has hoisted it to a named SSA value. The parser threads it back via
+    // the internal `scratch=` kwarg instead of re-synthesizing.
+    stream_ << ", scratch=";
+    VisitExpr(op->args_[1]);
+    stream_ << ")";
+    return;
+  }
+
   // Print positional arguments
   for (size_t i = 0; i < op->args_.size(); ++i) {
     if (i > 0) stream_ << ", ";

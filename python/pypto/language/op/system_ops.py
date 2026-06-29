@@ -26,12 +26,15 @@ from pypto.ir.op.system_ops import (
     bar_v,
     sync_dst,
     sync_src,
-    syncall,
 )
+from pypto.ir.utils import _get_span_or_capture
 from pypto.pypto_core import DataType
-from pypto.pypto_core.ir import Call, Span
+from pypto.pypto_core.ir import Call, ConstInt, MemorySpace, Span
 
-from ..typing import Array, Scalar, Tile
+from ..typing import Array, Scalar, Tensor, Tile
+
+# pto::SYNCALL soft barrier reserves 8 int32 slots per participating core.
+_SYNCALL_SOFT_SLOT_INT32 = 8
 
 __all__ = [
     "AUTO",
@@ -54,6 +57,69 @@ __all__ = [
     "task_invalid",
     "task_dummy",
 ]
+
+
+def syncall(
+    *,
+    core_type: str = "mix",
+    mode: str = "hard",
+    gm_workspace: Tensor | None = None,
+    used_cores: int = 0,
+    scratch: Tile | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Cross-core all-participant barrier (``pto::SYNCALL``).
+
+    Two modes:
+
+    - ``mode="hard"`` (default): FFTS barrier with no operands. Requires the
+      kernel to fill **all** physical cores of ``core_type`` (a partial launch
+      deadlocks). See :func:`pypto.ir.op.system_ops.syncall`.
+    - ``mode="soft"``: GM-polling barrier that works at partial occupancy.
+      Each participant bumps a per-core counter in a shared GM workspace and
+      polls until all ``used_cores`` participants arrive.
+
+    Soft-mode arguments:
+
+    Args:
+        core_type: Participant set, one of "aiv_only", "aic_only", or "mix".
+        mode: "hard" or "soft".
+        gm_workspace: Soft mode only. A shared, zero-initialized GM ``INT32``
+            tensor with at least ``used_cores * 8`` elements, visible to every
+            participating block (pass it as a kernel parameter so all SPMD
+            blocks share one buffer). The compiler synthesizes the local
+            UB/L1 staging tile automatically.
+        used_cores: Soft mode only. Number of participating cores (a positive
+            compile-time int).
+        span: Optional source span for debugging (auto-captured if not provided).
+
+    Returns:
+        Call expression for system.syncall.
+    """
+    if mode == "hard":
+        return _ir_ops.syncall(core_type=core_type, span=span)
+    if mode != "soft":
+        raise ValueError(f"syncall mode must be 'hard' or 'soft', got {mode!r}")
+    # Soft form currently supports only aiv_only. aic_only needs a flat L1 (cbuf)
+    # staging buffer (a fractal-laid-out Mat tile mis-places the counter slots),
+    # and mix needs both UB + L1 scratch across a mixed kernel — both follow-ups.
+    if core_type != "aiv_only":
+        raise ValueError(f"soft syncall currently supports only core_type='aiv_only', got {core_type!r}")
+    if gm_workspace is None:
+        raise ValueError("soft syncall requires gm_workspace (a shared, zero-initialized GM INT32 tensor)")
+    if not isinstance(used_cores, int) or used_cores <= 0:
+        raise ValueError(f"soft syncall requires a positive compile-time used_cores, got {used_cores!r}")
+
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    if scratch is None:
+        # User path: synthesize the local UB staging tile. (On reparse the printer
+        # threads the existing scratch back via scratch=, so we reuse it instead.)
+        from . import tile_ops as _tile  # noqa: PLC0415  # deferred: tile_ops imports system_ops (cycle)
+
+        slots = used_cores * _SYNCALL_SOFT_SLOT_INT32
+        scratch = _tile.create([1, slots], DataType.INT32, target_memory=MemorySpace.Vec)
+    args = [gm_workspace.unwrap(), scratch.unwrap(), ConstInt(used_cores, DataType.INT32, actual_span)]
+    return _ir_ops.syncall_soft(core_type, args, span=actual_span)
 
 
 def tpush_to_aiv(tile: Tile, *, split: int, id: int | None = None, span: Span | None = None) -> Call:

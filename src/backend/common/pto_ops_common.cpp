@@ -3811,15 +3811,61 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
 
     return std::string("");
   });
-  reg("system.syncall", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-    // Cross-core all-participant barrier (pto::SYNCALL), hard/FFTS form: no
-    // operands, only the participating core set is selected.
-    CHECK(op->args_.empty()) << "system.syncall (hard form) takes no arguments, got " << op->args_.size();
+  reg("system.syncall", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+    auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+    // Cross-core all-participant barrier (pto::SYNCALL). `mode` selects the
+    // hard/FFTS form (no operands) or the soft/GM-polling form (operands).
     const auto core_type = op->GetKwarg<std::string>("core_type", "mix");
+    const auto mode = op->GetKwarg<std::string>("mode", "hard");
     CHECK(core_type == "aiv_only" || core_type == "aic_only" || core_type == "mix")
         << "system.syncall: core_type must be aiv_only|aic_only|mix, got " << core_type;
-    codegen.Emit("pto.syncall() mode = #pto.sync_all_mode<hard>, core_type = #pto.sync_core_type<" +
-                 core_type + ">");
+
+    if (mode == "hard") {
+      CHECK(op->args_.empty()) << "system.syncall (hard form) takes no arguments, got " << op->args_.size();
+      codegen.Emit("pto.syncall() mode = #pto.sync_all_mode<hard>, core_type = #pto.sync_core_type<" +
+                   core_type + ">");
+      return std::string("");
+    }
+
+    CHECK(mode == "soft") << "system.syncall: mode must be hard|soft, got " << mode;
+    // Soft form operands: [gm_workspace, scratch, used_cores]. Currently only
+    // aiv_only is wired (aic_only needs a flat L1 scratch; mix needs both UB +
+    // L1 scratch across a mixed kernel) — both are follow-ups.
+    CHECK(core_type == "aiv_only") << "system.syncall: soft form currently supports only aiv_only, got "
+                                   << core_type;
+    CHECK(op->args_.size() == 3) << "system.syncall (soft aiv_only) requires 3 operands "
+                                    "(gm_workspace, scratch, used_cores), got "
+                                 << op->args_.size();
+
+    // gm_workspace: shared 1-D GM int32 tensor -> pto.partition_view over the
+    // whole buffer.
+    auto gm_var = AsVarLike(op->args_[0]);
+    CHECK_SPAN(gm_var, op->span_) << "system.syncall soft: gm_workspace must be a tensor variable";
+    auto gm_tt = As<ir::TensorType>(gm_var->GetType());
+    CHECK_SPAN(gm_tt && gm_tt->shape_.size() == 1, op->span_)
+        << "system.syncall soft: gm_workspace must be a 1-D tensor";
+    const std::string dtype_str = codegen.GetTypeString(gm_tt->dtype_);
+    const std::string gm_view = codegen.GetOrCreateTensorView(gm_var);
+    const std::string gm_view_type = codegen.GetTensorViewTypeString(gm_tt.get());
+    const std::string partition_type = MakePartitionTensorViewType(GetDimStrings(gm_tt->shape_), dtype_str);
+    const std::vector<std::string> offset_codes = {codegen.GetOrEmitConstant(int64_t{0}, DataType::INDEX)};
+    const std::vector<std::string> size_codes = GetSizeCodes(gm_tt->shape_, codegen);
+    const std::string gm_pview = EmitPartitionViewPTO(gm_var->name_hint_ + "_syncgm", gm_view, gm_view_type,
+                                                      partition_type, offset_codes, size_codes, codegen);
+
+    // scratch: local int32 staging tile (UB on AIV, L1 on AIC).
+    const std::string scratch = codegen.GetExprAsCode(op->args_[1]);
+    const std::string scratch_type = codegen.GetExprTypeAnnotation(op->args_[1]);
+    CHECK_SPAN(!scratch_type.empty(), op->span_)
+        << "system.syncall soft: scratch tile has no tile_buf type annotation";
+    // used_cores: i32 participant count.
+    const std::string used_cores = codegen.GetExprAsCode(op->args_[2]);
+
+    std::ostringstream oss;
+    oss << "pto.syncall(" << gm_pview << ", " << scratch << ", " << used_cores << " : " << partition_type
+        << ", " << scratch_type << ", i32) mode = #pto.sync_all_mode<soft>, core_type = #pto.sync_core_type<"
+        << core_type << ">";
+    codegen.Emit(oss.str());
     return std::string("");
   });
   reg("tile.slice", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
