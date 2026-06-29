@@ -96,11 +96,10 @@ def build_dynamic_paged_attention_program(
         kj: pl.Tensor[[BLOCK_SIZE_DYN, HEAD_DIM_DYN], pl.BF16],
         output: pl.Out[pl.Tensor[[Q_HEADS, BLOCK_SIZE_DYN], pl.FP32]],
     ) -> pl.Tensor[[Q_HEADS, BLOCK_SIZE_DYN], pl.FP32]:
-        """QK matmul: output = qi @ kj.T (CUBE). kj transposed on load."""
+        """QK matmul: output = qi @ kj.T (CUBE). kj reinterpreted as its transpose."""
         qi_l1 = pl.load(qi, [0, 0], [_Q_TILE, _HEAD_DIM], target_memory=pl.MemorySpace.Mat)
-        kj_l1 = pl.load(
-            kj, [0, 0], [_BLOCK_SIZE, _HEAD_DIM], target_memory=pl.MemorySpace.Mat, transpose=True
-        )
+        kj_nat = pl.load(kj, [0, 0], [_BLOCK_SIZE, _HEAD_DIM], target_memory=pl.MemorySpace.Mat)
+        kj_l1 = pl.tile.transpose_view(kj_nat)
         qi_l0a = pl.move(qi_l1, target_memory=pl.MemorySpace.Left)
         kj_l0b = pl.move(kj_l1, target_memory=pl.MemorySpace.Right)
         sij_l0c = pl.matmul(qi_l0a, kj_l0b)

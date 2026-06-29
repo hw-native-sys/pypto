@@ -31,29 +31,28 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 16 | `16-auto_tile_matmul_l0.md` | 16th pass |
 | 17 | `17-canonicalize_tile_slice.md` | Runs immediately after `AutoTileMatmulL0` (lowers Mat/Vec `tile.slice` → `tile.extract`) |
 | 18 | `18-infer_tile_memory_space.md` | 18th pass |
-| 19 | `19-lower_transpose_load_param_layout.md` | 19th pass (RFC #1300 P6 — replaces ResolveTransposeLayout) |
-| 20 | `20-resolve_backend_op_layouts.md` | 20th pass |
-| 21 | `21-lower_auto_vector_split.md` | Live auto-split lowering path; converts AUTO `pl.split` mixed InCore functions into the explicit `split_aiv` form (aiv_shard/aic_gather + halved vector sub-region). Runs immediately before `ExpandMixedKernel` |
-| 22 | `22-expand_mixed_kernel.md` | 22nd pass |
-| 23 | `23-inject_gm_pipe_buffer.md` | Runs immediately after `ExpandMixedKernel` (backend-gated, Ascend910B) |
-| 24 | `24-split_vector_kernel.md` | 24th pass (after the convergence refactor: only stamps attrs for split_aiv functions + handles the no-split dual-AIV path; the per-op halving driver was deleted — moved to LowerAutoVectorSplit + split_axis_utils) |
-| 25 | `25-stamp_tfree_split.md` | 25th pass (copies each cross-core tpop's split/pipe-id onto its matching tfree op; runs right after SplitVectorKernel finalizes split, before SkewCrossCorePipeline clones tpop/tfree pairs) |
-| 26 | `26-normalize_return_order.md` | 26th pass |
-| 27 | `27-skew_cross_core_pipeline.md` | 27th pass (cross-core cube/vector software-pipeline skew; runs immediately before LowerPipelineLoops) |
-| 28 | `28-lower_pipeline_loops.md` | 28th pass |
-| 29 | `29-canonicalize_io_order.md` | 29th pass |
-| 30 | `30-materialize_tensor_strides.md` | 30th pass (RFC #1300 P3 — wired into Default starting from P6) |
-| 31 | `31-init_memref.md` | 31st pass |
-| 32 | `32-memory_reuse.md` | 32nd pass (also enforces the Ascend910B load + tpop_from_aic in-place hazard guard) |
-| 33 | `33-allocate_memory_addr.md` | 33rd pass |
-| 34 | `34-fold_no_op_reshape.md` | 34th pass |
-| 35 | `35-fuse_create_assemble_to_slice.md` | 35th pass |
-| 36 | `36-derive_call_directions.md` | 36th pass (two-phase: arg directions + manual-scope lowering) |
-| 37 | `37-auto_derive_task_dependencies.md` | 37th pass (manual-scope compiler deps; opt-in AUTO-scope analysis/emission via compile-time switch; default behavior unchanged) |
-| 38 | `38-expand_manual_phase_fence.md` | 38th pass (manual-scope phase-fence TaskId dep compression; runs after AutoDeriveTaskDependencies) |
-| 39 | `39-materialize_comm_domain_scopes.md` | 39th pass (distributed: WindowBuffer + CommDomainScopeStmt wrappers in each host_orch body; runs immediately before LowerHostTensorCollectives) |
-| 40 | `40-lower_host_tensor_collectives.md` | 40th pass (host-level tensor collectives -> internal builtin chip dispatches; runs after comm-domain scopes) |
-| 41 | `41-materialize_runtime_scopes.md` | Last pass (after the final Simplify; inserts AUTO RuntimeScopeStmt so orchestration codegen emits PTO2_SCOPE 1:1) |
+| 19 | `19-resolve_backend_op_layouts.md` | 19th pass |
+| 20 | `20-lower_auto_vector_split.md` | Live auto-split lowering path; converts AUTO `pl.split` mixed InCore functions into the explicit `split_aiv` form (aiv_shard/aic_gather + halved vector sub-region). Runs immediately before `ExpandMixedKernel` |
+| 21 | `21-expand_mixed_kernel.md` | 21st pass |
+| 22 | `22-inject_gm_pipe_buffer.md` | Runs immediately after `ExpandMixedKernel` (backend-gated, Ascend910B) |
+| 23 | `23-split_vector_kernel.md` | 23rd pass (after the convergence refactor: only stamps attrs for split_aiv functions + handles the no-split dual-AIV path; the per-op halving driver was deleted — moved to LowerAutoVectorSplit + split_axis_utils) |
+| 24 | `24-stamp_tfree_split.md` | 24th pass (copies each cross-core tpop's split/pipe-id onto its matching tfree op; runs right after SplitVectorKernel finalizes split, before SkewCrossCorePipeline clones tpop/tfree pairs) |
+| 25 | `25-normalize_return_order.md` | 25th pass |
+| 26 | `26-skew_cross_core_pipeline.md` | 26th pass (cross-core cube/vector software-pipeline skew; runs immediately before LowerPipelineLoops) |
+| 27 | `27-lower_pipeline_loops.md` | 27th pass |
+| 28 | `28-canonicalize_io_order.md` | 28th pass |
+| 29 | `29-materialize_tensor_strides.md` | 29th pass (RFC #1300 P3 — wired into Default starting from P6) |
+| 30 | `30-init_memref.md` | 30th pass |
+| 31 | `31-memory_reuse.md` | 31st pass (also enforces the Ascend910B load + tpop_from_aic in-place hazard guard) |
+| 32 | `32-allocate_memory_addr.md` | 32nd pass |
+| 33 | `33-fold_no_op_reshape.md` | 33rd pass |
+| 34 | `34-fuse_create_assemble_to_slice.md` | 34th pass |
+| 35 | `35-derive_call_directions.md` | 35th pass (two-phase: arg directions + manual-scope lowering) |
+| 36 | `36-auto_derive_task_dependencies.md` | 36th pass (manual-scope compiler deps; opt-in AUTO-scope analysis/emission via compile-time switch; default behavior unchanged) |
+| 37 | `37-expand_manual_phase_fence.md` | 37th pass (manual-scope phase-fence TaskId dep compression; runs after AutoDeriveTaskDependencies) |
+| 38 | `38-materialize_comm_domain_scopes.md` | 38th pass (distributed: WindowBuffer + CommDomainScopeStmt wrappers in each host_orch body; runs immediately before LowerHostTensorCollectives) |
+| 39 | `39-lower_host_tensor_collectives.md` | 39th pass (host-level tensor collectives -> internal builtin chip dispatches; runs after comm-domain scopes) |
+| 40 | `40-materialize_runtime_scopes.md` | Last pass (after the final Simplify; inserts AUTO RuntimeScopeStmt so orchestration codegen emits PTO2_SCOPE 1:1) |
 | 91 | `91-utility_passes.md` | Not in Default strategy |
 | 99 | `99-verifier.md` | Infrastructure (not a pipeline pass) |
 

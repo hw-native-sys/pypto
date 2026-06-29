@@ -44,7 +44,7 @@ system.tfree_to_aic(t, split=1, id=2)
 
 有两条写法都会产生 tfree,二者都必须覆盖:
 
-- **混合核**(`pl.at(..., split=...)`):tfree 由 [`ExpandMixedKernel`](22-expand_mixed_kernel.md)
+- **混合核**(`pl.at(..., split=...)`):tfree 由 [`ExpandMixedKernel`](21-expand_mixed_kernel.md)
   内的 `FinalizeTpopTfrees` 生成,而后者只处理 InCore 函数。
 - **显式** `@pl.function(type=AIC/AIV)`:用户直接写 `pl.tfree_to_aic`,这些完全绕过 finalizer。
 

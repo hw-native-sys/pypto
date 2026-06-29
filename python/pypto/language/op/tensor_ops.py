@@ -1579,11 +1579,10 @@ def as_layout(tensor: Tensor, layout: TensorLayout) -> Tensor:
     """Flip a tensor's layout tag over the same physical memory (RFC #1300 §3.3).
 
     .. note::
-        Internal API — intended for compiler-generated code only. Passes such
-        as ``LowerTransposeLoadParamLayout`` inject ``tensor.as_layout`` at
-        orch ↔ InCore call sites to bridge ND ↔ DN views over one physical
-        buffer. It is wrapped here so DSL-level test programs and tooling can
-        name it with static type-checking; end users should not need it.
+        Internal API — intended for compiler-generated code only. It bridges
+        ND ↔ DN views over one physical buffer at orch ↔ InCore call sites. It
+        is wrapped here so DSL-level test programs and tooling can name it with
+        static type-checking; end users should not need it.
 
     The trailing-two-dim shape swap that accompanies a cross-layout flip is
     derived from the source — callers do not pass a target shape (RFC §4.2:

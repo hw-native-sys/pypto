@@ -146,7 +146,6 @@ class PassManager:
             ("AutoTileMatmulL0", lambda: passes.auto_tile_matmul_l0()),
             ("CanonicalizeTileSlice", lambda: passes.canonicalize_tile_slice()),
             ("InferTileMemorySpace", lambda: passes.infer_tile_memory_space()),
-            ("LowerTransposeLoadParamLayout", lambda: passes.lower_transpose_load_param_layout()),
             ("ResolveBackendOpLayouts", lambda: passes.resolve_backend_op_layouts()),
             # RFC #1300: convert AUTO pl.split mixed InCore functions into the explicit
             # split_aiv form (aiv_shard/aic_gather + halved vector sub-region) so
@@ -169,10 +168,6 @@ class PassManager:
             ("CanonicalizeIOOrder", lambda: passes.canonicalize_io_order()),
             # MaterializeTensorStrides fills empty stride slots on every
             # TensorView with packed canonical strides (RFC #1300 §2.4).
-            # Active in the default pipeline starting at P6 — by this point
-            # LowerTransposeLoadParamLayout has produced canonical-form DN
-            # parameters, so the materialized strides match the IR shape
-            # without going through the legacy `dn_swap` codegen path.
             ("MaterializeTensorStrides", lambda: passes.materialize_tensor_strides()),
             ("InitMemRef", lambda: passes.init_mem_ref()),
             # MemoryReuse coalesces tile buffers; on Ascend910B split-AIV it also

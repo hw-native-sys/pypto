@@ -504,36 +504,6 @@ Pass CanonicalizeTileSlice();
 Pass InferTileMemorySpace();
 
 /**
- * @brief Lower ``tile.load(transpose=True)`` to a body-local DN view (RFC #1300 P6)
- *
- * For each InCore function, detects ``tile.load(..., transpose=True)`` whose source
- * is a function parameter ``p`` and rewrites the body so the transpose intent is
- * encoded as an explicit ``tensor.as_layout`` view at the top of the body
- * (RFC #1300 §3.3 + §4.2):
- *
- *   - Prepends ``p_dn = tensor.as_layout(p, layout=DN)`` to the InCore body.
- *     ``p_dn`` carries the canonical ``[..., b, a] DN`` view; ``p``'s parameter
- *     signature is left unchanged.
- *   - Substitutes body uses of ``p`` with ``p_dn``.
- *   - Rewrites each ``tile.load(p_dn, offsets, shapes, valid_shapes, ..., transpose=True)``
- *     to swap the trailing pair of offsets / shapes / valid_shapes into canonical
- *     coords and drop the ``transpose=True`` kwarg — the DN-source + Mat-target
- *     signal on ``p_dn`` now fully encodes the load's tile-view orientation.
- *
- * Non-InCore (orch) functions are left untouched: the orch caller continues to
- * pass its original row-major ND tensor straight through to the kernel, which
- * keeps the cross-function type boundary trivial.
- *
- * Mixed-use parameters (same param loaded with both ``transpose=True`` and
- * ``transpose=False``) are rejected with ``pypto::ValueError``.
- *
- * Requirements:
- * - Input IR must have tile ops (run ConvertTensorToTileOps first)
- * - Input IR must have InCore scopes outlined (run OutlineIncoreScopes first)
- */
-Pass LowerTransposeLoadParamLayout();
-
-/**
  * @brief Materialize implicit ND/DN strides on every TensorType (RFC #1300 §2.4)
  *
  * Walks every TensorType reachable from the program and rewrites any

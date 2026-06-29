@@ -198,7 +198,7 @@ def test_tile_load_store():
     load_call = _op_call(
         "tile.load",
         [tensor, offsets, shapes, valid_shapes],
-        {"target_memory": ir.MemorySpace.Vec, "transpose": False},
+        {"target_memory": ir.MemorySpace.Vec},
     )
     store_call = _op_call("tile.store", [tile, off2, output])
 
@@ -213,25 +213,6 @@ def test_tile_load_store():
     code = torch_codegen(func)
     assert "_tile_load" in code
     assert "_tile_store" in code
-
-
-def test_tile_load_transpose():
-    """tile.load with transpose=True should append .mT."""
-    tensor = _tensor_var("t", [64, 64])
-    offsets = _make_tuple(_int(0), _int(0))
-    shapes = _make_tuple(_int(32), _int(32))
-    valid_shapes = _make_tuple(_int(32), _int(32))
-    tile = _tile_var("tile", [32, 32])
-
-    call = _op_call(
-        "tile.load",
-        [tensor, offsets, shapes, valid_shapes],
-        {"target_memory": ir.MemorySpace.Mat, "transpose": True},
-    )
-    assign = ir.AssignStmt(tile, call, _span())
-    func = _simple_function("f", [tensor], assign)
-    code = torch_codegen(func)
-    assert ".mT" in code
 
 
 def test_tile_compute_ops():
@@ -1142,7 +1123,7 @@ def test_tile_load_valid_shapes_masks_invalid():
     call = _op_call(
         "tile.load",
         [tensor, offsets, shapes, valid_shapes],
-        {"target_memory": ir.MemorySpace.Vec, "transpose": False},
+        {"target_memory": ir.MemorySpace.Vec},
     )
     assign = ir.AssignStmt(tile, call, _span())
     ret = ir.ReturnStmt([tile], _span())
@@ -1173,7 +1154,7 @@ def test_tile_load_passes_valid_shapes():
     call = _op_call(
         "tile.load",
         [tensor, offsets, shapes, valid_shapes],
-        {"target_memory": ir.MemorySpace.Vec, "transpose": False},
+        {"target_memory": ir.MemorySpace.Vec},
     )
     assign = ir.AssignStmt(tile, call, _span())
     func = _simple_function("f", [tensor], assign)

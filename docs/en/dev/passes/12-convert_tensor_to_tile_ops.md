@@ -39,7 +39,7 @@ The pass operates in three program-level phases:
 
 For each `FunctionType::InCore` function:
 
-1. **Pre-scan MatmulSlice patterns**: Collect `tensor.slice` results consumed by `tensor.matmul` / `tensor.matmul_acc`. These need `tile.load(Mat, transpose=...)` instead of the default `tile.load(Vec)`.
+1. **Pre-scan MatmulSlice patterns**: Collect `tensor.slice` results consumed by `tensor.matmul` / `tensor.matmul_acc`. These need a Mat `tile.load` (natural, plus a zero-copy `tile.transpose_view` when transposed) instead of the default `tile.load(Vec)`.
 
 2. **Insert tile.load (entry loads)**: For each `TensorType` parameter directly consumed by a converted op, insert `tile.load(param, zeros, shape, shape, target_memory=Vec, transpose=False)` at function entry. Parameters only referenced by self-loading ops (`tensor.slice`, `tensor.matmul`, `tensor.read`, `tensor.write`, `tensor.assemble`) are skipped — they manage their own loads.
 

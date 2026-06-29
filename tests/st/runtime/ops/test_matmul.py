@@ -120,9 +120,8 @@ class TestMatmulBTranspose(PTOTestCase):
                 c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 tile_a_l1 = pl.load(a, offsets=[0, 0], shapes=[M, K], target_memory=pl.MemorySpace.Mat)
-                tile_b_l1 = pl.load(
-                    b, offsets=[0, 0], shapes=[N, K], target_memory=pl.MemorySpace.Mat, transpose=True
-                )
+                tile_b_nat = pl.load(b, offsets=[0, 0], shapes=[N, K], target_memory=pl.MemorySpace.Mat)
+                tile_b_l1 = pl.tile.transpose_view(tile_b_nat)
                 tile_a_l0a = pl.move(tile_a_l1, target_memory=pl.MemorySpace.Left)
                 tile_b_l0b = pl.move(tile_b_l1, target_memory=pl.MemorySpace.Right)
                 tile_c_l0c = pl.matmul(tile_a_l0a, tile_b_l0b)
@@ -181,9 +180,8 @@ class TestMatmulATranspose(PTOTestCase):
                 b: pl.Tensor[[K, N], pl.FP32],
                 c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
             ) -> pl.Tensor[[M, N], pl.FP32]:
-                tile_a_l1 = pl.load(
-                    a, offsets=[0, 0], shapes=[K, M], target_memory=pl.MemorySpace.Mat, transpose=True
-                )
+                tile_a_nat = pl.load(a, offsets=[0, 0], shapes=[K, M], target_memory=pl.MemorySpace.Mat)
+                tile_a_l1 = pl.tile.transpose_view(tile_a_nat)
                 tile_b_l1 = pl.load(b, offsets=[0, 0], shapes=[K, N], target_memory=pl.MemorySpace.Mat)
                 tile_a_l0a = pl.move(tile_a_l1, target_memory=pl.MemorySpace.Left)
                 tile_b_l0b = pl.move(tile_b_l1, target_memory=pl.MemorySpace.Right)
@@ -243,12 +241,10 @@ class TestMatmulABTranspose(PTOTestCase):
                 b: pl.Tensor[[N, K], pl.FP32],
                 c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
             ) -> pl.Tensor[[M, N], pl.FP32]:
-                tile_a_l1 = pl.load(
-                    a, offsets=[0, 0], shapes=[K, M], target_memory=pl.MemorySpace.Mat, transpose=True
-                )
-                tile_b_l1 = pl.load(
-                    b, offsets=[0, 0], shapes=[N, K], target_memory=pl.MemorySpace.Mat, transpose=True
-                )
+                tile_a_nat = pl.load(a, offsets=[0, 0], shapes=[K, M], target_memory=pl.MemorySpace.Mat)
+                tile_a_l1 = pl.tile.transpose_view(tile_a_nat)
+                tile_b_nat = pl.load(b, offsets=[0, 0], shapes=[N, K], target_memory=pl.MemorySpace.Mat)
+                tile_b_l1 = pl.tile.transpose_view(tile_b_nat)
                 tile_a_l0a = pl.move(tile_a_l1, target_memory=pl.MemorySpace.Left)
                 tile_b_l0b = pl.move(tile_b_l1, target_memory=pl.MemorySpace.Right)
                 tile_c_l0c = pl.matmul(tile_a_l0a, tile_b_l0b)

@@ -52,7 +52,7 @@ consistency checks codegen used to perform.
 Two authoring paths produce tfrees, and both must be covered:
 
 - **Mixed-kernel** (`pl.at(..., split=...)`): tfrees are created by
-  `FinalizeTpopTfrees` inside [`ExpandMixedKernel`](22-expand_mixed_kernel.md),
+  `FinalizeTpopTfrees` inside [`ExpandMixedKernel`](21-expand_mixed_kernel.md),
   which only processes InCore functions.
 - **Explicit** `@pl.function(type=AIC/AIV)`: the user writes `pl.tfree_to_aic`
   directly; these bypass the finalizer entirely.

@@ -365,7 +365,6 @@ def load(
     shapes: Sequence[IntLike],
     valid_shapes: Sequence[IntLike] | None = None,
     target_memory: MemorySpace = MemorySpace.Vec,
-    transpose: bool = False,
 ) -> Tile:
     """Copy data from tensor to unified buffer (tile).
 
@@ -374,17 +373,11 @@ def load(
         offsets: Offsets in each dimension. Always in the source tensor's
             coordinate system.
         shapes: Shape of the region to load in each dimension. Always in the
-            source tensor's coordinate system, even when transpose=True. The
-            output TileType shape will be transposed automatically.
+            source tensor's coordinate system.
         target_memory: Target memory space (MemorySpace.Vec default, or MemorySpace.Mat)
         valid_shapes: Valid shape of the tile in each dimension. When provided, sets
             TileView.valid_shape in the output TileType. When omitted, shapes is used
             as valid_shape. Uses the same coordinate convention as shapes.
-        transpose: **Deprecated, will be removed.** Transpose the tile during load
-            (only on MemorySpace.Mat). The load-time transpose is superseded by a
-            zero-copy ``tile.transpose_view``: pass ``b_trans=True`` / ``a_trans=True``
-            to ``pl.matmul`` for matmul operands, or load natural and apply
-            ``pl.tile.transpose_view(...)``.
 
     Returns:
         Tile wrapping the load operation
@@ -393,15 +386,6 @@ def load(
         >>> # 2D load
         >>> tile = load(tensor, offsets=[0, 0], shapes=[32, 32])
     """
-    if transpose:
-        warnings.warn(
-            "load(..., transpose=True) is deprecated and will be removed. The "
-            "load-time transpose is replaced by a zero-copy tile.transpose_view: "
-            "use pl.matmul(..., b_trans=True/a_trans=True) for matmul operands, or "
-            "load natural and apply pl.tile.transpose_view(...).",
-            DeprecationWarning,
-            stacklevel=2,
-        )
     if valid_shapes is None:
         valid_shapes = shapes
     call_expr = _ir_ops.load(
@@ -410,7 +394,6 @@ def load(
         _normalize_intlike(shapes),
         _normalize_intlike(valid_shapes),
         target_memory,
-        transpose,
     )
     return Tile(expr=call_expr)
 

@@ -84,7 +84,7 @@ class TestDeriveDirectionMatrix:
                 x: pl.Tensor[[64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
-                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec)
                 ret = pl.tile.store(t, [0], out)
                 return ret
 
@@ -121,7 +121,7 @@ class TestDeriveDirectionMatrix:
         class Expected:
             @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
             def kernel(self, x: pl.InOut[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
-                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec)
                 t2 = pl.tile.add(t, t)
                 ret = pl.tile.store(t2, [0], x)
                 return ret
@@ -166,7 +166,7 @@ class TestDeriveDirectionMatrix:
                 x: pl.Tensor[[64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
-                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec)
                 ret = pl.tile.store(t, [0], out)
                 return ret
 
@@ -219,7 +219,7 @@ class TestDeriveDirectionMatrix:
                 x: pl.Tensor[[64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
-                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec)
                 ret = pl.tile.store(t, [0], out)
                 return ret
 
@@ -267,7 +267,7 @@ class TestDeriveDirectionMatrix:
                 x: pl.Tensor[[64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
-                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec)
                 ret = pl.tile.store(t, [0], out)
                 return ret
 
@@ -319,7 +319,7 @@ class TestDeriveDirectionMatrix:
                 x: pl.Tensor[[64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
-                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec)
                 ret = pl.tile.store(t, [0], out)
                 return ret
 
@@ -372,7 +372,7 @@ class TestDeriveDirectionMatrix:
                 x: pl.Tensor[[64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
-                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec)
                 ret = pl.tile.store(t, [0], out)
                 return ret
 
@@ -426,7 +426,7 @@ class TestDeriveDirectionMatrix:
                 x: pl.Tensor[[64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
-                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec)
                 ret = pl.tile.store(t, [0], out)
                 return ret
 
@@ -478,7 +478,7 @@ class TestDeriveDirectionMatrix:
                 x: pl.Tensor[[64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
-                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec)
                 ret = pl.tile.store(t, [0], out)
                 return ret
 
@@ -531,7 +531,7 @@ class TestDeriveDirectionMatrix:
                 x: pl.Tensor[[64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
-                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec)
                 ret = pl.tile.store(t, [0], out)
                 return ret
 
@@ -589,7 +589,7 @@ class TestDeriveDirectionMatrix:
                 x: pl.Tensor[[64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
-                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec)
                 ret = pl.tile.store(t, [0], out)
                 return ret
 
@@ -648,7 +648,7 @@ class TestDeriveDirectionMatrix:
                 x: pl.Tensor[[64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
-                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec)
                 ret = pl.tile.store(t, [0], out)
                 return ret
 
@@ -708,7 +708,7 @@ class TestDeriveDirectionMatrix:
                 x: pl.Tensor[[64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
-                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec)
                 ret = pl.tile.store(t, [0], out)
                 return ret
 
@@ -767,7 +767,7 @@ class TestDeriveDirectionMatrix:
                 x: pl.Tensor[[64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
-                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec)
                 ret = pl.tile.store(t, [0], out)
                 return ret
 
@@ -829,7 +829,7 @@ class TestDeriveDirectionMatrix:
                 offset: pl.Scalar[pl.INDEX],
                 out: pl.Out[pl.Tensor[[256], pl.FP32]],
             ) -> pl.Tensor[[256], pl.FP32]:
-                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec)
                 ret = pl.tile.store(t, [offset], out)
                 return ret
 
@@ -890,7 +890,7 @@ class TestDeriveDirectionMatrix:
                 x: pl.Tensor[[64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
-                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec)
                 ret = pl.tile.store(t, [0], out)
                 return ret
 
@@ -948,7 +948,7 @@ class TestDeriveDirectionMatrix:
                 x: pl.Tensor[[64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
-                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec)
                 ret = pl.tile.store(t, [0], out)
                 return ret
 
@@ -1004,7 +1004,7 @@ class TestDeriveDirectionMatrix:
                 x: pl.Tensor[[64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
-                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec)
                 ret = pl.tile.store(t, [0], out)
                 return ret
 
@@ -1055,7 +1055,7 @@ class TestDeriveDirectionMatrix:
                 x: pl.Tensor[[64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
-                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec)
                 ret = pl.tile.store(t, [0], out)
                 return ret
 

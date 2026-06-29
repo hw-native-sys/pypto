@@ -514,7 +514,6 @@ def test_pto_codegen_dynamic_valid_shape_scalar_defined_in_body():
                 [1, 120],
                 [1, valid_len],
                 target_memory=pl.MemorySpace.Vec,
-                transpose=False,
             )
             result: pl.Tensor[[1, 120], pl.FP32] = pl.tile.store(tile, [0, 0], output)
             return result
@@ -558,7 +557,6 @@ def test_pto_codegen_dynamic_valid_shape_row_defined_in_body():
                 [120, 16],
                 [valid_rows, 16],
                 target_memory=pl.MemorySpace.Vec,
-                transpose=False,
             )
             result: pl.Tensor[[120, 16], pl.FP32] = pl.tile.store(tile, [0, 0], output)
             return result
@@ -2017,7 +2015,6 @@ def test_pto_codegen_if_stmt_tile_phi_preserves_dynamic_valid_shape():
                 [1, 120],
                 [1, valid_len],
                 target_memory=pl.MemorySpace.Vec,
-                transpose=False,
             )
             updated: pl.Tile[[1, 120], pl.FP32] = pl.tile.muls(seed, 1.0)
             if flag == 0:

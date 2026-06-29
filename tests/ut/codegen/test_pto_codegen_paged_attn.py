@@ -67,9 +67,10 @@ class PagedAttention:
         s_ij: pl.Tensor[[16, 128], pl.FP32],
     ) -> pl.Tensor[[16, 128], pl.FP32]:
         q_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(qi, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
-        k_tile_T: pl.Tile[[128, 128], pl.BF16] = pl.load(
-            kj, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat, transpose=True
+        k_nat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+            kj, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
         )
+        k_tile_T: pl.Tile[[128, 128], pl.BF16] = pl.tile.transpose_view(k_nat)
         s_tile: pl.Tile[[16, 128], pl.FP32] = pl.tile.matmul(q_tile, k_tile_T)
         updated_sij: pl.Tensor[[16, 128], pl.FP32] = pl.store(s_tile, [0, 0], s_ij)
         return updated_sij

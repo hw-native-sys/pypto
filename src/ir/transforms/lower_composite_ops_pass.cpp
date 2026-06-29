@@ -582,7 +582,7 @@ ExprPtr LowerTensorAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>
   // target_memory / transpose kwargs — mirrors `pl.load(...)`.
   auto acc_initial = b.Bind("acc_initial",
                             reg.Create("tile.load", {target, zero_offsets, shape_tuple, shape_tuple},
-                                       {{"target_memory", MemorySpace::Vec}, {"transpose", false}}, span),
+                                       {{"target_memory", MemorySpace::Vec}}, span),
                             span);
 
   auto acc_final = b.EmitForReduce(
@@ -779,7 +779,7 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
   if (is_tensor_input) {
     stage_tile = b.Bind("local_tile",
                         reg.Create("tile.load", {local_data, zero_row_offsets, chunk_shape, chunk_shape},
-                                   {{"target_memory", MemorySpace::Vec}, {"transpose", false}}, span),
+                                   {{"target_memory", MemorySpace::Vec}}, span),
                         span);
   } else {
     stage_tile = local_data;
@@ -895,7 +895,7 @@ ExprPtr LowerTensorReduceScatterRule(const CallPtr& call, const std::vector<Expr
   // ---- Phase 3: accumulate peers' chunks at [my_rank, 0] ----
   auto acc_initial = b.Bind("acc_initial",
                             reg.Create("tile.load", {target, my_data_offsets, chunk_shape, chunk_shape},
-                                       {{"target_memory", MemorySpace::Vec}, {"transpose", false}}, span),
+                                       {{"target_memory", MemorySpace::Vec}}, span),
                             span);
 
   auto acc_final = b.EmitForReduce(

@@ -179,8 +179,7 @@ TypePtr DeduceTensorTransposeType(const std::vector<ExprPtr>& args,
   //     described by toggling the tag — non-trailing transposes leave the tag
   //     unchanged because ND/DN only describes the trailing two dims. PTOAS
   //     reads this tag and EmitMakeTensorViews / EmitTileLoadPTO use it to
-  //     drive the implicit "swap last two dims" path used by
-  //     tile.load(transpose=True) sources (see LowerTransposeLoadParamLayout).
+  //     drive the implicit "swap last two dims" path used by DN-source loads.
   //
   //  2. Explicit strides. tensor.transpose at orchestration level lowers to
   //     runtime Tensor::transpose, a metadata-only swap of shapes / offsets;
@@ -194,8 +193,8 @@ TypePtr DeduceTensorTransposeType(const std::vector<ExprPtr>& args,
   // Why both: the layout tag is needed for PTOAS contracts (it expects DN on
   // any trailing-transposed view at the kernel boundary), while the explicit
   // strides are needed because ND/DN alone cannot distinguish "source data is
-  // column-major in the IR shape" (matmul's tile.load(transpose=True) path)
-  // from "source data is row-major and we want a transposed view of it"
+  // column-major in the IR shape" (a DN-source tile.load) from "source data is
+  // row-major and we want a transposed view of it"
   // (this op's path). The codegen disambiguates by checking
   // tensor_view_->stride: if it's non-empty, skip the implicit DN swap.
   bool is_trailing_swap =
@@ -416,8 +415,8 @@ REGISTER_OP("tensor.as_layout")
         "The trailing-two-dim shape swap that comes with a ND ↔ DN flip is mechanical "
         "and derived here; this op never reshapes (use tensor.reshape for shape changes). "
         "Pure metadata — emits no PTOAS instructions; downstream make_tensor_view "
-        "consumes the new view directly. Internal-only; passes (e.g. "
-        "LowerTransposeLoadParamLayout) inject this at orch ↔ InCore call sites.")
+        "consumes the new view directly. Internal-only; injected by compiler passes "
+        "at orch ↔ InCore call sites.")
     .add_argument("input", "Input tensor (TensorType, packed canonical or bare)")
     // Inherit the input's MemRef: ``tensor.as_layout`` is a metadata-only
     // reinterpret of the same physical buffer, so its result must alias the

@@ -118,7 +118,7 @@ def test_sin_is_decomposed_to_primitives():
         def main_incore_0(
             x: pl.Tensor[[16, 16], pl.FP32], out_0: pl.Out[pl.Tensor[[16, 16], pl.FP32]]
         ) -> pl.Tensor[[16, 16], pl.FP32]:
-            x_tile = pl.tile.load(x, [0, 0], [16, 16], [16, 16], target_memory=pl.Mem.Vec, transpose=False)
+            x_tile = pl.tile.load(x, [0, 0], [16, 16], [16, 16], target_memory=pl.Mem.Vec)
             y_tile__pi_inv_x_tmp_v0 = pl.tile.muls(x_tile, 0.31830987334251404)
             y_tile__k_i_tmp_v1 = pl.tile.cast(y_tile__pi_inv_x_tmp_v0, target_type=pl.INT32, mode="round")
             y_tile__k_f_tmp_v2 = pl.tile.cast(y_tile__k_i_tmp_v1, target_type=pl.FP32, mode="none")
@@ -195,7 +195,7 @@ def test_cos_is_decomposed_to_primitives():
         def main_incore_0(
             x: pl.Tensor[[16, 16], pl.FP32], out_0: pl.Out[pl.Tensor[[16, 16], pl.FP32]]
         ) -> pl.Tensor[[16, 16], pl.FP32]:
-            x_tile = pl.tile.load(x, [0, 0], [16, 16], [16, 16], target_memory=pl.Mem.Vec, transpose=False)
+            x_tile = pl.tile.load(x, [0, 0], [16, 16], [16, 16], target_memory=pl.Mem.Vec)
             y_tile__pi_inv_x_tmp_v0 = pl.tile.muls(x_tile, 0.31830987334251404)
             y_tile__k_pre_tmp_v1 = pl.tile.adds(y_tile__pi_inv_x_tmp_v0, 0.5)
             y_tile__k_i_tmp_v2 = pl.tile.cast(y_tile__k_pre_tmp_v1, target_type=pl.INT32, mode="rint")
@@ -331,7 +331,7 @@ def test_both_sin_and_cos_in_same_function():
         def main_incore_0(
             x: pl.Tensor[[16, 16], pl.FP32], out_0: pl.Out[pl.Tensor[[16, 16], pl.FP32]]
         ) -> pl.Tensor[[16, 16], pl.FP32]:
-            x_tile = pl.tile.load(x, [0, 0], [16, 16], [16, 16], target_memory=pl.Mem.Vec, transpose=False)
+            x_tile = pl.tile.load(x, [0, 0], [16, 16], [16, 16], target_memory=pl.Mem.Vec)
             a__pi_inv_x_tmp_v0 = pl.tile.muls(x_tile, 0.31830987334251404)
             a__k_i_tmp_v1 = pl.tile.cast(a__pi_inv_x_tmp_v0, target_type=pl.INT32, mode="round")
             a__k_f_tmp_v2 = pl.tile.cast(a__k_i_tmp_v1, target_type=pl.FP32, mode="none")

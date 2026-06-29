@@ -67,8 +67,8 @@ b: pl.Tensor[[K, N], pl.FP32, pl.DN]   # → DeprecationWarning at parse time
 > layout-only shorthand forces you to mentally hold two coordinate systems
 > at once (the IR-logical post-view shape and the runtime row-major shape).
 > Drop the layout marker and write the runtime shape — for matmul B^T,
-> use `pl.load(..., transpose=True)` on the row-major tensor (see "Data
-> Movement" below); for slicing a DN-producing op, the slice inherits
+> pass `b_trans=True` (or `a_trans=True`) to `pl.matmul`, or load natural
+> and apply `pl.tile.transpose_view(...)` (see "Data Movement" below); for slicing a DN-producing op, the slice inherits
 > the parent's layout automatically.
 
 For NZ (hardware-specific tile layout), use `pl.Tile[..., pl.NZ]` — NZ is
@@ -477,7 +477,7 @@ too; entry `True` + inline `False` is legal and just nests hand scopes
 inside compiler AUTO scopes). `.incore` / `.opaque` reject it — they
 outline into separate kernels. It specializes into
 `@pl.function(..., auto_scope=False)` — see the
-[MaterializeRuntimeScopes pass](../dev/passes/41-materialize_runtime_scopes.md)
+[MaterializeRuntimeScopes pass](../dev/passes/40-materialize_runtime_scopes.md)
 for the resulting scope-placement semantics.
 
 ### `@pl.inline`
@@ -643,12 +643,11 @@ The `Default` strategy runs these passes in order:
 10. **ConvertTensorToTileOps** — convert tensor operations to tile operations
 11. **FlattenTileNdTo2D** — normalize ND tile ops to 2D
 12. **InferTileMemorySpace** — infer tile memory spaces
-13. **LowerTransposeLoadParamLayout** — repair transpose layout handling
-14. **ResolveBackendOpLayouts** — repair backend-constrained tile layouts
-15. **ExpandMixedKernel** — split mixed kernels when needed
-16. **InitMemRef** — assign memory spaces and insert buffer allocations
-17. **MemoryReuse** — share buffers with non-overlapping lifetimes
-18. **AllocateMemoryAddr** — assign concrete memory addresses
+13. **ResolveBackendOpLayouts** — repair backend-constrained tile layouts
+14. **ExpandMixedKernel** — split mixed kernels when needed
+15. **InitMemRef** — assign memory spaces and insert buffer allocations
+16. **MemoryReuse** — share buffers with non-overlapping lifetimes
+17. **AllocateMemoryAddr** — assign concrete memory addresses
 
 ### `JITFunction.compile()` (for `@pl.jit` kernels)
 

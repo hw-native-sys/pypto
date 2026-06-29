@@ -1,6 +1,6 @@
 # CanonicalizeIOOrder Pass
 
-仅限于 **`ForKind::Pipeline` 循环体内部** 的 `SeqStmts`，沿**同核硬件单元阶段阶梯**（标量 → load → compute → store）重排语句 —— 受 SSA 依赖图约束。把各克隆的 load 聚到前面，使两个 stage 的预取先于 compute 发射，于是 MTE load 引擎能跑在 Vector/Cube compute 引擎之前（双缓冲重叠）；compute/store 这一档再按 pipeline **stage** 排序，使每个 stage 算完立刻 store。注意：stage 之间的缓冲**分离**不再是这种聚集的副作用 —— 它现在是 [`MemoryReuse`](32-memory_reuse.md) 的显式约束（`pipeline_membership`）；本 pass 只塑造**调度顺序**。跨核（cube/vector）流水线由 [`SkewCrossCorePipeline`](27-skew_cross_core_pipeline.md) 在上游软流水，到达本 pass 时已是 `ForKind::Sequential`，故此处不含跨核处理。非流水线循环则保持不变。
+仅限于 **`ForKind::Pipeline` 循环体内部** 的 `SeqStmts`，沿**同核硬件单元阶段阶梯**（标量 → load → compute → store）重排语句 —— 受 SSA 依赖图约束。把各克隆的 load 聚到前面，使两个 stage 的预取先于 compute 发射，于是 MTE load 引擎能跑在 Vector/Cube compute 引擎之前（双缓冲重叠）；compute/store 这一档再按 pipeline **stage** 排序，使每个 stage 算完立刻 store。注意：stage 之间的缓冲**分离**不再是这种聚集的副作用 —— 它现在是 [`MemoryReuse`](31-memory_reuse.md) 的显式约束（`pipeline_membership`）；本 pass 只塑造**调度顺序**。跨核（cube/vector）流水线由 [`SkewCrossCorePipeline`](26-skew_cross_core_pipeline.md) 在上游软流水，到达本 pass 时已是 `ForKind::Sequential`，故此处不含跨核处理。非流水线循环则保持不变。
 
 ## 概述
 
@@ -13,13 +13,13 @@
 - tile 计算语句留在中间。
 - 每个 `tile.store` / `tile.write` 下沉到依赖图允许的最晚位置。
 
-只要数据流允许，结果即为 `[scalars…, loads…, 每个 stage 的 (compute, store)…]` —— 例如 `stage=2` 的循环体发射为 `load load compute_s0 store_s0 compute_s1 store_s1`。聚集 load 带来预取重叠（MTE 引擎跑在前面）；compute/store 按 stage 排序意味着每个 stage 算完立刻 store，在下一个 stage 之前释放该缓冲，既降低片上压力，也减轻跨迭代的 load↔store 耦合。stage 之间的缓冲分离由 `MemoryReuse` 单独强制（见 [32-memory_reuse.md](32-memory_reuse.md)）。
+只要数据流允许，结果即为 `[scalars…, loads…, 每个 stage 的 (compute, store)…]` —— 例如 `stage=2` 的循环体发射为 `load load compute_s0 store_s0 compute_s1 store_s1`。聚集 load 带来预取重叠（MTE 引擎跑在前面）；compute/store 按 stage 排序意味着每个 stage 算完立刻 store，在下一个 stage 之前释放该缓冲，既降低片上压力，也减轻跨迭代的 load↔store 耦合。stage 之间的缓冲分离由 `MemoryReuse` 单独强制（见 [31-memory_reuse.md](31-memory_reuse.md)）。
 
 上拉标量计算正是 load 聚集的关键：若不区分类别，每个克隆的地址运算 assign 会被归为普通 compute、按原始位置排序，从而在兄弟 load 之间穿插，把 load 钉在原始克隆里。把标量计算作为最高优先级类别后，所有兄弟克隆的地址运算先发射，所有依赖的 load 同时就绪，load 自然聚集。
 
 ### 跨核（AIC↔AIV）—— 由上游处理
 
-跨核（cube/vector）pipeline 循环由 [`SkewCrossCorePipeline`](27-skew_cross_core_pipeline.md) 软流水：它在 `LowerPipelineLoops` *之前*运行，把每个跨核循环改写为 `ForKind::Sequential`。因此它们永远不会以 `ForKind::Pipeline` body 进入本 pass，`CanonicalizeIOOrder` 也**不含任何跨核处理** —— 这里 `tpush`/`tpop` 只是普通 tile 计算，不会被重排进任何跨核阶段。本 pass 只对剩余的同核 pipeline 循环（GM→L1、L1→L0、嵌套 matmul）聚集**同核**阶段（标量 → load → compute → store）以实现 ping-pong。
+跨核（cube/vector）pipeline 循环由 [`SkewCrossCorePipeline`](26-skew_cross_core_pipeline.md) 软流水：它在 `LowerPipelineLoops` *之前*运行，把每个跨核循环改写为 `ForKind::Sequential`。因此它们永远不会以 `ForKind::Pipeline` body 进入本 pass，`CanonicalizeIOOrder` 也**不含任何跨核处理** —— 这里 `tpush`/`tpop` 只是普通 tile 计算，不会被重排进任何跨核阶段。本 pass 只对剩余的同核 pipeline 循环（GM→L1、L1→L0、嵌套 matmul）聚集**同核**阶段（标量 → load → compute → store）以实现 ping-pong。
 
 **前置条件**: SSAForm、SplitIncoreOrch、IncoreTileOps、TileOps2D、TileMemoryInferred、NormalizedStmtStructure。
 
@@ -49,7 +49,7 @@ result = passes.canonicalize_io_order()(program)
 
 `tile.read` 虽然产出标量，但仍归为 `Load` —— 它是针对 tile 的 I/O，与 `tile.load` 同属 load 层。LHS 类型检查仅在 RHS 不是已识别的 I/O op 时生效。
 
-跨核 `tpush`/`tpop` 不带任何特殊类别 —— 它们落入 `TileCompute`，在兄弟语句间保持程序顺序（跨核软流水由上游的 [`SkewCrossCorePipeline`](27-skew_cross_core_pipeline.md) 完成；见上文「跨核（AIC↔AIV）」）。
+跨核 `tpush`/`tpop` 不带任何特殊类别 —— 它们落入 `TileCompute`，在兄弟语句间保持程序顺序（跨核软流水由上游的 [`SkewCrossCorePipeline`](26-skew_cross_core_pipeline.md) 完成；见上文「跨核（AIC↔AIV）」）。
 
 每一步在 `ready`（所有前驱已发射）的语句中，发射 `(tier, stage, sub, original_index)` 最小者 —— `tier` 为标量 compute=0、load=1、tile-compute/store=2；`stage` 取语句的 `pipeline_membership`（这样 tile 定义与消费它的 store 共享同一 stage）；`sub` 为 compute=0、store=1。于是 load（tier 1）聚集在所有 compute/store 之前，而 compute/store 这一档里每个 stage 的 compute 先于其 store、再到下一个 stage。非流水线区域无 membership（`stage` 为空），tier/sub 排序退化为原先的 标量 → load → compute → store 阶梯。
 
@@ -125,7 +125,7 @@ for i in pl.range(0, 8, 4):
 
 ## 相关
 
-- [`LowerPipelineLoops`](28-lower_pipeline_loops.md) —— 上游复制区域生成者；保留 `ForKind::Pipeline` 标记供本 Pass 识别
-- [`MaterializeTensorStrides`](30-materialize_tensor_strides.md) —— 接入默认流水线后紧随本 Pass 运行；在 `InitMemRef` 消费前补全隐式 `TensorView` stride
-- [`MemoryReuse`](32-memory_reuse.md) —— 在本 Pass 之后运行；经 `pipeline_membership` 显式强制 stage 缓冲分离（本 pass 只塑造调度顺序）
+- [`LowerPipelineLoops`](27-lower_pipeline_loops.md) —— 上游复制区域生成者；保留 `ForKind::Pipeline` 标记供本 Pass 识别
+- [`MaterializeTensorStrides`](29-materialize_tensor_strides.md) —— 接入默认流水线后紧随本 Pass 运行；在 `InitMemRef` 消费前补全隐式 `TensorView` stride
+- [`MemoryReuse`](31-memory_reuse.md) —— 在本 Pass 之后运行；经 `pipeline_membership` 显式强制 stage 缓冲分离（本 pass 只塑造调度顺序）
 - RFC #1026 / PR #1029 —— InOut-use 规约 + 依赖分析工具

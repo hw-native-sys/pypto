@@ -181,34 +181,32 @@ def build_llama_mini_program(
             """
             # K-tile 0: columns [0 : k_tile_width]
             a0 = pl.load(a, [0, 0], [seq_len, k_tile_width], target_memory=pl.MemorySpace.Mat)
-            b0 = pl.load(b, [0, 0], [seq_len, k_tile_width], target_memory=pl.MemorySpace.Mat, transpose=True)
+            b0_nat = pl.load(b, [0, 0], [seq_len, k_tile_width], target_memory=pl.MemorySpace.Mat)
+            b0 = pl.tile.transpose_view(b0_nat)
             a0_l = pl.move(a0, target_memory=pl.MemorySpace.Left)
             b0_r = pl.move(b0, target_memory=pl.MemorySpace.Right)
             acc = pl.matmul(a0_l, b0_r)
 
             # K-tile 1: columns [k1 : k1+k_tile_width]
             a1 = pl.load(a, [0, k1], [seq_len, k_tile_width], target_memory=pl.MemorySpace.Mat)
-            b1 = pl.load(
-                b, [0, k1], [seq_len, k_tile_width], target_memory=pl.MemorySpace.Mat, transpose=True
-            )
+            b1_nat = pl.load(b, [0, k1], [seq_len, k_tile_width], target_memory=pl.MemorySpace.Mat)
+            b1 = pl.tile.transpose_view(b1_nat)
             a1_l = pl.move(a1, target_memory=pl.MemorySpace.Left)
             b1_r = pl.move(b1, target_memory=pl.MemorySpace.Right)
             acc = pl.matmul_acc(acc, a1_l, b1_r)
 
             # K-tile 2: columns [k2 : k2+k_tile_width]
             a2 = pl.load(a, [0, k2], [seq_len, k_tile_width], target_memory=pl.MemorySpace.Mat)
-            b2 = pl.load(
-                b, [0, k2], [seq_len, k_tile_width], target_memory=pl.MemorySpace.Mat, transpose=True
-            )
+            b2_nat = pl.load(b, [0, k2], [seq_len, k_tile_width], target_memory=pl.MemorySpace.Mat)
+            b2 = pl.tile.transpose_view(b2_nat)
             a2_l = pl.move(a2, target_memory=pl.MemorySpace.Left)
             b2_r = pl.move(b2, target_memory=pl.MemorySpace.Right)
             acc = pl.matmul_acc(acc, a2_l, b2_r)
 
             # K-tile 3: columns [k3 : k3+k_tile_width]
             a3 = pl.load(a, [0, k3], [seq_len, k_tile_width], target_memory=pl.MemorySpace.Mat)
-            b3 = pl.load(
-                b, [0, k3], [seq_len, k_tile_width], target_memory=pl.MemorySpace.Mat, transpose=True
-            )
+            b3_nat = pl.load(b, [0, k3], [seq_len, k_tile_width], target_memory=pl.MemorySpace.Mat)
+            b3 = pl.tile.transpose_view(b3_nat)
             a3_l = pl.move(a3, target_memory=pl.MemorySpace.Left)
             b3_r = pl.move(b3, target_memory=pl.MemorySpace.Right)
             acc = pl.matmul_acc(acc, a3_l, b3_r)

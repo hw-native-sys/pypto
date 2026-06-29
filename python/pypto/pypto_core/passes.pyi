@@ -481,24 +481,6 @@ def canonicalize_tile_slice() -> Pass:
 def infer_tile_memory_space() -> Pass:
     """Create a pass that infers memory_space for TileType variables in InCore functions."""
 
-def lower_transpose_load_param_layout() -> Pass:
-    """Create the LowerTransposeLoadParamLayout pass (RFC #1300 P6).
-
-    For each InCore function, detects ``tile.load(..., transpose=True)`` whose
-    source is a function parameter ``p`` and rewrites the body to encode the
-    transpose intent as an explicit ``tensor.as_layout`` view:
-
-    - prepends ``p_dn = tensor.as_layout(p, layout=DN)`` to the InCore body
-      (``p_dn`` carries the canonical ``[..., b, a] DN`` view);
-    - substitutes body uses of ``p`` with ``p_dn``;
-    - swaps the trailing pair of offsets/shapes/valid_shapes on the matching
-      ``tile.load`` calls and drops ``transpose=True``.
-
-    Parameter signatures are left unchanged. Non-InCore (orch) functions are
-    untouched. Mixed-use parameters (both ``transpose=True`` and
-    ``transpose=False`` loads on the same param) are rejected.
-    """
-
 def materialize_tensor_strides() -> Pass:
     """Create the MaterializeTensorStrides pass (RFC #1300 §2.4).
 
@@ -808,7 +790,6 @@ __all__ = [
     "auto_tile_matmul_l0",
     "canonicalize_tile_slice",
     "infer_tile_memory_space",
-    "lower_transpose_load_param_layout",
     "materialize_tensor_strides",
     "resolve_backend_op_layouts",
     "normalize_return_order",

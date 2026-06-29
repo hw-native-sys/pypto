@@ -370,7 +370,6 @@ class TestCrossCoreTpushTpopCodegen:
             passes.convert_tensor_to_tile_ops,
             passes.flatten_tile_nd_to_2d,
             passes.infer_tile_memory_space,
-            passes.lower_transpose_load_param_layout,
             passes.resolve_backend_op_layouts,
             passes.init_mem_ref,
             passes.memory_reuse,

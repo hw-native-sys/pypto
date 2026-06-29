@@ -65,10 +65,10 @@ class TestBasic:
                 mem_vec_4: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
                 mem_vec_5: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
                 tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = pl.tile.load(
-                    input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+                    input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec
                 )
                 tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_4, 0, 16384), pl.Mem.Vec] = pl.tile.load(
-                    input_b, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+                    input_b, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec
                 )
                 tile_sum: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
                     pl.tile.add(tile_a, tile_b)
@@ -124,14 +124,10 @@ class TestBasic:
                 mem_right_6: pl.Ptr = pl.tile.alloc(pl.Mem.Right, 2048)
                 mem_acc_7: pl.Ptr = pl.tile.alloc(pl.Mem.Acc, 4096)
                 tile_a_ub: pl.Tile[[32, 32], pl.FP16, pl.MemRef(mem_vec_3, 0, 2048), pl.Mem.Vec] = (
-                    pl.tile.load(
-                        input_a, [0, 0], [32, 32], [32, 32], target_memory=pl.Mem.Vec, transpose=False
-                    )
+                    pl.tile.load(input_a, [0, 0], [32, 32], [32, 32], target_memory=pl.Mem.Vec)
                 )
                 tile_b_l1: pl.Tile[[32, 32], pl.FP16, pl.MemRef(mem_mat_4, 0, 2048), pl.Mem.Mat] = (
-                    pl.tile.load(
-                        input_b, [0, 0], [32, 32], [32, 32], target_memory=pl.Mem.Mat, transpose=False
-                    )
+                    pl.tile.load(input_b, [0, 0], [32, 32], [32, 32], target_memory=pl.Mem.Mat)
                 )
                 tile_a_l0a: pl.Tile[[32, 32], pl.FP16, pl.MemRef(mem_left_5, 0, 2048), pl.Mem.Left] = (
                     pl.tile.move(tile_a_ub, target_memory=pl.Mem.Left)
@@ -181,7 +177,7 @@ class TestMemRefSharing:
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
                 tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.load(
-                    input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+                    input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec
                 )
                 result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
                     tile_a, [0, 0], output
@@ -219,7 +215,7 @@ class TestMemRefSharing:
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
                 tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.load(
-                    input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+                    input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec
                 )
                 reshaped: pl.Tile[[4096, 1], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
                     pl.tile.reshape(tile_a, [4096, 1])
@@ -356,14 +352,10 @@ class TestMemRefSharing:
                 mem_right_6: pl.Ptr = pl.tile.alloc(pl.Mem.Right, 2048)
                 mem_acc_7: pl.Ptr = pl.tile.alloc(pl.Mem.Acc, 4096)
                 tile_a_ub: pl.Tile[[32, 32], pl.FP16, pl.MemRef(mem_vec_3, 0, 2048), pl.Mem.Vec] = (
-                    pl.tile.load(
-                        input_a, [0, 0], [32, 32], [32, 32], target_memory=pl.Mem.Vec, transpose=False
-                    )
+                    pl.tile.load(input_a, [0, 0], [32, 32], [32, 32], target_memory=pl.Mem.Vec)
                 )
                 tile_b_l1: pl.Tile[[32, 32], pl.FP16, pl.MemRef(mem_mat_4, 0, 2048), pl.Mem.Mat] = (
-                    pl.tile.load(
-                        input_b, [0, 0], [32, 32], [32, 32], target_memory=pl.Mem.Mat, transpose=False
-                    )
+                    pl.tile.load(input_b, [0, 0], [32, 32], [32, 32], target_memory=pl.Mem.Mat)
                 )
                 tile_a_l0a: pl.Tile[[32, 32], pl.FP16, pl.MemRef(mem_left_5, 0, 2048), pl.Mem.Left] = (
                     pl.tile.move(tile_a_ub, target_memory=pl.Mem.Left)
@@ -440,7 +432,7 @@ class TestSliceView:
             ) -> pl.Tensor[[1, 16], pl.FP32]:
                 mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 512)
                 tile_a: pl.Tile[[8, 16], pl.FP32, pl.MemRef(mem_vec_3, 0, 512), pl.Mem.Vec] = pl.tile.load(
-                    input_a, [0, 0], [8, 16], [8, 16], target_memory=pl.Mem.Vec, transpose=False
+                    input_a, [0, 0], [8, 16], [8, 16], target_memory=pl.Mem.Vec
                 )
                 s0: pl.Tile[[1, 16], pl.FP32, pl.MemRef(mem_vec_3, 0, 64), pl.Mem.Vec] = pl.tile.slice(
                     tile_a, [1, 16], [0, 0]
@@ -503,14 +495,10 @@ class TestYieldMemRef:
                 mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
                 mem_vec_4: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
                 init_tile: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
-                    pl.tile.load(
-                        input_tensor, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
-                    )
+                    pl.tile.load(input_tensor, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec)
                 )
                 other_tile: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
-                    pl.tile.load(
-                        input_tensor, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
-                    )
+                    pl.tile.load(input_tensor, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec)
                 )
                 for _i, (acc,) in pl.range(0, 4, init_values=(init_tile,)):
                     acc_next: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_4, 0, 16384), pl.Mem.Vec] = (
@@ -577,10 +565,10 @@ class TestYieldMemRef:
                 mem_vec_4: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
                 mem_vec_5: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
                 init_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.load(
-                    input_tensor, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+                    input_tensor, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec
                 )
                 init_b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = pl.tile.load(
-                    input_tensor, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+                    input_tensor, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec
                 )
                 for _i, (a, b) in pl.range(0, 4, init_values=(init_a, init_b)):
                     a_next: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_4, 0, 16384), pl.Mem.Vec] = (
@@ -739,7 +727,6 @@ class TestYieldMemRef:
                             [64, 64],
                             [64, 64],
                             target_memory=pl.Mem.Vec,
-                            transpose=False,
                         )
                     )
                     if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
@@ -753,7 +740,6 @@ class TestYieldMemRef:
                             [64, 64],
                             [64, 64],
                             target_memory=pl.Mem.Vec,
-                            transpose=False,
                         )
                     )
                     if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
@@ -806,7 +792,7 @@ class TestYieldMemRef:
                 mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
                 mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
                 tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.load(
-                    input_tensor, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+                    input_tensor, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec
                 )
                 if cond < 2:
                     alias_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = tile_a

@@ -1552,13 +1552,8 @@ class TestVectorOpClassification:
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 x_l1 = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
                 x_left = pl.move(x_l1, target_memory=pl.MemorySpace.Left)
-                y_l1 = pl.load(
-                    y,
-                    [0, 0],
-                    [128, 128],
-                    target_memory=pl.MemorySpace.Mat,
-                    transpose=True,
-                )
+                y_nat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+                y_l1 = pl.tile.transpose_view(y_nat)
                 y_right = pl.move(y_l1, target_memory=pl.MemorySpace.Right)
                 z_tile = pl.matmul(x_left, y_right)
                 z_vec = pl.move(
@@ -1584,7 +1579,8 @@ class TestVectorOpClassification:
             ):
                 x_l1 = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
                 x_left = pl.move(x_l1, target_memory=pl.MemorySpace.Left)
-                y_l1 = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat, transpose=True)
+                y_nat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+                y_l1 = pl.tile.transpose_view(y_nat)
                 y_right = pl.move(y_l1, target_memory=pl.MemorySpace.Right)
                 z_tile = pl.matmul(x_left, y_right)
                 pl.tpush_to_aiv(z_tile, split=0)

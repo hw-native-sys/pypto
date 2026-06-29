@@ -203,13 +203,13 @@ def make_kernel_qk_matmul(
             phys_block = pl.read(block_indices, i)
             kj_row = phys_block * block_size
             qi_l1 = pl.load(qi, [0, 0], [q_tile, head_dim], target_memory=pl.MemorySpace.Mat)
-            kj_l1 = pl.load(
+            kj_nat = pl.load(
                 key_cache,
                 [kj_row, 0],
                 [block_size, head_dim],
                 target_memory=pl.MemorySpace.Mat,
-                transpose=True,
             )
+            kj_l1 = pl.tile.transpose_view(kj_nat)
             qi_l0a = pl.move(qi_l1, target_memory=pl.MemorySpace.Left)
             kj_l0b = pl.move(kj_l1, target_memory=pl.MemorySpace.Right)
             sij_l0c = pl.matmul(qi_l0a, kj_l0b)

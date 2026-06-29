@@ -302,8 +302,7 @@ void OpConversionRegistry::RegisterMemoryOps() {
           // lost here — a follow-up tile.fillpad is the workaround until tile.load
           // grows its own pad_value kwarg.
           auto valid_shapes = (args.size() == 4) ? args[3] : shape;
-          std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec},
-                                                                       {"transpose", false}};
+          std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec}};
           auto load_call =
               op_reg.Create("tile.load", {input, offset, shape, valid_shapes}, load_kwargs, span);
           return ConversionResult{load_call};
@@ -379,8 +378,7 @@ void OpConversionRegistry::RegisterMemoryOps() {
           std::vector<StmtPtr> prologue;
           auto offsets_load = MakeZeroOffsets(source_tensor_type->shape_.size(), span);
           auto shapes = MakeShapeTuple(source_tensor_type->shape_, span);
-          std::vector<std::pair<std::string, std::any>> load_kw = {{"target_memory", MemorySpace::Vec},
-                                                                   {"transpose", false}};
+          std::vector<std::pair<std::string, std::any>> load_kw = {{"target_memory", MemorySpace::Vec}};
           auto load_call = op_reg.Create("tile.load", {source, offsets_load, shapes, shapes}, load_kw, span);
           auto source_tile_var = std::make_shared<Var>("assemble_src", load_call->GetType(), span);
           prologue.push_back(std::make_shared<AssignStmt>(source_tile_var, load_call, span));
@@ -596,8 +594,7 @@ void OpConversionRegistry::RegisterMemoryOps() {
         }
         auto valid_shapes = MakeShapeTuple(valid_shape, span);
 
-        std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec},
-                                                                     {"transpose", false}};
+        std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec}};
         auto load_call =
             op_reg.Create("tile.load", {input, offsets, shapes, valid_shapes}, load_kwargs, span);
         auto load_var = std::make_shared<Var>("fillpad_src", load_call->GetType(), span);
@@ -785,8 +782,7 @@ void OpConversionRegistry::RegisterMemoryOps() {
                                     std::vector<StmtPtr>& stmts) -> ExprPtr {
           auto shapes = MakeShapeTuple(shape, span);
           auto valid_shapes = MakeShapeTuple(valid_shape, span);
-          std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec},
-                                                                       {"transpose", false}};
+          std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec}};
           auto load_call =
               op_reg.Create("tile.load", {tensor, offsets, shapes, valid_shapes}, load_kwargs, span);
           auto load_var = std::make_shared<Var>(name_hint, load_call->GetType(), span);
@@ -913,8 +909,9 @@ void OpConversionRegistry::RegisterMatmulOps() {
 
   // tensor.matmul: 2D × 2D → tile.matmul; any operand ≥3D → tile.batch_matmul.
   // a_trans/b_trans are honored via InputSpaceReq below — the producer load is
-  // emitted with target_memory=Mat and transpose=True, so the transposed tile
-  // arrives at matmul/batch_matmul already in the correct orientation.
+  // emitted natural (target_memory=Mat) plus a zero-copy tile.transpose_view, so
+  // the transposed tile arrives at matmul/batch_matmul already in the correct
+  // orientation.
   RegisterCustom(
       "tensor.matmul",
       [rank_of](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
@@ -1217,8 +1214,7 @@ void OpConversionRegistry::RegisterGatherOps() {
         auto zero = make_idx(0);
         auto one = make_idx(1);
 
-        std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec},
-                                                                     {"transpose", false}};
+        std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec}};
         std::vector<std::pair<std::string, std::any>> tmp_create_kwargs = {
             {"dtype", DataType(DataType::INT32)}, {"target_memory", MemorySpace::Vec}};
 

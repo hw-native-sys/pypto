@@ -39,7 +39,7 @@ program_tiled = convert_pass(program)
 
 对每个 `FunctionType::InCore` 函数：
 
-1. **预扫描 MatmulSlice 模式**：收集被 `tensor.matmul` / `tensor.matmul_acc` 使用的 `tensor.slice` 结果。这些需要生成 `tile.load(Mat, transpose=...)` 而非默认的 `tile.load(Vec)`。
+1. **预扫描 MatmulSlice 模式**：收集被 `tensor.matmul` / `tensor.matmul_acc` 使用的 `tensor.slice` 结果。这些需要生成 Mat 空间的 `tile.load`（自然 load，转置时再叠加零拷贝 `tile.transpose_view`），而非默认的 `tile.load(Vec)`。
 
 2. **插入 tile.load（入口加载）**：为每个被转换 op 直接使用的 `TensorType` 参数，在函数入口插入 `tile.load(param, zeros, shape, shape, target_memory=Vec, transpose=False)`。仅被自加载 op（`tensor.slice`、`tensor.matmul`、`tensor.read`、`tensor.write`、`tensor.assemble`）引用的参数不会生成额外加载。
 

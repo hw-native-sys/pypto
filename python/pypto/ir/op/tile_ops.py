@@ -154,7 +154,6 @@ def load(
     shapes: Sequence[int | Expr] | _ir_core.MakeTuple,
     valid_shapes: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     target_memory: MemorySpace = MemorySpace.Vec,
-    transpose: bool = False,
     span: Span | None = None,
 ) -> Call:
     """Copy data from tensor to specified memory level.
@@ -164,17 +163,13 @@ def load(
         offsets: Offsets in each dimension (sequence of scalars), or a MakeTuple.
             Always in the source tensor's coordinate system.
         shapes: Shape of the region to load in each dimension (sequence of scalars),
-            or a MakeTuple. Always in the source tensor's coordinate system, even
-            when transpose=True. The output TileType shape will be transposed
-            automatically by the type deduction layer.
+            or a MakeTuple. Always in the source tensor's coordinate system.
         valid_shapes: Valid shape of the tile in each dimension (sequence of scalars), or a
             MakeTuple. When provided, sets TileView.valid_shape in the output TileType.
             When omitted, shapes is used as valid_shape. Useful for dynamic shapes where
             the actual valid data region differs from the allocated tile size.
             Uses the same coordinate convention as shapes.
         target_memory: Target memory space (MemorySpace.Vec default, or MemorySpace.Mat)
-        transpose: Whether to transpose the tile during load (default: False).
-            Only supported when target_memory is MemorySpace.Mat (L1).
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -183,20 +178,11 @@ def load(
     Example:
         >>> # 2D load
         >>> tile = load(tensor, offsets=[0, 0], shapes=[32, 32])
-        >>> # 2D load with transpose to L1 (tensor is [N, K], output tile is [K, N])
-        >>> tile = load(tensor, offsets=[0, 0], shapes=[N, K],
-        ...             target_memory=MemorySpace.Mat, transpose=True)
     """
     # Validate target_memory: only Vec and Mat are allowed for load
     if target_memory not in (MemorySpace.Vec, MemorySpace.Mat):
         raise ValueError(
             f"target_memory for tile.load must be MemorySpace.Vec or MemorySpace.Mat, got {target_memory}"
-        )
-
-    if transpose and target_memory != MemorySpace.Mat:
-        raise ValueError(
-            f"transpose=True is only supported when target_memory is MemorySpace.Mat (L1), "
-            f"got target_memory={target_memory}"
         )
 
     actual_span = _get_span_or_capture(span)
@@ -205,7 +191,7 @@ def load(
     shapes_tuple = _to_make_tuple(shapes, actual_span)
     _validate_offsets_shapes(offsets_tuple, shapes_tuple)
 
-    kwargs: dict[str, Any] = {"target_memory": target_memory, "transpose": transpose}
+    kwargs: dict[str, Any] = {"target_memory": target_memory}
 
     valid_shapes_tuple = shapes_tuple
     if valid_shapes is not None:

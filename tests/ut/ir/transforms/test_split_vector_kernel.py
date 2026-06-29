@@ -205,7 +205,7 @@ class TestSplitVectorKernelNoSplitA2A3:
         load_call = ir.Call(
             ir.Op("tile.load"),
             [data, offsets, shapes, valid_shapes],
-            {"target_memory": ir.MemorySpace.Vec, "transpose": False},
+            {"target_memory": ir.MemorySpace.Vec},
             load_type,
             span,
         )
@@ -295,7 +295,7 @@ class TestSplitVectorKernelNoSplitA2A3:
         load_call = ir.Call(
             ir.Op("tile.load"),
             [data, offsets, shapes, valid_shapes],
-            {"target_memory": ir.MemorySpace.Vec, "transpose": False},
+            {"target_memory": ir.MemorySpace.Vec},
             load_type,
             span,
         )
@@ -383,7 +383,7 @@ class TestSplitVectorKernelNoSplitA2A3:
         load_call = ir.Call(
             ir.Op("tile.load"),
             [data, offsets, shapes, valid_shapes],
-            {"target_memory": ir.MemorySpace.Vec, "transpose": False},
+            {"target_memory": ir.MemorySpace.Vec},
             load_type,
             span,
         )

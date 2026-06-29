@@ -3,7 +3,7 @@
 经过分阶段收敛重构后，`SplitVectorKernel` 只剩两项窄职责，**不再折半任何函数体**：
 
 1. **`split_aiv` 属性打标** —— 本 pass 唯一的拆分路径。`split_aiv` 核（手写，或由上游
-   [`LowerAutoVectorSplit`](21-lower_auto_vector_split.md) 产生）已经把其显式
+   [`LowerAutoVectorSplit`](20-lower_auto_vector_split.md) 产生）已经把其显式
    `tile.aiv_shard` / `tile.aic_gather` 下降为带拆分标记的 `tpush`/`tpop`（由
    `ExpandMixedKernel` 折叠），并携带已折半的计算 tile 与自己的
    `tile.get_subblock_idx()`。本 pass 不动函数体，只在函数属性上打 `split`（对 AIV
@@ -219,11 +219,11 @@ passes.def("split_vector_kernel", &pass::SplitVectorKernel, ...);
 
 ## 相关
 
-- [`LowerAutoVectorSplit`](21-lower_auto_vector_split.md) —— 在用自动拆分下降路径；
+- [`LowerAutoVectorSplit`](20-lower_auto_vector_split.md) —— 在用自动拆分下降路径；
   产生本 pass 打标的 `split_aiv` 函数。逐算子向量折半规则位于该处及
   `split_axis_utils`。
-- [`ExpandMixedKernel`](22-expand_mixed_kernel.md) —— AIC/AIV 函数与
+- [`ExpandMixedKernel`](21-expand_mixed_kernel.md) —— AIC/AIV 函数与
   `dual_aiv_dispatch` 标记的上游生产者。
-- [`InjectGMPipeBuffer`](23-inject_gm_pipe_buffer.md) —— 紧邻其前运行；本 pass 依赖
+- [`InjectGMPipeBuffer`](22-inject_gm_pipe_buffer.md) —— 紧邻其前运行；本 pass 依赖
   的后端门控 GM pipe 缓冲布线。
-- [`NormalizeReturnOrder`](26-normalize_return_order.md) —— 紧邻其后运行。
+- [`NormalizeReturnOrder`](25-normalize_return_order.md) —— 紧邻其后运行。

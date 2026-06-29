@@ -94,7 +94,7 @@
 
 | 名称 | 签名 | 说明 |
 | ---- | ---- | ---- |
-| `load` | `(tensor: Tensor, offsets: Sequence[IntLike], shapes: Sequence[IntLike], target_memory: Mem = Mem.Vec, transpose: bool = False) -> Tile` | DDR → 片上 tile（transpose 仅支持 Mat）。`offsets` 和 `shapes` 均使用源 tensor 的坐标系。 |
+| `load` | `(tensor: Tensor, offsets: Sequence[IntLike], shapes: Sequence[IntLike], target_memory: Mem = Mem.Vec) -> Tile` | DDR → 片上 tile。`offsets` 和 `shapes` 均使用源 tensor 的坐标系。转置 matmul 操作数请对 load 结果叠加 `transpose_view`。 |
 | `store` | `(tile: Tile, offsets: Sequence[IntLike], output_tensor: Tensor, *, atomic: AtomicType = AtomicType.None_) -> Tensor` | Tile → DDR（pipe 根据源 tile 内存空间自动推断）。`atomic=AtomicType.Add` 将 tile 累加到 DDR 现有内容上（split-K）；浮点结果不确定，目标需预先清零，支持 dtype fp32/fp16/int32/int16/int8 |
 | `assemble` | `(target: Tile, source: Tile, offset: Sequence[IntLike]) -> Tile` | 将源 tile 写入目标 tile 的指定偏移处。语法糖（仅 SSA 前）：`target[i:i+H, j:j+W] = source` |
 | `scatter_update` | `(input: Tile, dim: int, index: Tile, src: Tile) -> Tile` | 按 `index` tile 指定的稀疏行位置，将 `src` tile 的行数据写入 `input` tile。`input`/`src`：2D `[rows, d]` 或 4D `[B, S, 1, d]`；`index`：2D `[b, s]` 整型。降级为 `tile.scatter`（pto.tscatter，整行 flat 索引）实现。当前仅支持 `dim=-2` |

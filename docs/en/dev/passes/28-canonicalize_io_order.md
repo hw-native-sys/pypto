@@ -1,6 +1,6 @@
 # CanonicalizeIOOrder Pass
 
-Scoped to `SeqStmts` **inside a `ForKind::Pipeline` body**, reorders statements along a **same-core hardware-unit stage ladder** (scalar → load → compute → store) — subject to the SSA dependency graph. Clustering the replicated clones' loads up front issues both stages' prefetches before the computes, so the MTE load engine runs ahead of the Vector/Cube compute engine (double-buffer overlap); the compute/store tier is then ordered by pipeline **stage** so each stage stores its output right after its compute. Note: buffer *separation* between stages is no longer a side effect of this clustering — it is an explicit [`MemoryReuse`](32-memory_reuse.md) constraint (`pipeline_membership`); this pass only shapes the **schedule**. Cross-core (cube/vector) pipelines are software-pipelined upstream by [`SkewCrossCorePipeline`](27-skew_cross_core_pipeline.md) and reach this pass as `ForKind::Sequential`, so there is no cross-core handling here. Loops that are not pipelined are left untouched.
+Scoped to `SeqStmts` **inside a `ForKind::Pipeline` body**, reorders statements along a **same-core hardware-unit stage ladder** (scalar → load → compute → store) — subject to the SSA dependency graph. Clustering the replicated clones' loads up front issues both stages' prefetches before the computes, so the MTE load engine runs ahead of the Vector/Cube compute engine (double-buffer overlap); the compute/store tier is then ordered by pipeline **stage** so each stage stores its output right after its compute. Note: buffer *separation* between stages is no longer a side effect of this clustering — it is an explicit [`MemoryReuse`](31-memory_reuse.md) constraint (`pipeline_membership`); this pass only shapes the **schedule**. Cross-core (cube/vector) pipelines are software-pipelined upstream by [`SkewCrossCorePipeline`](26-skew_cross_core_pipeline.md) and reach this pass as `ForKind::Sequential`, so there is no cross-core handling here. Loops that are not pipelined are left untouched.
 
 ## Overview
 
@@ -13,13 +13,13 @@ This pass reorders `SeqStmts` **inside a `ForKind::Pipeline` body** (including n
 - Tile compute statements settle in the middle.
 - Each `tile.store` / `tile.write` sinks to the latest position the dependency graph permits.
 
-The result is `[scalars…, loads…, per-stage (compute, store)…]` whenever the dataflow allows — e.g. a `stage=2` body emits `load load compute_s0 store_s0 compute_s1 store_s1`. Clustering the loads gives prefetch overlap (the MTE engine runs ahead); ordering the compute/store tier by stage means each stage's output is stored right after its compute, freeing that buffer before the next stage and cutting both on-chip pressure and the cross-iteration load↔store coupling. Buffer separation between stages is enforced separately by `MemoryReuse` (see [32-memory_reuse.md](32-memory_reuse.md)).
+The result is `[scalars…, loads…, per-stage (compute, store)…]` whenever the dataflow allows — e.g. a `stage=2` body emits `load load compute_s0 store_s0 compute_s1 store_s1`. Clustering the loads gives prefetch overlap (the MTE engine runs ahead); ordering the compute/store tier by stage means each stage's output is stored right after its compute, freeing that buffer before the next stage and cutting both on-chip pressure and the cross-iteration load↔store coupling. Buffer separation between stages is enforced separately by `MemoryReuse` (see [31-memory_reuse.md](31-memory_reuse.md)).
 
 Lifting scalar compute is what unlocks the load cluster: without it, each clone's address-arithmetic assign would be classified as ordinary compute and rank by original position — interleaving between sibling loads and pinning them in their original groups. With scalar compute as the highest-priority category, all sibling clones' address arithmetic emits first, all dependent loads become ready together, and the loads naturally cluster.
 
 ### Cross-core (AIC↔AIV) — handled upstream
 
-Cross-core (cube/vector) pipeline loops are software-pipelined by [`SkewCrossCorePipeline`](27-skew_cross_core_pipeline.md), which runs *before* `LowerPipelineLoops` and rewrites every cross-core loop to `ForKind::Sequential`. They therefore never reach this pass as a `ForKind::Pipeline` body, and `CanonicalizeIOOrder` has **no cross-core handling** — `tpush`/`tpop` are ordinary tile compute here, not reordered into any cross-core tier. This pass only clusters the **same-core** stages (scalar → load → compute → store) of the remaining same-core pipeline loops (GM→L1, L1→L0, nested matmul) for ping-pong.
+Cross-core (cube/vector) pipeline loops are software-pipelined by [`SkewCrossCorePipeline`](26-skew_cross_core_pipeline.md), which runs *before* `LowerPipelineLoops` and rewrites every cross-core loop to `ForKind::Sequential`. They therefore never reach this pass as a `ForKind::Pipeline` body, and `CanonicalizeIOOrder` has **no cross-core handling** — `tpush`/`tpop` are ordinary tile compute here, not reordered into any cross-core tier. This pass only clusters the **same-core** stages (scalar → load → compute → store) of the remaining same-core pipeline loops (GM→L1, L1→L0, nested matmul) for ping-pong.
 
 **Requires**: SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred, NormalizedStmtStructure.
 
@@ -49,7 +49,7 @@ A priority-aware stable topological sort applied to every `SeqStmts` of two or m
 
 `tile.read` is classified as `Load` even though it produces a scalar — it's I/O against a tile and belongs in the load tier alongside `tile.load`. The LHS-type check only applies once the RHS is determined not to be a recognized I/O op.
 
-Cross-core `tpush`/`tpop` carry no special category — they fall through to `TileCompute` and keep their program order among siblings (cross-core software-pipelining is done upstream by [`SkewCrossCorePipeline`](27-skew_cross_core_pipeline.md); see *Cross-core (AIC↔AIV)* above).
+Cross-core `tpush`/`tpop` carry no special category — they fall through to `TileCompute` and keep their program order among siblings (cross-core software-pipelining is done upstream by [`SkewCrossCorePipeline`](26-skew_cross_core_pipeline.md); see *Cross-core (AIC↔AIV)* above).
 
 At each step, among statements whose predecessors are all already emitted (`ready`), the pass emits the one with the smallest `(tier, stage, sub, original_index)` — where `tier` is 0 for scalar compute, 1 for load, 2 for tile-compute/store; `stage` is the statement's `pipeline_membership` (so a tile def, and the store that consumes it, share a stage); and `sub` is 0 for compute, 1 for store. Loads (tier 1) thus cluster before all compute/store, and within the compute/store tier each stage's compute precedes its store before the next stage begins. Non-pipeline regions carry no membership (`stage` empty), so the tier/sub ordering reduces to the prior scalar → load → compute → store ladder.
 
@@ -125,7 +125,7 @@ All four `off_k` lift first to unblock the loads, which then cluster (prefetch o
 
 ## Related
 
-- [`LowerPipelineLoops`](28-lower_pipeline_loops.md) — upstream producer of replicated regions that benefit from this pass; leaves `ForKind::Pipeline` as the scope marker this pass consumes
-- [`MaterializeTensorStrides`](30-materialize_tensor_strides.md) — runs immediately after this pass (when inserted into the default pipeline); fills implicit `TensorView` strides before `InitMemRef` consumes them
-- [`MemoryReuse`](32-memory_reuse.md) — runs after this pass; enforces stage buffer separation explicitly via `pipeline_membership` (this pass only shapes the schedule)
+- [`LowerPipelineLoops`](27-lower_pipeline_loops.md) — upstream producer of replicated regions that benefit from this pass; leaves `ForKind::Pipeline` as the scope marker this pass consumes
+- [`MaterializeTensorStrides`](29-materialize_tensor_strides.md) — runs immediately after this pass (when inserted into the default pipeline); fills implicit `TensorView` strides before `InitMemRef` consumes them
+- [`MemoryReuse`](31-memory_reuse.md) — runs after this pass; enforces stage buffer separation explicitly via `pipeline_membership` (this pass only shapes the schedule)
 - RFC #1026 / PR #1029 — InOut-use discipline + dependency analysis utility

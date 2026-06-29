@@ -65,9 +65,10 @@ def kernel_qk_matmul(
     kj: pl.Tensor[[128, 128], pl.BF16],
     output: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
 ) -> pl.Tensor[[16, 128], pl.FP32]:
-    """QK matmul: sij = qi @ kj.T (CUBE). kj transposed during load to L1."""
+    """QK matmul: sij = qi @ kj.T (CUBE). kj reinterpreted as its transpose on L1."""
     qi_l1 = pl.load(qi, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
-    kj_l1 = pl.load(kj, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat, transpose=True)
+    kj_nat = pl.load(kj, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+    kj_l1 = pl.tile.transpose_view(kj_nat)
     qi_l0a = pl.move(qi_l1, target_memory=pl.MemorySpace.Left)
     kj_l0b = pl.move(kj_l1, target_memory=pl.MemorySpace.Right)
     sij_l0c = pl.matmul(qi_l0a, kj_l0b)

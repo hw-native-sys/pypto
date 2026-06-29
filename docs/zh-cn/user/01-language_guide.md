@@ -60,7 +60,7 @@ b: pl.Tensor[[N, K], pl.FP32]
 b: pl.Tensor[[K, N], pl.FP32, pl.DN]   # → 解析期触发 DeprecationWarning
 ```
 
-> **为什么弃用 `pl.Tensor[..., pl.DN]`。** layout-only 简写迫使用户脑子里同时持有两套坐标系（IR 逻辑后视图 shape 与 runtime 行优先 shape）—— 恰恰是 RFC #1300 想要消除的歧义。改用：去掉 layout 标记，写 runtime shape —— matmul B^T 场景用 `pl.load(..., transpose=True)` 加载行优先 tensor（参见下文「数据搬运」）；DN-producing op 之后的 slice 自动继承父 layout。
+> **为什么弃用 `pl.Tensor[..., pl.DN]`。** layout-only 简写迫使用户脑子里同时持有两套坐标系（IR 逻辑后视图 shape 与 runtime 行优先 shape）—— 恰恰是 RFC #1300 想要消除的歧义。改用：去掉 layout 标记，写 runtime shape —— matmul B^T 场景给 `pl.matmul` 传 `b_trans=True`（或 `a_trans=True`），或自然 load 后用 `pl.tile.transpose_view(...)`（参见下文「数据搬运」）；DN-producing op 之后的 slice 自动继承父 layout。
 
 如需 NZ（硬件 tile layout），写 `pl.Tile[..., pl.NZ]` —— NZ 是 tile-only，不允许作为 TensorType annotation。`pl.NZ` 常量保留用于 tile annotation 和 IR 内部使用。
 
@@ -459,7 +459,7 @@ orchestrator（`@pl.jit.host`）和 inline 子函数（`@pl.jit.inline`）上
 只是手放 scope 会嵌套在编译器 AUTO scope 之内）。`.incore` / `.opaque`
 仍会拒绝它——它们外提为独立 kernel。它会 specialize 成
 `@pl.function(..., auto_scope=False)`——具体的 scope 放置语义见
-[MaterializeRuntimeScopes pass](../dev/passes/41-materialize_runtime_scopes.md)。
+[MaterializeRuntimeScopes pass](../dev/passes/40-materialize_runtime_scopes.md)。
 
 ### `@pl.inline`
 
@@ -624,12 +624,11 @@ output_dir = ir.compile(
 10. **ConvertTensorToTileOps** —— 将张量操作转换为 tile 操作
 11. **FlattenTileNdTo2D** —— 将 ND tile 操作规范化为 2D
 12. **InferTileMemorySpace** —— 推断 tile 内存空间
-13. **LowerTransposeLoadParamLayout** —— 修复转置布局处理
-14. **ResolveBackendOpLayouts** —— 修复 backend 受限的 tile 布局
-15. **ExpandMixedKernel** —— 在需要时拆分 mixed kernel
-16. **InitMemRef** —— 分配内存空间并插入缓冲区分配
-17. **MemoryReuse** —— 共享生命周期不重叠的缓冲区
-18. **AllocateMemoryAddr** —— 分配具体内存地址
+13. **ResolveBackendOpLayouts** —— 修复 backend 受限的 tile 布局
+14. **ExpandMixedKernel** —— 在需要时拆分 mixed kernel
+15. **InitMemRef** —— 分配内存空间并插入缓冲区分配
+16. **MemoryReuse** —— 共享生命周期不重叠的缓冲区
+17. **AllocateMemoryAddr** —— 分配具体内存地址
 
 ### `JITFunction.compile()`（用于 `@pl.jit` 内核）
 

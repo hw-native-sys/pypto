@@ -145,27 +145,15 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
       break;
     }
   }
-  bool transpose = GetKwarg<bool>(kwargs, "transpose", false);
-
-  // Transpose semantics are Mat-specific. Callers that use transpose=true must
-  // commit to target_memory=Mat at construction — InferTileMemorySpace does not
-  // revisit transpose decisions.
-  CHECK(!transpose || (target_memory_opt.has_value() && *target_memory_opt == MemorySpace::Mat))
-      << "The operator " << op_name << " only supports transpose=true when target_memory is Mat (L1)";
-
-  CHECK(!transpose || shapes_tuple->elements_.size() >= 2)
-      << "The operator " << op_name << " requires at least 2D shapes for transpose=true, but got "
-      << shapes_tuple->elements_.size() << "D";
-
   // Nz/Zn layout: only chosen when target_memory is known. If it is absent,
   // the default-constructed view is kept and InferTileMemorySpace rebuilds it
   // once the memory space is resolved.
   //
   // Source-DN equivalence (RFC #1300 §3.3 + P6): a DN-tagged source tensor
   // describes the same physical bytes as the canonical-pair ND view, so
-  // ``tile.load`` of a DN source produces the same tile layout as
-  // ``transpose=True`` on the equivalent ND source. Treat the two signals
-  // (source layout == DN, transpose kwarg) as an XOR.
+  // ``tile.load`` of a DN source produces the transposed (ZN) Mat layout.
+  // A transposed matmul operand is realised by a zero-copy ``tile.transpose_view``
+  // at the matmul site, not by the load.
   bool source_is_dn =
       tensor_type->tensor_view_.has_value() && tensor_type->tensor_view_->layout == TensorLayout::DN;
   TileView tile_view;
@@ -173,7 +161,7 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
     if (*target_memory_opt == MemorySpace::Mat) {
       tile_view.blayout = TileLayout::col_major;
       tile_view.slayout = TileLayout::row_major;
-      if (transpose != source_is_dn) {
+      if (source_is_dn) {
         std::swap(tile_view.blayout, tile_view.slayout);
       }
     } else if (auto last_dim = As<ConstInt>(shapes_tuple->elements_.back());
@@ -182,20 +170,10 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
     }
   }
 
-  // Build tile shape from shapes tuple.
-  // When transpose=true, shapes are in original (source tensor) coordinates;
-  // swap the last two dimensions to transposed coordinates for the output TileType.
-  auto shape_elements = shapes_tuple->elements_;
-  if (transpose && shape_elements.size() >= 2) {
-    std::iter_swap(shape_elements.end() - 2, shape_elements.end() - 1);
-  }
-  std::vector<ExprPtr> tile_shape(shape_elements.begin(), shape_elements.end());
+  // Build tile shape from shapes tuple (always in source-tensor coordinates).
+  std::vector<ExprPtr> tile_shape(shapes_tuple->elements_.begin(), shapes_tuple->elements_.end());
 
-  auto valid_elements = valid_shapes_tuple->elements_;
-  if (transpose && valid_elements.size() >= 2) {
-    std::iter_swap(valid_elements.end() - 2, valid_elements.end() - 1);
-  }
-  tile_view.valid_shape = valid_elements;
+  tile_view.valid_shape = valid_shapes_tuple->elements_;
 
   // Return TileType with same dtype as tensor and TileView containing valid_shape.
   // When target_memory is specified, write it into memory_space_ so the constructed
@@ -692,7 +670,6 @@ REGISTER_OP("tile.load")
         "valid_shapes",
         "Valid shape of tile in each dimension, in source tensor coordinates (TupleType of ScalarType). ")
     .set_attr<MemorySpace>("target_memory")
-    .set_attr<bool>("transpose")
     // No fallback: when target_memory is absent, memory_space stays unresolved and
     // InferTileMemorySpace picks the space from consumer demand.
     .set_output_memory_from_kwarg("target_memory")

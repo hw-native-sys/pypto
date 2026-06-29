@@ -48,7 +48,7 @@ def test_allocate_memory_addr_simple():
             mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
             mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
             tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.load(
-                input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+                input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec
             )
             tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 16384, 16384), pl.Mem.Vec] = pl.tile.add(
                 tile_a, tile_a
@@ -92,7 +92,7 @@ def test_allocate_memory_addr_multiple_tiles():
             mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
             mem_vec_4: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
             tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.load(
-                input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+                input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec
             )
             tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 16384, 16384), pl.Mem.Vec] = pl.tile.add(
                 tile_a, tile_a
@@ -139,7 +139,7 @@ def test_allocate_memory_addr_resolves_auto_reserve_buffer_before_tiles():
             mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
             _: pl.Scalar[pl.INT32] = pl.system.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0)
             tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 4096, 16384), pl.Mem.Vec] = pl.tile.load(
-                input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+                input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec
             )
             tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 20480, 16384), pl.Mem.Vec] = pl.tile.add(
                 tile_a, tile_a
@@ -215,13 +215,13 @@ def test_allocate_memory_addr_reuses_right_buffer_when_moves_sink_to_consumer():
             mem_right_8: pl.Ptr = pl.tile.alloc(pl.Mem.Right, 16384)
             mem_acc_9: pl.Ptr = pl.tile.alloc(pl.Mem.Acc, 1024)
             lhs_tile: pl.Tile[[4, 128], pl.BF16, pl.MemRef(mem_mat_4, 0, 1024), pl.Mem.Mat] = pl.tile.load(
-                lhs, [0, 0], [4, 128], [4, 128], target_memory=pl.Mem.Mat, transpose=False
+                lhs, [0, 0], [4, 128], [4, 128], target_memory=pl.Mem.Mat
             )
             rhs0_tile: pl.Tile[[128, 64], pl.BF16, pl.MemRef(mem_mat_5, 1024, 16384), pl.Mem.Mat] = (
-                pl.tile.load(rhs0, [0, 0], [128, 64], [128, 64], target_memory=pl.Mem.Mat, transpose=False)
+                pl.tile.load(rhs0, [0, 0], [128, 64], [128, 64], target_memory=pl.Mem.Mat)
             )
             rhs1_tile: pl.Tile[[128, 64], pl.BF16, pl.MemRef(mem_mat_6, 17408, 16384), pl.Mem.Mat] = (
-                pl.tile.load(rhs1, [0, 0], [128, 64], [128, 64], target_memory=pl.Mem.Mat, transpose=False)
+                pl.tile.load(rhs1, [0, 0], [128, 64], [128, 64], target_memory=pl.Mem.Mat)
             )
             lhs_tile_Left: pl.Tile[[4, 128], pl.BF16, pl.MemRef(mem_left_7, 0, 1024), pl.Mem.Left] = (
                 pl.tile.move(lhs_tile, target_memory=pl.Mem.Left)
@@ -298,7 +298,7 @@ def test_allocate_memory_addr_allocs_are_prepended_to_body():
             mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
             mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
             tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.load(
-                input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+                input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec
             )
             tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 16384, 16384), pl.Mem.Vec] = pl.tile.add(
                 tile_a, tile_a
@@ -343,7 +343,7 @@ def test_allocate_memory_addr_raw_pointer_uniqueness():
             mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
             mem_vec_4: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
             tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.load(
-                input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+                input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec
             )
             tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 16384, 16384), pl.Mem.Vec] = pl.tile.add(
                 tile_a, tile_a
@@ -389,7 +389,7 @@ def test_allocated_memory_addr_verifier_passes_after_add_alloc():
             mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
             mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
             tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.load(
-                input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+                input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec
             )
             tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 16384, 16384), pl.Mem.Vec] = pl.tile.add(
                 tile_a, tile_a
@@ -568,7 +568,6 @@ def test_allocate_memory_addr_uses_default_policy_without_backend():
                     [64, 64],
                     [64, 64],
                     target_memory=pl.Mem.Vec,
-                    transpose=False,
                 )
                 tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 16384, 16384), pl.Mem.Vec] = (
                     pl.tile.add(tile_a, tile_a)
@@ -639,7 +638,7 @@ def test_allocate_memory_addr_preserves_sibling_slice_offsets():
             mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 512)
             # Root sits at the slot base 0, sized to the full 512-byte alloc.
             tile_a: pl.Tile[[8, 16], pl.FP32, pl.MemRef(mem_vec_3, 0, 512), pl.Mem.Vec] = pl.tile.load(
-                input_a, [0, 0], [8, 16], [8, 16], target_memory=pl.Mem.Vec, transpose=False
+                input_a, [0, 0], [8, 16], [8, 16], target_memory=pl.Mem.Vec
             )
             # Row-0 slice + its reshape land on the slot base (offset 0).
             s0: pl.Tile[[1, 16], pl.FP32, pl.MemRef(mem_vec_3, 0, 64), pl.Mem.Vec] = pl.tile.slice(
@@ -702,7 +701,7 @@ def test_allocate_memory_addr_resolves_aic_reserve_buffer_in_mat_space():
             _: pl.Scalar[pl.INT32] = pl.system.reserve_buffer(name="aic_slot_buffer", size=4096, base=0)
             # Mat tile is pushed past the 4096-byte reserved Mat window.
             tile_a: pl.Tile[[64, 64], pl.BF16, pl.MemRef(mem_mat_2, 4096, 8192), pl.Mem.Mat] = pl.tile.load(
-                input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Mat, transpose=False
+                input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Mat
             )
             result: pl.Tensor[[64, 64], pl.BF16, pl.MemRef("mem_ddr_1", 0, 8192)] = pl.tile.store(
                 tile_a, [0, 0], out_0
@@ -756,7 +755,7 @@ def test_allocate_memory_addr_honors_explicit_reserve_buffer_base():
             )
             # Reserved window is [8192, 12288); the [0, 8192) gap below base stays unused.
             tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 12288, 16384), pl.Mem.Vec] = pl.tile.load(
-                input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+                input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec
             )
             tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 28672, 16384), pl.Mem.Vec] = pl.tile.add(
                 tile_a, tile_a

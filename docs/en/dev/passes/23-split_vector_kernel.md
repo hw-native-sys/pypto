@@ -5,7 +5,7 @@ it **no longer halves any function body**:
 
 1. **`split_aiv` attribute stamping** — the SOLE split path through this pass.
    A `split_aiv` kernel (hand-authored, or produced upstream by
-   [`LowerAutoVectorSplit`](21-lower_auto_vector_split.md)) has already lowered
+   [`LowerAutoVectorSplit`](20-lower_auto_vector_split.md)) has already lowered
    its explicit `tile.aiv_shard` / `tile.aic_gather` into split-stamped
    `tpush`/`tpop` (folded by `ExpandMixedKernel`) and carries already-halved
    compute tiles plus its own `tile.get_subblock_idx()`. This pass leaves the
@@ -239,11 +239,11 @@ passes.def("split_vector_kernel", &pass::SplitVectorKernel, ...);
 
 ## Related
 
-- [`LowerAutoVectorSplit`](21-lower_auto_vector_split.md) — the live auto-split
+- [`LowerAutoVectorSplit`](20-lower_auto_vector_split.md) — the live auto-split
   lowering path; produces the `split_aiv` functions this pass stamps. The per-op
   vector halving rules live there + in `split_axis_utils`.
-- [`ExpandMixedKernel`](22-expand_mixed_kernel.md) — upstream producer of
+- [`ExpandMixedKernel`](21-expand_mixed_kernel.md) — upstream producer of
   AIC/AIV functions and of the `dual_aiv_dispatch` marker.
-- [`InjectGMPipeBuffer`](23-inject_gm_pipe_buffer.md) — runs immediately before;
+- [`InjectGMPipeBuffer`](22-inject_gm_pipe_buffer.md) — runs immediately before;
   backend-gated GM pipe buffer wiring this pass relies on.
-- [`NormalizeReturnOrder`](26-normalize_return_order.md) — runs immediately after.
+- [`NormalizeReturnOrder`](25-normalize_return_order.md) — runs immediately after.

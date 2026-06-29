@@ -168,14 +168,6 @@ inline const PassProperties kInferTileMemorySpaceProperties{
                  IRProperty::NormalizedStmtStructure},
     .produced = {IRProperty::SSAForm, IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure}};
 
-// -- Lower transpose-load parameter layout pass (RFC #1300 P6) ----------------
-
-inline const PassProperties kLowerTransposeLoadParamLayoutProperties{
-    .required = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::SplitIncoreOrch,
-                 IRProperty::TileOps2D},
-    .produced = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::SplitIncoreOrch,
-                 IRProperty::TileOps2D}};
-
 // -- Materialize tensor strides pass (RFC #1300 §2.4) ------------------------
 
 inline const PassProperties kMaterializeTensorStridesProperties{

@@ -8,7 +8,7 @@ halves only the **vector sub-region** along the split axis, injects
 
 This is the **live auto-split lowering path**: it always runs, immediately
 before `ExpandMixedKernel`. After it runs, every split function reaches
-[`SplitVectorKernel`](24-split_vector_kernel.md) already `split_aiv`-marked,
+[`SplitVectorKernel`](23-split_vector_kernel.md) already `split_aiv`-marked,
 so that pass only stamps attributes (its split_aiv arm) — its former per-op
 halving driver was deleted, and the halving machinery now lives solely in
 `split_axis_utils`, shared by this pass.
@@ -226,10 +226,10 @@ end-to-end `pl.split` golden scenarios in
 
 ## Related
 
-- [`ResolveBackendOpLayouts`](20-resolve_backend_op_layouts.md) — runs
+- [`ResolveBackendOpLayouts`](19-resolve_backend_op_layouts.md) — runs
   immediately before.
-- [`ExpandMixedKernel`](22-expand_mixed_kernel.md) — runs immediately after;
+- [`ExpandMixedKernel`](21-expand_mixed_kernel.md) — runs immediately after;
   folds `tile.aiv_shard` / `tile.aic_gather` into split-stamped `tpush`/`tpop`.
-- [`SplitVectorKernel`](24-split_vector_kernel.md) — downstream; only stamps
+- [`SplitVectorKernel`](23-split_vector_kernel.md) — downstream; only stamps
   attrs for the `split_aiv` functions this pass produces, plus the no-split
   dual-AIV path.

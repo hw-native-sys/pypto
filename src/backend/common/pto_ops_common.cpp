@@ -1511,8 +1511,8 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
 
   // RFC #1300 P7: the IR's offsets / shapes / valid_shapes are already in
   // canonical coordinates (matching the source TensorType's shape). There is
-  // no implicit dn_swap here — ``LowerTransposeLoadParamLayout`` (P6) is
-  // responsible for ensuring all coordinate systems match before codegen.
+  // no implicit dn_swap here — earlier passes ensure all coordinate systems
+  // match before codegen.
   std::vector<std::string> partition_dims = GetDimStrings(valid_shapes_tuple->elements_);
   std::vector<std::string> offset_codes = GetIndexOffsetCodes(offsets_tuple->elements_, codegen);
   std::vector<std::string> size_codes = GetSizeCodes(valid_shapes_tuple->elements_, codegen);
@@ -3457,11 +3457,10 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
     return MakeTensorWriteCodegenPTO(op, codegen);
   });
   // ``tensor.as_layout`` (RFC #1300 §3.3): pure metadata reinterpret over the
-  // same physical buffer. In InCore code, ``LowerTransposeLoadParamLayout``
-  // prepends ``b_dn = tensor.as_layout(b, DN)`` at the top of the body for
-  // each ``tile.load(transpose=True)``-loaded param, then rewrites the body
-  // to use ``b_dn`` (a Var with TensorType ``[..., b, a] DN`` and explicit
-  // canonical strides) in place of the original param ``b``.
+  // same physical buffer. A compiler pass may prepend ``b_dn =
+  // tensor.as_layout(b, DN)`` at the top of an InCore body to bridge an
+  // ND ↔ DN view (``b_dn`` carries TensorType ``[..., b, a] DN`` with explicit
+  // canonical strides) and rewrite the body to use ``b_dn`` in place of ``b``.
   //
   // Codegen lowers this to a fresh ``pto.make_tensor_view`` bound to the
   // input's underlying buffer (the function parameter SSA), using the LHS's

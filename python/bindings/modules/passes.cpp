@@ -452,19 +452,6 @@ void BindPass(nb::module_& m) {
              "The dead tile.slice is then dropped, unifying Mat->Left/Right on pto.textract.");
   passes.def("infer_tile_memory_space", &pass::InferTileMemorySpace,
              "Create a pass that infers memory_space for TileType variables in InCore functions");
-  passes.def("lower_transpose_load_param_layout", &pass::LowerTransposeLoadParamLayout,
-             "Create the LowerTransposeLoadParamLayout pass (RFC #1300 P6).\n\n"
-             "For each InCore function, detects tile.load(..., transpose=True) whose source\n"
-             "is a function parameter `p` and rewrites the body to encode the transpose\n"
-             "intent as an explicit `tensor.as_layout` view:\n"
-             "  - prepends `p_dn = tensor.as_layout(p, layout=DN)` to the InCore body\n"
-             "    (`p_dn` carries the canonical `[..., b, a] DN` view);\n"
-             "  - substitutes body uses of `p` with `p_dn`;\n"
-             "  - swaps the trailing pair of offsets/shapes/valid_shapes on the matching\n"
-             "    tile.load calls and drops `transpose=True`.\n"
-             "Parameter signatures are left unchanged. Non-InCore (orch) functions are\n"
-             "untouched. Mixed-use params (both transpose=True and transpose=False loads on\n"
-             "the same param) are rejected.");
   passes.def("materialize_tensor_strides", &pass::MaterializeTensorStrides,
              "Create the MaterializeTensorStrides pass (RFC #1300 §2.4).\n\n"
              "Walks every TensorType reachable from the program and rewrites any\n"

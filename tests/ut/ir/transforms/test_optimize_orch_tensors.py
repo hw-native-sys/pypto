@@ -1246,7 +1246,7 @@ class Program:
                 ret0__out: pl.Out[pl.Tensor[[32, 64], pl.FP32]],
             ) -> pl.Tensor[[32, 64], pl.FP32]:
                 block__tile: pl.Tile[[32, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(
-                    score, [row_offset, 0], [32, 64], [32, 64], target_memory=pl.Mem.Vec, transpose=False
+                    score, [row_offset, 0], [32, 64], [32, 64], target_memory=pl.Mem.Vec
                 )
                 ret0__store: pl.Tensor[[32, 64], pl.FP32] = pl.tile.store(block__tile, [0, 0], ret0__out)
                 return ret0__store
@@ -1261,7 +1261,7 @@ class Program:
                 ret0__out: pl.Out[pl.Tensor[[32, 64], pl.FP32]],
             ) -> pl.Tensor[[32, 64], pl.FP32]:
                 block__tile: pl.Tile[[32, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(
-                    score, [0, 0], [32, 64], [32, 64], target_memory=pl.Mem.Vec, transpose=False
+                    score, [0, 0], [32, 64], [32, 64], target_memory=pl.Mem.Vec
                 )
                 ret0__store: pl.Tensor[[32, 64], pl.FP32] = pl.tile.store(block__tile, [0, 0], ret0__out)
                 return ret0__store
@@ -1964,12 +1964,12 @@ class Program:
                 row: pl.Scalar[pl.INDEX],
             ) -> pl.Tensor[[16, 256], pl.FP32]:
                 header_tile: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(
-                    header, [row, 0], [16, 64], [16, 64], target_memory=pl.Mem.Vec, transpose=False
+                    header, [row, 0], [16, 64], [16, 64], target_memory=pl.Mem.Vec
                 )
                 for h, (out_iter,) in pl.range(4, init_values=(out,)):
                     col: pl.Scalar[pl.INDEX] = h * 64
                     data_tile: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(
-                        data, [row, col], [16, 64], [16, 64], target_memory=pl.Mem.Vec, transpose=False
+                        data, [row, col], [16, 64], [16, 64], target_memory=pl.Mem.Vec
                     )
                     mixed: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.add(data_tile, header_tile)
                     out_next: pl.Tensor[[16, 256], pl.FP32] = pl.tile.store(mixed, [row, col], out_iter)
@@ -1991,12 +1991,12 @@ class Program:
                 row: pl.Scalar[pl.INDEX],
             ) -> pl.Tensor[[16, 256], pl.FP32, pl.TensorView(stride=[256, 1], layout=pl.TensorLayout.ND)]:
                 header_tile: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(
-                    header, [0, 0], [16, 64], [16, 64], target_memory=pl.Mem.Vec, transpose=False
+                    header, [0, 0], [16, 64], [16, 64], target_memory=pl.Mem.Vec
                 )
                 for h, (out_iter,) in pl.range(4, init_values=(out,)):
                     col: pl.Scalar[pl.INDEX] = h * 64
                     data_tile: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(
-                        data, [0, col], [16, 64], [16, 64], target_memory=pl.Mem.Vec, transpose=False
+                        data, [0, col], [16, 64], [16, 64], target_memory=pl.Mem.Vec
                     )
                     mixed: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.add(data_tile, header_tile)
                     out_next: pl.Tensor[
@@ -2069,7 +2069,7 @@ class Program:
                 out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
             ) -> pl.Tensor[[256, 64], pl.FP32]:
                 tile: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(
-                    data, [row_offset, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+                    data, [row_offset, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec
                 )
                 result: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.tile.adds(tile, bias)
                 ret = pl.tile.store(result, [row_offset, 0], out)
@@ -2086,7 +2086,7 @@ class Program:
                 ],
             ) -> pl.Tensor[[64, 64], pl.FP32, pl.TensorView(stride=[64, 1], layout=pl.TensorLayout.ND)]:
                 tile: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(
-                    data, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+                    data, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec
                 )
                 result: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.tile.adds(tile, bias)
                 ret: pl.Tensor[
@@ -2147,7 +2147,7 @@ class Program:
                 out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
             ) -> pl.Tensor[[256, 64], pl.FP32]:
                 tile: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(
-                    data, [row_offset, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+                    data, [row_offset, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec
                 )
                 ret = pl.tile.store(tile, [row_offset, 0], out)
                 return ret
@@ -2162,7 +2162,7 @@ class Program:
                 ],
             ) -> pl.Tensor[[64, 64], pl.FP32, pl.TensorView(stride=[64, 1], layout=pl.TensorLayout.ND)]:
                 tile: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(
-                    data, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+                    data, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec
                 )
                 ret: pl.Tensor[
                     [64, 64], pl.FP32, pl.TensorView(stride=[64, 1], layout=pl.TensorLayout.ND)
@@ -2415,7 +2415,7 @@ class Program:
                 out: pl.Out[pl.Tensor[[1024, 64], pl.FP32]],
             ) -> pl.Tensor[[1024, 64], pl.FP32]:
                 tile: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(
-                    data, [row_offset, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+                    data, [row_offset, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec
                 )
                 result: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.tile.adds(tile, bias)
                 ret = pl.tile.store(result, [row_offset, 0], out)
@@ -2432,7 +2432,7 @@ class Program:
                 ],
             ) -> pl.Tensor[[64, 64], pl.FP32, pl.TensorView(stride=[64, 1], layout=pl.TensorLayout.ND)]:
                 tile: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(
-                    data, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+                    data, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec
                 )
                 result: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.tile.adds(tile, bias)
                 ret: pl.Tensor[
@@ -2503,7 +2503,7 @@ class Program:
                 v_out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
             ) -> tuple[pl.Tensor[[256, 64], pl.FP32], pl.Tensor[[256, 64], pl.FP32]]:
                 tile: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(
-                    data, [row_offset, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+                    data, [row_offset, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec
                 )
                 k_next = pl.tile.store(tile, [row_offset, 0], k_out)
                 v_tile: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.tile.add(tile, tile)
@@ -2526,7 +2526,7 @@ class Program:
                 pl.Tensor[[64, 64], pl.FP32, pl.TensorView(stride=[64, 1], layout=pl.TensorLayout.ND)],
             ]:
                 tile: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(
-                    data, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+                    data, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec
                 )
                 k_next: pl.Tensor[
                     [64, 64], pl.FP32, pl.TensorView(stride=[64, 1], layout=pl.TensorLayout.ND)
@@ -2815,10 +2815,9 @@ class Program:
                             [16, 128],
                             [16, 128],
                             target_memory=pl.Mem.Mat,
-                            transpose=False,
                         )
                         tile_wk: pl.Tile[[128, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
-                            wk, [0, kv0], [128, 64], [128, 64], target_memory=pl.Mem.Mat, transpose=False
+                            wk, [0, kv0], [128, 64], [128, 64], target_memory=pl.Mem.Mat
                         )
                         k_acc: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(tile_a, tile_wk)
                         for kb, (k_acc_iter,) in pl.range(1, 4, init_values=(k_acc,)):
@@ -2829,10 +2828,9 @@ class Program:
                                 [16, 128],
                                 [16, 128],
                                 target_memory=pl.Mem.Mat,
-                                transpose=False,
                             )
                             tile_wk_i: pl.Tile[[128, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
-                                wk, [k0, kv0], [128, 64], [128, 64], target_memory=pl.Mem.Mat, transpose=False
+                                wk, [k0, kv0], [128, 64], [128, 64], target_memory=pl.Mem.Mat
                             )
                             k_acc_next: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(
                                 k_acc_iter, tile_a_i, tile_wk_i
@@ -2845,10 +2843,9 @@ class Program:
                             [16, 128],
                             [16, 128],
                             target_memory=pl.Mem.Mat,
-                            transpose=False,
                         )
                         tile_wv: pl.Tile[[128, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
-                            wv, [0, kv0], [128, 64], [128, 64], target_memory=pl.Mem.Mat, transpose=False
+                            wv, [0, kv0], [128, 64], [128, 64], target_memory=pl.Mem.Mat
                         )
                         v_acc: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(tile_a_2, tile_wv)
                         for kb2, (v_acc_iter,) in pl.range(1, 4, init_values=(v_acc,)):
@@ -2859,7 +2856,6 @@ class Program:
                                 [16, 128],
                                 [16, 128],
                                 target_memory=pl.Mem.Mat,
-                                transpose=False,
                             )
                             tile_wv_i: pl.Tile[[128, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
                                 wv,
@@ -2867,7 +2863,6 @@ class Program:
                                 [128, 64],
                                 [128, 64],
                                 target_memory=pl.Mem.Mat,
-                                transpose=False,
                             )
                             v_acc_next: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(
                                 v_acc_iter, tile_a_i_2, tile_wv_i
@@ -3014,15 +3009,15 @@ class Program:
                 wk: pl.Tensor[[512, 512], pl.BF16],
             ) -> pl.Tensor[[16, 512], pl.FP32]:
                 k_acc: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(
-                    k_out, [0, 0], [16, 64], [16, 64], target_memory=pl.Mem.Vec, transpose=False
+                    k_out, [0, 0], [16, 64], [16, 64], target_memory=pl.Mem.Vec
                 )
                 for ob, (k_iter, k_acc_iter) in pl.range(ob_chunk, ob_chunk + 4, init_values=(k_out, k_acc)):
                     kv0: pl.Scalar[pl.INDEX] = ob * 64
                     tile_a: pl.Tile[[16, 128], pl.BF16, pl.Mem.Vec] = pl.tile.load(
-                        normed_tile, [0, 0], [16, 128], [16, 128], target_memory=pl.Mem.Vec, transpose=False
+                        normed_tile, [0, 0], [16, 128], [16, 128], target_memory=pl.Mem.Vec
                     )
                     tile_wk: pl.Tile[[128, 64], pl.BF16, pl.Mem.Vec] = pl.tile.load(
-                        wk, [0, kv0], [128, 64], [128, 64], target_memory=pl.Mem.Vec, transpose=False
+                        wk, [0, kv0], [128, 64], [128, 64], target_memory=pl.Mem.Vec
                     )
                     matmul: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(tile_a, tile_wk)
                     k_acc_next: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.add(k_acc_iter, matmul)
@@ -3136,7 +3131,7 @@ class Program:
                 out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 tile: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(
-                    data, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+                    data, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec
                 )
                 ret = pl.tile.store(tile, [0, 0], out)
                 return ret

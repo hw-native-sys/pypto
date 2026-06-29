@@ -114,9 +114,9 @@ At the tile layer, `tile.batch_matmul` provides batched semantics for
 `TileType` operands. It accepts rank >= 2 tiles, broadcasts the leading batch
 dimensions, and keeps the same operand-only interface style as `tile.matmul`.
 If batch operands need transpose semantics, that can be expressed either with
-an explicit `tile.transpose(...)` on the inputs or by feeding a tile produced
-by `tile.load(..., transpose=True)`. During later lowering to 2D
-`tile.matmul`, both forms are normalized to the same operand-transpose
+an explicit `tile.transpose(...)` on the inputs or by a zero-copy
+`tile.transpose_view(...)` over a natural `tile.load`. During later lowering to
+2D `tile.matmul`, both forms are normalized to the same operand-transpose
 semantics.
 
 `tile.batch_matmul_acc(acc, lhs, rhs)` is the accumulating counterpart for

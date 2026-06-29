@@ -4,7 +4,7 @@
 
 `LowerHostTensorCollectives` 将 host orchestrator 中的
 `pld.tensor.allreduce` 调用改写为编译器内部的 builtin chip dispatch。它在
-[`MaterializeCommDomainScopes`](39-materialize_comm_domain_scopes.md) 之后运行，
+[`MaterializeCommDomainScopes`](38-materialize_comm_domain_scopes.md) 之后运行，
 因此 window 绑定的 data tensor 和用户显式传入的 signal tensor 已经带有
 `WindowBuffer` 反向引用，并属于推断出的通信域。
 
