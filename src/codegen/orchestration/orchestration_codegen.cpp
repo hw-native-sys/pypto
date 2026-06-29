@@ -528,11 +528,20 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // as rebind and set the array-carry size from the const trip count.
     for (size_t i = 0; i < carry_plans.size(); ++i) {
       if (i < for_stmt->return_vars_.size() && NeedsCompilerDepTaskId(for_stmt->return_vars_[i].get())) {
-        carry_plans[i].is_rebind = true;
         carry_plans[i].compiler_dep_collection = true;
-        if (carry_plans[i].array_size == 0) {
-          carry_plans[i].array_size = EvalConstTripCount(for_stmt);
-        }
+        // Always size compiler-dep carries from the outer loop's const trip
+        // count.  ResolveArrayCarrySize may have already set array_size to an
+        // inner Parallel loop's trip count (a Sequential outer wrapping a
+        // Parallel inner that also carries task ids), which would mis-size the
+        // carry array when the two trip counts differ.  The outer loop's trip
+        // count is authoritative for the fan-in array that collects all
+        // producer TaskIds across iterations (YunjiQin review, PR #1813).
+        carry_plans[i].array_size = EvalConstTripCount(for_stmt);
+        // is_rebind is not overridden here: Analyze() already sets it for
+        // TASK_ID iter_args when a YieldStmt is present, and the old code
+        // (pre-refactor) only set it inside the yield guard.  Leaving it
+        // unchanged preserves trivial-alias lowering when the body has no
+        // yield (YunjiQin review, PR #1813).
       }
     }
 
