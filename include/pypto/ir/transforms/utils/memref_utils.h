@@ -230,6 +230,50 @@ inline std::optional<uint64_t> ExtractNameCounter(const std::string& name) {
 }
 
 // ============================================================================
+// User-managed (pinned) buffer naming convention
+// ============================================================================
+//
+// The custom-tile-buffer feature lets a user pin a tile to an explicit buffer by
+// annotating its TileType with a `pl.MemRef(addr, size, id)`. InitMemRef honors
+// that buffer verbatim (its base Ptr and byte address) instead of auto-allocating,
+// MemoryReuse never coalesces it, and AllocateMemoryAddr leaves its address
+// untouched. To carry the "this base is user-managed" signal across those three
+// independent passes WITHOUT adding a flag to the MemRef IR node, InitMemRef
+// renames the base Ptr to a compiler-owned prefix. `BuildBasePtrName` never
+// produces this prefix, so there is no collision with auto-allocated bases.
+
+inline constexpr const char* kUserPinnedBasePrefix = "__pinned__";
+
+/// Wrap a user-annotated base Ptr name in the pinned prefix. Idempotent so that
+/// re-parsing already-printed pinned IR does not double-prefix.
+inline std::string MakePinnedBaseName(const std::string& user_base_name) {
+  if (user_base_name.rfind(kUserPinnedBasePrefix, 0) == 0) return user_base_name;
+  return std::string(kUserPinnedBasePrefix) + user_base_name;
+}
+
+/// True iff `name` denotes a user-managed (pinned) buffer base.
+inline bool IsUserPinnedBaseName(const std::string& name) {
+  return name.rfind(kUserPinnedBasePrefix, 0) == 0;
+}
+
+/// True iff `base` is a user-managed (pinned) buffer base Ptr.
+inline bool IsUserPinnedBase(const Var* base) {
+  return base != nullptr && IsUserPinnedBaseName(base->name_hint_);
+}
+
+/// Compute the static byte size of a shaped type. Returns std::nullopt when any
+/// shape element is non-constant or non-positive (dynamic / invalid extent).
+inline std::optional<uint64_t> ComputeStaticByteSize(const std::shared_ptr<const ShapedType>& type) {
+  uint64_t num_elements = 1;
+  for (const auto& dim : type->shape_) {
+    auto const_dim = As<ConstInt>(dim);
+    if (!const_dim || const_dim->value_ <= 0) return std::nullopt;
+    num_elements *= static_cast<uint64_t>(const_dim->value_);
+  }
+  return num_elements * ((type->dtype_.GetBit() + 7) / 8);
+}
+
+// ============================================================================
 // Alloc statement creation
 // ============================================================================
 

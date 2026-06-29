@@ -97,10 +97,86 @@ std::optional<size_t> GetOutputReusesInputArg(const std::string& op_name) {
   return registry.GetEntry(op_name).GetOutputReusesInputArg();
 }
 
+// The custom-buffer feature only manages on-chip general-pool spaces a user can
+// reason about: the unified vector buffer (Vec) and the L1 matrix buffer (Mat).
+// L0 matmul machinery (Left/Right/Acc/Bias) is capacity-tiny and backend-managed,
+// and DDR holds tensor params — neither is user-pinnable.
+bool IsPinnableSpace(MemorySpace space) { return space == MemorySpace::Vec || space == MemorySpace::Mat; }
+
+// Collect the pinnable memory spaces that contain at least one user-pinned tile.
+// A user-pinned tile is a TileType var whose type already carries a MemRef when
+// InitMemRef runs — no earlier pass creates MemRefs, so a present memref_ can
+// only come from a user `pl.MemRef(...)` annotation. A space with any pinned
+// tile is in "whole-space manual" mode: every tile in it must then be pinned,
+// else the kernel is not a pure tile-level kernel (it has a compiler-generated
+// or unannotated tile) and InitMemRef reports a user error.
+class ManualSpaceCollector : public IRVisitor {
+ public:
+  void Record(const VarPtr& var) {
+    if (!var) return;
+    auto tile_type = std::dynamic_pointer_cast<const TileType>(var->GetType());
+    if (!tile_type || !tile_type->memory_space_.has_value()) return;
+    if (!IsPinnableSpace(*tile_type->memory_space_)) return;
+    if (tile_type->memref_.has_value()) manual_spaces.insert(*tile_type->memory_space_);
+  }
+
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    Record(op->var_);
+    IRVisitor::VisitStmt_(op);
+  }
+
+  std::set<MemorySpace> manual_spaces;
+};
+
+std::set<MemorySpace> CollectManualSpaces(const FunctionPtr& func) {
+  ManualSpaceCollector collector;
+  for (const auto& param : func->params_) collector.Record(param);
+  if (func->body_) collector.VisitStmt(func->body_);
+  return collector.manual_spaces;
+}
+
 // Mutator to initialize MemRef for variables
 class InitMemRefMutator : public IRMutator {
  public:
   InitMemRefMutator() = default;
+  explicit InitMemRefMutator(std::set<MemorySpace> manual_spaces)
+      : manual_spaces_(std::move(manual_spaces)) {}
+
+  // Honor a user-pinned MemRef: intern its base Ptr by name so same-id pins
+  // across the kernel collapse onto one allocation (and one tile.alloc), keep the
+  // user's absolute byte address, and validate the declared buffer is large
+  // enough for the tile. The interned base is renamed to the compiler-owned
+  // pinned prefix so MemoryReuse / AllocateMemoryAddr recognise it without an IR
+  // flag. Raises a user error on a dynamic shape or too-small buffer.
+  std::optional<MemRefPtr> HonorUserPin(const MemRefPtr& user_ref, const ShapedTypePtr& shaped_type,
+                                        const VarPtr& var) {
+    const Span& span = var ? var->span_ : Span::unknown();
+    const std::string var_name = var ? var->name_hint_ : "<anonymous>";
+    auto required = ComputeStaticByteSize(shaped_type);
+    CHECK_SPAN(required.has_value(), span)
+        << "Pinned tile '" << var_name
+        << "' has a dynamic or invalid shape; custom buffers require a static tile shape.";
+    CHECK_SPAN(user_ref->size_ >= *required, span)
+        << "Pinned buffer for tile '" << var_name << "' is too small: declared size " << user_ref->size_
+        << " bytes < required " << *required << " bytes.";
+    if (auto addr = As<ConstInt>(user_ref->byte_offset_)) {
+      CHECK_SPAN(addr->value_ >= 0, span)
+          << "Pinned buffer for tile '" << var_name << "' has a negative address " << addr->value_ << ".";
+    }
+
+    INTERNAL_CHECK(user_ref->base_) << "Internal error: user-pinned MemRef must carry a base Ptr";
+    const std::string base_name = MakePinnedBaseName(user_ref->base_->name_hint_);
+    auto it = pinned_base_by_name_.find(base_name);
+    VarPtr base;
+    if (it != pinned_base_by_name_.end()) {
+      base = it->second;
+    } else {
+      base = std::make_shared<Var>(base_name, GetPtrType(), Span::unknown());
+      pinned_base_by_name_[base_name] = base;
+    }
+    // Preserve the user's absolute byte address; AllocateMemoryAddr honors it 1:1.
+    return std::make_shared<MemRef>(base, user_ref->byte_offset_, user_ref->size_);
+  }
 
   // Resolve memory space from TileType::memory_space_ field (set by InferTileMemorySpace),
   // falling back to DDR when default_to_ddr is true.
@@ -202,9 +278,31 @@ class InitMemRefMutator : public IRMutator {
     }
 
     if (auto shaped_type = std::dynamic_pointer_cast<const ShapedType>(var_expr->GetType())) {
-      // Resolve memory space once, pass to both CreateMemRef and CloneType
+      // Resolve memory space once, pass to both memref creation and CloneType
       auto memory_space = ResolveTileMemorySpace(var_expr->GetType(), /*default_to_ddr=*/true);
-      auto memref = CreateMemRef(shaped_type, var, memory_space);
+      std::optional<MemRefPtr> memref;
+      auto user_ref = GetTypeMemRef(var_expr->GetType());
+      const bool pinnable = memory_space.has_value() && IsPinnableSpace(*memory_space);
+      if (user_ref.has_value() && pinnable) {
+        // User pinned this tile to an explicit buffer — honor it verbatim.
+        memref = HonorUserPin(*user_ref, shaped_type, var);
+      } else {
+        // Whole-space manual contract: once any tile in a pinnable space is
+        // pinned, every fresh tile in that space must be pinned too. A fresh
+        // (non-view) tile with no annotation here means a compiler-generated or
+        // unannotated tile slipped into a user-managed space — reject it so its
+        // auto-allocated buffer cannot silently collide with the user's layout.
+        const bool manual = memory_space.has_value() && manual_spaces_.count(*memory_space) > 0;
+        CHECK_SPAN(!manual, var->span_)
+            << "Memory space " << MemorySpaceToString(*memory_space)
+            << " is in user-managed buffer mode (another tile pins an explicit buffer), but tile '"
+            << var->name_hint_
+            << "' has no buffer annotation. Custom tile buffers require EVERY tile in the space to "
+               "specify a buffer; this kernel has a compiler-generated or unannotated tile, so it is "
+               "not a pure tile-level kernel. Annotate every tile in this space, or remove all buffer "
+               "annotations to use automatic allocation.";
+        memref = CreateMemRef(shaped_type, var, memory_space);
+      }
       new_type = CloneTypeWithMemRefAndRemapExprs(
           var_expr->GetType(), memref, [this](const ExprPtr& expr) { return VisitExpr(expr); }, memory_space);
     } else {
@@ -549,6 +647,10 @@ class InitMemRefMutator : public IRMutator {
 
   std::map<VarPtr, VarPtr> var_map_;
   uint64_t next_id_ = 0;
+  // Pinnable spaces (Vec/Mat) in whole-space manual mode for this function.
+  std::set<MemorySpace> manual_spaces_;
+  // Interns user-pinned base Ptrs by name: same buffer name → one base → one alloc.
+  std::map<std::string, VarPtr> pinned_base_by_name_;
 };
 
 // Insert alloc statements at the beginning of a function body.
@@ -585,8 +687,9 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
   // Step 1: Normalize statement structure to ensure SeqStmts
   auto normalized_func = NormalizeStmtStructure(func);
 
-  // Step 2: Mutate variables to initialize their MemRef
-  InitMemRefMutator mutator;
+  // Step 2: Mutate variables to initialize their MemRef. Pre-scan first for
+  // pinnable spaces driven into whole-space manual mode by a user buffer pin.
+  InitMemRefMutator mutator(CollectManualSpaces(normalized_func));
 
   std::vector<VarPtr> new_params;
   new_params.reserve(normalized_func->params_.size());

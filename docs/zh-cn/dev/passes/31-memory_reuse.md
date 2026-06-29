@@ -100,6 +100,27 @@ MemoryReuse 掌管所有 buffer 合并决策，因此它从源头上阻止这种
 
 该 guard 由 `BackendHandler::RequiresSplitLoadTpopWorkaround()`（仅 Ascend910B 为 true）以及函数为 split-AIV 这两个条件门控；在其他任何 backend / 函数类型下输入集合为空，复用行为不变。writer 仍可自由复用任何**非** load buffer —— 只有 load + tpop 的原地组合会被拒绝。（该 guard 此前由独立的 `LegalizePTOBufferReuse` pass 在事后拆分 buffer 来实现，现已并入 MemoryReuse。）
 
+## 用户自管理（pinned）buffer
+
+自动复用是贪心启发式，无法保证最优布局。对于纯 tile 级 kernel，用户可以接管整个内存空间并手动放置 buffer —— 给每个 tile 的 `TileType` 标注显式的 `pl.MemRef(addr, size, id)`：
+
+```python
+with pl.at(level=pl.Level.CORE_GROUP):
+    lhs: pl.Tile[[64, 64], pl.FP32, pl.MemRef(0,     16384, 0), pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+    acc: pl.Tile[[64, 64], pl.FP32, pl.MemRef(16384, 16384, 1), pl.Mem.Vec] = pl.matmul(lhs, rhs)
+    out: pl.Tile[[64, 64], pl.FP32, pl.MemRef(0,     16384, 2), pl.Mem.Vec] = pl.add(acc, lhs)  # 复用地址 0
+    pl.store(out, [0, 0], y)
+```
+
+语义：
+
+- **buffer 身份 = `id`。** 同 `id` 的 tile 共享一块物理 buffer；不同 id 得到不同 buffer。MemoryReuse **绝不**把 pinned buffer 与其他 buffer 合并 —— 这正是用户阻止「过度复用破坏流水」的手段。
+- **地址由用户分配。** `addr` 被 AllocateMemoryAddr 原样 honor（不再自动重排）；`size` 为声明的 buffer 占用大小。
+- **整空间手动契约。** 一旦可 pin 空间（`Vec`/`Mat`）中有任意 tile 被 pin，则该空间内**每个** tile 都必须被 pin。该空间出现未标注的新建 tile（例如 composite op 拆解出的编译器临时 tile）即为硬错误：本特性仅支持托管空间内无编译器临时 tile 的纯 tile 级 kernel。
+- **重叠校验。** 两个**不同**的 pinned buffer 若地址区间**与**生命周期同时重叠，即为用户错误（在此处校验，因为这里有 liveness 信息）。生命周期不重叠的地址重叠属于合法的人工复用，放行。
+
+实现横跨三个 pass：InitMemRef honor 注解并按 id intern base（重命名为 `__pinned__<id>` 前缀，使下游 pass 无需 IR 节点标志即可识别 —— 见 [InitMemRef](30-init_memref.md)）；MemoryReuse 跳过 pinned base 并执行重叠校验；AllocateMemoryAddr 不改动 pinned 地址（见 [AllocateMemoryAddr](32-allocate_memory_addr.md)）。
+
 ## 示例
 
 ### MemRef 共享与 Alloc 清理

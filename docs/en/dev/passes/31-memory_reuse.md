@@ -100,6 +100,27 @@ MemoryReuse owns every buffer-coalescing decision, so it prevents the hazardous 
 
 The guard is gated by `BackendHandler::RequiresSplitLoadTpopWorkaround()` (true only for Ascend910B) and the function being split-AIV; on every other backend / function kind the inputs are empty and reuse behaviour is unchanged. The writer is still free to reuse any **non**-load buffer — only the load + tpop in-place combination is rejected. (This guard previously lived in a dedicated `LegalizePTOBufferReuse` pass that split the buffer after the fact; it now folds into MemoryReuse.)
 
+## User-managed (pinned) buffers
+
+Automatic reuse is a greedy heuristic and cannot guarantee the optimal layout. For pure tile-level kernels a user can take over a whole memory space and place buffers by hand, annotating each tile's `TileType` with an explicit `pl.MemRef(addr, size, id)`:
+
+```python
+with pl.at(level=pl.Level.CORE_GROUP):
+    lhs: pl.Tile[[64, 64], pl.FP32, pl.MemRef(0,     16384, 0), pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+    acc: pl.Tile[[64, 64], pl.FP32, pl.MemRef(16384, 16384, 1), pl.Mem.Vec] = pl.matmul(lhs, rhs)
+    out: pl.Tile[[64, 64], pl.FP32, pl.MemRef(0,     16384, 2), pl.Mem.Vec] = pl.add(acc, lhs)  # reuses addr 0
+    pl.store(out, [0, 0], y)
+```
+
+Semantics:
+
+- **Buffer identity = `id`.** Tiles sharing an `id` share one physical buffer; distinct ids get separate buffers. MemoryReuse **never** coalesces a pinned buffer with another buffer — this is exactly how a user prevents the over-reuse that breaks pipelining.
+- **Address = user-assigned.** `addr` is honored verbatim by AllocateMemoryAddr (no auto re-layout); `size` is the declared buffer footprint.
+- **Whole-space-manual contract.** Once any tile in a pinnable space (`Vec` / `Mat`) is pinned, *every* tile in that space must be pinned. A fresh unannotated tile there — e.g. a compiler temporary from composite-op lowering — is a hard error: the feature only supports pure tile-level kernels with no compiler-generated tiles in the managed space.
+- **Overlap check.** Two *distinct* pinned buffers whose address ranges **and** lifetimes both overlap is a user error (caught here, where liveness is available). Disjoint-lifetime address overlap is legal manual reuse and allowed.
+
+Implementation spans three passes: InitMemRef honors the annotation and interns the base by id (renamed to a `__pinned__<id>` prefix so downstream passes recognise it without an IR-node flag — see [InitMemRef](30-init_memref.md)); MemoryReuse skips pinned bases and runs the overlap check; AllocateMemoryAddr leaves pinned addresses untouched (see [AllocateMemoryAddr](32-allocate_memory_addr.md)).
+
 ## Example
 
 ### MemRef Sharing with Alloc Cleanup

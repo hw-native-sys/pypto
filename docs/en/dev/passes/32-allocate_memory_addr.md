@@ -101,6 +101,10 @@ mem_right_2: MemRefType = tile.alloc(Right, 0, 2048, 2)
 mem_acc_3: MemRefType = tile.alloc(Acc, 0, 2048, 3)
 ```
 
+## User-managed (pinned) buffers
+
+A base whose name carries the `__pinned__` prefix is a user-managed buffer (see [MemoryReuse](31-memory_reuse.md)). For such bases the pass does **not** run the bump allocator: each MemRef's `byte_offset_` already holds the user-assigned absolute address, so the pass keeps it verbatim (only canonicalising the dtype to `INT64` for PTO codegen) and does not advance `current_addr`. The capacity/`>= 0` checks in the `AllocatedMemoryAddr` verifier still apply, so an out-of-range pinned address is rejected.
+
 ## Implementation
 
 **Header**: `include/pypto/ir/transforms/passes.h`

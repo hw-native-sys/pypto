@@ -101,6 +101,10 @@ mem_right_2: MemRefType = tile.alloc(Right, 0, 2048, 2)
 mem_acc_3: MemRefType = tile.alloc(Acc, 0, 2048, 3)
 ```
 
+## 用户自管理（pinned）buffer
+
+base 名带 `__pinned__` 前缀的是用户自管理 buffer（见 [MemoryReuse](31-memory_reuse.md)）。对这类 base，本 pass **不**运行 bump 分配器：每个 MemRef 的 `byte_offset_` 已是用户分配的绝对地址，pass 原样保留（仅把 dtype 规范成 `INT64` 供 PTO codegen 读取），且不推进 `current_addr`。`AllocatedMemoryAddr` 验证器中的容量 / `>= 0` 校验仍然生效，因此越界的 pinned 地址会被拒绝。
+
 ## 实现
 
 **头文件**：`include/pypto/ir/transforms/passes.h`
