@@ -1132,7 +1132,7 @@ class TestOrchestration:
 
         @pl.program
         class LoopCarryProgram:
-            @pl.function(type=pl.FunctionType.AIV)
+            @pl.function(type=pl.FunctionType.AIV, attrs={"windowize": True})
             def produce(
                 self,
                 x: pl.Tensor[[N, M], pl.FP32],
@@ -1326,7 +1326,7 @@ class TestOrchestration:
 
         @pl.program
         class WindowedSubmitProgram:
-            @pl.function(type=pl.FunctionType.AIV)
+            @pl.function(type=pl.FunctionType.AIV, attrs={"windowize": True})
             def produce(
                 self,
                 x: pl.Tensor[[N, M], pl.FP32],
@@ -3566,7 +3566,7 @@ class TestTensorReadWriteOffsetCodegen:
 
         @pl.program
         class WindowedTupleLoopCarryProgram:
-            @pl.function(type=pl.FunctionType.InCore)
+            @pl.function(type=pl.FunctionType.InCore, attrs={"windowize": True})
             def kv_proj(
                 self,
                 k_proj: pl.Out[pl.Tensor[[16, 512], pl.FP32]],
@@ -3658,7 +3658,7 @@ class TestTensorReadWriteOffsetCodegen:
 
         @pl.program
         class WindowedWriteFullParentReadProgram:
-            @pl.function(type=pl.FunctionType.InCore)
+            @pl.function(type=pl.FunctionType.InCore, attrs={"windowize": True})
             def produce(
                 self,
                 x: pl.Tensor[[N, M], pl.FP32],

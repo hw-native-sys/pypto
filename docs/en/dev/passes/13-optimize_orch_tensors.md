@@ -74,6 +74,8 @@ for i in pl.range(N, init_values=[init_buf]):
 
 ### Pattern 5: Static Window Externalization (OutWindowExternalizer)
 
+Pattern 5 runs **only** on InCore-type functions (`InCore`, `AIC`, or `AIV`) explicitly annotated with `windowize=True`. Unannotated kernels are never windowed regardless of access pattern.
+
 **Problem**: An outlined callee may write only a statically provable local window of a large `Out` tensor, or consume only a statically provable local window of a large `In` tensor, but the call site still passes the whole tensor. Downstream dependence analysis then sees whole-buffer accesses and may add unnecessary serialization.
 
 **Solution**: Clone the callee to a `__windowed` variant with narrowed rewritten tensor parameter types and localized internal offsets. Rewrite the orchestration call site to explicit local slices. Output windows use `slice + __windowed call + assemble`:
@@ -111,7 +113,7 @@ Output-window eligibility:
 - the write must be a statically provable local `tile.store` window or aggregate window loop
 - window shape and offset must be statically known enough to materialize a `tensor.slice`
 - offsets must be affine in the surrounding loop variables accepted by the pass
-- multi-`Out` rewrites are all-or-nothing
+- multi-`Out` rewrites are per-output: each `Out` param is independently evaluated for window eligibility, and unproven outputs stay as full-tensor baseline arguments
 - if multiple externalized `Out` params at the same callsite resolve to the same parent tensor, that callsite stays full-tensor; Pattern 5 does not chain multiple `tensor.assemble` updates into one parent state
 - sequential-loop siblings are rewritten only when every rewritten `Out` can be proven disjoint across sibling iterations
 - same-scope sibling writers to the same parent or aliased parent tensor may still be externalized when each individual writer satisfies the static output-window eligibility rules; however, if that parent also has a sibling full writer (`Out` or `InOut`) that cannot be externalized as an output window, other writers to the same parent stay full-tensor so the non-window writer does not hide partially initialized regions
@@ -143,6 +145,58 @@ Non-goals and dependence model:
 - the pass does not split SPMD launches or externalize per-block SPMD windows
 - unsupported consumers, including full-tensor readers, remain baseline/full-tensor inputs
 - `DeriveCallDirections` keeps its existing sound sequential `Out -> InOut` rule; Pattern 5 only exposes proven local windows before that pass runs
+
+### Windowize Opt-in
+
+Pattern 5 is **disabled by default**. It only runs for InCore-type functions
+(`InCore`, `AIC`, or `AIV`) that carry the IR attribute `windowize = true`. The
+Python DSL currently exposes this attribute through `pl.at(...)`:
+
+```python
+with pl.at(level=pl.Level.CORE_GROUP, windowize=True):
+    out = self.my_kernel(...)
+```
+
+Tests, tools, or handwritten DSL/IR may also attach the same function attr
+directly:
+
+```python
+@pl.function(type=pl.FunctionType.InCore, attrs={"windowize": True})
+def kernel(...):
+    ...
+```
+
+Only functions explicitly annotated with `windowize=True` are candidates for
+Pattern 5. The opt-in is binary and local to that outlined function; there is no
+global switch, policy string, or per-direction override. Other frontends or
+hand-written IR may use the same function attribute directly. For example,
+parser/printer round-trips preserve the attr once it is present on the function.
+
+Use `windowize=True` only when the kernel has a stable local-window access
+pattern and the extra call-site slices are expected to expose narrower runtime
+dependencies. The pass keeps unsupported cases on the baseline full-tensor path,
+but the annotation is still an expert opt-in because it can increase
+orchestration and scheduling overhead.
+
+One practical way to find candidates is to inspect the swimlane timeline. A
+kernel may benefit when sibling orchestration tasks serialize even though they
+operate on different regions of the same tensor. Typical clues are:
+
+- adjacent tasks that could overlap but instead wait on each other
+- task gaps that are large compared with the task duration itself
+- TensorMap auto-dependency edges between tasks that should only touch disjoint
+  windows of the same parent tensor
+
+Windowization makes those local regions explicit with call-site slices and
+`__windowed` callees, so runtime dependency analysis can reason about the
+actual window descriptors instead of the full parent tensor. The trade-off is
+that finer dependencies can also add orchestration work and fragment scheduler
+dispatch/completion. If the new overhead dominates the saved serialization, do
+not enable `windowize=True` for that kernel.
+
+After enabling it, inspect the generated orchestration for `__windowed` callees
+and local `.view(...)`/slice arguments, then compare runtime behavior with and
+without the annotation.
 
 ## Example (Pattern 1)
 
@@ -194,7 +248,11 @@ The `tensor.create` is eliminated; the iter-arg buffer is reused across iteratio
 
 **Header**: `include/pypto/ir/transforms/passes.h`
 
-**Implementation**: `src/ir/transforms/optimize_orch_tensors_pass.cpp`
+**Main pass implementation**: `src/ir/transforms/optimize_orch_tensors_pass.cpp`
+
+**Pattern 5 utility module**:
+`include/pypto/ir/transforms/utils/window_externalization.h`,
+`src/ir/transforms/utils/window_externalization.cpp`
 
 **Python binding**: `python/bindings/modules/passes.cpp`
 
@@ -216,7 +274,7 @@ The `tensor.create` is eliminated; the iter-arg buffer is reused across iteratio
 | `AssembleParentStridesOptimizer` | Pattern 2 — attaches parent strides via TensorView |
 | `SliceInputStridesOptimizer` | Pattern 4 — attaches parent strides to In params via TensorView for slice patterns |
 | `AssembleLoopRewriter` | Pattern 3 — rewrites tile.assemble loops to tile.store loops |
-| `OutWindowExternalizer` | Pattern 5 — rewrites eligible local Out writes and eligible In-window consumers to explicit call-site slices |
+| `OutWindowExternalizer` | Pattern 5 utility module — rewrites eligible local Out writes and eligible In-window consumers to explicit call-site slices |
 | `BuildOutParamReturnMappings` | Shared helper — maps Out params to return indices via tile.store |
 | `ComputeRowMajorStrides` | Shared helper — computes row-major strides from a shape |
 

@@ -74,6 +74,8 @@ for i in pl.range(N, init_values=[init_buf]):
 
 ### 模式 5：静态窗口外提（OutWindowExternalizer）
 
+模式 5 **仅**对显式标注了 `windowize=True` 的 InCore-type function（`InCore`、`AIC` 或 `AIV`）生效。未标注的 kernel 无论访问模式如何都不会被 windowize。
+
 **问题**：某些 outlined callee 实际只写入大 `Out` 张量中的一个静态可证明局部窗口，或只消费大 `In` 张量中的一个静态可证明局部窗口，但调用点仍传入整块张量。后续依赖分析会把它视为整块缓冲区访问，从而引入不必要的串行化。
 
 **方案**：为 callee 克隆出 `__windowed` 版本，收窄被改写的张量参数类型，并局部化内部 offset。然后在 orchestration callsite 物化局部 slice。输出窗口使用 `slice + __windowed call + assemble`：
@@ -110,7 +112,7 @@ loop-carried iter-arg 不会被这样折叠。
 - 写入必须是静态可证明的局部 `tile.store` 窗口或聚合窗口循环
 - window shape 和 offset 必须足够静态，能够物化为 `tensor.slice`
 - offset 必须是该 pass 可接受的外层循环变量仿射表达式
-- multi-`Out` 改写采用全有或全无策略
+- multi-`Out` 改写采用逐输出策略：每个 `Out` 参数独立评估 window eligibility，不满足条件的输出保持 full-tensor baseline 参数
 - 如果同一 callsite 中多个被 externalize 的 `Out` 参数解析到同一个 parent tensor，该 callsite 保持 full-tensor；Pattern 5 不尝试把多个 `tensor.assemble` 串成同一个 parent state
 - 顺序循环 sibling 只有在每个被改写 `Out` 都能证明跨 sibling iteration 不重叠时才改写
 - 同一 scope 内写入同一 parent 或 alias parent tensor 的 sibling writer，只要每个 writer 自身满足静态 output-window eligibility，仍然可以 externalize；但如果同一个 parent 还存在无法 externalize 成 output window 的 sibling full writer（`Out` 或 `InOut`），则写同一 parent 的其他 writer 也保持 full-tensor，避免这个非 window writer 掩盖只被部分初始化的区域
@@ -142,6 +144,53 @@ loop-carried iter-arg 不会被这样折叠。
 - pass 不拆分 SPMD launch，也不 externalize per-block SPMD window
 - unsupported consumer，包括 full-tensor reader，保持 baseline/full-tensor input
 - `DeriveCallDirections` 保持现有 sound 的顺序 `Out -> InOut` 规则；Pattern 5 只是在该 pass 运行前显式化可证明的局部窗口
+
+### Windowize Opt-in 使用方法
+
+Pattern 5（window externalization）**默认关闭**。它只对带有 IR 属性
+`windowize = true` 的 InCore-type function（`InCore`、`AIC` 或 `AIV`）
+生效。Python DSL 当前通过 `pl.at(...)` 暴露这个属性：
+
+```python
+with pl.at(level=pl.Level.CORE_GROUP, windowize=True):
+    out = self.my_kernel(...)
+```
+
+测试、工具或手写 DSL/IR 也可以直接给 function 加同一个 attr：
+
+```python
+@pl.function(type=pl.FunctionType.InCore, attrs={"windowize": True})
+def kernel(...):
+    ...
+```
+
+只有显式标注 `windowize=True` 的 InCore-type function 才能进入 Pattern 5
+候选。这是局部二值开关，没有全局开关、policy 字符串或方向级覆盖参数。其他
+frontend 或手写 IR 也可以直接使用同一个 function 属性。function 上已有该属性时，
+parser/printer round-trip 也会保留它。
+
+仅在 kernel 的局部窗口访问模式稳定、并且额外 call-site slice 预计能暴露更窄
+runtime 依赖时使用 `windowize=True`。pass 会把 unsupported cases 保持在
+baseline full-tensor 路径，但这个标注仍然是专家 opt-in，因为它可能增加
+orchestration 和 scheduling 开销。
+
+一个实用的候选判断方式是看 swimlane 时间线。如果 sibling orchestration tasks
+操作同一 tensor 的不同区域，却仍然互相等待，那么这个 kernel 可能受益。常见
+线索包括：
+
+- 相邻 tasks 理论上可以重叠，但实际互相等待
+- task 之间的空档相对 task 自身执行时间很大
+- TensorMap auto-dependency edges 出现在只应访问同一 parent tensor 不同窗口的
+  tasks 之间
+
+windowization 会通过 call-site slice 和 `__windowed` callee 显式化这些局部
+区域，使 runtime dependency analysis 能基于真实 window descriptor 而不是整块
+parent tensor 建依赖。代价是更细粒度的依赖也可能增加 orchestration 工作量，并让
+scheduler dispatch/complete 更碎。如果新增开销超过节省的串行化开销，就不应对该
+kernel 开启 `windowize=True`。
+
+启用后，应检查生成的 orchestration 中是否出现 `__windowed` callee 和局部
+`.view(...)`/slice 参数，并对比开启前后的 runtime 行为。
 
 ## 示例（模式 1）
 
@@ -193,7 +242,11 @@ class After:
 
 **头文件**：`include/pypto/ir/transforms/passes.h`
 
-**实现**：`src/ir/transforms/optimize_orch_tensors_pass.cpp`
+**主 pass 实现**：`src/ir/transforms/optimize_orch_tensors_pass.cpp`
+
+**模式 5 工具模块**：
+`include/pypto/ir/transforms/utils/window_externalization.h`，
+`src/ir/transforms/utils/window_externalization.cpp`
 
 **Python 绑定**：`python/bindings/modules/passes.cpp`
 
@@ -215,7 +268,7 @@ class After:
 | `AssembleParentStridesOptimizer` | 模式 2 — 通过 TensorView 附加父张量步长 |
 | `SliceInputStridesOptimizer` | 模式 4 — 通过 TensorView 为切片输入的 In 参数附加父张量步长 |
 | `AssembleLoopRewriter` | 模式 3 — 将 tile.assemble 循环重写为 tile.store 循环 |
-| `OutWindowExternalizer` | 模式 5 — 将 eligible 的局部 Out 写和 eligible In-window consumer 改写为显式 callsite slice |
+| `OutWindowExternalizer` | 模式 5 工具模块 — 将 eligible 的局部 Out 写和 eligible In-window consumer 改写为显式 callsite slice |
 | `BuildOutParamReturnMappings` | 共享辅助函数 — 通过 tile.store 映射 Out 参数到返回索引 |
 | `ComputeRowMajorStrides` | 共享辅助函数 — 从形状计算行主序步长 |
 
