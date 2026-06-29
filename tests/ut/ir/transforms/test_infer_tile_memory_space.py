@@ -19,6 +19,7 @@ Test strategy:
 import pypto.language as pl
 import pytest
 from pypto import backend, ir, passes
+from pypto.backend import BackendType
 
 
 @pytest.fixture(autouse=True)
@@ -1937,6 +1938,106 @@ class TestInferTileMemorySpaceDemandBackprop:
 
         After = passes.infer_tile_memory_space()(Before)
         ir.assert_structural_equal(After, Expected)
+
+
+class TestInferTileMemorySpaceIterArgInherit:
+    """An inherit-input op whose argument is a loop iter-arg must inherit that
+    iter-arg's space — IterArg is matched via ``AsVarLike``, not ``As<Var>`` (kind
+    traits)."""
+
+    def test_assemble_into_mat_iter_arg_keeps_scratch_mat(self):
+        """Regression: a ``tile.assemble(target, source, offset)`` whose Mat-scratch
+        *target* is a loop-carried iter-arg must inherit the iter-arg's Mat space, not
+        fall through to the Acc *source*.
+
+        ``InheritFromInput`` used ``As<Var>``, which does not match an ``IterArg``, so the
+        (still-unresolved) Mat iter-arg target was skipped and the Acc source won —
+        forcing the whole Mat scratch chain into Acc. That is the L0c overflow behind
+        AutoTileMatmulL0's full-K Mat-scratch path. The fix seeds each iter-arg's space
+        from its init before the body is analysed and matches IterArg args via
+        ``AsVarLike``.
+        """
+        # A backend is needed so the Mat tile.create carries the implicit NZ TileView,
+        # matching the tile.assemble result type for the loop-carried reassignment.
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                b: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                tile_x = pl.tile.create([64, 64], dtype=pl.FP32, target_memory=pl.MemorySpace.Mat)
+                a_mat = pl.load(a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+                b_mat = pl.load(b, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+                for _i in pl.range(2):
+                    a_l = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
+                    b_r = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
+                    c = pl.matmul(a_l, b_r)  # Acc (L0C)
+                    tile_x = pl.tile.assemble(tile_x, c, [0, 0])  # Acc source -> Mat iter-arg target
+                out = pl.store(pl.move(tile_x, target_memory=pl.MemorySpace.Vec), [0, 0], out)
+                return out
+
+        After = passes.infer_tile_memory_space()(passes.convert_to_ssa()(Before))
+        printed = ir.python_print(After)
+
+        # The Mat scratch chain (create + assemble results) must stay Mat; only the
+        # matmul output is Acc. Before the fix the scratch chain was inferred Acc.
+        create_line = next(line for line in printed.splitlines() if "tile.create(" in line)
+        assert "Mem.Mat" in create_line, f"scratch tile.create must stay Mat: {create_line.strip()}"
+        assemble_lines = [line for line in printed.splitlines() if "tile.assemble(" in line]
+        assert assemble_lines, "expected tile.assemble in the lowered loop"
+        for line in assemble_lines:
+            assert "Mem.Mat" in line and "Mem.Acc" not in line, (
+                "an Acc->Mat assemble whose target is a Mat iter-arg must inherit the Mat "
+                f"target, not the Acc source: {line.strip()}"
+            )
+
+    def test_assemble_into_mat_iter_arg_keeps_scratch_mat_nested(self):
+        """Nested-loop variant — the structure ``BuildFullKPipelined`` actually emits.
+
+        The inner loop's iter-arg init is the *outer* iter-arg, so the seed must
+        propagate Mat outer -> inner (each iter-arg seeded from its init: the outer from
+        the ``tile.create``, the inner from the outer iter-arg via ``AsVarLike``). Pins
+        the recursive seeding the single-loop test does not reach.
+        """
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                b: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                tile_x = pl.tile.create([64, 64], dtype=pl.FP32, target_memory=pl.MemorySpace.Mat)
+                a_mat = pl.load(a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+                b_mat = pl.load(b, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+                for _o in pl.range(2):
+                    for _i in pl.range(2):
+                        a_l = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
+                        b_r = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
+                        c = pl.matmul(a_l, b_r)  # Acc (L0C)
+                        tile_x = pl.tile.assemble(tile_x, c, [0, 0])  # target = nested iter-arg
+                out = pl.store(pl.move(tile_x, target_memory=pl.MemorySpace.Vec), [0, 0], out)
+                return out
+
+        After = passes.infer_tile_memory_space()(passes.convert_to_ssa()(Before))
+        printed = ir.python_print(After)
+
+        create_line = next(line for line in printed.splitlines() if "tile.create(" in line)
+        assert "Mem.Mat" in create_line, f"scratch tile.create must stay Mat: {create_line.strip()}"
+        assemble_lines = [line for line in printed.splitlines() if "tile.assemble(" in line]
+        assert assemble_lines, "expected tile.assemble in the nested loop"
+        for line in assemble_lines:
+            assert "Mem.Mat" in line and "Mem.Acc" not in line, (
+                f"the outer->inner iter-arg seed must keep the nested-loop Mat scratch in Mat: {line.strip()}"
+            )
 
 
 if __name__ == "__main__":

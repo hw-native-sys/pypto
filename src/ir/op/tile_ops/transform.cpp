@@ -511,17 +511,30 @@ TypePtr DeduceTileAssembleType(const std::vector<ExprPtr>& args,
 
   ValidateIndexTupleElements(offset_tuple_type, "tile.assemble", "offset");
 
-  CHECK(target_type->dtype_ == source_type->dtype_)
-      << "tile.assemble requires target and source to have the same dtype, but got "
+  // A converting Acc->Mat FIXPIPE downcast is permitted: the cube drains its f32
+  // L0C accumulator into an L1/Mat scratch at the cube's low-precision operand
+  // dtype (bf16/f16) — the only offset Acc->Mat path on A2/A3 (pto.tinsert /
+  // mte_l0c_l1). Memory spaces aren't inferred yet here, so gate on the dtype
+  // (f32 source -> bf16/f16 target); every other assemble stays same-dtype.
+  const bool fixpipe_downcast =
+      source_type->dtype_ == DataType::FP32 &&
+      (target_type->dtype_ == DataType::BF16 || target_type->dtype_ == DataType::FP16);
+  CHECK(target_type->dtype_ == source_type->dtype_ || fixpipe_downcast)
+      << "tile.assemble requires target and source to have the same dtype (or an "
+         "Acc->Mat FIXPIPE downcast to bf16/f16), but got "
       << target_type->dtype_.ToString() << " and " << source_type->dtype_.ToString();
 
-  // Inherit layout metadata (blayout, slayout, fractal, pad) from the target so that
-  // the result type carries the correct tile_buf type annotation for codegen.
-  TileView tile_view;
-  if (target_type->tile_view_.has_value()) {
-    tile_view = *target_type->tile_view_;
+  // Inherit the target's TileView *and its optionality*.  When the target carries
+  // an implicit view (``tile_view_ == nullopt`` — e.g. a tile.create'd Mat scratch,
+  // whose effective layout is the Mat NZ implicit col_major/row_major), the result
+  // must stay implicit too, so its effective layout matches the target's rather than
+  // collapsing to the raw struct default (row_major/none_box — the VEC layout, not a
+  // Mat operand's).  An in-place Acc->Mat assemble chain then shares one consistent
+  // layout (see GetEffectiveTileView, which only honors an *explicit* view).
+  std::optional<TileView> tile_view = target_type->tile_view_;
+  if (tile_view.has_value()) {
+    tile_view->valid_shape = target_type->shape_;
   }
-  tile_view.valid_shape = target_type->shape_;
   return std::make_shared<TileType>(target_type->shape_, target_type->dtype_, std::nullopt, tile_view,
                                     target_type->memory_space_);
 }

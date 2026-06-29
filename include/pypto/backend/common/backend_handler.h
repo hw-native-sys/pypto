@@ -131,6 +131,21 @@ class BackendHandler {
   [[nodiscard]] virtual bool RequiresNoSplitDualAivDispatch() const = 0;
 
   /**
+   * @brief Whether a tiled (offset) Acc->Mat FIXPIPE writeback must downcast to
+   *        a low-precision (bf16/f16) destination.
+   *
+   * The only offset Acc->Mat path on A2/A3 is `pto.tinsert`, whose verifier
+   * requires `src=f32, dst=f16/bf16` — it cannot keep f32 (PTOAS
+   * `TInsertOp::verify`). So AutoTileMatmulL0's oversized chained-matmul result,
+   * when M/N-tiled into an L1/Mat scratch, must be bf16/f16 on Ascend910B; the
+   * pass folds a `tile.cast(result, bf16)` into the per-sub-tile assemble.
+   *
+   * Ascend950 (a5) `tinsert` accepts `dst=f32`, so the Mat scratch may stay f32
+   * there and this returns false (no cast required, the producer may keep f32).
+   */
+  [[nodiscard]] virtual bool RequiresLowPrecisionMatScratch() const = 0;
+
+  /**
    * @brief Compute the destination tile view for a cross-core transfer.
    *
    * Encapsulates the per-backend rule for how to lay out the bridge tile

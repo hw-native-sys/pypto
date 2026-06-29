@@ -197,17 +197,23 @@ int GetGMPipeSlotCount(int dir_mask) {
   return 0;
 }
 
-// DPS scatter family: each op is `set_output_reuses_input(0)` with `dst` as
-// arg 0, so the result must be written in-place into the input tile rather than
-// a freshly-allocated result tile — otherwise the emitted tscatter targets an
-// uninitialized tile and the DPS rows that are not written lose their values.
-bool IsInPlaceScatterFamilyOp(const ir::OpPtr& op) {
-  return ir::IsOp(op, "tile.scatter") || ir::IsOp(op, "tile.scatter_mask");
+// In-place DPS ops that write into input 0 rather than a freshly-allocated
+// result tile:
+//   * scatter family (`set_output_reuses_input(0)`): a tscatter into a fresh
+//     uninitialized tile would lose the rows it does not write;
+//   * `tile.assemble` (`set_output_memory_inherit_input()`): the result is the
+//     target with one window overwritten — written in place so the out-of-window
+//     data is preserved (and the Acc->Mat pto.tmov stays a clean converting move,
+//     not an unsupported Mat->Mat preservation copy).
+// The aliasing is gated below on the result and input actually sharing a base
+// memref, so it only triggers when memory reuse merged them in place.
+bool IsInPlaceInput0DpsOp(const ir::OpPtr& op) {
+  return ir::IsOp(op, "tile.scatter") || ir::IsOp(op, "tile.scatter_mask") || ir::IsOp(op, "tile.assemble");
 }
 
 bool ShouldAliasScatterResultToInput(const AssignStmtPtr& stmt) {
   auto call = As<ir::Call>(stmt->value_);
-  if (!call || !IsInPlaceScatterFamilyOp(call->op_) || call->args_.empty()) {
+  if (!call || !IsInPlaceInput0DpsOp(call->op_) || call->args_.empty()) {
     return false;
   }
 

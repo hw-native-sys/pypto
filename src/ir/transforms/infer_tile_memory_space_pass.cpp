@@ -204,6 +204,33 @@ class TileMemorySpaceAnalyzer : public IRVisitor {
   }
 
   void VisitStmt_(const ForStmtPtr& op) override {
+    // Seed each TileType iter-arg's memory space from its init value before
+    // analysing the body, so an inherit-input op in the body inherits the
+    // carried-in space instead of InheritFromInput falling through to a
+    // co-argument. Notably tile.assemble(target, source, offset) is
+    // output_inherits_input on its *target* (arg0); for a full-K Mat-scratch the
+    // target is the Mat scratch iter-arg, which is still unresolved when the body
+    // is analysed — without this seed InheritFromInput skips it and returns the
+    // Acc *source* (arg1), forcing the whole [M, N] scratch chain into Acc and
+    // overflowing L0c. The post-body override below still promotes a
+    // conservatively-Vec init that the body writes as Acc (matmul_acc accumulator).
+    // AsVarLike (not As<Var>) so an inner loop whose init is the outer iter-arg is
+    // also seeded. When the init carrier was never visited by the AssignStmt path
+    // (e.g. an IfStmt return var), it is absent from var_memory_ but still carries a
+    // memory_space_ in its TileType — fall back to that so the seed resolves
+    // regardless of the init's statement shape (mirrors the yield_memory lookup).
+    for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+      if (!As<TileType>(op->iter_args_[i]->GetType())) continue;
+      if (auto init_var = AsVarLike(op->iter_args_[i]->initValue_)) {
+        if (auto it = var_memory_.find(init_var); it != var_memory_.end()) {
+          var_memory_[op->iter_args_[i]] = it->second;
+        } else if (auto init_tile_type = As<TileType>(init_var->GetType());
+                   init_tile_type && init_tile_type->memory_space_.has_value()) {
+          var_memory_[op->iter_args_[i]] = *init_tile_type->memory_space_;
+        }
+      }
+    }
+
     IRVisitor::VisitStmt_(op);
 
     if (op->return_vars_.empty()) return;
@@ -307,8 +334,12 @@ class TileMemorySpaceAnalyzer : public IRVisitor {
   }
 
   std::optional<MemorySpace> InheritFromInput(const CallPtr& call) {
+    // AsVarLike (not As<Var>) so an IterArg argument is matched — e.g.
+    // tile.assemble's Mat scratch target (arg0) inside a full-K pipeline loop.
+    // With As<Var> the IterArg is skipped and the inherit falls through to a
+    // co-argument (the Acc source, arg1), forcing the scratch into Acc.
     for (const auto& arg : call->args_) {
-      if (auto var = As<Var>(arg)) {
+      if (auto var = AsVarLike(arg)) {
         auto it = var_memory_.find(var);
         if (it != var_memory_.end()) {
           return it->second;
