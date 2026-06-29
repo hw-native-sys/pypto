@@ -132,22 +132,6 @@ class Worker(ABC):
         ``compiled(...)`` callable surface.
         """
 
-    def run_timed(self, compiled: Any, *args: Any, config: Any = None) -> tuple[Any, Any]:
-        """Like :meth:`run`, but also return the dispatch ``RunTiming``.
-
-        Returns ``(outputs, timing)`` for the register-once + rounds benchmark
-        pattern (issue #1858). Only :class:`~pypto.runtime.ChipWorker` (L2)
-        overrides this; the base implementation raises so L3+ callers get a
-        clear message rather than an ``AttributeError`` via
-        :class:`RegistrationHandle`.
-        """
-        raise NotImplementedError(
-            f"{type(self).__name__}.run_timed() is not supported; per-launch RunTiming "
-            "is only exposed on ChipWorker (L2 single-chip). For L3+ DAG runs the "
-            "device wall is not aggregated (it would be 0) — read host-side timing "
-            "from the run instead."
-        )
-
     @abstractmethod
     def register(self, compiled: Any) -> RegistrationHandle:
         """Pre-register *compiled* on this Worker. Returns a callable handle.

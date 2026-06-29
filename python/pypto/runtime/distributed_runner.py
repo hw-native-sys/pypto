@@ -613,12 +613,11 @@ def _dispatch(
     sub_ids: dict[str, Any],
     call_config: Any,
     device_nums: int,
-) -> Any:
+) -> None:
     """Build the orchestration closure and run it once on ``w``.
 
-    Returns the simpler ``RunTiming`` from ``w.run`` (``host_wall_us`` /
-    ``device_wall_us``). For an L3 DAG ``device_wall_us`` is ``0`` — only the
-    host wall around the dispatch is meaningful here.
+    The simpler ``Worker.run`` returns ``None`` (per-run timing is read from
+    the runtime's ``[STRACE]`` log markers, simpler PR #1177).
     """
     # Fresh _keep per dispatch: it pins per-call TaskArgs alive for the run.
     _keep: list[Any] = []
@@ -645,14 +644,14 @@ def _dispatch(
             world_size=device_nums,
         )
 
-    return w.run(orch_fn)
+    w.run(orch_fn)
 
 
 def execute_distributed(
     compiled: DistributedCompiledProgram,
     coerced_args: list[torch.Tensor | DeviceTensor],
     config: RunConfig | None = None,
-) -> Any:
+) -> None:
     """Execute a distributed compiled program once via simpler Worker(level=3).
 
     One-shot path: runs the full setup, dispatches once, then tears the Worker
@@ -681,9 +680,9 @@ def execute_distributed(
             ring field to the runtime and leaves DFX off.
 
     Returns:
-        The simpler ``RunTiming`` from the dispatch (``host_wall_us`` /
-        ``device_wall_us``; ``device_wall_us`` is ``0`` for the L3 DAG), or
-        ``None`` if dispatch produced no timing.
+        ``None``. Device results are written back into the host tensors in
+        place; per-run timing is read from the runtime's ``[STRACE]`` log
+        markers (simpler PR #1177), not returned here.
     """
     dc = compiled._distributed_config
     output_dir = compiled.output_dir
@@ -717,7 +716,7 @@ def execute_distributed(
 
     num_sub = max(dc.num_sub_workers, len(sub_worker_fns))
 
-    def _run_once(call_config: Any) -> Any:
+    def _run_once(call_config: Any) -> None:
         """One full worker lifecycle (construct → register → init → dispatch → close).
 
         Each call forks fresh chip workers and closes them, so the per-pass DFX
@@ -734,7 +733,7 @@ def execute_distributed(
             w = _construct_worker(dc, compiled.platform, runtime_name, num_sub)
             sub_ids, chip_cids = _register_callables(w, sub_worker_fns, chip_callables)
             w.init()
-            return _dispatch(w, entry_fn, tensors, chip_cids, sub_ids, call_config, len(dc.device_ids))
+            _dispatch(w, entry_fn, tensors, chip_cids, sub_ids, call_config, len(dc.device_ids))
         finally:
             if w is not None:
                 w.close()
@@ -775,16 +774,15 @@ def execute_distributed(
 
         print("[swimlane] run 2/2: measuring clean per-task timing (these are the reported numbers).")
         timing_cfg = dataclasses.replace(config, enable_dep_gen=False)
-        timing = _run_once(
+        _run_once(
             _make_call_config(dc, timing_cfg, dfx_base=dfx_base, co_enable_swimlane_dep_gen=False)
         )
     else:
-        timing = _run_once(_make_call_config(dc, config, dfx_base=dfx_base))
+        _run_once(_make_call_config(dc, config, dfx_base=dfx_base))
 
     # Offline post-pass (reads the per-dispatch deps.json + records on disk).
     if swimlane:
         _collect_l3_swimlane(output_dir, len(dc.device_ids), compiled.platform)
-    return timing
 
 
 def execute_distributed_compiled(
@@ -1009,9 +1007,6 @@ class DistributedWorker(Worker):
         # Live RegistrationHandles so close() can mark them closed. WeakSet
         # so handles that drop out of scope first don't pin DistributedWorker.
         self._handles: weakref.WeakSet[Any] = weakref.WeakSet()
-        # RunTiming from the most recent dispatch (host_wall_us; device_wall_us
-        # is 0 for the L3 DAG), or None before the first run.
-        self.last_run_timing: Any = None
 
     @staticmethod
     def _check_compatible(prog: DistributedCompiledProgram, primary: DistributedCompiledProgram) -> None:
@@ -1214,7 +1209,7 @@ class DistributedWorker(Worker):
                 )
             tensors[info.name] = arg
 
-        self.last_run_timing = _dispatch(
+        _dispatch(
             self._w,
             state["entry_fn"],
             tensors,
@@ -1229,7 +1224,7 @@ class DistributedWorker(Worker):
         # worker reuses its forked chip children across dispatches, so it cannot
         # re-fork between a deps pass and a timing pass without tripping the
         # per-child ``halHostRegister`` cap (rc 8). It therefore runs swimlane
-        # single-pass (dep_gen co-enabled), so ``last_run_timing`` here includes
+        # single-pass (dep_gen co-enabled), so the on-disk records include
         # dep_gen collection overhead. Use ``execute_distributed`` (one-shot) for
         # clean two-pass swimlane timing.
         if config is not None and config.enable_l2_swimlane:

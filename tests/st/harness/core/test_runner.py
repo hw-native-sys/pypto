@@ -362,7 +362,7 @@ def _fused_execute_task(
     device_id = _device_pool.get()
     try:
         _executed_device[cache_key] = device_id
-        timing = _execute_on_device(
+        _execute_on_device(
             artifact.work_dir,
             artifact.work_dir / "golden.py",
             artifact.chip_callable,
@@ -375,8 +375,6 @@ def _fused_execute_task(
             passed=True,
             test_name=name,
             execution_time=time.time() - start,
-            device_wall_us=timing.device_wall_us,
-            host_wall_us=timing.host_wall_us,
         )
     except Exception as exc:
         return RunResult(
@@ -661,7 +659,7 @@ class TestRunner:
             chip_callable, runtime_name, _ = compile_and_assemble(
                 work_dir, resolved_platform, pto_isa_commit=self.config.pto_isa_commit
             )
-            timing = _execute_on_device(
+            _execute_on_device(
                 work_dir,
                 golden_path,
                 chip_callable,
@@ -675,8 +673,6 @@ class TestRunner:
                 passed=True,
                 test_name=test_name,
                 execution_time=time.time() - start_time,
-                device_wall_us=timing.device_wall_us,
-                host_wall_us=timing.host_wall_us,
             )
 
         except Exception as e:
