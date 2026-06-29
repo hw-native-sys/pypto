@@ -582,6 +582,71 @@ def test_put_chunk_shrinks_staging_tile_keeping_full_partition_view():
     )
 
 
+def test_put_pipeline_emits_two_staging_buffers_in_one_buf_group():
+    """``pipeline=True`` emits two VEC staging tiles inside a single ``buf(...)``
+    operand group, each contributing a trailing ``!pto.tile_buf`` type — pto-isa's
+    ping-pong TPUT overload."""
+
+    @pl.program
+    class PPipe:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[16, 64], pl.FP16],
+            src: pld.DistributedTensor[[16, 64], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            pld.tensor.put(
+                dst,
+                peer=peer,
+                src=src,
+                atomic=pld.AtomicType.None_,
+                chunk_rows=4,
+                chunk_cols=32,
+                pipeline=True,
+            )
+
+    mlir = _generate_mlir(PPipe)
+    tput_line = next(line for line in mlir.splitlines() if "pto.comm.tput(" in line)
+    # Both ping/pong tiles ride in a single buf(...) group: two comma-separated
+    # SSA tile operands and two trailing tile_buf types.
+    buf_inner = tput_line.split("buf(", 1)[1].split(")", 1)[0]
+    assert buf_inner.count(",") == 1, f"expected two staging tiles in buf(...), got: {tput_line}"
+    assert tput_line.count("!pto.tile_buf<loc=vec") == 2, (
+        f"double-buffered tput must list two tile_buf types, got: {tput_line}"
+    )
+    # Two distinct staging tiles are allocated (ping + pong), each the [4, 32] chunk.
+    ping = next(line for line in mlir.splitlines() if "pto.alloc_tile" in line and "tput_stage_ping" in line)
+    pong = next(line for line in mlir.splitlines() if "pto.alloc_tile" in line and "tput_stage_pong" in line)
+    for line in (ping, pong):
+        assert "rows=4" in line and "cols=32" in line, f"staging tile must be [4, 32], got: {line}"
+
+
+def test_get_pipeline_emits_two_staging_buffers_in_one_buf_group():
+    """``pipeline=True`` on get emits the two-buffer ping-pong TGET form."""
+
+    @pl.program
+    class PGetPipe:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[16, 64], pl.FP16],
+            src: pld.DistributedTensor[[16, 64], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            pld.tensor.get(dst, peer=peer, src=src, chunk_rows=4, chunk_cols=32, pipeline=True)
+
+    mlir = _generate_mlir(PGetPipe)
+    tget_line = next(line for line in mlir.splitlines() if "pto.comm.tget(" in line)
+    buf_inner = tget_line.split("buf(", 1)[1].split(")", 1)[0]
+    assert buf_inner.count(",") == 1, f"expected two staging tiles in buf(...), got: {tget_line}"
+    assert tget_line.count("!pto.tile_buf<loc=vec") == 2, (
+        f"double-buffered tget must list two tile_buf types, got: {tget_line}"
+    )
+    assert any("tget_stage_ping" in line for line in mlir.splitlines())
+    assert any("tget_stage_pong" in line for line in mlir.splitlines())
+
+
 def test_put_subregion_dynamic_shape_with_chunk():
     """A dynamic subregion transfer extent emits a dynamic partition view while
     the staging tile stays statically sized from the chunk — pto-isa chunks the

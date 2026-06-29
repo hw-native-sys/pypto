@@ -564,6 +564,51 @@ class TestConvertTensorToTileOps:
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_put_pipeline_emits_two_staging_tiles(self):
+        """``pipeline=True`` lowers to *two* tile.create staging tiles (ping/pong)
+        threaded into pld.tile.put so pto-isa TPUT double-buffers the chunked
+        transfer. Both tiles carry the chunked [4, 32] shape."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                dst: pld.DistributedTensor[[16, 64], pl.FP16],
+                src: pld.DistributedTensor[[16, 64], pl.FP16],
+                peer: pl.Scalar[pl.INT32],
+            ):
+                pld.tensor.put(
+                    dst,
+                    peer=peer,
+                    src=src,
+                    atomic=pld.AtomicType.None_,
+                    chunk_rows=4,
+                    chunk_cols=32,
+                    pipeline=True,
+                )
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                dst: pl.Out[pld.DistributedTensor[[16, 64], pl.FP16]],
+                src: pld.DistributedTensor[[16, 64], pl.FP16],
+                peer: pl.Scalar[pl.INT32],
+            ):
+                tput_stage_ping: pl.Tile[[4, 32], pl.FP16, pl.Mem.Vec] = pl.tile.create(
+                    [4, 32], dtype=pl.FP16, target_memory=pl.Mem.Vec
+                )
+                tput_stage_pong: pl.Tile[[4, 32], pl.FP16, pl.Mem.Vec] = pl.tile.create(
+                    [4, 32], dtype=pl.FP16, target_memory=pl.Mem.Vec
+                )
+                pld.tile.put(dst, peer, src, tput_stage_ping, tput_stage_pong, atomic=pld.AtomicType.None_)
+                return  # noqa: PLR1711  (DSL return terminator, not a Python no-op)
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
     def test_get_emits_tile_create_plus_tile_get(self):
         """pld.tensor.get lowers to tile.create(stage) + pld.tile.get(dst, peer, src, stage).
 

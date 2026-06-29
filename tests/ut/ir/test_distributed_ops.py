@@ -28,7 +28,8 @@ import pytest
 from pypto import DataType, ir
 from pypto.ir.op.distributed import tensor_ops as dist_tensor_ops
 from pypto.ir.op.distributed import tile_ops as dist_tile_ops
-from pypto.language.distributed.op.tensor_ops import _validate_chunk
+from pypto.language.distributed.op import tensor_ops as dsl_tensor_ops
+from pypto.language.distributed.op.tensor_ops import _validate_chunk, _validate_pipeline
 
 
 def _make_shape_tuple(values: list[int], span: ir.Span) -> ir.MakeTuple:
@@ -887,6 +888,49 @@ def test_dsl_validate_chunk():
     _validate_chunk(4, 0, "pld.tensor.put")
     _validate_chunk(4, 32, "pld.tensor.put")
 
+
+def test_dsl_validate_pipeline():
+    """pipeline=True requires both chunk dims; pipeline=False is unconstrained."""
+    # pipeline disabled → no constraint regardless of chunk.
+    _validate_pipeline(False, 0, 0, "pld.tensor.put")
+    # pipeline enabled with both chunk dims → ok.
+    _validate_pipeline(True, 4, 32, "pld.tensor.put")
+    # pipeline enabled missing a chunk dim → rejected.
+    for cr, cc in ((0, 32), (4, 0), (0, 0)):
+        with pytest.raises(ValueError, match="requires both chunk_rows>0 and chunk_cols>0"):
+            _validate_pipeline(True, cr, cc, "pld.tensor.put")
+
+
+def test_pipeline_packs_attr_and_requires_chunk():
+    """The IR builder packs pipeline as a bool attr; the C++ deducer enforces both chunk dims."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+
+    call = dist_tensor_ops.put(dst, peer, src, chunk_rows=4, chunk_cols=32, pipeline=True, span=span)
+    # pipeline is a bool switch attr (like tile.load's `transpose`), not an int count.
+    assert call.kwargs["pipeline"] is True
+
+    # Deducer rejects pipeline without both chunk dims.
+    with pytest.raises(Exception, match="pipeline=True requires both chunk_rows>0 and chunk_cols>0"):
+        ir.create_op_call(
+            "pld.tensor.put", [dst, peer, src], {"atomic": 0, "pipeline": True, "chunk_rows": 4}, span
+        )
+
+
+def test_dsl_pipeline_requires_chunk():
+    """The DSL put/get reject pipeline=True without both chunk dims, before lowering."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+
+    with pytest.raises(ValueError, match="pipeline=True requires both chunk_rows>0 and chunk_cols>0"):
+        dsl_tensor_ops.put(dst, peer, src, chunk_rows=4, pipeline=True)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="pipeline=True requires both chunk_rows>0 and chunk_cols>0"):
+        dsl_tensor_ops.get(dst, peer, src, chunk_cols=32, pipeline=True)  # type: ignore[arg-type]
+
     with pytest.raises(ValueError, match="must be non-negative"):
         _validate_chunk(-1, 0, "pld.tensor.put")
     with pytest.raises(TypeError, match="static"):
@@ -949,6 +993,47 @@ def test_tile_put_rejects_stage_larger_than_transfer():
 
     with pytest.raises(Exception, match="must fit within"):
         dist_tile_ops.put(dst, peer, src, stage, atomic=ir.AtomicType.None_, span=span)
+
+
+def test_tile_put_accepts_optional_second_stage():
+    """Positive: a second (ping/pong) staging tile is accepted for double-buffering."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+    ping = _make_tile_var("ping", [4, 32], DataType.FP16, span)
+    pong = _make_tile_var("pong", [4, 32], DataType.FP16, span)
+
+    call = dist_tile_ops.put(dst, peer, src, ping, atomic=ir.AtomicType.None_, stage2=pong, span=span)
+    assert isinstance(call.type, ir.UnknownType)
+    # stage2 is threaded in as the 5th positional operand.
+    assert len(call.args) == 5
+
+
+def test_tile_put_rejects_second_stage_shape_mismatch():
+    """Negative: ping/pong staging tiles must have identical shape (pto-isa)."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+    ping = _make_tile_var("ping", [4, 32], DataType.FP16, span)
+    pong = _make_tile_var("pong", [8, 32], DataType.FP16, span)  # different rows
+
+    with pytest.raises(Exception, match="ping/pong staging tiles must have identical shape"):
+        dist_tile_ops.put(dst, peer, src, ping, atomic=ir.AtomicType.None_, stage2=pong, span=span)
+
+
+def test_tile_put_rejects_second_stage_dtype_mismatch():
+    """Negative: the second staging tile must match dst dtype like the first."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+    ping = _make_tile_var("ping", [4, 32], DataType.FP16, span)
+    pong = _make_tile_var("pong", [4, 32], DataType.FP32, span)  # wrong dtype
+
+    with pytest.raises(Exception, match="stage2 dtype must match dst dtype"):
+        dist_tile_ops.put(dst, peer, src, ping, atomic=ir.AtomicType.None_, stage2=pong, span=span)
 
 
 def test_put_rejects_plain_tensor_dst():
@@ -1322,6 +1407,33 @@ def test_tile_get_accepts_plain_tensor_dst():
     call = dist_tile_ops.get(plain, peer, src, stage, span=span)
 
     assert isinstance(call.type, ir.UnknownType)
+
+
+def test_tile_get_accepts_optional_second_stage():
+    """Positive: a second (ping/pong) staging tile is accepted for double-buffering."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+    ping = _make_tile_var("ping", [4, 32], DataType.FP16, span)
+    pong = _make_tile_var("pong", [4, 32], DataType.FP16, span)
+
+    call = dist_tile_ops.get(dst, peer, src, ping, stage2=pong, span=span)
+    assert isinstance(call.type, ir.UnknownType)
+    assert len(call.args) == 5
+
+
+def test_tile_get_rejects_second_stage_shape_mismatch():
+    """Negative: ping/pong staging tiles must have identical shape (pto-isa)."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+    ping = _make_tile_var("ping", [4, 32], DataType.FP16, span)
+    pong = _make_tile_var("pong", [4, 16], DataType.FP16, span)  # different cols
+
+    with pytest.raises(Exception, match="ping/pong staging tiles must have identical shape"):
+        dist_tile_ops.get(dst, peer, src, ping, stage2=pong, span=span)
 
 
 def test_get_rejects_plain_tensor_src():

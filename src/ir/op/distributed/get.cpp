@@ -27,6 +27,15 @@
  *     pld.tensor.get(dst, peer, src, dst_offsets, src_offsets, shape)
  *         -> Unknown
  *
+ * Optional ``chunk_rows`` / ``chunk_cols`` int attrs size the VEC staging tile;
+ * the optional ``pipeline`` bool attr requests ping-pong double-buffering
+ * and is lowered by ``ConvertTensorToTileOps`` into a *second* ``tile.create``
+ * staging tile threaded into ``pld.tile.get`` (``pipeline=True`` requires both
+ * chunk dims set). The tile-level form therefore carries an optional second ``stage``::
+ *
+ *     pld.tile.get(dst, peer, src, stage[, stage2]
+ *                  [, dst_offsets, src_offsets, shape]) -> Unknown
+ *
  * Side-effect-only: the op produces :class:`UnknownType`, mirroring
  * ``pld.tensor.put`` and the sync primitives.
  *
@@ -184,12 +193,49 @@ void ValidateGetRegionArgs(const std::vector<ExprPtr>& args, size_t region_arg_b
   }
 }
 
-// Read an optional int attr (chunk_rows / chunk_cols), defaulting to 0 (unset).
+// Read an optional int attr (chunk_rows / chunk_cols / pipeline), defaulting to
+// 0 (unset).
 int ReadIntKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs, const std::string& key) {
   for (const auto& [k, v] : kwargs) {
     if (k == key) return AnyCast<int>(v, key);
   }
   return 0;
+}
+
+// Read an optional bool attr (pipeline), defaulting to false (unset). Mirrors put.cpp.
+bool ReadBoolKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs, const std::string& key) {
+  for (const auto& [k, v] : kwargs) {
+    if (k == key) return AnyCast<bool>(v, key);
+  }
+  return false;
+}
+
+// Double-buffering (ping-pong) only helps a chunked transfer — pto-isa slides
+// the transfer through two staging tiles with overlapped TLOAD/TSTORE. Require
+// both chunk dims so the staging tile is fully bounded. Mirrors put.cpp.
+void ValidatePipelineHasChunk(const std::vector<std::pair<std::string, std::any>>& kwargs,
+                              const std::string& op_name) {
+  if (!ReadBoolKwarg(kwargs, "pipeline")) return;
+  const int chunk_rows = ReadIntKwarg(kwargs, "chunk_rows");
+  const int chunk_cols = ReadIntKwarg(kwargs, "chunk_cols");
+  CHECK(chunk_rows > 0 && chunk_cols > 0)
+      << op_name
+      << ": pipeline=True requires both chunk_rows>0 and chunk_cols>0 (double-buffering needs a "
+         "chunked transfer to ping-pong through two staging tiles)";
+}
+
+// Validate one VEC staging tile: a 2D TileType whose dtype matches the local
+// dst. Returns the TileType for downstream extent checks. Shared by the single
+// stage and the optional ping-pong second stage. Mirrors put.cpp.
+TileTypePtr ValidateStageTile(const ExprPtr& stage, const DataType& dst_dtype, const std::string& what) {
+  auto stage_type = As<TileType>(stage->GetType());
+  CHECK(stage_type) << what << " must be a TileType, got " << stage->GetType()->TypeName();
+  CHECK(stage_type->dtype_ == dst_dtype)
+      << what << " dtype must match dst dtype, got stage=" << stage_type->dtype_.ToString()
+      << " dst=" << dst_dtype.ToString();
+  CHECK(stage_type->shape_.size() == 2)
+      << what << " must be a 2D VEC staging tile, got rank " << stage_type->shape_.size();
+  return stage_type;
 }
 
 // A dynamic transfer extent (a runtime sub-extent of the fixed window) needs a
@@ -285,42 +331,56 @@ TypePtr DeduceGetType(const std::vector<ExprPtr>& args,
     ValidateGetRegionArgs(args, 3, dst_type->shape_, src_type->shape_, "pld.tensor.get", &transfer_shape);
   }
   ValidateDynamicTransferHasChunk(transfer_shape, kwargs, "pld.tensor.get");
+  ValidatePipelineHasChunk(kwargs, "pld.tensor.get");
 
   return GetUnknownType();
 }
 
 TypePtr DeduceGetTileType(const std::vector<ExprPtr>& args,
                           const std::vector<std::pair<std::string, std::any>>& kwargs) {
-  CHECK(args.size() == 4 || args.size() == 7)
-      << "pld.tile.get requires 4 positional arguments (dst, peer, src, stage) or 7 "
-         "(dst, peer, src, stage, dst_offsets, src_offsets, shape), but got "
-      << args.size();
+  const size_t n = args.size();
+  CHECK(n == 4 || n == 5 || n == 7 || n == 8)
+      << "pld.tile.get requires 4/5 (single/double stage, full-slice) or 7/8 (single/double stage, "
+         "subregion) positional arguments (dst, peer, src, stage[, stage2][, dst_offsets, "
+         "src_offsets, shape]), but got "
+      << n;
   CHECK(kwargs.empty()) << "pld.tile.get does not accept keyword attributes";
-  for (size_t i = 0; i < args.size(); ++i) {
+  for (size_t i = 0; i < n; ++i) {
     CHECK(args[i]) << "pld.tile.get positional argument #" << i << " must not be null";
   }
-  ValidateGetContract(args[0], args[1], args[2], "pld.tile.get", args.size() == 4);
+  const bool has_stage2 = (n == 5 || n == 8);
+  const bool has_region = (n == 7 || n == 8);
+  const size_t region_base = 4 + (has_stage2 ? 1 : 0);
+  ValidateGetContract(args[0], args[1], args[2], "pld.tile.get", !has_region);
 
-  auto stage_type = As<TileType>(args[3]->GetType());
-  CHECK(stage_type) << "pld.tile.get stage must be a TileType, got " << args[3]->GetType()->TypeName();
   auto dst_type = AsTensorTypeLike(args[0]->GetType());
-  CHECK(stage_type->dtype_ == dst_type->dtype_)
-      << "pld.tile.get stage dtype must match dst dtype, got stage=" << stage_type->dtype_.ToString()
-      << " dst=" << dst_type->dtype_.ToString();
-  CHECK(stage_type->shape_.size() == 2)
-      << "pld.tile.get stage must be a 2D VEC staging tile, got rank " << stage_type->shape_.size();
+  auto stage_type = ValidateStageTile(args[3], dst_type->dtype_, "pld.tile.get stage");
+  TileTypePtr stage2_type;
+  if (has_stage2) {
+    stage2_type = ValidateStageTile(args[4], dst_type->dtype_, "pld.tile.get stage2");
+    // pto-isa ping/pong contract: identical-shape staging tiles.
+    CHECK(AreExprsEqual(stage_type->shape_[0], stage2_type->shape_[0]) &&
+          AreExprsEqual(stage_type->shape_[1], stage2_type->shape_[1]))
+        << "pld.tile.get ping/pong staging tiles must have identical shape";
+  }
 
   auto src_type = As<DistributedTensorType>(args[2]->GetType());
   std::vector<ExprPtr> transfer_shape = dst_type->shape_;
-  if (args.size() == 7) {
-    ValidateGetRegionArgs(args, 4, dst_type->shape_, src_type->shape_, "pld.tile.get", &transfer_shape);
+  if (has_region) {
+    ValidateGetRegionArgs(args, region_base, dst_type->shape_, src_type->shape_, "pld.tile.get",
+                          &transfer_shape);
   }
 
   // The explicit stage tile is the 2-D VEC bounce buffer that pto-isa TGET
   // streams the transfer through; it may be smaller than the transfer (a single
-  // chunk) but must not exceed the flattened [rows, cols] transfer extent.
+  // chunk) but must not exceed the flattened [rows, cols] transfer extent. A
+  // second stage (ping/pong double-buffering) shares the same extent.
   ValidateStageFitsTransfer(stage_type->shape_, transfer_shape, args[0]->span_, args[3]->span_,
                             "pld.tile.get");
+  if (has_stage2) {
+    ValidateStageFitsTransfer(stage2_type->shape_, transfer_shape, args[0]->span_, args[4]->span_,
+                              "pld.tile.get");
+  }
 
   return GetUnknownType();
 }
@@ -347,8 +407,16 @@ REGISTER_OP("pld.tensor.get")
     .add_argument("dst", "Local destination — DistributedTensor (window-bound) or plain Tensor")
     .add_argument("peer", "Peer rank index (ScalarType)")
     .add_argument("src", "Remote (peer) window-bound DistributedTensor source (same dtype as dst)")
+    .add_argument("dst_offsets",
+                  "Optional per-dim offsets (MakeTuple) into the local dst; present only in the "
+                  "subregion form (all three region args supplied together)")
+    .add_argument("src_offsets",
+                  "Optional per-dim offsets (MakeTuple) into the peer's src slice; present only in the "
+                  "subregion form")
+    .add_argument("shape", "Optional per-dim transfer shape (MakeTuple); present only in the subregion form")
     .set_attr<int>("chunk_rows")
     .set_attr<int>("chunk_cols")
+    .set_attr<bool>("pipeline")
     .no_memory_spec()
     .f_deduce_type(DeduceGetType);
 
@@ -365,6 +433,16 @@ REGISTER_OP("pld.tile.get")
     .add_argument("peer", "Peer rank index (ScalarType)")
     .add_argument("src", "Remote (peer) window-bound DistributedTensor source (same dtype as dst)")
     .add_argument("stage", "VEC staging TileType (rows x cols <= flattened transfer; auto-chunked by TGET)")
+    .add_argument("stage2",
+                  "Optional second VEC staging TileType (same shape as stage); when present, TGET "
+                  "ping-pong double-buffers the chunked transfer through both tiles")
+    .add_argument("dst_offsets",
+                  "Optional per-dim offsets (MakeTuple) into the local dst; present only in the "
+                  "subregion form (all three region args supplied together)")
+    .add_argument("src_offsets",
+                  "Optional per-dim offsets (MakeTuple) into the peer's src slice; present only in the "
+                  "subregion form")
+    .add_argument("shape", "Optional per-dim transfer shape (MakeTuple); present only in the subregion form")
     .no_memory_spec()
     .f_deduce_type(DeduceGetTileType);
 

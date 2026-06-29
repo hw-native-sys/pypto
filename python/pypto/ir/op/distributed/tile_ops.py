@@ -97,18 +97,26 @@ def put(
     stage: Expr,
     atomic: AtomicType = AtomicType.None_,
     *,
+    stage2: Expr | None = None,
     dst_offsets: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     src_offsets: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     shape: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     span: Span | None = None,
 ) -> Call:
-    """Build a ``pld.tile.put(dst, peer, src, stage)`` Call (post-conversion form)."""
+    """Build a ``pld.tile.put(dst, peer, src, stage[, stage2])`` Call (post-conversion form).
+
+    ``stage2`` is the optional second VEC staging tile; when supplied, codegen
+    emits the ping-pong (double-buffered) TPUT form. It must have the same shape
+    and dtype as ``stage``.
+    """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     peer_expr = _normalize_expr(peer, actual_span, int_dtype=DataType.INT32)
     has_region = dst_offsets is not None or src_offsets is not None or shape is not None
     if has_region and (dst_offsets is None or src_offsets is None or shape is None):
         raise ValueError("pld.tile.put dst_offsets, src_offsets, and shape must be provided together")
     args = [dst, peer_expr, src, stage]
+    if stage2 is not None:
+        args.append(stage2)
     if has_region:
         assert dst_offsets is not None
         assert src_offsets is not None
@@ -129,18 +137,26 @@ def get(
     src: Expr,
     stage: Expr,
     *,
+    stage2: Expr | None = None,
     dst_offsets: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     src_offsets: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     shape: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     span: Span | None = None,
 ) -> Call:
-    """Build a ``pld.tile.get(dst, peer, src, stage)`` Call (post-conversion form)."""
+    """Build a ``pld.tile.get(dst, peer, src, stage[, stage2])`` Call (post-conversion form).
+
+    ``stage2`` is the optional second VEC staging tile; when supplied, codegen
+    emits the ping-pong (double-buffered) TGET form. It must have the same shape
+    and dtype as ``stage``.
+    """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     peer_expr = _normalize_expr(peer, actual_span, int_dtype=DataType.INT32)
     has_region = dst_offsets is not None or src_offsets is not None or shape is not None
     if has_region and (dst_offsets is None or src_offsets is None or shape is None):
         raise ValueError("pld.tile.get dst_offsets, src_offsets, and shape must be provided together")
     args = [dst, peer_expr, src, stage]
+    if stage2 is not None:
+        args.append(stage2)
     if has_region:
         assert dst_offsets is not None
         assert src_offsets is not None

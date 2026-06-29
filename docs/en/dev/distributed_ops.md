@@ -150,9 +150,10 @@ positional, matching `tile.store`.
 ### `pld.tensor.put` (TPUT)
 
 ```text
-pld.tensor.put(dst, peer, src, *, atomic: int, chunk_rows: int = 0, chunk_cols: int = 0) -> Unknown
+pld.tensor.put(dst, peer, src, *, atomic: int,
+               chunk_rows: int = 0, chunk_cols: int = 0, pipeline: bool = False) -> Unknown
 pld.tensor.put(dst, peer, src, dst_offsets, src_offsets, shape,
-               *, atomic: int, chunk_rows: int = 0, chunk_cols: int = 0) -> Unknown
+               *, atomic: int, chunk_rows: int = 0, chunk_cols: int = 0, pipeline: bool = False) -> Unknown
 ```
 
 Synchronously writes local `src` data into the `peer` rank's slice of the
@@ -177,6 +178,19 @@ at the **full** transfer extent and pto-isa TPUT 2-D-slides the transfer through
 the smaller stage. This lets a single `put` move data larger than UB without the
 caller writing an explicit chunk loop. Oversized chunk values are clamped to the
 transfer extent.
+
+**Double-buffering (`pipeline`).** Setting `pipeline=True`
+makes `ConvertTensorToTileOps` materialise **two** identical VEC staging tiles
+(`tput_stage_ping` / `tput_stage_pong`) and thread both into `pld.tile.put` as a
+second `stage` operand. The codegen then emits the ping-pong form
+`pto.comm.tput(dst_pv, src_pv, buf(%ping, %pong) : …)`, which PTOAS routes to
+pto-isa's double-buffered `TPUT` overload — it overlaps the TLOAD of the next
+chunk with the TSTORE of the previous one across the two tiles. Because the
+benefit only exists when the transfer is chunked into more than one piece,
+`pipeline` **requires both `chunk_rows` and `chunk_cols` to be set** (the deducer
+and the DSL both reject `pipeline` without a full chunk). The two tiles are
+distinct `tile.create` allocations, so the memory allocator gives them
+non-overlapping UB addresses (pto-isa's ping/pong requirement).
 
 **Dynamic transfer extent.** The transfer may be **dynamic** — either the
 subregion `shape` (a runtime sub-extent of the window) or the `dst` / `src`
@@ -205,9 +219,9 @@ are bounded by the chunk at runtime).
 ### `pld.tensor.get` (TGET)
 
 ```text
-pld.tensor.get(dst, peer, src, *, chunk_rows: int = 0, chunk_cols: int = 0) -> Unknown
+pld.tensor.get(dst, peer, src, *, chunk_rows: int = 0, chunk_cols: int = 0, pipeline: bool = False) -> Unknown
 pld.tensor.get(dst, peer, src, dst_offsets, src_offsets, shape,
-               *, chunk_rows: int = 0, chunk_cols: int = 0) -> Unknown
+               *, chunk_rows: int = 0, chunk_cols: int = 0, pipeline: bool = False) -> Unknown
 ```
 
 Synchronously reads the `peer` rank's slice of the window-bound `src` into the
@@ -225,7 +239,12 @@ to a sub-tile of the flattened transfer extent so pto-isa TGET auto-chunks the
 full transfer through it — same contract as `put` above, including a **dynamic
 transfer** (the subregion `shape` or the full-slice `dst` / `src` window dims)
 bounded by a matching static chunk (dynamic innermost needs `chunk_cols`,
-dynamic leading needs `chunk_rows`).
+dynamic leading needs `chunk_rows`). Setting `pipeline=True`
+double-buffers the chunked read through two staging tiles
+(`tget_stage_ping` / `tget_stage_pong`), emitting
+`pto.comm.tget(…, buf(%ping, %pong) : …)` for pto-isa's ping-pong `TGET`
+overload — same contract as `put`, and likewise **requires both `chunk_rows` and
+`chunk_cols`**.
 
 Verifier: `dst` must be either `TensorType` or `DistributedTensorType` (matched
 via `AsTensorTypeLike`); `src` must be `DistributedTensorType`; `peer` must be a

@@ -31,6 +31,16 @@
  *     pld.tensor.put(dst, peer, src, dst_offsets, src_offsets, shape,
  *                    *, atomic: int) -> Unknown
  *
+ * Optional ``chunk_rows`` / ``chunk_cols`` int attrs size the VEC staging tile
+ * to a sub-tile of the flattened transfer; the optional ``pipeline`` bool attr
+ * requests ping-pong double-buffering and is lowered by
+ * ``ConvertTensorToTileOps`` into a *second* ``tile.create`` staging tile threaded
+ * into ``pld.tile.put`` (``pipeline=True`` requires both chunk dims set). The
+ * tile-level form therefore carries an optional second ``stage`` operand::
+ *
+ *     pld.tile.put(dst, peer, src, stage[, stage2]
+ *                  [, dst_offsets, src_offsets, shape], *, atomic: int) -> Unknown
+ *
  * The ``atomic`` integer is the underlying value of :enum:`AtomicType`
  * (``include/pypto/ir/comm.h``); the deducer validates the int against the
  * enum range so codegen can cast back without a separate guard. The DSL
@@ -209,12 +219,37 @@ std::vector<ExprPtr> ValidatePutRegionArgs(const std::vector<ExprPtr>& args, siz
   return transfer_shape->elements_;
 }
 
-// Read an optional int attr (chunk_rows / chunk_cols), defaulting to 0 (unset).
+// Read an optional int attr (chunk_rows / chunk_cols / pipeline), defaulting to
+// 0 (unset).
 int ReadIntKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs, const std::string& key) {
   for (const auto& [k, v] : kwargs) {
     if (k == key) return AnyCast<int>(v, key);
   }
   return 0;
+}
+
+// Read an optional bool attr (pipeline), defaulting to false (unset).
+bool ReadBoolKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs, const std::string& key) {
+  for (const auto& [k, v] : kwargs) {
+    if (k == key) return AnyCast<bool>(v, key);
+  }
+  return false;
+}
+
+// Double-buffering (ping-pong) is only meaningful when the transfer is chunked
+// through a staging tile smaller than the full extent — pto-isa then slides the
+// transfer through the two tiles with overlapped TLOAD/TSTORE. Requiring both
+// chunk dims keeps the staging tile fully bounded before the second tile is
+// allocated. User-facing (driven by the `pipeline` kwarg on pld.tensor.put/get).
+void ValidatePipelineHasChunk(const std::vector<std::pair<std::string, std::any>>& kwargs,
+                              const std::string& op_name) {
+  if (!ReadBoolKwarg(kwargs, "pipeline")) return;
+  const int chunk_rows = ReadIntKwarg(kwargs, "chunk_rows");
+  const int chunk_cols = ReadIntKwarg(kwargs, "chunk_cols");
+  CHECK(chunk_rows > 0 && chunk_cols > 0)
+      << op_name
+      << ": pipeline=True requires both chunk_rows>0 and chunk_cols>0 (double-buffering needs a "
+         "chunked transfer to ping-pong through two staging tiles)";
 }
 
 // A dynamic transfer extent (a runtime sub-extent of the fixed window) needs a
@@ -288,6 +323,22 @@ void ValidateStageFitsTransfer(const std::vector<ExprPtr>& stage_shape,
       << transfer_cols << " (pto-isa auto-chunks a smaller stage)";
 }
 
+// Validate one VEC staging tile operand: must be a 2D TileType whose dtype
+// matches the distributed dst. Returns the TileType for downstream extent
+// checks. Shared by the single-stage and (when present) the second ping-pong
+// stage of pld.tile.put / pld.tile.get.
+TileTypePtr ValidateStageTile(const ExprPtr& stage, const DistributedTensorTypePtr& dst_type,
+                              const std::string& what) {
+  auto stage_type = As<TileType>(stage->GetType());
+  CHECK(stage_type) << what << " must be a TileType, got " << stage->GetType()->TypeName();
+  CHECK(stage_type->dtype_ == dst_type->dtype_)
+      << what << " dtype must match dst dtype, got stage=" << stage_type->dtype_.ToString()
+      << " dst=" << dst_type->dtype_.ToString();
+  CHECK(stage_type->shape_.size() == 2)
+      << what << " must be a 2D VEC staging tile, got rank " << stage_type->shape_.size();
+  return stage_type;
+}
+
 TypePtr DeducePutType(const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
   CHECK(args.size() == 3 || args.size() == 6)
@@ -307,34 +358,44 @@ TypePtr DeducePutType(const std::vector<ExprPtr>& args,
     transfer_shape = ValidatePutRegionArgs(args, 3, dst_type->shape_, src_type->shape_, "pld.tensor.put");
   }
   ValidateDynamicTransferHasChunk(transfer_shape, kwargs, "pld.tensor.put");
+  ValidatePipelineHasChunk(kwargs, "pld.tensor.put");
   // Side-effect-only: no SSA result for downstream consumers.
   return GetUnknownType();
 }
 
 TypePtr DeducePutTileType(const std::vector<ExprPtr>& args,
                           const std::vector<std::pair<std::string, std::any>>& kwargs) {
-  CHECK(args.size() == 4 || args.size() == 7)
-      << "pld.tile.put requires 4 positional arguments (dst, peer, src, stage) or 7 "
-         "(dst, peer, src, stage, dst_offsets, src_offsets, shape), but got "
-      << args.size();
-  for (size_t i = 0; i < args.size(); ++i) {
+  const size_t n = args.size();
+  CHECK(n == 4 || n == 5 || n == 7 || n == 8)
+      << "pld.tile.put requires 4/5 (single/double stage, full-slice) or 7/8 (single/double stage, "
+         "subregion) positional arguments (dst, peer, src, stage[, stage2][, dst_offsets, "
+         "src_offsets, shape]), but got "
+      << n;
+  for (size_t i = 0; i < n; ++i) {
     CHECK(args[i]) << "pld.tile.put positional argument #" << i << " must not be null";
   }
-  ValidatePutContract(args[0], args[1], args[2], kwargs, "pld.tile.put", args.size() == 4);
+  const bool has_stage2 = (n == 5 || n == 8);
+  const bool has_region = (n == 7 || n == 8);
+  const size_t region_base = 4 + (has_stage2 ? 1 : 0);
+  ValidatePutContract(args[0], args[1], args[2], kwargs, "pld.tile.put", !has_region);
 
-  auto stage_type = As<TileType>(args[3]->GetType());
-  CHECK(stage_type) << "pld.tile.put stage must be a TileType, got " << args[3]->GetType()->TypeName();
   auto dst_type = As<DistributedTensorType>(args[0]->GetType());
-  CHECK(stage_type->dtype_ == dst_type->dtype_)
-      << "pld.tile.put stage dtype must match dst dtype, got stage=" << stage_type->dtype_.ToString()
-      << " dst=" << dst_type->dtype_.ToString();
-  CHECK(stage_type->shape_.size() == 2)
-      << "pld.tile.put stage must be a 2D VEC staging tile, got rank " << stage_type->shape_.size();
+  auto stage_type = ValidateStageTile(args[3], dst_type, "pld.tile.put stage");
+  TileTypePtr stage2_type;
+  if (has_stage2) {
+    stage2_type = ValidateStageTile(args[4], dst_type, "pld.tile.put stage2");
+    // pto-isa ping/pong contract: the two staging tiles must be identical in
+    // shape (same dtype already enforced by ValidateStageTile against dst).
+    CHECK(AreExprsEqual(stage_type->shape_[0], stage2_type->shape_[0]) &&
+          AreExprsEqual(stage_type->shape_[1], stage2_type->shape_[1]))
+        << "pld.tile.put ping/pong staging tiles must have identical shape";
+  }
 
   auto src_type = AsTensorTypeLike(args[2]->GetType());
   std::vector<ExprPtr> transfer_shape = dst_type->shape_;
-  if (args.size() == 7) {
-    transfer_shape = ValidatePutRegionArgs(args, 4, dst_type->shape_, src_type->shape_, "pld.tile.put");
+  if (has_region) {
+    transfer_shape =
+        ValidatePutRegionArgs(args, region_base, dst_type->shape_, src_type->shape_, "pld.tile.put");
   }
 
   // The explicit stage tile (allocated by ConvertTensorToTileOps) is the 2-D VEC
@@ -342,9 +403,14 @@ TypePtr DeducePutTileType(const std::vector<ExprPtr>& args,
   // full transfer extent from the partition views and uses the stage tile's
   // rows/cols as its 2-D sliding chunk size, so the stage may be SMALLER than
   // the transfer (a single chunk). It must only not EXCEED the transfer in
-  // either flattened dim (rows = prod(leading dims), cols = innermost dim).
+  // either flattened dim (rows = prod(leading dims), cols = innermost dim). A
+  // second stage (ping/pong double-buffering) shares the same extent.
   ValidateStageFitsTransfer(stage_type->shape_, transfer_shape, args[0]->span_, args[3]->span_,
                             "pld.tile.put");
+  if (has_stage2) {
+    ValidateStageFitsTransfer(stage2_type->shape_, transfer_shape, args[0]->span_, args[4]->span_,
+                              "pld.tile.put");
+  }
 
   return GetUnknownType();
 }
@@ -371,9 +437,17 @@ REGISTER_OP("pld.tensor.put")
     .add_argument("peer", "Peer rank index (ScalarType, integer)")
     .add_argument("src",
                   "Local source — DistributedTensor (window-bound) or plain Tensor (same dtype as dst)")
+    .add_argument("dst_offsets",
+                  "Optional per-dim offsets (MakeTuple) into the peer's dst slice; present only in the "
+                  "subregion form (all three region args supplied together)")
+    .add_argument(
+        "src_offsets",
+        "Optional per-dim offsets (MakeTuple) into the local src; present only in the subregion form")
+    .add_argument("shape", "Optional per-dim transfer shape (MakeTuple); present only in the subregion form")
     .set_attr<int>("atomic")
     .set_attr<int>("chunk_rows")
     .set_attr<int>("chunk_cols")
+    .set_attr<bool>("pipeline")
     .no_memory_spec()
     .f_deduce_type(DeducePutType);
 
@@ -391,6 +465,16 @@ REGISTER_OP("pld.tile.put")
     .add_argument("src",
                   "Local source — DistributedTensor (window-bound) or plain Tensor (same dtype as dst)")
     .add_argument("stage", "VEC staging TileType (rows x cols <= flattened transfer; auto-chunked by TPUT)")
+    .add_argument("stage2",
+                  "Optional second VEC staging TileType (same shape as stage); when present, TPUT "
+                  "ping-pong double-buffers the chunked transfer through both tiles")
+    .add_argument("dst_offsets",
+                  "Optional per-dim offsets (MakeTuple) into the peer's dst slice; present only in the "
+                  "subregion form (all three region args supplied together)")
+    .add_argument(
+        "src_offsets",
+        "Optional per-dim offsets (MakeTuple) into the local src; present only in the subregion form")
+    .add_argument("shape", "Optional per-dim transfer shape (MakeTuple); present only in the subregion form")
     .set_attr<int>("atomic")
     .no_memory_spec()
     .f_deduce_type(DeducePutTileType);

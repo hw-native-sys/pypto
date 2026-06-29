@@ -68,6 +68,23 @@ def _validate_chunk(chunk_rows: int, chunk_cols: int, op_name: str) -> None:
             raise ValueError(f"{op_name} {name} must be non-negative (0 = full), got {value}")
 
 
+def _validate_pipeline(pipeline: bool, chunk_rows: int, chunk_cols: int, op_name: str) -> None:
+    """Validate the put/get ``pipeline`` (ping-pong double-buffering) kwarg.
+
+    Double-buffering only helps a chunked transfer (pto-isa slides it through two
+    staging tiles with overlapped TLOAD/TSTORE), so ``pipeline=True`` requires
+    both ``chunk_rows`` and ``chunk_cols`` to be set. The C++ deducer enforces the
+    same rule; this front check yields a clearer DSL-level error.
+    """
+    if not pipeline:
+        return
+    if not (chunk_rows > 0 and chunk_cols > 0):
+        raise ValueError(
+            f"{op_name} pipeline=True requires both chunk_rows>0 and chunk_cols>0 "
+            f"(got chunk_rows={chunk_rows}, chunk_cols={chunk_cols})"
+        )
+
+
 def alloc_window_buffer(size: IntLike, *, name: str = "") -> Ptr:
     """Declare a per-rank HCCL window-buffer in a comm-domain scope slot of ``size`` bytes.
 
@@ -153,6 +170,7 @@ def put(
     atomic: AtomicType = AtomicType.None_,
     chunk_rows: int = 0,
     chunk_cols: int = 0,
+    pipeline: bool = False,
 ) -> Call:
     """Cross-rank put: write the local slice ``src`` into the peer rank's slice of ``dst``.
 
@@ -199,8 +217,13 @@ def put(
             clamped to the transfer extent.
         chunk_cols: Optional VEC staging-tile column extent (keyword-only,
             ``0`` = full innermost dim). Pairs with ``chunk_rows``.
+        pipeline: Enable ping-pong double-buffering (keyword-only). When True,
+            ``ConvertTensorToTileOps`` allocates two staging tiles and pto-isa
+            TPUT overlaps TLOAD/TSTORE across chunks through them. Requires both
+            ``chunk_rows`` and ``chunk_cols`` to be set (> 0).
     """
     _validate_chunk(chunk_rows, chunk_cols, "pld.tensor.put")
+    _validate_pipeline(pipeline, chunk_rows, chunk_cols, "pld.tensor.put")
     dst_expr = _unwrap(dst)
     src_expr = _unwrap(src)
     if not isinstance(dst_expr, Expr) or not isinstance(dst_expr.type, _ir.DistributedTensorType):
@@ -217,7 +240,13 @@ def put(
 
     if not has_region:
         return _ir_tensor.put(
-            dst_expr, _unwrap(peer), src_expr, atomic=atomic, chunk_rows=chunk_rows, chunk_cols=chunk_cols
+            dst_expr,
+            _unwrap(peer),
+            src_expr,
+            atomic=atomic,
+            chunk_rows=chunk_rows,
+            chunk_cols=chunk_cols,
+            pipeline=pipeline,
         )
     assert dst_offsets is not None
     assert src_offsets is not None
@@ -232,6 +261,7 @@ def put(
         atomic=atomic,
         chunk_rows=chunk_rows,
         chunk_cols=chunk_cols,
+        pipeline=pipeline,
     )
 
 
@@ -245,6 +275,7 @@ def get(
     *,
     chunk_rows: int = 0,
     chunk_cols: int = 0,
+    pipeline: bool = False,
 ) -> Call:
     """Cross-rank get: read the peer rank's slice of ``src`` into local ``dst``.
 
@@ -276,11 +307,16 @@ def get(
             Oversized values are clamped to the transfer extent.
         chunk_cols: Optional VEC staging-tile column extent (keyword-only,
             ``0`` = full innermost dim). Pairs with ``chunk_rows``.
+        pipeline: Enable ping-pong double-buffering (keyword-only). When True,
+            ``ConvertTensorToTileOps`` allocates two staging tiles and pto-isa
+            TGET overlaps TLOAD/TSTORE across chunks through them. Requires both
+            ``chunk_rows`` and ``chunk_cols`` to be set (> 0).
 
     Returns:
         The underlying IR Call.
     """
     _validate_chunk(chunk_rows, chunk_cols, "pld.tensor.get")
+    _validate_pipeline(pipeline, chunk_rows, chunk_cols, "pld.tensor.get")
     dst_expr = _unwrap(dst)
     src_expr = _unwrap(src)
     if not isinstance(dst_expr, Expr) or not isinstance(
@@ -296,7 +332,14 @@ def get(
         raise ValueError("pld.tensor.get dst_offsets, src_offsets, and shape must be provided together")
 
     if not has_region:
-        return _ir_tensor.get(dst_expr, _unwrap(peer), src_expr, chunk_rows=chunk_rows, chunk_cols=chunk_cols)
+        return _ir_tensor.get(
+            dst_expr,
+            _unwrap(peer),
+            src_expr,
+            chunk_rows=chunk_rows,
+            chunk_cols=chunk_cols,
+            pipeline=pipeline,
+        )
     assert dst_offsets is not None
     assert src_offsets is not None
     assert shape is not None
@@ -309,6 +352,7 @@ def get(
         shape=_normalize_intlike(shape),
         chunk_rows=chunk_rows,
         chunk_cols=chunk_cols,
+        pipeline=pipeline,
     )
 
 

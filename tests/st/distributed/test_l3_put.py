@@ -128,6 +128,85 @@ def _build_ring_put_program():
     return RingPut
 
 
+# Pipeline (ping-pong) ring put: a window larger than the chunk so pto-isa TPUT
+# slides the transfer through two staging tiles. [PIPE_ROWS, PIPE_COLS] with a
+# [chunk_rows, chunk_cols] sub-tile gives a 2x2 chunk grid (>1 chunk) so the
+# ping-pong path actually engages.
+PIPE_ROWS = 8
+PIPE_COLS = 128
+PIPE_CHUNK_ROWS = 4
+PIPE_CHUNK_COLS = 64
+
+
+def _build_ring_put_pipeline_program():
+    """Ring put that double-buffers the cross-rank write (``pipeline=True``)."""
+
+    @pl.program
+    class RingPutPipeline:
+        @pl.function(type=pl.FunctionType.InCore)
+        def ring_step(
+            self,
+            inp: pl.Tensor[[PIPE_ROWS, PIPE_COLS], pl.FP32],
+            out: pl.Out[pl.Tensor[[PIPE_ROWS, PIPE_COLS], pl.FP32]],
+            src: pld.DistributedTensor[[PIPE_ROWS, PIPE_COLS], pl.FP32],
+            dst: pld.DistributedTensor[[PIPE_ROWS, PIPE_COLS], pl.FP32],
+            signal: pld.DistributedTensor[[1, 1], pl.INT32],
+            peer: pl.Scalar[pl.INT32],
+        ) -> pl.Tensor[[PIPE_ROWS, PIPE_COLS], pl.FP32]:
+            local = pl.load(inp, [0, 0], [PIPE_ROWS, PIPE_COLS])
+            src = pl.store(local, [0, 0], src)
+
+            # Double-buffered TPUT: pto-isa ping-pongs the [8, 128] transfer
+            # through two [4, 64] staging tiles.
+            pld.tensor.put(
+                dst,
+                peer=peer,
+                src=src,
+                atomic=pld.AtomicType.None_,
+                chunk_rows=PIPE_CHUNK_ROWS,
+                chunk_cols=PIPE_CHUNK_COLS,
+                pipeline=True,
+            )
+
+            pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
+            pld.system.wait(signal=signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Ge)
+
+            recv = pl.load(dst, [0, 0], [PIPE_ROWS, PIPE_COLS])
+            return pl.store(recv, [0, 0], out)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self,
+            inp: pl.Tensor[[PIPE_ROWS, PIPE_COLS], pl.FP32],
+            out: pl.Out[pl.Tensor[[PIPE_ROWS, PIPE_COLS], pl.FP32]],
+            src: pld.DistributedTensor[[PIPE_ROWS, PIPE_COLS], pl.FP32],
+            dst: pld.DistributedTensor[[PIPE_ROWS, PIPE_COLS], pl.FP32],
+            signal: pld.DistributedTensor[[1, 1], pl.INT32],
+            peer: pl.Scalar[pl.INT32],
+        ) -> pl.Tensor[[PIPE_ROWS, PIPE_COLS], pl.FP32]:
+            return self.ring_step(inp, out, src, dst, signal, peer)
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(
+            self,
+            inputs: pl.Tensor[[2, PIPE_ROWS, PIPE_COLS], pl.FP32],
+            outputs: pl.Out[pl.Tensor[[2, PIPE_ROWS, PIPE_COLS], pl.FP32]],
+        ) -> pl.Tensor[[2, PIPE_ROWS, PIPE_COLS], pl.FP32]:
+            nbytes = PIPE_ROWS * PIPE_COLS * 4
+            src_buf = pld.alloc_window_buffer(nbytes)
+            dst_buf = pld.alloc_window_buffer(nbytes)
+            signal_buf = pld.alloc_window_buffer(4)
+
+            for r in pl.range(pld.world_size()):
+                src = pld.window(src_buf, [PIPE_ROWS, PIPE_COLS], dtype=pl.FP32)
+                dst = pld.window(dst_buf, [PIPE_ROWS, PIPE_COLS], dtype=pl.FP32)
+                signal = pld.window(signal_buf, [1, 1], dtype=pl.INT32)
+                self.chip_orch(inputs[r], outputs[r], src, dst, signal, (r + 1) % pld.world_size(), device=r)
+            return outputs
+
+    return RingPutPipeline
+
+
 def _build_atomic_add_program():
     """Build the ``atomic=Add`` accumulation program at call time.
 
@@ -246,6 +325,40 @@ class TestL3Put:
         expected = torch.stack([inputs[1], inputs[0]])
         assert torch.allclose(outputs, expected), (
             f"ring put mismatch: max diff = {(outputs - expected).abs().max().item()}"
+        )
+
+    def test_ring_shuffle_pipeline(self, test_config, device_ids):
+        """Double-buffered overwrite: same ring shuffle, but the TPUT ping-pongs the
+        [8, 128] transfer through two [4, 64] staging tiles (``pipeline=True``)."""
+        if len(device_ids) < 2:
+            pytest.skip(f"ring put needs 2 devices, got {device_ids}")
+
+        program = _build_ring_put_pipeline_program()
+        compiled = ir.compile(
+            program,
+            platform=test_config.platform,
+            distributed_config=DistributedConfig(
+                device_ids=device_ids[:2],
+                num_sub_workers=0,
+            ),
+        )
+
+        # rank 0 holds 0..N-1; rank 1 holds 1000..1000+N-1. After the ring push,
+        # rank r's slice is overwritten by (r - 1) % nranks.
+        n = PIPE_ROWS * PIPE_COLS
+        inputs = torch.stack(
+            [
+                torch.arange(n, dtype=torch.float32).reshape(PIPE_ROWS, PIPE_COLS),
+                torch.arange(1000.0, 1000.0 + n, dtype=torch.float32).reshape(PIPE_ROWS, PIPE_COLS),
+            ]
+        )
+        outputs = torch.zeros((2, PIPE_ROWS, PIPE_COLS), dtype=torch.float32)
+
+        compiled(inputs, outputs)
+
+        expected = torch.stack([inputs[1], inputs[0]])
+        assert torch.allclose(outputs, expected), (
+            f"pipeline ring put mismatch: max diff = {(outputs - expected).abs().max().item()}"
         )
 
     @pytest.mark.skip(reason="atomic-add put still fails on the current runtime/PTOAS stack")

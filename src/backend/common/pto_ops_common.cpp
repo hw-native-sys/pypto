@@ -2906,10 +2906,16 @@ static std::string MakeWaitCodegenPTO(const CallPtr& op, codegen::CodegenBase& c
 // DeducePutTileType), not equal it.
 static std::string MakePutCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  CHECK(op->args_.size() == 4 || op->args_.size() == 7)
-      << "pld.tile.put requires 4 arguments (dst, peer, src, stage) or 7 arguments "
-         "(dst, peer, src, stage, dst_offsets, src_offsets, shape), got "
-      << op->args_.size();
+  const size_t n = op->args_.size();
+  CHECK(n == 4 || n == 5 || n == 7 || n == 8)
+      << "pld.tile.put requires 4/5 (single/double stage, full-slice) or 7/8 (single/double stage, "
+         "subregion) arguments (dst, peer, src, stage[, stage2][, dst_offsets, src_offsets, shape]), got "
+      << n;
+  // Optional second staging tile (ping-pong double-buffering). The region
+  // tuples, when present, always follow the stage operand(s).
+  const bool has_stage2 = (n == 5 || n == 8);
+  const bool has_region = (n == 7 || n == 8);
+  const size_t region_base = 4 + (has_stage2 ? 1 : 0);
 
   // dst: remote (peer-addressed) DistributedTensor destination.
   auto dst_binding = ResolveDistTensorBinding(op->args_[0], codegen, "pld.tile.put");
@@ -2941,7 +2947,7 @@ static std::string MakePutCodegenPTO(const CallPtr& op, codegen::CodegenBase& co
   std::vector<std::string> size_ssa;
   std::vector<ExprPtr> transfer_shape;
 
-  if (op->args_.size() == 4) {
+  if (!has_region) {
     // Full-slice partition views: offsets all-zero, sizes = full shape. dst and
     // src share the same partition_tensor_view type (same dtype + static shape).
     std::string c0 = codegen.GetOrEmitConstant(static_cast<int64_t>(0), DataType::INDEX);
@@ -2953,9 +2959,9 @@ static std::string MakePutCodegenPTO(const CallPtr& op, codegen::CodegenBase& co
     // Subregion partition views: user-facing tensor.put supplied the two
     // offset tuples plus a shared static transfer shape. The explicit stage
     // tile was sized to this transfer shape by ConvertTensorToTileOps.
-    auto dst_offsets_tuple = As<ir::MakeTuple>(op->args_[4]);
-    auto src_offsets_tuple = As<ir::MakeTuple>(op->args_[5]);
-    auto shape_tuple = As<ir::MakeTuple>(op->args_[6]);
+    auto dst_offsets_tuple = As<ir::MakeTuple>(op->args_[region_base]);
+    auto src_offsets_tuple = As<ir::MakeTuple>(op->args_[region_base + 1]);
+    auto shape_tuple = As<ir::MakeTuple>(op->args_[region_base + 2]);
     INTERNAL_CHECK_SPAN(dst_offsets_tuple, op->span_) << "pld.tile.put dst_offsets must be MakeTuple";
     INTERNAL_CHECK_SPAN(src_offsets_tuple, op->span_) << "pld.tile.put src_offsets must be MakeTuple";
     INTERNAL_CHECK_SPAN(shape_tuple, op->span_) << "pld.tile.put shape must be MakeTuple";
@@ -2995,9 +3001,20 @@ static std::string MakePutCodegenPTO(const CallPtr& op, codegen::CodegenBase& co
   INTERNAL_CHECK_SPAN(!stage_type.empty(), op->span_)
       << "Internal error: pld.tile.put stage tile " << stage << " has no tile_buf type annotation";
 
-  // The VEC staging tile is not synthesized here: pld.tensor.put has already
+  // Optional second staging tile selects pto-isa's ping-pong TPUT overload. Both
+  // tiles ride in a single buf(...) operand group, each contributing a trailing
+  // tile_buf type in the operand type list.
+  std::string stage2, stage2_type;
+  if (has_stage2) {
+    stage2 = codegen.GetExprAsCode(op->args_[4]);
+    stage2_type = codegen.GetExprTypeAnnotation(op->args_[4]);
+    INTERNAL_CHECK_SPAN(!stage2_type.empty(), op->span_)
+        << "Internal error: pld.tile.put stage2 tile " << stage2 << " has no tile_buf type annotation";
+  }
+
+  // The VEC staging tile(s) are not synthesized here: pld.tensor.put has already
   // been lowered to tile.create + pld.tile.put so the allocator can assign the
-  // stage tile a real UB address before this PTO emission step.
+  // stage tile(s) real UB addresses before this PTO emission step.
 
   // TPUT reads the local source GM through MTE2. If the caller populated that
   // source via an immediately preceding TSTORE, order the store before TPUT's
@@ -3006,9 +3023,11 @@ static std::string MakePutCodegenPTO(const CallPtr& op, codegen::CodegenBase& co
   codegen.Emit("pto.barrier <PIPE_ALL>");
 
   std::ostringstream tput;
-  tput << "pto.comm.tput(" << dst_pview << ", " << src_pview << ", buf(" << stage << ") : " << partition_type
-       << ", " << partition_type << ", " << stage_type << ") {atomicType = #pto<atomic_type " << atomic_attr
-       << ">}";
+  tput << "pto.comm.tput(" << dst_pview << ", " << src_pview << ", buf(" << stage;
+  if (has_stage2) tput << ", " << stage2;
+  tput << ") : " << partition_type << ", " << partition_type << ", " << stage_type;
+  if (has_stage2) tput << ", " << stage2_type;
+  tput << ") {atomicType = #pto<atomic_type " << atomic_attr << ">}";
   codegen.Emit(tput.str());
 
   // Drain TPUT's writes before returning, so a following `pld.system.notify`
@@ -3043,10 +3062,14 @@ static std::string MakePutCodegenPTO(const CallPtr& op, codegen::CodegenBase& co
 
 static std::string MakeGetCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  CHECK(op->args_.size() == 4 || op->args_.size() == 7)
-      << "pld.tile.get requires 4 arguments (dst, peer, src, stage) or 7 arguments "
-         "(dst, peer, src, stage, dst_offsets, src_offsets, shape), got "
-      << op->args_.size();
+  const size_t n = op->args_.size();
+  CHECK(n == 4 || n == 5 || n == 7 || n == 8)
+      << "pld.tile.get requires 4/5 (single/double stage, full-slice) or 7/8 (single/double stage, "
+         "subregion) arguments (dst, peer, src, stage[, stage2][, dst_offsets, src_offsets, shape]), got "
+      << n;
+  const bool has_stage2 = (n == 5 || n == 8);
+  const bool has_region = (n == 7 || n == 8);
+  const size_t region_base = 4 + (has_stage2 ? 1 : 0);
 
   // dst: local destination — DistributedTensor (window-bound) or plain Tensor.
   // Both reuse the local tensor_view created by EmitMakeTensorViews (no peer
@@ -3073,16 +3096,16 @@ static std::string MakeGetCodegenPTO(const CallPtr& op, codegen::CodegenBase& co
   std::vector<std::string> size_ssa;
   std::vector<ExprPtr> transfer_shape;
 
-  if (op->args_.size() == 4) {
+  if (!has_region) {
     std::string c0 = codegen.GetOrEmitConstant(static_cast<int64_t>(0), DataType::INDEX);
     dst_offsets.assign(rank, c0);
     src_offsets.assign(rank, c0);
     transfer_shape = dst_shape;
     size_ssa = GetSizeCodes(transfer_shape, codegen);
   } else {
-    auto dst_offsets_tuple = As<ir::MakeTuple>(op->args_[4]);
-    auto src_offsets_tuple = As<ir::MakeTuple>(op->args_[5]);
-    auto shape_tuple = As<ir::MakeTuple>(op->args_[6]);
+    auto dst_offsets_tuple = As<ir::MakeTuple>(op->args_[region_base]);
+    auto src_offsets_tuple = As<ir::MakeTuple>(op->args_[region_base + 1]);
+    auto shape_tuple = As<ir::MakeTuple>(op->args_[region_base + 2]);
     INTERNAL_CHECK_SPAN(dst_offsets_tuple, op->span_) << op->op_->name_ << " dst_offsets must be MakeTuple";
     INTERNAL_CHECK_SPAN(src_offsets_tuple, op->span_) << op->op_->name_ << " src_offsets must be MakeTuple";
     INTERNAL_CHECK_SPAN(shape_tuple, op->span_) << op->op_->name_ << " shape must be MakeTuple";
@@ -3118,14 +3141,27 @@ static std::string MakeGetCodegenPTO(const CallPtr& op, codegen::CodegenBase& co
   INTERNAL_CHECK_SPAN(!stage_type.empty(), op->span_)
       << "Internal error: pld.tile.get stage tile " << stage << " has no tile_buf type annotation";
 
+  // Optional second staging tile selects pto-isa's ping-pong TGET overload (both
+  // tiles in one buf(...) group, each with a trailing tile_buf type).
+  std::string stage2, stage2_type;
+  if (has_stage2) {
+    stage2 = codegen.GetExprAsCode(op->args_[4]);
+    stage2_type = codegen.GetExprTypeAnnotation(op->args_[4]);
+    INTERNAL_CHECK_SPAN(!stage2_type.empty(), op->span_)
+        << "Internal error: pld.tile.get stage2 tile " << stage2 << " has no tile_buf type annotation";
+  }
+
   // Mirror TPUT's ordering guard. TGET may read a peer source that was just
   // populated from a local TSTORE before the cross-rank handshake; keep the
   // local store visible before the peer-side TGET source read.
   codegen.Emit("pto.barrier <PIPE_ALL>");
 
   std::ostringstream tget;
-  tget << "pto.comm.tget(" << dst_pview << ", " << src_pview << ", buf(" << stage << ") : " << partition_type
-       << ", " << partition_type << ", " << stage_type << ")";
+  tget << "pto.comm.tget(" << dst_pview << ", " << src_pview << ", buf(" << stage;
+  if (has_stage2) tget << ", " << stage2;
+  tget << ") : " << partition_type << ", " << partition_type << ", " << stage_type;
+  if (has_stage2) tget << ", " << stage2_type;
+  tget << ")";
   codegen.Emit(tget.str());
 
   // Drain TGET's writes into the local dst before returning. As with TPUT, when

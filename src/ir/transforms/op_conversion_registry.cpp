@@ -2140,16 +2140,16 @@ ExprPtr MakeTputStageShape(const std::vector<ExprPtr>& transfer_shape,
   return std::make_shared<MakeTuple>(std::vector<ExprPtr>{rows_expr, cols_expr}, span);
 }
 
-// Drop the staging-only chunk_rows / chunk_cols attrs before forwarding the
-// remaining kwargs (e.g. put's `atomic`) to the tile-level op — the stage
-// tile's shape already encodes the chunk, so the tile-level op needs no chunk
-// attr of its own.
+// Drop the staging-only chunk_rows / chunk_cols / pipeline attrs before
+// forwarding the remaining kwargs (e.g. put's `atomic`) to the tile-level op —
+// the stage tile's shape encodes the chunk and the presence of a second stage
+// tile encodes the pipeline, so the tile-level op needs neither attr of its own.
 std::vector<std::pair<std::string, std::any>> StripChunkKwargs(
     const std::vector<std::pair<std::string, std::any>>& kwargs) {
   std::vector<std::pair<std::string, std::any>> out;
   out.reserve(kwargs.size());
   for (const auto& kv : kwargs) {
-    if (kv.first == "chunk_rows" || kv.first == "chunk_cols") continue;
+    if (kv.first == "chunk_rows" || kv.first == "chunk_cols" || kv.first == "pipeline") continue;
     out.push_back(kv);
   }
   return out;
@@ -2193,17 +2193,30 @@ void OpConversionRegistry::RegisterDistributedOps() {
 
         std::vector<std::pair<std::string, std::any>> create_kwargs = {{"dtype", dst_type->dtype_},
                                                                        {"target_memory", MemorySpace::Vec}};
-        auto create_call = op_reg.Create("tile.create", {shape_tuple}, create_kwargs, span);
-        auto stage_var = std::make_shared<Var>("tput_stage", create_call->GetType(), span);
         std::vector<StmtPtr> prologue;
-        prologue.push_back(std::make_shared<AssignStmt>(stage_var, create_call, span));
+        // Materialize one (single-buffer) or two (pipeline / ping-pong) VEC
+        // staging tiles. Two distinct tile.create Vars give the memory allocator
+        // two non-overlapping UB addresses, satisfying pto-isa's ping/pong
+        // constraint. `pipeline` was validated (both chunk dims set) by the
+        // deducer; here it only selects the buffer count.
+        const bool pipeline = GetKwargOr<bool>(kwargs, "pipeline", false);
+        auto make_stage = [&](const char* hint) -> ExprPtr {
+          auto create_call = op_reg.Create("tile.create", {shape_tuple}, create_kwargs, span);
+          auto v = std::make_shared<Var>(hint, create_call->GetType(), span);
+          prologue.push_back(std::make_shared<AssignStmt>(v, create_call, span));
+          return v;
+        };
 
-        std::vector<ExprPtr> put_args{args[0], args[1], args[2], stage_var};
+        std::vector<ExprPtr> put_args{args[0], args[1], args[2],
+                                      make_stage(pipeline ? "tput_stage_ping" : "tput_stage")};
+        if (pipeline) {
+          put_args.push_back(make_stage("tput_stage_pong"));
+        }
         if (args.size() == 6) {
           put_args.insert(put_args.end(), args.begin() + 3, args.end());
         }
-        // chunk_* attrs are consumed by the stage sizing above; forward only the
-        // tile-level op's own attrs (atomic).
+        // chunk_* / pipeline attrs are consumed by the stage sizing/count above;
+        // forward only the tile-level op's own attrs (atomic).
         auto put_call = op_reg.Create("pld.tile.put", put_args, StripChunkKwargs(kwargs), span);
         return ConversionResult{std::move(prologue), put_call};
       });
@@ -2243,18 +2256,29 @@ void OpConversionRegistry::RegisterDistributedOps() {
 
         std::vector<std::pair<std::string, std::any>> create_kwargs = {{"dtype", dst_type->dtype_},
                                                                        {"target_memory", MemorySpace::Vec}};
-        auto create_call = op_reg.Create("tile.create", {shape_tuple}, create_kwargs, span);
-        auto stage_var = std::make_shared<Var>("tget_stage", create_call->GetType(), span);
         std::vector<StmtPtr> prologue;
-        prologue.push_back(std::make_shared<AssignStmt>(stage_var, create_call, span));
+        // One (single-buffer) or two (pipeline / ping-pong) VEC staging tiles —
+        // mirror the put path. `pipeline` validated (both chunk dims) by the
+        // deducer.
+        const bool pipeline = GetKwargOr<bool>(kwargs, "pipeline", false);
+        auto make_stage = [&](const char* hint) -> ExprPtr {
+          auto create_call = op_reg.Create("tile.create", {shape_tuple}, create_kwargs, span);
+          auto v = std::make_shared<Var>(hint, create_call->GetType(), span);
+          prologue.push_back(std::make_shared<AssignStmt>(v, create_call, span));
+          return v;
+        };
 
-        std::vector<ExprPtr> get_args{args[0], args[1], args[2], stage_var};
+        std::vector<ExprPtr> get_args{args[0], args[1], args[2],
+                                      make_stage(pipeline ? "tget_stage_ping" : "tget_stage")};
+        if (pipeline) {
+          get_args.push_back(make_stage("tget_stage_pong"));
+        }
         if (args.size() == 6) {
           get_args.insert(get_args.end(), args.begin() + 3, args.end());
         }
-        // No kwargs forwarded: pld.tensor.get's only attrs are chunk_rows/
-        // chunk_cols, already consumed by the stage sizing above; pld.tile.get
-        // registers no attrs. (put forwards `atomic` via StripChunkKwargs.)
+        // No kwargs forwarded: pld.tensor.get's only attrs are chunk_rows /
+        // chunk_cols / pipeline, all consumed by the stage sizing/count above;
+        // pld.tile.get registers no attrs. (put forwards `atomic`.)
         auto get_call = op_reg.Create("pld.tile.get", get_args, span);
         return ConversionResult{std::move(prologue), get_call};
       });

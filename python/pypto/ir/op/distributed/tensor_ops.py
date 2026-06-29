@@ -70,7 +70,7 @@ def window(
     return _ir_core.create_op_call("pld.tensor.window", [buf, shape_tuple], {"dtype": dtype}, actual_span)
 
 
-def put(
+def put(  # noqa: PLR0913
     dst: Expr,
     peer: int | Expr,
     src: Expr,
@@ -81,6 +81,7 @@ def put(
     shape: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     chunk_rows: int = 0,
     chunk_cols: int = 0,
+    pipeline: bool = False,
     span: Span | None = None,
 ) -> Call:
     """Build a ``pld.tensor.put(dst, peer, src)`` Call.
@@ -100,6 +101,11 @@ def put(
     ``[rows, cols]`` extent (``rows`` = product of leading dims, ``cols`` =
     innermost dim); pto-isa TPUT then auto-chunks the full transfer through it.
     Packed as ``int`` attrs only when non-zero.
+
+    ``pipeline`` requests ping-pong double-buffering: ``ConvertTensorToTileOps``
+    then allocates *two* staging tiles and threads both into ``pld.tile.put``.
+    Packed as the ``pipeline`` int attr (``1``) only when True. The C++ deducer
+    requires both ``chunk_rows`` and ``chunk_cols`` to be set when ``pipeline``.
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     peer_expr = _normalize_expr(peer, actual_span, int_dtype=DataType.INT32)
@@ -118,11 +124,13 @@ def put(
                 _to_make_tuple(shape, actual_span),
             ]
         )
-    attrs: dict[str, int] = {"atomic": int(atomic)}
+    attrs: dict[str, int | bool] = {"atomic": int(atomic)}
     if chunk_rows:
         attrs["chunk_rows"] = int(chunk_rows)
     if chunk_cols:
         attrs["chunk_cols"] = int(chunk_cols)
+    if pipeline:
+        attrs["pipeline"] = True
     return _ir_core.create_op_call("pld.tensor.put", args, attrs, actual_span)
 
 
@@ -136,6 +144,7 @@ def get(
     shape: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     chunk_rows: int = 0,
     chunk_cols: int = 0,
+    pipeline: bool = False,
     span: Span | None = None,
 ) -> Call:
     """Build a ``pld.tensor.get(dst, peer, src)`` Call.
@@ -155,6 +164,11 @@ def get(
     sub-tile of the flattened transfer ``[rows, cols]`` extent so pto-isa TGET
     auto-chunks the full transfer through it. Packed as ``int`` attrs only when
     non-zero.
+
+    ``pipeline`` requests ping-pong double-buffering: ``ConvertTensorToTileOps``
+    then allocates *two* staging tiles and threads both into ``pld.tile.get``.
+    Packed as the ``pipeline`` int attr (``1``) only when True. The C++ deducer
+    requires both ``chunk_rows`` and ``chunk_cols`` to be set when ``pipeline``.
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     peer_expr = _normalize_expr(peer, actual_span, int_dtype=DataType.INT32)
@@ -173,11 +187,13 @@ def get(
                 _to_make_tuple(shape, actual_span),
             ]
         )
-    attrs: dict[str, int] = {}
+    attrs: dict[str, int | bool] = {}
     if chunk_rows:
         attrs["chunk_rows"] = int(chunk_rows)
     if chunk_cols:
         attrs["chunk_cols"] = int(chunk_cols)
+    if pipeline:
+        attrs["pipeline"] = True
     return _ir_core.create_op_call("pld.tensor.get", args, attrs, actual_span)
 
 
