@@ -1126,7 +1126,7 @@ std::optional<std::pair<std::vector<StmtPtr>, VarPtr>> TryFoldMatScratch(const M
   const auto* handler = ctx ? ctx->GetBackendHandler() : pypto::backend::GetBackend()->GetHandler();
   const bool requires_low_precision = handler && handler->RequiresLowPrecisionMatScratch();
   if (requires_low_precision && scratch_dtype != DataType::BF16 && scratch_dtype != DataType::FP16) {
-    hints.emplace_back(DiagnosticSeverity::PerfHint, kPassName, 0, "PH-AT-007",
+    hints.emplace_back(DiagnosticSeverity::PerfHint, kPassName, 0, "PH-AT-009",
                        "chained-matmul [" + std::to_string(t.M) + ", " + std::to_string(t.N) +
                            "] intermediate is " + scratch_dtype.ToString() +
                            "; this backend's oversized on-chip Mat scratch needs a bf16/f16 "

@@ -224,6 +224,7 @@ The pass emits `PerfHint` diagnostics rather than failing when it declines to re
 | `PH-AT-006` | Output exceeds L0c but neither M/N placement applies — `tile.matmul_acc`, a Vec left operand, or a result consumed on-chip that is **not** *entirely* a matmul operand (mixed store-plus-on-chip, or elementwise). A result consumed entirely as a matmul operand takes the **Mat-scratch** path (no hint) — *unless* its `[M, N]` scratch exceeds the backend's Mat/L1 capacity, in which case it is deferred here too (a conservative necessary-condition gate; a full packed-peak check is a follow-up). |
 | `PH-AT-007` | `K % k != 0` (K-boundary handling not yet supported) |
 | `PH-AT-008` | `ChooseL0Tile` returned a fallback configuration with a perf hint message |
+| `PH-AT-009` | Backend needs a bf16/f16 on-chip Mat scratch (e.g. Ascend910B) but the oversized chained-matmul intermediate is f32 — cast the matmul result to bf16/f16 before the consumer matmul; left on the deferred path |
 
 ## See also
 
