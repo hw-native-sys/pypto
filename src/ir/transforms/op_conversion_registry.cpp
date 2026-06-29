@@ -641,8 +641,7 @@ void OpConversionRegistry::RegisterMemoryOps() {
         }
         auto valid_shapes = MakeShapeTuple(valid_shape, span);
 
-        std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec},
-                                                                     {"transpose", false}};
+        std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec}};
         auto load_call =
             op_reg.Create("tile.load", {input, offsets, shapes, valid_shapes}, load_kwargs, span);
         auto load_var = std::make_shared<Var>("fillpad_expand_src", load_call->GetType(), span);

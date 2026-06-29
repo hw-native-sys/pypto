@@ -41,7 +41,7 @@ program_tiled = convert_pass(program)
 
 1. **预扫描 MatmulSlice 模式**：收集被 `tensor.matmul` / `tensor.matmul_acc` 使用的 `tensor.slice` 结果。这些需要生成 Mat 空间的 `tile.load`（自然 load，转置时再叠加零拷贝 `tile.transpose_view`），而非默认的 `tile.load(Vec)`。
 
-2. **插入 tile.load（入口加载）**：为每个被转换 op 直接使用的 `TensorType` 参数，在函数入口插入 `tile.load(param, zeros, shape, shape, target_memory=Vec, transpose=False)`。仅被自加载 op（`tensor.slice`、`tensor.matmul`、`tensor.read`、`tensor.write`、`tensor.assemble`）引用的参数不会生成额外加载。
+2. **插入 tile.load（入口加载）**：为每个被转换 op 直接使用的 `TensorType` 参数，在函数入口插入 `tile.load(param, zeros, shape, shape, target_memory=Vec)`。仅被自加载 op（`tensor.slice`、`tensor.matmul`、`tensor.read`、`tensor.write`、`tensor.assemble`）引用的参数不会生成额外加载。
 
 3. **通过 TensorToTileMutator 转换函数体**：遍历函数体，使用 `OpConversionRegistry` 将每个 `tensor.*` 调用转换为对应的 `tile.*` 调用。Mutator 通过控制流传播类型变更（IterArgs、ForStmt/WhileStmt return_vars、IfStmt return_vars）。
 
@@ -77,7 +77,7 @@ InCore、Spmd、Group 函数在本阶段被跳过 —— 它们已在阶段一 /
 
 ## MatmulSlice 模式
 
-当 `tensor.slice` 的结果被 `tensor.matmul` 或 `tensor.matmul_acc` 使用时，slice 必须生成 Mat 空间的 tile 而非 Vec 空间。本 pass 预扫描此模式，并根据 matmul kwargs 中的转置标志（LHS 使用 `a_trans`，RHS 使用 `b_trans`）生成 `tile.load(Mat, transpose=...)`。
+当 `tensor.slice` 的结果被 `tensor.matmul` 或 `tensor.matmul_acc` 使用时，slice 必须生成 Mat 空间的 tile 而非 Vec 空间。本 pass 预扫描此模式，生成自然的 Mat `tile.load`；转置操作数（LHS 用 `a_trans`，RHS 用 `b_trans`）在 matmul 处叠加零拷贝 `tile.transpose_view`。
 
 ## Transpose 下沉
 
