@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <string>
@@ -26,6 +27,7 @@
 #include <vector>
 
 #include "pypto/codegen/distributed/distributed_op_registry.h"
+#include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/comm.h"
@@ -301,6 +303,13 @@ void DistributedCodegen::EmitFunction(const ir::FunctionPtr& func) {
   // don't own comm allocations and skip this step.
   if (func->level_.has_value() && ir::LevelToLinquLevel(*func->level_) >= 3) {
     CollectHostOrchVarDefs(func);
+    // Recover pl.dynamic() shape dims into local bindings before the body walk
+    // so per-rank host slices that reference a dynamic dim resolve at runtime
+    // instead of raising NameError (#1873). Bindings are emitted at the top of
+    // the function body (ahead of the comm-domain ``with`` / for-loop), so they
+    // are visible everywhere below — Python ``with`` / ``for`` do not open a
+    // new scope.
+    EmitHostOrchDynamicDimBindings(func);
   }
 
   // Emit body. The host_orch body is wrapped by MaterializeCommDomainScopes
@@ -342,6 +351,153 @@ void DistributedCodegen::CollectHostOrchVarDefs(const ir::FunctionPtr& func) {
   if (!func->body_) return;
   HostOrchVarDefCollector collector(host_orch_var_defs_);
   collector.VisitStmt(func->body_);
+}
+
+namespace {
+
+// Extract a constant int from a tensor-shape sub-expression, or nullopt.
+std::optional<int64_t> ConstIntFromShapeExpr(const ir::ExprPtr& expr) {
+  if (auto ci = ir::As<ir::ConstInt>(expr)) return ci->value_;
+  return std::nullopt;
+}
+
+// True iff ``v`` is the Var ``target``. Raw pointer identity is sound: the IR
+// holds the canonical shared_ptr graph, so each Var has exactly one address
+// (matching ``CollectVarsFromShapeExpr``'s own ``Var*`` dedup).
+bool IsTargetVar(const ir::ExprPtr& v, const ir::VarPtr& target) {
+  auto var = ir::As<ir::Var>(v);
+  return var && var.get() == target.get();
+}
+
+}  // namespace
+
+std::string DistributedCodegen::InvertShapeDimForVar(const ir::ExprPtr& dim_expr,
+                                                     const ir::VarPtr& target_var,
+                                                     const std::string& shape_access) const {
+  // Bare var: shape == var  ->  var = shape_access.
+  if (IsTargetVar(dim_expr, target_var)) return shape_access;
+
+  // Add: shape == var + c (either operand order)  ->  var = (shape - c).
+  if (auto add = ir::As<ir::Add>(dim_expr)) {
+    if (IsTargetVar(add->left_, target_var)) {
+      if (auto c = ConstIntFromShapeExpr(add->right_)) {
+        return "(" + shape_access + " - " + std::to_string(*c) + ")";
+      }
+    }
+    if (IsTargetVar(add->right_, target_var)) {
+      if (auto c = ConstIntFromShapeExpr(add->left_)) {
+        return "(" + shape_access + " - " + std::to_string(*c) + ")";
+      }
+    }
+    return "";
+  }
+
+  // Sub: shape == var - c  ->  var = (shape + c);
+  //      shape == c - var  ->  var = (c - shape).
+  if (auto sub = ir::As<ir::Sub>(dim_expr)) {
+    if (IsTargetVar(sub->left_, target_var)) {
+      if (auto c = ConstIntFromShapeExpr(sub->right_)) {
+        return "(" + shape_access + " + " + std::to_string(*c) + ")";
+      }
+    }
+    if (IsTargetVar(sub->right_, target_var)) {
+      if (auto c = ConstIntFromShapeExpr(sub->left_)) {
+        return "(" + std::to_string(*c) + " - " + shape_access + ")";
+      }
+    }
+    return "";
+  }
+
+  // Mul is commutative: shape == var * c (either order)  ->  var = (shape // c).
+  // Integer ``//`` (not ``/``) keeps the recovered dim int-typed for slice
+  // bounds. ``c == 0`` is rejected (non-invertible).
+  if (auto mul = ir::As<ir::Mul>(dim_expr)) {
+    if (IsTargetVar(mul->left_, target_var)) {
+      if (auto c = ConstIntFromShapeExpr(mul->right_); c && *c != 0) {
+        return "(" + shape_access + " // " + std::to_string(*c) + ")";
+      }
+    }
+    if (IsTargetVar(mul->right_, target_var)) {
+      if (auto c = ConstIntFromShapeExpr(mul->left_); c && *c != 0) {
+        return "(" + shape_access + " // " + std::to_string(*c) + ")";
+      }
+    }
+    return "";
+  }
+
+  // FloorDiv is non-commutative: only shape == var // c inverts (to
+  // var = shape * c). ``c // var`` is not uniquely invertible against a runtime
+  // shape, so ``(c, var)`` is rejected.
+  if (auto fdiv = ir::As<ir::FloorDiv>(dim_expr)) {
+    if (IsTargetVar(fdiv->left_, target_var)) {
+      if (auto c = ConstIntFromShapeExpr(fdiv->right_); c && *c != 0) {
+        return "(" + shape_access + " * " + std::to_string(*c) + ")";
+      }
+    }
+    return "";
+  }
+
+  return "";
+}
+
+void DistributedCodegen::EmitHostOrchDynamicDimBindings(const ir::FunctionPtr& func) {
+  // Per-param/dim walk delegates to ``CollectVarsFromShapeExpr`` -- the same C++
+  // helper that drives the trailing ``%argN: index`` params on the device
+  // ``func.func`` signature -- so host-side dim recovery stays in lockstep with
+  // the compiled kernel by construction.
+  struct DimSource {
+    ir::VarPtr var;
+    std::string param_name;  // already SanitizeName-d
+    int dim_idx;
+    ir::ExprPtr expr;
+  };
+
+  // First-seen order + best (invertible-preferred) source per canonical Var*.
+  std::vector<const ir::Var*> dyn_var_order;
+  std::unordered_map<const ir::Var*, DimSource> dyn_var_best;
+
+  for (const auto& param : func->params_) {
+    auto tensor_type = ir::AsTensorTypeLike(param->GetType());
+    if (!tensor_type) continue;
+    const std::string param_name = SanitizeName(param->name_hint_);
+    for (size_t dim_idx = 0; dim_idx < tensor_type->shape_.size(); ++dim_idx) {
+      const auto& dim = tensor_type->shape_[dim_idx];
+      for (const auto& dyn_var : CollectVarsFromShapeExpr(dim)) {
+        const ir::Var* key = dyn_var.get();
+        auto it = dyn_var_best.find(key);
+        if (it == dyn_var_best.end()) {
+          dyn_var_order.push_back(key);
+          dyn_var_best.emplace(key, DimSource{dyn_var, param_name, static_cast<int>(dim_idx), dim});
+          continue;
+        }
+        // Upgrade source if the previously-seen dim is non-invertible and this
+        // one is, so a symbol first seen in a non-invertible form still gets
+        // pinned to a recoverable shape.
+        const bool prev_invertible = !InvertShapeDimForVar(it->second.expr, it->second.var, "S").empty();
+        const bool cur_invertible = !InvertShapeDimForVar(dim, dyn_var, "S").empty();
+        if (!prev_invertible && cur_invertible) {
+          it->second = DimSource{dyn_var, param_name, static_cast<int>(dim_idx), dim};
+        }
+      }
+    }
+  }
+
+  for (const ir::Var* key : dyn_var_order) {
+    const DimSource& src = dyn_var_best.at(key);
+    const std::string shape_access =
+        "tensors[\"" + src.param_name + "\"].shape[" + std::to_string(src.dim_idx) + "]";
+    const std::string value_expr = InvertShapeDimForVar(src.expr, src.var, shape_access);
+    // Surface a non-invertible dynamic dim as a documented user-facing
+    // limitation (mirrors the device-side ValueError), rather than silently
+    // leaving the symbol unbound. ``src.var`` is guaranteed non-null here.
+    CHECK_SPAN(!value_expr.empty(), src.var->span_)
+        << "Cannot recover dynamic dimension '" << src.var->name_hint_
+        << "' for host-orchestration codegen: it only appears inside non-invertible tensor-shape "
+        << "expressions. Host-slice dynamic dims must be recoverable from a runtime tensor shape via "
+        << "'var' or a single-var affine form (var +/-/*// const_int); at least one tensor parameter "
+        << "must expose the variable in one of these forms.";
+    emitter_.EmitLine(SanitizeName(src.var->name_hint_) + " = " + value_expr);
+  }
 }
 
 std::string DistributedCodegen::GetCommSlotSizeAsCode(const ir::ExprPtr& size_expr) {
