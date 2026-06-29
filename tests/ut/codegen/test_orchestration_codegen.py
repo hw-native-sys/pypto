@@ -6306,10 +6306,7 @@ class TestManualScopeCodegen:
         # The compiler-dep carry array must be sized by the outer loop trip M=4.
         # The emit name is derived from prev's return_var (SSA-base "prev").
         outer_arr = re.search(r"PTO2TaskId\s+(prev\w*)\[(" + str(M) + r")\];", code)
-        assert outer_arr, (
-            f"Expected PTO2TaskId <prev...>[{M}] (outer trip) in:\n{code}"
-        )
-        outer_name = outer_arr.group(1)
+        assert outer_arr, f"Expected PTO2TaskId <prev...>[{M}] (outer trip) in:\n{code}"
         # The init loop also iterates M times, not N.
         assert f"for (int64_t __init_i = 0; __init_i < {M}; ++__init_i)" in code, (
             f"Expected init loop bound {M} in:\n{code}"
