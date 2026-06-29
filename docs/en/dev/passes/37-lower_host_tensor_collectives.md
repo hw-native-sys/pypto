@@ -30,24 +30,22 @@ For a host-orchestrator call:
 data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
 signal = pld.tensor.barrier(signal)
 data = pld.tensor.broadcast(data, signal, root=0)
-data = pld.tensor.reduce_scatter(data, signal)
+data = pld.tensor.reduce_scatter(data, signal, op=pld.ReduceOp.Sum)
 data = pld.tensor.allgather(data, signal)
 ```
 
-the pass emits one `builtin.tensor.allreduce` call per participating device.
-When the surrounding comm-domain scope has an explicit device list, the pass
-emits a `SeqStmts`; otherwise it emits a sequential `for r in
+the pass emits the corresponding `builtin.tensor.*` dispatch per participating
+device.  When the surrounding comm-domain scope has an explicit device list,
+the pass emits a `SeqStmts`; otherwise it emits a sequential `for r in
 pld.system.world_size()` loop.
 
-Each generated builtin call:
-
-- uses the same `data` and `signal` args,
-- carries `attrs["device"]`, `attrs["op"]`, and `attrs["dtype"]`,
-- marks both args `InOut`,
-- returns the same distributed tensor type as `data`.
+Each generated builtin call carries the collective-specific args and kwarg
+attributes from the source `pld.tensor.*` call.  Window-bound INOUT tensors
+are threaded through as-is; scalar kwarg values (`op`, `root`, `dtype`) are
+forwarded to the builtin.
 
 Assignments preserve the user-facing rebind idiom by appending
-`data = <original data expr>` after the generated builtin calls.
+`<result> = <original expr>` after the generated builtin calls.
 
 ## Checks
 

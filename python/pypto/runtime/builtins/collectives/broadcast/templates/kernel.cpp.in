@@ -76,6 +76,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   TASSIGN(recv_tile, 0x10000);
 
   for (int64_t base = 0; base < numel; base += kTileCount) {
+    int32_t epoch = static_cast<int32_t>(base / kTileCount + 1);
     int64_t chunk64 = numel - base;
     if (chunk64 > kTileCount) chunk64 = kTileCount;
     int chunk = static_cast<int>(chunk64);
@@ -98,12 +99,12 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
       if (peer == my_rank) continue;
       __gm__ int32_t *remote_signal = CommRemotePtr(comm_ctx, signal_base + my_rank, peer);
       pto::comm::Signal sig(remote_signal);
-      pto::comm::TNOTIFY(sig, static_cast<int32_t>(1), pto::comm::NotifyOp::AtomicAdd);
+      pto::comm::TNOTIFY(sig, epoch, pto::comm::NotifyOp::AtomicAdd);
     }
     for (int peer = 0; peer < nranks; ++peer) {
       if (peer == my_rank) continue;
       pto::comm::Signal sig(signal_base + peer);
-      pto::comm::TWAIT(sig, static_cast<int32_t>(1), pto::comm::WaitCmp::GE);
+      pto::comm::TWAIT(sig, epoch, pto::comm::WaitCmp::GE);
     }
     pipe_barrier(PIPE_ALL);
 

@@ -1082,16 +1082,25 @@ class LowerCompositeOpsMutator : public IRMutator {
   }
 
  private:
-  [[nodiscard]] static bool ShouldSkipHostCollective(const std::string& op_name) {
+  [[nodiscard]] static bool ShouldSkipHostCollective(const CallPtr& call) {
+    if (!call || !call->op_) return false;
+    const auto& op_name = call->op_->name_;
+    // pld.tensor.allgather overloads: skip only the 2-arg HOST builtin form;
+    // the 4-arg InCore composite form must still be lowered by this pass.
+    if (op_name == "pld.tensor.allgather") {
+      return call->args_.size() == 2;
+    }
     static const std::unordered_set<std::string> kSkipHostCollectives = {
-        "pld.tensor.allreduce", "pld.tensor.allgather",      "pld.tensor.barrier",
-        "pld.tensor.broadcast", "pld.tensor.reduce_scatter",
+        "pld.tensor.allreduce",
+        "pld.tensor.barrier",
+        "pld.tensor.broadcast",
+        "pld.tensor.reduce_scatter",
     };
     return kSkipHostCollectives.count(op_name) > 0;
   }
 
   [[nodiscard]] CompositeLoweringFn LookupRule(const CallPtr& call) const {
-    if (skip_host_collectives_ && call && call->op_ && ShouldSkipHostCollective(call->op_->name_)) {
+    if (skip_host_collectives_ && ShouldSkipHostCollective(call)) {
       return nullptr;
     }
     return call && call->op_ ? LookupCompositeRule(call->op_->name_) : nullptr;

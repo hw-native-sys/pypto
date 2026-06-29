@@ -316,13 +316,12 @@ class DispatchAnalyzer : public IRVisitor {
                                         ResolveWindowAlloc(op->args_[1], op_name, "signal"), op->span_});
         return;
       }
-      INTERNAL_CHECK_SPAN(op->args_.size() == 3, op->span_)
+      INTERNAL_CHECK_SPAN(op->args_.size() == 4, op->span_)
           << "MaterializeCommDomainScopes: pld.tensor.allgather expects 2 args (host builtin) or "
-             "3 args (InCore composite)";
+             "4 args (InCore composite)";
       collective_consumers.push_back({ResolveWindowAlloc(op->args_[1], op_name, "target"),
                                       ResolveWindowAlloc(op->args_[2], op_name, "signal"), op->span_});
     }
-  }
   }
 
   void VisitExpr_(const CallPtr& op) override {

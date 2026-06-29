@@ -55,6 +55,11 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
 
   int my_rank = static_cast<int>(comm_ctx->rankId);
 
+  // NOTE: This barrier is single-use per signal buffer — NotifyOp::Set writes
+  // a constant 1 and TWAIT checks >= 1.  After the first barrier, signal slots
+  // stay satisfied.  The caller must provide a fresh (zero-initialised) signal
+  // buffer for each barrier call (pld.alloc_window_buffer satisfies this).
+
   for (int peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) continue;
     __gm__ int32_t *remote_signal = CommRemotePtr(comm_ctx, signal_base + my_rank, peer);

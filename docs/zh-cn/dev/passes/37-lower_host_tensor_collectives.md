@@ -30,23 +30,23 @@ builtin chip dispatch。它在
 data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
 signal = pld.tensor.barrier(signal)
 data = pld.tensor.broadcast(data, signal, root=0)
-data = pld.tensor.reduce_scatter(data, signal)
+data = pld.tensor.reduce_scatter(data, signal, op=pld.ReduceOp.Sum)
 data = pld.tensor.allgather(data, signal)
 ```
 
-本 pass 会为每个参与设备生成一个 `builtin.tensor.allreduce` 调用。若外层
+本 pass 会为每个参与设备生成对应的 `builtin.tensor.*` 调用（如
+`builtin.tensor.allreduce`、`builtin.tensor.barrier`、
+`builtin.tensor.broadcast`、`builtin.tensor.reduce_scatter`、
+`builtin.tensor.allgather`）。若外层
 comm-domain scope 带有显式 device 列表，则生成 `SeqStmts`；否则生成顺序
 `for r in pld.system.world_size()` 循环。
 
-每个生成的 builtin call：
-
-- 复用相同的 `data` 和 `signal` 参数；
-- 携带 `attrs["device"]`、`attrs["op"]` 和 `attrs["dtype"]`；
-- 将两个参数都标记为 `InOut`；
-- 返回与 `data` 相同的 distributed tensor type。
+每个生成的 builtin call 携带来源 `pld.tensor.*` 调用中 collective 特定的
+参数和 kwarg 属性。窗口绑定的 INOUT tensor 原样传递；标量 kwarg 值
+（`op`、`root`、`dtype`）转发给 builtin。
 
 若用户代码使用赋值形式，pass 会在生成的 builtin 调用之后追加
-`data = <original data expr>`，保留 public API 的 rebind 语义。
+`<result> = <original expr>`，保留 public API 的 rebind 语义。
 
 ## 检查
 
