@@ -144,9 +144,9 @@ class ReduceScatterMesh:
         signal_buf = pld.alloc_window_buffer(pld.world_size() * 4)  # NR x 1 x INT32
 
         for r in pl.range(pld.world_size()):
-            scratch = pld.window(scratch_buf, [1, SIZE], dtype=pl.FP32)
-            signal = pld.window(signal_buf, [pld.world_size(), 1], dtype=pl.INT32)
             for c in pl.range(pld.world_size()):
+                scratch = pld.window(scratch_buf, [1, SIZE], dtype=pl.FP32)
+                signal = pld.window(signal_buf, [pld.world_size(), 1], dtype=pl.INT32)
                 self.chip_orch(
                     inputs[r, 0:1, c * SIZE : (c + 1) * SIZE],
                     outputs[r, 0:1, c * SIZE : (c + 1) * SIZE],
