@@ -60,6 +60,7 @@ __all__ = [
     "transpose",
     "slice",
     "fillpad",
+    "fillpad_expand",
     "matmul",
     "batch_matmul",
     "matmul_acc",
@@ -658,6 +659,24 @@ def fillpad(value: T, pad_value: PadValue | int | float = PadValue.zero) -> T:
     if isinstance(value, Tile):
         return _tile.fillpad(value, pad_value)
     raise TypeError(f"pl.fillpad: expected Tensor or Tile, got {type(value).__name__}")
+
+
+def fillpad_expand(
+    value: T, shape: Sequence[IntLike], pad_value: PadValue | int | float = PadValue.zero
+) -> T:
+    """Copy a smaller source into a larger destination, padding the rest.
+
+    Dispatched by input type. The destination ``shape`` may be larger than the
+    source in either dimension; the source's valid region is copied into the
+    top-left of the destination and every other element is filled with
+    ``pad_value`` (``PadValue`` enum or the literal sugars ``0``, ``math.inf``,
+    ``-math.inf``).
+    """
+    if isinstance(value, Tensor):
+        return _tensor.fillpad_expand(value, shape, pad_value)
+    if isinstance(value, Tile):
+        return _tile.fillpad_expand(value, shape, pad_value)
+    raise TypeError(f"pl.fillpad_expand: expected Tensor or Tile, got {type(value).__name__}")
 
 
 # ---------------------------------------------------------------------------

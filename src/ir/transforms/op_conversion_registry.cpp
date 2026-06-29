@@ -624,6 +624,49 @@ void OpConversionRegistry::RegisterMemoryOps() {
         return ConversionResult{std::move(prologue), fillpad_call};
       });
 
+  // tensor.fillpad_expand → tile.fillpad_expand (with auto-load for TensorType inputs).
+  // args[0] = source (tensor or tile), args[1] = destination shape tuple.
+  RegisterCustom(
+      "tensor.fillpad_expand",
+      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+         const Span& span) -> ConversionResult {
+        INTERNAL_CHECK_SPAN(args.size() == 2, span)
+            << "tensor.fillpad_expand conversion expects 2 args (input, shape)";
+        auto& op_reg = OpRegistry::GetInstance();
+        const auto& input = args[0];
+        const auto& shape = args[1];
+
+        if (As<TileType>(input->GetType())) {
+          return ConversionResult{op_reg.Create("tile.fillpad_expand", {input, shape}, kwargs, span)};
+        }
+
+        auto tensor_type = As<TensorType>(input->GetType());
+        INTERNAL_CHECK_SPAN(tensor_type, span)
+            << "tensor.fillpad_expand conversion: input must be TensorType or TileType, got "
+            << input->GetType()->TypeName();
+
+        // Load the (smaller) source tensor into a tile carrying its valid region.
+        auto offsets = MakeZeroOffsets(tensor_type->shape_.size(), span);
+        auto shapes = MakeShapeTuple(tensor_type->shape_, span);
+        std::vector<ExprPtr> valid_shape = tensor_type->shape_;
+        if (tensor_type->tensor_view_.has_value() && !tensor_type->tensor_view_->valid_shape.empty()) {
+          valid_shape = tensor_type->tensor_view_->valid_shape;
+        }
+        auto valid_shapes = MakeShapeTuple(valid_shape, span);
+
+        std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec},
+                                                                     {"transpose", false}};
+        auto load_call =
+            op_reg.Create("tile.load", {input, offsets, shapes, valid_shapes}, load_kwargs, span);
+        auto load_var = std::make_shared<Var>("fillpad_expand_src", load_call->GetType(), span);
+
+        std::vector<StmtPtr> prologue;
+        prologue.push_back(std::make_shared<AssignStmt>(load_var, load_call, span));
+
+        auto expand_call = op_reg.Create("tile.fillpad_expand", {load_var, shape}, kwargs, span);
+        return ConversionResult{std::move(prologue), expand_call};
+      });
+
   // tensor.read → tensor.read (gm_tensor) or tile.read (local_tensor)
   // ``AsTensorTypeLike`` matches both ``TensorType`` and ``DistributedTensorType``
   // (a window-bound TensorType subclass). Distributed-tensor reads on the

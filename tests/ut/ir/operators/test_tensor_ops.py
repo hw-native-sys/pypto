@@ -1940,6 +1940,50 @@ def test_tensor_fillpad_clears_valid_shape():
     assert result_type.tensor_view.valid_shape[1] == dim16
 
 
+def test_tensor_fillpad_expand():
+    """tensor.fillpad_expand grows the tensor and marks it fully valid."""
+    span = ir.Span.unknown()
+    dim48 = ir.ConstInt(48, DataType.INT32, span)
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    tensor_view = ir.TensorView(
+        stride=[],
+        layout=ir.TensorLayout.ND,
+        valid_shape=[ir.ConstInt(40, DataType.INT32, span), ir.ConstInt(50, DataType.INT32, span)],
+    )
+    tensor_type = ir.TensorType([dim48, dim64], DataType.FP32, None, tensor_view)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    call = ir.op.tensor.fillpad_expand(tensor_var, [64, 128], pad_value=ir.PadValue.zero)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.fillpad_expand"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+    # Output physical shape is the requested (larger) shape, fully valid.
+    rows, cols = result_type.shape[0], result_type.shape[1]
+    assert isinstance(rows, ir.ConstInt)
+    assert isinstance(cols, ir.ConstInt)
+    assert rows.value == 64
+    assert cols.value == 128
+    assert result_type.tensor_view is not None
+    assert result_type.tensor_view.pad == ir.PadValue.zero
+    vrows = result_type.tensor_view.valid_shape[0]
+    assert isinstance(vrows, ir.ConstInt)
+    assert vrows.value == 64
+
+
+def test_tensor_fillpad_expand_shrink_raises():
+    """tensor.fillpad_expand rejects a destination smaller than the source."""
+    span = ir.Span.unknown()
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim64, dim64], DataType.FP32)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    with pytest.raises(ValueError, match="must be >= source dimension"):
+        ir.op.tensor.fillpad_expand(tensor_var, [32, 64], pad_value=ir.PadValue.zero)
+
+
 def test_tensor_set_validshape():
     """Test tensor.set_validshape sets valid-shape metadata on a 2D tensor."""
     span = ir.Span.unknown()

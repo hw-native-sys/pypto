@@ -27,6 +27,7 @@ __all__ = [
     "dim",
     "slice",
     "fillpad",
+    "fillpad_expand",
     "full",
     "ci",
     "arange",
@@ -453,6 +454,31 @@ def fillpad(tensor: Tensor, pad_value: PadValue | int | float = PadValue.zero) -
         Tensor wrapping the fillpad operation
     """
     call_expr = _ir_ops.fillpad(tensor.unwrap(), pad_value=pad_value)
+    return Tensor(expr=call_expr)
+
+
+def fillpad_expand(
+    tensor: Tensor, shape: Sequence[IntLike], pad_value: PadValue | int | float = PadValue.zero
+) -> Tensor:
+    """Copy a smaller source tensor into a larger destination tensor, padding the rest.
+
+    Unlike :func:`fillpad` (which keeps the same shape and only fills the invalid
+    view region), the destination ``shape`` may be larger than the source in
+    either dimension. The source's valid region is copied into the top-left of
+    the destination and every other element is filled with ``pad_value``.
+
+    Args:
+        tensor: Source tensor
+        shape: Destination shape; each dimension must be >= the source dimension
+        pad_value: ``PadValue`` enum (``zero`` / ``max`` / ``min``), or one of
+            the literal sugars ``0``, ``math.inf``, ``-math.inf``. Default is
+            ``PadValue.zero``. Other values raise — the hardware only supports
+            the three padding modes.
+
+    Returns:
+        Tensor wrapping the fillpad_expand operation (a new, larger tensor).
+    """
+    call_expr = _ir_ops.fillpad_expand(tensor.unwrap(), _normalize_intlike(shape), pad_value=pad_value)
     return Tensor(expr=call_expr)
 
 

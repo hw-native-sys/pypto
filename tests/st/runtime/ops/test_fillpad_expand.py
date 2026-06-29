@@ -238,6 +238,29 @@ class FillpadExpandRowINT32:
         return self.kernel(input_tensor, output)
 
 
+@pl.program
+class FillpadExpandTensorFP32:
+    """Tensor-level path: pl.fillpad_expand on a whole Tensor, lowered by
+    ConvertTensorToTileOps to load + tile.fillpad_expand."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[48, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+    ) -> pl.Tensor[[64, 64], pl.FP32]:
+        result: pl.Tensor[[64, 64], pl.FP32] = pl.fillpad_expand(a, [64, 64], pad_value=pl.PadValue.zero)
+        return pl.assemble(output, result, [0, 0])
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrator(
+        self,
+        a: pl.Tensor[[48, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+    ) -> pl.Tensor[[64, 64], pl.FP32]:
+        return self.kernel(a, output)
+
+
 # =============================================================================
 # Test cases — generalized golden shared by every scenario.
 # =============================================================================
@@ -407,6 +430,18 @@ class FillpadExpandRowINT32Case(_FillpadExpandCase):
     pad = "zero"
 
 
+class FillpadExpandTensorFP32Case(_FillpadExpandCase):
+    """Tensor-level entry point (pl.fillpad_expand on a Tensor)."""
+
+    program = FillpadExpandTensorFP32
+    case_name = "fillpad_expand_tensor_fp32"
+    src_shape = [48, 64]
+    valid_shape = [48, 64]
+    dst_shape = [64, 64]
+    dtype = DataType.FP32
+    pad = "zero"
+
+
 # =============================================================================
 # Tests
 # =============================================================================
@@ -449,6 +484,10 @@ class TestFillpadExpand:
 
     def test_row_expand_int32(self, test_runner):
         result = test_runner.run(FillpadExpandRowINT32Case())
+        assert result.passed, f"Test failed: {result.error}"
+
+    def test_tensor_level_fp32(self, test_runner):
+        result = test_runner.run(FillpadExpandTensorFP32Case())
         assert result.passed, f"Test failed: {result.error}"
 
 

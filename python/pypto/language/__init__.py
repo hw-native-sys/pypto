@@ -183,6 +183,7 @@ from .op.unified_ops import (
     exp,
     expands,
     fillpad,
+    fillpad_expand,
     fmod,
     fmods,
     matmul,
@@ -363,6 +364,7 @@ __all__ = [
     # Promoted tile-only
     "create_tile",
     "fillpad",
+    "fillpad_expand",
     "load",
     "store",
     "move",

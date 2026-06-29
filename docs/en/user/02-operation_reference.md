@@ -107,7 +107,7 @@ Transfer data between memory hierarchy levels.
 | `create` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: Mem = Mem.Vec) -> Tile` | Create tile at memory space |
 | `full` | `(shape: list[int], dtype: DataType, value: int \| float) -> Tile` | Create tile filled with constant |
 | `fillpad` | `(input: Tensor \| Tile, pad_value: PadValue \| int \| float = PadValue.zero) -> Tensor \| Tile` | Fill invalid view elements using the requested pad value; accepts the `PadValue.zero/max/min` enum or the literal sugars `0`, `0.0`, `math.inf`, `-math.inf` (other values raise). Tensor inputs lower to tile fillpad in InCore code |
-| `tile.fillpad_expand` | `(tile: Tile, shape: Sequence[IntLike], pad_value: PadValue \| int \| float = PadValue.zero) -> Tile` | Like `fillpad` but the destination `shape` may be **larger** than the source in either dimension: the source's valid region is copied to the top-left and every other element is filled with `pad_value`. Each destination dimension must be `>=` the source. Tile-namespace only (`pl.tile.fillpad_expand`) |
+| `fillpad_expand` | `(input: Tensor \| Tile, shape: Sequence[IntLike], pad_value: PadValue \| int \| float = PadValue.zero) -> Tensor \| Tile` | Like `fillpad` but the destination `shape` may be **larger** than the source in either dimension: the source's valid region is copied to the top-left and every other element is filled with `pad_value`. Each destination dimension must be `>=` the source. Tensor inputs lower to tile fillpad_expand in InCore code |
 | `get_block_idx` | `() -> Scalar` | Get current hardware block index (UINT64) |
 
 ## Tile Arithmetic (`pl.tile.*`)

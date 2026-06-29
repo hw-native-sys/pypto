@@ -329,6 +329,40 @@ def fillpad(
     )
 
 
+def fillpad_expand(
+    tensor: Expr,
+    shape: Sequence[int | Expr] | _ir_core.MakeTuple,
+    pad_value: PadValue | int | float = PadValue.zero,
+    span: Span | None = None,
+) -> Call:
+    """Copy a smaller source tensor into a larger destination tensor, padding the rest.
+
+    Unlike :func:`fillpad` (which keeps the same shape and only fills the invalid
+    view region), the destination ``shape`` may be larger than the source in
+    either dimension. The source's valid region is copied into the top-left of
+    the destination and every other element is filled with ``pad_value``.
+
+    Args:
+        tensor: Source tensor expression
+        shape: Destination shape; each dimension must be >= the source dimension
+        pad_value: ``PadValue`` enum (``zero`` / ``max`` / ``min``), or one of
+            the literal sugars ``0``, ``math.inf``, ``-math.inf``. Other values
+            raise — the hardware only supports the three padding modes.
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression creating the expanded and padded tensor
+    """
+    actual_span = _get_span_or_capture(span)
+    shape_tuple = _to_make_tuple(shape, actual_span)
+    return _ir_core.create_op_call(
+        "tensor.fillpad_expand",
+        [tensor, shape_tuple],
+        {"pad_value": normalize_pad_value(pad_value)},
+        actual_span,
+    )
+
+
 def matmul(
     lhs: Expr,
     rhs: Expr,

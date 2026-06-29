@@ -297,6 +297,65 @@ TypePtr DeduceTensorFillpadType(const std::vector<ExprPtr>& args,
                                       std::move(tensor_view));
 }
 
+TypePtr DeduceTensorFillpadExpandType(const std::vector<ExprPtr>& args,
+                                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  // tensor.fillpad_expand(tensor, shape) — the destination may be larger than the
+  // source in either dimension; the source's valid region is copied into the
+  // top-left of the destination and the remainder is filled with pad_value.
+  CHECK(args.size() == 2) << "tensor.fillpad_expand requires exactly 2 arguments (tensor, shape), but got "
+                          << args.size();
+
+  auto tensor_type = As<TensorType>(args[0]->GetType());
+  CHECK(tensor_type) << "tensor.fillpad_expand requires first argument to be a TensorType, but got "
+                     << args[0]->GetType()->TypeName();
+
+  auto shape_tuple = As<MakeTuple>(args[1]);
+  CHECK(shape_tuple) << "tensor.fillpad_expand shape must be a literal tuple of constants, but got "
+                     << args[1]->GetType()->TypeName();
+  const std::vector<ExprPtr>& new_shape = shape_tuple->elements_;
+  CHECK(new_shape.size() == tensor_type->shape_.size())
+      << "tensor.fillpad_expand shape rank (" << new_shape.size() << ") must match source rank ("
+      << tensor_type->shape_.size() << ")";
+
+  for (size_t i = 0; i < new_shape.size(); ++i) {
+    auto dst_dim = As<ConstInt>(new_shape[i]);
+    CHECK(dst_dim) << "tensor.fillpad_expand shape dimension " << i << " must be a constant integer";
+    CHECK(dst_dim->value_ > 0) << "tensor.fillpad_expand shape dimension " << i << " must be positive, got "
+                               << dst_dim->value_;
+    if (auto src_dim = As<ConstInt>(tensor_type->shape_[i])) {
+      CHECK(dst_dim->value_ >= src_dim->value_)
+          << "tensor.fillpad_expand destination dimension " << i << " (" << dst_dim->value_
+          << ") must be >= source dimension (" << src_dim->value_ << ")";
+    }
+  }
+
+  PadValue pad_value = PadValue::zero;
+  for (const auto& kv : kwargs) {
+    if (kv.first == "pad_value") {
+      pad_value = std::any_cast<PadValue>(kv.second);
+      CHECK(pad_value != PadValue::null)
+          << "tensor.fillpad_expand requires pad_value to be zero/max/min, not null";
+    }
+  }
+
+  // After expand the entire destination is valid. Inherit the source view layout;
+  // only the (larger) shape, valid_shape, and pad change.
+  std::optional<TensorView> tensor_view = tensor_type->tensor_view_;
+  if (tensor_view.has_value()) {
+    tensor_view->valid_shape = new_shape;
+    tensor_view->pad = pad_value;
+  } else {
+    TensorView view;
+    view.valid_shape = new_shape;
+    view.pad = pad_value;
+    tensor_view = view;
+  }
+
+  // The destination is larger than the source, so it cannot share the source's
+  // backing buffer — return a fresh tensor (no inherited MemRef).
+  return std::make_shared<TensorType>(new_shape, tensor_type->dtype_, std::nullopt, std::move(tensor_view));
+}
+
 TypePtr DeduceTensorAssembleType(const std::vector<ExprPtr>& args,
                                  const std::vector<std::pair<std::string, std::any>>& kwargs) {
   // tensor.assemble requires exactly 3 arguments: target, source, and offset tuple
@@ -477,6 +536,17 @@ REGISTER_OP("tensor.fillpad")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorFillpadType(args, kwargs);
+    });
+
+REGISTER_OP("tensor.fillpad_expand")
+    .set_op_category("TensorOp")
+    .set_description("Copy a smaller source tensor into a larger destination tensor, padding the remainder")
+    .add_argument("tensor", "Source tensor (TensorType)")
+    .add_argument("shape", "Destination shape (Tuple of ConstInt), each dim >= source dim")
+    .set_attr<PadValue>("pad_value")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorFillpadExpandType(args, kwargs);
     });
 
 REGISTER_OP("tensor.full")

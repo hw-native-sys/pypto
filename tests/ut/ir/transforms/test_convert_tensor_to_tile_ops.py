@@ -2072,6 +2072,17 @@ class TestGmLocalTensorConversion:
         )
         _assert_convert_equal(before, expected)
 
+    def test_tensor_fillpad_expand_converts_to_tile_fillpad_expand(self):
+        """tensor.fillpad_expand lowers to load + tile.fillpad_expand with the target shape."""
+        before, expected = _make_pair(
+            in_specs=[("x", [8, 32], DataType.FP32)],
+            out_shape=[16, 64],
+            out_dtype=DataType.FP32,
+            tensor_op=lambda ins: tensor_ops.fillpad_expand(ins[0], [16, 64], pad_value=PadValue.min),
+            tile_op=lambda ts: tile_ops.fillpad_expand(ts[0], [16, 64], pad_value=PadValue.min),
+        )
+        _assert_convert_equal(before, expected)
+
     def test_tensor_set_validshape_converts_to_tile_set_validshape(self):
         """tensor.set_validshape should lower to tile.set_validshape via RegisterSimple."""
         before, expected = _make_pair(
