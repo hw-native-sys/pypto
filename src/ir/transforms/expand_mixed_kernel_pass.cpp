@@ -96,7 +96,7 @@ const std::string* GetSplitReshapeOpName(const CallPtr& call) {
   if (!call) return nullptr;
   auto op = std::dynamic_pointer_cast<const Op>(call->op_);
   if (!op) return nullptr;
-  if (op->name_ == "tile.aiv_shard" || op->name_ == "tile.aic_gather") return &op->name_;
+  if (IsOp(op, "tile.aiv_shard") || IsOp(op, "tile.aic_gather")) return &op->name_;
   return nullptr;
 }
 
@@ -104,8 +104,11 @@ bool IsSplitReshapeOp(const CallPtr& call) { return GetSplitReshapeOpName(call) 
 
 CVDirection SplitReshapeDirection(const std::string& op_name) {
   // aiv_shard pushes from the cube lane into the vector lane; aic_gather is its
-  // inverse (vector lane pushes into the cube lane).
-  return (op_name == "tile.aiv_shard") ? CVDirection::CUBE_TO_VECTOR : CVDirection::VECTOR_TO_CUBE;
+  // inverse (vector lane pushes into the cube lane). Route the literal through the
+  // registry getter (GetOp throws on a typo) and match by canonical name, mirroring
+  // the IsOp convention for sites that hold only the op name string.
+  return (op_name == OpRegistry::GetInstance().GetOp("tile.aiv_shard")->name_) ? CVDirection::CUBE_TO_VECTOR
+                                                                               : CVDirection::VECTOR_TO_CUBE;
 }
 
 /// Verify no explicit split-reshape op (tile.aiv_shard / tile.aic_gather)
@@ -149,9 +152,7 @@ bool IsGetSubblockIdxBinding(const StmtPtr& stmt) {
   auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt);
   if (!assign) return false;
   auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
-  if (!call) return false;
-  auto op = std::dynamic_pointer_cast<const Op>(call->op_);
-  return op && op->name_ == "tile.get_subblock_idx";
+  return IsOp(call, "tile.get_subblock_idx");
 }
 
 // Like PrependPipeSetup, but if `body` begins with a get_subblock_idx binding the

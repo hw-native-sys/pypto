@@ -51,26 +51,25 @@ bool IsReduceOnSplitAxis(const CallPtr& call, int split_dim) {
   // Calls with a non-null op_, so this guard correctly skips Submits (no
   // SubmitPtr handling needed — see pass-submit-awareness.md).
   if (!call->op_) return false;
-  const auto& name = call->op_->name_;
 
   auto input_tile_type = [&]() -> std::shared_ptr<const TileType> {
     if (call->args_.empty()) return nullptr;
     return std::dynamic_pointer_cast<const TileType>(call->args_[0]->GetType());
   };
 
-  if (name == "tile.row_sum" || name == "tile.row_max" || name == "tile.row_min" || name == "tile.row_prod" ||
-      name == "tile.row_argmax" || name == "tile.row_argmin") {
+  if (IsOp(call, "tile.row_sum") || IsOp(call, "tile.row_max") || IsOp(call, "tile.row_min") ||
+      IsOp(call, "tile.row_prod") || IsOp(call, "tile.row_argmax") || IsOp(call, "tile.row_argmin")) {
     auto tt = input_tile_type();
     int last_axis = tt ? static_cast<int>(tt->shape_.size()) - 1 : 1;
     return split_dim == last_axis;
   }
   // Column reductions collapse the first axis (axis 0). Splitting on that axis
   // (SplitMode::UpDown) would leave each lane with a partial reduction.
-  if (name == "tile.col_sum" || name == "tile.col_max" || name == "tile.col_min" || name == "tile.col_prod" ||
-      name == "tile.col_argmax" || name == "tile.col_argmin") {
+  if (IsOp(call, "tile.col_sum") || IsOp(call, "tile.col_max") || IsOp(call, "tile.col_min") ||
+      IsOp(call, "tile.col_prod") || IsOp(call, "tile.col_argmax") || IsOp(call, "tile.col_argmin")) {
     return split_dim == 0;
   }
-  if (name == "tile.sum" || name == "tile.max" || name == "tile.min") {
+  if (IsOp(call, "tile.sum") || IsOp(call, "tile.max") || IsOp(call, "tile.min")) {
     int axis = call->GetKwarg<int>("axis", -1);
     auto tt = input_tile_type();
     if (axis < 0 && tt) {
@@ -296,7 +295,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
 
     const auto& op_name = call->op_->name_;
 
-    if (op_name == "tile.tpush_to_aiv" || op_name == "tile.tpush_to_aic") {
+    if (IsOp(call, "tile.tpush_to_aiv") || IsOp(call, "tile.tpush_to_aic")) {
       auto new_call = RebuildCallWithSplit(call, split_int);
       return std::make_shared<AssignStmt>(assign->var_, new_call, assign->span_);
     }
@@ -304,11 +303,11 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
     // tpop_from_aic: AIV consumes from cube — halve the popped tile to match split vector lanes.
     // tpop_from_aiv: AIC consumes from vector — keep full tile shape; only sync split attribute
     // (vector-side split affects AIV compute, not the matmul operand tile delivered to cube).
-    if (op_name == "tile.tpop_from_aiv") {
+    if (IsOp(call, "tile.tpop_from_aiv")) {
       auto new_call = RebuildCallWithSplit(call, split_int);
       return std::make_shared<AssignStmt>(assign->var_, new_call, assign->span_);
     }
-    if (op_name == "tile.tpop_from_aic") {
+    if (IsOp(call, "tile.tpop_from_aic")) {
       auto tt = std::dynamic_pointer_cast<const TileType>(call->GetType());
       auto new_call = RebuildTpopWithHalvedShape(call, split_int, split_dim, subblock_idx);
       auto new_var =
@@ -324,7 +323,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
 
     // AIV only: tile.load — halve result shape, halve shape/valid_shape args, adjust offset.
     // Singleton split-dim tiles (e.g. broadcast [1, 128] under UP_DOWN) are preserved as-is.
-    if (is_aiv && op_name == "tile.load" && call->args_.size() >= 4) {
+    if (is_aiv && IsOp(call, "tile.load") && call->args_.size() >= 4) {
       auto tt = std::dynamic_pointer_cast<const TileType>(call->GetType());
       bool is_singleton =
           tt && split_dim < static_cast<int>(tt->shape_.size()) && IsSingletonDim(tt->shape_[split_dim]);
@@ -365,7 +364,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
     }
 
     // AIV only: tile.store — adjust offset using tracked tile info
-    if (is_aiv && op_name == "tile.store" && call->args_.size() >= 3) {
+    if (is_aiv && IsOp(call, "tile.store") && call->args_.size() >= 3) {
       auto tile_var = std::dynamic_pointer_cast<const Var>(call->args_[0]);
       if (tile_var) {
         auto it = tile_vars.find(tile_var.get());
@@ -407,7 +406,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
         // width and follow it with a per-subblock column slice so each lane reads
         // its own half. Reshapes whose input is already split fall through to the
         // plain result-halving below (their producer already partitioned the data).
-        if (op_name == "tile.reshape") {
+        if (IsOp(call, "tile.reshape")) {
           auto input_var = AsVarLike(call->args_[0]);
           bool input_is_split = input_var && tile_vars.count(input_var.get()) != 0;
           auto half_const = std::dynamic_pointer_cast<const ConstInt>(half_dim_size);
@@ -457,11 +456,11 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
 
         auto new_result_type = HalveTileShape(call->GetType(), split_dim, subblock_idx);
         std::vector<ExprPtr> new_args = call->args_;
-        if ((op_name == "tile.full" || op_name == "tile.create") && call->args_.size() >= 1) {
+        if ((IsOp(call, "tile.full") || IsOp(call, "tile.create")) && call->args_.size() >= 1) {
           new_args[0] = HalveTupleElement(call->args_[0], split_dim);
-        } else if (op_name == "tile.reshape" && call->args_.size() >= 2) {
+        } else if (IsOp(call, "tile.reshape") && call->args_.size() >= 2) {
           new_args[1] = HalveTupleElement(call->args_[1], split_dim);
-        } else if (op_name == "tile.slice" && call->args_.size() >= 3) {
+        } else if (IsOp(call, "tile.slice") && call->args_.size() >= 3) {
           // tile.slice = (src, shape, offset[, valid_shape[, drop_dims]]). The
           // generic result-type halving above shrinks the split dim of the
           // result TileType, but the static shape tuple (arg[1]) is left at full
@@ -495,7 +494,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
             new_args[3] = LocalizeTupleElementForSplit(call->args_[3], split_dim, tt->shape_[split_dim],
                                                        half_dim_size, subblock_idx);
           }
-        } else if (op_name == "tile.set_validshape" && call->args_.size() == 3) {
+        } else if (IsOp(call, "tile.set_validshape") && call->args_.size() == 3) {
           // args = (tile, valid_row, valid_col). Halving the result type alone
           // leaves the split-dim valid operand at its full pre-split extent, so
           // a full/overflowing operand exceeds the halved physical box (PTOAS
@@ -528,14 +527,12 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
     auto call = std::dynamic_pointer_cast<const Call>(eval->expr_);
     if (!call || !call->op_) return stmt;
 
-    const auto& op_name = call->op_->name_;
-
-    if (op_name == "tile.tpush_to_aiv" || op_name == "tile.tpush_to_aic") {
+    if (IsOp(call, "tile.tpush_to_aiv") || IsOp(call, "tile.tpush_to_aic")) {
       auto new_call = RebuildCallWithSplit(call, split_int);
       return std::make_shared<EvalStmt>(new_call, eval->span_);
     }
 
-    if (is_aiv && op_name == "tile.store" && call->args_.size() >= 3) {
+    if (is_aiv && IsOp(call, "tile.store") && call->args_.size() >= 3) {
       auto tile_var = std::dynamic_pointer_cast<const Var>(call->args_[0]);
       if (tile_var) {
         auto it = tile_vars.find(tile_var.get());

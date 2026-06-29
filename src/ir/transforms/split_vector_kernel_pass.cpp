@@ -81,9 +81,9 @@ bool RequiresNoSplitDualAivSync(const FunctionPtr& func) {
 // marked, so it can never double-halve an already-lowered auto-split function.
 // ---------------------------------------------------------------------------
 
-bool IsCrossCoreSplitOp(const std::string& op_name) {
-  return op_name == "tile.tpush_to_aiv" || op_name == "tile.tpush_to_aic" ||
-         op_name == "tile.tpop_from_aiv" || op_name == "tile.tpop_from_aic";
+bool IsCrossCoreSplitOp(const OpPtr& op) {
+  return IsOp(op, "tile.tpush_to_aiv") || IsOp(op, "tile.tpush_to_aic") || IsOp(op, "tile.tpop_from_aiv") ||
+         IsOp(op, "tile.tpop_from_aic");
 }
 
 std::optional<SplitMode> SplitModeFromInt(int split) {
@@ -115,7 +115,7 @@ class CrossCoreSplitCollector : public IRVisitor {
   std::optional<SplitMode> inferred_mode_;
 
   void ConsiderCall(const CallPtr& call) {
-    if (!call || !call->op_ || !IsCrossCoreSplitOp(call->op_->name_)) return;
+    if (!call || !call->op_ || !IsCrossCoreSplitOp(call->op_)) return;
 
     auto mode = SplitModeFromInt(call->GetKwarg<int>("split", 0));
     if (!mode.has_value()) return;
@@ -212,8 +212,7 @@ CallPtr RebuildLane1CallWithZeroValidShape(const CallPtr& call, const ExprReplac
     new_args.push_back(new_arg);
   }
 
-  const std::string& op_name = call->op_->name_;
-  if (op_name == "tile.load" && new_args.size() >= 3) {
+  if (IsOp(call, "tile.load") && new_args.size() >= 3) {
     auto new_type = WithZeroValidShape(call->GetType(), call->span_);
     auto tile_type = std::dynamic_pointer_cast<const TileType>(new_type);
     if (!tile_type) return call;
@@ -227,7 +226,7 @@ CallPtr RebuildLane1CallWithZeroValidShape(const CallPtr& call, const ExprReplac
     auto create_op = OpRegistry::GetInstance().GetOp("tile.create");
     return std::make_shared<Call>(create_op, std::vector<ExprPtr>{new_args[2]}, std::move(kwargs), new_type,
                                   call->span_);
-  } else if (op_name == "tile.slice" && new_args.size() >= 3) {
+  } else if (IsOp(call, "tile.slice") && new_args.size() >= 3) {
     // tile.slice is a pure view with no cross-core sync side effect, so in the
     // replay lane we only need an empty tile of the slice's result shape for the
     // downstream consumer to run as a no-op. Materialize it as tile.create (like
@@ -253,7 +252,7 @@ CallPtr RebuildLane1CallWithZeroValidShape(const CallPtr& call, const ExprReplac
     auto create_op = OpRegistry::GetInstance().GetOp("tile.create");
     return std::make_shared<Call>(create_op, std::vector<ExprPtr>{new_args[1]}, std::move(kwargs), new_type,
                                   call->span_);
-  } else if (op_name == "tile.transpose") {
+  } else if (IsOp(call, "tile.transpose")) {
     // tile.transpose lowers to a pto-isa op that hangs the AICore (507018) when
     // every operand is a zero-valid replay tile — the same static/zero-valid
     // hazard gh#1649 hit for subview slices. The replay result is discarded, so
@@ -275,7 +274,7 @@ CallPtr RebuildLane1CallWithZeroValidShape(const CallPtr& call, const ExprReplac
     auto create_op = OpRegistry::GetInstance().GetOp("tile.create");
     return std::make_shared<Call>(create_op, std::vector<ExprPtr>{shape_tuple}, std::move(kwargs), new_type,
                                   call->span_);
-  } else if (op_name == "tile.set_validshape" && new_args.size() == 3) {
+  } else if (IsOp(call, "tile.set_validshape") && new_args.size() == 3) {
     new_args[1] = MakeIndexConst(0, call->span_);
     new_args[2] = MakeIndexConst(0, call->span_);
     args_changed = true;
@@ -289,9 +288,8 @@ CallPtr RebuildLane1CallWithZeroValidShape(const CallPtr& call, const ExprReplac
 
 bool IsNoSplitSharedPipeSetupCall(const CallPtr& call) {
   if (!call || !call->op_) return false;
-  const std::string& op_name = call->op_->name_;
-  return op_name == "system.reserve_buffer" || op_name == "system.import_peer_buffer" ||
-         op_name == "system.aiv_initialize_pipe" || op_name == "system.aic_initialize_pipe";
+  return IsOp(call, "system.reserve_buffer") || IsOp(call, "system.import_peer_buffer") ||
+         IsOp(call, "system.aiv_initialize_pipe") || IsOp(call, "system.aic_initialize_pipe");
 }
 
 bool IsNoSplitSharedPipeSetupStmt(const StmtPtr& stmt) {
@@ -407,8 +405,7 @@ std::vector<StmtPtr> BuildNoSplitLane1ReplayStmts(const std::vector<StmtPtr>& st
         continue;
       }
 
-      const std::string& op_name = call->op_->name_;
-      if (op_name == "tile.store" && call->args_.size() >= 3) {
+      if (IsOp(call, "tile.store") && call->args_.size() >= 3) {
         auto passthrough = SubstituteExprIfNeeded(call->args_[2], replacements);
         replacements[assign->var_.get()] = passthrough;
         result.push_back(std::make_shared<AssignStmt>(assign->var_, passthrough, assign->span_));
@@ -434,8 +431,7 @@ std::vector<StmtPtr> BuildNoSplitLane1ReplayStmts(const std::vector<StmtPtr>& st
         continue;
       }
 
-      const std::string& op_name = call->op_->name_;
-      if (op_name == "tile.store") {
+      if (IsOp(call, "tile.store")) {
         continue;
       }
 
