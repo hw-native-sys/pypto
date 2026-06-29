@@ -181,7 +181,7 @@ def compile(  # noqa: PLR0913
         disabled = (
             disabled_diagnostics if disabled_diagnostics is not None else outer.get_disabled_diagnostics()
         )
-        strategy = outer.get_memory_reuse_strategy()
+        mr_strategy = outer.get_memory_reuse_strategy()
     else:
         vlevel = (
             verification_level if verification_level is not None else _passes.get_default_verification_level()
@@ -190,8 +190,11 @@ def compile(  # noqa: PLR0913
         disabled = disabled_diagnostics if disabled_diagnostics is not None else default_disabled
         # Seed the MemoryReuse strategy from the PYPTO_MEMORY_REUSE_STRATEGY env
         # default so it reaches the pass via the context pass_manager re-creates.
-        strategy = _passes.get_default_memory_reuse_strategy()
-    ctx = _passes.PassContext(instruments, vlevel, dphase, disabled, strategy)
+        mr_strategy = _passes.get_default_memory_reuse_strategy()
+    # NOTE: keep the MemoryReuse strategy in its own var — `strategy` is the
+    # OptimizationStrategy parameter that PassManager.get_strategy() keys on below.
+    # Reusing `strategy` for the MemoryReuse enum makes get_strategy() KeyError.
+    ctx = _passes.PassContext(instruments, vlevel, dphase, disabled, mr_strategy)
 
     def _stage(name: str) -> AbstractContextManager[Any]:
         if prof is not None:

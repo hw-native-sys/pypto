@@ -1445,8 +1445,7 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
     const std::map<VarPtr, std::vector<VarPtr>>& sharing_groups,
     const std::map<const Var*, std::pair<int, int>>& var_liveness,
     const std::map<const Var*, std::vector<std::pair<int32_t, int32_t>>>& pipeline_membership,
-    const std::set<const Var*>& pipeline_load_tiles, MemoryReuseStrategy strategy,
-    const std::map<MemorySpace, uint64_t>& space_budget) {
+    const std::set<const Var*>& pipeline_load_tiles) {
   std::map<VarPtr, VarPtr> reuse_map;
 
   // Members of a sharing group (the vars that already physically share one base).
@@ -1646,22 +1645,9 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
     // AllocateMemoryAddr error rather than being silently coalesced away; the
     // kernel must reduce its stage= count or tile size to fit.
     std::vector<std::vector<size_t>> buffers;
-
-    // CapacityGated budget for this space: spread to distinct buffers while the
-    // running footprint (sum of opened buffers' representative sizes, a
-    // conservative upper bound on the live-set peak) stays within the on-chip
-    // limit. budget == 0 means "no budget known" -> never spread (MinimizeFootprint
-    // behaviour). Reset per space because reuse is within a single space.
-    uint64_t footprint = 0;
-    uint64_t budget = 0;
-    if (strategy == MemoryReuseStrategy::CapacityGated) {
-      auto bit = space_budget.find(space);
-      if (bit != space_budget.end()) budget = bit->second;
-    }
-
-    // Attempt first-fit reuse of `cand` (interval `idx`) into an existing buffer.
-    // Returns true and commits the reuse decision on success.
-    auto try_reuse = [&](const LifetimeInterval& cand, size_t idx) -> bool {
+    for (size_t idx : indices) {
+      const auto& cand = lifetimes[idx];
+      bool placed = false;
       for (auto& buf : buffers) {
         bool fits = true;
         for (size_t member_idx : buf) {
@@ -1681,26 +1667,10 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
           }
         }
         buf.push_back(idx);
-        return true;
+        placed = true;
+        break;
       }
-      return false;
-    };
-    auto open_new = [&](size_t idx) {
-      buffers.push_back({idx});
-      footprint += lifetimes[idx].size;
-    };
-
-    for (size_t idx : indices) {
-      const auto& cand = lifetimes[idx];
-      // CapacityGated: prefer a private buffer while it fits the budget; this
-      // keeps independent tiles off one address so ptoas does not synthesise
-      // WAR/WAW barriers between them. Once the budget is hit, fall back to reuse.
-      const bool spread = budget > 0 && footprint + cand.size <= budget;
-      if (spread) {
-        open_new(idx);
-        continue;
-      }
-      if (!try_reuse(cand, idx)) open_new(idx);
+      if (!placed) buffers.push_back({idx});
     }
   }
 
@@ -2276,6 +2246,107 @@ class StripPipelineMembershipMutator : public IRMutator {
 };
 
 /**
+ * @brief Per-space allocator footprint of a body (for CapacityGated headroom).
+ *
+ * Groups every TileType MemRef by its base Ptr, takes the max member size per
+ * base (the allocator's slot size), and sums per memory space. Counts EVERY
+ * tile — reuse candidates and excluded loop-carry / escaped vars alike — so it
+ * matches what AllocateMemoryAddr will sum. Must be called on a body that has
+ * already had the minimal reuse map applied so coalesced tiles share a base.
+ */
+std::map<MemorySpace, uint64_t> CollectBaselineFootprint(const StmtPtr& body) {
+  // Use the same collector AllocateMemoryAddr does so we count EVERY MemRef
+  // (AssignStmt LHS, loop-carry iter_args/return_vars, params, view operands),
+  // not just AssignStmt outputs. Group by base Ptr, take the max member size per
+  // base (the allocator's slot size), and sum per space.
+  std::map<const Var*, std::pair<uint64_t, MemorySpace>> per_base;  // base -> (max size, space)
+  for (const auto& [memref, space] : memref_collectors::CollectMemRefsWithSpace(body)) {
+    if (!memref || !memref->base_) continue;
+    auto& entry = per_base[memref->base_.get()];
+    if (memref->size_ > entry.first) entry.first = memref->size_;
+    entry.second = space;
+  }
+  // Round each base up to 512B (>= the allocator's per-base 128B alignment) so
+  // the baseline is an upper bound on the real aligned footprint — keeping the
+  // CapacityGated headroom conservative.
+  std::map<MemorySpace, uint64_t> footprint;
+  for (const auto& [base, entry] : per_base) {
+    footprint[entry.second] += (entry.first + 511ULL) / 512ULL * 512ULL;
+  }
+  return footprint;
+}
+
+/**
+ * @brief CapacityGated de-coalescing: spread coalesced tiles to private buffers.
+ *
+ * `no_reuse` is the footprint with NO reuse (every tile its own base), measured
+ * on the un-reused body with `CollectBaselineFootprint` (each base rounded up to
+ * 512B, so it OVER-estimates the real aligned allocation). De-coalescing a
+ * member `m` (erasing it from `reuse_map`) adds `m`'s own buffer back, so the
+ * real footprint after promoting a set P is:
+ *
+ *   footprint(P) = real_no_reuse - sum_{members NOT in P} real_slot(m)
+ *
+ * To keep footprint(P) <= budget we must KEEP enough un-promoted members that
+ * their (real) slots cover `no_reuse - budget`. Using raw member sizes (an
+ * UNDER-estimate of the real slot) for the kept set and the over-estimated
+ * `no_reuse`, the bound holds rigorously:
+ *
+ *   promotable_raw = sum_raw(all members) + budget - no_reuse   (clamped >= 0)
+ *
+ * Promote smallest-first (raw) while the promoted raw bytes stay within
+ * `promotable_raw`; the rest stay reused. `budget` is pre-reduced by a small
+ * reserve by the caller to absorb yield-fixup / loop-carry overhead that the
+ * pre-reuse measurement does not see. Uses only reliable quantities (the
+ * no-reuse measurement and raw member sizes), never the unreliable footprint of
+ * a detached, partially-processed body. Mutates `reuse_map`.
+ */
+void DeCoalesceWithinBudget(std::map<VarPtr, VarPtr>* reuse_map,
+                            const std::map<MemorySpace, uint64_t>& no_reuse,
+                            const std::map<MemorySpace, uint64_t>& space_budget) {
+  auto tile_size = [](const VarPtr& v) -> uint64_t {
+    auto tt = As<TileType>(v->GetType());
+    if (!tt || !tt->memref_.has_value()) return 0;
+    return (*tt->memref_)->size_;
+  };
+
+  std::map<MemorySpace, std::vector<VarPtr>> members_by_space;
+  std::map<MemorySpace, uint64_t> member_raw_total;
+  for (const auto& [member, rep] : *reuse_map) {
+    auto tt = As<TileType>(member->GetType());
+    if (!tt) continue;
+    auto ms = tt->GetMemorySpace();
+    if (ms.has_value() && space_budget.count(*ms) != 0) {
+      members_by_space[*ms].push_back(member);
+      member_raw_total[*ms] += tile_size(member);
+    }
+  }
+
+  for (const auto& [space, budget] : space_budget) {
+    auto nit = no_reuse.find(space);
+    const uint64_t no_reuse_bytes = nit != no_reuse.end() ? nit->second : 0;
+    const uint64_t ms_raw = member_raw_total.count(space) ? member_raw_total[space] : 0;
+    // promotable_raw = ms_raw + budget - no_reuse, clamped to [0, ms_raw].
+    if (ms_raw + budget <= no_reuse_bytes) continue;  // no headroom
+    const uint64_t promotable = std::min(ms_raw, ms_raw + budget - no_reuse_bytes);
+    auto& members = members_by_space[space];
+    std::stable_sort(members.begin(), members.end(), [&](const VarPtr& a, const VarPtr& b) {
+      uint64_t sa = tile_size(a);
+      uint64_t sb = tile_size(b);
+      if (sa != sb) return sa < sb;
+      return a->name_hint_ < b->name_hint_;  // deterministic tie-break
+    });
+    uint64_t spent = 0;
+    for (const auto& member : members) {
+      const uint64_t cost = tile_size(member);
+      if (spent + cost > promotable) break;  // smallest-first: nothing larger fits either
+      reuse_map->erase(member);              // promote: keep its own MemRef
+      spent += cost;
+    }
+  }
+}
+
+/**
  * @brief Transform a function by identifying and applying memory reuse
  *
  * This transformation identifies memory reuse opportunities by walking the full
@@ -2329,27 +2400,42 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   forbid_collector.VisitStmt(new_body);
   ForbidAliasMap forbid_alias = forbid_collector.Take();
 
-  // Tile-buffer packing strategy + per-space byte budget. Strategy comes from
-  // the active PassContext (default MinimizeFootprint = historical behaviour).
-  // CapacityGated needs the on-chip limit per space; we surface only Vec for now
-  // (vector pipe is where false same-address barriers hurt). An empty budget map
-  // makes the packer behave exactly as MinimizeFootprint, so an unconfigured
-  // backend or a non-Vec space transparently keeps the old packing.
+  // Minimal-footprint reuse map (first-fit-decreasing) — the historical packing,
+  // and the floor that already fits on-chip today.
+  auto reuse_map = IdentifyReuseOpportunities(
+      analysis_result.lifetimes, hazard, forbid_alias, analysis_result.phi_family_ids,
+      analysis_result.var_sharing_groups, analysis_result.var_liveness, analysis_result.pipeline_membership,
+      analysis_result.pipeline_load_tiles);
+
+  // CapacityGated: when the active PassContext (or the PYPTO_MEMORY_REUSE_STRATEGY
+  // env default) selects it, de-coalesce tiles into private buffers within the
+  // free on-chip budget so ptoas does not synthesise false WAR/WAW barriers
+  // between independent ops sharing one address. We budget only the Vec space for
+  // now (the vector pipe is where those barriers hurt). The headroom is measured
+  // against the EXACT minimal footprint (all bases, incl. excluded loop-carry
+  // vars), so de-coalescing can never overflow AllocateMemoryAddr.
   auto* ctx = PassContext::Current();
   auto strategy = ctx ? ctx->GetMemoryReuseStrategy() : GetDefaultMemoryReuseStrategy();
-  std::map<MemorySpace, uint64_t> space_budget;
-  if (strategy == MemoryReuseStrategy::CapacityGated && backend::BackendConfig::IsConfigured()) {
+  if (strategy == MemoryReuseStrategy::CapacityGated && !reuse_map.empty() &&
+      backend::BackendConfig::IsConfigured()) {
     const auto* be = backend::GetBackend();
+    std::map<MemorySpace, uint64_t> space_budget;
     if (be != nullptr) {
       uint64_t vec_limit = be->GetMemSize(MemorySpace::Vec);
       if (vec_limit > 0) space_budget[MemorySpace::Vec] = vec_limit;
     }
+    if (!space_budget.empty()) {
+      // Reserve a fraction of the budget to absorb footprint the pre-reuse
+      // measurement cannot see (yield-fixup move buffers, loop-carry re-alignment,
+      // per-base alignment slop). 7/8 keeps de-coalescing comfortably below the
+      // hard limit; AllocateMemoryAddr remains the backstop verifier.
+      for (auto& [space, limit] : space_budget) limit = limit * 7ULL / 8ULL;
+      // No-reuse footprint (every tile its own base), measured on the un-reused
+      // body with 512B-rounded slots so it OVER-estimates the real allocation.
+      auto no_reuse = CollectBaselineFootprint(new_body);
+      DeCoalesceWithinBudget(&reuse_map, no_reuse, space_budget);
+    }
   }
-
-  auto reuse_map = IdentifyReuseOpportunities(
-      analysis_result.lifetimes, hazard, forbid_alias, analysis_result.phi_family_ids,
-      analysis_result.var_sharing_groups, analysis_result.var_liveness, analysis_result.pipeline_membership,
-      analysis_result.pipeline_load_tiles, strategy, space_budget);
 
   // Step 3: Apply MemRef sharing (skip if no reuse candidates)
   if (!reuse_map.empty()) {

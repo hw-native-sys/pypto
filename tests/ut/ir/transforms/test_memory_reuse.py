@@ -3721,6 +3721,60 @@ class TestCapacityGatedStrategy:
             f"CAPACITY_GATED over budget should partially spread then reuse, got bases {chain}"
         )
 
+    def test_capacity_gated_never_exceeds_budget(self):
+        """Regression: CAPACITY_GATED must keep the de-coalesced Vec footprint within
+        the platform limit even when a full spread would overflow it.
+
+        8 disjoint 64KB tiles -> 512KB if fully spread (>> 184KB Vec). The strategy
+        must leave enough tiles coalesced that the surviving distinct-base footprint
+        stays under the limit (the bug this guards: over-promoting past the budget).
+        """
+        D = 128  # [128, 128] FP32 = 64KB per tile
+
+        @pl.program
+        class Prog:
+            @pl.function
+            def main(
+                self,
+                input_a: pl.Tensor[[D, D], pl.FP32],
+                output: pl.Out[pl.Tensor[[D, D], pl.FP32]],
+            ) -> pl.Tensor[[D, D], pl.FP32]:
+                t0: pl.Tile[[D, D], pl.FP32, pl.MemorySpace.Vec] = pl.load(input_a, [0, 0], [D, D])
+                t1: pl.Tile[[D, D], pl.FP32, pl.MemorySpace.Vec] = pl.add(t0, t0)
+                t2: pl.Tile[[D, D], pl.FP32, pl.MemorySpace.Vec] = pl.add(t1, t1)
+                t3: pl.Tile[[D, D], pl.FP32, pl.MemorySpace.Vec] = pl.add(t2, t2)
+                t4: pl.Tile[[D, D], pl.FP32, pl.MemorySpace.Vec] = pl.add(t3, t3)
+                t5: pl.Tile[[D, D], pl.FP32, pl.MemorySpace.Vec] = pl.add(t4, t4)
+                t6: pl.Tile[[D, D], pl.FP32, pl.MemorySpace.Vec] = pl.add(t5, t5)
+                t7: pl.Tile[[D, D], pl.FP32, pl.MemorySpace.Vec] = pl.add(t6, t6)
+                result: pl.Tensor[[D, D], pl.FP32] = pl.store(t7, [0, 0], output)
+                return result
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        try:
+            with passes.PassContext([], memory_reuse_strategy=passes.MemoryReuseStrategy.CAPACITY_GATED):
+                After = passes.memory_reuse()(passes.init_mem_ref()(Prog))
+        finally:
+            backend.reset_for_testing()
+
+        # Footprint = sum over distinct Vec bases of the max member size.
+        VEC_LIMIT = 184 * 1024
+        per_base: dict[str, int] = {}
+        main_func = next(iter(After.functions.values()))
+
+        class _Footprint(ir.IRVisitor):
+            def visit_assign_stmt(self, stmt):  # type: ignore[override]
+                var_type = stmt.var.type
+                if isinstance(var_type, ir.TileType) and var_type.memref is not None:
+                    base = var_type.memref.base_.name_hint
+                    per_base[base] = max(per_base.get(base, 0), var_type.memref.size_)
+                super().visit_assign_stmt(stmt)
+
+        _Footprint().visit_stmt(main_func.body)
+        total = sum(per_base.values())
+        assert total <= VEC_LIMIT, f"CAPACITY_GATED Vec footprint {total} exceeds limit {VEC_LIMIT}"
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

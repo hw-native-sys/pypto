@@ -56,9 +56,13 @@ program_optimized = reuse_pass(program)
 | 策略 | 行为 | 适用场景 |
 | ---- | ---- | -------- |
 | `MinimizeFootprint`（默认） | first-fit-decreasing：每个无冲突区间都并入最早的已有 buffer → buffer 最少、footprint 最小。 | UB 占用高、内存吃紧。 |
-| `CapacityGated` | 在「每空间累计 footprint（已开 buffer 代表尺寸之和，为活跃集峰值的保守上界）≤ 后端 `GetMemSize(space)` 预算」时给每个区间独立 buffer；仅在超预算时回退到 first-fit 复用。 | buffer 富余（占用低）的 kernel：把众多独立 tile 并到同一地址会让 ptoas 在本可并行的算子间合成假的 `pipe_barrier(PIPE_V)` WAR/WAW 屏障。 |
+| `CapacityGated` | 先做 `MinimizeFootprint` 打包，再在不超过后端 `GetMemSize(space)` 预算的前提下，把成员**反合并**（de-coalesce，从小到大）回各自独立 buffer，让独立 tile 落到不同地址。 | buffer 富余（占用低）的 kernel：把众多独立 tile 并到同一地址会让 ptoas 在本可并行的算子间合成假的 `pipe_barrier(PIPE_V)` WAR/WAW 屏障。 |
 
-`CapacityGated` 目前只对 `Vec` 空间做预算（假同址屏障在此最痛）；其他空间及未配置后端透明保持 `MinimizeFootprint`。所有正确性约束（pipeline ping-pong、load+tpop 危害、no-alias）均不变——该策略仅决定是否合并两个*本可合法共享*的区间。通过 `PassContext(..., memory_reuse_strategy=passes.MemoryReuseStrategy.CAPACITY_GATED)` 或环境变量默认 `PYPTO_MEMORY_REUSE_STRATEGY=capacity_gated` 选择。
+`CapacityGated` 如何保证不超限（无 `AllocateMemoryAddr` 溢出）：把成员 `m` 提升会加回 `m` 自己的 buffer，所以提升集合 `P` 后的真实 footprint = `no_reuse − Σ(未提升成员的 slot)`。pass 在未复用的 body 上测得 `no_reuse`（每个 tile 独立 base，按 512B 上取整以高估），然后保留足够多的成员处于复用状态，使未提升成员（按原始尺寸、低估）的 slot 之和覆盖 `no_reuse − budget`。`budget` 预先打 7/8 折以吸收 pre-reuse 测量看不到的部分（yield-fixup 的 move buffer、loop-carry 重对齐、对齐零头），从而可证明结果不超限；`AllocateMemoryAddr` 仍作为兜底校验。
+
+`CapacityGated` 目前只对 `Vec` 空间做预算（假同址屏障在此最痛）；其他空间及未配置后端透明保持 `MinimizeFootprint`。所有正确性约束（pipeline ping-pong、load+tpop 危害、no-alias）均不变——该策略只反合并那些*本就合法共享*的区间。通过 `PassContext(..., memory_reuse_strategy=passes.MemoryReuseStrategy.CAPACITY_GATED)` 或环境变量默认 `PYPTO_MEMORY_REUSE_STRATEGY=capacity_gated` 选择。
+
+在 Qwen3-14B 的 `fa_inline` decode kernel 上，这使 AIV `Vec` 占用从 30.6%（21 buffer）升到 99%（41 buffer），并把 `pipe_barrier(PIPE_V)` 从 35 降到 26，且不超限。
 
 **复用条件**：
 

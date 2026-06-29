@@ -57,15 +57,29 @@ Step 3's packing preference is selectable via `PassContext.GetMemoryReuseStrateg
 | Strategy | Behaviour | Use when |
 | -------- | --------- | -------- |
 | `MinimizeFootprint` (default) | First-fit-decreasing: every non-interfering interval coalesces onto the earliest existing buffer → fewest buffers, smallest footprint. | UB pressure is real (high on-chip occupancy). |
-| `CapacityGated` | Gives each interval its own buffer while the per-space running footprint (sum of opened buffers' representative sizes, a conservative upper bound on the live-set peak) stays within the backend's `GetMemSize(space)` budget; falls back to first-fit reuse only on overflow. | Buffer-rich kernels (low occupancy) where coalescing many independent tiles onto one address makes ptoas synthesise false `pipe_barrier(PIPE_V)` WAR/WAW barriers between otherwise-independent ops. |
+| `CapacityGated` | Runs the `MinimizeFootprint` packing first, then **de-coalesces** members back to private buffers (smallest-first) so independent tiles land on distinct addresses, while staying within the backend's `GetMemSize(space)` budget. | Buffer-rich kernels (low occupancy) where coalescing many independent tiles onto one address makes ptoas synthesise false `pipe_barrier(PIPE_V)` WAR/WAW barriers between otherwise-independent ops. |
+
+How `CapacityGated` bounds memory (no `AllocateMemoryAddr` overflow): promoting a
+member `m` adds `m`'s own buffer, so the real footprint after promoting a set `P`
+is `no_reuse − Σ(slots of members NOT in P)`. The pass measures `no_reuse` (every
+tile its own base, 512B-rounded so it over-estimates) on the un-reused body, then
+keeps enough members reused that the un-promoted (raw-sized, under-estimated)
+slots cover `no_reuse − budget`. With `budget` pre-reduced by 1/8 to absorb
+footprint the pre-reuse measurement cannot see (yield-fixup move buffers,
+loop-carry re-alignment, alignment slop), the result provably stays under the
+limit; `AllocateMemoryAddr` remains the backstop verifier.
 
 `CapacityGated` currently budgets only the `Vec` space (where false same-address
 barriers hurt most); other spaces and an unconfigured backend transparently keep
 `MinimizeFootprint` packing. All correctness gates (pipeline ping-pong, load+tpop
-hazard, no-alias) are unchanged — the strategy only chooses whether to coalesce
-two intervals that *could* legally share. Select it via
+hazard, no-alias) are unchanged — the strategy only de-coalesces intervals that
+already shared legally. Select it via
 `PassContext(..., memory_reuse_strategy=passes.MemoryReuseStrategy.CAPACITY_GATED)`
 or the `PYPTO_MEMORY_REUSE_STRATEGY=capacity_gated` environment-variable default.
+
+On a Qwen3-14B `fa_inline` decode kernel this lifts the AIV `Vec` use from 30.6%
+(21 buffers) to 99% (41 buffers) and cuts `pipe_barrier(PIPE_V)` from 35 to 26,
+without exceeding the limit.
 
 **Reuse conditions**:
 
