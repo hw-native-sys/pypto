@@ -366,6 +366,77 @@ def test_reshape_of_already_split_input_halves_shape_arg():
     assert "pl.tile.reshape(prev, [128, 1])" in text
 
 
+def test_reshape_migrates_split_axis_row_to_col_and_back():
+    """UP_DOWN: a [N,1]<->[1,N] reshape migrates the split axis, not corrupts it (gh#1864).
+
+    The rms_norm column reshape moves the split data (rows) into the column dim and
+    back. Each AIV lane keeps its own half, so the reshape targets must halve the
+    MIGRATED dim ([1,8], then [8,1]) -- not stay at the stale full width ([1,16])
+    which left lane 1 reading garbage and emitting inf. No per-subblock slice is
+    needed (the partition is lane-local through the migration)."""
+    span = ir.Span.unknown()
+    data = ir.Var("data", _tensor([16, 1]), span)
+    out_0 = ir.Var("out_0", _tensor([16, 1]), span)
+    load = T.load(data, [0, 0], [16, 1], target_memory=MS.Vec, span=span)
+    col = ir.Var("col", load.type, span)
+    to_row = T.reshape(col, [1, 16], span=span)
+    row = ir.Var("row", to_row.type, span)
+    inv = T.recip(row, span=span)
+    inv_row = ir.Var("inv_row", inv.type, span)
+    to_col = T.reshape(inv_row, [16, 1], span=span)
+    back = ir.Var("back", to_col.type, span)
+    store = T.store(back, [0, 0], out_0, span=span)
+    out_store = ir.Var("out_store", store.type, span)
+    program = _incore_program(
+        [(data, _IN), (out_0, _OUT)],
+        [
+            ir.AssignStmt(col, load, span),
+            ir.AssignStmt(row, to_row, span),
+            ir.AssignStmt(inv_row, inv, span),
+            ir.AssignStmt(back, to_col, span),
+            ir.AssignStmt(out_store, store, span),
+            ir.ReturnStmt([out_store], span),
+        ],
+        [out_0.type],
+    )
+    text = ir.python_print(_lower(program))
+    assert "col: pl.Tile[[8, 1]" in text  # load halved on the row split dim
+    assert "pl.tile.reshape(col, [1, 8])" in text  # row -> col migration (was [1, 16])
+    assert "pl.tile.reshape(inv_row, [8, 1])" in text  # col -> row migration back
+    assert "pl.tile.slice" not in text  # each lane self-contained; no slice needed
+    # Store offset localized on the row dim, one half per subblock.
+    assert "subblock_idx * 8" in text
+
+
+def test_reshape_untrackable_split_axis_rejected():
+    """A reshape whose split partition can't map to a clean per-dim halving is rejected.
+
+    The dim-0 split of a [6, 4] tile partitions at flat offset 12 (rows 0-2 vs 3-5).
+    Reshaping to [3, 8] would place that boundary mid-row, so no result dim can
+    carry the halved split cleanly -- the pass rejects rather than miscompile."""
+    span = ir.Span.unknown()
+    data = ir.Var("data", _tensor([6, 4]), span)
+    out_0 = ir.Var("out_0", _tensor([3, 8]), span)
+    load = T.load(data, [0, 0], [6, 4], target_memory=MS.Vec, span=span)
+    prev = ir.Var("prev", load.type, span)
+    reshape = T.reshape(prev, [3, 8], span=span)
+    flat = ir.Var("flat", reshape.type, span)
+    store = T.store(flat, [0, 0], out_0, span=span)
+    out_store = ir.Var("out_store", store.type, span)
+    program = _incore_program(
+        [(data, _IN), (out_0, _OUT)],
+        [
+            ir.AssignStmt(prev, load, span),
+            ir.AssignStmt(flat, reshape, span),
+            ir.AssignStmt(out_store, store, span),
+            ir.ReturnStmt([out_store], span),
+        ],
+        [out_0.type],
+    )
+    with pytest.raises(ValueError, match="moves the split axis"):
+        _lower(program)
+
+
 def test_singleton_broadcast_tile_preserved():
     """UP_DOWN: a [1, 128] broadcast tile is NOT halved on the singleton split dim."""
     span = ir.Span.unknown()

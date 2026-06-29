@@ -12,6 +12,7 @@
 #include "pypto/ir/transforms/utils/split_axis_utils.h"
 
 #include <any>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -24,10 +25,13 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
@@ -286,6 +290,97 @@ TypePtr ApplyTrackedTileShape(const TypePtr& type, int dim, const ExprPtr& half_
   return std::make_shared<TileType>(new_shape, tt->dtype_, tt->memref_, new_tile_view, tt->memory_space_);
 }
 
+// Product of static tile dims in [lo, hi). Returns -1 if any dim is non-const
+// (real products are >= 1, so -1 is an unambiguous "not static" sentinel).
+int64_t StaticDimProduct(const std::vector<ExprPtr>& shape, int lo, int hi) {
+  int64_t p = 1;
+  for (int d = lo; d < hi; ++d) {
+    auto ci = std::dynamic_pointer_cast<const ConstInt>(shape[d]);
+    if (!ci) return -1;
+    p *= ci->value_;
+  }
+  return p;
+}
+
+// Handle a tile.reshape whose input is an already-split tile. Reshape preserves
+// row-major element order, so the split partition (first half vs second half of
+// the input's split dim) lands on a specific result dimension; this finds it and
+// halves that dimension, re-tracking the (possibly migrated) split axis.
+//
+// Returns: the rewritten statement when the split axis migrates to a *different*
+// result dim (e.g. the rms_norm [N,1]->[1,N] column reshape); nullptr when it
+// stays on the same dim index OR the row-major partition cannot be flat-tracked
+// (caller falls through to generic halving, which also covers dynamic dims and
+// the non-contiguous LEFT_RIGHT prefix); throws (reject) only when flat-tracking
+// applies but no result dim carries the halved split cleanly -- rather than
+// silently miscompile.
+StmtPtr TryMigrateReshapeSplit(const CallPtr& call, const std::shared_ptr<const AssignStmt>& assign,
+                               const std::shared_ptr<const TileType>& in_tt, int in_split_dim,
+                               const ExprPtr& subblock_idx,
+                               std::unordered_map<const Var*, TileInfo>& tile_vars,
+                               std::unordered_map<const Var*, VarPtr>& var_replacements) {
+  auto res_tt = std::dynamic_pointer_cast<const TileType>(call->GetType());
+  if (!res_tt || call->args_.size() < 2) return nullptr;
+  INTERNAL_CHECK_SPAN(in_split_dim >= 0 && in_split_dim < static_cast<int>(in_tt->shape_.size()), call->span_)
+      << "Internal error: input split dim " << in_split_dim << " out of bounds for rank "
+      << in_tt->shape_.size();
+
+  // Flat-offset tracking only applies when the split partition is a contiguous
+  // prefix (every input dim before the split dim is 1 -- always true for the
+  // dim-0 UP_DOWN split, not for a LEFT_RIGHT col split of a multi-row tile) and
+  // all extents are static. Otherwise defer to generic halving (same-axis path).
+  const int64_t prefix_in = StaticDimProduct(in_tt->shape_, 0, in_split_dim);
+  auto orig_c = std::dynamic_pointer_cast<const ConstInt>(in_tt->shape_[in_split_dim]);
+  const int64_t inner_in =
+      StaticDimProduct(in_tt->shape_, in_split_dim + 1, static_cast<int>(in_tt->shape_.size()));
+  if (prefix_in != 1 || !orig_c || (orig_c->value_ % 2) != 0 || inner_in < 0) return nullptr;
+
+  // Number of elements in the first half (row-major) of the split partition.
+  const int64_t split_flat = (orig_c->value_ / 2) * inner_in;
+
+  // Find the result dim whose first half matches that flat prefix exactly.
+  int d_out = -1;
+  int64_t prefix_out = 1;
+  for (int d = 0; d < static_cast<int>(res_tt->shape_.size()); ++d) {
+    auto out_c = std::dynamic_pointer_cast<const ConstInt>(res_tt->shape_[d]);
+    if (!out_c) return nullptr;  // dynamic result dim -> defer to generic
+    const int64_t inner_out =
+        StaticDimProduct(res_tt->shape_, d + 1, static_cast<int>(res_tt->shape_.size()));
+    if (inner_out < 0) return nullptr;
+    if (prefix_out == 1 && (out_c->value_ % 2) == 0 && (out_c->value_ / 2) * inner_out == split_flat) {
+      d_out = d;
+      break;
+    }
+    prefix_out *= out_c->value_;
+  }
+  // Flat-tracking applies but no clean per-dim halving exists -> reject.
+  if (d_out < 0) {
+    throw pypto::ValueError(
+        "SplitVectorKernel: tile.reshape moves the split axis (dim " + std::to_string(in_split_dim) +
+        ") across a layout this pass cannot track under split; keep the reduction/reshape out of the "
+        "split scope.");
+  }
+
+  // Split axis stays on the same dim index -> generic halving handles it; only
+  // migrate when it actually moves.
+  if (d_out == in_split_dim) return nullptr;
+
+  // Halve the migrated dim on both the reshape target arg and the result type.
+  ExprPtr half_dim_size = ComputeHalfDimSize(res_tt->shape_[d_out]);
+  auto new_result_type = HalveTileShape(call->GetType(), d_out, subblock_idx);
+  std::vector<ExprPtr> new_args = call->args_;
+  new_args[1] = HalveTupleElement(call->args_[1], d_out);
+
+  auto new_call =
+      std::make_shared<Call>(call->op_, std::move(new_args), call->kwargs_, new_result_type, call->span_);
+  auto new_var = std::make_shared<Var>(assign->var_->name_hint_, new_result_type, assign->var_->span_);
+  TileInfo info{half_dim_size, d_out};
+  tile_vars[assign->var_.get()] = info;
+  tile_vars[new_var.get()] = info;
+  var_replacements[assign->var_.get()] = new_var;
+  return std::make_shared<AssignStmt>(new_var, new_call, assign->span_);
+}
+
 StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int split_dim,
                     std::unordered_map<const Var*, TileInfo>& tile_vars, bool is_aiv,
                     const ExprPtr& subblock_idx, std::unordered_map<const Var*, VarPtr>& var_replacements) {
@@ -313,7 +408,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
       auto new_var =
           std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
       if (tt && split_dim < static_cast<int>(tt->shape_.size())) {
-        TileInfo info{ComputeHalfDimSize(tt->shape_[split_dim])};
+        TileInfo info{ComputeHalfDimSize(tt->shape_[split_dim]), split_dim};
         tile_vars[assign->var_.get()] = info;
         tile_vars[new_var.get()] = info;
       }
@@ -356,7 +451,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
       auto new_call =
           std::make_shared<Call>(call->op_, std::move(new_args), call->kwargs_, new_result_type, call->span_);
       auto new_var = std::make_shared<Var>(assign->var_->name_hint_, new_result_type, assign->var_->span_);
-      TileInfo info{half_dim_size};
+      TileInfo info{half_dim_size, split_dim};
       tile_vars[assign->var_.get()] = info;
       tile_vars[new_var.get()] = info;
       var_replacements[assign->var_.get()] = new_var;
@@ -369,7 +464,8 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
       if (tile_var) {
         auto it = tile_vars.find(tile_var.get());
         if (it != tile_vars.end()) {
-          auto new_offsets = AdjustOffsets(call->args_[1], split_dim, it->second.half_dim_size, subblock_idx);
+          auto new_offsets =
+              AdjustOffsets(call->args_[1], it->second.split_dim, it->second.half_dim_size, subblock_idx);
           std::vector<ExprPtr> new_args = call->args_;
           new_args[1] = new_offsets;
           auto new_call = std::make_shared<Call>(call->op_, std::move(new_args), call->kwargs_,
@@ -383,18 +479,51 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
     // Reject reduce ops that reduce on the split axis (partial reduction is semantically incorrect).
     // Skip halving when the output split-dim is singleton (broadcast / degenerate tiles).
     if (is_aiv) {
-      if (IsReduceOnSplitAxis(call, split_dim)) {
+      // Find the primary tracked (already-split) tile input. Its split dim can
+      // differ from the global split_dim once a reshape has migrated the split
+      // axis across dimensions (the rms_norm [N,1]<->[1,N] column reshape), so the
+      // reduce guard and elementwise halving must follow the input's dim.
+      int in_split_dim = -1;
+      std::shared_ptr<const TileType> in_tt;
+      for (const auto& a : call->args_) {
+        if (auto v = AsVarLike(a)) {
+          auto it = tile_vars.find(v.get());
+          if (it != tile_vars.end()) {
+            in_split_dim = it->second.split_dim;
+            in_tt = std::dynamic_pointer_cast<const TileType>(a->GetType());
+            break;
+          }
+        }
+      }
+
+      // Reduce on the (possibly migrated) split axis is a partial reduction —
+      // reject it on the input's tracked dim, not just the global split_dim.
+      const int reduce_split_dim = (in_split_dim >= 0) ? in_split_dim : split_dim;
+      if (IsReduceOnSplitAxis(call, reduce_split_dim)) {
         throw pypto::ValueError("SplitVectorKernel: reduce op '" + op_name +
-                                "' reduces on the split axis (dim " + std::to_string(split_dim) +
+                                "' reduces on the split axis (dim " + std::to_string(reduce_split_dim) +
                                 "); partial reduction in a split kernel is not supported");
       }
 
       auto tt = std::dynamic_pointer_cast<const TileType>(call->GetType());
-      if (tt && split_dim < static_cast<int>(tt->shape_.size())) {
-        if (IsSingletonDim(tt->shape_[split_dim])) {
+
+      // tile.reshape that moves the split axis to a different result dim.
+      if (tt && IsOp(call, "tile.reshape") && in_split_dim >= 0 && in_tt) {
+        if (auto migrated = TryMigrateReshapeSplit(call, assign, in_tt, in_split_dim, subblock_idx, tile_vars,
+                                                   var_replacements)) {
+          return migrated;
+        }
+        // nullptr -> split extent stays in place; fall through to generic halving.
+      }
+
+      // Result split dim: follow the tracked input's (possibly migrated) dim; root
+      // ops with no tracked input use the global split dim.
+      const int result_split_dim = (in_split_dim >= 0) ? in_split_dim : split_dim;
+      if (tt && result_split_dim < static_cast<int>(tt->shape_.size())) {
+        if (IsSingletonDim(tt->shape_[result_split_dim])) {
           return stmt;
         }
-        auto half_dim_size = ComputeHalfDimSize(tt->shape_[split_dim]);
+        auto half_dim_size = ComputeHalfDimSize(tt->shape_[result_split_dim]);
 
         // tile.reshape lifts a full (un-split) source tile -- typically a rank-1
         // load that bypassed the split-specific load rewrite -- onto a 2D shape
@@ -420,7 +549,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
             shape_elems.reserve(tt->shape_.size());
             offset_elems.reserve(tt->shape_.size());
             for (int d = 0; d < static_cast<int>(tt->shape_.size()); ++d) {
-              if (d == split_dim) {
+              if (d == result_split_dim) {
                 shape_elems.push_back(MakeIndexConst(half_const->value_, assign->span_));
                 offset_elems.push_back(
                     MakeMul(subblock_idx, MakeIndexConst(half_const->value_, assign->span_), assign->span_));
@@ -441,7 +570,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
                 std::make_shared<Var>(assign->var_->name_hint_, slice_call->GetType(), assign->var_->span_);
             auto slice_assign = std::make_shared<AssignStmt>(slice_var, slice_call, assign->span_);
 
-            TileInfo info{half_dim_size};
+            TileInfo info{half_dim_size, result_split_dim};
             // Track both the original var and the slice replacement, matching the
             // other tile-producing branches: a later tile.store / loop init that
             // references the original var (before the final Substitute) must still
@@ -454,12 +583,12 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
           }
         }
 
-        auto new_result_type = HalveTileShape(call->GetType(), split_dim, subblock_idx);
+        auto new_result_type = HalveTileShape(call->GetType(), result_split_dim, subblock_idx);
         std::vector<ExprPtr> new_args = call->args_;
         if ((IsOp(call, "tile.full") || IsOp(call, "tile.create")) && call->args_.size() >= 1) {
-          new_args[0] = HalveTupleElement(call->args_[0], split_dim);
+          new_args[0] = HalveTupleElement(call->args_[0], result_split_dim);
         } else if (IsOp(call, "tile.reshape") && call->args_.size() >= 2) {
-          new_args[1] = HalveTupleElement(call->args_[1], split_dim);
+          new_args[1] = HalveTupleElement(call->args_[1], result_split_dim);
         } else if (IsOp(call, "tile.slice") && call->args_.size() >= 3) {
           // tile.slice = (src, shape, offset[, valid_shape[, drop_dims]]). The
           // generic result-type halving above shrinks the split dim of the
@@ -469,7 +598,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
           // tstore expects (half), the qk_pv strided sub-slice miscompile that
           // motivated the explicit-AIV-split RFC. Halve the shape tuple so it
           // tracks the halved result type.
-          new_args[1] = HalveTupleElement(call->args_[1], split_dim);
+          new_args[1] = HalveTupleElement(call->args_[1], result_split_dim);
 
           // Offset (arg[2]) localization mirrors the reshape->slice path above:
           // only add the per-subblock base when the SOURCE tile is NOT already
@@ -480,7 +609,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
           auto slice_src = AsVarLike(call->args_[0]);
           bool slice_src_is_split = slice_src && tile_vars.count(slice_src.get()) != 0;
           if (!slice_src_is_split) {
-            new_args[2] = AdjustOffsets(call->args_[2], split_dim, half_dim_size, subblock_idx);
+            new_args[2] = AdjustOffsets(call->args_[2], result_split_dim, half_dim_size, subblock_idx);
           }
 
           // Optional explicit valid_shape (arg[3]) must stay consistent with the
@@ -491,8 +620,8 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
           // LocalizeTupleElementForSplit is a no-op on a tuple whose split_dim
           // is out of range.
           if (call->args_.size() >= 4) {
-            new_args[3] = LocalizeTupleElementForSplit(call->args_[3], split_dim, tt->shape_[split_dim],
-                                                       half_dim_size, subblock_idx);
+            new_args[3] = LocalizeTupleElementForSplit(
+                call->args_[3], result_split_dim, tt->shape_[result_split_dim], half_dim_size, subblock_idx);
           }
         } else if (IsOp(call, "tile.set_validshape") && call->args_.size() == 3) {
           // args = (tile, valid_row, valid_col). Halving the result type alone
@@ -503,16 +632,21 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
           // valid_shape -- but ONLY when it genuinely spans both lanes. A smaller
           // operand is a replicated extent both AIV lanes share; localizing it
           // would collapse lane 1 to 0 and silently corrupt that lane.
-          const int operand_idx = 1 + split_dim;  // split_dim 0 -> row, 1 -> col
-          if (ValidOperandNeedsLocalize(call->args_[operand_idx], tt->shape_[split_dim], half_dim_size)) {
-            new_args[operand_idx] = LocalizeValidDimForSplit(call->args_[operand_idx], tt->shape_[split_dim],
-                                                             half_dim_size, subblock_idx);
+          // set_validshape carries only (tile, valid_row, valid_col), so the
+          // operand index is valid only for a 2D split dim; guard against a
+          // migrated/higher result_split_dim that would index past the args.
+          const int operand_idx = 1 + result_split_dim;  // dim 0 -> row, 1 -> col
+          if (operand_idx < static_cast<int>(call->args_.size()) &&
+              ValidOperandNeedsLocalize(call->args_[operand_idx], tt->shape_[result_split_dim],
+                                        half_dim_size)) {
+            new_args[operand_idx] = LocalizeValidDimForSplit(
+                call->args_[operand_idx], tt->shape_[result_split_dim], half_dim_size, subblock_idx);
           }
         }
         auto new_call = std::make_shared<Call>(call->op_, std::move(new_args), call->kwargs_, new_result_type,
                                                call->span_);
         auto new_var = std::make_shared<Var>(assign->var_->name_hint_, new_result_type, assign->var_->span_);
-        TileInfo info{half_dim_size};
+        TileInfo info{half_dim_size, result_split_dim};
         tile_vars[assign->var_.get()] = info;
         tile_vars[new_var.get()] = info;
         var_replacements[assign->var_.get()] = new_var;
@@ -537,7 +671,8 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
       if (tile_var) {
         auto it = tile_vars.find(tile_var.get());
         if (it != tile_vars.end()) {
-          auto new_offsets = AdjustOffsets(call->args_[1], split_dim, it->second.half_dim_size, subblock_idx);
+          auto new_offsets =
+              AdjustOffsets(call->args_[1], it->second.split_dim, it->second.half_dim_size, subblock_idx);
           std::vector<ExprPtr> new_args = call->args_;
           new_args[1] = new_offsets;
           auto new_call = std::make_shared<Call>(call->op_, std::move(new_args), call->kwargs_,
@@ -578,8 +713,8 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
             has_tracked_tile = true;
             tracked_info = it->second;
             tile_vars[ia.get()] = it->second;
-            new_type =
-                ApplyTrackedTileShape(ia->GetType(), split_dim, it->second.half_dim_size, subblock_idx);
+            new_type = ApplyTrackedTileShape(ia->GetType(), it->second.split_dim, it->second.half_dim_size,
+                                             subblock_idx);
           }
         }
       }
@@ -620,7 +755,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
       auto it = tile_vars.find(new_iter_args[i].get());
       if (it != tile_vars.end()) {
         tile_vars[new_return_vars[i].get()] = it->second;
-        auto new_type = ApplyTrackedTileShape(new_return_vars[i]->GetType(), split_dim,
+        auto new_type = ApplyTrackedTileShape(new_return_vars[i]->GetType(), it->second.split_dim,
                                               it->second.half_dim_size, subblock_idx);
         if (new_type != new_return_vars[i]->GetType()) {
           auto new_return_var =

@@ -68,6 +68,10 @@ bool IsReduceOnSplitAxis(const CallPtr& call, int split_dim);
  */
 struct TileInfo {
   ExprPtr half_dim_size;
+  // The dimension this tile is currently split along. Usually the global split
+  // dim, but a reshape can migrate the split axis to another dimension (e.g. the
+  // rms_norm [N,1]<->[1,N] column reshape), so each tracked tile carries its own.
+  int split_dim = 0;
 };
 
 /**
