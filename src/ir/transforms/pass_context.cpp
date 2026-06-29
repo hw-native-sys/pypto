@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdlib>
 #include <fstream>
 #include <ios>
 #include <mutex>
@@ -300,14 +301,28 @@ void DiagnosticInstrument::RunAfterPipeline(const ProgramPtr& program) {
 
 std::string DiagnosticInstrument::GetName() const { return "DiagnosticInstrument"; }
 
+MemoryReuseStrategy GetDefaultMemoryReuseStrategy() {
+  // C++17: static local initialization is thread-safe and runs exactly once.
+  static const MemoryReuseStrategy strategy = [] {
+    const char* env = std::getenv("PYPTO_MEMORY_REUSE_STRATEGY");
+    if (env != nullptr && std::string(env) == "capacity_gated") {
+      return MemoryReuseStrategy::CapacityGated;
+    }
+    return MemoryReuseStrategy::MinimizeFootprint;
+  }();
+  return strategy;
+}
+
 // PassContext
 
 PassContext::PassContext(std::vector<PassInstrumentPtr> instruments, VerificationLevel verification_level,
-                         DiagnosticPhase diagnostic_phase, DiagnosticCheckSet disabled_diagnostics)
+                         DiagnosticPhase diagnostic_phase, DiagnosticCheckSet disabled_diagnostics,
+                         MemoryReuseStrategy memory_reuse_strategy)
     : instruments_(std::move(instruments)),
       verification_level_(verification_level),
       diagnostic_phase_(diagnostic_phase),
       disabled_diagnostics_(disabled_diagnostics),
+      memory_reuse_strategy_(memory_reuse_strategy),
       previous_(nullptr) {}
 
 VerificationLevel PassContext::GetVerificationLevel() const { return verification_level_; }
@@ -315,6 +330,8 @@ VerificationLevel PassContext::GetVerificationLevel() const { return verificatio
 DiagnosticPhase PassContext::GetDiagnosticPhase() const { return diagnostic_phase_; }
 
 const DiagnosticCheckSet& PassContext::GetDisabledDiagnostics() const { return disabled_diagnostics_; }
+
+MemoryReuseStrategy PassContext::GetMemoryReuseStrategy() const { return memory_reuse_strategy_; }
 
 const std::vector<PassInstrumentPtr>& PassContext::GetInstruments() const { return instruments_; }
 

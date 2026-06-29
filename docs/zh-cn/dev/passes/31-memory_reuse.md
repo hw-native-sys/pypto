@@ -49,6 +49,17 @@ program_optimized = reuse_pass(program)
    - **IfStmt**：修补 return_vars 使其 MemRef 与 yield value 一致
 6. **移除冗余 alloc**：收集仍被 TileType 变量引用的所有 MemRef，然后移除不再使用的 `tile.alloc` 语句
 
+## 打包策略（Packing strategy）
+
+第 3 步的打包偏好可通过 `PassContext.GetMemoryReuseStrategy()`（`MemoryReuseStrategy`）选择，默认保持历史行为：
+
+| 策略 | 行为 | 适用场景 |
+| ---- | ---- | -------- |
+| `MinimizeFootprint`（默认） | first-fit-decreasing：每个无冲突区间都并入最早的已有 buffer → buffer 最少、footprint 最小。 | UB 占用高、内存吃紧。 |
+| `CapacityGated` | 在「每空间累计 footprint（已开 buffer 代表尺寸之和，为活跃集峰值的保守上界）≤ 后端 `GetMemSize(space)` 预算」时给每个区间独立 buffer；仅在超预算时回退到 first-fit 复用。 | buffer 富余（占用低）的 kernel：把众多独立 tile 并到同一地址会让 ptoas 在本可并行的算子间合成假的 `pipe_barrier(PIPE_V)` WAR/WAW 屏障。 |
+
+`CapacityGated` 目前只对 `Vec` 空间做预算（假同址屏障在此最痛）；其他空间及未配置后端透明保持 `MinimizeFootprint`。所有正确性约束（pipeline ping-pong、load+tpop 危害、no-alias）均不变——该策略仅决定是否合并两个*本可合法共享*的区间。通过 `PassContext(..., memory_reuse_strategy=passes.MemoryReuseStrategy.CAPACITY_GATED)` 或环境变量默认 `PYPTO_MEMORY_REUSE_STRATEGY=capacity_gated` 选择。
+
 **复用条件**：
 
 - 生命周期不重叠（无干涉）。当 `prev.last_use <= curr.def` 时，两个变量不重叠（即源的最后使用可以和目标的定义在同一语句，因为在同一语句内输入先于输出被消费）

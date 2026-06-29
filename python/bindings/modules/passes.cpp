@@ -146,6 +146,15 @@ void BindPass(nb::module_& m) {
       .value("ROUNDTRIP", VerificationLevel::Roundtrip,
              "BASIC + print→parse structural-equality check after every pass");
 
+  // Bind MemoryReuseStrategy enum
+  nb::enum_<MemoryReuseStrategy>(passes, "MemoryReuseStrategy",
+                                 "Selects how MemoryReuse packs tile buffers")
+      .value("MINIMIZE_FOOTPRINT", MemoryReuseStrategy::MinimizeFootprint,
+             "First-fit-decreasing, maximal reuse: fewest buffers (default; historical behaviour)")
+      .value("CAPACITY_GATED", MemoryReuseStrategy::CapacityGated,
+             "Spread to distinct buffers while under the per-space on-chip budget, reuse only on "
+             "overflow: removes false same-address barriers on buffer-rich kernels");
+
   // Bind DiagnosticPhase enum
   nb::enum_<DiagnosticPhase>(passes, "DiagnosticPhase",
                              "Controls when DiagnosticInstrument runs registered checks "
@@ -209,6 +218,9 @@ void BindPass(nb::module_& m) {
       "Get the set of properties automatically verified during compilation");
   passes.def("get_default_verification_level", &GetDefaultVerificationLevel,
              "Get the default verification level (from PYPTO_VERIFY_LEVEL env var, default: Basic)");
+  passes.def("get_default_memory_reuse_strategy", &GetDefaultMemoryReuseStrategy,
+             "Get the default MemoryReuse strategy (from PYPTO_MEMORY_REUSE_STRATEGY env var, default: "
+             "MinimizeFootprint)");
   passes.def("verify_properties", &pass::VerifyProperties, nb::arg("properties"), nb::arg("program"),
              nb::arg("pass_name"), "Verify properties on a program and throw on errors");
 
@@ -266,12 +278,14 @@ void BindPass(nb::module_& m) {
                           "before/after each pass execution. Also controls automatic\n"
                           "verification and the diagnostic channel (warnings + performance\n"
                           "hints) for PassPipeline.")
-      .def(nb::init<std::vector<PassInstrumentPtr>, VerificationLevel, DiagnosticPhase, DiagnosticCheckSet>(),
+      .def(nb::init<std::vector<PassInstrumentPtr>, VerificationLevel, DiagnosticPhase, DiagnosticCheckSet,
+                    MemoryReuseStrategy>(),
            nb::arg("instruments"), nb::arg("verification_level") = VerificationLevel::Basic,
            nb::arg("diagnostic_phase") = DiagnosticPhase::PrePipeline,
            nb::arg("disabled_diagnostics") = DiagnosticCheckSet{DiagnosticCheck::UnusedControlFlowResult},
+           nb::arg("memory_reuse_strategy") = MemoryReuseStrategy::MinimizeFootprint,
            "Create a PassContext with instruments, verification level, diagnostic phase gate, "
-           "and optional disabled diagnostic checks")
+           "optional disabled diagnostic checks, and the MemoryReuse packing strategy")
       .def("__enter__",
            [](PassContext& self) -> PassContext& {
              self.EnterContext();
@@ -284,6 +298,8 @@ void BindPass(nb::module_& m) {
            "Get the diagnostic phase gate for this context")
       .def("get_disabled_diagnostics", &PassContext::GetDisabledDiagnostics,
            "Get the diagnostic checks suppressed by this context")
+      .def("get_memory_reuse_strategy", &PassContext::GetMemoryReuseStrategy,
+           "Get the MemoryReuse packing strategy for this context")
       .def("get_instruments", &PassContext::GetInstruments, "Get the instruments registered on this context")
       .def_static("current", &PassContext::Current, nb::rv_policy::reference,
                   "Get the currently active context, or None if no context is active");

@@ -91,6 +91,12 @@ class VerificationLevel(Enum):
     BASIC = ...
     ROUNDTRIP = ...
 
+class MemoryReuseStrategy(Enum):
+    """Selects how MemoryReuse packs tile buffers."""
+
+    MINIMIZE_FOOTPRINT = ...
+    CAPACITY_GATED = ...
+
 class DiagnosticPhase(Enum):
     """Controls when DiagnosticInstrument runs registered checks (warnings + perf hints)."""
 
@@ -146,6 +152,10 @@ def get_verified_properties() -> IRPropertySet:
 
 def get_default_verification_level() -> VerificationLevel:
     """Get the default verification level (from PYPTO_VERIFY_LEVEL env var, default: Basic)."""
+
+def get_default_memory_reuse_strategy() -> MemoryReuseStrategy:
+    """Get the default MemoryReuse strategy (from PYPTO_MEMORY_REUSE_STRATEGY env var,
+    default: MinimizeFootprint)."""
 
 def verify_properties(
     properties: IRPropertySet,
@@ -263,8 +273,10 @@ class PassContext:
         verification_level: VerificationLevel = VerificationLevel.BASIC,
         diagnostic_phase: DiagnosticPhase = DiagnosticPhase.PRE_PIPELINE,
         disabled_diagnostics: DiagnosticCheckSet = ...,  # default: {UnusedControlFlowResult}
+        memory_reuse_strategy: MemoryReuseStrategy = MemoryReuseStrategy.MINIMIZE_FOOTPRINT,
     ) -> None:
-        """Create a PassContext with instruments, verification level, phase, and disabled diagnostics."""
+        """Create a PassContext with instruments, verification level, phase, disabled diagnostics,
+        and the MemoryReuse packing strategy."""
         ...
 
     def __enter__(self) -> PassContext: ...
@@ -284,6 +296,10 @@ class PassContext:
 
     def get_disabled_diagnostics(self) -> DiagnosticCheckSet:
         """Get the diagnostic checks suppressed by this context."""
+        ...
+
+    def get_memory_reuse_strategy(self) -> MemoryReuseStrategy:
+        """Get the MemoryReuse packing strategy for this context."""
         ...
 
     def get_instruments(self) -> list[PassInstrument]:

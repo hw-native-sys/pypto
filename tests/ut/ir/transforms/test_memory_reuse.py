@@ -3635,5 +3635,92 @@ class TestPipelineStageSeparation:
         )
 
 
+class TestCapacityGatedStrategy:
+    """MemoryReuseStrategy.CAPACITY_GATED: spread to distinct buffers while the
+    per-space footprint stays within the on-chip budget, falling back to reuse
+    only on overflow. Default (MINIMIZE_FOOTPRINT) behaviour is unchanged.
+
+    A configured backend is required because the budget comes from
+    ``Backend.GetMemSize(Vec)`` (184KB on Ascend910B). The chain a->c->d->e has
+    fully disjoint lifetimes, so MINIMIZE_FOOTPRINT coalesces all four onto one
+    buffer; CAPACITY_GATED keeps them apart while the budget allows.
+    """
+
+    @staticmethod
+    def _chain_program(dim: int):
+        """A sequential chain load->add->mul->add->store over [dim, dim] FP32 tiles."""
+
+        @pl.program
+        class Prog:
+            @pl.function
+            def main(
+                self,
+                input_a: pl.Tensor[[dim, dim], pl.FP32],
+                output: pl.Out[pl.Tensor[[dim, dim], pl.FP32]],
+            ) -> pl.Tensor[[dim, dim], pl.FP32]:
+                tile_a: pl.Tile[[dim, dim], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    input_a, [0, 0], [dim, dim]
+                )
+                tile_c: pl.Tile[[dim, dim], pl.FP32, pl.MemorySpace.Vec] = pl.add(tile_a, tile_a)
+                tile_d: pl.Tile[[dim, dim], pl.FP32, pl.MemorySpace.Vec] = pl.mul(tile_c, tile_c)
+                tile_e: pl.Tile[[dim, dim], pl.FP32, pl.MemorySpace.Vec] = pl.add(tile_d, tile_d)
+                result: pl.Tensor[[dim, dim], pl.FP32] = pl.store(tile_e, [0, 0], output)
+                return result
+
+        return Prog
+
+    def test_default_minimizes_footprint(self):
+        """Default (explicit MINIMIZE_FOOTPRINT): the disjoint chain coalesces to ONE buffer.
+
+        The strategy is set explicitly so the test is deterministic regardless of
+        any ambient PYPTO_MEMORY_REUSE_STRATEGY env default.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        try:
+            with passes.PassContext(
+                [], memory_reuse_strategy=passes.MemoryReuseStrategy.MINIMIZE_FOOTPRINT
+            ):
+                After = _run_pipeline(self._chain_program(64))  # 16KB tiles
+        finally:
+            backend.reset_for_testing()
+        bases = _collect_tile_memref_bases(After)
+        chain = {bases["tile_a"], bases["tile_c"], bases["tile_d"], bases["tile_e"]}
+        assert len(chain) == 1, f"MINIMIZE_FOOTPRINT should coalesce the chain, got bases {chain}"
+
+    def test_capacity_gated_spreads_under_budget(self):
+        """CAPACITY_GATED with 16KB tiles (4x16KB = 64KB << 184KB Vec): four distinct buffers."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        try:
+            with passes.PassContext([], memory_reuse_strategy=passes.MemoryReuseStrategy.CAPACITY_GATED):
+                After = _run_pipeline(self._chain_program(64))  # 16KB tiles
+        finally:
+            backend.reset_for_testing()
+        bases = _collect_tile_memref_bases(After)
+        chain = [bases["tile_a"], bases["tile_c"], bases["tile_d"], bases["tile_e"]]
+        assert len(set(chain)) == 4, f"CAPACITY_GATED under budget should spread, got bases {chain}"
+
+    def test_capacity_gated_falls_back_on_overflow(self):
+        """CAPACITY_GATED with 64KB tiles (4x64KB = 256KB > 184KB Vec): partial spread + reuse.
+
+        Spreading is monotone: early tiles get private buffers until the running
+        footprint hits the budget, then later tiles fall back to reuse. The pass
+        must complete without overflow and yield fewer than four distinct buffers.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        try:
+            with passes.PassContext([], memory_reuse_strategy=passes.MemoryReuseStrategy.CAPACITY_GATED):
+                After = _run_pipeline(self._chain_program(128))  # 64KB tiles
+        finally:
+            backend.reset_for_testing()
+        bases = _collect_tile_memref_bases(After)
+        chain = {bases["tile_a"], bases["tile_c"], bases["tile_d"], bases["tile_e"]}
+        assert 1 < len(chain) < 4, (
+            f"CAPACITY_GATED over budget should partially spread then reuse, got bases {chain}"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -24,6 +24,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/any_cast.h"
@@ -1444,7 +1445,8 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
     const std::map<VarPtr, std::vector<VarPtr>>& sharing_groups,
     const std::map<const Var*, std::pair<int, int>>& var_liveness,
     const std::map<const Var*, std::vector<std::pair<int32_t, int32_t>>>& pipeline_membership,
-    const std::set<const Var*>& pipeline_load_tiles) {
+    const std::set<const Var*>& pipeline_load_tiles, MemoryReuseStrategy strategy,
+    const std::map<MemorySpace, uint64_t>& space_budget) {
   std::map<VarPtr, VarPtr> reuse_map;
 
   // Members of a sharing group (the vars that already physically share one base).
@@ -1629,7 +1631,6 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
   }
 
   for (auto& [space, indices] : by_space) {
-    (void)space;
     // Largest-first; ties broken by definition order for determinism and so that
     // equal-size workloads reproduce the prior definition-order grouping.
     std::stable_sort(indices.begin(), indices.end(), [&lifetimes](size_t a, size_t b) {
@@ -1645,9 +1646,22 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
     // AllocateMemoryAddr error rather than being silently coalesced away; the
     // kernel must reduce its stage= count or tile size to fit.
     std::vector<std::vector<size_t>> buffers;
-    for (size_t idx : indices) {
-      const auto& cand = lifetimes[idx];
-      bool placed = false;
+
+    // CapacityGated budget for this space: spread to distinct buffers while the
+    // running footprint (sum of opened buffers' representative sizes, a
+    // conservative upper bound on the live-set peak) stays within the on-chip
+    // limit. budget == 0 means "no budget known" -> never spread (MinimizeFootprint
+    // behaviour). Reset per space because reuse is within a single space.
+    uint64_t footprint = 0;
+    uint64_t budget = 0;
+    if (strategy == MemoryReuseStrategy::CapacityGated) {
+      auto bit = space_budget.find(space);
+      if (bit != space_budget.end()) budget = bit->second;
+    }
+
+    // Attempt first-fit reuse of `cand` (interval `idx`) into an existing buffer.
+    // Returns true and commits the reuse decision on success.
+    auto try_reuse = [&](const LifetimeInterval& cand, size_t idx) -> bool {
       for (auto& buf : buffers) {
         bool fits = true;
         for (size_t member_idx : buf) {
@@ -1667,10 +1681,26 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
           }
         }
         buf.push_back(idx);
-        placed = true;
-        break;
+        return true;
       }
-      if (!placed) buffers.push_back({idx});
+      return false;
+    };
+    auto open_new = [&](size_t idx) {
+      buffers.push_back({idx});
+      footprint += lifetimes[idx].size;
+    };
+
+    for (size_t idx : indices) {
+      const auto& cand = lifetimes[idx];
+      // CapacityGated: prefer a private buffer while it fits the budget; this
+      // keeps independent tiles off one address so ptoas does not synthesise
+      // WAR/WAW barriers between them. Once the budget is hit, fall back to reuse.
+      const bool spread = budget > 0 && footprint + cand.size <= budget;
+      if (spread) {
+        open_new(idx);
+        continue;
+      }
+      if (!try_reuse(cand, idx)) open_new(idx);
     }
   }
 
@@ -2299,10 +2329,27 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   forbid_collector.VisitStmt(new_body);
   ForbidAliasMap forbid_alias = forbid_collector.Take();
 
+  // Tile-buffer packing strategy + per-space byte budget. Strategy comes from
+  // the active PassContext (default MinimizeFootprint = historical behaviour).
+  // CapacityGated needs the on-chip limit per space; we surface only Vec for now
+  // (vector pipe is where false same-address barriers hurt). An empty budget map
+  // makes the packer behave exactly as MinimizeFootprint, so an unconfigured
+  // backend or a non-Vec space transparently keeps the old packing.
+  auto* ctx = PassContext::Current();
+  auto strategy = ctx ? ctx->GetMemoryReuseStrategy() : GetDefaultMemoryReuseStrategy();
+  std::map<MemorySpace, uint64_t> space_budget;
+  if (strategy == MemoryReuseStrategy::CapacityGated && backend::BackendConfig::IsConfigured()) {
+    const auto* be = backend::GetBackend();
+    if (be != nullptr) {
+      uint64_t vec_limit = be->GetMemSize(MemorySpace::Vec);
+      if (vec_limit > 0) space_budget[MemorySpace::Vec] = vec_limit;
+    }
+  }
+
   auto reuse_map = IdentifyReuseOpportunities(
       analysis_result.lifetimes, hazard, forbid_alias, analysis_result.phi_family_ids,
       analysis_result.var_sharing_groups, analysis_result.var_liveness, analysis_result.pipeline_membership,
-      analysis_result.pipeline_load_tiles);
+      analysis_result.pipeline_load_tiles, strategy, space_budget);
 
   // Step 3: Apply MemRef sharing (skip if no reuse candidates)
   if (!reuse_map.empty()) {

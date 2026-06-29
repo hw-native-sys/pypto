@@ -49,6 +49,24 @@ program_optimized = reuse_pass(program)
    - **IfStmt**: Patch return_vars to match yield value's MemRef
 6. **Remove redundant allocs**: Collect all MemRefs still referenced by TileType variables, then remove `tile.alloc` statements whose MemRef is no longer in use
 
+## Packing strategy
+
+Step 3's packing preference is selectable via `PassContext.GetMemoryReuseStrategy()`
+(`MemoryReuseStrategy`), defaulting to the historical behaviour:
+
+| Strategy | Behaviour | Use when |
+| -------- | --------- | -------- |
+| `MinimizeFootprint` (default) | First-fit-decreasing: every non-interfering interval coalesces onto the earliest existing buffer → fewest buffers, smallest footprint. | UB pressure is real (high on-chip occupancy). |
+| `CapacityGated` | Gives each interval its own buffer while the per-space running footprint (sum of opened buffers' representative sizes, a conservative upper bound on the live-set peak) stays within the backend's `GetMemSize(space)` budget; falls back to first-fit reuse only on overflow. | Buffer-rich kernels (low occupancy) where coalescing many independent tiles onto one address makes ptoas synthesise false `pipe_barrier(PIPE_V)` WAR/WAW barriers between otherwise-independent ops. |
+
+`CapacityGated` currently budgets only the `Vec` space (where false same-address
+barriers hurt most); other spaces and an unconfigured backend transparently keep
+`MinimizeFootprint` packing. All correctness gates (pipeline ping-pong, load+tpop
+hazard, no-alias) are unchanged — the strategy only chooses whether to coalesce
+two intervals that *could* legally share. Select it via
+`PassContext(..., memory_reuse_strategy=passes.MemoryReuseStrategy.CAPACITY_GATED)`
+or the `PYPTO_MEMORY_REUSE_STRATEGY=capacity_gated` environment-variable default.
+
 **Reuse conditions**:
 
 - Non-overlapping lifetimes (no interference). Two variables do NOT overlap when `prev.last_use <= curr.def` (i.e., the source's last use can be at the same statement as the target's definition, since inputs are read before outputs are written within a single statement).

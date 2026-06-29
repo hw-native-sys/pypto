@@ -55,6 +55,37 @@ class Pass;
 void EmitDiagnostics(const std::vector<Diagnostic>& diags, const std::string& phase_label);
 
 /**
+ * @brief Selects how MemoryReuse packs tile buffers.
+ *
+ * `MinimizeFootprint` is the historical behaviour: first-fit-decreasing
+ * packing that coalesces every non-interfering tile onto the earliest existing
+ * buffer, minimising the number of distinct buffers (smallest footprint). This
+ * can place many independent tiles on one address; ptoas then sees those as
+ * WAR/WAW hazards and inserts intra-pipe barriers (e.g. `pipe_barrier(PIPE_V)`)
+ * that serialise otherwise-independent vector ops.
+ *
+ * `CapacityGated` instead gives each tile its own buffer while the per-space
+ * running footprint stays within the on-chip budget, falling back to reuse only
+ * when spreading would exceed it. On buffer-rich kernels (low UB occupancy)
+ * this removes the false same-address hazards without overflowing memory; on
+ * high-occupancy kernels it degrades gracefully to the same reuse as
+ * `MinimizeFootprint`.
+ */
+enum class MemoryReuseStrategy {
+  MinimizeFootprint,  ///< first-fit-decreasing, maximal reuse (default; current behaviour)
+  CapacityGated,      ///< spread to distinct buffers while under the per-space budget
+};
+
+/**
+ * @brief Default MemoryReuse strategy when no PassContext overrides it.
+ *
+ * Reads the `PYPTO_MEMORY_REUSE_STRATEGY` environment variable once on first
+ * call: `capacity_gated` selects `CapacityGated`; anything else (or unset)
+ * selects `MinimizeFootprint`. Mirrors `GetDefaultVerificationLevel`.
+ */
+MemoryReuseStrategy GetDefaultMemoryReuseStrategy();
+
+/**
  * @brief Controls when property verification runs
  */
 enum class VerificationMode {
@@ -247,10 +278,12 @@ class PassContext {
    *        Performance hints are on by default; disable individual hints by
    *        adding their DiagnosticCheck values here.
    */
-  explicit PassContext(std::vector<PassInstrumentPtr> instruments,
-                       VerificationLevel verification_level = VerificationLevel::Basic,
-                       DiagnosticPhase diagnostic_phase = DiagnosticPhase::PrePipeline,
-                       DiagnosticCheckSet disabled_diagnostics = {DiagnosticCheck::UnusedControlFlowResult});
+  explicit PassContext(
+      std::vector<PassInstrumentPtr> instruments,
+      VerificationLevel verification_level = VerificationLevel::Basic,
+      DiagnosticPhase diagnostic_phase = DiagnosticPhase::PrePipeline,
+      DiagnosticCheckSet disabled_diagnostics = {DiagnosticCheck::UnusedControlFlowResult},
+      MemoryReuseStrategy memory_reuse_strategy = MemoryReuseStrategy::MinimizeFootprint);
 
   /**
    * @brief Push this context onto the thread-local stack
@@ -299,6 +332,11 @@ class PassContext {
   [[nodiscard]] const DiagnosticCheckSet& GetDisabledDiagnostics() const;
 
   /**
+   * @brief Get the tile-buffer packing strategy for MemoryReuse.
+   */
+  [[nodiscard]] MemoryReuseStrategy GetMemoryReuseStrategy() const;
+
+  /**
    * @brief Get the instruments registered on this context
    */
   [[nodiscard]] const std::vector<PassInstrumentPtr>& GetInstruments() const;
@@ -327,6 +365,7 @@ class PassContext {
   VerificationLevel verification_level_;
   DiagnosticPhase diagnostic_phase_;
   DiagnosticCheckSet disabled_diagnostics_;
+  MemoryReuseStrategy memory_reuse_strategy_;
   PassContext* previous_;
 
   static thread_local PassContext* current_;
