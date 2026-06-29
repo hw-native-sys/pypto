@@ -152,9 +152,7 @@ def syncall(*, core_type: str = "mix", span: Span | None = None) -> Call:
         Call expression for system.syncall
     """
     if core_type not in _SYNCALL_CORE_TYPES:
-        raise ValueError(
-            f"syncall core_type must be one of {_SYNCALL_CORE_TYPES}, got {core_type!r}"
-        )
+        raise ValueError(f"syncall core_type must be one of {_SYNCALL_CORE_TYPES}, got {core_type!r}")
     actual_span = _get_span_or_capture(span, frame_offset=1)
     return _ir_core.create_op_call("system.syncall", [], {"core_type": core_type}, actual_span)
 

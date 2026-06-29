@@ -3694,8 +3694,7 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   reg("system.syncall", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     // Cross-core all-participant barrier (pto::SYNCALL), hard/FFTS form: no
     // operands, only the participating core set is selected.
-    CHECK(op->args_.empty()) << "system.syncall (hard form) takes no arguments, got "
-                             << op->args_.size();
+    CHECK(op->args_.empty()) << "system.syncall (hard form) takes no arguments, got " << op->args_.size();
     const auto core_type = op->GetKwarg<std::string>("core_type", "mix");
     CHECK(core_type == "aiv_only" || core_type == "aic_only" || core_type == "mix")
         << "system.syncall: core_type must be aiv_only|aic_only|mix, got " << core_type;
