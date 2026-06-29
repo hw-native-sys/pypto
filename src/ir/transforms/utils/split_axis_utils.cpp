@@ -33,6 +33,7 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
@@ -869,6 +870,101 @@ SubblockInjectionResult InjectSubblockIdx(const FunctionPtr& func, bool is_aiv) 
   auto assign_stmt = std::make_shared<AssignStmt>(subblock_idx_var, subblock_call, func->span_);
   body_stmts.insert(body_stmts.begin(), assign_stmt);
   return {subblock_idx_var, std::move(body_stmts), std::move(used_names)};
+}
+
+SubblockInjectionResult InjectSubblockIdxIntoStmts(const std::vector<StmtPtr>& region_stmts,
+                                                   const std::unordered_set<std::string>& used_names) {
+  INTERNAL_CHECK(!region_stmts.empty())
+      << "Internal error: InjectSubblockIdxIntoStmts requires a non-empty region body";
+  std::vector<StmtPtr> body_stmts = region_stmts;
+
+  // Seed the name set with the caller-supplied names plus the region's own def
+  // vars so the injected subblock index never clashes with an existing binding.
+  std::unordered_set<std::string> names = used_names;
+  for (const auto& s : region_stmts) {
+    std::vector<VarPtr> def_vars;
+    transform_utils::CollectDefVars(s, def_vars);
+    for (const auto& v : def_vars) {
+      names.insert(v->name_hint_);
+    }
+  }
+
+  const Span& span = region_stmts.front()->span_;
+  auto idx_type = std::make_shared<ScalarType>(DataType::INDEX);
+  std::string subblock_var_name = ReserveFreshName(names, "subblock_idx");
+
+  auto& op_reg = OpRegistry::GetInstance();
+  auto subblock_op = op_reg.GetOp("tile.get_subblock_idx");
+  auto subblock_call = std::make_shared<Call>(
+      subblock_op, std::vector<ExprPtr>{}, std::vector<std::pair<std::string, std::any>>{}, idx_type, span);
+  auto subblock_idx_var = std::make_shared<Var>(subblock_var_name, idx_type, span);
+  auto assign_stmt = std::make_shared<AssignStmt>(subblock_idx_var, subblock_call, span);
+  body_stmts.insert(body_stmts.begin(), assign_stmt);
+  return {subblock_idx_var, std::move(body_stmts), std::move(names)};
+}
+
+namespace {
+
+// Mirrors the (formerly file-local) hazard finder in ExpandMixedKernel: records
+// the first tile.transpose whose source carries the split axis and whose
+// transpose actually swaps it. Shared so the explicit per-region check in pass 21
+// and the AUTO whole-function check in pass 22 use one detector.
+class TransposeSplitHazardFinder : public IRVisitor {
+ public:
+  explicit TransposeSplitHazardFinder(int split_dim) : split_dim_(split_dim) {}
+  [[nodiscard]] CallPtr Offending() const { return offending_; }
+  [[nodiscard]] const std::string& ResultName() const { return result_name_; }
+
+ protected:
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    Consider(As<Call>(op->value_), op->var_ ? op->var_->name_hint_ : "");
+    IRVisitor::VisitStmt_(op);
+  }
+  void VisitStmt_(const EvalStmtPtr& op) override {
+    Consider(As<Call>(op->expr_), "");
+    IRVisitor::VisitStmt_(op);
+  }
+
+ private:
+  // Whether the transpose actually swaps the split axis (so the split data
+  // migrates). tile.transpose carries the two axis indices as args[1]/args[2].
+  [[nodiscard]] bool SwapsSplitAxis(const CallPtr& call) const {
+    if (call->args_.size() < 3) return true;  // conservative if the axes are absent
+    auto a0 = std::dynamic_pointer_cast<const ConstInt>(call->args_[1]);
+    auto a1 = std::dynamic_pointer_cast<const ConstInt>(call->args_[2]);
+    if (!a0 || !a1) return true;
+    return static_cast<int>(a0->value_) == split_dim_ || static_cast<int>(a1->value_) == split_dim_;
+  }
+
+  void Consider(const CallPtr& call, const std::string& result_name) {
+    if (offending_ || !call || !call->op_ || !IsOp(call, "tile.transpose") || call->args_.empty()) {
+      return;
+    }
+    auto tt = std::dynamic_pointer_cast<const TileType>(call->args_[0]->GetType());
+    if (!tt || split_dim_ < 0 || split_dim_ >= static_cast<int>(tt->shape_.size())) return;
+    if (!SwapsSplitAxis(call)) return;  // split axis not transposed -> stays put, typed correctly
+    // The split axis carries real data unless it is statically 1. A dynamic
+    // (non-ConstInt) extent is treated as non-singleton: it cannot be proven
+    // safe, so flag it conservatively.
+    auto dim = std::dynamic_pointer_cast<const ConstInt>(tt->shape_[split_dim_]);
+    if (!dim || dim->value_ != 1) {
+      offending_ = call;
+      result_name_ = result_name;
+    }
+  }
+
+  int split_dim_;
+  CallPtr offending_;
+  std::string result_name_;
+};
+
+}  // namespace
+
+TransposeSplitHazard FindTransposeSplitHazard(const StmtPtr& body, int split_dim) {
+  if (!body) return {};
+  TransposeSplitHazardFinder finder(split_dim);
+  finder.VisitStmt(body);
+  return {finder.Offending(), finder.ResultName()};
 }
 
 }  // namespace split_axis

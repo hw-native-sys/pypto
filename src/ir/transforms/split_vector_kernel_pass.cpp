@@ -605,18 +605,28 @@ Pass SplitVectorKernel() {
       if ((func->func_type_ == FunctionType::AIV || func->func_type_ == FunctionType::AIC) &&
           func->HasAttr("split_aiv") && func->GetAttr<bool>("split_aiv", false)) {
         auto explicit_mode = func->GetSplitMode();
-        // Invariant: pl.split_aiv requires a mode (Phase B parser) and
-        // OutlineIncoreScopes co-propagates the function-level "split" attr
-        // alongside "split_aiv" (LowerAutoVectorSplit likewise stamps both). A
-        // split_aiv function without a split mode would be a double-halving
-        // miscompile risk; fail loudly so a future regression surfaces here.
-        INTERNAL_CHECK_SPAN(explicit_mode.has_value() && explicit_mode.value() != SplitMode::None,
-                            func->span_)
-            << "Internal error: function carries the split_aiv marker but no function-level "
-               "split mode; OutlineIncoreScopes / LowerAutoVectorSplit must co-propagate 'split' "
-               "with 'split_aiv'.";
         auto new_func = MutableCopy(func);
-        new_func->attrs_ = WithSplitAttrs(func, explicit_mode.value(), func->func_type_ == FunctionType::AIV);
+        if (explicit_mode.has_value() && explicit_mode.value() != SplitMode::None) {
+          // Single-mode split_aiv: a function-level "split" attr survives (a
+          // hand-written kernel, an AUTO function converged by LowerAutoVectorSplit,
+          // or a single-mode explicit region). Stamp split + dual_aiv_dispatch.
+          new_func->attrs_ =
+              WithSplitAttrs(func, explicit_mode.value(), func->func_type_ == FunctionType::AIV);
+        } else {
+          // Multi-mode explicit split_aiv: the per-region modes were lowered and
+          // erased by LowerAutoVectorSplit (pass 21); no single function-level mode
+          // survives. The authoritative per-op "split" ints already sit on the
+          // tpop/tpush pairs, so only the mode-agnostic dual_aiv_dispatch bool needs
+          // stamping here (all RequiresDualAivDispatch consults).
+          auto attrs = func->attrs_;
+          attrs.erase(std::remove_if(attrs.begin(), attrs.end(),
+                                     [](const auto& kv) { return kv.first == kDualAivDispatchAttr; }),
+                      attrs.end());
+          if (func->func_type_ == FunctionType::AIV) {
+            attrs.emplace_back(kDualAivDispatchAttr, true);
+          }
+          new_func->attrs_ = std::move(attrs);
+        }
         new_functions.push_back(new_func);
         changed = true;
         continue;

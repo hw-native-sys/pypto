@@ -100,6 +100,51 @@ struct SubblockInjectionResult {
 SubblockInjectionResult InjectSubblockIdx(const FunctionPtr& func, bool is_aiv);
 
 /**
+ * @brief Inject the per-subblock index binding at the head of a region body.
+ *
+ * Region-scoped analogue of ``InjectSubblockIdx`` for the explicit
+ * ``SplitAivScopeStmt`` consumer in LowerAutoVectorSplit (pass 21). Prepends a
+ * fresh ``subblock_idx = tile.get_subblock_idx()`` binding to ``region_stmts``
+ * (a region is always an AIV lane, so the index is always injected) and returns
+ * the rewritten body plus the index expr. ``used_names`` seeds the collision-free
+ * name set (caller-supplied names plus the region's own def vars are added) so the
+ * injected name never clashes with an existing binding.
+ *
+ * @param region_stmts The flattened statements of the region body.
+ * @param used_names Externally-reserved names to avoid colliding with.
+ * @return The prepended body statements plus the subblock-idx expr.
+ */
+SubblockInjectionResult InjectSubblockIdxIntoStmts(const std::vector<StmtPtr>& region_stmts,
+                                                   const std::unordered_set<std::string>& used_names);
+
+/**
+ * @brief A tile.transpose that swaps the split axis on a non-singleton source.
+ *
+ * ``call`` is the first offending transpose found (null when none). ``result_name``
+ * is the name_hint of the assigned result (empty for an EvalStmt or anonymous LHS).
+ */
+struct TransposeSplitHazard {
+  CallPtr call;
+  std::string result_name;
+};
+
+/**
+ * @brief Find the first split-axis-swapping tile.transpose within a body.
+ *
+ * Splitting halves the ``split_dim`` axis, but ``tile.transpose`` swaps axes — so
+ * a transpose that moves the split axis migrates the per-lane data to the other
+ * dimension and cannot be split correctly. A source that is statically singleton
+ * on the split axis carries no split data and is safe. Shared by ExpandMixedKernel
+ * (AUTO whole-function check) and LowerAutoVectorSplit (explicit per-region check);
+ * each caller builds its own actionable diagnostic from the result.
+ *
+ * @param body The statement tree to scan.
+ * @param split_dim The partitioned tile dimension (see SplitDimension).
+ * @return The first offending transpose (``call == nullptr`` when none).
+ */
+TransposeSplitHazard FindTransposeSplitHazard(const StmtPtr& body, int split_dim);
+
+/**
  * @brief Halve every split-axis tile along a statement list (recursive driver).
  *
  * Rewrites cross-core push/pop sync, halves AIV ``tile.load``/``tile.store``/

@@ -62,6 +62,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/core_affinity.h"
@@ -83,14 +84,24 @@ using core_affinity::CombineAffinity;
 using core_affinity::CoreAffinity;
 using core_affinity::CVDirection;
 using split_axis::InjectSubblockIdx;
+using split_axis::InjectSubblockIdxIntoStmts;
 using split_axis::ProcessStmts;
 using split_axis::SplitDimension;
 using split_axis::TileInfo;
 
 constexpr const char* kDualAivDispatchAttr = "dual_aiv_dispatch";
 constexpr const char* kSplitAivAttr = "split_aiv";
+// Stamped by the explicit-region path so ExpandMixedKernel (pass 22) skips its
+// single-func-mode transpose-hazard check (validated per-region here instead).
+constexpr const char* kSplitAivRegionValidatedAttr = "split_aiv_region_validated";
 
 CallPtr AsCall(const ExprPtr& expr) { return std::dynamic_pointer_cast<const Call>(expr); }
+
+// Defined below LowerStmts; forward-declared so the LowerStmts SplitAivScopeStmt
+// arm (explicit per-region lowering) can run them on the lowered region body.
+void CheckNoCubeTileHalved(const std::vector<StmtPtr>& stmts,
+                           const std::unordered_map<const Var*, TileInfo>& halved, bool& cube_halved);
+void ValidateTransposeSplitHazard(const std::vector<StmtPtr>& stmts, int split_dim, const Span& region_span);
 
 // Half of a split-axis physical extent: ConstInt even -> value/2, dynamic ->
 // floordiv(dim, 2). Mirrors split_axis::ComputeHalfDimSize (anonymous in
@@ -141,6 +152,39 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
   result.reserve(stmts.size());
 
   for (const auto& stmt : stmts) {
+    // --- Explicit split_aiv region (nested or top-level): lower in place. ---
+    // The region carries its OWN mode (reg->split_); region-local tile_vars /
+    // var_replacements maps keep a halved var from leaking into a sibling region
+    // or an out-of-region full-width op. After lowering, the scope wrapper is
+    // dropped and its scope-free body spliced in.
+    if (auto reg = As<SplitAivScopeStmt>(stmt)) {
+      SplitMode rmode = reg->split_;
+      int rdim = SplitDimension(rmode);
+      std::unordered_map<const Var*, TileInfo> r_tile_vars;
+      std::unordered_map<const Var*, VarPtr> r_var_repl;
+      auto inj = InjectSubblockIdxIntoStmts(transform_utils::FlattenToStmts(reg->body_),
+                                            /*used_names=*/{});
+      auto lowered = LowerStmts(inj.body_stmts, rmode, static_cast<int>(rmode), rdim, r_tile_vars,
+                                inj.subblock_idx_expr, r_var_repl);
+
+      // Per-region cube-operand backstop and transpose-hazard check, using THIS
+      // region's split_dim and span so diagnostics point at the region.
+      bool cube_halved = false;
+      CheckNoCubeTileHalved(lowered, r_tile_vars, cube_halved);
+      INTERNAL_CHECK_SPAN(!cube_halved, reg->span_)
+          << "Internal error: LowerAutoVectorSplit halved a CUBE-affinity op inside a pl.split_aiv "
+             "region — the vector-sub-region affinity gate leaked into a cube operand.";
+      ValidateTransposeSplitHazard(lowered, rdim, reg->span_);
+
+      StmtPtr region_body =
+          (lowered.size() == 1) ? lowered[0] : std::make_shared<SeqStmts>(lowered, reg->span_);
+      if (!r_var_repl.empty()) {
+        region_body = transform_utils::Substitute(region_body, r_var_repl);
+      }
+      for (auto& s : transform_utils::FlattenToStmts(region_body)) result.push_back(s);
+      continue;
+    }
+
     // --- Boundary tile.move: rewrite to aiv_shard (C->V) / aic_gather (V->C). ---
     if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
       if (auto call = AsCall(assign->value_)) {
@@ -324,6 +368,121 @@ void CheckNoCubeTileHalved(const std::vector<StmtPtr>& stmts,
   }
 }
 
+// Per-region transpose-split hazard check (user-facing limitation). A
+// tile.transpose that swaps the split axis migrates the per-lane data to the
+// other dimension and cannot be split correctly; reject it with an actionable
+// error pointing at the region. Shares the detector with ExpandMixedKernel's
+// AUTO whole-function check (split_axis::FindTransposeSplitHazard).
+void ValidateTransposeSplitHazard(const std::vector<StmtPtr>& stmts, int split_dim, const Span& region_span) {
+  auto body = std::make_shared<SeqStmts>(stmts, region_span);
+  auto hazard = split_axis::FindTransposeSplitHazard(body, split_dim);
+  if (hazard.call) {
+    const char* mode_name = (split_dim == 0) ? "UP_DOWN" : "LEFT_RIGHT";
+    std::string where = hazard.result_name.empty() ? std::string() : " (result '" + hazard.result_name + "')";
+    CHECK_SPAN(false, hazard.call->span_)
+        << "LowerAutoVectorSplit: a pl.split_aiv(" << mode_name << ") region contains a tile.transpose"
+        << where << " that swaps the split axis (dim " << split_dim
+        << "). The transpose moves the per-lane split data to the other dimension, so the region cannot "
+           "be split correctly. Fix it one of two ways: (1) remove the transpose, e.g. replace a "
+           "transpose-then-row-index with a direct column slice such as pre[:, h:h+1]; or (2) move the "
+           "transpose outside the pl.split_aiv region.";
+  }
+}
+
+// Top-level walk for the explicit ``SplitAivScopeStmt`` path. Statements OUTSIDE
+// any region are emitted FULL-WIDTH (passed through unchanged); the LowerStmts
+// SplitAivScopeStmt arm lowers each region's vector compute with region-local
+// maps. Recurses into for/if/seq so a region nested in a loop or conditional is
+// found and lowered while its surrounding full-width compute is preserved.
+std::vector<StmtPtr> LowerExplicitRegions(const std::vector<StmtPtr>& stmts) {
+  std::vector<StmtPtr> result;
+  result.reserve(stmts.size());
+  for (const auto& stmt : stmts) {
+    if (As<SplitAivScopeStmt>(stmt)) {
+      // Delegate to the LowerStmts region arm; it reads the region's own mode, so
+      // the placeholder mode/dim args are ignored. Region-local maps live inside
+      // the arm, so nothing leaks to the surrounding full-width context.
+      std::unordered_map<const Var*, TileInfo> ignored_tile_vars;
+      std::unordered_map<const Var*, VarPtr> ignored_var_repl;
+      auto lowered = LowerStmts({stmt}, SplitMode::None, /*split_int=*/0, /*split_dim=*/0, ignored_tile_vars,
+                                /*subblock_idx=*/nullptr, ignored_var_repl);
+      for (auto& s : lowered) result.push_back(s);
+      continue;
+    }
+    if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
+      auto new_body = LowerExplicitRegions(transform_utils::FlattenToStmts(for_stmt->body_));
+      auto new_for = MutableCopy(for_stmt);
+      new_for->body_ = loop_repair::MakeBody(new_body, for_stmt->span_);
+      result.push_back(new_for);
+      continue;
+    }
+    if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
+      auto new_then = LowerExplicitRegions(transform_utils::FlattenToStmts(if_stmt->then_body_));
+      std::optional<StmtPtr> new_else;
+      if (if_stmt->else_body_.has_value()) {
+        auto new_else_stmts = LowerExplicitRegions(transform_utils::FlattenToStmts(*if_stmt->else_body_));
+        new_else = loop_repair::MakeBody(new_else_stmts, if_stmt->span_);
+      }
+      auto new_if = MutableCopy(if_stmt);
+      new_if->then_body_ = loop_repair::MakeBody(new_then, if_stmt->span_);
+      new_if->else_body_ = new_else;
+      result.push_back(new_if);
+      continue;
+    }
+    if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(stmt)) {
+      result.push_back(std::make_shared<SeqStmts>(LowerExplicitRegions(seq->stmts_), seq->span_));
+      continue;
+    }
+    // Out-of-region statement: full width, unchanged.
+    result.push_back(stmt);
+  }
+  return result;
+}
+
+// Detect any live ``SplitAivScopeStmt`` in a body (O(N) single walk).
+class HasSplitAivScopeFinder : public IRVisitor {
+ public:
+  bool found_ = false;
+
+ protected:
+  void VisitStmt_(const SplitAivScopeStmtPtr& op) override { found_ = true; }
+};
+
+bool BodyContainsSplitAivScope(const StmtPtr& body) {
+  if (!body) return false;
+  HasSplitAivScopeFinder finder;
+  finder.VisitStmt(body);
+  return finder.found_;
+}
+
+// Lower an InCore function that carries explicit ``SplitAivScopeStmt`` regions:
+// halve only the vector compute inside each region (region-local), leave
+// out-of-region compute full-width, drop each scope wrapper, and stamp
+// ``split_aiv`` (idempotent — already bridged at OutlineIncoreScopes) plus
+// ``split_aiv_region_validated`` (signals pass 22 to skip its func-mode check).
+FunctionPtr LowerExplicitRegionFunction(const FunctionPtr& func) {
+  auto stmts = transform_utils::FlattenToStmts(func->body_);
+  auto new_stmts = LowerExplicitRegions(stmts);
+  StmtPtr new_body =
+      (new_stmts.size() == 1) ? new_stmts[0] : std::make_shared<SeqStmts>(new_stmts, func->span_);
+  auto [cloned_body, clone_map_unused] = DeepClone(new_body);
+  (void)clone_map_unused;
+
+  auto attrs = func->attrs_;
+  attrs.erase(std::remove_if(attrs.begin(), attrs.end(),
+                             [](const auto& kv) {
+                               return kv.first == kSplitAivAttr || kv.first == kSplitAivRegionValidatedAttr;
+                             }),
+              attrs.end());
+  attrs.emplace_back(kSplitAivAttr, true);
+  attrs.emplace_back(kSplitAivRegionValidatedAttr, true);
+
+  auto new_func = MutableCopy(func);
+  new_func->body_ = cloned_body;
+  new_func->attrs_ = std::move(attrs);
+  return new_func;
+}
+
 std::vector<std::pair<std::string, std::any>> WithSplitAivAttrs(const FunctionPtr& func, SplitMode mode) {
   auto attrs = func->attrs_;
   attrs.erase(std::remove_if(attrs.begin(), attrs.end(),
@@ -436,9 +595,19 @@ Pass LowerAutoVectorSplit() {
     for (const auto& [gvar, func] : program->functions_) {
       auto mode = func->GetSplitMode();
       const bool is_incore = (func->func_type_ == FunctionType::InCore);
-      // Only lower genuinely mixed (cube<->vector) functions. Pure-vector
-      // pl.split functions have no boundary to converge; ExpandMixedKernel
-      // strips their split, so marking them split_aiv here would desync.
+      // EXPLICIT region path: an InCore function whose body still carries one or
+      // more SplitAivScopeStmt regions (preserved through OutlineIncoreScopes).
+      // Each region carries its own mode, so this is checked before the AUTO path
+      // and handles the multi-mode case the single func-level mode cannot.
+      if (is_incore && BodyContainsSplitAivScope(func->body_)) {
+        new_functions.push_back(LowerExplicitRegionFunction(func));
+        changed = true;
+        continue;
+      }
+      // AUTO whole-function path (unchanged): lower genuinely mixed
+      // (cube<->vector) functions. Pure-vector pl.split functions have no boundary
+      // to converge; ExpandMixedKernel strips their split, so marking them
+      // split_aiv here would desync.
       if (is_incore && mode.has_value() && mode.value() != SplitMode::None &&
           !IsAlreadyExplicitSplitAiv(func) && IsMixedCubeVector(func)) {
         new_functions.push_back(LowerFunction(func, mode.value()));

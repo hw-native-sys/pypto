@@ -600,5 +600,209 @@ def test_pure_vector_split_is_left_untouched():
     assert "[64, 128]" not in text  # body not halved
 
 
+# ---------------------------------------------------------------------------
+# Explicit SplitAivScopeStmt region path (RFC #1300 nestable first-class node).
+#
+# LowerAutoVectorSplit is the SOLE consumer of SplitAivScopeStmt: it injects a
+# per-region subblock index, halves ONLY the vector compute INSIDE each region
+# (region-local maps so no leak to sibling regions or out-of-region full-width
+# ops), validates a per-region transpose hazard, then DROPS the scope wrapper.
+# The AUTO whole-function path above is unchanged.
+# ---------------------------------------------------------------------------
+
+
+def _count_split_aiv_scopes(program):
+    """Count surviving SplitAivScopeStmt nodes across all functions."""
+    count = 0
+
+    class Finder(ir.IRVisitor):
+        def visit_split_aiv_scope_stmt(self, op):
+            nonlocal count
+            count += 1
+            super().visit_split_aiv_scope_stmt(op)
+
+    finder = Finder()
+    for func in program.functions.values():
+        finder.visit_stmt(func.body)
+    return count
+
+
+def _vec_load_region(span, mode, data, out, *, full_shape=(128, 128)):
+    """A SplitAivScopeStmt region: aiv_id binding + a Vec load + store.
+
+    Mirrors the parser-produced shape (the body opens with
+    ``aiv_id = tile.get_subblock_idx()``). Returns (region_node, out_store_var).
+    """
+    aiv_id_call = T.get_subblock_idx(span=span)
+    aiv_id = ir.Var("aiv_id", aiv_id_call.type, span)
+    load = T.load(data, [0, 0], list(full_shape), target_memory=MS.Vec, span=span)
+    t = ir.Var("t", load.type, span)
+    store = T.store(t, [0, 0], out, span=span)
+    out_store = ir.Var("out_store", store.type, span)
+    body = ir.SeqStmts(
+        [
+            ir.AssignStmt(aiv_id, aiv_id_call, span),
+            ir.AssignStmt(t, load, span),
+            ir.AssignStmt(out_store, store, span),
+        ],
+        span,
+    )
+    region = ir.SplitAivScopeStmt(split=mode, body=body, span=span)
+    return region, out_store
+
+
+def _explicit_region_program(stmts, params, return_types, *, name="split_explicit"):
+    """A single InCore function whose body carries explicit SplitAivScopeStmt regions."""
+    span = ir.Span.unknown()
+    func = ir.Function(name, params, return_types, ir.SeqStmts(stmts, span), span, ir.FunctionType.InCore)
+    return ir.Program([func], name, span)
+
+
+def test_explicit_region_erased():
+    """Pass 21 consumes the region: no SplitAivScopeStmt survives, and the func is
+    stamped split_aiv + split_aiv_region_validated."""
+    span = ir.Span.unknown()
+    data = ir.Var("data", _tensor([128, 128]), span)
+    out_0 = ir.Var("out_0", _tensor([128, 128]), span)
+    region, out_store = _vec_load_region(span, ir.SplitMode.UP_DOWN, data, out_0)
+    program = _explicit_region_program(
+        [region, ir.ReturnStmt([out_store], span)],
+        [(data, _IN), (out_0, _OUT)],
+        [out_0.type],
+    )
+    after = _lower(program)
+    assert _count_split_aiv_scopes(after) == 0  # the scope wrapper is dropped
+    fattrs = _func_attrs(after)
+    assert fattrs.get("split_aiv") is True
+    assert fattrs.get("split_aiv_region_validated") is True
+    text = ir.python_print(after)
+    assert "split_aiv(" not in text  # the loop form is gone (node erased)
+    assert "get_subblock_idx" in text  # region body still derives the lane index
+
+
+def test_region_injects_subblock_idx():
+    """The pass prepends a `subblock_idx = tile.get_subblock_idx()` binding at the
+    region head and halves the vector load on the split axis."""
+    span = ir.Span.unknown()
+    data = ir.Var("data", _tensor([128, 128]), span)
+    out_0 = ir.Var("out_0", _tensor([128, 128]), span)
+    region, out_store = _vec_load_region(span, ir.SplitMode.UP_DOWN, data, out_0)
+    program = _explicit_region_program(
+        [region, ir.ReturnStmt([out_store], span)],
+        [(data, _IN), (out_0, _OUT)],
+        [out_0.type],
+    )
+    text = ir.python_print(_lower(program))
+    assert "subblock_idx" in text  # injected per-region index
+    assert "t: pl.Tile[[64, 128]" in text  # the in-region load is halved on dim0
+    assert "[0 + subblock_idx * 64, 0]" in text  # offset localized per subblock
+
+
+def test_region_halves_only_inside():
+    """Out-of-region vector compute stays FULL-WIDTH; only the in-region load is
+    halved (region-local maps do not leak)."""
+    span = ir.Span.unknown()
+    data = ir.Var("data", _tensor([128, 128]), span)
+    out_outer = ir.Var("out_outer", _tensor([128, 128]), span)
+    out_inner = ir.Var("out_inner", _tensor([128, 128]), span)
+
+    # Out-of-region vector load + store: must stay FULL [128, 128].
+    outer_load = T.load(data, [0, 0], [128, 128], target_memory=MS.Vec, span=span)
+    t_outer = ir.Var("t_outer", outer_load.type, span)
+    outer_store = T.store(t_outer, [0, 0], out_outer, span=span)
+    outer_store_var = ir.Var("outer_store", outer_store.type, span)
+
+    region, inner_store_var = _vec_load_region(span, ir.SplitMode.UP_DOWN, data, out_inner)
+
+    program = _explicit_region_program(
+        [
+            ir.AssignStmt(t_outer, outer_load, span),
+            ir.AssignStmt(outer_store_var, outer_store, span),
+            region,
+            ir.ReturnStmt([outer_store_var, inner_store_var], span),
+        ],
+        [(data, _IN), (out_outer, _OUT), (out_inner, _OUT)],
+        [out_outer.type, out_inner.type],
+    )
+    text = ir.python_print(_lower(program))
+    assert "t_outer: pl.Tile[[128, 128]" in text  # outside region: full width
+    assert "t: pl.Tile[[64, 128]" in text  # inside region: halved
+
+
+def test_multi_mode_two_regions():
+    """Two sibling regions with DIFFERENT modes halve independently: UP_DOWN on
+    dim0, LEFT_RIGHT on dim1 — no cross-region leak."""
+    span = ir.Span.unknown()
+    data = ir.Var("data", _tensor([128, 128]), span)
+    out_ud = ir.Var("out_ud", _tensor([128, 128]), span)
+    out_lr = ir.Var("out_lr", _tensor([128, 128]), span)
+
+    region_ud, store_ud = _vec_load_region(span, ir.SplitMode.UP_DOWN, data, out_ud)
+    region_lr, store_lr = _vec_load_region(span, ir.SplitMode.LEFT_RIGHT, data, out_lr)
+
+    program = _explicit_region_program(
+        [region_ud, region_lr, ir.ReturnStmt([store_ud, store_lr], span)],
+        [(data, _IN), (out_ud, _OUT), (out_lr, _OUT)],
+        [out_ud.type, out_lr.type],
+    )
+    after = _lower(program)
+    assert _count_split_aiv_scopes(after) == 0
+    text = ir.python_print(after)
+    # Each region halves on its OWN axis: UP_DOWN -> dim0, LEFT_RIGHT -> dim1.
+    assert "pl.Tile[[64, 128]" in text  # UP_DOWN region halves dim0
+    assert "pl.Tile[[128, 64]" in text  # LEFT_RIGHT region halves dim1
+    # The two regions use independent per-region subblock indices (no leak).
+    assert "[0 + subblock_idx" in text  # UP_DOWN: row offset localized
+    assert "[0, 0 + subblock_idx" in text  # LEFT_RIGHT: col offset localized
+
+
+def test_transpose_hazard_per_region():
+    """A tile.transpose that swaps the split axis inside a region is rejected with
+    an actionable ValueError (validated with THAT region's split_dim)."""
+    span = ir.Span.unknown()
+    src = ir.Var("src", _tile([16, 8], mem=MS.Vec), span)
+    out_0 = ir.Var("out_0", _tensor([8, 16]), span)
+    aiv_id_call = T.get_subblock_idx(span=span)
+    aiv_id = ir.Var("aiv_id", aiv_id_call.type, span)
+    tr = T.transpose(src, 0, 1, span=span)  # swaps split dim0 on a non-singleton source
+    zt = ir.Var("zt", tr.type, span)
+    store = T.store(zt, [0, 0], out_0, span=span)
+    out_store = ir.Var("out_store", store.type, span)
+    region = ir.SplitAivScopeStmt(
+        split=ir.SplitMode.UP_DOWN,
+        body=ir.SeqStmts(
+            [
+                ir.AssignStmt(aiv_id, aiv_id_call, span),
+                ir.AssignStmt(zt, tr, span),
+                ir.AssignStmt(out_store, store, span),
+            ],
+            span,
+        ),
+        span=span,
+    )
+    program = _explicit_region_program(
+        [region, ir.ReturnStmt([out_store], span)],
+        [(src, _IN), (out_0, _OUT)],
+        [out_0.type],
+    )
+    with pytest.raises(ValueError, match="swaps the split axis"):
+        _lower(program)
+
+
+def test_auto_path_unchanged():
+    """The AUTO whole-function pl.split path is untouched: it still inserts
+    aiv_shard, halves the vector region, stamps split_aiv — and crucially does NOT
+    take the explicit-region branch (no split_aiv_region_validated marker)."""
+    program = _build_c2v_mixed_program()
+    after = _lower(program)
+    fattrs = _func_attrs(after)
+    assert fattrs.get("split_aiv") is True
+    assert fattrs.get("split_aiv_region_validated") is None  # AUTO path, not region path
+    text = ir.python_print(after)
+    assert "aiv_shard" in text
+    assert "[64, 128]" in text  # vector sub-region halved
+    assert _count_split_aiv_scopes(after) == 0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
