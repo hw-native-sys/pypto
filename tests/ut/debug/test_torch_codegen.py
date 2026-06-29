@@ -215,6 +215,18 @@ def test_tile_load_store():
     assert "_tile_store" in code
 
 
+def test_tile_transpose_view():
+    """tile.transpose_view should emit .mT (matrix transpose of the trailing dims)."""
+    src = _tile_var("src", [64, 32])
+    view = _tile_var("view", [32, 64])
+
+    call = _op_call("tile.transpose_view", [src])
+    assign = ir.AssignStmt(view, call, _span())
+    func = _simple_function("f", [src], assign)
+    code = torch_codegen(func)
+    assert ".mT" in code
+
+
 def test_tile_compute_ops():
     """Tile compute ops should emit torch equivalents."""
     a = _tile_var("a", [64, 64])
