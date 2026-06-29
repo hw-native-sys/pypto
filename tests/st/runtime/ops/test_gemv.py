@@ -14,8 +14,10 @@ the layout passes (AutoTileMatmulL0 / CanonicalizeTileSlice) insert the L0
 Left/Right extracts. Coverage: several M/K/N shapes (incl. non-square and a
 K=128 case that forces AutoTileMatmulL0 to K-split), BF16 inputs with an FP32
 accumulator, narrowed valid_shape on the output rows (M) and the contraction
-(K), and a non-zero output row offset. Cube accumulation reorders the K
-reduction vs torch, so a relaxed FP32 tolerance is used.
+(K), and a non-zero output row offset. Narrowing the N dimension (rhs valid
+columns) is unsupported on a2a3 and rejected at type deduction. Cube
+accumulation reorders the K reduction vs torch, so a relaxed FP32 tolerance is
+used.
 
 gemv / gemv_acc / gemv_bias are not covered yet: they need pto-isa support
 (gemv/gemv_bias hit the TExtract dstRow % 16 == 0 1-row constraint; gemv_acc
@@ -173,9 +175,11 @@ class TestMatmulBias:
         )
         assert result.passed, f"Test failed: {result.error}"
 
-    # narrow-N (narrowing B/bias output cols) is omitted: the cube does not zero
-    # the [:, VALID_N:] output region the way row/contraction narrowing does
-    # (verified wrong on a2a3) — KNOWN_ISSUES. narrow-M and narrow-K work.
+    # narrow-N (rhs valid columns < N) is unsupported on a2a3: the cube
+    # miscomputes a column-narrowed Right operand (the valid output columns
+    # themselves come out wrong, not just the tail — verified on-device). The
+    # op now rejects it at type deduction (see test_tile_ops.py). Only narrow-M
+    # (rows) and narrow-K (contraction) are valid.
     @pytest.mark.platforms("a2a3")
     @pytest.mark.parametrize("narrow", ["M", "K"])
     def test_tile_matmul_bias_narrow(self, test_runner, narrow):

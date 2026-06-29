@@ -1590,6 +1590,38 @@ class TestTileMatMulOps:
         ir_str = str(Program)
         assert "tile.matmul_bias" in ir_str
 
+    def test_tile_matmul_bias_rejects_n_narrowing(self):
+        """matmul_bias rejects narrowing the N dimension (rhs valid cols < N).
+
+        Issue #1846 (narrow-N): on a2a3 the cube miscomputes a column-narrowed
+        Right operand — the valid output columns themselves come out wrong, not
+        just the tail (verified on-device). The op rejects it at type deduction
+        with an actionable message rather than silently returning wrong results.
+        Narrowing M (rows) or K (contraction) stays valid.
+        """
+        span = ir.Span.unknown()
+
+        def sliced(shape, valid):
+            st = ir.TileType(
+                [ir.ConstInt(shape[0], DataType.INT32, span), ir.ConstInt(shape[1], DataType.INT32, span)],
+                DataType.FP32,
+            )
+            return tile.slice(ir.Var("t", st, span), shape, [0, 0], valid_shape=valid)
+
+        # rhs valid cols (N) narrowed 64 -> 32 must raise.
+        rhs_narrow_n = sliced([64, 64], [64, 32])
+        with pytest.raises(ValueError, match=r"(?i)narrow.*N dimension"):
+            tile.matmul_bias(sliced([16, 64], [16, 64]), rhs_narrow_n, sliced([1, 64], [1, 64]))
+
+        # Narrowing M (lhs rows) is accepted: result keeps full [M, N] shape.
+        ok = tile.matmul_bias(
+            sliced([16, 64], [8, 64]), sliced([64, 64], [64, 64]), sliced([1, 64], [1, 64])
+        ).type
+        assert isinstance(ok, ir.TileType)
+        m_dim, n_dim = ok.shape
+        assert isinstance(m_dim, ir.ConstInt) and m_dim.value == 16
+        assert isinstance(n_dim, ir.ConstInt) and n_dim.value == 64
+
     def test_tile_gemv(self):
         """Test tile.gemv operator - general matrix-vector multiplication."""
 
