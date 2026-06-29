@@ -231,6 +231,25 @@ TypePtr DeduceTileMatMulBiasType(const std::vector<ExprPtr>& args,
 
   std::vector<ExprPtr> output_shape = {lhs_shape[0], rhs_shape[1]};
 
+  // Narrowing the N dimension (rhs valid columns < physical columns) is not
+  // supported on a2a3: the cube miscomputes a column-narrowed Right operand —
+  // verified on-device, both tile.matmul and tile.matmul_bias produce wrong
+  // values in the valid output columns, not just the tail. Reject it with a
+  // clear message instead of silently returning wrong results. Narrowing M
+  // (lhs rows) or K (contraction) is fine.
+  if (rhs_type->tile_view_ && !rhs_type->tile_view_->valid_shape.empty()) {
+    auto rhs_valid_n = As<ConstInt>(rhs_type->tile_view_->valid_shape[1]);
+    auto rhs_phys_n = As<ConstInt>(rhs_shape[1]);
+    if (rhs_valid_n && rhs_phys_n) {
+      CHECK(rhs_valid_n->value_ == rhs_phys_n->value_)
+          << "The operator " << op_name
+          << " does not support narrowing the N dimension on a2a3 (rhs valid columns " << rhs_valid_n->value_
+          << " < physical columns " << rhs_phys_n->value_
+          << "): the cube miscomputes a column-narrowed Right operand. Use the full N "
+             "width — compute all columns, or split N into separate full-width matmuls.";
+    }
+  }
+
   // Hardware requires bias to be [1, N]
   auto bias_row_const = As<ConstInt>(bias_shape[0]);
   CHECK(bias_row_const && bias_row_const->value_ == 1)
