@@ -34,6 +34,7 @@
 #include "pypto/ir/memory_allocator_policy.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/memref.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
@@ -85,7 +86,7 @@ class ReserveBufferCollector : public IRVisitor {
 
   void VisitExpr_(const CallPtr& op) override {
     auto ir_op = std::dynamic_pointer_cast<const Op>(op->op_);
-    if (ir_op && ir_op->name_ == "system.reserve_buffer") {
+    if (ir_op && IsOp(ir_op, "system.reserve_buffer")) {
       const int size = op->GetKwarg<int>("size", -1);
       const int base = op->GetKwarg<int>("base", -1);
       INTERNAL_CHECK_SPAN(size > 0, op->span_)

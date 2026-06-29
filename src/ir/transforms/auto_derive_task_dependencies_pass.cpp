@@ -32,6 +32,7 @@
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
@@ -112,11 +113,10 @@ StorageLocation SingleLocation(const Var* root, AccessRegion region) {
 
 bool HasLocation(const StorageLocation& location) { return !location.alternatives.empty(); }
 
-bool IsDynamicAccessOp(const std::string& op_name) {
-  return op_name == "tensor.gather" || op_name == "tensor.gather_mask" ||
-         op_name == "tensor.gather_compare" || op_name == "tensor.scatter_update" ||
-         op_name == "tile.gather" || op_name == "tile.gather_mask" || op_name == "tile.gather_compare" ||
-         op_name == "tile.scatter_update" || op_name == "tile.mscatter";
+bool IsDynamicAccessOp(const OpPtr& op) {
+  return IsOp(op, "tensor.gather") || IsOp(op, "tensor.gather_mask") || IsOp(op, "tensor.gather_compare") ||
+         IsOp(op, "tensor.scatter_update") || IsOp(op, "tile.gather") || IsOp(op, "tile.gather_mask") ||
+         IsOp(op, "tile.gather_compare") || IsOp(op, "tile.scatter_update") || IsOp(op, "tile.mscatter");
 }
 
 std::optional<std::vector<int64_t>> ConstIntTupleValues(const ExprPtr& expr) {
@@ -625,10 +625,10 @@ class StorageRootAnalysis : public IRVisitor {
 
     if (auto call = As<Call>(op->value_)) {
       const std::string& op_name = call->op_->name_;
-      if (op_name == "tensor.create") {
+      if (IsOp(call, "tensor.create")) {
         RegisterVarLocation(op->var_, MaybeUnknownRegionsForTensorType(
                                           SingleLocation(op->var_.get(), FullRegion()), op->var_->GetType()));
-      } else if (op_name == "tensor.slice") {
+      } else if (IsOp(call, "tensor.slice")) {
         if (call->args_.size() >= 3) {
           auto parent = ResolveExpr(call->args_[0]);
           if (HasLocation(parent)) {
@@ -637,14 +637,14 @@ class StorageRootAnalysis : public IRVisitor {
                               SliceLocation(parent, call->args_[1], call->args_[2]), op->var_->GetType()));
           }
         }
-      } else if (op_name == "tensor.assemble") {
+      } else if (IsOp(call, "tensor.assemble")) {
         if (!call->args_.empty()) {
           auto base = ResolveExpr(call->args_[0]);
           if (HasLocation(base)) {
             RegisterVarLocation(op->var_, MaybeUnknownRegionsForTensorType(base, op->var_->GetType()));
           }
         }
-      } else if (IsDynamicAccessOp(op_name)) {
+      } else if (IsDynamicAccessOp(call->op_)) {
         RegisterUnsupportedLocation(op->var_);
       } else if (!IsBuiltinOp(op_name)) {
         auto out_locations = CollectCallOutputLocations(call);
@@ -917,7 +917,7 @@ class SubmitTaskIdCollector : public IRVisitor {
     }
 
     auto call = As<Call>(expr);
-    if (!call || call->op_->name_ != "array.get_element" || call->args_.size() != 2) return out;
+    if (!call || !IsOp(call, "array.get_element") || call->args_.size() != 2) return out;
 
     auto array_var = AsVarLike(call->args_[0]);
     auto index = ConstIntValue(call->args_[1]);
@@ -1023,8 +1023,7 @@ class SubmitTaskIdCollector : public IRVisitor {
   void RecordTaskIdArrayProducer(const VarPtr& var, const CallPtr& call) {
     if (!var || !IsTaskIdArrayVar(var) || !call) return;
 
-    const std::string& op_name = call->op_->name_;
-    if (op_name == "array.create") {
+    if (IsOp(call, "array.create")) {
       TaskIdArrayLineage lineage;
       lineage.extent = TaskIdArrayExtent(var->GetType());
       array_lineage_by_var_id_[var->UniqueId()] = std::move(lineage);
@@ -1033,7 +1032,7 @@ class SubmitTaskIdCollector : public IRVisitor {
       return;
     }
 
-    if (op_name != "array.update_element" || call->args_.size() != 3) return;
+    if (!IsOp(call, "array.update_element") || call->args_.size() != 3) return;
 
     TaskIdArrayLineage lineage;
     if (auto base_array = AsVarLike(call->args_[0])) {

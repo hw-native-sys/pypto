@@ -45,9 +45,7 @@ namespace {
          (func->role_.has_value() && *func->role_ == Role::Orchestrator);
 }
 
-[[nodiscard]] bool IsTensorAllReduce(const CallPtr& call) {
-  return call && call->op_ && call->op_->name_ == "pld.tensor.allreduce";
-}
+[[nodiscard]] bool IsTensorAllReduce(const CallPtr& call) { return IsOp(call, "pld.tensor.allreduce"); }
 
 [[nodiscard]] WindowBufferPtr GetWindowBuffer(const ExprPtr& expr) {
   auto dist_type = As<DistributedTensorType>(expr->GetType());

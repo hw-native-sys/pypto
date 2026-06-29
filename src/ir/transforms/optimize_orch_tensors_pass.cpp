@@ -219,7 +219,7 @@ bool IsAllZeroOffsets(const std::vector<ExprPtr>& offsets) {
 
 bool IsTensorAllocationOp(const CallPtr& call) {
   if (!call || std::dynamic_pointer_cast<const GlobalVar>(call->op_)) return false;
-  return call->op_->name_ == "tensor.create" || call->op_->name_ == "tensor.full";
+  return IsOp(call, "tensor.create") || IsOp(call, "tensor.full");
 }
 
 bool IsOutputDirection(ParamDirection direction, bool include_inout) {
@@ -340,7 +340,7 @@ std::vector<OutParamReturnMapping> BuildOutParamReturnMappings(const FunctionPtr
     }
 
     auto call = As<Call>(def_it->second->value_);
-    if (!call || call->op_->name_ != "tile.store") continue;
+    if (!call || !IsOp(call, "tile.store")) continue;
 
     if (call->args_.size() < 3) continue;
     auto out_tensor = As<Var>(call->args_[2]);
@@ -458,7 +458,7 @@ class IterArgReuseOptimizer {
         auto call = As<Call>(assign->value_);
         if (!call) continue;
 
-        if (!std::dynamic_pointer_cast<const GlobalVar>(call->op_) && call->op_->name_ == "tensor.create") {
+        if (!std::dynamic_pointer_cast<const GlobalVar>(call->op_) && IsOp(call, "tensor.create")) {
           tensor_create_vars.insert(assign->var_.get());
         } else {
           auto fname = GetCallFuncName(call);
@@ -672,7 +672,7 @@ class IterArgReuseOptimizer {
       auto ret_def = collector.var_def.find(ret_var.get());
       if (ret_def == collector.var_def.end()) continue;
       auto store_call = As<Call>(ret_def->second->value_);
-      if (!store_call || store_call->op_->name_ != "tile.store" || store_call->args_.empty()) continue;
+      if (!store_call || !IsOp(store_call, "tile.store") || store_call->args_.empty()) continue;
 
       // Trace backward through iter_arg chains. Require at least one loop hop:
       // a bare tile.load → tile.store without an accumulator has no semantic
@@ -696,7 +696,7 @@ class IterArgReuseOptimizer {
       auto load_def = collector.var_def.find(current);
       if (load_def == collector.var_def.end()) continue;
       auto load_call = As<Call>(load_def->second->value_);
-      if (!load_call || load_call->op_->name_ != "tile.load" || load_call->args_.empty()) continue;
+      if (!load_call || !IsOp(load_call, "tile.load") || load_call->args_.empty()) continue;
       auto load_src = As<Var>(load_call->args_[0]);
       if (!load_src) continue;
       auto in_it = in_param_idx.find(load_src.get());
@@ -734,8 +734,8 @@ class IterArgReuseOptimizer {
     void VisitStmt_(const AssignStmtPtr& op) override {
       // Skip LHS (a def); visit only the RHS value.
       VisitExpr(op->value_);
-      if (auto call = As<Call>(op->value_); call && !std::dynamic_pointer_cast<const GlobalVar>(call->op_) &&
-                                            call->op_->name_ == "tensor.create") {
+      if (auto call = As<Call>(op->value_);
+          call && !std::dynamic_pointer_cast<const GlobalVar>(call->op_) && IsOp(call, "tensor.create")) {
         local_creates.insert(op->var_.get());
       }
     }
@@ -1003,7 +1003,7 @@ class IterArgReuseOptimizer {
       if (!call) return IRMutator::VisitStmt_(op);
 
       // Remove dead tensor.create
-      if (!std::dynamic_pointer_cast<const GlobalVar>(call->op_) && call->op_->name_ == "tensor.create") {
+      if (!std::dynamic_pointer_cast<const GlobalVar>(call->op_) && IsOp(call, "tensor.create")) {
         if (dead_creates_.count(op->var_.get())) {
           return std::make_shared<SeqStmts>(std::vector<StmtPtr>{}, op->span_);
         }
@@ -1142,7 +1142,7 @@ class AssembleParentStridesOptimizer {
       }
 
       // Check if this is a tensor.assemble(parent, source, offset)
-      if (!std::dynamic_pointer_cast<const GlobalVar>(call->op_) && call->op_->name_ == "tensor.assemble" &&
+      if (!std::dynamic_pointer_cast<const GlobalVar>(call->op_) && IsOp(call, "tensor.assemble") &&
           call->args_.size() == 3) {
         auto parent_var = AsVarLike(call->args_[0]);
         auto source_var = AsVarLike(call->args_[1]);
@@ -1209,7 +1209,7 @@ class AssembleParentStridesOptimizer {
       if (!assign) return visited;
 
       auto call = As<Call>(assign->value_);
-      if (!call || call->op_->name_ != "tile.store" || call->args_.size() < 3) return assign;
+      if (!call || !IsOp(call, "tile.store") || call->args_.size() < 3) return assign;
 
       auto out_var = AsVarLike(call->args_[2]);
       if (!out_var || !new_param_ptrs_.count(out_var.get())) return assign;
@@ -1407,7 +1407,7 @@ class AssembleLoopRewriter {
         auto assign = As<AssignStmt>(body_stmt);
         if (!assign) continue;
         auto call = As<Call>(assign->value_);
-        if (!call || call->op_->name_ != "tile.assemble") continue;
+        if (!call || !IsOp(call, "tile.assemble")) continue;
         if (call->args_.size() < 3) continue;
         const Var* arg0_raw = nullptr;
         if (auto v = As<Var>(call->args_[0])) arg0_raw = v.get();
@@ -1545,7 +1545,7 @@ class AssembleLoopRewriter {
       auto def_it = var_def.find(ret_var.get());
       if (def_it == var_def.end()) continue;
       auto call = As<Call>(def_it->second->value_);
-      if (!call || call->op_->name_ != "tile.store") continue;
+      if (!call || !IsOp(call, "tile.store")) continue;
       if (call->args_.size() < 3) continue;
       auto out_tensor = As<Var>(call->args_[2]);
       if (!out_tensor || !out_var_to_param_idx.count(out_tensor.get())) continue;
@@ -1559,7 +1559,7 @@ class AssembleLoopRewriter {
       auto def_it = var_def.find(sr.store_var);
       if (def_it == var_def.end()) continue;
       auto call = As<Call>(def_it->second->value_);
-      if (!call || call->op_->name_ != "tile.store") continue;
+      if (!call || !IsOp(call, "tile.store")) continue;
       auto tile_data_var = As<Var>(call->args_[0]);
       if (!tile_data_var) continue;
       for_return_to_store[tile_data_var.get()] = &sr;
@@ -1608,7 +1608,7 @@ class AssembleLoopRewriter {
           auto assign = As<AssignStmt>(body_stmt);
           if (!assign) continue;
           auto call = As<Call>(assign->value_);
-          if (!call || call->op_->name_ != "tile.assemble") continue;
+          if (!call || !IsOp(call, "tile.assemble")) continue;
           if (call->args_.size() < 3) continue;
           const Var* arg0_raw = nullptr;
           if (auto v = As<Var>(call->args_[0])) arg0_raw = v.get();
@@ -1727,7 +1727,7 @@ class SliceInputStridesOptimizer {
       if (!call) return;
 
       // Track tensor.slice(parent, size, offset) results
-      if (!std::dynamic_pointer_cast<const GlobalVar>(call->op_) && call->op_->name_ == "tensor.slice" &&
+      if (!std::dynamic_pointer_cast<const GlobalVar>(call->op_) && IsOp(call, "tensor.slice") &&
           call->args_.size() >= 3) {
         auto parent_var = AsVarLike(call->args_[0]);
         if (parent_var) {

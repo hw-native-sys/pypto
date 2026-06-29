@@ -24,6 +24,7 @@
 #include "pypto/core/error.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/memory_space.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
@@ -105,10 +106,10 @@ class TileInnermostDimVisitor : public IRVisitor {
     if (!op || !op->op_) return;
 
     const std::string& name = op->op_->name_;
-    if (name == "tile.load") {
+    if (IsOp(op, "tile.load")) {
       // tile.load returns a TileType — innermost dim is on the result.
       RecordIfBelowThreshold(name, op->GetType(), op->span_);
-    } else if (name == "tile.store") {
+    } else if (IsOp(op, "tile.store")) {
       // tile.store's first arg is the source tile; innermost dim lives there.
       if (op->args_.empty() || !op->args_[0]) return;
       RecordIfBelowThreshold(name, op->args_[0]->GetType(), op->span_);

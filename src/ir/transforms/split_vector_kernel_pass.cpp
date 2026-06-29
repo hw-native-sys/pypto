@@ -62,9 +62,9 @@ bool RequiresNoSplitDualAivSync(const FunctionPtr& func) {
          func->HasAttr(kDualAivDispatchAttr) && func->GetAttr<bool>(kDualAivDispatchAttr, false);
 }
 
-bool IsCrossCoreSplitOp(const std::string& op_name) {
-  return op_name == "tile.tpush_to_aiv" || op_name == "tile.tpush_to_aic" ||
-         op_name == "tile.tpop_from_aiv" || op_name == "tile.tpop_from_aic";
+bool IsCrossCoreSplitOp(const OpPtr& op) {
+  return IsOp(op, "tile.tpush_to_aiv") || IsOp(op, "tile.tpush_to_aic") || IsOp(op, "tile.tpop_from_aiv") ||
+         IsOp(op, "tile.tpop_from_aic");
 }
 
 std::optional<SplitMode> SplitModeFromInt(int split) {
@@ -94,7 +94,7 @@ class CrossCoreSplitCollector : public IRVisitor {
   std::optional<SplitMode> inferred_mode_;
 
   void ConsiderCall(const CallPtr& call) {
-    if (!call || !call->op_ || !IsCrossCoreSplitOp(call->op_->name_)) return;
+    if (!call || !call->op_ || !IsCrossCoreSplitOp(call->op_)) return;
 
     auto mode = SplitModeFromInt(call->GetKwarg<int>("split", 0));
     if (!mode.has_value()) return;
@@ -156,26 +156,25 @@ bool IsSingletonDim(const ExprPtr& dim_size) {
 
 bool IsReduceOnSplitAxis(const CallPtr& call, int split_dim) {
   if (!call->op_) return false;
-  const auto& name = call->op_->name_;
 
   auto input_tile_type = [&]() -> std::shared_ptr<const TileType> {
     if (call->args_.empty()) return nullptr;
     return std::dynamic_pointer_cast<const TileType>(call->args_[0]->GetType());
   };
 
-  if (name == "tile.row_sum" || name == "tile.row_max" || name == "tile.row_min" || name == "tile.row_prod" ||
-      name == "tile.row_argmax" || name == "tile.row_argmin") {
+  if (IsOp(call, "tile.row_sum") || IsOp(call, "tile.row_max") || IsOp(call, "tile.row_min") ||
+      IsOp(call, "tile.row_prod") || IsOp(call, "tile.row_argmax") || IsOp(call, "tile.row_argmin")) {
     auto tt = input_tile_type();
     int last_axis = tt ? static_cast<int>(tt->shape_.size()) - 1 : 1;
     return split_dim == last_axis;
   }
   // Column reductions collapse the first axis (axis 0). Splitting on that axis
   // (SplitMode::UpDown) would leave each lane with a partial reduction.
-  if (name == "tile.col_sum" || name == "tile.col_max" || name == "tile.col_min" || name == "tile.col_prod" ||
-      name == "tile.col_argmax" || name == "tile.col_argmin") {
+  if (IsOp(call, "tile.col_sum") || IsOp(call, "tile.col_max") || IsOp(call, "tile.col_min") ||
+      IsOp(call, "tile.col_prod") || IsOp(call, "tile.col_argmax") || IsOp(call, "tile.col_argmin")) {
     return split_dim == 0;
   }
-  if (name == "tile.sum" || name == "tile.max" || name == "tile.min") {
+  if (IsOp(call, "tile.sum") || IsOp(call, "tile.max") || IsOp(call, "tile.min")) {
     int axis = call->GetKwarg<int>("axis", -1);
     auto tt = input_tile_type();
     if (axis < 0 && tt) {
@@ -416,7 +415,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
 
     const auto& op_name = call->op_->name_;
 
-    if (op_name == "tile.tpush_to_aiv" || op_name == "tile.tpush_to_aic") {
+    if (IsOp(call, "tile.tpush_to_aiv") || IsOp(call, "tile.tpush_to_aic")) {
       auto new_call = RebuildCallWithSplit(call, split_int);
       return std::make_shared<AssignStmt>(assign->var_, new_call, assign->span_);
     }
@@ -424,11 +423,11 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
     // tpop_from_aic: AIV consumes from cube — halve the popped tile to match split vector lanes.
     // tpop_from_aiv: AIC consumes from vector — keep full tile shape; only sync split attribute
     // (vector-side split affects AIV compute, not the matmul operand tile delivered to cube).
-    if (op_name == "tile.tpop_from_aiv") {
+    if (IsOp(call, "tile.tpop_from_aiv")) {
       auto new_call = RebuildCallWithSplit(call, split_int);
       return std::make_shared<AssignStmt>(assign->var_, new_call, assign->span_);
     }
-    if (op_name == "tile.tpop_from_aic") {
+    if (IsOp(call, "tile.tpop_from_aic")) {
       auto tt = std::dynamic_pointer_cast<const TileType>(call->GetType());
       auto new_call = RebuildTpopWithHalvedShape(call, split_int, split_dim, subblock_idx);
       auto new_var =
@@ -444,7 +443,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
 
     // AIV only: tile.load — halve result shape, halve shape/valid_shape args, adjust offset.
     // Singleton split-dim tiles (e.g. broadcast [1, 128] under UP_DOWN) are preserved as-is.
-    if (is_aiv && op_name == "tile.load" && call->args_.size() >= 4) {
+    if (is_aiv && IsOp(call, "tile.load") && call->args_.size() >= 4) {
       auto tt = std::dynamic_pointer_cast<const TileType>(call->GetType());
       bool is_singleton =
           tt && split_dim < static_cast<int>(tt->shape_.size()) && IsSingletonDim(tt->shape_[split_dim]);
@@ -485,7 +484,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
     }
 
     // AIV only: tile.store — adjust offset using tracked tile info
-    if (is_aiv && op_name == "tile.store" && call->args_.size() >= 3) {
+    if (is_aiv && IsOp(call, "tile.store") && call->args_.size() >= 3) {
       auto tile_var = std::dynamic_pointer_cast<const Var>(call->args_[0]);
       if (tile_var) {
         auto it = tile_vars.find(tile_var.get());
@@ -527,7 +526,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
         // width and follow it with a per-subblock column slice so each lane reads
         // its own half. Reshapes whose input is already split fall through to the
         // plain result-halving below (their producer already partitioned the data).
-        if (op_name == "tile.reshape") {
+        if (IsOp(call, "tile.reshape")) {
           auto input_var = AsVarLike(call->args_[0]);
           bool input_is_split = input_var && tile_vars.count(input_var.get()) != 0;
           auto half_const = std::dynamic_pointer_cast<const ConstInt>(half_dim_size);
@@ -577,9 +576,9 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
 
         auto new_result_type = HalveTileShape(call->GetType(), split_dim, subblock_idx);
         std::vector<ExprPtr> new_args = call->args_;
-        if ((op_name == "tile.full" || op_name == "tile.create") && call->args_.size() >= 1) {
+        if ((IsOp(call, "tile.full") || IsOp(call, "tile.create")) && call->args_.size() >= 1) {
           new_args[0] = HalveTupleElement(call->args_[0], split_dim);
-        } else if (op_name == "tile.reshape" && call->args_.size() >= 2) {
+        } else if (IsOp(call, "tile.reshape") && call->args_.size() >= 2) {
           new_args[1] = HalveTupleElement(call->args_[1], split_dim);
         } else if (op_name == "tile.set_validshape" && call->args_.size() == 3) {
           // args = (tile, valid_row, valid_col). Halving the result type alone
@@ -614,14 +613,12 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
     auto call = std::dynamic_pointer_cast<const Call>(eval->expr_);
     if (!call || !call->op_) return stmt;
 
-    const auto& op_name = call->op_->name_;
-
-    if (op_name == "tile.tpush_to_aiv" || op_name == "tile.tpush_to_aic") {
+    if (IsOp(call, "tile.tpush_to_aiv") || IsOp(call, "tile.tpush_to_aic")) {
       auto new_call = RebuildCallWithSplit(call, split_int);
       return std::make_shared<EvalStmt>(new_call, eval->span_);
     }
 
-    if (is_aiv && op_name == "tile.store" && call->args_.size() >= 3) {
+    if (is_aiv && IsOp(call, "tile.store") && call->args_.size() >= 3) {
       auto tile_var = std::dynamic_pointer_cast<const Var>(call->args_[0]);
       if (tile_var) {
         auto it = tile_vars.find(tile_var.get());
@@ -851,8 +848,7 @@ CallPtr RebuildLane1CallWithZeroValidShape(const CallPtr& call, const ExprReplac
     new_args.push_back(new_arg);
   }
 
-  const std::string& op_name = call->op_->name_;
-  if (op_name == "tile.load" && new_args.size() >= 3) {
+  if (IsOp(call, "tile.load") && new_args.size() >= 3) {
     auto new_type = WithZeroValidShape(call->GetType(), call->span_);
     auto tile_type = std::dynamic_pointer_cast<const TileType>(new_type);
     if (!tile_type) return call;
@@ -866,7 +862,7 @@ CallPtr RebuildLane1CallWithZeroValidShape(const CallPtr& call, const ExprReplac
     auto create_op = OpRegistry::GetInstance().GetOp("tile.create");
     return std::make_shared<Call>(create_op, std::vector<ExprPtr>{new_args[2]}, std::move(kwargs), new_type,
                                   call->span_);
-  } else if (op_name == "tile.slice" && new_args.size() >= 3) {
+  } else if (IsOp(call, "tile.slice") && new_args.size() >= 3) {
     // tile.slice is a pure view with no cross-core sync side effect, so in the
     // replay lane we only need an empty tile of the slice's result shape for the
     // downstream consumer to run as a no-op. Materialize it as tile.create (like
@@ -892,7 +888,7 @@ CallPtr RebuildLane1CallWithZeroValidShape(const CallPtr& call, const ExprReplac
     auto create_op = OpRegistry::GetInstance().GetOp("tile.create");
     return std::make_shared<Call>(create_op, std::vector<ExprPtr>{new_args[1]}, std::move(kwargs), new_type,
                                   call->span_);
-  } else if (op_name == "tile.transpose") {
+  } else if (IsOp(call, "tile.transpose")) {
     // tile.transpose lowers to a pto-isa op that hangs the AICore (507018) when
     // every operand is a zero-valid replay tile — the same static/zero-valid
     // hazard gh#1649 hit for subview slices. The replay result is discarded, so
@@ -914,7 +910,7 @@ CallPtr RebuildLane1CallWithZeroValidShape(const CallPtr& call, const ExprReplac
     auto create_op = OpRegistry::GetInstance().GetOp("tile.create");
     return std::make_shared<Call>(create_op, std::vector<ExprPtr>{shape_tuple}, std::move(kwargs), new_type,
                                   call->span_);
-  } else if (op_name == "tile.set_validshape" && new_args.size() == 3) {
+  } else if (IsOp(call, "tile.set_validshape") && new_args.size() == 3) {
     new_args[1] = MakeIndexConst(0, call->span_);
     new_args[2] = MakeIndexConst(0, call->span_);
     args_changed = true;
@@ -928,9 +924,8 @@ CallPtr RebuildLane1CallWithZeroValidShape(const CallPtr& call, const ExprReplac
 
 bool IsNoSplitSharedPipeSetupCall(const CallPtr& call) {
   if (!call || !call->op_) return false;
-  const std::string& op_name = call->op_->name_;
-  return op_name == "system.reserve_buffer" || op_name == "system.import_peer_buffer" ||
-         op_name == "system.aiv_initialize_pipe" || op_name == "system.aic_initialize_pipe";
+  return IsOp(call, "system.reserve_buffer") || IsOp(call, "system.import_peer_buffer") ||
+         IsOp(call, "system.aiv_initialize_pipe") || IsOp(call, "system.aic_initialize_pipe");
 }
 
 bool IsNoSplitSharedPipeSetupStmt(const StmtPtr& stmt) {
@@ -1046,8 +1041,7 @@ std::vector<StmtPtr> BuildNoSplitLane1ReplayStmts(const std::vector<StmtPtr>& st
         continue;
       }
 
-      const std::string& op_name = call->op_->name_;
-      if (op_name == "tile.store" && call->args_.size() >= 3) {
+      if (IsOp(call, "tile.store") && call->args_.size() >= 3) {
         auto passthrough = SubstituteExprIfNeeded(call->args_[2], replacements);
         replacements[assign->var_.get()] = passthrough;
         result.push_back(std::make_shared<AssignStmt>(assign->var_, passthrough, assign->span_));
@@ -1073,8 +1067,7 @@ std::vector<StmtPtr> BuildNoSplitLane1ReplayStmts(const std::vector<StmtPtr>& st
         continue;
       }
 
-      const std::string& op_name = call->op_->name_;
-      if (op_name == "tile.store") {
+      if (IsOp(call, "tile.store")) {
         continue;
       }
 

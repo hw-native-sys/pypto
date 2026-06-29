@@ -109,9 +109,9 @@ class BufferRootCollector : public IRVisitor {
     }
     if (call) {
       const std::string& op_name = call->op_->name_;
-      if (op_name == "tensor.create" || op_name == "tensor.slice") {
+      if (IsOp(call, "tensor.create") || IsOp(call, "tensor.slice")) {
         buffer_roots_[assign->var_.get()] = assign->var_.get();
-      } else if (op_name == "tensor.assemble") {
+      } else if (IsOp(call, "tensor.assemble")) {
         if (call->args_.size() == 3) {
           if (const Var* target_root = ResolveExpr(call->args_[0])) {
             buffer_roots_[assign->var_.get()] = target_root;
@@ -245,12 +245,12 @@ class AssemblePatternCollector : public IRVisitor {
     if (auto tuple_value = As<MakeTuple>(assign->value_)) {
       tuple_values_[assign->var_.get()] = tuple_value;
     } else if (auto call = As<Call>(assign->value_)) {
-      if (call->op_->name_ == "tensor.create") {
+      if (IsOp(call, "tensor.create")) {
         const Var* root = ResolveVar(assign->var_.get());
         if (root == assign->var_.get()) {
           create_vars[assign->var_.get()] = assign->var_.get();
         }
-      } else if (call->op_->name_ == "tensor.assemble" && call->args_.size() == 3) {
+      } else if (IsOp(call, "tensor.assemble") && call->args_.size() == 3) {
         const Var* source_root = ResolveExpr(call->args_[1]);
         auto offset_tuple = ResolveTupleExpr(call->args_[2]);
         if (source_root && offset_tuple && create_vars.count(source_root) > 0) {
@@ -331,14 +331,12 @@ class FuseCreateAssembleMutator : public IRMutator {
     auto call = As<Call>(op->value_);
     if (!call) return IRMutator::VisitStmt_(op);
 
-    const std::string& op_name = call->op_->name_;
-
-    if (op_name == "tensor.create") {
+    if (IsOp(call, "tensor.create")) {
       const Var* root = ResolveVar(op->var_.get());
       if (root && fusible_roots_.count(root) > 0) {
         return RewriteCreateToSlice(op, call, fusible_roots_.at(root));
       }
-    } else if (op_name == "tensor.assemble" && call->args_.size() == 3) {
+    } else if (IsOp(call, "tensor.assemble") && call->args_.size() == 3) {
       const Var* source_root = ResolveExpr(call->args_[1]);
       if (source_root && fusible_roots_.count(source_root) > 0) {
         return RewriteAssembleToAlias(op, call);

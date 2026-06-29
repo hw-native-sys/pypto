@@ -30,6 +30,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
@@ -153,7 +154,7 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
   ExprPtr VisitExpr_(const CallPtr& op) override {
     auto base = IRMutator::VisitExpr_(op);
     auto call = std::dynamic_pointer_cast<const Call>(base);
-    if (call && call->op_ && call->op_->name_ == "tensor.as_layout") {
+    if (IsOp(call, "tensor.as_layout")) {
       base = SimplifyAsLayout(call);
     }
     auto new_type = SimplifyType(base->GetType());

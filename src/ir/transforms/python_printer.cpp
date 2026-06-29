@@ -42,6 +42,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/memref.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
@@ -873,7 +874,7 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   std::string op_name = op->op_->name_;
 
   // Normalize tensor.add with scalar rhs to tensor.adds (matches Python API dispatch)
-  if (op_name == "tensor.add" && op->args_.size() == 2) {
+  if (IsOp(op, "tensor.add") && op->args_.size() == 2) {
     if (std::dynamic_pointer_cast<const ConstFloat>(op->args_[1]) ||
         std::dynamic_pointer_cast<const ConstInt>(op->args_[1])) {
       op_name = "tensor.adds";
@@ -900,7 +901,7 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   // IR stores: args_=[shape, value_expr], kwargs_={"dtype": dtype}
   // Python API: full(shape, dtype, value) — print as full(shape, dtype=.., value=..)
   // because pl.FP32 as positional is rejected by the parser (standalone attribute access)
-  if ((op->op_->name_ == "tile.full" || op->op_->name_ == "tensor.full") && op->args_.size() >= 2) {
+  if ((IsOp(op, "tile.full") || IsOp(op, "tensor.full")) && op->args_.size() >= 2) {
     VisitExpr(op->args_[0]);  // shape (positional)
     for (const auto& [key, val] : op->kwargs_) {
       if (key == "dtype") {
@@ -930,7 +931,7 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
     if (i > 0) stream_ << ", ";
 
     // Special handling for tile.alloc/tensor.alloc first argument (memory_space)
-    if ((op->op_->name_ == "tile.alloc" || op->op_->name_ == "tensor.alloc") && i == 0) {
+    if ((IsOp(op, "tile.alloc") || IsOp(op, "tensor.alloc")) && i == 0) {
       // Try to extract the integer value and convert it to MemorySpace enum
       if (auto const_int = std::dynamic_pointer_cast<const ConstInt>(op->args_[i])) {
         int space_value = static_cast<int>(const_int->value_);
@@ -945,7 +946,7 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
 
   // Print kwargs as keyword arguments
   bool need_comma = !op->args_.empty();
-  if (op->op_->name_ == "system.task_dummy") {
+  if (IsOp(op, "system.task_dummy")) {
     const std::vector<VarPtr>* deps_to_print = nullptr;
     for (const auto& [k, v] : op->attrs_) {
       if (k != kAttrManualDepEdges) continue;
@@ -971,7 +972,7 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
     // at parse time and explicitly rejects a user-written ``name=`` kwarg. Skip
     // it on print so the round-trip parser can re-derive the name from the
     // assignment LHS without tripping the no-user-kwargs check.
-    if (op->op_->name_ == "pld.tensor.alloc_window_buffer" && key == "name") continue;
+    if (IsOp(op, "pld.tensor.alloc_window_buffer") && key == "name") continue;
     if (need_comma) {
       stream_ << ", ";
     }
@@ -1722,7 +1723,7 @@ bool IRPythonPrinter::IsTaskInvalidPlaceholderFor(const StmtPtr& candidate, cons
   if (assign->var_.get() != tid_var.get()) return false;
   auto call = As<Call>(assign->value_);
   if (!call || !call->op_) return false;
-  return call->op_->name_ == "system.task_invalid";
+  return IsOp(call, "system.task_invalid");
 }
 
 bool IRPythonPrinter::ShouldSuppressPlaceholder(const std::vector<StmtPtr>& stmts, size_t i) const {
@@ -1875,7 +1876,7 @@ void IRPythonPrinter::VisitStmt_(const SpmdScopeStmtPtr& op) {
                           : (incore ? As<AssignStmt>(incore->body_) : nullptr);
   auto first_call = first_assign ? As<Call>(first_assign->value_) : nullptr;
   auto first_op = first_call ? As<Op>(first_call->op_) : nullptr;
-  if (first_op && first_op->name_ == "tile.get_block_idx") {
+  if (first_op && IsOp(first_op, "tile.get_block_idx")) {
     stream_ << "for " << GetVarName(first_assign->var_.get()) << " in " << prefix_ << ".spmd(";
     VisitExpr(op->core_num_);
     if (op->sync_start_) {

@@ -39,6 +39,7 @@
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
@@ -200,13 +201,13 @@ int GetGMPipeSlotCount(int dir_mask) {
 // arg 0, so the result must be written in-place into the input tile rather than
 // a freshly-allocated result tile — otherwise the emitted tscatter targets an
 // uninitialized tile and the DPS rows that are not written lose their values.
-bool IsInPlaceScatterFamilyOp(const std::string& op_name) {
-  return op_name == "tile.scatter" || op_name == "tile.scatter_mask";
+bool IsInPlaceScatterFamilyOp(const ir::OpPtr& op) {
+  return ir::IsOp(op, "tile.scatter") || ir::IsOp(op, "tile.scatter_mask");
 }
 
 bool ShouldAliasScatterResultToInput(const AssignStmtPtr& stmt) {
   auto call = As<ir::Call>(stmt->value_);
-  if (!call || !IsInPlaceScatterFamilyOp(call->op_->name_) || call->args_.empty()) {
+  if (!call || !IsInPlaceScatterFamilyOp(call->op_) || call->args_.empty()) {
     return false;
   }
 
@@ -227,7 +228,7 @@ bool ShouldAliasScatterResultToInput(const AssignStmtPtr& stmt) {
 // name lets the emitted `pto.local_array_set` write the same storage — no copy.
 bool ShouldAliasArrayUpdateResultToInput(const AssignStmtPtr& stmt) {
   auto call = As<ir::Call>(stmt->value_);
-  return call && call->op_->name_ == "array.update_element" && !call->args_.empty() &&
+  return call && ir::IsOp(call, "array.update_element") && !call->args_.empty() &&
          As<ir::ArrayType>(stmt->var_->GetType());
 }
 
@@ -312,10 +313,10 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
   void VisitExpr_(const ir::CallPtr& op) override {
     if (op->op_) {
       if (!uses_spmd_block_ops_ &&
-          (op->op_->name_ == "tile.get_block_idx" || op->op_->name_ == "tile.get_block_num")) {
+          (ir::IsOp(op, "tile.get_block_idx") || ir::IsOp(op, "tile.get_block_num"))) {
         uses_spmd_block_ops_ = true;
       }
-      if (!uses_subblock_op_ && op->op_->name_ == "tile.get_subblock_idx") {
+      if (!uses_subblock_op_ && ir::IsOp(op, "tile.get_subblock_idx")) {
         uses_subblock_op_ = true;
       }
     }
@@ -1315,7 +1316,7 @@ void PTOCodegen::EmitExtraAllocTiles() {
 
 void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   auto call = As<ir::Call>(op->value_);
-  const bool is_set_validshape = call && call->op_->name_ == "tile.set_validshape";
+  const bool is_set_validshape = ir::IsOp(call, "tile.set_validshape");
   const bool alias_scatter_result_to_input = ShouldAliasScatterResultToInput(op);
   const bool alias_array_update_to_input = ShouldAliasArrayUpdateResultToInput(op);
 

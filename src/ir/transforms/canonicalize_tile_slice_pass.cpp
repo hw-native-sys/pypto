@@ -138,7 +138,7 @@ std::optional<SliceInfo> ParseCanonicalSlice(const AssignStmtPtr& assign,
                                              const std::unordered_map<const Var*, SliceInfo>& known) {
   if (!assign || !assign->var_) return std::nullopt;
   auto call = As<Call>(assign->value_);
-  if (!call || !call->op_ || call->op_->name_ != "tile.slice") return std::nullopt;
+  if (!call || !call->op_ || !IsOp(call, "tile.slice")) return std::nullopt;
   // Only canonical 3-arg slices (input, shape, offset).  A slice carrying
   // valid_shape / drop_dims is not a plain window and is left untouched.
   if (call->args_.size() != 3) return std::nullopt;
@@ -222,7 +222,7 @@ class CanonicalizeMutator : public IRMutator {
     auto assign = As<AssignStmt>(base);
     if (!assign) return base;
     auto call = As<Call>(assign->value_);
-    if (!call || !call->op_ || call->op_->name_ != "tile.extract" || call->args_.size() != 4) {
+    if (!call || !call->op_ || !IsOp(call, "tile.extract") || call->args_.size() != 4) {
       return base;
     }
     auto src = AsVarLike(call->args_[0]);
@@ -247,11 +247,10 @@ class CanonicalizeMutator : public IRMutator {
   /// Operand layout of the matmul family: (lhs index, rhs index) or nullopt.
   static std::optional<std::pair<size_t, size_t>> MatmulOperandIndices(const CallPtr& call) {
     if (!call || !call->op_) return std::nullopt;
-    const std::string& name = call->op_->name_;
-    if (name == "tile.matmul" || name == "tile.matmul_bias") {
+    if (IsOp(call, "tile.matmul") || IsOp(call, "tile.matmul_bias")) {
       return call->args_.size() >= 2 ? std::optional<std::pair<size_t, size_t>>({0, 1}) : std::nullopt;
     }
-    if (name == "tile.matmul_acc") {
+    if (IsOp(call, "tile.matmul_acc")) {
       return call->args_.size() >= 3 ? std::optional<std::pair<size_t, size_t>>({1, 2}) : std::nullopt;
     }
     return std::nullopt;
@@ -316,8 +315,8 @@ class CanonicalizeMutator : public IRMutator {
   /// True for the col-expand ops whose `pto.*` lowering materializes a subview
   /// operand via the lazy `pto.textract` path (pto_ops_common.cpp): both
   /// `tile.col_expand_mul` and `tile.col_expand_add` (#1640).
-  static bool IsColExpandMaterializingOp(const std::string& name) {
-    return name == "tile.col_expand_mul" || name == "tile.col_expand_add";
+  static bool IsColExpandMaterializingOp(const OpPtr& op) {
+    return IsOp(op, "tile.col_expand_mul") || IsOp(op, "tile.col_expand_add");
   }
 
   /// True when a slice offset is dynamic (either component is not a `ConstInt`).
@@ -347,7 +346,7 @@ class CanonicalizeMutator : public IRMutator {
   /// Returns nullopt when no operand is a rewritable dynamic Vec slice.
   std::optional<std::vector<StmtPtr>> TryRewriteColExpand(const AssignStmtPtr& assign) {
     auto call = As<Call>(assign->value_);
-    if (!call || !call->op_ || !IsColExpandMaterializingOp(call->op_->name_) || call->args_.size() != 2) {
+    if (!call || !call->op_ || !IsColExpandMaterializingOp(call->op_) || call->args_.size() != 2) {
       return std::nullopt;
     }
 

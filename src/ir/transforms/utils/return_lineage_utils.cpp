@@ -24,6 +24,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
@@ -153,13 +154,13 @@ const Var* TraceVar(const Var* var, const BodyIndexCollector& index,
       // Builtin output-side ops bind a fresh SSA var to an existing buffer.
       // tensor.assemble(target, tile, offset) / tensor.set_validshape(target, ...)
       // alias args[0]; tile.store(value, indices, target) aliases args[2].
-      if (op_name == "tensor.assemble" || op_name == "tensor.set_validshape") {
+      if (IsOp(call, "tensor.assemble") || IsOp(call, "tensor.set_validshape")) {
         auto arg_var = !call->args_.empty() ? AsVarLike(call->args_[0]) : nullptr;
         if (!arg_var) return nullptr;
         var = arg_var.get();
         continue;
       }
-      if (op_name == "tile.store") {
+      if (IsOp(call, "tile.store")) {
         auto arg_var = call->args_.size() >= 3 ? AsVarLike(call->args_[2]) : nullptr;
         if (!arg_var) return nullptr;
         var = arg_var.get();

@@ -43,7 +43,7 @@ CVDirection ClassifyMoveDirection(const CallPtr& call) {
   if (!call || !call->op_) return CVDirection::NONE;
 
   auto op = std::dynamic_pointer_cast<const Op>(call->op_);
-  if (!op || op->name_ != "tile.move") return CVDirection::NONE;
+  if (!op || !IsOp(op, "tile.move")) return CVDirection::NONE;
 
   auto src_memory = GetFirstTileArgMemory(call);
   if (!src_memory.has_value()) return CVDirection::NONE;
@@ -86,7 +86,7 @@ CoreAffinity ClassifyCallAffinity(const CallPtr& call) {
   // the src memory. The per-stmt "is this a boundary" decision lives in
   // boundary_moves; MIXED here is just the affinity label so CombineAffinity
   // rolls up correctly through compound stmts.
-  if (op->name_ == "tile.move") {
+  if (IsOp(op, "tile.move")) {
     if (ClassifyMoveDirection(call) != CVDirection::NONE) return CoreAffinity::MIXED;
     auto ms = GetFirstTileArgMemory(call);
     return (ms && IsCubeMemorySpace(*ms)) ? CoreAffinity::CUBE : CoreAffinity::VECTOR;

@@ -80,7 +80,7 @@ class StampTfreeSplitMutator : public IRMutator {
     const auto& info = it->second;
 
     const std::string expected_tpop =
-        call->op_->name_ == "system.tfree_to_aic" ? "tile.tpop_from_aic" : "tile.tpop_from_aiv";
+        IsOp(call, "system.tfree_to_aic") ? "tile.tpop_from_aic" : "tile.tpop_from_aiv";
     CHECK_SPAN(info.op_name == expected_tpop, call->span_)
         << call->op_->name_ << " requires its tile argument to come from " << expected_tpop << ", got "
         << info.op_name;

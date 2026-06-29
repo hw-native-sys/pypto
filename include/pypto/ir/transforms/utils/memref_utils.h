@@ -29,6 +29,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/memref.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
@@ -315,7 +316,7 @@ inline ExprPtr ComputeSliceByteOffset(const std::vector<ExprPtr>& offsets,
 inline ExprPtr ComputeViewByteOffset(const CallPtr& call, const TypePtr& parent_type) {
   const std::string& op_name = call->op_->name_;
 
-  if (op_name == "tensor.slice" || op_name == "tile.slice") {
+  if (IsOp(call, "tensor.slice") || IsOp(call, "tile.slice")) {
     auto shaped = std::dynamic_pointer_cast<const ShapedType>(parent_type);
     INTERNAL_CHECK_SPAN(shaped, call->span_) << "Internal error: slice parent must be ShapedType";
 

@@ -323,12 +323,6 @@ struct GmSyncPop {
   std::string token_name;
 };
 
-std::string GetCallOpName(const CallPtr& call) {
-  if (!call) return "";
-  auto op = std::dynamic_pointer_cast<const Op>(call->op_);
-  return op ? op->name_ : "";
-}
-
 /// Resolve a tensor SSA Var to its origin (the parameter / create result it
 /// derives from) by following tile.store result -> store destination chains.
 /// A tile.store's result is a fresh SSA version of the destination tensor, so
@@ -367,7 +361,7 @@ void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
     for (const auto& stmt : ss) {
       if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
         auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
-        if (GetCallOpName(call) == "tile.store" && call->args_.size() >= 3) {
+        if (IsOp(call, "tile.store") && call->args_.size() >= 3) {
           if (auto dest = std::dynamic_pointer_cast<const Var>(call->args_[2])) {
             store_result_to_dest[assign->var_.get()] = dest.get();
           }
@@ -410,15 +404,14 @@ void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
       CoreAffinity aff = (aff_it != stmt_map.end()) ? aff_it->second : CoreAffinity::SHARED;
       if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
         auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
-        const std::string name = GetCallOpName(call);
         const bool single_lane = (aff == CoreAffinity::CUBE || aff == CoreAffinity::VECTOR);
-        if (single_lane && name == "tile.store" && call->args_.size() >= 3) {
+        if (single_lane && IsOp(call, "tile.store") && call->args_.size() >= 3) {
           if (auto dest = std::dynamic_pointer_cast<const Var>(call->args_[2])) {
             const CoreSide side = (aff == CoreAffinity::CUBE) ? CoreSide::AIC : CoreSide::AIV;
             stores.push_back({stmt.get(), ResolveTensorOrigin(dest.get(), store_result_to_dest), side, call,
                               body_id, order_counter++});
           }
-        } else if (single_lane && name == "tile.load" && !call->args_.empty()) {
+        } else if (single_lane && IsOp(call, "tile.load") && !call->args_.empty()) {
           if (auto src = std::dynamic_pointer_cast<const Var>(call->args_[0])) {
             const CoreSide side = (aff == CoreAffinity::CUBE) ? CoreSide::AIC : CoreSide::AIV;
             loads.push_back({stmt.get(), ResolveTensorOrigin(src.get(), store_result_to_dest), side, call,
@@ -779,7 +772,7 @@ class TransposeSplitHazardFinder : public IRVisitor {
   }
 
   void Consider(const CallPtr& call, const std::string& result_name) {
-    if (offending_ || !call || !call->op_ || call->op_->name_ != "tile.transpose" || call->args_.empty()) {
+    if (offending_ || !call || !call->op_ || !IsOp(call, "tile.transpose") || call->args_.empty()) {
       return;
     }
     auto tt = std::dynamic_pointer_cast<const TileType>(call->args_[0]->GetType());
@@ -965,7 +958,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
       auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
       if (!call || !call->op_) continue;
       auto opnode = std::dynamic_pointer_cast<const Op>(call->op_);
-      if (!opnode || opnode->name_ != "tile.store") continue;
+      if (!opnode || !IsOp(opnode, "tile.store")) continue;
       if (call->args_.size() < 3) continue;
 
       // Check if the result var is NOT defined in the AIV body
@@ -1011,7 +1004,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
           const Var* lhs = assign->var_.get();
           if (auto call = std::dynamic_pointer_cast<const Call>(assign->value_)) {
             auto opnode = std::dynamic_pointer_cast<const Op>(call->op_);
-            if (opnode && opnode->name_ == "tile.store" && call->args_.size() >= 3) {
+            if (opnode && IsOp(opnode, "tile.store") && call->args_.size() >= 3) {
               propagate_from_expr(lhs, call->args_[2]);
               continue;
             }

@@ -202,22 +202,21 @@ void CollectCrossCorePipeMetadata(const std::vector<StmtPtr>& stmts, CrossCorePi
     }
     auto op = call ? std::dynamic_pointer_cast<const Op>(call->op_) : nullptr;
     if (op) {
-      const std::string& op_name = op->name_;
-      if (op_name == "system.reserve_buffer") {
+      if (IsOp(op, "system.reserve_buffer")) {
         metadata.has_reserve_buffer = true;
-      } else if (op_name == "system.import_peer_buffer") {
+      } else if (IsOp(op, "system.import_peer_buffer")) {
         metadata.has_import_peer_buffer = true;
-      } else if (op_name == "system.aic_initialize_pipe") {
+      } else if (IsOp(op, "system.aic_initialize_pipe")) {
         metadata.has_aic_initialize_pipe = true;
-      } else if (op_name == "system.aiv_initialize_pipe") {
+      } else if (IsOp(op, "system.aiv_initialize_pipe")) {
         metadata.has_aiv_initialize_pipe = true;
-      } else if (op_name == "tile.tpush_to_aiv" && call->args_.size() == 1) {
+      } else if (IsOp(op, "tile.tpush_to_aiv") && call->args_.size() == 1) {
         RecordTileSlotSize(metadata.c2v, call->args_[0]->GetType());
-      } else if (op_name == "tile.tpush_to_aic" && call->args_.size() == 1) {
+      } else if (IsOp(op, "tile.tpush_to_aic") && call->args_.size() == 1) {
         RecordTileSlotSize(metadata.v2c, call->args_[0]->GetType());
-      } else if (op_name == "tile.tpop_from_aiv" && assign) {
+      } else if (IsOp(op, "tile.tpop_from_aiv") && assign) {
         RecordTileSlotSize(metadata.v2c, assign->var_->GetType());
-      } else if (op_name == "tile.tpop_from_aic" && assign) {
+      } else if (IsOp(op, "tile.tpop_from_aic") && assign) {
         RecordTileSlotSize(metadata.c2v, assign->var_->GetType());
       }
     }
@@ -254,14 +253,13 @@ CrossCorePipeMetadata CollectDominatingPipeSetupMetadata(const std::vector<StmtP
       break;
     }
     if (op) {
-      const std::string& op_name = op->name_;
-      if (op_name == "system.reserve_buffer") {
+      if (IsOp(op, "system.reserve_buffer")) {
         metadata.has_reserve_buffer = true;
-      } else if (op_name == "system.import_peer_buffer") {
+      } else if (IsOp(op, "system.import_peer_buffer")) {
         metadata.has_import_peer_buffer = true;
-      } else if (op_name == "system.aic_initialize_pipe") {
+      } else if (IsOp(op, "system.aic_initialize_pipe")) {
         metadata.has_aic_initialize_pipe = true;
-      } else if (op_name == "system.aiv_initialize_pipe") {
+      } else if (IsOp(op, "system.aiv_initialize_pipe")) {
         metadata.has_aiv_initialize_pipe = true;
       }
     }

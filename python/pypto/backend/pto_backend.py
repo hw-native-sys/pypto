@@ -527,8 +527,13 @@ def _get_fixed_subblock_id(func: _ir_core.Function) -> int | None:
 # decides which synthetic params to append to the func.func signature — a
 # mismatch would desync the wrapper's forwarded call args from the callee
 # signature.
-_SPMD_BLOCK_OPS = frozenset({"tile.get_block_idx", "tile.get_block_num"})
-_SUBBLOCK_OPS = frozenset({"tile.get_subblock_idx"})
+# Routing each literal through get_op validates it at import (a typo raises), then
+# we keep the canonical names: ops are matched by name, not identity, because IR
+# reaching codegen may carry Op instances built outside the registry.
+_SPMD_BLOCK_OPS = frozenset(
+    {_ir_core.get_op("tile.get_block_idx").name, _ir_core.get_op("tile.get_block_num").name}
+)
+_SUBBLOCK_OPS = frozenset({_ir_core.get_op("tile.get_subblock_idx").name})
 
 
 def _function_uses_ops(func: _ir_core.Function, op_names: frozenset[str]) -> bool:
@@ -868,7 +873,7 @@ def _extract_peer_function_names(
         if not isinstance(call, _ir_core.Call):
             continue
         op = getattr(call, "op", None)
-        if not isinstance(op, _ir_core.Op) or op.name != "system.import_peer_buffer":
+        if not isinstance(op, _ir_core.Op) or op.name != _ir_core.get_op("system.import_peer_buffer").name:
             continue
         kwargs = getattr(call, "kwargs", {}) or {}
         peer_func = kwargs.get("peer_func", "")

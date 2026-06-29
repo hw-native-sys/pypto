@@ -707,10 +707,9 @@ void DistributedCodegen::VisitStmt_(const ir::AssignStmtPtr& op) {
   }
 
   const auto value_call = ir::As<ir::Call>(op->value_);
-  const bool distributed_tensor_alias =
-      ir::As<ir::DistributedTensorType>(op->var_->GetType()) &&
-      ir::As<ir::DistributedTensorType>(op->value_->GetType()) &&
-      (!value_call || (value_call->op_ && value_call->op_->name_ == "pld.tensor.window"));
+  const bool distributed_tensor_alias = ir::As<ir::DistributedTensorType>(op->var_->GetType()) &&
+                                        ir::As<ir::DistributedTensorType>(op->value_->GetType()) &&
+                                        (!value_call || ir::IsOp(value_call, "pld.tensor.window"));
   if (distributed_tensor_alias) {
     declared_vars_.insert(var_name);
     current_target_var_ = "";
@@ -865,7 +864,7 @@ void DistributedCodegen::VisitExpr_(const ir::CallPtr& op) {
   }
 
   // tensor.create → orch.alloc() for HOST-level orchestrators
-  if (op->op_->name_ == "tensor.create") {
+  if (ir::IsOp(op, "tensor.create")) {
     EmitTensorCreate(op);
     return;
   }
@@ -874,7 +873,7 @@ void DistributedCodegen::VisitExpr_(const ir::CallPtr& op) {
   // every emitted orchestrator's signature (see EmitFunction / EmitEntryFunction).
   // The runner fills it with len(DistributedConfig.device_ids) — present for
   // comm-less programs too, so this lowering is uniform.
-  if (op->op_->name_ == "pld.system.world_size") {
+  if (ir::IsOp(op, "pld.system.world_size")) {
     current_expr_value_ = "world_size";
     return;
   }
@@ -1132,7 +1131,7 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
 void DistributedCodegen::EmitDistIntrinsic(const ir::CallPtr& call) {
   const auto& op_name = call->op_->name_;
 
-  if (op_name == "dist.tree_reduce") {
+  if (ir::IsOp(call, "dist.tree_reduce")) {
     EmitTreeReduce(call);
     return;
   }
@@ -1205,7 +1204,7 @@ bool IsTensorCreateAssign(const ir::StmtPtr& stmt) {
   if (!assign) return false;
   auto call = std::dynamic_pointer_cast<const ir::Call>(assign->value_);
   if (!call || !call->op_) return false;
-  return call->op_->name_ == "tensor.create";
+  return ir::IsOp(call, "tensor.create");
 }
 
 // Recursively reject any `tensor.create` reachable through @p stmt — pre-init

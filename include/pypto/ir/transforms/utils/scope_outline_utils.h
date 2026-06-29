@@ -31,6 +31,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
@@ -66,7 +67,7 @@ class StoreTargetCollector : public IRVisitor {
  protected:
   void VisitExpr_(const CallPtr& op) override {
     auto opnode = std::dynamic_pointer_cast<const Op>(op->op_);
-    if (opnode && opnode->name_ == "tile.store" && op->args_.size() >= 3) {
+    if (opnode && IsOp(opnode, "tile.store") && op->args_.size() >= 3) {
       if (auto var = As<Var>(op->args_[2])) {
         store_targets.insert(var.get());
       }
@@ -95,7 +96,7 @@ class PostStoreAliasCollector : public IRVisitor {
   void VisitStmt_(const AssignStmtPtr& op) override {
     auto call = std::dynamic_pointer_cast<const Call>(op->value_);
     auto opnode = call ? std::dynamic_pointer_cast<const Op>(call->op_) : nullptr;
-    if (opnode && opnode->name_ == "tile.store" && call->args_.size() >= 3) {
+    if (opnode && IsOp(opnode, "tile.store") && call->args_.size() >= 3) {
       if (auto target = As<Var>(call->args_[2])) {
         alias_to_target.emplace(op->var_.get(), target.get());
       }
@@ -124,7 +125,7 @@ class StoreEvalToAssignMutator : public IRMutator {
     auto call = std::dynamic_pointer_cast<const Call>(op->expr_);
     if (!call) return op;
     auto opnode = std::dynamic_pointer_cast<const Op>(call->op_);
-    if (!opnode || opnode->name_ != "tile.store") {
+    if (!opnode || !IsOp(opnode, "tile.store")) {
       return op;
     }
     if (call->args_.size() < 3) return op;
@@ -141,7 +142,7 @@ class StoreEvalToAssignMutator : public IRMutator {
     auto call = std::dynamic_pointer_cast<const Call>(op->value_);
     if (!call) return IRMutator::VisitStmt_(op);
     auto opnode = std::dynamic_pointer_cast<const Op>(call->op_);
-    if (!opnode || opnode->name_ != "tile.store") return IRMutator::VisitStmt_(op);
+    if (!opnode || !IsOp(opnode, "tile.store")) return IRMutator::VisitStmt_(op);
     if (call->args_.size() < 3) return IRMutator::VisitStmt_(op);
     auto var = As<Var>(call->args_[2]);
     if (!var) return IRMutator::VisitStmt_(op);
@@ -323,7 +324,7 @@ class ScopeOutliner : public IRMutator {
       if (!assign || assign->var_.get() != target) return false;
       auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
       if (!call || !call->op_) return false;
-      return call->op_->name_ == "system.task_invalid";
+      return IsOp(call, "system.task_invalid");
     };
 
     // Indices of any preceding-scope placeholders we plan to drop.
@@ -1287,7 +1288,7 @@ class ScopeOutliner : public IRMutator {
      protected:
       void VisitExpr_(const CallPtr& call) override {
         auto opnode = std::dynamic_pointer_cast<const Op>(call->op_);
-        if (opnode && opnode->name_ == "tensor.assemble" && !call->args_.empty()) {
+        if (opnode && IsOp(opnode, "tensor.assemble") && !call->args_.empty()) {
           if (auto var = As<Var>(call->args_[0])) {
             auto it = var_to_idx_.find(var.get());
             if (it != var_to_idx_.end() && directions_[it->second] == ParamDirection::In) {

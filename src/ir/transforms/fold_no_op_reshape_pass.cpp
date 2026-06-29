@@ -16,6 +16,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/pass_properties.h"
@@ -36,7 +37,7 @@ namespace {
 bool IsNoOpReshape(const AssignStmtPtr& assign) {
   if (!assign || !assign->var_) return false;
   auto call = As<Call>(assign->value_);
-  if (!call || !call->op_ || call->op_->name_ != "tile.reshape") return false;
+  if (!call || !call->op_ || !IsOp(call, "tile.reshape")) return false;
   // Canonical tile.reshape arity is exactly 2 (tile, shape). Anything else
   // is malformed IR and should remain visible to the verifier rather than
   // being silently folded.

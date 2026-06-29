@@ -734,6 +734,50 @@ T GetRequiredKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs, 
 }
 
 /**
+ * @brief Operator check — a typo-safe alternative to a raw name-string literal.
+ *
+ * Tests whether `op` is the operator named `op_name`, routing the literal through
+ * `OpRegistry::GetOp`, which throws `ValueError` if `op_name` is not a registered
+ * operator. A mistyped or renamed operator literal therefore fails loudly at the
+ * comparison site, instead of silently evaluating to `false` the way a bare
+ * `op_->name_ == "..."` comparison does.
+ *
+ * The match itself is by *canonical name*, not pointer identity. `Op` instances
+ * are constructed in several places — registry singletons, the `.pto`
+ * deserializer (`deserializer.cpp`), and the MemRef alloc builders
+ * (`memref_utils.h`) each create their own `Op` objects — so two `Op`s sharing a
+ * name are the same operator yet distinct pointers. Name identity is the
+ * invariant the IR maintains; pointer identity is not.
+ *
+ * Prefer these over raw name comparisons:
+ * @code
+ *   if (IsOp(call, "tile.reshape")) ...   // was: call->op_->name_ == "tile.reshape"
+ *   if (!IsOp(call, "tile.store")) ...    // was: call->op_->name_ != "tile.store"
+ * @endcode
+ *
+ * @param op       Operator pointer to test (a Call/Submit `op_`); may be null.
+ * @param op_name  Registered operator name to compare against.
+ * @return true iff `op` is non-null and names the registered operator `op_name`.
+ * @throws ValueError if `op_name` is not a registered operator.
+ */
+[[nodiscard]] inline bool IsOp(const OpPtr& op, const std::string& op_name) {
+  // GetOp throws on an unregistered name (typo-safety); evaluated unconditionally
+  // so the guard fires even when `op` is null. Compare by canonical name.
+  const OpPtr& canonical = OpRegistry::GetInstance().GetOp(op_name);
+  return op && op->name_ == canonical->name_;
+}
+
+/// @overload Test a Call's operator (false when `call` or its op is null).
+[[nodiscard]] inline bool IsOp(const CallPtr& call, const std::string& op_name) {
+  return call && IsOp(call->op_, op_name);
+}
+
+/// @overload Test a Submit's operator (false when `submit` or its op is null).
+[[nodiscard]] inline bool IsOp(const SubmitPtr& submit, const std::string& op_name) {
+  return submit && IsOp(submit->op_, op_name);
+}
+
+/**
  * @brief Helper macro for operator registration
  *
  * Use this macro to register operators in initialization code:

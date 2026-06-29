@@ -24,6 +24,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
@@ -168,7 +169,7 @@ static bool IsTileGetBlockIdxAssign(const StmtPtr& stmt) {
   auto call = As<Call>(assign->value_);
   if (!call) return false;
   auto op = As<Op>(call->op_);
-  return op && op->name_ == "tile.get_block_idx";
+  return op && IsOp(op, "tile.get_block_idx");
 }
 
 static bool ContainsChunkLoop(const StmtPtr& stmt) {

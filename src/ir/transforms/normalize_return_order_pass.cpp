@@ -22,6 +22,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
@@ -79,7 +80,7 @@ std::vector<int> BuildReturnToParamMapping(const FunctionPtr& func) {
       if (!assign->var_) continue;
       if (auto call = As<Call>(assign->value_)) {
         // tile.store(tile, offsets, out_param, ...) → lhs tracks out_param
-        if (call->op_ && call->op_->name_ == "tile.store" && call->args_.size() >= 3) {
+        if (IsOp(call, "tile.store") && call->args_.size() >= 3) {
           if (auto out_param = As<Var>(call->args_[2])) {
             var_to_out_param[assign->var_.get()] = find_param_index(out_param.get());
           }

@@ -1162,8 +1162,7 @@ LifetimeAnalysisResult ComputeLifetimes(const StmtPtr& func_body) {
         // Parse the membership string once here; the packer compares pre-parsed
         // vectors so it never re-parses in its O(N²) pairwise loop.
         pipeline_membership[interval.variable.get()] = ParsePipelineMembership(packed);
-        const std::string& op_name = call->op_ ? call->op_->name_ : std::string();
-        if (op_name == "tile.load" || op_name == "tile.read") {
+        if (IsOp(call, "tile.load") || IsOp(call, "tile.read")) {
           pipeline_load_tiles.insert(interval.variable.get());
         }
         break;
@@ -1241,10 +1240,10 @@ static bool LifetimesOverlap(const LifetimeInterval& a, const LifetimeInterval& 
 
 /// Op names whose output aliases the input MemRef and lowers to a PTO view
 /// instruction — kept in sync with the PTO buffer-reuse view allowlist.
-static bool IsLegalTileViewOp(const std::string& op_name) {
-  return op_name == "tile.reshape" || op_name == "tile.extract" || op_name == "tile.slice" ||
-         op_name == "tile.fillpad" || op_name == "tile.fillpad_inplace" || op_name == "tile.transpose_view" ||
-         op_name == "tensor.slice";
+static bool IsLegalTileViewOp(const OpPtr& op) {
+  return IsOp(op, "tile.reshape") || IsOp(op, "tile.extract") || IsOp(op, "tile.slice") ||
+         IsOp(op, "tile.fillpad") || IsOp(op, "tile.fillpad_inplace") || IsOp(op, "tile.transpose_view") ||
+         IsOp(op, "tensor.slice");
 }
 
 struct HazardInputs {
@@ -1257,16 +1256,15 @@ class HazardInputCollector : public IRVisitor {
   void VisitStmt_(const AssignStmtPtr& op) override {
     if (GetTileTypeWithMemRef(op->var_->GetType())) {
       if (auto call = As<Call>(op->value_)) {
-        const std::string op_name = call->op_ ? call->op_->name_ : std::string();
         std::vector<const Var*> input_vars;
         for (const auto& arg : call->args_) {
           if (auto v = As<Var>(arg)) input_vars.push_back(v.get());
         }
         // load_derived closure: defs precede uses in program order, so a view's
         // source is already classified by the time we reach the view.
-        if (op_name == "tile.load") {
+        if (IsOp(call, "tile.load")) {
           inputs_.load_derived.insert(op->var_.get());
-        } else if (IsLegalTileViewOp(op_name)) {
+        } else if (IsLegalTileViewOp(call->op_)) {
           for (const Var* in : input_vars) {
             if (inputs_.load_derived.count(in) != 0) {
               inputs_.load_derived.insert(op->var_.get());
@@ -1274,7 +1272,7 @@ class HazardInputCollector : public IRVisitor {
             }
           }
         }
-        if (op_name == "tile.tpop_from_aic") tpop_vars_.insert(op->var_.get());
+        if (IsOp(call, "tile.tpop_from_aic")) tpop_vars_.insert(op->var_.get());
         for (const Var* in : input_vars) {
           if (tpop_vars_.count(in) != 0) {
             inputs_.reads_tpop.insert(op->var_.get());
@@ -1372,7 +1370,7 @@ class ForbidAliasCollector : public IRVisitor {
         // and clobbers input elements not yet converted -> corrupt results.
         // Narrowing / same-width casts are in-place-safe and keep the cross-dtype
         // reuse the removed gate enables, so forbid only the widening direction.
-        if (call->op_->name_ == "tile.cast" && !call->args_.empty()) {
+        if (IsOp(call, "tile.cast") && !call->args_.empty()) {
           auto out_t = As<TileType>(op->var_->GetType());
           auto in_t = As<TileType>(call->args_[0]->GetType());
           if (out_t && in_t && out_t->dtype_.GetBit() > in_t->dtype_.GetBit()) forbid_arg(0);
@@ -2203,7 +2201,7 @@ bool IsUnusedAllocStmt(const StmtPtr& stmt, const std::set<const Var*>& used_bas
   if (!assign) return false;
   auto call = As<Call>(assign->value_);
   if (!call) return false;
-  if (call->op_->name_ != "tile.alloc" && call->op_->name_ != "tensor.alloc") return false;
+  if (!IsOp(call, "tile.alloc") && !IsOp(call, "tensor.alloc")) return false;
   // Alloc LHS is a Ptr Var — check if any MemRef's base_ still references it
   return used_bases.find(assign->var_.get()) == used_bases.end();
 }

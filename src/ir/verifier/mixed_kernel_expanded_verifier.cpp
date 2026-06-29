@@ -23,6 +23,7 @@
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
@@ -155,7 +156,7 @@ void TryVerifyInitializePipeFromStmt(const StmtPtr& stmt, const std::string& fun
   if (!call || !call->op_) return;
   auto op = std::dynamic_pointer_cast<const Op>(call->op_);
   if (!op) return;
-  if (op->name_ != "system.aic_initialize_pipe" && op->name_ != "system.aiv_initialize_pipe") return;
+  if (!IsOp(op, "system.aic_initialize_pipe") && !IsOp(op, "system.aiv_initialize_pipe")) return;
   VerifySingleInitializePipeCall(call, func_name, op->name_, diagnostics);
 }
 
@@ -191,9 +192,9 @@ void TryCountReserveImportFromStmt(const StmtPtr& stmt, int& reserve_count, int&
   if (!call || !call->op_) return;
   auto op = std::dynamic_pointer_cast<const Op>(call->op_);
   if (!op) return;
-  if (op->name_ == "system.reserve_buffer") {
+  if (IsOp(op, "system.reserve_buffer")) {
     ++reserve_count;
-  } else if (op->name_ == "system.import_peer_buffer") {
+  } else if (IsOp(op, "system.import_peer_buffer")) {
     ++import_count;
   }
 }
@@ -203,7 +204,7 @@ void AccumulateRequiredReserveImportFromInitializePipe(const CallPtr& call, Func
                                                        int& required_import_count) {
   if (!call || !call->op_) return;
   auto op = std::dynamic_pointer_cast<const Op>(call->op_);
-  if (!op || (op->name_ != "system.aic_initialize_pipe" && op->name_ != "system.aiv_initialize_pipe")) {
+  if (!op || (!IsOp(op, "system.aic_initialize_pipe") && !IsOp(op, "system.aiv_initialize_pipe"))) {
     return;
   }
   const int dir_mask = call->GetKwarg<int>("dir_mask", 0);
@@ -335,9 +336,9 @@ class TpopMemoryVerifier : public IRVisitor {
     }
 
     std::optional<MemorySpace> expected_memory;
-    if (func_type_ == FunctionType::AIC && ir_op->name_ == "tile.tpop_from_aiv") {
+    if (func_type_ == FunctionType::AIC && IsOp(ir_op, "tile.tpop_from_aiv")) {
       expected_memory = MemorySpace::Mat;
-    } else if (func_type_ == FunctionType::AIV && ir_op->name_ == "tile.tpop_from_aic") {
+    } else if (func_type_ == FunctionType::AIV && IsOp(ir_op, "tile.tpop_from_aic")) {
       expected_memory = MemorySpace::Vec;
     }
 

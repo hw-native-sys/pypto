@@ -199,7 +199,7 @@ static LoopBodyDepIndex BuildLoopBodyDepIndex(const StmtPtr& body, const ArrayAl
     void VisitStmt_(const AssignStmtPtr& assign) override {
       if (assign->var_) index.body_defined_vars.insert(assign->var_.get());
       auto call = As<Call>(assign->value_);
-      if (call && call->op_->name_ == "array.update_element" && !call->args_.empty()) {
+      if (call && IsOp(call, "array.update_element") && !call->args_.empty()) {
         auto base = AsVarLike(call->args_[0]);
         if (base) InsertWithAliases(base.get(), aliases_, &index.updated_arrays);
       }

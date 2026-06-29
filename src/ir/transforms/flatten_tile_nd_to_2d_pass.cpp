@@ -522,7 +522,7 @@ CallPtr ResolveBatchOperandCall(const ExprPtr& operand_expr, const AssignDefMap&
 ///   * the last two dims (the matmul page) are identical static values,
 ///   * the product of the leading batch dims is the same on both sides.
 bool IsSafePeelableBatchMatmulReshape(const CallPtr& reshape_call) {
-  if (!reshape_call || !reshape_call->op_ || reshape_call->op_->name_ != "tile.reshape") {
+  if (!reshape_call || !reshape_call->op_ || !IsOp(reshape_call, "tile.reshape")) {
     return false;
   }
   if (reshape_call->args_.size() != 2) return false;
@@ -572,7 +572,7 @@ ExprPtr PeelSafeBatchReshape(const ExprPtr& operand_expr, const AssignDefMap& de
   while (true) {
     CallPtr reshape_call;
     if (auto call = As<Call>(current)) {
-      if (call->op_ && call->op_->name_ == "tile.reshape") {
+      if (IsOp(call, "tile.reshape")) {
         reshape_call = call;
       }
     }
@@ -581,7 +581,7 @@ ExprPtr PeelSafeBatchReshape(const ExprPtr& operand_expr, const AssignDefMap& de
         auto def_it = def_map.find(var.get());
         if (def_it != def_map.end()) {
           if (auto call = As<Call>(def_it->second->value_)) {
-            if (call->op_ && call->op_->name_ == "tile.reshape") {
+            if (IsOp(call, "tile.reshape")) {
               reshape_call = call;
             }
           }
@@ -843,7 +843,7 @@ DirectStoreInfo DetectDirectStore(const std::vector<StmtPtr>& stmts, size_t stmt
 
   auto store_assign = As<AssignStmt>(stmts[stmt_index + 1]);
   auto store_call = store_assign ? As<Call>(store_assign->value_) : nullptr;
-  if (!store_call || store_call->op_->name_ != "tile.store") return info;
+  if (!store_call || !IsOp(store_call, "tile.store")) return info;
 
   auto store_input = !store_call->args_.empty() ? As<Var>(store_call->args_[0]) : nullptr;
   if (!store_input || store_input.get() != result_var.get()) return info;
@@ -1633,7 +1633,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       auto def_it = stmt_def_map.find(current);
       if (def_it == stmt_def_map.end()) continue;
       auto chain_call = As<Call>(def_it->second->value_);
-      const bool is_view = chain_call && chain_call->op_ && chain_call->op_->name_ == "tile.transpose_view";
+      const bool is_view = IsOp(chain_call, "tile.transpose_view");
       if (!is_view && !IsSafePeelableBatchMatmulReshape(chain_call)) continue;
       auto input_var = As<Var>(chain_call->args_[0]);
       if (!input_var) continue;
@@ -1947,7 +1947,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
     //      are always 2D), keeping the tensor-rank source window for codegen —
     //      except a natural Mat load with a real batch (>1) collapses its window
     //      to 2D as well (the ND2NZ path rejects rank>2 GlobalTensors). ----
-    if (op_name == "tile.load") {
+    if (IsOp(call, "tile.load")) {
       // A batch_matmul operand load is KEPT here and sliced per batch by
       // ExtractBatchPage (the fit path) — both operands, transposed or not, are
       // handled identically (whole tile in L1 + per-batch slice). Only a !fit
@@ -2020,7 +2020,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
     // offsets are preserved; codegen uses the tensor view plus a partition_view
     // over the original tensor-rank window to produce the 2D result.
     // Signature: (tile, offsets, output_tensor[, shapes])
-    if (op_name == "tile.store") {
+    if (IsOp(call, "tile.store")) {
       auto orig_tile_type = As<TileType>(call->args_[0]->GetType());
 
       std::vector<ExprPtr> new_args;
@@ -2075,7 +2075,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
     }
 
     // ---- tile.create / tile.full with >2D shape: flatten shape directly ----
-    if (op_name == "tile.create" || op_name == "tile.full") {
+    if (IsOp(call, "tile.create") || IsOp(call, "tile.full")) {
       auto result_tile = As<TileType>(call->GetType());
       if (result_tile && result_tile->shape_.size() > 2) {
         auto [merged, last] = ComputeMergedShape(result_tile->shape_, op_name);
@@ -2103,7 +2103,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
     }
 
     // ---- tile.sum/tile.max/tile.min: remap axis to 1 (last axis of 2D) ----
-    if (op_name == "tile.sum" || op_name == "tile.max" || op_name == "tile.min") {
+    if (IsOp(call, "tile.sum") || IsOp(call, "tile.max") || IsOp(call, "tile.min")) {
       if (!call->args_.empty()) {
         auto input_tile = As<TileType>(call->args_[0]->GetType());
         if (IsNdTile(input_tile)) {
@@ -2135,7 +2135,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
     }
 
     // ---- tile.batch_matmul: delegate to LowerBatchMatmul ----
-    if (op_name == "tile.batch_matmul") {
+    if (IsOp(call, "tile.batch_matmul")) {
       auto lowering = LowerBatchMatmul(assign, call, stmts, stmt_index, ctx, op_registry, span);
       result.insert(result.end(), lowering.stmts.begin(), lowering.stmts.end());
       if (lowering.fused_store) {
@@ -2148,7 +2148,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
     }
 
     // ---- tile.batch_matmul_acc: delegate to LowerBatchMatmulAcc ----
-    if (op_name == "tile.batch_matmul_acc") {
+    if (IsOp(call, "tile.batch_matmul_acc")) {
       auto lowering = LowerBatchMatmulAcc(assign, call, stmts, ctx, op_registry, span);
       result.insert(result.end(), lowering.stmts.begin(), lowering.stmts.end());
       ctx.Insert(assign->var_, lowering.output_var);
@@ -2156,7 +2156,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
     }
 
     // ---- tile.transpose feeding only tile.batch_matmul[_acc]: skip and let lowering peel it ----
-    if (op_name == "tile.transpose" && batch_matmul_only_vars.count(assign->var_.get()) != 0) {
+    if (IsOp(call, "tile.transpose") && batch_matmul_only_vars.count(assign->var_.get()) != 0) {
       ctx.Insert(assign->var_, assign->var_);  // identity mapping for safety
       continue;
     }
@@ -2168,7 +2168,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
     //   2D   → emit one scratch tile.create + a 4-arg tile.transpose.
     // An already-4-arg 2D transpose (e.g. hand-built IR) falls through to the generic
     // re-create path unchanged.
-    if (op_name == "tile.transpose" && batch_matmul_only_vars.count(assign->var_.get()) == 0) {
+    if (IsOp(call, "tile.transpose") && batch_matmul_only_vars.count(assign->var_.get()) == 0) {
       if (IsNdTile(As<TileType>(call->args_[0]->GetType()))) {
         auto lowering = LowerNdTranspose(assign, call, ctx, op_registry, span);
         result.insert(result.end(), lowering.stmts.begin(), lowering.stmts.end());
@@ -2207,7 +2207,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
     //      a safe batch-only reshape that `NormalizeBatchMatmulOperand` peels, so
     //      no orphan rank>2 reshape survives. The underlying tile.load is reused by
     //      the lowering (fit path) or re-emitted per batch (!fit path). ----
-    if (op_name == "tile.reshape" && batch_matmul_only_vars.count(assign->var_.get()) != 0 &&
+    if (IsOp(call, "tile.reshape") && batch_matmul_only_vars.count(assign->var_.get()) != 0 &&
         IsSafePeelableBatchMatmulReshape(call)) {
       ctx.Insert(assign->var_, assign->var_);  // identity mapping for safety
       continue;

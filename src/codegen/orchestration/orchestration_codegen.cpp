@@ -40,6 +40,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
@@ -625,7 +626,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
           auto call = AsCallOrSubmitView(assign->value_);
           if (!call) continue;
           // (a) tensor.assemble: result var aliases its first arg (the target).
-          if (call->op_->name_ == "tensor.assemble" && !call->args_.empty()) {
+          if (IsOp(call, "tensor.assemble") && !call->args_.empty()) {
             auto first_arg = AsVarLike(call->args_[0]);
             if (first_arg) {
               for (auto& cls : aliases) {
@@ -1171,14 +1172,14 @@ class OrchestrationStmtCodegen : public CodegenBase {
       // TaskId of a ``pl.submit(...)`` call is handled separately (see
       // ``GenerateSubmitReturnAliases``) — it is a tuple element of the
       // kernel Call, not a standalone op.
-      if (op_name == "system.task_dummy") {
+      if (IsOp(call, "system.task_dummy")) {
         INTERNAL_CHECK_SPAN(call->GetAttr<bool>(kAttrDummyTask, false), assign->span_)
             << "Internal error: system.task_dummy must be marked with attrs['" << kAttrDummyTask << "']";
         EmitDummyTask(call, var_name);
         manual_task_id_map_[assign->var_.get()] = var_name;
         return;
       }
-      if (op_name == "system.task_invalid") {
+      if (IsOp(call, "system.task_invalid")) {
         // The Python literal ``None`` in a TaskId position lowers here.
         code_ << Indent() << "PTO2TaskId " << var_name << " = PTO2TaskId::invalid();\n";
         // Register so a downstream ``deps=[<this var>]`` resolves to the
@@ -1187,7 +1188,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         manual_task_id_map_[assign->var_.get()] = var_name;
         return;
       }
-      if (op_name == "system.task_is_valid") {
+      if (IsOp(call, "system.task_is_valid")) {
         // ``b = task_is_valid(t)`` lowers to ``bool b = <t>.is_valid();``.
         // The argument is any Scalar[TASK_ID] expression — a Var holding a
         // companion id, or an ``array.get_element`` call on a TASK_ID array
@@ -1200,7 +1201,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
       }
 
       if (IsTensorOp(op_name)) {
-        if (op_name == "tensor.assemble") {
+        if (IsOp(call, "tensor.assemble")) {
           HandleTensorAssembleAssign(assign, call);
         } else {
           GenerateTensorOpCode(call, var_name, assign->var_);
@@ -1210,20 +1211,20 @@ class OrchestrationStmtCodegen : public CodegenBase {
         // is SSA-functional: the LHS Var refers to the post-update array. At
         // codegen time we alias the LHS to the input array's emit name so the
         // emitted write lands on the same storage.
-        if (op_name == "array.update_element") {
+        if (IsOp(call, "array.update_element")) {
           HandleArrayUpdateElementAssign(assign, call);
         }
         GenerateTensorOpCode(call, var_name, assign->var_);
         // Register an ``array.create`` result as a backing array so a ForStmt
         // ArrayType iter_arg seeded by it can reuse the same C-stack array
         // instead of allocating a fresh one and copying in slot-by-slot.
-        if (op_name == "array.create") {
+        if (IsOp(call, "array.create")) {
           if (auto arr_ty = As<ArrayType>(assign->var_->GetType())) {
             if (auto extent = As<ConstInt>(arr_ty->extent())) {
               RegisterArrayCarry(assign->var_.get(), var_name, extent->value_);
             }
           }
-        } else if (op_name == "array.get_element") {
+        } else if (IsOp(call, "array.get_element")) {
           auto scalar_ty = As<ScalarType>(assign->var_->GetType());
           if (scalar_ty && scalar_ty->dtype_ == DataType::TASK_ID) {
             manual_task_id_map_[assign->var_.get()] = var_name;
@@ -1238,7 +1239,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         // ``arr[k] = ...`` overwrite must not retroactively change ``prev``.
         // Non-TaskId ``get_element`` results are not dependency sources, so
         // they are intentionally left unregistered.
-        if (op_name == "array.get_element") {
+        if (IsOp(call, "array.get_element")) {
           if (auto st = As<ScalarType>(assign->var_->GetType()); st && st->dtype_ == DataType::TASK_ID) {
             manual_task_id_map_[assign->var_.get()] = var_name;
           }
@@ -1826,13 +1827,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
         << "Misplaced tensor op '" << op_name
         << "' in Orchestration function (should be inside InCore block)";
 
-    if (op_name == "tensor.create" && assign_var &&
+    if (IsOp(call, "tensor.create") && assign_var &&
         (declared_var_ptrs_.count(assign_var.get()) || param_name_set_.count(GetVarName(assign_var)))) {
       return;
     }
 
     std::string emit_var = result_var;
-    if (op_name == "tensor.create" && assign_var) {
+    if (IsOp(call, "tensor.create") && assign_var) {
       declared_var_ptrs_.insert(assign_var.get());
       emit_var = ReserveVarEmitName(assign_var.get());
     }
@@ -1849,7 +1850,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
       }
     }
 
-    if (op_name == "tensor.create") {
+    if (IsOp(call, "tensor.create")) {
       EmitAllocBatch({emit_var});
     }
   }
@@ -2544,7 +2545,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         continue;
       }
       auto call = As<Call>(assign->value_);
-      if (!call || call->op_->name_ != "tensor.create") {
+      if (!call || !IsOp(call, "tensor.create")) {
         locally_defined.insert(assign->var_.get());
         continue;
       }

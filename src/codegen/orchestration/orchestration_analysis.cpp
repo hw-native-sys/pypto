@@ -25,6 +25,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
@@ -95,7 +96,7 @@ void OrchestrationInfoCollector::VisitStmt_(const AssignStmtPtr& assign) {
   // would desynchronise this analysis from the codegen lookup (which now also
   // keys on the binding Var).
   if (auto call = AsCallOrSubmitView(assign->value_)) {
-    if (!IsBuiltinOp(call->op_->name_) && call->op_->name_ != "tensor.create") {
+    if (!IsBuiltinOp(call->op_->name_) && !IsOp(call, "tensor.create")) {
       if (As<TupleType>(call->GetType())) {
         std::string unique_key = "_tc_" + std::to_string(tuple_call_counter_++);
         tuple_var_to_key[assign->var_.get()] = unique_key;
@@ -162,9 +163,9 @@ void BufferRootCollector::VisitStmt_(const AssignStmtPtr& assign) {
   // op-name branches below are unaffected.
   if (auto call = AsCallOrSubmitView(assign->value_)) {
     const std::string& op_name = call->op_->name_;
-    if (op_name == "tensor.create" || op_name == "tensor.slice") {
+    if (IsOp(call, "tensor.create") || IsOp(call, "tensor.slice")) {
       buffer_roots[assign->var_.get()] = assign->var_.get();
-    } else if (op_name == "tensor.assemble") {
+    } else if (IsOp(call, "tensor.assemble")) {
       if (call->args_.size() == 3) {
         if (const Var* target_root = ResolveExpr(call->args_[0])) {
           buffer_roots[assign->var_.get()] = target_root;

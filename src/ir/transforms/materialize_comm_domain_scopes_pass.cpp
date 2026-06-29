@@ -27,6 +27,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
@@ -111,8 +112,7 @@ class AllocAndWindowCollector : public IRVisitor {
     auto var = As<Var>(op->var_);
     auto call = As<Call>(op->value_);
     if (var && call && call->op_) {
-      const auto& op_name = call->op_->name_;
-      if (op_name == "pld.tensor.alloc_window_buffer") {
+      if (IsOp(call, "pld.tensor.alloc_window_buffer")) {
         INTERNAL_CHECK_SPAN(call->args_.size() == 1, call->span_)
             << "MaterializeCommDomainScopes: pld.tensor.alloc_window_buffer expects exactly one arg (size)";
         // The parser injects ``name`` as a kwarg derived from the assignment
@@ -123,7 +123,7 @@ class AllocAndWindowCollector : public IRVisitor {
         auto rec = std::make_unique<AllocRecord>(call, var, call->args_[0], name, call->span_);
         ptr_to_alloc[var.get()] = rec.get();
         allocs.push_back(std::move(rec));
-      } else if (op_name == "pld.tensor.window" && !call->args_.empty()) {
+      } else if (IsOp(call, "pld.tensor.window") && !call->args_.empty()) {
         auto ptr_arg_var = As<Var>(call->args_[0]);
         if (ptr_arg_var) {
           auto it = ptr_to_alloc.find(ptr_arg_var.get());
@@ -203,7 +203,7 @@ DeviceDescriptor ResolveDeviceDescriptor(const ExprPtr& device, const std::vecto
         // as the direct ``pl.range(pld.system.world_size())`` form.
         ExprPtr stop = UnwrapStopExpr(fs->stop_, var_defs);
         if (auto stop_call = As<Call>(stop)) {
-          if (stop_call->op_ && stop_call->op_->name_ == "pld.system.world_size") {
+          if (stop_call->op_ && IsOp(stop_call, "pld.system.world_size")) {
             desc.is_all = true;
             return desc;
           }
@@ -279,7 +279,7 @@ class DispatchAnalyzer : public IRVisitor {
   }
 
   void AnalyzeAllReduce(const CallPtr& op) {
-    if (!op || !op->op_ || op->op_->name_ != "pld.tensor.allreduce") return;
+    if (!op || !op->op_ || !IsOp(op, "pld.tensor.allreduce")) return;
     INTERNAL_CHECK_SPAN(op->args_.size() == 2, op->span_)
         << "MaterializeCommDomainScopes: pld.tensor.allreduce expects exactly two args";
     auto data_var = As<Var>(op->args_[0]);

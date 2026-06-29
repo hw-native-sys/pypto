@@ -64,7 +64,7 @@ bool IsViewOperation(const std::string& op_name) {
 // its input's buffer, but a permuting op's output must never alias the input:
 // pto.ttrans is not in-place safe (the unaligned scalar path writes dst directly
 // from src), so InitMemRef gives the transpose output a fresh buffer.
-bool IsDataPermutingInheritOp(const std::string& op_name) { return op_name == "tile.transpose"; }
+bool IsDataPermutingInheritOp(const OpPtr& op) { return IsOp(op, "tile.transpose"); }
 
 // A tile owns no general-pool buffer ("buffer-less by design") when its defining
 // value is a cross-core tpop result, or a non-permuting zero-copy view / plain
@@ -76,7 +76,7 @@ template <typename SourceBufferLess>
 bool ProducesBufferLessTile(const ExprPtr& value, const SourceBufferLess& source_buffer_less) {
   if (auto call = std::dynamic_pointer_cast<const Call>(value)) {
     if (!call->op_) return false;
-    if (call->op_->name_ == "tile.tpop_from_aic" || call->op_->name_ == "tile.tpop_from_aiv") {
+    if (IsOp(call, "tile.tpop_from_aic") || IsOp(call, "tile.tpop_from_aiv")) {
       return true;
     }
     if (op_predicates::IsBufferAliasingViewOp(call->op_->name_) && !call->args_.empty()) {
@@ -363,7 +363,7 @@ class InitMemRefMutator : public IRMutator {
         // Get the input tile (first argument) after mutation
         auto new_call = std::dynamic_pointer_cast<const Call>(new_value);
         if (new_call && !new_call->args_.empty()) {
-          const bool may_inherit = !IsDataPermutingInheritOp(call->op_->name_);
+          const bool may_inherit = !IsDataPermutingInheritOp(call->op_);
           if (may_inherit) {
             auto result = ShareMemRefFrom(new_call->args_[0], op, new_value);
             if (result) {

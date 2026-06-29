@@ -546,7 +546,7 @@ class TensorToTileMutator : public TypePropagatingMutator {
 
     // Consumer-driven space override for load-like ops (e.g. tensor.slice
     // feeding into tensor.matmul → load to Mat instead of default Vec).
-    if (call->op_->name_ == "tensor.slice") {
+    if (IsOp(call, "tensor.slice")) {
       auto consumer_req = consumer_collector_.GetConsumerReq(op->var_.get());
       if (consumer_req) {
         auto override_load = HandleConsumerDrivenLoad(op, call, *consumer_req);
@@ -814,23 +814,22 @@ ExprPtr GetCallKwargExpr(const CallPtr& call, const std::string& key) {
 ExprPtr GetWriteTargetExpr(const CallPtr& call) {
   if (!call) return nullptr;
 
-  const std::string& op_name = call->op_->name_;
-  if (op_name == "tensor.write" && !call->args_.empty()) {
+  if (IsOp(call, "tensor.write") && !call->args_.empty()) {
     return call->args_[0];
   }
-  if (op_name == "tile.store") {
+  if (IsOp(call, "tile.store")) {
     if (call->args_.size() >= 3) {
       return call->args_[2];
     }
     return GetCallKwargExpr(call, "output_tensor");
   }
-  if (op_name == "tensor.assemble" && !call->args_.empty()) {
+  if (IsOp(call, "tensor.assemble") && !call->args_.empty()) {
     return call->args_[0];
   }
   // pld.tile.remote_store(src_tile, target, peer, offsets): the cross-rank write
   // lands in `target` (args_[1]). Recognising it here lets the enclosing window
   // param be upgraded from In to Out/InOut so a later reader gets a RAW edge.
-  if (op_name == "pld.tile.remote_store" && call->args_.size() >= 2) {
+  if (IsOp(call, "pld.tile.remote_store") && call->args_.size() >= 2) {
     return call->args_[1];
   }
   // pld.tile.put(dst, peer, src, stage[, dst_offsets, src_offsets, shape]):
@@ -839,7 +838,7 @@ ExprPtr GetWriteTargetExpr(const CallPtr& call) {
   //   the HCCL TGET writes the pulled bytes into local `dst` (args_[0]).
   // Both mirror the remote_store handling above so the enclosing window
   // param is upgraded from In to Out/InOut and a later reader gets a RAW edge.
-  if ((op_name == "pld.tile.put" || op_name == "pld.tile.get") && !call->args_.empty()) {
+  if ((IsOp(call, "pld.tile.put") || IsOp(call, "pld.tile.get")) && !call->args_.empty()) {
     return call->args_[0];
   }
   // pld.tensor.allreduce(target, signal, *, op): the composite collective
@@ -849,32 +848,32 @@ ExprPtr GetWriteTargetExpr(const CallPtr& call) {
   // ``pld.tensor.allreduce`` already records both args as InOut; this
   // entry just identifies the primary data target for any downstream
   // consumer that walks GetWriteTargetExpr.
-  if (op_name == "pld.tensor.allreduce" && !call->args_.empty()) {
+  if (IsOp(call, "pld.tensor.allreduce") && !call->args_.empty()) {
     return call->args_[0];
   }
   // pld.tensor.allgather(local_data, target, signal, out): writes gathered
   // chunks into out on every rank (Phase 3 per-peer pld.tile.get).  out (args_[3])
   // is the primary write target; target (args_[1]) is used for staging only.
-  if (op_name == "pld.tensor.allgather" && call->args_.size() >= 4) {
+  if (IsOp(call, "pld.tensor.allgather") && call->args_.size() >= 4) {
     return call->args_[3];
   }
   // pld.tensor.reduce_scatter(target, signal, *, op): writes the reduced
   // chunk back into target (Phase 4 store).  target (args_[0]) is the
   // primary write target — same as allreduce.
-  if (op_name == "pld.tensor.reduce_scatter" && !call->args_.empty()) {
+  if (IsOp(call, "pld.tensor.reduce_scatter") && !call->args_.empty()) {
     return call->args_[0];
   }
   // pld.tensor.barrier(signal): returns a rebind of signal — the result
   // aliases signal so that ``sig2 = barrier(sig1)`` propagates origins
   // through GetAliasOrigins().  The AnalyzeCallAccess handler separately
   // marks signal read+write for param-direction inference.
-  if (op_name == "pld.tensor.barrier" && !call->args_.empty()) {
+  if (IsOp(call, "pld.tensor.barrier") && !call->args_.empty()) {
     return call->args_[0];
   }
   // pld.tensor.broadcast(target, signal, *, root): writes root's data into
   // target on every rank via pld.tile.get.  target (args_[0]) is
   // the primary write target.
-  if (op_name == "pld.tensor.broadcast" && !call->args_.empty()) {
+  if (IsOp(call, "pld.tensor.broadcast") && !call->args_.empty()) {
     return call->args_[0];
   }
   return nullptr;
@@ -907,11 +906,10 @@ ParamOrigins GetAliasOrigins(const ExprPtr& expr, const AliasOriginMap& origin_m
   auto call = As<Call>(expr);
   if (!call) return {};
 
-  const std::string& op_name = call->op_->name_;
   if (auto write_target = GetWriteTargetExpr(call)) {
     return GetAliasOrigins(write_target, origin_map);
   }
-  if (op_name == "tensor.slice" && !call->args_.empty()) {
+  if (IsOp(call, "tensor.slice") && !call->args_.empty()) {
     return GetAliasOrigins(call->args_[0], origin_map);
   }
   return {};
@@ -955,8 +953,7 @@ void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, st
                        std::vector<bool>& has_write) {
   if (!call) return;
 
-  const std::string& op_name = call->op_->name_;
-  if (op_name == "tile.load" || op_name == "tensor.read") {
+  if (IsOp(call, "tile.load") || IsOp(call, "tensor.read")) {
     if (!call->args_.empty()) {
       MarkAccess(GetAliasOrigins(call->args_[0], origin_map), has_read);
     }
@@ -966,7 +963,7 @@ void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, st
     return;
   }
 
-  if (op_name == "tile.store") {
+  if (IsOp(call, "tile.store")) {
     if (!call->args_.empty()) {
       MarkAccess(CollectReferencedOrigins(call->args_[0], origin_map), has_read);
     }
@@ -982,7 +979,7 @@ void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, st
     return;
   }
 
-  if (op_name == "pld.tile.remote_store") {
+  if (IsOp(call, "pld.tile.remote_store")) {
     // remote_store(src_tile, target, peer, offsets): src_tile/peer/offsets read,
     // target (args_[1]) written. Mirrors the tile.store handling above.
     if (!call->args_.empty()) {
@@ -997,7 +994,7 @@ void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, st
     return;
   }
 
-  if (op_name == "pld.tile.put" || op_name == "pld.tile.get") {
+  if (IsOp(call, "pld.tile.put") || IsOp(call, "pld.tile.get")) {
     // pld.tile.put(dst, peer, src, stage[, dst_offsets, src_offsets, shape]):
     //   dst (args_[0]) is the cross-rank write target; peer/src/stage and any
     //   subregion offsets are all read.
@@ -1015,7 +1012,7 @@ void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, st
     return;
   }
 
-  if (op_name == "pld.tensor.allreduce") {
+  if (IsOp(call, "pld.tensor.allreduce")) {
     // pld.tensor.allreduce(target, signal, *, op): both target (args_[0])
     // and signal (args_[1]) are InOut — read AND written across the
     // 4-phase decomposition (target read in Phase 3, written in Phase 4;
@@ -1031,7 +1028,7 @@ void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, st
     return;
   }
 
-  if (op_name == "pld.tensor.allgather") {
+  if (IsOp(call, "pld.tensor.allgather")) {
     // pld.tensor.allgather(local_data, target, signal, out):
     //   local_data (args_[0]) is In (read-only — staged into target).
     //   target (args_[1]) is read (Phase 3 pld.tile.get from peers)
@@ -1054,7 +1051,7 @@ void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, st
     return;
   }
 
-  if (op_name == "pld.tensor.reduce_scatter") {
+  if (IsOp(call, "pld.tensor.reduce_scatter")) {
     // pld.tensor.reduce_scatter(target, signal, *, op): same 5-phase
     // pattern as allreduce — both target and signal are InOut.
     for (size_t i = 0; i < std::min<size_t>(2, call->args_.size()); ++i) {
@@ -1065,7 +1062,7 @@ void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, st
     return;
   }
 
-  if (op_name == "pld.tensor.barrier") {
+  if (IsOp(call, "pld.tensor.barrier")) {
     // pld.tensor.barrier(signal): signal (args_[0]) is InOut.
     // Written in Phase 1 (notify), read in Phase 2 (wait).
     if (!call->args_.empty()) {
@@ -1076,7 +1073,7 @@ void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, st
     return;
   }
 
-  if (op_name == "pld.tensor.broadcast") {
+  if (IsOp(call, "pld.tensor.broadcast")) {
     // pld.tensor.broadcast(target, signal, *, root): target (args_[0]) and
     // signal (args_[1]) are both InOut.  Target is read via pld.tile.get
     // (non-root reads root's slice), written via pld.tile.get into local
@@ -1089,7 +1086,7 @@ void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, st
     return;
   }
 
-  if (op_name == "tensor.write") {
+  if (IsOp(call, "tensor.write")) {
     for (size_t i = 1; i < call->args_.size(); ++i) {
       MarkAccess(CollectReferencedOrigins(call->args_[i], origin_map), has_read);
     }
@@ -1099,7 +1096,7 @@ void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, st
     return;
   }
 
-  if (op_name == "tensor.assemble") {
+  if (IsOp(call, "tensor.assemble")) {
     for (size_t i = 1; i < call->args_.size(); ++i) {
       MarkAccess(CollectReferencedOrigins(call->args_[i], origin_map), has_read);
     }
@@ -1109,7 +1106,7 @@ void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, st
     return;
   }
 
-  if (op_name == "tensor.slice" || op_name == "tensor.create" || op_name == "tensor.full") {
+  if (IsOp(call, "tensor.slice") || IsOp(call, "tensor.create") || IsOp(call, "tensor.full")) {
     for (size_t i = 1; i < call->args_.size(); ++i) {
       MarkAccess(CollectReferencedOrigins(call->args_[i], origin_map), has_read);
     }
@@ -1351,7 +1348,7 @@ std::optional<ReturnedAssembleLoopRewrite> RewriteReturnedAssembleLoopToStore(
       if (assign) {
         auto call = As<Call>(assign->value_);
         bool is_target_assemble = false;
-        if (call && call->op_->name_ == "tile.assemble" && call->args_.size() == 3) {
+        if (call && IsOp(call, "tile.assemble") && call->args_.size() == 3) {
           if (auto iter = As<IterArg>(call->args_[0])) {
             is_target_assemble = iter.get() == old_iter_arg.get();
           } else if (auto var = As<Var>(call->args_[0])) {
@@ -2179,7 +2176,7 @@ class IncoreTileOpsVerifier : public IRVisitor {
       // ``AsTensorTypeLike`` also whitelists ``DistributedTensorType``, which the
       // conversion registry above keeps as ``tensor.read`` / ``tensor.write`` so the
       // PTO codegen can lower it as a local-rank ``pto.load_scalar`` / ``pto.store_scalar``.
-      if ((call->op_->name_ == "tensor.read" || call->op_->name_ == "tensor.write") && !call->args_.empty() &&
+      if ((IsOp(call, "tensor.read") || IsOp(call, "tensor.write")) && !call->args_.empty() &&
           AsTensorTypeLike(call->args_[0]->GetType())) {
         return;
       }

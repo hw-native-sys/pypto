@@ -27,6 +27,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
@@ -162,15 +163,13 @@ std::pair<StmtPtr, std::vector<ExprPtr>> SplitBodyYield(const StmtPtr& body) {
 bool IsTpushStmt(const StmtPtr& s) {
   auto call = GetCallFromStmt(s);
   if (!call) return false;
-  const std::string& n = call->op_->name_;
-  return n == "tile.tpush_to_aiv" || n == "tile.tpush_to_aic";
+  return IsOp(call, "tile.tpush_to_aiv") || IsOp(call, "tile.tpush_to_aic");
 }
 
 bool IsTpopStmt(const StmtPtr& s) {
   auto call = GetCallFromStmt(s);
   if (!call) return false;
-  const std::string& n = call->op_->name_;
-  return n == "tile.tpop_from_aiv" || n == "tile.tpop_from_aic";
+  return IsOp(call, "tile.tpop_from_aiv") || IsOp(call, "tile.tpop_from_aic");
 }
 
 /// Collect every Var *used* (RHS references) in a statement — LHS def of an

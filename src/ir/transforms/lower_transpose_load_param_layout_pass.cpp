@@ -54,7 +54,7 @@ class TransposeLoadScanner : public IRVisitor {
   const std::unordered_set<size_t>& GetPromoted() const { return promoted_; }
 
   void VisitExpr_(const CallPtr& call) override {
-    if (call && call->op_ && call->op_->name_ == "tile.load" && !call->args_.empty()) {
+    if (call && call->op_ && IsOp(call, "tile.load") && !call->args_.empty()) {
       auto src_var = As<Var>(call->args_[0]);
       if (src_var) {
         auto it = param_ptr_to_index_.find(src_var.get());
@@ -104,7 +104,7 @@ class TileLoadBodyRewriter : public IRMutator {
   ExprPtr VisitExpr_(const CallPtr& op) override {
     auto base = IRMutator::VisitExpr_(op);
     auto call = std::dynamic_pointer_cast<const Call>(base);
-    if (!call || !call->op_ || call->op_->name_ != "tile.load") return base;
+    if (!call || !call->op_ || !IsOp(call, "tile.load")) return base;
     if (call->args_.empty()) return base;
 
     auto src_var = As<Var>(call->args_[0]);

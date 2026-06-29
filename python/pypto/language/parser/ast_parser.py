@@ -152,7 +152,7 @@ def _is_per_element_task_id_read(expr: ir.Expr) -> bool:
     """
     if not isinstance(expr, ir.Call):
         return False
-    if expr.op.name != "array.get_element":
+    if expr.op.name != ir.get_op("array.get_element").name:
         return False
     if not isinstance(expr.type, ir.ScalarType) or expr.type.dtype != DataType.TASK_ID:
         return False
@@ -330,7 +330,7 @@ def _normalize_inferred_type_for_annotation(
         isinstance(annotation_type, ir.TileType)
         and isinstance(inferred_type, ir.TileType)
         and isinstance(value_expr, ir.Call)
-        and value_expr.op.name in {"tile.load", "tile.create"}
+        and value_expr.op.name in {ir.get_op("tile.load").name, ir.get_op("tile.create").name}
         and len(annotation_type.shape) <= 2
         and len(inferred_type.shape) > 2
     ):
@@ -1236,7 +1236,11 @@ class ASTParser:
                 (
                     isinstance(override_type, ir.TileType)
                     and isinstance(value_expr.type, ir.UnknownType)
-                    and value_expr.op.name in ("tile.tpop_from_aiv", "tile.tpop_from_aic")
+                    and value_expr.op.name
+                    in {
+                        ir.get_op("tile.tpop_from_aiv").name,
+                        ir.get_op("tile.tpop_from_aic").name,
+                    }
                 )
                 or not _types_match(value_expr.type, override_type)
             )

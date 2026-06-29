@@ -467,9 +467,8 @@ std::optional<MatmulTiling> AnalyzeMatmul(const AssignStmtPtr& assign, std::vect
   // ``tile.matmul`` and ``tile.matmul_acc`` are rewritten by this pass.
   // ``tile.matmul_bias`` is deferred — bias add inside a tiled K-loop needs
   // bias-add only after the final iteration, which is extra rewriting.
-  const std::string& op_name = call->op_->name_;
-  const bool is_matmul = op_name == "tile.matmul";
-  const bool is_matmul_acc = op_name == "tile.matmul_acc";
+  const bool is_matmul = IsOp(call, "tile.matmul");
+  const bool is_matmul_acc = IsOp(call, "tile.matmul_acc");
   if (!is_matmul && !is_matmul_acc) return std::nullopt;
 
   // Operand layout: (lhs, rhs) for matmul; (acc, lhs, rhs) for matmul_acc.
@@ -677,7 +676,7 @@ SiblingIndex BuildSiblingIndex(const std::vector<StmtPtr>& stmts) {
     if (!as) continue;
     auto call = As<Call>(as->value_);
     // Record top-level 2D ``tile.store(src, offsets, out)`` by source operand.
-    if (!call || !call->op_ || call->op_->name_ != "tile.store" || call->args_.size() != 3) continue;
+    if (!call || !call->op_ || !IsOp(call, "tile.store") || call->args_.size() != 3) continue;
     if (auto src = AsVarLike(call->args_[0])) idx.store_of.emplace(src.get(), as.get());
   }
   idx.use_counts = std::move(counter.counts);

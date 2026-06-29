@@ -1082,7 +1082,7 @@ class LowerCompositeOpsMutator : public IRMutator {
 
  private:
   CompositeLoweringFn LookupRule(const CallPtr& call) const {
-    if (skip_host_allreduce_ && call && call->op_ && call->op_->name_ == "pld.tensor.allreduce") {
+    if (skip_host_allreduce_ && call && call->op_ && IsOp(call, "pld.tensor.allreduce")) {
       return nullptr;
     }
     return call && call->op_ ? LookupCompositeRule(call->op_->name_) : nullptr;
