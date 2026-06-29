@@ -9,21 +9,24 @@
 
 """Runtime tests for tile argmax/argmin reductions.
 
-Covers four tile-level ops (and the tensor-level mirrors of the max variants):
+Covers four tile-level ops (plus tensor-level mirrors of the max variants):
 - ``tile.row_argmax`` / ``tile.row_argmin`` -> ``pto.trowargmax`` / ``pto.trowargmin``
 - ``tile.col_argmax`` / ``tile.col_argmin`` -> ``pto.tcolargmax`` / ``pto.tcolargmin``
 
 row variants reduce the last axis ([M, N] -> [M, 1]) and return, per row, the
 column index of the max/min. col variants reduce axis 0 ([M, N] -> [1, N]) and
 return, per column, the row index of the max/min. The index output dtype is
-INT32. All four require a tmp scratch tile (unlike col_max/col_min).
+INT32. All four require a tmp scratch tile (unlike col_max/col_min). Per the
+pto-isa contract the source dtype is half or float only, so coverage is FP32+FP16.
 
-Coverage per op: an ``aligned`` (fully valid) case AND a ``valid_shape`` case, in
-both FP32 and FP16. The valid_shape case narrows the *reduced* dimension only
-(columns for the row ops, rows for the col ops) so the output region stays fully
-valid and exactly comparable, while still exercising the partial-reduction /
-tail path (e.g. FP32 valid cols 72 > the 64-element repeat -> the tmp scratch is
-actually used).
+Full-scenario coverage per op (shared config matrix, both FP32 and FP16):
+- shapes: 16x16 (square), 32x64, 8x128 (wide) — varies the reduced and the
+  kept extent, exercising the single-repeat and multi-repeat reduction paths;
+- valid_shape: aligned, narrow rows, narrow cols, narrow both, and a wide
+  narrow-cols case (8x128 valid cols 72 > the FP32 64-element repeat, which
+  forces the tmp scratch into use). Narrowing the *reduced* dim exercises the
+  partial-reduction tail; narrowing the *kept* dim shrinks the valid output
+  region (the untouched output elements stay zero, matching the golden).
 
 Inputs are a random permutation of distinct integers (``torch.randperm``), so
 every row/column has a unique extremum (no tie-break ambiguity vs torch) and the
@@ -31,8 +34,8 @@ values are exactly representable in FP16 (all < 2048). The integer index outputs
 are compared exactly under the default tolerance.
 
 The DSL parser requires a literal ``pl.tile.<op>`` call, so there is one TestCase
-subclass per op (the op name cannot be an alias); the dtype and valid_shape are
-closure vars in a ``get_program``-nested ``@pl.program``.
+subclass per op; dtype, shape, and valid_shape are closure vars in a
+``get_program``-nested ``@pl.program``.
 """
 
 from typing import Any
@@ -44,9 +47,18 @@ from harness.core.harness import DataType, PTOTestCase, TensorSpec
 from pypto.backend import BackendType
 
 _PL_DT = {DataType.FP32: pl.FP32, DataType.FP16: pl.FP16}
+_DTYPES = [DataType.FP32, DataType.FP16]
 
-M = 16
-N = 128
+# (label, m, n, valid=(vr, vc) or None) — shared across all four ops.
+_CFGS = [
+    ("16x16", 16, 16, None),
+    ("32x64", 32, 64, None),
+    ("8x128", 8, 128, None),
+    ("16x16_nrows", 16, 16, (8, 16)),
+    ("16x16_ncols", 16, 16, (16, 8)),
+    ("16x16_nboth", 16, 16, (8, 12)),
+    ("8x128_ncols72", 8, 128, (8, 72)),
+]
 
 
 def _distinct(m: int, n: int):
@@ -54,47 +66,49 @@ def _distinct(m: int, n: int):
     return lambda: torch.randperm(m * n).reshape(m, n).to(torch.float32)
 
 
-# ---------------------------------------------------------------------------
-# Tile-level base + one subclass per op (literal pl.tile.<op> call).
-# valid narrows only the reduced dim, so the output stays fully valid.
-#   row ops: valid = (M, vc)   -> reduce cols, output [M, 1]
-#   col ops: valid = (vr, N)   -> reduce rows, output [1, N]
-# ---------------------------------------------------------------------------
-
-
 class _ArgBase(PTOTestCase):
     __test__ = False
     op_name = ""
-    reduce_dim = 1  # 1 = row (reduce cols), 0 = col (reduce rows)
+    reduce_dim = 1  # 1 = row (reduce cols -> [m, 1]); 0 = col (reduce rows -> [1, n])
     is_max = True
 
-    def __init__(self, *, valid=None, dtype=DataType.FP32, config=None):
+    def __init__(self, *, m=16, n=16, valid=None, dtype=DataType.FP32, config=None):
         super().__init__(config)
-        self._valid = valid
-        self._dtype = dtype
+        self._m, self._n, self._valid, self._dtype = m, n, valid, dtype
 
     def get_name(self) -> str:
         v = f"_v{self._valid[0]}x{self._valid[1]}" if self._valid else "_aligned"
-        return f"{self.op_name}_{M}x{N}_{self._dtype.value}{v}"
+        return f"{self.op_name}_{self._m}x{self._n}_{self._dtype.value}{v}"
 
     def get_backend_type(self) -> BackendType:
         return BackendType.Ascend910B
 
     def _out_shape(self) -> list[int]:
-        return [M, 1] if self.reduce_dim == 1 else [1, N]
+        return [self._m, 1] if self.reduce_dim == 1 else [1, self._n]
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
-            TensorSpec("a", [M, N], self._dtype, init_value=_distinct(M, N)),
+            TensorSpec("a", [self._m, self._n], self._dtype, init_value=_distinct(self._m, self._n)),
             TensorSpec("out", self._out_shape(), DataType.INT32, is_output=True),
         ]
 
     def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
         a = tensors["a"]
-        vr, vc = self._valid if self._valid else (M, N)
-        sub = a[:vr, :vc]
+        m, n = self._m, self._n
+        vr, vc = self._valid if self._valid else (m, n)
         fn = torch.argmax if self.is_max else torch.argmin
-        tensors["out"][:] = fn(sub, dim=self.reduce_dim, keepdim=True).to(torch.int32)
+        if self.reduce_dim == 1:
+            out = torch.zeros((m, 1), dtype=torch.int32)
+            out[:vr, 0] = fn(a[:vr, :vc], dim=1).to(torch.int32)
+        else:
+            out = torch.zeros((1, n), dtype=torch.int32)
+            out[0, :vc] = fn(a[:vr, :vc], dim=0).to(torch.int32)
+        tensors["out"][:] = out
+
+
+# One subclass per op. The DSL parser requires a literal ``pl.tile.<op>`` call
+# (it cannot resolve an aliased/closure op), so each get_program inlines its own
+# @pl.program; the shape/dtype/valid_shape are closure vars.
 
 
 class TileRowArgmax(_ArgBase):
@@ -103,24 +117,25 @@ class TileRowArgmax(_ArgBase):
     is_max = True
 
     def get_program(self) -> Any:
+        m, n = self._m, self._n
         dt = _PL_DT[self._dtype]
-        vshape = list(self._valid) if self._valid else [M, N]
+        vshape = list(self._valid) if self._valid else [m, n]
 
         @pl.program
         class RowArgmaxProgram:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
-                self, a: pl.Tensor[[M, N], dt], out: pl.Out[pl.Tensor[[M, 1], pl.INT32]]
-            ) -> pl.Tensor[[M, 1], pl.INT32]:
-                t: pl.Tile[[M, N], dt] = pl.load(a, [0, 0], [M, N], valid_shapes=vshape)
-                tmp: pl.Tile[[M, N], dt] = pl.tile.create([M, N], dtype=dt, target_memory=pl.MemorySpace.Vec)
-                r: pl.Tile[[M, 1], pl.INT32] = pl.tile.row_argmax(t, tmp)
+                self, a: pl.Tensor[[m, n], dt], out: pl.Out[pl.Tensor[[m, 1], pl.INT32]]
+            ) -> pl.Tensor[[m, 1], pl.INT32]:
+                t: pl.Tile[[m, n], dt] = pl.load(a, [0, 0], [m, n], valid_shapes=vshape)
+                tmp: pl.Tile[[m, n], dt] = pl.tile.create([m, n], dtype=dt, target_memory=pl.MemorySpace.Vec)
+                r: pl.Tile[[m, 1], pl.INT32] = pl.tile.row_argmax(t, tmp)
                 return pl.store(r, [0, 0], out)
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
-                self, a: pl.Tensor[[M, N], dt], out: pl.Out[pl.Tensor[[M, 1], pl.INT32]]
-            ) -> pl.Tensor[[M, 1], pl.INT32]:
+                self, a: pl.Tensor[[m, n], dt], out: pl.Out[pl.Tensor[[m, 1], pl.INT32]]
+            ) -> pl.Tensor[[m, 1], pl.INT32]:
                 return self.kernel(a, out)
 
         return RowArgmaxProgram
@@ -132,24 +147,25 @@ class TileRowArgmin(_ArgBase):
     is_max = False
 
     def get_program(self) -> Any:
+        m, n = self._m, self._n
         dt = _PL_DT[self._dtype]
-        vshape = list(self._valid) if self._valid else [M, N]
+        vshape = list(self._valid) if self._valid else [m, n]
 
         @pl.program
         class RowArgminProgram:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
-                self, a: pl.Tensor[[M, N], dt], out: pl.Out[pl.Tensor[[M, 1], pl.INT32]]
-            ) -> pl.Tensor[[M, 1], pl.INT32]:
-                t: pl.Tile[[M, N], dt] = pl.load(a, [0, 0], [M, N], valid_shapes=vshape)
-                tmp: pl.Tile[[M, N], dt] = pl.tile.create([M, N], dtype=dt, target_memory=pl.MemorySpace.Vec)
-                r: pl.Tile[[M, 1], pl.INT32] = pl.tile.row_argmin(t, tmp)
+                self, a: pl.Tensor[[m, n], dt], out: pl.Out[pl.Tensor[[m, 1], pl.INT32]]
+            ) -> pl.Tensor[[m, 1], pl.INT32]:
+                t: pl.Tile[[m, n], dt] = pl.load(a, [0, 0], [m, n], valid_shapes=vshape)
+                tmp: pl.Tile[[m, n], dt] = pl.tile.create([m, n], dtype=dt, target_memory=pl.MemorySpace.Vec)
+                r: pl.Tile[[m, 1], pl.INT32] = pl.tile.row_argmin(t, tmp)
                 return pl.store(r, [0, 0], out)
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
-                self, a: pl.Tensor[[M, N], dt], out: pl.Out[pl.Tensor[[M, 1], pl.INT32]]
-            ) -> pl.Tensor[[M, 1], pl.INT32]:
+                self, a: pl.Tensor[[m, n], dt], out: pl.Out[pl.Tensor[[m, 1], pl.INT32]]
+            ) -> pl.Tensor[[m, 1], pl.INT32]:
                 return self.kernel(a, out)
 
         return RowArgminProgram
@@ -161,24 +177,25 @@ class TileColArgmax(_ArgBase):
     is_max = True
 
     def get_program(self) -> Any:
+        m, n = self._m, self._n
         dt = _PL_DT[self._dtype]
-        vshape = list(self._valid) if self._valid else [M, N]
+        vshape = list(self._valid) if self._valid else [m, n]
 
         @pl.program
         class ColArgmaxProgram:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
-                self, a: pl.Tensor[[M, N], dt], out: pl.Out[pl.Tensor[[1, N], pl.INT32]]
-            ) -> pl.Tensor[[1, N], pl.INT32]:
-                t: pl.Tile[[M, N], dt] = pl.load(a, [0, 0], [M, N], valid_shapes=vshape)
-                tmp: pl.Tile[[M, N], dt] = pl.tile.create([M, N], dtype=dt, target_memory=pl.MemorySpace.Vec)
-                r: pl.Tile[[1, N], pl.INT32] = pl.tile.col_argmax(t, tmp)
+                self, a: pl.Tensor[[m, n], dt], out: pl.Out[pl.Tensor[[1, n], pl.INT32]]
+            ) -> pl.Tensor[[1, n], pl.INT32]:
+                t: pl.Tile[[m, n], dt] = pl.load(a, [0, 0], [m, n], valid_shapes=vshape)
+                tmp: pl.Tile[[m, n], dt] = pl.tile.create([m, n], dtype=dt, target_memory=pl.MemorySpace.Vec)
+                r: pl.Tile[[1, n], pl.INT32] = pl.tile.col_argmax(t, tmp)
                 return pl.store(r, [0, 0], out)
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
-                self, a: pl.Tensor[[M, N], dt], out: pl.Out[pl.Tensor[[1, N], pl.INT32]]
-            ) -> pl.Tensor[[1, N], pl.INT32]:
+                self, a: pl.Tensor[[m, n], dt], out: pl.Out[pl.Tensor[[1, n], pl.INT32]]
+            ) -> pl.Tensor[[1, n], pl.INT32]:
                 return self.kernel(a, out)
 
         return ColArgmaxProgram
@@ -190,24 +207,25 @@ class TileColArgmin(_ArgBase):
     is_max = False
 
     def get_program(self) -> Any:
+        m, n = self._m, self._n
         dt = _PL_DT[self._dtype]
-        vshape = list(self._valid) if self._valid else [M, N]
+        vshape = list(self._valid) if self._valid else [m, n]
 
         @pl.program
         class ColArgminProgram:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
-                self, a: pl.Tensor[[M, N], dt], out: pl.Out[pl.Tensor[[1, N], pl.INT32]]
-            ) -> pl.Tensor[[1, N], pl.INT32]:
-                t: pl.Tile[[M, N], dt] = pl.load(a, [0, 0], [M, N], valid_shapes=vshape)
-                tmp: pl.Tile[[M, N], dt] = pl.tile.create([M, N], dtype=dt, target_memory=pl.MemorySpace.Vec)
-                r: pl.Tile[[1, N], pl.INT32] = pl.tile.col_argmin(t, tmp)
+                self, a: pl.Tensor[[m, n], dt], out: pl.Out[pl.Tensor[[1, n], pl.INT32]]
+            ) -> pl.Tensor[[1, n], pl.INT32]:
+                t: pl.Tile[[m, n], dt] = pl.load(a, [0, 0], [m, n], valid_shapes=vshape)
+                tmp: pl.Tile[[m, n], dt] = pl.tile.create([m, n], dtype=dt, target_memory=pl.MemorySpace.Vec)
+                r: pl.Tile[[1, n], pl.INT32] = pl.tile.col_argmin(t, tmp)
                 return pl.store(r, [0, 0], out)
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
-                self, a: pl.Tensor[[M, N], dt], out: pl.Out[pl.Tensor[[1, N], pl.INT32]]
-            ) -> pl.Tensor[[1, N], pl.INT32]:
+                self, a: pl.Tensor[[m, n], dt], out: pl.Out[pl.Tensor[[1, n], pl.INT32]]
+            ) -> pl.Tensor[[1, n], pl.INT32]:
                 return self.kernel(a, out)
 
         return ColArgminProgram
@@ -224,20 +242,23 @@ class TensorRowArgmax(_ArgBase):
     reduce_dim = 1
     is_max = True
 
+    def __init__(self, **kw):
+        super().__init__(m=32, n=64, **kw)
+
     def get_program(self) -> Any:
         @pl.program
         class TensorRowArgmaxProgram:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
-                self, a: pl.Tensor[[M, N], pl.FP32], out: pl.Out[pl.Tensor[[M, 1], pl.INT32]]
-            ) -> pl.Tensor[[M, 1], pl.INT32]:
-                r: pl.Tensor[[M, 1], pl.INT32] = pl.row_argmax(a)
+                self, a: pl.Tensor[[32, 64], pl.FP32], out: pl.Out[pl.Tensor[[32, 1], pl.INT32]]
+            ) -> pl.Tensor[[32, 1], pl.INT32]:
+                r: pl.Tensor[[32, 1], pl.INT32] = pl.row_argmax(a)
                 return pl.assemble(out, r, [0, 0])
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
-                self, a: pl.Tensor[[M, N], pl.FP32], out: pl.Out[pl.Tensor[[M, 1], pl.INT32]]
-            ) -> pl.Tensor[[M, 1], pl.INT32]:
+                self, a: pl.Tensor[[32, 64], pl.FP32], out: pl.Out[pl.Tensor[[32, 1], pl.INT32]]
+            ) -> pl.Tensor[[32, 1], pl.INT32]:
                 return self.kernel(a, out)
 
         return TensorRowArgmaxProgram
@@ -248,48 +269,47 @@ class TensorColArgmax(_ArgBase):
     reduce_dim = 0
     is_max = True
 
+    def __init__(self, **kw):
+        super().__init__(m=32, n=64, **kw)
+
     def get_program(self) -> Any:
         @pl.program
         class TensorColArgmaxProgram:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
-                self, a: pl.Tensor[[M, N], pl.FP32], out: pl.Out[pl.Tensor[[1, N], pl.INT32]]
-            ) -> pl.Tensor[[1, N], pl.INT32]:
-                r: pl.Tensor[[1, N], pl.INT32] = pl.col_argmax(a)
+                self, a: pl.Tensor[[32, 64], pl.FP32], out: pl.Out[pl.Tensor[[1, 64], pl.INT32]]
+            ) -> pl.Tensor[[1, 64], pl.INT32]:
+                r: pl.Tensor[[1, 64], pl.INT32] = pl.col_argmax(a)
                 return pl.assemble(out, r, [0, 0])
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
-                self, a: pl.Tensor[[M, N], pl.FP32], out: pl.Out[pl.Tensor[[1, N], pl.INT32]]
-            ) -> pl.Tensor[[1, N], pl.INT32]:
+                self, a: pl.Tensor[[32, 64], pl.FP32], out: pl.Out[pl.Tensor[[1, 64], pl.INT32]]
+            ) -> pl.Tensor[[1, 64], pl.INT32]:
                 return self.kernel(a, out)
 
         return TensorColArgmaxProgram
 
 
-_DTYPES = [DataType.FP32, DataType.FP16]
 _ROW_OPS = [TileRowArgmax, TileRowArgmin]
 _COL_OPS = [TileColArgmax, TileColArgmin]
-# (label, valid) — narrow the reduced dim only so the output stays fully valid.
-_ROW_CASES = [("aligned", None), ("valid_cols", (M, 72))]
-_COL_CASES = [("aligned", None), ("valid_rows", (10, N))]
 
 
 class TestTileArgReduce:
-    """Tile-level row/col argmax/argmin: aligned + valid_shape, FP32 + FP16."""
+    """Tile-level row/col argmax/argmin: full shape x valid_shape x dtype matrix."""
 
     @pytest.mark.parametrize("dtype", _DTYPES, ids=[d.value for d in _DTYPES])
-    @pytest.mark.parametrize("label,valid", _ROW_CASES, ids=[c[0] for c in _ROW_CASES])
+    @pytest.mark.parametrize("label,m,n,valid", _CFGS, ids=[c[0] for c in _CFGS])
     @pytest.mark.parametrize("op_cls", _ROW_OPS, ids=[c.op_name for c in _ROW_OPS])
-    def test_row(self, test_runner, op_cls, label, valid, dtype):
-        result = test_runner.run(op_cls(valid=valid, dtype=dtype))
+    def test_row(self, test_runner, op_cls, label, m, n, valid, dtype):
+        result = test_runner.run(op_cls(m=m, n=n, valid=valid, dtype=dtype))
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.parametrize("dtype", _DTYPES, ids=[d.value for d in _DTYPES])
-    @pytest.mark.parametrize("label,valid", _COL_CASES, ids=[c[0] for c in _COL_CASES])
+    @pytest.mark.parametrize("label,m,n,valid", _CFGS, ids=[c[0] for c in _CFGS])
     @pytest.mark.parametrize("op_cls", _COL_OPS, ids=[c.op_name for c in _COL_OPS])
-    def test_col(self, test_runner, op_cls, label, valid, dtype):
-        result = test_runner.run(op_cls(valid=valid, dtype=dtype))
+    def test_col(self, test_runner, op_cls, label, m, n, valid, dtype):
+        result = test_runner.run(op_cls(m=m, n=n, valid=valid, dtype=dtype))
         assert result.passed, f"Test failed: {result.error}"
 
 
