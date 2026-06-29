@@ -65,6 +65,13 @@ class DynamicPagedAttentionTestCase(PTOTestCase):
         super().__init__(**kwargs)
         self.config.atol = 2e-2
         self.config.rtol = 2e-2
+        # This high-task-volume pipeline (batch * q_loop * kv_blocks * kernels)
+        # far exceeds the default per-ring task window (16384), so the AICPU
+        # orchestrator can fill the task ring and spin out waiting for the
+        # scheduler to drain -> intermittent "Task Ring Full" allocator deadlock
+        # -> device error 507018. Enlarge the task / dep rings from the front end.
+        self.config.ring_task_window = 1048576
+        self.config.ring_dep_pool = 1048576
         self.batch = batch
         self.num_heads = num_heads
         self.head_dim = head_dim
