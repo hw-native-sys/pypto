@@ -333,6 +333,8 @@ with ib.function("tile_computation") as f:
 | `system.task_invalid` | Sentinel `PTO2TaskId::invalid()` — "no producer" seed for a TaskId carry | None |
 | `system.task_is_valid` | Test whether a `TASK_ID` value is a valid (non-sentinel) handle | None; sole positional arg is the TaskId Var |
 
+`system.syncall` emits the hard/FFTS form of `pto::SYNCALL`, which waits for **all** physical cores of the selected `core_type` to arrive. The kernel must be launched at full occupancy (one block per physical core); a partial-occupancy launch deadlocks the barrier (AICore error 507018). Use a full-core SPMD/grid dispatch.
+
 `system.task_invalid` returns [`ScalarType(DataType::TASK_ID)`](02-types.md#scalartype). It is the lowering target of the Python literal `None` when `None` appears in a TaskId position (a `deps=[None]` entry or a TaskId loop iter_arg seed) inside `with pl.manual_scope():` regions. There is no `system.task_id_of` op — producer task ids are obtained from the second tuple element returned by the `pl.submit(...)` parser construct, not from a builtin. Source: `src/ir/op/sync_ops/task.cpp`.
 
 **Python Example:**

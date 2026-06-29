@@ -144,6 +144,13 @@ def syncall(*, core_type: str = "mix", span: Span | None = None) -> Call:
     past this point before any participant may proceed. Lowers to
     ``pto.syncall() mode = #pto.sync_all_mode<hard>``.
 
+    .. warning::
+        The hard/FFTS form waits for **all** physical cores of the participant
+        set to arrive. The kernel must therefore be launched at full occupancy
+        (one block per physical core of that type). A partial-occupancy launch
+        leaves some cores unreached, so the barrier never completes and the
+        AICore times out (error 507018). Use a full-core SPMD/grid dispatch.
+
     Args:
         core_type: Participant set, one of "aiv_only", "aic_only", or "mix".
         span: Optional source span for debugging (auto-captured if not provided)

@@ -327,6 +327,8 @@ with ib.function("tile_computation") as f:
 | `system.task_invalid` | `PTO2TaskId::invalid()` 哨兵——TaskId carry 的 "暂无 producer" 种子 | 无 |
 | `system.task_is_valid` | 测试某个 `TASK_ID` 值是否为有效（非哨兵）handle | 无；唯一位置参数是 TaskId Var |
 
+`system.syncall` 下沉为 `pto::SYNCALL` 的 hard/FFTS 形态，会等待所选 `core_type` 的**全部**物理核到达。因此 kernel 必须以满占用方式启动（每个物理核一个 block）；部分占用启动会令该屏障死锁（AICore 错误 507018）。请使用满核 SPMD/grid 分发。
+
 `system.task_invalid` 返回类型为 [`ScalarType(DataType::TASK_ID)`](02-types.md#scalartype)。当 Python 字面量 `None` 出现在 TaskId 位置（`deps=[None]` 条目或 TaskId 循环 iter_arg 种子）时，它就是 `None` 在 `with pl.manual_scope():` 区域内的下沉目标。不存在 `system.task_id_of` op —— producer task id 由 `pl.submit(...)` parser construct 返回的二元组第二个元素获得，而非来自 builtin。源码：`src/ir/op/sync_ops/task.cpp`。
 
 **Python 示例：**
