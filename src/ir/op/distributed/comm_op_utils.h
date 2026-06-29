@@ -64,6 +64,17 @@ inline bool ReadBoolKwarg(const Kwargs& kwargs, const std::string& key) {
   return false;
 }
 
+// Reject negative chunk sizes regardless of pipeline / dynamic state. The DSL
+// `_validate_chunk` enforces this at the user surface, but a direct IR-op call
+// (e.g. dist_tensor_ops.put(chunk_rows=-1)) bypasses it and would otherwise feed
+// a negative extent into stage-tile creation. 0 = full is still valid here.
+inline void ValidateChunkNonNegative(const Kwargs& kwargs, const std::string& op_name) {
+  const int chunk_rows = ReadIntKwarg(kwargs, "chunk_rows");
+  const int chunk_cols = ReadIntKwarg(kwargs, "chunk_cols");
+  CHECK(chunk_rows >= 0) << op_name << ": chunk_rows must be non-negative (0 = full), got " << chunk_rows;
+  CHECK(chunk_cols >= 0) << op_name << ": chunk_cols must be non-negative (0 = full), got " << chunk_cols;
+}
+
 // Double-buffering (ping-pong) only helps a chunked transfer — pto-isa slides
 // the transfer through two staging tiles with overlapped TLOAD/TSTORE. Require
 // both chunk dims so the staging tile is fully bounded before the second tile

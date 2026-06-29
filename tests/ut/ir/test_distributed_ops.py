@@ -881,6 +881,28 @@ def test_get_ir_builder_packs_chunk_attrs():
     assert plain.kwargs == {}
 
 
+def test_negative_chunk_rejected_by_deducer():
+    """The C++ deducer rejects negative chunk sizes even for direct IR calls.
+
+    The DSL ``_validate_chunk`` guards the user surface, but ``ir.create_op_call``
+    bypasses it; the deducer must still reject a negative extent so it never
+    reaches stage-tile creation. 0 (= full) stays valid.
+    """
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+
+    with pytest.raises(Exception, match="chunk_rows must be non-negative"):
+        ir.create_op_call("pld.tensor.put", [dst, peer, src], {"atomic": 0, "chunk_rows": -1}, span)
+    with pytest.raises(Exception, match="chunk_cols must be non-negative"):
+        ir.create_op_call("pld.tensor.get", [dst, peer, src], {"chunk_cols": -1}, span)
+
+    # 0 = full is accepted (no raise).
+    ir.create_op_call("pld.tensor.put", [dst, peer, src], {"atomic": 0, "chunk_rows": 0}, span)
+    ir.create_op_call("pld.tensor.get", [dst, peer, src], {"chunk_cols": 0}, span)
+
+
 def test_dsl_validate_chunk():
     """The DSL chunk_rows/chunk_cols accept non-negative static ints (0 = full)."""
     # Valid: 0 (full), positive ints — no exception.

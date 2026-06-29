@@ -123,6 +123,7 @@ TypePtr DeduceGetType(const std::vector<ExprPtr>& args,
     transfer_shape =
         comm_op::ValidateRegionArgs(args, 3, dst_type->shape_, src_type->shape_, "pld.tensor.get");
   }
+  comm_op::ValidateChunkNonNegative(kwargs, "pld.tensor.get");
   comm_op::ValidateDynamicTransferHasChunk(transfer_shape, kwargs, "pld.tensor.get");
   comm_op::ValidatePipelineHasChunk(kwargs, "pld.tensor.get");
 

@@ -2233,8 +2233,9 @@ void OpConversionRegistry::RegisterDistributedOps() {
             << "pld.tensor.get conversion expects 3 args (dst, peer, src) or 6 "
                "(dst, peer, src, dst_offsets, src_offsets, shape), got "
             << args.size();
-        // Only the optional chunk_rows / chunk_cols staging attrs are accepted
-        // here; they are consumed by the stage sizing below (not forwarded).
+        // Only the optional chunk_rows / chunk_cols / pipeline staging attrs are
+        // accepted here; they are consumed by the stage sizing / count below
+        // (not forwarded to the tile-level op).
         auto& op_reg = OpRegistry::GetInstance();
 
         auto dst_type = AsTensorTypeLike(args[0]->GetType());

@@ -104,7 +104,7 @@ def put(  # noqa: PLR0913
 
     ``pipeline`` requests ping-pong double-buffering: ``ConvertTensorToTileOps``
     then allocates *two* staging tiles and threads both into ``pld.tile.put``.
-    Packed as the ``pipeline`` int attr (``1``) only when True. The C++ deducer
+    Packed as the ``pipeline`` bool attr (``True``) only when True. The C++ deducer
     requires both ``chunk_rows`` and ``chunk_cols`` to be set when ``pipeline``.
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
@@ -167,7 +167,7 @@ def get(
 
     ``pipeline`` requests ping-pong double-buffering: ``ConvertTensorToTileOps``
     then allocates *two* staging tiles and threads both into ``pld.tile.get``.
-    Packed as the ``pipeline`` int attr (``1``) only when True. The C++ deducer
+    Packed as the ``pipeline`` bool attr (``True``) only when True. The C++ deducer
     requires both ``chunk_rows`` and ``chunk_cols`` to be set when ``pipeline``.
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)

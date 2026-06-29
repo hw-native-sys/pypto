@@ -32,10 +32,23 @@ def _is_region_arg(x: object) -> bool:
     (``dst_offsets``, ``src_offsets``, ``shape``) positionally right after the
     stage tile(s). A single-stage *subregion* call therefore lands a region tuple
     in the optional ``stage2`` slot on reparse, while a real second staging tile
-    is a :class:`pl.Tile` / :class:`ir.Expr`. Region args reparse as Python
-    sequences or an :class:`ir.MakeTuple`; staging tiles never do.
+    is a :class:`pl.Tile` / :class:`ir.Expr`. The parser's ``_dsl_invoker``
+    unwraps a printed region tuple to a plain ``list`` before it reaches this
+    layer, so in practice a region arg is a ``list`` / ``tuple``; the
+    :class:`ir.MakeTuple` case only arises for a directly-constructed call.
+    Staging tiles never match any of these.
     """
     return isinstance(x, (list, tuple, _ir.MakeTuple))
+
+
+def _normalize_region_arg(arg: Sequence[IntLike] | _ir.MakeTuple) -> Sequence[int | Expr] | _ir.MakeTuple:
+    """Normalize a region operand (offsets / shape) for the IR-op builder.
+
+    An :class:`ir.MakeTuple` (from a directly-constructed call) is passed through
+    untouched — the IR-op builder accepts it as-is via ``_to_make_tuple`` and
+    :func:`_normalize_intlike` cannot iterate it. A plain sequence is normalized.
+    """
+    return arg if isinstance(arg, _ir.MakeTuple) else _normalize_intlike(arg)
 
 
 def remote_load(
@@ -177,9 +190,9 @@ def put(
             stage_expr,
             atomic=atomic,
             stage2=stage2_expr,
-            dst_offsets=_normalize_intlike(dst_offsets),
-            src_offsets=_normalize_intlike(src_offsets),
-            shape=_normalize_intlike(shape),
+            dst_offsets=_normalize_region_arg(dst_offsets),
+            src_offsets=_normalize_region_arg(src_offsets),
+            shape=_normalize_region_arg(shape),
         )
     return _ir_tile.put(dst_expr, _unwrap(peer), src_expr, stage_expr, atomic=atomic, stage2=stage2_expr)
 
@@ -229,9 +242,9 @@ def get(
             src_expr,
             stage_expr,
             stage2=stage2_expr,
-            dst_offsets=_normalize_intlike(dst_offsets),
-            src_offsets=_normalize_intlike(src_offsets),
-            shape=_normalize_intlike(shape),
+            dst_offsets=_normalize_region_arg(dst_offsets),
+            src_offsets=_normalize_region_arg(src_offsets),
+            shape=_normalize_region_arg(shape),
         )
     return _ir_tile.get(dst_expr, _unwrap(peer), src_expr, stage_expr, stage2=stage2_expr)
 

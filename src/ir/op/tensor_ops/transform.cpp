@@ -387,8 +387,8 @@ REGISTER_OP("tensor.reshape")
     .add_argument("input", "Input tensor (TensorType)")
     .add_argument("shape", "New shape dimensions (TupleType of ScalarType(INT64))")
     .add_argument("valid_shape",
-                  "Optional logical valid shape (MakeTuple) carried onto the result TensorView; "
-                  "present only in the 3-arg form")
+                  "Optional logical valid shape (MakeTuple, same rank as `shape`) carried onto the "
+                  "result TensorView; present only in the 3-arg form")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorReshapeType(args, kwargs);
@@ -401,7 +401,8 @@ REGISTER_OP("tensor.transpose")
     .add_argument("axis1", "First axis to swap (ConstInt)")
     .add_argument("axis2", "Second axis to swap (ConstInt)")
     .add_argument("valid_shape",
-                  "Optional logical valid shape (MakeTuple) carried onto the result TensorView; "
+                  "Optional logical valid shape (MakeTuple, same rank as input) given in the "
+                  "OUTPUT/transposed coordinate order and carried onto the result TensorView; "
                   "present only in the 4-arg form")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
