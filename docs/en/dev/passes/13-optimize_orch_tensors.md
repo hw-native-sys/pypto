@@ -248,7 +248,11 @@ The `tensor.create` is eliminated; the iter-arg buffer is reused across iteratio
 
 **Header**: `include/pypto/ir/transforms/passes.h`
 
-**Implementation**: `src/ir/transforms/optimize_orch_tensors_pass.cpp`
+**Main pass implementation**: `src/ir/transforms/optimize_orch_tensors_pass.cpp`
+
+**Pattern 5 utility module**:
+`include/pypto/ir/transforms/utils/window_externalization.h`,
+`src/ir/transforms/utils/window_externalization.cpp`
 
 **Python binding**: `python/bindings/modules/passes.cpp`
 
@@ -270,7 +274,7 @@ The `tensor.create` is eliminated; the iter-arg buffer is reused across iteratio
 | `AssembleParentStridesOptimizer` | Pattern 2 — attaches parent strides via TensorView |
 | `SliceInputStridesOptimizer` | Pattern 4 — attaches parent strides to In params via TensorView for slice patterns |
 | `AssembleLoopRewriter` | Pattern 3 — rewrites tile.assemble loops to tile.store loops |
-| `OutWindowExternalizer` | Pattern 5 — rewrites eligible local Out writes and eligible In-window consumers to explicit call-site slices |
+| `OutWindowExternalizer` | Pattern 5 utility module — rewrites eligible local Out writes and eligible In-window consumers to explicit call-site slices |
 | `BuildOutParamReturnMappings` | Shared helper — maps Out params to return indices via tile.store |
 | `ComputeRowMajorStrides` | Shared helper — computes row-major strides from a shape |
 

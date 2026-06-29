@@ -242,7 +242,11 @@ class After:
 
 **头文件**：`include/pypto/ir/transforms/passes.h`
 
-**实现**：`src/ir/transforms/optimize_orch_tensors_pass.cpp`
+**主 pass 实现**：`src/ir/transforms/optimize_orch_tensors_pass.cpp`
+
+**模式 5 工具模块**：
+`include/pypto/ir/transforms/utils/window_externalization.h`，
+`src/ir/transforms/utils/window_externalization.cpp`
 
 **Python 绑定**：`python/bindings/modules/passes.cpp`
 
@@ -264,7 +268,7 @@ class After:
 | `AssembleParentStridesOptimizer` | 模式 2 — 通过 TensorView 附加父张量步长 |
 | `SliceInputStridesOptimizer` | 模式 4 — 通过 TensorView 为切片输入的 In 参数附加父张量步长 |
 | `AssembleLoopRewriter` | 模式 3 — 将 tile.assemble 循环重写为 tile.store 循环 |
-| `OutWindowExternalizer` | 模式 5 — 将 eligible 的局部 Out 写和 eligible In-window consumer 改写为显式 callsite slice |
+| `OutWindowExternalizer` | 模式 5 工具模块 — 将 eligible 的局部 Out 写和 eligible In-window consumer 改写为显式 callsite slice |
 | `BuildOutParamReturnMappings` | 共享辅助函数 — 通过 tile.store 映射 Out 参数到返回索引 |
 | `ComputeRowMajorStrides` | 共享辅助函数 — 从形状计算行主序步长 |
 
