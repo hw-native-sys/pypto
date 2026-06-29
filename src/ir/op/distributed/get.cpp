@@ -169,11 +169,9 @@ TypePtr DeduceGetTileType(const std::vector<ExprPtr>& args,
   // streams the transfer through; it may be smaller than the transfer (a single
   // chunk) but must not exceed the flattened [rows, cols] transfer extent. A
   // second stage (ping/pong double-buffering) shares the same extent.
-  comm_op::ValidateStageFitsTransfer(stage_type->shape_, transfer_shape, args[0]->span_, args[3]->span_,
-                                     "pld.tile.get");
+  comm_op::ValidateStageFitsTransfer(stage_type->shape_, transfer_shape, args[3]->span_, "pld.tile.get");
   if (has_stage2) {
-    comm_op::ValidateStageFitsTransfer(stage2_type->shape_, transfer_shape, args[0]->span_, args[4]->span_,
-                                       "pld.tile.get");
+    comm_op::ValidateStageFitsTransfer(stage2_type->shape_, transfer_shape, args[4]->span_, "pld.tile.get");
   }
 
   return GetUnknownType();

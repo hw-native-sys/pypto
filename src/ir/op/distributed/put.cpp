@@ -192,11 +192,9 @@ TypePtr DeducePutTileType(const std::vector<ExprPtr>& args,
   // the transfer (a single chunk). It must only not EXCEED the transfer in
   // either flattened dim (rows = prod(leading dims), cols = innermost dim). A
   // second stage (ping/pong double-buffering) shares the same extent.
-  comm_op::ValidateStageFitsTransfer(stage_type->shape_, transfer_shape, args[0]->span_, args[3]->span_,
-                                     "pld.tile.put");
+  comm_op::ValidateStageFitsTransfer(stage_type->shape_, transfer_shape, args[3]->span_, "pld.tile.put");
   if (has_stage2) {
-    comm_op::ValidateStageFitsTransfer(stage2_type->shape_, transfer_shape, args[0]->span_, args[4]->span_,
-                                       "pld.tile.put");
+    comm_op::ValidateStageFitsTransfer(stage2_type->shape_, transfer_shape, args[4]->span_, "pld.tile.put");
   }
 
   return GetUnknownType();

@@ -66,17 +66,6 @@ std::pair<int, int> DetectRowBroadcast(const std::vector<ExprPtr>& args) {
   return {-1, -1};
 }
 
-template <typename T>
-T GetKwargOr(const std::vector<std::pair<std::string, std::any>>& kwargs, const std::string& key,
-             const T& default_value) {
-  for (const auto& [k, v] : kwargs) {
-    if (k == key) {
-      return AnyCast<T>(v, "kwarg key: " + key);
-    }
-  }
-  return default_value;
-}
-
 }  // namespace
 
 OpConversionRegistry& OpConversionRegistry::GetInstance() {

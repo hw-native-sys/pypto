@@ -778,6 +778,33 @@ T GetRequiredKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs, 
 }
 
 /**
+ * @brief Read an optional kwarg by key, returning a default when absent.
+ *
+ * The optional counterpart of `GetRequiredKwarg`: same lookup-and-`AnyCast`
+ * logic, but returns `default_value` instead of throwing when the key is
+ * missing. A present-but-wrong-typed value still raises a contextual
+ * `TypeError` (via `AnyCast`). Shared by deducers and op-conversion lowerings
+ * so the "scan kwargs, value-or-default" loop lives in one place.
+ *
+ * @tparam T Expected type of the kwarg value
+ * @param kwargs Keyword arguments (metadata) passed to the deducer / conversion
+ * @param key Kwarg key to read
+ * @param default_value Value returned when the key is absent
+ * @return The kwarg value cast to T, or `default_value` if the key is absent
+ * @throws TypeError if the key is present but holds a different type
+ */
+template <typename T>
+T GetKwargOr(const std::vector<std::pair<std::string, std::any>>& kwargs, const std::string& key,
+             const T& default_value) {
+  for (const auto& [k, v] : kwargs) {
+    if (k == key) {
+      return AnyCast<T>(v, "kwarg key: " + key);
+    }
+  }
+  return default_value;
+}
+
+/**
  * @brief Helper macro for operator registration
  *
  * Use this macro to register operators in initialization code:

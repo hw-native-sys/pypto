@@ -33,11 +33,11 @@
 #include <utility>
 #include <vector>
 
-#include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
@@ -48,29 +48,13 @@ namespace comm_op {
 
 using Kwargs = std::vector<std::pair<std::string, std::any>>;
 
-// Read an optional int attr (chunk_rows / chunk_cols), defaulting to 0 (unset).
-inline int ReadIntKwarg(const Kwargs& kwargs, const std::string& key) {
-  for (const auto& [k, v] : kwargs) {
-    if (k == key) return AnyCast<int>(v, key);
-  }
-  return 0;
-}
-
-// Read an optional bool attr (pipeline), defaulting to false (unset).
-inline bool ReadBoolKwarg(const Kwargs& kwargs, const std::string& key) {
-  for (const auto& [k, v] : kwargs) {
-    if (k == key) return AnyCast<bool>(v, key);
-  }
-  return false;
-}
-
 // Reject negative chunk sizes regardless of pipeline / dynamic state. The DSL
 // `_validate_chunk` enforces this at the user surface, but a direct IR-op call
 // (e.g. dist_tensor_ops.put(chunk_rows=-1)) bypasses it and would otherwise feed
 // a negative extent into stage-tile creation. 0 = full is still valid here.
 inline void ValidateChunkNonNegative(const Kwargs& kwargs, const std::string& op_name) {
-  const int chunk_rows = ReadIntKwarg(kwargs, "chunk_rows");
-  const int chunk_cols = ReadIntKwarg(kwargs, "chunk_cols");
+  const int chunk_rows = GetKwargOr<int>(kwargs, "chunk_rows", 0);
+  const int chunk_cols = GetKwargOr<int>(kwargs, "chunk_cols", 0);
   CHECK(chunk_rows >= 0) << op_name << ": chunk_rows must be non-negative (0 = full), got " << chunk_rows;
   CHECK(chunk_cols >= 0) << op_name << ": chunk_cols must be non-negative (0 = full), got " << chunk_cols;
 }
@@ -80,9 +64,9 @@ inline void ValidateChunkNonNegative(const Kwargs& kwargs, const std::string& op
 // both chunk dims so the staging tile is fully bounded before the second tile
 // is allocated. User-facing (driven by the `pipeline` kwarg on put/get).
 inline void ValidatePipelineHasChunk(const Kwargs& kwargs, const std::string& op_name) {
-  if (!ReadBoolKwarg(kwargs, "pipeline")) return;
-  const int chunk_rows = ReadIntKwarg(kwargs, "chunk_rows");
-  const int chunk_cols = ReadIntKwarg(kwargs, "chunk_cols");
+  if (!GetKwargOr<bool>(kwargs, "pipeline", false)) return;
+  const int chunk_rows = GetKwargOr<int>(kwargs, "chunk_rows", 0);
+  const int chunk_cols = GetKwargOr<int>(kwargs, "chunk_cols", 0);
   CHECK(chunk_rows > 0 && chunk_cols > 0)
       << op_name
       << ": pipeline=True requires both chunk_rows>0 and chunk_cols>0 (double-buffering needs a "
@@ -103,12 +87,15 @@ inline void ValidateDynamicTransferHasChunk(const std::vector<ExprPtr>& transfer
     if (!As<ConstInt>(transfer_shape[i])) leading_dynamic = true;
   }
   if (!innermost_dynamic && !leading_dynamic) return;
-  const int chunk_rows = ReadIntKwarg(kwargs, "chunk_rows");
-  const int chunk_cols = ReadIntKwarg(kwargs, "chunk_cols");
-  CHECK(!leading_dynamic || chunk_rows > 0)
+  const int chunk_rows = GetKwargOr<int>(kwargs, "chunk_rows", 0);
+  const int chunk_cols = GetKwargOr<int>(kwargs, "chunk_cols", 0);
+  // Span sources are non-null transfer-shape elements: the leading branch only
+  // fails when a leading dim exists (size >= 2, front() valid); back() is valid
+  // whenever the vector is non-empty (guaranteed by the early return above).
+  CHECK_SPAN(!leading_dynamic || chunk_rows > 0, transfer_shape.front()->span_)
       << op_name
       << ": a dynamic leading transfer dim needs a static chunk_rows to bound the VEC staging tile";
-  CHECK(!innermost_dynamic || chunk_cols > 0)
+  CHECK_SPAN(!innermost_dynamic || chunk_cols > 0, transfer_shape.back()->span_)
       << op_name
       << ": a dynamic innermost transfer dim needs a static chunk_cols to bound the VEC staging tile";
 }
@@ -136,9 +123,8 @@ inline TileTypePtr ValidateStageTile(const ExprPtr& stage, const DataType& dst_d
 // must only not exceed it. Dynamic transfer dims can't be compared statically
 // (the chunk bounds them at runtime), so they are skipped here.
 inline void ValidateStageFitsTransfer(const std::vector<ExprPtr>& stage_shape,
-                                      const std::vector<ExprPtr>& transfer_shape, const Span& transfer_span,
-                                      const Span& stage_span, const std::string& op_name) {
-  (void)transfer_span;
+                                      const std::vector<ExprPtr>& transfer_shape, const Span& stage_span,
+                                      const std::string& op_name) {
   int64_t transfer_cols = 1;
   bool cols_static = false;
   int64_t transfer_rows = 1;
@@ -192,18 +178,20 @@ inline void ValidateTransferShapeContract(const std::vector<ExprPtr>& dst_shape,
     auto d = As<ConstInt>(dst_shape[i]);
     auto s = As<ConstInt>(src_shape[i]);
     if (d) {
-      CHECK(d->value_ > 0) << op_name << " shape dimension " << i << " must be positive, got " << d->value_;
+      CHECK_SPAN(d->value_ > 0, dst_shape[i]->span_)
+          << op_name << " shape dimension " << i << " must be positive, got " << d->value_;
     }
     if (s) {
-      CHECK(s->value_ > 0) << op_name << " src shape dimension " << i << " must be positive, got "
-                           << s->value_;
+      CHECK_SPAN(s->value_ > 0, src_shape[i]->span_)
+          << op_name << " src shape dimension " << i << " must be positive, got " << s->value_;
     }
     if (require_same_shape) {
       if (d && s) {
-        CHECK(d->value_ == s->value_) << op_name << " dst and src must have the same static shape; dimension "
-                                      << i << " differs (dst=" << d->value_ << ", src=" << s->value_ << ")";
+        CHECK_SPAN(d->value_ == s->value_, dst_shape[i]->span_)
+            << op_name << " dst and src must have the same static shape; dimension " << i
+            << " differs (dst=" << d->value_ << ", src=" << s->value_ << ")";
       } else {
-        CHECK(AreExprsEqual(dst_shape[i], src_shape[i]))
+        CHECK_SPAN(AreExprsEqual(dst_shape[i], src_shape[i]), dst_shape[i]->span_)
             << op_name << " full-slice dst and src must have the same shape; dimension " << i
             << " differs (dynamic dims must match structurally)";
       }
@@ -241,28 +229,28 @@ inline std::vector<ExprPtr> ValidateRegionArgs(const std::vector<ExprPtr>& args,
     // positivity / bounds checks below only apply when the dim is a ConstInt.
     auto dim = As<ConstInt>(transfer_shape->elements_[i]);
     if (dim) {
-      CHECK(dim->value_ > 0) << op_name << " shape dimension " << i << " must be positive, got "
-                             << dim->value_;
+      CHECK_SPAN(dim->value_ > 0, transfer_shape->elements_[i]->span_)
+          << op_name << " shape dimension " << i << " must be positive, got " << dim->value_;
     }
     // The window dims may also be dynamic; the subregion bounds check only runs
     // when both the transfer dim and the window dim are static ConstInts.
     auto dst_dim = As<ConstInt>(dst_shape[i]);
     auto src_dim = As<ConstInt>(src_shape[i]);
     if (auto dst_offset = As<ConstInt>(dst_offsets->elements_[i])) {
-      CHECK(dst_offset->value_ >= 0) << op_name << " dst_offsets dimension " << i
-                                     << " must be non-negative, got " << dst_offset->value_;
+      CHECK_SPAN(dst_offset->value_ >= 0, dst_offsets->elements_[i]->span_)
+          << op_name << " dst_offsets dimension " << i << " must be non-negative, got " << dst_offset->value_;
       if (dim && dst_dim) {
-        CHECK(dst_offset->value_ + dim->value_ <= dst_dim->value_)
+        CHECK_SPAN(dst_offset->value_ + dim->value_ <= dst_dim->value_, dst_offsets->elements_[i]->span_)
             << op_name << " dst subregion dimension " << i
             << " exceeds dst shape (offset=" << dst_offset->value_ << ", shape=" << dim->value_
             << ", dst_dim=" << dst_dim->value_ << ")";
       }
     }
     if (auto src_offset = As<ConstInt>(src_offsets->elements_[i])) {
-      CHECK(src_offset->value_ >= 0) << op_name << " src_offsets dimension " << i
-                                     << " must be non-negative, got " << src_offset->value_;
+      CHECK_SPAN(src_offset->value_ >= 0, src_offsets->elements_[i]->span_)
+          << op_name << " src_offsets dimension " << i << " must be non-negative, got " << src_offset->value_;
       if (dim && src_dim) {
-        CHECK(src_offset->value_ + dim->value_ <= src_dim->value_)
+        CHECK_SPAN(src_offset->value_ + dim->value_ <= src_dim->value_, src_offsets->elements_[i]->span_)
             << op_name << " src subregion dimension " << i
             << " exceeds src shape (offset=" << src_offset->value_ << ", shape=" << dim->value_
             << ", src_dim=" << src_dim->value_ << ")";
