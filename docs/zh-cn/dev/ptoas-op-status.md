@@ -134,7 +134,7 @@
 | pto.tmrgsort | TMRGSORT | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | reg as mrgsort_format1/2 |
 | pto.tfillpad | TFILLPAD | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tfillpad_inpace | TFILLPAD_INPLACE | tile | ✅ | ✅ | ❌ | ✅ | — |  |
-| pto.tfillpad_expand | TFILLPAD_EXPAND | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING |
+| pto.tfillpad_expand | TFILLPAD_EXPAND | tile | ✅ | ✅ | — | ✅ | — | NEW 前端+codegen+ST；a2a3 真机待 CI |
 | pto.tpartadd | TPARTADD | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | NEW 前端+codegen+ST；a2a3 真机待 CI（irregular 家族留意 ISA 缺陷） |
 | pto.tpartmul | TPARTMUL | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | NEW 前端+codegen+ST；a2a3 真机待 CI（irregular 家族留意 ISA 缺陷） |
 | pto.tpartmax | TPARTMAX | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | NEW 前端+codegen+ST；a2a3 真机待 CI（irregular 家族留意 ISA 缺陷） |

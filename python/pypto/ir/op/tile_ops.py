@@ -645,6 +645,41 @@ def fillpad_inplace(
     )
 
 
+def fillpad_expand(
+    tile: Expr,
+    shape: Sequence[int | Expr] | _ir_core.MakeTuple,
+    pad_value: PadValue | int | float = PadValue.zero,
+    span: Span | None = None,
+) -> Call:
+    """Copy a smaller source tile into a larger destination tile, padding the rest.
+
+    Unlike :func:`fillpad` (which requires ``dst.shape == src.shape``), this op
+    allows the destination to be larger than the source in either dimension. The
+    source's valid region is copied into the top-left of the destination and all
+    other destination elements are filled with ``pad_value``.
+
+    Args:
+        tile: Source tile (TileType)
+        shape: Destination shape; each dimension must be >= the source dimension
+        pad_value: ``PadValue`` enum (``zero`` / ``max`` / ``min``), or one of
+            the literal sugars ``0``, ``math.inf``, ``-math.inf``. Default is
+            ``PadValue.zero``. Other values raise — the hardware only supports
+            the three padding modes.
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression that returns the expanded and padded tile
+    """
+    actual_span = _get_span_or_capture(span)
+    shape_tuple = _to_make_tuple(shape, actual_span)
+    return _ir_core.create_op_call(
+        "tile.fillpad_expand",
+        [tile, shape_tuple],
+        {"pad_value": normalize_pad_value(pad_value)},
+        actual_span,
+    )
+
+
 # ============================================================================
 # Element-wise Operations
 # ============================================================================

@@ -142,6 +142,7 @@ print(pto_code)
 | `tile.mul(lhs, rhs)` | `pto.tmul` |
 | `tile.add(a, b, c)` | `pto.taddc` (3-operand add) |
 | `tile.adds(tile, scalar)` | `pto.tadds` (tile + scalar) |
+| `tile.fillpad_expand(src, shape)` | `pto.tfillpad_expand ins(%src) outs(%dst)` (the `shape` tuple is type-deduction only; the larger `dst` and its pad come from the result type) |
 
 **`tile.slice` / `tile.assemble` lowering details.**  Both ops are lowered
 through `pto.subview`, which is a pure view alias of the source tile (no

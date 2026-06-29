@@ -102,6 +102,7 @@
 | `create` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: Mem = Mem.Vec) -> Tile` | 在指定内存空间创建 tile |
 | `full` | `(shape: list[int], dtype: DataType, value: int \| float) -> Tile` | 创建用常量填充的 tile |
 | `fillpad` | `(input: Tensor \| Tile, pad_value: PadValue \| int \| float = PadValue.zero) -> Tensor \| Tile` | 按指定 pad 值填充无效视图区域；接受 `PadValue.zero/max/min` 枚举，或字面量 `0`、`0.0`、`math.inf`、`-math.inf`（其他值会报错）；Tensor 输入会在 InCore 代码中下沉为 tile fillpad |
+| `tile.fillpad_expand` | `(tile: Tile, shape: Sequence[IntLike], pad_value: PadValue \| int \| float = PadValue.zero) -> Tile` | 与 `fillpad` 类似，但目标 `shape` 在任一维度上都可以**大于**源：源的有效区域被拷贝到左上角，其余元素填充 `pad_value`。每个目标维度必须 `>=` 源维度。仅 tile 命名空间（`pl.tile.fillpad_expand`） |
 | `get_block_idx` | `() -> Scalar` | 获取当前 block 索引（UINT64） |
 
 ## Tile 算术（`pl.tile.*`）

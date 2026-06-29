@@ -574,6 +574,33 @@ static std::string MakeRowExpandCodegenPTO(const CallPtr& op, codegen::CodegenBa
   return "";
 }
 
+// pto.tfillpad_expand ins(%src) outs(%dst). IR tile.fillpad_expand(src, shape)
+// carries the destination shape tuple as args_[1] for type deduction only; the
+// hardware reads dst extents from the result type, so only the source tile is
+// emitted as an operand. The pad value rides on the result tile-buf type.
+static std::string MakeFillpadExpandCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 2) << "tile.fillpad_expand requires 2 arguments (src, shape), got "
+                               << op->args_.size();
+  const ir::ExprPtr& src = op->args_[0];
+  std::string operand = codegen.GetExprAsCode(src);
+  std::string in_type = codegen.GetExprTypeAnnotation(src);
+  std::string result_target = codegen.GetCurrentResultTarget();
+  std::string result_type = codegen.GetCurrentResultTileBufTypeString();
+  std::ostringstream oss;
+  oss << "pto.tfillpad_expand ins(" << operand;
+  if (!in_type.empty()) {
+    oss << " : " << in_type;
+  }
+  oss << ") outs(" << result_target;
+  if (!result_type.empty()) {
+    oss << " : " << result_type;
+  }
+  oss << ")";
+  codegen.Emit(oss.str());
+  return "";
+}
+
 // Helper function for StoreFP
 static std::string MakeStoreFPCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
                                          codegen::CodegenBase& codegen_base) {
@@ -3562,6 +3589,9 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   });
   reg("tile.row_expand", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeRowExpandCodegenPTO(op, codegen);
+  });
+  reg("tile.fillpad_expand", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeFillpadExpandCodegenPTO(op, codegen);
   });
   reg("tile.store_fp", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeStoreFPCodegenPTO("pto.tstore.fp", op, codegen);

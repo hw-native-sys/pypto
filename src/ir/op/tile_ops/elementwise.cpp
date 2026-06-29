@@ -1115,5 +1115,75 @@ REGISTER_OP("tile.fillpad_inplace")
                                         tile_type->memory_space_);
     });
 
+REGISTER_OP("tile.fillpad_expand")
+    .set_op_category("TileOp")
+    .set_description("Copy a smaller source tile into a larger destination tile, padding the remainder")
+    .add_argument("tile", "Source tile (TileType)")
+    .add_argument("shape", "Destination shape (Tuple of ConstInt), each dim >= source dim")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    // The destination is a fresh, larger, differently-strided tile (NOT a view of
+    // the source like tile.fillpad). The intrinsic reads the full source while
+    // writing dst at a wider row stride, so aliasing dst onto src would corrupt
+    // the strided copy — same hazard class as the arg-reduction family.
+    .not_inplace_safe()
+    .set_attr<PadValue>("pad_value")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      // tile.fillpad_expand(src, shape) — TFILLPAD_EXPAND: dst may be larger than
+      // src. The valid region of src is copied into the top-left of dst, and all
+      // other dst elements are filled with pad_value. The shape tuple is carried
+      // for type deduction only (the codegen reads dst extents from the result
+      // type, not from this operand).
+      CHECK(args.size() == 2)
+          << "The operator tile.fillpad_expand requires exactly 2 arguments (tile, shape), but got "
+          << args.size();
+
+      auto tile_type = As<TileType>(args[0]->GetType());
+      CHECK(tile_type)
+          << "The operator tile.fillpad_expand requires first argument to be a TileType, but got "
+          << args[0]->GetType()->TypeName();
+
+      auto shape_tuple = As<MakeTuple>(args[1]);
+      CHECK(shape_tuple) << "tile.fillpad_expand shape must be a literal tuple of constants, but got "
+                         << args[1]->GetType()->TypeName();
+      const std::vector<ExprPtr>& new_shape = shape_tuple->elements_;
+      CHECK(new_shape.size() == tile_type->shape_.size())
+          << "tile.fillpad_expand shape rank (" << new_shape.size() << ") must match source rank ("
+          << tile_type->shape_.size() << ")";
+
+      // When both source and destination dims are static, the destination must
+      // not be smaller than the source in any dimension (expand-only).
+      for (size_t i = 0; i < new_shape.size(); ++i) {
+        auto dst_dim = As<ConstInt>(new_shape[i]);
+        CHECK(dst_dim) << "tile.fillpad_expand shape dimension " << i << " must be a constant integer";
+        CHECK(dst_dim->value_ > 0) << "tile.fillpad_expand shape dimension " << i << " must be positive, got "
+                                   << dst_dim->value_;
+        if (auto src_dim = As<ConstInt>(tile_type->shape_[i])) {
+          CHECK(dst_dim->value_ >= src_dim->value_)
+              << "tile.fillpad_expand destination dimension " << i << " (" << dst_dim->value_
+              << ") must be >= source dimension (" << src_dim->value_ << ")";
+        }
+      }
+
+      PadValue pad_value = PadValue::zero;
+      for (const auto& kv : kwargs) {
+        if (kv.first == "pad_value") {
+          pad_value = std::any_cast<PadValue>(kv.second);
+          CHECK(pad_value != PadValue::null)
+              << "tile.fillpad_expand requires pad_value to be zero/max/min, not null";
+        }
+      }
+
+      // After expand the entire destination tile is valid (the padding region is
+      // filled). Inherit the source layout; only the shape and pad change.
+      TileView tile_view;
+      tile_view.valid_shape = new_shape;
+      InheritTileViewLayout(tile_view, tile_type);
+      tile_view.pad = pad_value;
+      return std::make_shared<TileType>(new_shape, tile_type->dtype_, tile_type->memref_, tile_view,
+                                        tile_type->memory_space_);
+    });
+
 }  // namespace ir
 }  // namespace pypto

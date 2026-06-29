@@ -140,6 +140,7 @@ print(pto_code)
 | `tile.mul(lhs, rhs)` | `pto.tmul` |
 | `tile.add(a, b, c)` | `pto.taddc` (三操作数加法) |
 | `tile.adds(tile, scalar)` | `pto.tadds` (Tile + 标量) |
+| `tile.fillpad_expand(src, shape)` | `pto.tfillpad_expand ins(%src) outs(%dst)`（`shape` 元组仅用于类型推导；更大的 `dst` 及其 pad 来自结果类型） |
 
 **`tile.slice` / `tile.assemble` 下沉细节。** 两个 op 都通过 `pto.subview`
 下沉，它是源 tile 的纯视图别名（不搬数据，也不会额外发 `pto.alloc_tile`）。

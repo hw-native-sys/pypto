@@ -38,6 +38,7 @@ __all__ = [
     "arange",
     "fillpad",
     "fillpad_inplace",
+    "fillpad_expand",
     "get_block_idx",
     "get_subblock_idx",
     "get_block_num",
@@ -629,6 +630,31 @@ def fillpad_inplace(tile: Tile, pad_value: PadValue | int | float = PadValue.zer
         Tile with padding filled (shares memory with the input tile).
     """
     call_expr = _ir_ops.fillpad_inplace(tile.unwrap(), pad_value=pad_value)
+    return Tile(expr=call_expr)
+
+
+def fillpad_expand(
+    tile: Tile, shape: Sequence[IntLike], pad_value: PadValue | int | float = PadValue.zero
+) -> Tile:
+    """Copy a smaller source tile into a larger destination tile, padding the rest.
+
+    Unlike :func:`fillpad` (which keeps the same physical shape and only fills the
+    valid-region expansion), this op produces a *larger* output tile: the source's
+    valid region is copied to the top-left and every other element is filled with
+    ``pad_value``. Equivalent to TFILLPAD_EXPAND on the hardware.
+
+    Args:
+        tile: Source tile
+        shape: Destination shape; each dimension must be >= the source dimension
+        pad_value: ``PadValue`` enum (``zero`` / ``max`` / ``min``), or one of
+            the literal sugars ``0``, ``math.inf``, ``-math.inf``. Default is
+            ``PadValue.zero``. Other values raise — the hardware only supports
+            the three padding modes.
+
+    Returns:
+        Tile wrapping the fillpad_expand operation (a new, larger tile).
+    """
+    call_expr = _ir_ops.fillpad_expand(tile.unwrap(), _normalize_intlike(shape), pad_value=pad_value)
     return Tile(expr=call_expr)
 
 

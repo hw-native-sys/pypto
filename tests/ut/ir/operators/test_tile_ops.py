@@ -1937,6 +1937,91 @@ class TestTileSliceReshapeOps:
         assert result_type3.get_effective_tile_view().blayout == ir.TileLayout.row_major
         assert call3.kwargs == {}
 
+    def test_tile_fillpad_expand(self):
+        """Test tile.fillpad_expand grows the tile and fills with pad_value."""
+        span = ir.Span.unknown()
+
+        # Source tile [48, 64], valid [40, 50].
+        dim48 = ir.ConstInt(48, DataType.INT32, span)
+        dim64 = ir.ConstInt(64, DataType.INT32, span)
+        src_type = ir.TileType([dim48, dim64], DataType.FP32)
+        src = ir.Var("src", src_type, span)
+
+        # Expand to [64, 128] with zero padding.
+        call = tile.fillpad_expand(src, [64, 128], pad_value=ir.PadValue.zero)
+
+        assert isinstance(call, ir.Call)
+        assert call.op.name == "tile.fillpad_expand"
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.dtype == DataType.FP32
+        # Output physical shape is the requested (larger) shape.
+        rows, cols = result_type.shape[0], result_type.shape[1]
+        assert isinstance(rows, ir.ConstInt)
+        assert isinstance(cols, ir.ConstInt)
+        assert rows.value == 64
+        assert cols.value == 128
+        view = result_type.get_effective_tile_view()
+        # After expand the whole destination is valid and carries the pad mode.
+        assert view.pad == ir.PadValue.zero
+        vrows, vcols = view.valid_shape[0], view.valid_shape[1]
+        assert isinstance(vrows, ir.ConstInt)
+        assert isinstance(vcols, ir.ConstInt)
+        assert vrows.value == 64
+        assert vcols.value == 128
+
+        # max / min pad modes round-trip onto the result view.
+        call_max = tile.fillpad_expand(src, [64, 128], pad_value=ir.PadValue.max)
+        max_type = call_max.type
+        assert isinstance(max_type, ir.TileType)
+        assert max_type.get_effective_tile_view().pad == ir.PadValue.max
+
+    def test_tile_fillpad_expand_same_shape(self):
+        """tile.fillpad_expand permits a same-shape (non-strict) expansion."""
+        span = ir.Span.unknown()
+        dim32 = ir.ConstInt(32, DataType.INT32, span)
+        src_type = ir.TileType([dim32, dim32], DataType.FP16)
+        src = ir.Var("src", src_type, span)
+
+        call = tile.fillpad_expand(src, [32, 32], pad_value=ir.PadValue.zero)
+        assert call.op.name == "tile.fillpad_expand"
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        dim0 = result_type.shape[0]
+        assert isinstance(dim0, ir.ConstInt)
+        assert dim0.value == 32
+
+    def test_tile_fillpad_expand_shrink_raises(self):
+        """tile.fillpad_expand rejects a destination smaller than the source."""
+        span = ir.Span.unknown()
+        dim64 = ir.ConstInt(64, DataType.INT32, span)
+        src_type = ir.TileType([dim64, dim64], DataType.FP32)
+        src = ir.Var("src", src_type, span)
+
+        with pytest.raises(ValueError, match="must be >= source dimension"):
+            tile.fillpad_expand(src, [32, 64], pad_value=ir.PadValue.zero)
+
+    def test_tile_fillpad_expand_program(self):
+        """tile.fillpad_expand is reachable from the DSL and prints in the IR."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[48, 64], pl.FP32],
+                output: pl.Tensor[[64, 64], pl.FP32],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                src: pl.Tile[[48, 64], pl.FP32] = pl.load(a, [0, 0], [48, 64])
+                dst: pl.Tile[[64, 64], pl.FP32] = pl.tile.fillpad_expand(
+                    src, [64, 64], pad_value=pl.PadValue.zero
+                )
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(dst, [0, 0], output)
+                return result
+
+        ir_str = str(Program)
+        assert "tile.fillpad_expand" in ir_str
+
     def test_tile_transpose(self):
         """Test tile.transpose operation."""
         span = ir.Span.unknown()
