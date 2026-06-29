@@ -1661,60 +1661,105 @@ class TestAutoTileMatmulL0FitsL0cCastFold:
 
         return Before
 
-    def _assert_numerics(self, after, k_first):
-        """The fold's FIXPIPE bf16 downcast must match the bf16 chain. As in the
-        Mat-scratch tests the reference carries real bf16 rounding, so the Frobenius
-        relative error (dominated by the large entries) is the robust metric."""
-        torch = pytest.importorskip("torch")
-        from pypto.debug import torch_codegen  # noqa: PLC0415
-
-        torch.manual_seed(0)
-        a = torch.randn(128, k_first, dtype=torch.bfloat16)
-        b = torch.randn(k_first, 128, dtype=torch.bfloat16)
-        e = torch.randn(128, 64, dtype=torch.bfloat16)
-        out = torch.zeros(128, 64)
-        ns: dict = {}
-        exec(torch_codegen(after), ns)  # noqa: S102 — executing generated reference code is the point
-        ns["kernel"](a, b, e, out)
-        c_bf16 = (a.float() @ b.float()).to(torch.bfloat16).float()  # FIXPIPE downcast
-        expected = c_bf16 @ e.float()
-        rel_err = ((out - expected).norm() / expected.norm()).item()
-        assert rel_err < 5e-2, f"fits-L0c cast-fold chained bf16 rel_err {rel_err:.3e} exceeds 5e-2"
-
     def test_no_ksplit_cast_folds_to_full_window_assemble(self):
-        """Corner C: the producer fits L0a/L0b (no K-loop). The cast becomes a single
-        full-window Acc->Mat ``tile.assemble`` into a bf16 Mat scratch, the cast op is
-        dropped, and the consumer matmul reads the scratch on-chip."""
+        """Corner C: the producer fits L0a/L0b (no K-loop). The bf16 downcast folds
+        into a single full-window Acc->Mat ``tile.assemble`` into a bf16 Mat scratch
+        (the standalone ``tile.cast`` is dropped), and the consumer matmul reads the
+        scratch on-chip. (Numerics are covered by the st suite — see
+        ``tests/st/runtime/ops/test_auto_tile_matmul.py``.)"""
         _backend.reset_for_testing()
         _backend.set_backend_type(BackendType.Ascend910B)
 
-        After = passes.auto_tile_matmul_l0()(_lower_to_tile_ops(self._chain(k_first=64)))
-        printed = ir.python_print(After)
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def kernel(
+                self,
+                a: pl.Tensor[[128, 64], pl.BF16],
+                b: pl.Tensor[[64, 128], pl.BF16],
+                e: pl.Tensor[[128, 64], pl.BF16],
+                out: pl.Out[pl.Tensor[[128, 64], pl.FP32]],
+            ) -> pl.Tensor[[128, 64], pl.FP32]:
+                a_mat: pl.Tile[[128, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    a, [0, 0], [128, 64], target_memory=pl.Mem.Mat
+                )
+                b_mat: pl.Tile[[64, 128], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    b, [0, 0], [64, 128], target_memory=pl.Mem.Mat
+                )
+                c: pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(a_mat, b_mat)
+                # Folded downcast: a bf16 Mat scratch + one full-window Acc->Mat
+                # assemble (no standalone tile.cast).
+                c_mat: pl.Tile[[128, 128], pl.BF16, pl.Mem.Mat] = pl.tile.create(
+                    [128, 128], dtype=pl.BF16, target_memory=pl.Mem.Mat
+                )
+                c_scratch: pl.Tile[[128, 128], pl.BF16, pl.Mem.Mat] = pl.tile.assemble(c_mat, c, [0, 0])
+                e_mat: pl.Tile[[128, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    e, [0, 0], [128, 64], target_memory=pl.Mem.Mat
+                )
+                d: pl.Tile[[128, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(c_scratch, e_mat)
+                out_st: pl.Tensor[[128, 64], pl.FP32] = pl.store(d, [0, 0], out)
+                return out_st
 
-        assert "tile.create" in printed and "Mem.Mat" in printed, "expected a bf16 Mat scratch"
-        assert printed.count("pl.tile.assemble(") == 1, "a single full-window Acc->Mat assemble"
-        assert "pl.tile.cast(" not in printed, "the downcast must be folded into the assemble"
-        assert "pl.pipeline(" not in printed, "the producer fits L0 (corner C) — no K-loop"
-        _assert_ssa_valid(After, "fits_l0c_no_ksplit_cast_fold")
-        self._assert_numerics(After, k_first=64)
+        After = passes.auto_tile_matmul_l0()(_lower_to_tile_ops(self._chain(k_first=64)))
+        ir.assert_structural_equal(After, Expected)
 
     def test_ksplit_cast_folds_to_full_window_assemble(self):
         """Corner D: the producer needs a K-loop (``[128, 512] @ [512, 128]``). The
-        K-loop's Acc result is folded into the *same* single full-window Acc->Mat
-        assemble (cast dropped) — the fold is independent of whether the producer was
-        K-tiled."""
+        K-loop's Acc result folds into the *same* single full-window Acc->Mat assemble
+        (cast dropped) — the fold is independent of whether the producer was K-tiled.
+        (Numerics are covered by the st suite.)"""
         _backend.reset_for_testing()
         _backend.set_backend_type(BackendType.Ascend910B)
 
-        After = passes.auto_tile_matmul_l0()(_lower_to_tile_ops(self._chain(k_first=512)))
-        printed = ir.python_print(After)
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def kernel(
+                self,
+                a: pl.Tensor[[128, 512], pl.BF16],
+                b: pl.Tensor[[512, 128], pl.BF16],
+                e: pl.Tensor[[128, 64], pl.BF16],
+                out: pl.Out[pl.Tensor[[128, 64], pl.FP32]],
+            ) -> pl.Tensor[[128, 64], pl.FP32]:
+                a_mat: pl.Tile[[128, 512], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    a, [0, 0], [128, 512], target_memory=pl.Mem.Mat
+                )
+                b_mat: pl.Tile[[512, 128], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    b, [0, 0], [512, 128], target_memory=pl.Mem.Mat
+                )
+                c_init: pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc] = pl.tile.create(
+                    [128, 128], dtype=pl.FP32, target_memory=pl.Mem.Acc
+                )
+                # Producer K-loop: the Acc result `c` is what the fold assembles.
+                for ko, (c_iter,) in pl.pipeline(0, 512, 128, stage=2, init_values=(c_init,)):
+                    a_sub: pl.Tile[[128, 128], pl.BF16, pl.Mem.Left] = pl.tile.extract(
+                        a_mat, 0, ko, shape=[128, 128], target_memory=pl.Mem.Left
+                    )
+                    b_sub: pl.Tile[[128, 128], pl.BF16, pl.Mem.Right] = pl.tile.extract(
+                        b_mat, ko, 0, shape=[128, 128], target_memory=pl.Mem.Right
+                    )
+                    if ko == 0:
+                        c_first: pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(a_sub, b_sub)
+                        c_phi: pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc] = pl.yield_(c_first)
+                    else:
+                        c_acc: pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(
+                            c_iter, a_sub, b_sub
+                        )
+                        c_phi: pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc] = pl.yield_(c_acc)
+                    c: pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc] = pl.yield_(c_phi)
+                c_mat: pl.Tile[[128, 128], pl.BF16, pl.Mem.Mat] = pl.tile.create(
+                    [128, 128], dtype=pl.BF16, target_memory=pl.Mem.Mat
+                )
+                c_scratch: pl.Tile[[128, 128], pl.BF16, pl.Mem.Mat] = pl.tile.assemble(c_mat, c, [0, 0])
+                e_mat: pl.Tile[[128, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    e, [0, 0], [128, 64], target_memory=pl.Mem.Mat
+                )
+                d: pl.Tile[[128, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(c_scratch, e_mat)
+                out_st: pl.Tensor[[128, 64], pl.FP32] = pl.store(d, [0, 0], out)
+                return out_st
 
-        assert "tile.create" in printed and "Mem.Mat" in printed, "expected a bf16 Mat scratch"
-        assert printed.count("pl.tile.assemble(") == 1, "a single full-window Acc->Mat assemble"
-        assert "pl.tile.cast(" not in printed, "the downcast must be folded into the assemble"
-        assert "pl.pipeline(" in printed, "the producer overflows L0a/L0b (corner D) — K-loop emitted"
-        _assert_ssa_valid(After, "fits_l0c_ksplit_cast_fold")
-        self._assert_numerics(After, k_first=512)
+        After = passes.auto_tile_matmul_l0()(_lower_to_tile_ops(self._chain(k_first=512)))
+        ir.assert_structural_equal(After, Expected)
 
     def test_cast_to_non_matmul_consumer_not_folded(self):
         """Guard: a fits-L0c matmul whose cast result is consumed by a store (not a
