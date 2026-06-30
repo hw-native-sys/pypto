@@ -34,36 +34,60 @@ from examples.models.qwen3_jit.qwen3_decode import qwen3_decode  # noqa: E402
 
 
 def _make_args():
-    def randn(shape, dtype):
-        return torch.empty(shape, dtype=dtype).normal_()
+    def empty(shape, dtype):
+        # ``compile_for_test`` consumes only tensor *shape* and *dtype* metadata
+        # (via ``_bind_args``); it never reads the tensor values. Filling the
+        # Qwen3-32B weights + 512K-row KV cache with ``torch.*.normal_()`` is
+        # ~37s of pure overhead per call (916M elements), so allocate
+        # uninitialized memory instead.
+        return torch.empty(shape, dtype=dtype)
 
     return [
-        randn([BATCH, HIDDEN], torch.bfloat16),
-        randn([1, HIDDEN], torch.float32),
-        randn([HIDDEN, HIDDEN], torch.bfloat16),
-        randn([HIDDEN, KV_HIDDEN], torch.bfloat16),
-        randn([HIDDEN, KV_HIDDEN], torch.bfloat16),
+        empty([BATCH, HIDDEN], torch.bfloat16),
+        empty([1, HIDDEN], torch.float32),
+        empty([HIDDEN, HIDDEN], torch.bfloat16),
+        empty([HIDDEN, KV_HIDDEN], torch.bfloat16),
+        empty([HIDDEN, KV_HIDDEN], torch.bfloat16),
         torch.randint(1, MAX_SEQ + 1, (BATCH,), dtype=torch.int32),
-        randn([MAX_SEQ, HEAD_DIM], torch.float32),
-        randn([MAX_SEQ, HEAD_DIM], torch.float32),
-        randn([CACHE_ROWS, HEAD_DIM], torch.bfloat16),
-        randn([CACHE_ROWS, HEAD_DIM], torch.bfloat16),
-        randn([HIDDEN, HIDDEN], torch.bfloat16),
-        randn([1, HIDDEN], torch.float32),
-        randn([HIDDEN, INTERMEDIATE], torch.bfloat16),
-        randn([HIDDEN, INTERMEDIATE], torch.bfloat16),
-        randn([INTERMEDIATE, HIDDEN], torch.bfloat16),
+        empty([MAX_SEQ, HEAD_DIM], torch.float32),
+        empty([MAX_SEQ, HEAD_DIM], torch.float32),
+        empty([CACHE_ROWS, HEAD_DIM], torch.bfloat16),
+        empty([CACHE_ROWS, HEAD_DIM], torch.bfloat16),
+        empty([HIDDEN, HIDDEN], torch.bfloat16),
+        empty([1, HIDDEN], torch.float32),
+        empty([HIDDEN, INTERMEDIATE], torch.bfloat16),
+        empty([HIDDEN, INTERMEDIATE], torch.bfloat16),
+        empty([INTERMEDIATE, HIDDEN], torch.bfloat16),
         torch.empty([BATCH, HIDDEN], dtype=torch.bfloat16),
     ]
+
+
+# Module-level cache so the (non-trivial) end-to-end compile runs once and is
+# shared by both tests below — they assert on the *same* post-pass program, so
+# compiling per test only doubles the pipeline cost. A *function*-scoped fixture
+# (memoized here) is used rather than ``scope="class"`` on purpose: a
+# class-scoped fixture sets up *before* the function-scoped autouse fixtures in
+# ``tests/ut/conftest.py``, so the compile would escape the per-test
+# ``PYPTO_PROG_BUILD_DIR`` redirect and leave stale build_output dirs in the
+# repo. A function-scoped fixture runs after those autouse fixtures, so the
+# shared compile's artifacts land in pytest's tmp dir.
+_POST_PASS: list = []
+
+
+@pytest.fixture
+def post_pass():
+    """Compile the Qwen3 decode example once; shared across this module's tests."""
+    if not _POST_PASS:
+        _POST_PASS.append(qwen3_decode.compile_for_test(*_make_args()))
+    return _POST_PASS[0]
 
 
 class TestQwen3JITCompile:
     """End-to-end compile of the Qwen3 JIT example."""
 
-    def test_qwen3_decode_compile_for_test(self):
+    def test_qwen3_decode_compile_for_test(self, post_pass):
         """compile_for_test runs the full pipeline; the post-pass IR drops all
         Inline functions and outlines pl.at scopes into InCore-class kernels."""
-        post_pass = qwen3_decode.compile_for_test(*_make_args())
         names = sorted(f.name for f in post_pass.functions.values())
 
         # No FunctionType.Inline survives the InlineFunctions pass. Note that
@@ -101,9 +125,8 @@ class TestQwen3JITCompile:
                 f"Expected an outlined function for ``pl.at(name_hint='{hint}')``; got functions: {names}"
             )
 
-    def test_qwen3_decode_post_pass_has_orchestration_entry(self):
+    def test_qwen3_decode_post_pass_has_orchestration_entry(self, post_pass):
         """The entry function lands as Orchestration after outlining."""
-        post_pass = qwen3_decode.compile_for_test(*_make_args())
         entry = post_pass.get_function("qwen3_decode")
         assert entry is not None
         assert entry.func_type == ir.FunctionType.Orchestration

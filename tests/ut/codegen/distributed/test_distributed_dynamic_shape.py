@@ -38,7 +38,7 @@ def _generate_mlir(func_name: str = "touch") -> str:
     program = ir.Program([func], "test_dist_dyn_signal", ir.Span.unknown())
     pm = PassManager.get_strategy(OptimizationStrategy.Default)
     # DistributedTensor[[NR, …]] round-trips without a module-level NR decl today;
-    # skip RoundtripInstrument (see test_orchestration_codegen tuple NoDep pattern).
+    # skip RoundtripInstrument (see test_orchestration_misc tuple NoDep pattern).
     ctx = _core_passes.PassContext(
         [_core_passes.VerificationInstrument(_core_passes.VerificationMode.BEFORE_AND_AFTER)]
     )
