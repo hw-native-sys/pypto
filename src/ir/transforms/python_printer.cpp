@@ -1527,9 +1527,7 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
     stream_ << (header_emitted ? ", " : ", attrs={");
     header_emitted = true;
     stream_ << std::quoted(key) << ": ";
-    if (value.type() == typeid(LoopOrigin)) {
-      stream_ << prefix_ << ".LoopOrigin." << LoopOriginToString(AnyCast<LoopOrigin>(value, key));
-    } else if (value.type() == typeid(int)) {
+    if (value.type() == typeid(int)) {
       stream_ << AnyCast<int>(value, key);
     } else if (value.type() == typeid(double)) {
       stream_ << FormatFloatLiteral(AnyCast<double>(value, key));

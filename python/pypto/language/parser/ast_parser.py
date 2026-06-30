@@ -42,7 +42,6 @@ from .diagnostics import (
 )
 from .enum_utils import (
     LEVEL_MAP,
-    LOOP_ORIGIN_MAP,
     ROLE_MAP,
     SCOPE_MODE_MAP,
     SPLIT_MODE_MAP,
@@ -2292,7 +2291,7 @@ class ASTParser:
                 raise ParserSyntaxError(
                     "attrs must be a dict literal",
                     span=self.span_tracker.get_span(keyword.value),
-                    hint='Use a dict like attrs={"loop_origin": pl.LoopOrigin.Original}',
+                    hint='Use a dict like attrs={"my_attr": 1}',
                 )
             result["attrs"] = self._parse_attrs_dict(keyword.value)
         else:
@@ -2351,12 +2350,9 @@ class ASTParser:
 
         Supports string keys with values that are:
         - Integer/float/bool/string constants
-        - pl.LoopOrigin.<name> enum references
         """
         # Map of known enum attr keys to their (enum_map, enum_name, qualified) configs
-        _ENUM_ATTRS: dict[str, tuple[dict[str, object], str, str]] = {
-            "loop_origin": (LOOP_ORIGIN_MAP, "LoopOrigin", "pl.LoopOrigin"),
-        }
+        _ENUM_ATTRS: dict[str, tuple[dict[str, object], str, str]] = {}
 
         result: dict[str, object] = {}
         for key_node, value_node in zip(node.keys, node.values):
@@ -2376,8 +2372,7 @@ class ASTParser:
                 raise ParserSyntaxError(
                     f"Unsupported value type for attrs key '{key}'",
                     span=self.span_tracker.get_span(value_node),
-                    hint="Supported values: integer, float, bool, string,"
-                    " or enum (e.g., pl.LoopOrigin.Original)",
+                    hint="Supported values: integer, float, bool, or string",
                 )
         return result
 

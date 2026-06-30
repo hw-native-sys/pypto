@@ -316,9 +316,6 @@ class StructuralHasher {
         h = hash_combine(h, std::hash<float>{}(AnyCast<float>(value, "hashing kwarg: " + key)));
       } else if (value.type() == typeid(DataType)) {
         h = hash_combine(h, std::hash<uint8_t>{}(AnyCast<DataType>(value, "hashing kwarg: " + key).Code()));
-      } else if (value.type() == typeid(LoopOrigin)) {
-        h = hash_combine(h, std::hash<uint8_t>{}(
-                                static_cast<uint8_t>(AnyCast<LoopOrigin>(value, "hashing kwarg: " + key))));
       } else if (value.type() == typeid(MemorySpace)) {
         h = hash_combine(h, std::hash<uint8_t>{}(
                                 static_cast<uint8_t>(AnyCast<MemorySpace>(value, "hashing kwarg: " + key))));

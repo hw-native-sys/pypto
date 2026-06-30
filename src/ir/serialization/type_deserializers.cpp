@@ -245,11 +245,6 @@ static std::vector<std::pair<std::string, std::any>> DeserializeKwargs(const msg
         } else {
           throw TypeError("Unknown PadValue: " + value_str + " for kwarg: " + key);
         }
-      } else if (type_name == "LoopOrigin") {
-        if (value_str.empty()) {
-          throw TypeError("Missing 'value' field for LoopOrigin kwarg: " + key);
-        }
-        kwargs.emplace_back(key, StringToLoopOrigin(value_str));
       } else if (type_name == "Var") {
         // Reserved Var-valued attr (kAttrTaskIdVar). Resolved through the node
         // table so it round-trips by identity. A missing 'value' field is a
@@ -686,26 +681,11 @@ static IRNodePtr DeserializeForStmt(const msgpack::object& fields_obj, msgpack::
     kind = static_cast<ForKind>(kind_obj->via.u64);
   }
 
-  // Deserialize attrs with backward compatibility for old loop_origin field
+  // Deserialize attrs. The obsolete legacy loop-origin field is ignored.
   std::vector<std::pair<std::string, std::any>> attrs;
   auto attrs_obj = GetOptionalFieldObj(fields_obj, "attrs", ctx);
   if (attrs_obj.has_value() && attrs_obj->type != msgpack::type::NIL) {
     attrs = DeserializeKwargs(*attrs_obj, "attrs", ctx, zone);
-  } else {
-    // Legacy backward compat: convert old "loop_origin" field to attrs.
-    auto loop_origin_obj = GetOptionalFieldObj(fields_obj, "loop_origin", ctx);
-    if (loop_origin_obj.has_value()) {
-      auto origin_value = loop_origin_obj->via.u64;
-      // The chunk loop-origin tags (ChunkOuter=1, ChunkInner=2, ChunkRemainder=3) were removed
-      // along with the auto_chunk subsystem; only Original (0) remains. Reject a legacy chunk
-      // value with a clear migration error rather than casting it into an invalid LoopOrigin
-      // enum (which would later trip an internal check in LoopOriginToString).
-      CHECK(origin_value == static_cast<uint64_t>(LoopOrigin::Original))
-          << "Cannot deserialize legacy loop_origin value " << origin_value
-          << ": the chunk loop-origin tags (ChunkOuter/ChunkInner/ChunkRemainder) were removed "
-          << "with the auto_chunk subsystem. Re-export this IR from a current PyPTO version.";
-      // Original is the default tag, so there is nothing to add to attrs.
-    }
   }
 
   return std::make_shared<ForStmt>(loop_var, start, stop, step, iter_args, body, return_vars, span, kind,

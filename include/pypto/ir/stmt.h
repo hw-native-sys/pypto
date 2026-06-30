@@ -58,39 +58,6 @@ enum class ForKind : uint8_t {
 };
 
 /**
- * @brief Loop origin classification for tracking how a loop was generated
- *
- * Classifies how a loop was generated (currently only Original).
- */
-enum class LoopOrigin : uint8_t {
-  Original = 0  ///< Regular loop (default)
-};
-
-/**
- * @brief Convert LoopOrigin to string
- */
-inline std::string LoopOriginToString(LoopOrigin origin) {
-  switch (origin) {
-    case LoopOrigin::Original:
-      return "Original";
-    default:
-      INTERNAL_CHECK(false) << "Unknown LoopOrigin: " << static_cast<int>(origin);
-      return "";  // Unreachable
-  }
-}
-
-/**
- * @brief Convert string to LoopOrigin
- */
-inline LoopOrigin StringToLoopOrigin(const std::string& str) {
-  if (str == "Original") {
-    return LoopOrigin::Original;
-  } else {
-    throw pypto::TypeError("Unknown LoopOrigin: " + str);
-  }
-}
-
-/**
  * @brief Distinguishes different scope kinds
  */
 enum class ScopeKind : uint8_t {

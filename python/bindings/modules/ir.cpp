@@ -140,8 +140,6 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
       kwargs.emplace_back(key, static_cast<int>(nb::cast<AtomicType>(item.second)));
     } else if (nb::isinstance<PadValue>(item.second)) {
       kwargs.emplace_back(key, nb::cast<PadValue>(item.second));
-    } else if (nb::isinstance<LoopOrigin>(item.second)) {
-      kwargs.emplace_back(key, nb::cast<LoopOrigin>(item.second));
     } else if (nb::isinstance<ArgDirection>(item.second)) {
       kwargs.emplace_back(key, nb::cast<ArgDirection>(item.second));
     } else if (key == kAttrTaskIdVar && nb::isinstance<Var>(item.second)) {
@@ -941,8 +939,6 @@ void BindIR(nb::module_& m) {
         result[key.c_str()] = AnyCast<TileLayout>(value, "converting to Python: " + key);
       } else if (value.type() == typeid(PadValue)) {
         result[key.c_str()] = AnyCast<PadValue>(value, "converting to Python: " + key);
-      } else if (value.type() == typeid(LoopOrigin)) {
-        result[key.c_str()] = AnyCast<LoopOrigin>(value, "converting to Python: " + key);
       } else if (value.type() == typeid(std::vector<ArgDirection>)) {
         const auto& dirs = AnyCast<std::vector<ArgDirection>>(value, "converting to Python: " + key);
         nb::list lst;
@@ -1224,11 +1220,6 @@ void BindIR(nb::module_& m) {
              "Software-pipelined loop (pre-lowering user marker + transient post-lowering marker)")
       .export_values();
 
-  // LoopOrigin enum (must be before ForStmt which uses it)
-  nb::enum_<LoopOrigin>(ir, "LoopOrigin", "Loop origin classification")
-      .value("Original", LoopOrigin::Original, "Regular loop (default)")
-      .export_values();
-
   // ForStmt - const shared_ptr
   auto for_stmt_class = nb::class_<ForStmt, Stmt>(
       ir, "ForStmt", "For loop statement: for loop_var in range(start, stop, step): body");
@@ -1253,7 +1244,7 @@ void BindIR(nb::module_& m) {
         nb::dict result;
         for (const auto& [key, value] : self->attrs_) {
           result[key.c_str()] = AnyToPyObject<int, bool, std::string, double, float, DataType, MemorySpace,
-                                              TensorLayout, TileLayout, PadValue, LoopOrigin>(value, key);
+                                              TensorLayout, TileLayout, PadValue>(value, key);
         }
         return result;
       },

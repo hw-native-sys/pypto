@@ -610,9 +610,6 @@ class StructuralEqualImpl {
       } else if (lhs_val.type() == typeid(MemorySpace)) {
         values_equal = (AnyCast<MemorySpace>(lhs_val, "comparing kwarg: " + lhs_key) ==
                         AnyCast<MemorySpace>(rhs_val, "comparing kwarg: " + lhs_key));
-      } else if (lhs_val.type() == typeid(LoopOrigin)) {
-        values_equal = (AnyCast<LoopOrigin>(lhs_val, "comparing kwarg: " + lhs_key) ==
-                        AnyCast<LoopOrigin>(rhs_val, "comparing kwarg: " + lhs_key));
       } else if (lhs_val.type() == typeid(TensorLayout)) {
         values_equal = (AnyCast<TensorLayout>(lhs_val, "comparing kwarg: " + lhs_key) ==
                         AnyCast<TensorLayout>(rhs_val, "comparing kwarg: " + lhs_key));

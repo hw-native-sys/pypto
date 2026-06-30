@@ -976,16 +976,6 @@ class ForKind(enum.Enum):
     persists as a marker through ``CanonicalizeIOOrder`` (which demotes it to
     ``Sequential`` on exit) and must not survive past that pass."""
 
-class LoopOrigin(enum.Enum):
-    """Loop origin classification.
-
-    Tracks how a loop was generated:
-    - Original: Regular loop (default)
-    """
-
-    Original = ...
-    """Regular loop (default)."""
-
 class MemorySpace(enum.Enum):
     """Memory space enumeration."""
 

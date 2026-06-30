@@ -55,10 +55,6 @@ SCOPE_MODE_MAP: dict[str, bool] = {
     "MANUAL": True,
 }
 
-LOOP_ORIGIN_MAP: dict[str, ir.LoopOrigin] = {
-    "Original": ir.LoopOrigin.Original,
-}
-
 FUNCTION_TYPE_MAP: dict[str, ir.FunctionType] = {
     "Opaque": ir.FunctionType.Opaque,
     "Orchestration": ir.FunctionType.Orchestration,
@@ -114,7 +110,6 @@ def extract_enum_value(
 
 __all__ = [
     "LEVEL_MAP",
-    "LOOP_ORIGIN_MAP",
     "ROLE_MAP",
     "SPLIT_MODE_MAP",
     "FUNCTION_TYPE_MAP",
