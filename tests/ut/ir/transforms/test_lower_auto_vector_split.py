@@ -933,7 +933,9 @@ def test_pure_vector_split_is_left_untouched():
 # ---------------------------------------------------------------------------
 
 # Attrs the region path stamps on the function (no whole-function ``split`` mode —
-# each region carries its own ``split_``).
+# each region carries its own ``split_``). Same for every mode, including the
+# task-parallel ``None``: the ``split_aiv`` marker alone routes the function to the
+# both-lanes split path downstream (never the lane-0-only no-split replay).
 _REGION_ATTRS = {"split_aiv": True, "split_aiv_region_validated": True}
 
 
@@ -964,13 +966,29 @@ def _vec_load_region(span, mode, data, out, *, full_shape=(128, 128)):
 def _lowered_vec_load_region(span, mode, data, out, *, full_shape=(128, 128)):
     """Scope-erased lowered form of ``_vec_load_region``.
 
-    The region path prepends an injected ``subblock_idx = get_subblock_idx()``,
-    keeps the region's own ``aiv_id`` binding, halves the load on the split axis,
-    and localizes the load + store offsets per subblock. Returns
+    For UP_DOWN / LEFT_RIGHT (data-parallel): the region path prepends an
+    injected ``subblock_idx = get_subblock_idx()``, keeps the region's own
+    ``aiv_id`` binding, halves the load on the split axis, and localizes the
+    load + store offsets per subblock.
+
+    For NONE (task-parallel): the body is passed through UNCHANGED (scope erased)
+    — the author's ``aiv_id`` binding survives, tiles stay FULL, offsets are not
+    localized, and NO internal ``subblock_idx`` is injected. Returns
     ``(lowered_stmts, out_store_var)``.
     """
-    sub = _sub_var()
     aiv_id = ir.Var("aiv_id", _IDX, span)
+    if mode.value == 0:  # NONE — no halving, no injected subblock_idx, full tiles.
+        load = T.load(data, [0, 0], list(full_shape), target_memory=MS.Vec, span=span)
+        t = ir.Var("t", load.type, span)
+        store = T.store(t, [0, 0], out, span=span)
+        out_store = ir.Var("out_store", store.type, span)
+        none_stmts: list[ir.Stmt] = [
+            _get_subblock(aiv_id, span),
+            ir.AssignStmt(t, load, span),
+            ir.AssignStmt(out_store, store, span),
+        ]
+        return none_stmts, out_store
+    sub = _sub_var()
     if mode.value == 1:
         half = [full_shape[0] // 2, full_shape[1]]
         off = [0 + sub * (full_shape[0] // 2), 0]
@@ -1037,6 +1055,64 @@ def test_explicit_region_erased():
         [e_out.type],
     )
     ir.assert_structural_equal(_lower(program), expected)
+
+
+def test_none_region_keeps_tiles_full_and_binds_aiv_id():
+    """A task-parallel (NONE) region is passed through FULL-width: the load is NOT
+    halved, offsets are NOT localized, NO internal subblock_idx is injected, the
+    author's aiv_id binding survives, the scope wrapper is dropped, and the
+    function is stamped split_aiv + split_aiv_region_validated (same as the
+    data-parallel region path)."""
+    span = ir.Span.unknown()
+    data = ir.Var("data", _tensor([128, 128]), span)
+    out_0 = ir.Var("out_0", _tensor([128, 128]), span)
+    region, out_store = _vec_load_region(span, ir.SplitMode.NONE, data, out_0)
+    program = _explicit_region_program(
+        [region, ir.ReturnStmt([out_store], span)],
+        [(data, _IN), (out_0, _OUT)],
+        [out_0.type],
+    )
+
+    e_data = ir.Var("data", _tensor([128, 128]), span)
+    e_out = ir.Var("out_0", _tensor([128, 128]), span)
+    stmts, e_out_store = _lowered_vec_load_region(span, ir.SplitMode.NONE, e_data, e_out)
+    expected = _expected_region_program(
+        [*stmts, ir.ReturnStmt([e_out_store], span)],
+        [(e_data, _IN), (e_out, _OUT)],
+        [e_out.type],
+    )
+    ir.assert_structural_equal(_lower(program), expected)
+
+
+def test_none_region_rejects_aiv_shard():
+    """A boundary op (tile.aiv_shard) inside a NONE region is rejected: a
+    task-parallel region has no split axis to shard. NEGATIVE — no After IR.
+    (The always-on lowering CHECK fires even with verification disabled.)"""
+    span = ir.Span.unknown()
+    data = ir.Var("data", _tensor([128, 128]), span)
+    out_0 = ir.Var("out_0", _tensor([128, 128]), span)
+    aiv_id_call = T.get_subblock_idx(span=span)
+    aiv_id = ir.Var("aiv_id", aiv_id_call.type, span)
+    cube = ir.Var("cube", _tile([128, 128], mem=MS.Mat), span)
+    cube_load = T.load(data, [0, 0], [128, 128], target_memory=MS.Mat, span=span)
+    shard = _shard_vec(cube, 1, [64, 128], span)
+    sh = ir.Var("sh", shard.type, span)
+    body = ir.SeqStmts(
+        [
+            ir.AssignStmt(aiv_id, aiv_id_call, span),
+            ir.AssignStmt(cube, cube_load, span),
+            ir.AssignStmt(sh, shard, span),
+        ],
+        span,
+    )
+    region = ir.SplitAivScopeStmt(split=ir.SplitMode.NONE, body=body, span=span)
+    program = _explicit_region_program(
+        [region, ir.ReturnStmt([sh], span)],
+        [(data, _IN), (out_0, _OUT)],
+        [sh.type],
+    )
+    with pytest.raises(ValueError, match="must not contain tile.aiv_shard"):
+        _lower(program)
 
 
 def test_region_injects_subblock_idx():

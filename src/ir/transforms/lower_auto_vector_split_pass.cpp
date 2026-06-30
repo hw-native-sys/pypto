@@ -93,7 +93,7 @@ using split_axis::TileInfo;
 
 constexpr const char* kDualAivDispatchAttr = "dual_aiv_dispatch";
 constexpr const char* kSplitAivAttr = "split_aiv";
-// Stamped by the explicit-region path so ExpandMixedKernel (pass 22) skips its
+// Stamped by the explicit-region path so ExpandMixedKernel (pass 21) skips its
 // single-func-mode transpose-hazard check (validated per-region here instead).
 constexpr const char* kSplitAivRegionValidatedAttr = "split_aiv_region_validated";
 
@@ -205,7 +205,6 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
     // dropped and its scope-free body spliced in.
     if (auto reg = As<SplitAivScopeStmt>(stmt)) {
       SplitMode rmode = reg->split_;
-      int rdim = SplitDimension(rmode);
 
       auto region_stmts = transform_utils::FlattenToStmts(reg->body_);
       // Empty region (DCE-emptied, or a ``pass``-only body whose sole binding was
@@ -213,6 +212,33 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
       if (region_stmts.empty()) {
         continue;
       }
+
+      // TASK-PARALLEL form (SplitMode::None): both AIV lanes run the FULL body for
+      // disjoint work the author dispatches via aiv_id. No split axis, so no
+      // halving, no offset localization, no aiv_shard/aic_gather. Bind aiv_id and
+      // splice the body through unchanged, then drop the scope wrapper. (This must
+      // branch BEFORE SplitDimension(rmode) below, which rejects None. A
+      // shard/gather op inside a None region is caught by the AivSplitValid
+      // verifier — there is no split axis for it to mark.)
+      if (rmode == SplitMode::None) {
+        // A boundary op needs a split axis to mark; a task-parallel region has
+        // none. The AivSplitValid verifier rejects this with a user diagnostic,
+        // but guard here too so a verification-off build fails loudly rather than
+        // miscompiling (full tile silently passed where a half is expected).
+        CHECK_SPAN(!RegionBodyHasExplicitBoundary(reg->body_), reg->span_)
+            << "pl.split_aiv(mode=pl.SplitMode.NONE) region must not contain tile.aiv_shard / "
+               "tile.aic_gather: a task-parallel region has no split axis to shard / gather. Use "
+               "mode=pl.SplitMode.UP_DOWN / LEFT_RIGHT for data-parallel halving.";
+        // Pass the body through UNCHANGED, dropping only the scope wrapper. The
+        // body already opens with aiv_id = get_subblock_idx() (the author's lane
+        // index, used for disjoint dispatch). No halving and no per-lane offset
+        // localization happen here, so there is no second internal subblock_idx
+        // to inject — both AIV lanes run the full body verbatim.
+        for (auto& s : region_stmts) result.push_back(s);
+        continue;
+      }
+
+      int rdim = SplitDimension(rmode);
 
       // EXPLICIT boundary form (user wrote tile.aiv_shard / tile.aic_gather
       // inside the region): the body is already half-width and carries its own
@@ -658,7 +684,7 @@ bool BodyContainsSplitAivScope(const StmtPtr& body) {
 // halve only the vector compute inside each region (region-local), leave
 // out-of-region compute full-width, drop each scope wrapper, and stamp
 // ``split_aiv`` (idempotent — already bridged at OutlineIncoreScopes) plus
-// ``split_aiv_region_validated`` (signals pass 22 to skip its func-mode check).
+// ``split_aiv_region_validated`` (signals pass 21 to skip its func-mode check).
 FunctionPtr LowerExplicitRegionFunction(const FunctionPtr& func) {
   auto stmts = transform_utils::FlattenToStmts(func->body_);
   // Seed the reservation set with every name visible in the function body (params

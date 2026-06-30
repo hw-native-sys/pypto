@@ -2297,8 +2297,11 @@ class SpmdScopeStmt(ScopeStmt):
 class SplitAivScopeStmt(ScopeStmt):
     """Explicit AIV-split region: `for aiv_id in pl.split_aiv(2, mode=...)`.
 
-    Halves vector compute across the 2 AIV subblocks. Erased by
-    LowerAutoVectorSplit (pass 21); never reaches codegen.
+    Dispatches a region across the 2 AIV subblocks. ``mode=SplitMode.NONE`` is
+    task-parallel (no halving; both lanes run the full body, dispatched via
+    ``aiv_id``); ``UP_DOWN`` / ``LEFT_RIGHT`` are data-parallel (vector compute
+    halved on the split axis). Erased by LowerAutoVectorSplit (pass 20); never
+    reaches codegen.
     """
 
     split: Final[SplitMode]

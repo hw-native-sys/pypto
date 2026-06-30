@@ -99,23 +99,38 @@ function is stamped `split_aiv` + `split_aiv_region_validated` (the latter signa
 transpose check — pass 21 validates each region's transpose hazard with the
 correct per-region split axis instead).
 
-Two region body shapes are handled:
+Three region body shapes are handled, selected by the region's `split_` mode:
 
-- **Full-width body** (no explicit boundary op): the region body holds full-width
-  vector compute. The region path injects a per-region `subblock_idx`, routes the
-  vector ops through the shared `split_axis::ProcessStmts` halving machinery
-  (region-scoped), and validates the per-region transpose hazard. This is the
-  paradigm the auto-converged form produces.
-- **Explicit boundary body** (`tile.aiv_shard` / `tile.aic_gather` already
-  present): the user manually sharded the cube tile and wrote the vector compute
-  on the per-lane half, so the body is **already** in half-width form. The region
-  path detects this (`RegionBodyHasExplicitBoundary`) and **splices the body
-  through unchanged** — no re-halving, no duplicate `subblock_idx`. Re-running the
-  halving here would double-shard (a downstream Acc→Vec move would be misread as a
-  fresh cube→vector boundary and rewritten to a second `aiv_shard`), orphaning a
-  halved Acc memref with no allocation and crashing PTO codegen. `ExpandMixedKernel`
-  folds the explicit boundary into `tpush`/`tpop` exactly as for a hand-authored
-  split_aiv kernel.
+- **Data-parallel, full-width body** (`UpDown` / `LeftRight`, no explicit boundary
+  op): the region body holds full-width vector compute. The region path injects a
+  per-region `subblock_idx`, routes the vector ops through the shared
+  `split_axis::ProcessStmts` halving machinery (region-scoped), and validates the
+  per-region transpose hazard. This is the paradigm the auto-converged form
+  produces.
+- **Data-parallel, explicit boundary body** (`UpDown` / `LeftRight` with
+  `tile.aiv_shard` / `tile.aic_gather` already present): the user manually sharded
+  the cube tile and wrote the vector compute on the per-lane half, so the body is
+  **already** in half-width form. The region path detects this
+  (`RegionBodyHasExplicitBoundary`) and **splices the body through unchanged** — no
+  re-halving, no duplicate `subblock_idx`. Re-running the halving here would
+  double-shard (a downstream Acc→Vec move would be misread as a fresh cube→vector
+  boundary and rewritten to a second `aiv_shard`), orphaning a halved Acc memref
+  with no allocation and crashing PTO codegen. `ExpandMixedKernel` folds the
+  explicit boundary into `tpush`/`tpop` exactly as for a hand-authored split_aiv
+  kernel.
+- **Task-parallel body** (`None`): there is **no split axis** — both AIV lanes run
+  the **full** body for disjoint work the author dispatches via the region's
+  `aiv_id` lane index (e.g. an `aiv_id`-strided loop). The region path **splices
+  the body through unchanged** (no halving, no offset localization, no injected
+  `subblock_idx`; the author's `aiv_id = get_subblock_idx()` binding already
+  carries the lane). A `tile.aiv_shard` / `tile.aic_gather` inside a `None` region
+  is rejected (nothing to shard without a split axis) — both by the `AivSplitValid`
+  verifier and by an always-on guard here. The function is still stamped
+  `split_aiv`, so downstream [`ExpandMixedKernel`](21-expand_mixed_kernel.md) /
+  `SplitVectorKernel` dispatch it to **both** AIV lanes (via `dual_aiv_dispatch`)
+  and **not** the lane-0-only no-split replay (which is only for non-`split_aiv`
+  kernels) — so both lanes run the full body. Use this when the region's tiles
+  cannot be halved (unit dims) or a reduction must stay full-width.
 
 Because the region is built via the generic `BeginScope`/`EndScope` and is
 non-outlined, it can be **nested** inside a `pl.range` / `pl.pipeline` loop or an
@@ -126,11 +141,13 @@ region while preserving the surrounding control flow.
 
 | `SplitMode` (int) | Split axis | Vector sub-region halved on |
 | ----------------- | ---------- | --------------------------- |
+| `None` (0) | — (no split axis) | nothing — task-parallel; tiles stay FULL, `aiv_id` dispatches both lanes |
 | `UpDown` (1) | dim 0 (height) | rows |
 | `LeftRight` (2) | dim 1 (width) | cols |
 
 `SplitDimension(mode)` returns `0` for `UpDown`, `1` for `LeftRight`
-(`split_axis_utils`).
+(`split_axis_utils`); it is **not** called for `None` (the region path branches on
+`None` first — there is no axis to derive).
 
 ## Algorithm
 

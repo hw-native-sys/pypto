@@ -1398,8 +1398,10 @@ void BindIR(nb::module_& m) {
   // SplitAivScopeStmt
   auto split_aiv_scope_stmt_class = nb::class_<SplitAivScopeStmt, ScopeStmt>(
       ir, "SplitAivScopeStmt",
-      "Explicit AIV-split region: halves vector compute across 2 subblocks. "
-      "Erased by LowerAutoVectorSplit (pass 21); never reaches codegen.");
+      "Explicit AIV-split region across 2 subblocks. mode=NONE is task-parallel "
+      "(no halving; both lanes run the full body via aiv_id); UP_DOWN/LEFT_RIGHT "
+      "halve vector compute on the split axis. Erased by LowerAutoVectorSplit "
+      "(pass 20); never reaches codegen.");
   split_aiv_scope_stmt_class.def(nb::init<SplitMode, int, std::string, const StmtPtr&, const Span&>(),
                                  nb::arg("split"), nb::arg("count") = 2, nb::arg("name_hint") = "",
                                  nb::arg("body"), nb::arg("span"), "Create an AIV-split scope statement");

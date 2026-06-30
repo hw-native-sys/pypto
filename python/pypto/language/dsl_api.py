@@ -847,10 +847,21 @@ def split_aiv(n: int, *, mode: ir.SplitMode) -> SplitAivContext:
     region carrying the requested ``SplitMode``. Because it is a structural node
     (not a whole-InCore-scope flag), it is **nestable**: the region may appear
     inside a ``pl.range`` / ``pl.pipeline`` loop or an ``if``, and sibling regions
-    may carry **different** modes (multi-mode), each halved independently. A
+    may carry **different** modes (multi-mode), each lowered independently. A
     top-level ``for aiv_id in pl.split_aiv(...)`` is wrapped in an enclosing
     ``InCore`` scope so OutlineIncoreScopes can outline it. The loop variable
     binds the AIV lane index (equivalent to ``pl.tile.get_subblock_idx()``).
+
+    Two dispatch modes:
+
+    * **Data-parallel** (``UP_DOWN`` / ``LEFT_RIGHT``): the region's vector
+      compute is **halved** on the split axis (rows / cols), so each lane
+      processes one half of every tile.
+    * **Task-parallel** (``NONE``): **no halving** — both lanes run the *full*
+      body for disjoint work the author dispatches via ``aiv_id`` (e.g. an
+      ``aiv_id``-strided loop). Use this when the tiles cannot be halved
+      (unit dims) or a reduction must stay full-width. ``tile.aiv_shard`` /
+      ``tile.aic_gather`` are rejected here — there is no split axis.
 
     The region survives parse -> SSA -> ResolveBackendOpLayouts as a structural
     node (printer emits ``for aiv_id in pl.split_aiv(...):`` so parse->print->parse
@@ -860,8 +871,9 @@ def split_aiv(n: int, *, mode: ir.SplitMode) -> SplitAivContext:
     Args:
         n: The AIV sub-core count. Positional; hardware-fixed at 2 (the two AIV
             lanes of one AICore). Any other value is rejected by the parser.
-        mode: Required split mode (``pl.SplitMode.UP_DOWN`` or
-            ``pl.SplitMode.LEFT_RIGHT``). No silent default.
+        mode: Required dispatch mode, no silent default. ``pl.SplitMode.NONE``
+            (task-parallel, no halving), ``pl.SplitMode.UP_DOWN`` or
+            ``pl.SplitMode.LEFT_RIGHT`` (data-parallel halving).
 
     Returns:
         Loop iterator for the explicit AIV-split region.

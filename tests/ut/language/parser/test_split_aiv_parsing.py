@@ -156,6 +156,56 @@ class TestSplitAivBuildsNode:
         assert incore.split is None
         assert "split_aiv" not in incore.attrs
 
+    def test_builds_node_none_mode(self):
+        """``mode=pl.SplitMode.NONE`` builds a task-parallel region: split is
+        NONE on the node, count stays 2, and aiv_id is still bound."""
+
+        @pl.program
+        class TestProgram:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+                    offset = aiv_id * 256
+                    t: pl.Tile[[256, 128], pl.FP32] = pl.load(a, [offset, 0], [256, 128])
+                    out = pl.store(t, [offset, 0], out)
+                return out
+
+        main_func = list(TestProgram.functions.values())[0]
+        region = _unique_descendant(main_func.body, ir.SplitAivScopeStmt)
+        assert region.split == ir.SplitMode.NONE
+        assert region.count == 2
+
+        # aiv_id still binds tile.get_subblock_idx() even with no halving.
+        first_stmt = _first_body_stmt(region)
+        assert isinstance(first_stmt, ir.AssignStmt)
+        assert isinstance(first_stmt.value, ir.Call)
+        assert first_stmt.value.op.name == "tile.get_subblock_idx"
+        assert first_stmt.var.name_hint == "aiv_id"
+
+    def test_none_mode_print_roundtrips(self):
+        """A NONE region prints as ``pl.split_aiv(2, mode=pl.SplitMode.NONE)``."""
+
+        @pl.program
+        class TestProgram:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+                    offset = aiv_id * 256
+                    t: pl.Tile[[256, 128], pl.FP32] = pl.load(a, [offset, 0], [256, 128])
+                    out = pl.store(t, [offset, 0], out)
+                return out
+
+        txt = ir.python_print(TestProgram)
+        assert "pl.split_aiv(2, mode=pl.SplitMode.NONE)" in txt
+
     def test_nested_in_loop_builds_node(self):
         """A split_aiv nested inside a pl.range loop (within a CORE_GROUP scope)
         builds a SplitAivScopeStmt region inside the ForStmt — the region is not

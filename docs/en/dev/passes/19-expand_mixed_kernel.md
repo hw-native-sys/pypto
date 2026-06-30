@@ -165,6 +165,13 @@ handshakes with tile-producing replay work forced to `valid_shape=[0, 0]`, and v
 This keeps the AIC/AIV handshakes balanced for `pl.at(level=CORE_GROUP)` no-split mixed
 kernels while the secondary sync lane avoids real DMA/compute work.
 
+This replay path applies only to **non-`split_aiv`** mixed kernels. A function carrying a `pl.split_aiv` region — any
+mode, including the task-parallel `pl.SplitMode.NONE` — is stamped `split_aiv` by
+[`LowerAutoVectorSplit`](20-lower_auto_vector_split.md) (pass 20), so [`SplitVectorKernel`](23-split_vector_kernel.md)
+routes it through the split path (both AIV lanes dispatch via `dual_aiv_dispatch`) and never the lane-0-only replay
+above. For a `NONE` region this is exactly right: both lanes run the **full** body for disjoint, `aiv_id`-dispatched
+work — dropping lane-1 stores would be a miscompile.
+
 **Requirements**:
 
 - Input IR must have tile ops (run `ConvertTensorToTileOps` first)

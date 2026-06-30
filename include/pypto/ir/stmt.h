@@ -800,11 +800,18 @@ using SpmdScopeStmtPtr = std::shared_ptr<const SpmdScopeStmt>;
 /**
  * @brief Explicit AIV-split region: `for aiv_id in pl.split_aiv(2, mode=...)`.
  *
- * Marks a region whose vector compute is halved across the 2 AIV subblocks.
+ * Marks a region dispatched across the 2 AIV subblocks. The mode selects how:
+ *   - `UpDown` / `LeftRight` — *data-parallel*: the region's vector compute is
+ *     halved on the split axis (rows / cols), so each lane processes one half.
+ *   - `None` — *task-parallel*: NO halving. Both lanes run the full body for
+ *     disjoint work the author selects via the `aiv_id` lane index (e.g. an
+ *     `aiv_id`-strided loop). Useful when the region's tiles cannot be halved
+ *     (unit dims) or when a reduction must stay full-width.
+ *
  * Unlike the legacy whole-InCore-scope split, this is a structural region that
  * may appear anywhere in an InCore body — inside a pl.range/pl.pipeline loop or
  * an if. The region body begins with `aiv_id = tile.get_subblock_idx()`. The
- * node is consumed and erased by LowerAutoVectorSplit (pass 21); never reaches
+ * node is consumed and erased by LowerAutoVectorSplit (pass 20); never reaches
  * codegen.
  */
 class SplitAivScopeStmt : public ScopeStmt {
@@ -816,8 +823,10 @@ class SplitAivScopeStmt : public ScopeStmt {
                   std::move(attrs)),
         split_(split),
         count_(count) {
-    INTERNAL_CHECK(split_ != SplitMode::None)
-        << "SplitAivScopeStmt split mode must not be None (got a no-op AIV split)";
+    // split_ == None is VALID: it marks a task-parallel dual-AIV region (no
+    // halving; both lanes run the full body, dispatched via aiv_id). UpDown /
+    // LeftRight are the data-parallel forms (vector compute halved on the split
+    // axis). count_ is hardware-fixed at 2 (the two AIV lanes of one AICore).
     INTERNAL_CHECK(count_ == 2) << "SplitAivScopeStmt count must be 2 (AIV sub-core count), got " << count_;
   }
 
@@ -832,7 +841,7 @@ class SplitAivScopeStmt : public ScopeStmt {
   }
 
  public:
-  SplitMode split_;  ///< AIV split mode (UpDown or LeftRight; never None)
+  SplitMode split_;  ///< None=task-parallel (no halving); UpDown/LeftRight=data-parallel halving
   int count_;        ///< AIV sub-core count (hardware-fixed at 2)
 };
 

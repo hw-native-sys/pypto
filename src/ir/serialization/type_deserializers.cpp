@@ -853,7 +853,7 @@ static IRNodePtr DeserializeSplitAivScopeStmt(const msgpack::object& fields_obj,
   CHECK_SPAN(split_obj.type == msgpack::type::POSITIVE_INTEGER, span)
       << "SplitAivScopeStmt 'split' must be an integer SplitMode code";
   SplitMode split = static_cast<SplitMode>(split_obj.as<uint64_t>());
-  CHECK_SPAN(split != SplitMode::None, span) << "SplitAivScopeStmt 'split' must not be None";
+  // None is a valid SplitAivScopeStmt mode (task-parallel dual-AIV; no halving).
   int count = static_cast<int>(GET_FIELD_OBJ("count").as<int64_t>());
   auto name_hint = DeserializeScopeNameHint(fields_obj, ctx);
   auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));

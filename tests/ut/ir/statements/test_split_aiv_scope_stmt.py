@@ -37,16 +37,37 @@ def test_construct():
     assert isinstance(scope.body, ir.AssignStmt)
 
 
-def test_construct_rejects_none_mode():
-    """The ctor INTERNAL_CHECK rejects SplitMode.NONE (a no-op AIV split).
+def test_construct_accepts_none_mode():
+    """The ctor accepts SplitMode.NONE — a task-parallel (no-halve) AIV region.
 
-    Narrowed to the exact pypto exception the INTERNAL_CHECK surfaces
-    (``pypto.InternalError``) so the test can't pass for the wrong reason.
+    Both AIV lanes run the full body, dispatched by aiv_id; count stays 2.
     """
     span = ir.Span("test.py", 1, 1, 1, 10)
     body = _make_body(span, *_vars(span))
+    scope = ir.SplitAivScopeStmt(split=ir.SplitMode.NONE, body=body, span=span)
+    assert scope.split == ir.SplitMode.NONE
+    assert scope.count == 2
+    assert scope.scope_kind == ir.ScopeKind.SplitAiv
+
+
+def test_construct_rejects_bad_count():
+    """count must be 2 (the two AIV sub-cores) regardless of mode."""
+    span = ir.Span("test.py", 1, 1, 1, 10)
+    body = _make_body(span, *_vars(span))
     with pytest.raises(pypto.InternalError):
-        ir.SplitAivScopeStmt(split=ir.SplitMode.NONE, body=body, span=span)
+        ir.SplitAivScopeStmt(split=ir.SplitMode.NONE, count=4, body=body, span=span)
+
+
+def test_none_mode_serialize_roundtrip():
+    """A task-parallel (None) region survives .pto serialize -> deserialize."""
+    span = ir.Span("test.py", 1, 1, 1, 10)
+    scope = ir.SplitAivScopeStmt(split=ir.SplitMode.NONE, body=_make_body(span, *_vars(span)), span=span)
+    data = ir.serialize(scope)
+    restored = ir.deserialize(data)
+    assert isinstance(restored, ir.SplitAivScopeStmt)
+    assert restored.split == ir.SplitMode.NONE
+    assert restored.count == 2
+    assert ir.serialize(restored) == data
 
 
 def test_structural_equal_same():

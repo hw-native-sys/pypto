@@ -3961,13 +3961,14 @@ class ASTParser:
         ``if`` — and carries the requested ``SplitMode`` on
         ``SplitAivScopeStmt::split_``. The loop variable is bound to
         ``pl.tile.get_subblock_idx()`` (the AIV lane / sub-core index) as the
-        first statement of the region body. ``LowerAutoVectorSplit`` (pass 21)
+        first statement of the region body. ``LowerAutoVectorSplit`` (pass 20)
         consumes and erases the node; it never reaches codegen.
         """
         split_aiv_hint = (
-            "Use 'for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):' — n is the "
-            "AIV sub-core count (hardware-fixed at 2), 'mode' is required, and the loop "
-            "variable binds the AIV lane index (equivalent to pl.tile.get_subblock_idx())."
+            "Use 'for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE):' — n is the AIV "
+            "sub-core count (hardware-fixed at 2); 'mode' is required (NONE = task-parallel, "
+            "no halving; UP_DOWN / LEFT_RIGHT = data-parallel halving); and the loop variable "
+            "binds the AIV lane index (equivalent to pl.tile.get_subblock_idx())."
         )
         # A pl.split_aiv loop must not be nested inside another pl.split_aiv body:
         # one split_aiv body already represents the two AIV lanes, so re-partitioning
@@ -4044,14 +4045,15 @@ class ASTParser:
                 )
         if split_mode is None:
             raise ParserSyntaxError(
-                "pl.split_aiv() requires mode= (e.g. mode=pl.SplitMode.UP_DOWN)",
+                "pl.split_aiv() requires mode= (e.g. mode=pl.SplitMode.NONE for task-parallel, "
+                "or pl.SplitMode.UP_DOWN / pl.SplitMode.LEFT_RIGHT for data-parallel halving)",
                 span=self.span_tracker.get_span(iter_call),
                 hint=split_aiv_hint,
             )
 
         # Build a first-class SplitAivScopeStmt region. The region body begins
         # with ``aiv_id = pl.tile.get_subblock_idx()`` and carries the requested
-        # SplitMode on the node; LowerAutoVectorSplit (pass 21) consumes it.
+        # SplitMode on the node; LowerAutoVectorSplit (pass 20) consumes it.
         #
         # FLATTEN: when already inside a CORE_GROUP scope — InCore *or* AutoInCore
         # (``pl.at(level=CORE_GROUP, optimizations=[pl.auto_chunk])``), directly or

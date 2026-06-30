@@ -137,6 +137,12 @@ replay 路径强制为 `valid_shape=[0, 0]`，同时屏蔽可见的 `tile.store`
 `pl.at(level=CORE_GROUP)` 形式的 no-split mixed kernel 也能保持 AIC/AIV
 握手对称，同时让第二个同步 lane 避免真实 DMA/计算工作。
 
+此 replay 路径仅适用于**非 `split_aiv`** 的 mixed kernel。携带 `pl.split_aiv` 区域的函数——任意模式，包括任务并行的
+`pl.SplitMode.NONE`——会被 [`LowerAutoVectorSplit`](20-lower_auto_vector_split.md)（pass 20）标记 `split_aiv`，因此
+[`SplitVectorKernel`](23-split_vector_kernel.md) 会将其走 split 路径（两个 AIV lane 经由 `dual_aiv_dispatch` 派发），
+而非上述 lane-0-only 的 replay。对 `NONE` 区域这正是所需：两个 lane 都运行**完整**函数体，处理由 `aiv_id` 分派的
+不相交工作——丢弃 lane-1 的 store 会导致误编译。
+
 **前置条件**：
 
 - 输入 IR 必须具有 tile 操作（需先运行 `ConvertTensorToTileOps`）

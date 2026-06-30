@@ -167,5 +167,55 @@ def test_fullwidth_vector_outside_region_passes():
     assert _errors(program) == []
 
 
+# ---------------------------------------------------------------------------
+# Task-parallel (NONE) regions: no split axis. Boundary ops are rejected; the
+# split-axis rules (cube / reduce-on-split-axis) do NOT apply (both lanes run
+# the full body).
+# ---------------------------------------------------------------------------
+
+
+def test_boundary_in_none_region_fails():
+    """tile.aiv_shard inside a NONE region -> Error (no split axis to shard)."""
+    span = ir.Span.unknown()
+    data = ir.Var("d", _tile([16, 128]), span)
+    shard = T.aiv_shard(data, split=int(ir.SplitMode.UP_DOWN.value), span=span)
+    res = ir.Var("res", shard.type, span)
+    region = _region(ir.SplitMode.NONE, [ir.AssignStmt(res, shard, span)])
+    program = _program(ir.SeqStmts([region], span))
+
+    errors = _errors(program)
+    assert len(errors) == 1
+    assert errors[0].rule_name == "AivSplitValid"
+    assert "tile.aiv_shard" in errors[0].message
+    assert "task-parallel" in errors[0].message
+
+
+def test_reduce_in_none_region_passes():
+    """A reduce that would collapse dim 0 is fine in a NONE region: there is no
+    split axis, so it is a full (not partial) reduction on both lanes."""
+    span = ir.Span.unknown()
+    data = ir.Var("d", _tile([16, 128]), span)
+    cm = T.col_max(data, span)
+    res = ir.Var("res", cm.type, span)
+    region = _region(ir.SplitMode.NONE, [ir.AssignStmt(res, cm, span)])
+    program = _program(ir.SeqStmts([region], span))
+
+    assert _errors(program) == []
+
+
+def test_cube_in_none_region_passes():
+    """A cube op is allowed in a NONE region: nothing is halved, and the op routes
+    to AIC after ExpandMixedKernel — both AIV lanes run the full body."""
+    span = ir.Span.unknown()
+    lhs = ir.Var("lhs", _tile([16, 128], MS.Left), span)
+    rhs = ir.Var("rhs", _tile([128, 64], MS.Right), span)
+    mm = T.matmul(lhs, rhs, span)
+    res = ir.Var("res", mm.type, span)
+    region = _region(ir.SplitMode.NONE, [ir.AssignStmt(res, mm, span)])
+    program = _program(ir.SeqStmts([region], span))
+
+    assert _errors(program) == []
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

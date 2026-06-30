@@ -58,7 +58,10 @@ class SplitAivStructuralVerifier : public IRVisitor {
     INTERNAL_CHECK_SPAN(op->body_, op->span_) << "Internal error: SplitAivScopeStmt has null body";
     int prev_split_dim = cur_split_dim_;
     ++depth_;
-    cur_split_dim_ = split_axis::SplitDimension(op->split_);
+    // A task-parallel (None) region has NO split axis — both lanes run the full
+    // body, dispatched via aiv_id. Mark cur_split_dim_ = -1 so the split-axis
+    // rules (a)/(b) are skipped for it; only the boundary-op rejection applies.
+    cur_split_dim_ = (op->split_ == SplitMode::None) ? -1 : split_axis::SplitDimension(op->split_);
     IRVisitor::VisitStmt(op->body_);
     --depth_;
     cur_split_dim_ = prev_split_dim;
@@ -67,7 +70,9 @@ class SplitAivStructuralVerifier : public IRVisitor {
   void VisitExpr_(const CallPtr& op) override {
     if (op && op->op_) {
       const bool boundary = IsOp(op, "tile.aiv_shard") || IsOp(op, "tile.aic_gather");
-      if (depth_ > 0) {
+      const bool in_split_region = depth_ > 0 && cur_split_dim_ != -1;  // data-parallel (UpDown/LeftRight)
+      const bool in_none_region = depth_ > 0 && cur_split_dim_ == -1;   // task-parallel (None)
+      if (in_split_region) {
         // (a) Cube compute cannot live inside a vector-split region.
         if (!boundary && core_affinity::ClassifyCallAffinity(op) == core_affinity::CoreAffinity::CUBE) {
           Err(op->span_, "cube op '" + op->op_->name_ +
@@ -82,6 +87,16 @@ class SplitAivStructuralVerifier : public IRVisitor {
                              ") inside a pl.split_aiv region, producing a partial reduction; reduce "
                              "the non-split axis, or gather the lanes back (tile.aic_gather) before "
                              "reducing.");
+        }
+      } else if (in_none_region) {
+        // (c') A boundary op needs a split axis to mark — none exists in a
+        // task-parallel (mode=NONE) region. Cube / reduce / full-width vector
+        // ops are all fine here (both lanes run the full body).
+        if (boundary) {
+          Err(op->span_, "'" + op->op_->name_ +
+                             "' cannot appear inside a task-parallel pl.split_aiv region "
+                             "(mode=pl.SplitMode.NONE): there is no split axis to shard / gather. Use "
+                             "mode=pl.SplitMode.UP_DOWN / LEFT_RIGHT for data-parallel halving instead.");
         }
       } else if (boundary) {
         // (c) The AIV-split boundary op escaped its region.

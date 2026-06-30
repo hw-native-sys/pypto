@@ -80,18 +80,27 @@ result = passes.lower_auto_vector_split()(program)
 [`ExpandMixedKernel`](21-expand_mixed_kernel.md) 跳过其单一函数级模式的转置检查——
 改由 pass 21 用每个区域正确的拆分轴校验各自的转置风险）。
 
-处理两种区域体形态：
+按区域的 `split_` 模式处理三种区域体形态：
 
-- **全宽体**（无显式边界算子）：区域体持有全宽向量计算。区域路径注入按区域的
-  `subblock_idx`，将向量算子路由到共享的 `split_axis::ProcessStmts` 折半机制（按区域局部
-  进行），并校验按区域的转置风险。这是自动收敛形态产生的范式。
-- **显式边界体**（已存在 `tile.aiv_shard` / `tile.aic_gather`）：用户已手动切分 cube
-  tile 并在每 lane 的半块上编写向量计算，故区域体**已是**半宽形态。区域路径检测到这一点
-  （`RegionBodyHasExplicitBoundary`）后**原样透传区域体**——不再折半，也不注入重复的
-  `subblock_idx`。若在此处再次折半将导致**双重切分**（下游的 Acc→Vec move 会被误判为新的
-  cube→vector 边界并被改写成第二个 `aiv_shard`），从而产生一个无任何分配的孤立 Acc
-  memref 并使 PTO codegen 崩溃。`ExpandMixedKernel` 会像处理手写 split_aiv 核一样，把显式
-  边界折叠为 `tpush`/`tpop`。
+- **数据并行 · 全宽体**（`UpDown` / `LeftRight`，无显式边界算子）：区域体持有全宽向量计算。
+  区域路径注入按区域的 `subblock_idx`，将向量算子路由到共享的 `split_axis::ProcessStmts`
+  折半机制（按区域局部进行），并校验按区域的转置风险。这是自动收敛形态产生的范式。
+- **数据并行 · 显式边界体**（`UpDown` / `LeftRight`，已存在 `tile.aiv_shard` /
+  `tile.aic_gather`）：用户已手动切分 cube tile 并在每 lane 的半块上编写向量计算，故区域体
+  **已是**半宽形态。区域路径检测到这一点（`RegionBodyHasExplicitBoundary`）后**原样透传区域
+  体**——不再折半，也不注入重复的 `subblock_idx`。若在此处再次折半将导致**双重切分**（下游的
+  Acc→Vec move 会被误判为新的 cube→vector 边界并被改写成第二个 `aiv_shard`），从而产生一个
+  无任何分配的孤立 Acc memref 并使 PTO codegen 崩溃。`ExpandMixedKernel` 会像处理手写
+  split_aiv 核一样，把显式边界折叠为 `tpush`/`tpop`。
+- **任务并行体**（`None`）：**没有拆分轴**——两个 AIV lane 都运行**完整**区域体，由作者通过
+  区域的 `aiv_id` lane 索引（例如按 `aiv_id` 跨步的循环）分派各自不相交的工作。区域路径
+  **原样透传区域体**（不折半、不本地化偏移、不注入 `subblock_idx`；作者的
+  `aiv_id = get_subblock_idx()` 绑定已携带 lane 信息）。`None` 区域内的 `tile.aiv_shard` /
+  `tile.aic_gather` 会被拒绝（无拆分轴可切分）——由 `AivSplitValid` 校验器与此处的常开保护
+  共同拦截。该函数仍会被标记 `split_aiv`，因此下游 [`ExpandMixedKernel`](21-expand_mixed_kernel.md) /
+  `SplitVectorKernel` 会把它派发到**两个** AIV lane（经由 `dual_aiv_dispatch`），而**非**
+  lane-0-only 的非拆分 replay（后者只针对非 `split_aiv` 核）——故两个 lane 都运行完整函数体。
+  当区域的 tile 无法折半（单位维）或归约必须保持全宽时使用本模式。
 
 由于区域经由通用的 `BeginScope`/`EndScope` 构建且不被提取，它可**嵌套**在 `pl.range` /
 `pl.pipeline` 循环或 `if` 之内；区域路径会递归进入复合语句，找到并下降每个区域，同时保留
@@ -101,11 +110,12 @@ result = passes.lower_auto_vector_split()(program)
 
 | `SplitMode`（int） | 拆分轴 | 折半的向量子区域 |
 | ------------------ | ------ | ---------------- |
+| `None`（0） | —（无拆分轴） | 不折半——任务并行；tile 保持全宽，由 `aiv_id` 分派两个 lane |
 | `UpDown`（1） | 维 0（高度） | 行 |
 | `LeftRight`（2） | 维 1（宽度） | 列 |
 
 `SplitDimension(mode)` 对 `UpDown` 返回 `0`，对 `LeftRight` 返回 `1`
-（`split_axis_utils`）。
+（`split_axis_utils`）；对 `None` **不调用**（区域路径先对 `None` 分支——无轴可推导）。
 
 ## 算法
 
