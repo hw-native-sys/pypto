@@ -2771,17 +2771,21 @@ class TestTensorRandomConversion:
     def test_tensor_random_conversion(self):
         """tensor.random -> tile.random conversion preserves seeds, dtype and rounds."""
 
+        # Use non-default dtype (INT32) and rounds (7) so a conversion bug that
+        # dropped user-specified attrs would fail this structural comparison.
         @pl.program
         class Before:
             @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(self, x: pl.Tensor[[4, 256], pl.UINT32]) -> pl.Tensor[[4, 256], pl.UINT32]:
-                r: pl.Tensor[[4, 256], pl.UINT32] = pl.tensor.random(1, 2, 3, 4, 5, 6, [4, 256])
-                y: pl.Tensor[[4, 256], pl.UINT32] = pl.add(r, x)
+            def main_incore_0(self, x: pl.Tensor[[4, 256], pl.INT32]) -> pl.Tensor[[4, 256], pl.INT32]:
+                r: pl.Tensor[[4, 256], pl.INT32] = pl.tensor.random(
+                    1, 2, 3, 4, 5, 6, [4, 256], dtype=pl.INT32, rounds=7
+                )
+                y: pl.Tensor[[4, 256], pl.INT32] = pl.add(r, x)
                 return y
 
             @pl.function
-            def main(self, x: pl.Tensor[[4, 256], pl.UINT32]) -> pl.Tensor[[4, 256], pl.UINT32]:
-                y: pl.Tensor[[4, 256], pl.UINT32] = self.main_incore_0(x)
+            def main(self, x: pl.Tensor[[4, 256], pl.INT32]) -> pl.Tensor[[4, 256], pl.INT32]:
+                y: pl.Tensor[[4, 256], pl.INT32] = self.main_incore_0(x)
                 return y
 
         @pl.program
@@ -2789,18 +2793,18 @@ class TestTensorRandomConversion:
             @pl.function(type=pl.FunctionType.InCore)
             def main_incore_0(
                 self,
-                x: pl.Tensor[[4, 256], pl.UINT32],
-                ret0__out: pl.Out[pl.Tensor[[4, 256], pl.UINT32]],
-            ) -> pl.Tensor[[4, 256], pl.UINT32]:
-                x__tile = pl.load(x, [0, 0], [4, 256], [4, 256], target_memory=pl.Mem.Vec, transpose=False)
-                r__tile = pl.tile.random(1, 2, 3, 4, 5, 6, [4, 256])
+                x: pl.Tensor[[4, 256], pl.INT32],
+                ret0__out: pl.Out[pl.Tensor[[4, 256], pl.INT32]],
+            ) -> pl.Tensor[[4, 256], pl.INT32]:
+                x__tile = pl.load(x, [0, 0], [4, 256], [4, 256], target_memory=pl.Mem.Vec)
+                r__tile = pl.tile.random(1, 2, 3, 4, 5, 6, [4, 256], dtype=pl.INT32, rounds=7)
                 y__tile = pl.tile.add(r__tile, x__tile)
                 ret0__store = pl.store(y__tile, [0, 0], ret0__out)
                 return ret0__store
 
             @pl.function
-            def main(self, x: pl.Tensor[[4, 256], pl.UINT32]) -> pl.Tensor[[4, 256], pl.UINT32]:
-                ret0__out = pl.create_tensor([4, 256], dtype=pl.UINT32, layout=pl.TensorLayout.ND)
+            def main(self, x: pl.Tensor[[4, 256], pl.INT32]) -> pl.Tensor[[4, 256], pl.INT32]:
+                ret0__out = pl.create_tensor([4, 256], dtype=pl.INT32, layout=pl.TensorLayout.ND)
                 y = self.main_incore_0(x, ret0__out)
                 return y
 

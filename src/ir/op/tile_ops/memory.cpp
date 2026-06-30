@@ -556,6 +556,10 @@ TypePtr DeduceTileRandomType(const std::vector<ExprPtr>& args,
     tile_shape.push_back(make_tuple->elements_[i]);
   }
   CHECK(!tile_shape.empty()) << "The operator " << op_name << " requires non-empty shape";
+  // pto.trandom is a 2D row/col generator and FlattenTileNd does not lower it, so
+  // reject N-D shapes here rather than emit a tile the codegen cannot handle.
+  CHECK(tile_shape.size() == 2) << "The operator " << op_name
+                                << " requires a 2D shape (rows, cols), but got rank " << tile_shape.size();
 
   // Default: the entire destination is populated (valid == full shape). An optional
   // valid_shape tuple narrows the written region (must match rank and 0 < v <= shape).

@@ -3400,6 +3400,14 @@ class TestTensorRandomOp:
         with pytest.raises(ValueError, match=r"INT32.*UINT32"):
             tensor.random(1, 2, 3, 4, 5, 6, [4, 64], dtype=DataType.FP32)
 
+    def test_tensor_random_rejects_bad_rounds(self):
+        with pytest.raises(ValueError, match="rounds to be 7 or 10"):
+            tensor.random(1, 2, 3, 4, 5, 6, [4, 64], rounds=5)
+
+    def test_tensor_random_rejects_nd_shape(self):
+        with pytest.raises(ValueError, match="2D shape"):
+            tensor.random(1, 2, 3, 4, 5, 6, [2, 4, 64])
+
     def test_top_level_random_is_tensor_random(self):
         assert pl.random is pl.tensor.random
 

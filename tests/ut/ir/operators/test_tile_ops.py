@@ -3921,8 +3921,9 @@ class TestTileRandomOp:
         assert call.type.dtype == DataType.INT32
 
     def test_tile_random_rounds7(self):
+        """rounds=7 must be preserved on the op, not silently dropped to the default 10."""
         call = tile.random(1, 2, 3, 4, 5, 6, [4, 64], rounds=7)
-        assert call is not None
+        assert "rounds=7" in str(call)
 
     def test_tile_random_valid_shape(self):
         """valid_shape narrows the written region; physical shape stays full."""

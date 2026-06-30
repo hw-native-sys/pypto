@@ -655,6 +655,17 @@ TypePtr DeduceTensorRandomType(const std::vector<ExprPtr>& args,
   CHECK(dtype == DataType::INT32 || dtype == DataType::UINT32)
       << "tensor.random dtype must be one of {INT32, UINT32}, but got " << dtype.ToString();
 
+  // rounds attr controls the cipher round count; the hardware only accepts 7 or 10.
+  // Mirror tile.random so an invalid tensor.random fails here, not after lowering.
+  int rounds = 10;
+  for (const auto& [key, value] : kwargs) {
+    if (key == "rounds") {
+      rounds = AnyCast<int>(value, "kwarg key: rounds");
+      break;
+    }
+  }
+  CHECK(rounds == 7 || rounds == 10) << "tensor.random requires rounds to be 7 or 10, but got " << rounds;
+
   // The 6 seed arguments are 32-bit integer scalars (key[0..1], counter[0..3]).
   for (size_t i = 0; i < 6; ++i) {
     auto scalar_type = As<ScalarType>(args[i]->GetType());
@@ -688,6 +699,9 @@ TypePtr DeduceTensorRandomType(const std::vector<ExprPtr>& args,
     }
   }
   CHECK(!shape.empty()) << "tensor.random requires non-empty shape";
+  // pto.trandom is a 2D row/col generator; reject ranks that FlattenTileNd does
+  // not lower (it does not flatten random), mirroring tile.random.
+  CHECK(shape.size() == 2) << "tensor.random requires a 2D shape (rows, cols), but got rank " << shape.size();
 
   return std::make_shared<TensorType>(shape, dtype);
 }
