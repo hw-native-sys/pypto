@@ -106,17 +106,18 @@ MemoryReuse 掌管所有 buffer 合并决策，因此它从源头上阻止这种
 
 ```python
 with pl.at(level=pl.Level.CORE_GROUP):
-    lhs: pl.Tile[[64, 64], pl.FP32, pl.MemRef(0,     16384, 0), pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
-    acc: pl.Tile[[64, 64], pl.FP32, pl.MemRef(16384, 16384, 1), pl.Mem.Vec] = pl.matmul(lhs, rhs)
-    out: pl.Tile[[64, 64], pl.FP32, pl.MemRef(0,     16384, 2), pl.Mem.Vec] = pl.add(acc, lhs)  # 复用地址 0
-    pl.store(out, [0, 0], y)
+    a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(0,     16384, 0), pl.Mem.Vec] = pl.load(x, [0, 0], [64, 64])
+    b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(16384, 16384, 1), pl.Mem.Vec] = pl.add(a, a)
+    c: pl.Tile[[64, 64], pl.FP32, pl.MemRef(0,     16384, 2), pl.Mem.Vec] = pl.mul(b, b)  # 复用地址 0（a 已死）
+    pl.store(c, [0, 0], y)
 ```
 
 语义：
 
 - **buffer 身份 = `id`。** 同 `id` 的 tile 共享一块物理 buffer；不同 id 得到不同 buffer。MemoryReuse **绝不**把 pinned buffer 与其他 buffer 合并 —— 这正是用户阻止「过度复用破坏流水」的手段。
 - **地址由用户分配。** `addr` 被 AllocateMemoryAddr 原样 honor（不再自动重排）；`size` 为声明的 buffer 占用大小。
-- **整空间手动契约。** 一旦可 pin 空间（`Vec`/`Mat`）中有任意 tile 被 pin，则该空间内**每个** tile 都必须被 pin。该空间出现未标注的新建 tile（例如 composite op 拆解出的编译器临时 tile）即为硬错误：本特性仅支持托管空间内无编译器临时 tile 的纯 tile 级 kernel。
+- **整空间手动契约。** 一旦可 pin 空间中有任意 tile 被 pin，则该空间内**每个** tile 都必须被 pin。该空间出现未标注的新建 tile（例如 composite op 拆解出的编译器临时 tile）即为硬错误：本特性仅支持托管空间内无编译器临时 tile 的纯 tile 级 kernel。
+- **可 pin 的空间。** `Vec`、`Mat`,以及 L0 matmul 空间 `Left` / `Right` / `Acc` / `Bias`。L0 空间只有在 matmul **显式写出**（`load` → `move` 到 `Left`/`Right` → `matmul` → `Acc`）时才可 pin：高层 `pl.matmul` 会被 `AutoTileMatmulL0` 展开成用户没写的 L0 tile,从而被整空间手动契约拒绝。所以 matmul/attention kernel 只有在完全显式的 tile 形式下才能 pin 所有 tile。`DDR`(tensor 参数)与标量寄存器堆永不可 pin。
 - **重叠校验。** 两个**不同**的 pinned buffer 若地址区间**与**生命周期同时重叠，即为用户错误（在此处校验，因为这里有 liveness 信息）。生命周期不重叠的地址重叠属于合法的人工复用，放行。
 
 实现横跨三个 pass：InitMemRef honor 注解并按 id intern base（重命名为 `__pinned__<id>` 前缀，使下游 pass 无需 IR 节点标志即可识别 —— 见 [InitMemRef](30-init_memref.md)）；MemoryReuse 跳过 pinned base 并执行重叠校验；AllocateMemoryAddr 不改动 pinned 地址（见 [AllocateMemoryAddr](32-allocate_memory_addr.md)）。

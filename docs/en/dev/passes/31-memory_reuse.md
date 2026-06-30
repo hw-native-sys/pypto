@@ -106,17 +106,18 @@ Automatic reuse is a greedy heuristic and cannot guarantee the optimal layout. F
 
 ```python
 with pl.at(level=pl.Level.CORE_GROUP):
-    lhs: pl.Tile[[64, 64], pl.FP32, pl.MemRef(0,     16384, 0), pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
-    acc: pl.Tile[[64, 64], pl.FP32, pl.MemRef(16384, 16384, 1), pl.Mem.Vec] = pl.matmul(lhs, rhs)
-    out: pl.Tile[[64, 64], pl.FP32, pl.MemRef(0,     16384, 2), pl.Mem.Vec] = pl.add(acc, lhs)  # reuses addr 0
-    pl.store(out, [0, 0], y)
+    a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(0,     16384, 0), pl.Mem.Vec] = pl.load(x, [0, 0], [64, 64])
+    b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(16384, 16384, 1), pl.Mem.Vec] = pl.add(a, a)
+    c: pl.Tile[[64, 64], pl.FP32, pl.MemRef(0,     16384, 2), pl.Mem.Vec] = pl.mul(b, b)  # reuses addr 0 (a dead)
+    pl.store(c, [0, 0], y)
 ```
 
 Semantics:
 
 - **Buffer identity = `id`.** Tiles sharing an `id` share one physical buffer; distinct ids get separate buffers. MemoryReuse **never** coalesces a pinned buffer with another buffer — this is exactly how a user prevents the over-reuse that breaks pipelining.
 - **Address = user-assigned.** `addr` is honored verbatim by AllocateMemoryAddr (no auto re-layout); `size` is the declared buffer footprint.
-- **Whole-space-manual contract.** Once any tile in a pinnable space (`Vec` / `Mat`) is pinned, *every* tile in that space must be pinned. A fresh unannotated tile there — e.g. a compiler temporary from composite-op lowering — is a hard error: the feature only supports pure tile-level kernels with no compiler-generated tiles in the managed space.
+- **Whole-space-manual contract.** Once any tile in a pinnable space is pinned, *every* tile in that space must be pinned. A fresh unannotated tile there — e.g. a compiler temporary from composite-op lowering — is a hard error: the feature only supports pure tile-level kernels with no compiler-generated tiles in the managed space.
+- **Pinnable spaces.** `Vec`, `Mat`, and the L0 matmul spaces `Left` / `Right` / `Acc` / `Bias`. The L0 spaces are pinnable only when the matmul is written **explicitly** (`load` → `move`-to-`Left`/`Right` → `matmul` → `Acc`): a high-level `pl.matmul` is expanded by `AutoTileMatmulL0` into L0 tiles the user never wrote, which the whole-space-manual contract then rejects. So a matmul/attention kernel can pin every tile only in fully-explicit tile form. `DDR` (tensor params) and the scalar register file are never pinnable.
 - **Overlap check.** Two *distinct* pinned buffers whose address ranges **and** lifetimes both overlap is a user error (caught here, where liveness is available). Disjoint-lifetime address overlap is legal manual reuse and allowed.
 
 Implementation spans three passes: InitMemRef honors the annotation and interns the base by id (renamed to a `__pinned__<id>` prefix so downstream passes recognise it without an IR-node flag — see [InitMemRef](30-init_memref.md)); MemoryReuse skips pinned bases and runs the overlap check; AllocateMemoryAddr leaves pinned addresses untouched (see [AllocateMemoryAddr](32-allocate_memory_addr.md)).
