@@ -875,5 +875,179 @@ def test_unsplittable_int8_transpose_raises_actionable_error():
     _assert_actionable_split_error(excinfo, "UP_DOWN")
 
 
+# ---------------------------------------------------------------------------
+# Regression: GM tensor written on the AIV lane, consumed by the AIC matmul.
+#
+# Mirror of the GM-mediated cross-lane store/load handshake test in the OPPOSITE
+# direction. The vector lane stores into a GM tensor (producing a fresh SSA
+# version); the cube lane loads that version back as the matmul left operand.
+# ExpandMixedKernel builds the AIC body's param/clone map from func->params_
+# only, so the AIV-defined GM version is a dangling free var on the AIC lane ->
+# the printer marks it __FREE_VAR and PTO codegen's GetOrCreateTensorView
+# crashes. The fix repoints the cross-half GM use onto the shared base parameter
+# (straight-line tile.store result, IfStmt phi, and ForStmt return_var forms).
+# ---------------------------------------------------------------------------
+
+
+def _expand_no_verify(program: ir.Program) -> ir.Program:
+    """SSA -> infer-memory -> expand-mixed-kernel, expanding with verification off.
+
+    Verification is disabled (empty PassContext) so a mis-routed free Var is
+    observable as a returned-IR property instead of a verifier crash -- matching
+    the __FREE_VAR check below.
+    """
+    p = passes.infer_tile_memory_space()(passes.convert_to_ssa()(program))
+    with passes.PassContext([]):
+        return passes.expand_mixed_kernel()(p)
+
+
+def _assert_no_free_var(program: ir.Program) -> None:
+    """A dangling/free Var prints with a ``__FREE_VAR`` suffix and later crashes
+    PTO codegen's GetOrCreateTensorView; assert none survive the split."""
+    assert "__FREE_VAR" not in ir.python_print(program)
+
+
+def _assert_aic_loads_reference_params(after: ir.Program) -> None:
+    """Every cube-lane ``tile.load`` source must resolve to an AIC parameter.
+
+    The AIV lane writes a GM tensor (a fresh SSA version) that the AIC lane loads
+    back for the matmul. ExpandMixedKernel must thread that cross-half reference
+    onto the AIC function's shared GM parameter; otherwise the AIC body loads
+    from a Var defined only on the AIV lane -- a dangling reference codegen
+    cannot resolve. ``unique_id`` (not ``id(...)``) is the reliable identity key
+    across binding-layer Var wrappers.
+    """
+    aic = next(f for f in after.functions.values() if f.func_type == ir.FunctionType.AIC)
+    param_ids = {p.unique_id for p in aic.params}
+    dangling = []
+    for s in ir.flatten_to_stmts(aic.body):
+        if isinstance(s, ir.AssignStmt) and isinstance(s.value, ir.Call) and _op_name(s) == "tile.load":
+            src = s.value.args[0]  # tile.load arg0 is the source tensor
+            if isinstance(src, ir.Var) and src.unique_id not in param_ids:
+                dangling.append(src.name_hint)
+    assert not dangling, (
+        f"AIC tile.load reads non-parameter Var(s) {dangling}: a cross-half GM "
+        f"SSA version was not threaded into the AIC parameter map"
+    )
+
+
+def test_aiv_gm_write_consumed_by_cube_straightline_resolves_to_param():
+    """Straight-line ``tile.store`` result (``scratch__ssa_v1``).
+
+    AIV: load -> add -> store into GM ``scratch``. AIC: load that scratch back ->
+    move Left -> matmul(scratch, b) -> move Vec. Before the fix the AIC load
+    reads the AIV-defined store-result version as a free var.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def gm_aiv_to_aic(
+            self,
+            a: pl.Tensor[[16, 128], pl.BF16],
+            b: pl.Tensor[[128, 128], pl.BF16],
+            scratch: pl.Out[pl.Tensor[[16, 128], pl.BF16]],
+            out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+        ) -> pl.Tensor[[16, 128], pl.FP32]:
+            # AIV lane: produce a GM scratch tensor (vector store).
+            a_tile = pl.load(a, [0, 0], [16, 128])
+            s = pl.add(a_tile, a_tile)
+            scratch = pl.store(s, [0, 0], scratch)
+            # AIC lane: cube matmul consumes the AIV-written scratch.
+            s_mat = pl.load(scratch, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+            s_left = pl.move(s_mat, target_memory=pl.MemorySpace.Left)
+            b_mat = pl.load(b, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+            b_right = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
+            z = pl.matmul(s_left, b_right)
+            z_vec = pl.move(z, target_memory=pl.MemorySpace.Vec)
+            out_0 = pl.store(z_vec, [0, 0], out_0)
+            return out_0
+
+    After = _expand_no_verify(Before)
+    _assert_no_free_var(After)
+    _assert_aic_loads_reference_params(After)
+
+
+def test_aiv_gm_write_in_if_consumed_by_cube_resolves_to_param():
+    """Conditional write -> IfStmt phi return_var (``scratch__phi_v*``).
+
+    Both branches store into GM ``scratch`` (so its post-if value is a phi whose
+    yields resolve to the same ``scratch`` origin); the AIC matmul loads that
+    phi. Exercises the IfStmt return_var origin propagation.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def gm_phi(
+            self,
+            a: pl.Tensor[[16, 128], pl.BF16],
+            b: pl.Tensor[[128, 128], pl.BF16],
+            flag: pl.Scalar[pl.INT32],
+            scratch: pl.Out[pl.Tensor[[16, 128], pl.BF16]],
+            out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+        ) -> pl.Tensor[[16, 128], pl.FP32]:
+            # AIV lane: both branches write GM scratch -> post-if phi version.
+            if flag == 0:
+                a0 = pl.load(a, [0, 0], [16, 128])
+                s0 = pl.add(a0, a0)
+                scratch = pl.store(s0, [0, 0], scratch)
+            else:
+                a1 = pl.load(a, [0, 0], [16, 128])
+                s1 = pl.mul(a1, a1)
+                scratch = pl.store(s1, [0, 0], scratch)
+            # AIC lane: cube matmul consumes the phi-versioned scratch.
+            s_mat = pl.load(scratch, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+            s_left = pl.move(s_mat, target_memory=pl.MemorySpace.Left)
+            b_mat = pl.load(b, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+            b_right = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
+            z = pl.matmul(s_left, b_right)
+            z_vec = pl.move(z, target_memory=pl.MemorySpace.Vec)
+            out_0 = pl.store(z_vec, [0, 0], out_0)
+            return out_0
+
+    After = _expand_no_verify(Before)
+    _assert_no_free_var(After)
+    _assert_aic_loads_reference_params(After)
+
+
+def test_aiv_gm_write_in_loop_consumed_by_cube_resolves_to_param():
+    """Loop write -> ForStmt return_var (``scratch__rv_v*``).
+
+    The loop carries GM ``scratch`` as an iter_arg (init = the ``scratch`` param)
+    and stores into it each iteration; its post-loop value is the return_var that
+    the AIC matmul loads. Covered by origin_map (return_var -> iter_arg -> init).
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def gm_loop(
+            self,
+            a: pl.Tensor[[16, 128], pl.BF16],
+            b: pl.Tensor[[128, 128], pl.BF16],
+            scratch: pl.Out[pl.Tensor[[16, 128], pl.BF16]],
+            out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+        ) -> pl.Tensor[[16, 128], pl.FP32]:
+            # AIV lane: store GM scratch each iteration -> post-loop return_var.
+            for i in pl.range(2):  # noqa: B007 - loop index unused by design
+                a_tile = pl.load(a, [0, 0], [16, 128])
+                s = pl.add(a_tile, a_tile)
+                scratch = pl.store(s, [0, 0], scratch)
+            # AIC lane: cube matmul consumes the loop-carried scratch version.
+            s_mat = pl.load(scratch, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+            s_left = pl.move(s_mat, target_memory=pl.MemorySpace.Left)
+            b_mat = pl.load(b, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+            b_right = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
+            z = pl.matmul(s_left, b_right)
+            z_vec = pl.move(z, target_memory=pl.MemorySpace.Vec)
+            out_0 = pl.store(z_vec, [0, 0], out_0)
+            return out_0
+
+    After = _expand_no_verify(Before)
+    _assert_no_free_var(After)
+    _assert_aic_loads_reference_params(After)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
