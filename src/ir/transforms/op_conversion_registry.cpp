@@ -200,6 +200,7 @@ void OpConversionRegistry::RegisterBroadcastAndTransformOps() {
 
   RegisterSimple("tensor.full", "tile.full");
   RegisterSimple("tensor.ci", "tile.ci");
+  RegisterSimple("tensor.random", "tile.random");
 }
 
 // ============================================================================

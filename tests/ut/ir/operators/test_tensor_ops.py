@@ -3380,5 +3380,29 @@ class TestTensorCiOp:
         assert pl.gather is pl.tensor.gather
 
 
+class TestTensorRandomOp:
+    """Tests for tensor.random (counter-based RNG generator)."""
+
+    def test_tensor_random_default(self):
+        call = tensor.random(1, 2, 3, 4, 5, 6, [4, 256])
+        t = call.type
+        assert isinstance(t, ir.TensorType)
+        assert t.dtype == DataType.UINT32
+        assert len(t.shape) == 2
+        assert "tensor.random" in str(call)
+
+    def test_tensor_random_int32_dtype(self):
+        call = tensor.random(1, 2, 3, 4, 5, 6, [8, 128], dtype=DataType.INT32)
+        assert isinstance(call.type, ir.TensorType)
+        assert call.type.dtype == DataType.INT32
+
+    def test_tensor_random_rejects_float_dtype(self):
+        with pytest.raises(ValueError, match=r"INT32.*UINT32"):
+            tensor.random(1, 2, 3, 4, 5, 6, [4, 64], dtype=DataType.FP32)
+
+    def test_top_level_random_is_tensor_random(self):
+        assert pl.random is pl.tensor.random
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

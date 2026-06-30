@@ -632,6 +632,66 @@ TypePtr DeduceTensorCiType(const std::vector<ExprPtr>& args,
   return std::make_shared<TensorType>(shape, dtype);
 }
 
+TypePtr DeduceTensorRandomType(const std::vector<ExprPtr>& args,
+                               const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  // tensor.random signature: (key0, key1, counter0, counter1, counter2, counter3, shape)
+  // with attrs {dtype, rounds}. Lowers to tile.random. Generates a tensor of
+  // counter-based (Philox/ChaCha) pseudo-random values seeded by the key + 128-bit
+  // counter scalars; there is no source tensor.
+  CHECK(args.size() == 7) << "tensor.random requires exactly 7 arguments (key0, key1, counter0, "
+                             "counter1, counter2, counter3, shape), but got "
+                          << args.size();
+
+  bool found_dtype = false;
+  DataType dtype;
+  for (const auto& [key, value] : kwargs) {
+    if (key == "dtype") {
+      dtype = AnyCast<DataType>(value, "kwarg key: dtype");
+      found_dtype = true;
+      break;
+    }
+  }
+  CHECK(found_dtype) << "tensor.random requires 'dtype' kwarg";
+  CHECK(dtype == DataType::INT32 || dtype == DataType::UINT32)
+      << "tensor.random dtype must be one of {INT32, UINT32}, but got " << dtype.ToString();
+
+  // The 6 seed arguments are 32-bit integer scalars (key[0..1], counter[0..3]).
+  for (size_t i = 0; i < 6; ++i) {
+    auto scalar_type = As<ScalarType>(args[i]->GetType());
+    CHECK(scalar_type) << "tensor.random requires argument " << i << " (seed scalar) to be a scalar, but got "
+                       << args[i]->GetType()->TypeName();
+    CHECK(scalar_type->dtype_ == DataType::INT32)
+        << "tensor.random requires seed argument " << i << " to have INT32 dtype, but got "
+        << scalar_type->dtype_.ToString();
+  }
+
+  // Shape: TupleType of integer scalars (mirrors tensor.ci).
+  auto shape_tuple_type = As<TupleType>(args[6]->GetType());
+  CHECK(shape_tuple_type) << "tensor.random requires shape to be TupleType, but got "
+                          << args[6]->GetType()->TypeName();
+  for (size_t i = 0; i < shape_tuple_type->types_.size(); ++i) {
+    auto scalar_type = As<ScalarType>(shape_tuple_type->types_[i]);
+    CHECK(scalar_type) << "tensor.random shape element " << i << " must be ScalarType, but got "
+                       << shape_tuple_type->types_[i]->TypeName();
+    CHECK(scalar_type->dtype_.IsInt())
+        << "tensor.random shape element " << i << " must have integer dtype, but got "
+        << scalar_type->dtype_.ToString();
+  }
+
+  std::vector<ExprPtr> shape;
+  shape.reserve(shape_tuple_type->types_.size());
+  if (auto make_tuple = As<MakeTuple>(args[6])) {
+    shape = make_tuple->elements_;
+  } else {
+    for (size_t i = 0; i < shape_tuple_type->types_.size(); ++i) {
+      shape.emplace_back(std::make_shared<TupleGetItemExpr>(args[6], static_cast<int>(i), args[6]->span_));
+    }
+  }
+  CHECK(!shape.empty()) << "tensor.random requires non-empty shape";
+
+  return std::make_shared<TensorType>(shape, dtype);
+}
+
 REGISTER_OP("tensor.ci")
     .set_op_category("TensorOp")
     .set_description("Generate a contiguous integer sequence into a tensor (lowers to tile.ci)")
@@ -642,6 +702,23 @@ REGISTER_OP("tensor.ci")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorCiType(args, kwargs);
+    });
+
+REGISTER_OP("tensor.random")
+    .set_op_category("TensorOp")
+    .set_description("Generate counter-based pseudo-random values into a tensor (lowers to tile.random)")
+    .add_argument("key0", "First key word (INT32 scalar)")
+    .add_argument("key1", "Second key word (INT32 scalar)")
+    .add_argument("counter0", "Counter word 0 (INT32 scalar)")
+    .add_argument("counter1", "Counter word 1 (INT32 scalar)")
+    .add_argument("counter2", "Counter word 2 (INT32 scalar)")
+    .add_argument("counter3", "Counter word 3 (INT32 scalar)")
+    .add_argument("shape", "Destination shape (TupleType of ScalarType integer)")
+    .set_attr<DataType>("dtype")
+    .set_attr<int>("rounds")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorRandomType(args, kwargs);
     });
 
 TypePtr DeduceTensorDimType(const std::vector<ExprPtr>& args,

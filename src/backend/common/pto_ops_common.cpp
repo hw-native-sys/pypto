@@ -1114,6 +1114,59 @@ static std::string MakeCiCodegenPTO(const std::string& pto_op_name, const CallPt
   return "";
 }
 
+// Helper function for Random: emits pto.trandom.
+// IR tile.random(key0, key1, counter0..3, shape) carries the shape tuple as the
+// last arg for type deduction only; the hardware reads the destination extent
+// from the result type, so only the 6 seed scalars are emitted as operands.
+//
+// The `rounds` attribute is special: ptoas' custom assembly format for
+// pto.trandom has no trailing attr-dict slot (a `... {rounds = N}` suffix fails
+// to parse). The PTOAS template defaults rounds to 10 when the attribute is
+// absent, so the common rounds==10 case is emitted as the clean DPS custom form
+//   pto.trandom ins(k0..c3 : i32 x6) outs(dst : dst_type)
+// and a non-default rounds is attached via the MLIR generic op form, the only
+// spelling ptoas accepts the attribute in:
+//   "pto.trandom"(k0..c3, dst) {rounds = N : i32} : (i32 x6, dst_type) -> ()
+static std::string MakeRandomCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
+                                        codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 7 || op->args_.size() == 8)
+      << "Operation:[" << pto_op_name
+      << "] requires 7 or 8 arguments (key0, key1, counter0, counter1, counter2, "
+         "counter3, shape, [valid_shape]), but got "
+      << op->args_.size();
+  int rounds = op->GetKwarg<int>("rounds", 10);
+  std::vector<std::string> seeds;
+  std::vector<std::string> seed_types;
+  seeds.reserve(6);
+  seed_types.reserve(6);
+  for (size_t i = 0; i < 6; ++i) {
+    seeds.push_back(codegen.GetExprAsCode(op->args_[i]));
+    seed_types.push_back(codegen.GetExprTypeAnnotation(op->args_[i]));
+  }
+  const std::string dst = codegen.GetCurrentResultTarget();
+  const std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
+
+  std::ostringstream oss;
+  if (rounds == 10) {
+    oss << pto_op_name << " ins(";
+    for (size_t i = 0; i < 6; ++i) oss << (i ? ", " : "") << seeds[i];
+    oss << " : ";
+    for (size_t i = 0; i < 6; ++i) oss << (i ? ", " : "") << seed_types[i];
+    oss << ") outs(" << dst;
+    if (!dst_type.empty()) oss << " : " << dst_type;
+    oss << ")";
+  } else {
+    oss << "\"" << pto_op_name << "\"(";
+    for (size_t i = 0; i < 6; ++i) oss << seeds[i] << ", ";
+    oss << dst << ") {rounds = " << rounds << " : i32} : (";
+    for (size_t i = 0; i < 6; ++i) oss << seed_types[i] << ", ";
+    oss << dst_type << ") -> ()";
+  }
+  codegen.Emit(oss.str());
+  return "";
+}
+
 // Helper function for Sort32: emits pto.tsort32
 // PTOAS expects: ins(src, idx : src_type, idx_type) outs(dst : dst_type)
 static std::string MakeSort32CodegenPTO(const std::string& pto_op_name, const CallPtr& op,
@@ -3742,6 +3795,14 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   reg("tile.ci", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeCiCodegenPTO("pto.tci", op, codegen);
   });
+  // tile.random (TRANDOM): output must be row_major per ISA
+  if (exclude_ops.count("tile.random") == 0) {
+    backend.RegisterOp("tile.random")
+        .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+          return MakeRandomCodegenPTO("pto.trandom", op, codegen);
+        })
+        .set_output_layout(ir::TileLayout::row_major);
+  }
   // tile.sort32 (TSORT32): all inputs and output must be row_major per ISA
   if (exclude_ops.count("tile.sort32") == 0) {
     backend.RegisterOp("tile.sort32")

@@ -56,6 +56,7 @@
 | `transpose` | `(tensor: Tensor, axis1: int, axis2: int) -> Tensor` | 交换两个轴 |
 | `assemble` | `(target: Tensor, source: Tensor, offset: Sequence[IntLike], *, atomic: AtomicType = AtomicType.None_) -> Tensor` | 将 source 写入 target 的指定偏移。语法糖（仅 SSA 前）：`target[i:i+H, j:j+W] = source`。`atomic=AtomicType.Add` 改为累加而非覆盖（split-K）——仅当 target 为函数输出（全局内存）时合法；浮点结果不确定，target 需预先清零，支持 dtype fp32/fp16/int32/int16/int8 |
 | `scatter_update` | `(input: Tensor, dim: int, index: Tensor, src: Tensor) -> Tensor` | 按 `index` 指定的稀疏行位置，将 `src` 的行数据写入 `input`。`input`/`src`：2D `[rows, d]` 或 4D `[B, S, 1, d]`；`index`：2D `[b, s]` 整型。当前仅支持 `dim=-2` |
+| `random` | `(key0, key1, counter0, counter1, counter2, counter3: int \| Scalar, shape: Sequence[IntLike], dtype: DataType = UINT32, rounds: int = 10) -> Tensor` | 基于计数器的（Philox/ChaCha 风格）随机数生成，下沉为 `tile.random`。由 key + counter 种子确定性生成。`dtype` ∈ {INT32, UINT32}；`rounds` ∈ {7, 10}。顶层别名 `pl.random`。**仅 A5** |
 | `add` | `(lhs: Tensor, rhs: Tensor \| int \| float \| Scalar) -> Tensor` | 逐元素加法 |
 | `sub` | `(lhs: Tensor, rhs: Tensor \| int \| float \| Scalar) -> Tensor` | 逐元素减法 |
 | `mul` | `(lhs: Tensor, rhs: Tensor \| int \| float \| Scalar) -> Tensor` | 逐元素乘法 |
@@ -101,6 +102,7 @@
 | `move` | `(tile: Tile, target_memory: Mem) -> Tile` | 在内存层级间移动 tile（包括 Vec→Vec 拷贝） |
 | `create` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: Mem = Mem.Vec) -> Tile` | 在指定内存空间创建 tile |
 | `full` | `(shape: list[int], dtype: DataType, value: int \| float) -> Tile` | 创建用常量填充的 tile |
+| `random` | `(key0, key1, counter0, counter1, counter2, counter3: int \| Scalar, shape: Sequence[int], dtype: DataType = UINT32, rounds: int = 10) -> Tile` | 用基于计数器的（Philox/ChaCha 风格）伪随机值填充 tile，种子为 64 位 key + 128 位 counter。确定性：相同种子产生相同 tile。`dtype` ∈ {INT32, UINT32}；`rounds` ∈ {7, 10}。**仅 A5**（`pto.trandom`） |
 | `fillpad` | `(input: Tensor \| Tile, pad_value: PadValue \| int \| float = PadValue.zero) -> Tensor \| Tile` | 按指定 pad 值填充无效视图区域；接受 `PadValue.zero/max/min` 枚举，或字面量 `0`、`0.0`、`math.inf`、`-math.inf`（其他值会报错）；Tensor 输入会在 InCore 代码中下沉为 tile fillpad |
 | `fillpad_expand` | `(input: Tensor \| Tile, shape: Sequence[IntLike], pad_value: PadValue \| int \| float = PadValue.zero) -> Tensor \| Tile` | 与 `fillpad` 类似，但目标 `shape` 在任一维度上都可以**大于**源：源的有效区域被拷贝到左上角，其余元素填充 `pad_value`。每个目标维度必须 `>=` 源维度。Tensor 输入会在 InCore 代码中下沉为 tile fillpad_expand |
 | `get_block_idx` | `() -> Scalar` | 获取当前 block 索引（UINT64） |

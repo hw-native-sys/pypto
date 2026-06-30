@@ -502,6 +502,91 @@ TypePtr DeduceTileCiType(const std::vector<ExprPtr>& args,
   return std::make_shared<TileType>(tile_shape, dtype, std::nullopt, tile_view);
 }
 
+TypePtr DeduceTileRandomType(const std::vector<ExprPtr>& args,
+                             const std::vector<std::pair<std::string, std::any>>& kwargs,
+                             const std::string& op_name) {
+  // tile.random signature: (key0, key1, counter0, counter1, counter2, counter3, shape,
+  // [valid_shape]) with attrs {dtype, rounds}. Generates a tile of counter-based
+  // (Philox/ChaCha) pseudo-random values; the 6 scalars seed the generator (key +
+  // 128-bit counter) and the shape tuple gives the destination extent. There is no
+  // source tile. The optional trailing valid_shape tuple narrows the written region:
+  // pto.trandom only fills the dst valid rows/cols, leaving the rest untouched.
+  CHECK(args.size() == 7 || args.size() == 8)
+      << "The operator " << op_name
+      << " requires 7 or 8 arguments (key0, key1, counter0, counter1, counter2, counter3, "
+         "shape, [valid_shape]), but got "
+      << args.size();
+
+  // Destination dtype: pto.trandom emits 32-bit lanes only (INT32 or UINT32).
+  DataType dtype = GetKwarg<DataType>(kwargs, "dtype");
+  CHECK(dtype == DataType::INT32 || dtype == DataType::UINT32)
+      << "The operator " << op_name << " requires dtype to be one of {INT32, UINT32}, but got "
+      << dtype.ToString();
+
+  // rounds attr controls the cipher round count; the hardware only accepts 7 or 10.
+  int rounds = GetKwarg<int>(kwargs, "rounds", 10);
+  CHECK(rounds == 7 || rounds == 10) << "The operator " << op_name
+                                     << " requires rounds to be 7 or 10, but got " << rounds;
+
+  // The 6 seed arguments are 32-bit integer scalars (key[0..1], counter[0..3]).
+  for (size_t i = 0; i < 6; ++i) {
+    auto scalar_type = As<ScalarType>(args[i]->GetType());
+    CHECK(scalar_type) << "The operator " << op_name << " requires argument " << i
+                       << " (seed scalar) to be a scalar, but got " << args[i]->GetType()->TypeName();
+    CHECK(scalar_type->dtype_ == DataType::INT32)
+        << "The operator " << op_name << " requires seed argument " << i << " to have INT32 dtype, but got "
+        << scalar_type->dtype_.ToString();
+  }
+
+  // Shape must be a literal tuple of positive compile-time constants.
+  auto make_tuple = As<MakeTuple>(args[6]);
+  CHECK(make_tuple) << "The operator " << op_name
+                    << " requires the shape argument to be a MakeTuple of compile-time constants, but got "
+                    << args[6]->TypeName();
+
+  std::vector<ExprPtr> tile_shape;
+  tile_shape.reserve(make_tuple->elements_.size());
+  for (size_t i = 0; i < make_tuple->elements_.size(); ++i) {
+    auto const_int = As<ConstInt>(make_tuple->elements_[i]);
+    CHECK(const_int) << "The operator " << op_name << " shape element " << i
+                     << " must be a compile-time constant (ConstInt), but got "
+                     << make_tuple->elements_[i]->TypeName();
+    CHECK(const_int->value_ > 0) << "The operator " << op_name << " shape element " << i
+                                 << " must be positive, got " << const_int->value_;
+    tile_shape.push_back(make_tuple->elements_[i]);
+  }
+  CHECK(!tile_shape.empty()) << "The operator " << op_name << " requires non-empty shape";
+
+  // Default: the entire destination is populated (valid == full shape). An optional
+  // valid_shape tuple narrows the written region (must match rank and 0 < v <= shape).
+  std::vector<ExprPtr> valid_shape = tile_shape;
+  if (args.size() == 8) {
+    auto valid_tuple = As<MakeTuple>(args[7]);
+    CHECK(valid_tuple) << "The operator " << op_name
+                       << " requires valid_shape to be a MakeTuple of compile-time constants, but got "
+                       << args[7]->TypeName();
+    CHECK(valid_tuple->elements_.size() == tile_shape.size())
+        << "The operator " << op_name << " valid_shape rank (" << valid_tuple->elements_.size()
+        << ") must match shape rank (" << tile_shape.size() << ")";
+    valid_shape.clear();
+    valid_shape.reserve(valid_tuple->elements_.size());
+    for (size_t i = 0; i < valid_tuple->elements_.size(); ++i) {
+      auto v = As<ConstInt>(valid_tuple->elements_[i]);
+      CHECK(v) << "The operator " << op_name << " valid_shape element " << i
+               << " must be a compile-time constant (ConstInt)";
+      auto dim = As<ConstInt>(tile_shape[i]);
+      CHECK(v->value_ > 0 && (!dim || v->value_ <= dim->value_))
+          << "The operator " << op_name << " valid_shape element " << i << " (" << v->value_
+          << ") must be in (0, shape dim " << (dim ? dim->value_ : -1) << "]";
+      valid_shape.push_back(valid_tuple->elements_[i]);
+    }
+  }
+
+  TileView tile_view;
+  tile_view.valid_shape = valid_shape;
+  return std::make_shared<TileType>(tile_shape, dtype, std::nullopt, tile_view);
+}
+
 TypePtr DeduceTileReadType(const std::vector<ExprPtr>& args,
                            const std::vector<std::pair<std::string, std::any>>& kwargs,
                            const std::string& op_name) {
@@ -824,6 +909,25 @@ REGISTER_OP("tile.ci")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileCiType(args, kwargs, "tile.ci");
+    });
+
+REGISTER_OP("tile.random")
+    .set_op_category("TileOp")
+    .set_description("Generate counter-based pseudo-random values into a destination tile (pto.trandom)")
+    .add_argument("key0", "First key word (INT32 scalar)")
+    .add_argument("key1", "Second key word (INT32 scalar)")
+    .add_argument("counter0", "Counter word 0 (INT32 scalar)")
+    .add_argument("counter1", "Counter word 1 (INT32 scalar)")
+    .add_argument("counter2", "Counter word 2 (INT32 scalar)")
+    .add_argument("counter3", "Counter word 3 (INT32 scalar)")
+    .add_argument("shape", "Destination shape (TupleType of ConstInt)")
+    .add_argument("valid_shape", "Optional written region (TupleType of ConstInt, <= shape)")
+    .set_attr<DataType>("dtype")
+    .set_attr<int>("rounds")
+    .set_output_memory(MemorySpace::Vec)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileRandomType(args, kwargs, "tile.random");
     });
 
 }  // namespace ir

@@ -31,6 +31,7 @@ __all__ = [
     "full",
     "ci",
     "arange",
+    "random",
     "matmul",
     "matmul_acc",
     "mul",
@@ -544,6 +545,40 @@ def ci(
 
 
 arange = ci
+
+
+def random(
+    key0: int | Scalar,
+    key1: int | Scalar,
+    counter0: int | Scalar,
+    counter1: int | Scalar,
+    counter2: int | Scalar,
+    counter3: int | Scalar,
+    shape: Sequence[IntLike],
+    dtype: DataType = DataType.UINT32,
+    rounds: int = 10,
+) -> Tensor:
+    """Generate counter-based pseudo-random values into a tensor.
+
+    Implements a counter-based (Philox/ChaCha-style) RNG. Each element is derived
+    deterministically from the 64-bit key ``(key0, key1)`` and 128-bit counter
+    ``(counter0..counter3)`` plus the element position, so the same seeds always
+    reproduce the same tensor. Lowers to ``tile.random`` → ``pto.trandom``.
+
+    Args:
+        key0, key1: The two INT32 key words (plain ints or Scalars).
+        counter0, counter1, counter2, counter3: The four INT32 counter words.
+        shape: Destination tensor shape (static).
+        dtype: Destination dtype. One of {INT32, UINT32}. Defaults to UINT32.
+        rounds: Cipher round count, 7 or 10. Defaults to 10.
+
+    Returns:
+        Tensor wrapping the random operation.
+    """
+    raw_seeds = (key0, key1, counter0, counter1, counter2, counter3)
+    seeds = [v.unwrap() if isinstance(v, Scalar) else v for v in raw_seeds]
+    call_expr = _ir_ops.random(*seeds, _normalize_intlike(shape), dtype=dtype, rounds=rounds)
+    return Tensor(expr=call_expr)
 
 
 def matmul(

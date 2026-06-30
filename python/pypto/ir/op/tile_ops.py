@@ -585,6 +585,57 @@ def ci(
 arange = ci
 
 
+def _to_int32_scalar(value: int | Expr, span: Span) -> Expr:
+    """Normalize a seed value to an INT32 scalar expression."""
+    if isinstance(value, Expr):
+        if isinstance(value, ConstInt) and value.dtype != DataType.INT32:
+            return ConstInt(value.value, DataType.INT32, span)
+        return value
+    return ConstInt(value, DataType.INT32, span)
+
+
+def random(  # noqa: PLR0913
+    key0: int | Expr,
+    key1: int | Expr,
+    counter0: int | Expr,
+    counter1: int | Expr,
+    counter2: int | Expr,
+    counter3: int | Expr,
+    shape: Sequence[int | Expr] | _ir_core.MakeTuple,
+    valid_shape: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
+    dtype: DataType = DataType.UINT32,
+    rounds: int = 10,
+    span: Span | None = None,
+) -> Call:
+    """Generate counter-based pseudo-random values into a tile (pto.trandom).
+
+    Implements a counter-based (Philox/ChaCha-style) RNG: each destination
+    element is derived deterministically from the 64-bit key ``(key0, key1)`` and
+    the 128-bit counter ``(counter0..counter3)`` plus the element position, so the
+    same seeds always produce the same tile.
+
+    Args:
+        key0, key1: The two INT32 key words.
+        counter0, counter1, counter2, counter3: The four INT32 counter words.
+        shape: Destination tile shape (static, tuple of ConstInt).
+        valid_shape: Optional written region (tuple of ConstInt, each ``<= shape``).
+            ``pto.trandom`` only fills the dst valid rows/cols; defaults to the full shape.
+        dtype: Destination dtype. One of {INT32, UINT32}. Defaults to UINT32.
+        rounds: Cipher round count, 7 or 10. Defaults to 10.
+        span: Optional source span for debugging (auto-captured if not provided).
+
+    Returns:
+        Call expression that returns a TileType filled with random values.
+    """
+    actual_span = _get_span_or_capture(span)
+    seeds = [_to_int32_scalar(v, actual_span) for v in (key0, key1, counter0, counter1, counter2, counter3)]
+    op_args: list[Expr] = [*seeds, _to_make_tuple(shape, actual_span)]
+    if valid_shape is not None:
+        op_args.append(_to_make_tuple(valid_shape, actual_span))
+    kwargs: dict[str, Any] = {"dtype": dtype, "rounds": rounds}
+    return _ir_core.create_op_call("tile.random", op_args, kwargs, actual_span)
+
+
 def fillpad(tile: Expr, pad_value: PadValue | int | float = PadValue.zero, span: Span | None = None) -> Call:
     """Fill remaining tile elements with specified padding value.
 

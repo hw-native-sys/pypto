@@ -174,6 +174,47 @@ def ci(
 arange = ci
 
 
+def _to_int32_scalar(value: int | Expr, span: Span) -> Expr:
+    """Normalize a seed value to an INT32 scalar expression."""
+    if isinstance(value, Expr):
+        if isinstance(value, ConstInt) and value.dtype != DataType.INT32:
+            return ConstInt(value.value, DataType.INT32, span)
+        return value
+    return ConstInt(value, DataType.INT32, span)
+
+
+def random(
+    key0: int | Expr,
+    key1: int | Expr,
+    counter0: int | Expr,
+    counter1: int | Expr,
+    counter2: int | Expr,
+    counter3: int | Expr,
+    shape: Sequence[int | Expr] | _ir_core.MakeTuple,
+    dtype: DataType = DataType.UINT32,
+    rounds: int = 10,
+    span: Span | None = None,
+) -> Call:
+    """Generate counter-based pseudo-random values into a tensor (lowers to tile.random).
+
+    Args:
+        key0, key1: The two INT32 key words.
+        counter0, counter1, counter2, counter3: The four INT32 counter words.
+        shape: Destination shape (static, tuple of integers).
+        dtype: Destination dtype. One of {INT32, UINT32}. Defaults to UINT32.
+        rounds: Cipher round count, 7 or 10. Defaults to 10.
+        span: Optional source span for debugging (auto-captured if not provided).
+
+    Returns:
+        Call expression that returns a TensorType filled with random values.
+    """
+    actual_span = _get_span_or_capture(span)
+    seeds = [_to_int32_scalar(v, actual_span) for v in (key0, key1, counter0, counter1, counter2, counter3)]
+    shape_tuple = _to_make_tuple(shape, actual_span)
+    kwargs: dict[str, Any] = {"dtype": dtype, "rounds": rounds}
+    return _ir_core.create_op_call("tensor.random", [*seeds, shape_tuple], kwargs, actual_span)
+
+
 def read(
     tensor: Expr, indices: Expr | list[int | Expr] | _ir_core.MakeTuple, span: Span | None = None
 ) -> Call:

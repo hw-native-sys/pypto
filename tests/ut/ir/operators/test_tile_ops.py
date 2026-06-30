@@ -3900,6 +3900,56 @@ class TestTileCiOp:
         assert pl.tile.arange is pl.tile.ci
 
 
+class TestTileRandomOp:
+    """tile.random (pto.trandom): counter-based RNG generator."""
+
+    def test_tile_random_default(self):
+        """tile.random returns a TileType with requested shape and UINT32 dtype."""
+        call = tile.random(1, 2, 3, 4, 5, 6, [4, 256])
+        t = call.type
+        assert isinstance(t, ir.TileType)
+        assert t.dtype == DataType.UINT32
+        assert len(t.shape) == 2
+        rows, cols = t.shape[0], t.shape[1]
+        assert isinstance(rows, ir.ConstInt) and rows.value == 4
+        assert isinstance(cols, ir.ConstInt) and cols.value == 256
+        assert "tile.random" in str(call)
+
+    def test_tile_random_int32_dtype(self):
+        call = tile.random(1, 2, 3, 4, 5, 6, [8, 128], dtype=DataType.INT32)
+        assert isinstance(call.type, ir.TileType)
+        assert call.type.dtype == DataType.INT32
+
+    def test_tile_random_rounds7(self):
+        call = tile.random(1, 2, 3, 4, 5, 6, [4, 64], rounds=7)
+        assert call is not None
+
+    def test_tile_random_valid_shape(self):
+        """valid_shape narrows the written region; physical shape stays full."""
+        call = tile.random(1, 2, 3, 4, 5, 6, [16, 128], valid_shape=[10, 80])
+        t = call.type
+        assert isinstance(t, ir.TileType)
+        rows, cols = t.shape[0], t.shape[1]
+        assert isinstance(rows, ir.ConstInt) and rows.value == 16
+        assert isinstance(cols, ir.ConstInt) and cols.value == 128
+        view = t.get_effective_tile_view()
+        vr, vc = view.valid_shape[0], view.valid_shape[1]
+        assert isinstance(vr, ir.ConstInt) and vr.value == 10
+        assert isinstance(vc, ir.ConstInt) and vc.value == 80
+
+    def test_tile_random_rejects_valid_shape_gt_shape(self):
+        with pytest.raises(ValueError, match="valid_shape element"):
+            tile.random(1, 2, 3, 4, 5, 6, [16, 128], valid_shape=[20, 80])
+
+    def test_tile_random_rejects_float_dtype(self):
+        with pytest.raises(ValueError, match=r"INT32.*UINT32"):
+            tile.random(1, 2, 3, 4, 5, 6, [4, 64], dtype=DataType.FP32)
+
+    def test_tile_random_rejects_bad_rounds(self):
+        with pytest.raises(ValueError, match="rounds to be 7 or 10"):
+            tile.random(1, 2, 3, 4, 5, 6, [4, 64], rounds=5)
+
+
 class TestTileStoreDistributedDest:
     """``tile.store`` accepts ``DistributedTensorType`` as the destination.
 
