@@ -28,6 +28,7 @@ __all__ = [
     "write",
     "load",
     "store",
+    "alloc_buffer",
     "assemble",
     "extract",
     "scatter_update",
@@ -447,6 +448,32 @@ def store(
         tile.unwrap(), normalized_offsets, output_tensor.unwrap(), normalized_shapes, atomic=int(atomic)
     )
     return output_tensor.__class__(expr=call_expr)
+
+
+def alloc_buffer(tile: Tile, addr: int, size: int, id: int = -1) -> Expr:
+    """Pin ``tile`` to an explicit on-chip buffer at byte ``addr`` (``size`` bytes).
+
+    Written as a bare statement right after the tile's defining op::
+
+        q_mat = pl.tile.load(q, [0, 0], [16, 128], target_memory=pl.Mem.Mat)
+        pl.tile.alloc_buffer(q_mat, addr=0, size=4096)
+
+    Tiles sharing a (non-negative) ``id`` share one physical buffer; the default
+    ``-1`` gives this pin a unique private buffer. The address is honored verbatim
+    by AllocateMemoryAddr. For fully-explicit tile kernels: once any tile in a
+    memory space is pinned, every tile in that space must be pinned.
+
+    Args:
+        tile: The tile whose buffer to pin
+        addr: Byte address within the tile's memory space
+        size: Buffer size in bytes (must be >= the tile footprint)
+        id: Buffer identity for sharing; -1 (default) means a unique buffer
+
+    Returns:
+        The underlying ``tile.alloc_buffer`` call expression. Callers ignore it;
+        the DSL parser surfaces the bare call as an ``EvalStmt``.
+    """
+    return _ir_ops.alloc_buffer(tile.unwrap(), addr, size, id)
 
 
 def assemble(target: Tile, source: Tile, offset: Sequence[IntLike]) -> Tile:

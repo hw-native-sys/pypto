@@ -32,6 +32,7 @@ from typing import cast
 
 import pypto.language as pl
 import pytest
+from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
 from pypto import ir, passes
 
@@ -259,6 +260,109 @@ def test_l0_spaces_pinnable_in_explicit_matmul():
     for name in ("q_left", "k_right", "scores"):
         assert mrs[name].base_.name_hint.startswith("__pinned__"), f"{name} must be user-pinned"
         assert _addr(mrs[name]) == 0  # each L0 space is independent → addr 0
+
+
+def test_alloc_buffer_consumed_and_honored():
+    """`pl.tile.alloc_buffer(tile, addr, size, id)` pins a tile end-to-end.
+
+    The marker carries the pin in op kwargs (which survive the pipeline's tile
+    rebuilds, unlike a pre-InitMemRef type memref). InitMemRef applies it and
+    erases the marker. Same id shares one buffer; the address is honored.
+    """
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            input_a: pl.Tensor[[64, 64], pl.FP32],
+            output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            a = pl.tile.load(input_a, [0, 0], [64, 64])
+            pl.tile.alloc_buffer(a, addr=0, size=16384, id=0)
+            b = pl.tile.add(a, a)
+            pl.tile.alloc_buffer(b, addr=16384, size=16384, id=1)
+            c = pl.tile.add(b, b)
+            pl.tile.alloc_buffer(c, addr=0, size=16384, id=0)  # reuse buffer 0 (a dead)
+            return pl.tile.store(c, [0, 0], output)
+
+    after = _allocate(Prog)
+    mrs = _tile_memrefs(after)
+    assert mrs["a"].base_.name_hint.startswith("__pinned__")
+    assert _addr(mrs["a"]) == 0
+    assert _addr(mrs["b"]) == SIZE
+    assert _addr(mrs["c"]) == 0
+    assert ir.MemRef.same_allocation(mrs["a"], mrs["c"]), "same id shares one buffer"
+    assert not ir.MemRef.same_allocation(mrs["a"], mrs["b"]), "distinct ids stay separate"
+    # Markers must be consumed (erased) — none may reach codegen.
+    func = next(iter(after.functions.values()))
+    for stmt in cast(ir.SeqStmts, func.body).stmts:
+        if isinstance(stmt, ir.EvalStmt) and isinstance(stmt.expr, ir.Call):
+            assert stmt.expr.op.name != "tile.alloc_buffer", "marker must be erased"
+
+
+def test_alloc_buffer_survives_full_pipeline():
+    """Regression guard: alloc_buffer pins survive the FULL default pipeline.
+
+    The type-annotation form is dropped by tile rebuilds (FlattenTileNdTo2D etc.)
+    between parse and InitMemRef; the op-kwarg marker survives. If a future pass
+    drops the marker, this test fails (and the whole-space-manual check errors).
+    """
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            x: pl.Tensor[[64, 64], pl.FP32],
+            y: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            with pl.spmd(4, name_hint="blk") as tid:  # noqa: F841 — multi-stmt body needs `as`
+                a = pl.tile.load(x, [0, 0], [64, 64])
+                pl.tile.alloc_buffer(a, addr=0, size=16384, id=0)
+                b = pl.tile.add(a, a)
+                pl.tile.alloc_buffer(b, addr=16384, size=16384, id=1)
+                y = pl.tile.store(b, [0, 0], y)
+            return y
+
+    prog: ir.Program = Prog
+    PassManager.get_strategy(OptimizationStrategy.Default)
+    plist = PassManager._strategy_passes[OptimizationStrategy.Default]
+    with passes.PassContext([], passes.VerificationLevel.NONE):
+        for name, factory in plist:
+            prog = factory()(prog)
+            if name == "AllocateMemoryAddr":
+                break
+
+    addrs: dict[str, int] = {}
+    markers = 0
+
+    def walk(stmt) -> None:
+        nonlocal markers
+        if stmt is None:
+            return
+        for s in getattr(stmt, "stmts", []):
+            walk(s)
+        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.var.type, ir.TileType):
+            mr = stmt.var.type.memref
+            if (
+                mr is not None
+                and "__pinned__" in mr.base_.name_hint
+                and isinstance(mr.byte_offset_, ir.ConstInt)
+            ):
+                addrs[stmt.var.name_hint.split("__")[0]] = mr.byte_offset_.value
+        expr = getattr(stmt, "expr", None)
+        if isinstance(expr, ir.Call) and expr.op.name == "tile.alloc_buffer":
+            markers += 1
+        for attr in ("body", "then_body", "else_body"):
+            if hasattr(stmt, attr):
+                walk(getattr(stmt, attr))
+
+    for func in prog.functions.values():
+        walk(func.body)
+    assert addrs.get("a") == 0, f"pin for 'a' lost through full pipeline: {addrs}"
+    assert addrs.get("b") == SIZE, f"pin for 'b' lost through full pipeline: {addrs}"
+    assert markers == 0, "alloc_buffer markers must be consumed before codegen"
 
 
 if __name__ == "__main__":

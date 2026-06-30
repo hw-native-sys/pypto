@@ -119,16 +119,25 @@ bool IsPinnableSpace(MemorySpace space) {
   }
 }
 
-// Collect the pinnable memory spaces that contain at least one user-pinned tile.
-// A user-pinned tile is a TileType var whose type already carries a MemRef when
-// InitMemRef runs — no earlier pass creates MemRefs, so a present memref_ can
-// only come from a user `pl.MemRef(...)` annotation. A space with any pinned
-// tile is in "whole-space manual" mode: every tile in it must then be pinned,
-// else the kernel is not a pure tile-level kernel (it has a compiler-generated
-// or unannotated tile) and InitMemRef reports a user error.
-class ManualSpaceCollector : public IRVisitor {
+// A user buffer pin sourced from a `tile.alloc_buffer(tile) {addr, size, id}`
+// marker. addr/size are bytes; id >= 0 shares one buffer across same-id pins,
+// id < 0 means a unique private buffer for this pin.
+struct PinSpec {
+  int64_t addr;
+  uint64_t size;
+  int id;
+};
+
+// Collect, for one function, (1) the pinnable spaces that are in "whole-space
+// manual" mode and (2) the per-var buffer pins. A space is manual when it holds
+// any user pin — via the legacy `pl.Tile[..., pl.MemRef(...)]` type annotation
+// (a present memref_ at InitMemRef can only be a user pin; no earlier pass makes
+// MemRefs) OR via a `tile.alloc_buffer` marker. Once manual, every tile in that
+// space must be pinned, else the kernel has a compiler-generated / unannotated
+// tile and InitMemRef reports a user error.
+class PinCollector : public IRVisitor {
  public:
-  void Record(const VarPtr& var) {
+  void RecordAnnotation(const VarPtr& var) {
     if (!var) return;
     auto tile_type = std::dynamic_pointer_cast<const TileType>(var->GetType());
     if (!tile_type || !tile_type->memory_space_.has_value()) return;
@@ -137,26 +146,59 @@ class ManualSpaceCollector : public IRVisitor {
   }
 
   void VisitStmt_(const AssignStmtPtr& op) override {
-    Record(op->var_);
+    RecordAnnotation(op->var_);
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const EvalStmtPtr& op) override {
+    if (auto call = As<Call>(op->expr_)) {
+      if (IsOp(call, "tile.alloc_buffer") && call->args_.size() == 1) {
+        if (auto var = AsVarLike(call->args_[0])) {
+          pin_by_var[var.get()] =
+              PinSpec{call->GetKwarg<int>("addr"), static_cast<uint64_t>(call->GetKwarg<int>("size")),
+                      call->GetKwarg<int>("id", -1)};
+          if (auto tt = As<TileType>(var->GetType());
+              tt && tt->memory_space_.has_value() && IsPinnableSpace(*tt->memory_space_)) {
+            manual_spaces.insert(*tt->memory_space_);
+          }
+        }
+      }
+    }
     IRVisitor::VisitStmt_(op);
   }
 
   std::set<MemorySpace> manual_spaces;
+  std::map<const Var*, PinSpec> pin_by_var;
 };
 
-std::set<MemorySpace> CollectManualSpaces(const FunctionPtr& func) {
-  ManualSpaceCollector collector;
-  for (const auto& param : func->params_) collector.Record(param);
+struct CollectedPins {
+  std::set<MemorySpace> manual_spaces;
+  std::map<const Var*, PinSpec> pin_by_var;
+};
+
+CollectedPins CollectPins(const FunctionPtr& func) {
+  PinCollector collector;
+  for (const auto& param : func->params_) collector.RecordAnnotation(param);
   if (func->body_) collector.VisitStmt(func->body_);
-  return collector.manual_spaces;
+  return CollectedPins{std::move(collector.manual_spaces), std::move(collector.pin_by_var)};
 }
 
 // Mutator to initialize MemRef for variables
 class InitMemRefMutator : public IRMutator {
  public:
   InitMemRefMutator() = default;
-  explicit InitMemRefMutator(std::set<MemorySpace> manual_spaces)
-      : manual_spaces_(std::move(manual_spaces)) {}
+  InitMemRefMutator(std::set<MemorySpace> manual_spaces, std::map<const Var*, PinSpec> pin_by_var)
+      : manual_spaces_(std::move(manual_spaces)), pin_by_var_(std::move(pin_by_var)) {}
+
+  // Build a user MemRef from a tile.alloc_buffer pin spec, ready for HonorUserPin.
+  // The base name encodes the buffer identity: "mem_<id>" shares across same-id
+  // pins; a negative id gets a unique "auto_<n>" base (a private buffer).
+  MemRefPtr BuildPinnedMemRef(const PinSpec& spec) {
+    std::string base_name =
+        spec.id >= 0 ? ("mem_" + std::to_string(spec.id)) : ("auto_" + std::to_string(auto_pin_id_++));
+    auto base = std::make_shared<Var>(base_name, GetPtrType(), Span::unknown());
+    return std::make_shared<MemRef>(base, spec.addr, spec.size);
+  }
 
   // Honor a user-pinned MemRef: intern its base Ptr by name so same-id pins
   // across the kernel collapse onto one allocation (and one tile.alloc), keep the
@@ -297,10 +339,14 @@ class InitMemRefMutator : public IRMutator {
       // Resolve memory space once, pass to both memref creation and CloneType
       auto memory_space = ResolveTileMemorySpace(var_expr->GetType(), /*default_to_ddr=*/true);
       std::optional<MemRefPtr> memref;
-      auto user_ref = GetTypeMemRef(var_expr->GetType());
       const bool pinnable = memory_space.has_value() && IsPinnableSpace(*memory_space);
-      if (user_ref.has_value() && pinnable) {
-        // User pinned this tile to an explicit buffer — honor it verbatim.
+      auto pin_it = pin_by_var_.find(var.get());
+      auto user_ref = GetTypeMemRef(var_expr->GetType());
+      if (pinnable && pin_it != pin_by_var_.end()) {
+        // User pinned this tile via a `tile.alloc_buffer` marker — honor it.
+        memref = HonorUserPin(BuildPinnedMemRef(pin_it->second), shaped_type, var);
+      } else if (pinnable && user_ref.has_value()) {
+        // User pinned this tile via a `pl.MemRef(...)` type annotation — honor it.
         memref = HonorUserPin(*user_ref, shaped_type, var);
       } else {
         // Whole-space manual contract: once any tile in a pinnable space is
@@ -519,6 +565,17 @@ class InitMemRefMutator : public IRMutator {
     return std::make_shared<AssignStmt>(new_var, new_value, op->span_);
   }
 
+  // Consume `tile.alloc_buffer` markers: the pin they carry has already been
+  // applied to the referenced tile's MemRef (see ProcessNormalVar), so the
+  // marker is erased here — it must never reach codegen. Returns an empty
+  // SeqStmts, which the surrounding SeqStmts flattens away.
+  StmtPtr VisitStmt_(const EvalStmtPtr& op) override {
+    if (auto call = As<Call>(op->expr_); call && IsOp(call, "tile.alloc_buffer")) {
+      return std::make_shared<SeqStmts>(std::vector<StmtPtr>{}, op->span_);
+    }
+    return IRMutator::VisitStmt_(op);
+  }
+
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
     // Manual traversal of ForStmt fields to ensure correct MemRef assignment:
     // - iter_args inherit MemRef from initValue (via ProcessIterArg)
@@ -663,10 +720,14 @@ class InitMemRefMutator : public IRMutator {
 
   std::map<VarPtr, VarPtr> var_map_;
   uint64_t next_id_ = 0;
-  // Pinnable spaces (Vec/Mat) in whole-space manual mode for this function.
+  // Pinnable spaces (Vec/Mat/L0) in whole-space manual mode for this function.
   std::set<MemorySpace> manual_spaces_;
   // Interns user-pinned base Ptrs by name: same buffer name → one base → one alloc.
   std::map<std::string, VarPtr> pinned_base_by_name_;
+  // Per-var pins from `tile.alloc_buffer` markers (keyed by the referenced var).
+  std::map<const Var*, PinSpec> pin_by_var_;
+  // Counter for unique private (id < 0) alloc_buffer bases.
+  uint64_t auto_pin_id_ = 0;
 };
 
 // Insert alloc statements at the beginning of a function body.
@@ -704,8 +765,10 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
   auto normalized_func = NormalizeStmtStructure(func);
 
   // Step 2: Mutate variables to initialize their MemRef. Pre-scan first for
-  // pinnable spaces driven into whole-space manual mode by a user buffer pin.
-  InitMemRefMutator mutator(CollectManualSpaces(normalized_func));
+  // user buffer pins (`pl.MemRef` annotations + `tile.alloc_buffer` markers) and
+  // the pinnable spaces they drive into whole-space manual mode.
+  auto pins = CollectPins(normalized_func);
+  InitMemRefMutator mutator(std::move(pins.manual_spaces), std::move(pins.pin_by_var));
 
   std::vector<VarPtr> new_params;
   new_params.reserve(normalized_func->params_.size());

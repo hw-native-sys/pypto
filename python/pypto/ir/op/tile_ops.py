@@ -148,6 +148,36 @@ def create(
 create_tile = create
 
 
+def alloc_buffer(
+    tile: Expr,
+    addr: int,
+    size: int,
+    id: int = -1,
+    span: Span | None = None,
+) -> Call:
+    """Pin a tile to a user-assigned on-chip buffer (side-effect marker).
+
+    Emits ``tile.alloc_buffer(tile) {addr, size, id}`` — a bare statement that
+    declares ``tile``'s buffer. The pin rides in op kwargs (which survive the
+    pipeline's tile rebuilds, unlike a pre-InitMemRef type memref), so it reaches
+    InitMemRef, which applies it and erases this marker (never reaches codegen).
+
+    Args:
+        tile: The tile whose buffer to pin (TileType expression)
+        addr: Byte address within the tile's memory space
+        size: Buffer size in bytes (>= the tile footprint)
+        id: Buffer identity. Tiles sharing a (non-negative) id share one physical
+            buffer; the default -1 means a unique private buffer for this pin.
+        span: Optional source span (auto-captured if not provided)
+
+    Returns:
+        Call expression for the marker (used as a bare EvalStmt).
+    """
+    actual_span = _get_span_or_capture(span)
+    kwargs: dict[str, Any] = {"addr": addr, "size": size, "id": id}
+    return _ir_core.create_op_call("tile.alloc_buffer", [tile], kwargs, actual_span)
+
+
 def load(
     tensor: Expr,
     offsets: Sequence[int | Expr] | _ir_core.MakeTuple,
