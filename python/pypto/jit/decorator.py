@@ -1116,11 +1116,13 @@ class JITFunction:
         func_type: str | None = None,
         level: Any = None,
         auto_scope: bool = True,
+        split: Any = None,
     ) -> None:
         self._func = func
         self._func_type = func_type or "orchestration"
         self._level = level
         self._auto_scope = auto_scope
+        self._split = split  # SplitMode for a `group` sub-function; None otherwise
         self._dep_graph: (
             tuple[
                 list[JITFunction],
@@ -1642,6 +1644,7 @@ class JITFunction:
                     scalar_dtypes=dep_sd,
                     dep_names=callees_by_id[id(dep._func)],
                     auto_scope=dep._auto_scope,
+                    split=dep._split,
                 )
             )
         dep_contexts.reverse()
@@ -1656,6 +1659,7 @@ class JITFunction:
             scalar_dtypes=scalar_dtypes,
             dep_names=callees_by_id[id(self._func)],
             auto_scope=self._auto_scope,
+            split=self._split,
         )
         return dep_contexts + [entry_ctx]
 
@@ -1765,7 +1769,7 @@ def _discover_deps(func: Any, caller_func_type: str = "orchestration") -> list[J
 
     all_vars = {**func_globals, **closure_vars}
 
-    allowed_dep_types: set[str] = {"incore", "inline", "opaque"}
+    allowed_dep_types: set[str] = {"incore", "inline", "opaque", "aic", "aiv", "group"}
     if caller_func_type == "host":
         allowed_dep_types.add("orchestration")
 
@@ -1808,12 +1812,17 @@ class _SubFunctionDecorator:
         orchestration loops and ``pl.at`` scopes).
     """
 
-    def __init__(self, func_type: str, *, allow_level: bool, allow_auto_scope: bool = False) -> None:
+    def __init__(
+        self, func_type: str, *, allow_level: bool, allow_auto_scope: bool = False, allow_split: bool = False
+    ) -> None:
         self._func_type = func_type
         self._allow_level = allow_level
         self._allow_auto_scope = allow_auto_scope
+        self._allow_split = allow_split
 
-    def __call__(self, func: Any = None, *, level: Any = None, auto_scope: Any = _AUTO_SCOPE_UNSET) -> Any:
+    def __call__(
+        self, func: Any = None, *, level: Any = None, auto_scope: Any = _AUTO_SCOPE_UNSET, split: Any = None
+    ) -> Any:
         if level is not None and not self._allow_level:
             raise TypeError(f"@pl.jit.{self._func_type} does not accept a level= argument")
         if auto_scope is not _AUTO_SCOPE_UNSET and not self._allow_auto_scope:
@@ -1822,12 +1831,20 @@ class _SubFunctionDecorator:
                 "(auto_scope is only meaningful for the Orchestration entry, the "
                 "HOST orchestrator, and inline sub-functions)"
             )
+        if split is not None and not self._allow_split:
+            raise TypeError(
+                f"@pl.jit.{self._func_type} does not accept a split= argument "
+                "(split is only meaningful for a group sub-function that dispatches "
+                "a hand-written AIC + AIV cube/vector pair)"
+            )
         resolved_auto_scope = True if auto_scope is _AUTO_SCOPE_UNSET else auto_scope
         if func is None:
             return lambda f: JITFunction(
-                f, func_type=self._func_type, level=level, auto_scope=resolved_auto_scope
+                f, func_type=self._func_type, level=level, auto_scope=resolved_auto_scope, split=split
             )
-        return JITFunction(func, func_type=self._func_type, level=None, auto_scope=resolved_auto_scope)
+        return JITFunction(
+            func, func_type=self._func_type, level=None, auto_scope=resolved_auto_scope, split=split
+        )
 
 
 class _JITDecorator:
@@ -1841,6 +1858,9 @@ class _JITDecorator:
         @pl.jit.incore(level=pl.Level.AIC)   # InCore with explicit level
         @pl.jit.inline                        # Inline sub-function (spliced at call site)
         @pl.jit.opaque                        # Opaque sub-function (separate IR function)
+        @pl.jit.aic                           # AIC (cube) half of a hand-written mixed kernel
+        @pl.jit.aiv                           # AIV (vector) half of a hand-written mixed kernel
+        @pl.jit.group(split=pl.SplitMode.UP_DOWN)  # dispatches a hand-written AIC + AIV pair
 
     ``host`` is the L3+ entry variant: it authors the per-rank dispatch loop
     (``for r in pl.range(pld.world_size()): chip_orch(..., device=r)``) and
@@ -1855,6 +1875,13 @@ class _JITDecorator:
         self.incore = _SubFunctionDecorator("incore", allow_level=True)
         self.inline = _SubFunctionDecorator("inline", allow_level=False, allow_auto_scope=True)
         self.opaque = _SubFunctionDecorator("opaque", allow_level=False)
+        # Hand-written cube/vector mixed-kernel sub-functions: the user writes the
+        # two halves explicitly (pipe setup + tpush/tpop) so every real tile is
+        # alloc_buffer-pinnable; a `group` sub-function (with split=) dispatches the
+        # AIC + AIV pair. See _emit_decorator for the FunctionType mapping.
+        self.aic = _SubFunctionDecorator("aic", allow_level=False)
+        self.aiv = _SubFunctionDecorator("aiv", allow_level=False)
+        self.group = _SubFunctionDecorator("group", allow_level=False, allow_split=True)
 
     def __call__(self, func: Any = None, *, auto_scope: bool = True) -> Any:
         """Decorate an entry-point JIT function (Orchestration).
