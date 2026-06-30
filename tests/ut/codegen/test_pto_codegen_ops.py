@@ -622,10 +622,15 @@ class TestA8W8MatmulDequantCodegen:
         assert "pto.tmatmul" in mlir, f"A8W8 decode path should use ordinary tmatmul, got:\n{mlir}"
         assert "pto.tgetval" in mlir, f"A8W8 decode path should read scalar activation scale, got:\n{mlir}"
         assert "pto.tmuls" in mlir, f"A8W8 decode path should apply scalar activation scale, got:\n{mlir}"
+        assert "pto.tmul ins" in mlir, (
+            "A8W8 decode path should apply weight scales as elementwise mul, " f"got:\n{mlir}"
+        )
         assert "pto.trowexpandmul" not in mlir, (
             "A8W8 decode M=1 path should not use row-expand activation scaling, " f"got:\n{mlir}"
         )
-        assert "pto.tcolexpandmul" in mlir, f"A8W8 path should apply weight scales, got:\n{mlir}"
+        assert "pto.tcolexpandmul" not in mlir, (
+            "A8W8 decode M=1 path should not use column-expand weight scaling, " f"got:\n{mlir}"
+        )
 
 
 class TestRsqrtHighPrecisionCodegen:

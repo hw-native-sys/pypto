@@ -71,5 +71,6 @@ def test_a8w8_matmul_dequant_decode_m1_uses_scalar_activation_scale():
 
     assert "pl.tile.read(" in text
     assert "pl.tile.muls(" in text
+    assert "pl.tile.mul(" in text
     assert "pl.tile.row_expand_mul(" not in text
-    assert "pl.tile.col_expand_mul(" in text
+    assert "pl.tile.col_expand_mul(" not in text

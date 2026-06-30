@@ -976,7 +976,9 @@ void OpConversionRegistry::RegisterMatmulOps() {
         } else {
           row_scaled = emit("tile.row_expand_mul", {vec_fp32, args[2]}, {}, "a8w8_row_scaled");
         }
-        auto col_scaled = op_reg.Create("tile.col_expand_mul", {row_scaled, args[3]}, span);
+        auto col_scaled = (HasStaticShape(row_scaled, {1, -1}) && HasStaticShape(args[3], {1, -1}))
+                              ? op_reg.Create("tile.mul", {row_scaled, args[3]}, span)
+                              : op_reg.Create("tile.col_expand_mul", {row_scaled, args[3]}, span);
         if (out_dtype == DataType::FP32) {
           return ConversionResult{std::move(prologue), col_scaled};
         }
