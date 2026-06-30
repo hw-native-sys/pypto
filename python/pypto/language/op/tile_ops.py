@@ -64,6 +64,7 @@ __all__ = [
     "relu",
     "cast",
     "matmul",
+    "matmul_mx",
     "batch_matmul",
     "matmul_acc",
     "batch_matmul_acc",
@@ -1020,6 +1021,25 @@ def matmul(lhs: Tile, rhs: Tile) -> Tile:
         Tile wrapping the matmul operation
     """
     call_expr = _ir_ops.matmul(lhs.unwrap(), rhs.unwrap())
+    return Tile(expr=call_expr)
+
+
+def matmul_mx(
+    lhs: Tile,
+    rhs: Tile,
+    act_scale: Tile,
+    weight_scale: Tile,
+    *,
+    out_dtype: DataType | None = None,
+) -> Tile:
+    """INT8 matrix multiplication with activation/weight scales."""
+    call_expr = _ir_ops.matmul_mx(
+        lhs.unwrap(),
+        rhs.unwrap(),
+        act_scale.unwrap(),
+        weight_scale.unwrap(),
+        out_dtype=out_dtype,
+    )
     return Tile(expr=call_expr)
 
 

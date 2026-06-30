@@ -142,6 +142,27 @@ def test_tensor_matmul_respects_out_dtype():
     assert "torch.matmul(a, b).to(torch.float32)" in code
 
 
+def test_tensor_a8w8_matmul_dequant_codegen():
+    """tensor.a8w8_matmul_dequant should emit INT8 matmul plus scale dequant."""
+    lhs = _tensor_var("lhs_i8", [16, 512], DataType.INT8)
+    rhs = _tensor_var("rhs_i8", [512, 256], DataType.INT8)
+    act_scale = _tensor_var("act_scale", [16, 1], DataType.FP32)
+    weight_scale = _tensor_var("weight_scale", [1, 256], DataType.FP32)
+    out = _tensor_var("out", [16, 256], DataType.BF16)
+    call = _op_call(
+        "tensor.a8w8_matmul_dequant",
+        [lhs, rhs, act_scale, weight_scale],
+        {"out_dtype": DataType.BF16, "a_trans": False, "b_trans": False},
+    )
+    assign = ir.AssignStmt(out, call, _span())
+    func = _simple_function("f", [lhs, rhs, act_scale, weight_scale], assign)
+    code = torch_codegen(func)
+
+    assert "torch.matmul(lhs_i8.to(torch.float32), rhs_i8.to(torch.float32))" in code
+    assert "* act_scale.to(torch.float32) * weight_scale.to(torch.float32)" in code
+    assert ".to(torch.bfloat16)" in code
+
+
 def test_tensor_cast():
     """tensor.cast should emit .to(dtype)."""
     a = _tensor_var("a", [64])

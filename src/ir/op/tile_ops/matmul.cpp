@@ -257,6 +257,113 @@ TypePtr DeduceTileMatMulBiasType(const std::vector<ExprPtr>& args,
   return std::make_shared<TileType>(output_shape, *result_dtype, std::nullopt, tile_view);
 }
 
+static bool StaticDimsEqual(const ExprPtr& lhs, const ExprPtr& rhs) {
+  auto lhs_const = As<ConstInt>(lhs);
+  auto rhs_const = As<ConstInt>(rhs);
+  return !lhs_const || !rhs_const || lhs_const->value_ == rhs_const->value_;
+}
+
+static bool IsStaticOne(const ExprPtr& expr) {
+  auto expr_const = As<ConstInt>(expr);
+  return !expr_const || expr_const->value_ == 1;
+}
+
+static void CheckScaleDtype(const TileTypePtr& scale_type, const std::string& name, const std::string& op_name) {
+  CHECK(scale_type->dtype_.IsFloat()) << "The operator " << op_name << " requires " << name
+                                      << " dtype to be floating point, but got "
+                                      << scale_type->dtype_.ToString();
+}
+
+static void CheckRowScaleShape(const TileTypePtr& scale_type, const ExprPtr& m_dim, const std::string& op_name) {
+  CheckScaleDtype(scale_type, "act_scale", op_name);
+  const auto& shape = scale_type->shape_;
+  CHECK(shape.size() == 1 || shape.size() == 2)
+      << "The operator " << op_name << " requires act_scale shape to be [M] or [M, 1], but got "
+      << shape.size() << "D";
+  if (shape.size() == 1) {
+    CHECK(StaticDimsEqual(shape[0], m_dim))
+        << "The operator " << op_name << " requires act_scale first dimension to match output M";
+    return;
+  }
+  CHECK(StaticDimsEqual(shape[0], m_dim) && IsStaticOne(shape[1]))
+      << "The operator " << op_name << " requires act_scale shape to be [M, 1] when 2D";
+}
+
+static void CheckColScaleShape(const TileTypePtr& scale_type, const ExprPtr& n_dim, const std::string& op_name) {
+  CheckScaleDtype(scale_type, "weight_scale", op_name);
+  const auto& shape = scale_type->shape_;
+  CHECK(shape.size() == 1 || shape.size() == 2)
+      << "The operator " << op_name << " requires weight_scale shape to be [N] or [1, N], but got "
+      << shape.size() << "D";
+  if (shape.size() == 1) {
+    CHECK(StaticDimsEqual(shape[0], n_dim))
+        << "The operator " << op_name << " requires weight_scale first dimension to match output N";
+    return;
+  }
+  CHECK(IsStaticOne(shape[0]) && StaticDimsEqual(shape[1], n_dim))
+      << "The operator " << op_name << " requires weight_scale shape to be [1, N] when 2D";
+}
+
+TypePtr DeduceTileMatMulMxType(const std::vector<ExprPtr>& args,
+                               const std::vector<std::pair<std::string, std::any>>& kwargs,
+                               const std::string& op_name) {
+  CHECK(args.size() == 4) << "The operator " << op_name
+                          << " requires exactly 4 arguments (lhs_i8, rhs_i8, act_scale, weight_scale), but got "
+                          << args.size();
+
+  auto lhs_type = As<TileType>(args[0]->GetType());
+  auto rhs_type = As<TileType>(args[1]->GetType());
+  auto act_scale_type = As<TileType>(args[2]->GetType());
+  auto weight_scale_type = As<TileType>(args[3]->GetType());
+
+  CHECK(lhs_type) << "The operator " << op_name << " requires lhs_i8 to be a TileType, but got "
+                  << args[0]->GetType()->TypeName();
+  CHECK(rhs_type) << "The operator " << op_name << " requires rhs_i8 to be a TileType, but got "
+                  << args[1]->GetType()->TypeName();
+  CHECK(act_scale_type) << "The operator " << op_name << " requires act_scale to be a TileType, but got "
+                        << args[2]->GetType()->TypeName();
+  CHECK(weight_scale_type) << "The operator " << op_name << " requires weight_scale to be a TileType, but got "
+                           << args[3]->GetType()->TypeName();
+
+  CHECK(lhs_type->dtype_ == DataType::INT8) << "The operator " << op_name << " requires lhs_i8 dtype INT8, but got "
+                                            << lhs_type->dtype_.ToString();
+  CHECK(rhs_type->dtype_ == DataType::INT8) << "The operator " << op_name << " requires rhs_i8 dtype INT8, but got "
+                                            << rhs_type->dtype_.ToString();
+
+  const auto& lhs_shape = lhs_type->shape_;
+  const auto& rhs_shape = rhs_type->shape_;
+  CHECK(lhs_shape.size() == 2) << "The operator " << op_name << " requires lhs_i8 to be 2D, but got "
+                               << lhs_shape.size() << "D";
+  CHECK(rhs_shape.size() == 2) << "The operator " << op_name << " requires rhs_i8 to be 2D, but got "
+                               << rhs_shape.size() << "D";
+
+  ExprPtr m_dim = lhs_shape[0];
+  ExprPtr k_lhs = lhs_shape[1];
+  ExprPtr k_rhs = rhs_shape[0];
+  ExprPtr n_dim = rhs_shape[1];
+  CHECK(StaticDimsEqual(k_lhs, k_rhs)) << "The operator " << op_name << " requires matching inner dimensions";
+
+  CheckRowScaleShape(act_scale_type, m_dim, op_name);
+  CheckColScaleShape(weight_scale_type, n_dim, op_name);
+
+  DataType out_dtype = DataType::FP32;
+  for (const auto& [key, value] : kwargs) {
+    if (key == "out_dtype") {
+      out_dtype = std::any_cast<DataType>(value);
+    }
+  }
+  CHECK(out_dtype == DataType::FP32 || out_dtype == DataType::BF16)
+      << "The operator " << op_name << " supports FP32 or BF16 output, but got " << out_dtype.ToString();
+
+  std::vector<ExprPtr> output_shape = {m_dim, n_dim};
+  TileView tile_view;
+  tile_view.blayout = TileLayout::col_major;
+  tile_view.slayout = TileLayout::row_major;
+  tile_view.fractal = 1024;
+  tile_view.valid_shape = output_shape;
+  return std::make_shared<TileType>(output_shape, out_dtype, std::nullopt, tile_view);
+}
+
 // ============================================================================
 // Registration Function for Block Matrix Multiplication Operations
 // ============================================================================
@@ -272,6 +379,24 @@ REGISTER_OP("tile.matmul")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileMatMulType(args, kwargs, "tile.matmul");
+    });
+
+REGISTER_OP("tile.matmul_mx")
+    .set_op_category("TileOp")
+    .set_description("A8W8 INT8 tile matmul followed by row/column scale dequantization")
+    .add_argument("lhs_i8", "Left-hand side INT8 tile (TileType, 2D [M, K])")
+    .add_argument("rhs_i8", "Right-hand side INT8 tile (TileType, 2D [K, N])")
+    .add_argument("act_scale", "Activation scale tile (TileType, [M] or [M, 1])")
+    .add_argument("weight_scale", "Weight scale tile (TileType, [N] or [1, N])")
+    .set_attr<DataType>("out_dtype")
+    .set_input_memory(0, MemorySpace::Left)
+    .set_input_memory(1, MemorySpace::Right)
+    .set_input_memory(2, MemorySpace::Mat)
+    .set_input_memory(3, MemorySpace::Mat)
+    .set_output_memory(MemorySpace::Acc)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileMatMulMxType(args, kwargs, "tile.matmul_mx");
     });
 
 REGISTER_OP("tile.matmul_acc")

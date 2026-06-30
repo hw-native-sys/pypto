@@ -1604,6 +1604,35 @@ def matmul(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tile.matmul", [lhs, rhs], {}, actual_span)
 
 
+def matmul_mx(
+    lhs: Expr,
+    rhs: Expr,
+    act_scale: Expr,
+    weight_scale: Expr,
+    span: Span | None = None,
+    *,
+    out_dtype: DataType | None = None,
+) -> Call:
+    """INT8 matrix multiplication with activation/weight scales.
+
+    Args:
+        lhs: Left-hand side INT8 tile
+        rhs: Right-hand side INT8 tile
+        act_scale: Activation scale tile for the M dimension
+        weight_scale: Weight scale tile for the N dimension
+        span: Optional source span for debugging (auto-captured if not provided)
+        out_dtype: Optional output dtype, defaults to backend type inference
+
+    Returns:
+        Call expression for scaled INT8 matrix multiplication
+    """
+    actual_span = _get_span_or_capture(span)
+    kwargs: dict[str, Any] = {}
+    if out_dtype is not None:
+        kwargs["out_dtype"] = out_dtype
+    return _ir_core.create_op_call("tile.matmul_mx", [lhs, rhs, act_scale, weight_scale], kwargs, actual_span)
+
+
 def matmul_acc(acc: Expr, lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
     """Matrix multiplication with accumulation.
 

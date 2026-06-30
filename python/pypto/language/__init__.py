@@ -91,6 +91,7 @@ from .op.system_ops import (
     tpush_to_aiv,
 )
 from .op.tensor_ops import (
+    a8w8_matmul_dequant,
     assemble,
     cos,
     create_l1,
@@ -441,6 +442,7 @@ __all__ = [
     "scatter_update",
     "sin",
     "arange",
+    "a8w8_matmul_dequant",
     "gather",
     "paged_gather",
     "create_l1",

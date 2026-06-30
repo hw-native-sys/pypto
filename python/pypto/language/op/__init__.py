@@ -43,6 +43,7 @@ from .system_ops import (
 
 # Promoted tensor-only ops (accessible as pl.create_tensor, etc.)
 from .tensor_ops import (
+    a8w8_matmul_dequant,
     assemble,
     cos,
     create_l1,
@@ -205,6 +206,7 @@ __all__ = [
     "transpose",
     "slice",
     "matmul",
+    "a8w8_matmul_dequant",
     "matmul_acc",
     "row_max",
     "row_sum",

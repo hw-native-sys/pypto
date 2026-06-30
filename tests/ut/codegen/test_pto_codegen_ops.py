@@ -547,6 +547,52 @@ class Test910BBlockOpsCodegen:
             validate_kernel_codegen(func_name, mlir_code)
 
 
+class TestA8W8MatmulDequantCodegen:
+    """Codegen coverage for the A8W8 matmul/dequant tensor op."""
+
+    def _generate_mlir(self, program_cls) -> str:
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        optimized = pm.run_passes(program_cls)
+        codegen_instance = codegen.PTOCodegen()
+        funcs = [func for func in optimized.functions.values() if func.name.endswith(("_aic", "_aiv"))]
+        assert funcs, "Program has no functions"
+        chunks = []
+        for func in funcs:
+            single = ir.Program([func], func.name, optimized.span)
+            chunks.append(codegen_instance.generate(single))
+        return "\n".join(chunks)
+
+    def test_tensor_a8w8_matmul_dequant_uses_int8_matmul_dequant_chain(self):
+        """pl.a8w8_matmul_dequant lowers through ordinary tmatmul plus scale ops."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_a8w8_matmul_dequant(
+                self,
+                lhs: pl.Tensor[[16, 32], pl.INT8],
+                rhs: pl.Tensor[[32, 32], pl.INT8],
+                act_scale: pl.Tensor[[16, 1], pl.FP32],
+                weight_scale: pl.Tensor[[1, 32], pl.FP32],
+                output: pl.Tensor[[16, 32], pl.BF16],
+            ) -> pl.Tensor[[16, 32], pl.BF16]:
+                result: pl.Tensor[[16, 32], pl.BF16] = pl.a8w8_matmul_dequant(
+                    lhs, rhs, act_scale, weight_scale, out_dtype=pl.BF16
+                )
+                updated_output: pl.Tensor[[16, 32], pl.BF16] = pl.assemble(output, result, [0, 0])
+                return updated_output
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.tmatmul" in mlir, f"A8W8 path should use ordinary tmatmul, got:\n{mlir}"
+        assert "pto.tmatmul.mx" not in mlir, f"A8W8 path must not use A5 MXFP tmatmul.mx, got:\n{mlir}"
+        assert "pto.tcvt" in mlir, f"A8W8 path should cast INT32 accumulator to FP32, got:\n{mlir}"
+        assert "pto.trowexpandmul" in mlir, f"A8W8 path should apply activation scales, got:\n{mlir}"
+        assert "pto.tcolexpandmul" in mlir, f"A8W8 path should apply weight scales, got:\n{mlir}"
+
+
 class TestRsqrtHighPrecisionCodegen:
     """Tests for the high-precision path of tile.rsqrt (2-arg form)."""
 

@@ -924,6 +924,80 @@ class TestMixedAddBTrans(PTOTestCase):
         tensors["c"][:] = torch.matmul(a, bt.T)
 
 
+class TestA8W8MatmulDequant(PTOTestCase):
+    """A8W8 matmul with fused row/column scale dequantization."""
+
+    __test__ = False
+
+    def __init__(self, m: int = 16, k: int = 32, n: int = 32, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
+        self.M = m
+        self.K = k
+        self.N = n
+
+    def get_name(self) -> str:
+        return f"a8w8_matmul_dequant_{self.M}x{self.K}x{self.N}"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec(
+                "a_i8",
+                [self.M, self.K],
+                DataType.INT8,
+                init_value=lambda: torch.randint(-8, 8, (self.M, self.K), dtype=torch.int8),
+            ),
+            TensorSpec(
+                "b_i8",
+                [self.K, self.N],
+                DataType.INT8,
+                init_value=lambda: torch.randint(-8, 8, (self.K, self.N), dtype=torch.int8),
+            ),
+            TensorSpec("act_scale", [self.M, 1], DataType.FP32, init_value=lambda: torch.rand(self.M, 1) * 0.02),
+            TensorSpec(
+                "weight_scale", [1, self.N], DataType.FP32, init_value=lambda: torch.rand(1, self.N) * 0.02
+            ),
+            TensorSpec("c", [self.M, self.N], DataType.BF16, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        M, K, N = self.M, self.K, self.N
+
+        @pl.program
+        class A8W8MatmulDequantProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def a8w8_matmul_dequant(
+                self,
+                a_i8: pl.Tensor[[M, K], pl.INT8],
+                b_i8: pl.Tensor[[K, N], pl.INT8],
+                act_scale: pl.Tensor[[M, 1], pl.FP32],
+                weight_scale: pl.Tensor[[1, N], pl.FP32],
+                c: pl.Out[pl.Tensor[[M, N], pl.BF16]],
+            ) -> pl.Tensor[[M, N], pl.BF16]:
+                out = pl.a8w8_matmul_dequant(a_i8, b_i8, act_scale, weight_scale, out_dtype=pl.BF16)
+                out_c = pl.assemble(c, out, [0, 0])
+                return out_c
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                a_i8: pl.Tensor[[M, K], pl.INT8],
+                b_i8: pl.Tensor[[K, N], pl.INT8],
+                act_scale: pl.Tensor[[M, 1], pl.FP32],
+                weight_scale: pl.Tensor[[1, N], pl.FP32],
+                out_c: pl.Out[pl.Tensor[[M, N], pl.BF16]],
+            ) -> pl.Tensor[[M, N], pl.BF16]:
+                out_c = self.a8w8_matmul_dequant(a_i8, b_i8, act_scale, weight_scale, out_c)
+                return out_c
+
+        return A8W8MatmulDequantProgram
+
+    def compute_expected(self, tensors, params=None):
+        mm = torch.matmul(tensors["a_i8"].to(torch.float32), tensors["b_i8"].to(torch.float32))
+        tensors["c"][:] = (mm * tensors["act_scale"].to(torch.float32) * tensors["weight_scale"].to(torch.float32)).to(
+            torch.bfloat16
+        )
+
+
 class TestMatmulOperations:
     """Test suite for matrix multiplication (matmul) operations."""
 
@@ -960,6 +1034,13 @@ class TestMatmulOperations:
     def test_matmul_mixed_add_btranspose(self, test_runner, platform, m, k, n):
         """Mixed-kernel: a Vec compute (add) result feeds a b_trans=True 2D matmul."""
         result = test_runner.run(TestMixedAddBTrans(m=m, k=k, n=n, platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_a8w8_matmul_dequant(self, test_runner, platform):
+        """A8W8 tensor matmul/dequant path."""
+        cfg = RunConfig(platform=platform, rtol=1e-2, atol=1e-2)
+        result = test_runner.run(TestA8W8MatmulDequant(platform=platform, config=cfg))
         assert result.passed, f"Test failed: {result.error}"
 
     def test_matmulacc(self, test_config):

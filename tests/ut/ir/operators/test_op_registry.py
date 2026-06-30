@@ -323,6 +323,108 @@ def test_matmul_with_transpose_kwargs():
     assert isinstance(call.type, ir.TensorType)
 
 
+def test_a8w8_matmul_dequant_type_deduction():
+    """tensor.a8w8_matmul_dequant returns [M, N] with requested output dtype."""
+    span = ir.Span.unknown()
+
+    dim1 = ir.ConstInt(1, DataType.INT32, span)
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+    dim256 = ir.ConstInt(256, DataType.INT32, span)
+    dim512 = ir.ConstInt(512, DataType.INT32, span)
+
+    lhs_type = ir.TensorType([dim16, dim512], DataType.INT8)
+    rhs_type = ir.TensorType([dim512, dim256], DataType.INT8)
+    act_scale_type = ir.TensorType([dim16, dim1], DataType.FP32)
+    weight_scale_type = ir.TensorType([dim1, dim256], DataType.FP32)
+
+    lhs = ir.Var("lhs_i8", lhs_type, span)
+    rhs = ir.Var("rhs_i8", rhs_type, span)
+    act_scale = ir.Var("act_scale", act_scale_type, span)
+    weight_scale = ir.Var("weight_scale", weight_scale_type, span)
+
+    call = ir.create_op_call(
+        "tensor.a8w8_matmul_dequant",
+        [lhs, rhs, act_scale, weight_scale],
+        {"out_dtype": DataType.BF16, "a_trans": False, "b_trans": False},
+        span,
+    )
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.BF16
+    assert [dim.value for dim in result_type.shape] == [16, 256]
+
+
+def test_a8w8_matmul_dequant_accepts_1d_scales():
+    """tensor.a8w8_matmul_dequant accepts [M] and [N] scale tensors."""
+    span = ir.Span.unknown()
+
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+    dim256 = ir.ConstInt(256, DataType.INT32, span)
+    dim512 = ir.ConstInt(512, DataType.INT32, span)
+
+    lhs = ir.Var("lhs_i8", ir.TensorType([dim16, dim512], DataType.INT8), span)
+    rhs = ir.Var("rhs_i8", ir.TensorType([dim512, dim256], DataType.INT8), span)
+    act_scale = ir.Var("act_scale", ir.TensorType([dim16], DataType.FP32), span)
+    weight_scale = ir.Var("weight_scale", ir.TensorType([dim256], DataType.FP32), span)
+
+    call = ir.create_op_call(
+        "tensor.a8w8_matmul_dequant",
+        [lhs, rhs, act_scale, weight_scale],
+        {"a_trans": False, "b_trans": False},
+        span,
+    )
+    assert isinstance(call.type, ir.TensorType)
+    assert call.type.dtype == DataType.FP32
+
+
+def test_a8w8_matmul_dequant_rejects_non_int8_inputs():
+    """tensor.a8w8_matmul_dequant requires both matmul inputs to be INT8."""
+    span = ir.Span.unknown()
+
+    dim1 = ir.ConstInt(1, DataType.INT32, span)
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+    dim256 = ir.ConstInt(256, DataType.INT32, span)
+    dim512 = ir.ConstInt(512, DataType.INT32, span)
+
+    lhs = ir.Var("lhs", ir.TensorType([dim16, dim512], DataType.FP32), span)
+    rhs = ir.Var("rhs", ir.TensorType([dim512, dim256], DataType.INT8), span)
+    act_scale = ir.Var("act_scale", ir.TensorType([dim16, dim1], DataType.FP32), span)
+    weight_scale = ir.Var("weight_scale", ir.TensorType([dim1, dim256], DataType.FP32), span)
+
+    with pytest.raises(Exception):
+        ir.create_op_call(
+            "tensor.a8w8_matmul_dequant",
+            [lhs, rhs, act_scale, weight_scale],
+            {"a_trans": False, "b_trans": False},
+            span,
+        )
+
+
+def test_a8w8_matmul_dequant_rejects_bad_scale_shape():
+    """tensor.a8w8_matmul_dequant requires row and column scale layout."""
+    span = ir.Span.unknown()
+
+    dim1 = ir.ConstInt(1, DataType.INT32, span)
+    dim8 = ir.ConstInt(8, DataType.INT32, span)
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+    dim256 = ir.ConstInt(256, DataType.INT32, span)
+    dim512 = ir.ConstInt(512, DataType.INT32, span)
+
+    lhs = ir.Var("lhs_i8", ir.TensorType([dim16, dim512], DataType.INT8), span)
+    rhs = ir.Var("rhs_i8", ir.TensorType([dim512, dim256], DataType.INT8), span)
+    bad_act_scale = ir.Var("bad_act_scale", ir.TensorType([dim8, dim1], DataType.FP32), span)
+    weight_scale = ir.Var("weight_scale", ir.TensorType([dim1, dim256], DataType.FP32), span)
+
+    with pytest.raises(Exception):
+        ir.create_op_call(
+            "tensor.a8w8_matmul_dequant",
+            [lhs, rhs, bad_act_scale, weight_scale],
+            {"a_trans": False, "b_trans": False},
+            span,
+        )
+
+
 def test_tile_batch_matmul_type_deduction():
     """Test tile.batch_matmul type deduction without transpose kwargs."""
     span = ir.Span.unknown()
@@ -445,6 +547,48 @@ def test_matmul_kwarg_schema():
     assert "b_trans" in keys
 
 
+def test_a8w8_matmul_dequant_kwarg_schema():
+    """tensor.a8w8_matmul_dequant exposes only the explicit fusion controls."""
+    op = ir.get_op("tensor.a8w8_matmul_dequant")
+
+    assert op.has_attr("out_dtype")
+    assert op.has_attr("a_trans")
+    assert op.has_attr("b_trans")
+
+    keys = op.get_attr_keys()
+    assert "out_dtype" in keys
+    assert "a_trans" in keys
+    assert "b_trans" in keys
+    assert "c_matrix_nz" not in keys
+
+
+def test_tile_matmul_mx_type_deduction():
+    """tile.matmul_mx returns dequantized [M, N] tile with requested output dtype."""
+    span = ir.Span.unknown()
+
+    dim1 = ir.ConstInt(1, DataType.INT32, span)
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+    dim256 = ir.ConstInt(256, DataType.INT32, span)
+    dim512 = ir.ConstInt(512, DataType.INT32, span)
+
+    lhs = ir.Var("lhs_i8", ir.TileType([dim16, dim512], DataType.INT8), span)
+    rhs = ir.Var("rhs_i8", ir.TileType([dim512, dim256], DataType.INT8), span)
+    act_scale = ir.Var("act_scale", ir.TileType([dim16, dim1], DataType.FP32), span)
+    weight_scale = ir.Var("weight_scale", ir.TileType([dim1, dim256], DataType.FP32), span)
+
+    call = ir.create_op_call(
+        "tile.matmul_mx",
+        [lhs, rhs, act_scale, weight_scale],
+        {"out_dtype": DataType.BF16},
+        span,
+    )
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TileType)
+    assert result_type.dtype == DataType.BF16
+    assert [dim.value for dim in result_type.shape] == [16, 256]
+
+
 def test_tile_batch_matmul_kwarg_schema():
     """Test that tile.batch_matmul does not add custom kwargs."""
     batch_matmul_op = ir.get_op("tile.batch_matmul")
@@ -520,6 +664,18 @@ class TestOpMemorySpecRegistry:
         assert constraints[0] == [ir.MemorySpace.Acc]
         assert constraints[1] == [ir.MemorySpace.Left]
         assert constraints[2] == [ir.MemorySpace.Right]
+
+    def test_matmul_mx_spec(self):
+        """tile.matmul_mx has Left/Right/Mat/Mat input constraints and Acc output."""
+        spec = ir.get_op_memory_spec("tile.matmul_mx")
+        assert spec is not None
+        assert spec["output_memory"] == ir.MemorySpace.Acc
+        constraints = spec["input_constraints"]
+        assert len(constraints) == 4
+        assert constraints[0] == [ir.MemorySpace.Left]
+        assert constraints[1] == [ir.MemorySpace.Right]
+        assert constraints[2] == [ir.MemorySpace.Mat]
+        assert constraints[3] == [ir.MemorySpace.Mat]
 
     def test_load_spec(self):
         """tile.load output is retargetable: resolves from target_memory kwarg if

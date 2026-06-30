@@ -400,6 +400,48 @@ def matmul(
     return _ir_core.create_op_call("tensor.matmul", args, kwargs, actual_span)
 
 
+def a8w8_matmul_dequant(
+    lhs_i8: Expr,
+    rhs_i8: Expr,
+    act_scale: Expr,
+    weight_scale: Expr,
+    out_dtype: int | DataType = DataType.FP32,
+    a_trans: bool = False,
+    b_trans: bool = False,
+    span: Span | None = None,
+) -> Call:
+    """A8W8 INT8 matmul followed by row/column scale dequantization.
+
+    Semantics:
+        ``matmul(lhs_i8, rhs_i8).float() * act_scale[row] * weight_scale[col]``.
+
+    Args:
+        lhs_i8: Left-hand side INT8 tensor, shape ``[M, K]``.
+        rhs_i8: Right-hand side INT8 tensor, shape ``[K, N]``.
+        act_scale: Activation scale tensor, shape ``[M]`` or ``[M, 1]``.
+        weight_scale: Weight scale tensor, shape ``[N]`` or ``[1, N]``.
+        out_dtype: Output dtype. Currently FP32 or BF16.
+        a_trans: Whether to transpose lhs_i8.
+        b_trans: Whether to transpose rhs_i8.
+        span: Optional source span for debugging.
+
+    Returns:
+        Call expression for the fused A8W8 matmul/dequant operation.
+    """
+    actual_span = _get_span_or_capture(span)
+    kwargs: dict[str, Any] = {
+        "out_dtype": out_dtype,
+        "a_trans": a_trans,
+        "b_trans": b_trans,
+    }
+    return _ir_core.create_op_call(
+        "tensor.a8w8_matmul_dequant",
+        [lhs_i8, rhs_i8, act_scale, weight_scale],
+        kwargs,
+        actual_span,
+    )
+
+
 def matmul_acc(
     acc: Expr,
     lhs: Expr,

@@ -185,6 +185,106 @@ TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args,
   return std::make_shared<TensorType>(output_shape, out_dtype);
 }
 
+static bool StaticDimsEqual(const ExprPtr& lhs, const ExprPtr& rhs) {
+  auto lhs_const = As<ConstInt>(lhs);
+  auto rhs_const = As<ConstInt>(rhs);
+  return !lhs_const || !rhs_const || lhs_const->value_ == rhs_const->value_;
+}
+
+static bool IsStaticOne(const ExprPtr& expr) {
+  auto expr_const = As<ConstInt>(expr);
+  return !expr_const || expr_const->value_ == 1;
+}
+
+static void CheckA8W8ScaleDtype(const TensorTypePtr& scale_type, const std::string& name,
+                                const std::string& op_name) {
+  CHECK(scale_type->dtype_.IsFloat()) << op_name << " requires " << name << " dtype to be floating point, but got "
+                                      << scale_type->dtype_.ToString();
+}
+
+static void CheckA8W8RowScaleShape(const TensorTypePtr& scale_type, const ExprPtr& m_dim,
+                                   const std::string& op_name) {
+  CheckA8W8ScaleDtype(scale_type, "act_scale", op_name);
+  const auto& shape = scale_type->shape_;
+  CHECK(shape.size() == 1 || shape.size() == 2)
+      << op_name << " requires act_scale shape to be [M] or [M, 1], but got " << shape.size() << "D";
+  if (shape.size() == 1) {
+    CHECK(StaticDimsEqual(shape[0], m_dim)) << op_name << " requires act_scale first dimension to match matmul M";
+    return;
+  }
+  CHECK(StaticDimsEqual(shape[0], m_dim) && IsStaticOne(shape[1]))
+      << op_name << " requires act_scale shape to be [M, 1] when 2D";
+}
+
+static void CheckA8W8ColScaleShape(const TensorTypePtr& scale_type, const ExprPtr& n_dim,
+                                   const std::string& op_name) {
+  CheckA8W8ScaleDtype(scale_type, "weight_scale", op_name);
+  const auto& shape = scale_type->shape_;
+  CHECK(shape.size() == 1 || shape.size() == 2)
+      << op_name << " requires weight_scale shape to be [N] or [1, N], but got " << shape.size() << "D";
+  if (shape.size() == 1) {
+    CHECK(StaticDimsEqual(shape[0], n_dim)) << op_name << " requires weight_scale first dimension to match matmul N";
+    return;
+  }
+  CHECK(IsStaticOne(shape[0]) && StaticDimsEqual(shape[1], n_dim))
+      << op_name << " requires weight_scale shape to be [1, N] when 2D";
+}
+
+TypePtr DeduceTensorA8W8MatMulDequantType(const std::vector<ExprPtr>& args,
+                                          const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  const std::string op_name = "tensor.a8w8_matmul_dequant";
+  CHECK(args.size() == 4) << op_name << " requires exactly 4 arguments (lhs_i8, rhs_i8, act_scale, weight_scale), but got "
+                          << args.size();
+
+  auto lhs_type = As<TensorType>(args[0]->GetType());
+  auto rhs_type = As<TensorType>(args[1]->GetType());
+  auto act_scale_type = As<TensorType>(args[2]->GetType());
+  auto weight_scale_type = As<TensorType>(args[3]->GetType());
+
+  CHECK(lhs_type) << op_name << " requires lhs_i8 to be a TensorType, but got " << args[0]->GetType()->TypeName();
+  CHECK(rhs_type) << op_name << " requires rhs_i8 to be a TensorType, but got " << args[1]->GetType()->TypeName();
+  CHECK(act_scale_type) << op_name << " requires act_scale to be a TensorType, but got "
+                        << args[2]->GetType()->TypeName();
+  CHECK(weight_scale_type) << op_name << " requires weight_scale to be a TensorType, but got "
+                           << args[3]->GetType()->TypeName();
+
+  CHECK(lhs_type->dtype_ == DataType::INT8) << op_name << " requires lhs_i8 dtype INT8, but got "
+                                            << lhs_type->dtype_.ToString();
+  CHECK(rhs_type->dtype_ == DataType::INT8) << op_name << " requires rhs_i8 dtype INT8, but got "
+                                            << rhs_type->dtype_.ToString();
+
+  const auto& lhs_shape = lhs_type->shape_;
+  const auto& rhs_shape = rhs_type->shape_;
+  CHECK(lhs_shape.size() == 2) << op_name << " currently supports only 2D lhs_i8, but got " << lhs_shape.size()
+                               << "D";
+  CHECK(rhs_shape.size() == 2) << op_name << " currently supports only 2D rhs_i8, but got " << rhs_shape.size()
+                               << "D";
+
+  bool a_trans = GetKwarg<bool>(kwargs, "a_trans", false);
+  bool b_trans = GetKwarg<bool>(kwargs, "b_trans", false);
+
+  ExprPtr m_dim = a_trans ? lhs_shape[1] : lhs_shape[0];
+  ExprPtr k_lhs = a_trans ? lhs_shape[0] : lhs_shape[1];
+  ExprPtr k_rhs = b_trans ? rhs_shape[1] : rhs_shape[0];
+  ExprPtr n_dim = b_trans ? rhs_shape[0] : rhs_shape[1];
+
+  CHECK(StaticDimsEqual(k_lhs, k_rhs)) << op_name << " requires matching inner dimensions";
+
+  CheckA8W8RowScaleShape(act_scale_type, m_dim, op_name);
+  CheckA8W8ColScaleShape(weight_scale_type, n_dim, op_name);
+
+  DataType out_dtype = DataType::FP32;
+  try {
+    out_dtype = GetKwarg<DataType>(kwargs, "out_dtype", DataType::FP32);
+  } catch (const TypeError& e) {
+    throw TypeError("Invalid kwarg type for out_dtype: " + std::string(e.what()));
+  }
+  CHECK(out_dtype == DataType::FP32 || out_dtype == DataType::BF16)
+      << op_name << " supports FP32 or BF16 output, but got " << out_dtype.ToString();
+
+  return std::make_shared<TensorType>(std::vector<ExprPtr>{m_dim, n_dim}, out_dtype);
+}
+
 // ============================================================================
 // Registration Function for Tensor Matrix Multiplication Operations
 // ============================================================================
@@ -201,6 +301,21 @@ REGISTER_OP("tensor.matmul")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorMatMulType(args, kwargs);
+    });
+
+REGISTER_OP("tensor.a8w8_matmul_dequant")
+    .set_op_category("TensorOp")
+    .set_description("A8W8 INT8 matmul followed by row/column scale dequantization")
+    .add_argument("lhs_i8", "Left-hand side INT8 tensor [M, K]")
+    .add_argument("rhs_i8", "Right-hand side INT8 tensor [K, N]")
+    .add_argument("act_scale", "Activation scale tensor [M] or [M, 1]")
+    .add_argument("weight_scale", "Weight scale tensor [N] or [1, N]")
+    .set_attr<DataType>("out_dtype")
+    .set_attr<bool>("a_trans")
+    .set_attr<bool>("b_trans")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorA8W8MatMulDequantType(args, kwargs);
     });
 
 // ============================================================================
