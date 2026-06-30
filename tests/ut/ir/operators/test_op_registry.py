@@ -453,6 +453,30 @@ def test_tile_batch_matmul_type_deduction():
     assert result_type.shape[2].value == 32
 
 
+def test_tile_move_accepts_target_type():
+    """tile.move can request a destination dtype for fused move+convert paths."""
+    span = ir.Span.unknown()
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+    dim32 = ir.ConstInt(32, DataType.INT32, span)
+    src = ir.Var("src", ir.TileType([dim16, dim32], DataType.INT32), span)
+
+    call = ir.create_op_call(
+        "tile.move",
+        [src],
+        {
+            "target_memory": ir.MemorySpace.Vec,
+            "target_type": DataType.FP32,
+            "blayout": ir.TileLayout.row_major,
+            "slayout": ir.TileLayout.row_major,
+        },
+        span,
+    )
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TileType)
+    assert result_type.dtype == DataType.FP32
+
+
 def test_matmul_with_unknown_kwarg():
     """Test tensor.matmul with unknown kwarg should raise error."""
     span = ir.Span.unknown()

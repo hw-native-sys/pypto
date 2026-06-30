@@ -951,12 +951,11 @@ void OpConversionRegistry::RegisterMatmulOps() {
         };
 
         auto acc_i32 = emit("tile.matmul", {args[0], args[1]}, {}, "a8w8_mm_i32");
-        auto vec_i32 = emit("tile.move", {acc_i32},
-                            {{"target_memory", MemorySpace::Vec},
-                             {"blayout", TileLayout::row_major},
-                             {"slayout", TileLayout::row_major}},
-                            "a8w8_mm_vec_i32");
-        auto vec_fp32 = emit("tile.cast", {vec_i32}, {{"target_type", DataType::FP32}, {"mode", 0}},
+        auto vec_fp32 = emit("tile.move", {acc_i32},
+                             {{"target_memory", MemorySpace::Vec},
+                              {"target_type", DataType::FP32},
+                              {"blayout", TileLayout::row_major},
+                              {"slayout", TileLayout::row_major}},
                              "a8w8_mm_vec_fp32");
         auto row_scaled = emit("tile.row_expand_mul", {vec_fp32, args[2]}, {}, "a8w8_row_scaled");
         auto col_scaled = op_reg.Create("tile.col_expand_mul", {row_scaled, args[3]}, span);

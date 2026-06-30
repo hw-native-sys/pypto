@@ -434,6 +434,7 @@ def transpose_view(
 def move(
     tile: Expr,
     target_memory: MemorySpace,
+    target_type: int | DataType | None = None,
     blayout: TileLayout | None = None,
     slayout: TileLayout | None = None,
     span: Span | None = None,
@@ -443,6 +444,7 @@ def move(
     Args:
         tile: Input tile (TileType)
         target_memory: Target memory space (MemorySpace.Vec, .Mat, .Left, .Right)
+        target_type: Optional destination dtype. Defaults to the input dtype.
         blayout: Optional block layout for the destination tile
         slayout: Optional scatter layout for the destination tile
         span: Optional source span for debugging (auto-captured if not provided)
@@ -456,6 +458,8 @@ def move(
     kwargs: dict[str, Any] = {
         "target_memory": target_memory,
     }
+    if target_type is not None:
+        kwargs["target_type"] = target_type
     if blayout is not None:
         kwargs["blayout"] = blayout
     if slayout is not None:

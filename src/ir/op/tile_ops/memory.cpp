@@ -262,6 +262,7 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
 
   // Extract MemorySpace
   MemorySpace space = GetKwarg<MemorySpace>(kwargs, "target_memory");
+  DataType target_dtype = GetKwarg<DataType>(kwargs, "target_type", tile_type->dtype_);
 
   const auto& input_shape = tile_type->shape_;
 
@@ -295,8 +296,11 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
     tile_view.pad = source_view.pad;
   }
 
-  // Return TileType with computed shape and same dtype (no explicit MemRef)
-  return std::make_shared<TileType>(output_shape, tile_type->dtype_, std::nullopt, tile_view);
+  // Return TileType with computed shape and requested dtype (no explicit MemRef).
+  // target_type is intentionally optional: plain tile.move remains a same-dtype
+  // move, while Acc->Vec paths may request the hardware conversion dtype so
+  // codegen can emit one pto.tmov instead of tmov + tcvt.
+  return std::make_shared<TileType>(output_shape, target_dtype, std::nullopt, tile_view);
 }
 
 TypePtr DeduceTileAllocType(const std::vector<ExprPtr>& args,
@@ -776,6 +780,7 @@ REGISTER_OP("tile.move")
     .set_description("Move tile between memory levels (Vec/Mat/Left/Right)")
     .add_argument("tile", "Input tile (TileType)")
     .set_attr<MemorySpace>("target_memory")
+    .set_attr<DataType>("target_type")
     .set_attr<TileLayout>("blayout")
     .set_attr<TileLayout>("slayout")
     .set_output_memory_from_kwarg("target_memory", MemorySpace::Vec)

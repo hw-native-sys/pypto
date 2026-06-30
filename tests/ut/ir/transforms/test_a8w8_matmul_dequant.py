@@ -35,8 +35,9 @@ def test_a8w8_matmul_dequant_lowers_to_int8_matmul_dequant_chain():
     assert "pl.tile.matmul(" in text
     assert "pl.tile.move(" in text
     assert "target_memory=pl.Mem.Vec" in text
-    assert "pl.tile.cast(" in text
     assert "target_type=pl.FP32" in text
+    assert "a8w8_mm_vec_i32" not in text
+    assert "pl.tile.cast(" in text
     assert "pl.tile.row_expand_mul(" in text
     assert "pl.tile.col_expand_mul(" in text
     assert "target_type=pl.BF16" in text

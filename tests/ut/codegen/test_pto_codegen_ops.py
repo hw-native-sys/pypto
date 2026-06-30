@@ -588,7 +588,13 @@ class TestA8W8MatmulDequantCodegen:
         mlir = self._generate_mlir(Prog)
         assert "pto.tmatmul" in mlir, f"A8W8 path should use ordinary tmatmul, got:\n{mlir}"
         assert "pto.tmatmul.mx" not in mlir, f"A8W8 path must not use A5 MXFP tmatmul.mx, got:\n{mlir}"
-        assert "pto.tcvt" in mlir, f"A8W8 path should cast INT32 accumulator to FP32, got:\n{mlir}"
+        assert "a8w8_mm_vec_i32" not in mlir, (
+            "A8W8 path should fold INT32 accumulator conversion into pto.tmov instead "
+            f"of materializing an intermediate INT32 Vec tile, got:\n{mlir}"
+        )
+        assert "pto.tcvt ins(%a8w8_mm_vec" not in mlir, (
+            "A8W8 path should not emit a separate INT32->FP32 tcvt after tpop/tmov, got:\n{mlir}"
+        )
         assert "pto.trowexpandmul" in mlir, f"A8W8 path should apply activation scales, got:\n{mlir}"
         assert "pto.tcolexpandmul" in mlir, f"A8W8 path should apply weight scales, got:\n{mlir}"
 

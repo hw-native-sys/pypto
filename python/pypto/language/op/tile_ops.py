@@ -529,6 +529,7 @@ def concat(src0: Tile, src1: Tile) -> Tile:
 def move(
     tile: Tile,
     target_memory: MemorySpace,
+    target_type: DataType | None = None,
     blayout: TileLayout | None = None,
     slayout: TileLayout | None = None,
 ) -> Tile:
@@ -537,13 +538,16 @@ def move(
     Args:
         tile: Input tile
         target_memory: Target memory space (MemorySpace.Vec, .Mat, .Left, .Right)
+        target_type: Optional destination dtype. Defaults to the input dtype.
         blayout: Optional block layout for the destination tile
         slayout: Optional scatter layout for the destination tile
 
     Returns:
         Tile wrapping the move operation
     """
-    call_expr = _ir_ops.move(tile.unwrap(), target_memory, blayout=blayout, slayout=slayout)
+    call_expr = _ir_ops.move(
+        tile.unwrap(), target_memory, target_type=target_type, blayout=blayout, slayout=slayout
+    )
     return Tile(expr=call_expr)
 
 
