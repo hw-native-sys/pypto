@@ -290,6 +290,31 @@ PR #1177，在 `PTO2_PROFILING` 下默认开启）；用 simpler 的 `strace_tim
 计时时，开启 L2 swimlane DFX（`RunConfig(enable_l2_swimlane=True)`）并读取
 `l2_swimlane_records.json`。
 
+### 性能基准（`benchmark`）
+
+对于 register-once + 多轮（rounds）模式，`pypto.runtime.benchmark` 封装了循环
+与聚合：它注册 *compiled* 一次并发起 `rounds` 次廉价 launch（不再每轮重付
+register/load），读取每次 launch 的 `[STRACE]` 标记并返回 `BenchmarkStats`：
+
+```python
+from pypto.runtime import benchmark
+
+stats = benchmark(compiled, [a, b, c], rounds=100, warmup=3,
+                  platform="a2a3", device_id=0)
+print(stats.device_wall_us_median, stats.device_wall_us_min, len(stats.samples))
+```
+
+常见情况传 `platform=` / `device_id=`；需要 `block_dim` / `aicpu_thread_num` 等
+精细控制时传完整的 `RunConfig`（通过 `config=`）——两者不能同时给。聚合指标同时
+以 `device_wall_us_*` 和更短的 `device_us_*` 两套命名暴露，`samples` 是原始
+`device_wall_us` 列表的别名。
+
+`benchmark` 从 `[STRACE]` 标记读取计时（simpler PR #1177）：它在 worker 生命周期内
+将 runtime 日志级别提升到 `v9`，并在测量循环期间以 fd 级别捕获 `stderr`，因此循环
+期间产生的 stderr 会被转存到临时文件，而非实时打印。`device_wall_us` 仅在 L2 单芯片
+运行时是真实的 NPU 墙钟；在未开启 `SIMPLER_PROFILING` 的 runtime 上或 `*sim` 平台
+上为 `0`（用 `stats.all_zero_device` 判断）。
+
 ### 分布式（L3+）程序
 
 `ir.compile` 对 L3+ 分布式程序返回的 `DistributedCompiledProgram` 与 `CompiledProgram`

@@ -299,6 +299,34 @@ a per-launch timing object. The runtime emits per-run host/device timing as
 device timing, enable the L2 swimlane DFX (`RunConfig(enable_l2_swimlane=True)`)
 and read `l2_swimlane_records.json`.
 
+### Benchmarking (`benchmark`)
+
+For the register-once + rounds pattern, `pypto.runtime.benchmark` owns the loop
+and aggregation: it registers *compiled* once and dispatches `rounds` cheap
+launches (no per-round register/load), reads each launch's `[STRACE]` markers,
+and returns a `BenchmarkStats`:
+
+```python
+from pypto.runtime import benchmark
+
+stats = benchmark(compiled, [a, b, c], rounds=100, warmup=3,
+                  platform="a2a3", device_id=0)
+print(stats.device_wall_us_median, stats.device_wall_us_min, len(stats.samples))
+```
+
+Pass `platform=` / `device_id=` for the common case, or a full `RunConfig` via
+`config=` for `block_dim` / `aicpu_thread_num` control (not both). Aggregates are
+exposed under both `device_wall_us_*` and shorter `device_us_*` names, with
+`samples` aliasing the raw `device_wall_us` list.
+
+`benchmark` reads timing from the `[STRACE]` markers (simpler PR #1177): it
+raises the runtime log level to `v9` for the worker's lifetime and captures
+`stderr` at the fd level around the measured loop, so stderr emitted during the
+loop is diverted into a temp file rather than shown live. `device_wall_us` is a
+real on-NPU wall only for L2 single-chip runs; it is `0` on runtimes built
+without `SIMPLER_PROFILING` or on `*sim` platforms (check
+`stats.all_zero_device`).
+
 ### Distributed (L3+) programs
 
 L3+ distributed programs returned by `ir.compile` (a `DistributedCompiledProgram`)

@@ -24,6 +24,7 @@ Example::
     compiled = run(MyProgram, a, b, c, config=RunConfig(platform="a2a3sim"))
 """
 
+from .bench import BenchmarkStats, benchmark
 from .device_tensor import DeviceTensor
 from .distributed_runner import DistributedWorker, execute_distributed_compiled
 from .log_config import _ensure_configured as _ensure_log_configured
@@ -40,11 +41,13 @@ _ensure_log_configured()
 
 __all__ = [
     "run",
+    "benchmark",
     "compile_program",
     "execute_compiled",
     "execute_distributed_compiled",
     "configure_log",
     "log_level",
+    "BenchmarkStats",
     "ChipWorker",
     "DeviceTensor",
     "DistributedWorker",
