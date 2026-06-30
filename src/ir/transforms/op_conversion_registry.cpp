@@ -50,6 +50,16 @@ namespace {
 
 bool IsConstOne(const ExprPtr& expr) { return IsConstValue(expr, 1); }
 
+bool HasStaticShape(const ExprPtr& expr, const std::vector<int64_t>& expected_shape) {
+  auto tile_type = As<TileType>(expr->GetType());
+  if (!tile_type || tile_type->shape_.size() != expected_shape.size()) return false;
+  for (size_t i = 0; i < expected_shape.size(); ++i) {
+    if (expected_shape[i] < 0) continue;
+    if (!IsConstValue(tile_type->shape_[i], expected_shape[i])) return false;
+  }
+  return true;
+}
+
 // Detect row-broadcast pattern: [M, N] op [M, 1] or [M, 1] op [M, N]
 // Returns {wider_arg_idx, narrower_arg_idx} if broadcast detected, empty otherwise
 std::pair<int, int> DetectRowBroadcast(const std::vector<ExprPtr>& args) {
@@ -957,7 +967,15 @@ void OpConversionRegistry::RegisterMatmulOps() {
                               {"blayout", TileLayout::row_major},
                               {"slayout", TileLayout::row_major}},
                              "a8w8_mm_vec_fp32");
-        auto row_scaled = emit("tile.row_expand_mul", {vec_fp32, args[2]}, {}, "a8w8_row_scaled");
+        ExprPtr row_scaled;
+        if (HasStaticShape(vec_fp32, {1, -1}) && HasStaticShape(args[2], {1, 1})) {
+          auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, span);
+          auto zero_zero = std::make_shared<MakeTuple>(std::vector<ExprPtr>{zero, zero}, span);
+          auto act_scale_scalar = emit("tile.read", {args[2], zero_zero}, {}, "a8w8_act_scale_scalar");
+          row_scaled = emit("tile.muls", {vec_fp32, act_scale_scalar}, {}, "a8w8_row_scaled");
+        } else {
+          row_scaled = emit("tile.row_expand_mul", {vec_fp32, args[2]}, {}, "a8w8_row_scaled");
+        }
         auto col_scaled = op_reg.Create("tile.col_expand_mul", {row_scaled, args[3]}, span);
         if (out_dtype == DataType::FP32) {
           return ConversionResult{std::move(prologue), col_scaled};

@@ -598,6 +598,35 @@ class TestA8W8MatmulDequantCodegen:
         assert "pto.trowexpandmul" in mlir, f"A8W8 path should apply activation scales, got:\n{mlir}"
         assert "pto.tcolexpandmul" in mlir, f"A8W8 path should apply weight scales, got:\n{mlir}"
 
+    def test_tensor_a8w8_matmul_dequant_decode_m1_uses_scalar_activation_scale(self):
+        """Decode M=1 should replace row-expand activation scaling with scalar tmuls."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_a8w8_matmul_dequant_decode_m1(
+                self,
+                lhs: pl.Tensor[[1, 32], pl.INT8],
+                rhs: pl.Tensor[[32, 32], pl.INT8],
+                act_scale: pl.Tensor[[1, 1], pl.FP32],
+                weight_scale: pl.Tensor[[1, 32], pl.FP32],
+                output: pl.Tensor[[1, 32], pl.BF16],
+            ) -> pl.Tensor[[1, 32], pl.BF16]:
+                result: pl.Tensor[[1, 32], pl.BF16] = pl.a8w8_matmul_dequant(
+                    lhs, rhs, act_scale, weight_scale, out_dtype=pl.BF16
+                )
+                updated_output: pl.Tensor[[1, 32], pl.BF16] = pl.assemble(output, result, [0, 0])
+                return updated_output
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.tmatmul" in mlir, f"A8W8 decode path should use ordinary tmatmul, got:\n{mlir}"
+        assert "pto.tgetval" in mlir, f"A8W8 decode path should read scalar activation scale, got:\n{mlir}"
+        assert "pto.tmuls" in mlir, f"A8W8 decode path should apply scalar activation scale, got:\n{mlir}"
+        assert "pto.trowexpandmul" not in mlir, (
+            "A8W8 decode M=1 path should not use row-expand activation scaling, " f"got:\n{mlir}"
+        )
+        assert "pto.tcolexpandmul" in mlir, f"A8W8 path should apply weight scales, got:\n{mlir}"
+
 
 class TestRsqrtHighPrecisionCodegen:
     """Tests for the high-precision path of tile.rsqrt (2-arg form)."""

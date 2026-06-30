@@ -48,3 +48,28 @@ def test_a8w8_matmul_dequant_lowers_to_int8_matmul_dequant_chain():
     assert "target_memory=pl.Mem.Left" in memory_text
     assert "target_memory=pl.Mem.Right" in memory_text
     assert memory_text.count("target_memory=pl.Mem.Vec") >= 3
+
+
+def test_a8w8_matmul_dequant_decode_m1_uses_scalar_activation_scale():
+    """Decode M=1 can use a scalar activation scale instead of row broadcast."""
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            lhs_i8: pl.Tensor[[1, 512], pl.INT8],
+            rhs_i8: pl.Tensor[[512, 256], pl.INT8],
+            act_scale: pl.Tensor[[1, 1], pl.FP32],
+            weight_scale: pl.Tensor[[1, 256], pl.FP32],
+        ) -> pl.Tensor[[1, 256], pl.BF16]:
+            out = pl.a8w8_matmul_dequant(lhs_i8, rhs_i8, act_scale, weight_scale, out_dtype=pl.BF16)
+            return out
+
+    after = passes.convert_tensor_to_tile_ops()(Program)
+    text = ir.python_print(after, format=False)
+
+    assert "pl.tile.read(" in text
+    assert "pl.tile.muls(" in text
+    assert "pl.tile.row_expand_mul(" not in text
+    assert "pl.tile.col_expand_mul(" in text
