@@ -688,6 +688,15 @@ static IRNodePtr DeserializeForStmt(const msgpack::object& fields_obj, msgpack::
     attrs = DeserializeKwargs(*attrs_obj, "attrs", ctx, zone);
   }
 
+  // Reject a legacy chunked ForStmt: the chunk / auto_chunk loop-chunking feature was removed,
+  // so a serialized "chunk_config" field can no longer be honored. Unlike the cosmetic
+  // loop-origin tag, chunk_config is semantic — silently dropping it would change the loop's
+  // meaning — so fail loudly with a migration hint instead.
+  CHECK(!GetOptionalFieldObj(fields_obj, "chunk_config", ctx).has_value())
+      << "Cannot deserialize a ForStmt carrying a legacy 'chunk_config' field: the chunk / "
+      << "auto_chunk loop-chunking feature was removed. Re-export this IR from a current PyPTO "
+      << "version (chunked loops can be expressed with manual tiling).";
+
   return std::make_shared<ForStmt>(loop_var, start, stop, step, iter_args, body, return_vars, span, kind,
                                    std::move(attrs), DeserializeLeadingComments(fields_obj));
 }
