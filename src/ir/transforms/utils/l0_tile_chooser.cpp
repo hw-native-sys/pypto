@@ -210,6 +210,10 @@ int64_t WallCycles(int m, int n, int k, const L0TileConfig& cfg, const Regime& r
   const double compute = std::max(LoadCycles(m, n, cfg, r), static_cast<double>(MadCycles(m, n, k, cfg)));
   const double drain = DrainCycles(cfg);
   const double wall = r.dbc ? std::max(compute, drain) : compute + drain;
+  // Guard the float->int cast: a non-finite or out-of-exact-range wall would be UB.
+  // Given the validated positive bandwidths and aligned-bounded dims this never fires.
+  INTERNAL_CHECK(std::isfinite(wall) && wall <= 9007199254740992.0)  // 2^53
+      << "Internal error: ChooseL0Tile wall cycles " << wall << " is non-finite or out of range";
   return static_cast<int64_t>(std::llround(wall));
 }
 
@@ -324,6 +328,9 @@ L0TileResult ChooseL0Tile(const L0TileConfig& cfg) {
       << "ChooseL0Tile: minimum tile dimensions must be positive";
   CHECK(cfg.align_m > 0 && cfg.align_n > 0 && cfg.align_k > 0)
       << "ChooseL0Tile: tile alignments must be positive";
+  CHECK(cfg.bw_a > 0.0 && cfg.bw_b > 0.0 && cfg.bw_drain > 0.0)
+      << "ChooseL0Tile: roofline bandwidths must be strictly positive (got bw_a=" << cfg.bw_a
+      << ", bw_b=" << cfg.bw_b << ", bw_drain=" << cfg.bw_drain << ") -- they divide the load/drain cost.";
 
   // Without padding, the problem dimensions themselves must already meet the
   // cube minimum. Callers (the pass) should pre-screen and skip with a
