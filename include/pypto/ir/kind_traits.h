@@ -136,13 +136,24 @@ DEFINE_KIND_TRAIT(GlobalVar, ObjectKind::GlobalVar)
 // Stmt base class - matches any statement kind
 template <>
 struct KindTrait<Stmt> {
-  static constexpr ObjectKind kinds[] = {
-      ObjectKind::AssignStmt,          ObjectKind::IfStmt,           ObjectKind::YieldStmt,
-      ObjectKind::ReturnStmt,          ObjectKind::ForStmt,          ObjectKind::WhileStmt,
-      ObjectKind::InCoreScopeStmt,     ObjectKind::ClusterScopeStmt, ObjectKind::HierarchyScopeStmt,
-      ObjectKind::SpmdScopeStmt,       ObjectKind::SplitAivScopeStmt, ObjectKind::RuntimeScopeStmt,
-      ObjectKind::CommDomainScopeStmt, ObjectKind::SeqStmts,         ObjectKind::EvalStmt,
-      ObjectKind::BreakStmt,           ObjectKind::ContinueStmt,     ObjectKind::InlineStmt};
+  static constexpr ObjectKind kinds[] = {ObjectKind::AssignStmt,
+                                         ObjectKind::IfStmt,
+                                         ObjectKind::YieldStmt,
+                                         ObjectKind::ReturnStmt,
+                                         ObjectKind::ForStmt,
+                                         ObjectKind::WhileStmt,
+                                         ObjectKind::InCoreScopeStmt,
+                                         ObjectKind::ClusterScopeStmt,
+                                         ObjectKind::HierarchyScopeStmt,
+                                         ObjectKind::SpmdScopeStmt,
+                                         ObjectKind::SplitAivScopeStmt,
+                                         ObjectKind::RuntimeScopeStmt,
+                                         ObjectKind::CommDomainScopeStmt,
+                                         ObjectKind::SeqStmts,
+                                         ObjectKind::EvalStmt,
+                                         ObjectKind::BreakStmt,
+                                         ObjectKind::ContinueStmt,
+                                         ObjectKind::InlineStmt};
   static constexpr size_t count = 18;
 };
 

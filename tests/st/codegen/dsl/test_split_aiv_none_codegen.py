@@ -62,10 +62,21 @@ def test_none_region_in_pipeline_compiles_to_pto():
         save_kernels=True,
         save_kernels_dir=str(DUMP_DIR),
     )
-    split_aiv_none_pipe(torch.randn(T, N), torch.empty(T, N), config=cfg)
+    # PTO codegen writes the .pto before the downstream kernel-compilation step
+    # (simpler_setup), which is absent in the codegen-only CI env. Capture any
+    # such post-codegen failure — the guard below is on the emitted .pto, which
+    # materializes first.
+    compile_error: Exception | None = None
+    try:
+        split_aiv_none_pipe(torch.randn(T, N), torch.empty(T, N), config=cfg)
+    except Exception as e:  # noqa: BLE001 - see comment above
+        compile_error = e
 
     ptos = sorted(DUMP_DIR.rglob("*.pto"))
-    assert ptos, f"codegen emitted no .pto under {DUMP_DIR} for a NONE split_aiv region"
+    assert ptos, (
+        f"codegen emitted no .pto under {DUMP_DIR} for a NONE split_aiv region; "
+        f"compile raised before .pto materialized: {compile_error!r}"
+    )
 
 
 if __name__ == "__main__":
