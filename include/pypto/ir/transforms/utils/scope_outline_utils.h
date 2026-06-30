@@ -907,6 +907,19 @@ class ScopeOutliner : public IRMutator {
       SplitAivModeSummaryFinder finder;
       finder.VisitStmt(op->body_);
       if (!finder.found) return;
+      // A function-level AUTO split (optimizations=[pl.split(mode)], carried as the
+      // scope's own split_) and explicit pl.split_aiv region(s) are mutually
+      // exclusive AIV-split mechanisms. Downstream lowering takes the per-region
+      // path and would silently drop the function-level split, so reject the
+      // combination HERE — the scope's user split (incore_split) and the regions
+      // are both visible only at outline time; post-outline they merge
+      // indistinguishably into the function's split / split_aiv attrs (a single
+      // pl.split_aiv region legitimately yields a derived function-level split).
+      CHECK_SPAN(!(incore_split.has_value() && incore_split.value() != SplitMode::None), op->span_)
+          << "scope combines a function-level pl.split(...) (optimizations=[pl.split(...)]) with "
+             "pl.split_aiv region(s); these are mutually exclusive AIV-split mechanisms. Remove "
+             "optimizations=[pl.split(...)] or the pl.split_aiv region(s) — the function-level "
+             "split would otherwise be silently dropped (the per-region split governs the lanes).";
       outlined_attrs.emplace_back("split_aiv", true);
       // Stamp a function-level representative ``split`` mode ONLY when all regions
       // share one mode (``uniform_mode``) AND the scope carries no AUTO cross-core

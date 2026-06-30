@@ -1459,6 +1459,41 @@ class TestOutlineNoDepArgs:
         assert outlined.attrs["split"] == pl.SplitMode.UP_DOWN.value
         assert outlined.attrs["split_aiv"] is True
 
+    def test_function_split_with_split_aiv_region_rejected(self):
+        """A function-level pl.split (optimizations=[pl.split(mode)]) on a scope
+        that ALSO contains pl.split_aiv region(s) is rejected: the two AIV-split
+        mechanisms are mutually exclusive, and the function-level split would
+        otherwise be silently dropped (the per-region split governs the lanes).
+
+        Detected at outline, where the scope's user split and the region are both
+        visible — post-outline they merge indistinguishably into the function's
+        split/split_aiv attrs (a single region legitimately derives a func split,
+        see test_outline_propagates_split_aiv_attr)."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                with pl.at(
+                    level=pl.Level.CORE_GROUP,
+                    name_hint="k",
+                    optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
+                ):
+                    for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+                        offset = aiv_id * 128
+                        t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
+                        out = pl.store(t, [offset, 0], out)
+                return out
+
+        with passes.PassContext([]):
+            ssa = passes.convert_to_ssa()(Before)
+            with pytest.raises(ValueError, match="mutually exclusive"):
+                passes.outline_incore_scopes()(ssa)
+
     def test_outline_multi_mode_regions_omits_func_split(self):
         """Two sibling pl.split_aiv regions with DIFFERING modes (UP_DOWN +
         LEFT_RIGHT) in one CORE_GROUP scope: the outlined function gets

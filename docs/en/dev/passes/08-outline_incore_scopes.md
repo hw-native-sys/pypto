@@ -196,3 +196,12 @@ passes.def("outline_incore_scopes", &pass::OutlineIncoreScopes, "Outline InCore 
 - YieldStmt in control flow handled correctly
 
 **Run ConvertToSSA first** if IR is not in SSA form.
+
+**Mutually exclusive AIV-split mechanisms**: a function-level AUTO split
+(`optimizations=[pl.split(mode)]`, carried as the scope's own `split_`) and
+explicit `pl.split_aiv` regions (`SplitAivScopeStmt`) cannot coexist on one
+scope. This pass rejects the combination (it bridges a single region's mode into
+a function-level representative `split`, which would silently collide with the
+user's `pl.split`). See
+[`LowerAutoVectorSplit`](20-lower_auto_vector_split.md) for how the surviving
+mechanism is lowered.

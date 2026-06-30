@@ -80,6 +80,13 @@ result = passes.lower_auto_vector_split()(program)
 [`ExpandMixedKernel`](21-expand_mixed_kernel.md) 跳过其单一函数级模式的转置检查——
 改由 pass 21 用每个区域正确的拆分轴校验各自的转置风险）。
 
+函数级 AUTO split（`optimizations=[pl.split(mode)]`）与显式 `pl.split_aiv` 区域是
+**互斥**的——同时携带二者的作用域会被拒绝。该检查在更早的
+[`OutlineIncoreScopes`](10-outline_incore_scopes.md) 中执行，那里作用域自身的 `split_`
+（用户的 `pl.split`）与其区域都仍可见；否则本区域路径会按区域下降并静默丢弃函数级 split。
+（提取后二者会无法区分地合并：**单个** `pl.split_aiv` 区域会合法地派生出一个函数级代表
+`split` 模式，故此处无法再检测该冲突。）
+
 按区域的 `split_` 模式处理三种区域体形态：
 
 - **数据并行 · 全宽体**（`UpDown` / `LeftRight`，无显式边界算子）：区域体持有全宽向量计算。
