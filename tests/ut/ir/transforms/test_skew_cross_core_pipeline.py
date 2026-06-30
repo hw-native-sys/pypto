@@ -29,6 +29,7 @@ from typing import cast
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
+from pypto.language.parser.text_parser import parse as _parse_text
 
 
 def _strip_membership(program: ir.Program) -> ir.Program:
@@ -42,7 +43,7 @@ def _strip_membership(program: ir.Program) -> ir.Program:
     carry no other attrs, so dropping the whole ``attrs={...}`` dict is exact."""
     text = ir.python_print(program)
     text = re.sub(r',\s*attrs=\{"pipeline_membership":\s*"[^"]*"\}', "", text)
-    return cast(ir.Program, pl.loads(text))
+    return cast(ir.Program, _parse_text(text, filename="<strip-membership>"))
 
 
 def _skew(program: ir.Program) -> ir.Program:

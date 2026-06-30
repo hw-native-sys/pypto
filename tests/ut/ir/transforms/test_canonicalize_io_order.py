@@ -21,9 +21,13 @@ any stale ``pipeline_stages`` attr on exit, so the Expected programs use plain
 ``pl.range`` — matching the post-pass state.
 """
 
+import re
+from typing import cast
+
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
+from pypto.language.parser.text_parser import parse as _parse_text
 
 
 def _run_pass(program: ir.Program) -> ir.Program:
@@ -717,10 +721,17 @@ class TestCanonicalizeIOOrder:
 def _run_lower_then_canon(program: ir.Program) -> ir.Program:
     """Skew cross-core loops (SkewCrossCorePipeline), replicate the rest
     (LowerPipelineLoops), then reorder (CanonicalizeIOOrder) — the real pipeline
-    order — under the conftest's default full verification."""
+    order — under the conftest's default full verification.
+
+    SkewCrossCorePipeline stamps a transient ``pipeline_membership`` attr on its
+    clones (a MemoryReuse buffer-separation hint, stripped downstream by
+    MemoryReuse); it is not part of the loop *shape* this flow asserts, so re-emit
+    without it before comparing."""
     skewed = passes.skew_cross_core_pipeline()(program)
     lowered = passes.lower_pipeline_loops()(skewed)
-    return passes.canonicalize_io_order()(lowered)
+    canon = passes.canonicalize_io_order()(lowered)
+    text = re.sub(r',\s*attrs=\{"pipeline_membership":\s*"[^"]*"\}', "", ir.python_print(canon))
+    return cast(ir.Program, _parse_text(text, filename="<strip-membership>"))
 
 
 class TestCanonicalizeCrossCore:

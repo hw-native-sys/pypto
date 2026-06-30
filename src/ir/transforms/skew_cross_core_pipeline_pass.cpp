@@ -220,6 +220,12 @@ class MembershipTagger : public IRMutator {
   MembershipTagger(int32_t group, int32_t stage) : group_(group), stage_(stage) {}
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+    // Skip the cross-core receive (`e = tpop_*`): its result is not a load buffer,
+    // so MemoryReuse's ping-pong guard ignores its membership anyway (the guard
+    // blocks only cross-stage *load* tiles). Tagging it would also break round-trip
+    // — tpop carries a `split` attr that the printer's membership-only allowlist
+    // drops, so the reparsed Call's attrs no longer match.
+    if (IsTpopStmt(op)) return IRMutator::VisitStmt_(op);
     auto visited = IRMutator::VisitStmt_(op);
     auto assign = std::dynamic_pointer_cast<const AssignStmt>(visited);
     if (!assign) return visited;
