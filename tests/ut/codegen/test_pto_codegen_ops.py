@@ -1616,12 +1616,14 @@ class TestTileAssembleCodegen:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
-                a: pl.Tensor[[256, 128], pl.BF16],
-                b: pl.Tensor[[128, 256], pl.BF16],
+                a: pl.Tensor[[256, 256], pl.BF16],
+                b: pl.Tensor[[256, 256], pl.BF16],
                 e: pl.Tensor[[256, 64], pl.BF16],
                 out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
             ) -> pl.Tensor[[256, 64], pl.FP32]:
-                c = pl.matmul(a, b, out_dtype=pl.FP32)  # [256, 256] > L0c, consumed on-chip
+                c = pl.matmul(
+                    a, b, out_dtype=pl.FP32
+                )  # [256, 256] > L0c, consumed on-chip (K-split, both OS -> packs)
                 cb = pl.cast(c, pl.BF16, mode="rint")  # rint -> bf16 Mat scratch (FIXPIPE tie-even)
                 d = pl.matmul(cb, e, out_dtype=pl.FP32)
                 out = pl.assemble(out, d, [0, 0])
@@ -1645,12 +1647,12 @@ class TestTileAssembleCodegen:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
-                a: pl.Tensor[[256, 32], pl.BF16],
-                b: pl.Tensor[[32, 256], pl.BF16],
+                a: pl.Tensor[[256, 64], pl.BF16],
+                b: pl.Tensor[[64, 256], pl.BF16],
                 e: pl.Tensor[[256, 64], pl.BF16],
                 out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
             ) -> pl.Tensor[[256, 64], pl.FP32]:
-                c = pl.matmul(a, b, out_dtype=pl.FP32)  # K=32 fits L0 (k == K) -> full-K; on-chip
+                c = pl.matmul(a, b, out_dtype=pl.FP32)  # K=64 fits L0 (k == K) -> full-K; on-chip
                 cb = pl.cast(c, pl.BF16, mode="rint")  # rint -> bf16 Mat scratch (FIXPIPE tie-even)
                 d = pl.matmul(cb, e, out_dtype=pl.FP32)
                 out = pl.assemble(out, d, [0, 0])
@@ -1658,7 +1660,9 @@ class TestTileAssembleCodegen:
 
         mlir = self._generate_mlir_all_incore(Prog)
         tinserts = [line for line in mlir.splitlines() if "pto.tinsert" in line]
-        assert len(tinserts) == 4, f"2x2 grid -> 4 Acc->Mat tinserts, got {len(tinserts)}:\n{mlir}"
+        assert len(tinserts) == 2, (
+            f"full-M, N-tiled (1x2 grid) -> 2 Acc->Mat tinserts, got {len(tinserts)}:\n{mlir}"
+        )
         assert "loc=mat, dtype=bf16" in mlir, (
             f"the full-K chained-matmul intermediate must be a bf16 Mat scratch:\n{mlir}"
         )
