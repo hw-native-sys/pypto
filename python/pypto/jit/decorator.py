@@ -59,6 +59,7 @@ import os
 import re
 import shutil
 import textwrap
+from collections.abc import Callable
 from typing import Any, NamedTuple
 
 from pypto.pypto_core import DataType
@@ -582,6 +583,45 @@ def _fold_int_arith(op: ast.operator, lhs: int, rhs: int) -> int | None:
     return None
 
 
+def _subscript_slice_meta(
+    sub: ast.Subscript,
+    local: dict[str, TensorMeta],
+    resolve_int: Callable[[ast.expr], int | None],
+) -> TensorMeta | None:
+    """Infer the ``TensorMeta`` of ``var = src[a:b, i, ...]`` subscript-slice sugar.
+
+    The documented equivalent of ``pl.slice`` (see ``_extract_local_tensor_metas``
+    form 2): dtype is inherited from ``src``; each slice dim resolves to
+    ``stop - start`` (``start`` defaults to 0), falling back to the parent dim
+    when ``start``/``stop`` aren't static or the upper bound is open (``a:``) —
+    a ``DynDim`` parent flows through transparently that way; a scalar index
+    drops its dim (numpy-style rank reduction); dims past the supplied indices
+    are implicit ``:`` and keep the parent extent. Returns ``None`` (skipped,
+    leaving the clear ``_build_params`` error) when ``src`` is unknown, a step
+    slice is used, or the index count exceeds ``src``'s rank.
+    """
+    src = sub.value
+    if not isinstance(src, ast.Name) or src.id not in local:
+        return None
+    src_meta = local[src.id]
+    slc = sub.slice
+    indices = list(slc.elts) if isinstance(slc, ast.Tuple) else [slc]
+    if len(indices) > len(src_meta.shape):
+        return None
+    dims: list[ShapeDim] = []
+    for dim_idx, idx in enumerate(indices):
+        if not isinstance(idx, ast.Slice):
+            continue  # scalar index → rank-reducing, dim dropped
+        if idx.step is not None:
+            return None
+        start = 0 if idx.lower is None else resolve_int(idx.lower)
+        stop = None if idx.upper is None else resolve_int(idx.upper)
+        extent = stop - start if isinstance(start, int) and isinstance(stop, int) else None
+        dims.append(extent if extent is not None else src_meta.shape[dim_idx])
+    dims.extend(src_meta.shape[len(indices) :])  # trailing implicit ``:``
+    return TensorMeta(shape=tuple(dims), dtype=src_meta.dtype)
+
+
 def _extract_local_tensor_metas(
     func: Any,
     seed_meta: dict[str, TensorMeta] | None = None,
@@ -607,7 +647,11 @@ def _extract_local_tensor_metas(
        as-is, and a non-static dim (e.g. a runtime ``valid_len``) falls back to
        ``src``'s corresponding dim, since a slice is bounded above by its
        parent. ``src`` dims that are themselves ``DynDim`` flow through
-       transparently.
+       transparently. The subscript-slice sugar ``var = src[a:b, i, ...]`` (an
+       ``ast.Subscript``) is the documented equivalent and is tracked the same
+       way: each slice dim resolves to ``stop - start`` (parent-dim fallback
+       when not static), a scalar index drops its dim, and trailing implicit
+       ``:`` dims keep the parent extent.
     3. ``v1, ..., vk = jit_dep(args)`` where ``jit_dep`` is an
        ``@pl.jit.incore`` / ``inline`` / ``opaque`` callee with ``k``
        ``pl.Out[...]`` parameters — each ``vi`` inherits the meta of the caller
@@ -811,23 +855,23 @@ def _extract_local_tensor_metas(
                 target = stmt.target
             else:
                 continue
-            call = stmt.value
-            if not isinstance(call, ast.Call):  # AnnAssign.value may be None
-                continue
-            fn = call.func
-            if (
-                isinstance(fn, ast.Attribute)
-                and isinstance(fn.value, ast.Name)
-                and isinstance(target, ast.Name)
-            ):
-                handler = _pl_attr_handlers.get(fn.attr)
-                if handler is not None:
-                    meta = handler(call)
-                    if meta is not None:
-                        local[target.id] = meta
-                    continue
-            if isinstance(fn, ast.Name) and fn.id in dep_io:
-                _record_dep_result_metas(call, fn.id, target)
+            value = stmt.value
+            named = target if isinstance(target, ast.Name) else None
+            meta: TensorMeta | None = None
+            # Subscript-slice sugar ``v = src[a:b, ...]`` (an ast.Subscript, not a
+            # pl.slice Call) is the documented equivalent of pl.slice; a tracked
+            # ``pl.<attr>(...)`` call dispatches through the handler table.
+            if isinstance(value, ast.Subscript) and named is not None:
+                meta = _subscript_slice_meta(value, local, _resolve_int)
+            elif isinstance(value, ast.Call):  # AnnAssign.value may be None
+                fn = value.func
+                if isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Name) and named is not None:
+                    handler = _pl_attr_handlers.get(fn.attr)
+                    meta = handler(value) if handler is not None else None
+                elif isinstance(fn, ast.Name) and fn.id in dep_io:
+                    _record_dep_result_metas(value, fn.id, target)
+            if meta is not None and named is not None:
+                local[named.id] = meta
 
     _walk(func_def.body)
     return local

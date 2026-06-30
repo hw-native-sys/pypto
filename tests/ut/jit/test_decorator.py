@@ -763,6 +763,25 @@ def _reshape_body(src: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
     return out_flat
 
 
+def _subscript_slice_body(src: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+    """Plain function for _extract_local_tensor_metas unit test: subscript-slice
+    sugar tracking (issue #1836). All locals are tracked by JIT AST metadata
+    extraction, hence the noqa F841 on the unused names."""
+    view = src[0:16, 0:8]  # static bounds → (16, 8)  # noqa: F841
+    row = src[4, 0:8]  # scalar index drops dim 0 → (8,)  # noqa: F841
+    partial = src[0:16]  # trailing implicit ``:`` keeps parent dim 1  # noqa: F841
+    out_view = out[0:16, 0:8]  # noqa: F841
+    return out
+
+
+def _subscript_runtime_slice_body(src: pl.Tensor, cfg: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+    """Plain function: a subscript slice whose upper bound is a runtime scalar."""
+    valid_len = pl.tensor.read(cfg, [0])
+    view = src[0:16, 0:valid_len]  # 2nd dim runtime → parent-dim fallback
+    out = _relu_kernel(view, out)
+    return out
+
+
 class TestSliceAndDepReturnMetadata:
     """Regression tests: the JIT specializer must track tensor metadata for
     ``pl.slice`` views and ``@pl.jit.incore`` return values when they flow into
@@ -999,6 +1018,52 @@ class TestSliceAndDepReturnMetadata:
         # reshape changes rank but keeps element count; dtype inherited from src.
         assert metas["x_flat"] == TensorMeta(shape=(128, 128), dtype=DataType.BF16)
         assert metas["out_flat"] == TensorMeta(shape=(128, 128), dtype=DataType.BF16)
+
+    def test_extract_local_tensor_metas_subscript_slice(self):
+        """``_extract_local_tensor_metas`` tracks subscript-slice sugar
+        ``v = src[a:b, ...]`` the same way it tracks ``pl.slice`` (issue #1836):
+        static extents, scalar-index rank reduction, and trailing implicit ``:``."""
+        seed = {
+            "src": TensorMeta(shape=(32, 32), dtype=DataType.FP32),
+            "out": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
+        }
+        metas = _extract_local_tensor_metas(_subscript_slice_body, seed_meta=seed)
+        # Two static slices → (stop - start) per dim; dtype inherited from src.
+        assert metas["view"] == TensorMeta(shape=(16, 8), dtype=DataType.FP32)
+        # Scalar index at dim 0 drops it (numpy-style rank reduction).
+        assert metas["row"] == TensorMeta(shape=(8,), dtype=DataType.FP32)
+        # Only dim 0 indexed → dim 1 is implicit ``:``, keeps the parent extent.
+        assert metas["partial"] == TensorMeta(shape=(16, 32), dtype=DataType.FP32)
+        # Subscript of an Out parameter resolves just like an In parameter.
+        assert metas["out_view"] == TensorMeta(shape=(16, 8), dtype=DataType.FP32)
+
+    def test_extract_local_tensor_metas_subscript_runtime_bound_uses_parent_dim(self):
+        """A subscript slice dim with a non-static upper bound falls back to the
+        parent tensor's static dim (the slice is bounded above by its parent)."""
+        seed = {
+            "src": TensorMeta(shape=(32, 64), dtype=DataType.FP16),
+            "cfg": TensorMeta(shape=(1,), dtype=DataType.INT64),
+            "out": TensorMeta(shape=(16, 64), dtype=DataType.FP16),
+        }
+        metas = _extract_local_tensor_metas(_subscript_runtime_slice_body, seed_meta=seed)
+        # Runtime-scalar 2nd bound → falls back to src's dim 1 = 64; dtype from src.
+        assert metas["view"] == TensorMeta(shape=(16, 64), dtype=DataType.FP16)
+
+    def test_extract_local_tensor_metas_subscript_propagates_dyndim(self):
+        """A full ``:`` subscript over a ``DynDim`` parent dim flows the DynDim
+        through transparently (matching ``pl.slice`` behaviour)."""
+        from pypto.jit.specializer import DynDim  # noqa: PLC0415
+
+        m_dim = DynDim(name="M", literal="M", static_bound=7)
+        seed = {"src": TensorMeta(shape=(m_dim, 128), dtype=DataType.BF16)}
+
+        def body(src):
+            view = src[:, 0:64]  # dim 0 full ``:`` keeps DynDim; dim 1 → 64  # noqa: F841
+            return view
+
+        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        assert metas["view"].shape == (m_dim, 64)
+        assert metas["view"].dtype == DataType.BF16
 
 
 # Module-level dynvar + constant for TestDynamicLocalTensorMetadata.
@@ -1780,6 +1845,45 @@ class TestInlineFuncIntegration:
         func_names = [f.name for f in post_pass.functions.values()]
         assert "copy_inline" not in func_names, f"Inline should be spliced, got {func_names}"
         assert "reshape_caller" in func_names
+
+    def test_inline_with_subscript_slice_compiles(self):
+        """Regression for #1836: a subscript-slice view ``src[a:b]`` forwarded into
+        an @pl.jit.inline dep compiles.
+
+        Previously failed because ``_extract_local_tensor_metas`` did not track the
+        subscript-slice sugar (an ``ast.Subscript``, unlike ``pl.slice``'s Call),
+        so the inline dep's param got no inferred metadata and ``_build_params``
+        raised ``missing inferred tensor metadata``. Mirrors
+        ``test_inline_with_reshape_compiles`` (the #1755 sibling) with the local
+        view produced by subscript sugar instead of ``pl.reshape``.
+        """
+        torch = pytest.importorskip("torch")
+
+        @jit.inline
+        def copy_inline(
+            x: pl.Tensor[[128, 128], pl.BF16],
+            y: pl.Out[pl.Tensor[[128, 128], pl.BF16]],
+        ):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                tile = pl.load(x, [0, 0], [128, 128])
+                pl.store(tile, [0, 0], y)
+            return y
+
+        @jit
+        def subscript_caller(
+            src: pl.Tensor[[256, 128], pl.BF16],
+            y: pl.Out[pl.Tensor[[128, 128], pl.BF16]],
+        ) -> pl.Tensor[[128, 128], pl.BF16]:
+            x_view = src[0:128]  # subscript-slice sugar → (128, 128)
+            y = copy_inline(x_view, y)
+            return y
+
+        src = torch.randn(256, 128, dtype=torch.bfloat16)
+        y = torch.empty(128, 128, dtype=torch.bfloat16)
+        post_pass = subscript_caller.compile_for_test(src, y)
+        func_names = [f.name for f in post_pass.functions.values()]
+        assert "copy_inline" not in func_names, f"Inline should be spliced, got {func_names}"
+        assert "subscript_caller" in func_names
 
 
 class TestOpaqueFuncIntegration:
