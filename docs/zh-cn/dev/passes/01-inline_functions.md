@@ -132,4 +132,4 @@ scope 被原样保留,稍后由 `OutlineIncoreScopes` 提取为独立的 InCore 
 
 - `python/pypto/jit/decorator.py` — `@pl.jit.inline` 是用户层入口(`_SubFunctionDecorator("inline", ...)`)。
 - [02-unroll_loops](02-unroll_loops.md) — 紧随其后运行。
-- [10-outline_incore_scopes](08-outline_incore_scopes.md) — 处理展开后剩余的 `pl.at` scope。
+- [08-outline_incore_scopes](08-outline_incore_scopes.md) — 处理展开后剩余的 `pl.at` scope。

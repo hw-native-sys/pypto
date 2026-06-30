@@ -692,13 +692,19 @@ static IRNodePtr DeserializeForStmt(const msgpack::object& fields_obj, msgpack::
   if (attrs_obj.has_value() && attrs_obj->type != msgpack::type::NIL) {
     attrs = DeserializeKwargs(*attrs_obj, "attrs", ctx, zone);
   } else {
-    // Legacy backward compat: convert old "loop_origin" field to attrs
+    // Legacy backward compat: convert old "loop_origin" field to attrs.
     auto loop_origin_obj = GetOptionalFieldObj(fields_obj, "loop_origin", ctx);
     if (loop_origin_obj.has_value()) {
-      auto origin = static_cast<LoopOrigin>(loop_origin_obj->via.u64);
-      if (origin != LoopOrigin::Original) {
-        attrs.emplace_back("loop_origin", origin);
-      }
+      auto origin_value = loop_origin_obj->via.u64;
+      // The chunk loop-origin tags (ChunkOuter=1, ChunkInner=2, ChunkRemainder=3) were removed
+      // along with the auto_chunk subsystem; only Original (0) remains. Reject a legacy chunk
+      // value with a clear migration error rather than casting it into an invalid LoopOrigin
+      // enum (which would later trip an internal check in LoopOriginToString).
+      CHECK(origin_value == static_cast<uint64_t>(LoopOrigin::Original))
+          << "Cannot deserialize legacy loop_origin value " << origin_value
+          << ": the chunk loop-origin tags (ChunkOuter/ChunkInner/ChunkRemainder) were removed "
+          << "with the auto_chunk subsystem. Re-export this IR from a current PyPTO version.";
+      // Original is the default tag, so there is nothing to add to attrs.
     }
   }
 
