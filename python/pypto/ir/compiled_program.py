@@ -356,7 +356,7 @@ def _invoke_compiled(
     args: tuple["CallArg", ...],
     config: Any,
     caller_name: str,
-) -> "tuple[torch.Tensor | tuple[torch.Tensor, ...] | None, Any]":
+) -> "torch.Tensor | tuple[torch.Tensor, ...] | None":
     """Shared dispatch: coerce args, call the runtime, pack outputs.
 
     Used by both :meth:`CompiledProgram.__call__` (single-orch case) and
@@ -364,13 +364,9 @@ def _invoke_compiled(
     differ only in *where* the artifacts live and *whose* metadata they
     apply — everything from argument coercion onward is identical.
 
-    Returns a ``(outputs, timing)`` pair: *outputs* is ``None`` for in-place
-    calls or the packed return tensors otherwise; *timing* is the simpler
-    ``RunTiming`` from :func:`pypto.runtime.execute_compiled` (``host_wall_us``
-    / ``device_wall_us``) — always a ``RunTiming``, never ``None``, since the
-    dispatch always produces one. Callers surface *timing* via
-    ``last_run_timing`` and return *outputs* unchanged so the public call
-    signature stays backward compatible.
+    Returns *outputs*: ``None`` for in-place calls or the packed return
+    tensors otherwise. Per-run timing is no longer returned — read it from
+    the runtime's ``[STRACE]`` log markers (simpler PR #1177).
     """
     coerced, return_style = _coerce_args(
         args, param_infos, output_indices, return_types, caller_name=caller_name
@@ -381,7 +377,7 @@ def _invoke_compiled(
     if config is None:
         config = RunConfig()
 
-    timing = execute_compiled(
+    execute_compiled(
         output_dir,
         coerced,
         platform=platform,
@@ -393,11 +389,10 @@ def _invoke_compiled(
     )
 
     if not return_style:
-        return None, timing
+        return None
     outputs = [coerced[i] for i in output_indices]
     assert all(isinstance(o, torch.Tensor) for o in outputs)
-    packed = outputs[0] if len(outputs) == 1 else tuple(outputs)
-    return packed, timing  # type: ignore[return-value]
+    return outputs[0] if len(outputs) == 1 else tuple(outputs)  # type: ignore[return-value]
 
 
 def _default_platform(backend_type: BackendType) -> str:
@@ -462,11 +457,6 @@ class CompiledProgram:
         self._chip_callable: Any = None
         self._runtime_name: str | None = None
         self._runtime_config: dict[str, Any] | None = None
-
-        # RunTiming from the most recent __call__ (host_wall_us /
-        # device_wall_us), or None before the first on-device run. Surfaced as
-        # a side channel so the call return value stays outputs/None.
-        self.last_run_timing: Any = None
 
         # Multi-orch (L2-only) programs emit each Orchestration as a
         # self-contained sub-build under ``next_levels/<name>/``. Detect
@@ -839,9 +829,9 @@ class CompiledProgram:
 
         Returns:
             ``None`` for in-place calls, a single ``torch.Tensor`` or a
-            ``tuple`` for return-style calls. The on-device timing for this
-            call is stored on :attr:`last_run_timing` (a simpler ``RunTiming``
-            with ``host_wall_us`` / ``device_wall_us``).
+            ``tuple`` for return-style calls. Per-run on-device timing is no
+            longer surfaced as an attribute — read it from the runtime's
+            ``[STRACE]`` log markers (simpler PR #1177).
 
         Raises:
             TypeError: If the program has multiple L2 orchestrations (use
@@ -855,7 +845,7 @@ class CompiledProgram:
                 f"compiled['<name>'](...) or compiled.<name>(...)."
             )
         param_infos, output_indices, return_types = self._get_metadata()
-        outputs, self.last_run_timing = _invoke_compiled(
+        return _invoke_compiled(
             output_dir=self._output_dir,
             platform=self._platform,
             param_infos=param_infos,
@@ -865,7 +855,6 @@ class CompiledProgram:
             config=config,
             caller_name="CompiledProgram",
         )
-        return outputs
 
 
 class _SubChipCallable:
@@ -888,8 +877,6 @@ class _SubChipCallable:
         self._chip_callable: Any = None
         self._runtime_name: str | None = None
         self._runtime_config: dict[str, Any] | None = None
-        # RunTiming from the most recent __call__ — see CompiledProgram.
-        self.last_run_timing: Any = None
 
     @property
     def name(self) -> str:
@@ -995,7 +982,7 @@ class _SubChipCallable:
         *args: CallArg,
         config: Any = None,
     ) -> torch.Tensor | tuple[torch.Tensor, ...] | None:
-        outputs, self.last_run_timing = _invoke_compiled(
+        return _invoke_compiled(
             output_dir=self._output_dir,
             platform=self._platform,
             param_infos=self._param_infos,
@@ -1005,7 +992,6 @@ class _SubChipCallable:
             config=config,
             caller_name=f"orchestration {self._name!r}",
         )
-        return outputs
 
 
 # Public re-exports for callers (e.g. ir.compile()) that need orchestration

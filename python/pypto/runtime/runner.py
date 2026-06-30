@@ -53,11 +53,6 @@ if TYPE_CHECKING:
     # time. The field is plumbed through to ``ir.compile()`` lazily anyway.
     from pypto.ir.distributed_compiled_program import DistributedConfig
 
-    # ``RunTiming`` is a simpler nanobind type re-exported via
-    # ``task_interface``. Under TYPE_CHECKING only so importing ``runner`` does
-    # not pull in the optional ``simpler`` package at import time.
-    from .task_interface import RunTiming  # pyright: ignore[reportAttributeAccessIssue]
-
 
 def _load_golden_from_data_dir(out_dir: Path, output_names: set[str]) -> dict[str, torch.Tensor] | None:
     """Load pre-computed golden outputs from ``data/out/{name}.pt`` files.
@@ -362,17 +357,8 @@ class RunResult:
         execution_time: Python wall-clock time in seconds for the full run
             (compile + execute + validate). This mixes host-side compile/golden
             overhead with the actual dispatch, so it cannot isolate device time
-            — use *device_wall_us* / *host_wall_us* for that (issue #1679).
-        device_wall_us: On-NPU orchestrator wall time in microseconds, taken
-            from the dispatch's :class:`RunTiming.device_wall_us`. ``None`` when
-            the run never reached device dispatch (pre-compile failure,
-            ``codegen_only``). For L2 single-task runs this is the real on-NPU
-            wall; on a runtime built without ``PTO2_PROFILING`` it is ``0``.
-        host_wall_us: Host-side wall time in microseconds around the dispatch
-            (:class:`RunTiming.host_wall_us`). ``None`` under the same
-            conditions as *device_wall_us*. Unlike *execution_time*, this
-            excludes compile/golden overhead — it brackets only the device
-            dispatch.
+            — read per-run device/host timing from the runtime's ``[STRACE]``
+            log markers (simpler PR #1177) instead.
     """
 
     __test__ = False  # Not a pytest test class
@@ -382,8 +368,6 @@ class RunResult:
     error: str | None = None
     execution_time: float | None = None
     profile: dict[str, Any] | None = None
-    device_wall_us: float | None = None
-    host_wall_us: float | None = None
 
     def __str__(self) -> str:
         time_str = f" ({self.execution_time:.2f}s)" if self.execution_time else ""
@@ -541,11 +525,11 @@ class _DfxOpts:
 
 
 def _execute_dfx_passes(
-    run_pass: Callable[["_DfxOpts"], "RunTiming"],
+    run_pass: Callable[["_DfxOpts"], None],
     capture_deps: Callable[[], None],
     dfx: "_DfxOpts",
     platform: str,
-) -> "RunTiming":
+) -> None:
     """Drive device execution, splitting into two passes when swimlane is on.
 
     The runtime swimlane converter joins per-task timing against a task graph
@@ -562,8 +546,7 @@ def _execute_dfx_passes(
         cap (``halHostRegister`` rc 8). A child process fully reclaims that
         state on exit. Best-effort — a failed capture is logged, not fatal.
       * Timing pass — swimlane (plus any other timing DFX), dep_gen off,
-        producing the clean ``l2_swimlane_records.json`` whose timing we return.
-        Runs in-process.
+        producing the clean ``l2_swimlane_records.json``. Runs in-process.
 
     Both passes write into the same ``output_prefix`` (the subprocess is pointed
     at the same ``dfx_outputs/``), so the converter finds ``deps.json`` and the
@@ -574,19 +557,16 @@ def _execute_dfx_passes(
     converter needs), so a second run buys nothing.
 
     Args:
-        run_pass: Executes one in-process device run with the given DFX flags
-            and returns its timing. Call-site closure over the static kwargs.
+        run_pass: Executes one in-process device run with the given DFX flags.
+            Call-site closure over the static kwargs.
         capture_deps: Captures ``deps.json`` in a subprocess (dep_gen only).
             Call-site closure; invoked once before the timing pass.
         dfx: The DFX toggles the caller requested.
         platform: Target execution platform (used only to detect ``*sim``).
-
-    Returns:
-        The :class:`RunTiming` from the kept pass (the timing pass when
-        two-pass, otherwise the single pass).
     """
     if not dfx.enable_l2_swimlane or platform.endswith("sim"):
-        return run_pass(dfx)
+        run_pass(dfx)
+        return
 
     # The two passes look like a double run, so announce what each is for.
     print(
@@ -850,7 +830,7 @@ def _execute_on_device(
     platform: str,
     device_id: int,
     dfx: _DfxOpts = _DfxOpts(),
-) -> "RunTiming":
+) -> None:
     """Load inputs, execute on device, and validate against golden.
 
     Shared execution logic used by both :func:`run` and the test harness
@@ -869,13 +849,6 @@ def _execute_on_device(
         dfx: Runtime DFX toggles. When any flag is enabled the artefacts
             land under ``<work_dir>/dfx_outputs/`` and the matching
             post-run converter is invoked.
-
-    Returns:
-        The :class:`RunTiming` from :func:`execute_on_device` (``host_wall_us``
-        plus ``device_wall_us``). The harness surfaces these on
-        :class:`RunResult` so callers can isolate device time from the
-        compile + golden + validate wall captured by ``execution_time``
-        (issue #1679).
     """
     from .device_runner import (  # noqa: PLC0415
         build_orch_args_from_inputs,
@@ -907,8 +880,8 @@ def _execute_on_device(
         dfx_dir = work_dir / "dfx_outputs"
         dfx_dir.mkdir(parents=True, exist_ok=True)
 
-    def _run_pass(pass_dfx: "_DfxOpts") -> "RunTiming":
-        return execute_on_device(
+    def _run_pass(pass_dfx: "_DfxOpts") -> None:
+        execute_on_device(
             chip_callable,
             orch_args,
             platform,
@@ -946,7 +919,7 @@ def _execute_on_device(
     # then run the clean-timing swimlane pass in-process. Collection uses the
     # original ``dfx`` so the converter joins the sibling ``deps.json`` and the
     # deps-render hint fires only when the user explicitly asked for dep_gen.
-    timing = _execute_dfx_passes(_run_pass, _capture_deps, dfx, platform)
+    _execute_dfx_passes(_run_pass, _capture_deps, dfx, platform)
 
     if dfx_dir is not None:
         _collect_dfx_artifacts(dfx_dir, platform, dfx)
@@ -958,8 +931,6 @@ def _execute_on_device(
         rtol=getattr(golden_module, "RTOL", 1e-5),
         atol=getattr(golden_module, "ATOL", 1e-5),
     )
-
-    return timing
 
 
 # ---------------------------------------------------------------------------
@@ -1232,7 +1203,7 @@ def execute_compiled(  # noqa: PLR0913
     block_dim: int | None = None,
     aicpu_thread_num: int | None = None,
     analyze_auto_scopes_for_deps: bool = False,
-) -> "RunTiming":
+) -> None:
     """Execute a pre-compiled program with user-provided tensors and scalars.
 
     Reuses :func:`device_runner.compile_and_assemble` for binary compilation
@@ -1271,13 +1242,9 @@ def execute_compiled(  # noqa: PLR0913
             compile and execute can pass it through safely. It has no effect
             after the program has already been compiled.
 
-    Returns:
-        The :class:`RunTiming` from :func:`execute_on_device` (``host_wall_us``
-        plus ``device_wall_us``; ``device_wall_us`` is the real on-NPU wall for
-        L2 single-task runs and ``0`` for L3+ DAG runs). Always a
-        :class:`RunTiming` — the underlying simpler ``Worker.run`` never returns
-        ``None`` (on a non-``PTO2_PROFILING`` build ``device_wall_us`` is ``0``,
-        not absent). Callers that do not need timing can ignore it.
+    Device results are written back into the host tensors in *args* in
+    place; per-run timing is no longer returned — read it from the runtime's
+    ``[STRACE]`` log markers (simpler PR #1177) or the L2 swimlane records.
     """
     del analyze_auto_scopes_for_deps
 
@@ -1309,8 +1276,8 @@ def execute_compiled(  # noqa: PLR0913
         dfx_dir = work_dir / "dfx_outputs"
         dfx_dir.mkdir(parents=True, exist_ok=True)
 
-    def _run_pass(pass_dfx: "_DfxOpts") -> "RunTiming":
-        return execute_on_device(
+    def _run_pass(pass_dfx: "_DfxOpts") -> None:
+        execute_on_device(
             chip_callable,
             orch_args,
             platform,
@@ -1352,13 +1319,10 @@ def execute_compiled(  # noqa: PLR0913
 
     # When swimlane is on (onboard), capture deps.json in a subprocess first,
     # then run the clean-timing swimlane pass in-process (see _execute_dfx_passes).
-    # The kept timing is the clean pass's.
-    timing = _execute_dfx_passes(_run_pass, _capture_deps, dfx, platform)
+    _execute_dfx_passes(_run_pass, _capture_deps, dfx, platform)
 
     # Collect DFX artefacts after execution (no-op when dfx_dir is None).
     # Original ``dfx`` drives collection so swimlane conversion auto-joins
     # ``deps.json`` and the deps-render hint fires only on explicit dep_gen.
     if dfx_dir is not None:
         _collect_dfx_artifacts(dfx_dir, platform, dfx)
-
-    return timing

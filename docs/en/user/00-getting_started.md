@@ -289,40 +289,15 @@ for batch in stream:
 See `examples/runtime/explicit_dispatch.py` for three end-to-end patterns
 (inference service, training loop, register/dispatch overhead check).
 
-### Reading per-launch timing (`run_timed`, `benchmark`)
+### Reading per-launch timing
 
-`worker.run` / `handle(...)` return tensor outputs only. To read the per-launch
-`RunTiming` (`host_wall_us` / `device_wall_us`) on the register-once path, use
-the opt-in `run_timed`, which returns `(outputs, timing)`:
-
-```python
-with ChipWorker(config=RunConfig(platform="a2a3sim")) as worker:
-    handle = worker.register(compiled)
-    out, timing = handle.run_timed(a, b, c)          # register once, timed launch
-    print(timing.device_wall_us)                     # on-NPU orchestrator wall
-```
-
-For benchmarking, `pypto.runtime.benchmark` owns the loop and aggregation — it
-registers once and dispatches `rounds` cheap launches (no per-round
-register/load), returning a `BenchmarkStats`:
-
-```python
-from pypto.runtime import benchmark
-
-stats = benchmark(compiled, [a, b, c], rounds=100, warmup=3,
-                  platform="a2a3", device_id=0)
-print(stats.device_wall_us_median, stats.device_wall_us_min, len(stats.samples))
-```
-
-Pass `platform=` / `device_id=` for the common case, or a full `RunConfig` via
-`config=` for `block_dim` / `aicpu_thread_num` control (not both). Aggregates are
-exposed under both `device_wall_us_*` (issue-aligned) and shorter `device_us_*`
-names, with `samples` aliasing the raw `device_wall_us` list.
-
-`device_wall_us` is a real on-NPU wall only for L2 single-chip runs. It is `0`
-on runtimes built without `PTO2_PROFILING` (check `stats.all_zero_device`).
-For L3+ DAG runs, aggregate device-wall timing is currently unsupported —
-`run_timed` / `benchmark` raise rather than report a zero-valued wall.
+`worker.run` / `handle(...)` return tensor outputs only and no longer surface
+a per-launch timing object. The runtime emits per-run host/device timing as
+`[STRACE]` log markers (simpler PR #1177, on by default under
+`PTO2_PROFILING`); parse them with simpler's `strace_timing` /
+`device_log_timing` tools rather than reading a return value. For per-task
+device timing, enable the L2 swimlane DFX (`RunConfig(enable_l2_swimlane=True)`)
+and read `l2_swimlane_records.json`.
 
 ### Distributed (L3+) programs
 

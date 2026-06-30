@@ -145,11 +145,6 @@ class DistributedCompiledProgram:
         self._output_indices = _output_indices
         self._return_types = _return_types
 
-        # RunTiming from the most recent __call__ (host_wall_us; device_wall_us
-        # is 0 for the L3 DAG), or None before the first on-device run. Surfaced
-        # as a side channel so the call return value stays outputs/None.
-        self.last_run_timing: Any = None
-
         # Only the fresh-compile path (live IR) writes artifacts. The reload
         # path must not clobber a user's hand-edited debug/run.py or the
         # already-present metadata file.
@@ -397,7 +392,7 @@ class DistributedCompiledProgram:
                 )
             coerced.append(arg)
 
-        self.last_run_timing = execute_distributed(self, coerced, config)
+        execute_distributed(self, coerced, config)
 
         if not return_style:
             return None
