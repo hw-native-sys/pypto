@@ -33,6 +33,7 @@
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/codegen/codegen_base.h"
+#include "pypto/codegen/orchestration/iter_arg_carry_analyzer.h"
 #include "pypto/codegen/orchestration/orchestration_analysis.h"
 #include "pypto/codegen/orchestration_op_registry.h"
 #include "pypto/core/dtype.h"
@@ -89,21 +90,9 @@ constexpr const char* kDualAivDispatchAttr = "dual_aiv_dispatch";
 // ForStmt / IfStmt branch body in an AUTO ``RuntimeScopeStmt`` so codegen emits
 // ``PTO2_SCOPE()`` 1:1 from the IR. The structural analyses below inspect those
 // bodies with hand-written traversals (GetLastYieldStmt, FlattenToStmts) that do
-// not descend through a scope node. ``UnwrapAutoScope`` peeks through a single
-// leading AUTO scope so those analyses see the original statements. Manual
-// scopes are intentionally left opaque — they were never auto-wrapped.
-StmtPtr UnwrapAutoScope(const StmtPtr& stmt) {
-  if (auto scope = As<RuntimeScopeStmt>(stmt); scope && !scope->manual_) {
-    return UnwrapAutoScope(scope->body_);
-  }
-  // A user-written ``with pl.auto_scope():`` body may arrive as a single-statement
-  // SeqStmts wrapper (before NormalizeStmtStructure collapses it); peek through it
-  // (and any nested AUTO scopes) so the analyses still reach the real statements.
-  if (auto seq = As<SeqStmts>(stmt); seq && seq->stmts_.size() == 1) {
-    return UnwrapAutoScope(seq->stmts_[0]);
-  }
-  return stmt;
-}
+// not descend through a scope node. ``UnwrapAutoScope`` (in orchestration_analysis)
+// peeks through a single leading AUTO scope so those analyses see the original
+// statements. Manual scopes are intentionally left opaque — they were never auto-wrapped.
 
 // The runtime primitive ``Arg::set_dependencies(ptr, count)`` has no upper
 // bound on the explicit dep count, and codegen sizes each call's
@@ -529,238 +518,43 @@ class OrchestrationStmtCodegen : public CodegenBase {
     INTERNAL_CHECK_SPAN(for_stmt->iter_args_.size() == for_stmt->return_vars_.size(), for_stmt->span_)
         << "Internal error: ForStmt iter_args/return_vars size mismatch";
 
-    // Classify each iter_arg by its yield: trivial (yields back the iter_arg
-    // itself, no body-level rebind) vs rebind (yields a different value, e.g.
-    // a freshly-created tensor). The two need different lowerings:
-    //
-    //   trivial: alias iter_arg/return_var to the init's emit name. The runtime
-    //     dependency tracker keys off Tensor* identity, and OUTPUT_EXISTING /
-    //     INOUT params record the address of the Tensor lvalue passed in. If we
-    //     materialised a fresh `Tensor` value for the carry, the kernel reads
-    //     and writes would see a different `&tensor` than the producer that
-    //     materialised the buffer, breaking dep chains. So for the trivial case
-    //     we keep the legacy aliasing behaviour.
-    //
-    //   rebind: predeclare a mutable carry variable initialised from the init,
-    //     and route YieldStmt to assign back to it. Without this, a python
-    //     rebind like `current = next` inside the loop body would never
-    //     propagate to the next iteration or to code following the loop. See
-    //     issue #1286.
-    //
-    // We need to know which case applies before visiting the body, so we look
-    // up the yield once here. The body may be wrapped in an AUTO scope by
-    // MaterializeRuntimeScopes; peek through it so the trailing yield is found.
-    auto yield = transform_utils::GetLastYieldStmt(UnwrapAutoScope(for_stmt->body_));
-    std::vector<bool> is_rebind(for_stmt->iter_args_.size(), false);
-    if (yield) {
-      INTERNAL_CHECK_SPAN(yield->value_.size() == for_stmt->iter_args_.size(), for_stmt->span_)
-          << "Internal error: ForStmt yield/iter_args size mismatch";
-      // Build the alias-equivalence set for each iter_arg. A Var is in
-      // `iter_arg`'s class if it IS the iter_arg, or it was assigned the
-      // result of `tensor.assemble(<member>, ...)` — assemble writes in place
-      // to its first arg so the result Var is just another name for the same
-      // backing buffer. The transitive closure is computed by repeatedly
-      // walking AssignStmts in the body until no new members are added.
-      // (This mirrors HandleTensorAssembleAssign at codegen-emit time, but
-      // we need it pre-body so we can decide on the carry lowering.)
-      std::vector<std::unordered_set<const Var*>> aliases(for_stmt->iter_args_.size());
-      for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
-        aliases[i].insert(for_stmt->iter_args_[i].get());
-      }
-      // Collect: (a) AssignStmts producing tensor.assemble aliases, and (b)
-      // nested ForStmts (so we can map their iter_args -> their return_vars,
-      // which are how a parent's carry "comes out of" an inner loop).
-      auto body_aliases = CollectBodyAliases(for_stmt->body_);
-      // Index assignments by produced var so rule (d) can climb tuple chains.
-      std::unordered_map<const Var*, AssignStmtPtr> var_to_assign;
-      for (const auto& a : body_aliases.assigns) {
-        var_to_assign[a->var_.get()] = a;
-      }
+    // ForStmt visitor pipeline: analyze iter-arg carries (IterArgCarryAnalyzer)
+    // -> post-process compiler-derived deps -> emit carry declarations -> emit loop body.
+    IterArgCarryAnalyzer carry_analyzer(program_, in_manual_scope_depth_);
+    auto carry_plans = carry_analyzer.Analyze(for_stmt);
 
-      bool changed = true;
-      while (changed) {
-        changed = false;
-        for (const auto& assign : body_aliases.assigns) {
-          // (d) TupleGetItemExpr: climb to the tuple-producing call and resolve
-          // the corresponding output arg. Multi-output InCore kernels return
-          // tuples; each `var = ret_tuple[i]` extract should alias the i-th
-          // output-side arg of the call (using the codegen's own indexing).
-          if (auto tge = As<TupleGetItemExpr>(assign->value_)) {
-            auto tuple_var = AsVarLike(tge->tuple_);
-            if (tuple_var) {
-              auto it = var_to_assign.find(tuple_var.get());
-              if (it != var_to_assign.end()) {
-                // The tuple producer may be a Submit (pl.submit / `as tid`);
-                // view it as a Call so its output args alias identically.
-                auto tcall = AsCallOrSubmitView(it->second->value_);
-                if (tcall) {
-                  auto tdirs = tcall->GetArgDirections();
-                  if (tdirs.size() == tcall->args_.size()) {
-                    int64_t out_seen = 0;
-                    int64_t target_idx = static_cast<int64_t>(tge->index_);
-                    for (size_t a = 0; a < tdirs.size(); ++a) {
-                      if (tdirs[a] != ArgDirection::OutputExisting && tdirs[a] != ArgDirection::InOut &&
-                          tdirs[a] != ArgDirection::Output) {
-                        continue;
-                      }
-                      if (out_seen == target_idx) {
-                        auto out_arg = AsVarLike(tcall->args_[a]);
-                        if (out_arg) {
-                          for (auto& cls : aliases) {
-                            if (cls.count(out_arg.get()) && !cls.count(assign->var_.get())) {
-                              cls.insert(assign->var_.get());
-                              changed = true;
-                            }
-                          }
-                        }
-                        break;
-                      }
-                      ++out_seen;
-                    }
-                  }
-                }
-              }
-            }
-            continue;
-          }
-          auto call = AsCallOrSubmitView(assign->value_);
-          if (!call) continue;
-          // (a) tensor.assemble: result var aliases its first arg (the target).
-          if (IsOp(call, "tensor.assemble") && !call->args_.empty()) {
-            auto first_arg = AsVarLike(call->args_[0]);
-            if (first_arg) {
-              for (auto& cls : aliases) {
-                if (cls.count(first_arg.get()) && !cls.count(assign->var_.get())) {
-                  cls.insert(assign->var_.get());
-                  changed = true;
-                }
-              }
-            }
-          }
-          // (c) Calls with output_existing/inout args (e.g. InCore kernels):
-          // the result aliases the Out/InOut arg the callee actually
-          // returns, mirroring the codegen alias
-          // `const Tensor& result = args[out_idx];` emitted later by
-          // GenerateSingleReturnAlias / GenerateTupleReturnAliases. If that
-          // arg is in an iter_arg's class, the result is in the class too.
-          // For kernels with multiple Out params (e.g. real result + GM
-          // scratch passed through pl.spmd mixed dispatch), tracing the
-          // ReturnStmt back to its Param avoids aliasing the result to an
-          // arbitrary scratch tensor.
-          auto call_dirs = call->GetArgDirections();
-          if (call_dirs.size() == call->args_.size()) {
-            FunctionPtr call_callee = program_->GetFunction(call->op_->name_);
-            std::optional<size_t> returned_idx = FindReturnedParamIndex(call_callee, program_);
-            for (size_t a = 0; a < call_dirs.size(); ++a) {
-              if (call_dirs[a] != ArgDirection::OutputExisting && call_dirs[a] != ArgDirection::InOut) {
-                continue;
-              }
-              if (returned_idx.has_value() && a != *returned_idx) {
-                continue;
-              }
-              auto out_arg = AsVarLike(call->args_[a]);
-              if (!out_arg) continue;
-              for (auto& cls : aliases) {
-                if (cls.count(out_arg.get()) && !cls.count(assign->var_.get())) {
-                  cls.insert(assign->var_.get());
-                  changed = true;
-                }
-              }
-              break;  // alias to the single returned output-side arg
-            }
-          }
-        }
-        // (b) Nested ForStmts: the parent's carry threaded through a nested
-        // loop comes out via the nested loop's return_var. Specifically, for
-        // each (nested iter_arg, nested return_var) pair, if nested iter_arg's
-        // init value is in the parent class, then nested return_var is too.
-        //
-        // ArrayType iter_args are EXCLUDED from this propagation: unlike
-        // TensorType (a pointer-to-buffer alias), an ArrayType iter_arg owns a
-        // *fresh* C-stack array at each level. Treating the inner rv as an
-        // alias of the outer iter_arg would mis-mark the outer slot as
-        // ``is_rebind=false`` (silently dropping the outer's yield-back copy,
-        // which is the very mechanism that propagates state across phases in
-        // a SEQ x PARALLEL phase fence). The outer carry must be a distinct
-        // backing array and the outer yield must emit an explicit array-array
-        // copy back into it (see VisitStmt_(YieldStmtPtr)).
-        for (const auto& nf : body_aliases.nested_fors) {
-          for (size_t k = 0; k < nf->iter_args_.size(); ++k) {
-            if (As<ArrayType>(nf->iter_args_[k]->GetType())) continue;
-            auto init_var = AsVarLike(nf->iter_args_[k]->initValue_);
-            if (!init_var) continue;
-            const auto* rv = nf->return_vars_[k].get();
-            for (auto& cls : aliases) {
-              if (cls.count(init_var.get()) && !cls.count(rv)) {
-                cls.insert(rv);
-                changed = true;
-              }
-            }
-          }
-        }
-      }
-      for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
-        auto yield_var = AsVarLike(yield->value_[i]);
-        // True rebind iff yield value is not in the iter_arg's alias class
-        // (i.e. not the iter_arg itself nor any tensor.assemble alias of it).
-        is_rebind[i] = !yield_var || !aliases[i].count(yield_var.get());
-        // TaskId iter_args are always rebind: the alias-closure logic above is
-        // about Tensor buffer identity (OUTPUT_EXISTING aliases), which doesn't
-        // apply to PTO2TaskId values — the runtime task_id at iter N+1 is
-        // genuinely different from iter N even when the IR Var aliases.
-        if (auto sty = As<ScalarType>(for_stmt->iter_args_[i]->GetType())) {
-          if (sty->dtype_ == DataType::TASK_ID) is_rebind[i] = true;
-        }
-        if (i < for_stmt->return_vars_.size() && NeedsCompilerDepTaskId(for_stmt->return_vars_[i].get())) {
-          is_rebind[i] = true;
-        }
+    // Post-process: compiler-derived dep collections use NeedsCompilerDepTaskId,
+    // which lives on the codegen class (not the analyzer). Mark these iter_args
+    // as rebind and set the array-carry size from the const trip count.
+    for (size_t i = 0; i < carry_plans.size(); ++i) {
+      if (i < for_stmt->return_vars_.size() && NeedsCompilerDepTaskId(for_stmt->return_vars_[i].get())) {
+        carry_plans[i].compiler_dep_collection = true;
+        // Always size compiler-dep carries from the outer loop's const trip
+        // count.  ResolveArrayCarrySize may have already set array_size to an
+        // inner Parallel loop's trip count (a Sequential outer wrapping a
+        // Parallel inner that also carries task ids), which would mis-size the
+        // carry array when the two trip counts differ.  The outer loop's trip
+        // count is authoritative for the fan-in array that collects all
+        // producer TaskIds across iterations (YunjiQin review, PR #1813).
+        carry_plans[i].array_size = EvalConstTripCount(for_stmt);
+        // is_rebind is not overridden here: Analyze() already sets it for
+        // TASK_ID iter_args when a YieldStmt is present, and the old code
+        // (pre-refactor) only set it inside the yield guard.  Leaving it
+        // unchanged preserves trivial-alias lowering when the body has no
+        // yield (YunjiQin review, PR #1813).
       }
     }
 
-    // For TaskId iter_args inside a manual scope we always lower via array
-    // carry: a Parallel ForStmt produces ``PTO2TaskId arr[N]`` with yields
-    // writing per-slot, and downstream ``add_dep`` iterates every slot. A
-    // Sequential ForStmt whose yield value is an inner Parallel rv is also
-    // array-carry of the same size. Scalar (single-name) carry would only
-    // fence the last-dispatched task — which is unsafe under MANUAL scope.
-
-    // Per-iter-arg array-carry size (0 means non-TaskId scalar carry).
-    std::vector<int64_t> array_sizes(for_stmt->iter_args_.size(), 0);
-    std::vector<bool> compiler_dep_collection(for_stmt->iter_args_.size(), false);
-    for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
-      if (!is_rebind[i]) continue;
-      const bool compiler_dep_needs_loop_task_ids =
-          i < for_stmt->return_vars_.size() && NeedsCompilerDepTaskId(for_stmt->return_vars_[i].get());
-      if (compiler_dep_needs_loop_task_ids) {
-        array_sizes[i] = EvalConstTripCount(for_stmt);
-        compiler_dep_collection[i] = array_sizes[i] > 0;
-      } else if (in_manual_scope_depth_ > 0) {
-        array_sizes[i] = ResolveArrayCarrySize(for_stmt, i);
-      }
-    }
-
-    // A Parallel ForStmt with a TaskId iter_arg REQUIRES a const trip count
-    // so we can allocate a ``PTO2TaskId[N]`` backing store. Without it we
-    // would silently fall back to last-dispatched fence semantics — wrong
-    // under MANUAL scope. Surface this as a clear user-facing error instead
-    // of emitting incorrect code.
-    if (for_stmt->kind_ == ForKind::Parallel && in_manual_scope_depth_ > 0) {
-      for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
-        if (!is_rebind[i]) continue;
-        auto sty = As<ScalarType>(for_stmt->iter_args_[i]->GetType());
-        if (!sty || sty->dtype_ != DataType::TASK_ID) continue;
-        CHECK(array_sizes[i] > 0) << "manual_scope: pl.parallel loops carrying a manual_scope dep "
-                                  << "(via ``deps=[...]``) must have a statically-known trip count. "
-                                  << "The runtime fence requires a PTO2TaskId[N] array of fixed N. "
-                                  << "Either make the parallel loop's trip count a Python int "
-                                  << "(e.g. ``pl.parallel(4)``) or restructure to put the parallel "
-                                  << "loop inside a const-bounded scope.";
-      }
-    }
-
+    // Emit carry declarations for each iter_arg. Three lowering paths:
+    //   - array_size > 0  -> TaskId array-carry (PTO2TaskId arr[N])
+    //   - ArrayType carry  -> C-stack array with in-place-update semantics
+    //   - is_rebind        -> scalar/Tensor mutable carry variable
+    //   - else             -> trivial alias to init's emit name
     for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
       const auto& iter_arg = for_stmt->iter_args_[i];
       const auto& return_var = for_stmt->return_vars_[i];
+      const bool is_rebind = carry_plans[i].is_rebind;
+      const int64_t array_size = carry_plans[i].array_size;
       std::string init_var_name = TryGetVarName(iter_arg->initValue_);
       INTERNAL_CHECK_SPAN(!init_var_name.empty(), for_stmt->span_)
           << "Internal error: ForStmt iter_arg initValue must be a variable, got non-variable expr";
@@ -770,12 +564,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
       // tensor in the emitted code.
       init_var_name = GetExternalTensorName(init_var_name);
 
-      if (array_sizes[i] > 0) {
+      if (array_size > 0) {
         // ARRAY CARRY PATH — allocate ``PTO2TaskId <name>[N]`` and init it.
         // Initialisation rule: if the iter_arg's init value is itself an
         // array-carry Var, copy slot-by-slot; otherwise broadcast the scalar
         // init expression to every slot.
-        const int64_t N = array_sizes[i];
+        const int64_t N = array_size;
         std::string rv_array_name = ReserveSyntheticEmitName(return_var->name_hint_);
         code_ << Indent() << "PTO2TaskId " << rv_array_name << "[" << N << "];\n";
 
@@ -788,7 +582,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         if (outer_init_arr && outer_init_arr->size == N) {
           code_ << Indent() << "for (int64_t __init_i = 0; __init_i < " << N << "; ++__init_i) "
                 << rv_array_name << "[__init_i] = " << outer_init_arr->array_name << "[__init_i];\n";
-        } else if (compiler_dep_collection[i]) {
+        } else if (carry_plans[i].compiler_dep_collection) {
           code_ << Indent() << "for (int64_t __init_i = 0; __init_i < " << N << "; ++__init_i) "
                 << rv_array_name << "[__init_i] = PTO2TaskId::invalid();\n";
         } else {
@@ -802,7 +596,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
           // — used as the deps source. If init is an array, alias to it; if
           // init is scalar, register the iter_arg's slot map to that scalar
           // broadcast (so EmitManualDeps emits add_dep on the same scalar).
-          if (compiler_dep_collection[i]) {
+          if (carry_plans[i].compiler_dep_collection) {
             // Compiler-derived fan-in collections collect producer TaskIds
             // yielded by the loop body. The tensor or None init value is not
             // itself a dependency source for this collection.
@@ -821,7 +615,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
           // updates via yield).
           RegisterArrayCarry(iter_arg.get(), rv_array_name, N);
         }
-      } else if (auto array_ty = As<ArrayType>(iter_arg->GetType()); array_ty && is_rebind[i]) {
+      } else if (auto array_ty = As<ArrayType>(iter_arg->GetType()); array_ty && is_rebind) {
         // ArrayType iter_arg — declare a fresh C-stack array and route both
         // the iter_arg and the return_var emit names through it. The loop
         // body's ``array.update_element`` calls already alias their LHS to
@@ -874,7 +668,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         // per-slot dependency fills.
         RegisterArrayCarry(iter_arg.get(), carry_name, N);
         RegisterArrayCarry(return_var.get(), carry_name, N);
-      } else if (is_rebind[i]) {
+      } else if (is_rebind) {
         // Scalar (single-name) carry path — only fires for non-TaskId
         // iter_args (e.g. Tensor) or Sequential TaskId iter_args whose
         // yield value isn't an inner array. Parallel TaskId iter_args are
@@ -933,7 +727,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // emitting one would just produce `init = init;`.
     current_return_vars_.clear();
     for (size_t i = 0; i < for_stmt->return_vars_.size(); ++i) {
-      if (is_rebind[i]) {
+      if (carry_plans[i].is_rebind) {
         current_return_vars_.push_back(for_stmt->return_vars_[i]);
       } else {
         current_return_vars_.push_back(nullptr);
@@ -3493,83 +3287,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
       slot_names.push_back(array_name + "[" + std::to_string(i) + "]");
     }
     manual_task_id_map_[var] = std::move(slot_names);
-  }
-
-  /// Constant-evaluate ``expr`` if it is a ConstInt; returns ``nullopt``
-  /// otherwise. Used to size TaskId carry arrays at codegen time.
-  static std::optional<int64_t> EvalConstInt(const ExprPtr& expr) {
-    if (auto ci = As<ConstInt>(expr)) return ci->value_;
-    return std::nullopt;
-  }
-
-  /// Return the const trip count of ``for_stmt`` if start/stop/step are all
-  /// ConstInts and step is positive; 0 otherwise. We only support array carry
-  /// for Parallel loops with statically-known trip counts.
-  static int64_t EvalConstTripCount(const ForStmtPtr& for_stmt) {
-    auto start = EvalConstInt(for_stmt->start_);
-    auto stop = EvalConstInt(for_stmt->stop_);
-    auto step = EvalConstInt(for_stmt->step_);
-    if (!start || !stop || !step || *step <= 0) return 0;
-    int64_t trip = (*stop - *start + *step - 1) / *step;
-    return trip > 0 ? trip : 0;
-  }
-
-  /// Find a ForStmt within ``body`` whose ``return_vars_`` contains a Var
-  /// equal to ``target``. Returns nullptr if none. Used by
-  /// ``ResolveArrayCarrySize`` to chase Sequential→Parallel array threading.
-  static ForStmtPtr FindForStmtByReturnVar(const StmtPtr& body, const Var* target) {
-    class Finder : public IRVisitor {
-     public:
-      ForStmtPtr result;
-      const Var* target = nullptr;
-      void VisitStmt_(const ForStmtPtr& f) override {
-        if (result) return;
-        for (const auto& rv : f->return_vars_) {
-          if (rv.get() == target) {
-            result = f;
-            return;
-          }
-        }
-        IRVisitor::VisitStmt_(f);
-      }
-    };
-    Finder finder;
-    finder.target = target;
-    finder.VisitStmt(body);
-    return finder.result;
-  }
-
-  /// Determine the carry size for a TaskId iter_arg of ``for_stmt`` at slot
-  /// ``idx``. Returns 0 when the iter_arg is scalar-carry.
-  ///   * Parallel ForStmt with const trip count: carry size = trip count.
-  ///   * Sequential ForStmt whose yield value at ``idx`` is the rv of an
-  ///     inner array-carry ForStmt: carry size = inner's size (recurses).
-  ///   * Anything else: 0 (scalar carry).
-  int64_t ResolveArrayCarrySize(const ForStmtPtr& for_stmt, size_t idx) const {
-    if (idx >= for_stmt->iter_args_.size()) return 0;
-    const auto& iter_arg = for_stmt->iter_args_[idx];
-    auto sty = As<ScalarType>(iter_arg->GetType());
-    if (!sty || sty->dtype_ != DataType::TASK_ID) return 0;
-    if (for_stmt->kind_ == ForKind::Parallel) {
-      return EvalConstTripCount(for_stmt);
-    }
-    if (for_stmt->kind_ != ForKind::Sequential) return 0;
-    // Body may be wrapped in an AUTO scope by MaterializeRuntimeScopes.
-    auto yield = transform_utils::GetLastYieldStmt(UnwrapAutoScope(for_stmt->body_));
-    if (!yield || idx >= yield->value_.size()) return 0;
-    auto yield_var = AsVarLike(yield->value_[idx]);
-    if (!yield_var) return 0;
-    auto inner = FindForStmtByReturnVar(for_stmt->body_, yield_var.get());
-    if (!inner) return 0;
-    size_t inner_idx = SIZE_MAX;
-    for (size_t j = 0; j < inner->return_vars_.size(); ++j) {
-      if (inner->return_vars_[j].get() == yield_var.get()) {
-        inner_idx = j;
-        break;
-      }
-    }
-    if (inner_idx == SIZE_MAX) return 0;
-    return ResolveArrayCarrySize(inner, inner_idx);
   }
 
   const ProgramPtr& program_;
