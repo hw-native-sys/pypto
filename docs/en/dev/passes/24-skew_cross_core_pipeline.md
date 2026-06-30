@@ -8,7 +8,7 @@ On A2/A3 a fused cube+vector kernel (e.g. flash-decode `qk_pv`) round-trips thro
 
 The old approach unrolled these loops (`pl.pipeline(stage=F)`) and let `CanonicalizeIOOrder` cluster the cross-core ops — which produced *back-to-back* `tpop`s that serialised the consumer. `SkewCrossCorePipeline` instead software-pipelines the loop:
 
-- **Single round-trip, producer role** — exactly one `tpush` and one `tpop`, and the `tpush`'s backward slice does not feed the body via an SSA edge (the cube: `QK → tpush`, `tpop → SV`). The two halves are linked only by the in-order cross-core FIFO, so the producer runs **`D = stage-1` iterations ahead**: a `produce(start … start+(D-1)·step)` prologue, a `ForKind::Sequential` steady loop whose loop var `k` leads each group and pairs the group's `D` produces `produce(k+i·step)` with the trailing `D` consumes `consume(k-(D-i)·step)`, stepping `k` by `D·step` over `[start+D·step, start+trip·step)`, and a `consume(last D)` epilogue. The cube issues group k's `D` `QK`s while the vector runs group (k-D)'s `D` softmaxes. See [Skew depth](#skew-depth-stage) for `D` selection and the buffer-separation it buys.
+- **Single round-trip, producer role** — exactly one `tpush` and one `tpop`, and the `tpush`'s backward slice does not feed the body via an SSA edge (the cube: `QK → tpush`, `tpop → SV`). The two halves are linked only by the in-order cross-core FIFO, so the producer runs **`D = max(2, stage-1)` iterations ahead** (cross-core defaults to depth-2): a `produce(start … start+(D-1)·step)` prologue, a `ForKind::Sequential` steady loop whose loop var `k` leads each group and pairs the group's `D` produces `produce(k+i·step)` with the trailing `D` consumes `consume(k-(D-i)·step)`, stepping `k` by `D·step` over `[start+D·step, start+trip·step)`, and a `consume(last D)` epilogue. The cube issues group k's `D` `QK`s while the vector runs group (k-D)'s `D` softmaxes. See [Skew depth](#skew-depth-stage) for `D` selection and the buffer-separation it buys.
 - **Consumer role, or multi-round-trip** — the lead op feeds the body via SSA (the vector: the popped scores feed softmax), or there is more than one message per FIFO direction. The loop is **demoted to a plain `ForKind::Sequential` loop** (body unchanged). This drops the unroll's back-to-back `tpop` while preserving the in-order FIFO; cross-core overlap then comes from the *peer* core's producer skew putting each tile in the FIFO a step early, so the in-order `tpop` never blocks.
 
 Every **non-cross-core** pipeline loop (same-core GM→L1, L1→L0, nested matmul stage loops — no `tpush`/`tpop`) is left untouched for `LowerPipelineLoops` to replicate.
@@ -39,14 +39,20 @@ Either way a cross-core loop **always** leaves this pass as `ForKind::Sequential
 
 ### Skew depth (`stage`)
 
-The producer runs **`D = stage - 1`** iterations ahead, and each steady iteration emits **`D` produces then `D` consumes** (the steady loop is unrolled by `D`). An `F`-stage software pipeline is `D = F-1` ahead, the standard meaning of "pipeline stages":
+Cross-core producer skew needs **at least depth 2**: the two pipeline stages (e.g. the cube's two QK matmuls) must land on separate L1/L0 buffers, or `MemoryReuse` coalesces them onto one and serialises the cube. So the **requested** depth is
+
+```text
+D = max(2, stage - 1)
+```
+
+— depth-2 by default, and the standard pipeline meaning `stage - 1` only once that exceeds 2 (i.e. `stage >= 4`). Each steady iteration emits **`D` produces then `D` consumes** (the steady loop is unrolled by `D`):
 
 | `stage` | depth `D` | steady body |
 | ------- | --------- | ----------- |
-| 2 | 1 | `produce(k); consume(k-step)` (classic produce-one-ahead) |
-| 3 | 2 | `produce(k); produce(k+step); consume(k-2·step); consume(k-step)` |
+| 2, 3 | 2 | `produce(k); produce(k+step); consume(k-2·step); consume(k-step)` |
+| 4 | 3 | `produce(k … k+2·step); consume(k-3·step … k-step)` |
 
-`D >= 2` needs `trip % D == 0` and `trip >= 2·D`; when those don't hold the pass falls back to the **largest feasible `D' <= D`** (always `>= 1`, since `trip >= 2`). The `D` distinct produce tiles and `D` distinct consume tiles per iteration keep the two pipeline stages off a single L1/L0 buffer — `MemoryReuse`'s over-reuse of one Mat buffer for a depth-1 cube QK/SV pair is what serialised the two matmuls; `stage=3` (depth-2) gives each its own buffer.
+The **effective** depth needs `trip % D == 0` and `trip >= 2·D`; when the requested `D` fails this the pass uses the **largest feasible `D' <= D`** — down to `1` (the classic produce-one-ahead skew) for an incompatible trip such as an odd one. The `D` distinct produce tiles and `D` distinct consume tiles per iteration keep the two pipeline stages off a single L1/L0 buffer — a depth-1 cube QK/SV pair sharing one Mat buffer is exactly what serialised the two matmuls.
 
 `iter_args` (e.g. flash-attention `mi/li/oi` accumulators) thread sequentially through the prologue → the `D` consumes per steady iteration → the epilogue; the producer half is iter-arg-transparent.
 
@@ -70,25 +76,24 @@ The producer runs **`D = stage - 1`** iterations ahead, and each steady iteratio
 ## Examples
 
 ```python
-# Producer role, stage=2 (depth-1) — SKEWED
-# Before: for i in pl.pipeline(0, 4, 1, stage=2):
-#             qk = ...; tpush_to_aiv(qk); p = tpop_from_aiv(); sv = ...(p); store(sv)
-# After:  produce(0)                              # prologue
-#         for i in pl.range(1, 4, 1):             # steady (Sequential)
-#             produce(i); consume(i-1)            # cube QK[i] overlaps vec softmax[i-1]
-#         consume(3)                              # epilogue
-```
-
-```python
-# Producer role, stage=3 (depth-2) — SKEWED, 2 produces then 2 consumes per body
-# Before: for i in pl.pipeline(0, 8, 1, stage=3):  (qk; tpush; tpop; sv; store)
+# Producer role, stage=2 (the default → depth-2) — SKEWED, 2 produces then 2 consumes
+# Before: for i in pl.pipeline(0, 8, 1, stage=2):  (qk; tpush; tpop; sv; store)
 # After:  produce(0); produce(1)                   # prologue (2 QKs primed)
 #         for k in pl.range(2, 8, 2):              # steady (Sequential, unroll-2)
 #             produce(k); produce(k+1)             # cube QK[k], QK[k+1]  -> tpush, tpush
 #             consume(k-2); consume(k-1)           # tpop, SV[k-2]; tpop, SV[k-1]
 #         consume(6); consume(7)                   # epilogue
 # The two QKs and two SVs use distinct Mat buffers, so MemoryReuse cannot collapse
-# them onto one buffer and serialise the cube (the depth-1 fa_fused_aic problem).
+# them onto one buffer and serialise the cube (the fa_fused_aic over-reuse).
+```
+
+```python
+# Odd trip (depth-2 infeasible: 3 % 2 != 0) → falls back to depth-1
+# Before: for i in pl.pipeline(0, 3, 1, stage=2):
+# After:  produce(0)                              # prologue
+#         for i in pl.range(1, 3, 1):             # steady (Sequential)
+#             produce(i); consume(i-1)            # cube QK[i] overlaps vec softmax[i-1]
+#         consume(2)                              # epilogue
 ```
 
 ```python

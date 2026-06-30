@@ -8,7 +8,7 @@
 
 旧方案对这些循环做 unroll（`pl.pipeline(stage=F)`）并由 `CanonicalizeIOOrder` 聚类跨核算子 —— 这会产生**背靠背的 `tpop`**，把消费者串行化。`SkewCrossCorePipeline` 改为对循环做软流水：
 
-- **单次往返、生产者角色** —— 恰好一个 `tpush` 和一个 `tpop`，且 `tpush` 的反向切片不通过 SSA 边喂给 body（cube：`QK → tpush`，`tpop → SV`）。两半仅通过有序的跨核 FIFO 关联，于是让生产者**提前 `D = stage-1` 个迭代**运行：`produce(start … start+(D-1)·step)` 序言（prologue）、一个 `ForKind::Sequential` 稳态循环（其循环变量 `k` 作为每组的首个 produce 索引，把该组的 `D` 个 produce `produce(k+i·step)` 与滞后的 `D` 个 consume `consume(k-(D-i)·step)` 配对，`k` 以 `D·step` 为步长取值 `[start+D·step, start+trip·step)`）、以及 `consume(最后 D 个)` 尾声（epilogue）。cube 发出第 k 组的 `D` 个 `QK` 时，vector 正在跑第 k-D 组的 `D` 个 softmax。`D` 默认取 2（更深可由 `pl.pipeline(stage=F)` 请求 D=F-1），需满足 `trip % D == 0` 且 `trip >= 2*D`，否则回退到最大可行深度（D=1 即原 depth-1 skew）。
+- **单次往返、生产者角色** —— 恰好一个 `tpush` 和一个 `tpop`，且 `tpush` 的反向切片不通过 SSA 边喂给 body（cube：`QK → tpush`，`tpop → SV`）。两半仅通过有序的跨核 FIFO 关联，于是让生产者**提前 `D = max(2, stage-1)` 个迭代**运行（跨核默认 depth-2）：`produce(start … start+(D-1)·step)` 序言（prologue）、一个 `ForKind::Sequential` 稳态循环（其循环变量 `k` 作为每组的首个 produce 索引，把该组的 `D` 个 produce `produce(k+i·step)` 与滞后的 `D` 个 consume `consume(k-(D-i)·step)` 配对，`k` 以 `D·step` 为步长取值 `[start+D·step, start+trip·step)`）、以及 `consume(最后 D 个)` 尾声（epilogue）。cube 发出第 k 组的 `D` 个 `QK` 时，vector 正在跑第 k-D 组的 `D` 个 softmax。详见 [skew 深度](#skew-深度stage)。
 - **消费者角色，或多次往返** —— lead 算子通过 SSA 喂给 body（vector：弹出的 scores 喂给 softmax），或某个 FIFO 方向上有多于一条消息。此时**降级为普通的 `ForKind::Sequential` 循环**（body 不变）。这消除了 unroll 的背靠背 `tpop`，同时保持 FIFO 的有序性；跨核重叠则来自**对端**核的生产者 skew —— 它提前一步把每个 tile 放入 FIFO，使本核有序的 `tpop` 不再 block。
 
 每个**非跨核**的 pipeline 循环（同核 GM→L1、L1→L0、嵌套 matmul stage 循环 —— 没有 `tpush`/`tpop`）保持不变，交给 `LowerPipelineLoops` 复制。
@@ -36,6 +36,23 @@ p = passes.skew_cross_core_pipeline()
    - 否则 —— `carried` 非空（消费者角色）、多于一个 `tpush`/`tpop`（多次往返；只 skew 一条消息会打乱有序 FIFO —— verifier 抓不到的静默数据错误）、动态边界、或 trip < 2 → **`DemoteToSequential`**。
 
 无论哪种，跨核循环**总是**以 `ForKind::Sequential`（无 `pipeline_stages` 标记）离开本 pass，因此永远不会以 Pipeline body 的形式到达 `LowerPipelineLoops` 或 `CanonicalizeIOOrder`。
+
+### skew 深度（stage）
+
+跨核生产者 skew **至少需要 depth 2**：两个流水 stage（例如 cube 的两个 QK matmul）必须落在不同的 L1/L0 buffer 上，否则 `MemoryReuse` 会把它们合并到一块、把 cube 串行化。因此**请求**的深度为
+
+```text
+D = max(2, stage - 1)
+```
+
+—— 默认 depth-2，只有当 `stage - 1` 超过 2（即 `stage >= 4`）时才取标准的 `stage - 1`。每个稳态迭代发 **`D` 个 produce、再 `D` 个 consume**（稳态循环按 `D` 展开）：
+
+| `stage` | 深度 `D` | 稳态体 |
+| ------- | -------- | ------ |
+| 2、3 | 2 | `produce(k); produce(k+step); consume(k-2·step); consume(k-step)` |
+| 4 | 3 | `produce(k … k+2·step); consume(k-3·step … k-step)` |
+
+**实际**深度需满足 `trip % D == 0` 且 `trip >= 2·D`；请求的 `D` 不满足时取**最大可行的 `D' <= D`**——对不整除的 trip（如奇数）一路回退到 `1`（即经典的提前一个迭代的 skew）。每个迭代的 `D` 个 produce tile 和 `D` 个 consume tile 各自独立，使两个流水 stage 不落在同一块 buffer 上——depth-1 时一个 cube QK/SV 对共用一块 Mat buffer，正是它把两个 matmul 串行化的。
 
 `iter_args`（例如 flash-attention 的 `mi/li/oi` 累加器）会穿过生产者 skew 的 prologue → 稳态 → epilogue；生产者半对 iter_arg 透明。
 

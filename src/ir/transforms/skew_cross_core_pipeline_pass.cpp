@@ -146,7 +146,8 @@ std::pair<StmtPtr, std::vector<ExprPtr>> SplitBodyYield(const StmtPtr& body) {
 // ForKind::Sequential, so no cross-core loop ever reaches LowerPipelineLoops or
 // CanonicalizeIOOrder as a Pipeline loop:
 //  - SINGLE round-trip, producer role (exactly one tpush + one tpop): run the
-//    producer D = stage-1 iterations AHEAD (`pl.pipeline(stage=F)` => depth D=F-1).
+//    producer D = max(2, F-1) iterations AHEAD (cross-core defaults to DEPTH-2; a
+//    higher `pl.pipeline(stage=F)` asks for the standard F-1 once that exceeds 2).
 //    Emit a produce(start..start+(D-1)*step) prologue, a KEPT Sequential steady
 //    ForStmt whose loop var k leads each group and pairs the group's D produces
 //    produce(k+i*step) with the trailing D consumes consume(k-(D-i)*step) over k in
@@ -258,8 +259,8 @@ StmtPtr TagPipelineStage(const StmtPtr& body, int32_t group, int32_t stage) {
  *
  * For a loop whose body has BOTH a cross-core `tile.tpush_*` and a `tile.tpop_*`:
  * a statically-skewable single-round-trip producer loop is rewritten to a prologue
- * + Sequential steady ForStmt + epilogue, with the producer running D = F-1 iterations
- * ahead (each steady iteration emits D produces then D consumes; D>=2 needs trip % D
+ * + Sequential steady ForStmt + epilogue, with the producer running D = max(2, F-1)
+ * iterations ahead (each steady iteration emits D produces then D consumes; D>=2 needs trip % D
  * == 0 and trip >= 2*D, else the largest feasible D' is used). A cross-half SSA carry
  * is allowed when it is a recomputable address scalar (recomputed in each consume
  * clone). Any other cross-core loop (a genuine tile/tensor carry, multi-round-trip,
@@ -322,9 +323,9 @@ class SkewCrossCoreMutator : public IRMutator {
       // iteration). Cross-core producer skew defaults to DEPTH-2 so the two pipeline
       // stages land on separate L1/L0 buffers (a depth-1 cube QK/SV pair shares one Mat
       // buffer, which serialises the two matmuls — the fa_fused_aic over-reuse). A higher
-      // `pl.pipeline(stage=F)` requests a deeper pipeline (depth F-1); LowerSkewed caps
-      // the depth to what the trip count allows (falling back toward depth-1).
-      int64_t depth = factor - 1 > 2 ? factor - 1 : 2;
+      // `pl.pipeline(stage=F)` requests a deeper pipeline — depth max(2, F-1); LowerSkewed
+      // caps that to what the trip count allows (falling back toward depth-1).
+      int64_t depth = factor - 1 > 2 ? factor - 1 : 2;  // = max(2, factor - 1)
       if (auto skewed = LowerSkewed(op, inner_body, *start_const, *stop_const, step, depth)) {
         return skewed;
       }
@@ -376,12 +377,11 @@ class SkewCrossCoreMutator : public IRMutator {
   /// both a tpush and a tpop), trip < 2, a degenerate lead/body split, or the lead
   /// consuming an iter_arg or a body-defined value (non-hoistable).
   ///
-  /// @p depth (= `stage - 1`) is how many iterations the producer runs ahead, and
-  /// equally the number of produce/consume messages emitted per steady iteration
-  /// (the steady loop is unrolled by `depth`). depth == 1 reproduces the classic
-  /// produce-one-ahead skew exactly. depth >= 2 needs `trip % depth == 0` and
-  /// `trip >= 2*depth`; when those don't hold the pass falls back to the largest
-  /// feasible depth (always >= 1, since trip >= 2 here). A depth-D steady body is
+  /// @p depth is how many iterations the producer runs ahead (the cross-core call site
+  /// passes `max(2, stage - 1)`), and equally the number of produce/consume messages emitted per steady
+  /// iteration (the steady loop is unrolled by `depth`). depth == 1 reproduces the classic produce-one-ahead
+  /// skew exactly. depth >= 2 needs `trip % depth == 0` and `trip >= 2*depth`; when those don't hold the pass
+  /// falls back to the largest feasible depth (always >= 1, since trip >= 2 here). A depth-D steady body is
   /// `produce(k), produce(k+step), ... [D produces]; consume(k-D*step), ... [D
   /// consumes]` — D distinct produce tiles and D distinct consume tiles per
   /// iteration, so MemoryReuse never collapses the two pipeline stages onto one
