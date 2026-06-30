@@ -682,6 +682,38 @@ REGISTER_OP("tile.write")
       return DeduceTileWriteType(args, kwargs, "tile.write");
     });
 
+// tile.alloc_buffer(tile) {addr, size, id}: a side-effect MARKER that pins the
+// input tile's on-chip buffer to a user-assigned byte address. Written by the
+// user as a bare statement right after the tile's defining op:
+//
+//     q_mat = pl.tile.load(q, ..., target_memory=pl.Mem.Mat)
+//     pl.tile.alloc_buffer(q_mat, addr=0, size=4096)   # pin q_mat's buffer
+//
+// The pin rides in op KWARGS (which survive the pipeline's tile rebuilds, unlike
+// a pre-InitMemRef type memref), so it reaches InitMemRef, which reads it,
+// applies the buffer to the referenced tile, and erases this marker (it never
+// reaches codegen). Result type = input tile type (used as a bare EvalStmt).
+TypePtr DeduceTileAllocBufferType(const std::vector<ExprPtr>& args,
+                                  const std::vector<std::pair<std::string, std::any>>& /*kwargs*/,
+                                  const std::string& /*op_name*/) {
+  CHECK(args.size() == 1) << "tile.alloc_buffer requires exactly 1 argument (the tile to pin), but got "
+                          << args.size();
+  CHECK(As<TileType>(args[0]->GetType()))
+      << "tile.alloc_buffer requires its argument to be a TileType, but got "
+      << args[0]->GetType()->TypeName();
+  return args[0]->GetType();
+}
+
+REGISTER_OP("tile.alloc_buffer")
+    .set_op_category("TileOp")
+    .set_description("Pin a tile to a user-assigned on-chip buffer (addr/size/id); consumed by InitMemRef")
+    .add_argument("tile", "The tile whose buffer to pin (TileType)")
+    .set_output_memory_inherit_input()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileAllocBufferType(args, kwargs, "tile.alloc_buffer");
+    });
+
 // ============================================================================
 // Registration Function for Block Memory Operations
 // ============================================================================
