@@ -3845,6 +3845,24 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
     CHECK_SPAN(gm_tt && gm_tt->shape_.size() == 1, op->span_)
         << "system.syncall soft: gm_workspace must be a 1-D tensor";
     const std::string dtype_str = codegen.GetTypeString(gm_tt->dtype_);
+    // Workspace contract (user-facing): the soft barrier indexes int32 counter
+    // slots, so the GM buffer must be INT32 with >= used_cores * 8 elements.
+    CHECK_SPAN(dtype_str == "i32", op->span_)
+        << "system.syncall soft: gm_workspace must be an INT32 tensor, got " << dtype_str;
+    constexpr int64_t kSyncAllSoftSlotInt32 = 8;  // pto::SYNCALL soft: 8 int32 slots per core
+    if (auto used_const = As<ir::ConstInt>(op->args_[2])) {
+      const int64_t required = used_const->value_ * kSyncAllSoftSlotInt32;
+      if (auto gm_dim = As<ir::ConstInt>(gm_tt->shape_[0])) {
+        CHECK_SPAN(gm_dim->value_ >= required, op->span_)
+            << "system.syncall soft: gm_workspace needs >= used_cores*8 (" << required
+            << ") int32 slots, got " << gm_dim->value_;
+      }
+    }
+    // scratch must be an INT32 staging tile (it mirrors the int32 GM slots).
+    if (auto scratch_tt = As<ir::TileType>(op->args_[1]->GetType())) {
+      CHECK_SPAN(codegen.GetTypeString(scratch_tt->dtype_) == "i32", op->span_)
+          << "system.syncall soft: scratch tile must be INT32";
+    }
     const std::string gm_view = codegen.GetOrCreateTensorView(gm_var);
     const std::string gm_view_type = codegen.GetTensorViewTypeString(gm_tt.get());
     const std::string partition_type = MakePartitionTensorViewType(GetDimStrings(gm_tt->shape_), dtype_str);

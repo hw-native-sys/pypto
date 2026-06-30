@@ -182,8 +182,10 @@ def syncall_soft(core_type: str, args: list[Expr], *, span: Span | None = None) 
     Returns:
         Call expression for the soft-mode system.syncall.
     """
-    if core_type not in _SYNCALL_CORE_TYPES:
-        raise ValueError(f"syncall core_type must be one of {_SYNCALL_CORE_TYPES}, got {core_type!r}")
+    if core_type != "aiv_only":
+        # Soft form currently only has a validated lowering for aiv_only. Gate the
+        # IR helper too so direct IR callers cannot build an unsupported barrier.
+        raise ValueError(f"soft syncall currently supports only core_type='aiv_only', got {core_type!r}")
     actual_span = _get_span_or_capture(span, frame_offset=1)
     return _ir_core.create_op_call(
         "system.syncall", args, {"core_type": core_type, "mode": "soft"}, actual_span

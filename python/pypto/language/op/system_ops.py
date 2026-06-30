@@ -97,6 +97,14 @@ def syncall(
         Call expression for system.syncall.
     """
     if mode == "hard":
+        # Reject soft-only kwargs so a typo like syncall(gm_workspace=ws) does not
+        # silently fall back to the full-occupancy hard barrier (the deadlock path
+        # the soft form exists to avoid).
+        if gm_workspace is not None or scratch is not None or used_cores:
+            raise ValueError(
+                "syncall(mode='hard') takes no gm_workspace/scratch/used_cores; "
+                "pass mode='soft' to use the GM-polling barrier"
+            )
         return _ir_ops.syncall(core_type=core_type, span=span)
     if mode != "soft":
         raise ValueError(f"syncall mode must be 'hard' or 'soft', got {mode!r}")
