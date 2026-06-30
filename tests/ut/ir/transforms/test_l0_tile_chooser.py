@@ -7,12 +7,20 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Tests for the closed-form L0 tile-size chooser.
+"""Tests for the L0 tile-size chooser.
 
-The chooser implements the algorithm described in the planning note
-`L0_TILING.md` at the repo root. These tests pin the five worked examples
-in §12 plus edge cases exercising small dimensions, K below the cube
-minimum, double-buffering of C, and the `c_read` traffic accounting.
+The chooser ranks legal aligned (m, n, k) tiles by a roofline wall objective
+(see the pto-isa cost-model study ``DESIGN_SPACE.md``) and returns the
+minimum-wall design point, modelling the algorithm the pass realizes today
+(output-stationary, with an optional L0C double-buffer). When
+``allow_double_buffer_c`` is set the chooser also evaluates a double-buffered L0C
+schedule -- half the L0C budget but the FIXPIPE drain overlaps the next tile's
+compute (``wall = max(C_load, C_mad, C_drain)`` instead of ``... + C_drain``) --
+and reports its choice via ``L0TileResult.double_buffer_c``.
+
+These tests pin representative worked examples, edge cases (small dimensions,
+K below the cube minimum, L0C double-buffering, ``c_read`` accounting), and a
+brute-force check that the chooser's pick is the true global wall-optimum.
 """
 
 import pytest
@@ -36,18 +44,26 @@ def _default_config(M: int, N: int, K: int) -> passes.l0_tile_chooser.L0TileConf
     cfg.bytes_c = 4  # FP32 accumulator
     cfg.min_m = cfg.min_n = cfg.min_k = 16
     cfg.align_m = cfg.align_n = cfg.align_k = 16
-    cfg.double_buffer_a = True
-    cfg.double_buffer_b = True
-    cfg.double_buffer_c = False
+    # Realizable-mask gates default OFF (output-stationary, dbC=1) — the
+    # algorithm the pass realizes today. Tests open a gate to exercise an axis.
+    cfg.allow_a_stationary = False
+    cfg.allow_b_stationary = False
+    cfg.allow_double_buffer_c = False
     cfg.c_read = False
     return cfg
 
 
-def _capacities_ok(m: int, n: int, k: int, cfg) -> bool:
-    """Re-derive effective capacity constraints and confirm (m, n, k) fits."""
-    a0 = cfg.l0a_bytes // (cfg.bytes_a * (2 if cfg.double_buffer_a else 1))
-    b0 = cfg.l0b_bytes // (cfg.bytes_b * (2 if cfg.double_buffer_b else 1))
-    c0 = cfg.l0c_bytes // (cfg.bytes_c * (2 if cfg.double_buffer_c else 1))
+def _capacities_ok(
+    m: int, n: int, k: int, cfg, dba: bool = True, dbb: bool = True, dbc: bool = False
+) -> bool:
+    """Re-derive effective capacity constraints and confirm (m, n, k) fits.
+
+    dba/dbb/dbc are the chosen per-operand double-buffer depths (true == depth 2,
+    halving that buffer).
+    """
+    a0 = cfg.l0a_bytes // (cfg.bytes_a * (2 if dba else 1))
+    b0 = cfg.l0b_bytes // (cfg.bytes_b * (2 if dbb else 1))
+    c0 = cfg.l0c_bytes // (cfg.bytes_c * (2 if dbc else 1))
     return m * k <= a0 and k * n <= b0 and m * n <= c0
 
 
@@ -68,32 +84,37 @@ class TestL0TilingDocExamples:
         assert result.perf_hint == ""
 
     def test_example_2_large_square_gemm(self):
-        """M=N=K=4096 → balanced tile under A/B double-buffering.
+        """M=N=K=4096 → (128, 128, 128) under the roofline cost model.
 
-        The L0_TILING.md doc cites (176, 176, 80) as "approximate" continuous
-        optimum, but k=80 does not divide K=4096, so the AutoTileMatmulL0
-        consumer would skip it (PH-AT-007).  When `allow_padding=False` the
-        chooser walks k down to the largest aligned divisor of K — for K=4096
-        that is k=64 (next divisor below 80).  We pin the properties that
-        matter under the divisor contract: k divides K, k respects the A0/B0
-        bound, and (m, n) stay within one alignment step of the continuous
-        optimum.
+        This GEMM is deeply compute-bound: C_mad (~1.8e7 cycles) dwarfs C_load,
+        so every cube-filling tile ties on wall = max(C_load, C_mad) + C_drain.
+        The lex tie-break then prefers fewer K-blocks (larger k), selecting the
+        balanced (128, 128, 128): m*k = k*n = 16384 = A0 = B0 with k=128 the
+        largest aligned divisor of K that fits both operand buffers. The
+        brute-force oracle (see test_matches_bruteforce_optimum) confirms this
+        is the global wall-minimum. (Supersedes the earlier bytes-traffic
+        heuristic, which cited an ~(176, 176, 64) continuous optimum.)
         """
         cfg = _default_config(M=4096, N=4096, K=4096)
         result = passes.l0_tile_chooser.choose_l0_tile(cfg)
-        assert _capacities_ok(result.m, result.n, result.k, cfg)
-        assert cfg.K % result.k == 0, f"k must divide K=4096; got k={result.k}"
-        assert result.k == 64, f"Expected largest aligned divisor ≤ 80; got k={result.k}"
-        assert result.m in (160, 176, 192), f"m near 176 (one align step); got m={result.m}"
-        assert result.n in (160, 176, 192), f"n near 176 (one align step); got n={result.n}"
-
-    def test_example_3_c_double_buffered(self):
-        """M=N=K=4096 with C also double-buffered → (128, 128, 128)."""
-        cfg = _default_config(M=4096, N=4096, K=4096)
-        cfg.double_buffer_c = True
-        result = passes.l0_tile_chooser.choose_l0_tile(cfg)
         assert (result.m, result.n, result.k) == (128, 128, 128)
         assert _capacities_ok(result.m, result.n, result.k, cfg)
+        assert cfg.K % result.k == 0, f"k must divide K=4096; got k={result.k}"
+
+    def test_example_3_c_double_buffer_declined_when_compute_bound(self):
+        """M=N=K=4096 with allow_double_buffer_c=True → still (128, 128, 128), dbC=1.
+
+        This GEMM is deeply compute-bound (C_mad dwarfs C_drain), so hiding the
+        drain behind the next tile's compute buys nothing while halving the L0C
+        budget would only shrink the tile. The chooser evaluates the
+        double-buffered schedule and correctly declines it.
+        """
+        cfg = _default_config(M=4096, N=4096, K=4096)
+        cfg.allow_double_buffer_c = True
+        result = passes.l0_tile_chooser.choose_l0_tile(cfg)
+        assert (result.m, result.n, result.k) == (128, 128, 128)
+        assert result.double_buffer_c is False
+        assert _capacities_ok(result.m, result.n, result.k, cfg, dbc=result.double_buffer_c)
 
     def test_example_4_short_n(self):
         """M=512, N=128, K=2048 → tile that covers all of N."""
@@ -253,6 +274,395 @@ class TestL0TilingInvariants:
         cfg = _default_config(M=128, N=-1, K=128)
         with pytest.raises(ValueError, match="M, N, K must all be positive"):
             passes.l0_tile_chooser.choose_l0_tile(cfg)
+
+
+# ---------------------------------------------------------------------------
+# Brute-force optimality: the chooser's pick must be the global wall-minimum
+# ---------------------------------------------------------------------------
+
+
+def _cdiv(a: int, b: int) -> int:
+    return (a + b - 1) // b
+
+
+# Stationarity tokens for the oracle, mapped to the bound enum for comparison.
+_OS, _AS, _BS = "OS", "A", "B"
+_STAT_ENUM = {
+    _OS: passes.l0_tile_chooser.Stationarity.OutputStationary,
+    _AS: passes.l0_tile_chooser.Stationarity.AStationary,
+    _BS: passes.l0_tile_chooser.Stationarity.BStationary,
+}
+
+
+def _derive_db(stat: str) -> tuple[bool, bool]:
+    """(dbA, dbB): stationary operand single-buffered (False), moving double (True)."""
+    if stat == _AS:
+        return (False, True)
+    if stat == _BS:
+        return (True, False)
+    return (True, True)
+
+
+def _load_cycles(m: int, n: int, cfg, stat: str) -> float:
+    M, N, K = cfg.M, cfg.N, cfg.K
+    cn, cm = _cdiv(N, n), _cdiv(M, m)
+    if stat == _AS:
+        a = cfg.bytes_a * M * K  # A loaded once (k == K)
+        b = cfg.bytes_b * K * N * cm
+    elif stat == _BS:
+        a = cfg.bytes_a * M * K * cn
+        b = cfg.bytes_b * K * N  # B loaded once (k == K)
+    else:  # OS: A once per n-block, B once per m-block
+        a = cfg.bytes_a * M * K * cn
+        b = cfg.bytes_b * K * N * cm
+    return a / cfg.bw_a + b / cfg.bw_b
+
+
+def _wall_key(m: int, n: int, k: int, cfg, stat: str, dbc: bool) -> tuple:
+    """Re-implement the C++ wall objective + lex tie-breaks for one design point."""
+    M, N, K = cfg.M, cfg.N, cfg.K
+    load = _load_cycles(m, n, cfg, stat)
+    kt = max(1, cfg.mad_k_fractal_bytes // cfg.bytes_a)
+    cpr = max(1, cfg.bytes_a // 2)
+    per = cfg.mad_head + cpr * _cdiv(m, cfg.align_m) * _cdiv(k, kt) * _cdiv(n, cfg.align_n)
+    mad = _cdiv(M, m) * _cdiv(N, n) * _cdiv(K, k) * per
+    drain = (2.0 if cfg.c_read else 1.0) * cfg.bytes_c * M * N / cfg.bw_drain
+    compute = max(load, float(mad))
+    wall = int((max(compute, drain) if dbc else compute + drain) + 0.5)
+    pvol = _cdiv(M, m) * m * _cdiv(N, n) * n * _cdiv(K, k) * k
+    # C_load is a wall-tie-break (after padded-compute + k-blocks, before area/k):
+    # among MAD-bound ties it picks the lower-hidden-load aspect.
+    return (wall, pvol, _cdiv(K, k), load, -(m * n), -k)
+
+
+def _legal_ks(m: int, n: int, cfg, a0: int, b0: int) -> list[int]:
+    """All legal aligned k for (m, n), ascending — a true enumeration mirroring
+    C++ EnumerateLegalKs. k is a real search axis: ceil(K/k)*ceil(k/kt) is not
+    monotone in k when kt != align_k, so the largest legal k is not always best.
+    """
+    cap = min(a0 // m, b0 // n)  # max k fitting L0a and L0b
+    k_problem = max(_cdiv(cfg.K, cfg.align_k) * cfg.align_k, cfg.min_k) if cfg.allow_padding else cfg.K
+    k_hi = (min(cap, k_problem) // cfg.align_k) * cfg.align_k
+    ks = []
+    k = cfg.min_k
+    while k <= k_hi:
+        if cfg.allow_padding or cfg.allow_k_boundary or cfg.K % k == 0:  # legacy: divisors only
+            ks.append(k)
+        k += cfg.align_k
+    # Unaligned whole-K single block (only when K is not align-multiple).
+    if cfg.allow_k_boundary and cap >= cfg.K >= cfg.min_k and cfg.K % cfg.align_k != 0:
+        ks.append(cfg.K)
+    return ks
+
+
+def _enumerate_best(cfg, stat: str, dbc: bool, require_2d: bool, require_full_k: bool):
+    """Exhaustively score the legal aligned (m, n, k) grid for one regime; best
+    (key, tile). Every legal k per (m, n) is scored (not a largest-k shortcut)."""
+    dba, dbb = _derive_db(stat)
+    a0 = cfg.l0a_bytes // (cfg.bytes_a * (2 if dba else 1))
+    b0 = cfg.l0b_bytes // (cfg.bytes_b * (2 if dbb else 1))
+    c0 = cfg.l0c_bytes // (cfg.bytes_c * (2 if dbc else 1))
+    best = None
+    m = cfg.min_m
+    while m <= cfg.M and m * cfg.min_n <= c0:
+        if not (require_2d and _cdiv(cfg.M, m) < 2):
+            n = cfg.min_n
+            while n <= min(cfg.N, c0 // m):
+                if not (require_2d and _cdiv(cfg.N, n) < 2):
+                    for k in _legal_ks(m, n, cfg, a0, b0):
+                        if require_full_k and k != cfg.K:
+                            continue
+                        key = _wall_key(m, n, k, cfg, stat, dbc)
+                        if best is None or key < best[0]:
+                            best = (key, (m, n, k))
+                n += cfg.align_n
+        m += cfg.align_m
+    return best
+
+
+def _brute_optimum(cfg) -> tuple:
+    """Mirror ChooseL0Tile over the design space (realizable-mask gates).
+
+    Returns (tile, stationarity, double_buffer_c, wall).
+    """
+    base = _enumerate_best(cfg, _OS, False, require_2d=False, require_full_k=False)
+    assert base is not None
+    best_key, best = base[0], (base[1], _OS, False)
+    # Explore the rest of the space only when the baseline already tiles.
+    if base[1] != (cfg.M, cfg.N, cfg.K):
+        stats = [_OS]
+        if cfg.allow_a_stationary:
+            stats.append(_AS)
+        if cfg.allow_b_stationary:
+            stats.append(_BS)
+        regimes = []  # built in C++ iteration order: stat, dbc
+        for stat in stats:
+            for dbc in [False, True] if cfg.allow_double_buffer_c else [False]:
+                regimes.append((stat, dbc))
+        for stat, dbc in regimes:
+            if stat == _OS and not dbc:
+                continue  # baseline, already scored
+            c0 = cfg.l0c_bytes // (cfg.bytes_c * (2 if dbc else 1))
+            if c0 < cfg.min_m * cfg.min_n:
+                continue
+            cand = _enumerate_best(cfg, stat, dbc, require_2d=dbc, require_full_k=(stat != _OS or dbc))
+            if cand is not None and cand[0][0] < best_key[0]:  # strictly lower wall
+                best_key, best = cand[0], (cand[1], stat, dbc)
+    tile, stat, dbc = best
+    return tile, stat, dbc, best_key[0]
+
+
+class TestL0TilingRooflineOptimum:
+    """The chooser must return the global minimum-wall design point (oracle check)."""
+
+    # Skewed / asymmetric-byte shapes (previously exposed sparse-candidate misses),
+    # square + the large 4096^3 example, and FIXPIPE-bound shapes (small K, large
+    # 2-D output) that exercise the operand-stationary / dbC branches.
+    @pytest.mark.parametrize(
+        "M,N,K",
+        [
+            (4096, 4096, 4096),
+            (256, 256, 256),
+            (512, 128, 2048),
+            (128, 512, 2048),
+            (240, 240, 480),
+            (400, 112, 256),
+            (1024, 64, 512),
+            (272, 160, 384),
+            (512, 512, 64),
+            (256, 256, 32),
+            (640, 384, 64),
+            (768, 768, 48),
+        ],
+    )
+    @pytest.mark.parametrize("bytes_a,bytes_b", [(2, 2), (2, 1), (1, 2)])
+    # Realizable-mask gate combinations: nothing, each axis alone, and all open.
+    @pytest.mark.parametrize(
+        "gates",
+        [
+            {},
+            {"allow_double_buffer_c": True},
+            {"allow_a_stationary": True},
+            {"allow_b_stationary": True},
+            {"allow_a_stationary": True, "allow_b_stationary": True},
+            {"allow_a_stationary": True, "allow_b_stationary": True, "allow_double_buffer_c": True},
+            {"allow_k_boundary": True},
+            {
+                "allow_k_boundary": True,
+                "allow_a_stationary": True,
+                "allow_b_stationary": True,
+                "allow_double_buffer_c": True,
+            },
+        ],
+    )
+    def test_matches_bruteforce_optimum(self, M, N, K, bytes_a, bytes_b, gates):
+        cfg = _default_config(M=M, N=N, K=K)
+        cfg.bytes_a, cfg.bytes_b = bytes_a, bytes_b
+        for key, val in gates.items():
+            setattr(cfg, key, val)
+        btile, bstat, bdbc, bwall = _brute_optimum(cfg)
+        r = passes.l0_tile_chooser.choose_l0_tile(cfg)
+        # The chooser enumerates the same regimes, so its full design point must
+        # match the global optimum.
+        got = (r.m, r.n, r.k, r.stationarity, r.double_buffer_c)
+        want = (*btile, _STAT_ENUM[bstat], bdbc)
+        assert got == want, (
+            f"M={M} N={N} K={K} ba={bytes_a} bb={bytes_b} gates={gates}: chooser={got} vs brute={want}"
+        )
+        assert r.estimated_cost_cycles == bwall
+        # dbA / dbB are derived from stationarity (not returned); the chosen tile
+        # must fit the operand buffers under those derived depths.
+        dba, dbb = _derive_db(bstat)
+        assert _capacities_ok(r.m, r.n, r.k, cfg, dba=dba, dbb=dbb, dbc=bdbc)
+
+    def test_double_buffer_c_chosen_when_drain_bound(self):
+        """A small-K, large 2-D-output GEMM is FIXPIPE-bound → dbC=2 wins.
+
+        512x512x64: the L0C drain (~M*N) dominates the shallow-K compute, so
+        hiding it behind the next tile beats a single big accumulator. The chosen
+        tile must fit the halved L0C budget and form a >= 2x2 grid.
+        """
+        cfg = _default_config(M=512, N=512, K=64)
+        cfg.allow_double_buffer_c = True
+        result = passes.l0_tile_chooser.choose_l0_tile(cfg)
+        assert result.double_buffer_c is True
+        assert result.k == 64, f"dbC=2 requires a full-K tile; got k={result.k}"
+        assert _cdiv(512, result.m) >= 2 and _cdiv(512, result.n) >= 2, "dbC=2 needs a >= 2x2 grid"
+        assert _capacities_ok(result.m, result.n, result.k, cfg, dbc=True)
+        # The single-L0C path must NOT pick dbC=2 (gate respected).
+        cfg.allow_double_buffer_c = False
+        assert passes.l0_tile_chooser.choose_l0_tile(cfg).double_buffer_c is False
+
+    def test_default_mask_is_output_stationary(self):
+        """With no gate opened the chooser emits only the realizable subset:
+        output-stationary, single L0C (dbA=dbB=2 derived from OS)."""
+        OS = passes.l0_tile_chooser.Stationarity.OutputStationary
+        for M, N, K in [(512, 512, 64), (256, 256, 256), (4096, 4096, 4096), (1024, 128, 512)]:
+            r = passes.l0_tile_chooser.choose_l0_tile(_default_config(M=M, N=N, K=K))
+            assert r.stationarity == OS
+            assert r.double_buffer_c is False
+
+    def test_operand_stationary_requires_gate(self):
+        """Opening the stationarity gates lets the chooser pin an operand (k == K),
+        and the derived per-operand depth follows (stationary operand single-buffered).
+
+        256x256x256: pinning A in a full (single-buffered) L0A admits a k = K = 256
+        tile that the output-stationary route (half L0A) cannot, and combined with a
+        hidden drain it beats the OS optimum. Without the gate the chooser stays OS.
+        """
+        OS = passes.l0_tile_chooser.Stationarity.OutputStationary
+        assert passes.l0_tile_chooser.choose_l0_tile(_default_config(M=256, N=256, K=256)).stationarity == OS
+        cfg = _default_config(M=256, N=256, K=256)
+        cfg.allow_a_stationary = True
+        cfg.allow_b_stationary = True
+        cfg.allow_double_buffer_c = True
+        r = passes.l0_tile_chooser.choose_l0_tile(cfg)
+        assert r.stationarity == passes.l0_tile_chooser.Stationarity.AStationary
+        assert r.k == 256, "operand-stationary pins across the full K reduction (k == K)"
+        # A-stationary derives dbA=1 (A pinned, full L0A), dbB=2 (B streams).
+        assert _capacities_ok(r.m, r.n, r.k, cfg, dba=False, dbb=True, dbc=r.double_buffer_c)
+
+    def test_load_tiebreak_prefers_low_load_aspect(self):
+        """MAD-bound square shape: the aspect-swapped tiles (m, n) and (n, m) tie on
+        wall (load is hidden under max(C_load, C_mad)), on padded-compute, and on
+        k-blocks. The C_load tie-break then picks the lower-hidden-load aspect —
+        m >= n, because L0B runs at half L0A's bandwidth, so fewer m-blocks (larger
+        m, fewer B re-streams) is the cheaper aspect. Without the tie-break the
+        ascending-m scan would emit the load-suboptimal m < n.
+
+        256x256x64: both (256, 128, 64) and (128, 256, 64) are wall-tied; the
+        chooser must return the m >= n aspect (256, 128, 64)."""
+        cfg = _default_config(M=256, N=256, K=64)
+        r = passes.l0_tile_chooser.choose_l0_tile(cfg)
+        assert r.m >= r.n, f"expected the low-load aspect m >= n; got ({r.m}, {r.n})"
+        assert (r.m, r.n, r.k) == (256, 128, 64)
+        # ... and it agrees with the exhaustive oracle (same C_load key).
+        btile, _, _, _ = _brute_optimum(cfg)
+        assert (r.m, r.n, r.k) == btile
+
+    def test_estimated_traffic_matches_chosen_stationarity(self):
+        """estimated_traffic_bytes (inspection metadata) must reflect the CHOSEN
+        stationarity, not always output-stationary. An A-stationary tile loads A
+        once (not ceil(N/n) times), so its reported traffic is the A-stationary
+        sum and never exceeds the output-stationary sum for the same tile."""
+        cfg = _default_config(M=256, N=256, K=256)
+        cfg.allow_a_stationary = True
+        cfg.allow_b_stationary = True
+        cfg.allow_double_buffer_c = True
+        r = passes.l0_tile_chooser.choose_l0_tile(cfg)
+        assert r.stationarity == passes.l0_tile_chooser.Stationarity.AStationary
+        M, N, K = 256, 256, 256
+        cn, cm = _cdiv(N, r.n), _cdiv(M, r.m)
+        gamma_c = 2 if cfg.c_read else 1
+        c_traffic = gamma_c * cfg.bytes_c * M * N
+        a_stat = cfg.bytes_a * M * K + cfg.bytes_b * K * N * cm + c_traffic  # A loaded once
+        os = cfg.bytes_a * M * K * cn + cfg.bytes_b * K * N * cm + c_traffic
+        assert r.estimated_traffic_bytes == a_stat, "traffic must use the A-stationary reload counts"
+        assert a_stat <= os, "A-stationary never charges more A traffic than output-stationary"
+
+
+class TestL0TilingKBoundary:
+    """allow_k_boundary: the chosen k need not divide K (the pass peels the partial
+    last K iteration); when the full K reduction fits one L0 block, k == K is returned
+    verbatim even for a non-16-aligned K — the cube zero-fills the K tail fractal in
+    the GM->L1 NZ repack (see the pto-isa MAD spec / DESIGN_SPACE.md)."""
+
+    def test_whole_K_fits_returns_unaligned_K(self):
+        """K=50 fits one L0 block (M=N=64): the chooser returns the full tile with
+        k == K == 50 (single matmul, no K-loop) rather than aligning down to 48."""
+        cfg = _default_config(M=64, N=64, K=50)
+        cfg.allow_k_boundary = True
+        result = passes.l0_tile_chooser.choose_l0_tile(cfg)
+        assert result.k == 50, f"whole-K-fits must return k == K == 50; got {result.k}"
+
+    def test_non_aligned_K_needs_the_flag(self):
+        """K=130 is not a multiple of 16, so no aligned k divides it: the legacy path
+        rejects it outright, while allow_k_boundary tiles it (largest aligned block
+        <= capacity) and the pass peels the partial tail."""
+        cfg = _default_config(M=16, N=320, K=130)
+        with pytest.raises(ValueError):  # no aligned divisor of 130 -> no legal tile
+            passes.l0_tile_chooser.choose_l0_tile(cfg)
+        cfg.allow_k_boundary = True
+        result = passes.l0_tile_chooser.choose_l0_tile(cfg)
+        assert result.k % cfg.align_k == 0 and result.k <= cfg.K
+        assert _capacities_ok(result.m, result.n, result.k, cfg)
+
+    @pytest.mark.parametrize(
+        "M,N,K",
+        [
+            (16, 320, 128),
+            (16, 320, 130),
+            (272, 160, 300),
+            (256, 256, 250),
+            (128, 512, 2050),
+            (512, 512, 50),
+        ],
+    )
+    def test_matches_bruteforce_with_k_boundary(self, M, N, K):
+        """With allow_k_boundary the chooser must still return the global wall-min
+        (oracle check) for both non-divisor-but-aligned K and non-16-aligned K."""
+        cfg = _default_config(M=M, N=N, K=K)
+        cfg.allow_k_boundary = True
+        btile, _, bdbc, bwall = _brute_optimum(cfg)
+        r = passes.l0_tile_chooser.choose_l0_tile(cfg)
+        assert (r.m, r.n, r.k, r.double_buffer_c) == (*btile, bdbc), (
+            f"M={M} N={N} K={K}: chooser=({r.m},{r.n},{r.k}) vs brute={btile}"
+        )
+        assert r.estimated_cost_cycles == bwall
+        assert _capacities_ok(r.m, r.n, r.k, cfg)
+
+
+class TestL0TilingKExhaustive:
+    """k is a REAL search axis: the chooser scores every legal aligned k per
+    (m, n), not just the largest. The MAD term ceil(K/k)*ceil(k/kt) is not
+    monotone in k when kt != align_k (bytes_a=1 -> kt=32 > align=16), so a
+    largest-legal-k shortcut misses the global optimum."""
+
+    def test_largest_k_is_not_always_optimal(self):
+        """Regression guard for the review counterexample. M=128, N=256, K=96 with
+        a 1-byte left operand (bytes_a=1, bytes_b=2): the wall-optimal tile is
+        (128, 256, 32) — NOT the largest-legal-k pick (which would land on
+        (128, 128, 96) / (128, 256, 48)). k=32 packs more N per block and hits a
+        cheaper ceil(k/32) MAD step than k=48/64. Pinned literally so a future
+        largest-k shortcut is caught even if the oracle drifts."""
+        cfg = _default_config(M=128, N=256, K=96)
+        cfg.bytes_a, cfg.bytes_b = 1, 2  # 1-byte left operand -> kt=32, align=16
+        result = passes.l0_tile_chooser.choose_l0_tile(cfg)
+        assert (result.m, result.n, result.k) == (128, 256, 32), (
+            f"expected the exhaustive-k optimum (128, 256, 32); got "
+            f"({result.m}, {result.n}, {result.k}) — largest-legal-k shortcut?"
+        )
+        # ... and it agrees with the exhaustive (all-k) oracle.
+        btile, _, _, _ = _brute_optimum(cfg)
+        assert (result.m, result.n, result.k) == btile
+
+
+class TestL0TilingRooflineMigration:
+    """Audit trail for the traffic->roofline objective change. The roofline rewrite
+    is a deliberate MODEL-DRIVEN tile-selection change, NOT a behavior-neutral
+    refactor: for MAD-bound shapes the wall-optimum differs from the old traffic
+    optimum. Each shape pins the current roofline tile and records the pre-rewrite
+    closed-form tile, so the delta is reviewable. 910B cost model (the 950 FP32
+    example from the review is omitted — its cost constants are placeholders)."""
+
+    @pytest.mark.parametrize(
+        "M,N,K,bytes_ab,old_closed_form,new_roofline",
+        [
+            (256, 256, 64, 2, (192, 160, 64), (256, 128, 64)),
+            (272, 272, 64, 2, (192, 160, 64), (272, 96, 32)),
+            (320, 320, 64, 2, (192, 160, 64), (160, 160, 64)),
+            (256, 256, 256, 4, (192, 160, 32), (128, 128, 64)),
+        ],
+    )
+    def test_roofline_tile_migration(self, M, N, K, bytes_ab, old_closed_form, new_roofline):
+        cfg = _default_config(M=M, N=N, K=K)
+        cfg.bytes_a = cfg.bytes_b = bytes_ab
+        r = passes.l0_tile_chooser.choose_l0_tile(cfg)
+        assert (r.m, r.n, r.k) == new_roofline, (
+            f"{M}x{N}x{K}: roofline tile {(r.m, r.n, r.k)} != pinned {new_roofline} "
+            f"(old traffic closed-form picked {old_closed_form})"
+        )
+        assert _capacities_ok(r.m, r.n, r.k, cfg)
 
 
 if __name__ == "__main__":

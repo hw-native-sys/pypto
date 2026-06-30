@@ -652,11 +652,18 @@ void BindPass(nb::module_& m) {
                    "Enforce the InOut-use discipline; raises pypto.Error (VerificationError) "
                    "on any violation so compilation halts rather than proceeding with unsound IR.");
 
-  // L0 tile-size chooser submodule (closed-form heuristic; consumed by the
+  // L0 tile-size chooser submodule (roofline cost model; consumed by the
   // AutoTileMatmulL0 pass and exposed for testing / inspection).
-  nb::module_ l0_tile = passes.def_submodule(
-      "l0_tile_chooser",
-      "Closed-form chooser for L0 matmul tile shape (m, n, k) under L1->L0 traffic minimisation");
+  nb::module_ l0_tile =
+      passes.def_submodule("l0_tile_chooser",
+                           "Chooser for the L0 matmul design point (m, n, k, stationarity, dbA/dbB/dbC) "
+                           "by roofline cost model: min wall over the legal aligned tile grid");
+
+  nb::enum_<utils::Stationarity>(l0_tile, "Stationarity",
+                                 "Which GEMM operand is pinned across the L0 tiling loops")
+      .value("OutputStationary", utils::Stationarity::kOutputStationary)
+      .value("AStationary", utils::Stationarity::kAStationary)
+      .value("BStationary", utils::Stationarity::kBStationary);
 
   nb::class_<utils::L0TileConfig>(l0_tile, "L0TileConfig",
                                   "Inputs to ChooseL0Tile: problem dims + hardware + schedule knobs")
@@ -676,11 +683,17 @@ void BindPass(nb::module_& m) {
       .def_rw("align_m", &utils::L0TileConfig::align_m)
       .def_rw("align_n", &utils::L0TileConfig::align_n)
       .def_rw("align_k", &utils::L0TileConfig::align_k)
-      .def_rw("double_buffer_a", &utils::L0TileConfig::double_buffer_a)
-      .def_rw("double_buffer_b", &utils::L0TileConfig::double_buffer_b)
-      .def_rw("double_buffer_c", &utils::L0TileConfig::double_buffer_c)
+      .def_rw("allow_a_stationary", &utils::L0TileConfig::allow_a_stationary)
+      .def_rw("allow_b_stationary", &utils::L0TileConfig::allow_b_stationary)
+      .def_rw("allow_double_buffer_c", &utils::L0TileConfig::allow_double_buffer_c)
       .def_rw("c_read", &utils::L0TileConfig::c_read)
-      .def_rw("allow_padding", &utils::L0TileConfig::allow_padding);
+      .def_rw("bw_a", &utils::L0TileConfig::bw_a)
+      .def_rw("bw_b", &utils::L0TileConfig::bw_b)
+      .def_rw("bw_drain", &utils::L0TileConfig::bw_drain)
+      .def_rw("mad_head", &utils::L0TileConfig::mad_head)
+      .def_rw("mad_k_fractal_bytes", &utils::L0TileConfig::mad_k_fractal_bytes)
+      .def_rw("allow_padding", &utils::L0TileConfig::allow_padding)
+      .def_rw("allow_k_boundary", &utils::L0TileConfig::allow_k_boundary);
 
   nb::class_<utils::L0TileResult>(l0_tile, "L0TileResult",
                                   "Output of ChooseL0Tile: the chosen (m, n, k) plus diagnostics")
@@ -688,11 +701,14 @@ void BindPass(nb::module_& m) {
       .def_ro("n", &utils::L0TileResult::n)
       .def_ro("k", &utils::L0TileResult::k)
       .def_ro("estimated_traffic_bytes", &utils::L0TileResult::estimated_traffic_bytes)
+      .def_ro("estimated_cost_cycles", &utils::L0TileResult::estimated_cost_cycles)
       .def_ro("padded_compute_volume", &utils::L0TileResult::padded_compute_volume)
+      .def_ro("stationarity", &utils::L0TileResult::stationarity)
+      .def_ro("double_buffer_c", &utils::L0TileResult::double_buffer_c)
       .def_ro("perf_hint", &utils::L0TileResult::perf_hint);
 
   l0_tile.def("choose_l0_tile", &utils::ChooseL0Tile, nb::arg("config"),
-              "Pick an approximately-optimal L0 tile shape (m, n, k) by closed-form heuristic.");
+              "Pick the minimum-cost L0 tile shape (m, n, k) under the roofline cost model.");
 }
 
 }  // namespace python
