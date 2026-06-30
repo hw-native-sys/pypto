@@ -217,5 +217,49 @@ def test_pinned_buffer_too_small_error():
         passes.init_mem_ref()(Prog)
 
 
+def test_l0_spaces_pinnable_in_explicit_matmul():
+    """L0 matmul operands/accumulator (Left/Right/Acc) are pinnable too.
+
+    When a matmul is written explicitly (load -> move-to-Left/Right -> matmul),
+    its L0 tiles are user-authored, so they pin on the same terms as Vec/Mat.
+    This is what lets a fully-explicit attention kernel pin EVERY tile. Address
+    handling is backend-agnostic, so this runs under whatever backend is active.
+    """
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def mm(
+            self,
+            q: pl.Tensor[[16, 128], pl.BF16],
+            k: pl.Tensor[[128, 128], pl.BF16],
+            out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+        ) -> pl.Tensor[[16, 128], pl.FP32]:
+            q_mat: pl.Tile[[16, 128], pl.BF16, pl.MemRef(0, 4096, 0), pl.MemorySpace.Mat] = pl.tile.load(
+                q, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+            )
+            k_mat: pl.Tile[[128, 128], pl.BF16, pl.MemRef(4096, 32768, 1), pl.MemorySpace.Mat] = pl.tile.load(
+                k, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+            )
+            k_t = pl.tile.transpose_view(k_mat)
+            q_left: pl.Tile[[16, 128], pl.BF16, pl.MemRef(0, 4096, 2), pl.MemorySpace.Left] = pl.tile.move(
+                q_mat, target_memory=pl.MemorySpace.Left
+            )
+            k_right: pl.Tile[[128, 128], pl.BF16, pl.MemRef(0, 32768, 3), pl.MemorySpace.Right] = (
+                pl.tile.move(k_t, target_memory=pl.MemorySpace.Right)
+            )
+            scores: pl.Tile[[16, 128], pl.FP32, pl.MemRef(0, 8192, 4), pl.MemorySpace.Acc] = pl.tile.matmul(
+                q_left, k_right
+            )
+            out = pl.tile.store(scores, [0, 0], out)
+            return out
+
+    mrs = _tile_memrefs(_allocate(Prog))
+    # Every L0 tile is honored at its user-assigned address, on a pinned base.
+    for name in ("q_left", "k_right", "scores"):
+        assert mrs[name].base_.name_hint.startswith("__pinned__"), f"{name} must be user-pinned"
+        assert _addr(mrs[name]) == 0  # each L0 space is independent → addr 0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

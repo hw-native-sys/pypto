@@ -97,11 +97,27 @@ std::optional<size_t> GetOutputReusesInputArg(const std::string& op_name) {
   return registry.GetEntry(op_name).GetOutputReusesInputArg();
 }
 
-// The custom-buffer feature only manages on-chip general-pool spaces a user can
-// reason about: the unified vector buffer (Vec) and the L1 matrix buffer (Mat).
-// L0 matmul machinery (Left/Right/Acc/Bias) is capacity-tiny and backend-managed,
-// and DDR holds tensor params — neither is user-pinnable.
-bool IsPinnableSpace(MemorySpace space) { return space == MemorySpace::Vec || space == MemorySpace::Mat; }
+// The custom-buffer feature manages the on-chip tile spaces a user can place by
+// hand when writing a fully-explicit tile kernel: the unified vector buffer
+// (Vec), the L1 matrix buffer (Mat), and the L0 matmul operands/accumulator
+// (Left/Right/Acc/Bias). In a high-level kernel the L0 machinery is compiler-
+// owned, but when the user writes the matmul explicitly (load -> move-to-Left/
+// Right -> matmul -> Acc) those tiles are user-authored too, so they are
+// pinnable on the same whole-space-manual terms. DDR (tensor params) and
+// ScalarLocal (register file) are never pinnable.
+bool IsPinnableSpace(MemorySpace space) {
+  switch (space) {
+    case MemorySpace::Vec:
+    case MemorySpace::Mat:
+    case MemorySpace::Left:
+    case MemorySpace::Right:
+    case MemorySpace::Acc:
+    case MemorySpace::Bias:
+      return true;
+    default:
+      return false;
+  }
+}
 
 // Collect the pinnable memory spaces that contain at least one user-pinned tile.
 // A user-pinned tile is a TileType var whose type already carries a MemRef when
