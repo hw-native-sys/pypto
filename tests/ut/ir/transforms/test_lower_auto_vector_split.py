@@ -1435,5 +1435,107 @@ def test_auto_path_unchanged():
     ir.assert_structural_equal(_lower(_build_c2v_mixed_program()), _expected_c2v_mixed_program())
 
 
+def test_while_inside_region_halves_vector_op():
+    """A WhileStmt *inside* a region body has its vector ops halved: LowerStmts
+    recurses into the while (mirroring its for/if arms), so the load is split on
+    the axis and its offset localized rather than left full-width on both lanes.
+    Before: region{ aiv_id, while{ load[128,128], store } }.
+    Expected: region erased -> subblock_idx + aiv_id + while{ load[64,128] @ localized, store }."""
+    span = ir.Span.unknown()
+    data = ir.Var("data", _tensor([128, 128]), span)
+    out_0 = ir.Var("out_0", _tensor([128, 128]), span)
+    cond = ir.ConstInt(0, DataType.BOOL, span)
+    aiv_id_call = T.get_subblock_idx(span=span)
+    aiv_id = ir.Var("aiv_id", aiv_id_call.type, span)
+    load = T.load(data, [0, 0], [128, 128], target_memory=MS.Vec, span=span)
+    t = ir.Var("t", load.type, span)
+    store = T.store(t, [0, 0], out_0, span=span)
+    out_store = ir.Var("out_store", store.type, span)
+    b_while = ir.WhileStmt(
+        cond,
+        [],
+        ir.SeqStmts([ir.AssignStmt(t, load, span), ir.AssignStmt(out_store, store, span)], span),
+        [],
+        span,
+    )
+    region = ir.SplitAivScopeStmt(
+        split=ir.SplitMode.UP_DOWN,
+        body=ir.SeqStmts([ir.AssignStmt(aiv_id, aiv_id_call, span), b_while], span),
+        span=span,
+    )
+    program = _explicit_region_program(
+        [region, ir.ReturnStmt([out_store], span)], [(data, _IN), (out_0, _OUT)], [out_0.type]
+    )
+
+    e_data = ir.Var("data", _tensor([128, 128]), span)
+    e_out = ir.Var("out_0", _tensor([128, 128]), span)
+    e_cond = ir.ConstInt(0, DataType.BOOL, span)
+    sub = _sub_var()
+    e_aiv = ir.Var("aiv_id", _IDX, span)
+    off = [0 + sub * 64, 0]  # UP_DOWN: row offset localized per subblock
+    e_load = T.load(e_data, off, [64, 128], target_memory=MS.Vec, span=span)
+    e_t = ir.Var("t", e_load.type, span)
+    e_store = T.store(e_t, off, e_out, span=span)
+    e_out_store = ir.Var("out_store", e_store.type, span)
+    e_while = ir.WhileStmt(
+        e_cond,
+        [],
+        ir.SeqStmts([ir.AssignStmt(e_t, e_load, span), ir.AssignStmt(e_out_store, e_store, span)], span),
+        [],
+        span,
+    )
+    expected = _expected_region_program(
+        [_get_subblock(sub, span), _get_subblock(e_aiv, span), e_while, ir.ReturnStmt([e_out_store], span)],
+        [(e_data, _IN), (e_out, _OUT)],
+        [e_out.type],
+    )
+    ir.assert_structural_equal(_lower(program), expected)
+
+
+def test_mixed_explicit_implicit_region_in_while_rejected():
+    """The mixed-explicit validator recurses into a WhileStmt inside the region, so
+    a plain full-width vector op buried in a while (not derived from the explicit
+    tile.aiv_shard) is still rejected. NEGATIVE test: a rejected transform has no
+    ``After`` IR."""
+    span = ir.Span.unknown()
+    a_left = ir.Var("a_left", _tile([128, 128], mem=MS.Left), span)
+    b_right = ir.Var("b_right", _tile([128, 128], mem=MS.Right), span)
+    data = ir.Var("data", _tensor([128, 128]), span)
+    out_0 = ir.Var("out_0", _tensor([128, 128]), span)
+    cond = ir.ConstInt(0, DataType.BOOL, span)
+    matmul = T.matmul(a_left, b_right, span=span)
+    qk = ir.Var("qk", matmul.type, span)
+    aiv_id_call = T.get_subblock_idx(span=span)
+    aiv_id = ir.Var("aiv_id", aiv_id_call.type, span)
+    shard = T.aiv_shard(qk, split=1, span=span)  # explicit C->V boundary (half)
+    qk_h = ir.Var("qk_h", shard.type, span)
+    # Full-width Vec load NOT derived from the shard, buried inside a while.
+    full_load = T.load(data, [0, 0], [128, 128], target_memory=MS.Vec, span=span)
+    full_t = ir.Var("full_t", full_load.type, span)
+    store = T.store(full_t, [0, 0], out_0, span=span)
+    out_store = ir.Var("out_store", store.type, span)
+    inner_while = ir.WhileStmt(
+        cond,
+        [],
+        ir.SeqStmts([ir.AssignStmt(full_t, full_load, span), ir.AssignStmt(out_store, store, span)], span),
+        [],
+        span,
+    )
+    region = ir.SplitAivScopeStmt(
+        split=ir.SplitMode.UP_DOWN,
+        body=ir.SeqStmts(
+            [ir.AssignStmt(aiv_id, aiv_id_call, span), ir.AssignStmt(qk_h, shard, span), inner_while], span
+        ),
+        span=span,
+    )
+    program = _explicit_region_program(
+        [ir.AssignStmt(qk, matmul, span), region, ir.ReturnStmt([out_store], span)],
+        [(a_left, _IN), (b_right, _IN), (data, _IN), (out_0, _OUT)],
+        [out_0.type],
+    )
+    with pytest.raises(ValueError, match="mixes explicit"):
+        _lower(program)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

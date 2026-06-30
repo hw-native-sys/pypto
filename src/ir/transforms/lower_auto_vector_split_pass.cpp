@@ -383,6 +383,15 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
       result.push_back(new_if);
       continue;
     }
+    if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
+      auto body = transform_utils::FlattenToStmts(while_stmt->body_);
+      auto new_body =
+          LowerStmts(body, mode, split_int, split_dim, tile_vars, subblock_idx, var_replacements, used_names);
+      auto new_while = MutableCopy(while_stmt);
+      new_while->body_ = loop_repair::MakeBody(new_body, while_stmt->span_);
+      result.push_back(new_while);
+      continue;
+    }
 
     // SHARED leaf / ReturnStmt / anything else: pass through unchanged.
     result.push_back(stmt);
@@ -526,6 +535,8 @@ void ScanRegionHalfWidth(const std::vector<StmtPtr>& stmts, std::unordered_set<c
         ScanRegionHalfWidth(transform_utils::FlattenToStmts(*if_stmt->else_body_), half_tiles,
                             full_width_vec_ops);
       }
+    } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
+      ScanRegionHalfWidth(transform_utils::FlattenToStmts(while_stmt->body_), half_tiles, full_width_vec_ops);
     } else if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(stmt)) {
       ScanRegionHalfWidth(seq->stmts_, half_tiles, full_width_vec_ops);
     }
