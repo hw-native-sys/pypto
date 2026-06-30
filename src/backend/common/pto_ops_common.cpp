@@ -449,6 +449,7 @@ static std::string MakeNaryCodegenPTO(const std::string& pto_op_name, size_t ari
   // ...) accept subview SSAs natively, so only the tcolexpand family needs
   // eager materialization.
   if (pto_op_name == "pto.tcolexpandmul" || pto_op_name == "pto.tcolexpandadd" ||
+      pto_op_name == "pto.tcolexpanddiv" || pto_op_name == "pto.tcolexpandsub" ||
       pto_op_name == "pto.tcolexpandmax" || pto_op_name == "pto.tcolexpandmin" ||
       pto_op_name == "pto.tcolexpandexpdif") {
     // Derive a debug hint from the op name (e.g. "pto.tcolexpandmul" -> "colexpandmul").
@@ -2505,6 +2506,8 @@ static const SimpleOpEntry kSimpleOps[] = {
     {"tile.col_argmin",      "pto.tcolargmin",       2},
     {"tile.col_expand_mul",  "pto.tcolexpandmul",    2},
     {"tile.col_expand_add",  "pto.tcolexpandadd",    2},
+    {"tile.col_expand_div",  "pto.tcolexpanddiv",    2},
+    {"tile.col_expand_sub",  "pto.tcolexpandsub",    2},
     {"tile.col_expand_max",  "pto.tcolexpandmax",    2},
     {"tile.col_expand_min",  "pto.tcolexpandmin",    2},
     {"tile.col_expand_expdif", "pto.tcolexpandexpdif", 2},

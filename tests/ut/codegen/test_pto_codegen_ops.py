@@ -877,6 +877,46 @@ class TestBroadcastOpsCodegen:
         mlir = self._generate_mlir(Prog)
         assert "pto.tcolexpandadd" in mlir, f"col_expand_add should generate pto.tcolexpandadd, got:\n{mlir}"
 
+    def test_col_expand_div_codegen(self):
+        """tile.col_expand_div(tile[M,N], col_vec[1,N]) should generate pto.tcolexpanddiv."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[16, 16], pl.FP32],
+                col_vec_tensor: pl.Tensor[[1, 16], pl.FP32],
+                dst: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                src_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(src, [0, 0], [16, 16])
+                col_tile: pl.Tile[[1, 16], pl.FP32] = pl.load(col_vec_tensor, [0, 0], [1, 16])
+                result: pl.Tile[[16, 16], pl.FP32] = pl.tile.col_expand_div(src_tile, col_tile)
+                return pl.store(result, [0, 0], dst)
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.tcolexpanddiv" in mlir, f"col_expand_div should generate pto.tcolexpanddiv, got:\n{mlir}"
+
+    def test_col_expand_sub_codegen(self):
+        """tile.col_expand_sub(tile[M,N], col_vec[1,N]) should generate pto.tcolexpandsub."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[16, 16], pl.FP32],
+                col_vec_tensor: pl.Tensor[[1, 16], pl.FP32],
+                dst: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                src_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(src, [0, 0], [16, 16])
+                col_tile: pl.Tile[[1, 16], pl.FP32] = pl.load(col_vec_tensor, [0, 0], [1, 16])
+                result: pl.Tile[[16, 16], pl.FP32] = pl.tile.col_expand_sub(src_tile, col_tile)
+                return pl.store(result, [0, 0], dst)
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.tcolexpandsub" in mlir, f"col_expand_sub should generate pto.tcolexpandsub, got:\n{mlir}"
+
     def test_col_expand_codegen(self):
         """tile.col_expand(target, col_vec) should emit pto.tcolexpand with only col_vec in ins()."""
 
@@ -986,7 +1026,12 @@ class TestTileSliceCodegen:
 
     @pytest.mark.parametrize(
         "op_name, pto_op",
-        [("col_expand_mul", "pto.tcolexpandmul"), ("col_expand_add", "pto.tcolexpandadd")],
+        [
+            ("col_expand_mul", "pto.tcolexpandmul"),
+            ("col_expand_add", "pto.tcolexpandadd"),
+            ("col_expand_div", "pto.tcolexpanddiv"),
+            ("col_expand_sub", "pto.tcolexpandsub"),
+        ],
     )
     def test_tile_slice_into_col_expand_materializes_via_extract(self, op_name, pto_op):
         """Regression for #1640: a dynamic-offset Vec ``tile.slice`` feeding
@@ -1022,7 +1067,7 @@ class TestTileSliceCodegen:
                     return pl.store(scaled, [0, 0], dst)
 
             prog = ProgMul
-        else:
+        elif op_name == "col_expand_add":
 
             @pl.program
             class ProgAdd:
@@ -1042,6 +1087,46 @@ class TestTileSliceCodegen:
                     return pl.store(scaled, [0, 0], dst)
 
             prog = ProgAdd
+        elif op_name == "col_expand_div":
+
+            @pl.program
+            class ProgDiv:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    scores: pl.Tensor[[16, 256], pl.FP32],
+                    gamma: pl.Tensor[[1, 256], pl.FP32],
+                    row_off: pl.Scalar[pl.INDEX],
+                    dst: pl.Tensor[[1, 256], pl.FP32],
+                ) -> pl.Tensor[[1, 256], pl.FP32]:
+                    local: pl.Tile[[16, 256], pl.FP32] = pl.load(scores, [0, 0], [16, 256])
+                    gamma_t: pl.Tile[[1, 256], pl.FP32] = pl.load(gamma, [0, 0], [1, 256])
+                    # Dynamic-offset slice of a local tile — the #1640 hazard.
+                    row: pl.Tile[[1, 256], pl.FP32] = pl.tile.slice(local, [1, 256], [row_off, 0])
+                    scaled: pl.Tile[[1, 256], pl.FP32] = pl.tile.col_expand_div(row, gamma_t)
+                    return pl.store(scaled, [0, 0], dst)
+
+            prog = ProgDiv
+        else:
+
+            @pl.program
+            class ProgSub:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    scores: pl.Tensor[[16, 256], pl.FP32],
+                    gamma: pl.Tensor[[1, 256], pl.FP32],
+                    row_off: pl.Scalar[pl.INDEX],
+                    dst: pl.Tensor[[1, 256], pl.FP32],
+                ) -> pl.Tensor[[1, 256], pl.FP32]:
+                    local: pl.Tile[[16, 256], pl.FP32] = pl.load(scores, [0, 0], [16, 256])
+                    gamma_t: pl.Tile[[1, 256], pl.FP32] = pl.load(gamma, [0, 0], [1, 256])
+                    # Dynamic-offset slice of a local tile — the #1640 hazard.
+                    row: pl.Tile[[1, 256], pl.FP32] = pl.tile.slice(local, [1, 256], [row_off, 0])
+                    scaled: pl.Tile[[1, 256], pl.FP32] = pl.tile.col_expand_sub(row, gamma_t)
+                    return pl.store(scaled, [0, 0], dst)
+
+            prog = ProgSub
 
         mlir = self._generate_mlir(prog)
         assert pto_op in mlir, f"{op_name} should still lower to {pto_op}, got:\n{mlir}"

@@ -313,10 +313,13 @@ class CanonicalizeMutator : public IRMutator {
   }
 
   /// True for the col-expand ops whose `pto.*` lowering materializes a subview
-  /// operand via the lazy `pto.textract` path (pto_ops_common.cpp): both
-  /// `tile.col_expand_mul` and `tile.col_expand_add` (#1640).
+  /// operand via the lazy `pto.textract` path (pto_ops_common.cpp).  Must mirror
+  /// the materializing set in `MakeNaryCodegenPTO` exactly (#1640).
   static bool IsColExpandMaterializingOp(const OpPtr& op) {
-    return IsOp(op, "tile.col_expand_mul") || IsOp(op, "tile.col_expand_add");
+    return IsOp(op, "tile.col_expand_mul") || IsOp(op, "tile.col_expand_add") ||
+           IsOp(op, "tile.col_expand_div") || IsOp(op, "tile.col_expand_sub") ||
+           IsOp(op, "tile.col_expand_max") || IsOp(op, "tile.col_expand_min") ||
+           IsOp(op, "tile.col_expand_expdif");
   }
 
   /// True when a slice offset is dynamic (either component is not a `ConstInt`).
