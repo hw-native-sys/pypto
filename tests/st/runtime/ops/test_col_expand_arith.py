@@ -211,54 +211,70 @@ class TestTileColExpandArith:
 
 
 # =============================================================================
-# Tensor-level cases — pl.col_expand_div / col_expand_sub on whole Tensors,
-# lowered to the tile ops by ConvertTensorToTileOps.
+# Tensor-level cases — pl.col_expand_div / col_expand_sub on whole Tensors.
+# Uses the canonical Opaque + pl.at(CORE_GROUP) + pl.assemble form so the path
+# genuinely exercises ConvertTensorToTileOps lowering tensor.col_expand_* into
+# tile.col_expand_*.
 # =============================================================================
 
 
 @pl.program
 class TensorColExpandDivProg:
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel(
-        self,
-        a: pl.Tensor[[M, N], pl.FP32],
-        v: pl.Tensor[[1, N], pl.FP32],
-        output: pl.Out[pl.Tensor[[M, N], pl.FP32]],
-    ) -> pl.Tensor[[M, N], pl.FP32]:
-        result: pl.Tensor[[M, N], pl.FP32] = pl.col_expand_div(a, v)
-        return pl.assemble(output, result, [0, 0])
+    """tensor.col_expand_div on whole tensors; lowers to tile.col_expand_div."""
 
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
         self,
         a: pl.Tensor[[M, N], pl.FP32],
         v: pl.Tensor[[1, N], pl.FP32],
         output: pl.Out[pl.Tensor[[M, N], pl.FP32]],
     ) -> pl.Tensor[[M, N], pl.FP32]:
-        output = self.kernel(a, v, output)
+        with pl.at(level=pl.Level.CORE_GROUP):
+            output = pl.assemble(output, pl.col_expand_div(a, v), [0, 0])
         return output
 
 
 @pl.program
 class TensorColExpandSubProg:
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel(
-        self,
-        a: pl.Tensor[[M, N], pl.FP32],
-        v: pl.Tensor[[1, N], pl.FP32],
-        output: pl.Out[pl.Tensor[[M, N], pl.FP32]],
-    ) -> pl.Tensor[[M, N], pl.FP32]:
-        result: pl.Tensor[[M, N], pl.FP32] = pl.col_expand_sub(a, v)
-        return pl.assemble(output, result, [0, 0])
+    """tensor.col_expand_sub on whole tensors; lowers to tile.col_expand_sub."""
 
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
         self,
         a: pl.Tensor[[M, N], pl.FP32],
         v: pl.Tensor[[1, N], pl.FP32],
         output: pl.Out[pl.Tensor[[M, N], pl.FP32]],
     ) -> pl.Tensor[[M, N], pl.FP32]:
-        output = self.kernel(a, v, output)
+        with pl.at(level=pl.Level.CORE_GROUP):
+            output = pl.assemble(output, pl.col_expand_sub(a, v), [0, 0])
+        return output
+
+
+@pl.program
+class TensorColExpandDivProgFP16:
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        a: pl.Tensor[[M, N], pl.FP16],
+        v: pl.Tensor[[1, N], pl.FP16],
+        output: pl.Out[pl.Tensor[[M, N], pl.FP16]],
+    ) -> pl.Tensor[[M, N], pl.FP16]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            output = pl.assemble(output, pl.col_expand_div(a, v), [0, 0])
+        return output
+
+
+@pl.program
+class TensorColExpandSubProgFP16:
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        a: pl.Tensor[[M, N], pl.FP16],
+        v: pl.Tensor[[1, N], pl.FP16],
+        output: pl.Out[pl.Tensor[[M, N], pl.FP16]],
+    ) -> pl.Tensor[[M, N], pl.FP16]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            output = pl.assemble(output, pl.col_expand_sub(a, v), [0, 0])
         return output
 
 
@@ -266,18 +282,19 @@ class _TensorColExpandBase(PTOTestCase):
     __test__ = False
     op_name = ""
     program: Any = None
+    dtype = DataType.FP32
 
     def __init__(self, *, platform=None, config=None):
         super().__init__(config, platform=platform)
 
     def get_name(self) -> str:
-        return f"tensor_{self.op_name}_fp32"
+        return f"tensor_{self.op_name}_{self.dtype.value}"
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
-            TensorSpec("a", [M, N], DataType.FP32, init_value=lambda: _a(M, N)),
-            TensorSpec("v", [1, N], DataType.FP32, init_value=lambda: _v(N)),
-            TensorSpec("output", [M, N], DataType.FP32, is_output=True),
+            TensorSpec("a", [M, N], self.dtype, init_value=lambda: _a(M, N)),
+            TensorSpec("v", [1, N], self.dtype, init_value=lambda: _v(N)),
+            TensorSpec("output", [M, N], self.dtype, is_output=True),
         ]
 
     def get_program(self) -> Any:
@@ -306,6 +323,24 @@ class TensorColExpandSubCase(_TensorColExpandBase):
         return a - v
 
 
+class TensorColExpandDivCaseFP16(_TensorColExpandBase):
+    op_name = "col_expand_div"
+    program = TensorColExpandDivProgFP16
+    dtype = DataType.FP16
+
+    def _ref(self, a, v):
+        return a / v
+
+
+class TensorColExpandSubCaseFP16(_TensorColExpandBase):
+    op_name = "col_expand_sub"
+    program = TensorColExpandSubProgFP16
+    dtype = DataType.FP16
+
+    def _ref(self, a, v):
+        return a - v
+
+
 class TestTensorColExpandArith:
     """Tensor-level pl.col_expand_div / col_expand_sub (lowered via tensor->tile)."""
 
@@ -317,6 +352,16 @@ class TestTensorColExpandArith:
     @pytest.mark.parametrize("platform", ONBOARD_PLATFORMS)
     def test_tensor_sub(self, test_runner, platform):
         result = test_runner.run(TensorColExpandSubCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", ONBOARD_PLATFORMS)
+    def test_tensor_div_fp16(self, test_runner, platform):
+        result = test_runner.run(TensorColExpandDivCaseFP16(config=_FP16_CFG, platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", ONBOARD_PLATFORMS)
+    def test_tensor_sub_fp16(self, test_runner, platform):
+        result = test_runner.run(TensorColExpandSubCaseFP16(config=_FP16_CFG, platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 
