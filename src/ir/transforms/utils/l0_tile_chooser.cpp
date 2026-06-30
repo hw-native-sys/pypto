@@ -97,15 +97,15 @@ std::vector<int> EnumerateLegalKs(int m, int n, const L0TileConfig& cfg, int64_t
       cfg.allow_padding ? std::max<int64_t>(AlignUp(static_cast<int64_t>(cfg.K), cfg.align_k), cfg.min_k)
                         : static_cast<int64_t>(cfg.K);
   const int64_t k_hi = AlignDown(std::min(cap, k_problem), cfg.align_k);
+  // allow_k_boundary admits a NON-DIVISOR k (the K-peel) ONLY when K is itself
+  // align_k-aligned: then every full block AND the peeled tail (K - floor(K/k)*k)
+  // are 16-aligned, which ptoas requires for tile cols. A non-16-aligned K has no
+  // valid k-tiling (a non-fractal tail or whole-K block), so it yields no candidate
+  // here and the pass skips the matmul (PH-AT-007) rather than emit invalid extracts.
+  const bool peel_ok = cfg.allow_k_boundary && (cfg.K % cfg.align_k == 0);
   for (int64_t k = cfg.min_k; k <= k_hi; k += cfg.align_k) {
-    if (!cfg.allow_padding && !cfg.allow_k_boundary && cfg.K % k != 0) continue;  // divisors only
+    if (!cfg.allow_padding && !peel_ok && cfg.K % k != 0) continue;  // divisors only
     ks.push_back(static_cast<int>(k));
-  }
-  // Unaligned whole-K single block: only needed when K is not align-multiple
-  // (the aligned loop above already covers an aligned K that fits).
-  if (cfg.allow_k_boundary && cap >= static_cast<int64_t>(cfg.K) && cfg.K >= cfg.min_k &&
-      cfg.K % cfg.align_k != 0) {
-    ks.push_back(cfg.K);
   }
   return ks;
 }

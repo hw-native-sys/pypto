@@ -513,17 +513,15 @@ class TestAutoTileMatmulL0KOnly:
         twice = passes.auto_tile_matmul_l0()(once)
         ir.assert_structural_equal(twice, once)
 
-    def test_k_not_divisible_peeled_loop(self):
-        """A non-divisor k is tiled, not skipped (``allow_k_boundary``): the pass
-        emits a pipelined K-loop over the full blocks plus a straight-line
-        ``matmul_acc`` tail for the partial last block.  This is a **structural**
-        test of the peel emit shape; M=16, N=64, K=2050 only forces a peel (the
-        exhaustive-k chooser picks k=48 — 42 full blocks, loop bound 2016 = 42*48,
-        tail 34) and keeps the Expected compact.  On real inputs K and k are both
-        16-aligned, so the peeled tail is itself 16-aligned — ptoas requires
-        16-aligned tile cols, so non-16-aligned operand dims are unsupported.  The
-        device-valid peel (16-aligned K=688) runs in the st suite
-        (``tests/st/runtime/ops/test_matmul.py::...test_matmul_autol0_nonaligned_k``)."""
+    def test_non_aligned_K_left_untouched(self):
+        """Non-16-aligned K has no valid L0 K-tiling: any peeled tail or whole-K block
+        would have non-16-aligned (non-fractal) tile cols that ptoas rejects, so the
+        pass leaves the matmul untouched (PH-AT-007 PerfHint) instead of emitting
+        invalid extracts.  K=2050 (M=16, N=64) is not a multiple of the cube fractal
+        16.  The device-valid 16-aligned-K peel is covered in the st suite
+        (``tests/st/runtime/ops/test_matmul.py::...test_matmul_autol0_nonaligned_k``,
+        K=688); the chooser-level rejection in
+        ``test_l0_tile_chooser.py::...test_non_aligned_K_rejected``."""
 
         @pl.program
         class Before:
@@ -544,60 +542,16 @@ class TestAutoTileMatmulL0KOnly:
                 out = pl.store(c, [0, 0], out)
                 return out
 
-        @pl.program
-        class Expected:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                lhs: pl.Tensor[[16, 2050], pl.BF16],
-                rhs: pl.Tensor[[2050, 64], pl.BF16],
-                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
-            ) -> pl.Tensor[[16, 64], pl.FP32]:
-                lhs_mat: pl.Tile[[16, 2050], pl.BF16, pl.Mem.Mat] = pl.tile.load(
-                    lhs, [0, 0], [16, 2050], target_memory=pl.Mem.Mat
-                )
-                rhs_mat: pl.Tile[[2050, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
-                    rhs, [0, 0], [2050, 64], target_memory=pl.Mem.Mat
-                )
-                c_init: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.create(
-                    [16, 64], dtype=pl.FP32, target_memory=pl.Mem.Acc
-                )
-                # Pipelined loop over the 42 full K blocks (bound 2016 = 42*48), not K=2050.
-                for ko, (c_iter,) in pl.pipeline(0, 2016, 48, stage=2, init_values=(c_init,)):
-                    sa: pl.Tile[[16, 48], pl.BF16, pl.Mem.Left] = pl.tile.extract(
-                        lhs_mat, 0, ko, [16, 48], target_memory=pl.Mem.Left
-                    )
-                    sb: pl.Tile[[48, 64], pl.BF16, pl.Mem.Right] = pl.tile.extract(
-                        rhs_mat, ko, 0, [48, 64], target_memory=pl.Mem.Right
-                    )
-                    if ko == 0:
-                        c_first: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(sa, sb)
-                        c_phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c_first)
-                    else:
-                        c_acc: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(c_iter, sa, sb)
-                        c_phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c_acc)
-                    c_main: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c_phi)
-                # Straight-line peel of the partial last K block [2016:2050) (width 34).
-                sa_t: pl.Tile[[16, 34], pl.BF16, pl.Mem.Left] = pl.tile.extract(
-                    lhs_mat, 0, 2016, [16, 34], target_memory=pl.Mem.Left
-                )
-                sb_t: pl.Tile[[34, 64], pl.BF16, pl.Mem.Right] = pl.tile.extract(
-                    rhs_mat, 2016, 0, [34, 64], target_memory=pl.Mem.Right
-                )
-                c_tail: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(c_main, sa_t, sb_t)
-                out = pl.store(c_tail, [0, 0], out)
-                return out
-
         After = passes.auto_tile_matmul_l0()(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(After, Before)  # non-aligned K -> untouched
 
-    def test_k_not_divisible_peeled_min_padding_k(self):
-        """For a load-bound skinny shape the exhaustive-k chooser picks the
-        minimum-padding k among the wall-tied candidates (not the largest legal k),
-        and the K-peel still applies. M=16, N=64, K=300 — wall is load-bound, so
-        every k ties; the tie-break prefers k=16 (18 full blocks, bound 288, least
-        compute padding) and peels the 12-wide tail. A largest-legal-k shortcut
-        would instead emit a single big k-block — this pins the exhaustive choice."""
+    def test_non_aligned_K_load_bound_left_untouched(self):
+        """A load-bound skinny shape with non-16-aligned K is also skipped: K=300
+        (M=16, N=64) is not a multiple of the cube fractal 16, so there is no valid
+        K-tiling (a peeled tail / whole-K block would have non-fractal cols) and the
+        pass leaves the matmul untouched (PH-AT-007).  Mirrors
+        ``test_non_aligned_K_left_untouched`` for a load-bound (vs MAD-bound) K; the
+        exhaustive-k tie-break itself is covered by the chooser oracle."""
 
         @pl.program
         class Before:
@@ -618,52 +572,8 @@ class TestAutoTileMatmulL0KOnly:
                 out = pl.store(c, [0, 0], out)
                 return out
 
-        @pl.program
-        class Expected:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                lhs: pl.Tensor[[16, 300], pl.BF16],
-                rhs: pl.Tensor[[300, 64], pl.BF16],
-                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
-            ) -> pl.Tensor[[16, 64], pl.FP32]:
-                lhs_mat: pl.Tile[[16, 300], pl.BF16, pl.Mem.Mat] = pl.tile.load(
-                    lhs, [0, 0], [16, 300], target_memory=pl.Mem.Mat
-                )
-                rhs_mat: pl.Tile[[300, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
-                    rhs, [0, 0], [300, 64], target_memory=pl.Mem.Mat
-                )
-                c_init: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.create(
-                    [16, 64], dtype=pl.FP32, target_memory=pl.Mem.Acc
-                )
-                # Pipelined loop over the 18 full K blocks (bound 288 = 18*16), not K=300.
-                for ko, (c_iter,) in pl.pipeline(0, 288, 16, stage=2, init_values=(c_init,)):
-                    sa: pl.Tile[[16, 16], pl.BF16, pl.Mem.Left] = pl.tile.extract(
-                        lhs_mat, 0, ko, [16, 16], target_memory=pl.Mem.Left
-                    )
-                    sb: pl.Tile[[16, 64], pl.BF16, pl.Mem.Right] = pl.tile.extract(
-                        rhs_mat, ko, 0, [16, 64], target_memory=pl.Mem.Right
-                    )
-                    if ko == 0:
-                        c_first: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(sa, sb)
-                        c_phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c_first)
-                    else:
-                        c_acc: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(c_iter, sa, sb)
-                        c_phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c_acc)
-                    c_main: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c_phi)
-                # Straight-line peel of the partial last K block [288:300) (width 12).
-                sa_t: pl.Tile[[16, 12], pl.BF16, pl.Mem.Left] = pl.tile.extract(
-                    lhs_mat, 0, 288, [16, 12], target_memory=pl.Mem.Left
-                )
-                sb_t: pl.Tile[[12, 64], pl.BF16, pl.Mem.Right] = pl.tile.extract(
-                    rhs_mat, 288, 0, [12, 64], target_memory=pl.Mem.Right
-                )
-                c_tail: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(c_main, sa_t, sb_t)
-                out = pl.store(c_tail, [0, 0], out)
-                return out
-
         After = passes.auto_tile_matmul_l0()(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(After, Before)  # non-aligned K -> untouched
 
 
 def _torch_codegen_matches_matmul(program, m_dim, n_dim, k_dim):

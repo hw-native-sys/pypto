@@ -637,12 +637,21 @@ std::optional<MatmulTiling> AnalyzeMatmul(const AssignStmtPtr& assign, std::vect
   cfg.c_read = is_matmul_acc;
   cfg.allow_padding = false;
   // Permit a non-divisor final K block: the chooser may return a k that does not
-  // divide K (or k == K verbatim when the full K fits one L0 block), and
-  // BuildKLoopRewrite peels the partial last K iteration.  K and k are 16-aligned,
-  // so the peeled tail width is itself 16-aligned (an ordinary matmul_acc block) —
-  // ptoas requires 16-aligned tile cols, so non-16-aligned operand dims are
-  // unsupported.
+  // divide K, and BuildKLoopRewrite peels the partial last K iteration.  The peel
+  // is only valid when K is 16-aligned — then the tail K - floor(K/k)*k is itself
+  // 16-aligned (ptoas requires 16-aligned tile cols).  A non-16-aligned K has no
+  // valid K-tiling (any tail or whole-K block has non-fractal cols), so skip it
+  // here with a perf hint rather than emit invalid extracts (the pre-roofline path
+  // also bailed on unsupported K).
   cfg.allow_k_boundary = true;
+  if (K % cfg.align_k != 0) {
+    hints.emplace_back(DiagnosticSeverity::PerfHint, kPassName, 0, "PH-AT-007",
+                       "tile.matmul: K=" + std::to_string(K) + " is not a multiple of the cube fractal " +
+                           std::to_string(cfg.align_k) +
+                           " — non-16-aligned K is unsupported; left untouched.",
+                       assign->span_);
+    return std::nullopt;
+  }
 
   utils::L0TileResult res;
   try {
@@ -1271,8 +1280,11 @@ std::optional<std::pair<std::vector<StmtPtr>, VarPtr>> TryFoldMatScratch(const M
   // K-split (K spans >= 2 L0 blocks) → unrolled per-sub-tile K-loop grid; full-K →
   // the pipelined interior + straight-line tail.  Both drive MatScratchPlacer,
   // which assembles each sub-tile into the L1/Mat scratch (tile.assemble accepts
-  // constant or loop-variable offsets).
-  const bool full_k = t.K / t.k < 2;
+  // constant or loop-variable offsets).  A non-divisor k with k < K < 2k still needs
+  // the K-loop + peel (BuildSplitKGrid), so dispatch on k == K rather than the
+  // integer-division proxy K/k < 2 — which would mis-route a split-K tile to the
+  // full-K [m,K]/[K,n] emitter and blow the L0A/L0B budget.
+  const bool full_k = t.k == t.K;
   auto [stmts, scratch] = full_k ? BuildFullKPipelined(t, placer) : BuildSplitKGrid(t, placer);
   return std::make_pair(std::move(stmts), scratch);
 }

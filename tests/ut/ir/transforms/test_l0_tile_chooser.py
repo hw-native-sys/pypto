@@ -567,40 +567,45 @@ class TestL0TilingKBoundary:
     verbatim even for a non-16-aligned K — the cube zero-fills the K tail fractal in
     the GM->L1 NZ repack (see the pto-isa MAD spec / DESIGN_SPACE.md)."""
 
-    def test_whole_K_fits_returns_unaligned_K(self):
-        """K=50 fits one L0 block (M=N=64): the chooser returns the full tile with
-        k == K == 50 (single matmul, no K-loop) rather than aligning down to 48."""
+    def test_unaligned_whole_K_rejected(self):
+        """K=50 is not a multiple of align_k (16): a k == K == 50 block would have
+        non-fractal (non-16-aligned) tile cols that ptoas rejects, so the chooser
+        admits no candidate even with allow_k_boundary -- the pass skips the matmul
+        (PH-AT-007) instead of emitting an invalid whole-K block."""
         cfg = _default_config(M=64, N=64, K=50)
         cfg.allow_k_boundary = True
-        result = passes.l0_tile_chooser.choose_l0_tile(cfg)
-        assert result.k == 50, f"whole-K-fits must return k == K == 50; got {result.k}"
+        with pytest.raises(ValueError):  # non-16-aligned K -> no legal tile
+            passes.l0_tile_chooser.choose_l0_tile(cfg)
 
-    def test_non_aligned_K_needs_the_flag(self):
-        """K=130 is not a multiple of 16, so no aligned k divides it: the legacy path
-        rejects it outright, while allow_k_boundary tiles it (largest aligned block
-        <= capacity) and the pass peels the partial tail."""
+    def test_non_aligned_K_rejected(self):
+        """K=130 is not a multiple of align_k (16): no aligned k divides it, AND a
+        non-divisor peel would leave a non-16-aligned tail, so the chooser rejects it
+        BOTH with and without allow_k_boundary (the K-boundary peel is only valid for
+        16-aligned K). ptoas requires 16-aligned tile cols; the pass skips non-aligned
+        K with a PerfHint rather than emit invalid extracts."""
         cfg = _default_config(M=16, N=320, K=130)
-        with pytest.raises(ValueError):  # no aligned divisor of 130 -> no legal tile
+        with pytest.raises(ValueError):  # legacy: no aligned divisor of 130
             passes.l0_tile_chooser.choose_l0_tile(cfg)
         cfg.allow_k_boundary = True
-        result = passes.l0_tile_chooser.choose_l0_tile(cfg)
-        assert result.k % cfg.align_k == 0 and result.k <= cfg.K
-        assert _capacities_ok(result.m, result.n, result.k, cfg)
+        with pytest.raises(ValueError):  # peel needs 16-aligned K -> still no legal tile
+            passes.l0_tile_chooser.choose_l0_tile(cfg)
 
     @pytest.mark.parametrize(
         "M,N,K",
         [
             (16, 320, 128),
-            (16, 320, 130),
-            (272, 160, 300),
-            (256, 256, 250),
-            (128, 512, 2050),
-            (512, 512, 50),
+            (16, 320, 144),
+            (272, 160, 304),
+            (256, 256, 240),
+            (128, 512, 2064),
+            (512, 512, 64),
         ],
     )
     def test_matches_bruteforce_with_k_boundary(self, M, N, K):
         """With allow_k_boundary the chooser must still return the global wall-min
-        (oracle check) for both non-divisor-but-aligned K and non-16-aligned K."""
+        (oracle check) for non-divisor-but-aligned K (the K-boundary peel; every K
+        here is 16-aligned). Non-16-aligned K is unsupported and rejected — see
+        test_non_aligned_K_rejected / test_unaligned_whole_K_rejected."""
         cfg = _default_config(M=M, N=N, K=K)
         cfg.allow_k_boundary = True
         btile, _, bdbc, bwall = _brute_optimum(cfg)

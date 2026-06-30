@@ -116,14 +116,15 @@ struct L0TileConfig {
   // the chooser's.
   bool allow_padding = false;
 
-  // Allow a non-divisor final K block (K-boundary peel): the chosen k need not
-  // divide K. When the full K reduction fits one L0a/L0b block, ChooseL0Tile
-  // returns k == K verbatim; otherwise it tiles K with the largest aligned block
-  // and the pass peels a partial last K iteration. K and k are both 16-aligned (the
-  // cube fractal), so the peeled tail width is itself 16-aligned — an ordinary
-  // matmul_acc block (ptoas requires 16-aligned tile cols, so non-16-aligned operand
-  // dimensions are not supported). When false the chooser instead walks k down to an
-  // aligned divisor of K (legacy behavior — the pass had no K-boundary handling).
+  // Allow a non-divisor final K block (K-boundary peel) -- valid ONLY for a
+  // 16-aligned K. The chosen k need not divide K, but K must be a multiple of
+  // align_k so the peeled tail K - floor(K/k)*k is itself 16-aligned (ptoas requires
+  // 16-aligned tile cols). When the full (16-aligned) K fits one L0a/L0b block the
+  // chooser returns k == K (single block, no loop); otherwise it tiles K and the pass
+  // peels the partial last block. A NON-16-aligned K admits no legal tile at all (any
+  // tail or whole-K block would have non-fractal cols): the chooser returns none and
+  // the pass skips the matmul with a PerfHint (PH-AT-007). When false the chooser
+  // walks k down to an aligned divisor of K (legacy — no K-boundary handling).
   bool allow_k_boundary = false;
 };
 
