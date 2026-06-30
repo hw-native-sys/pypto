@@ -1459,31 +1459,93 @@ class TestOutlineNoDepArgs:
         assert outlined.attrs["split"] == pl.SplitMode.UP_DOWN.value
         assert outlined.attrs["split_aiv"] is True
 
+    def test_outline_multi_mode_regions_omits_func_split(self):
+        """Two sibling pl.split_aiv regions with DIFFERING modes (UP_DOWN +
+        LEFT_RIGHT) in one CORE_GROUP scope: the outlined function gets
+        split_aiv=True but NO function-level ``split`` mode — there is no single
+        representative mode. The authoritative per-region mode rides each
+        SplitAivScopeStmt (consumed at LowerAutoVectorSplit, pass 21); downstream
+        readers key on the split_aiv marker / per-op split, not a func mode.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                b: pl.Tensor[[128, 128], pl.FP32],
+                out_ud: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+                out_lr: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="k"):
+                    for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                        off_ud = aiv_id * 64
+                        ta: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [0, 0], [128, 128])
+                        out_ud = pl.store(pl.add(ta, ta), [off_ud, 0], out_ud)
+                    for aiv_id2 in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
+                        off_lr = aiv_id2 * 64
+                        tb: pl.Tile[[128, 128], pl.FP32] = pl.load(b, [0, 0], [128, 128])
+                        out_lr = pl.store(pl.add(tb, tb), [0, off_lr], out_lr)
+                return out_ud
+
+        # BEFORE_AND_AFTER verification only (the python printer does not yet emit
+        # the split_aiv marker, so a roundtrip would spuriously fail — see
+        # test_outline_propagates_split_aiv_attr).
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+            Before = passes.convert_to_ssa()(Before)
+            After = passes.outline_incore_scopes()(Before)
+
+        outlined = next(f for gv, f in After.functions.items() if f.func_type == ir.FunctionType.InCore)
+        assert outlined.attrs["split_aiv"] is True
+        # Differing sibling modes -> no single representative -> func-level mode unset.
+        assert "split" not in outlined.attrs
+
     @staticmethod
-    def _count_regions(node):
-        count = 0
+    def _strip_outlined_incore_wrapper(program):
+        """Author-side adapter for the SplitAiv outlined Expected.
 
-        def walk(n):
-            nonlocal count
-            if isinstance(n, ir.SplitAivScopeStmt):
-                count += 1
-            if isinstance(n, ir.SeqStmts):
-                for s in n.stmts:
-                    walk(s)
-            elif isinstance(n, ir.IfStmt):
-                walk(n.then_body)
-                if n.else_body is not None:
-                    walk(n.else_body)
-            elif hasattr(n, "body") and n.body is not None:
-                walk(n.body)
-
-        walk(node)
-        return count
+        OutlineIncoreScopes emits the ``SplitAivScopeStmt`` region *directly* in
+        the outlined InCore body — the InCore scope it absorbed became the
+        function boundary, so no ``InCoreScopeStmt`` wrapper remains. The
+        ``pl.split_aiv`` DSL, however, always nests its region inside a
+        CORE_GROUP InCore scope, so a DSL-authored Expected carries one extra
+        wrapper. Strip that single redundant ``InCoreScopeStmt`` from every
+        InCore function so the authored Expected matches the outlined shape.
+        """
+        new_funcs = []
+        for func in program.functions.values():
+            body = func.body
+            if func.func_type == ir.FunctionType.InCore and isinstance(body, ir.SeqStmts):
+                flat = []
+                for stmt in body.stmts:
+                    if isinstance(stmt, ir.InCoreScopeStmt):
+                        inner = stmt.body
+                        flat.extend(inner.stmts if isinstance(inner, ir.SeqStmts) else [inner])
+                    else:
+                        flat.append(stmt)
+                func = ir.Function(
+                    func.name,
+                    list(zip(func.params, func.param_directions)),
+                    func.return_types,
+                    ir.SeqStmts(flat, func.span),
+                    func.span,
+                    func.func_type,
+                    func.level,
+                    func.role,
+                    dict(func.attrs),
+                )
+            new_funcs.append(func)
+        return ir.Program(new_funcs, program.name, program.span)
 
     def test_split_aiv_preserved_in_outlined_func(self):
         """OutlineIncoreScopes outlines the enclosing InCore scope but preserves
         the nested ``SplitAivScopeStmt`` region inside the outlined function body
         (SplitAiv is never an outline target — it is lowered in place at pass 21).
+
+        The Expected pins the outlined two-function form: the region lives in the
+        InCore ``main_incore_0`` body and the Orchestration ``main`` only carries
+        the synthesised Call (no region), which a structural match subsumes.
         """
 
         @pl.program
@@ -1502,21 +1564,56 @@ class TestOutlineNoDepArgs:
                     out = pl.store(pl.add(tile_a, tile_b), [offset, 0], out)
                 return out
 
-        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
-            Before = passes.convert_to_ssa()(Before)
-            After = passes.outline_incore_scopes()(Before)
+        @pl.program
+        class ExpectedRaw:
+            @pl.function(
+                type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN, "split_aiv": True}
+            )
+            def main_incore_0(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                b: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.InOut[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                    offset: pl.Scalar[pl.INDEX] = aiv_id * 128
+                    tile_a: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
+                    tile_b: pl.Tile[[128, 128], pl.FP32] = pl.load(b, [offset, 0], [128, 128])
+                    out_v1: pl.Tensor[[512, 128], pl.FP32] = pl.store(
+                        pl.add(tile_a, tile_b), [offset, 0], out
+                    )
+                    out_store: pl.Tensor[[512, 128], pl.FP32] = out_v1
+                return out
 
-        outlined = next(f for gv, f in After.functions.items() if f.func_type == ir.FunctionType.InCore)
-        # The region node survives inside the outlined InCore function body.
-        assert self._count_regions(outlined.body) == 1
-        # The orchestration parent no longer holds the region (it was outlined).
-        orch = next(f for gv, f in After.functions.items() if f.func_type == ir.FunctionType.Orchestration)
-        assert self._count_regions(orch.body) == 0
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                b: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                out2: pl.Tensor[[512, 128], pl.FP32] = self.main_incore_0(a, b, out)
+                return out2
+
+        # BEFORE_AND_AFTER verification (not the default `roundtrip` level): the
+        # python printer does not yet emit the InCoreScopeStmt `split_aiv` marker,
+        # so a print->parse roundtrip of a split_aiv program spuriously fails on
+        # the scope's attrs — unrelated to the outlining this test exercises.
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+            After = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+            Expected = self._strip_outlined_incore_wrapper(passes.convert_to_ssa()(ExpectedRaw))
+
+        ir.assert_structural_equal(After, Expected)
 
     def test_split_aiv_aiv_id_not_outlined_param(self):
         """``aiv_id`` is bound inside the region body (``tile.get_subblock_idx``),
         so the outliner's def/use analysis must treat it as locally-defined — the
-        outlined function signature must gain NO ``aiv_id`` parameter."""
+        outlined function signature must gain NO ``aiv_id`` parameter.
+
+        The Expected's ``main_incore_0`` signature is ``(a, b, out)`` with no
+        ``aiv_id`` param, so the structural match pins that guarantee; an explicit
+        param-name assertion keeps the test's named intent self-evident.
+        """
 
         @pl.program
         class Before:
@@ -1534,10 +1631,44 @@ class TestOutlineNoDepArgs:
                     out = pl.store(pl.add(tile_a, tile_b), [offset, 0], out)
                 return out
 
-        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
-            Before = passes.convert_to_ssa()(Before)
-            After = passes.outline_incore_scopes()(Before)
+        @pl.program
+        class ExpectedRaw:
+            @pl.function(
+                type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN, "split_aiv": True}
+            )
+            def main_incore_0(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                b: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.InOut[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                    offset: pl.Scalar[pl.INDEX] = aiv_id * 128
+                    tile_a: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
+                    tile_b: pl.Tile[[128, 128], pl.FP32] = pl.load(b, [offset, 0], [128, 128])
+                    out_v1: pl.Tensor[[512, 128], pl.FP32] = pl.store(
+                        pl.add(tile_a, tile_b), [offset, 0], out
+                    )
+                    out_store: pl.Tensor[[512, 128], pl.FP32] = out_v1
+                return out
 
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                b: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                out2: pl.Tensor[[512, 128], pl.FP32] = self.main_incore_0(a, b, out)
+                return out2
+
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+            After = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+            Expected = self._strip_outlined_incore_wrapper(passes.convert_to_ssa()(ExpectedRaw))
+
+        ir.assert_structural_equal(After, Expected)
+
+        # Focused guard on the test's named purpose: aiv_id stays region-local.
         outlined = next(f for gv, f in After.functions.items() if f.func_type == ir.FunctionType.InCore)
         param_names = [p.name_hint for p in outlined.params]
         assert not any("aiv_id" in name for name in param_names), (

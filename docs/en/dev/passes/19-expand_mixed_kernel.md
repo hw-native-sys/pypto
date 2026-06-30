@@ -49,7 +49,7 @@ non-`ConstInt` extent is treated as non-singleton and flagged conservatively).
 This whole-function check reads a **single** `func->GetSplitMode()`, so it cannot
 represent a multi-mode function. By the time `ExpandMixedKernel` runs, any
 first-class `SplitAivScopeStmt` regions have already been consumed and erased by
-[`LowerAutoVectorSplit`](21-lower_auto_vector_split.md) (pass 21), which validates
+[`LowerAutoVectorSplit`](20-lower_auto_vector_split.md) (pass 20), which validates
 **each region's** transpose hazard with that region's own split axis and stamps
 `split_aiv_region_validated` on the function. So this pass skips the single-func-mode
 transpose check for functions carrying `split_aiv_region_validated` (the AUTO

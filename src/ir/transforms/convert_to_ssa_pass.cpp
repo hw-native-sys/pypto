@@ -1173,6 +1173,13 @@ class SSAConverter {
     if (auto scope = As<RuntimeScopeStmt>(s)) {
       return ExtractYield(scope->body_);
     }
+    // SplitAivScopeStmt is likewise transparent: lowered in place by
+    // LowerAutoVectorSplit (pass 21), its body shares SSA state with the
+    // enclosing function, so a for/if body whose trailing stmt is a region must
+    // tunnel its carry-yield through the wrapper.
+    if (auto scope = As<SplitAivScopeStmt>(s)) {
+      return ExtractYield(scope->body_);
+    }
     if (auto seq = As<SeqStmts>(s)) {
       if (!seq->stmts_.empty()) {
         return ExtractYield(seq->stmts_.back());
@@ -1187,6 +1194,14 @@ class SSAConverter {
     // Transparent through a RuntimeScopeStmt: replace the carry-yield *inside*
     // the scope body and keep the scope wrapper (codegen still needs it).
     if (auto scope = As<RuntimeScopeStmt>(s)) {
+      auto copy = MutableCopy(scope);
+      copy->body_ = ReplaceOrAppendYield(scope->body_, vals, span);
+      return copy;
+    }
+    // Transparent through a SplitAivScopeStmt for the same reason (see
+    // ExtractYield): replace the carry-yield inside the region body and keep the
+    // wrapper for LowerAutoVectorSplit to consume.
+    if (auto scope = As<SplitAivScopeStmt>(s)) {
       auto copy = MutableCopy(scope);
       copy->body_ = ReplaceOrAppendYield(scope->body_, vals, span);
       return copy;

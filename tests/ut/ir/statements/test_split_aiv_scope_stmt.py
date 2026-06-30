@@ -9,6 +9,7 @@
 
 """Unit tests for the SplitAivScopeStmt IR node."""
 
+import pypto
 import pytest
 from pypto import DataType, ir
 
@@ -37,10 +38,14 @@ def test_construct():
 
 
 def test_construct_rejects_none_mode():
-    """The ctor INTERNAL_CHECK rejects SplitMode.NONE (a no-op AIV split)."""
+    """The ctor INTERNAL_CHECK rejects SplitMode.NONE (a no-op AIV split).
+
+    Narrowed to the exact pypto exception the INTERNAL_CHECK surfaces
+    (``pypto.InternalError``) so the test can't pass for the wrong reason.
+    """
     span = ir.Span("test.py", 1, 1, 1, 10)
     body = _make_body(span, *_vars(span))
-    with pytest.raises(Exception):
+    with pytest.raises(pypto.InternalError):
         ir.SplitAivScopeStmt(split=ir.SplitMode.NONE, body=body, span=span)
 
 

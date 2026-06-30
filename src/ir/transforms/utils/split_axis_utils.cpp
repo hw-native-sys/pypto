@@ -874,8 +874,13 @@ SubblockInjectionResult InjectSubblockIdx(const FunctionPtr& func, bool is_aiv) 
 
 SubblockInjectionResult InjectSubblockIdxIntoStmts(const std::vector<StmtPtr>& region_stmts,
                                                    const std::unordered_set<std::string>& used_names) {
-  INTERNAL_CHECK(!region_stmts.empty())
-      << "Internal error: InjectSubblockIdxIntoStmts requires a non-empty region body";
+  // An empty region (DCE-emptied, or a ``pass``-only body whose sole binding was
+  // dropped) carries no compute to localize, so there is nothing to inject a
+  // per-lane index for. Return a no-op result (null index, empty body) the caller
+  // splices as nothing — i.e. it erases the region rather than crashing.
+  if (region_stmts.empty()) {
+    return {nullptr, {}, used_names};
+  }
   std::vector<StmtPtr> body_stmts = region_stmts;
 
   // Seed the name set with the caller-supplied names plus the region's own def

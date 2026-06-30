@@ -95,7 +95,7 @@ case the single function-level mode cannot. Region-local `tile_vars` /
 an out-of-region full-width op. Statements **outside** any region are emitted
 full-width. After all regions are lowered, the scope wrappers are dropped and the
 function is stamped `split_aiv` + `split_aiv_region_validated` (the latter signals
-[`ExpandMixedKernel`](22-expand_mixed_kernel.md) to skip its single-func-mode
+[`ExpandMixedKernel`](21-expand_mixed_kernel.md) to skip its single-func-mode
 transpose check — pass 21 validates each region's transpose hazard with the
 correct per-region split axis instead).
 

@@ -77,7 +77,7 @@ result = passes.lower_auto_vector_split()(program)
 的多模式情形。区域局部的 `tile_vars` / `var_replacements` 映射保证折半后的变量不会泄漏
 到同级区域或区域外的全宽算子。任何区域**之外**的语句以全宽发出。所有区域下降后，作用域
 包装被丢弃，函数被打上 `split_aiv` + `split_aiv_region_validated`（后者通知
-[`ExpandMixedKernel`](22-expand_mixed_kernel.md) 跳过其单一函数级模式的转置检查——
+[`ExpandMixedKernel`](21-expand_mixed_kernel.md) 跳过其单一函数级模式的转置检查——
 改由 pass 21 用每个区域正确的拆分轴校验各自的转置风险）。
 
 处理两种区域体形态：

@@ -194,6 +194,39 @@ class TestSplitAivBuildsNode:
         region = _unique_descendant(for_stmt.body, ir.SplitAivScopeStmt)
         assert region.split == ir.SplitMode.UP_DOWN
 
+    def test_nested_in_auto_chunk_core_group_nests_in_place(self):
+        """A split_aiv inside an auto-chunk CORE_GROUP scope
+        (``pl.at(level=CORE_GROUP, optimizations=[pl.auto_chunk])`` -> AutoInCore)
+        nests in place: the region lives directly inside the AutoInCoreScopeStmt
+        body, with NO synthesized nested InCoreScopeStmt wrapper.
+        """
+
+        @pl.program
+        class TestProgram:
+            @pl.function(type=pl.FunctionType.Opaque)
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                b: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
+                    for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                        tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(a, [0, 0], [64, 64])
+                        tile_b: pl.Tile[[64, 64], pl.FP32] = pl.load(b, [0, 0], [64, 64])
+                        out = pl.store(pl.add(tile_a, tile_b), [0, 0], out)
+                return out
+
+        main_func = list(TestProgram.functions.values())[0]
+
+        # The AutoInCore scope is the existing CORE_GROUP scope; the region nested
+        # in place — NO redundant InCore wrapper was synthesized inside it.
+        assert _count_descendants(main_func.body, ir.AutoInCoreScopeStmt) == 1
+        assert _count_descendants(main_func.body, ir.InCoreScopeStmt) == 0
+        auto_incore = _unique_descendant(main_func.body, ir.AutoInCoreScopeStmt)
+        region = _unique_descendant(auto_incore.body, ir.SplitAivScopeStmt)
+        assert region.split == ir.SplitMode.UP_DOWN
+
     def test_rejects_n_not_2(self):
         """n must be hardware-fixed at 2."""
         with pytest.raises(ParserSyntaxError, match="requires n == 2"):

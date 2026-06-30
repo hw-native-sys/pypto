@@ -106,25 +106,37 @@ class PostStoreAliasCollector : public IRVisitor {
 };
 
 /**
- * @brief Find the SplitMode of the first nested SplitAivScopeStmt region.
+ * @brief Summarize the SplitMode of the nested SplitAivScopeStmt regions.
  *
  * The explicit ``pl.split_aiv`` form is a first-class node in the InCore body,
  * not a scope attr (the old ``MarkCurrentScopeSplitAiv`` marker was removed).
- * OutlineIncoreScopes uses this to bridge the node into the function-level
- * ``split_aiv`` marker (mode-agnostic bool + a coarse representative ``split``
- * mode) the downstream contract (passes 11-24) expects. The authoritative
- * per-region mode is ``node->split_``, consumed at LowerAutoVectorSplit (21).
+ * OutlineIncoreScopes uses this to bridge the node(s) into the function-level
+ * ``split_aiv`` marker the downstream contract (passes 11-24) expects.
+ *
+ * ``found`` is true when the body carries at least one region. ``uniform_mode``
+ * is set ONLY when every region shares ONE mode — that single mode is a valid
+ * function-level representative ``split``. When sibling regions carry DIFFERING
+ * modes there is no representative; ``uniform_mode`` is reset to ``nullopt`` and
+ * the outliner stamps ``split_aiv=true`` WITHOUT a function-level ``split`` mode.
+ * The authoritative per-region mode is always ``node->split_``, consumed at
+ * LowerAutoVectorSplit (21); downstream readers of the function-level mode
+ * (ExpandMixedKernel, SplitVectorKernel, MemoryReuse) tolerate the unset mode by
+ * keying on the ``split_aiv`` marker / per-op split.
  */
-class FirstSplitAivModeFinder : public IRVisitor {
+class SplitAivModeSummaryFinder : public IRVisitor {
  public:
-  std::optional<SplitMode> mode;
+  bool found = false;                     ///< at least one SplitAivScopeStmt region
+  std::optional<SplitMode> uniform_mode;  ///< set iff ALL regions share one mode
 
  protected:
   void VisitStmt_(const SplitAivScopeStmtPtr& op) override {
-    if (!mode.has_value()) {
-      mode = op->split_;
+    if (!found) {
+      found = true;
+      uniform_mode = op->split_;
+    } else if (uniform_mode.has_value() && uniform_mode.value() != op->split_) {
+      uniform_mode.reset();  // differing sibling modes -> no representative mode
     }
-    // No need to descend into the region body for the representative mode.
+    // No need to descend into the region body for the mode summary.
   }
 };
 
@@ -892,12 +904,18 @@ class ScopeOutliner : public IRMutator {
     // a separate meaning. The authoritative per-region mode is ``node->split_``
     // (consumed at pass 21).
     auto append_split_aiv_attr = [&](std::optional<SplitMode> incore_split) {
-      FirstSplitAivModeFinder finder;
+      SplitAivModeSummaryFinder finder;
       finder.VisitStmt(op->body_);
-      if (!finder.mode.has_value()) return;
+      if (!finder.found) return;
       outlined_attrs.emplace_back("split_aiv", true);
-      if (!incore_split.has_value() || incore_split.value() == SplitMode::None) {
-        outlined_attrs.emplace_back("split", static_cast<int>(finder.mode.value()));
+      // Stamp a function-level representative ``split`` mode ONLY when all regions
+      // share one mode (``uniform_mode``) AND the scope carries no AUTO cross-core
+      // split (which has a separate meaning). Differing sibling modes have no
+      // single representative: leave the function-level mode unset — the
+      // authoritative per-region mode rides ``node->split_`` (consumed at pass 21).
+      if (finder.uniform_mode.has_value() &&
+          (!incore_split.has_value() || incore_split.value() == SplitMode::None)) {
+        outlined_attrs.emplace_back("split", static_cast<int>(finder.uniform_mode.value()));
       }
     };
     if (auto incore = As<InCoreScopeStmt>(op)) {

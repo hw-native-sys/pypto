@@ -1398,6 +1398,13 @@ bool NeedsLoadTpopHazardGuard(const FunctionPtr& func) {
   const auto* ctx = PassContext::Current();
   if (ctx == nullptr) return false;
   if (!ctx->GetBackendHandler()->RequiresSplitLoadTpopWorkaround()) return false;
+  // A split AIV function needs the guard. The split may be signalled either as a
+  // function-level mode (single-mode / standalone kernels carry ``split``) or
+  // ONLY as the mode-agnostic ``split_aiv`` marker — multi-mode explicit
+  // pl.split_aiv regions have their per-region modes lowered + erased by
+  // LowerAutoVectorSplit, so no single function-level mode survives. Key on the
+  // marker too so the guard still fires for them.
+  if (func->HasAttr("split_aiv") && func->GetAttr<bool>("split_aiv", false)) return true;
   const auto split_mode = func->GetSplitMode();
   return split_mode.has_value() && *split_mode != SplitMode::None;
 }
