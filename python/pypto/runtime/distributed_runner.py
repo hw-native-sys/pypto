@@ -774,9 +774,7 @@ def execute_distributed(
 
         print("[swimlane] run 2/2: measuring clean per-task timing (these are the reported numbers).")
         timing_cfg = dataclasses.replace(config, enable_dep_gen=False)
-        _run_once(
-            _make_call_config(dc, timing_cfg, dfx_base=dfx_base, co_enable_swimlane_dep_gen=False)
-        )
+        _run_once(_make_call_config(dc, timing_cfg, dfx_base=dfx_base, co_enable_swimlane_dep_gen=False))
     else:
         _run_once(_make_call_config(dc, config, dfx_base=dfx_base))
 

@@ -266,10 +266,7 @@ jobs:
         # runs here despite the tests/st/codegen ignore: its numeric golden
         # compare is unstable on the CPU container's torch/BLAS build (see the
         # codegen-tests job), so it needs this environment.
-        # test_run_timing_st.py is ignored here and runs in its own
-        # "Test run-timing output" step below (with -s, to surface the
-        # measured host/device wall times in the log).
-        run: pytest tests/st tests/st/codegen/torch/test_torch_codegen_paged_attention.py -v --device="$DEVICE_RANGE" --precompile-workers=128 --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }} --ignore=tests/st/distributed --ignore=tests/st/codegen --ignore=tests/st/runtime/framework_and_models/test_run_timing_st.py
+        run: pytest tests/st tests/st/codegen/torch/test_torch_codegen_paged_attention.py -v --device="$DEVICE_RANGE" --precompile-workers=128 --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }} --ignore=tests/st/distributed --ignore=tests/st/codegen
 
       - name: Test multi-orch L2 (isolated pytest invocation)
         # A ``Worker(level=2)`` device session currently leaves runtime
@@ -289,14 +286,6 @@ jobs:
         run: |
           pytest tests/st/runtime/framework_and_models/test_dump_tag.py \
             -v --device="$DEVICE_ID" --platform=a2a3 --dump-tensor --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }} --forked
-
-      - name: Test run-timing output
-        # Surfaces RunTiming (host_wall_us / device_wall_us) across every L2
-        # dispatch entry point (issue #1679). ``-s`` keeps stdout uncaptured so
-        # the per-path "[run-timing] ..." lines show in the log.
-        run: |
-          pytest tests/st/runtime/framework_and_models/test_run_timing_st.py \
-            -v -s --device="$DEVICE_ID" --platform=a2a3 --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }}
 
   dist-system-tests:
     # No container: HCCL needs host-only env (HCCL_LOGIC_SUPERPOD_ID, plugin

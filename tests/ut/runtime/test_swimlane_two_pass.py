@@ -28,21 +28,20 @@ from pypto.runtime.runner import _build_args_spec, _DfxOpts, _execute_dfx_passes
 def _drive(dfx: _DfxOpts, platform: str) -> tuple[list[_DfxOpts], int]:
     """Run the helper with stubs that record each in-process pass and capture.
 
-    Returns ``(in_process_passes, capture_calls)``. The run_pass stub returns
-    its index so callers can assert which pass's result the helper surfaces.
+    Returns ``(in_process_passes, capture_calls)``. ``_execute_dfx_passes``
+    returns ``None`` (per-run timing is no longer a return value — simpler PR
+    #1177); the protocol it drives is asserted via the recorded passes/captures.
     """
     seen: list[_DfxOpts] = []
     captures = {"n": 0}
 
-    def run_pass(pass_dfx: _DfxOpts) -> int:
+    def run_pass(pass_dfx: _DfxOpts) -> None:
         seen.append(pass_dfx)
-        return len(seen) - 1
 
     def capture_deps() -> None:
         captures["n"] += 1
 
-    kept = _execute_dfx_passes(run_pass, capture_deps, dfx, platform)
-    assert kept == len(seen) - 1  # helper returns the last in-process pass
+    assert _execute_dfx_passes(run_pass, capture_deps, dfx, platform) is None
     return seen, captures["n"]
 
 

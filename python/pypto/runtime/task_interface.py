@@ -23,7 +23,6 @@ from simpler.task_interface import (  # pyright: ignore[reportMissingImports]
     Tensor,
     scalar_to_uint64,
 )
-
 from simpler.worker import Worker  # pyright: ignore[reportMissingImports]
 from simpler_setup.torch_interop import (  # pyright: ignore[reportMissingImports]
     make_tensor_arg,
