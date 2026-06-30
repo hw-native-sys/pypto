@@ -132,7 +132,7 @@ jobs:
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
       CCACHE_DIR: /root/.cache/ccache
-      CCACHE_MAXSIZE: 5G
+      CCACHE_MAXSIZE: 20G
       PIP_CACHE_DIR: /root/.cache/pip
     container:
       image: localhost:5000/ci-py310:latest
@@ -180,7 +180,12 @@ jobs:
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
       CCACHE_DIR: /root/.cache/ccache
-      CCACHE_MAXSIZE: 5G
+      CCACHE_MAXSIZE: 20G
+      # Isolate the compile cache by pto-isa pin: simpler now links pto-isa, so
+      # reusing objects built against a different pin causes an ABI mismatch that
+      # segfaults the kernel/orchestration compile. Namespacing by the pin forces
+      # a clean recompile on every bump (the larger maxsize holds several pins).
+      CCACHE_NAMESPACE: ${{ needs.toolchain.outputs.pto_isa_commit }}
       PIP_CACHE_DIR: /root/.cache/pip
     container:
       image: localhost:5000/ci-device-py310:latest
@@ -310,7 +315,12 @@ jobs:
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
       CCACHE_DIR: /home/ci-runner/.cache/ccache
-      CCACHE_MAXSIZE: 5G
+      CCACHE_MAXSIZE: 20G
+      # Isolate the compile cache by pto-isa pin: simpler now links pto-isa, so
+      # reusing objects built against a different pin causes an ABI mismatch that
+      # segfaults the kernel/orchestration compile. Namespacing by the pin forces
+      # a clean recompile on every bump (the larger maxsize holds several pins).
+      CCACHE_NAMESPACE: ${{ needs.toolchain.outputs.pto_isa_commit }}
       PIP_CACHE_DIR: /home/ci-runner/.cache/pip
     steps:
       - uses: actions/checkout@v4
@@ -401,7 +411,12 @@ jobs:
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
       CCACHE_DIR: /root/.cache/ccache
-      CCACHE_MAXSIZE: 5G
+      CCACHE_MAXSIZE: 20G
+      # Isolate the compile cache by pto-isa pin: simpler now links pto-isa, so
+      # reusing objects built against a different pin causes an ABI mismatch that
+      # segfaults the kernel/orchestration compile. Namespacing by the pin forces
+      # a clean recompile on every bump (the larger maxsize holds several pins).
+      CCACHE_NAMESPACE: ${{ needs.toolchain.outputs.pto_isa_commit }}
       PIP_CACHE_DIR: /root/.cache/pip
     container:
       image: localhost:5000/ci-device-py310:latest
