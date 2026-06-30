@@ -1188,6 +1188,42 @@ def generate(
     return _generate_single_chip(transformed_program, output_dir, skip_ptoas, block_dim=block_dim)
 
 
+def _resolve_host_orch_dynamic_dims(orch_code: str) -> str:
+    """Define ``pl.dynamic()`` dim symbols at the top of host-orch functions.
+
+    The distributed host orchestrator slices per-rank inputs such as
+    ``tensors["x_hc__ssa_v0"][rank, 0:PREFILL_TOKENS_DYN, 0:4, 0:4096]``. The
+    dynamic-dim symbols are runtime-only and are not otherwise bound in the
+    generated Python, so a host orchestrator that carries ``pl.dynamic()`` dims
+    raises ``NameError`` at execution. The device-side codegen already recovers
+    dynamic dims from tensor shapes (``_append_dynamic_dim_unpacking``); this does
+    the equivalent for the Python host orchestrator, emitting once per symbol
+    ``<DYN> = tensors["<key>"].shape[<dim>]`` derived from the first slice that
+    uses it. No-op when the orchestrator has no dynamic dims (the common case).
+    """
+    slice_re = re.compile(r'tensors\["([^"]+)"\]\[([^\]]+)\]')
+    bound_re = re.compile(r"^0:([A-Za-z_]\w*)$")
+    resolved: "OrderedDict[str, str]" = OrderedDict()
+    for key, idx_str in slice_re.findall(orch_code):
+        for dim_i, comp in enumerate(c.strip() for c in idx_str.split(",")):
+            m = bound_re.match(comp)
+            if m and m.group(1) not in resolved:
+                resolved[m.group(1)] = f'tensors["{key}"].shape[{dim_i}]'
+    if not resolved:
+        return orch_code
+
+    def_re = re.compile(r"^(\s*)def\s+\w+\(orch\b.*\):\s*$")
+    out: list[str] = []
+    for line in orch_code.split("\n"):
+        out.append(line)
+        m = def_re.match(line)
+        if m:
+            indent = m.group(1) + "    "
+            out.append(f"{indent}# Recover pl.dynamic() dims from runtime tensor shapes for host slicing.")
+            out.extend(f"{indent}{name} = {expr}" for name, expr in resolved.items())
+    return "\n".join(out)
+
+
 def _generate_with_distributed(
     transformed_program: _ir_core.Program,
     output_dir: str,
@@ -1209,6 +1245,7 @@ def _generate_with_distributed(
     # 1. L3 HOST orchestrator → orchestration/host_orch.py
     cg = _codegen_core.DistributedCodegen()
     orch_code = cg.generate(transformed_program)
+    orch_code = _resolve_host_orch_dynamic_dims(orch_code)
     result_files["orchestration/host_orch.py"] = orch_code
     result_files.update(_materialize_builtin_next_levels(cg.get_builtin_next_level_specs()))
 
