@@ -146,14 +146,18 @@ std::pair<StmtPtr, std::vector<ExprPtr>> SplitBodyYield(const StmtPtr& body) {
 // ForKind::Sequential, so no cross-core loop ever reaches LowerPipelineLoops or
 // CanonicalizeIOOrder as a Pipeline loop:
 //  - SINGLE round-trip, producer role (exactly one tpush + one tpop): run the
-//    producer one iteration AHEAD — produce(start) prologue, a KEPT Sequential
-//    steady ForStmt whose loop var k indexes the produce and pairs produce(k) with
-//    the trailing consume(k-step) over k in [start+step, start+trip*step), and a
-//    consume(last) epilogue. This lets the cube issue iteration k's QK while the
-//    vector runs iteration k-step's softmax. A cross-half SSA carry is OK iff it is
-//    a RECOMPUTABLE ADDRESS SCALAR (pure function of the loop var + loop-invariants,
-//    e.g. K/V cache_row) — duplicated into the consume clone and re-derived at
-//    k-step rather than blocking the skew.
+//    producer D = stage-1 iterations AHEAD (`pl.pipeline(stage=F)` => depth D=F-1).
+//    Emit a produce(start..start+(D-1)*step) prologue, a KEPT Sequential steady
+//    ForStmt whose loop var k leads each group and pairs the group's D produces
+//    produce(k+i*step) with the trailing D consumes consume(k-(D-i)*step) over k in
+//    [start+D*step, start+trip*step) stepping by D*step, and a consume(last D)
+//    epilogue. This lets the cube issue group k's D QKs while the vector runs group
+//    (k-D)'s D softmaxes; D distinct produce/consume tiles per iteration keep the two
+//    stages off one L1/L0 buffer. D=1 is the classic produce-one-ahead skew; D>=2
+//    needs trip % D == 0 and trip >= 2*D (else the largest feasible D' <= D is used).
+//    A cross-half SSA carry is OK iff it is a RECOMPUTABLE ADDRESS SCALAR (pure
+//    function of the loop var + loop-invariants, e.g. K/V cache_row) — duplicated
+//    into each consume clone and re-derived at its index rather than blocking the skew.
 //  - GENUINE carry (a tile/tensor, incl. the consumer role's popped tile, or a
 //    tpop-derived value), MULTI round-trip, or not statically skewable: demote to a
 //    plain Sequential loop — order-preserving; overlap comes from the peer core's
@@ -197,6 +201,50 @@ bool BodyHasCrossCorePair(const StmtPtr& body) {
   return has_push && has_pop;
 }
 
+/// Tag every tile-producing `Call` in @p body with one `(group, stage)`
+/// pipeline-membership pair (mirrors LowerPipelineLoops' PipelineMembershipTagger).
+///
+/// Why the skew pass must do this itself: MemoryReuse keeps the per-stage *load*
+/// buffers of a software pipeline private (its ping-pong guard, keyed on
+/// `pipeline_membership`), but that attr is normally stamped by LowerPipelineLoops
+/// when it replicates a `ForKind::Pipeline` loop. The skew demotes the cross-core
+/// loop to `ForKind::Sequential` *before* LowerPipelineLoops runs, so its D
+/// produce/consume clones would otherwise reach MemoryReuse untagged and have their
+/// Mat-L1 load buffers coalesced (the fa_fused_aic over-reuse). Tagging each clone
+/// with a distinct stage restores the per-stage separation. The pair is *appended*
+/// to any existing membership, so a tile inside a nested already-lowered pipeline
+/// keeps both memberships. Only the LHS-defining `Call` of a TileType AssignStmt is
+/// tagged — exactly the tile definitions MemoryReuse keys on.
+class MembershipTagger : public IRMutator {
+ public:
+  MembershipTagger(int32_t group, int32_t stage) : group_(group), stage_(stage) {}
+
+  StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+    auto visited = IRMutator::VisitStmt_(op);
+    auto assign = std::dynamic_pointer_cast<const AssignStmt>(visited);
+    if (!assign) return visited;
+    if (!std::dynamic_pointer_cast<const TileType>(assign->var_->GetType())) return visited;
+    auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
+    if (!call) return visited;
+    auto packed = call->GetAttr<std::string>(kPipelineMembershipAttr, std::string());
+    packed = AppendPipelineMembership(packed, group_, stage_);
+    auto new_attrs = StripAttr(call->attrs_, kPipelineMembershipAttr);
+    new_attrs.emplace_back(kPipelineMembershipAttr, std::move(packed));
+    auto new_call = std::make_shared<Call>(call->op_, call->args_, call->kwargs_, std::move(new_attrs),
+                                           call->GetType(), call->span_);
+    return std::make_shared<AssignStmt>(assign->var_, new_call, assign->span_);
+  }
+
+ private:
+  int32_t group_, stage_;
+};
+
+/// Apply `MembershipTagger(group, stage)` to a cloned produce/consume half.
+StmtPtr TagPipelineStage(const StmtPtr& body, int32_t group, int32_t stage) {
+  MembershipTagger tagger(group, stage);
+  return tagger.VisitStmt(body);
+}
+
 /**
  * @brief Mutator that software-pipelines (skews) mixed cube/vector cross-core
  *        `pl.pipeline(N, stage=F)` loops (`ForKind::Pipeline` + `pipeline_stages
@@ -204,13 +252,15 @@ bool BodyHasCrossCorePair(const StmtPtr& body) {
  *
  * For a loop whose body has BOTH a cross-core `tile.tpush_*` and a `tile.tpop_*`:
  * a statically-skewable single-round-trip producer loop is rewritten to a prologue
- * + Sequential steady ForStmt + epilogue (a cross-half SSA carry is allowed when it
- * is a recomputable address scalar — recomputed in the consume half); any other
- * cross-core loop (a genuine tile/tensor carry, multi-round-trip, dynamic bounds,
- * trip < 2) is demoted to a plain `ForKind::Sequential` loop. Either way the result is `ForKind::Sequential`
- * with NO `pipeline_stages` marker, so EVERY cross-core loop leaves this pass as Sequential and never reaches
- * `LowerPipelineLoops` (trigger `kind == Pipeline`) or `CanonicalizeIOOrder` (scoped to Pipeline bodies) —
- * neither of which carries any cross-core handling anymore.
+ * + Sequential steady ForStmt + epilogue, with the producer running D = F-1 iterations
+ * ahead (each steady iteration emits D produces then D consumes; D>=2 needs trip % D
+ * == 0 and trip >= 2*D, else the largest feasible D' is used). A cross-half SSA carry
+ * is allowed when it is a recomputable address scalar (recomputed in each consume
+ * clone). Any other cross-core loop (a genuine tile/tensor carry, multi-round-trip,
+ * dynamic bounds, trip < 2) is demoted to a plain `ForKind::Sequential` loop. Either way the result is
+ * `ForKind::Sequential` with NO `pipeline_stages` marker, so EVERY cross-core loop leaves this pass as
+ * Sequential and never reaches `LowerPipelineLoops` (trigger `kind == Pipeline`) or `CanonicalizeIOOrder`
+ * (scoped to Pipeline bodies) — neither of which carries any cross-core handling anymore.
  *
  * NON-cross-core pipeline loops (same-core GM->L1 / L1->L0 / nested matmul stage
  * loops) are left intact as `ForKind::Pipeline` for `LowerPipelineLoops` to
@@ -262,7 +312,14 @@ class SkewCrossCoreMutator : public IRMutator {
     auto start_const = TryGetConstInt(inner_start);
     auto stop_const = TryGetConstInt(inner_stop);
     if (start_const.has_value() && stop_const.has_value()) {
-      if (auto skewed = LowerSkewed(op, inner_body, *start_const, *stop_const, step)) {
+      // Skew depth = the producer's lead in iterations (= produces/consumes per steady
+      // iteration). Cross-core producer skew defaults to DEPTH-2 so the two pipeline
+      // stages land on separate L1/L0 buffers (a depth-1 cube QK/SV pair shares one Mat
+      // buffer, which serialises the two matmuls — the fa_fused_aic over-reuse). A higher
+      // `pl.pipeline(stage=F)` requests a deeper pipeline (depth F-1); LowerSkewed caps
+      // the depth to what the trip count allows (falling back toward depth-1).
+      int64_t depth = factor - 1 > 2 ? factor - 1 : 2;
+      if (auto skewed = LowerSkewed(op, inner_body, *start_const, *stop_const, step, depth)) {
         return skewed;
       }
     }
@@ -270,6 +327,13 @@ class SkewCrossCoreMutator : public IRMutator {
   }
 
  private:
+  /// Monotonic pipeline-group id for the membership tags this pass stamps. Started
+  /// at a high base so it never collides with LowerPipelineLoops' own 0-based group
+  /// ids (both passes write `pipeline_membership`; a shared id would make MemoryReuse
+  /// conflate two unrelated pipelines). One fresh group per skewed loop.
+  static constexpr int32_t kSkewGroupBase = 1 << 20;
+  int32_t next_skew_group_ = kSkewGroupBase;
+
   /// Rebuild the loop with the recursed bounds/body, preserving kind and attrs.
   /// Returns `op` unchanged (identity fast path) when nothing changed.
   StmtPtr RebuildIfChanged(const ForStmtPtr& op, const ExprPtr& start, const ExprPtr& stop,
@@ -305,7 +369,19 @@ class SkewCrossCoreMutator : public IRMutator {
   /// Returns nullptr when not skewable: not a bidirectional cross-core loop (needs
   /// both a tpush and a tpop), trip < 2, a degenerate lead/body split, or the lead
   /// consuming an iter_arg or a body-defined value (non-hoistable).
-  StmtPtr LowerSkewed(const ForStmtPtr& op, const StmtPtr& body, int64_t start, int64_t stop, int64_t step) {
+  ///
+  /// @p depth (= `stage - 1`) is how many iterations the producer runs ahead, and
+  /// equally the number of produce/consume messages emitted per steady iteration
+  /// (the steady loop is unrolled by `depth`). depth == 1 reproduces the classic
+  /// produce-one-ahead skew exactly. depth >= 2 needs `trip % depth == 0` and
+  /// `trip >= 2*depth`; when those don't hold the pass falls back to the largest
+  /// feasible depth (always >= 1, since trip >= 2 here). A depth-D steady body is
+  /// `produce(k), produce(k+step), ... [D produces]; consume(k-D*step), ... [D
+  /// consumes]` — D distinct produce tiles and D distinct consume tiles per
+  /// iteration, so MemoryReuse never collapses the two pipeline stages onto one
+  /// L1/L0 buffer (the over-reuse that serialises a depth-1 cube QK/SV pair).
+  StmtPtr LowerSkewed(const ForStmtPtr& op, const StmtPtr& body, int64_t start, int64_t stop, int64_t step,
+                      int64_t depth) {
     Span sp = op->span_;
     int64_t trip = ComputeStaticTripCount(start, stop, step);
     if (trip < 2) return nullptr;
@@ -556,18 +632,44 @@ class SkewCrossCoreMutator : public IRMutator {
 
     std::vector<ExprPtr> init = InitValueExprs(op->iter_args_);
 
-    // Prologue: produce(start) — primes the peer with iteration 0's tile so it
-    // can start consuming while the steady loop computes iteration 1's produce.
-    auto [prologue, _pl] = clone_half(produce_set, MakeConstIndex(start, sp), init, /*with_yield=*/false);
+    // Effective skew depth D = #messages the producer runs ahead = #produce/#consume
+    // emitted per steady iteration (the steady loop's unroll factor). depth-D needs
+    // `trip % D == 0` and `trip >= 2*D` (prologue's D produces + epilogue's D consumes
+    // + at least one steady group). Pick the LARGEST feasible D' <= requested depth
+    // so an incompatible trip degrades gracefully instead of demoting — D' == 1 is
+    // always feasible here (trip >= 2), reproducing the classic produce-one-ahead skew.
+    int64_t D = 1;
+    for (int64_t d = depth; d >= 1; --d) {
+      if (trip % d == 0 && trip >= 2 * d) {
+        D = d;
+        break;
+      }
+    }
 
-    // Steady loop: trip-1 iterations whose loop var k = start+step ..
-    // start+(trip-1)*step indexes the PRODUCE (running one step ahead); the
-    // CONSUME trails one step behind at k-step. Body = produce(k) ;
-    // consume(k-step) ; yield(updated iter_args), overlapping the cube (QK of k)
-    // with the vector (softmax of k-step). Equivalent to a produce-ahead skew
-    // with the +step offset on the consume side, so the loop ranges over the
-    // natural produce indices `[start+step, start+trip*step)` and `produce(k)`
-    // uses the bare loop var.
+    // One fresh pipeline group for this skewed loop. Each produce/consume clone is
+    // tagged with stage = its index i (the produce and consume clone at index i share
+    // stage i — their loads have disjoint lifetimes), so MemoryReuse's ping-pong guard
+    // keeps the per-stage Mat-L1 load buffers private instead of coalescing the D
+    // copies onto one buffer (the fa_fused_aic over-reuse). See MembershipTagger.
+    const int32_t group = next_skew_group_++;
+
+    // Prologue: produce(start + i*step) for i in [0, D) — primes the peer with the
+    // first D tiles so it can start consuming while the steady loop runs D ahead.
+    std::vector<StmtPtr> result;
+    for (int64_t i = 0; i < D; ++i) {
+      auto half =
+          clone_half(produce_set, MakeConstIndex(start + i * step, sp), init, /*with_yield=*/false).first;
+      result.push_back(TagPipelineStage(half, group, static_cast<int32_t>(i)));
+    }
+
+    // Steady loop: G-1 iterations (G = trip/D groups), loop var k = the FIRST produce
+    // index of the group, stepping by D*step over [start+D*step, start+trip*step). Body
+    // = produce(k+i*step) for i in [0,D)  then  consume(k-D*step+i*step) for i in [0,D),
+    // threading iter_args sequentially through the D consumes, then yield. The cube
+    // issues group k's D QKs while the vector runs group (k-D)'s D softmaxes; the D
+    // distinct produce/consume tiles never share an L1/L0 buffer. A steady ForStmt is
+    // KEPT (not unrolled away) so AllocateMemoryAddr's Acc double-buffering still has a
+    // loop to alternate over.
     VarPtr new_lv = CloneLoopVar(op->loop_var_);
     std::vector<IterArgPtr> new_iter_args;
     std::vector<ExprPtr> steady_init_subs;
@@ -576,36 +678,55 @@ class SkewCrossCoreMutator : public IRMutator {
       new_iter_args.push_back(fresh);
       steady_init_subs.push_back(fresh);
     }
-    auto [steady_prod, _sp] = clone_half(produce_set, new_lv, steady_init_subs, /*with_yield=*/false);
-    auto [steady_cons, steady_yields] = clone_half(consume_set, MakeSub(new_lv, MakeConstIndex(step, sp), sp),
-                                                   steady_init_subs, /*with_yield=*/true);
-    std::vector<StmtPtr> steady_body_parts = {steady_prod, steady_cons};
+    std::vector<StmtPtr> steady_body_parts;
+    for (int64_t i = 0; i < D; ++i) {
+      auto half =
+          clone_half(produce_set, OffsetIndex(new_lv, i * step, sp), steady_init_subs, /*with_yield=*/false)
+              .first;
+      steady_body_parts.push_back(TagPipelineStage(half, group, static_cast<int32_t>(i)));
+    }
+    std::vector<ExprPtr> steady_subs = steady_init_subs;
+    for (int64_t i = 0; i < D; ++i) {
+      // consume index k - (D-i)*step: i=0 is the oldest tile (D*step behind the
+      // produce), i=D-1 trails by one step. A single subtraction (vs (k-D*step)+i*step)
+      // keeps the printed index clean and reparse-stable.
+      ExprPtr cons_idx = MakeSub(new_lv, MakeConstIndex((D - i) * step, sp), sp);
+      auto [cons_body, cons_yields] = clone_half(consume_set, cons_idx, steady_subs, /*with_yield=*/true);
+      steady_body_parts.push_back(TagPipelineStage(cons_body, group, static_cast<int32_t>(i)));
+      steady_subs = cons_yields;  // thread iter_args into the next consume
+    }
     if (!op->iter_args_.empty()) {
-      steady_body_parts.push_back(std::make_shared<YieldStmt>(steady_yields, sp));
+      steady_body_parts.push_back(std::make_shared<YieldStmt>(steady_subs, sp));
     }
     auto steady_body = SeqStmts::Flatten(std::move(steady_body_parts), sp);
 
     std::vector<VarPtr> steady_rv =
         op->return_vars_.empty() ? op->return_vars_ : MakeFreshReturnVars(op->return_vars_, "_swp");
     auto steady_loop = std::make_shared<ForStmt>(
-        new_lv, MakeConstIndex(start + step, sp), MakeConstIndex(start + trip * step, sp),
-        MakeConstIndex(step, sp), new_iter_args, steady_body, steady_rv, sp, ForKind::Sequential);
+        new_lv, MakeConstIndex(start + D * step, sp), MakeConstIndex(start + trip * step, sp),
+        MakeConstIndex(D * step, sp), new_iter_args, steady_body, steady_rv, sp, ForKind::Sequential);
     // Preserve loop metadata, stripping the pipeline marker (the steady loop is
     // Sequential): any non-pipeline attrs and leading comments carry through.
     steady_loop->attrs_ = StripAttr(op->attrs_, kPipelineStagesAttr);
     steady_loop->leading_comments_ = op->leading_comments_;
+    result.push_back(steady_loop);
 
-    // Epilogue: consume(start+(trip-1)*step), seeded from the steady loop's final
-    // iter_args (or the loop's init values when there are no iter_args).
-    std::vector<ExprPtr> epi_iter_subs = steady_rv.empty() ? init : ReturnVarsAsExprs(steady_rv);
-    auto [epilogue, epi_yields] = clone_half(consume_set, MakeConstIndex(start + (trip - 1) * step, sp),
-                                             epi_iter_subs, /*with_yield=*/true);
+    // Epilogue: consume the last D indices start+(trip-D)*step .. start+(trip-1)*step,
+    // seeded from the steady loop's final iter_args (or the loop init when there are
+    // none), threading the D consumes sequentially.
+    std::vector<ExprPtr> epi_subs = steady_rv.empty() ? init : ReturnVarsAsExprs(steady_rv);
+    for (int64_t i = 0; i < D; ++i) {
+      auto [epi_body, epi_yields] =
+          clone_half(consume_set, MakeConstIndex(start + (trip - D) * step + i * step, sp), epi_subs,
+                     /*with_yield=*/true);
+      result.push_back(TagPipelineStage(epi_body, group, static_cast<int32_t>(i)));
+      epi_subs = epi_yields;
+    }
 
-    std::vector<StmtPtr> result = {prologue, steady_loop, epilogue};
     // Bind the original loop's return_vars to the epilogue's final yields so the
     // enclosing block loop's iter_arg threading still sees the result.
     for (size_t j = 0; j < op->return_vars_.size(); ++j) {
-      result.push_back(std::make_shared<AssignStmt>(op->return_vars_[j], epi_yields[j], sp));
+      result.push_back(std::make_shared<AssignStmt>(op->return_vars_[j], epi_subs[j], sp));
     }
     return SeqStmts::Flatten(std::move(result), sp);
   }
