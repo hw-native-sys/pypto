@@ -192,29 +192,6 @@ class TestNestedLoops:
         After = passes.unroll_loops()(Before)
         ir.assert_structural_equal(After, Before)
 
-    def test_chunked_unroll_not_expanded(self):
-        """Chunked unroll loops are left intact for SplitChunkedLoops to handle.
-
-        VisitStmt_ skips expansion when ``op->chunk_config_.has_value()``
-        (unroll_loops_pass.cpp:164), so a ``pl.unroll(..., chunk=...)`` loop
-        survives this pass unchanged — the chunk is later lowered by
-        SplitChunkedLoops. The pass returns the original function unmodified,
-        so the result is structurally identical to the input (no SSA conversion
-        needed since nothing is transformed).
-        """
-
-        @pl.program
-        class Before:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
-                    for i in pl.unroll(0, 8, 1, chunk=4, chunk_policy="leading_full"):
-                        x = pl.add(x, 1.0)
-                return x
-
-        After = passes.unroll_loops()(Before)
-        ir.assert_structural_equal(After, Before)
-
 
 class TestZeroTripLoop:
     """Tests for zero-trip unrolled loops."""

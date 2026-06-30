@@ -94,7 +94,7 @@ bool IsSingletonDim(const ExprPtr& dim_size) {
 // producer/consumer/slot-size co-ordination that lives outside this pass.
 // Users who need odd extents should pad the tile box to a multiple of the
 // producer's innerDim and narrow back with pl.tile.set_validshape; see
-// docs/en/dev/passes/24-split_vector_kernel.md.
+// docs/en/dev/passes/22-split_vector_kernel.md.
 ExprPtr ComputeHalfDimSize(const ExprPtr& dim_size) {
   if (auto ci = std::dynamic_pointer_cast<const ConstInt>(dim_size)) {
     if ((ci->value_ % 2) != 0) {

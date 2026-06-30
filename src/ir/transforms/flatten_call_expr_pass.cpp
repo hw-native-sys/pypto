@@ -60,7 +60,6 @@ class FlattenCallExprMutator : public IRMutator {
   StmtPtr VisitStmt_(const WhileStmtPtr& op) override;
   StmtPtr VisitStmt_(const ReturnStmtPtr& op) override;
   StmtPtr VisitStmt_(const InCoreScopeStmtPtr& op) override;
-  StmtPtr VisitStmt_(const AutoInCoreScopeStmtPtr& op) override;
   StmtPtr VisitStmt_(const ClusterScopeStmtPtr& op) override;
   StmtPtr VisitStmt_(const HierarchyScopeStmtPtr& op) override;
   StmtPtr VisitStmt_(const SpmdScopeStmtPtr& op) override;
@@ -380,13 +379,6 @@ StmtPtr FlattenCallExprMutator::VisitStmt_(const InCoreScopeStmtPtr& op) {
   if (new_body.get() == op->body_.get()) return op;
   return std::make_shared<const InCoreScopeStmt>(op->split_, op->name_hint_, std::move(new_body), op->span_,
                                                  op->leading_comments_, op->attrs_);
-}
-
-StmtPtr FlattenCallExprMutator::VisitStmt_(const AutoInCoreScopeStmtPtr& op) {
-  auto new_body = FlattenScopeBody(op->body_);
-  if (new_body.get() == op->body_.get()) return op;
-  return std::make_shared<const AutoInCoreScopeStmt>(op->split_, op->name_hint_, std::move(new_body),
-                                                     op->span_, op->leading_comments_, op->attrs_);
 }
 
 StmtPtr FlattenCallExprMutator::VisitStmt_(const ClusterScopeStmtPtr& op) {

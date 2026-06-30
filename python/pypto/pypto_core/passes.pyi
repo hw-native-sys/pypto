@@ -360,12 +360,6 @@ class TypeCheckErrorType(Enum):
     FOR_RANGE_MUST_BE_SCALAR = ...
     CONDITION_MUST_BE_BOOL = ...
 
-def split_chunked_loops() -> Pass:
-    """Create a pass that splits chunked loops into nested loops."""
-
-def interchange_chunk_loops() -> Pass:
-    """Create a pass that interchanges chunk loops and inserts InCore scopes."""
-
 def unroll_loops() -> Pass:
     """Create a loop unrolling pass that expands ForKind.Unroll loops at compile time."""
 
@@ -776,8 +770,6 @@ __all__ = [
     "VerificationError",
     "SSAErrorType",
     "TypeCheckErrorType",
-    "split_chunked_loops",
-    "interchange_chunk_loops",
     "unroll_loops",
     "ctrl_flow_transform",
     "convert_to_ssa",

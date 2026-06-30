@@ -187,16 +187,6 @@ class StructuralHasher {
     return static_cast<result_type>(std::hash<uint8_t>{}(static_cast<uint8_t>(field)));
   }
 
-  result_type VisitLeafField(const ChunkPolicy& field) {
-    return static_cast<result_type>(std::hash<uint8_t>{}(static_cast<uint8_t>(field)));
-  }
-
-  result_type VisitLeafField(const std::optional<ChunkConfig>& field) {
-    if (!field.has_value()) return 0;
-    result_type h = VisitIRNodeField(field->size);
-    return hash_combine(h, VisitLeafField(field->policy));
-  }
-
   result_type VisitLeafField(const ScopeKind& field) {
     return static_cast<result_type>(std::hash<uint8_t>{}(static_cast<uint8_t>(field)));
   }
@@ -601,7 +591,6 @@ StructuralHasher::result_type StructuralHasher::HashNode(const IRNodePtr& node) 
   HASH_DISPATCH(ForStmt)
   HASH_DISPATCH(WhileStmt)
   HASH_DISPATCH(InCoreScopeStmt)
-  HASH_DISPATCH(AutoInCoreScopeStmt)
   HASH_DISPATCH(ClusterScopeStmt)
   HASH_DISPATCH(HierarchyScopeStmt)
   HASH_DISPATCH(SpmdScopeStmt)

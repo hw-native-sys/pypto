@@ -42,7 +42,7 @@ class V2CUDProgram:
     ) -> pl.Tensor[[32, 32], pl.FP32]:
         with pl.at(
             level=pl.Level.CORE_GROUP,
-            optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.UP_DOWN)],
+            optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
         ):
             a_plus_b = pl.add(a, b)
             sub = pl.sub(a, b)
@@ -62,7 +62,7 @@ class V2CLRProgram:
     ) -> pl.Tensor[[32, 32], pl.FP32]:
         with pl.at(
             level=pl.Level.CORE_GROUP,
-            optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.LEFT_RIGHT)],
+            optimizations=[pl.split(pl.SplitMode.LEFT_RIGHT)],
         ):
             a_plus_b = pl.add(a, b)
             sub = pl.sub(a, b)
@@ -80,10 +80,7 @@ class V2CNoSplitProgram:
         b: pl.Tensor[[32, 32], pl.FP32],
         output: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
     ) -> pl.Tensor[[32, 32], pl.FP32]:
-        with pl.at(
-            level=pl.Level.CORE_GROUP,
-            optimizations=[pl.auto_chunk],
-        ):
+        with pl.at(level=pl.Level.CORE_GROUP):
             a_plus_b = pl.add(a, b)
             sub = pl.sub(a, b)
             out = pl.matmul(a_plus_b, sub)
@@ -102,9 +99,9 @@ class C2VLRProgram:
     ) -> pl.Tensor[[M, N], pl.FP32]:
         with pl.at(
             level=pl.Level.CORE_GROUP,
-            optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.LEFT_RIGHT)],
+            optimizations=[pl.split(pl.SplitMode.LEFT_RIGHT)],
         ):
-            for nb in pl.parallel(0, N_BLOCKS, 1, chunk=4, chunk_policy="leading_full"):
+            for nb in pl.range(0, N_BLOCKS):
                 n0 = nb * N_BLOCK
                 c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
                 b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
@@ -124,9 +121,9 @@ class C2VUDProgram:
     ) -> pl.Tensor[[M, N], pl.FP32]:
         with pl.at(
             level=pl.Level.CORE_GROUP,
-            optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.UP_DOWN)],
+            optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
         ):
-            for nb in pl.parallel(0, N_BLOCKS, 1, chunk=4, chunk_policy="leading_full"):
+            for nb in pl.range(0, N_BLOCKS):
                 n0 = nb * N_BLOCK
                 c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
                 b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
@@ -144,11 +141,8 @@ class C2VNoSplitProgram:
         b: pl.Tensor[[K, N], pl.FP32],
         c: pl.Tensor[[M, N], pl.FP32],
     ) -> pl.Tensor[[M, N], pl.FP32]:
-        with pl.at(
-            level=pl.Level.CORE_GROUP,
-            optimizations=[pl.auto_chunk],
-        ):
-            for nb in pl.parallel(0, N_BLOCKS, 1, chunk=4, chunk_policy="leading_full"):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            for nb in pl.range(0, N_BLOCKS):
                 n0 = nb * N_BLOCK
                 c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
                 b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
@@ -168,9 +162,9 @@ class BiDirectUDProgram:
     ) -> pl.Tensor[[M, N], pl.FP32]:
         with pl.at(
             level=pl.Level.CORE_GROUP,
-            optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.UP_DOWN)],
+            optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
         ):
-            for nb in pl.parallel(0, N_BLOCKS, 1, chunk=4, chunk_policy="leading_full"):
+            for nb in pl.range(0, N_BLOCKS):
                 n0 = nb * N_BLOCK
                 c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
                 a_add = pl.add(a, 1.0)
@@ -191,9 +185,9 @@ class BiDirectLRProgram:
     ) -> pl.Tensor[[M, N], pl.FP32]:
         with pl.at(
             level=pl.Level.CORE_GROUP,
-            optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.LEFT_RIGHT)],
+            optimizations=[pl.split(pl.SplitMode.LEFT_RIGHT)],
         ):
-            for nb in pl.parallel(0, N_BLOCKS, 1, chunk=4, chunk_policy="leading_full"):
+            for nb in pl.range(0, N_BLOCKS):
                 n0 = nb * N_BLOCK
                 c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
                 a_add = pl.add(a, 1.0)
@@ -212,11 +206,8 @@ class BiDirectNoSplitProgram:
         b: pl.Tensor[[K, N], pl.FP32],
         c: pl.Tensor[[M, N], pl.FP32],
     ) -> pl.Tensor[[M, N], pl.FP32]:
-        with pl.at(
-            level=pl.Level.CORE_GROUP,
-            optimizations=[pl.auto_chunk],
-        ):
-            for nb in pl.parallel(0, N_BLOCKS, 1, chunk=4, chunk_policy="leading_full"):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            for nb in pl.range(0, N_BLOCKS):
                 n0 = nb * N_BLOCK
                 c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
                 a_add = pl.add(a, 1.0)

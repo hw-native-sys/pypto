@@ -379,10 +379,6 @@ void BindPass(nb::module_& m) {
       .value("USE_BEFORE_DEF", use_after_def::ErrorType::USE_BEFORE_DEF,
              "Variable used before any definition in scope");
 
-  passes.def("split_chunked_loops", &pass::SplitChunkedLoops,
-             "Create a pass that splits chunked loops into nested loops");
-  passes.def("interchange_chunk_loops", &pass::InterchangeChunkLoops,
-             "Create a pass that interchanges chunk loops and inserts InCore scopes");
   passes.def("unroll_loops", &pass::UnrollLoops, "Create a loop unrolling pass");
   passes.def("skew_cross_core_pipeline", &pass::SkewCrossCorePipeline,
              "Skew cross-core (cube/vector) ``pl.pipeline`` loops; runs immediately before\n"

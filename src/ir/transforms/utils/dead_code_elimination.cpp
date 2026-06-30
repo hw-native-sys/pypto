@@ -146,7 +146,6 @@ void FindLiveRootsRecursiveImpl(const std::vector<StmtPtr>& stmts, const Removab
       collect_expr_refs(for_stmt->start_);
       collect_expr_refs(for_stmt->stop_);
       collect_expr_refs(for_stmt->step_);
-      if (for_stmt->chunk_config_.has_value()) collect_expr_refs(for_stmt->chunk_config_->size);
       collect_iter_arg_refs(for_stmt);
       FindLiveRootsRecursiveImpl(FlattenBody(for_stmt->body_), is_removable, live);
     } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
@@ -266,10 +265,6 @@ std::vector<StmtPtr> FilterDeadCodeImpl(const std::vector<StmtPtr>& stmts,
       StmtPtr new_scope;
       if (auto incore = std::dynamic_pointer_cast<const InCoreScopeStmt>(stmt)) {
         auto copy = MutableCopy(incore);
-        copy->body_ = new_body;
-        new_scope = copy;
-      } else if (auto auto_incore = std::dynamic_pointer_cast<const AutoInCoreScopeStmt>(stmt)) {
-        auto copy = MutableCopy(auto_incore);
         copy->body_ = new_body;
         new_scope = copy;
       } else if (auto cluster = std::dynamic_pointer_cast<const ClusterScopeStmt>(stmt)) {
@@ -433,11 +428,6 @@ void FilterTrailingYieldSlots(std::vector<StmtPtr>& branch, const std::vector<si
 StmtPtr RebuildScopeWithBody(const std::shared_ptr<const ScopeStmt>& scope_stmt, const StmtPtr& new_body) {
   if (auto incore = std::dynamic_pointer_cast<const InCoreScopeStmt>(scope_stmt)) {
     auto copy = MutableCopy(incore);
-    copy->body_ = new_body;
-    return copy;
-  }
-  if (auto auto_incore = std::dynamic_pointer_cast<const AutoInCoreScopeStmt>(scope_stmt)) {
-    auto copy = MutableCopy(auto_incore);
     copy->body_ = new_body;
     return copy;
   }

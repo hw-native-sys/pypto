@@ -132,4 +132,4 @@ The `InlineFunctionsEliminated` `PropertyVerifier` (registered against `IRProper
 
 - `python/pypto/jit/decorator.py` — `@pl.jit.inline` is the user-facing front end (`_SubFunctionDecorator("inline", ...)`).
 - [02-unroll_loops](02-unroll_loops.md) — runs immediately after.
-- [10-outline_incore_scopes](10-outline_incore_scopes.md) — handles the `pl.at` scopes that survive splicing.
+- [10-outline_incore_scopes](08-outline_incore_scopes.md) — handles the `pl.at` scopes that survive splicing.

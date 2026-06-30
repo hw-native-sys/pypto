@@ -193,9 +193,6 @@ class InOutUseDisciplineChecker : public IRVisitor {
     VisitExpr(op->start_);
     VisitExpr(op->stop_);
     VisitExpr(op->step_);
-    if (op->chunk_config_.has_value() && op->chunk_config_->size) {
-      VisitExpr(op->chunk_config_->size);
-    }
     for (const auto& ia : op->iter_args_) {
       if (ia->initValue_) VisitExpr(ia->initValue_);
     }

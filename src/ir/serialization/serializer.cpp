@@ -90,8 +90,6 @@ class FieldSerializerVisitor {
   result_type VisitLeafField(const FunctionType& field);
   result_type VisitLeafField(const ForKind& field);
   result_type VisitLeafField(const InlineLanguage& field);
-  result_type VisitLeafField(const ChunkPolicy& field);
-  result_type VisitLeafField(const std::optional<ChunkConfig>& field);
 
   result_type VisitLeafField(const ScopeKind& field);
   result_type VisitLeafField(const MemorySpace& field);
@@ -226,7 +224,6 @@ class IRSerializer::Impl {
     SERIALIZE_FIELDS(ForStmt);
     SERIALIZE_FIELDS(WhileStmt);
     SERIALIZE_FIELDS(InCoreScopeStmt);
-    SERIALIZE_FIELDS(AutoInCoreScopeStmt);
     SERIALIZE_FIELDS(ClusterScopeStmt);
     SERIALIZE_FIELDS(HierarchyScopeStmt);
     SERIALIZE_FIELDS(SpmdScopeStmt);
@@ -594,25 +591,6 @@ msgpack::object FieldSerializerVisitor::VisitLeafField(const ForKind& field) {
 
 msgpack::object FieldSerializerVisitor::VisitLeafField(const InlineLanguage& field) {
   return msgpack::object(static_cast<uint8_t>(field), zone_);
-}
-
-msgpack::object FieldSerializerVisitor::VisitLeafField(const ChunkPolicy& field) {
-  return msgpack::object(static_cast<uint8_t>(field), zone_);
-}
-
-msgpack::object FieldSerializerVisitor::VisitLeafField(const std::optional<ChunkConfig>& field) {
-  if (!field.has_value()) return msgpack::object();
-  // Serialize as a map with "size" and "policy" keys
-  auto* kv = static_cast<msgpack::object_kv*>(zone_.allocate_align(sizeof(msgpack::object_kv) * 2));
-  kv[0].key = msgpack::object("size", zone_);
-  kv[0].val = ctx_.SerializeNode(field->size, zone_);
-  kv[1].key = msgpack::object("policy", zone_);
-  kv[1].val = msgpack::object(static_cast<uint8_t>(field->policy), zone_);
-  msgpack::object obj;
-  obj.type = msgpack::type::MAP;
-  obj.via.map.size = 2;
-  obj.via.map.ptr = kv;
-  return obj;
 }
 
 msgpack::object FieldSerializerVisitor::VisitLeafField(const ScopeKind& field) {

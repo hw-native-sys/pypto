@@ -257,7 +257,6 @@ class IRPythonPrinter : public IRVisitor {
   void VisitStmt_(const ForStmtPtr& op) override;
   void VisitStmt_(const WhileStmtPtr& op) override;
   void VisitStmt_(const InCoreScopeStmtPtr& op) override;
-  void VisitStmt_(const AutoInCoreScopeStmtPtr& op) override;
   void VisitStmt_(const ClusterScopeStmtPtr& op) override;
   void VisitStmt_(const HierarchyScopeStmtPtr& op) override;
   void VisitStmt_(const SpmdScopeStmtPtr& op) override;
@@ -346,9 +345,8 @@ class IRPythonPrinter : public IRVisitor {
   bool PrintScopeVarListKwarg(const ScopeStmtPtr& op, const char* attr_key, const char* kwarg_name);
 
   // Emit ``no_dep_args=[t1, t2]`` if the scope carries ``kAttrArgDirOverrideVars``;
-  // returns true when something was printed. Common to InCore/AutoInCore/
-  // Hierarchy scope printers so the parser can recover the marker after a
-  // print/reparse roundtrip.
+  // returns true when something was printed. Common to InCore/Hierarchy scope
+  // printers so the parser can recover the marker after a print/reparse roundtrip.
   bool PrintScopeNoDepsAttr(const ScopeStmtPtr& op);
 
   // Emit ``deps=[t1, t2]`` if the scope carries ``kAttrManualDepEdges``; returns
@@ -1491,8 +1489,7 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
   }
 
   // Unroll loops cannot have iter_args. The DSL parser forbids init_values for
-  // pl.unroll(), and SplitChunkedLoops preserves this: chunk-split unroll loops
-  // always take the simple (no iter_args) path.
+  // pl.unroll().
   if (op->kind_ == ForKind::Unroll && !op->iter_args_.empty()) {
     INTERNAL_CHECK_SPAN(false, op->span_) << "ForKind::Unroll does not support iter_args/init_values";
   }
@@ -1517,25 +1514,6 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
     // Add trailing comma for single-element tuple
     if (op->iter_args_.size() == 1) stream_ << ",";
     stream_ << ")";
-  }
-
-  // Add chunk kwargs
-  if (op->chunk_config_.has_value()) {
-    stream_ << ", chunk=";
-    VisitExpr(op->chunk_config_->size);
-    if (op->chunk_config_->policy != ChunkPolicy::Guarded) {
-      // Emit lowercase policy string to match DSL/parser convention.
-      stream_ << ", chunk_policy=\"";
-      switch (op->chunk_config_->policy) {
-        case ChunkPolicy::LeadingFull:
-          stream_ << "leading_full";
-          break;
-        case ChunkPolicy::Guarded:
-          stream_ << "guarded";
-          break;
-      }
-      stream_ << "\"";
-    }
   }
 
   // Add attrs kwargs. When the loop prints as `.pipeline(...)`, `pipeline_stages`
@@ -1704,7 +1682,7 @@ bool IRPythonPrinter::PrintScopeTaskIdVarSuffix(const ScopeStmtPtr& op) {
 VarPtr IRPythonPrinter::GetScopeTaskIdVar(const StmtPtr& stmt) const {
   // ``As<ScopeStmt>`` is the polymorphic form — KindTrait<ScopeStmt> matches
   // every concrete scope subclass (see include/pypto/ir/kind_traits.h:152).
-  // InCore / AutoInCore / Hierarchy scopes carry ``kAttrTaskIdVar`` via
+  // InCore / Hierarchy scopes carry ``kAttrTaskIdVar`` via
   // ``with pl.at(...) as tid:``; Spmd scopes carry it via
   // ``with pl.spmd(...) as tid:``. Cluster / Runtime scopes never do, but
   // ``GetAttr<VarPtr>`` returns null for them, so the broader cast is harmless.
@@ -1764,35 +1742,6 @@ void IRPythonPrinter::VisitStmt_(const InCoreScopeStmtPtr& op) {
   if (op->HasAttr("slot_num") || (op->split_.has_value() && op->split_.value() != SplitMode::None)) {
     PrintSplitOptimizations(op->split_.value_or(SplitMode::None), op);
   }
-  if (!op->name_hint_.empty()) {
-    stream_ << ", name_hint=\"" << op->name_hint_ << "\"";
-  }
-  PrintScopeDepsAttr(op);
-  PrintScopeNoDepsAttr(op);
-  PrintScopeDumpAttr(op);
-  PrintScopeAllowEarlyResolveAttr(op);
-  PrintScopeWindowizeAttr(op);
-  stream_ << ")";
-  PrintScopeTaskIdVarSuffix(op);
-  stream_ << ":\n";
-  IncreaseIndent();
-  PrintStmtBlock(op->body_);
-  DecreaseIndent();
-}
-
-void IRPythonPrinter::VisitStmt_(const AutoInCoreScopeStmtPtr& op) {
-  // Always open the surviving ``optimizations=[pl.auto_chunk, ...]`` list.
-  // Append ``pl.split(mode[, slot_num=N])`` whenever there is a slot_num (a
-  // NONE mixed kernel still carries a ring depth) or a non-None split mode;
-  // a plain AutoInCore prints as ``optimizations=[pl.auto_chunk]``.
-  const bool has_split = op->split_.has_value() && op->split_.value() != SplitMode::None;
-  stream_ << "with " << prefix_ << ".at(level=" << prefix_ << ".Level.CORE_GROUP, optimizations=[" << prefix_
-          << ".auto_chunk";
-  if (op->HasAttr("slot_num") || has_split) {
-    stream_ << ", ";
-    PrintSplitCall(op->split_.value_or(SplitMode::None), op);
-  }
-  stream_ << "]";
   if (!op->name_hint_.empty()) {
     stream_ << ", name_hint=\"" << op->name_hint_ << "\"";
   }
@@ -2513,7 +2462,7 @@ static std::unordered_map<const Var*, std::string> CollectDynVarMapping(const Pr
     }
   };
   // Use a full IRVisitor so that dynamic-dimension Var names are found in every
-  // expression context: loop bounds (ForStmt start/stop/step/chunk_size),
+  // expression context: loop bounds (ForStmt start/stop/step),
   // if/while conditions, EvalStmt expressions, AssignStmt values, etc.
   // The ad-hoc collect_from_stmt only inspected AssignStmt variable types and
   // missed all those other locations.

@@ -379,14 +379,6 @@ std::vector<VarPtr> RebuildLane1LoopReturnVars(const std::vector<VarPtr>& return
   return new_return_vars;
 }
 
-std::optional<ChunkConfig> SubstituteChunkConfigIfNeeded(const std::optional<ChunkConfig>& chunk_config,
-                                                         const ExprReplacementMap& replacements) {
-  if (!chunk_config.has_value()) return std::nullopt;
-  auto new_size = SubstituteExprIfNeeded(chunk_config->size, replacements);
-  if (new_size == chunk_config->size) return chunk_config;
-  return ChunkConfig{new_size, chunk_config->policy};
-}
-
 // Lane 1 still needs to replay cross-core handshakes so Ascend910B GM-backed
 // pipes stay balanced. Tile-producing replay work is forced to static
 // valid_shape=0, letting PTO ops run as empty tiles while preserving the tpush /
@@ -453,7 +445,6 @@ std::vector<StmtPtr> BuildNoSplitLane1ReplayStmts(const std::vector<StmtPtr>& st
       new_for->iter_args_ = std::move(new_iter_args);
       new_for->body_ = loop_repair::MakeBody(new_body_stmts, for_stmt->span_);
       new_for->return_vars_ = std::move(new_return_vars);
-      new_for->chunk_config_ = SubstituteChunkConfigIfNeeded(for_stmt->chunk_config_, replacements);
       result.push_back(new_for);
       continue;
     }

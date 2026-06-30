@@ -1212,11 +1212,6 @@ YieldAliasInfo AnalyzeStmtAliases(const StmtPtr& stmt, AliasOriginMap& origin_ma
     if (auto step_call = As<Call>(for_stmt->step_)) {
       AnalyzeCallAccess(step_call, origin_map, has_read, has_write);
     }
-    if (for_stmt->chunk_config_.has_value()) {
-      if (auto chunk_call = As<Call>(for_stmt->chunk_config_->size)) {
-        AnalyzeCallAccess(chunk_call, origin_map, has_read, has_write);
-      }
-    }
 
     auto body_map = origin_map;
     std::vector<ParamOrigins> init_origins(for_stmt->iter_args_.size());

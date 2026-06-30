@@ -115,11 +115,6 @@ StmtPtr CloneScopeWithBody(const ScopeStmtPtr& scope, const StmtPtr& body) {
     return std::make_shared<InCoreScopeStmt>(incore->split_, incore->name_hint_, body, incore->span_,
                                              incore->leading_comments_, incore->attrs_);
   }
-  if (auto auto_incore = As<AutoInCoreScopeStmt>(scope)) {
-    return std::make_shared<AutoInCoreScopeStmt>(auto_incore->split_, auto_incore->name_hint_, body,
-                                                 auto_incore->span_, auto_incore->leading_comments_,
-                                                 auto_incore->attrs_);
-  }
   if (auto cluster = As<ClusterScopeStmt>(scope)) {
     return std::make_shared<ClusterScopeStmt>(cluster->name_hint_, body, cluster->span_,
                                               cluster->leading_comments_, cluster->attrs_);

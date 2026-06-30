@@ -51,8 +51,6 @@ class RangeIterator(Generic[T]):
         start: RangeArg = 0,
         step: RangeArg = 1,
         init_values: tuple[Any, ...] | None = None,
-        chunk: int | None = None,
-        chunk_policy: str = "guarded",
         pipeline_stages: int | None = None,
     ):
         """Initialize range iterator.
@@ -62,8 +60,6 @@ class RangeIterator(Generic[T]):
             start: Start value (default 0, int or Scalar)
             step: Step value (default 1, int or Scalar)
             init_values: Initial values for iter_args
-            chunk: Chunk size for loop chunking (None = no chunking)
-            chunk_policy: Chunk distribution policy (default: "guarded")
             pipeline_stages: Software-pipelining depth — replicates the body this
                 many times per outer iteration (None = no pipelining). Only set by
                 pl.pipeline(); validated by the parser.
@@ -72,8 +68,6 @@ class RangeIterator(Generic[T]):
         self.stop = stop
         self.step = step
         self.init_values = init_values or ()
-        self.chunk = chunk
-        self.chunk_policy = chunk_policy
         self.pipeline_stages = pipeline_stages
         self.current = start
 
@@ -131,23 +125,15 @@ class RangeIterator(Generic[T]):
 def _make_range_iterator(
     *args: RangeArg,
     init_values: tuple[Any, ...] | None = None,
-    chunk: int | None = None,
-    chunk_policy: str = "guarded",
     pipeline_stages: int | None = None,
     func_name: str = "range",
 ) -> RangeIterator[Scalar] | RangeIterator[tuple[Scalar, tuple[Any, ...]]]:
     """Shared implementation for range(), parallel(), unroll(), and pipeline()."""
-    if chunk is not None and (not isinstance(chunk, int) or isinstance(chunk, bool) or chunk <= 0):
-        raise ValueError(f"{func_name}() chunk must be a positive integer, got {chunk!r}")
     if pipeline_stages is not None:
         if not isinstance(pipeline_stages, int) or isinstance(pipeline_stages, bool) or pipeline_stages < 1:
             raise ValueError(f"{func_name}() stage must be a positive integer, got {pipeline_stages!r}")
-        if chunk is not None:
-            raise ValueError(f"{func_name}() stage= and chunk= are mutually exclusive")
     kwargs = {
         "init_values": init_values,
-        "chunk": chunk,
-        "chunk_policy": chunk_policy,
         "pipeline_stages": pipeline_stages,
     }
     if len(args) == 1:
@@ -164,8 +150,6 @@ def _make_range_iterator(
 def range(
     *args: RangeArg,
     init_values: None = None,
-    chunk: int | None = None,
-    chunk_policy: str = "guarded",
 ) -> RangeIterator[Scalar]: ...
 
 
@@ -173,8 +157,6 @@ def range(
 def range(
     *args: RangeArg,
     init_values: tuple[T1],
-    chunk: int | None = None,
-    chunk_policy: str = "guarded",
 ) -> RangeIterator[tuple[Scalar, tuple[T1]]]: ...
 
 
@@ -182,8 +164,6 @@ def range(
 def range(
     *args: RangeArg,
     init_values: tuple[T1, T2],
-    chunk: int | None = None,
-    chunk_policy: str = "guarded",
 ) -> RangeIterator[tuple[Scalar, tuple[T1, T2]]]: ...
 
 
@@ -191,8 +171,6 @@ def range(
 def range(
     *args: RangeArg,
     init_values: tuple[T1, T2, T3],
-    chunk: int | None = None,
-    chunk_policy: str = "guarded",
 ) -> RangeIterator[tuple[Scalar, tuple[T1, T2, T3]]]: ...
 
 
@@ -200,8 +178,6 @@ def range(
 def range(
     *args: RangeArg,
     init_values: tuple[T1, T2, T3, T4],
-    chunk: int | None = None,
-    chunk_policy: str = "guarded",
 ) -> RangeIterator[tuple[Scalar, tuple[T1, T2, T3, T4]]]: ...
 
 
@@ -209,23 +185,18 @@ def range(
 def range(
     *args: RangeArg,
     init_values: tuple[T1, T2, T3, T4, T5],
-    chunk: int | None = None,
-    chunk_policy: str = "guarded",
 ) -> RangeIterator[tuple[Scalar, tuple[T1, T2, T3, T4, T5]]]: ...
 
 
 def range(
     *args: RangeArg,
     init_values: tuple[Any, ...] | None = None,
-    chunk: int | None = None,
-    chunk_policy: str = "guarded",
 ) -> RangeIterator[Scalar] | RangeIterator[tuple[Scalar, tuple[Any, ...]]]:
     """Create a range iterator for for loops.
 
     Supports several patterns:
         Simple:        for i in pl.range(10):
         Iter args:     for i, (var1, var2) in pl.range(16, init_values=(init1, init2)):
-        Chunked:       for i in pl.range(0, 10, chunk=5):
 
     For software pipelining (body replication for ping-pong buffering), use
     ``pl.pipeline(N, stage=F)`` instead — it is a sibling loop iterator.
@@ -239,8 +210,6 @@ def range(
         *args: Positional arguments (stop) or (start, stop) or (start, stop, step).
             Each argument can be an int literal or a pl.Scalar value.
         init_values: Initial values for iteration arguments
-        chunk: Chunk size for loop chunking (splits loop into nested loops)
-        chunk_policy: Chunk distribution policy (default: "guarded")
 
     Returns:
         If no init_values: RangeIterator yielding loop variable (Scalar)
@@ -249,36 +218,26 @@ def range(
     return _make_range_iterator(
         *args,
         init_values=init_values,
-        chunk=chunk,
-        chunk_policy=chunk_policy,
         func_name="range",
     )
 
 
 @overload
-def parallel(
-    *args: RangeArg, init_values: None = None, chunk: int | None = None, chunk_policy: str = "guarded"
-) -> RangeIterator[Scalar]: ...
+def parallel(*args: RangeArg, init_values: None = None) -> RangeIterator[Scalar]: ...
 
 
 @overload
-def parallel(
-    *args: RangeArg, init_values: tuple[T1], chunk: int | None = None, chunk_policy: str = "guarded"
-) -> RangeIterator[tuple[Scalar, tuple[T1]]]: ...
+def parallel(*args: RangeArg, init_values: tuple[T1]) -> RangeIterator[tuple[Scalar, tuple[T1]]]: ...
 
 
 @overload
-def parallel(
-    *args: RangeArg, init_values: tuple[T1, T2], chunk: int | None = None, chunk_policy: str = "guarded"
-) -> RangeIterator[tuple[Scalar, tuple[T1, T2]]]: ...
+def parallel(*args: RangeArg, init_values: tuple[T1, T2]) -> RangeIterator[tuple[Scalar, tuple[T1, T2]]]: ...
 
 
 @overload
 def parallel(
     *args: RangeArg,
     init_values: tuple[T1, T2, T3],
-    chunk: int | None = None,
-    chunk_policy: str = "guarded",
 ) -> RangeIterator[tuple[Scalar, tuple[T1, T2, T3]]]: ...
 
 
@@ -286,8 +245,6 @@ def parallel(
 def parallel(
     *args: RangeArg,
     init_values: tuple[T1, T2, T3, T4],
-    chunk: int | None = None,
-    chunk_policy: str = "guarded",
 ) -> RangeIterator[tuple[Scalar, tuple[T1, T2, T3, T4]]]: ...
 
 
@@ -295,16 +252,12 @@ def parallel(
 def parallel(
     *args: RangeArg,
     init_values: tuple[T1, T2, T3, T4, T5],
-    chunk: int | None = None,
-    chunk_policy: str = "guarded",
 ) -> RangeIterator[tuple[Scalar, tuple[T1, T2, T3, T4, T5]]]: ...
 
 
 def parallel(
     *args: RangeArg,
     init_values: tuple[Any, ...] | None = None,
-    chunk: int | None = None,
-    chunk_policy: str = "guarded",
 ) -> RangeIterator[Scalar] | RangeIterator[tuple[Scalar, tuple[Any, ...]]]:
     """Create a parallel range iterator for parallel for loops.
 
@@ -315,22 +268,16 @@ def parallel(
         *args: Positional arguments (stop) or (start, stop) or (start, stop, step).
             Each argument can be an int literal or a pl.Scalar value.
         init_values: Initial values for iteration arguments
-        chunk: Chunk size for loop chunking
-        chunk_policy: Chunk distribution policy (default: "guarded")
 
     Returns:
         If no init_values: RangeIterator yielding loop variable (Scalar)
         If init_values: RangeIterator yielding (loop_var, (iter_args...))
     """
-    return _make_range_iterator(
-        *args, init_values=init_values, chunk=chunk, chunk_policy=chunk_policy, func_name="parallel"
-    )
+    return _make_range_iterator(*args, init_values=init_values, func_name="parallel")
 
 
 def unroll(
     *args: RangeArg,
-    chunk: int | None = None,
-    chunk_policy: str = "guarded",
 ) -> RangeIterator[Scalar]:
     """Create an unroll range iterator for compile-time loop unrolling.
 
@@ -342,8 +289,6 @@ def unroll(
     Args:
         *args: Positional arguments (stop) or (start, stop) or (start, stop, step).
             Each argument must be an int literal (compile-time constant).
-        chunk: Chunk size for loop chunking
-        chunk_policy: Chunk distribution policy (default: "guarded")
 
     Returns:
         RangeIterator yielding loop variable (Scalar)
@@ -356,7 +301,7 @@ def unroll(
     """
     return cast(
         RangeIterator["Scalar"],
-        _make_range_iterator(*args, chunk=chunk, chunk_policy=chunk_policy, func_name="unroll"),
+        _make_range_iterator(*args, func_name="unroll"),
     )
 
 
@@ -785,9 +730,7 @@ def spmd(
 
     Optional ``optimizations=[pl.split(mode)]`` applies to the inner InCore scope
     (auto-generated for the for-form and the ``as tid`` form, wrapped around the
-    call for the plain with-form). ``pl.auto_chunk`` is not supported on
-    ``pl.spmd`` — use ``pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk])``
-    inside the loop body for chunked parallel loops.
+    call for the plain with-form).
 
     Args:
         core_num: Number of blocks for SPMD dispatch. Positional; accepts a
@@ -934,7 +877,6 @@ class AtContext:
     'with' statement. The parser recognizes this pattern and creates:
     - ScopeStmt(InCore) when level=CORE_GROUP (no optimizations)
     - ScopeStmt(InCore, split=...) when level=CORE_GROUP with optimizations=[pl.split(...)]
-    - ScopeStmt(AutoInCore) when level=CORE_GROUP with optimizations=[pl.auto_chunk]
     - ScopeStmt(Hierarchy) for all other levels
     """
 
@@ -993,8 +935,6 @@ def at(
 
     - no entries → ``ScopeStmt(InCore)``
     - ``pl.split(mode)`` → ``ScopeStmt(InCore, split=mode)``
-    - ``pl.auto_chunk`` → ``ScopeStmt(AutoInCore)``
-    - both entries → ``ScopeStmt(AutoInCore, split=mode)``
 
     For all other levels, this creates a Hierarchy scope.
 
@@ -1002,10 +942,9 @@ def at(
         level: Target hierarchy level (e.g. pl.Level.HOST, pl.Level.CORE_GROUP).
         role: Function role (Orchestrator or Worker). Default: None.
         optimizations: Optional list literal of optimization entries. Each
-            entry must be one of ``pl.auto_chunk`` or ``pl.split(mode)`` —
-            written inline at the call site, since the DSL parser inspects
-            the AST and does not accept dynamically built variables here.
-            Entries are independent and may be combined.
+            entry must be ``pl.split(mode)`` — written inline at the call
+            site, since the DSL parser inspects the AST and does not accept
+            dynamically built variables here.
         deps: Optional explicit producer-edge list (TaskId Vars and/or
             ``None`` sentinels). Lowered to the resulting Call's
             ``manual_dep_edges`` attr, which codegen packs into a
@@ -1060,17 +999,6 @@ def at(
         >>> with pl.at(level=pl.Level.CORE_GROUP,
         ...            optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):
         ...     y = pl.ops.add(x, x)
-
-        >>> # AutoInCore scope:
-        >>> with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
-        ...     for i in pl.parallel(0, 8, 1, chunk=4):
-        ...         x = pl.add(x, x)
-
-        >>> # AutoInCore + split hint (combined, independent entries):
-        >>> with pl.at(level=pl.Level.CORE_GROUP,
-        ...            optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.UP_DOWN)]):
-        ...     for i in pl.parallel(0, 8, 1, chunk=4):
-        ...         x = pl.add(x, x)
 
         >>> # Hierarchy scope (unchanged behavior):
         >>> with pl.at(level=pl.Level.HOST, role=pl.Role.SubWorker):

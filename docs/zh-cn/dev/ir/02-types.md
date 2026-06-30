@@ -149,7 +149,7 @@ Packed canonical 公式（`BuildLogicalStridesFromLayout`，见
   stride 为空，消费者按对应 layout 的 packed canonical 解释。
 - **显式** —— 每个维度的 stride 都已写出。
 
-[`MaterializeTensorStrides`](../passes/29-materialize_tensor_strides.md) Pass
+[`MaterializeTensorStrides`](../passes/27-materialize_tensor_strides.md) Pass
 将所有隐式形态展开为显式 packed canonical，让 codegen 看到单一契约。
 `TensorViewCanonical` IRProperty + verifier 强制此不变量：
 

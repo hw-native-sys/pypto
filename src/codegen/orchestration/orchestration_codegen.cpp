@@ -507,8 +507,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   void VisitStmt_(const ForStmtPtr& for_stmt) override {
     INTERNAL_CHECK_SPAN(for_stmt->kind_ != ForKind::Unroll, for_stmt->span_)
-        << "Internal error: ForKind::Unroll reached codegen — UnrollLoops and "
-        << "SplitChunkedLoops should have resolved it. The pipeline is incomplete.";
+        << "Internal error: ForKind::Unroll reached codegen — UnrollLoops "
+        << "should have resolved it. The pipeline is incomplete.";
     INTERNAL_CHECK_SPAN(for_stmt->kind_ != ForKind::Pipeline, for_stmt->span_)
         << "Internal error: ForKind::Pipeline reached codegen — LowerPipelineLoops "
         << "and CanonicalizeIOOrder should have demoted it to Sequential. "

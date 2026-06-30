@@ -1074,55 +1074,6 @@ class TestSplitIncoreOrchVerifier:
         After = passes.outline_incore_scopes()(program)
         ir.assert_structural_equal(After, Expected)
 
-    def test_full_pipeline_with_verification_passes(self):
-        """Full pipeline with auto_incore: no compute ops leak into Orchestration."""
-
-        @pl.program
-        class Input:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
-                    x = pl.add(x, 1.0)
-                    for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
-                        x = pl.add(x, 2.0)
-                return x
-
-        @pl.program
-        class Expected:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                x1: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
-                return x1
-
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                for i, (xi,) in pl.parallel(
-                    4, init_values=(x,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
-                ):
-                    x4: pl.Tensor[[64], pl.FP32] = pl.add(xi, 2.0)
-                    xrv = pl.yield_(x4)
-                return x
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                x1: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x)
-                for i, (xi,) in pl.parallel(
-                    2, init_values=(x1,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
-                ):
-                    xrv: pl.Tensor[[64], pl.FP32] = self.main_incore_1(xi)
-                    xorv = pl.yield_(xrv)
-                return xorv
-
-        # Run the full pipeline with verification enabled — should not throw
-        program = passes.unroll_loops()(Input)
-        program = passes.convert_to_ssa()(program)
-        program = passes.flatten_call_expr()(program)
-        program = passes.split_chunked_loops()(program)
-        program = passes.interchange_chunk_loops()(program)
-        program = passes.outline_incore_scopes()(program)
-
-        ir.assert_structural_equal(program, Expected)
-
 
 class TestOutlineNamedIncoreScopes:
     """Test OutlineIncoreScopes pass with user-provided scope names."""

@@ -118,7 +118,7 @@ def out_projection_residual(
     for ob in pl.parallel(0, HIDDEN // Q_OUT_CHUNK, 2):
         with pl.at(
             level=pl.Level.CORE_GROUP,
-            optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.UP_DOWN)],
+            optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
             name_hint="out_proj_residual",
         ):
             for oi in pl.range(ob, ob + 2):
@@ -153,7 +153,7 @@ def down_projection_residual(
     for db in pl.parallel(0, HIDDEN // DOWN_N_CHUNK, 2):
         with pl.at(
             level=pl.Level.CORE_GROUP,
-            optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.UP_DOWN)],
+            optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
             name_hint="down_proj_residual",
         ):
             for di in pl.range(db, db + 2):

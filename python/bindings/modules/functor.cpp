@@ -131,7 +131,6 @@ struct PyIRVisitor : IRVisitor {
   VISITOR_STMT_TRAMPOLINE(ForStmt, visit_for_stmt)
   VISITOR_STMT_TRAMPOLINE(WhileStmt, visit_while_stmt)
   VISITOR_STMT_TRAMPOLINE(InCoreScopeStmt, visit_in_core_scope_stmt)
-  VISITOR_STMT_TRAMPOLINE(AutoInCoreScopeStmt, visit_auto_in_core_scope_stmt)
   VISITOR_STMT_TRAMPOLINE(ClusterScopeStmt, visit_cluster_scope_stmt)
   VISITOR_STMT_TRAMPOLINE(HierarchyScopeStmt, visit_hierarchy_scope_stmt)
   VISITOR_STMT_TRAMPOLINE(SpmdScopeStmt, visit_spmd_scope_stmt)
@@ -228,7 +227,6 @@ struct PyIRMutator : IRMutator {
   MUTATOR_STMT_TRAMPOLINE(ForStmt, visit_for_stmt)
   MUTATOR_STMT_TRAMPOLINE(WhileStmt, visit_while_stmt)
   MUTATOR_STMT_TRAMPOLINE(InCoreScopeStmt, visit_in_core_scope_stmt)
-  MUTATOR_STMT_TRAMPOLINE(AutoInCoreScopeStmt, visit_auto_in_core_scope_stmt)
   MUTATOR_STMT_TRAMPOLINE(ClusterScopeStmt, visit_cluster_scope_stmt)
   MUTATOR_STMT_TRAMPOLINE(HierarchyScopeStmt, visit_hierarchy_scope_stmt)
   MUTATOR_STMT_TRAMPOLINE(SpmdScopeStmt, visit_spmd_scope_stmt)
@@ -359,7 +357,6 @@ void BindFunctor(nb::module_& m) {
   BIND_VISITOR(visitor_cls, ForStmt, visit_for_stmt);
   BIND_VISITOR(visitor_cls, WhileStmt, visit_while_stmt);
   BIND_VISITOR(visitor_cls, InCoreScopeStmt, visit_in_core_scope_stmt);
-  BIND_VISITOR(visitor_cls, AutoInCoreScopeStmt, visit_auto_in_core_scope_stmt);
   BIND_VISITOR(visitor_cls, ClusterScopeStmt, visit_cluster_scope_stmt);
   BIND_VISITOR(visitor_cls, HierarchyScopeStmt, visit_hierarchy_scope_stmt);
   BIND_VISITOR(visitor_cls, SpmdScopeStmt, visit_spmd_scope_stmt);
@@ -457,7 +454,6 @@ void BindFunctor(nb::module_& m) {
   BIND_MUTATOR(mutator_cls, ForStmt, visit_for_stmt);
   BIND_MUTATOR(mutator_cls, WhileStmt, visit_while_stmt);
   BIND_MUTATOR(mutator_cls, InCoreScopeStmt, visit_in_core_scope_stmt);
-  BIND_MUTATOR(mutator_cls, AutoInCoreScopeStmt, visit_auto_in_core_scope_stmt);
   BIND_MUTATOR(mutator_cls, ClusterScopeStmt, visit_cluster_scope_stmt);
   BIND_MUTATOR(mutator_cls, HierarchyScopeStmt, visit_hierarchy_scope_stmt);
   BIND_MUTATOR(mutator_cls, SpmdScopeStmt, visit_spmd_scope_stmt);

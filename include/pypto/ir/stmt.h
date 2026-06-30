@@ -58,64 +58,12 @@ enum class ForKind : uint8_t {
 };
 
 /**
- * @brief Chunk policy for loop chunking
- *
- * Controls how iterations are distributed across chunks.
- */
-enum class ChunkPolicy : uint8_t {
-  LeadingFull = 0,  ///< Full chunks first, smaller remainder at end (splits into two kernels)
-  Guarded = 1       ///< Single loop over ceil(N/C) chunks with per-iteration if-guard (default)
-};
-
-/**
- * @brief Convert ChunkPolicy to string
- */
-inline std::string ChunkPolicyToString(ChunkPolicy policy) {
-  switch (policy) {
-    case ChunkPolicy::LeadingFull:
-      return "LeadingFull";
-    case ChunkPolicy::Guarded:
-      return "Guarded";
-    default:
-      INTERNAL_CHECK(false) << "Unknown ChunkPolicy: " << static_cast<int>(policy);
-      return "";  // Unreachable
-  }
-}
-
-/**
- * @brief Convert string to ChunkPolicy
- */
-inline ChunkPolicy StringToChunkPolicy(const std::string& str) {
-  if (str == "LeadingFull" || str == "leading_full") {
-    return ChunkPolicy::LeadingFull;
-  }
-  if (str == "Guarded" || str == "guarded") {
-    return ChunkPolicy::Guarded;
-  }
-  throw pypto::TypeError("Unknown ChunkPolicy: " + str);
-}
-
-/**
- * @brief Chunk configuration for parallel loop splitting.
- *
- * Groups chunk_size and chunk_policy which always appear together.
- * Only meaningful on parallel (chunked) loops.
- */
-struct ChunkConfig {
-  ExprPtr size;                               ///< Chunk size expression
-  ChunkPolicy policy = ChunkPolicy::Guarded;  ///< Distribution policy (default: Guarded)
-};
-
-/**
  * @brief Loop origin classification for tracking how a loop was generated
  *
- * Used by SplitChunkedLoops to tag each generated loop with its origin.
+ * Classifies how a loop was generated (currently only Original).
  */
 enum class LoopOrigin : uint8_t {
-  Original = 0,       ///< Regular loop (default)
-  ChunkOuter = 1,     ///< Outer loop from chunk splitting
-  ChunkInner = 2,     ///< Inner loop from chunk splitting
-  ChunkRemainder = 3  ///< Remainder loop from chunk splitting
+  Original = 0  ///< Regular loop (default)
 };
 
 /**
@@ -125,12 +73,6 @@ inline std::string LoopOriginToString(LoopOrigin origin) {
   switch (origin) {
     case LoopOrigin::Original:
       return "Original";
-    case LoopOrigin::ChunkOuter:
-      return "ChunkOuter";
-    case LoopOrigin::ChunkInner:
-      return "ChunkInner";
-    case LoopOrigin::ChunkRemainder:
-      return "ChunkRemainder";
     default:
       INTERNAL_CHECK(false) << "Unknown LoopOrigin: " << static_cast<int>(origin);
       return "";  // Unreachable
@@ -143,12 +85,6 @@ inline std::string LoopOriginToString(LoopOrigin origin) {
 inline LoopOrigin StringToLoopOrigin(const std::string& str) {
   if (str == "Original") {
     return LoopOrigin::Original;
-  } else if (str == "ChunkOuter") {
-    return LoopOrigin::ChunkOuter;
-  } else if (str == "ChunkInner") {
-    return LoopOrigin::ChunkInner;
-  } else if (str == "ChunkRemainder") {
-    return LoopOrigin::ChunkRemainder;
   } else {
     throw pypto::TypeError("Unknown LoopOrigin: " + str);
   }
@@ -158,13 +94,12 @@ inline LoopOrigin StringToLoopOrigin(const std::string& str) {
  * @brief Distinguishes different scope kinds
  */
 enum class ScopeKind : uint8_t {
-  InCore = 0,      ///< InCore scope for AICore sub-graphs
-  AutoInCore = 1,  ///< AutoInCore scope for automatic chunking
-  Cluster = 2,     ///< Cluster scope for co-scheduled AIC + AIV groups
-  Hierarchy = 3,   ///< Distributed hierarchy scope (uses level_/role_ on ScopeStmt)
-  Spmd = 4,        ///< SPMD dispatch scope (core_num/sync_start on ScopeStmt)
-  Runtime = 5,     ///< Runtime orchestration scope (PTO2_SCOPE wrapper, manual on/off)
-  CommDomain = 6   ///< CommDomain scope (with orch.allocate_domain(...) wrapper)
+  InCore = 0,     ///< InCore scope for AICore sub-graphs
+  Cluster = 2,    ///< Cluster scope for co-scheduled AIC + AIV groups
+  Hierarchy = 3,  ///< Distributed hierarchy scope (uses level_/role_ on ScopeStmt)
+  Spmd = 4,       ///< SPMD dispatch scope (core_num/sync_start on ScopeStmt)
+  Runtime = 5,    ///< Runtime orchestration scope (PTO2_SCOPE wrapper, manual on/off)
+  CommDomain = 6  ///< CommDomain scope (with orch.allocate_domain(...) wrapper)
 };
 
 /**
@@ -258,15 +193,13 @@ inline ForKind StringToForKind(const std::string& str) {
 /**
  * @brief Convert ScopeKind to string
  * @param kind The scope kind
- * @return String representation ("InCore", "AutoInCore", "Cluster", "Hierarchy", "Spmd", "Runtime",
+ * @return String representation ("InCore", "Cluster", "Hierarchy", "Spmd", "Runtime",
  *         or "CommDomain")
  */
 inline std::string ScopeKindToString(ScopeKind kind) {
   switch (kind) {
     case ScopeKind::InCore:
       return "InCore";
-    case ScopeKind::AutoInCore:
-      return "AutoInCore";
     case ScopeKind::Cluster:
       return "Cluster";
     case ScopeKind::Hierarchy:
@@ -534,12 +467,10 @@ class ForStmt : public Stmt {
    * @param return_vars Return variables (capture final values, accessible after loop)
    * @param span Source location
    * @param kind Loop kind (Sequential, Parallel, or Unroll; default: Sequential)
-   * @param chunk_config Optional chunk configuration (nullopt = no chunking)
    * @param attrs Loop-level attributes (key-value metadata, default: empty)
    */
   ForStmt(VarPtr loop_var, ExprPtr start, ExprPtr stop, ExprPtr step, std::vector<IterArgPtr> iter_args,
           StmtPtr body, std::vector<VarPtr> return_vars, Span span, ForKind kind = ForKind::Sequential,
-          std::optional<ChunkConfig> chunk_config = std::nullopt,
           std::vector<std::pair<std::string, std::any>> attrs = {},
           std::vector<std::string> leading_comments = {})
       : Stmt(std::move(span), std::move(leading_comments)),
@@ -551,7 +482,6 @@ class ForStmt : public Stmt {
         body_(std::move(body)),
         return_vars_(std::move(return_vars)),
         kind_(kind),
-        chunk_config_(std::move(chunk_config)),
         attrs_(std::move(attrs)) {}
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::ForStmt; }
@@ -572,7 +502,6 @@ class ForStmt : public Stmt {
                                           reflection::UsualField(&ForStmt::body_, "body"),
                                           reflection::DefField(&ForStmt::return_vars_, "return_vars"),
                                           reflection::UsualField(&ForStmt::kind_, "kind"),
-                                          reflection::UsualField(&ForStmt::chunk_config_, "chunk_config"),
                                           reflection::UsualField(&ForStmt::attrs_, "attrs")));
   }
 
@@ -585,7 +514,6 @@ class ForStmt : public Stmt {
   StmtPtr body_;                       // Loop body statement (must yield if iter_args non-empty)
   std::vector<VarPtr> return_vars_;    // Variables capturing final iteration values (accessible after loop)
   ForKind kind_;                       // Loop kind (Sequential, Parallel, or Unroll)
-  std::optional<ChunkConfig> chunk_config_;              // Chunk configuration (nullopt = no chunking)
   std::vector<std::pair<std::string, std::any>> attrs_;  // Loop-level attributes (key-value metadata)
 
   /// Get a typed attribute value (returns default_value if key not found)
@@ -696,7 +624,6 @@ using WhileStmtPtr = std::shared_ptr<const WhileStmt>;
  * **Class hierarchy** (issue #1047):
  * - `ScopeStmt` (abstract): common fields `name_hint_`, `body_`
  *   - `InCoreScopeStmt`: optional `split_`
- *   - `AutoInCoreScopeStmt`: optional `split_`
  *   - `ClusterScopeStmt`: no extra fields
  *   - `HierarchyScopeStmt`: required `level_`, optional `role_`
  *   - `SpmdScopeStmt`: required `core_num_`, `sync_start_` (default false)
@@ -804,35 +731,6 @@ class InCoreScopeStmt : public ScopeStmt {
 };
 
 using InCoreScopeStmtPtr = std::shared_ptr<const InCoreScopeStmt>;
-
-/**
- * @brief AutoInCore scope: InCore region with automatic chunking.
- *
- * Carries an optional `split` for cross-core transfer mode.
- */
-class AutoInCoreScopeStmt : public ScopeStmt {
- public:
-  AutoInCoreScopeStmt(std::optional<SplitMode> split, std::string name_hint, StmtPtr body, Span span,
-                      std::vector<std::string> leading_comments = {},
-                      std::vector<std::pair<std::string, std::any>> attrs = {})
-      : ScopeStmt(std::move(name_hint), std::move(body), std::move(span), std::move(leading_comments),
-                  std::move(attrs)),
-        split_(split) {}
-
-  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::AutoInCoreScopeStmt; }
-  [[nodiscard]] ScopeKind GetScopeKind() const override { return ScopeKind::AutoInCore; }
-  [[nodiscard]] std::string TypeName() const override { return "AutoInCoreScopeStmt"; }
-
-  static constexpr auto GetFieldDescriptors() {
-    return std::tuple_cat(ScopeStmt::GetFieldDescriptors(),
-                          std::make_tuple(reflection::UsualField(&AutoInCoreScopeStmt::split_, "split")));
-  }
-
- public:
-  std::optional<SplitMode> split_;  // Split mode (nullopt or None for no split)
-};
-
-using AutoInCoreScopeStmtPtr = std::shared_ptr<const AutoInCoreScopeStmt>;
 
 /**
  * @brief Cluster scope: co-scheduled AIC + AIV group.

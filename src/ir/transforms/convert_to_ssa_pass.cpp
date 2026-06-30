@@ -153,7 +153,6 @@ static std::unordered_set<const Var*> ComputeStmtLiveIn(const StmtPtr& stmt) {
     uc.CollectExpr(op->stop_);
     uc.CollectExpr(op->step_);
     for (const auto& ia : op->iter_args_) uc.CollectExpr(ia->initValue_);
-    if (op->chunk_config_.has_value()) uc.CollectExpr(op->chunk_config_->size);
     auto body_li = ComputeStmtLiveIn(op->body_);
     body_li.erase(op->loop_var_.get());
     for (const auto& ia : op->iter_args_) body_li.erase(ia.get());
@@ -473,10 +472,9 @@ class SSAConverter {
     if (kind == ObjectKind::ReturnStmt) return ConvertReturn(As<ReturnStmt>(s));
     if (kind == ObjectKind::YieldStmt) return ConvertYield(As<YieldStmt>(s));
     if (kind == ObjectKind::EvalStmt) return ConvertEval(As<EvalStmt>(s));
-    if (kind == ObjectKind::InCoreScopeStmt || kind == ObjectKind::AutoInCoreScopeStmt ||
-        kind == ObjectKind::ClusterScopeStmt || kind == ObjectKind::HierarchyScopeStmt ||
-        kind == ObjectKind::SpmdScopeStmt || kind == ObjectKind::RuntimeScopeStmt ||
-        kind == ObjectKind::CommDomainScopeStmt) {
+    if (kind == ObjectKind::InCoreScopeStmt || kind == ObjectKind::ClusterScopeStmt ||
+        kind == ObjectKind::HierarchyScopeStmt || kind == ObjectKind::SpmdScopeStmt ||
+        kind == ObjectKind::RuntimeScopeStmt || kind == ObjectKind::CommDomainScopeStmt) {
       return ConvertScope(As<ScopeStmt>(s));
     }
     return s;
@@ -1050,8 +1048,8 @@ class SSAConverter {
 
     // Block escaping-var promotion across non-Runtime scope boundaries (#1351).
     //
-    // ``HierarchyScopeStmt`` / ``InCoreScopeStmt`` / ``AutoInCoreScopeStmt`` /
-    // ``ClusterScopeStmt`` / ``SpmdScopeStmt`` separate the loops *inside*
+    // ``HierarchyScopeStmt`` / ``InCoreScopeStmt`` / ``ClusterScopeStmt`` /
+    // ``SpmdScopeStmt`` separate the loops *inside*
     // their body from the use-site of any variable defined further down the
     // *outer* sequence. The inner loops cannot manufacture a working init
     // value for such a use (FindInitValue typically falls back to an
@@ -1064,9 +1062,9 @@ class SSAConverter {
     // ``cur_`` is intentionally NOT restored after the body — variables
     // first-defined inside the body and referenced after the scope must
     // still substitute to their in-body SSA version (relied on by passes
-    // like InterchangeChunkLoops that emit ``out = pl.assemble(...)`` inside
-    // ``pl.at`` and return ``out`` outside). Whether such a leak is
-    // user-legal is enforced by other property verifiers, not by SSA.
+    // that emit ``out = pl.assemble(...)`` inside ``pl.at`` and return
+    // ``out`` outside). Whether such a leak is user-legal is enforced by
+    // other property verifiers, not by SSA.
     //
     // ``RuntimeScopeStmt`` is a thin ``pl.scope()`` codegen wrapper, not a
     // boundary — its body shares SSA state with the enclosing function and
@@ -1102,7 +1100,6 @@ class SSAConverter {
       return result;
     };
     if (auto in_core = As<InCoreScopeStmt>(op)) return rewrite(in_core);
-    if (auto auto_in_core = As<AutoInCoreScopeStmt>(op)) return rewrite(auto_in_core);
     if (auto cluster = As<ClusterScopeStmt>(op)) return rewrite(cluster);
     if (auto hier = As<HierarchyScopeStmt>(op)) return rewrite(hier);
     if (auto spmd = As<SpmdScopeStmt>(op)) {

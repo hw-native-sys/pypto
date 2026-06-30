@@ -15,17 +15,11 @@ The entries can be combined freely in the ``optimizations=`` list.
 Available entries:
     - ``pl.split(mode)`` — Cross-core data-transfer split hint, consumed by
       the ``ExpandMixedKernel`` pass. Lowers the scope to ``InCore`` with
-      ``split_=mode``.
-    - ``pl.auto_chunk`` — Request compiler-driven outlining of chunked
-      parallel loops. Lowers the scope to ``AutoInCore`` so that the
-      ``InterchangeChunkLoops`` pass can interchange and outline chunked
-      loops within it.
+      ``split_=mode``::
 
-These two entries are independent and may be combined::
-
-    with pl.at(level=pl.Level.CORE_GROUP,
-               optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.UP_DOWN)]):
-        ...
+          with pl.at(level=pl.Level.CORE_GROUP,
+                     optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):
+              ...
 """
 
 from __future__ import annotations
@@ -45,11 +39,8 @@ class Split(Optimization):
 
     Sets ``ScopeStmt::split_`` on the enclosing ``pl.at`` scope; that metadata
     is consumed by the ``ExpandMixedKernel`` pass via the outlined function's
-    ``SplitMode``. The split hint is independent of the resulting scope kind:
-
-    - ``optimizations=[pl.split(mode)]`` → ``ScopeKind::InCore`` (split metadata).
-    - ``optimizations=[pl.auto_chunk, pl.split(mode)]`` → ``ScopeKind::AutoInCore``
-      (split metadata still attached).
+    ``SplitMode``. ``optimizations=[pl.split(mode)]`` lowers the scope to
+    ``ScopeKind::InCore`` with the split metadata attached.
 
     Args:
         mode: Split mode (``SplitMode.NONE``, ``SplitMode.UP_DOWN``, or
@@ -68,18 +59,6 @@ class Split(Optimization):
 
     mode: SplitMode
     slot_num: int | None = None
-
-
-@dataclass(frozen=True)
-class AutoChunk(Optimization):
-    """Request compiler-driven outlining of chunked parallel loops.
-
-    Lowers the enclosing ``pl.at`` scope to ``ScopeKind::AutoInCore`` so the
-    ``InterchangeChunkLoops`` pass can interchange chunked parallel loops
-    and outline the inner sequential portion into ``InCore`` scopes.
-
-    Only valid with ``level=pl.Level.CORE_GROUP``.
-    """
 
 
 def split(mode: SplitMode, *, slot_num: int | None = None) -> Split:
@@ -107,17 +86,8 @@ def split(mode: SplitMode, *, slot_num: int | None = None) -> Split:
     return Split(mode=mode, slot_num=slot_num)
 
 
-auto_chunk: AutoChunk = AutoChunk()
-"""Sentinel for the ``AutoChunk`` optimization.
-
-Use as ``pl.auto_chunk`` in ``pl.at(..., optimizations=[pl.auto_chunk, ...])``.
-"""
-
-
 __all__ = [
     "Optimization",
     "Split",
-    "AutoChunk",
     "split",
-    "auto_chunk",
 ]

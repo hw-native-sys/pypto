@@ -364,31 +364,6 @@ class StructuralEqualImpl {
     return true;
   }
 
-  result_type VisitLeafField(const ChunkPolicy& lhs, const ChunkPolicy& rhs) {
-    if (lhs != rhs) {
-      if constexpr (AssertMode) {
-        std::ostringstream msg;
-        msg << "ChunkPolicy mismatch (" << ChunkPolicyToString(lhs) << " != " << ChunkPolicyToString(rhs)
-            << ")";
-        ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
-      }
-      return false;
-    }
-    return true;
-  }
-
-  result_type VisitLeafField(const std::optional<ChunkConfig>& lhs, const std::optional<ChunkConfig>& rhs) {
-    if (lhs.has_value() != rhs.has_value()) {
-      if constexpr (AssertMode) {
-        ThrowMismatch("ChunkConfig presence mismatch", IRNodePtr(), IRNodePtr(), "", "");
-      }
-      return false;
-    }
-    if (!lhs.has_value()) return true;
-    if (!VisitIRNodeField(lhs->size, rhs->size)) return false;
-    return VisitLeafField(lhs->policy, rhs->policy);
-  }
-
   [[nodiscard]] result_type VisitLeafField(const ScopeKind& lhs, const ScopeKind& rhs) {
     if (lhs != rhs) {
       if constexpr (AssertMode) {
@@ -990,7 +965,6 @@ bool StructuralEqualImpl<AssertMode>::Equal(const IRNodePtr& lhs, const IRNodePt
   EQUAL_DISPATCH(ForStmt)
   EQUAL_DISPATCH(WhileStmt)
   EQUAL_DISPATCH(InCoreScopeStmt)
-  EQUAL_DISPATCH(AutoInCoreScopeStmt)
   EQUAL_DISPATCH(ClusterScopeStmt)
   EQUAL_DISPATCH(HierarchyScopeStmt)
   EQUAL_DISPATCH(SpmdScopeStmt)

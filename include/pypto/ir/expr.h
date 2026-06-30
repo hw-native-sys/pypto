@@ -718,7 +718,7 @@ inline constexpr const char* kAttrCompilerManualDepEdges = "compiler_manual_dep_
  * @brief Reserved attr key for the producer-TaskId Var captured by a
  * ``with pl.at(...) as tid:`` block.
  * Set by the parser as a key on the enclosing ``ScopeStmt``'s ``attrs_``
- * (``InCoreScopeStmt`` / ``AutoInCoreScopeStmt`` / ``HierarchyScopeStmt``).
+ * (``InCoreScopeStmt`` / ``HierarchyScopeStmt``).
  * Value type: ``VarPtr`` — a fresh ``Scalar[TASK_ID]`` Var allocated in the
  * outer scope. ``OutlineIncoreScopes`` / ``OutlineHierarchyScopes`` augment
  * the synthesised ``Call``'s return type with ``Scalar[TASK_ID]`` and emit

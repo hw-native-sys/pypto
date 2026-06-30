@@ -278,22 +278,6 @@ for i in pl.parallel(start, stop, step):
 
 **Key points:** Loop-carried values use `pl.range()` or `pl.parallel()` with `init_values`, tuple unpacking `(sum,)` declares iter_args, `pl.yield_()` updates values for next iteration, after loop iter_args contain final values. `pl.parallel()` produces a `ForKind.Parallel` loop while `pl.range()` produces `ForKind.Sequential` (default).
 
-#### Chunked Loops
-
-```python
-# Split loop into chunks of C iterations (nested outer/inner loops)
-for i in pl.range(10, chunk=5):
-    body_statements
-
-for i in pl.parallel(8, chunk=4):
-    body_statements
-
-for i in pl.unroll(12, chunk=4):
-    body_statements
-```
-
-**Key points:** `chunk=C` splits the loop into an outer sequential loop and an inner loop of `C` iterations. The inner loop preserves the original kind (Sequential/Parallel/Unroll). `init_values` is supported with chunked loops (iter_args thread through the generated outer/inner/remainder loops). `chunk=` loops are only valid inside a `with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):` — outside that scope the parser rejects them with an error. See [SplitChunkedLoops Pass](../passes/07-split_chunked_loops.md).
-
 ### While Loop (SSA-style with iter_args)
 
 ```python
@@ -329,14 +313,12 @@ for (x,) in pl.while_(init_values=(x_init,)):
 | ---- | ---------- | ----- |
 | `pl.at(level=pl.Level.CORE_GROUP)` | `InCore` | Fixed-boundary outline at CORE_GROUP |
 | `pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(MODE)])` | `InCore` | InCore + cross-core split hint |
-| `pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk])` | `AutoInCore` | Compiler-driven chunked loop split |
-| `pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk, pl.split(MODE)])` | `AutoInCore` | AutoInCore + split hint (independent entries) |
 | `pl.at(level=pl.Level.HOST)` *(or any non-`CORE_GROUP` level)* | `Hierarchy` | Distributed hierarchy scope |
 | `pl.cluster()` | `Cluster` | Co-scheduled AIC+AIV group |
 | `with pl.spmd(N)` / `for i in pl.spmd(N)` | `Spmd` (for-form wraps inner `InCore`) | SPMD multi-block dispatch — see [pl.spmd](#plspmd-multi-block-dispatch) |
 | `pl.spmd(N, optimizations=[pl.split(MODE)])` | `Spmd(InCore(split=MODE))` | Split hint applies to the inner InCore (both forms) |
 | `pl.scope(mode=pl.ScopeMode.MANUAL)` / `pl.manual_scope()` | `Runtime(manual=true)` | Orchestrator MANUAL scope — user manages task ordering. Allowed in either `auto_scope` mode (it is a dependency-semantics choice). See [Manual dependency primitives](#manual-dependency-primitives) |
-| `pl.scope()` | `Runtime(manual=false)` | Orchestrator AUTO scope (`PTO2_SCOPE()`). Hand-placing one requires `@pl.function(auto_scope=False)` (in the default `auto_scope=True` the compiler owns AUTO placement). See [MaterializeRuntimeScopes](../passes/40-materialize_runtime_scopes.md) |
+| `pl.scope()` | `Runtime(manual=false)` | Orchestrator AUTO scope (`PTO2_SCOPE()`). Hand-placing one requires `@pl.function(auto_scope=False)` (in the default `auto_scope=True` the compiler owns AUTO placement). See [MaterializeRuntimeScopes](../passes/38-materialize_runtime_scopes.md) |
 
 See [Language Guide](../../user/01-language_guide.md#incore-scopes) for examples.
 
@@ -351,7 +333,7 @@ See [Language Guide](../../user/01-language_guide.md#incore-scopes) for examples
 
 All three `pl.spmd(...)` scope forms also accept `allow_early_resolve=True` (a boolean literal; same early-dispatch opt-in as `pl.submit` / `pl.at`). It forces the dispatch to lower to an `ir.Submit` even without `as tid` and lowers to `Arg::set_allow_early_resolve(true)`. Rejected on a `pl.cluster()`-nested `pl.spmd` (such a scope is unwrapped into the Group function and never produces a Submit, so the hint would be lost).
 
-Optional `optimizations=[pl.split(MODE)]` only (**not** `pl.auto_chunk`; use `pl.at(..., optimizations=[pl.auto_chunk])` inside the body for chunked loops):
+Optional `optimizations=[pl.split(MODE)]`:
 
 | Entry | Form | Effect |
 | ----- | ---- | ------ |

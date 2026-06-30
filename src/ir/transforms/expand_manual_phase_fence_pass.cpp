@@ -307,10 +307,10 @@ class ManualPhaseFenceMutator : public IRMutator {
                               new_start.get() != op->start_.get() || new_stop.get() != op->stop_.get() ||
                               new_step.get() != op->step_.get();
     if (!decisions.empty()) {
-      auto new_for = std::make_shared<const ForStmt>(
-          op->loop_var_, std::move(new_start), std::move(new_stop), std::move(new_step), op->iter_args_,
-          std::move(body_with_nested), op->return_vars_, op->span_, op->kind_, op->chunk_config_, op->attrs_,
-          op->leading_comments_);
+      auto new_for = std::make_shared<const ForStmt>(op->loop_var_, std::move(new_start), std::move(new_stop),
+                                                     std::move(new_step), op->iter_args_,
+                                                     std::move(body_with_nested), op->return_vars_, op->span_,
+                                                     op->kind_, op->attrs_, op->leading_comments_);
       std::vector<StmtPtr> with_barriers;
       with_barriers.reserve(decisions.size() + 1);
       for (const auto& decision : decisions) {
@@ -322,8 +322,8 @@ class ManualPhaseFenceMutator : public IRMutator {
     if (loop_changed) {
       return std::make_shared<const ForStmt>(op->loop_var_, std::move(new_start), std::move(new_stop),
                                              std::move(new_step), op->iter_args_, std::move(body_with_nested),
-                                             op->return_vars_, op->span_, op->kind_, op->chunk_config_,
-                                             op->attrs_, op->leading_comments_);
+                                             op->return_vars_, op->span_, op->kind_, op->attrs_,
+                                             op->leading_comments_);
     }
     return op;
   }

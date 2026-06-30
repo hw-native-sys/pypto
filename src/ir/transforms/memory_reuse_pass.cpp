@@ -226,13 +226,12 @@ class DefMapVisitor : public IRVisitor {
     ancestor_stack_.pop_back();
   }
 
-  // Scope statements (InCore/AutoInCore/Cluster/Hierarchy/Spmd) must also
+  // Scope statements (InCore/Cluster/Hierarchy/Spmd) must also
   // participate in the ancestor chain.  Without them, the liveness walk
   // would jump straight from a scope body's SeqStmts to the enclosing
   // loop body SeqStmts without finding its path-child, and reads after
   // the scope in the enclosing body would be missed.
   void VisitStmt_(const InCoreScopeStmtPtr& op) override { VisitScope(op, op->body_); }
-  void VisitStmt_(const AutoInCoreScopeStmtPtr& op) override { VisitScope(op, op->body_); }
   void VisitStmt_(const ClusterScopeStmtPtr& op) override { VisitScope(op, op->body_); }
   void VisitStmt_(const HierarchyScopeStmtPtr& op) override { VisitScope(op, op->body_); }
   void VisitStmt_(const SpmdScopeStmtPtr& op) override { VisitScope(op, op->body_); }
@@ -800,7 +799,6 @@ class LifetimeAnalyzer : public IRVisitor {
   }
 
   void VisitStmt_(const InCoreScopeStmtPtr& op) override { VisitStmt(op->body_); }
-  void VisitStmt_(const AutoInCoreScopeStmtPtr& op) override { VisitStmt(op->body_); }
   void VisitStmt_(const ClusterScopeStmtPtr& op) override { VisitStmt(op->body_); }
   void VisitStmt_(const HierarchyScopeStmtPtr& op) override { VisitStmt(op->body_); }
   void VisitStmt_(const SpmdScopeStmtPtr& op) override { VisitStmt(op->body_); }

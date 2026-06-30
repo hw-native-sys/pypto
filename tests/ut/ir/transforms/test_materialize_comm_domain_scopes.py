@@ -34,7 +34,7 @@ the granularity of the pass's structurally-comparable output products: the
 ``devices`` list and ``slots`` vector of each emitted
 :class:`ir.CommDomainScopeStmt`. Slot ``WindowBuffer``s are hand-built from
 the pass's documented semantics (device-descriptor table + slot/alloc-order
-rules in ``docs/en/dev/passes/36-materialize_comm_domain_scopes.md``) and compared with
+rules in ``docs/en/dev/passes/37-materialize_comm_domain_scopes.md``) and compared with
 ``enable_auto_mapping=True`` so freshly-constructed Vars match the
 pass-produced ones by structural isomorphism rather than identity.
 

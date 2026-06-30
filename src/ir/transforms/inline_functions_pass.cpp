@@ -403,7 +403,6 @@ class InlineDumpVarTransfer : public IRMutator {
   explicit InlineDumpVarTransfer(std::vector<VarPtr> dump_vars) : dump_vars_(std::move(dump_vars)) {}
 
   StmtPtr VisitStmt_(const InCoreScopeStmtPtr& op) override { return Attach<InCoreScopeStmt>(op); }
-  StmtPtr VisitStmt_(const AutoInCoreScopeStmtPtr& op) override { return Attach<AutoInCoreScopeStmt>(op); }
   StmtPtr VisitStmt_(const HierarchyScopeStmtPtr& op) override { return Attach<HierarchyScopeStmt>(op); }
   StmtPtr VisitStmt_(const ClusterScopeStmtPtr& op) override { return Attach<ClusterScopeStmt>(op); }
   StmtPtr VisitStmt_(const SpmdScopeStmtPtr& op) override { return Attach<SpmdScopeStmt>(op); }

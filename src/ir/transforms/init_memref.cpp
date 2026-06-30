@@ -457,12 +457,6 @@ class InitMemRefMutator : public IRMutator {
       new_return_vars.push_back(new_rv);
     }
 
-    // Visit chunk_size if present
-    std::optional<ChunkConfig> new_chunk_config = op->chunk_config_;
-    if (op->chunk_config_.has_value()) {
-      new_chunk_config = ChunkConfig{VisitExpr(op->chunk_config_->size), op->chunk_config_->policy};
-    }
-
     auto new_for = MutableCopy(op);
     new_for->loop_var_ = new_loop_var;
     new_for->start_ = new_start;
@@ -471,7 +465,6 @@ class InitMemRefMutator : public IRMutator {
     new_for->iter_args_ = new_iter_args;
     new_for->body_ = new_body;
     new_for->return_vars_ = new_return_vars;
-    new_for->chunk_config_ = new_chunk_config;
 
     // Patch return_vars so each shares its iter_arg's MemRef (inherited from initValue).
     // This establishes the invariant that initValue/iter_arg/return_var all share the

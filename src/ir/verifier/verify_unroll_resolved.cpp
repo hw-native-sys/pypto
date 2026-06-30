@@ -25,9 +25,9 @@ namespace {
 
 /// Walks a function body, reporting any ForStmt that still carries the
 /// ``ForKind::Unroll`` marker. By design this marker must be gone after
-/// ``SplitChunkedLoops`` — ``UnrollLoops`` expands non-chunked unroll loops,
-/// and ``SplitChunkedLoops`` demotes chunked unroll loops to Sequential.
-/// Any leftover indicates a pass pipeline defect.
+/// ``UnrollLoops`` — ``UnrollLoops`` expands unroll loops into their
+/// fully-unrolled Sequential form. Any leftover indicates a pass pipeline
+/// defect.
 class UnrollKindLeftoverChecker : public IRVisitor {
  public:
   UnrollKindLeftoverChecker(std::vector<Diagnostic>& diagnostics, const std::string& func_name)
@@ -36,9 +36,9 @@ class UnrollKindLeftoverChecker : public IRVisitor {
   void VisitStmt_(const ForStmtPtr& op) override {
     if (op->kind_ == ForKind::Unroll) {
       diagnostics_.emplace_back(DiagnosticSeverity::Error, "UnrollResolved", 0,
-                                "ForKind::Unroll survived past SplitChunkedLoops in function '" + func_name_ +
-                                    "'. This kind is a compile-time marker — UnrollLoops and "
-                                    "SplitChunkedLoops must resolve all Unroll loops. "
+                                "ForKind::Unroll survived past UnrollLoops in function '" + func_name_ +
+                                    "'. This kind is a compile-time marker — UnrollLoops "
+                                    "must resolve all Unroll loops. "
                                     "Check for a pass pipeline defect.",
                                 op->span_);
     }

@@ -69,9 +69,141 @@ def build_qwen3_scope3_program(
     MLP_OUT_BLOCKS = INTER_CFG // MLP_OUT_CHUNK
     hidden_inv = 1.0 / HIDDEN_CFG
 
+    # Manual orchestration outlining (previously expressed via auto_chunk).
+    #
+    # Scope 3's working set (resid1 / post_norm / down_proj at [BATCH_TILE,
+    # HIDDEN]) does not fit in Vec/UB, so the per-chunk bodies are outlined into
+    # explicit InCore kernels and the three large intermediates live in GM,
+    # threaded between kernels by the Orchestration driver. This reproduces, by
+    # hand, the GM-promotion + InCore outlining that auto_chunk used to perform
+    # automatically — using only surviving explicit forms (plain InCore kernels +
+    # an Orchestration driver loop).
     @pl.program
     class Qwen3Scope3:
-        @pl.function(type=pl.FunctionType.Opaque)
+        @pl.function(type=pl.FunctionType.InCore)
+        def oproj_block(
+            self,
+            attn_out: pl.Tensor[[BATCH_CFG, HIDDEN_CFG], pl.BF16],
+            wo: pl.Tensor[[HIDDEN_CFG, HIDDEN_CFG], pl.BF16],
+            hidden_states: pl.Tensor[[BATCH_CFG, HIDDEN_CFG], pl.BF16],
+            b0: pl.Scalar[pl.INDEX],
+            o0: pl.Scalar[pl.INDEX],
+            resid1_gm: pl.Out[pl.Tensor[[BATCH_TILE, HIDDEN_CFG], pl.FP32]],
+        ) -> pl.Tensor[[BATCH_TILE, HIDDEN_CFG], pl.FP32]:
+            """Output projection + residual for one Q_OUT_CHUNK output block."""
+            o_acc = pl.full([BATCH_TILE, Q_OUT_CHUNK], dtype=pl.FP32, value=0.0)
+            for kb in pl.range(HIDDEN_BLOCKS):
+                k0 = kb * K_CHUNK
+                a_chunk = pl.slice(attn_out, [BATCH_TILE, K_CHUNK], [b0, k0])
+                w_chunk = pl.slice(wo, [K_CHUNK, Q_OUT_CHUNK], [k0, o0])
+                o_acc = pl.add(o_acc, pl.matmul(a_chunk, w_chunk))
+            resid = pl.cast(
+                pl.slice(hidden_states, [BATCH_TILE, Q_OUT_CHUNK], [b0, o0]),
+                target_type=pl.FP32,
+            )
+            resid1_gm = pl.assemble(resid1_gm, pl.add(o_acc, resid), [0, o0])
+            return resid1_gm
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def rmsnorm(
+            self,
+            resid1_gm: pl.Tensor[[BATCH_TILE, HIDDEN_CFG], pl.FP32],
+            inv_rms_gm: pl.Out[pl.Tensor[[1, BATCH_TILE], pl.FP32]],
+        ) -> pl.Tensor[[1, BATCH_TILE], pl.FP32]:
+            """Post-attention RMSNorm reciprocal-RMS over the full resid1 row."""
+            sq_sum = pl.full([1, BATCH_TILE], dtype=pl.FP32, value=0.0)
+            for kb in pl.range(HIDDEN_BLOCKS):
+                k0 = kb * K_CHUNK
+                x_chunk = pl.slice(resid1_gm, [BATCH_TILE, K_CHUNK], [0, k0])
+                sq_sum = pl.add(sq_sum, pl.reshape(pl.row_sum(pl.mul(x_chunk, x_chunk)), [1, BATCH_TILE]))
+            inv_rms = pl.rsqrt(pl.add(pl.mul(sq_sum, hidden_inv), EPS))
+            inv_rms_gm = pl.assemble(inv_rms_gm, inv_rms, [0, 0])
+            return inv_rms_gm
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def postnorm_block(
+            self,
+            resid1_gm: pl.Tensor[[BATCH_TILE, HIDDEN_CFG], pl.FP32],
+            inv_rms_gm: pl.Tensor[[1, BATCH_TILE], pl.FP32],
+            post_rms_weight: pl.Tensor[[1, HIDDEN_CFG], pl.FP32],
+            k0: pl.Scalar[pl.INDEX],
+            post_norm_gm: pl.Out[pl.Tensor[[BATCH_TILE, HIDDEN_CFG], pl.BF16]],
+        ) -> pl.Tensor[[BATCH_TILE, HIDDEN_CFG], pl.BF16]:
+            """Apply RMSNorm scale + gamma to one K_CHUNK block, cast to BF16."""
+            x_chunk = pl.slice(resid1_gm, [BATCH_TILE, K_CHUNK], [0, k0])
+            gamma = pl.slice(post_rms_weight, [1, K_CHUNK], [0, k0])
+            inv_rms = pl.slice(inv_rms_gm, [1, BATCH_TILE], [0, 0])
+            normed = pl.col_expand_mul(
+                pl.row_expand_mul(x_chunk, pl.reshape(inv_rms, [BATCH_TILE, 1])), gamma
+            )
+            post_norm_gm = pl.assemble(post_norm_gm, pl.cast(normed, target_type=pl.BF16), [0, k0])
+            return post_norm_gm
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def zero_down(
+            self,
+            down_proj_gm: pl.Out[pl.Tensor[[BATCH_TILE, HIDDEN_CFG], pl.FP32]],
+        ) -> pl.Tensor[[BATCH_TILE, HIDDEN_CFG], pl.FP32]:
+            """Zero-initialise the down-projection accumulator in GM."""
+            for zi in pl.range(HIDDEN_BLOCKS):
+                z0 = zi * K_CHUNK
+                down_zero_chunk = pl.full([BATCH_TILE, K_CHUNK], dtype=pl.FP32, value=0.0)
+                down_proj_gm = pl.assemble(down_proj_gm, down_zero_chunk, [0, z0])
+            return down_proj_gm
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def mlp_block(
+            self,
+            post_norm_gm: pl.Tensor[[BATCH_TILE, HIDDEN_CFG], pl.BF16],
+            w_gate: pl.Tensor[[HIDDEN_CFG, INTER_CFG], pl.BF16],
+            w_up: pl.Tensor[[HIDDEN_CFG, INTER_CFG], pl.BF16],
+            w_down: pl.Tensor[[INTER_CFG, HIDDEN_CFG], pl.BF16],
+            o0: pl.Scalar[pl.INDEX],
+            down_proj_gm: pl.Out[pl.Tensor[[BATCH_TILE, HIDDEN_CFG], pl.FP32]],
+        ) -> pl.Tensor[[BATCH_TILE, HIDDEN_CFG], pl.FP32]:
+            """SwiGLU MLP for one intermediate block, accumulated into down_proj."""
+            gate_acc = pl.full([BATCH_TILE, MLP_OUT_CHUNK], dtype=pl.FP32, value=0.0)
+            up_acc = pl.full([BATCH_TILE, MLP_OUT_CHUNK], dtype=pl.FP32, value=0.0)
+            for kb in pl.range(HIDDEN_BLOCKS):
+                k0 = kb * K_CHUNK
+                post_chunk = pl.slice(post_norm_gm, [BATCH_TILE, K_CHUNK], [0, k0])
+                wg = pl.slice(w_gate, [K_CHUNK, MLP_OUT_CHUNK], [k0, o0])
+                wu = pl.slice(w_up, [K_CHUNK, MLP_OUT_CHUNK], [k0, o0])
+                gate_acc = pl.add(gate_acc, pl.matmul(post_chunk, wg))
+                up_acc = pl.add(up_acc, pl.matmul(post_chunk, wu))
+
+            sigmoid = pl.recip(pl.add(pl.exp(pl.neg(gate_acc)), 1.0))
+            mlp_chunk = pl.mul(pl.mul(gate_acc, sigmoid), up_acc)
+            mlp_chunk_bf16 = pl.cast(mlp_chunk, target_type=pl.BF16)
+
+            for dob in pl.range(HIDDEN_BLOCKS):
+                d0 = dob * K_CHUNK
+                for doff in pl.range(0, K_CHUNK, DOWN_OUT_CHUNK):
+                    d1 = d0 + doff
+                    down_prev = pl.slice(down_proj_gm, [BATCH_TILE, DOWN_OUT_CHUNK], [0, d1])
+                    w_down_chunk = pl.slice(w_down, [MLP_OUT_CHUNK, DOWN_OUT_CHUNK], [o0, d1])
+                    down_next = pl.add(down_prev, pl.matmul(mlp_chunk_bf16, w_down_chunk))
+                    down_proj_gm = pl.assemble(down_proj_gm, down_next, [0, d1])
+            return down_proj_gm
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def final_resid_block(
+            self,
+            down_proj_gm: pl.Tensor[[BATCH_TILE, HIDDEN_CFG], pl.FP32],
+            resid1_gm: pl.Tensor[[BATCH_TILE, HIDDEN_CFG], pl.FP32],
+            b0: pl.Scalar[pl.INDEX],
+            o0: pl.Scalar[pl.INDEX],
+            out: pl.Out[pl.Tensor[[BATCH_CFG, HIDDEN_CFG], pl.BF16]],
+        ) -> pl.Tensor[[BATCH_CFG, HIDDEN_CFG], pl.BF16]:
+            """Final residual add (down_proj + resid1) for one K_CHUNK block."""
+            down_acc = pl.add(
+                pl.slice(down_proj_gm, [BATCH_TILE, K_CHUNK], [0, o0]),
+                pl.slice(resid1_gm, [BATCH_TILE, K_CHUNK], [0, o0]),
+            )
+            out = pl.assemble(out, pl.cast(down_acc, target_type=pl.BF16), [b0, o0])
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
         def scope3(
             self,
             attn_out: pl.Tensor[[BATCH_CFG, HIDDEN_CFG], pl.BF16],
@@ -81,94 +213,40 @@ def build_qwen3_scope3_program(
             w_gate: pl.Tensor[[HIDDEN_CFG, INTER_CFG], pl.BF16],
             w_up: pl.Tensor[[HIDDEN_CFG, INTER_CFG], pl.BF16],
             w_down: pl.Tensor[[INTER_CFG, HIDDEN_CFG], pl.BF16],
-            out: pl.Tensor[[BATCH_CFG, HIDDEN_CFG], pl.BF16],
+            out: pl.Out[pl.Tensor[[BATCH_CFG, HIDDEN_CFG], pl.BF16]],
         ) -> pl.Tensor[[BATCH_CFG, HIDDEN_CFG], pl.BF16]:
-            with pl.at(
-                level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.UP_DOWN)]
-            ):
-                for b0 in pl.range(0, BATCH_CFG, BATCH_TILE):
-                    resid1_tile = pl.create_tensor([BATCH_TILE, HIDDEN_CFG], dtype=pl.FP32)
-                    for ob in pl.parallel(0, Q_OUT_BLOCKS):
-                        o0 = ob * Q_OUT_CHUNK
-                        zero_resid1 = pl.full([BATCH_TILE, Q_OUT_CHUNK], dtype=pl.FP32, value=0.0)
-                        resid1_tile = pl.assemble(resid1_tile, zero_resid1, [0, o0])
+            for b0 in pl.range(0, BATCH_CFG, BATCH_TILE):
+                # Large per-tile intermediates live in GM, threaded across kernels.
+                resid1_gm = pl.create_tensor([BATCH_TILE, HIDDEN_CFG], dtype=pl.FP32)
+                inv_rms_gm = pl.create_tensor([1, BATCH_TILE], dtype=pl.FP32)
+                post_norm_gm = pl.create_tensor([BATCH_TILE, HIDDEN_CFG], dtype=pl.BF16)
+                down_proj_gm = pl.create_tensor([BATCH_TILE, HIDDEN_CFG], dtype=pl.FP32)
 
-                    # Output projection: attn_out × wo, tiled by Q_OUT_CHUNK.
-                    for ob in pl.parallel(0, Q_OUT_BLOCKS, 1, chunk=8, chunk_policy="leading_full"):
-                        o0 = ob * Q_OUT_CHUNK
-                        o_acc = pl.full([BATCH_TILE, Q_OUT_CHUNK], dtype=pl.FP32, value=0.0)
-                        for kb in pl.range(HIDDEN_BLOCKS):
-                            k0 = kb * K_CHUNK
-                            a_chunk = pl.slice(attn_out, [BATCH_TILE, K_CHUNK], [b0, k0])
-                            w_chunk = pl.slice(wo, [K_CHUNK, Q_OUT_CHUNK], [k0, o0])
-                            o_acc = pl.add(o_acc, pl.matmul(a_chunk, w_chunk))
-                        resid = pl.cast(
-                            pl.slice(hidden_states, [BATCH_TILE, Q_OUT_CHUNK], [b0, o0]),
-                            target_type=pl.FP32,
-                        )
-                        resid1_tile = pl.assemble(resid1_tile, pl.add(o_acc, resid), [0, o0])
+                # Output projection: attn_out × wo + residual, tiled by Q_OUT_CHUNK.
+                for ob in pl.range(0, Q_OUT_BLOCKS):
+                    o0 = ob * Q_OUT_CHUNK
+                    resid1_gm = self.oproj_block(attn_out, wo, hidden_states, b0, o0, resid1_gm)
 
-                    sq_sum = pl.full([1, BATCH_TILE], dtype=pl.FP32, value=0.0)
-                    for kb in pl.range(HIDDEN_BLOCKS):
-                        k0 = kb * K_CHUNK
-                        x_chunk = pl.slice(resid1_tile, [BATCH_TILE, K_CHUNK], [0, k0])
-                        sq_sum = pl.add(
-                            sq_sum, pl.reshape(pl.row_sum(pl.mul(x_chunk, x_chunk)), [1, BATCH_TILE])
-                        )
-                    inv_rms = pl.rsqrt(pl.add(pl.mul(sq_sum, hidden_inv), EPS))
+                inv_rms_gm = self.rmsnorm(resid1_gm, inv_rms_gm)
 
-                    post_norm_tile = pl.create_tensor([BATCH_TILE, HIDDEN_CFG], dtype=pl.BF16)
-                    down_proj_tile = pl.create_tensor([BATCH_TILE, HIDDEN_CFG], dtype=pl.FP32)
-                    for zi in pl.range(HIDDEN_BLOCKS):
-                        z0 = zi * K_CHUNK
-                        down_zero_chunk = pl.full([BATCH_TILE, K_CHUNK], dtype=pl.FP32, value=0.0)
-                        down_proj_tile = pl.assemble(down_proj_tile, down_zero_chunk, [0, z0])
+                # Post-attention RMSNorm, tiled by K_CHUNK.
+                for kb in pl.range(0, HIDDEN_BLOCKS):
+                    k0 = kb * K_CHUNK
+                    post_norm_gm = self.postnorm_block(
+                        resid1_gm, inv_rms_gm, post_rms_weight, k0, post_norm_gm
+                    )
 
-                    for kb in pl.range(HIDDEN_BLOCKS):
-                        k0 = kb * K_CHUNK
-                        x_chunk = pl.slice(resid1_tile, [BATCH_TILE, K_CHUNK], [0, k0])
-                        gamma = pl.slice(post_rms_weight, [1, K_CHUNK], [0, k0])
-                        normed = pl.col_expand_mul(
-                            pl.row_expand_mul(x_chunk, pl.reshape(inv_rms, [BATCH_TILE, 1])), gamma
-                        )
-                        post_norm_tile = pl.assemble(
-                            post_norm_tile, pl.cast(normed, target_type=pl.BF16), [0, k0]
-                        )
+                down_proj_gm = self.zero_down(down_proj_gm)
 
-                    for ob in pl.range(MLP_OUT_BLOCKS):
-                        o0 = ob * MLP_OUT_CHUNK
-                        gate_acc = pl.full([BATCH_TILE, MLP_OUT_CHUNK], dtype=pl.FP32, value=0.0)
-                        up_acc = pl.full([BATCH_TILE, MLP_OUT_CHUNK], dtype=pl.FP32, value=0.0)
+                # SwiGLU MLP + down projection, tiled by MLP_OUT_CHUNK.
+                for ob in pl.range(0, MLP_OUT_BLOCKS):
+                    o0 = ob * MLP_OUT_CHUNK
+                    down_proj_gm = self.mlp_block(post_norm_gm, w_gate, w_up, w_down, o0, down_proj_gm)
 
-                        for kb in pl.range(HIDDEN_BLOCKS):
-                            k0 = kb * K_CHUNK
-                            post_chunk = pl.slice(post_norm_tile, [BATCH_TILE, K_CHUNK], [0, k0])
-                            wg = pl.slice(w_gate, [K_CHUNK, MLP_OUT_CHUNK], [k0, o0])
-                            wu = pl.slice(w_up, [K_CHUNK, MLP_OUT_CHUNK], [k0, o0])
-                            gate_acc = pl.add(gate_acc, pl.matmul(post_chunk, wg))
-                            up_acc = pl.add(up_acc, pl.matmul(post_chunk, wu))
-
-                        sigmoid = pl.recip(pl.add(pl.exp(pl.neg(gate_acc)), 1.0))
-                        mlp_chunk = pl.mul(pl.mul(gate_acc, sigmoid), up_acc)
-                        mlp_chunk_bf16 = pl.cast(mlp_chunk, target_type=pl.BF16)
-
-                        for dob in pl.parallel(0, HIDDEN_BLOCKS, 1, chunk=4, chunk_policy="leading_full"):
-                            d0 = dob * K_CHUNK
-                            for doff in pl.range(0, K_CHUNK, DOWN_OUT_CHUNK):
-                                d1 = d0 + doff
-                                down_prev = pl.slice(down_proj_tile, [BATCH_TILE, DOWN_OUT_CHUNK], [0, d1])
-                                w_down_chunk = pl.slice(w_down, [MLP_OUT_CHUNK, DOWN_OUT_CHUNK], [o0, d1])
-                                down_next = pl.add(down_prev, pl.matmul(mlp_chunk_bf16, w_down_chunk))
-                                down_proj_tile = pl.assemble(down_proj_tile, down_next, [0, d1])
-
-                    # Final residual: down_proj + resid1, write to output.
-                    for ob in pl.parallel(0, HIDDEN_BLOCKS, 1, chunk=4, chunk_policy="leading_full"):
-                        o0 = ob * K_CHUNK
-                        down_acc = pl.add(
-                            pl.slice(down_proj_tile, [BATCH_TILE, K_CHUNK], [0, o0]),
-                            pl.slice(resid1_tile, [BATCH_TILE, K_CHUNK], [0, o0]),
-                        )
-                        out = pl.assemble(out, pl.cast(down_acc, target_type=pl.BF16), [b0, o0])
+                # Final residual: down_proj + resid1, write to output.
+                for ob in pl.range(0, HIDDEN_BLOCKS):
+                    o0 = ob * K_CHUNK
+                    out = self.final_resid_block(down_proj_gm, resid1_gm, b0, o0, out)
 
             return out
 

@@ -72,7 +72,7 @@ program_simplified = simplify_pass(program)
 两个折叠在 `SimplifyMutator` 遍历内部运行，因此与周围的表达式级处理共享分析器的约束栈：
 
 - **Fold A —— 常量条件 `IfStmt` 折叠**。条件被化简后，分别用 `CanProve(cond)` 与 `CanProve(Not(cond))` 询问分析器。任一极性被证明，则丢弃死分支并把保留分支提升到父作用域。当 `return_vars_` 非空时，保留分支末尾的 `YieldStmt` 被剥离，每个 `return_vars[i]` 在 `var_remap_` 中绑定到对应的 yielded 值，使后续兄弟语句（以及函数 `ReturnStmt`）直接读取该值。真/假两种极性的处理是对称的；唯一的边界情况是「永远为假，无 else，且 `return_vars_` 为空」，此时折叠为空体。
-- **Fold B —— 纯单次/零次 `ForStmt` 折叠**。仅对*纯*顺序循环触发：`chunk_config_` 为空、`attrs_` 为空、`kind_ == ForKind::Sequential`。对这类循环，用 `CanProveGreaterEqual(step, 1)` 加 `CanProve(stop <= start)`（零次）或 `CanProve(start < stop && stop <= start + step)`（一次）询问分析器以证明循环次数。零次时，为每个 return var 发出 `AssignStmt(return_vars[i], iter_args[i].initValue_)` 并丢弃循环体；一次时，用 `DeepClone` 复制循环体并将 `loop_var → start`、`iter_args[i] → init_values[i]` 直接代入，再次访问克隆体让进一步折叠在同一次 Pass 中发生，最后剥离末尾的 `YieldStmt` 并把 `return_vars[i] → yielded_value[i]` 写入 `var_remap_`（与 Fold A 的提升机制一致）。
+- **Fold B —— 纯单次/零次 `ForStmt` 折叠**。仅对*纯*顺序循环触发：`attrs_` 为空、`kind_ == ForKind::Sequential`。对这类循环，用 `CanProveGreaterEqual(step, 1)` 加 `CanProve(stop <= start)`（零次）或 `CanProve(start < stop && stop <= start + step)`（一次）询问分析器以证明循环次数。零次时，为每个 return var 发出 `AssignStmt(return_vars[i], iter_args[i].initValue_)` 并丢弃循环体；一次时，用 `DeepClone` 复制循环体并将 `loop_var → start`、`iter_args[i] → init_values[i]` 直接代入，再次访问克隆体让进一步折叠在同一次 Pass 中发生，最后剥离末尾的 `YieldStmt` 并把 `return_vars[i] → yielded_value[i]` 写入 `var_remap_`（与 Fold A 的提升机制一致）。
 
 在循环体上使用 `DeepClone` 且 `clone_def_vars=true`（而非就地的 `var_remap_` 覆盖），是为了让展开后的循环体在每个定义点获得全新的 `Var` 标识，与 `LoopUnrollMutator` 保持一致。这样提升后的副本在结构上与原（已丢弃的）循环体相互独立，并使重新访问时能在与外围作用域不同的标识上绑定循环体内的标量。
 
@@ -208,7 +208,7 @@ first_iter(0)
 
 `pl.range(0, 128, 128)` 满足循环次数证明 `start < stop && stop <= start + step`，因此 Fold B 通过 `DeepClone` 把 `ko → 0` 代入循环体并提升到父作用域。代换之后内层的 `if ko == 0` 变为 `if 0 == 0`，被 `analyzer_->Simplify` 化简为 `ConstBool(true)`，进而触发 Fold A 丢掉死的 else 分支 —— 两种折叠在同一次 Simplify 中叠加生效。零次循环走相同的路径：为每个 `return_vars[i] = iter_args[i].initValue_` 发出 `AssignStmt`，并整体丢弃循环体。
 
-带有 `chunk_config_`、`attrs_` 或非 `Sequential` `kind_` 的循环会被跳过 —— 这些形式参与执行模型契约（chunk 循环配对、Parallel/Unroll/Pipeline 调度），下游 Pass 可能依赖它们仍然以 `ForStmt` 形式出现。
+带有 `attrs_` 或非 `Sequential` `kind_` 的循环会被跳过 —— 这些形式参与执行模型契约（Parallel/Unroll/Pipeline 调度），下游 Pass 可能依赖它们仍然以 `ForStmt` 形式出现。
 
 ## 实现
 

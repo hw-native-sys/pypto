@@ -468,7 +468,7 @@ class TestSpmdForLoop:
                 return a
 
     def test_for_spmd_rejects_chunk_kwarg(self):
-        """chunk= is a pl.parallel/pl.range kwarg and not valid on pl.spmd."""
+        """chunk= is not a valid kwarg on pl.spmd loop forms."""
         with pytest.raises(ParserSyntaxError, match=r"does not accept 'chunk='"):
 
             @pl.function
@@ -645,8 +645,7 @@ class TestSpmdForLoop:
 class TestSpmdOptimizations:
     """Test ``pl.spmd(..., optimizations=[pl.split(...)])`` lowering.
 
-    Only ``pl.split(mode)`` is supported on ``pl.spmd``; ``pl.auto_chunk`` must
-    be used on nested ``pl.at(level=CORE_GROUP, ...)`` instead.
+    Only ``pl.split(mode)`` is supported on ``pl.spmd``.
     """
 
     @staticmethod
@@ -960,41 +959,6 @@ class TestSpmdOptimizations:
         assert spmd.name_hint == "my_kernel_spmd"
         assert incore.name_hint == "my_kernel"
         assert incore.split == ir.SplitMode.UP_DOWN
-
-    def test_spmd_rejects_auto_chunk_on_with_form(self):
-        """``pl.auto_chunk`` is not supported on ``pl.spmd`` (either form)."""
-        with pytest.raises(ParserSyntaxError, match="not supported in pl.spmd"):
-
-            @pl.program
-            class _Prog:
-                @pl.function(type=pl.FunctionType.InCore)
-                def kernel(
-                    self,
-                    a: pl.Tensor[[64], pl.FP32],
-                    out: pl.Out[pl.Tensor[[64], pl.FP32]],
-                ) -> pl.Tensor[[64], pl.FP32]:
-                    with pl.at(level=pl.Level.CORE_GROUP):
-                        out = pl.add(a, a)
-                    return out
-
-                @pl.function(type=pl.FunctionType.Orchestration)
-                def main(
-                    self,
-                    a: pl.Tensor[[64], pl.FP32],
-                    out: pl.Out[pl.Tensor[[64], pl.FP32]],
-                ) -> pl.Tensor[[64], pl.FP32]:
-                    with pl.spmd(4, optimizations=[pl.auto_chunk]):
-                        out = self.kernel(a, out)
-                    return out
-
-    def test_spmd_rejects_auto_chunk_on_for_form(self):
-        with pytest.raises(ParserSyntaxError, match="not supported in pl.spmd"):
-
-            @pl.function
-            def bad(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                for i in pl.spmd(4, optimizations=[pl.auto_chunk]):
-                    _ = i
-                return a
 
     def test_with_spmd_no_optimizations_preserves_ir_shape(self):
         """Regression: omitting optimizations keeps the historical IR shape

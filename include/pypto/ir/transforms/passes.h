@@ -163,25 +163,6 @@ Pass MemoryReuse();
 Pass AllocateMemoryAddr();
 
 /**
- * @brief Create a loop chunking pass
- *
- * Splits ForStmt nodes with chunk_size into nested loops: an outer loop
- * iterating over chunk indices and an inner loop iterating within each chunk.
- * Requires SSA form input and produces SSA form output.
- */
-Pass SplitChunkedLoops();
-
-/**
- * @brief Interchange chunk loops and insert InCore scopes
- *
- * Reorders nested ChunkOuter/ChunkInner loop pairs so that all outer loops
- * are on top, then wraps the inner loops + body in a ScopeStmt(InCore).
- * Only interchanges when all ChunkInner loops are Parallel.
- * Requires SSA form input and produces SSA form output.
- */
-Pass InterchangeChunkLoops();
-
-/**
  * @brief Eliminate FunctionType::Inline functions by splicing their bodies
  *        into every call site.
  *

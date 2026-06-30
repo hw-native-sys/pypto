@@ -411,8 +411,7 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
 
   auto for_stmt = std::make_shared<ForStmt>(ko_var, MakeIndex(0, sp), MakeIndex(r.K, sp), MakeIndex(r.k, sp),
                                             std::vector<IterArgPtr>{c_iter}, body, std::vector<VarPtr>{rv},
-                                            sp, ForKind::Pipeline,
-                                            /*chunk_config=*/std::nullopt, std::move(attrs));
+                                            sp, ForKind::Pipeline, std::move(attrs));
   out.push_back(for_stmt);
   return RewriteResult{std::move(out), rv};
 }
@@ -958,21 +957,19 @@ std::pair<std::vector<StmtPtr>, VarPtr> BuildFullKPipelined(const MatmulTiling& 
     std::vector<std::pair<std::string, std::any>> inner_attrs = {{kPipelineStagesAttr, /*pipeline_stages=*/2},
                                                                  {kPipelineOverlapStoresAttr, false}};
     auto inner_rv = std::make_shared<Var>(base + "_irv", out_type, sp);
-    auto inner_for = std::make_shared<ForStmt>(inner_var, MakeIndex(0, sp), MakeIndex(inner_extent, sp),
-                                               MakeIndex(inner_step, sp), std::vector<IterArgPtr>{out_inner},
-                                               SeqStmts::Flatten(std::move(inner_body), sp),
-                                               std::vector<VarPtr>{inner_rv}, sp, ForKind::Pipeline,
-                                               /*chunk_config=*/std::nullopt, std::move(inner_attrs));
+    auto inner_for = std::make_shared<ForStmt>(
+        inner_var, MakeIndex(0, sp), MakeIndex(inner_extent, sp), MakeIndex(inner_step, sp),
+        std::vector<IterArgPtr>{out_inner}, SeqStmts::Flatten(std::move(inner_body), sp),
+        std::vector<VarPtr>{inner_rv}, sp, ForKind::Pipeline, std::move(inner_attrs));
     std::vector<StmtPtr> outer_body{outer_extract, inner_for,
                                     std::make_shared<YieldStmt>(std::vector<ExprPtr>{inner_rv}, sp)};
     std::vector<std::pair<std::string, std::any>> outer_attrs = {{kPipelineStagesAttr, /*pipeline_stages=*/2},
                                                                  {kPipelineOverlapStoresAttr, false}};
     auto outer_rv = std::make_shared<Var>(base + "_orv", out_type, sp);
-    auto outer_for = std::make_shared<ForStmt>(outer_var, MakeIndex(0, sp), MakeIndex(outer_extent, sp),
-                                               MakeIndex(outer_step, sp), std::vector<IterArgPtr>{out_outer},
-                                               SeqStmts::Flatten(std::move(outer_body), sp),
-                                               std::vector<VarPtr>{outer_rv}, sp, ForKind::Pipeline,
-                                               /*chunk_config=*/std::nullopt, std::move(outer_attrs));
+    auto outer_for = std::make_shared<ForStmt>(
+        outer_var, MakeIndex(0, sp), MakeIndex(outer_extent, sp), MakeIndex(outer_step, sp),
+        std::vector<IterArgPtr>{out_outer}, SeqStmts::Flatten(std::move(outer_body), sp),
+        std::vector<VarPtr>{outer_rv}, sp, ForKind::Pipeline, std::move(outer_attrs));
     stmts.push_back(outer_for);
     chain = outer_rv;
   }

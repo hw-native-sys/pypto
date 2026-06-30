@@ -797,20 +797,9 @@ StmtPtr IRMutator::VisitStmt_(const ForStmtPtr& op) {
     }
   }
 
-  std::optional<ChunkConfig> new_chunk_config = op->chunk_config_;
-  bool chunk_config_changed = false;
-  if (op->chunk_config_.has_value()) {
-    auto new_cs = ExprFunctor<ExprPtr>::VisitExpr(op->chunk_config_->size);
-    INTERNAL_CHECK_SPAN(new_cs, op->span_) << "ForStmt chunk_size mutated to null";
-    if (new_cs.get() != op->chunk_config_->size.get()) {
-      new_chunk_config = ChunkConfig{new_cs, op->chunk_config_->policy};
-      chunk_config_changed = true;
-    }
-  }
-
   if (new_loop_var.get() != op->loop_var_.get() || new_start.get() != op->start_.get() ||
       new_stop.get() != op->stop_.get() || new_step.get() != op->step_.get() || iter_args_changed ||
-      body_changed || return_vars_changed || chunk_config_changed) {
+      body_changed || return_vars_changed) {
     auto result = MutableCopy(op);
     result->loop_var_ = std::move(new_loop_var);
     result->start_ = std::move(new_start);
@@ -819,7 +808,6 @@ StmtPtr IRMutator::VisitStmt_(const ForStmtPtr& op) {
     result->iter_args_ = std::move(new_iter_args);
     result->body_ = std::move(new_body);
     result->return_vars_ = std::move(new_return_vars);
-    result->chunk_config_ = std::move(new_chunk_config);
     return result;
   }
   return op;
@@ -960,20 +948,6 @@ StmtPtr IRMutator::VisitStmt_(const InCoreScopeStmtPtr& op) {
   return op;
 }
 
-StmtPtr IRMutator::VisitStmt_(const AutoInCoreScopeStmtPtr& op) {
-  INTERNAL_CHECK_SPAN(op->body_, op->span_) << "AutoInCoreScopeStmt has null body";
-  auto new_body = StmtFunctor<StmtPtr>::VisitStmt(op->body_);
-  INTERNAL_CHECK_SPAN(new_body, op->span_) << "AutoInCoreScopeStmt body mutated to null";
-  auto [new_attrs, attrs_changed] = MutateScopeAttrs(op->attrs_);
-  if (new_body.get() != op->body_.get() || attrs_changed) {
-    auto result = MutableCopy(op);
-    result->body_ = std::move(new_body);
-    if (attrs_changed) result->attrs_ = std::move(new_attrs);
-    return result;
-  }
-  return op;
-}
-
 StmtPtr IRMutator::VisitStmt_(const ClusterScopeStmtPtr& op) {
   INTERNAL_CHECK_SPAN(op->body_, op->span_) << "ClusterScopeStmt has null body";
   auto new_body = StmtFunctor<StmtPtr>::VisitStmt(op->body_);
@@ -1011,7 +985,7 @@ StmtPtr IRMutator::VisitStmt_(const SpmdScopeStmtPtr& op) {
 
   // Spmd scopes can carry kAttrTaskIdVar / kAttrManualDepEdges (the
   // `with pl.spmd(...) as tid:` capture form), so substitute over the attr Vars
-  // just like the InCore / AutoInCore / Hierarchy handlers — otherwise a
+  // just like the InCore / Hierarchy handlers — otherwise a
   // Var-substituting pass would leave the tid / dep edges pointing at stale Vars.
   auto [new_attrs, attrs_changed] = MutateScopeAttrs(op->attrs_);
   if (new_core_num.get() != op->core_num_.get() || new_body.get() != op->body_.get() || attrs_changed) {

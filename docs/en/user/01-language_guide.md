@@ -477,7 +477,7 @@ too; entry `True` + inline `False` is legal and just nests hand scopes
 inside compiler AUTO scopes). `.incore` / `.opaque` reject it — they
 outline into separate kernels. It specializes into
 `@pl.function(..., auto_scope=False)` — see the
-[MaterializeRuntimeScopes pass](../dev/passes/40-materialize_runtime_scopes.md)
+[MaterializeRuntimeScopes pass](../dev/passes/38-materialize_runtime_scopes.md)
 for the resulting scope-placement semantics.
 
 ### `@pl.inline`
@@ -524,29 +524,14 @@ with pl.at(level=pl.Level.CORE_GROUP):
     y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
 ```
 
-For compiler-driven chunked loop outlining (AutoInCore), pass `pl.auto_chunk` in
-the `optimizations` list:
-
-```python
-with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
-    for i in pl.parallel(0, 8, 1, chunk=4):
-        x = pl.add(x, x)
-```
-
 To set a cross-core split mode (consumed by the `ExpandMixedKernel` pass), use
-`pl.split(...)` — independent from `pl.auto_chunk`, so the two can be combined:
+`pl.split(...)`:
 
 ```python
-# Plain InCore + split hint:
+# InCore + split hint:
 with pl.at(level=pl.Level.CORE_GROUP,
            optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):
     y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
-
-# AutoInCore + split hint (independent entries, combined freely):
-with pl.at(level=pl.Level.CORE_GROUP,
-           optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.UP_DOWN)]):
-    for i in pl.parallel(0, 8, 1, chunk=4):
-        x = pl.add(x, x)
 ```
 
 ## Memory and Data Movement
@@ -635,19 +620,17 @@ The `Default` strategy runs these passes in order:
 2. **CtrlFlowTransform** — rewrite control flow to structured IR
 3. **ConvertToSSA** — convert to static single assignment form
 4. **FlattenCallExpr** — flatten nested function calls
-5. **SplitChunkedLoops** — split chunked loops into separate loops
-6. **InterchangeChunkLoops** — interchange chunk loop ordering
-7. **OutlineHierarchyScopes** — outline hierarchy scopes
-8. **OutlineIncoreScopes** — outline InCore scopes into separate functions
-9. **OutlineClusterScopes** — outline cluster scopes
-10. **ConvertTensorToTileOps** — convert tensor operations to tile operations
-11. **FlattenTileNdTo2D** — normalize ND tile ops to 2D
-12. **InferTileMemorySpace** — infer tile memory spaces
-13. **ResolveBackendOpLayouts** — repair backend-constrained tile layouts
-14. **ExpandMixedKernel** — split mixed kernels when needed
-15. **InitMemRef** — assign memory spaces and insert buffer allocations
-16. **MemoryReuse** — share buffers with non-overlapping lifetimes
-17. **AllocateMemoryAddr** — assign concrete memory addresses
+5. **OutlineHierarchyScopes** — outline hierarchy scopes
+6. **OutlineIncoreScopes** — outline InCore scopes into separate functions
+7. **OutlineClusterScopes** — outline cluster scopes
+8. **ConvertTensorToTileOps** — convert tensor operations to tile operations
+9. **FlattenTileNdTo2D** — normalize ND tile ops to 2D
+10. **InferTileMemorySpace** — infer tile memory spaces
+11. **ResolveBackendOpLayouts** — repair backend-constrained tile layouts
+12. **ExpandMixedKernel** — split mixed kernels when needed
+13. **InitMemRef** — assign memory spaces and insert buffer allocations
+14. **MemoryReuse** — share buffers with non-overlapping lifetimes
+15. **AllocateMemoryAddr** — assign concrete memory addresses
 
 ### `JITFunction.compile()` (for `@pl.jit` kernels)
 

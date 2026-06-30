@@ -33,7 +33,6 @@ def test_hierarchy_scope_kind_exists():
 def test_hierarchy_scope_kind_distinct():
     """Hierarchy is distinct from existing ScopeKind values."""
     assert ir.ScopeKind.Hierarchy != ir.ScopeKind.InCore
-    assert ir.ScopeKind.Hierarchy != ir.ScopeKind.AutoInCore
     assert ir.ScopeKind.Hierarchy != ir.ScopeKind.Cluster
 
 
@@ -199,7 +198,6 @@ def test_scope_outliner_ignores_hierarchy_kind():
     # scope via the DSL parser yet (pl.at() parsing is Step 04).
     assert ir.ScopeKind.Hierarchy != ir.ScopeKind.InCore
     assert ir.ScopeKind.Hierarchy != ir.ScopeKind.Cluster
-    assert ir.ScopeKind.Hierarchy != ir.ScopeKind.AutoInCore
 
 
 if __name__ == "__main__":

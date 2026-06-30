@@ -75,10 +75,10 @@ class After:
 UnrollLoops runs **once** in `Default` and `DebugTileOptimization`, before control flow structuring:
 
 ```text
-UnrollLoops → CtrlFlowTransform → ConvertToSSA → FlattenCallExpr → SplitChunkedLoops → InterchangeChunkLoops → OutlineIncoreScopes → ...
+UnrollLoops → CtrlFlowTransform → ConvertToSSA → FlattenCallExpr → OutlineHierarchyScopes → OutlineIncoreScopes → ...
 ```
 
-UnrollLoops expands non-chunked `pl.unroll()` loops (skipping chunked unroll loops which retain `chunk` for `SplitChunkedLoops` to handle later).
+UnrollLoops expands `pl.unroll()` loops into their fully unrolled, straight-line form.
 
 ## Pass Properties
 

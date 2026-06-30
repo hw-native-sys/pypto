@@ -15,7 +15,7 @@ Covers both DSL layers exposed by issue #1138 (tensor.abs):
   TileAbsTest         : Tile level,   pl.tile.abs(t)      out = abs(a)
   TensorAbsTestFP16   : Tensor level, pl.abs(x)  FP16     out = abs(x)
   TensorAbsTestFP32   : Tensor level, pl.abs(x)  FP32     out = abs(x)
-  TensorAbsTestLarge  : Tensor level, pl.abs(x)  FP32 64x128 — exercises chunked_loop split
+  TensorAbsTestLarge  : Tensor level, pl.abs(x)  FP32 64x128 — exercises the UP_DOWN vector split
 """
 
 from typing import Any
@@ -102,7 +102,7 @@ class TensorAbsProgramFP16:
     ) -> pl.Tensor[[M, N], pl.FP16]:
         with pl.at(
             level=pl.Level.CORE_GROUP,
-            optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.UP_DOWN)],
+            optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
         ):
             y = pl.abs(x)
             out = pl.assemble(out, y, [0, 0])
@@ -143,7 +143,7 @@ class TensorAbsProgramFP32:
     ) -> pl.Tensor[[M, N], pl.FP32]:
         with pl.at(
             level=pl.Level.CORE_GROUP,
-            optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.UP_DOWN)],
+            optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
         ):
             y = pl.abs(x)
             out = pl.assemble(out, y, [0, 0])
@@ -177,7 +177,7 @@ LARGE_N = 128
 
 @pl.program
 class TensorAbsProgramLarge:
-    """Tensor-level abs on a larger shape (64x128) to exercise the chunked-loop split path."""
+    """Tensor-level abs on a larger shape (64x128) to exercise the UP_DOWN vector split path."""
 
     @pl.function(type=pl.FunctionType.Opaque)
     def main(
@@ -187,7 +187,7 @@ class TensorAbsProgramLarge:
     ) -> pl.Tensor[[LARGE_M, LARGE_N], pl.FP32]:
         with pl.at(
             level=pl.Level.CORE_GROUP,
-            optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.UP_DOWN)],
+            optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
         ):
             y = pl.abs(x)
             out = pl.assemble(out, y, [0, 0])
@@ -195,7 +195,7 @@ class TensorAbsProgramLarge:
 
 
 class TensorAbsTestLarge(PTOTestCase):
-    """Tensor abs on 64x128 FP32 — validates codegen under chunked-loop splitting."""
+    """Tensor abs on 64x128 FP32 — validates codegen under UP_DOWN vector splitting."""
 
     __test__ = False
 
@@ -244,7 +244,7 @@ class TestAbs:
         assert result.passed, f"Tensor abs FP32 failed: {result.error}"
 
     def test_tensor_abs_large(self, test_runner):
-        """Tensor-level pl.abs on 64x128 — exercises chunked-loop split."""
+        """Tensor-level pl.abs on 64x128 — exercises the UP_DOWN vector split."""
         result = test_runner.run(TensorAbsTestLarge())
         assert result.passed, f"Tensor abs large failed: {result.error}"
 

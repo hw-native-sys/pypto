@@ -363,8 +363,6 @@ class TestCrossCoreTpushTpopCodegen:
             passes.unroll_loops,
             passes.convert_to_ssa,
             passes.flatten_call_expr,
-            passes.split_chunked_loops,
-            passes.interchange_chunk_loops,
             passes.outline_incore_scopes,
             passes.outline_cluster_scopes,
             passes.convert_tensor_to_tile_ops,
@@ -1339,8 +1337,6 @@ class TestExpandMixedKernelCodegen:
         pipeline.add_pass(passes.unroll_loops())
         pipeline.add_pass(passes.convert_to_ssa())
         pipeline.add_pass(passes.flatten_call_expr())
-        pipeline.add_pass(passes.split_chunked_loops())
-        pipeline.add_pass(passes.interchange_chunk_loops())
         pipeline.add_pass(passes.outline_incore_scopes())
         pipeline.add_pass(passes.outline_cluster_scopes())
         pipeline.add_pass(passes.convert_tensor_to_tile_ops())

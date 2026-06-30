@@ -287,12 +287,6 @@ void IRVisitor::VisitStmt_(const InCoreScopeStmtPtr& op) {
   VisitStmt(op->body_);
 }
 
-void IRVisitor::VisitStmt_(const AutoInCoreScopeStmtPtr& op) {
-  INTERNAL_CHECK_SPAN(op->body_, op->span_) << "AutoInCoreScopeStmt has null body";
-  VisitScopeAttrs(op);
-  VisitStmt(op->body_);
-}
-
 void IRVisitor::VisitStmt_(const ClusterScopeStmtPtr& op) {
   INTERNAL_CHECK_SPAN(op->body_, op->span_) << "ClusterScopeStmt has null body";
   VisitStmt(op->body_);
@@ -308,7 +302,7 @@ void IRVisitor::VisitStmt_(const SpmdScopeStmtPtr& op) {
   INTERNAL_CHECK_SPAN(op->core_num_, op->span_) << "SpmdScopeStmt has null core_num";
   VisitExpr(op->core_num_);
   // Visit kAttrTaskIdVar / kAttrManualDepEdges attr Vars (the
-  // `with pl.spmd(...) as tid:` capture form), like the InCore / AutoInCore /
+  // `with pl.spmd(...) as tid:` capture form), like the InCore /
   // Hierarchy handlers — so free-var / use-def analyses see the tid and dep edges.
   VisitScopeAttrs(op);
   INTERNAL_CHECK_SPAN(op->body_, op->span_) << "SpmdScopeStmt has null body";

@@ -70,12 +70,6 @@ inline std::string JoinQualifierParts(const std::vector<std::string>& qualifier_
   return qualifier;
 }
 
-inline std::string ChunkOuterQualifier() { return "co"; }
-
-inline std::string ChunkInnerQualifier() { return "ci"; }
-
-inline std::string ChunkRemainderQualifier() { return "cr"; }
-
 inline std::string ChunkGuardQualifier() { return "cg"; }
 
 inline std::string LoopLevelQualifier(int level) { return "l" + std::to_string(level); }

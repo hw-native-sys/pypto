@@ -92,8 +92,6 @@ def _strip_auto_tfree_from_stmt(stmt):
             stmt.return_vars,
             stmt.span,
             stmt.kind,
-            stmt.chunk_size,
-            stmt.chunk_policy,
             stmt.attrs,
         )
     if isinstance(stmt, ir.IfStmt):

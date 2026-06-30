@@ -192,7 +192,7 @@ class LowerHostTensorCollectivesMutator : public IRMutator {
     auto stop = OpRegistry::GetInstance().Create("pld.system.world_size", {}, call->span_);
     auto body = std::make_shared<EvalStmt>(MakeBuiltinCall(call, loop_var), call->span_);
     return std::make_shared<ForStmt>(loop_var, zero, stop, one, std::vector<IterArgPtr>{}, body,
-                                     std::vector<VarPtr>{}, span, ForKind::Sequential, std::nullopt,
+                                     std::vector<VarPtr>{}, span, ForKind::Sequential,
                                      std::vector<std::pair<std::string, std::any>>{}, leading_comments);
   }
 

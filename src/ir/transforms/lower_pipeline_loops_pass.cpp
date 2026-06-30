@@ -388,8 +388,7 @@ class LowerPipelineMutator : public IRMutator {
     Attrs new_attrs = StripAttr(op->attrs_, kPipelineStagesAttr);
     new_attrs.emplace_back(kPipelineStagesAttr, 1);
     return std::make_shared<ForStmt>(new_loop_var, main_start, main_stop, new_step, new_iter_args, new_body,
-                                     main_return_vars, sp, op->kind_,
-                                     /*chunk_config=*/std::nullopt, new_attrs, op->leading_comments_);
+                                     main_return_vars, sp, op->kind_, new_attrs, op->leading_comments_);
   }
 
   /**

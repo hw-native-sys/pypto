@@ -191,7 +191,7 @@ def test_printer_hierarchy_scope_roundtrip():
     assert "Role.Orchestrator" in printed
 
 
-# ─── New pl.at() InCore / AutoInCore forms ───────────────────────────────────
+# ─── New pl.at() InCore forms ────────────────────────────────────────────────
 
 
 def test_parse_pl_at_core_group_incore():
@@ -206,60 +206,6 @@ def test_parse_pl_at_core_group_incore():
     scope = _find_scope_stmt(f.body)
     assert scope is not None
     assert scope.scope_kind == ir.ScopeKind.InCore
-
-
-def test_parse_pl_at_core_group_auto_chunk_bare():
-    """pl.at(level=CORE_GROUP, optimizations=[pl.auto_chunk]) → AutoInCore, no split."""
-
-    @pl.function
-    def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
-            for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
-                x = pl.add(x, x)
-        return x
-
-    scope = _find_scope_stmt(f.body)
-    assert scope is not None
-    assert scope.scope_kind == ir.ScopeKind.AutoInCore
-    assert cast(_HasSplit, scope).split is None
-
-
-def test_parse_pl_at_core_group_auto_chunk_with_split():
-    """pl.at(level=CORE_GROUP, optimizations=[pl.auto_chunk, pl.split(LEFT_RIGHT)]) → AutoInCore."""
-
-    @pl.function
-    def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        with pl.at(
-            level=pl.Level.CORE_GROUP,
-            optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.LEFT_RIGHT)],
-        ):
-            for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
-                x = pl.add(x, x)
-        return x
-
-    scope = _find_scope_stmt(f.body)
-    assert scope is not None
-    assert scope.scope_kind == ir.ScopeKind.AutoInCore
-    assert cast(_HasSplit, scope).split == ir.SplitMode.LEFT_RIGHT
-
-
-def test_parse_pl_at_auto_chunk_none_split_is_default_nosplit():
-    """optimizations=[pl.auto_chunk] with no split entry yields no-split AutoInCore."""
-
-    @pl.function
-    def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        with pl.at(
-            level=pl.Level.CORE_GROUP,
-            optimizations=[pl.auto_chunk],
-        ):
-            for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
-                x = pl.add(x, x)
-        return x
-
-    scope = _find_scope_stmt(f.body)
-    assert scope is not None
-    assert scope.scope_kind == ir.ScopeKind.AutoInCore
-    assert cast(_HasSplit, scope).split is None
 
 
 def test_parse_pl_at_role_with_core_group_errors():

@@ -2353,11 +2353,11 @@ class TestOrchestration:
         assert "params_t1.add_input(acc);" in code
 
     def test_for_loop_with_inplace_return_after_passes(self):
-        """Test inplace detection when return var has compound auto-name suffixes from pass pipeline.
+        """Test inplace detection when the return var has compound auto-name suffixes from the pipeline.
 
-        When an Opaque function with auto_incore + parallel(chunk=) goes through the full
-        pass pipeline (SSA → split_chunked_loops → interchange_chunk_loops → outline), the
-        return var acquires compound suffixes like "__co_l0_rv_v1". GetSSABaseName must
+        When an Opaque function with a hand-tiled loop nest over the iteration space goes
+        through the full pass pipeline (SSA → outline), the return var acquires compound
+        suffixes from the nested loop-carried renames (e.g. "__rv_v1"). GetSSABaseName must
         strip all of these to match the return var back to the original param name for correct
         inplace detection (2 arg slots, not 3).
         """
@@ -2372,11 +2372,13 @@ class TestOrchestration:
                 input_tensor: pl.Tensor[[1024, 256], pl.FP32],
                 output_tensor: pl.Tensor[[1024, 256], pl.FP32],
             ) -> pl.Tensor[[1024, 256], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
-                    for r in pl.parallel(0, 1024, 1, chunk=64, chunk_policy="leading_full"):
-                        row_tile = pl.slice(input_tensor, [1, 256], [r, 0])
-                        row_result = pl.add(row_tile, 1.0)
-                        output_tensor = pl.assemble(output_tensor, row_result, [r, 0])
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    for rc in pl.range(0, 1024 // 64):
+                        for ri in pl.range(0, 64):
+                            r = rc * 64 + ri
+                            row_tile = pl.slice(input_tensor, [1, 256], [r, 0])
+                            row_result = pl.add(row_tile, 1.0)
+                            output_tensor = pl.assemble(output_tensor, row_result, [r, 0])
                 return output_tensor
 
         # Run the full pass pipeline to produce compound SSA suffixes
@@ -3792,7 +3794,7 @@ class TestTensorReadWriteOffsetCodegen:
                 b: pl.Tensor[[32, 32], pl.FP32],
                 out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
             ) -> pl.Tensor[[32, 32], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
+                with pl.at(level=pl.Level.CORE_GROUP):
                     a_plus_b = pl.add(a, b)
                     sub = pl.sub(a, b)
                     result = pl.matmul(a_plus_b, sub)

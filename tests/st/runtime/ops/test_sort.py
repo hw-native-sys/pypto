@@ -235,7 +235,7 @@ class MrgSort1DynFP32TensorProgram:
     ) -> pl.Tensor[[1, 2048], pl.FP32]:
         with pl.at(
             level=pl.Level.CORE_GROUP,
-            optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.UP_DOWN)],
+            optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
         ):
             sorted_t = pl.tensor.sort32(src, idx)
             for i, (acc,) in pl.range(3, init_values=(sorted_t,)):
@@ -268,7 +268,7 @@ class MrgSort1DynFP32TensorValIdxProgram:
     ) -> tuple[pl.Tensor[[1, 2048], pl.FP32], pl.Tensor[[1, 2048], pl.UINT32]]:
         with pl.at(
             level=pl.Level.CORE_GROUP,
-            optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.UP_DOWN)],
+            optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
         ):
             sorted_t = pl.tensor.sort32(src, idx)
             for i, (acc,) in pl.range(3, init_values=(sorted_t,)):
@@ -306,7 +306,7 @@ class MrgSort1DynFP32TopLevelProgram:
     ) -> tuple[pl.Tensor[[1, 2048], pl.FP32], pl.Tensor[[1, 2048], pl.UINT32]]:
         with pl.at(
             level=pl.Level.CORE_GROUP,
-            optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.UP_DOWN)],
+            optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
         ):
             sorted_t = pl.sort32(src, idx)
             for i, (acc,) in pl.range(3, init_values=(sorted_t,)):
@@ -396,7 +396,7 @@ class MrgSort2WayFP32Program:
     ) -> tuple[pl.Tensor[[1, 1024], pl.FP32], pl.Tensor[[1, 1024], pl.UINT32]]:
         with pl.at(
             level=pl.Level.CORE_GROUP,
-            optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.UP_DOWN)],
+            optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
         ):
             # Slice src/idx into left and right halves.
             left_src = pl.tensor.slice(src, shape=[1, 512], offset=[0, 0])

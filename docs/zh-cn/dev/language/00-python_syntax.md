@@ -276,22 +276,6 @@ for i in pl.parallel(start, stop, step):
 
 **要点:** 循环携带值使用 `pl.range()` 或 `pl.parallel()` 的 `init_values`, 元组解包 `(sum,)` 声明 iter_args, `pl.yield_()` 为下一次迭代更新值, 循环结束后 iter_args 包含最终值。`pl.parallel()` 生成 `ForKind.Parallel` 循环, `pl.range()` 生成 `ForKind.Sequential` (默认)。
 
-#### 分块循环 (Chunked Loops)
-
-```python
-# 将循环拆分为每块 C 次迭代的嵌套循环
-for i in pl.range(10, chunk=5):
-    body_statements
-
-for i in pl.parallel(8, chunk=4):
-    body_statements
-
-for i in pl.unroll(12, chunk=4):
-    body_statements
-```
-
-**要点:** `chunk=C` 将循环拆分为外层顺序循环和 `C` 次迭代的内层循环。内层循环保留原始类型 (Sequential/Parallel/Unroll)。`chunk=` 循环支持与 `init_values` 一起使用（iter_args 会贯穿生成的外层/内层/余数循环）。`chunk=` 循环只能出现在 `with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):` 内；在该作用域外，parser 会直接报错。参见 [SplitChunkedLoops Pass](../passes/07-split_chunked_loops.md)。
-
 ### While 循环 (带 iter_args 的 SSA 风格)
 
 ```python
@@ -327,14 +311,12 @@ for (x,) in pl.while_(init_values=(x_init,)):
 | ---- | ---------- | ---- |
 | `pl.at(level=pl.Level.CORE_GROUP)` | `InCore` | CORE_GROUP 级固定边界 outline |
 | `pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(MODE)])` | `InCore` | InCore + 跨核 split 提示 |
-| `pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk])` | `AutoInCore` | 编译器驱动的 chunked 循环 split |
-| `pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk, pl.split(MODE)])` | `AutoInCore` | AutoInCore + split 提示（条目独立） |
 | `pl.at(level=pl.Level.HOST)`（或任意非 `CORE_GROUP` 级别） | `Hierarchy` | 分布式层级作用域 |
 | `pl.cluster()` | `Cluster` | AIC+AIV 协同调度组 |
 | `with pl.spmd(N)` / `for i in pl.spmd(N)` | `Spmd`（for-form 内嵌 `InCore`） | SPMD 多 block 派发——见 [pl.spmd](#plspmd-多-block-派发) |
 | `pl.spmd(N, optimizations=[pl.split(MODE)])` | `Spmd(InCore(split=MODE))` | split 提示作用于内层 InCore（两种形式均适用） |
 | `pl.scope(mode=pl.ScopeMode.MANUAL)` / `pl.manual_scope()` | `Runtime(manual=true)` | orchestrator 的 MANUAL scope——由用户管理任务排序。两种 `auto_scope` 模式下都可用（它是依赖语义选择）。见[手工依赖原语](#手工依赖原语) |
-| `pl.scope()` | `Runtime(manual=false)` | orchestrator 的 AUTO scope（`PTO2_SCOPE()`）。手写它需要 `@pl.function(auto_scope=False)`（默认 `auto_scope=True` 下由编译器决定 AUTO 放置）。见 [MaterializeRuntimeScopes](../passes/40-materialize_runtime_scopes.md) |
+| `pl.scope()` | `Runtime(manual=false)` | orchestrator 的 AUTO scope（`PTO2_SCOPE()`）。手写它需要 `@pl.function(auto_scope=False)`（默认 `auto_scope=True` 下由编译器决定 AUTO 放置）。见 [MaterializeRuntimeScopes](../passes/38-materialize_runtime_scopes.md) |
 
 #### `pl.spmd` 多 block 派发
 
@@ -347,7 +329,7 @@ for (x,) in pl.while_(init_values=(x_init,)):
 
 以上三种形式也都接受 `allow_early_resolve=True`（布尔字面量；与 `pl.submit` / `pl.at` 相同的 early-dispatch 选项）。即使不写 `as tid` 也会强制走 `ir.Submit` 形态，并 lower 为 `Arg::set_allow_early_resolve(true)`。在嵌套于 `pl.cluster()` 内的 `pl.spmd` 上会被拒绝（此类 scope 会被 unwrap 进 Group 函数、永远不会产生 Submit，提示会丢失）。
 
-可选 `optimizations=[pl.split(MODE)]`（**不支持** `pl.auto_chunk`；chunk 循环请在内层使用 `pl.at(..., optimizations=[pl.auto_chunk])`）：
+可选 `optimizations=[pl.split(MODE)]`：
 
 | 条目 | 适用形式 | 作用 |
 | ---- | -------- | ---- |

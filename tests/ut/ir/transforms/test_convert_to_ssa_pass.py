@@ -2201,8 +2201,8 @@ class TestScopeTransparentToSSA:
 class TestScopeOutlineBoundary:
     """For non-``RuntimeScopeStmt`` scopes, ``ConvertScope`` blocks
     inner-loop escaping-var promotion for variables first-defined inside
-    the scope body. ``cur_`` stays transparent (later passes such as
-    ``InterchangeChunkLoops`` rely on scope-local vars flowing out for
+    the scope body. ``cur_`` stays transparent (later passes that outline
+    scope bodies rely on scope-local vars flowing out for
     sequential references), but the escaping path is gated to avoid the
     ``init_values=(foo__FREE_VAR,)`` failure mode. Regression for #1351."""
 

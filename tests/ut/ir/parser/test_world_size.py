@@ -155,7 +155,7 @@ def test_world_size_rejected_outside_host_function():
 
 def test_world_size_rejected_in_nested_device_scope_within_host_function():
     """Even inside a HOST orchestrator, ``pld.world_size()`` must be rejected
-    when nested inside a device-side scope (InCore / AutoInCore / SPMD), since
+    when nested inside a device-side scope (InCore / SPMD), since
     the call is not lowerable there."""
     with pytest.raises(Exception, match="InCore"):
 

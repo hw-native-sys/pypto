@@ -117,7 +117,7 @@ class V2CUDProgram:
         b: pl.Tensor[[32, 32], pl.FP32],
         output: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
     ) -> pl.Tensor[[32, 32], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.UP_DOWN)]):
+        with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):
             a_plus_b = pl.add(a, b)
             sub = pl.sub(a, b)
             out = pl.matmul(a_plus_b, sub)
@@ -164,9 +164,7 @@ class V2CLRProgram:
         b: pl.Tensor[[32, 32], pl.FP32],
         output: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
     ) -> pl.Tensor[[32, 32], pl.FP32]:
-        with pl.at(
-            level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.LEFT_RIGHT)]
-        ):
+        with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(pl.SplitMode.LEFT_RIGHT)]):
             a_plus_b = pl.add(a, b)
             sub = pl.sub(a, b)
             out = pl.matmul(a_plus_b, sub)
@@ -213,10 +211,7 @@ class V2CNoSplitProgram:
         b: pl.Tensor[[32, 32], pl.FP32],
         output: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
     ) -> pl.Tensor[[32, 32], pl.FP32]:
-        with pl.at(
-            level=pl.Level.CORE_GROUP,
-            optimizations=[pl.auto_chunk],
-        ):
+        with pl.at(level=pl.Level.CORE_GROUP):
             a_plus_b = pl.add(a, b)
             sub = pl.sub(a, b)
             out = pl.matmul(a_plus_b, sub)
@@ -263,15 +258,15 @@ class C2VLRProgram:
         b: pl.Tensor[[K, N], pl.FP32],
         c: pl.Tensor[[M, N], pl.FP32],
     ) -> pl.Tensor[[M, N], pl.FP32]:
-        with pl.at(
-            level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.LEFT_RIGHT)]
-        ):
-            for nb in pl.parallel(0, N_BLOCKS, 1, chunk=4, chunk_policy="leading_full"):
-                n0 = nb * N_BLOCK
-                c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
-                b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
-                c_next = pl.add(c_prev, pl.matmul(a, b_chunk))
-                c = pl.assemble(c, c_next, [0, n0])
+        with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(pl.SplitMode.LEFT_RIGHT)]):
+            for cb in pl.range(0, N_BLOCKS // 4):
+                for ci in pl.range(0, 4):
+                    nb = cb * 4 + ci
+                    n0 = nb * N_BLOCK
+                    c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
+                    b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
+                    c_next = pl.add(c_prev, pl.matmul(a, b_chunk))
+                    c = pl.assemble(c, c_next, [0, n0])
         return c
 
 
@@ -315,13 +310,15 @@ class C2VUDProgram:
         b: pl.Tensor[[K, N], pl.FP32],
         c: pl.Tensor[[M, N], pl.FP32],
     ) -> pl.Tensor[[M, N], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.UP_DOWN)]):
-            for nb in pl.parallel(0, N_BLOCKS, 1, chunk=4, chunk_policy="leading_full"):
-                n0 = nb * N_BLOCK
-                c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
-                b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
-                c_next = pl.add(c_prev, pl.matmul(a, b_chunk))
-                c = pl.assemble(c, c_next, [0, n0])
+        with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):
+            for cb in pl.range(0, N_BLOCKS // 4):
+                for ci in pl.range(0, 4):
+                    nb = cb * 4 + ci
+                    n0 = nb * N_BLOCK
+                    c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
+                    b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
+                    c_next = pl.add(c_prev, pl.matmul(a, b_chunk))
+                    c = pl.assemble(c, c_next, [0, n0])
         return c
 
 
@@ -365,16 +362,15 @@ class C2VNoSplitProgram:
         b: pl.Tensor[[K, N], pl.FP32],
         c: pl.Tensor[[M, N], pl.FP32],
     ) -> pl.Tensor[[M, N], pl.FP32]:
-        with pl.at(
-            level=pl.Level.CORE_GROUP,
-            optimizations=[pl.auto_chunk],
-        ):
-            for nb in pl.parallel(0, N_BLOCKS, 1, chunk=4, chunk_policy="leading_full"):
-                n0 = nb * N_BLOCK
-                c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
-                b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
-                c_next = pl.add(c_prev, pl.matmul(a, b_chunk))
-                c = pl.assemble(c, c_next, [0, n0])
+        with pl.at(level=pl.Level.CORE_GROUP):
+            for cb in pl.range(0, N_BLOCKS // 4):
+                for ci in pl.range(0, 4):
+                    nb = cb * 4 + ci
+                    n0 = nb * N_BLOCK
+                    c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
+                    b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
+                    c_next = pl.add(c_prev, pl.matmul(a, b_chunk))
+                    c = pl.assemble(c, c_next, [0, n0])
         return c
 
 
@@ -417,14 +413,16 @@ class BiDirectUDProgram:
         b: pl.Tensor[[K, N], pl.FP32],
         c: pl.Tensor[[M, N], pl.FP32],
     ) -> pl.Tensor[[M, N], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.UP_DOWN)]):
-            for nb in pl.parallel(0, N_BLOCKS, 1, chunk=4, chunk_policy="leading_full"):
-                n0 = nb * N_BLOCK
-                c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
-                a_add = pl.add(a, 1.0)
-                b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
-                c_next = pl.add(c_prev, pl.matmul(a_add, b_chunk))
-                c = pl.assemble(c, c_next, [0, n0])
+        with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):
+            for cb in pl.range(0, N_BLOCKS // 4):
+                for ci in pl.range(0, 4):
+                    nb = cb * 4 + ci
+                    n0 = nb * N_BLOCK
+                    c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
+                    a_add = pl.add(a, 1.0)
+                    b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
+                    c_next = pl.add(c_prev, pl.matmul(a_add, b_chunk))
+                    c = pl.assemble(c, c_next, [0, n0])
         return c
 
 
@@ -467,16 +465,16 @@ class BiDirectLRProgram:
         b: pl.Tensor[[K, N], pl.FP32],
         c: pl.Tensor[[M, N], pl.FP32],
     ) -> pl.Tensor[[M, N], pl.FP32]:
-        with pl.at(
-            level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.LEFT_RIGHT)]
-        ):
-            for nb in pl.parallel(0, N_BLOCKS, 1, chunk=4, chunk_policy="leading_full"):
-                n0 = nb * N_BLOCK
-                c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
-                a_add = pl.add(a, 1.0)
-                b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
-                c_next = pl.add(c_prev, pl.matmul(a_add, b_chunk))
-                c = pl.assemble(c, c_next, [0, n0])
+        with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(pl.SplitMode.LEFT_RIGHT)]):
+            for cb in pl.range(0, N_BLOCKS // 4):
+                for ci in pl.range(0, 4):
+                    nb = cb * 4 + ci
+                    n0 = nb * N_BLOCK
+                    c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
+                    a_add = pl.add(a, 1.0)
+                    b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
+                    c_next = pl.add(c_prev, pl.matmul(a_add, b_chunk))
+                    c = pl.assemble(c, c_next, [0, n0])
         return c
 
 
@@ -519,17 +517,16 @@ class BiDirectNoSplitProgram:
         b: pl.Tensor[[K, N], pl.FP32],
         c: pl.Tensor[[M, N], pl.FP32],
     ) -> pl.Tensor[[M, N], pl.FP32]:
-        with pl.at(
-            level=pl.Level.CORE_GROUP,
-            optimizations=[pl.auto_chunk],
-        ):
-            for nb in pl.parallel(0, N_BLOCKS, 1, chunk=4, chunk_policy="leading_full"):
-                n0 = nb * N_BLOCK
-                c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
-                a_add = pl.add(a, 1.0)
-                b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
-                c_next = pl.add(c_prev, pl.matmul(a_add, b_chunk))
-                c = pl.assemble(c, c_next, [0, n0])
+        with pl.at(level=pl.Level.CORE_GROUP):
+            for cb in pl.range(0, N_BLOCKS // 4):
+                for ci in pl.range(0, 4):
+                    nb = cb * 4 + ci
+                    n0 = nb * N_BLOCK
+                    c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
+                    a_add = pl.add(a, 1.0)
+                    b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
+                    c_next = pl.add(c_prev, pl.matmul(a_add, b_chunk))
+                    c = pl.assemble(c, c_next, [0, n0])
         return c
 
 

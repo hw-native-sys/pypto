@@ -97,13 +97,10 @@ class UseAfterDefChecker : public IRVisitor {
   void VisitStmt_(const ForStmtPtr& op) override {
     if (!op) return;
 
-    // Bounds and chunk_size are evaluated in the outer scope.
+    // Bounds are evaluated in the outer scope.
     if (op->start_) VisitExpr(op->start_);
     if (op->stop_) VisitExpr(op->stop_);
     if (op->step_) VisitExpr(op->step_);
-    if (op->chunk_config_.has_value() && op->chunk_config_->size) {
-      VisitExpr(op->chunk_config_->size);
-    }
 
     // IterArg initial values are evaluated in the outer scope.
     for (const auto& iter_arg : op->iter_args_) {

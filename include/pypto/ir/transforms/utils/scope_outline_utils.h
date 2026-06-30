@@ -437,7 +437,6 @@ class ScopeOutliner : public IRMutator {
   }
 
   StmtPtr VisitStmt_(const InCoreScopeStmtPtr& op) override { return VisitScopeKind(op); }
-  StmtPtr VisitStmt_(const AutoInCoreScopeStmtPtr& op) override { return VisitScopeKind(op); }
   StmtPtr VisitStmt_(const ClusterScopeStmtPtr& op) override { return VisitScopeKind(op); }
   StmtPtr VisitStmt_(const HierarchyScopeStmtPtr& op) override { return VisitScopeKind(op); }
   StmtPtr VisitStmt_(const SpmdScopeStmtPtr& op) override { return VisitScopeKind(op); }
@@ -868,10 +867,6 @@ class ScopeOutliner : public IRMutator {
       append_slot_num_attr();
       append_windowize_attr();
       append_split_aiv_attr();
-    } else if (auto auto_incore = As<AutoInCoreScopeStmt>(op)) {
-      append_split_attr(auto_incore->split_);
-      append_slot_num_attr();
-      append_windowize_attr();
     } else if (auto spmd = As<SpmdScopeStmt>(op)) {
       outlined_attrs.emplace_back("core_num", spmd->core_num_);
       if (spmd->sync_start_) {
@@ -1413,7 +1408,6 @@ class ScopeKindAbsenceVerifier : public IRVisitor {
   }
 
   void VisitStmt_(const InCoreScopeStmtPtr& op) override { CheckKind(op); }
-  void VisitStmt_(const AutoInCoreScopeStmtPtr& op) override { CheckKind(op); }
   void VisitStmt_(const ClusterScopeStmtPtr& op) override { CheckKind(op); }
   void VisitStmt_(const HierarchyScopeStmtPtr& op) override { CheckKind(op); }
   void VisitStmt_(const SpmdScopeStmtPtr& op) override { CheckKind(op); }

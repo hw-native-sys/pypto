@@ -1734,8 +1734,6 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       };
       if (auto in_core = As<InCoreScopeStmt>(stmt)) {
         result.push_back(rewrite(in_core));
-      } else if (auto auto_in_core = As<AutoInCoreScopeStmt>(stmt)) {
-        result.push_back(rewrite(auto_in_core));
       } else if (auto cluster = As<ClusterScopeStmt>(stmt)) {
         result.push_back(rewrite(cluster));
       } else if (auto hier = As<HierarchyScopeStmt>(stmt)) {

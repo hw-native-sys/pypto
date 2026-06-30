@@ -1483,55 +1483,6 @@ class TestConvertTensorToTileOps:
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
-    def test_returned_assemble_loop_treats_chunk_expr_as_iter_arg_use(self):
-        """Chunk expressions must count as loop-carried uses during rewrite checks."""
-
-        span = ir.Span.unknown()
-        idx_type = ir.ScalarType(DataType.INDEX)
-        small_tensor_type = ir.TensorType([1, 32], DataType.FP32)
-        large_tensor_type = ir.TensorType([1, 64], DataType.FP32)
-
-        x = ir.Var("x", small_tensor_type, span)
-        buf_init = ir.Var("buf_init", large_tensor_type, span)
-        loop_var = ir.Var("i", idx_type, span)
-        iter_arg = ir.IterArg("acc", large_tensor_type, buf_init, span)
-        yielded_var = ir.Var("acc_next", large_tensor_type, span)
-        return_var = ir.Var("result", large_tensor_type, span)
-        inner_loop_var = ir.Var("j", idx_type, span)
-
-        inner_loop = ir.ForStmt(
-            inner_loop_var,
-            ir.ConstInt(0, DataType.INDEX, span),
-            ir.ConstInt(1, DataType.INDEX, span),
-            ir.ConstInt(1, DataType.INDEX, span),
-            [],
-            ir.SeqStmts([], span),
-            [],
-            span,
-            chunk_size=iter_arg,
-        )
-        assemble_stmt = ir.AssignStmt(yielded_var, ir.op.tensor.assemble(iter_arg, x, [0, 0]), span)
-        outer_loop = ir.ForStmt(
-            loop_var,
-            ir.ConstInt(0, DataType.INDEX, span),
-            ir.ConstInt(2, DataType.INDEX, span),
-            ir.ConstInt(1, DataType.INDEX, span),
-            [iter_arg],
-            ir.SeqStmts([inner_loop, assemble_stmt, ir.YieldStmt([yielded_var], span)], span),
-            [return_var],
-            span,
-        )
-        func = ir.Function(
-            "main_incore_0",
-            [x, buf_init],
-            [large_tensor_type],
-            ir.SeqStmts([outer_loop, ir.ReturnStmt([return_var], span)], span),
-            span,
-            ir.FunctionType.InCore,
-        )
-        with pytest.raises(ValueError, match="tensor\\.assemble"):
-            passes.convert_tensor_to_tile_ops()(ir.Program([func], "ChunkUseProg", span))
-
     def test_no_spurious_loads_for_explicit_tile_ops(self):
         """Regression test for #334: no redundant Vec loads when params are consumed by tile ops only.
 

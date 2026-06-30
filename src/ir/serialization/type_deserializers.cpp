@@ -686,20 +686,6 @@ static IRNodePtr DeserializeForStmt(const msgpack::object& fields_obj, msgpack::
     kind = static_cast<ForKind>(kind_obj->via.u64);
   }
 
-  // Deserialize chunk_config (optional map with "size" and "policy")
-  std::optional<ChunkConfig> chunk_config = std::nullopt;
-  auto chunk_config_obj = GetOptionalFieldObj(fields_obj, "chunk_config", ctx);
-  if (chunk_config_obj.has_value() && chunk_config_obj->type == msgpack::type::MAP) {
-    auto size_obj = ctx.GetFieldObj(*chunk_config_obj, "size");
-    auto chunk_size = std::static_pointer_cast<const Expr>(ctx.DeserializeNode(size_obj, zone));
-    ChunkPolicy chunk_policy = ChunkPolicy::Guarded;
-    auto policy_obj = GetOptionalFieldObj(*chunk_config_obj, "policy", ctx);
-    if (policy_obj.has_value()) {
-      chunk_policy = static_cast<ChunkPolicy>(policy_obj->via.u64);
-    }
-    chunk_config = ChunkConfig{chunk_size, chunk_policy};
-  }
-
   // Deserialize attrs with backward compatibility for old loop_origin field
   std::vector<std::pair<std::string, std::any>> attrs;
   auto attrs_obj = GetOptionalFieldObj(fields_obj, "attrs", ctx);
@@ -717,7 +703,7 @@ static IRNodePtr DeserializeForStmt(const msgpack::object& fields_obj, msgpack::
   }
 
   return std::make_shared<ForStmt>(loop_var, start, stop, step, iter_args, body, return_vars, span, kind,
-                                   chunk_config, std::move(attrs), DeserializeLeadingComments(fields_obj));
+                                   std::move(attrs), DeserializeLeadingComments(fields_obj));
 }
 
 // Deserialize WhileStmt
@@ -803,18 +789,6 @@ static IRNodePtr DeserializeInCoreScopeStmt(const msgpack::object& fields_obj, m
   return std::make_shared<InCoreScopeStmt>(split, std::move(name_hint), body, span,
                                            DeserializeLeadingComments(fields_obj),
                                            DeserializeScopeAttrs(fields_obj, ctx, zone));
-}
-
-// Deserialize AutoInCoreScopeStmt
-static IRNodePtr DeserializeAutoInCoreScopeStmt(const msgpack::object& fields_obj, msgpack::zone& zone,
-                                                DeserializerContext& ctx) {
-  auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
-  auto split = DeserializeScopeSplit(fields_obj, ctx);
-  auto name_hint = DeserializeScopeNameHint(fields_obj, ctx);
-  auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
-  return std::make_shared<AutoInCoreScopeStmt>(split, std::move(name_hint), body, span,
-                                               DeserializeLeadingComments(fields_obj),
-                                               DeserializeScopeAttrs(fields_obj, ctx, zone));
 }
 
 // Deserialize ClusterScopeStmt
@@ -1215,8 +1189,6 @@ static TypeRegistrar _return_stmt_registrar("ReturnStmt", DeserializeReturnStmt)
 static TypeRegistrar _for_stmt_registrar("ForStmt", DeserializeForStmt);
 static TypeRegistrar _while_stmt_registrar("WhileStmt", DeserializeWhileStmt);
 static TypeRegistrar _in_core_scope_stmt_registrar("InCoreScopeStmt", DeserializeInCoreScopeStmt);
-static TypeRegistrar _auto_in_core_scope_stmt_registrar("AutoInCoreScopeStmt",
-                                                        DeserializeAutoInCoreScopeStmt);
 static TypeRegistrar _cluster_scope_stmt_registrar("ClusterScopeStmt", DeserializeClusterScopeStmt);
 static TypeRegistrar _hierarchy_scope_stmt_registrar("HierarchyScopeStmt", DeserializeHierarchyScopeStmt);
 static TypeRegistrar _spmd_scope_stmt_registrar("SpmdScopeStmt", DeserializeSpmdScopeStmt);

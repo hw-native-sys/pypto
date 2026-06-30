@@ -18,7 +18,7 @@ cased to InCore by the parser).
 
 Every transform case follows the canonical Before/After/Expected style: the
 Expected IR is the post-outline program written by hand from the pass's
-documented semantics (``docs/en/dev/passes/09-outline_hierarchy_scopes.md`` and
+documented semantics (``docs/en/dev/passes/07-outline_hierarchy_scopes.md`` and
 ``src/ir/transforms/outline_hierarchy_scopes_pass.cpp``), then run through
 ``convert_to_ssa`` so SSA naming/phi insertion matches the pass output.
 """

@@ -224,16 +224,6 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     auto new_stop = SimplifyExpr(op->stop_);
     auto new_step = SimplifyExpr(op->step_);
 
-    std::optional<ChunkConfig> new_chunk_config = op->chunk_config_;
-    bool chunk_config_changed = false;
-    if (op->chunk_config_.has_value()) {
-      auto new_cs = SimplifyExpr(op->chunk_config_->size);
-      if (new_cs.get() != op->chunk_config_->size.get()) {
-        new_chunk_config = ChunkConfig{new_cs, op->chunk_config_->policy};
-        chunk_config_changed = true;
-      }
-    }
-
     // Rebuild iter_args before visiting the body so body references pick up
     // the remapped IterArg identity.
     bool iter_args_changed = false;
@@ -244,10 +234,10 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     auto stop_ci = As<ConstInt>(new_stop);
 
     // Fold B: collapse a *pure* sequential ForStmt when the analyzer can
-    // prove the trip count is 0 or 1. "Pure" means no chunk_config, no attrs,
-    // and Sequential kind — these forms have no execution-model side effects
-    // (no chunk-loop pairing, no Parallel/Unroll/Pipeline scheduling) that a
-    // downstream pass might depend on observing as a ForStmt.
+    // prove the trip count is 0 or 1. "Pure" means no attrs and Sequential
+    // kind — these forms have no execution-model side effects (no
+    // Parallel/Unroll/Pipeline scheduling) that a downstream pass might
+    // depend on observing as a ForStmt.
     //
     // Trip-count proof:
     //   step >= 1 (forward iteration)
@@ -258,8 +248,7 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     // CanProve is used instead of literal-only ConstInt matching so closure-
     // captured trip counts like `for k in pl.range(C, C + 1)` collapse the
     // same way `pl.range(0, 1)` does.
-    const bool is_pure_for =
-        !op->chunk_config_.has_value() && op->attrs_.empty() && op->kind_ == ForKind::Sequential;
+    const bool is_pure_for = op->attrs_.empty() && op->kind_ == ForKind::Sequential;
     if (is_pure_for && analyzer_->CanProveGreaterEqual(new_step, 1)) {
       const Span& sp = op->span_;
       int trips = -1;
@@ -367,7 +356,7 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
 
     bool changed = (new_start.get() != op->start_.get()) || (new_stop.get() != op->stop_.get()) ||
                    (new_step.get() != op->step_.get()) || (new_body.get() != op->body_.get()) ||
-                   chunk_config_changed || iter_args_changed || return_vars_changed;
+                   iter_args_changed || return_vars_changed;
     if (!changed) return op;
 
     auto result = MutableCopy(op);
@@ -377,7 +366,6 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     result->iter_args_ = std::move(new_iter_args);
     result->body_ = new_body;
     result->return_vars_ = std::move(new_return_vars);
-    result->chunk_config_ = new_chunk_config;
     return result;
   }
 

@@ -1224,26 +1224,9 @@ void BindIR(nb::module_& m) {
              "Software-pipelined loop (pre-lowering user marker + transient post-lowering marker)")
       .export_values();
 
-  // ChunkPolicy enum (must be before ForStmt which uses it)
-  nb::enum_<ChunkPolicy>(ir, "ChunkPolicy", "Chunk policy for loop chunking")
-      .value("LeadingFull", ChunkPolicy::LeadingFull, "Full chunks first, smaller remainder at end")
-      .value("Guarded", ChunkPolicy::Guarded,
-             "Single loop over ceil(N/C) chunks with per-iteration if-guard (default)")
-      .export_values();
-
-  // ChunkConfig struct (must be before ForStmt which uses it)
-  nb::class_<ChunkConfig>(ir, "ChunkConfig", "Chunk configuration for parallel loop splitting")
-      .def(nb::init<ExprPtr, ChunkPolicy>(), nb::arg("size"), nb::arg("policy") = ChunkPolicy::Guarded,
-           "Create a chunk configuration")
-      .def_ro("size", &ChunkConfig::size, "Chunk size expression")
-      .def_ro("policy", &ChunkConfig::policy, "Chunk distribution policy");
-
   // LoopOrigin enum (must be before ForStmt which uses it)
   nb::enum_<LoopOrigin>(ir, "LoopOrigin", "Loop origin classification")
       .value("Original", LoopOrigin::Original, "Regular loop (default)")
-      .value("ChunkOuter", LoopOrigin::ChunkOuter, "Outer loop from chunk splitting")
-      .value("ChunkInner", LoopOrigin::ChunkInner, "Inner loop from chunk splitting")
-      .value("ChunkRemainder", LoopOrigin::ChunkRemainder, "Remainder loop from chunk splitting")
       .export_values();
 
   // ForStmt - const shared_ptr
@@ -1254,17 +1237,13 @@ void BindIR(nb::module_& m) {
       [](ForStmt* self, const VarPtr& loop_var, const ExprPtr& start, const ExprPtr& stop,
          const ExprPtr& step, const std::vector<IterArgPtr>& iter_args, const StmtPtr& body,
          const std::vector<VarPtr>& return_vars, const Span& span, ForKind kind,
-         const std::optional<ExprPtr>& chunk_size, ChunkPolicy chunk_policy,
          const nb::object& attrs_or_none) {
         auto attrs = ConvertAttrsFromPython(attrs_or_none);
-        std::optional<ChunkConfig> chunk_config =
-            chunk_size.has_value() ? std::optional{ChunkConfig{*chunk_size, chunk_policy}} : std::nullopt;
-        new (self) ForStmt(loop_var, start, stop, step, iter_args, body, return_vars, span, kind,
-                           std::move(chunk_config), std::move(attrs));
+        new (self)
+            ForStmt(loop_var, start, stop, step, iter_args, body, return_vars, span, kind, std::move(attrs));
       },
       nb::arg("loop_var"), nb::arg("start"), nb::arg("stop"), nb::arg("step"), nb::arg("iter_args"),
       nb::arg("body"), nb::arg("return_vars"), nb::arg("span"), nb::arg("kind") = ForKind::Sequential,
-      nb::arg("chunk_size") = nb::none(), nb::arg("chunk_policy") = ChunkPolicy::Guarded,
       nb::arg("attrs") = nb::none(), "Create a for loop statement");
   BindFields<ForStmt>(for_stmt_class);
   // Custom attrs property: convert vector<pair<string, any>> to Python dict
@@ -1279,21 +1258,6 @@ void BindIR(nb::module_& m) {
         return result;
       },
       "Loop-level attributes as a dictionary");
-  // Convenience properties for chunk_size and chunk_policy (derived from chunk_config)
-  for_stmt_class.def_prop_ro(
-      "chunk_size",
-      [](const ForStmtPtr& self) -> std::optional<ExprPtr> {
-        if (self->chunk_config_.has_value()) return self->chunk_config_->size;
-        return std::nullopt;
-      },
-      "Chunk size expression (None if no chunking)");
-  for_stmt_class.def_prop_ro(
-      "chunk_policy",
-      [](const ForStmtPtr& self) -> ChunkPolicy {
-        if (self->chunk_config_.has_value()) return self->chunk_config_->policy;
-        return ChunkPolicy::Guarded;
-      },
-      "Chunk distribution policy");
 
   // WhileStmt - const shared_ptr
   auto while_stmt_class =
@@ -1307,7 +1271,6 @@ void BindIR(nb::module_& m) {
   // ScopeKind enum
   nb::enum_<ScopeKind>(ir, "ScopeKind", "Scope kind classification")
       .value("InCore", ScopeKind::InCore, "InCore scope for AICore sub-graphs")
-      .value("AutoInCore", ScopeKind::AutoInCore, "AutoInCore scope for automatic chunking")
       .value("Cluster", ScopeKind::Cluster, "Cluster scope for co-scheduled AIC + AIV groups")
       .value("Hierarchy", ScopeKind::Hierarchy, "Distributed hierarchy scope (uses level/role)")
       .value("Spmd", ScopeKind::Spmd, "SPMD dispatch scope (core_num/sync_start)")
@@ -1381,21 +1344,6 @@ void BindIR(nb::module_& m) {
   in_core_scope_stmt_class.def_prop_ro(
       "attrs",
       [kwargs_to_pydict](const std::shared_ptr<const InCoreScopeStmt>& self) {
-        return kwargs_to_pydict(self->attrs_);
-      },
-      scope_attrs_doc);
-
-  // AutoInCoreScopeStmt
-  auto auto_in_core_scope_stmt_class = nb::class_<AutoInCoreScopeStmt, ScopeStmt>(
-      ir, "AutoInCoreScopeStmt", "AutoInCore scope: InCore region with automatic chunking");
-  auto_in_core_scope_stmt_class.def(
-      nb::init<std::optional<SplitMode>, std::string, const StmtPtr&, const Span&>(),
-      nb::arg("split") = nb::none(), nb::arg("name_hint") = "", nb::arg("body"), nb::arg("span"),
-      "Create an AutoInCore scope statement");
-  BindFields<AutoInCoreScopeStmt>(auto_in_core_scope_stmt_class);
-  auto_in_core_scope_stmt_class.def_prop_ro(
-      "attrs",
-      [kwargs_to_pydict](const std::shared_ptr<const AutoInCoreScopeStmt>& self) {
         return kwargs_to_pydict(self->attrs_);
       },
       scope_attrs_doc);

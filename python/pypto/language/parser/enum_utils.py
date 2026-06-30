@@ -57,9 +57,6 @@ SCOPE_MODE_MAP: dict[str, bool] = {
 
 LOOP_ORIGIN_MAP: dict[str, ir.LoopOrigin] = {
     "Original": ir.LoopOrigin.Original,
-    "ChunkOuter": ir.LoopOrigin.ChunkOuter,
-    "ChunkInner": ir.LoopOrigin.ChunkInner,
-    "ChunkRemainder": ir.LoopOrigin.ChunkRemainder,
 }
 
 FUNCTION_TYPE_MAP: dict[str, ir.FunctionType] = {
