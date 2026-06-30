@@ -1230,28 +1230,29 @@ def sel(mask: Expr, lhs: Expr, rhs: Expr, tmp: Expr, span: Span | None = None) -
     return _ir_core.create_op_call("tile.sel", [mask, lhs, rhs, tmp], {}, actual_span)
 
 
-def sels(lhs: Expr, rhs: Expr, select_mode: int | float | Expr, span: Span | None = None) -> Call:
-    """Select between two tiles based on a scalar mode.
+def sels(mask: Expr, src: Expr, tmp: Expr, scalar: int | float | Expr, span: Span | None = None) -> Call:
+    """Per-element selection between a source tile and a scalar using a mask tile.
 
-    Maps to the TSELS hardware intrinsic. The interpretation of select_mode values
-    is target-dependent and enforced by codegen.
+    For each element (i, j): dst[i,j] = src[i,j] if mask[i,j] is true, else scalar.
+    Maps to the TSELS hardware intrinsic. The mask encoding is target-defined.
 
     Args:
-        lhs: Source tile 0 (TileType)
-        rhs: Source tile 1 (TileType)
-        select_mode: Scalar select mode
+        mask: Predicate mask tile (TileType); encoding is target-defined
+        src: Source tile, selected where mask is true (TileType)
+        tmp: Scratch/placeholder tile required by TSELS (TileType)
+        scalar: Scalar value, selected where mask is false
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
-        Call expression for tile select
+        Call expression for tile-scalar select
     """
     actual_span = _get_span_or_capture(span)
-    select_mode_expr = (
-        _normalize_expr(select_mode, actual_span, int_dtype=DataType.INT32, float_dtype=DataType.FP32)
-        if not isinstance(select_mode, Expr)
-        else select_mode
+    scalar_expr = (
+        _normalize_expr(scalar, actual_span, int_dtype=DataType.INT32, float_dtype=DataType.FP32)
+        if not isinstance(scalar, Expr)
+        else scalar
     )
-    return _ir_core.create_op_call("tile.sels", [lhs, rhs, select_mode_expr], {}, actual_span)
+    return _ir_core.create_op_call("tile.sels", [mask, src, tmp, scalar_expr], {}, actual_span)
 
 
 def muls(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:

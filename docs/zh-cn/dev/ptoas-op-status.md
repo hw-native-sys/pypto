@@ -42,9 +42,9 @@
 | pto.tand | TAND | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 ptoas 拒绝该 op；PR #1823 ST 暂下架 |
 | pto.tcmp | TCMP | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tcvt | TCVT | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
-| pto.tdiv | TDIV | tile+tensor | ✅ | ✅ | ✅ | ❌ | — |  |
+| pto.tdiv | TDIV | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | ST: feat-class-a-op-st (a2a3) |
 | pto.texp | TEXP | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
-| pto.tlog | TLOG | tile+tensor | ✅ | ✅ | ✅ | ❌ | — |  |
+| pto.tlog | TLOG | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | ST: feat-class-a-op-st (a2a3) |
 | pto.tmax | TMAX | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | binary max |
 | pto.tmin | TMIN | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | binary min |
 | pto.tmul | TMUL | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
@@ -68,21 +68,21 @@
 | pto.pow | TPOW | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (需 tmp tile) |
 | **逐元素与标量** |  |  |  |  |  |  |  |  |
 | pto.pows | TPOWS | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (需 tmp tile) |
-| pto.tadds | TADDS | tile+tensor | ✅ | ✅ | ✅ | ❌ | — |  |
+| pto.tadds | TADDS | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | ST: feat-class-a-op-st (a2a3) |
 | pto.tands | TANDS | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 ptoas 拒绝该 op；PR #1823 ST 暂下架 |
 | pto.tcmps | TCMPS | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.tdivs | TDIVS | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | ST: PR #1823 |
-| pto.texpands | TEXPANDS | tile+tensor | ✅ | ✅ | ✅ | ❌ | — |  |
+| pto.texpands | TEXPANDS | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | ST: feat-class-a-op-st (a2a3); fixed deducer dtype + scalar-dtype codegen |
 | pto.tlrelu | TLRELU | tile | ✅ | ✅ | ❌ | ✅ | — | ST: PR #1823 |
 | pto.tmaxs | TMAXS | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.tmins | TMINS | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.tmuls | TMULS | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | ST: PR #1823 |
 | pto.tors | TORS | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 ptoas 拒绝该 op；PR #1823 ST 暂下架 |
 | pto.trems | TREMS | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 TREM int32 误算/TREMS alloc 错；PR #1823 修了 tmp 操作数, ST 待 ISA |
-| pto.tsels | TSELS | tile | ✅ | ✅ | ❌ | ❌ | — |  |
+| pto.tsels | TSELS | tile | ✅ | ✅ | ❌ | ✅ | — | ST: feat-class-a-op-st (a2a3, FP32/FP16); redefined to TSELS (mask,src,tmp,scalar); INT32 skipped (integer cmps codegen gap) |
 | pto.tshls | TSHLS | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 ptoas 拒绝该 op；PR #1823 ST 暂下架 |
 | pto.tshrs | TSHRS | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 ptoas 拒绝该 op；PR #1823 ST 暂下架 |
-| pto.tsubs | TSUBS | tile+tensor | ✅ | ✅ | ✅ | ❌ | — |  |
+| pto.tsubs | TSUBS | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | ST: feat-class-a-op-st (a2a3) |
 | pto.txors | TXORS | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 仅 int16/uint16；PR #1823 修了 tmp 操作数 |
 | pto.tfmods | TFMODS | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | PR #1837 前端+codegen；a2a3 TFMODS 误算(全0)，ST 暂下架待 ISA |
 | **按轴逐元素 (reduce/expand)** |  |  |  |  |  |  |  |  |
@@ -92,14 +92,14 @@
 | pto.tcolsum | TCOLSUM | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.trowexpand | TROWEXPAND | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.trowmax | TROWMAX | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
-| pto.trowmin | TROWMIN | tile+tensor | ✅ | ✅ | ✅ | ❌ | — |  |
+| pto.trowmin | TROWMIN | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | ST: feat-class-a-op-st (a2a3) |
 | pto.trowsum | TROWSUM | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tcolprod | TCOLPROD | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | NEW |
 | pto.trowprod | TROWPROD | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | NEW |
 | pto.trowexpandsub | TROWEXPANDSUB | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.trowexpandmul | TROWEXPANDMUL | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.trowexpanddiv | TROWEXPANDDIV | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
-| pto.trowexpandadd | TROWEXPANDADD | tile+tensor | ✅ | ✅ | ✅ | ❌ | — |  |
+| pto.trowexpandadd | TROWEXPANDADD | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | ST: feat-class-a-op-st (a2a3) |
 | pto.trowexpandmax | TROWEXPANDMAX | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | NEW |
 | pto.trowexpandmin | TROWEXPANDMIN | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | NEW |
 | pto.trowexpandexpdif | TROWEXPANDEXPDIF | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | NEW |
@@ -131,7 +131,7 @@
 | pto.tgatherb | TGATHERB | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING |
 | pto.tscatter | TSCATTER | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tsort32 | TSORT32 | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
-| pto.tmrgsort | TMRGSORT | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | reg as mrgsort_format1/2 |
+| pto.tmrgsort | TMRGSORT | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | reg as mrgsort_format1/2; ST: test_sort.py incl. 2/3/4-way (a2a3) |
 | pto.tfillpad | TFILLPAD | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tfillpad_inpace | TFILLPAD_INPLACE | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.tfillpad_expand | TFILLPAD_EXPAND | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | NEW tile+tensor 前端+codegen+ST；tile a2a3 CI 通过，tensor 待 CI |

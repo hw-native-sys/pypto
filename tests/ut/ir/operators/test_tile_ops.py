@@ -2968,7 +2968,7 @@ class TestTileBitwiseArithmeticOps:
         assert "tile.lrelu" in ir_str
 
     def test_tile_sels(self):
-        """Test tile.sels operator - select between two tiles via integer scalar mode."""
+        """Test tile.sels operator - select between a source tile and a scalar via mask tile."""
 
         @pl.program
         class Program:
@@ -2981,7 +2981,9 @@ class TestTileBitwiseArithmeticOps:
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
                 tile_b: pl.Tile[[32, 32], pl.FP32] = pl.load(b, [0, 0], [32, 32])
-                tile_out: pl.Tile[[32, 32], pl.FP32] = pl.sels(tile_a, tile_b, 1)
+                mask: pl.Tile[[32, 32], pl.UINT8] = pl.cmp(tile_a, tile_b, cmp_type=0)
+                tmp: pl.Tile[[1, 32], pl.UINT8] = pl.tile.create([1, 32], dtype=pl.UINT8)
+                tile_out: pl.Tile[[32, 32], pl.FP32] = pl.sels(mask, tile_a, tmp, 1.0)
                 result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_out, [0, 0], output)
                 return result
 
