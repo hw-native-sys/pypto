@@ -18,14 +18,18 @@ Orchestrates the full test execution pipeline:
 5. Validate results
 """
 
+import json
 import logging
+import math
 import queue
 import shutil
+import subprocess
+import sys
 import tempfile
 import threading
 import time
 import traceback
-from concurrent.futures import Future, ThreadPoolExecutor, wait
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -46,6 +50,7 @@ from pypto.runtime.runner import (
     RunResult,
     _DfxOpts,
     _execute_on_device,
+    validate_persisted_outputs,
 )
 from pypto.runtime.tensor_spec import TensorSpec as RuntimeTensorSpec
 
@@ -76,6 +81,28 @@ _log = logging.getLogger(__name__)
 # right test's capture window.
 _compile_futures: dict[str, Future] = {}
 
+# cache_key → (batch Future, work_dir) for the task-submit BATCH device run.
+# In task-submit mode the device runs are NOT submitted one task-submit task per
+# artifact (that pays the torch/pypto import + NPU init per artifact — a huge
+# cold-start cost).  Instead a background submitter groups every compiled
+# artifact into batches of ``--execute-batch-size`` and submits ONE task-submit
+# task per batch; that task runs the whole batch in a single hot process,
+# reusing one ChipWorker device session (execute_artifact --batch-manifest).
+# The batch Future resolves to ``{str(work_dir): (ok, error, device)}``;
+# TestRunner.run awaits it, picks out this case, and validates the persisted
+# outputs with the test's real tolerance.  ``_batches_ready`` is set once the
+# submitter has assigned every case to a batch.
+_case_to_batch: dict[str, "tuple[Future, Path]"] = {}
+_batches_ready = threading.Event()
+
+# Per-batch device-run stats for the end-of-session summary: one entry per
+# submitted batch, ``(batch_name, n_ok, n_total, device)``. Appended from the
+# execute-pool thread in _run_batch_via_task_submit (list.append is GIL-atomic).
+# Surfaced by execution_summary_lines() in pytest_terminal_summary so the user
+# can see batching happened and how the runs spread across the borrowed cards
+# (otherwise invisible — the per-artifact markers are suppressed for a clean log).
+_batch_stats: "list[tuple[str, int, int, int | None]]" = []
+
 # cache_key → device id actually used by the execute task.  Read by
 # TestRunner.run after exec_fut.result() and forwarded to the _report_device
 # fixture via _last_device.
@@ -92,6 +119,12 @@ _device_pool: "queue.Queue[int] | None" = None
 _execute_pool: ThreadPoolExecutor | None = None
 _compile_pools: list[ThreadPoolExecutor] = []
 _pipeline_ctx: dict = {}
+
+# Upper bound on the task-submit execute pool size.  In task-submit mode every
+# case's device run is submitted at once (task-submit schedules them), so the
+# pool tracks the case count; this caps the thread / task-submit-client count on
+# very large suites (the excess simply queues in the pool, then task-submit).
+_MAX_TASK_SUBMIT_INFLIGHT = 512
 
 # set_backend_type is called once per backend-type group before the thread pool
 # starts.  Only get_program() needs serialisation because the @pl.program
@@ -328,6 +361,306 @@ def _fused_compile_task(
         )
 
 
+# ---------------------------------------------------------------------------
+# task-submit execute path (opt-in via --execute-via-task-submit)
+# ---------------------------------------------------------------------------
+#
+# In this mode the execute half borrows an NPU per case from the host-level
+# ``task-submit --device auto`` queue instead of a local DevicePool, so the CI
+# job itself holds no card during compile + golden.  The compiled .o/.so already
+# live in ``work_dir`` (a host-visible path); the child re-binds them with no
+# recompile.  Everything below is reached ONLY when execute_mode == "task-submit"
+# — the default device-pool path never imports or calls task-submit, so machines
+# without the binary are unaffected.
+
+# Sentinel emitted by pypto.runtime.execute_artifact; lets us tell a genuine
+# case failure apart from an infra kill (queue timeout / watchdog / missing
+# binary).  Keep in sync with execute_artifact._RESULT_PREFIX.
+_RESULT_MARKER_PREFIX = "PYPTO_EXEC_RESULT"
+
+
+def _dfx_to_cli(dfx: "_DfxOpts") -> list[str]:
+    """Inverse of ``execute_artifact`` DFX arg parsing.
+
+    Emits only the flags whose value differs from the off-default, so a plain
+    run yields an empty list.  Keep in sync with
+    ``pypto.runtime.execute_artifact._build_parser``.
+    """
+    argv: list[str] = []
+    if dfx.enable_l2_swimlane:
+        argv.append("--enable-l2-swimlane")
+    if dfx.enable_dump_tensor:
+        argv += ["--dump-tensor", str(dfx.enable_dump_tensor)]
+    if dfx.enable_pmu:
+        argv += ["--enable-pmu", str(dfx.enable_pmu)]
+    if dfx.enable_dep_gen:
+        argv.append("--enable-dep-gen")
+    if dfx.enable_scope_stats:
+        argv.append("--enable-scope-stats")
+    return argv
+
+
+def _marker_value(line: str, key: str) -> str | None:
+    """Return the value of a ``key=value`` token in a PYPTO_EXEC_RESULT line.
+
+    e.g. ``_marker_value("...=PASS work_dir=/x device=3", "device=") == "3"``.
+    Values never contain spaces (paths in CI, integer ids), so a token split is
+    sufficient.
+    """
+    for tok in line.split():
+        if tok.startswith(key):
+            return tok[len(key) :]
+    return None
+
+
+def _parse_executed_device(stdout: str) -> int | None:
+    """Pull the real device id out of execute_artifact's PASS marker."""
+    for line in reversed(stdout.splitlines()):
+        if line.startswith(f"{_RESULT_MARKER_PREFIX}=PASS"):
+            for tok in line.split():
+                if tok.startswith("device="):
+                    try:
+                        return int(tok.split("=", 1)[1])
+                    except ValueError:
+                        return None
+    return None
+
+
+def _classify_task_submit_failure(returncode: int, stdout: str, stderr: str) -> str:
+    """Build a ``RunResult.error`` distinguishing a real failure from infra.
+
+    ``task-submit --run`` propagates the inner exit code verbatim, so the code +
+    the presence/absence of the PASS/FAIL marker pins down what went wrong.
+    """
+    has_fail = f"{_RESULT_MARKER_PREFIX}=FAIL" in stdout
+    has_pass = f"{_RESULT_MARKER_PREFIX}=PASS" in stdout
+    streams = f"---- stdout ----\n{stdout}\n---- stderr ----\n{stderr}"
+    if returncode == 0 and not has_pass:
+        return f"task-submit returned 0 without a PASS marker — suspected scheduler anomaly.\n{streams}"
+    if returncode == 1 and has_fail:
+        return f"Test failed on device.\n{streams}"
+    if returncode == 1:
+        return (
+            "Borrowed-card queue wait timed out (task-submit --timeout); the task may still "
+            f"be running. Raise --task-queue-timeout.\n{streams}"
+        )
+    if returncode in (137, 143):
+        return (
+            "Execution killed by task-submit watchdog (--max-time exceeded); investigate a "
+            f"hang or raise --task-max-time.\n{streams}"
+        )
+    return f"task-submit rc={returncode}.\n{streams}"
+
+
+def _run_artifact_via_task_submit(
+    work_dir: Path,
+    platform: str,
+    dfx: "_DfxOpts",
+    pto_isa_commit: str | None,
+    max_time: int,
+    queue_timeout: int,
+    device: str = "auto",
+) -> tuple[bool, str | None, int | None]:
+    """Execute one compiled artifact through ``task-submit``.
+
+    Returns ``(passed, error, device_id)``.  The child re-binds the cached
+    .o/.so in *work_dir* (no recompile, no card) and runs on the NPU task-submit
+    lends it via ``$TASK_DEVICE``.  Blocks until the child exits.
+
+    *device* is the ``task-submit --device`` value: ``"auto"`` (borrow any free
+    card) or a specific id / range (pin to it — used to validate the flow before
+    trusting auto-allocation).
+
+    No ``--env`` / ``--ptoas`` flags are passed: ``task-submit`` runs the child
+    via ``runuser`` as the submitter and preserves the caller's exported
+    environment (PTO_ISA_ROOT / PTOAS_ROOT / PYTHONPATH / PTO2_RING_* all reach
+    the child), so the minimal CI ``task-submit`` (which lacks those options)
+    works — matching the existing ``daily_ci`` a5 job.
+    """
+    # Use the exact interpreter running the harness (the per-job venv python),
+    # not bare "python": task-submit runs the child via runuser and bare "python"
+    # would resolve off PATH to the conda base python, which need not have pypto.
+    inner = [
+        sys.executable,
+        "-m",
+        "pypto.runtime.execute_artifact",
+        "--work-dir",
+        str(work_dir),
+        "--platform",
+        platform,
+        "--device-id",
+        "$TASK_DEVICE",  # expanded by the shell task-submit runs the command in
+        # Device run only — persist actual outputs, no allclose. The harness
+        # validates with the per-test tolerance after this returns, so the run
+        # is tolerance-independent and can be submitted eagerly.
+        "--no-validate",
+        *_dfx_to_cli(dfx),
+    ]
+    if pto_isa_commit:
+        inner += ["--pto-isa-commit", pto_isa_commit]
+    argv = [
+        "task-submit",
+        "--device",
+        device,
+        "--timeout",
+        str(queue_timeout),
+        "--max-time",
+        str(max_time),
+        "--run",
+        f"cd {_PROJECT_ROOT} && {' '.join(inner)}",
+    ]
+    try:
+        proc = subprocess.run(argv, check=False, capture_output=True, text=True)  # noqa: S603
+    except FileNotFoundError:
+        return (
+            False,
+            "task-submit not found on this machine — do not pass --execute-via-task-submit here.",
+            None,
+        )
+    # Persist the full child output next to the artifact for post-mortem. Do NOT
+    # reprint it: the device chatter / markers would drown pytest's own per-test
+    # output. Failures surface their detail via the returned error instead.
+    combined = f"---- stdout ----\n{proc.stdout}\n---- stderr ----\n{proc.stderr}\n"
+    try:
+        (work_dir / "execute.log").write_text(combined, encoding="utf-8")
+    except OSError:
+        pass
+    if proc.returncode == 0 and f"{_RESULT_MARKER_PREFIX}=PASS" in proc.stdout:
+        return (True, None, _parse_executed_device(proc.stdout))
+    return (False, _classify_task_submit_failure(proc.returncode, proc.stdout, proc.stderr), None)
+
+
+def _run_batch_via_task_submit(
+    entries: "list[tuple[Path, str]]",
+    manifest_path: Path,
+    device: str,
+    dfx: "_DfxOpts",
+    pto_isa_commit: str | None,
+    max_time: int,
+    queue_timeout: int,
+) -> "dict[str, tuple[bool, str | None, int | None]]":
+    """Run a batch of compiled artifacts in ONE task-submit task.
+
+    *entries* is ``[(work_dir, platform), ...]``.  Writes a manifest and submits
+    a single ``execute_artifact --batch-manifest`` task — one hot process, one
+    ChipWorker device session for the whole batch — then parses the per-artifact
+    markers into ``{str(work_dir): (ok, error, device)}``.  Artifacts with no
+    marker (the batch process crashed before reaching them, or an infra kill)
+    are reported as failures.  Blocks until the batch task exits.
+    """
+    manifest_path.write_text(
+        json.dumps([{"work_dir": str(wd), "platform": plat} for wd, plat in entries]),
+        encoding="utf-8",
+    )
+    inner = [
+        sys.executable,
+        "-m",
+        "pypto.runtime.execute_artifact",
+        "--batch-manifest",
+        str(manifest_path),
+        "--device-id",
+        "$TASK_DEVICE",  # expanded by the shell task-submit runs the command in
+        "--no-validate",  # device run only; the harness validates per-test below
+        *_dfx_to_cli(dfx),
+    ]
+    if pto_isa_commit:
+        inner += ["--pto-isa-commit", pto_isa_commit]
+    argv = [
+        "task-submit",
+        "--device",
+        device,
+        "--timeout",
+        str(queue_timeout),
+        "--max-time",
+        str(max_time),
+        "--run",
+        f"cd {_PROJECT_ROOT} && {' '.join(inner)}",
+    ]
+    try:
+        proc = subprocess.run(argv, check=False, capture_output=True, text=True)  # noqa: S603
+    except FileNotFoundError:
+        err = "task-submit not found on this machine — do not pass --execute-via-task-submit here."
+        return {str(wd): (False, err, None) for wd, _ in entries}
+    # Persist the full batch output for post-mortem; do NOT reprint it (the
+    # device chatter / per-artifact markers would bury pytest's own per-test
+    # lines). Failures carry the relevant detail via the returned error, and the
+    # batch log path is referenced there.
+    combined = f"---- stdout ----\n{proc.stdout}\n---- stderr ----\n{proc.stderr}\n"
+    batch_log = manifest_path.with_suffix(".log")
+    try:
+        batch_log.write_text(combined, encoding="utf-8")
+    except OSError:
+        pass
+    # Walk the markers, attributing the lines printed before each one to that
+    # artifact — so a FAIL carries its own traceback inline (the batch log is
+    # ephemeral). "PYPTO_EXEC_RESULT=PASS work_dir=<wd> device=<N>".
+    results: dict[str, tuple[bool, str | None, int | None]] = {}
+    buf: list[str] = []
+    for line in proc.stdout.splitlines():
+        if line.startswith(_RESULT_MARKER_PREFIX) and "work_dir=" in line:
+            wd = _marker_value(line, "work_dir=")
+            if wd is not None:
+                if line.startswith(f"{_RESULT_MARKER_PREFIX}=PASS"):
+                    dev = _marker_value(line, "device=")
+                    results[wd] = (True, None, int(dev) if dev and dev.isdigit() else None)
+                else:
+                    results[wd] = (False, "device run failed:\n" + "\n".join(buf).strip(), None)
+            buf = []
+        else:
+            buf.append(line)
+    # Artifacts without a marker: the batch process died early, or an infra kill
+    # (queue timeout / watchdog) that produced no per-artifact markers at all.
+    # ``buf`` holds whatever the process printed after the last marker (the crash).
+    infra_err = None
+    if proc.returncode not in (0, 1):
+        infra_err = _classify_task_submit_failure(proc.returncode, proc.stdout, proc.stderr)
+    tail = "\n".join(buf[-40:]).strip()
+    for wd, _ in entries:
+        results.setdefault(
+            str(wd),
+            (
+                False,
+                infra_err or f"no result marker — batch process likely died before this case:\n{tail}",
+                None,
+            ),
+        )
+    # Record one stat line per batch for the end-of-session summary (the live
+    # per-artifact markers are suppressed to keep pytest's log readable). The
+    # actual card is whatever task-submit handed this batch — read it back from a
+    # successful marker rather than the requested --device string ("auto"/range).
+    n_ok = sum(1 for ok, _, _ in results.values() if ok)
+    actual_device = next((d for ok, _, d in results.values() if ok and d is not None), None)
+    _batch_stats.append((manifest_path.stem, n_ok, len(entries), actual_device))
+    return results
+
+
+def _validate_after_device_run(
+    tc: "PTOTestCase",
+    work_dir: Path,
+    execution_time: float,
+) -> RunResult:
+    """Validate persisted device outputs with *tc*'s real tolerance (split path).
+
+    The task-submit device run is validation-free (``--no-validate``); it leaves
+    the actual outputs under ``work_dir/data/actual``.  This compares them
+    against the golden using the test's ``RunConfig`` rtol/atol — the tolerance
+    is applied here, in pytest's per-item lifecycle, not in the eager run.
+    """
+    try:
+        validate_persisted_outputs(work_dir, tc.config.rtol, tc.config.atol)
+    except Exception as exc:  # noqa: BLE001 — surfaced as a test failure
+        return RunResult(
+            passed=False,
+            test_name=tc.get_name(),
+            error=(
+                f"golden validation failed (rtol={tc.config.rtol}, atol={tc.config.atol}):\n"
+                f"{exc}\n{traceback.format_exc()}"
+            ),
+            execution_time=execution_time,
+        )
+    return RunResult(passed=True, test_name=tc.get_name(), execution_time=execution_time)
+
+
 def _fused_execute_task(
     tc: "PTOTestCase",
     cache_key: str,
@@ -358,6 +691,8 @@ def _fused_execute_task(
             execution_time=time.time() - start,
         )
 
+    # Local device-pool path (the legacy lazy mode + sim under task-submit).
+    # task-submit's onboard device runs go through the batch submitter, not here.
     assert _device_pool is not None, "device pool not initialised"
     device_id = _device_pool.get()
     try:
@@ -406,6 +741,87 @@ def _schedule_exec_after_golden(
     return _execute_pool.submit(_fused_execute_task, tc, cache_key, artifact)
 
 
+def _await_all_batches() -> None:
+    """Block until every submitted batch task has finished (drained).
+
+    Used by the undiscovered-case inline path so its per-case task-submit child
+    never cold-inits the card while a batch process is still doing the same.
+    """
+    _batches_ready.wait()
+    for batch_fut in {fut for fut, _ in _case_to_batch.values()}:
+        try:
+            batch_fut.result()
+        except Exception:  # noqa: BLE001 — batch errors surface on their own cases' run()
+            pass
+
+
+def _batch_submitter(batch_size: int, cache_dir: Path) -> None:
+    """Stream compiled artifacts into batches and submit one task per batch.
+
+    Runs on a background thread (so it doesn't block pytest's collection from
+    returning).  Instead of waiting for the WHOLE compile pool to drain before
+    submitting anything, it consumes compile futures in *completion* order and,
+    as soon as *batch_size* have compiled, submits that batch to the execute
+    pool via :func:`_run_batch_via_task_submit` — so the device run of the early
+    batches OVERLAPS the still-running compiles of the later ones (the card
+    starts working during the compile phase instead of sitting idle until the
+    end).  Each case is mapped to its batch Future in ``_case_to_batch`` so
+    ``TestRunner.run`` can await it; ``_batches_ready`` is set once every batch
+    has been submitted.
+
+    Compile failures / sim / codegen-only are skipped here and handled by
+    ``run``'s lazy per-item path.
+    """
+    assert _execute_pool is not None, "execute pool not initialised"
+    device = _pipeline_ctx.get("task_submit_device", "auto")
+    dfx = _pipeline_ctx.get("dfx", _DfxOpts())
+    pto_isa_commit = _pipeline_ctx.get("pto_isa_commit")
+    max_time = _pipeline_ctx.get("task_max_time", 600)
+    queue_timeout = _pipeline_ctx.get("task_queue_timeout", 1800)
+
+    def _submit(chunk: "list[tuple[str, Path, str]]", idx: int) -> None:
+        entries = [(wd, plat) for _, wd, plat in chunk]
+        manifest_path = cache_dir / f"batch_{idx}.json"
+        fut = _execute_pool.submit(
+            _run_batch_via_task_submit,
+            entries,
+            manifest_path,
+            device,
+            dfx,
+            pto_isa_commit,
+            max_time,
+            queue_timeout,
+        )
+        for key, wd, _ in chunk:
+            _case_to_batch[key] = (fut, wd)
+
+    key_by_fut = {cfut: key for key, cfut in _compile_futures.items()}
+    batch_idx = 0
+    pending: list[tuple[str, Path, str]] = []  # (cache_key, work_dir, platform)
+
+    # Consume in completion order: fill a batch as cases finish compiling and
+    # submit it immediately, so execution and compilation overlap.
+    for cfut in as_completed(key_by_fut):
+        try:
+            artifact = cfut.result()
+        except Exception:  # noqa: BLE001 — run() re-raises the compile crash with context
+            continue
+        if artifact.error is not None or _pipeline_ctx.get("codegen_only"):
+            continue
+        if artifact.resolved_platform.endswith("sim"):
+            continue
+        pending.append((key_by_fut[cfut], artifact.work_dir, artifact.resolved_platform))
+        if len(pending) >= batch_size:
+            _submit(pending[:batch_size], batch_idx)
+            batch_idx += 1
+            pending = pending[batch_size:]
+
+    if pending:  # final short batch
+        _submit(pending, batch_idx)
+
+    _batches_ready.set()
+
+
 def start_pipeline(  # noqa: PLR0913
     *,
     test_cases: "list[PTOTestCase]",
@@ -422,6 +838,11 @@ def start_pipeline(  # noqa: PLR0913
     enable_pmu: int = 0,
     enable_dep_gen: bool = False,
     enable_scope_stats: bool = False,
+    execute_mode: str = "device-pool",
+    task_max_time: int = 600,
+    task_queue_timeout: int = 1800,
+    task_submit_device: str = "auto",
+    execute_batch_size: int = 64,
 ) -> None:
     """Spin up the compile pipeline and populate :data:`_compile_futures`.
 
@@ -438,6 +859,8 @@ def start_pipeline(  # noqa: PLR0913
     progress reporting during collection.
     """
     global _device_pool, _execute_pool, _pipeline_ctx  # noqa: PLW0603
+
+    _batch_stats.clear()  # fresh per session; read by pytest_terminal_summary
 
     # Resolve PTO_ISA_ROOT once on the main thread before any compile workers
     # start.  Otherwise concurrent workers race on `git clone` into the same
@@ -465,9 +888,28 @@ def start_pipeline(  # noqa: PLR0913
             enable_dep_gen=enable_dep_gen,
             enable_scope_stats=enable_scope_stats,
         ),
+        "execute_mode": execute_mode,
+        "task_max_time": task_max_time,
+        "task_queue_timeout": task_queue_timeout,
+        "task_submit_device": task_submit_device,
+        # In task-submit mode route the undiscovered-case tail through task-submit
+        # too, so EVERY device run goes through task-submit's per-card lock. An
+        # in-process device run would bypass that lock and collide with the
+        # batch processes on the same card (halMemCtl EACCES). One mechanism, one
+        # lock, no contention. Sim still runs in-process (it needs no card).
+        "inline_via_task_submit": execute_mode == "task-submit",
     }
-    n_devices = device_pool.qsize()
-    _execute_pool = ThreadPoolExecutor(max_workers=max(1, n_devices), thread_name_prefix="pypto-exec")
+    # task-submit mode: every compiled artifact goes into a batch of
+    # execute_batch_size, and each batch is one task-submit task (one hot
+    # process).  Size the pool to the batch count so all batches are submitted at
+    # once and task-submit owns the cross-card scheduling.  Device-pool mode keeps
+    # tracking the local card count.
+    if execute_mode == "task-submit":
+        n_batches = max(1, math.ceil(len(test_cases) / max(1, execute_batch_size)))
+        n_exec = min(n_batches, _MAX_TASK_SUBMIT_INFLIGHT)
+    else:
+        n_exec = max(1, device_pool.qsize())
+    _execute_pool = ThreadPoolExecutor(max_workers=n_exec, thread_name_prefix="pypto-exec")
 
     groups: dict[BackendType, list[PTOTestCase]] = {}
     for tc in test_cases:
@@ -491,11 +933,6 @@ def start_pipeline(  # noqa: PLR0913
                 analyze_auto_scopes_for_deps,
                 pto_isa_commit,
             )
-            # TestRunner.run() blocks on this compile future, rewrites
-            # golden.py with the real RunConfig, then submits the exec
-            # task itself.  Keeping exec submission on the main thread
-            # aligns C++ stdout with pytest's per-test capture window and
-            # ensures the real tolerances reach golden.py.
             _compile_futures[key] = cfut
             group_futs.append(cfut)
         if is_last:
@@ -510,6 +947,43 @@ def start_pipeline(  # noqa: PLR0913
         _compile_pools.remove(compile_pool)
         reset_for_testing()
 
+    # task-submit mode: a background thread waits for all compiles, groups the
+    # artifacts into batches and submits one task-submit task per batch.  Runs in
+    # the background so pytest's per-item loop starts immediately; TestRunner.run
+    # waits on _batches_ready before reading _case_to_batch.
+    if execute_mode == "task-submit":
+        threading.Thread(
+            target=_batch_submitter,
+            args=(execute_batch_size, cache_dir),
+            name="pypto-batch-submitter",
+            daemon=True,
+        ).start()
+
+
+def configure_inline_task_submit(
+    *,
+    task_max_time: int = 600,
+    task_queue_timeout: int = 1800,
+    task_submit_device: str = "auto",
+) -> None:
+    """Route the inline (no-pipeline) execute path through task-submit.
+
+    Used when ``--execute-via-task-submit`` is passed *without*
+    ``--precompile-workers``: no compile pipeline runs, but ``_run_inline``
+    consults ``_pipeline_ctx`` to decide how to execute.  ``pto_isa_commit`` and
+    DFX still come from the test's ``RunConfig`` on that path, so only the
+    execute-mode toggle and task-submit knobs are stashed here.
+    """
+    _pipeline_ctx["execute_mode"] = "task-submit"
+    _pipeline_ctx["task_max_time"] = task_max_time
+    _pipeline_ctx["task_queue_timeout"] = task_queue_timeout
+    _pipeline_ctx["task_submit_device"] = task_submit_device
+    # No compile pipeline here, so there is no batch path: every case is inline
+    # and must borrow a card per case via task-submit (the harness host may have
+    # no local device). With a pipeline, undiscovered cases stay in-process —
+    # see _run_inline.
+    _pipeline_ctx["inline_via_task_submit"] = True
+
 
 def shutdown_pipeline() -> None:
     """Tear down compile/execute pools; called from ``pytest_sessionfinish``."""
@@ -520,6 +994,33 @@ def shutdown_pipeline() -> None:
     if _execute_pool is not None:
         _execute_pool.shutdown(wait=False, cancel_futures=True)
     _execute_pool = None
+    _case_to_batch.clear()
+    _batches_ready.clear()
+    # NOTE: _batch_stats is intentionally NOT cleared here — pytest_terminal_summary
+    # runs *after* sessionfinish (which calls this) and reads it. It is reset at
+    # the start of the next pipeline (start_pipeline) instead.
+
+
+def execution_summary_lines() -> list[str]:
+    """End-of-session summary of the task-submit device runs (for the terminal).
+
+    The per-artifact device markers are suppressed to keep pytest's log clean, so
+    without this the batched, card-borrowing execution is invisible. Returns one
+    line showing how many batches ran, the pass count, and how the runs spread
+    across the borrowed cards — or ``[]`` when no batch ran (non-task-submit mode).
+    """
+    if not _batch_stats:
+        return []
+    total = sum(n for _, _, n, _ in _batch_stats)
+    ok = sum(n for _, n, _, _ in _batch_stats)
+    by_device: dict[int | None, int] = {}
+    for _, _, n, dev in _batch_stats:
+        by_device[dev] = by_device.get(dev, 0) + n
+    dist = ", ".join(
+        f"device {d}: {c}" if d is not None else f"device ?: {c}"
+        for d, c in sorted(by_device.items(), key=lambda kv: (kv[0] is None, kv[0] or 0))
+    )
+    return [f"{len(_batch_stats)} batch(es), {ok}/{total} device runs ok | cards used: {dist}"]
 
 
 class TestRunner:
@@ -576,6 +1077,51 @@ class TestRunner:
                     error=f"compile task crashed: {exc}\n{traceback.format_exc()}",
                     execution_time=0.0,
                 )
+            if _pipeline_ctx.get("execute_mode") == "task-submit" and not artifact.resolved_platform.endswith(
+                "sim"
+            ):
+                # task-submit: this case's device run was batched and submitted by
+                # the background _batch_submitter.  Wait for the batches to be
+                # assigned, await this case's batch, pick out its per-artifact
+                # result, then validate the persisted outputs with THIS test's
+                # real tolerance.  The device run itself was tolerance-independent
+                # and ran (with its whole batch) in one hot process.
+                _batches_ready.wait()
+                entry = _case_to_batch.get(cache_k)
+                if entry is not None:
+                    batch_fut, work_dir = entry
+                    try:
+                        batch_results = batch_fut.result()
+                    except Exception as exc:
+                        _last_device["value"] = None
+                        return RunResult(
+                            passed=False,
+                            test_name=test_case.get_name(),
+                            error=f"batch execute crashed: {exc}\n{traceback.format_exc()}",
+                            execution_time=0.0,
+                        )
+                    ok, error, device = batch_results.get(
+                        str(work_dir), (False, "no batch result for case", None)
+                    )
+                    _last_device["value"] = device
+                    if not ok:
+                        return RunResult(
+                            passed=False,
+                            test_name=test_case.get_name(),
+                            error=error,
+                            execution_time=0.0,
+                        )
+                    return _validate_after_device_run(test_case, work_dir, 0.0)
+                # Compiled OK but not assigned to a batch — shouldn't happen.
+                _last_device["value"] = None
+                return RunResult(
+                    passed=False,
+                    test_name=test_case.get_name(),
+                    error="task-submit mode: case compiled but was not assigned to any batch",
+                    execution_time=0.0,
+                )
+            # device-pool / sim / codegen-only: legacy lazy per-item path
+            # (run() rewrites golden + submits + validates in-process).
             exec_fut = _schedule_exec_after_golden(test_case, cache_k, artifact)
             try:
                 result = exec_fut.result()
@@ -659,6 +1205,43 @@ class TestRunner:
             chip_callable, runtime_name, _ = compile_and_assemble(
                 work_dir, resolved_platform, pto_isa_commit=self.config.pto_isa_commit
             )
+            # Undiscovered cases (the minority the collection scan can't see)
+            # borrow a card via task-submit too, so EVERY device run goes through
+            # task-submit's per-card lock. Running these in-process would bypass
+            # that lock and collide with the batch processes on the same card
+            # (halMemCtl EACCES). One mechanism, one lock, no contention. Sim
+            # never needs a card, so it always stays in-process.
+            if _pipeline_ctx.get("inline_via_task_submit") and not resolved_platform.endswith("sim"):
+                # Run this undiscovered case's device step only AFTER every batch
+                # has drained, so its task-submit child doesn't cold-init the card
+                # concurrently with the batch processes (2+ device inits at once
+                # on a busy card → halMemCtl EACCES). Keeps init one-at-a-time.
+                _await_all_batches()
+                passed, error, device = _run_artifact_via_task_submit(
+                    work_dir,
+                    resolved_platform,
+                    _DfxOpts.from_run_config(self.config),
+                    self.config.pto_isa_commit,
+                    _pipeline_ctx.get("task_max_time", 600),
+                    _pipeline_ctx.get("task_queue_timeout", 1800),
+                    _pipeline_ctx.get("task_submit_device", "auto"),
+                )
+                # Report the card task-submit actually lent (run() optimistically
+                # stashed config.device_id before delegating here), so the
+                # [DEVICE] line and per-device summary reflect the real card.
+                if device is not None:
+                    _last_device["value"] = device
+                if not passed:
+                    return RunResult(
+                        passed=False,
+                        test_name=test_name,
+                        error=error,
+                        execution_time=time.time() - start_time,
+                    )
+                # Device run (--no-validate) persisted outputs; validate here.
+                return _validate_after_device_run(test_case, work_dir, time.time() - start_time)
+            # RunTiming was dropped (simpler #1177): _execute_on_device returns
+            # None now; timing is read from the runtime's [STRACE] log markers.
             _execute_on_device(
                 work_dir,
                 golden_path,
