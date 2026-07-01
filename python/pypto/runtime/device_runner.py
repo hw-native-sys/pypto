@@ -58,6 +58,37 @@ from .task_interface import (
 
 logger = logging.getLogger(__name__)
 
+_COMPILE_WORKERS_ENV = "PYPTO_DEVICE_COMPILE_WORKERS"
+_COMPILE_WORKERS_CAP = 16
+
+
+def _available_cpus() -> int:
+    """Best-effort count of CPUs usable by this process."""
+    try:
+        return len(os.sched_getaffinity(0))
+    except AttributeError:  # pragma: no cover - non-Linux fallback
+        return os.cpu_count() or 1
+
+
+def _device_compile_workers(n_units: int) -> int:
+    """Thread count for a single test case's kernel/orchestration compilation.
+
+    Each unit spawns a ccec subprocess (itself multi-threaded via libgomp), and
+    many test cases compile concurrently under the precompile pool. An
+    unbounded per-case fan-out multiplies with that outer concurrency and can
+    exhaust process/thread limits (libgomp thread-creation failures, segfaults).
+    Cap the fan-out at ``min(_COMPILE_WORKERS_CAP, available_cpus)``; override
+    via ``PYPTO_DEVICE_COMPILE_WORKERS``.
+    """
+    env_val = os.environ.get(_COMPILE_WORKERS_ENV, "").strip()
+    if env_val:
+        try:
+            return max(1, int(env_val))
+        except ValueError:
+            logger.warning("Invalid %s='%s', using default", _COMPILE_WORKERS_ENV, env_val)
+    cap = min(_COMPILE_WORKERS_CAP, _available_cpus())
+    return max(1, min(cap, n_units))
+
 
 # ---------------------------------------------------------------------------
 # Binary cache helpers
@@ -471,7 +502,7 @@ def compile_and_assemble(
         # Compile via shared function; skip secondary prebuild cache write
         return compile_single_orchestration(orchestration["source"], compiler, runtime_name)
 
-    max_workers = min(64, 1 + len(kernels))
+    max_workers = _device_compile_workers(1 + len(kernels))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         fut_orch = executor.submit(_compile_orchestration)
         fut_kernels = [executor.submit(_compile_one_kernel, k) for k in kernels]
