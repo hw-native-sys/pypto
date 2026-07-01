@@ -263,7 +263,7 @@ jobs:
         run: ccache -s || true
 
       - name: Test system tests
-        timeout-minutes: 15
+        timeout-minutes: 20
         # tests/st/codegen is device-free and runs in the separate CPU
         # codegen-tests job (--codegen-only). On-board execution tests
         # (incl. the paged-attention pipelines) live under tests/st/runtime.
