@@ -14,13 +14,14 @@ This configuration sets up the testing environment using the internal
 harness package (migrated from pto-testing-framework).
 """
 
+import ast
 import inspect
 import queue
 import random
-import re
 import shutil
 import sys
 import tempfile
+import textwrap
 from collections import Counter
 from contextlib import nullcontext
 from datetime import datetime
@@ -46,6 +47,8 @@ from harness.core.harness import ALL_PLATFORM_IDS, PTOTestCase  # noqa: E402
 from harness.core.test_runner import (  # noqa: E402
     TestRunner,
     _cache_key,
+    configure_inline_task_submit,
+    execution_summary_lines,
     shutdown_pipeline,
     start_pipeline,
 )
@@ -154,6 +157,47 @@ def pytest_addoption(parser):
         default=None,
         type=int,
         help="Number of parallel threads for pre-compilation phase (default: min(32, cpu_count+4))",
+    )
+    parser.addoption(
+        "--execute-via-task-submit",
+        action="store_true",
+        default=False,
+        help="Borrow an NPU per case from the host-level 'task-submit --device auto' queue for "
+        "the execute step (compile + golden stay card-free). Orthogonal to --precompile-workers; "
+        "machines without task-submit must NOT pass this (default: False).",
+    )
+    parser.addoption(
+        "--task-max-time",
+        action="store",
+        default=600,
+        type=int,
+        help="Per-case execution cap passed to 'task-submit --max-time' (seconds, default: 600).",
+    )
+    parser.addoption(
+        "--task-queue-timeout",
+        action="store",
+        default=1800,
+        type=int,
+        help="Card-queue wait cap passed to 'task-submit --timeout' (seconds). Must be >= the "
+        "longest task; deep queues need a large value (default: 1800).",
+    )
+    parser.addoption(
+        "--task-submit-device",
+        action="store",
+        default="auto",
+        help="Value for 'task-submit --device' in task-submit mode: 'auto' (borrow any free "
+        'card) or a specific id/range to pin to (e.g. "$DEVICE_RANGE") for validating the '
+        "flow before trusting auto-allocation (default: auto).",
+    )
+    parser.addoption(
+        "--execute-batch-size",
+        action="store",
+        default=64,
+        type=int,
+        help="Artifacts per task-submit task in task-submit mode. Each batch runs in ONE hot "
+        "process (one torch/NPU init for the whole batch), amortizing cold-start cost. Smaller "
+        "= more parallel tasks (more cards) but more init; larger = fewer inits but less "
+        "parallelism (default: 64).",
     )
     parser.addoption(
         "--pypto-log-level",
@@ -337,13 +381,22 @@ def _report_device(request) -> None:
 
 
 def pytest_terminal_summary(terminalreporter, exitstatus, config) -> None:  # noqa: ARG001
-    """Emit a per-device test count summary at the end of the session."""
-    if not _device_counter:
+    """Emit a per-device test count + task-submit batch summary at session end.
+
+    In task-submit mode the per-artifact device markers are suppressed for a
+    clean log, so this is the one place the borrowed-card batched execution is
+    made visible: how many batches ran and how the runs spread across cards.
+    """
+    batch_lines = execution_summary_lines()
+    if not _device_counter and not batch_lines:
         return
-    total = sum(_device_counter.values())
-    terminalreporter.write_sep("=", f"per-device test count ({total} total)")
-    for dev in sorted(_device_counter):
-        terminalreporter.write_line(f"  device {dev:>3}: {_device_counter[dev]} tests")
+    if _device_counter:
+        total = sum(_device_counter.values())
+        terminalreporter.write_sep("=", f"per-device test count ({total} total)")
+        for dev in sorted(_device_counter):
+            terminalreporter.write_line(f"  device {dev:>3}: {_device_counter[dev]} tests")
+    for line in batch_lines:
+        terminalreporter.write_line(f"  task-submit: {line}")
 
 
 @pytest.fixture(autouse=True)
@@ -472,6 +525,16 @@ def pytest_configure(config):
     )
     config.addinivalue_line("markers", "slow: mark test as slow")
     config.addinivalue_line("markers", "fuzz: mark test as fuzz test")
+    config.addinivalue_line(
+        "markers",
+        "device_batch: auto-applied to tests that execute via test_runner.run "
+        "(PTOTestCase) — compile/golden card-free, device run batched through "
+        "task-submit. Tests WITHOUT it call the device directly (@pl.jit / "
+        "config=test_config) and must run in-process. CI selects them with "
+        "`-m device_batch` (batched step) vs `-m 'not device_batch'` (in-process "
+        "step); the split is by fixture usage, so new tests self-classify with no "
+        "ci.yml change.",
+    )
 
     # Set C++ log level as early as possible so it applies to collection too.
     # Forked child processes inherit this setting via os.fork().
@@ -491,6 +554,25 @@ def pytest_configure(config):
             from pypto.runtime import configure_log  # noqa: PLC0415
 
             configure_log(runtime_level)  # ValueError propagates: invalid CLI value must fail fast
+
+
+def pytest_itemcollected(item):
+    """Auto-classify each test into the batched (A) vs in-process (B) execute path.
+
+    The discriminator is fixture usage, resolved at collection time — so a new
+    test needs no ci.yml edit to be routed correctly, and a file mixing both
+    styles is split per-test:
+
+    - Uses the ``test_runner`` fixture (``test_runner.run(PTOTestCase)``) → mark
+      ``device_batch``: the harness pre-compiles it card-free and runs its device
+      step through the batched task-submit pipeline.
+    - Otherwise (direct ``@pl.jit`` kernel call / ``config=test_config``, or no
+      device at all) → left unmarked: CI runs it in-process via
+      ``-m 'not device_batch'`` (one task-submit card session), which is the only
+      correct path for a synchronous direct-device call.
+    """
+    if isinstance(item, pytest.Function) and "test_runner" in getattr(item, "fixturenames", ()):
+        item.add_marker("device_batch")
 
 
 def pytest_collection_modifyitems(config, items):
@@ -542,51 +624,125 @@ def pytest_collection_modifyitems(config, items):
         items[:] = selected
 
 
+class _Unresolvable(Exception):
+    """A constructor-argument AST node that cannot be resolved statically."""
+
+
+def _eval_arg_node(
+    node: ast.AST, params: dict[str, Any], localns: dict[str, Any], globalns: dict[str, Any]
+) -> Any:
+    """Resolve a constructor-argument AST node to a Python value.
+
+    Handles the shapes test bodies actually use to build a ``PTOTestCase``:
+    literals, parametrize names, local variables assigned earlier in the body,
+    module globals, attribute/enum access (``DataType.FP16``), tuples/lists,
+    negated numbers, and *calls* (``RunConfig(...)``, ``_cfg()``) — the call is
+    re-evaluated exactly as the body would.  Name lookup order is
+    params → locals → globals, mirroring how the body would evaluate it.
+    Anything else (arithmetic on non-constants, ``**kwargs``) raises
+    :class:`_Unresolvable` so the case falls back to the inline path rather than
+    being mis-reconstructed.
+    """
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Name):
+        if node.id in params:
+            return params[node.id]
+        if node.id in localns:
+            return localns[node.id]
+        if node.id in globalns:
+            return globalns[node.id]
+        raise _Unresolvable(node.id)
+    if isinstance(node, ast.Attribute):
+        return getattr(_eval_arg_node(node.value, params, localns, globalns), node.attr)
+    if isinstance(node, (ast.Tuple, ast.List)):
+        elts = [_eval_arg_node(e, params, localns, globalns) for e in node.elts]
+        return tuple(elts) if isinstance(node, ast.Tuple) else elts
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        return -_eval_arg_node(node.operand, params, localns, globalns)
+    if isinstance(node, ast.Call):
+        fn = _eval_arg_node(node.func, params, localns, globalns)
+        a = [_eval_arg_node(x, params, localns, globalns) for x in node.args]
+        kw = {k.arg: _eval_arg_node(k.value, params, localns, globalns) for k in node.keywords if k.arg}
+        if any(k.arg is None for k in node.keywords):
+            raise _Unresolvable("**kwargs")
+        return fn(*a, **kw)
+    raise _Unresolvable(ast.dump(node))
+
+
 def _collect_test_case_from_item(item: pytest.Item, seen: dict[str, PTOTestCase]) -> None:
-    """Inspect *item* and add any newly discovered PTOTestCase instance to *seen*."""
+    """Inspect *item* and add any discovered PTOTestCase instances to *seen*.
+
+    Parses the test body and resolves every ``SomeCase(...)`` constructor call
+    (callee + all positional/keyword args) against this item's parametrize
+    params, locals assigned earlier in the body, and the test module globals,
+    then instantiates it exactly as the body would.  This reconstructs the case
+    regardless of parametrize→__init__ name renames (``valid`` →
+    ``valid_shapes``), hard-coded literal args (``dtype=DataType.FP16``),
+    positional args, the class-as-parameter pattern (``op_cls(...)``), or a
+    locally-built config (``cfg = RunConfig(...); run(Case(config=cfg))``) — so
+    the case is pre-compiled and batched instead of falling to the per-case
+    inline path.  Cases whose args genuinely can't be resolved (built in a loop,
+    arithmetic on params) are left for the inline path.
+    """
     if any(m.name == "skip" for m in item.iter_markers()):
         return
 
     module = item.module
-
-    # Collect PTOTestCase subclasses visible in this module.
-    testcase_classes: dict[str, type] = {}
-    for attr in dir(module):
-        obj = getattr(module, attr, None)
-        if (
-            obj is not None
-            and isinstance(obj, type)
-            and issubclass(obj, PTOTestCase)
-            and obj is not PTOTestCase
-        ):
-            testcase_classes[attr] = obj
-
-    if not testcase_classes:
+    if module is None:
         return
+    globalns = vars(module)
 
-    # callspec params for @pytest.mark.parametrize (empty dict if none).
     callspec = getattr(item, "callspec", None)
-    call_params: dict[str, Any] = callspec.params if callspec else {}
+    params: dict[str, Any] = callspec.params if callspec else {}
 
-    # Scan test function source to find which class name is referenced.
     try:
-        source = inspect.getsource(item.function)
-    except (OSError, TypeError):
+        source = textwrap.dedent(inspect.getsource(item.function))
+        tree = ast.parse(source)
+    except (OSError, TypeError, SyntaxError):
         return
 
-    for cls_name, cls in testcase_classes.items():
-        if not re.search(r"\b" + re.escape(cls_name) + r"\s*\(", source):
+    # Build a local namespace from simple ``name = <expr>`` assignments, in
+    # source order, so a constructor arg referencing a local (``config=cfg``)
+    # resolves. Unresolvable assignments (e.g. ``result = test_runner.run(...)``)
+    # are skipped — the fixture call can't and shouldn't be evaluated here.
+    localns: dict[str, Any] = {}
+    assigns = sorted(
+        (n for n in ast.walk(tree) if isinstance(n, ast.Assign)),
+        key=lambda n: (n.lineno, n.col_offset),
+    )
+    for stmt in assigns:
+        if len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+            try:
+                localns[stmt.targets[0].id] = _eval_arg_node(stmt.value, params, localns, globalns)
+            except Exception:  # noqa: BLE001 — best-effort; unresolved locals just stay unknown
+                continue
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
             continue
-        # Filter callspec params to those accepted by __init__.
+        # The callee must resolve to a concrete PTOTestCase subclass. Any
+        # evaluation failure (unresolvable name, an attribute/call on a fixture
+        # or other non-constructor callee, a side-effecting helper that raises)
+        # just means "not a discoverable case here" — skip, don't crash
+        # collection.
         try:
-            sig = inspect.signature(cls.__init__)
-            valid = {k: v for k, v in call_params.items() if k in sig.parameters}
-            instance = cls(**valid)
+            func = _eval_arg_node(node.func, params, localns, globalns)
+        except Exception:  # noqa: BLE001 — best-effort discovery; never abort collection
+            continue
+        if not (isinstance(func, type) and issubclass(func, PTOTestCase) and func is not PTOTestCase):
+            continue
+        # Resolve every arg exactly as the body passes them (positional + kw).
+        try:
+            if any(kw.arg is None for kw in node.keywords):
+                raise _Unresolvable("**kwargs")
+            args = [_eval_arg_node(a, params, localns, globalns) for a in node.args]
+            kwargs = {kw.arg: _eval_arg_node(kw.value, params, localns, globalns) for kw in node.keywords}
+            instance = func(*args, **kwargs)
         except Exception:
-            continue  # constructor mismatch — skip
-        key = _cache_key(instance)
-        if key not in seen:
-            seen[key] = instance
+            # _Unresolvable arg, or a constructor mismatch — leave for inline.
+            continue
+        seen.setdefault(_cache_key(instance), instance)
 
 
 def pytest_collection_finish(session: pytest.Session) -> None:
@@ -616,10 +772,36 @@ def pytest_collection_finish(session: pytest.Session) -> None:
     if not seen:
         return
 
+    execute_via_task_submit: bool = session.config.getoption("--execute-via-task-submit")
+    task_max_time: int = session.config.getoption("--task-max-time")
+    task_queue_timeout: int = session.config.getoption("--task-queue-timeout")
+    task_submit_device: str = (session.config.getoption("--task-submit-device") or "").strip()
+    execute_batch_size: int = session.config.getoption("--execute-batch-size")
+
+    # Guard against a silently-wrong card. ``--task-submit-device="$DEVICE_RANGE"``
+    # with an *unset* DEVICE_RANGE (e.g. the var didn't propagate to a de-dockered
+    # runner) collapses to an empty string, which would make ``task-submit
+    # --device ""`` fall back to auto-allocation — borrowing a host-free card the
+    # runner may not own (→ halMemCtl EACCES). Fail loudly instead.
+    if execute_via_task_submit and not task_submit_device:
+        raise pytest.UsageError(
+            "--task-submit-device is empty (an unset $DEVICE_RANGE on a de-dockered runner?). "
+            "Pass 'auto' to borrow any free card, or a specific id/range (e.g. \"$DEVICE_RANGE\") "
+            "to pin. Refusing to fall back to task-submit's default card silently."
+        )
+
     max_workers: int | None = session.config.getoption("--precompile-workers")
     # Without --precompile-workers the pipeline is skipped entirely; each
-    # test compiles + executes inline inside TestRunner._run_inline().
+    # test compiles + executes inline inside TestRunner._run_inline().  When
+    # task-submit is still requested, route that inline execute through it too
+    # (the no-pipeline + task-submit matrix cell).
     if max_workers is None:
+        if execute_via_task_submit:
+            configure_inline_task_submit(
+                task_max_time=task_max_time,
+                task_queue_timeout=task_queue_timeout,
+                task_submit_device=task_submit_device,
+            )
         return
 
     dump_passes: bool = session.config.getoption("--dump-passes")
@@ -642,6 +824,17 @@ def pytest_collection_finish(session: pytest.Session) -> None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             cache_dir = _PROJECT_ROOT / "build_output" / f"precompile_{timestamp}"
         cache_dir.mkdir(parents=True, exist_ok=True)
+    elif execute_via_task_submit:
+        # task-submit runs the execute child as a host-level process that must
+        # read this (parent-written) cache_dir.  Put it under the repo's
+        # build_output — a real host path inside the checkout (reclaimed by the
+        # next run's ``actions/checkout`` clean) — rather than /tmp, to avoid
+        # private-tmp / cross-user visibility surprises.  Still a temp dir:
+        # removed at session end (pytest_sessionfinish), so CI disk does not grow.
+        base = _PROJECT_ROOT / "build_output"
+        base.mkdir(parents=True, exist_ok=True)
+        cache_dir = Path(tempfile.mkdtemp(prefix="pypto_precompile_", dir=str(base)))
+        _temp_precompile_dirs.append(cache_dir)
     else:
         cache_dir = Path(tempfile.mkdtemp(prefix="pypto_precompile_"))
         _temp_precompile_dirs.append(cache_dir)
@@ -657,10 +850,18 @@ def pytest_collection_finish(session: pytest.Session) -> None:
     for d in devices:
         device_pool.put(d)
 
+    execute_mode = "task-submit" if execute_via_task_submit else "device-pool"
     test_cases = list(seen.values())
+    # In task-submit mode the device runs borrow `task_submit_device` via
+    # task-submit; the local `--device` pool is unused (only in-process sim would
+    # touch it). Show only the device that actually executes, to avoid implying
+    # two different cards are in play.
+    device_info = (
+        f"task_submit_device={task_submit_device}" if execute_via_task_submit else f"devices={devices}"
+    )
     print(
         f"\n[PyPTO] Pipeline: {len(test_cases)} test case(s); "
-        f"compile_workers={max_workers}, devices={devices}"
+        f"compile_workers={max_workers}, execute_mode={execute_mode}, {device_info}"
     )
     start_pipeline(
         test_cases=test_cases,
@@ -677,6 +878,11 @@ def pytest_collection_finish(session: pytest.Session) -> None:
         enable_dep_gen=enable_dep_gen,
         enable_scope_stats=enable_scope_stats,
         analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
+        execute_mode=execute_mode,
+        task_max_time=task_max_time,
+        task_queue_timeout=task_queue_timeout,
+        task_submit_device=task_submit_device,
+        execute_batch_size=execute_batch_size,
     )
     print("[PyPTO] Pipeline scheduled — pytest item loop starting\n")
 
