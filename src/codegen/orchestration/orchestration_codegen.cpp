@@ -3797,6 +3797,24 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   CHECK(func->params_.size() == func->param_directions_.size())
       << "Orchestration function '" << func->name_ << "' has " << func->params_.size() << " params but "
       << func->param_directions_.size() << " param directions";
+  // orchestration_signature is built from the entry's declared ParamDirections,
+  // so an output a kernel writes into an entry parameter must be manually marked
+  // pl.Out / pl.InOut — otherwise it stays ParamDirection::In, is marked IN in the
+  // signature, and the runtime skips its D2H copy-back (silent all-zero output).
+  // As a lightweight guard, warn (non-fatal) when the entry declares no output
+  // parameter at all — commonly a forgotten annotation. It stays a warning
+  // because returning a runtime-allocated output is legitimate and needs no
+  // output parameter.
+  const bool has_output_param =
+      std::any_of(func->param_directions_.begin(), func->param_directions_.end(),
+                  [](ParamDirection d) { return d == ParamDirection::Out || d == ParamDirection::InOut; });
+  if (!has_output_param) {
+    LOG_ERROR << "Orchestration '" << func->name_
+              << "' declares no pl.Out / pl.InOut parameter. If a kernel writes a result into an "
+                 "entry parameter, mark that parameter pl.Out[...] (write-only) or pl.InOut[...] "
+                 "(read-write) so the runtime copies its result back to the host; an unmarked "
+                 "(pl.Tensor) parameter is treated as a read-only input and is not copied back.";
+  }
   for (size_t param_idx = 0; param_idx < func->params_.size(); ++param_idx) {
     const auto& var = func->params_[param_idx];
     std::string emit_name = GetSSABaseName(var->name_hint_);

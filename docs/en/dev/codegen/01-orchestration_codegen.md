@@ -152,6 +152,30 @@ The `ParamDirection` of each function parameter determines how it appears in tas
 
 Internal tensors from `tensor.create` are pre-allocated at scope entry via `alloc_tensors()`. When passed to kernels, they use `add_output(const Tensor&)` which triggers the OUTPUT_EXISTING overload — the runtime reuses the pre-allocated buffer instead of allocating a new one.
 
+### Orchestration Signature (copy-back control)
+
+`OrchestrationResult::orchestration_signature` is the entry's per-tensor runtime
+`ArgDirection` name list (`IN` / `OUT` / `INOUT`), in `orch_args` tensor order
+(scalars excluded). The config generator emits it as the `ORCHESTRATION`
+`"signature"`, and the runtime (`bind_callable_to_runtime_impl`) uses
+`signature[i]` for `orch_args.tensor(i)` to decide device staging and copy-back:
+a tensor marked `IN` **skips the D2H copy-back** (read-only input) and a pure
+`OUT` tensor takes the on-device memset fast path.
+
+**The signature is built from the entry's declared `ParamDirection`s, so declared
+directions are authoritative and outputs must be marked by hand:** an entry
+parameter that a kernel writes **must** be declared `pl.Out[...]` (write-only) or
+`pl.InOut[...]` (read-write). Left as a plain `pl.Tensor` (`ParamDirection::In`)
+it is marked `IN`, the runtime skips its copy-back, and its result silently reads
+back as all-zeros on the host.
+
+As a lightweight guard, `GenerateOrchestration` logs a **non-fatal** warning
+(`LOG_ERROR`) when the entry declares no `pl.Out` / `pl.InOut` parameter at all —
+commonly a forgotten output annotation. Compilation still proceeds: returning a
+runtime-allocated output (a tensor produced by a kernel and returned, rather than
+written into a caller-supplied buffer) is a legitimate pattern that needs no
+output parameter, so this stays a warning rather than a hard error.
+
 ### Scalar Parameter Encoding
 
 Scalar params occupy `ChipStorageTaskArgs` scalar slots (0-indexed, separate from tensor slots).

@@ -151,6 +151,25 @@ PTO2_SCOPE() {
 
 来自 `tensor.create` 的内部张量在 scope 入口通过 `alloc_tensors()` 预分配。传递给核函数时，使用 `add_output(const Tensor&)` 触发 OUTPUT_EXISTING 重载——运行时复用预分配的缓冲区，而非分配新的。
 
+### 编排签名（回拷控制）
+
+`OrchestrationResult::orchestration_signature` 是入口函数按 `orch_args` 张量顺序
+（排除标量）给出的每张量运行时 `ArgDirection` 名列表（`IN` / `OUT` / `INOUT`）。
+配置生成器将其作为 `ORCHESTRATION` 的 `"signature"` 发出，运行时
+（`bind_callable_to_runtime_impl`）用 `signature[i]` 对应 `orch_args.tensor(i)`
+来决定设备侧暂存与回拷：标记为 `IN` 的张量**跳过 D2H 回拷**（只读输入），纯
+`OUT` 张量走设备侧 memset 快路径。
+
+**签名由入口声明的 `ParamDirection` 构建,因此声明方向即权威,输出必须手动标记**：
+被核函数写入的入口参数**必须**声明为 `pl.Out[...]`（只写）或 `pl.InOut[...]`（读写）。
+若留作普通 `pl.Tensor`（`ParamDirection::In`），它会被标为 `IN`,运行时跳过其回拷,
+其结果在主机侧静默读回为全零。
+
+作为轻量护栏,当入口**完全没有** `pl.Out` / `pl.InOut` 参数时,`GenerateOrchestration`
+会记录一条**非致命**警告（`LOG_ERROR`）——这通常是漏标输出。编译仍会继续:返回运行时
+分配的输出（由核函数产生并 `return` 的张量,而非写入调用方传入的缓冲）是合法模式,无需
+输出参数,故此处只是警告而非硬错误。
+
 ### 标量参数编码
 
 标量参数占用 `ChipStorageTaskArgs` 的 scalar 槽位（从 0 开始独立索引，与张量槽位分离）。
