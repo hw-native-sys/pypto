@@ -62,6 +62,11 @@ std::optional<int64_t> EvalConstInt(const ir::ExprPtr& expr);
 /// for Parallel loops with statically-known trip counts.
 int64_t EvalConstTripCount(const ir::ForStmtPtr& for_stmt);
 
+/// Compute total GM-pipe workspace elements required by a root orchestration
+/// function by walking reachable statements/callees and summing
+/// ``initialize_pipe`` slot_count * slot_size.
+int64_t ComputeGMPipeWorkspaceElements(const ir::ProgramPtr& program, const ir::FunctionPtr& root_func);
+
 // ---------------------------------------------------------------------------
 // Supporting types
 // ---------------------------------------------------------------------------

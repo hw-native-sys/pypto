@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from importlib import resources
 
 try:
-    from importlib.resources.abc import Traversable  # Python >= 3.11
+    from importlib.resources.abc import Traversable  # pyright: ignore[reportMissingImports] # Python >= 3.11
 except ImportError:  # pragma: no cover - fallback for older interpreters
     from importlib.abc import Traversable
 from typing import Any

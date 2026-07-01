@@ -1581,6 +1581,106 @@ class TestOrchestrationMore:
         assert "enable_dump_tensor_selective" not in code
         assert code.count("params_t0.dump(ext_a);") == 1
 
+    def test_mixed_group_emission_order(self):
+        """MixedKernels, launch_spec, and set_dependencies must emit in canonical order.
+
+        Canonical order: ``L0TaskArgs → params → dump → MixedKernels → launch_spec → set_dependencies → submit``.
+        Guards against unintentional reorder in ``TaskDispatchPlan::Emit``.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class MixedOrderProgram:
+            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            def kernel(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                b: pl.Tensor[[64, 64], pl.FP32],
+                bias: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                tile_a = pl.load(a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+                tile_b = pl.load(b, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+                tile_l0a = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
+                tile_l0b = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
+                tile_mm = pl.matmul(tile_l0a, tile_l0b)
+                tile_bias = pl.load(bias, [0, 0], [64, 64])
+                tile_out = pl.add(tile_mm, tile_bias)
+                out = pl.store(tile_out, [0, 0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                b: pl.Tensor[[64, 64], pl.FP32],
+                bias: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                with pl.spmd(4):
+                    out = self.kernel(a, b, bias, out)
+                return out
+
+        transformed = passes.expand_mixed_kernel()(
+            passes.infer_tile_memory_space()(
+                passes.outline_cluster_scopes()(passes.convert_to_ssa()(MixedOrderProgram))
+            )
+        )
+        code = _generate_orch_code(transformed)
+
+        assert "MixedKernels mixed_0" in code, code
+        assert "params_t0.launch_spec." in code, code
+        assert "rt_submit_task(mixed_0" in code, code
+
+        # MixedKernels must appear after L0TaskArgs (params/dump block ends with
+        # add_* calls; MixedKernels comes next in the old canonical order).
+        assert "L0TaskArgs params_t0;" in code, code
+        l0_index = code.index("L0TaskArgs params_t0;")
+        mixed_index = code.index("MixedKernels mixed_0")
+        launch_index = code.index("params_t0.launch_spec.")
+        submit_index = code.index("rt_submit_task(mixed_0")
+        assert l0_index < mixed_index, "MixedKernels must appear after L0TaskArgs"
+        assert mixed_index < launch_index, "MixedKernels must appear before launch_spec"
+        assert launch_index < submit_index, "launch_spec must appear before submit"
+
+    def test_direct_call_with_deps_emission_order(self):
+        """Direct-call path with deps: L0TaskArgs → deps array → set_dependencies → submit.
+
+        The dependent task (params_t1) carries the deps. Guards the canonical
+        order for ``pl.submit(..., deps=[...])`` so a future change to
+        ``TaskDispatchPlan::Emit`` cannot silently reorder it.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class DepsOrderProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def k(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                x, tid = pl.submit(self.k, x)
+                x, _ = pl.submit(self.k, x, deps=[tid])
+                return x
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(DepsOrderProgram)
+        code = _generate_orch_code(transformed)
+
+        # Task 0 (no deps) and Task 1 (carries deps) must both be present.
+        assert "L0TaskArgs params_t0;" in code, code
+        assert "params_t1.set_dependencies(" in code, code
+        assert "rt_submit_aiv_task(" in code, code
+
+        l0_t0 = code.index("L0TaskArgs params_t0;")
+        deps_t1 = code.index("params_t1.set_dependencies(")
+        submit_t1 = code.rindex("rt_submit_aiv_task(")
+        assert l0_t0 < deps_t1, "L0TaskArgs must appear before set_dependencies"
+        assert deps_t1 < submit_t1, "set_dependencies must appear before submit"
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

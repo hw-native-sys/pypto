@@ -46,11 +46,31 @@ class CodeEmitter {
   void DecreaseIndent();
 
   /**
-   * @brief Get the currently accumulated code
+   * @brief Get the generated code as a string
    *
    * @return The generated code as a string
    */
   std::string GetCode() const;
+
+  /**
+   * @brief Append pre-formatted text (indentation and newlines included)
+   */
+  void AppendRaw(const std::string& text);
+
+  /**
+   * @brief Get the indentation string for the current level
+   */
+  std::string GetIndentString() const;
+
+  /**
+   * @brief Get current indentation level
+   */
+  int GetIndentLevel() const;
+
+  /**
+   * @brief Set indentation level explicitly
+   */
+  void SetIndentLevel(int level);
 
   /**
    * @brief Clear all accumulated code
