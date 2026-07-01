@@ -1929,11 +1929,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// Wrapper functions may omit constants or otherwise expose a different
   /// parameter order than the callee binary expects. Submit args using the
   /// inner callee's order, not the wrapper's order.
-  WrapperParams BuildWrapperReorderedParams(const CallPtr& outer_call,
-                                                      const FunctionPtr& wrapper_func,
-                                                      const CallPtr& inner_call,
-                                                      const FunctionPtr& inner_callee,
-                                                      const WrapperBridge& bridge = {}) {
+  WrapperParams BuildWrapperReorderedParams(const CallPtr& outer_call, const FunctionPtr& wrapper_func,
+                                            const CallPtr& inner_call, const FunctionPtr& inner_callee,
+                                            const WrapperBridge& bridge = {}) {
     std::unordered_map<const Var*, size_t> wrapper_param_to_outer_idx;
     for (size_t i = 0; i < wrapper_func->params_.size(); ++i) {
       wrapper_param_to_outer_idx[wrapper_func->params_[i].get()] = i;
@@ -2355,8 +2353,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// ``BuildWrapperReorderedParams`` (inner-kernel param order); this appends the
   /// ``_ctx`` suffix. The wrapper-path counterpart of ``EmitDistTensorCtxScalars``
   /// (which walks a directly-called callee's own params).
-  void EmitCtxScalars(const std::string& task_var,
-                      const std::vector<std::string>& ext_names) {
+  void EmitCtxScalars(const std::string& task_var, const std::vector<std::string>& ext_names) {
     for (const auto& ext_name : ext_names) {
       EmitIndentedLine(task_var + ".add_scalar(" + ext_name + "_ctx);");
     }
@@ -2452,8 +2449,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   TaskDispatchPlan BuildAivOnlyGroupDispatchPlan(const CallPtr& call, const FunctionPtr& launch_func,
                                                  const std::string& group_name, int aiv_id,
-                                                 std::vector<ParamEntry>&& params,
-                                                 bool capture_plain_task_id,
+                                                 std::vector<ParamEntry>&& params, bool capture_plain_task_id,
                                                  std::vector<std::string>&& ctx_scalar_names = {}) {
     std::string task_var = CurrentTaskVarName();
     auto [launch_core_num, launch_sync_start] = EffectiveLaunchSpec(call, launch_func);
@@ -2738,10 +2734,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
       std::string emit_var = ReserveVarEmitName(assign->var_.get());
       if (IsInjectedGMPipeCreateVar(assign->var_)) {
         auto create_use = ResolveGMPipeCreateUse(stmts, stmt_idx, assign->var_);
-        CHECK(create_use.has_value())
+        INTERNAL_CHECK(create_use.has_value())
             << "Internal error: injected gm_pipe_buffer tensor.create is not passed to a callee";
         int64_t workspace_elems = GetGMPipeWorkspaceElements(create_use->callee);
-        CHECK(workspace_elems > 0)
+        INTERNAL_CHECK(workspace_elems > 0)
             << "Internal error: injected gm_pipe_buffer tensor.create found without initialize_pipe ops";
         std::string size_expr = std::to_string(workspace_elems);
         const std::string& core_num_expr = create_use->core_num_expr;
@@ -2897,7 +2893,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
     (*func_name_to_core_type_)[callee_name] = core_type;
 
     int func_id = GetOrCreateFuncId(callee_name, func_name_to_id_, next_func_id_);
-    auto [params, ctx_scalar_names] = BuildWrapperReorderedParams(call, spmd_func, info.inner_call, info.inner_callee);
+    auto [params, ctx_scalar_names] =
+        BuildWrapperReorderedParams(call, spmd_func, info.inner_call, info.inner_callee);
     RecordKernelSignature(callee_name, params);
 
     BuildSpmdCallDispatchPlan(call, spmd_func, callee_name, core_type, func_id, std::move(params),
@@ -2927,7 +2924,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
       // Reorder params from wrapper param order to inner kernel arg order.
       INTERNAL_CHECK(info.inner_call != nullptr && info.inner_callee != nullptr)
           << "Internal error: no inner call found in AIV-only Group '" << group_name << "'";
-      auto [params, ctx_scalar_names] = BuildWrapperReorderedParams(call, group_func, info.inner_call, info.inner_callee, bridge);
+      auto [params, ctx_scalar_names] =
+          BuildWrapperReorderedParams(call, group_func, info.inner_call, info.inner_callee, bridge);
       RecordKernelSignature(info.aiv_name, params);
 
       BuildAivOnlyGroupDispatchPlan(call, launch_func, group_name, aiv_id, std::move(params),
@@ -2954,7 +2952,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // Reorder params from wrapper param order to inner kernel arg order.
     INTERNAL_CHECK(info.inner_call != nullptr && info.inner_callee != nullptr)
         << "Internal error: no inner call found in MixedKernels Group '" << group_name << "'";
-    auto [params, ctx_scalar_names] = BuildWrapperReorderedParams(call, group_func, info.inner_call, info.inner_callee, bridge);
+    auto [params, ctx_scalar_names] =
+        BuildWrapperReorderedParams(call, group_func, info.inner_call, info.inner_callee, bridge);
     RecordKernelSignature(info.aic_name, params);
     RecordKernelSignature(info.aiv_name, params);
 

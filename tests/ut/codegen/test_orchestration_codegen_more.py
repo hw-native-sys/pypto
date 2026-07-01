@@ -1584,7 +1584,10 @@ class TestOrchestrationMore:
     def test_mixed_group_emission_order(self):
         """MixedKernels, launch_spec, and set_dependencies must emit in canonical order.
 
-        Canonical order: ``L0TaskArgs → params → dump → MixedKernels → launch_spec → set_dependencies → submit``.
+        Canonical order::
+
+          L0TaskArgs → params → dump → MixedKernels → launch_spec → set_dependencies → submit
+
         Guards against unintentional reorder in ``TaskDispatchPlan::Emit``.
         """
         backend.reset_for_testing()
