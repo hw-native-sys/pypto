@@ -300,13 +300,16 @@ class TopDownRetargeter {
   /// onto the accumulator buffer so both branches share it and no move is emitted,
   /// matching mad_acc's shared-%dst in-place semantics.
   ///
-  /// Safe because IfStmt branches are mutually exclusive: coalescing a phi's two
-  /// branch yields onto one buffer never violates downstream liveness (the phi is
-  /// redefined by exactly one branch at runtime).  So the seed is retyped with the
-  /// general dead-at-assign check disabled (RetargetAssign check_liveness=false),
-  /// keeping only the op-legality checks.  Returns the rewrite map (apply via
-  /// RetypeApplier).  A needed-but-declined retarget is a hard error at the call
-  /// site — no legal Acc->Acc move exists to fall back to.
+  /// The seed retype bypasses the *global* dead-at-assign check (the accumulator
+  /// buffer is legitimately live at the post-if phi consumer, which the global
+  /// check would treat as a conflict), but only after `TryCoalesceAccIfPhi`
+  /// verifies the two preconditions branch exclusivity actually needs: (a) the
+  /// seed producer is lexically inside the branch, and (b) a branch-scoped
+  /// liveness scan (`IsTargetDeadAtAssign(..., stop_at=if)`) finds no same-branch
+  /// tail read of the accumulator buffer.  When either fails, that phi is left to
+  /// YieldFixup instead of being coalesced.  Returns the rewrite map (apply via
+  /// RetypeApplier).  A needed-but-declined retarget (after the preconditions
+  /// hold) is a hard error — no legal Acc->Acc move exists to fall back to.
   std::map<VarPtr, TypePtr> CoalesceAccumulatorIfPhis(const StmtPtr& func_body) {
     DefMapVisitor def_v;
     def_v.Run(func_body);
@@ -432,8 +435,33 @@ class TopDownRetargeter {
       if (MemRef::SameAllocation(acc_memref, GetDefinedMemRef(seed_tile))) continue;  // already shared
 
       auto seed_def = defs_.find(seed_var);
-      const bool ok = seed_def != defs_.end() && seed_def->second.kind == VarDef::kAssign &&
-                      RetargetAssign(seed_var, seed_def->second, acc_memref, acc_tile->GetMemorySpace(),
+      if (seed_def == defs_.end() || seed_def->second.kind != VarDef::kAssign) continue;
+      // The seed must be a Call producer we can retype; a bare-Var / tuple rename
+      // cannot be retargeted — leave it to YieldFixup rather than hard-failing.
+      auto seed_assign = As<AssignStmt>(seed_def->second.assign_stmt);
+      if (!seed_assign || !As<Call>(seed_assign->value_)) continue;
+
+      // The `check_liveness=false` bypass below is only sound when branch
+      // exclusivity actually applies, which requires BOTH:
+      //  (a) the seed producer is lexically *inside* this IfStmt's branch — a
+      //      pre-if value yielded through the branch runs unconditionally and
+      //      would clobber the accumulator the sibling in-place branch reads; and
+      //  (b) the accumulator buffer is dead *within the branch* after the seed
+      //      (exclusivity covers only cross-branch and post-if reads, not a
+      //      same-branch tail read between the seed producer and the yield).
+      // When either fails, fall back to YieldFixup (leave the phi untouched here).
+      const auto& seed_anc = seed_def->second.ancestors;
+      const bool in_branch = std::any_of(seed_anc.begin(), seed_anc.end(),
+                                         [&](const StmtPtr& a) { return a.get() == if_stmt.get(); });
+      if (!in_branch) continue;
+      if (!IsTargetDeadAtAssign(seed_def->second, acc_memref->base_.get(), /*stop_at=*/if_stmt.get()))
+        continue;
+
+      // Now safe: (a)+(b) plus exclusivity cover every read of acc_memref, so we
+      // bypass the global liveness (which would false-decline on the legitimate
+      // post-if phi consumer). A remaining decline is a genuine "cannot coalesce
+      // this Acc phi" — fail loud, since no legal Acc->Acc move exists.
+      const bool ok = RetargetAssign(seed_var, seed_def->second, acc_memref, acc_tile->GetMemorySpace(),
                                      /*check_liveness=*/false);
       INTERNAL_CHECK_SPAN(ok, seed_var->span_)
           << "Internal error: cannot coalesce L0C accumulator across a peeled if-phi — seed producer '"
@@ -677,10 +705,15 @@ class TopDownRetargeter {
   /// This check does NOT special-case IfStmt siblings: it never scans the other
   /// branch of an enclosing IfStmt.  That is correct — branches are mutually
   /// exclusive — but it is a conservative side effect, not modelled exclusivity.
-  /// CoalesceAccumulatorIfPhis therefore bypasses this check entirely (via
-  /// RetargetAssign check_liveness=false) and relies on branch exclusivity
-  /// directly, so it does not depend on this incidental behaviour.
-  bool IsTargetDeadAtAssign(const VarDef& def, const Var* target_base) {
+  ///
+  /// `stop_at`, when non-null, bounds the walk to a single enclosing scope: the
+  /// walk halts (returns "dead") upon reaching that statement instead of
+  /// continuing into its parent body.  `CoalesceAccumulatorIfPhis` passes the
+  /// enclosing `IfStmt` so the scan covers only the seed's *branch tail* (a
+  /// same-branch read between the seed producer and the yield) while ignoring
+  /// the mutually-exclusive sibling branch and the legitimate post-if phi
+  /// consumers — the reads it must *not* treat as conflicts.
+  bool IsTargetDeadAtAssign(const VarDef& def, const Var* target_base, const Stmt* stop_at = nullptr) {
     if (def.ancestors.empty()) return true;
 
     // `child_on_path` is the direct descendant of the current ancestor that
@@ -699,6 +732,10 @@ class TopDownRetargeter {
           }
         }
       }
+
+      // Branch-scoped boundary: stop at the caller-supplied enclosing statement
+      // (e.g. the accumulator if-phi) rather than walking into its parent body.
+      if (stop_at && anc.get() == stop_at) return true;
 
       // Stop once we've scanned the body of the enclosing ForStmt: the
       // retyped value is consumed by that loop's yield, so anything outside

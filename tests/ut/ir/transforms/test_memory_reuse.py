@@ -2772,6 +2772,56 @@ class TestTopDownRetargeter:
             f"expected the pre-existing Vec->Vec move (coalescer must skip non-Acc):\n{ir.python_print(After)}"
         )
 
+    def test_pre_if_acc_seed_not_coalesced_onto_accumulator(self):
+        """Branch-locality guard: the accumulator coalescer must only retarget a
+        seed that is defined *inside* the non-accumulator branch.
+
+        Here ``then`` yields ``pre`` — a *pre-if* Acc value (computed before the
+        ``if``, so it runs unconditionally) — and ``else`` accumulates in place
+        into ``prev``. Coalescing would retarget ``pre`` onto ``prev``'s buffer,
+        writing it before the ``if`` and clobbering the accumulator that the else
+        branch reads. Branch exclusivity does NOT hold for a pre-if producer, so
+        the coalescer must skip this phi (leaving it to YieldFixup) and keep
+        ``pre`` and ``prev`` on distinct buffers.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                lhs: pl.Tensor[[16, 64], pl.BF16],
+                rhs: pl.Tensor[[64, 64], pl.BF16],
+                cond: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                sa: pl.Tile[[16, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [16, 64], target_memory=pl.Mem.Mat
+                )
+                sb: pl.Tile[[64, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [64, 64], target_memory=pl.Mem.Mat
+                )
+                prev: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(sa, sb)  # the accumulator
+                pre: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(sa, sb)  # pre-if seed
+                if cond < 1:
+                    phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(pre)
+                else:
+                    acc: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(prev, sa, sb)
+                    phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(acc)
+                result: pl.Tensor[[16, 64], pl.FP32] = pl.store(phi, [0, 0], out)
+                return result
+
+        # Verification off: the un-coalesced divergent Acc phi is the documented
+        # out-of-scope case (YieldFixup emits its usual move); we only assert the
+        # safety property — the pre-if seed was NOT retargeted onto the accumulator.
+        with passes.PassContext([], passes.VerificationLevel.NONE):
+            After = _run_pipeline(Before)
+        bases = _collect_tile_memref_bases(After)
+        assert bases["pre"] != bases["prev"], (
+            f"pre-if seed must not be coalesced onto the accumulator buffer (clobber): "
+            f"pre={bases.get('pre')} prev={bases.get('prev')}\n{ir.python_print(After)}"
+        )
+
     def test_retargeter_declines_when_target_still_live(self):
         """Safety check: if target's base is read after the candidate
         producer (here, via another op that reads the iter_arg), the
