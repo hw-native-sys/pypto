@@ -1656,7 +1656,7 @@ class Specializer:
         if ctx.func_type == "aic":
             return "@pl.function(type=pl.FunctionType.AIC)"
         if ctx.func_type == "aiv":
-            return "@pl.function(type=pl.FunctionType.AIV)"
+            return "@pl.function(type=pl.FunctionType.AIV, attrs={'dual_aiv_dispatch': True})"
         if ctx.func_type == "group":
             split_attr = f", attrs={{'split': pl.SplitMode.{ctx.split.name}}}" if ctx.split else ""
             return f"@pl.function(type=pl.FunctionType.Group{split_attr})"
