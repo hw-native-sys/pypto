@@ -406,7 +406,9 @@ def _collect_dep_names(func_def: ast.FunctionDef, jit_func_names: set[str]) -> l
 # ---------------------------------------------------------------------------
 
 
-def _build_tensor_annotation(meta: TensorMeta, is_out: bool, is_distributed: bool = False) -> str:
+def _build_tensor_annotation(
+    meta: TensorMeta, is_out: bool, is_distributed: bool = False, is_inout: bool = False
+) -> str:
     """Build the type annotation string for a tensor parameter.
 
     Static dims emit as integer literals; DynDim entries emit as their
@@ -415,14 +417,22 @@ def _build_tensor_annotation(meta: TensorMeta, is_out: bool, is_distributed: boo
     shape/dtype subscript form, only the IR ObjectKind differs (see
     ``pld.DistributedTensor``).
 
+    ``is_inout`` wraps the type in ``pl.InOut[...]`` (read-write parameter);
+    it takes precedence over ``is_out``. Both round-trip the direction so the
+    generated ``@pl.function`` source declares the same ``ir.ParamDirection``
+    the user wrote.
+
     Returns:
         Annotation string such as ``pl.Tensor[[M, 128], pl.FP32]``,
-        ``pl.Out[pl.Tensor[[128, 128], pl.FP32]]``, or
+        ``pl.Out[pl.Tensor[[128, 128], pl.FP32]]``,
+        ``pl.InOut[pl.Tensor[[128, 128], pl.FP32]]``, or
         ``pld.DistributedTensor[[256], pl.INT8]``.
     """
     dims = [d.name if isinstance(d, DynDim) else str(d) for d in meta.shape]
     head = "pld.DistributedTensor" if is_distributed else "pl.Tensor"
     inner = f"{head}[[{', '.join(dims)}], {_dtype_str(meta.dtype)}]"
+    if is_inout:
+        return f"pl.InOut[{inner}]"
     return f"pl.Out[{inner}]" if is_out else inner
 
 
@@ -1168,20 +1178,22 @@ def _infer_return_type(
 
 def _classify_params(
     func_def: ast.FunctionDef,
-) -> tuple[list[str], list[str], dict[str, str], set[str]]:
+) -> tuple[list[str], list[str], list[str], dict[str, str], set[str]]:
     """Classify function parameters.
 
     Returns:
-        (out_params, tensor_params, scalar_dtype_strs, distributed_params)
+        (out_params, inout_params, tensor_params, scalar_dtype_strs, distributed_params)
         - out_params: names annotated Out[pl.Tensor] / Out[pld.DistributedTensor]
+        - inout_params: names annotated InOut[pl.Tensor] / InOut[pld.DistributedTensor]
         - tensor_params: all names annotated as tensor-like — pl.Tensor or
-          pld.DistributedTensor (including Out ones)
+          pld.DistributedTensor (including Out and InOut ones)
         - scalar_dtype_strs: param_name → dtype string for scalar params
         - distributed_params: subset of tensor_params whose annotation uses
           ``DistributedTensor`` (and should round-trip as
           ``pld.DistributedTensor[...]`` in the generated @pl.program source)
     """
     out_params: list[str] = []
+    inout_params: list[str] = []
     tensor_params: list[str] = []
     scalar_dtype_strs: dict[str, str] = {}
     distributed_params: set[str] = set()
@@ -1194,17 +1206,22 @@ def _classify_params(
         if ann is None:
             continue
 
-        # Detect Out[pl.Tensor] / Out[pld.DistributedTensor] etc.
+        # Detect Out[pl.Tensor] / InOut[pl.Tensor] (or the pld.DistributedTensor
+        # variants). Both are direction wrappers around a tensor-like inner type;
+        # they round-trip so the generated source keeps the user's direction.
         if isinstance(ann, ast.Subscript):
             outer = ann.value
             is_out = (isinstance(outer, ast.Name) and outer.id == "Out") or (
                 isinstance(outer, ast.Attribute) and outer.attr == "Out"
             )
+            is_inout = (isinstance(outer, ast.Name) and outer.id == "InOut") or (
+                isinstance(outer, ast.Attribute) and outer.attr == "InOut"
+            )
             # The inner subscript value
             inner = ann.slice
             is_tensor = _is_tensor_annotation(inner)
-            if is_out and is_tensor:
-                out_params.append(name)
+            if (is_out or is_inout) and is_tensor:
+                (out_params if is_out else inout_params).append(name)
                 tensor_params.append(name)
                 if _is_distributed_tensor_annotation(inner):
                     distributed_params.add(name)
@@ -1227,7 +1244,7 @@ def _classify_params(
         if dtype_str is not None:
             scalar_dtype_strs[name] = dtype_str
 
-    return out_params, tensor_params, scalar_dtype_strs, distributed_params
+    return out_params, inout_params, tensor_params, scalar_dtype_strs, distributed_params
 
 
 def _is_tensor_annotation(node: ast.expr) -> bool:
@@ -1471,22 +1488,25 @@ class Specializer:
         )
 
         # Classify parameters
-        out_params, tensor_params, scalar_dtype_strs, distributed_params = _classify_params(func_def)
+        out_params, inout_params, tensor_params, scalar_dtype_strs, distributed_params = _classify_params(
+            func_def
+        )
 
         # Inline helpers are spliced at the call site before SSA conversion,
         # so their parameters are already in-place aliases of the caller's
-        # variables — `pl.Out[...]` is redundant ceremony there. Warn the user
-        # so they migrate to bare `pl.Tensor[...]`, and drop the wrapper from
-        # the generated source so downstream passes see the simpler form.
+        # variables — `pl.Out[...]` / `pl.InOut[...]` is redundant ceremony
+        # there. Warn the user so they migrate to bare `pl.Tensor[...]`, and drop
+        # the wrapper from the generated source so downstream passes see the
+        # simpler form.
         is_inline = ctx.func_type == "inline"
-        if is_inline and out_params:
+        if is_inline and (out_params or inout_params):
             warnings.warn(
-                f"@pl.jit.inline helper '{ctx.func_name}' uses pl.Out[...] on "
-                f"parameter(s) {out_params!r}. pl.Out annotations are deprecated "
-                f"for inline helpers because the body is spliced at the call "
+                f"@pl.jit.inline helper '{ctx.func_name}' uses pl.Out[...]/pl.InOut[...] on "
+                f"parameter(s) {(out_params + inout_params)!r}. Direction annotations are "
+                f"deprecated for inline helpers because the body is spliced at the call "
                 f"site before SSA conversion — the parameter is already an "
-                f"in-place alias of the caller's variable. Drop the pl.Out "
-                f"wrapper; bare pl.Tensor[...] works the same.",
+                f"in-place alias of the caller's variable. Drop the wrapper; "
+                f"bare pl.Tensor[...] works the same.",
                 DeprecationWarning,
                 stacklevel=2,
             )
@@ -1523,6 +1543,7 @@ class Specializer:
         params = self._build_params(
             all_param_names,
             out_params,
+            inout_params,
             tensor_params,
             scalar_dtype_strs,
             distributed_params,
@@ -1661,6 +1682,7 @@ class Specializer:
         self,
         all_param_names: list[str],
         out_params: list[str],
+        inout_params: list[str],
         tensor_params: list[str],
         scalar_dtype_strs: dict[str, str],
         distributed_params: set[str],
@@ -1675,9 +1697,9 @@ class Specializer:
         arrays) — without it those params would be emitted bare and the
         generated source would fail to parse.
 
-        When ``is_inline`` is True, ``pl.Out[...]`` wrappers are stripped from
-        tensor params — inline helpers don't have a calling convention boundary,
-        so the direction tag carries no information.
+        When ``is_inline`` is True, ``pl.Out[...]`` / ``pl.InOut[...]`` wrappers
+        are stripped from tensor params — inline helpers don't have a calling
+        convention boundary, so the direction tag carries no information.
 
         Params listed in ``distributed_params`` round-trip as
         ``pld.DistributedTensor[...]`` and trigger the corresponding import in
@@ -1687,6 +1709,7 @@ class Specializer:
         for name in all_param_names:
             if name in tensor_params:
                 is_out = (name in out_params) and not is_inline
+                is_inout = (name in inout_params) and not is_inline
                 is_distributed = name in distributed_params
                 if is_distributed:
                     self._needs_pld_import = True
@@ -1699,7 +1722,9 @@ class Specializer:
                         "ensure any intermediate pl.create_tensor() used for this parameter "
                         "has a statically inferable shape and dtype."
                     )
-                ann = _build_tensor_annotation(meta, is_out=is_out, is_distributed=is_distributed)
+                ann = _build_tensor_annotation(
+                    meta, is_out=is_out, is_distributed=is_distributed, is_inout=is_inout
+                )
                 result.append(f"{name}: {ann}")
             elif name in scalar_dtype_strs:
                 dtype_s = scalar_dtype_strs[name]

@@ -235,7 +235,7 @@ class TestClassifyParams:
                 pass
         """)
         func_def = _parse_func(src)
-        out_params, tensor_params, _, distributed_params = _classify_params(func_def)
+        out_params, _, tensor_params, _, distributed_params = _classify_params(func_def)
         assert "a" in tensor_params
         assert "b" in tensor_params
         assert len(out_params) == 0
@@ -247,7 +247,7 @@ class TestClassifyParams:
                 pass
         """)
         func_def = _parse_func(src)
-        out_params, tensor_params, _, distributed_params = _classify_params(func_def)
+        out_params, _, tensor_params, _, distributed_params = _classify_params(func_def)
         assert "c" in out_params
         assert "c" in tensor_params
         assert "a" not in out_params
@@ -260,7 +260,7 @@ class TestClassifyParams:
                 pass
         """)
         func_def = _parse_func(src)
-        out_params, tensor_params, _, distributed_params = _classify_params(func_def)
+        out_params, _, tensor_params, _, distributed_params = _classify_params(func_def)
         assert "c" in out_params
         assert "c" in tensor_params
         assert not distributed_params
@@ -271,7 +271,7 @@ class TestClassifyParams:
                 pass
         """)
         func_def = _parse_func(src)
-        _, _, scalar_strs, _ = _classify_params(func_def)
+        _, _, _, scalar_strs, _ = _classify_params(func_def)
         assert "BLOCK_M" in scalar_strs
         assert "alpha" in scalar_strs
 
@@ -283,7 +283,7 @@ class TestClassifyParams:
                 pass
         """)
         func_def = _parse_func(src)
-        _, tensor_params, _, distributed_params = _classify_params(func_def)
+        _, _, tensor_params, _, distributed_params = _classify_params(func_def)
         assert "a" in tensor_params
         assert "b" in tensor_params
         assert "a" not in distributed_params
@@ -296,7 +296,7 @@ class TestClassifyParams:
                 pass
         """)
         func_def = _parse_func(src)
-        _, tensor_params, _, distributed_params = _classify_params(func_def)
+        _, _, tensor_params, _, distributed_params = _classify_params(func_def)
         assert "b" in tensor_params
         assert "b" in distributed_params
 
@@ -307,7 +307,7 @@ class TestClassifyParams:
                 pass
         """)
         func_def = _parse_func(src)
-        _, tensor_params, _, distributed_params = _classify_params(func_def)
+        _, _, tensor_params, _, distributed_params = _classify_params(func_def)
         assert "b" in tensor_params
         assert "b" in distributed_params
 
@@ -318,10 +318,34 @@ class TestClassifyParams:
                 pass
         """)
         func_def = _parse_func(src)
-        out_params, tensor_params, _, distributed_params = _classify_params(func_def)
+        out_params, _, tensor_params, _, distributed_params = _classify_params(func_def)
         assert "c" in out_params
         assert "c" in tensor_params
         assert "c" in distributed_params
+
+    def test_inout_param(self):
+        src = textwrap.dedent("""
+            def f(a: pl.Tensor, c: pl.InOut[pl.Tensor]):
+                pass
+        """)
+        func_def = _parse_func(src)
+        out_params, inout_params, tensor_params, _, distributed_params = _classify_params(func_def)
+        assert "c" in inout_params
+        assert "c" in tensor_params
+        assert "c" not in out_params
+        assert not distributed_params
+
+    def test_inout_param_subscripted_tensor(self):
+        """InOut[pl.Tensor[[64], pl.FP32]] is recognised as InOut + tensor."""
+        src = textwrap.dedent("""
+            def f(c: pl.InOut[pl.Tensor[[64], pl.FP32]]):
+                pass
+        """)
+        func_def = _parse_func(src)
+        _out, inout_params, tensor_params, _, distributed_params = _classify_params(func_def)
+        assert "c" in inout_params
+        assert "c" in tensor_params
+        assert not distributed_params
 
 
 # ---------------------------------------------------------------------------
@@ -621,6 +645,25 @@ class TestSpecializer:
             },
         )
         assert "pl.Out[pl.Tensor[[64, 32], pl.FP16]]" in out
+
+    def test_inout_annotation_filled(self):
+        """pl.InOut[...] on an orchestration entry round-trips into the
+        generated @pl.function source. Regression: the InOut wrapper used to be
+        dropped in _classify_params, so the param was emitted bare and downstream
+        codegen raised 'Parameter <name> missing type annotation'."""
+        src = """
+            def kernel(a: pl.Tensor, c: pl.InOut[pl.Tensor]):
+                return c
+        """
+        out = self._specialize_simple(
+            src,
+            ["a", "c"],
+            {
+                "a": TensorMeta((64, 32), DataType.FP16),
+                "c": TensorMeta((64, 32), DataType.FP16),
+            },
+        )
+        assert "pl.InOut[pl.Tensor[[64, 32], pl.FP16]]" in out
 
     def test_dynvar_emitted_at_module_level(self):
         src = """
@@ -1485,7 +1528,7 @@ class TestSpecializerInlineDeprecation:
             "a": TensorMeta(shape=(32, 32), dtype=DataType.FP32),
             "out": TensorMeta(shape=(32, 32), dtype=DataType.FP32),
         }
-        with pytest.warns(DeprecationWarning, match="pl.Out annotations are deprecated"):
+        with pytest.warns(DeprecationWarning, match="Direction annotations are deprecated"):
             out = self._spec(
                 {
                     "func_name": "util",
@@ -1680,6 +1723,7 @@ class TestArrayParamAnnotation:
         params = spec._build_params(
             all_param_names=["a", "tids"],
             out_params=[],
+            inout_params=[],
             tensor_params=["a"],
             scalar_dtype_strs={},
             distributed_params=set(),
@@ -1699,6 +1743,7 @@ class TestArrayParamAnnotation:
         params = spec._build_params(
             all_param_names=["a", "tids"],
             out_params=[],
+            inout_params=[],
             tensor_params=["a"],
             scalar_dtype_strs={},
             distributed_params=set(),
