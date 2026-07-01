@@ -339,19 +339,19 @@ def _legal_ks(m: int, n: int, cfg, a0: int, b0: int) -> list[int]:
     """All legal aligned k for (m, n), ascending — a true enumeration mirroring
     C++ EnumerateLegalKs. k is a real search axis: ceil(K/k)*ceil(k/kt) is not
     monotone in k when kt != align_k, so the largest legal k is not always best.
+    A non-divisor k (the K-peel) is admitted only when K is itself align_k-aligned
+    (peel_ok); a non-16-aligned K has no legal k here and is rejected upstream.
     """
     cap = min(a0 // m, b0 // n)  # max k fitting L0a and L0b
     k_problem = max(_cdiv(cfg.K, cfg.align_k) * cfg.align_k, cfg.min_k) if cfg.allow_padding else cfg.K
     k_hi = (min(cap, k_problem) // cfg.align_k) * cfg.align_k
+    peel_ok = cfg.allow_k_boundary and cfg.K % cfg.align_k == 0
     ks = []
     k = cfg.min_k
     while k <= k_hi:
-        if cfg.allow_padding or cfg.allow_k_boundary or cfg.K % k == 0:  # legacy: divisors only
+        if cfg.allow_padding or peel_ok or cfg.K % k == 0:  # non-divisor k only when peel_ok
             ks.append(k)
         k += cfg.align_k
-    # Unaligned whole-K single block (only when K is not align-multiple).
-    if cfg.allow_k_boundary and cap >= cfg.K >= cfg.min_k and cfg.K % cfg.align_k != 0:
-        ks.append(cfg.K)
     return ks
 
 
