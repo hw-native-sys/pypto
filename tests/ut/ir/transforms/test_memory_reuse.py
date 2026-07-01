@@ -2643,6 +2643,141 @@ class TestTopDownRetargeter:
             f"expected no tile.move in a coalesced accumulator chain:\n{ir.python_print(After)}"
         )
 
+    def test_accumulator_if_phi_seed_retargets_to_accumulator_buffer(self):
+        """Structural before/after for CoalesceAccumulatorIfPhis on a minimal
+        accumulator if-phi (no loop/peel needed to reproduce).
+
+        ``then`` is a fresh ``matmul`` seed on its own Acc buffer; ``else`` is an
+        in-place ``matmul_acc`` on the accumulator buffer (aliasing ``prev``).
+        Pre-fix, MemoryReuse reconciled them with a phantom Acc->Acc ``tile.move``
+        onto a 2nd Acc buffer. The fix retargets the seed onto the accumulator
+        buffer, so both branches and the phi share ONE Acc allocation and no move
+        is emitted. Pinned structurally.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                lhs: pl.Tensor[[16, 64], pl.BF16],
+                rhs: pl.Tensor[[64, 64], pl.BF16],
+                cond: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                sa: pl.Tile[[16, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [16, 64], target_memory=pl.Mem.Mat
+                )
+                sb: pl.Tile[[64, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [64, 64], target_memory=pl.Mem.Mat
+                )
+                prev: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(sa, sb)
+                if cond < 1:
+                    seed: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(sa, sb)
+                    phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(seed)
+                else:
+                    acc: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(prev, sa, sb)
+                    phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(acc)
+                result: pl.Tensor[[16, 64], pl.FP32] = pl.store(phi, [0, 0], out)
+                return result
+
+        # Both branches' matmul/matmul_acc AND the phi land on mem_acc_5; the seed's
+        # own buffer (mem_acc_6) is retargeted away and its alloc dropped; no tile.move.
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                lhs: pl.Tensor[[16, 64], pl.BF16, pl.MemRef("mem_ddr_0", 0, 2048)],
+                rhs: pl.Tensor[[64, 64], pl.BF16, pl.MemRef("mem_ddr_1", 0, 8192)],
+                cond: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32, pl.MemRef("mem_ddr_2", 0, 4096)]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                mem_mat_3: pl.Ptr = pl.tile.alloc(pl.Mem.Mat, 2048)
+                mem_mat_4: pl.Ptr = pl.tile.alloc(pl.Mem.Mat, 8192)
+                mem_acc_5: pl.Ptr = pl.tile.alloc(pl.Mem.Acc, 4096)
+                sa: pl.Tile[[16, 64], pl.BF16, pl.MemRef(mem_mat_3, 0, 2048), pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [16, 64], [16, 64], target_memory=pl.Mem.Mat
+                )
+                sb: pl.Tile[[64, 64], pl.BF16, pl.MemRef(mem_mat_4, 0, 8192), pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Mat
+                )
+                prev: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_5, 0, 4096), pl.Mem.Acc] = pl.tile.matmul(
+                    sa, sb
+                )
+                if cond < 1:
+                    seed: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_5, 0, 4096), pl.Mem.Acc] = (
+                        pl.tile.matmul(sa, sb)
+                    )
+                    phi: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_5, 0, 4096), pl.Mem.Acc] = pl.yield_(
+                        seed
+                    )
+                else:
+                    acc: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_5, 0, 4096), pl.Mem.Acc] = (
+                        pl.tile.matmul_acc(prev, sa, sb)
+                    )
+                    phi: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_5, 0, 4096), pl.Mem.Acc] = pl.yield_(
+                        acc
+                    )
+                result: pl.Tensor[[16, 64], pl.FP32, pl.MemRef("mem_ddr_2", 0, 4096)] = pl.tile.store(
+                    phi, [0, 0], out
+                )
+                return result
+
+        After = _run_pipeline(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_gating_vec_inplace_if_phi_is_not_acc_coalesced(self):
+        """Gating: the accumulator coalescer is Acc-scoped. A structurally
+        identical if-phi in Vec space -- ``else`` is an in-place
+        ``fillpad_inplace`` (reuses input, output aliases it), ``then`` a fresh
+        seed on a different Vec buffer -- must NOT be coalesced by the seed
+        retarget. ``IsInplaceAccumulatorProducer`` returns true for the Vec
+        branch, but the ``MemorySpace::Acc`` gate skips it, so the existing
+        ``YieldFixupMutator`` reconciles it with a legal Vec->Vec ``tile.move``
+        (Vec->Vec is a legal tmov pair, unlike Acc->Acc). Two Vec buffers survive.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64, 64], pl.FP32],
+                cond: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                base: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    x, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
+                prev: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.tile.fillpad_inplace(
+                    base, pad_value=pl.PadValue.zero
+                )
+                if cond < 1:
+                    # Fresh, non-in-place producer (tile.fillpad, not _inplace) so the
+                    # seed is NOT an accumulator, while still carrying a tile_view to
+                    # match the else branch (IfStmt requires consistent tile_view).
+                    seed: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.tile.fillpad(
+                        base, pad_value=pl.PadValue.max
+                    )
+                    phi: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.yield_(seed)
+                else:
+                    acc: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.tile.fillpad_inplace(
+                        prev, pad_value=pl.PadValue.max
+                    )
+                    phi: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.yield_(acc)
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(phi, [0, 0], out)
+                return result
+
+        After = _run_pipeline(Before)
+        bases = {b for b in _collect_tile_memref_bases(After).values() if "vec" in b}
+        # Not acc-coalesced: the two branch buffers survive and the existing path
+        # inserts a (legal, Vec->Vec) tile.move to reconcile the phi.
+        assert len(bases) == 2, f"Vec accumulator-shaped phi must not be acc-coalesced; bases={sorted(bases)}"
+        assert "tile.move" in ir.python_print(After), (
+            f"expected the pre-existing Vec->Vec move (coalescer must skip non-Acc):\n{ir.python_print(After)}"
+        )
+
     def test_retargeter_declines_when_target_still_live(self):
         """Safety check: if target's base is read after the candidate
         producer (here, via another op that reads the iter_arg), the
