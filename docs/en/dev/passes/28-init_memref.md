@@ -108,6 +108,15 @@ ForStmt has four loop-carry related variables with specific MemRef sharing rules
 
 Group A and B may have different MemRefs. The yield-to-iter_arg mismatch is resolved later by MemoryReuse (which inserts `tile.move` if needed).
 
+## User-managed (pinned) buffers
+
+A tile may arrive with a MemRef already on its `TileType` — a user `pl.MemRef(addr, size, id)` annotation (no earlier pass creates MemRefs, so a present `memref_` can only be a user pin). When a pinnable space — `Vec`, `Mat`, or an L0 matmul space (`Left`/`Right`/`Acc`/`Bias`) — contains any such pin it enters **whole-space-manual** mode:
+
+- A pinned tile is honored: InitMemRef interns its base Ptr by `id` (renamed `__pinned__<id>` so MemoryReuse / AllocateMemoryAddr recognise it without an IR-node flag), keeps the user's byte address, and validates the declared buffer is large enough.
+- Every other fresh tile in that space must also be pinned; an unannotated one is a hard error (it would be a compiler temporary, which this feature does not support).
+
+See [MemoryReuse](31-memory_reuse.md) for the full feature description and the no-reuse / overlap rules.
+
 ## Implementation
 
 **Header**: `include/pypto/ir/transforms/passes.h`

@@ -1614,6 +1614,16 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
   // base, and largest-first ordering guarantees the buffer is sized to its
   // representative (no member is ever larger than the buffer it joins).
   auto can_share = [&](const LifetimeInterval& cand, const LifetimeInterval& member) {
+    // User-pinned buffers never coalesce with auto buffers or with a *different*
+    // pinned buffer — the user owns their addresses, so MemoryReuse must not
+    // merge them (that merging is exactly the over-reuse this feature prevents).
+    // Same-id pins already share one base via InitMemRef interning, so they
+    // arrive in one sharing group and never reach can_share against each other;
+    // the cb == mb branch only ever fires for a pinned tile's own view.
+    const Var* cb = physical_base(cand.variable);
+    const Var* mb = physical_base(member.variable);
+    if (IsUserPinnedBase(cb) || IsUserPinnedBase(mb)) return cb == mb;
+
     // Group-interval overlap is a fast reject; when it fires, fall back to the
     // precise per-var check so mutually-exclusive / same-value phi-family tiles
     // may still share while a genuine conflict (incl. one hidden behind a
@@ -1624,6 +1634,46 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
     if (pipeline_blocks(cand, member)) return false;  // symmetric — one call suffices
     return true;
   };
+
+  // Validate user-pinned buffer layout. In a user-managed space the compiler
+  // honors the user's addresses verbatim, so it must catch the one mistake the
+  // user can make: two DISTINCT pinned buffers (different id/base) whose byte
+  // ranges overlap while their lifetimes also overlap — that would silently
+  // clobber data. Disjoint lifetimes at the same address are legal manual reuse
+  // and allowed; same-id buffers are an intentional share. K = pinned-interval
+  // count is the user-authored pin count (small, bounded by user input, not by
+  // IR size N), so the pairwise scan does not affect the pass's O(N log N) bound.
+  auto pinned_address = [](const LifetimeInterval& itv) -> std::optional<int64_t> {
+    auto mr = GetTypeMemRef(itv.variable->GetType());
+    if (!mr.has_value()) return std::nullopt;
+    if (auto ci = As<ConstInt>((*mr)->byte_offset_)) return ci->value_;
+    return std::nullopt;
+  };
+  std::vector<size_t> pinned;
+  for (size_t i = 0; i < lifetimes.size(); ++i) {
+    if (IsUserPinnedBase(physical_base(lifetimes[i].variable))) pinned.push_back(i);
+  }
+  for (size_t a = 0; a < pinned.size(); ++a) {
+    for (size_t b = a + 1; b < pinned.size(); ++b) {
+      const auto& ia = lifetimes[pinned[a]];
+      const auto& ib = lifetimes[pinned[b]];
+      if (ia.memory_space != ib.memory_space) continue;
+      if (physical_base(ia.variable) == physical_base(ib.variable)) continue;  // same id — intentional share
+      auto addr_a = pinned_address(ia);
+      auto addr_b = pinned_address(ib);
+      if (!addr_a.has_value() || !addr_b.has_value()) continue;
+      const int64_t a_lo = *addr_a, a_hi = *addr_a + static_cast<int64_t>(ia.size);
+      const int64_t b_lo = *addr_b, b_hi = *addr_b + static_cast<int64_t>(ib.size);
+      const bool addr_overlap = a_lo < b_hi && b_lo < a_hi;
+      const bool life_overlap = LifetimesOverlap(ia, ib);
+      CHECK_SPAN(!(addr_overlap && life_overlap), ia.variable->span_)
+          << "User-pinned tile buffers overlap: '" << ia.variable->name_hint_ << "' at byte " << *addr_a
+          << " (size " << ia.size << ") and '" << ib.variable->name_hint_ << "' at byte " << *addr_b
+          << " (size " << ib.size
+          << ") occupy overlapping addresses while their lifetimes overlap. Give them disjoint "
+             "addresses, or the same buffer id if they are meant to share one buffer.";
+    }
+  }
 
   // Group interval indices by memory space — reuse only happens within a space.
   std::map<MemorySpace, std::vector<size_t>> by_space;

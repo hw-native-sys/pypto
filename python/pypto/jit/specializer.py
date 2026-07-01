@@ -149,6 +149,8 @@ class SpecializeContext:
     # Appended at the tail to preserve positional construction of this exported
     # dataclass for external callers (auto_scope is keyword-only in practice).
     auto_scope: bool = True
+    # SplitMode for a `group` sub-function (cube/vector dispatch); None otherwise.
+    split: Any = None
 
     @property
     def dynamic_dims(self) -> set[tuple[str, int]]:
@@ -1671,6 +1673,14 @@ class Specializer:
             return f"@pl.function(type=pl.FunctionType.Inline{auto_scope_suffix})"
         if ctx.func_type == "opaque":
             return "@pl.function(type=pl.FunctionType.Opaque)"
+        # Hand-written cube/vector mixed-kernel halves and their dispatch group.
+        if ctx.func_type == "aic":
+            return "@pl.function(type=pl.FunctionType.AIC)"
+        if ctx.func_type == "aiv":
+            return "@pl.function(type=pl.FunctionType.AIV, attrs={'dual_aiv_dispatch': True})"
+        if ctx.func_type == "group":
+            split_attr = f", attrs={{'split': pl.SplitMode.{ctx.split.name}}}" if ctx.split else ""
+            return f"@pl.function(type=pl.FunctionType.Group{split_attr})"
         # InCore
         if ctx.level is None:
             return "@pl.function(type=pl.FunctionType.InCore)"
@@ -1770,6 +1780,7 @@ def build_specialize_context(
     scalar_dtypes: dict[str, DataType],
     dep_names: list[str],
     auto_scope: bool = True,
+    split: Any = None,
 ) -> SpecializeContext:
     """Build a SpecializeContext from a Python function and call-site data.
 
@@ -1825,6 +1836,7 @@ def build_specialize_context(
         scalar_dtypes=scalar_dtypes,
         dep_names=dep_names,
         auto_scope=auto_scope,
+        split=split,
         py_globals=getattr(func, "__globals__", {}),
         orig_file=orig_file,
         orig_start_line=orig_start_line,

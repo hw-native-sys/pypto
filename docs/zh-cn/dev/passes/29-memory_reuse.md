@@ -100,6 +100,31 @@ MemoryReuse 掌管所有 buffer 合并决策，因此它从源头上阻止这种
 
 该 guard 由 `BackendHandler::RequiresSplitLoadTpopWorkaround()`（仅 Ascend910B 为 true）以及函数为 split-AIV 这两个条件门控；在其他任何 backend / 函数类型下输入集合为空，复用行为不变。writer 仍可自由复用任何**非** load buffer —— 只有 load + tpop 的原地组合会被拒绝。（该 guard 此前由独立的 `LegalizePTOBufferReuse` pass 在事后拆分 buffer 来实现，现已并入 MemoryReuse。）
 
+## 用户自管理（pinned）buffer
+
+自动复用是贪心启发式，无法保证最优布局。对于完全显式的 tile 级 kernel，用户可以接管整个内存空间并手动放置 buffer。用户面 API 是 **`pl.tile.alloc_buffer(tile, addr, size, id=-1)`** —— 紧跟在 tile 的定义 op 之后的一条独立语句，用来 pin 该 tile 的 buffer：
+
+```python
+q_mat = pl.tile.load(q, [0, 0], [16, 128], target_memory=pl.Mem.Mat)
+pl.tile.alloc_buffer(q_mat, addr=0, size=4096)            # pin q_mat 的 buffer
+q_left = pl.tile.move(q_mat, target_memory=pl.Mem.Left)
+pl.tile.alloc_buffer(q_left, addr=0, size=4096)
+scores = pl.tile.matmul(q_left, k_right)
+pl.tile.alloc_buffer(scores, addr=0, size=8192)           # Acc(L0)—— 显式形式下可 pin
+```
+
+语义：
+
+- **buffer 身份 = `id`。** 同一个(非负)`id` 的 tile 共享一块物理 buffer；`id=-1`(默认)为该 pin 分配独占私有 buffer。MemoryReuse **绝不**把 pinned buffer 与其他 buffer 合并 —— 这正是用户阻止「过度复用破坏流水」的手段。
+- **地址由用户分配。** `addr` 被 AllocateMemoryAddr 原样 honor（不再自动重排）；`size` 为声明的 buffer 占用大小。
+- **整空间手动契约。** 一旦可 pin 空间中有任意 tile 被 pin，则该空间内**每个** tile 都必须被 pin。该空间出现未 pin 的新建 tile（例如 composite op 拆解出的编译器临时 tile）即为硬错误：本特性仅支持托管空间内无编译器临时 tile 的纯 tile 级 kernel。
+- **可 pin 的空间。** `Vec`、`Mat`,以及 L0 matmul 空间 `Left` / `Right` / `Acc` / `Bias`。L0 空间只有在 matmul **显式写出**（`load` → `move` 到 `Left`/`Right` → `matmul` → `Acc`）时才可 pin：高层 `pl.matmul` 会被 `AutoTileMatmulL0` 展开成用户没写的 L0 tile,从而被整空间手动契约拒绝。所以 matmul/attention kernel 只有在完全显式的 tile 形式下才能 pin 所有 tile。`DDR`(tensor 参数)与标量寄存器堆永不可 pin。
+- **重叠校验。** 两个**不同**的 pinned buffer 若地址区间**与**生命周期同时重叠，即为用户错误（在此处校验，因为这里有 liveness 信息）。生命周期不重叠的地址重叠属于合法的人工复用，放行。
+
+**为什么用标记 op,而不是 type 注解。** pin 必须存活到 InitMemRef。type 级的 `pl.Tile[..., pl.MemRef(...)]` 注解会被丢弃:parse 与 InitMemRef 之间的 pass 普遍通过 op 类型重新推导重建 tile op,而重新推导产出无 memref 的 type(InitMemRef 之前 memref 本就无意义)。`tile.alloc_buffer` 把 pin 放在 op **kwargs** 里,而 kwargs 在重建中被保留(`op_registry.Create` 总是带着 op 的 kwargs 调用),因此标记能完整到达 InitMemRef。(`pl.MemRef(...)` 注解形式保留作为已经是 tile 级 IR 的底层机制 —— 例如直接喂给内存 pass 的测试 —— 但不是端到端用户 API。)
+
+实现:InitMemRef 预扫 `tile.alloc_buffer` 标记,通过共用的 `HonorUserPin` 把每个 pin 应用到对应 tile(按 id intern base,重命名为 `__pinned__<id>` 前缀,使下游 pass 无需 IR 节点标志即可识别 —— 见 [InitMemRef](30-init_memref.md)),并**擦除标记**(绝不进 codegen);MemoryReuse 跳过 pinned base 并执行重叠校验;AllocateMemoryAddr 不改动 pinned 地址（见 [AllocateMemoryAddr](32-allocate_memory_addr.md)）。
+
 ## 示例
 
 ### MemRef 共享与 Alloc 清理

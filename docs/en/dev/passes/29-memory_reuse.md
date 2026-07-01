@@ -100,6 +100,31 @@ MemoryReuse owns every buffer-coalescing decision, so it prevents the hazardous 
 
 The guard is gated by `BackendHandler::RequiresSplitLoadTpopWorkaround()` (true only for Ascend910B) and the function being split-AIV; on every other backend / function kind the inputs are empty and reuse behaviour is unchanged. The writer is still free to reuse any **non**-load buffer — only the load + tpop in-place combination is rejected. (This guard previously lived in a dedicated `LegalizePTOBufferReuse` pass that split the buffer after the fact; it now folds into MemoryReuse.)
 
+## User-managed (pinned) buffers
+
+Automatic reuse is a greedy heuristic and cannot guarantee the optimal layout. For fully-explicit tile-level kernels a user can take over a whole memory space and place buffers by hand. The user-facing API is **`pl.tile.alloc_buffer(tile, addr, size, id=-1)`** — a bare statement right after the tile's defining op that pins that tile's buffer:
+
+```python
+q_mat = pl.tile.load(q, [0, 0], [16, 128], target_memory=pl.Mem.Mat)
+pl.tile.alloc_buffer(q_mat, addr=0, size=4096)            # pin q_mat's buffer
+q_left = pl.tile.move(q_mat, target_memory=pl.Mem.Left)
+pl.tile.alloc_buffer(q_left, addr=0, size=4096)
+scores = pl.tile.matmul(q_left, k_right)
+pl.tile.alloc_buffer(scores, addr=0, size=8192)           # Acc (L0) — pinnable in explicit form
+```
+
+Semantics:
+
+- **Buffer identity = `id`.** Tiles sharing a (non-negative) `id` share one physical buffer; `id=-1` (default) gives a unique private buffer. MemoryReuse **never** coalesces a pinned buffer with another — this is exactly how a user prevents the over-reuse that breaks pipelining.
+- **Address = user-assigned.** `addr` is honored verbatim by AllocateMemoryAddr (no auto re-layout); `size` is the declared buffer footprint.
+- **Whole-space-manual contract.** Once any tile in a pinnable space is pinned, *every* tile in that space must be pinned. A fresh unpinned tile there — e.g. a compiler temporary from composite-op lowering — is a hard error: the feature only supports pure tile-level kernels with no compiler-generated tiles in the managed space.
+- **Pinnable spaces.** `Vec`, `Mat`, and the L0 matmul spaces `Left` / `Right` / `Acc` / `Bias`. The L0 spaces are pinnable only when the matmul is written **explicitly** (`load` → `move`-to-`Left`/`Right` → `matmul` → `Acc`): a high-level `pl.matmul` is expanded by `AutoTileMatmulL0` into L0 tiles the user never wrote, which the whole-space-manual contract then rejects. So a matmul/attention kernel can pin every tile only in fully-explicit tile form. `DDR` (tensor params) and the scalar register file are never pinnable.
+- **Overlap check.** Two *distinct* pinned buffers whose address ranges **and** lifetimes both overlap is a user error (caught here, where liveness is available). Disjoint-lifetime address overlap is legal manual reuse and allowed.
+
+**Why a marker op, not a type annotation.** The pin must survive the front pipeline to reach InitMemRef. A type-level `pl.Tile[..., pl.MemRef(...)]` annotation is dropped: passes between parse and InitMemRef pervasively rebuild tile ops via op type re-deduction, which produces memref-less types (a pre-InitMemRef memref is, by design, meaningless). `tile.alloc_buffer` instead carries the pin in op **kwargs**, which the rebuilds preserve (`op_registry.Create` is always called with the op's kwargs). So the marker reaches InitMemRef intact. (The `pl.MemRef(...)` annotation form is retained as a low-level mechanism for IR already at tile level — e.g. tests fed straight to the memory passes — but is not the end-to-end user API.)
+
+Implementation: InitMemRef pre-scans for `tile.alloc_buffer` markers, applies each pin to its tile via the shared `HonorUserPin` (interning the base by id, renamed to a `__pinned__<id>` prefix so downstream passes recognise it without an IR-node flag — see [InitMemRef](30-init_memref.md)), and **erases the marker** (it never reaches codegen); MemoryReuse skips pinned bases and runs the overlap check; AllocateMemoryAddr leaves pinned addresses untouched (see [AllocateMemoryAddr](32-allocate_memory_addr.md)).
+
 ## Example
 
 ### MemRef Sharing with Alloc Cleanup
