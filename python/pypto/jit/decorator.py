@@ -503,12 +503,17 @@ def _func_name_lookup(func: Any) -> dict[str, Any]:
 def _scan_dep_io(
     func: Any, caller_func_type: str = "orchestration"
 ) -> dict[str, tuple[list[str], list[str]]]:
-    """Return ``dep_name → (param_names, out_param_names)`` for every @pl.jit
+    """Return ``dep_name → (param_names, output_param_names)`` for every @pl.jit
     dep called from ``func``'s body.
 
     Used by :func:`_extract_local_tensor_metas` to propagate metas through
     ``v1, ..., vk = dep(args)`` assignments (each ``vi`` inherits the meta of
-    the caller arg bound to the i-th ``Out`` parameter).
+    the caller arg bound to the i-th output-like parameter).
+
+    ``output_param_names`` covers both ``pl.Out[...]`` and ``pl.InOut[...]``
+    params — a caller can capture either from ``v = dep(...)`` — and is kept in
+    declaration order so it stays aligned with the callee's return order (the
+    positional target<->param zip in :func:`_propagate_dep_out_metas`).
 
     ``caller_func_type`` mirrors :func:`_discover_deps`'s gating: a host
     orchestrator also admits ``orchestration`` deps (its chip orchestrators).
@@ -516,10 +521,13 @@ def _scan_dep_io(
     out: dict[str, tuple[list[str], list[str]]] = {}
     for dep in _discover_deps(func, caller_func_type):
         try:
-            out_params, _, _, _, _ = _classify_params(_get_func_def(dep._func))
+            out_params, inout_params, _, _, _ = _classify_params(_get_func_def(dep._func))
         except OSError:
             continue
-        out[dep.__name__] = (dep._param_names(), out_params)
+        param_names = dep._param_names()
+        output_set = set(out_params) | set(inout_params)
+        output_params = [p for p in param_names if p in output_set]
+        out[dep.__name__] = (param_names, output_params)
     return out
 
 

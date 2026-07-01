@@ -30,6 +30,7 @@ from pypto.jit.decorator import (
     _resolve_dep_call_metadata,
     _rewrite_jit_error,
     _run_config_compile_kwargs,
+    _scan_dep_io,
     _scan_dynamic_dims,
     _SlicedArg,
     jit,
@@ -308,6 +309,40 @@ class TestHostDiscoversOrchestrationDep:
 # ---------------------------------------------------------------------------
 # Tensor.bind_dynamic no-op
 # ---------------------------------------------------------------------------
+
+
+class TestScanDepIo:
+    """_scan_dep_io records both Out and InOut params as output-like (so meta
+    propagates to captured dep results), in declaration order."""
+
+    def test_includes_inout_params_in_declaration_order(self):
+        @jit.inline
+        def sub(a: pl.Tensor, cache: pl.InOut[pl.Tensor], out: pl.Out[pl.Tensor]):
+            return out
+
+        def caller(a, cache, out):
+            out = sub(a, cache, out)
+            return out
+
+        io = _scan_dep_io(caller)
+        assert "sub" in io
+        param_names, output_params = io["sub"]
+        assert param_names == ["a", "cache", "out"]
+        # Both InOut (cache) and Out (out) are output-like; declaration order,
+        # so the positional target<->param mapping stays aligned.
+        assert output_params == ["cache", "out"]
+
+    def test_out_only_dep_unchanged(self):
+        @jit.inline
+        def sub(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+            return out
+
+        def caller(a, out):
+            out = sub(a, out)
+            return out
+
+        _, output_params = _scan_dep_io(caller)["sub"]
+        assert output_params == ["out"]
 
 
 class TestBindDynamic:
