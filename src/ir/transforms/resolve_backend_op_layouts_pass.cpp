@@ -76,6 +76,19 @@ bool RequiresRowMajor(const std::optional<TileLayout>& required_layout) {
 
 bool IsRowMajor(const TileTypePtr& tile_type) { return GetTileLayout(tile_type) == TileLayout::row_major; }
 
+bool ShouldRepairRowMajorInput(const CallPtr& call, size_t arg_index, const TileTypePtr& tile_type) {
+  if (!tile_type || IsRowMajor(tile_type)) {
+    return false;
+  }
+  // TSTORE accepts the tile's logical valid shape. Rewriting a [N, 1] column
+  // vector to [1, N] would change the store footprint, so keep vector stores
+  // in their original shape and only repair matrix col-major stores.
+  if (call->op_->name_ == "tile.store" && arg_index == 0 && IsColumnVector(tile_type)) {
+    return false;
+  }
+  return true;
+}
+
 ExprPtr MakeShapeTuple(const std::vector<ExprPtr>& dims, const Span& span) {
   return std::make_shared<MakeTuple>(dims, span);
 }
@@ -131,7 +144,7 @@ bool NeedsInputRepair(const CallPtr& call, const backend::BackendTileLayoutSpec&
     if (!tile_type) {
       continue;  // Non-tile inputs (scalars, shapes) are not subject to layout repair
     }
-    if (!IsRowMajor(tile_type)) {
+    if (ShouldRepairRowMajorInput(call, i, tile_type)) {
       return true;
     }
   }
@@ -166,8 +179,11 @@ class BackendLayoutRepairMutator : public IRMutator {
       return IRMutator::VisitStmt_(op);
     }
 
-    INTERNAL_CHECK_SPAN(result_tile_type, op->span_)
-        << "ResolveBackendOpLayouts expects constrained op assignment targets to be TileType";
+    const bool needs_output_repair = NeedsOutputRepair(result_tile_type, *layout_spec);
+    if (needs_output_repair) {
+      INTERNAL_CHECK_SPAN(result_tile_type, op->span_)
+          << "ResolveBackendOpLayouts expects output-repaired op assignment targets to be TileType";
+    }
 
     std::vector<StmtPtr> rewritten;
     std::vector<ExprPtr> new_args = call->args_;
@@ -179,7 +195,7 @@ class BackendLayoutRepairMutator : public IRMutator {
       }
 
       auto tile_type = As<TileType>(call->args_[i]->GetType());
-      if (!tile_type || IsRowMajor(tile_type)) {
+      if (!ShouldRepairRowMajorInput(call, i, tile_type)) {
         continue;
       }
 
@@ -206,7 +222,7 @@ class BackendLayoutRepairMutator : public IRMutator {
     INTERNAL_CHECK_SPAN(repaired_call, call->span_)
         << "ResolveBackendOpLayouts: repaired consumer must remain a Call";
 
-    if (NeedsOutputRepair(result_tile_type, *layout_spec)) {
+    if (needs_output_repair) {
       auto row_major_var = std::make_shared<Var>(NextTempName(op->var_->name_hint_, {"row_major"}),
                                                  repaired_call->GetType(), call->span_);
       rewritten.push_back(std::make_shared<AssignStmt>(row_major_var, repaired_call, op->span_));
@@ -251,7 +267,7 @@ class BackendLayoutRepairMutator : public IRMutator {
         continue;
       }
       auto tile_type = As<TileType>(call->args_[i]->GetType());
-      if (!tile_type || IsRowMajor(tile_type)) {
+      if (!ShouldRepairRowMajorInput(call, i, tile_type)) {
         continue;
       }
       auto repair_var_name = NextTempName("layout_fix", {"row_major", "arg" + std::to_string(i)});

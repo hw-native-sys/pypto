@@ -622,6 +622,22 @@ def _handle_tensor_a8w8_matmul_dequant(a: list[str], kw: dict[str, Any]) -> str:
     return expr
 
 
+def _handle_tensor_a8w8_matmul_dequant_acc(a: list[str], kw: dict[str, Any]) -> str:
+    acc, lhs, rhs, act_scale, weight_scale = a[0], a[1], a[2], a[3], a[4]
+    if kw.get("a_trans"):
+        lhs = f"{lhs}.mT"
+    if kw.get("b_trans"):
+        rhs = f"{rhs}.mT"
+    expr = (
+        f"(({acc}.to(torch.float32) + torch.matmul({lhs}.to(torch.float32), {rhs}.to(torch.float32))) "
+        f"* {act_scale}.to(torch.float32) * {weight_scale}.to(torch.float32))"
+    )
+    out_dtype = kw.get("out_dtype")
+    if isinstance(out_dtype, DataType):
+        expr = f"{expr}.to({_torch_dtype(out_dtype)})"
+    return expr
+
+
 def _handle_cast(a: list[str], kw: dict[str, Any]) -> str:
     dt = kw.get("target_type")
     dtype_str = _torch_dtype(dt) if isinstance(dt, DataType) else "torch.float32"
@@ -978,6 +994,7 @@ def _register_ops() -> None:  # noqa: PLR0915
     m["tensor.matmul"] = _handle_tensor_matmul
     m["tensor.matmul_acc"] = _handle_tensor_matmul_acc
     m["tensor.a8w8_matmul_dequant"] = _handle_tensor_a8w8_matmul_dequant
+    m["tensor.a8w8_matmul_dequant_acc"] = _handle_tensor_a8w8_matmul_dequant_acc
     m["tensor.dim"] = lambda a, _kw: f"{a[0]}.shape[{a[1]}]"
     m["tensor.create"] = _handle_create
     m["tensor.full"] = _handle_full

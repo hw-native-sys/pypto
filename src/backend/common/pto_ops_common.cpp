@@ -3429,7 +3429,11 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
         if (src_space.has_value() && dst_space.has_value() && *src_space == *dst_space) {
           auto src_offset = As<ir::ConstInt>((*src_tile->memref_)->byte_offset_);
           auto dst_offset = As<ir::ConstInt>((*dst_tile->memref_)->byte_offset_);
-          if (src_offset && dst_offset && src_offset->value_ == dst_offset->value_) {
+          const bool same_dtype = src_tile->dtype_ == dst_tile->dtype_;
+          const bool same_tile_view = ir::tile_view_semantics::GetEffectiveTileView(*src_tile) ==
+                                      ir::tile_view_semantics::GetEffectiveTileView(*dst_tile);
+          if (src_offset && dst_offset && src_offset->value_ == dst_offset->value_ && same_dtype &&
+              same_tile_view) {
             // Alias the destination to the source SSA value so downstream
             // references use the source's defined buffer, not the destination's
             // alloc_tile (which would be unwritten after eliding the tmov).
@@ -3543,9 +3547,14 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   reg("tile.load", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTileLoadCodegenPTO(op, codegen);
   });
-  reg("tile.store", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-    return MakeTileStoreCodegenPTO(op, codegen);
-  });
+  if (exclude_ops.count("tile.store") == 0) {
+    auto reg_entry = backend.RegisterOp("tile.store");
+    reg_entry
+        .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+          return MakeTileStoreCodegenPTO(op, codegen);
+        })
+        .set_input_layout(0, ir::TileLayout::row_major);
+  }
   // Distributed N6 ops — cross-rank tile load + per-rank signal notify/wait +
   // synchronous bulk get/put. See MakeRemoteLoadCodegenPTO /
   // MakeNotifyCodegenPTO / MakeWaitCodegenPTO / MakeGetCodegenPTO /

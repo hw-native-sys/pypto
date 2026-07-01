@@ -308,7 +308,13 @@ class TestResolveBackendOpLayouts:
                     blayout=pl.TileLayout.col_major,
                     slayout=pl.TileLayout.row_major,
                 )
-                stored: pl.Tensor[[16, 256], pl.FP32] = pl.store(result, [0, 0], out)
+                stored_row_major_arg0: pl.Tile[[16, 256], pl.FP32, pl.MemorySpace.Vec] = pl.tile.move(
+                    result,
+                    target_memory=pl.MemorySpace.Vec,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.none_box,
+                )
+                stored: pl.Tensor[[16, 256], pl.FP32] = pl.store(stored_row_major_arg0, [0, 0], out)
                 return stored
 
         After = _run_pass(Before)
@@ -398,6 +404,66 @@ class TestResolveBackendOpLayouts:
                 )
                 result: pl.Tile[[16, 1], pl.FP32] = pl.tile.abs(src)
                 stored: pl.Tensor[[16, 1], pl.FP32] = pl.store(result, [0, 0], out)
+                return stored
+
+        After = _run_pass(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_tile_store_repairs_col_major_input(self):
+        """`tile.store` must materialize a row-major Vec tile before PTO TSTORE."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def repro(
+                self,
+                out: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
+            ) -> pl.Tensor[[16, 256], pl.FP32]:
+                src: pl.Tile[[16, 256], pl.FP32] = pl.tile.create(
+                    [16, 256], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                col_major: pl.Tile[
+                    [16, 256],
+                    pl.FP32,
+                    pl.MemorySpace.Vec,
+                    pl.TileView(blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.row_major),
+                ] = pl.tile.move(
+                    src,
+                    target_memory=pl.MemorySpace.Vec,
+                    blayout=pl.TileLayout.col_major,
+                    slayout=pl.TileLayout.row_major,
+                )
+                stored: pl.Tensor[[16, 256], pl.FP32] = pl.store(col_major, [0, 0], out)
+                return stored
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def repro(
+                self,
+                out: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
+            ) -> pl.Tensor[[16, 256], pl.FP32]:
+                src: pl.Tile[[16, 256], pl.FP32, pl.MemorySpace.Vec] = pl.tile.create(
+                    [16, 256], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                col_major: pl.Tile[
+                    [16, 256],
+                    pl.FP32,
+                    pl.MemorySpace.Vec,
+                    pl.TileView(blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.row_major),
+                ] = pl.tile.move(
+                    src,
+                    target_memory=pl.MemorySpace.Vec,
+                    blayout=pl.TileLayout.col_major,
+                    slayout=pl.TileLayout.row_major,
+                )
+                stored_row_major_arg0: pl.Tile[[16, 256], pl.FP32, pl.MemorySpace.Vec] = pl.tile.move(
+                    col_major,
+                    target_memory=pl.MemorySpace.Vec,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.none_box,
+                )
+                stored: pl.Tensor[[16, 256], pl.FP32] = pl.store(stored_row_major_arg0, [0, 0], out)
                 return stored
 
         After = _run_pass(Before)

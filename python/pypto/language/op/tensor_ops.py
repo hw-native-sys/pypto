@@ -33,6 +33,7 @@ __all__ = [
     "arange",
     "matmul",
     "a8w8_matmul_dequant",
+    "a8w8_matmul_dequant_acc",
     "matmul_acc",
     "mul",
     "muls",
@@ -585,6 +586,30 @@ def a8w8_matmul_dequant(
 ) -> Tensor:
     """A8W8 INT8 matmul followed by row/column scale dequantization."""
     call_expr = _ir_ops.a8w8_matmul_dequant(
+        lhs_i8.unwrap(),
+        rhs_i8.unwrap(),
+        act_scale.unwrap(),
+        weight_scale.unwrap(),
+        out_dtype,
+        a_trans,
+        b_trans,
+    )
+    return Tensor(expr=call_expr)
+
+
+def a8w8_matmul_dequant_acc(
+    acc_i32: Tensor,
+    lhs_i8: Tensor,
+    rhs_i8: Tensor,
+    act_scale: Tensor,
+    weight_scale: Tensor,
+    out_dtype: int | DataType = DataType.FP32,
+    a_trans: bool = False,
+    b_trans: bool = False,
+) -> Tensor:
+    """A8W8 INT8 matmul accumulation followed by row/column scale dequantization."""
+    call_expr = _ir_ops.a8w8_matmul_dequant_acc(
+        acc_i32.unwrap(),
         lhs_i8.unwrap(),
         rhs_i8.unwrap(),
         act_scale.unwrap(),

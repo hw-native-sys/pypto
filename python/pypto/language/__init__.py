@@ -92,6 +92,7 @@ from .op.system_ops import (
 )
 from .op.tensor_ops import (
     a8w8_matmul_dequant,
+    a8w8_matmul_dequant_acc,
     assemble,
     cos,
     create_l1,
@@ -443,6 +444,7 @@ __all__ = [
     "sin",
     "arange",
     "a8w8_matmul_dequant",
+    "a8w8_matmul_dequant_acc",
     "gather",
     "paged_gather",
     "create_l1",

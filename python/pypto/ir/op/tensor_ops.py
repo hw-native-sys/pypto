@@ -442,6 +442,36 @@ def a8w8_matmul_dequant(
     )
 
 
+def a8w8_matmul_dequant_acc(
+    acc_i32: Expr,
+    lhs_i8: Expr,
+    rhs_i8: Expr,
+    act_scale: Expr,
+    weight_scale: Expr,
+    out_dtype: int | DataType = DataType.FP32,
+    a_trans: bool = False,
+    b_trans: bool = False,
+    span: Span | None = None,
+) -> Call:
+    """A8W8 INT8 matmul accumulation followed by row/column scale dequantization.
+
+    Semantics:
+        ``(acc_i32 + matmul(lhs_i8, rhs_i8)).float() * act_scale[row] * weight_scale[col]``.
+    """
+    actual_span = _get_span_or_capture(span)
+    kwargs: dict[str, Any] = {
+        "out_dtype": out_dtype,
+        "a_trans": a_trans,
+        "b_trans": b_trans,
+    }
+    return _ir_core.create_op_call(
+        "tensor.a8w8_matmul_dequant_acc",
+        [acc_i32, lhs_i8, rhs_i8, act_scale, weight_scale],
+        kwargs,
+        actual_span,
+    )
+
+
 def matmul_acc(
     acc: Expr,
     lhs: Expr,

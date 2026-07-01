@@ -24,10 +24,27 @@ from simpler.task_interface import (  # pyright: ignore[reportMissingImports]
     scalar_to_uint64,
 )
 
-# ``RunTiming`` is a native ``_task_interface`` nanobind type re-exported by
-# ``simpler.worker`` (not by ``simpler.task_interface``), so import it alongside
-# ``Worker`` from there.
-from simpler.worker import RunTiming, Worker  # pyright: ignore[reportMissingImports]
+# ``RunTiming`` is a native ``_task_interface`` nanobind type in older Simpler
+# builds. Newer Simpler revisions no longer export it because timing is emitted
+# through profiling logs. Keep a small compatibility stand-in so compile-only
+# flows and callers that only read the attributes can still import PyPTO.
+try:
+    from simpler.worker import RunTiming, Worker  # pyright: ignore[reportMissingImports]
+except ImportError:
+    from simpler.worker import Worker  # pyright: ignore[reportMissingImports]
+
+    class RunTiming:  # pyright: ignore[reportRedeclaration]
+        def __init__(self, host_wall_ns: int = 0, device_wall_ns: int = 0) -> None:
+            self.host_wall_ns = host_wall_ns
+            self.device_wall_ns = device_wall_ns
+
+        @property
+        def host_wall_us(self) -> float:
+            return self.host_wall_ns / 1000.0
+
+        @property
+        def device_wall_us(self) -> float:
+            return self.device_wall_ns / 1000.0
 from simpler_setup.torch_interop import (  # pyright: ignore[reportMissingImports]
     make_tensor_arg,
     torch_dtype_to_datatype,

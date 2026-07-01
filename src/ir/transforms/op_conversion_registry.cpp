@@ -60,6 +60,12 @@ bool HasStaticShape(const ExprPtr& expr, const std::vector<int64_t>& expected_sh
   return true;
 }
 
+bool HasStaticDim(const ExprPtr& expr, size_t axis, int64_t expected) {
+  auto tile_type = As<TileType>(expr->GetType());
+  if (!tile_type || axis >= tile_type->shape_.size()) return false;
+  return IsConstValue(tile_type->shape_[axis], expected);
+}
+
 // Detect row-broadcast pattern: [M, N] op [M, 1] or [M, 1] op [M, N]
 // Returns {wider_arg_idx, narrower_arg_idx} if broadcast detected, empty otherwise
 std::pair<int, int> DetectRowBroadcast(const std::vector<ExprPtr>& args) {
@@ -928,7 +934,7 @@ void OpConversionRegistry::RegisterMatmulOps() {
         (void)kwargs;
         INTERNAL_CHECK_SPAN(args.size() == 2, span) << "tensor.matmul conversion expects 2 args (lhs, rhs)";
         const bool nd = rank_of(args[0]) > 2 || rank_of(args[1]) > 2;
-        const std::string out_op = nd ? "tile.batch_matmul" : "tile.matmul";
+        const std::string out_op = nd ? "tile.batch_matmul" : (HasStaticDim(args[0], 0, 1) ? "tile.gemv" : "tile.matmul");
         return ConversionResult{OpRegistry::GetInstance().Create(out_op, {args[0], args[1]}, span)};
       },
       {{0, {MemorySpace::Mat, "a_trans"}}, {1, {MemorySpace::Mat, "b_trans"}}});
@@ -960,12 +966,10 @@ void OpConversionRegistry::RegisterMatmulOps() {
           return var;
         };
 
-        auto acc_i32 = emit("tile.matmul", {args[0], args[1]}, {}, "a8w8_mm_i32");
-        auto vec_fp32 = emit("tile.move", {acc_i32},
-                             {{"target_memory", MemorySpace::Vec},
-                              {"target_type", DataType::FP32},
-                              {"blayout", TileLayout::row_major},
-                              {"slayout", TileLayout::row_major}},
+        const std::string mm_op = HasStaticDim(args[0], 0, 1) ? "tile.gemv" : "tile.matmul";
+        auto acc_i32 = emit(mm_op, {args[0], args[1]}, {}, "a8w8_mm_i32");
+        auto vec_fp32 = emit("tile.cast", {acc_i32},
+                             {{"target_type", DataType::FP32}, {"mode", 0}},
                              "a8w8_mm_vec_fp32");
         ExprPtr row_scaled;
         if (HasStaticShape(vec_fp32, {1, -1}) && HasStaticShape(args[2], {1, 1})) {
@@ -993,6 +997,71 @@ void OpConversionRegistry::RegisterMatmulOps() {
        {2, {MemorySpace::Vec, std::nullopt}},
        {3, {MemorySpace::Vec, std::nullopt}}});
 
+  // tensor.a8w8_matmul_dequant_acc: INT8 matmul accumulation plus row/column
+  // scale dequant. This matches decode projection K-loop lowering where the
+  // caller owns an INT32 accumulator and each chunk contributes via *_acc.
+  RegisterCustom(
+      "tensor.a8w8_matmul_dequant_acc",
+      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+         const Span& span) -> ConversionResult {
+        INTERNAL_CHECK_SPAN(args.size() == 5, span)
+            << "tensor.a8w8_matmul_dequant_acc conversion expects 5 args "
+               "(acc_i32, lhs_i8, rhs_i8, act_scale, weight_scale)";
+        const DataType out_dtype = GetKwargOr<DataType>(kwargs, "out_dtype", DataType::FP32);
+        CHECK_SPAN(out_dtype == DataType::FP32 || out_dtype == DataType::BF16, span)
+            << "tensor.a8w8_matmul_dequant_acc conversion only supports FP32 or BF16 output, got "
+            << out_dtype.ToString();
+
+        auto& op_reg = OpRegistry::GetInstance();
+        std::vector<StmtPtr> prologue;
+        auto emit = [&](const std::string& op_name, const std::vector<ExprPtr>& call_args,
+                        const std::vector<std::pair<std::string, std::any>>& call_kwargs,
+                        const std::string& name_hint) -> VarPtr {
+          auto call = call_kwargs.empty() ? op_reg.Create(op_name, call_args, span)
+                                          : op_reg.Create(op_name, call_args, call_kwargs, span);
+          auto var = std::make_shared<Var>(name_hint, call->GetType(), span);
+          prologue.push_back(std::make_shared<AssignStmt>(var, call, span));
+          return var;
+        };
+
+        const std::string mm_op = HasStaticDim(args[1], 0, 1) ? "tile.gemv_acc" : "tile.matmul_acc";
+        auto acc_i32 = emit(mm_op, {args[0], args[1], args[2]}, {}, "a8w8_mm_acc_i32");
+        auto vec_fp32 = emit("tile.cast", {acc_i32},
+                             {{"target_type", DataType::FP32}, {"mode", 0}},
+                             "a8w8_mm_acc_vec_fp32");
+        if (HasStaticShape(vec_fp32, {1, -1}) && HasStaticShape(args[3], {1, 1})) {
+          auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, span);
+          auto zero_zero = std::make_shared<MakeTuple>(std::vector<ExprPtr>{zero, zero}, span);
+          auto act_scale_scalar = emit("tile.read", {args[3], zero_zero}, {}, "a8w8_acc_act_scale_scalar");
+          auto row_scaled = emit("tile.muls", {vec_fp32, act_scale_scalar}, {}, "a8w8_acc_row_scaled");
+          auto col_scaled = HasStaticShape(args[4], {1, -1}) ? op_reg.Create("tile.mul", {row_scaled, args[4]}, span)
+                                                             : op_reg.Create("tile.col_expand_mul", {row_scaled, args[4]}, span);
+          if (out_dtype == DataType::FP32) {
+            return ConversionResult{std::move(prologue), col_scaled};
+          }
+
+          auto col_scaled_var = std::make_shared<Var>("a8w8_acc_col_scaled", col_scaled->GetType(), span);
+          prologue.push_back(std::make_shared<AssignStmt>(col_scaled_var, col_scaled, span));
+          auto out = op_reg.Create("tile.cast", {col_scaled_var}, {{"target_type", out_dtype}, {"mode", 0}}, span);
+          return ConversionResult{std::move(prologue), out};
+        }
+
+        auto col_scaled = emit("tile.col_expand_mul", {vec_fp32, args[4]}, {}, "a8w8_acc_col_scaled");
+        auto row_scaled = op_reg.Create("tile.row_expand_mul", {col_scaled, args[3]}, span);
+        if (out_dtype == DataType::FP32) {
+          return ConversionResult{std::move(prologue), row_scaled};
+        }
+
+        auto row_scaled_var = std::make_shared<Var>("a8w8_acc_row_scaled", row_scaled->GetType(), span);
+        prologue.push_back(std::make_shared<AssignStmt>(row_scaled_var, row_scaled, span));
+        auto out = op_reg.Create("tile.cast", {row_scaled_var}, {{"target_type", out_dtype}, {"mode", 0}}, span);
+        return ConversionResult{std::move(prologue), out};
+      },
+      {{1, {MemorySpace::Mat, "a_trans"}},
+       {2, {MemorySpace::Mat, "b_trans"}},
+       {3, {MemorySpace::Vec, std::nullopt}},
+       {4, {MemorySpace::Vec, std::nullopt}}});
+
   // tensor.matmul_acc: 2D × 2D × 2D → tile.matmul_acc; any operand ≥3D →
   // tile.batch_matmul_acc. Same a_trans/b_trans handling as tensor.matmul.
   RegisterCustom(
@@ -1003,7 +1072,8 @@ void OpConversionRegistry::RegisterMatmulOps() {
         INTERNAL_CHECK_SPAN(args.size() == 3, span)
             << "tensor.matmul_acc conversion expects 3 args (acc, lhs, rhs)";
         const bool nd = rank_of(args[0]) > 2 || rank_of(args[1]) > 2 || rank_of(args[2]) > 2;
-        const std::string out_op = nd ? "tile.batch_matmul_acc" : "tile.matmul_acc";
+        const std::string out_op =
+            nd ? "tile.batch_matmul_acc" : (HasStaticDim(args[1], 0, 1) ? "tile.gemv_acc" : "tile.matmul_acc");
         return ConversionResult{OpRegistry::GetInstance().Create(out_op, {args[0], args[1], args[2]}, span)};
       },
       {{1, {MemorySpace::Mat, "a_trans"}}, {2, {MemorySpace::Mat, "b_trans"}}});
