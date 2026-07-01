@@ -26,6 +26,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/codegen/codegen_preconditions.h"
 #include "pypto/codegen/distributed/distributed_op_registry.h"
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/core/dtype.h"
@@ -73,6 +74,7 @@ std::string BuiltinEntrySymbol(const std::string& variant) {
 
 std::string DistributedCodegen::Generate(const ir::ProgramPtr& program) {
   CHECK(program != nullptr) << "Cannot generate code for null program";
+  VerifyDistributedCodegenPreconditions(program);
 
   program_ = program;
   emitter_.Clear();
