@@ -54,6 +54,11 @@ std::string FormatConstFloatValue(const ir::ConstFloatPtr& c, const std::string&
 int GetOrCreateFuncId(const std::string& func_name, std::map<std::string, int>* func_name_to_id,
                       int* next_func_id);
 
+/// Compute total GM-pipe workspace elements required by a root orchestration
+/// function by walking reachable statements/callees and summing
+/// ``initialize_pipe`` slot_count * slot_size.
+int64_t ComputeGMPipeWorkspaceElements(const ir::ProgramPtr& program, const ir::FunctionPtr& root_func);
+
 // ---------------------------------------------------------------------------
 // Supporting types
 // ---------------------------------------------------------------------------

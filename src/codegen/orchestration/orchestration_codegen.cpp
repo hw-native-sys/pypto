@@ -32,7 +32,9 @@
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
+#include "pypto/codegen/code_emitter.h"
 #include "pypto/codegen/codegen_base.h"
+#include "pypto/codegen/codegen_preconditions.h"
 #include "pypto/codegen/orchestration/orchestration_analysis.h"
 #include "pypto/codegen/orchestration_op_registry.h"
 #include "pypto/core/dtype.h"
@@ -47,8 +49,6 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
-#include "pypto/ir/transforms/utils/core_affinity.h"
-#include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/transforms/utils/wrapper_call_utils.h"
@@ -109,91 +109,6 @@ StmtPtr UnwrapAutoScope(const StmtPtr& stmt) {
 // bound on the explicit dep count, and codegen sizes each call's
 // ``PTO2TaskId <task>_deps[K]`` stack array to its exact edge count, so there
 // is no codegen-time cap on per-task explicit dependencies.
-
-int GetGMPipeSlotCount(int dir_mask) {
-  const int bidirectional = core_affinity::kDirMaskC2V | core_affinity::kDirMaskV2C;
-  if (dir_mask == bidirectional) {
-    return 4;
-  }
-  if (dir_mask == core_affinity::kDirMaskC2V || dir_mask == core_affinity::kDirMaskV2C) {
-    return 8;
-  }
-  return 0;
-}
-
-int64_t ComputeGMPipeWorkspaceElements(const ProgramPtr& program, const FunctionPtr& root_func) {
-  std::map<std::pair<int, int>, int> slot_size_by_pipe;
-
-  std::unordered_set<std::string> visited_funcs;
-  std::function<void(const std::vector<StmtPtr>&)> scan_stmts;
-  std::function<void(const FunctionPtr&)> scan_func;
-  scan_stmts = [&](const std::vector<StmtPtr>& stmts) {
-    for (const auto& stmt : stmts) {
-      auto call = transform_utils::GetCallFromStmt(stmt);
-      if (op_predicates::IsInitializePipe(call)) {
-        const int pipe_id = call->GetKwarg<int>("id", 0);
-        const int dir_mask = call->GetKwarg<int>("dir_mask", 0);
-        const int slot_size = call->GetKwarg<int>("slot_size", 0);
-        if (dir_mask > 0 && slot_size > 0) {
-          const auto key = std::make_pair(pipe_id, dir_mask);
-          auto [it, inserted] = slot_size_by_pipe.emplace(key, slot_size);
-          CHECK(inserted || it->second == slot_size)
-              << "initialize_pipe for frontend pipe id " << pipe_id << " and dir_mask " << dir_mask
-              << " uses inconsistent slot_size values: " << it->second << " and " << slot_size;
-        }
-      } else if (call) {
-        auto gv = As<GlobalVar>(call->op_);
-        if (gv) {
-          scan_func(program->GetFunction(gv->name_));
-        }
-      }
-
-      if (auto for_stmt = As<ForStmt>(stmt)) {
-        scan_stmts(transform_utils::FlattenToStmts(for_stmt->body_));
-      } else if (auto if_stmt = As<IfStmt>(stmt)) {
-        scan_stmts(transform_utils::FlattenToStmts(if_stmt->then_body_));
-        const auto& else_body = if_stmt->else_body_;
-        if (else_body) {
-          scan_stmts(transform_utils::FlattenToStmts(*else_body));
-        }
-      } else if (auto while_stmt = As<WhileStmt>(stmt)) {
-        scan_stmts(transform_utils::FlattenToStmts(while_stmt->body_));
-      } else if (auto scope = As<RuntimeScopeStmt>(stmt)) {
-        // MaterializeRuntimeScopes wraps the function body and for/if bodies in
-        // AUTO RuntimeScopeStmt; descend so nested initialize_pipe calls and
-        // loops remain visible to GM-pipe workspace sizing.
-        scan_stmts(transform_utils::FlattenToStmts(scope->body_));
-      }
-    }
-  };
-
-  scan_func = [&](const FunctionPtr& func) {
-    if (!func || !visited_funcs.insert(func->name_).second) {
-      return;
-    }
-    if (func->body_) {
-      scan_stmts(transform_utils::FlattenToStmts(func->body_));
-    }
-  };
-
-  scan_func(root_func);
-
-  int64_t total_bytes = 0;
-  for (const auto& [key, slot_size] : slot_size_by_pipe) {
-    const int dir_mask = key.second;
-    const int slot_count = GetGMPipeSlotCount(dir_mask);
-    CHECK(slot_count > 0) << "initialize_pipe has invalid dir_mask for GM slot buffer: " << dir_mask;
-    CHECK(total_bytes <= std::numeric_limits<int64_t>::max() -
-                             static_cast<int64_t>(slot_count) * static_cast<int64_t>(slot_size))
-        << "GM slot buffer size overflow while sizing frontend pipe id " << key.first;
-    total_bytes += static_cast<int64_t>(slot_count) * static_cast<int64_t>(slot_size);
-  }
-
-  if (total_bytes == 0) {
-    return 0;
-  }
-  return (total_bytes + static_cast<int64_t>(sizeof(float)) - 1) / static_cast<int64_t>(sizeof(float));
-}
 
 // ---------------------------------------------------------------------------
 // Template / boilerplate generation helpers
@@ -302,7 +217,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   void SetTupleVarToKey(std::map<const Var*, std::string> mapping) { tuple_var_to_key_ = std::move(mapping); }
 
-  void SetInitialIndent(int indent) { indent_ = indent; }
+  void SetInitialIndent(int indent) {
+    INTERNAL_CHECK(indent >= 0 && indent % 4 == 0)
+        << "Internal error: initial indent must be a non-negative multiple of 4, got " << indent;
+    emitter_.SetIndentLevel(indent / 4);
+  }
   void SetEffectiveUses(std::unordered_set<const Var*> uses) { effective_uses_ = std::move(uses); }
 
   void PrepareCrossScopeTaskIdHoists(const StmtPtr& body) {
@@ -461,10 +380,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
   }
 
-  std::string GetGeneratedCode() const { return code_.str(); }
+  std::string GetGeneratedCode() const { return emitter_.GetCode(); }
   // --- CodegenBase pure virtual implementations ---
   [[nodiscard]] std::string GetCurrentResultTarget() const override { return current_result_var_; }
-  void Emit(const std::string& line) override { code_ << line; }
+  void Emit(const std::string& line) override { Active().AppendRaw(line); }
   std::string GetExprAsCode(const ExprPtr& expr) override { return GenerateExprString(expr); }
   [[nodiscard]] std::string GetTypeString(const DataType& dtype) const override {
     return dtype.ToCTypeString();
@@ -777,7 +696,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         // init expression to every slot.
         const int64_t N = array_sizes[i];
         std::string rv_array_name = ReserveSyntheticEmitName(return_var->name_hint_);
-        code_ << Indent() << "PTO2TaskId " << rv_array_name << "[" << N << "];\n";
+        EmitIndentedLine("PTO2TaskId " + rv_array_name + "[" + std::to_string(N) + "];");
 
         auto outer_init_var = AsVarLike(iter_arg->initValue_);
         const ArrayCarryEntry* outer_init_arr = nullptr;
@@ -786,14 +705,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
           if (outer_it != array_carry_vars_.end()) outer_init_arr = &outer_it->second;
         }
         if (outer_init_arr && outer_init_arr->size == N) {
-          code_ << Indent() << "for (int64_t __init_i = 0; __init_i < " << N << "; ++__init_i) "
-                << rv_array_name << "[__init_i] = " << outer_init_arr->array_name << "[__init_i];\n";
+          EmitArrayCopyLoop(N, rv_array_name, outer_init_arr->array_name, "__init_i");
         } else if (compiler_dep_collection[i]) {
-          code_ << Indent() << "for (int64_t __init_i = 0; __init_i < " << N << "; ++__init_i) "
-                << rv_array_name << "[__init_i] = PTO2TaskId::invalid();\n";
+          EmitArrayFillLoop(N, rv_array_name, "PTO2TaskId::invalid()", "__init_i");
         } else {
-          code_ << Indent() << "for (int64_t __init_i = 0; __init_i < " << N << "; ++__init_i) "
-                << rv_array_name << "[__init_i] = " << init_var_name << ";\n";
+          EmitArrayFillLoop(N, rv_array_name, init_var_name, "__init_i");
         }
         // Register rv as array-carry (yields target into this array).
         RegisterArrayCarry(return_var.get(), rv_array_name, N);
@@ -862,9 +778,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
           carry_name = init_carry->array_name;
         } else {
           carry_name = ReserveSyntheticEmitName(return_var->name_hint_);
-          code_ << Indent() << cpp_dtype << " " << carry_name << "[" << N << "];\n";
-          code_ << Indent() << "for (int64_t __init_i = 0; __init_i < " << N << "; ++__init_i) " << carry_name
-                << "[__init_i] = " << init_var_name << "[__init_i];\n";
+          EmitIndentedLine(cpp_dtype + " " + carry_name + "[" + std::to_string(N) + "];");
+
+          EmitArrayCopyLoop(N, carry_name, init_var_name, "__init_i");
         }
         emit_name_map_[iter_arg.get()] = carry_name;
         emit_name_map_[return_var.get()] = carry_name;
@@ -897,7 +813,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
         if (cpp_type == "Tensor") {
           EmitMutableTensorCarryDecl(carry_name, init_var_name);
         } else {
-          code_ << Indent() << cpp_type << " " << carry_name << " = " << init_var_name << ";\n";
+          EmitIndentedLine(cpp_type + " " + carry_name + " = " + init_var_name + ";");
+
           RegisterMutableTensorName(cpp_type, carry_name);
         }
         emit_name_map_[return_var.get()] = carry_name;
@@ -918,48 +835,48 @@ class OrchestrationStmtCodegen : public CodegenBase {
       }
     }
 
-    code_ << Indent() << "for (int64_t " << loop_var << " = " << start_expr << "; " << loop_var << " < "
-          << stop_expr << "; " << loop_var << " += " << step_expr << ") {\n";
-    indent_ += 4;
-    PushCppScope();
+    EmitForLoopHeader(loop_var, start_expr, stop_expr, step_expr);
+    {
+      IndentGuard indent_guard(Active());
+      PushCppScope();
 
-    // The implicit ``PTO2_SCOPE()`` wrapper around the loop body is now an
-    // explicit AUTO RuntimeScopeStmt inserted by MaterializeRuntimeScopes
-    // (suppressed inside a manual scope); visiting the body emits it 1:1.
+      // The implicit ``PTO2_SCOPE()`` wrapper around the loop body is now an
+      // explicit AUTO RuntimeScopeStmt inserted by MaterializeRuntimeScopes
+      // (suppressed inside a manual scope); visiting the body emits it 1:1.
 
-    auto saved = current_return_vars_;
-    // Only register return_vars whose yield is a true rebind. Trivial slots
-    // are aliased to the init name and don't need a yield-time assignment;
-    // emitting one would just produce `init = init;`.
-    current_return_vars_.clear();
-    for (size_t i = 0; i < for_stmt->return_vars_.size(); ++i) {
-      if (is_rebind[i]) {
-        current_return_vars_.push_back(for_stmt->return_vars_[i]);
-      } else {
-        current_return_vars_.push_back(nullptr);
+      auto saved = current_return_vars_;
+      // Only register return_vars whose yield is a true rebind. Trivial slots
+      // are aliased to the init name and don't need a yield-time assignment;
+      // emitting one would just produce `init = init;`.
+      current_return_vars_.clear();
+      for (size_t i = 0; i < for_stmt->return_vars_.size(); ++i) {
+        if (is_rebind[i]) {
+          current_return_vars_.push_back(for_stmt->return_vars_[i]);
+        } else {
+          current_return_vars_.push_back(nullptr);
+        }
       }
-    }
-    // Array-carry slot index = (loop_var - start) / step (0-based ordinal).
-    // For the common ``pl.parallel(N)`` case (start=0, step=1) this reduces
-    // to ``loop_var`` itself; peephole the expression so generated code stays
-    // readable. For non-trivial ranges like ``pl.parallel(2, 10, 2)`` the
-    // raw loop_var (2,4,6,8) would index out of the ``arr[N=4]`` allocation —
-    // see CodeRabbit thread on PR #1330.
-    std::string slot_expr = loop_var;
-    auto start_ci = As<ConstInt>(for_stmt->start_);
-    auto step_ci = As<ConstInt>(for_stmt->step_);
-    bool trivial_range = start_ci && step_ci && start_ci->value_ == 0 && step_ci->value_ == 1;
-    if (!trivial_range) {
-      slot_expr = "((" + loop_var + " - " + start_expr + ") / " + step_expr + ")";
-    }
-    current_loop_slot_exprs_.push_back(slot_expr);
-    VisitStmt(for_stmt->body_);
-    current_loop_slot_exprs_.pop_back();
-    current_return_vars_ = saved;
+      // Array-carry slot index = (loop_var - start) / step (0-based ordinal).
+      // For the common ``pl.parallel(N)`` case (start=0, step=1) this reduces
+      // to ``loop_var`` itself; peephole the expression so generated code stays
+      // readable. For non-trivial ranges like ``pl.parallel(2, 10, 2)`` the
+      // raw loop_var (2,4,6,8) would index out of the ``arr[N=4]`` allocation —
+      // see CodeRabbit thread on PR #1330.
+      std::string slot_expr = loop_var;
+      auto start_ci = As<ConstInt>(for_stmt->start_);
+      auto step_ci = As<ConstInt>(for_stmt->step_);
+      bool trivial_range = start_ci && step_ci && start_ci->value_ == 0 && step_ci->value_ == 1;
+      if (!trivial_range) {
+        slot_expr = "((" + loop_var + " - " + start_expr + ") / " + step_expr + ")";
+      }
+      current_loop_slot_exprs_.push_back(slot_expr);
+      VisitStmt(for_stmt->body_);
+      current_loop_slot_exprs_.pop_back();
+      current_return_vars_ = saved;
 
-    PopCppScope();
-    indent_ -= 4;
-    code_ << Indent() << "}\n";
+      PopCppScope();
+    }
+    EmitIndentedLine("}");
   }
 
   void VisitStmt_(const RuntimeScopeStmtPtr& scope) override {
@@ -983,13 +900,15 @@ class OrchestrationStmtCodegen : public CodegenBase {
       // AUTO scope: emit inline. No alias hoisting needed — the outermost AUTO
       // wrapper has nothing placed after it, and for/if bodies escape values
       // through phis / iter_args rather than raw const-ref aliases.
-      code_ << Indent() << "PTO2_SCOPE() {\n";
-      indent_ += 4;
-      PushCppScope();
-      VisitStmt(scope->body_);
-      PopCppScope();
-      indent_ -= 4;
-      code_ << Indent() << "}\n";
+      EmitIndentedLine("PTO2_SCOPE() {");
+      {
+        IndentGuard indent_guard(Active());
+        PushCppScope();
+        VisitStmt(scope->body_);
+        PopCppScope();
+      }
+      EmitIndentedLine("}");
+
       manual_task_id_map_ = std::move(saved_map);
       array_carry_vars_ = std::move(saved_array_carry);
       return;
@@ -1008,15 +927,16 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // We buffer the block body so the hoisted allocation decls can be flushed
     // ahead of the ``PTO2_SCOPE(MANUAL) {`` header, where they are in scope both
     // inside the block and at after-scope readers.
-    const std::string parent_indent = Indent();
+    const int parent_indent_level = Active().GetIndentLevel();
+    const std::string parent_indent = IndentAtLevel(parent_indent_level);
     std::vector<std::string>* saved_sink = scope_hoist_sink_;
-    std::string saved_hoist_indent = std::move(scope_hoist_indent_);
+    const int saved_hoist_indent_level = scope_hoist_indent_level_;
     std::set<std::string>* saved_local_names = manual_local_names_;
     std::set<std::string>* saved_enclosing_local_names = enclosing_manual_local_names_;
     std::vector<std::string> hoisted;
     std::set<std::string> local_names;
     scope_hoist_sink_ = &hoisted;
-    scope_hoist_indent_ = parent_indent;
+    scope_hoist_indent_level_ = parent_indent_level;
     // The set in scope on entry belongs to the enclosing manual scope (null when
     // the parent is the AUTO body). A buffer this scope hoists lands in that
     // enclosing scope's body, so it must be recorded there as scope-local
@@ -1025,28 +945,29 @@ class OrchestrationStmtCodegen : public CodegenBase {
     enclosing_manual_local_names_ = manual_local_names_;
     manual_local_names_ = &local_names;
 
-    std::ostringstream body_buf;
-    code_.swap(body_buf);  // redirect block-body emission into body_buf
-    indent_ += 4;
+    CodeEmitter body_emitter;
+    body_emitter.SetIndentLevel(parent_indent_level);
+    CodeEmitter* saved_active = active_emitter_;
+    active_emitter_ = &body_emitter;
+    IndentGuard body_indent(Active());
     PushCppScope();
     ++in_manual_scope_depth_;
     VisitStmt(scope->body_);
     --in_manual_scope_depth_;
     PopCppScope();
-    indent_ -= 4;
-    code_.swap(body_buf);  // restore: code_ holds prior output, body_buf the block
+    active_emitter_ = saved_active;
 
     scope_hoist_sink_ = saved_sink;
-    scope_hoist_indent_ = std::move(saved_hoist_indent);
+    scope_hoist_indent_level_ = saved_hoist_indent_level;
     manual_local_names_ = saved_local_names;
     enclosing_manual_local_names_ = saved_enclosing_local_names;
 
     for (const auto& line : hoisted) {
-      code_ << line;
+      Active().AppendRaw(line);
     }
-    code_ << parent_indent << "PTO2_SCOPE(PTO2ScopeMode::MANUAL) {\n";
-    code_ << body_buf.str();
-    code_ << parent_indent << "}\n";
+    Active().AppendRaw(parent_indent + "PTO2_SCOPE(PTO2ScopeMode::MANUAL) {\n");
+    Active().AppendRaw(body_emitter.GetCode());
+    Active().AppendRaw(parent_indent + "}\n");
 
     // Restore the outer scheduling bindings. A binding minted inside the block
     // that names a manual-scope-local C++ identifier (e.g. ``PTO2TaskId prev =
@@ -1140,20 +1061,21 @@ class OrchestrationStmtCodegen : public CodegenBase {
         // enclosing-scope-valid, or the decl stays in place (EmitMutableTensorCarryDecl).
         EmitMutableTensorCarryDecl(emit_name, tensor_phi_init);
       } else {
-        code_ << Indent() << cpp_type << " " << emit_name << ";\n";
+        EmitIndentedLine(cpp_type + " " + emit_name + ";");
       }
     }
 
-    code_ << Indent() << "if (" << cond_expr << ") {\n";
+    EmitIndentedLine("if (" + cond_expr + ") {");
+
     VisitScopedBranchBody(if_stmt->then_body_, if_stmt->return_vars_);
 
     const auto& else_body = if_stmt->else_body_;
     if (else_body.has_value()) {
-      code_ << Indent() << "} else {\n";
+      EmitIndentedLine("} else {");
       VisitScopedBranchBody(*else_body, if_stmt->return_vars_);
     }
 
-    code_ << Indent() << "}\n";
+    EmitIndentedLine("}");
   }
 
   void VisitStmt_(const AssignStmtPtr& assign) override {
@@ -1181,7 +1103,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
       }
       if (IsOp(call, "system.task_invalid")) {
         // The Python literal ``None`` in a TaskId position lowers here.
-        code_ << Indent() << "PTO2TaskId " << var_name << " = PTO2TaskId::invalid();\n";
+        EmitIndentedLine("PTO2TaskId " + var_name + " = PTO2TaskId::invalid();");
+
         // Register so a downstream ``deps=[<this var>]`` resolves to the
         // emitted name (string variant). The ``is_valid()`` guard in
         // ``EmitManualDeps`` skips the invalid sentinel at runtime.
@@ -1196,7 +1119,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
         INTERNAL_CHECK_SPAN(call->args_.size() == 1, assign->span_)
             << "Internal error: system.task_is_valid expects exactly 1 argument";
         std::string arg_expr = GenerateExprString(call->args_[0]);
-        code_ << Indent() << "bool " << var_name << " = " << arg_expr << ".is_valid();\n";
+        EmitIndentedLine("bool " + var_name + " = " + arg_expr + ".is_valid();");
+
         return;
       }
 
@@ -1354,7 +1278,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
           return;
         }
       }
-      code_ << Indent() << cpp_type << " " << var_name << " = " << value_expr << ";\n";
+      EmitIndentedLine(cpp_type + " " + var_name + " = " + value_expr + ";");
+
       RegisterMutableTensorName(cpp_type, var_name);
     }
   }
@@ -1399,8 +1324,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
           INTERNAL_CHECK_SPAN(inner_it->second.size == rv_arr.size, yield_stmt->span_)
               << "Internal error: array-carry yield size mismatch (rv=" << rv_arr.size
               << ", yield=" << inner_it->second.size << ")";
-          code_ << Indent() << "for (int64_t __yield_i = 0; __yield_i < " << rv_arr.size << "; ++__yield_i) "
-                << rv_arr.array_name << "[__yield_i] = " << inner_it->second.array_name << "[__yield_i];\n";
+          EmitArrayCopyLoop(rv_arr.size, rv_arr.array_name, inner_it->second.array_name, "__yield_i");
         } else {
           // Scalar → array slot write (Parallel inner yielding a fresh task id
           // into its slot). The slot index is the enclosing loop's 0-based
@@ -1414,8 +1338,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
               << "Internal error: scalar yield to array carry expects string-variant entry";
           INTERNAL_CHECK_SPAN(!current_loop_slot_exprs_.empty(), yield_stmt->span_)
               << "Internal error: scalar yield to array carry requires an enclosing loop var";
-          code_ << Indent() << rv_arr.array_name << "[" << current_loop_slot_exprs_.back()
-                << "] = " << *scalar_name << ";\n";
+          EmitIndentedLine(rv_arr.array_name + "[" + current_loop_slot_exprs_.back() + "] = " + *scalar_name +
+                           ";");
         }
         continue;
       }
@@ -1445,11 +1369,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
         INTERNAL_CHECK_SPAN(extent_const, yield_stmt->span_)
             << "Internal error: ArrayType rv extent must be ConstInt for slot-by-slot yield copy";
         const int64_t N = extent_const->value_;
-        code_ << Indent() << "for (int64_t __yield_i = 0; __yield_i < " << N << "; ++__yield_i) " << lhs_name
-              << "[__yield_i] = " << value_expr << "[__yield_i];\n";
+        EmitArrayCopyLoop(N, lhs_name, value_expr, "__yield_i");
         continue;
       }
-      code_ << Indent() << lhs_name << " = " << value_expr << ";\n";
+      EmitIndentedLine(lhs_name + " = " + value_expr + ";");
     }
   }
 
@@ -1483,7 +1406,43 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 
  private:
-  std::string Indent() const { return std::string(indent_, ' '); }
+  class IndentGuard {
+   public:
+    explicit IndentGuard(CodeEmitter& emitter) : emitter_(emitter) { emitter_.IncreaseIndent(); }
+    ~IndentGuard() { emitter_.DecreaseIndent(); }
+
+   private:
+    CodeEmitter& emitter_;
+  };
+
+  CodeEmitter& Active() { return *active_emitter_; }
+  const CodeEmitter& Active() const { return *active_emitter_; }
+
+  void EmitIndentedLine(const std::string& line) { Active().EmitLine(line); }
+
+  void EmitBlankLine() { Active().EmitLine(""); }
+
+  void EmitForLoopHeader(const std::string& loop_var, const std::string& start_expr,
+                         const std::string& stop_expr, const std::string& step_expr) {
+    EmitIndentedLine("for (int64_t " + loop_var + " = " + start_expr + "; " + loop_var + " < " + stop_expr +
+                     "; " + loop_var + " += " + step_expr + ") {");
+  }
+
+  void EmitArrayCopyLoop(int64_t extent, const std::string& dst_array, const std::string& src_array,
+                         const std::string& index_var = "__i") {
+    const std::string n = std::to_string(extent);
+    EmitIndentedLine("for (int64_t " + index_var + " = 0; " + index_var + " < " + n + "; ++" + index_var +
+                     ") " + dst_array + "[" + index_var + "] = " + src_array + "[" + index_var + "];");
+  }
+
+  void EmitArrayFillLoop(int64_t extent, const std::string& dst_array, const std::string& value_expr,
+                         const std::string& index_var = "__i") {
+    const std::string n = std::to_string(extent);
+    EmitIndentedLine("for (int64_t " + index_var + " = 0; " + index_var + " < " + n + "; ++" + index_var +
+                     ") " + dst_array + "[" + index_var + "] = " + value_expr + ";");
+  }
+
+  std::string IndentAtLevel(int level) const { return std::string(static_cast<size_t>(level * 4), ' '); }
 
   std::string GetCppType(const TypePtr& type) {
     if (auto scalar_type = As<ScalarType>(type)) {
@@ -1560,16 +1519,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
     /// (selective dump from ``pl.dump_tag`` / ``dumps=``). Set by
     /// VarPtr identity in the param builders — no name comparison.
     bool dump = false;
-  };
-
-  /// Result of building a wrapper (Spmd/Group) call's task params. ``params`` is
-  /// the reordered ParamEntry list; ``ctx_scalar_names`` holds the ``ext_<name>``
-  /// of each DistributedTensor formal (in inner-kernel param order), which the
-  /// caller emits as trailing ``add_scalar(ext_<name>_ctx)`` — the wrapper-path
-  /// analogue of the InCore ``EmitDistTensorCtxScalars``.
-  struct WrapperParams {
-    std::vector<ParamEntry> params;
-    std::vector<std::string> ctx_scalar_names;
   };
 
   /// Reorder a param list so non-scalar (tensor) entries precede scalars,
@@ -1667,16 +1616,17 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// Emit ``<task_var>.dump(v1, v2, ...);`` for the ``params`` entries marked
   /// for selective dump (``kAttrDumpVars``). No-op when no param is marked
   /// (legacy full-dump path is preserved).
-  void EmitSelectiveDumpCall(const std::string& ind, const std::string& task_var,
-                             const std::vector<ParamEntry>& params) {
+  void EmitSelectiveDumpCall(const std::string& task_var, const std::vector<ParamEntry>& params) {
     auto dump_vals = CollectSelectiveDumpValues(params);
     if (dump_vals.empty()) return;
-    code_ << ind << task_var << ".dump(";
+    std::ostringstream oss;
+    oss << task_var << ".dump(";
     for (size_t i = 0; i < dump_vals.size(); ++i) {
-      if (i > 0) code_ << ", ";
-      code_ << dump_vals[i];
+      if (i > 0) oss << ", ";
+      oss << dump_vals[i];
     }
-    code_ << ");\n";
+    oss << ");";
+    EmitIndentedLine(oss.str());
   }
 
   /// For a Submit's Out param at callee position `param_idx` that is *not*
@@ -1696,27 +1646,29 @@ class OrchestrationStmtCodegen : public CodegenBase {
     const size_t ndim = tensor_ty->shape_.size();
     std::string ci_var =
         "params_t" + std::to_string(task_counter_) + "_synth_out_" + std::to_string(param_idx);
-    std::string ind = Indent();
-
-    code_ << ind << "uint32_t " << ci_var << "_shapes[" << ndim << "] = {";
-    for (size_t i = 0; i < ndim; ++i) {
-      if (i > 0) code_ << ", ";
-      std::string dim_str = GenerateExprString(tensor_ty->shape_[i]);
-      if (As<ConstInt>(tensor_ty->shape_[i])) {
-        code_ << dim_str;
-      } else {
-        code_ << "static_cast<uint32_t>(" << dim_str << ")";
+    {
+      std::ostringstream shapes;
+      shapes << "uint32_t " << ci_var << "_shapes[" << ndim << "] = {";
+      for (size_t i = 0; i < ndim; ++i) {
+        if (i > 0) shapes << ", ";
+        std::string dim_str = GenerateExprString(tensor_ty->shape_[i]);
+        if (As<ConstInt>(tensor_ty->shape_[i])) {
+          shapes << dim_str;
+        } else {
+          shapes << "static_cast<uint32_t>(" << dim_str << ")";
+        }
       }
+      shapes << "};";
+      EmitIndentedLine(shapes.str());
     }
-    code_ << "};\n";
 
     // No set_initial_value() here: this CI is synthesised for a callee Out param
     // that the caller never passed (a runtime-allocated output), so there is no
     // user-facing `pl.create_tensor(..., init_value=...)` to honour. Buffer
     // pre-fill is emitted only on the originating `tensor.create` op (see
     // tensor_op_codegen.cpp), which keeps its own CI on the orchestration path.
-    code_ << ind << "TensorCreateInfo " << ci_var << "(" << ci_var << "_shapes, " << ndim << ", "
-          << GetRuntimeDataTypeString(tensor_ty->dtype_) << ");\n";
+    EmitIndentedLine("TensorCreateInfo " + ci_var + "(" + ci_var + "_shapes, " + std::to_string(ndim) + ", " +
+                     GetRuntimeDataTypeString(tensor_ty->dtype_) + ");");
 
     return {ArgDirection::Output, ci_var};
   }
@@ -1856,7 +1808,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     std::string line;
     while (std::getline(iss, line)) {
       if (!line.empty()) {
-        code_ << Indent() << line << "\n";
+        EmitIndentedLine(line);
       }
     }
 
@@ -1919,9 +1871,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// Wrapper functions may omit constants or otherwise expose a different
   /// parameter order than the callee binary expects. Submit args using the
   /// inner callee's order, not the wrapper's order.
-  WrapperParams BuildWrapperReorderedParams(const CallPtr& outer_call, const FunctionPtr& wrapper_func,
-                                            const CallPtr& inner_call, const FunctionPtr& inner_callee,
-                                            const WrapperBridge& bridge = {}) {
+  std::vector<ParamEntry> BuildWrapperReorderedParams(const CallPtr& outer_call,
+                                                      const FunctionPtr& wrapper_func,
+                                                      const CallPtr& inner_call,
+                                                      const FunctionPtr& inner_callee,
+                                                      const WrapperBridge& bridge = {}) {
     std::unordered_map<const Var*, size_t> wrapper_param_to_outer_idx;
     for (size_t i = 0; i < wrapper_func->params_.size(); ++i) {
       wrapper_param_to_outer_idx[wrapper_func->params_[i].get()] = i;
@@ -2007,7 +1961,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
     std::set<const Var*> inner_dump_var_set = CollectDumpVarSet(inner_call);
 
     std::vector<ParamEntry> params;
-    std::vector<std::string> ctx_scalar_names;
     for (size_t inner_idx = 0; inner_idx < inner_call->args_.size(); ++inner_idx) {
       const auto& inner_arg = inner_call->args_[inner_idx];
       auto inner_arg_var = AsVarLike(inner_arg);
@@ -2070,13 +2023,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
             << "Internal error: resolved direction index " << dir_idx << " out of range for tensor arg of '"
             << wrapper_func->name_ << "' (" << outer_arg_directions.size() << " directions).";
         params.push_back({outer_arg_directions[dir_idx], ext_name, is_dump});
-        // ``inner_idx`` is 1:1 with ``inner_callee->params_``, so record the
-        // resolved ``ext_<name>`` of each DistributedTensor formal for the trailing
-        // CommContext scalar (analogue of the InCore ``EmitDistTensorCtxScalars``).
-        if (inner_idx < inner_callee->params_.size() &&
-            As<DistributedTensorType>(inner_callee->params_[inner_idx]->GetType())) {
-          ctx_scalar_names.push_back(ext_name);
-        }
       } else if (auto const_int = As<ConstInt>(outer_arg)) {
         std::string cpp_type = const_int->dtype().ToCTypeString();
         std::string value = FormatConstIntValue(const_int, cpp_type);
@@ -2099,10 +2045,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
         << "Wrapper '" << wrapper_func->name_ << "' built " << params.size() << " params for "
         << inner_call->args_.size() << " inner-call args (1:1 invariant violated).";
 
-    // Tensors must precede scalars. ``ctx_scalar_names`` is kept separate and in
-    // inner-kernel param order (unaffected by the reorder) — emitted after all
-    // params by the caller.
-    return {ReorderTensorsBeforeScalars(std::move(params)), std::move(ctx_scalar_names)};
+    // Tensors must precede scalars
+    return ReorderTensorsBeforeScalars(params);
   }
 
   // Render the launched function's core_num attribute as a C++ scalar expression.
@@ -2144,15 +2088,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
     return {core_num, sync_start};
   }
 
-  void EmitLaunchSpec(const std::string& ind, const std::string& task_var, const ExprPtr& core_num_expr,
-                      bool sync_start) {
+  void EmitLaunchSpec(const std::string& task_var, const ExprPtr& core_num_expr, bool sync_start) {
     if (core_num_expr) {
       const std::string method = pypto::backend::GetBackend()->GetHandler()->GetLaunchSpecCoreCountMethod();
-      code_ << ind << task_var << ".launch_spec." << method << "(" << RenderLaunchCoreNum(core_num_expr)
-            << ");\n";
+      EmitIndentedLine(task_var + ".launch_spec." + method + "(" + RenderLaunchCoreNum(core_num_expr) + ");");
     }
     if (sync_start) {
-      code_ << ind << task_var << ".launch_spec.set_require_sync_start(true);\n";
+      EmitIndentedLine(task_var + ".launch_spec.set_require_sync_start(true);");
     }
   }
 
@@ -2161,9 +2103,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
   // Call attr by SubmitToCallView; a plain submit / call lacks it, so this is a
   // no-op there. Emitted on the producer task's L0TaskArgs before its rt_submit_* —
   // see simpler#1065 ("codegen-side emission of set_allow_early_resolve()").
-  void EmitEarlyResolveHint(const std::string& ind, const std::string& task_var, const CallPtr& call) {
+  void EmitEarlyResolveHint(const std::string& task_var, const CallPtr& call) {
     if (call->GetAttr<bool>("allow_early_resolve", false)) {
-      code_ << ind << task_var << ".set_allow_early_resolve(true);\n";
+      EmitIndentedLine(task_var + ".set_allow_early_resolve(true);");
     }
   }
 
@@ -2177,9 +2119,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
       // ``Arg::set_dependencies`` is itself orthogonal to OverlapMap
       // tracking (final fanin = auto ∪ explicit).
       const std::string outs_var = "task_" + std::to_string(task_counter_) + "_outs";
-      code_ << Indent() << "TaskOutputTensors " << outs_var << " = " << submit_expr << ";\n";
+      EmitIndentedLine("TaskOutputTensors " + outs_var + " = " + submit_expr + ";");
     } else {
-      code_ << Indent() << submit_expr << ";\n";
+      EmitIndentedLine(submit_expr + ";");
     }
     task_counter_++;
   }
@@ -2310,11 +2252,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
     return total;
   }
 
-  /// Emit the per-task ``L0TaskArgs`` declaration. Dependency edges (if any)
-  /// are attached separately by ``EmitManualDeps`` via ``set_dependencies``.
-  void EmitTaskParamsDecl(const std::string& ind, const std::string& task_var) {
-    code_ << ind << "L0TaskArgs " << task_var << ";\n";
-  }
+  /// Emit the per-task ``Arg`` declaration. Dependency edges (if any) are
+  /// attached separately by ``EmitManualDeps`` via ``set_dependencies``.
+  void EmitTaskParamsDecl(const std::string& task_var) { EmitIndentedLine("L0TaskArgs " + task_var + ";"); }
 
   /// Emit one ``params_t.add_scalar(ext_<outer_arg>_ctx)`` per DistributedTensor
   /// formal of the callee, in IR-param order. The L1 kernel (PTOCodegen) appends
@@ -2322,7 +2262,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// signature; the L2 orch must thread the matching CommContext ``uint64_t`` into
   /// the dispatch payload by add_scalar'ing the outer-scope ``ext_<name>_ctx``
   /// variable (unpacked once in ``aicpu_orchestration_entry``).
-  void EmitDistTensorCtxScalars(const CallPtr& call, const FunctionPtr& callee_func, const std::string& ind,
+  void EmitDistTensorCtxScalars(const CallPtr& call, const FunctionPtr& callee_func,
                                 const std::string& task_var) {
     for (size_t i = 0; i < callee_func->params_.size() && i < call->args_.size(); ++i) {
       if (!As<DistributedTensorType>(callee_func->params_[i]->GetType())) continue;
@@ -2330,20 +2270,123 @@ class OrchestrationStmtCodegen : public CodegenBase {
       INTERNAL_CHECK_SPAN(!outer_arg_name.empty(), call->span_)
           << "Internal error: DistributedTensor arg " << i << " of call to '" << callee_func->name_
           << "' is not a bound variable — required to thread the matching CommContext scalar.";
-      code_ << ind << task_var << ".add_scalar(" << GetExternalTensorName(outer_arg_name) << "_ctx);\n";
+      EmitIndentedLine(task_var + ".add_scalar(" + GetExternalTensorName(outer_arg_name) + "_ctx);");
     }
   }
 
-  /// Emit the trailing per-DistributedTensor CommContext scalars for a wrapper
-  /// (Spmd/Group) task. ``ext_names`` are the ``ext_<name>`` resolved by
-  /// ``BuildWrapperReorderedParams`` (inner-kernel param order); this appends the
-  /// ``_ctx`` suffix. The wrapper-path counterpart of ``EmitDistTensorCtxScalars``
-  /// (which walks a directly-called callee's own params).
-  void EmitCtxScalars(const std::string& ind, const std::string& task_var,
-                      const std::vector<std::string>& ext_names) {
-    for (const auto& ext_name : ext_names) {
-      code_ << ind << task_var << ".add_scalar(" << ext_name << "_ctx);\n";
+  struct TaskDispatchPlan {
+    std::string comment;
+    std::string task_var;
+    std::vector<std::string> pre_lines;
+    std::vector<ParamEntry> params;
+    CallPtr call;
+    FunctionPtr dist_ctx_callee;
+    ExprPtr launch_core_num;
+    bool launch_sync_start{false};
+    std::string submit_expr;
+    bool capture_outputs{false};
+
+    /// Emit the full task-dispatch sequence using the supplied codegen's emit surface.
+    /// Consumes ``*this`` (rvalue-reference) — the plan is moved-from after emission.
+    void Emit(OrchestrationStmtCodegen& cg) && {
+      cg.EmitBlankLine();
+      cg.EmitIndentedLine(comment);
+      cg.EmitTaskParamsDecl(task_var);
+      for (const auto& p : params) {
+        cg.EmitIndentedLine(task_var + "." + ArgDirectionToMethodName(p.direction) + "(" + p.value + ");");
+      }
+      cg.EmitSelectiveDumpCall(task_var, params);
+      if (dist_ctx_callee != nullptr) {
+        cg.EmitDistTensorCtxScalars(call, dist_ctx_callee, task_var);
+      }
+      for (const auto& line : pre_lines) {
+        cg.EmitIndentedLine(line);
+      }
+      cg.EmitLaunchSpec(task_var, launch_core_num, launch_sync_start);
+      cg.EmitEarlyResolveHint(task_var, call);
+      cg.EmitManualDeps(call, task_var);
+      cg.EmitTaskSubmitAndBind(submit_expr, capture_outputs);
     }
+  };
+
+  std::string CurrentTaskVarName() const { return "params_t" + std::to_string(task_counter_); }
+
+  TaskDispatchPlan BuildTaskDispatchPlan(const std::string& comment, const CallPtr& call,
+                                         std::vector<ParamEntry>&& params, const ExprPtr& launch_core_num,
+                                         bool launch_sync_start, const std::string& submit_expr,
+                                         bool capture_outputs, const FunctionPtr& dist_ctx_callee = nullptr,
+                                         std::vector<std::string>&& pre_lines = {}) {
+    TaskDispatchPlan plan;
+    plan.comment = comment;
+    plan.task_var = CurrentTaskVarName();
+    plan.pre_lines = std::move(pre_lines);
+    plan.params = std::move(params);
+    plan.call = call;
+    plan.dist_ctx_callee = dist_ctx_callee;
+    plan.launch_core_num = launch_core_num;
+    plan.launch_sync_start = launch_sync_start;
+    plan.submit_expr = submit_expr;
+    plan.capture_outputs = capture_outputs;
+    return plan;
+  }
+
+  TaskDispatchPlan BuildDirectCallDispatchPlan(const CallPtr& call, const FunctionPtr& callee_func,
+                                               const std::string& callee_name, CoreType core_type,
+                                               int func_id, std::vector<ParamEntry>&& params,
+                                               bool capture_plain_task_id) {
+    std::string task_var = CurrentTaskVarName();
+    std::string submit_expr =
+        CoreTypeToSubmitPrefix(core_type) + std::to_string(func_id) + ", " + task_var + ")";
+    auto [launch_core_num, launch_sync_start] = EffectiveLaunchSpec(call, callee_func);
+    return BuildTaskDispatchPlan("// Task " + std::to_string(task_counter_) + ": " + callee_name, call,
+                                 std::move(params), launch_core_num, launch_sync_start, submit_expr,
+                                 ShouldCaptureTaskOutputs(call, capture_plain_task_id), callee_func);
+  }
+
+  TaskDispatchPlan BuildSpmdCallDispatchPlan(const CallPtr& call, const FunctionPtr& spmd_func,
+                                             const std::string& callee_name, CoreType core_type, int func_id,
+                                             std::vector<ParamEntry>&& params, bool capture_plain_task_id,
+                                             const FunctionPtr& dist_ctx_callee = nullptr) {
+    std::string task_var = CurrentTaskVarName();
+    auto [launch_core_num, launch_sync_start] = EffectiveLaunchSpec(call, spmd_func);
+    std::string submit_expr =
+        CoreTypeToSubmitPrefix(core_type) + std::to_string(func_id) + ", " + task_var + ")";
+    return BuildTaskDispatchPlan("// Spmd " + spmd_func->name_ + ": " + callee_name, call, std::move(params),
+                                 launch_core_num, launch_sync_start, submit_expr,
+                                 ShouldCaptureTaskOutputs(call, capture_plain_task_id), dist_ctx_callee);
+  }
+
+  TaskDispatchPlan BuildAivOnlyGroupDispatchPlan(const CallPtr& call, const FunctionPtr& launch_func,
+                                                 const std::string& group_name, int aiv_id,
+                                                 std::vector<ParamEntry>&& params,
+                                                 bool capture_plain_task_id,
+                                                 const FunctionPtr& dist_ctx_callee = nullptr) {
+    std::string task_var = CurrentTaskVarName();
+    auto [launch_core_num, launch_sync_start] = EffectiveLaunchSpec(call, launch_func);
+    std::string submit_expr =
+        CoreTypeToSubmitPrefix(CoreType::VECTOR) + std::to_string(aiv_id) + ", " + task_var + ")";
+    return BuildTaskDispatchPlan("// Group " + group_name + ": AIV-only SPMD", call, std::move(params),
+                                 launch_core_num, launch_sync_start, submit_expr,
+                                 ShouldCaptureTaskOutputs(call, capture_plain_task_id), dist_ctx_callee);
+  }
+
+  TaskDispatchPlan BuildMixedGroupDispatchPlan(const CallPtr& call, const FunctionPtr& launch_func,
+                                               const std::string& group_name, int aic_id, int aiv_id,
+                                               const FunctionPtr& aiv_func, std::vector<ParamEntry>&& params,
+                                               bool capture_plain_task_id,
+                                               const FunctionPtr& dist_ctx_callee = nullptr) {
+    std::string task_var = CurrentTaskVarName();
+    auto [launch_core_num, launch_sync_start] = EffectiveLaunchSpec(call, launch_func);
+    std::string submit_expr = "rt_submit_task(mixed_" + std::to_string(task_counter_) + ", " + task_var + ")";
+    // Split AIV groups dispatch the same kernel on both vector lanes.
+    std::string third_id = RequiresDualAivDispatch(aiv_func) ? std::to_string(aiv_id) : "INVALID_KERNEL_ID";
+    std::vector<std::string> pre_lines{"MixedKernels mixed_" + std::to_string(task_counter_) + " = {" +
+                                       std::to_string(aic_id) + ", " + std::to_string(aiv_id) + ", " +
+                                       third_id + "};"};
+    return BuildTaskDispatchPlan("// Group " + group_name + ": MixedKernels (AIC + AIV lanes)", call,
+                                 std::move(params), launch_core_num, launch_sync_start, submit_expr,
+                                 ShouldCaptureTaskOutputs(call, capture_plain_task_id), dist_ctx_callee,
+                                 std::move(pre_lines));
   }
 
   /// Emit explicit dependency wiring for a kernel ``Call``: a fixed-size
@@ -2370,8 +2413,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
     if (dep_capacity == 0) return;
     const std::string deps_arr = task_var + "_deps";
     const std::string deps_cnt = task_var + "_deps_count";
-    code_ << Indent() << "PTO2TaskId " << deps_arr << "[" << dep_capacity << "];\n";
-    code_ << Indent() << "uint32_t " << deps_cnt << " = 0;\n";
+    EmitIndentedLine("PTO2TaskId " + deps_arr + "[" + std::to_string(dep_capacity) + "];");
+
+    EmitIndentedLine("uint32_t " + deps_cnt + " = 0;");
+
     for (const auto& edge : edges) {
       if (!edge) continue;
       const auto* binding = ResolveManualTaskIdBinding(edge.get());
@@ -2394,8 +2439,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
       } else if (auto* names = std::get_if<std::vector<std::string>>(binding)) {
         // Array-carry iter_arg: include every valid slot.
         for (const auto& name : *names) {
-          code_ << Indent() << "if (" << name << ".is_valid()) " << deps_arr << "[" << deps_cnt
-                << "++] = " << name << ";\n";
+          EmitIndentedLine("if (" + name + ".is_valid()) " + deps_arr + "[" + deps_cnt + "++] = " + name +
+                           ";");
         }
       } else {
         const auto& name = std::get<std::string>(*binding);
@@ -2404,11 +2449,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
         // (``system.task_invalid``) loop-carry seed. Guard every entry with
         // ``is_valid()``; the branch is a harmless always-true test for ids
         // already known valid.
-        code_ << Indent() << "if (" << name << ".is_valid()) " << deps_arr << "[" << deps_cnt
-              << "++] = " << name << ";\n";
+        EmitIndentedLine("if (" + name + ".is_valid()) " + deps_arr + "[" + deps_cnt + "++] = " + name + ";");
       }
     }
-    code_ << Indent() << task_var << ".set_dependencies(" << deps_arr << ", " << deps_cnt << ");\n";
+    EmitIndentedLine(task_var + ".set_dependencies(" + deps_arr + ", " + deps_cnt + ");");
   }
 
   void EmitDummyTask(const CallPtr& call, const std::string& tid_name) {
@@ -2417,21 +2461,25 @@ class OrchestrationStmtCodegen : public CodegenBase {
     const std::string deps_cnt = task_var + "_deps_count";
     const std::string outs_var = "phase_fence_barrier_" + std::to_string(barrier_idx) + "_outs";
     const size_t dep_capacity = CountManualDeps(GetDependencyEdges(call), call);
-    code_ << "\n";
-    code_ << Indent() << "// Phase-fence barrier " << barrier_idx << ": dependency-only dummy task\n";
-    EmitTaskParamsDecl(Indent(), task_var);
+    EmitBlankLine();
+    EmitIndentedLine("// Phase-fence barrier " + std::to_string(barrier_idx) +
+                     ": dependency-only dummy task");
+
+    EmitTaskParamsDecl(task_var);
     if (dep_capacity > 0) {
       EmitManualDeps(call, task_var);
     } else {
-      code_ << Indent() << "uint32_t " << deps_cnt << " = 0;\n";
+      EmitIndentedLine("uint32_t " + deps_cnt + " = 0;");
     }
-    code_ << Indent() << "PTO2TaskId " << tid_name << " = PTO2TaskId::invalid();\n";
-    code_ << Indent() << "if (" << deps_cnt << " > 0) {\n";
-    indent_ += 4;
-    code_ << Indent() << "TaskOutputTensors " << outs_var << " = rt_submit_dummy_task(" << task_var << ");\n";
-    code_ << Indent() << tid_name << " = " << outs_var << ".task_id();\n";
-    indent_ -= 4;
-    code_ << Indent() << "}\n";
+    EmitIndentedLine("PTO2TaskId " + tid_name + " = PTO2TaskId::invalid();");
+
+    EmitIndentedLine("if (" + deps_cnt + " > 0) {");
+    {
+      IndentGuard guard(Active());
+      EmitIndentedLine("TaskOutputTensors " + outs_var + " = rt_submit_dummy_task(" + task_var + ");");
+      EmitIndentedLine(tid_name + " = " + outs_var + ".task_id();");
+    }
+    EmitIndentedLine("}");
   }
 
   static constexpr size_t kMaxAllocTensorsArgs = 16;
@@ -2544,18 +2592,20 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   void EmitAllocBatch(const std::vector<std::string>& emit_names) {
     std::string alloc_var = "alloc_" + std::to_string(alloc_counter_++);
-    code_ << Indent() << "TaskOutputTensors " << alloc_var << " = alloc_tensors(";
+    std::ostringstream alloc;
+    alloc << "TaskOutputTensors " << alloc_var << " = alloc_tensors(";
     for (size_t i = 0; i < emit_names.size(); i++) {
       if (i > 0) {
-        code_ << ", ";
+        alloc << ", ";
       }
-      code_ << emit_names[i] << "_ci";
+      alloc << emit_names[i] << "_ci";
     }
-    code_ << ");\n";
+    alloc << ");";
+    EmitIndentedLine(alloc.str());
 
     for (size_t i = 0; i < emit_names.size(); i++) {
-      code_ << Indent() << "const Tensor& " << emit_names[i] << " = " << alloc_var << ".get_ref(" << i
-            << ");\n";
+      EmitIndentedLine("const Tensor& " + emit_names[i] + " = " + alloc_var + ".get_ref(" +
+                       std::to_string(i) + ");");
     }
   }
 
@@ -2639,11 +2689,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // then lets a kernel output that aliases such a buffer remap to it
     // (EmitTensorAlias / IsEnclosingScopeValid).
     const bool hoist_batch = scope_hoist_sink_ != nullptr && IsAtManualScopeBodyIndent();
-    std::ostringstream batch_buf;
-    const int saved_indent = indent_;
+    CodeEmitter batch_emitter;
+    CodeEmitter* saved_active = active_emitter_;
+    const int saved_indent_level = Active().GetIndentLevel();
     if (hoist_batch) {
-      code_.swap(batch_buf);  // capture the batch separately
-      indent_ -= 4;           // render at the enclosing (parent) indent
+      active_emitter_ = &batch_emitter;
+      batch_emitter.SetIndentLevel(saved_indent_level - 1);
     }
 
     for (size_t batch_start = 0; batch_start < creates.size(); batch_start += kMaxAllocTensorsArgs) {
@@ -2656,7 +2707,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         std::string line;
         while (std::getline(iss, line)) {
           if (!line.empty()) {
-            code_ << Indent() << line << "\n";
+            EmitIndentedLine(line);
           }
         }
       }
@@ -2669,9 +2720,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
 
     if (hoist_batch) {
-      indent_ = saved_indent;
-      code_.swap(batch_buf);  // restore the in-block output
-      scope_hoist_sink_->push_back(batch_buf.str());
+      active_emitter_ = saved_active;
+      scope_hoist_sink_->push_back(batch_emitter.GetCode());
       // The hoisted buffers now live in the enclosing scope: drop them from this
       // scope's local set so an output that aliases one remaps to it. If the
       // enclosing scope is itself a manual scope, the buffer's decl landed in
@@ -2713,33 +2763,18 @@ class OrchestrationStmtCodegen : public CodegenBase {
     auto params = BuildTaskParams(call, callee_func);
     RecordKernelSignature(callee_name, params);
 
-    std::string ind = Indent();
-    std::string task_var = "params_t" + std::to_string(task_counter_);
-    code_ << "\n";
-    code_ << ind << "// Task " << task_counter_ << ": " << callee_name << "\n";
-    EmitTaskParamsDecl(ind, task_var);
-    for (const auto& p : params) {
-      code_ << ind << task_var << "." << ArgDirectionToMethodName(p.direction) << "(" << p.value << ");\n";
-    }
-    EmitSelectiveDumpCall(ind, task_var, params);
     // For each DistributedTensor formal of the callee, append the matching
     // outer ext_<name>_ctx scalar so the L1 kernel's trailing CommContext
     // ptr arg gets populated. The outer ctx variable is unpacked in
     // ``aicpu_orchestration_entry`` (see the DistributedTensor CommContext
     // pointers block) and named ``ext_<outer-arg-name>_ctx``.
-    EmitDistTensorCtxScalars(call, callee_func, ind, task_var);
-    EmitManualDeps(call, task_var);
     // SPMD launch spec for pl.spmd_submit targeting an AIC/AIV kernel directly
     // (no Spmd-wrapper function). core_num/sync_start ride on the Submit and
     // are surfaced as Call attrs by SubmitToCallView; a plain submit / call
     // has neither, so EffectiveLaunchSpec yields (nullptr, false) → no-op.
-    auto [launch_core_num, launch_sync_start] = EffectiveLaunchSpec(call, callee_func);
-    EmitLaunchSpec(ind, task_var, launch_core_num, launch_sync_start);
-    EmitEarlyResolveHint(ind, task_var, call);
-
-    std::string submit_expr =
-        CoreTypeToSubmitPrefix(core_type) + std::to_string(func_id) + ", " + task_var + ")";
-    EmitTaskSubmitAndBind(submit_expr, ShouldCaptureTaskOutputs(call, capture_plain_task_id));
+    BuildDirectCallDispatchPlan(call, callee_func, callee_name, core_type, func_id, std::move(params),
+                                capture_plain_task_id)
+        .Emit(*this);
   }
 
   void GenerateSpmdCallCode(const CallPtr& call, const FunctionPtr& spmd_func, bool capture_plain_task_id) {
@@ -2765,28 +2800,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
     (*func_name_to_core_type_)[callee_name] = core_type;
 
     int func_id = GetOrCreateFuncId(callee_name, func_name_to_id_, next_func_id_);
-    auto [params, ctx_scalar_names] =
-        BuildWrapperReorderedParams(call, spmd_func, info.inner_call, info.inner_callee);
+    auto params = BuildWrapperReorderedParams(call, spmd_func, info.inner_call, info.inner_callee);
     RecordKernelSignature(callee_name, params);
 
-    std::string ind = Indent();
-    std::string task_var = "params_t" + std::to_string(task_counter_);
-    code_ << "\n";
-    code_ << ind << "// Spmd " << spmd_func->name_ << ": " << callee_name << "\n";
-    EmitTaskParamsDecl(ind, task_var);
-    for (const auto& p : params) {
-      code_ << ind << task_var << "." << ArgDirectionToMethodName(p.direction) << "(" << p.value << ");\n";
-    }
-    EmitSelectiveDumpCall(ind, task_var, params);
-    EmitCtxScalars(ind, task_var, ctx_scalar_names);
-    auto [launch_core_num, launch_sync_start] = EffectiveLaunchSpec(call, spmd_func);
-    EmitLaunchSpec(ind, task_var, launch_core_num, launch_sync_start);
-    EmitEarlyResolveHint(ind, task_var, call);
-    EmitManualDeps(call, task_var);
-
-    std::string submit_expr =
-        CoreTypeToSubmitPrefix(core_type) + std::to_string(func_id) + ", " + task_var + ")";
-    EmitTaskSubmitAndBind(submit_expr, ShouldCaptureTaskOutputs(call, capture_plain_task_id));
+    BuildSpmdCallDispatchPlan(call, spmd_func, callee_name, core_type, func_id, std::move(params),
+                              capture_plain_task_id, info.inner_callee)
+        .Emit(*this);
   }
 
   void GenerateGroupCallCode(const CallPtr& call, const FunctionPtr& group_func,
@@ -2811,29 +2830,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
       // Reorder params from wrapper param order to inner kernel arg order.
       INTERNAL_CHECK(info.inner_call != nullptr && info.inner_callee != nullptr)
           << "Internal error: no inner call found in AIV-only Group '" << group_name << "'";
-      auto [params, ctx_scalar_names] =
-          BuildWrapperReorderedParams(call, group_func, info.inner_call, info.inner_callee, bridge);
+      auto params = BuildWrapperReorderedParams(call, group_func, info.inner_call, info.inner_callee, bridge);
       RecordKernelSignature(info.aiv_name, params);
 
-      std::string ind = Indent();
-      std::string task_var = "params_t" + std::to_string(task_counter_);
-      code_ << "\n";
-      code_ << ind << "// Group " << group_name << ": AIV-only SPMD\n";
-      EmitTaskParamsDecl(ind, task_var);
-      for (const auto& p : params) {
-        code_ << ind << task_var << "." << ArgDirectionToMethodName(p.direction) << "(" << p.value << ");\n";
-      }
-      EmitSelectiveDumpCall(ind, task_var, params);
-      EmitCtxScalars(ind, task_var, ctx_scalar_names);
-
-      auto [launch_core_num, launch_sync_start] = EffectiveLaunchSpec(call, launch_func);
-      EmitLaunchSpec(ind, task_var, launch_core_num, launch_sync_start);
-      EmitEarlyResolveHint(ind, task_var, call);
-      EmitManualDeps(call, task_var);
-
-      std::string submit_expr =
-          CoreTypeToSubmitPrefix(CoreType::VECTOR) + std::to_string(aiv_id) + ", " + task_var + ")";
-      EmitTaskSubmitAndBind(submit_expr, ShouldCaptureTaskOutputs(call, capture_plain_task_id));
+      BuildAivOnlyGroupDispatchPlan(call, launch_func, group_name, aiv_id, std::move(params),
+                                    capture_plain_task_id, info.inner_callee)
+          .Emit(*this);
       return;
     }
 
@@ -2855,38 +2857,16 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // Reorder params from wrapper param order to inner kernel arg order.
     INTERNAL_CHECK(info.inner_call != nullptr && info.inner_callee != nullptr)
         << "Internal error: no inner call found in MixedKernels Group '" << group_name << "'";
-    auto [params, ctx_scalar_names] =
-        BuildWrapperReorderedParams(call, group_func, info.inner_call, info.inner_callee, bridge);
+    auto params = BuildWrapperReorderedParams(call, group_func, info.inner_call, info.inner_callee, bridge);
     RecordKernelSignature(info.aic_name, params);
     RecordKernelSignature(info.aiv_name, params);
 
     int aic_id = GetOrCreateFuncId(info.aic_name, func_name_to_id_, next_func_id_);
     int aiv_id = GetOrCreateFuncId(info.aiv_name, func_name_to_id_, next_func_id_);
 
-    std::string ind = Indent();
-    std::string task_var = "params_t" + std::to_string(task_counter_);
-
-    code_ << "\n";
-    code_ << ind << "// Group " << group_name << ": MixedKernels (AIC + AIV lanes)\n";
-    EmitTaskParamsDecl(ind, task_var);
-    for (const auto& p : params) {
-      code_ << ind << task_var << "." << ArgDirectionToMethodName(p.direction) << "(" << p.value << ");\n";
-    }
-    EmitSelectiveDumpCall(ind, task_var, params);
-    EmitCtxScalars(ind, task_var, ctx_scalar_names);
-    // Split AIV groups dispatch the same kernel on both vector lanes. The
-    // kernel body uses tile.get_subblock_idx() to select its lane-local slice.
-    std::string third_id = RequiresDualAivDispatch(aiv_func) ? std::to_string(aiv_id) : "INVALID_KERNEL_ID";
-    code_ << ind << "MixedKernels mixed_" << task_counter_ << " = {" << aic_id << ", " << aiv_id << ", "
-          << third_id << "};\n";
-
-    auto [launch_core_num, launch_sync_start] = EffectiveLaunchSpec(call, launch_func);
-    EmitLaunchSpec(ind, task_var, launch_core_num, launch_sync_start);
-    EmitEarlyResolveHint(ind, task_var, call);
-    EmitManualDeps(call, task_var);
-
-    std::string submit_expr = "rt_submit_task(mixed_" + std::to_string(task_counter_) + ", " + task_var + ")";
-    EmitTaskSubmitAndBind(submit_expr, ShouldCaptureTaskOutputs(call, capture_plain_task_id));
+    BuildMixedGroupDispatchPlan(call, launch_func, group_name, aic_id, aiv_id, aiv_func, std::move(params),
+                                capture_plain_task_id, info.inner_callee)
+        .Emit(*this);
   }
 
   // --- Alias generation helpers ---
@@ -2986,9 +2966,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
 
     if (mutable_alias) {
-      code_ << Indent() << alias_name << " = " << out_name << ";\n";
+      EmitIndentedLine(alias_name + " = " + out_name + ";");
     } else {
-      code_ << Indent() << "const Tensor& " << alias_name << " = " << out_name << ";\n";
+      EmitIndentedLine("const Tensor& " + alias_name + " = " + out_name + ";");
     }
   }
 
@@ -3005,11 +2985,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   /// True when the current emit indent is exactly the direct body of a
   /// ``pl.manual_scope`` — one nesting level (``+ 4`` spaces) deeper than where
-  /// the scope-hoist sink lands (``scope_hoist_indent_``). Used to restrict
+  /// the scope-hoist sink lands (``scope_hoist_indent_level_``). Used to restrict
   /// manual-scope hoisting / carry-collapse to the scope's own body, so anything
   /// nested in a for/if *within* the scope is left in place.
   bool IsAtManualScopeBodyIndent() const {
-    return static_cast<size_t>(indent_) == scope_hoist_indent_.size() + 4;
+    return Active().GetIndentLevel() == scope_hoist_indent_level_ + 1;
   }
 
   void RegisterMutableTensorName(const std::string& cpp_type, const std::string& emit_name) {
@@ -3048,13 +3028,15 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// Caller guarantees the decl type is ``Tensor``.
   void EmitMutableTensorCarryDecl(const std::string& name, const std::string& init_expr) {
     if (scope_hoist_sink_ != nullptr && IsAtManualScopeBodyIndent() && IsEnclosingScopeValid(init_expr)) {
-      scope_hoist_sink_->push_back(scope_hoist_indent_ + "Tensor " + name + " = " + init_expr + ";\n");
+      scope_hoist_sink_->push_back(IndentAtLevel(scope_hoist_indent_level_) + "Tensor " + name + " = " +
+                                   init_expr + ";\n");
       RegisterMutableTensorNameInEnclosingScope(name);
       hoisted_carry_names_.insert(name);
       if (manual_local_names_ != nullptr) manual_local_names_->erase(name);
       if (enclosing_manual_local_names_ != nullptr) enclosing_manual_local_names_->insert(name);
     } else {
-      code_ << Indent() << "Tensor " << name << " = " << init_expr << ";\n";
+      EmitIndentedLine("Tensor " + name + " = " + init_expr + ";");
+
       RegisterMutableTensorName("Tensor", name);
     }
   }
@@ -3090,7 +3072,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
   void DeclareHoistedTaskId(const Var* var) {
     if (!var || hoisted_task_id_emit_names_by_key_.count(TaskIdHoistKey(var))) return;
     std::string name = ReserveSyntheticEmitName(GetSSABaseName(var->name_hint_) + "_tid");
-    code_ << Indent() << "PTO2TaskId " << name << " = PTO2TaskId::invalid();\n";
+    EmitIndentedLine("PTO2TaskId " + name + " = PTO2TaskId::invalid();");
+
     hoisted_task_id_emit_names_by_key_[TaskIdHoistKey(var)] = name;
     hoisted_task_id_emit_names_[var->UniqueId()] = name;
     manual_task_id_map_[var] = name;
@@ -3118,17 +3101,20 @@ class OrchestrationStmtCodegen : public CodegenBase {
     auto hoisted_by_key = var ? hoisted_task_id_emit_names_by_key_.find(TaskIdHoistKey(var))
                               : hoisted_task_id_emit_names_by_key_.end();
     if (hoisted_by_key != hoisted_task_id_emit_names_by_key_.end()) {
-      code_ << Indent() << hoisted_by_key->second << " = " << value_expr << ";\n";
+      EmitIndentedLine(hoisted_by_key->second + " = " + value_expr + ";");
+
       return hoisted_by_key->second;
     }
     auto hoisted_it =
         var ? hoisted_task_id_emit_names_.find(var->UniqueId()) : hoisted_task_id_emit_names_.end();
     if (hoisted_it != hoisted_task_id_emit_names_.end()) {
-      code_ << Indent() << hoisted_it->second << " = " << value_expr << ";\n";
+      EmitIndentedLine(hoisted_it->second + " = " + value_expr + ";");
+
       return hoisted_it->second;
     }
     std::string tid_name = ReserveSyntheticEmitName(base_name);
-    code_ << Indent() << "PTO2TaskId " << tid_name << " = " << value_expr << ";\n";
+    EmitIndentedLine("PTO2TaskId " + tid_name + " = " + value_expr + ";");
+
     return tid_name;
   }
 
@@ -3136,19 +3122,22 @@ class OrchestrationStmtCodegen : public CodegenBase {
     auto hoisted_by_key = var ? hoisted_task_id_emit_names_by_key_.find(TaskIdHoistKey(var))
                               : hoisted_task_id_emit_names_by_key_.end();
     if (hoisted_by_key != hoisted_task_id_emit_names_by_key_.end()) {
-      code_ << Indent() << hoisted_by_key->second << " = " << value_expr << ";\n";
+      EmitIndentedLine(hoisted_by_key->second + " = " + value_expr + ";");
+
       emit_name_map_[var] = hoisted_by_key->second;
       return hoisted_by_key->second;
     }
     auto hoisted_it =
         var ? hoisted_task_id_emit_names_.find(var->UniqueId()) : hoisted_task_id_emit_names_.end();
     if (hoisted_it != hoisted_task_id_emit_names_.end()) {
-      code_ << Indent() << hoisted_it->second << " = " << value_expr << ";\n";
+      EmitIndentedLine(hoisted_it->second + " = " + value_expr + ";");
+
       emit_name_map_[var] = hoisted_it->second;
       return hoisted_it->second;
     }
     std::string tid_name = ReserveVarEmitName(var);
-    code_ << Indent() << "PTO2TaskId " << tid_name << " = " << value_expr << ";\n";
+    EmitIndentedLine("PTO2TaskId " + tid_name + " = " + value_expr + ";");
+
     return tid_name;
   }
 
@@ -3232,7 +3221,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         if (effective_uses_.count(elem.var)) {
           std::string elem_name = ReserveVarEmitName(elem.var);
           if (auto st = As<ScalarType>(elem.var->GetType())) {
-            code_ << Indent() << st->dtype_.ToCTypeString() << " " << elem_name << " = 0;\n";
+            EmitIndentedLine(st->dtype_.ToCTypeString() + " " + elem_name + " = 0;");
           }
         }
         continue;
@@ -3366,7 +3355,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         if (effective_uses_.count(elem.var)) {
           std::string elem_name = ReserveVarEmitName(elem.var);
           if (auto st = As<ScalarType>(elem.var->GetType())) {
-            code_ << Indent() << st->dtype_.ToCTypeString() << " " << elem_name << " = 0;\n";
+            EmitIndentedLine(st->dtype_.ToCTypeString() + " " + elem_name + " = 0;");
           }
         }
         continue;
@@ -3389,16 +3378,16 @@ class OrchestrationStmtCodegen : public CodegenBase {
         std::string source =
             "task_" + std::to_string(task_idx) + "_outs.get_ref(" + std::to_string(runtime_out_pos) + ")";
         if (IsMutableTensorNameInCurrentScope(elem_name)) {
-          code_ << Indent() << elem_name << " = " << source << ";\n";
+          EmitIndentedLine(elem_name + " = " + source + ";");
         } else {
-          code_ << Indent() << "const Tensor& " << elem_name << " = " << source << ";\n";
+          EmitIndentedLine("const Tensor& " + elem_name + " = " + source + ";");
         }
       }
     }
   }
 
   void VisitScopedBranchBody(const StmtPtr& body, const std::vector<VarPtr>& return_vars) {
-    indent_ += 4;
+    IndentGuard indent_guard(Active());
     PushCppScope();
     // The implicit ``PTO2_SCOPE()`` wrapper around the branch body is now an
     // explicit AUTO RuntimeScopeStmt inserted by MaterializeRuntimeScopes
@@ -3409,7 +3398,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
     current_return_vars_ = saved;
 
     PopCppScope();
-    indent_ -= 4;
   }
 
   void HandleTensorAssembleAssign(const AssignStmtPtr& assign, const CallPtr& call) {
@@ -3617,8 +3605,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::set<std::string> declared_var_names_;
   std::set<std::string> param_name_set_;
   std::map<std::string, int> param_name_to_orch_index_;
-  std::ostringstream code_;
-  int indent_ = 4;
+  CodeEmitter emitter_;
+  CodeEmitter* active_emitter_ = &emitter_;
   std::string current_result_var_;
   std::vector<VarPtr> current_return_vars_;
   int task_counter_ = 0;
@@ -3674,7 +3662,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// Manual-scope cross-scope tensor handling (issue #1697). While a
   /// ``pl.manual_scope`` block body is being buffered, EmitBatchedAllocTensors
   /// routes a hoisted ``alloc_tensors`` declaration (rendered at
-  /// ``scope_hoist_indent_``, the parent indent) into ``scope_hoist_sink_``
+  /// ``scope_hoist_indent_level_``, the parent indent) into ``scope_hoist_sink_``
   /// instead of the deep block indent; the scope handler flushes the sink ahead
   /// of the ``PTO2_SCOPE(MANUAL) {`` header. ``manual_local_names_`` holds the
   /// tensor emit names that are scope-local — first reserved inside the block
@@ -3686,7 +3674,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// enclosing scope's body. All are null / empty outside a manual scope and
   /// saved/restored around nesting.
   std::vector<std::string>* scope_hoist_sink_ = nullptr;
-  std::string scope_hoist_indent_;
+  int scope_hoist_indent_level_ = 0;
   std::set<std::string>* manual_local_names_ = nullptr;
   std::set<std::string>* enclosing_manual_local_names_ = nullptr;
   /// Emit names of loop carries whose ``Tensor carry = init;`` decl was hoisted
@@ -3730,9 +3718,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
 OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const ir::FunctionPtr& func) {
   CHECK(program != nullptr) << "Cannot generate orchestration for null program";
   CHECK(func != nullptr) << "Cannot generate orchestration for null function";
-
-  // OrchestrationReferencesResolved is verified by the pass pipeline (registered
-  // as a property produced by OutlineHierarchyScopes). Codegen assumes well-formed IR.
+  VerifyOrchestrationCodegenPreconditions(program, func);
 
   std::map<std::string, int> func_name_to_id;
   std::map<std::string, CoreType> func_name_to_core_type;

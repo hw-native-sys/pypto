@@ -36,6 +36,17 @@ void CodeEmitter::DecreaseIndent() {
 
 std::string CodeEmitter::GetCode() const { return buffer_.str(); }
 
+void CodeEmitter::AppendRaw(const std::string& text) { buffer_ << text; }
+
+std::string CodeEmitter::GetIndentString() const { return GetIndent(); }
+
+int CodeEmitter::GetIndentLevel() const { return indent_level_; }
+
+void CodeEmitter::SetIndentLevel(int level) {
+  INTERNAL_CHECK(level >= 0) << "Internal error: indentation level cannot be negative";
+  indent_level_ = level;
+}
+
 void CodeEmitter::Clear() {
   buffer_.str("");
   buffer_.clear();
