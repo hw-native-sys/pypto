@@ -1569,6 +1569,16 @@ class OrchestrationStmtCodegen : public CodegenBase {
     bool dump = false;
   };
 
+  /// Result of building a wrapper (Spmd/Group) call's task params. ``params`` is
+  /// the reordered ParamEntry list; ``ctx_scalar_names`` holds the ``ext_<name>``
+  /// of each DistributedTensor formal (in inner-kernel param order), which the
+  /// caller emits as trailing ``add_scalar(ext_<name>_ctx)`` — the wrapper-path
+  /// analogue of the InCore ``EmitDistTensorCtxScalars``.
+  struct WrapperParams {
+    std::vector<ParamEntry> params;
+    std::vector<std::string> ctx_scalar_names;
+  };
+
   /// Reorder a param list so non-scalar (tensor) entries precede scalars,
   /// preserving relative order within each group — the new PTOParam ordering
   /// invariant (tensors must be added before scalars; see
@@ -1919,7 +1929,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// Wrapper functions may omit constants or otherwise expose a different
   /// parameter order than the callee binary expects. Submit args using the
   /// inner callee's order, not the wrapper's order.
-  std::vector<ParamEntry> BuildWrapperReorderedParams(const CallPtr& outer_call,
+  WrapperParams BuildWrapperReorderedParams(const CallPtr& outer_call,
                                                       const FunctionPtr& wrapper_func,
                                                       const CallPtr& inner_call,
                                                       const FunctionPtr& inner_callee,
@@ -2009,6 +2019,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     std::set<const Var*> inner_dump_var_set = CollectDumpVarSet(inner_call);
 
     std::vector<ParamEntry> params;
+    std::vector<std::string> ctx_scalar_names;
     for (size_t inner_idx = 0; inner_idx < inner_call->args_.size(); ++inner_idx) {
       const auto& inner_arg = inner_call->args_[inner_idx];
       auto inner_arg_var = AsVarLike(inner_arg);
@@ -2071,6 +2082,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
             << "Internal error: resolved direction index " << dir_idx << " out of range for tensor arg of '"
             << wrapper_func->name_ << "' (" << outer_arg_directions.size() << " directions).";
         params.push_back({outer_arg_directions[dir_idx], ext_name, is_dump});
+        // ``inner_idx`` is 1:1 with ``inner_callee->params_``, so record the
+        // resolved ``ext_<name>`` of each DistributedTensor formal for the trailing
+        // CommContext scalar (analogue of the InCore ``EmitDistTensorCtxScalars``).
+        if (inner_idx < inner_callee->params_.size() &&
+            As<DistributedTensorType>(inner_callee->params_[inner_idx]->GetType())) {
+          ctx_scalar_names.push_back(ext_name);
+        }
       } else if (auto const_int = As<ConstInt>(outer_arg)) {
         std::string cpp_type = const_int->dtype().ToCTypeString();
         std::string value = FormatConstIntValue(const_int, cpp_type);
@@ -2093,8 +2111,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
         << "Wrapper '" << wrapper_func->name_ << "' built " << params.size() << " params for "
         << inner_call->args_.size() << " inner-call args (1:1 invariant violated).";
 
-    // Tensors must precede scalars
-    return ReorderTensorsBeforeScalars(params);
+    // Tensors must precede scalars. ``ctx_scalar_names`` is kept separate and in
+    // inner-kernel param order (unaffected by the reorder) — emitted after all
+    // params by the caller.
+    return {ReorderTensorsBeforeScalars(std::move(params)), std::move(ctx_scalar_names)};
   }
 
   // Render the launched function's core_num attribute as a C++ scalar expression.
@@ -2330,11 +2350,24 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
   }
 
+  /// Emit the trailing per-DistributedTensor CommContext scalars for a wrapper
+  /// (Spmd/Group) task. ``ext_names`` are the ``ext_<name>`` resolved by
+  /// ``BuildWrapperReorderedParams`` (inner-kernel param order); this appends the
+  /// ``_ctx`` suffix. The wrapper-path counterpart of ``EmitDistTensorCtxScalars``
+  /// (which walks a directly-called callee's own params).
+  void EmitCtxScalars(const std::string& task_var,
+                      const std::vector<std::string>& ext_names) {
+    for (const auto& ext_name : ext_names) {
+      EmitIndentedLine(task_var + ".add_scalar(" + ext_name + "_ctx);");
+    }
+  }
+
   struct TaskDispatchPlan {
     std::string comment;
     std::string task_var;
     std::vector<std::string> pre_lines;
     std::vector<ParamEntry> params;
+    std::vector<std::string> ctx_scalar_names;
     CallPtr call;
     FunctionPtr dist_ctx_callee;
     ExprPtr launch_core_num;
@@ -2352,7 +2385,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
         cg.EmitIndentedLine(task_var + "." + ArgDirectionToMethodName(p.direction) + "(" + p.value + ");");
       }
       cg.EmitSelectiveDumpCall(task_var, params);
-      if (dist_ctx_callee != nullptr) {
+      if (!ctx_scalar_names.empty()) {
+        cg.EmitCtxScalars(task_var, ctx_scalar_names);
+      } else if (dist_ctx_callee != nullptr) {
         cg.EmitDistTensorCtxScalars(call, dist_ctx_callee, task_var);
       }
       for (const auto& line : pre_lines) {
@@ -2371,12 +2406,14 @@ class OrchestrationStmtCodegen : public CodegenBase {
                                          std::vector<ParamEntry>&& params, const ExprPtr& launch_core_num,
                                          bool launch_sync_start, const std::string& submit_expr,
                                          bool capture_outputs, const FunctionPtr& dist_ctx_callee = nullptr,
+                                         std::vector<std::string>&& ctx_scalar_names = {},
                                          std::vector<std::string>&& pre_lines = {}) {
     TaskDispatchPlan plan;
     plan.comment = comment;
     plan.task_var = CurrentTaskVarName();
     plan.pre_lines = std::move(pre_lines);
     plan.params = std::move(params);
+    plan.ctx_scalar_names = std::move(ctx_scalar_names);
     plan.call = call;
     plan.dist_ctx_callee = dist_ctx_callee;
     plan.launch_core_num = launch_core_num;
@@ -2402,35 +2439,37 @@ class OrchestrationStmtCodegen : public CodegenBase {
   TaskDispatchPlan BuildSpmdCallDispatchPlan(const CallPtr& call, const FunctionPtr& spmd_func,
                                              const std::string& callee_name, CoreType core_type, int func_id,
                                              std::vector<ParamEntry>&& params, bool capture_plain_task_id,
-                                             const FunctionPtr& dist_ctx_callee = nullptr) {
+                                             std::vector<std::string>&& ctx_scalar_names = {}) {
     std::string task_var = CurrentTaskVarName();
     auto [launch_core_num, launch_sync_start] = EffectiveLaunchSpec(call, spmd_func);
     std::string submit_expr =
         CoreTypeToSubmitPrefix(core_type) + std::to_string(func_id) + ", " + task_var + ")";
     return BuildTaskDispatchPlan("// Spmd " + spmd_func->name_ + ": " + callee_name, call, std::move(params),
                                  launch_core_num, launch_sync_start, submit_expr,
-                                 ShouldCaptureTaskOutputs(call, capture_plain_task_id), dist_ctx_callee);
+                                 ShouldCaptureTaskOutputs(call, capture_plain_task_id), nullptr,
+                                 std::move(ctx_scalar_names));
   }
 
   TaskDispatchPlan BuildAivOnlyGroupDispatchPlan(const CallPtr& call, const FunctionPtr& launch_func,
                                                  const std::string& group_name, int aiv_id,
                                                  std::vector<ParamEntry>&& params,
                                                  bool capture_plain_task_id,
-                                                 const FunctionPtr& dist_ctx_callee = nullptr) {
+                                                 std::vector<std::string>&& ctx_scalar_names = {}) {
     std::string task_var = CurrentTaskVarName();
     auto [launch_core_num, launch_sync_start] = EffectiveLaunchSpec(call, launch_func);
     std::string submit_expr =
         CoreTypeToSubmitPrefix(CoreType::VECTOR) + std::to_string(aiv_id) + ", " + task_var + ")";
     return BuildTaskDispatchPlan("// Group " + group_name + ": AIV-only SPMD", call, std::move(params),
                                  launch_core_num, launch_sync_start, submit_expr,
-                                 ShouldCaptureTaskOutputs(call, capture_plain_task_id), dist_ctx_callee);
+                                 ShouldCaptureTaskOutputs(call, capture_plain_task_id), nullptr,
+                                 std::move(ctx_scalar_names));
   }
 
   TaskDispatchPlan BuildMixedGroupDispatchPlan(const CallPtr& call, const FunctionPtr& launch_func,
                                                const std::string& group_name, int aic_id, int aiv_id,
                                                const FunctionPtr& aiv_func, std::vector<ParamEntry>&& params,
                                                bool capture_plain_task_id,
-                                               const FunctionPtr& dist_ctx_callee = nullptr) {
+                                               std::vector<std::string>&& ctx_scalar_names = {}) {
     std::string task_var = CurrentTaskVarName();
     auto [launch_core_num, launch_sync_start] = EffectiveLaunchSpec(call, launch_func);
     std::string submit_expr = "rt_submit_task(mixed_" + std::to_string(task_counter_) + ", " + task_var + ")";
@@ -2441,8 +2480,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
                                        third_id + "};"};
     return BuildTaskDispatchPlan("// Group " + group_name + ": MixedKernels (AIC + AIV lanes)", call,
                                  std::move(params), launch_core_num, launch_sync_start, submit_expr,
-                                 ShouldCaptureTaskOutputs(call, capture_plain_task_id), dist_ctx_callee,
-                                 std::move(pre_lines));
+                                 ShouldCaptureTaskOutputs(call, capture_plain_task_id), nullptr,
+                                 std::move(ctx_scalar_names), std::move(pre_lines));
   }
 
   /// Emit explicit dependency wiring for a kernel ``Call``: a fixed-size
@@ -2858,11 +2897,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
     (*func_name_to_core_type_)[callee_name] = core_type;
 
     int func_id = GetOrCreateFuncId(callee_name, func_name_to_id_, next_func_id_);
-    auto params = BuildWrapperReorderedParams(call, spmd_func, info.inner_call, info.inner_callee);
+    auto [params, ctx_scalar_names] = BuildWrapperReorderedParams(call, spmd_func, info.inner_call, info.inner_callee);
     RecordKernelSignature(callee_name, params);
 
     BuildSpmdCallDispatchPlan(call, spmd_func, callee_name, core_type, func_id, std::move(params),
-                              capture_plain_task_id, info.inner_callee)
+                              capture_plain_task_id, std::move(ctx_scalar_names))
         .Emit(*this);
   }
 
@@ -2888,11 +2927,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
       // Reorder params from wrapper param order to inner kernel arg order.
       INTERNAL_CHECK(info.inner_call != nullptr && info.inner_callee != nullptr)
           << "Internal error: no inner call found in AIV-only Group '" << group_name << "'";
-      auto params = BuildWrapperReorderedParams(call, group_func, info.inner_call, info.inner_callee, bridge);
+      auto [params, ctx_scalar_names] = BuildWrapperReorderedParams(call, group_func, info.inner_call, info.inner_callee, bridge);
       RecordKernelSignature(info.aiv_name, params);
 
       BuildAivOnlyGroupDispatchPlan(call, launch_func, group_name, aiv_id, std::move(params),
-                                    capture_plain_task_id, info.inner_callee)
+                                    capture_plain_task_id, std::move(ctx_scalar_names))
           .Emit(*this);
       return;
     }
@@ -2915,7 +2954,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // Reorder params from wrapper param order to inner kernel arg order.
     INTERNAL_CHECK(info.inner_call != nullptr && info.inner_callee != nullptr)
         << "Internal error: no inner call found in MixedKernels Group '" << group_name << "'";
-    auto params = BuildWrapperReorderedParams(call, group_func, info.inner_call, info.inner_callee, bridge);
+    auto [params, ctx_scalar_names] = BuildWrapperReorderedParams(call, group_func, info.inner_call, info.inner_callee, bridge);
     RecordKernelSignature(info.aic_name, params);
     RecordKernelSignature(info.aiv_name, params);
 
@@ -2923,7 +2962,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     int aiv_id = GetOrCreateFuncId(info.aiv_name, func_name_to_id_, next_func_id_);
 
     BuildMixedGroupDispatchPlan(call, launch_func, group_name, aic_id, aiv_id, aiv_func, std::move(params),
-                                capture_plain_task_id, info.inner_callee)
+                                capture_plain_task_id, std::move(ctx_scalar_names))
         .Emit(*this);
   }
 
