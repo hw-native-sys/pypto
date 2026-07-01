@@ -66,3 +66,7 @@ class TestMemoryReuseAccumulatorCoalesce:
         expected = a.float() @ b.float()
         rel_err = ((out - expected).norm() / expected.norm()).item()
         assert rel_err < 2e-2, f"512x512x192 bf16 matmul Frobenius rel_err = {rel_err:.3e} exceeds 2e-2"
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
