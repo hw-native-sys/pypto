@@ -2561,6 +2561,76 @@ class TestTopDownRetargeter:
         After = _run_pipeline(Before)
         ir.assert_structural_equal(After, Expected)
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason="MemoryReuse does not yet coalesce the peeled loop-carried accumulator: it "
+        "leaves a phantom acc->acc tile.move (a 2nd L0C buffer). Fix pending on this branch; "
+        "remove this marker when the IfStmt-reconciliation coalescing lands.",
+    )
+    def test_pipelined_kloop_accumulator_coalesces_to_one_acc_buffer(self):
+        """A stage-2 pipelined K-loop matmul (as AutoTileMatmulL0 emits) whose
+        L0C accumulator is large (176x176 = 121KB). After LowerPipelineLoops
+        peels it into the multi-if-block shape, MemoryReuse must coalesce the
+        whole accumulator chain (tile.create init + first-block matmul + the
+        per-block matmul_acc + the if phis + the loop yield) onto ONE Acc
+        allocation.
+
+        Regression: today MemoryReuse leaves the peeled accumulator on several
+        Acc buffers and inserts acc->acc ``tile.move`` copies to reconcile them
+        -- a 2nd co-live 121KB L0C buffer that overflows the 128KB L0C (and the
+        Acc->Acc tmov is rejected by ptoas). Reproduces the 512x512x192 bf16
+        compile failure. Runs the real ``lower_pipeline_loops`` so the peeled
+        SSA shape matches production (hand-authored post-peel IR coalesces
+        fine, so the real pass is required to trigger the gap).
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[176, 192], pl.BF16],
+                rhs: pl.Tensor[[192, 176], pl.BF16],
+                out: pl.Out[pl.Tensor[[176, 176], pl.FP32]],
+            ) -> pl.Tensor[[176, 176], pl.FP32]:
+                lhs_mat: pl.Tile[[176, 192], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [176, 192], target_memory=pl.Mem.Mat
+                )
+                rhs_mat: pl.Tile[[192, 176], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [192, 176], target_memory=pl.Mem.Mat
+                )
+                c_init: pl.Tile[[176, 176], pl.FP32, pl.Mem.Acc] = pl.tile.create(
+                    [176, 176], dtype=pl.FP32, target_memory=pl.Mem.Acc
+                )
+                for ko, (c_iter,) in pl.pipeline(0, 192, 64, init_values=(c_init,), stage=2):
+                    sa: pl.Tile[[176, 64], pl.BF16, pl.Mem.Left] = pl.tile.extract(
+                        lhs_mat, 0, ko, shape=[176, 64], target_memory=pl.Mem.Left
+                    )
+                    sb: pl.Tile[[64, 176], pl.BF16, pl.Mem.Right] = pl.tile.extract(
+                        rhs_mat, ko, 0, shape=[64, 176], target_memory=pl.Mem.Right
+                    )
+                    if ko == 0:
+                        c_first: pl.Tile[[176, 176], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(sa, sb)
+                        c_phi: pl.Tile[[176, 176], pl.FP32, pl.Mem.Acc] = pl.yield_(c_first)
+                    else:
+                        c_acc: pl.Tile[[176, 176], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(c_iter, sa, sb)
+                        c_phi: pl.Tile[[176, 176], pl.FP32, pl.Mem.Acc] = pl.yield_(c_acc)
+                    c: pl.Tile[[176, 176], pl.FP32, pl.Mem.Acc] = pl.yield_(c_phi)
+                result: pl.Tensor[[176, 176], pl.FP32] = pl.store(c, [0, 0], out)
+                return result
+
+        # No instruments / verification: the peeled IR trips the RoundtripInstrument
+        # (a separate printer round-trip concern), which would mask the coalescing check.
+        with passes.PassContext([], passes.VerificationLevel.NONE):
+            After = passes.memory_reuse()(passes.init_mem_ref()(passes.lower_pipeline_loops()(Before)))
+        # The whole accumulator chain must coalesce onto ONE Acc allocation. A
+        # phantom acc->acc tile.move (failed coalescing) leaves a 2nd Acc base.
+        acc_bases = {b for b in _collect_tile_memref_bases(After).values() if "acc" in b}
+        assert len(acc_bases) == 1, (
+            f"expected ONE Acc allocation (accumulator coalesced), got {len(acc_bases)}: "
+            f"{sorted(acc_bases)}\n{ir.python_print(After)}"
+        )
+
     def test_retargeter_declines_when_target_still_live(self):
         """Safety check: if target's base is read after the candidate
         producer (here, via another op that reads the iter_arg), the
