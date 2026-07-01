@@ -3923,12 +3923,15 @@ class TestConvertCrossCoreSplitOps:
     the tile deducer drops so the result is byte-identical to the AUTO
     ``pl.split`` path (LowerAutoVectorSplit).
 
-    Each Before is parsed from the ``@pl.jit`` / ``pl.spmd`` author-facing surface:
-    ``pl.aiv_shard`` / ``pl.aic_gather`` on a high-level Tensor inside a
-    ``for aiv_id in pl.split_aiv(...)`` region — the shape that reaches this pass
-    (pass 10), before LowerAutoVectorSplit (pass 18) erases the region. The shard
-    operand is a cube ``pl.matmul`` result (Acc tile after conversion); the gather
-    operand is a Vec vector-compute result (``pl.exp`` → Vec tile).
+    Each Before is an InCore function running ``pl.aiv_shard`` / ``pl.aic_gather``
+    on a high-level Tensor inside a ``for aiv_id in pl.split_aiv(...)`` region — the
+    shape that reaches this pass (pass 10), before LowerAutoVectorSplit (pass 18)
+    erases the region. The shard operand is a cube ``pl.matmul`` result (Acc tile
+    after conversion); the gather operand is a Vec vector-compute result
+    (``pl.exp`` → Vec tile). Inside a ``split_aiv`` region the printer suppresses
+    the redundant ``split=`` kwarg on the split ops (the parser re-stamps it from
+    the region mode), so each Expected writes ``pl.tile.aiv_shard(x)`` /
+    ``pl.tile.aic_gather(x)`` without ``split=``.
     """
 
     @staticmethod
@@ -3968,75 +3971,168 @@ class TestConvertCrossCoreSplitOps:
         assert call is not None, f"{tile_op_name} not found after conversion"
         return call
 
-    @pytest.mark.parametrize(
-        ("mode", "split", "expected_shape"),
-        [("UP_DOWN", 1, [64, 128]), ("LEFT_RIGHT", 2, [128, 64])],
-        ids=["up_down_axis0", "left_right_axis1"],
-    )
-    def test_aiv_shard_lowers_to_tile_aiv_shard(self, mode, split, expected_shape):
-        """``pl.aiv_shard(cube_tensor)`` → ``tile.aiv_shard`` with the split axis
-        halved and Vec memory re-attached; the ``split`` attr survives."""
-        before = self._parse_split_kernel("aiv_shard", mode, expected_shape)
-        after = passes.convert_tensor_to_tile_ops()(before)
+    def test_aiv_shard_up_down_lowers_to_tile_aiv_shard(self):
+        """``pl.aiv_shard(cube_tensor)`` in an UP_DOWN ``split_aiv`` region lowers to
+        ``tile.aiv_shard`` with split axis 0 halved ([128, 128] -> [64, 128]) and Vec
+        memory re-attached; the matmul producer loads both operands to Mat.
 
-        # No tensor.aiv_shard survives; exactly the tile op remains.
-        counts = _count_calls(
-            _require_function(after, "main_incore_0"),
-            {ir.get_op("tensor.aiv_shard").name, ir.get_op("tile.aiv_shard").name},
-        )
-        assert counts[ir.get_op("tensor.aiv_shard").name] == 0
-        assert counts[ir.get_op("tile.aiv_shard").name] == 1
+        The ``for aiv_id in pl.split_aiv(...)`` region is retained in Expected, so
+        ``assert_structural_equal`` proves the ``SplitAivScopeStmt`` survives this
+        pass (it is erased later, by LowerAutoVectorSplit) — no separate
+        region-survival test is needed.
+        """
 
-        call = self._find_split_op(after, ir.get_op("tile.aiv_shard").name)
-        assert call.op.name == ir.get_op("tile.aiv_shard").name
-        assert isinstance(call.type, ir.TileType)
-        assert [int(str(s)) for s in call.type.shape] == expected_shape
-        assert call.type.memory_space == MemorySpace.Vec
-        assert call.kwargs["split"] == split
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self, a: pl.Tensor[[128, 128], pl.FP32], b: pl.Tensor[[128, 128], pl.FP32]
+            ) -> pl.Tensor[[64, 128], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                        qk = pl.matmul(a, b)
+                        res = pl.aiv_shard(qk)
+                return res
 
-    @pytest.mark.parametrize(
-        ("mode", "split", "expected_shape"),
-        [("UP_DOWN", 1, [256, 128]), ("LEFT_RIGHT", 2, [128, 256])],
-        ids=["up_down_axis0", "left_right_axis1"],
-    )
-    def test_aic_gather_lowers_to_tile_aic_gather(self, mode, split, expected_shape):
-        """``pl.aic_gather(vec_tensor)`` → ``tile.aic_gather`` with the split axis
-        doubled and Vec memory re-attached; the ``split`` attr survives."""
-        before = self._parse_split_kernel("aic_gather", mode, expected_shape)
-        after = passes.convert_tensor_to_tile_ops()(before)
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                b: pl.Tensor[[128, 128], pl.FP32],
+                ret0__out: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+            ) -> pl.Tensor[[64, 128], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                        a_mat: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.load(
+                            a, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Mat
+                        )
+                        b_mat: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.load(
+                            b, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Mat
+                        )
+                        qk__tile: pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(a_mat, b_mat)
+                        # split= suppressed inside the region; re-stamped from the mode.
+                        res__tile: pl.Tile[[64, 128], pl.FP32, pl.Mem.Vec] = pl.tile.aiv_shard(qk__tile)
+                ret0__store: pl.Tensor[[64, 128], pl.FP32] = pl.tile.store(res__tile, [0, 0], ret0__out)
+                return ret0__store
 
-        counts = _count_calls(
-            _require_function(after, "main_incore_0"),
-            {ir.get_op("tensor.aic_gather").name, ir.get_op("tile.aic_gather").name},
-        )
-        assert counts[ir.get_op("tensor.aic_gather").name] == 0
-        assert counts[ir.get_op("tile.aic_gather").name] == 1
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
 
-        call = self._find_split_op(after, ir.get_op("tile.aic_gather").name)
-        assert call.op.name == ir.get_op("tile.aic_gather").name
-        assert isinstance(call.type, ir.TileType)
-        assert [int(str(s)) for s in call.type.shape] == expected_shape
-        assert call.type.memory_space == MemorySpace.Vec
-        assert call.kwargs["split"] == split
+    def test_aiv_shard_left_right_lowers_to_tile_aiv_shard(self):
+        """``pl.aiv_shard(cube_tensor)`` in a LEFT_RIGHT ``split_aiv`` region lowers to
+        ``tile.aiv_shard`` with split axis 1 halved ([128, 128] -> [128, 64]) and Vec
+        memory re-attached."""
 
-    def test_split_region_preserved_through_conversion(self):
-        """The ``SplitAivScopeStmt`` wrapper survives ConvertTensorToTileOps (it is
-        erased later, by LowerAutoVectorSplit); only the inner op is lowered."""
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self, a: pl.Tensor[[128, 128], pl.FP32], b: pl.Tensor[[128, 128], pl.FP32]
+            ) -> pl.Tensor[[128, 64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
+                        qk = pl.matmul(a, b)
+                        res = pl.aiv_shard(qk)
+                return res
 
-        class _RegionFinder(ir.IRVisitor):
-            def __init__(self) -> None:
-                super().__init__()
-                self.count = 0
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                b: pl.Tensor[[128, 128], pl.FP32],
+                ret0__out: pl.Out[pl.Tensor[[128, 64], pl.FP32]],
+            ) -> pl.Tensor[[128, 64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
+                        a_mat: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.load(
+                            a, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Mat
+                        )
+                        b_mat: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.load(
+                            b, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Mat
+                        )
+                        qk__tile: pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(a_mat, b_mat)
+                        res__tile: pl.Tile[[128, 64], pl.FP32, pl.Mem.Vec] = pl.tile.aiv_shard(qk__tile)
+                ret0__store: pl.Tensor[[128, 64], pl.FP32] = pl.tile.store(res__tile, [0, 0], ret0__out)
+                return ret0__store
 
-            def visit_split_aiv_scope_stmt(self, op: ir.SplitAivScopeStmt) -> None:
-                self.count += 1
-                super().visit_split_aiv_scope_stmt(op)
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
 
-        before = self._parse_split_kernel("aiv_shard", "UP_DOWN", [64, 128])
-        after = passes.convert_tensor_to_tile_ops()(before)
-        finder = _RegionFinder()
-        finder.visit_stmt(_require_function(after, "main_incore_0").body)
-        assert finder.count == 1
+    def test_aic_gather_up_down_lowers_to_tile_aic_gather(self):
+        """``pl.aic_gather(vec_tensor)`` in an UP_DOWN ``split_aiv`` region lowers to
+        ``tile.aic_gather`` with split axis 0 doubled ([128, 128] -> [256, 128]) and Vec
+        memory re-attached; the exp producer loads its operand to Vec."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(self, x: pl.Tensor[[128, 128], pl.FP32]) -> pl.Tensor[[256, 128], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                        h = pl.exp(x)
+                        res = pl.aic_gather(h)
+                return res
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[128, 128], pl.FP32],
+                ret0__out: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
+            ) -> pl.Tensor[[256, 128], pl.FP32]:
+                x__tile: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    x, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Vec
+                )
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                        h__tile: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec] = pl.tile.exp(x__tile)
+                        res__tile: pl.Tile[[256, 128], pl.FP32, pl.Mem.Vec] = pl.tile.aic_gather(h__tile)
+                ret0__store: pl.Tensor[[256, 128], pl.FP32] = pl.tile.store(res__tile, [0, 0], ret0__out)
+                return ret0__store
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_aic_gather_left_right_lowers_to_tile_aic_gather(self):
+        """``pl.aic_gather(vec_tensor)`` in a LEFT_RIGHT ``split_aiv`` region lowers to
+        ``tile.aic_gather`` with split axis 1 doubled ([128, 128] -> [128, 256]) and Vec
+        memory re-attached."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(self, x: pl.Tensor[[128, 128], pl.FP32]) -> pl.Tensor[[128, 256], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
+                        h = pl.exp(x)
+                        res = pl.aic_gather(h)
+                return res
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[128, 128], pl.FP32],
+                ret0__out: pl.Out[pl.Tensor[[128, 256], pl.FP32]],
+            ) -> pl.Tensor[[128, 256], pl.FP32]:
+                x__tile: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    x, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Vec
+                )
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
+                        h__tile: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec] = pl.tile.exp(x__tile)
+                        res__tile: pl.Tile[[128, 256], pl.FP32, pl.Mem.Vec] = pl.tile.aic_gather(h__tile)
+                ret0__store: pl.Tensor[[128, 256], pl.FP32] = pl.tile.store(res__tile, [0, 0], ret0__out)
+                return ret0__store
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
 
     def test_explicit_shard_type_matches_auto_path(self):
         """AUTO oracle: the ``tile.aiv_shard`` result type produced by the explicit
