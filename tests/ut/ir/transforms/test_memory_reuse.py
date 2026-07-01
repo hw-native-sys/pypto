@@ -2567,27 +2567,28 @@ class TestTopDownRetargeter:
         After = _run_pipeline(Before)
         ir.assert_structural_equal(After, Expected)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="MemoryReuse does not yet coalesce the peeled loop-carried accumulator: it "
-        "leaves a phantom acc->acc tile.move (a 2nd L0C buffer). Fix pending on this branch; "
-        "remove this marker when the IfStmt-reconciliation coalescing lands.",
-    )
     def test_pipelined_kloop_accumulator_coalesces_to_one_acc_buffer(self):
         """A stage-2 pipelined K-loop matmul (as AutoTileMatmulL0 emits) whose
-        L0C accumulator is large (176x176 = 121KB). After LowerPipelineLoops
-        peels it into the multi-if-block shape, MemoryReuse must coalesce the
-        whole accumulator chain (tile.create init + first-block matmul + the
-        per-block matmul_acc + the if phis + the loop yield) onto ONE Acc
-        allocation.
+        L0C accumulator is large (176x176x4 = 121KB, fp32). After
+        LowerPipelineLoops peels it into the multi-if-block shape, MemoryReuse
+        must coalesce the whole accumulator chain (tile.create init + first-block
+        matmul seed + the per-block matmul_acc + the if phis + the loop yield)
+        onto ONE Acc allocation.
 
-        Regression: today MemoryReuse leaves the peeled accumulator on several
-        Acc buffers and inserts acc->acc ``tile.move`` copies to reconcile them
-        -- a 2nd co-live 121KB L0C buffer that overflows the 128KB L0C (and the
-        Acc->Acc tmov is rejected by ptoas). Reproduces the 512x512x192 bf16
-        compile failure. Runs the real ``lower_pipeline_loops`` so the peeled
-        SSA shape matches production (hand-authored post-peel IR coalesces
-        fine, so the real pass is required to trigger the gap).
+        Regression (fixed by TopDownRetargeter::CoalesceAccumulatorIfPhis): the
+        peeled epilogue if-phi has a live in-place ``matmul_acc`` branch (on the
+        accumulator buffer) and a dead ``if k==0`` fresh-``matmul`` seed branch on
+        a different buffer. YieldFixupMutator used to reconcile them by copying the
+        accumulator onto the seed buffer via an acc->acc ``tile.move`` -- a 2nd
+        co-live 121KB L0C buffer that overflows the 128KB L0C, and an Acc->Acc tmov
+        that ptoas rejects on every target. This reproduced the 512x512x192 bf16
+        compile failure. The fix retargets the seed onto the accumulator buffer so
+        both branches share it and no move is emitted (mad_acc's shared-%dst
+        semantics). Runs the real ``lower_pipeline_loops`` so the peeled SSA shape
+        matches production (hand-authored post-peel IR coalesces fine, so the real
+        pass is required to trigger the gap). Runs with BASIC verification: the
+        coalescing makes the peeled IR round-trip-clean, so the check is on legal
+        IR, not just buffer count.
         """
 
         @pl.program
@@ -2625,9 +2626,9 @@ class TestTopDownRetargeter:
                 result: pl.Tensor[[176, 176], pl.FP32] = pl.store(c, [0, 0], out)
                 return result
 
-        # No instruments / verification: the peeled IR trips the RoundtripInstrument
-        # (a separate printer round-trip concern), which would mask the coalescing check.
-        with passes.PassContext([], passes.VerificationLevel.NONE):
+        # BASIC verification: the coalescing fix makes the peeled IR round-trip
+        # clean, so this exercises the legality check, not just the buffer count.
+        with passes.PassContext([], passes.VerificationLevel.BASIC):
             After = passes.memory_reuse()(passes.init_mem_ref()(passes.lower_pipeline_loops()(Before)))
         # The whole accumulator chain must coalesce onto ONE Acc allocation. A
         # phantom acc->acc tile.move (failed coalescing) leaves a 2nd Acc base.
@@ -2635,6 +2636,11 @@ class TestTopDownRetargeter:
         assert len(acc_bases) == 1, (
             f"expected ONE Acc allocation (accumulator coalesced), got {len(acc_bases)}: "
             f"{sorted(acc_bases)}\n{ir.python_print(After)}"
+        )
+        # Self-documenting: an in-place accumulator kernel needs no tile.move; a
+        # surviving one here would be the illegal Acc->Acc copy.
+        assert "tile.move" not in ir.python_print(After), (
+            f"expected no tile.move in a coalesced accumulator chain:\n{ir.python_print(After)}"
         )
 
     def test_retargeter_declines_when_target_still_live(self):
