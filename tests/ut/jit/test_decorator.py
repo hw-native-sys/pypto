@@ -770,6 +770,7 @@ def _subscript_slice_body(src: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
     view = src[0:16, 0:8]  # static bounds → (16, 8)  # noqa: F841
     row = src[4, 0:8]  # scalar index drops dim 0 → (8,)  # noqa: F841
     partial = src[0:16]  # trailing implicit ``:`` keeps parent dim 1  # noqa: F841
+    open_lo = src[4:]  # open upper bound → parent_dim - start = (28, 32)  # noqa: F841
     out_view = out[0:16, 0:8]  # noqa: F841
     return out
 
@@ -1034,6 +1035,9 @@ class TestSliceAndDepReturnMetadata:
         assert metas["row"] == TensorMeta(shape=(8,), dtype=DataType.FP32)
         # Only dim 0 indexed → dim 1 is implicit ``:``, keeps the parent extent.
         assert metas["partial"] == TensorMeta(shape=(16, 32), dtype=DataType.FP32)
+        # Open upper bound with a static lower bound → parent_dim - start on the
+        # sliced dim (matching the parser), parent extent on the trailing dim.
+        assert metas["open_lo"] == TensorMeta(shape=(28, 32), dtype=DataType.FP32)
         # Subscript of an Out parameter resolves just like an In parameter.
         assert metas["out_view"] == TensorMeta(shape=(16, 8), dtype=DataType.FP32)
 

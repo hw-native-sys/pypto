@@ -592,13 +592,15 @@ def _subscript_slice_meta(
 
     The documented equivalent of ``pl.slice`` (see ``_extract_local_tensor_metas``
     form 2): dtype is inherited from ``src``; each slice dim resolves to
-    ``stop - start`` (``start`` defaults to 0), falling back to the parent dim
-    when ``start``/``stop`` aren't static or the upper bound is open (``a:``) —
-    a ``DynDim`` parent flows through transparently that way; a scalar index
-    drops its dim (numpy-style rank reduction); dims past the supplied indices
-    are implicit ``:`` and keep the parent extent. Returns ``None`` (skipped,
-    leaving the clear ``_build_params`` error) when ``src`` is unknown, a step
-    slice is used, or the index count exceeds ``src``'s rank.
+    ``stop - start`` (``start`` defaults to 0), and an open upper bound ``a:``
+    resolves to ``parent_dim - start`` — mirroring the parser's
+    ``_build_subscript_slice_args``. A dim falls back to the parent extent when
+    its bounds aren't static — a ``DynDim`` parent flows through transparently
+    that way; a scalar index drops its dim (numpy-style rank reduction); dims
+    past the supplied indices are implicit ``:`` and keep the parent extent.
+    Returns ``None`` (skipped, leaving the clear ``_build_params`` error) when
+    ``src`` is unknown, a step slice is used, or the index count exceeds
+    ``src``'s rank.
     """
     src = sub.value
     if not isinstance(src, ast.Name) or src.id not in local:
@@ -615,9 +617,16 @@ def _subscript_slice_meta(
         if idx.step is not None:
             return None
         start = 0 if idx.lower is None else resolve_int(idx.lower)
-        stop = None if idx.upper is None else resolve_int(idx.upper)
-        extent = stop - start if isinstance(start, int) and isinstance(stop, int) else None
-        dims.append(extent if extent is not None else src_meta.shape[dim_idx])
+        parent = src_meta.shape[dim_idx]
+        if idx.upper is None:
+            # Open upper bound ``a:`` — the parser bounds it at ``parent - start``
+            # (see ``_build_subscript_slice_args``), so mirror that here instead
+            # of falling back to the full parent extent for a nonzero ``start``.
+            extent = parent - start if isinstance(parent, int) and isinstance(start, int) else None
+        else:
+            stop = resolve_int(idx.upper)
+            extent = stop - start if isinstance(start, int) and isinstance(stop, int) else None
+        dims.append(extent if extent is not None else parent)
     dims.extend(src_meta.shape[len(indices) :])  # trailing implicit ``:``
     return TensorMeta(shape=tuple(dims), dtype=src_meta.dtype)
 
