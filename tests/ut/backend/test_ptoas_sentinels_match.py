@@ -89,9 +89,7 @@ def test_base_ptoas_flags_subset_of_backend_flags() -> None:
         for flag in pto_rebuild._ptoas_flags(content)
         for tok in flag.replace("--pto-level=", "").split()
     }
-    missing = [
-        tok for tok in rebuild_flags if repr(tok) not in src and tok not in src
-    ]
+    missing = [tok for tok in rebuild_flags if repr(tok) not in src and tok not in src]
     assert not missing, (
         f"pto_rebuild base flag tokens {missing!r} no longer found in pto_backend._get_ptoas_flags source."
     )
