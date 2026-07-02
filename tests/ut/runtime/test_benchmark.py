@@ -14,7 +14,7 @@ runtime's ``[STRACE]`` stderr markers rather than a ``run_timed`` return value.
 The parse + aggregate path (:func:`_parse_stats_from_strace`) delegates the
 marker grammar to simpler's ``strace_timing``, so those tests feed synthetic
 marker lines through it and **skip when the optional ``simpler`` runtime is not
-installed** (e.g. the unit-test CI host) via the ``require_simpler`` fixture.
+installed** (e.g. the unit-test CI host) via the ``span_root`` fixture.
 The ``benchmark`` driver (register-once, warmup, log-level + stderr capture) and
 the pure-``BenchmarkStats`` aggregate helpers patch the parse seam out, so they
 run everywhere without ``simpler``.
@@ -29,32 +29,43 @@ from pypto.runtime.bench import BenchmarkStats, _parse_stats_from_strace, benchm
 
 
 @pytest.fixture
-def require_simpler():
-    """Skip the test unless the optional ``simpler`` runtime is importable.
+def span_root() -> str:
+    """Skip unless the optional ``simpler`` runtime is importable; return its
+    ``[STRACE]`` span root name.
 
     :func:`_parse_stats_from_strace` lazily imports ``simpler_setup.tools.
-    strace_timing`` (the single source of truth for the ``[STRACE]`` grammar);
-    it is absent on the unit-test CI host, where these parse tests skip.
+    strace_timing`` (the single source of truth for the ``[STRACE]`` grammar
+    *and* span names) and reads the per-launch span names from its
+    ``_ROUNDS_TABLE_NAMES``. The root was renamed ``run_prepared`` ->
+    ``simpler_run`` in simpler #1210, so the synthetic markers below build their
+    names off this fixture rather than hardcoding a root — keeping the tests
+    working against both runtime generations. Absent on the unit-test CI host,
+    where these parse tests skip.
     """
-    pytest.importorskip("simpler_setup.tools.strace_timing")
+    mod = pytest.importorskip("simpler_setup.tools.strace_timing")
+    return mod._ROUNDS_TABLE_NAMES["host"]
 
 
 def _strace_line(
     inv: int, name: str, dur_ns: int, *, hid: str = "abc", depth: int = 0, dev: bool = False
 ) -> str:
-    """One synthetic ``[STRACE]`` marker line (matches strace_timing's grammar)."""
+    """One synthetic ``[STRACE]`` marker line (matches strace_timing's grammar).
+
+    Only the ``name=`` field is parsed for the span tree; the leading log tag is
+    ignored by ``strace_timing``'s regex.
+    """
     attrs = " clk=dev" if dev else ""
     return (
-        f"[2026-01-01][T0x1][INFO_V9] run_prepared: [STRACE] v=1 pid=100 tid=1 "
+        f"[2026-01-01][T0x1][INFO_V9] {name}: [STRACE] v=1 pid=100 tid=1 "
         f"inv={inv} hid={hid} depth={depth} name={name} ts={inv * 1000} dur={dur_ns}{attrs}"
     )
 
 
-def _launch_lines(inv: int, *, host_us: float, device_us: float) -> list[str]:
-    """The two markers one launch emits: the ``run_prepared`` host span + device wall."""
+def _launch_lines(inv: int, root: str, *, host_us: float, device_us: float) -> list[str]:
+    """The two markers one launch emits: the host span (*root*) + device wall."""
     return [
-        _strace_line(inv, "run_prepared", int(host_us * 1000), depth=0),
-        _strace_line(inv, "run_prepared.runner_run.device_wall", int(device_us * 1000), depth=2, dev=True),
+        _strace_line(inv, root, int(host_us * 1000), depth=0),
+        _strace_line(inv, f"{root}.runner_run.device_wall", int(device_us * 1000), depth=2, dev=True),
     ]
 
 
@@ -70,15 +81,15 @@ def _row_present(tree: str, expected: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def test_parse_discards_warmup_and_collects_rounds(require_simpler):
+def test_parse_discards_warmup_and_collects_rounds(span_root):
     """Warmup invocations are dropped; only the trailing ``rounds`` are measured."""
     lines: list[str] = []
     # 2 warmup launches (inv 0,1) then 3 measured (inv 2,3,4).
-    lines += _launch_lines(0, host_us=99, device_us=99)
-    lines += _launch_lines(1, host_us=99, device_us=99)
-    lines += _launch_lines(2, host_us=100, device_us=10)
-    lines += _launch_lines(3, host_us=200, device_us=20)
-    lines += _launch_lines(4, host_us=300, device_us=30)
+    lines += _launch_lines(0, span_root, host_us=99, device_us=99)
+    lines += _launch_lines(1, span_root, host_us=99, device_us=99)
+    lines += _launch_lines(2, span_root, host_us=100, device_us=10)
+    lines += _launch_lines(3, span_root, host_us=200, device_us=20)
+    lines += _launch_lines(4, span_root, host_us=300, device_us=30)
 
     stats = _parse_stats_from_strace("\n".join(lines), rounds=3, warmup=2)
 
@@ -88,46 +99,48 @@ def test_parse_discards_warmup_and_collects_rounds(require_simpler):
     assert stats.warmup == 2
 
 
-def test_parse_no_warmup_keeps_all(require_simpler):
-    lines = _launch_lines(0, host_us=50, device_us=5) + _launch_lines(1, host_us=60, device_us=15)
+def test_parse_no_warmup_keeps_all(span_root):
+    lines = _launch_lines(0, span_root, host_us=50, device_us=5) + _launch_lines(
+        1, span_root, host_us=60, device_us=15
+    )
     stats = _parse_stats_from_strace("\n".join(lines), rounds=2, warmup=0)
     assert stats.device_wall_us == [5.0, 15.0]
     assert stats.host_wall_us == [50.0, 60.0]
 
 
-def test_parse_no_device_span_reads_zero(require_simpler):
+def test_parse_no_device_span_reads_zero(span_root):
     """On sim / non-profiling builds only the host span is emitted -> device 0."""
-    lines = [_strace_line(0, "run_prepared", 50_000, depth=0)]
+    lines = [_strace_line(0, span_root, 50_000, depth=0)]
     stats = _parse_stats_from_strace("\n".join(lines), rounds=1, warmup=0)
     assert stats.host_wall_us == [50.0]
     assert stats.device_wall_us == [0.0]
     assert stats.all_zero_device is True
 
 
-def test_parse_no_markers_returns_empty(require_simpler):
+def test_parse_no_markers_returns_empty(span_root):
     stats = _parse_stats_from_strace("no strace markers here\n", rounds=5, warmup=1)
     assert stats.device_wall_us == []
     assert stats.host_wall_us == []
     assert stats.invocations == []
 
 
-def test_parse_populates_full_span_tree_and_format(require_simpler):
+def test_parse_populates_full_span_tree_and_format(span_root):
     """Each measured launch keeps its full span tree; format_tree draws the
     hierarchy with ``|-`` / `` `- `` connectors and tags device spans."""
     # A branching tree (siblings tie on ts -> kept in line order):
-    #   run_prepared
+    #   <root>
     #   |- bind
     #   |  |- args
     #   |  `- prebuilt
     #   `- runner_run
     #      `- device_wall [dev]
     lines = [
-        _strace_line(0, "run_prepared", 10_000, depth=0),
-        _strace_line(0, "run_prepared.bind", 6_000, depth=1),
-        _strace_line(0, "run_prepared.bind.args", 4_000, depth=2),
-        _strace_line(0, "run_prepared.bind.prebuilt", 2_000, depth=2),
-        _strace_line(0, "run_prepared.runner_run", 3_000, depth=1),
-        _strace_line(0, "run_prepared.runner_run.device_wall", 2_000, depth=2, dev=True),
+        _strace_line(0, span_root, 10_000, depth=0),
+        _strace_line(0, f"{span_root}.bind", 6_000, depth=1),
+        _strace_line(0, f"{span_root}.bind.args", 4_000, depth=2),
+        _strace_line(0, f"{span_root}.bind.prebuilt", 2_000, depth=2),
+        _strace_line(0, f"{span_root}.runner_run", 3_000, depth=1),
+        _strace_line(0, f"{span_root}.runner_run.device_wall", 2_000, depth=2, dev=True),
     ]
     stats = _parse_stats_from_strace("\n".join(lines), rounds=1, warmup=0)
 
@@ -137,8 +150,8 @@ def test_parse_populates_full_span_tree_and_format(require_simpler):
     inv = stats.invocations[0]
     root = inv.root()
     assert root is not None
-    assert root.name == "run_prepared"
-    assert inv.by_name()["run_prepared.runner_run.device_wall"].is_device
+    assert root.name == span_root
+    assert inv.by_name()[f"{span_root}.runner_run.device_wall"].is_device
 
     tree = stats.format_tree(launch=0)
     # Branch connectors mark hierarchy (not indentation alone).
@@ -155,38 +168,38 @@ def test_format_tree_no_capture_message():
     assert "no span tree captured" in stats.format_mean_tree()
 
 
-def test_mean_tree_averages_durations_across_launches(require_simpler):
+def test_mean_tree_averages_durations_across_launches(span_root):
     """The mean tree averages each span's duration across measured launches."""
-    # Two launches; run_prepared -> runner_run.device_wall. Device wall is 10
-    # then 20 us -> mean 15; host run_prepared 100 then 300 -> mean 200.
+    # Two launches; <root> -> runner_run.device_wall. Device wall is 10
+    # then 20 us -> mean 15; host <root> 100 then 300 -> mean 200.
     lines = []
     for inv, host_us, dev_us in [(0, 100.0, 10.0), (1, 300.0, 20.0)]:
-        lines.append(_strace_line(inv, "run_prepared", int(host_us * 1000), depth=0))
+        lines.append(_strace_line(inv, span_root, int(host_us * 1000), depth=0))
         lines.append(
-            _strace_line(inv, "run_prepared.runner_run.device_wall", int(dev_us * 1000), depth=2, dev=True)
+            _strace_line(inv, f"{span_root}.runner_run.device_wall", int(dev_us * 1000), depth=2, dev=True)
         )
     stats = _parse_stats_from_strace("\n".join(lines), rounds=2, warmup=0)
 
     mean = stats.mean_invocation()
     assert mean is not None
     by = mean.by_name()
-    assert by["run_prepared"].dur == 200_000  # mean of 100k, 300k ns
-    assert by["run_prepared.runner_run.device_wall"].dur == 15_000  # mean of 10k, 20k
-    assert by["run_prepared.runner_run.device_wall"].is_device
+    assert by[span_root].dur == 200_000  # mean of 100k, 300k ns
+    assert by[f"{span_root}.runner_run.device_wall"].dur == 15_000  # mean of 10k, 20k
+    assert by[f"{span_root}.runner_run.device_wall"].is_device
 
     tree = stats.format_mean_tree()
     assert "mean of 2 launches" in tree
-    assert _row_present(tree, "run_prepared 200.0us")
+    assert _row_present(tree, f"{span_root} 200.0us")
     assert _row_present(tree, "device_wall [dev] 15.0us")
 
 
-def test_mean_tree_spread_annotations(require_simpler):
+def test_mean_tree_spread_annotations(span_root):
     """Mean-tree nodes carry ±stdev and [min..max] across launches."""
     lines = []
     for inv, host_us, dev_us in [(0, 100.0, 10.0), (1, 300.0, 20.0)]:
-        lines.append(_strace_line(inv, "run_prepared", int(host_us * 1000), depth=0))
+        lines.append(_strace_line(inv, span_root, int(host_us * 1000), depth=0))
         lines.append(
-            _strace_line(inv, "run_prepared.runner_run.device_wall", int(dev_us * 1000), depth=2, dev=True)
+            _strace_line(inv, f"{span_root}.runner_run.device_wall", int(dev_us * 1000), depth=2, dev=True)
         )
     stats = _parse_stats_from_strace("\n".join(lines), rounds=2, warmup=0)
 
