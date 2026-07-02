@@ -42,9 +42,11 @@ void BindCodegen(nb::module_& m) {
       "Generates PTO ISA instructions in SSA form with tile operations, control flow, and type "
       "annotations.")
       .def(nb::init<>(), "Create a PTO code generator (backend is always PTO)")
-      .def("generate", &PTOCodegen::Generate, nb::arg("program"),
+      .def("generate", &PTOCodegen::Generate, nb::arg("program"), nb::arg("emit_tile_addr") = true,
            "Generate PTO assembly from PyPTO IR Program. Returns PTO assembly code string (.pto format) with "
-           "instructions like tmul, tadd, FOR/ENDFOR, etc.");
+           "instructions like tmul, tadd, FOR/ENDFOR, etc. When emit_tile_addr=False, pto.alloc_tile omits "
+           "the "
+           "physical addr operand so the ptoas PlanMemory pass allocates (--pto-level=level2).");
 
   // OrchestrationResult - result of orchestration code generation
   nb::class_<OrchestrationResult>(codegen_module, "OrchestrationResult",

@@ -248,8 +248,19 @@ class PassManager:
         self.passes: list[passes.Pass] = []
         self.pass_names: list[str] = []
 
+        # When the active PassContext selects ptoas as the memory planner, skip
+        # the PyPTO on-chip allocation passes so ptoas PlanMemory owns allocation
+        # (codegen then emits no `pto.alloc_tile addr` and ptoas runs at
+        # --pto-level=level2). Read here because __init__ runs inside the
+        # compile() PassContext (see compile.py).
+        ctx = passes.PassContext.current()
+        skip_mem_planning = ctx is not None and ctx.get_memory_planner() == passes.MemoryPlanner.PTOAS
+        _mem_planning_passes = ("MemoryReuse", "AllocateMemoryAddr")
+
         # Build pass list
         for pass_name, pass_factory in self._strategy_passes[strategy]:
+            if skip_mem_planning and pass_name in _mem_planning_passes:
+                continue
             if pass_name == "AutoDeriveTaskDependencies":
                 self.passes.append(
                     passes.auto_derive_task_dependencies(analyze_auto_scopes=analyze_auto_scopes_for_deps)

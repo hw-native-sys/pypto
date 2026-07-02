@@ -382,7 +382,8 @@ PTOCodegen::PTOCodegen(const backend::Backend* backend) : backend_(backend) {
 // Generate entry and GenerateFunction
 // ========================================================================
 
-std::string PTOCodegen::Generate(const ProgramPtr& program) {
+std::string PTOCodegen::Generate(const ProgramPtr& program, bool emit_tile_addr) {
+  emit_tile_addr_ = emit_tile_addr;
   stream_.str("");
   stream_.clear();
   fs_.constants_section.str("");
@@ -726,10 +727,12 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   // For addr constants specifically, codegen preserves the IR ConstInt
   // dtype 1:1 (other operands like valid_row/valid_col adapt to the
   // consumer's type via cast_to_index — see ComputeAllocTileFields).
-  for (const auto& [tile_var, tile_type] : fs_.tile_var_allocs) {
-    auto memref = ir::GetDefinedMemRef(tile_type);
-    if (auto const_offset = memref ? As<ir::ConstInt>(memref->byte_offset_) : nullptr) {
-      GetOrEmitConstant(const_offset->value_, const_offset->dtype());
+  if (emit_tile_addr_) {
+    for (const auto& [tile_var, tile_type] : fs_.tile_var_allocs) {
+      auto memref = ir::GetDefinedMemRef(tile_type);
+      if (auto const_offset = memref ? As<ir::ConstInt>(memref->byte_offset_) : nullptr) {
+        GetOrEmitConstant(const_offset->value_, const_offset->dtype());
+      }
     }
   }
 
@@ -1072,7 +1075,7 @@ PTOCodegen::AllocTileFields PTOCodegen::ComputeAllocTileFields(
   }
 
   auto memref = ir::GetDefinedMemRef(tile_type);
-  if (memref) {
+  if (memref && emit_tile_addr_) {
     if (auto const_offset = As<ir::ConstInt>(memref->byte_offset_)) {
       fields.addr_ssa = GetOrEmitConstant(const_offset->value_, const_offset->dtype());
     }
@@ -1303,7 +1306,7 @@ bool PTOCodegen::IsDualAivDispatchFunction() const {
 void PTOCodegen::EmitExtraAllocTiles() {
   for (const auto& alloc : fs_.extra_alloc_tiles) {
     stream_ << GetIndent() << alloc.name << " = pto.alloc_tile";
-    if (!alloc.addr_ssa.empty()) {
+    if (emit_tile_addr_ && !alloc.addr_ssa.empty()) {
       stream_ << " addr = " << alloc.addr_ssa;
     }
     if (!alloc.valid_row_ssa.empty()) {

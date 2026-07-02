@@ -9,6 +9,7 @@
 
 """High-level API functions for PyPTO IR compilation."""
 
+import logging
 import os
 from contextlib import AbstractContextManager, nullcontext
 from datetime import datetime
@@ -22,6 +23,8 @@ from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core import passes as _passes
 
 from .pass_manager import OptimizationStrategy, PassManager
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .compiled_program import CompiledProgram
@@ -60,6 +63,7 @@ def compile(  # noqa: PLR0913
     verification_level: _passes.VerificationLevel | None = None,
     diagnostic_phase: _passes.DiagnosticPhase | None = None,
     disabled_diagnostics: _passes.DiagnosticCheckSet | None = None,
+    memory_planner: _passes.MemoryPlanner | None = None,
     profiling: bool = False,
     platform: str | None = None,
     distributed_config: Any = None,
@@ -94,6 +98,12 @@ def compile(  # noqa: PLR0913
         disabled_diagnostics: Set of diagnostic checks to disable (covers both
             warnings and performance hints). None uses the default
             (UnusedControlFlowResult disabled, perf hints enabled).
+        memory_planner: Who plans on-chip buffer memory. ``None`` uses the
+            default (``MemoryPlanner.PYPTO`` — PyPTO's AllocateMemoryAddr bakes
+            physical addresses and ptoas runs at ``--pto-level=level3``).
+            ``MemoryPlanner.PTOAS`` skips the PyPTO allocation passes
+            (MemoryReuse + AllocateMemoryAddr), emits no ``pto.alloc_tile addr``,
+            and lets the ptoas PlanMemory pass allocate at ``--pto-level=level2``.
         profiling: If True, enable compile profiling that records per-stage
             wall-clock timings.  Results are written to ``output_dir/report/``.
         platform: Target execution platform.  One of ``"a2a3sim"``,
@@ -156,6 +166,11 @@ def compile(  # noqa: PLR0913
             "compile() was called with diagnostic_phase while a PassContext is already active. "
             "Set the diagnostic phase on the existing PassContext instead."
         )
+    if memory_planner is not None and outer is not None:
+        raise RuntimeError(
+            "compile() was called with memory_planner while a PassContext is already active. "
+            "Set the memory planner on the existing PassContext instead."
+        )
 
     # --- Compile profiling ---------------------------------------------------
     prof = get_active_profiler()
@@ -181,13 +196,23 @@ def compile(  # noqa: PLR0913
         disabled = (
             disabled_diagnostics if disabled_diagnostics is not None else outer.get_disabled_diagnostics()
         )
+        mplan = memory_planner if memory_planner is not None else outer.get_memory_planner()
     else:
         vlevel = (
             verification_level if verification_level is not None else _passes.get_default_verification_level()
         )
         dphase = diagnostic_phase if diagnostic_phase is not None else _passes.get_default_diagnostic_phase()
         disabled = disabled_diagnostics if disabled_diagnostics is not None else default_disabled
-    ctx = _passes.PassContext(instruments, vlevel, dphase, disabled)
+        mplan = memory_planner if memory_planner is not None else _passes.MemoryPlanner.PYPTO
+    ctx = _passes.PassContext(instruments, vlevel, dphase, disabled, mplan)
+
+    if mplan == _passes.MemoryPlanner.PTOAS:
+        logger.warning(
+            "memory_planner=PTOAS: skipping PyPTO MemoryReuse + AllocateMemoryAddr; ptoas "
+            "PlanMemory (--pto-level=level2) owns on-chip allocation. The Ascend910B "
+            "load + tpop_from_aic in-place hazard legalisation (normally done by MemoryReuse) "
+            "and reserve-buffer base resolution are deferred to ptoas — verify on-device."
+        )
 
     def _stage(name: str) -> AbstractContextManager[Any]:
         if prof is not None:
@@ -208,7 +233,13 @@ def compile(  # noqa: PLR0913
         # any value of the ``BackendType`` enum is a valid PTO codegen target.
         try:
             with _stage("codegen"):
-                files = generate(transformed_program, output_dir, skip_ptoas=skip_ptoas, block_dim=block_dim)
+                files = generate(
+                    transformed_program,
+                    output_dir,
+                    skip_ptoas=skip_ptoas,
+                    block_dim=block_dim,
+                    memory_planner=mplan,
+                )
         except PartialCodegenError as exc:
             _write_files(exc.files, output_dir)
             raise
