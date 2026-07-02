@@ -214,11 +214,13 @@ class TraceInvocation:
         return "\n".join(lines)
 
 
-# Span names read per launch (mirror ``strace_timing._ROUNDS_TABLE_NAMES``).
-# ``host`` is the whole ``run_prepared`` wall; ``device`` is the on-NPU
-# orchestrator wall.
-_SPAN_HOST = "run_prepared"
-_SPAN_DEVICE = "run_prepared.runner_run.device_wall"
+# Per-launch spans are read root-agnostically: ``host`` is the whole dispatch
+# wall (the depth-0 root span) and ``device`` is the on-NPU orchestrator wall
+# (``<root>.runner_run.device_wall``). The root span name is the runtime's
+# dispatch entrypoint, which simpler #1210 renamed ``run_prepared`` ->
+# ``simpler_run``; matching by depth (host) and by dotted suffix (device) reads
+# timing from both the pre- and post-#1210 STRACE vocabularies.
+_DEVICE_WALL_SUFFIX = ".runner_run.device_wall"
 
 # Runtime log level that makes the ``LOG_INFO_V9`` ``[STRACE]`` markers visible.
 _STRACE_LOG_LEVEL = "v9"
@@ -474,8 +476,10 @@ def _parse_stats_from_strace(log_text: str, *, rounds: int, warmup: int) -> Benc
     never import simpler types. Groups markers by ``(pid, inv)``, buckets by
     callable hash, takes the busiest bucket (our register-once callable emits one
     invocation per launch), orders by ``inv``, drops the first *warmup*
-    invocations, and reads each remaining launch's host (``run_prepared``) and
-    device (``run_prepared.runner_run.device_wall``) span durations (µs).
+    invocations, and reads each remaining launch's host (the depth-0 root span)
+    and device (``<root>.runner_run.device_wall``) span durations (µs). The root
+    span name is matched by depth/suffix rather than a literal so both the pre-
+    and post-#1210 (``run_prepared`` -> ``simpler_run``) vocabularies work.
     """
     # ``simpler`` is an optional runtime-provided package: present on devices
     # where the runtime is installed, absent on the lint / unit-test host. The
@@ -496,9 +500,8 @@ def _parse_stats_from_strace(log_text: str, *, rounds: int, warmup: int) -> Benc
     # bucket_by_hid orders each bucket by inv, so warmup drops in dispatch order.
     busiest = max(bucket_by_hid(invocations).values(), key=len)
     for inv in busiest[warmup:]:
-        named = inv.by_name()
-        host = named.get(_SPAN_HOST)
-        device = named.get(_SPAN_DEVICE)
+        host = next((s for s in inv.spans if s.depth == 0), None)
+        device = next((s for s in inv.spans if s.name.endswith(_DEVICE_WALL_SUFFIX)), None)
         stats.host_wall_us.append(host.dur / 1000.0 if host is not None else 0.0)
         stats.device_wall_us.append(device.dur / 1000.0 if device is not None else 0.0)
         stats.invocations.append(

@@ -95,6 +95,23 @@ def test_parse_no_warmup_keeps_all(require_simpler):
     assert stats.host_wall_us == [50.0, 60.0]
 
 
+def test_parse_matches_renamed_root_span(require_simpler):
+    """Root-span rename must not zero device timing (simpler #1210 renamed the
+    dispatch root ``run_prepared`` -> ``simpler_run``). The host span is matched
+    by depth (root = depth 0) and the device span by the ``.runner_run.device_wall``
+    suffix, so both STRACE vocabularies parse identically."""
+    lines = [
+        _strace_line(0, "simpler_run", 100_000, depth=0),
+        _strace_line(0, "simpler_run.runner_run.device_wall", 10_000, depth=2, dev=True),
+        _strace_line(1, "simpler_run", 200_000, depth=0),
+        _strace_line(1, "simpler_run.runner_run.device_wall", 20_000, depth=2, dev=True),
+    ]
+    stats = _parse_stats_from_strace("\n".join(lines), rounds=2, warmup=0)
+    assert stats.device_wall_us == [10.0, 20.0]
+    assert stats.host_wall_us == [100.0, 200.0]
+    assert stats.all_zero_device is False
+
+
 def test_parse_no_device_span_reads_zero(require_simpler):
     """On sim / non-profiling builds only the host span is emitted -> device 0."""
     lines = [_strace_line(0, "run_prepared", 50_000, depth=0)]
