@@ -272,7 +272,7 @@ class PassContext:
         disabled_diagnostics: DiagnosticCheckSet = ...,  # default: {UnusedControlFlowResult}
         memory_planner: MemoryPlanner = MemoryPlanner.PYPTO,
     ) -> None:
-        """Create a PassContext with instruments, verification level, phase, disabled diagnostics, and memory planner."""
+        """Create a PassContext with instruments and pass configuration (incl. memory planner)."""
         ...
 
     def __enter__(self) -> PassContext: ...

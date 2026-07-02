@@ -1166,7 +1166,9 @@ def _run_ptoas_phase(
             _collect_emit_result(result, unit, prof, result_files, errors)
     else:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(_emit_unit, unit, output_dir, skip_ptoas, memory_planner) for unit in units]
+            futures = [
+                executor.submit(_emit_unit, unit, output_dir, skip_ptoas, memory_planner) for unit in units
+            ]
             for unit, future in zip(units, futures):
                 result = future.result()  # exceptions caught inside _emit_unit
                 _collect_emit_result(result, unit, prof, result_files, errors)
@@ -1215,7 +1217,9 @@ def generate(
     )
 
     if has_distributed:
-        return _generate_with_distributed(transformed_program, output_dir, skip_ptoas, memory_planner=memory_planner)
+        return _generate_with_distributed(
+            transformed_program, output_dir, skip_ptoas, memory_planner=memory_planner
+        )
 
     # L2-only program with multiple Orchestrations: emit each as a
     # self-contained sub-build under ``next_levels/{orch_name}/``.
