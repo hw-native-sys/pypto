@@ -11,7 +11,7 @@
 
 import pytest
 import torch
-from pypto.runtime import DeviceTensor
+from pypto.runtime import DeviceTensor, StackedDeviceTensor
 
 
 class TestDeviceTensorConstruction:
@@ -101,6 +101,108 @@ class TestDeviceTensorRepr:
         assert "0xabcd" in r.lower()
         assert "(2, 3)" in r
         assert "int8" in r
+
+
+def _shards(n, shape=(4, 5), dtype=torch.float32):
+    return [DeviceTensor(0x1000 + i * 0x100, shape, dtype) for i in range(n)]
+
+
+class TestStackedDeviceTensorConstruction:
+    def test_basic(self):
+        sh = _shards(3)
+        s = StackedDeviceTensor(sh, (3, 4, 5), (0, 1, 2))
+        assert s.shards == tuple(sh)
+        assert s.full_shape == (3, 4, 5)
+        assert s.worker_ids == (0, 1, 2)
+        assert s.dtype is torch.float32
+
+    def test_non_identity_worker_ids(self):
+        sh = _shards(3)
+        s = StackedDeviceTensor(sh, (3, 4, 5), (2, 0, 1))
+        assert s.worker_ids == (2, 0, 1)
+        # __getitem__ is keyed by shard index, independent of worker placement.
+        assert s[0] is sh[0]
+
+    def test_shard_count_mismatch_raises(self):
+        with pytest.raises(ValueError, match="2 shards"):
+            StackedDeviceTensor(_shards(3), (2, 4, 5), (0, 1))
+
+    def test_worker_ids_count_mismatch_raises(self):
+        with pytest.raises(ValueError, match="worker_ids"):
+            StackedDeviceTensor(_shards(3), (3, 4, 5), (0, 1))
+
+    def test_duplicate_worker_ids_raises(self):
+        with pytest.raises(ValueError, match="distinct"):
+            StackedDeviceTensor(_shards(3), (3, 4, 5), (0, 1, 1))
+
+    def test_shard_shape_mismatch_raises(self):
+        bad = [DeviceTensor(0x1000 + i, (9, 9), torch.float32) for i in range(3)]
+        with pytest.raises(ValueError, match="per-shard shape"):
+            StackedDeviceTensor(bad, (3, 4, 5), (0, 1, 2))
+
+    def test_shard_dtype_mismatch_raises(self):
+        sh = [
+            DeviceTensor(0x1000, (4, 5), torch.float32),
+            DeviceTensor(0x2000, (4, 5), torch.float16),
+        ]
+        with pytest.raises(ValueError, match="dtype"):
+            StackedDeviceTensor(sh, (2, 4, 5), (0, 1))
+
+    def test_rank_one_full_shape_raises(self):
+        with pytest.raises(ValueError, match="rank >= 2"):
+            StackedDeviceTensor([DeviceTensor(0x1000, (4,), torch.float32)], (1,), (0,))
+
+    def test_empty_leading_dim_raises(self):
+        # B == 0 would leave shards empty; .dtype/.__repr__ would IndexError.
+        with pytest.raises(ValueError, match="at least one shard"):
+            StackedDeviceTensor([], (0, 4, 5), ())
+
+
+class TestStackedDeviceTensorIndexing:
+    def test_int_index_returns_shard(self):
+        sh = _shards(3)
+        s = StackedDeviceTensor(sh, (3, 4, 5), (0, 1, 2))
+        assert s[0] is sh[0]
+        assert s[2] is sh[2]
+
+    def test_tuple_index_full_slices(self):
+        # The form the generated host_orch emits: x[r, 0:N, 0:M].
+        sh = _shards(3)
+        s = StackedDeviceTensor(sh, (3, 4, 5), (0, 1, 2))
+        assert s[1, 0:4, 0:5] is sh[1]
+        assert s[1, :, :] is sh[1]
+
+    def test_ellipsis_index_returns_shard(self):
+        # The documented whole-shard form x[i, ...] must behave like x[i].
+        sh = _shards(3)
+        s = StackedDeviceTensor(sh, (3, 4, 5), (0, 1, 2))
+        assert s[1, ...] is sh[1]
+        assert s[2, ...] is sh[2]
+
+    def test_ellipsis_with_leading_full_slice(self):
+        sh = _shards(3)
+        s = StackedDeviceTensor(sh, (3, 4, 5), (0, 1, 2))
+        assert s[1, 0:4, ...] is sh[1]
+
+    def test_multiple_ellipsis_rejected(self):
+        s = StackedDeviceTensor(_shards(3), (3, 4, 5), (0, 1, 2))
+        with pytest.raises(IndexError, match="at most one Ellipsis"):
+            _ = s[0, ..., ...]
+
+    def test_partial_tail_slice_rejected(self):
+        s = StackedDeviceTensor(_shards(3), (3, 4, 5), (0, 1, 2))
+        with pytest.raises(ValueError, match="whole-shard"):
+            _ = s[0, 0:2, 0:5]
+
+    def test_out_of_range_index_raises(self):
+        s = StackedDeviceTensor(_shards(3), (3, 4, 5), (0, 1, 2))
+        with pytest.raises(IndexError, match="out of range"):
+            _ = s[3]
+
+    def test_non_int_leading_index_raises(self):
+        s = StackedDeviceTensor(_shards(3), (3, 4, 5), (0, 1, 2))
+        with pytest.raises(TypeError, match="leading index"):
+            _ = s[0:1]
 
 
 if __name__ == "__main__":

@@ -386,6 +386,47 @@ with compiled.prepare() as rt:                  # setup 只跑一次
 # 退出时自动 rt.close()
 ```
 
+#### 把权重按卡切分常驻（`alloc_stacked_tensor`）
+
+当 HOST orchestrator 把一个 `[B, N, M]` 权重按首维切片并分发到每张卡——即规范写法
+`for r in range(world_size): child(x[r], device=r)`——直接传整块 host 张量会在**每次**
+dispatch 都把 `x[r]` 切片重新上传到对应卡。要让每个分片**只上传一次**并常驻在自己那张卡上,
+用 `rt.alloc_stacked_tensor` 构造一个 `StackedDeviceTensor`:
+
+```python
+host_w = load_weight().share_memory_()           # [B, N, M],B == world_size
+host_a = torch.zeros((B, N, M), dtype=...).share_memory_()
+host_out = torch.zeros((B, N, M), dtype=...).share_memory_()
+
+with compiled.prepare() as rt:
+    w = rt.alloc_stacked_tensor(host_w)          # 第 i 片上传到第 i 张卡,只传一次
+    for step in steps:
+        host_a.copy_(next_input(step))
+        rt(host_a, w, host_out)                  # x[r] 解析到常驻的第 r 片
+        consume(host_out)
+    rt.free_stacked_tensor(w)
+```
+
+内部每个分片 `host_w[i]` 都成为一个 worker 常驻的 `DeviceTensor`,因此生成代码里的
+`x[r]` 取下标会跳过 H2D 上传(`child_memory`)。分片在 `close()` 时自动释放,也可提前用
+`free_stacked_tensor` 释放。
+
+首维就是分片维,`B` 必须等于程序分发到的卡数。默认第 `i` 片落在第 `i` 个 worker 上
+(对应 `device=r`)。如果程序用的是**非恒等**放置——置换或子集卡(如 `device=2*r`,或字面量
+`device=1` / `device=0`)——就要传匹配的 `worker_ids`,其中 `worker_ids[i]` 是程序提交
+`x[i]` 那次任务所用的 worker:
+
+```python
+# orchestrator 把 x[0] 分发到卡 1、x[1] 分发到卡 0
+w = rt.alloc_stacked_tensor(host_w, worker_ids=[1, 0])
+```
+
+`worker_ids` 必须互不相同且落在 `[0, world_size)` 内;与程序的 `device=` 不匹配会把分片放到
+错误的卡上、读到垃圾数据。
+
+`rt.alloc_tensor(..., worker_id=r)` 同样接受非默认的 `worker_id`,可把单个常驻
+`DeviceTensor` 放到任意卡(`free_tensor` 时传相同的 `worker_id`)。
+
 #### 在同一个 worker 上调度多个程序（multi-program）
 
 Serving 场景需要把 prefill 和 decode 作为两个独立的 HOST 程序,共享同一个 L3

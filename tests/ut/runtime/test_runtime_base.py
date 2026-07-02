@@ -26,8 +26,6 @@ class FakeHandle(Worker):
     _close_owned_tensors) without instantiating a real ``ChipWorker``.
     """
 
-    _WORKER_KIND = "fake worker"
-
     def __init__(self) -> None:
         super().__init__()
         self.ready = True
@@ -35,6 +33,7 @@ class FakeHandle(Worker):
         self.live: dict[int, int] = {}  # ptr -> nbytes
         self.uploads: list[tuple[int, int, int]] = []
         self.freed: list[int] = []
+        self.free_calls: list[tuple[int, int]] = []  # (ptr, worker_id)
         self.fail_copy = False
 
     def malloc(self, nbytes: int, *, worker_id: int = 0) -> int:
@@ -45,6 +44,7 @@ class FakeHandle(Worker):
 
     def free(self, ptr: int, *, worker_id: int = 0) -> None:
         self.freed.append(ptr)
+        self.free_calls.append((ptr, worker_id))
         self.live.pop(ptr, None)
 
     def copy_to(self, dst_dev_ptr: int, src_host_ptr: int, nbytes: int, *, worker_id: int = 0) -> None:
@@ -98,14 +98,15 @@ def test_alloc_tensor_rollback_on_copy_failure():
 def test_alloc_tensor_tracks_in_owned_set():
     h = FakeHandle()
     t = h.alloc_tensor((4,), torch.float32)
-    assert t.data_ptr in h._owned_tensors
+    # Tracking is keyed by (worker_id, data_ptr); default worker_id is 0.
+    assert (0, t.data_ptr) in h._owned_tensors
 
 
 def test_free_tensor_untracks_and_frees():
     h = FakeHandle()
     t = h.alloc_tensor((4,), torch.float32)
     h.free_tensor(t)
-    assert t.data_ptr not in h._owned_tensors
+    assert (0, t.data_ptr) not in h._owned_tensors
     assert h.freed == [t.data_ptr]
 
 
@@ -161,13 +162,54 @@ def test_free_tensor_forwards_data_ptr():
     assert h.freed == [t.data_ptr]
 
 
-def test_worker_id_nonzero_rejected_with_kind_noun():
+def test_nonzero_worker_id_allocates_tracks_and_frees_against_that_worker():
+    """alloc_tensor / free_tensor support a non-default worker_id, tracking and
+    freeing the buffer against the worker it was allocated on."""
     h = FakeHandle()
-    with pytest.raises(ValueError, match="fake worker"):
-        h.alloc_tensor((4,), torch.float32, worker_id=1)
-    t = DeviceTensor(0x1000, (4,), torch.float32)
-    with pytest.raises(ValueError, match="fake worker"):
-        h.free_tensor(t, worker_id=1)
+    t = h.alloc_tensor((4,), torch.float32, worker_id=3)
+    # Tracked under (worker_id, ptr) — NOT the default-worker key.
+    assert (3, t.data_ptr) in h._owned_tensors
+    assert (0, t.data_ptr) not in h._owned_tensors
+
+    h.free_tensor(t, worker_id=3)
+    assert (3, t.data_ptr) not in h._owned_tensors
+    # free was forwarded to worker 3, not worker 0.
+    assert (t.data_ptr, 3) in h.free_calls
+
+
+def test_free_tensor_wrong_worker_id_raises_instead_of_leaking():
+    """Freeing a still-owned ptr with the wrong worker_id surfaces the contract
+    bug rather than silently no-oping (which would leak until close())."""
+    h = FakeHandle()
+    t = h.alloc_tensor((4,), torch.float32, worker_id=3)
+    with pytest.raises(ValueError, match="does not match the owning worker"):
+        h.free_tensor(t, worker_id=0)  # wrong worker id
+    # Still tracked (not leaked-and-forgotten) and never freed.
+    assert (3, t.data_ptr) in h._owned_tensors
+    assert h.freed == []
+    # The correct worker_id still frees it.
+    h.free_tensor(t, worker_id=3)
+    assert h.freed == [t.data_ptr]
+
+
+def test_free_tensor_genuine_double_free_is_still_noop():
+    """A second free of a fully-released ptr is an idempotent no-op (no raise)."""
+    h = FakeHandle()
+    t = h.alloc_tensor((4,), torch.float32, worker_id=2)
+    h.free_tensor(t, worker_id=2)
+    h.free_tensor(t, worker_id=2)  # ptr no longer owned under any worker -> no-op
+    assert h.freed == [t.data_ptr]  # freed exactly once
+
+
+def test_close_frees_multi_worker_tensors_against_their_workers():
+    """_close_owned_tensors releases each leaked buffer against its own worker."""
+    h = FakeHandle()
+    a = h.alloc_tensor((4,), torch.float32, worker_id=0)
+    b = h.alloc_tensor((4,), torch.float32, worker_id=2)
+    h._close_owned_tensors()
+    assert h._owned_tensors == set()
+    assert (a.data_ptr, 0) in h.free_calls
+    assert (b.data_ptr, 2) in h.free_calls
 
 
 def test_require_ready_consulted_by_alloc_tensor():

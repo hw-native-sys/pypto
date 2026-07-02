@@ -276,11 +276,129 @@ class TestDeviceMemoryApi:
         patched_setup["worker"]._orch.free.assert_called_once_with(0, 0xDEAD0000)
         rt.close()
 
-    def test_alloc_tensor_rejects_nonzero_worker_id(self, patched_setup):
+    def test_alloc_tensor_forwards_nonzero_worker_id(self, patched_setup):
+        # A non-default worker_id is supported: malloc is forwarded to that
+        # worker (facade order is ``malloc(worker_id, nbytes)``) and the buffer
+        # is tracked under (worker_id, ptr) for per-worker auto-free.
         compiled = _fake_compiled([_param("a", [16, 16])], [])
         rt = DistributedWorker(compiled)
-        with pytest.raises(ValueError, match="worker_id=0"):
-            rt.alloc_tensor((16, 16), torch.float32, worker_id=1)
+        dev = rt.alloc_tensor((16, 16), torch.float32, worker_id=1)
+        patched_setup["worker"]._orch.malloc.assert_called_once_with(1, 16 * 16 * 4)
+        assert (1, dev.data_ptr) in rt._owned_tensors
+        rt.free_tensor(dev, worker_id=1)
+        patched_setup["worker"]._orch.free.assert_called_once_with(1, 0xDEAD0000)
+        rt.close()
+
+
+class TestAllocStackedTensor:
+    """``alloc_stacked_tensor`` uploads each leading-dim shard to its worker once."""
+
+    @staticmethod
+    def _compiled_2cards():
+        compiled = _fake_compiled([_param("b", [2, 4, 4])], [])
+        compiled._distributed_config = DistributedConfig(device_ids=[0, 1])
+        return compiled
+
+    def test_identity_uploads_shard_per_worker(self, patched_setup):
+        patched_setup["worker"]._orch.malloc.side_effect = [0xA000, 0xB000]
+        rt = DistributedWorker(self._compiled_2cards())
+        host = torch.arange(2 * 4 * 4, dtype=torch.float32).view(2, 4, 4).share_memory_()
+
+        stacked = rt.alloc_stacked_tensor(host)  # default worker_ids = range(2)
+
+        assert stacked.full_shape == (2, 4, 4)
+        assert stacked.worker_ids == (0, 1)
+        assert tuple(s.shape for s in stacked.shards) == ((4, 4), (4, 4))
+        orch = patched_setup["worker"]._orch
+        # shard 0 -> worker 0, shard 1 -> worker 1 (facade arg order worker_id first).
+        nbytes = 4 * 4 * 4
+        orch.malloc.assert_any_call(0, nbytes)
+        orch.malloc.assert_any_call(1, nbytes)
+        orch.copy_to.assert_any_call(0, 0xA000, host[0].contiguous().data_ptr(), nbytes)
+        orch.copy_to.assert_any_call(1, 0xB000, host[1].contiguous().data_ptr(), nbytes)
+        # Tracked per (worker_id, ptr) for auto-free.
+        assert (0, 0xA000) in rt._owned_tensors
+        assert (1, 0xB000) in rt._owned_tensors
+        rt.close()
+
+    def test_permuted_worker_ids_place_shards(self, patched_setup):
+        patched_setup["worker"]._orch.malloc.side_effect = [0xA000, 0xB000]
+        rt = DistributedWorker(self._compiled_2cards())
+        host = torch.zeros(2, 4, 4, dtype=torch.float32).share_memory_()
+
+        stacked = rt.alloc_stacked_tensor(host, worker_ids=[1, 0])
+
+        assert stacked.worker_ids == (1, 0)
+        orch = patched_setup["worker"]._orch
+        nbytes = 4 * 4 * 4
+        # shard 0 -> worker 1, shard 1 -> worker 0.
+        orch.malloc.assert_any_call(1, nbytes)
+        orch.malloc.assert_any_call(0, nbytes)
+        assert (1, 0xA000) in rt._owned_tensors
+        assert (0, 0xB000) in rt._owned_tensors
+        rt.close()
+
+    def test_free_stacked_tensor_releases_each_shard(self, patched_setup):
+        patched_setup["worker"]._orch.malloc.side_effect = [0xA000, 0xB000]
+        rt = DistributedWorker(self._compiled_2cards())
+        host = torch.zeros(2, 4, 4, dtype=torch.float32).share_memory_()
+        stacked = rt.alloc_stacked_tensor(host, worker_ids=[1, 0])
+
+        patched_setup["worker"]._orch.free.reset_mock()
+        rt.free_stacked_tensor(stacked)
+
+        orch = patched_setup["worker"]._orch
+        orch.free.assert_any_call(1, 0xA000)
+        orch.free.assert_any_call(0, 0xB000)
+        assert (1, 0xA000) not in rt._owned_tensors
+        assert (0, 0xB000) not in rt._owned_tensors
+        rt.close()
+
+    def test_close_auto_frees_stacked_shards(self, patched_setup):
+        patched_setup["worker"]._orch.malloc.side_effect = [0xA000, 0xB000]
+        rt = DistributedWorker(self._compiled_2cards())
+        host = torch.zeros(2, 4, 4, dtype=torch.float32).share_memory_()
+        rt.alloc_stacked_tensor(host)  # leak — close() must release both shards
+
+        patched_setup["worker"]._orch.free.reset_mock()
+        rt.close()
+        orch = patched_setup["worker"]._orch
+        orch.free.assert_any_call(0, 0xA000)
+        orch.free.assert_any_call(1, 0xB000)
+
+    def test_worker_ids_out_of_range_rejected(self, patched_setup):
+        rt = DistributedWorker(self._compiled_2cards())
+        host = torch.zeros(2, 4, 4, dtype=torch.float32).share_memory_()
+        with pytest.raises(ValueError, match="out of range"):
+            rt.alloc_stacked_tensor(host, worker_ids=[0, 5])
+        rt.close()
+
+    def test_empty_leading_dim_rejected(self, patched_setup):
+        # B == 0 must fail cleanly (before any malloc), not build an empty
+        # StackedDeviceTensor that IndexErrors on .dtype / __repr__.
+        rt = DistributedWorker(self._compiled_2cards())
+        host = torch.zeros(0, 4, 4, dtype=torch.float32).share_memory_()
+        with pytest.raises(ValueError, match="at least one shard"):
+            rt.alloc_stacked_tensor(host)
+        patched_setup["worker"]._orch.malloc.assert_not_called()
+        rt.close()
+
+    def test_worker_ids_length_mismatch_rejected(self, patched_setup):
+        rt = DistributedWorker(self._compiled_2cards())
+        host = torch.zeros(2, 4, 4, dtype=torch.float32).share_memory_()
+        with pytest.raises(ValueError, match="entries"):
+            rt.alloc_stacked_tensor(host, worker_ids=[0])
+        rt.close()
+
+    def test_non_shared_host_rejected_and_rolled_back(self, patched_setup):
+        patched_setup["worker"]._orch.malloc.side_effect = [0xA000, 0xB000]
+        rt = DistributedWorker(self._compiled_2cards())
+        host = torch.zeros(2, 4, 4, dtype=torch.float32)  # NOT shared
+
+        with pytest.raises(ValueError, match="shared-memory"):
+            rt.alloc_stacked_tensor(host)
+        # No shard should remain tracked after the rollback.
+        assert not any(ptr in (0xA000, 0xB000) for _w, ptr in rt._owned_tensors)
         rt.close()
 
 
@@ -506,7 +624,7 @@ class TestExplicitDispatchAPI:
         # alloc_tensor goes through Worker ABC -> records in _owned_tensors.
         host = torch.zeros(4, dtype=torch.float32).share_memory_()
         t = rt.alloc_tensor((4,), torch.float32, init=host)
-        assert t.data_ptr in rt._owned_tensors
+        assert (0, t.data_ptr) in rt._owned_tensors
 
         # Spy on the orchestrator's free so we can assert close drove the
         # auto-free path (L3 routes free through the orchestrator facade).

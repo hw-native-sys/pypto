@@ -42,7 +42,8 @@ def fake_simpler_worker():
 def test_alloc_tensor_enters_owned_set(fake_simpler_worker):
     w = ChipWorker(config=RunConfig(platform="a2a3sim"))
     t = w.alloc_tensor((4,), torch.float32)
-    assert t.data_ptr in w._owned_tensors
+    # Tracking is keyed by (worker_id, data_ptr); default worker_id is 0.
+    assert (0, t.data_ptr) in w._owned_tensors
     w.close()
 
 
@@ -50,7 +51,7 @@ def test_free_tensor_exits_owned_set(fake_simpler_worker):
     w = ChipWorker(config=RunConfig(platform="a2a3sim"))
     t = w.alloc_tensor((4,), torch.float32)
     w.free_tensor(t)
-    assert t.data_ptr not in w._owned_tensors
+    assert (0, t.data_ptr) not in w._owned_tensors
     fake_simpler_worker.free.assert_called_with(t.data_ptr, 0)
     w.close()
 
@@ -117,7 +118,7 @@ def test_raw_malloc_not_tracked(fake_simpler_worker):
     """Raw ``malloc()`` is user-managed; it must NOT enter _owned_tensors."""
     w = ChipWorker(config=RunConfig(platform="a2a3sim"))
     ptr = w.malloc(64)
-    assert ptr not in w._owned_tensors
+    assert (0, ptr) not in w._owned_tensors
     w.free(ptr)
     w.close()
 

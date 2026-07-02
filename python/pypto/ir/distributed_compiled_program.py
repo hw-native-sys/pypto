@@ -27,7 +27,7 @@ import torch
 
 from pypto.backend import BackendType
 from pypto.pypto_core.ir import ParamDirection, Program, Role, level_to_linqu_level
-from pypto.runtime.device_tensor import DeviceTensor
+from pypto.runtime.device_tensor import DeviceTensor, StackedDeviceTensor
 
 from .compiled_program import (
     CallArg,
@@ -38,6 +38,7 @@ from .compiled_program import (
     _ParamInfo,
     _to_torch_dtype,
     _validate_device_tensor,
+    _validate_stacked_tensor,
 )
 
 # Filename of the small JSON sidecar persisted alongside the build artifacts so
@@ -340,7 +341,13 @@ class DistributedCompiledProgram:
         self,
         *args: CallArg,
         config: "RunConfig | None" = None,
-    ) -> torch.Tensor | DeviceTensor | tuple[torch.Tensor | DeviceTensor, ...] | None:
+    ) -> (
+        torch.Tensor
+        | DeviceTensor
+        | StackedDeviceTensor
+        | tuple[torch.Tensor | DeviceTensor | StackedDeviceTensor, ...]
+        | None
+    ):
         """Execute the distributed program via simpler Worker(level=3).
 
         ``config`` is an optional per-dispatch :class:`RunConfig`; its per-task
@@ -375,11 +382,17 @@ class DistributedCompiledProgram:
                 f"Parameters: {[p.name for p in param_infos]}"
             )
 
-        # Validate and coerce args. Tensor params accept a host ``torch.Tensor``
-        # or a worker-resident ``DeviceTensor`` (skips H2D/D2H), matching the L2
-        # ``CompiledProgram`` calling convention.
-        coerced: list[torch.Tensor | DeviceTensor] = []
+        # Validate and coerce args. Tensor params accept a host ``torch.Tensor``,
+        # a worker-resident ``DeviceTensor``, or a ``StackedDeviceTensor`` whose
+        # per-rank shards are resident (both skip H2D/D2H) — matching the L2
+        # ``CompiledProgram`` and the ``DistributedWorker.run`` calling
+        # conventions.
+        coerced: list[torch.Tensor | DeviceTensor | StackedDeviceTensor] = []
         for info, arg in zip(param_infos, all_args, strict=True):
+            if isinstance(arg, StackedDeviceTensor):
+                _validate_stacked_tensor(arg, info)
+                coerced.append(arg)
+                continue
             if isinstance(arg, DeviceTensor):
                 _validate_device_tensor(arg, info)
                 coerced.append(arg)
@@ -387,7 +400,7 @@ class DistributedCompiledProgram:
             if not isinstance(arg, torch.Tensor):
                 raise TypeError(
                     f"Distributed programs only support tensor parameters "
-                    f"(torch.Tensor host or DeviceTensor worker-resident). "
+                    f"(torch.Tensor host, DeviceTensor, or StackedDeviceTensor worker-resident). "
                     f"Parameter {info.name!r} got {type(arg).__name__}"
                 )
             coerced.append(arg)

@@ -406,6 +406,52 @@ with compiled.prepare() as rt:                  # setup runs once
 # rt.close() runs on exit
 ```
 
+#### Sharding a weight across cards (`alloc_stacked_tensor`)
+
+When a HOST orchestrator slices a `[B, N, M]` weight along its leading dimension
+and dispatches a per-rank child — the canonical
+`for r in range(world_size): child(x[r], device=r)` — passing the whole host
+tensor re-uploads each `x[r]` slice to its card on **every** dispatch. To upload
+each shard **once** and keep it resident on its card, build a
+`StackedDeviceTensor` with `rt.alloc_stacked_tensor`:
+
+```python
+host_w = load_weight().share_memory_()           # [B, N, M], B == world_size
+host_a = torch.zeros((B, N, M), dtype=...).share_memory_()
+host_out = torch.zeros((B, N, M), dtype=...).share_memory_()
+
+with compiled.prepare() as rt:
+    w = rt.alloc_stacked_tensor(host_w)          # shard i uploaded to card i, once
+    for step in steps:
+        host_a.copy_(next_input(step))
+        rt(host_a, w, host_out)                  # x[r] resolves to the resident shard r
+        consume(host_out)
+    rt.free_stacked_tensor(w)
+```
+
+Internally each shard `host_w[i]` becomes a worker-resident `DeviceTensor`, so the
+generated `x[r]` indexing skips the H2D upload (`child_memory`). Shards are
+auto-freed on `close()` if not released earlier via `free_stacked_tensor`.
+
+The leading dimension is the shard dimension and `B` must equal the number of
+cards the program dispatches to. By default shard `i` lands on worker `i`
+(matching `device=r`). If the program uses a **non-identity** placement — a
+permutation or a subset of cards (e.g. `device=2*r`, or literal `device=1` /
+`device=0`) — pass the matching `worker_ids`, where `worker_ids[i]` is the worker
+the program submits `x[i]`'s task to:
+
+```python
+# orchestrator dispatches x[0] to card 1 and x[1] to card 0
+w = rt.alloc_stacked_tensor(host_w, worker_ids=[1, 0])
+```
+
+`worker_ids` must be distinct and within `[0, world_size)`; a mismatch with the
+program's `device=` would leave a shard on the wrong card and read garbage.
+
+`rt.alloc_tensor(..., worker_id=r)` similarly accepts a non-default `worker_id`
+to place a single resident `DeviceTensor` on any card (pass the same `worker_id`
+to `free_tensor`).
+
 #### Dispatching several programs on one worker (multi-program)
 
 Serving needs prefill and decode as separate HOST programs that share one L3
