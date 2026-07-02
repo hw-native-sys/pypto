@@ -920,55 +920,59 @@ REGISTER_OP("tile.sel")
       return DeduceTileSelType(args, kwargs, "tile.sel");
     });
 
-// Type deduction for tile.sels (Tile x Tile x Scalar -> Tile)
-TypePtr DeduceTileSelScalarType(const std::vector<ExprPtr>& args,
-                                const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                const std::string& op_name) {
-  CHECK(args.size() == 3) << "The operator " << op_name << " requires exactly 3 arguments, but got "
+// Type deduction for tile.sels (Mask x Src x Tmp x Scalar -> Tile).
+// dst[i,j] = mask[i,j] ? src[i,j] : scalar (TSELS). The output mirrors src.
+TypePtr DeduceTileSelsType(const std::vector<ExprPtr>& args,
+                           const std::vector<std::pair<std::string, std::any>>& kwargs,
+                           const std::string& op_name) {
+  CHECK(args.size() == 4) << "The operator " << op_name << " requires exactly 4 arguments, but got "
                           << args.size();
 
-  auto tile_type1 = As<TileType>(args[0]->GetType());
-  auto tile_type2 = As<TileType>(args[1]->GetType());
-  CHECK(tile_type1) << "The operator " << op_name
-                    << " requires first argument (lhs) to be a TileType, but got "
-                    << args[0]->GetType()->TypeName();
-  CHECK(tile_type2) << "The operator " << op_name
-                    << " requires second argument (rhs) to be a TileType, but got "
-                    << args[1]->GetType()->TypeName();
+  CHECK(As<TileType>(args[0]->GetType()))
+      << "The operator " << op_name << " requires first argument (mask) to be a TileType, but got "
+      << args[0]->GetType()->TypeName();
 
-  CHECK(As<ScalarType>(args[2]->GetType()))
-      << "The operator " << op_name << " requires third argument (select_mode) to be a ScalarType, but got "
+  auto src_type = As<TileType>(args[1]->GetType());
+  CHECK(src_type) << "The operator " << op_name
+                  << " requires second argument (src) to be a TileType, but got "
+                  << args[1]->GetType()->TypeName();
+
+  CHECK(As<TileType>(args[2]->GetType()))
+      << "The operator " << op_name << " requires third argument (tmp) to be a TileType, but got "
       << args[2]->GetType()->TypeName();
 
-  auto result_dtype = PromoteDataTypes(tile_type1->dtype_, tile_type2->dtype_);
-  CHECK(result_dtype) << "The operator " << op_name << " requires compatible data types, but got "
-                      << tile_type1->dtype_.ToString() << " and " << tile_type2->dtype_.ToString();
+  CHECK(As<ScalarType>(args[3]->GetType()))
+      << "The operator " << op_name << " requires fourth argument (scalar) to be a ScalarType, but got "
+      << args[3]->GetType()->TypeName();
 
-  auto broadcast_result = BroadcastShapes(tile_type1->shape_, tile_type2->shape_);
-  CHECK(broadcast_result.success) << "The operator " << op_name << " requires compatible shapes, but got "
-                                  << FormatShape(tile_type1->shape_) << " and "
-                                  << FormatShape(tile_type2->shape_);
-
-  // TODO(YunjiQin): assumes both src tiles have the same valid_shape; may need refinement
-  // for cases where lhs and rhs have different valid_shapes (e.g. after broadcasting).
+  // Output mirrors src exactly (same shape, dtype, valid region) per TSELS.
   TileView tile_view;
-  tile_view.valid_shape = GetValidShape(tile_type1);
-  InheritTileViewLayout(tile_view, tile_type1);
-  return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
+  tile_view.valid_shape = GetValidShape(src_type);
+  InheritTileViewLayout(tile_view, src_type);
+  return std::make_shared<TileType>(src_type->shape_, src_type->dtype_, std::nullopt, tile_view);
 }
 
 REGISTER_OP("tile.sels")
     .set_op_category("TileOp")
-    .set_description("Select between two tiles based on a scalar mode. Maps to the TSELS hardware intrinsic.")
-    .add_argument("lhs", "Source tile 0 (TileType)")
-    .add_argument("rhs", "Source tile 1 (TileType)")
-    .add_argument("select_mode", "Scalar select mode (ScalarType)")
+    .set_description(
+        "Per-element selection between a source tile and a scalar using a predicate "
+        "mask tile. dst[i,j] = mask[i,j] ? src[i,j] : scalar. Maps to the TSELS "
+        "hardware intrinsic.")
+    .add_argument("mask", "Predicate mask tile; encoding is target-defined (TileType)")
+    .add_argument("src", "Source tile, selected where mask is true (TileType)")
+    .add_argument("tmp", "Scratch/placeholder tile required by TSELS (TileType)")
+    .add_argument("scalar", "Scalar value, selected where mask is false (ScalarType)")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
+    .set_input_memory(2, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    // The mask (arg 0) and tmp scratch (arg 2) are read while writing dst, so dst
+    // must not alias their buffers (mirrors tile.sel).
+    .forbid_output_alias(0)
+    .forbid_output_alias(2)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileSelScalarType(args, kwargs, "tile.sels");
+      return DeduceTileSelsType(args, kwargs, "tile.sels");
     });
 
 // Type deduction for tile.cmp and tile.cmps (comparison operations)

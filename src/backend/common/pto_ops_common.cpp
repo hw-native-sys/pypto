@@ -494,6 +494,16 @@ static std::string MakeTileSelCodegenPTO(const CallPtr& op, codegen::CodegenBase
   return "";
 }
 
+// pto.tsels ins(%mask, %src, %tmp, %scalar) outs(%dst). IR form:
+// tile.sels(mask, src, tmp, scalar). dst[i,j] = mask[i,j] ? src[i,j] : scalar.
+static std::string MakeTileSelsCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  INTERNAL_CHECK_SPAN(op->args_.size() == 4, op->span_)
+      << "Operation:[pto.tsels] requires 4 arguments, but got " << op->args_.size();
+  codegen.Emit("pto.tsels " + GenerateInsOutsClause(op, codegen));
+  return "";
+}
+
 // pto.ttrans ins(%src, %tmp : tile_type, tile_type). IR form: tile.transpose(src, axis0, axis1, tmp).
 // tmp is pre-allocated by an IR-level tile.create so the memory allocator gives it a real UB
 // address before codegen (required at --pto-level=level3).
@@ -647,10 +657,32 @@ static std::string MakeFullCodegenPTO(const std::string& pto_op_name, const Call
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
   CHECK(op->args_.size() == 2) << "Operation:[" << pto_op_name << "] requires 2 arguments, but got "
                                << op->args_.size();
-  std::string scalar = codegen.GetExprAsCode(op->args_[1]);
-  std::string scalar_type = codegen.GetExprTypeAnnotation(op->args_[1]);
   std::string dst = codegen.GetCurrentResultTarget();
   std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
+
+  // pto.texpands requires the scalar operand's type to equal the dst element
+  // type. A *constant* scalar arg may carry a different dtype (e.g. tile.expands
+  // normalizes its scalar to FP32 while the target tile is FP16), so re-emit the
+  // constant at the dst tile's dtype. A non-constant scalar SSA cannot be
+  // relabeled without a real cast, so it keeps its own dtype/annotation.
+  std::string scalar;
+  std::string scalar_type;
+  auto result_var = codegen.GetCurrentResultVar();
+  auto result_tile = result_var ? As<ir::TileType>(result_var->GetType()) : nullptr;
+  if (result_tile && As<ir::ConstFloat>(op->args_[1])) {
+    DataType dst_dtype = result_tile->dtype_;
+    scalar = codegen.GetOrEmitConstant(As<ir::ConstFloat>(op->args_[1])->value_, dst_dtype);
+    scalar_type = codegen.GetTypeString(dst_dtype);
+  } else if (result_tile && As<ir::ConstInt>(op->args_[1])) {
+    DataType dst_dtype = result_tile->dtype_;
+    scalar = codegen.GetOrEmitConstant(As<ir::ConstInt>(op->args_[1])->value_, dst_dtype);
+    scalar_type = codegen.GetTypeString(dst_dtype);
+  } else {
+    // Non-constant scalar (or unknown dst): emit the SSA with its own type.
+    scalar = codegen.GetExprAsCode(op->args_[1]);
+    scalar_type = codegen.GetExprTypeAnnotation(op->args_[1]);
+  }
+
   std::ostringstream oss;
   oss << pto_op_name << " ins(" << scalar;
   if (!scalar_type.empty()) oss << " : " << scalar_type;
@@ -3706,6 +3738,17 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
         .set_input_layout(3, ir::TileLayout::row_major)
         .set_output_layout(ir::TileLayout::row_major);
   }
+  // tile.sels (TSELS): mask/src/dst row_major per ISA. Scalar arg (3) carries no layout.
+  if (exclude_ops.count("tile.sels") == 0) {
+    backend.RegisterOp("tile.sels")
+        .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+          return MakeTileSelsCodegenPTO(op, codegen);
+        })
+        .set_input_layout(0, ir::TileLayout::row_major)
+        .set_input_layout(1, ir::TileLayout::row_major)
+        .set_input_layout(2, ir::TileLayout::row_major)
+        .set_output_layout(ir::TileLayout::row_major);
+  }
   // tile.mscatter: src and idx must be row_major (MTE3 DMA reads UB linearly)
   if (exclude_ops.count("tile.mscatter") == 0) {
     backend.RegisterOp("tile.mscatter")
@@ -3778,6 +3821,16 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   // tile.full (TEXPANDS): output is row_major per ISA
   if (exclude_ops.count("tile.full") == 0) {
     backend.RegisterOp("tile.full")
+        .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+          return MakeFullCodegenPTO("pto.texpands", op, codegen);
+        })
+        .set_output_layout(ir::TileLayout::row_major);
+  }
+  // tile.expands (TEXPANDS): broadcast a scalar to the target tile shape.
+  // Same codegen as tile.full — scalar is arg[1], output shape comes from dst;
+  // arg[0] (target tile) only carries the shape and is not emitted.
+  if (exclude_ops.count("tile.expands") == 0) {
+    backend.RegisterOp("tile.expands")
         .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
           return MakeFullCodegenPTO("pto.texpands", op, codegen);
         })

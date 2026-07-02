@@ -1022,7 +1022,7 @@ def _register_ops() -> None:  # noqa: PLR0915
 
     # tile selection
     m["tile.sel"] = lambda a, _kw: f"torch.where({a[0]}, {a[1]}, {a[2]})"
-    m["tile.sels"] = lambda a, _kw: f"torch.where({a[0]}, {a[1]}, {a[2]})"
+    m["tile.sels"] = lambda a, _kw: f"torch.where({a[0]}, {a[1]}, {a[3]})"
     m["tile.lrelu"] = lambda a, _kw: f"torch.where({a[0]} > 0, {a[0]}, {a[0]} * {a[1]})"
 
     # tile ternary add/sub with carry

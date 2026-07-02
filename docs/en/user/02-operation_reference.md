@@ -221,7 +221,7 @@ scratch tile to materialize numeric results on A2/A3.
 | `cmp` | `(lhs: Tile, rhs: Tile, cmp_type: int = 0) -> Tile` | Compare two tiles |
 | `cmps` | `(lhs: Tile, rhs: int \| float \| Scalar, cmp_type: int = 0) -> Tile` | Compare tile with scalar |
 | `sel` | `(mask: Tile, lhs: Tile, rhs: Tile, tmp: Tile) -> Tile` | Select: `lhs if mask else rhs`; `tmp` is TSEL scratch |
-| `sels` | `(lhs: Tile, rhs: Tile, select_mode: int \| float \| Scalar) -> Tile` | Select by scalar mode |
+| `sels` | `(mask: Tile, src: Tile, tmp: Tile, scalar: int \| float \| Scalar) -> Tile` | Select: `src if mask else scalar`; `tmp` is TSELS scratch |
 
 ## Bitwise (`pl.tile.*`)
 

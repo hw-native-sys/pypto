@@ -133,20 +133,19 @@ TypePtr DeduceTileExpandScalarType(const std::vector<ExprPtr>& args,
   CHECK(tile_type) << "The operator " << op_name << " requires first argument to be a TileType, but got "
                    << args[0]->GetType()->TypeName();
 
-  // Second argument is the scalar to expand
+  // Second argument is the scalar to broadcast
   auto scalar_type = As<ScalarType>(args[1]->GetType());
   CHECK(scalar_type) << "The operator " << op_name << " requires second argument to be a ScalarType, but got "
                      << args[1]->GetType()->TypeName();
 
-  // Result has same shape as tile, with promoted dtype
-  auto result_dtype = PromoteDataTypes(tile_type->dtype_, scalar_type->dtype_);
-  CHECK(result_dtype) << "The operator " << op_name << " requires compatible data types";
-
-  // Broadcast ops preserve the target tile's valid_shape (issue #1450; same class as #1370 for unary ops).
+  // expands is a scalar fill: the scalar is broadcast into the target tile, so
+  // the output dtype follows the target tile, NOT a promotion against the
+  // scalar. Promoting (e.g. FP16 tile + FP32 scalar -> FP32) would widen the
+  // output and break the pto.tstore src/dst bitwidth match on A2/A3.
   TileView tile_view;
   tile_view.valid_shape = GetValidShape(tile_type);
   InheritTileViewLayout(tile_view, tile_type);
-  return std::make_shared<TileType>(tile_type->shape_, *result_dtype, std::nullopt, tile_view);
+  return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt, tile_view);
 }
 
 // ============================================================================

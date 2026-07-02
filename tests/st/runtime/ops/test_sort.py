@@ -427,10 +427,122 @@ class MrgSort2WayFP32Program:
         return val_output, idx_output
 
 
+@pl.program
+class MrgSort3WayFP32Program:
+    """Tensor-level sort32 + format1 + format2 (3-way merge) for 1536 FP32 elements.
+
+    Three 512-element thirds are each sorted (sort32 → 2× format1), then merged
+    with a single format2 3-way ``pl.tensor.mrgsort(a, b, c)`` (tmp synthesized by
+    the conversion pass).
+    """
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        src: pl.Tensor[[1, 1536], pl.FP32],
+        idx: pl.Tensor[[1, 1536], pl.UINT32],
+        val_output: pl.Out[pl.Tensor[[1, 1536], pl.FP32]],
+        idx_output: pl.Out[pl.Tensor[[1, 1536], pl.UINT32]],
+    ) -> tuple[pl.Tensor[[1, 1536], pl.FP32], pl.Tensor[[1, 1536], pl.UINT32]]:
+        with pl.at(
+            level=pl.Level.CORE_GROUP,
+            optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
+        ):
+            a_src = pl.tensor.slice(src, shape=[1, 512], offset=[0, 0])
+            a_idx = pl.tensor.slice(idx, shape=[1, 512], offset=[0, 0])
+            b_src = pl.tensor.slice(src, shape=[1, 512], offset=[0, 512])
+            b_idx = pl.tensor.slice(idx, shape=[1, 512], offset=[0, 512])
+            c_src = pl.tensor.slice(src, shape=[1, 512], offset=[0, 1024])
+            c_idx = pl.tensor.slice(idx, shape=[1, 512], offset=[0, 1024])
+
+            a_sorted = pl.tensor.mrgsort(
+                pl.tensor.mrgsort(pl.tensor.sort32(a_src, a_idx), block_len=64), block_len=256
+            )
+            b_sorted = pl.tensor.mrgsort(
+                pl.tensor.mrgsort(pl.tensor.sort32(b_src, b_idx), block_len=64), block_len=256
+            )
+            c_sorted = pl.tensor.mrgsort(
+                pl.tensor.mrgsort(pl.tensor.sort32(c_src, c_idx), block_len=64), block_len=256
+            )
+
+            merged = pl.tensor.mrgsort(a_sorted, b_sorted, c_sorted)
+
+            vals = pl.tensor.gather(merged, mask_pattern=pl.tile.MaskPattern.P0101)
+            sorted_idx = pl.tensor.gather(
+                merged, mask_pattern=pl.tile.MaskPattern.P1010, output_dtype=pl.UINT32
+            )
+            val_output = pl.assemble(val_output, vals, [0, 0])
+            idx_output = pl.assemble(idx_output, sorted_idx, [0, 0])
+        return val_output, idx_output
+
+
+@pl.program
+class MrgSort4WayFP32Program:
+    """Tensor-level sort32 + format1 + format2 (4-way merge) for 2048 FP32 elements.
+
+    Four 512-element quarters are each sorted (sort32 → 2× format1), then merged
+    with a single format2 4-way ``pl.tensor.mrgsort(a, b, c, d)``.
+    """
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        src: pl.Tensor[[1, 2048], pl.FP32],
+        idx: pl.Tensor[[1, 2048], pl.UINT32],
+        val_output: pl.Out[pl.Tensor[[1, 2048], pl.FP32]],
+        idx_output: pl.Out[pl.Tensor[[1, 2048], pl.UINT32]],
+    ) -> tuple[pl.Tensor[[1, 2048], pl.FP32], pl.Tensor[[1, 2048], pl.UINT32]]:
+        with pl.at(
+            level=pl.Level.CORE_GROUP,
+            optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
+        ):
+            a_src = pl.tensor.slice(src, shape=[1, 512], offset=[0, 0])
+            a_idx = pl.tensor.slice(idx, shape=[1, 512], offset=[0, 0])
+            b_src = pl.tensor.slice(src, shape=[1, 512], offset=[0, 512])
+            b_idx = pl.tensor.slice(idx, shape=[1, 512], offset=[0, 512])
+            c_src = pl.tensor.slice(src, shape=[1, 512], offset=[0, 1024])
+            c_idx = pl.tensor.slice(idx, shape=[1, 512], offset=[0, 1024])
+            d_src = pl.tensor.slice(src, shape=[1, 512], offset=[0, 1536])
+            d_idx = pl.tensor.slice(idx, shape=[1, 512], offset=[0, 1536])
+
+            a_sorted = pl.tensor.mrgsort(
+                pl.tensor.mrgsort(pl.tensor.sort32(a_src, a_idx), block_len=64), block_len=256
+            )
+            b_sorted = pl.tensor.mrgsort(
+                pl.tensor.mrgsort(pl.tensor.sort32(b_src, b_idx), block_len=64), block_len=256
+            )
+            c_sorted = pl.tensor.mrgsort(
+                pl.tensor.mrgsort(pl.tensor.sort32(c_src, c_idx), block_len=64), block_len=256
+            )
+            d_sorted = pl.tensor.mrgsort(
+                pl.tensor.mrgsort(pl.tensor.sort32(d_src, d_idx), block_len=64), block_len=256
+            )
+
+            merged = pl.tensor.mrgsort(a_sorted, b_sorted, c_sorted, d_sorted)
+
+            vals = pl.tensor.gather(merged, mask_pattern=pl.tile.MaskPattern.P0101)
+            sorted_idx = pl.tensor.gather(
+                merged, mask_pattern=pl.tile.MaskPattern.P1010, output_dtype=pl.UINT32
+            )
+            val_output = pl.assemble(val_output, vals, [0, 0])
+            idx_output = pl.assemble(idx_output, sorted_idx, [0, 0])
+        return val_output, idx_output
+
+
 # --- Test Cases ---
 
 
 # Factory functions for init_value tensors (golden_writer requires callables for large tensors).
+
+
+def _make_idx_1x1536():
+    """Global indices [0..1535] for mrgsort 3-way format2 test."""
+    return torch.arange(0, 1536, dtype=torch.int32).unsqueeze(0).contiguous()
+
+
+def _make_src_1x1536():
+    """Deterministic [1, 1536] FP32 source with unique values."""
+    return _make_unique_fp32_values(1536).unsqueeze(0).contiguous()
 
 
 def _make_unique_fp32_values(length: int) -> torch.Tensor:
@@ -700,6 +812,72 @@ class MrgSort2WayFP32TestCase(PTOTestCase):
         tensors["idx_output"][:] = idx[global_order].unsqueeze(0)
 
 
+class MrgSort3WayFP32TestCase(PTOTestCase):
+    """Test sort32 → format1 (per 512-element third) → format2 3-way merge pipeline.
+
+    1536 FP32 elements split into three 512-element thirds, each sorted with
+    sort32 + 2× format1, then merged via mrgsort format2 (3-way).
+    """
+
+    def get_name(self) -> str:
+        return "mrgsort3_way_fp32"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("src", [1, 1536], DataType.FP32, init_value=_make_src_1x1536),
+            TensorSpec("idx", [1, 1536], DataType.UINT32, init_value=_make_idx_1x1536),
+            TensorSpec("val_output", [1, 1536], DataType.FP32, is_output=True),
+            TensorSpec("idx_output", [1, 1536], DataType.UINT32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return MrgSort3WayFP32Program
+
+    def compute_expected(self, tensors, params=None):
+        """Sort all 1536 elements descending; verify values and original indices."""
+        src = tensors["src"].flatten()
+        idx = tensors["idx"].flatten()
+        _, global_order = torch.sort(src, descending=True)
+        tensors["val_output"][:] = src[global_order].unsqueeze(0)
+        tensors["idx_output"][:] = idx[global_order].unsqueeze(0)
+
+
+class MrgSort4WayFP32TestCase(PTOTestCase):
+    """Test sort32 → format1 (per 512-element quarter) → format2 4-way merge pipeline.
+
+    2048 FP32 elements split into four 512-element quarters, each sorted with
+    sort32 + 2× format1, then merged via mrgsort format2 (4-way).
+    """
+
+    def get_name(self) -> str:
+        return "mrgsort4_way_fp32"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("src", [1, 2048], DataType.FP32, init_value=_make_src_1x2048),
+            TensorSpec("idx", [1, 2048], DataType.UINT32, init_value=_make_idx_1x2048),
+            TensorSpec("val_output", [1, 2048], DataType.FP32, is_output=True),
+            TensorSpec("idx_output", [1, 2048], DataType.UINT32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return MrgSort4WayFP32Program
+
+    def compute_expected(self, tensors, params=None):
+        """Sort all 2048 elements descending; verify values and original indices."""
+        src = tensors["src"].flatten()
+        idx = tensors["idx"].flatten()
+        _, global_order = torch.sort(src, descending=True)
+        tensors["val_output"][:] = src[global_order].unsqueeze(0)
+        tensors["idx_output"][:] = idx[global_order].unsqueeze(0)
+
+
 class Sort32FP32TestCase(PTOTestCase):
     """Test sort32 with FP32 data and PTO backend.
 
@@ -886,6 +1064,18 @@ class TestSort:
           format2 2-way merge → [1,2048] → gather → val [1,1024] + idx [1,1024]
         """
         result = test_runner.run(MrgSort2WayFP32TestCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_mrgsort3_way_fp32(self, test_runner, platform):
+        """Test tmrgsort format2 3-way merge: sort 1536 elements via three sorted thirds."""
+        result = test_runner.run(MrgSort3WayFP32TestCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_mrgsort4_way_fp32(self, test_runner, platform):
+        """Test tmrgsort format2 4-way merge: sort 2048 elements via four sorted quarters."""
+        result = test_runner.run(MrgSort4WayFP32TestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 
