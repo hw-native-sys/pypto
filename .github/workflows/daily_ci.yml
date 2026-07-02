@@ -194,7 +194,13 @@ jobs:
           python -c "import pypto, simpler; print('env OK:', pypto.__file__)"
 
       - name: Clone pypto-lib (Qwen3-14B decode)
-        run: git clone --depth 1 https://github.com/hw-native-sys/pypto-lib.git $GITHUB_WORKSPACE/pypto-lib
+        # $GITHUB_WORKSPACE/pypto-lib is a sibling of the perf-checkout checkout
+        # path, so actions/checkout won't clean it on a persistent self-hosted
+        # runner — a leftover dir from a previous run makes `git clone` fail with
+        # "destination path already exists". Remove it first.
+        run: |
+          rm -rf "$GITHUB_WORKSPACE/pypto-lib"
+          git clone --depth 1 https://github.com/hw-native-sys/pypto-lib.git "$GITHUB_WORKSPACE/pypto-lib"
 
       - name: Install pypto-lib runner dependencies
         run: |

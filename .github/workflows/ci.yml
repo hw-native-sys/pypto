@@ -185,6 +185,9 @@ jobs:
     # Checkout / install happen under ./st-checkout so they don't collide with
     # other jobs' workspaces.
     needs: toolchain
+    # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
+    permissions:
+      contents: read
     # TEST MODE: keep the device runner so DEVICE_ID/DEVICE_RANGE exist and pin
     # task-submit to that card (validates the new compile-card-free + task-submit
     # execute flow deterministically). FLIP TO PROD: change this to
@@ -226,6 +229,13 @@ jobs:
         # Namespace ccache by the pinned pto-isa commit so an ISA bump forces a
         # real recompile instead of serving stale objects (mirrors pypto-lib).
         run: echo "CCACHE_NAMESPACE=pto-isa-${{ needs.toolchain.outputs.pto_isa_commit }}" >> "$GITHUB_ENV"
+
+      - name: Relax shared ccache permissions
+        # The container codegen-tests job writes this same ci-cache/ccache dir as
+        # root; CCACHE_UMASK only affects NEW entries, so pre-existing root-owned
+        # buckets can be unwritable by this host (ci-runner) job. Best-effort relax
+        # them before the first compiler launch (no-op if absent / already ok).
+        run: chmod -R a+rwX "$CCACHE_DIR" 2>/dev/null || true
 
       - name: Install ptoas (local cache)
         env:
@@ -428,6 +438,9 @@ jobs:
     # would EACCES our ci-runner cleanup).
     needs: toolchain
     if: false  # DEBUG: temporarily disabled — focus on system-tests only. RESTORE before merge.
+    # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
+    permissions:
+      contents: read
     # TEST MODE: keep the 2-device runner and pin task-submit to DEVICE_RANGE
     # (see system-tests). FLIP TO PROD: cpu runner + `--device auto --device-num 2`.
     runs-on: [self-hosted, linux, arm64, npu-2-device]
@@ -465,6 +478,13 @@ jobs:
         # Namespace ccache by the pinned pto-isa commit so an ISA bump forces a
         # real recompile instead of serving stale objects (mirrors pypto-lib).
         run: echo "CCACHE_NAMESPACE=pto-isa-${{ needs.toolchain.outputs.pto_isa_commit }}" >> "$GITHUB_ENV"
+
+      - name: Relax shared ccache permissions
+        # The container codegen-tests job writes this same ci-cache/ccache dir as
+        # root; CCACHE_UMASK only affects NEW entries, so pre-existing root-owned
+        # buckets can be unwritable by this host (ci-runner) job. Best-effort relax
+        # them before the first compiler launch (no-op if absent / already ok).
+        run: chmod -R a+rwX "$CCACHE_DIR" 2>/dev/null || true
 
       - name: Install ptoas (local cache)
         env:
@@ -553,6 +573,9 @@ jobs:
     # activate.sh before the wrap is enough — the child inherits the venv + env.
     needs: toolchain
     if: false  # DEBUG: temporarily disabled — focus on system-tests only. RESTORE before merge.
+    # Checkout + clone pypto-lib + test only — no write scopes needed on GITHUB_TOKEN.
+    permissions:
+      contents: read
     # TEST MODE: keep the device runner and pin task-submit to its card (see
     # system-tests). FLIP TO PROD: cpu runner + `--device auto`.
     runs-on: [self-hosted, linux, arm64, npu-1-device]
@@ -590,6 +613,13 @@ jobs:
         # Namespace ccache by the pinned pto-isa commit so an ISA bump forces a
         # real recompile instead of serving stale objects (mirrors pypto-lib).
         run: echo "CCACHE_NAMESPACE=pto-isa-${{ needs.toolchain.outputs.pto_isa_commit }}" >> "$GITHUB_ENV"
+
+      - name: Relax shared ccache permissions
+        # The container codegen-tests job writes this same ci-cache/ccache dir as
+        # root; CCACHE_UMASK only affects NEW entries, so pre-existing root-owned
+        # buckets can be unwritable by this host (ci-runner) job. Best-effort relax
+        # them before the first compiler launch (no-op if absent / already ok).
+        run: chmod -R a+rwX "$CCACHE_DIR" 2>/dev/null || true
 
       - name: Install ptoas (local cache)
         env:

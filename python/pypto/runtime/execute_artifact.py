@@ -41,15 +41,27 @@ import argparse
 import json
 import traceback
 from pathlib import Path
+from typing import Any
 
 from pypto.runtime.runner import _DfxOpts, _execute_on_device
 
-__all__ = ["execute_artifact_dir", "execute_batch_manifest", "main"]
+__all__ = ["ArtifactSetupError", "execute_artifact_dir", "execute_batch_manifest", "main"]
 
 # Sentinel line parsed by the harness (``_execute_via_task_submit``) to tell a
 # genuine case failure apart from an infra kill (``task-submit`` --max-time /
 # --timeout, missing binary). Keep in sync with the harness-side parser.
 _RESULT_PREFIX = "PYPTO_EXEC_RESULT"
+
+
+class ArtifactSetupError(Exception):
+    """A pre-run artifact reconstruction / setup failure.
+
+    Raised when ``compile_and_assemble`` cannot rebuild the cached artifact
+    (missing / stale ``.o``/``.so``, bad ``work_dir``, corrupt inputs) — i.e.
+    *before* any device execution. The CLI reports this as an infra problem
+    (``PYPTO_EXEC_RESULT=INFRA``) rather than a device test failure
+    (``=FAIL``), so a cache/setup miss isn't misread as a numerical regression.
+    """
 
 
 def execute_artifact_dir(
@@ -83,12 +95,20 @@ def execute_artifact_dir(
             per-test tolerance, so this run is tolerance-independent.
 
     Raises:
-        Exception: Any compile/load/device/validation error is propagated to
-            the caller (``main`` turns it into exit code ``1``).
+        ArtifactSetupError: ``compile_and_assemble`` could not rebuild the
+            cached artifact (infra, not a test failure). ``main`` maps it to
+            ``PYPTO_EXEC_RESULT=INFRA``.
+        Exception: Any device / validation error is propagated to the caller
+            (``main`` turns it into ``PYPTO_EXEC_RESULT=FAIL`` + exit ``1``).
     """
     from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
 
-    chip_callable, runtime_name, _ = compile_and_assemble(work_dir, platform, pto_isa_commit=pto_isa_commit)
+    try:
+        chip_callable, runtime_name, _ = compile_and_assemble(
+            work_dir, platform, pto_isa_commit=pto_isa_commit
+        )
+    except Exception as exc:  # noqa: BLE001 — reclassified as infra, re-raised below
+        raise ArtifactSetupError(f"artifact reconstruction failed for {work_dir}: {exc}") from exc
     _execute_on_device(
         work_dir,
         work_dir / "golden.py",
@@ -122,8 +142,13 @@ def execute_batch_manifest(
     Each artifact runs under its own ``try`` so one failure doesn't abort the
     rest, and emits a per-artifact marker the harness parses::
 
-        PYPTO_EXEC_RESULT=PASS work_dir=<wd> device=<N>
-        PYPTO_EXEC_RESULT=FAIL work_dir=<wd>
+        PYPTO_EXEC_RESULT=PASS  work_dir=<wd> device=<N>   # ran + (deferred) validate
+        PYPTO_EXEC_RESULT=FAIL  work_dir=<wd>              # device / validation failure
+        PYPTO_EXEC_RESULT=INFRA work_dir=<wd>              # reconstruction/setup failure
+
+    Every entry — including one whose artifact cannot be rebound — gets its own
+    marker, so a single bad artifact never sinks the whole batch (a marker-less
+    batch-level crash would make the harness fail *all* entries).
 
     Returns ``True`` iff every artifact in the batch succeeded.  (A hard process
     crash leaves later artifacts without a marker; the harness treats a missing
@@ -136,10 +161,25 @@ def execute_batch_manifest(
     if not entries:
         return True
 
-    def _run_one(work_dir: Path, platform: str) -> bool:
+    all_ok = True
+    # The worker caches registrations by ``id(chip_callable)``; if a callable is
+    # GC'd mid-batch its id can be recycled by the next one and the worker would
+    # dispatch the *stale* registration. Hold a strong ref to every callable for
+    # the batch lifetime to keep ids distinct.
+    live_callables: list[Any] = []
+
+    def _rebind(work_dir: Path, platform: str) -> tuple[Any, str]:
         chip_callable, runtime_name, _ = compile_and_assemble(
             work_dir, platform, pto_isa_commit=pto_isa_commit
         )
+        live_callables.append(chip_callable)
+        return chip_callable, runtime_name
+
+    def _run_one(work_dir: Path, platform: str) -> None:
+        try:
+            chip_callable, runtime_name = _rebind(work_dir, platform)
+        except Exception as exc:
+            raise ArtifactSetupError(str(exc)) from exc
         _execute_on_device(
             work_dir,
             work_dir / "golden.py",
@@ -151,32 +191,63 @@ def execute_batch_manifest(
             validate=validate,
             actual_out_dir=work_dir / "data" / "actual",
         )
-        return True
 
-    # Open one ChipWorker for the batch, bound to the first artifact's runtime
-    # (uniform within a backend group in practice). compile_and_assemble is a
-    # cache hit, so peeking the first runtime is cheap.
-    first = entries[0]
-    _, first_runtime, _ = compile_and_assemble(
-        Path(first["work_dir"]), first["platform"], pto_isa_commit=pto_isa_commit
-    )
-    all_ok = True
+    def _run_and_mark(entry: dict) -> None:
+        nonlocal all_ok
+        work_dir = Path(entry["work_dir"])
+        try:
+            _run_one(work_dir, entry["platform"])
+            print(f"{_RESULT_PREFIX}=PASS work_dir={work_dir} device={device_id}", flush=True)
+        except ArtifactSetupError:
+            # Rebuild failed before the device run — infra, not a test failure.
+            print(traceback.format_exc(), flush=True)
+            print(f"{_RESULT_PREFIX}=INFRA work_dir={work_dir}", flush=True)
+            all_ok = False
+        except Exception:
+            # Print the traceback to stdout (not stderr) so it sits right before
+            # this artifact's FAIL marker — the harness attributes the preceding
+            # stdout lines to this case for an inline error report.
+            print(traceback.format_exc(), flush=True)
+            print(f"{_RESULT_PREFIX}=FAIL work_dir={work_dir}", flush=True)
+            all_ok = False
+
+    # Onboard swimlane runs a dep-gen subprocess that must own the card/SVM state
+    # for the duration of dep capture; a batch ChipWorker held open on the same
+    # device_id would collide with it. Fall back to per-artifact one-shot
+    # execution (each _execute_on_device opens + closes its own worker) so the
+    # dep-gen child owns the device first, preserving the two-pass design.
+    first_platform = str(entries[0]["platform"])
+    if dfx.enable_l2_swimlane and not first_platform.endswith("sim"):
+        for entry in entries:
+            _run_and_mark(entry)
+        return all_ok
+
+    # Reuse one ChipWorker for the batch, bound to the runtime of the first
+    # artifact that rebinds. Probe entries in order so a leading un-rebindable
+    # artifact gets its own INFRA marker instead of aborting the batch before the
+    # worker opens. compile_and_assemble is a cache hit, so the probe is cheap.
+    first_runtime: str | None = None
+    start_idx = 0
+    for i, entry in enumerate(entries):
+        try:
+            _, first_runtime = _rebind(Path(entry["work_dir"]), entry["platform"])
+            start_idx = i
+            break
+        except Exception:
+            work_dir = Path(entry["work_dir"])
+            print(traceback.format_exc(), flush=True)
+            print(f"{_RESULT_PREFIX}=INFRA work_dir={work_dir}", flush=True)
+            all_ok = False
+    else:
+        # No artifact could be rebound — every entry already got an INFRA marker.
+        return False
+
     with ChipWorker(
-        config=RunConfig(platform=first["platform"], device_id=device_id),
+        config=RunConfig(platform=str(entries[start_idx]["platform"]), device_id=device_id),
         runtime=first_runtime,
     ):
-        for entry in entries:
-            work_dir = Path(entry["work_dir"])
-            try:
-                _run_one(work_dir, entry["platform"])
-                print(f"{_RESULT_PREFIX}=PASS work_dir={work_dir} device={device_id}", flush=True)
-            except Exception:
-                # Print the traceback to stdout (not stderr) so it sits right
-                # before this artifact's FAIL marker — the harness attributes the
-                # preceding stdout lines to this case for an inline error report.
-                print(traceback.format_exc(), flush=True)
-                print(f"{_RESULT_PREFIX}=FAIL work_dir={work_dir}", flush=True)
-                all_ok = False
+        for entry in entries[start_idx:]:
+            _run_and_mark(entry)
     return all_ok
 
 
@@ -255,11 +326,11 @@ def main(argv: list[str] | None = None) -> int:
                 validate=not args.no_validate,
             )
         except Exception:
-            # A batch-level failure (e.g. opening the ChipWorker / device init):
-            # no per-artifact markers — the harness treats every artifact in the
-            # batch as failed.
+            # A batch-level failure (e.g. opening the ChipWorker / device init) is
+            # infra, not a test failure: no per-artifact markers — the harness
+            # treats every artifact in the batch as failed.
             traceback.print_exc()
-            print(f"{_RESULT_PREFIX}=FAIL", flush=True)
+            print(f"{_RESULT_PREFIX}=INFRA", flush=True)
             return 1
         return 0 if all_ok else 1
 
@@ -274,6 +345,13 @@ def main(argv: list[str] | None = None) -> int:
             dfx=dfx,
             validate=not args.no_validate,
         )
+    except ArtifactSetupError:
+        # Reconstruction/setup failed before the device run — infra, not a test
+        # failure. Emit INFRA (not FAIL) so the harness doesn't count a stale /
+        # missing cache or bad --work-dir as a device regression.
+        traceback.print_exc()
+        print(f"{_RESULT_PREFIX}=INFRA", flush=True)
+        return 1
     except Exception:
         traceback.print_exc()
         print(f"{_RESULT_PREFIX}=FAIL", flush=True)

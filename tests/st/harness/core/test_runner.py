@@ -22,6 +22,7 @@ import json
 import logging
 import math
 import queue
+import shlex
 import shutil
 import subprocess
 import sys
@@ -189,6 +190,31 @@ def _default_work_dir(test_name: str) -> Path:
     """Return the default output path for a saved test: build_output/{testName}_{timestamp}."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return _PROJECT_ROOT / "build_output" / f"{test_name}_{timestamp}"
+
+
+def _inline_work_dir(config: RunConfig, test_name: str, resolved_platform: str) -> "tuple[Path, bool]":
+    """Pick the ``_run_inline`` build directory. Returns ``(work_dir, is_temp)``.
+
+    - ``--save-kernels``: a persistent, named directory (never cleaned up here).
+    - otherwise a temp dir. When the case will borrow a card via task-submit, the
+      device step runs in a separate host process (via runuser) that must READ
+      work_dir, and a private-/tmp ``mkdtemp`` isn't guaranteed cross-user
+      visible — so mirror the pipeline path and place it under the repo-local
+      ``build_output``. A plain /tmp dir is fine for the in-process device run.
+    """
+    if config.save_kernels:
+        if config.save_kernels_dir:
+            work_dir = Path(config.save_kernels_dir) / test_name
+        else:
+            work_dir = _default_work_dir(test_name)
+        work_dir.mkdir(parents=True, exist_ok=True)
+        return work_dir, False
+    base_dir: str | None = None
+    if _pipeline_ctx.get("inline_via_task_submit") and not resolved_platform.endswith("sim"):
+        base = _PROJECT_ROOT / "build_output"
+        base.mkdir(parents=True, exist_ok=True)
+        base_dir = str(base)
+    return Path(tempfile.mkdtemp(prefix=f"pypto_test_{test_name}_", dir=base_dir)), True
 
 
 def _write_golden_for_test_case(test_case: PTOTestCase, output_path: Path) -> None:
@@ -434,22 +460,49 @@ def _classify_task_submit_failure(returncode: int, stdout: str, stderr: str) -> 
     """
     has_fail = f"{_RESULT_MARKER_PREFIX}=FAIL" in stdout
     has_pass = f"{_RESULT_MARKER_PREFIX}=PASS" in stdout
+    has_infra = f"{_RESULT_MARKER_PREFIX}=INFRA" in stdout
     streams = f"---- stdout ----\n{stdout}\n---- stderr ----\n{stderr}"
+    if has_infra:
+        # Pre-run reconstruction/setup failure (stale/missing cached .o/.so, bad
+        # --work-dir, corrupt artifact) — an infra problem, not a device test
+        # failure. Kept distinct from FAIL so a cache/setup miss isn't misread
+        # as a real numerical regression.
+        return f"Artifact reconstruction/setup failed before the device run (infra, not a test).\n{streams}"
     if returncode == 0 and not has_pass:
         return f"task-submit returned 0 without a PASS marker — suspected scheduler anomaly.\n{streams}"
     if returncode == 1 and has_fail:
         return f"Test failed on device.\n{streams}"
-    if returncode == 1:
+    if returncode == 1 and not stdout.strip() and not stderr.strip():
+        # No child output at all: task-submit never got a card within --timeout.
         return (
             "Borrowed-card queue wait timed out (task-submit --timeout); the task may still "
             f"be running. Raise --task-queue-timeout.\n{streams}"
         )
+    if returncode == 1:
+        # The child ran and printed something but emitted no PASS/FAIL/INFRA
+        # marker — e.g. a bootstrap/import crash before execute_artifact's own
+        # try/except. Don't mislabel it as a queue timeout.
+        return f"execute_artifact exited 1 without a result marker (child bootstrap failure?).\n{streams}"
     if returncode in (137, 143):
         return (
             "Execution killed by task-submit watchdog (--max-time exceeded); investigate a "
             f"hang or raise --task-max-time.\n{streams}"
         )
     return f"task-submit rc={returncode}.\n{streams}"
+
+
+def _shell_quote_run(project_root: Path, inner: "list[str]") -> str:
+    """Build the ``task-submit --run`` shell payload, quoting every token.
+
+    ``subprocess.run`` invokes ``task-submit`` with an argv list, but the
+    ``--run`` value is a *shell* command line, so spaces / metacharacters in the
+    work_dir, platform, or commit tokens would otherwise alter it. Quote the
+    project root and each ``inner`` token with ``shlex.quote`` — except the
+    literal ``$TASK_DEVICE`` placeholder, which must stay unquoted so the shell
+    ``task-submit`` runs the command in expands it.
+    """
+    quoted = " ".join("$TASK_DEVICE" if tok == "$TASK_DEVICE" else shlex.quote(tok) for tok in inner)
+    return f"cd {shlex.quote(str(project_root))} && {quoted}"
 
 
 def _run_artifact_via_task_submit(
@@ -507,14 +560,14 @@ def _run_artifact_via_task_submit(
         "--max-time",
         str(max_time),
         "--run",
-        f"cd {_PROJECT_ROOT} && {' '.join(inner)}",
+        _shell_quote_run(_PROJECT_ROOT, inner),
     ]
     try:
         proc = subprocess.run(argv, check=False, capture_output=True, text=True)  # noqa: S603
-    except FileNotFoundError:
+    except OSError as exc:
         return (
             False,
-            "task-submit not found on this machine — do not pass --execute-via-task-submit here.",
+            f"Failed to exec task-submit ({exc}) — do not pass --execute-via-task-submit here.",
             None,
         )
     # Persist the full child output next to the artifact for post-mortem. Do NOT
@@ -574,12 +627,12 @@ def _run_batch_via_task_submit(
         "--max-time",
         str(max_time),
         "--run",
-        f"cd {_PROJECT_ROOT} && {' '.join(inner)}",
+        _shell_quote_run(_PROJECT_ROOT, inner),
     ]
     try:
         proc = subprocess.run(argv, check=False, capture_output=True, text=True)  # noqa: S603
-    except FileNotFoundError:
-        err = "task-submit not found on this machine — do not pass --execute-via-task-submit here."
+    except OSError as exc:
+        err = f"Failed to exec task-submit ({exc}) — do not pass --execute-via-task-submit here."
         return {str(wd): (False, err, None) for wd, _ in entries}
     # Persist the full batch output for post-mortem; do NOT reprint it (the
     # device chatter / per-artifact markers would bury pytest's own per-test
@@ -603,6 +656,15 @@ def _run_batch_via_task_submit(
                 if line.startswith(f"{_RESULT_MARKER_PREFIX}=PASS"):
                     dev = _marker_value(line, "device=")
                     results[wd] = (True, None, int(dev) if dev and dev.isdigit() else None)
+                elif line.startswith(f"{_RESULT_MARKER_PREFIX}=INFRA"):
+                    # Reconstruction/setup failure for this artifact (stale cache,
+                    # missing .o/.so) — infra, not a device test failure. Attributed
+                    # to the entry so one bad artifact doesn't sink the whole batch.
+                    results[wd] = (
+                        False,
+                        "artifact reconstruction/setup failed (infra):\n" + "\n".join(buf).strip(),
+                        None,
+                    )
                 else:
                     results[wd] = (False, "device run failed:\n" + "\n".join(buf).strip(), None)
             buf = []
@@ -778,10 +840,20 @@ def _batch_submitter(batch_size: int, cache_dir: Path) -> None:
     pto_isa_commit = _pipeline_ctx.get("pto_isa_commit")
     max_time = _pipeline_ctx.get("task_max_time", 600)
     queue_timeout = _pipeline_ctx.get("task_queue_timeout", 1800)
+    # A 0 / negative batch size would never fill a batch (``len(pending) >= 0`` is
+    # always true, submitting empty chunks while pending never drains), hanging
+    # every task-submit test on ``_batches_ready``. Clamp to a sane minimum.
+    batch_size = max(1, batch_size)
 
     def _submit(chunk: "list[tuple[str, Path, str]]", idx: int) -> None:
         entries = [(wd, plat) for _, wd, plat in chunk]
         manifest_path = cache_dir / f"batch_{idx}.json"
+        # ``--task-max-time`` is a PER-CASE budget, but a batch runs all its
+        # entries in one task-submit task, so scale the watchdog by the batch
+        # length — otherwise a valid batch of many slow-but-passing artifacts is
+        # killed at the single-case limit and the harness reports the survivors as
+        # infra failures.
+        batch_max_time = max_time * len(entries)
         fut = _execute_pool.submit(
             _run_batch_via_task_submit,
             entries,
@@ -789,7 +861,7 @@ def _batch_submitter(batch_size: int, cache_dir: Path) -> None:
             device,
             dfx,
             pto_isa_commit,
-            max_time,
+            batch_max_time,
             queue_timeout,
         )
         for key, wd, _ in chunk:
@@ -797,7 +869,11 @@ def _batch_submitter(batch_size: int, cache_dir: Path) -> None:
 
     key_by_fut = {cfut: key for key, cfut in _compile_futures.items()}
     batch_idx = 0
-    pending: list[tuple[str, Path, str]] = []  # (cache_key, work_dir, platform)
+    # A batch child opens ONE ChipWorker from its first entry's platform, so a
+    # batch must never mix platforms (a mixed --platform=a2a3,a5 run would
+    # otherwise execute a5 artifacts under an a2a3 device context). Bucket pending
+    # artifacts per resolved platform and chunk within each bucket.
+    pending: dict[str, list[tuple[str, Path, str]]] = {}  # platform → (cache_key, work_dir, platform)
 
     # Consume in completion order: fill a batch as cases finish compiling and
     # submit it immediately, so execution and compilation overlap.
@@ -810,14 +886,17 @@ def _batch_submitter(batch_size: int, cache_dir: Path) -> None:
             continue
         if artifact.resolved_platform.endswith("sim"):
             continue
-        pending.append((key_by_fut[cfut], artifact.work_dir, artifact.resolved_platform))
-        if len(pending) >= batch_size:
-            _submit(pending[:batch_size], batch_idx)
+        bucket = pending.setdefault(artifact.resolved_platform, [])
+        bucket.append((key_by_fut[cfut], artifact.work_dir, artifact.resolved_platform))
+        if len(bucket) >= batch_size:
+            _submit(bucket[:batch_size], batch_idx)
             batch_idx += 1
-            pending = pending[batch_size:]
+            pending[artifact.resolved_platform] = bucket[batch_size:]
 
-    if pending:  # final short batch
-        _submit(pending, batch_idx)
+    for leftover in pending.values():  # final short batch per platform
+        if leftover:
+            _submit(leftover, batch_idx)
+            batch_idx += 1
 
     _batches_ready.set()
 
@@ -1077,6 +1156,26 @@ class TestRunner:
                     error=f"compile task crashed: {exc}\n{traceback.format_exc()}",
                     execution_time=0.0,
                 )
+            # Pre-compilation failure / codegen-only must be handled BEFORE the
+            # task-submit batch path: the batch submitter skips errored and
+            # codegen-only artifacts (they never enter ``_case_to_batch``), so
+            # otherwise a compile failure would surface as the misleading "compiled
+            # but was not assigned to any batch" instead of its real traceback.
+            if artifact.error is not None:
+                _last_device["value"] = None
+                return RunResult(
+                    passed=False,
+                    test_name=test_case.get_name(),
+                    error=f"Pre-compilation failed: {artifact.error}",
+                    execution_time=0.0,
+                )
+            if _pipeline_ctx.get("codegen_only"):
+                _last_device["value"] = None
+                return RunResult(
+                    passed=True,
+                    test_name=test_case.get_name(),
+                    execution_time=0.0,
+                )
             if _pipeline_ctx.get("execute_mode") == "task-submit" and not artifact.resolved_platform.endswith(
                 "sim"
             ):
@@ -1149,16 +1248,7 @@ class TestRunner:
         start_time = time.time()
         test_name = test_case.get_name()
 
-        if self.config.save_kernels:
-            if self.config.save_kernels_dir:
-                work_dir = Path(self.config.save_kernels_dir) / test_name
-            else:
-                work_dir = _default_work_dir(test_name)
-            work_dir.mkdir(parents=True, exist_ok=True)
-            use_temp = False
-        else:
-            work_dir = Path(tempfile.mkdtemp(prefix=f"pypto_test_{test_name}_"))
-            use_temp = True
+        work_dir, use_temp = _inline_work_dir(self.config, test_name, resolved_platform)
 
         try:
             backend_type = test_case.get_backend_type()

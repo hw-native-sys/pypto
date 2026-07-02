@@ -72,6 +72,28 @@ def test_failure_prints_fail_marker_and_returns_one(tmp_path, capsys):
     assert "PYPTO_EXEC_RESULT=PASS" not in captured.out
 
 
+def test_setup_error_prints_infra_marker_not_fail(tmp_path, capsys):
+    """A reconstruction/setup failure emits INFRA (infra), never FAIL (test failure)."""
+    with patch.object(
+        execute_artifact,
+        "execute_artifact_dir",
+        side_effect=execute_artifact.ArtifactSetupError("stale cache"),
+    ):
+        rc = main(_argv(tmp_path))
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "PYPTO_EXEC_RESULT=INFRA" in captured.out
+    assert "PYPTO_EXEC_RESULT=FAIL" not in captured.out
+    assert "stale cache" in captured.err
+
+
+def test_execute_artifact_dir_wraps_compile_failure_as_setup_error(tmp_path, stub_compile_and_assemble):
+    """A compile_and_assemble failure surfaces as ArtifactSetupError (infra)."""
+    stub_compile_and_assemble.side_effect = RuntimeError("missing .so")
+    with pytest.raises(execute_artifact.ArtifactSetupError):
+        execute_artifact_dir(tmp_path, "a2a3", 0)
+
+
 def test_dfx_flags_parsed_into_dfx_opts(tmp_path):
     with patch.object(execute_artifact, "execute_artifact_dir") as run:
         rc = main(
@@ -125,7 +147,7 @@ def test_execute_artifact_dir_wires_compile_then_execute(tmp_path, stub_compile_
     with patch.object(execute_artifact, "_execute_on_device") as exec_on_dev:
         execute_artifact_dir(tmp_path, "a2a3", 1, pto_isa_commit="deadbeef")
     stub_compile_and_assemble.assert_called_once_with(tmp_path, "a2a3", pto_isa_commit="deadbeef")
-    args, kwargs = exec_on_dev.call_args
+    args, _ = exec_on_dev.call_args
     # work_dir, golden_path, chip_callable, runtime_name, platform, device_id
     assert args[0] == tmp_path
     assert args[1] == tmp_path / "golden.py"
@@ -178,6 +200,53 @@ def test_execute_batch_one_failure_does_not_abort_rest(tmp_path, capsys, stub_co
     out = capsys.readouterr().out
     assert f"PYPTO_EXEC_RESULT=FAIL work_dir={wd1}" in out
     assert f"PYPTO_EXEC_RESULT=PASS work_dir={wd2} device=0" in out
+
+
+def test_execute_batch_first_rebind_failure_marks_infra_and_continues(
+    tmp_path, capsys, stub_compile_and_assemble
+):
+    """A leading un-rebindable artifact gets its own INFRA marker; the rest still run.
+
+    Regression: previously the batch's runtime probe ran outside the per-entry
+    try, so a first-entry rebind failure escaped as a marker-less batch crash and
+    the harness failed *every* entry in the batch.
+    """
+    wd1, wd2 = tmp_path / "a", tmp_path / "b"
+    manifest = _manifest(tmp_path, wd1, wd2)
+    # 1st rebind (probe wd1) fails; 2nd (probe wd2) + 3rd (run wd2) succeed.
+    stub_compile_and_assemble.side_effect = [
+        RuntimeError("bad .so"),
+        (object(), "tensormap_and_ringbuffer", {}),
+        (object(), "tensormap_and_ringbuffer", {}),
+    ]
+    with (
+        patch("pypto.runtime.ChipWorker", return_value=MagicMock()),
+        patch.object(execute_artifact, "_execute_on_device"),
+    ):
+        all_ok = execute_batch_manifest(manifest, 0, validate=False)
+    assert all_ok is False
+    out = capsys.readouterr().out
+    assert f"PYPTO_EXEC_RESULT=INFRA work_dir={wd1}" in out
+    assert f"PYPTO_EXEC_RESULT=PASS work_dir={wd2} device=0" in out
+
+
+def test_execute_batch_setup_failure_marks_infra_not_fail(tmp_path, capsys, stub_compile_and_assemble):
+    """A mid-batch rebind failure is INFRA (infra), a device-run failure is FAIL."""
+    wd1, wd2 = tmp_path / "a", tmp_path / "b"
+    manifest = _manifest(tmp_path, wd1, wd2)
+    # Probe wd1 ok (opens worker); run wd1 ok; rebind wd2 fails → INFRA for wd2.
+    good = (object(), "tensormap_and_ringbuffer", {})
+    stub_compile_and_assemble.side_effect = [good, good, RuntimeError("wd2 cache miss")]
+    with (
+        patch("pypto.runtime.ChipWorker", return_value=MagicMock()),
+        patch.object(execute_artifact, "_execute_on_device"),
+    ):
+        all_ok = execute_batch_manifest(manifest, 0, validate=False)
+    assert all_ok is False
+    out = capsys.readouterr().out
+    assert f"PYPTO_EXEC_RESULT=PASS work_dir={wd1} device=0" in out
+    assert f"PYPTO_EXEC_RESULT=INFRA work_dir={wd2}" in out
+    assert f"PYPTO_EXEC_RESULT=FAIL work_dir={wd2}" not in out
 
 
 if __name__ == "__main__":

@@ -46,7 +46,9 @@ def _reset_pipeline_ctx():
     yield
     test_runner._pipeline_ctx.clear()
     test_runner._pipeline_ctx.update(saved_ctx)
-    setattr(test_runner, "_device_pool", saved_pool)
+    # Direct assignment (not setattr); pyright sees the importlib-loaded module as
+    # bare ModuleType, so ignore its spurious unknown-attribute error.
+    test_runner._device_pool = saved_pool  # pyright: ignore[reportAttributeAccessIssue]
 
 
 def _proc(returncode, stdout="", stderr=""):
@@ -166,13 +168,17 @@ def test_task_submit_watchdog_kill_is_distinguished(tmp_path):
     assert "--max-time" in error
 
 
-def test_task_submit_missing_binary(tmp_path):
-    with patch.object(test_runner.subprocess, "run", side_effect=FileNotFoundError):
+@pytest.mark.parametrize("exc", [FileNotFoundError(), PermissionError("not executable")])
+def test_task_submit_exec_failure(tmp_path, exc):
+    # OSError (missing binary *or* not-executable) is reported as an exec failure,
+    # not a device test failure — with the "do not pass --execute-via-task-submit"
+    # hint so the operator knows to drop the flag on this host.
+    with patch.object(test_runner.subprocess, "run", side_effect=exc):
         passed, error, _ = test_runner._run_artifact_via_task_submit(
             tmp_path, "a2a3", _DfxOpts(), None, 600, 1800
         )
     assert passed is False
-    assert "task-submit not found" in error
+    assert "do not pass --execute-via-task-submit" in error
 
 
 # ---------------------------------------------------------------------------
@@ -195,7 +201,7 @@ def test_sim_platform_never_borrows_a_card():
     test_runner._pipeline_ctx["execute_mode"] = "task-submit"
     pool: queue.Queue = queue.Queue()
     pool.put(0)
-    setattr(test_runner, "_device_pool", pool)
+    test_runner._device_pool = pool  # pyright: ignore[reportAttributeAccessIssue]
     tc = Mock()
     tc.get_name.return_value = "case_sim"
     timing = SimpleNamespace(device_wall_us=1.0, host_wall_us=2.0)
@@ -251,7 +257,7 @@ def test_batch_missing_task_submit(tmp_path):
         )
     ok, error, _ = results[str(tmp_path / "a@a2a3")]
     assert ok is False
-    assert "task-submit not found" in error
+    assert "do not pass --execute-via-task-submit" in error
 
 
 def test_marker_value():
@@ -259,6 +265,33 @@ def test_marker_value():
     assert test_runner._marker_value(line, "work_dir=") == "/x/y"
     assert test_runner._marker_value(line, "device=") == "4"
     assert test_runner._marker_value(line, "missing=") is None
+
+
+# ---------------------------------------------------------------------------
+# _classify_task_submit_failure — marker / exit-code triage
+# ---------------------------------------------------------------------------
+
+
+def test_classify_infra_marker_is_not_a_test_failure():
+    # An INFRA marker (reconstruction/setup miss) must read as infra, never as a
+    # device test failure — even at rc=1.
+    err = test_runner._classify_task_submit_failure(1, "boom\nPYPTO_EXEC_RESULT=INFRA\n", "")
+    assert "infra" in err.lower()
+    assert "Test failed on device" not in err
+
+
+def test_classify_rc1_no_output_is_queue_timeout():
+    # No child output at all → task-submit never got a card within --timeout.
+    err = test_runner._classify_task_submit_failure(1, "", "")
+    assert "queue wait timed out" in err
+
+
+def test_classify_rc1_with_output_no_marker_is_marker_missing():
+    # The child ran and printed (e.g. an import crash) but emitted no marker —
+    # don't mislabel it as a queue timeout.
+    err = test_runner._classify_task_submit_failure(1, "ImportError: boom", "traceback")
+    assert "without a result marker" in err
+    assert "queue wait timed out" not in err
 
 
 if __name__ == "__main__":

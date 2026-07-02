@@ -769,9 +769,11 @@ def pytest_collection_finish(session: pytest.Session) -> None:
     for item in session.items:
         _collect_test_case_from_item(item, seen)
 
-    if not seen:
-        return
-
+    # Read the task-submit / pipeline options *before* the empty-discovery guard:
+    # a suite that only creates PTOTestCases dynamically leaves ``seen`` empty yet
+    # still runs each case through ``TestRunner._run_inline()``, which must be
+    # routed through task-submit too. Bailing on ``not seen`` before this would
+    # silently ignore ``--execute-via-task-submit`` for that inline path.
     execute_via_task_submit: bool = session.config.getoption("--execute-via-task-submit")
     task_max_time: int = session.config.getoption("--task-max-time")
     task_queue_timeout: int = session.config.getoption("--task-queue-timeout")
@@ -794,7 +796,9 @@ def pytest_collection_finish(session: pytest.Session) -> None:
     # Without --precompile-workers the pipeline is skipped entirely; each
     # test compiles + executes inline inside TestRunner._run_inline().  When
     # task-submit is still requested, route that inline execute through it too
-    # (the no-pipeline + task-submit matrix cell).
+    # (the no-pipeline + task-submit matrix cell). This applies whether or not any
+    # case was *statically* discovered — dynamically-created cases still run
+    # inline — so it must precede the ``not seen`` return below.
     if max_workers is None:
         if execute_via_task_submit:
             configure_inline_task_submit(
@@ -802,6 +806,11 @@ def pytest_collection_finish(session: pytest.Session) -> None:
                 task_queue_timeout=task_queue_timeout,
                 task_submit_device=task_submit_device,
             )
+        return
+
+    # The pre-compile pipeline only has work when cases were statically
+    # discovered; undiscovered suites fall back to the inline path handled above.
+    if not seen:
         return
 
     dump_passes: bool = session.config.getoption("--dump-passes")
