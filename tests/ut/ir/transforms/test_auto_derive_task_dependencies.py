@@ -69,6 +69,10 @@ def _user_edges(call: ir.Call | ir.Submit) -> list[ir.Var]:
     return list(call.attrs.get("manual_dep_edges", []))
 
 
+def _arg_directions(call: ir.Call | ir.Submit) -> list[ir.ArgDirection]:
+    return list(call.arg_directions)
+
+
 def _printed(program: ir.Program) -> str:
     return ir.python_print(program)
 
@@ -145,6 +149,7 @@ class TestAutoDeriveTaskDependencies:
         edges = _compiler_edges(consume_call)
         assert len(edges) == 1
         assert edges[0].name_hint == "producer_tid"
+        assert _arg_directions(consume_call) == [ir.ArgDirection.NoDep]
 
     def test_auto_scope_read_read_does_not_add_edge_when_enabled(self):
         @pl.program
@@ -302,6 +307,117 @@ class TestAutoDeriveTaskDependencies:
         printed = _printed(out)
         assert '"compiler_manual_dep_edges": [produced]' in printed
 
+    def test_auto_scope_raw_hazard_demotes_covered_input_to_no_dep(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill(
+                self,
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                return out
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+            def main(self, scratch: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.scope(mode=pl.ScopeMode.AUTO):
+                    produced, _producer_tid = pl.submit(self.fill, scratch)
+                    out, _ = pl.submit(self.consume, produced)
+                return out
+
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
+        consume_call = _user_calls(out, "consume")[0]
+
+        assert [edge.name_hint for edge in _compiler_edges(consume_call)] == ["_producer_tid"]
+        assert _arg_directions(consume_call) == [ir.ArgDirection.NoDep]
+
+    def test_auto_no_dep_rewrite_preserves_submit_allow_early_resolve(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill(
+                self,
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                return out
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+            def main(self, scratch: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.scope(mode=pl.ScopeMode.AUTO):
+                    produced, _producer_tid = pl.submit(self.fill, scratch)
+                    out, _ = pl.submit(self.consume, produced, allow_early_resolve=True)
+                return out
+
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
+        consume_call = _user_calls(out, "consume")[0]
+
+        assert isinstance(consume_call, ir.Submit)
+        assert consume_call.allow_early_resolve is True
+        assert _arg_directions(consume_call) == [ir.ArgDirection.NoDep]
+
+    def test_auto_scope_covered_inout_hazard_becomes_output_existing(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill(
+                self,
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                return out
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def mutate(self, x: pl.InOut[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+            def main(self, scratch: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.scope(mode=pl.ScopeMode.AUTO):
+                    produced, _producer_tid = pl.submit(self.fill, scratch)
+                    out, _ = pl.submit(self.mutate, produced)
+                return out
+
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
+        mutate_call = _user_calls(out, "mutate")[0]
+
+        assert [edge.name_hint for edge in _compiler_edges(mutate_call)] == ["_producer_tid"]
+        assert _arg_directions(mutate_call) == [ir.ArgDirection.OutputExisting]
+
+    def test_debug_logs_auto_no_dep_candidate_buckets(self, monkeypatch, capfd):
+        monkeypatch.setenv("PYPTO_AUTO_DEPS_LOOP_CARRY_DEBUG", "1")
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill(
+                self,
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                return out
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def mutate(self, x: pl.InOut[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+            def main(self, scratch: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.scope(mode=pl.ScopeMode.AUTO):
+                    produced, _producer_tid = pl.submit(self.fill, scratch)
+                    out, _ = pl.submit(self.mutate, produced)
+                return out
+
+        _run_auto_deps(Prog, analyze_auto_scopes=True)
+        captured = capfd.readouterr()
+
+        assert "[auto-no-dep-bucket]" in captured.err
+        assert "bucket=applied" in captured.err
+
     def test_auto_runtime_scope_dynamic_hazard_falls_back_without_stale_edges(self):
         @pl.program
         class Prog:
@@ -373,6 +489,33 @@ class TestAutoDeriveTaskDependencies:
         compiler_edges = _compiler_edges(consume_call)
         assert [edge.name_hint for edge in user_edges] == ["user_tid"]
         assert [edge.name_hint for edge in compiler_edges] == ["producer_tid"]
+
+    def test_user_edge_covered_input_can_be_no_dep_without_compiler_edge(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill(
+                self,
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                return out
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+            def main(self, scratch: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.scope(mode=pl.ScopeMode.AUTO):
+                    produced, producer_tid = pl.submit(self.fill, scratch)
+                    out, _ = pl.submit(self.consume, produced, deps=[producer_tid])
+                return out
+
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
+        consume_call = _user_calls(out, "consume")[0]
+        assert [edge.name_hint for edge in _user_edges(consume_call)] == ["producer_tid"]
+        assert _compiler_edges(consume_call) == []
+        assert _arg_directions(consume_call) == [ir.ArgDirection.NoDep]
 
     def test_user_edge_covering_submit_return_keeps_manual_scope(self):
         @pl.program
@@ -663,6 +806,7 @@ class TestAutoDeriveTaskDependencies:
         edges = _compiler_edges(consume_call)
         assert len(edges) == 1
         assert edges[0].name_hint == "producer_tid"
+        assert _arg_directions(consume_call) == [ir.ArgDirection.NoDep]
 
     def test_static_overlapping_slices_add_compiler_edge(self):
         @pl.program
@@ -693,7 +837,37 @@ class TestAutoDeriveTaskDependencies:
         assert len(edges) == 1
         assert edges[0].name_hint == "producer_tid"
 
-    def test_symbolic_slice_offset_stays_conservative(self):
+    def test_static_overlapping_slice_covered_input_can_be_no_dep(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill(
+                self,
+                out: pl.Out[pl.Tensor[[32], pl.FP32]],
+            ) -> pl.Tensor[[32], pl.FP32]:
+                return out
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(self, x: pl.Tensor[[32], pl.FP32]) -> pl.Tensor[[32], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+            def main(self, scratch: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[32], pl.FP32]:
+                with pl.scope(mode=pl.ScopeMode.AUTO):
+                    left = scratch[0:32]
+                    mid = scratch[16:48]
+                    _produced, producer_tid = pl.submit(self.fill, left)
+                    out, _ = pl.submit(self.consume, mid)
+                return out
+
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
+        consume_call = _user_calls(out, "consume")[0]
+        edges = _compiler_edges(consume_call)
+        assert len(edges) == 1
+        assert edges[0].name_hint == "producer_tid"
+        assert _arg_directions(consume_call) == [ir.ArgDirection.NoDep]
+
+    def test_symbolic_slice_offset_keeps_dependency_but_not_no_dep(self):
         @pl.program
         class Prog:
             @pl.function(type=pl.FunctionType.InCore)
@@ -725,6 +899,7 @@ class TestAutoDeriveTaskDependencies:
         edges = _compiler_edges(consume_call)
         assert len(edges) == 1
         assert edges[0].name_hint == "producer_tid"
+        assert _arg_directions(consume_call) == [ir.ArgDirection.Input]
 
     def test_if_yield_return_var_keeps_storage_lineage(self):
         @pl.program
@@ -1087,6 +1262,111 @@ class TestAutoDeriveTaskDependencies:
         edges = _compiler_edges(consume_call)
         assert edges == []
 
+    def test_debug_bucket_prefers_inactive_dynamic_fallback_reason(self, monkeypatch, capfd):
+        monkeypatch.setenv("PYPTO_AUTO_DEPS_LOOP_CARRY_DEBUG", "1")
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill(
+                self,
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                return out
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                scratch: pl.Tensor[[64], pl.FP32],
+                n_steps: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                carried = scratch
+                for _i, (carried,) in pl.range(0, n_steps, init_values=(carried,)):
+                    carried = self.fill(carried)
+                    carried = pl.yield_(carried)
+                out = self.consume(carried)
+                return out
+
+        _run_auto_deps(Prog, analyze_auto_scopes=True)
+        captured = capfd.readouterr()
+
+        assert "fallback_reason=prior_from_inactive_dynamic_loop" in captured.err
+        assert "bucket=dynamic_producer_incomplete" not in captured.err
+
+    def test_dynamic_loop_passthrough_preserves_carried_storage_for_no_dep(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill(
+                self,
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                return out
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+            def main(
+                self,
+                scratch: pl.Tensor[[64], pl.FP32],
+                n_steps: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.scope(mode=pl.ScopeMode.AUTO):
+                    produced = self.fill(scratch)
+                    carried = produced
+                    for _i, (carried,) in pl.range(0, n_steps, init_values=(carried,)):
+                        carried = pl.yield_(carried)
+                    out = self.consume(carried)
+                return out
+
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
+        consume_call = _user_calls(out, "consume")[0]
+        edges = _compiler_edges(consume_call)
+        assert len(edges) == 1
+        assert edges[0].name_hint == "produced"
+        assert _arg_directions(consume_call) == [ir.ArgDirection.NoDep]
+
+    def test_active_dynamic_loop_producer_can_cover_same_iteration_input_as_no_dep(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill(
+                self,
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                return out
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+            def main(
+                self,
+                scratch: pl.Tensor[[64], pl.FP32],
+                n_steps: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.scope(mode=pl.ScopeMode.AUTO):
+                    carried = scratch
+                    for _i, (carried,) in pl.range(0, n_steps, init_values=(carried,)):
+                        produced = self.fill(carried)
+                        carried = self.consume(produced)
+                        carried = pl.yield_(carried)
+                return carried
+
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
+        consume_call = _user_calls(out, "consume")[0]
+        edges = _compiler_edges(consume_call)
+        assert len(edges) == 1
+        assert edges[0].name_hint == "produced"
+        assert _arg_directions(consume_call) == [ir.ArgDirection.NoDep]
+
     def test_dynamic_trip_tensor_carrier_falls_back(self):
         @pl.program
         class Prog:
@@ -1115,6 +1395,82 @@ class TestAutoDeriveTaskDependencies:
                 ):
                     carried = self.fill(carried)
                     carried = pl.yield_(carried)
+                out = self.consume(carried)
+                return out
+
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
+        consume_call = _user_calls(out, "consume")[0]
+        edges = _compiler_edges(consume_call)
+        assert edges == []
+
+    def test_dynamic_parallel_tensor_carrier_exports_summary_edge(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill(
+                self,
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                return out
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                scratch: pl.Tensor[[64], pl.FP32],
+                n_steps: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                carried = scratch
+                for _i, (carried,) in pl.parallel(
+                    0,
+                    n_steps,
+                    init_values=(carried,),
+                ):
+                    carried = self.fill(carried)
+                    carried = pl.yield_(carried)
+                out = self.consume(carried)
+                return out
+
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
+        consume_call = _user_calls(out, "consume")[0]
+        edges = _compiler_edges(consume_call)
+        assert len(edges) == 1
+        assert edges[0].name_hint.startswith("carried")
+        assert _arg_directions(consume_call) == [ir.ArgDirection.NoDep]
+
+    def test_static_outer_dynamic_inner_tensor_carrier_falls_back(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill(
+                self,
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                return out
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                scratch: pl.Tensor[[64], pl.FP32],
+                n_steps: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                carried = scratch
+                for _i, (carried,) in pl.range(0, 4, init_values=(carried,)):
+                    for _j, (inner_carried,) in pl.parallel(
+                        0,
+                        n_steps,
+                        init_values=(carried,),
+                    ):
+                        produced = self.fill(inner_carried)
+                        inner_carried = pl.yield_(produced)
+                    carried = pl.yield_(inner_carried)
                 out = self.consume(carried)
                 return out
 
@@ -1263,6 +1619,40 @@ class TestAutoDeriveTaskDependencies:
 
         consume_call = _user_calls(out, "consume")[0]
         assert _compiler_edges(consume_call) == []
+        assert _arg_directions(consume_call) == [ir.ArgDirection.NoDep]
+
+    def test_complete_task_id_array_deps_allow_auto_no_dep_for_fan_in_input(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill(
+                self,
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                return out
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+            def main(self, scratch: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.scope(mode=pl.ScopeMode.AUTO):
+                    tids = pl.array.create(4, pl.TASK_ID)
+                    for n in pl.parallel(4):
+                        _produced, producer_tid = pl.submit(self.fill, scratch)
+                        tids[n] = producer_tid
+                    out, _ = pl.submit(self.consume, scratch, deps=[tids[k] for k in range(4)])
+                return out
+
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
+        scopes = _runtime_scopes(out)
+        assert len(scopes) == 1
+        assert scopes[0].manual is False
+
+        consume_call = _user_calls(out, "consume")[0]
+        assert _compiler_edges(consume_call) == []
+        assert _arg_directions(consume_call) == [ir.ArgDirection.NoDep]
 
     def test_loop_task_id_array_slot_temps_keep_manual_scope(self):
         @pl.program
@@ -1299,6 +1689,41 @@ class TestAutoDeriveTaskDependencies:
 
         consume_call = _user_calls(out, "consume")[0]
         assert _compiler_edges(consume_call) == []
+        assert _arg_directions(consume_call) == [ir.ArgDirection.NoDep]
+
+    def test_partial_loop_task_id_array_slot_temp_deps_do_not_allow_no_dep(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill(
+                self,
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                return out
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, scratch: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.manual_scope():
+                    tids = pl.array.create(4, pl.TASK_ID)
+                    for n in pl.parallel(4):
+                        _produced, producer_tid = pl.submit(self.fill, scratch)
+                        tids[n] = producer_tid
+                    dep0 = tids[0]
+                    out, _ = pl.submit(self.consume, scratch, deps=[dep0])
+                return out
+
+        out = _run_auto_deps(Prog)
+        scopes = _runtime_scopes(out)
+        assert len(scopes) == 1
+        assert scopes[0].manual is True
+
+        consume_call = _user_calls(out, "consume")[0]
+        assert _compiler_edges(consume_call) == []
+        assert _arg_directions(consume_call) == [ir.ArgDirection.Input]
 
     def test_partial_loop_task_id_array_deps_keep_manual_scope(self):
         @pl.program
@@ -1407,6 +1832,7 @@ class TestAutoDeriveTaskDependencies:
         assert scopes[0].manual is False
         for call in _user_calls(out, "consume"):
             assert _compiler_edges(call) == []
+            assert ir.ArgDirection.NoDep not in _arg_directions(call)
 
     def test_default_auto_scope_plain_call_raw_hazard_skips_synthetic_task_id_edge(self):
         @pl.program
@@ -1455,6 +1881,100 @@ class TestAutoDeriveTaskDependencies:
         out = _run_auto_deps(Prog, analyze_auto_scopes=True)
         printed = _printed(out)
         assert '"compiler_manual_dep_edges": [produced]' in printed
+
+    def test_sibling_auto_scopes_covered_input_becomes_no_dep_when_enabled(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill(
+                self,
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                return out
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+            def main(self, scratch: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.scope():
+                    produced = self.fill(scratch)
+                with pl.scope():
+                    out = self.consume(produced)
+                return out
+
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
+        consume_call = _user_calls(out, "consume")[0]
+
+        assert [edge.name_hint for edge in _compiler_edges(consume_call)] == ["produced"]
+        assert _arg_directions(consume_call) == [ir.ArgDirection.NoDep]
+        assert "__auto_no_dep_candidate_indices" not in _printed(out)
+
+    def test_static_loop_carry_covered_input_becomes_no_dep_when_enabled(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill(
+                self,
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                return out
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, scratch: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for _, (carried,) in pl.range(1, init_values=(scratch,)):
+                    produced = self.fill(carried)
+                    carried_next = pl.yield_(produced)
+                out = self.consume(carried_next)
+                return out
+
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
+        consume_call = _user_calls(out, "consume")[0]
+
+        assert [edge.name_hint for edge in _compiler_edges(consume_call)] == ["carried_next"]
+        assert _arg_directions(consume_call) == [ir.ArgDirection.NoDep]
+
+    def test_virtual_auto_scope_fallback_keeps_representable_no_dep_candidate(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill(
+                self,
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                return out
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume_gather(self, x: pl.Tensor[[4, 8], pl.FP32]) -> pl.Tensor[[4, 8], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                src: pl.Tensor[[4, 16], pl.FP32],
+                index: pl.Tensor[[4, 8], pl.INT32],
+                scratch: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                gathered = pl.tensor.gather(src, -1, index)
+                _unused = self.consume_gather(gathered)
+                produced = self.fill(scratch)
+                out = self.consume(produced)
+                return out
+
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
+        consume_call = _user_calls(out, "consume")[0]
+
+        assert [edge.name_hint for edge in _compiler_edges(consume_call)] == ["produced"]
+        assert _arg_directions(consume_call) == [ir.ArgDirection.NoDep]
 
     def test_sibling_auto_scopes_raw_hazard_exports_compiler_edge(self):
         @pl.program
@@ -1564,6 +2084,42 @@ class TestAutoDeriveTaskDependencies:
         out = _run_auto_deps(Prog, analyze_auto_scopes=True)
         consume_call = _user_calls(out, "consume")[0]
         assert _compiler_edges(consume_call) == []
+
+    def test_manual_scope_missing_task_id_keeps_later_auto_scope_conservative(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill(
+                self,
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                return out
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume_pair(
+                self,
+                manual_value: pl.Tensor[[64], pl.FP32],
+                local_value: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                return local_value
+
+            @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+            def main(
+                self,
+                manual_scratch: pl.Tensor[[64], pl.FP32],
+                local_scratch: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.manual_scope():
+                    manual_produced = self.fill(manual_scratch)
+                with pl.scope():
+                    local_produced, _local_tid = pl.submit(self.fill, local_scratch)
+                    out, _ = pl.submit(self.consume_pair, manual_produced, local_produced)
+                return out
+
+        out = _run_auto_deps(Prog, analyze_auto_scopes=True)
+        consume_call = _user_calls(out, "consume_pair")[0]
+        assert _compiler_edges(consume_call) == []
+        assert _arg_directions(consume_call) == [ir.ArgDirection.Input, ir.ArgDirection.Input]
 
     def test_single_trip_loop_producer_exports_scalar_task_id(self):
         @pl.program

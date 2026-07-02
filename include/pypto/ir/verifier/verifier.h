@@ -338,8 +338,9 @@ PropertyVerifierPtr CreateUnrollResolvedPropertyVerifier();
  *   - tensor arguments carry a non-Scalar direction; scalar arguments carry
  *     ``ArgDirection::Scalar``;
  *   - the per-argument ``ArgDirection`` is consistent with the callee's
- *     ``ParamDirection`` (``In`` ↔ ``Input``; ``InOut`` ↔ ``InOut``;
- *     ``Out`` ↔ ``Output`` / ``OutputExisting`` / ``InOut`` for WAW promotion).
+ *     ``ParamDirection`` (``In`` ↔ ``Input``; ``InOut`` ↔ ``InOut`` /
+ *     ``OutputExisting`` after auto-deps rewrite; ``Out`` ↔ ``Output`` /
+ *     ``OutputExisting`` / ``InOut`` for WAW promotion).
  *
  * The runtime requirement that ``add_input/add_output`` come before
  * ``add_scalar`` is satisfied by orchestration codegen (``stable_partition``

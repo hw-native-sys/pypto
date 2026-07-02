@@ -443,6 +443,86 @@ def test_compiler_derived_deps_for_dynamic_trip_tensor_carrier_falls_back():
     assert ".set_dependencies(" not in code
 
 
+def test_compiler_derived_deps_for_dynamic_parallel_tensor_carriers_share_phase_barrier():
+    """Dynamic parallel tensor producers in one phase should share one dummy barrier."""
+
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B)
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.AIV)
+        def fill_q(
+            self,
+            out: pl.Out[pl.Tensor[[64], pl.FP32]],
+        ) -> pl.Tensor[[64], pl.FP32]:
+            return out
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def fill_k(
+            self,
+            out: pl.Out[pl.Tensor[[64], pl.FP32]],
+        ) -> pl.Tensor[[64], pl.FP32]:
+            return out
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def fill_v(
+            self,
+            out: pl.Out[pl.Tensor[[64], pl.FP32]],
+        ) -> pl.Tensor[[64], pl.FP32]:
+            return out
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def consume(
+            self,
+            q: pl.Tensor[[64], pl.FP32],
+            k: pl.Tensor[[64], pl.FP32],
+            v: pl.Tensor[[64], pl.FP32],
+        ) -> pl.Tensor[[64], pl.FP32]:
+            return q
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            q: pl.Tensor[[64], pl.FP32],
+            k: pl.Tensor[[64], pl.FP32],
+            v: pl.Tensor[[64], pl.FP32],
+            n_steps: pl.Scalar[pl.INDEX],
+        ) -> pl.Tensor[[64], pl.FP32]:
+            q_carried = q
+            k_carried = k
+            v_carried = v
+            for _i, (q_carried, k_carried, v_carried) in pl.parallel(
+                0,
+                n_steps,
+                init_values=(q_carried, k_carried, v_carried),
+            ):
+                q_carried = self.fill_q(q_carried)
+                k_carried = self.fill_k(k_carried)
+                v_carried = self.fill_v(v_carried)
+                q_carried, k_carried, v_carried = pl.yield_(q_carried, k_carried, v_carried)
+            out = self.consume(q_carried, k_carried, v_carried)
+            return out
+
+    code = _generate_orch_full_pipeline(P, analyze_auto_scopes_for_deps=True)
+
+    assert "#include <vector>" in code
+    collection = re.search(
+        r"std::vector<PTO2TaskId>\s+(\w+)\(static_cast<size_t>\(\w+\)\);\n\s+uint32_t\s+(\w+)\s*=\s*0;",
+        code,
+    )
+    assert collection, code
+    buffer_name, count_name = collection.groups()
+    assert ".push_back(" not in code
+    assert code.count(f"{buffer_name}[{count_name}++] =") == 3, code
+    assert code.count("Dynamic compiler-dependency barrier") == 1, code
+    assert code.count("rt_submit_dummy_task") == 1, code
+    assert f".set_dependencies({buffer_name}.data(), {count_name});" in code, code
+    assert re.search(r"PTO2TaskId params_t\d+_deps\[1\];", code), code
+    assert not re.search(r"PTO2TaskId params_t\d+_deps\[[23]\];", code), code
+    assert code.count(".add_no_dep(") >= 3, code
+
+
 def test_compiler_derived_deps_for_dynamic_trip_tuple_output_tensor_carrier_falls_back():
     """Dynamic-trip tuple-output tensor carriers should fall back instead of allocating vectors."""
 
