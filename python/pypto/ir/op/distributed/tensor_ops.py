@@ -349,7 +349,27 @@ def reduce_scatter(
     )
 
 
+def all_to_all(
+    input: Expr,
+    target: Expr,
+    signal: Expr,
+    out: Expr,
+    *,
+    span: Span | None = None,
+) -> Call:
+    """Build a ``pld.tensor.all_to_all(...)`` Call.
+
+    4-arg InCore composite: Tensor [NR, SIZE] input, DistributedTensor staging
+    window, INT32 barrier, Tensor output.  Lowered by LowerCompositeOps into a
+    3-phase mesh decomposition (stage-in → barrier → peer-read via pld.tile.get).
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    _args: list[Expr] = [input, target, signal, out]
+    return _ir_core.create_op_call("pld.tensor.all_to_all", _args, {}, actual_span)
+
+
 __all__ = [
+    "all_to_all",
     "alloc_window_buffer",
     "allgather",
     "allreduce",

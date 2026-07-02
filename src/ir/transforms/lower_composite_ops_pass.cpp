@@ -960,6 +960,116 @@ ExprPtr LowerTensorBarrierRule(const CallPtr& call, const std::vector<ExprPtr>& 
   return signal;
 }
 
+// ============================================================================
+// ``pld.tensor.all_to_all`` lowering rule
+//
+// Symmetric all-to-all: every rank sends a distinct chunk to every other rank.
+// 3-phase decomposition matching the simpler all_to_all_distributed reference:
+//
+//   Phase 1 (stage-in): for dest in 0..NR-1:
+//       tile.load(input, [dest, 0], [1, SIZE]) → stage_tile
+//       tile.store(stage_tile, [dest, 0], target)  // local window row dest
+//
+//   Phase 2a: notify-all (Set 1)
+//   Phase 2b: wait-all  (Ge 1)
+//
+//   Phase 3 (exchange): for src in 0..NR-1:
+//       pld.tile.get(out, peer=src, target, stage_tile,
+//                    dst_offsets=[src, 0], src_offsets=[my_rank, 0],
+//                    shape=[1, SIZE])
+//
+// Input layout:  input[dest, :] = chunk destined for rank dest.
+// Output layout: output[src, :] = chunk received from rank src.
+// ============================================================================
+
+ExprPtr LowerTensorAllToAllRule(const CallPtr& call, const std::vector<ExprPtr>& args, LoweringBuilder& b) {
+  const Span& span = call->span_;
+  INTERNAL_CHECK_SPAN(args.size() == 4, span)
+      << "pld.tensor.all_to_all rule expects 4 args (input, target, signal, out), got " << args.size();
+  const auto& input = args[0];
+  const auto& target = args[1];
+  const auto& signal = args[2];
+  const auto& out = args[3];
+
+  // input must be a Tensor [NR, SIZE].
+  INTERNAL_CHECK_SPAN(As<TensorType>(input->GetType()), span)
+      << "pld.tensor.all_to_all input must be TensorType, got " << input->GetType()->TypeName();
+  auto target_type = As<DistributedTensorType>(target->GetType());
+  INTERNAL_CHECK_SPAN(target_type, span)
+      << "pld.tensor.all_to_all target must be DistributedTensorType (deducer-rejected otherwise)";
+  INTERNAL_CHECK_SPAN(target_type->shape_.size() == 2, span)
+      << "pld.tensor.all_to_all target must be 2D [NR, SIZE]";
+
+  auto& reg = OpRegistry::GetInstance();
+  auto comm = b.EmitCommSetup(target, span);
+
+  auto one_i32 = std::make_shared<ConstInt>(1, DataType::INT32, span);
+
+  // Per-chunk shape: [1, SIZE] where SIZE = target.shape[1].
+  auto size_expr = target_type->shape_[1];
+  auto chunk_shape = std::make_shared<MakeTuple>(
+      std::vector<ExprPtr>{std::make_shared<ConstInt>(1, DataType::INDEX, span), size_expr}, span);
+
+  auto zero_idx = std::make_shared<ConstInt>(0, DataType::INDEX, span);
+  auto one_idx = std::make_shared<ConstInt>(1, DataType::INDEX, span);
+
+  // ---- Phase 1: stage-in — copy each destination chunk into the local
+  //      window.  rank r writes input[dest, :] to target[dest, 0] so
+  //      every peer can later read the slice destined for them at
+  //      target[my_rank, 0].
+  b.EmitFor(
+      "dest", zero_idx, comm.nranks_idx, one_idx,
+      [&](LoweringBuilder& body, const VarPtr& dest_var) {
+        auto dest_row_offsets = std::make_shared<MakeTuple>(
+            std::vector<ExprPtr>{dest_var, std::make_shared<ConstInt>(0, DataType::INDEX, span)}, span);
+
+        auto stage_tile =
+            body.Bind("aa_load",
+                      reg.Create("tile.load", {input, dest_row_offsets, chunk_shape, chunk_shape},
+                                 {{"target_memory", MemorySpace::Vec}}, span),
+                      span);
+
+        body.Bind("aa_stage", reg.Create("tile.store", {stage_tile, dest_row_offsets, target}, {}, span),
+                  span);
+      },
+      span);
+
+  // ---- Phase 2a: notify-all ----
+  b.EmitNotifyAll(signal, comm.nranks_idx, comm.my_rank, NotifyOp::kSet, one_i32, "", span);
+
+  // ---- Phase 2b: wait-all ----
+  b.EmitWaitAll(signal, comm.nranks_idx, comm.my_rank, one_i32, "", span);
+
+  // ---- Phase 3: exchange — read chunk my_rank from every peer's scratch.
+  //      Peer src staged the chunk for me at target[my_rank, 0] in its own
+  //      local window.  I read that slot and write it to out[src, 0].
+  auto recv_stage =
+      b.Bind("aa_recv",
+             reg.Create("tile.create", {chunk_shape},
+                        {{"dtype", target_type->dtype_}, {"target_memory", MemorySpace::Vec}}, span),
+             span);
+
+  // Offsets for the peer-read: read at [my_rank, 0] on the peer's window.
+  auto my_rank_offsets = tile_conversion_utils::MakeSignalOffsets(comm.my_rank, span);
+
+  b.EmitFor(
+      "src", zero_idx, comm.nranks_idx, one_idx,
+      [&](LoweringBuilder& body, const VarPtr& src_var) {
+        // Write to out[src, 0] — rank-ordered output.
+        auto dst_offsets = std::make_shared<MakeTuple>(
+            std::vector<ExprPtr>{src_var, std::make_shared<ConstInt>(0, DataType::INDEX, span)}, span);
+
+        body.Bind("aa_get",
+                  reg.Create("pld.tile.get",
+                             {out, src_var, target, recv_stage, dst_offsets, my_rank_offsets, chunk_shape},
+                             {}, span),
+                  span);
+      },
+      span);
+
+  return out;
+}
+
 // ----------------------------------------------------------------------------
 // Composite-op dispatch table.
 //
@@ -986,6 +1096,7 @@ CompositeLoweringFn LookupCompositeRule(const std::string& op_name) {
       {"pld.tensor.reduce_scatter", &LowerTensorReduceScatterRule},
       {"pld.tensor.barrier", &LowerTensorBarrierRule},
       {"pld.tensor.broadcast", &LowerTensorBroadcastRule},
+      {"pld.tensor.all_to_all", &LowerTensorAllToAllRule},
   };
   auto it = kRules.find(op_name);
   return it == kRules.end() ? nullptr : it->second;
