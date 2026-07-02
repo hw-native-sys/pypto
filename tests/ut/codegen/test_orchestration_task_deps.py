@@ -20,6 +20,7 @@ from _orchestration_codegen_common import (
 )
 from pypto import backend, passes
 from pypto.backend import BackendType
+from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
 
 def test_array_slot_task_id_usable_as_submit_dep():
@@ -1024,6 +1025,70 @@ def test_spmd_submit_950_backend_emits_set_core_num():
         code = _generate_orch_code(P)
     assert "params_t0.launch_spec.set_core_num(4);" in code, code
     assert "set_block_num" not in code, code
+
+
+def test_compiler_dep_carry_array_sized_by_outer_loop_trip_count():
+    """Compiler-dep TaskId carry arrays must be sized by the *outer* Sequential loop.
+
+    When a Sequential outer loop (trip M) wraps a Parallel inner loop (trip N)
+    inside a ``pl.manual_scope``, and the outer loop's TaskId iter_arg receives a
+    compiler-derived dependency edge, the carry array must declare
+    ``PTO2TaskId arr[M]`` (outer trip), NOT ``arr[N]`` (inner trip).
+
+    ``ResolveArrayCarrySize`` would otherwise recurse into the inner Parallel loop
+    and return N, producing a mis-sized fan-in array that over- or under-fences
+    (YunjiQin review, PR #1813).  The codegen post-process must unconditionally
+    use ``EvalConstTripCount`` of the outer loop for compiler-dep carries.
+    """
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B)
+
+    M, N = 4, 8
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.AIV)
+        def k1(
+            self,
+            out: pl.Out[pl.Tensor[[64], pl.FP32]],
+        ) -> pl.Tensor[[64], pl.FP32]:
+            return out
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def k2(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            return x
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, scratch: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            with pl.manual_scope():
+                prev = pl.system.task_invalid()
+                for _i in pl.range(M):
+                    for _j in pl.parallel(N):
+                        _, _tid = pl.submit(self.k1, scratch)
+                    # compiler_manual_dep_edges on prev: makes it an
+                    # iter_arg carry of the outer Sequential loop,
+                    # and triggers NeedsCompilerDepTaskId for its
+                    # return_var.
+                    self.k2(scratch, attrs={"compiler_manual_dep_edges": [prev]})
+                    prev = pl.system.task_invalid()
+                return scratch
+
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
+    transformed = pm.run_passes(Prog)
+    code = _generate_orch_code(transformed)
+
+    # The compiler-dep carry array must be sized by the outer loop trip M=4.
+    # The emit name is derived from prev's return_var (SSA-base "prev").
+    outer_arr = re.search(r"PTO2TaskId\s+(prev\w*)\[(" + str(M) + r")\];", code)
+    assert outer_arr, f"Expected PTO2TaskId <prev...>[{M}] (outer trip) in:\n{code}"
+    # The init loop also iterates M times, not N.
+    assert f"for (int64_t __init_i = 0; __init_i < {M}; ++__init_i)" in code, (
+        f"Expected init loop bound {M} in:\n{code}"
+    )
+    # No array declaration should be sized by the inner trip N=8.
+    assert not re.search(r"PTO2TaskId\s+\w+\[" + str(N) + r"\];", code), (
+        f"Unexpected PTO2TaskId array sized [{N}] (inner trip) in:\n{code}"
+    )
 
 
 if __name__ == "__main__":
