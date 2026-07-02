@@ -1631,5 +1631,120 @@ class TestOrchestration:
         assert "int64_t d0 = 64" in code
 
 
+class TestOrchestrationOutputDeclaration:
+    """The orchestration signature is built from the entry's declared
+    ``ParamDirection``s, so an output a kernel writes into an entry parameter must
+    be marked ``pl.Out`` / ``pl.InOut`` — otherwise it stays ``In``, is marked IN
+    in the signature, and the runtime skips its D2H copy-back (silent all-zero
+    output). Codegen logs a non-fatal warning when the entry declares no output
+    parameter at all, but compilation still proceeds (returning a runtime-allocated
+    output is a legitimate no-output-param pattern).
+    """
+
+    def test_no_output_param_is_non_fatal(self) -> None:
+        # An entry whose only tensor params are declared read-only (plain
+        # pl.Tensor) still compiles — the missing-output-param warning is
+        # non-fatal. The declared directions flow straight into the signature.
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class NoOutputParamProgram:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel_add(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                a_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                b_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(b, [0, 0], [16, 16])
+                result: pl.Tile[[16, 16], pl.FP32] = pl.add(a_tile, b_tile)
+                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], output)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_return_output(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                c: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
+                c = self.kernel_add(a, b, c)
+                return c
+
+        # No exception — the missing-output-param check is a non-fatal warning.
+        result = _generate_orch_result(NoOutputParamProgram)
+        assert list(result.orchestration_signature) == ["IN", "IN"]
+
+    def test_written_param_declared_out_ok(self) -> None:
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class GoodProgram:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel_add(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                a_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                b_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(b, [0, 0], [16, 16])
+                result: pl.Tile[[16, 16], pl.FP32] = pl.add(a_tile, b_tile)
+                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], output)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_good(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                d: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                d = self.kernel_add(a, b, d)
+                return d
+
+        result = _generate_orch_result(GoodProgram)
+        # a, b are read-only inputs; d is the written output.
+        assert list(result.orchestration_signature) == ["IN", "IN", "OUT"]
+
+    def test_read_only_input_not_flagged(self) -> None:
+        # A read-only param is fine as plain pl.Tensor even when consumed by a
+        # kernel — only Out/InOut kernel args trigger the write check.
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class ReadOnlyProgram:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel_add(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                a_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                b_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(b, [0, 0], [16, 16])
+                result: pl.Tile[[16, 16], pl.FP32] = pl.add(a_tile, b_tile)
+                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], output)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_ro(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                d: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                d = self.kernel_add(a, b, d)
+                return d
+
+        # No exception: a, b (plain pl.Tensor, only read) are not flagged.
+        result = _generate_orch_result(ReadOnlyProgram)
+        assert list(result.orchestration_signature) == ["IN", "IN", "OUT"]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
