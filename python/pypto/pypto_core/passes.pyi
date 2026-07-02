@@ -706,10 +706,17 @@ class stmt_dependency_analysis:
         """
 
 class l0_tile_chooser:
-    """Closed-form chooser for L0 matmul tile shape (m, n, k)."""
+    """Chooser for the L0 matmul design point by roofline cost model."""
+
+    class Stationarity(Enum):
+        """Which GEMM operand is pinned across the L0 tiling loops."""
+
+        OutputStationary = 0
+        AStationary = 1
+        BStationary = 2
 
     class L0TileConfig:
-        """Inputs to choose_l0_tile: problem dims + hardware + schedule knobs."""
+        """Inputs to choose_l0_tile: problem dims + hardware + realizable-mask gates."""
 
         M: int
         N: int
@@ -726,26 +733,35 @@ class l0_tile_chooser:
         align_m: int
         align_n: int
         align_k: int
-        double_buffer_a: bool
-        double_buffer_b: bool
-        double_buffer_c: bool
+        allow_a_stationary: bool
+        allow_b_stationary: bool
+        allow_double_buffer_c: bool
         c_read: bool
+        bw_a: float
+        bw_b: float
+        bw_drain: float
+        mad_head: int
+        mad_k_fractal_bytes: int
         allow_padding: bool
+        allow_k_boundary: bool
         def __init__(self) -> None: ...
 
     class L0TileResult:
-        """Output of choose_l0_tile: the chosen (m, n, k) plus diagnostics."""
+        """Output of choose_l0_tile: the chosen design point plus diagnostics."""
 
         m: int
         n: int
         k: int
         estimated_traffic_bytes: int
+        estimated_cost_cycles: int
         padded_compute_volume: int
+        stationarity: l0_tile_chooser.Stationarity
+        double_buffer_c: bool
         perf_hint: str
 
     @staticmethod
     def choose_l0_tile(config: L0TileConfig) -> L0TileResult:
-        """Pick an approximately-optimal L0 tile shape (m, n, k)."""
+        """Pick the minimum-wall L0 GEMM design point under the roofline cost model."""
 
 __all__ = [
     "IRProperty",
@@ -818,6 +834,7 @@ __all__ = [
     "create_function_pass",
     "create_program_pass",
     "stmt_dependency_analysis",
+    "l0_tile_chooser",
     "skew_cross_core_pipeline",
     "lower_pipeline_loops",
     "canonicalize_io_order",

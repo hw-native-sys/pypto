@@ -23,6 +23,28 @@ namespace pypto {
 namespace backend {
 
 /**
+ * @brief Closed-form GEMM cost-model parameters consumed by ChooseL0Tile.
+ *
+ * Bandwidths are in BYTES PER CORE CYCLE (GB/s ÷ clock-GHz), so the chooser can
+ * weight L1->L0 traffic and the L0C drain directly in cycles. Defaults are
+ * Ascend a2a3 (910B), grounded in the pto-isa perf-sim cost model:
+ *   L1->L0A 441 GB/s, L1->L0B 220.5 GB/s (exactly half — the cube's port
+ *   asymmetry), L0C->L1 drain 128 GB/s, all @ 1.85 GHz.
+ *
+ * The MAD term mirrors the cube's per-TMATMUL cost
+ * `mad_head_cycles + cpr * ceil(m/16) * ceil(k/kt) * ceil(n/16)`, where
+ * `kt = mad_k_fractal_bytes / bytes_a` and `cpr` (1 for 2-byte inputs, 2 for
+ * 4-byte) is derived from the operand byte width in the chooser.
+ */
+struct L0CostModel {
+  double bw_l0a = 238.38;        ///< L1->L0A bytes/cycle (a2a3: 441 GB/s / 1.85 GHz).
+  double bw_l0b = 119.19;        ///< L1->L0B bytes/cycle (a2a3: 220.5 GB/s — half of A).
+  double bw_drain = 69.19;       ///< L0C->L1 drain bytes/cycle (a2a3: 128 GB/s / 1.85 GHz).
+  int mad_head_cycles = 6;       ///< Fixed per-TMATMUL issue overhead.
+  int mad_k_fractal_bytes = 32;  ///< Cube K-fractal width in bytes (kt = this / bytes_a).
+};
+
+/**
  * @brief Backend-specific behavior dispatch interface
  *
  * BackendHandler centralises every behavioural difference between backends
@@ -250,6 +272,16 @@ class BackendHandler {
    * outer matmul shape is itself smaller than this threshold).
    */
   [[nodiscard]] virtual int GetMinL0TileDim() const { return 16; }
+
+  /**
+   * @brief Closed-form GEMM cost-model parameters (L1<->L0 / drain bandwidths
+   * and MAD constants) consumed by ChooseL0Tile.
+   *
+   * Default is Ascend a2a3 (910B), validated against the pto-isa perf-sim. The
+   * a5 (950) numbers are not yet measured; the a2a3 default stands in as a
+   * placeholder until characterised — override here once measured.
+   */
+  [[nodiscard]] virtual L0CostModel GetL0CostModel() const { return L0CostModel{}; }
 };
 
 }  // namespace backend

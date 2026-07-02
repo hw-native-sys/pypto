@@ -100,9 +100,10 @@
 ///     accumulator slicing), of a Vec left operand, or of a result consumed
 ///     on-chip (not by a single 2D store) is deferred — those emit a
 ///     ``PerfHint`` and skip.
-///   * ``K % k == 0``.  K-boundary handling (slice valid_shape on the last
-///     iteration) is not yet implemented; mismatched cases emit a
-///     ``PerfHint`` and skip.
+///   * Any 16-aligned K.  When the chosen ``k`` does not divide ``K``
+///     (``allow_k_boundary``) the K-loop peels a partial last block of width
+///     ``K - (K/k)*k``; with K and k both 16-aligned the tail is itself 16-aligned
+///     -- an ordinary matmul_acc block (ptoas requires 16-aligned tile cols).
 ///
 /// Already-L0-sized matmuls (chooser returns ``(M, N, K)``) are left
 /// untouched.
@@ -347,38 +348,50 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
   const Span sp = r.original->span_;
   const std::string base = r.name_base.empty() ? r.original->var_->name_hint_ : r.name_base;
   const bool is_acc = r.acc_init != nullptr;
+  auto& reg = OpRegistry::GetInstance();
+
+  INTERNAL_CHECK_SPAN(r.k < r.K, sp) << "Internal error: BuildKLoopRewrite expects a tiled K (k < K), got k="
+                                     << r.k << ", K=" << r.K;
+
+  // K-block decomposition.  With allow_k_boundary the chosen k need not divide
+  // K: the reduction is `num_full` full blocks of width k plus a final partial
+  // block of width `k_eff = K - num_full*k` (k_eff == 0 when k divides K — the
+  // legacy uniform loop).  K and k are 16-aligned, so k_eff is itself 16-aligned —
+  // an ordinary matmul_acc block (ptoas requires 16-aligned tile cols).
+  const int64_t num_full = r.K / r.k;
+  const int64_t k_full = num_full * r.k;
+  const int64_t k_eff = r.K - k_full;
+  const bool has_tail = k_eff > 0;
 
   std::vector<StmtPtr> out;
-  out.reserve(2);
 
-  // Iter-arg init.  For matmul_acc, use the caller's accumulator directly —
-  // its type already matches the per-iter matmul_acc output (Acc with Nz
-  // TileView), so iter_arg / yield types are structurally consistent.  For
-  // plain matmul, build an Acc-resident ``tile.create`` placeholder; the
-  // real accumulator buffer is materialized by the first iteration's
-  // ``tile.matmul``, and the Nz TileView from ``tile.create`` matches the
-  // matmul output so iter_arg / yield / return_var stay Acc-typed.
-  ExprPtr init_value;
-  TypePtr iter_type;
-  if (is_acc) {
-    init_value = r.acc_init;
-    iter_type = r.acc_init->GetType();
-  } else {
-    auto acc_dtype = As<TileType>(r.original->var_->GetType())->dtype_;
-    auto c_init = BuildAccInit(r.m, r.n, acc_dtype, base + "_l0_init", sp);
-    out.push_back(c_init);
-    init_value = c_init->var_;
-    iter_type = c_init->var_->GetType();
+  // Iter-arg init for the pipelined K-loop (only when there are >= 2 full
+  // blocks).  Emitted FIRST — before the optional Vec->Mat staging below — so a
+  // k that divides K yields byte-identical output to the pre-peel emitter.  For
+  // matmul_acc the caller's accumulator is the init directly; for plain matmul a
+  // fresh Acc-resident ``tile.create`` placeholder that the first iteration's
+  // ``tile.matmul`` overwrites (the Nz TileView matches, so iter_arg / yield /
+  // return_var stay Acc-typed).
+  ExprPtr loop_init;
+  TypePtr loop_iter_type;
+  if (num_full >= 2) {
+    if (is_acc) {
+      loop_init = r.acc_init;
+      loop_iter_type = r.acc_init->GetType();
+    } else {
+      auto acc_dtype = As<TileType>(r.original->var_->GetType())->dtype_;
+      auto c_init = BuildAccInit(r.m, r.n, acc_dtype, base + "_l0_init", sp);
+      out.push_back(c_init);
+      loop_init = c_init->var_;
+      loop_iter_type = c_init->var_->GetType();
+    }
   }
 
-  auto ko_var = std::make_shared<Var>(base + "_l0_ko", std::make_shared<ScalarType>(DataType::INDEX), sp);
-  auto c_iter = std::make_shared<IterArg>(base + "_l0_c", iter_type, init_value, sp);
-
-  // A Vec-resident left operand (fused-attention PV / ``score·V``) is staged
-  // into Mat once, before the K-loop, so the per-iter extract slices from Mat
-  // exactly like the QK path — and so ``ExpandMixedKernel`` can lower the
-  // Vec→Mat boundary crossing via its ``tile.move``-based handshake (see
-  // ``BuildMoveToMat``).  Mat-resident left operands extract directly.
+  // A Vec-resident left operand (fused-attention PV / ``score·V``) is staged into
+  // Mat once, before any K block, so each extract slices from Mat exactly like
+  // the QK path — and so ``ExpandMixedKernel`` can lower the Vec→Mat crossing via
+  // its ``tile.move`` handshake (``CollectCVBoundaryMoves`` only matches
+  // ``tile.move``).  Mat-resident left operands extract directly.
   VarPtr lhs_extract_src = r.lhs_src;
   if (r.stage_lhs_to_mat) {
     auto lhs_mat = BuildMoveToMat(r.lhs_src, base + "_l0_lmat", sp);
@@ -386,34 +399,62 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
     lhs_extract_src = lhs_mat->var_;
   }
 
-  // Per-iter operand extracts: lhs is sliced over rows [mi, mi + m) and along K
-  // and lands in Left; rhs is sliced along K and over cols [ni, ni + n) and
-  // lands in Right.  No intermediate Mat-resident tile and no follow-up
-  // tile.mov is needed.  The K-only path passes mi == ni == null (== 0) with
-  // m == M, n == N, so the extracts are identical to the un-tiled case.
   ExprPtr mi_off = r.mi ? r.mi : MakeIndex(0, sp);
   ExprPtr ni_off = r.ni ? r.ni : MakeIndex(0, sp);
-  auto sa = BuildExtract(lhs_extract_src, {r.m, r.k}, mi_off, ko_var, MemorySpace::Left, base + "_l0_a", sp);
-  auto sb = BuildExtract(r.rhs_src, {r.k, r.n}, ko_var, ni_off, MemorySpace::Right, base + "_l0_b", sp);
 
-  StmtPtr body = is_acc ? BuildMatmulAccBody(c_iter, sa, sb, base, sp)
-                        : BuildMatmulBody(ko_var, c_iter, sa, sb, base, sp);
+  // Emit one straight-line K block ``[m, kb] x [kb, n]`` at static K-offset
+  // ``ko``, accumulating into ``acc_in`` (``tile.matmul_acc``) or starting fresh
+  // (``tile.matmul`` when ``acc_in`` is null).  Used for the single-full-block
+  // (num_full == 1) and partial-tail cases; the multi-block case pipelines below.
+  auto emit_block = [&](int64_t ko, int64_t kb, const ExprPtr& acc_in, const std::string& tag) -> VarPtr {
+    auto sa = BuildExtract(lhs_extract_src, {r.m, kb}, mi_off, MakeIndex(ko, sp), MemorySpace::Left,
+                           base + "_l0_a" + tag, sp);
+    auto sb = BuildExtract(r.rhs_src, {kb, r.n}, MakeIndex(ko, sp), ni_off, MemorySpace::Right,
+                           base + "_l0_b" + tag, sp);
+    ExprPtr call = acc_in ? reg.Create("tile.matmul_acc", {acc_in, sa->var_, sb->var_}, sp)
+                          : reg.Create("tile.matmul", {sa->var_, sb->var_}, sp);
+    auto cvar = std::make_shared<Var>(base + "_l0_c" + tag, call->GetType(), sp);
+    out.push_back(sa);
+    out.push_back(sb);
+    out.push_back(std::make_shared<AssignStmt>(cvar, call, sp));
+    return cvar;
+  };
 
-  // The caller filters K/k < 2 cases (already-L0-sized when K == k); the loop
-  // here always runs at least twice, so pipelining is always meaningful.
-  std::vector<std::pair<std::string, std::any>> attrs = {{kPipelineStagesAttr, /*pipeline_stages=*/2}};
+  // --- Full blocks: a pipelined K-loop when there are >= 2 of them, else a
+  //     single straight-line block (a 1-trip pipeline loop would be degenerate).
+  VarPtr main_var;
+  if (num_full >= 2) {
+    auto ko_var = std::make_shared<Var>(base + "_l0_ko", std::make_shared<ScalarType>(DataType::INDEX), sp);
+    auto c_iter = std::make_shared<IterArg>(base + "_l0_c", loop_iter_type, loop_init, sp);
+    auto sa =
+        BuildExtract(lhs_extract_src, {r.m, r.k}, mi_off, ko_var, MemorySpace::Left, base + "_l0_a", sp);
+    auto sb = BuildExtract(r.rhs_src, {r.k, r.n}, ko_var, ni_off, MemorySpace::Right, base + "_l0_b", sp);
+    StmtPtr body = is_acc ? BuildMatmulAccBody(c_iter, sa, sb, base, sp)
+                          : BuildMatmulBody(ko_var, c_iter, sa, sb, base, sp);
+    std::vector<std::pair<std::string, std::any>> attrs = {{kPipelineStagesAttr, /*pipeline_stages=*/2}};
+    // Loop return var: an intermediate when a partial tail follows (named
+    // distinctly so round-trip names stay unique), else the final result.
+    auto rv =
+        std::make_shared<Var>(has_tail ? base + "_l0_kmain" : base, loop_iter_type, r.original->var_->span_);
+    auto for_stmt = std::make_shared<ForStmt>(
+        ko_var, MakeIndex(0, sp), MakeIndex(k_full, sp), MakeIndex(r.k, sp), std::vector<IterArgPtr>{c_iter},
+        body, std::vector<VarPtr>{rv}, sp, ForKind::Pipeline, std::move(attrs));
+    out.push_back(for_stmt);
+    main_var = rv;
+  } else {
+    // num_full == 1: a single straight-line full block (k < K checked above, so a
+    // partial tail always follows).  This is a correctness guard, not a hot path:
+    // the roofline chooser never selects k in (K/2, K) -- a near-full k is wall-
+    // dominated (2x the MAD ceil-step of a divisor, and it loses the min-padding
+    // tie-break), so num_full is >= 2 in practice.  Kept so the emitter stays
+    // correct (no degenerate 1-trip pipeline) if the cost model ever changes.
+    main_var = emit_block(/*ko=*/0, /*kb=*/r.k, is_acc ? ExprPtr(r.acc_init) : nullptr, "0");
+  }
 
-  // Build a fresh return_var typed identically to the iter-arg.  For
-  // matmul_acc the type matches the original Var's type, but we still create
-  // a fresh Var so the rewrite is uniform with the matmul case (downstream
-  // substitution treats both identically).
-  auto rv = std::make_shared<Var>(base, iter_type, r.original->var_->span_);
-
-  auto for_stmt = std::make_shared<ForStmt>(ko_var, MakeIndex(0, sp), MakeIndex(r.K, sp), MakeIndex(r.k, sp),
-                                            std::vector<IterArgPtr>{c_iter}, body, std::vector<VarPtr>{rv},
-                                            sp, ForKind::Pipeline, std::move(attrs));
-  out.push_back(for_stmt);
-  return RewriteResult{std::move(out), rv};
+  // --- Partial tail: matmul_acc the [m, k_eff] x [k_eff, n] block onto the
+  //     full-blocks accumulator (no-op when k divides K). ---
+  VarPtr result_var = has_tail ? emit_block(k_full, k_eff, ExprPtr(main_var), "t") : main_var;
+  return RewriteResult{std::move(out), result_var};
 }
 
 /// Operands + chosen L0 tile shape for a tileable matmul.  Produced by
@@ -427,6 +468,11 @@ struct MatmulTiling {
   bool stage_lhs_to_mat = false;
   int64_t M = 0, N = 0, K = 0;
   int64_t m = 0, n = 0, k = 0;
+  /// Chosen L0 stationarity (which operand is pinned single-buffered across the
+  /// moving grid). Output-stationary unless the chooser picked A/B-stationary
+  /// (k == K); BuildFullKPipelined sets the loop order + single-buffers the
+  /// stationary (outer) operand accordingly.
+  utils::Stationarity stationarity = utils::Stationarity::kOutputStationary;
   [[nodiscard]] bool is_acc() const { return acc_init != nullptr; }
   /// True when the chosen L0 tile is smaller than the [M, N] output on either
   /// axis — the output Acc would overflow L0c, so the output must be tiled.
@@ -548,6 +594,12 @@ std::optional<MatmulTiling> AnalyzeMatmul(const AssignStmtPtr& assign, std::vect
   cfg.l0a_bytes = handler->GetL0aCapacityBytes();
   cfg.l0b_bytes = handler->GetL0bCapacityBytes();
   cfg.l0c_bytes = handler->GetL0cCapacityBytes();
+  const auto cost_model = handler->GetL0CostModel();
+  cfg.bw_a = cost_model.bw_l0a;
+  cfg.bw_b = cost_model.bw_l0b;
+  cfg.bw_drain = cost_model.bw_drain;
+  cfg.mad_head = cost_model.mad_head_cycles;
+  cfg.mad_k_fractal_bytes = cost_model.mad_k_fractal_bytes;
   cfg.bytes_a = bytes_a;
   cfg.bytes_b = bytes_b;
   cfg.bytes_c = bytes_c;
@@ -557,15 +609,49 @@ std::optional<MatmulTiling> AnalyzeMatmul(const AssignStmtPtr& assign, std::vect
   cfg.min_m = handler->GetMinL0TileDim();
   cfg.min_n = handler->GetMinL0TileDim();
   cfg.min_k = handler->GetMinL0TileDim();
-  cfg.double_buffer_a = true;
-  cfg.double_buffer_b = true;
-  cfg.double_buffer_c = false;
+  // Operand-stationary (the chooser's allow_a/b_stationary; dbA/dbB derived):
+  // pin the chosen operand in a SINGLE-buffered (full) L0 buffer across the moving
+  // grid (requires k == K), streaming the other operand double-buffered.
+  // BuildFullKPipelined realizes it by making the stationary (outer) loop
+  // ForKind::Sequential — the held operand then uses the full L0 buffer the chooser
+  // budgeted (no /2) and is loaded once per outer step (no re-stream across the
+  // moving axis). The chooser adopts A/B-stationary only on a strictly lower wall,
+  // so it stays output-stationary for compute-bound shapes.
+  cfg.allow_a_stationary = true;
+  cfg.allow_b_stationary = true;
+  // TODO(dbC=2): L0C double-buffering (the chooser's allow_double_buffer_c / dbC=2
+  // design point) is left OFF here: the chooser can score it, but the full-K
+  // emitter threads the output accumulator as a single iter-arg chain through the
+  // M/N grid, so the lowering allocates ONE L0C buffer (MemoryReuse reuses it
+  // across tiles) and pipeline_overlap_stores does not float consecutive tiles into
+  // two co-live accumulators. Enabling it would only shrink the tile (budgeting
+  // L0C/2) without hiding the drain — a regression. Re-enable once the emitter
+  // realizes a genuine two-accumulator ping-pong (two co-live L0C buffers with the
+  // drain of tile i overlapping the MAD of tile i+1; needs the direct-store output
+  // chain broken so the per-tile FIXPIPE drains can overlap).
+  cfg.allow_double_buffer_c = false;
   // tile.matmul_acc threads the caller's accumulator into the K-loop's
   // iter-arg, so each invocation reads C from L1 at start and writes back at
   // end (gamma_c = 2 in the chooser's traffic model).  Plain tile.matmul
   // starts from a fresh Acc placeholder so C is write-only (gamma_c = 1).
   cfg.c_read = is_matmul_acc;
   cfg.allow_padding = false;
+  // Permit a non-divisor final K block: the chooser may return a k that does not
+  // divide K, and BuildKLoopRewrite peels the partial last K iteration.  The peel
+  // is only valid when K is 16-aligned — then the tail K - floor(K/k)*k is itself
+  // 16-aligned (ptoas requires 16-aligned tile cols).  A non-16-aligned K has no
+  // valid K-tiling (any tail or whole-K block has non-fractal cols), so skip it
+  // here with a perf hint rather than emit invalid extracts (the pre-roofline path
+  // also bailed on unsupported K).
+  cfg.allow_k_boundary = true;
+  if (K % cfg.align_k != 0) {
+    hints.emplace_back(DiagnosticSeverity::PerfHint, kPassName, 0, "PH-AT-007",
+                       "tile.matmul: K=" + std::to_string(K) + " is not a multiple of the cube fractal " +
+                           std::to_string(cfg.align_k) +
+                           " — non-16-aligned K is unsupported; left untouched.",
+                       assign->span_);
+    return std::nullopt;
+  }
 
   utils::L0TileResult res;
   try {
@@ -580,17 +666,6 @@ std::optional<MatmulTiling> AnalyzeMatmul(const AssignStmtPtr& assign, std::vect
 
   // Already L0-sized — nothing to do.
   if (res.m == M && res.n == N && res.k == K) return std::nullopt;
-
-  // Require K divisible by the chosen k (applies to both K-only and M/N
-  // tiling).  K-boundary handling (slice valid_shape on the last K iteration)
-  // is not yet implemented.
-  if (K % res.k != 0) {
-    hints.emplace_back(DiagnosticSeverity::PerfHint, kPassName, 0, "PH-AT-007",
-                       "tile.matmul: chooser picked k=" + std::to_string(res.k) + " not dividing K=" +
-                           std::to_string(K) + "; K-boundary handling not yet supported — left untouched",
-                       assign->span_);
-    return std::nullopt;
-  }
 
   if (!res.perf_hint.empty()) {
     hints.emplace_back(DiagnosticSeverity::PerfHint, kPassName, 0, "PH-AT-008",
@@ -612,6 +687,7 @@ std::optional<MatmulTiling> AnalyzeMatmul(const AssignStmtPtr& assign, std::vect
   t.m = res.m;
   t.n = res.n;
   t.k = res.k;
+  t.stationarity = res.stationarity;
   return t;
 }
 
@@ -914,7 +990,16 @@ std::pair<std::vector<StmtPtr>, VarPtr> BuildFullKPipelined(const MatmulTiling& 
   const int64_t q_blocks = t.N / t.n;  // interior col blocks (>= 1)
   const int64_t t_row = p_blocks * a_panel + p_blocks * q_blocks * b_panel;
   const int64_t t_col = p_blocks * q_blocks * a_panel + q_blocks * b_panel;
-  const bool row_outer = t_row <= t_col;  // A-stationary (rows outer) when row traversal is cheaper
+  // Loop order + buffering. When the chooser picked an operand-stationary point
+  // (k == K), the stationary operand is the OUTER (held) panel and is SINGLE-
+  // buffered — the chooser budgeted it the full L0 buffer (no /2). A-stationary
+  // -> A held -> rows outer; B-stationary -> B held -> cols outer. Output-
+  // stationary double-buffers both and picks the loop order by extract traffic
+  // (T_row vs T_col).
+  const bool a_stationary = t.stationarity == utils::Stationarity::kAStationary;
+  const bool b_stationary = t.stationarity == utils::Stationarity::kBStationary;
+  const bool stationary_single_buffered = a_stationary || b_stationary;
+  const bool row_outer = stationary_single_buffered ? a_stationary : (t_row <= t_col);
 
   // Interior = the region tiled by FULL m x n blocks; the L-shaped partial
   // boundary beyond it is peeled into straight-line tiles below.
@@ -963,13 +1048,20 @@ std::pair<std::vector<StmtPtr>, VarPtr> BuildFullKPipelined(const MatmulTiling& 
         std::vector<VarPtr>{inner_rv}, sp, ForKind::Pipeline, std::move(inner_attrs));
     std::vector<StmtPtr> outer_body{outer_extract, inner_for,
                                     std::make_shared<YieldStmt>(std::vector<ExprPtr>{inner_rv}, sp)};
-    std::vector<std::pair<std::string, std::any>> outer_attrs = {{kPipelineStagesAttr, /*pipeline_stages=*/2},
-                                                                 {kPipelineOverlapStoresAttr, false}};
+    // Operand-stationary: the outer loop carries the SINGLE-buffered stationary
+    // panel, so it is Sequential — a Pipeline stage=2 outer would double-buffer the
+    // held operand (2x its full-L0 budget -> overflow). The inner (moving) loop
+    // stays pipelined. Output-stationary double-buffers both -> outer Pipeline.
+    const ForKind outer_kind = stationary_single_buffered ? ForKind::Sequential : ForKind::Pipeline;
+    std::vector<std::pair<std::string, std::any>> outer_attrs;
+    if (!stationary_single_buffered) {
+      outer_attrs = {{kPipelineStagesAttr, /*pipeline_stages=*/2}, {kPipelineOverlapStoresAttr, false}};
+    }
     auto outer_rv = std::make_shared<Var>(base + "_orv", out_type, sp);
     auto outer_for = std::make_shared<ForStmt>(
         outer_var, MakeIndex(0, sp), MakeIndex(outer_extent, sp), MakeIndex(outer_step, sp),
         std::vector<IterArgPtr>{out_outer}, SeqStmts::Flatten(std::move(outer_body), sp),
-        std::vector<VarPtr>{outer_rv}, sp, ForKind::Pipeline, std::move(outer_attrs));
+        std::vector<VarPtr>{outer_rv}, sp, outer_kind, std::move(outer_attrs));
     stmts.push_back(outer_for);
     chain = outer_rv;
   }
@@ -1058,7 +1150,11 @@ std::optional<MNFold> TryFoldMNTiling(const MatmulTiling& t, int result_uses, co
   // k == K (full K fits L0a/L0b) → pipelined interior + straight-line partial
   // tail (BuildFullKPipelined).  Either grid drives the chosen SubtilePlacer;
   // neither requires m | M or n | N (the full-K tail peels the partial boundary).
-  const bool full_k = t.K / t.k < 2;
+  // The chooser returns k == K exactly when the full K reduction fits one L0
+  // block (possibly an unaligned k < align under allow_k_boundary) — only then
+  // is there no K-loop.  A non-divisor k with k < K < 2k still needs the
+  // K-loop+peel, so test k == K rather than the integer-division proxy K/k < 2.
+  const bool full_k = t.k == t.K;
 
   // Direct-store: the sole consumer is a 2D tile.store.  The grid is emitted
   // later at the store site, where the caller re-applies the then-current remap
@@ -1184,8 +1280,11 @@ std::optional<std::pair<std::vector<StmtPtr>, VarPtr>> TryFoldMatScratch(const M
   // K-split (K spans >= 2 L0 blocks) → unrolled per-sub-tile K-loop grid; full-K →
   // the pipelined interior + straight-line tail.  Both drive MatScratchPlacer,
   // which assembles each sub-tile into the L1/Mat scratch (tile.assemble accepts
-  // constant or loop-variable offsets).
-  const bool full_k = t.K / t.k < 2;
+  // constant or loop-variable offsets).  A non-divisor k with k < K < 2k still needs
+  // the K-loop + peel (BuildSplitKGrid), so dispatch on k == K rather than the
+  // integer-division proxy K/k < 2 — which would mis-route a split-K tile to the
+  // full-K [m,K]/[K,n] emitter and blow the L0A/L0B budget.
+  const bool full_k = t.k == t.K;
   auto [stmts, scratch] = full_k ? BuildFullKPipelined(t, placer) : BuildSplitKGrid(t, placer);
   return std::make_pair(std::move(stmts), scratch);
 }
@@ -1336,9 +1435,11 @@ class AutoTileMutator : public IRMutator {
       if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(current)) {
         if (auto tiling = AnalyzeMatmul(assign, hints)) {
           if (!tiling->needs_mn_tiling()) {
-            // Whole output fits L0c — tile K only (existing behaviour).
-            INTERNAL_CHECK_SPAN(tiling->K / tiling->k >= 2, tiling->assign->span_)
-                << "Internal error: K-only tiling expects K / k >= 2 (K=" << tiling->K << ", k=" << tiling->k
+            // Whole output fits L0c — tile K only.  k < K here (k == K with
+            // m == M, n == N would be already-L0-sized and skipped above); the
+            // chooser may return a non-divisor k that BuildKLoopRewrite peels.
+            INTERNAL_CHECK_SPAN(tiling->k < tiling->K, tiling->assign->span_)
+                << "Internal error: K-only tiling expects k < K (K=" << tiling->K << ", k=" << tiling->k
                 << ")";
             auto rewrite = BuildKLoopRewrite(
                 MakeKLoop(*tiling, /*mi=*/nullptr, /*ni=*/nullptr, tiling->m, tiling->n, /*name_base=*/""));

@@ -513,14 +513,16 @@ class TestAutoTileMatmulL0KOnly:
         twice = passes.auto_tile_matmul_l0()(once)
         ir.assert_structural_equal(twice, once)
 
-    def test_k_not_divisible_skipped(self):
-        """When the chooser picks a ``k`` that doesn't divide ``K``, the pass
-        emits a ``PerfHint`` (PH-AT-007) and leaves the matmul untouched —
-        K-boundary handling (``valid_shape`` on the last slice) is not yet
-        implemented."""
+    def test_non_aligned_K_left_untouched(self):
+        """Non-16-aligned K has no valid L0 K-tiling: any peeled tail or whole-K block
+        would have non-16-aligned (non-fractal) tile cols that ptoas rejects, so the
+        pass leaves the matmul untouched (PH-AT-007 PerfHint) instead of emitting
+        invalid extracts.  K=2050 (M=16, N=64) is not a multiple of the cube fractal
+        16.  The device-valid 16-aligned-K peel is covered in the st suite
+        (``tests/st/runtime/ops/test_matmul.py::...test_matmul_autol0_nonaligned_k``,
+        K=688); the chooser-level rejection in
+        ``test_l0_tile_chooser.py::...test_non_aligned_K_rejected``."""
 
-        # M=16, N=64, K=2050 (not divisible by 256 — chooser picks k=256 for
-        # 16/64 BF16 → emits PH-AT-007).
         @pl.program
         class Before:
             @pl.function(type=pl.FunctionType.InCore)
@@ -541,7 +543,37 @@ class TestAutoTileMatmulL0KOnly:
                 return out
 
         After = passes.auto_tile_matmul_l0()(Before)
-        ir.assert_structural_equal(After, Before)
+        ir.assert_structural_equal(After, Before)  # non-aligned K -> untouched
+
+    def test_non_aligned_K_load_bound_left_untouched(self):
+        """A load-bound skinny shape with non-16-aligned K is also skipped: K=300
+        (M=16, N=64) is not a multiple of the cube fractal 16, so there is no valid
+        K-tiling (a peeled tail / whole-K block would have non-fractal cols) and the
+        pass leaves the matmul untouched (PH-AT-007).  Mirrors
+        ``test_non_aligned_K_left_untouched`` for a load-bound (vs MAD-bound) K; the
+        exhaustive-k tie-break itself is covered by the chooser oracle."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 300], pl.BF16],
+                rhs: pl.Tensor[[300, 64], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                lhs_mat: pl.Tile[[16, 300], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [16, 300], target_memory=pl.Mem.Mat
+                )
+                rhs_mat: pl.Tile[[300, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [300, 64], target_memory=pl.Mem.Mat
+                )
+                c: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lhs_mat, rhs_mat)
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        ir.assert_structural_equal(After, Before)  # non-aligned K -> untouched
 
 
 def _torch_codegen_matches_matmul(program, m_dim, n_dim, k_dim):
@@ -959,11 +991,10 @@ class TestAutoTileMatmulL0MNTiling:
         """Full-K (k == K) M/N tiling emits **nested pipelined loops** — outer rows,
         inner cols, both ``ForKind::Pipeline`` stage=2 — so ``LowerPipelineLoops``
         double-buffers both operand extracts (the pto-isa cost model's ~15% win).
-        The chooser runs in ``require_divisible`` mode so the tiles divide M/N
-        exactly (integer trip counts, no partial last iteration).
 
-        256×256 @ 64 BF16 on Ascend910B: output [256,256] FP32 overflows L0c; the
-        left panel (m×K) is not smaller than the right (K×n), so A is stationary
+        384×640 @ 64 BF16 on Ascend910B: the roofline chooser picks (m=192, n=160,
+        k=64), a divisible 2×4 grid (output [384,640] FP32 overflows L0c). The left
+        panel (192×64) is not smaller than the right (64×160), so A is stationary
         and the M-row loop is the outer one."""
 
         _backend.reset_for_testing()
@@ -974,17 +1005,17 @@ class TestAutoTileMatmulL0MNTiling:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
-                lhs: pl.Tensor[[256, 64], pl.BF16],
-                rhs: pl.Tensor[[64, 256], pl.BF16],
-                out: pl.Out[pl.Tensor[[256, 256], pl.FP32]],
-            ) -> pl.Tensor[[256, 256], pl.FP32]:
-                lhs_mat: pl.Tile[[256, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
-                    lhs, [0, 0], [256, 64], target_memory=pl.Mem.Mat
+                lhs: pl.Tensor[[384, 64], pl.BF16],
+                rhs: pl.Tensor[[64, 640], pl.BF16],
+                out: pl.Out[pl.Tensor[[384, 640], pl.FP32]],
+            ) -> pl.Tensor[[384, 640], pl.FP32]:
+                lhs_mat: pl.Tile[[384, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [384, 64], target_memory=pl.Mem.Mat
                 )
-                rhs_mat: pl.Tile[[64, 256], pl.BF16, pl.Mem.Mat] = pl.tile.load(
-                    rhs, [0, 0], [64, 256], target_memory=pl.Mem.Mat
+                rhs_mat: pl.Tile[[64, 640], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [64, 640], target_memory=pl.Mem.Mat
                 )
-                c: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lhs_mat, rhs_mat)
+                c: pl.Tile[[384, 640], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lhs_mat, rhs_mat)
                 out = pl.store(c, [0, 0], out)
                 return out
 
@@ -999,9 +1030,9 @@ class TestAutoTileMatmulL0MNTiling:
         from pypto.debug import torch_codegen  # noqa: PLC0415
 
         torch.manual_seed(0)
-        a = torch.randn(256, 64, dtype=torch.bfloat16)
-        b = torch.randn(64, 256, dtype=torch.bfloat16)
-        out = torch.zeros(256, 256, dtype=torch.float32)
+        a = torch.randn(384, 64, dtype=torch.bfloat16)
+        b = torch.randn(64, 640, dtype=torch.bfloat16)
+        out = torch.zeros(384, 640, dtype=torch.float32)
         ns: dict = {}
         exec(torch_codegen(After), ns)  # noqa: S102
         ns["kernel"](a, b, out)
@@ -1065,11 +1096,13 @@ class TestAutoTileMatmulL0MNTiling:
     def test_full_k_partial_boundary_is_peeled_into_tail(self):
         """When the chosen tile does not divide M/N, the full-K emitter pipelines
         the ``[0,full_m)×[0,full_n)`` interior (full m×n blocks) and peels the
-        L-shaped partial boundary into straight-line tail tiles — instead of
-        forcing a tiny exact-divisor tile.  272 = 16·17 (17 prime) would snap to a
-        16×16 tile (~289 sub-tiles) under exact-divisibility; here the chooser
-        picks freely (m=192, n=160 → 1×1 interior + 3 partial tail tiles) and the
-        partial boundary, including the [80×112] corner, is numerically exact."""
+        partial boundary into straight-line tail tiles — instead of forcing a tiny
+        exact-divisor tile.  272×416 @ 32 (output-stationary): the roofline chooser
+        picks (m=144, n=208, k=32) → a 1×2 full-tile interior plus an M-tail strip
+        ``[144:272)×[0:416)``, every tile numerically exact with no collapse to a
+        tiny divisor.  (A deliberately output-stationary shape, so this exercises
+        the OS nested-pipeline peel; A/B-stationary peeling is covered separately
+        in ``test_a_stationary_*``.)"""
 
         _backend.reset_for_testing()
         _backend.set_backend_type(BackendType.Ascend910B)
@@ -1079,17 +1112,17 @@ class TestAutoTileMatmulL0MNTiling:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
-                lhs: pl.Tensor[[272, 64], pl.BF16],
-                rhs: pl.Tensor[[64, 272], pl.BF16],
-                out: pl.Out[pl.Tensor[[272, 272], pl.FP32]],
-            ) -> pl.Tensor[[272, 272], pl.FP32]:
-                lhs_mat: pl.Tile[[272, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
-                    lhs, [0, 0], [272, 64], target_memory=pl.Mem.Mat
+                lhs: pl.Tensor[[272, 32], pl.BF16],
+                rhs: pl.Tensor[[32, 416], pl.BF16],
+                out: pl.Out[pl.Tensor[[272, 416], pl.FP32]],
+            ) -> pl.Tensor[[272, 416], pl.FP32]:
+                lhs_mat: pl.Tile[[272, 32], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [272, 32], target_memory=pl.Mem.Mat
                 )
-                rhs_mat: pl.Tile[[64, 272], pl.BF16, pl.Mem.Mat] = pl.tile.load(
-                    rhs, [0, 0], [64, 272], target_memory=pl.Mem.Mat
+                rhs_mat: pl.Tile[[32, 416], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [32, 416], target_memory=pl.Mem.Mat
                 )
-                c: pl.Tile[[272, 272], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lhs_mat, rhs_mat)
+                c: pl.Tile[[272, 416], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lhs_mat, rhs_mat)
                 out = pl.store(c, [0, 0], out)
                 return out
 
@@ -1105,19 +1138,178 @@ class TestAutoTileMatmulL0MNTiling:
         steps = [int(s) for s in re.findall(r"pl\.pipeline\(0, \d+, (\d+)", printed)]
         assert steps and all(s >= 64 for s in steps), f"tile collapsed to a tiny divisor: steps={steps}"
 
+    def test_a_stationary_single_buffers_held_operand(self):
+        """A-stationary (chooser picks it for k == K when pinning A cuts load): the
+        held operand A occupies the FULL L0A (single-buffered) across the moving N
+        grid; B streams double-buffered. The emitter realizes it as a **Sequential**
+        outer (M) loop carrying A's extract + a **pipelined** inner (N) loop — one
+        pipeline, not the two nested pipelines of the output-stationary path.
+
+        496×544 @ 64 → A-stationary (m=496, n=32, k=64): A = [496, 64] = 63.5 KB
+        fits L0A single-buffered (≤ 64 KB) but would overflow double-buffered, so
+        the single-buffered Sequential outer is what makes the chooser's tile legal;
+        the full Default pipeline must allocate cleanly. (Numerics: st suite.)"""
+        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[496, 64], pl.BF16],
+                rhs: pl.Tensor[[64, 544], pl.BF16],
+                out: pl.Out[pl.Tensor[[496, 544], pl.FP32]],
+            ) -> pl.Tensor[[496, 544], pl.FP32]:
+                lhs_mat: pl.Tile[[496, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [496, 64], target_memory=pl.Mem.Mat
+                )
+                rhs_mat: pl.Tile[[64, 544], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [64, 544], target_memory=pl.Mem.Mat
+                )
+                c: pl.Tile[[496, 544], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lhs_mat, rhs_mat)
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[496, 64], pl.BF16],
+                rhs: pl.Tensor[[64, 544], pl.BF16],
+                out: pl.Out[pl.Tensor[[496, 544], pl.FP32]],
+            ) -> pl.Tensor[[496, 544], pl.FP32]:
+                lhs_mat: pl.Tile[[496, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [496, 64], target_memory=pl.Mem.Mat
+                )
+                rhs_mat: pl.Tile[[64, 544], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [64, 544], target_memory=pl.Mem.Mat
+                )
+                # Sequential outer (M) loop holds the single-buffered A panel (full L0A).
+                for mo, (out_o,) in pl.range(0, 496, 496, init_values=(out,)):
+                    a_held: pl.Tile[[496, 64], pl.BF16, pl.Mem.Left] = pl.tile.extract(
+                        lhs_mat, mo, 0, [496, 64], target_memory=pl.Mem.Left
+                    )
+                    # Pipelined inner (N) loop streams B double-buffered.
+                    for ni, (out_i,) in pl.pipeline(
+                        0, 544, 32, stage=2, init_values=(out_o,), attrs={"pipeline_overlap_stores": False}
+                    ):
+                        b_mov: pl.Tile[[64, 32], pl.BF16, pl.Mem.Right] = pl.tile.extract(
+                            rhs_mat, 0, ni, [64, 32], target_memory=pl.Mem.Right
+                        )
+                        c_sub: pl.Tile[[496, 32], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(a_held, b_mov)
+                        out_s: pl.Tensor[[496, 544], pl.FP32] = pl.store(c_sub, [mo, ni], out_i)
+                        out_iy = pl.yield_(out_s)
+                    out_oy = pl.yield_(out_iy)
+                return out_oy
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        ir.assert_structural_equal(After, Expected)
+        # The chooser's single-buffered A tile must also allocate without an L0A
+        # overflow through the full pipeline (A = 63.5 KB single-buffered; double-
+        # buffering it, 127 KB, would exceed the 64 KB L0A).
+        assert PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before) is not None
+
         torch = pytest.importorskip("torch")
         from pypto.debug import torch_codegen  # noqa: PLC0415
 
         torch.manual_seed(0)
-        a = torch.randn(272, 64, dtype=torch.bfloat16)
-        b = torch.randn(64, 272, dtype=torch.bfloat16)
-        out = torch.zeros(272, 272, dtype=torch.float32)
+        a = torch.randn(496, 64, dtype=torch.bfloat16)
+        b = torch.randn(64, 544, dtype=torch.bfloat16)
+        out = torch.zeros(496, 544, dtype=torch.float32)
         ns: dict = {}
         exec(torch_codegen(After), ns)  # noqa: S102
         ns["kernel"](a, b, out)
         expected = torch.matmul(a, b).float()
         assert torch.allclose(out, expected, rtol=1e-2, atol=1e-2), (
-            f"full-K tail mismatch: max abs diff {(out - expected).abs().max().item():.3e}"
+            f"A-stationary numerics mismatch: max abs diff {(out - expected).abs().max().item():.3e}"
+        )
+
+    def test_b_stationary_single_buffers_held_operand(self):
+        """B-stationary mirror: the held operand B occupies the FULL L0B
+        (single-buffered) across the moving M grid; A streams double-buffered. The
+        held B is the outer (Sequential) panel and A the moving (pipelined) inner
+        panel — the loop order flips vs A-stationary, the single-buffering does not.
+
+        256×272 @ 64 → B-stationary (m=64, n=272, k=64): B = [64, 272] held in full
+        L0B, A = [64, 64] streamed across the 4 m-blocks."""
+        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[256, 64], pl.BF16],
+                rhs: pl.Tensor[[64, 272], pl.BF16],
+                out: pl.Out[pl.Tensor[[256, 272], pl.FP32]],
+            ) -> pl.Tensor[[256, 272], pl.FP32]:
+                lhs_mat: pl.Tile[[256, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [256, 64], target_memory=pl.Mem.Mat
+                )
+                rhs_mat: pl.Tile[[64, 272], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [64, 272], target_memory=pl.Mem.Mat
+                )
+                c: pl.Tile[[256, 272], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lhs_mat, rhs_mat)
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[256, 64], pl.BF16],
+                rhs: pl.Tensor[[64, 272], pl.BF16],
+                out: pl.Out[pl.Tensor[[256, 272], pl.FP32]],
+            ) -> pl.Tensor[[256, 272], pl.FP32]:
+                lhs_mat: pl.Tile[[256, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [256, 64], target_memory=pl.Mem.Mat
+                )
+                rhs_mat: pl.Tile[[64, 272], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [64, 272], target_memory=pl.Mem.Mat
+                )
+                # Sequential outer (N) loop holds the single-buffered B panel (full L0B).
+                for no, (out_o,) in pl.range(0, 272, 272, init_values=(out,)):
+                    b_held: pl.Tile[[64, 272], pl.BF16, pl.Mem.Right] = pl.tile.extract(
+                        rhs_mat, 0, no, [64, 272], target_memory=pl.Mem.Right
+                    )
+                    # Pipelined inner (M) loop streams A double-buffered.
+                    for mi, (out_i,) in pl.pipeline(
+                        0, 256, 64, stage=2, init_values=(out_o,), attrs={"pipeline_overlap_stores": False}
+                    ):
+                        a_mov: pl.Tile[[64, 64], pl.BF16, pl.Mem.Left] = pl.tile.extract(
+                            lhs_mat, mi, 0, [64, 64], target_memory=pl.Mem.Left
+                        )
+                        c_sub: pl.Tile[[64, 272], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(a_mov, b_held)
+                        out_s: pl.Tensor[[256, 272], pl.FP32] = pl.store(c_sub, [mi, no], out_i)
+                        out_iy = pl.yield_(out_s)
+                    out_oy = pl.yield_(out_iy)
+                return out_oy
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        ir.assert_structural_equal(After, Expected)
+        assert PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before) is not None
+
+        torch = pytest.importorskip("torch")
+        from pypto.debug import torch_codegen  # noqa: PLC0415
+
+        torch.manual_seed(0)
+        a = torch.randn(256, 64, dtype=torch.bfloat16)
+        b = torch.randn(64, 272, dtype=torch.bfloat16)
+        out = torch.zeros(256, 272, dtype=torch.float32)
+        ns: dict = {}
+        exec(torch_codegen(After), ns)  # noqa: S102
+        ns["kernel"](a, b, out)
+        expected = torch.matmul(a, b).float()
+        assert torch.allclose(out, expected, rtol=1e-2, atol=1e-2), (
+            f"B-stationary numerics mismatch: max abs diff {(out - expected).abs().max().item():.3e}"
         )
 
     def test_full_k_direct_gm_keeps_one_l0c_accumulator(self):
@@ -1475,10 +1667,19 @@ class TestAutoTileMatmulL0MatScratch:
     constant-offset grid satisfies ``tile.assemble``'s literal-offset requirement."""
 
     def test_chained_matmul_uses_mat_scratch(self):
-        """An oversized producer feeding a matmul: the pass assembles the result into a
-        Mat scratch (2×2 grid → 4 Acc→Mat assembles), the consumer reads the scratch,
-        and SSA stays valid.  Structural — the numerical end-to-end path depends on the
-        in-place merge + full pipeline (a follow-up)."""
+        """An oversized producer feeding a matmul: the pass assembles the result into an
+        L1/Mat scratch via per-sub-tile Acc→Mat assembles, and the consumer reads the
+        scratch on-chip (no DDR — the L0C→L1→L0A trip).  256×256 @ 256 producer: the
+        roofline chooser picks (128,128,128) **output-stationary** split-K → a 2×2 grid
+        → 4 Acc→Mat assembles at constant offsets; the consumer is also output-stationary.
+
+        The dims are chosen so BOTH matmuls are output-stationary: their L0 operand
+        buffers are the same 32 KB shape, so the producer's (sequential, dead before the
+        consumer) packs cleanly into the consumer's in the current MemoryReuse.  An
+        A-stationary producer would instead pin a monolithic 64 KB L0 buffer that the
+        consumer's 2×32 KB double-buffer cannot pack against until MemoryReuse learns to
+        subdivide a freed region (the offset-packing follow-up).  Asserts structure + SSA
+        + numerics, and that the full Default pipeline allocates without an L0 overflow."""
         _backend.reset_for_testing()
         _backend.set_backend_type(BackendType.Ascend910B)
 
@@ -1487,8 +1688,8 @@ class TestAutoTileMatmulL0MatScratch:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
-                a: pl.Tensor[[256, 128], pl.BF16],
-                b: pl.Tensor[[128, 256], pl.BF16],
+                a: pl.Tensor[[256, 256], pl.BF16],
+                b: pl.Tensor[[256, 256], pl.BF16],
                 e: pl.Tensor[[256, 64], pl.BF16],
                 out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
             ) -> pl.Tensor[[256, 64], pl.FP32]:
@@ -1502,12 +1703,22 @@ class TestAutoTileMatmulL0MatScratch:
         printed = ir.python_print(After)
 
         assert "tile.create" in printed and "Mem.Mat" in printed, "expected a Mat output scratch"
-        assert printed.count("pl.tile.assemble(") == 4, "2×2 grid → 4 Acc→Mat assembles"
+        assert printed.count("pl.tile.assemble(") == 4, (
+            "output-stationary split-K 2×2 grid → 4 Acc→Mat assembles at constant offsets"
+        )
         assert "pl.tile.matmul(a__ssa_v0_mat, b__ssa_v0_mat)" not in printed, (
             "the oversized producer must be tiled, not left whole"
         )
         assert "pl.tile.cast(" not in printed, "the downcast must be fused into the Mat scratch"
         _assert_ssa_valid(After, "test_mat_scratch_chained")
+
+        # The chained producer must allocate without an L0 overflow.  These dims keep
+        # both matmuls output-stationary, so their L0 operand buffers are the same 32 KB
+        # shape and pack in MemoryReuse; a pass-level structural check alone would not
+        # catch an overflow.
+        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+
+        assert PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before) is not None
 
         # Numerically correct vs the bf16 chain, executed through torch_codegen. The
         # reference does block-wise bf16 matmuls with the intermediate downcast to bf16
@@ -1518,8 +1729,8 @@ class TestAutoTileMatmulL0MatScratch:
         from pypto.debug import torch_codegen  # noqa: PLC0415
 
         torch.manual_seed(0)
-        a = torch.randn(256, 128, dtype=torch.bfloat16)
-        b = torch.randn(128, 256, dtype=torch.bfloat16)
+        a = torch.randn(256, 256, dtype=torch.bfloat16)
+        b = torch.randn(256, 256, dtype=torch.bfloat16)
         e = torch.randn(256, 64, dtype=torch.bfloat16)
         out = torch.zeros(256, 64)
         ns: dict = {}
