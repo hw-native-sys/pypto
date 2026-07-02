@@ -410,16 +410,17 @@ jobs:
       - name: Kill orphaned task-submit tasks
         # If this job is cancelled (e.g. cancel-in-progress on a new push) or
         # killed mid-flight, the task-submit tasks it submitted keep running
-        # server-side — they are detached ("断开后可用 task-submit --wait 重连").
+        # server-side — they are detached (reattachable via `task-submit --wait`).
         # --max-time bounds them, but until then they hold a card shared with the
         # other repos/jobs on this host. Kill THIS job's own tasks explicitly.
-        # always() runs even on cancellation; we match by this job's workspace
-        # path (unique per runner) so we never touch another job's tasks.
+        # always() runs even on cancellation; we match by this job's checkout dir
+        # ($GITHUB_WORKSPACE/st-checkout, embedded in every --run above) so two
+        # jobs sharing a workspace root on one host never kill each other's tasks.
         if: always()
         run: |
-          echo "cleaning up task-submit tasks for $GITHUB_WORKSPACE"
+          echo "cleaning up task-submit tasks for $GITHUB_WORKSPACE/st-checkout"
           task-submit --list 2>/dev/null \
-            | grep -F "$GITHUB_WORKSPACE" \
+            | grep -F "$GITHUB_WORKSPACE/st-checkout" \
             | grep -oE 'task_[0-9_]+' \
             | sort -u \
             | while read -r tid; do
@@ -437,7 +438,6 @@ jobs:
     # with system-tests' workspace (which is owned by container root and
     # would EACCES our ci-runner cleanup).
     needs: toolchain
-    if: false  # DEBUG: temporarily disabled — focus on system-tests only. RESTORE before merge.
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -563,6 +563,28 @@ jobs:
           task-submit --device "$DEVICE_RANGE" --timeout 1800 --max-time 900 \
             --run "cd $GITHUB_WORKSPACE/dist-checkout && source activate.sh && python -m pytest tests/st/distributed -v --device=\$TASK_DEVICE --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }} --ignore=tests/st/distributed/test_l2_multi_orch.py"
 
+      - name: Kill orphaned task-submit tasks
+        # If this job is cancelled (e.g. cancel-in-progress on a new push) or
+        # killed mid-flight, the task-submit tasks it submitted keep running
+        # server-side — they are detached (reattachable via `task-submit --wait`).
+        # --max-time bounds them, but until then they hold a card shared with the
+        # other repos/jobs on this host. Kill THIS job's own tasks explicitly.
+        # always() runs even on cancellation; we match by this job's checkout dir
+        # ($GITHUB_WORKSPACE/dist-checkout, embedded in every --run above) so two
+        # jobs sharing a workspace root on one host never kill each other's tasks.
+        if: always()
+        run: |
+          echo "cleaning up task-submit tasks for $GITHUB_WORKSPACE/dist-checkout"
+          task-submit --list 2>/dev/null \
+            | grep -F "$GITHUB_WORKSPACE/dist-checkout" \
+            | grep -oE 'task_[0-9_]+' \
+            | sort -u \
+            | while read -r tid; do
+                echo "  killing $tid"
+                task-submit --kill "$tid" || true
+              done
+          true
+
   pypto-lib-model:
     # No container: each model run borrows an NPU from the host-level
     # `task-submit --device auto` queue (mechanism B — the whole `python
@@ -572,7 +594,6 @@ jobs:
     # caller's environment (per daily_ci.yml `a5-system-tests`), so sourcing
     # activate.sh before the wrap is enough — the child inherits the venv + env.
     needs: toolchain
-    if: false  # DEBUG: temporarily disabled — focus on system-tests only. RESTORE before merge.
     # Checkout + clone pypto-lib + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -740,6 +761,28 @@ jobs:
           source activate.sh
           task-submit --device "$DEVICE_ID" --timeout 1800 --max-time 1800 \
             --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/deepseek/v4/prefill_attention_swa.py -p a2a3 -d \$TASK_DEVICE"
+
+      - name: Kill orphaned task-submit tasks
+        # If this job is cancelled (e.g. cancel-in-progress on a new push) or
+        # killed mid-flight, the task-submit tasks it submitted keep running
+        # server-side — they are detached (reattachable via `task-submit --wait`).
+        # --max-time bounds them, but until then they hold a card shared with the
+        # other repos/jobs on this host. Kill THIS job's own tasks explicitly.
+        # always() runs even on cancellation; we match by this job's checkout dir
+        # ($GITHUB_WORKSPACE/lib-checkout, sourced in every --run above) so two
+        # jobs sharing a workspace root on one host never kill each other's tasks.
+        if: always()
+        run: |
+          echo "cleaning up task-submit tasks for $GITHUB_WORKSPACE/lib-checkout"
+          task-submit --list 2>/dev/null \
+            | grep -F "$GITHUB_WORKSPACE/lib-checkout" \
+            | grep -oE 'task_[0-9_]+' \
+            | sort -u \
+            | while read -r tid; do
+                echo "  killing $tid"
+                task-submit --kill "$tid" || true
+              done
+          true
 
   system-tests-a5sim:
     needs: toolchain

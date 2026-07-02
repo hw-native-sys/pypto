@@ -85,10 +85,33 @@ jobs:
           pip install -v ./runtime
 
       - name: Run A5 system tests
+        # `cd $GITHUB_WORKSPACE` is a no-op (the child already runs from the
+        # checkout root — the relative tests/st/... paths resolve today) but it
+        # puts the workspace path into the task command so the cleanup step below
+        # can grep -F "$GITHUB_WORKSPACE" to find THIS job's task.
         run: |
           task-submit --timeout 1800 --max-time 1800 --device 6 \
-            --run "pytest tests/st/runtime/ops/test_assemble.py tests/st/runtime/ops/test_mscatter.py tests/st/runtime/ops/test_random.py tests/st/runtime/framework_and_models/test_qwen3_decode_scope3_mixed.py tests/st/runtime/control_flow/test_dyn_orch_shape.py::TestDynOrchShapeOperations::test_dyn_orch_paged_attention -v --forked --platform=a5 --device=6 --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }} \
+            --run "cd $GITHUB_WORKSPACE && pytest tests/st/runtime/ops/test_assemble.py tests/st/runtime/ops/test_mscatter.py tests/st/runtime/ops/test_random.py tests/st/runtime/framework_and_models/test_qwen3_decode_scope3_mixed.py tests/st/runtime/control_flow/test_dyn_orch_shape.py::TestDynOrchShapeOperations::test_dyn_orch_paged_attention -v --forked --platform=a5 --device=6 --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }} \
               -k 'not (test_tile_row_expand or test_fillpad_zero or test_fillpad_max or test_fillpad_min or TestMscatter)'"
+
+      - name: Kill orphaned task-submit tasks
+        # If this job is cancelled or killed mid-flight, the task-submit task it
+        # submitted keeps running server-side (detached) and holds device 6 until
+        # --max-time. always() runs even on cancellation; match by this job's
+        # workspace path (embedded in the --run above) so we never touch another
+        # job's tasks.
+        if: always()
+        run: |
+          echo "cleaning up task-submit tasks for $GITHUB_WORKSPACE"
+          task-submit --list 2>/dev/null \
+            | grep -F "$GITHUB_WORKSPACE" \
+            | grep -oE 'task_[0-9_]+' \
+            | sort -u \
+            | while read -r tid; do
+                echo "  killing $tid"
+                task-submit --kill "$tid" || true
+              done
+          true
 
   qwen3-perf:
     # Qwen3-14B decode performance monitoring (moved out of per-PR ci.yml).
@@ -238,6 +261,26 @@ jobs:
           --baseline .github/perf_baselines/qwen3_14b_decode.json
           --name "qwen3-14b decode_layer"
           --metric makespan_us
+
+      - name: Kill orphaned task-submit tasks
+        # If this job is cancelled or killed mid-sampling-loop, the task-submit
+        # tasks it submitted keep running server-side (detached) and hold a card
+        # shared with the other repos/jobs on this host until --max-time. always()
+        # runs even on cancellation; match by this job's checkout dir
+        # ($GITHUB_WORKSPACE/perf-checkout, sourced in each sample's --run) so two
+        # jobs sharing a workspace root on one host never kill each other's tasks.
+        if: always()
+        run: |
+          echo "cleaning up task-submit tasks for $GITHUB_WORKSPACE/perf-checkout"
+          task-submit --list 2>/dev/null \
+            | grep -F "$GITHUB_WORKSPACE/perf-checkout" \
+            | grep -oE 'task_[0-9_]+' \
+            | sort -u \
+            | while read -r tid; do
+                echo "  killing $tid"
+                task-submit --kill "$tid" || true
+              done
+          true
 
   notify-on-failure:
     name: Open issue on failure
