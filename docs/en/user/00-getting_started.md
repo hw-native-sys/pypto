@@ -323,9 +323,9 @@ exposed under both `device_wall_us_*` and shorter `device_us_*` names, with
 raises the runtime log level to `v9` for the worker's lifetime and captures
 `stderr` at the fd level around the measured loop, so stderr emitted during the
 loop is diverted into a temp file rather than shown live. `device_wall_us` is a
-real on-NPU wall only for L2 single-chip runs; it is `0` on runtimes built
-without `SIMPLER_PROFILING` or on `*sim` platforms (check
-`stats.all_zero_device`).
+real on-NPU wall for L2 single-chip runs (see the L3 note below for distributed
+programs); it is `0` on runtimes built without `SIMPLER_PROFILING` or on `*sim`
+platforms (check `stats.all_zero_device`).
 
 Beyond the aggregates, each measured launch keeps its full `[STRACE]` span tree
 on `stats.invocations` (a list of `TraceInvocation`; warmup excluded). Render it
@@ -354,6 +354,28 @@ wall-clock window, *not* a partition: children may overlap (e.g. `orch`/`sched`
 run concurrently) or sit in a different clock domain (`runner_run` host wall vs
 `device_wall` on-NPU), so child durations need not sum to the parent. Drill into
 raw spans via `stats.invocations[i].by_name()[<name>].dur_us`.
+
+`benchmark` also accepts an L3 `DistributedCompiledProgram` (opened via
+`compiled.prepare()`): pass shared-memory host tensors (or `DeviceTensor`s) and
+omit `platform=` / `device_id=` (the device set is fixed at compile time via
+`distributed_config`). L3 has no single DAG-level device wall, so timing is
+folded from the per-rank chip-child markers into per-round samples — the headline
+`device_wall_us[k]` is the max across ranks of each rank's summed dispatch device
+walls. Query the four metrics uniformly:
+
+```python
+stats.per_round("device" | "host" | "effective" | "union")  # -> [one value per round]
+stats.per_rank("device" | "host" | "effective")             # -> {pid: [one per round]}
+```
+
+`effective` is the orch∪sched on-device window (per-card L2 Effective); `union`
+is the cross-rank host-timeline window (captures start skew — host-domain, so it
+includes dispatch overhead). The navigable `round -> rank -> [dispatch]` grid is
+`stats.rounds_dispatches`, where each `TraceInvocation` exposes `.task` (callable
+id), `.device_wall_us`, `.host_wall_us`, `.effective_us`. A pure-device
+cross-rank end-to-end wall is not recoverable from the markers today. If the
+dispatch shape is non-deterministic, `stats.fallback_flattened` is set and the
+per-rank / `union` views are empty.
 
 ### Distributed (L3+) programs
 

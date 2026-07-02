@@ -20,10 +20,12 @@ the pure-``BenchmarkStats`` aggregate helpers patch the parse seam out, so they
 run everywhere without ``simpler``.
 """
 
+import os
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pypto.ir import distributed_compiled_program as dcp_mod
 from pypto.runtime import RunConfig
 from pypto.runtime.bench import BenchmarkStats, _parse_stats_from_strace, benchmark
 
@@ -40,21 +42,40 @@ def require_simpler():
 
 
 def _strace_line(
-    inv: int, name: str, dur_ns: int, *, hid: str = "abc", depth: int = 0, dev: bool = False
+    inv: int,
+    name: str,
+    dur_ns: int,
+    *,
+    hid: str = "abc",
+    depth: int = 0,
+    dev: bool = False,
+    pid: int = 100,
+    ts: int | None = None,
 ) -> str:
     """One synthetic ``[STRACE]`` marker line (matches strace_timing's grammar)."""
     attrs = " clk=dev" if dev else ""
+    ts_ns = ts if ts is not None else inv * 1000
     return (
-        f"[2026-01-01][T0x1][INFO_V9] run_prepared: [STRACE] v=1 pid=100 tid=1 "
-        f"inv={inv} hid={hid} depth={depth} name={name} ts={inv * 1000} dur={dur_ns}{attrs}"
+        f"[2026-01-01][T0x1][INFO_V9] run_prepared: [STRACE] v=1 pid={pid} tid=1 "
+        f"inv={inv} hid={hid} depth={depth} name={name} ts={ts_ns} dur={dur_ns}{attrs}"
     )
 
 
-def _launch_lines(inv: int, *, host_us: float, device_us: float) -> list[str]:
+def _launch_lines(
+    inv: int, *, host_us: float, device_us: float, pid: int = 100, hid: str = "abc"
+) -> list[str]:
     """The two markers one launch emits: the ``run_prepared`` host span + device wall."""
     return [
-        _strace_line(inv, "run_prepared", int(host_us * 1000), depth=0),
-        _strace_line(inv, "run_prepared.runner_run.device_wall", int(device_us * 1000), depth=2, dev=True),
+        _strace_line(inv, "run_prepared", int(host_us * 1000), depth=0, pid=pid, hid=hid),
+        _strace_line(
+            inv,
+            "run_prepared.runner_run.device_wall",
+            int(device_us * 1000),
+            depth=2,
+            dev=True,
+            pid=pid,
+            hid=hid,
+        ),
     ]
 
 
@@ -209,6 +230,164 @@ def test_mean_tree_spread_annotations(require_simpler):
 
 
 # ---------------------------------------------------------------------------
+# _parse_stats_from_strace — L3 (distributed=True) per-rank aggregation
+# ---------------------------------------------------------------------------
+
+
+def test_parse_l3_two_ranks_per_round_max(require_simpler):
+    """Two ranks (pids), one dispatch/round each: headline = per-round max across ranks."""
+    lines: list[str] = []
+    # rank0 (pid 100): warmup inv0, measured inv1=10us, inv2=30us device.
+    lines += _launch_lines(0, host_us=99, device_us=99, pid=100)
+    lines += _launch_lines(1, host_us=100, device_us=10, pid=100)
+    lines += _launch_lines(2, host_us=300, device_us=30, pid=100)
+    # rank1 (pid 101): warmup inv0, measured inv1=20us, inv2=5us device.
+    lines += _launch_lines(0, host_us=99, device_us=99, pid=101)
+    lines += _launch_lines(1, host_us=200, device_us=20, pid=101)
+    lines += _launch_lines(2, host_us=50, device_us=5, pid=101)
+
+    stats = _parse_stats_from_strace("\n".join(lines), rounds=2, warmup=1, distributed=True)
+
+    assert stats.fallback_flattened is False
+    assert stats.per_rank("device") == {100: [10.0, 30.0], 101: [20.0, 5.0]}
+    assert stats.per_rank("host") == {100: [100.0, 300.0], 101: [200.0, 50.0]}
+    # Per-round max across ranks: round0 = max(10,20)=20; round1 = max(30,5)=30.
+    assert stats.device_wall_us == [20.0, 30.0]
+    assert stats.host_wall_us == [200.0, 300.0]
+
+
+def test_parse_l3_multi_dispatch_sums_within_round(require_simpler):
+    """A rank dispatched multiple times per round (heterogeneous hids) sums within the round."""
+    lines: list[str] = []
+    # rank0 (pid 100): 2 dispatches/round, different hids. No warmup.
+    # round0 = inv0(hidA,4us) + inv1(hidB,6us) = 10us; round1 = inv2(3us)+inv3(7us) = 10us.
+    lines += _launch_lines(0, host_us=1, device_us=4, pid=100, hid="A")
+    lines += _launch_lines(1, host_us=1, device_us=6, pid=100, hid="B")
+    lines += _launch_lines(2, host_us=1, device_us=3, pid=100, hid="A")
+    lines += _launch_lines(3, host_us=1, device_us=7, pid=100, hid="B")
+    # rank1 (pid 101): 1 dispatch/round -> different per-rank d.
+    lines += _launch_lines(0, host_us=1, device_us=5, pid=101, hid="C")
+    lines += _launch_lines(1, host_us=1, device_us=8, pid=101, hid="C")
+
+    stats = _parse_stats_from_strace("\n".join(lines), rounds=2, warmup=0, distributed=True)
+
+    assert stats.fallback_flattened is False
+    assert stats.per_rank("device") == {100: [10.0, 10.0], 101: [5.0, 8.0]}
+    # Per-round max: round0 = max(10,5)=10; round1 = max(10,8)=10.
+    assert stats.device_wall_us == [10.0, 10.0]
+
+
+def test_parse_l3_non_divisible_falls_back_to_flattened(require_simpler):
+    """A non-deterministic dispatch shape (count not divisible by launches) flattens."""
+    lines: list[str] = []
+    # 3 invocations, rounds=2 warmup=0 -> 3 % 2 != 0 -> fallback.
+    lines += _launch_lines(0, host_us=1, device_us=5, pid=100)
+    lines += _launch_lines(1, host_us=1, device_us=6, pid=100)
+    lines += _launch_lines(2, host_us=1, device_us=7, pid=100)
+
+    stats = _parse_stats_from_strace("\n".join(lines), rounds=2, warmup=0, distributed=True)
+
+    assert stats.fallback_flattened is True
+    assert stats.per_rank("device") == {}
+    # Flattened pool of all per-dispatch device walls (warmup=0 -> none dropped).
+    assert sorted(stats.device_wall_us) == [5.0, 6.0, 7.0]
+    # No round alignment -> no cross-rank union window.
+    assert stats.per_round("union") == []
+
+
+def test_parse_l3_union_window_captures_cross_rank_skew(require_simpler):
+    """``per_round("union")`` = cross-rank host-timeline window (max end - min start).
+
+    ``_strace_line`` sets each span's host ``ts`` to ``inv * 1000`` ns, so giving
+    the two ranks different ``inv`` values models a cross-rank start skew.
+    """
+    lines: list[str] = []
+    # rank0 (pid100): inv=0 -> run_prepared host window [0, 5000] ns.
+    lines += _launch_lines(0, host_us=5, device_us=10, pid=100)
+    # rank1 (pid101): inv=3 -> starts later, window [3000, 8000] ns.
+    lines += _launch_lines(3, host_us=5, device_us=20, pid=101)
+
+    stats = _parse_stats_from_strace("\n".join(lines), rounds=1, warmup=0, distributed=True)
+
+    assert stats.fallback_flattened is False
+    assert stats.device_wall_us == [20.0]  # per-round max across ranks
+    # Union: max(end)=8000 - min(start)=0 = 8000 ns = 8.0 us.
+    assert stats.per_round("union") == [8.0]
+
+
+def test_parse_l3_rounds_dispatches_round_rank_dispatch_view(require_simpler):
+    """``rounds_dispatches[k][pid]`` gives the per-round, per-rank dispatch list,
+    each carrying its task (hid) and precise per-dispatch timing."""
+    lines: list[str] = []
+    # rank0 (pid100): 2 dispatches/round (hids A, B); rank1 (pid101): 1/round (hid C).
+    # round0                          round1
+    lines += _launch_lines(0, host_us=1, device_us=4, pid=100, hid="a")
+    lines += _launch_lines(1, host_us=1, device_us=6, pid=100, hid="b")
+    lines += _launch_lines(2, host_us=1, device_us=3, pid=100, hid="a")
+    lines += _launch_lines(3, host_us=1, device_us=7, pid=100, hid="b")
+    lines += _launch_lines(0, host_us=1, device_us=5, pid=101, hid="c")
+    lines += _launch_lines(1, host_us=1, device_us=8, pid=101, hid="c")
+
+    stats = _parse_stats_from_strace("\n".join(lines), rounds=2, warmup=0, distributed=True)
+
+    # Shape: rounds -> {rank: [dispatch, ...]}.
+    assert len(stats.rounds_dispatches) == 2
+    assert set(stats.rounds_dispatches[0]) == {100, 101}
+    # Round 0, rank 100: two dispatches (tasks a, b) with precise per-dispatch device walls.
+    r0_rank0 = stats.rounds_dispatches[0][100]
+    assert [d.task for d in r0_rank0] == ["a", "b"]
+    assert [d.device_wall_us for d in r0_rank0] == [4.0, 6.0]
+    # Round 1, rank 101: single dispatch (task c), device wall 8.
+    r1_rank1 = stats.rounds_dispatches[1][101]
+    assert [d.task for d in r1_rank1] == ["c"]
+    assert r1_rank1[0].device_wall_us == 8.0
+    # The nested view sums to the per-rank per-round busy figures.
+    assert stats.per_rank("device")[100] == [10.0, 10.0]  # 4+6, 3+7
+
+
+def test_parse_l3_per_rank_effective_time(require_simpler):
+    """Per-card L2 Effective = orch∪sched window; exposed per dispatch and per rank."""
+    DEV = "run_prepared.runner_run.device_wall"
+
+    def dispatch(inv, pid, *, orch, sched):
+        # orch / sched are (start_ns, dur_ns) device-domain spans.
+        return [
+            _strace_line(inv, "run_prepared", 5000, depth=0, pid=pid),
+            _strace_line(inv, DEV, 9000, depth=2, dev=True, pid=pid),
+            _strace_line(inv, DEV + ".orch", orch[1], depth=3, dev=True, pid=pid, ts=orch[0]),
+            _strace_line(inv, DEV + ".sched", sched[1], depth=3, dev=True, pid=pid, ts=sched[0]),
+        ]
+
+    lines: list[str] = []
+    # rank0: orch [1000,4000], sched [2000,6000] -> effective = 6000-1000 = 5.0us.
+    lines += dispatch(0, 100, orch=(1000, 3000), sched=(2000, 4000))
+    # rank1: orch [0,2000], sched [5000,3000]->[5000,8000] -> effective = 8000-0 = 8.0us.
+    lines += dispatch(0, 101, orch=(0, 2000), sched=(5000, 3000))
+
+    stats = _parse_stats_from_strace("\n".join(lines), rounds=1, warmup=0, distributed=True)
+
+    # Per-dispatch effective (via the navigable view).
+    assert stats.rounds_dispatches[0][100][0].effective_us == 5.0
+    assert stats.rounds_dispatches[0][101][0].effective_us == 8.0
+    # Per-card per-round effective (summed within the round; 1 dispatch here).
+    assert stats.per_rank("effective") == {100: [5.0], 101: [8.0]}
+
+
+def test_parse_l3_degenerates_to_l2_for_single_rank(require_simpler):
+    """One rank, one dispatch/round: L3 aggregation matches the L2 per-launch values."""
+    lines: list[str] = []
+    lines += _launch_lines(0, host_us=99, device_us=99, pid=100)  # warmup
+    lines += _launch_lines(1, host_us=100, device_us=10, pid=100)
+    lines += _launch_lines(2, host_us=200, device_us=20, pid=100)
+
+    stats = _parse_stats_from_strace("\n".join(lines), rounds=2, warmup=1, distributed=True)
+
+    assert stats.fallback_flattened is False
+    assert stats.device_wall_us == [10.0, 20.0]
+    assert stats.per_rank("device") == {100: [10.0, 20.0]}
+
+
+# ---------------------------------------------------------------------------
 # BenchmarkStats — aggregate helpers
 # ---------------------------------------------------------------------------
 
@@ -281,8 +460,9 @@ def test_benchmark_registers_once_and_loops_warmup_plus_rounds():
     stats, worker, _ctor, _cfg, parse = _run_benchmark(rounds=3, warmup=2)
     assert worker.register_calls == 1  # registered exactly once
     assert worker.handle.call_count == 5  # warmup + rounds launches
-    # The captured log text is forwarded to the parser with rounds/warmup.
-    assert parse.call_args.kwargs == {"rounds": 3, "warmup": 2}
+    # The captured log text is forwarded to the parser with rounds/warmup + the
+    # L2/L3 selector (a plain CompiledProgram mock -> distributed=False).
+    assert parse.call_args.kwargs == {"rounds": 3, "warmup": 2, "distributed": False}
     assert stats.rounds == 3
 
 
@@ -315,6 +495,105 @@ def test_benchmark_rejects_bad_rounds_warmup():
 def test_benchmark_rejects_config_with_platform():
     with pytest.raises(ValueError, match="not both"):
         benchmark(_compiled_mock(), [MagicMock()], config=RunConfig(platform="a2a3"), platform="a2a3")
+
+
+class _FakeDistributedWorker:
+    """A ``DistributedWorker`` stand-in: context manager handing out one handle."""
+
+    def __init__(self) -> None:
+        self.register_calls = 0
+        self.handle = MagicMock(name="RegistrationHandle")
+
+    def __enter__(self) -> "_FakeDistributedWorker":
+        return self
+
+    def __exit__(self, *_exc: object) -> bool:
+        return False
+
+    def register(self, _compiled: object) -> MagicMock:
+        self.register_calls += 1
+        return self.handle
+
+
+class _FakeDistributedCompiled:
+    """A ``DistributedCompiledProgram`` stand-in whose ``prepare()`` hands out *rt*."""
+
+    def __init__(self, rt: _FakeDistributedWorker) -> None:
+        self._rt = rt
+        self.platform = "a2a3sim"
+
+    def prepare(self) -> _FakeDistributedWorker:
+        return self._rt
+
+
+def test_benchmark_l3_dispatches_via_distributed_worker():
+    """An L3 program routes through ``prepare()`` / ``DistributedWorker``, not ``ChipWorker``."""
+    rt = _FakeDistributedWorker()
+    sentinel = BenchmarkStats(device_wall_us=[1.0], host_wall_us=[2.0], rounds=2, warmup=1)
+    with (
+        patch.object(dcp_mod, "DistributedCompiledProgram", _FakeDistributedCompiled),
+        patch("pypto.runtime.bench.ChipWorker") as chip_ctor,
+        patch("pypto.runtime.bench.configure_log"),
+        patch("pypto.runtime.bench.current_level", return_value=20),
+        patch("pypto.runtime.bench._parse_stats_from_strace", return_value=sentinel) as parse,
+    ):
+        compiled = _FakeDistributedCompiled(rt)
+        stats = benchmark(compiled, [MagicMock(name="arg")], rounds=2, warmup=1)
+
+    assert rt.register_calls == 1  # registered exactly once
+    assert rt.handle.call_count == 3  # warmup + rounds launches
+    assert chip_ctor.call_count == 0  # L3 must NOT touch ChipWorker
+    # The parser is told this is a distributed run.
+    assert parse.call_args.kwargs == {"rounds": 2, "warmup": 1, "distributed": True}
+    assert stats.rounds == 2
+
+
+def test_benchmark_l3_rejects_platform_device_id():
+    """platform=/device_id= do not apply to L3 (device set is compile-fixed)."""
+    rt = _FakeDistributedWorker()
+    with (
+        patch.object(dcp_mod, "DistributedCompiledProgram", _FakeDistributedCompiled),
+        patch("pypto.runtime.bench.configure_log"),
+        patch("pypto.runtime.bench.current_level", return_value=20),
+    ):
+        with pytest.raises(ValueError, match="do not apply to an L3"):
+            benchmark(_FakeDistributedCompiled(rt), [MagicMock()], rounds=1, warmup=0, platform="a2a3")
+        with pytest.raises(ValueError, match="do not apply to an L3"):
+            benchmark(_FakeDistributedCompiled(rt), [MagicMock()], rounds=1, warmup=0, device_id=2)
+
+
+def test_benchmark_l3_capture_wraps_prepare(require_simpler):
+    """Markers emitted during ``prepare()`` are captured — the stderr redirect
+    must wrap ``prepare()`` (where chip workers fork), not just the loop.
+
+    A real L3 chip child writes its ``[STRACE]`` markers from a process forked
+    inside ``prepare()``. Here a fake ``prepare()`` writes rank markers straight
+    to fd 2; if the capture only wrapped the loop they would escape to the real
+    stderr and the parse would find nothing. Using the real parser, we assert the
+    prepare-time markers were captured and aggregated.
+    """
+
+    class _CompiledEmittingAtPrepare(_FakeDistributedCompiled):
+        def prepare(self) -> _FakeDistributedWorker:
+            # Two ranks each emit one dispatch's markers at fork/prepare time,
+            # before the measured loop runs.
+            for pid, dev_us in ((100, 10.0), (101, 20.0)):
+                for line in _launch_lines(0, host_us=5.0, device_us=dev_us, pid=pid):
+                    os.write(2, (line + "\n").encode())
+            return self._rt
+
+    rt = _FakeDistributedWorker()
+    with (
+        patch.object(dcp_mod, "DistributedCompiledProgram", _FakeDistributedCompiled),
+        patch("pypto.runtime.bench.configure_log"),
+        patch("pypto.runtime.bench.current_level", return_value=20),
+    ):
+        # handle() is a mock (emits nothing), so all markers come from prepare().
+        stats = benchmark(_CompiledEmittingAtPrepare(rt), [MagicMock(name="arg")], rounds=1, warmup=0)
+
+    # Prepare-time markers were captured and aggregated (per-round max across ranks).
+    assert stats.device_wall_us == [20.0]
+    assert set(stats.per_rank("device")) == {100, 101}
 
 
 def test_benchmark_raises_when_no_markers_captured():
