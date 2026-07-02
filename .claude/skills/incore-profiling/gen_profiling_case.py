@@ -112,12 +112,15 @@ def parse_cpp(cpp_text: str) -> tuple[str, bool, list[Param]]:
     m = re.search(r"__global__\s+AICORE\s+void\s+(\w+)\s*\(([^)]*)\)", cpp_text)
     if m:
         return m.group(1), False, [_parse_param(p) for p in _split_params(m.group(2))]
-    m = re.search(r"\bAICORE\s+void\s+(\w+)\s*\(([^)]*)\)", cpp_text)
-    if m and not m.group(1).endswith(("_aic", "_aiv")):
-        return m.group(1), False, [_parse_param(p) for p in _split_params(m.group(2))]
     m = re.search(r"\bAICORE\s+void\s+(\w+)_aic\s*\(([^)]*)\)", cpp_text)
     if m:
         return m.group(1), True, [_parse_param(p) for p in _split_params(m.group(2))]
+    m = re.search(
+        r'(?<!static\s)(?<!inline\s)(?:extern\s+"C"\s+)?AICORE\s+void\s+(\w+)\s*\(([^)]*)\)',
+        cpp_text,
+    )
+    if m and not m.group(1).endswith(("_aic", "_aiv")):
+        return m.group(1), False, [_parse_param(p) for p in _split_params(m.group(2))]
     raise ValueError(
         "no '__global__ AICORE void <name>', bare 'AICORE void <name>', "
         "or '<name>_aic' decl found in kernel .cpp"
@@ -376,23 +379,18 @@ def emit_kernel_cpp(cpp_text: str, name: str, is_mixed: bool, params: list[Param
     )
     call = ", ".join(p.name for p in params)
 
-    has_global_entry = re.search(rf'__global__\s+AICORE\s+void\s+{re.escape(name)}\s*\(', cpp_text)
+    has_global_entry = re.search(rf"__global__\s+AICORE\s+void\s+{re.escape(name)}\s*\(", cpp_text)
     if not is_mixed and not has_global_entry:
         impl_name = f"{name}_impl"
         cpp_text = re.sub(
-            rf"\bAICORE\s+void\s+{re.escape(name)}\s*\(",
+            rf'(?:extern\s+"C"\s+)?AICORE\s+void\s+{re.escape(name)}\s*\(',
             f"static AICORE void {impl_name}(",
             cpp_text,
-            count=1,
         )
 
     out = _PREAMBLE + "\n" + cpp_text
     if not is_mixed and not has_global_entry:
-        out += (
-            f'\n\nextern "C" __global__ AICORE void {name}({decl}) {{\n'
-            f"  {name}_impl({call});\n"
-            f"}}\n"
-        )
+        out += f'\n\nextern "C" __global__ AICORE void {name}({decl}) {{\n  {name}_impl({call});\n}}\n'
     if is_mixed:
         # The AIV side of a mixed kernel may take extra trailing scalar args
         # beyond the AIC launch ABI (e.g. block-partition offsets the runtime
@@ -404,7 +402,8 @@ def emit_kernel_cpp(cpp_text: str, name: str, is_mixed: bool, params: list[Param
         if m_aiv:
             n_extra = len(_split_params(m_aiv.group(1))) - len(params)
             if n_extra > 0:
-                aiv_call = call + ", " + ", ".join(["0"] * n_extra)
+                extra_args = ", ".join(["0"] * n_extra)
+                aiv_call = f"{call}, {extra_args}" if call else extra_args
         # extern "C" so the merged dispatcher's launch-ABI symbol matches the
         # non-mangled forward decl in launch.cpp (mirrors the ptoas pure-kernel
         # convention, which is always `extern "C" __global__`).
