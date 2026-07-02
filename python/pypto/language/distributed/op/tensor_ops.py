@@ -567,7 +567,33 @@ def reduce_scatter(
     return DistributedTensor(expr=call)
 
 
+def all_to_all(
+    input: Tensor,
+    target: DistributedTensor,
+    signal: DistributedTensor,
+    out: Tensor,
+) -> Tensor:
+    """All-to-all: symmetric personalized exchange.
+
+    4-arg InCore composite: ``pld.tensor.all_to_all(input, target, signal, out)``
+    ``input`` is a plain Tensor [NR, SIZE] with per-destination chunks.
+    ``target`` is a DistributedTensor staging window.
+    ``signal`` is an INT32 barrier.  ``out`` receives the result [NR, SIZE]
+    where ``out[src, :]`` holds the chunk received from rank ``src``.
+
+    Lowered by LowerCompositeOps into a 3-phase decomposition.
+    """
+    target_expr, signal_expr = _unwrap_distributed_tensors(
+        "pld.tensor.all_to_all", target=target, signal=signal
+    )
+    input_expr = _unwrap(input)
+    out_expr = _unwrap(out)
+    call = _ir_tensor.all_to_all(input_expr, target_expr, signal_expr, out_expr)
+    return Tensor(expr=call)
+
+
 __all__ = [
+    "all_to_all",
     "alloc_window_buffer",
     "allgather",
     "allreduce",

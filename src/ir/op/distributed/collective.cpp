@@ -295,6 +295,70 @@ REGISTER_OP("pld.tensor.allgather")
     .f_deduce_type(DeduceTensorAllGatherType);
 
 // ============================================================================
+// pld.tensor.all_to_all — symmetric all-to-all (4-arg InCore composite)
+// ============================================================================
+
+namespace {
+
+TypePtr DeduceTensorAllToAllType(const std::vector<ExprPtr>& args,
+                                 const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  (void)kwargs;
+  CHECK(args.size() == 4)
+      << "pld.tensor.all_to_all requires 4 args (input, target, signal, out) for InCore composite, but got "
+      << args.size();
+  for (size_t i = 0; i < args.size(); ++i) {
+    CHECK(args[i]) << "pld.tensor.all_to_all positional argument #" << i << " must not be null";
+  }
+
+  // 4-arg InCore composite path
+  auto input_type = As<TensorType>(args[0]->GetType());
+  CHECK(input_type) << "pld.tensor.all_to_all input must be a Tensor, got " << args[0]->GetType()->TypeName();
+  CHECK(input_type->shape_.size() == 2)
+      << "pld.tensor.all_to_all input must be 2D [NR, SIZE], got " << input_type->shape_.size() << " dims";
+
+  auto target_type = As<DistributedTensorType>(args[1]->GetType());
+  CHECK(target_type) << "pld.tensor.all_to_all target must be a DistributedTensor (window-bound), got "
+                     << args[1]->GetType()->TypeName();
+  CHECK(target_type->shape_.size() == 2)
+      << "pld.tensor.all_to_all target must be 2D [NR, SIZE], got " << target_type->shape_.size() << " dims";
+
+  auto signal_type = As<DistributedTensorType>(args[2]->GetType());
+  CHECK(signal_type) << "pld.tensor.all_to_all signal must be a DistributedTensor (window-bound), got "
+                     << args[2]->GetType()->TypeName();
+  CHECK(signal_type->dtype_ == DataType::INT32)
+      << "pld.tensor.all_to_all signal must have INT32 element type, got dtype "
+      << signal_type->dtype_.ToString();
+
+  auto out_type = As<TensorType>(args[3]->GetType());
+  CHECK(out_type) << "pld.tensor.all_to_all out must be a Tensor (not a DistributedTensor), got "
+                  << args[3]->GetType()->TypeName();
+  CHECK(out_type->shape_.size() == 2)
+      << "pld.tensor.all_to_all out must be 2D [NR, SIZE], got " << out_type->shape_.size() << " dims";
+
+  return out_type;
+}
+
+}  // namespace
+
+REGISTER_OP("pld.tensor.all_to_all")
+    .set_description(
+        "All-to-all: symmetric personalized exchange.  Every rank sends a distinct "
+        "chunk to every other rank.  ``input`` is a Tensor [NR, SIZE] where "
+        "``input[dest, :]`` is the chunk destined for rank ``dest``.  ``target`` is "
+        "a window-bound DistributedTensor [NR, SIZE] staging area.  ``signal`` is a "
+        "window-bound INT32 barrier tensor.  ``out`` is a plain Tensor [NR, SIZE] "
+        "where ``out[src, :]`` holds the chunk received from rank ``src``.  "
+        "Lowered by LowerCompositeOps into a 3-phase mesh decomposition "
+        "(stage-in → barrier → peer-read via pld.tile.get).")
+    .set_op_category("DistributedOp")
+    .add_argument("input", "Plain Tensor [NR, SIZE] with per-destination chunks (Input)")
+    .add_argument("target", "Window-bound DistributedTensor [NR, SIZE] (InOut)")
+    .add_argument("signal", "Window-bound INT32 DistributedTensor used as cross-rank barrier (InOut)")
+    .add_argument("out", "Plain Tensor [NR, SIZE] — receives the exchange result (Output)")
+    .no_memory_spec()
+    .f_deduce_type(DeduceTensorAllToAllType);
+
+// ============================================================================
 // pld.tensor.reduce_scatter — reduce + scatter chunks across ranks
 // ============================================================================
 
