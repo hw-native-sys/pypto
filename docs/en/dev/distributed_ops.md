@@ -356,10 +356,9 @@ dispatches before the final `Simplify`.
   (each likewise dynamic-NR, P=2/P=4),
   `test_l3_tensor_allreduce_intrinsic.py`, `test_l3_host_tensor_allreduce.py`,
   `test_l3_ep_dispatch_combine.py`, `test_l3_notify_wait.py`, and related L3 STs
-  under `tests/st/distributed/`. `test_l3_put.py` and `test_l3_get.py` are
-  currently **skipped** pending the N7 host codegen (`add_scalar(ctx)` per
-  `DistributedTensor`, `Tensor.make(..., child_memory=True)`) and N8
-  driver glue (`HostBufferStaging` window wiring on the codegen-emitted
-  `orch.allocate_domain(...)` block). The embedded programs and golden checks
-  are the canonical e2e contracts — drop the skip markers once that host-side
-  work lands.
+  under `tests/st/distributed/`. **Put/get canonical e2e contracts** are now
+  enabled: `test_l3_put.py` (ring overwrite, row-offset put, and chunked/pipelined
+  transfers ✅), `test_l3_get.py` (ring read, row-offset get ✅), and
+  `test_l3_remote_store.py` (tile-level subview push ✅). Atomic-add put remains
+  skipped (runtime issue on current stack). All tests use the `pld.system.notify` /
+  `pld.system.wait` handshake pattern established by notify/wait and collective STs.

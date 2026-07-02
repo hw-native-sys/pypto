@@ -243,13 +243,6 @@ class TestL3RemoteStore:
             f"ring remote_store mismatch: max diff = {(outputs - expected).abs().max().item()}"
         )
 
-    @pytest.mark.xfail(
-        strict=False,
-        reason="PTOAS does not drain MTE pipes before pto.comm.tnotify, so the second "
-        "remote tstore can be in flight when the signal lands on peer. Tracked upstream "
-        "at hw-native-sys/PTOAS#711. Kept as xfail (not skip) so the subview codegen path "
-        "still runs in CI and a regression / upstream fix is visible.",
-    )
     def test_subview_halves(self, test_config, device_ids):
         """Subview push: each rank writes two half-tiles to disjoint offsets of peer's dst."""
         if len(device_ids) < 2:
