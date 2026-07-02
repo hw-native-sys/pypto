@@ -32,7 +32,7 @@ module therefore:
    ``contextlib.redirect_stderr`` cannot capture the C++ writes) into a temp
    file around the measured loop;
 3. parses the captured markers, reading each launch's on-NPU ``device_wall``
-   and host ``run_prepared`` span.
+   and host ``simpler_run`` span.
 
 Because the capture is fd-level, **all** stderr produced during the measured
 loop is diverted into the temp file (not shown live). Warmup/teardown logging
@@ -72,7 +72,7 @@ class TraceSpan:
     Attributes:
         depth: Nesting level; a span at depth ``d`` is a child of the nearest
             enclosing span at depth ``d-1``.
-        name: Dotted span path (e.g. ``run_prepared.runner_run.device_wall``).
+        name: Dotted span path (e.g. ``simpler_run.runner_run.device_wall``).
         ts: Start timestamp in nanoseconds (host clock, or device clock when
             :attr:`is_device`).
         dur: Span duration in nanoseconds.
@@ -115,7 +115,7 @@ class TraceInvocation:
     spans: list[TraceSpan] = field(default_factory=list)
 
     def root(self) -> "TraceSpan | None":
-        """The depth-0 span (``run_prepared``), or ``None`` if absent."""
+        """The depth-0 span (``simpler_run``), or ``None`` if absent."""
         for s in self.spans:
             if s.depth == 0:
                 return s
@@ -138,7 +138,7 @@ class TraceInvocation:
         indentation alone. Nesting is reconstructed from the dotted span names (a
         span's parent is the span whose name is its longest proper dotted
         prefix), which is robust to the host/device clock-domain split —
-        device-domain spans (``run_prepared.runner_run.device_wall.*``) correctly
+        device-domain spans (``simpler_run.runner_run.device_wall.*``) correctly
         nest under their host parent even though they are emitted as a separate
         batch. Siblings are ordered by start timestamp; device-domain spans are
         tagged ``[dev]``.
@@ -214,11 +214,12 @@ class TraceInvocation:
         return "\n".join(lines)
 
 
-# Span names read per launch (mirror ``strace_timing._ROUNDS_TABLE_NAMES``).
-# ``host`` is the whole ``run_prepared`` wall; ``device`` is the on-NPU
-# orchestrator wall.
-_SPAN_HOST = "run_prepared"
-_SPAN_DEVICE = "run_prepared.runner_run.device_wall"
+# The per-launch span names (``host`` = whole run wall, ``device`` = on-NPU
+# orchestrator wall) are sourced at call time from the installed runtime's
+# ``strace_timing._ROUNDS_TABLE_NAMES`` rather than hardcoded here: the span
+# root was renamed ``run_prepared`` -> ``simpler_run`` in simpler #1210, so
+# deriving the keys keeps ``benchmark`` working against both runtime
+# generations (see :func:`benchmark`).
 
 # Runtime log level that makes the ``LOG_INFO_V9`` ``[STRACE]`` markers visible.
 _STRACE_LOG_LEVEL = "v9"
@@ -236,10 +237,10 @@ class BenchmarkStats:
     Attributes:
         device_wall_us: Per-measured-launch on-NPU orchestrator wall times
             (microseconds), read from each launch's ``[STRACE]``
-            ``run_prepared.runner_run.device_wall`` span. Length is ``rounds``
+            ``simpler_run.runner_run.device_wall`` span. Length is ``rounds``
             (warmup launches excluded).
         host_wall_us: Per-measured-launch host wall times (microseconds), read
-            from each launch's ``[STRACE]`` ``run_prepared`` span.
+            from each launch's ``[STRACE]`` ``simpler_run`` span.
         rounds: Number of measured launches.
         warmup: Number of leading launches discarded before measurement.
         invocations: Full per-measured-launch span tree (one
@@ -474,18 +475,24 @@ def _parse_stats_from_strace(log_text: str, *, rounds: int, warmup: int) -> Benc
     never import simpler types. Groups markers by ``(pid, inv)``, buckets by
     callable hash, takes the busiest bucket (our register-once callable emits one
     invocation per launch), orders by ``inv``, drops the first *warmup*
-    invocations, and reads each remaining launch's host (``run_prepared``) and
-    device (``run_prepared.runner_run.device_wall``) span durations (µs).
+    invocations, and reads each remaining launch's host (``simpler_run``) and
+    device (``simpler_run.runner_run.device_wall``) span durations (µs).
     """
     # ``simpler`` is an optional runtime-provided package: present on devices
     # where the runtime is installed, absent on the lint / unit-test host. The
     # import is resolved lazily at call time; pyright cannot see it in the lint
     # env, and unit tests skip the parse path when it is not installed.
     from simpler_setup.tools.strace_timing import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
+        _ROUNDS_TABLE_NAMES,
         bucket_by_hid,
         group_invocations,
         parse_spans,
     )
+
+    # Span root was renamed ``run_prepared`` -> ``simpler_run`` in simpler #1210;
+    # read the current names from the tool so both runtime generations work.
+    host_key = _ROUNDS_TABLE_NAMES["host"]
+    device_key = _ROUNDS_TABLE_NAMES["device"]
 
     stats = BenchmarkStats(rounds=rounds, warmup=warmup)
     invocations = group_invocations(parse_spans(log_text.splitlines()))
@@ -497,8 +504,8 @@ def _parse_stats_from_strace(log_text: str, *, rounds: int, warmup: int) -> Benc
     busiest = max(bucket_by_hid(invocations).values(), key=len)
     for inv in busiest[warmup:]:
         named = inv.by_name()
-        host = named.get(_SPAN_HOST)
-        device = named.get(_SPAN_DEVICE)
+        host = named.get(host_key)
+        device = named.get(device_key)
         stats.host_wall_us.append(host.dur / 1000.0 if host is not None else 0.0)
         stats.device_wall_us.append(device.dur / 1000.0 if device is not None else 0.0)
         stats.invocations.append(
@@ -580,7 +587,7 @@ def benchmark(
 
     Note:
         Only L2 single-chip runs carry a real ``device_wall_us``. On a ``*sim``
-        platform the host ``run_prepared`` span is still emitted but the
+        platform the host ``simpler_run`` span is still emitted but the
         device-domain spans are not, so every ``device_wall_us`` sample is ``0``
         — check :attr:`BenchmarkStats.all_zero_device`.
     """
