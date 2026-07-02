@@ -46,6 +46,17 @@ def _compile_program(program_cls) -> str:
     return _generate_orch_code(transformed)
 
 
+def _compile_program_with_auto_deps(program_cls) -> str:
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B)
+    pm = PassManager.get_strategy(
+        OptimizationStrategy.Default,
+        analyze_auto_scopes_for_deps=True,
+    )
+    transformed = pm.run_passes(program_cls)
+    return _generate_orch_code(transformed)
+
+
 def _assert_single_barrier_shape(code: str, *, fanin: int) -> None:
     assert "rt_submit_dummy_task(params_phase_fence_barrier_0)" in code, code
     assert f"PTO2TaskId params_phase_fence_barrier_0_deps[{fanin}];" in code, code
@@ -279,6 +290,88 @@ class TestPhaseFenceDepCompressionCodegen:
         assert "for (int64_t producer_branch =" in code, code
         assert "for (int64_t consumer_branch =" in code, code
         assert code.count("set_dependencies(") >= 1, code
+
+    def test_auto_scope_compiler_array_deps_emit_invariant_phase_fence(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.AIV)
+            def fill(
+                self,
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                return out
+
+            @pl.function(type=pl.FunctionType.AIV)
+            def consume(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, scratch: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                carried = scratch
+                last_tid = pl.system.task_invalid()
+                for _i, (carried, last_tid) in pl.range(
+                    0,
+                    4,
+                    init_values=(carried, last_tid),  # pyright: ignore[reportArgumentType]
+                ):
+                    carried, last_tid = pl.submit(self.fill, carried)
+                    carried, last_tid = pl.yield_(carried, last_tid)
+                for _j in pl.range(0, 4):
+                    carried = self.consume(carried)
+                return carried
+
+        code = _compile_program_with_auto_deps(Prog)
+
+        assert "PTO2ScopeMode::MANUAL" not in code, code
+        _assert_single_barrier_shape(code, fanin=4)
+        assert re.search(r"PTO2TaskId params_t\d+_deps\[4\];", code) is None, code
+
+    def test_auto_scope_compiler_array_dep_compression_preserves_scalar_dep(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.AIV)
+            def fill(
+                self,
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                return out
+
+            @pl.function(type=pl.FunctionType.AIV)
+            def consume(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                gate: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                scratch: pl.Tensor[[64], pl.FP32],
+                gate_scratch: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                carried = scratch
+                last_tid = pl.system.task_invalid()
+                for _i, (carried, last_tid) in pl.range(
+                    0,
+                    4,
+                    init_values=(carried, last_tid),  # pyright: ignore[reportArgumentType]
+                ):
+                    carried, last_tid = pl.submit(self.fill, carried)
+                    carried, last_tid = pl.yield_(carried, last_tid)
+
+                gate, _gate_tid = pl.submit(self.fill, gate_scratch)
+                for _j in pl.range(0, 4):
+                    carried = self.consume(carried, gate)
+                return carried
+
+        code = _compile_program_with_auto_deps(Prog)
+
+        assert "PTO2ScopeMode::MANUAL" not in code, code
+        assert "rt_submit_dummy_task(params_phase_fence_barrier_0)" in code, code
+        assert "PTO2TaskId params_phase_fence_barrier_0_deps[4];" in code, code
+        assert re.search(r"PTO2TaskId params_t\d+_deps\[2\];", code), code
+        assert re.search(r"PTO2TaskId params_t\d+_deps\[5\];", code) is None, code
 
     def test_multiloop_chain_compresses_only_stable_segments(self):
         rows, cols = 640, 128

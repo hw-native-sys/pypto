@@ -54,10 +54,13 @@ using ::pypto::codegen::IsBuiltinOp;
 
 enum class AccessKind { Read, Write, ReadWrite };
 
-enum class RegionKind { Unknown, Full, Box };
+enum class RegionKind { Unknown, Full, Box, Conservative, Dynamic };
 
 constexpr size_t kMaxStaticRootAlternatives = 4;
 constexpr size_t kMinWindowedTaskIdTempDeps = 1;
+constexpr size_t kInvalidArgIndex = std::numeric_limits<size_t>::max();
+constexpr const char* kAttrAutoNoDepCandidateIndices = "__auto_no_dep_candidate_indices";
+constexpr const char* kAttrAutoOutputExistingCandidateIndices = "__auto_output_existing_candidate_indices";
 
 struct AccessRegion {
   RegionKind kind = RegionKind::Unknown;
@@ -87,10 +90,19 @@ struct StorageAccess {
   VarPtr task_id_var;
   bool task_id_var_is_direct = false;
   bool dynamic_producer = false;
+  size_t innermost_dynamic_loop_depth = 0;
+  size_t innermost_dynamic_loop_id = 0;
+  size_t arg_index = kInvalidArgIndex;
 };
 
 struct AccessSummary {
   std::vector<StorageAccess> accesses;
+};
+
+struct AutoNoDepCandidateState {
+  bool has_covered_hazard = false;
+  bool blocked = false;
+  std::string blocked_reason;
 };
 
 struct LoopCarryTaskIdMapping {
@@ -103,6 +115,10 @@ bool IsTensorType(const TypePtr& type) { return As<TensorType>(type) != nullptr;
 AccessRegion UnknownRegion() { return AccessRegion{RegionKind::Unknown, {}, {}}; }
 
 AccessRegion FullRegion() { return AccessRegion{RegionKind::Full, {}, {}}; }
+
+AccessRegion ConservativeRegion() { return AccessRegion{RegionKind::Conservative, {}, {}}; }
+
+AccessRegion DynamicRegion() { return AccessRegion{RegionKind::Dynamic, {}, {}}; }
 
 StorageLocation UnknownLocation() { return StorageLocation{}; }
 
@@ -145,11 +161,17 @@ AccessRegion SliceRegion(const AccessRegion& parent, const ExprPtr& shape_expr, 
   auto shape = ConstIntTupleValues(shape_expr);
   auto offsets = ConstIntTupleValues(offset_expr);
   if (!shape.has_value() || !offsets.has_value() || shape->size() != offsets->size()) {
-    return UnknownRegion();
+    return parent.kind == RegionKind::Unknown ? UnknownRegion() : DynamicRegion();
   }
 
   if (parent.kind == RegionKind::Unknown) {
     return UnknownRegion();
+  }
+  if (parent.kind == RegionKind::Conservative) {
+    return ConservativeRegion();
+  }
+  if (parent.kind == RegionKind::Dynamic) {
+    return DynamicRegion();
   }
 
   std::vector<int64_t> absolute_offsets;
@@ -157,10 +179,10 @@ AccessRegion SliceRegion(const AccessRegion& parent, const ExprPtr& shape_expr, 
   if (parent.kind == RegionKind::Full) {
     absolute_offsets = *offsets;
   } else {
-    if (parent.offsets.size() != offsets->size()) return UnknownRegion();
+    if (parent.offsets.size() != offsets->size()) return DynamicRegion();
     for (size_t i = 0; i < offsets->size(); ++i) {
       auto absolute = AddInt64(parent.offsets[i], (*offsets)[i]);
-      if (!absolute.has_value()) return UnknownRegion();
+      if (!absolute.has_value()) return DynamicRegion();
       absolute_offsets.push_back(*absolute);
     }
   }
@@ -170,6 +192,8 @@ AccessRegion SliceRegion(const AccessRegion& parent, const ExprPtr& shape_expr, 
 
 bool RegionsMayOverlap(const AccessRegion& lhs, const AccessRegion& rhs) {
   if (lhs.kind == RegionKind::Unknown || rhs.kind == RegionKind::Unknown) return true;
+  if (lhs.kind == RegionKind::Conservative || rhs.kind == RegionKind::Conservative) return true;
+  if (lhs.kind == RegionKind::Dynamic || rhs.kind == RegionKind::Dynamic) return true;
   if (lhs.kind == RegionKind::Full || rhs.kind == RegionKind::Full) return true;
   if (lhs.offsets.size() != rhs.offsets.size() || lhs.shape.size() != rhs.shape.size() ||
       lhs.offsets.size() != lhs.shape.size()) {
@@ -183,6 +207,11 @@ bool RegionsMayOverlap(const AccessRegion& lhs, const AccessRegion& rhs) {
     if (*lhs_end <= rhs.offsets[i] || *rhs_end <= lhs.offsets[i]) return false;
   }
   return true;
+}
+
+bool IsPreciseNoDepRegion(const AccessRegion& region) {
+  return region.kind == RegionKind::Full || region.kind == RegionKind::Box ||
+         region.kind == RegionKind::Conservative;
 }
 
 bool SameRegion(const AccessRegion& lhs, const AccessRegion& rhs) {
@@ -227,19 +256,25 @@ StorageLocation UnknownRegionsFor(const StorageLocation& location) {
   return widened;
 }
 
+StorageLocation ConservativeRegionsFor(const StorageLocation& location) {
+  StorageLocation widened;
+  widened.alternatives.reserve(location.alternatives.size());
+  for (const auto& alternative : location.alternatives) {
+    if (alternative.root) {
+      widened.alternatives.push_back(StorageAlternative{alternative.root, ConservativeRegion()});
+    }
+  }
+  return widened;
+}
+
 bool SameStaticConstInt(const ExprPtr& lhs, const ExprPtr& rhs) {
   auto lhs_const = As<ConstInt>(lhs);
   auto rhs_const = As<ConstInt>(rhs);
   return lhs_const && rhs_const && lhs_const->value_ == rhs_const->value_;
 }
 
-bool IsPackedNdTensorView(const TensorTypePtr& tensor_type) {
-  if (!tensor_type || !tensor_type->tensor_view_.has_value()) return true;
-
-  const auto& view = tensor_type->tensor_view_.value();
-  if (view.layout != TensorLayout::ND) return false;
-  if (!view.valid_shape.empty()) return false;
-  if (view.pad != PadValue::null) return false;
+bool HasPackedNdStrides(const TensorTypePtr& tensor_type, const TensorView& view) {
+  if (view.stride.empty()) return true;
 
   std::vector<ExprPtr> packed_strides;
   try {
@@ -255,9 +290,38 @@ bool IsPackedNdTensorView(const TensorTypePtr& tensor_type) {
   return true;
 }
 
+bool IsPackedNdTensorView(const TensorTypePtr& tensor_type) {
+  if (!tensor_type || !tensor_type->tensor_view_.has_value()) return true;
+
+  const auto& view = tensor_type->tensor_view_.value();
+  if (view.layout != TensorLayout::ND) return false;
+  if (!view.valid_shape.empty()) return false;
+  if (view.pad != PadValue::null) return false;
+  return HasPackedNdStrides(tensor_type, view);
+}
+
+bool IsConservativeNdTensorView(const TensorTypePtr& tensor_type) {
+  if (!tensor_type || !tensor_type->tensor_view_.has_value()) return false;
+
+  const auto& view = tensor_type->tensor_view_.value();
+  if (view.layout != TensorLayout::ND) return false;
+  if (view.valid_shape.empty()) return false;
+  if (view.pad != PadValue::null) return false;
+  return HasPackedNdStrides(tensor_type, view);
+}
+
 StorageLocation MaybeUnknownRegionsForTensorType(const StorageLocation& location, const TypePtr& type) {
   auto tensor_type = As<TensorType>(type);
   if (!tensor_type || IsPackedNdTensorView(tensor_type)) return location;
+  if (IsConservativeNdTensorView(tensor_type)) return ConservativeRegionsFor(location);
+  return UnknownRegionsFor(location);
+}
+
+StorageLocation MaybeConservativeRegionsForTensorType(const StorageLocation& location, const TypePtr& type) {
+  auto tensor_type = As<TensorType>(type);
+  if (!tensor_type || IsPackedNdTensorView(tensor_type) || IsConservativeNdTensorView(tensor_type)) {
+    return ConservativeRegionsFor(location);
+  }
   return UnknownRegionsFor(location);
 }
 
@@ -305,6 +369,50 @@ std::vector<VarPtr> GetDepAttr(const CallPtr& call, const char* key) {
   return {};
 }
 
+std::vector<int32_t> GetIntVectorAttr(const std::vector<std::pair<std::string, std::any>>& attrs,
+                                      const char* key) {
+  for (const auto& [k, v] : attrs) {
+    if (k != key) continue;
+    if (const auto* values = std::any_cast<std::vector<int32_t>>(&v)) {
+      return *values;
+    }
+    return {};
+  }
+  return {};
+}
+
+std::vector<std::pair<std::string, std::any>> WithIntVectorAttr(
+    std::vector<std::pair<std::string, std::any>> attrs, const char* key, std::vector<int32_t> values) {
+  for (auto& [k, v] : attrs) {
+    if (k == key) {
+      v = std::move(values);
+      return attrs;
+    }
+  }
+  attrs.emplace_back(key, std::move(values));
+  return attrs;
+}
+
+std::vector<std::pair<std::string, std::any>> StripAttr(
+    const std::vector<std::pair<std::string, std::any>>& attrs, const char* key) {
+  std::vector<std::pair<std::string, std::any>> stripped;
+  stripped.reserve(attrs.size());
+  for (const auto& attr : attrs) {
+    if (attr.first != key) {
+      stripped.push_back(attr);
+    }
+  }
+  return stripped;
+}
+
+bool HasAttr(const std::vector<std::pair<std::string, std::any>>& attrs, const char* key) {
+  for (const auto& [k, v] : attrs) {
+    (void)v;
+    if (k == key) return true;
+  }
+  return false;
+}
+
 bool ContainsVar(const std::vector<VarPtr>& vars, const VarPtr& candidate) {
   if (!candidate) return false;
   for (const auto& var : vars) {
@@ -314,7 +422,7 @@ bool ContainsVar(const std::vector<VarPtr>& vars, const VarPtr& candidate) {
 }
 
 bool AutoDepsLoopCarryDebugEnabled() {
-  static const bool enabled = []() {
+  static const bool enabled = [] {
     const char* value = std::getenv("PYPTO_AUTO_DEPS_LOOP_CARRY_DEBUG");
     if (!value) return false;
     std::string text(value);
@@ -356,6 +464,45 @@ std::string DebugLocationStatus(LocationStatus status) {
       return "Unsupported";
   }
   return "Invalid";
+}
+
+std::string DebugAccessKind(AccessKind kind) {
+  switch (kind) {
+    case AccessKind::Read:
+      return "Read";
+    case AccessKind::Write:
+      return "Write";
+    case AccessKind::ReadWrite:
+      return "ReadWrite";
+  }
+  return "Invalid";
+}
+
+std::string DebugRegionKind(RegionKind kind) {
+  switch (kind) {
+    case RegionKind::Unknown:
+      return "Unknown";
+    case RegionKind::Full:
+      return "Full";
+    case RegionKind::Box:
+      return "Box";
+    case RegionKind::Conservative:
+      return "Conservative";
+    case RegionKind::Dynamic:
+      return "Dynamic";
+  }
+  return "Invalid";
+}
+
+void DebugNoDepBucket(const std::string& call_name, size_t arg_index, const std::string& bucket,
+                      const std::string& detail = "") {
+  if (!AutoDepsLoopCarryDebugEnabled()) return;
+  std::ostringstream oss;
+  oss << "[auto-no-dep-bucket] call=" << call_name << " arg_index=" << arg_index << " bucket=" << bucket;
+  if (!detail.empty()) {
+    oss << " " << detail;
+  }
+  DebugLog(oss.str());
 }
 
 YieldStmtPtr GetTrailingYield(const StmtPtr& stmt) {
@@ -411,22 +558,21 @@ bool HasCompleteDynamicCoverage(const std::unordered_set<int64_t>& slots, int64_
 
 std::vector<std::pair<std::string, std::any>> StripCompilerManualDepEdges(
     const std::vector<std::pair<std::string, std::any>>& attrs) {
-  std::vector<std::pair<std::string, std::any>> stripped;
-  stripped.reserve(attrs.size());
-  for (const auto& attr : attrs) {
-    if (attr.first != kAttrCompilerManualDepEdges) {
-      stripped.push_back(attr);
-    }
-  }
-  return stripped;
+  auto stripped = StripAttr(attrs, kAttrCompilerManualDepEdges);
+  stripped = StripAttr(stripped, kAttrAutoNoDepCandidateIndices);
+  return StripAttr(stripped, kAttrAutoOutputExistingCandidateIndices);
 }
 
 bool HasCompilerManualDepEdgesAttr(const std::vector<std::pair<std::string, std::any>>& attrs) {
-  for (const auto& [k, v] : attrs) {
-    (void)v;
-    if (k == kAttrCompilerManualDepEdges) return true;
-  }
-  return false;
+  return HasAttr(attrs, kAttrCompilerManualDepEdges);
+}
+
+bool HasAutoNoDepCandidateAttr(const std::vector<std::pair<std::string, std::any>>& attrs) {
+  return HasAttr(attrs, kAttrAutoNoDepCandidateIndices);
+}
+
+bool HasAutoOutputExistingCandidateAttr(const std::vector<std::pair<std::string, std::any>>& attrs) {
+  return HasAttr(attrs, kAttrAutoOutputExistingCandidateIndices);
 }
 
 bool HasHazard(AccessKind current, AccessKind prior) {
@@ -562,7 +708,7 @@ class StorageRootAnalysis : public IRVisitor {
         }
         location = MergeLocations(location, yield_location);
       }
-      location = UnknownRegionsFor(location);
+      location = MaybeConservativeRegionsForTensorType(location, op->return_vars_[i]->GetType());
       if (ExceedsRootAlternativeLimit(location)) {
         RegisterUnsupportedLocation(op->return_vars_[i]);
       } else if (HasLocation(location)) {
@@ -867,6 +1013,9 @@ class SubmitTaskIdCollector : public IRVisitor {
   const std::unordered_map<uint64_t, std::vector<VarPtr>>& task_ids_by_array_var_id() const {
     return task_ids_by_array_var_id_;
   }
+  const std::unordered_set<uint64_t>& complete_task_id_array_var_ids() const {
+    return complete_task_id_array_var_ids_;
+  }
 
  private:
   struct TaskIdExprLineage {
@@ -899,11 +1048,6 @@ class SubmitTaskIdCollector : public IRVisitor {
     TaskIdExprLineage out;
     if (!expr) return out;
 
-    if (auto task_id = CanonicalTaskIdForExpr(expr)) {
-      AppendUnique(&out.task_ids, task_id);
-      return out;
-    }
-
     if (auto var = AsVarLike(expr)) {
       auto ids_it = task_ids_by_var_id_.find(var->UniqueId());
       if (ids_it != task_ids_by_var_id_.end()) {
@@ -914,6 +1058,11 @@ class SubmitTaskIdCollector : public IRVisitor {
         out.dynamic_array_slots = slots_it->second;
       }
       if (!out.task_ids.empty() || !out.dynamic_array_slots.empty()) return out;
+    }
+
+    if (auto task_id = CanonicalTaskIdForExpr(expr)) {
+      AppendUnique(&out.task_ids, task_id);
+      return out;
     }
 
     auto call = As<Call>(expr);
@@ -1009,13 +1158,11 @@ class SubmitTaskIdCollector : public IRVisitor {
 
       if (iter_args[i] && IsTaskIdArrayVar(iter_args[i])) {
         array_lineage_by_var_id_[iter_args[i]->UniqueId()] = lineage_it->second;
-        RecordTaskIdArrayExtent(iter_args[i]);
-        task_ids_by_array_var_id_[iter_args[i]->UniqueId()] = ExpandTaskIdArray(iter_args[i]);
+        RecordTaskIdArrayDerivedFacts(iter_args[i]);
       }
       if (return_vars[i] && IsTaskIdArrayVar(return_vars[i])) {
         array_lineage_by_var_id_[return_vars[i]->UniqueId()] = lineage_it->second;
-        RecordTaskIdArrayExtent(return_vars[i]);
-        task_ids_by_array_var_id_[return_vars[i]->UniqueId()] = ExpandTaskIdArray(return_vars[i]);
+        RecordTaskIdArrayDerivedFacts(return_vars[i]);
       }
     }
   }
@@ -1027,8 +1174,7 @@ class SubmitTaskIdCollector : public IRVisitor {
       TaskIdArrayLineage lineage;
       lineage.extent = TaskIdArrayExtent(var->GetType());
       array_lineage_by_var_id_[var->UniqueId()] = std::move(lineage);
-      RecordTaskIdArrayExtent(var);
-      task_ids_by_array_var_id_[var->UniqueId()] = {};
+      RecordTaskIdArrayDerivedFacts(var);
       return;
     }
 
@@ -1073,8 +1219,7 @@ class SubmitTaskIdCollector : public IRVisitor {
     }
 
     array_lineage_by_var_id_[var->UniqueId()] = std::move(lineage);
-    RecordTaskIdArrayExtent(var);
-    task_ids_by_array_var_id_[var->UniqueId()] = ExpandTaskIdArray(var);
+    RecordTaskIdArrayDerivedFacts(var);
   }
 
   void RecordTaskIdScalarProducer(const VarPtr& var, const CallPtr& call) {
@@ -1102,6 +1247,38 @@ class SubmitTaskIdCollector : public IRVisitor {
     }
   }
 
+  bool IsCompleteTaskIdArray(const VarPtr& var) const {
+    if (!var || !IsTaskIdArrayVar(var)) return false;
+    auto lineage_it = array_lineage_by_var_id_.find(var->UniqueId());
+    if (lineage_it == array_lineage_by_var_id_.end()) return false;
+
+    const auto& lineage = lineage_it->second;
+    if (!lineage.extent.has_value() || *lineage.extent <= 0) return false;
+    if (lineage.has_unknown_dynamic_update || !lineage.unknown_static_slots.empty()) return false;
+
+    std::unordered_set<int64_t> covered_slots;
+    for (const auto& [slot, task_ids] : lineage.static_slots) {
+      if (!task_ids.empty()) covered_slots.insert(slot);
+    }
+    for (const auto& [slot, source_slots] : lineage.static_dynamic_slots) {
+      if (!source_slots.empty()) covered_slots.insert(slot);
+    }
+    return HasCompleteDynamicCoverage(covered_slots, *lineage.extent);
+  }
+
+  void RecordTaskIdArrayDerivedFacts(const VarPtr& var) {
+    if (!var) return;
+    RecordTaskIdArrayExtent(var);
+    if (IsTaskIdArrayVar(var)) {
+      task_ids_by_array_var_id_[var->UniqueId()] = ExpandTaskIdArray(var);
+    }
+    if (IsCompleteTaskIdArray(var)) {
+      complete_task_id_array_var_ids_.insert(var->UniqueId());
+    } else {
+      complete_task_id_array_var_ids_.erase(var->UniqueId());
+    }
+  }
+
   std::unordered_map<const Var*, ExprPtr> task_expr_by_tuple_;
   std::unordered_map<const Var*, std::unordered_map<int, VarPtr>> tuple_get_by_tuple_;
   std::unordered_map<const Expr*, VarPtr> task_id_by_expr_;
@@ -1112,6 +1289,7 @@ class SubmitTaskIdCollector : public IRVisitor {
   std::unordered_map<uint64_t, int64_t> task_id_array_extent_by_var_id_;
   std::unordered_map<uint64_t, TaskIdArrayLineage> array_lineage_by_var_id_;
   std::unordered_map<uint64_t, std::vector<VarPtr>> task_ids_by_array_var_id_;
+  std::unordered_set<uint64_t> complete_task_id_array_var_ids_;
 };
 
 class AutoDepMutator : public IRMutator {
@@ -1125,7 +1303,8 @@ class AutoDepMutator : public IRMutator {
           task_id_dynamic_slots_by_var_id,
       const std::unordered_map<uint64_t, int64_t>* task_id_array_extent_by_var_id,
       const std::unordered_map<uint64_t, std::vector<VarPtr>>* task_ids_by_array_var_id,
-      bool analyze_auto_scopes, bool analyze_whole_body_as_auto_scope)
+      const std::unordered_set<uint64_t>* complete_task_id_array_var_ids, bool analyze_auto_scopes,
+      bool analyze_whole_body_as_auto_scope)
       : program_(std::move(program)),
         storage_(storage),
         task_id_by_expr_(task_id_by_expr),
@@ -1134,6 +1313,7 @@ class AutoDepMutator : public IRMutator {
         task_id_dynamic_slots_by_var_id_(task_id_dynamic_slots_by_var_id),
         task_id_array_extent_by_var_id_(task_id_array_extent_by_var_id),
         task_ids_by_array_var_id_(task_ids_by_array_var_id),
+        complete_task_id_array_var_ids_(complete_task_id_array_var_ids),
         analyze_auto_scopes_(analyze_auto_scopes),
         analyze_whole_body_as_auto_scope_(analyze_whole_body_as_auto_scope) {
     if (!task_id_by_expr_) return;
@@ -1167,12 +1347,29 @@ class AutoDepMutator : public IRMutator {
       return result;
     }
     const auto static_trip_count = StaticPositiveTripCount(op);
+    const bool dynamic_loop = !static_trip_count.has_value();
+    const size_t current_loop_depth = loop_depth_ + 1;
     ++loop_depth_;
+    if (dynamic_loop) {
+      dynamic_loop_depth_stack_.push_back(current_loop_depth);
+      dynamic_loop_id_stack_.push_back(next_dynamic_loop_id_++);
+    }
     auto result = IRMutator::VisitStmt_(op);
+    if (dynamic_loop) {
+      dynamic_loop_id_stack_.pop_back();
+      dynamic_loop_depth_stack_.pop_back();
+    }
     --loop_depth_;
     if (static_trip_count.has_value() && *static_trip_count > 0) {
       if (auto new_for = As<ForStmt>(result)) {
-        RemapFixedTripLoopAccessTaskIds(new_for);
+        RemapFixedTripLoopAccessTaskIds(new_for, current_loop_depth);
+      }
+      // Only summarize top-level dynamic parallel carriers for now. Nested
+      // dynamic producers need extra dominance/hoisting rules; keep their
+      // existing conservative fallback behavior.
+    } else if (dynamic_loop && op->kind_ == ForKind::Parallel && current_loop_depth == 1) {
+      if (auto new_for = As<ForStmt>(result)) {
+        RemapDynamicParallelLoopAccessTaskIds(new_for);
       }
     }
     return result;
@@ -1180,14 +1377,21 @@ class AutoDepMutator : public IRMutator {
 
   StmtPtr VisitStmt_(const WhileStmtPtr& op) override {
     if (prior_stack_.empty()) return IRMutator::VisitStmt_(op);
+    const size_t current_loop_depth = loop_depth_ + 1;
     ++loop_depth_;
+    dynamic_loop_depth_stack_.push_back(current_loop_depth);
+    dynamic_loop_id_stack_.push_back(next_dynamic_loop_id_++);
     auto result = IRMutator::VisitStmt_(op);
+    dynamic_loop_id_stack_.pop_back();
+    dynamic_loop_depth_stack_.pop_back();
     --loop_depth_;
     return result;
   }
 
   StmtPtr VisitStmt_(const RuntimeScopeStmtPtr& op) override {
-    if (op->manual_ || !analyze_auto_scopes_) {
+    // Manual scopes still inspect user-covered read-only inputs for NoDep,
+    // but never synthesize compiler dependency edges for the scope.
+    if (!op->manual_ && !analyze_auto_scopes_) {
       return op;
     }
     return AnalyzeRuntimeScopeBody(op->body_, op->manual_, op->name_hint_, op->span_,
@@ -1214,14 +1418,18 @@ class AutoDepMutator : public IRMutator {
     prior_stack_.emplace_back();
     scope_manual_stack_.push_back(manual);
     fallback_stack_.push_back(false);
+    auto_no_dep_candidate_count_stack_.push_back(0);
     INTERNAL_CHECK_SPAN(body, span) << "RuntimeScopeStmt has null body";
     auto new_body = VisitStmt(body);
     INTERNAL_CHECK_SPAN(new_body, span) << "RuntimeScopeStmt body mutated to null";
     const bool fallback = fallback_stack_.back();
+    const size_t auto_no_dep_candidate_count = auto_no_dep_candidate_count_stack_.back();
     auto scope_accesses = std::move(prior_stack_.back());
+    auto_no_dep_candidate_count_stack_.pop_back();
     fallback_stack_.pop_back();
     scope_manual_stack_.pop_back();
     prior_stack_.pop_back();
+    const bool has_parent_runtime_scope = !auto_no_dep_candidate_count_stack_.empty();
     if (!fallback && !prior_stack_.empty()) {
       for (auto& access : scope_accesses) {
         prior_stack_.back().push_back(std::move(access));
@@ -1231,13 +1439,20 @@ class AutoDepMutator : public IRMutator {
       DebugLog("fallback_runtime_scope name_hint=" + name_hint);
       // The virtual whole-body region has no runtime scope boundary to fall back to.
       // Keep representable local edges; the fallback already prevents access export.
-      if (is_virtual_whole_body) return new_body;
+      if (is_virtual_whole_body) {
+        return auto_no_dep_candidate_count > 0 ? ApplyAutoNoDepCandidates(new_body) : new_body;
+      }
       auto stripped_body = StripCompilerDeps(new_body);
       return std::make_shared<const RuntimeScopeStmt>(false, name_hint, std::move(stripped_body), span,
                                                       std::move(leading_comments), std::move(attrs));
     }
     DebugLog("keep_runtime_scope name_hint=" + name_hint +
              " manual=" + (manual ? std::string("true") : std::string("false")));
+    if (auto_no_dep_candidate_count > 0 && has_parent_runtime_scope) {
+      auto_no_dep_candidate_count_stack_.back() += auto_no_dep_candidate_count;
+    } else if (auto_no_dep_candidate_count > 0) {
+      new_body = ApplyAutoNoDepCandidates(new_body);
+    }
     if (is_virtual_whole_body) return new_body;
     if (new_body.get() != body.get()) {
       return std::make_shared<const RuntimeScopeStmt>(manual, name_hint, std::move(new_body), span,
@@ -1248,8 +1463,14 @@ class AutoDepMutator : public IRMutator {
 
   StmtPtr AnalyzeCrossScopeContainerBody(const StmtPtr& body) {
     prior_stack_.emplace_back();
+    auto_no_dep_candidate_count_stack_.push_back(0);
     auto new_body = VisitStmt(body);
+    const size_t auto_no_dep_candidate_count = auto_no_dep_candidate_count_stack_.back();
+    auto_no_dep_candidate_count_stack_.pop_back();
     prior_stack_.pop_back();
+    if (auto_no_dep_candidate_count > 0) {
+      new_body = ApplyAutoNoDepCandidates(new_body);
+    }
     return new_body;
   }
 
@@ -1271,7 +1492,7 @@ class AutoDepMutator : public IRMutator {
     }
   }
 
-  void RemapFixedTripLoopAccessTaskIds(const ForStmtPtr& op) {
+  void RemapFixedTripLoopAccessTaskIds(const ForStmtPtr& op, size_t fixed_loop_depth) {
     if (prior_stack_.empty() || !op) return;
     auto yield = GetTrailingYield(op->body_);
     if (!yield) return;
@@ -1281,17 +1502,36 @@ class AutoDepMutator : public IRMutator {
 
     for (auto& access : prior_stack_.back()) {
       if (!access.dynamic_producer || !access.task_id_var) continue;
+      bool keep_dynamic_producer = false;
       auto it = remap.find(access.task_id_var->UniqueId());
       if (it != remap.end()) {
         access.task_id_var = it->second.target;
         access.task_id_var_is_direct = it->second.direct_task_id;
+        keep_dynamic_producer =
+            !it->second.direct_task_id && access.innermost_dynamic_loop_depth > fixed_loop_depth;
       } else if (auto return_var = LoopReturnVarForAccess(op, access)) {
+        keep_dynamic_producer = access.innermost_dynamic_loop_depth > fixed_loop_depth;
         access.task_id_var = return_var;
         access.task_id_var_is_direct = false;
       } else {
         continue;
       }
+      access.dynamic_producer = keep_dynamic_producer;
+    }
+  }
+
+  void RemapDynamicParallelLoopAccessTaskIds(const ForStmtPtr& op) {
+    if (prior_stack_.empty() || !op) return;
+
+    for (auto& access : prior_stack_.back()) {
+      if (!access.dynamic_producer || !access.task_id_var) continue;
+      auto return_var = LoopReturnVarForAccess(op, access);
+      if (!return_var) continue;
+      access.task_id_var = return_var;
+      access.task_id_var_is_direct = false;
       access.dynamic_producer = false;
+      access.innermost_dynamic_loop_depth = 0;
+      access.innermost_dynamic_loop_id = 0;
     }
   }
 
@@ -1372,7 +1612,11 @@ class AutoDepMutator : public IRMutator {
     if (!submit) return base;
     auto rewritten = AnalyzeCallLike(SubmitToCallView(submit), op.get(), submit->attrs_);
     auto rewritten_call = As<Call>(rewritten);
-    if (!rewritten_call || !HasCompilerManualDepEdgesAttr(rewritten_call->attrs_)) return submit;
+    if (!rewritten_call || (!HasCompilerManualDepEdgesAttr(rewritten_call->attrs_) &&
+                            !HasAutoNoDepCandidateAttr(rewritten_call->attrs_) &&
+                            !HasAutoOutputExistingCandidateAttr(rewritten_call->attrs_))) {
+      return submit;
+    }
     return std::make_shared<const Submit>(
         submit->op_, submit->args_, submit->deps_, submit->kwargs_, rewritten_call->attrs_, submit->GetType(),
         submit->span_, submit->core_num_, submit->sync_start_, submit->allow_early_resolve_);
@@ -1402,6 +1646,7 @@ class AutoDepMutator : public IRMutator {
                " needs_fallback_from_summary=" + (needs_fallback ? "true" : "false"));
     }
     if (needs_fallback) {
+      if (in_manual_scope) return call;
       if (debug_loop_carry) {
         DebugLog("fallback_reason=summary_unknown_location call=" + call->op_->name_);
       }
@@ -1410,6 +1655,81 @@ class AutoDepMutator : public IRMutator {
     }
     auto& accesses = summary.accesses;
     if (accesses.empty()) return call;
+
+    auto arg_directions = call->GetArgDirections();
+    std::unordered_map<size_t, AutoNoDepCandidateState> auto_no_dep_candidates;
+    std::unordered_map<size_t, AutoNoDepCandidateState> auto_output_existing_candidates;
+    auto can_consider_auto_no_dep = [&](const StorageAccess& access) {
+      return access.kind == AccessKind::Read && access.arg_index != kInvalidArgIndex &&
+             access.arg_index < arg_directions.size() &&
+             arg_directions[access.arg_index] == ArgDirection::Input &&
+             IsPreciseNoDepRegion(access.location.region);
+    };
+    auto can_consider_auto_output_existing = [&](const StorageAccess& access) {
+      return !in_manual_scope && access.kind == AccessKind::ReadWrite &&
+             access.arg_index != kInvalidArgIndex && access.arg_index < arg_directions.size() &&
+             arg_directions[access.arg_index] == ArgDirection::InOut &&
+             IsPreciseNoDepRegion(access.location.region);
+    };
+    auto auto_no_dep_detail = [&](const StorageAccess& access, const VarPtr& prior_edge) {
+      std::ostringstream oss;
+      oss << "direction=";
+      if (access.arg_index < arg_directions.size()) {
+        oss << ArgDirectionToString(arg_directions[access.arg_index]);
+      } else {
+        oss << "Invalid";
+      }
+      oss << " access=" << DebugAccessKind(access.kind)
+          << " region=" << DebugRegionKind(access.location.region.kind)
+          << " prior_edge=" << DebugVar(prior_edge) << " current_task_id=" << DebugVar(task_id);
+      return oss.str();
+    };
+    auto log_not_auto_no_dep_candidate = [&](const StorageAccess& access, const VarPtr& prior_edge) {
+      if (access.arg_index == kInvalidArgIndex || access.arg_index >= arg_directions.size()) return;
+      if (can_consider_auto_output_existing(access)) return;
+      if (access.kind != AccessKind::Read || arg_directions[access.arg_index] != ArgDirection::Input) {
+        DebugNoDepBucket(call->op_->name_, access.arg_index, "inout_or_output",
+                         auto_no_dep_detail(access, prior_edge));
+        return;
+      }
+      if (access.location.region.kind == RegionKind::Unknown) {
+        DebugNoDepBucket(call->op_->name_, access.arg_index, "unknown_region",
+                         auto_no_dep_detail(access, prior_edge));
+        return;
+      }
+      if (access.location.region.kind == RegionKind::Dynamic) {
+        DebugNoDepBucket(call->op_->name_, access.arg_index, "dynamic_region",
+                         auto_no_dep_detail(access, prior_edge));
+      }
+    };
+    auto mark_auto_no_dep_blocked = [&](const StorageAccess& access, const std::string& reason,
+                                        const VarPtr& prior_edge) {
+      if (!can_consider_auto_no_dep(access)) return;
+      auto& state = auto_no_dep_candidates[access.arg_index];
+      state.blocked = true;
+      if (state.blocked_reason.empty()) {
+        state.blocked_reason = reason;
+      }
+      DebugNoDepBucket(call->op_->name_, access.arg_index, reason, auto_no_dep_detail(access, prior_edge));
+    };
+    auto mark_auto_output_existing_blocked = [&](const StorageAccess& access, const std::string& reason,
+                                                 const VarPtr& prior_edge) {
+      if (!can_consider_auto_output_existing(access)) return;
+      auto& state = auto_output_existing_candidates[access.arg_index];
+      state.blocked = true;
+      if (state.blocked_reason.empty()) {
+        state.blocked_reason = reason;
+      }
+      DebugNoDepBucket(call->op_->name_, access.arg_index, reason, auto_no_dep_detail(access, prior_edge));
+    };
+    auto mark_auto_no_dep_covered = [&](const StorageAccess& access) {
+      if (!can_consider_auto_no_dep(access)) return;
+      auto_no_dep_candidates[access.arg_index].has_covered_hazard = true;
+    };
+    auto mark_auto_output_existing_covered = [&](const StorageAccess& access) {
+      if (!can_consider_auto_output_existing(access)) return;
+      auto_output_existing_candidates[access.arg_index].has_covered_hazard = true;
+    };
 
     std::vector<VarPtr> compiler_edges;
     for (const auto& access : accesses) {
@@ -1421,22 +1741,62 @@ class AutoDepMutator : public IRMutator {
           VarPtr prior_edge =
               prior.task_id_var_is_direct ? prior.task_id_var : CanonicalTaskId(prior.task_id_var);
           if (!prior_edge) prior_edge = prior.task_id_var;
+          const bool active_dynamic_prior = prior.dynamic_producer && prior.innermost_dynamic_loop_id != 0 &&
+                                            IsActiveDynamicLoopId(prior.innermost_dynamic_loop_id);
+          const bool inactive_dynamic_prior =
+              prior.innermost_dynamic_loop_id != 0 && !IsActiveDynamicLoopId(prior.innermost_dynamic_loop_id);
+          const bool complete_dynamic_user_coverage =
+              prior.dynamic_producer && (HasCompleteDynamicTaskIdUserCoverage(raw_user_edges, prior_edge) ||
+                                         HasCompleteTaskIdArrayUserCoverage(raw_user_edges, prior_edge));
           const bool covered_by_user_edge =
               (ContainsVar(user_edges, prior_edge) &&
                !(prior.dynamic_producer &&
                  HasIncompleteDynamicTaskIdUserCoverage(raw_user_edges, prior_edge))) ||
-              (prior.dynamic_producer && (HasCompleteDynamicTaskIdUserCoverage(raw_user_edges, prior_edge) ||
-                                          HasWindowedTaskIdTempUserCoverage(user_edges)));
+              (prior.dynamic_producer &&
+               (complete_dynamic_user_coverage || HasWindowedTaskIdTempUserCoverage(user_edges)));
+          log_not_auto_no_dep_candidate(access, prior_edge);
+          if (prior.dynamic_producer && !active_dynamic_prior && !inactive_dynamic_prior &&
+              !complete_dynamic_user_coverage) {
+            mark_auto_no_dep_blocked(access, "dynamic_producer_incomplete", prior_edge);
+            mark_auto_output_existing_blocked(access, "dynamic_producer_incomplete", prior_edge);
+          }
           if (debug_loop_carry) {
             DebugLog("hazard call=" + call->op_->name_ + " prior_task_id=" + DebugVar(prior.task_id_var) +
                      " prior_edge=" + DebugVar(prior_edge) +
                      " covered_by_user_edge=" + (covered_by_user_edge ? std::string("true") : "false") +
+                     " complete_dynamic_user_coverage=" +
+                     (complete_dynamic_user_coverage ? std::string("true") : "false") +
+                     " active_dynamic_prior=" + (active_dynamic_prior ? std::string("true") : "false") +
+                     " inactive_dynamic_prior=" + (inactive_dynamic_prior ? std::string("true") : "false") +
                      " dynamic_producer=" + (prior.dynamic_producer ? std::string("true") : "false") +
                      " direct_task_id=" + (prior.task_id_var_is_direct ? std::string("true") : "false") +
                      " current_task_id=" + DebugVar(task_id));
           }
-          if (covered_by_user_edge) continue;
-          if (prior.dynamic_producer) {
+          if (covered_by_user_edge) {
+            mark_auto_no_dep_covered(access);
+            mark_auto_output_existing_covered(access);
+            continue;
+          }
+          if (in_manual_scope) {
+            mark_auto_no_dep_blocked(access, "manual_scope", prior_edge);
+            mark_auto_output_existing_blocked(access, "manual_scope", prior_edge);
+            continue;
+          }
+          if (inactive_dynamic_prior) {
+            DebugNoDepBucket(
+                call->op_->name_, access.arg_index, "fallback",
+                auto_no_dep_detail(access, prior_edge) + " fallback_reason=prior_from_inactive_dynamic_loop");
+            if (debug_loop_carry) {
+              DebugLog("fallback_reason=prior_from_inactive_dynamic_loop call=" + call->op_->name_ +
+                       " prior_task_id=" + DebugVar(prior.task_id_var));
+            }
+            MarkCurrentScopeFallback();
+            return call;
+          }
+          if (prior.dynamic_producer && !active_dynamic_prior) {
+            DebugNoDepBucket(call->op_->name_, access.arg_index, "fallback",
+                             auto_no_dep_detail(access, prior_edge) +
+                                 " fallback_reason=dynamic_prior_producer_requires_scope_lift");
             if (debug_loop_carry) {
               DebugLog("fallback_reason=dynamic_prior_producer_requires_scope_lift call=" + call->op_->name_ +
                        " prior_task_id=" + DebugVar(prior.task_id_var));
@@ -1445,6 +1805,9 @@ class AutoDepMutator : public IRMutator {
             return call;
           }
           if (!prior.task_id_var) {
+            DebugNoDepBucket(
+                call->op_->name_, access.arg_index, "fallback",
+                auto_no_dep_detail(access, prior_edge) + " fallback_reason=missing_prior_task_id");
             if (debug_loop_carry) {
               DebugLog("fallback_reason=" +
                        std::string(prior.dynamic_producer ? "dynamic_prior_producer_missing_task_id"
@@ -1455,28 +1818,89 @@ class AutoDepMutator : public IRMutator {
             return call;
           }
           AppendUnique(&compiler_edges, prior_edge);
+          mark_auto_no_dep_covered(access);
+          mark_auto_output_existing_covered(access);
         }
       }
     }
+
+    std::vector<int32_t> auto_no_dep_indices;
+    for (const auto& [arg_index, state] : auto_no_dep_candidates) {
+      if (!state.has_covered_hazard) {
+        DebugNoDepBucket(call->op_->name_, arg_index, "no_covered_hazard");
+        continue;
+      }
+      if (state.blocked) {
+        DebugNoDepBucket(call->op_->name_, arg_index,
+                         state.blocked_reason.empty() ? "blocked" : state.blocked_reason, "final=rejected");
+        continue;
+      }
+      if (arg_index > static_cast<size_t>(std::numeric_limits<int32_t>::max())) continue;
+      DebugNoDepBucket(call->op_->name_, arg_index, "applied");
+      auto_no_dep_indices.push_back(static_cast<int32_t>(arg_index));
+    }
+    std::sort(auto_no_dep_indices.begin(), auto_no_dep_indices.end());
+
+    std::vector<int32_t> auto_output_existing_indices;
+    for (const auto& [arg_index, state] : auto_output_existing_candidates) {
+      if (!state.has_covered_hazard) {
+        DebugNoDepBucket(call->op_->name_, arg_index, "no_covered_hazard");
+        continue;
+      }
+      if (state.blocked) {
+        DebugNoDepBucket(call->op_->name_, arg_index,
+                         state.blocked_reason.empty() ? "blocked" : state.blocked_reason, "final=rejected");
+        continue;
+      }
+      if (arg_index > static_cast<size_t>(std::numeric_limits<int32_t>::max())) continue;
+      DebugNoDepBucket(call->op_->name_, arg_index, "applied");
+      auto_output_existing_indices.push_back(static_cast<int32_t>(arg_index));
+    }
+    std::sort(auto_output_existing_indices.begin(), auto_output_existing_indices.end());
 
     for (auto& access : accesses) {
       access.task_id_var =
           task_id ? task_id : (in_manual_scope ? nullptr : ProducerTaskIdForAccess(call, access));
       access.task_id_var_is_direct = access.task_id_var && IsTaskIdVar(access.task_id_var);
       access.dynamic_producer = loop_depth_ > 0;
+      access.innermost_dynamic_loop_depth =
+          dynamic_loop_depth_stack_.empty() ? 0 : dynamic_loop_depth_stack_.back();
+      access.innermost_dynamic_loop_id = dynamic_loop_id_stack_.empty() ? 0 : dynamic_loop_id_stack_.back();
       prior_stack_.back().push_back(std::move(access));
     }
 
-    if (compiler_edges.empty()) {
+    if (compiler_edges.empty() && auto_no_dep_indices.empty() && auto_output_existing_indices.empty()) {
       return call;
     }
 
-    auto new_attrs = WithCompilerManualDepEdgesAttr(output_attrs, std::move(compiler_edges));
+    auto new_attrs = output_attrs;
+    if (!compiler_edges.empty()) {
+      new_attrs = WithCompilerManualDepEdgesAttr(std::move(new_attrs), std::move(compiler_edges));
+    }
+    if (!auto_no_dep_indices.empty()) {
+      if (!auto_no_dep_candidate_count_stack_.empty()) {
+        auto_no_dep_candidate_count_stack_.back() += auto_no_dep_indices.size();
+      }
+      new_attrs = WithIntVectorAttr(std::move(new_attrs), kAttrAutoNoDepCandidateIndices,
+                                    std::move(auto_no_dep_indices));
+    }
+    if (!auto_output_existing_indices.empty()) {
+      if (!auto_no_dep_candidate_count_stack_.empty()) {
+        auto_no_dep_candidate_count_stack_.back() += auto_output_existing_indices.size();
+      }
+      new_attrs = WithIntVectorAttr(std::move(new_attrs), kAttrAutoOutputExistingCandidateIndices,
+                                    std::move(auto_output_existing_indices));
+    }
     return std::make_shared<const Call>(call->op_, call->args_, call->kwargs_, std::move(new_attrs),
                                         call->GetType(), call->span_);
   }
 
  private:
+  bool IsActiveDynamicLoopId(size_t id) const {
+    return std::find(dynamic_loop_id_stack_.begin(), dynamic_loop_id_stack_.end(), id) !=
+           dynamic_loop_id_stack_.end();
+  }
+
   void MarkCurrentScopeFallback() {
     if (fallback_stack_.empty()) return;
     fallback_stack_.back() = true;
@@ -1512,6 +1936,69 @@ class AutoDepMutator : public IRMutator {
   static StmtPtr StripCompilerDeps(const StmtPtr& stmt) {
     CompilerDepStripper stripper;
     return stripper.VisitStmt(stmt);
+  }
+
+  class AutoDirectionCandidateApplier : public IRMutator {
+   protected:
+    ExprPtr VisitExpr_(const CallPtr& op) override {
+      auto base = IRMutator::VisitExpr_(op);
+      auto call = As<Call>(base);
+      if (!call) return base;
+
+      auto attrs = ApplyToAttrs(call->attrs_, call->GetArgDirections());
+      if (!attrs.has_value()) return call;
+      return std::make_shared<const Call>(call->op_, call->args_, call->kwargs_, std::move(*attrs),
+                                          call->GetType(), call->span_);
+    }
+
+    ExprPtr VisitExpr_(const SubmitPtr& op) override {
+      auto base = IRMutator::VisitExpr_(op);
+      auto submit = As<Submit>(base);
+      if (!submit) return base;
+
+      auto attrs = ApplyToAttrs(submit->attrs_, submit->GetArgDirections());
+      if (!attrs.has_value()) return submit;
+      return std::make_shared<const Submit>(
+          submit->op_, submit->args_, submit->deps_, submit->kwargs_, std::move(*attrs), submit->GetType(),
+          submit->span_, submit->core_num_, submit->sync_start_, submit->allow_early_resolve_);
+    }
+
+   private:
+    static std::optional<std::vector<std::pair<std::string, std::any>>> ApplyToAttrs(
+        const std::vector<std::pair<std::string, std::any>>& attrs, std::vector<ArgDirection> dirs) {
+      auto no_dep_indices = GetIntVectorAttr(attrs, kAttrAutoNoDepCandidateIndices);
+      auto output_existing_indices = GetIntVectorAttr(attrs, kAttrAutoOutputExistingCandidateIndices);
+      if (no_dep_indices.empty() && output_existing_indices.empty() && !HasAutoNoDepCandidateAttr(attrs) &&
+          !HasAutoOutputExistingCandidateAttr(attrs)) {
+        return std::nullopt;
+      }
+
+      for (const int32_t raw_idx : no_dep_indices) {
+        if (raw_idx < 0) continue;
+        const size_t idx = static_cast<size_t>(raw_idx);
+        if (idx >= dirs.size()) continue;
+        if (dirs[idx] == ArgDirection::Input) {
+          dirs[idx] = ArgDirection::NoDep;
+        }
+      }
+      for (const int32_t raw_idx : output_existing_indices) {
+        if (raw_idx < 0) continue;
+        const size_t idx = static_cast<size_t>(raw_idx);
+        if (idx >= dirs.size()) continue;
+        if (dirs[idx] == ArgDirection::InOut) {
+          dirs[idx] = ArgDirection::OutputExisting;
+        }
+      }
+
+      auto stripped = StripAttr(attrs, kAttrAutoNoDepCandidateIndices);
+      stripped = StripAttr(stripped, kAttrAutoOutputExistingCandidateIndices);
+      return WithArgDirectionsAttr(std::move(stripped), std::move(dirs));
+    }
+  };
+
+  static StmtPtr ApplyAutoNoDepCandidates(const StmtPtr& stmt) {
+    AutoDirectionCandidateApplier applier;
+    return applier.VisitStmt(stmt);
   }
 
   VarPtr LookupTaskId(const Expr* expr) const {
@@ -1621,6 +2108,23 @@ class AutoDepMutator : public IRMutator {
     return false;
   }
 
+  bool HasCompleteTaskIdArrayUserCoverage(const std::vector<VarPtr>& raw_user_edges,
+                                          const VarPtr& prior_edge) const {
+    if (!prior_edge || !task_ids_by_array_var_id_ || !complete_task_id_array_var_ids_) {
+      return false;
+    }
+    for (const auto& edge : raw_user_edges) {
+      if (!edge || !IsTaskIdArrayVar(edge)) continue;
+      if (complete_task_id_array_var_ids_->find(edge->UniqueId()) == complete_task_id_array_var_ids_->end()) {
+        continue;
+      }
+      auto expanded_it = task_ids_by_array_var_id_->find(edge->UniqueId());
+      if (expanded_it == task_ids_by_array_var_id_->end()) continue;
+      if (ContainsVar(expanded_it->second, prior_edge)) return true;
+    }
+    return false;
+  }
+
   bool HasIncompleteDynamicTaskIdUserCoverage(const std::vector<VarPtr>& raw_user_edges,
                                               const VarPtr& prior_edge) const {
     if (!prior_edge || !task_id_dynamic_slots_by_var_id_ || !task_id_array_extent_by_var_id_ ||
@@ -1722,6 +2226,15 @@ class AutoDepMutator : public IRMutator {
           const VarPtr original_task_id = LookupTaskIdForVar(call->args_[i]);
           const bool covered_by_user_edge =
               kind == AccessKind::Read && ContainsVar(user_edges, original_task_id);
+          if (dirs[i] == ArgDirection::Input || dirs[i] == ArgDirection::InOut ||
+              dirs[i] == ArgDirection::Output || dirs[i] == ArgDirection::OutputExisting) {
+            DebugNoDepBucket(call->op_->name_, i, "fallback",
+                             "direction=" + ArgDirectionToString(dirs[i]) + " access=" +
+                                 DebugAccessKind(*kind) + " status=" + DebugLocationStatus(resolved.status) +
+                                 " original_task_id=" + DebugVar(original_task_id) +
+                                 " covered_by_user_edge=" + (covered_by_user_edge ? "true" : "false") +
+                                 " fallback_reason=unresolved_location");
+          }
           if (debug_loop_carry) {
             DebugLog("summarize_access_unresolved call=" + call->op_->name_ + " index=" + std::to_string(i) +
                      " covered_by_user_edge=" + (covered_by_user_edge ? std::string("true") : "false") +
@@ -1738,7 +2251,7 @@ class AutoDepMutator : public IRMutator {
           return {};
         }
         for (const auto& alternative : resolved.location.alternatives) {
-          out.accesses.push_back(StorageAccess{alternative, *kind, nullptr});
+          out.accesses.push_back(StorageAccess{alternative, *kind, nullptr, false, false, 0, 0, i});
         }
       }
     }
@@ -1754,14 +2267,19 @@ class AutoDepMutator : public IRMutator {
       task_id_dynamic_slots_by_var_id_;
   const std::unordered_map<uint64_t, int64_t>* task_id_array_extent_by_var_id_;
   const std::unordered_map<uint64_t, std::vector<VarPtr>>* task_ids_by_array_var_id_;
+  const std::unordered_set<uint64_t>* complete_task_id_array_var_ids_;
   std::unordered_set<uint64_t> submit_task_id_var_ids_;
   bool analyze_auto_scopes_ = false;
   bool analyze_whole_body_as_auto_scope_ = false;
   std::vector<std::vector<StorageAccess>> prior_stack_;
   std::vector<bool> scope_manual_stack_;
   std::vector<bool> fallback_stack_;
+  std::vector<size_t> auto_no_dep_candidate_count_stack_;
   VarPtr current_assign_lhs_;
   size_t loop_depth_ = 0;
+  std::vector<size_t> dynamic_loop_depth_stack_;
+  std::vector<size_t> dynamic_loop_id_stack_;
+  size_t next_dynamic_loop_id_ = 1;
 };
 
 }  // namespace
@@ -1792,7 +2310,8 @@ Pass AutoDeriveTaskDependencies(bool analyze_auto_scopes) {
       AutoDepMutator mutator(program, &storage, &task_ids.task_id_by_expr(), &task_ids.task_id_by_var_id(),
                              &task_ids.task_ids_by_var_id(), &task_ids.task_id_dynamic_slots_by_var_id(),
                              &task_ids.task_id_array_extent_by_var_id(), &task_ids.task_ids_by_array_var_id(),
-                             analyze_auto_scopes, analyze_whole_body_as_auto_scope);
+                             &task_ids.complete_task_id_array_var_ids(), analyze_auto_scopes,
+                             analyze_whole_body_as_auto_scope);
       auto new_body = mutator.AnalyzeBody(func->body_);
       if (new_body.get() == func->body_.get()) continue;
 

@@ -1637,6 +1637,25 @@ class TestVerifyNegative:
             _verify_call_directions(prog)
 
 
+class TestVerifyAutoDepsPositive:
+    """Verify pass accepts direction rewrites produced by later dependency passes."""
+
+    def test_inout_with_output_existing_is_allowed_after_auto_dep_rewrite(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, x: pl.InOut[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                r: pl.Tensor[[64], pl.FP32] = self.kernel(x)
+                return r
+
+        prog = _RewriteUserCall([ir.ArgDirection.OutputExisting]).run(Prog)
+        _verify_call_directions(prog)
+
+
 # ---------------------------------------------------------------------------
 # pl.no_dep override
 # ---------------------------------------------------------------------------

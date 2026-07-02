@@ -304,6 +304,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   void SetInitialIndent(int indent) { indent_ = indent; }
   void SetEffectiveUses(std::unordered_set<const Var*> uses) { effective_uses_ = std::move(uses); }
+  [[nodiscard]] bool NeedsVectorInclude() const { return needs_vector_include_; }
 
   void PrepareCrossScopeTaskIdHoists(const StmtPtr& body) {
     struct ScopeInfo {
@@ -503,6 +504,145 @@ class OrchestrationStmtCodegen : public CodegenBase {
       return size_it->second;
     }
     return CodegenBase::GetTensorCreateSizeExpr(result_var, default_dim_expr);
+  }
+
+  std::vector<VarPtr> GetCompilerDependencyEdges(const CallPtr& call) const {
+    std::vector<VarPtr> edges;
+    if (!call) return edges;
+    std::unordered_set<uint64_t> seen;
+    for (const auto& [key, value] : call->attrs_) {
+      if (key != kAttrCompilerManualDepEdges) continue;
+      const auto* attr_edges = std::any_cast<std::vector<VarPtr>>(&value);
+      if (!attr_edges) return edges;
+      for (const auto& edge : *attr_edges) {
+        if (!edge || !seen.insert(edge->UniqueId()).second) continue;
+        edges.push_back(edge);
+      }
+      return edges;
+    }
+    return edges;
+  }
+
+  std::vector<const Var*> CollectCompilerDepArrayBarrierEdges(const ForStmtPtr& for_stmt) const {
+    class Collector : public IRVisitor {
+     public:
+      explicit Collector(const OrchestrationStmtCodegen* codegen) : codegen_(codegen) {}
+
+      void VisitStmt_(const AssignStmtPtr& assign) override {
+        if (assign->var_) body_defined_vars.insert(assign->var_.get());
+        IRVisitor::VisitStmt_(assign);
+      }
+
+      void VisitStmt_(const ForStmtPtr& nested_for) override {
+        for (const auto& iter_arg : nested_for->iter_args_) {
+          if (iter_arg) body_defined_vars.insert(iter_arg.get());
+        }
+        for (const auto& return_var : nested_for->return_vars_) {
+          if (return_var) body_defined_vars.insert(return_var.get());
+        }
+        IRVisitor::VisitStmt_(nested_for);
+      }
+
+      void VisitExpr_(const CallPtr& call) override {
+        RecordCompilerDeps(call);
+        IRVisitor::VisitExpr_(call);
+      }
+
+      void VisitExpr_(const SubmitPtr& submit) override {
+        RecordCompilerDeps(SubmitToCallView(submit));
+        IRVisitor::VisitExpr_(submit);
+      }
+
+      std::unordered_map<const Var*, int64_t> consumer_counts;
+      std::unordered_set<const Var*> body_defined_vars;
+
+     private:
+      void RecordCompilerDeps(const CallPtr& call) {
+        for (const auto& edge : codegen_->GetCompilerDependencyEdges(call)) {
+          const auto* binding = codegen_->ResolveManualTaskIdBinding(edge.get());
+          if (!binding || !std::holds_alternative<std::vector<std::string>>(*binding)) continue;
+          consumer_counts[edge.get()] += 1;
+        }
+      }
+
+      const OrchestrationStmtCodegen* codegen_;
+    };
+
+    const int64_t trip_count = EvalConstTripCount(for_stmt);
+    if (trip_count <= 1) return {};
+
+    Collector collector(this);
+    collector.VisitStmt(for_stmt->body_);
+
+    std::vector<const Var*> edges;
+    for (const auto& [edge, consumers_per_iter] : collector.consumer_counts) {
+      if (!edge || collector.body_defined_vars.count(edge) != 0) continue;
+      const auto* binding = ResolveManualTaskIdBinding(edge);
+      if (!binding) continue;
+      const auto* names = std::get_if<std::vector<std::string>>(binding);
+      if (!names || names->empty()) continue;
+      const int64_t producer_count = static_cast<int64_t>(names->size());
+      const int64_t consumer_count = consumers_per_iter * trip_count;
+      const int64_t estimated_saving = producer_count * consumer_count - (producer_count + consumer_count);
+      if (estimated_saving <= 0) continue;
+      edges.push_back(edge);
+    }
+    std::sort(edges.begin(), edges.end(),
+              [](const Var* lhs, const Var* rhs) { return lhs->UniqueId() < rhs->UniqueId(); });
+    return edges;
+  }
+
+  std::string EmitCompilerDepArrayBarrier(const std::vector<std::string>& names) {
+    const int barrier_idx = phase_fence_barrier_counter_++;
+    const std::string task_var = "params_phase_fence_barrier_" + std::to_string(barrier_idx);
+    const std::string deps_arr = task_var + "_deps";
+    const std::string deps_cnt = task_var + "_deps_count";
+    const std::string outs_var = "phase_fence_barrier_" + std::to_string(barrier_idx) + "_outs";
+    const std::string tid_name = "phase_fence_barrier_" + std::to_string(barrier_idx) + "_tid";
+    code_ << "\n";
+    code_ << Indent() << "// Compiler-dependency barrier " << barrier_idx << ": compressed loop fan-in\n";
+    EmitTaskParamsDecl(Indent(), task_var);
+    code_ << Indent() << "PTO2TaskId " << deps_arr << "[" << names.size() << "];\n";
+    code_ << Indent() << "uint32_t " << deps_cnt << " = 0;\n";
+    for (const auto& name : names) {
+      code_ << Indent() << "if (" << name << ".is_valid()) " << deps_arr << "[" << deps_cnt
+            << "++] = " << name << ";\n";
+    }
+    code_ << Indent() << task_var << ".set_dependencies(" << deps_arr << ", " << deps_cnt << ");\n";
+    code_ << Indent() << "PTO2TaskId " << tid_name << " = PTO2TaskId::invalid();\n";
+    code_ << Indent() << "if (" << deps_cnt << " > 0) {\n";
+    indent_ += 4;
+    code_ << Indent() << "TaskOutputTensors " << outs_var << " = rt_submit_dummy_task(" << task_var << ");\n";
+    code_ << Indent() << tid_name << " = " << outs_var << ".task_id();\n";
+    indent_ -= 4;
+    code_ << Indent() << "}\n";
+    return tid_name;
+  }
+
+  struct DynamicTaskIdCollection {
+    std::string data_name;
+    std::string count_name;
+  };
+
+  std::string EmitDynamicCompilerDepBarrier(const DynamicTaskIdCollection& collection) {
+    const int barrier_idx = phase_fence_barrier_counter_++;
+    const std::string task_var = "params_phase_fence_barrier_" + std::to_string(barrier_idx);
+    const std::string outs_var = "phase_fence_barrier_" + std::to_string(barrier_idx) + "_outs";
+    const std::string tid_name = "phase_fence_barrier_" + std::to_string(barrier_idx) + "_tid";
+    code_ << "\n";
+    code_ << Indent() << "// Dynamic compiler-dependency barrier " << barrier_idx
+          << ": compressed loop fan-in\n";
+    EmitTaskParamsDecl(Indent(), task_var);
+    code_ << Indent() << "PTO2TaskId " << tid_name << " = PTO2TaskId::invalid();\n";
+    code_ << Indent() << "if (" << collection.count_name << " > 0) {\n";
+    indent_ += 4;
+    code_ << Indent() << task_var << ".set_dependencies(" << collection.data_name << ".data(), "
+          << collection.count_name << ");\n";
+    code_ << Indent() << "TaskOutputTensors " << outs_var << " = rt_submit_dummy_task(" << task_var << ");\n";
+    code_ << Indent() << tid_name << " = " << outs_var << ".task_id();\n";
+    indent_ -= 4;
+    code_ << Indent() << "}\n";
+    return tid_name;
   }
 
   void VisitStmt_(const ForStmtPtr& for_stmt) override {
@@ -727,6 +867,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // Per-iter-arg array-carry size (0 means non-TaskId scalar carry).
     std::vector<int64_t> array_sizes(for_stmt->iter_args_.size(), 0);
     std::vector<bool> compiler_dep_collection(for_stmt->iter_args_.size(), false);
+    std::vector<bool> dynamic_compiler_dep_collection(for_stmt->iter_args_.size(), false);
+    std::optional<DynamicTaskIdCollection> dynamic_compiler_dep_collection_info;
     for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
       if (!is_rebind[i]) continue;
       const bool compiler_dep_needs_loop_task_ids =
@@ -734,6 +876,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
       if (compiler_dep_needs_loop_task_ids) {
         array_sizes[i] = EvalConstTripCount(for_stmt);
         compiler_dep_collection[i] = array_sizes[i] > 0;
+        if (array_sizes[i] <= 0 && for_stmt->kind_ == ForKind::Parallel) {
+          dynamic_compiler_dep_collection[i] = true;
+        }
       } else if (in_manual_scope_depth_ > 0) {
         array_sizes[i] = ResolveArrayCarrySize(for_stmt, i);
       }
@@ -916,6 +1061,33 @@ class OrchestrationStmtCodegen : public CodegenBase {
         emit_name_map_[iter_arg.get()] = init_var_name;
         emit_name_map_[return_var.get()] = init_var_name;
       }
+      if (dynamic_compiler_dep_collection[i]) {
+        if (!dynamic_compiler_dep_collection_info) {
+          DynamicTaskIdCollection collection;
+          collection.data_name = ReserveSyntheticEmitName("dynamic_compiler_dep_tids");
+          collection.count_name = ReserveSyntheticEmitName(collection.data_name + "_count");
+          const std::string capacity_name = ReserveSyntheticEmitName(collection.data_name + "_capacity");
+          code_ << Indent() << "const int64_t " << capacity_name << " = ((" << step_expr << ") > 0 && ("
+                << stop_expr << ") > (" << start_expr << ")) ? (((" << stop_expr << ") - (" << start_expr
+                << ") + (" << step_expr << ") - 1) / (" << step_expr << ")) : 0;\n";
+          code_ << Indent() << "std::vector<PTO2TaskId> " << collection.data_name << "(static_cast<size_t>("
+                << capacity_name << "));\n";
+          code_ << Indent() << "uint32_t " << collection.count_name << " = 0;\n";
+          needs_vector_include_ = true;
+          dynamic_compiler_dep_collection_info = collection;
+        }
+        dynamic_task_id_collections_[return_var.get()] = *dynamic_compiler_dep_collection_info;
+      }
+    }
+
+    for (const Var* edge : CollectCompilerDepArrayBarrierEdges(for_stmt)) {
+      const auto* binding = ResolveManualTaskIdBinding(edge);
+      if (!binding) continue;
+      const auto* names = std::get_if<std::vector<std::string>>(binding);
+      if (!names || names->empty()) continue;
+      const std::string barrier_tid = EmitCompilerDepArrayBarrier(*names);
+      manual_task_id_map_[edge] = barrier_tid;
+      manual_task_id_map_by_key_[TaskIdHoistKey(edge)] = barrier_tid;
     }
 
     code_ << Indent() << "for (int64_t " << loop_var << " = " << start_expr << "; " << loop_var << " < "
@@ -960,6 +1132,22 @@ class OrchestrationStmtCodegen : public CodegenBase {
     PopCppScope();
     indent_ -= 4;
     code_ << Indent() << "}\n";
+
+    std::unordered_map<std::string, std::string> dynamic_barrier_tids;
+    for (size_t i = 0; i < for_stmt->return_vars_.size() && i < dynamic_compiler_dep_collection.size(); ++i) {
+      if (!dynamic_compiler_dep_collection[i]) continue;
+      const auto& return_var = for_stmt->return_vars_[i];
+      if (!return_var) continue;
+      auto vec_it = dynamic_task_id_collections_.find(return_var.get());
+      if (vec_it == dynamic_task_id_collections_.end()) continue;
+      auto [barrier_it, inserted] = dynamic_barrier_tids.emplace(vec_it->second.data_name, std::string());
+      if (inserted) {
+        barrier_it->second = EmitDynamicCompilerDepBarrier(vec_it->second);
+      }
+      const std::string& barrier_tid = barrier_it->second;
+      manual_task_id_map_[return_var.get()] = barrier_tid;
+      manual_task_id_map_by_key_[TaskIdHoistKey(return_var.get())] = barrier_tid;
+    }
   }
 
   void VisitStmt_(const RuntimeScopeStmtPtr& scope) override {
@@ -1379,6 +1567,24 @@ class OrchestrationStmtCodegen : public CodegenBase {
         continue;
       }
       const auto& rv = current_return_vars_[i];
+      auto dyn_it = dynamic_task_id_collections_.find(rv.get());
+      if (dyn_it != dynamic_task_id_collections_.end()) {
+        auto yield_var = AsVarLike(yield_stmt->value_[i]);
+        INTERNAL_CHECK_SPAN(yield_var, yield_stmt->span_)
+            << "Internal error: dynamic compiler-dep yield expects a Var value";
+        const ManualTaskIdBinding* tid_binding = ResolveManualTaskIdBinding(yield_var.get());
+        INTERNAL_CHECK_SPAN(tid_binding != nullptr, yield_stmt->span_)
+            << "Internal error: dynamic compiler-dep yield must resolve to a TaskId";
+        auto* scalar_name = std::get_if<std::string>(tid_binding);
+        INTERNAL_CHECK_SPAN(scalar_name, yield_stmt->span_)
+            << "Internal error: dynamic compiler-dep yield expects string-variant TaskId";
+        code_ << Indent() << "if (" << *scalar_name << ".is_valid()) {\n";
+        indent_ += 4;
+        code_ << Indent() << dyn_it->second.data_name << "[" << dyn_it->second.count_name
+              << "++] = " << *scalar_name << ";\n";
+        indent_ -= 4;
+        code_ << Indent() << "}\n";
+      }
       // Array-carry rv: route yield writes into the underlying ``arr[N]``.
       auto rv_arr_it = array_carry_vars_.find(rv.get());
       if (rv_arr_it != array_carry_vars_.end()) {
@@ -2292,6 +2498,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   size_t CountManualDeps(const std::vector<VarPtr>& edges, const CallPtr& call) const {
     size_t total = 0;
+    std::unordered_set<std::string> seen_names;
     for (const auto& edge : edges) {
       if (!edge) continue;
       const auto* binding = ResolveManualTaskIdBinding(edge.get());
@@ -2302,16 +2509,23 @@ class OrchestrationStmtCodegen : public CodegenBase {
                                                 << "a Scalar[TASK_ID] Var (string variant).";
       }
       if (auto* names = std::get_if<std::vector<std::string>>(binding)) {
-        total += names->size();
+        for (const auto& name : *names) {
+          if (seen_names.insert(name).second) {
+            total += 1;
+          }
+        }
       } else {
-        total += 1;
+        const auto& name = std::get<std::string>(*binding);
+        if (seen_names.insert(name).second) {
+          total += 1;
+        }
       }
     }
     return total;
   }
 
-  /// Emit the per-task ``L0TaskArgs`` declaration. Dependency edges (if any)
-  /// are attached separately by ``EmitManualDeps`` via ``set_dependencies``.
+  /// Emit the per-task ``Arg`` declaration. Dependency edges (if any) are
+  /// attached separately by ``EmitManualDeps`` via ``set_dependencies``.
   void EmitTaskParamsDecl(const std::string& ind, const std::string& task_var) {
     code_ << ind << "L0TaskArgs " << task_var << ";\n";
   }
@@ -2372,6 +2586,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
     const std::string deps_cnt = task_var + "_deps_count";
     code_ << Indent() << "PTO2TaskId " << deps_arr << "[" << dep_capacity << "];\n";
     code_ << Indent() << "uint32_t " << deps_cnt << " = 0;\n";
+    std::unordered_set<std::string> emitted_names;
+    auto emit_one_dep = [&](const std::string& name) {
+      if (!emitted_names.insert(name).second) return;
+      code_ << Indent() << "if (" << name << ".is_valid()) " << deps_arr << "[" << deps_cnt
+            << "++] = " << name << ";\n";
+    };
     for (const auto& edge : edges) {
       if (!edge) continue;
       const auto* binding = ResolveManualTaskIdBinding(edge.get());
@@ -2394,8 +2614,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
       } else if (auto* names = std::get_if<std::vector<std::string>>(binding)) {
         // Array-carry iter_arg: include every valid slot.
         for (const auto& name : *names) {
-          code_ << Indent() << "if (" << name << ".is_valid()) " << deps_arr << "[" << deps_cnt
-                << "++] = " << name << ";\n";
+          emit_one_dep(name);
         }
       } else {
         const auto& name = std::get<std::string>(*binding);
@@ -2404,8 +2623,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         // (``system.task_invalid``) loop-carry seed. Guard every entry with
         // ``is_valid()``; the branch is a harmless always-true test for ids
         // already known valid.
-        code_ << Indent() << "if (" << name << ".is_valid()) " << deps_arr << "[" << deps_cnt
-              << "++] = " << name << ";\n";
+        emit_one_dep(name);
       }
     }
     code_ << Indent() << task_var << ".set_dependencies(" << deps_arr << ", " << deps_cnt << ");\n";
@@ -3665,6 +3883,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
     int64_t size;
   };
   std::unordered_map<const Var*, ArrayCarryEntry> array_carry_vars_;
+  std::unordered_map<const Var*, DynamicTaskIdCollection> dynamic_task_id_collections_;
+  bool needs_vector_include_ = false;
   /// Names of mutable Tensor values declared in each generated C++ block.
   /// Tuple-output alias emission must avoid redeclaring names already declared
   /// in the same block, but must not treat outer-block declarations as aliases:
@@ -3810,7 +4030,7 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   stmt_codegen.SetInitialIndent(4);
   stmt_codegen.VisitStmt(func->body_);
 
-  oss << GenerateIncludes(false);
+  oss << GenerateIncludes(false, stmt_codegen.NeedsVectorInclude());
 
   oss << "extern \"C\" {\n\n";
 

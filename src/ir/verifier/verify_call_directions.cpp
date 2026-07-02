@@ -148,8 +148,10 @@ class CallDirectionChecker : public IRVisitor {
           return;
         }
       } else if (cd == ParamDirection::InOut && is_tensor) {
-        // Allowed: InOut (default) or NoDep (caller-site override).
-        if (d != ArgDirection::InOut && d != ArgDirection::NoDep) {
+        // Allowed: InOut (default), OutputExisting (auto-deps rewrite when
+        // explicit deps cover the read-side ordering), or NoDep
+        // (caller-site override).
+        if (d != ArgDirection::InOut && d != ArgDirection::OutputExisting && d != ArgDirection::NoDep) {
           std::ostringstream oss;
           oss << "tensor argument at index " << i << " has " << ArgDirectionToString(d)
               << " but callee param direction is InOut";
