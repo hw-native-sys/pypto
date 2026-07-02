@@ -378,6 +378,8 @@ PTOCodegen::PTOCodegen(const backend::Backend* backend) : backend_(backend) {
   CHECK(backend->GetHandler() != nullptr) << "PTOCodegen requires a backend that exposes a BackendHandler";
 }
 
+const backend::BackendHandler* PTOCodegen::GetBackendHandler() const { return backend_->GetHandler(); }
+
 // ========================================================================
 // Generate entry and GenerateFunction
 // ========================================================================

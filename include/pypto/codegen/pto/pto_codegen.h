@@ -90,6 +90,15 @@ class PTOCodegen : public CodegenBase {
   ~PTOCodegen() override = default;
 
   /**
+   * @brief Backend handler for backend-specific codegen decisions.
+   *
+   * Never null: the constructor requires a backend that exposes a handler.
+   * Used by op-emit callbacks that must gate behaviour on the target backend
+   * (e.g. rejecting a bf16 atomic-add store on Ascend950).
+   */
+  [[nodiscard]] const backend::BackendHandler* GetBackendHandler() const;
+
+  /**
    * @brief Generate PTO-ISA MLIR format code from IR Program
    *
    * @param program Input PyPTO IR Program
