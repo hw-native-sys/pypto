@@ -334,6 +334,15 @@ TypePtr DeduceTensorAllToAllType(const std::vector<ExprPtr>& args,
                      << args[1]->GetType()->TypeName();
   CHECK(target_type->shape_.size() == 2)
       << "pld.tensor.all_to_all target must be 2D [NR, SIZE], got " << target_type->shape_.size() << " dims";
+  CHECK(target_type->shape_.size() == input_type->shape_.size())
+      << "pld.tensor.all_to_all target rank must match input rank, got " << target_type->shape_.size()
+      << " vs " << input_type->shape_.size();
+  CHECK(AreExprsEqual(target_type->shape_[0], input_type->shape_[0]) &&
+        AreExprsEqual(target_type->shape_[1], input_type->shape_[1]))
+      << "pld.tensor.all_to_all target shape must equal input shape";
+  CHECK(target_type->dtype_ == input_type->dtype_)
+      << "pld.tensor.all_to_all target dtype " << target_type->dtype_.ToString() << " must match input dtype "
+      << input_type->dtype_.ToString();
 
   auto signal_type = As<DistributedTensorType>(args[2]->GetType());
   CHECK(signal_type) << "pld.tensor.all_to_all signal must be a DistributedTensor (window-bound), got "
@@ -341,12 +350,29 @@ TypePtr DeduceTensorAllToAllType(const std::vector<ExprPtr>& args,
   CHECK(signal_type->dtype_ == DataType::INT32)
       << "pld.tensor.all_to_all signal must have INT32 element type, got dtype "
       << signal_type->dtype_.ToString();
+  CHECK(signal_type->shape_.size() == 2)
+      << "pld.tensor.all_to_all signal must be 2D [NR, 1], got " << signal_type->shape_.size() << " dims";
+  {
+    auto signal_dim1 = As<ConstInt>(signal_type->shape_[1]);
+    CHECK(signal_dim1 && signal_dim1->value_ == 1)
+        << "pld.tensor.all_to_all signal second dimension must be 1, got "
+        << (signal_dim1 ? std::to_string(signal_dim1->value_) : "<dynamic>");
+  }
 
   auto out_type = As<TensorType>(args[3]->GetType());
   CHECK(out_type) << "pld.tensor.all_to_all out must be a Tensor (not a DistributedTensor), got "
                   << args[3]->GetType()->TypeName();
   CHECK(out_type->shape_.size() == 2)
       << "pld.tensor.all_to_all out must be 2D [NR, SIZE], got " << out_type->shape_.size() << " dims";
+  CHECK(out_type->shape_.size() == input_type->shape_.size())
+      << "pld.tensor.all_to_all out rank must match input rank, got " << out_type->shape_.size() << " vs "
+      << input_type->shape_.size();
+  CHECK(AreExprsEqual(out_type->shape_[0], input_type->shape_[0]) &&
+        AreExprsEqual(out_type->shape_[1], input_type->shape_[1]))
+      << "pld.tensor.all_to_all out shape must equal input shape";
+  CHECK(out_type->dtype_ == input_type->dtype_)
+      << "pld.tensor.all_to_all out dtype " << out_type->dtype_.ToString() << " must match input dtype "
+      << input_type->dtype_.ToString();
 
   return out_type;
 }

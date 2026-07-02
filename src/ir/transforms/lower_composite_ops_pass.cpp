@@ -1050,7 +1050,8 @@ ExprPtr LowerTensorAllToAllRule(const CallPtr& call, const std::vector<ExprPtr>&
              span);
 
   // Offsets for the peer-read: read at [my_rank, 0] on the peer's window.
-  auto my_rank_offsets = tile_conversion_utils::MakeSignalOffsets(comm.my_rank, span);
+  auto my_rank_offsets = std::make_shared<MakeTuple>(
+      std::vector<ExprPtr>{comm.my_rank, std::make_shared<ConstInt>(0, DataType::INDEX, span)}, span);
 
   b.EmitFor(
       "src", zero_idx, comm.nranks_idx, one_idx,
@@ -1066,6 +1067,17 @@ ExprPtr LowerTensorAllToAllRule(const CallPtr& call, const std::vector<ExprPtr>&
                   span);
       },
       span);
+
+  // ---- Phase 3.5: post-exchange barrier (AtomicAdd 1 → wait >= 2) ----
+  // Phase 3 writes exchange results into out, which is a plain tensor.  However
+  // target (the HCCL window) is still accessible to peers via pld.tile.remote_load
+  // during Phase 3.  Without this barrier, a fast rank that returns from
+  // all_to_all and immediately starts a second collective reusing target
+  // could overwrite the staging slots while a slow peer is still remote-reading
+  // them — a write-after-read hazard matching allreduce's Phase 3.5 rationale.
+  auto two_i32 = std::make_shared<ConstInt>(2, DataType::INT32, span);
+  b.EmitNotifyAll(signal, comm.nranks_idx, comm.my_rank, NotifyOp::kAtomicAdd, one_i32, "2", span);
+  b.EmitWaitAll(signal, comm.nranks_idx, comm.my_rank, two_i32, "2", span);
 
   return out;
 }

@@ -361,7 +361,7 @@ def all_to_all(
 
     4-arg InCore composite: Tensor [NR, SIZE] input, DistributedTensor staging
     window, INT32 barrier, Tensor output.  Lowered by LowerCompositeOps into a
-    3-phase mesh decomposition (stage-in → barrier → peer-read via pld.tile.get).
+    3-phase mesh decomposition (stage-in → barrier → peer-read via pld.tile.remote_load).
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     _args: list[Expr] = [input, target, signal, out]

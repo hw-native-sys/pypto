@@ -88,22 +88,36 @@ class AllToAllMesh:
         for peer in pl.range(nranks):
             if peer != my_rank:
                 pld.system.notify(
-                    signal, peer=peer, offsets=[my_rank, 0],
-                    value=1, op=pld.NotifyOp.Set,
+                    signal,
+                    peer=peer,
+                    offsets=[my_rank, 0],
+                    value=1,
+                    op=pld.NotifyOp.Set,
                 )
         for src in pl.range(nranks):
             if src != my_rank:
                 pld.system.wait(
-                    signal=signal, offsets=[src, 0],
-                    expected=1, cmp=pld.WaitCmp.Ge,
+                    signal=signal,
+                    offsets=[src, 0],
+                    expected=1,
+                    cmp=pld.WaitCmp.Ge,
                 )
 
         # Phase 3: exchange — read chunk my_rank from each peer's window.
         # Peer src staged the chunk for me at data[my_rank, :] in its
-        # local window.  remote_load fetches it, then store into out.
+        # local window.  pld.tile.get reads it directly into out[src, :]
+        # via a shared VEC staging tile (matches the C++ lowering).
+        recv_stage = pl.tile.create([1, SIZE], dtype=pl.FP32, target_memory=pl.Mem.Vec)
         for src in pl.range(nranks):
-            recv = pld.tile.remote_load(data, peer=src, offsets=[my_rank, 0], shape=[1, SIZE])
-            pl.store(recv, [src, 0], out)
+            pld.tile.get(
+                out,
+                peer=src,
+                src=data,
+                stage=recv_stage,
+                dst_offsets=[src, 0],
+                src_offsets=[my_rank, 0],
+                shape=[1, SIZE],
+            )
 
         return out
 

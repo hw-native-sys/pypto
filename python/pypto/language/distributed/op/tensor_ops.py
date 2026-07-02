@@ -604,12 +604,18 @@ def all_to_all(
     """All-to-all: symmetric personalized exchange.
 
     4-arg InCore composite: ``pld.tensor.all_to_all(input, target, signal, out)``
-    ``input`` is a plain Tensor [NR, SIZE] with per-destination chunks.
-    ``target`` is a DistributedTensor staging window.
-    ``signal`` is an INT32 barrier.  ``out`` receives the result [NR, SIZE]
-    where ``out[src, :]`` holds the chunk received from rank ``src``.
-
     Lowered by LowerCompositeOps into a 3-phase decomposition.
+
+    Args:
+        input: :class:`pl.Tensor` [NR, SIZE] with per-destination chunks.
+            ``input[dest, :]`` is the chunk destined for rank ``dest``.
+        target: :class:`pld.DistributedTensor` [NR, SIZE] staging window.
+        signal: :class:`pld.DistributedTensor` [NR, 1] INT32 barrier.
+        out: :class:`pl.Tensor` [NR, SIZE] output.
+            ``out[src, :]`` holds the chunk received from rank ``src``.
+
+    Returns:
+        The ``out`` :class:`pl.Tensor`.
     """
     target_expr, signal_expr = _unwrap_distributed_tensors(
         "pld.tensor.all_to_all", target=target, signal=signal

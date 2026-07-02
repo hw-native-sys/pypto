@@ -33,7 +33,7 @@ There are **twelve ops** and **four ABI enums**:
 | `pld.tensor.broadcast` | replicate root rank's data to all ranks | `DistributedTensorType` (same as src) | builtin collective |
 | `pld.tensor.reduce_scatter` | reduce and scatter chunks across ranks | `DistributedTensorType` (same as src) | builtin collective |
 | `pld.tensor.allgather` | gather data from all ranks via window | `DistributedTensorType` (same as src) | builtin collective |
-| `pld.tensor.all_to_all` | symmetric personalized exchange — every rank sends a distinct chunk to every other rank | `TensorType` [NR, SIZE] | builtin collective |
+| `pld.tensor.all_to_all` | symmetric personalized exchange — every rank sends a distinct chunk to every other rank | `TensorType` [NR, SIZE] | composite |
 | `pld.system.notify` | signal a peer's slot | `Unknown` (side effect) | TNOTIFY |
 | `pld.system.wait` | block on own slot | `Unknown` (side effect) | TWAIT |
 
