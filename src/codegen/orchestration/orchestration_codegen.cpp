@@ -3794,8 +3794,10 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   // exactly as they are excluded from the tensor index — mirroring the
   // per-kernel RecordKernelSignature contract.
   std::vector<std::string> orchestration_signature;
-  CHECK(func->params_.size() == func->param_directions_.size())
-      << "Orchestration function '" << func->name_ << "' has " << func->params_.size() << " params but "
+  // params_ and param_directions_ are kept equal-length by the Function
+  // constructor, so a mismatch here is a compiler bug, not user error.
+  INTERNAL_CHECK(func->params_.size() == func->param_directions_.size())
+      << "Internal error: orchestration function has " << func->params_.size() << " params but "
       << func->param_directions_.size() << " param directions";
   // orchestration_signature is built from the entry's declared ParamDirections,
   // so an output a kernel writes into an entry parameter must be manually marked
