@@ -18,6 +18,8 @@ full pass pipeline and verifies the per-core kernel emits an atomic-add store.
 Mirrors ``examples/kernels/10_split_k.py``.
 """
 
+import re
+
 import pypto.language as pl
 import pytest
 from pypto import backend, codegen, ir
@@ -154,8 +156,8 @@ def test_split_k_bf16_direct_emits_atomic_add_store():
     assert atomic_acc_stores, (
         f"bf16 split-K must lower to a cube (loc=acc) atomic-add store, got:\n{tstore_lines}"
     )
-    assert all("xbf16>" in line for line in atomic_acc_stores), (
-        f"the cube atomic-add store must target a bf16 GM view, got:\n{atomic_acc_stores}"
+    assert all(re.search(r"partition_tensor_view<[0-9x]+xbf16>", line) for line in atomic_acc_stores), (
+        f"the cube atomic-add store must target a bf16 GM partition view, got:\n{atomic_acc_stores}"
     )
     assert "pto.tmatmul" in mlir, f"expected a cube matmul across the InCore kernels:\n{mlir}"
 
@@ -207,8 +209,8 @@ def test_split_k_fp16_direct_emits_atomic_add_store():
         if "{atomicType = #pto<atomic_type atomic_add>}" in line and "loc=acc" in line
     ]
     assert atomic_acc, f"fp16 split-K must lower to a cube (loc=acc) atomic-add store, got:\n{tstore_lines}"
-    assert all("xf16>" in line for line in atomic_acc), (
-        f"the cube atomic-add store must target a fp16 GM view, got:\n{atomic_acc}"
+    assert all(re.search(r"partition_tensor_view<[0-9x]+xf16>", line) for line in atomic_acc), (
+        f"the cube atomic-add store must target a fp16 GM partition view, got:\n{atomic_acc}"
     )
     assert "pto.tmatmul" in mlir, f"expected a cube matmul across the InCore kernels:\n{mlir}"
 

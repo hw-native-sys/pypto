@@ -2351,6 +2351,12 @@ class TestTileStoreAtomicCodegen:
         codegen: on Ascend950 the ``pto.tstore`` emit raises a clean PyPTO error
         rather than deferring to a downstream pto-isa ``static_assert``.
         """
+        # Capture the prior backend so the A5 override does not leak; it may be
+        # unset (get_backend_type raises when no backend is configured yet).
+        try:
+            prev_backend = backend.get_backend_type()
+        except Exception:
+            prev_backend = None
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend950)
         try:
@@ -2370,7 +2376,8 @@ class TestTileStoreAtomicCodegen:
                 codegen.PTOCodegen().generate(single)
         finally:
             backend.reset_for_testing()
-            backend.set_backend_type(BackendType.Ascend910B)
+            if prev_backend is not None:
+                backend.set_backend_type(prev_backend)
 
 
 class TestTensorAssembleAtomicCodegen:

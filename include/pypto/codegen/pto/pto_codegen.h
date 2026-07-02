@@ -36,6 +36,13 @@
 
 namespace pypto {
 
+// Forward declaration for PTOCodegen::GetBackendHandler()'s return type. The full
+// definition lives in pypto/backend/common/backend_handler.h and is included by
+// the translation units that call the handler's methods (e.g. op-emit callbacks).
+namespace backend {
+class BackendHandler;
+}  // namespace backend
+
 namespace codegen {
 
 /// Order distinct DataTypes by their internal code so containers keyed on

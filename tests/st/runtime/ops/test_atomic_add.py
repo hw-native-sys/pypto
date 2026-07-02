@@ -220,8 +220,12 @@ class TestAtomicAddStore:
             f"INT32 atomic-add store mismatch: max abs diff = {(out - expected).abs().max().item()}"
         )
 
+    @pytest.mark.platforms("a2a3", "a2a3sim")
     def test_atomic_add_store_bf16(self, test_config):
         """BF16 (A2/A3, VECTOR path): ``out`` starts at 1.0; kernel atomic-adds ``x``.
+
+        bf16 atomic-add is A2/A3-only; on A5 it is rejected in codegen, so this
+        test is restricted to the a2a3 platforms.
 
         Uses a loose tolerance because bf16 has ~8 mantissa bits — the single
         accumulation ``1.0 + x`` is exact up to bf16 rounding of the operands.
@@ -300,8 +304,12 @@ class TestAtomicAddAssemble:
             f"Split-K atomic-add mismatch: max diff = {(c - expected).abs().max().item()}"
         )
 
+    @pytest.mark.platforms("a2a3", "a2a3sim")
     def test_split_k_matmul_atomic_add_bf16(self, test_config):
         """BF16 (A2/A3, CUBE path): parallel cores atomic-add bf16 partials into ``c``.
+
+        bf16 atomic-add is A2/A3-only (rejected in codegen on A5), so this test is
+        restricted to the a2a3 platforms.
 
         Each core's fp32 accumulator is cast to bf16 and atomic-added directly into
         the shared bf16 output (set_atomic_bf16). Inputs are scaled down so the
