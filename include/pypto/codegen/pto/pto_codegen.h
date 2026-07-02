@@ -36,6 +36,13 @@
 
 namespace pypto {
 
+// Forward declaration for PTOCodegen::GetBackendHandler()'s return type. The full
+// definition lives in pypto/backend/common/backend_handler.h and is included by
+// the translation units that call the handler's methods (e.g. op-emit callbacks).
+namespace backend {
+class BackendHandler;
+}  // namespace backend
+
 namespace codegen {
 
 /// Order distinct DataTypes by their internal code so containers keyed on
@@ -88,6 +95,15 @@ class PTOCodegen : public CodegenBase {
   explicit PTOCodegen(const backend::Backend* backend);
 
   ~PTOCodegen() override = default;
+
+  /**
+   * @brief Backend handler for backend-specific codegen decisions.
+   *
+   * Never null: the constructor requires a backend that exposes a handler.
+   * Used by op-emit callbacks that must gate behaviour on the target backend
+   * (e.g. rejecting a bf16 atomic-add store on Ascend950).
+   */
+  [[nodiscard]] const backend::BackendHandler* GetBackendHandler() const;
 
   /**
    * @brief Generate PTO-ISA MLIR format code from IR Program

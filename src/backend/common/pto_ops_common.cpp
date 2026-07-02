@@ -35,6 +35,7 @@
 #include <vector>
 
 #include "pypto/backend/common/backend.h"
+#include "pypto/backend/common/backend_handler.h"
 #include "pypto/codegen/codegen_base.h"
 #include "pypto/codegen/distributed/comm_layout.h"
 #include "pypto/codegen/pto/pto_codegen.h"
@@ -1752,6 +1753,20 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
                       op->span_)
       << "tile.store atomic kwarg must encode AtomicType::kNone or kAdd, got " << atomic_int;
   if (atomic_int == static_cast<int>(ir::AtomicType::kAdd)) {
+    // bf16 atomic-add into GM is only honoured on the A2/A3 store path
+    // (pto-isa set_atomic_bf16); the A5 store path rejects it. Fail here with a
+    // clean, backend-aware user error instead of deferring to a downstream
+    // pto-isa static_assert. The hardware atomic dispatch keys on the GM
+    // *destination* dtype, so this also guards the cube path (fp32 Acc -> bf16
+    // GM via fix-pipe), where the source tile is fp32 but the target is bf16.
+    if (tensor_type->dtype_ == DataType::BF16) {
+      const auto* handler = codegen.GetBackendHandler();
+      CHECK_SPAN(handler->SupportsBf16AtomicAdd(), op->span_)
+          << "tile.store with atomic=AtomicType.Add into a bf16 global tensor is not supported on the '"
+          << handler->GetPtoTargetArch()
+          << "' backend; bf16 atomic-add requires the Ascend910B (A2/A3) profile. Accumulate into an fp32 "
+             "tensor and cast to bf16 after the reduction instead.";
+    }
     tstore_line << " {atomicType = #pto<atomic_type atomic_add>}";
   }
   codegen.Emit(tstore_line.str());
