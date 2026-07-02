@@ -85,63 +85,90 @@ jobs:
           pip install -v ./runtime
 
       - name: Run A5 system tests
+        # `cd $GITHUB_WORKSPACE` is a no-op (the child already runs from the
+        # checkout root — the relative tests/st/... paths resolve today) but it
+        # puts the workspace path into the task command so the cleanup step below
+        # can grep -F "$GITHUB_WORKSPACE" to find THIS job's task.
         run: |
           task-submit --timeout 1800 --max-time 1800 --device 6 \
-            --run "pytest tests/st/runtime/ops/test_assemble.py tests/st/runtime/ops/test_mscatter.py tests/st/runtime/ops/test_random.py tests/st/runtime/framework_and_models/test_qwen3_decode_scope3_mixed.py tests/st/runtime/control_flow/test_dyn_orch_shape.py::TestDynOrchShapeOperations::test_dyn_orch_paged_attention -v --forked --platform=a5 --device=6 --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }} \
+            --run "cd $GITHUB_WORKSPACE && pytest tests/st/runtime/ops/test_assemble.py tests/st/runtime/ops/test_mscatter.py tests/st/runtime/ops/test_random.py tests/st/runtime/framework_and_models/test_qwen3_decode_scope3_mixed.py tests/st/runtime/control_flow/test_dyn_orch_shape.py::TestDynOrchShapeOperations::test_dyn_orch_paged_attention -v --forked --platform=a5 --device=6 --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }} \
               -k 'not (test_tile_row_expand or test_fillpad_zero or test_fillpad_max or test_fillpad_min or TestMscatter)'"
+
+      - name: Kill orphaned task-submit tasks
+        # If this job is cancelled or killed mid-flight, the task-submit task it
+        # submitted keeps running server-side (detached) and holds device 6 until
+        # --max-time. always() runs even on cancellation; match by this job's
+        # workspace path (embedded in the --run above) so we never touch another
+        # job's tasks.
+        if: always()
+        run: |
+          echo "cleaning up task-submit tasks for $GITHUB_WORKSPACE"
+          task-submit --list 2>/dev/null \
+            | grep -F "$GITHUB_WORKSPACE" \
+            | grep -oE 'task_[0-9_]+' \
+            | sort -u \
+            | while read -r tid; do
+                echo "  killing $tid"
+                task-submit --kill "$tid" || true
+              done || true
 
   qwen3-perf:
     # Qwen3-14B decode performance monitoring (moved out of per-PR ci.yml).
     # Samples the L2-swimlane makespan several times and averages to absorb the
     # ~8.5% run-to-run jitter, then compares against the committed baseline.
+    #
+    # No container: each perf sample borrows an NPU via `task-submit --device
+    # auto` (mechanism B), so the job holds no card and runs on a CPU runner.
+    # Host setup mirrors dist-system-tests (conda py310 + venv + activate.sh).
     needs: toolchain
+    # TEST MODE: keep the device runner and pin task-submit to its card (see
+    # ci.yml system-tests). FLIP TO PROD: cpu runner + `--device auto`.
     runs-on: [self-hosted, linux, arm64, npu-1-device]
+    defaults:
+      run:
+        working-directory: perf-checkout
     env:
       ASCEND_HOME_PATH: /usr/local/Ascend/cann-9.0.0
-      PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
-      PTO_ISA_ROOT: ${{ github.workspace }}/pto-isa
+      PTOAS_ROOT: ${{ github.workspace }}/perf-checkout/ptoas-bin
+      PTO_ISA_ROOT: ${{ github.workspace }}/perf-checkout/pto-isa
       PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
       PTOAS_SHA256: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
       CMAKE_BUILD_PARALLEL_LEVEL: 16
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
-      CCACHE_DIR: /root/.cache/ccache
-      CCACHE_MAXSIZE: 5G
-      PIP_CACHE_DIR: /root/.cache/pip
-    container:
-      image: localhost:5000/ci-device-py310:latest
-      options: >-
-        --privileged
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro
-        -v /usr/local/Ascend:/usr/local/Ascend:ro
-        -v /dev:/dev
-        -v /home/ci-runner/hw-native-sys-pypto/ci-cache/pip:/root/.cache/pip
-        -v /home/ci-runner/hw-native-sys-pypto/ci-cache/ccache:/root/.cache/ccache
-        -v /home/ci-runner/hw-native-sys-pypto/ci-cache/ptoas:/opt/ptoas-cache
-        -e ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.0.0
-        -e DEVICE_ID
-        -e DEVICE_RANGE
-        -e PTO2_RING_HEAP
-        -e PTO2_RING_TASK_WINDOW
-        -e PTO2_RING_DEP_POOL
+      CCACHE_DIR: /home/ci-runner/hw-native-sys-pypto/ci-cache/ccache
+      CCACHE_MAXSIZE: 30G
+      # Shared with the container codegen-tests job (root) via the same ci-cache
+      # dir; 000 keeps cache files mutually writable across root and ci-runner.
+      CCACHE_UMASK: '000'
+      # Per-job pip dir: pip has no shared-umask knob, so the root-owned
+      # codegen-tests pip mount can't be reused by this ci-runner host job.
+      PIP_CACHE_DIR: /home/ci-runner/hw-native-sys-pypto/ci-cache/pip-perf
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: true
+          path: perf-checkout
 
       - name: Check NPU
+        working-directory: .
         run: npu-smi info
 
-      - name: Install project and dependencies
-        run: |
-          python -m pip install --upgrade pip
-          rm -rf ./build ./_skbuild
-          test ! -e ./build && test ! -e ./_skbuild && echo "OK: pypto build removed"
-          pip install --no-build-isolation .[dev]
+      - name: Scope ccache to pto-isa version
+        # Namespace ccache by the pinned pto-isa commit so an ISA bump forces a
+        # real recompile instead of serving stale objects (mirrors pypto-lib).
+        run: echo "CCACHE_NAMESPACE=pto-isa-${{ needs.toolchain.outputs.pto_isa_commit }}" >> "$GITHUB_ENV"
+
+      - name: Relax shared ccache permissions
+        # The container codegen-tests job (ci.yml) writes this same ci-cache/ccache
+        # dir as root; CCACHE_UMASK only affects NEW entries, so pre-existing
+        # root-owned buckets can be unwritable by this host (ci-runner) job.
+        # Best-effort relax them before the first compiler launch (no-op if absent).
+        run: chmod -R a+rwX "$CCACHE_DIR" 2>/dev/null || true
 
       - name: Install ptoas (local cache)
         env:
-          PTOAS_CACHE_DIR: /opt/ptoas-cache
+          PTOAS_CACHE_DIR: /home/ci-runner/hw-native-sys-pypto/ci-cache/ptoas
         run: |
           CACHE_ARCHIVE="$PTOAS_CACHE_DIR/ptoas-aarch64-${PTOAS_VERSION}-${PTOAS_SHA256}.tar.gz"
           if [ ! -f "$CACHE_ARCHIVE" ]; then
@@ -155,50 +182,77 @@ jobs:
           else
             echo "Cache hit — using $CACHE_ARCHIVE"
           fi
-          mkdir -p "$GITHUB_WORKSPACE/ptoas-bin"
-          tar -xzf "$CACHE_ARCHIVE" -C "$GITHUB_WORKSPACE/ptoas-bin"
-          chmod +x "$GITHUB_WORKSPACE/ptoas-bin/ptoas"
-          chmod +x "$GITHUB_WORKSPACE/ptoas-bin/bin/ptoas"
-
-      - name: Add Ascend tools to PATH
-        run: echo "/usr/local/Ascend/cann-9.0.0/bin" >> $GITHUB_PATH
+          mkdir -p "$PTOAS_ROOT"
+          tar -xzf "$CACHE_ARCHIVE" -C "$PTOAS_ROOT"
+          chmod +x "$PTOAS_ROOT/ptoas"
+          chmod +x "$PTOAS_ROOT/bin/ptoas"
 
       - name: Clone pto-isa
         run: |
-          timeout 60 git clone https://github.com/hw-native-sys/pto-isa.git $GITHUB_WORKSPACE/pto-isa \
-            || { rm -rf $GITHUB_WORKSPACE/pto-isa; timeout 300 git clone https://gitcode.com/luohuan40/pto-isa.git $GITHUB_WORKSPACE/pto-isa; }
-          cd $GITHUB_WORKSPACE/pto-isa
+          rm -rf "$PTO_ISA_ROOT"
+          timeout 60 git clone https://github.com/hw-native-sys/pto-isa.git "$PTO_ISA_ROOT" \
+            || { rm -rf "$PTO_ISA_ROOT"; timeout 300 git clone https://gitcode.com/luohuan40/pto-isa.git "$PTO_ISA_ROOT"; }
+          cd "$PTO_ISA_ROOT"
           git checkout ${{ needs.toolchain.outputs.pto_isa_commit }}
 
-      - name: Install simpler
+      - name: Bootstrap conda + per-job venv + write activate.sh
         run: |
-          rm -rf ./runtime/build
-          ls -la ./runtime/ | grep -q "^d.*build$" && echo "FAIL: build still exists" && exit 1 || echo "OK: build removed"
+          source /home/ci-runner/miniconda3/etc/profile.d/conda.sh
+          conda activate py310
+          python -m venv venv --system-site-packages
+          cat > activate.sh <<'EOF'
+          source /home/ci-runner/miniconda3/etc/profile.d/conda.sh
+          conda activate py310
+          source "$GITHUB_WORKSPACE/perf-checkout/venv/bin/activate"
+          source /usr/local/Ascend/cann-9.0.0/set_env.sh
+          export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
+          EOF
+
+      - name: Install project and dependencies
+        run: |
+          source activate.sh
+          rm -rf ./build ./_skbuild ./runtime/build ./runtime/_skbuild
+          python -m pip install --upgrade pip
+          pip install scikit-build-core nanobind cmake ninja
+          pip install --no-build-isolation .[dev]
           pip install --no-build-isolation ./runtime
+          # Fail fast if the venv can't import our freshly-built packages (catches
+          # a stale conda shadow or a broken venv here, not 10 min later in the
+          # test step). The conda py310 base env must NOT have pypto/simpler
+          # installed, or --system-site-packages would let them shadow the venv.
+          python -c "import pypto, simpler; print('env OK:', pypto.__file__)"
 
       - name: Clone pypto-lib (Qwen3-14B decode)
-        run: git clone --depth 1 https://github.com/hw-native-sys/pypto-lib.git $GITHUB_WORKSPACE/pypto-lib
+        # $GITHUB_WORKSPACE/pypto-lib is a sibling of the perf-checkout checkout
+        # path, so actions/checkout won't clean it on a persistent self-hosted
+        # runner — a leftover dir from a previous run makes `git clone` fail with
+        # "destination path already exists". Remove it first.
+        run: |
+          rm -rf "$GITHUB_WORKSPACE/pypto-lib"
+          git clone --depth 1 https://github.com/hw-native-sys/pypto-lib.git "$GITHUB_WORKSPACE/pypto-lib"
 
       - name: Install pypto-lib runner dependencies
         run: |
-          pip install nanobind
-          pip install torch
+          source activate.sh
+          pip install nanobind torch
 
       - name: Run Qwen3-14B decode perf samples (L2 swimlane, 5x)
         id: qwen3_perf_run
         continue-on-error: true   # perf signal is advisory; never fail the job
-        working-directory: ${{ github.workspace }}/pypto-lib
         shell: bash   # bash adds `-eo pipefail`; per-run `|| echo` keeps the loop resilient
         env:
           PYTHONPATH: ${{ github.workspace }}/pypto-lib
-        # Append each run's stdout (carrying its "Total Test Time: <X> us" line)
-        # to a single log; perf_guard averages across all sampled runs.
+        # Each sample borrows a card via task-submit; its stdout streams back and
+        # is tee'd (carrying "Total Test Time: <X> us") into one log perf_guard
+        # averages over. Host job (no container) → $GITHUB_WORKSPACE is the host
+        # path, so the log location is unambiguous.
         run: |
+          source activate.sh
           : > "$GITHUB_WORKSPACE/qwen3_perf.log"   # truncate any stale log
           for i in $(seq 1 5); do
             echo "=== qwen3 decode perf sample $i/5 ==="
-            python models/qwen3/14b/decode_layer.py -p a2a3 -d "$DEVICE_ID" \
-              --enable-l2-swimlane --max-seq --seed 1234 \
+            task-submit --device "$DEVICE_ID" --timeout 1800 --max-time 1800 \
+              --run "source $GITHUB_WORKSPACE/perf-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/qwen3/14b/decode_layer.py -p a2a3 -d \$TASK_DEVICE --enable-l2-swimlane --max-seq --seed 1234" \
               2>&1 | tee -a "$GITHUB_WORKSPACE/qwen3_perf.log" \
               || echo "WARN: perf sample $i exited non-zero"
           done
@@ -206,16 +260,32 @@ jobs:
       - name: Qwen3-14B decode perf guard (warn-only, avg of samples)
         if: always()
         continue-on-error: true   # regression -> yellow warning on this step, job stays green
-        # Use the $GITHUB_WORKSPACE env (container path) to match where the perf
-        # run tee'd the log. The ${{ github.workspace }} context resolves to the
-        # HOST path on self-hosted+container runners, which is absent inside the
-        # container — reading it yields an empty log ("no usable number").
         run: >-
+          source activate.sh &&
           python .github/scripts/perf_guard.py
           --log "$GITHUB_WORKSPACE/qwen3_perf.log"
           --baseline .github/perf_baselines/qwen3_14b_decode.json
           --name "qwen3-14b decode_layer"
           --metric makespan_us
+
+      - name: Kill orphaned task-submit tasks
+        # If this job is cancelled or killed mid-sampling-loop, the task-submit
+        # tasks it submitted keep running server-side (detached) and hold a card
+        # shared with the other repos/jobs on this host until --max-time. always()
+        # runs even on cancellation; match by this job's checkout dir
+        # ($GITHUB_WORKSPACE/perf-checkout, sourced in each sample's --run) so two
+        # jobs sharing a workspace root on one host never kill each other's tasks.
+        if: always()
+        run: |
+          echo "cleaning up task-submit tasks for $GITHUB_WORKSPACE/perf-checkout"
+          task-submit --list 2>/dev/null \
+            | grep -F "$GITHUB_WORKSPACE/perf-checkout" \
+            | grep -oE 'task_[0-9_]+' \
+            | sort -u \
+            | while read -r tid; do
+                echo "  killing $tid"
+                task-submit --kill "$tid" || true
+              done || true
 
   notify-on-failure:
     name: Open issue on failure

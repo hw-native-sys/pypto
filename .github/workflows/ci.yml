@@ -19,7 +19,14 @@ jobs:
     # runtime owns it and enforces build == run). Both are re-exported as outputs
     # consumed via `needs.toolchain.outputs.*`. Bumping the runtime submodule
     # moves pypto's pto-isa in lockstep.
-    runs-on: ubuntu-latest
+    #
+    # Runs on the same self-hosted arm64 CPU runner + container as clang-tidy so
+    # the whole pipeline stays on in-house infra (no GitHub-hosted minutes) and
+    # every job sees the same base image. This job only greps/reads pinned files,
+    # so it needs no pip cache mount.
+    runs-on: [self-hosted, linux, arm64, cpu]
+    container:
+      image: localhost:5000/ci-py310:latest
     permissions:
       contents: read
     outputs:
@@ -132,7 +139,12 @@ jobs:
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
       CCACHE_DIR: /root/.cache/ccache
-      CCACHE_MAXSIZE: 20G
+      CCACHE_MAXSIZE: 30G
+      # This job (root, in-container) shares the host ci-cache/ccache dir with the
+      # de-dockerized device jobs (ci-runner). 000 keeps root-written cache files
+      # group/world-writable so ci-runner can update / LRU-evict them, and vice
+      # versa — same rationale as pypto-lib's sim/a2a3 cache sharing.
+      CCACHE_UMASK: '000'
       PIP_CACHE_DIR: /root/.cache/pip
     container:
       image: localhost:5000/ci-py310:latest
@@ -168,63 +180,73 @@ jobs:
           --ignore=tests/st/codegen/torch/test_torch_codegen_paged_attention.py
 
   system-tests:
+    # No container: compile + golden run card-free on this CPU host, and each
+    # case's device run borrows an NPU from the host-level `task-submit --device
+    # auto` queue (mechanism A; --execute-via-task-submit). The job therefore
+    # holds no card and is no longer pinned to a single-device runner. Host setup
+    # mirrors dist-system-tests (conda py310 + per-job venv + activate.sh) so the
+    # CI job and the task-submit child share one filesystem / absolute path —
+    # the compiled .o/.so in the precompile cache_dir are readable by the child
+    # with no path translation.
+    #
+    # Checkout / install happen under ./st-checkout so they don't collide with
+    # other jobs' workspaces.
     needs: toolchain
+    # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
+    permissions:
+      contents: read
+    # TEST MODE: keep the device runner so DEVICE_ID/DEVICE_RANGE exist and pin
+    # task-submit to that card (validates the new compile-card-free + task-submit
+    # execute flow deterministically). FLIP TO PROD: change this to
+    # `[self-hosted, linux, arm64, cpu]` and drop --task-submit-device below so
+    # cases borrow any free card via `--device auto`.
     runs-on: [self-hosted, linux, arm64, npu-1-device]
+    defaults:
+      run:
+        working-directory: st-checkout
     env:
       ASCEND_HOME_PATH: /usr/local/Ascend/cann-9.0.0
-      PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
-      PTO_ISA_ROOT: ${{ github.workspace }}/pto-isa
+      PTOAS_ROOT: ${{ github.workspace }}/st-checkout/ptoas-bin
+      PTO_ISA_ROOT: ${{ github.workspace }}/st-checkout/pto-isa
       PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
       PTOAS_SHA256: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
       CMAKE_BUILD_PARALLEL_LEVEL: 16
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
-      CCACHE_DIR: /root/.cache/ccache
-      CCACHE_MAXSIZE: 20G
-      # Isolate the compile cache by pto-isa pin: simpler now links pto-isa, so
-      # reusing objects built against a different pin causes an ABI mismatch that
-      # segfaults the kernel/orchestration compile. Namespacing by the pin forces
-      # a clean recompile on every bump (the larger maxsize holds several pins).
-      CCACHE_NAMESPACE: ${{ needs.toolchain.outputs.pto_isa_commit }}
-      PIP_CACHE_DIR: /root/.cache/pip
-    container:
-      image: localhost:5000/ci-device-py310:latest
-      options: >-
-        --privileged
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro
-        -v /usr/local/Ascend:/usr/local/Ascend:ro
-        -v /dev:/dev
-        -v /home/ci-runner/hw-native-sys-pypto/ci-cache/pip:/root/.cache/pip
-        -v /home/ci-runner/hw-native-sys-pypto/ci-cache/ccache:/root/.cache/ccache
-        -v /home/ci-runner/hw-native-sys-pypto/ci-cache/ptoas:/opt/ptoas-cache
-        -e ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.0.0
-        -e DEVICE_ID
-        -e DEVICE_RANGE
-        -e PTO2_RING_HEAP
-        -e PTO2_RING_TASK_WINDOW
-        -e PTO2_RING_DEP_POOL
+      CCACHE_DIR: /home/ci-runner/hw-native-sys-pypto/ci-cache/ccache
+      CCACHE_MAXSIZE: 30G
+      # Shared with the container codegen-tests job (root) via the same ci-cache
+      # dir; 000 keeps cache files mutually writable across root and ci-runner.
+      # CCACHE_NAMESPACE is set by the "Scope ccache to pto-isa version" step.
+      CCACHE_UMASK: '000'
+      # Per-job pip dir: pip has no shared-umask knob, so the root-owned
+      # codegen-tests pip mount can't be reused by this ci-runner host job.
+      PIP_CACHE_DIR: /home/ci-runner/hw-native-sys-pypto/ci-cache/pip-st
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: true
+          path: st-checkout
 
       - name: Check NPU
-        run: |
-          npu-smi info
+        working-directory: .
+        run: npu-smi info
 
-      - name: Show ccache stats (before)
-        run: ccache -s || true
+      - name: Scope ccache to pto-isa version
+        # Namespace ccache by the pinned pto-isa commit so an ISA bump forces a
+        # real recompile instead of serving stale objects (mirrors pypto-lib).
+        run: echo "CCACHE_NAMESPACE=pto-isa-${{ needs.toolchain.outputs.pto_isa_commit }}" >> "$GITHUB_ENV"
 
-      - name: Install project and dependencies
-        run: |
-          python -m pip install --upgrade pip
-          rm -rf ./build ./_skbuild
-          test ! -e ./build && test ! -e ./_skbuild && echo "OK: pypto build removed"
-          pip install --no-build-isolation .[dev]
+      - name: Relax shared ccache permissions
+        # The container codegen-tests job writes this same ci-cache/ccache dir as
+        # root; CCACHE_UMASK only affects NEW entries, so pre-existing root-owned
+        # buckets can be unwritable by this host (ci-runner) job. Best-effort relax
+        # them before the first compiler launch (no-op if absent / already ok).
+        run: chmod -R a+rwX "$CCACHE_DIR" 2>/dev/null || true
 
       - name: Install ptoas (local cache)
         env:
-          PTOAS_CACHE_DIR: /opt/ptoas-cache
+          PTOAS_CACHE_DIR: /home/ci-runner/hw-native-sys-pypto/ci-cache/ptoas
         run: |
           CACHE_ARCHIVE="$PTOAS_CACHE_DIR/ptoas-aarch64-${PTOAS_VERSION}-${PTOAS_SHA256}.tar.gz"
           if [ ! -f "$CACHE_ARCHIVE" ]; then
@@ -238,59 +260,180 @@ jobs:
           else
             echo "Cache hit — using $CACHE_ARCHIVE"
           fi
-          mkdir -p "$GITHUB_WORKSPACE/ptoas-bin"
-          tar -xzf "$CACHE_ARCHIVE" -C "$GITHUB_WORKSPACE/ptoas-bin"
-          chmod +x "$GITHUB_WORKSPACE/ptoas-bin/ptoas"
-          chmod +x "$GITHUB_WORKSPACE/ptoas-bin/bin/ptoas"
-
-      - name: Add Ascend tools to PATH
-        run: echo "/usr/local/Ascend/cann-9.0.0/bin" >> $GITHUB_PATH
+          mkdir -p "$PTOAS_ROOT"
+          tar -xzf "$CACHE_ARCHIVE" -C "$PTOAS_ROOT"
+          chmod +x "$PTOAS_ROOT/ptoas"
+          chmod +x "$PTOAS_ROOT/bin/ptoas"
 
       - name: Clone pto-isa
         run: |
-          timeout 60 git clone https://github.com/hw-native-sys/pto-isa.git $GITHUB_WORKSPACE/pto-isa \
-            || { rm -rf $GITHUB_WORKSPACE/pto-isa; timeout 300 git clone https://gitcode.com/luohuan40/pto-isa.git $GITHUB_WORKSPACE/pto-isa; }
-          cd $GITHUB_WORKSPACE/pto-isa
+          rm -rf "$PTO_ISA_ROOT"
+          timeout 60 git clone https://github.com/hw-native-sys/pto-isa.git "$PTO_ISA_ROOT" \
+            || { rm -rf "$PTO_ISA_ROOT"; timeout 300 git clone https://gitcode.com/luohuan40/pto-isa.git "$PTO_ISA_ROOT"; }
+          cd "$PTO_ISA_ROOT"
           git checkout ${{ needs.toolchain.outputs.pto_isa_commit }}
 
-      - name: Install simpler
+      - name: Bootstrap conda + per-job venv + write activate.sh
+        # Per-job venv layered on conda py310; activate.sh lets each later step
+        # enter the env with a single `source activate.sh`. LD_LIBRARY_PATH is
+        # prepended with $CONDA_PREFIX/lib because ptoas needs GLIBCXX_3.4.29.
+        # Unlike dist-system-tests we KEEP PTO2_RING_* (the system tests rely on
+        # the runner's ring-sizing env; task-submit preserves the caller's env
+        # into the child, so they reach the device run).
         run: |
-          rm -rf ./runtime/build
-          ls -la ./runtime/ | grep -q "^d.*build$" && echo "FAIL: build still exists" && exit 1 || echo "OK: build removed"
+          source /home/ci-runner/miniconda3/etc/profile.d/conda.sh
+          conda activate py310
+          python -m venv venv --system-site-packages
+          cat > activate.sh <<'EOF'
+          source /home/ci-runner/miniconda3/etc/profile.d/conda.sh
+          conda activate py310
+          source "$GITHUB_WORKSPACE/st-checkout/venv/bin/activate"
+          source /usr/local/Ascend/cann-9.0.0/set_env.sh
+          export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
+          EOF
+
+      - name: Show ccache stats (before)
+        run: ccache -s || true
+
+      - name: Install project and dependencies
+        run: |
+          source activate.sh
+          rm -rf ./build ./_skbuild ./runtime/build ./runtime/_skbuild
+          python -m pip install --upgrade pip
+          pip install scikit-build-core nanobind cmake ninja
+          pip install --no-build-isolation .[dev]
           pip install --no-build-isolation ./runtime
+          # Fail fast if the venv can't import our freshly-built packages (catches
+          # a stale conda shadow or a broken venv here, not 10 min later in the
+          # test step). The conda py310 base env must NOT have pypto/simpler
+          # installed, or --system-site-packages would let them shadow the venv.
+          python -c "import pypto, simpler; print('env OK:', pypto.__file__)"
 
       - name: Show ccache stats (after)
         run: ccache -s || true
 
       - name: Test system tests
-        timeout-minutes: 20
+        timeout-minutes: 30
+        # Mechanism A: compile + golden run card-free in the precompile pool;
+        # each case's device run borrows an NPU via `task-submit --device auto`
+        # (--execute-via-task-submit). No --device: the harness no longer owns a
+        # card. cache_dir auto-lands under the repo's build_output (host-visible
+        # to the task-submit child), cleaned at session end.
+        #
         # tests/st/codegen is device-free and runs in the separate CPU
-        # codegen-tests job (--codegen-only). On-board execution tests
-        # (incl. the paged-attention pipelines) live under tests/st/runtime.
-        # test_torch_codegen_paged_attention is passed explicitly so it still
-        # runs here despite the tests/st/codegen ignore: its numeric golden
-        # compare is unstable on the CPU container's torch/BLAS build (see the
-        # codegen-tests job), so it needs this environment.
-        run: pytest tests/st tests/st/codegen/torch/test_torch_codegen_paged_attention.py -v --device="$DEVICE_RANGE" --precompile-workers=64 --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }} --ignore=tests/st/distributed --ignore=tests/st/codegen
+        # codegen-tests job (--codegen-only). test_torch_codegen_paged_attention
+        # is passed explicitly so it still runs here despite the tests/st/codegen
+        # ignore: its numeric golden compare is unstable on a CPU torch/BLAS
+        # build, so it needs this environment.
+        run: |
+          source activate.sh
+          # TEST MODE: --task-submit-device pins EVERY device run (batched + the
+          # undiscovered-case tail) to this runner's card (DEVICE_RANGE) through
+          # task-submit's per-card lock. FLIP TO PROD: cpu runner, drop
+          # --task-submit-device, use --device auto (borrow any free card).
+          # DEVICE_RANGE must be non-empty, else task-submit would auto-borrow a
+          # host card this runner does not own (halMemCtl EACCES).
+          echo "[device] DEVICE_ID=$DEVICE_ID DEVICE_RANGE=$DEVICE_RANGE"
+          test -n "$DEVICE_RANGE" || { echo "DEVICE_RANGE is empty in the runner env"; exit 1; }
+          # Category A (`-m device_batch`, auto-applied to tests using
+          # test_runner.run): compile + golden card-free, device run BATCHED via
+          # task-submit. Everything else (`-m 'not device_batch'` — direct @pl.jit
+          # / config=test_config) runs in the in-process step below. The split is
+          # by fixture usage (conftest pytest_itemcollected), so NEW tests
+          # self-classify — no ci.yml edit, no per-file lists.
+          #
+          # Excluded from BOTH generic steps (run elsewhere): tests/st/distributed
+          # (own multi-card job), tests/st/codegen (own CPU --codegen-only job),
+          # and the DFX tests below (own flagged steps: dump-tensor / swimlane).
+          # test_dump_tag uses test_runner (would be batched here) so it is
+          # --ignore'd; swimlane is direct-device and --ignore'd from the B step.
+          python -m pytest tests/st -v -m device_batch \
+            --ignore=tests/st/distributed \
+            --ignore=tests/st/codegen \
+            --ignore=tests/st/runtime/framework_and_models/test_dump_tag.py \
+            --precompile-workers=32 --execute-via-task-submit --execute-batch-size=64 \
+            --task-queue-timeout=1800 --task-max-time=600 --task-submit-device="$DEVICE_RANGE" \
+            --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }}
+
+      - name: Test direct-device (mechanism B — one card, in-process)
+        timeout-minutes: 30
+        # Everything NOT batched above (`-m 'not device_batch'`): direct @pl.jit
+        # kernel calls / config=test_config (and no-fixture device tests), which
+        # execute the device synchronously in-process and cannot be batched. Wrap
+        # them whole in ONE task-submit card session and run in-process on the
+        # borrowed card (--device=$TASK_DEVICE, no --execute-via-task-submit): one
+        # device init for the step, pytest's native full capture on failure.
+        # Selection is by marker, so mixed files split per-test and new tests need
+        # no edit. swimlane is --ignore'd here — it runs in its own flagged step.
+        # (paged_attention has its own step below — passing it as an explicit path
+        # here collapses pytest's dir collection.)
+        run: |
+          source activate.sh
+          task-submit --device "$DEVICE_RANGE" --timeout 1800 --max-time 1800 \
+            --run "cd $GITHUB_WORKSPACE/st-checkout && source activate.sh && python -m pytest \
+              tests/st -v -m 'not device_batch' \
+              --ignore=tests/st/distributed \
+              --ignore=tests/st/codegen \
+              --ignore=tests/st/runtime/framework_and_models/test_perf_swimlane.py \
+              --device=\$TASK_DEVICE --platform=a2a3 \
+              --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }}"
+
+      - name: Test paged-attention codegen (numeric compare, in device env)
+        # tests/st/codegen runs device-free in the CPU codegen-tests job, but this
+        # one file's numeric golden compare is unstable on a CPU torch/BLAS build,
+        # so it runs here in the device job's environment. Own step (in-process
+        # via task-submit) because it lives under the --ignore'd tests/st/codegen.
+        run: |
+          source activate.sh
+          task-submit --device "$DEVICE_RANGE" --timeout 1800 --max-time 600 \
+            --run "cd $GITHUB_WORKSPACE/st-checkout && source activate.sh && python -m pytest \
+              tests/st/codegen/torch/test_torch_codegen_paged_attention.py \
+              -v --device=\$TASK_DEVICE --platform=a2a3 \
+              --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }}"
 
       - name: Test multi-orch L2 (isolated pytest invocation)
-        # A ``Worker(level=2)`` device session currently leaves runtime
-        # state that hangs / segfaults the next ``Worker(level=3)``
-        # init in the same Python process (simpler-side state
-        # isolation bug). Running this file in its own pytest process
-        # keeps the L2 leak from poisoning ``test_l3_distributed``.
-        timeout-minutes: 3
-        run: pytest tests/st/distributed/test_l2_multi_orch.py -v --device="$DEVICE_RANGE" --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }}
+        # Mechanism B: a single forked pytest wrapped whole in task-submit (no
+        # precompile pipeline here). A ``Worker(level=2)`` session leaves runtime
+        # state that poisons the next ``Worker(level=3)`` init in the same
+        # process, so this file runs in its own pytest invocation.
+        timeout-minutes: 5
+        run: |
+          source activate.sh
+          task-submit --device "$DEVICE_ID" --timeout 1800 --max-time 600 \
+            --run "cd $GITHUB_WORKSPACE/st-checkout && source activate.sh && python -m pytest tests/st/distributed/test_l2_multi_orch.py -v --device=\$TASK_DEVICE --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }}"
 
       - name: Test swimlane output
         run: |
-          pytest tests/st/runtime/framework_and_models/test_perf_swimlane.py \
-            -v --device="$DEVICE_ID" --platform=a2a3 --enable-l2-swimlane --forked --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }}
+          source activate.sh
+          task-submit --device "$DEVICE_ID" --timeout 1800 --max-time 600 \
+            --run "cd $GITHUB_WORKSPACE/st-checkout && source activate.sh && python -m pytest tests/st/runtime/framework_and_models/test_perf_swimlane.py -v --device=\$TASK_DEVICE --platform=a2a3 --enable-l2-swimlane --forked --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }}"
 
       - name: Test dump-tensor output
         run: |
-          pytest tests/st/runtime/framework_and_models/test_dump_tag.py \
-            -v --device="$DEVICE_ID" --platform=a2a3 --dump-tensor --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }} --forked
+          source activate.sh
+          task-submit --device "$DEVICE_ID" --timeout 1800 --max-time 600 \
+            --run "cd $GITHUB_WORKSPACE/st-checkout && source activate.sh && python -m pytest tests/st/runtime/framework_and_models/test_dump_tag.py -v --device=\$TASK_DEVICE --platform=a2a3 --dump-tensor --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }} --forked"
+
+      - name: Kill orphaned task-submit tasks
+        # If this job is cancelled (e.g. cancel-in-progress on a new push) or
+        # killed mid-flight, the task-submit tasks it submitted keep running
+        # server-side — they are detached (reattachable via `task-submit --wait`).
+        # --max-time bounds them, but until then they hold a card shared with the
+        # other repos/jobs on this host. Kill THIS job's own tasks explicitly.
+        # always() runs even on cancellation; we match by this job's checkout dir
+        # ($GITHUB_WORKSPACE/st-checkout, embedded in every --run above) so two
+        # jobs sharing a workspace root on one host never kill each other's tasks.
+        if: always()
+        run: |
+          echo "cleaning up task-submit tasks for $GITHUB_WORKSPACE/st-checkout"
+          task-submit --list 2>/dev/null \
+            | grep -F "$GITHUB_WORKSPACE/st-checkout" \
+            | grep -oE 'task_[0-9_]+' \
+            | sort -u \
+            | while read -r tid; do
+                echo "  killing $tid"
+                task-submit --kill "$tid" || true
+              done || true
 
   dist-system-tests:
     # No container: HCCL needs host-only env (HCCL_LOGIC_SUPERPOD_ID, plugin
@@ -301,6 +444,11 @@ jobs:
     # with system-tests' workspace (which is owned by container root and
     # would EACCES our ci-runner cleanup).
     needs: toolchain
+    # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
+    permissions:
+      contents: read
+    # TEST MODE: keep the 2-device runner and pin task-submit to DEVICE_RANGE
+    # (see system-tests). FLIP TO PROD: cpu runner + `--device auto --device-num 2`.
     runs-on: [self-hosted, linux, arm64, npu-2-device]
     defaults:
       run:
@@ -314,14 +462,14 @@ jobs:
       CMAKE_BUILD_PARALLEL_LEVEL: 16
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
-      CCACHE_DIR: /home/ci-runner/.cache/ccache
-      CCACHE_MAXSIZE: 20G
-      # Isolate the compile cache by pto-isa pin: simpler now links pto-isa, so
-      # reusing objects built against a different pin causes an ABI mismatch that
-      # segfaults the kernel/orchestration compile. Namespacing by the pin forces
-      # a clean recompile on every bump (the larger maxsize holds several pins).
-      CCACHE_NAMESPACE: ${{ needs.toolchain.outputs.pto_isa_commit }}
-      PIP_CACHE_DIR: /home/ci-runner/.cache/pip
+      CCACHE_DIR: /home/ci-runner/hw-native-sys-pypto/ci-cache/ccache
+      CCACHE_MAXSIZE: 30G
+      # Shared with the container codegen-tests job (root) via the same ci-cache
+      # dir; 000 keeps cache files mutually writable across root and ci-runner.
+      CCACHE_UMASK: '000'
+      # Per-job pip dir: pip has no shared-umask knob, so the root-owned
+      # codegen-tests pip mount can't be reused by this ci-runner host job.
+      PIP_CACHE_DIR: /home/ci-runner/hw-native-sys-pypto/ci-cache/pip-dist
     steps:
       - uses: actions/checkout@v4
         with:
@@ -331,6 +479,18 @@ jobs:
       - name: Check NPU
         working-directory: .
         run: npu-smi info
+
+      - name: Scope ccache to pto-isa version
+        # Namespace ccache by the pinned pto-isa commit so an ISA bump forces a
+        # real recompile instead of serving stale objects (mirrors pypto-lib).
+        run: echo "CCACHE_NAMESPACE=pto-isa-${{ needs.toolchain.outputs.pto_isa_commit }}" >> "$GITHUB_ENV"
+
+      - name: Relax shared ccache permissions
+        # The container codegen-tests job writes this same ci-cache/ccache dir as
+        # root; CCACHE_UMASK only affects NEW entries, so pre-existing root-owned
+        # buckets can be unwritable by this host (ci-runner) job. Best-effort relax
+        # them before the first compiler launch (no-op if absent / already ok).
+        run: chmod -R a+rwX "$CCACHE_DIR" 2>/dev/null || true
 
       - name: Install ptoas (local cache)
         env:
@@ -391,67 +551,105 @@ jobs:
           pip install scikit-build-core nanobind cmake ninja
           pip install --no-build-isolation .[dev]
           pip install --no-build-isolation ./runtime
+          # Fail fast if the venv can't import our freshly-built packages (catches
+          # a stale conda shadow or a broken venv here, not 10 min later in the
+          # test step). The conda py310 base env must NOT have pypto/simpler
+          # installed, or --system-site-packages would let them shadow the venv.
+          python -c "import pypto, simpler; print('env OK:', pypto.__file__)"
 
       - name: Test distributed system tests
-        timeout-minutes: 10
+        timeout-minutes: 15
+        # Mechanism B (multi-card): borrow 2 NPUs via `task-submit --device auto
+        # --device-num 2` for the whole pytest run; $TASK_DEVICE is the lent set
+        # (comma-separated), passed to --device. The job no longer pins an
+        # npu-2-device runner. activate.sh already unset PTO2_RING_* (they break
+        # HCCL); task-submit preserves that env into the child.
         run: |
           source activate.sh
-          python -m pytest tests/st/distributed -v --device="$DEVICE_RANGE" --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }} --ignore=tests/st/distributed/test_l2_multi_orch.py
+          task-submit --device "$DEVICE_RANGE" --timeout 1800 --max-time 900 \
+            --run "cd $GITHUB_WORKSPACE/dist-checkout && source activate.sh && python -m pytest tests/st/distributed -v --device=\$TASK_DEVICE --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }} --ignore=tests/st/distributed/test_l2_multi_orch.py"
+
+      - name: Kill orphaned task-submit tasks
+        # If this job is cancelled (e.g. cancel-in-progress on a new push) or
+        # killed mid-flight, the task-submit tasks it submitted keep running
+        # server-side — they are detached (reattachable via `task-submit --wait`).
+        # --max-time bounds them, but until then they hold a card shared with the
+        # other repos/jobs on this host. Kill THIS job's own tasks explicitly.
+        # always() runs even on cancellation; we match by this job's checkout dir
+        # ($GITHUB_WORKSPACE/dist-checkout, embedded in every --run above) so two
+        # jobs sharing a workspace root on one host never kill each other's tasks.
+        if: always()
+        run: |
+          echo "cleaning up task-submit tasks for $GITHUB_WORKSPACE/dist-checkout"
+          task-submit --list 2>/dev/null \
+            | grep -F "$GITHUB_WORKSPACE/dist-checkout" \
+            | grep -oE 'task_[0-9_]+' \
+            | sort -u \
+            | while read -r tid; do
+                echo "  killing $tid"
+                task-submit --kill "$tid" || true
+              done || true
 
   pypto-lib-model:
+    # No container: each model run borrows an NPU from the host-level
+    # `task-submit --device auto` queue (mechanism B — the whole `python
+    # models/...` invocation, which compiles + runs in one process, is wrapped).
+    # Host setup mirrors dist-system-tests (conda py310 + venv + activate.sh);
+    # the job holds no card and runs on a CPU runner. task-submit preserves the
+    # caller's environment (per daily_ci.yml `a5-system-tests`), so sourcing
+    # activate.sh before the wrap is enough — the child inherits the venv + env.
     needs: toolchain
+    # Checkout + clone pypto-lib + test only — no write scopes needed on GITHUB_TOKEN.
+    permissions:
+      contents: read
+    # TEST MODE: keep the device runner and pin task-submit to its card (see
+    # system-tests). FLIP TO PROD: cpu runner + `--device auto`.
     runs-on: [self-hosted, linux, arm64, npu-1-device]
+    defaults:
+      run:
+        working-directory: lib-checkout
     env:
       ASCEND_HOME_PATH: /usr/local/Ascend/cann-9.0.0
-      PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
-      PTO_ISA_ROOT: ${{ github.workspace }}/pto-isa
+      PTOAS_ROOT: ${{ github.workspace }}/lib-checkout/ptoas-bin
+      PTO_ISA_ROOT: ${{ github.workspace }}/lib-checkout/pto-isa
       PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
       PTOAS_SHA256: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
       CMAKE_BUILD_PARALLEL_LEVEL: 16
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
-      CCACHE_DIR: /root/.cache/ccache
-      CCACHE_MAXSIZE: 20G
-      # Isolate the compile cache by pto-isa pin: simpler now links pto-isa, so
-      # reusing objects built against a different pin causes an ABI mismatch that
-      # segfaults the kernel/orchestration compile. Namespacing by the pin forces
-      # a clean recompile on every bump (the larger maxsize holds several pins).
-      CCACHE_NAMESPACE: ${{ needs.toolchain.outputs.pto_isa_commit }}
-      PIP_CACHE_DIR: /root/.cache/pip
-    container:
-      image: localhost:5000/ci-device-py310:latest
-      options: >-
-        --privileged
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro
-        -v /usr/local/Ascend:/usr/local/Ascend:ro
-        -v /dev:/dev
-        -v /home/ci-runner/hw-native-sys-pypto/ci-cache/pip:/root/.cache/pip
-        -v /home/ci-runner/hw-native-sys-pypto/ci-cache/ccache:/root/.cache/ccache
-        -v /home/ci-runner/hw-native-sys-pypto/ci-cache/ptoas:/opt/ptoas-cache
-        -e ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.0.0
-        -e DEVICE_ID
-        -e DEVICE_RANGE
-        -e PTO2_RING_HEAP
-        -e PTO2_RING_TASK_WINDOW
-        -e PTO2_RING_DEP_POOL
+      CCACHE_DIR: /home/ci-runner/hw-native-sys-pypto/ci-cache/ccache
+      CCACHE_MAXSIZE: 30G
+      # Shared with the container codegen-tests job (root) via the same ci-cache
+      # dir; 000 keeps cache files mutually writable across root and ci-runner.
+      CCACHE_UMASK: '000'
+      # Per-job pip dir: pip has no shared-umask knob, so the root-owned
+      # codegen-tests pip mount can't be reused by this ci-runner host job.
+      PIP_CACHE_DIR: /home/ci-runner/hw-native-sys-pypto/ci-cache/pip-lib
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: true
+          path: lib-checkout
 
       - name: Check NPU
+        working-directory: .
         run: npu-smi info
 
-      - name: Install project and dependencies
-        run: |
-          python -m pip install --upgrade pip
-          rm -rf ./build ./_skbuild
-          test ! -e ./build && test ! -e ./_skbuild && echo "OK: pypto build removed"
-          pip install --no-build-isolation .[dev]
+      - name: Scope ccache to pto-isa version
+        # Namespace ccache by the pinned pto-isa commit so an ISA bump forces a
+        # real recompile instead of serving stale objects (mirrors pypto-lib).
+        run: echo "CCACHE_NAMESPACE=pto-isa-${{ needs.toolchain.outputs.pto_isa_commit }}" >> "$GITHUB_ENV"
+
+      - name: Relax shared ccache permissions
+        # The container codegen-tests job writes this same ci-cache/ccache dir as
+        # root; CCACHE_UMASK only affects NEW entries, so pre-existing root-owned
+        # buckets can be unwritable by this host (ci-runner) job. Best-effort relax
+        # them before the first compiler launch (no-op if absent / already ok).
+        run: chmod -R a+rwX "$CCACHE_DIR" 2>/dev/null || true
 
       - name: Install ptoas (local cache)
         env:
-          PTOAS_CACHE_DIR: /opt/ptoas-cache
+          PTOAS_CACHE_DIR: /home/ci-runner/hw-native-sys-pypto/ci-cache/ptoas
         run: |
           CACHE_ARCHIVE="$PTOAS_CACHE_DIR/ptoas-aarch64-${PTOAS_VERSION}-${PTOAS_SHA256}.tar.gz"
           if [ ! -f "$CACHE_ARCHIVE" ]; then
@@ -465,40 +663,70 @@ jobs:
           else
             echo "Cache hit — using $CACHE_ARCHIVE"
           fi
-          mkdir -p "$GITHUB_WORKSPACE/ptoas-bin"
-          tar -xzf "$CACHE_ARCHIVE" -C "$GITHUB_WORKSPACE/ptoas-bin"
-          chmod +x "$GITHUB_WORKSPACE/ptoas-bin/ptoas"
-          chmod +x "$GITHUB_WORKSPACE/ptoas-bin/bin/ptoas"
-
-      - name: Add Ascend tools to PATH
-        run: echo "/usr/local/Ascend/cann-9.0.0/bin" >> $GITHUB_PATH
+          mkdir -p "$PTOAS_ROOT"
+          tar -xzf "$CACHE_ARCHIVE" -C "$PTOAS_ROOT"
+          chmod +x "$PTOAS_ROOT/ptoas"
+          chmod +x "$PTOAS_ROOT/bin/ptoas"
 
       - name: Clone pto-isa
         run: |
-          timeout 60 git clone https://github.com/hw-native-sys/pto-isa.git $GITHUB_WORKSPACE/pto-isa \
-            || { rm -rf $GITHUB_WORKSPACE/pto-isa; timeout 300 git clone https://gitcode.com/luohuan40/pto-isa.git $GITHUB_WORKSPACE/pto-isa; }
-          cd $GITHUB_WORKSPACE/pto-isa
+          rm -rf "$PTO_ISA_ROOT"
+          timeout 60 git clone https://github.com/hw-native-sys/pto-isa.git "$PTO_ISA_ROOT" \
+            || { rm -rf "$PTO_ISA_ROOT"; timeout 300 git clone https://gitcode.com/luohuan40/pto-isa.git "$PTO_ISA_ROOT"; }
+          cd "$PTO_ISA_ROOT"
           git checkout ${{ needs.toolchain.outputs.pto_isa_commit }}
 
-      - name: Install simpler
+      - name: Bootstrap conda + per-job venv + write activate.sh
         run: |
-          rm -rf ./runtime/build
-          ls -la ./runtime/ | grep -q "^d.*build$" && echo "FAIL: build still exists" && exit 1 || echo "OK: build removed"
+          source /home/ci-runner/miniconda3/etc/profile.d/conda.sh
+          conda activate py310
+          python -m venv venv --system-site-packages
+          cat > activate.sh <<'EOF'
+          source /home/ci-runner/miniconda3/etc/profile.d/conda.sh
+          conda activate py310
+          source "$GITHUB_WORKSPACE/lib-checkout/venv/bin/activate"
+          source /usr/local/Ascend/cann-9.0.0/set_env.sh
+          export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
+          EOF
+
+      - name: Install project and dependencies
+        run: |
+          source activate.sh
+          rm -rf ./build ./_skbuild ./runtime/build ./runtime/_skbuild
+          python -m pip install --upgrade pip
+          pip install scikit-build-core nanobind cmake ninja
+          pip install --no-build-isolation .[dev]
           pip install --no-build-isolation ./runtime
+          # Fail fast if the venv can't import our freshly-built packages (catches
+          # a stale conda shadow or a broken venv here, not 10 min later in the
+          # test step). The conda py310 base env must NOT have pypto/simpler
+          # installed, or --system-site-packages would let them shadow the venv.
+          python -c "import pypto, simpler; print('env OK:', pypto.__file__)"
 
       - name: Clone pypto-lib (Qwen3-14B decode)
-        run: git clone --depth 1 https://github.com/hw-native-sys/pypto-lib.git $GITHUB_WORKSPACE/pypto-lib
+        # $GITHUB_WORKSPACE/pypto-lib is a sibling of lib-checkout, so
+        # actions/checkout won't clean it on a persistent self-hosted runner — a
+        # leftover dir from a previous run makes `git clone` fail with
+        # "destination path already exists". Remove it first (mirrors daily_ci).
+        run: |
+          rm -rf "$GITHUB_WORKSPACE/pypto-lib"
+          git clone --depth 1 https://github.com/hw-native-sys/pypto-lib.git "$GITHUB_WORKSPACE/pypto-lib"
 
       - name: Install pypto-lib runner dependencies
         run: |
-          pip install nanobind
-          pip install torch
+          source activate.sh
+          pip install nanobind torch
 
+      # Each model run borrows a card via task-submit for the whole `python ...`
+      # invocation (compile + run). task-submit propagates the inner exit code,
+      # so a model crash fails the step. $TASK_DEVICE is the lent card.
       - name: Run pypto-lib Qwen3-14B decode example
-        working-directory: ${{ github.workspace }}/pypto-lib
         env:
           PYTHONPATH: ${{ github.workspace }}/pypto-lib
-        run: python models/qwen3/14b/decode_layer.py -p a2a3 -d "$DEVICE_ID"
+        run: |
+          source activate.sh
+          task-submit --device "$DEVICE_ID" --timeout 1800 --max-time 1800 \
+            --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/qwen3/14b/decode_layer.py -p a2a3 -d \$TASK_DEVICE"
 
       # NOTE: Qwen3-14B decode performance monitoring (L2-swimlane makespan +
       # perf_guard) lives in the daily_ci.yml `qwen3-perf` job, not here. Per-PR
@@ -506,34 +734,65 @@ jobs:
       # is sampled daily with multiple runs averaged to keep the signal stable.
 
       - name: Run pypto-lib DeepSeek-V4 decode_attention_swa example
-        working-directory: ${{ github.workspace }}/pypto-lib
         env:
           PYTHONPATH: ${{ github.workspace }}/pypto-lib
-        run: python models/deepseek/v4/decode_attention_swa.py -p a2a3 -d "$DEVICE_ID"
+        run: |
+          source activate.sh
+          task-submit --device "$DEVICE_ID" --timeout 1800 --max-time 1800 \
+            --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/deepseek/v4/decode_attention_swa.py -p a2a3 -d \$TASK_DEVICE"
 
       - name: Run pypto-lib DeepSeek-V4 decode_attention_hca example
-        working-directory: ${{ github.workspace }}/pypto-lib
         env:
           PYTHONPATH: ${{ github.workspace }}/pypto-lib
-        run: python models/deepseek/v4/decode_attention_hca.py -p a2a3 -d "$DEVICE_ID"
+        run: |
+          source activate.sh
+          task-submit --device "$DEVICE_ID" --timeout 1800 --max-time 1800 \
+            --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/deepseek/v4/decode_attention_hca.py -p a2a3 -d \$TASK_DEVICE"
 
       - name: Run pypto-lib DeepSeek-V4 prefill_attention_csa example
-        working-directory: ${{ github.workspace }}/pypto-lib
         env:
           PYTHONPATH: ${{ github.workspace }}/pypto-lib
-        run: python models/deepseek/v4/prefill_attention_csa.py -p a2a3 -d "$DEVICE_ID"
+        run: |
+          source activate.sh
+          task-submit --device "$DEVICE_ID" --timeout 1800 --max-time 1800 \
+            --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/deepseek/v4/prefill_attention_csa.py -p a2a3 -d \$TASK_DEVICE"
 
       - name: Run pypto-lib DeepSeek-V4 prefill_attention_hca example
-        working-directory: ${{ github.workspace }}/pypto-lib
         env:
           PYTHONPATH: ${{ github.workspace }}/pypto-lib
-        run: python models/deepseek/v4/prefill_attention_hca.py -p a2a3 -d "$DEVICE_ID"
+        run: |
+          source activate.sh
+          task-submit --device "$DEVICE_ID" --timeout 1800 --max-time 1800 \
+            --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/deepseek/v4/prefill_attention_hca.py -p a2a3 -d \$TASK_DEVICE"
 
       - name: Run pypto-lib DeepSeek-V4 prefill_attention_swa example
-        working-directory: ${{ github.workspace }}/pypto-lib
         env:
           PYTHONPATH: ${{ github.workspace }}/pypto-lib
-        run: python models/deepseek/v4/prefill_attention_swa.py -p a2a3 -d "$DEVICE_ID"
+        run: |
+          source activate.sh
+          task-submit --device "$DEVICE_ID" --timeout 1800 --max-time 1800 \
+            --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/deepseek/v4/prefill_attention_swa.py -p a2a3 -d \$TASK_DEVICE"
+
+      - name: Kill orphaned task-submit tasks
+        # If this job is cancelled (e.g. cancel-in-progress on a new push) or
+        # killed mid-flight, the task-submit tasks it submitted keep running
+        # server-side — they are detached (reattachable via `task-submit --wait`).
+        # --max-time bounds them, but until then they hold a card shared with the
+        # other repos/jobs on this host. Kill THIS job's own tasks explicitly.
+        # always() runs even on cancellation; we match by this job's checkout dir
+        # ($GITHUB_WORKSPACE/lib-checkout, sourced in every --run above) so two
+        # jobs sharing a workspace root on one host never kill each other's tasks.
+        if: always()
+        run: |
+          echo "cleaning up task-submit tasks for $GITHUB_WORKSPACE/lib-checkout"
+          task-submit --list 2>/dev/null \
+            | grep -F "$GITHUB_WORKSPACE/lib-checkout" \
+            | grep -oE 'task_[0-9_]+' \
+            | sort -u \
+            | while read -r tid; do
+                echo "  killing $tid"
+                task-submit --kill "$tid" || true
+              done || true
 
   system-tests-a5sim:
     needs: toolchain
