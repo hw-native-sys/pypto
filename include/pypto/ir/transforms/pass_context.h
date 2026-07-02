@@ -233,6 +233,19 @@ class DiagnosticInstrument : public PassInstrument {
  *       result = some_pass(program)  # instruments fire automatically
  * @endcode
  */
+/**
+ * @brief Selects who plans on-chip buffer memory.
+ *
+ * PyPTO runs its own allocator (AllocateMemoryAddr) and bakes physical
+ * addresses into `pto.alloc_tile addr = ...`; PtoAS skips the pypto
+ * allocation passes (MemoryReuse + AllocateMemoryAddr), emits no addresses,
+ * and lets the ptoas PlanMemory pass allocate at `--pto-level=level2`.
+ */
+enum class MemoryPlanner {
+  PyPTO,  ///< PyPTO allocates addresses (ptoas --pto-level=level3)
+  PtoAS,  ///< ptoas PlanMemory allocates (ptoas --pto-level=level2)
+};
+
 class PassContext {
  public:
   /**
@@ -246,11 +259,15 @@ class PassContext {
    *        DiagnosticCheck enum (default: UnusedControlFlowResult).
    *        Performance hints are on by default; disable individual hints by
    *        adding their DiagnosticCheck values here.
+   * @param memory_planner Who plans on-chip buffer memory (default: PyPTO).
+   *        PtoAS makes the pipeline skip the pypto allocation passes so the
+   *        ptoas PlanMemory pass owns allocation instead.
    */
   explicit PassContext(std::vector<PassInstrumentPtr> instruments,
                        VerificationLevel verification_level = VerificationLevel::Basic,
                        DiagnosticPhase diagnostic_phase = DiagnosticPhase::PrePipeline,
-                       DiagnosticCheckSet disabled_diagnostics = {DiagnosticCheck::UnusedControlFlowResult});
+                       DiagnosticCheckSet disabled_diagnostics = {DiagnosticCheck::UnusedControlFlowResult},
+                       MemoryPlanner memory_planner = MemoryPlanner::PyPTO);
 
   /**
    * @brief Push this context onto the thread-local stack
@@ -304,6 +321,11 @@ class PassContext {
   [[nodiscard]] const std::vector<PassInstrumentPtr>& GetInstruments() const;
 
   /**
+   * @brief Get the memory planner selection for this context
+   */
+  [[nodiscard]] MemoryPlanner GetMemoryPlanner() const;
+
+  /**
    * @brief Get the currently active context (top of thread-local stack)
    * @return Pointer to current context, or nullptr if none
    */
@@ -327,6 +349,7 @@ class PassContext {
   VerificationLevel verification_level_;
   DiagnosticPhase diagnostic_phase_;
   DiagnosticCheckSet disabled_diagnostics_;
+  MemoryPlanner memory_planner_;
   PassContext* previous_;
 
   static thread_local PassContext* current_;

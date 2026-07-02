@@ -93,9 +93,13 @@ class PTOCodegen : public CodegenBase {
    * @brief Generate PTO-ISA MLIR format code from IR Program
    *
    * @param program Input PyPTO IR Program
+   * @param emit_tile_addr When true (default), emit the physical `addr` operand
+   *        on `pto.alloc_tile` from the MemRef byte offset (ptoas
+   *        --pto-level=level3). When false, omit `addr` so the ptoas PlanMemory
+   *        pass allocates instead (--pto-level=level2).
    * @return MLIR code as string
    */
-  std::string Generate(const ir::ProgramPtr& program);
+  std::string Generate(const ir::ProgramPtr& program, bool emit_tile_addr = true);
 
   // CodegenBase interface (unified API for operator codegen callbacks)
   [[nodiscard]] std::string GetCurrentResultTarget() const override;
@@ -811,6 +815,10 @@ class PTOCodegen : public CodegenBase {
   std::set<DataType, DtypeCodeLess> remote_offset_dtypes_;
 
   const backend::Backend* backend_;  ///< Backend instance for querying op info
+
+  /// When false, `pto.alloc_tile` omits the physical `addr` operand so the
+  /// ptoas PlanMemory pass owns allocation (--pto-level=level2). Set by Generate.
+  bool emit_tile_addr_ = true;
 
   /// Emit an arith binary op, return SSA result name
   std::string EmitArithBinaryOp(const std::string& mlir_op, const std::string& lhs, const std::string& rhs,
