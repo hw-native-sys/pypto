@@ -72,14 +72,28 @@ def test_preprocess_matches_pto_backend() -> None:
 
 def test_base_ptoas_flags_subset_of_backend_flags() -> None:
     """The rebuild path uses base flags only (no backend-handler extras).
-    Each base flag must still appear in ``_get_ptoas_flags``'s source so the
-    rebuilt cpp is assembled with the same baseline as a fresh compile.
-    Source-level check avoids needing a configured backend in this test.
+
+    Both ``pto_rebuild._ptoas_flags`` and ``pto_backend._get_ptoas_flags`` pick
+    the ``--pto-level`` from the memory planner (rebuild infers it from the
+    ``.pto`` content; a fresh compile from ``memory_planner``), so the drift
+    guard checks that every distinct token the rebuild path can emit — across
+    both a level3 (``addr =`` present) and level2 (absent) ``.pto`` — still
+    appears in ``_get_ptoas_flags``'s source. Source-level check avoids needing
+    a configured backend in this test.
     """
     src = inspect.getsource(pto_backend._get_ptoas_flags)
-    missing = [f for f in pto_rebuild._ptoas_flags() if repr(f) not in src and f not in src]
+    # Union of tokens the rebuild path emits for both level3 and level2 inputs.
+    rebuild_flags = {
+        tok
+        for content in ("qk = pto.alloc_tile addr = %c0 : ...", "qk = pto.alloc_tile : ...")
+        for flag in pto_rebuild._ptoas_flags(content)
+        for tok in flag.replace("--pto-level=", "").split()
+    }
+    missing = [
+        tok for tok in rebuild_flags if repr(tok) not in src and tok not in src
+    ]
     assert not missing, (
-        f"pto_rebuild base flags {missing!r} no longer found in pto_backend._get_ptoas_flags source."
+        f"pto_rebuild base flag tokens {missing!r} no longer found in pto_backend._get_ptoas_flags source."
     )
 
 

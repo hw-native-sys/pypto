@@ -303,14 +303,18 @@ std::string DiagnosticInstrument::GetName() const { return "DiagnosticInstrument
 // PassContext
 
 PassContext::PassContext(std::vector<PassInstrumentPtr> instruments, VerificationLevel verification_level,
-                         DiagnosticPhase diagnostic_phase, DiagnosticCheckSet disabled_diagnostics)
+                         DiagnosticPhase diagnostic_phase, DiagnosticCheckSet disabled_diagnostics,
+                         MemoryPlanner memory_planner)
     : instruments_(std::move(instruments)),
       verification_level_(verification_level),
       diagnostic_phase_(diagnostic_phase),
       disabled_diagnostics_(disabled_diagnostics),
+      memory_planner_(memory_planner),
       previous_(nullptr) {}
 
 VerificationLevel PassContext::GetVerificationLevel() const { return verification_level_; }
+
+MemoryPlanner PassContext::GetMemoryPlanner() const { return memory_planner_; }
 
 DiagnosticPhase PassContext::GetDiagnosticPhase() const { return diagnostic_phase_; }
 

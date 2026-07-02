@@ -274,6 +274,25 @@ print(pto_code)
 - `addr` 属性来自 `MemRef.addr_`，输出为 `arith.constant ... : i64`
 - 共享同一 MemRef 的变量共享相同的 `addr` SSA 值
 
+#### 由谁规划内存：`compile(memory_planner=...)`
+
+物理 `addr` 由谁分配，通过 `memory_planner` 选项选择
+（`ir.compile(..., memory_planner=passes.MemoryPlanner.PYPTO | PTOAS)`，默认
+`PYPTO`）。它同时作用于 pass 流水线（经 `PassContext`）与 codegen：
+
+| 模式 | 流水线 | `pto.alloc_tile` | ptoas |
+| ---- | ------ | ---------------- | ----- |
+| `PYPTO`（默认） | 运行 `MemoryReuse` + `AllocateMemoryAddr` | 发射 `addr = <const>`（来自 `MemRef.byte_offset_`） | `--pto-level=level3`（信任已烘焙地址） |
+| `PTOAS` | **跳过** `MemoryReuse` + `AllocateMemoryAddr` | 省略 `addr`（`PTOCodegen.generate(emit_tile_addr=False)`） | `--pto-level=level2`（ptoas `PlanMemory` 分配） |
+
+两种模式都运行 `InitMemRef` —— 它创建 ptoas `PlanMemory` 据以规划的 MemRef /
+alloc 操作。`PTOAS` 模式下 codegen 省略 `addr`，因为 ptoas `level2` 拒绝任何
+`addr` 操作数；缓冲区别名结构通过共享的 alloc SSA 身份保留（而非地址）。
+
+> **注意：** `PTOAS` 模式同时跳过了 `MemoryReuse` / `AllocateMemoryAddr` 通常完成的
+> Ascend910B `load + tpop_from_aic` 原地写冒险合法化与 reserve-buffer 基址解析，
+> 这些交由 ptoas 处理。`compile()` 会输出告警 —— 相关 kernel 请上机验证。
+
 ### 加载操作转换
 
 **PyPTO IR**:

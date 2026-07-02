@@ -1335,7 +1335,7 @@ class TestGenerateKernelWrapper:
 
         monkeypatch.setattr(
             "pypto.backend.pto_backend._compile_pto_module",
-            lambda _pto_code, _module_name, _output_dir: SAMPLE_PTOAS_OUTPUT,
+            lambda _pto_code, _module_name, _output_dir, _memory_planner=None: SAMPLE_PTOAS_OUTPUT,
         )
 
         result_files = {}

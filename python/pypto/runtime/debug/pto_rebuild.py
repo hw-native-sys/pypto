@@ -69,20 +69,28 @@ def _disabled_via_env() -> bool:
     )
 
 
-def _ptoas_flags() -> list[str]:
+def _ptoas_flags(pto_content: str) -> list[str]:
     """Base ptoas flags shared with ``pto_backend._get_ptoas_flags``.
+
+    The ``--pto-level`` is inferred from the ``.pto`` itself: if any
+    ``pto.alloc_tile`` carries a physical ``addr`` operand, PyPTO owned
+    allocation (level3); otherwise the ptoas PlanMemory pass must own it
+    (level2). This keeps the rebuild path in sync with whichever
+    ``memory_planner`` produced the ``.pto``.
 
     Backend-specific extras (from ``get_handler().get_extra_ptoas_flags()``)
     are intentionally omitted — the rebuild path has no backend handler in
     scope. Edits that rely on backend-specific flags require a fresh
     ``ir.compile()`` instead of a ``.pto`` splice.
     """
-    return ["--enable-insert-sync", "--pto-level=level3"]
+    level = "level3" if "addr =" in pto_content else "level2"
+    return ["--enable-insert-sync", f"--pto-level={level}"]
 
 
 def _run_ptoas(ptoas_bin: str, pto_path: Path, out_cpp: Path) -> None:
     """Invoke the ``ptoas`` binary on *pto_path*, writing to *out_cpp*."""
-    cmd = [ptoas_bin, str(pto_path), "-o", str(out_cpp), *_ptoas_flags()]
+    pto_content = pto_path.read_text(encoding="utf-8")
+    cmd = [ptoas_bin, str(pto_path), "-o", str(out_cpp), *_ptoas_flags(pto_content)]
     result = subprocess.run(  # noqa: S603 — args are constructed locally, no shell
         cmd,
         capture_output=True,

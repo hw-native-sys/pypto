@@ -282,6 +282,27 @@ Based on TileType variables collected from the function body. Each tile variable
 - `addr` attribute from `MemRef.addr_`, emitted as `arith.constant ... : i64`
 - Variables sharing the same MemRef produce the same `addr` SSA value
 
+#### Who plans memory: `compile(memory_planner=...)`
+
+Who assigns the physical `addr` is selected by the `memory_planner` option
+(`ir.compile(..., memory_planner=passes.MemoryPlanner.PYPTO | PTOAS)`, default
+`PYPTO`). It threads to both the pass pipeline (via `PassContext`) and codegen:
+
+| Mode | Pipeline | `pto.alloc_tile` | ptoas |
+| ---- | -------- | ---------------- | ----- |
+| `PYPTO` (default) | runs `MemoryReuse` + `AllocateMemoryAddr` | emits `addr = <const>` (from `MemRef.byte_offset_`) | `--pto-level=level3` (trusts baked addresses) |
+| `PTOAS` | **skips** `MemoryReuse` + `AllocateMemoryAddr` | omits `addr` (`PTOCodegen.generate(emit_tile_addr=False)`) | `--pto-level=level2` (ptoas `PlanMemory` allocates) |
+
+`InitMemRef` runs in both modes — it creates the MemRefs / alloc ops that ptoas
+`PlanMemory` plans over. In `PTOAS` mode codegen omits `addr` because ptoas
+`level2` rejects any `addr` operand, and the buffer-aliasing structure is
+preserved through shared alloc SSA identity (not through addresses).
+
+> **Caveat:** `PTOAS` mode also skips the Ascend910B `load + tpop_from_aic`
+> in-place hazard legalisation and reserve-buffer base resolution normally done
+> by `MemoryReuse` / `AllocateMemoryAddr`; those are deferred to ptoas. `compile()`
+> emits a warning — verify affected kernels on-device.
+
 ### Load Operation Transformation
 
 **PyPTO IR**:
