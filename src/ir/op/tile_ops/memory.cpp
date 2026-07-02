@@ -237,10 +237,15 @@ TypePtr DeduceTileStoreType(const std::vector<ExprPtr>& args,
       << " atomic kwarg must be AtomicType.None_ or AtomicType.Add, but got int " << atomic;
   if (atomic == static_cast<int>(AtomicType::kAdd)) {
     const DataType& dt = tile_type->dtype_;
-    CHECK(dt == DataType::FP32 || dt == DataType::FP16 || dt == DataType::INT32 || dt == DataType::INT16 ||
-          dt == DataType::INT8)
+    // Hardware atomic-add dtypes. bf16 is honoured on the A2/A3 (Ascend910B) and
+    // kirinX90 profiles (pto-isa SetAtomicAdd<bfloat16_t> -> set_atomic_bf16);
+    // it is NOT supported on the A5/kirin9030 store path, where a bf16 atomic
+    // store is rejected downstream by the pto-isa static_assert.
+    CHECK(dt == DataType::FP32 || dt == DataType::BF16 || dt == DataType::FP16 || dt == DataType::INT32 ||
+          dt == DataType::INT16 || dt == DataType::INT8)
         << "The operator " << op_name
-        << " with atomic=AtomicType.Add requires an fp32/fp16/int32/int16/int8 tile (hardware atomic-add "
+        << " with atomic=AtomicType.Add requires an fp32/bf16/fp16/int32/int16/int8 tile (hardware "
+           "atomic-add "
            "dtypes), but got "
         << dt.ToString();
   }

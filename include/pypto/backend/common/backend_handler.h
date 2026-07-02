@@ -146,6 +146,21 @@ class BackendHandler {
   [[nodiscard]] virtual bool RequiresLowPrecisionMatScratch() const = 0;
 
   /**
+   * @brief Whether this backend's store pipe honours a bf16 atomic-add into GM.
+   *
+   * The pto-isa `SetAtomicAdd<T>` dispatch accepts `__gm__ bfloat16_t`
+   * (`set_atomic_bf16`) on the A2/A3 store path (Ascend910B) but NOT on the A5
+   * path (Ascend950), where a bf16 atomic-add store fails a pto-isa
+   * `static_assert`. PTOCodegen gates a bf16 atomic-add `pto.tstore` on this so
+   * A5 users get a clean PyPTO error instead of a downstream C++ compile
+   * failure. The atomic dispatch keys on the GM *destination* dtype, so this
+   * also covers the cube path (fp32 Acc -> bf16 GM via fix-pipe).
+   *
+   * Ascend910B: true. Ascend950: false.
+   */
+  [[nodiscard]] virtual bool SupportsBf16AtomicAdd() const = 0;
+
+  /**
    * @brief Compute the destination tile view for a cross-core transfer.
    *
    * Encapsulates the per-backend rule for how to lay out the bridge tile

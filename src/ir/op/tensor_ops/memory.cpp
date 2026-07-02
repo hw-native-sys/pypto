@@ -405,9 +405,12 @@ TypePtr DeduceTensorAssembleType(const std::vector<ExprPtr>& args,
       << "tensor.assemble atomic kwarg must be AtomicType.None_ or AtomicType.Add, but got int " << atomic;
   if (atomic == static_cast<int>(AtomicType::kAdd)) {
     const DataType& dt = target_type->dtype_;
-    CHECK(dt == DataType::FP32 || dt == DataType::FP16 || dt == DataType::INT32 || dt == DataType::INT16 ||
-          dt == DataType::INT8)
-        << "tensor.assemble with atomic=AtomicType.Add requires an fp32/fp16/int32/int16/int8 target "
+    // Hardware atomic-add dtypes. bf16 is honoured on the A2/A3 (Ascend910B) and
+    // kirinX90 profiles (pto-isa SetAtomicAdd<bfloat16_t> -> set_atomic_bf16);
+    // it is NOT supported on the A5/kirin9030 store path.
+    CHECK(dt == DataType::FP32 || dt == DataType::BF16 || dt == DataType::FP16 || dt == DataType::INT32 ||
+          dt == DataType::INT16 || dt == DataType::INT8)
+        << "tensor.assemble with atomic=AtomicType.Add requires an fp32/bf16/fp16/int32/int16/int8 target "
            "(hardware atomic-add dtypes), but got "
         << dt.ToString();
   }

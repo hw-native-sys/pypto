@@ -48,6 +48,10 @@ class Ascend950Handler : public BackendHandler {
   // A5 acc->mat tinsert accepts dst=f32, so the Mat scratch may stay f32.
   [[nodiscard]] bool RequiresLowPrecisionMatScratch() const override { return false; }
 
+  // A5 store pipe does NOT support bf16 atomic-add (pto-isa SetAtomicAdd<T>
+  // rejects bfloat16_t on the a5 path); require an fp32 accumulator + cast.
+  [[nodiscard]] bool SupportsBf16AtomicAdd() const override { return false; }
+
   [[nodiscard]] ir::TileView BuildCrossCoreTransferView(ir::MemorySpace dest_ms,
                                                         const ir::TileView& original_view) const override;
 

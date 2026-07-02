@@ -1552,7 +1552,9 @@ def assemble(
             NOTE: atomic-add accumulation order across cores is not fixed, so
             floating-point results are non-deterministic. The target must be
             zero-initialised before the kernel runs. Supported dtypes:
-            fp32 / fp16 / int32 / int16 / int8 (not bf16).
+            fp32 / bf16 / fp16 / int32 / int16 / int8. bf16 atomic-add is
+            available on the Ascend910B (A2/A3) profile; it is not supported on
+            A5, where an fp32 accumulator + cast is required instead.
 
     Returns:
         Tensor wrapping the assemble operation
