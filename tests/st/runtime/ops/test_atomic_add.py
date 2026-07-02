@@ -87,9 +87,13 @@ def atomic_add_store_int16(x: pl.Tensor, out: pl.Out[pl.Tensor]):
 
 @pl.jit
 def atomic_add_store_int8(x: pl.Tensor, out: pl.Out[pl.Tensor]):
-    """INT8 VECTOR-unit UB->GM atomic-add (set_atomic_s8)."""
+    """INT8 VECTOR-unit UB->GM atomic-add (set_atomic_s8).
+
+    Uses a 32-col tile: for int8 the tile row byte size (cols * 1) must be
+    32-byte aligned, so 16 cols (16 bytes) is rejected by ptoas.
+    """
     with pl.at(level=pl.Level.CORE_GROUP):
-        x_tile = pl.load(x, [0, 0], [16, 16])
+        x_tile = pl.load(x, [0, 0], [16, 32])
         pl.store(x_tile, [0, 0], out, atomic=pl.AtomicType.Add)
     return out
 
@@ -276,9 +280,9 @@ class TestAtomicAddStore:
         """
         atomic_add_store_int8._cache.clear()
         torch.manual_seed(0)
-        x = torch.randint(-20, 20, (16, 16), dtype=torch.int8)
+        x = torch.randint(-20, 20, (16, 32), dtype=torch.int8)
         baseline = 1
-        out = torch.full((16, 16), baseline, dtype=torch.int8)
+        out = torch.full((16, 32), baseline, dtype=torch.int8)
         atomic_add_store_int8(x, out, config=test_config)
         expected = baseline + x
         assert torch.equal(out, expected), (

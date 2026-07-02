@@ -2284,12 +2284,14 @@ class TestTileStoreAtomicCodegen:
     # plain loaded Vec tile stored to a GM tensor of the same dtype -> a `loc=vec`
     # atomic store on the AIV UB->GM (MTE3) pipe. These vector-path dtypes are not
     # constrained by the Acc->GM whitelist (that only bounds the cube path).
-    def _assert_vec_atomic_store(self, dtype, mlir_dt):
+    def _assert_vec_atomic_store(self, dtype, mlir_dt, cols=16):
+        # `cols` widens the tile so the row byte size (cols * sizeof(dtype)) meets
+        # ptoas' 32-byte row alignment — int8 needs 32 cols (16 would be 16 bytes).
         @pl.program
         class Prog:
             @pl.function(type=pl.FunctionType.InCore)
-            def kernel(self, x: pl.Tensor[[16, 16], dtype], out: pl.Tensor[[16, 16], dtype]):
-                t = pl.load(x, [0, 0], [16, 16])
+            def kernel(self, x: pl.Tensor[[16, cols], dtype], out: pl.Tensor[[16, cols], dtype]):
+                t = pl.load(x, [0, 0], [16, cols])
                 pl.store(t, [0, 0], out, atomic=pl.AtomicType.Add)
 
         mlir = self._generate_mlir(Prog)
@@ -2323,8 +2325,8 @@ class TestTileStoreAtomicCodegen:
         self._assert_vec_atomic_store(pl.INT16, "i16")
 
     def test_atomic_add_store_int8_emits_atomic_type(self):
-        """int8 vector (AIV) atomic-add store (set_atomic_s8)."""
-        self._assert_vec_atomic_store(pl.INT8, "i8")
+        """int8 vector (AIV) atomic-add store (set_atomic_s8); 32 cols for row alignment."""
+        self._assert_vec_atomic_store(pl.INT8, "i8", cols=32)
 
     def test_plain_store_omits_atomic_type(self):
         """A plain pl.store emits no atomicType attribute (byte-identical codegen)."""
