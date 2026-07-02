@@ -66,7 +66,7 @@ def _available_cpus() -> int:
     """Best-effort count of CPUs usable by this process."""
     try:
         return len(os.sched_getaffinity(0))
-    except AttributeError:  # pragma: no cover - non-Linux fallback
+    except (AttributeError, OSError):  # pragma: no cover - non-Linux/restricted fallback
         return os.cpu_count() or 1
 
 
