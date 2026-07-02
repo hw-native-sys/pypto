@@ -75,9 +75,12 @@ def ddr_full_k(a: pl.Tensor, b: pl.Tensor, out: pl.Out[pl.Tensor]):
 
 @pl.jit
 def mat_split_k(a: pl.Tensor, b: pl.Tensor, e: pl.Tensor, out: pl.Out[pl.Tensor]):
-    """``(a @ b) @ e`` -> **Mat/L1 scratch**, **split-K**. The ``[256,256]`` intermediate
-    (> L0c) is consumed on-chip by the second matmul, so it is M/N-tiled into an L1/Mat
-    scratch instead of spilling to DDR; ``K=128`` splits.
+    """``(a @ b) @ e`` -> **Mat/L1 scratch**. The ``[256,256]`` intermediate (> L0c) is
+    consumed on-chip by the second matmul, so it is M/N-tiled into an L1/Mat scratch
+    instead of spilling to DDR. The test drives this with a K where the roofline chooser
+    keeps both chained matmuls **output-stationary** so their L0 buffers pack (a K that
+    makes the producer A/B-stationary hits the #1908 offset-packing gap: ``Left buffer
+    usage exceeds``).
 
     The intermediate is **bf16** — the cube accumulates in f32 (L0C) and the FIXPIPE
     writeback to L1 downcasts to bf16/f16 (the only offset Acc->Mat path on A2/A3), which

@@ -57,10 +57,18 @@ class TestAutoTileMatmulL0:
             f"{kernel.__name__} (DDR direct-store) max abs diff = {(out - expected).abs().max().item():.3e}"
         )
 
-    @pytest.mark.parametrize("kernel, K", [(mat_split_k, 128), (mat_full_k, 32)])
+    @pytest.mark.parametrize("kernel, K", [(mat_split_k, 64), (mat_full_k, 32)])
     def test_mat_scratch(self, test_config, kernel, K):
         """``(a @ b) @ e`` with a bf16 ``[256, 256]`` intermediate kept on-chip in an
-        L1/Mat scratch (Acc->Mat ``pto.tinsert``); split-K (K=128) and full-K (K=32).
+        L1/Mat scratch (Acc->Mat ``pto.tinsert``); K=64 and K=32.
+
+        K is chosen so the chained producer and consumer pick the **same
+        (output-stationary) algorithm**, so their L0 buffers have matching shapes and
+        pack under `AllocateMemoryAddr`. A K where the roofline chooser makes the
+        producer A/B-stationary (e.g. K=128 -> ``(256,128,128)A``) pins a monolithic
+        full-L0A buffer the consumer's double-buffers cannot pack against -> `Left
+        buffer usage exceeds` — the offset-packing gap tracked in #1908. Both matmuls
+        here are also full-K (no K-loop peel), so this does not depend on #1924.
 
         Operands are bf16 and the on-chip intermediate is bf16 — the cube's FIXPIPE
         writeback to L1 downcasts the f32 accumulator, which is also the cube's native

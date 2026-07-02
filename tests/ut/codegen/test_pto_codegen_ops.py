@@ -1633,7 +1633,7 @@ class TestTileAssembleCodegen:
 
         mlir = self._generate_mlir_all_incore(Prog)
         tinserts = [line for line in mlir.splitlines() if "pto.tinsert" in line]
-        assert len(tinserts) == 2, f"1x2 grid (m=256, n=128) -> 2 Acc->Mat tinserts, got {len(tinserts)}:\n{mlir}"
+        assert len(tinserts) == 2, f"1x2 grid -> 2 Acc->Mat tinserts, got {len(tinserts)}:\n{mlir}"
         assert "loc=mat, dtype=bf16" in mlir, (
             f"the chained-matmul intermediate must be a bf16 Mat scratch:\n{mlir}"
         )
