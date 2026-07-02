@@ -166,32 +166,40 @@ int64_t MadCycles(int m, int n, int k, const L0TileConfig& cfg) {
 
 // L1->L0 load cost (cycles). The MTE1 pipe is shared, so A and B loads serialize;
 // each is weighted by its port bandwidth (the 2:1 L0A/L0B asymmetry). The reload
-// counts depend on the stationarity / reuse route (DESIGN_SPACE.md):
-//   OS     : A re-streamed once per n-block (ceil(N/n)); B once per m-block
-//            (ceil(M/m)).
-//   A-stat : A held -> loaded once (k == K); B once per m-block.
-//   B-stat : B held -> loaded once (k == K); A once per n-block.
-double LoadCycles(int m, int n, const L0TileConfig& cfg, const Regime& r) {
+// counts depend on the stationarity / reuse route. The full-K emitter
+// (BuildFullKPipelined) ALWAYS hoists one operand to the outer loop -- it is
+// loaded once per outer step and reused across the inner sweep, the other
+// streamed -- so "output-stationary" at k == K is NOT "both re-streamed"; it
+// picks the cheaper hoist. Only the split-K emitter (BuildSplitKGrid, k < K)
+// genuinely re-streams both, because partial sums pin the L0C accumulator and no
+// operand panel stays resident across the K blocks.  (op-sim work-calibrated:
+// the old OS "M*K*ceil_n" charged the hoisted operand as re-extracted per inner
+// tile -- a phantom saving that made A/B-stationary look cheaper than OS.)
+//   held A (k==K) : A once (M*K)      ; B streamed (K*N*ceil_m)
+//   held B (k==K) : A streamed (M*K*ceil_n) ; B once (K*N)
+//   OS, k==K      : min(held-A, held-B) route (the emit hoists the cheaper)
+//   OS, k<K       : both re-streamed (A M*K*ceil_n, B K*N*ceil_m)
+double LoadCycles(int m, int n, int k, const L0TileConfig& cfg, const Regime& r) {
   const double M = cfg.M, N = cfg.N, K = cfg.K;
   const double ceil_n = static_cast<double>(CeilDiv(cfg.N, n));
   const double ceil_m = static_cast<double>(CeilDiv(cfg.M, m));
-  double a_bytes = 0.0;
-  double b_bytes = 0.0;
+  const double ba = static_cast<double>(cfg.bytes_a);
+  const double bb = static_cast<double>(cfg.bytes_b);
+  const double held_a = (ba * M * K) / cfg.bw_a + (bb * K * N * ceil_m) / cfg.bw_b;  // hold A, stream B
+  const double held_b = (ba * M * K * ceil_n) / cfg.bw_a + (bb * K * N) / cfg.bw_b;  // hold B, stream A
   switch (r.stat) {
     case Stationarity::kAStationary:
-      a_bytes = static_cast<double>(cfg.bytes_a) * M * K;  // A loaded once (k == K)
-      b_bytes = static_cast<double>(cfg.bytes_b) * K * N * ceil_m;
-      break;
+      return held_a;  // A held (requires k == K)
     case Stationarity::kBStationary:
-      a_bytes = static_cast<double>(cfg.bytes_a) * M * K * ceil_n;
-      b_bytes = static_cast<double>(cfg.bytes_b) * K * N;  // B loaded once (k == K)
-      break;
+      return held_b;  // B held (requires k == K)
     case Stationarity::kOutputStationary:
-      a_bytes = static_cast<double>(cfg.bytes_a) * M * K * ceil_n;
-      b_bytes = static_cast<double>(cfg.bytes_b) * K * N * ceil_m;
-      break;
+      if (k >= static_cast<int>(K)) {
+        return std::min(held_a, held_b);  // full-K: the emit hoists the cheaper operand
+      }
+      // split-K: BuildSplitKGrid re-streams both operands across the K blocks.
+      return (ba * M * K * ceil_n) / cfg.bw_a + (bb * K * N * ceil_m) / cfg.bw_b;
   }
-  return a_bytes / cfg.bw_a + b_bytes / cfg.bw_b;
+  return std::min(held_a, held_b);
 }
 
 // L0C drain cost. Shape-invariant (every output element drains once; gamma_c=2
@@ -207,7 +215,7 @@ double DrainCycles(const L0TileConfig& cfg) {
 // pipe maximum. With L0C double-buffered (drain_hidden=true) the drain overlaps
 // the next tile's compute, so it JOINS the maximum instead of adding.
 int64_t WallCycles(int m, int n, int k, const L0TileConfig& cfg, const Regime& r) {
-  const double compute = std::max(LoadCycles(m, n, cfg, r), static_cast<double>(MadCycles(m, n, k, cfg)));
+  const double compute = std::max(LoadCycles(m, n, k, cfg, r), static_cast<double>(MadCycles(m, n, k, cfg)));
   const double drain = DrainCycles(cfg);
   const double wall = r.dbc ? std::max(compute, drain) : compute + drain;
   // Guard the float->int cast: a non-finite or out-of-exact-range wall would be UB.
@@ -257,7 +265,7 @@ std::optional<Candidate> MakeCandidate(int m, int n, int k, const L0TileConfig& 
   c.traffic = EstimateTraffic(m, n, k, cfg, regime);
   c.cost_cycles = WallCycles(m, n, k, cfg, regime);
   c.padded_compute = PaddedComputeVolume(m, n, k, cfg);
-  c.load_cycles = LoadCycles(m, n, cfg, regime);
+  c.load_cycles = LoadCycles(m, n, k, cfg, regime);
   c.regime = regime;
   return c;
 }

@@ -76,10 +76,12 @@ class TestL0TilingDocExamples:
     """Pin the five examples in L0_TILING.md §12 (Examples 1-5)."""
 
     def test_example_1_skinny_gemm(self):
-        """M=16, N=256, K=512 → (16, 256, 64). Full C fits, K split by B0."""
+        """M=16, N=256, K=512 → (16, 32, 512) under the op-sim-calibrated load model
+        (full-K hoist of the [16, 512] A-panel; N split so B streams). Matches the
+        brute-force optimum. (Pre-calibration this was (16, 256, 64).)"""
         cfg = _default_config(M=16, N=256, K=512)
         result = passes.l0_tile_chooser.choose_l0_tile(cfg)
-        assert (result.m, result.n, result.k) == (16, 256, 64)
+        assert (result.m, result.n, result.k) == (16, 32, 512)
         assert _capacities_ok(result.m, result.n, result.k, cfg)
         assert result.perf_hint == ""
 
@@ -303,25 +305,28 @@ def _derive_db(stat: str) -> tuple[bool, bool]:
     return (True, True)
 
 
-def _load_cycles(m: int, n: int, cfg, stat: str) -> float:
+def _load_cycles(m: int, n: int, k: int, cfg, stat: str) -> float:
+    # The full-K emitter hoists one operand (loaded once, reused across the inner
+    # sweep); OS at k == K picks the cheaper hoist -- NOT "both re-streamed". Only
+    # split-K (k < K) re-streams both. Mirrors C++ LoadCycles.
     M, N, K = cfg.M, cfg.N, cfg.K
     cn, cm = _cdiv(N, n), _cdiv(M, m)
+    held_a = (cfg.bytes_a * M * K) / cfg.bw_a + (cfg.bytes_b * K * N * cm) / cfg.bw_b  # hold A
+    held_b = (cfg.bytes_a * M * K * cn) / cfg.bw_a + (cfg.bytes_b * K * N) / cfg.bw_b  # hold B
     if stat == _AS:
-        a = cfg.bytes_a * M * K  # A loaded once (k == K)
-        b = cfg.bytes_b * K * N * cm
-    elif stat == _BS:
-        a = cfg.bytes_a * M * K * cn
-        b = cfg.bytes_b * K * N  # B loaded once (k == K)
-    else:  # OS: A once per n-block, B once per m-block
-        a = cfg.bytes_a * M * K * cn
-        b = cfg.bytes_b * K * N * cm
-    return a / cfg.bw_a + b / cfg.bw_b
+        return held_a
+    if stat == _BS:
+        return held_b
+    if k >= K:  # OS, full-K: hoist the cheaper operand
+        return min(held_a, held_b)
+    # OS, split-K: both re-streamed
+    return (cfg.bytes_a * M * K * cn) / cfg.bw_a + (cfg.bytes_b * K * N * cm) / cfg.bw_b
 
 
 def _wall_key(m: int, n: int, k: int, cfg, stat: str, dbc: bool) -> tuple:
     """Re-implement the C++ wall objective + lex tie-breaks for one design point."""
     M, N, K = cfg.M, cfg.N, cfg.K
-    load = _load_cycles(m, n, cfg, stat)
+    load = _load_cycles(m, n, k, cfg, stat)
     kt = max(1, cfg.mad_k_fractal_bytes // cfg.bytes_a)
     cpr = max(1, cfg.bytes_a // 2)
     per = cfg.mad_head + cpr * _cdiv(m, cfg.align_m) * _cdiv(k, kt) * _cdiv(n, cfg.align_n)
@@ -522,21 +527,20 @@ class TestL0TilingRooflineOptimum:
         # A-stationary derives dbA=1 (A pinned, full L0A), dbB=2 (B streams).
         assert _capacities_ok(r.m, r.n, r.k, cfg, dba=False, dbb=True, dbc=r.double_buffer_c)
 
-    def test_load_tiebreak_prefers_low_load_aspect(self):
-        """MAD-bound square shape: the aspect-swapped tiles (m, n) and (n, m) tie on
-        wall (load is hidden under max(C_load, C_mad)), on padded-compute, and on
-        k-blocks. The C_load tie-break then picks the lower-hidden-load aspect —
-        m >= n, because L0B runs at half L0A's bandwidth, so fewer m-blocks (larger
-        m, fewer B re-streams) is the cheaper aspect. Without the tie-break the
-        ascending-m scan would emit the load-suboptimal m < n.
-
-        256x256x64: both (256, 128, 64) and (128, 256, 64) are wall-tied; the
-        chooser must return the m >= n aspect (256, 128, 64)."""
+    def test_aspect_swap_ties_under_min_hoist(self):
+        """MAD-bound square shape: the aspect-swapped tiles (m, n) and (n, m) are
+        FULLY wall-tied under the op-sim-calibrated min-hoist load model. OS loads
+        min(hold-A, hold-B), so (256,128) [holds A] and (128,256) [holds B] have the
+        identical load -> identical wall key. The load can no longer break the tie
+        (the old "prefer m >= n because L0B is half-bandwidth" was an artifact of the
+        both-re-streamed OS formula). We accept the tie: the chooser returns a
+        deterministic aspect by enumeration order (m <= n), matching the exhaustive
+        oracle. (Pre-calibration this picked the m >= n aspect (256,128,64).)"""
         cfg = _default_config(M=256, N=256, K=64)
+        # The two aspects genuinely tie on the full wall key -- nothing to break on:
+        assert _wall_key(256, 128, 64, cfg, _OS, False) == _wall_key(128, 256, 64, cfg, _OS, False)
         r = passes.l0_tile_chooser.choose_l0_tile(cfg)
-        assert r.m >= r.n, f"expected the low-load aspect m >= n; got ({r.m}, {r.n})"
-        assert (r.m, r.n, r.k) == (256, 128, 64)
-        # ... and it agrees with the exhaustive oracle (same C_load key).
+        assert (r.m, r.n, r.k) == (128, 256, 64)  # deterministic (enum order); a valid tied optimum
         btile, _, _, _ = _brute_optimum(cfg)
         assert (r.m, r.n, r.k) == btile
 
@@ -624,17 +628,19 @@ class TestL0TilingKExhaustive:
     largest-legal-k shortcut misses the global optimum."""
 
     def test_largest_k_is_not_always_optimal(self):
-        """Regression guard for the review counterexample. M=128, N=256, K=96 with
-        a 1-byte left operand (bytes_a=1, bytes_b=2): the wall-optimal tile is
-        (128, 256, 32) — NOT the largest-legal-k pick (which would land on
-        (128, 128, 96) / (128, 256, 48)). k=32 packs more N per block and hits a
-        cheaper ceil(k/32) MAD step than k=48/64. Pinned literally so a future
-        largest-k shortcut is caught even if the oracle drifts."""
-        cfg = _default_config(M=128, N=256, K=96)
-        cfg.bytes_a, cfg.bytes_b = 1, 2  # 1-byte left operand -> kt=32, align=16
+        """Regression guard for k-search exhaustiveness (P0), re-derived under the
+        op-sim-calibrated model. M=128, N=128, K=192 (BF16): the wall-optimal tile is
+        (128, 128, 96) — NOT the largest-legal k=128. k=128 fits L0 but leaves a
+        partial K-block (192 = 128 + 64), padding the compute to 2*128 = 256; k=96
+        divides K cleanly (2*96 = 192, no K-padding), winning the padded-compute
+        tie-break at equal wall/K-blocks. Matches the exhaustive oracle; pinned
+        literally so a future largest-k shortcut is caught even if the oracle drifts.
+        (The pre-calibration counterexample (128,256,96,bytes=1,2 -> (128,256,32))
+        no longer holds after the load recalibration; this is a fresh one.)"""
+        cfg = _default_config(M=128, N=128, K=192)
         result = passes.l0_tile_chooser.choose_l0_tile(cfg)
-        assert (result.m, result.n, result.k) == (128, 256, 32), (
-            f"expected the exhaustive-k optimum (128, 256, 32); got "
+        assert (result.m, result.n, result.k) == (128, 128, 96), (
+            f"expected the exhaustive-k optimum (128, 128, 96); got "
             f"({result.m}, {result.n}, {result.k}) — largest-legal-k shortcut?"
         )
         # ... and it agrees with the exhaustive (all-k) oracle.
@@ -653,7 +659,14 @@ class TestL0TilingRooflineMigration:
     @pytest.mark.parametrize(
         "M,N,K,bytes_ab,old_closed_form,new_roofline",
         [
-            (256, 256, 64, 2, (192, 160, 64), (256, 128, 64)),
+            (
+                256,
+                256,
+                64,
+                2,
+                (192, 160, 64),
+                (128, 256, 64),
+            ),  # min-hoist: aspect tie -> enum order picks m<n
             (272, 272, 64, 2, (192, 160, 64), (272, 96, 32)),
             (320, 320, 64, 2, (192, 160, 64), (160, 160, 64)),
             (256, 256, 256, 4, (192, 160, 32), (128, 128, 64)),

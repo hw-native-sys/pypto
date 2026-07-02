@@ -37,8 +37,9 @@ namespace backend {
  * 4-byte) is derived from the operand byte width in the chooser.
  */
 struct L0CostModel {
-  double bw_l0a = 238.38;        ///< L1->L0A bytes/cycle (a2a3: 441 GB/s / 1.85 GHz).
-  double bw_l0b = 119.19;        ///< L1->L0B bytes/cycle (a2a3: 220.5 GB/s — half of A).
+  double bw_l0a = 200.0;  ///< L1->L0A bytes/cycle (a2a3 op-sim work-fit; datasheet 441 GB/s/1.85 GHz = 238).
+  double bw_l0b =
+      132.0;  ///< L1->L0B bytes/cycle (a2a3 op-sim work-fit; ~1.5:1 vs L0A, not the datasheet 2:1).
   double bw_drain = 69.19;       ///< L0C->L1 drain bytes/cycle (a2a3: 128 GB/s / 1.85 GHz).
   int mad_head_cycles = 6;       ///< Fixed per-TMATMUL issue overhead.
   int mad_k_fractal_bytes = 32;  ///< Cube K-fractal width in bytes (kt = this / bytes_a).

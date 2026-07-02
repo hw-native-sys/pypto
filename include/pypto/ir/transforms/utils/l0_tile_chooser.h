@@ -98,8 +98,8 @@ struct L0TileConfig {
   // chooser scores wall-clock directly: wall ~= max(C_load, C_mad) + C_drain.
   // Defaults are Ascend a2a3 (910B) for the common BF16 x BF16 -> FP32 GEMM, so
   // standalone callers (tests) get a sane model without wiring a backend.
-  double bw_a = 238.38;          // L1->L0A bytes/cycle (441 GB/s @ 1.85 GHz).
-  double bw_b = 119.19;          // L1->L0B bytes/cycle (220.5 GB/s -- half of A).
+  double bw_a = 200.0;           // L1->L0A bytes/cycle (op-sim work-fit; datasheet 238).
+  double bw_b = 132.0;           // L1->L0B bytes/cycle (op-sim work-fit; ~1.5:1 vs L0A, not 2:1).
   double bw_drain = 69.19;       // L0C->L1 drain bytes/cycle (128 GB/s).
   int mad_head = 6;              // Fixed per-TMATMUL issue overhead.
   int mad_k_fractal_bytes = 32;  // Cube K-fractal width (kt = this / bytes_a).
