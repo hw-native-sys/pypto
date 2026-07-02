@@ -101,6 +101,22 @@ def execute_artifact_dir(
         Exception: Any device / validation error is propagated to the caller
             (``main`` turns it into ``PYPTO_EXEC_RESULT=FAIL`` + exit ``1``).
     """
+    chip_callable, runtime_name = _reconstruct_artifact(work_dir, platform, pto_isa_commit=pto_isa_commit)
+    _run_on_device(
+        work_dir, platform, device_id, chip_callable, runtime_name, dfx=dfx, validate=validate
+    )
+
+
+def _reconstruct_artifact(
+    work_dir: Path, platform: str, *, pto_isa_commit: str | None
+) -> tuple[Any, str]:
+    """Rebuild the cached artifact, reclassifying any failure as infra.
+
+    ``compile_and_assemble`` reuses the cached ``.o``/``.so`` next to each kernel
+    (a cache hit — no recompile, no card). A failure here is a reconstruction /
+    setup problem, so it is wrapped as :class:`ArtifactSetupError` (the CLI reports
+    ``PYPTO_EXEC_RESULT=INFRA``) rather than a device test failure.
+    """
     from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
 
     try:
@@ -109,6 +125,26 @@ def execute_artifact_dir(
         )
     except Exception as exc:  # noqa: BLE001 — reclassified as infra, re-raised below
         raise ArtifactSetupError(f"artifact reconstruction failed for {work_dir}: {exc}") from exc
+    return chip_callable, runtime_name
+
+
+def _run_on_device(
+    work_dir: Path,
+    platform: str,
+    device_id: int,
+    chip_callable: Any,
+    runtime_name: str,
+    *,
+    dfx: _DfxOpts,
+    validate: bool,
+) -> None:
+    """Device-run half shared by the single (:func:`execute_artifact_dir`) and
+    batch (:func:`execute_batch_manifest`) paths.
+
+    Always persists the actual device outputs under ``data/actual/`` (tolerance
+    independent) so a caller can validate them separately; runs the in-process
+    ``allclose`` only when *validate* is set.
+    """
     _execute_on_device(
         work_dir,
         work_dir / "golden.py",
@@ -155,7 +191,6 @@ def execute_batch_manifest(
     marker as a failure.)
     """
     from pypto.runtime import ChipWorker, RunConfig  # noqa: PLC0415
-    from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
 
     entries = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
     if not entries:
@@ -169,27 +204,15 @@ def execute_batch_manifest(
     live_callables: list[Any] = []
 
     def _rebind(work_dir: Path, platform: str) -> tuple[Any, str]:
-        chip_callable, runtime_name, _ = compile_and_assemble(
-            work_dir, platform, pto_isa_commit=pto_isa_commit
-        )
+        # _reconstruct_artifact already wraps a compile failure as ArtifactSetupError.
+        chip_callable, runtime_name = _reconstruct_artifact(work_dir, platform, pto_isa_commit=pto_isa_commit)
         live_callables.append(chip_callable)
         return chip_callable, runtime_name
 
     def _run_one(work_dir: Path, platform: str) -> None:
-        try:
-            chip_callable, runtime_name = _rebind(work_dir, platform)
-        except Exception as exc:
-            raise ArtifactSetupError(str(exc)) from exc
-        _execute_on_device(
-            work_dir,
-            work_dir / "golden.py",
-            chip_callable,
-            runtime_name,
-            platform,
-            device_id,
-            dfx=dfx,
-            validate=validate,
-            actual_out_dir=work_dir / "data" / "actual",
+        chip_callable, runtime_name = _rebind(work_dir, platform)
+        _run_on_device(
+            work_dir, platform, device_id, chip_callable, runtime_name, dfx=dfx, validate=validate
         )
 
     def _run_and_mark(entry: dict) -> None:

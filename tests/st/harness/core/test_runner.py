@@ -505,6 +505,81 @@ def _shell_quote_run(project_root: Path, inner: "list[str]") -> str:
     return f"cd {shlex.quote(str(project_root))} && {quoted}"
 
 
+def _build_execute_artifact_cmd(
+    mode_args: "list[str]", dfx: "_DfxOpts", pto_isa_commit: str | None
+) -> list[str]:
+    """Assemble the ``python -m pypto.runtime.execute_artifact`` child argv.
+
+    *mode_args* selects single (``--work-dir`` / ``--platform``) vs batch
+    (``--batch-manifest``); everything else — the interpreter, ``--device-id
+    $TASK_DEVICE``, ``--no-validate``, the DFX flags and the optional pto-isa pin —
+    is shared by both task-submit paths.
+
+    Uses the exact interpreter running the harness (the per-job venv python), not
+    bare ``"python"``: task-submit runs the child via ``runuser`` and bare
+    ``"python"`` would resolve off PATH to the conda base python, which need not
+    have pypto.
+    """
+    inner = [
+        sys.executable,
+        "-m",
+        "pypto.runtime.execute_artifact",
+        *mode_args,
+        "--device-id",
+        "$TASK_DEVICE",  # expanded by the shell task-submit runs the command in
+        # Device run only — persist actual outputs, no allclose. The harness
+        # validates with the per-test tolerance after this returns, so the run is
+        # tolerance-independent and can be submitted eagerly.
+        "--no-validate",
+        *_dfx_to_cli(dfx),
+    ]
+    if pto_isa_commit:
+        inner += ["--pto-isa-commit", pto_isa_commit]
+    return inner
+
+
+def _exec_task_submit(
+    inner: "list[str]", device: str, max_time: int, queue_timeout: int, log_path: Path
+) -> "tuple[subprocess.CompletedProcess | None, str | None]":
+    """Run one ``task-submit --run <inner>`` and persist the child output.
+
+    Returns ``(proc, None)`` on a successful exec, or ``(None, error)`` when
+    ``task-submit`` itself could not be launched (``OSError`` — missing binary /
+    not executable). Never raises. On success the full stdout+stderr is written to
+    *log_path* for post-mortem (a write failure is swallowed — best-effort only).
+
+    No ``--env`` / ``--ptoas`` flags are passed: ``task-submit`` runs the child
+    via ``runuser`` as the submitter and preserves the caller's exported
+    environment (PTO_ISA_ROOT / PTOAS_ROOT / PYTHONPATH / PTO2_RING_* all reach
+    the child), so the minimal CI ``task-submit`` (which lacks those options)
+    works — matching the existing ``daily_ci`` a5 job.
+    """
+    argv = [
+        "task-submit",
+        "--device",
+        device,
+        "--timeout",
+        str(queue_timeout),
+        "--max-time",
+        str(max_time),
+        "--run",
+        _shell_quote_run(_PROJECT_ROOT, inner),
+    ]
+    try:
+        proc = subprocess.run(argv, check=False, capture_output=True, text=True)  # noqa: S603
+    except OSError as exc:
+        return None, f"Failed to exec task-submit ({exc}) — do not pass --execute-via-task-submit here."
+    # Persist the full child output for post-mortem. Do NOT reprint it: the device
+    # chatter / markers would drown pytest's own per-test output. Failures surface
+    # their detail via the returned error instead.
+    combined = f"---- stdout ----\n{proc.stdout}\n---- stderr ----\n{proc.stderr}\n"
+    try:
+        log_path.write_text(combined, encoding="utf-8")
+    except OSError:
+        pass
+    return proc, None
+
+
 def _run_artifact_via_task_submit(
     work_dir: Path,
     platform: str,
@@ -523,61 +598,13 @@ def _run_artifact_via_task_submit(
     *device* is the ``task-submit --device`` value: ``"auto"`` (borrow any free
     card) or a specific id / range (pin to it — used to validate the flow before
     trusting auto-allocation).
-
-    No ``--env`` / ``--ptoas`` flags are passed: ``task-submit`` runs the child
-    via ``runuser`` as the submitter and preserves the caller's exported
-    environment (PTO_ISA_ROOT / PTOAS_ROOT / PYTHONPATH / PTO2_RING_* all reach
-    the child), so the minimal CI ``task-submit`` (which lacks those options)
-    works — matching the existing ``daily_ci`` a5 job.
     """
-    # Use the exact interpreter running the harness (the per-job venv python),
-    # not bare "python": task-submit runs the child via runuser and bare "python"
-    # would resolve off PATH to the conda base python, which need not have pypto.
-    inner = [
-        sys.executable,
-        "-m",
-        "pypto.runtime.execute_artifact",
-        "--work-dir",
-        str(work_dir),
-        "--platform",
-        platform,
-        "--device-id",
-        "$TASK_DEVICE",  # expanded by the shell task-submit runs the command in
-        # Device run only — persist actual outputs, no allclose. The harness
-        # validates with the per-test tolerance after this returns, so the run
-        # is tolerance-independent and can be submitted eagerly.
-        "--no-validate",
-        *_dfx_to_cli(dfx),
-    ]
-    if pto_isa_commit:
-        inner += ["--pto-isa-commit", pto_isa_commit]
-    argv = [
-        "task-submit",
-        "--device",
-        device,
-        "--timeout",
-        str(queue_timeout),
-        "--max-time",
-        str(max_time),
-        "--run",
-        _shell_quote_run(_PROJECT_ROOT, inner),
-    ]
-    try:
-        proc = subprocess.run(argv, check=False, capture_output=True, text=True)  # noqa: S603
-    except OSError as exc:
-        return (
-            False,
-            f"Failed to exec task-submit ({exc}) — do not pass --execute-via-task-submit here.",
-            None,
-        )
-    # Persist the full child output next to the artifact for post-mortem. Do NOT
-    # reprint it: the device chatter / markers would drown pytest's own per-test
-    # output. Failures surface their detail via the returned error instead.
-    combined = f"---- stdout ----\n{proc.stdout}\n---- stderr ----\n{proc.stderr}\n"
-    try:
-        (work_dir / "execute.log").write_text(combined, encoding="utf-8")
-    except OSError:
-        pass
+    inner = _build_execute_artifact_cmd(
+        ["--work-dir", str(work_dir), "--platform", platform], dfx, pto_isa_commit
+    )
+    proc, exec_err = _exec_task_submit(inner, device, max_time, queue_timeout, work_dir / "execute.log")
+    if proc is None:
+        return (False, exec_err, None)
     if proc.returncode == 0 and f"{_RESULT_MARKER_PREFIX}=PASS" in proc.stdout:
         return (True, None, _parse_executed_device(proc.stdout))
     return (False, _classify_task_submit_failure(proc.returncode, proc.stdout, proc.stderr), None)
@@ -605,45 +632,12 @@ def _run_batch_via_task_submit(
         json.dumps([{"work_dir": str(wd), "platform": plat} for wd, plat in entries]),
         encoding="utf-8",
     )
-    inner = [
-        sys.executable,
-        "-m",
-        "pypto.runtime.execute_artifact",
-        "--batch-manifest",
-        str(manifest_path),
-        "--device-id",
-        "$TASK_DEVICE",  # expanded by the shell task-submit runs the command in
-        "--no-validate",  # device run only; the harness validates per-test below
-        *_dfx_to_cli(dfx),
-    ]
-    if pto_isa_commit:
-        inner += ["--pto-isa-commit", pto_isa_commit]
-    argv = [
-        "task-submit",
-        "--device",
-        device,
-        "--timeout",
-        str(queue_timeout),
-        "--max-time",
-        str(max_time),
-        "--run",
-        _shell_quote_run(_PROJECT_ROOT, inner),
-    ]
-    try:
-        proc = subprocess.run(argv, check=False, capture_output=True, text=True)  # noqa: S603
-    except OSError as exc:
-        err = f"Failed to exec task-submit ({exc}) — do not pass --execute-via-task-submit here."
-        return {str(wd): (False, err, None) for wd, _ in entries}
-    # Persist the full batch output for post-mortem; do NOT reprint it (the
-    # device chatter / per-artifact markers would bury pytest's own per-test
-    # lines). Failures carry the relevant detail via the returned error, and the
-    # batch log path is referenced there.
-    combined = f"---- stdout ----\n{proc.stdout}\n---- stderr ----\n{proc.stderr}\n"
-    batch_log = manifest_path.with_suffix(".log")
-    try:
-        batch_log.write_text(combined, encoding="utf-8")
-    except OSError:
-        pass
+    inner = _build_execute_artifact_cmd(["--batch-manifest", str(manifest_path)], dfx, pto_isa_commit)
+    proc, exec_err = _exec_task_submit(
+        inner, device, max_time, queue_timeout, manifest_path.with_suffix(".log")
+    )
+    if proc is None:
+        return {str(wd): (False, exec_err, None) for wd, _ in entries}
     # Walk the markers, attributing the lines printed before each one to that
     # artifact — so a FAIL carries its own traceback inline (the batch log is
     # ephemeral). "PYPTO_EXEC_RESULT=PASS work_dir=<wd> device=<N>".
