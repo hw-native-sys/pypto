@@ -860,6 +860,118 @@ REGISTER_OP("tile.mscatter")
       return DeduceTileMscatterType(args, kwargs, "tile.mscatter");
     });
 
+// ============================================================================
+// tile.mgather: indexed gather-load from a GM table into a fresh VEC tile.
+// Maps to pto.mgather. The `coalesce` attr selects the mode:
+//   row  (0, default): dst[r, j] = mem[idx[r], j]   — idx is a [1, R] / [R, 1]
+//                      index vector; output is [R, mem_cols].
+//   elem (1):          dst[i, j] = mem[idx[i, j]]   — mem flat-indexed; output
+//                      has the same shape as idx.
+// Mirror of tile.mscatter (the GM scatter-store), but reads GM -> tile instead
+// of writing tile -> GM. Intended for loop-local idx inside spmd / pl.range.
+// ============================================================================
+
+namespace {
+// coalesce attr enum, shared with the PTO codegen: 0 = row, 1 = elem.
+constexpr int kMgatherCoalesceRow = 0;
+constexpr int kMgatherCoalesceElem = 1;
+
+bool IsMgatherElementDtype(const DataType& dt) {
+  return dt == DataType::INT8 || dt == DataType::INT16 || dt == DataType::INT32 || dt == DataType::FP16 ||
+         dt == DataType::BF16 || dt == DataType::FP32;
+}
+}  // namespace
+
+TypePtr DeduceTileMgatherType(const std::vector<ExprPtr>& args,
+                              const std::vector<std::pair<std::string, std::any>>& kwargs,
+                              const std::string& op_name) {
+  CHECK(args.size() == 2) << "The operator " << op_name << " requires 2 arguments (mem, idx), but got "
+                          << args.size();
+
+  // First arg: mem — GM source table. AsTensorTypeLike accepts both TensorType
+  // and DistributedTensorType (per-rank window-buffer slice).
+  auto mem_type = AsTensorTypeLike(args[0]->GetType());
+  CHECK(mem_type) << "The operator " << op_name
+                  << " requires mem to be a TensorType or DistributedTensorType (GM source), but got "
+                  << args[0]->GetType()->TypeName();
+  CHECK(IsMgatherElementDtype(mem_type->dtype_))
+      << "The operator " << op_name << " requires mem dtype in {I8, I16, I32, FP16, BF16, FP32}, but got "
+      << mem_type->dtype_.ToString();
+  CHECK(!mem_type->shape_.empty()) << "The operator " << op_name
+                                   << " requires mem to have at least 1 dimension (scalar not supported)";
+
+  // Second arg: idx — index tile (INT32, 2D).
+  auto idx_type = As<TileType>(args[1]->GetType());
+  CHECK(idx_type) << "The operator " << op_name << " requires idx to be a TileType, but got "
+                  << args[1]->GetType()->TypeName();
+  CHECK(idx_type->dtype_ == DataType::INT32)
+      << "The operator " << op_name << " requires idx dtype to be INT32, but got "
+      << idx_type->dtype_.ToString();
+  CHECK(idx_type->shape_.size() == 2)
+      << "The operator " << op_name << " requires a 2D idx tile, but got rank " << idx_type->shape_.size();
+
+  int coalesce = kMgatherCoalesceRow;
+  for (const auto& [key, value] : kwargs) {
+    if (key == "coalesce") {
+      coalesce = AnyCast<int>(value, "kwarg key: coalesce");
+      break;
+    }
+  }
+  CHECK(coalesce == kMgatherCoalesceRow || coalesce == kMgatherCoalesceElem)
+      << "The operator " << op_name << " requires coalesce in {0 (row), 1 (elem)}, but got " << coalesce;
+
+  // Output: a fresh VEC tile with mem's element type. Its PHYSICAL shape
+  // follows the idx tile's physical shape, but its valid_shape follows the idx
+  // tile's valid_shape — so a partially-valid idx (valid < physical, e.g. a
+  // dynamic-length gather) yields a correspondingly partially-valid output
+  // instead of over-gathering the idx padding region.
+  //   elem mode: dst shape == idx shape; dst valid == idx valid.
+  //   row  mode: dst = [R, mem_cols] (R = idx's non-unit dim); dst valid =
+  //              [R_valid, mem_cols] (R_valid = idx's non-unit valid extent;
+  //              each gathered row spans the full mem row width).
+  const TileView idx_view = tile_view_semantics::GetEffectiveTileView(*idx_type);
+  const std::vector<ExprPtr>& idx_valid =
+      idx_view.valid_shape.empty() ? idx_type->shape_ : idx_view.valid_shape;
+
+  std::vector<ExprPtr> out_shape;
+  std::vector<ExprPtr> out_valid;
+  if (coalesce == kMgatherCoalesceElem) {
+    out_shape = idx_type->shape_;
+    out_valid = idx_valid;
+  } else {
+    // Row mode: idx is [1, R] (row_major, default) or [R, 1] (col_major). R is
+    // the non-unit dimension; a [R, 1] column vector has its unit dim last.
+    auto col = As<ConstInt>(idx_type->shape_[1]);
+    const bool col_vec = (col && col->value_ == 1);
+    ExprPtr rows_phys = col_vec ? idx_type->shape_[0] : idx_type->shape_[1];
+    ExprPtr rows_valid = col_vec ? idx_valid[0] : idx_valid[1];
+    out_shape = {rows_phys, mem_type->shape_.back()};
+    out_valid = {rows_valid, mem_type->shape_.back()};
+  }
+
+  TileView tile_view;
+  tile_view.valid_shape = out_valid;
+  return std::make_shared<TileType>(out_shape, mem_type->dtype_, std::nullopt, tile_view);
+}
+
+REGISTER_OP("tile.mgather")
+    .set_op_category("TileOp")
+    .set_description(
+        "Indexed gather-load from a GM table into a fresh VEC tile "
+        "(maps to pto.mgather; row mode dst[r,j]=mem[idx[r],j], elem mode dst[i,j]=mem[idx[i,j]])")
+    .add_argument("mem", "GM source table (TensorType or DistributedTensorType)")
+    .add_argument("idx", "Index tile (INT32, 2D)")
+    .set_attr<int>("coalesce")
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    // dst must not reuse the idx tile's UB buffer: the per-row gather reads the
+    // whole idx vector while writing dst, so aliasing corrupts indices mid-loop.
+    .not_inplace_safe()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileMgatherType(args, kwargs, "tile.mgather");
+    });
+
 REGISTER_OP("tile.move")
     .set_op_category("TileOp")
     .set_description("Move tile between memory levels (Vec/Mat/Left/Right)")

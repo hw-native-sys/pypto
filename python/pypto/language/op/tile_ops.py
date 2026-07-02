@@ -153,6 +153,7 @@ __all__ = [
     "scatter",
     "scatter_mask",
     "mscatter",
+    "mgather",
     "MaskPattern",
     "mrgsort",
 ]
@@ -2555,6 +2556,48 @@ def mscatter(src: Tile, idx: Tile, output_tensor: _TensorT) -> _TensorT:
     """
     call_expr = _ir_ops.mscatter(src.unwrap(), idx.unwrap(), output_tensor.unwrap())
     return output_tensor.__class__(expr=call_expr)
+
+
+def mgather(mem: Tensor, idx: Tile, coalesce: str = "row") -> Tile:
+    """Indexed gather-load from a GM table into a fresh VEC tile.
+
+    The reverse of :func:`mscatter`: reads scattered rows / elements of a GM
+    table into an on-chip tile. Usable inside ``spmd`` / ``pl.range`` with a
+    loop-local index tile. Two modes selected by ``coalesce``:
+
+    - ``"row"`` (default): ``dst[r, j] = mem[idx[r], j]``. ``idx`` is an index
+      vector ``[1, R]`` (row-major) or ``[R, 1]`` (col-major); the result is
+      ``[R, mem_cols]`` where ``mem_cols`` is ``mem``'s row width.
+    - ``"elem"``: ``dst[i, j] = mem[idx[i, j]]`` (``mem`` flat-indexed); the
+      result has the same shape as ``idx``.
+
+    Maps to the PTOAS ``pto.mgather`` instruction.
+
+    .. note::
+        PTOAS requires the index tile's row byte size to be 32-byte aligned
+        (a ``none_box`` VEC tile constraint): ``idx_cols * sizeof(idx_dtype)``
+        must be a multiple of 32. For INT32 indices this means the index width
+        must be a multiple of 8 (e.g. ``[1, 8]``, ``[1, 16]``, ``[1, 32]``);
+        a width like ``[1, 20]`` (80 bytes) is rejected at compile time. To
+        gather a count that is not a multiple of 8, pad the index tile to the
+        next aligned width and load only the valid rows (``valid_shapes``).
+
+    Args:
+        mem: GM source table (Tensor; the result takes ``mem``'s dtype).
+        idx: Index tile (INT32, 2D). Its row byte size must be 32-byte aligned
+            (INT32 width a multiple of 8) — see the note above.
+        coalesce: ``"row"`` (default) or ``"elem"``.
+
+    Returns:
+        Tile of ``mem``'s dtype holding the gathered rows (row mode) or elements
+        (elem mode).
+
+    Example:
+        >>> dst = pl.tile.mgather(kv_pool, idx_tile)                  # row mode
+        >>> dst = pl.tile.mgather(table, idx_tile, coalesce="elem")
+    """
+    call_expr = _ir_ops.mgather(mem.unwrap(), idx.unwrap(), coalesce=coalesce)
+    return Tile(expr=call_expr)
 
 
 @overload
