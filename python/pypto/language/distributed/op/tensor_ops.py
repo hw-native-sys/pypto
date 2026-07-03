@@ -360,7 +360,9 @@ def get(
 
 
 @overload
-def allreduce(target: DistributedTensor, *, op: ReduceOp = ReduceOp.Sum) -> DistributedTensor: ...
+def allreduce(
+    target: DistributedTensor, *, op: ReduceOp = ReduceOp.Sum, mode: str = "mesh"
+) -> DistributedTensor: ...
 
 
 @overload
@@ -369,6 +371,7 @@ def allreduce(
     signal: DistributedTensor,
     *,
     op: ReduceOp = ReduceOp.Sum,
+    mode: str = "mesh",
 ) -> DistributedTensor: ...
 
 
@@ -377,6 +380,7 @@ def allreduce(
     signal: DistributedTensor | object = _ALLREDUCE_SIGNAL_MISSING,
     *,
     op: ReduceOp = ReduceOp.Sum,
+    mode: str = "mesh",
 ) -> DistributedTensor:
     """In-place cross-rank allreduce of a window-bound DistributedTensor.
 
@@ -387,26 +391,29 @@ def allreduce(
     .. code-block:: python
 
         pub = pld.tensor.allreduce(pub, sig, op=pld.ReduceOp.Sum)
+        pub = pld.tensor.allreduce(pub, sig, op=pld.ReduceOp.Sum, mode="ring")
 
-    LowerCompositeOps expands the explicit-signal InCore form into the 4-phase
-    notify/wait/remote_load+accumulate/store decomposition; the kernel sees
-    only the lowered primitives. Host-orchestrator code can omit ``signal``
+    LowerCompositeOps expands the explicit-signal InCore form into either:
+    (a) the 4-phase notify/wait/remote_load+accumulate/store decomposition
+    for ``mode="mesh"`` (default); or (b) the NCCL-style 2(P−1)-step
+    chunked reduce-scatter + allgather ring schedule for ``mode="ring"``.
+    In both modes the kernel sees only the lowered primitives.
+    Host-orchestrator code can omit ``signal``
     outside ``for`` and ``while`` loops; the compiler synthesizes a private
-    INT32 signal window of shape ``[pld.world_size(), 1]`` for that call.
+    INT32 signal window of shape ``[pld.world_size(), 1]`` for that call
+    (mesh mode only — ring mode on the HOST rail is delivered by a
+    subsequent host builtin).
 
-    **Signal buffers are single-shot per call.** The lowering uses two
-    barrier waves on the same cells (Set 1 → wait ≥1, then AtomicAdd 1
-    → wait ≥2), so by the time the call returns every cell sits at
-    ``2`` rather than its initial ``0``. **Do not reuse the same signal
-    buffer for a back-to-back allreduce** — the second call's first
-    wait would pass immediately on the stale ``≥1``, breaking the
-    barrier and racing Phase 3 against the previous reduction's
-    Phase 4. Explicit-signal callers issuing multiple allreduces must allocate
-    a fresh signal buffer (``alloc_window_buffer`` + ``window``) for each
-    allreduce call. All allreduce calls in ``for`` and ``while`` loops are
-    rejected because the current signal protocol cannot provide a fresh signal
-    for every dynamic iteration. A self-resetting variant is blocked on a
-    runtime fix — PTOAS issue #797.
+    Mesh signal shape is ``[NR, 1]``; ring signal shape is
+    ``[2 * (NR − 1), NR]`` (one row per ring round). Both are single-shot
+    per call — the lowering uses ``AtomicAdd(0→1)`` / ``WaitGe(1)`` per
+    barrier wave, and cells end the call at non-zero values.
+    **Do not reuse the same signal buffer for a back-to-back allreduce**
+    — allocate a fresh signal buffer (``alloc_window_buffer`` + ``window``)
+    for each allreduce call. All allreduce calls in ``for`` and ``while``
+    loops are rejected because the current signal protocol cannot provide a
+    fresh signal for every dynamic iteration. A self-resetting variant is
+    blocked on a runtime fix — PTOAS issue #797.
 
     Args:
         target: Window-bound :class:`pld.DistributedTensor` holding per-rank
@@ -420,6 +427,9 @@ def allreduce(
             (keyword-only). Defaults to :attr:`pld.ReduceOp.Sum`. First-version
             lowering accepts only ``Sum``; ``Max`` / ``Min`` / ``Prod`` are
             reserved enum values and will be rejected at the C++ deducer.
+        mode: Algorithm selector (keyword-only). ``"mesh"`` (default) for
+            direct all-to-all exchange; ``"ring"`` for the NCCL-style
+            chunked reduce-scatter + allgather ring schedule.
 
     Returns:
         The rebound :class:`pld.DistributedTensor` view of ``target`` —
@@ -427,7 +437,7 @@ def allreduce(
     """
     if signal is _ALLREDUCE_SIGNAL_MISSING:
         (target_expr,) = _unwrap_distributed_tensors("pld.tensor.allreduce", target=target)
-        call = _ir_tensor.allreduce(target_expr, op=op)
+        call = _ir_tensor.allreduce(target_expr, op=op, mode=mode)
         return DistributedTensor(expr=call)
     if signal is None:
         raise TypeError(
@@ -437,7 +447,7 @@ def allreduce(
     target_expr, signal_expr = _unwrap_distributed_tensors(
         "pld.tensor.allreduce", target=target, signal=signal
     )
-    call = _ir_tensor.allreduce(target_expr, signal_expr, op)
+    call = _ir_tensor.allreduce(target_expr, signal_expr, op, mode=mode)
     return DistributedTensor(expr=call)
 
 

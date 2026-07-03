@@ -134,6 +134,7 @@ REGISTER_OP("pld.tensor.allreduce")
     .add_argument("signal",
                   "Optional window-bound INT32 DistributedTensor used as cross-rank barrier (InOut)")
     .set_attr<int>("op")
+    .set_attr<std::string>("mode")
     .no_memory_spec()
     .f_deduce_type(DeduceTensorAllReduceType);
 

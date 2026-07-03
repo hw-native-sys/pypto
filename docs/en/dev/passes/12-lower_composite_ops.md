@@ -1,6 +1,6 @@
 # LowerCompositeOps Pass
 
-Decomposes composite tile / distributed ops into compositions of primitive tile ops (`tile.muls`, `tile.adds`, `tile.add`, `tile.sub`, `tile.mul`, `tile.cast`) and distributed primitives, so codegen never has to emit a high-level intrinsic. Today the pass handles `tile.sin` / `tile.cos` (FP32 Cody-Waite + Horner) and `pld.tensor.*` distributed collectives (`allreduce`, `allgather`, `reduce_scatter`, `broadcast`, `barrier`). New composite ops add a lowering rule to the dispatch table inside the pass file without touching the dispatcher.
+Decomposes composite tile / distributed ops into compositions of primitive tile ops (`tile.muls`, `tile.adds`, `tile.add`, `tile.sub`, `tile.mul`, `tile.cast`) and distributed primitives, so codegen never has to emit a high-level intrinsic. Today the pass handles `tile.sin` / `tile.cos` (FP32 Cody-Waite + Horner) and `pld.tensor.*` distributed collectives (`allreduce` (mesh and ring), `allgather`, `reduce_scatter`, `broadcast`, `barrier`). New composite ops add a lowering rule to the dispatch table inside the pass file without touching the dispatcher.
 
 ## Overview
 
@@ -43,7 +43,7 @@ src/ir/transforms/lower_composite_ops_pass.cpp
 
 Adding a new composite op (all edits stay in `lower_composite_ops_pass.cpp`):
 
-1. Write a `Lower<Op>Rule(call, args, builder)` function. It receives the original `CallPtr` (use `call->span_`, `call->kwargs_`, `call->op_->name_` as needed), the visited arg expressions (var-remap already applied), and a `LoweringBuilder` whose `Bind` helper appends an `AssignStmt` per intermediate temp. For rules that need control flow, use `builder.EmitFor` / `builder.EmitForReduce` / `builder.EmitIf` / `builder.EmitIfExpr` — each takes a body callback that receives a nested builder sharing the same temp counter, so emitted temps stay uniquely named regardless of nesting depth. `LowerTensorAllReduceRule` is the canonical example of a control-flow-bearing rule (4-phase notify / wait / remote_load+accumulate / store).
+1. Write a `Lower<Op>Rule(call, args, builder)` function. It receives the original `CallPtr` (use `call->span_`, `call->kwargs_`, `call->op_->name_` as needed), the visited arg expressions (var-remap already applied), and a `LoweringBuilder` whose `Bind` helper appends an `AssignStmt` per intermediate temp. For rules that need control flow, use `builder.EmitFor` / `builder.EmitForReduce` / `builder.EmitIf` / `builder.EmitIfExpr` — each takes a body callback that receives a nested builder sharing the same temp counter, so emitted temps stay uniquely named regardless of nesting depth. `LowerTensorAllReduceRule` is the canonical example of a control-flow-bearing rule (4-phase notify / wait / remote_load+accumulate / store for mesh; `LowerTensorRingAllReduceRule` adds a chunked RS+AG ring schedule dispatched via a `mode` kwarg).
 2. Add a `{"<op>", &Lower<Op>Rule}` row to `kRules` inside `LookupCompositeRule`.
 
 No edits to the mutator are needed. When the table grows past a handful of entries — or a rule wants its own translation unit — promote it back to a standalone registry under `src/ir/transforms/composite_ops/`.

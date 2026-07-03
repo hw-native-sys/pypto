@@ -510,6 +510,11 @@ ExprPtr LowerCosRule(const CallPtr& call, const std::vector<ExprPtr>& args, Lowe
 // mutator bind it to the AssignStmt's LHS Var.
 // ============================================================================
 
+// Forward declaration — the ring rule is defined after the mesh rule but is
+// called from the mode dispatch inside LowerTensorAllReduceRule.
+ExprPtr LowerTensorRingAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>& args,
+                                     LoweringBuilder& b);
+
 ExprPtr LowerTensorAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>& args, LoweringBuilder& b) {
   const Span& span = call->span_;
   // Host-orchestrator calls may omit the signal and get one synthesized before
@@ -529,6 +534,13 @@ ExprPtr LowerTensorAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>
   INTERNAL_CHECK_SPAN(op_value == static_cast<int>(ReduceOp::kSum), span)
       << "pld.tensor.allreduce lowering supports ReduceOp::kSum only (got int " << op_value
       << ") — deducer should have rejected this";
+
+  // Mode dispatch: "ring" delegates to the chunked reduce-scatter + allgather
+  // ring schedule; "mesh" (default) uses the direct-exchange lowering below.
+  auto mode = GetKwargOr<std::string>(call->kwargs_, "mode", std::string("mesh"));
+  if (mode == "ring") {
+    return LowerTensorRingAllReduceRule(call, args, b);
+  }
 
   const std::size_t ndim = target_type->shape_.size();
 
@@ -635,6 +647,224 @@ ExprPtr LowerTensorAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>
   b.Bind("store_ret", reg.Create("tile.store", {acc_final, zero_offsets, target}, {}, span), span);
 
   // In-place semantics: the rebind LHS receives the (post-reduce) target view.
+  return target;
+}
+
+// ============================================================================
+// ``pld.tensor.allreduce`` ring lowering rule (mode="ring")
+//
+// NCCL-style chunked reduce-scatter + allgather ring schedule with 2(P−1)
+// per-round barriers.  Signal shape is [2*(NR−1), NR] — one row per ring
+// round, one cell per rank.  Barrier: AtomicAdd(0→1) / WaitGe(1) monotonic.
+//
+// The ring operates on the target DistributedTensor [NR, SIZE] in-place:
+// each rank's local window holds SIZE elements, and the ring exchanges
+// chunk_size = SIZE // NR elements per step.  No explicit stage-in needed.
+//
+// Hand-rolled reference: tests/st/distributed/collectives/test_l3_allreduce_ring.py
+// Simpler reference:    simpler/examples/workers/l3/allreduce_ring_distributed/
+// ============================================================================
+
+ExprPtr LowerTensorRingAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>& args,
+                                     LoweringBuilder& b) {
+  const Span& span = call->span_;
+  CHECK_SPAN(args.size() == 2, span) << "pld.tensor.allreduce mode=ring requires an explicit signal. "
+                                        "Use pld.tensor.allreduce(target, signal, mode=\"ring\")";
+  const auto& target = args[0];
+  const auto& signal = args[1];
+  auto target_type = As<DistributedTensorType>(target->GetType());
+  INTERNAL_CHECK_SPAN(target_type, span)
+      << "pld.tensor.allreduce target must be DistributedTensorType (deducer-rejected otherwise)";
+  INTERNAL_CHECK_SPAN(target_type->shape_.size() == 2, span)
+      << "pld.tensor.allreduce mode=ring requires 2D target [NR, SIZE], got " << target_type->shape_.size()
+      << "D";
+
+  auto op_value = GetRequiredKwarg<int>(call->kwargs_, "op", "pld.tensor.allreduce");
+  INTERNAL_CHECK_SPAN(op_value == static_cast<int>(ReduceOp::kSum), span)
+      << "pld.tensor.allreduce mode=ring supports ReduceOp::kSum only (got int " << op_value << ")";
+
+  // Signal validation: must be 2D INT32 DistributedTensor for ring barriers.
+  auto signal_type = As<DistributedTensorType>(signal->GetType());
+  INTERNAL_CHECK_SPAN(signal_type, span) << "mode=ring signal must be DistributedTensorType";
+  INTERNAL_CHECK_SPAN(signal_type->shape_.size() == 2, span) << "mode=ring signal must be 2D [2*(NR-1), NR]";
+  INTERNAL_CHECK_SPAN(signal_type->dtype_ == DataType::INT32, span) << "mode=ring signal must be INT32";
+
+  auto& reg = OpRegistry::GetInstance();
+  auto comm = b.EmitCommSetup(target, span);
+
+  auto zero_idx = std::make_shared<ConstInt>(0, DataType::INDEX, span);
+  auto one_idx = std::make_shared<ConstInt>(1, DataType::INDEX, span);
+  auto one_i32 = std::make_shared<ConstInt>(1, DataType::INT32, span);
+
+  // Cast my_rank to INDEX for modulo arithmetic.
+  auto my_rank_idx =
+      b.Bind("my_rank_idx", std::make_shared<ir::Cast>(comm.my_rank, DataType::INDEX, span), span);
+
+  // chunk_size = SIZE // NR.
+  // Prefer the signal type's shape[1] for NR — it is a compile-time
+  // constant from the factory-parameter type annotation (e.g. [2*(NR-1), NR]).
+  // When both SIZE and NR are ConstInts, constant-fold to avoid a dynamic
+  // FloorDiv that downstream passes (InitMemRef) cannot handle.
+  auto size_expr = target_type->shape_[1];
+  auto nr_expr = signal_type->shape_[1];
+  ExprPtr chunk_size;
+  auto size_const = As<ConstInt>(size_expr);
+  auto nr_const = As<ConstInt>(nr_expr);
+  if (size_const && nr_const && nr_const->value_ > 0) {
+    chunk_size = std::make_shared<ConstInt>(size_const->value_ / nr_const->value_, DataType::INDEX, span);
+  } else {
+    chunk_size = MakeFloorDiv(size_expr, nr_expr, span);
+  }
+  auto chunk_shape = std::make_shared<MakeTuple>(
+      std::vector<ExprPtr>{std::make_shared<ConstInt>(1, DataType::INDEX, span), chunk_size}, span);
+
+  // nr_minus_one = NR − 1 (loop bound, 0..NR-2 inclusive → P−1 steps)
+  auto nr_minus_one = b.Bind("nr_minus_one", MakeSub(comm.nranks_idx, one_idx, span), span);
+
+  // ------------------------------------------------------------------
+  // Phase 1: Reduce-Scatter — P−1 ring steps
+  // ------------------------------------------------------------------
+  b.EmitFor(
+      "rs_step", zero_idx, nr_minus_one, one_idx,
+      [&](LoweringBuilder& body, const VarPtr& rs_step_var) {
+        auto step = body.Bind("step", MakeAdd(rs_step_var, one_idx, span), span);
+
+        // recv_add_idx = (my_rank − step − 1 + NR) % NR
+        auto r1 = MakeSub(my_rank_idx, step, span);
+        auto r2 = MakeSub(r1, one_idx, span);
+        auto r3 = MakeAdd(r2, comm.nranks_idx, span);
+        auto recv_add_idx = body.Bind("recv_add_idx", MakeFloorMod(r3, comm.nranks_idx, span), span);
+        auto send_idx = body.Bind("send_idx", MakeFloorMod(r3, comm.nranks_idx, span), span);
+
+        // left = (my_rank − 1 + NR) % NR
+        auto l1 = MakeSub(my_rank_idx, one_idx, span);
+        auto l2 = MakeAdd(l1, comm.nranks_idx, span);
+        auto left_peer = body.Bind("left", MakeFloorMod(l2, comm.nranks_idx, span), span);
+
+        // ---- Round barrier (notify-all + wait-all) ----
+        // Use EmitFor with per-peer IfStmt to skip self.
+        auto rs_offsets = std::make_shared<MakeTuple>(std::vector<ExprPtr>{rs_step_var, comm.my_rank}, span);
+        body.EmitFor(
+            "peer_rs", zero_idx, comm.nranks_idx, one_idx,
+            [&](LoweringBuilder& inner, const VarPtr& peer) {
+              inner.EmitIf(
+                  inner.NotEq(peer, comm.my_rank, span),
+                  [&](LoweringBuilder& then_body) {
+                    then_body.Bind("notify_rs",
+                                   reg.Create("pld.system.notify", {signal, peer, rs_offsets, one_i32},
+                                              {{"op", static_cast<int>(NotifyOp::kAtomicAdd)}}, span),
+                                   span);
+                  },
+                  nullptr, span);
+            },
+            span);
+        body.EmitFor(
+            "src_rs", zero_idx, comm.nranks_idx, one_idx,
+            [&](LoweringBuilder& inner, const VarPtr& src) {
+              auto src_offsets = std::make_shared<MakeTuple>(std::vector<ExprPtr>{rs_step_var, src}, span);
+              inner.EmitIf(
+                  inner.NotEq(src, comm.my_rank, span),
+                  [&](LoweringBuilder& then_body) {
+                    then_body.Bind("wait_rs",
+                                   reg.Create("pld.system.wait", {signal, src_offsets, one_i32},
+                                              {{"cmp", static_cast<int>(WaitCmp::kGe)}}, span),
+                                   span);
+                  },
+                  nullptr, span);
+            },
+            span);
+
+        // ---- remote_load(left, send_idx) + local accumulate ----
+        auto send_offsets = std::make_shared<MakeTuple>(
+            std::vector<ExprPtr>{zero_idx, MakeMul(send_idx, chunk_size, span)}, span);
+        auto recv = body.Bind(
+            "recv_rs",
+            reg.Create("pld.tile.remote_load", {target, left_peer, send_offsets, chunk_shape}, {}, span),
+            span);
+
+        auto recv_offsets = std::make_shared<MakeTuple>(
+            std::vector<ExprPtr>{zero_idx, MakeMul(recv_add_idx, chunk_size, span)}, span);
+        auto acc = body.Bind("acc_rs",
+                             reg.Create("tile.load", {target, recv_offsets, chunk_shape, chunk_shape},
+                                        {{"target_memory", MemorySpace::Vec}}, span),
+                             span);
+        auto acc_next = body.Bind("acc_rs_next", body.Add(acc, recv, span), span);
+        body.Bind("store_rs", reg.Create("tile.store", {acc_next, recv_offsets, target}, {}, span), span);
+      },
+      span);
+
+  // ------------------------------------------------------------------
+  // Phase 2: AllGather — P−1 ring steps
+  // ------------------------------------------------------------------
+  b.EmitFor(
+      "ag_step", zero_idx, nr_minus_one, one_idx,
+      [&](LoweringBuilder& body, const VarPtr& ag_step_var) {
+        auto step = body.Bind("ag_step_val", MakeAdd(ag_step_var, one_idx, span), span);
+        auto ag_round = body.Bind("ag_round", MakeAdd(ag_step_var, nr_minus_one, span), span);
+
+        auto r1 = MakeSub(my_rank_idx, step, span);
+        auto r2 = MakeAdd(r1, comm.nranks_idx, span);
+        auto recv_idx = body.Bind("ag_recv_idx", MakeFloorMod(r2, comm.nranks_idx, span), span);
+
+        // left = (my_rank − 1 + NR) % NR — used both as the remote_load peer
+        // and in the send_idx formula (hand-rolled ring uses `left`, not
+        // `my_rank`, for the AG send-chunk index).
+        auto l1 = MakeSub(my_rank_idx, one_idx, span);
+        auto l2 = MakeAdd(l1, comm.nranks_idx, span);
+        auto left_val = MakeFloorMod(l2, comm.nranks_idx, span);
+        auto left_peer = body.Bind("ag_left", left_val, span);
+
+        // send_idx = (left − step + 1 + NR) % NR
+        auto s1 = MakeSub(left_val, step, span);
+        auto s2 = MakeAdd(s1, one_idx, span);
+        auto s3 = MakeAdd(s2, comm.nranks_idx, span);
+        auto send_idx = body.Bind("ag_send_idx", MakeFloorMod(s3, comm.nranks_idx, span), span);
+
+        // ---- Round barrier ----
+        auto ag_offsets = std::make_shared<MakeTuple>(std::vector<ExprPtr>{ag_round, comm.my_rank}, span);
+        body.EmitFor(
+            "peer_ag", zero_idx, comm.nranks_idx, one_idx,
+            [&](LoweringBuilder& inner, const VarPtr& peer) {
+              inner.EmitIf(
+                  inner.NotEq(peer, comm.my_rank, span),
+                  [&](LoweringBuilder& then_body) {
+                    then_body.Bind("notify_ag",
+                                   reg.Create("pld.system.notify", {signal, peer, ag_offsets, one_i32},
+                                              {{"op", static_cast<int>(NotifyOp::kAtomicAdd)}}, span),
+                                   span);
+                  },
+                  nullptr, span);
+            },
+            span);
+        body.EmitFor(
+            "src_ag", zero_idx, comm.nranks_idx, one_idx,
+            [&](LoweringBuilder& inner, const VarPtr& src) {
+              auto src_offsets = std::make_shared<MakeTuple>(std::vector<ExprPtr>{ag_round, src}, span);
+              inner.EmitIf(
+                  inner.NotEq(src, comm.my_rank, span),
+                  [&](LoweringBuilder& then_body) {
+                    then_body.Bind("wait_ag",
+                                   reg.Create("pld.system.wait", {signal, src_offsets, one_i32},
+                                              {{"cmp", static_cast<int>(WaitCmp::kGe)}}, span),
+                                   span);
+                  },
+                  nullptr, span);
+            },
+            span);
+
+        // ---- remote_load(left, send_idx) + store locally ----
+        auto send_offsets = std::make_shared<MakeTuple>(
+            std::vector<ExprPtr>{zero_idx, MakeMul(send_idx, chunk_size, span)}, span);
+        auto recv = body.Bind(
+            "recv_ag",
+            reg.Create("pld.tile.remote_load", {target, left_peer, send_offsets, chunk_shape}, {}, span),
+            span);
+        auto recv_offsets = std::make_shared<MakeTuple>(
+            std::vector<ExprPtr>{zero_idx, MakeMul(recv_idx, chunk_size, span)}, span);
+        body.Bind("store_ag", reg.Create("tile.store", {recv, recv_offsets, target}, {}, span), span);
+      },
+      span);
+
   return target;
 }
 

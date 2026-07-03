@@ -1109,5 +1109,164 @@ def test_reduce_scatter_deducer_rejects_unsupported_reduce_op():
                 return data
 
 
+# ============================================================================
+# pld.tensor.allreduce ring mode lowering
+#
+# Ring allreduce decomposes ``pld.tensor.allreduce(data, signal, mode="ring")``
+# into an NCCL-style chunked reduce-scatter + allgather schedule with 2(P−1)
+# per-round barriers.  The signal shape is [2*(NR−1), NR] (one row per ring
+# round, one cell per rank).  These tests pin the ring-specific invariants
+# without hand-mirroring every temp name.
+# ============================================================================
+
+_RING_ALLREDUCE_SIZE = 16
+_RING_ALLREDUCE_NRANKS = 2
+
+# Ops the ring decomposition must emit.
+_RING_ALLREDUCE_REQUIRED_OPS = {
+    "pld.system.get_comm_ctx",
+    "pld.system.nranks",
+    "pld.system.rank",
+    "pld.system.notify",  # per-round barrier (2(P−1) rounds)
+    "pld.system.wait",  # per-round barrier
+    "pld.tile.remote_load",  # per-ring-step chunk receive
+    "tile.add",  # reduce-scatter accumulation
+    "tile.load",  # reduce-scatter local accumulation
+    "tile.store",  # reduce-scatter + allgather chunk writes
+}
+
+
+def _build_ring_allreduce_before():
+    """Build a minimal Before program that calls allreduce(mode="ring")."""
+    SIZE = _RING_ALLREDUCE_SIZE
+    nr = _RING_ALLREDUCE_NRANKS
+    total_rounds = 2 * (nr - 1)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def reduce_step(
+            self,
+            inp: pl.Tensor[[1, SIZE], pl.FP32],
+            out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
+            data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[total_rounds, nr], pl.INT32]],
+        ) -> pl.Tensor[[1, SIZE], pl.FP32]:
+            local = pl.load(inp, [0, 0], [1, SIZE])
+            data = pl.store(local, [0, 0], data)
+            data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, mode="ring")
+            acc = pl.load(data, [0, 0], [1, SIZE])
+            return pl.store(acc, [0, 0], out)
+
+    return Before
+
+
+def test_ring_allreduce_is_decomposed_to_primitives():
+    """The composite ring allreduce Call is replaced by the ring primitive
+    tree; no ``pld.tensor.allreduce`` survives."""
+    Before = _build_ring_allreduce_before()
+    After = passes.lower_composite_ops()(Before)
+    op_names = set(_collect_op_names(After))
+
+    assert "pld.tensor.allreduce" not in op_names, (
+        "lower_composite_ops must remove the composite allreduce call entirely"
+    )
+    missing = _RING_ALLREDUCE_REQUIRED_OPS - op_names
+    assert not missing, f"ring-lowered IR missing expected ops: {missing}"
+
+
+def test_ring_allreduce_emits_ring_control_flow():
+    """Ring lowering emits 2 ForStmts (reduce-scatter, allgather) with
+    4 IfStmts (notify+wait per phase step).  For P=2 the inner
+    notify/wait ForStmts are fused into the phase body as direct
+    IfStmts — the EmitFor creates a per-peer loop whose body is a single
+    IfStmt, which LoweringBuilder fuses into the parent body."""
+    Before = _build_ring_allreduce_before()
+    After = passes.lower_composite_ops()(Before)
+    collector = _StmtKindCollector()
+    collector.visit_program(After)
+
+    # P=2 → 1 RS step + 1 AG step = 2 ForStmts.
+    # Each step has notify (IfStmt) + wait (IfStmt) = 4 IfStmts total.
+    assert collector.for_count == 2, (
+        f"expected 2 ForStmts for P=2 ring (RS body + AG body), got {collector.for_count}"
+    )
+    assert collector.if_count == 4, (
+        f"expected 4 IfStmts (RS notify+wait + AG notify+wait), got {collector.if_count}"
+    )
+
+
+def test_ring_allreduce_lowering_is_idempotent():
+    """Running the pass on already-lowered ring IR is a no-op."""
+    Before = _build_ring_allreduce_before()
+    once = passes.lower_composite_ops()(Before)
+    twice = passes.lower_composite_ops()(once)
+    ir.assert_structural_equal(twice, once)
+
+
+def test_ring_allreduce_invalid_signal_shape_is_rejected():
+    """Ring mode validates signal type — rejects non-DistributedTensor or
+    non-INT32 signals at lowering time.  The exact shape [2*(NR−1), NR]
+    is checked for dimensionality (must be 2D) but exact dimension values
+    are validated at runtime when NR is dynamic."""
+    SIZE = _RING_ALLREDUCE_SIZE
+    nr = _RING_ALLREDUCE_NRANKS
+
+    # Wrong dtype: signal must be INT32 for notify/wait counters.
+    with pytest.raises((ValueError, TypeError, ParserError)):
+
+        @pl.program
+        class BadDtype:
+            @pl.function(type=pl.FunctionType.InCore)
+            def reduce_step(
+                self,
+                data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+                signal: pl.InOut[pld.DistributedTensor[[2 * (nr - 1), nr], pl.FP32]],
+            ) -> pl.Tensor[[1, SIZE], pl.FP32]:
+                data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, mode="ring")
+                return data
+
+        passes.lower_composite_ops()(BadDtype)
+
+
+def test_ring_allreduce_mesh_default_unchanged():
+    """Existing mesh allreduce (mode omitted) still decomposes to the mesh
+    recipe — no ring primitives leak in."""
+    Before = _build_allreduce_before()
+    After = passes.lower_composite_ops()(Before)
+    op_names = set(_collect_op_names(After))
+
+    assert "pld.tensor.allreduce" not in op_names
+    missing = _ALLREDUCE_REQUIRED_OPS - op_names
+    assert not missing, f"mesh-lowered IR missing expected ops: {missing}"
+
+    # Mesh-specific: exactly 5 ForStmts (notify, wait, reduce, re-notify, re-wait)
+    collector = _StmtKindCollector()
+    collector.visit_program(After)
+    assert collector.for_count == 5, (
+        f"mesh allreduce must still produce 5 ForStmts, got {collector.for_count}"
+    )
+
+
+def test_ring_allreduce_deducer_rejects_unsupported_reduce_op():
+    """Ring mode inherits the kSum-only restriction from mesh."""
+    SIZE = _RING_ALLREDUCE_SIZE
+    nr = _RING_ALLREDUCE_NRANKS
+    total_rounds = 2 * (nr - 1)
+
+    with pytest.raises((ValueError, TypeError, ParserError)):
+
+        @pl.program
+        class BadRingOp:
+            @pl.function(type=pl.FunctionType.InCore)
+            def f(
+                self,
+                data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+                signal: pl.InOut[pld.DistributedTensor[[total_rounds, nr], pl.INT32]],
+            ) -> pl.Tensor[[1, SIZE], pl.FP32]:
+                data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Max, mode="ring")
+                return data
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

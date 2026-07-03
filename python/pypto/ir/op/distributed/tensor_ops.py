@@ -210,6 +210,7 @@ def allreduce(
     signal: Expr,
     op: ReduceOp = ReduceOp.Sum,
     *,
+    mode: str = "mesh",
     span: Span | None = None,
 ) -> Call: ...
 
@@ -219,6 +220,7 @@ def allreduce(
     signal: Expr | object = _ALLREDUCE_SIGNAL_MISSING,
     op: ReduceOp = ReduceOp.Sum,
     *,
+    mode: str = "mesh",
     span: Span | None = None,
 ) -> Call:
     """Build a ``pld.tensor.allreduce(target[, signal])`` Call.
@@ -230,12 +232,15 @@ def allreduce(
     downstream lowering. Explicit signals are single-shot: callers issuing
     multiple allreduces must provide a fresh signal for each call. ``op``
     (:class:`ir.ReduceOp`) selects the reduction operator, defaults to
-    ``ReduceOp.Sum``, and is packed as an ``int`` attr. The result type is ``target``'s
-    :class:`ir.DistributedTensorType` (the rebind target — same semantics as
-    :func:`pl.store`).
+    ``ReduceOp.Sum``, and is packed as an ``int`` attr. ``mode`` selects the
+    lowering algorithm: ``"mesh"`` (direct exchange, O(P) windows) or
+    ``"ring"`` (chunked reduce-scatter + allgather, O(1) windows). The result
+    type is ``target``'s :class:`ir.DistributedTensorType` (the rebind target —
+    same semantics as :func:`pl.store`).
 
     Explicit-signal InCore allreduce is expanded by LowerCompositeOps into the
-    4-phase notify/wait/remote_load+accumulate/store decomposition. Host-level
+    4-phase notify/wait/remote_load+accumulate/store decomposition (mesh) or
+    the 2(P−1)-step reduce-scatter + allgather ring schedule (ring). Host-level
     allreduce is lowered later by LowerHostTensorCollectives after signal
     synthesis and comm-domain materialization.
     """
@@ -250,7 +255,7 @@ def allreduce(
         args = [target, signal]
     else:
         raise TypeError(f"pld.tensor.allreduce signal must be an Expr, got {type(signal).__name__}")
-    return _ir_core.create_op_call("pld.tensor.allreduce", args, {"op": int(op)}, actual_span)
+    return _ir_core.create_op_call("pld.tensor.allreduce", args, {"op": int(op), "mode": mode}, actual_span)
 
 
 def barrier(

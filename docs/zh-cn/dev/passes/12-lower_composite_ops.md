@@ -1,6 +1,6 @@
 # LowerCompositeOps Pass
 
-把组合 (composite) tile / distributed 算子降级 (lower) 为一组基本 tile 算子（`tile.muls`、`tile.adds`、`tile.add`、`tile.sub`、`tile.mul`、`tile.cast`）和分布式原语的组合，使代码生成 (codegen) 不再需要发射高层 (high-level) 指令。当前支持 `tile.sin` / `tile.cos`（FP32 Cody-Waite + Horner）以及 `pld.tensor.*` 分布式集合通信算子（`allreduce`、`allgather`、`reduce_scatter`、`broadcast`、`barrier`）。新的组合算子只需在 Pass 文件内部的分发表 (dispatch table) 里加一条降级规则，无需改动分发器本身。
+把组合 (composite) tile / distributed 算子降级 (lower) 为一组基本 tile 算子（`tile.muls`、`tile.adds`、`tile.add`、`tile.sub`、`tile.mul`、`tile.cast`）和分布式原语的组合，使代码生成 (codegen) 不再需要发射高层 (high-level) 指令。当前支持 `tile.sin` / `tile.cos`（FP32 Cody-Waite + Horner）以及 `pld.tensor.*` 分布式集合通信算子（`allreduce`（mesh 与 ring）、`allgather`、`reduce_scatter`、`broadcast`、`barrier`）。新的组合算子只需在 Pass 文件内部的分发表 (dispatch table) 里加一条降级规则，无需改动分发器本身。
 
 ## 概览 (Overview)
 
@@ -43,7 +43,7 @@ src/ir/transforms/lower_composite_ops_pass.cpp
 
 新增一个组合算子的步骤（改动都留在 `lower_composite_ops_pass.cpp` 内）：
 
-1. 写一个 `Lower<Op>Rule(call, args, builder)` 函数。它接收原始 `CallPtr`（按需用 `call->span_`、`call->kwargs_`、`call->op_->name_`）、已 visit 过的参数表达式（已应用 var-remap）以及一个 `LoweringBuilder`，其 `Bind` 助手会为每个中间临时变量追加一条 `AssignStmt`。需要控制流的规则可以用 `builder.EmitFor` / `builder.EmitForReduce` / `builder.EmitIf` / `builder.EmitIfExpr`——每个都接收一个 body 回调，回调里收到的嵌套 builder 与外层共享同一个 temp 计数器，因此发射的临时变量名跨任意嵌套深度都唯一。`LowerTensorAllReduceRule` 是含控制流规则的范例（4 阶段 notify / wait / remote_load+accumulate / store）。
+1. 写一个 `Lower<Op>Rule(call, args, builder)` 函数。它接收原始 `CallPtr`（按需用 `call->span_`、`call->kwargs_`、`call->op_->name_`）、已 visit 过的参数表达式（已应用 var-remap）以及一个 `LoweringBuilder`，其 `Bind` 助手会为每个中间临时变量追加一条 `AssignStmt`。需要控制流的规则可以用 `builder.EmitFor` / `builder.EmitForReduce` / `builder.EmitIf` / `builder.EmitIfExpr`——每个都接收一个 body 回调，回调里收到的嵌套 builder 与外层共享同一个 temp 计数器，因此发射的临时变量名跨任意嵌套深度都唯一。`LowerTensorAllReduceRule` 是含控制流规则的范例（4 阶段 notify / wait / remote_load+accumulate / store，用于 mesh；`LowerTensorRingAllReduceRule` 则通过 `mode` kwarg 分发，增加分块 RS+AG ring 调度）。
 2. 在 `LookupCompositeRule` 的 `kRules` 里加一条 `{"<op>", &Lower<Op>Rule}`。
 
 无需修改 mutator。当分发表条目增多——或某条规则需要独立的翻译单元时——再把它拆回 `src/ir/transforms/composite_ops/` 下的独立注册表。
