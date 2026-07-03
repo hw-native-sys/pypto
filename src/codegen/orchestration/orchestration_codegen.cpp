@@ -689,19 +689,18 @@ class OrchestrationStmtCodegen : public CodegenBase {
         // count is authoritative for the fan-in array that collects all
         // producer TaskIds across iterations (YunjiQin review, PR #1813).
         carry_plans[i].array_size = EvalConstTripCount(for_stmt);
-        // Only enable compiler-dep collection when array_size > 0 (const trip
-        // count). When the trip count is dynamic (0) the collection falls
-        // through to the scalar/trivial carry path — compiler_dep_collection
-        // is only consumed inside the array_size > 0 branch below.
-        carry_plans[i].compiler_dep_collection = (carry_plans[i].array_size > 0);
+        carry_plans[i].compiler_dep_collection = true;
+        // compiler_dep_collection is functionally only consumed inside the
+        // array_size > 0 branch below (for PTO2TaskId::invalid() init).
+        // When array_size == 0 the dynamic path handles collection instead.
         if (carry_plans[i].array_size <= 0 && for_stmt->kind_ == ForKind::Parallel) {
           carry_plans[i].dynamic_compiler_dep_collection = true;
         }
-        // is_rebind is not overridden here: Analyze() already sets it for
-        // TASK_ID iter_args when a YieldStmt is present, and the old code
-        // (pre-refactor) only set it inside the yield guard.  Leaving it
-        // unchanged preserves trivial-alias lowering when the body has no
-        // yield (YunjiQin review, PR #1813).
+        // Override is_rebind: the analyzer only sets it for TASK_ID iter_args,
+        // but Tensor-typed iter_args with compiler-dep edges also need true
+        // so the yield handler emits dynamic-collection writes. The old
+        // pre-refactor code set this inside the yield guard identically.
+        carry_plans[i].is_rebind = true;
       }
     }
 
