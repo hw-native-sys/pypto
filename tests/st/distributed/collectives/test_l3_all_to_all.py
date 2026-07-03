@@ -7,19 +7,18 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""L3 distributed st: N-rank all-to-all — hand-rolled 3-phase DSL port of simpler
-``all_to_all_distributed`` reference.
+"""L3 distributed st: N-rank all-to-all — hand-rolled push-based DSL reference.
 
-Mirrors the 3-phase pattern of ``kernels/aiv/all_to_all_kernel.cpp``:
+Implements push-based 2-phase mesh all-to-all:
 
-* **Phase 1 (stage-in)** — copy each destination chunk ``inp[dest, :]`` into
-  this rank's slice of the window-bound ``data`` buffer so every peer can
-  read the chunk destined for them.
+* **Phase 1 (push)** — for each dest rank, load the chunk and push it directly
+  to the peer's window via ``pld.tile.remote_store`` (TSTORE-based).
+  Self-rank chunk uses local ``tile.store``.
 * **Phase 2 (barrier)** — each rank ``Set``s every peer's ``signal`` cell
   via ``pld.system.notify`` and ``pld.system.wait``s until all ranks have
-  staged.
-* **Phase 3 (exchange)** — for ``src`` in 0..NR-1: read chunk ``my_rank``
-  from peer ``src``'s window via ``pld.tile.get``, write to ``out[src, :]``.
+  completed their pushes.
+* **Phase 3 (read-back)** — read ``data[src, :]`` (the chunk received from
+  rank ``src``) into ``out[src, :]`` via ``pl.load`` + ``pl.store``.
 
 Golden: ``output[rank, src, j] = src*1000 + rank*100 + j``.
 
@@ -71,18 +70,20 @@ class AllToAllMesh:
         data: pl.InOut[pld.DistributedTensor[[NR, SIZE], pl.FP32]],
         signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
     ) -> pl.Tensor[[NR, SIZE], pl.FP32]:
-        """Three-phase mesh all-to-all on window-bound ``data`` / ``signal``."""
-        # CommContext must be acquired before any data rebinding so the
-        # threading pass can trace it through all SSA uses of the window.
+        """Push-based mesh all-to-all on window-bound ``data`` / ``signal``."""
         ctx = pld.get_comm_ctx(data)
         my_rank = pld.rank(ctx)
         nranks = pld.nranks(ctx)
 
-        # Phase 1: stage-in — copy each destination chunk into the local
-        # window so every peer can read the slice destined for them.
+        # Phase 1: push — load each destination chunk and write it directly
+        # to the peer's window via pld.tile.remote_store (TSTORE-based).
+        # Self-rank uses local pl.store for efficiency.
         for dest in pl.range(nranks):
-            local = pl.load(inp, [dest, 0], [1, SIZE])
-            pl.store(local, [dest, 0], data)
+            chunk = pl.load(inp, [dest, 0], [1, SIZE])
+            if dest == my_rank:
+                pl.store(chunk, [my_rank, 0], data)
+            else:
+                pld.tile.remote_store(chunk, target=data, peer=dest, offsets=[my_rank, 0])
 
         # Phase 2: barrier — notify every peer, wait on every peer slot.
         for peer in pl.range(nranks):
@@ -103,21 +104,11 @@ class AllToAllMesh:
                     cmp=pld.WaitCmp.Ge,
                 )
 
-        # Phase 3: exchange — read chunk my_rank from each peer's window.
-        # Peer src staged the chunk for me at data[my_rank, :] in its
-        # local window.  pld.tile.get reads it directly into out[src, :]
-        # via a shared VEC staging tile (matches the C++ lowering).
-        recv_stage = pl.tile.create([1, SIZE], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+        # Phase 3: read-back — data[src, :] now holds the chunk from rank src.
+        # Copy each row into out[src, :] for host-side verification.
         for src in pl.range(nranks):
-            pld.tile.get(
-                out,
-                peer=src,
-                src=data,
-                stage=recv_stage,
-                dst_offsets=[src, 0],
-                src_offsets=[my_rank, 0],
-                shape=[1, SIZE],
-            )
+            chunk = pl.load(data, [src, 0], [1, SIZE])
+            pl.store(chunk, [src, 0], out)
 
         return out
 
@@ -148,12 +139,12 @@ class AllToAllMesh:
 
 
 class TestL3AllToAll:
-    """L3 distributed runtime: hand-rolled 3-phase mesh all-to-all.
+    """L3 distributed runtime: hand-rolled push-based mesh all-to-all.
 
-    Validates that the raw DSL primitives (``pl.load`` / ``pl.store`` /
-    ``pld.system.notify`` / ``pld.system.wait`` / ``pld.tile.get``) produce
-    the correct rank-ordered personalized exchange identical to simpler's
-    ``all_to_all_distributed`` reference.
+    Validates that the raw DSL primitives (``pl.tile.load`` /
+    ``pld.tile.remote_store`` / ``pl.tile.store`` /
+    ``pld.system.notify`` / ``pld.system.wait``) produce the correct
+    rank-ordered personalized exchange.
     """
 
     @pytest.mark.parametrize("n_ranks", [2, 4])

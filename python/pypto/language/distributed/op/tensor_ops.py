@@ -599,31 +599,32 @@ def all_to_all(
     input: Tensor,
     target: DistributedTensor,
     signal: DistributedTensor,
-    out: Tensor,
-) -> Tensor:
-    """All-to-all: symmetric personalized exchange.
+) -> DistributedTensor:
+    """All-to-all: symmetric personalized exchange (push-based).
 
-    4-arg InCore composite: ``pld.tensor.all_to_all(input, target, signal, out)``
-    Lowered by LowerCompositeOps into a 3-phase decomposition.
+    3-arg InCore composite: ``pld.tensor.all_to_all(input, target, signal)``
+    Every rank pushes its per-destination chunks directly to every peer's
+    window via ``pld.tile.remote_store``, then synchronises with a notify/wait
+    barrier.  Returns ``target`` in-place (window-as-result — same idiom as
+    ``reduce_scatter`` / ``broadcast``).
 
     Args:
         input: :class:`pl.Tensor` [NR, SIZE] with per-destination chunks.
             ``input[dest, :]`` is the chunk destined for rank ``dest``.
-        target: :class:`pld.DistributedTensor` [NR, SIZE] staging window.
+        target: :class:`pld.DistributedTensor` [NR, SIZE] window that receives
+            the result in-place.  After the call,
+            ``target[src, :]`` holds the chunk received from rank ``src``.
         signal: :class:`pld.DistributedTensor` [NR, 1] INT32 barrier.
-        out: :class:`pl.Tensor` [NR, SIZE] output.
-            ``out[src, :]`` holds the chunk received from rank ``src``.
 
     Returns:
-        The ``out`` :class:`pl.Tensor`.
+        The ``target`` :class:`pld.DistributedTensor` (window-as-result).
     """
     target_expr, signal_expr = _unwrap_distributed_tensors(
         "pld.tensor.all_to_all", target=target, signal=signal
     )
     input_expr = _unwrap(input)
-    out_expr = _unwrap(out)
-    call = _ir_tensor.all_to_all(input_expr, target_expr, signal_expr, out_expr)
-    return Tensor(expr=call)
+    call = _ir_tensor.all_to_all(input_expr, target_expr, signal_expr)
+    return DistributedTensor(expr=call)
 
 
 __all__ = [

@@ -9,14 +9,14 @@
 
 """L3 distributed st: N-rank all-to-all via ``pld.tensor.all_to_all`` intrinsic.
 
-Validates the composite all-to-all intrinsic produces the same rank-ordered
-personalized exchange as the simpler ``all_to_all_distributed`` reference.
+Validates the push-based composite all-to-all intrinsic produces the correct
+rank-ordered personalized exchange.
 
-The intrinsic accepts four arguments: ``input`` (Tensor [NR, SIZE]),
-``target`` (DistributedTensor [NR, SIZE] staging window), ``signal``, and
-``out`` (plain Tensor [NR, SIZE]).  It handles the stage-in, synchronises,
-uses ``pld.tile.get`` to transfer from peers, and writes directly into
-``out``.
+The intrinsic accepts three arguments: ``input`` (Tensor [NR, SIZE]),
+``target`` (DistributedTensor [NR, SIZE] window), ``signal`` (INT32 barrier),
+and returns ``target`` in-place (window-as-result — same idiom as
+``reduce_scatter`` / ``broadcast``).  The caller reads back from the
+window into a plain output tensor for host-side verification.
 
 ST coverage: **P=2** (default CI / 2-device hosts) and **P=4** (any four
 devices). Both use the same N-rank program body.
@@ -65,10 +65,14 @@ def _build_all_to_all_program(n_ranks: int):
             data: pl.InOut[pld.DistributedTensor[[nr, SIZE], pl.FP32]],
             signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
         ) -> pl.Tensor[[nr, SIZE], pl.FP32]:
-            # All-to-all — intrinsic handles stage-in, sync, pld.tile.get
-            # from peers, and writes directly into out.
-            result = pld.tensor.all_to_all(inp, data, signal, out)
-            return result
+            # Push-based all_to_all — intrinsic pushes chunks to peers and
+            # returns data in-place (window-as-result).
+            result = pld.tensor.all_to_all(inp, data, signal)
+            # Read back from the window into out for host-side verification.
+            for src in pl.range(nr):
+                chunk = pl.load(result, [src, 0], [1, SIZE])
+                pl.store(chunk, [src, 0], out)
+            return out
 
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(
@@ -101,8 +105,8 @@ def _build_all_to_all_program(n_ranks: int):
 class TestL3TensorAllToAllIntrinsic:
     """L3 distributed runtime: N-rank all-to-all via ``pld.tensor.all_to_all``.
 
-    Validates that the lowered composite produces an on-board result
-    bit-identical to the simpler ``all_to_all_distributed`` reference.
+    Validates the push-based composite intrinsic produces a bit-identical
+    rank-ordered personalized exchange.
     """
 
     @pytest.mark.parametrize("n_ranks", [2, 4])

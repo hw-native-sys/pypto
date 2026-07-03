@@ -963,36 +963,37 @@ ExprPtr LowerTensorBarrierRule(const CallPtr& call, const std::vector<ExprPtr>& 
 // ============================================================================
 // ``pld.tensor.all_to_all`` lowering rule
 //
-// Symmetric all-to-all: every rank sends a distinct chunk to every other rank.
-// 3-phase decomposition matching the simpler all_to_all_distributed reference:
+// Push-based symmetric all-to-all: every rank sends a distinct chunk to every
+// other rank.  2-phase decomposition:
 //
-//   Phase 1 (stage-in): for dest in 0..NR-1:
-//       tile.load(input, [dest, 0], [1, SIZE]) → stage_tile
-//       tile.store(stage_tile, [dest, 0], target)  // local window row dest
+//   Phase 1 (push): for dest in 0..NR-1:
+//       stage_tile = tile.load(input, [dest, 0], [1, SIZE])
+//       if dest == my_rank:
+//           tile.store(stage_tile, [my_rank, 0], target)       // local self-copy
+//       else:
+//           pld.tile.remote_store(stage_tile, target, dest,     // push to peer's window
+//                                 [my_rank, 0])
 //
-//   Phase 2a: notify-all (Set 1)
-//   Phase 2b: wait-all  (Ge 1)
+//   Phase 2 (barrier):
+//       notify-all (Set 1)
+//       wait-all  (Ge 1)
 //
-//   Phase 3 (exchange): for src in 0..NR-1:
-//       pld.tile.get(out, peer=src, target, stage_tile,
-//                    dst_offsets=[src, 0], src_offsets=[my_rank, 0],
-//                    shape=[1, SIZE])
+//   Result: target (window-as-result).  After the barrier, target[src, :]
+//           holds the chunk received from rank src.
 //
 // Input layout:  input[dest, :] = chunk destined for rank dest.
-// Output layout: output[src, :] = chunk received from rank src.
 // ============================================================================
 
 ExprPtr LowerTensorAllToAllRule(const CallPtr& call, const std::vector<ExprPtr>& args, LoweringBuilder& b) {
   const Span& span = call->span_;
-  INTERNAL_CHECK_SPAN(args.size() == 4, span)
-      << "pld.tensor.all_to_all rule expects 4 args (input, target, signal, out), got " << args.size();
+  INTERNAL_CHECK_SPAN(args.size() == 3, span)
+      << "pld.tensor.all_to_all rule expects 3 args (input, target, signal), got " << args.size();
   const auto& input = args[0];
   const auto& target = args[1];
   const auto& signal = args[2];
-  const auto& out = args[3];
 
-  // input must be a Tensor [NR, SIZE].
-  INTERNAL_CHECK_SPAN(As<TensorType>(input->GetType()), span)
+  auto input_type = As<TensorType>(input->GetType());
+  INTERNAL_CHECK_SPAN(input_type, span)
       << "pld.tensor.all_to_all input must be TensorType, got " << input->GetType()->TypeName();
   auto target_type = As<DistributedTensorType>(target->GetType());
   INTERNAL_CHECK_SPAN(target_type, span)
@@ -1013,10 +1014,16 @@ ExprPtr LowerTensorAllToAllRule(const CallPtr& call, const std::vector<ExprPtr>&
   auto zero_idx = std::make_shared<ConstInt>(0, DataType::INDEX, span);
   auto one_idx = std::make_shared<ConstInt>(1, DataType::INDEX, span);
 
-  // ---- Phase 1: stage-in — copy each destination chunk into the local
-  //      window.  rank r writes input[dest, :] to target[dest, 0] so
-  //      every peer can later read the slice destined for them at
-  //      target[my_rank, 0].
+  // Offsets for the push target: write at [my_rank, 0] on the peer's window.
+  // Every rank r writes its per-destination chunk to slot [r, 0] on every
+  // peer's window, so after the barrier, rank r sees target[src, :] = chunk
+  // sent from src to r.
+  auto my_rank_offsets = std::make_shared<MakeTuple>(
+      std::vector<ExprPtr>{comm.my_rank, std::make_shared<ConstInt>(0, DataType::INDEX, span)}, span);
+
+  // ---- Phase 1: push — load each destination chunk and write it directly
+  //      to the peer's window via pld.tile.remote_store (TSTORE-based).
+  //      Self-rank case uses local tile.store for efficiency.
   b.EmitFor(
       "dest", zero_idx, comm.nranks_idx, one_idx,
       [&](LoweringBuilder& body, const VarPtr& dest_var) {
@@ -1029,8 +1036,22 @@ ExprPtr LowerTensorAllToAllRule(const CallPtr& call, const std::vector<ExprPtr>&
                                  {{"target_memory", MemorySpace::Vec}}, span),
                       span);
 
-        body.Bind("aa_stage", reg.Create("tile.store", {stage_tile, dest_row_offsets, target}, {}, span),
-                  span);
+        // Self-rank: local tile.store in the else branch.
+        body.EmitIf(
+            body.NotEq(dest_var, comm.my_rank, span),
+            [&](LoweringBuilder& then_body) {
+              // Peer: push via pld.tile.remote_store.
+              then_body.Bind("aa_push",
+                             reg.Create("pld.tile.remote_store",
+                                        {stage_tile, target, dest_var, my_rank_offsets}, {}, span),
+                             span);
+            },
+            /*else_fn=*/
+            [&](LoweringBuilder& else_body) {
+              else_body.Bind("aa_self",
+                             reg.Create("tile.store", {stage_tile, my_rank_offsets, target}, {}, span), span);
+            },
+            span);
       },
       span);
 
@@ -1040,46 +1061,10 @@ ExprPtr LowerTensorAllToAllRule(const CallPtr& call, const std::vector<ExprPtr>&
   // ---- Phase 2b: wait-all ----
   b.EmitWaitAll(signal, comm.nranks_idx, comm.my_rank, one_i32, "", span);
 
-  // ---- Phase 3: exchange — read chunk my_rank from every peer's scratch.
-  //      Peer src staged the chunk for me at target[my_rank, 0] in its own
-  //      local window.  I read that slot and write it to out[src, 0].
-  auto recv_stage =
-      b.Bind("aa_recv",
-             reg.Create("tile.create", {chunk_shape},
-                        {{"dtype", target_type->dtype_}, {"target_memory", MemorySpace::Vec}}, span),
-             span);
-
-  // Offsets for the peer-read: read at [my_rank, 0] on the peer's window.
-  auto my_rank_offsets = std::make_shared<MakeTuple>(
-      std::vector<ExprPtr>{comm.my_rank, std::make_shared<ConstInt>(0, DataType::INDEX, span)}, span);
-
-  b.EmitFor(
-      "src", zero_idx, comm.nranks_idx, one_idx,
-      [&](LoweringBuilder& body, const VarPtr& src_var) {
-        // Write to out[src, 0] — rank-ordered output.
-        auto dst_offsets = std::make_shared<MakeTuple>(
-            std::vector<ExprPtr>{src_var, std::make_shared<ConstInt>(0, DataType::INDEX, span)}, span);
-
-        body.Bind("aa_get",
-                  reg.Create("pld.tile.get",
-                             {out, src_var, target, recv_stage, dst_offsets, my_rank_offsets, chunk_shape},
-                             {}, span),
-                  span);
-      },
-      span);
-
-  // ---- Phase 3.5: post-exchange barrier (AtomicAdd 1 → wait >= 2) ----
-  // Phase 3 writes exchange results into out, which is a plain tensor.  However
-  // target (the HCCL window) is still accessible to peers via pld.tile.remote_load
-  // during Phase 3.  Without this barrier, a fast rank that returns from
-  // all_to_all and immediately starts a second collective reusing target
-  // could overwrite the staging slots while a slow peer is still remote-reading
-  // them — a write-after-read hazard matching allreduce's Phase 3.5 rationale.
-  auto two_i32 = std::make_shared<ConstInt>(2, DataType::INT32, span);
-  b.EmitNotifyAll(signal, comm.nranks_idx, comm.my_rank, NotifyOp::kAtomicAdd, one_i32, "2", span);
-  b.EmitWaitAll(signal, comm.nranks_idx, comm.my_rank, two_i32, "2", span);
-
-  return out;
+  // Window-as-result: target[src, :] now holds the chunk from rank src.
+  // No read-back phase or post-barrier needed — the barrier guarantees all
+  // peer writes are complete, and no peer reads the window afterwards.
+  return target;
 }
 
 // ----------------------------------------------------------------------------
