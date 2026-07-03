@@ -20,9 +20,8 @@ Tests drive the full Default pipeline on Ascend910B (48 VECTOR / 24 CUBE cores).
 
 import pypto.language as pl
 import pytest
-from pypto.ir.pass_manager import OptimizationStrategy, PassManager
-
 from pypto import backend
+from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
 TR = TC = 128
 
