@@ -681,7 +681,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // defer to a dynamic (vector) collection.
     for (size_t i = 0; i < carry_plans.size(); ++i) {
       if (i < for_stmt->return_vars_.size() && NeedsCompilerDepTaskId(for_stmt->return_vars_[i].get())) {
-        carry_plans[i].compiler_dep_collection = true;
         // Always size compiler-dep carries from the outer loop's const trip
         // count.  ResolveArrayCarrySize may have already set array_size to an
         // inner Parallel loop's trip count (a Sequential outer wrapping a
@@ -690,6 +689,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
         // count is authoritative for the fan-in array that collects all
         // producer TaskIds across iterations (YunjiQin review, PR #1813).
         carry_plans[i].array_size = EvalConstTripCount(for_stmt);
+        // Only enable compiler-dep collection when array_size > 0 (const trip
+        // count). When the trip count is dynamic (0) the collection falls
+        // through to the scalar/trivial carry path — compiler_dep_collection
+        // is only consumed inside the array_size > 0 branch below.
+        carry_plans[i].compiler_dep_collection = (carry_plans[i].array_size > 0);
         if (carry_plans[i].array_size <= 0 && for_stmt->kind_ == ForKind::Parallel) {
           carry_plans[i].dynamic_compiler_dep_collection = true;
         }
