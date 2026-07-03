@@ -500,9 +500,20 @@ def _shell_quote_run(project_root: Path, inner: "list[str]") -> str:
     project root and each ``inner`` token with ``shlex.quote`` — except the
     literal ``$TASK_DEVICE`` placeholder, which must stay unquoted so the shell
     ``task-submit`` runs the command in expands it.
+
+    The payload re-derives the Ascend/CANN environment on the device host via
+    ``source activate.sh`` (which itself sources ``set_env.sh``) instead of
+    relying on ``task-submit`` snapshotting the caller's exported environment.
+    The snapshot path (``env -0`` -> ``pending/<task_id>.env`` -> daemon read)
+    can truncate under the 32-worker precompile submit concurrency, dropping
+    e.g. ``ASCEND_HOME_PATH`` for a single batch and failing every artifact in
+    it with an ``(infra)`` ArtifactSetupError. Sourcing ``activate.sh`` here
+    makes the child self-sufficient — the same pattern the mechanism-B
+    ``--run`` payloads already use — so a partial snapshot can no longer strand
+    a batch. ``activate.sh`` lives at *project_root*, so the ``cd`` precedes it.
     """
     quoted = " ".join("$TASK_DEVICE" if tok == "$TASK_DEVICE" else shlex.quote(tok) for tok in inner)
-    return f"cd {shlex.quote(str(project_root))} && {quoted}"
+    return f"cd {shlex.quote(str(project_root))} && source activate.sh && {quoted}"
 
 
 def _build_execute_artifact_cmd(
@@ -548,11 +559,14 @@ def _exec_task_submit(
     not executable). Never raises. On success the full stdout+stderr is written to
     *log_path* for post-mortem (a write failure is swallowed — best-effort only).
 
-    No ``--env`` / ``--ptoas`` flags are passed: ``task-submit`` runs the child
-    via ``runuser`` as the submitter and preserves the caller's exported
-    environment (PTO_ISA_ROOT / PTOAS_ROOT / PYTHONPATH / PTO2_RING_* all reach
-    the child), so the minimal CI ``task-submit`` (which lacks those options)
-    works — matching the existing ``daily_ci`` a5 job.
+    No ``--env`` / ``--ptoas`` flags are passed: the ``--run`` payload sources
+    ``activate.sh`` to re-derive the Ascend/CANN environment on the device host
+    (see ``_shell_quote_run``), so the minimal CI ``task-submit`` (which lacks
+    those options) works — matching the mechanism-B ``--run`` payloads and the
+    ``daily_ci`` a5 job. ``task-submit`` still preserves the caller's exported
+    environment via ``runuser`` (PTO_ISA_ROOT / PTOAS_ROOT / PYTHONPATH /
+    PTO2_RING_* reach the child that way), but the CANN vars no longer depend on
+    that snapshot surviving the high-concurrency submit path.
     """
     argv = [
         "task-submit",

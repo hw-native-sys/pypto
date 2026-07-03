@@ -145,82 +145,21 @@ jobs:
       # codegen-tests pip mount can't be reused by this ci-runner host job.
       PIP_CACHE_DIR: /home/ci-runner/hw-native-sys-pypto/ci-cache/pip-perf
     steps:
-      - uses: actions/checkout@v4
+      - name: Fetch composite action definitions
+        # Local `uses: ./.github/actions/...` resolves against $GITHUB_WORKSPACE,
+        # but this job checks the repo out into ./perf-checkout — sparse-fetch just
+        # the action defs at the workspace root first (clean: false leaves sibling
+        # subdir checkouts on this persistent runner untouched).
+        uses: actions/checkout@v4
         with:
-          submodules: true
-          path: perf-checkout
+          sparse-checkout: .github/actions
+          clean: false
 
-      - name: Check NPU
-        working-directory: .
-        run: npu-smi info
-
-      - name: Scope ccache to pto-isa version
-        # Namespace ccache by the pinned pto-isa commit so an ISA bump forces a
-        # real recompile instead of serving stale objects (mirrors pypto-lib).
-        run: echo "CCACHE_NAMESPACE=pto-isa-${{ needs.toolchain.outputs.pto_isa_commit }}" >> "$GITHUB_ENV"
-
-      - name: Relax shared ccache permissions
-        # The container codegen-tests job (ci.yml) writes this same ci-cache/ccache
-        # dir as root; CCACHE_UMASK only affects NEW entries, so pre-existing
-        # root-owned buckets can be unwritable by this host (ci-runner) job.
-        # Best-effort relax them before the first compiler launch (no-op if absent).
-        run: chmod -R a+rwX "$CCACHE_DIR" 2>/dev/null || true
-
-      - name: Install ptoas (local cache)
-        env:
-          PTOAS_CACHE_DIR: /home/ci-runner/hw-native-sys-pypto/ci-cache/ptoas
-        run: |
-          CACHE_ARCHIVE="$PTOAS_CACHE_DIR/ptoas-aarch64-${PTOAS_VERSION}-${PTOAS_SHA256}.tar.gz"
-          if [ ! -f "$CACHE_ARCHIVE" ]; then
-            echo "Cache miss — downloading ptoas ${PTOAS_VERSION}"
-            mkdir -p "$PTOAS_CACHE_DIR"
-            curl --fail --location --retry 3 --retry-all-errors \
-              https://github.com/hw-native-sys/PTOAS/releases/download/${PTOAS_VERSION}/ptoas-bin-aarch64.tar.gz \
-              -o "$CACHE_ARCHIVE.tmp"
-            echo "${PTOAS_SHA256}  $CACHE_ARCHIVE.tmp" | sha256sum -c -
-            mv "$CACHE_ARCHIVE.tmp" "$CACHE_ARCHIVE"
-          else
-            echo "Cache hit — using $CACHE_ARCHIVE"
-          fi
-          mkdir -p "$PTOAS_ROOT"
-          tar -xzf "$CACHE_ARCHIVE" -C "$PTOAS_ROOT"
-          chmod +x "$PTOAS_ROOT/ptoas"
-          chmod +x "$PTOAS_ROOT/bin/ptoas"
-
-      - name: Clone pto-isa
-        run: |
-          rm -rf "$PTO_ISA_ROOT"
-          timeout 60 git clone https://github.com/hw-native-sys/pto-isa.git "$PTO_ISA_ROOT" \
-            || { rm -rf "$PTO_ISA_ROOT"; timeout 300 git clone https://gitcode.com/luohuan40/pto-isa.git "$PTO_ISA_ROOT"; }
-          cd "$PTO_ISA_ROOT"
-          git checkout ${{ needs.toolchain.outputs.pto_isa_commit }}
-
-      - name: Bootstrap conda + per-job venv + write activate.sh
-        run: |
-          source /home/ci-runner/miniconda3/etc/profile.d/conda.sh
-          conda activate py310
-          python -m venv venv --system-site-packages
-          cat > activate.sh <<'EOF'
-          source /home/ci-runner/miniconda3/etc/profile.d/conda.sh
-          conda activate py310
-          source "$GITHUB_WORKSPACE/perf-checkout/venv/bin/activate"
-          source /usr/local/Ascend/cann-9.0.0/set_env.sh
-          export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
-          EOF
-
-      - name: Install project and dependencies
-        run: |
-          source activate.sh
-          rm -rf ./build ./_skbuild ./runtime/build ./runtime/_skbuild
-          python -m pip install --upgrade pip
-          pip install scikit-build-core nanobind cmake ninja
-          pip install --no-build-isolation .[dev]
-          pip install --no-build-isolation ./runtime
-          # Fail fast if the venv can't import our freshly-built packages (catches
-          # a stale conda shadow or a broken venv here, not 10 min later in the
-          # test step). The conda py310 base env must NOT have pypto/simpler
-          # installed, or --system-site-packages would let them shadow the venv.
-          python -c "import pypto, simpler; print('env OK:', pypto.__file__)"
+      - name: Setup NPU device job
+        uses: ./.github/actions/setup-npu-device-job
+        with:
+          checkout-path: perf-checkout
+          pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
 
       - name: Clone pypto-lib (Qwen3-14B decode)
         # $GITHUB_WORKSPACE/pypto-lib is a sibling of the perf-checkout checkout
@@ -269,23 +208,10 @@ jobs:
           --metric makespan_us
 
       - name: Kill orphaned task-submit tasks
-        # If this job is cancelled or killed mid-sampling-loop, the task-submit
-        # tasks it submitted keep running server-side (detached) and hold a card
-        # shared with the other repos/jobs on this host until --max-time. always()
-        # runs even on cancellation; match by this job's checkout dir
-        # ($GITHUB_WORKSPACE/perf-checkout, sourced in each sample's --run) so two
-        # jobs sharing a workspace root on one host never kill each other's tasks.
         if: always()
-        run: |
-          echo "cleaning up task-submit tasks for $GITHUB_WORKSPACE/perf-checkout"
-          task-submit --list 2>/dev/null \
-            | grep -F "$GITHUB_WORKSPACE/perf-checkout" \
-            | grep -oE 'task_[0-9_]+' \
-            | sort -u \
-            | while read -r tid; do
-                echo "  killing $tid"
-                task-submit --kill "$tid" || true
-              done || true
+        uses: ./.github/actions/kill-orphaned-tasks
+        with:
+          checkout-path: perf-checkout
 
   notify-on-failure:
     name: Open issue on failure

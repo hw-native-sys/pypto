@@ -1,0 +1,155 @@
+name: Setup NPU device job
+description: >-
+  Shared setup for the self-hosted NPU device jobs (system-tests,
+  dist-system-tests, pypto-lib-model): resilient submodule checkout, ptoas +
+  pto-isa install, a per-job conda venv + activate.sh, and the project
+  build/install. The calling job must define the CCACHE_*, PTOAS_ROOT,
+  PTO_ISA_ROOT, PTOAS_VERSION and PTOAS_SHA256 environment variables (identical
+  across the three jobs); they are read from the job environment here.
+
+inputs:
+  checkout-path:
+    description: >-
+      Workspace-relative dir to check the repo out into (also the venv /
+      activate.sh home). Isolates each job's tree on the shared self-hosted host.
+    required: true
+  pto-isa-commit:
+    description: pto-isa commit to pin (needs.toolchain.outputs.pto_isa_commit).
+    required: true
+  unset-ring:
+    description: >-
+      When 'true', activate.sh unsets PTO2_RING_* — the dist HCCL tests break
+      with the runner's systemd ring-sizing env. Default 'false' keeps them (the
+      system tests rely on the runner's ring env, propagated to the device run).
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    # Self-hosted runners reuse the workspace across runs. A prior run — or a
+    # force-pushed PR ref moving refs/remotes/pull/<n>/merge — can leave the
+    # checkout dir with a stale submodule object store, so actions/checkout's
+    # forced submodule update dies with "fatal: Unable to find current revision
+    # in submodule path ...". Try the fast incremental checkout first; on any
+    # failure purge the dir and re-clone from scratch.
+    - name: Checkout (incremental)
+      id: checkout
+      continue-on-error: true
+      uses: actions/checkout@v4
+      with:
+        submodules: true
+        path: ${{ inputs.checkout-path }}
+
+    - name: Purge stale checkout on failure
+      if: steps.checkout.outcome == 'failure'
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      run: rm -rf "${{ inputs.checkout-path }}"
+
+    - name: Checkout (clean re-clone)
+      if: steps.checkout.outcome == 'failure'
+      uses: actions/checkout@v4
+      with:
+        submodules: true
+        path: ${{ inputs.checkout-path }}
+
+    - name: Check NPU
+      shell: bash
+      run: npu-smi info
+
+    - name: Scope ccache to pto-isa version
+      # Namespace ccache by the pinned pto-isa commit so an ISA bump forces a
+      # real recompile instead of serving stale objects (mirrors pypto-lib).
+      shell: bash
+      run: echo "CCACHE_NAMESPACE=pto-isa-${{ inputs.pto-isa-commit }}" >> "$GITHUB_ENV"
+
+    - name: Relax shared ccache permissions
+      # The container codegen-tests job writes this same ci-cache/ccache dir as
+      # root; CCACHE_UMASK only affects NEW entries, so pre-existing root-owned
+      # buckets can be unwritable by this host (ci-runner) job. Best-effort relax
+      # them before the first compiler launch (no-op if absent / already ok).
+      shell: bash
+      run: chmod -R a+rwX "$CCACHE_DIR" 2>/dev/null || true
+
+    - name: Install ptoas (local cache)
+      shell: bash
+      env:
+        PTOAS_CACHE_DIR: /home/ci-runner/hw-native-sys-pypto/ci-cache/ptoas
+      run: |
+        CACHE_ARCHIVE="$PTOAS_CACHE_DIR/ptoas-aarch64-${PTOAS_VERSION}-${PTOAS_SHA256}.tar.gz"
+        if [ ! -f "$CACHE_ARCHIVE" ]; then
+          echo "Cache miss — downloading ptoas ${PTOAS_VERSION}"
+          mkdir -p "$PTOAS_CACHE_DIR"
+          curl --fail --location --retry 3 --retry-all-errors \
+            https://github.com/hw-native-sys/PTOAS/releases/download/${PTOAS_VERSION}/ptoas-bin-aarch64.tar.gz \
+            -o "$CACHE_ARCHIVE.tmp"
+          echo "${PTOAS_SHA256}  $CACHE_ARCHIVE.tmp" | sha256sum -c -
+          mv "$CACHE_ARCHIVE.tmp" "$CACHE_ARCHIVE"
+        else
+          echo "Cache hit — using $CACHE_ARCHIVE"
+        fi
+        mkdir -p "$PTOAS_ROOT"
+        tar -xzf "$CACHE_ARCHIVE" -C "$PTOAS_ROOT"
+        chmod +x "$PTOAS_ROOT/ptoas"
+        chmod +x "$PTOAS_ROOT/bin/ptoas"
+
+    - name: Clone pto-isa
+      shell: bash
+      run: |
+        rm -rf "$PTO_ISA_ROOT"
+        timeout 60 git clone https://github.com/hw-native-sys/pto-isa.git "$PTO_ISA_ROOT" \
+          || { rm -rf "$PTO_ISA_ROOT"; timeout 300 git clone https://gitcode.com/luohuan40/pto-isa.git "$PTO_ISA_ROOT"; }
+        cd "$PTO_ISA_ROOT"
+        git checkout ${{ inputs.pto-isa-commit }}
+
+    - name: Bootstrap conda + per-job venv + write activate.sh
+      # Per-job venv layered on conda py310; activate.sh lets each later step
+      # enter the env with a single `source activate.sh`. LD_LIBRARY_PATH is
+      # prepended with $CONDA_PREFIX/lib because ptoas needs GLIBCXX_3.4.29.
+      shell: bash
+      working-directory: ${{ inputs.checkout-path }}
+      run: |
+        source /home/ci-runner/miniconda3/etc/profile.d/conda.sh
+        conda activate py310
+        # Explicit reset: don't rely solely on the checkout's `git clean -ffdx`
+        # to have removed a prior run's venv — a stale venv would let `python -m
+        # venv` reuse it and carry over old site-packages.
+        rm -rf venv
+        python -m venv venv --system-site-packages
+        cat > activate.sh <<'EOF'
+        source /home/ci-runner/miniconda3/etc/profile.d/conda.sh
+        conda activate py310
+        source "$GITHUB_WORKSPACE/${{ inputs.checkout-path }}/venv/bin/activate"
+        source /usr/local/Ascend/cann-9.0.0/set_env.sh
+        export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
+        EOF
+        # dist HCCL tests break with the runner's systemd PTO2_RING_* env; the
+        # other jobs rely on it. Append the unset only when the caller asks.
+        if [ "${{ inputs.unset-ring }}" = "true" ]; then
+          printf '%s\n' 'unset PTO2_RING_HEAP PTO2_RING_TASK_WINDOW PTO2_RING_DEP_POOL' >> activate.sh
+        fi
+
+    - name: Show ccache stats (before)
+      shell: bash
+      run: ccache -s || true
+
+    - name: Install project and dependencies
+      shell: bash
+      working-directory: ${{ inputs.checkout-path }}
+      run: |
+        source activate.sh
+        rm -rf ./build ./_skbuild ./runtime/build ./runtime/_skbuild
+        python -m pip install --upgrade pip
+        pip install scikit-build-core nanobind cmake ninja
+        pip install --no-build-isolation .[dev]
+        pip install --no-build-isolation ./runtime
+        # Fail fast if the venv can't import our freshly-built packages (catches
+        # a stale conda shadow or a broken venv here, not 10 min later in the
+        # test step). The conda py310 base env must NOT have pypto/simpler
+        # installed, or --system-site-packages would let them shadow the venv.
+        python -c "import pypto, simpler; print('env OK:', pypto.__file__)"
+
+    - name: Show ccache stats (after)
+      shell: bash
+      run: ccache -s || true

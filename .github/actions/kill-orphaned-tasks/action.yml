@@ -1,0 +1,30 @@
+name: Kill orphaned task-submit tasks
+description: >-
+  Kill the task-submit tasks THIS job submitted, matched by its checkout dir.
+  If a job is cancelled (cancel-in-progress on a new push) or killed mid-flight,
+  its task-submit tasks keep running server-side (detached, reattachable via
+  `task-submit --wait`) and hold a card shared with other repos/jobs on the host
+  until --max-time bounds them. Matching by the job's checkout dir (embedded in
+  every --run) means two jobs sharing a workspace root never kill each other's
+  tasks. Call this with `if: always()` so it runs even on cancellation.
+
+inputs:
+  checkout-path:
+    description: This job's workspace-relative checkout dir (embedded in every --run).
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Kill orphaned task-submit tasks
+      shell: bash
+      run: |
+        echo "cleaning up task-submit tasks for $GITHUB_WORKSPACE/${{ inputs.checkout-path }}"
+        task-submit --list 2>/dev/null \
+          | grep -F "$GITHUB_WORKSPACE/${{ inputs.checkout-path }}" \
+          | grep -oE 'task_[0-9_]+' \
+          | sort -u \
+          | while read -r tid; do
+              echo "  killing $tid"
+              task-submit --kill "$tid" || true
+            done || true
