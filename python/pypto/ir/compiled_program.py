@@ -38,14 +38,15 @@ from pypto.pypto_core.ir import (
     ScalarType,
     ShapedType,
 )
-from pypto.runtime.device_tensor import DeviceTensor
+from pypto.runtime.device_tensor import DeviceTensor, StackedDeviceTensor
 
 # Type alias for arguments accepted by CompiledProgram.__call__().
-# Tensor params accept ``torch.Tensor`` (host) or :class:`DeviceTensor`
-# (worker-resident — skips H2D/D2H, see ``pypto.runtime.DeviceTensor``).
+# Tensor params accept ``torch.Tensor`` (host), :class:`DeviceTensor`
+# (worker-resident — skips H2D/D2H, see ``pypto.runtime.DeviceTensor``), or, for
+# distributed programs, a :class:`StackedDeviceTensor` (per-card resident shards).
 # Scalar params accept Python primitives or ctypes scalars (which are
 # coerced to the correct ctypes type internally).
-CallArg = torch.Tensor | DeviceTensor | int | float | bool | ctypes._SimpleCData
+CallArg = torch.Tensor | DeviceTensor | StackedDeviceTensor | int | float | bool | ctypes._SimpleCData
 
 # IR DataType -> torch.dtype mapping.
 # Keyed by string because nanobind DataType instances are not singletons,
@@ -246,6 +247,38 @@ def _validate_device_tensor(arg: DeviceTensor, info: _ParamInfo) -> None:
     if expected_dtype is not None and arg.dtype != expected_dtype:
         raise TypeError(
             f"Parameter {info.name!r} expects dtype {expected_dtype}; got DeviceTensor dtype {arg.dtype}"
+        )
+
+
+def _validate_stacked_tensor(arg: StackedDeviceTensor, info: _ParamInfo) -> None:
+    """Check a ``StackedDeviceTensor`` arg against IR parameter metadata.
+
+    The stacked tensor stands in for a ``[B, *tail]`` parameter the orchestrator
+    slices along its leading dimension, so its ``full_shape`` is validated the
+    same way as a :class:`DeviceTensor`'s shape: rank and every static dim must
+    agree; dynamic dims (``-1``) are skipped. Per-shard shapes and dtype
+    consistency are already enforced by ``StackedDeviceTensor.__init__``.
+
+    Raises:
+        TypeError: when ``full_shape`` rank/dims or dtype disagree with ``info``.
+    """
+    if info.shape is not None:
+        if len(info.shape) != len(arg.full_shape):
+            raise TypeError(
+                f"Parameter {info.name!r} expects rank {len(info.shape)} "
+                f"(shape {tuple(info.shape)}); got StackedDeviceTensor full_shape {arg.full_shape}"
+            )
+        for expected_dim, actual_dim in zip(info.shape, arg.full_shape, strict=True):
+            if expected_dim >= 0 and expected_dim != actual_dim:
+                raise TypeError(
+                    f"Parameter {info.name!r} expects shape {tuple(info.shape)}; "
+                    f"got StackedDeviceTensor full_shape {arg.full_shape}"
+                )
+    expected_dtype = _to_torch_dtype(info.dtype)
+    if expected_dtype is not None and arg.dtype != expected_dtype:
+        raise TypeError(
+            f"Parameter {info.name!r} expects dtype {expected_dtype}; "
+            f"got StackedDeviceTensor dtype {arg.dtype}"
         )
 
 

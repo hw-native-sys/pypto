@@ -179,19 +179,23 @@ class TestAllocTensor:
             worker.alloc_tensor((4, 8), torch.float32, init=host)
         fake_simpler_worker.free.assert_called_once_with(0x9000, 0)
 
-    def test_alloc_rejects_non_zero_worker_id(self, fake_simpler_worker, worker):
-        # DeviceTensor doesn't encode worker_id yet, so allowing alloc on a
-        # different worker would produce a handle that free_tensor (default
-        # worker_id=0) would mis-route.  Fail loud at the API boundary.
-        with pytest.raises(ValueError, match="worker_id=0"):
-            worker.alloc_tensor((4, 8), torch.float32, worker_id=3)
-        fake_simpler_worker.malloc.assert_not_called()
+    def test_alloc_forwards_non_zero_worker_id(self, fake_simpler_worker, worker):
+        # A non-default worker_id allocates on that worker; malloc is forwarded
+        # with the trailing worker_id arg, and the buffer is tracked under it.
+        fake_simpler_worker.malloc.return_value = 0x9000
+        t = worker.alloc_tensor((4, 8), torch.float32, worker_id=3)
+        fake_simpler_worker.malloc.assert_called_once_with(4 * 8 * 4, 3)
+        assert (3, t.data_ptr) in worker._owned_tensors
 
-    def test_free_tensor_rejects_non_zero_worker_id(self, fake_simpler_worker, worker):
-        t = DeviceTensor(0x9000, (4, 8), torch.float32)
-        with pytest.raises(ValueError, match="worker_id=0"):
-            worker.free_tensor(t, worker_id=3)
-        fake_simpler_worker.free.assert_not_called()
+    def test_free_tensor_forwards_non_zero_worker_id(self, fake_simpler_worker, worker):
+        # free_tensor on the same worker_id used to allocate forwards free to
+        # that worker (the trailing worker_id arg is 3, not the default 0).
+        fake_simpler_worker.malloc.return_value = 0x9000
+        t = worker.alloc_tensor((4, 8), torch.float32, worker_id=3)
+        fake_simpler_worker.free.reset_mock()
+        worker.free_tensor(t, worker_id=3)
+        fake_simpler_worker.free.assert_called_once_with(0x9000, 3)
+        assert (3, t.data_ptr) not in worker._owned_tensors
 
 
 if __name__ == "__main__":

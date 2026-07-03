@@ -28,7 +28,7 @@ from pypto.ir.distributed_compiled_program import (
     DistributedConfig,
 )
 from pypto.pypto_core.ir import ParamDirection
-from pypto.runtime import DeviceTensor
+from pypto.runtime import DeviceTensor, StackedDeviceTensor
 
 
 @pl.program
@@ -107,6 +107,40 @@ def test_call_validates_device_tensor_shape(compiled):
     """A DeviceTensor with the wrong shape is rejected by _validate_device_tensor."""
     a = torch.zeros(128, 128, dtype=torch.float32)
     bad = DeviceTensor(0xABCD0000, (64, 64), torch.float32)  # wrong shape
+    out = torch.zeros(128, 128, dtype=torch.float32)
+
+    with patch("pypto.runtime.distributed_runner.execute_distributed"):
+        with pytest.raises(TypeError, match="shape"):
+            compiled(a, bad, out)
+
+
+def _stacked(full_shape):
+    """Build a StackedDeviceTensor of ``full_shape`` (B shards resident per rank)."""
+    b = full_shape[0]
+    tail = tuple(full_shape[1:])
+    shards = [DeviceTensor(0x10000 + i * 0x1000, tail, torch.float32) for i in range(b)]
+    return StackedDeviceTensor(shards, full_shape, tuple(range(b)))
+
+
+def test_call_accepts_stacked_device_tensor(compiled):
+    """A StackedDeviceTensor is accepted at the one-shot entry (parity with
+    DeviceTensor) and passed through to execute_distributed unchanged."""
+    a = torch.zeros(128, 128, dtype=torch.float32)
+    stacked = _stacked((128, 128))  # per-card resident shards for the [128,128] param
+    out = torch.zeros(128, 128, dtype=torch.float32)
+
+    with patch("pypto.runtime.distributed_runner.execute_distributed") as mock_exec:
+        compiled(a, stacked, out)
+
+    mock_exec.assert_called_once()
+    coerced = mock_exec.call_args.args[1]
+    assert coerced[1] is stacked  # StackedDeviceTensor reached the runner unchanged
+
+
+def test_call_validates_stacked_device_tensor_shape(compiled):
+    """A StackedDeviceTensor whose full_shape mismatches the param is rejected."""
+    a = torch.zeros(128, 128, dtype=torch.float32)
+    bad = _stacked((64, 64))  # wrong full_shape for the [128,128] param
     out = torch.zeros(128, 128, dtype=torch.float32)
 
     with patch("pypto.runtime.distributed_runner.execute_distributed"):

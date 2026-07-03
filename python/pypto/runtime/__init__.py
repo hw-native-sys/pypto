@@ -25,7 +25,7 @@ Example::
 """
 
 from .bench import BenchmarkStats, TraceInvocation, TraceSpan, benchmark
-from .device_tensor import DeviceTensor
+from .device_tensor import DeviceTensor, StackedDeviceTensor
 from .distributed_runner import DistributedWorker, execute_distributed_compiled
 from .log_config import _ensure_configured as _ensure_log_configured
 from .log_config import configure_log
@@ -52,6 +52,7 @@ __all__ = [
     "TraceSpan",
     "ChipWorker",
     "DeviceTensor",
+    "StackedDeviceTensor",
     "DistributedWorker",
     "RegistrationHandle",
     "RunConfig",
