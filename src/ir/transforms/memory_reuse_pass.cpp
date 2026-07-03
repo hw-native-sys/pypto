@@ -276,6 +276,30 @@ inline bool SubtreeReadsBase(const StmtPtr& stmt, const Var* target_base) {
   return c.bases.count(target_base) > 0;
 }
 
+// Collects the MemRef bases WRITTEN (assignment LHS) in a subtree — the dual of
+// SubtreeReadBaseCollector, which intentionally skips write targets. Used by the
+// branch-tail liveness scan to also reject a later write-only clobber of the base
+// (a fresh def whose LHS aliases the base but that does not read it), which a
+// reads-only scan would miss.
+class SubtreeWriteBaseCollector : public IRVisitor {
+ public:
+  std::set<const Var*> bases;
+
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    if (auto tile = GetTileTypeWithMemRef(op->var_->GetType())) {
+      bases.insert(GetDefinedMemRef(tile)->base_.get());
+    }
+    IRVisitor::VisitStmt_(op);  // continue into nested stmts
+  }
+};
+
+inline bool SubtreeWritesBase(const StmtPtr& stmt, const Var* target_base) {
+  if (!stmt) return false;
+  SubtreeWriteBaseCollector c;
+  c.VisitStmt(stmt);
+  return c.bases.count(target_base) > 0;
+}
+
 /// Plans top-down retypes. Produces (old Var -> new Type) map.
 class TopDownRetargeter {
  public:
@@ -728,7 +752,10 @@ class TopDownRetargeter {
         auto pos = std::find(seq->stmts_.begin(), seq->stmts_.end(), child_on_path);
         if (pos != seq->stmts_.end()) {
           for (++pos; pos != seq->stmts_.end(); ++pos) {
-            if (SubtreeReadsBase(*pos, target_base)) return false;
+            // A later READ observes the retyped value's buffer; a later WRITE-only
+            // def clobbers it before its consumer. Reject both (SubtreeReadsBase
+            // alone misses the write-only clobber — the seed-branch tail case).
+            if (SubtreeReadsBase(*pos, target_base) || SubtreeWritesBase(*pos, target_base)) return false;
           }
         }
       }
@@ -2441,10 +2468,50 @@ class NormalizeIdentityCopyBuffersMutator : public IRMutator {
         return std::make_shared<AssignStmt>(new_lhs, new_src, op->span_);
       }
     }
+    // An in-place accumulator Call (GetOutputReusesInputArg, e.g. tile.matmul_acc)
+    // is not a bare rename, but its output MemRef aliases its reused input's. When
+    // the coalescing retargeted that input onto another buffer (its bare-copy chain
+    // retyped in subst_ above), the Call's output must follow — else it is left
+    // declared on the now-orphaned original buffer that nothing writes, and
+    // downstream reads of this output address a stale, never-written buffer (the
+    // non-divisor K-peel matmul_acc tail after CoalesceAccumulatorIfPhis).
+    if (auto reanchored = ReanchorInplaceOutput(op)) return reanchored;
     return IRMutator::VisitStmt_(op);
   }
 
  private:
+  /// Re-anchor an in-place op's output onto its reused input's new buffer when the
+  /// input was retargeted, preserving the output's tile metadata (shape/dtype/space)
+  /// and swapping only the MemRef.  Returns nullptr when not applicable.
+  StmtPtr ReanchorInplaceOutput(const AssignStmtPtr& op) {
+    auto call = As<Call>(op->value_);
+    if (!call) return nullptr;
+    const auto& reg = OpRegistry::GetInstance();
+    if (!reg.IsRegistered(call->op_->name_)) return nullptr;
+    auto reuse_idx = reg.GetEntry(call->op_->name_).GetOutputReusesInputArg();
+    if (!reuse_idx.has_value() || *reuse_idx >= call->args_.size()) return nullptr;
+    auto in_var = AsVarLike(call->args_[*reuse_idx]);
+    if (!in_var) return nullptr;
+    auto new_in = AsVarLike(VisitExpr(in_var));                   // follow prior subst_ renames
+    if (!new_in || new_in.get() == in_var.get()) return nullptr;  // input not moved
+    auto lhs_tile = GetTileTypeWithMemRef(op->var_->GetType());
+    auto in_old_tile = GetTileTypeWithMemRef(in_var->GetType());
+    auto in_new_tile = GetTileTypeWithMemRef(new_in->GetType());
+    if (!lhs_tile || !in_old_tile || !in_new_tile) return nullptr;
+    // Fire only when the output aliased the input in-place AND the input moved.
+    if (!MemRef::SameAllocation(GetDefinedMemRef(lhs_tile), GetDefinedMemRef(in_old_tile)) ||
+        MemRef::SameAllocation(GetDefinedMemRef(in_new_tile), GetDefinedMemRef(in_old_tile))) {
+      return nullptr;
+    }
+    auto new_type = CloneTypeWithMemRef(op->var_->GetType(), GetDefinedMemRef(in_new_tile),
+                                        in_new_tile->GetMemorySpace());
+    auto new_lhs = std::make_shared<Var>(op->var_->name_hint_, new_type, op->var_->span_);
+    subst_[op->var_] = new_lhs;
+    auto recursed = As<AssignStmt>(IRMutator::VisitStmt_(op));
+    INTERNAL_CHECK_SPAN(recursed, op->span_) << "Internal error: AssignStmt visit must yield an AssignStmt";
+    return std::make_shared<AssignStmt>(new_lhs, recursed->value_, recursed->span_);
+  }
+
   std::map<VarPtr, ExprPtr> subst_;
 };
 

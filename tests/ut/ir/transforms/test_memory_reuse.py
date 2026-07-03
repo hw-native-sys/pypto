@@ -2828,6 +2828,90 @@ class TestTopDownRetargeter:
             f"pre={bases.get('pre')} prev={bases.get('prev')}\n{ir.python_print(After)}"
         )
 
+    def test_seed_branch_write_only_clobber_blocks_acc_coalesce(self):
+        """Safety gate for the accumulator-if-phi coalescer's branch-tail
+        liveness scan: a *write* to the accumulator buffer after the seed (with
+        no read) must block coalescing, not just a read.
+
+        The seed branch computes the fresh ``seed`` (its own Acc buffer) and then
+        a *write-only* op ``_clob`` that lands on the accumulator buffer
+        (``mem_acc_5``) — a fresh matmul reading only Mat operands, so it never
+        *reads* ``mem_acc_5``.  If the coalescer retargeted ``seed`` onto
+        ``mem_acc_5`` (as the read-only scan would allow), ``_clob`` — sequenced
+        after ``seed`` — would overwrite the yielded value before the phi is read.
+        The scan must therefore reject a later write of the target base, not only
+        a later read (``SubtreeReadsBase`` alone misses the write-only clobber
+        because the read collector skips the LHS definition of each stmt).
+
+        Authored in fully-lowered form (explicit allocs + MemRefs) and run through
+        ``memory_reuse`` alone: the clobbering alias is a specific buffer layout
+        that only surfaces after allocation, so it cannot be expressed through the
+        high-level ``init_mem_ref`` path (which hands every tile a distinct base).
+        Verification off: the declined phi is reconciled by YieldFixup's usual
+        (legal, distinct-buffer) move — we assert only the safety property, that
+        ``seed`` was NOT retargeted onto the accumulator buffer.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 64], pl.BF16, pl.MemRef("mem_ddr_0", 0, 2048)],
+                rhs: pl.Tensor[[64, 64], pl.BF16, pl.MemRef("mem_ddr_1", 0, 8192)],
+                cond: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32, pl.MemRef("mem_ddr_2", 0, 4096)]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                mem_mat_3: pl.Ptr = pl.tile.alloc(pl.Mem.Mat, 2048)
+                mem_mat_4: pl.Ptr = pl.tile.alloc(pl.Mem.Mat, 8192)
+                mem_acc_5: pl.Ptr = pl.tile.alloc(pl.Mem.Acc, 4096)
+                mem_acc_6: pl.Ptr = pl.tile.alloc(pl.Mem.Acc, 4096)
+                sa: pl.Tile[[16, 64], pl.BF16, pl.MemRef(mem_mat_3, 0, 2048), pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [16, 64], [16, 64], target_memory=pl.Mem.Mat
+                )
+                sb: pl.Tile[[64, 64], pl.BF16, pl.MemRef(mem_mat_4, 0, 8192), pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Mat
+                )
+                prev: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_5, 0, 4096), pl.Mem.Acc] = pl.tile.matmul(
+                    sa, sb
+                )
+                if cond < 1:
+                    seed: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_6, 0, 4096), pl.Mem.Acc] = (
+                        pl.tile.matmul(sa, sb)
+                    )
+                    # Write-only clobber of the accumulator buffer mem_acc_5: a
+                    # fresh matmul reading only Mat operands, so it never *reads*
+                    # mem_acc_5. Sequenced after `seed`, before the yield. Left
+                    # deliberately unread (``_`` prefix) — only its write to the
+                    # accumulator base matters; a read here would already trip the
+                    # read-only scan and mask the write-only gap this test guards.
+                    _clob: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_5, 0, 4096), pl.Mem.Acc] = (
+                        pl.tile.matmul(sa, sb)
+                    )
+                    phi: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_6, 0, 4096), pl.Mem.Acc] = pl.yield_(
+                        seed
+                    )
+                else:
+                    acc: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_5, 0, 4096), pl.Mem.Acc] = (
+                        pl.tile.matmul_acc(prev, sa, sb)
+                    )
+                    phi: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_5, 0, 4096), pl.Mem.Acc] = pl.yield_(
+                        acc
+                    )
+                result: pl.Tensor[[16, 64], pl.FP32, pl.MemRef("mem_ddr_2", 0, 4096)] = pl.tile.store(
+                    phi, [0, 0], out
+                )
+                return result
+
+        with passes.PassContext([], passes.VerificationLevel.NONE):
+            After = passes.memory_reuse()(Before)
+        bases = _collect_tile_memref_bases(After)
+        assert bases["seed"] != bases["prev"], (
+            f"seed must not be coalesced onto the accumulator buffer when a later write-only op "
+            f"clobbers it in the branch tail: seed={bases.get('seed')} prev={bases.get('prev')}\n"
+            f"{ir.python_print(After)}"
+        )
+
     def test_retargeter_declines_when_target_still_live(self):
         """Safety check: if target's base is read after the candidate
         producer (here, via another op that reads the iter_arg), the
