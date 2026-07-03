@@ -376,31 +376,6 @@ def compile_single_orchestration(
 
 
 # ---------------------------------------------------------------------------
-# CoreCallable.build compatibility
-# ---------------------------------------------------------------------------
-
-# simpler #1181 replaced ``CoreCallable.build``'s ``arg_index`` parameter with a
-# positional dump + func_id array, removing the parameter entirely. Older
-# runtimes (pre-#1181) instead *require* ``arg_index`` parallel to ``signature``.
-# Detect support once from the nanobind signature (exposed in ``__doc__``) so
-# pypto drives both runtime generations without a pin bump.
-_BUILD_ACCEPTS_ARG_INDEX = "arg_index" in (CoreCallable.build.__doc__ or "")
-
-
-def _build_core_callable(kernel: dict, signature: list, binary: bytes) -> CoreCallable:
-    """Build a :class:`CoreCallable`, passing ``arg_index`` only when supported.
-
-    On pre-#1181 runtimes ``arg_index`` is mandatory and parallel to
-    ``signature`` (it defaults to the identity payload-slot mapping when the
-    kernel config omits it); on #1181+ runtimes the parameter no longer exists.
-    """
-    if _BUILD_ACCEPTS_ARG_INDEX:
-        arg_index = kernel.get("arg_index", list(range(len(signature))))
-        return CoreCallable.build(signature=signature, binary=binary, arg_index=arg_index)
-    return CoreCallable.build(signature=signature, binary=binary)
-
-
-# ---------------------------------------------------------------------------
 # compile_and_assemble
 # ---------------------------------------------------------------------------
 
@@ -473,13 +448,13 @@ def compile_and_assemble(
         cached_bin = _load_binary(cache_file)
         if cached_bin is not None:
             sig = kernel.get("signature", [])
-            return (func_id, _build_core_callable(kernel, sig, cached_bin))
+            return (func_id, CoreCallable.build(signature=sig, binary=cached_bin))
 
         # Compile via shared function; skip secondary prebuild cache write
         _, kernel_bin = compile_single_kernel(kernel, compiler, platform, pto_isa_root, runtime_name)
 
         sig = kernel.get("signature", [])
-        return (func_id, _build_core_callable(kernel, sig, kernel_bin))
+        return (func_id, CoreCallable.build(signature=sig, binary=kernel_bin))
 
     def _compile_orchestration() -> bytes:
         source = Path(orchestration["source"])

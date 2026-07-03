@@ -837,14 +837,6 @@ def _generate_config_file(
         signature = func_name_to_signature.get(name)
         if signature:
             entry += f', "signature": [{_format_signature(signature)}]'
-            # arg_index is mandatory and parallel to signature: it gives each
-            # signature entry's absolute slot in the task payload (used by the
-            # runtime tensor dump). pypto's payload is tensors-first (scalars
-            # are reordered after tensors by the orchestration codegen) and the
-            # signature excludes scalars, so each tensor entry maps 1:1 to
-            # payload slot i — an identity index.
-            idx_str = ", ".join(str(i) for i in range(len(signature)))
-            entry += f', "arg_index": [{idx_str}]'
         entry += "},"
         lines.append(entry)
 
