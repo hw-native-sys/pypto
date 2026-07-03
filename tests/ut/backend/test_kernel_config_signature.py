@@ -107,5 +107,59 @@ class TestKernelConfigSignature:
         assert _is_valid_python(text)
 
 
+class TestOrchestrationConfigSignature:
+    """Regression tests for the ``ORCHESTRATION`` ``signature`` emission.
+
+    Without this, the ChipCallable signature is empty (``sig_count == 0``) and
+    ``bind_callable_to_runtime_impl`` cannot tell which orch tensors are
+    read-only inputs, so every tensor is conservatively D2H-copied-back and the
+    pure-OUT on-device memset fast path is disabled. The signature is per-tensor
+    in ``orch_args`` tensor order (scalars excluded), matching the runtime's
+    ``orch_args.tensor(i)`` index.
+    """
+
+    def test_orchestration_signature_emitted(self) -> None:
+        text = _generate_config_file(
+            **_base_inputs(),
+            orchestration_signature=["IN", "IN", "OUT"],
+        )
+        # ArgDirection import is present and the ORCHESTRATION dict carries it.
+        assert "from simpler.task_interface import ArgDirection as _D" in text
+        assert '"signature": [_D.IN, _D.IN, _D.OUT]' in text
+        # The signature sits inside the ORCHESTRATION dict, not KERNELS.
+        orch_block = text.split("KERNELS")[0]
+        assert '"signature": [_D.IN, _D.IN, _D.OUT]' in orch_block
+        assert _is_valid_python(text)
+
+    def test_no_orchestration_signature_is_noop(self) -> None:
+        # Omitting the orch signature keeps the pre-fix behavior: no key, and
+        # (with no kernel signatures either) no ArgDirection import.
+        text = _generate_config_file(**_base_inputs(), orchestration_signature=[])
+        assert "ArgDirection" not in text
+        assert '"signature"' not in text
+        assert _is_valid_python(text)
+
+    def test_orchestration_and_kernel_signatures_coexist(self) -> None:
+        text = _generate_config_file(
+            **_base_inputs(),
+            func_name_to_signature={"matmul_aic": ["IN", "IN", "INOUT"]},
+            orchestration_signature=["IN", "OUT"],
+        )
+        # Both the ORCHESTRATION and the KERNELS entry carry a signature.
+        orch_block, kernels_block = text.split("KERNELS", 1)
+        assert '"signature": [_D.IN, _D.OUT]' in orch_block
+        assert '"signature": [_D.IN, _D.IN, _D.INOUT]' in kernels_block
+        assert _is_valid_python(text)
+
+    def test_orchestration_signature_inout(self) -> None:
+        text = _generate_config_file(
+            **_base_inputs(),
+            orchestration_signature=["INOUT", "IN", "OUT"],
+        )
+        assert '"signature": [_D.INOUT, _D.IN, _D.OUT]' in text
+        assert "_D.SCALAR" not in text
+        assert _is_valid_python(text)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -738,11 +738,21 @@ def _generate_kernel_wrapper(
     return f"{header}\n// --- ptoas-generated code ---\n{ptoas_body}\n{wrapper_func}"
 
 
+def _format_signature(directions: list[str]) -> str:
+    """Render a runtime ArgDirection name list as a ``[_D.IN, _D.OUT, ...]`` body.
+
+    Used for both the per-kernel ``KERNELS`` signature and the ``ORCHESTRATION``
+    signature so the ``_D.{name}`` token format lives in one place.
+    """
+    return ", ".join(f"_D.{d}" for d in directions)
+
+
 def _generate_config_file(
     orch_func_name: str,
     func_name_to_id: dict[str, int],
     func_name_to_core_type: dict[str, _ir_core.CoreType],
     func_name_to_signature: dict[str, list[str]] | None = None,
+    orchestration_signature: list[str] | None = None,
     *,
     block_dim: int | None = None,
 ) -> str:
@@ -763,9 +773,20 @@ def _generate_config_file(
     runtime builds a non-empty CoreCallable signature — required for the tensor
     dump to match the task payload tensor_count. Kernels without an entry fall
     back to an empty signature (the pre-existing behavior).
+
+    ``orchestration_signature`` is the orchestration entry's per-tensor
+    ``ArgDirection`` names ("IN"/"OUT"/"INOUT"), in ``orch_args`` tensor order
+    (scalars excluded). When present, the ``ORCHESTRATION`` dict gains a
+    ``"signature"`` field so the runtime builds a non-empty ChipCallable
+    signature, indexed by the orch tensor index in
+    ``bind_callable_to_runtime_impl``. This lets read-only IN tensors skip the
+    wasteful D2H copy-back and pure-OUT tensors take the on-device memset fast
+    path. Without it the signature is empty and every tensor is conservatively
+    copied back (the pre-existing behavior).
     """
     func_name_to_signature = func_name_to_signature or {}
-    has_signatures = any(func_name_to_signature.values())
+    orchestration_signature = orchestration_signature or []
+    has_signatures = any(func_name_to_signature.values()) or bool(orchestration_signature)
 
     runtime_lines = [
         "RUNTIME_CONFIG = {",
@@ -795,7 +816,11 @@ def _generate_config_file(
         *runtime_lines,
         "ORCHESTRATION = {",
         f'\t"source": str(_ROOT_DIR / "orchestration" / "{orch_func_name}.cpp"),',
-        '\t"function_name": "aicpu_orchestration_entry"',
+        '\t"function_name": "aicpu_orchestration_entry",',
+    ]
+    if orchestration_signature:
+        lines.append(f'\t"signature": [{_format_signature(orchestration_signature)}],')
+    lines += [
         "}\n",
         "KERNELS = [",
     ]
@@ -811,8 +836,7 @@ def _generate_config_file(
         )
         signature = func_name_to_signature.get(name)
         if signature:
-            sig_str = ", ".join(f"_D.{d}" for d in signature)
-            entry += f', "signature": [{sig_str}]'
+            entry += f', "signature": [{_format_signature(signature)}]'
             # arg_index is mandatory and parallel to signature: it gives each
             # signature entry's absolute slot in the task payload (used by the
             # runtime tensor dump). pypto's payload is tensors-first (scalars
@@ -1522,6 +1546,7 @@ def _generate_single_chip(
                     orch_result.func_name_to_id,
                     orch_result.func_name_to_core_type,
                     orch_result.func_name_to_signature,
+                    orch_result.orchestration_signature,
                     block_dim=block_dim,
                 )
         except Exception as e:

@@ -254,7 +254,7 @@ def build_dynamic_paged_attention_program(
             value_cache: pl.Tensor[[KEY_CACHE_ROWS_DYN, HEAD_DIM_DYN], pl.BF16],
             block_table: pl.Tensor[[BLOCK_TABLE_FLAT_DYN], pl.INT32],
             context_lens: pl.Tensor[[BATCH_DYN], pl.INT32],
-            out: pl.Tensor[[QUERY_ROWS_DYN, HEAD_DIM_DYN], pl.FP32],
+            out: pl.Out[pl.Tensor[[QUERY_ROWS_DYN, HEAD_DIM_DYN], pl.FP32]],
         ) -> pl.Tensor[[QUERY_ROWS_DYN, HEAD_DIM_DYN], pl.FP32]:
             """Paged attention orchestration with dynamic-shape InCore kernels.
 

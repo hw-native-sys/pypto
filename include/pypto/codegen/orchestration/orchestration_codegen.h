@@ -37,6 +37,13 @@ struct OrchestrationResult {
   /// kernel_config.py to set each CoreCallable signature so the runtime tensor
   /// dump's per-subtask tensor-arg count matches the task payload tensor_count.
   std::map<std::string, std::vector<std::string>> func_name_to_signature;
+  /// Orchestration entry's per-tensor runtime ArgDirection names ("IN"/"OUT"/
+  /// "INOUT"), in orch_args tensor order (declaration order, scalars skipped).
+  /// This matches the orch tensor index the runtime uses in
+  /// bind_callable_to_runtime_impl (orch_args.tensor(i)), letting it set the
+  /// ChipCallable signature so read-only IN tensors skip the D2H copy-back and
+  /// pure-OUT tensors take the on-device memset fast path.
+  std::vector<std::string> orchestration_signature;
 };
 
 /**

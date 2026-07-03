@@ -62,6 +62,11 @@ class OrchestrationResult:
         """Kernel name to tensor-arg ArgDirection name list (scalars excluded), in task-payload order."""
         ...
 
+    @property
+    def orchestration_signature(self) -> list[str]:
+        """Orchestration entry per-tensor ArgDirection names (scalars excluded), in orch_args tensor order."""
+        ...
+
 class BuiltinNextLevelSpec:
     """Builtin chip-callable variant requested by distributed host codegen."""
 
