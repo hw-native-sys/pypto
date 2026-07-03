@@ -123,7 +123,7 @@ jobs:
     needs: toolchain
     # TEST MODE: keep the device runner and pin task-submit to its card (see
     # ci.yml system-tests). FLIP TO PROD: cpu runner + `--device auto`.
-    runs-on: [self-hosted, linux, arm64, npu-1-device]
+    runs-on: [self-hosted, linux, arm64, npu]
     defaults:
       run:
         working-directory: perf-checkout

@@ -195,12 +195,12 @@ jobs:
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
-    # TEST MODE: keep the device runner so DEVICE_ID/DEVICE_RANGE exist and pin
+    # TEST MODE: keep the device runner so DEVICE_ID/DEVICE_ID exist and pin
     # task-submit to that card (validates the new compile-card-free + task-submit
     # execute flow deterministically). FLIP TO PROD: change this to
     # `[self-hosted, linux, arm64, cpu]` and drop --task-submit-device below so
     # cases borrow any free card via `--device auto`.
-    runs-on: [self-hosted, linux, arm64, npu-1-device]
+    runs-on: [self-hosted, linux, arm64, npu]
     defaults:
       run:
         working-directory: st-checkout
@@ -328,13 +328,13 @@ jobs:
         run: |
           source activate.sh
           # TEST MODE: --task-submit-device pins EVERY device run (batched + the
-          # undiscovered-case tail) to this runner's card (DEVICE_RANGE) through
+          # undiscovered-case tail) to this runner's card (DEVICE_ID) through
           # task-submit's per-card lock. FLIP TO PROD: cpu runner, drop
           # --task-submit-device, use --device auto (borrow any free card).
-          # DEVICE_RANGE must be non-empty, else task-submit would auto-borrow a
+          # DEVICE_ID must be non-empty, else task-submit would auto-borrow a
           # host card this runner does not own (halMemCtl EACCES).
-          echo "[device] DEVICE_ID=$DEVICE_ID DEVICE_RANGE=$DEVICE_RANGE"
-          test -n "$DEVICE_RANGE" || { echo "DEVICE_RANGE is empty in the runner env"; exit 1; }
+          echo "[device] DEVICE_ID=$DEVICE_ID DEVICE_ID=$DEVICE_ID"
+          test -n "$DEVICE_ID" || { echo "DEVICE_ID is empty in the runner env"; exit 1; }
           # Category A (`-m device_batch`, auto-applied to tests using
           # test_runner.run): compile + golden card-free, device run BATCHED via
           # task-submit. Everything else (`-m 'not device_batch'` — direct @pl.jit
@@ -352,7 +352,7 @@ jobs:
             --ignore=tests/st/codegen \
             --ignore=tests/st/runtime/framework_and_models/test_dump_tag.py \
             --precompile-workers=32 --execute-via-task-submit --execute-batch-size=64 \
-            --task-queue-timeout=1800 --task-max-time=600 --task-submit-device="$DEVICE_RANGE" \
+            --task-queue-timeout=1800 --task-max-time=600 --task-submit-device="$DEVICE_ID" \
             --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }}
 
       - name: Test direct-device (mechanism B — one card, in-process)
@@ -369,7 +369,7 @@ jobs:
         # here collapses pytest's dir collection.)
         run: |
           source activate.sh
-          task-submit --device "$DEVICE_RANGE" --timeout 1800 --max-time 1800 \
+          task-submit --device "$DEVICE_ID" --timeout 1800 --max-time 1800 \
             --run "cd $GITHUB_WORKSPACE/st-checkout && source activate.sh && python -m pytest \
               tests/st -v -m 'not device_batch' \
               --ignore=tests/st/distributed \
@@ -385,7 +385,7 @@ jobs:
         # via task-submit) because it lives under the --ignore'd tests/st/codegen.
         run: |
           source activate.sh
-          task-submit --device "$DEVICE_RANGE" --timeout 1800 --max-time 600 \
+          task-submit --device "$DEVICE_ID" --timeout 1800 --max-time 600 \
             --run "cd $GITHUB_WORKSPACE/st-checkout && source activate.sh && python -m pytest \
               tests/st/codegen/torch/test_torch_codegen_paged_attention.py \
               -v --device=\$TASK_DEVICE --platform=a2a3 \
@@ -447,9 +447,9 @@ jobs:
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
-    # TEST MODE: keep the 2-device runner and pin task-submit to DEVICE_RANGE
+    # TEST MODE: keep the 2-device runner and pin task-submit to DEVICE_ID
     # (see system-tests). FLIP TO PROD: cpu runner + `--device auto --device-num 2`.
-    runs-on: [self-hosted, linux, arm64, npu-2-device]
+    runs-on: [self-hosted, linux, arm64, npu]
     defaults:
       run:
         working-directory: dist-checkout
@@ -566,7 +566,7 @@ jobs:
         # HCCL); task-submit preserves that env into the child.
         run: |
           source activate.sh
-          task-submit --device "$DEVICE_RANGE" --timeout 1800 --max-time 900 \
+          task-submit --device "$DEVICE_ID" --device-num 2 --timeout 1800 --max-time 900 \
             --run "cd $GITHUB_WORKSPACE/dist-checkout && source activate.sh && python -m pytest tests/st/distributed -v --device=\$TASK_DEVICE --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }} --ignore=tests/st/distributed/test_l2_multi_orch.py"
 
       - name: Kill orphaned task-submit tasks
@@ -604,7 +604,7 @@ jobs:
       contents: read
     # TEST MODE: keep the device runner and pin task-submit to its card (see
     # system-tests). FLIP TO PROD: cpu runner + `--device auto`.
-    runs-on: [self-hosted, linux, arm64, npu-1-device]
+    runs-on: [self-hosted, linux, arm64, npu]
     defaults:
       run:
         working-directory: lib-checkout
@@ -726,7 +726,7 @@ jobs:
         run: |
           source activate.sh
           task-submit --device "$DEVICE_ID" --timeout 1800 --max-time 1800 \
-            --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/qwen3/14b/decode_layer.py -p a2a3 -d \$TASK_DEVICE"
+            --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/qwen3/14b/decode_fwd.py -p a2a3 -d \$TASK_DEVICE"
 
       # NOTE: Qwen3-14B decode performance monitoring (L2-swimlane makespan +
       # perf_guard) lives in the daily_ci.yml `qwen3-perf` job, not here. Per-PR
