@@ -25,6 +25,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
@@ -121,7 +122,7 @@ std::vector<std::unordered_set<const Var*>> ComputeAliasClasses(const ForStmtPtr
       auto call = AsCallOrSubmitView(assign->value_);
       if (!call) continue;
       // tensor.assemble: result var aliases its first arg (the target).
-      if (call->op_->name_ == "tensor.assemble" && !call->args_.empty()) {
+      if (IsOp(call, "tensor.assemble") && !call->args_.empty()) {
         auto first_arg = AsVarLike(call->args_[0]);
         if (first_arg) {
           for (auto& cls : aliases) {
