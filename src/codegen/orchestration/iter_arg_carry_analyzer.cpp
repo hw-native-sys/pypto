@@ -63,6 +63,23 @@ ForStmtPtr FindForStmtByReturnVar(const StmtPtr& body, const Var* target) {
   return finder.result;
 }
 
+// Build the alias-equivalence set for each iter_arg. A Var is in
+// ``iter_arg``'s class if it IS the iter_arg, or it was assigned the
+// result of ``tensor.assemble(<member>, ...)`` — assemble writes in place
+// to its first arg so the result Var is just another name for the same
+// backing buffer. The transitive closure is computed by repeatedly
+// walking AssignStmts in the body until no new members are added.
+// (This mirrors HandleTensorAssembleAssign at codegen-emit time, but
+// we need it pre-body so we can decide on the carry lowering.)
+//
+// Four alias rules:
+//   * tensor.assemble: result aliases its first arg (the target).
+//   * Nested ForStmts: the parent's carry threaded through a nested
+//     loop comes out via the nested loop's return_var.
+//   * Output_existing/inout calls: the result aliases the Out/InOut
+//     arg the callee actually returns.
+//   * TupleGetItemExpr: climb to the tuple-producing call and resolve
+//     the corresponding output arg.
 std::vector<std::unordered_set<const Var*>> ComputeAliasClasses(const ForStmtPtr& for_stmt,
                                                                 const BodyAliases& body_aliases,
                                                                 const ProgramPtr& program) {
@@ -71,6 +88,8 @@ std::vector<std::unordered_set<const Var*>> ComputeAliasClasses(const ForStmtPtr
     aliases[i].insert(for_stmt->iter_args_[i].get());
   }
 
+  // Index assignments by produced var so the TupleGetItemExpr rule can
+  // climb tuple chains.
   std::unordered_map<const Var*, AssignStmtPtr> var_to_assign;
   for (const auto& a : body_aliases.assigns) {
     var_to_assign[a->var_.get()] = a;
@@ -81,8 +100,11 @@ std::vector<std::unordered_set<const Var*>> ComputeAliasClasses(const ForStmtPtr
     changed = false;
     for (const auto& assign : body_aliases.assigns) {
       // TupleGetItemExpr: climb to the tuple-producing call or submit and
-      // resolve the corresponding output arg (Submit is viewed as a Call
-      // via AsCallOrSubmitView, so its output args alias identically).
+      // resolve the corresponding output arg. Multi-output InCore kernels
+      // return tuples; each ``var = ret_tuple[i]`` extract should alias the
+      // i-th output-side arg of the call (using the codegen's own indexing).
+      // Submit is viewed as a Call via AsCallOrSubmitView, so its output
+      // args alias identically.
       if (auto tge = As<TupleGetItemExpr>(assign->value_)) {
         auto tuple_var = AsVarLike(tge->tuple_);
         if (tuple_var) {
@@ -134,7 +156,12 @@ std::vector<std::unordered_set<const Var*>> ComputeAliasClasses(const ForStmtPtr
         }
       }
       // Calls with output_existing/inout args (e.g. InCore kernels):
-      // the result aliases the Out/InOut arg the callee actually returns.
+      // the result aliases the Out/InOut arg the callee actually returns,
+      // mirroring the codegen alias ``const Tensor& result = args[out_idx];``
+      // emitted later by GenerateSingleReturnAlias / GenerateTupleReturnAliases.
+      // For kernels with multiple Out params (e.g. real result + GM scratch
+      // passed through pl.spmd mixed dispatch), tracing the ReturnStmt back
+      // to its Param avoids aliasing the result to an arbitrary scratch tensor.
       auto call_dirs = call->GetArgDirections();
       if (call_dirs.size() == call->args_.size()) {
         FunctionPtr call_callee = program->GetFunction(call->op_->name_);
@@ -158,9 +185,18 @@ std::vector<std::unordered_set<const Var*>> ComputeAliasClasses(const ForStmtPtr
         }
       }
     }
-    // Nested ForStmts: the parent's carry threaded through a nested
-    // loop comes out via the nested loop's return_var. ArrayType iter_args
-    // are excluded — they own a fresh C-stack array at each level.
+    // Nested ForStmts: the parent's carry threaded through a nested loop
+    // comes out via the nested loop's return_var.
+    //
+    // ArrayType iter_args are EXCLUDED from this propagation: unlike
+    // TensorType (a pointer-to-buffer alias), an ArrayType iter_arg owns a
+    // *fresh* C-stack array at each level. Treating the inner rv as an
+    // alias of the outer iter_arg would mis-mark the outer slot as
+    // ``is_rebind=false`` (silently dropping the outer's yield-back copy,
+    // which is the very mechanism that propagates state across phases in
+    // a SEQ x PARALLEL phase fence). The outer carry must be a distinct
+    // backing array and the outer yield must emit an explicit array-array
+    // copy back into it (see VisitStmt_(YieldStmtPtr)).
     for (const auto& nf : body_aliases.nested_fors) {
       for (size_t k = 0; k < nf->iter_args_.size(); ++k) {
         if (As<ArrayType>(nf->iter_args_[k]->GetType())) continue;
