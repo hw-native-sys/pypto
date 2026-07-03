@@ -121,7 +121,9 @@ def syncall(
     if mode != "soft":
         raise ValueError(f"syncall mode must be 'hard' or 'soft', got {mode!r}")
     if core_type not in _SYNCALL_SOFT_CORE_TYPES:
-        raise ValueError(f"soft syncall core_type must be one of {_SYNCALL_SOFT_CORE_TYPES}, got {core_type!r}")
+        raise ValueError(
+            f"soft syncall core_type must be one of {_SYNCALL_SOFT_CORE_TYPES}, got {core_type!r}"
+        )
     if gm_workspace is None:
         raise ValueError("soft syncall requires gm_workspace (a shared, zero-initialized GM INT32 tensor)")
     if not isinstance(used_cores, int) or used_cores <= 0:

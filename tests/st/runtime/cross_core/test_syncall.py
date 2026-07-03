@@ -249,9 +249,7 @@ class SPMDSyncAllMixSoftProgram:
             a_slice = pl.slice(a, [MIX_ROW_TILE, MIX_K], [m0, 0])
             a_add = pl.add(a_slice, 1.0)  # vector produces the matmul operand (V->C)
             # Cross-core barrier across every participating AIC block and AIV subblock.
-            pl.system.syncall(
-                mode="soft", core_type="mix", gm_workspace=sync_ws, used_cores=MIX_USED_CORES
-            )
+            pl.system.syncall(mode="soft", core_type="mix", gm_workspace=sync_ws, used_cores=MIX_USED_CORES)
             c_tile = pl.matmul(a_add, b)  # cube
             c_vec = pl.add(c_tile, 1.0)  # vector consumes the matmul result (C->V)
             out = pl.assemble(out, c_vec, [m0, 0])

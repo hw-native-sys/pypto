@@ -4033,9 +4033,8 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
     const bool is_mix = core_type == "mix";
     const size_t num_scratch = is_mix ? 2 : 1;
     const size_t expected_args = num_scratch + 2;  // gm_workspace + scratch(es) + used_cores
-    CHECK(op->args_.size() == expected_args)
-        << "system.syncall (soft " << core_type << ") requires " << expected_args
-        << " operands, got " << op->args_.size();
+    CHECK(op->args_.size() == expected_args) << "system.syncall (soft " << core_type << ") requires "
+                                             << expected_args << " operands, got " << op->args_.size();
     const size_t used_idx = op->args_.size() - 1;
 
     // gm_workspace: shared 1-D GM int32 tensor -> pto.partition_view over the

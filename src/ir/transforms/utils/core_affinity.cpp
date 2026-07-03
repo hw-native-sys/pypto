@@ -13,6 +13,7 @@
 
 #include <memory>
 #include <optional>
+#include <string>
 
 #include "pypto/core/any_cast.h"
 #include "pypto/core/logging.h"
