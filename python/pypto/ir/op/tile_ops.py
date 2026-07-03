@@ -118,8 +118,9 @@ def create(
     dtype: DataType,
     target_memory: MemorySpace = MemorySpace.Vec,
     transpose: bool | None = None,
-    flat_layout: bool | None = None,
     span: Span | None = None,
+    *,
+    flat_layout: bool | None = None,
 ) -> Call:
     """Create a tile from a shape.
 
@@ -133,13 +134,15 @@ def create(
             (DN2NZ tload) can fill. Default ``None`` keeps the canonical layout and
             is omitted from the op kwargs, so ordinary ``tile.create`` output is
             unchanged; only forwarded to the op when explicitly set.
-        flat_layout: When True, allocate a flat (non-fractal, slayout=none_box)
-            L1/cbuf tile — a contiguous byte-staging buffer rather than the boxed
-            NZ layout Mat tiles normally carry. Requires ``target_memory=Mat`` and
-            is mutually exclusive with ``transpose``. Used for the mix/aic_only
-            soft ``system.syncall`` L1 scratch, whose counter slots must be
-            contiguous. Default ``None`` keeps the canonical layout.
         span: Optional source span for debugging (auto-captured if not provided)
+        flat_layout: Keyword-only. When True, allocate a flat (non-fractal,
+            slayout=none_box) L1/cbuf tile — a contiguous byte-staging buffer
+            rather than the boxed NZ layout Mat tiles normally carry. Requires
+            ``target_memory=Mat`` and is mutually exclusive with ``transpose``.
+            Used for the mix/aic_only soft ``system.syncall`` L1 scratch, whose
+            counter slots must be contiguous. Default ``None`` keeps the
+            canonical layout. Kept keyword-only so it does not shift ``span``'s
+            positional slot for existing callers.
 
     Returns:
         Call expression that returns a TileType with the created tile
