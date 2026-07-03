@@ -85,7 +85,6 @@ CoreType InferFunctionCoreType(const FunctionPtr& func) {
 namespace {
 
 constexpr const char* kDualAivDispatchAttr = "dual_aiv_dispatch";
-constexpr const char* kAttrCompilerAutoManualScopeCandidate = "__compiler_auto_manual_scope_candidate";
 
 const char* ParamDirectionToRuntimeName(ParamDirection dir) {
   switch (dir) {
@@ -99,30 +98,6 @@ const char* ParamDirectionToRuntimeName(ParamDirection dir) {
   INTERNAL_CHECK(false) << "Internal error: unexpected ParamDirection value";
   return "";
 }
-
-// MaterializeRuntimeScopes wraps the orchestration function body and each
-// ForStmt / IfStmt branch body in an AUTO ``RuntimeScopeStmt`` so codegen emits
-// ``PTO2_SCOPE()`` 1:1 from the IR. The structural analyses below inspect those
-// bodies with hand-written traversals (GetLastYieldStmt, FlattenToStmts) that do
-// not descend through a scope node. ``UnwrapAutoScope`` peeks through leading
-// compiler-inserted scopes so those analyses see the original statements. User
-// manual scopes are intentionally left opaque.
-StmtPtr UnwrapAutoScope(const StmtPtr& stmt) {
-  if (auto scope = As<RuntimeScopeStmt>(stmt);
-      scope && (!scope->manual_ || scope->GetAttr<bool>(kAttrCompilerAutoManualScopeCandidate, false))) {
-    return UnwrapAutoScope(scope->body_);
-  }
-  // A user-written ``with pl.auto_scope():`` body may arrive as a single-statement
-  // SeqStmts wrapper (before NormalizeStmtStructure collapses it); peek through it
-  // (and any nested AUTO scopes) so the analyses still reach the real statements.
-  if (auto seq = As<SeqStmts>(stmt); seq && seq->stmts_.size() == 1) {
-    return UnwrapAutoScope(seq->stmts_[0]);
-  }
-  return stmt;
-}
-// not descend through a scope node. ``UnwrapAutoScope`` (in orchestration_analysis)
-// peeks through a single leading AUTO scope so those analyses see the original
-// statements. Manual scopes are intentionally left opaque — they were never auto-wrapped.
 
 // The runtime primitive ``Arg::set_dependencies(ptr, count)`` has no upper
 // bound on the explicit dep count, and codegen sizes each call's
@@ -699,82 +674,14 @@ class OrchestrationStmtCodegen : public CodegenBase {
     IterArgCarryAnalyzer carry_analyzer(program_, in_manual_scope_depth_);
     auto carry_plans = carry_analyzer.Analyze(for_stmt);
 
-      bool changed = true;
-      while (changed) {
-        changed = false;
-        for (const auto& assign : body_aliases.assigns) {
-          // (d) TupleGetItemExpr: climb to the tuple-producing call and resolve
-          // the corresponding output arg. Multi-output InCore kernels return
-          // tuples; each `var = ret_tuple[i]` extract should alias the i-th
-          // output-side arg of the call (using the codegen's own indexing).
-          if (auto tge = As<TupleGetItemExpr>(assign->value_)) {
-            auto tuple_var = AsVarLike(tge->tuple_);
-            if (tuple_var) {
-              auto it = var_to_assign.find(tuple_var.get());
-              if (it != var_to_assign.end()) {
-                // The tuple producer may be a Submit (pl.submit / `as tid`);
-                // view it as a Call so its output args alias identically.
-                auto tcall = AsCallOrSubmitView(it->second->value_);
-                if (tcall) {
-                  auto tdirs = tcall->GetArgDirections();
-                  if (tdirs.size() == tcall->args_.size()) {
-                    int64_t out_seen = 0;
-                    int64_t target_idx = static_cast<int64_t>(tge->index_);
-                    for (size_t a = 0; a < tdirs.size(); ++a) {
-                      if (tdirs[a] != ArgDirection::OutputExisting && tdirs[a] != ArgDirection::InOut &&
-                          tdirs[a] != ArgDirection::Output) {
-                        continue;
-                      }
-                      if (out_seen == target_idx) {
-                        auto out_arg = AsVarLike(tcall->args_[a]);
-                        if (out_arg) {
-                          for (auto& cls : aliases) {
-                            if (cls.count(out_arg.get()) && !cls.count(assign->var_.get())) {
-                              cls.insert(assign->var_.get());
-                              changed = true;
-                            }
-                          }
-                        }
-                        break;
-                      }
-                      ++out_seen;
-                    }
-                  }
-                }
-              }
-            }
-            continue;
-          }
-          auto call = AsCallOrSubmitView(assign->value_);
-          if (!call) continue;
-          // (a) tensor.assemble: result var aliases its first arg (the target).
-          if (IsOp(call, "tensor.assemble") && !call->args_.empty()) {
-            auto first_arg = AsVarLike(call->args_[0]);
-            if (first_arg) {
-              for (auto& cls : aliases) {
-                if (cls.count(first_arg.get()) && !cls.count(assign->var_.get())) {
-                  cls.insert(assign->var_.get());
-                  changed = true;
-                }
-              }
     // Post-process: compiler-derived dep collections use NeedsCompilerDepTaskId,
     // which lives on the codegen class (not the analyzer). Mark these iter_args
-    // as rebind and set the array-carry size from the const trip count.
+    // as needing compiler-dep collection and set the array-carry size from the
+    // const trip count. Carries without a const trip count on Parallel loops
+    // defer to a dynamic (vector) collection.
     for (size_t i = 0; i < carry_plans.size(); ++i) {
       if (i < for_stmt->return_vars_.size() && NeedsCompilerDepTaskId(for_stmt->return_vars_[i].get())) {
         carry_plans[i].compiler_dep_collection = true;
-        if (carry_plans[i].array_size == 0) {
-          // EvalConstTripCount (mirrors the copy in iter_arg_carry_analyzer.cpp).
-          if (auto start_ci = As<ConstInt>(for_stmt->start_)) {
-            auto stop_ci = As<ConstInt>(for_stmt->stop_);
-            auto step_ci = As<ConstInt>(for_stmt->step_);
-            if (stop_ci && step_ci && step_ci->value_ > 0) {
-              int64_t trip = (stop_ci->value_ - start_ci->value_ + step_ci->value_ - 1) / step_ci->value_;
-              if (trip > 0) carry_plans[i].array_size = trip;
-            }
-          }
-          carry_plans[i].array_size = EvalConstTripCount(for_stmt);
-        }
         // Always size compiler-dep carries from the outer loop's const trip
         // count.  ResolveArrayCarrySize may have already set array_size to an
         // inner Parallel loop's trip count (a Sequential outer wrapping a
@@ -783,79 +690,23 @@ class OrchestrationStmtCodegen : public CodegenBase {
         // count is authoritative for the fan-in array that collects all
         // producer TaskIds across iterations (YunjiQin review, PR #1813).
         carry_plans[i].array_size = EvalConstTripCount(for_stmt);
+        if (carry_plans[i].array_size <= 0 && for_stmt->kind_ == ForKind::Parallel) {
+          carry_plans[i].dynamic_compiler_dep_collection = true;
+        }
         // is_rebind is not overridden here: Analyze() already sets it for
         // TASK_ID iter_args when a YieldStmt is present, and the old code
         // (pre-refactor) only set it inside the yield guard.  Leaving it
         // unchanged preserves trivial-alias lowering when the body has no
         // yield (YunjiQin review, PR #1813).
       }
-      for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
-        auto yield_var = AsVarLike(yield->value_[i]);
-        // True rebind iff yield value is not in the iter_arg's alias class
-        // (i.e. not the iter_arg itself nor any tensor.assemble alias of it).
-        is_rebind[i] = !yield_var || !aliases[i].count(yield_var.get());
-        // TaskId iter_args are always rebind: the alias-closure logic above is
-        // about Tensor buffer identity (OUTPUT_EXISTING aliases), which doesn't
-        // apply to PTO2TaskId values — the runtime task_id at iter N+1 is
-        // genuinely different from iter N even when the IR Var aliases.
-        if (auto sty = As<ScalarType>(for_stmt->iter_args_[i]->GetType())) {
-          if (sty->dtype_ == DataType::TASK_ID) is_rebind[i] = true;
-        }
-        if (i < for_stmt->return_vars_.size() && NeedsCompilerDepTaskId(for_stmt->return_vars_[i].get())) {
-          is_rebind[i] = true;
-        }
-      }
     }
 
-    // For TaskId iter_args inside a manual scope we always lower via array
-    // carry: a Parallel ForStmt produces ``PTO2TaskId arr[N]`` with yields
-    // writing per-slot, and downstream ``add_dep`` iterates every slot. A
-    // Sequential ForStmt whose yield value is an inner Parallel rv is also
-    // array-carry of the same size. Scalar (single-name) carry would only
-    // fence the last-dispatched task — which is unsafe under MANUAL scope.
-
-    // Per-iter-arg array-carry size (0 means non-TaskId scalar carry).
-    std::vector<int64_t> array_sizes(for_stmt->iter_args_.size(), 0);
-    std::vector<bool> compiler_dep_collection(for_stmt->iter_args_.size(), false);
-    std::vector<bool> dynamic_compiler_dep_collection(for_stmt->iter_args_.size(), false);
-    std::optional<DynamicTaskIdCollection> dynamic_compiler_dep_collection_info;
-    for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
-      if (!is_rebind[i]) continue;
-      const bool compiler_dep_needs_loop_task_ids =
-          i < for_stmt->return_vars_.size() && NeedsCompilerDepTaskId(for_stmt->return_vars_[i].get());
-      if (compiler_dep_needs_loop_task_ids) {
-        array_sizes[i] = EvalConstTripCount(for_stmt);
-        compiler_dep_collection[i] = array_sizes[i] > 0;
-        if (array_sizes[i] <= 0 && for_stmt->kind_ == ForKind::Parallel) {
-          dynamic_compiler_dep_collection[i] = true;
-        }
-      } else if (in_manual_scope_depth_ > 0) {
-        array_sizes[i] = ResolveArrayCarrySize(for_stmt, i);
-      }
-    }
+    // Count dynamic compiler-dep slots per iteration (for vector sizing).
     size_t dynamic_compiler_dep_slots_per_iter = 0;
-    for (const bool enabled : dynamic_compiler_dep_collection) {
-      if (enabled) ++dynamic_compiler_dep_slots_per_iter;
+    for (const auto& plan : carry_plans) {
+      if (plan.dynamic_compiler_dep_collection) ++dynamic_compiler_dep_slots_per_iter;
     }
-
-    // A Parallel ForStmt with a TaskId iter_arg REQUIRES a const trip count
-    // so we can allocate a ``PTO2TaskId[N]`` backing store. Without it we
-    // would silently fall back to last-dispatched fence semantics — wrong
-    // under MANUAL scope. Surface this as a clear user-facing error instead
-    // of emitting incorrect code.
-    if (for_stmt->kind_ == ForKind::Parallel && in_manual_scope_depth_ > 0) {
-      for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
-        if (!is_rebind[i]) continue;
-        auto sty = As<ScalarType>(for_stmt->iter_args_[i]->GetType());
-        if (!sty || sty->dtype_ != DataType::TASK_ID) continue;
-        CHECK(array_sizes[i] > 0) << "manual_scope: pl.parallel loops carrying a manual_scope dep "
-                                  << "(via ``deps=[...]``) must have a statically-known trip count. "
-                                  << "The runtime fence requires a PTO2TaskId[N] array of fixed N. "
-                                  << "Either make the parallel loop's trip count a Python int "
-                                  << "(e.g. ``pl.parallel(4)``) or restructure to put the parallel "
-                                  << "loop inside a const-bounded scope.";
-      }
-    }
+    std::optional<DynamicTaskIdCollection> dynamic_compiler_dep_collection_info;
 
     // Emit carry declarations for each iter_arg. Three lowering paths:
     //   - array_size > 0  -> TaskId array-carry (PTO2TaskId arr[N])
@@ -1022,7 +873,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         emit_name_map_[iter_arg.get()] = init_var_name;
         emit_name_map_[return_var.get()] = init_var_name;
       }
-      if (dynamic_compiler_dep_collection[i]) {
+      if (carry_plans[i].dynamic_compiler_dep_collection) {
         if (!dynamic_compiler_dep_collection_info) {
           DynamicTaskIdCollection collection;
           collection.data_name = ReserveSyntheticEmitName("dynamic_compiler_dep_tids");
@@ -1105,8 +956,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
     code_ << Indent() << "}\n";
 
     std::unordered_map<std::string, std::string> dynamic_barrier_tids;
-    for (size_t i = 0; i < for_stmt->return_vars_.size() && i < dynamic_compiler_dep_collection.size(); ++i) {
-      if (!dynamic_compiler_dep_collection[i]) continue;
+    for (size_t i = 0; i < for_stmt->return_vars_.size() && i < carry_plans.size(); ++i) {
+      if (!carry_plans[i].dynamic_compiler_dep_collection) continue;
       const auto& return_var = for_stmt->return_vars_[i];
       if (!return_var) continue;
       auto vec_it = dynamic_task_id_collections_.find(return_var.get());

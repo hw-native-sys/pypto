@@ -466,8 +466,15 @@ BodyAliases CollectBodyAliases(const StmtPtr& body) {
 // UnwrapAutoScope
 // ---------------------------------------------------------------------------
 
+namespace {
+
+constexpr const char* kAttrCompilerAutoManualScopeCandidate = "__compiler_auto_manual_scope_candidate";
+
+}  // namespace
+
 StmtPtr UnwrapAutoScope(const StmtPtr& stmt) {
-  if (auto scope = As<RuntimeScopeStmt>(stmt); scope && !scope->manual_) {
+  if (auto scope = As<RuntimeScopeStmt>(stmt);
+      scope && (!scope->manual_ || scope->GetAttr<bool>(kAttrCompilerAutoManualScopeCandidate, false))) {
     return UnwrapAutoScope(scope->body_);
   }
   if (auto seq = As<SeqStmts>(stmt); seq && seq->stmts_.size() == 1) {

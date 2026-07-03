@@ -32,6 +32,10 @@ struct IterArgCarryPlan {
   /// always returns false here. The carry is initialised with
   /// PTO2TaskId::invalid() and filled by yielded producer TaskIds.
   bool compiler_dep_collection = false;
+  /// True when compiler-dep collection needs a dynamic (vector) backing store
+  /// because the ForStmt trip count is not a compile-time constant. Set by the
+  /// caller post-analysis alongside compiler_dep_collection.
+  bool dynamic_compiler_dep_collection = false;
 };
 
 /// Classifies ForStmt iter_args (trivial vs rebind) and sizes TaskId array carries.
