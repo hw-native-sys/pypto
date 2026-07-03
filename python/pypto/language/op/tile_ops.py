@@ -303,6 +303,7 @@ def create(
     dtype: DataType,
     target_memory: MemorySpace = MemorySpace.Vec,
     transpose: bool | None = None,
+    flat_layout: bool | None = None,
 ) -> Tile:
     """Create a tile from a shape.
 
@@ -313,6 +314,11 @@ def create(
         transpose: When True, allocate the transposed Mat (ZN) fractal layout for a
             matmul ``b_trans`` B-operand (the layout a DN-source ``gather_row`` fills).
             Default ``None`` keeps the canonical layout and is omitted from the op.
+        flat_layout: When True, allocate a flat (non-fractal, slayout=none_box)
+            L1/cbuf tile — a contiguous staging buffer rather than the boxed NZ
+            layout Mat tiles normally carry. Requires ``target_memory=Mat`` and is
+            mutually exclusive with ``transpose``. Default ``None`` keeps the
+            canonical layout.
 
     Returns:
         Tile wrapping the create operation
@@ -324,6 +330,7 @@ def create(
         dtype,
         target_memory,
         transpose,
+        flat_layout,
     )
     return Tile(expr=call_expr)
 

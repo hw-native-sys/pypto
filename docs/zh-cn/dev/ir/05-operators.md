@@ -327,7 +327,13 @@ with ib.function("tile_computation") as f:
 | `system.task_invalid` | `PTO2TaskId::invalid()` 哨兵——TaskId carry 的 "暂无 producer" 种子 | 无 |
 | `system.task_is_valid` | 测试某个 `TASK_ID` 值是否为有效（非哨兵）handle | 无；唯一位置参数是 TaskId Var |
 
-`system.syncall` 有两种 mode。**hard** 形态（`mode="hard"`，默认）下沉为 FFTS 屏障，等待所选 `core_type` 的**全部**物理核到达；kernel 必须以满占用方式启动（每个物理核一个 block），否则屏障死锁（AICore 错误 507018）。**soft** 形态（`mode="soft"`）轮询一段共享 GM workspace，因此可在**部分**占用下工作。soft 形态带 operand `[gm_workspace, scratch, used_cores]`：`gm_workspace` 是共享、清零的 GM `INT32` tensor，含 `used_cores * 8` 个 slot（请作为 kernel 参数传入，使所有 block 共享同一缓冲）；`scratch` 是编译器合成的本地暂存 tile；`used_cores` 是参与核数。soft 形态目前仅支持 `core_type="aiv_only"`。
+`system.syncall` 有两种 mode。**hard** 形态（`mode="hard"`，默认）下沉为 FFTS 屏障，等待所选 `core_type` 的**全部**物理核到达；kernel 必须以满占用方式启动（每个物理核一个 block），否则屏障死锁（AICore 错误 507018）。**soft** 形态（`mode="soft"`）轮询一段共享 GM workspace，因此可在**部分**占用下工作。`gm_workspace` 是共享、清零的 GM `INT32` tensor，含 `used_cores * 8` 个 slot（请作为 kernel 参数传入，使所有 block 共享同一缓冲）；暂存 tile 由编译器合成；`used_cores` 是参与核数。soft 形态对每种 `core_type` 都支持，operand 随参与核集合而不同：
+
+- `aiv_only`：`[gm_workspace, ub_scratch, used_cores]` —— 一个 UB（Vec）暂存 tile。
+- `aic_only`：`[gm_workspace, l1_scratch, used_cores]` —— 一个扁平 L1（Mat，`slayout=none_box`）暂存 tile。
+- `mix`：`[gm_workspace, ub_scratch, l1_scratch, used_cores]` —— UB 与扁平 L1 各一个。该屏障汇合 AIC + AIV 核，故 `used_cores` 是**总**参与数（AIC block 数 + AIV subblock 数）。该 op 会被复制到 cube 与 vector 两条流上，每条流各用自己的 tile（另一个在该流上是死代码），与 pto-isa 的 soft-mix 下沉一致。
+
+扁平 L1 暂存 tile 通过 `pl.tile.create(..., target_memory=pl.Mem.Mat, flat_layout=True)` 创建，保持连续的 `slayout=none_box` 布局（普通的 boxed NZ Mat tile 会错位 8 个 int32 计数槽）。
 
 统一的 `mode=` 关键字 API（`mode="hard"` / `mode="soft"`）是 **DSL** 层接口（`pl.system.syncall`）。`pypto.ir.op.system` 下的 Python IR 辅助函数则是拆开的：`syncall(core_type=...)` 构造 hard 形态，`syncall_soft(core_type, args)` 构造 soft 形态。
 

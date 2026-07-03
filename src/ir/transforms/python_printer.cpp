@@ -929,11 +929,14 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
     return;
   }
 
-  // system.syncall soft form: args_ = [gm_workspace, scratch, used_cores]. The
-  // scratch tile (args_[1]) is a compiler-synthesized staging buffer, so print
-  // the high-level DSL surface (mode=/core_type=/gm_workspace=/used_cores=) and
-  // let the parser re-synthesize the scratch on reparse.
-  if (IsOp(op, "system.syncall") && op->args_.size() == 3) {
+  // system.syncall soft form operands:
+  //   aiv_only/aic_only: [gm_workspace, scratch, used_cores]         (3 args)
+  //   mix:               [gm_workspace, ub_scratch, l1_scratch, used_cores] (4 args)
+  // The scratch tile(s) are compiler-synthesized staging buffers, so print the
+  // high-level DSL surface (mode=/core_type=/gm_workspace=/used_cores=/scratch=
+  // [/scratch_l1=]) and let the parser thread the existing scratch(es) back on
+  // reparse instead of re-synthesizing.
+  if (IsOp(op, "system.syncall") && (op->args_.size() == 3 || op->args_.size() == 4)) {
     std::string core_type = "mix";
     std::string mode = "soft";
     for (const auto& [key, val] : op->kwargs_) {
@@ -942,19 +945,23 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
       else if (key == "mode")
         mode = AnyCast<std::string>(val, "syncall mode");
     }
+    const size_t used_idx = op->args_.size() - 1;
     stream_ << "mode=\"" << mode << "\", core_type=\"" << core_type << "\", gm_workspace=";
     VisitExpr(op->args_[0]);
     stream_ << ", used_cores=";
-    if (auto ci = As<ConstInt>(op->args_[2])) {
+    if (auto ci = As<ConstInt>(op->args_[used_idx])) {
       stream_ << ci->value_;
     } else {
-      VisitExpr(op->args_[2]);
+      VisitExpr(op->args_[used_idx]);
     }
-    // Print the synthesized scratch tile so the IR round-trips faithfully once a
-    // pass has hoisted it to a named SSA value. The parser threads it back via
-    // the internal `scratch=` kwarg instead of re-synthesizing.
+    // scratch= is the UB (Vec) tile for aiv_only/mix and the flat L1 (Mat) tile
+    // for aic_only; mix additionally threads its flat L1 tile via scratch_l1=.
     stream_ << ", scratch=";
     VisitExpr(op->args_[1]);
+    if (op->args_.size() == 4) {
+      stream_ << ", scratch_l1=";
+      VisitExpr(op->args_[2]);
+    }
     stream_ << ")";
     return;
   }

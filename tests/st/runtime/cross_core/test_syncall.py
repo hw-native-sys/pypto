@@ -41,15 +41,25 @@ from pypto.ir.pass_manager import OptimizationStrategy
 from pypto.pypto_core import ir as _ir
 
 
-def _aiv_core_count(bk: backend.Backend) -> int:
-    """Total VECTOR (AIV) core count described by a backend's SoC model."""
+def _core_count(bk: backend.Backend, core_type: "_ir.CoreType") -> int:
+    """Total physical core count of ``core_type`` described by a backend's SoC model."""
     total = 0
     for die, die_n in bk.soc.die_counts.items():
         for cluster, cluster_n in die.cluster_counts.items():
             for core, core_n in cluster.core_counts.items():
-                if core.core_type == _ir.CoreType.VECTOR:
+                if core.core_type == core_type:
                     total += core_n * cluster_n * die_n
     return total
+
+
+def _aiv_core_count(bk: backend.Backend) -> int:
+    """Total VECTOR (AIV) core count described by a backend's SoC model."""
+    return _core_count(bk, _ir.CoreType.VECTOR)
+
+
+def _aic_core_count(bk: backend.Backend) -> int:
+    """Total CUBE (AIC) core count described by a backend's SoC model."""
+    return _core_count(bk, _ir.CoreType.CUBE)
 
 
 # Hard-form SYNCALL requires full AIV-core occupancy (see module docstring).
@@ -70,6 +80,29 @@ A2A3_PLATFORMS = ("a2a3", "a2a3sim")
 SOFT_CORE_NUM = 4
 SOFT_TOTAL_ROWS = SOFT_CORE_NUM * TILE_ROWS  # 512
 SOFT_WS_SLOTS = SOFT_CORE_NUM * 8
+
+# Mixed (AIC + AIV) soft-form SYNCALL. On 910B one cube block pairs with
+# AIV_RATIO vector subblocks (1 AIC + 2 AIV), so a launch of B cube blocks has
+# B * (1 + AIV_RATIO) soft participants. Derive the ratio from the SoC model.
+_BK910B = backend.Backend910B.instance()
+AIV_RATIO = _aiv_core_count(_BK910B) // _aic_core_count(_BK910B)  # 48 // 24 = 2
+MIX_CUBE_BLOCKS = 2  # partial occupancy (a hard mix barrier would deadlock here)
+MIX_USED_CORES = MIX_CUBE_BLOCKS * (1 + AIV_RATIO)  # 2 * 3 = 6 total AIC+AIV participants
+MIX_WS_SLOTS = MIX_USED_CORES * 8  # 48
+MIX_M = 32
+MIX_K = 64
+MIX_N = 32
+MIX_ROW_TILE = MIX_M // MIX_CUBE_BLOCKS  # 16 rows per cube block
+
+# AIC-only soft-form SYNCALL: only cube cores participate, so a launch of B cube
+# blocks has exactly B soft participants.
+AIC_CUBE_BLOCKS = 2
+AIC_USED_CORES = AIC_CUBE_BLOCKS  # cube cores only
+AIC_WS_SLOTS = AIC_USED_CORES * 8  # 16
+AIC_M = 32
+AIC_K = 64
+AIC_N = 32
+AIC_ROW_TILE = AIC_M // AIC_CUBE_BLOCKS  # 16
 
 
 @pl.program
@@ -192,6 +225,125 @@ class SPMDSyncAllSoftTestCase(PTOTestCase):
         tensors["out"][:] = tensors["a"] + tensors["b"]
 
 
+@pl.program
+class SPMDSyncAllMixSoftProgram:
+    """Mixed (AIC + AIV) *soft* syncall at partial occupancy.
+
+    A fused cube+vector kernel: a vector op produces the matmul operand (V->C)
+    and a vector op consumes the result (C->V), so the scope is genuinely mixed
+    and ExpandMixedKernel splits it across both lanes. The mix soft barrier is
+    duplicated onto both lanes (SHARED) and rendezvouses all B*(1+ratio)
+    participants. The barrier is numerically a no-op: ``out = (a + 1) @ b + 1``.
+    """
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        a: pl.Tensor[[MIX_M, MIX_K], pl.FP32],
+        b: pl.Tensor[[MIX_K, MIX_N], pl.FP32],
+        sync_ws: pl.Tensor[[MIX_WS_SLOTS], pl.INT32],
+        out: pl.Out[pl.Tensor[[MIX_M, MIX_N], pl.FP32]],
+    ) -> pl.Tensor[[MIX_M, MIX_N], pl.FP32]:
+        for ob in pl.spmd(MIX_CUBE_BLOCKS, name_hint="mix_syncall"):
+            m0 = ob * MIX_ROW_TILE
+            a_slice = pl.slice(a, [MIX_ROW_TILE, MIX_K], [m0, 0])
+            a_add = pl.add(a_slice, 1.0)  # vector produces the matmul operand (V->C)
+            # Cross-core barrier across every participating AIC block and AIV subblock.
+            pl.system.syncall(
+                mode="soft", core_type="mix", gm_workspace=sync_ws, used_cores=MIX_USED_CORES
+            )
+            c_tile = pl.matmul(a_add, b)  # cube
+            c_vec = pl.add(c_tile, 1.0)  # vector consumes the matmul result (C->V)
+            out = pl.assemble(out, c_vec, [m0, 0])
+        return out
+
+
+class SPMDSyncAllMixSoftTestCase(PTOTestCase):
+    """Mixed soft syncall at partial occupancy (2 cube blocks -> 6 participants)."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "spmd_syncall_soft_mix_32x32"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("a", [MIX_M, MIX_K], DataType.FP32, init_value=torch.randn),
+            TensorSpec("b", [MIX_K, MIX_N], DataType.FP32, init_value=torch.randn),
+            TensorSpec("sync_ws", [MIX_WS_SLOTS], DataType.INT32, init_value=torch.zeros),
+            TensorSpec("out", [MIX_M, MIX_N], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return SPMDSyncAllMixSoftProgram
+
+    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
+        a = tensors["a"]
+        b = tensors["b"]
+        for m0 in range(0, MIX_M, MIX_ROW_TILE):
+            tensors["out"][m0 : m0 + MIX_ROW_TILE] = torch.matmul(a[m0 : m0 + MIX_ROW_TILE] + 1.0, b) + 1.0
+
+
+@pl.program
+class SPMDSyncAllAicSoftProgram:
+    """AIC-only *soft* syncall in a cube-only kernel at partial occupancy.
+
+    A pure matmul per row-tile; only cube cores participate in the barrier.
+    The barrier is numerically a no-op: ``out = a @ b``.
+    """
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        a: pl.Tensor[[AIC_M, AIC_K], pl.FP32],
+        b: pl.Tensor[[AIC_K, AIC_N], pl.FP32],
+        sync_ws: pl.Tensor[[AIC_WS_SLOTS], pl.INT32],
+        out: pl.Out[pl.Tensor[[AIC_M, AIC_N], pl.FP32]],
+    ) -> pl.Tensor[[AIC_M, AIC_N], pl.FP32]:
+        for ob in pl.spmd(AIC_CUBE_BLOCKS, name_hint="aic_syncall"):
+            m0 = ob * AIC_ROW_TILE
+            a_slice = pl.slice(a, [AIC_ROW_TILE, AIC_K], [m0, 0])
+            # Cube-only cross-core barrier across the AIC_CUBE_BLOCKS cube cores.
+            pl.system.syncall(
+                mode="soft", core_type="aic_only", gm_workspace=sync_ws, used_cores=AIC_USED_CORES
+            )
+            c_tile = pl.matmul(a_slice, b)  # cube
+            out = pl.assemble(out, c_tile, [m0, 0])
+        return out
+
+
+class SPMDSyncAllAicSoftTestCase(PTOTestCase):
+    """AIC-only soft syncall at partial occupancy (2 cube blocks)."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "spmd_syncall_soft_aic_32x32"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("a", [AIC_M, AIC_K], DataType.FP32, init_value=torch.randn),
+            TensorSpec("b", [AIC_K, AIC_N], DataType.FP32, init_value=torch.randn),
+            TensorSpec("sync_ws", [AIC_WS_SLOTS], DataType.INT32, init_value=torch.zeros),
+            TensorSpec("out", [AIC_M, AIC_N], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return SPMDSyncAllAicSoftProgram
+
+    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
+        a = tensors["a"]
+        b = tensors["b"]
+        for m0 in range(0, AIC_M, AIC_ROW_TILE):
+            tensors["out"][m0 : m0 + AIC_ROW_TILE] = torch.matmul(a[m0 : m0 + AIC_ROW_TILE], b)
+
+
 class TestSyncAll:
     """Cross-core all-participant barrier (pl.system.syncall) system test."""
 
@@ -206,6 +358,18 @@ class TestSyncAll:
         """SPMD add with an aiv_only *soft* barrier at partial occupancy: verify out = a + b."""
         result = test_runner.run(SPMDSyncAllSoftTestCase(platform=platform))
         assert result.passed, f"SPMD aiv_only soft syncall failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", A2A3_PLATFORMS)
+    def test_spmd_syncall_soft_mix(self, test_runner, platform):
+        """Mixed (AIC+AIV) *soft* barrier at partial occupancy: verify out = (a + 1) @ b + 1."""
+        result = test_runner.run(SPMDSyncAllMixSoftTestCase(platform=platform))
+        assert result.passed, f"SPMD mix soft syncall failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", A2A3_PLATFORMS)
+    def test_spmd_syncall_soft_aic_only(self, test_runner, platform):
+        """AIC-only *soft* barrier at partial occupancy: verify out = a @ b."""
+        result = test_runner.run(SPMDSyncAllAicSoftTestCase(platform=platform))
+        assert result.passed, f"SPMD aic_only soft syncall failed: {result.error}"
 
 
 if __name__ == "__main__":

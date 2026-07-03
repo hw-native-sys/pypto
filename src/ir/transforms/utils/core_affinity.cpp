@@ -91,6 +91,28 @@ CoreAffinity ClassifyCallAffinity(const CallPtr& call) {
     return (ms && IsCubeMemorySpace(*ms)) ? CoreAffinity::CUBE : CoreAffinity::VECTOR;
   }
 
+  // 2a. system.syncall is dynamically classified by its `core_type` (for both
+  // the hard and soft forms): a "mix" barrier rendezvouses both cube and vector
+  // cores, so it is SHARED (duplicated onto both lanes by ExpandMixedKernel);
+  // "aic_only" runs on cube, "aiv_only" on vector. Without this, the soft form's
+  // first tile arg (a Vec UB scratch) would mis-classify a mix barrier as VECTOR
+  // via the first-tile-input rule below and drop it from the AIC lane; the hard
+  // form (no operands) would otherwise fall through to SHARED for every
+  // core_type. Classifying by core_type keeps aiv_only/aic_only on their own
+  // lane in a mixed kernel.
+  if (IsOp(op, "system.syncall")) {
+    std::string core_type = "mix";
+    for (const auto& [key, value] : call->kwargs_) {
+      if (key == "core_type") {
+        core_type = AnyCast<std::string>(value, "core_type");
+        break;
+      }
+    }
+    if (core_type == "aic_only") return CoreAffinity::CUBE;
+    if (core_type == "aiv_only") return CoreAffinity::VECTOR;
+    return CoreAffinity::SHARED;  // mix
+  }
+
   // 2b. Explicit split-reshape ops are cross-C/V boundaries (the data crosses
   // the cube/vector divide as a tpush on the producer plus a tpop on the
   // consumer), so they roll up as MIXED exactly like a boundary tile.move.

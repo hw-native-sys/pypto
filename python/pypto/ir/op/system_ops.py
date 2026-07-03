@@ -171,7 +171,8 @@ def syncall_soft(core_type: str, args: list[Expr], *, span: Span | None = None) 
     works at partial occupancy. ``args`` is the positional operand list, already
     assembled by the DSL layer:
 
-    - aiv_only / aic_only: ``[gm_workspace, scratch_tile, used_cores]``
+    - aiv_only: ``[gm_workspace, ub_scratch, used_cores]``
+    - aic_only: ``[gm_workspace, l1_scratch, used_cores]``
     - mix: ``[gm_workspace, ub_scratch, l1_scratch, used_cores]``
 
     Args:
@@ -182,10 +183,16 @@ def syncall_soft(core_type: str, args: list[Expr], *, span: Span | None = None) 
     Returns:
         Call expression for the soft-mode system.syncall.
     """
-    if core_type != "aiv_only":
-        # Soft form currently only has a validated lowering for aiv_only. Gate the
-        # IR helper too so direct IR callers cannot build an unsupported barrier.
-        raise ValueError(f"soft syncall currently supports only core_type='aiv_only', got {core_type!r}")
+    if core_type not in _SYNCALL_CORE_TYPES:
+        raise ValueError(f"soft syncall core_type must be one of {_SYNCALL_CORE_TYPES}, got {core_type!r}")
+    # aiv_only/aic_only carry one scratch tile (3 operands); mix carries both a UB
+    # and a flat L1 scratch (4 operands). Gate the arity here so direct IR callers
+    # cannot build a malformed barrier.
+    expected = 4 if core_type == "mix" else 3
+    if len(args) != expected:
+        raise ValueError(
+            f"soft syncall core_type={core_type!r} requires {expected} operands, got {len(args)}"
+        )
     actual_span = _get_span_or_capture(span, frame_offset=1)
     return _ir_core.create_op_call(
         "system.syncall", args, {"core_type": core_type, "mode": "soft"}, actual_span

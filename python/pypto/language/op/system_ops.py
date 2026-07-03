@@ -59,6 +59,9 @@ __all__ = [
 ]
 
 
+_SYNCALL_SOFT_CORE_TYPES = ("aiv_only", "aic_only", "mix")
+
+
 def syncall(
     *,
     core_type: str = "mix",
@@ -66,6 +69,7 @@ def syncall(
     gm_workspace: Tensor | None = None,
     used_cores: int = 0,
     scratch: Tile | None = None,
+    scratch_l1: Tile | None = None,
     span: Span | None = None,
 ) -> Call:
     """Cross-core all-participant barrier (``pto::SYNCALL``).
@@ -77,20 +81,28 @@ def syncall(
       deadlocks). See :func:`pypto.ir.op.system_ops.syncall`.
     - ``mode="soft"``: GM-polling barrier that works at partial occupancy.
       Each participant bumps a per-core counter in a shared GM workspace and
-      polls until all ``used_cores`` participants arrive.
+      polls until all ``used_cores`` participants arrive. Supported for every
+      ``core_type`` ("aiv_only", "aic_only", "mix").
 
     Soft-mode arguments:
 
     Args:
         core_type: Participant set, one of "aiv_only", "aic_only", or "mix".
+            For "mix", ``used_cores`` is the *total* AIC + AIV participant count.
         mode: "hard" or "soft".
         gm_workspace: Soft mode only. A shared, zero-initialized GM ``INT32``
             tensor with at least ``used_cores * 8`` elements, visible to every
             participating block (pass it as a kernel parameter so all SPMD
             blocks share one buffer). The compiler synthesizes the local
-            UB/L1 staging tile automatically.
+            UB/L1 staging tile(s) automatically.
         used_cores: Soft mode only. Number of participating cores (a positive
             compile-time int).
+        scratch: Compiler-internal. The local staging tile threaded back by the
+            printer on reparse (UB/Vec tile for "aiv_only" and "mix"; flat
+            L1/Mat tile for "aic_only"). Leave ``None`` in user code.
+        scratch_l1: Compiler-internal. The flat L1/Mat staging tile for the
+            "mix" form, threaded back by the printer on reparse. Leave ``None``
+            in user code.
         span: Optional source span for debugging (auto-captured if not provided).
 
     Returns:
@@ -100,33 +112,55 @@ def syncall(
         # Reject soft-only kwargs so a typo like syncall(gm_workspace=ws) does not
         # silently fall back to the full-occupancy hard barrier (the deadlock path
         # the soft form exists to avoid).
-        if gm_workspace is not None or scratch is not None or used_cores:
+        if gm_workspace is not None or scratch is not None or scratch_l1 is not None or used_cores:
             raise ValueError(
-                "syncall(mode='hard') takes no gm_workspace/scratch/used_cores; "
+                "syncall(mode='hard') takes no gm_workspace/scratch/scratch_l1/used_cores; "
                 "pass mode='soft' to use the GM-polling barrier"
             )
         return _ir_ops.syncall(core_type=core_type, span=span)
     if mode != "soft":
         raise ValueError(f"syncall mode must be 'hard' or 'soft', got {mode!r}")
-    # Soft form currently supports only aiv_only. aic_only needs a flat L1 (cbuf)
-    # staging buffer (a fractal-laid-out Mat tile mis-places the counter slots),
-    # and mix needs both UB + L1 scratch across a mixed kernel — both follow-ups.
-    if core_type != "aiv_only":
-        raise ValueError(f"soft syncall currently supports only core_type='aiv_only', got {core_type!r}")
+    if core_type not in _SYNCALL_SOFT_CORE_TYPES:
+        raise ValueError(f"soft syncall core_type must be one of {_SYNCALL_SOFT_CORE_TYPES}, got {core_type!r}")
     if gm_workspace is None:
         raise ValueError("soft syncall requires gm_workspace (a shared, zero-initialized GM INT32 tensor)")
     if not isinstance(used_cores, int) or used_cores <= 0:
         raise ValueError(f"soft syncall requires a positive compile-time used_cores, got {used_cores!r}")
 
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    if scratch is None:
-        # User path: synthesize the local UB staging tile. (On reparse the printer
-        # threads the existing scratch back via scratch=, so we reuse it instead.)
-        from . import tile_ops as _tile  # noqa: PLC0415  # deferred: tile_ops imports system_ops (cycle)
+    # Deferred import: tile_ops imports system_ops (cycle).
+    from . import tile_ops as _tile  # noqa: PLC0415
 
-        slots = used_cores * _SYNCALL_SOFT_SLOT_INT32
-        scratch = _tile.create([1, slots], DataType.INT32, target_memory=MemorySpace.Vec)
-    args = [gm_workspace.unwrap(), scratch.unwrap(), ConstInt(used_cores, DataType.INT32, actual_span)]
+    def _ub_scratch(existing: Tile | None) -> Tile:
+        # UB (Vec) staging tile. The AIV barrier bulk-reads every participant's
+        # slot into it, so it needs used_cores * 8 int32 (flat by default).
+        if existing is not None:
+            return existing
+        return _tile.create(
+            [1, used_cores * _SYNCALL_SOFT_SLOT_INT32], DataType.INT32, target_memory=MemorySpace.Vec
+        )
+
+    def _l1_scratch(existing: Tile | None) -> Tile:
+        # Flat L1 (Mat/cbuf) staging tile. The cube path only stages its own
+        # single counter line via create_cbuf_matrix, so 8 int32 suffice; it must
+        # be flat (slayout=none_box) or the counter slot is mis-placed.
+        if existing is not None:
+            return existing
+        return _tile.create(
+            [1, _SYNCALL_SOFT_SLOT_INT32], DataType.INT32, target_memory=MemorySpace.Mat, flat_layout=True
+        )
+
+    used_const = ConstInt(used_cores, DataType.INT32, actual_span)
+    if core_type == "aiv_only":
+        scratch = _ub_scratch(scratch)
+        args = [gm_workspace.unwrap(), scratch.unwrap(), used_const]
+    elif core_type == "aic_only":
+        scratch = _l1_scratch(scratch)
+        args = [gm_workspace.unwrap(), scratch.unwrap(), used_const]
+    else:  # mix: both a UB and a flat L1 staging tile
+        scratch = _ub_scratch(scratch)
+        scratch_l1 = _l1_scratch(scratch_l1)
+        args = [gm_workspace.unwrap(), scratch.unwrap(), scratch_l1.unwrap(), used_const]
     return _ir_ops.syncall_soft(core_type, args, span=actual_span)
 
 

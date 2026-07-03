@@ -333,7 +333,13 @@ with ib.function("tile_computation") as f:
 | `system.task_invalid` | Sentinel `PTO2TaskId::invalid()` — "no producer" seed for a TaskId carry | None |
 | `system.task_is_valid` | Test whether a `TASK_ID` value is a valid (non-sentinel) handle | None; sole positional arg is the TaskId Var |
 
-`system.syncall` has two modes. The **hard** form (`mode="hard"`, default) emits an FFTS barrier that waits for **all** physical cores of the selected `core_type`; the kernel must be launched at full occupancy (one block per physical core), or the barrier deadlocks (AICore error 507018). The **soft** form (`mode="soft"`) polls a shared GM workspace and so works at **partial** occupancy. Soft mode carries operands `[gm_workspace, scratch, used_cores]`: `gm_workspace` is a shared, zero-initialized GM `INT32` tensor with `used_cores * 8` slots (pass it as a kernel parameter so all blocks share one buffer); `scratch` is a compiler-synthesized local staging tile; `used_cores` is the participant count. Soft mode currently supports `core_type="aiv_only"` only.
+`system.syncall` has two modes. The **hard** form (`mode="hard"`, default) emits an FFTS barrier that waits for **all** physical cores of the selected `core_type`; the kernel must be launched at full occupancy (one block per physical core), or the barrier deadlocks (AICore error 507018). The **soft** form (`mode="soft"`) polls a shared GM workspace and so works at **partial** occupancy. `gm_workspace` is a shared, zero-initialized GM `INT32` tensor with `used_cores * 8` slots (pass it as a kernel parameter so all blocks share one buffer); the scratch tile(s) are compiler-synthesized local staging buffers; `used_cores` is the participant count. Soft mode is supported for every `core_type`, with operands that vary by participant set:
+
+- `aiv_only`: `[gm_workspace, ub_scratch, used_cores]` — one UB (Vec) staging tile.
+- `aic_only`: `[gm_workspace, l1_scratch, used_cores]` — one flat L1 (Mat, `slayout=none_box`) staging tile.
+- `mix`: `[gm_workspace, ub_scratch, l1_scratch, used_cores]` — both a UB and a flat L1 tile. The barrier rendezvouses AIC + AIV cores, so `used_cores` is the *total* participant count (AIC blocks + AIV subblocks). The op is duplicated onto both the cube and vector lanes; each lane uses its own tile (the other is dead), matching pto-isa's soft-mix lowering.
+
+The flat L1 staging tile is created via `pl.tile.create(..., target_memory=pl.Mem.Mat, flat_layout=True)`, which keeps the contiguous `slayout=none_box` layout (a normal boxed NZ Mat tile would mis-place the 8-int32 counter slots).
 
 The unified `mode=` keyword API (`mode="hard"` / `mode="soft"`) is the **DSL** surface (`pl.system.syncall`). The Python IR helpers under `pypto.ir.op.system` are split instead: `syncall(core_type=...)` builds the hard form and `syncall_soft(core_type, args)` builds the soft form.
 

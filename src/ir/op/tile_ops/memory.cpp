@@ -366,8 +366,15 @@ TypePtr DeduceTileCreateTileType(const std::vector<ExprPtr>& args,
   // carries when loaded with b_trans, and the only Mat layout a DN-source
   // gather_row (DN2ZN tload) can fill. Default false keeps the canonical NZ.
   bool transpose_layout = false;
+  // `flat_layout=true` requests a flat (non-fractal, slayout=none_box) L1/cbuf
+  // tile: a contiguous byte-staging buffer rather than the boxed NZ layout Mat
+  // tiles normally carry. Used for the mix/aic_only soft `system.syncall` L1
+  // scratch (pto-isa `Tile<TileType::Mat, ..., SLayout::NoneBox>`), whose 8
+  // int32 counter slots must be contiguous — a fractal layout mis-places them.
+  bool flat_layout = false;
   for (const auto& [k, v] : kwargs) {
     if (k == "transpose") transpose_layout = AnyCast<bool>(v, "transpose");
+    if (k == "flat_layout") flat_layout = AnyCast<bool>(v, "flat_layout");
   }
   // The transposed Mat (ZN) layout is a 2D L1 matmul-`b_trans` operand layout; it
   // is meaningless for a non-Mat space or a non-2D shape. Fail fast rather than
@@ -376,8 +383,22 @@ TypePtr DeduceTileCreateTileType(const std::vector<ExprPtr>& args,
         (tile_shape.size() == 2 && target_memory_opt.has_value() && *target_memory_opt == MemorySpace::Mat))
       << "The operator " << op_name
       << " supports transpose=true only for a 2D tile with target_memory=Mat (L1)";
+  // flat_layout is a Mat (L1/cbuf) staging layout and mutually exclusive with the
+  // transposed NZ layout.
+  CHECK(!flat_layout ||
+        (target_memory_opt.has_value() && *target_memory_opt == MemorySpace::Mat && !transpose_layout))
+      << "The operator " << op_name
+      << " supports flat_layout=true only for target_memory=Mat (L1) without transpose";
 
-  if (target_memory_opt.has_value() && *target_memory_opt == MemorySpace::Acc) {
+  // A flat L1 tile keeps the canonical flat view (blayout=row_major,
+  // slayout=none_box, fractal default) — it is deliberately NOT boxed. We also
+  // stamp memory_space_=Mat at creation so InferTileMemorySpace sees the space
+  // is already resolved and preserves the none_box view instead of overwriting
+  // it with Mat's implicit boxed layout (see ComputeRewrittenType).
+  std::optional<MemorySpace> creation_space = std::nullopt;
+  if (flat_layout) {
+    creation_space = MemorySpace::Mat;
+  } else if (target_memory_opt.has_value() && *target_memory_opt == MemorySpace::Acc) {
     tile_view.blayout = TileLayout::col_major;
     tile_view.slayout = TileLayout::row_major;
     tile_view.fractal = 1024;
@@ -392,7 +413,7 @@ TypePtr DeduceTileCreateTileType(const std::vector<ExprPtr>& args,
     }
   }
   tile_view.valid_shape = tile_shape;
-  return std::make_shared<TileType>(tile_shape, dtype, std::nullopt, tile_view);
+  return std::make_shared<TileType>(tile_shape, dtype, std::nullopt, tile_view, creation_space);
 }
 
 TypePtr DeduceTileFullType(const std::vector<ExprPtr>& args,
@@ -743,6 +764,7 @@ REGISTER_OP("tile.create")
     .set_attr<DataType>("dtype")
     .set_attr<MemorySpace>("target_memory")
     .set_attr<bool>("transpose")
+    .set_attr<bool>("flat_layout")
     // No fallback: when target_memory is absent, memory_space stays unresolved and
     // InferTileMemorySpace picks the space from consumer demand.
     .set_output_memory_from_kwarg("target_memory")

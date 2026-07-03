@@ -174,11 +174,14 @@ class TestSystemOpsParsing:
         """Soft syncall validates mode, core_type, gm_workspace, and used_cores."""
         with pytest.raises(ValueError, match="mode"):
             pl.system.syncall(mode="bogus")
-        # aic_only / mix soft not yet supported.
-        with pytest.raises(ValueError, match="aiv_only"):
-            pl.system.syncall(mode="soft", core_type="aic_only", used_cores=4)
-        with pytest.raises(ValueError, match="gm_workspace"):
-            pl.system.syncall(mode="soft", core_type="aiv_only", used_cores=4)
+        # An unknown core_type is rejected.
+        with pytest.raises(ValueError, match="core_type"):
+            pl.system.syncall(mode="soft", core_type="bogus_type", used_cores=4)
+        # aiv_only, aic_only, and mix are all supported; each still requires a
+        # shared gm_workspace.
+        for ct in ("aiv_only", "aic_only", "mix"):
+            with pytest.raises(ValueError, match="gm_workspace"):
+                pl.system.syncall(mode="soft", core_type=ct, used_cores=4)
 
     def test_multiple_system_ops_round_trip(self):
         """Test round-trip with multiple system ops in a single function."""
