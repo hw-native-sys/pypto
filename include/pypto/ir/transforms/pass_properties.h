@@ -211,10 +211,15 @@ inline const PassProperties kLowerAutoVectorSplitProperties{
 
 // -- Mixed kernel expansion pass ----------------------------------------------
 
+// HardSyncallOccupancyValid is produced here (not by a transformation ExpandMixedKernel
+// performs, but because this pass resolves each kernel's FunctionType to AIV/AIC/Group —
+// the precondition the hard-syncall occupancy verifier depends on). The verifier fires
+// once, right after this pass.
 inline const PassProperties kExpandMixedKernelProperties{
     .required = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::SplitIncoreOrch,
                  IRProperty::TileOps2D, IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure},
-    .produced = {IRProperty::SSAForm, IRProperty::MixedKernelExpanded, IRProperty::NormalizedStmtStructure}};
+    .produced = {IRProperty::SSAForm, IRProperty::MixedKernelExpanded, IRProperty::NormalizedStmtStructure,
+                 IRProperty::HardSyncallOccupancyValid}};
 
 // -- GM pipe buffer injection pass (backend-gated; extracted from ExpandMixedKernel) --
 

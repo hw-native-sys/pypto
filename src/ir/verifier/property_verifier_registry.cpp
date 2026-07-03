@@ -88,6 +88,11 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   // to GetStructuralProperties() (Phase 2).
   Register(IRProperty::AssignTypeSymmetry, CreateAssignTypeSymmetryPropertyVerifier);
   Register(IRProperty::ReturnParamsExplicit, CreateReturnParamsExplicitPropertyVerifier);
+  // HardSyncallOccupancyValid (#1935): a hard (FFTS) system.syncall requires the
+  // enclosing pl.spmd to fill all physical cores of the barrier's core_type;
+  // partial occupancy deadlocks on device. Produced by ExpandMixedKernel and in
+  // GetVerifiedProperties(), so it fires once right after that pass.
+  Register(IRProperty::HardSyncallOccupancyValid, CreateHardSyncallOccupancyPropertyVerifier);
 }
 
 void PropertyVerifierRegistry::Register(IRProperty prop, std::function<PropertyVerifierPtr()> factory) {

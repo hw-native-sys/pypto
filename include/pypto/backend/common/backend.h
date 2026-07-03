@@ -283,6 +283,17 @@ class Backend {
   [[nodiscard]] uint64_t GetMemSize(ir::MemorySpace mem_type) const;
 
   /**
+   * @brief Total physical core count of a given core type across the whole SoC.
+   *
+   * Sums the per-cluster core counts of the requested type, weighted by cluster
+   * and die multiplicities (e.g. Ascend910B: 48 VECTOR / 24 CUBE cores).
+   *
+   * @param core_type Core type to count (VECTOR / CUBE)
+   * @return Number of physical cores of that type (0 if none)
+   */
+  [[nodiscard]] int GetCoreCount(ir::CoreType core_type) const;
+
+  /**
    * @brief Get memory alignment for a specific memory type
    *
    * Returns the alignment requirement of a single memory component of the

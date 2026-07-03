@@ -453,6 +453,24 @@ PropertyVerifierPtr CreateAssignTypeSymmetryPropertyVerifier();
  */
 PropertyVerifierPtr CreateReturnParamsExplicitPropertyVerifier();
 
+/**
+ * @brief Factory function for creating HardSyncallOccupancyValid property verifier
+ *
+ * Verifies that every hard (FFTS) ``system.syncall`` is launched at full core
+ * occupancy: the enclosing ``pl.spmd(N)`` fills all physical cores of the
+ * barrier's ``core_type``. Runs after ExpandMixedKernel (kernel FunctionType
+ * resolved), mapping spmd blocks to physical cores per launch shape:
+ *   - Spmd -> standalone AIV kernel : required N == #VECTOR cores (aiv_only)
+ *   - Spmd -> standalone AIC kernel : required N == #CUBE cores (aic_only)
+ *   - Spmd -> Group (mixed kernel)  : required N == #CUBE core-groups (any barrier)
+ * A partial or over-occupancy launch deadlocks on device (507018); the error
+ * message points users at ``mode="soft"`` for partial occupancy. Bare
+ * hard-syncall kernels with no ``pl.spmd`` launch are not checked.
+ *
+ * @return Shared pointer to HardSyncallOccupancy PropertyVerifier
+ */
+PropertyVerifierPtr CreateHardSyncallOccupancyPropertyVerifier();
+
 }  // namespace ir
 }  // namespace pypto
 

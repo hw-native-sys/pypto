@@ -149,7 +149,11 @@ def syncall(*, core_type: str = "mix", span: Span | None = None) -> Call:
         set to arrive. The kernel must therefore be launched at full occupancy
         (one block per physical core of that type). A partial-occupancy launch
         leaves some cores unreached, so the barrier never completes and the
-        AICore times out (error 507018). Use a full-core SPMD/grid dispatch.
+        AICore times out (error 507018). The compiler enforces this at compile
+        time (``HardSyncallOccupancy`` verifier, issue #1935): a hard-mode
+        ``syncall`` whose enclosing ``pl.spmd`` does not fill all physical cores
+        of ``core_type`` is rejected. Use a full-core SPMD dispatch, or the soft
+        form (``mode="soft"``) for partial occupancy.
 
     Args:
         core_type: Participant set, one of "aiv_only", "aic_only", or "mix".

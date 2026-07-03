@@ -73,8 +73,11 @@ def syncall(
     Two modes:
 
     - ``mode="hard"`` (default): FFTS barrier with no operands. Requires the
-      kernel to fill **all** physical cores of ``core_type`` (a partial launch
-      deadlocks). See :func:`pypto.ir.op.system_ops.syncall`.
+      enclosing ``pl.spmd`` launch to fill **all** physical cores of
+      ``core_type`` (a partial launch deadlocks on device — error 507018). The
+      compiler rejects a partial-occupancy hard launch at compile time
+      (``HardSyncallOccupancy`` verifier, issue #1935). See
+      :func:`pypto.ir.op.system_ops.syncall`.
     - ``mode="soft"``: GM-polling barrier that works at partial occupancy.
       Each participant bumps a per-core counter in a shared GM workspace and
       polls until all ``used_cores`` participants arrive.

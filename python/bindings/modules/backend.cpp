@@ -177,6 +177,8 @@ void BindBackend(nb::module_& m) {
            "Find memory path from source to destination")
       .def("get_mem_size", &Backend::GetMemSize, nb::arg("mem_type"),
            "Get total memory size for given memory type")
+      .def("get_core_count", &Backend::GetCoreCount, nb::arg("core_type"),
+           "Get total physical core count of a given core type across the SoC")
       .def_prop_ro(
           "soc", [](const Backend& backend) -> const SoC& { return backend.GetSoC(); }, "Get SoC object");
 

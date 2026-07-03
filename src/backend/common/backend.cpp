@@ -379,6 +379,20 @@ uint64_t Backend::GetMemSize(ir::MemorySpace mem_type) const {
   return 0;
 }
 
+int Backend::GetCoreCount(ir::CoreType core_type) const {
+  int total = 0;
+  for (const auto& [die, die_count] : soc_->GetDieCounts()) {
+    for (const auto& [cluster, cluster_count] : die.GetClusterCounts()) {
+      for (const auto& [core, core_count] : cluster.GetCoreCounts()) {
+        if (core.GetCoreType() == core_type) {
+          total += core_count * cluster_count * die_count;
+        }
+      }
+    }
+  }
+  return total;
+}
+
 uint64_t Backend::GetMemAlignment(ir::MemorySpace mem_type) const {
   for (const auto& [die, die_count] : soc_->GetDieCounts()) {
     for (const auto& [cluster, cluster_count] : die.GetClusterCounts()) {
