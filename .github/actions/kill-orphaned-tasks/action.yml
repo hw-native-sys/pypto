@@ -19,6 +19,14 @@ runs:
     - name: Kill orphaned task-submit tasks
       shell: bash
       run: |
+        # Guard against an empty checkout-path: grep -F "$GITHUB_WORKSPACE/"
+        # would match every task on a shared workspace root and kill other jobs'
+        # tasks. checkout-path is a required input, but fail safe rather than
+        # sorry if a caller ever passes an empty string.
+        if [ -z "${{ inputs.checkout-path }}" ]; then
+          echo "checkout-path is empty — skipping task-submit cleanup"
+          exit 0
+        fi
         echo "cleaning up task-submit tasks for $GITHUB_WORKSPACE/${{ inputs.checkout-path }}"
         task-submit --list 2>/dev/null \
           | grep -F "$GITHUB_WORKSPACE/${{ inputs.checkout-path }}" \

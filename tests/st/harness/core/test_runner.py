@@ -511,9 +511,19 @@ def _shell_quote_run(project_root: Path, inner: "list[str]") -> str:
     makes the child self-sufficient — the same pattern the mechanism-B
     ``--run`` payloads already use — so a partial snapshot can no longer strand
     a batch. ``activate.sh`` lives at *project_root*, so the ``cd`` precedes it.
+
+    Sourcing is guarded on the file's existence (``[ ! -f activate.sh ] ||
+    source activate.sh``): in CI ``activate.sh`` is always present so the env is
+    re-derived, but a developer invoking ``--execute-via-task-submit`` from a
+    shell without the CI bootstrap falls back to their already-configured
+    environment (the pre-existing behavior) instead of failing on a missing
+    file. A present-but-broken ``activate.sh`` still surfaces its error.
     """
     quoted = " ".join("$TASK_DEVICE" if tok == "$TASK_DEVICE" else shlex.quote(tok) for tok in inner)
-    return f"cd {shlex.quote(str(project_root))} && source activate.sh && {quoted}"
+    return (
+        f"cd {shlex.quote(str(project_root))} "
+        f"&& {{ [ ! -f activate.sh ] || source activate.sh; }} && {quoted}"
+    )
 
 
 def _build_execute_artifact_cmd(

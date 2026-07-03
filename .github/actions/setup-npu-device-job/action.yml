@@ -91,8 +91,11 @@ runs:
         fi
         mkdir -p "$PTOAS_ROOT"
         tar -xzf "$CACHE_ARCHIVE" -C "$PTOAS_ROOT"
-        chmod +x "$PTOAS_ROOT/ptoas"
-        chmod +x "$PTOAS_ROOT/bin/ptoas"
+        # Guard each chmod on existence so a packaging variation (only one of the
+        # two ptoas paths present) doesn't fail the whole step.
+        [ -f "$PTOAS_ROOT/ptoas" ] && chmod +x "$PTOAS_ROOT/ptoas"
+        [ -f "$PTOAS_ROOT/bin/ptoas" ] && chmod +x "$PTOAS_ROOT/bin/ptoas"
+        true
 
     - name: Clone pto-isa
       shell: bash
