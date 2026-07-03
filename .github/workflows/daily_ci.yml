@@ -121,6 +121,9 @@ jobs:
     # auto` (mechanism B), so the job holds no card and runs on a CPU runner.
     # Host setup mirrors dist-system-tests (conda py310 + venv + activate.sh).
     needs: toolchain
+    # Perf sampling only reads the repo — no write scopes needed on GITHUB_TOKEN.
+    permissions:
+      contents: read
     # TEST MODE: keep the device runner and pin task-submit to its card (see
     # ci.yml system-tests). FLIP TO PROD: cpu runner + `--device auto`.
     runs-on: [self-hosted, linux, arm64, npu]
@@ -154,6 +157,9 @@ jobs:
         with:
           sparse-checkout: .github/actions
           clean: false
+          # Bootstrap only fetches the public .github/actions tree; it doesn't
+          # need the token persisted into .git/config afterward (zizmor artipacked).
+          persist-credentials: false
 
       - name: Setup NPU device job
         uses: ./.github/actions/setup-npu-device-job

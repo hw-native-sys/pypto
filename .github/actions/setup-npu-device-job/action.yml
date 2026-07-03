@@ -123,7 +123,12 @@ runs:
         cat > activate.sh <<'EOF'
         source /home/ci-runner/miniconda3/etc/profile.d/conda.sh
         conda activate py310
-        source "$GITHUB_WORKSPACE/${{ inputs.checkout-path }}/venv/bin/activate"
+        # Derive the venv from this script's own location instead of
+        # $GITHUB_WORKSPACE: when activate.sh is sourced inside a task-submit
+        # child, a truncated env snapshot could drop $GITHUB_WORKSPACE and point
+        # the source at a wrong/absent path. BASH_SOURCE is snapshot-independent.
+        _PYPTO_ENV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        source "$_PYPTO_ENV_DIR/venv/bin/activate"
         source /usr/local/Ascend/cann-9.0.0/set_env.sh
         export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
         EOF

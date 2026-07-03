@@ -232,6 +232,9 @@ jobs:
         with:
           sparse-checkout: .github/actions
           clean: false
+          # Bootstrap only fetches the public .github/actions tree; it doesn't
+          # need the token persisted into .git/config afterward (zizmor artipacked).
+          persist-credentials: false
 
       - name: Setup NPU device job
         uses: ./.github/actions/setup-npu-device-job
@@ -392,6 +395,9 @@ jobs:
         with:
           sparse-checkout: .github/actions
           clean: false
+          # Bootstrap only fetches the public .github/actions tree; it doesn't
+          # need the token persisted into .git/config afterward (zizmor artipacked).
+          persist-credentials: false
 
       - name: Setup NPU device job
         uses: ./.github/actions/setup-npu-device-job
@@ -463,6 +469,9 @@ jobs:
         with:
           sparse-checkout: .github/actions
           clean: false
+          # Bootstrap only fetches the public .github/actions tree; it doesn't
+          # need the token persisted into .git/config afterward (zizmor artipacked).
+          persist-credentials: false
 
       - name: Setup NPU device job
         uses: ./.github/actions/setup-npu-device-job
