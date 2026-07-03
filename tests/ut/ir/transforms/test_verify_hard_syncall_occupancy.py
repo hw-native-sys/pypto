@@ -157,6 +157,109 @@ def _bare_kernel_program():
     return Prog
 
 
+def _aiv_default_mix_program(n: int):
+    """Pure-AIV kernel with the DEFAULT (mix) hard barrier — unsatisfiable in an AIV launch."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def add(
+            self,
+            a: pl.Tensor[[n * TR, TC], pl.FP32],
+            b: pl.Tensor[[n * TR, TC], pl.FP32],
+            out: pl.Out[pl.Tensor[[n * TR, TC], pl.FP32]],
+        ) -> pl.Tensor[[n * TR, TC], pl.FP32]:
+            i = pl.tile.get_block_idx()
+            o = i * TR
+            ta = pl.load(a, [o, 0], [TR, TC])
+            tb = pl.load(b, [o, 0], [TR, TC])
+            pl.system.syncall()  # default core_type="mix" — no AIC participants in an AIV launch
+            out = pl.store(pl.add(ta, tb), [o, 0], out)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def orchestrator(
+            self,
+            a: pl.Tensor[[n * TR, TC], pl.FP32],
+            b: pl.Tensor[[n * TR, TC], pl.FP32],
+            out: pl.Out[pl.Tensor[[n * TR, TC], pl.FP32]],
+        ) -> pl.Tensor[[n * TR, TC], pl.FP32]:
+            with pl.spmd(n):
+                out = self.add(a, b, out)
+            return out
+
+    return Prog
+
+
+def _spmd_submit_program(n: int):
+    """pl.spmd_submit(..., core_num=n) — the block count rides on the Submit node."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def add(
+            self,
+            a: pl.Tensor[[n * TR, TC], pl.FP32],
+            b: pl.Tensor[[n * TR, TC], pl.FP32],
+            out: pl.Out[pl.Tensor[[n * TR, TC], pl.FP32]],
+        ) -> pl.Tensor[[n * TR, TC], pl.FP32]:
+            i = pl.tile.get_block_idx()
+            o = i * TR
+            ta = pl.load(a, [o, 0], [TR, TC])
+            tb = pl.load(b, [o, 0], [TR, TC])
+            pl.system.syncall(core_type="aiv_only")
+            out = pl.store(pl.add(ta, tb), [o, 0], out)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+        def orchestrator(
+            self,
+            a: pl.Tensor[[n * TR, TC], pl.FP32],
+            b: pl.Tensor[[n * TR, TC], pl.FP32],
+            out: pl.Out[pl.Tensor[[n * TR, TC], pl.FP32]],
+        ) -> pl.Tensor[[n * TR, TC], pl.FP32]:
+            with pl.manual_scope():
+                out, _tid = pl.spmd_submit(self.add, a, b, out, core_num=n)
+            return out
+
+    return Prog
+
+
+def _cluster_spmd_program(n: int):
+    """pl.cluster() wrapping pl.spmd(n) — unwrapped to a Group carrying a core_num attr."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def add(
+            self,
+            a: pl.Tensor[[n * TR, TC], pl.FP32],
+            b: pl.Tensor[[n * TR, TC], pl.FP32],
+            out: pl.Out[pl.Tensor[[n * TR, TC], pl.FP32]],
+        ) -> pl.Tensor[[n * TR, TC], pl.FP32]:
+            i = pl.tile.get_block_idx()
+            o = i * TR
+            ta = pl.load(a, [o, 0], [TR, TC])
+            tb = pl.load(b, [o, 0], [TR, TC])
+            pl.system.syncall(core_type="aiv_only")
+            out = pl.store(pl.add(ta, tb), [o, 0], out)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def orchestrator(
+            self,
+            a: pl.Tensor[[n * TR, TC], pl.FP32],
+            b: pl.Tensor[[n * TR, TC], pl.FP32],
+            out: pl.Out[pl.Tensor[[n * TR, TC], pl.FP32]],
+        ) -> pl.Tensor[[n * TR, TC], pl.FP32]:
+            with pl.cluster():
+                with pl.spmd(n):
+                    out = self.add(a, b, out)
+            return out
+
+    return Prog
+
+
 class TestHardSyncallOccupancy:
     """Compile-time occupancy check for the hard (FFTS) syncall (issue #1935)."""
 
@@ -190,6 +293,29 @@ class TestHardSyncallOccupancy:
         """Mixed kernel + hard mix barrier at pl.spmd(12) < 24 core-groups is rejected."""
         with pytest.raises(Exception, match="core-groups"):
             _run(_mixed_program(12))
+
+    def test_standalone_default_mix_barrier_rejected(self):
+        """A pure-AIV kernel with the default (mix) hard barrier can never complete (no AIC)."""
+        with pytest.raises(Exception, match="can never complete"):
+            _run(_aiv_default_mix_program(48))
+
+    def test_spmd_submit_partial_occupancy_rejected(self):
+        """pl.spmd_submit(core_num=24) carries the block count on the Submit — still checked."""
+        with pytest.raises(Exception, match="fill all 48 AIV cores"):
+            _run(_spmd_submit_program(24))
+
+    def test_spmd_submit_full_occupancy_accepted(self):
+        """pl.spmd_submit(core_num=48) at full AIV occupancy compiles cleanly."""
+        _run(_spmd_submit_program(48))
+
+    def test_cluster_spmd_partial_occupancy_rejected(self):
+        """pl.cluster()-nested pl.spmd(24) (a Group with core_num) is checked and rejected."""
+        with pytest.raises(Exception, match="fill all 48 AIV cores"):
+            _run(_cluster_spmd_program(24))
+
+    def test_cluster_spmd_full_occupancy_accepted(self):
+        """pl.cluster()-nested pl.spmd(48) at full AIV occupancy compiles cleanly."""
+        _run(_cluster_spmd_program(48))
 
 
 if __name__ == "__main__":
