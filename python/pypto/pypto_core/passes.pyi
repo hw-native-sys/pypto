@@ -450,9 +450,14 @@ def auto_tile_matmul_l0() -> Pass:
     auto-inserted Mat→Left/Right moves. Already-L0-sized matmuls are left
     untouched.
 
-    Supported today: ``tile.matmul`` and ``tile.matmul_acc``;
-    ``tile.matmul_bias`` is deferred. Only K tiling; M/N tiling and
-    ``K % k != 0`` cases emit a perf hint and skip.
+    Supported today: ``tile.matmul`` and ``tile.matmul_acc``
+    (``tile.matmul_bias`` is deferred). The chooser is a roofline cost-model
+    search over ``(m, n, k, stationarity)``; besides the K-loop it emits
+    **M/N output tiling** (a direct-store grid, or an on-chip **Mat-scratch**
+    assemble when the result is consumed as a matmul operand), a
+    **non-divisor-K boundary peel** for 16-aligned K, and **operand-stationary**
+    (A/B-stationary) schedules. Non-16-aligned K and the other deferred regimes
+    emit a perf hint and are left untouched.
     """
 
 def canonicalize_tile_slice() -> Pass:
@@ -759,6 +764,7 @@ class l0_tile_chooser:
         estimated_cost_cycles: int
         padded_compute_volume: int
         stationarity: l0_tile_chooser.Stationarity
+        os_holds_a: bool
         double_buffer_c: bool
         perf_hint: str
 

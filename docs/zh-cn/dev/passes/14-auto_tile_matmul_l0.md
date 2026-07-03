@@ -232,6 +232,7 @@ L0 容量与 fractal 对齐都来自当前 `BackendHandler`。Pass 优先从 `Pa
 | `tile.matmul_bias` | 跳过（待支持——「最后一次迭代后再 bias-add」的改写尚未实现） |
 | 已经是 L0 大小（`(m, n, k) == (M, N, K)`）的 matmul | 不动 |
 | 输出超过 L0c 但两种 M/N 放置都不适用——`matmul_acc`、Vec 左操作数、非矩阵乘操作数消费者、或 `[M, N]` 超过 Mat/L1 的链式 matmul scratch | 以 `PerfHint`（`PH-AT-006`）跳过 |
+| `K` 不是 cube 分形 16 的倍数 | 以 `PerfHint`（`PH-AT-007`）跳过——不存在分形对齐的 K 切分 |
 | 子字节 dtype | 以 `PerfHint` 跳过 |
 | 非 InCore 函数（Orchestration、Opaque） | 不动 |
 
@@ -244,6 +245,7 @@ L0 容量与 fractal 对齐都来自当前 `BackendHandler`。Pass 优先从 `Pa
 | `PH-AT-003` | 操作数或累加器使用了子字节 dtype |
 | `PH-AT-005` | `ChooseL0Tile` 拒绝了该配置 |
 | `PH-AT-006` | 输出超过 L0c，但两种 M/N 放置都不适用——`tile.matmul_acc`、左操作数为 Vec、或结果在片上被消费但**并非**完全作为矩阵乘操作数（混合 store + 片上、或 elementwise）。结果被完全作为矩阵乘操作数消费时走 **Mat-scratch** 路径（不发提示）——但若其 `[M, N]` scratch 超过 backend 的 Mat/L1 容量，则同样在此延后（保守的必要条件 gate；完整的 packed-peak 检查为后续工作）。 |
+| `PH-AT-007` | 非 16 对齐的 `K`——不存在分形对齐的 K 切分（任何剥离尾块或整段 K 块的列数都非分形），故该 matmul 保持不变 |
 | `PH-AT-008` | `ChooseL0Tile` 返回了 fallback 配置并附带 perf hint |
 | `PH-AT-009` | 该 backend 需要 bf16/f16 的片上 Mat scratch（如 Ascend910B），但超大链式 matmul 的中间结果是 f32——在消费 matmul 之前把 matmul 结果 cast 成 bf16/f16；否则留在延后路径上 |
 | `PH-AT-010` | fits-L0c 链式 matmul 的 cast 无法折叠进 cube FIXPIPE（FIXPIPE 仅以就近取偶把 `f32 → bf16/f16` 降精度）：源非 f32，或舍入模式不是 `rint`（例如默认的 `round`，或 `floor`/`ceil`/`trunc`/`odd`/`none`）。保留在 Vector `pto.tcvt` 路径——一次 cube→vector→cube 往返，在较大 `[M, N]` 下可能撑爆 Vec buffer。对 f32 结果使用 `mode="rint"` 即可留在 cube 上。 |

@@ -436,8 +436,12 @@ void BindPass(nb::module_& m) {
              "tile.matmul_acc the body is uniform — every iteration is tile.matmul_acc with the\n"
              "iter-arg init = caller's accumulator. The K-loop is marked ForKind::Pipeline +\n"
              "pipeline_stages=2 so LowerPipelineLoops produces a 2-deep ping-pong. Already-L0-\n"
-             "sized matmuls are left untouched. tile.matmul_bias is not yet supported. Only K\n"
-             "tiling; M/N tiling and K%k!=0 cases emit a PerfHint and skip.");
+             "sized matmuls are left untouched. tile.matmul_bias is not yet supported. The tile\n"
+             "(m,n,k,stationarity) comes from a roofline cost-model search: besides the K-loop\n"
+             "the pass emits M/N output tiling (direct-store grid or on-chip Mat-scratch\n"
+             "assemble), a non-divisor-K boundary peel for 16-aligned K, and operand-stationary\n"
+             "(A/B-stationary) schedules. Non-16-aligned K and other deferred regimes emit a\n"
+             "PerfHint and are left untouched.");
   passes.def("canonicalize_tile_slice", &pass::CanonicalizeTileSlice,
              "Create a pass that lowers Mat-resident tile.slice into tile.extract\n\n"
              "A tile.slice whose result tile is Mem.Mat (e.g. a batch-page slice emitted by\n"
@@ -712,6 +716,7 @@ void BindPass(nb::module_& m) {
       .def_ro("estimated_cost_cycles", &utils::L0TileResult::estimated_cost_cycles)
       .def_ro("padded_compute_volume", &utils::L0TileResult::padded_compute_volume)
       .def_ro("stationarity", &utils::L0TileResult::stationarity)
+      .def_ro("os_holds_a", &utils::L0TileResult::os_holds_a)
       .def_ro("double_buffer_c", &utils::L0TileResult::double_buffer_c)
       .def_ro("perf_hint", &utils::L0TileResult::perf_hint);
 

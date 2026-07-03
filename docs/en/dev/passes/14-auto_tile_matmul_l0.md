@@ -232,6 +232,7 @@ Adding a new backend therefore only needs to provide these handler hooks — the
 | `tile.matmul_bias` | Skipped (deferred — bias-add-only-after-final-iter rewrite not yet implemented) |
 | Already L0-sized matmul (`(m, n, k) == (M, N, K)`) | Untouched |
 | Output exceeds L0c but no M/N placement applies — `matmul_acc`, Vec left, a non-matmul-operand consumer, or a chained-matmul scratch whose `[M, N]` exceeds Mat/L1 | Skipped with `PerfHint` (`PH-AT-006`) |
+| `K` not a multiple of the cube fractal (16) | Skipped with `PerfHint` (`PH-AT-007`) — no fractal-aligned K-tiling |
 | Sub-byte dtypes | Skipped with `PerfHint` |
 | Non-InCore functions (Orchestration, Opaque) | Untouched |
 
@@ -244,6 +245,7 @@ The pass emits `PerfHint` diagnostics rather than failing when it declines to re
 | `PH-AT-003` | Sub-byte dtype on operand or accumulator |
 | `PH-AT-005` | `ChooseL0Tile` rejected the configuration |
 | `PH-AT-006` | Output exceeds L0c but neither M/N placement applies — `tile.matmul_acc`, a Vec left operand, or a result consumed on-chip that is **not** *entirely* a matmul operand (mixed store-plus-on-chip, or elementwise). A result consumed entirely as a matmul operand takes the **Mat-scratch** path (no hint) — *unless* its `[M, N]` scratch exceeds the backend's Mat/L1 capacity, in which case it is deferred here too (a conservative necessary-condition gate; a full packed-peak check is a follow-up). |
+| `PH-AT-007` | Non-16-aligned `K` — no fractal-aligned K-tiling exists (any peeled tail or whole-K block would have non-fractal cols), so the matmul is left untouched |
 | `PH-AT-008` | `ChooseL0Tile` returned a fallback configuration with a perf hint message |
 | `PH-AT-009` | Backend needs a bf16/f16 on-chip Mat scratch (e.g. Ascend910B) but the oversized chained-matmul intermediate is f32 — cast the matmul result to bf16/f16 before the consumer matmul; left on the deferred path |
 | `PH-AT-010` | A fits-L0c chained-matmul cast cannot fold onto the cube FIXPIPE (which narrows `f32 → bf16/f16` with round-half-to-even only): the source is non-f32, or the round mode is not `rint` (e.g. the default `round`, or `floor`/`ceil`/`trunc`/`odd`/`none`). Kept on the Vector `pto.tcvt` path — a cube→vector→cube round-trip that may overflow the Vec buffer at large `[M, N]`. Cast an f32 result with `mode="rint"` to keep it on the cube. |

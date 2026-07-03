@@ -512,7 +512,8 @@ KLoopRewrite MakeKLoop(const MatmulTiling& t, ExprPtr mi, ExprPtr ni, int64_t m_
 /// so which L0 tile shape to use.  Returns the tiling plan on success;
 /// otherwise nullopt and (when useful) appends a PerfHint.  The caller
 /// dispatches K-only vs M/N tiling on ``MatmulTiling::needs_mn_tiling()``.
-std::optional<MatmulTiling> AnalyzeMatmul(const AssignStmtPtr& assign, std::vector<Diagnostic>& hints) {
+std::optional<MatmulTiling> AnalyzeMatmul(const AssignStmtPtr& assign, std::vector<Diagnostic>& hints,
+                                          bool force_output_stationary = false) {
   auto call = As<Call>(assign->value_);
   if (!call || !call->op_) return std::nullopt;
 
@@ -624,8 +625,12 @@ std::optional<MatmulTiling> AnalyzeMatmul(const AssignStmtPtr& assign, std::vect
   // budgeted (no /2) and is loaded once per outer step (no re-stream across the
   // moving axis). The chooser adopts A/B-stationary only on a strictly lower wall,
   // so it stays output-stationary for compute-bound shapes.
-  cfg.allow_a_stationary = true;
-  cfg.allow_b_stationary = true;
+  // Chained Mat-scratch producers pass force_output_stationary=true to turn these
+  // off (see the #1908 guard at the fold site): the Mat-scratch offset-packing path
+  // cannot yet pack a single-buffered A/B-stationary producer against the consumer
+  // matmul's double-buffered operands, so those producers must stay output-stationary.
+  cfg.allow_a_stationary = !force_output_stationary;
+  cfg.allow_b_stationary = !force_output_stationary;
   // TODO(dbC=2): L0C double-buffering (the chooser's allow_double_buffer_c / dbC=2
   // design point) is left OFF here: the chooser can score it, but the full-K
   // emitter threads the output accumulator as a single iter-arg chain through the
@@ -1490,7 +1495,22 @@ class AutoTileMutator : public IRMutator {
           // matmul result (or its downcast) to it.  Emitted at the matmul site
           // (like the K-only rewrite), with no store to defer.  Checked before the
           // direct-store fold so its hints stay clean.
-          if (auto ms = TryFoldMatScratch(*tiling, result_uses, operand_uses, scratch_dtype, hints)) {
+          // #1908 guard: a chained Mat-scratch producer must stay output-stationary.
+          // The Mat-scratch offset-packing path cannot yet pack an A/B-stationary
+          // producer (its held operand is a monolithic single-buffered [m,K]/[K,n]
+          // panel in the full L0 buffer) against the consumer matmul's double-buffered
+          // operands, so an A/B-stationary chained producer overflows at
+          // AllocateMemoryAddr. OS is always a legal tile and the oversized producer
+          // must be tiled (deferring would overflow L0c), so re-choose OS-only for the
+          // fold rather than defer. Remove once offset packing lands.
+          const MatmulTiling* fold_tiling = &*tiling;
+          std::optional<MatmulTiling> os_tiling;
+          if (tiling->stationarity != utils::Stationarity::kOutputStationary) {
+            std::vector<Diagnostic> discard;  // the first AnalyzeMatmul already emitted the hints
+            os_tiling = AnalyzeMatmul(assign, discard, /*force_output_stationary=*/true);
+            if (os_tiling) fold_tiling = &*os_tiling;
+          }
+          if (auto ms = TryFoldMatScratch(*fold_tiling, result_uses, operand_uses, scratch_dtype, hints)) {
             for (auto& s : ms->first) out.push_back(std::move(s));
             remap[remap_target] = ms->second;
             if (extra_remap) {

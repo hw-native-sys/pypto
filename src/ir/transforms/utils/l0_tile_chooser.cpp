@@ -110,15 +110,19 @@ std::vector<int> EnumerateLegalKs(int m, int n, const L0TileConfig& cfg, int64_t
   return ks;
 }
 
+// Which operand a full-K output-stationary tile hoists (defined with LoadCycles
+// below; forward-declared so EstimateTraffic mirrors the same min-hoist route).
+bool OSHoldsHoldA(int m, int n, const L0TileConfig& cfg);
+
 // L1<->L0 operand + drain traffic in BYTES for the chosen tile under its regime.
 // Inspection-only (the chooser ranks by the roofline wall, not this value); the
 // reload counts follow the regime's stationarity, mirroring LoadCycles so the
-// reported traffic is honest for A/B-stationary too (not just output-stationary):
-//   A traffic ≈ bytes_a * M * K * (ceil(N/n), or 1 when A is held / A-stationary)
-//   B traffic ≈ bytes_b * K * N * (ceil(M/m), or 1 when B is held / B-stationary)
+// reported traffic is honest for every regime (A/B-stationary AND the full-K
+// output-stationary min-hoist, not just split-K OS):
+//   A traffic ≈ bytes_a * M * K * (ceil(N/n), or 1 when A is held)
+//   B traffic ≈ bytes_b * K * N * (ceil(M/m), or 1 when B is held)
 //   C traffic ≈ gamma_c * bytes_c * M * N   (gamma_c = 2 when the accumulator is read)
 int64_t EstimateTraffic(int m, int n, int k, const L0TileConfig& cfg, const Regime& r) {
-  (void)k;  // k does not change the C-stationary reload counts.
   const int64_t M = cfg.M;
   const int64_t N = cfg.N;
   const int64_t K = cfg.K;
@@ -136,8 +140,18 @@ int64_t EstimateTraffic(int m, int n, int k, const L0TileConfig& cfg, const Regi
       b_traffic = static_cast<int64_t>(cfg.bytes_b) * K * N;  // B loaded once (k == K)
       break;
     case Stationarity::kOutputStationary:
-      a_traffic = static_cast<int64_t>(cfg.bytes_a) * M * K * ceil_n;
-      b_traffic = static_cast<int64_t>(cfg.bytes_b) * K * N * ceil_m;
+      // Full-K OS hoists one operand (mirror LoadCycles' min-hoist via OSHoldsHoldA so
+      // this metric matches the wall the tile was scored under); split-K re-streams both.
+      if (static_cast<int64_t>(k) >= K && OSHoldsHoldA(m, n, cfg)) {
+        a_traffic = static_cast<int64_t>(cfg.bytes_a) * M * K;           // A held once
+        b_traffic = static_cast<int64_t>(cfg.bytes_b) * K * N * ceil_m;  // B streamed
+      } else if (static_cast<int64_t>(k) >= K) {
+        a_traffic = static_cast<int64_t>(cfg.bytes_a) * M * K * ceil_n;  // A streamed
+        b_traffic = static_cast<int64_t>(cfg.bytes_b) * K * N;           // B held once
+      } else {
+        a_traffic = static_cast<int64_t>(cfg.bytes_a) * M * K * ceil_n;  // split-K: both re-streamed
+        b_traffic = static_cast<int64_t>(cfg.bytes_b) * K * N * ceil_m;
+      }
       break;
   }
   const int64_t gamma_c = cfg.c_read ? 2 : 1;

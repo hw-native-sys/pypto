@@ -545,36 +545,6 @@ class TestAutoTileMatmulL0KOnly:
         After = passes.auto_tile_matmul_l0()(Before)
         ir.assert_structural_equal(After, Before)  # non-aligned K -> untouched
 
-    def test_non_aligned_K_load_bound_left_untouched(self):
-        """A load-bound skinny shape with non-16-aligned K is also skipped: K=300
-        (M=16, N=64) is not a multiple of the cube fractal 16, so there is no valid
-        K-tiling (a peeled tail / whole-K block would have non-fractal cols) and the
-        pass leaves the matmul untouched (PH-AT-007).  Mirrors
-        ``test_non_aligned_K_left_untouched`` for a load-bound (vs MAD-bound) K; the
-        exhaustive-k tie-break itself is covered by the chooser oracle."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                lhs: pl.Tensor[[16, 300], pl.BF16],
-                rhs: pl.Tensor[[300, 64], pl.BF16],
-                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
-            ) -> pl.Tensor[[16, 64], pl.FP32]:
-                lhs_mat: pl.Tile[[16, 300], pl.BF16, pl.Mem.Mat] = pl.tile.load(
-                    lhs, [0, 0], [16, 300], target_memory=pl.Mem.Mat
-                )
-                rhs_mat: pl.Tile[[300, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
-                    rhs, [0, 0], [300, 64], target_memory=pl.Mem.Mat
-                )
-                c: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lhs_mat, rhs_mat)
-                out = pl.store(c, [0, 0], out)
-                return out
-
-        After = passes.auto_tile_matmul_l0()(Before)
-        ir.assert_structural_equal(After, Before)  # non-aligned K -> untouched
-
 
 def _torch_codegen_matches_matmul(program, m_dim, n_dim, k_dim):
     """Drive ``program`` through ``torch_codegen`` and check the executed
@@ -1823,6 +1793,56 @@ class TestAutoTileMatmulL0MatScratch:
         expected = c_bf16 @ e.float()
         rel_err = ((out - expected).norm() / expected.norm()).item()
         assert rel_err < 5e-2, f"split-K Mat-scratch chained bf16 rel_err {rel_err:.3e} exceeds 5e-2"
+
+    def test_chained_mat_scratch_producer_forced_output_stationary(self):
+        """#1908 guard: a chained Mat-scratch producer whose geometry standalone picks
+        B-stationary (128×272×64) is forced OUTPUT-STATIONARY when its result is consumed
+        on-chip. The Mat-scratch offset-packing path can't yet pack an A/B-stationary
+        producer's monolithic single-buffered L0 panel against the consumer's
+        double-buffered operands (#1908), so the pass re-chooses OS (always legal) rather
+        than emit the unpackable A/B-stationary schedule. This exact shape is B-stationary
+        standalone (``test_b_stationary_single_buffers_held_operand`` mirror) — as a
+        chained producer it must not be.
+
+        128×272 FP32 output (136 KB) > L0c so the producer is tiled; the 128×272 bf16
+        Mat scratch (68 KB) fits Mat/L1, so it reaches the fold (not the capacity gate).
+        The consumer [128, 64] fits L0c (no loop), so any Sequential ``pl.range`` in the
+        emitted kernel would be the producer's A/B-stationary held-operand loop."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[128, 64], pl.BF16],
+                b: pl.Tensor[[64, 272], pl.BF16],
+                e: pl.Tensor[[272, 64], pl.BF16],
+                out: pl.Out[pl.Tensor[[128, 64], pl.FP32]],
+            ) -> pl.Tensor[[128, 64], pl.FP32]:
+                c = pl.matmul(a, b, out_dtype=pl.FP32)  # [128, 272] f32 > L0c → Mat scratch
+                cb = pl.cast(c, pl.BF16, mode="rint")
+                d = pl.matmul(cb, e, out_dtype=pl.FP32)  # consumes the scratch as a matmul operand
+                out = pl.assemble(out, d, [0, 0])
+                return out
+
+        After = passes.auto_tile_matmul_l0()(_lower_to_tile_ops(Before))
+        printed = ir.python_print(After)
+        assert "tile.create" in printed and "Mem.Mat" in printed, "expected a Mat output scratch"
+        # The guard forces the producer output-stationary: an A/B-stationary schedule
+        # emits a Sequential ``pl.range`` held-operand outer loop, which the Mat-scratch
+        # packing cannot handle yet (#1908). OS emits nested ``pl.pipeline`` instead.
+        assert "pl.range(" not in printed, (
+            "chained Mat-scratch producer must be output-stationary (nested pl.pipeline), "
+            "not A/B-stationary (Sequential pl.range) — the #1908 guard failed"
+        )
+        _assert_ssa_valid(After, "test_mat_scratch_producer_os_guard")
+        # And it must allocate cleanly through the full Default pipeline (the A/B-stationary
+        # producer would overflow at AllocateMemoryAddr — the #1908 packing gap).
+        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+
+        assert PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before) is not None
 
     def test_chained_matmul_exceeding_mat_capacity_deferred(self):
         """The conservative Mat-capacity gate: a bf16 chained matmul whose result is

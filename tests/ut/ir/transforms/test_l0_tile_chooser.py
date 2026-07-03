@@ -580,6 +580,28 @@ class TestL0TilingRooflineOptimum:
         assert r.estimated_traffic_bytes == a_stat, "traffic must use the A-stationary reload counts"
         assert a_stat <= os, "A-stationary never charges more A traffic than output-stationary"
 
+    def test_estimated_traffic_matches_os_full_k_hoist(self):
+        """For a full-K output-stationary tile the emit hoists ONE operand (recorded in
+        os_holds_a); estimated_traffic_bytes must mirror that min-hoist route (hold one,
+        stream the other), not the split-K both-re-streamed sum — otherwise the metadata
+        contradicts the wall the tile was scored under."""
+        cfg = _default_config(M=512, N=512, K=64)  # bf16, k == K == 64 → output-stationary
+        r = passes.l0_tile_chooser.choose_l0_tile(cfg)
+        assert r.stationarity == passes.l0_tile_chooser.Stationarity.OutputStationary
+        assert r.k == 64, "expected a full-K (k == K) output-stationary tile"
+        M, N, K = 512, 512, 64
+        cn, cm = _cdiv(N, r.n), _cdiv(M, r.m)
+        gamma_c = 2 if cfg.c_read else 1
+        c_traffic = gamma_c * cfg.bytes_c * M * N
+        held_a = cfg.bytes_a * M * K + cfg.bytes_b * K * N * cm + c_traffic  # hold A, stream B
+        held_b = cfg.bytes_a * M * K * cn + cfg.bytes_b * K * N + c_traffic  # hold B, stream A
+        both = cfg.bytes_a * M * K * cn + cfg.bytes_b * K * N * cm + c_traffic  # split-K: re-stream both
+        expected = held_a if r.os_holds_a else held_b
+        assert r.estimated_traffic_bytes == expected, (
+            "full-K OS traffic must mirror the os_holds_a min-hoist route, not re-stream both operands"
+        )
+        assert expected <= both, "the min-hoist route never charges more than re-streaming both"
+
 
 class TestL0TilingKBoundary:
     """allow_k_boundary: the chosen k need not divide K (the pass peels the partial

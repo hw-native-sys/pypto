@@ -221,11 +221,15 @@ struct L0TileResult {
  *                 (ceil(K/k)*mad_head + cpr*ceil(m/16)*Kfrac*ceil(n/16))
  *          Kfrac = floor(K/k)*ceil(k/kt) + ceil((K - floor(K/k)*k)/kt)
  *                  (the K-peel tail is scored at its own width, not rounded to k)
- *        C_drain = gamma_c*bytes_c*M*N/BW_drain
+ *        C_drain = ceil(M/m)*ceil(N/n) * (drain_fixed + gamma_c*bytes_c*m*n/BW_drain)
+ *                  (per output tile: fixed issue overhead + its bytes at BW_drain;
+ *                   M/N-split adds drains, K-split does not)
  *        C_load (BW-weighted, by stationarity):
- *          OS     : ba*M*K*ceil(N/n)/BW_A + bb*K*N*ceil(M/m)/BW_B
- *          A-stat : ba*M*K/BW_A           + bb*K*N*ceil(M/m)/BW_B   (k==K)
- *          B-stat : ba*M*K*ceil(N/n)/BW_A + bb*K*N/BW_B             (k==K)
+ *          OS full-K : min(held-A, held-B) route (hoist the cheaper operand; the
+ *                      recorded os_holds_a drives the emit) — held-A / held-B as below
+ *          OS split-K: ba*M*K*ceil(N/n)/BW_A + bb*K*N*ceil(M/m)/BW_B  (both re-streamed)
+ *          A-stat    : ba*M*K/BW_A           + bb*K*N*ceil(M/m)/BW_B   (k==K, held-A)
+ *          B-stat    : ba*M*K*ceil(N/n)/BW_A + bb*K*N/BW_B             (k==K, held-B)
  *        wall   = max(C_load, C_mad) + C_drain        (dbC == 1, drain exposed)
  *               = max(C_load, C_mad, C_drain)         (dbC == 2, drain hidden)
  *      with kt = mad_k_fractal_bytes/bytes_a, cpr = bytes_a/2. Ties break by lex

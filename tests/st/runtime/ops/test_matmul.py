@@ -393,18 +393,24 @@ class TestMatmulAutoL0NonAlignedK(PTOTestCase):
     """BF16 matmul whose K is not a multiple of the chosen tile k — the
     AutoTileMatmulL0 K-boundary peel (non-divisor k).
 
-    M=128, N=128, K=688 (bf16): K=688 is 16-aligned but its only 16-aligned divisors
-    are 16 and 688 (688 = 16·43), so the roofline chooser picks k=64 (a non-divisor)
-    rather than a tiny k=16.  The pass pipelines floor(688/64)=10 full K-blocks (640)
-    and peels a straight-line ``matmul_acc`` tail of 688-640=48.  Every tile dim
-    (k=64, tail 48, K=688) stays 16-aligned — ptoas requires 16-aligned tile cols, so
-    the operand dimensions themselves must be 16-aligned (non-16-aligned dims are not
-    supported).  The [128, 128] FP32 output fits L0c (no M/N grid) and the [128, 688]
-    + [688, 128] Mat operands fit L1, so this is a clean K-only peel."""
+    M=128, N=192, K=688 (bf16): K=688 is 16-aligned but its only 16-aligned divisors
+    are 16 and 688 (688 = 16·43), so the roofline chooser picks a non-divisor k rather
+    than a tiny k=16 — here k=80, pipelining floor(688/80)=8 full K-blocks (640) and
+    peeling a straight-line ``matmul_acc`` tail of 688-640=48.  Every tile dim (k=80,
+    tail 48, K=688) stays 16-aligned — ptoas requires 16-aligned tile cols, so the
+    operand dimensions themselves must be 16-aligned (non-16-aligned dims are not
+    supported).  The [128, 192] FP32 output fits L0c (no M/N grid) and the [128, 688]
+    + [688, 192] Mat operands fit L1, so this is a clean K-only peel.
+
+    N is 192 (not 128) on purpose: at N=128 the chooser picks a *k=128* peel whose
+    codegen emits an acc->acc ``pto.tmov`` (the peeled loop-carried accumulator move
+    that MemoryReuse coalescing / #1924 removes) which ptoas rejects on a2a3.  N=192
+    caps the L0B-bound k at 80, so the chosen peel stays on the codegen-clean path
+    while still exercising the non-divisor K-boundary peel."""
 
     __test__ = False
 
-    def __init__(self, m: int = 128, k: int = 688, n: int = 128, *, platform: str | None = None, config=None):
+    def __init__(self, m: int = 128, k: int = 688, n: int = 192, *, platform: str | None = None, config=None):
         super().__init__(config, platform=platform)
         self.M = m
         self.K = k
@@ -1386,9 +1392,10 @@ class TestMatmulOperations:
 
     @pytest.mark.parametrize("platform", PLATFORMS)
     def test_matmul_autol0_nonaligned_k(self, test_runner, platform):
-        """Non-divisor k (128x688x128): AutoTileMatmulL0 pipelines the 10 full k=64
+        """Non-divisor k (128x688x192): AutoTileMatmulL0 pipelines the 8 full k=80
         blocks and peels a straight-line matmul_acc tail of 48 (all 16-aligned).
-        Validates the K-boundary peel numerically on device."""
+        Validates the K-boundary peel numerically on device. (N=192 keeps the pick on
+        the k=80 codegen-clean peel; see the case class docstring.)"""
         cfg = RunConfig(platform=platform, rtol=2e-3, atol=2e-3)
         result = test_runner.run(TestMatmulAutoL0NonAlignedK(platform=platform, config=cfg))
         assert result.passed, f"Test failed: {result.error}"
