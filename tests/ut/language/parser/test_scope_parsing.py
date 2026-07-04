@@ -9,9 +9,12 @@
 
 """Unit tests for parsing ScopeStmt with pl.at(level=pl.Level.CORE_GROUP): syntax."""
 
+import ast
+
 import pypto.language as pl
 import pytest
 from pypto import ir
+from pypto.language.parser.ast_parser import ASTParser
 from pypto.language.parser.diagnostics.exceptions import ParserSyntaxError
 from pypto.language.parser.text_parser import parse_program
 
@@ -1575,6 +1578,21 @@ class TestSpmdInlineWithForm:
                         t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [0, 0], [128, 128])
                         out = pl.store(pl.add(t, t), [0, 0], out)
                     return out
+
+    def test_block_idx_guard_requires_tile_receiver(self):
+        """The block-index guard matches only ``<tile>.get_block_idx()``, not an
+        unrelated ``foo.get_block_idx()``. Directly exercises the AST matcher so the
+        (otherwise unreachable) false-positive receiver is pinned down."""
+        reads = ASTParser._spmd_body_reads_block_idx
+        # Both documented spellings satisfy the guard.
+        assert reads(ast.parse("x = pl.tile.get_block_idx()").body)
+        assert reads(ast.parse("x = tile.get_block_idx()").body)
+        # A nested use (inside an expression argument) still counts.
+        assert reads(ast.parse("t = pl.load(a, [pl.tile.get_block_idx() * 8, 0], [8, 8])").body)
+        # An unrelated receiver must NOT satisfy the guard (Copilot review).
+        assert not reads(ast.parse("x = foo.get_block_idx()").body)
+        # A body with no block-index read at all is rejected.
+        assert not reads(ast.parse("x = pl.load(a, [0, 0], [8, 8])").body)
 
 
 class TestSpmdAllowEarlyResolve:

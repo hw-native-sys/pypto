@@ -3589,7 +3589,7 @@ class ASTParser:
 
     @staticmethod
     def _spmd_body_reads_block_idx(body: "list[ast.stmt]") -> bool:
-        """True if any statement in an inline SPMD body calls ``*.get_block_idx()``.
+        """True if any statement in an inline SPMD body calls ``tile.get_block_idx()``.
 
         An inline (auto-outlined) ``pl.spmd`` body distinguishes blocks solely via
         the per-block index; without it every block executes identical work — almost
@@ -3597,17 +3597,28 @@ class ASTParser:
         kernel at all. The single-call direct-dispatch shape is exempt (the callee
         reads the index internally), so this is only consulted for inline bodies.
 
-        Matched at the AST layer by the trailing attribute name (no IR ``Op`` exists
-        yet), so ``pl.tile.get_block_idx()`` and ``tile.get_block_idx()`` both count.
-        ``ast.walk`` recurses the whole body subtree, so a nested use (inside a
-        ``pl.range`` loop or an expression argument) is found too.
+        Matched at the AST layer (no IR ``Op`` exists yet) by requiring the call to
+        be ``<tile>.get_block_idx(...)`` where ``<tile>`` is a ``tile`` reference —
+        so ``pl.tile.get_block_idx()`` and ``tile.get_block_idx()`` both count, but
+        an unrelated ``foo.get_block_idx()`` does not (the error message and docs
+        name ``pl.tile.get_block_idx()`` specifically). ``ast.walk`` recurses the
+        whole body subtree, so a nested use (inside a ``pl.range`` loop or an
+        expression argument) is found too.
         """
+
+        def _is_tile_ref(value: "ast.expr") -> bool:
+            # ``pl.tile`` (Attribute .attr == "tile") or a bare ``tile`` (Name).
+            return (isinstance(value, ast.Attribute) and value.attr == "tile") or (
+                isinstance(value, ast.Name) and value.id == "tile"
+            )
+
         for body_stmt in body:
             for node in ast.walk(body_stmt):
                 if (
                     isinstance(node, ast.Call)
                     and isinstance(node.func, ast.Attribute)
                     and node.func.attr == "get_block_idx"
+                    and _is_tile_ref(node.func.value)
                 ):
                     return True
         return False
