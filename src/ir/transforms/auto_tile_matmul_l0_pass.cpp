@@ -1252,25 +1252,19 @@ std::optional<std::pair<std::vector<StmtPtr>, VarPtr>> TryFoldMatScratch(const M
   }
   auto result_ty = As<TileType>(t.assign->var_->GetType());
   INTERNAL_CHECK_SPAN(result_ty, sp) << "Internal error: matmul result is not a TileType";
-  // Conservative Mat-capacity gate (necessary condition).  MatScratchPlacer::Init
-  // materializes the whole [M, N] result in Mat, so without this guard a large
-  // chained matmul would be rewritten into an impossible on-chip allocation that
-  // only fails later, at AllocateMemoryAddr.  Defer (PH-AT-006) when the scratch
-  // alone exceeds the backend's Mat capacity.  A full packed-peak check (coexisting
-  // Mat operands / live tensors) is a follow-up; this lower bound is always safe.
-  if (pypto::backend::BackendConfig::IsConfigured()) {
-    const uint64_t mat_capacity = pypto::backend::GetBackend()->GetMemSize(ir::MemorySpace::Mat);
-    const uint64_t scratch_bytes =
-        static_cast<uint64_t>(t.M) * static_cast<uint64_t>(t.N) * DTypeBytes(scratch_dtype);
-    if (mat_capacity > 0 && scratch_bytes > mat_capacity) {
-      hints.emplace_back(DiagnosticSeverity::PerfHint, kPassName, 0, "PH-AT-006",
-                         "chained-matmul [" + std::to_string(t.M) + ", " + std::to_string(t.N) +
-                             "] Mat scratch (" + std::to_string(scratch_bytes) +
-                             " bytes) exceeds Mat capacity (" + std::to_string(mat_capacity) +
-                             " bytes); left on the deferred path",
-                         sp);
-      return std::nullopt;
-    }
+  // Necessary capacity gate: the Mat scratch alone must fit. The allocator still
+  // performs the full live-range/packing check later.
+  const uint64_t mat_capacity = handler ? handler->GetMatCapacityBytes() : 0;
+  const uint64_t scratch_bytes =
+      static_cast<uint64_t>(t.M) * static_cast<uint64_t>(t.N) * DTypeBytes(scratch_dtype);
+  if (mat_capacity > 0 && scratch_bytes > mat_capacity) {
+    hints.emplace_back(DiagnosticSeverity::PerfHint, kPassName, 0, "PH-AT-006",
+                       "chained-matmul [" + std::to_string(t.M) + ", " + std::to_string(t.N) +
+                           "] Mat scratch (" + std::to_string(scratch_bytes) +
+                           " bytes) exceeds Mat capacity (" + std::to_string(mat_capacity) +
+                           " bytes); left on the deferred path",
+                       sp);
+    return std::nullopt;
   }
   const std::string base = t.assign->var_->name_hint_ + "_mat";
   MatScratchPlacer placer(t.M, t.N, scratch_dtype, base, sp);

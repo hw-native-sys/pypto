@@ -605,9 +605,9 @@ class TestL0TilingRooflineOptimum:
 
 class TestL0TilingKBoundary:
     """allow_k_boundary: the chosen k need not divide K (the pass peels the partial
-    last K iteration); when the full K reduction fits one L0 block, k == K is returned
-    verbatim even for a non-16-aligned K — the cube zero-fills the K tail fractal in
-    the GM->L1 NZ repack (see the pto-isa MAD spec / DESIGN_SPACE.md)."""
+    last K iteration). The peel is only legal when K is itself 16-aligned; a
+    non-16-aligned whole-K block or peel tail is rejected because ptoas requires
+    fractal-aligned tile cols."""
 
     def test_unaligned_whole_K_rejected(self):
         """K=50 is not a multiple of align_k (16): a k == K == 50 block would have

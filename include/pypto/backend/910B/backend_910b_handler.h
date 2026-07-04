@@ -61,6 +61,7 @@ class Ascend910BHandler : public BackendHandler {
   [[nodiscard]] uint32_t GetL0aCapacityBytes() const override { return 64ULL * 1024; }
   [[nodiscard]] uint32_t GetL0bCapacityBytes() const override { return 64ULL * 1024; }
   [[nodiscard]] uint32_t GetL0cCapacityBytes() const override { return 128ULL * 1024; }
+  [[nodiscard]] uint64_t GetMatCapacityBytes() const override { return 512ULL * 1024; }
 
  private:
   Ascend910BHandler() = default;

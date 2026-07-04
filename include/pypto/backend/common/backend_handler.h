@@ -275,6 +275,15 @@ class BackendHandler {
   [[nodiscard]] virtual uint32_t GetL0cCapacityBytes() const = 0;
 
   /**
+   * @brief Mat (L1) on-chip SRAM capacity, in bytes.
+   *
+   * Used by passes that need a conservative per-core capacity gate without
+   * walking the global Backend SoC object. This keeps pass-level backend
+   * decisions on the BackendHandler / PassContext path.
+   */
+  [[nodiscard]] virtual uint64_t GetMatCapacityBytes() const = 0;
+
+  /**
    * @brief Cube fractal alignment in *elements* for L0 tile dimensions.
    *
    * Distinct from memory access alignment (which is a byte-level concept on

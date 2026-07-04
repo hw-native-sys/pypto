@@ -63,6 +63,11 @@ class Ascend950Handler : public BackendHandler {
   [[nodiscard]] uint32_t GetL0aCapacityBytes() const override { return 64ULL * 1024; }
   [[nodiscard]] uint32_t GetL0bCapacityBytes() const override { return 64ULL * 1024; }
   [[nodiscard]] uint32_t GetL0cCapacityBytes() const override { return 256ULL * 1024; }
+  [[nodiscard]] uint64_t GetMatCapacityBytes() const override { return 512ULL * 1024; }
+
+  // TODO(a5-calibration): explicit placeholder. The roofline constants inherited
+  // from BackendHandler are a2a3-calibrated until a5 op-sim/device data exists.
+  [[nodiscard]] L0CostModel GetL0CostModel() const override { return L0CostModel{}; }
 
  private:
   Ascend950Handler() = default;

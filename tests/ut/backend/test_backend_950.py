@@ -174,10 +174,12 @@ class TestBackend950L0Tiling:
         assert handler.get_l0a_capacity_bytes() == 64 * 1024
         assert handler.get_l0b_capacity_bytes() == 64 * 1024
         assert handler.get_l0c_capacity_bytes() == 256 * 1024
+        assert handler.get_mat_capacity_bytes() == 512 * 1024
 
         assert handler.get_l0a_capacity_bytes() == backend.get_mem_size(ir.MemorySpace.Left)
         assert handler.get_l0b_capacity_bytes() == backend.get_mem_size(ir.MemorySpace.Right)
         assert handler.get_l0c_capacity_bytes() == backend.get_mem_size(ir.MemorySpace.Acc)
+        assert handler.get_mat_capacity_bytes() == backend.get_mem_size(ir.MemorySpace.Mat)
 
     def test_l0_fractal_alignment_default(self):
         handler = Backend950.instance().get_handler()
