@@ -1579,20 +1579,46 @@ class TestSpmdInlineWithForm:
                         out = pl.store(pl.add(t, t), [0, 0], out)
                     return out
 
-    def test_block_idx_guard_requires_tile_receiver(self):
-        """The block-index guard matches only ``<tile>.get_block_idx()``, not an
-        unrelated ``foo.get_block_idx()``. Directly exercises the AST matcher so the
-        (otherwise unreachable) false-positive receiver is pinned down."""
+    def test_inline_with_spmd_accepts_top_level_get_block_idx(self):
+        """Regression (qwen3 decode / pypto-lib-model CI): an inline body that reads
+        the block index via the top-level ``pl.get_block_idx()`` alias (not the
+        qualified ``pl.tile.get_block_idx()``) is accepted, not rejected by the guard."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                with pl.spmd(4, name_hint="fa_fused"):
+                    i = pl.get_block_idx()  # top-level alias, as real models use
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [i * 128, 0], [128, 128])
+                    out = pl.store(pl.add(t, t), [i * 128, 0], out)
+                return out
+
+        main_func = list(Prog.functions.values())[0]
+        spmd = self._unique(main_func.body, ir.SpmdScopeStmt)
+        # Outlined (InCore wrapper present), not rejected by the block-index guard.
+        self._unique(spmd.body, ir.InCoreScopeStmt)
+
+    def test_block_idx_guard_matches_every_get_block_idx_spelling(self):
+        """The block-index guard matches ``get_block_idx()`` by name, across every
+        valid spelling regardless of receiver. Regression: the top-level
+        ``pl.get_block_idx()`` alias (used by real models, e.g. qwen3 decode) must be
+        accepted — a receiver-restricted match wrongly rejected it."""
         reads = ASTParser._spmd_body_reads_block_idx
-        # Both documented spellings satisfy the guard.
+        # Top-level alias (the regression case), qualified forms, and bare import.
+        assert reads(ast.parse("x = pl.get_block_idx()").body)
         assert reads(ast.parse("x = pl.tile.get_block_idx()").body)
         assert reads(ast.parse("x = tile.get_block_idx()").body)
+        assert reads(ast.parse("x = get_block_idx()").body)
         # A nested use (inside an expression argument) still counts.
-        assert reads(ast.parse("t = pl.load(a, [pl.tile.get_block_idx() * 8, 0], [8, 8])").body)
-        # An unrelated receiver must NOT satisfy the guard (Copilot review).
-        assert not reads(ast.parse("x = foo.get_block_idx()").body)
+        assert reads(ast.parse("t = pl.load(a, [pl.get_block_idx() * 8, 0], [8, 8])").body)
         # A body with no block-index read at all is rejected.
         assert not reads(ast.parse("x = pl.load(a, [0, 0], [8, 8])").body)
+        assert not reads(ast.parse("x = foo.get_subblock_idx()").body)
 
 
 class TestSpmdAllowEarlyResolve:

@@ -3589,7 +3589,7 @@ class ASTParser:
 
     @staticmethod
     def _spmd_body_reads_block_idx(body: "list[ast.stmt]") -> bool:
-        """True if any statement in an inline SPMD body calls ``tile.get_block_idx()``.
+        """True if any statement in an inline SPMD body calls ``get_block_idx()``.
 
         An inline (auto-outlined) ``pl.spmd`` body distinguishes blocks solely via
         the per-block index; without it every block executes identical work — almost
@@ -3597,30 +3597,24 @@ class ASTParser:
         kernel at all. The single-call direct-dispatch shape is exempt (the callee
         reads the index internally), so this is only consulted for inline bodies.
 
-        Matched at the AST layer (no IR ``Op`` exists yet) by requiring the call to
-        be ``<tile>.get_block_idx(...)`` where ``<tile>`` is a ``tile`` reference —
-        so ``pl.tile.get_block_idx()`` and ``tile.get_block_idx()`` both count, but
-        an unrelated ``foo.get_block_idx()`` does not (the error message and docs
-        name ``pl.tile.get_block_idx()`` specifically). ``ast.walk`` recurses the
-        whole body subtree, so a nested use (inside a ``pl.range`` loop or an
-        expression argument) is found too.
+        Matched at the AST layer (no IR ``Op`` exists yet) by the trailing call name,
+        so every valid spelling of the API counts regardless of receiver:
+        ``pl.get_block_idx()`` (the top-level alias real models use), the qualified
+        ``pl.tile.get_block_idx()`` / ``tile.get_block_idx()``, and a bare
+        ``get_block_idx()`` imported directly. Matching by name only is deliberately
+        lenient: ``get_block_idx`` is unique to this API (no other DSL object exposes
+        it), and being lenient here is far safer than rejecting a real body that
+        distinguishes blocks. ``ast.walk`` recurses the whole body subtree, so a
+        nested use (inside a ``pl.range`` loop or an expression argument) is found.
         """
-
-        def _is_tile_ref(value: "ast.expr") -> bool:
-            # ``pl.tile`` (Attribute .attr == "tile") or a bare ``tile`` (Name).
-            return (isinstance(value, ast.Attribute) and value.attr == "tile") or (
-                isinstance(value, ast.Name) and value.id == "tile"
-            )
-
         for body_stmt in body:
             for node in ast.walk(body_stmt):
-                if (
-                    isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "get_block_idx"
-                    and _is_tile_ref(node.func.value)
-                ):
-                    return True
+                if isinstance(node, ast.Call):
+                    func = node.func
+                    if (isinstance(func, ast.Attribute) and func.attr == "get_block_idx") or (
+                        isinstance(func, ast.Name) and func.id == "get_block_idx"
+                    ):
+                        return True
         return False
 
     def _emit_spmd_body(  # noqa: PLR0913 — args map 1:1 to the SpmdScopeStmt fields
