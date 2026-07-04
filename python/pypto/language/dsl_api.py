@@ -711,9 +711,13 @@ def spmd(
 
     Usage forms:
 
-    1. ``with pl.spmd(n):`` — body must be a single call to a pre-defined
-       InCore kernel. Can stand alone (implicit cluster) or nest inside
-       ``pl.cluster()``.
+    1. ``with pl.spmd(n):`` — body is either a single call to a pre-defined
+       InCore kernel (direct dispatch), or an inline multi-statement block that
+       is auto-outlined into a synthetic InCore kernel (like the loop form, minus
+       the auto-bound index). An inline body must read the per-block index via
+       ``pl.tile.get_block_idx()`` — without it every block runs identical work.
+       Captures no producer TaskId (use form 3 for that). Can stand alone
+       (implicit cluster) or nest inside ``pl.cluster()``.
 
     2. ``for i in pl.spmd(n):`` — loop-style. The iteration variable binds
        the per-block index (equivalent to ``pl.tile.get_block_idx()``); the
@@ -721,12 +725,12 @@ def spmd(
        tile/tensor ops work without a separate ``@pl.function(type=InCore)``
        declaration.
 
-    3. ``with pl.spmd(n, deps=[...]) as tid:`` — captures the grid dispatch's
-       producer ``Scalar[TASK_ID]`` in ``tid`` (mirroring ``with pl.at(...) as
-       tid:``), usable as a ``deps=`` edge on later tasks, stored into a
-       ``pl.array.create(N, pl.TASK_ID)``, or crossing into ``pl.manual_scope``.
-       Unlike form 1, this form accepts an inline multi-statement body (like the
-       loop form); read the per-block index inside via ``pl.tile.get_block_idx()``.
+    3. ``with pl.spmd(n, deps=[...]) as tid:`` — same body shapes as form 1, and
+       additionally captures the grid dispatch's producer ``Scalar[TASK_ID]`` in
+       ``tid`` (mirroring ``with pl.at(...) as tid:``), usable as a ``deps=`` edge
+       on later tasks, stored into a ``pl.array.create(N, pl.TASK_ID)``, or
+       crossing into ``pl.manual_scope``. TaskId capture is the only thing this
+       adds over form 1 — it is orthogonal to the inline body.
 
     Optional ``optimizations=[pl.split(mode)]`` applies to the inner InCore scope
     (auto-generated for the for-form and the ``as tid`` form, wrapped around the
@@ -761,9 +765,17 @@ def spmd(
         Context manager / loop iterator for the SPMD scope.
 
     Examples:
-        >>> # Single-kernel context-manager form
+        >>> # Single-kernel context-manager form (direct dispatch)
         >>> with pl.spmd(4):
         ...     out = self.kernel(a, b, out)
+        >>>
+        >>> # Inline context-manager form — no TaskId; read the block index yourself
+        >>> with pl.spmd(4):
+        ...     i = pl.tile.get_block_idx()
+        ...     offset = i * 128
+        ...     tile_a = pl.load(a, [offset, 0], [128, 128])
+        ...     tile_b = pl.load(b, [offset, 0], [128, 128])
+        ...     out = pl.store(pl.add(tile_a, tile_b), [offset, 0], out)
         >>>
         >>> # Loop form — body runs per-block with i = tile.get_block_idx()
         >>> for i in pl.spmd(4):

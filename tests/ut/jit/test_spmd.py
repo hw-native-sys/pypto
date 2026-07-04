@@ -83,6 +83,50 @@ def test_jit_spmd_with_form():
     )
 
 
+def test_jit_spmd_inline_with_form_no_tid():
+    """``with pl.spmd(N):`` with an INLINE body (no ``as tid``) compiles end-to-end.
+
+    Exercises the decoupling of inline-body support from TaskId capture: the plain
+    with-form auto-outlines the inline body into a synthetic InCore kernel — like the
+    for-form / as-tid form — without capturing a producer TaskId. The dispatch stays
+    a plain Call (no task_id_var → not lowered to a Submit), unlike the as-tid form.
+    """
+    torch = pytest.importorskip("torch")
+
+    @jit
+    def entry(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+        with pl.spmd(2):
+            i = pl.tile.get_block_idx()
+            offset = i * 64
+            tile_a = pl.load(a, [offset, 0], [64, 128])
+            tile_b = pl.load(b, [offset, 0], [64, 128])
+            c = pl.store(pl.add(tile_a, tile_b), [offset, 0], c)
+        return c
+
+    post = entry.compile_for_test(torch.randn(128, 128), torch.randn(128, 128), torch.empty(128, 128))
+    func_types = {f.func_type for f in post.functions.values()}
+    assert ir.FunctionType.Spmd in func_types, (
+        f"expected an Spmd function from the inline `with pl.spmd()` body, got {func_types}"
+    )
+    # No `as tid`, so the dispatch keeps the plain-Call shape (never a Submit).
+    orch = next(f for f in post.functions.values() if f.func_type == ir.FunctionType.Orchestration)
+    spmd_names = {f.name for f in post.functions.values() if f.func_type == ir.FunctionType.Spmd}
+    submits = []
+
+    def _walk(node):
+        if isinstance(node, ir.SeqStmts):
+            for s in node.stmts:
+                _walk(s)
+        elif isinstance(node, ir.AssignStmt):
+            if isinstance(node.value, ir.Submit) and node.value.op.name in spmd_names:
+                submits.append(node.value)
+        elif hasattr(node, "body") and node.body is not None:
+            _walk(node.body)
+
+    _walk(orch.body)
+    assert not submits, "plain inline with-form (no as tid) must not lower to a Submit"
+
+
 def test_jit_inline_helper_spmd_for_loop():
     """A @pl.jit.inline helper using ``for i in pl.spmd(N)`` is spliced + dispatched."""
     torch = pytest.importorskip("torch")

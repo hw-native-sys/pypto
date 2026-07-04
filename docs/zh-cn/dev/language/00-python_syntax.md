@@ -322,9 +322,9 @@ for (x,) in pl.while_(init_values=(x_init,)):
 
 `pl.spmd(N)` 把一个 kernel 派发到 `N` 个 block。形式：
 
-- `with pl.spmd(N): kernel(...)` —— body 必须是对一个已声明 InCore kernel 的单次调用。
+- `with pl.spmd(N): ...` —— body **既可以**是对一个已声明 InCore kernel 的单次调用（直接派发，`SpmdScopeStmt(body=Call)`，无内层 InCore 包裹），**也可以**是一段内联多语句块，自动外包成一段隐式 InCore 区域（与 for-form 相同，只是不自动绑定索引）。内联 body 必须通过 `pl.tile.get_block_idx()` 读取每个 block 的索引——否则所有 block 执行完全相同的工作，parser 会拒绝。不捕获 producer TaskId。
 - `for i in pl.spmd(N): ...` —— 循环变量绑定到每个 block 的索引（`pl.tile.get_block_idx()`）；body 自动外包成一段隐式 InCore 区域。
-- `with pl.spmd(N, deps=[...]) as tid: ...` —— **捕获形式**：与 `with pl.at(...) as tid:` 对称。在 `tid` 中捕获该分发的 grid 级 producer `pl.Scalar[pl.TASK_ID]`（可用作 `deps=` 边、存入 `pl.array.create(N, pl.TASK_ID)`、或跨入 `pl.manual_scope`），并像 for-form 一样接受内联多语句 body（在 body 内通过 `pl.tile.get_block_idx()` 读取每个 block 的索引）。lower 成一个 `ir.Submit`，其尾部 tuple 元素即 grid TaskId；`core_num` / `sync_start` 记录在外包出的 `Spmd` Function attrs 上。参见下文“手动依赖原语”小节。
+- `with pl.spmd(N, deps=[...]) as tid: ...` —— **捕获形式**：与 `with pl.at(...) as tid:` 对称。body 形态与上面的普通形式相同，并额外在 `tid` 中捕获该分发的 grid 级 producer `pl.Scalar[pl.TASK_ID]`（可用作 `deps=` 边、存入 `pl.array.create(N, pl.TASK_ID)`、或跨入 `pl.manual_scope`）。TaskId 捕获与内联 body 正交——这是该形式相比普通形式唯一多出来的能力。lower 成一个 `ir.Submit`，其尾部 tuple 元素即 grid TaskId；`core_num` / `sync_start` 记录在外包出的 `Spmd` Function attrs 上。参见下文“手动依赖原语”小节。
 - `out, tid = pl.spmd_submit(kernel, *args, core_num=N)` —— **submit 形式**：将 kernel 在 `N` 个 block 上分发，同时捕获该分发的 producer `pl.Scalar[pl.TASK_ID]`（针对已声明 kernel 的 `pl.submit` 版本）。参见下文“手动依赖原语”小节。
 
 以上三种形式也都接受 `allow_early_resolve=True`（布尔字面量；与 `pl.submit` / `pl.at` 相同的 early-dispatch 选项）。即使不写 `as tid` 也会强制走 `ir.Submit` 形态，并 lower 为 `Arg::set_allow_early_resolve(true)`。在嵌套于 `pl.cluster()` 内的 `pl.spmd` 上会被拒绝（此类 scope 会被 unwrap 进 Group 函数、永远不会产生 Submit，提示会丢失）。
