@@ -21,6 +21,7 @@ import pytest
 from pypto import DataType, backend, ir, passes
 from pypto.backend import BackendType
 from pypto.ir.op import tile
+from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
 
 def _run_pipeline(program: ir.Program) -> ir.Program:
@@ -3605,6 +3606,936 @@ class TestPipelineStageSeparation:
         assert "a" in bases and "b" in bases, f"Expected both tiles; got {bases}"
         assert bases["a"] == bases["b"], (
             f"disjoint non-pipeline tiles should merge, but bind to {bases['a']} and {bases['b']}"
+        )
+
+
+class TestCapacityGatedReuse:
+    """Capacity-gated reuse (now the unconditional default, #1475 L0b fix) keeps
+    cross-stage pipeline operands in separate L0 buffers when the space can afford
+    it — instead of the legacy ``is_l0_space`` exemption that merges them and
+    serialises the matmuls.
+
+    Asserted by the **buffer signature**, not by synchronisation count: the two
+    cross-stage ``Right`` operands get distinct buffers (the depth-2 ping-pong that
+    shows up downstream as the ``0 A 0 A`` address stream) whenever the space can
+    afford it; when it cannot, the shed / force_legacy floor merges them (the
+    fa_fused 8->1 collapse in miniature). The success metric is WAR distance /
+    overlap, *never* sync-flag count (see the pipeline-stage guard in
+    docs/en/dev/passes/29-memory_reuse.md). The operands are ``tile.move``
+    results (not loads), so the legacy load-only guard never protected them either.
+    """
+
+    @staticmethod
+    def _collect_bases(program: ir.Program, names: tuple[str, ...]) -> dict[str, ir.Var]:
+        """MemRef ``base_`` of each named Right operand in the result IR."""
+        func = program.get_function("kernel")
+        assert func is not None
+        bases: dict[str, ir.Var] = {}
+
+        def visit(stmt: ir.Stmt) -> None:
+            if isinstance(stmt, ir.AssignStmt) and stmt.var.name_hint in names:
+                t = stmt.var.type
+                assert isinstance(t, ir.TileType) and t.memref is not None
+                bases[stmt.var.name_hint] = t.memref.base_
+            if isinstance(stmt, ir.SeqStmts):
+                for s in stmt.stmts:
+                    visit(s)
+            elif isinstance(stmt, ir.IfStmt):
+                visit(stmt.then_body)
+                if stmt.else_body is not None:
+                    visit(stmt.else_body)
+            elif isinstance(stmt, ir.ForStmt):
+                visit(stmt.body)
+
+        visit(func.body)
+        missing = [n for n in names if n not in bases]
+        assert not missing, f"operands {missing} not found in After IR: {list(bases)}"
+        return bases
+
+    @staticmethod
+    def _two_stage_matmuls(
+        a_shape: tuple[int, int] = (32, 32), b_shape: tuple[int, int] = (32, 32)
+    ) -> ir.Program:
+        """Two matmuls whose Right operands ``r0``/``r1`` are cross-stage pipeline
+        clones (``pipeline_membership`` ``"0:0"`` vs ``"0:1"`` — same group, distinct
+        stage) with disjoint lifetimes: the minimal fa_fused shape. ``a_shape`` is the
+        Left ``[M, K]`` and ``b_shape`` the Right ``[K, N]``; the default ``[32, 32]``
+        BF16 => 2 KB each fits L0b (64 KB) with room. Pass a larger ``b_shape`` to force
+        the depth-2 overflow that pins the group to a single buffer."""
+        a_m, a_k = a_shape
+        b_k, b_n = b_shape
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a0: pl.Tensor[[a_m, a_k], pl.BF16],
+                b0: pl.Tensor[[b_k, b_n], pl.BF16],
+                a1: pl.Tensor[[a_m, a_k], pl.BF16],
+                b1: pl.Tensor[[b_k, b_n], pl.BF16],
+                out0: pl.Out[pl.Tensor[[a_m, b_n], pl.FP32]],
+                out1: pl.Out[pl.Tensor[[a_m, b_n], pl.FP32]],
+            ) -> pl.Tensor[[a_m, b_n], pl.FP32]:
+                a0m: pl.Tile[[a_m, a_k], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    a0, [0, 0], [a_m, a_k], target_memory=pl.Mem.Mat
+                )
+                b0m: pl.Tile[[b_k, b_n], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    b0, [0, 0], [b_k, b_n], target_memory=pl.Mem.Mat
+                )
+                l0: pl.Tile[[a_m, a_k], pl.BF16, pl.Mem.Left] = pl.tile.move(a0m, target_memory=pl.Mem.Left)
+                r0: pl.Tile[[b_k, b_n], pl.BF16, pl.Mem.Right] = pl.tile.move(
+                    b0m, target_memory=pl.Mem.Right, attrs={"pipeline_membership": "0:0"}
+                )
+                m0: pl.Tile[[a_m, b_n], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(l0, r0)
+                out0 = pl.store(m0, [0, 0], out0)
+                a1m: pl.Tile[[a_m, a_k], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    a1, [0, 0], [a_m, a_k], target_memory=pl.Mem.Mat
+                )
+                b1m: pl.Tile[[b_k, b_n], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    b1, [0, 0], [b_k, b_n], target_memory=pl.Mem.Mat
+                )
+                l1: pl.Tile[[a_m, a_k], pl.BF16, pl.Mem.Left] = pl.tile.move(a1m, target_memory=pl.Mem.Left)
+                r1: pl.Tile[[b_k, b_n], pl.BF16, pl.Mem.Right] = pl.tile.move(
+                    b1m, target_memory=pl.Mem.Right, attrs={"pipeline_membership": "0:1"}
+                )
+                m1: pl.Tile[[a_m, b_n], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(l1, r1)
+                out1 = pl.store(m1, [0, 0], out1)
+                return out1
+
+        return Before
+
+    def test_separates_affordable_cross_stage_right_operands(self):
+        """Affordable: L0b (64 KB) holds both 2 KB operands, so the gate keeps them
+        in distinct buffers — the depth-2 ping-pong. This is the ->2 address
+        signature (the ``0 A 0 A`` stream) capacity-gated reuse produces."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        Before = self._two_stage_matmuls()
+        After = passes.memory_reuse()(passes.init_mem_ref()(Before))
+        bases = self._collect_bases(After, ("r0", "r1"))
+        assert bases["r0"] is not bases["r1"], (
+            "capacity-gated reuse should keep affordable cross-stage Right operands in separate L0b buffers"
+        )
+
+    def test_merges_when_slot_too_large_to_double_buffer(self):
+        """Slot too large to double-buffer: each 48 KB Right operand leaves
+        room for only k = min(2, floor(64/48)) = 1 buffer in the 64 KB L0b, so the two
+        stages share it (depth-1). Depth-2 would need 96 KB > 64 KB. This is the
+        capacity-pinned projection behaviour, preventing the overflow that blind
+        separation would cause."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        # [128, 192] BF16 Right operand => 48 KB, so depth-2 (96 KB) overflows the 64 KB L0b.
+        Before = self._two_stage_matmuls(a_shape=(16, 128), b_shape=(128, 192))
+        After = passes.memory_reuse()(passes.init_mem_ref()(Before))
+        bases = self._collect_bases(After, ("r0", "r1"))
+        assert bases["r0"] is bases["r1"], (
+            "L0b that fits only one 48 KB buffer (k=1) must merge the two stages"
+        )
+
+    def test_emits_perf_hint_when_pipeline_depth_capacity_reduced(self, tmp_path):
+        """Explicit ``pl.pipeline`` intent that cannot fit must NOT degrade silently. The same
+        48 KB Right operand caps ``F_g`` to 1 in the 64 KB L0b while the programmer requested
+        depth 2, so the pass emits a loud ``PH-MR-001`` perf hint naming requested-vs-achieved
+        depth and the fix. Routed through the diagnostic channel and captured via a
+        ``ReportInstrument``'s ``perf_hints.log`` — the serialization is no longer silent."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        Before = self._two_stage_matmuls(a_shape=(16, 128), b_shape=(128, 192))
+        with passes.PassContext([passes.ReportInstrument(str(tmp_path))]):
+            passes.memory_reuse()(passes.init_mem_ref()(Before))
+        log = tmp_path / "perf_hints.log"
+        assert log.exists(), "a capacity-reduced pipeline depth must emit a perf hint, not serialize silently"
+        text = log.read_text()
+        assert "PH-MR-001" in text, f"expected the capacity-gate perf hint PH-MR-001, got: {text!r}"
+        assert "requested depth 2" in text and "only 1 of 2 buffers" in text, (
+            f"the hint must name the requested vs achieved depth, got: {text!r}"
+        )
+        # This shed is slot-bound (48 KB operand can't be double-buffered in 64 KB), so the fix is the
+        # exact byte threshold — not the space-pressure wording.
+        assert "shrink the per-stage tile" in text, (
+            f"an operand-too-large shed must give the byte-threshold fix, got: {text!r}"
+        )
+
+    def test_finds_max_affordable_double_buffer_depth(self):
+        """Depth-aware: a 3-stage group whose full separation (3 x 32 = 96 KB)
+        exceeds L0b (64 KB) is capped to the max-affordable double-buffering depth
+        k = min(3, floor(64/32)) = 2 — NOT collapsed to depth-1. The stages ping-pong
+        through 2 buffers (stage mod 2): r0 and r2 share, r1 is separate. This is the
+        proper modulo-variable-expansion an all-or-nothing gate would miss."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a0: pl.Tensor[[16, 128], pl.BF16],
+                b0: pl.Tensor[[128, 128], pl.BF16],
+                a1: pl.Tensor[[16, 128], pl.BF16],
+                b1: pl.Tensor[[128, 128], pl.BF16],
+                a2: pl.Tensor[[16, 128], pl.BF16],
+                b2: pl.Tensor[[128, 128], pl.BF16],
+                out0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+                out1: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+                out2: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                a0m: pl.Tile[[16, 128], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    a0, [0, 0], [16, 128], target_memory=pl.Mem.Mat
+                )
+                b0m: pl.Tile[[128, 128], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    b0, [0, 0], [128, 128], target_memory=pl.Mem.Mat
+                )
+                l0: pl.Tile[[16, 128], pl.BF16, pl.Mem.Left] = pl.tile.move(a0m, target_memory=pl.Mem.Left)
+                r0: pl.Tile[[128, 128], pl.BF16, pl.Mem.Right] = pl.tile.move(
+                    b0m, target_memory=pl.Mem.Right, attrs={"pipeline_membership": "0:0"}
+                )
+                m0: pl.Tile[[16, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(l0, r0)
+                out0 = pl.store(m0, [0, 0], out0)
+                a1m: pl.Tile[[16, 128], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    a1, [0, 0], [16, 128], target_memory=pl.Mem.Mat
+                )
+                b1m: pl.Tile[[128, 128], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    b1, [0, 0], [128, 128], target_memory=pl.Mem.Mat
+                )
+                l1: pl.Tile[[16, 128], pl.BF16, pl.Mem.Left] = pl.tile.move(a1m, target_memory=pl.Mem.Left)
+                r1: pl.Tile[[128, 128], pl.BF16, pl.Mem.Right] = pl.tile.move(
+                    b1m, target_memory=pl.Mem.Right, attrs={"pipeline_membership": "0:1"}
+                )
+                m1: pl.Tile[[16, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(l1, r1)
+                out1 = pl.store(m1, [0, 0], out1)
+                a2m: pl.Tile[[16, 128], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    a2, [0, 0], [16, 128], target_memory=pl.Mem.Mat
+                )
+                b2m: pl.Tile[[128, 128], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    b2, [0, 0], [128, 128], target_memory=pl.Mem.Mat
+                )
+                l2: pl.Tile[[16, 128], pl.BF16, pl.Mem.Left] = pl.tile.move(a2m, target_memory=pl.Mem.Left)
+                r2: pl.Tile[[128, 128], pl.BF16, pl.Mem.Right] = pl.tile.move(
+                    b2m, target_memory=pl.Mem.Right, attrs={"pipeline_membership": "0:2"}
+                )
+                m2: pl.Tile[[16, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(l2, r2)
+                out2 = pl.store(m2, [0, 0], out2)
+                return out2
+
+        After = passes.memory_reuse()(passes.init_mem_ref()(Before))
+        bases = self._collect_bases(After, ("r0", "r1", "r2"))
+        distinct = {b.name_hint for b in bases.values()}
+        assert len(distinct) == 2, (
+            f"depth-aware gate must keep the max-affordable depth-2 (2 buffers), got {len(distinct)}: {distinct}"
+        )
+        assert bases["r0"] is bases["r2"], "stages 0 and 2 (0 mod 2 == 2 mod 2) must share a ping-pong buffer"
+        assert bases["r0"] is not bases["r1"], "stages 0 and 1 must occupy different ping-pong buffers"
+
+    def test_merges_same_stage_operands(self):
+        """Within-stage coalescing (the other half of the §5 tie-break): two operands
+        tagged the SAME (group, stage) map to the same ping-pong residue, so they merge
+        — only *cross-stage* operands are kept apart."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a0: pl.Tensor[[32, 32], pl.BF16],
+                b0: pl.Tensor[[32, 32], pl.BF16],
+                a1: pl.Tensor[[32, 32], pl.BF16],
+                b1: pl.Tensor[[32, 32], pl.BF16],
+                out0: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+                out1: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                a0m: pl.Tile[[32, 32], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    a0, [0, 0], [32, 32], target_memory=pl.Mem.Mat
+                )
+                b0m: pl.Tile[[32, 32], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    b0, [0, 0], [32, 32], target_memory=pl.Mem.Mat
+                )
+                l0: pl.Tile[[32, 32], pl.BF16, pl.Mem.Left] = pl.tile.move(a0m, target_memory=pl.Mem.Left)
+                r0: pl.Tile[[32, 32], pl.BF16, pl.Mem.Right] = pl.tile.move(
+                    b0m, target_memory=pl.Mem.Right, attrs={"pipeline_membership": "0:0"}
+                )
+                m0: pl.Tile[[32, 32], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(l0, r0)
+                out0 = pl.store(m0, [0, 0], out0)
+                a1m: pl.Tile[[32, 32], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    a1, [0, 0], [32, 32], target_memory=pl.Mem.Mat
+                )
+                b1m: pl.Tile[[32, 32], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    b1, [0, 0], [32, 32], target_memory=pl.Mem.Mat
+                )
+                l1: pl.Tile[[32, 32], pl.BF16, pl.Mem.Left] = pl.tile.move(a1m, target_memory=pl.Mem.Left)
+                r1: pl.Tile[[32, 32], pl.BF16, pl.Mem.Right] = pl.tile.move(
+                    b1m, target_memory=pl.Mem.Right, attrs={"pipeline_membership": "0:0"}
+                )
+                m1: pl.Tile[[32, 32], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(l1, r1)
+                out1 = pl.store(m1, [0, 0], out1)
+                return out1
+
+        After = passes.memory_reuse()(passes.init_mem_ref()(Before))
+        bases = self._collect_bases(After, ("r0", "r1"))
+        assert bases["r0"] is bases["r1"], "same-stage operands must share a buffer"
+
+    def test_separates_sparse_stage_ids(self):
+        """Sparse stage IDs: stages {0, 2} are two distinct stages, so with k=2 they
+        must stay separate. The fix compares the dense stage *ordinal* (0, 1) mod k,
+        not the raw stage value — raw `2 mod 2 == 0 mod 2` would wrongly merge them."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a0: pl.Tensor[[32, 32], pl.BF16],
+                b0: pl.Tensor[[32, 32], pl.BF16],
+                a1: pl.Tensor[[32, 32], pl.BF16],
+                b1: pl.Tensor[[32, 32], pl.BF16],
+                out0: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+                out1: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                a0m: pl.Tile[[32, 32], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    a0, [0, 0], [32, 32], target_memory=pl.Mem.Mat
+                )
+                b0m: pl.Tile[[32, 32], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    b0, [0, 0], [32, 32], target_memory=pl.Mem.Mat
+                )
+                l0: pl.Tile[[32, 32], pl.BF16, pl.Mem.Left] = pl.tile.move(a0m, target_memory=pl.Mem.Left)
+                r0: pl.Tile[[32, 32], pl.BF16, pl.Mem.Right] = pl.tile.move(
+                    b0m, target_memory=pl.Mem.Right, attrs={"pipeline_membership": "0:0"}
+                )
+                m0: pl.Tile[[32, 32], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(l0, r0)
+                out0 = pl.store(m0, [0, 0], out0)
+                a1m: pl.Tile[[32, 32], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    a1, [0, 0], [32, 32], target_memory=pl.Mem.Mat
+                )
+                b1m: pl.Tile[[32, 32], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    b1, [0, 0], [32, 32], target_memory=pl.Mem.Mat
+                )
+                l1: pl.Tile[[32, 32], pl.BF16, pl.Mem.Left] = pl.tile.move(a1m, target_memory=pl.Mem.Left)
+                r1: pl.Tile[[32, 32], pl.BF16, pl.Mem.Right] = pl.tile.move(
+                    b1m, target_memory=pl.Mem.Right, attrs={"pipeline_membership": "0:2"}
+                )
+                m1: pl.Tile[[32, 32], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(l1, r1)
+                out1 = pl.store(m1, [0, 0], out1)
+                return out1
+
+        After = passes.memory_reuse()(passes.init_mem_ref()(Before))
+        bases = self._collect_bases(After, ("r0", "r1"))
+        assert bases["r0"] is not bases["r1"], (
+            "sparse stages {0,2} are distinct; dense-ordinal mod k must keep them apart"
+        )
+
+    def test_sheds_depth_when_coresident_tile_would_overflow(self, tmp_path):
+        """Whole-space footprint safety with the *exact* SpaceFootprint: two 32 KB
+        pipeline operands fill L0b at depth 2 (64 KB) on their own; a **co-live**
+        non-pipeline Right tile ``np0`` (defined before stage 0, used after stage 1)
+        cannot reuse either pipeline buffer, so it adds real capacity and the space
+        overflows. The gate sheds the pipeline group's depth (2 -> 1) so the two
+        operands merge, and AllocateMemoryAddr completes without overflow.
+
+        Note ``np0`` must be *co-live*: a disjoint-lifetime non-pipeline tile would
+        reuse a pipeline buffer for free (the exact footprint sees this), so the
+        operands would correctly stay separated — the old conservative Sum(size)
+        estimate over-counted a disjoint tile as its own buffer."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a0: pl.Tensor[[16, 128], pl.BF16],
+                b0: pl.Tensor[[128, 128], pl.BF16],
+                a1: pl.Tensor[[16, 128], pl.BF16],
+                b1: pl.Tensor[[128, 128], pl.BF16],
+                a2: pl.Tensor[[16, 128], pl.BF16],
+                b2: pl.Tensor[[128, 128], pl.BF16],
+                out0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+                out1: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+                out2: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                # np0 sourced + defined at the top and consumed last, so it is live
+                # across both pipeline stages — a genuine co-resident that cannot reuse.
+                a2m: pl.Tile[[16, 128], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    a2, [0, 0], [16, 128], target_memory=pl.Mem.Mat
+                )
+                b2m: pl.Tile[[128, 128], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    b2, [0, 0], [128, 128], target_memory=pl.Mem.Mat
+                )
+                l2: pl.Tile[[16, 128], pl.BF16, pl.Mem.Left] = pl.tile.move(a2m, target_memory=pl.Mem.Left)
+                np0: pl.Tile[[128, 128], pl.BF16, pl.Mem.Right] = pl.tile.move(
+                    b2m, target_memory=pl.Mem.Right
+                )
+                a0m: pl.Tile[[16, 128], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    a0, [0, 0], [16, 128], target_memory=pl.Mem.Mat
+                )
+                b0m: pl.Tile[[128, 128], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    b0, [0, 0], [128, 128], target_memory=pl.Mem.Mat
+                )
+                l0: pl.Tile[[16, 128], pl.BF16, pl.Mem.Left] = pl.tile.move(a0m, target_memory=pl.Mem.Left)
+                r0: pl.Tile[[128, 128], pl.BF16, pl.Mem.Right] = pl.tile.move(
+                    b0m, target_memory=pl.Mem.Right, attrs={"pipeline_membership": "0:0"}
+                )
+                m0: pl.Tile[[16, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(l0, r0)
+                out0 = pl.store(m0, [0, 0], out0)
+                a1m: pl.Tile[[16, 128], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    a1, [0, 0], [16, 128], target_memory=pl.Mem.Mat
+                )
+                b1m: pl.Tile[[128, 128], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    b1, [0, 0], [128, 128], target_memory=pl.Mem.Mat
+                )
+                l1: pl.Tile[[16, 128], pl.BF16, pl.Mem.Left] = pl.tile.move(a1m, target_memory=pl.Mem.Left)
+                r1: pl.Tile[[128, 128], pl.BF16, pl.Mem.Right] = pl.tile.move(
+                    b1m, target_memory=pl.Mem.Right, attrs={"pipeline_membership": "0:1"}
+                )
+                m1: pl.Tile[[16, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(l1, r1)
+                out1 = pl.store(m1, [0, 0], out1)
+                m2: pl.Tile[[16, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(l2, np0)
+                out2 = pl.store(m2, [0, 0], out2)
+                return out2
+
+        with passes.PassContext([passes.ReportInstrument(str(tmp_path))]):
+            after_reuse = passes.memory_reuse()(passes.init_mem_ref()(Before))
+        bases = self._collect_bases(after_reuse, ("r0", "r1"))
+        assert bases["r0"] is bases["r1"], "co-resident non-pipeline tile must force fallback to merge"
+        # The merged allocation fits; AllocateMemoryAddr must complete without overflow.
+        allocated = passes.allocate_memory_addr()(after_reuse)
+        assert allocated.get_function("kernel") is not None
+        # This shed is *space-pressure*, not slot-bound: each 32 KB operand fits depth 2 in the 64 KB L0b on
+        # its own — the co-live np tile is what overflows. The hint must therefore blame the co-residents and
+        # NOT hand out the misleading per-slot byte threshold (the tile already satisfies slot <= cap/depth).
+        text = (tmp_path / "perf_hints.log").read_text()
+        assert "PH-MR-001" in text, f"a co-live shed must still emit the capacity hint, got: {text!r}"
+        assert "over-subscribe the space" in text, (
+            f"a space-pressure shed must point at co-residents, got: {text!r}"
+        )
+        assert "shrink the per-stage tile" not in text, (
+            f"the per-slot byte threshold is misleading when the operand fits alone, got: {text!r}"
+        )
+
+    def test_is_deterministic(self):
+        """Same IR in => identical buffer assignment out (the direct depth-cap is
+        order-free — no ratio-greedy merge ordering to diverge)."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        Before = self._two_stage_matmuls()
+        first = self._collect_bases(passes.memory_reuse()(passes.init_mem_ref()(Before)), ("r0", "r1"))
+        second = self._collect_bases(passes.memory_reuse()(passes.init_mem_ref()(Before)), ("r0", "r1"))
+        assert (first["r0"] is first["r1"]) == (second["r0"] is second["r1"])
+        assert {b.name_hint for b in first.values()} == {b.name_hint for b in second.values()}
+
+    def test_composes_with_matmul_acc_carry(self):
+        """Carry composition (#1352; see the loop-carry re-alignment in
+        docs/en/dev/passes/29-memory_reuse.md): the gate only ever *adds* separation and
+        excludes loop carries from the packer, so capacity-gated reuse must not disturb a
+        matmul_acc accumulator chain. These operands carry no pipeline_membership tags,
+        so they never trip the gated residue constraint and behave like legacy. The pass
+        + allocation must complete cleanly. (Note: this exercises the *untagged* bypass,
+        NOT the shed-loop `force_legacy` fallback branch, which needs a tagged,
+        capacity-overflowing space to fire.)"""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                input_a: pl.Tensor[[32, 32], pl.FP16],
+                input_b: pl.Tensor[[32, 32], pl.FP16],
+                output: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                tile_a_l1: pl.Tile[[32, 32], pl.FP16, pl.MemorySpace.Mat] = pl.load(
+                    input_a, [0, 0], [32, 32], target_memory=pl.MemorySpace.Mat
+                )
+                tile_b_l1: pl.Tile[[32, 32], pl.FP16, pl.MemorySpace.Mat] = pl.load(
+                    input_b, [0, 0], [32, 32], target_memory=pl.MemorySpace.Mat
+                )
+                tile_a_l0a: pl.Tile[[32, 32], pl.FP16, pl.MemorySpace.Left] = pl.move(
+                    tile_a_l1, target_memory=pl.MemorySpace.Left
+                )
+                tile_b_l0b: pl.Tile[[32, 32], pl.FP16, pl.MemorySpace.Right] = pl.move(
+                    tile_b_l1, target_memory=pl.MemorySpace.Right
+                )
+                init_acc: pl.Tile[[32, 32], pl.FP32, pl.MemorySpace.Acc] = pl.matmul(tile_a_l0a, tile_b_l0b)
+                for _k, (acc,) in pl.range(0, 4, init_values=(init_acc,)):
+                    acc_next: pl.Tile[[32, 32], pl.FP32, pl.MemorySpace.Acc] = pl.matmul_acc(
+                        acc, tile_a_l0a, tile_b_l0b
+                    )
+                    loop_out = pl.yield_(acc_next)
+                result: pl.Tensor[[32, 32], pl.FP32] = pl.store(loop_out, [0, 0], output)
+                return result
+
+        after = passes.memory_reuse()(passes.init_mem_ref()(Before))
+        allocated = passes.allocate_memory_addr()(after)
+        assert allocated.get_function("main") is not None, (
+            "capacity-gated reuse must compose cleanly with an untagged matmul_acc carry chain"
+        )
+
+    def test_real_pipeline_membership_tags_reach_the_gate(self):
+        """End-to-end tag flow on a REAL same-core ``pl.pipeline``: AutoTileMatmulL0
+        turns a full-K matmul into ``pl.pipeline(stage=2)``, LowerPipelineLoops stamps
+        real ``pipeline_membership`` tags, and they must reach MemoryReuse — verified
+        by running the actual Default pipeline (truncated at MemoryReuse), not by
+        hand-stamping tags.
+
+        Note: same-core stage clones are *co-live*, so they are already double-buffered
+        (OFF and ON both keep 2). The fa 8->1 *collapse* is cross-core-skew-specific —
+        SkewCrossCorePipeline leaves the operands disjoint in each core's local order,
+        which is what the legacy gate over-merges — and is modeled by the hand-tagged
+        tests above. This guards the real tag production/consumption flow and that the
+        gate yields a valid <=L0b allocation on a real pipeline."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 2048], pl.BF16],
+                rhs: pl.Tensor[[2048, 64], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                lhs_mat: pl.Tile[[16, 2048], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [16, 2048], target_memory=pl.Mem.Mat
+                )
+                rhs_mat: pl.Tile[[2048, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [2048, 64], target_memory=pl.Mem.Mat
+                )
+                c: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lhs_mat, rhs_mat)
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        def pm_upto(upto: str) -> PassManager:
+            pm = PassManager.get_strategy(OptimizationStrategy.Default)
+            idx = pm.pass_names.index(upto)
+            pipe = passes.PassPipeline()
+            for p in pm.passes[: idx + 1]:
+                pipe.add_pass(p)
+            pm._pipeline = pipe
+            pm.pass_names = pm.pass_names[: idx + 1]
+            return pm
+
+        # Real LowerPipelineLoops tags reach MemoryReuse's input (they are stripped in
+        # MemoryReuse's own output, so assert on the pre-pass IR).
+        before_reuse = ir.python_print(pm_upto("InitMemRef").run_passes(Prog))
+        assert '"pipeline_membership"' in before_reuse, "LowerPipelineLoops tags must reach MemoryReuse"
+        assert "Mem.Right" in before_reuse, "expected pipelined Right operands in the lowered IR"
+
+        # The gate runs on the real tags and yields a valid ≤ L0b allocation (no overflow).
+        after_reuse = pm_upto("MemoryReuse").run_passes(Prog)
+        allocated = passes.allocate_memory_addr()(after_reuse)
+        assert allocated.get_function("kernel") is not None
+
+    def test_stage4_uses_balanced_modulo_coloring(self):
+        """Stage-4 group, room for 2 buffers (F = min(4, 64/32) = 2): the surviving
+        coloring must be the balanced modulo-2 residues {0,2},{1,3} — every adjacent
+        clone pair in different buffers — not a def-order adjacent collapse. This is the
+        adjacency guarantee at depth > 2 that a distance-blind shed would break; it is
+        why mod F is kept rather than recovered from a scalar ShedScore."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[16, 128], pl.BF16],
+                b: pl.Tensor[[128, 128], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                # One Left / one Mat load reused; the four stage clones r0..r3 are distinct
+                # disjoint-lifetime moves (each its own buffer candidate), tagged 0:0..0:3.
+                am: pl.Tile[[16, 128], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    a, [0, 0], [16, 128], target_memory=pl.Mem.Mat
+                )
+                bm: pl.Tile[[128, 128], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    b, [0, 0], [128, 128], target_memory=pl.Mem.Mat
+                )
+                lt: pl.Tile[[16, 128], pl.BF16, pl.Mem.Left] = pl.tile.move(am, target_memory=pl.Mem.Left)
+                r0: pl.Tile[[128, 128], pl.BF16, pl.Mem.Right] = pl.tile.move(
+                    bm, target_memory=pl.Mem.Right, attrs={"pipeline_membership": "0:0"}
+                )
+                m0: pl.Tile[[16, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lt, r0)
+                out = pl.store(m0, [0, 0], out)
+                r1: pl.Tile[[128, 128], pl.BF16, pl.Mem.Right] = pl.tile.move(
+                    bm, target_memory=pl.Mem.Right, attrs={"pipeline_membership": "0:1"}
+                )
+                m1: pl.Tile[[16, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lt, r1)
+                out = pl.store(m1, [0, 0], out)
+                r2: pl.Tile[[128, 128], pl.BF16, pl.Mem.Right] = pl.tile.move(
+                    bm, target_memory=pl.Mem.Right, attrs={"pipeline_membership": "0:2"}
+                )
+                m2: pl.Tile[[16, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lt, r2)
+                out = pl.store(m2, [0, 0], out)
+                r3: pl.Tile[[128, 128], pl.BF16, pl.Mem.Right] = pl.tile.move(
+                    bm, target_memory=pl.Mem.Right, attrs={"pipeline_membership": "0:3"}
+                )
+                m3: pl.Tile[[16, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lt, r3)
+                out = pl.store(m3, [0, 0], out)
+                return out
+
+        # Empty-instruments context suppresses the autouse SSA verification: this kernel
+        # intentionally reassigns `out` per stage (non-SSA input) to model the stage clones.
+        with passes.PassContext([]):
+            after = passes.memory_reuse()(passes.init_mem_ref()(Before))
+        bases = self._collect_bases(after, ("r0", "r1", "r2", "r3"))
+        assert len({b.name_hint for b in bases.values()}) == 2, "exactly 2 ping-pong buffers at F=2"
+        assert bases["r0"] is bases["r2"], "residue 0 = stages {0,2} share a buffer"
+        assert bases["r1"] is bases["r3"], "residue 1 = stages {1,3} share a buffer"
+        assert bases["r0"] is not bases["r1"], "adjacent stages 0,1 must be in different buffers"
+        allocated = passes.allocate_memory_addr()(after)
+        assert allocated.get_function("kernel") is not None
+
+    def test_sequential_groups_time_share_without_false_shed(self):
+        """Two *sequential* pipeline groups in L0b — group A (16 KB slots, stages 0:0/0:1)
+        then group B (24 KB slots, 1:0/1:1). The naive per-group sum is 2·16 + 2·24 =
+        80 KB > 64 KB, but the groups are disjoint in time, so the exact SpaceFootprint
+        lets them **cross-merge diagonally** (A's operands reuse B's freed buffers) and
+        both keep depth 2 in just 2 physical buffers (48 KB). No false shed — this is the
+        co-resident/whole-space accuracy that the old Sum(size) estimate lacked. (The shed
+        loop itself is exercised by the co-resident test, where a co-live tile forces it.)"""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                la: pl.Tensor[[16, 128], pl.BF16],
+                ba0: pl.Tensor[[128, 64], pl.BF16],
+                ba1: pl.Tensor[[128, 64], pl.BF16],
+                bb0: pl.Tensor[[128, 96], pl.BF16],
+                bb1: pl.Tensor[[128, 96], pl.BF16],
+                outa0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+                outa1: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+                outb0: pl.Out[pl.Tensor[[16, 96], pl.FP32]],
+                outb1: pl.Out[pl.Tensor[[16, 96], pl.FP32]],
+            ) -> pl.Tensor[[16, 96], pl.FP32]:
+                lam: pl.Tile[[16, 128], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    la, [0, 0], [16, 128], target_memory=pl.Mem.Mat
+                )
+                lt: pl.Tile[[16, 128], pl.BF16, pl.Mem.Left] = pl.tile.move(lam, target_memory=pl.Mem.Left)
+                # group A (16 KB Right slots), stages 0:0 / 0:1
+                ba0m: pl.Tile[[128, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    ba0, [0, 0], [128, 64], target_memory=pl.Mem.Mat
+                )
+                ra0: pl.Tile[[128, 64], pl.BF16, pl.Mem.Right] = pl.tile.move(
+                    ba0m, target_memory=pl.Mem.Right, attrs={"pipeline_membership": "0:0"}
+                )
+                ma0: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lt, ra0)
+                outa0 = pl.store(ma0, [0, 0], outa0)
+                ba1m: pl.Tile[[128, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    ba1, [0, 0], [128, 64], target_memory=pl.Mem.Mat
+                )
+                ra1: pl.Tile[[128, 64], pl.BF16, pl.Mem.Right] = pl.tile.move(
+                    ba1m, target_memory=pl.Mem.Right, attrs={"pipeline_membership": "0:1"}
+                )
+                ma1: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lt, ra1)
+                outa1 = pl.store(ma1, [0, 0], outa1)
+                # group B (24 KB Right slots), stages 1:0 / 1:1
+                bb0m: pl.Tile[[128, 96], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    bb0, [0, 0], [128, 96], target_memory=pl.Mem.Mat
+                )
+                rb0: pl.Tile[[128, 96], pl.BF16, pl.Mem.Right] = pl.tile.move(
+                    bb0m, target_memory=pl.Mem.Right, attrs={"pipeline_membership": "1:0"}
+                )
+                mb0: pl.Tile[[16, 96], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lt, rb0)
+                outb0 = pl.store(mb0, [0, 0], outb0)
+                bb1m: pl.Tile[[128, 96], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    bb1, [0, 0], [128, 96], target_memory=pl.Mem.Mat
+                )
+                rb1: pl.Tile[[128, 96], pl.BF16, pl.Mem.Right] = pl.tile.move(
+                    bb1m, target_memory=pl.Mem.Right, attrs={"pipeline_membership": "1:1"}
+                )
+                mb1: pl.Tile[[16, 96], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lt, rb1)
+                outb1 = pl.store(mb1, [0, 0], outb1)
+                return outb1
+
+        after = passes.memory_reuse()(passes.init_mem_ref()(Before))
+        bases = self._collect_bases(after, ("ra0", "ra1", "rb0", "rb1"))
+        assert bases["ra0"] is not bases["ra1"], "group A keeps depth 2 — its operands stay separate"
+        assert bases["rb0"] is not bases["rb1"], "group B keeps depth 2 — its operands stay separate"
+        assert len({b.name_hint for b in bases.values()}) == 2, "both groups fit in 2 buffers by time-sharing"
+        allocated = passes.allocate_memory_addr()(after)
+        assert allocated.get_function("kernel") is not None
+
+    def test_reserved_region_reduces_available_capacity(self):
+        """The fit check begins free allocation at reserved_start — the top of any
+        system.reserve_buffer region — matching AllocateMemoryAddr. Two 48 KB Vec
+        pipeline operands fit at depth 2 (96 KB) on their own, but a 128 KB reserved
+        buffer leaves too little Vec room, so the gate sheds them to a shared buffer.
+        Without the reserve they stay separate: the only difference is the
+        reserved_start accounting. (reserve_buffer lives in Vec for InCore functions;
+        L0 — the #1475 L0b target — has no reserve region, so it is unaffected.)"""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class WithReserve:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x0: pl.Tensor[[128, 96], pl.FP32],
+                x1: pl.Tensor[[128, 96], pl.FP32],
+                out0: pl.Out[pl.Tensor[[128, 96], pl.FP32]],
+                out1: pl.Out[pl.Tensor[[128, 96], pl.FP32]],
+            ) -> pl.Tensor[[128, 96], pl.FP32]:
+                pl.reserve_buffer(name="scratch", size=131072)
+                r0: pl.Tile[[128, 96], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    x0, [0, 0], [128, 96], target_memory=pl.Mem.Vec, attrs={"pipeline_membership": "0:0"}
+                )
+                s0: pl.Tile[[128, 96], pl.FP32, pl.Mem.Vec] = pl.tile.add(r0, r0)
+                out0 = pl.store(s0, [0, 0], out0)
+                r1: pl.Tile[[128, 96], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    x1, [0, 0], [128, 96], target_memory=pl.Mem.Vec, attrs={"pipeline_membership": "0:1"}
+                )
+                s1: pl.Tile[[128, 96], pl.FP32, pl.Mem.Vec] = pl.tile.add(r1, r1)
+                out1 = pl.store(s1, [0, 0], out1)
+                return out1
+
+        @pl.program
+        class NoReserve:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x0: pl.Tensor[[128, 96], pl.FP32],
+                x1: pl.Tensor[[128, 96], pl.FP32],
+                out0: pl.Out[pl.Tensor[[128, 96], pl.FP32]],
+                out1: pl.Out[pl.Tensor[[128, 96], pl.FP32]],
+            ) -> pl.Tensor[[128, 96], pl.FP32]:
+                r0: pl.Tile[[128, 96], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    x0, [0, 0], [128, 96], target_memory=pl.Mem.Vec, attrs={"pipeline_membership": "0:0"}
+                )
+                s0: pl.Tile[[128, 96], pl.FP32, pl.Mem.Vec] = pl.tile.add(r0, r0)
+                out0 = pl.store(s0, [0, 0], out0)
+                r1: pl.Tile[[128, 96], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    x1, [0, 0], [128, 96], target_memory=pl.Mem.Vec, attrs={"pipeline_membership": "0:1"}
+                )
+                s1: pl.Tile[[128, 96], pl.FP32, pl.Mem.Vec] = pl.tile.add(r1, r1)
+                out1 = pl.store(s1, [0, 0], out1)
+                return out1
+
+        no_r = self._collect_bases(passes.memory_reuse()(passes.init_mem_ref()(NoReserve)), ("r0", "r1"))
+        with_r = self._collect_bases(passes.memory_reuse()(passes.init_mem_ref()(WithReserve)), ("r0", "r1"))
+        assert no_r["r0"] is not no_r["r1"], "without the reserve, 96 KB of Vec operands fit at depth 2"
+        assert with_r["r0"] is with_r["r1"], "the 128 KB reserve reduces free Vec room, forcing the merge"
+
+    def test_multi_group_shed_prefers_largest_slot(self):
+        """The hardcoded ``max_relief`` shed policy: when a space overflows and *two*
+        pipeline groups can each give up double-buffering, shed the **larger-slot**
+        group first (freeing the most bytes per level ⇒ fewest levels lost).
+
+        Two sheddable groups alone cannot force this — being lifetime-disjoint within a
+        group is precisely what lets them *diagonal cross-merge* and time-share, so they
+        never overflow (see ``test_on_sequential_groups_time_share_without_false_shed``;
+        this is provable, not incidental: a group sheddable enough to merge its own
+        stages always has a stage disjoint from the other group's, so a diagonal merge
+        exists). The selection only becomes reachable with a **co-live non-pipeline
+        blocker** that adds fixed pressure on top of the time-shared groups.
+
+        Here group A (24 KB slots, ``0:0``/``0:1``) and B (16 KB slots, ``1:0``/``1:1``)
+        are sequential (so they diagonal-merge to 2×24 KB), and ``np0`` (24 KB) is live
+        across both. Full: 24 (A/B shared) + 24 (A/B shared) + 24 (np0) = 72 KB > 64 KB
+        L0b ⇒ shed. ``max_relief`` drops A (24 KB > 16 KB) to depth 1; the space then
+        fits at exactly 64 KB with **B still double-buffered**. A min-relief / arrival
+        policy would instead shed B first — which does *not* relieve enough (A's two
+        24 KB buffers + np0 still overflow), so it would go on to shed A too and lose
+        B's depth as well. So the assertion below discriminates ``max_relief`` from the
+        alternatives, not merely "some group shed"."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                la: pl.Tensor[[16, 128], pl.BF16],
+                bnp: pl.Tensor[[128, 96], pl.BF16],
+                ba: pl.Tensor[[128, 96], pl.BF16],
+                bb: pl.Tensor[[128, 64], pl.BF16],
+                onp: pl.Out[pl.Tensor[[16, 96], pl.FP32]],
+                oa: pl.Out[pl.Tensor[[16, 96], pl.FP32]],
+                ob: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 96], pl.FP32]:
+                lam: pl.Tile[[16, 128], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    la, [0, 0], [16, 128], target_memory=pl.Mem.Mat
+                )
+                lt: pl.Tile[[16, 128], pl.BF16, pl.Mem.Left] = pl.tile.move(lam, target_memory=pl.Mem.Left)
+                # co-live blocker np0: defined at the top, consumed last — cannot reuse a pipeline buffer.
+                bnpm: pl.Tile[[128, 96], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    bnp, [0, 0], [128, 96], target_memory=pl.Mem.Mat
+                )
+                np0: pl.Tile[[128, 96], pl.BF16, pl.Mem.Right] = pl.tile.move(
+                    bnpm, target_memory=pl.Mem.Right
+                )
+                # group A (24 KB Right slots), sequential stages 0:0 / 0:1 (both loads reuse `ba`)
+                ba0m: pl.Tile[[128, 96], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    ba, [0, 0], [128, 96], target_memory=pl.Mem.Mat
+                )
+                ra0: pl.Tile[[128, 96], pl.BF16, pl.Mem.Right] = pl.tile.move(
+                    ba0m, target_memory=pl.Mem.Right, attrs={"pipeline_membership": "0:0"}
+                )
+                ma0: pl.Tile[[16, 96], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lt, ra0)
+                oa = pl.store(ma0, [0, 0], oa)
+                ba1m: pl.Tile[[128, 96], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    ba, [0, 0], [128, 96], target_memory=pl.Mem.Mat
+                )
+                ra1: pl.Tile[[128, 96], pl.BF16, pl.Mem.Right] = pl.tile.move(
+                    ba1m, target_memory=pl.Mem.Right, attrs={"pipeline_membership": "0:1"}
+                )
+                ma1: pl.Tile[[16, 96], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lt, ra1)
+                oa = pl.store(ma1, [0, 0], oa)
+                # group B (16 KB Right slots), sequential stages 1:0 / 1:1 (both loads reuse `bb`)
+                bb0m: pl.Tile[[128, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    bb, [0, 0], [128, 64], target_memory=pl.Mem.Mat
+                )
+                rb0: pl.Tile[[128, 64], pl.BF16, pl.Mem.Right] = pl.tile.move(
+                    bb0m, target_memory=pl.Mem.Right, attrs={"pipeline_membership": "1:0"}
+                )
+                mb0: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lt, rb0)
+                ob = pl.store(mb0, [0, 0], ob)
+                bb1m: pl.Tile[[128, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    bb, [0, 0], [128, 64], target_memory=pl.Mem.Mat
+                )
+                rb1: pl.Tile[[128, 64], pl.BF16, pl.Mem.Right] = pl.tile.move(
+                    bb1m, target_memory=pl.Mem.Right, attrs={"pipeline_membership": "1:1"}
+                )
+                mb1: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lt, rb1)
+                ob = pl.store(mb1, [0, 0], ob)
+                mnp: pl.Tile[[16, 96], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lt, np0)
+                onp = pl.store(mnp, [0, 0], onp)
+                return onp
+
+        # Empty-instruments context suppresses the autouse SSA verification: this kernel
+        # intentionally reassigns `oa`/`ob` per stage (non-SSA input) to model the stage clones.
+        with passes.PassContext([]):
+            after = passes.memory_reuse()(passes.init_mem_ref()(Before))
+        bases = self._collect_bases(after, ("ra0", "ra1", "rb0", "rb1"))
+        assert bases["ra0"] is bases["ra1"], "max_relief sheds the larger-slot group A to depth 1"
+        assert bases["rb0"] is not bases["rb1"], "the smaller group B keeps its depth-2 double-buffering"
+        # After the shed the space fits at exactly cap — AllocateMemoryAddr must complete.
+        allocated = passes.allocate_memory_addr()(after)
+        assert allocated.get_function("kernel") is not None
+
+    def test_unknown_capacity_matches_legacy_not_merge_all(self):
+        """Unknown capacity (`cap == 0` — here no backend configured) must fall through to the
+        legacy predicate, **not** gate every group to F_g == 1. Gating to F_g == 1 would merge
+        everything and silently drop the legacy non-L0 load-only separation (#1900's Mat/L1 fix),
+        separating strictly *less* than legacy. With an unknown budget the capacity-gated path is a
+        no-op equivalent to legacy, so "never worse than legacy" holds for separation, not only for
+        overflow. Two cross-stage Vec (non-L0) *load* tiles must stay apart."""
+        backend.reset_for_testing()  # deliberately NO backend → GetMemSize == 0 for every space
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x0: pl.Tensor[[128, 96], pl.FP32],
+                x1: pl.Tensor[[128, 96], pl.FP32],
+                o0: pl.Out[pl.Tensor[[128, 96], pl.FP32]],
+                o1: pl.Out[pl.Tensor[[128, 96], pl.FP32]],
+            ) -> pl.Tensor[[128, 96], pl.FP32]:
+                r0: pl.Tile[[128, 96], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    x0, [0, 0], [128, 96], target_memory=pl.Mem.Vec, attrs={"pipeline_membership": "0:0"}
+                )
+                s0: pl.Tile[[128, 96], pl.FP32, pl.Mem.Vec] = pl.tile.add(r0, r0)
+                o0 = pl.store(s0, [0, 0], o0)
+                r1: pl.Tile[[128, 96], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    x1, [0, 0], [128, 96], target_memory=pl.Mem.Vec, attrs={"pipeline_membership": "0:1"}
+                )
+                s1: pl.Tile[[128, 96], pl.FP32, pl.Mem.Vec] = pl.tile.add(r1, r1)
+                o1 = pl.store(s1, [0, 0], o1)
+                return o1
+
+        bases = self._collect_bases(passes.memory_reuse()(passes.init_mem_ref()(Before)), ("r0", "r1"))
+        assert bases["r0"] is not bases["r1"], (
+            "unknown capacity must NOT merge the two cross-stage Vec load tiles (legacy fallthrough)"
+        )
+
+    def test_fallback_repacks_legacy_on_genuine_overflow(self, capfd):
+        """The ``force_legacy`` shed-loop floor (§8.4): when a tagged space genuinely cannot fit
+        at *any* depth, the shed exhausts (every group at F_g == 1) and the packer re-runs the
+        legacy predicate + logs a diagnostic. One pipeline group, 4 co-live 20 KB stages (all four
+        defined before any use ⇒ lifetimes overlap): 4×20 = 80 KB > 64 KB L0b, and co-liveness
+        keeps ``can_share`` false at every depth, so the shed can never reduce the footprint and
+        lands in ``force_legacy``. This is a genuine overflow legacy would also hit, so we don't
+        assert allocation succeeds — we assert the branch's contract: the fallback re-runs exactly
+        the legacy packing, which keeps the 4 co-live operands in distinct buffers."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                la: pl.Tensor[[16, 128], pl.BF16],
+                b: pl.Tensor[[128, 80], pl.BF16],
+                o0: pl.Out[pl.Tensor[[16, 80], pl.FP32]],
+                o1: pl.Out[pl.Tensor[[16, 80], pl.FP32]],
+                o2: pl.Out[pl.Tensor[[16, 80], pl.FP32]],
+                o3: pl.Out[pl.Tensor[[16, 80], pl.FP32]],
+            ) -> pl.Tensor[[16, 80], pl.FP32]:
+                lam: pl.Tile[[16, 128], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    la, [0, 0], [16, 128], target_memory=pl.Mem.Mat
+                )
+                lt: pl.Tile[[16, 128], pl.BF16, pl.Mem.Left] = pl.tile.move(lam, target_memory=pl.Mem.Left)
+                # all four stages of one group defined before any use → mutually co-live (20 KB each)
+                b0m: pl.Tile[[128, 80], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    b, [0, 0], [128, 80], target_memory=pl.Mem.Mat
+                )
+                r0: pl.Tile[[128, 80], pl.BF16, pl.Mem.Right] = pl.tile.move(
+                    b0m, target_memory=pl.Mem.Right, attrs={"pipeline_membership": "0:0"}
+                )
+                b1m: pl.Tile[[128, 80], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    b, [0, 0], [128, 80], target_memory=pl.Mem.Mat
+                )
+                r1: pl.Tile[[128, 80], pl.BF16, pl.Mem.Right] = pl.tile.move(
+                    b1m, target_memory=pl.Mem.Right, attrs={"pipeline_membership": "0:1"}
+                )
+                b2m: pl.Tile[[128, 80], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    b, [0, 0], [128, 80], target_memory=pl.Mem.Mat
+                )
+                r2: pl.Tile[[128, 80], pl.BF16, pl.Mem.Right] = pl.tile.move(
+                    b2m, target_memory=pl.Mem.Right, attrs={"pipeline_membership": "0:2"}
+                )
+                b3m: pl.Tile[[128, 80], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    b, [0, 0], [128, 80], target_memory=pl.Mem.Mat
+                )
+                r3: pl.Tile[[128, 80], pl.BF16, pl.Mem.Right] = pl.tile.move(
+                    b3m, target_memory=pl.Mem.Right, attrs={"pipeline_membership": "0:3"}
+                )
+                m0: pl.Tile[[16, 80], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lt, r0)
+                o0 = pl.store(m0, [0, 0], o0)
+                m1: pl.Tile[[16, 80], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lt, r1)
+                o1 = pl.store(m1, [0, 0], o1)
+                m2: pl.Tile[[16, 80], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lt, r2)
+                o2 = pl.store(m2, [0, 0], o2)
+                m3: pl.Tile[[16, 80], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lt, r3)
+                o3 = pl.store(m3, [0, 0], o3)
+                return o3
+
+        names = ("r0", "r1", "r2", "r3")
+        bases = self._collect_bases(passes.memory_reuse()(passes.init_mem_ref()(Before)), names)
+        # co-live ⇒ the force_legacy floor reproduces the legacy packing, keeping all four separate.
+        assert len({bases[n].name_hint for n in names}) == 4, (
+            "force_legacy fallback must keep the 4 co-live operands in distinct buffers"
+        )
+        # The fallback is not silent: it emits a Warning through the unified diagnostic channel (stderr).
+        err = capfd.readouterr().err
+        assert "fell back to the legacy packing" in err, (
+            f"force_legacy must warn through the diagnostic channel, got stderr: {err!r}"
         )
 
 

@@ -19,18 +19,22 @@
 #include <memory>
 #include <optional>
 #include <set>
+#include <sstream>
 #include <string>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/any_cast.h"
+#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memory_space.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
@@ -41,9 +45,11 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/attrs.h"
+#include "pypto/ir/transforms/utils/memory_footprint.h"
 #include "pypto/ir/transforms/utils/memref_collectors.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/reserve_buffer_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -1438,16 +1444,37 @@ bool NeedsLoadTpopHazardGuard(const FunctionPtr& func) {
  *                input operands it reads while writing the output in place.
  *
  * Complexity: O(M log M) sort + O(M^2) worst-case pairwise checks over the M
- * tile intervals (M a subset of the N IR nodes) — same class as the prior
- * greedy implementation.
+ * tile intervals (M a subset of the N IR nodes). The capacity-gated shed loop
+ * re-runs the O(M^2) FFD pack once per shed step, so the worst case is O(S·M^2)
+ * where S = Σ(F_g − 1) is the total double-buffering depth shed across a space's
+ * pipeline groups. S is bounded by (#pipeline groups × depth) — a small constant
+ * on real kernels (groups few, depth 2–4) — so this stays the same O(M^2) class as
+ * the prior greedy in practice; the FFD base was already O(M^2) pre-#1475.
  */
+// Cross-group shed objective (see docs/en/dev/passes/29-memory_reuse.md, pipeline-stage guard): when a
+// space overflows at every group's max-affordable depth,
+// the packer lowers one pipeline group's double-buffering depth by a residue. The MaxRelief heuristic
+// selects **which** group loses a level — lower score sheds first; ties always break by lowest group id
+// (deterministic). MaxRelief is used unconditionally: the pluggable objective (and its ArrivalOrder
+// alternative) was retired because it never diverged from MaxRelief on any real kernel — the multi-group
+// forced-shed it needs to differ does not occur in practice.
+struct ShedCandidate {
+  int32_t group;         ///< pipeline group id (the tie-break key)
+  uint64_t bytes_freed;  ///< align(slot_g): bytes reclaimed by dropping one residue buffer of this group
+};
+
+/// MaxRelief: shed the group that frees the most bytes per level ⇒ fewest levels lost to fit the space.
+inline double ScoreMaxRelief(const ShedCandidate& c) { return -static_cast<double>(c.bytes_freed); }
+
 std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
     const std::vector<LifetimeInterval>& lifetimes, const HazardInputs& hazard,
     const ForbidAliasMap& forbid_alias, const std::map<const Var*, std::set<int>>& phi_family_ids,
     const std::map<VarPtr, std::vector<VarPtr>>& sharing_groups,
     const std::map<const Var*, std::pair<int, int>>& var_liveness,
     const std::map<const Var*, std::vector<std::pair<int32_t, int32_t>>>& pipeline_membership,
-    const std::set<const Var*>& pipeline_load_tiles) {
+    const std::set<const Var*>& pipeline_load_tiles,
+    const std::map<MemorySpace, uint64_t>& reserved_end_by_space, const FunctionPtr& func,
+    std::vector<Diagnostic>* out_hints) {
   std::map<VarPtr, VarPtr> reuse_map;
 
   // Members of a sharing group (the vars that already physically share one base).
@@ -1568,40 +1595,129 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
 
   // Pipeline ping-pong guard (symmetric): two tiles that share a pipeline group
   // with a *different* stage index belong to replicated clones the scheduler
-  // overlaps, so a *load* buffer of one stage must never share storage with any
-  // buffer of another stage — even though their program-order lifetimes are
+  // overlaps, so collapsing them onto one buffer injects a false write-after-read
+  // that serializes the stages — even though their program-order lifetimes are
   // disjoint (that disjointness is exactly what pipelining hides). Non-pipelined
   // tiles carry no membership and never trigger this. See ``kPipelineMembershipAttr``.
   //
-  // Role-aware granularity: forbidding *all* cross-stage reuse (depth = F) is
-  // physically infeasible — F full copies of every intermediate overflow the
-  // on-chip budget (e.g. stage=4 RMSNorm needs 4x67KB > 188KB UB). Only the
-  // *load* buffers genuinely need per-stage privacy so iteration i+1's prefetch
-  // overlaps iteration i's compute. Compute intermediates do not stream across
-  // the stage boundary, so two compute tiles of different stages MAY still
-  // coalesce. Hence: block iff the two tiles are same-group / different-stage
-  // AND at least one of them is a load.
+  // Default (capacity-gated, #1475): protect concurrent clones in EVERY space —
+  // including the L0 matmul spaces (Left/Right/Acc/Bias) and regardless of whether
+  // a tile is a load or a `tile.move` result — up to the max-affordable
+  // double-buffering depth `F_g` (see below). This is what fixes the L0b operand
+  // collapse: the binding matmul operands are L0 `tile.move` results, so the legacy
+  // predicate below skipped them and merged 8 → 1.
   //
-  // Scope: the L0 matmul spaces (Left/Right/Acc/Bias) are exempt entirely. They
-  // are capacity-bound (a single operand tile can already fill L0B) and owned by
-  // the matmul-L0 machinery — L1->L0 ping-pong is handled by CanonicalizeIOOrder's
-  // extract clustering and accumulator carries by AlignLoopCarriesToInit. Forcing
-  // per-stage separation there both fights that machinery and overflows L0 (e.g.
-  // 2x64KB Right > 64KB). The pl.pipeline multi-buffer intent targets the
-  // data-movement spaces (Vec / Mat-L1 / GM), so the guard applies only there.
+  // Legacy predicate (the `!gated` fallback, used only when a space's capacity is
+  // unknown or when `force_legacy` re-packs after an unfittable shed): the L0
+  // spaces are exempt entirely and only *load* buffers get per-stage privacy.
+  // Forbidding *all* cross-stage reuse without a capacity check is infeasible — F
+  // full copies of every intermediate overflow the budget (e.g. stage=4 RMSNorm
+  // needs 4x67KB > 188KB UB), and 2x64KB Right > 64KB L0b — so the ungated path
+  // blocks iff the two tiles are same-group / different-stage AND at least one is a
+  // load. The capacity gate replaces this coarse heuristic with an exact per-space
+  // fit; the predicate is retained verbatim only as the never-worse-than-legacy floor.
   auto is_l0_space = [](MemorySpace s) {
     return s == MemorySpace::Left || s == MemorySpace::Right || s == MemorySpace::Acc ||
            s == MemorySpace::Bias;
   };
-  auto pipeline_blocks = [&pipeline_membership, &pipeline_load_tiles, &is_l0_space](
-                             const LifetimeInterval& a, const LifetimeInterval& b) {
-    if (is_l0_space(a.memory_space)) return false;  // reuse is within one space, so a==b space
+  // Capacity-gated (#1475): keep software-pipelined operands in separate buffers so the pipeline
+  // stages double-buffer instead of serializing on a shared buffer. #1900's `pipeline_membership` tags
+  // give each operand its (group, stage); `stage` is the clone index 0..F-1 of a `pl.pipeline(stage=F)`
+  // group whose clones run concurrently and must occupy distinct buffers. Each group `g` gets an
+  // affordable residue count `F_g = min(D_g, ⌊C_s / slot_g⌋)`; clone stage k lands in residue
+  // `ordinal(k) mod F_g`, so clones < F_g apart never share (exact double-buffering when F_g == D_g,
+  // maximal spread when capacity forces F_g < D_g). This adjacency guarantee is structural and
+  // model-free — it is `mod k`, kept. `F_g` is *mutable*: the FFD driver's shed loop lowers one group's
+  // depth (re-packing, exact SpaceFootprint fit) when a space overflows, and `F_g == 1` collapses that
+  // group to the legacy merge. Unknown capacity (`cap == 0`) ⇒ `F_g = 1` (conservative merge — never a
+  // separation we cannot verify fits). The whole-space fit is now the allocator's realized footprint
+  // (Primitive A, in the driver below), not a `Σ` estimate — so co-resident tiles and alignment are exact.
+  std::map<std::pair<MemorySpace, int32_t>, uint64_t> group_slot;  // (space, group) -> max tile
+  std::map<std::pair<MemorySpace, int32_t>, int32_t> group_depth;  // (space, group) -> F_g (mutable)
+  std::map<std::pair<MemorySpace, int32_t>, std::map<int32_t, int32_t>>
+      group_stage_ordinal;                                                   // stage->ordinal
+  std::map<std::pair<MemorySpace, int32_t>, int32_t> group_requested_depth;  // (space, group) -> D_g (stages)
+  std::set<MemorySpace> force_legacy_spaces;  // spaces whose gated packing overflowed → legacy fallback fired
+  // Spaces with a *known* (non-zero) capacity — only these are capacity-gated. A space whose bound is
+  // unknown (`cap == 0`, incl. no backend configured) falls through to the legacy predicate: gating it to
+  // F_g == 1 would merge *everything*, dropping even the legacy non-L0 load-only separation (#1900) and
+  // thus separating strictly LESS than legacy. Legacy-for-unknown makes "never worse than legacy" hold
+  // for separation too, not just for overflow.
+  std::set<MemorySpace> capacity_known_spaces;
+  {
+    const backend::Backend* be = backend::BackendConfig::IsConfigured() ? backend::GetBackend() : nullptr;
+    std::map<std::pair<MemorySpace, int32_t>, std::set<int32_t>> group_stages;
+    for (const auto& iv : lifetimes) {
+      auto it = pipeline_membership.find(iv.variable.get());
+      if (it == pipeline_membership.end()) continue;
+      for (const auto& [g, st] : it->second) {
+        auto key = std::make_pair(iv.memory_space, g);
+        group_slot[key] = std::max(group_slot[key], iv.size);
+        group_stages[key].insert(st);
+      }
+    }
+    for (const auto& [key, slot] : group_slot) {
+      // Optimistic per-slot depth using the *raw* space size (not cap − reserved_start): this is only the
+      // initial F_g. The shed loop below re-checks with the exact reserved-aware SpaceFootprint and lowers
+      // F_g further if the reserved region or co-resident tiles don't actually leave room.
+      const uint64_t cap = be ? be->GetMemSize(key.first) : 0;
+      const int32_t depth = static_cast<int32_t>(group_stages[key].size());
+      int32_t f = 1;  // cap == 0 (unknown capacity) ⇒ this space is NOT gated (legacy predicate below)
+      if (cap != 0 && slot != 0) {
+        f = std::min(depth, std::max<int32_t>(1, static_cast<int32_t>(cap / slot)));
+        capacity_known_spaces.insert(key.first);
+      }
+      group_depth[key] = f;
+      group_requested_depth[key] = depth;
+      int32_t ordinal = 0;  // stages may be sparse; compare dense ordinals mod F, not raw stage mod F
+      for (const int32_t st : group_stages[key]) group_stage_ordinal[key][st] = ordinal++;
+    }
+  }
+  // `force_legacy` (set by the driver's fallback below) makes the guard behave exactly like the
+  // legacy predicate for a space whose gated packing overflowed — so the fallback is legacy by construction.
+  bool force_legacy = false;
+  auto pipeline_blocks = [&pipeline_membership, &pipeline_load_tiles, &is_l0_space, &group_depth,
+                          &group_stage_ordinal, &force_legacy,
+                          &capacity_known_spaces](const LifetimeInterval& a, const LifetimeInterval& b) {
+    // The binding matmul operands live in L0 and are `tile.move` results, so the legacy guard's
+    // `is_l0_space` exemption AND its load-only restriction both skip them — the per-stage operands
+    // merge (8 → 1) and the cube matmuls serialize. The capacity-gated path (always on) protects
+    // pipeline operands in every space and regardless of load/move, up to the max-affordable
+    // double-buffering depth. A space whose capacity is unknown (`cap == 0`) is NOT gated — it uses the
+    // legacy predicate, so gated packing is never worse than legacy there. (a and b share a memory
+    // space — reuse only happens within a space.)
+    const bool gated = !force_legacy && capacity_known_spaces.count(a.memory_space) != 0;
+    if (!gated && is_l0_space(a.memory_space)) return false;  // legacy: L0 exempt
     auto ia = pipeline_membership.find(a.variable.get());
     if (ia == pipeline_membership.end()) return false;
     auto ib = pipeline_membership.find(b.variable.get());
     if (ib == pipeline_membership.end()) return false;
+    if (gated) {
+      // Keep separate iff a shared group's dense stage ordinals fall in different residues mod F_g (the
+      // current, possibly-shed, affordable residue count). F_g == 1 ⇒ same residue ⇒ mergeable (legacy).
+      // The whole-space fit is decided by the driver's exact SpaceFootprint, not here.
+      for (const auto& [ga, sa] : ia->second) {
+        for (const auto& [gb, sb] : ib->second) {
+          if (ga != gb) continue;
+          const auto key = std::make_pair(a.memory_space, ga);
+          auto dit = group_depth.find(key);
+          const int32_t k = (dit != group_depth.end() && dit->second > 0) ? dit->second : 1;
+          int32_t ra = sa;
+          int32_t rb = sb;
+          auto omit = group_stage_ordinal.find(key);
+          if (omit != group_stage_ordinal.end()) {
+            auto oa = omit->second.find(sa);
+            if (oa != omit->second.end()) ra = oa->second;
+            auto ob = omit->second.find(sb);
+            if (ob != omit->second.end()) rb = ob->second;
+          }
+          if (((ra % k) + k) % k != ((rb % k) + k) % k) return true;  // different buffer → separate
+        }
+      }
+      return false;
+    }
     if (!PipelineMembershipsConflict(ia->second, ib->second)) return false;  // not cross-stage
-    // Cross-stage: block only if at least one side is a load buffer.
+    // Legacy: block only if at least one side is a load buffer.
     return pipeline_load_tiles.count(a.variable.get()) != 0 ||
            pipeline_load_tiles.count(b.variable.get()) != 0;
   };
@@ -1631,8 +1747,11 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
     by_space[lifetimes[i].memory_space].push_back(i);
   }
 
+  // Allocator policy for the exact per-space footprint (Primitive A) — only when a backend is configured.
+  const backend::Backend* pack_be = backend::BackendConfig::IsConfigured() ? backend::GetBackend() : nullptr;
+  auto alloc_policy = pack_be ? pack_be->CreateMemoryAllocatorPolicy() : nullptr;
+
   for (auto& [space, indices] : by_space) {
-    (void)space;
     // Largest-first; ties broken by definition order for determinism and so that
     // equal-size workloads reproduce the prior definition-order grouping.
     std::stable_sort(indices.begin(), indices.end(), [&lifetimes](size_t a, size_t b) {
@@ -1640,40 +1759,165 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
       return lifetimes[a].def_point < lifetimes[b].def_point;
     });
 
-    // Each buffer is a list of interval indices sharing one MemRef; element 0 is
-    // the representative (largest, earliest on ties) every member is rebased to.
-    // Pipeline-stage separation (pipeline_blocks in can_share) is applied
-    // unconditionally — it is NOT relaxed to fit a budget. When separation pushes
-    // a space past its on-chip limit the overflow surfaces as a hard
-    // AllocateMemoryAddr error rather than being silently coalesced away; the
-    // kernel must reduce its stage= count or tile size to fit.
-    std::vector<std::vector<size_t>> buffers;
-    for (size_t idx : indices) {
-      const auto& cand = lifetimes[idx];
-      bool placed = false;
-      for (auto& buf : buffers) {
-        bool fits = true;
-        for (size_t member_idx : buf) {
-          if (!can_share(cand, lifetimes[member_idx])) {
-            fits = false;
-            break;
+    // First-fit-decreasing pack with the current per-group residue counts (pipeline_blocks reads the
+    // mutable F_g). Each buffer is a list of interval indices, element 0 the representative (largest,
+    // earliest on ties). Pure — it does NOT touch reuse_map, since the shed loop below may re-pack.
+    auto pack = [&]() {
+      std::vector<std::vector<size_t>> buffers;
+      for (size_t idx : indices) {
+        const auto& cand = lifetimes[idx];
+        bool placed = false;
+        for (auto& buf : buffers) {
+          bool fits = true;
+          for (size_t member_idx : buf) {
+            if (!can_share(cand, lifetimes[member_idx])) {
+              fits = false;
+              break;
+            }
+          }
+          if (!fits) continue;
+          buf.push_back(idx);
+          placed = true;
+          break;
+        }
+        if (!placed) buffers.push_back({idx});
+      }
+      return buffers;
+    };
+
+    std::vector<std::vector<size_t>> buffers = pack();
+
+    // Graceful cross-group depth shed: while the space's exact allocator footprint (SpaceFootprint,
+    // Primitive A) overflows, lower the largest-slot group's depth by one residue and re-pack. Re-running
+    // the FFD (not merging in place) avoids in-place non-monotonicity, but the FFD is still not monotone
+    // under the *relaxed* (F_g==1) predicate, so exhausting the shed does NOT guarantee a fit: the loop
+    // ends in a from-scratch legacy re-pack + diagnostic (see the `!shed_group` branch below), which
+    // guarantees no fit regression vs legacy. The shed objective is MaxRelief (largest slot first, tie
+    // by lowest group id), applied unconditionally.
+    if (alloc_policy) {
+      const uint64_t cap = pack_be->GetMemSize(space);
+      auto rit = reserved_end_by_space.find(space);
+      const uint64_t reserved_start = rit != reserved_end_by_space.end() ? rit->second : 0;
+      auto footprint = [&](const std::vector<std::vector<size_t>>& bufs) {
+        SpaceFootprint fp(space, *alloc_policy, reserved_start);
+        for (const auto& buf : bufs) {
+          uint64_t slot = 0;
+          for (size_t idx : buf) slot = std::max(slot, lifetimes[idx].size);
+          (void)fp.OpenBuffer(slot);
+        }
+        return fp.HighWater();
+      };
+      while (cap != 0 && footprint(buffers) > cap) {
+        // Pick the group to shed by MaxRelief; ties break by lowest group id (deterministic).
+        std::optional<int32_t> shed_group;
+        double best_score = 0.0;
+        for (const auto& [key, f] : group_depth) {
+          if (key.first != space || f <= 1) continue;
+          const uint64_t slot = group_slot.count(key) ? group_slot.at(key) : 0;
+          const double s = ScoreMaxRelief(ShedCandidate{key.second, alloc_policy->AlignAddress(slot, space)});
+          if (!shed_group || s < best_score || (s == best_score && key.second < *shed_group)) {
+            best_score = s;
+            shed_group = key.second;
           }
         }
-        if (!fits) continue;
-        const VarPtr& representative = lifetimes[buf.front()].variable;
-        reuse_map[cand.variable] = representative;  // member -> representative
-        // Record the base coalescing so resolve_base() can chase a view whose
-        // owning tile is reused onto the representative's buffer (no-alias guard).
+        if (!shed_group) {
+          // Every pipeline group is at depth 1 and the space still overflows. FFD is NOT monotone under
+          // the relaxed (F_g==1) predicate — a permitted merge can foreclose a later reuse — so this
+          // packing may be worse than legacy. Re-pack in legacy mode (`force_legacy`, byte-identical to
+          // the legacy predicate): that guarantees no fit regression vs legacy; if legacy also overflows
+          // it is a genuine overflow legacy would hit too (AllocateMemoryAddr surfaces it).
+          force_legacy = true;
+          buffers = pack();
+          force_legacy = false;
+          force_legacy_spaces.insert(space);
+          // Fold into the diagnostic channel (Warning) so all capacity-degradation signals go through one
+          // place (perf hint for a partial reduction below; this Warning for a space that fits at no depth).
+          if (out_hints != nullptr) {
+            const bool still_overflows = footprint(buffers) > cap;
+            out_hints->emplace_back(
+                DiagnosticSeverity::Warning, "MemoryReuse", 0,
+                "capacity-gated reuse could not fit memory space " + MemorySpaceToString(space) +
+                    " at any double-buffering depth; fell back to the legacy packing" +
+                    (still_overflows ? " (which also overflows — reduce tile size or stage count)" : "") +
+                    ".",
+                func ? func->span_ : Span::unknown());
+          }
+          break;
+        }
+        group_depth[std::make_pair(space, *shed_group)] -= 1;
+        buffers = pack();
+      }
+    }
+
+    // Commit the final packing: members [1..] reuse the representative [0]'s MemRef. The base coalescing
+    // lets resolve_base() chase a view whose owning tile is reused onto the representative's buffer.
+    for (const auto& buf : buffers) {
+      const VarPtr& representative = lifetimes[buf.front()].variable;
+      for (size_t m = 1; m < buf.size(); ++m) {
+        const auto& cand = lifetimes[buf[m]];
+        reuse_map[cand.variable] = representative;
         if (const Var* cb = TileMemRefBase(cand.variable)) {
           if (const Var* rb = physical_base(representative)) {
             if (cb != rb) base_remap[cb] = rb;
           }
         }
-        buf.push_back(idx);
-        placed = true;
-        break;
       }
-      if (!placed) buffers.push_back({idx});
+    }
+  }
+
+  // Loud diagnostic (perf hint): a pipeline group whose achieved depth F_g fell below the requested D_g
+  // means the capacity gate could not honor the programmer's `pl.pipeline(stage=D)` — stages k and k+F_g
+  // share a buffer and re-serialize (the false WAR the pipeline meant to avoid). Surface it (correct, just
+  // slower) with the concrete fix, rather than silently degrading. Spaces that hit the legacy fallback
+  // already emitted a Warning above, so skip them here to avoid a double signal.
+  if (out_hints != nullptr) {
+    for (const auto& [key, achieved] : group_depth) {
+      if (capacity_known_spaces.count(key.first) == 0) continue;  // unknown capacity ⇒ not gated
+      if (force_legacy_spaces.count(key.first) != 0) continue;    // already warned at the space level
+      auto rit = group_requested_depth.find(key);
+      const int32_t requested = rit != group_requested_depth.end() ? rit->second : achieved;
+      if (achieved >= requested) continue;  // fully double-buffered as requested — nothing to report
+      const uint64_t slot = group_slot.count(key) != 0 ? group_slot.at(key) : 0;
+      const uint64_t cap = pack_be != nullptr ? pack_be->GetMemSize(key.first) : 0;
+      // Effective (free) capacity is the total minus the reserved region — the same reserved_start the exact
+      // SpaceFootprint fit begins at. Co-resident non-pipeline tiles and other pipeline groups also consume
+      // the space, but they are not a single subtractable constant, so the byte threshold is only exact when
+      // this operand's own footprint is the binding constraint. Distinguish the two shed causes so the fix
+      // stays honest: (a) slot-bound — `slot*requested` overflows even an otherwise-empty free region, so
+      // shrink to `free_cap/requested`; (b) space-pressure — it would fit alone, so the fix is to relieve the
+      // co-residents, not shrink this tile (which already satisfies the per-slot bound).
+      const uint64_t reserved =
+          reserved_end_by_space.count(key.first) != 0 ? reserved_end_by_space.at(key.first) : 0;
+      const uint64_t free_cap = cap > reserved ? cap - reserved : 0;
+      // Use the *aligned* slot — the same per-buffer increment SpaceFootprint bumps by — so the slot-bound
+      // vs space-pressure classification and the byte threshold match the real fit (raw `slot` under-counts
+      // when the tile isn't an alignment multiple).
+      const uint64_t aligned_slot =
+          alloc_policy != nullptr ? alloc_policy->AlignAddress(slot, key.first) : slot;
+      const uint64_t need = aligned_slot * static_cast<uint64_t>(requested);
+      const bool slot_bound = free_cap == 0 || need > free_cap;
+      // Source-agnostic wording: `pipeline_membership` is stamped both by an explicit `pl.pipeline(stage=)`
+      // and by compiler-synthesized pipelines (e.g. #1900's cross-core skew clones), so blame "software
+      // pipelining", not the user's `stage=`, and offer `pl.pipeline(stage=)` only as an example.
+      std::ostringstream msg;
+      msg << "software pipelining requested depth " << requested << " for pipeline group " << key.second
+          << " in " << MemorySpaceToString(key.first) << ", but only " << achieved << " of " << requested
+          << " buffers fit (" << aligned_slot << " B per stage, " << free_cap << " B free";
+      if (reserved != 0) msg << " after " << reserved << " B reserved";
+      msg << ") — stages " << achieved << " apart share storage and serialize. ";
+      if (slot_bound) {
+        msg << "This operand alone needs " << need << " B for depth " << requested
+            << "; shrink the per-stage tile to <= "
+            << (requested > 0 ? free_cap / static_cast<uint64_t>(requested) : free_cap)
+            << " B, or reduce the pipeline depth (e.g. `pl.pipeline(stage=)`) to " << achieved << ".";
+      } else {
+        msg << "The operand would fit depth " << requested
+            << " on its own, but co-resident buffers / other pipeline groups over-subscribe the space; "
+            << "relieve the co-residents (smaller or fewer co-live tiles) or reduce the pipeline depth to "
+            << achieved << ".";
+      }
+      out_hints->emplace_back(DiagnosticSeverity::PerfHint, "MemoryReuse", 0, "PH-MR-001", msg.str(),
+                              func ? func->span_ : Span::unknown());
     }
   }
 
@@ -2322,10 +2566,25 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   forbid_collector.VisitStmt(new_body);
   ForbidAliasMap forbid_alias = forbid_collector.Take();
 
+  // Per-space reserved end (the SpaceFootprint reserved_start for the exact fit check). Only meaningful
+  // with a configured backend; empty otherwise ⇒ reserved_start defaults to 0.
+  std::map<MemorySpace, uint64_t> reserved_end_by_space;
+  if (backend::BackendConfig::IsConfigured()) {
+    auto policy = backend::GetBackend()->CreateMemoryAllocatorPolicy();
+    if (policy) {
+      // Shared with AllocateMemoryAddr — the reserved start is parity-by-construction, not comment-synced.
+      const auto resolution = ResolveReserveBufferBases(func, *policy);
+      for (const auto& [space, end] : resolution.reserved_end_by_space) reserved_end_by_space[space] = end;
+    }
+  }
+  std::vector<Diagnostic> hints;
   auto reuse_map = IdentifyReuseOpportunities(
       analysis_result.lifetimes, hazard, forbid_alias, analysis_result.phi_family_ids,
       analysis_result.var_sharing_groups, analysis_result.var_liveness, analysis_result.pipeline_membership,
-      analysis_result.pipeline_load_tiles);
+      analysis_result.pipeline_load_tiles, reserved_end_by_space, func, &hints);
+  // Surface capacity-forced pipeline-depth reductions (perf hints) and legacy-fallback overflows
+  // (warnings) through the unified diagnostic channel → perf_hints.log / stderr.
+  if (!hints.empty()) EmitDiagnostics(hints, "MemoryReuse");
 
   // Step 3: Apply MemRef sharing (skip if no reuse candidates)
   if (!reuse_map.empty()) {
