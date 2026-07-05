@@ -348,6 +348,17 @@ class TypePropagatingMutator : public IRMutator {
     return std::make_shared<IterArg>(op->name_hint_, new_init->GetType(), new_init, op->span_);
   }
 
+  ExprPtr VisitExpr_(const TupleGetItemExprPtr& op) override {
+    auto tuple = VisitExpr(op->tuple_);
+    if (auto make_tuple = As<MakeTuple>(tuple)) {
+      if (op->index_ >= 0 && static_cast<size_t>(op->index_) < make_tuple->elements_.size()) {
+        return VisitExpr(make_tuple->elements_[static_cast<size_t>(op->index_)]);
+      }
+    }
+    if (tuple.get() == op->tuple_.get()) return op;
+    return std::make_shared<TupleGetItemExpr>(tuple, op->index_, op->span_);
+  }
+
   /// Override ForStmt to update return_vars types to match iter_arg types.
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
     auto result = IRMutator::VisitStmt_(op);
@@ -575,6 +586,11 @@ class TensorToTileMutator : public TypePropagatingMutator {
     // Revisit result after mutating prologue — prologue conversions may have
     // remapped vars that the result expression references.
     auto new_result = VisitExpr(conv_result.result);
+
+    if (As<MakeTuple>(new_result)) {
+      var_remap_[op->var_.get()] = new_result;
+      return SeqStmts::Flatten(std::move(stmts), op->span_);
+    }
 
     auto tile_name = MakeTileValueName(op->var_->name_hint_);
     auto tile_var = std::make_shared<Var>(tile_name, new_result->GetType(), op->var_->span_);

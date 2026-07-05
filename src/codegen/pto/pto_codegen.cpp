@@ -1255,6 +1255,16 @@ void PTOCodegen::RegisterTileBufType(const std::string& ssa_name, const std::str
   fs_.ssa_to_tile_buf_type[ssa_name] = type_string;
 }
 
+void PTOCodegen::AliasTileVarToExistingBuf(const ir::VarPtr& var, const std::string& ssa_name,
+                                           const std::string& type_string) {
+  INTERNAL_CHECK(var != nullptr) << "Internal error: cannot alias null tile var";
+  INTERNAL_CHECK(!ssa_name.empty()) << "Internal error: cannot alias tile var to empty SSA";
+  BindVarToMlir(var, ssa_name);
+  if (!type_string.empty()) {
+    RegisterTileBufType(ssa_name, type_string);
+  }
+}
+
 std::string PTOCodegen::GetSSATileBufType(const std::string& ssa_name) const {
   auto it = fs_.ssa_to_tile_buf_type.find(ssa_name);
   return it != fs_.ssa_to_tile_buf_type.end() ? it->second : std::string{};
@@ -1382,6 +1392,13 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   const bool is_set_validshape = ir::IsOp(call, "tile.set_validshape");
   const bool alias_scatter_result_to_input = ShouldAliasScatterResultToInput(op);
   const bool alias_array_update_to_input = ShouldAliasArrayUpdateResultToInput(op);
+
+  if (As<ir::TupleGetItemExpr>(op->value_)) {
+    auto key = GetVarKey(op->var_);
+    if (fs_.var_to_mlir.find(key) != fs_.var_to_mlir.end()) {
+      return;
+    }
+  }
 
   if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
     if (!is_set_validshape && !alias_scatter_result_to_input) {

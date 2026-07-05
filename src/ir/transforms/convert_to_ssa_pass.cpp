@@ -819,6 +819,47 @@ class SSAConverter {
     auto cond = SubstExpr(op->condition_);
     auto before = cur_;
 
+    // Frontend constants such as ``if True:`` can wrap manual-dependency
+    // producers that are consumed later in the parent scope.  If we keep the
+    // artificial IfStmt until SSA conversion, those producer variables appear
+    // branch-local and the verifier rejects their later uses.  Fold constants
+    // here, including explicit return_vars: the kept branch's trailing yield is
+    // stripped and each return_var is rebound to its yielded SSA value.
+    if (auto const_cond = StaticBoolValue(cond)) {
+      if (!*const_cond && !op->else_body_.has_value()) {
+        cur_ = before;
+        return std::make_shared<const SeqStmts>(std::vector<StmtPtr>{}, op->span_);
+      }
+      auto kept_body = ConvertStmt(*const_cond ? op->then_body_ : *op->else_body_);
+      if (op->return_vars_.empty()) {
+        return kept_body;
+      }
+      auto stripped = StripTrailingYield(kept_body, op->return_vars_.size());
+      std::vector<StmtPtr> extra_assigns;
+      for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+        auto rv_key = op->return_vars_[i].get();
+        auto yielded = stripped.yielded_values[i];
+        if (auto yielded_var = As<Var>(yielded)) {
+          cur_[rv_key] = yielded_var;
+          continue;
+        }
+        int v = NextVersion(rv_key);
+        auto nrv = std::make_shared<Var>(BuildAutoNamedVersion(rv_key->name_hint_, "rv", v),
+                                         op->return_vars_[i]->GetType(), op->return_vars_[i]->span_);
+        extra_assigns.push_back(std::make_shared<AssignStmt>(nrv, yielded, op->span_));
+        cur_[rv_key] = nrv;
+      }
+      if (extra_assigns.empty()) return stripped.body;
+      std::vector<StmtPtr> stmts;
+      if (auto seq = As<SeqStmts>(stripped.body)) {
+        stmts = seq->stmts_;
+      } else if (stripped.body) {
+        stmts.push_back(stripped.body);
+      }
+      stmts.insert(stmts.end(), extra_assigns.begin(), extra_assigns.end());
+      return SeqStmts::Flatten(std::move(stmts), op->span_);
+    }
+
     // Convert then branch
     auto new_then = ConvertStmt(op->then_body_);
     auto then_ver = cur_;
@@ -1222,6 +1263,55 @@ class SSAConverter {
       return yield;
     }
     return SeqStmts::Flatten({s, yield}, span);
+  }
+
+  struct StrippedYield {
+    StmtPtr body;
+    std::vector<ExprPtr> yielded_values;
+  };
+
+  static StmtPtr EmptyBody(const Span& span) {
+    return std::make_shared<const SeqStmts>(std::vector<StmtPtr>{}, span);
+  }
+
+  static std::optional<bool> StaticBoolValue(const ExprPtr& e) {
+    if (auto b = As<ConstBool>(e)) return b->value_;
+    if (auto i = As<ConstInt>(e); i && i->dtype() == DataType::BOOL) return i->value_ != 0;
+    return std::nullopt;
+  }
+
+  static StrippedYield StripTrailingYield(const StmtPtr& s, size_t return_var_count) {
+    AssertNoMidBodyYield(s);
+    if (auto scope = As<RuntimeScopeStmt>(s)) {
+      auto copy = MutableCopy(scope);
+      auto stripped = StripTrailingYield(scope->body_, return_var_count);
+      copy->body_ = stripped.body ? stripped.body : EmptyBody(scope->body_->span_);
+      return {copy, std::move(stripped.yielded_values)};
+    }
+    if (auto scope = As<SplitAivScopeStmt>(s)) {
+      auto copy = MutableCopy(scope);
+      auto stripped = StripTrailingYield(scope->body_, return_var_count);
+      copy->body_ = stripped.body ? stripped.body : EmptyBody(scope->body_->span_);
+      return {copy, std::move(stripped.yielded_values)};
+    }
+    if (auto seq = As<SeqStmts>(s)) {
+      INTERNAL_CHECK_SPAN(!seq->stmts_.empty(), seq->span_)
+          << "ConvertToSSA: IfStmt with return_vars must end with YieldStmt";
+      auto stmts = seq->stmts_;
+      auto stripped = StripTrailingYield(stmts.back(), return_var_count);
+      if (stripped.body) {
+        stmts.back() = stripped.body;
+      } else {
+        stmts.pop_back();
+      }
+      return {SeqStmts::Flatten(std::move(stmts), seq->span_), std::move(stripped.yielded_values)};
+    }
+    auto yield = As<YieldStmt>(s);
+    INTERNAL_CHECK_SPAN(yield, s->span_) << "ConvertToSSA: IfStmt with return_vars must end with YieldStmt";
+    INTERNAL_CHECK_SPAN(yield->value_.size() == return_var_count, yield->span_)
+        << "ConvertToSSA: yielded value count " << yield->value_.size()
+        << " does not match return_vars count " << return_var_count;
+    return {nullptr, yield->value_};
   }
 
   // ── State ──────────────────────────────────────────────────────────

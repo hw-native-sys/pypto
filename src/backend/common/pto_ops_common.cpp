@@ -2221,8 +2221,10 @@ static void EmitLogicalTpushValidShapeRestore(const CallPtr& op, codegen::PTOCod
 static std::string FormatFrontendPipeAttrs(const CallPtr& op, int split) {
   std::ostringstream oss;
   oss << "{";
-  if (op->HasKwarg("id")) {
-    const int id = op->GetKwarg<int>("id", 0);
+  const bool has_explicit_id = op->HasKwarg("id");
+  const int id = has_explicit_id ? op->GetKwarg<int>("id", 0) : (split != 0 ? split : 0);
+  // Keep an explicit id=0 distinguishable from the omitted-id default.
+  if (id != 0 || has_explicit_id) {
     CHECK(id >= 0) << "Frontend pipe 'id' attribute must be non-negative, got " << id;
     oss << "id = " << id << ", ";
   }
@@ -3506,7 +3508,22 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
         if (src_space.has_value() && dst_space.has_value() && *src_space == *dst_space) {
           auto src_offset = As<ir::ConstInt>((*src_tile->memref_)->byte_offset_);
           auto dst_offset = As<ir::ConstInt>((*dst_tile->memref_)->byte_offset_);
-          if (src_offset && dst_offset && src_offset->value_ == dst_offset->value_) {
+          const bool same_dtype = src_tile->dtype_ == dst_tile->dtype_;
+          const bool same_tile_view = ir::tile_view_semantics::GetEffectiveTileView(*src_tile) ==
+                                      ir::tile_view_semantics::GetEffectiveTileView(*dst_tile);
+          bool same_shape = src_tile->shape_.size() == dst_tile->shape_.size();
+          for (size_t i = 0; same_shape && i < src_tile->shape_.size(); ++i) {
+            same_shape = IsSameDimExpr(src_tile->shape_[i], dst_tile->shape_[i]);
+          }
+          if (*src_space == ir::MemorySpace::Acc && same_dtype && same_shape) {
+            // PTOAS has no Acc->Acc tmov form. Treat same-shaped Acc moves as
+            // SSA aliases; these are inserted as layout/placement repairs before
+            // consumers such as tile.store, and copying would be illegal anyway.
+            codegen.SetCurrentResultBuf(codegen.GetExprAsCode(op->args_[0]));
+            return std::string("");
+          }
+          if (src_offset && dst_offset && src_offset->value_ == dst_offset->value_ && same_dtype &&
+              same_tile_view) {
             // Alias the destination to the source SSA value so downstream
             // references use the source's defined buffer, not the destination's
             // alloc_tile (which would be unwritten after eliding the tmov).
@@ -3620,9 +3637,14 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   reg("tile.load", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTileLoadCodegenPTO(op, codegen);
   });
-  reg("tile.store", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-    return MakeTileStoreCodegenPTO(op, codegen);
-  });
+  if (exclude_ops.count("tile.store") == 0) {
+    auto reg_entry = backend.RegisterOp("tile.store");
+    reg_entry
+        .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+          return MakeTileStoreCodegenPTO(op, codegen);
+        })
+        .set_input_layout(0, ir::TileLayout::row_major);
+  }
   // Distributed N6 ops — cross-rank tile load + per-rank signal notify/wait +
   // synchronous bulk get/put. See MakeRemoteLoadCodegenPTO /
   // MakeNotifyCodegenPTO / MakeWaitCodegenPTO / MakeGetCodegenPTO /

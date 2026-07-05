@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -148,6 +149,15 @@ std::string BuildPipeBufferName(const std::string& func_name, core_affinity::Pip
          ((direction == core_affinity::PipeDirection::C2V) ? "_c2v_slot_buffer" : "_v2c_slot_buffer");
 }
 
+std::string BuildPipeBufferNameForId(const std::string& func_name, core_affinity::PipeDirection direction,
+                                     int pipe_id) {
+  if (pipe_id == 0) {
+    return BuildPipeBufferName(func_name, direction);
+  }
+  return func_name + "_pipe" + std::to_string(pipe_id) +
+         ((direction == core_affinity::PipeDirection::C2V) ? "_c2v_slot_buffer" : "_v2c_slot_buffer");
+}
+
 CallPtr CreateSystemOpCall(const std::string& op_name,
                            const std::vector<std::pair<std::string, std::any>>& kwargs, const Span& span) {
   return CreateSystemOpCall(op_name, {}, kwargs, span);
@@ -176,7 +186,7 @@ CallPtr CreateImportPeerBuffer(const std::string& buffer_name, const std::string
 
 CallPtr CreateInitializePipe(core_affinity::CoreSide side, int dir_mask, int slot_size_bytes,
                              const ExprPtr& c2v_consumer_buf, const ExprPtr& v2c_consumer_buf,
-                             std::optional<int> slot_num, const Span& span) {
+                             std::optional<int> slot_num, int pipe_id, const Span& span) {
   INTERNAL_CHECK_SPAN(slot_size_bytes >= 0 && slot_size_bytes <= std::numeric_limits<int>::max(), span)
       << "Cross-core slot_size out of range: " << slot_size_bytes;
   std::vector<std::pair<std::string, std::any>> kwargs = {{"dir_mask", std::any(dir_mask)},
@@ -186,8 +196,52 @@ CallPtr CreateInitializePipe(core_affinity::CoreSide side, int dir_mask, int slo
         << "Cross-core slot_num override must be positive: " << slot_num.value();
     kwargs.emplace_back("slot_num", std::any(slot_num.value()));
   }
+  if (pipe_id != 0) {
+    kwargs.emplace_back("id", std::any(pipe_id));
+  }
   const std::string op_name = core_side_ops::InitializePipeOp(side);
   return CreateSystemOpCall(op_name, {c2v_consumer_buf, v2c_consumer_buf}, kwargs, span);
+}
+
+void CollectCrossCorePipeMetadataById(const std::vector<StmtPtr>& stmts,
+                                      std::map<int, CrossCorePipeMetadata>& metadata_by_id) {
+  for (const auto& stmt : stmts) {
+    auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt);
+    auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt);
+    CallPtr call;
+    if (assign) {
+      call = std::dynamic_pointer_cast<const Call>(assign->value_);
+    } else if (eval) {
+      call = std::dynamic_pointer_cast<const Call>(eval->expr_);
+    }
+    auto op = call ? std::dynamic_pointer_cast<const Op>(call->op_) : nullptr;
+    if (op) {
+      const int split = call->GetKwarg<int>("split", 0);
+      const int pipe_id = call->HasKwarg("id") ? call->GetKwarg<int>("id", 0) : (split != 0 ? split : 0);
+      auto& metadata = metadata_by_id[pipe_id];
+      if (IsOp(op, "tile.tpush_to_aiv") && call->args_.size() == 1) {
+        RecordTileSlotSize(metadata.c2v, call->args_[0]->GetType());
+      } else if (IsOp(op, "tile.tpush_to_aic") && call->args_.size() == 1) {
+        RecordTileSlotSize(metadata.v2c, call->args_[0]->GetType());
+      } else if (IsOp(op, "tile.tpop_from_aiv") && assign) {
+        RecordTileSlotSize(metadata.v2c, assign->var_->GetType());
+      } else if (IsOp(op, "tile.tpop_from_aic") && assign) {
+        RecordTileSlotSize(metadata.c2v, assign->var_->GetType());
+      }
+    }
+
+    if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
+      CollectCrossCorePipeMetadataById(FlattenBody(for_stmt->body_), metadata_by_id);
+    } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
+      CollectCrossCorePipeMetadataById(FlattenBody(if_stmt->then_body_), metadata_by_id);
+      const auto& else_body = if_stmt->else_body_;
+      if (else_body) {
+        CollectCrossCorePipeMetadataById(FlattenBody(*else_body), metadata_by_id);
+      }
+    } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
+      CollectCrossCorePipeMetadataById(FlattenBody(while_stmt->body_), metadata_by_id);
+    }
+  }
 }
 
 void CollectCrossCorePipeMetadata(const std::vector<StmtPtr>& stmts, CrossCorePipeMetadata& metadata) {
@@ -281,76 +335,83 @@ AutomaticPipeSetup BuildAutomaticPipeSetup(const std::string& func_name, const s
     return {};
   }
 
-  const int dir_mask = BuildDirMask(combined);
-  auto common_slot_size = GetCommonSlotSizeBytes(combined);
-  if (dir_mask == 0 || !common_slot_size.has_value()) {
-    return {};
-  }
-
-  // Ring depth: pl.split(mode, slot_num=N) override, else the PTOAS-matching
-  // default (8 unidirectional / 4 bidirectional). The reserved buffer and the
-  // emitted initialize_pipe slot_num attribute both use this value, so PTOAS
-  // and the auto-reserved buffer stay consistent on a3 (local footprint =
-  // slot_num when local_slot_num is omitted) and a5 (footprint = slot_num).
   if (slot_num_override.has_value()) {
     INTERNAL_CHECK_SPAN(slot_num_override.value() > 0, span)
         << "Cross-core slot_num override must be positive: " << slot_num_override.value();
   }
-  const int effective_slot_num = slot_num_override.value_or(GetSlotNumForDirMask(dir_mask));
-  // Bound-check the slot size before multiplying so an oversized inferred size
-  // can't overflow the int64 buffer_size computation.
-  const int64_t slot_size_i64 = common_slot_size.value();
-  INTERNAL_CHECK_SPAN(slot_size_i64 >= 0 && slot_size_i64 <= std::numeric_limits<int>::max(), span)
-      << "Cross-core slot_size out of range: " << slot_size_i64;
-  const int slot_size_bytes = static_cast<int>(slot_size_i64);
-  const int64_t buffer_size = slot_size_i64 * effective_slot_num;
-  AutomaticPipeSetup setup;
 
-  std::shared_ptr<Var> aic_v2c_reserve_var;
-  std::shared_ptr<Var> aic_c2v_import_var;
-  std::shared_ptr<Var> aiv_c2v_reserve_var;
-  std::shared_ptr<Var> aiv_v2c_import_var;
+  std::map<int, CrossCorePipeMetadata> metadata_by_id;
+  CollectCrossCorePipeMetadataById(aic_stmts, metadata_by_id);
+  CollectCrossCorePipeMetadataById(aiv_stmts, metadata_by_id);
+
+  AutomaticPipeSetup setup;
 
   auto zero_i32 = [&]() { return std::make_shared<ConstInt>(0, DataType::INT32, span); };
   auto var_as_expr = [](const std::shared_ptr<Var>& v) -> ExprPtr {
     return std::static_pointer_cast<const Expr>(v);
   };
 
-  if (dir_mask & core_affinity::kDirMaskV2C) {
-    const auto v2c_name = BuildPipeBufferName(func_name, core_affinity::PipeDirection::V2C);
-    auto v2c_reserve = CreateReserveBuffer(v2c_name, buffer_size, span);
-    aic_v2c_reserve_var = std::make_shared<Var>(v2c_name, v2c_reserve->GetType(), span);
-    setup.aic_stmts.push_back(std::make_shared<AssignStmt>(aic_v2c_reserve_var, v2c_reserve, span));
-    auto v2c_import = CreateImportPeerBuffer(v2c_name, aic_name, span);
-    aiv_v2c_import_var = std::make_shared<Var>(v2c_name + "_import", v2c_import->GetType(), span);
-    setup.aiv_stmts.push_back(std::make_shared<AssignStmt>(aiv_v2c_import_var, v2c_import, span));
+  for (const auto& [pipe_id, pipe_metadata] : metadata_by_id) {
+    const int dir_mask = BuildDirMask(pipe_metadata);
+    auto common_slot_size = GetCommonSlotSizeBytes(pipe_metadata);
+    if (dir_mask == 0 || !common_slot_size.has_value()) {
+      continue;
+    }
+
+    // Ring depth: pl.split(mode, slot_num=N) override, else the PTOAS-matching
+    // default (8 unidirectional / 4 bidirectional). Split and non-split transfer
+    // boundaries use distinct logical pipe ids so PTOAS never sees split=0 and
+    // split=1/2 traffic on the same pipe.
+    const int effective_slot_num = slot_num_override.value_or(GetSlotNumForDirMask(dir_mask));
+    // Bound-check the slot size before multiplying so an oversized inferred size
+    // can't overflow the int64 buffer_size computation.
+    const int64_t slot_size_i64 = common_slot_size.value();
+    INTERNAL_CHECK_SPAN(slot_size_i64 >= 0 && slot_size_i64 <= std::numeric_limits<int>::max(), span)
+        << "Cross-core slot_size out of range: " << slot_size_i64;
+    const int slot_size_bytes = static_cast<int>(slot_size_i64);
+    const int64_t buffer_size = slot_size_i64 * effective_slot_num;
+
+    std::shared_ptr<Var> aic_v2c_reserve_var;
+    std::shared_ptr<Var> aic_c2v_import_var;
+    std::shared_ptr<Var> aiv_c2v_reserve_var;
+    std::shared_ptr<Var> aiv_v2c_import_var;
+
+    if (dir_mask & core_affinity::kDirMaskV2C) {
+      const auto v2c_name = BuildPipeBufferNameForId(func_name, core_affinity::PipeDirection::V2C, pipe_id);
+      auto v2c_reserve = CreateReserveBuffer(v2c_name, buffer_size, span);
+      aic_v2c_reserve_var = std::make_shared<Var>(v2c_name, v2c_reserve->GetType(), span);
+      setup.aic_stmts.push_back(std::make_shared<AssignStmt>(aic_v2c_reserve_var, v2c_reserve, span));
+      auto v2c_import = CreateImportPeerBuffer(v2c_name, aic_name, span);
+      aiv_v2c_import_var = std::make_shared<Var>(v2c_name + "_import", v2c_import->GetType(), span);
+      setup.aiv_stmts.push_back(std::make_shared<AssignStmt>(aiv_v2c_import_var, v2c_import, span));
+    }
+
+    if (dir_mask & core_affinity::kDirMaskC2V) {
+      const auto c2v_name = BuildPipeBufferNameForId(func_name, core_affinity::PipeDirection::C2V, pipe_id);
+      auto c2v_reserve = CreateReserveBuffer(c2v_name, buffer_size, span);
+      aiv_c2v_reserve_var = std::make_shared<Var>(c2v_name, c2v_reserve->GetType(), span);
+      setup.aiv_stmts.push_back(std::make_shared<AssignStmt>(aiv_c2v_reserve_var, c2v_reserve, span));
+      auto c2v_import = CreateImportPeerBuffer(c2v_name, aiv_name, span);
+      aic_c2v_import_var = std::make_shared<Var>(c2v_name + "_import", c2v_import->GetType(), span);
+      setup.aic_stmts.push_back(std::make_shared<AssignStmt>(aic_c2v_import_var, c2v_import, span));
+    }
+
+    // AIC: c2v operand = import on Cube; v2c operand = reserve on Cube (matches PTO codegen order).
+    const ExprPtr aic_c2v_arg = aic_c2v_import_var ? var_as_expr(aic_c2v_import_var) : ExprPtr(zero_i32());
+    const ExprPtr aic_v2c_arg = aic_v2c_reserve_var ? var_as_expr(aic_v2c_reserve_var) : ExprPtr(zero_i32());
+    // AIV: c2v operand = reserve on Vector; v2c operand = import on Vector.
+    const ExprPtr aiv_c2v_arg = aiv_c2v_reserve_var ? var_as_expr(aiv_c2v_reserve_var) : ExprPtr(zero_i32());
+    const ExprPtr aiv_v2c_arg = aiv_v2c_import_var ? var_as_expr(aiv_v2c_import_var) : ExprPtr(zero_i32());
+
+    setup.aic_stmts.push_back(
+        std::make_shared<EvalStmt>(CreateInitializePipe(core_affinity::CoreSide::AIC, dir_mask, slot_size_bytes,
+                                                        aic_c2v_arg, aic_v2c_arg, slot_num_override, pipe_id, span),
+                                   span));
+    setup.aiv_stmts.push_back(
+        std::make_shared<EvalStmt>(CreateInitializePipe(core_affinity::CoreSide::AIV, dir_mask, slot_size_bytes,
+                                                        aiv_c2v_arg, aiv_v2c_arg, slot_num_override, pipe_id, span),
+                                   span));
   }
-
-  if (dir_mask & core_affinity::kDirMaskC2V) {
-    const auto c2v_name = BuildPipeBufferName(func_name, core_affinity::PipeDirection::C2V);
-    auto c2v_reserve = CreateReserveBuffer(c2v_name, buffer_size, span);
-    aiv_c2v_reserve_var = std::make_shared<Var>(c2v_name, c2v_reserve->GetType(), span);
-    setup.aiv_stmts.push_back(std::make_shared<AssignStmt>(aiv_c2v_reserve_var, c2v_reserve, span));
-    auto c2v_import = CreateImportPeerBuffer(c2v_name, aiv_name, span);
-    aic_c2v_import_var = std::make_shared<Var>(c2v_name + "_import", c2v_import->GetType(), span);
-    setup.aic_stmts.push_back(std::make_shared<AssignStmt>(aic_c2v_import_var, c2v_import, span));
-  }
-
-  // AIC: c2v operand = import on Cube; v2c operand = reserve on Cube (matches PTO codegen order).
-  const ExprPtr aic_c2v_arg = aic_c2v_import_var ? var_as_expr(aic_c2v_import_var) : ExprPtr(zero_i32());
-  const ExprPtr aic_v2c_arg = aic_v2c_reserve_var ? var_as_expr(aic_v2c_reserve_var) : ExprPtr(zero_i32());
-  // AIV: c2v operand = reserve on Vector; v2c operand = import on Vector.
-  const ExprPtr aiv_c2v_arg = aiv_c2v_reserve_var ? var_as_expr(aiv_c2v_reserve_var) : ExprPtr(zero_i32());
-  const ExprPtr aiv_v2c_arg = aiv_v2c_import_var ? var_as_expr(aiv_v2c_import_var) : ExprPtr(zero_i32());
-
-  setup.aic_stmts.push_back(
-      std::make_shared<EvalStmt>(CreateInitializePipe(core_affinity::CoreSide::AIC, dir_mask, slot_size_bytes,
-                                                      aic_c2v_arg, aic_v2c_arg, slot_num_override, span),
-                                 span));
-  setup.aiv_stmts.push_back(
-      std::make_shared<EvalStmt>(CreateInitializePipe(core_affinity::CoreSide::AIV, dir_mask, slot_size_bytes,
-                                                      aiv_c2v_arg, aiv_v2c_arg, slot_num_override, span),
-                                 span));
 
   return setup;
 }

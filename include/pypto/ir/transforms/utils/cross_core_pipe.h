@@ -80,7 +80,7 @@ CallPtr CreateImportPeerBuffer(const std::string& buffer_name, const std::string
 // (otherwise PTOAS derives it from `dir_mask`).
 CallPtr CreateInitializePipe(core_affinity::CoreSide side, int dir_mask, int slot_size_bytes,
                              const ExprPtr& c2v_consumer_buf, const ExprPtr& v2c_consumer_buf,
-                             std::optional<int> slot_num, const Span& span);
+                             std::optional<int> slot_num, int pipe_id, const Span& span);
 
 void CollectCrossCorePipeMetadata(const std::vector<StmtPtr>& stmts, CrossCorePipeMetadata& metadata);
 CrossCorePipeMetadata CollectDominatingPipeSetupMetadata(const std::vector<StmtPtr>& stmts);

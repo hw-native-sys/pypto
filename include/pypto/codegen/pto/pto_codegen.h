@@ -370,6 +370,8 @@ class PTOCodegen : public CodegenBase {
   void SetCurrentResultBuf(const std::string& buf);
   void RegisterTileBufType(const std::string& ssa_name, const std::string& type_string);
   std::string GetSSATileBufType(const std::string& ssa_name) const;
+  void AliasTileVarToExistingBuf(const ir::VarPtr& var, const std::string& ssa_name,
+                                 const std::string& type_string = "");
   struct SubviewMaterializationInfo {
     std::string source_ssa;
     std::string source_type;

@@ -345,7 +345,11 @@ void CollectCVBoundaryMoves(const std::vector<StmtPtr>& stmts,
 // ============================================================================
 
 std::vector<std::pair<std::string, std::any>> MakeSplitKwargs(int split = 0) {
-  return {{"split", std::any(split)}};
+  std::vector<std::pair<std::string, std::any>> kwargs{{"split", std::any(split)}};
+  if (split != 0) {
+    kwargs.emplace_back("id", std::any(split));
+  }
+  return kwargs;
 }
 
 CallPtr CreateTpush(const std::string& op_name, const ExprPtr& tile, const Span& span, int split = 0) {
@@ -391,6 +395,54 @@ bool NeedsPostTpopMove(CoreSide side, const TileType& dest_type) {
   INTERNAL_CHECK(dest_type.memory_space_.has_value())
       << "Boundary move destination must have inferred memory_space before ExpandMixedKernel";
   return dest_type.memory_space_.value() != GetBoundaryTpopMemory(side);
+}
+
+bool SameDimExpr(const ExprPtr& lhs, const ExprPtr& rhs) {
+  if (lhs.get() == rhs.get()) return true;
+  auto lhs_const = std::dynamic_pointer_cast<const ConstInt>(lhs);
+  auto rhs_const = std::dynamic_pointer_cast<const ConstInt>(rhs);
+  return lhs_const && rhs_const && lhs_const->value_ == rhs_const->value_;
+}
+
+bool SameTileShape(const TileType& lhs, const TileType& rhs) {
+  if (lhs.shape_.size() != rhs.shape_.size()) return false;
+  for (size_t i = 0; i < lhs.shape_.size(); ++i) {
+    if (!SameDimExpr(lhs.shape_[i], rhs.shape_[i])) return false;
+  }
+  return true;
+}
+
+bool IsSameSpaceTpopMoveAlias(const AssignStmtPtr& assign, const TpopDefs& tpop_defs,
+                              const std::unordered_map<const Var*, VarPtr>& tpop_var_remap,
+                              VarPtr* canonical_tpop) {
+  if (!assign) return false;
+  auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
+  if (!IsOp(call, "tile.move") || call->args_.empty()) return false;
+  auto source_var = AsVarLike(call->args_[0]);
+  if (!source_var) return false;
+
+  VarPtr source_after_remap = source_var;
+  if (auto remap_it = tpop_var_remap.find(source_var.get());
+      remap_it != tpop_var_remap.end() && remap_it->second) {
+    source_after_remap = remap_it->second;
+  } else if (tpop_defs.count(source_var.get()) == 0) {
+    return false;
+  }
+
+  auto src_type = std::dynamic_pointer_cast<const TileType>(source_after_remap->GetType());
+  auto dst_type = std::dynamic_pointer_cast<const TileType>(assign->var_->GetType());
+  if (!src_type || !dst_type) return false;
+  auto src_space = src_type->GetMemorySpace();
+  auto dst_space = dst_type->GetMemorySpace();
+  if (!src_space.has_value() || !dst_space.has_value() || src_space.value() != dst_space.value()) return false;
+  if (src_type->dtype_ != dst_type->dtype_) return false;
+  if (!SameTileShape(*src_type, *dst_type)) return false;
+  if (tile_view_semantics::GetEffectiveTileView(*src_type) != tile_view_semantics::GetEffectiveTileView(*dst_type)) {
+    return false;
+  }
+
+  if (canonical_tpop) *canonical_tpop = source_after_remap;
+  return true;
 }
 
 std::string BuildBoundaryTpopName(CoreSide side, const std::string& dest_name) {
@@ -670,7 +722,8 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
                                    std::unordered_map<const Var*, VarPtr>& tpop_var_remap,
                                    std::unordered_set<const Var*>& superseded_tpop_vars,
                                    const std::map<const Stmt*, GmSyncPush>& gm_sync_pushes,
-                                   const std::map<const Stmt*, std::vector<GmSyncPop>>& gm_sync_pops) {
+                                   const std::map<const Stmt*, std::vector<GmSyncPop>>& gm_sync_pops,
+                                   const TpopDefs& tpop_defs) {
   const auto* handler = PassContext::Current()->GetBackendHandler();
   // AIC keeps CUBE, skips VECTOR; AIV keeps VECTOR, skips CUBE
   CoreAffinity keep_affinity = (side == CoreSide::AIC) ? CoreAffinity::CUBE : CoreAffinity::VECTOR;
@@ -765,7 +818,7 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
             view_ms = shape_tt->memory_space_.value();  // NOLINT(bugprone-unchecked-optional-access)
             needs_post_move = NeedsPostTpopMove(side, *shape_tt);
           }
-          auto tpop_type = BuildBoundaryTpopType(side, shape_source);
+          auto tpop_type = needs_post_move ? BuildBoundaryTpopType(side, shape_source) : shape_source;
           // Consumer-side transfer view. For op-driven boundaries the cross-core
           // data lands in a FRESH transfer tile of this side's memory (Vec on
           // AIV, Mat on AIC) — exactly like a plain move-boundary destination —
@@ -827,6 +880,14 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
       if (superseded_tpop_vars.count(assign->var_.get()) > 0) continue;
     }
 
+    if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
+      VarPtr canonical_tpop;
+      if (IsSameSpaceTpopMoveAlias(assign, tpop_defs, tpop_var_remap, &canonical_tpop)) {
+        tpop_var_remap[assign->var_.get()] = canonical_tpop;
+        continue;
+      }
+    }
+
     // GM cross-lane sync (issue #1433): on the consumer lane, emit a fence tpop
     // just before the keyed stmt. That stmt is the load itself when producer and
     // consumer share a body, or the loop/branch enclosing the load (so the fence
@@ -856,19 +917,19 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
       // Recurse into compound statements, building pruned copies
       if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
         auto new_body = BuildCoreBody(side, FlattenBody(for_stmt->body_), stmt_map, boundary_moves,
-                                      tpop_var_remap, superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+                                      tpop_var_remap, superseded_tpop_vars, gm_sync_pushes, gm_sync_pops, tpop_defs);
         auto new_for = MutableCopy(for_stmt);
         new_for->body_ = MakeBody(new_body, for_stmt->span_);
         result.push_back(new_for);
       } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
         auto new_then = BuildCoreBody(side, FlattenBody(if_stmt->then_body_), stmt_map, boundary_moves,
-                                      tpop_var_remap, superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+                                      tpop_var_remap, superseded_tpop_vars, gm_sync_pushes, gm_sync_pops, tpop_defs);
         std::optional<StmtPtr> new_else;
         const auto& else_body = if_stmt->else_body_;
         if (else_body.has_value()) {
           auto new_else_stmts =
               BuildCoreBody(side, FlattenBody(*else_body), stmt_map, boundary_moves, tpop_var_remap,
-                            superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+                            superseded_tpop_vars, gm_sync_pushes, gm_sync_pops, tpop_defs);
           new_else = MakeBody(new_else_stmts, if_stmt->span_);
         }
         auto new_if = MutableCopy(if_stmt);
@@ -877,7 +938,7 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
         result.push_back(new_if);
       } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
         auto new_body = BuildCoreBody(side, FlattenBody(while_stmt->body_), stmt_map, boundary_moves,
-                                      tpop_var_remap, superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+                                      tpop_var_remap, superseded_tpop_vars, gm_sync_pushes, gm_sync_pops, tpop_defs);
         auto new_while = MutableCopy(while_stmt);
         new_while->body_ = MakeBody(new_body, while_stmt->span_);
         result.push_back(new_while);
@@ -1145,7 +1206,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
   // Build AIC body (recursive — handles MIXED compound stmts)
   std::unordered_map<const Var*, VarPtr> aic_tpop_remap;
   auto aic_stmts = BuildCoreBody(CoreSide::AIC, stmts, stmt_map, boundary_moves, aic_tpop_remap,
-                                 superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+                                 superseded_tpop_vars, gm_sync_pushes, gm_sync_pops, tpop_defs);
 
   // Remove ReturnStmt from AIC (AIC doesn't return values)
   std::vector<StmtPtr> aic_stmts_no_return;
@@ -1173,7 +1234,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
   // Build AIV body (recursive — handles MIXED compound stmts)
   std::unordered_map<const Var*, VarPtr> aiv_tpop_remap;
   auto aiv_stmts = BuildCoreBody(CoreSide::AIV, stmts, stmt_map, boundary_moves, aiv_tpop_remap,
-                                 superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+                                 superseded_tpop_vars, gm_sync_pushes, gm_sync_pops, tpop_defs);
   auto aiv_final =
       FinalizeTpopTfrees(FinalizeSplitCoreBody(aiv_stmts, original_def_map, remap_keys(aiv_tpop_remap)),
                          CoreSide::AIV, aiv_tpop_remap);

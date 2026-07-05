@@ -161,16 +161,23 @@ bool ValidOperandNeedsLocalize(const ExprPtr& valid_dim, const ExprPtr& original
 CallPtr RebuildCallWithSplit(const CallPtr& call, int split_int) {
   std::vector<std::pair<std::string, std::any>> new_kwargs;
   bool has_split = false;
+  bool has_id = false;
   for (const auto& [key, val] : call->kwargs_) {
     if (key == "split") {
       new_kwargs.emplace_back("split", std::any(split_int));
       has_split = true;
+    } else if (key == "id" && split_int != 0) {
+      new_kwargs.emplace_back("id", std::any(split_int));
+      has_id = true;
     } else {
       new_kwargs.emplace_back(key, val);
     }
   }
   if (!has_split) {
     new_kwargs.emplace_back("split", std::any(split_int));
+  }
+  if (split_int != 0 && !has_id) {
+    new_kwargs.emplace_back("id", std::any(split_int));
   }
   return std::make_shared<Call>(call->op_, call->args_, std::move(new_kwargs), call->GetType(), call->span_);
 }
@@ -221,16 +228,23 @@ CallPtr RebuildTpopWithHalvedShape(const CallPtr& call, int split_int, int split
 
   std::vector<std::pair<std::string, std::any>> new_kwargs;
   bool has_split = false;
+  bool has_id = false;
   for (const auto& [key, val] : call->kwargs_) {
     if (key == "split") {
       new_kwargs.emplace_back("split", std::any(split_int));
       has_split = true;
+    } else if (key == "id" && split_int != 0) {
+      new_kwargs.emplace_back("id", std::any(split_int));
+      has_id = true;
     } else {
       new_kwargs.emplace_back(key, val);
     }
   }
   if (!has_split) {
     new_kwargs.emplace_back("split", std::any(split_int));
+  }
+  if (split_int != 0 && !has_id) {
+    new_kwargs.emplace_back("id", std::any(split_int));
   }
 
   return std::make_shared<Call>(call->op_, call->args_, std::move(new_kwargs), new_result_type, call->span_);

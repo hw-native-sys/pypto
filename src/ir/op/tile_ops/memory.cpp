@@ -398,6 +398,12 @@ TypePtr DeduceTileCreateTileType(const std::vector<ExprPtr>& args,
   std::optional<MemorySpace> creation_space = std::nullopt;
   if (flat_layout) {
     creation_space = MemorySpace::Mat;
+  } else if (target_memory_opt.has_value() && *target_memory_opt == MemorySpace::Left) {
+    tile_view.blayout = TileLayout::col_major;
+    tile_view.slayout = TileLayout::row_major;
+  } else if (target_memory_opt.has_value() && *target_memory_opt == MemorySpace::Right) {
+    tile_view.blayout = TileLayout::row_major;
+    tile_view.slayout = TileLayout::col_major;
   } else if (target_memory_opt.has_value() && *target_memory_opt == MemorySpace::Acc) {
     tile_view.blayout = TileLayout::col_major;
     tile_view.slayout = TileLayout::row_major;
