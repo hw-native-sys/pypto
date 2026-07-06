@@ -373,7 +373,7 @@ REGISTER_OP("pld.tensor.all_to_all")
     .set_description(
         "All-to-all: symmetric personalized exchange.  Every rank pushes its "
         "per-destination chunks directly to every peer's window via "
-        "``pld.tile.remote_store``, then synchronises with a notify/wait "
+        "``pld.tensor.put`` (TPUT), then synchronises with a notify/wait "
         "barrier.  ``input`` is a Tensor [NR, SIZE] where ``input[dest, :]`` "
         "is the chunk destined for rank ``dest``.  ``target`` is a "
         "window-bound DistributedTensor [NR, SIZE] that receives the result "

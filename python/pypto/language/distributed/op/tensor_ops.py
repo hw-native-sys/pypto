@@ -604,7 +604,7 @@ def all_to_all(
 
     3-arg InCore composite: ``pld.tensor.all_to_all(input, target, signal)``
     Every rank pushes its per-destination chunks directly to every peer's
-    window via ``pld.tile.remote_store``, then synchronises with a notify/wait
+    window via ``pld.tensor.put`` (TPUT), then synchronises with a notify/wait
     barrier.  Returns ``target`` in-place (window-as-result — same idiom as
     ``reduce_scatter`` / ``broadcast``).
 

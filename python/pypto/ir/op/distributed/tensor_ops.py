@@ -361,7 +361,7 @@ def all_to_all(
     3-arg push-based InCore composite: Tensor [NR, SIZE] input, DistributedTensor
     [NR, SIZE] target (window-as-result), INT32 barrier signal.  Lowered by
     LowerCompositeOps into a 2-phase push decomposition (push via
-    ``pld.tile.remote_store`` → barrier → return target).
+    ``pld.tensor.put`` / TPUT → barrier → return target).
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     _args: list[Expr] = [input, target, signal]

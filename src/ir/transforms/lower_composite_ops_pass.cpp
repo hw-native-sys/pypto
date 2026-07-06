@@ -967,12 +967,10 @@ ExprPtr LowerTensorBarrierRule(const CallPtr& call, const std::vector<ExprPtr>& 
 // other rank.  2-phase decomposition:
 //
 //   Phase 1 (push): for dest in 0..NR-1:
-//       stage_tile = tile.load(input, [dest, 0], [1, SIZE])
-//       if dest == my_rank:
-//           tile.store(stage_tile, [my_rank, 0], target)       // local self-copy
-//       else:
-//           pld.tile.remote_store(stage_tile, target, dest,     // push to peer's window
-//                                 [my_rank, 0])
+//       pld.tile.put(dst=target, peer=dest, src=input, stage,   // push row to peer
+//                    dst_offsets=[my_rank, 0],
+//                    src_offsets=[dest, 0],
+//                    shape=[1, SIZE], atomic=None)
 //
 //   Phase 2 (barrier):
 //       notify-all (Set 1)
@@ -982,6 +980,15 @@ ExprPtr LowerTensorBarrierRule(const CallPtr& call, const std::vector<ExprPtr>& 
 //           holds the chunk received from rank src.
 //
 // Input layout:  input[dest, :] = chunk destined for rank dest.
+//
+// Emits tile.create + pld.tile.put directly (the tensor-level pld.tensor.put
+// has no codegen and ConvertTensorToTileOps runs before this pass — same
+// reason broadcast/allgather emit pld.tile.get directly). The HCCL TPUT engine
+// streams input[dest, :] through the shared VEC staging tile into the peer's
+// window row [my_rank, 0], so a row larger than the staging tile is auto-chunked
+// by pto-isa. The self-rank case (peer == my_rank) falls out of the same TPUT
+// path via HCCL identity mapping (CommRemotePtr returns the local ptr), so no
+// separate self-copy branch is needed.
 // ============================================================================
 
 ExprPtr LowerTensorAllToAllRule(const CallPtr& call, const std::vector<ExprPtr>& args, LoweringBuilder& b) {
@@ -1021,36 +1028,33 @@ ExprPtr LowerTensorAllToAllRule(const CallPtr& call, const std::vector<ExprPtr>&
   auto my_rank_offsets = std::make_shared<MakeTuple>(
       std::vector<ExprPtr>{comm.my_rank, std::make_shared<ConstInt>(0, DataType::INDEX, span)}, span);
 
-  // ---- Phase 1: push — load each destination chunk and write it directly
-  //      to the peer's window via pld.tile.remote_store (TSTORE-based).
-  //      Self-rank case uses local tile.store for efficiency.
+  // ---- Phase 1: push — write each per-destination row directly into the
+  //      peer's window via pld.tile.put (TPUT-based). The HCCL TPUT engine
+  //      streams input[dest, :] through the shared VEC staging tile, so a row
+  //      larger than the stage is auto-chunked. The self-rank case (peer ==
+  //      my_rank) falls out of the same path via HCCL identity mapping.
+  //
+  // One shared [1, SIZE] VEC staging tile is reused across all destinations,
+  // mirroring allgather's per-peer pld.tile.get.
+  auto put_stage =
+      b.Bind("aa_stage",
+             reg.Create("tile.create", {chunk_shape},
+                        {{"dtype", target_type->dtype_}, {"target_memory", MemorySpace::Vec}}, span),
+             span);
+
   b.EmitFor(
       "dest", zero_idx, comm.nranks_idx, one_idx,
       [&](LoweringBuilder& body, const VarPtr& dest_var) {
         auto dest_row_offsets = std::make_shared<MakeTuple>(
             std::vector<ExprPtr>{dest_var, std::make_shared<ConstInt>(0, DataType::INDEX, span)}, span);
 
-        auto stage_tile =
-            body.Bind("aa_load",
-                      reg.Create("tile.load", {input, dest_row_offsets, chunk_shape, chunk_shape},
-                                 {{"target_memory", MemorySpace::Vec}}, span),
-                      span);
-
-        // Self-rank: local tile.store in the else branch.
-        body.EmitIf(
-            body.NotEq(dest_var, comm.my_rank, span),
-            [&](LoweringBuilder& then_body) {
-              // Peer: push via pld.tile.remote_store.
-              then_body.Bind("aa_push",
-                             reg.Create("pld.tile.remote_store",
-                                        {stage_tile, target, dest_var, my_rank_offsets}, {}, span),
-                             span);
-            },
-            /*else_fn=*/
-            [&](LoweringBuilder& else_body) {
-              else_body.Bind("aa_self",
-                             reg.Create("tile.store", {stage_tile, my_rank_offsets, target}, {}, span), span);
-            },
+        // pld.tile.put(dst, peer, src, stage, dst_offsets, src_offsets, shape):
+        // read input[dest, :] and write it to the peer's window row [my_rank, 0].
+        body.Bind(
+            "aa_put",
+            reg.Create("pld.tile.put",
+                       {target, dest_var, input, put_stage, my_rank_offsets, dest_row_offsets, chunk_shape},
+                       {{"atomic", static_cast<int>(AtomicType::kNone)}}, span),
             span);
       },
       span);

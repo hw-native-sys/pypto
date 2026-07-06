@@ -11,14 +11,15 @@
 
 Implements push-based 2-phase mesh all-to-all:
 
-* **Phase 1 (push)** — for each dest rank, load the chunk and push it directly
-  to the peer's window via ``pld.tile.remote_store`` (TSTORE-based).
-  Self-rank chunk uses local ``tile.store``.
+* **Phase 1 (push)** — for each dest rank, push the chunk directly to the
+  peer's window via ``pld.tensor.put`` (TPUT-based). The self-rank case
+  (``dest == my_rank``) is handled uniformly by TPUT's HCCL identity mapping.
 * **Phase 2 (barrier)** — each rank ``Set``s every peer's ``signal`` cell
   via ``pld.system.notify`` and ``pld.system.wait``s until all ranks have
   completed their pushes.
 * **Phase 3 (read-back)** — read ``data[src, :]`` (the chunk received from
-  rank ``src``) into ``out[src, :]`` via ``pl.load`` + ``pl.store``.
+  rank ``src``) into ``out[src, :]`` via ``pl.load`` + ``pl.store`` so the
+  host-visible ``out`` tensor carries the device-only window result.
 
 Golden: ``output[rank, src, j] = src*1000 + rank*100 + j``.
 
@@ -75,15 +76,12 @@ class AllToAllMesh:
         my_rank = pld.rank(ctx)
         nranks = pld.nranks(ctx)
 
-        # Phase 1: push — load each destination chunk and write it directly
-        # to the peer's window via pld.tile.remote_store (TSTORE-based).
-        # Self-rank uses local pl.store for efficiency.
+        # Phase 1: push — write each destination chunk directly into the peer's
+        # window via pld.tensor.put (TPUT-based). The self-rank case
+        # (dest == my_rank) is handled uniformly by TPUT's HCCL identity mapping,
+        # so no separate local-store branch is needed.
         for dest in pl.range(nranks):
-            chunk = pl.load(inp, [dest, 0], [1, SIZE])
-            if dest == my_rank:
-                pl.store(chunk, [my_rank, 0], data)
-            else:
-                pld.tile.remote_store(chunk, target=data, peer=dest, offsets=[my_rank, 0])
+            pld.tensor.put(data, dest, inp, [my_rank, 0], [dest, 0], [1, SIZE])
 
         # Phase 2: barrier — notify every peer, wait on every peer slot.
         for peer in pl.range(nranks):
@@ -141,10 +139,9 @@ class AllToAllMesh:
 class TestL3AllToAll:
     """L3 distributed runtime: hand-rolled push-based mesh all-to-all.
 
-    Validates that the raw DSL primitives (``pl.tile.load`` /
-    ``pld.tile.remote_store`` / ``pl.tile.store`` /
-    ``pld.system.notify`` / ``pld.system.wait``) produce the correct
-    rank-ordered personalized exchange.
+    Validates that the raw DSL primitives (``pld.tensor.put`` /
+    ``pld.system.notify`` / ``pld.system.wait`` / ``pl.load`` / ``pl.store``)
+    produce the correct rank-ordered personalized exchange.
     """
 
     @pytest.mark.parametrize("n_ranks", [2, 4])
