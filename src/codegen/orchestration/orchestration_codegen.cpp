@@ -1343,8 +1343,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
         EmitIndentedLine("if (" + *scalar_name + ".is_valid()) {");
         {
           IndentGuard guard(Active());
-          EmitIndentedLine(dyn_it->second.data_name + "[" + dyn_it->second.count_name + "++] = " +
-                           *scalar_name + ";");
+          EmitIndentedLine(dyn_it->second.data_name + "[" + dyn_it->second.count_name +
+                           "++] = " + *scalar_name + ";");
           EmitIndentedLine("#if PTO2_ORCH_PROFILING");
           EmitIndentedLine("rt_orch_profile_add_dynamic_dep_vector(rt_orch_profile_now() - " +
                            profile_start_name + ", 1);");
