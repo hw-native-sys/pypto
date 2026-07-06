@@ -48,6 +48,28 @@ logger = logging.getLogger(__name__)
 
 _PTOAS_RELEASE_URL = "https://github.com/zhangstevenunity/PTOAS/releases"
 
+_PTOAS_TIMEOUT_ENV = "PYPTO_PTOAS_TIMEOUT"
+_DEFAULT_PTOAS_TIMEOUT_S = 120
+
+
+def _get_ptoas_timeout() -> int:
+    """Per-kernel ptoas compilation timeout in seconds.
+
+    Defaults to ``_DEFAULT_PTOAS_TIMEOUT_S``; overridable via the
+    ``PYPTO_PTOAS_TIMEOUT`` env var. Heavy kernels (multi-stage pipelines,
+    looped scatter) can approach the limit under high compile-pool
+    concurrency, so CI may raise it without affecting local runs.
+    """
+    env_val = os.environ.get(_PTOAS_TIMEOUT_ENV, "").strip()
+    if not env_val:
+        return _DEFAULT_PTOAS_TIMEOUT_S
+    try:
+        n = int(env_val)
+    except ValueError:
+        logger.warning("Invalid %s='%s', using default", _PTOAS_TIMEOUT_ENV, env_val)
+        return _DEFAULT_PTOAS_TIMEOUT_S
+    return max(1, n)
+
 
 class PartialCodegenError(RuntimeError):
     """Codegen failed after producing some output files."""
@@ -202,7 +224,7 @@ def _run_ptoas(
             capture_output=True,
             text=True,
             check=False,
-            timeout=60,
+            timeout=_get_ptoas_timeout(),
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"ptoas compilation timed out after {exc.timeout}s") from exc
