@@ -67,13 +67,15 @@ inline constexpr const char* kPipelineOverlapStoresAttr = "pipeline_overlap_stor
 /// store-after-compute *within* a stage — the compute/store tier is shared and
 /// sorted by stage, so a stage-i store still precedes the stage-{i+1} matmul).
 /// It keeps the two iterations' L0C accumulators genuinely co-live, which is the
-/// dbC=2 (double-buffered L0C) ping-pong: under the ptoas memory planner the two
-/// co-live Acc tiles land on distinct L0C offsets so tile i's FIXPIPE drain
-/// overlaps tile i+1's MAD.  AutoTileMatmulL0 sets it only when the chooser picked
-/// ``double_buffer_c`` (ptoas planner + accumulator budgeted at L0C/2); under the
-/// pypto planner it stays absent (⇒ ``false``) so MemoryReuse's single-accumulator
-/// budget is preserved.  Consumed (stripped) by ``CanonicalizeIOOrder`` alongside
-/// ``pipeline_stages`` and ``pipeline_overlap_stores``.
+/// dbC=2 (double-buffered L0C) ping-pong: overlapping their live ranges forces any
+/// correct allocator to give them distinct L0C offsets, so tile i's FIXPIPE drain
+/// overlaps tile i+1's MAD.  The co-live pair only survives under
+/// ``memory_planner=PTOAS``, which skips MemoryReuse (whose opportunistic reuse
+/// over-coalesces the pair into one buffer); InitMemRef then keeps the two buffers
+/// distinct and ptoas places them.  AutoTileMatmulL0 sets it only when the chooser
+/// picked ``double_buffer_c`` (ptoas planner + accumulator budgeted at L0C/2);
+/// under the pypto planner it stays absent (⇒ ``false``).  Consumed (stripped) by
+/// ``CanonicalizeIOOrder`` alongside ``pipeline_stages`` and ``pipeline_overlap_stores``.
 inline constexpr const char* kPipelineDoubleBufferCAttr = "pipeline_double_buffer_c";
 
 /// Attribute key marking a tile-producing ``Call`` with the pipeline-stage
