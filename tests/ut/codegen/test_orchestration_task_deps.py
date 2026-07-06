@@ -767,6 +767,12 @@ def test_spmd_submit_emits_launch_spec_and_captures_task_id():
     # Producer TaskId is captured and the consumer depends on it.
     assert re.search(r"PTO2TaskId\s+\w+\s*=\s*task_0_outs\.task_id\(\);", code), code
     assert "set_dependencies(" in code, code
+    # Direct-call dispatch emits set_dependencies BEFORE the launch spec (deps
+    # -> launch_spec -> early_resolve). This locks the byte-identical per-path
+    # emission order; wrapper paths (Spmd/Group/Mixed) use the opposite order.
+    deps_pos = code.index("params_t1.set_dependencies(")
+    launch_pos = code.index("params_t1.launch_spec.set_block_num(2);")
+    assert deps_pos < launch_pos, code
 
 
 def test_spmd_submit_group_emits_mixed_kernels_and_launch_spec():

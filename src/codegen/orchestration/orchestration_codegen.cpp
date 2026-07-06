@@ -2371,6 +2371,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
     bool launch_sync_start{false};
     std::string submit_expr;
     bool capture_outputs{false};
+    /// Direct kernel calls emit ``set_dependencies`` *before* the launch spec;
+    /// wrapper paths (Spmd/Group/Mixed) emit it *after*. This mirrors the
+    /// historical per-path emission order so generated orchestration C++ is
+    /// byte-identical across the refactor. See ``BuildDirectCallDispatchPlan``.
+    bool deps_before_launch{false};
 
     /// Emit the full task-dispatch sequence using the supplied codegen's emit surface.
     /// Consumes ``*this`` (rvalue-reference) — the plan is moved-from after emission.
@@ -2390,9 +2395,17 @@ class OrchestrationStmtCodegen : public CodegenBase {
       for (const auto& line : pre_lines) {
         cg.EmitIndentedLine(line);
       }
-      cg.EmitLaunchSpec(task_var, launch_core_num, launch_sync_start);
-      cg.EmitEarlyResolveHint(task_var, call);
-      cg.EmitManualDeps(call, task_var);
+      if (deps_before_launch) {
+        // Direct-call order: deps -> launch_spec -> early_resolve.
+        cg.EmitManualDeps(call, task_var);
+        cg.EmitLaunchSpec(task_var, launch_core_num, launch_sync_start);
+        cg.EmitEarlyResolveHint(task_var, call);
+      } else {
+        // Wrapper (Spmd/Group/Mixed) order: launch_spec -> early_resolve -> deps.
+        cg.EmitLaunchSpec(task_var, launch_core_num, launch_sync_start);
+        cg.EmitEarlyResolveHint(task_var, call);
+        cg.EmitManualDeps(call, task_var);
+      }
       cg.EmitTaskSubmitAndBind(submit_expr, capture_outputs);
     }
   };
@@ -2428,9 +2441,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
     std::string submit_expr =
         CoreTypeToSubmitPrefix(core_type) + std::to_string(func_id) + ", " + task_var + ")";
     auto [launch_core_num, launch_sync_start] = EffectiveLaunchSpec(call, callee_func);
-    return BuildTaskDispatchPlan("// Task " + std::to_string(task_counter_) + ": " + callee_name, call,
-                                 std::move(params), launch_core_num, launch_sync_start, submit_expr,
-                                 ShouldCaptureTaskOutputs(call, capture_plain_task_id), callee_func);
+    TaskDispatchPlan plan =
+        BuildTaskDispatchPlan("// Task " + std::to_string(task_counter_) + ": " + callee_name, call,
+                              std::move(params), launch_core_num, launch_sync_start, submit_expr,
+                              ShouldCaptureTaskOutputs(call, capture_plain_task_id), callee_func);
+    // Direct calls historically emit set_dependencies before the launch spec.
+    plan.deps_before_launch = true;
+    return plan;
   }
 
   TaskDispatchPlan BuildSpmdCallDispatchPlan(const CallPtr& call, const FunctionPtr& spmd_func,
