@@ -155,9 +155,9 @@ class TraceInvocation:
 
     @property
     def effective_us(self) -> float:
-        """L2 **Effective** window (µs): the orch∪sched merged on-device window.
+        """L2 **Effective** window (µs): the orch/sched merged on-device window.
 
-        ``max(orch_end, sched_end) − min(orch_start, sched_start)`` over this
+        ``max(orch_end, sched_end) - min(orch_start, sched_start)`` over this
         dispatch's device-domain ``orch`` / ``sched`` spans — the runtime's
         "Effective" metric (the old device-log "Total") for this single L2 run.
         Both spans share this invocation's device-clock origin, so the union is
@@ -290,6 +290,7 @@ def _span_names() -> dict[str, str]:
     except (ImportError, AttributeError, TypeError, KeyError):
         return dict(_LEGACY_SPAN_NAMES)
 
+
 # Runtime log level that makes the ``LOG_INFO_V9`` ``[STRACE]`` markers visible.
 _STRACE_LOG_LEVEL = "v9"
 
@@ -387,10 +388,10 @@ class BenchmarkStats:
 
         - ``"device"`` / ``"host"`` — the stored headline (L3: max across ranks).
         - ``"effective"`` — L3: per-round max across ranks of each rank's summed
-          Effective (orch∪sched) window; L2 / fallback: each dispatch's
+          Effective (orch/sched) window; L2 / fallback: each dispatch's
           :attr:`TraceInvocation.effective_us` in order.
         - ``"union"`` — L3 only: per-round cross-rank **host-timeline** union
-          window ``max(host-span end) − min(host-span start)`` across all
+          window ``max(host-span end) - min(host-span start)`` across all
           ranks' dispatches (host clocks are ``CLOCK_MONOTONIC``, cross-process
           comparable, so this captures overlap / start skew — but includes host
           dispatch overhead). ``[]`` for L2 and the flatten fallback.
@@ -707,6 +708,20 @@ def _parse_l3_stats(invocations: Any, stats: BenchmarkStats, *, rounds: int, war
         by_pid[inv.pid].append(inv)
     for invs in by_pid.values():
         invs.sort(key=lambda i: i.inv)
+
+    # Keep only chip-child ranks. A real rank emits a ``device_wall`` span; the
+    # L3 host-orch parent process emits its own ``run_prepared`` root without any
+    # chip ``device_wall``, so its pid must not be grouped as a rank — otherwise
+    # it adds a fake zero-device rank that corrupts ``per_rank`` / rank counts and
+    # pollutes the ``host_wall`` / ``union`` windows with the parent orch span.
+    device_name = _span_names()["device"]
+    by_pid = {
+        pid: invs
+        for pid, invs in by_pid.items()
+        if any(inv.by_name().get(device_name) is not None for inv in invs)
+    }
+    if not by_pid:
+        return stats
 
     segmentable = launches > 0 and all(invs and len(invs) % launches == 0 for invs in by_pid.values())
 

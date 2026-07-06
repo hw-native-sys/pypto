@@ -364,7 +364,7 @@ def test_parse_l3_rounds_dispatches_round_rank_dispatch_view(span_root):
 
 
 def test_parse_l3_per_rank_effective_time(span_root):
-    """Per-card L2 Effective = orch∪sched window; exposed per dispatch and per rank."""
+    """Per-card L2 Effective = orch union sched window; exposed per dispatch and per rank."""
     DEV = f"{span_root}.runner_run.device_wall"
 
     def dispatch(inv, pid, *, orch, sched):

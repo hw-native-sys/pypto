@@ -198,7 +198,7 @@ def test_benchmark_l3_surfaces_per_rank_timing(test_config, device_ids):
     assert not stats.all_zero_device, "device_wall_us must be > 0 on the default SIMPLER_PROFILING build"
     assert stats.device_us_min > 0.0
 
-    # Per-card L2 Effective (orch∪sched window): one series per rank, > 0, and
+    # Per-card L2 Effective (orch union sched window): one series per rank, > 0, and
     # bounded by that rank's device wall (Effective ⊆ device_wall).
     assert set(rank_eff) == set(rank_dev)
     for pid, eff in rank_eff.items():
