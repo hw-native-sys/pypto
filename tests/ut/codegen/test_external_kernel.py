@@ -23,10 +23,7 @@ import pypto.language as pl
 import pytest
 from pypto.ir.compile import compile as ir_compile
 
-_KERNEL_SRC = (
-    "#include <cstdint>\n"
-    'extern "C" void kernel_entry(int64_t* args) { (void)args; }\n'
-)
+_KERNEL_SRC = '#include <cstdint>\nextern "C" void kernel_entry(int64_t* args) { (void)args; }\n'
 
 
 def _write_kernel(tmp_path: Path) -> Path:

@@ -47,8 +47,7 @@ class SpmdWriteExternProgram:
         self,
         out: pl.InOut[pl.Tensor[[_TOTAL], pl.FP32]],
         base_cl: pl.Scalar[pl.INDEX],
-    ) -> pl.Tensor[[_TOTAL], pl.FP32]:
-        ...  # implementation lives in kernels/aiv/spmd_write.cpp
+    ) -> pl.Tensor[[_TOTAL], pl.FP32]: ...  # implementation lives in kernels/aiv/spmd_write.cpp
 
     @pl.function(type=pl.FunctionType.Orchestration)
     def main(self, out: pl.Out[pl.Tensor[[_TOTAL], pl.FP32]]) -> pl.Tensor[[_TOTAL], pl.FP32]:

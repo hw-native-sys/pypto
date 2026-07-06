@@ -92,11 +92,7 @@ def _is_empty_body(body: list[ast.stmt]) -> bool:
     only = non_doc[0]
     if isinstance(only, ast.Pass):
         return True
-    return (
-        isinstance(only, ast.Expr)
-        and isinstance(only.value, ast.Constant)
-        and only.value.value is ...
-    )
+    return isinstance(only, ast.Expr) and isinstance(only.value, ast.Constant) and only.value.value is ...
 
 
 def _is_pld_call(node: object, attr_name: str) -> TypeGuard[ast.Call]:

@@ -21,12 +21,11 @@ from pathlib import Path
 import pypto.language as pl
 import pytest
 import torch
+from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.jit.specializer import Specializer
+from pypto.pypto_core import ir
 
-_KERNEL_SRC = (
-    "#include <cstdint>\n"
-    'extern "C" void kernel_entry(int64_t* args) { (void)args; }\n'
-)
+_KERNEL_SRC = '#include <cstdint>\nextern "C" void kernel_entry(int64_t* args) { (void)args; }\n'
 
 
 def _write_kernel(tmp_path: Path, name: str = "ext.cpp") -> Path:
@@ -71,9 +70,8 @@ def test_mixed_extern_expands_to_group(tmp_path):
     assert "self.pa(a, out)" in src
 
     # The generated program parses and survives the full pass pipeline.
-    from pypto.ir.pass_manager import OptimizationStrategy, PassManager
-
     program = pl.parse(src)
+    assert isinstance(program, ir.Program)
     after = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
     names = {f.name for f in after.functions.values()}
     assert {"entry", "pa", "pa_aic", "pa_aiv"} <= names

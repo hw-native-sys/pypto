@@ -95,7 +95,7 @@ Python stub 未变，kernel 变更也会触发重新编译。
   仅豁免 `ReturnParamsExplicit` 属性 —— 该属性要求存在 `ReturnStmt`，而函数头本就没有。
 - **Orchestration 代码生成**：为该 kernel 分配 `func_id`，并像 DSL kernel 一样生成派发
   —— 单核 AIC/AIV 的 `rt_submit_*_task`，或 group 的 `MixedKernels{aic_id, aiv_id, ...}`
-  + `rt_submit_task`。
+  - `rt_submit_task`。
 - **Backend**：对外部 kernel 跳过 ptoas，并把其 `.cpp` 复制到
   `kernels/<aic|aiv>/<name>.cpp`，因此生成的 `kernel_config.py` manifest 会像列出生成
   kernel 一样列出它（`func_id`、`source`、`core_type`、`signature`、`arg_index`）。

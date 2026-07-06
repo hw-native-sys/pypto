@@ -1679,14 +1679,19 @@ class Specializer:
                 "    ...",
             ]
 
+        # The @pl.jit.extern decorator guarantees the source(s) for the selected
+        # core_type are set; assert to narrow str | None -> str for the type checker.
         core = ctx.external_core_type
         if core == "aic":
+            assert ctx.external_aic_source is not None
             return _member(name, "AIC", ctx.external_aic_source)
         if core == "aiv":
+            assert ctx.external_aiv_source is not None
             return _member(name, "AIV", ctx.external_aiv_source)
 
         # Mixed: two members + a Group wrapper named after the extern so the
         # entry's ``self.<name>(...)`` call resolves to the group.
+        assert ctx.external_aic_source is not None and ctx.external_aiv_source is not None
         lines = _member(f"{name}_aic", "AIC", ctx.external_aic_source)
         lines += _member(f"{name}_aiv", "AIV", ctx.external_aiv_source)
         lines.append("@pl.function(type=pl.FunctionType.Group)")
@@ -1825,7 +1830,7 @@ def specialize(class_name: str, contexts: list[SpecializeContext]) -> str:
     return Specializer(class_name, contexts).specialize()
 
 
-def build_specialize_context(
+def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each arg maps to a SpecializeContext field
     func: Any,
     func_name: str,
     func_type: str | None,
