@@ -290,18 +290,22 @@ Who assigns the physical `addr` is selected by the `memory_planner` option
 
 | Mode | Pipeline | `pto.alloc_tile` | ptoas |
 | ---- | -------- | ---------------- | ----- |
-| `PYPTO` (default) | runs `MemoryReuse` + `AllocateMemoryAddr` | emits `addr = <const>` (from `MemRef.byte_offset_`) | `--pto-level=level3` (trusts baked addresses) |
-| `PTOAS` | **skips** `MemoryReuse` + `AllocateMemoryAddr` | omits `addr` (`PTOCodegen.generate(emit_tile_addr=False)`) | `--pto-level=level2` (ptoas `PlanMemory` allocates) |
+| `PYPTO` (default) | runs `MaterializeSemanticAliases` + `MemoryReuse` + `AllocateMemoryAddr` | emits `addr = <const>` (from `MemRef.byte_offset_`) | `--pto-level=level3` (trusts baked addresses) |
+| `PTOAS` | runs `MaterializeSemanticAliases`; **skips** `MemoryReuse` + `AllocateMemoryAddr` | omits `addr` (`PTOCodegen.generate(emit_tile_addr=False)`) | `--pto-level=level2` (ptoas `PlanMemory` does reuse + addresses) |
 
-`InitMemRef` runs in both modes — it creates the MemRefs / alloc ops that ptoas
-`PlanMemory` plans over. In `PTOAS` mode codegen omits `addr` because ptoas
-`level2` rejects any `addr` operand, and the buffer-aliasing structure is
-preserved through shared alloc SSA identity (not through addresses).
+Memory planning is split into two passes: **`MaterializeSemanticAliases`**
+forces *semantics-required* aliasing (loop-carried accumulators, in-place ops)
+to share one MemRef, while **`MemoryReuse`** does *opportunistic* lifetime-based
+coalescing of independent buffers. `InitMemRef` + `MaterializeSemanticAliases`
+run in both modes, so the must-alias buffers survive; in `PTOAS` mode codegen
+renders those shared MemRefs as a single `tile_buf` handle with an in-place
+`outs(%acc)`, and ptoas `PlanMemory` (which `level2` requires, rejecting any
+`addr` operand) does the lifetime reuse and address assignment.
 
-> **Caveat:** `PTOAS` mode also skips the Ascend910B `load + tpop_from_aic`
-> in-place hazard legalisation and reserve-buffer base resolution normally done
-> by `MemoryReuse` / `AllocateMemoryAddr`; those are deferred to ptoas. `compile()`
-> emits a warning — verify affected kernels on-device.
+> **Caveat:** `PTOAS` mode skips the Ascend910B `load + tpop_from_aic` in-place
+> hazard guard (part of `MemoryReuse`) and reserve-buffer base resolution
+> (`AllocateMemoryAddr`); those are deferred to ptoas. `compile()` emits a
+> warning — verify affected kernels on-device.
 
 ### Load Operation Transformation
 

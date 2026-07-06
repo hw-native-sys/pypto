@@ -282,16 +282,19 @@ print(pto_code)
 
 | 模式 | 流水线 | `pto.alloc_tile` | ptoas |
 | ---- | ------ | ---------------- | ----- |
-| `PYPTO`（默认） | 运行 `MemoryReuse` + `AllocateMemoryAddr` | 发射 `addr = <const>`（来自 `MemRef.byte_offset_`） | `--pto-level=level3`（信任已烘焙地址） |
-| `PTOAS` | **跳过** `MemoryReuse` + `AllocateMemoryAddr` | 省略 `addr`（`PTOCodegen.generate(emit_tile_addr=False)`） | `--pto-level=level2`（ptoas `PlanMemory` 分配） |
+| `PYPTO`（默认） | 运行 `MaterializeSemanticAliases` + `MemoryReuse` + `AllocateMemoryAddr` | 发射 `addr = <const>`（来自 `MemRef.byte_offset_`） | `--pto-level=level3`（信任已烘焙地址） |
+| `PTOAS` | 运行 `MaterializeSemanticAliases`；**跳过** `MemoryReuse` + `AllocateMemoryAddr` | 省略 `addr`（`PTOCodegen.generate(emit_tile_addr=False)`） | `--pto-level=level2`（ptoas `PlanMemory` 做复用 + 定址） |
 
-两种模式都运行 `InitMemRef` —— 它创建 ptoas `PlanMemory` 据以规划的 MemRef /
-alloc 操作。`PTOAS` 模式下 codegen 省略 `addr`，因为 ptoas `level2` 拒绝任何
-`addr` 操作数；缓冲区别名结构通过共享的 alloc SSA 身份保留（而非地址）。
+内存规划拆成两个 pass：**`MaterializeSemanticAliases`** 把**语义强制**的别名
+（循环累加器、原地算子）归一到同一 MemRef；**`MemoryReuse`** 只做**机会性**的、
+基于生命周期的独立 buffer 合并。`InitMemRef` + `MaterializeSemanticAliases`
+两种模式都跑,所以强制别名得以保留;`PTOAS` 模式下 codegen 把这些共享 MemRef
+渲染成单个 `tile_buf` handle、原地 `outs(%acc)`,由 ptoas `PlanMemory`
+(level2 强制要求、拒绝任何 `addr` 操作数)完成生命周期复用与地址分配。
 
-> **注意：** `PTOAS` 模式同时跳过了 `MemoryReuse` / `AllocateMemoryAddr` 通常完成的
-> Ascend910B `load + tpop_from_aic` 原地写冒险合法化与 reserve-buffer 基址解析，
-> 这些交由 ptoas 处理。`compile()` 会输出告警 —— 相关 kernel 请上机验证。
+> **注意：** `PTOAS` 模式跳过了 `MemoryReuse` 里的 Ascend910B `load + tpop_from_aic`
+> 原地写冒险守卫,以及 `AllocateMemoryAddr` 的 reserve-buffer 基址解析,这些交由
+> ptoas 处理。`compile()` 会输出告警 —— 相关 kernel 请上机验证。
 
 ### 加载操作转换
 

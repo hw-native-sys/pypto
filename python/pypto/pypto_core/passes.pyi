@@ -327,6 +327,9 @@ class PassPipeline:
 def init_mem_ref() -> Pass:
     """Create an init memref pass."""
 
+def materialize_semantic_aliases() -> Pass:
+    """Create the semantic must-alias materialization pass (loop-carry / in-place)."""
+
 def memory_reuse() -> Pass:
     """Create a memory reuse pass."""
 

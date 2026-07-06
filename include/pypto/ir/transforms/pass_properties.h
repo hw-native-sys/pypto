@@ -241,6 +241,14 @@ inline const PassProperties kInitMemRefProperties{
     .produced = {IRProperty::HasMemRefs, IRProperty::NormalizedStmtStructure},
     .invalidated = {IRProperty::SSAForm}};
 
+// Semantic must-alias materialization (Step 0 formerly inside MemoryReuse).
+// Same requirements as MemoryReuse; retargets MemRefs in place without adding or
+// removing structural IR properties.
+inline const PassProperties kMaterializeSemanticAliasesProperties{
+    .required = {IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps, IRProperty::HasMemRefs,
+                 IRProperty::TileOps2D, IRProperty::NormalizedStmtStructure},
+    .produced = {IRProperty::NormalizedStmtStructure}};
+
 inline const PassProperties kMemoryReuseProperties{
     .required = {IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps, IRProperty::HasMemRefs,
                  IRProperty::TileOps2D, IRProperty::NormalizedStmtStructure},

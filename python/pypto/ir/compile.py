@@ -101,9 +101,13 @@ def compile(  # noqa: PLR0913
         memory_planner: Who plans on-chip buffer memory. ``None`` uses the
             default (``MemoryPlanner.PYPTO`` — PyPTO's AllocateMemoryAddr bakes
             physical addresses and ptoas runs at ``--pto-level=level3``).
-            ``MemoryPlanner.PTOAS`` skips the PyPTO allocation passes
-            (MemoryReuse + AllocateMemoryAddr), emits no ``pto.alloc_tile addr``,
-            and lets the ptoas PlanMemory pass allocate at ``--pto-level=level2``.
+            ``MemoryPlanner.PTOAS`` skips the opportunistic lifetime reuse
+            (MemoryReuse) and address assignment (AllocateMemoryAddr), emits no
+            ``pto.alloc_tile addr``, and lets the ptoas PlanMemory pass do both at
+            ``--pto-level=level2``. MaterializeSemanticAliases still runs, so
+            semantics-required aliasing (loop-carried accumulators, in-place ops)
+            is preserved as a shared ``tile_buf`` handle that ptoas keeps as one
+            buffer.
         profiling: If True, enable compile profiling that records per-stage
             wall-clock timings.  Results are written to ``output_dir/report/``.
         platform: Target execution platform.  One of ``"a2a3sim"``,
@@ -210,9 +214,11 @@ def compile(  # noqa: PLR0913
     if mplan == _passes.MemoryPlanner.PTOAS:
         logger.warning(
             "memory_planner=PTOAS: skipping PyPTO MemoryReuse + AllocateMemoryAddr; ptoas "
-            "PlanMemory (--pto-level=level2) owns on-chip allocation. The Ascend910B "
-            "load + tpop_from_aic in-place hazard legalisation (normally done by MemoryReuse) "
-            "and reserve-buffer base resolution are deferred to ptoas — verify on-device."
+            "PlanMemory (--pto-level=level2) owns lifetime reuse and address assignment. "
+            "MaterializeSemanticAliases still runs so semantics-required aliasing (loop-carried "
+            "accumulators, in-place ops) is preserved as a shared tile_buf handle. The "
+            "Ascend910B load + tpop_from_aic in-place hazard guard and reserve-buffer base "
+            "resolution are deferred to ptoas — verify on-device."
         )
 
     def _stage(name: str) -> AbstractContextManager[Any]:

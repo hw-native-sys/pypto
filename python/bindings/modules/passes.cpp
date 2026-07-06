@@ -315,6 +315,12 @@ void BindPass(nb::module_& m) {
              "Initializes MemRef for all variables in functions.\n"
              "Sets memory space to UB by default, or DDR for tile.load/tile.store operands.");
 
+  passes.def("materialize_semantic_aliases", &pass::MaterializeSemanticAliases,
+             "Create the semantic must-alias materialization pass\n\n"
+             "Propagates loop-carried iter_arg/initValue MemRefs down the yield/producer chain so\n"
+             "accumulator producers write directly into the carried buffer. Split out of MemoryReuse\n"
+             "so it can run without the opportunistic lifetime-reuse phase (memory_planner=PTOAS).");
+
   passes.def("memory_reuse", &pass::MemoryReuse,
              "Create a memory reuse pass\n\n"
              "Uses lifetime analysis over the full IR to identify memory reuse opportunities.\n"

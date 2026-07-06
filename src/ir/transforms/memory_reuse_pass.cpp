@@ -2256,6 +2256,35 @@ class StripPipelineMembershipMutator : public IRMutator {
  * Variables that can share memory will point to the same MemRef object.
  * After sharing, redundant alloc operations are removed.
  */
+// Semantic must-alias materialization — the "Step 0" formerly at the head of
+// MemoryReuse. Propagates each ForStmt iter_arg/initValue's canonical MemRef
+// down the yield/producer chain so accumulator producers (and other loop-carry
+// / in-place chains) write directly into the carried buffer. This is a
+// *semantics-required* aliasing (the loop accumulator must live in one buffer),
+// as opposed to the opportunistic lifetime coalescing in MemoryReuse.
+//
+// Split into its own pass so it can run without the (skippable) lifetime-reuse
+// phase: when ptoas owns lifetime reuse (memory_planner=PTOAS), this still runs
+// while MemoryReuse is skipped, so codegen can emit a shared tile_buf handle for
+// the must-alias buffers and ptoas PlanMemory does the reuse.
+FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
+  INTERNAL_CHECK(func) << "MaterializeSemanticAliases cannot run on null function";
+
+  // Orchestration functions submit tasks and never hold TileType variables.
+  if (func->func_type_ == FunctionType::Orchestration) return func;
+
+  StmtPtr new_body = func->body_;
+  TopDownRetargeter retargeter;
+  auto rewrites = retargeter.Compute(new_body);
+  if (rewrites.empty()) return func;
+  RetypeApplier applier(std::move(rewrites));
+  new_body = applier.VisitStmt(new_body);
+
+  return std::make_shared<const Function>(func->name_, func->params_, func->param_directions_,
+                                          func->return_types_, new_body, func->span_, func->func_type_,
+                                          func->level_, func->role_, func->attrs_);
+}
+
 FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   INTERNAL_CHECK(func) << "MemoryReusePass cannot run on null function";
 
@@ -2263,18 +2292,9 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   // so there is nothing for memory reuse to do — skip them silently.
   if (func->func_type_ == FunctionType::Orchestration) return func;
 
-  // Step 0: Top-down retarget — propagate iter_arg/initValue MemRefs down the
-  // yield chain so accumulator producers land directly in the canonical buffer.
-  // This eliminates most accumulator-related move insertions downstream.
+  // Step 0 (semantic must-alias retarget) now runs in the preceding
+  // MaterializeSemanticAliases pass, so the body here is already retargeted.
   StmtPtr new_body = func->body_;
-  {
-    TopDownRetargeter retargeter;
-    auto rewrites = retargeter.Compute(new_body);
-    if (!rewrites.empty()) {
-      RetypeApplier applier(std::move(rewrites));
-      new_body = applier.VisitStmt(new_body);
-    }
-  }
 
   // Step 1: Compute lifetimes by walking full IR tree
   auto analysis_result = ComputeLifetimes(new_body);
@@ -2342,6 +2362,10 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
 }  // namespace
 
 namespace pass {
+Pass MaterializeSemanticAliases() {
+  return CreateFunctionPass(TransformMaterializeSemanticAliases, "MaterializeSemanticAliases",
+                            kMaterializeSemanticAliasesProperties);
+}
 Pass MemoryReuse() { return CreateFunctionPass(TransformMemoryReuse, "MemoryReuse", kMemoryReuseProperties); }
 }  // namespace pass
 }  // namespace ir

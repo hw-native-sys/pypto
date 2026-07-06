@@ -51,7 +51,31 @@ class ElementwiseAdd:
         return out
 
 
-def _run_pipeline(memory_planner: passes.MemoryPlanner) -> tuple[ir.Program, list[str]]:
+@pl.program
+class LoopCarriedAdd:
+    """Loop-carried accumulator — the must-alias case: acc must stay one buffer."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[128, 64], pl.FP32],
+        n: pl.Scalar[pl.INDEX],
+        output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+    ) -> pl.Tensor[[64, 64], pl.FP32]:
+        acc: pl.Tile[[64, 64], pl.FP32] = pl.load(a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Vec)
+        for i, (acc_i,) in pl.range(n, init_values=(acc,)):
+            t: pl.Tile[[64, 64], pl.FP32] = pl.load(
+                a, [i * 64, 0], [64, 64], target_memory=pl.MemorySpace.Vec
+            )
+            acc_next: pl.Tile[[64, 64], pl.FP32] = pl.add(acc_i, t)
+            r = pl.yield_(acc_next)
+        out: pl.Tensor[[64, 64], pl.FP32] = pl.store(r, [0, 0], output)
+        return out
+
+
+def _run_pipeline(
+    memory_planner: passes.MemoryPlanner, program: ir.Program = ElementwiseAdd
+) -> tuple[ir.Program, list[str]]:
     """Run the Default pipeline under a PassContext with the given planner.
 
     Returns the optimized program and the concrete list of executed pass names.
@@ -60,7 +84,7 @@ def _run_pipeline(memory_planner: passes.MemoryPlanner) -> tuple[ir.Program, lis
     backend.set_backend_type(BackendType.Ascend910B)
     with passes.PassContext([], memory_planner=memory_planner):
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
-        optimized = pm.run_passes(ElementwiseAdd)
+        optimized = pm.run_passes(program)
     return optimized, list(pm.pass_names)
 
 
@@ -95,13 +119,16 @@ def test_pypto_pipeline_runs_allocation_passes():
     assert "MemoryReuse" in pass_names
     assert "AllocateMemoryAddr" in pass_names
     assert "InitMemRef" in pass_names
+    assert "MaterializeSemanticAliases" in pass_names
 
 
-def test_ptoas_pipeline_skips_allocation_passes():
+def test_ptoas_pipeline_skips_reuse_keeps_semantic_aliases():
     _, pass_names = _run_pipeline(passes.MemoryPlanner.PTOAS)
     # InitMemRef still runs (creates the MemRefs / alloc ops ptoas plans over).
     assert "InitMemRef" in pass_names
-    # The two PyPTO allocation passes are handed off to ptoas PlanMemory.
+    # Semantics-required aliasing is preserved; only opportunistic reuse + addr
+    # assignment are handed off to ptoas PlanMemory.
+    assert "MaterializeSemanticAliases" in pass_names
     assert "MemoryReuse" not in pass_names
     assert "AllocateMemoryAddr" not in pass_names
 
@@ -129,6 +156,44 @@ def test_ptoas_codegen_omits_alloc_tile_addr():
     assert all("addr =" not in line for line in alloc_lines), (
         f"PTOAS mode must not emit an addr operand (ptoas --pto-level=level2 rejects it):\n{mlir}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Loop-carried accumulator: must-alias must survive in PTOAS mode as an
+# in-place tadd on a single shared handle (no addr, MemoryReuse skipped).
+# ---------------------------------------------------------------------------
+
+
+def test_ptoas_loop_carry_is_in_place_single_handle():
+    optimized, _ = _run_pipeline(passes.MemoryPlanner.PTOAS, LoopCarriedAdd)
+    mlir = _codegen(optimized, emit_tile_addr=False)
+
+    tadd = next((ln for ln in mlir.splitlines() if "pto.tadd" in ln), None)
+    assert tadd is not None, f"expected a pto.tadd:\n{mlir}"
+    # The accumulator's out handle must be one of the in handles (in-place),
+    # i.e. MaterializeSemanticAliases retargeted acc_next onto acc's buffer even
+    # though MemoryReuse did not run.
+    ins = tadd.split("ins(")[1].split(")")[0]
+    out = tadd.split("outs(")[1].split(")")[0]
+    out_handle = out.split(":")[0].strip()
+    in_handles = [tok.strip() for tok in ins.split(":")[0].split(",")]
+    assert out_handle in in_handles, (
+        f"PTOAS loop-carry must be in-place (out handle {out_handle} should alias an input "
+        f"{in_handles}):\n{tadd}"
+    )
+
+    # The accumulator alloc appears once, not once per SSA name (acc == acc_next).
+    acc_allocs = [ln for ln in mlir.splitlines() if "pto.alloc_tile" in ln and out_handle in ln]
+    assert len(acc_allocs) == 1, f"accumulator buffer must have exactly one alloc_tile:\n{mlir}"
+
+
+def test_pypto_loop_carry_uses_shared_addr():
+    optimized, _ = _run_pipeline(passes.MemoryPlanner.PYPTO, LoopCarriedAdd)
+    mlir = _codegen(optimized, emit_tile_addr=True)
+    alloc_lines = [ln for ln in mlir.splitlines() if "pto.alloc_tile" in ln]
+    addrs = [ln.split("addr =")[1].split()[0] for ln in alloc_lines if "addr =" in ln]
+    # In level3 the loop-carry aliasing is carried by two allocs sharing an addr.
+    assert len(addrs) != len(set(addrs)), f"PYPTO mode must alias the accumulator via a shared addr:\n{mlir}"
 
 
 if __name__ == "__main__":

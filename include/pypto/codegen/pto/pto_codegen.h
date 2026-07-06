@@ -735,6 +735,16 @@ class PTOCodegen : public CodegenBase {
     std::map<const ir::Var*, std::string> memref_to_var_name;  ///< keyed by base_ Ptr
     std::vector<std::pair<ir::VarPtr, std::shared_ptr<const ir::TileType>>> tile_var_allocs;
     std::set<const ir::Var*> emitted_tile_alloc_vars;
+    /// PTOAS memory-planner mode only (no addr baked): full-MemRef-identity key
+    /// (base+offset+size) -> canonical tile_buf SSA. Variables that resolve to
+    /// the same buffer (e.g. a loop-carried accumulator coalesced by
+    /// MemoryReuse) share one handle so the op writes in place and ptoas
+    /// PlanMemory keeps them one buffer. Views (same base, different
+    /// offset/size) get distinct keys and are never merged.
+    std::map<std::string, std::string> memref_identity_to_mlir;
+    /// alloc_tile SSA handles already emitted — dedups the alloc when several
+    /// vars share one handle (PTOAS in-place aliasing).
+    std::set<std::string> emitted_tile_alloc_names;
 
     ir::FunctionPtr current_function;
     ir::VarPtr current_result_var;
@@ -793,6 +803,8 @@ class PTOCodegen : public CodegenBase {
       memref_to_var_name.clear();
       tile_var_allocs.clear();
       emitted_tile_alloc_vars.clear();
+      memref_identity_to_mlir.clear();
+      emitted_tile_alloc_names.clear();
 
       current_function.reset();
       current_result_var.reset();

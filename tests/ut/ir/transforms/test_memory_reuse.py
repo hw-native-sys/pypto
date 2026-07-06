@@ -24,8 +24,14 @@ from pypto.ir.op import tile
 
 
 def _run_pipeline(program: ir.Program) -> ir.Program:
-    """Run init_mem_ref + memory_reuse pipeline, return resulting Program."""
-    return passes.memory_reuse()(passes.init_mem_ref()(program))
+    """Run init_mem_ref + materialize_semantic_aliases + memory_reuse pipeline.
+
+    The loop-carry / in-place must-alias retarget (formerly MemoryReuse "Step 0")
+    lives in materialize_semantic_aliases, which runs between init_mem_ref and
+    memory_reuse in the real pipeline — compose all three here so these unit
+    tests exercise the same combined transformation.
+    """
+    return passes.memory_reuse()(passes.materialize_semantic_aliases()(passes.init_mem_ref()(program)))
 
 
 class TestBasic:

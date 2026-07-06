@@ -168,9 +168,14 @@ class PassManager:
             # TensorView with packed canonical strides (RFC #1300 §2.4).
             ("MaterializeTensorStrides", lambda: passes.materialize_tensor_strides()),
             ("InitMemRef", lambda: passes.init_mem_ref()),
-            # MemoryReuse coalesces tile buffers; on Ascend910B split-AIV it also
-            # avoids the load + tpop_from_aic in-place hazard so a separate
-            # legalisation pass is no longer needed.
+            # MaterializeSemanticAliases forces loop-carried / in-place buffers to
+            # share one MemRef (semantics-required aliasing). It always runs; only
+            # the opportunistic lifetime coalescing (MemoryReuse) is skippable when
+            # ptoas owns reuse (memory_planner=PTOAS).
+            ("MaterializeSemanticAliases", lambda: passes.materialize_semantic_aliases()),
+            # MemoryReuse coalesces independent tile buffers by lifetime; on
+            # Ascend910B split-AIV it also avoids the load + tpop_from_aic in-place
+            # hazard so a separate legalisation pass is no longer needed.
             ("MemoryReuse", lambda: passes.memory_reuse()),
             ("AllocateMemoryAddr", lambda: passes.allocate_memory_addr()),
             ("FoldNoOpReshape", lambda: passes.fold_no_op_reshape()),
@@ -250,10 +255,14 @@ class PassManager:
         self.pass_names: list[str] = []
 
         # When the active PassContext selects ptoas as the memory planner, skip
-        # the PyPTO on-chip allocation passes so ptoas PlanMemory owns allocation
-        # (codegen then emits no `pto.alloc_tile addr` and ptoas runs at
-        # --pto-level=level2). Read here because __init__ runs inside the
-        # compile() PassContext (see compile.py).
+        # the opportunistic lifetime reuse (MemoryReuse) and address assignment
+        # (AllocateMemoryAddr) so ptoas PlanMemory owns them (codegen emits no
+        # `pto.alloc_tile addr` and ptoas runs at --pto-level=level2).
+        # MaterializeSemanticAliases still runs, so semantics-required aliasing
+        # (loop-carried accumulators, in-place ops) is preserved as a shared
+        # MemRef that codegen renders as one tile_buf handle — ptoas cannot
+        # recover that from independent addr-less allocs. Read here because
+        # __init__ runs inside the compile() PassContext (see compile.py).
         ctx = passes.PassContext.current()
         skip_mem_planning = ctx is not None and ctx.get_memory_planner() == passes.MemoryPlanner.PTOAS
         _mem_planning_passes = ("MemoryReuse", "AllocateMemoryAddr")

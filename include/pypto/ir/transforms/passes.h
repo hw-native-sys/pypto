@@ -147,6 +147,18 @@ Pass CreateProgramPass(std::function<ProgramPtr(const ProgramPtr&)> transform, c
 Pass InitMemRef();
 
 /**
+ * @brief Create the semantic must-alias materialization pass
+ *
+ * Propagates each loop-carried iter_arg/initValue MemRef down the yield/producer
+ * chain so accumulator producers (and other loop-carry chains) write directly
+ * into the carried buffer. This is a semantics-required aliasing (the loop
+ * accumulator must live in one buffer), split out of MemoryReuse so it can run
+ * without the opportunistic lifetime-reuse phase (e.g. when ptoas owns reuse via
+ * memory_planner=PTOAS). Runs after InitMemRef, before MemoryReuse.
+ */
+Pass MaterializeSemanticAliases();
+
+/**
  * @brief Create a memory reuse pass
  *
  * Uses dependency analysis to identify memory reuse opportunities.
