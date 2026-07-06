@@ -24,6 +24,7 @@ import pytest
 import torch
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
+from pypto.pypto_core.passes import MemoryPlanner
 from pypto.runtime.runner import RunConfig
 from pypto.runtime.tensor_spec import ScalarSpec
 
@@ -194,6 +195,7 @@ class PTOTestCase(ABC):
         platform: str | None = None,
         backend_type: BackendType | None = None,
         strategy: OptimizationStrategy | None = None,
+        memory_planner: MemoryPlanner | None = None,
     ):
         """Initialize test case.
 
@@ -210,11 +212,15 @@ class PTOTestCase(ABC):
                 value derived from ``platform`` wins.
             strategy: Override the optimization strategy.  If None, falls
                 back to the class-level ``get_strategy()`` default (Default).
+            memory_planner: Override the on-chip memory planner (PYPTO/PTOAS).
+                If None, falls back to ``get_memory_planner()`` (which returns
+                None, deferring to ir.compile's PYPTO default).
         """
         self.config = config or RunConfig()
         self._override_platform = platform
         self._override_backend = backend_type
         self._override_strategy = strategy
+        self._override_memory_planner = memory_planner
         self._tensor_specs: list[TensorSpec] | None = None
         self._scalar_specs: list[ScalarSpec] | None = None
 
@@ -255,6 +261,17 @@ class PTOTestCase(ABC):
         if self._override_strategy is not None:
             return self._override_strategy
         return OptimizationStrategy.Default
+
+    def get_memory_planner(self) -> MemoryPlanner | None:
+        """Return the on-chip memory planner for compilation.
+
+        If *memory_planner* was passed to the constructor, that value takes
+        precedence. Otherwise returns None, deferring to ir.compile's default
+        (``MemoryPlanner.PYPTO``). Subclasses may override this method to opt a
+        test case into ``MemoryPlanner.PTOAS`` (ptoas owns lifetime reuse +
+        address assignment at ``--pto-level=level2``).
+        """
+        return self._override_memory_planner
 
     def get_platform(self) -> str | None:
         """Return the target platform string ("a2a3"/"a5"/"a2a3sim"/"a5sim").

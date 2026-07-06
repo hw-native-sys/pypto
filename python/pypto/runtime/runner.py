@@ -42,7 +42,7 @@ import torch
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 from pypto.pypto_core import backend as _backend_core
-from pypto.pypto_core.passes import DiagnosticCheckSet, DiagnosticPhase
+from pypto.pypto_core.passes import DiagnosticCheckSet, DiagnosticPhase, MemoryPlanner
 
 from .device_tensor import DeviceTensor
 
@@ -396,6 +396,7 @@ def compile_program(
     disabled_diagnostics: DiagnosticCheckSet | None = None,
     profiling: bool = False,
     analyze_auto_scopes_for_deps: bool = False,
+    memory_planner: MemoryPlanner | None = None,
 ) -> None:
     """Compile *program* to *work_dir* and patch orchestration headers.
 
@@ -426,6 +427,7 @@ def compile_program(
         disabled_diagnostics=disabled_diagnostics,
         profiling=profiling,
         analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
+        memory_planner=memory_planner,
     )
     _patch_orchestration_headers(work_dir)
 
