@@ -2629,7 +2629,11 @@ class TestTopDownRetargeter:
         # BASIC verification: the coalescing fix makes the peeled IR round-trip
         # clean, so this exercises the legality check, not just the buffer count.
         with passes.PassContext([], passes.VerificationLevel.BASIC):
-            After = passes.memory_reuse()(passes.init_mem_ref()(passes.lower_pipeline_loops()(Before)))
+            After = passes.memory_reuse()(
+                passes.materialize_semantic_aliases()(
+                    passes.init_mem_ref()(passes.lower_pipeline_loops()(Before))
+                )
+            )
         # The whole accumulator chain must coalesce onto ONE Acc allocation. A
         # phantom acc->acc tile.move (failed coalescing) leaves a 2nd Acc base.
         acc_bases = {b for b in _collect_tile_memref_bases(After).values() if "acc" in b}
