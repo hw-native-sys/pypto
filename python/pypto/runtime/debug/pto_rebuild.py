@@ -69,6 +69,13 @@ def _disabled_via_env() -> bool:
     )
 
 
+# Matches a `pto.alloc_tile` line that carries a physical `addr =` operand.
+# Scoped to alloc_tile lines specifically so an unrelated `addr =` elsewhere in
+# the `.pto` cannot flip the inferred level (only pto.alloc_tile addr selects
+# PyPTO-owned allocation / level3).
+_ALLOC_TILE_ADDR_RE = re.compile(r"^\s*%\S+\s*=\s*pto\.alloc_tile\b.*\baddr\s*=", re.MULTILINE)
+
+
 def _ptoas_flags(pto_content: str) -> list[str]:
     """Base ptoas flags shared with ``pto_backend._get_ptoas_flags``.
 
@@ -83,7 +90,7 @@ def _ptoas_flags(pto_content: str) -> list[str]:
     scope. Edits that rely on backend-specific flags require a fresh
     ``ir.compile()`` instead of a ``.pto`` splice.
     """
-    level = "level3" if "addr =" in pto_content else "level2"
+    level = "level3" if _ALLOC_TILE_ADDR_RE.search(pto_content) else "level2"
     return ["--enable-insert-sync", f"--pto-level={level}"]
 
 
