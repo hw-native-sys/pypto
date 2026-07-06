@@ -1091,20 +1091,41 @@ class DistributedWorker(Worker):
         # Worker ABC hook: device-memory ops are valid until close().
         self._require_open(op)
 
-    def _prepare_init(self, init: torch.Tensor) -> torch.Tensor:
-        # Worker ABC hook: the upload (``copy_to``) runs **inside the
-        # forked chip worker**, so ``init`` must be a CPU, contiguous,
-        # shared-memory tensor allocated **before**
-        # :meth:`DistributedCompiledProgram.prepare` (call ``.share_memory_()``).
-        # Unlike L2 we cannot make a defensive ``.cpu().contiguous()`` copy: that
-        # copy would live only in the parent and be invisible to the child.
-        if not (init.is_shared() and init.is_contiguous() and init.device.type == "cpu"):
+    @staticmethod
+    def _require_forked_host_buffer(tensor: torch.Tensor, api: str, access: str) -> None:
+        """Validate *tensor* is a host buffer the forked chip worker can ``access``.
+
+        Every H2D/D2H copy runs **inside the forked chip worker**, which can only
+        touch host memory it inherited at fork. So *tensor* must be a CPU,
+        contiguous, **shared-memory** tensor allocated **before**
+        :meth:`DistributedCompiledProgram.prepare` (call ``.share_memory_()``); a
+        buffer allocated after ``prepare()`` — or a non-shared one — is invisible
+        to the child.
+
+        Args:
+            tensor: The host buffer to validate.
+            api: The calling API signature, woven into the error message
+                (e.g. ``"copy_stacked_from(host=...)"``).
+            access: The child's access verb — ``"read"`` for uploads, ``"write"``
+                for read-backs.
+
+        Raises:
+            ValueError: If *tensor* is not CPU, contiguous, and shared-memory.
+        """
+        if not (tensor.is_shared() and tensor.is_contiguous() and tensor.device.type == "cpu"):
             raise ValueError(
-                "DistributedWorker.alloc_tensor(init=...) requires a CPU, contiguous, "
-                "shared-memory tensor allocated BEFORE prepare() (call .share_memory_()). "
-                "The upload runs in the forked chip worker, which can only read host "
-                "memory it inherited at fork."
+                f"{api} requires a CPU, contiguous, shared-memory tensor allocated "
+                f"BEFORE prepare() (call .share_memory_()). The copy runs in the forked "
+                f"chip worker, which can only {access} host memory it inherited at fork."
             )
+
+    def _prepare_init(self, init: torch.Tensor) -> torch.Tensor:
+        # Worker ABC hook: the upload (``copy_to``) runs **inside the forked chip
+        # worker**, so ``init`` must be a CPU, contiguous, shared-memory tensor
+        # allocated **before** prepare() (see _require_forked_host_buffer). Unlike
+        # L2 we cannot make a defensive ``.cpu().contiguous()`` copy: that copy
+        # would live only in the parent and be invisible to the child.
+        self._require_forked_host_buffer(init, "DistributedWorker.alloc_tensor(init=...)", "read")
         return init
 
     def alloc_stacked_tensor(
@@ -1193,6 +1214,47 @@ class DistributedWorker(Worker):
         """Release every shard of *stacked* against its owning worker. Idempotent."""
         for shard, w in zip(stacked.shards, stacked.worker_ids, strict=True):
             self.free_tensor(shard, worker_id=w)
+
+    def copy_stacked_from(self, stacked: StackedDeviceTensor, host: torch.Tensor) -> None:
+        """Read every shard of *stacked* back to *host* (D2H) — the read-back
+        symmetric to :meth:`alloc_stacked_tensor`.
+
+        Because a :class:`~pypto.runtime.StackedDeviceTensor` skips the
+        per-dispatch D2H copy, callers that want the shards' current device
+        contents (e.g. a resident KV cache at the end of an L3 step) must read
+        them back explicitly. Shard ``i`` is copied from its owning worker
+        ``stacked.worker_ids[i]`` into ``host[i]``.
+
+        Args:
+            stacked: The resident stacked tensor to read back.
+            host: A CPU, contiguous, **shared-memory** ``[B, *tail]`` tensor
+                allocated BEFORE :meth:`~DistributedCompiledProgram.prepare`
+                (call ``.share_memory_()``), whose shape and dtype match
+                ``stacked.full_shape`` / ``stacked.dtype``. Filled in place
+                (``host[i]`` receives shard ``i``). The D2H copy runs in the
+                forked chip worker, which can only write to host memory it
+                inherited at fork — a buffer allocated after ``prepare()`` (or a
+                non-shared one) would leave *host* untouched.
+        """
+        self._require_open("copy_stacked_from")
+        if not isinstance(stacked, StackedDeviceTensor):
+            raise TypeError(
+                f"copy_stacked_from(stacked=...) expects a StackedDeviceTensor, got {type(stacked).__name__}"
+            )
+        if not isinstance(host, torch.Tensor):
+            raise TypeError(f"copy_stacked_from(host=...) expects a torch.Tensor, got {type(host).__name__}")
+        if tuple(host.shape) != stacked.full_shape:
+            raise ValueError(
+                f"host shape {tuple(host.shape)} does not match stacked full_shape {stacked.full_shape}"
+            )
+        if host.dtype != stacked.dtype:
+            raise ValueError(f"host dtype {host.dtype} does not match stacked dtype {stacked.dtype}")
+        self._require_forked_host_buffer(host, "copy_stacked_from(host=...)", "write")
+        for i, (shard, w) in enumerate(zip(stacked.shards, stacked.worker_ids, strict=True)):
+            # host is contiguous + shared, so host[i] is a contiguous view at the
+            # right offset into the same shm segment the child inherited at fork;
+            # host[i].data_ptr() is therefore the correct cross-process D2H dst.
+            self.copy_from(host[i].data_ptr(), shard.data_ptr, shard.nbytes, worker_id=w)
 
     # ------------------------------------------------------------------
     # Dispatch

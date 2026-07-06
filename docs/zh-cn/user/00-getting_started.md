@@ -411,6 +411,14 @@ with compiled.prepare() as rt:
 `x[r]` 取下标会跳过 H2D 上传(`child_memory`)。分片在 `close()` 时自动释放,也可提前用
 `free_stacked_tensor` 释放。
 
+和单个 `DeviceTensor` 一样,`StackedDeviceTensor` 也不会被自动拷回。若要一次把每个分片
+当前的设备内容读回主机——例如某一步结束时读回常驻的 KV cache——可用
+`rt.copy_stacked_from(w, host_out)`,即 `alloc_stacked_tensor` 的对称读回接口。`host_out`
+原地填充(`host_out[i]` 接收第 `i` 片);与上传源一样,它必须是形状和 dtype 与该 stack
+匹配、且在 `prepare()` **之前**分配的 CPU、连续、**共享内存** `[B, *tail]` 张量
+(调用 `.share_memory_()`):D2H 拷贝在 fork 出的 chip worker 中执行,只能写它在 fork
+时继承的主机内存。
+
 首维就是分片维,`B` 必须等于程序分发到的卡数。默认第 `i` 片落在第 `i` 个 worker 上
 (对应 `device=r`)。如果程序用的是**非恒等**放置——置换或子集卡(如 `device=2*r`,或字面量
 `device=1` / `device=0`)——就要传匹配的 `worker_ids`,其中 `worker_ids[i]` 是程序提交

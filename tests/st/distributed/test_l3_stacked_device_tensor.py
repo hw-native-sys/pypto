@@ -145,6 +145,9 @@ def _run_stacked(test_config, device_ids, program, worker_ids):
     host_b = torch.empty((N_RANKS, DIM, DIM), dtype=torch.float32).share_memory_()
     for i in range(N_RANKS):
         host_b[i].fill_(10.0 + i)  # shard i holds 10 + i
+    # D2H read-back destination — like every host buffer the forked worker writes,
+    # it must be shared memory allocated BEFORE prepare() (see copy_stacked_from).
+    host_readback = torch.zeros((N_RANKS, DIM, DIM), dtype=torch.float32).share_memory_()
 
     with compiled.prepare() as rt:
         weight = rt.alloc_stacked_tensor(host_b, worker_ids=worker_ids)
@@ -162,6 +165,16 @@ def _run_stacked(test_config, device_ids, program, worker_ids):
                 for i in range(N_RANKS):
                     expected[i].fill_(host_a_val + 10.0 + i)  # a + (10 + i)
                 torch.testing.assert_close(host_f, expected, rtol=1e-5, atol=1e-5)
+
+            # Read the resident stack back to the host (D2H). The kernel only
+            # reads ``b``, so each shard still holds ``10 + i`` even though the
+            # host source was zeroed after upload — a clean copy_stacked_from proof.
+            host_readback.zero_()
+            rt.copy_stacked_from(weight, host_readback)
+            for i in range(N_RANKS):
+                torch.testing.assert_close(
+                    host_readback[i], torch.full((DIM, DIM), 10.0 + i), rtol=1e-5, atol=1e-5
+                )
         finally:
             rt.free_stacked_tensor(weight)
 

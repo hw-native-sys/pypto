@@ -433,6 +433,16 @@ Internally each shard `host_w[i]` becomes a worker-resident `DeviceTensor`, so t
 generated `x[r]` indexing skips the H2D upload (`child_memory`). Shards are
 auto-freed on `close()` if not released earlier via `free_stacked_tensor`.
 
+Like a single `DeviceTensor`, a `StackedDeviceTensor` is never copied back
+automatically. To read the current device contents of every shard back to the
+host in one call — e.g. a resident KV cache at the end of a step — use
+`rt.copy_stacked_from(w, host_out)`, the read-back symmetric of
+`alloc_stacked_tensor`. `host_out` is filled in place (`host_out[i]` receives
+shard `i`) and, like the upload source, must be a CPU, contiguous, **shared-memory**
+`[B, *tail]` tensor matching the stack's shape and dtype, allocated before
+`prepare()` (call `.share_memory_()`): the D2H copy runs in the forked chip worker,
+which can only write host memory it inherited at fork.
+
 The leading dimension is the shard dimension and `B` must equal the number of
 cards the program dispatches to. By default shard `i` lands on worker `i`
 (matching `device=r`). If the program uses a **non-identity** placement — a

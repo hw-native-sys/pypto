@@ -290,18 +290,18 @@ class TestDeviceMemoryApi:
         rt.close()
 
 
+def _compiled_2cards():
+    compiled = _fake_compiled([_param("b", [2, 4, 4])], [])
+    compiled._distributed_config = DistributedConfig(device_ids=[0, 1])
+    return compiled
+
+
 class TestAllocStackedTensor:
     """``alloc_stacked_tensor`` uploads each leading-dim shard to its worker once."""
 
-    @staticmethod
-    def _compiled_2cards():
-        compiled = _fake_compiled([_param("b", [2, 4, 4])], [])
-        compiled._distributed_config = DistributedConfig(device_ids=[0, 1])
-        return compiled
-
     def test_identity_uploads_shard_per_worker(self, patched_setup):
         patched_setup["worker"]._orch.malloc.side_effect = [0xA000, 0xB000]
-        rt = DistributedWorker(self._compiled_2cards())
+        rt = DistributedWorker(_compiled_2cards())
         host = torch.arange(2 * 4 * 4, dtype=torch.float32).view(2, 4, 4).share_memory_()
 
         stacked = rt.alloc_stacked_tensor(host)  # default worker_ids = range(2)
@@ -323,7 +323,7 @@ class TestAllocStackedTensor:
 
     def test_permuted_worker_ids_place_shards(self, patched_setup):
         patched_setup["worker"]._orch.malloc.side_effect = [0xA000, 0xB000]
-        rt = DistributedWorker(self._compiled_2cards())
+        rt = DistributedWorker(_compiled_2cards())
         host = torch.zeros(2, 4, 4, dtype=torch.float32).share_memory_()
 
         stacked = rt.alloc_stacked_tensor(host, worker_ids=[1, 0])
@@ -340,7 +340,7 @@ class TestAllocStackedTensor:
 
     def test_free_stacked_tensor_releases_each_shard(self, patched_setup):
         patched_setup["worker"]._orch.malloc.side_effect = [0xA000, 0xB000]
-        rt = DistributedWorker(self._compiled_2cards())
+        rt = DistributedWorker(_compiled_2cards())
         host = torch.zeros(2, 4, 4, dtype=torch.float32).share_memory_()
         stacked = rt.alloc_stacked_tensor(host, worker_ids=[1, 0])
 
@@ -356,7 +356,7 @@ class TestAllocStackedTensor:
 
     def test_close_auto_frees_stacked_shards(self, patched_setup):
         patched_setup["worker"]._orch.malloc.side_effect = [0xA000, 0xB000]
-        rt = DistributedWorker(self._compiled_2cards())
+        rt = DistributedWorker(_compiled_2cards())
         host = torch.zeros(2, 4, 4, dtype=torch.float32).share_memory_()
         rt.alloc_stacked_tensor(host)  # leak — close() must release both shards
 
@@ -367,7 +367,7 @@ class TestAllocStackedTensor:
         orch.free.assert_any_call(1, 0xB000)
 
     def test_worker_ids_out_of_range_rejected(self, patched_setup):
-        rt = DistributedWorker(self._compiled_2cards())
+        rt = DistributedWorker(_compiled_2cards())
         host = torch.zeros(2, 4, 4, dtype=torch.float32).share_memory_()
         with pytest.raises(ValueError, match="out of range"):
             rt.alloc_stacked_tensor(host, worker_ids=[0, 5])
@@ -376,7 +376,7 @@ class TestAllocStackedTensor:
     def test_empty_leading_dim_rejected(self, patched_setup):
         # B == 0 must fail cleanly (before any malloc), not build an empty
         # StackedDeviceTensor that IndexErrors on .dtype / __repr__.
-        rt = DistributedWorker(self._compiled_2cards())
+        rt = DistributedWorker(_compiled_2cards())
         host = torch.zeros(0, 4, 4, dtype=torch.float32).share_memory_()
         with pytest.raises(ValueError, match="at least one shard"):
             rt.alloc_stacked_tensor(host)
@@ -384,7 +384,7 @@ class TestAllocStackedTensor:
         rt.close()
 
     def test_worker_ids_length_mismatch_rejected(self, patched_setup):
-        rt = DistributedWorker(self._compiled_2cards())
+        rt = DistributedWorker(_compiled_2cards())
         host = torch.zeros(2, 4, 4, dtype=torch.float32).share_memory_()
         with pytest.raises(ValueError, match="entries"):
             rt.alloc_stacked_tensor(host, worker_ids=[0])
@@ -392,7 +392,7 @@ class TestAllocStackedTensor:
 
     def test_non_shared_host_rejected_and_rolled_back(self, patched_setup):
         patched_setup["worker"]._orch.malloc.side_effect = [0xA000, 0xB000]
-        rt = DistributedWorker(self._compiled_2cards())
+        rt = DistributedWorker(_compiled_2cards())
         host = torch.zeros(2, 4, 4, dtype=torch.float32)  # NOT shared
 
         with pytest.raises(ValueError, match="shared-memory"):
@@ -400,6 +400,91 @@ class TestAllocStackedTensor:
         # No shard should remain tracked after the rollback.
         assert not any(ptr in (0xA000, 0xB000) for _w, ptr in rt._owned_tensors)
         rt.close()
+
+
+class TestCopyStackedFrom:
+    """``copy_stacked_from`` reads each resident shard back into host[i] (D2H)."""
+
+    def _make_stacked(self, patched_setup, worker_ids=None):
+        patched_setup["worker"]._orch.malloc.side_effect = [0xA000, 0xB000]
+        rt = DistributedWorker(_compiled_2cards())
+        host = torch.zeros(2, 4, 4, dtype=torch.float32).share_memory_()
+        stacked = rt.alloc_stacked_tensor(host, worker_ids=worker_ids)
+        patched_setup["worker"]._orch.copy_from.reset_mock()
+        return rt, stacked
+
+    def test_reads_each_shard_back(self, patched_setup):
+        rt, stacked = self._make_stacked(patched_setup)  # worker_ids == (0, 1)
+        out = torch.zeros(2, 4, 4, dtype=torch.float32).share_memory_()
+
+        rt.copy_stacked_from(stacked, out)
+
+        orch = patched_setup["worker"]._orch
+        nbytes = 4 * 4 * 4
+        # Facade arg order: copy_from(worker_id, dst_host_ptr, src_dev_ptr, nbytes).
+        orch.copy_from.assert_any_call(0, out[0].data_ptr(), 0xA000, nbytes)
+        orch.copy_from.assert_any_call(1, out[1].data_ptr(), 0xB000, nbytes)
+        assert orch.copy_from.call_count == 2
+        rt.close()
+
+    def test_permuted_worker_ids(self, patched_setup):
+        rt, stacked = self._make_stacked(patched_setup, worker_ids=[1, 0])
+        out = torch.zeros(2, 4, 4, dtype=torch.float32).share_memory_()
+
+        rt.copy_stacked_from(stacked, out)
+
+        orch = patched_setup["worker"]._orch
+        nbytes = 4 * 4 * 4
+        # shard 0 resides on worker 1, shard 1 on worker 0.
+        orch.copy_from.assert_any_call(1, out[0].data_ptr(), 0xA000, nbytes)
+        orch.copy_from.assert_any_call(0, out[1].data_ptr(), 0xB000, nbytes)
+        rt.close()
+
+    def test_shape_mismatch_rejected(self, patched_setup):
+        rt, stacked = self._make_stacked(patched_setup)
+        out = torch.zeros(3, 4, 4, dtype=torch.float32).share_memory_()
+        with pytest.raises(ValueError, match="does not match stacked full_shape"):
+            rt.copy_stacked_from(stacked, out)
+        rt.close()
+
+    def test_dtype_mismatch_rejected(self, patched_setup):
+        rt, stacked = self._make_stacked(patched_setup)
+        out = torch.zeros(2, 4, 4, dtype=torch.float16).share_memory_()
+        with pytest.raises(ValueError, match="does not match stacked dtype"):
+            rt.copy_stacked_from(stacked, out)
+        rt.close()
+
+    def test_non_shared_host_rejected(self, patched_setup):
+        # A plain (non-shared) host buffer is invisible to the forked worker's
+        # D2H write — reject it up front rather than silently returning zeros.
+        rt, stacked = self._make_stacked(patched_setup)
+        out = torch.zeros(2, 4, 4, dtype=torch.float32)  # NOT shared
+        with pytest.raises(ValueError, match="shared-memory"):
+            rt.copy_stacked_from(stacked, out)
+        rt.close()
+
+    def test_non_contiguous_host_rejected(self, patched_setup):
+        rt, stacked = self._make_stacked(patched_setup)
+        # Shared but transposed -> non-contiguous; still rejected.
+        out = torch.zeros(2, 4, 4, dtype=torch.float32).share_memory_().transpose(1, 2)
+        assert not out.is_contiguous()
+        with pytest.raises(ValueError, match="shared-memory"):
+            rt.copy_stacked_from(stacked, out)
+        rt.close()
+
+    def test_wrong_type_rejected(self, patched_setup):
+        rt, _stacked = self._make_stacked(patched_setup)
+        out = torch.zeros(2, 4, 4, dtype=torch.float32).share_memory_()
+        with pytest.raises(TypeError, match="expects a StackedDeviceTensor"):
+            rt.copy_stacked_from(object(), out)  # type: ignore[arg-type]  # runtime guard under test
+        rt.close()
+
+    def test_after_close_raises(self, patched_setup):
+        rt, stacked = self._make_stacked(patched_setup)
+        out = torch.zeros(2, 4, 4, dtype=torch.float32).share_memory_()
+        rt.close()
+        with pytest.raises(RuntimeError, match="called after close"):
+            rt.copy_stacked_from(stacked, out)
 
 
 class TestLifecycle:
