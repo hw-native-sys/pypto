@@ -483,7 +483,6 @@ def _parse_stats_from_strace(log_text: str, *, rounds: int, warmup: int) -> Benc
     # import is resolved lazily at call time; pyright cannot see it in the lint
     # env, and unit tests skip the parse path when it is not installed.
     from simpler_setup.tools.strace_timing import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
-        _ROUNDS_TABLE_NAMES,
         bucket_by_hid,
         group_invocations,
         parse_spans,
@@ -491,8 +490,18 @@ def _parse_stats_from_strace(log_text: str, *, rounds: int, warmup: int) -> Benc
 
     # Span root was renamed ``run_prepared`` -> ``simpler_run`` in simpler #1210;
     # read the current names from the tool so both runtime generations work.
-    host_key = _ROUNDS_TABLE_NAMES["host"]
-    device_key = _ROUNDS_TABLE_NAMES["device"]
+    # ``_ROUNDS_TABLE_NAMES`` is a private symbol absent from pre-#1210 simpler,
+    # so fall back to the legacy hardcoded root when it (or its keys) is missing.
+    try:
+        from simpler_setup.tools.strace_timing import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
+            _ROUNDS_TABLE_NAMES,
+        )
+
+        host_key = _ROUNDS_TABLE_NAMES["host"]
+        device_key = _ROUNDS_TABLE_NAMES["device"]
+    except (ImportError, AttributeError, TypeError, KeyError):
+        host_key = "run_prepared"
+        device_key = "run_prepared.runner_run.device_wall"
 
     stats = BenchmarkStats(rounds=rounds, warmup=warmup)
     invocations = group_invocations(parse_spans(log_text.splitlines()))

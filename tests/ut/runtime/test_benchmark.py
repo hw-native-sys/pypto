@@ -43,7 +43,12 @@ def span_root() -> str:
     where these parse tests skip.
     """
     mod = pytest.importorskip("simpler_setup.tools.strace_timing")
-    return mod._ROUNDS_TABLE_NAMES["host"]
+    # ``_ROUNDS_TABLE_NAMES`` is a private symbol absent from pre-#1210 simpler;
+    # fall back to the legacy root so the tests stay compatible with both.
+    try:
+        return mod._ROUNDS_TABLE_NAMES["host"]
+    except (AttributeError, TypeError, KeyError):
+        return "run_prepared"
 
 
 def _strace_line(
