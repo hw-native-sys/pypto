@@ -78,6 +78,7 @@ struct PassProperties {
 | ExpandMixedKernel | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D | SSAForm, MixedKernelExpanded | — |
 | NormalizeReturnOrder | SplitIncoreOrch, IncoreTileOps | — | — |
 | InitMemRef | TypeChecked, SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D | HasMemRefs | SSAForm |
+| MaterializeSemanticAliases | SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
 | MemoryReuse | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
 | AllocateMemoryAddr | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | AllocatedMemoryAddr | — |
 | FoldNoOpReshape | SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
@@ -391,18 +392,19 @@ The PTO-oriented tile stage shared by `Default` and `DebugTileOptimization` is:
 15. [`CanonicalizeIOOrder`](26-canonicalize_io_order.md)
 16. [`MaterializeTensorStrides`](27-materialize_tensor_strides.md) — wired into the default pipeline starting from RFC #1300 P6
 17. `InitMemRef`
-18. `MemoryReuse`
-19. `AllocateMemoryAddr`
-20. [`FoldNoOpReshape`](31-fold_no_op_reshape.md)
-21. [`FuseCreateAssembleToSlice`](32-fuse_create_assemble_to_slice.md)
-22. [`DeriveCallDirections`](33-derive_call_directions.md)
-23. [`AutoDeriveTaskDependencies`](34-auto_derive_task_dependencies.md) (compiler deps for runtime scopes; AUTO-scope analysis is opt-in)
-24. [`ExpandManualPhaseFence`](35-expand_manual_phase_fence.md) (manual-scope phase-fence TaskId dep compression)
-25. [`SynthesizeAllReduceSignals`](36-synthesize_allreduce_signals.md) (distributed: host allreduce optional signal -> explicit internal signal IR)
-26. [`MaterializeCommDomainScopes`](37-materialize_comm_domain_scopes.md) (distributed: WindowBuffer + CommDomainScopeStmt wrappers in each host_orch body; no-op for comm-less programs)
-27. [`LowerHostTensorCollectives`](38-lower_host_tensor_collectives.md) (host-level tensor collectives -> internal builtin chip dispatches)
-28. `Simplify`
-29. [`MaterializeRuntimeScopes`](39-materialize_runtime_scopes.md) (inserts AUTO RuntimeScopeStmt so orchestration codegen emits PTO2_SCOPE 1:1)
+18. [`MaterializeSemanticAliases`](29-materialize_semantic_aliases.md) (semantics-required must-alias: loop-carry / in-place; always runs)
+19. `MemoryReuse`
+20. `AllocateMemoryAddr`
+21. [`FoldNoOpReshape`](32-fold_no_op_reshape.md)
+22. [`FuseCreateAssembleToSlice`](33-fuse_create_assemble_to_slice.md)
+23. [`DeriveCallDirections`](34-derive_call_directions.md)
+24. [`AutoDeriveTaskDependencies`](35-auto_derive_task_dependencies.md) (compiler deps for runtime scopes; AUTO-scope analysis is opt-in)
+25. [`ExpandManualPhaseFence`](36-expand_manual_phase_fence.md) (manual-scope phase-fence TaskId dep compression)
+26. [`SynthesizeAllReduceSignals`](37-synthesize_allreduce_signals.md) (distributed: host allreduce optional signal -> explicit internal signal IR)
+27. [`MaterializeCommDomainScopes`](38-materialize_comm_domain_scopes.md) (distributed: WindowBuffer + CommDomainScopeStmt wrappers in each host_orch body; no-op for comm-less programs)
+28. [`LowerHostTensorCollectives`](39-lower_host_tensor_collectives.md) (host-level tensor collectives -> internal builtin chip dispatches)
+29. `Simplify`
+30. [`MaterializeRuntimeScopes`](40-materialize_runtime_scopes.md) (inserts AUTO RuntimeScopeStmt so orchestration codegen emits PTO2_SCOPE 1:1)
 
 `DebugTileOptimization` is a debug-only strategy for inspecting this tile stage
 without the tensor-only prefix passes. Use `Default` for normal compilation and

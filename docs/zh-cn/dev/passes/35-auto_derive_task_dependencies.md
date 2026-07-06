@@ -4,7 +4,7 @@
 
 `AutoDeriveTaskDependencies` 在显式开启时，为 AUTO runtime scope 保守推导
 task-to-task 依赖边。它运行在
-[`DeriveCallDirections`](33-derive_call_directions.md) 之后，读取已经解析的
+[`DeriveCallDirections`](34-derive_call_directions.md) 之后，读取已经解析的
 `Call.attrs["arg_directions"]`，并把编译器推导出的 producer TaskId 边写入
 `Call.attrs["compiler_manual_dep_edges"]`。当某个 tensor slot 的 runtime 依赖查询已经被
 同一个成功分析的 scope 内的用户显式边或编译器边完整覆盖时，本 pass 也可以改写部分

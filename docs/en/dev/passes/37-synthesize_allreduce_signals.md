@@ -22,7 +22,7 @@ to use the explicit signal argument and is lowered by
 ```
 
 The pass runs immediately before
-[`MaterializeCommDomainScopes`](37-materialize_comm_domain_scopes.md), while the
+[`MaterializeCommDomainScopes`](38-materialize_comm_domain_scopes.md), while the
 host `alloc_window_buffer` / `window` / dispatch chain is still visible.
 Materialization then sees the synthesized signal buffer as an ordinary window
 allocation and can place it in the same communication domain as the allreduce

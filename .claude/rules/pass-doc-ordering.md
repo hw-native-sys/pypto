@@ -41,16 +41,18 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 26 | `26-canonicalize_io_order.md` | 26th pass |
 | 27 | `27-materialize_tensor_strides.md` | 27th pass (RFC #1300 P3 — wired into Default starting from P6) |
 | 28 | `28-init_memref.md` | 28th pass |
-| 29 | `29-memory_reuse.md` | 29th pass (also enforces the Ascend910B load + tpop_from_aic in-place hazard guard) |
-| 30 | `30-allocate_memory_addr.md` | 30th pass |
-| 31 | `31-fold_no_op_reshape.md` | 31st pass |
-| 32 | `32-fuse_create_assemble_to_slice.md` | 32nd pass |
-| 33 | `33-derive_call_directions.md` | 33rd pass (two-phase: arg directions + manual-scope lowering) |
-| 34 | `34-auto_derive_task_dependencies.md` | 34th pass (manual-scope compiler deps; opt-in AUTO-scope analysis/emission via compile-time switch; default behavior unchanged) |
-| 35 | `35-expand_manual_phase_fence.md` | 35th pass (manual-scope phase-fence TaskId dep compression; runs after AutoDeriveTaskDependencies) |
-| 36 | `36-materialize_comm_domain_scopes.md` | 36th pass (distributed: WindowBuffer + CommDomainScopeStmt wrappers in each host_orch body; runs immediately before LowerHostTensorCollectives) |
-| 37 | `37-lower_host_tensor_collectives.md` | 37th pass (host-level tensor collectives -> internal builtin chip dispatches; runs after comm-domain scopes) |
-| 38 | `38-materialize_runtime_scopes.md` | Last pass (after the final Simplify; inserts AUTO RuntimeScopeStmt so orchestration codegen emits PTO2_SCOPE 1:1) |
+| 29 | `29-materialize_semantic_aliases.md` | Semantics-required must-alias (loop-carry / in-place); split out of MemoryReuse (its former "Step 0"); always runs, even when MemoryReuse is skipped under `memory_planner=PTOAS` |
+| 30 | `30-memory_reuse.md` | Opportunistic lifetime reuse (also enforces the Ascend910B load + tpop_from_aic in-place hazard guard); skippable under `memory_planner=PTOAS` |
+| 31 | `31-allocate_memory_addr.md` | 31st pass (skippable under `memory_planner=PTOAS`) |
+| 32 | `32-fold_no_op_reshape.md` | 32nd pass |
+| 33 | `33-fuse_create_assemble_to_slice.md` | 33rd pass |
+| 34 | `34-derive_call_directions.md` | 34th pass (two-phase: arg directions + manual-scope lowering) |
+| 35 | `35-auto_derive_task_dependencies.md` | 35th pass (manual-scope compiler deps; opt-in AUTO-scope analysis/emission via compile-time switch; default behavior unchanged) |
+| 36 | `36-expand_manual_phase_fence.md` | 36th pass (manual-scope phase-fence TaskId dep compression; runs after AutoDeriveTaskDependencies) |
+| 37 | `37-synthesize_allreduce_signals.md` | 37th pass (distributed: host allreduce optional signal -> explicit internal signal IR) |
+| 38 | `38-materialize_comm_domain_scopes.md` | 38th pass (distributed: WindowBuffer + CommDomainScopeStmt wrappers in each host_orch body; runs immediately before LowerHostTensorCollectives) |
+| 39 | `39-lower_host_tensor_collectives.md` | 39th pass (host-level tensor collectives -> internal builtin chip dispatches; runs after comm-domain scopes) |
+| 40 | `40-materialize_runtime_scopes.md` | Last pass (after the final Simplify; inserts AUTO RuntimeScopeStmt so orchestration codegen emits PTO2_SCOPE 1:1) |
 | 91 | `91-utility_passes.md` | Not in Default strategy |
 | 99 | `99-verifier.md` | Infrastructure (not a pipeline pass) |
 

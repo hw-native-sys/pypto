@@ -15,7 +15,7 @@ After applying MemRef sharing, the pass also **removes redundant `tile.alloc` st
 - Lifetime is determined by def-use analysis
 - After sharing, MemRefs that become unreferenced are cleaned up along with their alloc statements
 
-**When to use**: Run after InitMemRef and before AllocateMemoryAddr. Reduces memory allocation overhead.
+**When to use**: Run after [`MaterializeSemanticAliases`](29-materialize_semantic_aliases.md) and before AllocateMemoryAddr. Reduces memory allocation overhead. This pass does the *opportunistic* lifetime coalescing only; the *semantics-required* must-alias retarget (loop-carry / in-place — this pass's former "Step 0") now runs in `MaterializeSemanticAliases`, so `MemoryReuse` can be skipped independently (e.g. `memory_planner=PTOAS`, where ptoas owns lifetime reuse).
 
 ## API
 

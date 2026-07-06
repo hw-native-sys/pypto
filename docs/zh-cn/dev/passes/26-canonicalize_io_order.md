@@ -1,6 +1,6 @@
 # CanonicalizeIOOrder Pass
 
-仅限于 **`ForKind::Pipeline` 循环体内部** 的 `SeqStmts`，沿**同核硬件单元阶段阶梯**（标量 → load → compute → store）重排语句 —— 受 SSA 依赖图约束。把各克隆的 load 聚到前面，使两个 stage 的预取先于 compute 发射，于是 MTE load 引擎能跑在 Vector/Cube compute 引擎之前（双缓冲重叠）；compute/store 这一档再按 pipeline **stage** 排序，使每个 stage 算完立刻 store。注意：stage 之间的缓冲**分离**不再是这种聚集的副作用 —— 它现在是 [`MemoryReuse`](29-memory_reuse.md) 的显式约束（`pipeline_membership`）；本 pass 只塑造**调度顺序**。跨核（cube/vector）流水线由 [`SkewCrossCorePipeline`](24-skew_cross_core_pipeline.md) 在上游软流水，到达本 pass 时已是 `ForKind::Sequential`，故此处不含跨核处理。非流水线循环则保持不变。
+仅限于 **`ForKind::Pipeline` 循环体内部** 的 `SeqStmts`，沿**同核硬件单元阶段阶梯**（标量 → load → compute → store）重排语句 —— 受 SSA 依赖图约束。把各克隆的 load 聚到前面，使两个 stage 的预取先于 compute 发射，于是 MTE load 引擎能跑在 Vector/Cube compute 引擎之前（双缓冲重叠）；compute/store 这一档再按 pipeline **stage** 排序，使每个 stage 算完立刻 store。注意：stage 之间的缓冲**分离**不再是这种聚集的副作用 —— 它现在是 [`MemoryReuse`](30-memory_reuse.md) 的显式约束（`pipeline_membership`）；本 pass 只塑造**调度顺序**。跨核（cube/vector）流水线由 [`SkewCrossCorePipeline`](24-skew_cross_core_pipeline.md) 在上游软流水，到达本 pass 时已是 `ForKind::Sequential`，故此处不含跨核处理。非流水线循环则保持不变。
 
 ## 概述
 
@@ -13,7 +13,7 @@
 - tile 计算语句留在中间。
 - 每个 `tile.store` / `tile.write` 下沉到依赖图允许的最晚位置。
 
-只要数据流允许，结果即为 `[scalars…, loads…, 每个 stage 的 (compute, store)…]` —— 例如 `stage=2` 的循环体发射为 `load load compute_s0 store_s0 compute_s1 store_s1`。聚集 load 带来预取重叠（MTE 引擎跑在前面）；compute/store 按 stage 排序意味着每个 stage 算完立刻 store，在下一个 stage 之前释放该缓冲，既降低片上压力，也减轻跨迭代的 load↔store 耦合。stage 之间的缓冲分离由 `MemoryReuse` 单独强制（见 [29-memory_reuse.md](29-memory_reuse.md)）。
+只要数据流允许，结果即为 `[scalars…, loads…, 每个 stage 的 (compute, store)…]` —— 例如 `stage=2` 的循环体发射为 `load load compute_s0 store_s0 compute_s1 store_s1`。聚集 load 带来预取重叠（MTE 引擎跑在前面）；compute/store 按 stage 排序意味着每个 stage 算完立刻 store，在下一个 stage 之前释放该缓冲，既降低片上压力，也减轻跨迭代的 load↔store 耦合。stage 之间的缓冲分离由 `MemoryReuse` 单独强制（见 [30-memory_reuse.md](30-memory_reuse.md)）。
 
 上拉标量计算正是 load 聚集的关键：若不区分类别，每个克隆的地址运算 assign 会被归为普通 compute、按原始位置排序，从而在兄弟 load 之间穿插，把 load 钉在原始克隆里。把标量计算作为最高优先级类别后，所有兄弟克隆的地址运算先发射，所有依赖的 load 同时就绪，load 自然聚集。
 
@@ -127,5 +127,5 @@ for i in pl.range(0, 8, 4):
 
 - [`LowerPipelineLoops`](25-lower_pipeline_loops.md) —— 上游复制区域生成者；保留 `ForKind::Pipeline` 标记供本 Pass 识别
 - [`MaterializeTensorStrides`](27-materialize_tensor_strides.md) —— 接入默认流水线后紧随本 Pass 运行；在 `InitMemRef` 消费前补全隐式 `TensorView` stride
-- [`MemoryReuse`](29-memory_reuse.md) —— 在本 Pass 之后运行；经 `pipeline_membership` 显式强制 stage 缓冲分离（本 pass 只塑造调度顺序）
+- [`MemoryReuse`](30-memory_reuse.md) —— 在本 Pass 之后运行；经 `pipeline_membership` 显式强制 stage 缓冲分离（本 pass 只塑造调度顺序）
 - RFC #1026 / PR #1029 —— InOut-use 规约 + 依赖分析工具
