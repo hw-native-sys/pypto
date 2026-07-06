@@ -1293,6 +1293,12 @@ std::optional<std::pair<std::vector<StmtPtr>, VarPtr>> TryFoldMatScratch(const M
   // the K-loop + peel (BuildSplitKGrid), so dispatch on k == K rather than the
   // integer-division proxy K/k < 2 — which would mis-route a split-K tile to the
   // full-K [m,K]/[K,n] emitter and blow the L0A/L0B budget.
+  // dbC=2 works on the Mat-scratch path too: the Acc->Mat drain is `tile.assemble`,
+  // which CanonicalizeIOOrder floats above the compute tier under the dbC attr (same
+  // as tile.store for the direct-store path), keeping the two accumulators co-live.
+  // BuildFullKPipelined attaches the attr when t.double_buffer_c; the split-K grid
+  // never carries it.  (The Acc->Mat drain is cheaper than Acc->GM, so the hiding
+  // upside is smaller here, but the mechanism is the same.)
   const bool full_k = t.k == t.K;
   auto [stmts, scratch] = full_k ? BuildFullKPipelined(t, placer) : BuildSplitKGrid(t, placer);
   return std::make_pair(std::move(stmts), scratch);

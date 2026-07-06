@@ -75,22 +75,24 @@ enum class IOCategory : int {
 /// of name strings avoids string comparisons in the hot path and makes the set
 /// of recognized ops explicit at pass construction.
 struct IOCategoryOps {
-  OpPtr tile_load;     ///< Read: tensor → tile data movement
-  OpPtr tile_read;     ///< Read: extract scalar from a tile
-  OpPtr tile_store;    ///< Write: tile → tensor data movement
-  OpPtr tile_write;    ///< Write: put scalar into a tile
-  OpPtr tile_extract;  ///< Sub-tile extract — load-like only when L1→L0 (see IsL1ToL0ExtractCall)
+  OpPtr tile_load;      ///< Read: tensor → tile data movement
+  OpPtr tile_read;      ///< Read: extract scalar from a tile
+  OpPtr tile_store;     ///< Write: tile → tensor data movement
+  OpPtr tile_write;     ///< Write: put scalar into a tile
+  OpPtr tile_extract;   ///< Sub-tile extract — load-like only when L1→L0 (see IsL1ToL0ExtractCall)
+  OpPtr tile_assemble;  ///< Acc→Mat sub-tile drain (Mat-scratch path) — drain-like only under dbC
 
   static IOCategoryOps Build() {
     const auto& registry = OpRegistry::GetInstance();
     return {
         registry.GetOp("tile.load"),  registry.GetOp("tile.read"),    registry.GetOp("tile.store"),
-        registry.GetOp("tile.write"), registry.GetOp("tile.extract"),
+        registry.GetOp("tile.write"), registry.GetOp("tile.extract"), registry.GetOp("tile.assemble"),
     };
   }
 
   [[nodiscard]] bool IsLoadLike(const OpPtr& op) const { return op == tile_load || op == tile_read; }
   [[nodiscard]] bool IsStoreLike(const OpPtr& op) const { return op == tile_store || op == tile_write; }
+  [[nodiscard]] bool IsAssemble(const OpPtr& op) const { return op == tile_assemble; }
 
   /// True when @p call is a `tile.extract` whose source lives in L1 (Mat) and
   /// whose destination lives in L0a/L0b (Left/Right) — i.e. the ISA TEXTRACT
@@ -138,6 +140,13 @@ IOCategory CategorizeStmt(const StmtPtr& stmt, const IOCategoryOps& ops, bool ov
       // a tile and belongs in the load tier alongside tile.load.
       if (ops.IsLoadLike(call->op_)) return IOCategory::Load;
       if (ops.IsStoreLike(call->op_)) return store_tier;
+      // tile.assemble is the Acc→Mat drain of the Mat-scratch path. Under dbC it is
+      // drain-like (Store tier → lifted above all compute in ReorderRegion) so the
+      // two Mat-scratch accumulators stay co-live, mirroring tile.store on the
+      // direct-store path. Without dbC it stays TileCompute (its chain dependency
+      // already orders it after its producing matmul) — the one-accumulator
+      // Mat-scratch schedule is unchanged.
+      if (double_buffer_c && ops.IsAssemble(call->op_)) return IOCategory::Store;
       // tile.extract is load-like only when it represents an L1→L0 transfer
       // (Mat source, Left/Right target). Other extract shapes stay in
       // TileCompute — see IsL1ToL0ExtractCall doc for rationale.

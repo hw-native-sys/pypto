@@ -56,10 +56,12 @@ inline constexpr const char* kPipelineStagesAttr = "pipeline_stages";
 inline constexpr const char* kPipelineOverlapStoresAttr = "pipeline_overlap_stores";
 
 /// Optional ``bool`` policy attr on a ``ForKind::Pipeline`` ``ForStmt`` (absent ⇒
-/// ``false``): when ``true``, ``CanonicalizeIOOrder`` floats store-like ops into a
-/// tier *above all compute* in the loop body, so every sibling-iteration store
-/// sorts after every matmul — ``matmul_i, matmul_{i+1}, store_i, store_{i+1}``
-/// instead of ``matmul_i, store_i, matmul_{i+1}, store_{i+1}``.
+/// ``false``): when ``true``, ``CanonicalizeIOOrder`` floats the Acc-draining ops
+/// into a tier *above all compute* in the loop body, so every sibling-iteration
+/// drain sorts after every matmul — ``matmul_i, matmul_{i+1}, drain_i, drain_{i+1}``
+/// instead of ``matmul_i, drain_i, matmul_{i+1}, drain_{i+1}``. The drain op is
+/// ``tile.store`` on the direct-store (Acc→GM) path and ``tile.assemble`` on the
+/// Mat-scratch (Acc→Mat) path.
 ///
 /// This is a *stronger* float than ``pipeline_overlap_stores`` (which only orders
 /// store-after-compute *within* a stage — the compute/store tier is shared and
