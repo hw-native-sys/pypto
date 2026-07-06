@@ -26,8 +26,8 @@
 /// lazy materialization would attempt a ``loc=mat -> loc=mat``
 /// ``pto.textract`` — an unsupported L1→L1 DMA path.
 ///
-/// This pass eliminates every Mat-resident ``tile.slice`` by folding its
-/// offset into each consumer:
+/// This pass eliminates Mat-resident ``tile.slice`` nodes whose consumers it
+/// can canonicalize by folding the offset into each consumer:
 ///
 ///   * Consumed by ``tile.extract(s, ir, ic, shape)`` — the extract reads the
 ///     slice's source directly and the slice offset is added into ``ir`` /

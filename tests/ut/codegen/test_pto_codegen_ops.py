@@ -1419,8 +1419,8 @@ class TestTileSliceCodegen:
 
     def _generate_mlir_all_incore(self, program_cls) -> str:
         """Like ``_generate_mlir`` but concatenates PTOCodegen output for every
-        InCore (AIC/AIV) leaf function, skipping the Group/orchestration wrapper a
-        mixed (cube+vector) kernel splits into (those are not PTOCodegen targets)."""
+        InCore (AIC/AIV) leaf function, skipping the Group/orchestration wrapper that
+        a mixed (cube+vector) kernel splits into (those are not PTOCodegen targets)."""
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
         optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program_cls)
@@ -1522,8 +1522,8 @@ class TestTileAssembleCodegen:
 
     def _generate_mlir_all_incore(self, program_cls) -> str:
         """Like ``_generate_mlir`` but concatenates PTOCodegen output for every
-        InCore (AIC/AIV) leaf function, skipping the Group/orchestration wrapper a
-        mixed (cube+vector) kernel splits into (those are not PTOCodegen targets)."""
+        InCore (AIC/AIV) leaf function, skipping the Group/orchestration wrapper that
+        a mixed (cube+vector) kernel splits into (those are not PTOCodegen targets)."""
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
         optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program_cls)

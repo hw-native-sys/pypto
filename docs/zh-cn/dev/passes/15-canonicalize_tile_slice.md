@@ -6,7 +6,7 @@
 
 结果 tile 位于 `Mem.Mat` 的 `tile.slice` 是一种合法的高层「Mat tile 子窗口」构造。[`FlattenTileNdTo2D`](13-flatten_tile_nd_to_2d.md) 在展开 `tile.batch_matmul` 的 batch 维时，会为每个 batch page 生成一个这样的 slice：page 偏移为 `batch_index * page_rows`；当 batch 前导维为 1 时该偏移为 0、窗口覆盖整个 tile——但它仍然是一个 `tile.slice`。
 
-PTO ISA 支持 Mat 上的 `pto.subview` 作为零拷贝别名（无数据搬运），因此当消费者能直接接受 subview SSA 时，独立的 Mat slice 是合法的。但是，触发惰性实例化（通过 `MaterializeSubviewOperandIfNeeded`）的消费者会尝试生成 `loc=mat → loc=mat` 的 `pto.textract`——这是 Ascend 910C 等目标不支持的 L1→L1 DMA 路径。本 pass 为了效率，通过把每个 Mat-resident `tile.slice` 的偏移折叠进其消费者来消除该 slice，随后删除已死的 slice。
+PTO ISA 支持 Mat 上的 `pto.subview` 作为零拷贝别名（无数据搬运），因此当消费者能直接接受 subview SSA 时，独立的 Mat slice 是合法的。但是，触发惰性实例化（通过 `MaterializeSubviewOperandIfNeeded`）的消费者会尝试生成 `loc=mat → loc=mat` 的 `pto.textract`——这是 Ascend 910C 等目标不支持的 L1→L1 DMA 路径。本 pass 为了效率，通过把可规范化消费者（extract/matmul）对应的 Mat-resident `tile.slice` 偏移折叠进消费者来消除这些 slice，随后删除已死的 slice。消费者不可规范化的 Mat slice（如 `tile.move`）保持原样——它会下沉为合法的 `pto.subview`。
 
 本 pass 还会规范化被 `tile.col_expand_mul` / `tile.col_expand_add` 消费的**动态偏移 Vec** `tile.slice`（issue #1640）。`pto.tcolexpandmul` / `pto.tcolexpandadd` 无法读取 `pto.subview` 操作数，因此 codegen 会通过 `pto.textract` 把该 slice 惰性实例化到 slice 自身的结果缓冲区。由于 `tile.slice` 继承其源 tile 的内存，而 `AllocateMemoryAddr` 无法把动态偏移编码为 `ConstInt` 地址，该缓冲区会退化到裸源基址——实例化于是把抽出的那一行写进源 tile 的第 0 行。把该操作数替换为新的 `tile.extract(..., target_memory=Vec)`（其结果获得独立、非继承的分配）即可消除别名。只有**动态**偏移是隐患：`AllocateMemoryAddr` 会把常量偏移折叠成 `base + off`，因此惰性 `pto.textract` 是一次恒等拷贝，常量偏移的 slice 保持原样。
 

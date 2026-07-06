@@ -424,7 +424,8 @@ static std::string MaterializeSubviewOperandIfNeeded(const ir::ExprPtr& expr, co
   if (!mat) return operand;
   if (mat->emitted) return mat->materialize_target_ssa;
 
-  INTERNAL_CHECK(!mat->source_memory_space.has_value() || *mat->source_memory_space != ir::MemorySpace::Mat)
+  INTERNAL_CHECK_SPAN(
+      !mat->source_memory_space.has_value() || *mat->source_memory_space != ir::MemorySpace::Mat, expr->span_)
       << "Internal error: lazy materialization of a Mat-resident pto.subview "
          "would produce an unsupported Mat->Mat pto.textract (no L1->L1 DMA); "
          "the consumer should accept the subview SSA directly";
