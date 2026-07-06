@@ -28,6 +28,7 @@
 #include "pypto/core/dtype.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/memory_space.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
@@ -376,6 +377,7 @@ class PTOCodegen : public CodegenBase {
     std::string col_off_ssa;
     std::string materialize_target_ssa;
     std::string materialize_target_type;
+    std::optional<ir::MemorySpace> source_memory_space;
     bool emitted = false;
   };
   void RegisterSubviewMaterialization(const std::string& subview_ssa, const SubviewMaterializationInfo& info);

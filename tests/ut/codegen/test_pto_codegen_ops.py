@@ -1417,6 +1417,46 @@ class TestTileSliceCodegen:
             f"on the subview result (ptoas would reject); got:\n{subview_lines[0]}"
         )
 
+    def _generate_mlir_all_incore(self, program_cls) -> str:
+        """Like ``_generate_mlir`` but concatenates PTOCodegen output for every
+        InCore (AIC/AIV) leaf function, skipping the Group/orchestration wrapper a
+        mixed (cube+vector) kernel splits into (those are not PTOCodegen targets)."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program_cls)
+        return "\n".join(
+            codegen.PTOCodegen().generate(ir.Program([func], func.name, optimized.span))
+            for func in optimized.functions.values()
+            if ir.is_incore_type(func.func_type)
+        )
+
+    def test_tile_slice_mat_subview_emits_loc_mat(self):
+        """A Mat tile.slice that survives the full pass pipeline (consumed by
+        tile.move Mat→Vec, not extract/matmul) lowers to pto.subview with
+        loc=mat on both source and result types."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[32, 64], pl.FP32],
+                dst: pl.Tensor[[16, 64], pl.FP32],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                src_mat = pl.tile.load(src, [0, 0], [32, 64], target_memory=pl.Mem.Mat)
+                sliced = pl.tile.slice(src_mat, [16, 64], [16, 0])
+                vec_tile = pl.tile.move(sliced, target_memory=pl.Mem.Vec)
+                return pl.store(vec_tile, [0, 0], dst)
+
+        mlir = self._generate_mlir_all_incore(Prog)
+        subview_lines = [line.strip() for line in mlir.splitlines() if "pto.subview" in line]
+        assert subview_lines, f"Expected pto.subview for Mat tile.slice, got:\n{mlir}"
+        sv = subview_lines[0]
+        assert "loc=mat" in sv, f"pto.subview source must be loc=mat: {sv}"
+        result_type = sv.split("->", 1)[-1] if "->" in sv else ""
+        assert "loc=mat" in result_type, f"pto.subview result must be loc=mat: {sv}"
+        assert "sizes [16, 64]" in sv, f"subview sizes must match slice shape: {sv}"
+
 
 class TestTileAssembleCodegen:
     """Tests for tile.assemble PTO code generation (pto.subview + pto.tmov).

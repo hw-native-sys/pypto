@@ -424,6 +424,11 @@ static std::string MaterializeSubviewOperandIfNeeded(const ir::ExprPtr& expr, co
   if (!mat) return operand;
   if (mat->emitted) return mat->materialize_target_ssa;
 
+  INTERNAL_CHECK(!mat->source_memory_space.has_value() || *mat->source_memory_space != ir::MemorySpace::Mat)
+      << "Internal error: lazy materialization of a Mat-resident pto.subview "
+         "would produce an unsupported Mat->Mat pto.textract (no L1->L1 DMA); "
+         "the consumer should accept the subview SSA directly";
+
   auto result_type = mat->materialize_target_type;
   std::ostringstream extract;
   extract << "pto.textract ins(" << mat->source_ssa << ", " << mat->row_off_ssa << ", " << mat->col_off_ssa;
@@ -4215,6 +4220,7 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
     mat_info.col_off_ssa = col_off;
     mat_info.materialize_target_ssa = result_target;
     mat_info.materialize_target_type = result_type;
+    mat_info.source_memory_space = source_tile_type->memory_space_;
     codegen.RegisterSubviewMaterialization(view_ssa, mat_info);
 
     // Bind the slice's result variable to the subview SSA; the pre-emitted

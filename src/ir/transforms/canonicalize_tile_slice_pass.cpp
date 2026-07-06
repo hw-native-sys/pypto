@@ -20,9 +20,11 @@
 /// "sub-window of a Mat tile" construct — ``FlattenTileNdTo2D`` emits one per
 /// batch page when it unrolls a ``tile.batch_matmul`` (the page offset is
 /// ``batch_index * page_rows``; for a leading-dim-1 batch the offset is 0 and
-/// the window covers the whole tile, but it is still a ``tile.slice``).  Such
-/// a slice has no standalone hardware lowering: codegen would materialize it
-/// as an unsupported ``loc=mat -> loc=mat`` ``pto.tmov``.
+/// the window covers the whole tile, but it is still a ``tile.slice``).
+/// PTO ISA supports ``pto.subview`` on Mat as a zero-copy alias (no data
+/// movement), but a standalone Mat slice followed by a consumer that triggers
+/// lazy materialization would attempt a ``loc=mat -> loc=mat``
+/// ``pto.textract`` — an unsupported L1→L1 DMA path.
 ///
 /// This pass eliminates every Mat-resident ``tile.slice`` by folding its
 /// offset into each consumer:

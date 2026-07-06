@@ -990,6 +990,31 @@ class TestNoOp:
 
         ir.assert_structural_equal(_run_pass(Before), Before)
 
+    def test_mat_slice_with_non_extract_non_matmul_consumer_left_untouched(self):
+        """A canonical 3-arg Mat ``tile.slice`` consumed by ``tile.move``
+        (Mat→Vec) — not by ``tile.extract`` or a matmul — survives the pass
+        unchanged. The slice lowers to a valid ``pto.subview`` in codegen."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[32, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                x_mat: pl.Tile[[32, 64], pl.FP32, pl.Mem.Mat] = pl.tile.load(
+                    x, [0, 0], [32, 64], target_memory=pl.Mem.Mat
+                )
+                x_slice: pl.Tile[[16, 64], pl.FP32, pl.Mem.Mat] = pl.tile.slice(x_mat, [16, 64], [16, 0])
+                x_vec: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.move(
+                    x_slice, target_memory=pl.Mem.Vec
+                )
+                out = pl.store(x_vec, [0, 0], out)
+                return out
+
+        ir.assert_structural_equal(_run_pass(Before), Before)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
