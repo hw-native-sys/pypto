@@ -346,6 +346,12 @@ class TopDownRetargeter {
   std::map<VarPtr, VarDef> defs_;
   std::map<VarPtr, TypePtr> rewrites_;
   std::set<VarPtr> visiting_;  // cycle guard
+  // True while retargeting is seeded from an IfStmt return_var (issue #1956).
+  // In that mode IsTargetDeadAtAssign stops its liveness scan at the enclosing
+  // IfStmt — reads of the target buffer *after* the if are the phi's own merged
+  // consumers, not clobbers — mirroring the existing enclosing-ForStmt early-out
+  // for loop-carry. Scoped to phi seeding so loop-carry-through-if stays sound.
+  bool if_phi_seed_ = false;
 
   // Walk IR, calling Propagate for each ForStmt we encounter.
   void VisitForStmts(const StmtPtr& stmt) {
@@ -356,6 +362,7 @@ class TopDownRetargeter {
       PropagateFromForStmt(for_stmt);
       VisitForStmts(for_stmt->body_);
     } else if (auto if_stmt = As<IfStmt>(stmt)) {
+      PropagateFromIfStmt(if_stmt);
       VisitForStmts(if_stmt->then_body_);
       if (if_stmt->else_body_.has_value()) VisitForStmts(if_stmt->else_body_.value());
     } else if (auto scope = As<ScopeStmt>(stmt)) {
@@ -492,6 +499,44 @@ class TopDownRetargeter {
           << seed_var->name_hint_
           << "' refused retarget onto the accumulator buffer, which would force an illegal "
              "Acc->Acc tile.move.";
+    }
+  }
+
+  // Seed must-alias retargeting from IfStmt return_vars (issue #1956). An
+  // if/else that yields a tile is a phi: both branch producers and the merged
+  // return_var must live in ONE buffer. Without this, the branches keep
+  // distinct buffers and codegen would emit the merged tile handle inside a
+  // branch — an undeclared-SSA scoping violation under memory_planner=PTOAS,
+  // where no shared physical addr masks it (level3 aliased them via addr).
+  // Mirrors PropagateFromForStmt: push the return_var's canonical MemRef onto
+  // both branch yields so RetargetIfReturn's producer-chain walk unifies them.
+  void PropagateFromIfStmt(const IfStmtPtr& if_stmt) {
+    if (if_stmt->return_vars_.empty()) return;
+    if (!if_stmt->else_body_.has_value()) return;  // a phi requires both arms
+    auto then_yield = FindYieldStmt(if_stmt->then_body_);
+    auto else_yield = FindYieldStmt(if_stmt->else_body_.value());
+    if (!then_yield || !else_yield) return;
+
+    for (size_t i = 0; i < if_stmt->return_vars_.size(); ++i) {
+      const auto& rv = if_stmt->return_vars_[i];
+      // Use the planned (possibly-rewritten) type so an enclosing ForStmt that
+      // already retargeted this return_var seeds the aligned buffer.
+      auto rv_key = std::static_pointer_cast<const Var>(rv);
+      auto rit = rewrites_.find(rv_key);
+      TypePtr rv_type = (rit != rewrites_.end()) ? rit->second : rv->GetType();
+      auto rv_tile = GetTileTypeWithMemRef(rv_type);
+      if (!rv_tile) continue;
+      auto target_memref = GetDefinedMemRef(rv_tile);
+      auto target_memory = rv_tile->GetMemorySpace();
+
+      if_phi_seed_ = true;
+      if (i < then_yield->value_.size()) {
+        if (auto yv = AsVarLike(then_yield->value_[i])) TryRetargetVar(yv, target_memref, target_memory);
+      }
+      if (i < else_yield->value_.size()) {
+        if (auto yv = AsVarLike(else_yield->value_[i])) TryRetargetVar(yv, target_memref, target_memory);
+      }
+      if_phi_seed_ = false;
     }
   }
 
@@ -768,6 +813,15 @@ class TopDownRetargeter {
       // retyped value is consumed by that loop's yield, so anything outside
       // the loop cannot observe it.
       if (As<ForStmt>(anc)) return true;
+
+      // During if-phi seeding, stop at the enclosing IfStmt for the same
+      // reason: the retyped branch producer is consumed by that if's merge
+      // (its return_var), so reads of the target buffer after the if are the
+      // merged phi value — the intended dataflow, not a clobber. Intra-branch
+      // hazards were already caught by the SeqStmts scan above. Gated so the
+      // loop-carry path (which may target an *outer* buffer through an if)
+      // still scans past inner ifs.
+      if (if_phi_seed_ && As<IfStmt>(anc)) return true;
 
       child_on_path = anc;
     }

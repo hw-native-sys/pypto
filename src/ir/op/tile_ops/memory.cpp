@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <any>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -35,6 +36,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
+#include "pypto/ir/memref.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/tile_view_semantics.h"
@@ -312,6 +314,59 @@ TypePtr DeduceTileAllocType(const std::vector<ExprPtr>& args,
                           << args.size();
 
   return GetPtrType();
+}
+
+// alloc_tile is the first-class tile *handle* (issue #1956), complementary to
+// `tile.alloc` (the region → base Ptr). It references (base Ptr, byte_offset,
+// shape) and deduces the typed TileType handle carrying that MemRef. Passes
+// place exactly one alloc_tile per must-alias group at a scope that dominates
+// all uses, so aliasing becomes structural (shared handle SSA) rather than
+// addr-based; codegen emits `pto.alloc_tile` from it 1:1. The physical address
+// rides as an optional `addr` kwarg set by AllocateMemoryAddr under
+// memory_planner=PYPTO (absent under PTOAS, whose ptoas PlanMemory assigns it).
+TypePtr DeduceAllocTileType(const std::vector<ExprPtr>& args,
+                            const std::vector<std::pair<std::string, std::any>>& kwargs,
+                            const std::string& op_name) {
+  // Signature: (base, byte_offset, shape) with dtype + memory_space kwargs.
+  CHECK(args.size() == 3) << "The operator " << op_name
+                          << " requires exactly 3 arguments (base, byte_offset, shape), but got "
+                          << args.size();
+
+  // arg[0]: base — the region Ptr Var (allocation identity token).
+  auto base = AsVarLike(args[0]);
+  CHECK(base) << "The operator " << op_name << " requires arg 0 (base) to be a Ptr variable, got "
+              << args[0]->TypeName();
+
+  // arg[2]: shape — MakeTuple of static ConstInt dims (matches tile.create).
+  auto make_tuple = As<MakeTuple>(args[2]);
+  CHECK(make_tuple) << "The operator " << op_name
+                    << " requires arg 2 (shape) to be a MakeTuple of static shape values, but got "
+                    << args[2]->TypeName();
+
+  std::vector<ExprPtr> tile_shape;
+  tile_shape.reserve(make_tuple->elements_.size());
+  uint64_t num_elements = 1;
+  for (size_t i = 0; i < make_tuple->elements_.size(); ++i) {
+    auto const_int = As<ConstInt>(make_tuple->elements_[i]);
+    CHECK(const_int) << "The operator " << op_name << " shape element " << i
+                     << " must be a compile-time constant (ConstInt), but got "
+                     << make_tuple->elements_[i]->TypeName();
+    CHECK(const_int->value_ > 0) << "The operator " << op_name << " shape element " << i
+                                 << " must be positive, got " << const_int->value_;
+    tile_shape.push_back(make_tuple->elements_[i]);
+    num_elements *= static_cast<uint64_t>(const_int->value_);
+  }
+  CHECK(!tile_shape.empty()) << "The operator " << op_name << " requires non-empty shape";
+
+  DataType dtype = GetKwarg<DataType>(kwargs, "dtype");
+  MemorySpace memory_space = GetKwarg<MemorySpace>(kwargs, "memory_space");
+
+  // arg[1]: byte_offset — kept as an ExprPtr on the MemRef so dynamic offsets
+  // survive; the physical addr (when materialized) rides the `addr` kwarg.
+  const uint64_t size_bytes = num_elements * ((dtype.GetBit() + 7) / 8);
+  auto memref = std::make_shared<MemRef>(base, args[1], size_bytes);
+
+  return std::make_shared<TileType>(tile_shape, dtype, memref, std::nullopt, memory_space);
 }
 
 TypePtr DeduceTileCreateTileType(const std::vector<ExprPtr>& args,
@@ -915,6 +970,27 @@ REGISTER_OP("tile.alloc")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileAllocType(args, kwargs, "tile.alloc");
+    });
+
+// alloc_tile: first-class tile *handle* onto a region (issue #1956). Distinct
+// from `tile.alloc` (the region → base Ptr): this references (base, byte_offset,
+// shape) and produces the typed tile handle codegen emits as `pto.alloc_tile`
+// 1:1. Pass-synthesized (no DSL surface); a placement/must-alias pass emits one
+// per must-alias group at a dominating scope so aliasing is structural.
+REGISTER_OP("alloc_tile")
+    .set_op_category("TileOp")
+    .set_description(
+        "Materialize an explicit tile buffer handle onto a region (base Ptr, byte_offset, shape)")
+    .set_core_affinity(core_affinity::CoreAffinity::VECTOR)
+    .add_argument("base", "Region Ptr from tile.alloc (allocation identity)")
+    .add_argument("byte_offset", "Byte offset within the region (scalar)")
+    .add_argument("shape", "Tile shape (TupleType of ConstInt)")
+    .set_attr<DataType>("dtype")
+    .set_attr<MemorySpace>("memory_space")
+    .no_memory_spec()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceAllocTileType(args, kwargs, "alloc_tile");
     });
 
 REGISTER_OP("tile.full")
