@@ -1177,11 +1177,19 @@ class JITFunction:
         func_type: str | None = None,
         level: Any = None,
         auto_scope: bool = True,
+        external_core_type: str | None = None,
+        external_aic_source: str | None = None,
+        external_aiv_source: str | None = None,
     ) -> None:
         self._func = func
         self._func_type = func_type or "orchestration"
         self._level = level
         self._auto_scope = auto_scope
+        # External C++ kernel backing (func_type == "extern"): resolved absolute
+        # paths the specializer emits as @pl.function(external_source=...).
+        self._external_core_type = external_core_type
+        self._external_aic_source = external_aic_source
+        self._external_aiv_source = external_aiv_source
         self._dep_graph: (
             tuple[
                 list[JITFunction],
@@ -1301,11 +1309,23 @@ class JITFunction:
     # Source hash (includes all dep sources; lazily computed after deps found)
     # ------------------------------------------------------------------
 
+    def _external_source_paths(self) -> list[str]:
+        """Absolute paths of the C++ source(s) backing an external kernel dep."""
+        return [p for p in (self._external_aic_source, self._external_aiv_source) if p is not None]
+
     def _get_source_hash(self) -> str:
         if self._source_hash is None:
             sources = [inspect.getsource(self._func)]
             for dep in self._get_deps():
-                sources.append(inspect.getsource(dep._func))
+                if dep._func_type == "extern":
+                    # The Python stub is just ``...``; the real implementation is
+                    # the C++ file(s). Hash their content so editing a kernel
+                    # invalidates the JIT cache (the stub source never changes).
+                    for path in dep._external_source_paths():
+                        with open(path) as f:
+                            sources.append(f.read())
+                else:
+                    sources.append(inspect.getsource(dep._func))
             self._source_hash = compute_source_hash(sources)
         return self._source_hash
 
@@ -1703,6 +1723,9 @@ class JITFunction:
                     scalar_dtypes=dep_sd,
                     dep_names=callees_by_id[id(dep._func)],
                     auto_scope=dep._auto_scope,
+                    external_core_type=dep._external_core_type,
+                    external_aic_source=dep._external_aic_source,
+                    external_aiv_source=dep._external_aiv_source,
                 )
             )
         dep_contexts.reverse()
@@ -1826,7 +1849,7 @@ def _discover_deps(func: Any, caller_func_type: str = "orchestration") -> list[J
 
     all_vars = {**func_globals, **closure_vars}
 
-    allowed_dep_types: set[str] = {"incore", "inline", "opaque"}
+    allowed_dep_types: set[str] = {"incore", "inline", "opaque", "extern"}
     if caller_func_type == "host":
         allowed_dep_types.add("orchestration")
 
@@ -1891,6 +1914,82 @@ class _SubFunctionDecorator:
         return JITFunction(func, func_type=self._func_type, level=None, auto_scope=resolved_auto_scope)
 
 
+def _resolve_extern_source(source: str | Any, func: Any) -> str:
+    """Resolve an external-kernel source path to an absolute file string.
+
+    A relative path is resolved against the directory of the file defining the
+    decorated ``@pl.jit.extern`` stub (``inspect.getsourcefile``), matching the
+    ``@pl.program`` external_source convention.
+    """
+    path = os.fspath(source)
+    if not os.path.isabs(path):
+        src_file = inspect.getsourcefile(func)
+        if src_file is not None and not src_file.startswith("<"):
+            path = os.path.join(os.path.dirname(src_file), path)
+    path = os.path.abspath(path)
+    if not os.path.isfile(path):
+        raise ValueError(
+            f"@pl.jit.extern source file not found: {path}. "
+            "Provide an absolute path, or one relative to the file defining the kernel."
+        )
+    return path
+
+
+class _ExternKernelDecorator:
+    """Sub-decorator for ``@pl.jit.extern`` — a hand-written C++ InCore kernel.
+
+    The decorated function is a signature-only stub (``...`` body); its
+    implementation is the referenced ``.cpp``. Forms::
+
+        @pl.jit.extern(source="k_aiv.cpp", core_type="aiv")     # single core
+        @pl.jit.extern(source="k_aic.cpp", core_type="aic")
+        @pl.jit.extern(core_type="mixed",                       # AIC+AIV pair
+                       aic_source="k.cpp", aiv_source="k.cpp")
+
+    A ``mixed`` kernel is dispatched as one ``MixedKernels`` submit: the
+    specializer emits an AIC member, an AIV member, and a Group wrapper.
+    """
+
+    def __call__(
+        self,
+        func: Any = None,
+        *,
+        core_type: str = "aiv",
+        source: str | Any = None,
+        aic_source: str | Any = None,
+        aiv_source: str | Any = None,
+    ) -> Any:
+        if core_type not in ("aic", "aiv", "mixed"):
+            raise ValueError(f"@pl.jit.extern core_type must be 'aic', 'aiv', or 'mixed', got {core_type!r}")
+
+        def _make(f: Any) -> JITFunction:
+            if core_type == "mixed":
+                if aic_source is None or aiv_source is None:
+                    raise ValueError(
+                        "@pl.jit.extern(core_type='mixed') requires both aic_source= and aiv_source="
+                    )
+                ext_aic = _resolve_extern_source(aic_source, f)
+                ext_aiv = _resolve_extern_source(aiv_source, f)
+            else:
+                single = source if source is not None else (aic_source or aiv_source)
+                if single is None:
+                    raise ValueError(f"@pl.jit.extern(core_type={core_type!r}) requires source=")
+                resolved = _resolve_extern_source(single, f)
+                ext_aic = resolved if core_type == "aic" else None
+                ext_aiv = resolved if core_type == "aiv" else None
+            return JITFunction(
+                f,
+                func_type="extern",
+                external_core_type=core_type,
+                external_aic_source=ext_aic,
+                external_aiv_source=ext_aiv,
+            )
+
+        if func is None:
+            return _make
+        return _make(func)
+
+
 class _JITDecorator:
     """The ``pl.jit`` object.
 
@@ -1916,6 +2015,7 @@ class _JITDecorator:
         self.incore = _SubFunctionDecorator("incore", allow_level=True)
         self.inline = _SubFunctionDecorator("inline", allow_level=False, allow_auto_scope=True)
         self.opaque = _SubFunctionDecorator("opaque", allow_level=False)
+        self.extern = _ExternKernelDecorator()
 
     def __call__(self, func: Any = None, *, auto_scope: bool = True) -> Any:
         """Decorate an entry-point JIT function (Orchestration).

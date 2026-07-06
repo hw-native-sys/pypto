@@ -66,6 +66,39 @@ if TYPE_CHECKING:
 _PLD_CATEGORIES: frozenset[str] = frozenset({"system", "tensor", "tile"})
 
 
+def _is_empty_body(body: list[ast.stmt]) -> bool:
+    """True if a function body carries no statements beyond a signature marker.
+
+    Accepts a bare ``...`` (the documented spelling), a bare ``pass`` (what the
+    IR printer emits for an empty body — required so external-kernel functions
+    survive print -> reparse round-trips), and an optional leading docstring.
+
+    Used to validate external-kernel declarations, whose implementation lives in
+    a hand-written C++ source rather than a parsed DSL body.
+    """
+    non_doc = [
+        stmt
+        for stmt in body
+        if not (
+            isinstance(stmt, ast.Expr)
+            and isinstance(stmt.value, ast.Constant)
+            and isinstance(stmt.value.value, str)
+        )
+    ]
+    if not non_doc:
+        return True
+    if len(non_doc) != 1:
+        return False
+    only = non_doc[0]
+    if isinstance(only, ast.Pass):
+        return True
+    return (
+        isinstance(only, ast.Expr)
+        and isinstance(only.value, ast.Constant)
+        and only.value.value is ...
+    )
+
+
 def _is_pld_call(node: object, attr_name: str) -> TypeGuard[ast.Call]:
     """Match ``pld.<attr_name>(...)`` or ``pld.<category>.<attr_name>(...)``.
 
@@ -752,7 +785,28 @@ class ASTParser:
 
             # Parse function body. HOST SubWorkers carry pure-Python source
             # via ``inline_body`` and are not parsed as DSL.
-            if inline_body is not None:
+            external_source = (func_attrs or {}).get("external_source")
+            if external_source is not None:
+                # Header-only external C++ kernel: no DSL body to parse. The
+                # signature (params + directions + return types) is the contract
+                # the orchestration submits against; the backend compiles the
+                # referenced ``.cpp`` as the InCore kernel by func_id.
+                if func_type not in (ir.FunctionType.AIC, ir.FunctionType.AIV):
+                    raise ParserTypeError(
+                        f"external_source is only valid on FunctionType.AIC or "
+                        f"FunctionType.AIV, got {func_type!r} for function '{func_name}'",
+                        span=func_span,
+                        hint="Declare the external kernel as pl.FunctionType.AIC or pl.FunctionType.AIV.",
+                    )
+                if not _is_empty_body(func_def.body):
+                    raise ParserSyntaxError(
+                        f"External kernel '{func_name}' must have an empty '...' body "
+                        "(signature only) — its implementation is the C++ source "
+                        "given by external_source.",
+                        span=func_span,
+                        hint="Replace the function body with a bare '...'.",
+                    )
+            elif inline_body is not None:
                 self.builder.inline_stmt(inline_body, ir.InlineLanguage.Python, func_span)
             else:
                 self._parse_body_siblings(func_def.body)

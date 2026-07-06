@@ -16,6 +16,7 @@ import linecache
 import sys
 import textwrap
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, TypeAlias, TypeVar, cast, overload
 
 from pypto.compile_profiling import CompileProfiler, get_active_profiler
@@ -420,6 +421,46 @@ def _normalize_attrs(attrs: dict[str, Any]) -> dict[str, Any] | None:
     return result or None
 
 
+# Function-attr key carrying the path to a hand-written external C++ kernel
+# source. When present on an AIC/AIV function, the DSL body is empty (``...``):
+# the compiler assigns the function a kernel func_id and emits the orchestration
+# submit as usual, but skips PyPTO codegen and instead compiles the referenced
+# ``.cpp`` as the InCore kernel (see pto_backend). Stored as an absolute path str.
+EXTERNAL_SOURCE_ATTR = "external_source"
+
+
+def _resolve_external_source(external_source: str | Path, caller_frame: Any) -> str:
+    """Resolve an ``external_source`` argument to an absolute file path string.
+
+    A relative path is resolved against the directory of the Python file that
+    defines the decorated function (the ``@pl.program`` / ``@pl.function``
+    source file), matching how examples locate their ``kernels/`` sources.
+
+    Args:
+        external_source: Path to a hand-written C++ kernel ``.cpp`` (str or PathLike).
+        caller_frame: The frame that invoked ``@pl.function`` — its ``__file__``
+            global provides the base directory for relative paths.
+
+    Returns:
+        Absolute path string to the kernel source.
+
+    Raises:
+        ValueError: If the resolved path does not point at an existing file.
+    """
+    path = Path(external_source)
+    if not path.is_absolute():
+        base_file = caller_frame.f_globals.get("__file__") if caller_frame is not None else None
+        if base_file is not None:
+            path = Path(base_file).parent / path
+    path = path.resolve()
+    if not path.is_file():
+        raise ValueError(
+            f"@pl.function(external_source=...) file not found: {path}. "
+            "Provide an absolute path, or one relative to the file defining the program."
+        )
+    return str(path)
+
+
 def _extract_function_attrs_from_decorator(node: ast.FunctionDef) -> dict[str, Any]:
     """Extract function attrs from @pl.function(attrs={...}) decorator.
 
@@ -682,6 +723,7 @@ def function(
     attrs: dict[str, Any] | None = None,
     auto_scope: bool = True,
     strict_ssa: bool = False,
+    external_source: str | Path | None = None,
 ) -> ir.Function: ...
 
 
@@ -695,6 +737,7 @@ def function(
     attrs: dict[str, Any] | None = None,
     auto_scope: bool = True,
     strict_ssa: bool = False,
+    external_source: str | Path | None = None,
 ) -> FunctionDecorator: ...
 
 
@@ -707,6 +750,7 @@ def function(
     attrs: dict[str, Any] | None = None,
     auto_scope: bool = True,
     strict_ssa: bool = False,
+    external_source: str | Path | None = None,
 ) -> ir.Function | FunctionDecorator:
     """Decorator that parses a DSL function and returns IR Function.
 
@@ -726,6 +770,13 @@ def function(
                    (only meaningful for Orchestration functions).
         strict_ssa: If True, enforce SSA (single assignment per variable).
                    If False (default), allow variable reassignment (non-SSA mode).
+        external_source: Path to a hand-written C++ kernel ``.cpp`` that backs
+                   this function. Only valid on ``FunctionType.AIC`` /
+                   ``FunctionType.AIV`` functions, whose body must be a bare
+                   ``...`` (signature only). The orchestration calls the kernel
+                   as usual, but the compiler skips PyPTO codegen for it and
+                   compiles the referenced source as the InCore kernel instead.
+                   Relative paths resolve against the defining file's directory.
 
     Returns:
         IR Function object (or decorator if used with parameters)
@@ -744,11 +795,21 @@ def function(
     caller_frame = sys._getframe(1)
     closure_vars = {**caller_frame.f_globals, **caller_frame.f_locals}
 
+    resolved_external_source = (
+        _resolve_external_source(external_source, caller_frame) if external_source is not None else None
+    )
+
     def _decorator(f: Callable[..., Any]) -> ir.Function | Callable[..., Any]:
         # Check if this is a method inside a class decorated with @pl.program
         # If so, return the original function - it will be parsed by @pl.program decorator
         if _is_class_method(f):
-            # Don't parse now - let @pl.program handle it with proper global_vars context
+            # Don't parse now - let @pl.program handle it with proper global_vars
+            # context. Stash the resolved external_source on the function object so
+            # the @pl.program AST walker can recover it via getattr (the value is a
+            # runtime Path expression, not an AST literal, so it can't be re-read
+            # from the decorator node).
+            if resolved_external_source is not None:
+                f._pl_external_source = resolved_external_source  # type: ignore[attr-defined]
             return f
 
         # Get source code and file information
@@ -787,6 +848,10 @@ def function(
             # Fold auto_scope=False into attrs (absent ⇒ default True).
             if auto_scope is False:
                 func_attrs = {**(func_attrs or {}), "auto_scope": False}
+            # Fold external_source into attrs — marks this as a header-only
+            # external kernel (empty ``...`` body, backed by hand-written C++).
+            if resolved_external_source is not None:
+                func_attrs = {**(func_attrs or {}), EXTERNAL_SOURCE_ATTR: resolved_external_source}
 
             try:
                 ir_func = parser.parse_function(
@@ -1019,6 +1084,15 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
                 func_auto_scope = _extract_function_auto_scope_from_decorator(func_def)
                 if func_auto_scope is False:
                     func_attrs["auto_scope"] = False
+
+                # External C++ kernel: @pl.function(external_source=...) stashed the
+                # resolved path on the method object (the value is a runtime Path
+                # expression, not an AST literal). Fold it into attrs so the parser
+                # emits a header-only function and the backend compiles the .cpp.
+                method_obj = getattr(c, func_def.name, None)
+                external_source = getattr(method_obj, "_pl_external_source", None)
+                if external_source is not None:
+                    func_attrs[EXTERNAL_SOURCE_ATTR] = external_source
 
                 # HOST SubWorkers carry their pure-Python body inline in the IR
                 # via an InlineStmt — no DSL parsing, no implicit `self` stripping

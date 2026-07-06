@@ -149,6 +149,14 @@ class SpecializeContext:
     # Appended at the tail to preserve positional construction of this exported
     # dataclass for external callers (auto_scope is keyword-only in practice).
     auto_scope: bool = True
+    # External C++ kernel backing (func_type == "extern"). core_type is
+    # "aic" | "aiv" (single) or "mixed" (AIC+AIV pair dispatched as one
+    # MixedKernels submit). The specializer renders the corresponding
+    # ``@pl.function(external_source=...)`` declaration(s), plus a Group wrapper
+    # for "mixed". Paths are absolute .cpp files.
+    external_core_type: str | None = None
+    external_aic_source: str | None = None
+    external_aiv_source: str | None = None
 
     @property
     def dynamic_dims(self) -> set[tuple[str, int]]:
@@ -1556,6 +1564,13 @@ class Specializer:
         ret_type = _infer_return_type(func_def, ctx.tensor_meta, out_params, distributed_params)
         ret_ann = f" -> {ret_type}" if ret_type else ""
 
+        # External C++ kernel: emit header-only declaration(s) backed by the
+        # hand-written source instead of a transformed DSL body. A "mixed"
+        # kernel expands to an AIC member + AIV member + Group wrapper so the
+        # entry's call lowers to a single MixedKernels submit.
+        if ctx.func_type == "extern":
+            return self._render_external(ctx, params, ret_ann, all_param_names)
+
         # Transform body
         dep_names = set(ctx.dep_names)
         # Collect all names defined anywhere in the function to seed collision avoidance.
@@ -1637,6 +1652,56 @@ class Specializer:
         result_lines.extend(body_lines[1:])
 
         return result_lines
+
+    def _render_external(
+        self,
+        ctx: SpecializeContext,
+        params: list[str],
+        ret_ann: str,
+        all_param_names: list[str],
+    ) -> list[str]:
+        """Render an external C++ kernel declaration as @pl.function source lines.
+
+        Single core (``core_type`` "aic"/"aiv") emits one header-only function.
+        "mixed" emits an AIC member, an AIV member, and a Group wrapper that
+        calls both — reproducing the ``@pl.program`` ``pl.group`` route so the
+        entry's call lowers to a single MixedKernels submit.
+        """
+        name = ctx.func_name
+        sig_params = ", ".join(params)
+        call_args = ", ".join(all_param_names)
+        header = f"def {name}(self, {sig_params}){ret_ann}:"
+
+        def _member(member_name: str, core_upper: str, source: str) -> list[str]:
+            return [
+                f"@pl.function(type=pl.FunctionType.{core_upper}, external_source={source!r})",
+                f"def {member_name}(self, {sig_params}){ret_ann}:",
+                "    ...",
+            ]
+
+        core = ctx.external_core_type
+        if core == "aic":
+            return _member(name, "AIC", ctx.external_aic_source)
+        if core == "aiv":
+            return _member(name, "AIV", ctx.external_aiv_source)
+
+        # Mixed: two members + a Group wrapper named after the extern so the
+        # entry's ``self.<name>(...)`` call resolves to the group.
+        lines = _member(f"{name}_aic", "AIC", ctx.external_aic_source)
+        lines += _member(f"{name}_aiv", "AIV", ctx.external_aiv_source)
+        lines.append("@pl.function(type=pl.FunctionType.Group)")
+        lines.append(header)
+        # AIV lanes never capture a return; the AIC lane echoes the outputs, so
+        # a value-returning kernel threads through the AIC member (matching the
+        # @pl.program group example). A void kernel emits both calls uncaptured.
+        if ret_ann:
+            lines.append(f"    _r = self.{name}_aic({call_args})")
+            lines.append(f"    self.{name}_aiv({call_args})")
+            lines.append("    return _r")
+        else:
+            lines.append(f"    self.{name}_aic({call_args})")
+            lines.append(f"    self.{name}_aiv({call_args})")
+        return lines
 
     def _build_decorator(self, ctx: SpecializeContext) -> str:
         """Build the @pl.function(...) decorator line.
@@ -1770,6 +1835,9 @@ def build_specialize_context(
     scalar_dtypes: dict[str, DataType],
     dep_names: list[str],
     auto_scope: bool = True,
+    external_core_type: str | None = None,
+    external_aic_source: str | None = None,
+    external_aiv_source: str | None = None,
 ) -> SpecializeContext:
     """Build a SpecializeContext from a Python function and call-site data.
 
@@ -1829,6 +1897,9 @@ def build_specialize_context(
         orig_file=orig_file,
         orig_start_line=orig_start_line,
         orig_col_offset=orig_col_offset,
+        external_core_type=external_core_type,
+        external_aic_source=external_aic_source,
+        external_aiv_source=external_aiv_source,
     )
 
 

@@ -56,6 +56,10 @@ class ReturnParamsExplicitVerifierImpl : public PropertyVerifier {
     if (!program) return;
     for (const auto& [gv, func] : program->functions_) {
       if (!func || !func->body_) continue;
+      // External C++ kernels are header-only declarations (empty '...' body); the
+      // implementation lives in the hand-written source named by "external_source".
+      // They legitimately have no ReturnStmt, so exempt them from this property.
+      if (func->HasAttr("external_source")) continue;
       const bool applies = IsInCoreType(func->func_type_) || func->func_type_ == FunctionType::Group ||
                            func->func_type_ == FunctionType::Spmd;
       if (!applies) continue;
