@@ -18,6 +18,7 @@ callable boundary.
 
 from ast import FunctionDef
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, Generic, TypeVar, overload
 
 from pypto.pypto_core import ir
@@ -60,7 +61,10 @@ def function(
     type: ir.FunctionType = ...,
     level: ir.Level | None = ...,
     role: ir.Role | None = ...,
+    attrs: dict[str, Any] | None = ...,
+    auto_scope: bool = ...,
     strict_ssa: bool = ...,
+    external_source: str | Path | None = ...,
 ) -> Callable[[Callable[..., _R_co]], DSLFunction[_R_co]]: ...
 def function(
     func: Callable[..., _R_co] | None = None,
@@ -68,7 +72,10 @@ def function(
     type: ir.FunctionType = ...,
     level: ir.Level | None = ...,
     role: ir.Role | None = ...,
+    attrs: dict[str, Any] | None = ...,
+    auto_scope: bool = ...,
     strict_ssa: bool = ...,
+    external_source: str | Path | None = ...,
 ) -> DSLFunction[_R_co] | Callable[[Callable[..., _R_co]], DSLFunction[_R_co]]: ...
 def inline(func: Callable[..., Any]) -> InlineFunction: ...
 @overload

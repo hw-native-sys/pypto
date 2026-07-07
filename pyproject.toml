@@ -115,8 +115,8 @@ line-ending = "lf"
 wheel.packages = ["python/pypto"]
 # Install the package data files (*.pyi, py.typed)
 wheel.install-dir = "pypto"
-# Set minimum CMake version
-cmake.minimum-version = "3.15"
+# Set minimum CMake version (cmake.minimum-version was removed in scikit-build-core 1.0)
+cmake.version = ">=3.15"
 # Build type
 cmake.build-type = "RelWithDebInfo"
 # Build directory, better for incremental build

@@ -312,7 +312,12 @@ def _compile_for_cache(
         analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
         memory_planner=test_case.get_memory_planner(),
     )
-    if not list((work_dir / "kernels").rglob("*.cpp")):
+    # External kernels are referenced in the manifest at their original path
+    # (not copied into the artifact), so accept them even when no kernel .cpp is
+    # generated under kernels/.
+    config_path = work_dir / "kernel_config.py"
+    kernels_in_manifest = config_path.exists() and '"func_id"' in config_path.read_text()
+    if not list((work_dir / "kernels").rglob("*.cpp")) and not kernels_in_manifest:
         raise ValueError(f"No kernels generated for {test_case.get_name()}")
     if not list((work_dir / "orchestration").glob("*.cpp")):
         raise ValueError(

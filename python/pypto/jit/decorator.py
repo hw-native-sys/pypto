@@ -1314,20 +1314,29 @@ class JITFunction:
         return [p for p in (self._external_aic_source, self._external_aiv_source) if p is not None]
 
     def _get_source_hash(self) -> str:
-        if self._source_hash is None:
-            sources = [inspect.getsource(self._func)]
-            for dep in self._get_deps():
-                if dep._func_type == "extern":
-                    # The Python stub is just ``...``; the real implementation is
-                    # the C++ file(s). Hash their content so editing a kernel
-                    # invalidates the JIT cache (the stub source never changes).
-                    for path in dep._external_source_paths():
-                        with open(path) as f:
-                            sources.append(f.read())
-                else:
-                    sources.append(inspect.getsource(dep._func))
-            self._source_hash = compute_source_hash(sources)
-        return self._source_hash
+        deps = self._get_deps()
+        # External kernel .cpp files are mutable on disk, unlike the (fixed once
+        # loaded) Python source. When any extern dep is present, recompute the
+        # hash on every lookup so an edited kernel is picked up even within a
+        # long-lived process; otherwise cache it.
+        has_extern = any(d._func_type == "extern" for d in deps)
+        if self._source_hash is not None and not has_extern:
+            return self._source_hash
+        sources = [inspect.getsource(self._func)]
+        for dep in deps:
+            if dep._func_type == "extern":
+                # The Python stub is just ``...``; the real implementation is
+                # the C++ file(s). Hash their content so editing a kernel
+                # invalidates the JIT cache (the stub source never changes).
+                for path in dep._external_source_paths():
+                    with open(path) as f:
+                        sources.append(f.read())
+            else:
+                sources.append(inspect.getsource(dep._func))
+        source_hash = compute_source_hash(sources)
+        if not has_extern:
+            self._source_hash = source_hash
+        return source_hash
 
     # ------------------------------------------------------------------
     # Parameter introspection
