@@ -16,9 +16,16 @@ signature (empty ``...`` body), the compiler skips codegen for it and compiles
 the referenced ``kernels/aiv/spmd_write.cpp`` as the InCore kernel, and the
 PyPTO orchestration dispatches it across SPMD blocks.
 
-The kernel writes ``float(block_idx)`` at ``out[(base_cl + block_idx) * 16]``,
-so a 4-block SPMD launch with ``base_cl = 0`` produces ``[0, 1, 2, 3]`` at
-stride 16 — an exact, deterministic golden.
+The kernel is **multi-file**: its entry ``kernels/aiv/spmd_write.cpp`` pulls in
+``kernels/common/cacheline_offset.h`` (which defines ``FLOATS_PER_CACHE_LINE``)
+via a relative ``../common/...`` include. This validates that PyPTO references
+the entry ``.cpp`` at its original path (rather than copying it), so sibling
+files stay reachable.
+
+The kernel writes ``float(block_idx)`` at
+``out[(base_cl + block_idx) * FLOATS_PER_CACHE_LINE]``, so a 4-block SPMD launch
+with ``base_cl = 0`` produces ``[0, 1, 2, 3]`` at stride 16 — an exact,
+deterministic golden.
 """
 
 from pathlib import Path

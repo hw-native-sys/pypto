@@ -18,6 +18,11 @@
  *
  *   out[(base_cl + block_idx) * FLOATS_PER_CACHE_LINE] = float(block_idx)
  *
+ * FLOATS_PER_CACHE_LINE lives in a sibling directory and is pulled in via a
+ * relative "../common/..." include, so this is a multi-file external kernel:
+ * PyPTO references the entry .cpp at its original path, keeping the sibling
+ * header reachable.
+ *
  * Args:
  *   args[0] = output Tensor* (INOUT)
  *   args[1] = scalar: base_cl (starting cache line index for this task)
@@ -36,9 +41,8 @@
 #define __aicore__ [aicore]  // NOLINT(whitespace/braces)
 #endif
 
-#include "intrinsic.h"  // NOLINT(build/include_subdir)
-
-static constexpr int32_t FLOATS_PER_CACHE_LINE = 16;
+#include "../common/cacheline_offset.h"  // sibling header via relative include
+#include "intrinsic.h"                   // NOLINT(build/include_subdir)
 
 #ifdef PTO_CPUSTUB_HPP
 #define dcci(...) \
