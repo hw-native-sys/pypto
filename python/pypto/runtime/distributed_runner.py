@@ -428,8 +428,11 @@ def _make_call_config(
             # dep_gen does not perturb it. Everywhere else (the timing-pass-less
             # single-pass: prepared worker, or sim where conversion is skipped)
             # co-enable dep_gen so swimlane still has a graph in one dispatch.
-            call_config.enable_dep_gen = dfx.enable_dep_gen or (
-                co_enable_swimlane_dep_gen and dfx.enable_l2_swimlane
+            # ``enable_l2_swimlane`` is an int level (0/1/2), so ``... and
+            # dfx.enable_l2_swimlane`` yields an int; coerce to bool because the
+            # CallConfig.enable_dep_gen setter only accepts bool.
+            call_config.enable_dep_gen = bool(
+                dfx.enable_dep_gen or (co_enable_swimlane_dep_gen and dfx.enable_l2_swimlane)
             )
             call_config.enable_scope_stats = dfx.enable_scope_stats
             call_config.enable_l2_swimlane = dfx.enable_l2_swimlane
