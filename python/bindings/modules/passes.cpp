@@ -111,7 +111,9 @@ void BindPass(nb::module_& m) {
              "return->param map is a lookup (#1702)")
       .value("AivSplitValid", IRProperty::AivSplitValid,
              "Split-mode AIV/AIC functions (explicit split_aiv marker + non-None split mode) have no "
-             "vector reduce op that collapses the split axis (partial-reduction miscompile)");
+             "vector reduce op that collapses the split axis (partial-reduction miscompile)")
+      .value("AllocTileDominatesUses", IRProperty::AllocTileDominatesUses,
+             "Every TileType-with-MemRef use is dominated by an alloc_tile op for its buffer (#1956)");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");
@@ -320,6 +322,12 @@ void BindPass(nb::module_& m) {
              "Propagates loop-carried iter_arg/initValue MemRefs down the yield/producer chain so\n"
              "accumulator producers write directly into the carried buffer. Split out of MemoryReuse\n"
              "so it can run without the opportunistic lifetime-reuse phase (memory_planner=PTOAS).");
+
+  passes.def("materialize_alloc_tiles", &pass::MaterializeAllocTiles,
+             "Create the alloc_tile materialization pass (issue #1956)\n\n"
+             "Emits one explicit alloc_tile(base, byte_offset, shape) op at the function head per\n"
+             "distinct tile buffer (grouped by MemRef identity), so PTO codegen emits pto.alloc_tile\n"
+             "1:1 instead of synthesizing an in-branch handle. The handle then dominates its uses.");
 
   passes.def("memory_reuse", &pass::MemoryReuse,
              "Create a memory reuse pass\n\n"

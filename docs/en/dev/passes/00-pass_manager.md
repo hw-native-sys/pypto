@@ -91,6 +91,7 @@ struct PassProperties {
 | LowerHostTensorCollectives | CommDomainScopesMaterialized | CommDomainScopesMaterialized | — |
 | Simplify | — | — | — |
 | MaterializeRuntimeScopes | SplitIncoreOrch, CallDirectionsResolved | RuntimeScopesMaterialized | — |
+| MaterializeAllocTiles | SplitIncoreOrch, IncoreTileOps, HasMemRefs, NormalizedStmtStructure | NormalizedStmtStructure, AllocTileDominatesUses | — |
 
 > **Note**: VerifySSA and TypeCheck are **PropertyVerifiers** (verification rules), not Passes. They run via `VerificationInstrument` or the `run_verifier()` utility — see [Verifier](99-verifier.md).
 
@@ -405,6 +406,7 @@ The PTO-oriented tile stage shared by `Default` and `DebugTileOptimization` is:
 28. [`LowerHostTensorCollectives`](39-lower_host_tensor_collectives.md) (host-level tensor collectives -> internal builtin chip dispatches)
 29. `Simplify`
 30. [`MaterializeRuntimeScopes`](40-materialize_runtime_scopes.md) (inserts AUTO RuntimeScopeStmt so orchestration codegen emits PTO2_SCOPE 1:1)
+31. [`MaterializeAllocTiles`](41-materialize_alloc_tiles.md) (dead last, both memory planners; promotes the PTO tile handle to a first-class `alloc_tile` op so codegen is strict 1:1 — #1956)
 
 `DebugTileOptimization` is a debug-only strategy for inspecting this tile stage
 without the tensor-only prefix passes. Use `Default` for normal compilation and

@@ -27,10 +27,11 @@ both passes run and codegen bakes ``addr`` for ``--pto-level=level3``.
 
 import pypto.language as pl
 import pytest
-from pypto import backend, ir
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import codegen, passes
+
+from pypto import backend, ir
 
 
 @pl.program
@@ -190,10 +191,25 @@ def test_ptoas_loop_carry_is_in_place_single_handle():
 def test_pypto_loop_carry_uses_shared_addr():
     optimized, _ = _run_pipeline(passes.MemoryPlanner.PYPTO, LoopCarriedAdd)
     mlir = _codegen(optimized, emit_tile_addr=True)
-    alloc_lines = [ln for ln in mlir.splitlines() if "pto.alloc_tile" in ln]
-    addrs = [ln.split("addr =")[1].split()[0] for ln in alloc_lines if "addr =" in ln]
-    # In level3 the loop-carry aliasing is carried by two allocs sharing an addr.
-    assert len(addrs) != len(set(addrs)), f"PYPTO mode must alias the accumulator via a shared addr:\n{mlir}"
+    # Since #1956 the loop-carry accumulator is a single structural alloc_tile
+    # handle (the same must-alias collapse as the PTOAS path — see
+    # test_ptoas_loop_carry_is_in_place_single_handle — rather than the pre-#1956
+    # pair of per-var allocs sharing one addr). The tadd writes in place onto that
+    # handle, and PYPTO bakes a physical addr on it (the level3 distinction).
+    tadd = next((ln for ln in mlir.splitlines() if "pto.tadd" in ln), None)
+    assert tadd is not None, f"expected a pto.tadd:\n{mlir}"
+    ins = tadd.split("ins(")[1].split(")")[0]
+    out_handle = tadd.split("outs(")[1].split(")")[0].split(":")[0].strip()
+    in_handles = [tok.strip() for tok in ins.split(":")[0].split(",")]
+    assert out_handle in in_handles, (
+        f"PYPTO loop-carry must be in-place (out handle {out_handle} should alias an input "
+        f"{in_handles}):\n{tadd}"
+    )
+    acc_allocs = [ln for ln in mlir.splitlines() if "pto.alloc_tile" in ln and out_handle in ln]
+    assert len(acc_allocs) == 1, f"accumulator buffer must have exactly one alloc_tile:\n{mlir}"
+    assert "addr =" in acc_allocs[0], (
+        f"PYPTO mode must bake a physical addr on the accumulator alloc_tile:\n{acc_allocs[0]}"
+    )
 
 
 if __name__ == "__main__":

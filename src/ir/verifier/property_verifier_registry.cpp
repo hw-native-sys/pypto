@@ -93,6 +93,10 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   // partial occupancy deadlocks on device. Produced by ExpandMixedKernel and in
   // GetVerifiedProperties(), so it fires once right after that pass.
   Register(IRProperty::HardSyncallOccupancyValid, CreateHardSyncallOccupancyPropertyVerifier);
+  // AllocTileDominatesUses (#1956): every TileType-with-MemRef use is dominated
+  // by an alloc_tile op for its buffer. Produced by MaterializeAllocTiles (the
+  // last pass) and in GetVerifiedProperties(), so it fires once at pipeline end.
+  Register(IRProperty::AllocTileDominatesUses, CreateAllocTileDominatesPropertyVerifier);
 }
 
 void PropertyVerifierRegistry::Register(IRProperty prop, std::function<PropertyVerifierPtr()> factory) {

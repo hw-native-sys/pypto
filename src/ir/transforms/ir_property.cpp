@@ -97,6 +97,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "AivSplitValid";
     case IRProperty::HardSyncallOccupancyValid:
       return "HardSyncallOccupancyValid";
+    case IRProperty::AllocTileDominatesUses:
+      return "AllocTileDominatesUses";
     default:
       return "Unknown";
   }
@@ -143,7 +145,8 @@ const IRPropertySet& GetVerifiedProperties() {
                                    IRProperty::ManualDepsOnSubmitOnly,
                                    IRProperty::ReturnParamsExplicit,
                                    IRProperty::AivSplitValid,
-                                   IRProperty::HardSyncallOccupancyValid};
+                                   IRProperty::HardSyncallOccupancyValid,
+                                   IRProperty::AllocTileDominatesUses};
   return props;
 }
 

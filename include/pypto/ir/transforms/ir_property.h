@@ -85,6 +85,10 @@ enum class IRProperty : uint64_t {
                                     ///< 1 block/core-group). A partial/over launch deadlocks on device
                                     ///< (507018) — use mode="soft" for partial occupancy. Verified after
                                     ///< ExpandMixedKernel (kernel FunctionType resolved).
+  AllocTileDominatesUses,           ///< Every TileType-with-MemRef use is dominated by an alloc_tile op
+                                    ///< for its buffer (issue #1956). Produced by MaterializeAllocTiles —
+                                    ///< the explicit handle must be declared at a scope dominating all
+                                    ///< uses, so no branch-local handle is read from another branch.
   kCount                            ///< Sentinel (must be last)
 };
 

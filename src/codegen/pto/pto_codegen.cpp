@@ -33,6 +33,7 @@
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/codegen/distributed/comm_layout.h"
 #include "pypto/codegen/pto/pto_type_utils.h"
+#include "pypto/codegen/pto/tile_buf_signature.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -75,23 +76,6 @@ using ir::YieldStmtPtr;
 namespace transform_utils = ir::transform_utils;
 
 namespace {
-
-// Full-MemRef-identity key used by PTOAS memory-planner codegen to decide when
-// two tile variables denote the *same* buffer (and must share one tile_buf
-// handle so the op writes in place). Same base + byte_offset + size = same
-// buffer (loop-carried accumulator, in-place op result). A view shares the
-// base but differs in offset and/or size, so it gets a distinct key.
-std::string MemRefIdentityKey(const ir::MemRefPtr& memref) {
-  std::ostringstream key;
-  key << static_cast<const void*>(memref->base_.get()) << '|';
-  if (auto off = As<ir::ConstInt>(memref->byte_offset_)) {
-    key << "off" << off->value_;
-  } else {
-    key << "off@" << static_cast<const void*>(memref->byte_offset_.get());
-  }
-  key << "|sz" << memref->size_;
-  return key.str();
-}
 
 bool IsSameDimExpr(const ExprPtr& lhs, const ExprPtr& rhs) {
   if (lhs == rhs) {
@@ -616,18 +600,24 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   for (const auto& [tile_var, tile_type] : fs_.tile_var_allocs) {
     auto memref = ir::GetDefinedMemRef(tile_type);
 
+    // Resolve every tile var to the handle MaterializeAllocTiles (issue #1956)
+    // emitted for its buffer. The handle var is first in program order (placed at
+    // the dominating scope), so it wins the SSA name and every member resolves to
+    // it: loop-carried accumulators, if/else-yield phi producers + return_var,
+    // in-place op results, and same-signature views all alias one handle. The key
+    // is memref identity under PTOAS, and memref identity + TileBufSignature under
+    // PyPTO so distinct pad / shape / layout / valid-shape at one address keep
+    // their own handle (see BufferHandleKey). Applied under both memory planners:
+    // under PyPTO the shared addr is emitted once per typed handle instead of once
+    // per aliasing var; under PTOAS ptoas PlanMemory keeps the slot one buffer.
+    const std::string ident = BufferHandleKey(tile_type);
     std::string ssa_name;
-    if (!emit_tile_addr_) {
-      const std::string ident = MemRefIdentityKey(memref);
-      auto it = fs_.memref_identity_to_mlir.find(ident);
-      if (it != fs_.memref_identity_to_mlir.end()) {
-        ssa_name = it->second;  // reuse the shared handle (in-place aliasing)
-      } else {
-        ssa_name = NewNamedTemp(tile_var->name_hint_);
-        fs_.memref_identity_to_mlir[ident] = ssa_name;
-      }
+    auto it = fs_.memref_identity_to_mlir.find(ident);
+    if (it != fs_.memref_identity_to_mlir.end()) {
+      ssa_name = it->second;  // reuse the shared handle (in-place aliasing)
     } else {
       ssa_name = NewNamedTemp(tile_var->name_hint_);
+      fs_.memref_identity_to_mlir[ident] = ssa_name;
     }
     BindVarToMlir(tile_var, ssa_name);
 
@@ -1058,6 +1048,21 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
   }
 }
 
+std::string PTOCodegen::BufferHandleKey(const std::shared_ptr<const ir::TileType>& tile_type) const {
+  auto memref = ir::GetDefinedMemRef(tile_type);
+  std::string key = ir::MemRefIdentityKey(memref);
+  // PyPTO (emit_tile_addr_): a byte-slot may host several distinct typed handles
+  // that alias the same address (differing pad / shape / layout / valid-shape).
+  // Split them by TileBufSignature so each resolves to its own pto.alloc_tile —
+  // matching the pre-#1956 per-var handles and the MaterializeAllocTiles pass's
+  // BufferKey. PTOAS emits no addr and ptoas allocates one buffer per handle, so
+  // the slot maps to exactly one handle (memref identity only).
+  if (emit_tile_addr_) {
+    key += "|sig=" + TileBufSignature::FromTileType(*tile_type).Key();
+  }
+  return key;
+}
+
 PTOCodegen::AllocTileFields PTOCodegen::ComputeAllocTileFields(
     const std::shared_ptr<const ir::TileType>& tile_type) {
   AllocTileFields fields;
@@ -1382,6 +1387,18 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   const bool is_set_validshape = ir::IsOp(call, "tile.set_validshape");
   const bool alias_scatter_result_to_input = ShouldAliasScatterResultToInput(op);
   const bool alias_array_update_to_input = ShouldAliasArrayUpdateResultToInput(op);
+
+  // alloc_tile (issue #1956) IS the explicit tile-handle declaration: emit the
+  // `pto.alloc_tile` for this buffer here (at the dominating scope the pass
+  // placed it) and stop — it carries no backend op to lower. Every other tile
+  // var that shares this buffer resolves to the same handle by MemRef identity
+  // and its own EmitAllocTileForVar becomes a no-op (already emitted).
+  if (ir::IsOp(call, "alloc_tile")) {
+    if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
+      EmitAllocTileForVar(op->var_, tile_type);
+    }
+    return;
+  }
 
   if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
     if (!is_set_validshape && !alias_scatter_result_to_input) {

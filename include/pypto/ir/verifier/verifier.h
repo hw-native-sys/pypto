@@ -471,6 +471,21 @@ PropertyVerifierPtr CreateReturnParamsExplicitPropertyVerifier();
  */
 PropertyVerifierPtr CreateHardSyncallOccupancyPropertyVerifier();
 
+/**
+ * @brief Create a verifier for the AllocTileDominatesUses property (issue #1956)
+ *
+ * After MaterializeAllocTiles, every tile buffer is declared by exactly one
+ * explicit ``alloc_tile`` op at a scope that dominates all its uses. This
+ * verifier flags any use of a TileType-with-MemRef variable whose buffer was
+ * not materialized by a dominating ``alloc_tile`` — in particular a handle
+ * declared inside one branch and read from another (the pre-#1956 miscompile
+ * under memory_planner=PTOAS). Keyed by MemRef identity, so it holds under both
+ * memory planners.
+ *
+ * @return Shared pointer to AllocTileDominatesUses PropertyVerifier
+ */
+PropertyVerifierPtr CreateAllocTileDominatesPropertyVerifier();
+
 }  // namespace ir
 }  // namespace pypto
 

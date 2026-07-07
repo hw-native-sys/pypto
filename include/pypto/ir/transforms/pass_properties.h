@@ -259,6 +259,15 @@ inline const PassProperties kAllocateMemoryAddrProperties{
                  IRProperty::TileOps2D},
     .produced = {IRProperty::AllocatedMemoryAddr}};
 
+// alloc_tile materialization (issue #1956). Inserts one explicit alloc_tile op
+// per tile buffer at a dominating scope; requires MemRefs to exist, preserves
+// stmt structure, and guarantees every tile-buffer use is dominated by its
+// alloc_tile handle.
+inline const PassProperties kMaterializeAllocTilesProperties{
+    .required = {IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps, IRProperty::HasMemRefs,
+                 IRProperty::NormalizedStmtStructure},
+    .produced = {IRProperty::NormalizedStmtStructure, IRProperty::AllocTileDominatesUses}};
+
 // -- Return order normalization pass ------------------------------------------
 
 inline const PassProperties kNormalizeReturnOrderProperties{

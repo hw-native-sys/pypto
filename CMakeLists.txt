@@ -155,6 +155,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/stamp_tfree_split_pass.cpp
     src/ir/transforms/materialize_runtime_scopes_pass.cpp
     src/ir/transforms/fuse_create_assemble_to_slice_pass.cpp
+    src/ir/transforms/materialize_alloc_tiles_pass.cpp
     src/ir/transforms/memory_reuse_pass.cpp
     src/ir/transforms/normalize_return_order_pass.cpp
     src/ir/transforms/convert_tensor_to_tile_ops_pass.cpp
@@ -225,6 +226,7 @@ set(PYPTO_SOURCES
     src/ir/verifier/verifier.cpp
     src/ir/verifier/property_verifier_registry.cpp
     src/ir/verifier/mixed_kernel_expanded_verifier.cpp
+    src/ir/verifier/verify_alloc_tile_dominates.cpp
     src/ir/verifier/verify_hard_syncall_occupancy.cpp
     src/ir/verifier/verify_aiv_split.cpp
     src/ir/verifier/verify_ssa_pass.cpp

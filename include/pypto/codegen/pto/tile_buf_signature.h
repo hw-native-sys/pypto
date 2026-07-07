@@ -13,6 +13,8 @@
 #define PYPTO_CODEGEN_PTO_TILE_BUF_SIGNATURE_H_
 
 #include <cstdint>
+#include <sstream>
+#include <string>
 
 #include "pypto/core/dtype.h"
 #include "pypto/ir/expr.h"
@@ -55,6 +57,35 @@ struct TileBufSignature {
            v_col_dynamic == o.v_col_dynamic;
   }
   bool operator!=(const TileBufSignature& o) const { return !(*this == o); }
+
+  /**
+   * @brief Stable string key over the fields the PTO tile-buf *type* encodes.
+   *
+   * Covers memory_space, dtype, physical rows/cols, block/sub layout, fractal,
+   * and pad — exactly the attributes that appear in a `pto.alloc_tile` type
+   * string. The valid-shape extent (`v_row`/`v_col` and their dynamic flags) is
+   * deliberately excluded: alloc_tile always types the buffer with dynamic
+   * `v_row=?, v_col=?` and conveys the extent via separate `valid_row`/
+   * `valid_col` operands (or a later `pto.set_validshape`), so it does not gate
+   * handle identity.
+   *
+   * Used to key PTO tile-handle deduplication (issue #1956): under
+   * `memory_planner=PyPTO` two tile vars that share one MemRef byte-slot but have
+   * different type keys (differing pad / physical shape / layout) resolve to
+   * distinct `pto.alloc_tile` handles at the same address (matching the pre-#1956
+   * per-var model — e.g. a `tile.fillpad` pad=min result over a pad=0 load, or a
+   * row-major [1,N] reshape-tmp aliasing an [N,1] col-major phi value). Tiles
+   * that differ only in valid-shape (e.g. `tile.set_validshape` narrowing a load)
+   * keep the same key and therefore alias one handle, as do true aliases
+   * (loop-carry, if/else-yield phi, in-place op results).
+   */
+  [[nodiscard]] std::string Key() const {
+    std::ostringstream k;
+    k << "ms" << static_cast<int>(memory_space) << ":dt" << static_cast<int>(dtype.Code()) << ":r" << rows
+      << ":c" << cols << ":bl" << static_cast<int>(blayout) << ":sl" << static_cast<int>(slayout) << ":fr"
+      << fractal << ":pd" << static_cast<int>(pad);
+    return k.str();
+  }
 
   /**
    * @brief Check whether two signatures are storage-compatible

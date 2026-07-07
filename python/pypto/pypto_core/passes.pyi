@@ -54,6 +54,7 @@ class IRProperty(Enum):
     ManualDepsOnSubmitOnly = ...
     ReturnParamsExplicit = ...
     AivSplitValid = ...
+    AllocTileDominatesUses = ...
 
 class IRPropertySet:
     """A set of IR properties backed by a bitset."""
@@ -329,6 +330,13 @@ def init_mem_ref() -> Pass:
 
 def materialize_semantic_aliases() -> Pass:
     """Create the semantic must-alias materialization pass (loop-carry / in-place)."""
+
+def materialize_alloc_tiles() -> Pass:
+    """Create the alloc_tile materialization pass (issue #1956).
+
+    Emits one explicit ``alloc_tile(base, byte_offset, shape)`` op at the function
+    head per distinct tile buffer so PTO codegen emits ``pto.alloc_tile`` 1:1.
+    """
 
 def memory_reuse() -> Pass:
     """Create a memory reuse pass."""

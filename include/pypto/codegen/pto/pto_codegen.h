@@ -339,6 +339,24 @@ class PTOCodegen : public CodegenBase {
   void EmitAllocTileForVar(const ir::VarPtr& tile_var, const std::shared_ptr<const ir::TileType>& tile_type);
 
   /**
+   * @brief Tile-handle dedup key: MemRef identity, plus TileBufSignature under
+   *        PyPTO (issue #1956).
+   *
+   * The MemRef identity portion is `ir::MemRefIdentityKey` (the byte-slot key
+   * shared with the MaterializeAllocTiles pass and the AllocTileDominatesUses
+   * verifier). A byte-slot may host several distinct typed tile handles that
+   * alias the same address (differing pad / physical shape / layout). Under
+   * memory_planner=PyPTO (emit_tile_addr_) handles carry an explicit addr, so
+   * such typed views are kept apart by appending the TileBufSignature — matching
+   * the pre-#1956 per-var handles. Under PTOAS ptoas allocates one buffer per
+   * handle, so the slot maps to exactly one handle (memref identity only). Kept
+   * in lock-step with the MaterializeAllocTiles pass's BufferKey so every tile
+   * var — AssignStmt-defined, loop iter_arg, control-flow return_var — resolves
+   * to the handle placed for it.
+   */
+  std::string BufferHandleKey(const std::shared_ptr<const ir::TileType>& tile_type) const;
+
+  /**
    * @brief Resolve the DPS element vars of a tuple-returning op call
    *
    * Multi-output ops (e.g. tile.gather_compare) return a TupleType. The parser

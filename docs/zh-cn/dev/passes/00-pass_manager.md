@@ -91,6 +91,7 @@ struct PassProperties {
 | LowerHostTensorCollectives | CommDomainScopesMaterialized | CommDomainScopesMaterialized | — |
 | Simplify | — | — | — |
 | MaterializeRuntimeScopes | SplitIncoreOrch, CallDirectionsResolved | RuntimeScopesMaterialized | — |
+| MaterializeAllocTiles | SplitIncoreOrch, IncoreTileOps, HasMemRefs, NormalizedStmtStructure | NormalizedStmtStructure, AllocTileDominatesUses | — |
 
 > **注意**：VerifySSA 和 TypeCheck 是**属性验证器 (PropertyVerifier)**（验证规则），不是 Pass。它们通过 `VerificationInstrument` 或 `run_verifier()` 工具函数运行——参见[验证器](99-verifier.md)。
 
@@ -405,6 +406,7 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 28. [`LowerHostTensorCollectives`](39-lower_host_tensor_collectives.md)（host-level tensor collectives -> internal builtin chip dispatches）
 29. `Simplify`
 30. [`MaterializeRuntimeScopes`](40-materialize_runtime_scopes.md)（插入 AUTO RuntimeScopeStmt，使 orchestration codegen 1:1 emit PTO2_SCOPE）
+31. [`MaterializeAllocTiles`](41-materialize_alloc_tiles.md)（dead last，两种 memory planner 都跑；把 PTO tile handle 提升为一等 `alloc_tile` op，使 codegen 严格 1:1 —— #1956）
 
 `DebugTileOptimization` 只是用于排查 PTO tile 阶段的调试策略，会跳过
 tensor-only 前缀 pass。正常编译和非 strategy 专项测试都应优先使用

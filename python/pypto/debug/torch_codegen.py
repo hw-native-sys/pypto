@@ -633,6 +633,14 @@ def _handle_create(a: list[str], kw: dict[str, Any]) -> str:
     return f"torch.zeros({a[0]}, dtype={_kw_dtype(kw)})"
 
 
+def _handle_alloc_tile(a: list[str], kw: dict[str, Any]) -> str:
+    # alloc_tile(base, byte_offset, shape) declares a PTO tile-buffer handle
+    # (issue #1956). It is a codegen artifact with no value-SSA consumer — the
+    # logical tile vars carry the data — so evaluate it to a zeroed tile of the
+    # declared shape (arg index 2) purely to keep the reference eval well-formed.
+    return f"torch.zeros({a[2]}, dtype={_kw_dtype(kw)})"
+
+
 def _handle_full(a: list[str], kw: dict[str, Any]) -> str:
     return f"torch.full({a[0]}, {a[1]}, dtype={_kw_dtype(kw)})"
 
@@ -974,6 +982,7 @@ def _register_ops() -> None:  # noqa: PLR0915
     m["tile.create"] = _handle_create
     m["tile.full"] = _handle_full
     m["tile.alloc"] = _handle_create
+    m["alloc_tile"] = _handle_alloc_tile
     m["tile.move"] = _identity()
     m["tile.slice"] = _handle_slice
     m["tile.extract"] = _handle_tile_extract

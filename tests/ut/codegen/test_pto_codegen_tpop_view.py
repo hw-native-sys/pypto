@@ -18,9 +18,10 @@ fresh, disconnected ``pto.alloc_tile`` the popped data is never moved into.
 
 import pypto.language as pl
 import pytest
-from pypto import backend, codegen
 from pypto.backend import BackendType
 from pypto.ir import OptimizationStrategy, PassManager
+
+from pypto import backend, codegen
 
 PTOCodegen = codegen.PTOCodegen
 
@@ -112,9 +113,11 @@ def test_pto_codegen_reshape_over_tpop_lowers_to_treshape():
         "both reshapes over the tpop result must lower to pto.treshape; got:\n" + consumer
     )
 
-    # The views own no buffer: the only alloc_tiles are the loaded input and the
-    # exp output — neither reshape result gets a (disconnected) alloc_tile.
-    assert consumer.count("pto.alloc_tile") == 2, (
+    # The views own no buffer: the tpop result and its reshapes read the popped
+    # tile in place, allocating nothing. tile_a's buffer is reused in place by the
+    # exp output (MemoryReuse), so under #1956 structural aliasing they collapse
+    # to one handle — the sole alloc_tile in this function.
+    assert consumer.count("pto.alloc_tile") == 1, (
         "a view over a tpop result must not allocate a buffer; got:\n" + consumer
     )
 

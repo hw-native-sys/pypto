@@ -255,24 +255,42 @@ print(pto_code)
 
 ### 分配生成
 
-基于附加到 TileType 变量的 MemRef 对象。代码生成器从关联的 TileType 推导 Tile 维度和数据类型:
+每个 tile buffer 都由一个显式的 `pto.alloc_tile` op 声明，codegen 从 IR **1:1**
+emit 它。handle *不再*在 codegen 层合成：
+[`MaterializeAllocTiles`](../passes/41-materialize_alloc_tiles.md) pass（issue #1956）
+为每个不同的 tile buffer 在一个支配其全部使用的作用域中插入一个
+`alloc_tile` op，codegen 逐条原样转写。其余每个 tile 变量都解析到其 buffer 的
+handle，因此一个跨 `if`/`else` 分支写入的 buffer 只在分支*之前*声明一次 —— 绝不
+声明在某个分支内部（这正是该 pass 存在所要防止的 SSA 作用域违规）。
 
 ```mlir
 %mi_tile = pto.alloc_tile addr = %c8320_i64 : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=1,
-                       v_row=16, v_col=1, blayout=col_major,
-                       slayout=none_box, fractal=512, pad=0>
+                      v_row=?, v_col=?, blayout=col_major,
+                      slayout=none_box, fractal=512, pad=0>
 %mi_tile_nd = pto.alloc_tile addr = %c8320_i64 : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16,
-                       v_row=1, v_col=16, blayout=row_major,
-                       slayout=none_box, fractal=512, pad=0>
+                      v_row=?, v_col=?, blayout=row_major,
+                      slayout=none_box, fractal=512, pad=0>
 ```
 
-**Tile 变量到 alloc_tile 的映射**:
+**每个 buffer 有多少个 handle** —— 上面两个 op 共享同一地址，却是不同的 handle，
+因为它们的物理 shape / layout 不同。去重键（`PTOCodegen::BufferHandleKey`，与 pass
+的 `BufferKey` 保持一致）取决于 memory planner：
 
-- 内存空间 (`TileType.memory_space_`) 映射到 `loc` 属性 (使用 PTO 地址空间名)
-- Tile 数据类型和维度从每个变量自身的 TileType 元数据推导
-- 每个 Tile 变量对应一次分配 (不是每个唯一 MemRef)
-- `addr` 属性来自 `MemRef.addr_`，输出为 `arith.constant ... : i64`
-- 共享同一 MemRef 的变量共享相同的 `addr` SSA 值
+- **`PYPTO`** —— 键是 *MemRef 身份 + `TileBufSignature`*（内存空间、dtype、物理
+  shape、layout、fractal、pad）。handle 携带显式 `addr`，因此多个带类型的 handle
+  可以别名同一地址；两个共享字节槽位但 pad / shape / layout 不同的 tile 各得一个
+  自己的 handle（与历史上的每变量模型一致 —— 例如叠在一个 `pad=0` load 之上的
+  `tile.fillpad` `pad=min` 结果）。仅 *valid 范围* 不同的 tile（例如一次
+  `tile.set_validshape` 收窄）共享同一 handle：范围搭载在 `valid_row` /
+  `valid_col` 操作数上，而不在 handle 类型里（handle 类型始终是
+  `v_row=?, v_col=?`）。
+- **`PTOAS`** —— 键仅为 *MemRef 身份*。ptoas 为每个 handle 分配一个 buffer，因此
+  一个字节槽位恰好映射到一个 handle（pad 差异被折叠）。
+
+Must-alias 组（循环累加器、`if`/`else`-yield phi 生产者 + return-var、原地 op
+结果）共享同一签名，因而在两种 planner 下都共享同一 handle —— 这就是取代旧的
+共享-`addr` 约定的结构性别名。`addr` 属性本身来自 `MemRef.byte_offset_`，emit 为
+`arith.constant ... : i64`，在 `PTOAS` 下省略。
 
 #### 由谁规划内存：`compile(memory_planner=...)`
 

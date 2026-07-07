@@ -52,7 +52,8 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 37 | `37-synthesize_allreduce_signals.md` | 37th pass (distributed: host allreduce optional signal -> explicit internal signal IR) |
 | 38 | `38-materialize_comm_domain_scopes.md` | 38th pass (distributed: WindowBuffer + CommDomainScopeStmt wrappers in each host_orch body; runs immediately before LowerHostTensorCollectives) |
 | 39 | `39-lower_host_tensor_collectives.md` | 39th pass (host-level tensor collectives -> internal builtin chip dispatches; runs after comm-domain scopes) |
-| 40 | `40-materialize_runtime_scopes.md` | Last pass (after the final Simplify; inserts AUTO RuntimeScopeStmt so orchestration codegen emits PTO2_SCOPE 1:1) |
+| 40 | `40-materialize_runtime_scopes.md` | Runs after the final Simplify; inserts AUTO RuntimeScopeStmt so orchestration codegen emits PTO2_SCOPE 1:1 |
+| 41 | `41-materialize_alloc_tiles.md` | Dead last (after MaterializeRuntimeScopes; both memory planners). Promotes the PTO tile handle to a first-class `alloc_tile` op so codegen is strict 1:1 (#1956) |
 | 91 | `91-utility_passes.md` | Not in Default strategy |
 | 99 | `99-verifier.md` | Infrastructure (not a pipeline pass) |
 

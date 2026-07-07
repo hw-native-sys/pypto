@@ -159,6 +159,18 @@ Pass InitMemRef();
 Pass MaterializeSemanticAliases();
 
 /**
+ * @brief Create the alloc_tile materialization pass (issue #1956)
+ *
+ * Emits one explicit `alloc_tile(base, byte_offset, shape)` op at the function
+ * head per distinct tile buffer (grouped by MemRef identity: base + byte_offset
+ * + size). Codegen emits `pto.alloc_tile` 1:1 from these ops instead of
+ * synthesizing a handle at each tile var's (possibly in-branch) definition site,
+ * so the handle always dominates its uses. Runs late, after MemRef addresses and
+ * buffers are final (must-alias unification, reuse, address assignment).
+ */
+Pass MaterializeAllocTiles();
+
+/**
  * @brief Create a memory reuse pass
  *
  * Uses dependency analysis to identify memory reuse opportunities.

@@ -5162,6 +5162,12 @@ class ASTParser:
             from .decorator import InlineFunction  # noqa: PLC0415 (circular import)
 
             func_name = func.id
+            # ``alloc_tile`` is pass-synthesized (MaterializeAllocTiles, issue
+            # #1956), has no DSL surface, and the printer emits it bare (its op
+            # name carries no namespace dot). Reconstruct the raw IR call so the
+            # print -> parse round-trip (e.g. the RoundtripInstrument) resolves it.
+            if func_name == "alloc_tile":
+                return self._parse_printed_alloc_tile_call(call)
             resolved = self.expr_evaluator.closure_vars.get(func_name)
             if isinstance(resolved, ir.Function):
                 return self._parse_external_function_call(func_name, resolved, call)
@@ -7023,6 +7029,29 @@ class ASTParser:
                 span=self.span_tracker.get_span(call),
             )
         return ir.create_op_call(op_name, args, {}, self.span_tracker.get_span(call))
+
+    def _parse_printed_alloc_tile_call(self, call: ast.Call) -> ir.Call:
+        """Parse printer-emitted ``alloc_tile(base, byte_offset, [shape], dtype=, memory_space=)``.
+
+        The ``alloc_tile`` op (issue #1956) is placed by MaterializeAllocTiles and
+        has no DSL surface, so its printed form is reconstructed into a raw IR call
+        directly (rather than through a DSL wrapper) for print -> parse round-trip.
+        """
+        span = self.span_tracker.get_span(call)
+        if len(call.args) != 3:
+            raise InvalidOperationError(
+                f"alloc_tile in printed IR expects 3 positional args (base, byte_offset, shape), "
+                f"got {len(call.args)}",
+                span=span,
+            )
+        base = self.parse_expression(call.args[0])
+        byte_offset = self.parse_expression(call.args[1])
+        shape_arg = call.args[2]
+        if not isinstance(shape_arg, ast.List):
+            raise InvalidOperationError("alloc_tile shape (3rd arg) must be a list literal", span=span)
+        shape_tuple = ir.MakeTuple([self.parse_expression(e) for e in shape_arg.elts], span)
+        kwargs = self._parse_op_kwargs(call)
+        return ir.create_op_call("alloc_tile", [base, byte_offset, shape_tuple], kwargs, span)
 
     def _parse_system_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse system operation."""

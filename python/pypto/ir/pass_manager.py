@@ -202,6 +202,13 @@ class PassManager:
             # 1:1 from the IR. Runs dead last, after the final Simplify, so no
             # other transform has to reason about the inserted scope wrappers.
             ("MaterializeRuntimeScopes", lambda: passes.materialize_runtime_scopes()),
+            # Promote the PTO tile handle to explicit alloc_tile ops (issue #1956)
+            # so codegen emits pto.alloc_tile 1:1 instead of synthesizing an
+            # in-branch handle. Runs dead last (both memory planners): after
+            # MemRefs/addresses are final and after the final Simplify, so DCE
+            # never removes the (deliberately unused) handle vars and no earlier
+            # transform has to reason about the alloc_tile op.
+            ("MaterializeAllocTiles", lambda: passes.materialize_alloc_tiles()),
         ]
         cls._strategy_passes = {
             OptimizationStrategy.Default: tensor_prefix_passes + tensor_only_passes + tile_pto_passes,

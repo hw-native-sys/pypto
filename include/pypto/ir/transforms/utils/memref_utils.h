@@ -19,6 +19,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -190,6 +191,25 @@ inline MemRefPtr GetDefinedMemRef(const std::shared_ptr<const TileType>& tile_ty
   CHECK(tile_type != nullptr) << "TileType must not be null";
   CHECK(tile_type->memref_.has_value()) << "TileType must carry MemRef";
   return *tile_type->memref_;
+}
+
+/// Same-buffer identity key for a MemRef: base Ptr + byte_offset + size. Two tile
+/// vars denote the same physical tile_buf iff they share this key. This is the
+/// single source of truth for the key that PTO codegen resolves handles by
+/// (`PTOCodegen::BufferHandleKey`), that `MaterializeAllocTiles` groups buffers
+/// by (`BufferKey`), and that the `AllocTileDominatesUses` verifier checks
+/// dominance by — the three must agree byte-for-byte, so they share this helper
+/// (issue #1956). A view shares the base but differs in offset/size → distinct.
+inline std::string MemRefIdentityKey(const MemRefPtr& memref) {
+  std::ostringstream key;
+  key << static_cast<const void*>(memref->base_.get()) << '|';
+  if (auto off = As<ConstInt>(memref->byte_offset_)) {
+    key << "off" << off->value_;
+  } else {
+    key << "off@" << static_cast<const void*>(memref->byte_offset_.get());
+  }
+  key << "|sz" << memref->size_;
+  return key.str();
 }
 
 inline bool TryRegisterUniqueMemRef(const MemRefPtr& memref, MemorySpace memory_space,

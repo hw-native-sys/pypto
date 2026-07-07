@@ -13,8 +13,9 @@ import os
 
 import pypto.language as pl
 import pytest
-from pypto import DataType, backend, ir, passes
 from pypto.backend import BackendType
+
+from pypto import DataType, backend, ir, passes
 
 TENSOR_ONLY_PASSES = [
     "OutlineHierarchyScopes",
@@ -63,6 +64,7 @@ TENSOR_OPTIMIZATION_PASSES = [
     "LowerHostTensorCollectives",
     "Simplify",
     "MaterializeRuntimeScopes",
+    "MaterializeAllocTiles",
 ]
 
 DEBUG_TILE_OPTIMIZATION_PASSES = [
@@ -103,6 +105,7 @@ DEBUG_TILE_OPTIMIZATION_PASSES = [
     "LowerHostTensorCollectives",
     "Simplify",
     "MaterializeRuntimeScopes",
+    "MaterializeAllocTiles",
 ]
 
 

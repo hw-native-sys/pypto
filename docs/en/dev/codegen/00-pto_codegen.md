@@ -263,24 +263,46 @@ Example for a `[16, 1]` column vector (no DN annotation in DSL):
 
 ### Allocation Generation
 
-Based on TileType variables collected from the function body. Each tile variable gets its own `pto.alloc_tile` instruction with an explicit `addr` attribute derived from the variable's MemRef. Variables sharing the same MemRef share the same address:
+Every tile buffer is declared by an explicit `pto.alloc_tile` op that codegen
+emits **1-to-1** from the IR. The handle is *not* synthesized in the codegen
+layer: the [`MaterializeAllocTiles`](../passes/41-materialize_alloc_tiles.md)
+pass (issue #1956) inserts one `alloc_tile` op per distinct tile buffer at a
+scope that dominates all its uses, and codegen transcribes each op verbatim.
+Every other tile variable resolves to its buffer's handle, so a buffer written
+across `if`/`else` branches is declared once *before* the branch — never inside
+one (the SSA-scoping violation the pass exists to prevent).
 
 ```mlir
 %mi_tile = pto.alloc_tile addr = %c8320_i64 : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=1,
-                      v_row=16, v_col=1, blayout=col_major,
+                      v_row=?, v_col=?, blayout=col_major,
                       slayout=none_box, fractal=512, pad=0>
 %mi_tile_nd = pto.alloc_tile addr = %c8320_i64 : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16,
-                      v_row=1, v_col=16, blayout=row_major,
+                      v_row=?, v_col=?, blayout=row_major,
                       slayout=none_box, fractal=512, pad=0>
 ```
 
-**Tile variable → alloc_tile mapping**:
+**How many handles per buffer** — the two ops above share one address yet are
+distinct handles because they differ in physical shape / layout. The dedup key
+(`PTOCodegen::BufferHandleKey`, kept in lock-step with the pass's `BufferKey`) is
+memory-planner dependent:
 
-- Memory space (`TileType.memory_space_`) → `loc` attribute (using PTO address space names)
-- Tile dtype and dimensions derived from each variable's own TileType metadata
-- One allocation per tile variable (not per unique MemRef)
-- `addr` attribute from `MemRef.addr_`, emitted as `arith.constant ... : i64`
-- Variables sharing the same MemRef produce the same `addr` SSA value
+- **`PYPTO`** — key is *MemRef identity + `TileBufSignature`* (memory space,
+  dtype, physical shape, layout, fractal, pad). Handles carry an explicit `addr`,
+  so several typed handles may alias one address; two tiles that share a byte-slot
+  but differ in pad / shape / layout each get their own handle (matching the
+  historical per-variable model — e.g. a `tile.fillpad` `pad=min` result over a
+  `pad=0` load). Tiles that differ only in *valid extent* (e.g. a
+  `tile.set_validshape` narrowing) share one handle: the extent rides on the
+  `valid_row` / `valid_col` operands, not the handle type (which is always
+  `v_row=?, v_col=?`).
+- **`PTOAS`** — key is *MemRef identity* only. ptoas allocates one buffer per
+  handle, so a byte-slot maps to exactly one handle (pad differences collapse).
+
+Must-alias groups (loop-carried accumulators, `if`/`else`-yield phi producers +
+return-var, in-place op results) share one signature, hence one handle, under
+both planners — the structural aliasing that replaces the old shared-`addr`
+convention. The `addr` attribute itself comes from `MemRef.byte_offset_`, emitted
+as `arith.constant ... : i64`, and is omitted under `PTOAS`.
 
 #### Who plans memory: `compile(memory_planner=...)`
 

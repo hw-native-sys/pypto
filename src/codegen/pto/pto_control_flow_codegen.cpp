@@ -161,12 +161,25 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
       } else if (auto tile_type = As<TileType>(return_var->GetType())) {
         INTERNAL_CHECK_SPAN(tile_type->memref_.has_value(), op->span_)
             << "TileType return_var must have a MemRef at codegen stage for var: " << return_var->name_hint_;
-        // Reuse the same alloc_tile rules as EmitAllocTileForVar so this
-        // deferred alloc emits a dynamic-validShape `pto.alloc_tile` with
-        // explicit valid_row / valid_col operands.
-        AllocTileFields fields = ComputeAllocTileFields(tile_type);
-        std::string ret_name = AllocNewTileBuf(fields.type_str, return_var->name_hint_, fields.addr_ssa,
-                                               fields.valid_row_ssa, fields.valid_col_ssa);
+        // The phi return_var shares its buffer with both branch producers
+        // (unified by MaterializeSemanticAliases), and MaterializeAllocTiles
+        // placed one alloc_tile handle for that buffer at the function head.
+        // Resolve to that shared handle by the same key the per-var loop uses
+        // (BufferHandleKey — memref identity, plus TileBufSignature under PyPTO;
+        // issue #1956) so the merged value the branches wrote is exactly what
+        // downstream reads — instead of allocating a fresh, never-written
+        // return_var buffer (the pre-#1956 miscompile under memory_planner=PTOAS).
+        // Fall back to a fresh alloc only if no handle was materialized (e.g.
+        // codegen paths that skip MaterializeAllocTiles).
+        std::string ret_name;
+        auto handle_it = fs_.memref_identity_to_mlir.find(BufferHandleKey(tile_type));
+        if (handle_it != fs_.memref_identity_to_mlir.end()) {
+          ret_name = handle_it->second;
+        } else {
+          AllocTileFields fields = ComputeAllocTileFields(tile_type);
+          ret_name = AllocNewTileBuf(fields.type_str, return_var->name_hint_, fields.addr_ssa,
+                                     fields.valid_row_ssa, fields.valid_col_ssa);
+        }
         BindVarToMlir(return_var, ret_name);
       } else if (As<TensorType>(return_var->GetType()) || As<ir::ArrayType>(return_var->GetType())) {
         // Tensors and on-core arrays are mutable references mutated in place
