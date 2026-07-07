@@ -580,6 +580,45 @@ def test_pto_codegen_dynamic_valid_shape_row_defined_in_body():
     assert "pto.set_validshape" not in mlir_code
 
 
+def test_pto_codegen_alloc_tile_placed_inside_loop_for_body_valid_shape():
+    """A tile used only inside a loop, whose valid_shape depends on a loop-body
+    scalar, must have its alloc_tile placed INSIDE the loop (after the scalar) —
+    not hoisted above the loop where the operand is out of scope (issue #1956).
+    """
+
+    @pl.program
+    class LoopBodyValidShapeProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            inp: pl.Tensor[[8, 120], pl.FP32],
+            n: pl.Scalar[pl.INDEX],
+            out: pl.Out[pl.Tensor[[8, 120], pl.FP32]],
+        ) -> pl.Tensor[[8, 120], pl.FP32]:
+            for i in pl.range(n):
+                # valid length is derived from the loop induction var, in-body.
+                valid_len: pl.Scalar[pl.INDEX] = i + 1
+                t: pl.Tile[[1, 120], pl.FP32] = pl.tile.load(
+                    inp, [i, 0], [1, 120], [1, valid_len], target_memory=pl.MemorySpace.Vec
+                )
+                _r: pl.Tensor[[8, 120], pl.FP32] = pl.tile.store(t, [i, 0], out)
+            return out
+
+    mlir_code = _generate_default_mlir(LoopBodyValidShapeProgram)
+    lines = mlir_code.splitlines()
+
+    for_idx = next(i for i, ln in enumerate(lines) if "scf.for" in ln)
+    alloc_idx = next(i for i, ln in enumerate(lines) if "pto.alloc_tile" in ln)
+    # The handle must be emitted inside the loop body (after scf.for opens), so
+    # its dynamic valid_col operand (the in-body scalar) is in scope.
+    assert alloc_idx > for_idx, f"alloc_tile must be inside the loop, not hoisted above it:\n{mlir_code}"
+    alloc_line = lines[alloc_idx]
+    assert "valid_col = %" in alloc_line and "valid_col = %c" not in alloc_line, (
+        f"Expected a dynamic (SSA, non-constant) valid_col operand, got: {alloc_line}"
+    )
+    assert "v_col=?" in alloc_line, f"Expected dynamic v_col=? in tile type, got: {alloc_line}"
+
+
 def test_pto_codegen_tile_load_lowering():
     """Test that tile.load generates partition_view + tload."""
 
@@ -1993,6 +2032,61 @@ def test_pto_codegen_if_stmt_only_returns_scalars_for_tile_phi():
     phi_target = match.group(1)
     phi_alloc_line = _single_line(lines, f"{phi_target} = pto.alloc_tile", startswith=True)
     assert "addr =" in phi_alloc_line, f"Expected IfStmt tile phi alloc to carry addr: {phi_alloc_line}"
+
+
+def test_pto_codegen_nested_if_phi_unifies_into_one_buffer():
+    """A nested if/else-yield phi must unify every branch producer — including the
+    inner-if producers — into the outer phi's single buffer. Guards the
+    MemoryReuse if_phi_seed_ exact-seeded-IfStmt liveness scan against nested
+    control flow (issue #1956): a stale any-IfStmt early-out could alias a buffer
+    that is later clobbered."""
+
+    @pl.program
+    class NestedIfPhi:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[64, 64], pl.FP32],
+            c1: pl.Scalar[pl.INDEX],
+            c2: pl.Scalar[pl.INDEX],
+            out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            ta: pl.Tile[[64, 64], pl.FP32] = pl.load(a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Vec)
+            if c1 == 0:
+                if c2 == 0:
+                    r1: pl.Tile[[64, 64], pl.FP32] = pl.mul(ta, ta)
+                    inner: pl.Tile[[64, 64], pl.FP32] = pl.yield_(r1)
+                else:
+                    r2: pl.Tile[[64, 64], pl.FP32] = pl.add(ta, ta)
+                    inner: pl.Tile[[64, 64], pl.FP32] = pl.yield_(r2)
+                res: pl.Tile[[64, 64], pl.FP32] = pl.yield_(inner)
+            else:
+                r3: pl.Tile[[64, 64], pl.FP32] = pl.exp(ta)
+                res: pl.Tile[[64, 64], pl.FP32] = pl.yield_(r3)
+            o: pl.Tensor[[64, 64], pl.FP32] = pl.store(res, [0, 0], out)
+            return o
+
+    mlir_code = _generate_default_mlir(NestedIfPhi)
+    lines = _get_mlir_lines(mlir_code)
+
+    # The store reads the merged phi buffer; every branch producer must write it.
+    store_line = _single_line(lines, "pto.tstore")
+    store_match = re.search(r"ins\((%[\w\d_]+) :", store_line)
+    assert store_match is not None, f"Expected tstore ins operand, got: {store_line}"
+    phi_buf = store_match.group(1)
+
+    for op in ("pto.tmul", "pto.tadd", "pto.texp"):
+        producer = _single_line(lines, op)
+        out_match = re.search(r"outs\((%[\w\d_]+) :", producer)
+        assert out_match and out_match.group(1) == phi_buf, (
+            f"{op} must write the unified phi buffer {phi_buf} (nested if-phi), got:\n{producer}"
+        )
+
+    # The phi buffer's alloc_tile dominates the if — declared once, outside it.
+    phi_alloc = _single_line(lines, f"{phi_buf} = pto.alloc_tile", startswith=True)
+    if_idx = next(i for i, ln in enumerate(lines) if "scf.if" in ln)
+    alloc_idx = next(i for i, ln in enumerate(lines) if phi_alloc.strip() == ln.strip())
+    assert alloc_idx < if_idx, f"phi buffer alloc_tile must precede the if:\n{mlir_code}"
 
 
 def test_pto_codegen_if_stmt_tile_phi_preserves_dynamic_valid_shape():

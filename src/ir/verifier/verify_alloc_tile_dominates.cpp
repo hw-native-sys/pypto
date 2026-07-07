@@ -88,6 +88,10 @@ class AllocTileDominatesChecker : public IRVisitor {
     if (op->value_) VisitExpr(op->value_);
   }
 
+  // Loop iter_args are live inside the body and return_vars after the loop; both
+  // carry a MemRef whose alloc_tile handle MaterializeAllocTiles places at the
+  // enclosing (dominating) scope, so they are checked against `saved` — the
+  // materialization state outside the loop body.
   void VisitStmt_(const ForStmtPtr& op) override {
     if (!op) return;
     if (op->start_) VisitExpr(op->start_);
@@ -97,8 +101,12 @@ class AllocTileDominatesChecker : public IRVisitor {
       if (iter_arg && iter_arg->initValue_) VisitExpr(iter_arg->initValue_);
     }
     auto saved = materialized_;
+    for (const auto& ia : op->iter_args_)
+      if (ia) VisitVarLike_(std::static_pointer_cast<const Var>(ia));
     if (op->body_) VisitStmt(op->body_);
-    materialized_ = std::move(saved);  // body-local handles do not leak past the loop
+    materialized_ = saved;  // body-local handles do not leak past the loop
+    for (const auto& rv : op->return_vars_)
+      if (rv) VisitVarLike_(rv);
   }
 
   void VisitStmt_(const WhileStmtPtr& op) override {
@@ -107,9 +115,13 @@ class AllocTileDominatesChecker : public IRVisitor {
       if (iter_arg && iter_arg->initValue_) VisitExpr(iter_arg->initValue_);
     }
     auto saved = materialized_;
+    for (const auto& ia : op->iter_args_)
+      if (ia) VisitVarLike_(std::static_pointer_cast<const Var>(ia));
     if (op->condition_) VisitExpr(op->condition_);
     if (op->body_) VisitStmt(op->body_);
-    materialized_ = std::move(saved);
+    materialized_ = saved;
+    for (const auto& rv : op->return_vars_)
+      if (rv) VisitVarLike_(rv);
   }
 
   void VisitStmt_(const IfStmtPtr& op) override {
@@ -119,7 +131,11 @@ class AllocTileDominatesChecker : public IRVisitor {
     if (op->then_body_) VisitStmt(op->then_body_);
     materialized_ = saved;
     if (op->else_body_.has_value() && *op->else_body_) VisitStmt(*op->else_body_);
-    materialized_ = std::move(saved);  // branch-local handles do not leak past the if
+    materialized_ = saved;  // branch-local handles do not leak past the if
+    // return_vars (phi results) are live after the if; their handle is placed
+    // before it.
+    for (const auto& rv : op->return_vars_)
+      if (rv) VisitVarLike_(rv);
   }
 
  private:

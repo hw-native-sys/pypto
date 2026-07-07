@@ -77,12 +77,21 @@ one signature and therefore one handle under both planners.
 
 ### Deps-aware placement
 
-Each handle is inserted immediately before the first top-level statement whose
-subtree uses its buffer. That point (a) dominates all uses — a buffer written
-across branches is first seen at the enclosing `IfStmt`, so the handle lands
-before it — and (b) follows any body-defined value the handle's `TileView`
-references (e.g. a runtime valid length), which a blind hoist to the function head
-would precede. The scan is O(N): each top-level subtree is visited once.
+Each handle is placed at the **smallest scope that dominates all uses of its
+buffer** and follows the handle's `TileView` operand dependencies, found by
+recursing the statement tree:
+
+- A buffer used across several statements — or across `if`/`else` branches, or as
+  a loop carry (iter-arg / return-var) — is placed at the current level, before
+  its first use. A phi buffer written in both branches is thus declared before the
+  enclosing `IfStmt`, dominating both.
+- A buffer used **entirely within one nested loop or branch body** descends into
+  that scope, so a handle whose `valid_shape` references a loop-body scalar
+  (e.g. `valid = i + 1; t = load(..., valid_shapes=[.., valid])`) lands *after*
+  that scalar — not hoisted above the loop where the operand is out of scope.
+
+Each statement is rescanned once per enclosing level, so the pass is O(N × depth)
+(nesting depth is bounded).
 
 ## Example
 
@@ -95,9 +104,13 @@ else:
 final = pl.store(result, [0, 0], out)
 ```
 
+The IR op is `alloc_tile(base, byte_offset, shape)`; PTO codegen emits it as
+`pto.alloc_tile`, lowering the tile's `TileView` valid extent into the
+`valid_row` / `valid_col` operands shown below (`v_row=?, v_col=?` in the type):
+
 ```mlir
-; After MaterializeAllocTiles (PTOAS): one handle at the function head, both
-; branches and the store share it — no in-branch declaration.
+; After MaterializeAllocTiles (PTOAS): one handle before the if (it dominates
+; both branches), which the branches and the store share — no in-branch decl.
 %res__buf1 = pto.alloc_tile valid_row = %c64_index valid_col = %c64_index : !pto.tile_buf<...>
 scf.if %flag {
   pto.tmul ... outs(%res__buf1 : !pto.tile_buf<...>)

@@ -35,6 +35,7 @@
 #include <cstddef>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -176,6 +177,152 @@ StmtPtr MakeAllocTileStmt(const BufferInfo& info, int idx) {
   return std::make_shared<AssignStmt>(handle, call, Span::unknown());
 }
 
+// The buffer key of a var, or "" if it holds no MemRef-backed tile.
+std::string BufferKeyOfVar(const VarPtr& var, bool split_by_signature) {
+  auto tile_type = GetTileTypeWithMemRef(var->GetType());
+  if (!tile_type) return "";
+  auto memref = GetDefinedMemRef(tile_type);
+  if (!memref) return "";
+  return BufferKey(memref, tile_type, split_by_signature);
+}
+
+// Which of `keys` does `stmt`'s subtree use? Returned in `keys` order.
+std::vector<std::string> KeysUsedBy(const StmtPtr& stmt, const std::vector<std::string>& keys,
+                                    bool split_by_signature) {
+  BufferCollector bc(split_by_signature);
+  bc.VisitStmt(stmt);
+  std::set<std::string> used(bc.order.begin(), bc.order.end());
+  std::vector<std::string> out;
+  for (const auto& k : keys)
+    if (used.count(k)) out.push_back(k);
+  return out;
+}
+
+std::vector<StmtPtr> BodyToVec(const StmtPtr& body) {
+  if (auto seq = As<SeqStmts>(body)) return seq->stmts_;
+  return {body};
+}
+
+// Forward decl: recursive placement of handles into a statement list.
+std::vector<StmtPtr> PlaceHandlesInSeq(const std::vector<StmtPtr>& stmts,
+                                       const std::vector<std::string>& keys,
+                                       const std::map<std::string, BufferInfo>& buffers, int* idx,
+                                       bool split_by_signature);
+
+// A buffer used by exactly one child statement `stmt` may descend into a nested
+// scope of that child — but only when the descent still dominates every use and
+// keeps the handle after its TileView operand deps:
+//   - ForStmt / WhileStmt: descend into the body iff the buffer is NOT a loop
+//     carry (iter_arg / return_var), which would live across the loop boundary.
+//   - IfStmt: descend into a branch iff the buffer is used in exactly one branch
+//     and is not a return_var (a phi that must be declared before the if).
+// Otherwise the handle is placed at the current level, before the child.
+bool CanDescend(const StmtPtr& stmt, const std::string& key, bool split_by_signature) {
+  auto is_carry = [&](const auto& iter_args, const std::vector<VarPtr>& return_vars) {
+    for (const auto& ia : iter_args)
+      if (BufferKeyOfVar(std::static_pointer_cast<const Var>(ia), split_by_signature) == key) return true;
+    for (const auto& rv : return_vars)
+      if (BufferKeyOfVar(rv, split_by_signature) == key) return true;
+    return false;
+  };
+  if (auto f = As<ForStmt>(stmt)) return !is_carry(f->iter_args_, f->return_vars_);
+  if (auto w = As<WhileStmt>(stmt)) return !is_carry(w->iter_args_, w->return_vars_);
+  if (auto ic = As<IfStmt>(stmt)) {
+    for (const auto& rv : ic->return_vars_)
+      if (BufferKeyOfVar(rv, split_by_signature) == key) return false;
+    bool in_then = ic->then_body_ && !KeysUsedBy(ic->then_body_, {key}, split_by_signature).empty();
+    bool in_else = ic->else_body_.has_value() && *ic->else_body_ &&
+                   !KeysUsedBy(*ic->else_body_, {key}, split_by_signature).empty();
+    return in_then != in_else;  // exactly one branch
+  }
+  return false;
+}
+
+// Rebuild `stmt` with `keys` placed inside its (single) nested scope. Only called
+// for stmts where CanDescend returned true for every key.
+StmtPtr RewriteStmtWithPushdown(const StmtPtr& stmt, const std::vector<std::string>& keys,
+                                const std::map<std::string, BufferInfo>& buffers, int* idx,
+                                bool split_by_signature) {
+  if (auto f = As<ForStmt>(stmt)) {
+    auto new_body = SeqStmts::Flatten(
+        PlaceHandlesInSeq(BodyToVec(f->body_), keys, buffers, idx, split_by_signature), f->body_->span_);
+    return std::make_shared<ForStmt>(f->loop_var_, f->start_, f->stop_, f->step_, f->iter_args_, new_body,
+                                     f->return_vars_, f->span_, f->kind_, f->attrs_, f->leading_comments_);
+  }
+  if (auto w = As<WhileStmt>(stmt)) {
+    auto new_body = SeqStmts::Flatten(
+        PlaceHandlesInSeq(BodyToVec(w->body_), keys, buffers, idx, split_by_signature), w->body_->span_);
+    return std::make_shared<WhileStmt>(w->condition_, w->iter_args_, new_body, w->return_vars_, w->span_,
+                                       w->leading_comments_);
+  }
+  auto ic = As<IfStmt>(stmt);
+  INTERNAL_CHECK(ic) << "Internal error: RewriteStmtWithPushdown expects For/While/If";
+  std::vector<std::string> then_keys, else_keys;
+  for (const auto& k : keys) {
+    if (ic->then_body_ && !KeysUsedBy(ic->then_body_, {k}, split_by_signature).empty()) {
+      then_keys.push_back(k);
+    } else {
+      else_keys.push_back(k);
+    }
+  }
+  StmtPtr new_then = ic->then_body_;
+  if (!then_keys.empty() && ic->then_body_) {
+    new_then = SeqStmts::Flatten(
+        PlaceHandlesInSeq(BodyToVec(ic->then_body_), then_keys, buffers, idx, split_by_signature),
+        ic->then_body_->span_);
+  }
+  std::optional<StmtPtr> new_else = ic->else_body_;
+  if (!else_keys.empty() && ic->else_body_.has_value() && *ic->else_body_) {
+    new_else = SeqStmts::Flatten(
+        PlaceHandlesInSeq(BodyToVec(*ic->else_body_), else_keys, buffers, idx, split_by_signature),
+        (*ic->else_body_)->span_);
+  }
+  return std::make_shared<IfStmt>(ic->condition_, new_then, new_else, ic->return_vars_, ic->span_,
+                                  ic->leading_comments_);
+}
+
+// Deps-aware, scope-recursive placement: put each buffer's alloc_tile op at the
+// smallest scope that dominates all its uses AND follows its TileView operand
+// deps. A buffer used across several statements (or across if/else branches, or
+// as a loop carry) is placed at this level before its first use; a buffer used
+// entirely within one nested loop/branch descends into that scope (so a handle
+// whose valid_shape references a loop-body scalar is not hoisted above it). O(N)
+// per level; each stmt is rescanned once per enclosing level (nesting depth is
+// bounded), so overall O(N * depth).
+std::vector<StmtPtr> PlaceHandlesInSeq(const std::vector<StmtPtr>& stmts,
+                                       const std::vector<std::string>& keys,
+                                       const std::map<std::string, BufferInfo>& buffers, int* idx,
+                                       bool split_by_signature) {
+  std::map<std::string, std::vector<size_t>> users;
+  for (size_t i = 0; i < stmts.size(); ++i)
+    for (const auto& k : KeysUsedBy(stmts[i], keys, split_by_signature)) users[k].push_back(i);
+
+  std::map<size_t, std::vector<std::string>> place_before, push_into;
+  for (const auto& k : keys) {  // iterate in `keys` order for deterministic handle naming
+    auto it = users.find(k);
+    if (it == users.end() || it->second.empty()) continue;
+    size_t first = it->second.front();
+    if (it->second.size() == 1 && CanDescend(stmts[first], k, split_by_signature)) {
+      push_into[first].push_back(k);
+    } else {
+      place_before[first].push_back(k);
+    }
+  }
+
+  std::vector<StmtPtr> out;
+  out.reserve(stmts.size() + keys.size());
+  for (size_t i = 0; i < stmts.size(); ++i) {
+    auto pb = place_before.find(i);
+    if (pb != place_before.end())
+      for (const auto& k : pb->second) out.push_back(MakeAllocTileStmt(buffers.at(k), (*idx)++));
+    auto pi = push_into.find(i);
+    out.push_back(pi != push_into.end()
+                      ? RewriteStmtWithPushdown(stmts[i], pi->second, buffers, idx, split_by_signature)
+                      : stmts[i]);
+  }
+  return out;
+}
+
 FunctionPtr TransformMaterializeAllocTiles(const FunctionPtr& func) {
   INTERNAL_CHECK(func) << "MaterializeAllocTiles cannot run on null function";
   // Orchestration functions submit tasks and never hold TileType variables.
@@ -193,56 +340,10 @@ FunctionPtr TransformMaterializeAllocTiles(const FunctionPtr& func) {
   collector.VisitStmt(func->body_);
   if (collector.order.empty()) return func;
 
-  auto seq = As<SeqStmts>(func->body_);
-  if (!seq) {
-    // Single-statement body: the buffer's sole use is that statement, so place
-    // every handle before it (its base Ptr and any type deps are in scope).
-    std::vector<StmtPtr> new_stmts;
-    new_stmts.reserve(collector.order.size() + 1);
-    int idx = 0;
-    for (const auto& key : collector.order) {
-      new_stmts.push_back(MakeAllocTileStmt(collector.buffers.at(key), idx++));
-    }
-    new_stmts.push_back(func->body_);
-    StmtPtr new_body = SeqStmts::Flatten(std::move(new_stmts), func->body_->span_);
-    return std::make_shared<const Function>(func->name_, func->params_, func->param_directions_,
-                                            func->return_types_, new_body, func->span_, func->func_type_,
-                                            func->level_, func->role_, func->attrs_);
-  }
-
-  // Deps-aware placement: insert each buffer's alloc_tile op immediately before
-  // the first top-level statement whose subtree uses that buffer. That point
-  // (a) dominates all uses — a buffer written across if/else branches is first
-  // seen at the enclosing IfStmt, so the handle lands before it — and (b) follows
-  // any body-defined value the handle's TileView references (e.g. a runtime valid
-  // length), which a blind hoist to the function head would precede. O(N): each
-  // top-level subtree is scanned once.
-  std::map<std::string, size_t> first_use;
-  for (size_t i = 0; i < seq->stmts_.size(); ++i) {
-    BufferCollector stmt_bufs(split_by_signature);
-    stmt_bufs.VisitStmt(seq->stmts_[i]);
-    for (const auto& key : stmt_bufs.order) first_use.emplace(key, i);
-  }
-
-  std::map<size_t, std::vector<StmtPtr>> inserts;  // stmt index -> handles to prepend
   int idx = 0;
-  for (const auto& key : collector.order) {
-    auto stmt = MakeAllocTileStmt(collector.buffers.at(key), idx++);
-    auto it = first_use.find(key);
-    inserts[it != first_use.end() ? it->second : 0].push_back(std::move(stmt));
-  }
-
-  std::vector<StmtPtr> new_stmts;
-  new_stmts.reserve(seq->stmts_.size() + collector.order.size());
-  for (size_t i = 0; i < seq->stmts_.size(); ++i) {
-    auto ins = inserts.find(i);
-    if (ins != inserts.end()) {
-      for (auto& s : ins->second) new_stmts.push_back(std::move(s));
-    }
-    new_stmts.push_back(seq->stmts_[i]);
-  }
-
-  StmtPtr new_body = SeqStmts::Flatten(std::move(new_stmts), func->body_->span_);
+  StmtPtr new_body = SeqStmts::Flatten(
+      PlaceHandlesInSeq(BodyToVec(func->body_), collector.order, collector.buffers, &idx, split_by_signature),
+      func->body_->span_);
   return std::make_shared<const Function>(func->name_, func->params_, func->param_directions_,
                                           func->return_types_, new_body, func->span_, func->func_type_,
                                           func->level_, func->role_, func->attrs_);

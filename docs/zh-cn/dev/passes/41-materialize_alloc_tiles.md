@@ -72,11 +72,17 @@ materialized = passes.materialize_alloc_tiles()(program)
 
 ### 感知依赖的放置
 
-每个 handle 被插入到第一条其子树使用该 buffer 的顶层语句之前。该位置 (a) 支配
-所有使用 —— 一个跨分支写入的 buffer 会最先在外层 `IfStmt` 处出现，因此 handle
-落在它之前 —— 并且 (b) 位于 handle 的 `TileView` 所引用的任何 body 内定义值
-（例如运行时 valid 长度）之后，而盲目地上提到函数头部会跑到它们前面。该扫描是
-O(N)：每个顶层子树只访问一次。
+每个 handle 被放到**支配其 buffer 全部使用、且位于其 `TileView` 操作数依赖之后
+的最小作用域**，通过递归遍历语句树确定：
+
+- 跨多条语句使用（或跨 `if`/`else` 分支、或作为循环 carry —— iter-arg / return-var）
+  的 buffer 放在当前层、其首个使用之前。因此在两分支都写入的 phi buffer 会声明在
+  外层 `IfStmt` 之前，从而支配两分支。
+- **完全只在某个嵌套循环/分支体内使用**的 buffer 会下沉进那个作用域，因此一个
+  `valid_shape` 引用循环体内标量（例如 `valid = i + 1; t = load(..., valid_shapes=[.., valid])`）
+  的 handle 会落在该标量*之后*，而不会被上提到循环之上（那样操作数就越界了）。
+
+每条语句在每个外层被重扫一次，故整体为 O(N × depth)（嵌套深度有界）。
 
 ## 示例
 
@@ -89,9 +95,13 @@ else:
 final = pl.store(result, [0, 0], out)
 ```
 
+IR op 是 `alloc_tile(base, byte_offset, shape)`；PTO codegen 把它 emit 成
+`pto.alloc_tile`，并将 tile 的 `TileView` valid 范围下降为下面的 `valid_row` /
+`valid_col` 操作数（类型里是 `v_row=?, v_col=?`）：
+
 ```mlir
-; After MaterializeAllocTiles (PTOAS): one handle at the function head, both
-; branches and the store share it — no in-branch declaration.
+; After MaterializeAllocTiles (PTOAS): one handle before the if (it dominates
+; both branches), which the branches and the store share — no in-branch decl.
 %res__buf1 = pto.alloc_tile valid_row = %c64_index valid_col = %c64_index : !pto.tile_buf<...>
 scf.if %flag {
   pto.tmul ... outs(%res__buf1 : !pto.tile_buf<...>)

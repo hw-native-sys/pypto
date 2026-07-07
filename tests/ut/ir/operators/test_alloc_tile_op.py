@@ -99,7 +99,7 @@ def test_alloc_tile_distinct_from_region_tile_alloc():
 def test_alloc_tile_rejects_wrong_arg_count():
     span = ir.Span.unknown()
     base = ir.Var("mem_vec_0", ir.PtrType.get(), span)
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError):
         # Missing the shape argument.
         ir.create_op_call(
             "alloc_tile",
@@ -113,7 +113,7 @@ def test_alloc_tile_rejects_non_constant_shape():
     span = ir.Span.unknown()
     base = ir.Var("mem_vec_0", ir.PtrType.get(), span)
     dyn = ir.Var("n", ir.ScalarType(DataType.INDEX), span)
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError):
         ir.create_op_call(
             "alloc_tile",
             [base, ir.ConstInt(0, DataType.INT64, span), ir.MakeTuple([dyn], span)],

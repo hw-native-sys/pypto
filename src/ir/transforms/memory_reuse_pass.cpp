@@ -346,12 +346,15 @@ class TopDownRetargeter {
   std::map<VarPtr, VarDef> defs_;
   std::map<VarPtr, TypePtr> rewrites_;
   std::set<VarPtr> visiting_;  // cycle guard
-  // True while retargeting is seeded from an IfStmt return_var (issue #1956).
-  // In that mode IsTargetDeadAtAssign stops its liveness scan at the enclosing
-  // IfStmt — reads of the target buffer *after* the if are the phi's own merged
-  // consumers, not clobbers — mirroring the existing enclosing-ForStmt early-out
-  // for loop-carry. Scoped to phi seeding so loop-carry-through-if stays sound.
-  bool if_phi_seed_ = false;
+  // The exact IfStmt whose return_var is currently seeding retargeting (issue
+  // #1956), or nullptr outside phi seeding. IsTargetDeadAtAssign stops its
+  // liveness scan at *this* IfStmt — reads of the target buffer after it are the
+  // phi's own merged consumers, not clobbers — mirroring the enclosing-ForStmt
+  // early-out for loop-carry. Storing the exact node (not a plain bool) keeps
+  // the scan correct for nested control flow: a producer nested inside an inner
+  // `if` still scans reads in the seeded outer branch after that inner if before
+  // stopping, instead of prematurely early-outing at the inner if.
+  const Stmt* if_phi_seed_stmt_ = nullptr;
 
   // Walk IR, calling Propagate for each ForStmt we encounter.
   void VisitForStmts(const StmtPtr& stmt) {
@@ -529,14 +532,14 @@ class TopDownRetargeter {
       auto target_memref = GetDefinedMemRef(rv_tile);
       auto target_memory = rv_tile->GetMemorySpace();
 
-      if_phi_seed_ = true;
+      if_phi_seed_stmt_ = if_stmt.get();
       if (i < then_yield->value_.size()) {
         if (auto yv = AsVarLike(then_yield->value_[i])) TryRetargetVar(yv, target_memref, target_memory);
       }
       if (i < else_yield->value_.size()) {
         if (auto yv = AsVarLike(else_yield->value_[i])) TryRetargetVar(yv, target_memref, target_memory);
       }
-      if_phi_seed_ = false;
+      if_phi_seed_stmt_ = nullptr;
     }
   }
 
@@ -814,14 +817,15 @@ class TopDownRetargeter {
       // the loop cannot observe it.
       if (As<ForStmt>(anc)) return true;
 
-      // During if-phi seeding, stop at the enclosing IfStmt for the same
-      // reason: the retyped branch producer is consumed by that if's merge
-      // (its return_var), so reads of the target buffer after the if are the
-      // merged phi value — the intended dataflow, not a clobber. Intra-branch
-      // hazards were already caught by the SeqStmts scan above. Gated so the
-      // loop-carry path (which may target an *outer* buffer through an if)
-      // still scans past inner ifs.
-      if (if_phi_seed_ && As<IfStmt>(anc)) return true;
+      // During if-phi seeding, stop at the *exact* seeded IfStmt: the retyped
+      // branch producer is consumed by that if's merge (its return_var), so reads
+      // of the target buffer after the if are the merged phi value — the intended
+      // dataflow, not a clobber. Matching the exact node (not any IfStmt) keeps a
+      // producer nested in an inner if scanning outer-branch reads after that
+      // inner if before stopping. Intra-branch hazards were already caught by the
+      // SeqStmts scan above; the loop-carry path (target may be an outer buffer
+      // through an if) has if_phi_seed_stmt_ == nullptr and scans past all ifs.
+      if (if_phi_seed_stmt_ && anc.get() == if_phi_seed_stmt_) return true;
 
       child_on_path = anc;
     }
