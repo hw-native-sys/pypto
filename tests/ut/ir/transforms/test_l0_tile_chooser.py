@@ -291,6 +291,13 @@ def _cdiv(a: int, b: int) -> int:
     return (a + b - 1) // b
 
 
+def _odd_part(x: int) -> int:
+    """x divided by its largest power-of-2 factor (mirrors C++ OddPart)."""
+    while x % 2 == 0:
+        x //= 2
+    return x
+
+
 # Stationarity tokens for the oracle, mapped to the bound enum for comparison.
 _OS, _AS, _BS = "OS", "A", "B"
 _STAT_ENUM = {
@@ -342,11 +349,22 @@ def _wall_key(m: int, n: int, k: int, cfg, stat: str, dbc: bool) -> tuple:
     k_fractals = num_full * _cdiv(k, kt) + (_cdiv(k_tail, kt) if k_tail > 0 else 0)
     per_mn = k_blocks * cfg.mad_head + cpr * _cdiv(m, cfg.align_m) * k_fractals * _cdiv(n, cfg.align_n)
     mad = _cdiv(M, m) * _cdiv(N, n) * per_mn
-    # Tile-dependent FIXPIPE drain: one drain per (m, n) output block, each paying a
-    # fixed issue overhead + its bytes at bw_drain (mirrors C++ DrainCycles). M/N-split
-    # raises the drain count; K-split does not. Penalizes over-splitting the output.
+    # Tile-dependent FIXPIPE drain (mirrors C++ DrainCycles): one drain per (m, n)
+    # output block = fixed issue overhead + the #1912 aligned byte-throughput term +
+    # a misalignment term. FIXPIPE addresses one M-row of the N1 M1 M0 N0 accumulator
+    # at a time, bursting the N1 = ceil(n/N0) fractals (N0 = drain_c0_bytes/bytes_c)
+    # in pow2-aligned groups; the odd part of N1 counts the serial passes it cannot
+    # parallelize (the N%32 drain cliff). M/N-split raises the drain count; K-split
+    # does not. gamma_c (C read-back) rides the byte term only; misalignment is write-side.
     num_drains = _cdiv(M, m) * _cdiv(N, n)
-    per_drain = cfg.drain_fixed_cycles + (2.0 if cfg.c_read else 1.0) * cfg.bytes_c * m * n / cfg.bw_drain
+    n0 = max(1, cfg.drain_c0_bytes // cfg.bytes_c)
+    n1 = _cdiv(n, n0)
+    gamma_c = 2.0 if cfg.c_read else 1.0
+    per_drain = (
+        cfg.drain_fixed_cycles
+        + gamma_c * cfg.bytes_c * m * n / cfg.bw_drain
+        + m * cfg.drain_penalty_cycles * (_odd_part(n1) - 1)
+    )
     drain = num_drains * per_drain
     compute = max(load, float(mad))
     wall = int((max(compute, drain) if dbc else compute + drain) + 0.5)
@@ -547,11 +565,10 @@ class TestL0TilingRooflineOptimum:
         """MAD-bound square shape: the aspect-swapped tiles (m, n) and (n, m) are
         FULLY wall-tied under the op-sim-calibrated min-hoist load model. OS loads
         min(hold-A, hold-B), so (256,128) [holds A] and (128,256) [holds B] have the
-        identical load -> identical wall key. The load can no longer break the tie
-        (the old "prefer m >= n because L0B is half-bandwidth" was an artifact of the
-        both-re-streamed OS formula). We accept the tie: the chooser returns a
-        deterministic aspect by enumeration order (m <= n), matching the exhaustive
-        oracle. (Pre-calibration this picked the m >= n aspect (256,128,64).)"""
+        identical load -> identical wall key. The aligned drain is symmetric in m*n
+        (odd(N1)==1 for both), so it does not break the tie either. We accept the
+        tie: the chooser returns a deterministic aspect by enumeration order (m <= n),
+        matching the exhaustive oracle. (Pre-calibration this picked (256,128,64).)"""
         cfg = _default_config(M=256, N=256, K=64)
         # The two aspects genuinely tie on the full wall key -- nothing to break on:
         assert _wall_key(256, 128, 64, cfg, _OS, False) == _wall_key(128, 256, 64, cfg, _OS, False)
@@ -705,8 +722,9 @@ class TestL0TilingRooflineMigration:
                 (192, 160, 64),
                 (128, 256, 64),
             ),  # min-hoist: aspect tie -> enum order picks m<n
-            (272, 272, 64, 2, (192, 160, 64), (272, 96, 32)),
-            (320, 320, 64, 2, (192, 160, 64), (160, 160, 64)),
+            # drain misalignment penalty steers off n=96/n=160 (odd(N1)>1) to aligned n=64:
+            (272, 272, 64, 2, (192, 160, 64), (272, 64, 32)),
+            (320, 320, 64, 2, (192, 160, 64), (320, 64, 32)),
             (256, 256, 256, 4, (192, 160, 32), (256, 128, 32)),
         ],
     )

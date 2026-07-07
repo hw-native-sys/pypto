@@ -765,6 +765,8 @@ class l0_tile_chooser:
         bw_b: float
         bw_drain: float
         drain_fixed_cycles: float
+        drain_penalty_cycles: float
+        drain_c0_bytes: int
         mad_head: int
         mad_k_fractal_bytes: int
         allow_padding: bool

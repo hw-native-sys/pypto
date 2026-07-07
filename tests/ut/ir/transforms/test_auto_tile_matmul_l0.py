@@ -1067,20 +1067,22 @@ class TestAutoTileMatmulL0MNTiling:
         """The full-K OS emit must hoist the SAME operand the chooser scored the
         wall under — a bandwidth-weighted (not raw-byte) decision.
 
-        320×320 @ 64 BF16 on Ascend910B → output-stationary, square tile
-        (m = n = 160), a 2×2 grid. The two operand panels are byte-identical
-        (160×64 vs 64×160 BF16), so raw interior-extract traffic **ties**
-        (T_row == T_col). But L0A is faster than L0B (~200 vs ~132 B/cyc), so
-        streaming A across the grid is cheaper than streaming B: the chooser's
-        min-hoist load scores **hold B** (held_b ≈ 720 < held_a ≈ 825 cyc), and
-        records it in ``os_holds_a``. The emit therefore hoists B (column-outer).
+        384×512 @ 64 BF16 on Ascend910B → output-stationary full-K tile
+        (m = 128, n = 256), a 3×2 grid. L0A is faster than L0B (~200 vs ~132
+        B/cyc), so streaming A on the fast port while holding B is cheaper than the
+        reverse: the chooser's min-hoist load scores **hold B**, recorded in
+        ``os_holds_a = False``. The emit therefore hoists B (column-outer).
 
         This is a regression pin for the chooser/emit hoist-objective unification:
-        the previous emit re-derived the hoist from raw bytes, and on this tie it
-        picked ``T_row <= T_col`` → **A** — a loop order the wall was never scored
-        under (``estimated_cost_cycles`` assumed B). The single-source
-        ``os_holds_a`` makes the emitted hoist match the scored hoist by
-        construction, so this asserts **B**; it fails ("A") on the pre-fix code."""
+        the previous emit re-derived the hoist from raw interior-extract bytes,
+        which can disagree with the bandwidth-weighted min-hoist the wall was scored
+        under (``estimated_cost_cycles``). The single-source ``os_holds_a`` makes the
+        emitted hoist match the scored hoist by construction, so this asserts **B**.
+
+        (The original byte-*tie* square case — 320×320@64 → 160×160 — is no longer
+        reachable: n=160 has odd(ceil(160/8))=odd(20)=5, so the FIXPIPE
+        misalignment penalty now prices that tile drain-bound and the chooser
+        avoids it. This aligned-N asymmetric shape exercises the same hoist path.)"""
 
         _backend.reset_for_testing()
         _backend.set_backend_type(BackendType.Ascend910B)
@@ -1090,17 +1092,17 @@ class TestAutoTileMatmulL0MNTiling:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
-                lhs: pl.Tensor[[320, 64], pl.BF16],
-                rhs: pl.Tensor[[64, 320], pl.BF16],
-                out: pl.Out[pl.Tensor[[320, 320], pl.FP32]],
-            ) -> pl.Tensor[[320, 320], pl.FP32]:
-                lhs_mat: pl.Tile[[320, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
-                    lhs, [0, 0], [320, 64], target_memory=pl.Mem.Mat
+                lhs: pl.Tensor[[384, 64], pl.BF16],
+                rhs: pl.Tensor[[64, 512], pl.BF16],
+                out: pl.Out[pl.Tensor[[384, 512], pl.FP32]],
+            ) -> pl.Tensor[[384, 512], pl.FP32]:
+                lhs_mat: pl.Tile[[384, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [384, 64], target_memory=pl.Mem.Mat
                 )
-                rhs_mat: pl.Tile[[64, 320], pl.BF16, pl.Mem.Mat] = pl.tile.load(
-                    rhs, [0, 0], [64, 320], target_memory=pl.Mem.Mat
+                rhs_mat: pl.Tile[[64, 512], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [64, 512], target_memory=pl.Mem.Mat
                 )
-                c: pl.Tile[[320, 320], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lhs_mat, rhs_mat)
+                c: pl.Tile[[384, 512], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lhs_mat, rhs_mat)
                 out = pl.store(c, [0, 0], out)
                 return out
 
@@ -1112,16 +1114,16 @@ class TestAutoTileMatmulL0MNTiling:
         # this was A — the assertion that pins the fix.
         assert _full_k_stationary_operand(After) == "B", (
             "OS full-K emit must obey the scored bandwidth-weighted hoist (hold B), "
-            "not the raw-byte tie (which held A)"
+            "not the raw-byte heuristic"
         )
 
         torch = pytest.importorskip("torch")
         from pypto.debug import torch_codegen  # noqa: PLC0415
 
         torch.manual_seed(0)
-        a = torch.randn(320, 64, dtype=torch.bfloat16)
-        b = torch.randn(64, 320, dtype=torch.bfloat16)
-        out = torch.zeros(320, 320, dtype=torch.float32)
+        a = torch.randn(384, 64, dtype=torch.bfloat16)
+        b = torch.randn(64, 512, dtype=torch.bfloat16)
+        out = torch.zeros(384, 512, dtype=torch.float32)
         ns: dict = {}
         exec(torch_codegen(After), ns)  # noqa: S102
         ns["kernel"](a, b, out)

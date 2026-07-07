@@ -721,6 +721,8 @@ void BindPass(nb::module_& m) {
       .def_rw("bw_b", &utils::L0TileConfig::bw_b)
       .def_rw("bw_drain", &utils::L0TileConfig::bw_drain)
       .def_rw("drain_fixed_cycles", &utils::L0TileConfig::drain_fixed_cycles)
+      .def_rw("drain_penalty_cycles", &utils::L0TileConfig::drain_penalty_cycles)
+      .def_rw("drain_c0_bytes", &utils::L0TileConfig::drain_c0_bytes)
       .def_rw("mad_head", &utils::L0TileConfig::mad_head)
       .def_rw("mad_k_fractal_bytes", &utils::L0TileConfig::mad_k_fractal_bytes)
       .def_rw("allow_padding", &utils::L0TileConfig::allow_padding)

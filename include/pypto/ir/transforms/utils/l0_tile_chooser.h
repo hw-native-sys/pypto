@@ -100,10 +100,13 @@ struct L0TileConfig {
   // standalone callers (tests) get a sane model without wiring a backend.
   double bw_a = 200.0;                // L1->L0A bytes/cycle (op-sim work-fit; datasheet 238).
   double bw_b = 132.0;                // L1->L0B bytes/cycle (op-sim work-fit; ~1.5:1 vs L0A, not 2:1).
-  double bw_drain = 118.0;            // FIXPIPE L0C drain bytes/cycle (op-sim work-fit; per-drain slope).
+  double bw_drain = 118.0;            // FIXPIPE aligned throughput, L0C bytes/cycle (#1912-validated).
   double drain_fixed_cycles = 245.0;  // Per-FIXPIPE-drain fixed overhead (penalizes M/N-split, not K-split).
-  int mad_head = 6;                   // Fixed per-TMATMUL issue overhead.
-  int mad_k_fractal_bytes = 32;       // Cube K-fractal width (kt = this / bytes_a).
+  double drain_penalty_cycles =
+      2.6;                       // Misalignment: cycles per M-row per extra serial burst pass (odd(N1)-1).
+  int drain_c0_bytes = 32;       // NZ fractal C0 in bytes (N0 = C0 / bytes_c; 8 fp32, 16 bf16).
+  int mad_head = 21;             // Fixed per-TMATMUL issue overhead.
+  int mad_k_fractal_bytes = 32;  // Cube K-fractal width (kt = this / bytes_a).
 
   // Whether the chooser may pick a tile dimension larger than the problem
   // dimension (i.e. pad M / N / K up to reach `min_m` / `min_n` / `min_k`).
@@ -221,8 +224,12 @@ struct L0TileResult {
  *                 (ceil(K/k)*mad_head + cpr*ceil(m/16)*Kfrac*ceil(n/16))
  *          Kfrac = floor(K/k)*ceil(k/kt) + ceil((K - floor(K/k)*k)/kt)
  *                  (the K-peel tail is scored at its own width, not rounded to k)
- *        C_drain = ceil(M/m)*ceil(N/n) * (drain_fixed + gamma_c*bytes_c*m*n/BW_drain)
- *                  (per output tile: fixed issue overhead + its bytes at BW_drain;
+ *        C_drain = ceil(M/m)*ceil(N/n) *
+ *                  (drain_fixed + gamma_c*bytes_c*m*n/BW_drain + m*drain_penalty*(odd(N1)-1))
+ *                  (per output tile: fixed issue overhead + the #1912 aligned
+ *                   byte-throughput term + a misalignment term -- N1 = ceil(n/N0),
+ *                   N0 = drain_c0_bytes/bytes_c, odd(.) the odd part of the
+ *                   N-fractal count = extra serial burst passes for a non-pow2 N;
  *                   M/N-split adds drains, K-split does not)
  *        C_load (BW-weighted, by stationarity):
  *          OS full-K : min(held-A, held-B) route (hoist the cheaper operand; the

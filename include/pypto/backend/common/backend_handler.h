@@ -28,10 +28,27 @@ namespace backend {
  * Bandwidths are in BYTES PER CORE CYCLE, so the chooser can weight L1->L0
  * traffic and the L0C drain directly in cycles. Defaults are Ascend a2a3 (910B),
  * op-sim work-calibrated: L1->L0A ~200, L1->L0B ~132 B/cyc (~1.5:1, not the
- * datasheet 2:1). The FIXPIPE L0C drain is PER-DRAIN: `drain_fixed_cycles` issue
- * overhead plus `bytes_c*m*n/bw_drain`, scaled by the output-tile count
- * `ceil(M/m)*ceil(N/n)` -- so splitting the OUTPUT (M/N) adds drains while
- * splitting K does not (accumulate in one L0C). Device-validated (op-sim).
+ * datasheet 2:1). The FIXPIPE L0C drain, per output tile (scaled by the tile
+ * count `ceil(M/m)*ceil(N/n)`):
+ *   per_tile = drain_fixed_cycles                          // fixed issue overhead
+ *            + gamma_c*bytes_c*m*n / bw_drain              // aligned throughput
+ *            + m * drain_penalty_cycles * (odd(N1) - 1)    // misalignment serialization
+ * with `N1 = ceil(n / N0)`, `N0 = drain_c0_bytes / bytes_c`. The first two terms
+ * are the #1912 device-validated aligned model (fixed issue + per-byte throughput).
+ * The third is the on-device correction for the N%32 drain cliff: per the FIXPIPE
+ * writeback model (pto-isa docs/isa/cube/fixpipe-model.md + nz-fractal-layout.md),
+ * FIXPIPE addresses one M-row of the `N1 M1 M0 N0` FRACTAL_NZ accumulator at a
+ * time and bursts the `N1 = ceil(n/N0)` N-fractals in power-of-2-aligned groups;
+ * a non-pow2 fractal count serializes the odd residual `odd(N1)-1` into extra
+ * passes at `drain_penalty_cycles` per M-row (the sweep measured the byte-only
+ * model under-costing misaligned-N drains up to ~3.5x, e.g. n=80 -> odd(10)=5).
+ * Splitting the OUTPUT (M/N) adds drains; splitting K does not (accumulate in one
+ * L0C). Device-validated (a2a3 op-sim + on-device FIXPIPE sweep). NOTE: the
+ * aligned (odd==1) constants are deliberately the #1912 ones -- the on-device
+ * sweep shows the true aligned drain is flatter in N (a lower bw with a higher
+ * fixed base), but recalibrating it broadly reshapes tile selection (wide-N /
+ * split-K / dbC=2), so that is deferred to a dedicated device sweep; this change
+ * corrects only the misalignment cliff.
  *
  * The MAD term mirrors the cube's per-TMATMUL cost
  * `mad_head_cycles + cpr * ceil(m/16) * ceil(k/kt) * ceil(n/16)`, where
@@ -42,10 +59,14 @@ struct L0CostModel {
   double bw_l0a = 200.0;  ///< L1->L0A bytes/cycle (a2a3 op-sim work-fit; datasheet 441 GB/s/1.85 GHz = 238).
   double bw_l0b =
       132.0;  ///< L1->L0B bytes/cycle (a2a3 op-sim work-fit; ~1.5:1 vs L0A, not the datasheet 2:1).
-  double bw_drain = 118.0;  ///< FIXPIPE L0C drain bytes/cycle (a2a3 op-sim work-fit; per-drain byte slope).
-  double drain_fixed_cycles =
-      245.0;                ///< Per-FIXPIPE-drain fixed cycles (a2a3 op-sim work-fit; penalizes M/N-split).
-  int mad_head_cycles = 6;  ///< Fixed per-TMATMUL issue overhead.
+  double bw_drain = 118.0;  ///< FIXPIPE aligned throughput, L0C bytes/cycle (a2a3 op-sim; #1912-validated).
+  double drain_fixed_cycles = 245.0;  ///< Per-FIXPIPE-drain fixed cycles (a2a3 op-sim; penalizes M/N-split).
+  double drain_penalty_cycles =
+      2.6;                  ///< Misalignment cost: FIXPIPE cycles per L0C M-row per extra
+                            ///< serial burst pass, charged (odd(N1)-1) times (a2a3 on-device sweep).
+  int drain_c0_bytes = 32;  ///< NZ fractal C0 constant in bytes (N0 = C0 / bytes_c; 8 for fp32, 16 for bf16).
+  int mad_head_cycles = 21;      ///< Fixed per-TMATMUL issue overhead (a2a3 op-sim: 21 cyc/MMAD,
+                                 ///< regime- and K-independent; per-tile CUBE = mad_head + 16*K).
   int mad_k_fractal_bytes = 32;  ///< Cube K-fractal width in bytes (kt = this / bytes_a).
 };
 
