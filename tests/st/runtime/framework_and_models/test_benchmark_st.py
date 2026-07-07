@@ -25,9 +25,11 @@ the ``warmup`` launches are excluded from the sample count.
 import sys
 
 import pypto.language as pl
+import pypto.language.distributed as pld
 import pytest
 import torch
 from pypto import ir
+from pypto.ir.distributed_compiled_program import DistributedConfig
 from pypto.runtime import RunConfig, benchmark
 
 _M = 128
@@ -92,6 +94,117 @@ def test_benchmark_register_once_surfaces_timing(test_config, tmp_path):
     assert stats.device_us_min > 0.0
     assert stats.device_us_max >= stats.device_us_min
     assert stats.device_us_min <= stats.device_us_median <= stats.device_us_max
+
+
+_L3_ROWS = 16
+_L3_COLS = 32
+
+
+def _build_per_rank_add_one():
+    """A minimal L3 program: one rank-pinned ``+ 1`` child dispatch per rank."""
+
+    @pl.program
+    class PerRankAddOne:
+        @pl.function(type=pl.FunctionType.InCore)
+        def add_one(
+            self,
+            x: pl.Tensor[[_L3_ROWS, _L3_COLS], pl.FP32],
+            y: pl.Out[pl.Tensor[[_L3_ROWS, _L3_COLS], pl.FP32]],
+        ) -> pl.Tensor[[_L3_ROWS, _L3_COLS], pl.FP32]:
+            for row in pl.parallel(_L3_ROWS):
+                x_row = pl.slice(x, [1, _L3_COLS], [row, 0])
+                y_row = pl.add(x_row, 1.0)
+                y = pl.assemble(y, y_row, [row, 0])
+            return y
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def child(
+            self,
+            x: pl.Tensor[[_L3_ROWS, _L3_COLS], pl.FP32],
+            y: pl.Out[pl.Tensor[[_L3_ROWS, _L3_COLS], pl.FP32]],
+        ) -> pl.Tensor[[_L3_ROWS, _L3_COLS], pl.FP32]:
+            y = self.add_one(x, y)
+            return y
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(
+            self,
+            x: pl.Tensor[[pl.dynamic("NR"), _L3_ROWS, _L3_COLS], pl.FP32],
+            y: pl.Out[pl.Tensor[[pl.dynamic("NR"), _L3_ROWS, _L3_COLS], pl.FP32]],
+        ):
+            for r in pl.range(pld.world_size()):
+                self.child(x[r], y[r], device=r)
+
+    return PerRankAddOne
+
+
+def test_benchmark_l3_surfaces_per_rank_timing(test_config, device_ids):
+    """``benchmark`` on an L3 program aggregates per-rank ``[STRACE]`` markers.
+
+    Routes through ``DistributedWorker`` (``compiled.prepare()``), dispatches
+    ``warmup + rounds`` DAG launches, and folds each rank's chip-child markers
+    into per-round samples. The per-rank ``+1`` program dispatches exactly one
+    child per rank per round (deterministic shape → no flatten fallback), so the
+    headline ``device_wall_us`` is the per-round max across ranks and
+    ``per_rank("device")`` carries one list per rank.
+    """
+    n_ranks = 2
+    if len(device_ids) < n_ranks:
+        pytest.skip(f"L3 benchmark needs >= {n_ranks} devices, got {device_ids}")
+
+    program = _build_per_rank_add_one()
+    compiled = ir.compile(
+        program,
+        platform=test_config.platform,
+        distributed_config=DistributedConfig(device_ids=device_ids[:n_ranks], num_sub_workers=0),
+    )
+
+    # L3 requires shared-memory host tensors (the forked chip workers read them
+    # through the inherited mapping). Reused in place across launches.
+    inputs = torch.randn((n_ranks, _L3_ROWS, _L3_COLS), dtype=torch.float32).share_memory_()
+    outputs = torch.zeros((n_ranks, _L3_ROWS, _L3_COLS), dtype=torch.float32).share_memory_()
+
+    rounds, warmup = 5, 2
+    # platform/device_id are rejected for L3 (device set is compile-fixed).
+    stats = benchmark(compiled, [inputs, outputs], rounds=rounds, warmup=warmup)
+
+    # Output is correct after the final measured launch.
+    assert torch.allclose(outputs, inputs + 1.0), (
+        f"L3 benchmark output mismatch: max diff = {(outputs - (inputs + 1.0)).abs().max().item()}"
+    )
+
+    assert not stats.fallback_flattened, "deterministic 1-dispatch/rank/round shape must segment cleanly"
+    assert len(stats.device_wall_us) == rounds, (
+        f"expected {rounds} per-round samples (warmup excluded), got {len(stats.device_wall_us)}"
+    )
+    # One per-rank series per device, each with one entry per measured round.
+    rank_dev = stats.per_rank("device")
+    rank_host = stats.per_rank("host")
+    rank_eff = stats.per_rank("effective")
+    union = stats.per_round("union")
+    assert len(rank_dev) == n_ranks, f"expected {n_ranks} ranks, got {sorted(rank_dev)}"
+    for pid, series in rank_dev.items():
+        assert len(series) == rounds, f"rank {pid} has {len(series)} rounds, expected {rounds}"
+    # Headline is the per-round max across ranks.
+    for k in range(rounds):
+        assert stats.device_wall_us[k] == max(v[k] for v in rank_dev.values())
+
+    # Cross-rank host-timeline union window is populated (one per round) and, as a
+    # window spanning all ranks' host spans, is >= the per-round host max.
+    assert len(union) == rounds
+    for k in range(rounds):
+        assert union[k] >= max(v[k] for v in rank_host.values()) - 1e-6
+
+    assert not stats.all_zero_device, "device_wall_us must be > 0 on the default SIMPLER_PROFILING build"
+    assert stats.device_us_min > 0.0
+
+    # Per-card L2 Effective (orch union sched window): one series per rank, > 0, and
+    # bounded by that rank's device wall (Effective ⊆ device_wall).
+    assert set(rank_eff) == set(rank_dev)
+    for pid, eff in rank_eff.items():
+        assert len(eff) == rounds
+        for k in range(rounds):
+            assert 0.0 < eff[k] <= rank_dev[pid][k] + 1e-6
 
 
 if __name__ == "__main__":
