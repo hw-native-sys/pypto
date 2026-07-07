@@ -27,11 +27,10 @@ both passes run and codegen bakes ``addr`` for ``--pto-level=level3``.
 
 import pypto.language as pl
 import pytest
+from pypto import backend, ir
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import codegen, passes
-
-from pypto import backend, ir
 
 
 @pl.program

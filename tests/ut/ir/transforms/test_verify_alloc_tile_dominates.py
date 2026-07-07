@@ -20,10 +20,9 @@ under ``memory_planner=PTOAS``).
 
 import pypto.language as pl
 import pytest
+from pypto import DataType, backend, ir, passes
 from pypto.backend import BackendType
 from pypto.ir import OptimizationStrategy, PassManager
-
-from pypto import DataType, backend, ir, passes
 
 
 def _alloc_tile_props() -> passes.IRPropertySet:

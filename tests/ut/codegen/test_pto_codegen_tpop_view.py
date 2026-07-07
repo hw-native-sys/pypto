@@ -18,10 +18,9 @@ fresh, disconnected ``pto.alloc_tile`` the popped data is never moved into.
 
 import pypto.language as pl
 import pytest
+from pypto import backend, codegen
 from pypto.backend import BackendType
 from pypto.ir import OptimizationStrategy, PassManager
-
-from pypto import backend, codegen
 
 PTOCodegen = codegen.PTOCodegen
 

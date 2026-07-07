@@ -18,7 +18,6 @@ aliasing is structural (shared handle SSA) rather than physical-address based.
 """
 
 import pytest
-
 from pypto import DataType, ir
 
 
