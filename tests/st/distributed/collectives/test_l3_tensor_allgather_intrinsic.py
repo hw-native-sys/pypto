@@ -12,11 +12,12 @@
 Validates the composite allgather intrinsic produces the same rank-ordered
 concatenation on every rank as the hand-written ``test_l3_allgather.py``.
 
-The intrinsic accepts four arguments: ``local_data`` (Tensor [1, SIZE]),
-``target`` (DistributedTensor [NR, SIZE] staging window), ``signal``, and
-``out`` (plain Tensor [1, NR*SIZE]).  It handles the ``pl.load`` internally,
-synchronises, uses ``pld.tile.get`` to transfer from peers, and writes directly
-into ``out``.
+Push-based (3-arg): ``pld.tensor.allgather(local_data, target, signal)`` —
+each rank pushes its chunk to every peer's window slot via
+``pld.tile.remote_store``; after the notify/wait barrier, the window itself
+holds the gathered ``[NR, SIZE]`` result (window-as-result).  The InCore
+function then reads from the window and writes into the output tensor for
+host-side verification.
 
 ST coverage: **P=2** (default CI / 2-device hosts) and **P=4** (any four
 devices). Both use the same N-rank program body.
@@ -67,12 +68,13 @@ def _build_allgather_program(n_ranks: int):
             data: pl.InOut[pld.DistributedTensor[[nr, SIZE], pl.FP32]],
             signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
         ) -> pl.Tensor[[1, nr * SIZE], pl.FP32]:
-            # Allgather — intrinsic handles load, stage-in, sync, pld.tile.get
-            # transfers from peers, and writes directly into out.  Bind result to capture the
-            # composite allgather Call in an AssignStmt so LowerCompositeOps
-            # can find and lower it.
-            result = pld.tensor.allgather(inp, data, signal, out)
-            return result
+            # Push-based allgather: window becomes the gathered [NR, SIZE] result.
+            data = pld.tensor.allgather(inp, data, signal)
+            # Stage-out: read from the gathered window into the output tensor.
+            for r in pl.range(nr):
+                chunk = pl.load(data, [r, 0], [1, SIZE])
+                pl.store(chunk, [0, r * SIZE], out)
+            return out
 
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(
@@ -103,7 +105,7 @@ def _build_allgather_program(n_ranks: int):
 
 
 class TestL3TensorAllGatherIntrinsic:
-    """L3 distributed runtime: N-rank allgather via ``pld.tensor.allgather``.
+    """L3 distributed runtime: N-rank push-based allgather via ``pld.tensor.allgather``.
 
     Validates that the lowered composite produces an on-board result
     bit-identical to the hand-written ``test_l3_allgather.py`` reference.

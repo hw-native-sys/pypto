@@ -302,7 +302,6 @@ def allgather(
     local_data: Expr,
     target: Expr | None = None,
     signal: Expr | None = None,
-    out: Expr | None = None,
     *,
     span: Span | None = None,
 ) -> Call:
@@ -311,24 +310,26 @@ def allgather(
     **2-arg form (HOST builtin):** ``allgather(target, signal)`` — pre-staged
     window data, lowered to ``builtin.tensor.allgather`` per chip.
 
-    **4-arg form (InCore composite):** ``allgather(local_data, target, signal, out)`` —
-    lowered by LowerCompositeOps into tile.load + tile.store + notify/wait +
-    per-peer remote_load into out.
+    **3-arg form (InCore composite):** ``allgather(local_data, target, signal)`` —
+    push-based: each rank remote_stores its chunk into every peer's window
+    slot, then notify/wait barrier; the window itself becomes the gathered
+    [NR, SIZE] result (window-as-result). Lowered by LowerCompositeOps into
+    tile.load + remote_store loop + notify/wait.
 
     Args:
-        local_data: For 4-arg: Tensor [1, SIZE] with this rank's chunk.
+        local_data: For 3-arg: Tensor (or Tile) [1, SIZE] with this rank's chunk.
         target: DistributedTensor [NR, SIZE] staging window (or data in 2-arg form).
         signal: Window-bound INT32 barrier tensor.
-        out: For 4-arg: Tensor [1, NR*SIZE] output.
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    if signal is None and out is None:
+    if signal is None:
         # 2-arg HOST builtin form: allgather(data, signal)
+        # Positional mapping: data→local_data, signal→target
         _args: list[Expr] = [local_data, target]  # type: ignore[assignment]  # target is non-None here
         return _ir_core.create_op_call("pld.tensor.allgather", _args, {}, actual_span)
-    # 4-arg InCore composite form
-    _args_4: list[Expr] = [local_data, target, signal, out]  # type: ignore[assignment]
-    return _ir_core.create_op_call("pld.tensor.allgather", _args_4, {}, actual_span)
+    # 3-arg InCore composite form
+    _args_3: list[Expr] = [local_data, target, signal]  # type: ignore[assignment]
+    return _ir_core.create_op_call("pld.tensor.allgather", _args_3, {}, actual_span)
 
 
 def reduce_scatter(

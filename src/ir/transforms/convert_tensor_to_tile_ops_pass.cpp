@@ -857,11 +857,12 @@ ExprPtr GetWriteTargetExpr(const CallPtr& call) {
   if (IsOp(call, "pld.tensor.allreduce") && !call->args_.empty()) {
     return call->args_[0];
   }
-  // pld.tensor.allgather(local_data, target, signal, out): writes gathered
-  // chunks into out on every rank (Phase 3 per-peer pld.tile.get).  out (args_[3])
-  // is the primary write target; target (args_[1]) is used for staging only.
-  if (IsOp(call, "pld.tensor.allgather") && call->args_.size() >= 4) {
-    return call->args_[3];
+  // pld.tensor.allgather(local_data, target, signal): push-based — writes
+  // gathered chunks into target on every rank (Phase 1 remote_store loop).
+  // target (args_[1]) is the primary write target and also the result
+  // (window-as-result).  signal (args_[2]) is used for barrier only.
+  if (IsOp(call, "pld.tensor.allgather") && call->args_.size() >= 2) {
+    return call->args_[1];
   }
   // pld.tensor.reduce_scatter(target, signal, *, op): writes the reduced
   // chunk back into target (Phase 4 store).  target (args_[0]) is the
@@ -1035,24 +1036,19 @@ void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, st
   }
 
   if (IsOp(call, "pld.tensor.allgather")) {
-    // pld.tensor.allgather(local_data, target, signal, out):
-    //   local_data (args_[0]) is In (read-only — staged into target).
-    //   target (args_[1]) is read (Phase 3 pld.tile.get from peers)
-    //     and written (Phase 1 store into own window).  InOut.
+    // Push-based 3-arg:
+    //   local_data (args_[0]) is In (read-only — pushed to peers via remote_store).
+    //   target (args_[1]) is read (Phase 1 remote_store from self / barrier)
+    //     and written (Phase 1 remote_store into window from every peer).  InOut.
     //   signal (args_[2]) is written (notify) and read (wait).  InOut.
-    //   out (args_[3]) is write-only — the intrinsic writes directly into it.
     if (call->args_.size() >= 1) {
       // local_data: read only
       MarkAccess(CollectReferencedOrigins(call->args_[0], origin_map), has_read);
     }
-    for (size_t i = 1; i < std::min<size_t>(3, call->args_.size()); ++i) {
+    for (size_t i = 1; i < call->args_.size(); ++i) {
       auto origins = CollectReferencedOrigins(call->args_[i], origin_map);
       MarkAccess(origins, has_read);
       MarkAccess(origins, has_write);
-    }
-    if (call->args_.size() >= 4) {
-      // out: write only
-      MarkAccess(CollectReferencedOrigins(call->args_[3], origin_map), has_write);
     }
     return;
   }

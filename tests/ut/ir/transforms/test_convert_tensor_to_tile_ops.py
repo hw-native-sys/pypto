@@ -3871,9 +3871,10 @@ class TestWindowSliceIncoreConversion:
         ir.assert_structural_equal(After, Expected)
 
     def test_allgather_upgrades_target_and_signal_to_inout(self):
-        """``pld.tensor.allgather(local_data, target, signal, out)`` upgrades both
-        ``target`` and ``signal`` params to InOut. ``local_data`` remains In
-        (read-only). ``out`` is write-only (Out)."""
+        """``pld.tensor.allgather(local_data, target, signal)`` (push-based 3-arg)
+        upgrades both ``target`` and ``signal`` params to InOut. ``local_data``
+        remains In (read-only). The result is the ``target`` window
+        (window-as-result, DistributedTensor)."""
         SIZE = 16
         nr = 2
 
@@ -3883,18 +3884,17 @@ class TestWindowSliceIncoreConversion:
             def kernel(
                 self,
                 local_data: pl.Tensor[[1, SIZE], pl.FP32],
-                out: pl.Out[pl.Tensor[[1, nr * SIZE], pl.FP32]],
                 target: pld.DistributedTensor[[nr, SIZE], pl.FP32],
                 signal: pld.DistributedTensor[[nr, 1], pl.INT32],
-            ) -> pl.Tensor[[1, nr * SIZE], pl.FP32]:
-                pld.tensor.allgather(local_data, target, signal, out)  # type: ignore[arg-type]
-                return out  # type: ignore[return-type]
+            ) -> pld.DistributedTensor[[nr, SIZE], pl.FP32]:
+                result = pld.tensor.allgather(local_data, target, signal)  # type: ignore[arg-type]
+                return result
 
         After = passes.convert_tensor_to_tile_ops()(Before)
         # After conversion the function has additional params (MemRef for
         # local_data load).  Verify just the
         # direction inference: target and signal must be InOut; local_data
-        # (an original plain-Tensor In param) stays In; out must be Out.
+        # (an original plain-Tensor In param) stays In.
         after_fn = After["kernel"]
         assert after_fn is not None
         before_fn = Before["kernel"]
@@ -3908,8 +3908,6 @@ class TestWindowSliceIncoreConversion:
                 assert after_dir == ir.ParamDirection.InOut, f"signal must be InOut, got {after_dir}"
             elif bp.name_hint == "local_data":
                 assert after_dir == ir.ParamDirection.In, f"local_data must be In, got {after_dir}"
-            elif bp.name_hint == "out":
-                assert after_dir == ir.ParamDirection.Out, f"out must be Out, got {after_dir}"
 
     def test_reduce_scatter_upgrades_target_and_signal_to_inout(self):
         """``pld.tensor.reduce_scatter(target, signal, op=...)`` upgrades both

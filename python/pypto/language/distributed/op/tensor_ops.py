@@ -553,14 +553,14 @@ def allgather(
     local_data: Tensor | DistributedTensor,
     target: DistributedTensor | None = None,
     signal: DistributedTensor | None = None,
-    out: Tensor | None = None,
-) -> Tensor | DistributedTensor:
+) -> DistributedTensor:
     """Gather data from all ranks, either as an InCore composite or HOST builtin.
 
-        **InCore composite (4 args):** ``pld.tensor.allgather(local_data, target, signal, out)`` —
-        ``local_data`` is a plain Tensor [1, SIZE] with this rank's chunk.
-        The intrinsic handles ``pl.load``, stage-in, notify/wait, and per-peer
-        ``remote_load`` into ``out``.
+        **InCore composite (3 args):** ``pld.tensor.allgather(local_data, target, signal)`` —
+        push-based: each rank remote_stores its chunk into every peer's window
+        slot at ``target[my_rank, :]``, then notify/wait barrier; the window
+        itself becomes the gathered ``[NR, SIZE]`` result (window-as-result).
+        No separate output tensor — the window IS the result.
 
         **HOST builtin (2 args):** ``pld.tensor.allgather(data, signal)`` —
         each rank's chunk is already staged in ``data[my_rank, :]`` via a prior
@@ -572,15 +572,15 @@ def allgather(
             local_data: For InCore: :class:`pl.Tensor` [1, SIZE].  For HOST:
                 window-bound :class:`pld.DistributedTensor` [NR, SIZE] with
                 pre-staged chunks.
-            target: InCore only: :class:`pld.DistributedTensor` [NR, SIZE] staging window.
+            target: For InCore: :class:`pld.DistributedTensor` [NR, SIZE] staging
+                window — also the result (window-as-result).
             signal: Window-bound INT32 :class:`pld.DistributedTensor` barrier tensor.
-            out: InCore only: :class:`pl.Tensor` [1, NR*SIZE] output.
 
         Returns:
-            InCore: the ``out`` :class:`pl.Tensor`.  HOST: the rebound
-            :class:`pld.DistributedTensor`.
+            :class:`pld.DistributedTensor` — the ``target`` window holding the
+            gathered ``[NR, SIZE]`` result.
     """
-    if isinstance(target, DistributedTensor) and signal is None and out is None:
+    if isinstance(target, DistributedTensor) and signal is None:
         # 2-arg HOST builtin path: allgather(data, signal)
         # Positional mapping: data→local_data, signal→target
         data_expr, signal_expr = _unwrap_distributed_tensors(
@@ -588,14 +588,13 @@ def allgather(
         )
         call = _ir_tensor.allgather(data_expr, signal_expr)
         return DistributedTensor(expr=call)
-    # 4-arg InCore composite path
+    # 3-arg InCore composite path (push-based)
     target_expr, signal_expr = _unwrap_distributed_tensors(
         "pld.tensor.allgather", target=target, signal=signal
     )
     local_data_expr = _unwrap(local_data)
-    out_expr = _unwrap(out)
-    call = _ir_tensor.allgather(local_data_expr, target_expr, signal_expr, out_expr)
-    return Tensor(expr=call)
+    call = _ir_tensor.allgather(local_data_expr, target_expr, signal_expr)
+    return DistributedTensor(expr=call)
 
 
 def reduce_scatter(

@@ -187,7 +187,7 @@ Running `LowerCompositeOps` twice produces identical IR after the first run: the
 
 ## `pld.tensor.*` distributed collectives
 
-The pass also lowers the `pld.tensor.*` family of window-bound distributed collectives. Each collective is a single composite `Call` that expands into a notify / wait + data-movement recipe. The data-movement primitive differs by op: `allgather` and `broadcast` relocate window data with `pld.tile.get` (a GM→GM bulk copy through a VEC staging tile), while `allreduce` and `reduce_scatter` pull peer chunks into a UB tile with `pld.tile.remote_load` and accumulate with `tile.add`. The rules share the same signal-buffer discipline: a window-bound INT32 `signal` matrix is used as a cross-rank barrier, and the buffer is **single-shot per call**.
+The pass also lowers the `pld.tensor.*` family of window-bound distributed collectives. Each collective is a single composite `Call` that expands into a notify / wait + data-movement recipe. The data-movement primitive differs by op: `allgather` uses `pld.tile.remote_store` (a push-based TSTORE through a VEC staging tile), `broadcast` relocates window data with `pld.tile.get` (GM→GM copy), while `allreduce` and `reduce_scatter` pull peer chunks into a UB tile with `pld.tile.remote_load` and accumulate with `tile.add`. The rules share the same signal-buffer discipline: a window-bound INT32 `signal` matrix is used as a cross-rank barrier, and the buffer is **single-shot per call**.
 
 ### `pld.tensor.allreduce`
 
@@ -203,15 +203,15 @@ Only `ReduceOp::kSum` is supported in the first version; the C++ deducer rejects
 
 ### `pld.tensor.allgather`
 
-Signature: `allgather(local_data, target, signal, out)`. `local_data` is this rank's chunk (`Tensor` or `Tile` `[1, SIZE]`), `target` is a window-bound `DistributedTensor[NR, SIZE]` staging area, `signal` is the INT32 barrier, and `out` is a plain `Tensor[1, NR*SIZE]` that receives the result. Decomposes into a recipe aligned with the simpler allgather reference (`simpler/examples/workers/l3/allgather_distributed/`):
+Signature: `allgather(local_data, target, signal)`. `local_data` is this rank's chunk (`Tensor` or `Tile` `[1, SIZE]`), `target` is a window-bound `DistributedTensor[NR, SIZE]` staging area that also serves as the result, and `signal` is the INT32 barrier. Push-based decomposition:
 
 - Phase 0: `tile.load(local_data, [0, 0], [1, SIZE])` — emit a Tile from the plain input when `local_data` is a `Tensor`; skipped when it is already a Tile
-- Phase 1: `tile.store(stage_tile, [0, 0], target)` — stage this rank's chunk into its private HCCL window at local row 0
+- Phase 1: for `peer` in `0..NR-1`, `pld.tile.remote_store(stage_tile, target, peer, [my_rank, 0])` — push this rank's chunk into every peer's window at row `my_rank`. Self-store (`peer == my_rank`) uses HCCL identity mapping
 - Phase 2a: notify-all (`Set 1`)
 - Phase 2b: wait-all (`Ge 1`)
-- Phase 3: for `r` in `0..NR-1`, `pld.tile.get(out, peer=r, target, stage, dst_offsets=[0, r*SIZE], src_offsets=[0, 0], shape=[1, SIZE])` — transfer each peer's chunk directly into `out` at column offset `[0, r*SIZE]` through one shared `[1, SIZE]` VEC staging tile. No `tile.concat`; each transfer is `[1, SIZE]` so it fits in UB for any `NR`/`SIZE`. Returns the `out` **Tensor** `[1, NR*SIZE]`.
+- Return `target` — the window IS the gathered `[NR, SIZE]` result (window-as-result, `DistributedTensor`)
 
-Self-read falls out of the same `pld.tile.get` path via HCCL identity mapping (`CommRemotePtr` returns local pointer for `peer == my_rank`). Every rank produces the identical rank-ordered concatenation in `out`.
+Compared to the original pull-based allgather (4-arg with a separate `out` tensor), this push-based variant drops the `out` parameter and the per-peer `pld.tile.get` gather loop. Total HBM drops from `(NR+1)×SIZE` to `NR×SIZE`, at the cost of the window remaining occupied until the caller consumes the result.
 
 ### `pld.tensor.reduce_scatter`
 

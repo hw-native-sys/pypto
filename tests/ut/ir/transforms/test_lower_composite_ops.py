@@ -1181,9 +1181,7 @@ _ALLGATHER_REQUIRED_OPS = {
     "pld.system.rank",
     "pld.system.notify",
     "pld.system.wait",
-    "tile.create",
-    "pld.tile.get",
-    "tile.store",
+    "pld.tile.remote_store",
     "tile.load",
 }
 
@@ -1199,11 +1197,10 @@ def _build_allgather_before():
         def gather_step(
             self,
             inp: pl.Tensor[[1, SIZE], pl.FP32],
-            out: pl.Out[pl.Tensor[[1, nr * SIZE], pl.FP32]],
             data: pl.InOut[pld.DistributedTensor[[nr, SIZE], pl.FP32]],
             signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
-        ) -> pl.Tensor[[1, nr * SIZE], pl.FP32]:
-            result = pld.tensor.allgather(inp, data, signal, out)
+        ) -> pld.DistributedTensor[[nr, SIZE], pl.FP32]:
+            result = pld.tensor.allgather(inp, data, signal)
             return result
 
     return Before
@@ -1224,20 +1221,17 @@ def test_allgather_is_decomposed_to_primitives():
 
 
 def test_allgather_emits_for_and_if_control_flow():
-    """Allgather emits 3 ForStmts + 2 IfStmts: notify-all, wait-all, gather.
+    """Push-based allgather emits 3 ForStmts + 2 IfStmts: push loop, notify-all, wait-all.
 
-    Phase 3 (gather) now uses a runtime ForStmt over nranks_idx (matching
-    the barrier phases) instead of a compile-time unrolled loop — this
-    keeps the gather consistent with the notify/wait bounds regardless of
-    the actual comm-group size.  The gather ForStmt body emits pld.tile.get
-    for every peer (self-read via HCCL identity mapping), so there is no
-    per-rank IfStmt inside the gather loop."""
+    Phase 1 (push) uses a runtime ForStmt over nranks_idx — every peer gets a
+    remote_store (self-store via HCCL identity mapping, no per-rank IfStmt).
+    Phase 2a/2b are the standard notify-all/wait-all loops with per-peer IfStmts."""
     Before = _build_allgather_before()
     After = passes.lower_composite_ops()(Before)
     collector = _StmtKindCollector()
     collector.visit_program(After)
 
-    assert collector.for_count == 3, f"expected 3 ForStmts (notify, wait, gather), got {collector.for_count}"
+    assert collector.for_count == 3, f"expected 3 ForStmts (push, notify, wait), got {collector.for_count}"
     assert collector.if_count == 2, f"expected 2 IfStmts (notify-all + wait-all), got {collector.if_count}"
 
 

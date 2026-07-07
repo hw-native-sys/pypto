@@ -23,7 +23,7 @@
  *   - pld.tensor.barrier(signal)                                  -> DistributedTensorType
  *   - pld.tensor.broadcast(target, signal, root)                   -> DistributedTensorType
  *   - pld.tensor.allgather(target, signal)          (2-arg HOST)   -> DistributedTensorType
- *   - pld.tensor.allgather(local_data, target, signal, out) (4-arg)-> TensorType
+ *   - pld.tensor.allgather(local_data, target, signal) (3-arg push)  -> DistributedTensorType
  *   - pld.tensor.reduce_scatter(target, signal, op)                -> DistributedTensorType
  *
  * The five builtin.tensor.* ops are internal chip-dispatch targets emitted by the
@@ -220,7 +220,7 @@ REGISTER_OP("pld.tensor.broadcast")
     .f_deduce_type(DeduceTensorBroadcastType);
 
 // ============================================================================
-// pld.tensor.allgather — gather data from all ranks (2-arg HOST builtin or 4-arg InCore composite)
+// pld.tensor.allgather — gather data from all ranks (2-arg HOST builtin or 3-arg InCore composite)
 // ============================================================================
 
 namespace {
@@ -228,9 +228,9 @@ namespace {
 TypePtr DeduceTensorAllGatherType(const std::vector<ExprPtr>& args,
                                   const std::vector<std::pair<std::string, std::any>>& kwargs) {
   (void)kwargs;
-  CHECK(args.size() == 2 || args.size() == 4)
+  CHECK(args.size() == 2 || args.size() == 3)
       << "pld.tensor.allgather requires 2 args (target, signal) for host builtin path "
-         "or 4 args (local_data, target, signal, out) for InCore composite, but got "
+         "or 3 args (local_data, target, signal) for InCore composite, but got "
       << args.size();
   for (size_t i = 0; i < args.size(); ++i) {
     CHECK(args[i]) << "pld.tensor.allgather positional argument #" << i << " must not be null";
@@ -252,13 +252,13 @@ TypePtr DeduceTensorAllGatherType(const std::vector<ExprPtr>& args,
     return args[0]->GetType();
   }
 
-  // 4-arg InCore composite path.
+  // 3-arg InCore composite path (push-based).
   // arg 0: local_data — Tile (or Tensor before ConvertTensorToTileOps) with this rank's chunk
   auto local_type = args[0]->GetType();
   CHECK(As<TileType>(local_type) || As<TensorType>(local_type))
       << "pld.tensor.allgather local_data must be a Tile or Tensor, got " << local_type->TypeName();
 
-  // arg 1: target — DistributedTensor [NR, SIZE] staging window
+  // arg 1: target — DistributedTensor [NR, SIZE] staging window (also the result)
   auto target_type = As<DistributedTensorType>(args[1]->GetType());
   CHECK(target_type) << "pld.tensor.allgather target must be a DistributedTensor (window-bound), got "
                      << args[1]->GetType()->TypeName();
@@ -275,15 +275,10 @@ TypePtr DeduceTensorAllGatherType(const std::vector<ExprPtr>& args,
   CHECK(AreExprsEqual(signal_type->shape_[0], target_type->shape_[0]))
       << "pld.tensor.allgather signal first dimension must equal target first dimension (NR)";
 
-  // arg 3: out — Tensor [1, NR*SIZE] where the gathered result is written
-  auto out_type = As<TensorType>(args[3]->GetType());
-  CHECK(out_type) << "pld.tensor.allgather out must be a Tensor (not a DistributedTensor), got "
-                  << args[3]->GetType()->TypeName();
-  CHECK(out_type->shape_.size() == 2)
-      << "pld.tensor.allgather out must be 2D [1, NR*SIZE], got " << out_type->shape_.size() << " dims";
-
-  // Return the output Tensor type — the intrinsic writes directly into it.
-  return out_type;
+  // Push-based: each rank remote_stores its chunk into every peer's window at
+  // row my_rank.  After the barrier the window itself holds the gathered
+  // [NR, SIZE] result.  Return target's DistributedTensorType (window-as-result).
+  return target_type;
 }
 
 }  // namespace
@@ -294,19 +289,17 @@ REGISTER_OP("pld.tensor.allgather")
         "(2-arg) `pld.tensor.allgather(target, signal)` for HOST builtin — "
         "each rank's chunk is pre-staged in the window-bound target, lowered "
         "to builtin.tensor.barrier per chip; "
-        "(4-arg) `pld.tensor.allgather(local_data, target, signal, out)` for "
-        "InCore composite — `local_data` is the rank's chunk (Tile [1, SIZE]), "
-        "`target` is a window-bound DistributedTensor[NR, SIZE] staging area, "
-        "`signal` is a window-bound INT32 barrier tensor, `out` is a plain "
-        "Tensor[1, NR*SIZE] receiving the rank-ordered concatenation. "
-        "The 4-arg form is lowered by LowerCompositeOps into tile.store + "
-        "notify-all/wait-all + per-peer remote_load + tile.store into out; "
+        "(3-arg) `pld.tensor.allgather(local_data, target, signal)` for "
+        "InCore composite — push-based: each rank remote_stores its chunk "
+        "into every peer's window, then notify/wait barrier; the window itself "
+        "becomes the gathered [NR, SIZE] result (window-as-result). "
+        "The 3-arg form is lowered by LowerCompositeOps into "
+        "remote_store loop + notify-all/wait-all; "
         "this Call never survives past that pass.")
     .set_op_category("DistributedOp")
     .add_argument("local_data", "Local tile [1, SIZE] — this rank's data (Input)")
-    .add_argument("target", "Window-bound DistributedTensor[NR, SIZE] (InOut)")
+    .add_argument("target", "Window-bound DistributedTensor[NR, SIZE] — push target and result (InOut)")
     .add_argument("signal", "Window-bound INT32 DistributedTensor used as cross-rank barrier (InOut)")
-    .add_argument("out", "Plain Tensor[1, NR*SIZE] — receives the gathered result (Output)")
     .no_memory_spec()
     .f_deduce_type(DeduceTensorAllGatherType);
 
