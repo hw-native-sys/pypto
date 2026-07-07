@@ -16,13 +16,32 @@ An external kernel is a normal InCore kernel from the runtime's point of view,
 so the hand-written source must meet the same ABI PyPTO-generated kernels do:
 
 - Export a single `extern "C" void kernel_entry(__gm__ int64_t* args)` entry
-  (one kernel per `.cpp`; the runtime dispatches by `func_id`, the symbol is
-  fixed). This is the same entry PyPTO's own generated kernels export.
+  (one entry `.cpp` per kernel; the runtime dispatches by `func_id`, the symbol
+  is fixed). This is the same entry PyPTO's own generated kernels export.
 - The declared **parameter order and directions** (`pl.Out` / `pl.InOut`) must
   match how the kernel reads its arguments — the orchestration builds the task
   payload (`add_input` / `add_inout` / `add_output`) from the declaration.
 
 The declaration carries only the signature; its body is a bare `...`.
+
+### Multi-file kernels
+
+`external_source` names the single entry `.cpp` (the one exporting
+`kernel_entry`). That file may `#include` any number of sibling files —
+PyPTO **references it at its original path** (it does not copy it), so
+relative includes resolve against the original tree. A kernel laid out as
+
+```text
+my_kernel/
+  aic/entry.cpp          # external_source; #include "../kernel/impl.cce"
+  kernel/impl.cce        #                  #include "../tiling/params.h"
+  tiling/params.h
+```
+
+works unchanged — point `external_source` at `aic/entry.cpp` and the whole
+`../kernel/` / `../tiling/` include chain is picked up at compile time.
+Headers on the runtime include path (e.g. `tensor.h`, `intrinsic.h`,
+`pto/pto-inst.hpp`) resolve as usual.
 
 ## `@pl.program` route
 
@@ -102,10 +121,11 @@ though the Python stub is unchanged.
 - **Orchestration codegen**: assigns the kernel a `func_id` and emits the submit
   exactly as for a DSL kernel — a single AIC/AIV `rt_submit_*_task`, or a
   `MixedKernels{aic_id, aiv_id, ...}` + `rt_submit_task` for a group.
-- **Backend**: skips ptoas for the external kernel and copies its `.cpp` to
-  `kernels/<aic|aiv>/<name>.cpp`, so the generated `kernel_config.py` manifest
-  lists it exactly like a generated kernel (`func_id`, `source`, `core_type`,
-  `signature`, `arg_index`).
+- **Backend**: skips ptoas for the external kernel and lists it in the
+  generated `kernel_config.py` manifest like a generated kernel (`func_id`,
+  `core_type`, `signature`), but with `source` pointing at the original
+  hand-written `.cpp` (referenced in place, so its sibling files stay
+  reachable) rather than a copy under the artifact dir.
 
 ## Restrictions
 

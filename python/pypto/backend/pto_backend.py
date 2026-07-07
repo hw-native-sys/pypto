@@ -754,6 +754,7 @@ def _generate_config_file(
     func_name_to_core_type: dict[str, _ir_core.CoreType],
     func_name_to_signature: dict[str, list[str]] | None = None,
     orchestration_signature: list[str] | None = None,
+    func_name_to_external_source: dict[str, str] | None = None,
     *,
     block_dim: int | None = None,
 ) -> str:
@@ -786,6 +787,7 @@ def _generate_config_file(
     copied back (the pre-existing behavior).
     """
     func_name_to_signature = func_name_to_signature or {}
+    func_name_to_external_source = func_name_to_external_source or {}
     orchestration_signature = orchestration_signature or []
     has_signatures = any(func_name_to_signature.values()) or bool(orchestration_signature)
 
@@ -829,11 +831,16 @@ def _generate_config_file(
     for name, func_id in sorted(func_name_to_id.items(), key=lambda x: x[1]):
         core_type = func_name_to_core_type[name]
         ct_str = "aiv" if core_type == _ir_core.CoreType.VECTOR else "aic"
+        # External kernels are referenced in place at their original path so the
+        # entry .cpp keeps its sibling files (relative #include "../..." resolve);
+        # DSL kernels are generated at kernels/<ct>/<name>.cpp under the artifact.
+        ext_source = func_name_to_external_source.get(name)
+        if ext_source is not None:
+            source_expr = repr(ext_source)
+        else:
+            source_expr = f'str(_ROOT_DIR / "kernels" / "{ct_str}" / "{name}.cpp")'
         entry = (
-            f'\t{{"func_id": {func_id}, '
-            f'"name": "{name}", '
-            f'"source": str(_ROOT_DIR / "kernels" / "{ct_str}" / "{name}.cpp"), '
-            f'"core_type": "{ct_str}"'
+            f'\t{{"func_id": {func_id}, "name": "{name}", "source": {source_expr}, "core_type": "{ct_str}"'
         )
         signature = func_name_to_signature.get(name)
         if signature:
@@ -969,30 +976,13 @@ def _external_source_of(func: _ir_core.Function) -> str | None:
     """Return the ``external_source`` path of a header-only external kernel, else None.
 
     External kernels (declared via ``@pl.function(type=AIC/AIV,
-    external_source=...)``) carry the path to a hand-written C++ ``.cpp`` in
-    their ``external_source`` attr and have an empty ``...`` DSL body. The
-    backend copies that source into ``kernels/<ct>/<name>.cpp`` instead of
-    running PyPTO codegen + ptoas.
+    external_source=...)``) carry the absolute path to a hand-written C++
+    ``.cpp`` in their ``external_source`` attr and have an empty ``...`` DSL
+    body. The backend skips PyPTO codegen for them and references the source at
+    this original path in the manifest (so its sibling files stay reachable),
+    instead of generating a kernel.
     """
     return dict(func.attrs).get("external_source")
-
-
-def _emit_external_kernel(func: _ir_core.Function, result_files: dict[str, str]) -> None:
-    """Copy a hand-written external kernel source into the per-core kernel path.
-
-    The orchestration codegen still assigns the function a ``func_id`` and emits
-    its submit; only the kernel body is taken from the referenced ``.cpp``
-    instead of being generated. The manifest (``kernel_config.py``) picks up the
-    file at the standard ``kernels/<ct>/<name>.cpp`` location, so no manifest
-    change is needed.
-    """
-    source_path = _external_source_of(func)
-    if source_path is None:
-        raise RuntimeError(f"Internal error: '{func.name}' has no external_source attr")
-    with open(source_path) as f:
-        source = f.read()
-    out_path = _get_kernel_output_path(func, "cpp")
-    result_files[out_path] = source
 
 
 def _compile_pto_module(
@@ -1543,6 +1533,15 @@ def _generate_single_chip(
 
     groups, ungrouped = _build_group_mapping(transformed_program)
 
+    # External kernels are referenced at their original path in the manifest
+    # (kept beside their sibling sources so relative #include "../..." resolve),
+    # so PyPTO neither codegens nor copies them.
+    func_name_to_external_source: dict[str, str] = {
+        f.name: src
+        for f in transformed_program.functions.values()
+        if (src := _external_source_of(f)) is not None
+    }
+
     # ── Phase 1: IR → MLIR (sequential, fast) ────────────────────────
     # PTOCodegen converts IR to MLIR strings. This is cheap (pure string
     # generation) and runs sequentially so that we don't contend on the GIL.
@@ -1554,10 +1553,10 @@ def _generate_single_chip(
     # Grouped functions: one MLIR module per group
     for group_name, members in groups.items():
         try:
-            # External kernels: copy the hand-written .cpp per member and skip
-            # PyPTO codegen. A group must be all-external or all-DSL — mixing is
-            # rejected (the DSL members would need cross-core protocol wiring the
-            # external source can't participate in).
+            # External kernels are referenced in place (see the manifest map);
+            # skip PyPTO codegen for them. A group must be all-external or
+            # all-DSL — mixing is rejected (the DSL members would need cross-core
+            # protocol wiring the external source can't participate in).
             ext_members = [m for m in members if _external_source_of(m) is not None]
             if ext_members:
                 if len(ext_members) != len(members):
@@ -1566,8 +1565,6 @@ def _generate_single_chip(
                         f"Group '{group_name}' mixes external and DSL kernels "
                         f"(DSL members: {dsl}). A group must be all-external or all-DSL."
                     )
-                for member in members:
-                    _emit_external_kernel(member, result_files)
                 continue
             grouped_program = _ir_core.Program(members, group_name, transformed_program.span)
             stage = StageRecord(name=f"kernel_codegen:{group_name}", start=time.perf_counter())
@@ -1583,9 +1580,9 @@ def _generate_single_chip(
 
     for func in ungrouped:
         try:
-            # External kernel: copy the hand-written .cpp and skip PyPTO codegen.
+            # External kernel: referenced in place (see the manifest map);
+            # skip PyPTO codegen.
             if _external_source_of(func) is not None:
-                _emit_external_kernel(func, result_files)
                 continue
             peer_names = _extract_peer_function_names(func)
             peer_funcs: list[_ir_core.Function] = []
@@ -1627,6 +1624,7 @@ def _generate_single_chip(
                     orch_result.func_name_to_core_type,
                     orch_result.func_name_to_signature,
                     orch_result.orchestration_signature,
+                    func_name_to_external_source,
                     block_dim=block_dim,
                 )
         except Exception as e:
