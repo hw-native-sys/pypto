@@ -84,6 +84,39 @@ materialized = passes.materialize_alloc_tiles()(program)
 
 每条语句在每个外层被重扫一次，故整体为 O(N × depth)（嵌套深度有界）。
 
+### 动态 valid 修复
+
+感知依赖的放置能把 handle 保持在*单个*循环体 `valid_shape` 操作数之下，但当内存
+复用让一个 buffer 被**多个兄弟作用域**共享时（例如同一个 `mem_vec` 槽被两个相邻
+循环各自加载，各带自己的循环内 `valid_len`），就不存在任何一个作用域既支配全部使用
+又能看见全部操作数 —— 它会被上提到公共祖先，位于它们全部之上。此时在那里发出 handle
+的动态 `valid_col` 会引用越界操作数，ptoas 会报错（`'pto.alloc_tile' op valid_col
+operand is required because result type v_col is ?`）。
+
+放置完成后有一趟修复处理此情况：遍历语句树并跟踪当前作用域内的变量，对每个
+`valid_shape` 操作数在 handle 位置**不在作用域**内的 `alloc_tile`：
+
+1. 让 handle 以**静态** valid（物理形状 —— 自包含、可任意上提的操作数）声明；
+2. 在每个动态-valid 生产者*之前*、对 handle 注入一条 `tile.set_validshape`（该处
+   操作数在作用域内)重新建立其真实 valid。必须在生产者**之前**(而非之后):
+   `tile.load` 的填充/补齐范围跟随目标 tile 的 valid，所以 load 写入时 buffer 必须
+   已经是 `valid_len`；放到之后会让 load 期间 buffer 仍是静态 valid，破坏部分-valid 块。
+
+```mlir
+%h = pto.alloc_tile addr = %c0 valid_row = %c16 valid_col = %c64 : ...   # 静态
+scf.for ... {                                     # pass 1
+  %valid_len = scf.if ...
+  pto.set_validshape %h, %c16, %valid_len : ...   # 注入 —— 真实 valid,在 load 之前
+  pto.tload ... outs(%h)
+  pto.tfillpad ins(%h) ...                        # 用 min 补 valid_len..64
+}
+scf.for ... { pto.set_validshape %h, %c16, %valid_len_p2 ... pto.tload ... }   # pass 2
+```
+
+这是语义等价的（注入的 `set_validshape` 恢复了下沉的 alloc 本会携带的 valid），并
+保持严格的「每 buffer 一个 handle」模型。由于本 pass 是最后一趟，后续没有 DCE 会
+删除结果未使用的 `set_validshape` 副作用 op。
+
 ## 示例
 
 ```python

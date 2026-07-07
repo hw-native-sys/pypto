@@ -1467,7 +1467,17 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
       // Register per-variable tile_buf type from the variable's own TileType.
       // This ensures that even when multiple variables share a MemRef, each
       // variable's SSA value carries its correct typed annotation.
-      if (result_tile_type && !fs_.current_result_buf.empty() && fs_.current_result_buf == result_buf) {
+      //
+      // Exception: `tile.set_validshape` only narrows the valid-shape extent; it
+      // must NOT rewrite the shared handle's block/sub layout. Its result var
+      // carries a layout-defaulted TileView (e.g. an Acc buffer whose matmul
+      // producer is col_major/fractal=1024 but whose set_validshape result
+      // defaults to row_major/none_box/512). Overwriting here would corrupt the
+      // handle's canonical type for every later use (tpush, restore) that shares
+      // the same SSA name, so ptoas sees conflicting types on one value (#1956).
+      // The op handler already registered the input-derived canonical type.
+      if (!is_set_validshape && result_tile_type && !fs_.current_result_buf.empty() &&
+          fs_.current_result_buf == result_buf) {
         std::string var_type_str = GetTileBufTypeStringFromTileType(result_tile_type);
         if (!var_type_str.empty()) {
           fs_.ssa_to_tile_buf_type[fs_.current_result_buf] = var_type_str;

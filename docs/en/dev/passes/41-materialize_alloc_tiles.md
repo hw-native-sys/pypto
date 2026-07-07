@@ -93,6 +93,47 @@ recursing the statement tree:
 Each statement is rescanned once per enclosing level, so the pass is O(N × depth)
 (nesting depth is bounded).
 
+### Dynamic-valid fixup
+
+Deps-aware placement keeps a handle below a *single* loop-body `valid_shape`
+operand, but a buffer that memory-reuse shares across **several sibling scopes**
+(e.g. one `mem_vec` slot loaded in two consecutive loops, each with its own
+loop-local `valid_len`) has no single scope that both dominates every use *and*
+sees every operand — it is hoisted to the common ancestor, above all of them.
+Emitting the handle's dynamic `valid_col` there would reference an out-of-scope
+operand, which ptoas rejects (`'pto.alloc_tile' op valid_col operand is required
+because result type v_col is ?`).
+
+A final pass over the placed body repairs this. Walking the tree while tracking
+the in-scope variables, for each `alloc_tile` whose `valid_shape` operand is
+**not** in scope at the handle's position it:
+
+1. declares the handle with a **static** valid (the physical shape — a
+   self-contained, hoistable operand), and
+2. re-establishes each use's real valid by injecting a `tile.set_validshape` on
+   the handle **immediately before** the dynamic-valid producer, where the
+   operand *is* in scope. It must precede the producer (not follow it): a
+   `tile.load`'s fill/pad extent follows the destination tile's valid, so the
+   buffer must already carry `valid_len` when the load writes — emitting it after
+   leaves the buffer at its static valid during the load and corrupts
+   partial-valid blocks.
+
+```mlir
+%h = pto.alloc_tile addr = %c0 valid_row = %c16 valid_col = %c64 : ...   # static
+scf.for ... {                                     # pass 1
+  %valid_len = scf.if ...
+  pto.set_validshape %h, %c16, %valid_len : ...   # injected — real valid BEFORE the load
+  pto.tload ... outs(%h)
+  pto.tfillpad ins(%h) ...                        # pads valid_len..64 with min
+}
+scf.for ... { pto.set_validshape %h, %c16, %valid_len_p2 ... pto.tload ... }   # pass 2
+```
+
+This is semantics-preserving (the injected `set_validshape` restores the valid
+the descended alloc would otherwise carry) and keeps the strict one-handle
+per-buffer model. Because this pass is dead-last, no later DCE drops the
+result-unused `set_validshape` side-effect ops.
+
 ## Example
 
 ```python
