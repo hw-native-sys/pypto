@@ -89,6 +89,7 @@ struct PassProperties {
 | SynthesizeAllReduceSignals | — | — | — |
 | MaterializeCommDomainScopes | — | CommDomainScopesMaterialized | — |
 | LowerHostTensorCollectives | CommDomainScopesMaterialized | CommDomainScopesMaterialized | — |
+| MaterializeDistTensorCtx | CommDomainScopesMaterialized | CommDomainScopesMaterialized | — |
 | Simplify | — | — | — |
 | MaterializeRuntimeScopes | SplitIncoreOrch, CallDirectionsResolved | RuntimeScopesMaterialized | — |
 
@@ -403,8 +404,9 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 26. [`SynthesizeAllReduceSignals`](37-synthesize_allreduce_signals.md)（分布式：host allreduce optional signal -> explicit internal signal IR）
 27. [`MaterializeCommDomainScopes`](38-materialize_comm_domain_scopes.md)（分布式：构造 WindowBuffer 并写 CommDomainScopeStmt wrappers in each host_orch body；无通信程序为 no-op）
 28. [`LowerHostTensorCollectives`](39-lower_host_tensor_collectives.md)（host-level tensor collectives -> internal builtin chip dispatches）
-29. `Simplify`
-30. [`MaterializeRuntimeScopes`](40-materialize_runtime_scopes.md)（插入 AUTO RuntimeScopeStmt，使 orchestration codegen 1:1 emit PTO2_SCOPE）
+29. [`MaterializeDistTensorCtx`](40-materialize_dist_tensor_ctx.md)（为 DistributedTensor 参数显式物化 CommCtx 参数/实参）
+30. `Simplify`
+31. [`MaterializeRuntimeScopes`](41-materialize_runtime_scopes.md)（插入 AUTO RuntimeScopeStmt，使 orchestration codegen 1:1 emit PTO2_SCOPE）
 
 `DebugTileOptimization` 只是用于排查 PTO tile 阶段的调试策略，会跳过
 tensor-only 前缀 pass。正常编译和非 strategy 专项测试都应优先使用

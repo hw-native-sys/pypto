@@ -107,7 +107,7 @@ const Tensor& tmp = alloc_0.get_ref(0);
 
 All task submission is wrapped in a top-level `PTO2_SCOPE()`. Codegen no longer
 decides scope placement from the `for` / `if` structure: the
-[MaterializeRuntimeScopes](../passes/40-materialize_runtime_scopes.md) pass
+[MaterializeRuntimeScopes](../passes/41-materialize_runtime_scopes.md) pass
 inserts explicit AUTO `RuntimeScopeStmt` nodes (the function body and each
 `for` / `if` body) into the IR, and codegen emits `PTO2_SCOPE` 1:1 from those
 nodes (manual scopes lower to `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`):

@@ -106,7 +106,7 @@ const Tensor& tmp = alloc_0.get_ref(0);
 ### 阶段 6–8：任务提交与控制流
 
 所有任务提交包裹在顶层 `PTO2_SCOPE()` 中。codegen 不再依据 `for` / `if` 结构
-决定 scope 位置：[MaterializeRuntimeScopes](../passes/40-materialize_runtime_scopes.md)
+决定 scope 位置：[MaterializeRuntimeScopes](../passes/41-materialize_runtime_scopes.md)
 pass 会向 IR 中插入显式的 AUTO `RuntimeScopeStmt` 节点（函数体以及每个
 `for` / `if` 体），codegen 从这些节点 1:1 地 emit `PTO2_SCOPE`（manual scope
 降级为 `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`）：

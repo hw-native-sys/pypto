@@ -429,16 +429,15 @@ class PTOCodegen : public CodegenBase {
   [[nodiscard]] std::string GetSpmdSubblockIdxArgSSA() const { return fs_.spmd_subblock_idx_arg; }
 
   /**
-   * @brief SSA name of the CommContext pointer arg appended for a
-   * DistributedTensor param.
+   * @brief SSA name of the materialized CommContext pointer arg for a
+   * DistributedTensor parameter.
    *
-   * N6 distributed codegen appends one ``!pto.ptr<i64>`` arg per
-   * DistributedTensor parameter at the end of the func.func signature
-   * (after explicit tensor/scalar params, before dynamic-shape ``index``
-   * params). The mapping ``dist_tensor_var → ctx_ssa`` lets the
-   * pld.system.get_comm_ctx / pld.tile.remote_load / pld.tensor.put /
-   * pld.system.notify / pld.system.wait codegen
-   * recover the matching context pointer.
+   * MaterializeDistTensorCtx adds one explicit ``CommCtxType``
+   * parameter per DistributedTensor parameter. PTOCodegen lowers those
+   * params as ``!pto.ptr<i64>`` scalar arguments and records the
+   * ``dist_tensor_var -> ctx_ssa`` mapping so pld.system.get_comm_ctx /
+   * pld.tile.remote_load / pld.tensor.put / pld.system.notify /
+   * pld.system.wait codegen can recover the matching context pointer.
    *
    * @param dist_var DistributedTensor parameter variable.
    * @return SSA name (e.g. ``%arg7``), or empty string if @p dist_var is

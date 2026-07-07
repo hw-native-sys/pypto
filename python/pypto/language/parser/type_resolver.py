@@ -308,6 +308,11 @@ class TypeResolver:
         if isinstance(type_node, ast.Call):
             return self._resolve_call_type(type_node)
 
+        # Printer round-trip for explicit communication-context parameters.
+        # ``CommCtxType`` is a singleton marker, so it has no subscript payload.
+        if self._is_comm_ctx_type_node(type_node):
+            return ir.CommCtxType.get()
+
         # Handle attribute access like pl.Tensor
         if isinstance(type_node, ast.Attribute):
             raise ParserTypeError(
@@ -321,6 +326,12 @@ class TypeResolver:
             span=self._get_span(type_node),
             hint="Use pl.Tensor[[shape], dtype], pl.Tile[[shape], dtype], or pl.Scalar[dtype]",
         )
+
+    @staticmethod
+    def _is_comm_ctx_type_node(node: ast.expr) -> bool:
+        if isinstance(node, ast.Attribute):
+            return isinstance(node.value, ast.Name) and node.value.id == "pld" and node.attr == "CommCtxType"
+        return isinstance(node, ast.Name) and node.id == "CommCtxType"
 
     def _resolve_subscript_type(self, subscript_node: ast.Subscript) -> ir.Type:  # noqa: PLR0912
         """Resolve subscript type annotation.

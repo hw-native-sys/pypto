@@ -16,7 +16,7 @@ use [`LowerCompositeOps`](12-lower_composite_ops.md).
 ## Position in the pipeline
 
 ```text
-... -> SynthesizeAllReduceSignals -> MaterializeCommDomainScopes -> LowerHostTensorCollectives -> Simplify (final) -> MaterializeRuntimeScopes
+... -> SynthesizeAllReduceSignals -> MaterializeCommDomainScopes -> LowerHostTensorCollectives -> MaterializeDistTensorCtx -> Simplify (final) -> MaterializeRuntimeScopes
 ```
 
 The final `Simplify` runs after this pass so any generated loop bounds or

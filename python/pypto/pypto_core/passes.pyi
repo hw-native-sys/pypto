@@ -631,6 +631,9 @@ def materialize_comm_domain_scopes() -> Pass:
 def lower_host_tensor_collectives() -> Pass:
     """Lower host-level ``pld.tensor.allreduce`` calls to builtin collective dispatches."""
 
+def materialize_dist_tensor_ctx() -> Pass:
+    """Materialize CommCtx parameters and arguments for DistributedTensor function parameters."""
+
 def stamp_tfree_split() -> Pass:
     """Copy each cross-core tpop's split/pipe-id onto its matching tfree op.
 
@@ -842,6 +845,7 @@ __all__ = [
     "split_vector_kernel",
     "simplify",
     "lower_composite_ops",
+    "materialize_dist_tensor_ctx",
     "flatten_call_expr",
     "inline_functions",
     "normalize_stmt_structure",

@@ -161,6 +161,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/synthesize_allreduce_signals_pass.cpp
     src/ir/transforms/materialize_comm_domain_scopes_pass.cpp
     src/ir/transforms/lower_host_tensor_collectives_pass.cpp
+    src/ir/transforms/materialize_dist_tensor_ctx_pass.cpp
     src/ir/transforms/optimize_orch_tensors_pass.cpp
     src/ir/transforms/derive_call_directions_pass.cpp
     src/ir/transforms/auto_derive_task_dependencies_pass.cpp

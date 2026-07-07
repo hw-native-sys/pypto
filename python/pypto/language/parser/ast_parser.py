@@ -5494,6 +5494,34 @@ class ASTParser:
                 hint=hint,
             )
 
+    @staticmethod
+    def _call_args_for_return_deduction(
+        func_obj: ir.Function,
+        args: list[ir.Expr],
+        *,
+        as_submit: bool,
+    ) -> tuple[list[ir.Var], list[ir.Expr]]:
+        """Pair callee params with actual args for return-type substitution."""
+        if not as_submit or len(args) == len(func_obj.params):
+            return list(func_obj.params), args
+
+        callee_params: list[ir.Var] = []
+        paired_args: list[ir.Expr] = []
+        arg_idx = 0
+        for param_idx, (param, direction) in enumerate(zip(func_obj.params, func_obj.param_directions)):
+            if direction in (ir.ParamDirection.Out, ir.ParamDirection.InOut):
+                remaining_required = sum(
+                    1
+                    for d in func_obj.param_directions[param_idx + 1 :]
+                    if d not in (ir.ParamDirection.Out, ir.ParamDirection.InOut)
+                )
+                if len(args) - arg_idx <= remaining_required:
+                    continue
+            callee_params.append(param)
+            paired_args.append(args[arg_idx])
+            arg_idx += 1
+        return callee_params, paired_args
+
     def _parse_kernel_call(
         self,
         method_attr: ast.Attribute,
@@ -5546,7 +5574,38 @@ class ASTParser:
 
         # Validate argument count before parsing args to fail fast.
         if func_obj is not None:
-            self._validate_call_arg_count(method_name, func_obj, len(arg_nodes), span)
+            if as_submit:
+                # For submit (pl.submit / pl.spmd_submit), Out- and InOut-
+                # directed parameters are runtime-allocated outputs that
+                # MAY be omitted at the call site. The lower bound is the
+                # count of non-Out/InOut params; the upper bound is all
+                # params (when Out params are passed explicitly).
+                expected_lo = sum(
+                    1
+                    for d in func_obj.param_directions
+                    if d not in (ir.ParamDirection.Out, ir.ParamDirection.InOut)
+                )
+                expected_hi = len(func_obj.params)
+                ok = expected_lo <= len(arg_nodes) <= expected_hi
+            else:
+                expected_hi = len(func_obj.params)
+                ok = len(arg_nodes) == len(func_obj.params)
+            if not ok:
+                param_info = [
+                    f"{p.name_hint}: {d.name}" for p, d in zip(func_obj.params, func_obj.param_directions)
+                ]
+                hint = (
+                    f"Parameters: {param_info}. Out/InOut params may be omitted in submit calls."
+                    if as_submit
+                    else f"Parameters: {param_info}"
+                )
+                raise ParserTypeError(
+                    f"Function '{method_name}' expects "
+                    + (f"{expected_lo}..{expected_hi}" if as_submit else f"{expected_hi}")
+                    + f" argument(s), got {len(arg_nodes)}",
+                    span=span,
+                    hint=hint,
+                )
 
         arg_directions = self._extract_arg_directions_from_attrs(method_name, keywords, len(arg_nodes), span)
         if arg_directions is None:
@@ -5616,9 +5675,14 @@ class ASTParser:
         if func_obj is not None and not return_types and not as_submit:
             return_types = self._effective_return_types(func_obj)
         if func_obj is not None and return_types:
-            return_types = ir.deduce_call_return_type(
-                list(func_obj.params),
+            callee_params_for_return, args_for_return = self._call_args_for_return_deduction(
+                func_obj,
                 args,
+                as_submit=as_submit,
+            )
+            return_types = ir.deduce_call_return_type(
+                callee_params_for_return,
+                args_for_return,
                 return_types,
             )
         return self._make_call_with_return_type(

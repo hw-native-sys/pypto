@@ -12,6 +12,7 @@
 import re
 
 import pypto.language as pl
+import pypto.language.distributed as pld
 import pytest
 from _orchestration_codegen_common import (
     _generate_orch_code,
@@ -68,6 +69,47 @@ class TestManualScopeCodegen:
         # Only task 0 dumps ext_x; task 1 dumps nothing.
         assert code.count("params_t0.dump(ext_x);") == 1
         assert "params_t1.dump(" not in code
+
+    def test_submit_runtime_out_after_materialized_comm_ctx_aliases_task_output(self):
+        """Runtime Out aliases must ignore trailing materialized CommCtx args."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class SubmitRuntimeOutWithCtxProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def producer(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                signal: pld.DistributedTensor[[1], pl.INT32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                tile = pl.load(x, [0], [64])
+                return pl.store(tile, [0], out)
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consumer(self, y: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return y
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                signal: pld.DistributedTensor[[1], pl.INT32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.manual_scope():
+                    y, _tid = pl.submit(self.producer, x, signal)
+                z = self.consumer(y)
+                return z
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(SubmitRuntimeOutWithCtxProgram)
+        code = _generate_orch_code(transformed)
+
+        assert code.count("params_t0.add_scalar(signal_ctx);") == 1, code
+        assert "const Tensor& y = task_0_outs.get_ref(0);" in code, code
+        assert "params_t1.add_input(y);" in code, code
+        assert "signal_ctx.get_ref" not in code, code
 
     def test_manual_scope_emits_manual_pto2_scope_and_task_id_capture(self):
         backend.reset_for_testing()

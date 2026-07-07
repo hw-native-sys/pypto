@@ -188,7 +188,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
                                     int* next_id,
                                     std::unordered_map<const Var*, std::string> param_to_emit_name,
                                     std::set<std::string> param_name_set,
-                                    std::map<std::string, int> param_name_to_orch_index)
+                                    std::map<std::string, int> param_name_to_orch_index,
+                                    std::unordered_map<std::string, std::string> dist_param_to_ctx_param)
       : program_(prog),
         func_name_to_id_(func_ids),
         func_name_to_core_type_(core_types),
@@ -196,7 +197,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
         next_func_id_(next_id),
         emit_name_map_(std::move(param_to_emit_name)),
         param_name_set_(std::move(param_name_set)),
-        param_name_to_orch_index_(std::move(param_name_to_orch_index)) {
+        param_name_to_orch_index_(std::move(param_name_to_orch_index)),
+        dist_param_to_ctx_param_(std::move(dist_param_to_ctx_param)) {
     declared_var_names_ = param_name_set_;
     CollectCompilerDepTaskIds(program_);
   }
@@ -1138,6 +1140,19 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
         return;
       }
+      if (IsOp(call, "pld.system.get_comm_ctx")) {
+        INTERNAL_CHECK_SPAN(call->args_.size() == 1, assign->span_)
+            << "Internal error: pld.system.get_comm_ctx expects exactly 1 argument";
+        std::string arg_name = TryGetVarName(call->args_[0]);
+        INTERNAL_CHECK_SPAN(!arg_name.empty(), assign->span_)
+            << "Internal error: orchestration get_comm_ctx expects a DistributedTensor Var argument";
+        auto ctx_it = dist_param_to_ctx_param_.find(arg_name);
+        INTERNAL_CHECK_SPAN(ctx_it != dist_param_to_ctx_param_.end(), assign->span_)
+            << "Internal error: orchestration get_comm_ctx could not find materialized CommCtx param for "
+            << arg_name;
+        EmitIndentedLine("uint64_t " + var_name + " = " + ctx_it->second + ";");
+        return;
+      }
 
       if (IsTensorOp(op_name)) {
         if (IsOp(call, "tensor.assemble")) {
@@ -1502,6 +1517,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // legal (C++ rejects ``auto x;`` without init). Yield/Assign downstream
     // will rebind it.
     if (AsTensorTypeLike(type)) return "Tensor";
+    if (As<CommCtxType>(type)) return "uint64_t";
     // ArrayType has split declaration syntax (``dtype name[N]``) — there's no
     // single "type expression" that names a C array. Callers that need to
     // emit a Var of ArrayType always go through array.create's op codegen,
@@ -1569,16 +1585,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
     bool dump = false;
   };
 
-  /// Result of building a wrapper (Spmd/Group) call's task params. ``params`` is
-  /// the reordered ParamEntry list; ``ctx_scalar_names`` holds the ``ext_<name>``
-  /// of each DistributedTensor formal (in inner-kernel param order), which the
-  /// caller emits as trailing ``add_scalar(ext_<name>_ctx)`` — the wrapper-path
-  /// analogue of the InCore ``EmitDistTensorCtxScalars``.
-  struct WrapperParams {
-    std::vector<ParamEntry> params;
-    std::vector<std::string> ctx_scalar_names;
-  };
-
   /// Reorder a param list so non-scalar (tensor) entries precede scalars,
   /// preserving relative order within each group — the new PTOParam ordering
   /// invariant (tensors must be added before scalars; see
@@ -1614,6 +1620,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
     const auto& arg = call->args_[arg_idx];
     std::string var_name = TryGetVarName(arg);
     if (!var_name.empty()) {
+      if (IsA<CommCtxType>(arg->GetType())) {
+        return {ArgDirection::Scalar, var_name};
+      }
       if (auto scalar_type = As<ScalarType>(arg->GetType())) {
         std::string cpp_type = scalar_type->dtype_.ToCTypeString();
         return {ArgDirection::Scalar, EncodeScalarVar(var_name, cpp_type)};
@@ -1654,6 +1663,15 @@ class OrchestrationStmtCodegen : public CodegenBase {
       }
     }
     return out;
+  }
+
+  size_t CountTrailingCommCtxParams(const FunctionPtr& callee_func) const {
+    size_t ctx_count = 0;
+    while (ctx_count < callee_func->params_.size() &&
+           IsA<CommCtxType>(callee_func->params_[callee_func->params_.size() - 1 - ctx_count]->GetType())) {
+      ++ctx_count;
+    }
+    return ctx_count;
   }
 
   /// Return the ``ParamEntry::value`` strings to pass to ``Arg::dump(...)``.
@@ -1804,19 +1822,28 @@ class OrchestrationStmtCodegen : public CodegenBase {
     std::set<const Var*> dump_var_set = CollectDumpVarSet(call);
 
     params.reserve(callee_func->params_.size());
-    for (size_t arg_idx = 0; arg_idx < call->args_.size(); ++arg_idx) {
+    auto push_call_arg = [&](size_t arg_idx) {
       params.push_back(BuildOneArgParam(call, callee_name, call_arg_directions, arg_idx));
       if (!dump_var_set.empty()) {
         if (auto v = AsVarLike(call->args_[arg_idx])) {
           params.back().dump = dump_var_set.count(v.get()) > 0;
         }
       }
-    }
+    };
     if (IsSubmitCall(call)) {
       INTERNAL_CHECK_SPAN(call->args_.size() <= callee_func->params_.size(), call->span_)
           << "Submit to '" << callee_name << "' has args_ size " << call->args_.size()
           << " but callee has only " << callee_func->params_.size() << " params.";
-      for (size_t param_idx = call->args_.size(); param_idx < callee_func->params_.size(); ++param_idx) {
+      const size_t ctx_count = CountTrailingCommCtxParams(callee_func);
+      INTERNAL_CHECK_SPAN(call->args_.size() >= ctx_count, call->span_)
+          << "Submit to '" << callee_name << "' has " << call->args_.size()
+          << " args, fewer than the materialized CommCtx suffix size " << ctx_count << ".";
+      const size_t original_arg_count = call->args_.size() - ctx_count;
+      const size_t original_param_count = callee_func->params_.size() - ctx_count;
+      for (size_t arg_idx = 0; arg_idx < original_arg_count; ++arg_idx) {
+        push_call_arg(arg_idx);
+      }
+      for (size_t param_idx = original_arg_count; param_idx < original_param_count; ++param_idx) {
         INTERNAL_CHECK_SPAN(callee_func->param_directions_[param_idx] == ParamDirection::Out,
                             callee_func->params_[param_idx]->span_)
             << "Submit to '" << callee_name << "' missing positional arg for callee param[" << param_idx
@@ -1824,7 +1851,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
             << " (only Out params may be runtime-allocated).";
         params.push_back(EmitSubmitSynthOutputEntry(callee_func, param_idx));
       }
+      for (size_t arg_idx = original_arg_count; arg_idx < call->args_.size(); ++arg_idx) {
+        push_call_arg(arg_idx);
+      }
     } else {
+      for (size_t arg_idx = 0; arg_idx < call->args_.size(); ++arg_idx) {
+        push_call_arg(arg_idx);
+      }
       // Plain Call: full coverage required (args.size() == callee params).
       // The trivial `params.size() == call->args_.size()` invariant holds by
       // construction; the meaningful invariant is callee-side coverage.
@@ -1929,9 +1962,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// Wrapper functions may omit constants or otherwise expose a different
   /// parameter order than the callee binary expects. Submit args using the
   /// inner callee's order, not the wrapper's order.
-  WrapperParams BuildWrapperReorderedParams(const CallPtr& outer_call, const FunctionPtr& wrapper_func,
-                                            const CallPtr& inner_call, const FunctionPtr& inner_callee,
-                                            const WrapperBridge& bridge = {}) {
+  std::vector<ParamEntry> BuildWrapperReorderedParams(const CallPtr& outer_call,
+                                                      const FunctionPtr& wrapper_func,
+                                                      const CallPtr& inner_call,
+                                                      const WrapperBridge& bridge = {}) {
     std::unordered_map<const Var*, size_t> wrapper_param_to_outer_idx;
     for (size_t i = 0; i < wrapper_func->params_.size(); ++i) {
       wrapper_param_to_outer_idx[wrapper_func->params_[i].get()] = i;
@@ -2017,7 +2051,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
     std::set<const Var*> inner_dump_var_set = CollectDumpVarSet(inner_call);
 
     std::vector<ParamEntry> params;
-    std::vector<std::string> ctx_scalar_names;
     for (size_t inner_idx = 0; inner_idx < inner_call->args_.size(); ++inner_idx) {
       const auto& inner_arg = inner_call->args_[inner_idx];
       auto inner_arg_var = AsVarLike(inner_arg);
@@ -2059,6 +2092,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
       std::string var_name = TryGetVarName(outer_arg);
 
       if (!var_name.empty()) {
+        if (IsA<CommCtxType>(outer_arg->GetType())) {
+          params.push_back({ArgDirection::Scalar, var_name});
+          continue;
+        }
         if (auto scalar_type = As<ScalarType>(outer_arg->GetType())) {
           std::string cpp_type = scalar_type->dtype_.ToCTypeString();
           params.push_back({ArgDirection::Scalar, EncodeScalarVar(var_name, cpp_type)});
@@ -2080,13 +2117,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
             << "Internal error: resolved direction index " << dir_idx << " out of range for tensor arg of '"
             << wrapper_func->name_ << "' (" << outer_arg_directions.size() << " directions).";
         params.push_back({outer_arg_directions[dir_idx], ext_name, is_dump});
-        // ``inner_idx`` is 1:1 with ``inner_callee->params_``, so record the
-        // resolved ``ext_<name>`` of each DistributedTensor formal for the trailing
-        // CommContext scalar (analogue of the InCore ``EmitDistTensorCtxScalars``).
-        if (inner_idx < inner_callee->params_.size() &&
-            As<DistributedTensorType>(inner_callee->params_[inner_idx]->GetType())) {
-          ctx_scalar_names.push_back(ext_name);
-        }
       } else if (auto const_int = As<ConstInt>(outer_arg)) {
         std::string cpp_type = const_int->dtype().ToCTypeString();
         std::string value = FormatConstIntValue(const_int, cpp_type);
@@ -2109,10 +2139,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         << "Wrapper '" << wrapper_func->name_ << "' built " << params.size() << " params for "
         << inner_call->args_.size() << " inner-call args (1:1 invariant violated).";
 
-    // Tensors must precede scalars. ``ctx_scalar_names`` is kept separate and in
-    // inner-kernel param order (unaffected by the reorder) — emitted after all
-    // params by the caller.
-    return {ReorderTensorsBeforeScalars(std::move(params)), std::move(ctx_scalar_names)};
+    return ReorderTensorsBeforeScalars(std::move(params));
   }
 
   // Render the launched function's core_num attribute as a C++ scalar expression.
@@ -2330,43 +2357,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// attached separately by ``EmitManualDeps`` via ``set_dependencies``.
   void EmitTaskParamsDecl(const std::string& task_var) { EmitIndentedLine("L0TaskArgs " + task_var + ";"); }
 
-  /// Emit one ``params_t.add_scalar(ext_<outer_arg>_ctx)`` per DistributedTensor
-  /// formal of the callee, in IR-param order. The L1 kernel (PTOCodegen) appends
-  /// one ``!pto.ptr<i64>`` arg per DistributedTensor at the tail of the func.func
-  /// signature; the L2 orch must thread the matching CommContext ``uint64_t`` into
-  /// the dispatch payload by add_scalar'ing the outer-scope ``ext_<name>_ctx``
-  /// variable (unpacked once in ``aicpu_orchestration_entry``).
-  void EmitDistTensorCtxScalars(const CallPtr& call, const FunctionPtr& callee_func,
-                                const std::string& task_var) {
-    for (size_t i = 0; i < callee_func->params_.size() && i < call->args_.size(); ++i) {
-      if (!As<DistributedTensorType>(callee_func->params_[i]->GetType())) continue;
-      std::string outer_arg_name = TryGetVarName(call->args_[i]);
-      INTERNAL_CHECK_SPAN(!outer_arg_name.empty(), call->span_)
-          << "Internal error: DistributedTensor arg " << i << " of call to '" << callee_func->name_
-          << "' is not a bound variable — required to thread the matching CommContext scalar.";
-      EmitIndentedLine(task_var + ".add_scalar(" + GetExternalTensorName(outer_arg_name) + "_ctx);");
-    }
-  }
-
-  /// Emit the trailing per-DistributedTensor CommContext scalars for a wrapper
-  /// (Spmd/Group) task. ``ext_names`` are the ``ext_<name>`` resolved by
-  /// ``BuildWrapperReorderedParams`` (inner-kernel param order); this appends the
-  /// ``_ctx`` suffix. The wrapper-path counterpart of ``EmitDistTensorCtxScalars``
-  /// (which walks a directly-called callee's own params).
-  void EmitCtxScalars(const std::string& task_var, const std::vector<std::string>& ext_names) {
-    for (const auto& ext_name : ext_names) {
-      EmitIndentedLine(task_var + ".add_scalar(" + ext_name + "_ctx);");
-    }
-  }
-
   struct TaskDispatchPlan {
     std::string comment;
     std::string task_var;
     std::vector<std::string> pre_lines;
     std::vector<ParamEntry> params;
-    std::vector<std::string> ctx_scalar_names;
     CallPtr call;
-    FunctionPtr dist_ctx_callee;
     ExprPtr launch_core_num;
     bool launch_sync_start{false};
     std::string submit_expr;
@@ -2387,11 +2383,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
         cg.EmitIndentedLine(task_var + "." + ArgDirectionToMethodName(p.direction) + "(" + p.value + ");");
       }
       cg.EmitSelectiveDumpCall(task_var, params);
-      if (!ctx_scalar_names.empty()) {
-        cg.EmitCtxScalars(task_var, ctx_scalar_names);
-      } else if (dist_ctx_callee != nullptr) {
-        cg.EmitDistTensorCtxScalars(call, dist_ctx_callee, task_var);
-      }
       for (const auto& line : pre_lines) {
         cg.EmitIndentedLine(line);
       }
@@ -2415,17 +2406,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
   TaskDispatchPlan BuildTaskDispatchPlan(const std::string& comment, const CallPtr& call,
                                          std::vector<ParamEntry>&& params, const ExprPtr& launch_core_num,
                                          bool launch_sync_start, const std::string& submit_expr,
-                                         bool capture_outputs, const FunctionPtr& dist_ctx_callee = nullptr,
-                                         std::vector<std::string>&& ctx_scalar_names = {},
-                                         std::vector<std::string>&& pre_lines = {}) {
+                                         bool capture_outputs, std::vector<std::string>&& pre_lines = {}) {
     TaskDispatchPlan plan;
     plan.comment = comment;
     plan.task_var = CurrentTaskVarName();
     plan.pre_lines = std::move(pre_lines);
     plan.params = std::move(params);
-    plan.ctx_scalar_names = std::move(ctx_scalar_names);
     plan.call = call;
-    plan.dist_ctx_callee = dist_ctx_callee;
     plan.launch_core_num = launch_core_num;
     plan.launch_sync_start = launch_sync_start;
     plan.submit_expr = submit_expr;
@@ -2444,7 +2431,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     TaskDispatchPlan plan =
         BuildTaskDispatchPlan("// Task " + std::to_string(task_counter_) + ": " + callee_name, call,
                               std::move(params), launch_core_num, launch_sync_start, submit_expr,
-                              ShouldCaptureTaskOutputs(call, capture_plain_task_id), callee_func);
+                              ShouldCaptureTaskOutputs(call, capture_plain_task_id));
     // Direct calls historically emit set_dependencies before the launch spec.
     plan.deps_before_launch = true;
     return plan;
@@ -2452,37 +2439,33 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   TaskDispatchPlan BuildSpmdCallDispatchPlan(const CallPtr& call, const FunctionPtr& spmd_func,
                                              const std::string& callee_name, CoreType core_type, int func_id,
-                                             std::vector<ParamEntry>&& params, bool capture_plain_task_id,
-                                             std::vector<std::string>&& ctx_scalar_names = {}) {
+                                             std::vector<ParamEntry>&& params, bool capture_plain_task_id) {
     std::string task_var = CurrentTaskVarName();
     auto [launch_core_num, launch_sync_start] = EffectiveLaunchSpec(call, spmd_func);
     std::string submit_expr =
         CoreTypeToSubmitPrefix(core_type) + std::to_string(func_id) + ", " + task_var + ")";
     return BuildTaskDispatchPlan("// Spmd " + spmd_func->name_ + ": " + callee_name, call, std::move(params),
                                  launch_core_num, launch_sync_start, submit_expr,
-                                 ShouldCaptureTaskOutputs(call, capture_plain_task_id), nullptr,
-                                 std::move(ctx_scalar_names));
+                                 ShouldCaptureTaskOutputs(call, capture_plain_task_id));
   }
 
   TaskDispatchPlan BuildAivOnlyGroupDispatchPlan(const CallPtr& call, const FunctionPtr& launch_func,
                                                  const std::string& group_name, int aiv_id,
-                                                 std::vector<ParamEntry>&& params, bool capture_plain_task_id,
-                                                 std::vector<std::string>&& ctx_scalar_names = {}) {
+                                                 std::vector<ParamEntry>&& params,
+                                                 bool capture_plain_task_id) {
     std::string task_var = CurrentTaskVarName();
     auto [launch_core_num, launch_sync_start] = EffectiveLaunchSpec(call, launch_func);
     std::string submit_expr =
         CoreTypeToSubmitPrefix(CoreType::VECTOR) + std::to_string(aiv_id) + ", " + task_var + ")";
     return BuildTaskDispatchPlan("// Group " + group_name + ": AIV-only SPMD", call, std::move(params),
                                  launch_core_num, launch_sync_start, submit_expr,
-                                 ShouldCaptureTaskOutputs(call, capture_plain_task_id), nullptr,
-                                 std::move(ctx_scalar_names));
+                                 ShouldCaptureTaskOutputs(call, capture_plain_task_id));
   }
 
   TaskDispatchPlan BuildMixedGroupDispatchPlan(const CallPtr& call, const FunctionPtr& launch_func,
                                                const std::string& group_name, int aic_id, int aiv_id,
                                                const FunctionPtr& aiv_func, std::vector<ParamEntry>&& params,
-                                               bool capture_plain_task_id,
-                                               std::vector<std::string>&& ctx_scalar_names = {}) {
+                                               bool capture_plain_task_id) {
     std::string task_var = CurrentTaskVarName();
     auto [launch_core_num, launch_sync_start] = EffectiveLaunchSpec(call, launch_func);
     std::string submit_expr = "rt_submit_task(mixed_" + std::to_string(task_counter_) + ", " + task_var + ")";
@@ -2493,8 +2476,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
                                        third_id + "};"};
     return BuildTaskDispatchPlan("// Group " + group_name + ": MixedKernels (AIC + AIV lanes)", call,
                                  std::move(params), launch_core_num, launch_sync_start, submit_expr,
-                                 ShouldCaptureTaskOutputs(call, capture_plain_task_id), nullptr,
-                                 std::move(ctx_scalar_names), std::move(pre_lines));
+                                 ShouldCaptureTaskOutputs(call, capture_plain_task_id), std::move(pre_lines));
   }
 
   /// Emit explicit dependency wiring for a kernel ``Call``: a fixed-size
@@ -2873,11 +2855,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
     auto params = BuildTaskParams(call, callee_func);
     RecordKernelSignature(callee_name, params);
 
-    // For each DistributedTensor formal of the callee, append the matching
-    // outer ext_<name>_ctx scalar so the L1 kernel's trailing CommContext
-    // ptr arg gets populated. The outer ctx variable is unpacked in
-    // ``aicpu_orchestration_entry`` (see the DistributedTensor CommContext
-    // pointers block) and named ``ext_<outer-arg-name>_ctx``.
     // SPMD launch spec for pl.spmd_submit targeting an AIC/AIV kernel directly
     // (no Spmd-wrapper function). core_num/sync_start ride on the Submit and
     // are surfaced as Call attrs by SubmitToCallView; a plain submit / call
@@ -2910,12 +2887,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
     (*func_name_to_core_type_)[callee_name] = core_type;
 
     int func_id = GetOrCreateFuncId(callee_name, func_name_to_id_, next_func_id_);
-    auto [params, ctx_scalar_names] =
-        BuildWrapperReorderedParams(call, spmd_func, info.inner_call, info.inner_callee);
+    auto params = BuildWrapperReorderedParams(call, spmd_func, info.inner_call);
     RecordKernelSignature(callee_name, params);
 
     BuildSpmdCallDispatchPlan(call, spmd_func, callee_name, core_type, func_id, std::move(params),
-                              capture_plain_task_id, std::move(ctx_scalar_names))
+                              capture_plain_task_id)
         .Emit(*this);
   }
 
@@ -2941,12 +2917,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
       // Reorder params from wrapper param order to inner kernel arg order.
       INTERNAL_CHECK(info.inner_call != nullptr && info.inner_callee != nullptr)
           << "Internal error: no inner call found in AIV-only Group '" << group_name << "'";
-      auto [params, ctx_scalar_names] =
-          BuildWrapperReorderedParams(call, group_func, info.inner_call, info.inner_callee, bridge);
+      auto params = BuildWrapperReorderedParams(call, group_func, info.inner_call, bridge);
       RecordKernelSignature(info.aiv_name, params);
 
       BuildAivOnlyGroupDispatchPlan(call, launch_func, group_name, aiv_id, std::move(params),
-                                    capture_plain_task_id, std::move(ctx_scalar_names))
+                                    capture_plain_task_id)
           .Emit(*this);
       return;
     }
@@ -2969,8 +2944,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // Reorder params from wrapper param order to inner kernel arg order.
     INTERNAL_CHECK(info.inner_call != nullptr && info.inner_callee != nullptr)
         << "Internal error: no inner call found in MixedKernels Group '" << group_name << "'";
-    auto [params, ctx_scalar_names] =
-        BuildWrapperReorderedParams(call, group_func, info.inner_call, info.inner_callee, bridge);
+    auto params = BuildWrapperReorderedParams(call, group_func, info.inner_call, bridge);
     RecordKernelSignature(info.aic_name, params);
     RecordKernelSignature(info.aiv_name, params);
 
@@ -2978,7 +2952,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     int aiv_id = GetOrCreateFuncId(info.aiv_name, func_name_to_id_, next_func_id_);
 
     BuildMixedGroupDispatchPlan(call, launch_func, group_name, aic_id, aiv_id, aiv_func, std::move(params),
-                                capture_plain_task_id, std::move(ctx_scalar_names))
+                                capture_plain_task_id)
         .Emit(*this);
   }
 
@@ -3384,20 +3358,20 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// so a downstream ``deps=[tid]`` resolves to it.
   ///
   /// For the Out/InOut tuple elements, the aliasing target depends on whether
-  /// the callee param is *caller-allocated* (in Submit's args_) or
-  /// *runtime-allocated* (callee param index >= Submit args_.size()):
-  ///   - Caller-allocated (param_idx < args_.size()): alias to
+  /// the callee param is *caller-allocated* (in Submit's original, non-ctx args)
+  /// or *runtime-allocated* (callee param index >= original arg count):
+  ///   - Caller-allocated (param_idx < original arg count): alias to
   ///     ``call->args_[param_idx]`` — the original tensor variable the user
   ///     passed in. The runtime's ``TaskOutputTensors`` stores only
   ///     ``add_output`` entries (see runtime/.../pto_types.h:72 — "Only
   ///     runtime-created outputs are stored here"), so ``add_inout`` /
   ///     in-args ``add_output(Tensor&)`` slots do **not** appear in
   ///     ``task_<idx>_outs`` and ``get_ref`` would skip past them or assert.
-  ///   - Runtime-allocated (param_idx >= args_.size()): alias to
+  ///   - Runtime-allocated (param_idx >= original arg count): alias to
   ///     ``task_<idx>_outs.get_ref(runtime_out_pos)`` where
-  ///     ``runtime_out_pos = param_idx - args_.size()`` because
+  ///     ``runtime_out_pos = param_idx - original_arg_count`` because
   ///     ``BuildTaskParams`` appends one synth ``add_output`` per callee Out
-  ///     in the tail, in callee param order.
+  ///     before the materialized CommCtx suffix, in callee param order.
   void GenerateSubmitReturnAliases(const CallPtr& call, int task_idx, const Var* result_var) {
     auto tuple_key_it = tuple_var_to_key_.find(result_var);
     if (tuple_key_it == tuple_var_to_key_.end()) return;
@@ -3412,6 +3386,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
     FunctionPtr callee = program_->GetFunction(call->op_->name_);
     INTERNAL_CHECK_SPAN(callee != nullptr, call->span_)
         << "Internal error: submit callee '" << call->op_->name_ << "' not found";
+    const size_t ctx_count = CountTrailingCommCtxParams(callee);
+    INTERNAL_CHECK_SPAN(call->args_.size() >= ctx_count, call->span_)
+        << "Submit to '" << call->op_->name_ << "' has " << call->args_.size()
+        << " args, fewer than the materialized CommCtx suffix size " << ctx_count << ".";
+    const size_t original_arg_count = call->args_.size() - ctx_count;
 
     // Prefer the precise return-position -> callee param map (handles an InOut
     // param written in place but not returned — issue #1573). Fall back to the
@@ -3479,15 +3458,15 @@ class OrchestrationStmtCodegen : public CodegenBase {
           << "Internal error: resolved param_idx " << param_idx << " out of range for " << call->op_->name_
           << " (has " << callee->params_.size() << " params)";
       std::string elem_name = ReserveVarEmitName(elem.var);
-      if (param_idx < call->args_.size()) {
+      if (param_idx < original_arg_count) {
         // Caller-allocated: the param was passed positionally as an arg.
         // Alias to the arg's emit name — runtime tracks producer via the
         // submitted task, but TaskOutputTensors does NOT contain this slot.
         EmitTensorAlias(elem.var, elem_name, call, param_idx);
       } else {
         // Runtime-allocated: BuildTaskParams synthesised an add_output for
-        // this param at runtime output position (param_idx - args_.size()).
-        size_t runtime_out_pos = param_idx - call->args_.size();
+        // this param at runtime output position (param_idx - original_arg_count).
+        size_t runtime_out_pos = param_idx - original_arg_count;
         std::string source =
             "task_" + std::to_string(task_idx) + "_outs.get_ref(" + std::to_string(runtime_out_pos) + ")";
         if (IsMutableTensorNameInCurrentScope(elem_name)) {
@@ -3745,6 +3724,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::unordered_set<const Var*> effective_uses_;
   std::unordered_map<std::string, int64_t> gm_pipe_workspace_elements_by_callee_;
   std::unordered_map<std::string, std::string> tensor_create_size_expr_by_emit_name_;
+  std::unordered_map<std::string, std::string> dist_param_to_ctx_param_;
   /// Memoizes ``FindReturnedParamIndices`` per callee Function. Tuple/submit
   /// alias generation runs once per call site, but distinct call sites may
   /// share a callee; caching the per-callee return→param map keeps the codegen
@@ -3783,15 +3763,14 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   int tensor_param_count = 0;
   struct ScalarParamInfo {
     std::string emit_name;
-    ScalarTypePtr scalar_type;
+    TypePtr type;
   };
   std::vector<ScalarParamInfo> scalar_params;
-  // Names of DistributedTensor params (in IR-param order). Each needs a
-  // trailing CommContext ``uint64_t`` slot unpacked from ``orch_args.scalar(...)``
-  // and forwarded as a trailing ``add_scalar(ext_<name>_ctx)`` to the L1
-  // kernel dispatch (matching the trailing ``!pto.ptr<i64>`` args appended
-  // by PTOCodegen for DistributedTensor params).
+  // Names of DistributedTensor params and their materialized CommCtxType params,
+  // both in IR-param order. The mapping lets ``pld.system.get_comm_ctx`` alias
+  // the explicit uint64_t ctx param already unpacked from ``orch_args.scalar``.
   std::vector<std::string> dist_tensor_param_names;
+  std::vector<std::string> comm_ctx_param_names;
   std::vector<std::string> orchestration_signature;
   INTERNAL_CHECK(func->params_.size() == func->param_directions_.size())
       << "Internal error: orchestration function has " << func->params_.size() << " params but "
@@ -3808,9 +3787,20 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
       if (As<DistributedTensorType>(var->GetType())) {
         dist_tensor_param_names.push_back(emit_name);
       }
-    } else if (auto stype = As<ScalarType>(var->GetType())) {
-      scalar_params.push_back({emit_name, stype});
+    } else if (As<ScalarType>(var->GetType()) || IsA<CommCtxType>(var->GetType())) {
+      scalar_params.push_back({emit_name, var->GetType()});
+      if (IsA<CommCtxType>(var->GetType())) {
+        comm_ctx_param_names.push_back(emit_name);
+      }
     }
+  }
+
+  std::unordered_map<std::string, std::string> dist_param_to_ctx_param;
+  INTERNAL_CHECK(dist_tensor_param_names.size() == comm_ctx_param_names.size())
+      << "Materialized orchestration signature has " << dist_tensor_param_names.size()
+      << " DistributedTensor params but " << comm_ctx_param_names.size() << " CommCtx params.";
+  for (size_t i = 0; i < dist_tensor_param_names.size(); ++i) {
+    dist_param_to_ctx_param[dist_tensor_param_names[i]] = comm_ctx_param_names[i];
   }
 
   for (const auto& [body_var, param_var] : lineage.var_to_param) {
@@ -3822,14 +3812,14 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
     }
   }
 
-  int expected_arg_count = tensor_param_count + static_cast<int>(scalar_params.size()) +
-                           static_cast<int>(dist_tensor_param_names.size());
+  int expected_arg_count = tensor_param_count + static_cast<int>(scalar_params.size());
 
   std::ostringstream oss;
 
   OrchestrationStmtCodegen stmt_codegen(program, &func_name_to_id, &func_name_to_core_type,
                                         &func_name_to_signature, &next_func_id, std::move(emit_name_map),
-                                        std::move(param_name_set), std::move(param_name_to_orch_index));
+                                        std::move(param_name_set), std::move(param_name_to_orch_index),
+                                        std::move(dist_param_to_ctx_param));
   stmt_codegen.SetCallTupleElements(info_collector.call_tuple_elements);
   stmt_codegen.SetTupleVarToKey(info_collector.tuple_var_to_key);
   stmt_codegen.SetEffectiveUses(std::move(use_collector.var_uses));
@@ -3872,17 +3862,13 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   if (!scalar_params.empty()) {
     oss << "\n    // Scalar params\n";
     for (size_t i = 0; i < scalar_params.size(); ++i) {
-      oss << GenerateScalarUnpack(scalar_params[i].emit_name, static_cast<int>(i),
-                                  scalar_params[i].scalar_type);
-    }
-  }
-
-  if (!dist_tensor_param_names.empty()) {
-    oss << "\n    // DistributedTensor CommContext pointers\n";
-    int ctx_scalar_idx = static_cast<int>(scalar_params.size());
-    for (const auto& name : dist_tensor_param_names) {
-      oss << "    uint64_t ext_" << name << "_ctx = orch_args.scalar(" << ctx_scalar_idx << ");\n";
-      ctx_scalar_idx++;
+      if (auto scalar_type = As<ScalarType>(scalar_params[i].type)) {
+        oss << GenerateScalarUnpack(scalar_params[i].emit_name, static_cast<int>(i), scalar_type);
+      } else {
+        INTERNAL_CHECK(IsA<CommCtxType>(scalar_params[i].type))
+            << "Unexpected non-scalar orchestration scalar param type: " << scalar_params[i].type->TypeName();
+        oss << "    uint64_t " << scalar_params[i].emit_name << " = orch_args.scalar(" << i << ");\n";
+      }
     }
   }
 

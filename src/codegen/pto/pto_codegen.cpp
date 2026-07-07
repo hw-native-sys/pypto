@@ -565,17 +565,10 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   for (size_t i = 0; i < func->params_.size(); i++) {
     fs_.used_ssa_names.insert("arg" + std::to_string(i));
   }
-  // Reserve extra %argN slots for the trailing signature args: one
-  // CommContext ptr per DistributedTensor param, then the dyn-dim Vars
-  // (``dyn_vars`` computed at the top of GenerateFunction). Order here only
-  // affects the reserved name count; the actual layout is emitted below.
-  size_t dist_tensor_count = 0;
-  for (const auto& param : func->params_) {
-    if (As<ir::DistributedTensorType>(param->GetType())) {
-      ++dist_tensor_count;
-    }
-  }
-  for (size_t i = 0; i < dist_tensor_count + dyn_vars.size(); i++) {
+  // Reserve extra %argN slots for generated trailing signature args
+  // (``dyn_vars`` computed at the top of GenerateFunction). Explicit
+  // CommCtxType params are already included in func->params_.
+  for (size_t i = 0; i < dyn_vars.size(); i++) {
     fs_.used_ssa_names.insert("arg" + std::to_string(func->params_.size() + i));
   }
 
@@ -646,13 +639,16 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   // ``dyn_vars`` was computed at the top of GenerateFunction; it carries the
   // trailing %argN: index parameters in first-seen order.
 
-  // Collect ordered DistributedTensor params (in IR-param order). One
-  // CommContext pointer arg is appended per DistributedTensor at the end
-  // of the func.func signature.
+  // Collect ordered DistributedTensor params and their materialized CommCtx
+  // params (both in IR-param order) so get_comm_ctx aliases can resolve to the
+  // explicit ctx pointer argument.
   std::vector<VarPtr> dist_tensor_params;
+  std::vector<VarPtr> comm_ctx_params;
   for (const auto& param : func->params_) {
     if (As<ir::DistributedTensorType>(param->GetType())) {
       dist_tensor_params.push_back(param);
+    } else if (ir::IsA<ir::CommCtxType>(param->GetType())) {
+      comm_ctx_params.push_back(param);
     }
   }
 
@@ -703,25 +699,27 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
     stream_ << "%arg" << (scalar_start_idx + j) << ": ";
     if (auto scalar_type = As<ScalarType>(param->GetType())) {
       stream_ << GetTypeString(scalar_type->dtype_);
+    } else if (ir::IsA<ir::CommCtxType>(param->GetType())) {
+      stream_ << "!pto.ptr<i64>";
     } else {
       stream_ << "!pto.ptr<f32>";
     }
   }
 
-  // Append one CommContext pointer arg per DistributedTensor param (in IR-param
-  // order). The runtime CommContext is passed as a GM ``uint64_t*`` (see
-  // ``runtime/src/common/platform_comm/comm_context.h``); codegen indexes its
-  // fields via ``pto.load_scalar`` and the ``comm_layout::k*`` constants. The
-  // host-side L2 orch flattens these as ``add_scalar(ctx)`` calls — i.e. they
-  // are passed as trailing scalar slots, mirroring dynamic-shape flattening.
-  size_t next_arg_idx = func->params_.size();
-  for (const auto& dist_param : dist_tensor_params) {
-    std::string arg_name = "%arg" + std::to_string(next_arg_idx++);
-    stream_ << ", " << arg_name << ": !pto.ptr<i64>";
-    fs_.dist_tensor_to_ctx[GetVarKey(dist_param)] = arg_name;
+  // Pair each DistributedTensor param with its explicit CommCtxType param (in
+  // IR-param order). The runtime CommContext is passed as a GM ``uint64_t*``
+  // (see ``runtime/src/common/platform_comm/comm_context.h``); codegen indexes
+  // its fields via ``pto.load_scalar`` and the ``comm_layout::k*`` constants.
+  INTERNAL_CHECK_SPAN(dist_tensor_params.size() == comm_ctx_params.size(), func->span_)
+      << "PTOCodegen: function '" << func->name_ << "' has " << dist_tensor_params.size()
+      << " DistributedTensor params but " << comm_ctx_params.size()
+      << " CommCtxType params; run MaterializeDistTensorCtx before PTO codegen";
+  for (size_t i = 0; i < dist_tensor_params.size(); ++i) {
+    fs_.dist_tensor_to_ctx[GetVarKey(dist_tensor_params[i])] = GetVarName(comm_ctx_params[i]);
   }
 
   // Append trailing index parameters for each unique dynamic dimension variable
+  size_t next_arg_idx = func->params_.size();
   for (const auto& dyn_var : dyn_vars) {
     std::string arg_name = "%arg" + std::to_string(next_arg_idx++);
     stream_ << ", " << arg_name << ": index";
@@ -1493,7 +1491,7 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   VisitExpr(op->value_);
   // Register scalar/index/CommCtx result so subsequent expressions can look up
   // this variable. N7: CommCtxType is a singleton marker; the bound SSA is the
-  // matching ``!pto.ptr<i64>`` ctx ptr from the func.func trailing-ctx segment
+  // matching explicit ``!pto.ptr<i64>`` ctx ptr from the func.func signature
   // (no MLIR is emitted for ``pld.system.get_comm_ctx`` — its lambda just sets
   // ``current_expr_value`` to the ctx SSA). Treating it like a scalar here lets
   // downstream ``pld.system.rank(ctx)`` / ``pld.system.nranks(ctx)`` codegen

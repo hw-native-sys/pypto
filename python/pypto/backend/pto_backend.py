@@ -420,11 +420,17 @@ def _generate_arg_unpacking(func: _ir_core.Function, *, uses_spmd: bool = False)
     lines: list[str] = []
     var_names: list[str] = []
 
-    # Separate params into tensors and scalars for tensors-first dispatch order
+    # Separate params into tensors and scalar-like values for tensors-first dispatch order.
+    # CommCtxType is materialized as an explicit scalar payload by
+    # MaterializeDistTensorCtx and lowered to a GM int64_t* in the wrapper.
     tensor_params = [p for p in func.params if isinstance(p.type, _ir_core.TensorType)]
-    scalar_params = [p for p in func.params if isinstance(p.type, _ir_core.ScalarType)]
+    scalar_params = [
+        p for p in func.params if isinstance(p.type, (_ir_core.ScalarType, _ir_core.CommCtxType))
+    ]
     other_params = [
-        p for p in func.params if not isinstance(p.type, (_ir_core.TensorType, _ir_core.ScalarType))
+        p
+        for p in func.params
+        if not isinstance(p.type, (_ir_core.TensorType, _ir_core.ScalarType, _ir_core.CommCtxType))
     ]
     if other_params:
         raise ValueError(
@@ -472,31 +478,23 @@ def _generate_arg_unpacking(func: _ir_core.Function, *, uses_spmd: bool = False)
     # Unpack scalars: args[N_tensors..]
     for j, param in enumerate(scalar_params):
         param_name = param.name_hint
+        arg_idx = scalar_start_idx + j
+        if isinstance(param.type, _ir_core.CommCtxType):
+            lines.append(f"    // Unpack CommContext: {param_name}")
+            lines.append(
+                f"    __gm__ int64_t* {param_name} = reinterpret_cast<__gm__ int64_t*>(args[{arg_idx}]);"
+            )
+            lines.append("")
+            var_names.append(param_name)
+            continue
         assert isinstance(param.type, _ir_core.ScalarType)
         c_type = param.type.dtype.to_c_type_string()
-        arg_idx = scalar_start_idx + j
         lines.append(f"    // Unpack scalar: {param_name}")
         lines.append(f"    union {{ uint64_t u64; {c_type} val; }} {param_name}_conv;")
         lines.append(f"    {param_name}_conv.u64 = args[{arg_idx}];")
         lines.append(f"    {c_type} {param_name} = {param_name}_conv.val;")
         lines.append("")
         var_names.append(param_name)
-
-    # Unpack one trailing __gm__ int64_t* CommContext pointer per DistributedTensor
-    # param. Mirrors the func.func signature emitted by PTOCodegen
-    # (src/codegen/pto/pto_codegen.cpp around the dist_tensor_to_ctx loop): one
-    # `!pto.ptr<i64>` arg per DistributedTensor at the end of the regular params,
-    # before any dynamic-dim trailing args. The L2 orch threads the matching
-    # `add_scalar(ctx)` slots into the dispatch payload in IR-param order.
-    dist_tensor_params = [p for p in tensor_params if isinstance(p.type, _ir_core.DistributedTensorType)]
-    ctx_start_idx = scalar_start_idx + len(scalar_params)
-    for k, param in enumerate(dist_tensor_params):
-        ctx_name = f"{param.name_hint}_ctx"
-        arg_idx = ctx_start_idx + k
-        lines.append(f"    // Unpack CommContext for DistributedTensor: {param.name_hint}")
-        lines.append(f"    __gm__ int64_t* {ctx_name} = reinterpret_cast<__gm__ int64_t*>(args[{arg_idx}]);")
-        lines.append("")
-        var_names.append(ctx_name)
 
     # Extract dynamic dim values from tensor structs (shapes[] holds current view shape at runtime).
     # Dedup by Var.unique_id (stable C++ identity) -- name_hint is cosmetic, and Python wrapper
@@ -507,7 +505,9 @@ def _generate_arg_unpacking(func: _ir_core.Function, *, uses_spmd: bool = False)
     # the wrong tensor.
     used_c_names: set[str] = set(var_names)
     used_c_names.update(f"{p.name_hint}_tensor" for p in tensor_params)
-    used_c_names.update(f"{p.name_hint}_conv" for p in scalar_params)
+    used_c_names.update(
+        f"{p.name_hint}_conv" for p in scalar_params if isinstance(p.type, _ir_core.ScalarType)
+    )
     _append_dynamic_dim_unpacking(tensor_params, used_c_names, lines, var_names)
 
     return "\n".join(lines), var_names

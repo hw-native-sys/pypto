@@ -196,6 +196,7 @@ class PassManager:
             ("SynthesizeAllReduceSignals", lambda: passes.synthesize_allreduce_signals()),
             ("MaterializeCommDomainScopes", lambda: passes.materialize_comm_domain_scopes()),
             ("LowerHostTensorCollectives", lambda: passes.lower_host_tensor_collectives()),
+            ("MaterializeDistTensorCtx", lambda: passes.materialize_dist_tensor_ctx()),
             ("Simplify", lambda: passes.simplify()),
             # Insert explicit AUTO RuntimeScopeStmt nodes (function body + for/if
             # bodies) into Orchestration functions so codegen emits PTO2_SCOPE

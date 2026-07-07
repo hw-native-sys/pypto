@@ -12,8 +12,9 @@
 Covers the InCore PTO codegen for ``pld.tile.remote_load``,
 ``pld.system.notify`` and ``pld.system.wait``:
 
-- CommContext ``!pto.ptr<i64>`` parameter is appended at the end of the
-  ``func.func`` signature, one per ``DistributedTensor`` IR param.
+- MaterializeDistTensorCtx adds one explicit CommContext IR parameter per
+  ``DistributedTensor`` IR param; PTO codegen lowers each one to
+  ``!pto.ptr<i64>``.
 - One module-level ``func.func @CommRemoteOffset_<dtype>`` helper is
   emitted per distinct element dtype consumed by remote ops. The helper
   reads the CommContext field, computes the byte→element delta between
@@ -61,8 +62,8 @@ def _generate_mlir(program_cls) -> str:
     return codegen.PTOCodegen().generate(optimized)
 
 
-def test_ctx_arg_appended_per_distributed_tensor():
-    """One ``!pto.ptr<i64>`` arg appended per DistributedTensor param."""
+def test_ctx_arg_materialized_per_distributed_tensor():
+    """One explicit ``!pto.ptr<i64>`` arg is emitted per DistributedTensor param."""
 
     @pl.program
     class P:
@@ -84,7 +85,7 @@ def test_ctx_arg_appended_per_distributed_tensor():
     # (peer) + 2 ctx ptrs (one per DistributedTensor).
     header = next(line for line in mlir.splitlines() if "func.func @kernel" in line)
     assert header.count("%arg") == 6, header
-    # Trailing args after the explicit IR params are the ctx ptrs.
+    # Args after user scalars are the explicit ctx ptrs materialized in IR.
     assert "%arg4: !pto.ptr<i64>" in header, header
     assert "%arg5: !pto.ptr<i64>" in header, header
     # The CtxArg type only appears in the func header at this point (later

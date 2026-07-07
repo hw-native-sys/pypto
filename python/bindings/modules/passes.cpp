@@ -524,6 +524,8 @@ void BindPass(nb::module_& m) {
              "LowerHostTensorCollectives, while the host dispatch chain is still intact.");
   passes.def("lower_host_tensor_collectives", &pass::LowerHostTensorCollectives,
              "Lower host-level pld.tensor.allreduce calls to builtin tensor collective dispatches.");
+  passes.def("materialize_dist_tensor_ctx", &pass::MaterializeDistTensorCtx,
+             "Materialize CommCtx parameters and arguments for DistributedTensor function parameters.");
   passes.def("stamp_tfree_split", &pass::StampTfreeSplit,
              "Copy each cross-core tpop's split/pipe-id onto its matching tfree op so codegen\n"
              "reads them from the op directly. Covers mixed-kernel and explicit AIC/AIV tfrees.");

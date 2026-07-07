@@ -15,7 +15,7 @@ builtin chip dispatch。它在 [`MaterializeCommDomainScopes`](38-materialize_co
 ## Pipeline 位置
 
 ```text
-... -> SynthesizeAllReduceSignals -> MaterializeCommDomainScopes -> LowerHostTensorCollectives -> Simplify（最终） -> MaterializeRuntimeScopes
+... -> SynthesizeAllReduceSignals -> MaterializeCommDomainScopes -> LowerHostTensorCollectives -> MaterializeDistTensorCtx -> Simplify（最终） -> MaterializeRuntimeScopes
 ```
 
 最终的 `Simplify` 位于本 pass 之后，用于继续折叠生成的循环边界或常量表达式，

@@ -247,6 +247,11 @@ Pass MaterializeCommDomainScopes();
 Pass LowerHostTensorCollectives();
 
 /**
+ * @brief Materialize one CommCtx parameter/argument per DistributedTensor parameter.
+ */
+Pass MaterializeDistTensorCtx();
+
+/**
  * @brief Create a loop unrolling pass
  *
  * Expands ForStmt nodes with ForKind::Unroll into inlined copies of the loop

@@ -89,6 +89,7 @@ struct PassProperties {
 | SynthesizeAllReduceSignals | — | — | — |
 | MaterializeCommDomainScopes | — | CommDomainScopesMaterialized | — |
 | LowerHostTensorCollectives | CommDomainScopesMaterialized | CommDomainScopesMaterialized | — |
+| MaterializeDistTensorCtx | CommDomainScopesMaterialized | CommDomainScopesMaterialized | — |
 | Simplify | — | — | — |
 | MaterializeRuntimeScopes | SplitIncoreOrch, CallDirectionsResolved | RuntimeScopesMaterialized | — |
 
@@ -403,8 +404,9 @@ The PTO-oriented tile stage shared by `Default` and `DebugTileOptimization` is:
 26. [`SynthesizeAllReduceSignals`](37-synthesize_allreduce_signals.md) (distributed: host allreduce optional signal -> explicit internal signal IR)
 27. [`MaterializeCommDomainScopes`](38-materialize_comm_domain_scopes.md) (distributed: WindowBuffer + CommDomainScopeStmt wrappers in each host_orch body; no-op for comm-less programs)
 28. [`LowerHostTensorCollectives`](39-lower_host_tensor_collectives.md) (host-level tensor collectives -> internal builtin chip dispatches)
-29. `Simplify`
-30. [`MaterializeRuntimeScopes`](40-materialize_runtime_scopes.md) (inserts AUTO RuntimeScopeStmt so orchestration codegen emits PTO2_SCOPE 1:1)
+29. [`MaterializeDistTensorCtx`](40-materialize_dist_tensor_ctx.md) (explicit CommCtx params/args for DistributedTensor params)
+30. `Simplify`
+31. [`MaterializeRuntimeScopes`](41-materialize_runtime_scopes.md) (inserts AUTO RuntimeScopeStmt so orchestration codegen emits PTO2_SCOPE 1:1)
 
 `DebugTileOptimization` is a debug-only strategy for inspecting this tile stage
 without the tensor-only prefix passes. Use `Default` for normal compilation and

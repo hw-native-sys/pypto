@@ -38,7 +38,7 @@ class TestSpmdScopeTaskIdCodegen:
 
     @staticmethod
     def _codegen(program):
-        """Run DeriveCallDirections + MaterializeRuntimeScopes + orchestration codegen.
+        """Run DeriveCallDirections + MaterializeDistTensorCtx + runtime-scope materialization + codegen.
 
         Runs under the repo conftest's default ``PYPTO_VERIFY_LEVEL=roundtrip``
         instrument (print -> parse -> structural_equal after each pass):
@@ -47,6 +47,7 @@ class TestSpmdScopeTaskIdCodegen:
         VerificationLevel.NONE bypass is needed.
         """
         program = passes.derive_call_directions()(program)
+        program = passes.materialize_dist_tensor_ctx()(program)
         program = passes.materialize_runtime_scopes()(program)
         for func in program.functions.values():
             if func.func_type == ir.FunctionType.Orchestration:
@@ -225,6 +226,56 @@ class TestSpmdScopeTaskIdCodegen:
         # The other (distinct) args are each emitted exactly once, unaffected.
         assert code.count("params_t0.add_input(ext_b);") == 1, code
         assert code.count("params_t0.add_input(ext_bias);") == 1, code
+
+    def test_mixed_spmd_forwards_materialized_comm_ctx_scalar(self):
+        """DistributedTensor ctx params flow through Spmd -> Group wrappers as ordinary scalars.
+
+        Regression coverage for the #1913 family: wrapper codegen must not rely
+        on a side-channel ctx-synthesis helper. Once
+        MaterializeDistTensorCtx has appended ``signal_ctx`` to the wrapper
+        signature and inner call, BuildWrapperReorderedParams should forward it
+        with the normal scalar path.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class P:
+            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            def kernel(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                b: pl.Tensor[[64, 64], pl.FP32],
+                bias: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+                signal: pld.DistributedTensor[[1], pl.INT32],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                tile_a_l1 = pl.load(a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+                tile_b_l1 = pl.load(b, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+                tile_a_l0a = pl.move(tile_a_l1, target_memory=pl.MemorySpace.Left)
+                tile_b_l0b = pl.move(tile_b_l1, target_memory=pl.MemorySpace.Right)
+                tile_mm = pl.matmul(tile_a_l0a, tile_b_l0b)
+                tile_out = pl.add(tile_mm, pl.load(bias, [0, 0], [64, 64]))
+                return pl.store(tile_out, [0, 0], out)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                b: pl.Tensor[[64, 64], pl.FP32],
+                bias: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+                signal: pld.DistributedTensor[[1], pl.INT32],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                with pl.spmd(4):
+                    out = self.kernel(a, b, bias, out, signal)
+                return out
+
+        transformed = self._mixed_spmd_pipeline(P)
+        code = self._codegen(transformed)
+        assert "uint64_t signal_ctx = orch_args.scalar(0);" in code, code
+        assert code.count("params_t0.add_scalar(signal_ctx);") == 1, code
+        assert "ext_signal_ctx" not in code, code
 
     def test_mixed_spmd_distinct_args_codegen_unchanged(self):
         """Control / no-regression: a MIXED ``pl.spmd`` dispatch with all-distinct
@@ -422,11 +473,11 @@ class TestSpmdScopeTaskIdCodegen:
         """A ``pl.spmd`` dispatch of an InCore kernel taking a ``DistributedTensor``
         must thread the per-tensor CommContext scalar into the task (issue #1913).
 
-        The L1 kernel (PTOCodegen) appends one trailing ``!pto.ptr<i64>`` ctx arg
-        per DistributedTensor formal; the L2 Spmd orchestration must add the
-        matching ``add_scalar(ext_<name>_ctx)`` — exactly like the InCore path —
-        or the kernel reads a garbage CommContext and the cross-rank notify/wait
-        deadlocks. Mirrors ``tests/st/distributed/test_l3_notify_wait.py`` but
+        MaterializeDistTensorCtx appends one explicit CommContext scalar arg per
+        DistributedTensor formal; the L2 Spmd orchestration must forward the
+        matching ``signal_ctx`` exactly like the InCore path, or the kernel reads
+        a garbage CommContext and the cross-rank notify/wait deadlocks. Mirrors
+        ``tests/st/distributed/test_l3_notify_wait.py`` but
         wraps the call in ``pl.spmd`` (the failing scope).
         """
         backend.reset_for_testing()
@@ -465,8 +516,9 @@ class TestSpmdScopeTaskIdCodegen:
         # non-Group branch), not a mixed cube+vector Group.
         code = self._codegen(transformed)
         assert "rt_submit_aiv_task" in code, code
-        # The DistributedTensor ``signal`` threads its CommContext scalar last.
-        assert "params_t0.add_scalar(ext_signal_ctx);" in code, code
+        # The DistributedTensor ``signal`` threads its explicit CommContext scalar last.
+        assert code.count("params_t0.add_scalar(signal_ctx);") == 1, code
+        assert "ext_signal_ctx" not in code, code
 
     def test_mixed_spmd_dist_tensor_threads_comm_ctx_through_group_bridge(self):
         """A MIXED (``split=``) ``pl.spmd`` dispatch carrying a ``DistributedTensor``
@@ -475,8 +527,8 @@ class TestSpmdScopeTaskIdCodegen:
 
         The Spmd wrapper dispatches a cube+vector Group, so codegen routes through
         ``GenerateGroupCallCode``'s MixedKernels branch (via ``WrapperBridge``) —
-        a different emit site than the plain-Spmd path above. Both must add the
-        trailing ``add_scalar(ext_<name>_ctx)`` for the DistributedTensor formal.
+        a different emit site than the plain-Spmd path above. Both must forward
+        the explicit ``signal_ctx`` scalar for the DistributedTensor formal.
         """
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
@@ -521,7 +573,8 @@ class TestSpmdScopeTaskIdCodegen:
         # Mixed cube+vector dispatch through the Group bridge ...
         assert "rt_submit_task(mixed_0, params_t0);" in code, code
         # ... still threads the DistributedTensor CommContext scalar.
-        assert "params_t0.add_scalar(ext_signal_ctx);" in code, code
+        assert code.count("params_t0.add_scalar(signal_ctx);") == 1, code
+        assert "ext_signal_ctx" not in code, code
 
 
 if __name__ == "__main__":

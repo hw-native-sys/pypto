@@ -61,6 +61,7 @@ TENSOR_OPTIMIZATION_PASSES = [
     "SynthesizeAllReduceSignals",
     "MaterializeCommDomainScopes",
     "LowerHostTensorCollectives",
+    "MaterializeDistTensorCtx",
     "Simplify",
     "MaterializeRuntimeScopes",
 ]
@@ -101,6 +102,7 @@ DEBUG_TILE_OPTIMIZATION_PASSES = [
     "SynthesizeAllReduceSignals",
     "MaterializeCommDomainScopes",
     "LowerHostTensorCollectives",
+    "MaterializeDistTensorCtx",
     "Simplify",
     "MaterializeRuntimeScopes",
 ]

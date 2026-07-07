@@ -22,7 +22,7 @@ the IR types so downstream codegen has O(1) access.
 ## Position in the pipeline
 
 ```text
-... -> ExpandManualPhaseFence -> SynthesizeAllReduceSignals -> MaterializeCommDomainScopes -> LowerHostTensorCollectives -> Simplify (final)
+... -> ExpandManualPhaseFence -> SynthesizeAllReduceSignals -> MaterializeCommDomainScopes -> LowerHostTensorCollectives -> MaterializeDistTensorCtx -> Simplify (final)
 ```
 
 The pass runs near the end of the default pipeline, immediately before

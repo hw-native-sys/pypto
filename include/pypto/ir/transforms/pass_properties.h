@@ -49,6 +49,10 @@ inline const PassProperties kLowerHostTensorCollectivesProperties{
     .required = {IRProperty::CommDomainScopesMaterialized},
     .produced = {IRProperty::CommDomainScopesMaterialized}};
 
+inline const PassProperties kMaterializeDistTensorCtxProperties{
+    .required = {IRProperty::CommDomainScopesMaterialized},
+    .produced = {IRProperty::CommDomainScopesMaterialized}};
+
 // -- MaterializeRuntimeScopes pass (runs last, after the final Simplify) ------
 //    Inserts explicit AUTO RuntimeScopeStmt nodes for the orchestration function
 //    body and for/if bodies so codegen emits PTO2_SCOPE 1:1 from the IR.

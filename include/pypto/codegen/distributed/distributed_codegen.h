@@ -104,6 +104,12 @@ class DistributedCodegen : public CodegenBase {
   /// Resolve a dispatch call's ``device=`` attr to a Python rank expression.
   [[nodiscard]] std::string ResolveRankExpr(const ir::CallPtr& call) const;
 
+  /// Lower a ``CommCtxType`` call argument. get_comm_ctx-derived locals map to
+  /// the runtime device_ctx expression for the current dispatch rank; explicit
+  /// CommCtx params are forwarded as scalar names.
+  [[nodiscard]] std::string ResolveCommCtxArg(const ir::ExprPtr& arg, const std::string& rank_expr,
+                                              const ir::Span& span) const;
+
   /// Return the emitted Python handle variable for the comm domain that owns
   /// ``wb``.
   [[nodiscard]] std::string GetCommDomainHandleVar(const ir::WindowBufferPtr& wb) const;

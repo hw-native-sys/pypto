@@ -16,9 +16,9 @@ Covers four orthogonal pieces of the host_orch emit:
    buffers=[CommBufferSpec(...)]) as __comm_d0:``.
 2. DistributedTensor formal → ``add_tensor(Tensor.make(data=__comm_d0[<r>]
    .buffer_ptrs["<name>"], shapes=..., dtype=..., child_memory=True), ...)``.
-3. Per-DistributedTensor trailing ctx scalar:
+3. Explicit CommCtx scalar:
    ``add_scalar(__comm_d0[<r>].device_ctx)`` placed AFTER all tensor adds,
-   in IR-arg order (matches the incore func.func trailing-ctx segment).
+   in IR-arg order (matching the materialized incore function signature).
 4. dispatch ``device=`` attr → ``_submit_chip(orch, ..., config, <r>)`` (the
    rank-pinned wrapper that namespaces per-rank DFX ``output_prefix``).
 
@@ -70,6 +70,7 @@ def _lower(program) -> str:
     """Apply the late host-distributed pipeline, then run distributed codegen directly."""
     program = passes.synthesize_allreduce_signals()(program)
     program = passes.materialize_comm_domain_scopes()(program)
+    program = passes.materialize_dist_tensor_ctx()(program)
     cg = codegen.DistributedCodegen()
     return cg.generate(program)
 
@@ -78,6 +79,7 @@ def _lower_host_collectives(program):
     program = passes.synthesize_allreduce_signals()(program)
     program = passes.materialize_comm_domain_scopes()(program)
     program = passes.lower_host_tensor_collectives()(program)
+    program = passes.materialize_dist_tensor_ctx()(program)
     cg = codegen.DistributedCodegen()
     code = cg.generate(program)
     return code, cg
@@ -132,16 +134,14 @@ def test_dist_tensor_formal_emits_continuous_tensor_make():
     # Trailing per-DistributedTensor ctx scalar — same rank index as
     # the Tensor.make above.
     assert re.search(r"\.add_scalar\(__comm_d0\[\w+\]\.device_ctx\)", code), code
+    assert "pld.system.get_comm_ctx" not in code, code
     # ``device=r`` → rank-pinned dispatch routes through ``_submit_chip`` (which
     # namespaces the per-rank DFX ``output_prefix``), passing the rank last.
     assert re.search(r"_submit_chip\(orch, callables\[\"chip_orch\"\],.*config, \w+\)", code), code
 
 
-def test_two_dist_tensor_formals_emit_two_ctx_scalars():
-    """Two ``DistributedTensor`` formals emit two
-    ``add_scalar(__comm_d0[r].device_ctx)`` in IR-arg order, both after all
-    ``add_tensor`` lines (PTOParam tensor-first invariant + trailing-ctx
-    convention)."""
+def test_two_dist_tensor_formals_emit_two_explicit_ctx_scalars():
+    """Two explicit ``CommCtx`` args emit two device_ctx scalars after tensors."""
 
     @pl.program
     class Prog:
@@ -179,6 +179,33 @@ def test_two_dist_tensor_formals_emit_two_ctx_scalars():
     scalars = re.findall(r"\.add_scalar\(__comm_d0\[(\w+)\]\.device_ctx\)", code)
     assert len(scalars) == 2, code
     assert scalars[0] == scalars[1], scalars  # both subscript the same rank
+
+
+def test_wrapper_forwards_explicit_comm_ctx_param_as_scalar_name():
+    """A materialized wrapper ctx param is already a scalar value, not a get_comm_ctx local."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_inner(self, data: pld.DistributedTensor[[SIZE], pl.FP32]) -> pl.Tensor[[SIZE], pl.FP32]:
+            return data  # type: ignore[return-value]
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_wrapper(self, data: pld.DistributedTensor[[SIZE], pl.FP32]) -> pl.Tensor[[SIZE], pl.FP32]:
+            return self.chip_inner(data)  # type: ignore[return-value]
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self) -> pl.Tensor[[SIZE], pl.FP32]:
+            data_buf = pld.alloc_window_buffer(SIZE * 4)
+            data = pld.window(data_buf, [SIZE], dtype=pl.FP32)
+            for r in pl.range(pld.world_size()):
+                self.chip_wrapper(data, device=r)
+            return data  # type: ignore[return-value]
+
+    code = _lower(Prog)
+
+    assert re.search(r"\.add_scalar\(__comm_d0\[\w+\]\.device_ctx\)", code), code
+    assert "pld.system.get_comm_ctx" not in code, code
 
 
 def test_const_device_kwarg_renders_literal_worker():
@@ -492,7 +519,7 @@ def test_two_groups_handle_routing_is_per_dispatch_not_state_bleed():
         ("__comm_d1", "buf_b"),
     ], (cont_makes, code)
 
-    # Each dispatch's trailing ctx scalar follows the same routing.
+    # Each dispatch's explicit ctx scalar follows the same routing.
     scalars = re.findall(r"\.add_scalar\((__comm_d\d+)\[\w+\]\.device_ctx\)", code)
     assert scalars == ["__comm_d0", "__comm_d1"], (scalars, code)
 
@@ -622,6 +649,7 @@ def test_backend_materializes_builtin_next_level_files(tmp_path):
 
     program = passes.materialize_comm_domain_scopes()(Prog)
     program = passes.lower_host_tensor_collectives()(program)
+    program = passes.materialize_dist_tensor_ctx()(program)
     files = pto_backend.generate(program, str(tmp_path), skip_ptoas=True)
 
     base = "next_levels/builtin.tensor.allreduce__sum__fp32"
@@ -841,6 +869,7 @@ def test_backend_materializes_allgather_next_level_files(tmp_path):
 def _assert_host_collective_next_level_files(program_cls, tmp_path, variant, signature, kernel_snippet):
     program = passes.materialize_comm_domain_scopes()(program_cls)
     program = passes.lower_host_tensor_collectives()(program)
+    program = passes.materialize_dist_tensor_ctx()(program)
     files = pto_backend.generate(program, str(tmp_path), skip_ptoas=True)
 
     entry = variant.replace(".", "_")

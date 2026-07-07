@@ -21,7 +21,7 @@
 ## 流水线位置
 
 ```text
-... -> ExpandManualPhaseFence -> SynthesizeAllReduceSignals -> MaterializeCommDomainScopes -> LowerHostTensorCollectives -> Simplify（最终）
+... -> ExpandManualPhaseFence -> SynthesizeAllReduceSignals -> MaterializeCommDomainScopes -> LowerHostTensorCollectives -> MaterializeDistTensorCtx -> Simplify（最终）
 ```
 
 本 pass 跑在默认 pipeline 的末尾阶段，位于
