@@ -1435,6 +1435,83 @@ class TestAutoTileMatmulL0MNTiling:
                 f"matmul at {i} not immediately followed by its store (two-accumulator schedule): {seq}"
             )
 
+    def _colive_seq(self, program):
+        """Op sequence (extract/matmul/store) of the inner body after the tile sub-pipeline
+        (auto_tile -> infer_mem -> lower_pipeline -> canonicalize_io_order)."""
+        prog = passes.auto_tile_matmul_l0()(program)
+        prog = passes.infer_tile_memory_space()(prog)
+        prog = passes.lower_pipeline_loops()(prog)
+        prog = passes.canonicalize_io_order()(prog)
+        seq = []
+        for line in ir.python_print(prog).splitlines():
+            s = line.strip()
+            if ".extract(" in s and ("Left" in s or "Right" in s):
+                seq.append("matmul_extract")
+            elif "matmul" in s and "=" in s:
+                seq.append("matmul")
+            elif ".store(" in s and "=" in s:
+                seq.append("store")
+        return seq
+
+    def test_dbc2_ptoas_co_lives_two_l0c_accumulators(self):
+        """Golden co-live check for dbC=2 (companion to the dbC=1 test above).
+
+        Under ``memory_planner=PTOAS`` a dbC=2-eligible full-K grid emits the
+        two-accumulator ping-pong: ``CanonicalizeIOOrder`` floats **both** stores below
+        **both** matmuls (``matmul, matmul, store, store``), so two L0C accumulators are
+        live at once. Under the default PyPTO planner the *same shape* stays dbC=1 and
+        interleaves each store with its matmul (``matmul, store, …``). This pins the
+        co-live ordering (subtle -- the nested-context bug silently disabled it once) and
+        the planner gate in one test.
+
+        256x64x256 BF16: chooser picks a 2x2 dbC=2 grid; each accumulator (128x128 or
+        smaller, <= L0C/2) leaves room for two co-live buffers.
+        """
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[256, 64], pl.BF16],
+                rhs: pl.Tensor[[64, 256], pl.BF16],
+                out: pl.Out[pl.Tensor[[256, 256], pl.FP32]],
+            ) -> pl.Tensor[[256, 256], pl.FP32]:
+                lhs_mat: pl.Tile[[256, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [256, 64], target_memory=pl.Mem.Mat
+                )
+                rhs_mat: pl.Tile[[64, 256], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [64, 256], target_memory=pl.Mem.Mat
+                )
+                c: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lhs_mat, rhs_mat)
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        # PTOAS: dbC=2 -> at least one adjacent matmul,matmul (two co-live accumulators),
+        # and the stores float below (a matmul,matmul,store,store window exists).
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+            ptoas_seq = self._colive_seq(Before)
+        mm = [i for i, op in enumerate(ptoas_seq) if op == "matmul"]
+        assert mm, f"expected matmuls under PTOAS: {ptoas_seq}"
+        assert any(i + 1 < len(ptoas_seq) and ptoas_seq[i + 1] == "matmul" for i in mm), (
+            f"dbC=2 (PTOAS) must co-live two accumulators (adjacent matmul,matmul), got: {ptoas_seq}"
+        )
+        assert any(
+            ptoas_seq[i : i + 4] == ["matmul", "matmul", "store", "store"] for i in range(len(ptoas_seq) - 3)
+        ), f"dbC=2 (PTOAS) must float both stores below both matmuls (matmul,matmul,store,store): {ptoas_seq}"
+
+        # Default PyPTO planner: dbC=1 -> every matmul is immediately followed by its store
+        # (no two co-live accumulators), for the SAME shape.
+        pypto_seq = self._colive_seq(Before)
+        mm2 = [i for i, op in enumerate(pypto_seq) if op == "matmul"]
+        assert mm2, f"expected matmuls under PyPTO: {pypto_seq}"
+        for i in mm2:
+            assert i + 1 < len(pypto_seq) and pypto_seq[i + 1] == "store", (
+                f"dbC=1 (PyPTO) must interleave matmul,store (one accumulator), got: {pypto_seq}"
+            )
+
     @pytest.mark.parametrize(
         ("M", "N"),
         [

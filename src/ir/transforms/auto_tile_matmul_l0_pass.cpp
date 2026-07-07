@@ -655,6 +655,15 @@ std::optional<MatmulTiling> AnalyzeMatmul(const AssignStmtPtr& assign, std::vect
   // it there only shrinks the tile (L0C/2) with no second buffer, a regression.  The
   // co-live emit is gated on the chooser's `double_buffer_c` result below, which
   // tags the moving loop with kPipelineDoubleBufferCAttr.
+  //
+  // KNOWN-FRAGILE (experimental): this reads the memory planner from the *mutable*
+  // mid-pipeline PassContext, so dbC=2 behaviour depends on run-time context state
+  // rather than an immutable IR property. A nested PassContext once silently reset
+  // it (fixed by propagating memory_planner + PassManager's fail-loud planner check),
+  // but the underlying smell remains. The durable design is a first-class co-live /
+  // no-coalesce Acc-buffer-pair IR property set once at emit and honoured by BOTH
+  // planners (also the natural carrier for the PyPTO-planner path via #1949). Tracked
+  // as a follow-up; acceptable only for this ptoas-path-only / experimental feature.
   const bool ptoas_planner = ctx && ctx->GetMemoryPlanner() == MemoryPlanner::PtoAS;
   cfg.allow_double_buffer_c = ptoas_planner;
   // tile.matmul_acc threads the caller's accumulator into the K-loop's
