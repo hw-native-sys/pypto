@@ -357,7 +357,8 @@ def _wall_key(m: int, n: int, k: int, cfg, stat: str, dbc: bool) -> tuple:
     # addresses one M-row of the N1 M1 M0 N0 accumulator at a time; the per-row cost is
     # max(floor, throughput) -- a fixed burst-issue floor (drain_row) for narrow N, or
     # the fractal byte throughput (bytes_c*n/bw_drain) for wide N -- plus the odd
-    # residual (odd(N1)-1) for a non-pow2 N (the N%32 cliff). Write-side, so no gamma_c.
+    # residual (odd(N1)-1) for a non-pow2 N-fractal count N1 (NOT literally N%32: n=96 is
+    # penalized -- odd(12)=3 -- despite 96%32==0). Write-side, so no gamma_c.
     # M/N-split raises the drain count; K-split does not.
     num_drains = _cdiv(M, m) * _cdiv(N, n)
     n0 = max(1, cfg.drain_c0_bytes // cfg.bytes_c)
@@ -368,7 +369,14 @@ def _wall_key(m: int, n: int, k: int, cfg, stat: str, dbc: bool) -> tuple:
     per_drain = cfg.drain_fixed_cycles + m * per_row
     drain = num_drains * per_drain
     compute = max(load, float(mad))
-    wall = int((max(compute, drain) if dbc else compute + drain) + 0.5)
+    # dbC pipeline fill/drain bubble (mirrors C++ WallCycles): the first tile's compute or
+    # the last tile's drain is not overlapped, so the all-hidden T*max(C,D) roofline
+    # undercounts by one tile's non-dominant pipe -> wall = max(agg) + min(agg)/T.
+    if dbc:
+        wall_f = max(compute, drain) + min(compute, drain) / num_drains
+    else:
+        wall_f = compute + drain
+    wall = int(wall_f + 0.5)
     pvol = _cdiv(M, m) * m * _cdiv(N, n) * n * _cdiv(K, k) * k
     # C_load is a wall-tie-break (after padded-compute + k-blocks, before area/k):
     # among MAD-bound ties it picks the lower-hidden-load aspect.

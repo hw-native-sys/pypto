@@ -155,7 +155,9 @@ struct L0TileResult {
   // Estimated wall-clock for the chosen tile in core cycles (the roofline
   // objective the chooser ranks by; lower is better):
   //   double_buffer_c == false : max(C_load, C_mad) + C_drain  (drain exposed)
-  //   double_buffer_c == true  : max(C_load, C_mad, C_drain)   (drain hidden)
+  //   double_buffer_c == true  : max(C_load, C_mad, C_drain)
+  //                              + min(compute, C_drain)/T      (drain hidden except
+  //                              the one-tile pipeline fill/drain bubble; T = tiles)
   int64_t estimated_cost_cycles = 0;
 
   // Padded compute volume = ceil(M/m)*m * ceil(N/n)*n * ceil(K/k)*k.

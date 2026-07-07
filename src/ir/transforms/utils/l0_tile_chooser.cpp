@@ -279,7 +279,9 @@ int64_t OddPart(int64_t x) {
 // (flat base below the ~n=131 crossover, byte-throughput above; a byte-only model
 // under-costs narrow N up to 2.2x, a flat-only model under-costs wide N 1.5x). A
 // non-pow2 fractal count adds the odd residual odd(N1)-1 serial burst passes at
-// drain_penalty per M-row (the N%32 cliff, e.g. n=80 -> odd(ceil(80/8))=odd(10)=5).
+// drain_penalty per M-row. The predicate is a NON-POWER-OF-2 N-fractal count N1, not
+// literally N%32: n=80 -> odd(ceil(80/8))=odd(10)=5 (penalized), but so is n=96 ->
+// odd(12)=3 even though 96%32==0; aligned pow2 N1 (n=64->8, n=128->16) pays nothing.
 // So a misaligned-N tile is priced drain-heavy and is not over-picked. The drain is
 // write-side, so no gamma_c (C read-back rides the load traffic, not the writeback).
 double DrainCycles(int m, int n, const L0TileConfig& cfg) {
@@ -295,12 +297,32 @@ double DrainCycles(int m, int n, const L0TileConfig& cfg) {
 
 // Roofline wall in cycles. With a single L0C (drain_hidden=false) the FIXPIPE
 // drain is exposed -- the cube stalls on each tile's store -- so it ADDS to the
-// pipe maximum. With L0C double-buffered (drain_hidden=true) the drain overlaps
-// the next tile's compute, so it JOINS the maximum instead of adding.
+// pipe maximum. With L0C double-buffered (drain_hidden=true) drain(i) overlaps
+// compute(i+1), so the T output-tile drains JOIN the maximum instead of adding --
+// but the pipeline is not perfectly overlapped end to end: the first tile's
+// compute (fill) and the last tile's drain (drain) have no partner to hide behind.
+// So the ideal all-hidden T*max(C,D) roofline undercounts by exactly one tile's
+// *non-dominant* pipe:
+//     wall_dbc = T*max(C_tile, D_tile) + min(C_tile, D_tile)
+//              = max(compute, drain) + min(compute, drain) / T      (T = num tiles)
+// At a 2x2 grid (T=4) this restores ~25% of the smaller pipe the old
+// all-drains-hidden form dropped, so dbC is not over-picked on small grids and is
+// not biased toward drain-heavy tiles whose exposed tail otherwise read as free.
+// The exposed pipe is the drain when compute-bound and the compute (fill) when
+// drain-bound; min() is whichever is exposed either way. The bubble uses the
+// average tile (C_tile=compute/T, D_tile=drain/T); on a peeled-tail grid the actual
+// exposed tile is smaller, so this is a slight -- and safe (conservative) --
+// over-correction. Tail-accurate pricing is a follow-up (see docs).
 int64_t WallCycles(int m, int n, int k, const L0TileConfig& cfg, const Regime& r) {
   const double compute = std::max(LoadCycles(m, n, k, cfg, r), static_cast<double>(MadCycles(m, n, k, cfg)));
   const double drain = DrainCycles(m, n, cfg);
-  const double wall = r.dbc ? std::max(compute, drain) : compute + drain;
+  double wall;
+  if (r.dbc) {
+    const double num_tiles = static_cast<double>(CeilDiv(cfg.M, m) * CeilDiv(cfg.N, n));
+    wall = std::max(compute, drain) + std::min(compute, drain) / num_tiles;
+  } else {
+    wall = compute + drain;
+  }
   // Guard the float->int cast: a non-finite or out-of-exact-range wall would be UB.
   // Given the validated positive bandwidths and aligned-bounded dims this never fires.
   INTERNAL_CHECK(std::isfinite(wall) && wall <= 9007199254740992.0)  // 2^53
