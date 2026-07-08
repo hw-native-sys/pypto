@@ -525,7 +525,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     EmitIndentedLine("PTO2TaskId " + deps_arr + "[" + std::to_string(names.size()) + "];");
     EmitIndentedLine("uint32_t " + deps_cnt + " = 0;");
     for (const auto& name : names) {
-      EmitIndentedLine("if (" + name + ".is_valid()) " + deps_arr + "[" + deps_cnt + "++] = " + name + ";");
+      EmitDepArrayInsert(name, deps_arr, deps_cnt);
     }
     EmitIndentedLine(task_var + ".set_dependencies(" + deps_arr + ", " + deps_cnt + ");");
     EmitIndentedLine("PTO2TaskId " + tid_name + " = PTO2TaskId::invalid();");
@@ -1340,17 +1340,25 @@ class OrchestrationStmtCodegen : public CodegenBase {
         EmitIndentedLine("#if PTO2_ORCH_PROFILING");
         EmitIndentedLine("uint64_t " + profile_start_name + " = rt_orch_profile_now();");
         EmitIndentedLine("#endif");
-        EmitIndentedLine("if (" + *scalar_name + ".is_valid()) {");
-        {
-          IndentGuard guard(Active());
-          EmitIndentedLine(dyn_it->second.data_name + "[" + dyn_it->second.count_name +
-                           "++] = " + *scalar_name + ";");
-          EmitIndentedLine("#if PTO2_ORCH_PROFILING");
-          EmitIndentedLine("rt_orch_profile_add_dynamic_dep_vector(rt_orch_profile_now() - " +
-                           profile_start_name + ", 1);");
-          EmitIndentedLine("#endif");
+        // A fresh direct-producer yield is statically valid, so skip the
+        // is_valid() guard block and append unconditionally; any other id
+        // (loop-carried / None-seed) keeps the guard.
+        const bool needs_guard = guaranteed_valid_task_ids_.count(*scalar_name) == 0;
+        std::optional<IndentGuard> guard_indent;
+        if (needs_guard) {
+          EmitIndentedLine("if (" + *scalar_name + ".is_valid()) {");
+          guard_indent.emplace(Active());
         }
-        EmitIndentedLine("}");
+        EmitIndentedLine(dyn_it->second.data_name + "[" + dyn_it->second.count_name +
+                         "++] = " + *scalar_name + ";");
+        EmitIndentedLine("#if PTO2_ORCH_PROFILING");
+        EmitIndentedLine("rt_orch_profile_add_dynamic_dep_vector(rt_orch_profile_now() - " +
+                         profile_start_name + ", 1);");
+        EmitIndentedLine("#endif");
+        if (needs_guard) {
+          guard_indent.reset();
+          EmitIndentedLine("}");
+        }
       }
       // Array-carry rv: route yield writes into the underlying ``arr[N]``.
       auto rv_arr_it = array_carry_vars_.find(rv.get());
@@ -2504,17 +2512,30 @@ class OrchestrationStmtCodegen : public CodegenBase {
   ///
   /// The edge list is written directly by the parser from a ``pl.submit(...)``
   /// ``deps=[tid1, tid2]`` kwarg — each entry a ``Scalar[TASK_ID]`` Var, or an
-  /// ``Array[N, TASK_ID]`` that contributes one slot each. Every entry is
-  /// guarded by ``is_valid()``: any TaskId may legitimately hold the
+  /// ``Array[N, TASK_ID]`` that contributes one slot each. Each entry is
+  /// emitted via ``EmitDepArrayInsert``: an entry that may hold the
   /// ``PTO2TaskId::invalid()`` sentinel — a ``None`` loop-carry seed, an early
-  /// loop iteration's iter_arg carry, or an unwritten array slot — and an
-  /// invalid id must never reach ``set_dependencies``. The guard is a cheap
-  /// always-true branch for ids known valid.
+  /// loop iteration's iter_arg carry, an unwritten array slot, or a hoisted /
+  /// dummy / barrier tid — is guarded by ``is_valid()`` so an invalid id never
+  /// reaches ``set_dependencies``. A fresh direct-producer id, proven always
+  /// valid, skips the guard.
   ///
   /// Orthogonal to scope mode: ``set_dependencies`` adds explicit edges on top
   /// of any auto-tracked deps the runtime infers from OverlapMap (final
   /// fanin = auto ∪ explicit), so this fires in both auto and manual scopes.
   /// No-op when there are no edges attached.
+  void EmitDepArrayInsert(const std::string& name, const std::string& deps_arr, const std::string& deps_cnt) {
+    const std::string assign = deps_arr + "[" + deps_cnt + "++] = " + name + ";";
+    // A fresh direct-producer TaskId is statically valid (see
+    // guaranteed_valid_task_ids_) so its insert skips the runtime is_valid()
+    // guard; every other id keeps the guard because it may hold the
+    // ``PTO2TaskId::invalid()`` sentinel.
+    if (guaranteed_valid_task_ids_.count(name)) {
+      EmitIndentedLine(assign);
+    } else {
+      EmitIndentedLine("if (" + name + ".is_valid()) " + assign);
+    }
+  }
   void EmitManualDeps(const CallPtr& call, const std::string& task_var) {
     const auto edges = GetDependencyEdges(call);
     const size_t dep_capacity = CountManualDeps(edges, call);
@@ -2526,7 +2547,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     std::unordered_set<std::string> emitted_names;
     auto emit_one_dep = [&](const std::string& name) {
       if (!emitted_names.insert(name).second) return;
-      EmitIndentedLine("if (" + name + ".is_valid()) " + deps_arr + "[" + deps_cnt + "++] = " + name + ";");
+      EmitDepArrayInsert(name, deps_arr, deps_cnt);
     };
     for (const auto& edge : edges) {
       if (!edge) continue;
@@ -2554,11 +2575,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
         }
       } else {
         const auto& name = std::get<std::string>(*binding);
-        // Any scalar TaskId may hold the ``PTO2TaskId::invalid()`` sentinel
-        // — an iter_arg carry on the first loop iteration, or a ``None``
-        // (``system.task_invalid``) loop-carry seed. Guard every entry with
-        // ``is_valid()``; the branch is a harmless always-true test for ids
-        // already known valid.
+        // A scalar TaskId may hold the ``PTO2TaskId::invalid()`` sentinel — an
+        // iter_arg carry on the first loop iteration, or a ``None``
+        // (``system.task_invalid``) loop-carry seed. ``EmitDepArrayInsert``
+        // guards those with ``is_valid()``, and elides the guard only for a
+        // fresh direct-producer id proven always-valid.
         emit_one_dep(name);
       }
     }
@@ -3227,6 +3248,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
     std::string tid_name = ReserveSyntheticEmitName(base_name);
     EmitIndentedLine("PTO2TaskId " + tid_name + " = " + value_expr + ";");
+    // Fresh producer local: every caller binds a ``task_<n>_outs.task_id()``
+    // producer id, which the runtime guarantees valid. Record so its dep-array
+    // insert can skip the redundant is_valid() guard. The hoisted branches
+    // above deliberately do NOT record: those names are pre-declared
+    // ``= PTO2TaskId::invalid()`` loop carries that may be invalid at a read.
+    guaranteed_valid_task_ids_.insert(tid_name);
 
     return tid_name;
   }
@@ -3250,6 +3277,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
     std::string tid_name = ReserveVarEmitName(var);
     EmitIndentedLine("PTO2TaskId " + tid_name + " = " + value_expr + ";");
+    // Fresh producer local (see BindSyntheticTaskId): the sole caller binds a
+    // ``task_<n>_outs.task_id()`` producer id, always valid. The hoisted
+    // branches above are left unrecorded for the same reason.
+    guaranteed_valid_task_ids_.insert(tid_name);
 
     return tid_name;
   }
@@ -3739,6 +3770,15 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::unordered_map<const RuntimeScopeStmt*, std::vector<const Var*>> hoisted_task_id_vars_by_scope_;
   std::unordered_map<uint64_t, std::string> hoisted_task_id_emit_names_;
   std::unordered_map<uint64_t, std::string> hoisted_task_id_emit_names_by_key_;
+  /// Emit names of fresh direct-producer TaskId locals
+  /// (``PTO2TaskId <name> = task_<n>_outs.task_id();``) — statically always
+  /// valid, so their dependency-array insert skips the runtime is_valid()
+  /// guard (see EmitDepArrayInsert). Populated only by the fresh-declaration
+  /// branch of BindSyntheticTaskId / BindVarTaskId; hoisted / loop-carried /
+  /// None-seed / array-slot / dummy / barrier tids are never recorded and keep
+  /// the guard. Monotonic: emit names are globally unique, so entries are never
+  /// cleared (a stale name cannot match a different, possibly-invalid var).
+  std::unordered_set<std::string> guaranteed_valid_task_ids_;
   bool declared_compiler_dep_task_ids_ = false;
   std::unordered_set<const Var*> declared_var_ptrs_;
   std::unordered_set<const Stmt*> batched_create_stmts_;

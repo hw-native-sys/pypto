@@ -419,15 +419,17 @@ params_t1.add_input(...);
 // ...
 PTO2TaskId params_t1_deps[K];          // K = 精确的 dep 边数
 uint32_t params_t1_deps_count = 0;
-if (tid.is_valid()) params_t1_deps[params_t1_deps_count++] = tid;      // 每个条目都有 is_valid() 守卫
-if (carry.is_valid()) params_t1_deps[params_t1_deps_count++] = carry;
+params_t1_deps[params_t1_deps_count++] = tid;                          // 新鲜生产者——不加守卫
+if (carry.is_valid()) params_t1_deps[params_t1_deps_count++] = carry;  // 循环 carry——可能无效
 params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);
 ```
 
-每个 dep 槽位都被 `if (task_id.is_valid())` 包裹：任何 TaskId 都可能合法地
-持有 `PTO2TaskId::invalid()` 哨兵——`None` 循环 carry 种子、循环首次迭代的
-iter_arg carry，或未写入的数组槽——invalid id 绝不能进入
-`set_dependencies`。对已知有效的 id，该守卫只是一个恒真的廉价分支。
+只有当 TaskId 可能合法地持有 `PTO2TaskId::invalid()` 哨兵时，dep 槽位才被
+`if (task_id.is_valid())` 包裹——`None` 循环 carry 种子、循环首次迭代的
+iter_arg carry，或未写入的数组槽——因为 invalid id 绝不能进入
+`set_dependencies`。而**新鲜的直接生产者** TaskId（同一直线作用域中更早的
+`pl.submit(...)` 的输出）静态上恒为有效，因此其插入不加守卫（issue #1966），
+从编排热路径上消除了这个恒真分支。
 
 不再有 `params.add_dep(...)` 调用，也没有 16 条依赖上限——runtime 的
 `Arg::set_dependencies` 原语没有上限，栈数组按精确数量定长。dep 边
@@ -460,11 +462,11 @@ call 上）。Codegen 会按这个顺序合并两组列表，并按 Var identity
 `pl.submit` call 的 kernel-result tuple 元素与普通多输出 kernel call 一样，
 直接 alias kernel 的 `Out`/`InOut` 参数。
 
-每个 dep 数组填充条目都会被 `if (<task_id>.is_valid())` 包裹——包括直接来自
-`pl.submit` 的 producer TaskId。`EmitManualDeps` 对所有标量（string 形式）
-TaskId 统一加守卫，因为任何 TaskId 都可能持有 `PTO2TaskId::invalid()` 哨兵
-（首轮迭代的 iter_arg carry、未写入的数组槽、数组槽读取，或 `None` 种子）。
-array-carry iter_arg 则按元素逐槽生成带守卫的填充。
+当 id 可能持有 `PTO2TaskId::invalid()` 哨兵时，dep 数组填充条目才会被
+`if (<task_id>.is_valid())` 包裹（首轮迭代的 iter_arg carry、未写入的数组槽、
+数组槽读取，或 `None` 种子）。而**新鲜的 `pl.submit` producer** TaskId 静态上
+恒为有效，因此 `EmitManualDeps` 对其插入不加守卫（issue #1966）；其余所有标量
+（string 形式）TaskId 仍保留守卫。array-carry iter_arg 则按元素逐槽生成带守卫的填充。
 
 **词法作用域生命周期。** TaskId 绑定命名的是在其产生所在的 `PTO2_SCOPE { ... }`
 块内声明的 C++ 局部变量（`PTO2TaskId tid = ...`）。每个 `PTO2_SCOPE`（AUTO 或

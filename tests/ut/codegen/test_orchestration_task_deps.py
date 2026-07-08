@@ -67,10 +67,55 @@ def test_array_slot_task_id_usable_as_submit_dep():
     # the array slot (the dep site references the snapshot, not a slot re-read).
     assert re.search(r"PTO2TaskId\s+prev\w*\s*=\s*tids\w*\[0\];", code), code
     # The consumer gets exactly one dependency array, filled from BOTH the direct
-    # producer tid (seed_tid) and the array-slot snapshot (prev), each guarded.
+    # producer tid (seed_tid) and the array-slot snapshot (prev).
     assert code.count("set_dependencies(") == 1, code
-    assert re.search(r"if \(seed_tid\w*\.is_valid\(\)\)", code), code
+    # ``seed_tid`` is a fresh direct-producer TaskId (issue #1966): its insert is
+    # unguarded. ``prev`` is an array-slot snapshot that may hold the invalid
+    # sentinel, so it keeps the is_valid() guard.
+    assert not re.search(r"if \(seed_tid\w*\.is_valid\(\)\)", code), code
+    assert re.search(r"\] = seed_tid\w*;", code), code
     assert re.search(r"if \(prev\w*\.is_valid\(\)\)", code), code
+
+
+def test_direct_producer_dep_skips_is_valid_guard():
+    """Regression for issue #1966.
+
+    A dependency TaskId produced by a ``pl.submit(...)`` earlier in the same
+    straight-line scope is statically always-valid — the runtime never hands it
+    the ``PTO2TaskId::invalid()`` sentinel. Orchestration codegen must therefore
+    emit its ``set_dependencies`` insert *without* the redundant ``is_valid()``
+    guard. Loop-carried ``iter_arg`` / ``None``-seed / array-slot TaskIds still
+    keep the guard (see ``test_compiler_derived_deps_for_fixed_trip_loop_fan_in_``
+    ``capture_task_ids`` and ``test_array_slot_task_id_usable_as_submit_dep``).
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            return x
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def k2(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            return x
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            _a, prod_tid = pl.submit(self.k1, x)
+            b, _ = pl.submit(self.k2, x, deps=[prod_tid])
+            return b
+
+    code = _generate_orch_full_pipeline(P, allow_relaxed_verification=True)
+
+    # The producer TaskId (task 0) is a fresh direct-producer local.
+    producer = re.search(r"PTO2TaskId\s+(\w+)\s*=\s*task_0_outs\.task_id\(\);", code)
+    assert producer, code
+    name = producer.group(1)
+    # Its dependency-array insert is UNGUARDED (the #1966 optimization) ...
+    assert re.search(rf"\w+_deps\[[^\]]*\] = {re.escape(name)};", code), code
+    # ... with no redundant is_valid() branch emitted for it.
+    assert f"if ({name}.is_valid())" not in code, code
+    assert re.search(r"\.set_dependencies\(", code), code
 
 
 def test_task_id_binding_does_not_leak_past_pl_scope():
@@ -715,7 +760,9 @@ def test_mixed_in_and_out_of_scope_deps_does_not_crash_codegen():
 
     # The in-scope edge is wired; the out-of-scope ``scoped_tid`` is dropped.
     assert code.count("set_dependencies(") == 1, code
-    assert re.search(r"if \(seed_tid\w*\.is_valid\(\)\)", code), code
+    # ``seed_tid`` is a fresh direct-producer TaskId (issue #1966): unguarded insert.
+    assert not re.search(r"if \(seed_tid\w*\.is_valid\(\)\)", code), code
+    assert re.search(r"\] = seed_tid\w*;", code), code
     m = re.search(r"PTO2TaskId\s+(\w+)\s*=\s*task_0_outs\.task_id\(\);", code)
     assert m, code
     assert code.count(m.group(1)) == 1, code

@@ -217,11 +217,14 @@ class TestManualScopeCodegen:
 
         assert "rt_submit_dummy_task(params_phase_fence_barrier_0)" in code, code
         assert "PTO2TaskId params_phase_fence_barrier_0_deps[1];" in code, code
+        # ``tid`` is a fresh direct-producer TaskId (issue #1966): its dep-array
+        # insert is emitted WITHOUT the redundant is_valid() guard.
         assert re.search(
-            r"if \(tid.*\.is_valid\(\)\) params_phase_fence_barrier_0_deps"
+            r"params_phase_fence_barrier_0_deps"
             r"\[params_phase_fence_barrier_0_deps_count\+\+\] = tid",
             code,
         ), code
+        assert "if (tid.is_valid())" not in code, code
         assert re.search(r"PTO2TaskId params_t\d+_deps\[1\];", code), code
 
     def test_user_written_empty_task_dummy_keeps_invalid_task_id(self):
@@ -368,7 +371,9 @@ class TestManualScopeCodegen:
         # ``stage2`` carries the explicit dep on ``t1`` via the stack-array
         # + set_dependencies path.
         assert "PTO2TaskId params_t1_deps[1];" in code, code
-        assert "if (t1.is_valid()) params_t1_deps[params_t1_deps_count++] = t1;" in code, code
+        # ``t1`` is a fresh direct-producer TaskId (issue #1966): unguarded insert.
+        assert "params_t1_deps[params_t1_deps_count++] = t1;" in code, code
+        assert "if (t1.is_valid())" not in code, code
         assert "params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);" in code, code
         # The parser-emitted ``t1 = system.task_invalid()`` placeholder is
         # dropped by the outliner once the real TupleGetItem binding is
@@ -462,7 +467,9 @@ class TestManualScopeCodegen:
         # k2's explicit dep on a_tid is wired through a stack deps array +
         # set_dependencies, exactly like in manual scope.
         assert "PTO2TaskId params_t1_deps[1];" in code, code
-        assert "if (a_tid.is_valid()) params_t1_deps[params_t1_deps_count++] = a_tid;" in code, code
+        # ``a_tid`` is a fresh direct-producer TaskId (issue #1966): unguarded insert.
+        assert "params_t1_deps[params_t1_deps_count++] = a_tid;" in code, code
+        assert "if (a_tid.is_valid())" not in code, code
         assert "params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);" in code, code
 
     def test_compiler_derived_deps_in_auto_scope_emit_set_dependencies_when_enabled_without_manual_scope(
@@ -1451,10 +1458,10 @@ class TestManualScopeCodegen:
         # task and the regression would re-emerge.
         assert "L0TaskArgs params_t1;" in code, code
         assert "PTO2TaskId params_t1_deps[1];" in code, code
-        assert (
-            f"if ({producer_tid.group(1)}.is_valid()) params_t1_deps[params_t1_deps_count++] = {producer_tid.group(1)};"  # noqa: E501
-            in code
-        ), code
+        # ``outer_tid`` is a fresh direct-producer TaskId declared in the outer
+        # C++ scope (issue #1966): its cross-scope dep insert is unguarded.
+        assert f"params_t1_deps[params_t1_deps_count++] = {producer_tid.group(1)};" in code, code
+        assert f"if ({producer_tid.group(1)}.is_valid())" not in code, code
         assert "params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);" in code, code
 
     def test_submit_dumps_emits_per_task_dump(self):

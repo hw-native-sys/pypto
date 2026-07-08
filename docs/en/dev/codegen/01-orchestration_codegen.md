@@ -429,16 +429,19 @@ params_t1.add_input(...);
 // ...
 PTO2TaskId params_t1_deps[K];          // K = exact dep-edge count
 uint32_t params_t1_deps_count = 0;
-if (tid.is_valid()) params_t1_deps[params_t1_deps_count++] = tid;      // every entry is is_valid()-guarded
-if (carry.is_valid()) params_t1_deps[params_t1_deps_count++] = carry;
+params_t1_deps[params_t1_deps_count++] = tid;                          // fresh producer — unguarded
+if (carry.is_valid()) params_t1_deps[params_t1_deps_count++] = carry;  // loop carry — may be invalid
 params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);
 ```
 
-Every dep slot is wrapped in `if (task_id.is_valid())`: any TaskId may
+A dep slot is wrapped in `if (task_id.is_valid())` only when the TaskId may
 legitimately hold the `PTO2TaskId::invalid()` sentinel — a `None` loop-carry
 seed, an early loop iteration's iter_arg carry, or an unwritten array slot —
-and an invalid id must never reach `set_dependencies`. The guard is a cheap
-always-true branch for ids known valid.
+because an invalid id must never reach `set_dependencies`. A **fresh
+direct-producer** TaskId (the output of a `pl.submit(...)` earlier in the same
+straight-line scope) is statically always-valid, so its insert is emitted
+unguarded (issue #1966), dropping the redundant always-true branch from the
+orchestration hot path.
 
 There is no `params.add_dep(...)` call any more, and there is no 16-dep cap
 — the runtime `Arg::set_dependencies` primitive has no upper bound, and the
@@ -475,12 +478,12 @@ plain calls. Each entry resolves at codegen time through
 The kernel-result tuple elements of a `pl.submit` call alias the kernel's
 `Out`/`InOut` args exactly like an ordinary multi-output kernel call.
 
-Every dep array-fill entry is wrapped in `if (<task_id>.is_valid())` —
-including direct `pl.submit`-producer TaskId bindings. `EmitManualDeps` guards
-every scalar (string-backed) TaskId uniformly because any TaskId may hold the
-`PTO2TaskId::invalid()` sentinel (a first-iteration iter_arg carry, an unwritten
-array slot, an array-slot read, or a `None` seed). Array-carry iter_args fill
-one guarded slot per element.
+A dep array-fill entry is wrapped in `if (<task_id>.is_valid())` when the id may
+hold the `PTO2TaskId::invalid()` sentinel — a first-iteration iter_arg carry, an
+unwritten array slot, an array-slot read, or a `None` seed. A **fresh
+`pl.submit`-producer** TaskId is statically always-valid, so `EmitManualDeps`
+emits its insert unguarded (issue #1966); every other scalar (string-backed)
+TaskId keeps the guard. Array-carry iter_args fill one guarded slot per element.
 
 **Lexical-scope lifetime.** TaskId bindings name C++ locals (`PTO2TaskId tid
 = ...`) declared inside the generated `PTO2_SCOPE { ... }` block they are

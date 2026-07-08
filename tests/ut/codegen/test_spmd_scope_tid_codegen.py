@@ -150,9 +150,9 @@ class TestSpmdScopeTaskIdCodegen:
         assert m is not None, f"first dispatch's producer TaskId not captured\n{code}"
         alias = m.group(1)
         # ... assert THAT alias (not just any TaskId) is pushed into a deps array ...
-        m2 = re.search(
-            rf"if \({re.escape(alias)}\.is_valid\(\)\) (\w+)\[[^\]]*\] = {re.escape(alias)};", code
-        )
+        # A fresh direct-producer TaskId (issue #1966) is statically valid, so its
+        # dep-array insert is emitted WITHOUT the is_valid() guard.
+        m2 = re.search(rf"(\w+)\[[^\]]*\] = {re.escape(alias)};", code)
         assert m2 is not None, f"captured TaskId {alias!r} not wired into a deps array\n{code}"
         deps_arr = m2.group(1)
         # ... and that the same deps array is handed to the consumer's set_dependencies.
@@ -347,7 +347,10 @@ class TestSpmdScopeTaskIdCodegen:
         aliased = [n for n in set(consumer_args) if consumer_args.count(n) == 2]
         assert len(aliased) == 1, f"expected one buffer aliased twice, got {consumer_args}\n{code}"
         # And the deps edge is wired from the captured producer TaskId.
-        assert re.search(rf"if \({re.escape(tid)}\.is_valid\(\)\)", code) is not None, code
+        # Fresh direct-producer TaskId (issue #1966): unguarded dep insert, no
+        # redundant is_valid() branch.
+        assert re.search(rf"if \({re.escape(tid)}\.is_valid\(\)\)", code) is None, code
+        assert re.search(rf"\[[^\]]*\] = {re.escape(tid)};", code) is not None, code
         assert re.search(r"params_t1\.set_dependencies\(", code) is not None, code
 
     def test_allow_early_resolve_emits_set_allow_early_resolve(self):
