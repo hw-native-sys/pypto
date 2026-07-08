@@ -537,7 +537,11 @@ ExprPtr LowerTensorAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>
 
   // Mode dispatch: "ring" delegates to the chunked reduce-scatter + allgather
   // ring schedule; "mesh" (default) uses the direct-exchange lowering below.
+  // `mode` is a public DSL kwarg, so an unknown value is a user error — reject
+  // it explicitly instead of silently defaulting to mesh.
   auto mode = GetKwargOr<std::string>(call->kwargs_, "mode", std::string("mesh"));
+  CHECK_SPAN(mode == "ring" || mode == "mesh", span)
+      << "pld.tensor.allreduce mode must be \"ring\" or \"mesh\", got \"" << mode << "\"";
   if (mode == "ring") {
     return LowerTensorRingAllReduceRule(call, args, b);
   }
@@ -675,7 +679,7 @@ ExprPtr LowerTensorRingAllReduceRule(const CallPtr& call, const std::vector<Expr
   auto target_type = As<DistributedTensorType>(target->GetType());
   INTERNAL_CHECK_SPAN(target_type, span)
       << "pld.tensor.allreduce target must be DistributedTensorType (deducer-rejected otherwise)";
-  INTERNAL_CHECK_SPAN(target_type->shape_.size() == 2, span)
+  CHECK_SPAN(target_type->shape_.size() == 2, span)
       << "pld.tensor.allreduce mode=ring requires 2D target [NR, SIZE], got " << target_type->shape_.size()
       << "D";
 
@@ -683,11 +687,12 @@ ExprPtr LowerTensorRingAllReduceRule(const CallPtr& call, const std::vector<Expr
   INTERNAL_CHECK_SPAN(op_value == static_cast<int>(ReduceOp::kSum), span)
       << "pld.tensor.allreduce mode=ring supports ReduceOp::kSum only (got int " << op_value << ")";
 
-  // Signal validation: must be 2D INT32 DistributedTensor for ring barriers.
+  // Signal validation: the signal is user-supplied via its DSL type
+  // annotation, so a wrong shape/dtype is a user error — use CHECK_SPAN.
   auto signal_type = As<DistributedTensorType>(signal->GetType());
-  INTERNAL_CHECK_SPAN(signal_type, span) << "mode=ring signal must be DistributedTensorType";
-  INTERNAL_CHECK_SPAN(signal_type->shape_.size() == 2, span) << "mode=ring signal must be 2D [2*(NR-1), NR]";
-  INTERNAL_CHECK_SPAN(signal_type->dtype_ == DataType::INT32, span) << "mode=ring signal must be INT32";
+  CHECK_SPAN(signal_type, span) << "mode=ring signal must be a DistributedTensor";
+  CHECK_SPAN(signal_type->shape_.size() == 2, span) << "mode=ring signal must be 2D [2*(NR-1), NR]";
+  CHECK_SPAN(signal_type->dtype_ == DataType::INT32, span) << "mode=ring signal must be INT32";
 
   auto& reg = OpRegistry::GetInstance();
   auto comm = b.EmitCommSetup(target, span);
@@ -711,6 +716,13 @@ ExprPtr LowerTensorRingAllReduceRule(const CallPtr& call, const std::vector<Expr
   auto size_const = As<ConstInt>(size_expr);
   auto nr_const = As<ConstInt>(nr_expr);
   if (size_const && nr_const && nr_const->value_ > 0) {
+    // The ring schedule exchanges SIZE // NR elements per step and relies on
+    // every chunk being the same size; a non-divisible SIZE would silently
+    // drop the tail. Reject it up front as a user error.
+    CHECK_SPAN(size_const->value_ % nr_const->value_ == 0, span)
+        << "pld.tensor.allreduce mode=ring requires the per-rank size (target dim 1 = "
+        << size_const->value_ << ") to be an exact multiple of the rank count (" << nr_const->value_
+        << "); got a remainder of " << (size_const->value_ % nr_const->value_);
     chunk_size = std::make_shared<ConstInt>(size_const->value_ / nr_const->value_, DataType::INDEX, span);
   } else {
     chunk_size = MakeFloorDiv(size_expr, nr_expr, span);
@@ -733,8 +745,10 @@ ExprPtr LowerTensorRingAllReduceRule(const CallPtr& call, const std::vector<Expr
         auto r1 = MakeSub(my_rank_idx, step, span);
         auto r2 = MakeSub(r1, one_idx, span);
         auto r3 = MakeAdd(r2, comm.nranks_idx, span);
+        // recv_add_idx and send_idx are the same chunk index in this
+        // reduce-scatter formulation — bind once and reuse.
         auto recv_add_idx = body.Bind("recv_add_idx", MakeFloorMod(r3, comm.nranks_idx, span), span);
-        auto send_idx = body.Bind("send_idx", MakeFloorMod(r3, comm.nranks_idx, span), span);
+        const auto& send_idx = recv_add_idx;
 
         // left = (my_rank − 1 + NR) % NR
         auto l1 = MakeSub(my_rank_idx, one_idx, span);

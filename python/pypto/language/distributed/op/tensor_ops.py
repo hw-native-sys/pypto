@@ -429,15 +429,27 @@ def allreduce(
             reserved enum values and will be rejected at the C++ deducer.
         mode: Algorithm selector (keyword-only). ``"mesh"`` (default) for
             direct all-to-all exchange; ``"ring"`` for the NCCL-style
-            chunked reduce-scatter + allgather ring schedule.
+            chunked reduce-scatter + allgather ring schedule. ``"ring"``
+            requires an explicit ``signal`` — host signal synthesis is
+            mesh-only, so omitting the signal with ``mode="ring"`` is
+            rejected.
 
     Returns:
         The rebound :class:`pld.DistributedTensor` view of ``target`` —
         identical shape / dtype / window-buffer binding, post-reduce content.
     """
     if signal is _ALLREDUCE_SIGNAL_MISSING:
+        # Host signal synthesis only produces a mesh-shaped [world_size, 1]
+        # signal. Ring mode needs a [2*(NR-1), NR] signal, so it must be
+        # passed explicitly — reject the synthesized-signal path for it.
+        if mode != "mesh":
+            raise ValueError(
+                f'pld.tensor.allreduce mode="{mode}" requires an explicit signal; '
+                "host signal synthesis only supports mesh mode. Pass a window-bound "
+                'signal, e.g. pld.tensor.allreduce(target, signal, mode="ring").'
+            )
         (target_expr,) = _unwrap_distributed_tensors("pld.tensor.allreduce", target=target)
-        call = _ir_tensor.allreduce(target_expr, op=op, mode=mode)
+        call = _ir_tensor.allreduce(target_expr, op=op)
         return DistributedTensor(expr=call)
     if signal is None:
         raise TypeError(
