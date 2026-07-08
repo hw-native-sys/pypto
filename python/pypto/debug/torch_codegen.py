@@ -524,6 +524,18 @@ def _fillpad(tensor, pad_mode="zero"):
     padded[valid_slices] = tensor[valid_slices]
     return padded
 
+def _set_validshape(tensor, valid_row, valid_col):
+    # tile.set_validshape narrows a buffer handle's valid region in place
+    # (MaterializeAllocTiles injects it to reconcile members that disagree on the
+    # valid extent, e.g. an SPMD replay's [0, 0]). The torch reference models each
+    # tile as an independent tensor and the alloc_tile handle as a throwaway
+    # zeroed tensor, so recording the valid on the handle is harmless to the
+    # computed result; return it so the (unused) result SSA stays well-formed.
+    valid = _coerce_shape((valid_row, valid_col))
+    tensor._pypto_valid_shape = valid
+    tensor._pypto_full_shape = tuple(int(s) for s in tensor.shape)
+    return tensor
+
 def _write_and_return(container, index, value):
     container[index] = value
     return container
@@ -643,6 +655,11 @@ def _handle_alloc_tile(a: list[str], kw: dict[str, Any]) -> str:
 
 def _handle_full(a: list[str], kw: dict[str, Any]) -> str:
     return f"torch.full({a[0]}, {a[1]}, dtype={_kw_dtype(kw)})"
+
+
+def _handle_set_validshape(a: list[str], _kw: dict[str, Any]) -> str:
+    # args: [handle, valid_row, valid_col]
+    return f"_set_validshape({a[0]}, {a[1]}, {a[2]})"
 
 
 def _handle_cmp(a: list[str], kw: dict[str, Any]) -> str:
@@ -983,6 +1000,7 @@ def _register_ops() -> None:  # noqa: PLR0915
     m["tile.full"] = _handle_full
     m["tile.alloc"] = _handle_create
     m["alloc_tile"] = _handle_alloc_tile
+    m["tile.set_validshape"] = _handle_set_validshape
     m["tile.move"] = _identity()
     m["tile.slice"] = _handle_slice
     m["tile.extract"] = _handle_tile_extract
