@@ -55,8 +55,15 @@ namespace backend {
  * (Acc->GM) and Mat-scratch (Acc->Mat) drains, bf16 and fp32; m in {16..256},
  * n aligned {16..512}; N-fractal N1 sampled at power-of-2 and small non-pow2 counts
  * (n up to 128 densely, plus n=320); FIXPIPE isolated via the dbc0-dbc1 difference.
- * NOT yet swept: large odd-part N1 (n=136/264 -> odd 17/33) -- the odd(N1) burst-
- * grouping form there is interpolated, not measured (follow-up sweep pending).
+ * The odd(N1) FORM is op-sim-validated across odd-parts {1,3,5,7,9,11,13,15}
+ * (16-aligned n in {128..240}, camodel FIXP lane): R^2 0.968, and two engineered
+ * contradictions (n=192 oddPart 3 vs a bounded-remainder's 8; n=144 oddPart 9 vs 2)
+ * both track oddPart, decisively refuting a bounded 1-2-pass remainder form. So the
+ * penalty scales with the ODD PART of the fractal count, not a bounded remainder. The
+ * MAGNITUDE (drain_penalty=2.6) stays device-anchored (n=80 sweep) -- op-sim over-
+ * states absolute FIXP ~4x, so it is used for form discrimination only, not refit.
+ * Non-16-aligned n (e.g. 136/264, odd 17/33) can't be measured (ptoas rejects), so
+ * those exact points remain model-only, but the form holds out to oddPart 15.
  *
  * The MAD term mirrors the cube's per-TMATMUL cost
  * `mad_head_cycles + cpr * ceil(m/16) * ceil(k/kt) * ceil(n/16)`, where
