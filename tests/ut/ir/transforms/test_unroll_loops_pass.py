@@ -275,6 +275,56 @@ class TestPrinterRoundTrip:
         assert "pl.unroll(" in printed
 
 
+class TestCallAttrSubstitution:
+    """Tests that Call attrs referencing the loop var are substituted on unroll."""
+
+    def test_device_attr_substituted_on_single_iteration_unroll(self):
+        """A ``device=`` attr (kAttrDevice) referencing the loop var must be
+        substituted with the literal when a single-iteration loop is unrolled.
+
+        Regression test: ``IRMutator::VisitExpr_(const CallPtr&)`` re-mutated a
+        whitelist of ``Var``-typed dependency attrs during loop-var substitution
+        but omitted ``kAttrDevice`` (an ``ExprPtr``-valued attr). At P==1 in a
+        host-orchestration loop, this left ``device=r`` dangling to the
+        now-unbound loop var after unrolling folded ``r`` -> ``0``, producing a
+        ``NameError`` in generated orchestration code.
+        """
+
+        SIZE = 8
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def chip_orch(self, out: pl.Out[pl.Tensor[[SIZE], pl.FP32]]) -> pl.Tensor[[SIZE], pl.FP32]:
+                return out
+
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def host_orch(
+                self,
+                outputs: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
+            ) -> pl.Tensor[[1, SIZE], pl.FP32]:
+                for r in pl.unroll(1):
+                    self.chip_orch(outputs[r], device=r)
+                return outputs
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.Orchestration, strict_ssa=True)
+            def chip_orch(self, out: pl.Out[pl.Tensor[[SIZE], pl.FP32]]) -> pl.Tensor[[SIZE], pl.FP32]:
+                return out
+
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator, strict_ssa=True)
+            def host_orch(
+                self,
+                outputs: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
+            ) -> pl.Tensor[[1, SIZE], pl.FP32]:
+                self.chip_orch(outputs[0], device=0)
+                return outputs
+
+        After = _unroll_and_ssa(Before)
+        ir.assert_structural_equal(After, Expected)
+
+
 class TestPipelineFallback:
     """Tests that unexpanded unroll loops survive non-codegen pipeline stages."""
 

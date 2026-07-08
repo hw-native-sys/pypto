@@ -385,6 +385,24 @@ ExprPtr IRMutator::VisitExpr_(const CallPtr& op) {
           continue;
         }
       }
+    } else if (k == kAttrDevice) {
+      // The distributed dispatch ``device=`` attr holds a single ExprPtr (a
+      // ConstInt rank or a Var loop index). It references a Var defined
+      // elsewhere (the host-orch ``for r in pl.range(P)`` loop var), so it must
+      // be remapped alongside the args — otherwise a loop-var substitution
+      // (e.g. the P==1 unroll folding ``r`` -> ``0``) rewrites the slice
+      // subscripts but leaves ``device=r`` dangling to the now-undefined loop
+      // var, and codegen emits an unbound index -> NameError. Mirrors the
+      // kAttrDevice handling in the SSA pass.
+      const auto* dev = std::any_cast<ExprPtr>(&v);
+      if (dev && *dev) {
+        auto new_dev = ExprFunctor<ExprPtr>::VisitExpr(*dev);
+        if (new_dev.get() != dev->get()) {
+          attrs_changed = true;
+          new_attrs.emplace_back(k, std::any(std::move(new_dev)));
+          continue;
+        }
+      }
     }
     new_attrs.emplace_back(k, v);
   }
