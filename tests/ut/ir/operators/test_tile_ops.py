@@ -1997,6 +1997,44 @@ class TestTileSliceReshapeOps:
         assert result_type3.get_effective_tile_view().blayout == ir.TileLayout.row_major
         assert call3.kwargs == {}
 
+    def test_tile_reshape_propagates_valid_shape(self):
+        """tile.reshape must PROPAGATE the input's valid_shape.
+
+        A reshape is a metadata-only reinterpret (same flat byte order), so the valid elements stay
+        valid. Dropping the valid (result = full new_shape) broke the ResolveBackendOpLayouts
+        print->parse round-trip for partial-valid ``[N, 1]`` column vectors. Covers static AND
+        dynamic partial extents, the unit-dim extent, and the full-valid / non-vector no-change
+        cases.
+        """
+        span = ir.Span.unknown()
+
+        def reshape_valid(in_shape, in_valid, new_shape):
+            tv = ir.TileView(
+                valid_shape=[
+                    ir.ConstInt(v, DataType.INDEX, span) if isinstance(v, int) else v for v in in_valid
+                ]
+            )
+            tt = ir.TileType(in_shape, DataType.FP32, memref=None, tile_view=tv, memory_space=None)
+            rt = tile.reshape(ir.Var("t", tt, span), new_shape).type
+            assert isinstance(rt, ir.TileType)
+            return [
+                e.value if isinstance(e, ir.ConstInt) else e for e in rt.get_effective_tile_view().valid_shape
+            ]
+
+        # Static vector reshape: the valid extent moves to the new non-unit dim (both directions).
+        assert reshape_valid([8, 1], [3, 1], [1, 8]) == [1, 3]
+        assert reshape_valid([1, 8], [1, 3], [8, 1]) == [3, 1]
+        # DYNAMIC partial extent is carried through (constant compare would miss it).
+        n = ir.Var("n", ir.ScalarType(DataType.INDEX), span)
+        dyn = reshape_valid([8, 1], [n, 1], [1, 8])
+        assert dyn[0] == 1 and dyn[1] is n
+        # A degenerate unit valid (0) is preserved, not reset to 1.
+        assert reshape_valid([8, 1], [3, 0], [1, 8]) == [0, 3]
+        # Fully-valid input stays fully valid.
+        assert reshape_valid([8, 1], [8, 1], [1, 8]) == [1, 8]
+        # A non-vector reshape carrying a partial valid keeps the full new shape (unchanged).
+        assert reshape_valid([4, 4], [2, 2], [16, 1]) == [16, 1]
+
     def test_tile_fillpad_expand(self):
         """Test tile.fillpad_expand grows the tile and fills with pad_value."""
         span = ir.Span.unknown()

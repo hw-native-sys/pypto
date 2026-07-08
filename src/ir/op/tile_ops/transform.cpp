@@ -330,11 +330,69 @@ TypePtr DeduceTileReshapeType(const std::vector<ExprPtr>& args,
                                       << " into shape with size " << new_product;
   }
 
-  // Return new TileType with reshaped dimensions and same dtype
+  // Return new TileType with reshaped dimensions and same dtype.
+  //
+  // Propagate the input's valid_shape through the reshape. A tile.reshape is a metadata-only
+  // reinterpret (same flat byte order), so the VALID ELEMENTS stay valid. Dropping the valid here
+  // (result = fully-valid new_shape) made the inferred reshape type disagree with the result view
+  // that ResolveBackendOpLayouts restores when it repairs a partial-valid `[N, 1]` column vector —
+  // the reshape call inferred full valid while the result var carried the restored partial valid,
+  // which broke the print->parse round-trip (assert_structural_equal on `.value.type`). A fully-
+  // valid input stays fully valid. For the layout-repair VECTOR reshape (`[N, 1]` <-> `[1, N]`, one
+  // non-unit dim on each side) the valid extents move to the corresponding new dims — BOTH the
+  // non-unit and the unit extents, so a degenerate unit valid (0) is preserved. A general non-vector
+  // reshape carrying a partial valid keeps the full new_shape (unchanged) — its flat valid region is
+  // not always representable as a per-dim box.
   TileView tile_view;
-  tile_view.valid_shape = new_shape;
-
   tile_view.blayout = InferTileLayoutFromShape(new_shape);
+  tile_view.valid_shape = new_shape;  // default: fully valid
+
+  if (tile_type->tile_view_.has_value() && !tile_type->tile_view_->valid_shape.empty()) {
+    const std::vector<ExprPtr>& in_shape = tile_type->shape_;
+    const std::vector<ExprPtr>& in_valid = tile_type->tile_view_->valid_shape;
+    auto const_ext = [](const ExprPtr& e) -> int64_t {
+      auto c = As<ConstInt>(e);
+      return c != nullptr ? c->value_ : -1;
+    };
+    // Split the input's valid extents by whether their dim is a unit (== 1) dim, preserving order.
+    ExprPtr in_nonunit_valid;
+    std::vector<ExprPtr> in_unit_valids;
+    int in_nonunit = 0;
+    for (size_t i = 0; i < in_shape.size(); ++i) {
+      const ExprPtr v = (i < in_valid.size()) ? in_valid[i] : in_shape[i];
+      if (const_ext(in_shape[i]) != 1) {
+        in_nonunit++;
+        in_nonunit_valid = v;
+      } else {
+        in_unit_valids.push_back(v);
+      }
+    }
+    // Partial iff valid_shape is not STRUCTURALLY equal to shape — a constant compare would miss a
+    // DYNAMIC narrowed extent (e.g. valid_shape = [valid_rows, 1]), leaving the same call/var type
+    // inconsistency this propagation fixes for the static case.
+    const bool in_partial = !tile_view_semantics::ShapeExprListsEquivalent(in_valid, in_shape);
+    int new_nonunit = 0;
+    for (const auto& e : new_shape) {
+      if (const_ext(e) != 1) {
+        new_nonunit++;
+      }
+    }
+    // Vector <-> vector reshape: map the non-unit valid to the new non-unit dim and the unit valids
+    // (in order) to the new unit dims.
+    if (in_partial && in_nonunit <= 1 && new_nonunit <= 1) {
+      std::vector<ExprPtr> mapped;
+      mapped.reserve(new_shape.size());
+      size_t unit_idx = 0;
+      for (const auto& e : new_shape) {
+        if (const_ext(e) != 1) {
+          mapped.push_back(in_nonunit_valid != nullptr ? in_nonunit_valid : e);
+        } else {
+          mapped.push_back(unit_idx < in_unit_valids.size() ? in_unit_valids[unit_idx++] : e);
+        }
+      }
+      tile_view.valid_shape = std::move(mapped);
+    }
+  }
 
   return std::make_shared<TileType>(new_shape, tile_type->dtype_, std::nullopt, tile_view);
 }
