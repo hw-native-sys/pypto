@@ -1344,10 +1344,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
         // is_valid() guard block and append unconditionally; any other id
         // (loop-carried / None-seed) keeps the guard.
         const bool needs_guard = guaranteed_valid_task_ids_.count(*scalar_name) == 0;
-        std::optional<IndentGuard> guard_indent;
         if (needs_guard) {
           EmitIndentedLine("if (" + *scalar_name + ".is_valid()) {");
-          guard_indent.emplace(Active());
+          Active().IncreaseIndent();
         }
         EmitIndentedLine(dyn_it->second.data_name + "[" + dyn_it->second.count_name +
                          "++] = " + *scalar_name + ";");
@@ -1356,7 +1355,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
                          profile_start_name + ", 1);");
         EmitIndentedLine("#endif");
         if (needs_guard) {
-          guard_indent.reset();
+          Active().DecreaseIndent();
           EmitIndentedLine("}");
         }
       }
