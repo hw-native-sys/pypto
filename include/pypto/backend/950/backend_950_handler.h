@@ -59,15 +59,42 @@ class Ascend950Handler : public BackendHandler {
   [[nodiscard]] uint32_t GetL2CacheLineBytes() const override { return 512; }
   [[nodiscard]] uint32_t GetRecommendedInnermostDimBytes() const override { return 128; }
 
-  // L0 capacity (matches Create950SoC AIC core memory layout).
+  // L0 capacity (matches Create950SoC AIC core memory layout; grounded in the pto-isa
+  // hardware reference include/pto/common/buffer_limits.hpp under PTO_NPU_ARCH_A5:
+  // L0A/L0B 64 KB, L0C 256 KB (2x a2a3), Mat/CB 512 KB). These are CORRECT for a5 and
+  // are what already make a5 tile differently from a2a3 (bigger accumulator -> bigger
+  // tiles / fewer M/N splits). Only the ROOFLINE CONSTANTS below are still a2a3-derived.
   [[nodiscard]] uint32_t GetL0aCapacityBytes() const override { return 64ULL * 1024; }
   [[nodiscard]] uint32_t GetL0bCapacityBytes() const override { return 64ULL * 1024; }
   [[nodiscard]] uint32_t GetL0cCapacityBytes() const override { return 256ULL * 1024; }
   [[nodiscard]] uint64_t GetMatCapacityBytes() const override { return 512ULL * 1024; }
 
-  // TODO(a5-calibration): explicit placeholder. The roofline constants inherited
-  // from BackendHandler are a2a3-calibrated until a5 op-sim/device data exists.
-  [[nodiscard]] L0CostModel GetL0CostModel() const override { return L0CostModel{}; }
+  // TODO(a5-calibration): a5 roofline cost-model constants. These are EXPLICIT (rather
+  // than the inherited BackendHandler default) so each can be refit from an a5-sim
+  // sweep, but every value below currently EQUALS the a2a3 default, so this override is
+  // a behavioural NO-OP until the numbers are replaced -- a5 tile picks are unchanged
+  // by this stub. Calibration recipe (mirrors the a2a3 work; see the a5 calibration
+  // harness / device task): fit each constant from an a5-sim forced-tile sweep with
+  // per-pipe isolation (cube / MTE1 / MTE2 / FIXP lanes), then transfer the a2a3
+  // op-sim->device correction (BW /~1.54, mad_head as-is, FIXPIPE magnitude
+  // device-anchored) since raw op-sim over-states port BW ~1.5x and FIXPIPE ~4x. The
+  // form (per-M-row max(floor,throughput) + oddPart misalignment) is arch-general and
+  // does NOT need refitting -- only these magnitudes. Ship as sim-provisional (a5
+  // *device* validation pending) and audit the resulting pick changes vs the a2a3
+  // baseline before trusting it broadly.
+  [[nodiscard]] L0CostModel GetL0CostModel() const override {
+    L0CostModel m;
+    m.bw_l0a = 129.7;              // TODO(a5): refit from a5-sim MTE1 lane (a2a3: dev 129.7)
+    m.bw_l0b = 85.4;               // TODO(a5): refit from a5-sim MTE2 lane (a2a3: dev 85.4)
+    m.bw_drain = 118.0;            // TODO(a5): refit from a5-sim FIXP lane (a2a3: dev 118.0)
+    m.drain_fixed_cycles = 164.0;  // TODO(a5): refit (a2a3: 164.0)
+    m.drain_row_cycles = 4.45;     // TODO(a5): refit a5 per-row floor (a2a3: 4.45)
+    m.drain_penalty_cycles = 2.6;  // TODO(a5): refit a5 misalignment penalty (a2a3: 2.6)
+    m.drain_c0_bytes = 32;         // ISA NZ-fractal C0; a5-invariant (keep 32)
+    m.mad_head_cycles = 21;        // TODO(a5): confirm on a5 cube (a2a3 transfers ~2%; 21)
+    m.mad_k_fractal_bytes = 32;    // ISA cube K-fractal; a5-invariant (keep 32)
+    return m;
+  }
 
  private:
   Ascend950Handler() = default;
