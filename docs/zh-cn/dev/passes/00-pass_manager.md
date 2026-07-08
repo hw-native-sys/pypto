@@ -390,6 +390,7 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 11. [`StampTfreeSplit`](22-stamp_tfree_split.md)（把每个跨核 tpop 的 split/pipe-id 复制到与之配对的 tfree 算子上）
 12. `NormalizeReturnOrder`
 13. [`SkewCrossCorePipeline`](24-skew_cross_core_pipeline.md)（cube/vector 跨核软流水 skew；紧接在 LowerPipelineLoops 之前运行）
+    - `ConvertToPtoasMultiBuffer` —— **可选，由 `PassContext.use_ptoas_multi_buffer` 门控**（默认 no-op；见 [ptoas-multi-buffer.md](ptoas-multi-buffer.md)）。运行在 `LowerPipelineLoops` 的槽位。开启后 pass_manager 还会**摘掉 `LowerPipelineLoops` 和 `CanonicalizeIOOrder`**，于是本 pass 全权接管 pipeline 下降：把同核循环里那条唯一 i-依赖的 Vec/Mat load 改写为**同 slot** 的 ptoas 多缓冲访问（`t = tile.multi_buffer_load_slot(region, i%N, ...)`，同 slot 消费），并把不满足条件的循环降为 `Sequential`。codegen 发射 `pto.alloc_multi_tile` + `pto.multi_tile_get %mb[i%N]`；跨迭代重叠由 ptoas 完成。开关会**自动强制 `memory_planner=PtoAS`**（`--pto-level=level2`）—— 重叠只在那里成立（level3 的烘死基址 + 动态 slot 会击败 ptoas `MemAlias`）。
 14. [`LowerPipelineLoops`](25-lower_pipeline_loops.md)
 15. [`CanonicalizeIOOrder`](26-canonicalize_io_order.md)
 16. [`MaterializeTensorStrides`](27-materialize_tensor_strides.md) —— 自 RFC #1300 P6 起接入默认 pipeline

@@ -390,6 +390,7 @@ The PTO-oriented tile stage shared by `Default` and `DebugTileOptimization` is:
 11. [`StampTfreeSplit`](22-stamp_tfree_split.md) (copies each cross-core tpop's split/pipe-id onto its matching tfree op)
 12. `NormalizeReturnOrder`
 13. [`SkewCrossCorePipeline`](24-skew_cross_core_pipeline.md) (cross-core cube/vector software-pipeline skew; runs immediately before LowerPipelineLoops)
+    - `ConvertToPtoasMultiBuffer` — **optional, gated by `PassContext.use_ptoas_multi_buffer`** (no-op by default; see [ptoas-multi-buffer.md](ptoas-multi-buffer.md)). Runs in `LowerPipelineLoops`' slot. When enabled the pass manager also **drops `LowerPipelineLoops` and `CanonicalizeIOOrder`**, so this pass owns pipeline lowering: it rewrites a same-core loop's single i-dependent Vec/Mat load into a **same-slot** ptoas multi-buffer access (`t = tile.multi_buffer_load_slot(region, i%N, ...)`, consumed same-slot), and demotes non-eligible loops to `Sequential`. Codegen emits `pto.alloc_multi_tile` + `pto.multi_tile_get %mb[i%N]`; ptoas delivers the cross-iteration overlap. The switch **auto-forces `memory_planner=PtoAS`** (`--pto-level=level2`) — the overlap only materializes there (level3's baked base + dynamic slot defeats ptoas `MemAlias`).
 14. [`LowerPipelineLoops`](25-lower_pipeline_loops.md)
 15. [`CanonicalizeIOOrder`](26-canonicalize_io_order.md)
 16. [`MaterializeTensorStrides`](27-materialize_tensor_strides.md) — wired into the default pipeline starting from RFC #1300 P6

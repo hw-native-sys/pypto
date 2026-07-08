@@ -162,6 +162,13 @@ class PassManager:
             ("StampTfreeSplit", lambda: passes.stamp_tfree_split()),
             ("NormalizeReturnOrder", lambda: passes.normalize_return_order()),
             ("SkewCrossCorePipeline", lambda: passes.skew_cross_core_pipeline()),
+            # Gated by PassContext.use_ptoas_multi_buffer (no-op otherwise). Runs
+            # right before LowerPipelineLoops so only same-core Pipeline loops
+            # remain (cross-core ones were demoted by SkewCrossCorePipeline). Tags
+            # vec/mat tile Calls with the slot count and downgrades pipeline_stages
+            # to 1 so codegen emits ptoas multi-buffer ops instead of pypto
+            # replicating the body for ping-pong.
+            ("ConvertToPtoasMultiBuffer", lambda: passes.convert_to_ptoas_multi_buffer()),
             ("LowerPipelineLoops", lambda: passes.lower_pipeline_loops()),
             ("CanonicalizeIOOrder", lambda: passes.canonicalize_io_order()),
             # MaterializeTensorStrides fills empty stride slots on every
@@ -274,9 +281,20 @@ class PassManager:
         skip_mem_planning = ctx is not None and ctx.get_memory_planner() == passes.MemoryPlanner.PTOAS
         _mem_planning_passes = ("MemoryReuse", "AllocateMemoryAddr")
 
+        # When ptoas multi-buffer is on, ConvertToPtoasMultiBuffer owns pipeline
+        # lowering: it rewrites eligible pipeline loops into a dyn-slot prefetch
+        # over a multi-buffer region and demotes the rest to Sequential, leaving
+        # zero Pipeline loops. So the ordinary pipeline-lowering passes are dropped
+        # (LowerPipelineLoops would double-replicate; CanonicalizeIOOrder would
+        # reorder the hand-built prefetch order). Mirrors the memory-planner skip.
+        skip_pipeline_lowering = ctx is not None and ctx.use_ptoas_multi_buffer()
+        _pipeline_lowering_passes = ("LowerPipelineLoops", "CanonicalizeIOOrder")
+
         # Build pass list
         for pass_name, pass_factory in self._strategy_passes[strategy]:
             if skip_mem_planning and pass_name in _mem_planning_passes:
+                continue
+            if skip_pipeline_lowering and pass_name in _pipeline_lowering_passes:
                 continue
             if pass_name == "AutoDeriveTaskDependencies":
                 self.passes.append(
@@ -414,8 +432,17 @@ class PassManager:
             inner_phase = passes.DiagnosticPhase.PRE_PIPELINE
         else:
             inner_phase = outer_phase
+        # Preserve ALL outer-context pass config here — this reconstructs the
+        # context the pipeline runs under, so any PassContext setting the passes
+        # read (e.g. memory_planner; use_ptoas_multi_buffer gating
+        # ConvertToPtoasMultiBuffer) must be carried over, or dump mode silently
+        # changes pass behavior.
+        mplan = ctx.get_memory_planner() if ctx else passes.MemoryPlanner.PYPTO
+        mbuf = ctx.use_ptoas_multi_buffer() if ctx else False
 
-        with passes.PassContext([*outer_instruments, *extra_instruments], level, inner_phase, disabled):
+        with passes.PassContext(
+            [*outer_instruments, *extra_instruments], level, inner_phase, disabled, mplan, mbuf
+        ):
             try:
                 return self._pipeline.run(input_ir)
             finally:

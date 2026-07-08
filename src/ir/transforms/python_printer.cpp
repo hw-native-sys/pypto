@@ -1103,11 +1103,15 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   // tests don't expect. ``pipeline_membership`` (set by LowerPipelineLoops, read
   // by MemoryReuse) has no such surface and MUST round-trip, else the structural
   // equality check after those passes fails. The matching reader is
-  // ``ast_parser`` (``_parse_op_attrs`` -> ``set_call_attrs``).
+  // ``ast_parser`` (``_parse_op_attrs`` -> ``set_call_attrs``). (ptoas
+  // multi-buffer carries no such attr — it uses first-class ops
+  // ``tile.multi_buffer_alloc`` / ``_load_slot`` that round-trip generically.)
   {
     std::vector<const std::pair<std::string, std::any>*> serialized_attrs;
     for (const auto& kv : op->attrs_) {
-      if (kv.first == kPipelineMembershipAttr) serialized_attrs.push_back(&kv);
+      if (kv.first == kPipelineMembershipAttr) {
+        serialized_attrs.push_back(&kv);
+      }
     }
     if (!serialized_attrs.empty()) {
       stream_ << (need_comma ? ", " : "") << "attrs={";

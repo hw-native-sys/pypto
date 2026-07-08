@@ -416,6 +416,27 @@ TypePtr DeduceTileCreateTileType(const std::vector<ExprPtr>& args,
   return std::make_shared<TileType>(tile_shape, dtype, std::nullopt, tile_view, creation_space);
 }
 
+// tile.multi_buffer_get_slot / tile.multi_buffer_load_slot: reference slot `k` of
+// a ptoas multi-buffer region. Both are zero-copy views — the result is the
+// per-slot tile, structurally identical to the region's per-slot TileType
+// (arg 0). The dynamic slot index (arg 1) is a pure runtime address selector
+// resolved at codegen (pto.multi_tile_get %mb[k]), so it never affects the
+// result *type*: the view inherits the region type verbatim, and InitMemRef
+// shares the region's base (offset 0). load_slot additionally carries a
+// tensor/offsets/shapes[/valid_shapes] tail (args 2..) that codegen turns into
+// a pto.tload filling the selected slot.
+TypePtr DeduceMultiBufferSlotType(const std::vector<ExprPtr>& args,
+                                  const std::vector<std::pair<std::string, std::any>>& /*kwargs*/,
+                                  const std::string& op_name) {
+  CHECK(args.size() >= 2) << "The operator " << op_name
+                          << " requires at least 2 arguments (region, slot_index), but got " << args.size();
+  auto region_type = As<TileType>(args[0]->GetType());
+  CHECK(region_type) << "The operator " << op_name
+                     << " requires its first argument to be a multi-buffer region (TileType), but got "
+                     << args[0]->TypeName();
+  return region_type;
+}
+
 TypePtr DeduceTileFullType(const std::vector<ExprPtr>& args,
                            const std::vector<std::pair<std::string, std::any>>& kwargs,
                            const std::string& op_name) {
@@ -771,6 +792,65 @@ REGISTER_OP("tile.create")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileCreateTileType(args, kwargs, "tile.create");
+    });
+
+// ptoas multi-buffer region: an N-slot rotating buffer for the route-2 prefetch
+// lowering (ConvertToPtoasMultiBuffer). Structurally a `tile.create` (same
+// per-slot shape/dtype/space, so it reuses DeduceTileCreateTileType) plus a
+// `count=N` slot count. AllocateMemoryAddr reserves `N*slotBytes` at its base;
+// codegen lowers it to `pto.alloc_multi_tile ... count=N`. Consumed only by
+// `tile.multi_buffer_get_slot`; never loaded/stored directly. Pass-synthesized,
+// not DSL-exposed.
+REGISTER_OP("tile.multi_buffer_alloc")
+    .set_op_category("TileOp")
+    .set_description("Allocate an N-slot ptoas multi-buffer region (route-2 prefetch)")
+    .set_core_affinity(core_affinity::CoreAffinity::SHARED)
+    .add_argument("shape", "Per-slot shape dimensions (TupleType of ScalarType(INT64))")
+    .set_attr<DataType>("dtype")
+    .set_attr<MemorySpace>("target_memory")
+    .set_attr<int>("count")
+    .set_output_memory_from_kwarg("target_memory")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileCreateTileType(args, kwargs, "tile.multi_buffer_alloc");
+    });
+
+// Pick slot `k` of a multi-buffer region (consume view): a zero-copy view
+// inheriting the region's per-slot tile + base (offset 0). The dynamic
+// `slot_index` selects the physical slot at codegen (`pto.multi_tile_get
+// %mb[k]`); it does not enter the MemRef (pypto MemRef offsets are static — the
+// rotation stays a runtime index). Pass-synthesized, not DSL-exposed.
+REGISTER_OP("tile.multi_buffer_get_slot")
+    .set_op_category("TileOp")
+    .set_description("Select slot k of a ptoas multi-buffer region (consume view)")
+    .set_core_affinity(core_affinity::CoreAffinity::SHARED)
+    .add_argument("region", "Multi-buffer region tile (from tile.multi_buffer_alloc)")
+    .add_argument("slot_index", "Slot to select (index ScalarType) — resolved at codegen")
+    .set_output_memory_inherit_input()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceMultiBufferSlotType(args, kwargs, "tile.multi_buffer_get_slot");
+    });
+
+// Prefetch/prologue fill: select slot `k` AND load into it from a tensor. The
+// tail args (tensor, offsets, shapes[, valid_shapes]) mirror `tile.load`; codegen
+// emits `pto.multi_tile_get %mb[k]` then a `pto.tload` filling that slot. Like
+// get_slot it is a zero-copy view over the region base (the tload writes the
+// region's storage in place). Pass-synthesized, not DSL-exposed.
+REGISTER_OP("tile.multi_buffer_load_slot")
+    .set_op_category("TileOp")
+    .set_description("Select slot k of a ptoas multi-buffer region and load into it (prefetch)")
+    .set_core_affinity(core_affinity::CoreAffinity::SHARED)
+    .add_argument("region", "Multi-buffer region tile (from tile.multi_buffer_alloc)")
+    .add_argument("slot_index", "Slot to fill (index ScalarType) — resolved at codegen")
+    .add_argument("tensor", "Source tensor (TensorType)")
+    .add_argument("offsets", "Load offsets (TupleType of ScalarType)")
+    .add_argument("shapes", "Load region shape (TupleType of ScalarType)")
+    .add_argument("valid_shapes", "Valid tile shape (TupleType of ScalarType)")
+    .set_output_memory_inherit_input()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceMultiBufferSlotType(args, kwargs, "tile.multi_buffer_load_slot");
     });
 
 REGISTER_OP("tile.load")

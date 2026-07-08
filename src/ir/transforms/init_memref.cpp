@@ -79,6 +79,14 @@ bool ProducesBufferLessTile(const ExprPtr& value, const SourceBufferLess& source
     if (IsOp(call, "tile.tpop_from_aic") || IsOp(call, "tile.tpop_from_aiv")) {
       return true;
     }
+    // ptoas multi-buffer slot views (route-2 prefetch) own no general-pool
+    // buffer: their storage is a physical slot of the region, addressed at
+    // codegen via `pto.multi_tile_get`. Keeping them MemRef-less gives each use
+    // its own SSA name (no pure-alias collapse onto the region) and keeps them
+    // out of MemoryReuse's lifetime coalescing.
+    if (IsOp(call, "tile.multi_buffer_get_slot") || IsOp(call, "tile.multi_buffer_load_slot")) {
+      return true;
+    }
     if (op_predicates::IsBufferAliasingViewOp(call->op_->name_) && !call->args_.empty()) {
       auto in = AsVarLike(call->args_[0]);
       return in && source_buffer_less(in.get());

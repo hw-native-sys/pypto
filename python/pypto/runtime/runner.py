@@ -242,6 +242,12 @@ class RunConfig:
     ring_dep_pool: int | list[int] | tuple[int, ...] | None = None
     distributed_config: "DistributedConfig | None" = None
     analyze_auto_scopes_for_deps: bool = False
+    # Opt into ptoas multi-buffer lowering (ConvertToPtoasMultiBuffer): converts
+    # pl.pipeline ping-pong loops to pto.alloc_multi_tile / pto.multi_tile_get so
+    # ptoas owns slot rotation + sync. None defers to the PYPTO_PTOAS_MULTI_BUFFER
+    # env var; True/False forces it. Threaded explicitly to ir.compile() so it is
+    # reliable regardless of dump_passes / outer PassContext.
+    use_ptoas_multi_buffer: bool | None = None
 
     def __post_init__(self) -> None:
         if self.platform not in ("a2a3sim", "a2a3", "a5sim", "a5"):
@@ -480,6 +486,7 @@ def run(
         platform=config.platform,
         profiling=config.compile_profiling,
         analyze_auto_scopes_for_deps=config.analyze_auto_scopes_for_deps,
+        use_ptoas_multi_buffer=config.use_ptoas_multi_buffer,
     )
 
     if tensors and not config.codegen_only:

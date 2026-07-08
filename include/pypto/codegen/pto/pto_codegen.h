@@ -339,6 +339,17 @@ class PTOCodegen : public CodegenBase {
   void EmitAllocTileForVar(const ir::VarPtr& tile_var, const std::shared_ptr<const ir::TileType>& tile_type);
 
   /**
+   * @brief Emit `pto.multi_tile_get %mb[k]` for a multi-buffer slot view.
+   *
+   * Shared by the `tile.multi_buffer_get_slot` (consume) and
+   * `tile.multi_buffer_load_slot` (prefetch) op emitters. Resolves the region
+   * (op arg 0) to its `alloc_multi_tile` SSA (`fs_.mb_region`), lowers the slot
+   * index (op arg 1) to an SSA, and emits the slot pick into the current result
+   * buffer. load_slot then emits a `pto.tload` filling the selected slot.
+   */
+  void EmitMultiTileGet(const ir::CallPtr& op);
+
+  /**
    * @brief Resolve the DPS element vars of a tuple-returning op call
    *
    * Multi-output ops (e.g. tile.gather_compare) return a TupleType. The parser
@@ -756,6 +767,23 @@ class PTOCodegen : public CodegenBase {
     /// vars share one handle (PTOAS in-place aliasing).
     std::set<std::string> emitted_tile_alloc_names;
 
+    /// ptoas multi-buffer (route-2 prefetch, tile.multi_buffer_alloc /
+    /// _get_slot / _load_slot). The region gets one `pto.alloc_multi_tile`
+    /// emitted by `EmitAllocTileForVar`; buffer-less slot views emit their own
+    /// `pto.multi_tile_get %mb[k]` (get_slot / load_slot op codegen), with the
+    /// dynamic slot `k` lowered from the op's index operand.
+    struct MultiBufferRegion {
+      std::string mb_ssa;         ///< alloc_multi_tile result SSA
+      std::string mtb_type_str;   ///< `!pto.multi_tile_buf<...>` type string
+      std::string tile_type_str;  ///< per-slot `!pto.tile_buf<...>` type string
+    };
+    /// region Var → N (count). Pre-registered in `VisitStmt_(AssignStmt)` before
+    /// `EmitAllocTileForVar` so the region emits `alloc_multi_tile`, not `alloc_tile`.
+    std::map<const ir::Var*, int> mb_region_count;
+    /// region Var → emitted `alloc_multi_tile` info (filled by EmitAllocTileForVar,
+    /// read by the get_slot / load_slot op emitters).
+    std::map<const ir::Var*, MultiBufferRegion> mb_region;
+
     ir::FunctionPtr current_function;
     ir::VarPtr current_result_var;
     std::string current_result_buf;
@@ -815,6 +843,9 @@ class PTOCodegen : public CodegenBase {
       emitted_tile_alloc_vars.clear();
       memref_identity_to_mlir.clear();
       emitted_tile_alloc_names.clear();
+
+      mb_region_count.clear();
+      mb_region.clear();
 
       current_function.reset();
       current_result_var.reset();

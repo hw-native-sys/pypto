@@ -53,7 +53,7 @@ def _backend_type_for_platform(platform: str | None, fallback: BackendType) -> B
     raise ValueError(f"Invalid platform {platform!r}. Expected 'a2a3sim', 'a2a3', 'a5sim', or 'a5'.")
 
 
-def compile(  # noqa: PLR0913
+def compile(  # noqa: PLR0913, PLR0912
     program: _ir_core.Program,
     output_dir: str | None = None,
     strategy: OptimizationStrategy = OptimizationStrategy.Default,
@@ -69,6 +69,7 @@ def compile(  # noqa: PLR0913
     distributed_config: Any = None,
     block_dim: int | None = None,
     analyze_auto_scopes_for_deps: bool = False,
+    use_ptoas_multi_buffer: bool | None = None,
 ) -> "CompiledProgram | DistributedCompiledProgram":
     """Compile a Program through passes and codegen.
 
@@ -130,9 +131,16 @@ def compile(  # noqa: PLR0913
         analyze_auto_scopes_for_deps: If True, let
             ``AutoDeriveTaskDependencies`` analyze AUTO runtime scopes. The
             default is False to preserve the existing TensorMap-fallback
-            behavior unless explicitly enabled. User-written manual scopes are
-            skipped: they do not get compiler deps or automatic
-            NoDep/OutputExisting direction rewrites.
+            behavior unless explicitly enabled. User-written manual scopes do
+            not get compiler deps, but covered read-only inputs may still be
+            rewritten to NoDep.
+        use_ptoas_multi_buffer: When True, ``ConvertToPtoasMultiBuffer`` lowers a
+            same-core ``pl.pipeline`` loop's rotating load to a ptoas multi-buffer
+            region (``tile.multi_buffer_alloc`` / ``_load_slot``, slot ``i%N``),
+            letting ptoas deliver the cross-iteration double-buffer overlap. This
+            **forces** ``memory_planner=PtoAS`` (the overlap only materializes at
+            ``--pto-level=level2``). None uses the default (off, or the
+            ``PYPTO_PTOAS_MULTI_BUFFER`` env var).
 
     Returns:
         A :class:`CompiledProgram` that wraps the output directory and can
@@ -176,6 +184,11 @@ def compile(  # noqa: PLR0913
             "compile() was called with memory_planner while a PassContext is already active. "
             "Set the memory planner on the existing PassContext instead."
         )
+    if use_ptoas_multi_buffer is not None and outer is not None:
+        raise RuntimeError(
+            "compile() was called with use_ptoas_multi_buffer while a PassContext is already active. "
+            "Set use_ptoas_multi_buffer on the existing PassContext instead."
+        )
 
     # --- Compile profiling ---------------------------------------------------
     prof = get_active_profiler()
@@ -209,7 +222,31 @@ def compile(  # noqa: PLR0913
         dphase = diagnostic_phase if diagnostic_phase is not None else _passes.get_default_diagnostic_phase()
         disabled = disabled_diagnostics if disabled_diagnostics is not None else default_disabled
         mplan = memory_planner if memory_planner is not None else _passes.MemoryPlanner.PYPTO
-    ctx = _passes.PassContext(instruments, vlevel, dphase, disabled, mplan)
+
+    # Resolve ptoas multi-buffer lowering. The explicit ``use_ptoas_multi_buffer``
+    # argument (from compile() / RunConfig) is the reliable source of truth; the
+    # PYPTO_PTOAS_MULTI_BUFFER env var is a global fallback that applies whether
+    # or not an outer PassContext is active. An outer context can only force it
+    # *on* (its default is off), so it never suppresses the env var.
+    env_mbuf = os.environ.get("PYPTO_PTOAS_MULTI_BUFFER", "0").strip().lower() in ("1", "true", "yes", "on")
+    outer_mbuf = outer.use_ptoas_multi_buffer() if outer is not None else False
+    if use_ptoas_multi_buffer is not None:
+        mbuf = use_ptoas_multi_buffer
+    else:
+        mbuf = outer_mbuf or env_mbuf
+    ctx = _passes.PassContext(instruments, vlevel, dphase, disabled, mplan, mbuf)
+
+    # ptoas multi-buffer implies the PTOAS memory planner (the overlap only
+    # materializes at --pto-level=level2). PassContext forces this internally; read
+    # the effective planner back so codegen's level (generate(memory_planner=...))
+    # matches the passes that just ran. Warn if it overrode an explicit request.
+    if mbuf and memory_planner is not None and memory_planner != _passes.MemoryPlanner.PTOAS:
+        logger.warning(
+            "use_ptoas_multi_buffer=True forces memory_planner=PTOAS (requested %s): the "
+            "multi-buffer double-buffer overlap requires ptoas PlanMemory at --pto-level=level2.",
+            memory_planner,
+        )
+    mplan = ctx.get_memory_planner()
 
     if mplan == _passes.MemoryPlanner.PTOAS:
         logger.warning(

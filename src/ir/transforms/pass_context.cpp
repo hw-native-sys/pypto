@@ -304,12 +304,19 @@ std::string DiagnosticInstrument::GetName() const { return "DiagnosticInstrument
 
 PassContext::PassContext(std::vector<PassInstrumentPtr> instruments, VerificationLevel verification_level,
                          DiagnosticPhase diagnostic_phase, DiagnosticCheckSet disabled_diagnostics,
-                         MemoryPlanner memory_planner)
+                         MemoryPlanner memory_planner, bool use_ptoas_multi_buffer)
     : instruments_(std::move(instruments)),
       verification_level_(verification_level),
       diagnostic_phase_(diagnostic_phase),
       disabled_diagnostics_(disabled_diagnostics),
-      memory_planner_(memory_planner),
+      // ptoas multi-buffer implies the PTOAS memory planner: the cross-iteration
+      // double-buffer overlap only materializes at --pto-level=level2, where ptoas
+      // PlanMemory assigns the N slots concrete disjoint addresses (level3's baked
+      // base + dynamic slot defeats ptoas MemAlias and serializes). Forcing it here
+      // keeps every consumer — pass-manager mem-planning skip, codegen level, ptoas
+      // invocation — consistent no matter how the context was constructed.
+      memory_planner_(use_ptoas_multi_buffer ? MemoryPlanner::PtoAS : memory_planner),
+      use_ptoas_multi_buffer_(use_ptoas_multi_buffer),
       previous_(nullptr) {}
 
 VerificationLevel PassContext::GetVerificationLevel() const { return verification_level_; }
@@ -319,6 +326,8 @@ MemoryPlanner PassContext::GetMemoryPlanner() const { return memory_planner_; }
 DiagnosticPhase PassContext::GetDiagnosticPhase() const { return diagnostic_phase_; }
 
 const DiagnosticCheckSet& PassContext::GetDisabledDiagnostics() const { return disabled_diagnostics_; }
+
+bool PassContext::UsePtoasMultiBuffer() const { return use_ptoas_multi_buffer_; }
 
 const std::vector<PassInstrumentPtr>& PassContext::GetInstruments() const { return instruments_; }
 

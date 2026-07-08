@@ -88,7 +88,10 @@ class TestMakeCacheKey:
         assert isinstance(tensor_part, tuple)
         assert isinstance(scalar_part, tuple)
         assert dist_part is None  # single-chip default
-        assert compile_opts == (("analyze_auto_scopes_for_deps", False),)
+        assert compile_opts == (
+            ("analyze_auto_scopes_for_deps", False),
+            ("use_ptoas_multi_buffer", None),
+        )
 
     def test_tensor_shape_in_key(self):
         key = self._make_key(
