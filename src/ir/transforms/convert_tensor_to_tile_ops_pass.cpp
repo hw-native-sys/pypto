@@ -857,12 +857,16 @@ ExprPtr GetWriteTargetExpr(const CallPtr& call) {
   if (IsOp(call, "pld.tensor.allreduce") && !call->args_.empty()) {
     return call->args_[0];
   }
-  // pld.tensor.allgather(local_data, target, signal): push-based — writes
-  // gathered chunks into target on every rank (Phase 1 remote_store loop).
-  // target (args_[1]) is the primary write target and also the result
-  // (window-as-result).  signal (args_[2]) is used for barrier only.
-  if (IsOp(call, "pld.tensor.allgather") && call->args_.size() >= 2) {
-    return call->args_[1];
+  // pld.tensor.allgather has two overloads (see DeduceTensorAllGatherType):
+  //   2-arg HOST builtin: allgather(target, signal) — the result aliases
+  //     target (args_[0]); signal (args_[1]) is the barrier only.
+  //   3-arg InCore push-based: allgather(local_data, target, signal) — writes
+  //     gathered chunks into target (args_[1]) on every rank (Phase 1
+  //     remote_store loop) and target is the result (window-as-result);
+  //     local_data (args_[0]) is read-only, signal (args_[2]) is barrier only.
+  if (IsOp(call, "pld.tensor.allgather")) {
+    if (call->args_.size() == 2) return call->args_[0];
+    if (call->args_.size() >= 3) return call->args_[1];
   }
   // pld.tensor.reduce_scatter(target, signal, *, op): writes the reduced
   // chunk back into target (Phase 4 store).  target (args_[0]) is the
@@ -1036,6 +1040,17 @@ void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, st
   }
 
   if (IsOp(call, "pld.tensor.allgather")) {
+    // 2-arg HOST builtin: allgather(target, signal) — both target (args_[0])
+    // and signal (args_[1]) are InOut (data pre-staged in the window, barrier
+    // reads/writes signal), mirroring allreduce's HOST handling.
+    if (call->args_.size() == 2) {
+      for (size_t i = 0; i < 2; ++i) {
+        auto origins = CollectReferencedOrigins(call->args_[i], origin_map);
+        MarkAccess(origins, has_read);
+        MarkAccess(origins, has_write);
+      }
+      return;
+    }
     // Push-based 3-arg:
     //   local_data (args_[0]) is In (read-only — pushed to peers via remote_store).
     //   target (args_[1]) is read (Phase 1 remote_store from self / barrier)

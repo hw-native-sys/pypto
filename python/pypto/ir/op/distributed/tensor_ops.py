@@ -325,7 +325,12 @@ def allgather(
     if signal is None:
         # 2-arg HOST builtin form: allgather(data, signal)
         # Positional mapping: data→local_data, signal→target
-        _args: list[Expr] = [local_data, target]  # type: ignore[assignment]  # target is non-None here
+        if target is None:
+            raise TypeError(
+                "pld.tensor.allgather 2-arg HOST form requires (data, signal); "
+                "the second positional argument (signal) must not be None"
+            )
+        _args: list[Expr] = [local_data, target]
         return _ir_core.create_op_call("pld.tensor.allgather", _args, {}, actual_span)
     # 3-arg InCore composite form
     _args_3: list[Expr] = [local_data, target, signal]  # type: ignore[assignment]

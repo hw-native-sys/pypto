@@ -549,6 +549,18 @@ def broadcast(
     return DistributedTensor(expr=call)
 
 
+@overload
+def allgather(local_data: DistributedTensor, target: DistributedTensor) -> DistributedTensor: ...
+
+
+@overload
+def allgather(
+    local_data: Tensor | DistributedTensor,
+    target: DistributedTensor,
+    signal: DistributedTensor,
+) -> DistributedTensor: ...
+
+
 def allgather(
     local_data: Tensor | DistributedTensor,
     target: DistributedTensor | None = None,
@@ -580,8 +592,13 @@ def allgather(
             :class:`pld.DistributedTensor` — the ``target`` window holding the
             gathered ``[NR, SIZE]`` result.
     """
-    if isinstance(target, DistributedTensor) and signal is None:
-        # 2-arg HOST builtin path: allgather(data, signal)
+    if (
+        isinstance(local_data, DistributedTensor)
+        and isinstance(target, DistributedTensor)
+        and signal is None
+    ):
+        # 2-arg HOST builtin path: allgather(data, signal) — both positional
+        # args are window-bound DistributedTensors.
         # Positional mapping: data→local_data, signal→target
         data_expr, signal_expr = _unwrap_distributed_tensors(
             "pld.tensor.allgather", target=local_data, signal=target
@@ -589,6 +606,13 @@ def allgather(
         call = _ir_tensor.allgather(data_expr, signal_expr)
         return DistributedTensor(expr=call)
     # 3-arg InCore composite path (push-based)
+    if target is None or signal is None:
+        raise TypeError(
+            "pld.tensor.allgather expects either the 2-arg HOST form "
+            "allgather(data, signal) with two DistributedTensors, or the 3-arg "
+            "InCore form allgather(local_data, target, signal); got "
+            f"local_data={type(local_data).__name__}, target={target!r}, signal={signal!r}"
+        )
     target_expr, signal_expr = _unwrap_distributed_tensors(
         "pld.tensor.allgather", target=target, signal=signal
     )
