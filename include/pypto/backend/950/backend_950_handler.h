@@ -86,15 +86,19 @@ class Ascend950Handler : public BackendHandler {
     // a2a3 (bw_l0a 129.7->206, bw_l0b 85.4->224 -- note a5 L0B is not the slower port).
     m.bw_l0a = 206.3;  // a5-sim MTE1 (LOAD_2Dv2), analytic-bytes fit (a2a3: 129.7)
     m.bw_l0b = 223.8;  // a5-sim MTE1 (a2a3: 85.4)
-    // Drain (FIX_L0C_TO_DST work-cycles): fits the a5-sim FIXP sweep to <1%.
-    // ⚠ bw_drain=30 carries a known ~4x SIM-vs-DEVICE gap: the work-cycle method matches
-    // device on the load/cube lanes but a5-sim FIXPIPE drain is ~4x its would-be device
-    // value (a2a3-sim drain is likewise ~4x a2a3-device's 118). Shipped raw per "a5-sim is
-    // ground truth". Effect: drain becomes ~90% of the (sequential wall=max(load,mad)+drain)
-    // predicted wall and OVER-predicts wide-N single-tile walls ~34%, because a5-sim
-    // actually pipelines the drain under the next tile's compute. If this mis-picks tiles,
-    // the fix is to price wide-N drain via the drain-hidden max(compute,drain) path (dbC=2),
-    // NOT to hand-edit bw_drain. Single-tile roofline ranking is still strong (Spearman ~0.9).
+    // Drain (FIX_L0C_TO_DST work-cycles): fits the a5-sim FIXP sweep to <1%. a5 drain is
+    // ~4x costlier than a2a3 (118) -> the FIXP lane dominates a5 GEMM (Exp-C trace: FIXP
+    // 44-52% of the wall, cube util below pto-isa's >50% target -- drain-bound, not an emit
+    // defect).
+    // ⚠ bw_drain=30 carries a known ~4x SIM-vs-DEVICE gap (a2a3-sim drain is likewise ~4x
+    // a2a3-device's 118), so it OVER-predicts absolute a5 walls ~34%. But this does NOT
+    // mis-pick: the a5-sim VALIDATION (a5_validate_picks.py + reconstructed multi-tile walls)
+    // showed the chooser's tile is the sim's #2-#3, within ~1-2% of the measured-lane best on
+    // all tested shapes -- the over-prediction is uniform enough to preserve the ranking.
+    // Making dbC=2 the a5 DEFAULT does NOT fix it and was REFUTED (Exp B): dbC=2's full-K
+    // constraint forces tiny fp32 tiles -> more drains -> a ~40% LOSS for fp32 (bf16 only
+    // ~1.25x). The real absolute-accuracy lever is a5-DEVICE drain data or tail-accurate
+    // drain-hidden pricing, not a schedule flip or a bw_drain hand-edit.
     m.bw_drain = 30.0;              // a5-sim FIXP throughput (a2a3: 118; see warning above)
     m.drain_fixed_cycles = 343.4;   // a5-sim per-drain fixed (a2a3: 164)
     m.drain_row_cycles = 4.59;      // a5-sim narrow-N floor (a2a3: 4.45; ~arch-invariant)
