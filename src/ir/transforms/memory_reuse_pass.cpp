@@ -522,6 +522,19 @@ class TopDownRetargeter {
 
     for (size_t i = 0; i < if_stmt->return_vars_.size(); ++i) {
       const auto& rv = if_stmt->return_vars_[i];
+      // Skip accumulator if-phis: a slot where either branch yields an in-place
+      // accumulator producer (matmul_acc's shared %dst) is coalesced onto the
+      // *accumulator* buffer by CoalesceAccumulatorIfPhis (PYPTO, pass 30) and is
+      // already must-aliased to its input via the in-place-reuse path under both
+      // planners. Seeding it here onto the return_var's own buffer instead splits
+      // the accumulator across two Acc buffers, doubling usage past the platform
+      // limit (the coalescer then cannot reconcile them).
+      auto then_yv = i < then_yield->value_.size() ? AsVarLike(then_yield->value_[i]) : nullptr;
+      auto else_yv = i < else_yield->value_.size() ? AsVarLike(else_yield->value_[i]) : nullptr;
+      if ((then_yv && IsInplaceAccumulatorProducer(then_yv)) ||
+          (else_yv && IsInplaceAccumulatorProducer(else_yv))) {
+        continue;
+      }
       // Use the planned (possibly-rewritten) type so an enclosing ForStmt that
       // already retargeted this return_var seeds the aligned buffer.
       auto rv_key = std::static_pointer_cast<const Var>(rv);
