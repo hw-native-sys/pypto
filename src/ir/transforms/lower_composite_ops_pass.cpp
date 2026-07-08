@@ -720,9 +720,9 @@ ExprPtr LowerTensorRingAllReduceRule(const CallPtr& call, const std::vector<Expr
     // every chunk being the same size; a non-divisible SIZE would silently
     // drop the tail. Reject it up front as a user error.
     CHECK_SPAN(size_const->value_ % nr_const->value_ == 0, span)
-        << "pld.tensor.allreduce mode=ring requires the per-rank size (target dim 1 = "
-        << size_const->value_ << ") to be an exact multiple of the rank count (" << nr_const->value_
-        << "); got a remainder of " << (size_const->value_ % nr_const->value_);
+        << "pld.tensor.allreduce mode=ring requires the per-rank size (target dim 1 = " << size_const->value_
+        << ") to be an exact multiple of the rank count (" << nr_const->value_ << "); got a remainder of "
+        << (size_const->value_ % nr_const->value_);
     chunk_size = std::make_shared<ConstInt>(size_const->value_ / nr_const->value_, DataType::INDEX, span);
   } else {
     chunk_size = MakeFloorDiv(size_expr, nr_expr, span);
