@@ -269,24 +269,7 @@ pld.tensor.allreduce(src, signal, *, op: ReduceOp = ReduceOp.Sum, mode: str = "m
 ```
 
 Reduces every participating rank's window-bound `src` slice in place and returns
-the same type as `src`. Host-orchestrator user code may omit `signal` outside
-`for` and `while` loops; the
-[`SynthesizeAllReduceSignals`](passes/37-synthesize_allreduce_signals.md) pass
-inserts a private INT32 signal window with semantic shape `[world_size, 1]` for
-that call. The pass binds `world_size = pld.world_size()` as a standalone
-statement and uses that variable in the synthesized buffer size and window
-shape.
-All calls in loops are rejected because the current signal protocol is
-single-use. Explicit `signal` remains the
-internal form used by InCore lowering and by tests that intentionally construct
-the internal protocol. Comm-domain materialisation then keeps the signal buffer
-in the same domain as `src`, even when it is not passed to a user chip kernel.
-The public op currently accepts `ReduceOp.Sum` and rejects the reserved reduce
-variants (`Max`, `Min`, `Prod`) until their lowerings land. The host builtin
-lowering path currently supports the `Sum` + FP32 variant and accepts either a
-rank-1 `[world_size]` signal or the synthesized rank-2 `[world_size, 1]`
-signal.
-the same type as `src`.  The `mode` keyword selects the lowering algorithm:
+the same type as `src`. The `mode` keyword selects the lowering algorithm:
 
 - **`"mesh"` (default)** — direct all-to-all exchange with O(P) HCCL windows.
   Signal shape `[NR, 1]` (one cell per rank).  4-phase decomposition: notify-all
@@ -295,23 +278,22 @@ the same type as `src`.  The `mode` keyword selects the lowering algorithm:
 - **`"ring"`** — NCCL-style chunked reduce-scatter + allgather schedule with
   O(1) HCCL windows.  Signal shape `[2 * (NR − 1), NR]` (one row per ring
   round, one cell per rank).  2(P−1) ring steps with per-round barriers
-  (AtomicAdd 1 → Ge 1).  Chunk size = `SIZE // NR`;
-  `LowerCompositeOps` constant-folds it when both `SIZE` and `NR` are
-  compile-time constants.
+  (AtomicAdd 1 → Ge 1).  Chunk size = `SIZE // NR`, and `SIZE` must be an exact
+  multiple of `NR`; `LowerCompositeOps` constant-folds the chunk size when both
+  `SIZE` and `NR` are compile-time constants.
 
 Host-orchestrator user code may omit `signal` outside `for` and `while` loops;
-the [`SynthesizeAllReduceSignals`](passes/36-synthesize_allreduce_signals.md)
-pass inserts a private INT32 signal window with semantic shape
-`[world_size, 1]` for that call (mesh mode only — ring mode on the HOST rail
-is delivered by a subsequent host builtin). The pass binds
-`world_size = pld.world_size()` as a standalone statement and uses that
-variable in the synthesized buffer size and window shape. All calls in loops
-are rejected because the current signal protocol is single-use. Explicit
+the [`SynthesizeAllReduceSignals`](passes/37-synthesize_allreduce_signals.md)
+pass inserts a private INT32 signal window with semantic shape `[world_size, 1]`
+for that call (mesh mode only — `mode="ring"` requires an explicit signal). The
+pass binds `world_size = pld.world_size()` as a standalone statement and uses
+that variable in the synthesized buffer size and window shape. All calls in
+loops are rejected because the current signal protocol is single-use. Explicit
 `signal` remains the internal form used by InCore lowering and by tests that
-intentionally construct the internal protocol. Comm-domain materialisation
-then keeps the signal buffer in the same domain as `src`, even when it is not
-passed to a user chip kernel. The public op currently accepts `ReduceOp.Sum`
-and rejects the reserved reduce variants (`Max`, `Min`, `Prod`) until their
+intentionally construct the internal protocol. Comm-domain materialisation then
+keeps the signal buffer in the same domain as `src`, even when it is not passed
+to a user chip kernel. The public op currently accepts `ReduceOp.Sum` and
+rejects the reserved reduce variants (`Max`, `Min`, `Prod`) until their
 lowerings land. The host builtin lowering path currently supports the `Sum` +
 FP32 variant and accepts either a rank-1 `[world_size]` signal or the
 synthesized rank-2 `[world_size, 1]` signal.

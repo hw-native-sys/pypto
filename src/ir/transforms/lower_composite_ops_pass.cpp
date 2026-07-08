@@ -477,7 +477,7 @@ ExprPtr LowerCosRule(const CallPtr& call, const std::vector<ExprPtr>& args, Lowe
 // In-place all-reduce of a window-bound DistributedTensor across every rank
 // of its comm group. Expands the single composite Call into the 4-phase
 // decomposition validated by the hand-written reference in
-// ``tests/st/distributed/test_l3_allreduce.py`` (``reduce_step``):
+// ``tests/st/distributed/collectives/test_l3_allreduce.py`` (``reduce_step``):
 //
 //   Phase 2a: for peer in 0..nranks:
 //               if peer != my_rank:
@@ -571,7 +571,7 @@ ExprPtr LowerTensorAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>
   // cell[B], it has already been advanced from 1 (B's 2a Set) to 2
   // (B's 3.5a AtomicAdd). ``kEq(==1)`` would never unblock; ``kGe(>=1)``
   // does. The hand-written reference at
-  // ``tests/st/distributed/test_l3_allreduce.py`` uses ``Ge(1)`` for
+  // ``tests/st/distributed/collectives/test_l3_allreduce.py`` uses ``Ge(1)`` for
   // exactly this reason and survives the same race window.
   //
   // The cells end the call at 2, so the buffer is **not reusable** across
@@ -643,7 +643,7 @@ ExprPtr LowerTensorAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>
   // no peer adds more than ``+1`` here, the cell tops out at 2 and
   // ``>= 2`` is both safe and tight. See the prelude comment block above
   // and the hand-written reference at
-  // ``tests/st/distributed/test_l3_allreduce.py``.
+  // ``tests/st/distributed/collectives/test_l3_allreduce.py``.
   b.EmitNotifyAll(signal, comm.nranks_idx, comm.my_rank, NotifyOp::kAtomicAdd, one_i32, "2", span);
   b.EmitWaitAll(signal, comm.nranks_idx, comm.my_rank, two_i32, "2", span);
 
@@ -666,7 +666,7 @@ ExprPtr LowerTensorAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>
 // chunk_size = SIZE // NR elements per step.  No explicit stage-in needed.
 //
 // Hand-rolled reference: tests/st/distributed/collectives/test_l3_allreduce_ring.py
-// Simpler reference:    simpler/examples/workers/l3/allreduce_ring_distributed/
+// Runtime reference:     runtime/examples/workers/l3/allreduce_ring_distributed/
 // ============================================================================
 
 ExprPtr LowerTensorRingAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>& args,

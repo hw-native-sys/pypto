@@ -237,9 +237,6 @@ pld.tensor.allreduce(src, signal, *, op: ReduceOp = ReduceOp.Sum, mode: str = "m
 ```
 
 对所有参与 rank 的窗口绑定 `src` 切片做原地 all-reduce，并返回与 `src`
-相同的类型。host-orchestrator 用户代码可以在 `for` 和 `while` 循环外省略 `signal`；
-[`SynthesizeAllReduceSignals`](passes/37-synthesize_allreduce_signals.md) 阶段会为该 call 插入 private INT32 signal window，
-语义 shape 为 `[world_size, 1]`。该阶段会先插入 standalone `world_size = pld.world_size()` binding，
 相同的类型。`mode` 关键字选择降级算法：
 
 - **`"mesh"`（默认）** — 全对全直接交换，O(P) 个 HCCL 窗口。信号 shape
@@ -249,13 +246,13 @@ pld.tensor.allreduce(src, signal, *, op: ReduceOp = ReduceOp.Sum, mode: str = "m
 - **`"ring"`** — NCCL 风格的分块 reduce-scatter + allgather 调度，
   O(1) 个 HCCL 窗口。信号 shape `[2 * (NR − 1), NR]`（每轮 ring 一行，
   每 rank 一个槽位）。2(P−1) 轮 ring 步骤，每轮带有屏障 (AtomicAdd 1 →
-  Ge 1)。块大小 = `SIZE // NR`；当 `SIZE` 与 `NR` 均为编译期常量时，
-  `LowerCompositeOps` 会常量折叠。
+  Ge 1)。块大小 = `SIZE // NR`，且 `SIZE` 必须是 `NR` 的整数倍；当 `SIZE`
+  与 `NR` 均为编译期常量时，`LowerCompositeOps` 会常量折叠块大小。
 
 host-orchestrator 用户代码可以在 `for` 和 `while` 循环外省略 `signal`；
-[`SynthesizeAllReduceSignals`](passes/36-synthesize_allreduce_signals.md) 阶段会为该 call 插入 private INT32 signal window，
-语义 shape 为 `[world_size, 1]`（仅 mesh 模式 — ring 模式在 HOST 层的支持
-由后续 host builtin 提供）。该阶段会先插入 standalone `world_size = pld.world_size()` binding，
+[`SynthesizeAllReduceSignals`](passes/37-synthesize_allreduce_signals.md) 阶段会为该 call 插入 private INT32 signal window，
+语义 shape 为 `[world_size, 1]`（仅 mesh 模式 — `mode="ring"` 必须显式传入
+signal）。该阶段会先插入 standalone `world_size = pld.world_size()` binding，
 再用该变量构造 buffer size 和 window shape。循环内的所有调用都会被拒绝，因为当前 signal 协议只能
 单次使用。显式 `signal` 仍然是 InCore
 lowering 和内部测试使用的形态。通信域物化会把该 signal buffer 保留在与 `src`
