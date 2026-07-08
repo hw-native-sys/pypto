@@ -33,6 +33,7 @@
 
 #include <any>
 #include <cstddef>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <set>
@@ -368,6 +369,48 @@ std::set<const Var*> ValidShapeRefs(const std::shared_ptr<const TileType>& tile_
   return c.refs;
 }
 
+// The tile's *effective* valid dims: its explicit `valid_shape` if present,
+// else the physical shape (a full tile). Two tiles sharing a buffer whose
+// effective valids differ (e.g. an SPMD replay's static `[0,0]` vs the primary's
+// full extent, or a dynamic `[16, valid_len]` vs full) must reconcile the shared
+// handle via set_validshape — this returns the (row, col) exprs to set.
+std::pair<ExprPtr, ExprPtr> ValidDims(const std::shared_ptr<const TileType>& tile_type) {
+  if (tile_type->tile_view_.has_value() && tile_type->tile_view_->valid_shape.size() == 2) {
+    return {tile_type->tile_view_->valid_shape[0], tile_type->tile_view_->valid_shape[1]};
+  }
+  // Full tile: synthesise INDEX consts from the physical shape (set_validshape
+  // needs INDEX/INT64/UINT64 operands; a raw shape ConstInt may be another dtype).
+  auto to_index = [](const ExprPtr& e) -> ExprPtr {
+    if (auto c = As<ConstInt>(e))
+      return std::make_shared<ConstInt>(c->value_, DataType::INDEX, Span::unknown());
+    return e;  // non-const physical dim (rare) — pass through, already scalar
+  };
+  return {to_index(tile_type->shape_[0]), to_index(tile_type->shape_[1])};
+}
+
+// A stable signature of a tile's effective valid (valid_shape, else physical
+// shape). Two members of one buffer with the SAME signature need no
+// reconciliation; differing signatures trigger a set_validshape. ConstInts
+// compare by value (so an explicit full `valid_shape` == an absent one), other
+// exprs by identity (a dynamic valid var).
+std::string ValidSig(const std::shared_ptr<const TileType>& tile_type) {
+  const std::vector<ExprPtr>* dims = &tile_type->shape_;
+  if (tile_type->tile_view_.has_value() && !tile_type->tile_view_->valid_shape.empty()) {
+    dims = &tile_type->tile_view_->valid_shape;
+  }
+  std::string sig;
+  for (const auto& e : *dims) {
+    if (!e) {
+      sig += "?:";
+    } else if (auto c = As<ConstInt>(e)) {
+      sig += "c" + std::to_string(c->value_) + ":";
+    } else {
+      sig += "v" + std::to_string(reinterpret_cast<uintptr_t>(e.get())) + ":";
+    }
+  }
+  return sig;
+}
+
 // Rebuild an alloc_tile so the handle declares a STATIC valid (valid_shape
 // stripped → codegen falls back to the physical shape). Layout / fractal / pad /
 // memref are preserved so BufferHandleKey (which excludes valid extent) is
@@ -395,8 +438,8 @@ StmtPtr MakeStaticValidAlloc(const AssignStmtPtr& assign, const std::shared_ptr<
 // codegen resolves the handle to the buffer and emits an in-place
 // `pto.set_validshape %handle`.
 StmtPtr MakeSetValidShapeStmt(const VarPtr& handle, const std::shared_ptr<const TileType>& tile_type) {
-  const auto& vs = tile_type->tile_view_->valid_shape;
-  std::vector<ExprPtr> args = {handle, vs[0], vs[1]};
+  auto [vr, vc] = ValidDims(tile_type);
+  std::vector<ExprPtr> args = {handle, vr, vc};
   auto op = OpRegistry::GetInstance().GetOp("tile.set_validshape");
   auto call = std::make_shared<Call>(op, std::move(args), std::vector<std::pair<std::string, std::any>>{},
                                      std::static_pointer_cast<const Type>(tile_type), handle->span_);
@@ -404,13 +447,34 @@ StmtPtr MakeSetValidShapeStmt(const VarPtr& handle, const std::shared_ptr<const 
   return std::make_shared<AssignStmt>(res, call, handle->span_);
 }
 
+// A "pure view" member (tile.slice / reshape / transpose / transpose_view /
+// assemble ...) aliases an existing tile's memory (registered via
+// `set_output_memory_inherit_input`) and is emitted as a `pto.subview` that
+// carries its OWN `valid [...]` clause — it never reads valid from the buffer
+// handle's tile_buf type. Reconciling such a member against the handle would
+// both emit a spurious `set_validshape` and corrupt the source's valid, so it is
+// excluded. In-place writers (`set_output_reuses_input`) genuinely write the
+// buffer at the bare handle and stay reconcilable.
+bool IsPureViewMember(const CallPtr& call) {
+  if (!call || !call->op_) return false;
+  const auto& reg = OpRegistry::GetInstance();
+  if (!reg.IsRegistered(call->op_->name_)) return false;
+  const auto& entry = reg.GetEntry(call->op_->name_);
+  return entry.OutputMemoryInheritsInput() && !entry.GetOutputReusesInputArg().has_value();
+}
+
 // Recursively walk `stmts`, tracking the Var*s in scope (params + enclosing
-// binds + preceding siblings). `static_keys` (shared, grows) records buffers
-// whose alloc was made static and therefore need per-use set_validshape.
+// binds + preceding siblings). For every alloc_tile it records the handle var
+// (`handles`) and the valid signature it declares (`handle_valid_sig`); before a
+// member whose effective valid differs from that signature it injects a
+// set_validshape on the handle. This covers both dynamic valids across scopes
+// (a hoisted alloc is declared static, every dynamic use reconciled) and static
+// valids that differ between members of one buffer (e.g. an SPMD replay's
+// `valid=[0,0]` vs the primary's full extent). Buffers whose members all share
+// one valid inject nothing.
 std::vector<StmtPtr> FixupDynamicValid(const std::vector<StmtPtr>& stmts, std::set<const Var*> in_scope,
-                                       std::set<std::string>& static_keys,
-                                       std::map<std::string, VarPtr>& static_handles,
-                                       bool split_by_signature) {
+                                       std::map<std::string, std::string>& handle_valid_sig,
+                                       std::map<std::string, VarPtr>& handles, bool split_by_signature) {
   std::vector<StmtPtr> out;
   out.reserve(stmts.size());
   for (const auto& s : stmts) {
@@ -418,33 +482,42 @@ std::vector<StmtPtr> FixupDynamicValid(const std::vector<StmtPtr>& stmts, std::s
       auto call = As<Call>(assign->value_);
       auto tt = GetTileTypeWithMemRef(assign->var_->GetType());
       if (IsOp(call, "alloc_tile")) {
+        const auto key = BufferKeyOfVar(assign->var_, split_by_signature);
+        // A dynamic valid whose operand is out of scope at the (hoisted) alloc
+        // can't ride on the handle — declare it static (physical) and reconcile
+        // every use below. Otherwise the handle keeps its representative valid.
+        bool make_static = false;
         if (tt && HasDynamicValidShape(tt)) {
-          bool out_of_scope = false;
           for (const auto* r : ValidShapeRefs(tt))
             if (!in_scope.count(r)) {
-              out_of_scope = true;
+              make_static = true;
               break;
             }
-          if (out_of_scope) {
-            auto static_alloc = MakeStaticValidAlloc(assign, tt);
-            const auto key = BufferKeyOfVar(assign->var_, split_by_signature);
-            static_keys.insert(key);
-            static_handles[key] = As<AssignStmt>(static_alloc)->var_;  // handle for set_validshape
-            out.push_back(static_alloc);
-            in_scope.insert(assign->var_.get());
-            continue;
-          }
         }
-        out.push_back(s);
+        StmtPtr emitted = s;
+        auto declared_tt = tt;
+        if (make_static) {
+          emitted = MakeStaticValidAlloc(assign, tt);
+          declared_tt = GetTileTypeWithMemRef(As<AssignStmt>(emitted)->var_->GetType());
+        }
+        if (declared_tt) {
+          handles[key] = As<AssignStmt>(emitted)->var_;
+          handle_valid_sig[key] = ValidSig(declared_tt);
+        }
+        out.push_back(emitted);
         in_scope.insert(assign->var_.get());
         continue;
       }
-      // Inject set_validshape *before* a dynamic-valid member of a static buffer,
-      // so the handle carries its real valid when this producer writes into it.
-      if (tt && HasDynamicValidShape(tt) && tt->tile_view_->valid_shape.size() == 2 &&
-          !IsOp(call, "tile.set_validshape")) {
-        auto it = static_handles.find(BufferKeyOfVar(assign->var_, split_by_signature));
-        if (it != static_handles.end()) out.push_back(MakeSetValidShapeStmt(it->second, tt));
+      // Reconcile a member whose effective valid differs from its handle's
+      // declared valid: inject set_validshape on the handle *before* this
+      // producer, so the buffer carries the right valid when it writes.
+      if (tt && tt->shape_.size() == 2 && !IsOp(call, "tile.set_validshape") && !IsPureViewMember(call)) {
+        const auto key = BufferKeyOfVar(assign->var_, split_by_signature);
+        auto hit = handles.find(key);
+        auto sit = handle_valid_sig.find(key);
+        if (hit != handles.end() && sit != handle_valid_sig.end() && ValidSig(tt) != sit->second) {
+          out.push_back(MakeSetValidShapeStmt(hit->second, tt));
+        }
       }
       out.push_back(s);
       in_scope.insert(assign->var_.get());
@@ -456,7 +529,7 @@ std::vector<StmtPtr> FixupDynamicValid(const std::vector<StmtPtr>& stmts, std::s
       for (const auto& ia : f->iter_args_)
         if (auto v = AsVarLike(ia)) child.insert(v.get());
       auto new_body = SeqStmts::Flatten(
-          FixupDynamicValid(BodyToVec(f->body_), child, static_keys, static_handles, split_by_signature),
+          FixupDynamicValid(BodyToVec(f->body_), child, handle_valid_sig, handles, split_by_signature),
           f->body_->span_);
       out.push_back(std::make_shared<ForStmt>(f->loop_var_, f->start_, f->stop_, f->step_, f->iter_args_,
                                               new_body, f->return_vars_, f->span_, f->kind_, f->attrs_,
@@ -469,7 +542,7 @@ std::vector<StmtPtr> FixupDynamicValid(const std::vector<StmtPtr>& stmts, std::s
       for (const auto& ia : w->iter_args_)
         if (auto v = AsVarLike(ia)) child.insert(v.get());
       auto new_body = SeqStmts::Flatten(
-          FixupDynamicValid(BodyToVec(w->body_), child, static_keys, static_handles, split_by_signature),
+          FixupDynamicValid(BodyToVec(w->body_), child, handle_valid_sig, handles, split_by_signature),
           w->body_->span_);
       out.push_back(std::make_shared<WhileStmt>(w->condition_, w->iter_args_, new_body, w->return_vars_,
                                                 w->span_, w->leading_comments_));
@@ -479,13 +552,13 @@ std::vector<StmtPtr> FixupDynamicValid(const std::vector<StmtPtr>& stmts, std::s
     if (auto ic = As<IfStmt>(s)) {
       StmtPtr new_then = ic->then_body_;
       if (ic->then_body_)
-        new_then = SeqStmts::Flatten(FixupDynamicValid(BodyToVec(ic->then_body_), in_scope, static_keys,
-                                                       static_handles, split_by_signature),
+        new_then = SeqStmts::Flatten(FixupDynamicValid(BodyToVec(ic->then_body_), in_scope, handle_valid_sig,
+                                                       handles, split_by_signature),
                                      ic->then_body_->span_);
       std::optional<StmtPtr> new_else = ic->else_body_;
       if (ic->else_body_.has_value() && *ic->else_body_)
-        new_else = SeqStmts::Flatten(FixupDynamicValid(BodyToVec(*ic->else_body_), in_scope, static_keys,
-                                                       static_handles, split_by_signature),
+        new_else = SeqStmts::Flatten(FixupDynamicValid(BodyToVec(*ic->else_body_), in_scope, handle_valid_sig,
+                                                       handles, split_by_signature),
                                      (*ic->else_body_)->span_);
       out.push_back(std::make_shared<IfStmt>(ic->condition_, new_then, new_else, ic->return_vars_, ic->span_,
                                              ic->leading_comments_));
@@ -524,10 +597,10 @@ FunctionPtr TransformMaterializeAllocTiles(const FunctionPtr& func) {
   std::set<const Var*> params_in_scope;
   for (const auto& p : func->params_)
     if (auto v = AsVarLike(p)) params_in_scope.insert(v.get());
-  std::set<std::string> static_keys;
-  std::map<std::string, VarPtr> static_handles;
+  std::map<std::string, std::string> handle_valid_sig;
+  std::map<std::string, VarPtr> handles;
   StmtPtr new_body = SeqStmts::Flatten(
-      FixupDynamicValid(placed, params_in_scope, static_keys, static_handles, split_by_signature),
+      FixupDynamicValid(placed, params_in_scope, handle_valid_sig, handles, split_by_signature),
       func->body_->span_);
   return std::make_shared<const Function>(func->name_, func->params_, func->param_directions_,
                                           func->return_types_, new_body, func->span_, func->func_type_,

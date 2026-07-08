@@ -84,23 +84,37 @@ materialized = passes.materialize_alloc_tiles()(program)
 
 每条语句在每个外层被重扫一次，故整体为 O(N × depth)（嵌套深度有界）。
 
-### 动态 valid 修复
+### valid 协调
 
-感知依赖的放置能把 handle 保持在*单个*循环体 `valid_shape` 操作数之下，但当内存
-复用让一个 buffer 被**多个兄弟作用域**共享时（例如同一个 `mem_vec` 槽被两个相邻
-循环各自加载，各带自己的循环内 `valid_len`），就不存在任何一个作用域既支配全部使用
-又能看见全部操作数 —— 它会被上提到公共祖先，位于它们全部之上。此时在那里发出 handle
-的动态 `valid_col` 会引用越界操作数，ptoas 会报错（`'pto.alloc_tile' op valid_col
-operand is required because result type v_col is ?`）。
+一个 handle 服务其 buffer 的每个成员，但成员之间可能对 valid 范围有分歧。放置完成
+后有一趟遍历语句树、跟踪当前作用域内变量的修复，依据每个成员的*有效 valid*（有
+`valid_shape` 则取之，否则取物理形状）协调两种情况：
 
-放置完成后有一趟修复处理此情况：遍历语句树并跟踪当前作用域内的变量，对每个
-`valid_shape` 操作数在 handle 位置**不在作用域**内的 `alloc_tile`：
+**1. 动态 valid 被上提出作用域。** 感知依赖的放置能把 handle 保持在*单个*循环体
+`valid_shape` 操作数之下，但当内存复用让一个 buffer 被**多个兄弟作用域**共享时
+（例如同一个 `mem_vec` 槽被两个相邻循环各自加载，各带自己的循环内 `valid_len`），
+就不存在任何一个作用域既支配全部使用又能看见全部操作数 —— 它会被上提到公共祖先，
+位于它们全部之上。此时在那里发出 handle 的动态 `valid_col` 会引用越界操作数，ptoas
+会报错（`'pto.alloc_tile' op valid_col operand is required because result type
+v_col is ?`）。对每个 `valid_shape` 操作数在 handle 位置**不在作用域**内的
+`alloc_tile`，让 handle 以**静态** valid（物理形状 —— 自包含、可任意上提的操作数）
+声明。
 
-1. 让 handle 以**静态** valid（物理形状 —— 自包含、可任意上提的操作数）声明；
-2. 在每个动态-valid 生产者*之前*、对 handle 注入一条 `tile.set_validshape`（该处
-   操作数在作用域内)重新建立其真实 valid。必须在生产者**之前**(而非之后):
-   `tile.load` 的填充/补齐范围跟随目标 tile 的 valid，所以 load 写入时 buffer 必须
-   已经是 `valid_len`；放到之后会让 load 期间 buffer 仍是静态 valid，破坏部分-valid 块。
+**2. valid 与 handle 声明不同的成员。** 只要一个成员的有效 valid 与 handle 声明的
+valid 不同 —— 上面的静态-alloc 情况，*或*一个被复用 buffer 上两个成员携带不同 valid
+（例如 SPMD 次子块 replay 的 `valid=[0,0]` 与主块全范围共享同一 MemRef）—— 就在该
+生产者*之前*、对 handle 注入一条 `tile.set_validshape`（该处操作数在作用域内）重新
+建立成员的真实 valid。必须在生产者**之前**(而非之后)：`tile.load` 的填充/补齐范围
+跟随目标 tile 的 valid，所以 load 写入时 buffer 必须已经是正确的 `valid`；放到之后
+会让 load 期间 buffer 仍是 handle 声明的 valid，破坏部分-valid 块。
+
+**纯 view 成员被排除。** 由 view op（`tile.slice` / `tile.reshape` /
+`tile.transpose` / `tile.assemble` …，以 `set_output_memory_inherit_input` 注册）
+产生的成员别名一个已有 tile 的内存，并被 emit 成携带**自己** `valid [...]` 子句的
+`pto.subview` —— 它从不从 handle 的 `tile_buf` 类型读取 valid。协调它会 emit 一条多
+余的 `set_validshape` 并破坏源的 valid，故 view 成员被跳过。原地写入者
+（`set_output_reuses_input`，例如 `fillpad_inplace`）确实在裸 handle 处写入 buffer，
+仍参与协调。
 
 ```mlir
 %h = pto.alloc_tile addr = %c0 valid_row = %c16 valid_col = %c64 : ...   # 静态

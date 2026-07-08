@@ -93,30 +93,45 @@ recursing the statement tree:
 Each statement is rescanned once per enclosing level, so the pass is O(N × depth)
 (nesting depth is bounded).
 
-### Dynamic-valid fixup
+### Valid reconciliation
 
-Deps-aware placement keeps a handle below a *single* loop-body `valid_shape`
-operand, but a buffer that memory-reuse shares across **several sibling scopes**
-(e.g. one `mem_vec` slot loaded in two consecutive loops, each with its own
-loop-local `valid_len`) has no single scope that both dominates every use *and*
-sees every operand — it is hoisted to the common ancestor, above all of them.
-Emitting the handle's dynamic `valid_col` there would reference an out-of-scope
-operand, which ptoas rejects (`'pto.alloc_tile' op valid_col operand is required
-because result type v_col is ?`).
+A single handle serves every member of its buffer, but members can disagree on
+the valid extent. A final pass over the placed body walks the tree tracking the
+in-scope variables and reconciles two cases, keyed off each member's *effective
+valid* (its `valid_shape` if present, else the physical shape):
 
-A final pass over the placed body repairs this. Walking the tree while tracking
-the in-scope variables, for each `alloc_tile` whose `valid_shape` operand is
-**not** in scope at the handle's position it:
+**1. Dynamic valid hoisted out of scope.** Deps-aware placement keeps a handle
+below a *single* loop-body `valid_shape` operand, but a buffer that memory-reuse
+shares across **several sibling scopes** (e.g. one `mem_vec` slot loaded in two
+consecutive loops, each with its own loop-local `valid_len`) has no single scope
+that both dominates every use *and* sees every operand — it is hoisted to the
+common ancestor, above all of them. Emitting the handle's dynamic `valid_col`
+there would reference an out-of-scope operand, which ptoas rejects
+(`'pto.alloc_tile' op valid_col operand is required because result type v_col is
+?`). For each `alloc_tile` whose `valid_shape` operand is **not** in scope at the
+handle's position, the pass declares the handle with a **static** valid (the
+physical shape — a self-contained, hoistable operand).
 
-1. declares the handle with a **static** valid (the physical shape — a
-   self-contained, hoistable operand), and
-2. re-establishes each use's real valid by injecting a `tile.set_validshape` on
-   the handle **immediately before** the dynamic-valid producer, where the
-   operand *is* in scope. It must precede the producer (not follow it): a
-   `tile.load`'s fill/pad extent follows the destination tile's valid, so the
-   buffer must already carry `valid_len` when the load writes — emitting it after
-   leaves the buffer at its static valid during the load and corrupts
-   partial-valid blocks.
+**2. Members whose valid differs from the handle's.** Whenever a member's
+effective valid differs from the valid the handle declares — the static-alloc
+case above, *or* two members carrying different valids on one coalesced buffer
+(e.g. an SPMD secondary-subblock replay's `valid=[0,0]` sharing a MemRef with the
+primary's full extent) — the pass re-establishes the member's real valid by
+injecting a `tile.set_validshape` on the handle **immediately before** the
+producer, where the operand *is* in scope. It must precede the producer (not
+follow it): a `tile.load`'s fill/pad extent follows the destination tile's valid,
+so the buffer must already carry the right `valid` when the load writes —
+emitting it after leaves the buffer at the handle's declared valid during the
+load and corrupts partial-valid blocks.
+
+**Pure-view members are excluded.** A member produced by a view op
+(`tile.slice` / `tile.reshape` / `tile.transpose` / `tile.assemble` …, registered
+with `set_output_memory_inherit_input`) aliases an existing tile's memory and is
+emitted as a `pto.subview` that carries its **own** `valid [...]` clause — it
+never reads valid from the handle's `tile_buf` type. Reconciling it would emit a
+spurious `set_validshape` and corrupt the source's valid, so view members are
+skipped. In-place writers (`set_output_reuses_input`, e.g. `fillpad_inplace`)
+genuinely write the buffer at the bare handle and stay reconcilable.
 
 ```mlir
 %h = pto.alloc_tile addr = %c0 valid_row = %c16 valid_col = %c64 : ...   # static
