@@ -69,19 +69,17 @@ class Ascend950Handler : public BackendHandler {
   [[nodiscard]] uint32_t GetL0cCapacityBytes() const override { return 256ULL * 1024; }
   [[nodiscard]] uint64_t GetMatCapacityBytes() const override { return 512ULL * 1024; }
 
-  // TODO(a5-calibration): a5 roofline cost-model constants. These are EXPLICIT (rather
-  // than the inherited BackendHandler default) so each can be refit from an a5-sim
-  // sweep, but every value below currently EQUALS the a2a3 default, so this override is
-  // a behavioural NO-OP until the numbers are replaced -- a5 tile picks are unchanged
-  // by this stub. Calibration recipe (mirrors the a2a3 work; see the a5 calibration
-  // harness / device task): fit each constant from an a5-sim forced-tile sweep with
-  // per-pipe isolation (cube / MTE1 / MTE2 / FIXP lanes), then transfer the a2a3
-  // op-sim->device correction (BW /~1.54, mad_head as-is, FIXPIPE magnitude
-  // device-anchored) since raw op-sim over-states port BW ~1.5x and FIXPIPE ~4x. The
-  // form (per-M-row max(floor,throughput) + oddPart misalignment) is arch-general and
-  // does NOT need refitting -- only these magnitudes. Ship as sim-provisional (a5
-  // *device* validation pending) and audit the resulting pick changes vs the a2a3
-  // baseline before trusting it broadly.
+  // a5 roofline cost-model constants (EXPLICIT, so each is an a5-sim-calibratable slot).
+  // Cube is a5-sim-CALIBRATED (mad_head=25, mad_fp32_passes=8, bf16 cpr=1); bw + drain are
+  // still a2a3-inherited (a5-sim sweep pending -- see below). Calibration recipe (full
+  // spec: a5_cost_model_device_task.md): fit each constant from an a5-sim forced-tile
+  // sweep using WORK-CYCLE extraction by instruction source (excluding WAIT_FLAG/BAR
+  // stalls) on the cube / MTE1 (LOAD_2Dv2) / FIXP lanes. That method reproduces the shipped
+  // a2a3 *device* model within ~15%, so fit RAW a5-sim work-cycle numbers -- NO transfer
+  // correction (the earlier BW/~1.54 idea was for raw pipe sums, superseded). No a5 device
+  // exists, so a5-sim IS the ground truth; validate picks with an a5-sim OLD-vs-NEW wall
+  // check. The form (per-M-row max(floor,throughput) + oddPart) is arch-general; only these
+  // magnitudes vary (plus the already-measured fp32 cube pass count).
   [[nodiscard]] L0CostModel GetL0CostModel() const override {
     L0CostModel m;
     // BW + drain: still a2a3-inherited. TODO(a5): a5-sim couldn't fit these yet (a5-sim
