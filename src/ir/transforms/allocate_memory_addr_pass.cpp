@@ -557,23 +557,64 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> PlanWithDsaRP(
 }
 
 /**
- * @brief Consulting-mode DSA solver: run it alongside the authoritative bump and
- *        log the packed peak vs the bump's, without changing any address.
+ * @brief Rebuild memref->address pairs from a DSA solution.
  *
- * Gated by the ``PYPTO_DSA_SOLVER=1`` env flag (experimental).  This proves the
- * DSA adapter + first-fit solver end-to-end on real IR and measures the reuse
- * headroom, while the legacy bump stays authoritative — so it is correctness-safe
- * even though pipeline / hazard separations are not yet modelled (the reported
- * DSA peak is therefore an optimistic lower bound).
+ * Each allocation's slot base becomes its DSA offset; every member keeps its own
+ * relative offset (the same fold the bump does: new = slot_base + relative).
+ * MemRefs whose allocation the solver did not plan (DDR / non-allocated spaces)
+ * keep their bump pair unchanged, so the returned set covers exactly what the
+ * bump covered.
  */
-void MaybeConsultDsaSolver(const FunctionPtr& func, const MemoryAllocatorPolicy& policy,
-                           const ReservedEndBySpace& reserved_end_by_space,
-                           const std::vector<MemRefWithSpace>& memrefs,
-                           const std::vector<std::pair<const MemRef*, MemRefPtr>>& bump_pairs) {
-  if (dsa::GetSolverMode() == dsa::SolverMode::Off) return;
+std::vector<std::pair<const MemRef*, MemRefPtr>> ApplyDsaSolution(
+    const std::vector<std::pair<const MemRef*, MemRefPtr>>& bump_pairs,
+    const std::vector<LifetimeInterval>& intervals, const dsa::DsaSolution& solution) {
+  // Allocation base_ Ptr -> its planned slot offset (buffer id == interval index).
+  std::unordered_map<const Var*, uint64_t> base_offset;
+  for (size_t i = 0; i < intervals.size(); ++i) {
+    auto it = solution.offsets.find(static_cast<dsa::BufferId>(i));
+    if (it == solution.offsets.end()) continue;
+    auto mr = GetTypeMemRef(intervals[i].variable->GetType());
+    if (mr.has_value() && mr.value()) base_offset[mr.value()->base_.get()] = it->second;
+  }
+
+  std::vector<std::pair<const MemRef*, MemRefPtr>> pairs;
+  pairs.reserve(bump_pairs.size());
+  for (const auto& [old_memref, bump_new] : bump_pairs) {
+    auto bit = base_offset.find(old_memref->base_.get());
+    if (bit == base_offset.end()) {
+      pairs.emplace_back(old_memref, bump_new);  // unplanned (DDR/skipped) — keep bump
+      continue;
+    }
+    int64_t relative = 0;
+    if (auto rel = std::dynamic_pointer_cast<const ConstInt>(old_memref->byte_offset_)) {
+      relative = rel->value_;
+    }
+    auto new_off = std::make_shared<ConstInt>(static_cast<int64_t>(bit->second) + relative, DataType::INT64,
+                                              Span::unknown());
+    auto new_memref = std::make_shared<MemRef>(old_memref->name_hint_, old_memref->base_, new_off,
+                                               old_memref->size_, old_memref->span_);
+    pairs.emplace_back(old_memref, new_memref);
+  }
+  return pairs;
+}
+
+/**
+ * @brief Run the DSA solver on real IR (PYPTO_DSA_SOLVER).  ``consult`` logs the
+ *        packed peak vs the bump and keeps the bump authoritative.  ``plan`` makes
+ *        the solver authoritative — but only through a hard gate (feasible, every
+ *        space's peak <= the bump's, validator clean); otherwise it falls back to
+ *        the bump.  Returns the replacement pairs when the plan is applied, else
+ *        nullopt (keep bump).
+ */
+std::optional<std::vector<std::pair<const MemRef*, MemRefPtr>>> MaybePlanWithDsaSolver(
+    const FunctionPtr& func, const MemoryAllocatorPolicy& policy,
+    const ReservedEndBySpace& reserved_end_by_space, const std::vector<MemRefWithSpace>& memrefs,
+    const std::vector<std::pair<const MemRef*, MemRefPtr>>& bump_pairs) {
+  const dsa::SolverMode mode = dsa::GetSolverMode();
+  if (mode == dsa::SolverMode::Off) return std::nullopt;
 
   auto plan = ComputeAllocationPlan(func);
-  if (plan.intervals.empty()) return;
+  if (plan.intervals.empty()) return std::nullopt;
 
   // Backend per-space capacities (0 == unbounded) as pool caps.
   std::unordered_map<MemorySpace, uint64_t> caps;
@@ -591,9 +632,9 @@ void MaybeConsultDsaSolver(const FunctionPtr& func, const MemoryAllocatorPolicy&
   auto result = solver.Solve(problem);
   INTERNAL_CHECK_SPAN(result.solution.has_value(), func->span_)
       << "DSA solver returned no solution for '" << func->name_ << "'";
-  auto errors = dsa::Validate(problem, *result.solution);
+  const auto errors = dsa::Validate(problem, *result.solution);
 
-  // Bump peak per space, from the authoritative bump result, for comparison.
+  // Bump peak per space, from the authoritative bump result, for the gate + log.
   std::unordered_map<const MemRef*, MemorySpace> space_of;
   for (const auto& [memref, space] : memrefs) space_of[memref.get()] = space;
   std::map<MemorySpace, uint64_t> bump_peak;
@@ -607,18 +648,28 @@ void MaybeConsultDsaSolver(const FunctionPtr& func, const MemoryAllocatorPolicy&
     peak = std::max(peak, end);
   }
 
+  const char* tag = mode == dsa::SolverMode::Plan ? "dsa-plan" : "dsa-consult";
+  bool gate_ok = result.status == dsa::SolveStatus::kFeasible && errors.empty();
   for (const auto& [space, bump] : bump_peak) {
     uint64_t dsa_peak = 0;
     auto pit = result.objective.peak_by_pool.find(static_cast<dsa::PoolId>(space));
     if (pit != result.objective.peak_by_pool.end()) dsa_peak = pit->second;
-    LOG_INFO << "[dsa-consult] " << func->name_ << " " << MemorySpaceToString(space)
-             << ": bump=" << bump << "B dsa=" << dsa_peak << "B"
-             << (dsa_peak < bump ? " (dsa packs tighter)" : "");
+    if (dsa_peak > bump) gate_ok = false;
+    LOG_INFO << "[" << tag << "] " << func->name_ << " " << MemorySpaceToString(space) << ": bump=" << bump
+             << "B dsa=" << dsa_peak << "B" << (dsa_peak < bump ? " (dsa packs tighter)" : "");
   }
   if (!errors.empty()) {
-    LOG_WARN << "[dsa-consult] " << func->name_ << " validator flagged " << errors.size()
+    LOG_WARN << "[" << tag << "] " << func->name_ << " validator flagged " << errors.size()
              << " issue(s); first: " << errors.front();
   }
+
+  if (mode != dsa::SolverMode::Plan) return std::nullopt;  // consult: bump stays authoritative
+  if (!gate_ok) {
+    LOG_WARN << "[dsa-plan] " << func->name_ << ": gate failed (status/peak/validator) — keeping bump";
+    return std::nullopt;
+  }
+  LOG_INFO << "[dsa-plan] " << func->name_ << ": applying DSA plan (gate passed)";
+  return ApplyDsaSolution(bump_pairs, plan.intervals, *result.solution);
 }
 
 /**
@@ -662,9 +713,13 @@ FunctionPtr TransformAllocateMemoryAddr(const FunctionPtr& func) {
                                            func->name_);
   }
 
-  // Consulting-mode DSA solver (PYPTO_DSA_SOLVER=1): measure first-fit-by-lifetime
-  // packing against the bump, without changing addresses. No-op unless the flag is set.
-  MaybeConsultDsaSolver(func, *policy, reserve_resolution.reserved_end_by_space, memrefs, memref_pairs);
+  // DSA solver (PYPTO_DSA_SOLVER): consult logs vs the bump; plan replaces the
+  // bump's addresses when the gate (feasible, peak <= bump, validator clean)
+  // passes. No-op unless the flag is set.
+  if (auto dsa_pairs = MaybePlanWithDsaSolver(func, *policy, reserve_resolution.reserved_end_by_space, memrefs,
+                                              memref_pairs)) {
+    memref_pairs = std::move(*dsa_pairs);
+  }
 
   if (memref_pairs.empty() && reserve_resolution.resolved_bases.empty()) {
     return func;
