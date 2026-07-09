@@ -1181,7 +1181,8 @@ _ALLGATHER_REQUIRED_OPS = {
     "pld.system.rank",
     "pld.system.notify",
     "pld.system.wait",
-    "pld.tile.remote_store",
+    "pld.tile.put",
+    "tile.create",
     "tile.load",
 }
 

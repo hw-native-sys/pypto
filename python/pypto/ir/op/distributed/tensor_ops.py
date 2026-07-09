@@ -307,30 +307,37 @@ def allgather(
 ) -> Call:
     """Build a ``pld.tensor.allgather(...)`` Call.
 
-    **2-arg form (HOST builtin):** ``allgather(target, signal)`` — pre-staged
-    window data, lowered to ``builtin.tensor.allgather`` per chip.
+    Unified 3-arg API for both HOST builtin and InCore composite paths.
 
-    **3-arg form (InCore composite):** ``allgather(local_data, target, signal)`` —
-    push-based: each rank remote_stores its chunk into every peer's window
-    slot, then notify/wait barrier; the window itself becomes the gathered
-    [NR, SIZE] result (window-as-result). Lowered by LowerCompositeOps into
-    tile.load + remote_store loop + notify/wait.
+    **HOST builtin:** ``allgather(local_data, target, signal=None)`` — each rank's
+    chunk is pre-staged in the window-bound ``local_data`` ([NR, SIZE]
+    DistributedTensor), ``target`` is the INT32 DistributedTensor signal.
+    The 2-arg convenience form expands to 3-arg IR internally.
+
+    **InCore composite:** ``allgather(local_data, target, signal)`` —
+    push-based: each rank pushes its chunk into every peer's window via
+    ``pld.tile.put``, then notify/wait barrier; the window itself becomes
+    the gathered [NR, SIZE] result (window-as-result). Lowered by
+    LowerCompositeOps into tile.load + pld.tile.put loop + notify/wait.
 
     Args:
-        local_data: For 3-arg: Tensor (or Tile) [1, SIZE] with this rank's chunk.
-        target: DistributedTensor [NR, SIZE] staging window (or data in 2-arg form).
-        signal: Window-bound INT32 barrier tensor.
+        local_data: HOST: DistributedTensor [NR, SIZE] pre-staged window.
+            InCore: Tensor (or Tile) [1, SIZE] with this rank's chunk.
+        target: HOST: DistributedTensor INT32 signal.
+            InCore: DistributedTensor [NR, SIZE] staging window / result.
+        signal: InCore: INT32 DistributedTensor barrier (None for HOST).
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     if signal is None:
-        # 2-arg HOST builtin form: allgather(data, signal)
-        # Positional mapping: data→local_data, signal→target
+        # 2-arg HOST convenience form: expand to 3-arg IR.
+        # The C++ deducer detects HOST by args[0] being DistributedTensor;
+        # args[2] is unused for HOST — recycle target (the signal) as placeholder.
         if target is None:
             raise TypeError(
                 "pld.tensor.allgather 2-arg HOST form requires (data, signal); "
                 "the second positional argument (signal) must not be None"
             )
-        _args: list[Expr] = [local_data, target]
+        _args: list[Expr] = [local_data, target, target]
         return _ir_core.create_op_call("pld.tensor.allgather", _args, {}, actual_span)
     # 3-arg InCore composite form
     _args_3: list[Expr] = [local_data, target, signal]  # type: ignore[assignment]

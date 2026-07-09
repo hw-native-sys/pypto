@@ -220,7 +220,7 @@ REGISTER_OP("pld.tensor.broadcast")
     .f_deduce_type(DeduceTensorBroadcastType);
 
 // ============================================================================
-// pld.tensor.allgather — gather data from all ranks (2-arg HOST builtin or 3-arg InCore composite)
+// pld.tensor.allgather — gather data from all ranks (unified 3-arg: HOST builtin or InCore composite)
 // ============================================================================
 
 namespace {
@@ -228,35 +228,38 @@ namespace {
 TypePtr DeduceTensorAllGatherType(const std::vector<ExprPtr>& args,
                                   const std::vector<std::pair<std::string, std::any>>& kwargs) {
   (void)kwargs;
-  CHECK(args.size() == 2 || args.size() == 3)
-      << "pld.tensor.allgather requires 2 args (target, signal) for host builtin path "
-         "or 3 args (local_data, target, signal) for InCore composite, but got "
+  CHECK(args.size() == 3)
+      << "pld.tensor.allgather requires 3 args (local_data, target, signal); "
+         "use pld.tensor.allgather(local_data, target, signal) for both HOST builtin and InCore composite paths, "
+         "but got "
       << args.size();
   for (size_t i = 0; i < args.size(); ++i) {
     CHECK(args[i]) << "pld.tensor.allgather positional argument #" << i << " must not be null";
   }
 
-  if (args.size() == 2) {
-    // 2-arg HOST builtin path: allgather(target, signal) — data pre-staged in window.
-    auto target_type = As<DistributedTensorType>(args[0]->GetType());
-    CHECK(target_type) << "pld.tensor.allgather target must be a DistributedTensor (window-bound), got "
-                       << args[0]->GetType()->TypeName();
+  // Dispatch by arg[0] type: DistributedTensor = HOST builtin, Tile/Tensor = InCore composite.
+  auto first_type = args[0]->GetType();
+  if (As<DistributedTensorType>(first_type)) {
+    // HOST builtin path: allgather(local_data, target, signal) where
+    // local_data is the pre-staged window-bound DistributedTensor ([NR, SIZE]),
+    // target is the INT32 DistributedTensor signal, and signal is unused.
+    auto target_type = As<DistributedTensorType>(first_type);
     CHECK(target_type->shape_.size() == 2)
-        << "pld.tensor.allgather target must be 2D [NR, SIZE], got " << target_type->shape_.size() << " dims";
+        << "pld.tensor.allgather HOST target must be 2D [NR, SIZE], got " << target_type->shape_.size()
+        << " dims";
     auto signal_type = As<DistributedTensorType>(args[1]->GetType());
-    CHECK(signal_type) << "pld.tensor.allgather signal must be a DistributedTensor (window-bound), got "
+    CHECK(signal_type) << "pld.tensor.allgather HOST signal (arg[1]) must be a DistributedTensor (window-bound), got "
                        << args[1]->GetType()->TypeName();
     CHECK(signal_type->dtype_ == DataType::INT32)
-        << "pld.tensor.allgather signal must have INT32 element type, got dtype "
+        << "pld.tensor.allgather HOST signal must have INT32 element type, got dtype "
         << signal_type->dtype_.ToString();
     return args[0]->GetType();
   }
 
   // 3-arg InCore composite path (push-based).
   // arg 0: local_data — Tile (or Tensor before ConvertTensorToTileOps) with this rank's chunk
-  auto local_type = args[0]->GetType();
-  CHECK(As<TileType>(local_type) || As<TensorType>(local_type))
-      << "pld.tensor.allgather local_data must be a Tile or Tensor, got " << local_type->TypeName();
+  CHECK(As<TileType>(first_type) || As<TensorType>(first_type))
+      << "pld.tensor.allgather local_data must be a Tile or Tensor, got " << first_type->TypeName();
 
   // arg 1: target — DistributedTensor [NR, SIZE] staging window (also the result)
   auto target_type = As<DistributedTensorType>(args[1]->GetType());
@@ -285,21 +288,20 @@ TypePtr DeduceTensorAllGatherType(const std::vector<ExprPtr>& args,
 
 REGISTER_OP("pld.tensor.allgather")
     .set_description(
-        "All-gather: gather data from all ranks.  Two forms are supported: "
-        "(2-arg) `pld.tensor.allgather(target, signal)` for HOST builtin — "
-        "each rank's chunk is pre-staged in the window-bound target, lowered "
-        "to builtin.tensor.barrier per chip; "
-        "(3-arg) `pld.tensor.allgather(local_data, target, signal)` for "
-        "InCore composite — push-based: each rank remote_stores its chunk "
-        "into every peer's window, then notify/wait barrier; the window itself "
-        "becomes the gathered [NR, SIZE] result (window-as-result). "
-        "The 3-arg form is lowered by LowerCompositeOps into "
-        "remote_store loop + notify-all/wait-all; "
+        "All-gather: gather data from all ranks.  Unified 3-arg API: "
+        "`pld.tensor.allgather(local_data, target, signal)` for both HOST builtin and InCore composite. "
+        "HOST builtin: `local_data` is the pre-staged window-bound DistributedTensor ([NR, SIZE]), "
+        "`target` is the INT32 DistributedTensor signal, `signal` is unused; lowered to "
+        "builtin.tensor.barrier per chip. "
+        "InCore composite: `local_data` is the rank's chunk (Tile/Tensor [1, SIZE]), "
+        "`target` is the window-bound DistributedTensor [NR, SIZE] staging area and result, "
+        "`signal` is the INT32 DistributedTensor barrier; push-based lowering: "
+        "pld.tile.put loop + notify-all/wait-all; "
         "this Call never survives past that pass.")
     .set_op_category("DistributedOp")
-    .add_argument("local_data", "Local tile [1, SIZE] — this rank's data (Input)")
-    .add_argument("target", "Window-bound DistributedTensor[NR, SIZE] — push target and result (InOut)")
-    .add_argument("signal", "Window-bound INT32 DistributedTensor used as cross-rank barrier (InOut)")
+    .add_argument("local_data", "HOST: pre-staged DistributedTensor [NR, SIZE]; InCore: Tile/Tensor [1, SIZE] (Input)")
+    .add_argument("target", "HOST: INT32 DistributedTensor signal; InCore: DistributedTensor [NR, SIZE] push target and result (InOut)")
+    .add_argument("signal", "HOST: unused; InCore: INT32 DistributedTensor barrier (InOut)")
     .no_memory_spec()
     .f_deduce_type(DeduceTensorAllGatherType);
 

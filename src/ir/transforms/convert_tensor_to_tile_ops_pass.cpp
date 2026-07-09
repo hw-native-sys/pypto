@@ -857,16 +857,20 @@ ExprPtr GetWriteTargetExpr(const CallPtr& call) {
   if (IsOp(call, "pld.tensor.allreduce") && !call->args_.empty()) {
     return call->args_[0];
   }
-  // pld.tensor.allgather has two overloads (see DeduceTensorAllGatherType):
-  //   2-arg HOST builtin: allgather(target, signal) — the result aliases
-  //     target (args_[0]); signal (args_[1]) is the barrier only.
-  //   3-arg InCore push-based: allgather(local_data, target, signal) — writes
-  //     gathered chunks into target (args_[1]) on every rank (Phase 1
-  //     remote_store loop) and target is the result (window-as-result);
+  // pld.tensor.allgather unified 3-arg API (see DeduceTensorAllGatherType):
+  //   HOST builtin (args[0] is DistributedTensor): allgather(local_data, target, signal)
+  //     — local_data is the pre-staged window, target is the signal.
+  //     The result aliases local_data (args_[0]).
+  //   InCore composite (args[0] is Tile/Tensor): allgather(local_data, target, signal)
+  //     — target (args_[1]) is the push target and result (window-as-result);
   //     local_data (args_[0]) is read-only, signal (args_[2]) is barrier only.
   if (IsOp(call, "pld.tensor.allgather")) {
-    if (call->args_.size() == 2) return call->args_[0];
-    if (call->args_.size() >= 3) return call->args_[1];
+    if (call->args_.size() >= 3) {
+      if (As<DistributedTensorType>(call->args_[0]->GetType())) {
+        return call->args_[0];  // HOST: window is the write target
+      }
+      return call->args_[1];  // InCore: target is the write target
+    }
   }
   // pld.tensor.reduce_scatter(target, signal, *, op): writes the reduced
   // chunk back into target (Phase 4 store).  target (args_[0]) is the
@@ -1040,30 +1044,32 @@ void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, st
   }
 
   if (IsOp(call, "pld.tensor.allgather")) {
-    // 2-arg HOST builtin: allgather(target, signal) — both target (args_[0])
-    // and signal (args_[1]) are InOut (data pre-staged in the window, barrier
-    // reads/writes signal), mirroring allreduce's HOST handling.
-    if (call->args_.size() == 2) {
-      for (size_t i = 0; i < 2; ++i) {
+    // Unified 3-arg:
+    //   HOST (args[0] is DistributedTensor): args[0]=pre-staged window (InOut),
+    //     args[1]=signal (InOut), args[2]=unused.
+    //   InCore (args[0] is Tile/Tensor): args[0]=local_data (In, read-only),
+    //     args[1]=target window (InOut, push target and result),
+    //     args[2]=signal (InOut, barrier).
+    if (call->args_.size() >= 3) {
+      if (As<DistributedTensorType>(call->args_[0]->GetType())) {
+        // HOST: both args[0] (window) and args[1] (signal) are InOut.
+        for (size_t i = 0; i < 2; ++i) {
+          auto origins = CollectReferencedOrigins(call->args_[i], origin_map);
+          MarkAccess(origins, has_read);
+          MarkAccess(origins, has_write);
+        }
+        return;
+      }
+      // InCore: local_data (args_[0]) is In; target (args_[1]) and signal
+      // (args_[2]) are InOut.
+      if (call->args_.size() >= 1) {
+        MarkAccess(CollectReferencedOrigins(call->args_[0], origin_map), has_read);
+      }
+      for (size_t i = 1; i < call->args_.size(); ++i) {
         auto origins = CollectReferencedOrigins(call->args_[i], origin_map);
         MarkAccess(origins, has_read);
         MarkAccess(origins, has_write);
       }
-      return;
-    }
-    // Push-based 3-arg:
-    //   local_data (args_[0]) is In (read-only — pushed to peers via remote_store).
-    //   target (args_[1]) is read (Phase 1 remote_store from self / barrier)
-    //     and written (Phase 1 remote_store into window from every peer).  InOut.
-    //   signal (args_[2]) is written (notify) and read (wait).  InOut.
-    if (call->args_.size() >= 1) {
-      // local_data: read only
-      MarkAccess(CollectReferencedOrigins(call->args_[0], origin_map), has_read);
-    }
-    for (size_t i = 1; i < call->args_.size(); ++i) {
-      auto origins = CollectReferencedOrigins(call->args_[i], origin_map);
-      MarkAccess(origins, has_read);
-      MarkAccess(origins, has_write);
     }
     return;
   }
