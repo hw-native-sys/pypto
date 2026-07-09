@@ -28,15 +28,32 @@ from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import codegen, passes
 
 
-def _emit_pto(program, planner: passes.MemoryPlanner) -> str:
-    """Run the default pipeline under `planner` and return the emitted PTO MLIR."""
+def _run_passes(program, planner: passes.MemoryPlanner):
     reset_for_testing()
     set_backend_type(BackendType.Ascend910B)
     with passes.PassContext([], memory_planner=planner):
-        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+        return PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+
+
+def _emit_pto(program, planner: passes.MemoryPlanner) -> str:
+    """Run the default pipeline under `planner` and return the emitted PTO MLIR."""
+    optimized = _run_passes(program, planner)
     emit_tile_addr = planner == passes.MemoryPlanner.PYPTO
     result = codegen.PTOCodegen().generate(optimized, emit_tile_addr=emit_tile_addr)
     return result if isinstance(result, str) else "".join(result.values())
+
+
+def _emit_incore_pto(program, planner: passes.MemoryPlanner) -> str:
+    """Same, for a program whose kernel is outlined into a single in-core function.
+
+    `PTOCodegen.generate` only accepts in-core functions, so the Orchestration
+    parent left behind by `pl.at` outlining has to be dropped first.
+    """
+    optimized = _run_passes(program, planner)
+    incore = [f for f in optimized.functions.values() if f.func_type != pl.FunctionType.Orchestration]
+    assert len(incore) == 1, f"expected one in-core function, got {[f.name for f in incore]}"
+    single = _ir.Program([incore[0]], incore[0].name, optimized.span)
+    return codegen.PTOCodegen().generate(single, emit_tile_addr=planner == passes.MemoryPlanner.PYPTO)
 
 
 def _sole_line(mlir: str, needle: str) -> str:
@@ -162,6 +179,69 @@ def test_reshape_of_subview_folds_away_under_pypto_planner():
     address, so it is a re-view and no `pto.treshape` is emitted at all."""
     mlir = _emit_pto(SubviewReshapeProgram, passes.MemoryPlanner.PYPTO)
     assert "pto.treshape" not in mlir, mlir
+
+
+# ── transposed matmul operand: the reinterpret needs its own SSA ─────────────
+
+QM, QK, KN = 16, 128, 128
+
+
+@pl.program
+class MatmulBTransProgram:
+    """`b_trans=True` views the Mat tile transposed, then tmovs it into Right."""
+
+    @pl.function
+    def kernel(
+        self,
+        q: pl.Tensor[[QM, QK], pl.BF16],
+        k: pl.Tensor[[KN, QK], pl.BF16],
+        out: pl.Out[pl.Tensor[[QM, KN], pl.FP32]],
+    ) -> pl.Tensor[[QM, KN], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP, name_hint="qk"):
+            out[:, :] = pl.matmul(q[:, :], k[:, :], b_trans=True, out_dtype=pl.FP32)
+        return out
+
+
+def _tmov_into(mlir: str, dst_loc: str) -> str:
+    """The single `pto.tmov` whose `outs(...)` targets a `dst_loc` tile_buf."""
+    movs = [ln for ln in mlir.splitlines() if "pto.tmov" in ln and dst_loc in ln.split("outs(", 1)[1]]
+    assert len(movs) == 1, f"expected one tmov into {dst_loc}, got {movs}:\n{mlir}"
+    return movs[0]
+
+
+def test_transposed_matmul_operand_materializes_a_reinterpret_under_ptoas():
+    """The transposed view must get its own SSA, and the tmov must read it.
+
+    Under the PyPTO planner the view is a second `pto.alloc_tile` at the source's
+    baked address carrying the transposed layout. The PTOAS planner bakes no
+    address, so aliased vars collapse onto ONE tile_buf handle and that second
+    declaration is never emitted — `tile.transpose_view` must then materialize the
+    reinterpret as a `pto.treshape`. Otherwise the tmov annotated the *source*
+    handle with the *transposed* layout, and MLIR rejected the def/use mismatch.
+    """
+    mlir = _emit_incore_pto(MatmulBTransProgram, passes.MemoryPlanner.PTOAS)
+    treshape = _sole_line(mlir, "pto.treshape")
+
+    # The reinterpret swaps blayout/slayout relative to its (mat) source.
+    assert "blayout=col_major, slayout=row_major" in _operand_type(treshape), treshape
+    assert "blayout=row_major, slayout=col_major" in _result_type(treshape), treshape
+
+    # The tmov into the Right buffer reads the reinterpret, not the raw handle.
+    reinterpret = treshape.split("=", 1)[0].strip()
+    right_mov = _tmov_into(mlir, "loc=right")
+    assert f"ins({reinterpret} " in right_mov, f"{treshape}\n{right_mov}"
+
+
+def test_transposed_matmul_operand_is_a_re_view_under_pypto_planner():
+    """Default planner: the transposed view owns an `alloc_tile` at the source's
+    address, so no `pto.treshape` is needed and the tmov reads that decl."""
+    mlir = _emit_incore_pto(MatmulBTransProgram, passes.MemoryPlanner.PYPTO)
+    assert "pto.treshape" not in mlir, mlir
+
+    right_mov = _tmov_into(mlir, "loc=right")
+    src = right_mov.split("ins(", 1)[1].split(" ", 1)[0]
+    decl = _sole_line(mlir, f"{src} = pto.alloc_tile")
+    assert "blayout=row_major, slayout=col_major" in decl, decl
 
 
 if __name__ == "__main__":

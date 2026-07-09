@@ -1096,14 +1096,17 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
 
   reg("tile.transpose_view", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
     // Zero-copy fractal-layout reinterpretation (NZ<->ZN).
-    //  - Alloc-backed result (the #1776 case): the result var owns a pre-declared
-    //    pto.alloc_tile carrying the transposed (ZN) type, aliased to the source
-    //    buffer's address through the shared MemRef. The two alloc_tile decls at
-    //    the same addr ARE the whole mechanism — emit nothing.
-    //  - MemRef-less result (a view over a cross-core tpop slot, which owns no
-    //    buffer): there is no alloc to alias, so reinterpret the slot in place
-    //    with pto.treshape reading the source SSA (a metadata-only op — no data
-    //    movement), exactly like tile.reshape over a tpop.
+    //  - The result var owns a pre-declared pto.alloc_tile already carrying the
+    //    transposed (ZN) type, aliased to the source buffer's address through the
+    //    shared MemRef (the #1776 case, PyPTO planner). The two alloc_tile decls
+    //    at the same addr ARE the whole mechanism — emit nothing.
+    //  - Otherwise there is no declaration carrying the transposed type, so
+    //    reinterpret the source in place with pto.treshape reading its SSA (a
+    //    metadata-only op — no data movement), exactly like tile.reshape. This
+    //    covers both a MemRef-less result (a view over a cross-core tpop slot,
+    //    which owns no buffer) and the PTOAS planner, where addr-less aliased
+    //    vars collapse onto ONE tile_buf handle: the second alloc_tile that
+    //    would have carried the transposed layout is never emitted.
     CHECK(op->args_.size() == 1) << "Operation:[tile.transpose_view] requires 1 argument (tile), but got "
                                  << op->args_.size();
     auto& codegen = AsPto(codegen_base);
@@ -1117,13 +1120,15 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
         result_has_memref = result_tile->memref_.has_value();
       }
     }
-    // Alloc-backed: the pre-declared alloc_tile at the shared addr is the view.
-    if (result_has_memref) {
+    // The result's own alloc_tile already declares the transposed type: it IS
+    // the view, so emit nothing. Mirrors tile.reshape's no-op check.
+    auto existing_type = codegen.GetSSATileBufType(result_target);
+    if (result_has_memref && !existing_type.empty() && existing_type == result_type) {
       return std::string("");
     }
 
-    // MemRef-less: reinterpret the slot in place via pto.treshape reading the
-    // source SSA — exactly like tile.reshape over a tpop.
+    // No declaration carries the transposed type — reinterpret the source in
+    // place via pto.treshape reading its SSA, exactly like tile.reshape.
     EmitTreshapeView(codegen, op->args_[0], result_target, result_type, "transpose_view_buf");
     return std::string("");
   });
