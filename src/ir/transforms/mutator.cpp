@@ -397,6 +397,7 @@ ExprPtr IRMutator::VisitExpr_(const CallPtr& op) {
       const auto* dev = std::any_cast<ExprPtr>(&v);
       if (dev && *dev) {
         auto new_dev = ExprFunctor<ExprPtr>::VisitExpr(*dev);
+        INTERNAL_CHECK_SPAN(new_dev, op->span_) << "Call device attribute mutated to null";
         if (new_dev.get() != dev->get()) {
           attrs_changed = true;
           new_attrs.emplace_back(k, std::any(std::move(new_dev)));
