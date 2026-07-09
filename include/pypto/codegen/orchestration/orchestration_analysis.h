@@ -25,6 +25,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -44,23 +45,27 @@ bool IsTensorOp(const std::string& op_name);
 bool IsArrayOp(const std::string& op_name);
 
 /// Returns a Call-shaped view of ``expr`` when it is a Call or a Submit, else
-/// null. Submit (a task launch) is the canonical IR form after
-/// DeriveCallDirections; orchestration analysis and codegen funnel it through
-/// ``SubmitToCallView`` so the Call-based logic applies unchanged. Maps keyed
-/// on node identity must use the binding Var, never this transient view.
-ir::CallPtr AsCallOrSubmitView(const ir::ExprPtr& expr);
+/// null. Thin forward to ``ir::transform_utils::AsCallOrSubmitView``, kept so
+/// codegen call sites read unqualified.
+inline ir::CallPtr AsCallOrSubmitView(const ir::ExprPtr& expr) {
+  return ir::transform_utils::AsCallOrSubmitView(expr);
+}
 std::string FormatConstIntValue(const ir::ConstIntPtr& c, const std::string& cpp_type);
 std::string FormatConstFloatValue(const ir::ConstFloatPtr& c, const std::string& cpp_type);
 int GetOrCreateFuncId(const std::string& func_name, std::map<std::string, int>* func_name_to_id,
                       int* next_func_id);
 
 /// Constant-evaluate ``expr`` if it is a ``ConstInt``; returns ``nullopt``
-/// otherwise. Used to size TaskId carry arrays at codegen time.
-std::optional<int64_t> EvalConstInt(const ir::ExprPtr& expr);
+/// otherwise. Thin forward to ``ir::transform_utils::EvalConstInt``.
+inline std::optional<int64_t> EvalConstInt(const ir::ExprPtr& expr) {
+  return ir::transform_utils::EvalConstInt(expr);
+}
 /// Return the const trip count of ``for_stmt`` if start/stop/step are all
-/// ``ConstInt`` and step is positive; 0 otherwise. We only support array carry
-/// for Parallel loops with statically-known trip counts.
-int64_t EvalConstTripCount(const ir::ForStmtPtr& for_stmt);
+/// ``ConstInt`` and step is positive; 0 otherwise. Thin forward to
+/// ``ir::transform_utils::EvalConstTripCount``.
+inline int64_t EvalConstTripCount(const ir::ForStmtPtr& for_stmt) {
+  return ir::transform_utils::EvalConstTripCount(for_stmt);
+}
 
 /// Compute total GM-pipe workspace elements required by a root orchestration
 /// function by walking reachable statements/callees and summing
@@ -216,34 +221,12 @@ std::vector<std::optional<size_t>> FindReturnedParamIndices(const ir::FunctionPt
 std::vector<ir::ParamDirection> ComputeGroupEffectiveDirections(const ir::FunctionPtr& group_func,
                                                                 const ir::ProgramPtr& program);
 
-/// AssignStmts and nested ForStmts collected from a loop (or other) body.
-/// Used by iter-arg aliasing analysis in orchestration codegen.
-struct BodyAliases {
-  std::vector<ir::AssignStmtPtr> assigns;
-  std::vector<ir::ForStmtPtr> nested_fors;
-};
-
-/// Walk ``body`` and collect every AssignStmt and nested ForStmt (including
-/// those inside nested control flow). Does not compute alias equivalence —
-/// callers run the fixpoint over ``assigns`` / ``nested_fors``.
-BodyAliases CollectBodyAliases(const ir::StmtPtr& body);
-
 /// Peek through a leading AUTO ``RuntimeScopeStmt`` so structural analyses
-/// reach the original statements.
-///
-/// ``MaterializeRuntimeScopes`` wraps the orchestration function body and
-/// each ForStmt / IfStmt branch body in an AUTO ``RuntimeScopeStmt`` so
-/// codegen emits ``PTO2_SCOPE()`` 1:1 from the IR. The structural analyses
-/// (``GetLastYieldStmt``, ``FlattenToStmts``) do not descend through a scope
-/// node. ``UnwrapAutoScope`` peeks through leading compiler-inserted scopes
-/// so those analyses see the original statements. User ``pl.manual_scope``
-/// scopes are intentionally left opaque — they were never auto-wrapped.
-///
-/// A user-written ``with pl.auto_scope():`` body may arrive as a
-/// single-statement ``SeqStmts`` wrapper (before ``NormalizeStmtStructure``
-/// collapses it); peek through it (and any nested AUTO scopes) so the
-/// analyses still reach the real statements.
-ir::StmtPtr UnwrapAutoScope(const ir::StmtPtr& stmt);
+/// reach the original statements. Thin forward to
+/// ``ir::transform_utils::UnwrapAutoScope``.
+inline ir::StmtPtr UnwrapAutoScope(const ir::StmtPtr& stmt) {
+  return ir::transform_utils::UnwrapAutoScope(stmt);
+}
 
 }  // namespace codegen
 }  // namespace pypto

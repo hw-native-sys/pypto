@@ -327,6 +327,18 @@ PropertyVerifierPtr CreatePipelineResolvedPropertyVerifier();
 PropertyVerifierPtr CreateUnrollResolvedPropertyVerifier();
 
 /**
+ * @brief Factory function for creating IterArgCarryClassified property verifier
+ *
+ * Verifies that every ``ForStmt`` with iter_args inside a
+ * ``FunctionType::Orchestration`` function carries the per-slot
+ * ``iter_arg_rebind_<i>`` attr stamped by ``ClassifyIterArgCarry``, and that a
+ * positive ``iter_arg_array_size_<i>`` only accompanies a rebind carry.
+ *
+ * @return Shared pointer to IterArgCarryClassified PropertyVerifier
+ */
+PropertyVerifierPtr CreateIterArgCarryClassifiedPropertyVerifier();
+
+/**
  * @brief Factory function for creating CallDirectionsResolved property verifier
  *
  * Verifies that every non-builtin ``Call`` in the program carries a fully

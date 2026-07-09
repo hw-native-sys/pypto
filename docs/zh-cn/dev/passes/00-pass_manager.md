@@ -92,6 +92,7 @@ struct PassProperties {
 | MaterializeDistTensorCtx | CommDomainScopesMaterialized | CommDomainScopesMaterialized | — |
 | Simplify | — | — | — |
 | MaterializeRuntimeScopes | SplitIncoreOrch, CallDirectionsResolved | RuntimeScopesMaterialized | — |
+| ClassifyIterArgCarry | CallDirectionsResolved, RuntimeScopesMaterialized | IterArgCarryClassified, RuntimeScopesMaterialized | — |
 
 > **注意**：VerifySSA 和 TypeCheck 是**属性验证器 (PropertyVerifier)**（验证规则），不是 Pass。它们通过 `VerificationInstrument` 或 `run_verifier()` 工具函数运行——参见[验证器](99-verifier.md)。
 
@@ -407,6 +408,7 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 29. [`MaterializeDistTensorCtx`](40-materialize_dist_tensor_ctx.md)（为 DistributedTensor 参数显式物化 CommCtx 参数/实参）
 30. `Simplify`
 31. [`MaterializeRuntimeScopes`](41-materialize_runtime_scopes.md)（插入 AUTO RuntimeScopeStmt，使 orchestration codegen 1:1 emit PTO2_SCOPE）
+32. [`ClassifyIterArgCarry`](42-classify_iter_arg_carry.md)（把每个 ForStmt iter_arg 标注为平凡别名 / 重绑定 carry，并为 manual-scope TaskId fence 数组定尺）
 
 `DebugTileOptimization` 只是用于排查 PTO tile 阶段的调试策略，会跳过
 tensor-only 前缀 pass。正常编译和非 strategy 专项测试都应优先使用

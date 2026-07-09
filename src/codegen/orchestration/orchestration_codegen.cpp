@@ -35,7 +35,6 @@
 #include "pypto/codegen/code_emitter.h"
 #include "pypto/codegen/codegen_base.h"
 #include "pypto/codegen/codegen_preconditions.h"
-#include "pypto/codegen/orchestration/iter_arg_carry_analyzer.h"
 #include "pypto/codegen/orchestration/orchestration_analysis.h"
 #include "pypto/codegen/orchestration_op_registry.h"
 #include "pypto/core/dtype.h"
@@ -57,6 +56,28 @@
 
 namespace pypto {
 namespace codegen {
+
+/// Per-iter_arg carry lowering plan consumed by the ForStmt emitter.
+///
+/// ``is_rebind`` / ``array_size`` are read straight off ``ForStmt::attrs_``
+/// (stamped by the ``ClassifyIterArgCarry`` pass). The two compiler-dep flags
+/// are a codegen-local overlay: they depend on the program-wide compiler-derived
+/// dependency edges collected by ``CollectCompilerDepTaskIds``, not on the loop's
+/// own structure.
+struct IterArgCarryPlan {
+  /// True when the carry needs a materialised mutable variable (vs. a trivial
+  /// alias to the init value's emit name).
+  bool is_rebind = false;
+  /// TaskId manual-scope array-carry extent; 0 means scalar/tensor/ArrayType path.
+  int64_t array_size = 0;
+  /// True when this iter_arg collects compiler-derived task dependencies
+  /// (NeedsCompilerDepTaskId). The carry is initialised with
+  /// PTO2TaskId::invalid() and filled by yielded producer TaskIds.
+  bool compiler_dep_collection = false;
+  /// True when compiler-dep collection needs a dynamic (vector) backing store
+  /// because the ForStmt trip count is not a compile-time constant.
+  bool dynamic_compiler_dep_collection = false;
+};
 
 using namespace pypto::ir;  // NOLINT(build/namespaces)
 
@@ -592,16 +613,21 @@ class OrchestrationStmtCodegen : public CodegenBase {
     INTERNAL_CHECK_SPAN(for_stmt->iter_args_.size() == for_stmt->return_vars_.size(), for_stmt->span_)
         << "Internal error: ForStmt iter_args/return_vars size mismatch";
 
-    // ForStmt visitor pipeline: analyze iter-arg carries (IterArgCarryAnalyzer)
-    // -> post-process compiler-derived deps -> emit carry declarations -> emit loop body.
-    IterArgCarryAnalyzer carry_analyzer(program_, in_manual_scope_depth_);
-    auto carry_plans = carry_analyzer.Analyze(for_stmt);
+    // ForStmt visitor pipeline: read the iter-arg carry plan stamped by
+    // ClassifyIterArgCarry -> post-process compiler-derived deps -> emit carry
+    // declarations -> emit loop body.
+    std::vector<IterArgCarryPlan> carry_plans(for_stmt->iter_args_.size());
+    for (size_t i = 0; i < carry_plans.size(); ++i) {
+      carry_plans[i].is_rebind = transform_utils::IterArgIsRebind(for_stmt, i);
+      carry_plans[i].array_size = transform_utils::IterArgArraySize(for_stmt, i);
+    }
 
     // Post-process: compiler-derived dep collections use NeedsCompilerDepTaskId,
-    // which lives on the codegen class (not the analyzer). Mark these iter_args
-    // as needing compiler-dep collection and set the array-carry size from the
-    // const trip count. Carries without a const trip count on Parallel loops
-    // defer to a dynamic (vector) collection.
+    // which lives on the codegen class (the pass classifies carries from the
+    // loop's own structure, not from program-wide compiler-dep edges). Mark
+    // these iter_args as needing compiler-dep collection and set the array-carry
+    // size from the const trip count. Carries without a const trip count on
+    // Parallel loops defer to a dynamic (vector) collection.
     for (size_t i = 0; i < carry_plans.size(); ++i) {
       if (i < for_stmt->return_vars_.size() && NeedsCompilerDepTaskId(for_stmt->return_vars_[i].get())) {
         // Always size compiler-dep carries from the outer loop's const trip
@@ -619,10 +645,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
         if (carry_plans[i].array_size <= 0 && for_stmt->kind_ == ForKind::Parallel) {
           carry_plans[i].dynamic_compiler_dep_collection = true;
         }
-        // Override is_rebind: the analyzer only sets it for TASK_ID iter_args,
-        // but Tensor-typed iter_args with compiler-dep edges also need true
-        // so the yield handler emits dynamic-collection writes. The old
-        // pre-refactor code set this inside the yield guard identically.
+        // Override is_rebind: ClassifyIterArgCarry only sets it for TASK_ID
+        // iter_args, but Tensor-typed iter_args with compiler-dep edges also
+        // need true so the yield handler emits dynamic-collection writes.
         carry_plans[i].is_rebind = true;
       }
     }

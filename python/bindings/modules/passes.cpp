@@ -111,7 +111,11 @@ void BindPass(nb::module_& m) {
              "return->param map is a lookup (#1702)")
       .value("AivSplitValid", IRProperty::AivSplitValid,
              "Split-mode AIV/AIC functions (explicit split_aiv marker + non-None split mode) have no "
-             "vector reduce op that collapses the split axis (partial-reduction miscompile)");
+             "vector reduce op that collapses the split axis (partial-reduction miscompile)")
+      .value("IterArgCarryClassified", IRProperty::IterArgCarryClassified,
+             "Every ForStmt with iter_args in an Orchestration function carries an "
+             "attrs['iter_arg_rebind_<i>'] classification per slot (plus attrs['iter_arg_array_size_<i>'] "
+             "for TaskId array carries), so orchestration codegen reads the carry lowering");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");
@@ -535,6 +539,12 @@ void BindPass(nb::module_& m) {
              "wrapping the function body and each ForStmt / IfStmt branch body (suppressed\n"
              "inside a manual scope). Codegen then emits PTO2_SCOPE only from RuntimeScopeStmt\n"
              "nodes, 1:1 with the IR. Runs last in the pipeline, after the final Simplify.");
+  passes.def("classify_iter_arg_carry", &pass::ClassifyIterArgCarry,
+             "Classify ForStmt iter_arg carries and size TaskId array carries.\n\n"
+             "For every Orchestration function, stamps attrs['iter_arg_rebind_<i>'] (bool, every\n"
+             "slot) and attrs['iter_arg_array_size_<i>'] (int, positive extents only) onto each\n"
+             "ForStmt, so orchestration codegen reads the carry lowering instead of re-deriving\n"
+             "it from an alias fixpoint. Runs last, after materialize_runtime_scopes.");
   passes.def("normalize_stmt_structure", &pass::NormalizeStmtStructure,
              "Create a pass that normalizes statement structure");
   passes.def("derive_call_directions", &pass::DeriveCallDirections,

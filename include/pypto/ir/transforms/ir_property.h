@@ -85,6 +85,11 @@ enum class IRProperty : uint64_t {
                                     ///< 1 block/core-group). A partial/over launch deadlocks on device
                                     ///< (507018) — use mode="soft" for partial occupancy. Verified after
                                     ///< ExpandMixedKernel (kernel FunctionType resolved).
+  IterArgCarryClassified,           ///< Every ForStmt with iter_args in an Orchestration function carries an
+                                    ///< ``iter_arg_rebind_<i>`` attr per slot (plus
+                                    ///< ``iter_arg_array_size_<i>`` for TaskId array carries), so
+                                    ///< orchestration codegen reads the carry lowering instead of
+                                    ///< re-deriving it
   kCount                            ///< Sentinel (must be last)
 };
 

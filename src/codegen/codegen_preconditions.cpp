@@ -65,11 +65,11 @@ void VerifyOrchestrationCodegenPreconditions(const ProgramPtr& program, const Fu
   INTERNAL_CHECK(func != nullptr)
       << "Internal error: GenerateOrchestration preconditions — function must not be null";
 
-  // Codegen assumes hierarchy references resolved and explicit
-  // RuntimeScopeStmt materialization.
+  // Codegen assumes hierarchy references resolved, explicit RuntimeScopeStmt
+  // materialization, and a stamped iter_arg carry plan on every ForStmt.
   pass::VerifyProperties(
       IRPropertySet{IRProperty::SplitIncoreOrch, IRProperty::OrchestrationReferencesResolved,
-                    IRProperty::RuntimeScopesMaterialized},
+                    IRProperty::RuntimeScopesMaterialized, IRProperty::IterArgCarryClassified},
       program, "GenerateOrchestration preconditions");
 }
 

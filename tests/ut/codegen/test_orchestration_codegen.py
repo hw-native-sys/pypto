@@ -14,6 +14,7 @@ import re
 import pypto.language as pl
 import pytest
 from _orchestration_codegen_common import (
+    _finalize_for_codegen,
     _generate_orch_code,
     _generate_orch_result,
     _out_of_scope_tensor_refs,
@@ -928,7 +929,7 @@ class TestOrchestration:
                 return out
 
         which = "main_inside" if create_inside else "main_before"
-        program = passes.materialize_runtime_scopes()(
+        program = _finalize_for_codegen(
             passes.derive_call_directions()(
                 PassManager.get_strategy(OptimizationStrategy.Default).run_passes(CrossScopeProgram)
             )
@@ -1063,7 +1064,7 @@ class TestOrchestration:
                 return out
 
         which = "main_fresh" if fresh_carry else "main_inplace"
-        program = passes.materialize_runtime_scopes()(
+        program = _finalize_for_codegen(
             passes.derive_call_directions()(
                 PassManager.get_strategy(OptimizationStrategy.Default).run_passes(LoopCarryProgram)
             )
@@ -1236,7 +1237,7 @@ class TestOrchestration:
                 out = self.consume(score_flat, out)
                 return out
 
-        program = passes.materialize_runtime_scopes()(
+        program = _finalize_for_codegen(
             passes.derive_call_directions()(
                 PassManager.get_strategy(OptimizationStrategy.Default).run_passes(WindowedSubmitProgram)
             )
@@ -1321,7 +1322,7 @@ class TestOrchestration:
         code = next(
             codegen.generate_orchestration(program, f).code
             for program in [
-                passes.materialize_runtime_scopes()(
+                _finalize_for_codegen(
                     passes.derive_call_directions()(
                         PassManager.get_strategy(OptimizationStrategy.Default).run_passes(SnapshotProgram)
                     )
@@ -1386,7 +1387,7 @@ class TestOrchestration:
                 out = self.consumer(buf, out)
                 return out
 
-        program = passes.materialize_runtime_scopes()(
+        program = _finalize_for_codegen(
             passes.derive_call_directions()(
                 PassManager.get_strategy(OptimizationStrategy.Default).run_passes(IfPhiProgram)
             )

@@ -25,6 +25,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 
 namespace pypto {
@@ -35,7 +36,6 @@ namespace {
 
 using ::pypto::codegen::IsBuiltinOp;
 
-constexpr const char* kAttrCompilerAutoManualScopeCandidate = "__compiler_auto_manual_scope_candidate";
 constexpr const char* kAttrCompilerAutoManualLayerCandidate = "__compiler_auto_manual_layer_candidate";
 
 bool HasAttr(const std::vector<std::pair<std::string, std::any>>& attrs, const char* key) {

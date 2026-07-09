@@ -1055,8 +1055,9 @@ class TestManualScopeCodegen:
         Array-carry codegen needs a const trip count to allocate a fixed-size
         ``PTO2TaskId[N]`` fence array. With a dynamic trip count we cannot
         emit correct multi-deps lowering; silently falling back to a scalar
-        ``last-dispatched`` fence would be wrong. The codegen surfaces this
-        as a clear user-facing CHECK.
+        ``last-dispatched`` fence would be wrong. ``ClassifyIterArgCarry`` (the
+        pipeline's last pass, which sizes the array carry) surfaces this as a
+        clear user-facing CHECK — before codegen ever runs.
         """
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
@@ -1096,9 +1097,8 @@ class TestManualScopeCodegen:
                 return out
 
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
-        transformed = pm.run_passes(Prog)
         with pytest.raises(Exception, match="statically-known trip count"):
-            _generate_orch_code(transformed)
+            _generate_orch_code(pm.run_passes(Prog))
 
     def test_manual_scope_double_buffered_array_carry_above_legacy_16_cap(self):
         """A stable full-array dep with ``N > 16`` lowers through a dummy barrier.

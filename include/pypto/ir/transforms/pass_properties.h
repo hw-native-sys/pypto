@@ -60,6 +60,15 @@ inline const PassProperties kMaterializeRuntimeScopesProperties{
     .required = {IRProperty::SplitIncoreOrch, IRProperty::CallDirectionsResolved},
     .produced = {IRProperty::RuntimeScopesMaterialized}};
 
+// -- ClassifyIterArgCarry pass (runs last, after MaterializeRuntimeScopes) ----
+//    Classifies each Orchestration ForStmt iter_arg as a trivial alias or a
+//    materialised rebind carry and sizes manual-scope TaskId array carries,
+//    stamping the plan onto ForStmt::attrs_. Runs on the final IR shape so the
+//    stamped plan is exactly what the orchestration codegen lowers.
+inline const PassProperties kClassifyIterArgCarryProperties{
+    .required = {IRProperty::CallDirectionsResolved, IRProperty::RuntimeScopesMaterialized},
+    .produced = {IRProperty::IterArgCarryClassified, IRProperty::RuntimeScopesMaterialized}};
+
 // -- Loop unrolling pass (runs before SSA) ------------------------------------
 
 inline const PassProperties kUnrollLoopsProperties{.produced = {IRProperty::UnrollResolved}};

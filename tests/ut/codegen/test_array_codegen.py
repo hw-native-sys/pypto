@@ -145,6 +145,19 @@ class P:
 # ----------------------------------------------------------------------------
 
 
+def _classify_carries(program: ir.Program) -> tuple[ir.Program, ir.Function]:
+    """Stamp the iter_arg carry plan codegen reads (a codegen precondition).
+
+    Hand-built IR skips the pass pipeline, so ClassifyIterArgCarry has to be run
+    explicitly before ``generate_orchestration``.
+    """
+    program = passes.classify_iter_arg_carry()(program)
+    for func in program.functions.values():
+        if func.func_type == ir.FunctionType.Orchestration:
+            return program, func
+    raise AssertionError("no Orchestration function found in program")
+
+
 def _build_array_iter_arg_program(dtype: DataType, extent: int) -> tuple[ir.Program, ir.Function]:
     """Build an orchestration function with an ArrayType[dtype, extent] iter_arg.
 
@@ -177,9 +190,8 @@ def _build_array_iter_arg_program(dtype: DataType, extent: int) -> tuple[ir.Prog
             updated = ib.let("upd", ir_array.update_element(arr_iter, k, value))
             ib.emit(ir.YieldStmt([updated], ir.Span.unknown()))
         ib.return_stmt(x)
-    orch_func = orch_f.get_result()
-    program = ir.Program([orch_func], "test_array_iter_arg", ir.Span.unknown())
-    return program, orch_func
+    program = ir.Program([orch_f.get_result()], "test_array_iter_arg", ir.Span.unknown())
+    return _classify_carries(program)
 
 
 def test_for_stmt_with_int_array_iter_arg_codegen():
@@ -363,9 +375,8 @@ def _build_nested_array_iter_arg_program(
             inner_rv = inner_for.return_vars[0]
             ib.emit(ir.YieldStmt([inner_rv], ir.Span.unknown()))
         ib.return_stmt(x)
-    orch_func = orch_f.get_result()
-    program = ir.Program([orch_func], "test_nested_array_iter_arg", ir.Span.unknown())
-    return program, orch_func
+    program = ir.Program([orch_f.get_result()], "test_nested_array_iter_arg", ir.Span.unknown())
+    return _classify_carries(program)
 
 
 def test_nested_seq_parallel_task_id_array_carry_codegen():

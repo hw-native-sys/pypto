@@ -6,6 +6,8 @@
 
 例如，返回值到参数的追踪（将被调用者返回值映射回 `Out` 参数）是分析工作，应由代码生成之前的 Pass 解决。[`NormalizeReturnOrder`](../passes/23-normalize_return_order.md) pass 现在会在代码生成之前完成此规范化，使编排代码生成可以直接将 `return[i]` 映射到 `out_indices[i]`，无需追踪 `tile.store`/yield 链。
 
+同样，判断一个 `ForStmt` iter_arg 是否需要物化 carry 变量，过去要在循环体上跑别名等价不动点。[`ClassifyIterArgCarry`](../passes/42-classify_iter_arg_carry.md) pass 现在把该判定（以及 TaskId fence 数组的 extent）打在 `ForStmt::attrs_` 上，codegen 直接读 `iter_arg_rebind_<i>` / `iter_arg_array_size_<i>`，不再自行推导。
+
 ## 概述
 
 编排代码生成器（Orchestration Codegen）生成 PTO2 运行时 C++ 代码，用于管理昇腾硬件上的任务图执行。[PTO 代码生成](00-pto_codegen.md)产生 InCore 核函数代码（Tile 级计算），而编排代码生成器产生主机侧代码，负责：

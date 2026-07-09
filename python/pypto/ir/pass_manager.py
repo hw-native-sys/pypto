@@ -203,6 +203,12 @@ class PassManager:
             # 1:1 from the IR. Runs dead last, after the final Simplify, so no
             # other transform has to reason about the inserted scope wrappers.
             ("MaterializeRuntimeScopes", lambda: passes.materialize_runtime_scopes()),
+            # Classify each Orchestration ForStmt iter_arg as a trivial alias or a
+            # materialised rebind carry (and size manual-scope TaskId array
+            # carries), stamping the plan onto ForStmt.attrs. Runs after
+            # MaterializeRuntimeScopes so the classified IR is exactly the IR
+            # orchestration codegen lowers.
+            ("ClassifyIterArgCarry", lambda: passes.classify_iter_arg_carry()),
         ]
         cls._strategy_passes = {
             OptimizationStrategy.Default: tensor_prefix_passes + tensor_only_passes + tile_pto_passes,

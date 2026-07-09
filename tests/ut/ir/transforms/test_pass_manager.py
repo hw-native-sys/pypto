@@ -64,6 +64,7 @@ TENSOR_OPTIMIZATION_PASSES = [
     "MaterializeDistTensorCtx",
     "Simplify",
     "MaterializeRuntimeScopes",
+    "ClassifyIterArgCarry",
 ]
 
 DEBUG_TILE_OPTIMIZATION_PASSES = [
@@ -105,6 +106,7 @@ DEBUG_TILE_OPTIMIZATION_PASSES = [
     "MaterializeDistTensorCtx",
     "Simplify",
     "MaterializeRuntimeScopes",
+    "ClassifyIterArgCarry",
 ]
 
 

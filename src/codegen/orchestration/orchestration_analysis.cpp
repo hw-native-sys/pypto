@@ -60,13 +60,6 @@ bool IsTensorOp(const std::string& op_name) { return op_name.find("tensor.") == 
 
 bool IsArrayOp(const std::string& op_name) { return op_name.find("array.") == 0; }
 
-// See orchestration_analysis.h for the contract.
-CallPtr AsCallOrSubmitView(const ExprPtr& expr) {
-  if (auto call = As<Call>(expr)) return call;
-  if (auto submit = As<Submit>(expr)) return SubmitToCallView(submit);
-  return nullptr;
-}
-
 std::string FormatConstIntValue(const ConstIntPtr& c, const std::string& cpp_type) {
   int64_t v = c->value_;
   if (cpp_type != "int64_t") {
@@ -89,20 +82,6 @@ int GetOrCreateFuncId(const std::string& func_name, std::map<std::string, int>* 
     (*func_name_to_id)[func_name] = (*next_func_id)++;
   }
   return (*func_name_to_id)[func_name];
-}
-
-std::optional<int64_t> EvalConstInt(const ExprPtr& expr) {
-  if (auto ci = As<ConstInt>(expr)) return ci->value_;
-  return std::nullopt;
-}
-
-int64_t EvalConstTripCount(const ForStmtPtr& for_stmt) {
-  auto start = EvalConstInt(for_stmt->start_);
-  auto stop = EvalConstInt(for_stmt->stop_);
-  auto step = EvalConstInt(for_stmt->step_);
-  if (!start || !stop || !step || *step <= 0) return 0;
-  int64_t trip = (*stop - *start + *step - 1) / *step;
-  return trip > 0 ? trip : 0;
 }
 
 namespace {
@@ -529,49 +508,6 @@ std::vector<ParamDirection> ComputeGroupEffectiveDirections(const FunctionPtr& g
   };
 
   return compute_effective(group_func);
-}
-
-// ---------------------------------------------------------------------------
-// CollectBodyAliases
-// ---------------------------------------------------------------------------
-
-BodyAliases CollectBodyAliases(const StmtPtr& body) {
-  class AliasingNodeCollector : public IRVisitor {
-   public:
-    BodyAliases result;
-    void VisitStmt_(const AssignStmtPtr& a) override {
-      result.assigns.push_back(a);
-      IRVisitor::VisitStmt_(a);
-    }
-    void VisitStmt_(const ForStmtPtr& f) override {
-      result.nested_fors.push_back(f);
-      IRVisitor::VisitStmt_(f);
-    }
-  };
-  AliasingNodeCollector collector;
-  collector.VisitStmt(body);
-  return collector.result;
-}
-
-// ---------------------------------------------------------------------------
-// UnwrapAutoScope
-// ---------------------------------------------------------------------------
-
-namespace {
-
-constexpr const char* kAttrCompilerAutoManualScopeCandidate = "__compiler_auto_manual_scope_candidate";
-
-}  // namespace
-
-StmtPtr UnwrapAutoScope(const StmtPtr& stmt) {
-  if (auto scope = As<RuntimeScopeStmt>(stmt);
-      scope && (!scope->manual_ || scope->GetAttr<bool>(kAttrCompilerAutoManualScopeCandidate, false))) {
-    return UnwrapAutoScope(scope->body_);
-  }
-  if (auto seq = As<SeqStmts>(stmt); seq && seq->stmts_.size() == 1) {
-    return UnwrapAutoScope(seq->stmts_[0]);
-  }
-  return stmt;
 }
 
 }  // namespace codegen

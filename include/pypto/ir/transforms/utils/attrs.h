@@ -157,6 +157,41 @@ inline std::vector<std::pair<std::string, std::any>> StripAttr(
   return out;
 }
 
+/// ``bool`` attr on a MANUAL ``RuntimeScopeStmt`` marking it as a scope that the
+/// compiler synthesised (``AutoDeriveTaskDependencies`` / ``MaterializeRuntimeScopes``)
+/// rather than one the user wrote with ``pl.manual_scope()``. Structural analyses
+/// peek through such a scope as if it were AUTO (see ``transform_utils::UnwrapAutoScope``).
+inline constexpr const char* kAttrCompilerAutoManualScopeCandidate = "__compiler_auto_manual_scope_candidate";
+
+// ---------------------------------------------------------------------------
+// ForStmt iter_arg carry classification (produced by ``ClassifyIterArgCarry``)
+// ---------------------------------------------------------------------------
+//
+// ``ClassifyIterArgCarry`` stamps one ``bool`` attr per iter_arg naming its
+// lowering (trivial alias vs. materialised rebind carry), plus an optional
+// ``int`` attr sizing a TaskId array-carry. Keys are index-suffixed because
+// ``ForStmt::attrs_`` is a flat string→scalar map whose printer/parser codec
+// only round-trips scalar values.
+//
+//   attrs={"iter_arg_rebind_0": True, "iter_arg_array_size_0": 4}
+//
+// The rebind attr is stamped for **every** iter_arg (even when false) so its
+// presence proves the pass ran; the array-size attr is stamped only when
+// positive. See ``docs/en/dev/passes/42-classify_iter_arg_carry.md``.
+
+/// Prefix of the per-iter_arg ``bool`` "needs a materialised carry" attr.
+inline constexpr const char* kIterArgRebindAttrPrefix = "iter_arg_rebind_";
+/// Prefix of the per-iter_arg ``int`` TaskId array-carry extent attr.
+inline constexpr const char* kIterArgArraySizeAttrPrefix = "iter_arg_array_size_";
+
+inline std::string IterArgRebindAttrKey(size_t idx) {
+  return std::string(kIterArgRebindAttrPrefix) + std::to_string(idx);
+}
+
+inline std::string IterArgArraySizeAttrKey(size_t idx) {
+  return std::string(kIterArgArraySizeAttrPrefix) + std::to_string(idx);
+}
+
 }  // namespace ir
 }  // namespace pypto
 

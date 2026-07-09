@@ -154,6 +154,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/fold_no_op_reshape_pass.cpp
     src/ir/transforms/stamp_tfree_split_pass.cpp
     src/ir/transforms/materialize_runtime_scopes_pass.cpp
+    src/ir/transforms/classify_iter_arg_carry_pass.cpp
     src/ir/transforms/fuse_create_assemble_to_slice_pass.cpp
     src/ir/transforms/memory_reuse_pass.cpp
     src/ir/transforms/normalize_return_order_pass.cpp
@@ -244,6 +245,7 @@ set(PYPTO_SOURCES
     src/ir/verifier/verify_manual_deps_on_submit_only.cpp
     src/ir/verifier/verify_pipeline_resolved.cpp
     src/ir/verifier/verify_unroll_resolved.cpp
+    src/ir/verifier/verify_iter_arg_carry_classified.cpp
     src/ir/verifier/verify_call_directions.cpp
     src/ir/verifier/verify_tile_type_coherence.cpp
     src/ir/verifier/verify_assign_type_symmetry.cpp
@@ -264,7 +266,6 @@ set(PYPTO_SOURCES
     src/codegen/codegen_preconditions.cpp
     src/codegen/codegen_base.cpp
     src/codegen/orchestration/orchestration_analysis.cpp
-    src/codegen/orchestration/iter_arg_carry_analyzer.cpp
     src/codegen/orchestration/orchestration_codegen.cpp
     src/codegen/orchestration_op_registry.cpp
     src/codegen/pto/pto_codegen.cpp

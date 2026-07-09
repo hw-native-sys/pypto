@@ -54,6 +54,7 @@ class IRProperty(Enum):
     ManualDepsOnSubmitOnly = ...
     ReturnParamsExplicit = ...
     AivSplitValid = ...
+    IterArgCarryClassified = ...
 
 class IRPropertySet:
     """A set of IR properties backed by a bitset."""
@@ -656,6 +657,23 @@ def materialize_runtime_scopes() -> Pass:
     Runs last in the pipeline (after the final :func:`simplify`) so no other
     transform has to reason about the inserted scopes. Only Orchestration
     functions are touched.
+    """
+
+def classify_iter_arg_carry() -> Pass:
+    """Classify ForStmt iter_arg carries and size TaskId array carries.
+
+    For every ``FunctionType.Orchestration`` function, classifies each ``ForStmt``
+    iter_arg as a **trivial** alias of its init value or a **rebind** needing a
+    materialised mutable carry, and sizes ``Scalar[TASK_ID]`` array carries inside
+    a ``pl.manual_scope`` from the constant trip count.
+
+    The plan is stamped onto ``ForStmt.attrs``: ``iter_arg_rebind_<i>`` (bool, one
+    per slot) and ``iter_arg_array_size_<i>`` (int, positive extents only).
+    Orchestration codegen reads these attrs instead of re-deriving the
+    classification from an alias-equivalence fixpoint over the loop body.
+
+    Runs last, after :func:`materialize_runtime_scopes`, so the classified IR is
+    exactly the IR codegen lowers.
     """
 
 class NestedCallErrorType(Enum):

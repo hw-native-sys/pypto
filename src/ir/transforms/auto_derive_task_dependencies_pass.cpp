@@ -41,6 +41,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/type.h"
 
@@ -61,7 +62,6 @@ constexpr size_t kMinWindowedTaskIdTempDeps = 1;
 constexpr size_t kInvalidArgIndex = std::numeric_limits<size_t>::max();
 constexpr const char* kAttrAutoNoDepCandidateIndices = "__auto_no_dep_candidate_indices";
 constexpr const char* kAttrAutoOutputExistingCandidateIndices = "__auto_output_existing_candidate_indices";
-constexpr const char* kAttrCompilerAutoManualScopeCandidate = "__compiler_auto_manual_scope_candidate";
 constexpr const char* kAttrCompilerAutoManualLayerCandidate = "__compiler_auto_manual_layer_candidate";
 
 struct AccessRegion {

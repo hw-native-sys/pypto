@@ -49,6 +49,7 @@ class TestSpmdScopeTaskIdCodegen:
         program = passes.derive_call_directions()(program)
         program = passes.materialize_dist_tensor_ctx()(program)
         program = passes.materialize_runtime_scopes()(program)
+        program = passes.classify_iter_arg_carry()(program)
         for func in program.functions.values():
             if func.func_type == ir.FunctionType.Orchestration:
                 return codegen.generate_orchestration(program, func).code

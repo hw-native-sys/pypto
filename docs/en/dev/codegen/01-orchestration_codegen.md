@@ -6,6 +6,8 @@ Orchestration codegen follows the same principle as [PTO codegen](00-pto_codegen
 
 For example, return-to-parameter tracing (mapping callee return values back to `Out` parameters) is analysis that should be resolved by a pass before codegen sees the IR. The [`NormalizeReturnOrder`](../passes/23-normalize_return_order.md) pass now canonicalizes this before codegen, so orchestration codegen maps `return[i]` directly to `out_indices[i]` without tracing through `tile.store`/yield chains.
 
+Likewise, deciding whether a `ForStmt` iter_arg needs a materialised carry variable used to require an alias-equivalence fixpoint over the loop body. The [`ClassifyIterArgCarry`](../passes/42-classify_iter_arg_carry.md) pass now stamps that decision (and the TaskId fence-array extent) onto `ForStmt::attrs_`, so codegen reads `iter_arg_rebind_<i>` / `iter_arg_array_size_<i>` instead of deriving them.
+
 ## Overview
 
 The orchestration codegen generates PTO2 runtime C++ code that manages task-graph execution on Ascend hardware. While [PTO codegen](00-pto_codegen.md) produces InCore kernel code (tile-level compute), orchestration codegen produces the host-side code that:
