@@ -18,10 +18,9 @@ from _orchestration_codegen_common import (
     _generate_orch_code,
     _run_default_pipeline_with_auto_scope_deps,
 )
+from pypto import backend, passes
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
-
-from pypto import backend, passes
 
 
 class TestManualScopeCodegen:
