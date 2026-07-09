@@ -1512,6 +1512,58 @@ class TestAutoTileMatmulL0MNTiling:
                 f"dbC=1 (PyPTO) must interleave matmul,store (one accumulator), got: {pypto_seq}"
             )
 
+    def test_dbc2_pypto_flag_allocates_ping_pong(self):
+        """The experimental ``enable_pypto_l0c_double_buffer`` opt-in makes the PyPTO
+        memory planner allocate the dbC=2 ping-pong: the pipeline-membership tagger gives
+        the accumulator a flat depth-2 membership, so MemoryReuse's capacity gate keeps
+        the two co-live L0C accumulators in distinct buffers. Default off: the same shape
+        coalesces to a single accumulator. Pins the opt-in gate + the end-to-end
+        allocation (the golden test above only pins the emit ordering)."""
+        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[256, 64], pl.BF16],
+                rhs: pl.Tensor[[64, 256], pl.BF16],
+                out: pl.Out[pl.Tensor[[256, 256], pl.FP32]],
+            ) -> pl.Tensor[[256, 256], pl.FP32]:
+                lhs_mat: pl.Tile[[256, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [256, 64], target_memory=pl.Mem.Mat
+                )
+                rhs_mat: pl.Tile[[64, 256], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [64, 256], target_memory=pl.Mem.Mat
+                )
+                c: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lhs_mat, rhs_mat)
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        def acc_buffer_count() -> int:
+            """Distinct L0C (Acc) buffers after the full Default pipeline."""
+            prog = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+            bases = {
+                line.strip().split(":")[0]
+                for line in ir.python_print(prog).splitlines()
+                if "tile.alloc(pl.Mem.Acc" in line
+            }
+            return len(bases)
+
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO):
+            assert acc_buffer_count() == 1, "PyPTO default must keep a single L0C accumulator (dbC=1)"
+
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+        with passes.PassContext(
+            [], memory_planner=passes.MemoryPlanner.PYPTO, enable_pypto_l0c_double_buffer=True
+        ):
+            assert acc_buffer_count() == 2, (
+                "PyPTO + opt-in flag must allocate the dbC=2 ping-pong (two co-live L0C accumulators)"
+            )
+
     @pytest.mark.parametrize(
         ("M", "N"),
         [

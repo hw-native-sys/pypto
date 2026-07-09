@@ -262,12 +262,18 @@ class PassContext {
    * @param memory_planner Who plans on-chip buffer memory (default: PyPTO).
    *        PtoAS makes the pipeline skip the pypto allocation passes so the
    *        ptoas PlanMemory pass owns allocation instead.
+   * @param enable_pypto_l0c_double_buffer Opt in to L0C double-buffering (dbC=2)
+   *        under the PyPTO memory planner (default: false; experimental, pending
+   *        device validation). No effect under PtoAS, which already emits dbC=2
+   *        unconditionally. When true, AutoTileMatmulL0 emits two co-live L0C
+   *        accumulators and MemoryReuse's capacity gate allocates the ping-pong.
    */
   explicit PassContext(std::vector<PassInstrumentPtr> instruments,
                        VerificationLevel verification_level = VerificationLevel::Basic,
                        DiagnosticPhase diagnostic_phase = DiagnosticPhase::PrePipeline,
                        DiagnosticCheckSet disabled_diagnostics = {DiagnosticCheck::UnusedControlFlowResult},
-                       MemoryPlanner memory_planner = MemoryPlanner::PyPTO);
+                       MemoryPlanner memory_planner = MemoryPlanner::PyPTO,
+                       bool enable_pypto_l0c_double_buffer = false);
 
   /**
    * @brief Push this context onto the thread-local stack
@@ -326,6 +332,12 @@ class PassContext {
   [[nodiscard]] MemoryPlanner GetMemoryPlanner() const;
 
   /**
+   * @brief Whether L0C double-buffering (dbC=2) is enabled under the PyPTO memory
+   *        planner. Off by default (experimental). No effect under PtoAS.
+   */
+  [[nodiscard]] bool GetEnablePyptoL0cDoubleBuffer() const;
+
+  /**
    * @brief Get the currently active context (top of thread-local stack)
    * @return Pointer to current context, or nullptr if none
    */
@@ -350,6 +362,7 @@ class PassContext {
   DiagnosticPhase diagnostic_phase_;
   DiagnosticCheckSet disabled_diagnostics_;
   MemoryPlanner memory_planner_;
+  bool enable_pypto_l0c_double_buffer_;
   PassContext* previous_;
 
   static thread_local PassContext* current_;

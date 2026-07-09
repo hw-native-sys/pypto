@@ -64,6 +64,7 @@ def compile(  # noqa: PLR0913
     diagnostic_phase: _passes.DiagnosticPhase | None = None,
     disabled_diagnostics: _passes.DiagnosticCheckSet | None = None,
     memory_planner: _passes.MemoryPlanner | None = None,
+    enable_pypto_l0c_double_buffer: bool | None = None,
     profiling: bool = False,
     platform: str | None = None,
     distributed_config: Any = None,
@@ -202,6 +203,11 @@ def compile(  # noqa: PLR0913
             disabled_diagnostics if disabled_diagnostics is not None else outer.get_disabled_diagnostics()
         )
         mplan = memory_planner if memory_planner is not None else outer.get_memory_planner()
+        dbc_flag = (
+            enable_pypto_l0c_double_buffer
+            if enable_pypto_l0c_double_buffer is not None
+            else outer.get_enable_pypto_l0c_double_buffer()
+        )
     else:
         vlevel = (
             verification_level if verification_level is not None else _passes.get_default_verification_level()
@@ -209,7 +215,8 @@ def compile(  # noqa: PLR0913
         dphase = diagnostic_phase if diagnostic_phase is not None else _passes.get_default_diagnostic_phase()
         disabled = disabled_diagnostics if disabled_diagnostics is not None else default_disabled
         mplan = memory_planner if memory_planner is not None else _passes.MemoryPlanner.PYPTO
-    ctx = _passes.PassContext(instruments, vlevel, dphase, disabled, mplan)
+        dbc_flag = enable_pypto_l0c_double_buffer if enable_pypto_l0c_double_buffer is not None else False
+    ctx = _passes.PassContext(instruments, vlevel, dphase, disabled, mplan, dbc_flag)
 
     if mplan == _passes.MemoryPlanner.PTOAS:
         logger.warning(

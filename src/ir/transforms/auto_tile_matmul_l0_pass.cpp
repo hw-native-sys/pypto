@@ -650,11 +650,18 @@ std::optional<MatmulTiling> AnalyzeMatmul(const AssignStmtPtr& assign, std::vect
   // MemoryReuse, whose opportunistic reuse over-coalesces the two overlapping-live-
   // range accumulators back into one buffer.  With MemoryReuse skipped, InitMemRef
   // keeps the two buffers distinct and ptoas assigns their physical offsets (any
-  // correct allocator must separate overlapping live ranges).  Under the default
-  // PyPTO planner dbC=2 stays OFF — MemoryReuse would coalesce the pair, so enabling
-  // it there only shrinks the tile (L0C/2) with no second buffer, a regression.  The
-  // co-live emit is gated on the chooser's `double_buffer_c` result below, which
-  // tags the moving loop with kPipelineDoubleBufferCAttr.
+  // correct allocator must separate overlapping live ranges).
+  //
+  // Under the PyPTO planner dbC=2 is an experimental opt-in (PassContext flag,
+  // default OFF). It now works there because the pipeline-membership tagger gives
+  // the dbC accumulator a *flat depth-2* membership — only the moving (dbC) loop
+  // tags it; enclosing loops skip it since the cube serializes MADs — so
+  // MemoryReuse's capacity gate (#1475) allocates exactly the two co-live L0C
+  // buffers instead of over-coalescing the pair (its former behaviour, which
+  // shrank the tile to L0C/2 with no second buffer). Kept default-off pending
+  // device validation of the numerics + drain-hidden win. The co-live emit is
+  // gated on the chooser's `double_buffer_c` result below, which tags the moving
+  // loop with kPipelineDoubleBufferCAttr.
   //
   // KNOWN-FRAGILE (experimental): this reads the memory planner from the *mutable*
   // mid-pipeline PassContext, so dbC=2 behaviour depends on run-time context state
@@ -662,10 +669,11 @@ std::optional<MatmulTiling> AnalyzeMatmul(const AssignStmtPtr& assign, std::vect
   // it (fixed by propagating memory_planner + PassManager's fail-loud planner check),
   // but the underlying smell remains. The durable design is a first-class co-live /
   // no-coalesce Acc-buffer-pair IR property set once at emit and honoured by BOTH
-  // planners (also the natural carrier for the PyPTO-planner path via #1949). Tracked
-  // as a follow-up; acceptable only for this ptoas-path-only / experimental feature.
+  // planners. Tracked as a follow-up.
   const bool ptoas_planner = ctx && ctx->GetMemoryPlanner() == MemoryPlanner::PtoAS;
-  cfg.allow_double_buffer_c = ptoas_planner;
+  const bool pypto_dbc =
+      ctx && ctx->GetMemoryPlanner() == MemoryPlanner::PyPTO && ctx->GetEnablePyptoL0cDoubleBuffer();
+  cfg.allow_double_buffer_c = ptoas_planner || pypto_dbc;
   // tile.matmul_acc threads the caller's accumulator into the K-loop's
   // iter-arg, so each invocation reads C from L1 at start and writes back at
   // end (gamma_c = 2 in the chooser's traffic model).  Plain tile.matmul

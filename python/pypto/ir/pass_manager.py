@@ -443,11 +443,13 @@ class PassManager:
         # so callers' diagnostic intent isn't reset.
         outer_instruments = list(ctx.get_instruments()) if ctx else []
         level = ctx.get_verification_level() if ctx else passes.get_default_verification_level()
-        # Propagate the outer memory planner: a nested PassContext otherwise resets it
-        # to the PYPTO binding default, which silently disables PTOAS-gated pass
-        # behaviour (e.g. AutoTileMatmulL0's dbC=2 tile selection reads
-        # GetMemoryPlanner() *during* pass execution) whenever the pipeline dumps IR.
+        # Propagate the outer memory planner AND the PyPTO dbC=2 opt-in: a nested
+        # PassContext otherwise resets them to the binding defaults, which silently
+        # disables planner-gated pass behaviour (AutoTileMatmulL0's dbC=2 tile
+        # selection reads GetMemoryPlanner() + GetEnablePyptoL0cDoubleBuffer()
+        # *during* pass execution) whenever the pipeline dumps IR.
         mplan = ctx.get_memory_planner() if ctx else passes.MemoryPlanner.PYPTO
+        dbc_flag = ctx.get_enable_pypto_l0c_double_buffer() if ctx else False
         outer_phase = ctx.get_diagnostic_phase() if ctx else passes.get_default_diagnostic_phase()
         if outer_phase == passes.DiagnosticPhase.POST_PASS:
             inner_phase = passes.DiagnosticPhase.PRE_PIPELINE
@@ -455,7 +457,7 @@ class PassManager:
             inner_phase = outer_phase
 
         with passes.PassContext(
-            [*outer_instruments, *extra_instruments], level, inner_phase, disabled, mplan
+            [*outer_instruments, *extra_instruments], level, inner_phase, disabled, mplan, dbc_flag
         ):
             try:
                 return self._pipeline.run(input_ir)
@@ -486,9 +488,10 @@ class PassManager:
         ctx = passes.PassContext.current()
         outer_instruments = list(ctx.get_instruments()) if ctx else []
         level = ctx.get_verification_level() if ctx else passes.get_default_verification_level()
-        # Propagate the outer memory planner (see run_passes) so profiling doesn't
-        # silently reset it to PYPTO and disable PTOAS-gated pass behaviour.
+        # Propagate the outer memory planner + PyPTO dbC=2 opt-in (see run_passes)
+        # so profiling doesn't silently reset them and disable planner-gated behaviour.
         mplan = ctx.get_memory_planner() if ctx else passes.MemoryPlanner.PYPTO
+        dbc_flag = ctx.get_enable_pypto_l0c_double_buffer() if ctx else False
         dphase = ctx.get_diagnostic_phase() if ctx else passes.get_default_diagnostic_phase()
         if ctx:
             disabled = ctx.get_disabled_diagnostics()
@@ -496,7 +499,9 @@ class PassManager:
             disabled = passes.DiagnosticCheckSet()
             disabled.insert(passes.DiagnosticCheck.UnusedControlFlowResult)
 
-        with passes.PassContext([*outer_instruments, timing_instrument], level, dphase, disabled, mplan):
+        with passes.PassContext(
+            [*outer_instruments, timing_instrument], level, dphase, disabled, mplan, dbc_flag
+        ):
             try:
                 return self._pipeline.run(input_ir)
             finally:

@@ -281,13 +281,15 @@ void BindPass(nb::module_& m) {
                           "verification and the diagnostic channel (warnings + performance\n"
                           "hints) for PassPipeline.")
       .def(nb::init<std::vector<PassInstrumentPtr>, VerificationLevel, DiagnosticPhase, DiagnosticCheckSet,
-                    MemoryPlanner>(),
+                    MemoryPlanner, bool>(),
            nb::arg("instruments"), nb::arg("verification_level") = VerificationLevel::Basic,
            nb::arg("diagnostic_phase") = DiagnosticPhase::PrePipeline,
            nb::arg("disabled_diagnostics") = DiagnosticCheckSet{DiagnosticCheck::UnusedControlFlowResult},
            nb::arg("memory_planner") = MemoryPlanner::PyPTO,
+           nb::arg("enable_pypto_l0c_double_buffer") = false,
            "Create a PassContext with instruments, verification level, diagnostic phase gate, "
-           "optional disabled diagnostic checks, and memory planner selection")
+           "optional disabled diagnostic checks, memory planner selection, and the experimental "
+           "PyPTO-planner L0C double-buffer (dbC=2) opt-in")
       .def("__enter__",
            [](PassContext& self) -> PassContext& {
              self.EnterContext();
@@ -303,6 +305,8 @@ void BindPass(nb::module_& m) {
       .def("get_instruments", &PassContext::GetInstruments, "Get the instruments registered on this context")
       .def("get_memory_planner", &PassContext::GetMemoryPlanner,
            "Get the memory planner selection for this context")
+      .def("get_enable_pypto_l0c_double_buffer", &PassContext::GetEnablePyptoL0cDoubleBuffer,
+           "Whether L0C double-buffering (dbC=2) is enabled under the PyPTO memory planner")
       .def_static("current", &PassContext::Current, nb::rv_policy::reference,
                   "Get the currently active context, or None if no context is active");
 

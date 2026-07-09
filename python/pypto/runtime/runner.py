@@ -407,6 +407,7 @@ def compile_program(
     profiling: bool = False,
     analyze_auto_scopes_for_deps: bool = False,
     memory_planner: MemoryPlanner | None = None,
+    enable_pypto_l0c_double_buffer: bool | None = None,
 ) -> None:
     """Compile *program* to *work_dir* and patch orchestration headers.
 
@@ -438,6 +439,7 @@ def compile_program(
         profiling=profiling,
         analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
         memory_planner=memory_planner,
+        enable_pypto_l0c_double_buffer=enable_pypto_l0c_double_buffer,
     )
     _patch_orchestration_headers(work_dir)
 

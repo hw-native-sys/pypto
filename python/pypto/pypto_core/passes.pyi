@@ -272,8 +272,14 @@ class PassContext:
         diagnostic_phase: DiagnosticPhase = DiagnosticPhase.PRE_PIPELINE,
         disabled_diagnostics: DiagnosticCheckSet = ...,  # default: {UnusedControlFlowResult}
         memory_planner: MemoryPlanner = MemoryPlanner.PYPTO,
+        enable_pypto_l0c_double_buffer: bool = False,
     ) -> None:
-        """Create a PassContext with instruments and pass configuration (incl. memory planner)."""
+        """Create a PassContext with instruments and pass configuration (incl. memory planner).
+
+        ``enable_pypto_l0c_double_buffer`` opts in to L0C double-buffering (dbC=2)
+        under the PyPTO memory planner (experimental, default off; no effect under
+        PtoAS, which already emits dbC=2).
+        """
         ...
 
     def __enter__(self) -> PassContext: ...
@@ -297,6 +303,10 @@ class PassContext:
 
     def get_memory_planner(self) -> MemoryPlanner:
         """Get the memory planner selection for this context."""
+        ...
+
+    def get_enable_pypto_l0c_double_buffer(self) -> bool:
+        """Whether L0C double-buffering (dbC=2) is enabled under the PyPTO memory planner."""
         ...
 
     def get_instruments(self) -> list[PassInstrument]:
