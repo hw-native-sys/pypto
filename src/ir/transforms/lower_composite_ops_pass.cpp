@@ -1014,10 +1014,9 @@ ExprPtr LowerTensorBroadcastRule(const CallPtr& call, const std::vector<ExprPtr>
 //   arg[2] = signal      — DistributedTensor INT32, cross-rank barrier
 //
 // Phases:
-//   0.  tile.load(local_data, [0,0], [1,SIZE])   — when local_data is a
-//       Tensor (emit a Tile from the plain input); skipped when Tile
+//   0.  tile.create [1, SIZE] VEC — staging tile for auto-chunking
 //   1.  for peer in 0..NR-1:
-//         pld.tile.put(target, peer, stage_tile, put_stage,
+//         pld.tile.put(target, peer, local_data, put_stage,
 //                      [my_rank, 0], [0, 0], [1, SIZE])
 //       — push this rank's chunk into every peer's window at row my_rank.
 //       Self-store (peer == my_rank) uses HCCL identity mapping (same
@@ -1041,12 +1040,9 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
   const auto& target = args[1];
   const auto& signal = args[2];
 
-  // local_data may be a Tile (pre-loaded by user) or a Tensor (intrinsic
-  // handles the load internally).  Record which so we can emit tile.load
-  // after the shared setup expressions are available.
-  bool is_tensor_input = (As<TensorType>(local_data->GetType()) != nullptr);
-  INTERNAL_CHECK_SPAN(As<TileType>(local_data->GetType()) || is_tensor_input, span)
-      << "pld.tensor.allgather local_data must be TileType or TensorType, got "
+  // local_data must be TensorType at this point (ConvertTensorToTileOps runs later).
+  INTERNAL_CHECK_SPAN(As<TensorType>(local_data->GetType()), span)
+      << "pld.tensor.allgather local_data must be TensorType, got "
       << local_data->GetType()->TypeName();
   auto target_type = As<DistributedTensorType>(target->GetType());
   INTERNAL_CHECK_SPAN(target_type, span)
@@ -1070,16 +1066,10 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
                                                        std::make_shared<ConstInt>(0, DataType::INDEX, span)},
                                   span);
 
-  // ---- Phase 0: load (Tensor → Tile, when local_data is a Tensor) ----
-  ExprPtr stage_tile;
-  if (is_tensor_input) {
-    stage_tile = b.Bind("local_tile",
-                        reg.Create("tile.load", {local_data, zero_row_offsets, chunk_shape, chunk_shape},
-                                   {{"target_memory", MemorySpace::Vec}}, span),
-                        span);
-  } else {
-    stage_tile = local_data;
-  }
+  // ---- Phase 0: tile.load removed — pld.tile.put handles tile load internally ----
+  // local_data is always a Tensor at this point in the pass pipeline
+  // (ConvertTensorToTileOps runs later).  pld.tile.put reads from the
+  // tensor source and auto-chunks into the stage tile.
 
   // ---- Phase 1: push — pld.tile.put this rank's chunk into every peer's window ----
   // Each peer receives this rank's chunk at target[my_rank, 0:SIZE].
@@ -1103,10 +1093,12 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
       "peer", zero_idx, comm.nranks_idx, one_idx,
       [&](LoweringBuilder& body, const VarPtr& peer) {
         // pld.tile.put(dst, peer, src, stage, dst_offsets, src_offsets, shape):
-        // push stage_tile contents to every peer's window at row my_rank.
+        // push local_data contents to every peer's window at row my_rank.
+        // src is the original Tensor local_data — pld.tile.put handles
+        // tile-load/chunking internally through the stage tile.
         body.Bind("push",
                   reg.Create("pld.tile.put",
-                             {target, peer, stage_tile, put_stage, my_rank_offsets, zero_row_offsets,
+                             {target, peer, local_data, put_stage, my_rank_offsets, zero_row_offsets,
                               chunk_shape},
                              {{"atomic", static_cast<int>(AtomicType::kNone)}}, span),
                   span);

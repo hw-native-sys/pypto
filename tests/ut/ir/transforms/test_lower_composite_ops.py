@@ -1183,7 +1183,6 @@ _ALLGATHER_REQUIRED_OPS = {
     "pld.system.wait",
     "pld.tile.put",
     "tile.create",
-    "tile.load",
 }
 
 

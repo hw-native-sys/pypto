@@ -568,35 +568,35 @@ def allgather(
 ) -> DistributedTensor:
     """Gather data from all ranks, either as an InCore composite or HOST builtin.
 
-        Unified 3-arg API for both paths.  The 2-arg form
-        ``allgather(data, signal)`` is a convenience wrapper for the HOST
-        builtin form and internally expands to 3-arg IR.
+    Unified 3-arg API for both paths.  The 2-arg form
+    ``allgather(data, signal)`` is a convenience wrapper for the HOST
+    builtin form and internally expands to 3-arg IR.
 
-        **InCore composite (3 args):** ``pld.tensor.allgather(local_data, target, signal)`` —
-        push-based: each rank pushes its chunk into every peer's window
-        slot at ``target[my_rank, :]`` via ``pld.tile.put``, then notify/wait
-        barrier; the window itself becomes the gathered ``[NR, SIZE]`` result
-        (window-as-result).  No separate output tensor — the window IS the result.
+    **InCore composite (3 args):** ``pld.tensor.allgather(local_data, target, signal)`` —
+    push-based: each rank pushes its chunk into every peer's window
+    slot at ``target[my_rank, :]`` via ``pld.tile.put``, then notify/wait
+    barrier; the window itself becomes the gathered ``[NR, SIZE]`` result
+    (window-as-result).  No separate output tensor — the window IS the result.
 
-        **HOST builtin (2 args):** ``pld.tensor.allgather(data, signal)`` —
-        each rank's chunk is already staged in ``data[my_rank, :]`` via a prior
-        publish step.  The host lowering emits ``builtin.tensor.barrier`` per chip
-        (the allgather AIV kernel requires concurrent cross-chip dispatch;
-        a barrier synchronises pre-staged window data).
+    **HOST builtin (2 args):** ``pld.tensor.allgather(data, signal)`` —
+    each rank's chunk is already staged in ``data[my_rank, :]`` via a prior
+    publish step.  The host lowering emits ``builtin.tensor.barrier`` per chip
+    (the allgather AIV kernel requires concurrent cross-chip dispatch;
+    a barrier synchronises pre-staged window data).
 
-        Args:
-            local_data: For InCore: :class:`pl.Tensor` [1, SIZE].  For HOST:
-                window-bound :class:`pld.DistributedTensor` [NR, SIZE] with
-                pre-staged chunks.
-            target: For InCore: :class:`pld.DistributedTensor` [NR, SIZE] staging
-                window — also the result (window-as-result).  For HOST:
-                :class:`pld.DistributedTensor` INT32 signal barrier.
-            signal: Window-bound INT32 :class:`pld.DistributedTensor` barrier tensor
-                (InCore only; None for HOST).
+    Args:
+        local_data: For InCore: :class:`pl.Tensor` [1, SIZE].  For HOST:
+            window-bound :class:`pld.DistributedTensor` [NR, SIZE] with
+            pre-staged chunks.
+        target: For InCore: :class:`pld.DistributedTensor` [NR, SIZE] staging
+            window — also the result (window-as-result).  For HOST:
+            :class:`pld.DistributedTensor` INT32 signal barrier.
+        signal: Window-bound INT32 :class:`pld.DistributedTensor` barrier tensor
+            (InCore only; None for HOST).
 
-        Returns:
-            :class:`pld.DistributedTensor` — the ``target`` window holding the
-            gathered ``[NR, SIZE]`` result.
+    Returns:
+        :class:`pld.DistributedTensor` — the ``target`` window holding the
+        gathered ``[NR, SIZE]`` result.
     """
     if isinstance(local_data, DistributedTensor) and signal is None:
         # 2-arg HOST builtin convenience: allgather(data, signal) — both positional
