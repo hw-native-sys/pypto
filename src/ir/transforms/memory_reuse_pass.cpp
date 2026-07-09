@@ -2860,6 +2860,15 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   // so there is nothing for memory reuse to do — skip them silently.
   if (func->func_type_ == FunctionType::Orchestration) return func;
 
+  // NOTE (#1980, deferred): skipping this pass's opportunistic merge under
+  // PYPTO_DSA_SOLVER=plan (to hand the solver un-merged buffers for the #1908
+  // sub-region fix) is NOT safe yet — it removes MemoryReuse's capacity-gated
+  // shed loop, which the DSA adapter's optimistic F_g separation cannot fully
+  // replicate, so tight L0B kernels (e.g. expert_routed's matmuls) overflow and
+  // the gate falls back to an already-overflowing un-merged bump. For now =plan
+  // runs the solver on this pass's MERGED groups (safe, gate-bounded), so the
+  // #1908 sub-region case is not yet fixed by =plan. See PHASE3_PLAN.md 3.3.
+
   // Step 0 (semantic must-alias retarget) now runs in the preceding
   // MaterializeSemanticAliases pass, so the body here is already retargeted.
   StmtPtr new_body = func->body_;
@@ -2988,18 +2997,63 @@ AllocationPlan ComputeAllocationPlan(const FunctionPtr& func) {
     if (mr.has_value() && mr.value()) base_to_index[mr.value()->base_.get()] = i;
   }
 
-  // (1) Pipeline double-buffer separations: allocations sharing a pipeline group
-  // with different stages are ping-pong clones and must occupy distinct buffers.
-  // O(n^2) over allocations (n small, per function); same-space only.
+  // (1) Pipeline double-buffer separations, capacity-gated (#1949 core). Within a
+  // pipeline group, keep clones in distinct residues mod F_g apart, where
+  // F_g = max(1, min(depth, floor(cap/slot))) is the max affordable
+  // double-buffering depth. F_g == depth is exact double-buffering; F_g < depth
+  // means capacity forces some clones to share (the solver then reuses the
+  // lifetime-disjoint same-residue clones). Unknown cap (no backend) => full
+  // depth (no cap to overflow). Same-space only; O(n^2), n small.
   const auto& pm = analysis.pipeline_membership;
-  for (size_t i = 0; i < intervals.size(); ++i) {
-    auto ii = pm.find(intervals[i].variable.get());
-    if (ii == pm.end()) continue;
-    for (size_t j = i + 1; j < intervals.size(); ++j) {
-      if (intervals[i].memory_space != intervals[j].memory_space) continue;
-      auto jj = pm.find(intervals[j].variable.get());
-      if (jj == pm.end()) continue;
-      if (PipelineMembershipsConflict(ii->second, jj->second)) plan.separations.emplace_back(i, j);
+  {
+    const backend::Backend* be = backend::BackendConfig::IsConfigured() ? backend::GetBackend() : nullptr;
+    using GroupKey = std::pair<MemorySpace, int32_t>;
+    std::map<GroupKey, uint64_t> group_slot;             // (space, group) -> max member size
+    std::map<GroupKey, std::set<int32_t>> group_stages;  // (space, group) -> distinct stages
+    for (const auto& iv : intervals) {
+      auto it = pm.find(iv.variable.get());
+      if (it == pm.end()) continue;
+      for (const auto& [g, st] : it->second) {
+        const GroupKey key{iv.memory_space, g};
+        group_slot[key] = std::max(group_slot[key], iv.size);
+        group_stages[key].insert(st);
+      }
+    }
+    std::map<GroupKey, int32_t> group_fg;                        // (space, group) -> F_g
+    std::map<GroupKey, std::map<int32_t, int32_t>> group_ord;    // stage -> dense ordinal
+    for (const auto& [key, stages] : group_stages) {
+      const int32_t depth = static_cast<int32_t>(stages.size());
+      const uint64_t cap = be != nullptr ? be->GetMemSize(key.first) : 0;
+      const uint64_t slot = group_slot[key];
+      int32_t fg = depth;  // unknown cap => no gating
+      if (cap != 0 && slot != 0) {
+        fg = static_cast<int32_t>(std::max<uint64_t>(1, std::min<uint64_t>(depth, cap / slot)));
+      }
+      group_fg[key] = fg;
+      int32_t ord = 0;
+      for (const int32_t st : stages) group_ord[key][st] = ord++;
+    }
+    auto residue = [&](MemorySpace space, int32_t g, int32_t st) {
+      const GroupKey key{space, g};
+      const int32_t fg = group_fg.at(key);
+      return ((group_ord.at(key).at(st) % fg) + fg) % fg;
+    };
+    for (size_t i = 0; i < intervals.size(); ++i) {
+      auto ii = pm.find(intervals[i].variable.get());
+      if (ii == pm.end()) continue;
+      const MemorySpace space = intervals[i].memory_space;
+      for (size_t j = i + 1; j < intervals.size(); ++j) {
+        if (intervals[j].memory_space != space) continue;
+        auto jj = pm.find(intervals[j].variable.get());
+        if (jj == pm.end()) continue;
+        bool sep = false;
+        for (const auto& [ga, sa] : ii->second) {
+          for (const auto& [gb, sb] : jj->second) {
+            if (ga == gb && residue(space, ga, sa) != residue(space, gb, sb)) sep = true;
+          }
+        }
+        if (sep) plan.separations.emplace_back(i, j);
+      }
     }
   }
 
