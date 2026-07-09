@@ -47,11 +47,32 @@ class IfPhiProgram:
         return pl.store(r, [0, 0], out)
 
 
-def _ptoas_pto() -> str:
+@pl.program
+class IfPhiPassThroughProgram:
+    """One branch yields a fresh producer; the other yields the outer tile `a`
+    unchanged (a pass-through). The pass-through branch has no producer writing
+    the phi buffer, so codegen must copy `a` into the phi handle (tmov)."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        x: pl.Tensor[[64, 64], pl.FP32],
+        flag: pl.Scalar[pl.INT32],
+        out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+    ) -> pl.Tensor[[64, 64], pl.FP32]:
+        a: pl.Tile[[64, 64], pl.FP32] = pl.load(x, [0, 0], [64, 64])
+        if flag == 0:
+            r: pl.Tile[[64, 64], pl.FP32] = pl.add(a, 1.0)
+        else:
+            r: pl.Tile[[64, 64], pl.FP32] = a
+        return pl.store(r, [0, 0], out)
+
+
+def _ptoas_pto(program) -> str:
     reset_for_testing()
     set_backend_type(BackendType.Ascend910B)
     with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
-        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(IfPhiProgram)
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
     func = next(f for f in optimized.functions.values() if f.name == "kernel")
     return codegen.PTOCodegen().generate(_ir.Program([func], "kernel", optimized.span), emit_tile_addr=False)
 
@@ -63,7 +84,7 @@ def _first_group(pattern: str, text: str) -> str:
 
 
 def test_if_phi_branches_write_one_head_declared_handle():
-    mlir = _ptoas_pto()
+    mlir = _ptoas_pto(IfPhiProgram)
     # The tile the store reads is the phi buffer.
     store = next(ln for ln in mlir.splitlines() if "pto.tstore" in ln)
     phi = _first_group(r"pto\.tstore ins\((%[A-Za-z0-9_]+)", store)
@@ -72,7 +93,8 @@ def test_if_phi_branches_write_one_head_declared_handle():
     decls = [ln for ln in mlir.splitlines() if f"{phi} = pto.alloc_tile" in ln]
     assert len(decls) == 1, f"phi handle {phi} must be declared exactly once:\n{mlir}"
 
-    # Both branch producers (tadds / tmuls) write that same phi handle.
+    # Both branch producers (tadds / tmuls) write that same phi handle directly —
+    # a branch-local producer is re-pointed, so no copy is needed.
     producer_outs = [
         _first_group(r"outs\((%[A-Za-z0-9_]+)", ln)
         for ln in mlir.splitlines()
@@ -81,6 +103,22 @@ def test_if_phi_branches_write_one_head_declared_handle():
     assert len(producer_outs) == 2, f"expected two branch producers, got {producer_outs}:\n{mlir}"
     for out in producer_outs:
         assert out == phi, f"branch producer writes {out}, not the phi handle {phi}:\n{mlir}"
+    assert "pto.tmov" not in mlir, f"branch-local phi must be copy-free (no tmov):\n{mlir}"
+
+
+def test_if_phi_pass_through_branch_copies_into_phi_handle():
+    mlir = _ptoas_pto(IfPhiPassThroughProgram)
+    store = next(ln for ln in mlir.splitlines() if "pto.tstore" in ln)
+    phi = _first_group(r"pto\.tstore ins\((%[A-Za-z0-9_]+)", store)
+
+    # The producing branch writes the phi handle directly.
+    prod = next(ln for ln in mlir.splitlines() if "pto.tadds" in ln)
+    assert _first_group(r"outs\((%[A-Za-z0-9_]+)", prod) == phi, f"producer must write phi {phi}:\n{mlir}"
+
+    # The pass-through branch (yields the outer tile unchanged) copies it into the
+    # phi handle via tmov, so the post-if store never reads an uninitialised buffer.
+    movs = [ln for ln in mlir.splitlines() if "pto.tmov" in ln and f"outs({phi}" in ln]
+    assert len(movs) == 1, f"pass-through branch must tmov into the phi handle {phi}:\n{mlir}"
 
 
 if __name__ == "__main__":

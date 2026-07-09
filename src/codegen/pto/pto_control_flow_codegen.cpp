@@ -116,8 +116,15 @@ std::string PTOCodegen::GetScalarIterArgTypeString(
 }
 
 namespace {
-// Find the YieldStmt terminating a branch body (last yield, possibly inside the
-// trailing SeqStmts). Used to recover each branch's per-slot yield source.
+// A ScopeStmt subtype (InCoreScopeStmt, SpmdScopeStmt, ...) has its own
+// ObjectKind, so As<ScopeStmt> misses it; match the whole family by base type.
+std::shared_ptr<const ir::ScopeStmt> AsScope(const StmtPtr& s) {
+  return std::dynamic_pointer_cast<const ir::ScopeStmt>(s);
+}
+
+// Find the YieldStmt terminating a branch body (last yield, recursing through the
+// trailing SeqStmts and any scope wrappers). Used to recover the per-slot yield
+// source so a branch-local producer can be re-pointed at the phi handle.
 YieldStmtPtr FindBranchYield(const StmtPtr& body) {
   if (!body) return nullptr;
   if (auto y = As<ir::YieldStmt>(body)) return y;
@@ -126,25 +133,51 @@ YieldStmtPtr FindBranchYield(const StmtPtr& body) {
       if (auto y = FindBranchYield(*it)) return y;
     }
   }
+  if (auto scope = AsScope(body)) return FindBranchYield(scope->body_);
   return nullptr;
 }
 
-// True when `var` is defined by an AssignStmt lexically inside `body` — i.e. a
-// branch-local producer whose output handle can be safely re-pointed at the phi
-// buffer. A yield source that is NOT branch-local (a function param / outer-scope
-// tile threaded through the branch unchanged) must not be re-bound: its handle
-// is read elsewhere, so re-pointing it would corrupt those reads.
+// True when `var` is defined lexically inside `body` — an AssignStmt result, a
+// loop iter-arg/return-var, or a nested control-flow return-var — i.e. a
+// branch-local value whose handle can be safely re-pointed at the phi buffer. A
+// yield source that is NOT branch-local (a function param / outer-scope tile
+// threaded through the branch unchanged) must not be re-bound: its handle is read
+// elsewhere, so re-pointing it would corrupt those reads.
 bool IsDefinedInBranch(const ir::Var* var, const StmtPtr& body) {
   if (!body || !var) return false;
-  if (auto assign = As<ir::AssignStmt>(body)) return assign->var_.get() == var;
+  if (auto assign = As<ir::AssignStmt>(body)) {
+    // Only a real op producer (Call value) writes a fresh buffer we may re-point.
+    // A bare-var alias (`r = a`) or a view writes nothing at its own handle, so
+    // re-pointing it would leave the phi buffer unwritten — the tmov fallback in
+    // emit_branch copies those into the phi handle instead.
+    return assign->var_.get() == var && As<ir::Call>(assign->value_) != nullptr;
+  }
   if (auto seq = As<ir::SeqStmts>(body)) {
     for (const auto& s : seq->stmts_)
       if (IsDefinedInBranch(var, s)) return true;
+    return false;
+  }
+  if (auto for_stmt = As<ir::ForStmt>(body)) {
+    for (const auto& ia : for_stmt->iter_args_)
+      if (ia.get() == var) return true;
+    for (const auto& rv : for_stmt->return_vars_)
+      if (rv.get() == var) return true;
+    return IsDefinedInBranch(var, for_stmt->body_);
+  }
+  if (auto while_stmt = As<ir::WhileStmt>(body)) {
+    for (const auto& ia : while_stmt->iter_args_)
+      if (ia.get() == var) return true;
+    for (const auto& rv : while_stmt->return_vars_)
+      if (rv.get() == var) return true;
+    return IsDefinedInBranch(var, while_stmt->body_);
   }
   if (auto if_stmt = As<ir::IfStmt>(body)) {
+    for (const auto& rv : if_stmt->return_vars_)
+      if (rv.get() == var) return true;
     if (IsDefinedInBranch(var, if_stmt->then_body_)) return true;
-    if (if_stmt->else_body_.has_value() && IsDefinedInBranch(var, *if_stmt->else_body_)) return true;
+    return if_stmt->else_body_.has_value() && IsDefinedInBranch(var, *if_stmt->else_body_);
   }
+  if (auto scope = AsScope(body)) return IsDefinedInBranch(var, scope->body_);
   return false;
 }
 }  // namespace
@@ -290,10 +323,34 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
                 << "' yields different backing SSAs across branches: " << inplace_return_ssa[i] << " vs "
                 << branch_yields[i];
           }
+        } else if (!emit_tile_addr_ && As<TileType>(op->return_vars_[i]->GetType())) {
+          // Tile phi under PTOAS (fix #1956). A branch-local producer was already
+          // re-pointed at the phi handle above, so its yield resolves to the phi
+          // handle and needs nothing. Any other yield — an outer tile threaded
+          // through the branch, or one the re-point conservatively skipped — has
+          // NOT written the phi buffer, so copy it in: without MemoryReuse's
+          // YieldFixupMutator (skipped under PTOAS) the post-if read would
+          // otherwise see an uninitialised phi buffer.
+          auto phi_it = fs_.var_to_mlir.find(GetVarKey(op->return_vars_[i]));
+          if (phi_it != fs_.var_to_mlir.end() && !branch_yields[i].empty() &&
+              branch_yields[i] != phi_it->second) {
+            const std::string& phi = phi_it->second;
+            std::string ty;
+            if (auto tit = fs_.ssa_to_tile_buf_type.find(phi); tit != fs_.ssa_to_tile_buf_type.end()) {
+              ty = tit->second;
+            }
+            std::ostringstream mov;
+            mov << "pto.tmov ins(" << branch_yields[i];
+            if (!ty.empty()) mov << " : " << ty;
+            mov << ") outs(" << phi;
+            if (!ty.empty()) mov << " : " << ty;
+            mov << ")";
+            Emit(mov.str());
+          }
         }
-        // Tile return_vars: MemoryReuse ensures branch yields share the return_var's
-        // canonical MemRef (same physical address). No codegen-level tmov needed —
-        // the IR-level tile.move (from MemoryReuse's YieldFixupMutator) handles the copy.
+        // Tile return_vars under PYPTO: MemoryReuse ensures branch yields share the
+        // return_var's canonical MemRef (same physical address), so no codegen-level
+        // tmov is needed — the IR-level tile.move (from YieldFixupMutator) handles it.
       }
 
       if (!scf_return_types.empty()) {
