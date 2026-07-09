@@ -924,16 +924,23 @@ def test_allocate_memory_addr_skips_non_incore_function():
     ir.assert_structural_equal(After, Initialized)
 
 
-def test_dsa_consult_flag_does_not_change_addresses():
-    """The PYPTO_DSA_SOLVER consulting path runs the DSA solver on real IR but
-    keeps the bump authoritative — so addresses must be identical with the flag
-    on vs off. This proves the adapter+solver run end-to-end without altering
-    output (RFC pypto#1980, Phase 2 consulting mode)."""
-    import os
+def _vec_peak(func) -> int:
+    """Max (offset + size) over Vec-space MemRefs in a function's printed IR."""
+    text = ir.python_print(func)
+    peak = 0
+    for off, size in re.findall(r"MemRef\([^,]+,\s*pl\.const\((\d+),[^)]*\),\s*(\d+)\),\s*pl\.Mem\.Vec", text):
+        peak = max(peak, int(off) + int(size))
+    return peak
+
+
+def _dsa_chain_program():
+    """InCore (AIV) kernel with a chain a->b->c; tile_a[def..b] and tile_c are
+    lifetime-disjoint, so tile_c can reuse tile_a's slot. AIV is required — a
+    plain @pl.function is non-InCore and AllocateMemoryAddr no-ops on it."""
 
     @pl.program
     class Before:
-        @pl.function
+        @pl.function(type=pl.FunctionType.AIV)
         def main(
             self,
             input_a: pl.Tensor[[64, 64], pl.FP32],
@@ -945,21 +952,47 @@ def test_dsa_consult_flag_does_not_change_addresses():
             result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_c, [0, 0], output)
             return result
 
-    base = passes.init_mem_ref()(Before)
-    without_flag = passes.allocate_memory_addr()(base)
+    return passes.init_mem_ref()(Before)
+
+
+def _allocate_with_dsa(base, mode: str):
+    """Run allocate_memory_addr with PYPTO_DSA_SOLVER=<mode>, restoring the env."""
+    import os
 
     prev = os.environ.get("PYPTO_DSA_SOLVER")
-    os.environ["PYPTO_DSA_SOLVER"] = "1"
+    os.environ["PYPTO_DSA_SOLVER"] = mode
     try:
-        with_flag = passes.allocate_memory_addr()(base)
+        return passes.allocate_memory_addr()(base)
     finally:
         if prev is None:
             os.environ.pop("PYPTO_DSA_SOLVER", None)
         else:
             os.environ["PYPTO_DSA_SOLVER"] = prev
 
-    # Consulting mode must not perturb the authoritative bump result.
-    ir.assert_structural_equal(with_flag, without_flag)
+
+def test_dsa_plan_mode_reuses_disjoint_lifetimes():
+    """Under PYPTO_DSA_SOLVER=plan the solver becomes authoritative and reuses
+    lifetime-disjoint buffers the bump keeps separate — so the Vec peak drops.
+    Proves the writeback produces a valid, tighter plan (RFC pypto#1980)."""
+    base = _dsa_chain_program()
+    bump = passes.allocate_memory_addr()(base)
+    planned = _allocate_with_dsa(base, "plan")
+
+    bump_peak = _vec_peak(bump)
+    plan_peak = _vec_peak(planned)
+    assert bump_peak == 3 * 16384  # bump: three distinct 16 KB slots
+    assert plan_peak <= bump_peak  # gate guarantees never worse
+    assert plan_peak == 2 * 16384  # tile_c reused tile_a's freed slot
+
+
+def test_dsa_consult_mode_keeps_bump_authoritative():
+    """PYPTO_DSA_SOLVER=1 (consult) runs the solver + logs but must NOT change
+    addresses — the bump stays authoritative even where reuse is possible."""
+    base = _dsa_chain_program()
+    bump = passes.allocate_memory_addr()(base)
+    consulted = _allocate_with_dsa(base, "1")
+    ir.assert_structural_equal(consulted, bump)
+    assert _vec_peak(consulted) == _vec_peak(bump) == 3 * 16384  # unchanged
 
 
 if __name__ == "__main__":
