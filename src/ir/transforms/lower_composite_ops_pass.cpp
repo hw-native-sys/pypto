@@ -820,10 +820,9 @@ ExprPtr LowerTensorRingAllReduceRule(const CallPtr& call, const std::vector<Expr
         auto left_peer = body.Bind("left", MakeFloorMod(l2, comm.nranks_idx, span), span);
 
         // ---- Round barrier (notify-all + wait-all) ----
-        body.EmitNotifyAll(signal, comm.nranks_idx, comm.my_rank, rs_step_var,
-                           NotifyOp::kAtomicAdd, one_i32, "_rs", span);
-        body.EmitWaitAll(signal, comm.nranks_idx, comm.my_rank, rs_step_var,
-                         one_i32, "_rs", span);
+        body.EmitNotifyAll(signal, comm.nranks_idx, comm.my_rank, rs_step_var, NotifyOp::kAtomicAdd, one_i32,
+                           "_rs", span);
+        body.EmitWaitAll(signal, comm.nranks_idx, comm.my_rank, rs_step_var, one_i32, "_rs", span);
 
         // ---- remote_load(left, send_idx) + local accumulate ----
         auto send_offsets = std::make_shared<MakeTuple>(
@@ -872,10 +871,9 @@ ExprPtr LowerTensorRingAllReduceRule(const CallPtr& call, const std::vector<Expr
         auto send_idx = body.Bind("ag_send_idx", MakeFloorMod(s3, comm.nranks_idx, span), span);
 
         // ---- Round barrier ----
-        body.EmitNotifyAll(signal, comm.nranks_idx, comm.my_rank, ag_round,
-                           NotifyOp::kAtomicAdd, one_i32, "_ag", span);
-        body.EmitWaitAll(signal, comm.nranks_idx, comm.my_rank, ag_round,
-                         one_i32, "_ag", span);
+        body.EmitNotifyAll(signal, comm.nranks_idx, comm.my_rank, ag_round, NotifyOp::kAtomicAdd, one_i32,
+                           "_ag", span);
+        body.EmitWaitAll(signal, comm.nranks_idx, comm.my_rank, ag_round, one_i32, "_ag", span);
 
         // ---- remote_load(left, send_idx) + store locally ----
         auto send_offsets = std::make_shared<MakeTuple>(
