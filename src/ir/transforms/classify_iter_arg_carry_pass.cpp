@@ -330,12 +330,13 @@ std::vector<IterArgCarryPlan> AnalyzeCarries(const ForStmtPtr& for_stmt, const P
   if (for_stmt->kind_ == ForKind::Parallel && manual_scope_depth > 0) {
     for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
       if (!plans[i].is_rebind || !IsTaskIdScalar(for_stmt->iter_args_[i])) continue;
-      CHECK(plans[i].array_size > 0) << "manual_scope: pl.parallel loops carrying a manual_scope dep "
-                                     << "(via ``deps=[...]``) must have a statically-known trip count. "
-                                     << "The runtime fence requires a PTO2TaskId[N] array of fixed N. "
-                                     << "Either make the parallel loop's trip count a Python int "
-                                     << "(e.g. ``pl.parallel(4)``) or restructure to put the parallel "
-                                     << "loop inside a const-bounded scope.";
+      CHECK_SPAN(plans[i].array_size > 0, for_stmt->span_)
+          << "manual_scope: pl.parallel loops carrying a manual_scope dep "
+          << "(via ``deps=[...]``) must have a statically-known trip count. "
+          << "The runtime fence requires a PTO2TaskId[N] array of fixed N. "
+          << "Either make the parallel loop's trip count a Python int "
+          << "(e.g. ``pl.parallel(4)``) or restructure to put the parallel "
+          << "loop inside a const-bounded scope.";
     }
   }
 
