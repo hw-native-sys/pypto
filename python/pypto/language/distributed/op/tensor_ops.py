@@ -406,8 +406,19 @@ def allreduce(
 
     Mesh signal shape is ``[NR, 1]``; ring signal shape is
     ``[2 * (NR − 1), NR]`` (one row per ring round). Both are single-shot
-    per call — the lowering uses ``AtomicAdd(0→1)`` / ``WaitGe(1)`` per
-    barrier wave, and cells end the call at non-zero values.
+    per call.
+
+    **Mesh barrier protocol:** two waves on the same cells —
+    ``Set(1) → WaitGe(1)`` for the first wave (Phases 2a/2b), then
+    ``AtomicAdd(1) → WaitGe(2)`` for the post-reduce WAR guard
+    (Phases 3.5a/3.5b). By the time the call returns every cell sits at
+    ``2`` rather than its initial ``0``.
+
+    **Ring barrier protocol:** per-round ``AtomicAdd(0→1) → WaitGe(1)``
+    monotonic on a ``[2*(NR−1), NR]`` signal — each ring step writes
+    a fresh row, so cells end at non-zero values but the monotonic
+    advance is per-row, not per-cell reuse.
+
     **Do not reuse the same signal buffer for a back-to-back allreduce**
     — allocate a fresh signal buffer (``alloc_window_buffer`` + ``window``)
     for each allreduce call. All allreduce calls in ``for`` and ``while``

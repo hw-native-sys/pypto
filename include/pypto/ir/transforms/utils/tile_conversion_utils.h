@@ -81,6 +81,13 @@ inline ExprPtr MakeSignalOffsets(const ExprPtr& rank_expr, const Span& span) {
   return std::make_shared<MakeTuple>(std::move(elements), span);
 }
 
+/// Build a 2D signal-slot offset tuple [row_expr, rank_expr] for 2D signal
+/// matrices (e.g. ring allreduce signals of shape [2*(NR-1), NR]).
+inline ExprPtr MakeSignalOffsets(const ExprPtr& rank_expr, const ExprPtr& row_expr, const Span& span) {
+  std::vector<ExprPtr> elements = {row_expr, rank_expr};
+  return std::make_shared<MakeTuple>(std::move(elements), span);
+}
+
 }  // namespace pypto::ir::tile_conversion_utils
 
 #endif  // PYPTO_IR_TRANSFORMS_UTILS_TILE_CONVERSION_UTILS_H_
