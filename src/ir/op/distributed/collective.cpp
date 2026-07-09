@@ -228,11 +228,11 @@ namespace {
 TypePtr DeduceTensorAllGatherType(const std::vector<ExprPtr>& args,
                                   const std::vector<std::pair<std::string, std::any>>& kwargs) {
   (void)kwargs;
-  CHECK(args.size() == 3)
-      << "pld.tensor.allgather requires 3 args (local_data, target, signal); "
-         "use pld.tensor.allgather(local_data, target, signal) for both HOST builtin and InCore composite paths, "
-         "but got "
-      << args.size();
+  CHECK(args.size() == 3) << "pld.tensor.allgather requires 3 args (local_data, target, signal); "
+                             "use pld.tensor.allgather(local_data, target, signal) for both HOST builtin and "
+                             "InCore composite paths, "
+                             "but got "
+                          << args.size();
   for (size_t i = 0; i < args.size(); ++i) {
     CHECK(args[i]) << "pld.tensor.allgather positional argument #" << i << " must not be null";
   }
@@ -244,12 +244,12 @@ TypePtr DeduceTensorAllGatherType(const std::vector<ExprPtr>& args,
     // local_data is the pre-staged window-bound DistributedTensor ([NR, SIZE]),
     // target is the INT32 DistributedTensor signal, and signal is unused.
     auto target_type = As<DistributedTensorType>(first_type);
-    CHECK(target_type->shape_.size() == 2)
-        << "pld.tensor.allgather HOST target must be 2D [NR, SIZE], got " << target_type->shape_.size()
-        << " dims";
+    CHECK(target_type->shape_.size() == 2) << "pld.tensor.allgather HOST target must be 2D [NR, SIZE], got "
+                                           << target_type->shape_.size() << " dims";
     auto signal_type = As<DistributedTensorType>(args[1]->GetType());
-    CHECK(signal_type) << "pld.tensor.allgather HOST signal (arg[1]) must be a DistributedTensor (window-bound), got "
-                       << args[1]->GetType()->TypeName();
+    CHECK(signal_type)
+        << "pld.tensor.allgather HOST signal (arg[1]) must be a DistributedTensor (window-bound), got "
+        << args[1]->GetType()->TypeName();
     CHECK(signal_type->dtype_ == DataType::INT32)
         << "pld.tensor.allgather HOST signal must have INT32 element type, got dtype "
         << signal_type->dtype_.ToString();
@@ -299,8 +299,11 @@ REGISTER_OP("pld.tensor.allgather")
         "pld.tile.put loop + notify-all/wait-all; "
         "this Call never survives past that pass.")
     .set_op_category("DistributedOp")
-    .add_argument("local_data", "HOST: pre-staged DistributedTensor [NR, SIZE]; InCore: Tile/Tensor [1, SIZE] (Input)")
-    .add_argument("target", "HOST: INT32 DistributedTensor signal; InCore: DistributedTensor [NR, SIZE] push target and result (InOut)")
+    .add_argument("local_data",
+                  "HOST: pre-staged DistributedTensor [NR, SIZE]; InCore: Tile/Tensor [1, SIZE] (Input)")
+    .add_argument("target",
+                  "HOST: INT32 DistributedTensor signal; InCore: DistributedTensor [NR, SIZE] push target "
+                  "and result (InOut)")
     .add_argument("signal", "HOST: unused; InCore: INT32 DistributedTensor barrier (InOut)")
     .no_memory_spec()
     .f_deduce_type(DeduceTensorAllGatherType);

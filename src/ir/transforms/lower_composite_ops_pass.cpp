@@ -1042,8 +1042,7 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
 
   // local_data must be TensorType at this point (ConvertTensorToTileOps runs later).
   INTERNAL_CHECK_SPAN(As<TensorType>(local_data->GetType()), span)
-      << "pld.tensor.allgather local_data must be TensorType, got "
-      << local_data->GetType()->TypeName();
+      << "pld.tensor.allgather local_data must be TensorType, got " << local_data->GetType()->TypeName();
   auto target_type = As<DistributedTensorType>(target->GetType());
   INTERNAL_CHECK_SPAN(target_type, span)
       << "pld.tensor.allgather target must be DistributedTensorType (deducer-rejected otherwise)";
@@ -1084,8 +1083,7 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
              span);
 
   auto my_rank_offsets = std::make_shared<MakeTuple>(
-      std::vector<ExprPtr>{comm.my_rank, std::make_shared<ConstInt>(0, DataType::INDEX, span)},
-      span);
+      std::vector<ExprPtr>{comm.my_rank, std::make_shared<ConstInt>(0, DataType::INDEX, span)}, span);
 
   auto zero_idx = std::make_shared<ConstInt>(0, DataType::INDEX, span);
   auto one_idx = std::make_shared<ConstInt>(1, DataType::INDEX, span);
@@ -1096,12 +1094,12 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
         // push local_data contents to every peer's window at row my_rank.
         // src is the original Tensor local_data — pld.tile.put handles
         // tile-load/chunking internally through the stage tile.
-        body.Bind("push",
-                  reg.Create("pld.tile.put",
-                             {target, peer, local_data, put_stage, my_rank_offsets, zero_row_offsets,
-                              chunk_shape},
-                             {{"atomic", static_cast<int>(AtomicType::kNone)}}, span),
-                  span);
+        body.Bind(
+            "push",
+            reg.Create("pld.tile.put",
+                       {target, peer, local_data, put_stage, my_rank_offsets, zero_row_offsets, chunk_shape},
+                       {{"atomic", static_cast<int>(AtomicType::kNone)}}, span),
+            span);
       },
       span);
 
@@ -1519,8 +1517,7 @@ class LowerCompositeOpsMutator : public IRMutator {
     // (args[0] is a DistributedTensor — pre-staged window); the InCore
     // composite path (args[0] is Tile/Tensor) must still be lowered here.
     if (IsOp(call, "pld.tensor.allgather")) {
-      return call->args_.size() == 3 &&
-             As<DistributedTensorType>(call->args_[0]->GetType()) != nullptr;
+      return call->args_.size() == 3 && As<DistributedTensorType>(call->args_[0]->GetType()) != nullptr;
     }
     return IsOp(call, "pld.tensor.allreduce") || IsOp(call, "pld.tensor.barrier") ||
            IsOp(call, "pld.tensor.broadcast") || IsOp(call, "pld.tensor.reduce_scatter");
