@@ -271,7 +271,7 @@ pld.tensor.allreduce(src, signal, *, op: ReduceOp = ReduceOp.Sum) -> Distributed
 Reduces every participating rank's window-bound `src` slice in place and returns
 the same type as `src`. Host-orchestrator user code may omit `signal` outside
 `for` and `while` loops; the
-[`SynthesizeAllReduceSignals`](passes/37-synthesize_allreduce_signals.md) pass
+[`SynthesizeAllReduceSignals`](passes/38-synthesize_allreduce_signals.md) pass
 inserts a private INT32 signal window with semantic shape `[world_size, 1]` for
 that call. The pass binds `world_size = pld.world_size()` as a standalone
 statement and uses that variable in the synthesized buffer size and window
@@ -336,11 +336,11 @@ The local-vs-remote split is intentional: a *local* operand (e.g. `get`'s
 ## Pipeline integration
 
 Comm domains and their slot allocations are materialised by the
-[`MaterializeCommDomainScopes`](passes/38-materialize_comm_domain_scopes.md) pass, which wraps each
+[`MaterializeCommDomainScopes`](passes/39-materialize_comm_domain_scopes.md) pass, which wraps each
 host_orch body in nested `CommDomainScopeStmt` nodes (one per inferred comm domain) and produces the
 per-window `WindowBuffer` records that the runtime binds physical buffers to.
 Host-level tensor collectives are then lowered by
-[`LowerHostTensorCollectives`](passes/39-lower_host_tensor_collectives.md) into internal builtin chip
+[`LowerHostTensorCollectives`](passes/40-lower_host_tensor_collectives.md) into internal builtin chip
 dispatches before the final `Simplify`.
 
 ## Testing

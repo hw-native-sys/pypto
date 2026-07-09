@@ -477,7 +477,7 @@ too; entry `True` + inline `False` is legal and just nests hand scopes
 inside compiler AUTO scopes). `.incore` / `.opaque` reject it — they
 outline into separate kernels. It specializes into
 `@pl.function(..., auto_scope=False)` — see the
-[MaterializeRuntimeScopes pass](../dev/passes/41-materialize_runtime_scopes.md)
+[MaterializeRuntimeScopes pass](../dev/passes/42-materialize_runtime_scopes.md)
 for the resulting scope-placement semantics.
 
 ### `@pl.inline`

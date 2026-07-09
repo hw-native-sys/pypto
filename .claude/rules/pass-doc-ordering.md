@@ -47,13 +47,14 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 32 | `32-fold_no_op_reshape.md` | 32nd pass |
 | 33 | `33-fuse_create_assemble_to_slice.md` | 33rd pass |
 | 34 | `34-derive_call_directions.md` | 34th pass (two-phase: arg directions + manual-scope lowering) |
-| 35 | `35-auto_derive_task_dependencies.md` | 35th pass (manual-scope compiler deps; opt-in AUTO-scope analysis/emission via compile-time switch; default behavior unchanged) |
-| 36 | `36-expand_manual_phase_fence.md` | 36th pass (manual-scope phase-fence TaskId dep compression; runs after AutoDeriveTaskDependencies) |
-| 37 | `37-synthesize_allreduce_signals.md` | 37th pass (distributed: host allreduce optional signal -> explicit internal signal IR) |
-| 38 | `38-materialize_comm_domain_scopes.md` | 38th pass (distributed: WindowBuffer + CommDomainScopeStmt wrappers in each host_orch body; runs immediately before LowerHostTensorCollectives) |
-| 39 | `39-lower_host_tensor_collectives.md` | 39th pass (host-level tensor collectives -> internal builtin chip dispatches; runs after comm-domain scopes) |
-| 40 | `40-materialize_dist_tensor_ctx.md` | 40th pass (materializes explicit CommCtx params/args for DistributedTensor params; runs before the final Simplify) |
-| 41 | `41-materialize_runtime_scopes.md` | Last pass (after the final Simplify; inserts AUTO RuntimeScopeStmt so orchestration codegen emits PTO2_SCOPE 1:1) |
+| 35 | `35-eliminate_redundant_var_copy.md` | 35th pass (orchestration copy-propagation; folds same-buffer `X = Y` Var rebinds so codegen never sees no-op aliases; runs immediately after DeriveCallDirections) |
+| 36 | `36-auto_derive_task_dependencies.md` | 36th pass (manual-scope compiler deps; opt-in AUTO-scope analysis/emission via compile-time switch; default behavior unchanged) |
+| 37 | `37-expand_manual_phase_fence.md` | 37th pass (manual-scope phase-fence TaskId dep compression; runs after AutoDeriveTaskDependencies) |
+| 38 | `38-synthesize_allreduce_signals.md` | 38th pass (distributed: host allreduce optional signal -> explicit internal signal IR) |
+| 39 | `39-materialize_comm_domain_scopes.md` | 39th pass (distributed: WindowBuffer + CommDomainScopeStmt wrappers in each host_orch body; runs immediately before LowerHostTensorCollectives) |
+| 40 | `40-lower_host_tensor_collectives.md` | 40th pass (host-level tensor collectives -> internal builtin chip dispatches; runs after comm-domain scopes) |
+| 41 | `41-materialize_dist_tensor_ctx.md` | 41st pass (materializes explicit CommCtx params/args for DistributedTensor params; runs before the final Simplify) |
+| 42 | `42-materialize_runtime_scopes.md` | Last pass (after the final Simplify; inserts AUTO RuntimeScopeStmt so orchestration codegen emits PTO2_SCOPE 1:1) |
 | 91 | `91-utility_passes.md` | Not in Default strategy |
 | 99 | `99-verifier.md` | Infrastructure (not a pipeline pass) |
 

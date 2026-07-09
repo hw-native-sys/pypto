@@ -238,7 +238,7 @@ pld.tensor.allreduce(src, signal, *, op: ReduceOp = ReduceOp.Sum) -> Distributed
 
 对所有参与 rank 的窗口绑定 `src` 切片做原地 all-reduce，并返回与 `src`
 相同的类型。host-orchestrator 用户代码可以在 `for` 和 `while` 循环外省略 `signal`；
-[`SynthesizeAllReduceSignals`](passes/37-synthesize_allreduce_signals.md) 阶段会为该 call 插入 private INT32 signal window，
+[`SynthesizeAllReduceSignals`](passes/38-synthesize_allreduce_signals.md) 阶段会为该 call 插入 private INT32 signal window，
 语义 shape 为 `[world_size, 1]`。该阶段会先插入 standalone `world_size = pld.world_size()` binding，
 再用该变量构造 buffer size 和 window shape。循环内的所有调用都会被拒绝，因为当前 signal 协议只能
 单次使用。显式 `signal` 仍然是 InCore
@@ -294,10 +294,10 @@ Verifier：`signal` 必须是 `DistributedTensorType`；`expected` 必须是
 ## 流水线集成
 
 通信域与其槽位分配由
-[`MaterializeCommDomainScopes`](passes/38-materialize_comm_domain_scopes.md) pass 完成。该 pass 将每个
+[`MaterializeCommDomainScopes`](passes/39-materialize_comm_domain_scopes.md) pass 完成。该 pass 将每个
 host_orch 函数体包裹进嵌套的 `CommDomainScopeStmt` 节点（按推断出的通信域逐层嵌套），并产生运行时据以
 绑定物理缓冲的按窗口 `WindowBuffer` 记录。
-随后 [`LowerHostTensorCollectives`](passes/39-lower_host_tensor_collectives.md) 会在最终
+随后 [`LowerHostTensorCollectives`](passes/40-lower_host_tensor_collectives.md) 会在最终
 `Simplify` 之前把 host-level tensor collectives 降为内部 builtin chip dispatch。
 
 ## 测试
