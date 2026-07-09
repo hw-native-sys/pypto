@@ -2579,19 +2579,31 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
     EmitTaskParamsDecl(task_var);
     if (dep_capacity > 0) {
+      // Dep-carrying barrier: deps are appended under per-edge is_valid()
+      // guards, so the effective count is only known at runtime. Skip the
+      // submit only when the barrier ends up fencing nothing (every dep
+      // resolved to an invalid sentinel).
       EmitManualDeps(call, task_var);
+      EmitIndentedLine("PTO2TaskId " + tid_name + " = PTO2TaskId::invalid();");
+      EmitIndentedLine("if (" + deps_cnt + " > 0) {");
+      {
+        IndentGuard guard(Active());
+        EmitIndentedLine("TaskOutputTensors " + outs_var + " = rt_submit_dummy_task(" + task_var + ");");
+        EmitIndentedLine(tid_name + " = " + outs_var + ".task_id();");
+      }
+      EmitIndentedLine("}");
     } else {
-      EmitIndentedLine("uint32_t " + deps_cnt + " = 0;");
-    }
-    EmitIndentedLine("PTO2TaskId " + tid_name + " = PTO2TaskId::invalid();");
-
-    EmitIndentedLine("if (" + deps_cnt + " > 0) {");
-    {
-      IndentGuard guard(Active());
+      // Statically empty-deps barrier: a user-written task_dummy(deps=[]).
+      // (ExpandManualPhaseFence only inserts barriers when profitable, never
+      // empty, so this path is exclusively user-originated.) Such a dummy has
+      // no producers and is ready immediately, but it must still materialize
+      // as a real task with a valid id that is added to each consumer's fanin.
+      // Having no predecessors affects neither its submission nor the edges to
+      // its successors, so submit it unconditionally — eliding it would
+      // silently drop those edges.
       EmitIndentedLine("TaskOutputTensors " + outs_var + " = rt_submit_dummy_task(" + task_var + ");");
-      EmitIndentedLine(tid_name + " = " + outs_var + ".task_id();");
+      EmitIndentedLine("PTO2TaskId " + tid_name + " = " + outs_var + ".task_id();");
     }
-    EmitIndentedLine("}");
   }
 
   static constexpr size_t kMaxAllocTensorsArgs = 16;

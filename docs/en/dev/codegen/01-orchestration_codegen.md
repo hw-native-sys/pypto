@@ -577,6 +577,17 @@ plain cross-function `Call`s never carry it). Orchestration codegen lowers that 
 call to `rt_submit_dummy_task(...)`, then emits ordinary scalar dependency
 lowering for the rewritten consumers.
 
+**Empty-deps vs dep-carrying dummies.** Codegen submits a dep-carrying dummy
+under an `if (deps_count > 0)` runtime guard, because its deps are appended
+under per-edge `is_valid()` guards and may all resolve to an invalid sentinel
+(fencing nothing). A statically empty-deps dummy — which can only come from a
+user-written `pl.system.task_dummy(deps=[])`, since `ExpandManualPhaseFence`
+never inserts an empty barrier — is instead submitted **unconditionally**. A
+no-predecessor barrier is still a real, ready-immediately task whose valid id
+must join each consumer's fanin; having no predecessors affects neither its
+submission nor the edges to its successors, so guarding it on `deps_count > 0`
+would statically elide it and silently drop those edges.
+
 This preserves the phase boundary while avoiding repeated all-to-all fanout:
 
 ```text
