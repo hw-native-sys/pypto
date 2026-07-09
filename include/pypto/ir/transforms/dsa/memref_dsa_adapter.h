@@ -12,8 +12,10 @@
 #ifndef PYPTO_IR_TRANSFORMS_DSA_MEMREF_DSA_ADAPTER_H_
 #define PYPTO_IR_TRANSFORMS_DSA_MEMREF_DSA_ADAPTER_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "pypto/ir/memory_space.h"
@@ -27,6 +29,15 @@ class MemoryAllocatorPolicy;
 
 namespace dsa {
 
+/// Selects how the experimental DSA solver participates, via the
+/// ``PYPTO_DSA_SOLVER`` env var: ``consult``/``1`` = run + log vs the bump (bump
+/// authoritative); ``plan`` = authoritative (write DSA offsets, gated fallback);
+/// unset/other = off.
+enum class SolverMode { Off, Consult, Plan };
+
+/// Read the ``PYPTO_DSA_SOLVER`` env var into a SolverMode (Off if unset).
+[[nodiscard]] SolverMode GetSolverMode();
+
 /**
  * @brief Translate per-allocation lifetimes into a DsaProblem (core mapping).
  *
@@ -36,13 +47,13 @@ namespace dsa {
  * non-allocated spaces are skipped.  reserved_base / pool_caps come from the
  * reserve-buffer resolution and the backend's per-space capacities.
  *
- * This is the CORE mapping only.  Must-aliases and views are already folded into
- * the intervals (via base_ identity); opportunistic reuse is the solver's job.
- * Separations for pipeline double-buffers / cross-pipe hazards are NOT yet
- * emitted here — so the resulting packing is a lower bound (consulting mode),
- * not yet safe to make authoritative.
+ * Must-aliases and views are already folded into the intervals (via base_
+ * identity); opportunistic reuse is the solver's job.  ``separations`` are index
+ * pairs into ``lifetimes`` that must stay apart (pipeline double-buffer clones);
+ * pairs referencing a skipped (DDR / non-allocated) buffer are dropped.
  */
 [[nodiscard]] DsaProblem BuildDsaProblem(const std::vector<LifetimeInterval>& lifetimes,
+                                         const std::vector<std::pair<size_t, size_t>>& separations,
                                          const MemoryAllocatorPolicy& policy,
                                          const std::unordered_map<MemorySpace, uint64_t>& reserved_end_by_space,
                                          const std::unordered_map<MemorySpace, uint64_t>& pool_caps);
