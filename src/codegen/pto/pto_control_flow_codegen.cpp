@@ -115,6 +115,40 @@ std::string PTOCodegen::GetScalarIterArgTypeString(
   return GetTypeString(scalar_type->dtype_);
 }
 
+namespace {
+// Find the YieldStmt terminating a branch body (last yield, possibly inside the
+// trailing SeqStmts). Used to recover each branch's per-slot yield source.
+YieldStmtPtr FindBranchYield(const StmtPtr& body) {
+  if (!body) return nullptr;
+  if (auto y = As<ir::YieldStmt>(body)) return y;
+  if (auto seq = As<ir::SeqStmts>(body)) {
+    for (auto it = seq->stmts_.rbegin(); it != seq->stmts_.rend(); ++it) {
+      if (auto y = FindBranchYield(*it)) return y;
+    }
+  }
+  return nullptr;
+}
+
+// True when `var` is defined by an AssignStmt lexically inside `body` — i.e. a
+// branch-local producer whose output handle can be safely re-pointed at the phi
+// buffer. A yield source that is NOT branch-local (a function param / outer-scope
+// tile threaded through the branch unchanged) must not be re-bound: its handle
+// is read elsewhere, so re-pointing it would corrupt those reads.
+bool IsDefinedInBranch(const ir::Var* var, const StmtPtr& body) {
+  if (!body || !var) return false;
+  if (auto assign = As<ir::AssignStmt>(body)) return assign->var_.get() == var;
+  if (auto seq = As<ir::SeqStmts>(body)) {
+    for (const auto& s : seq->stmts_)
+      if (IsDefinedInBranch(var, s)) return true;
+  }
+  if (auto if_stmt = As<ir::IfStmt>(body)) {
+    if (IsDefinedInBranch(var, if_stmt->then_body_)) return true;
+    if (if_stmt->else_body_.has_value() && IsDefinedInBranch(var, *if_stmt->else_body_)) return true;
+  }
+  return false;
+}
+}  // namespace
+
 void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
   INTERNAL_CHECK_SPAN(op != nullptr, op->span_) << "Internal error: null IfStmt";
   INTERNAL_CHECK_SPAN(op->condition_ != nullptr, op->span_) << "Internal error: IfStmt has null condition";
@@ -168,6 +202,10 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
         std::string ret_name = AllocNewTileBuf(fields.type_str, return_var->name_hint_, fields.addr_ssa,
                                                fields.valid_row_ssa, fields.valid_col_ssa);
         BindVarToMlir(return_var, ret_name);
+        // This head-declared handle is the phi buffer. Under PTOAS the branch
+        // producers are re-bound to it (see emit_branch, fix #1956); mark it
+        // emitted so their EmitAllocTileForVar dedups instead of re-declaring it.
+        if (!emit_tile_addr_) fs_.emitted_tile_alloc_names.insert(ret_name);
       } else if (As<TensorType>(return_var->GetType()) || As<ir::ArrayType>(return_var->GetType())) {
         // Tensors and on-core arrays are mutable references mutated in place
         // (pl.assemble lowers to a tile store into the backing memref; arrays
@@ -202,6 +240,29 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
     std::vector<std::string> inplace_return_ssa(op->return_vars_.size());
 
     auto emit_branch = [&](const StmtPtr& body, const char* branch_name) {
+      // Fix #1956: under memory_planner=PTOAS, MemoryReuse (which would alias the
+      // branch yields onto the phi return_var's canonical MemRef via
+      // YieldFixupMutator) is skipped. Without it, each branch's tile producer
+      // writes its own handle and the post-if read of the phi handle reads a
+      // buffer no branch wrote. Re-bind each tile yield-source var to the phi
+      // return_var's (head-declared) handle so this branch's producer writes it.
+      // Under PYPTO (emit_tile_addr_) the IR-level aliasing already holds, so
+      // leave the bindings untouched.
+      if (!emit_tile_addr_) {
+        if (auto yield = FindBranchYield(body)) {
+          for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+            if (i >= yield->value_.size()) continue;
+            if (!As<TileType>(op->return_vars_[i]->GetType())) continue;
+            auto src = ir::AsVarLike(yield->value_[i]);
+            if (!src) continue;
+            // Only re-point a branch-local producer; an outer var yielded through
+            // the branch is read elsewhere and must keep its own handle.
+            if (!IsDefinedInBranch(src.get(), body)) continue;
+            auto phi_it = fs_.var_to_mlir.find(GetVarKey(op->return_vars_[i]));
+            if (phi_it != fs_.var_to_mlir.end()) BindVarToMlir(src, phi_it->second);
+          }
+        }
+      }
       fs_.yield_buffer.clear();
       VisitStmt(body);
       auto branch_yields = fs_.yield_buffer;
