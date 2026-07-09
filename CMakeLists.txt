@@ -151,6 +151,8 @@ set(PYPTO_SOURCES
     src/ir/arith/int_set.cpp
 
     # IR - Transforms
+    src/ir/transforms/dsa/first_fit_solver.cpp
+    src/ir/transforms/dsa/memref_dsa_adapter.cpp
     src/ir/transforms/allocate_memory_addr_pass.cpp
     src/ir/transforms/canonicalize_tile_slice_pass.cpp
     src/ir/transforms/fold_no_op_reshape_pass.cpp

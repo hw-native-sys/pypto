@@ -13,6 +13,8 @@
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/function.h>
+#include <nanobind/stl/map.h>
+#include <nanobind/stl/optional.h>
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
@@ -23,6 +25,7 @@
 #include "pypto/core/error.h"
 #include "pypto/ir/transforms/ir_property.h"
 #include "pypto/ir/transforms/pass_context.h"
+#include "pypto/ir/transforms/dsa/dsa_solver.h"
 #include "pypto/ir/transforms/utils/l0_tile_chooser.h"
 #include "pypto/ir/transforms/utils/stmt_dependency_analysis.h"
 #include "pypto/ir/verifier/diagnostic_check_registry.h"
@@ -776,6 +779,95 @@ void BindPass(nb::module_& m) {
 
   l0_tile.def("choose_l0_tile", &utils::ChooseL0Tile, nb::arg("config"),
               "Pick the minimum-cost L0 tile shape (m, n, k) under the roofline cost model.");
+
+  // DSA (Dynamic Storage Allocation) solver submodule — an IR-free library that
+  // maps buffers (lifetime + size) to offsets, exposed for unit testing and
+  // benchmarking against MiniMalloc CSV instances (RFC hw-native-sys/pypto#1980).
+  nb::module_ dsa_mod = passes.def_submodule(
+      "dsa", "IR-free Dynamic Storage Allocation solver: buffers (lifetime, size) -> offsets");
+
+  nb::enum_<dsa::SolveStatus>(dsa_mod, "SolveStatus", "Outcome of DsaSolver::Solve")
+      .value("kFeasible", dsa::SolveStatus::kFeasible)
+      .value("kInfeasibleProven", dsa::SolveStatus::kInfeasibleProven)
+      .value("kBestEffortNoFit", dsa::SolveStatus::kBestEffortNoFit)
+      .value("kTimeout", dsa::SolveStatus::kTimeout)
+      .value("kUnsupported", dsa::SolveStatus::kUnsupported);
+
+  nb::class_<dsa::DsaProblem>(dsa_mod, "DsaProblem",
+                              "A DSA instance built incrementally, then handed to a solver")
+      .def(nb::init<>())
+      .def(
+          "add_buffer",
+          [](dsa::DsaProblem& p, dsa::BufferId id, uint64_t size, uint64_t align, dsa::PoolId pool,
+             int32_t start, int32_t end) {
+            dsa::Buffer b;
+            b.id = id;
+            b.size = size;
+            b.align = align;
+            b.pool = pool;
+            b.interval.start = start;
+            b.interval.end = end;
+            p.buffers.push_back(b);
+          },
+          nb::arg("id"), nb::arg("size"), nb::arg("align"), nb::arg("pool"), nb::arg("start"), nb::arg("end"),
+          "Add a buffer with an inclusive [start, end] topological lifetime interval.")
+      .def(
+          "add_colocation",
+          [](dsa::DsaProblem& p, dsa::BufferId a, dsa::BufferId b) { p.colocations.emplace_back(a, b); },
+          nb::arg("a"), nb::arg("b"), "Force two buffers to share the same offset (must-alias).")
+      .def(
+          "add_separation",
+          [](dsa::DsaProblem& p, dsa::BufferId a, dsa::BufferId b) { p.separations.emplace_back(a, b); },
+          nb::arg("a"), nb::arg("b"), "Force two buffers apart in address even if lifetime-disjoint.")
+      .def(
+          "set_reserved_base",
+          [](dsa::DsaProblem& p, dsa::PoolId pool, uint64_t base) { p.reserved_base[pool] = base; },
+          nb::arg("pool"), nb::arg("base"), "Set a pool's low watermark (placement starts here).")
+      .def(
+          "set_pool_cap", [](dsa::DsaProblem& p, dsa::PoolId pool, uint64_t cap) { p.pool_caps[pool] = cap; },
+          nb::arg("pool"), nb::arg("cap"), "Set a pool's capacity in bytes (0 == unbounded).")
+      .def_prop_ro("num_buffers", [](const dsa::DsaProblem& p) { return p.buffers.size(); });
+
+  nb::class_<dsa::DsaSolution>(dsa_mod, "DsaSolution", "buffer id -> byte offset")
+      .def_ro("offsets", &dsa::DsaSolution::offsets)
+      .def("offset_of", &dsa::DsaSolution::OffsetOf, nb::arg("id"));
+
+  nb::class_<dsa::ObjectiveValue>(dsa_mod, "ObjectiveValue", "Objective readout: peak (overall + per pool)")
+      .def_ro("peak", &dsa::ObjectiveValue::peak)
+      .def_ro("peak_by_pool", &dsa::ObjectiveValue::peak_by_pool);
+
+  nb::class_<dsa::DsaResult>(dsa_mod, "DsaResult", "status + optional solution + objective + diagnostics")
+      .def_ro("status", &dsa::DsaResult::status)
+      .def_ro("solution", &dsa::DsaResult::solution)
+      .def_ro("objective", &dsa::DsaResult::objective)
+      .def_ro("diagnostics", &dsa::DsaResult::diagnostics);
+
+  nb::class_<dsa::SolverCapabilities>(dsa_mod, "SolverCapabilities", "What a solver honors")
+      .def_ro("multi_interval", &dsa::SolverCapabilities::multi_interval)
+      .def_ro("cost_model", &dsa::SolverCapabilities::cost_model)
+      .def_ro("colocations", &dsa::SolverCapabilities::colocations)
+      .def_ro("separations", &dsa::SolverCapabilities::separations)
+      .def_ro("pinned", &dsa::SolverCapabilities::pinned)
+      .def_ro("multi_pool", &dsa::SolverCapabilities::multi_pool);
+
+  dsa_mod.def(
+      "solve_first_fit",
+      [](const dsa::DsaProblem& problem) {
+        dsa::FirstFitByLifetimeSolver solver;
+        return solver.Solve(problem);
+      },
+      nb::arg("problem"), "Solve with first-fit-by-lifetime, decreasing size (the ptoas-modern heuristic).");
+
+  dsa_mod.def(
+      "first_fit_capabilities",
+      []() {
+        dsa::FirstFitByLifetimeSolver solver;
+        return solver.Capabilities();
+      },
+      "Capabilities advertised by the first-fit solver.");
+
+  dsa_mod.def("validate", &dsa::Validate, nb::arg("problem"), nb::arg("solution"),
+              "Independently check a solution; returns violation strings (empty list == valid).");
 }
 
 }  // namespace python

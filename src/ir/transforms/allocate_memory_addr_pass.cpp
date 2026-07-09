@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <any>
 #include <cstdint>
+#include <cstdlib>
 #include <map>
 #include <memory>
 #include <optional>
@@ -40,10 +41,13 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/dsa/dsa_solver.h"
+#include "pypto/ir/transforms/dsa/memref_dsa_adapter.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/core_affinity.h"
 #include "pypto/ir/transforms/utils/cross_core_pipe.h"
+#include "pypto/ir/transforms/utils/lifetime_analysis.h"
 #include "pypto/ir/transforms/utils/memory_footprint.h"
 #include "pypto/ir/transforms/utils/memref_collectors.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
@@ -455,6 +459,72 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
 }
 
 /**
+ * @brief Consulting-mode DSA solver: run it alongside the authoritative bump and
+ *        log the packed peak vs the bump's, without changing any address.
+ *
+ * Gated by the ``PYPTO_DSA_SOLVER=1`` env flag (experimental).  This proves the
+ * DSA adapter + first-fit solver end-to-end on real IR and measures the reuse
+ * headroom, while the legacy bump stays authoritative — so it is correctness-safe
+ * even though pipeline / hazard separations are not yet modelled (the reported
+ * DSA peak is therefore an optimistic lower bound).
+ */
+void MaybeConsultDsaSolver(const FunctionPtr& func, const MemoryAllocatorPolicy& policy,
+                           const ReservedEndBySpace& reserved_end_by_space,
+                           const std::vector<MemRefWithSpace>& memrefs,
+                           const std::vector<std::pair<const MemRef*, MemRefPtr>>& bump_pairs) {
+  const char* flag = std::getenv("PYPTO_DSA_SOLVER");
+  if (flag == nullptr || std::string(flag) != "1") return;
+
+  auto lifetimes = ComputeAllocationLifetimes(func->body_);
+  if (lifetimes.empty()) return;
+
+  // Backend per-space capacities (0 == unbounded) as pool caps.
+  std::unordered_map<MemorySpace, uint64_t> caps;
+  if (backend::BackendConfig::IsConfigured()) {
+    const backend::Backend* be = backend::GetBackend();
+    for (const auto& li : lifetimes) {
+      if (caps.count(li.memory_space)) continue;
+      const uint64_t sz = be->GetMemSize(li.memory_space);
+      if (sz > 0) caps[li.memory_space] = sz;
+    }
+  }
+
+  auto problem = dsa::BuildDsaProblem(lifetimes, policy, reserved_end_by_space, caps);
+  dsa::FirstFitByLifetimeSolver solver;
+  auto result = solver.Solve(problem);
+  INTERNAL_CHECK_SPAN(result.solution.has_value(), func->span_)
+      << "DSA solver returned no solution for '" << func->name_ << "'";
+  auto errors = dsa::Validate(problem, *result.solution);
+
+  // Bump peak per space, from the authoritative bump result, for comparison.
+  std::unordered_map<const MemRef*, MemorySpace> space_of;
+  for (const auto& [memref, space] : memrefs) space_of[memref.get()] = space;
+  std::map<MemorySpace, uint64_t> bump_peak;
+  for (const auto& [old_memref, new_memref] : bump_pairs) {
+    auto it = space_of.find(old_memref);
+    if (it == space_of.end() || it->second == MemorySpace::DDR) continue;
+    auto off = std::dynamic_pointer_cast<const ConstInt>(new_memref->byte_offset_);
+    if (!off || off->value_ < 0) continue;
+    const uint64_t end = static_cast<uint64_t>(off->value_) + new_memref->size_;
+    uint64_t& peak = bump_peak[it->second];
+    peak = std::max(peak, end);
+  }
+
+  for (const auto& [space, bump] : bump_peak) {
+    uint64_t dsa_peak = 0;
+    auto pit = result.objective.peak_by_pool.find(static_cast<dsa::PoolId>(space));
+    if (pit != result.objective.peak_by_pool.end()) dsa_peak = pit->second;
+    LOG_INFO << "[dsa-consult] " << func->name_ << " " << MemorySpaceToString(space)
+             << ": bump=" << bump << "B dsa=" << dsa_peak << "B"
+             << (dsa_peak < bump ? " (dsa packs tighter)" : "");
+  }
+  if (!errors.empty()) {
+    LOG_WARN << "[dsa-consult] " << func->name_ << " validator flagged " << errors.size()
+             << " issue(s); first: " << errors.front();
+  }
+}
+
+/**
  * @brief Allocate real memory addresses for existing alloc operations
  *
  * Alloc statements already exist (created by InitMemRef with addr=-1).
@@ -485,6 +555,10 @@ FunctionPtr TransformAllocateMemoryAddr(const FunctionPtr& func) {
   pinned_collector.VisitStmt(func->body_);
   auto memref_pairs = AllocateMemoryAddresses(memrefs, reserve_resolution, *policy,
                                               pinned_collector.alloc_sizes, func->name_);
+
+  // Consulting-mode DSA solver (PYPTO_DSA_SOLVER=1): measure first-fit-by-lifetime
+  // packing against the bump, without changing addresses. No-op unless the flag is set.
+  MaybeConsultDsaSolver(func, *policy, reserve_resolution.reserved_end_by_space, memrefs, memref_pairs);
 
   if (memref_pairs.empty() && reserve_resolution.resolved_bases.empty()) {
     return func;

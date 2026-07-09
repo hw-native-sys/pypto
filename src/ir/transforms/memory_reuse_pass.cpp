@@ -46,6 +46,7 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/attrs.h"
+#include "pypto/ir/transforms/utils/lifetime_analysis.h"
 #include "pypto/ir/transforms/utils/memory_footprint.h"
 #include "pypto/ir/transforms/utils/memref_collectors.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
@@ -58,16 +59,8 @@
 namespace pypto {
 namespace ir {
 
-/**
- * @brief Lifetime interval for a TileType variable (based on topological order)
- */
-struct LifetimeInterval {
-  VarPtr variable;           ///< The variable
-  int def_point;             ///< Definition point (topological order)
-  int last_use_point;        ///< Last use point (topological order)
-  MemorySpace memory_space;  ///< Memory space
-  uint64_t size;             ///< Size in bytes
-};
+// LifetimeInterval now lives in utils/lifetime_analysis.h so the DSA adapter can
+// consume the same per-allocation intervals this pass computes.
 
 namespace {
 
@@ -3229,6 +3222,13 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
 }
 
 }  // namespace
+
+// Shared entry point (see utils/lifetime_analysis.h): the DSA adapter reuses the
+// exact per-allocation intervals this pass computes, so both plan from identical
+// liveness. ComputeLifetimes has internal linkage but is visible in this TU.
+std::vector<LifetimeInterval> ComputeAllocationLifetimes(const StmtPtr& func_body) {
+  return ComputeLifetimes(func_body).lifetimes;
+}
 
 namespace pass {
 Pass MaterializeSemanticAliases() {

@@ -924,5 +924,43 @@ def test_allocate_memory_addr_skips_non_incore_function():
     ir.assert_structural_equal(After, Initialized)
 
 
+def test_dsa_consult_flag_does_not_change_addresses():
+    """The PYPTO_DSA_SOLVER consulting path runs the DSA solver on real IR but
+    keeps the bump authoritative — so addresses must be identical with the flag
+    on vs off. This proves the adapter+solver run end-to-end without altering
+    output (RFC pypto#1980, Phase 2 consulting mode)."""
+    import os
+
+    @pl.program
+    class Before:
+        @pl.function
+        def main(
+            self,
+            input_a: pl.Tensor[[64, 64], pl.FP32],
+            output: pl.Tensor[[64, 64], pl.FP32],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+            tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
+            tile_c: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_b, tile_b)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_c, [0, 0], output)
+            return result
+
+    base = passes.init_mem_ref()(Before)
+    without_flag = passes.allocate_memory_addr()(base)
+
+    prev = os.environ.get("PYPTO_DSA_SOLVER")
+    os.environ["PYPTO_DSA_SOLVER"] = "1"
+    try:
+        with_flag = passes.allocate_memory_addr()(base)
+    finally:
+        if prev is None:
+            os.environ.pop("PYPTO_DSA_SOLVER", None)
+        else:
+            os.environ["PYPTO_DSA_SOLVER"] = prev
+
+    # Consulting mode must not perturb the authoritative bump result.
+    ir.assert_structural_equal(with_flag, without_flag)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
