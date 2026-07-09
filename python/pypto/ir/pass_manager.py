@@ -181,6 +181,10 @@ class PassManager:
             ("FoldNoOpReshape", lambda: passes.fold_no_op_reshape()),
             ("FuseCreateAssembleToSlice", lambda: passes.fuse_create_assemble_to_slice()),
             ("DeriveCallDirections", lambda: passes.derive_call_directions()),
+            # Copy-propagate lineage-redundant `X = Y` Var rebinds now that
+            # directions are resolved, so downstream analyses and codegen never
+            # see the no-op aliases (replaces the orchestration-codegen band-aid).
+            ("EliminateRedundantVarCopy", lambda: passes.eliminate_redundant_var_copy()),
             ("AutoDeriveTaskDependencies", lambda: passes.auto_derive_task_dependencies()),
             ("ExpandManualPhaseFence", lambda: passes.expand_manual_phase_fence()),
             # First normalize host allreduce calls that omit signal into the

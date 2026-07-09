@@ -342,6 +342,9 @@ def fuse_create_assemble_to_slice() -> Pass:
 def fold_no_op_reshape() -> Pass:
     """Fold no-op tile.reshape assignments into Var-to-Var assignments."""
 
+def eliminate_redundant_var_copy() -> Pass:
+    """Eliminate redundant Var-to-Var copies in Orchestration functions."""
+
 def normalize_return_order() -> Pass:
     """Create a return order normalization pass."""
 
@@ -820,6 +823,7 @@ __all__ = [
     "allocate_memory_addr",
     "fuse_create_assemble_to_slice",
     "fold_no_op_reshape",
+    "eliminate_redundant_var_copy",
     "stamp_tfree_split",
     "VerificationError",
     "SSAErrorType",

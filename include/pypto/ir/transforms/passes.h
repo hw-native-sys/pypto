@@ -748,6 +748,29 @@ Pass AutoDeriveTaskDependencies(bool analyze_auto_scopes = false);
 Pass FoldNoOpReshape();
 
 /**
+ * @brief Eliminate redundant Var-to-Var copies in Orchestration functions
+ *
+ * Copy-propagates pure ``X = Y`` AssignStmts (value is a Var/IterArg) that
+ * alias the same physical buffer, rewriting every use of ``X`` to ``Y`` and
+ * dropping the copy. This moves an IR-level copy-propagation concern out of the
+ * orchestration codegen, which previously papered over these lineage-redundant
+ * rebinds with an emit-time band-aid (dropping ``auto X = X`` / remapping
+ * scope-local emit names).
+ *
+ * Safety guards (a copy is folded only when all hold):
+ * - The enclosing function is Orchestration.
+ * - Neither side is a mutable loop/branch carry lvalue (iter_arg / return_var).
+ * - ``X`` and ``Y`` resolve to the same buffer root.
+ * - ``Y``'s buffer is written in place at most once, so no read of ``X`` can
+ *   observe a post-mutation value.
+ *
+ * Requirements:
+ * - Runs after DeriveCallDirections (needs ``arg_directions`` to detect
+ *   in-place writes); preserves CallDirectionsResolved.
+ */
+Pass EliminateRedundantVarCopy();
+
+/**
  * @brief Materialize implicit orchestration scopes as explicit RuntimeScopeStmt nodes
  *
  * The simpler runtime wraps regions of an Orchestration function in

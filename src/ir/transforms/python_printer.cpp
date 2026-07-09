@@ -334,6 +334,12 @@ class IRPythonPrinter : public IRVisitor {
   // SeqStmts is a transparent container - recursed into without extra indent.
   void PrintStmtBlock(const StmtPtr& stmt);
 
+  // Print a region body, emitting `pass` when the body has no statements.
+  // A pass may legitimately empty a region (e.g. EliminateRedundantVarCopy
+  // folding away every copy in a `manual_scope`); Python requires an indented
+  // block, so a bare `with ...:` header would not re-parse.
+  void PrintBlockOrPass(const StmtPtr& stmt);
+
   // Emit the `with pl.scope(...):` header for a RuntimeScopeStmt. AUTO prints as
   // the bare `pl.scope()`; MANUAL as `pl.scope(mode=pl.ScopeMode.MANUAL)`.
   // Callers emit the leading indent themselves (it differs by call site).
@@ -1976,6 +1982,15 @@ void IRPythonPrinter::PrintLeadingComments(const StmtPtr& stmt) {
   }
 }
 
+void IRPythonPrinter::PrintBlockOrPass(const StmtPtr& stmt) {
+  auto seq = As<SeqStmts>(stmt);
+  if (!stmt || (seq && seq->stmts_.empty())) {
+    stream_ << GetIndent() << "pass\n";
+    return;
+  }
+  PrintStmtBlock(stmt);
+}
+
 void IRPythonPrinter::PrintStmtBlock(const StmtPtr& stmt) {
   if (auto seq = As<SeqStmts>(stmt)) {
     INTERNAL_CHECK(seq->leading_comments_.empty()) << "SeqStmts should not carry leading comments directly";
@@ -1996,7 +2011,7 @@ void IRPythonPrinter::VisitStmt_(const RuntimeScopeStmtPtr& op) {
   // surface and round-trip: `with pl.auto_scope():` / `with pl.manual_scope():`.
   PrintRuntimeScopeHeader(op->manual_);
   IncreaseIndent();
-  PrintStmtBlock(op->body_);
+  PrintBlockOrPass(op->body_);
   DecreaseIndent();
 }
 
@@ -2078,6 +2093,12 @@ void IRPythonPrinter::PrintYieldAssignmentVars(const std::vector<VarPtr>& return
 }
 
 void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPtr>& return_vars) {
+  // An emptied region body (every statement folded away) still needs an
+  // indented block to re-parse as Python.
+  if (auto empty_seq = As<SeqStmts>(body); !body || (empty_seq && empty_seq->stmts_.empty())) {
+    stream_ << GetIndent() << "pass\n";
+    return;
+  }
   // A single-statement SeqStmts is a transparent wrapper (e.g. a user-written
   // `with pl.auto_scope():` body before NormalizeStmtStructure collapses it).
   // Unwrap it first so an AUTO scope reaches the rscope branch below with

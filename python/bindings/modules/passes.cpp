@@ -344,6 +344,14 @@ void BindPass(nb::module_& m) {
              "sides share the same MemRef root and produce identical TileBufSignatures,\n"
              "removing the reshape Call so PTO codegen can stay 1:1.");
 
+  passes.def("eliminate_redundant_var_copy", &pass::EliminateRedundantVarCopy,
+             "Eliminate redundant Var-to-Var copies in Orchestration functions\n\n"
+             "Copy-propagates pure `X = Y` AssignStmts (value is a Var/IterArg) that\n"
+             "alias the same buffer, rewriting uses of X to Y and dropping the copy.\n"
+             "Only folds snapshot-safe copies (neither side a loop/branch carry; Y's\n"
+             "buffer written in place at most once). Moves the orchestration codegen\n"
+             "copy-propagation band-aid into an IR pass.");
+
   passes.def("normalize_return_order", &pass::NormalizeReturnOrder,
              "Create a return order normalization pass\n\n"
              "Reorders return tuple values in InCore functions so that return[i]\n"

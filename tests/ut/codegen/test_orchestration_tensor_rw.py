@@ -271,7 +271,17 @@ class TestTensorReadWriteOffsetCodegen:
         )
 
     def test_windowed_tuple_outputs_rebind_loop_carried_tensor_without_redeclaration(self):
-        """OutWindowExternalizer tuple outputs must rebind loop carries instead of redeclaring them."""
+        """OutWindowExternalizer tuple outputs must never redeclare a loop carry.
+
+        The carry here is a pure alias of the ``pl.Out`` params (same buffer,
+        written in place by the kernel), so ``EliminateRedundantVarCopy`` folds
+        its SSA rebinds away entirely and codegen windows the enclosing
+        ``ext_*`` names directly instead of materializing a self-assigning
+        ``k_proj_rv`` carry. The invariant this test guards is unchanged: no C++
+        name may be declared twice, be both a mutable ``Tensor`` and a
+        ``const Tensor&`` alias, or be referenced without a declaration
+        (issues #1697 / #1713).
+        """
 
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
@@ -345,14 +355,16 @@ class TestTensorReadWriteOffsetCodegen:
         )
         assert not (mutable_tensor_names & const_alias_names), code
 
-        rv_carry_names = {
-            name for name in mutable_tensor_names if name.endswith("_rv") or re.search(r"__rv(?:_|$)", name)
-        }
-        assert rv_carry_names, code
-        assert any(
-            re.search(rf"^\s*{re.escape(name)}\s*=\s*[^;]+;", code, flags=re.MULTILINE)
-            for name in rv_carry_names
-        ), code
+        # The per-iteration windows resolve to the enclosing Out params, since the
+        # folded carry was only ever an alias of them.
+        assert "ext_k_proj.view(" in code, code
+        assert "ext_v_proj.view(" in code, code
+
+        # Any surviving `_rv` carry name must be declared before it is used; an
+        # after-scope reader naming a dead alias is the #1697/#1713 failure mode.
+        referenced_rv_names = set(re.findall(r"\b([A-Za-z_]\w*_rv\w*)\b", code))
+        undeclared_rv = referenced_rv_names - mutable_tensor_names - const_alias_names
+        assert not undeclared_rv, f"generated C++ references undeclared {sorted(undeclared_rv)}:\n{code}"
 
     def test_windowed_writer_before_full_parent_reader_exposes_windowed_writer(self):
         """Window writers may stay windowed before a later full-parent reader.

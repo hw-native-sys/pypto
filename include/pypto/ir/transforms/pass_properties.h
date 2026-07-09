@@ -327,6 +327,18 @@ inline const PassProperties kAutoDeriveTaskDependenciesProperties{
     .required = {IRProperty::SplitIncoreOrch, IRProperty::CallDirectionsResolved},
     .produced = {IRProperty::CallDirectionsResolved}};
 
+// -- Redundant Var-copy elimination pass -------------------------------------
+//
+// Copy-propagates lineage-redundant ``X = Y`` Var-RHS AssignStmts in
+// Orchestration functions (post-DeriveCallDirections SSA rebinds that alias the
+// same physical buffer), rewriting uses of ``X`` to ``Y`` and dropping the
+// copy. Reads ``arg_directions`` to detect in-place writes (guard: only stable,
+// single-writer sources are folded), so it requires CallDirectionsResolved and
+// preserves it (bare copies carry no directions).
+inline const PassProperties kEliminateRedundantVarCopyProperties{
+    .required = {IRProperty::SplitIncoreOrch, IRProperty::CallDirectionsResolved},
+    .produced = {IRProperty::SplitIncoreOrch, IRProperty::CallDirectionsResolved}};
+
 // -- No-op tile.reshape folding pass -----------------------------------------
 
 inline const PassProperties kFoldNoOpReshapeProperties{
