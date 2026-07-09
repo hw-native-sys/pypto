@@ -13,65 +13,41 @@
 #define PYPTO_IR_TRANSFORMS_DSA_MEMREF_DSA_ADAPTER_H_
 
 #include <cstdint>
-#include <set>
 #include <unordered_map>
-#include <utility>
 #include <vector>
 
-#include "pypto/ir/expr.h"
-#include "pypto/ir/function.h"
 #include "pypto/ir/memory_space.h"
-#include "pypto/ir/memref.h"
-#include "pypto/ir/transforms/dsa/allocation_plan.h"
-#include "pypto/ir/transforms/dsa/dsa_reuse_penalty_solver.h"
+#include "pypto/ir/transforms/dsa/dsa_solver.h"
+#include "pypto/ir/transforms/utils/lifetime_analysis.h"
 
 namespace pypto {
-namespace backend {
-class Backend;
-}
 namespace ir {
 
 class MemoryAllocatorPolicy;
 
-namespace dsa_adapter {
-
-using MemRefWithSpace = std::pair<MemRefPtr, MemorySpace>;
+namespace dsa {
 
 /**
- * @brief In-memory DSA-RP problem and transient writeback information.
+ * @brief Translate per-allocation lifetimes into a DsaProblem (core mapping).
  *
- * No schema or filesystem representation is involved. ``pipeline_pairs`` are
- * exactly the hard separations that become legal if pipeline intent must be
- * relaxed; target and semantic separations never appear in this list.
+ * One DSA Buffer per allocation: pool = memory space, interval = [def, last_use],
+ * size rounded up to the space's alignment (matching the bump's per-buffer
+ * footprint), align = the space's alignment granule.  Off-chip (DDR) and
+ * non-allocated spaces are skipped.  reserved_base / pool_caps come from the
+ * reserve-buffer resolution and the backend's per-space capacities.
+ *
+ * This is the CORE mapping only.  Must-aliases and views are already folded into
+ * the intervals (via base_ identity); opportunistic reuse is the solver's job.
+ * Separations for pipeline double-buffers / cross-pipe hazards are NOT yet
+ * emitted here — so the resulting packing is a lower bound (consulting mode),
+ * not yet safe to make authoritative.
  */
-struct PreparedProblem {
-  dsa::DsaProblem strict_problem;
-  std::unordered_map<const Var*, dsa::BufferId> buffer_id_by_base;
-  std::set<const Var*> declared_allocation_bases;
-  std::vector<dsa::Separation> pipeline_pairs;
-};
+[[nodiscard]] DsaProblem BuildDsaProblem(const std::vector<LifetimeInterval>& lifetimes,
+                                         const MemoryAllocatorPolicy& policy,
+                                         const std::unordered_map<MemorySpace, uint64_t>& reserved_end_by_space,
+                                         const std::unordered_map<MemorySpace, uint64_t>& pool_caps);
 
-/**
- * @brief Translate PyPTO allocation facts into the narrow in-tree DSA-RP model.
- */
-[[nodiscard]] PreparedProblem BuildProblem(
-    const FunctionPtr& func, const AllocationPlan& allocation_plan, const MemoryAllocatorPolicy& policy,
-    const std::unordered_map<MemorySpace, uint64_t>& reserved_end_by_space,
-    const std::unordered_map<MemorySpace, uint64_t>& pool_caps, const backend::Backend* backend);
-
-/**
- * @brief Remove only pipeline-only hard relations and price the newly legal reuse.
- */
-[[nodiscard]] dsa::DsaProblem RelaxPipelineIntent(const PreparedProblem& prepared);
-
-/**
- * @brief Convert validated offsets to fresh MemRefs, preserving view offsets.
- */
-[[nodiscard]] std::vector<std::pair<const MemRef*, MemRefPtr>> BuildMemRefReplacements(
-    const PreparedProblem& prepared, const dsa::DsaSolution& solution,
-    const std::vector<MemRefWithSpace>& memrefs, const MemoryAllocatorPolicy& policy);
-
-}  // namespace dsa_adapter
+}  // namespace dsa
 }  // namespace ir
 }  // namespace pypto
 

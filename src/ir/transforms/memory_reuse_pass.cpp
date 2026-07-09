@@ -62,6 +62,9 @@
 namespace pypto {
 namespace ir {
 
+// LifetimeInterval now lives in utils/lifetime_analysis.h so the DSA adapter can
+// consume the same per-allocation intervals this pass computes.
+
 namespace {
 
 /**
@@ -3275,43 +3278,11 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
 
 }  // namespace
 
-AllocationConstraintAnalysis AnalyzeAllocationConstraints(const FunctionPtr& func,
-                                                          const LifetimeAnalysisResult& lifetimes,
-                                                          const char* consumer) {
-  AllocationConstraintAnalysis result;
-  result.declared_allocation_sizes = CollectPinnedAllocSizes(func->body_, func->span_, consumer);
-  for (const auto& [base, size] : result.declared_allocation_sizes) {
-    static_cast<void>(size);
-    result.declared_allocation_bases.insert(base);
-  }
-  ValidateDeclaredAllocs(func->body_, result.declared_allocation_bases, lifetimes.var_liveness);
-
-  for (const LifetimeInterval& interval : lifetimes.lifetimes) {
-    if (const auto layout_class = GetVecNzLayoutClass(interval.variable)) {
-      result.vec_nz_layout_class.emplace(interval.variable.get(), *layout_class);
-    }
-  }
-
-  result.needs_load_tpop_hazard_guard = NeedsLoadTpopHazardGuard(func);
-  if (result.needs_load_tpop_hazard_guard) {
-    HazardInputCollector collector;
-    collector.VisitStmt(func->body_);
-    result.target_hazard_inputs = collector.Take();
-  }
-
-  ForbidAliasCollector forbid_collector(lifetimes.var_sharing_groups);
-  forbid_collector.VisitStmt(func->body_);
-  result.forbid_alias = forbid_collector.Take();
-  return result;
-}
-
-LifetimeAnalysisResult AnalyzeAllocationLifetimes(const StmtPtr& func_body) {
-  return AnalyzeAllocationLifetimesImpl(func_body);
-}
-
-LifetimeAnalysisResult AnalyzeAllocationLifetimes(const FunctionPtr& func) {
-  INTERNAL_CHECK(func != nullptr) << "Cannot analyze allocation lifetimes for a null function";
-  return AnalyzeAllocationLifetimesImpl(func->body_, func->params_);
+// Shared entry point (see utils/lifetime_analysis.h): the DSA adapter reuses the
+// exact per-allocation intervals this pass computes, so both plan from identical
+// liveness. ComputeLifetimes has internal linkage but is visible in this TU.
+std::vector<LifetimeInterval> ComputeAllocationLifetimes(const StmtPtr& func_body) {
+  return ComputeLifetimes(func_body).lifetimes;
 }
 
 namespace pass {

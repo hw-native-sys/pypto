@@ -13,13 +13,9 @@
 #define PYPTO_IR_TRANSFORMS_UTILS_LIFETIME_ANALYSIS_H_
 
 #include <cstdint>
-#include <map>
-#include <set>
-#include <utility>
 #include <vector>
 
 #include "pypto/ir/expr.h"
-#include "pypto/ir/function.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/stmt.h"
 
@@ -27,45 +23,34 @@ namespace pypto {
 namespace ir {
 
 /**
- * @brief Conservative lifetime of one physical allocation identity.
+ * @brief Lifetime interval for one allocation (a base-group of TileType vars).
  *
- * Views and mandatory aliases that share one base MemRef are represented by a
- * single interval. Opportunistic reuse between different intervals remains a
- * placement decision.
+ * One interval per physical allocation: views and semantic must-aliases that
+ * share a ``base_`` Ptr are collapsed into a single interval whose [def, last_use]
+ * is the union over the group's members (topological order).  This is the unit
+ * the reuse packer — and the DSA adapter — treats as one buffer.
  */
 struct LifetimeInterval {
-  VarPtr variable;
-  int def_point;
-  int last_use_point;
-  MemorySpace memory_space;
-  uint64_t size;
+  VarPtr variable;           ///< Representative variable of the sharing group.
+  int def_point;             ///< Group's earliest definition point (topological order).
+  int last_use_point;        ///< Group's latest last-use point (topological order).
+  MemorySpace memory_space;  ///< Memory space (== DSA pool).
+  uint64_t size;             ///< Slot size in bytes (largest member).
 };
 
 /**
- * @brief Shared result of allocation-lifetime analysis.
- */
-struct LifetimeAnalysisResult {
-  std::vector<LifetimeInterval> lifetimes;
-  std::map<VarPtr, std::vector<VarPtr>> var_sharing_groups;
-  std::map<const Var*, std::set<int>> phi_family_ids;
-  std::map<const Var*, std::pair<int, int>> var_liveness;
-  std::map<const Var*, std::vector<std::pair<int32_t, int32_t>>> pipeline_membership;
-  std::set<const Var*> pipeline_load_tiles;
-};
-
-/**
- * @brief Analyze conservative allocation lifetimes and alias families.
- */
-[[nodiscard]] LifetimeAnalysisResult AnalyzeAllocationLifetimes(const StmtPtr& func_body);
-
-/**
- * @brief Analyze allocation lifetimes, including on-chip Tile parameters.
+ * @brief Per-allocation lifetime intervals for a function body.
  *
- * Function parameters are live on entry and have no defining AssignStmt in the
- * body. Function-wide allocation planners must use this overload so those
- * allocation identities participate in placement and writeback.
+ * Thin, IR-facing entry point over the reuse pass's lifetime analysis, exposed so
+ * the DSA adapter can build a DsaProblem without duplicating the (phi/loop-aware)
+ * liveness computation.  Intervals reflect must-aliases + views already collapsed
+ * (via ``base_`` identity), but NOT opportunistic lifetime reuse — that is exactly
+ * what a DSA solver decides from these intervals.
+ *
+ * @param func_body The function body to analyze.
+ * @return One LifetimeInterval per allocation; empty if the body holds no tiles.
  */
-[[nodiscard]] LifetimeAnalysisResult AnalyzeAllocationLifetimes(const FunctionPtr& func);
+[[nodiscard]] std::vector<LifetimeInterval> ComputeAllocationLifetimes(const StmtPtr& func_body);
 
 }  // namespace ir
 }  // namespace pypto
