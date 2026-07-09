@@ -172,7 +172,7 @@ print(pto_code)
 | `system.tfree_to_aiv(tile_from_tpop[, id=I])` | `pto.tfree_from_aiv {[id = I, ]split = N}` | 将消费侧槽位释放回 Vector |
 | `system.aic_initialize_pipe(...)` | `pto.aic_initialize_pipe {[id = I, ]dir_mask = D, slot_size = S[, slot_num = N][, local_slot_num = L]} (c2v_consumer_buf = %ssa : i32, v2c_consumer_buf = %ssa : i32)` | Cube 管道初始化（仅在显式设置时输出 `slot_num`/`local_slot_num`，否则由 PTOAS 取默认值） |
 | `system.aiv_initialize_pipe(...)` | `pto.aiv_initialize_pipe {[id = I, ]dir_mask = D, slot_size = S[, slot_num = N][, local_slot_num = L]} (c2v_consumer_buf = %ssa : i32, v2c_consumer_buf = %ssa : i32)` | Vector 管道初始化（仅在显式设置时输出 `slot_num`/`local_slot_num`，否则由 PTOAS 取默认值） |
-| `system.reserve_buffer(...)` | `%name = pto.reserve_buffer {name = "N", size = S, location = #pto.address_space<loc>, auto = false, base = B} -> i32` | 预留缓冲区 |
+| `system.reserve_buffer(...)` | `%name = pto.reserve_buffer {name = "N", size = S, location = #pto.address_space<loc>, auto = false, base = B} -> i32` | 预留缓冲区（`memory_planner=PTOAS` 下发射 `auto = true` 且省略 `base`） |
 | `system.import_peer_buffer(...)` | `%name = pto.import_reserved_buffer {name = "N", peer_func = @F} -> i32` | 导入对等缓冲区 |
 | `system.syncall(core_type=C)` | `pto.syncall() mode = #pto.sync_all_mode<hard>, core_type = #pto.sync_core_type<C>` | 跨核全员屏障（hard/FFTS 形态） |
 | `system.syncall(mode="soft", core_type="aiv_only", gm_workspace=ws, used_cores=N)` | `pto.syncall(%gm_pview, %scratch, %used : !pto.partition_tensor_view<...xi32>, !pto.tile_buf<loc=vec, ...i32>, i32) mode = #pto.sync_all_mode<soft>, core_type = #pto.sync_core_type<aiv_only>` | soft/GM 轮询屏障（部分占用即可；`gm_workspace` 下沉为 `pto.partition_view`，scratch tile 由编译器合成） |
@@ -193,7 +193,7 @@ print(pto_code)
 - `system.tfree_*` 的 `split` 来自其 tile 参数，因此前端必须释放由 `tile.tpop_*` 产生的那个确切 SSA 值，即使 PTO 指令本身并不显式接收该 tile 作为操作数
 - `ExpandMixedKernel` 现在会在 split 生成的消费侧 `tile.tpop_*` 之后自动补 `system.tfree_*`，保持 `tpop -> direct users -> tfree -> next tpop`
 - `reserve_buffer` 和 `import_reserved_buffer` 返回 `i32` SSA 值；`initialize_pipe` 以操作数引用这些值
-- `AllocateMemoryAddr` 会在 PTO 输出前解析 `reserve_buffer(base=AUTO)`，因此 PTO 始终输出 `auto = false, base = <value>`
+- `memory_planner=PYPTO` 时，`AllocateMemoryAddr` 会在 PTO 输出前解析 `reserve_buffer(base=AUTO)`，因此 PTO 输出 `auto = false, base = <value>`；`memory_planner=PTOAS` 跳过该 pass，PTO 输出 `auto = true` 且省略 `base`（ptoas 不接受两者同时出现），由 ptoas `PlanMemory` 放置该预留区
 - `reserve_buffer` location 对于 AIC 函数为 `mat`，对于 AIV/InCore 函数为 `vec`
 - `import_reserved_buffer` 使用 MLIR 符号语法（`@func_name`）表示 `peer_func`
 - 缓冲区名称和 peer_func 字符串由 `CheckSafeIdentifier` 验证（仅允许字母数字和下划线）
@@ -280,10 +280,10 @@ print(pto_code)
 （`ir.compile(..., memory_planner=passes.MemoryPlanner.PYPTO | PTOAS)`，默认
 `PYPTO`）。它同时作用于 pass 流水线（经 `PassContext`）与 codegen：
 
-| 模式 | 流水线 | `pto.alloc_tile` | ptoas |
-| ---- | ------ | ---------------- | ----- |
-| `PYPTO`（默认） | 运行 `MaterializeSemanticAliases` + `MemoryReuse` + `AllocateMemoryAddr` | 发射 `addr = <const>`（来自 `MemRef.byte_offset_`） | `--pto-level=level3`（信任已烘焙地址） |
-| `PTOAS` | 运行 `MaterializeSemanticAliases`；**跳过** `MemoryReuse` + `AllocateMemoryAddr` | 省略 `addr`（`PTOCodegen.generate(emit_tile_addr=False)`） | `--pto-level=level2`（ptoas `PlanMemory` 做复用 + 定址） |
+| 模式 | 流水线 | `pto.alloc_tile` | `pto.reserve_buffer` | ptoas |
+| ---- | ------ | ---------------- | -------------------- | ----- |
+| `PYPTO`（默认） | 运行 `MaterializeSemanticAliases` + `MemoryReuse` + `AllocateMemoryAddr` | 发射 `addr = <const>`（来自 `MemRef.byte_offset_`） | `auto = false, base = <const>` | `--pto-level=level3`（信任已烘焙地址） |
+| `PTOAS` | 运行 `MaterializeSemanticAliases`；**跳过** `MemoryReuse` + `AllocateMemoryAddr` | 省略 `addr`（`PTOCodegen.generate(emit_tile_addr=False)`） | `auto = true`（不带 `base`） | `--pto-level=level2`（ptoas `PlanMemory` 做复用 + 定址） |
 
 内存规划拆成两个 pass：**`MaterializeSemanticAliases`** 把**语义强制**的别名
 （循环累加器、原地算子）归一到同一 MemRef；**`MemoryReuse`** 只做**机会性**的、

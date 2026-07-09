@@ -390,9 +390,12 @@ void RegisterCrossCoreOps(Backend& backend, const std::unordered_set<std::string
     const auto name = op->GetKwarg<std::string>("name");
     const int size = op->GetKwarg<int>("size", -1);
     const int base = op->GetKwarg<int>("base", -1);
+    // Under memory_planner=PtoAS, AllocateMemoryAddr is skipped and ptoas PlanMemory places the
+    // reserved region itself (`auto = true`, base absent — ptoas rejects both being present).
+    const bool auto_alloc = !codegen.EmitTileAddr();
     CHECK(!name.empty()) << "reserve_buffer requires 'name' attribute";
     CHECK(size > 0) << "reserve_buffer requires positive 'size' attribute, got " << size;
-    CHECK(base >= 0)
+    INTERNAL_CHECK_SPAN(auto_alloc || base >= 0, op->span_)
         << "reserve_buffer requires AllocateMemoryAddr to resolve 'base' before PTO emission, got " << base;
     CheckSafeIdentifier(name, "reserve_buffer 'name'");
 
@@ -413,7 +416,10 @@ void RegisterCrossCoreOps(Backend& backend, const std::unordered_set<std::string
 
     std::ostringstream oss;
     oss << ssa_name << " = pto.reserve_buffer {name = \"" << name << "\", size = " << size
-        << ", location = #pto.address_space<" << location << ">, auto = false, base = " << base;
+        << ", location = #pto.address_space<" << location << ">, auto = " << (auto_alloc ? "true" : "false");
+    if (!auto_alloc) {
+      oss << ", base = " << base;
+    }
     oss << "} -> i32";
     codegen.Emit(oss.str());
 

@@ -536,6 +536,15 @@ class PTOCodegen : public CodegenBase {
   [[nodiscard]] std::string GetGMSlotBufferSSAForPipe(int pipe_id, int dir_mask);
 
   /**
+   * @brief Whether physical addresses are baked into the emitted PTO.
+   *
+   * False under `memory_planner=PtoAS` (--pto-level=level2), where ptoas
+   * PlanMemory owns local-memory placement: `pto.alloc_tile` omits `addr` and
+   * `pto.reserve_buffer` is emitted as `auto = true` with no `base`.
+   */
+  [[nodiscard]] bool EmitTileAddr() const { return emit_tile_addr_; }
+
+  /**
    * @brief Check if the current function is an AIC (Cube) function
    */
   [[nodiscard]] bool IsAICFunction() const;

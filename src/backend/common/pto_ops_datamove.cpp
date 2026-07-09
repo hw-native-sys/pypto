@@ -800,10 +800,20 @@ static void EmitTreshapeView(codegen::PTOCodegen& codegen, const ir::ExprPtr& sr
                              std::string result_target, const std::string& result_type,
                              const std::string& temp_prefix) {
   std::string src = codegen.GetExprAsCode(src_arg);
-  std::string src_type;
-  if (auto src_var = AsVarLike(src_arg)) {
-    if (auto tile_type = As<ir::TileType>(src_var->GetType())) {
-      src_type = codegen.GetTileBufTypeStringFromTileType(tile_type);
+  // Annotate the operand with the type its SSA value was DEFINED with, which
+  // GetExprTypeAnnotation resolves through the SSA → tile_buf-type map. Deriving
+  // it from the IR TileType instead breaks whenever the def carries static valid
+  // dims that `ExtractTileTypeInfo` renders as `v_row=?, v_col=?`: a `pto.subview`
+  // def infers its valid from the slice `sizes`, so a reshape of a slice would
+  // print `valid=?x?` at the use and MLIR rejects the def/use type mismatch.
+  std::string src_type = codegen.GetExprTypeAnnotation(src_arg);
+  if (src_type.empty()) {
+    // MemRef-less source (a view over a cross-core tpop slot): no SSA type was
+    // registered and GetExprTypeAnnotation's TileType arm requires a MemRef.
+    if (auto src_var = AsVarLike(src_arg)) {
+      if (auto tile_type = As<ir::TileType>(src_var->GetType())) {
+        src_type = codegen.GetTileBufTypeStringFromTileType(tile_type);
+      }
     }
   }
   if (!result_type.empty()) {

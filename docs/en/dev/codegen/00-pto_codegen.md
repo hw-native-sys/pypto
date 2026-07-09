@@ -177,7 +177,7 @@ sub-window carved out by `pto.subview`.
 | `system.tfree_to_aiv(tile_from_tpop[, id=I])` | `pto.tfree_from_aiv {[id = I, ]split = N}` | Release a consumer slot back to Vector |
 | `system.aic_initialize_pipe(...)` | `pto.aic_initialize_pipe {[id = I, ]dir_mask = D, slot_size = S[, slot_num = N][, local_slot_num = L]} (c2v_consumer_buf = %ssa : i32, v2c_consumer_buf = %ssa : i32)` | Cube pipe init (`slot_num`/`local_slot_num` emitted only when set; otherwise PTOAS uses its defaults) |
 | `system.aiv_initialize_pipe(...)` | `pto.aiv_initialize_pipe {[id = I, ]dir_mask = D, slot_size = S[, slot_num = N][, local_slot_num = L]} (c2v_consumer_buf = %ssa : i32, v2c_consumer_buf = %ssa : i32)` | Vector pipe init (`slot_num`/`local_slot_num` emitted only when set; otherwise PTOAS uses its defaults) |
-| `system.reserve_buffer(...)` | `%name = pto.reserve_buffer {name = "N", size = S, location = #pto.address_space<loc>, auto = false, base = B} -> i32` | Reserve buffer |
+| `system.reserve_buffer(...)` | `%name = pto.reserve_buffer {name = "N", size = S, location = #pto.address_space<loc>, auto = false, base = B} -> i32` | Reserve buffer (`auto = true`, `base` omitted under `memory_planner=PTOAS`) |
 | `system.import_peer_buffer(...)` | `%name = pto.import_reserved_buffer {name = "N", peer_func = @F} -> i32` | Import peer buffer |
 | `system.syncall(core_type=C)` | `pto.syncall() mode = #pto.sync_all_mode<hard>, core_type = #pto.sync_core_type<C>` | Cross-core all-participant barrier (hard/FFTS form) |
 | `system.syncall(mode="soft", core_type="aiv_only", gm_workspace=ws, used_cores=N)` | `pto.syncall(%gm_pview, %scratch, %used : !pto.partition_tensor_view<...xi32>, !pto.tile_buf<loc=vec, ...i32>, i32) mode = #pto.sync_all_mode<soft>, core_type = #pto.sync_core_type<aiv_only>` | Soft/GM-polling barrier (partial occupancy; `gm_workspace` lowers to a `pto.partition_view`, scratch tile is compiler-synthesized) |
@@ -198,7 +198,7 @@ sub-window carved out by `pto.subview`.
 - `system.tfree_*` derives `split` from its tile argument, so the frontend must free the exact SSA value produced by `tile.tpop_*`, even though the PTO instruction itself does not take the tile as an explicit operand
 - `ExpandMixedKernel` now auto-generates consumer-side `system.tfree_*` after split-generated `tile.tpop_*`, preserving `tpop -> direct users -> tfree -> next tpop`
 - `reserve_buffer` and `import_reserved_buffer` return `i32` SSA values; `initialize_pipe` references them as operands
-- `AllocateMemoryAddr` resolves `reserve_buffer(base=AUTO)` before PTO emission, so PTO always emits `auto = false, base = <value>`
+- Under `memory_planner=PYPTO`, `AllocateMemoryAddr` resolves `reserve_buffer(base=AUTO)` before PTO emission, so PTO emits `auto = false, base = <value>`. Under `memory_planner=PTOAS` that pass is skipped, so PTO emits `auto = true` with `base` omitted (ptoas rejects both attributes together) and ptoas `PlanMemory` places the reserved region
 - `reserve_buffer` location is `mat` for AIC functions, `vec` for AIV/InCore functions
 - `import_reserved_buffer` uses MLIR symbol syntax (`@func_name`) for `peer_func`
 - Buffer name and peer_func strings are validated by `CheckSafeIdentifier` (alphanumeric + underscore only)
@@ -288,10 +288,10 @@ Who assigns the physical `addr` is selected by the `memory_planner` option
 (`ir.compile(..., memory_planner=passes.MemoryPlanner.PYPTO | PTOAS)`, default
 `PYPTO`). It threads to both the pass pipeline (via `PassContext`) and codegen:
 
-| Mode | Pipeline | `pto.alloc_tile` | ptoas |
-| ---- | -------- | ---------------- | ----- |
-| `PYPTO` (default) | runs `MaterializeSemanticAliases` + `MemoryReuse` + `AllocateMemoryAddr` | emits `addr = <const>` (from `MemRef.byte_offset_`) | `--pto-level=level3` (trusts baked addresses) |
-| `PTOAS` | runs `MaterializeSemanticAliases`; **skips** `MemoryReuse` + `AllocateMemoryAddr` | omits `addr` (`PTOCodegen.generate(emit_tile_addr=False)`) | `--pto-level=level2` (ptoas `PlanMemory` does reuse + addresses) |
+| Mode | Pipeline | `pto.alloc_tile` | `pto.reserve_buffer` | ptoas |
+| ---- | -------- | ---------------- | -------------------- | ----- |
+| `PYPTO` (default) | runs `MaterializeSemanticAliases` + `MemoryReuse` + `AllocateMemoryAddr` | emits `addr = <const>` (from `MemRef.byte_offset_`) | `auto = false, base = <const>` | `--pto-level=level3` (trusts baked addresses) |
+| `PTOAS` | runs `MaterializeSemanticAliases`; **skips** `MemoryReuse` + `AllocateMemoryAddr` | omits `addr` (`PTOCodegen.generate(emit_tile_addr=False)`) | `auto = true` (no `base`) | `--pto-level=level2` (ptoas `PlanMemory` does reuse + addresses) |
 
 Memory planning is split into two passes: **`MaterializeSemanticAliases`**
 forces *semantics-required* aliasing (loop-carried accumulators, in-place ops)
