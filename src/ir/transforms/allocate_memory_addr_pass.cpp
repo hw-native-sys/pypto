@@ -12,7 +12,6 @@
 #include <algorithm>
 #include <any>
 #include <cstdint>
-#include <cstdlib>
 #include <map>
 #include <memory>
 #include <set>
@@ -304,24 +303,23 @@ void MaybeConsultDsaSolver(const FunctionPtr& func, const MemoryAllocatorPolicy&
                            const ReservedEndBySpace& reserved_end_by_space,
                            const std::vector<MemRefWithSpace>& memrefs,
                            const std::vector<std::pair<const MemRef*, MemRefPtr>>& bump_pairs) {
-  const char* flag = std::getenv("PYPTO_DSA_SOLVER");
-  if (flag == nullptr || std::string(flag) != "1") return;
+  if (dsa::GetSolverMode() == dsa::SolverMode::Off) return;
 
-  auto lifetimes = ComputeAllocationLifetimes(func->body_);
-  if (lifetimes.empty()) return;
+  auto plan = ComputeAllocationPlan(func->body_);
+  if (plan.intervals.empty()) return;
 
   // Backend per-space capacities (0 == unbounded) as pool caps.
   std::unordered_map<MemorySpace, uint64_t> caps;
   if (backend::BackendConfig::IsConfigured()) {
     const backend::Backend* be = backend::GetBackend();
-    for (const auto& li : lifetimes) {
+    for (const auto& li : plan.intervals) {
       if (caps.count(li.memory_space)) continue;
       const uint64_t sz = be->GetMemSize(li.memory_space);
       if (sz > 0) caps[li.memory_space] = sz;
     }
   }
 
-  auto problem = dsa::BuildDsaProblem(lifetimes, policy, reserved_end_by_space, caps);
+  auto problem = dsa::BuildDsaProblem(plan.intervals, plan.separations, policy, reserved_end_by_space, caps);
   dsa::FirstFitByLifetimeSolver solver;
   auto result = solver.Solve(problem);
   INTERNAL_CHECK_SPAN(result.solution.has_value(), func->span_)

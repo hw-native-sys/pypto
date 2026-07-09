@@ -44,6 +44,7 @@
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/dsa/memref_dsa_adapter.h"
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/lifetime_analysis.h"
 #include "pypto/ir/transforms/utils/memory_footprint.h"
@@ -2953,7 +2954,14 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   // Step 6: Strip the now-consumed pipeline_membership attr so it does not ride
   // downstream into later passes / codegen. It was only needed to carry stage
   // identity from LowerPipelineLoops to the reuse decision above.
-  new_body = StripPipelineMembershipMutator().VisitStmt(new_body);
+  //
+  // Exception: when the DSA solver is engaged (PYPTO_DSA_SOLVER), keep the attr
+  // so AllocateMemoryAddr's adapter can reconstruct the pipeline-clone
+  // separations. Codegen already tolerates a surviving attr (it does under
+  // memory_planner=PTOAS, where MemoryReuse — and thus this strip — is skipped).
+  if (dsa::GetSolverMode() == dsa::SolverMode::Off) {
+    new_body = StripPipelineMembershipMutator().VisitStmt(new_body);
+  }
 
   auto result = std::make_shared<const Function>(func->name_, func->params_, func->param_directions_,
                                                  func->return_types_, new_body, func->span_, func->func_type_,
@@ -2964,10 +2972,30 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
 }  // namespace
 
 // Shared entry point (see utils/lifetime_analysis.h): the DSA adapter reuses the
-// exact per-allocation intervals this pass computes, so both plan from identical
-// liveness. ComputeLifetimes has internal linkage but is visible in this TU.
-std::vector<LifetimeInterval> ComputeAllocationLifetimes(const StmtPtr& func_body) {
-  return ComputeLifetimes(func_body).lifetimes;
+// exact per-allocation intervals + pipeline-clone separations this pass computes,
+// so both plan from identical liveness. ComputeLifetimes has internal linkage but
+// is visible in this TU; PipelineMembershipsConflict comes from utils/attrs.h.
+AllocationPlan ComputeAllocationPlan(const StmtPtr& func_body) {
+  auto analysis = ComputeLifetimes(func_body);
+  AllocationPlan plan;
+  plan.intervals = std::move(analysis.lifetimes);
+
+  // Pipeline double-buffer separations: two allocations that share a pipeline
+  // group with different stages are ping-pong clones and must occupy distinct
+  // buffers. O(n^2) over allocations (n small, per function per pool); pairs are
+  // indices into `intervals`. Same-space only (cross-space pairs can't conflict).
+  const auto& pm = analysis.pipeline_membership;
+  for (size_t i = 0; i < plan.intervals.size(); ++i) {
+    auto ii = pm.find(plan.intervals[i].variable.get());
+    if (ii == pm.end()) continue;
+    for (size_t j = i + 1; j < plan.intervals.size(); ++j) {
+      if (plan.intervals[i].memory_space != plan.intervals[j].memory_space) continue;
+      auto jj = pm.find(plan.intervals[j].variable.get());
+      if (jj == pm.end()) continue;
+      if (PipelineMembershipsConflict(ii->second, jj->second)) plan.separations.emplace_back(i, j);
+    }
+  }
+  return plan;
 }
 
 namespace pass {
