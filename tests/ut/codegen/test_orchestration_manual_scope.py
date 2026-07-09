@@ -269,7 +269,11 @@ class TestManualScopeCodegen:
         assert "if (tid.is_valid())" not in code, code
         assert re.search(r"PTO2TaskId params_t\d+_deps\[1\];", code), code
 
-    def test_user_written_empty_task_dummy_keeps_invalid_task_id(self):
+    def test_user_written_empty_task_dummy_submits_unconditionally(self):
+        # A user-written ``task_dummy(deps=[])`` has no producers but must still
+        # materialize as a real, ready-immediately task whose id is valid and is
+        # added to each consumer's fanin. It is submitted unconditionally — an
+        # ``if (deps_count > 0)`` guard would statically elide it (issue #1976).
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
 
@@ -290,9 +294,17 @@ class TestManualScopeCodegen:
         transformed = pm.run_passes(Prog)
         code = _generate_orch_code(transformed)
 
-        assert "uint32_t params_phase_fence_barrier_0_deps_count = 0;" in code, code
-        assert "PTO2TaskId barrier = PTO2TaskId::invalid();" in code, code
-        assert "if (params_phase_fence_barrier_0_deps_count > 0)" in code, code
+        # The dummy is submitted unconditionally and its id captured directly.
+        assert (
+            "TaskOutputTensors phase_fence_barrier_0_outs = "
+            "rt_submit_dummy_task(params_phase_fence_barrier_0);" in code
+        ), code
+        assert "PTO2TaskId barrier = phase_fence_barrier_0_outs.task_id();" in code, code
+        # No runtime deps-count guard for the empty-deps path — that guard is
+        # what statically elided the barrier before the fix.
+        assert "if (params_phase_fence_barrier_0_deps_count > 0)" not in code, code
+        assert "PTO2TaskId barrier = PTO2TaskId::invalid();" not in code, code
+        # The consumer still lists the (now valid) barrier in its fanin.
         assert re.search(
             r"if \(barrier.*\.is_valid\(\)\) (params_t\d+)_deps\[\1_deps_count\+\+\] = barrier",
             code,

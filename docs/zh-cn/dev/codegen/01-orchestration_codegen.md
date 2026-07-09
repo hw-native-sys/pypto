@@ -542,6 +542,14 @@ call；这个 dummy call 自己的 `manual_dep_edges` attr 仍然引用原始 Ta
 codegen 会把带标记的 call 降低为 `rt_submit_dummy_task(...)`，随后对被改写的 consumer
 继续使用普通标量 dependency lowering。
 
+**空 deps 与带 deps 的 dummy 区别。** 带 deps 的 dummy 会在 `if (deps_count > 0)`
+运行时守卫下提交：它的每条 dep 都在 per-edge `is_valid()` 守卫下追加，运行时可能
+全部解析为 invalid sentinel（即什么都不 fence）。而静态空 deps 的 dummy——只能来自
+用户手写的 `pl.system.task_dummy(deps=[])`，因为 `ExpandManualPhaseFence` 从不插入
+空 barrier——则**无条件**提交。没有前驱的 barrier 依然是一个立即就绪的真实 task，
+其有效 id 必须加入每个 consumer 的 fanin；没有前驱既不影响它的提交，也不影响它到
+后继的边，因此若用 `deps_count > 0` 守卫它就会被静态消除，从而悄悄丢掉这些边。
+
 这会保留 phase boundary，同时避免重复 all-to-all fanout：
 
 ```text
