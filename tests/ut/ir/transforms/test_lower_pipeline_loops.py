@@ -17,6 +17,8 @@ lower → canonicalize chain against Expected programs written as plain
 demoted by CanonicalizeIOOrder).
 """
 
+import re
+
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
@@ -566,6 +568,89 @@ class TestLowerPipelineMechanics:
 
         After = _run_pass(Before)
         ir.assert_structural_equal(After, Expected)
+
+
+class TestAccumulatorMembership:
+    """LowerPipelineLoops tags a pipeline stage's *operands* with
+    ``pipeline_membership`` so MemoryReuse keeps their stage clones in separate
+    buffers (the operand double-buffer). It must NOT tag *cube accumulators*: an
+    Acc-space tile written by a ``tile.matmul*`` MAD is written by the single
+    serialized cube, which retires one tile's MAD before the next's regardless of
+    how many stages overlap, so it is never co-live with the next stage's
+    accumulator. Tagging it would make MemoryReuse's capacity-gate request one L0C
+    buffer per stage and shed it back (a spurious PH-MR-001, and 2^N requested
+    buffers for an accumulator nested N pipeline loops deep). The exception keys on
+    the producer op, not on ``Mem.Acc``: a data-movement op that also targets Acc
+    (e.g. ``tile.extract(..., target_memory=Acc)``) is a real per-stage buffer and
+    stays tagged."""
+
+    def test_pipelined_accumulator_is_not_tagged(self):
+        """A ``tile.matmul`` accumulator inside a ``pl.pipeline`` loop stays
+        untagged after lowering, while its operands — and a non-cube Acc producer
+        (``tile.extract`` into Acc) — get distinct-stage membership. The tagger is
+        backend-independent (no backend fixture)."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore, strict_ssa=True)
+            def kernel(
+                self,
+                a: pl.Tensor[[64, 32], pl.BF16],
+                b: pl.Tensor[[32, 32], pl.BF16],
+                out: pl.Out[pl.Tensor[[64, 32], pl.FP32]],
+            ) -> pl.Tensor[[64, 32], pl.FP32]:
+                for i, (acc,) in pl.pipeline(0, 64, 32, stage=2, init_values=(out,)):
+                    am: pl.Tile[[32, 32], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                        a, [i, 0], [32, 32], target_memory=pl.Mem.Mat
+                    )
+                    bm: pl.Tile[[32, 32], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                        b, [0, 0], [32, 32], target_memory=pl.Mem.Mat
+                    )
+                    lft: pl.Tile[[32, 32], pl.BF16, pl.Mem.Left] = pl.tile.move(am, target_memory=pl.Mem.Left)
+                    rgt: pl.Tile[[32, 32], pl.BF16, pl.Mem.Right] = pl.tile.move(
+                        bm, target_memory=pl.Mem.Right
+                    )
+                    c: pl.Tile[[32, 32], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lft, rgt)
+                    # A non-cube Acc producer: Mat->Acc data movement, NOT a MAD.
+                    _spare: pl.Tile[[32, 32], pl.BF16, pl.Mem.Acc] = pl.tile.extract(
+                        bm, 0, 0, [32, 32], target_memory=pl.Mem.Acc
+                    )
+                    nxt: pl.Tensor[[64, 32], pl.FP32] = pl.store(c, [i, 0], acc)
+                    r = pl.yield_(nxt)
+                return r
+
+        After = passes.lower_pipeline_loops()(Before)
+        lines = ir.python_print(After).splitlines()
+
+        # stage=2 replicates the body into 2 clones. Neither clone's Acc matmul
+        # carries pipeline_membership.
+        acc_matmuls = [ln for ln in lines if "Mem.Acc" in ln and "tile.matmul" in ln]
+        assert len(acc_matmuls) == 2, (
+            f"expected 2 replicated Acc matmuls, got {len(acc_matmuls)}: {acc_matmuls}"
+        )
+        for ln in acc_matmuls:
+            assert "pipeline_membership" not in ln, (
+                f"cube accumulator must not carry pipeline_membership (cube serializes MADs): {ln.strip()}"
+            )
+
+        # A non-cube Acc producer (Mat->Acc extract) is data movement, not a
+        # serialized MAD, so it stays tagged like any operand.
+        acc_extracts = [ln for ln in lines if "Mem.Acc" in ln and "tile.extract" in ln]
+        assert len(acc_extracts) == 2, f"expected 2 replicated Acc extracts, got {len(acc_extracts)}"
+        for ln in acc_extracts:
+            assert "pipeline_membership" in ln, (
+                f"a non-cube Acc producer (tile.extract) must keep membership: {ln.strip()}"
+            )
+
+        # The operand moves are tagged with distinct-stage membership ("0:0" / "0:1").
+        operand_moves = [ln for ln in lines if "tile.move" in ln]
+        assert len(operand_moves) == 4, f"expected 4 replicated operand moves, got {len(operand_moves)}"
+        stages = sorted(
+            m.group(1) for ln in operand_moves if (m := re.search(r'pipeline_membership":\s*"([^"]*)"', ln))
+        )
+        assert stages == ["0:0", "0:0", "0:1", "0:1"], (
+            f"pipelined operands must carry distinct-stage membership, got {stages}"
+        )
 
 
 if __name__ == "__main__":

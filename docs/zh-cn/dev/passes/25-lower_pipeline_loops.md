@@ -8,9 +8,11 @@
 
 `LowerPipelineLoops` 提供更精细的开关：在 tile 层级把循环体复制 `F` 份（典型值 2–4），保留外层 `N/F` 次顺序迭代。每个副本获得独立的定义变量（保持 SSA），各自操作独立的 tile。
 
-仅有新鲜 SSA 变量并不足以让各副本占用独立缓冲：`F` 份副本在程序序上是顺序的，它们的 per-clone tile 生命周期**不相交**——这恰好是 `MemoryReuse` 会将其合并为同一缓冲（破坏 ping-pong）的条件。为使 stage 分离显式化，本 pass 给副本 `k` 的每个产生 tile 的 `Call` 打上 `pipeline_membership` 属性记录 `(group, stage=k)`（见 `include/pypto/ir/transforms/utils/attrs.h`）。嵌套 pipeline 的 tile 会按每层复制区域各携带一个 membership 对，从而在每一层都保持分离。
+仅有新鲜 SSA 变量并不足以让各副本占用独立缓冲：`F` 份副本在程序序上是顺序的，它们的 per-clone tile 生命周期**不相交**——这恰好是 `MemoryReuse` 会将其合并为同一缓冲（破坏 ping-pong）的条件。为使 stage 分离显式化，本 pass 给副本 `k` 中每个产生 tile 的 `Call` 打上 `pipeline_membership` 属性记录 `(group, stage=k)`（见 `include/pypto/ir/transforms/utils/attrs.h`）。嵌套 pipeline 的 tile 会按每层复制区域各携带一个 membership 对，从而在每一层都保持分离。
 
-`MemoryReuse` 以**角色感知**的粒度消费该属性——禁止*所有*跨 stage 复用（depth = `F`）会让每个中间结果都需要 `F` 份独立拷贝，在真实 kernel 上超出片上预算（例如 `stage=4` 的 RMSNorm 需要 `4 × 67 KB > 188 KB` UB）。只有 **load 缓冲**真正需要 per-stage 私有（以便第 `i+1` 次迭代的预取与第 `i` 次的计算重叠）。因此规则为：当两个 tile 同 group、不同 stage **且至少有一个是 load**（`tile.load` / `tile.read`）时，禁止它们共享缓冲；不同 stage 的计算中间结果仍可合并。L0 matmul 空间（Left/Right/Acc/Bias）完全豁免——其 ping-pong 由 `AutoTileMatmulL0` / `CanonicalizeIOOrder` 的 extract 聚类管理，且容量受限。
+**cube 累加器是唯一的例外——它们不被打标记。** 流水线 stage 会对它*加载*的操作数做双缓冲：这些加载与上一 stage 的计算重叠，因此两个 stage 的操作数缓冲确实同时存活（co-live），必须占用独立缓冲。而累加器不是加载得到的；它由单个串行化的 cube（一个 `tile.matmul*` MAD）写入——cube 在开始下一块的 MAD 之前会先完成当前块的 MAD，无论调度器重叠了多少 stage。因此某个 stage 的累加器永远不会与下一 stage 的累加器同时存活；给它打标记只会让 `MemoryReuse` 的容量门控为每个 stage 申请一块 L0C 缓冲、随后又收回为一块——这种冗余分离会触发一条虚假的 `PH-MR-001`，并且对于嵌套 `N` 层 pipeline 的累加器会膨胀到 `2^N` 块申请缓冲。不打标记时，drain-before-next 的累加器仅凭生命周期就合并到它真正需要的那一块 L0C 缓冲上（启用双缓冲 L0C 时，由 `AutoTileMatmulL0` 发射两个真正同时存活的累加器来驱动，而非依赖 membership 标记）。该例外的判定依据是**生产者算子**，而非仅凭 `Mem.Acc`：一个同样以 Acc 为目标的数据搬运算子（例如 `tile.extract(..., target_memory=Acc)`）是真正的 per-stage 缓冲、会跨 stage 重叠，因此像其它被加载的操作数一样保持打标记。
+
+`MemoryReuse` 以**角色感知**的粒度消费该属性——禁止*所有*跨 stage 复用（depth = `F`）会让每个中间结果都需要 `F` 份独立拷贝，在真实 kernel 上超出片上预算（例如 `stage=4` 的 RMSNorm 需要 `4 × 67 KB > 188 KB` UB）。只有 **load 缓冲**真正需要 per-stage 私有（以便第 `i+1` 次迭代的预取与第 `i` 次的计算重叠）。因此**遗留规则**为：当两个 tile 同 group、不同 stage **且至少有一个是 load**（`tile.load` / `tile.read`）时，禁止它们共享缓冲，且 L0 matmul 空间完全豁免；不同 stage 的计算中间结果仍可合并。**默认**路径是容量门控（#1475）：它按可负担的双缓冲深度对操作数 L0 空间（Left/Right/Bias）做 per-stage 分离，仅在某空间容量未知时才回退到遗留判定。累加器（Acc）两条规则都不触及——`LowerPipelineLoops` 不给它们打标记（见上），因此它们总是合并到串行化 cube 所需的那一块 L0C 缓冲上。
 
 由于该标记是通用的 op-call 属性，它会经 python printer/parser（`attrs={"pipeline_membership": "..."}`）序列化，以便在测试框架每个 pass 后执行的 print→parse 往返中存活。
 

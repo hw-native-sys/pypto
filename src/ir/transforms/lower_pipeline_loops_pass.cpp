@@ -124,6 +124,22 @@ VarPtr MakeFreshVar(const VarPtr& original, const std::string& suffix) {
 /// is exactly the set of tile *definitions* MemoryReuse keys its reuse decision
 /// on. Non-tile assigns and non-Call tile defs (e.g. a bare Var alias) carry no
 /// membership and simply fall through unconstrained.
+///
+/// Cube accumulators are the one exception: they are *not* tagged. A pipeline
+/// loop double-buffers the operands it *loads* — their loads overlap the previous
+/// stage's compute, so two stages' operand buffers are genuinely co-live and must
+/// stay apart. An accumulator is not loaded; it is written by the single
+/// serialized cube (a `tile.matmul*` MAD), which retires one tile's MAD before
+/// starting the next regardless of how many stages the scheduler overlaps. So an
+/// accumulator nested in a pipeline loop is never co-live with the next stage's
+/// accumulator, and tagging it only makes MemoryReuse's capacity-gate request one
+/// L0C buffer per stage and then shed it back (a redundant separation that emits a
+/// spurious PH-MR-001, and for an accumulator nested N loops deep balloons to 2^N
+/// requested buffers). Left untagged, the drain-before-next accumulator coalesces
+/// by lifetime alone onto the single buffer it actually needs. The exception keys
+/// on the *producer* op, not on `Mem.Acc`: a data-movement op that also targets
+/// Acc (e.g. `tile.extract(..., target_memory=Acc)`) is a real per-stage buffer
+/// that overlaps across stages, so it stays tagged like any other loaded operand.
 class PipelineMembershipTagger : public IRMutator {
  public:
   PipelineMembershipTagger(int32_t group, int32_t stage) : group_(group), stage_(stage) {}
@@ -135,9 +151,20 @@ class PipelineMembershipTagger : public IRMutator {
     auto visited = IRMutator::VisitStmt_(op);
     auto assign = std::dynamic_pointer_cast<const AssignStmt>(visited);
     if (!assign) return visited;
-    if (!std::dynamic_pointer_cast<const TileType>(assign->var_->GetType())) return visited;
+    auto tile_type = std::dynamic_pointer_cast<const TileType>(assign->var_->GetType());
+    if (!tile_type) return visited;
     auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
     if (!call) return visited;
+
+    // Cube accumulators are written by the serialized cube, never co-live across a
+    // pipeline stage — skip them so MemoryReuse coalesces them onto the single L0C
+    // buffer they need (see the class comment above). Gate on the *producer* being
+    // a cube MAD op (`tile.matmul` and its `_acc` / `_bias` / `_mx*` variants), not
+    // on `Mem.Acc` alone: a data-movement op that also targets Acc (e.g.
+    // `tile.extract(..., target_memory=Acc)`) is a genuine per-stage buffer that
+    // overlaps across stages and must keep its membership.
+    const bool is_cube_matmul = call->op_ && call->op_->name_.rfind("tile.matmul", 0) == 0;
+    if (is_cube_matmul && tile_type->GetMemorySpace() == MemorySpace::Acc) return visited;
 
     auto packed = call->GetAttr<std::string>(kPipelineMembershipAttr, std::string());
     packed = AppendPipelineMembership(packed, group_, stage_);
