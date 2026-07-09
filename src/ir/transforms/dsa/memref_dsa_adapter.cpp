@@ -13,7 +13,9 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <set>
+#include <string>
 
 #include "pypto/ir/memory_allocator_policy.h"
 
@@ -21,11 +23,23 @@ namespace pypto {
 namespace ir {
 namespace dsa {
 
-DsaProblem BuildDsaProblem(const std::vector<LifetimeInterval>& lifetimes, const MemoryAllocatorPolicy& policy,
+SolverMode GetSolverMode() {
+  const char* env = std::getenv("PYPTO_DSA_SOLVER");
+  if (env == nullptr) return SolverMode::Off;
+  const std::string value(env);
+  if (value == "plan") return SolverMode::Plan;
+  if (value == "1" || value == "consult" || value == "on") return SolverMode::Consult;
+  return SolverMode::Off;
+}
+
+DsaProblem BuildDsaProblem(const std::vector<LifetimeInterval>& lifetimes,
+                           const std::vector<std::pair<size_t, size_t>>& separations,
+                           const MemoryAllocatorPolicy& policy,
                            const std::unordered_map<MemorySpace, uint64_t>& reserved_end_by_space,
                            const std::unordered_map<MemorySpace, uint64_t>& pool_caps) {
   DsaProblem problem;
   std::set<MemorySpace> spaces_seen;
+  std::set<size_t> added;  // lifetime indices that became buffers (id == index)
 
   for (size_t i = 0; i < lifetimes.size(); ++i) {
     const LifetimeInterval& li = lifetimes[i];
@@ -45,7 +59,15 @@ DsaProblem BuildDsaProblem(const std::vector<LifetimeInterval>& lifetimes, const
     b.interval.start = li.def_point;
     b.interval.end = li.last_use_point;
     problem.buffers.push_back(b);
+    added.insert(i);
     spaces_seen.insert(li.memory_space);
+  }
+
+  // Carry separations whose both endpoints became buffers (skip DDR-touching pairs).
+  for (const auto& [i, j] : separations) {
+    if (added.count(i) != 0 && added.count(j) != 0) {
+      problem.separations.emplace_back(static_cast<BufferId>(i), static_cast<BufferId>(j));
+    }
   }
 
   for (MemorySpace space : spaces_seen) {
