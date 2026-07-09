@@ -7,13 +7,19 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Compile-time occupancy check for hard-form ``pl.system.syncall`` (issue #1935).
+"""Compile-time occupancy + sync_start check for hard-form ``pl.system.syncall`` (issue #1935).
 
 A hard (FFTS) ``syncall`` waits for every physical core of its ``core_type`` to
-reach the barrier, so the enclosing ``pl.spmd`` must fill all of them exactly; a
-partial launch deadlocks on device (507018). The ``HardSyncallOccupancy``
-verifier (produced by ``ExpandMixedKernel``, in ``GetVerifiedProperties()``)
-rejects such launches at compile time.
+reach the barrier, so the enclosing ``pl.spmd`` must satisfy two conditions:
+
+1. **Full occupancy** — fill all those cores exactly (one block per core); a
+   partial launch leaves unlaunched cores that never reach the barrier.
+2. **sync_start=True** — all blocks co-resident at once; without it the runtime
+   may dispatch blocks in waves and the barrier deadlocks even at full occupancy.
+
+Either gap deadlocks on device (507018). The ``HardSyncallOccupancy`` verifier
+(produced by ``ExpandMixedKernel``, in ``GetVerifiedProperties()``) rejects both
+at compile time.
 
 Tests drive the full Default pipeline on Ascend910B (48 VECTOR / 24 CUBE cores).
 """
@@ -34,6 +40,14 @@ def _run(program_cls) -> None:
     pm.run_passes(program_cls)
 
 
+# A hard barrier now requires BOTH full occupancy and sync_start=True, so the
+# primary builders launch with the literal ``sync_start=True`` (occupancy-only
+# rejection tests still fail on occupancy first, before the sync_start check).
+# The ``_no_sync`` variants below launch without it to exercise the sync_start
+# rejection. Each variant lives in its OWN builder function: the DSL parser needs
+# a ``sync_start=`` boolean *literal*, and ``inspect.getsource`` (used by
+# ``@pl.program``) locates a class by qualname — two same-named classes in one
+# function would both resolve to the first one's source.
 def _aiv_program(n: int):
     @pl.program
     class Prog:
@@ -59,7 +73,41 @@ def _aiv_program(n: int):
             b: pl.Tensor[[n * TR, TC], pl.FP32],
             out: pl.Out[pl.Tensor[[n * TR, TC], pl.FP32]],
         ) -> pl.Tensor[[n * TR, TC], pl.FP32]:
-            with pl.spmd(n):
+            with pl.spmd(n, sync_start=True):
+                out = self.add(a, b, out)
+            return out
+
+    return Prog
+
+
+def _aiv_program_no_sync(n: int):
+    """Full-occupancy AIV launch WITHOUT sync_start — exercises the sync_start check."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def add(
+            self,
+            a: pl.Tensor[[n * TR, TC], pl.FP32],
+            b: pl.Tensor[[n * TR, TC], pl.FP32],
+            out: pl.Out[pl.Tensor[[n * TR, TC], pl.FP32]],
+        ) -> pl.Tensor[[n * TR, TC], pl.FP32]:
+            i = pl.tile.get_block_idx()
+            o = i * TR
+            ta = pl.load(a, [o, 0], [TR, TC])
+            tb = pl.load(b, [o, 0], [TR, TC])
+            pl.system.syncall(core_type="aiv_only")  # HARD barrier
+            out = pl.store(pl.add(ta, tb), [o, 0], out)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def orchestrator(
+            self,
+            a: pl.Tensor[[n * TR, TC], pl.FP32],
+            b: pl.Tensor[[n * TR, TC], pl.FP32],
+            out: pl.Out[pl.Tensor[[n * TR, TC], pl.FP32]],
+        ) -> pl.Tensor[[n * TR, TC], pl.FP32]:
+            with pl.spmd(n):  # no sync_start (DSL default False)
                 out = self.add(a, b, out)
             return out
 
@@ -133,7 +181,48 @@ def _mixed_program(n: int):
             bias: pl.Tensor[[M, NN], pl.FP32],
             out: pl.Out[pl.Tensor[[M, NN], pl.FP32]],
         ) -> pl.Tensor[[M, NN], pl.FP32]:
-            with pl.spmd(n):
+            with pl.spmd(n, sync_start=True):
+                out = self.mixed(a, b, bias, out)
+            return out
+
+    return Prog
+
+
+def _mixed_program_no_sync(n: int):
+    """Full-occupancy mixed-kernel launch WITHOUT sync_start — exercises the sync_start check."""
+    M = K = NN = 64
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def mixed(
+            self,
+            a: pl.Tensor[[M, K], pl.FP16],
+            b: pl.Tensor[[K, NN], pl.FP16],
+            bias: pl.Tensor[[M, NN], pl.FP32],
+            out: pl.Out[pl.Tensor[[M, NN], pl.FP32]],
+        ) -> pl.Tensor[[M, NN], pl.FP32]:
+            ta = pl.load(a, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+            tb = pl.load(b, [0, 0], [K, NN], target_memory=pl.Mem.Mat)
+            tal = pl.move(ta, target_memory=pl.Mem.Left)
+            tbl = pl.move(tb, target_memory=pl.Mem.Right)
+            tc = pl.matmul(tal, tbl)
+            tcv = pl.move(tc, target_memory=pl.Mem.Vec)
+            tbias = pl.load(bias, [0, 0], [M, NN])
+            tsum = pl.add(tcv, tbias)
+            pl.system.syncall(core_type="mix")  # HARD mix barrier
+            out = pl.store(tsum, [0, 0], out)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def orchestrator(
+            self,
+            a: pl.Tensor[[M, K], pl.FP16],
+            b: pl.Tensor[[K, NN], pl.FP16],
+            bias: pl.Tensor[[M, NN], pl.FP32],
+            out: pl.Out[pl.Tensor[[M, NN], pl.FP32]],
+        ) -> pl.Tensor[[M, NN], pl.FP32]:
+            with pl.spmd(n):  # no sync_start (DSL default False)
                 out = self.mixed(a, b, bias, out)
             return out
 
@@ -219,7 +308,41 @@ def _spmd_submit_program(n: int):
             out: pl.Out[pl.Tensor[[n * TR, TC], pl.FP32]],
         ) -> pl.Tensor[[n * TR, TC], pl.FP32]:
             with pl.manual_scope():
-                out, _tid = pl.spmd_submit(self.add, a, b, out, core_num=n)
+                out, _tid = pl.spmd_submit(self.add, a, b, out, core_num=n, sync_start=True)
+            return out
+
+    return Prog
+
+
+def _spmd_submit_program_no_sync(n: int):
+    """Full-occupancy pl.spmd_submit WITHOUT sync_start — exercises the Submit sync_start check."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def add(
+            self,
+            a: pl.Tensor[[n * TR, TC], pl.FP32],
+            b: pl.Tensor[[n * TR, TC], pl.FP32],
+            out: pl.Out[pl.Tensor[[n * TR, TC], pl.FP32]],
+        ) -> pl.Tensor[[n * TR, TC], pl.FP32]:
+            i = pl.tile.get_block_idx()
+            o = i * TR
+            ta = pl.load(a, [o, 0], [TR, TC])
+            tb = pl.load(b, [o, 0], [TR, TC])
+            pl.system.syncall(core_type="aiv_only")
+            out = pl.store(pl.add(ta, tb), [o, 0], out)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+        def orchestrator(
+            self,
+            a: pl.Tensor[[n * TR, TC], pl.FP32],
+            b: pl.Tensor[[n * TR, TC], pl.FP32],
+            out: pl.Out[pl.Tensor[[n * TR, TC], pl.FP32]],
+        ) -> pl.Tensor[[n * TR, TC], pl.FP32]:
+            with pl.manual_scope():
+                out, _tid = pl.spmd_submit(self.add, a, b, out, core_num=n)  # no sync_start
             return out
 
     return Prog
@@ -253,7 +376,42 @@ def _cluster_spmd_program(n: int):
             out: pl.Out[pl.Tensor[[n * TR, TC], pl.FP32]],
         ) -> pl.Tensor[[n * TR, TC], pl.FP32]:
             with pl.cluster():
-                with pl.spmd(n):
+                with pl.spmd(n, sync_start=True):
+                    out = self.add(a, b, out)
+            return out
+
+    return Prog
+
+
+def _cluster_spmd_program_no_sync(n: int):
+    """Full-occupancy pl.cluster()-nested pl.spmd, no sync_start — exercises the Group check."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def add(
+            self,
+            a: pl.Tensor[[n * TR, TC], pl.FP32],
+            b: pl.Tensor[[n * TR, TC], pl.FP32],
+            out: pl.Out[pl.Tensor[[n * TR, TC], pl.FP32]],
+        ) -> pl.Tensor[[n * TR, TC], pl.FP32]:
+            i = pl.tile.get_block_idx()
+            o = i * TR
+            ta = pl.load(a, [o, 0], [TR, TC])
+            tb = pl.load(b, [o, 0], [TR, TC])
+            pl.system.syncall(core_type="aiv_only")
+            out = pl.store(pl.add(ta, tb), [o, 0], out)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def orchestrator(
+            self,
+            a: pl.Tensor[[n * TR, TC], pl.FP32],
+            b: pl.Tensor[[n * TR, TC], pl.FP32],
+            out: pl.Out[pl.Tensor[[n * TR, TC], pl.FP32]],
+        ) -> pl.Tensor[[n * TR, TC], pl.FP32]:
+            with pl.cluster():
+                with pl.spmd(n):  # no sync_start (DSL default False)
                     out = self.add(a, b, out)
             return out
 
@@ -261,7 +419,7 @@ def _cluster_spmd_program(n: int):
 
 
 class TestHardSyncallOccupancy:
-    """Compile-time occupancy check for the hard (FFTS) syncall (issue #1935)."""
+    """Compile-time occupancy + sync_start check for the hard (FFTS) syncall (issue #1935)."""
 
     def test_partial_aiv_occupancy_rejected(self):
         """pl.spmd(24) < 48 AIV cores + hard aiv_only barrier is rejected at compile time."""
@@ -269,13 +427,18 @@ class TestHardSyncallOccupancy:
             _run(_aiv_program(24))
 
     def test_full_aiv_occupancy_accepted(self):
-        """pl.spmd(48) == 48 AIV cores compiles cleanly (occupancy is exactly full)."""
+        """pl.spmd(48, sync_start=True) at full AIV occupancy compiles cleanly."""
         _run(_aiv_program(48))
 
     def test_over_aiv_occupancy_rejected(self):
         """pl.spmd(96) > 48 AIV cores is rejected (hard barrier needs exactly-full occupancy)."""
         with pytest.raises(Exception, match="fill all 48 AIV cores"):
             _run(_aiv_program(96))
+
+    def test_full_aiv_occupancy_without_sync_start_rejected(self):
+        """pl.spmd(48) at full occupancy but without sync_start is rejected (blocks not co-resident)."""
+        with pytest.raises(Exception, match="sync_start=True"):
+            _run(_aiv_program_no_sync(48))
 
     def test_soft_form_not_checked(self):
         """The soft (GM-polling) form works at partial occupancy and is not rejected."""
@@ -286,13 +449,18 @@ class TestHardSyncallOccupancy:
         _run(_bare_kernel_program())
 
     def test_mixed_full_occupancy_accepted(self):
-        """Mixed kernel + hard mix barrier at pl.spmd(24) == 24 core-groups compiles cleanly."""
+        """Mixed kernel + hard mix barrier at pl.spmd(24, sync_start=True) compiles cleanly."""
         _run(_mixed_program(24))
 
     def test_mixed_partial_occupancy_rejected(self):
         """Mixed kernel + hard mix barrier at pl.spmd(12) < 24 core-groups is rejected."""
         with pytest.raises(Exception, match="core-groups"):
             _run(_mixed_program(12))
+
+    def test_mixed_full_occupancy_without_sync_start_rejected(self):
+        """Mixed kernel at full 24 core-groups but without sync_start is rejected."""
+        with pytest.raises(Exception, match="sync_start=True"):
+            _run(_mixed_program_no_sync(24))
 
     def test_standalone_default_mix_barrier_rejected(self):
         """A pure-AIV kernel with the default (mix) hard barrier can never complete (no AIC)."""
@@ -305,8 +473,13 @@ class TestHardSyncallOccupancy:
             _run(_spmd_submit_program(24))
 
     def test_spmd_submit_full_occupancy_accepted(self):
-        """pl.spmd_submit(core_num=48) at full AIV occupancy compiles cleanly."""
+        """pl.spmd_submit(core_num=48, sync_start=True) at full AIV occupancy compiles cleanly."""
         _run(_spmd_submit_program(48))
+
+    def test_spmd_submit_full_occupancy_without_sync_start_rejected(self):
+        """pl.spmd_submit(core_num=48) at full occupancy but without sync_start is rejected."""
+        with pytest.raises(Exception, match="sync_start=True"):
+            _run(_spmd_submit_program_no_sync(48))
 
     def test_cluster_spmd_partial_occupancy_rejected(self):
         """pl.cluster()-nested pl.spmd(24) (a Group with core_num) is checked and rejected."""
@@ -314,8 +487,13 @@ class TestHardSyncallOccupancy:
             _run(_cluster_spmd_program(24))
 
     def test_cluster_spmd_full_occupancy_accepted(self):
-        """pl.cluster()-nested pl.spmd(48) at full AIV occupancy compiles cleanly."""
+        """pl.cluster()-nested pl.spmd(48, sync_start=True) at full AIV occupancy compiles cleanly."""
         _run(_cluster_spmd_program(48))
+
+    def test_cluster_spmd_full_occupancy_without_sync_start_rejected(self):
+        """pl.cluster()-nested pl.spmd(48) at full occupancy but without sync_start is rejected."""
+        with pytest.raises(Exception, match="sync_start=True"):
+            _run(_cluster_spmd_program_no_sync(48))
 
 
 if __name__ == "__main__":

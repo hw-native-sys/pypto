@@ -12,11 +12,18 @@
 // HardSyncallOccupancyValid verifier (issue #1935).
 //
 // The hard (FFTS) form of `system.syncall` waits for *every* physical core of
-// its `core_type` to arrive at the barrier. If the enclosing SPMD launch does
-// not fill all those cores, the unlaunched cores never reach the barrier, the
-// FFTS wait never completes, and the AICore times out on device (507018),
-// leaving it needing a reset. The soft (GM-polling) form exists for partial
-// occupancy. This verifier turns that runtime footgun into a compile-time error.
+// its `core_type` to arrive at the barrier. Completing it needs two independent
+// guarantees from the enclosing SPMD launch:
+//   1. Full occupancy — one block per physical core. If the launch does not
+//      fill all those cores, the unlaunched cores never reach the barrier.
+//   2. sync_start — all blocks co-resident at once. Even at full occupancy, a
+//      non-sync_start launch may dispatch blocks in waves; an early wave hits
+//      the FFTS barrier and waits for a later wave that cannot dispatch until
+//      the early one retires, so the barrier deadlocks.
+// Either gap leaves the FFTS wait unable to complete, the AICore times out on
+// device (507018), and the core needs a reset. The soft (GM-polling) form
+// exists for partial occupancy. This verifier turns both runtime footguns into
+// compile-time errors.
 //
 // It runs after ExpandMixedKernel, where each launched kernel's FunctionType is
 // resolved (AIV / AIC / Group), which is what lets us map SPMD blocks to physical
@@ -36,13 +43,15 @@
 //   - K Group (mixed AIC+AIV kernel) -> required = #CUBE core-groups (1 AIC each),
 //     for any barrier core_type; the hard syncall lives in the AIC/AIV sub-kernels
 //     (a `mix` barrier is duplicated into both lanes -> reported once).
-// N != required is an error (partial *and* over-occupancy).
+// N != required is an error (partial *and* over-occupancy). Independently, a
+// launch that is exactly full but lacks sync_start is also an error.
 //
 // A bare hard-syncall kernel with no SPMD launch is not checked: occupancy is a
 // launch-time property.
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -128,6 +137,33 @@ std::string OccupancyMessage(const std::string& detail, int64_t launched, const 
          " blocks. Use mode=\"soft\" (GM-polling) for partial occupancy.";
 }
 
+// Full occupancy fills every physical core, but the FFTS barrier also needs all
+// those blocks *co-resident* — every core must be running this kernel at the
+// same time. Only a sync_start launch guarantees that; without it the runtime
+// may dispatch blocks in waves, so an early wave hits the barrier and waits for
+// a later wave that cannot dispatch until the early one retires -> deadlock
+// (507018). Occupancy is necessary but not sufficient; sync_start is the
+// co-residency guarantee.
+std::string SyncStartMessage(const std::string& detail) {
+  return "hard pl.system.syncall" + detail +
+         " requires the SPMD launch to set sync_start=True so all blocks are co-resident at the "
+         "FFTS barrier; without it the runtime may dispatch blocks in waves and the barrier "
+         "deadlocks on device (507018). Add sync_start=True to the launch, or use mode=\"soft\" "
+         "(GM-polling).";
+}
+
+// Ordered launch-level gate for a hard syncall: full occupancy first, then
+// co-residency (sync_start). Returns the diagnostic for the first unmet
+// requirement, or nullopt when the launch satisfies both. Keeps the "occupancy
+// before sync_start" policy in one place for the AIV / AIC / Group cases.
+// `requirement` names the occupancy target (e.g. "fill all 48 AIV cores ...").
+std::optional<std::string> OccupancyGateMessage(bool occupancy_ok, bool sync_start, const std::string& detail,
+                                                int64_t launched, const std::string& requirement) {
+  if (!occupancy_ok) return OccupancyMessage(detail, launched, requirement);
+  if (!sync_start) return SyncStartMessage(detail);
+  return std::nullopt;
+}
+
 std::string UnsatisfiableMessage(const std::string& core_type, const std::string& launch_kind,
                                  const std::string& missing_cores) {
   return "hard pl.system.syncall(core_type=\"" + core_type + "\") can never complete in a " + launch_kind +
@@ -161,8 +197,10 @@ class HardSyncallOccupancyVerifierImpl : public PropertyVerifier {
       const bool is_launch_fn = fn->func_type_ == FunctionType::Spmd ||
                                 (fn->func_type_ == FunctionType::Group && fn->HasAttr("core_num"));
       if (is_launch_fn) {
-        CheckLaunchSite(fn->GetAttr<ExprPtr>("core_num", nullptr), DirectCallees(fn, program), total_vector,
-                        total_cube, program, diagnostics);
+        // sync_start rides as a launch-function attr, emitted only when true by
+        // OutlineHierarchyScopes / OutlineClusterScopes (absent => false).
+        CheckLaunchSite(fn->GetAttr<ExprPtr>("core_num", nullptr), fn->GetAttr<bool>("sync_start", false),
+                        DirectCallees(fn, program), total_vector, total_cube, program, diagnostics);
       }
 
       // Submit launch sites: pl.spmd_submit(..., core_num=N) carries the block
@@ -174,26 +212,27 @@ class HardSyncallOccupancyVerifierImpl : public PropertyVerifier {
         if (!submit->core_num_.has_value() || !submit->op_) continue;
         auto callee = program->GetFunction(submit->op_->name_);
         if (!callee) continue;
-        CheckLaunchSite(*submit->core_num_, {callee}, total_vector, total_cube, program, diagnostics);
+        CheckLaunchSite(*submit->core_num_, submit->sync_start_, {callee}, total_vector, total_cube, program,
+                        diagnostics);
       }
     }
   }
 
  private:
-  static void CheckLaunchSite(const ExprPtr& core_num_expr, const std::vector<FunctionPtr>& callees,
-                              int total_vector, int total_cube, const ProgramPtr& program,
-                              std::vector<Diagnostic>& diagnostics) {
+  static void CheckLaunchSite(const ExprPtr& core_num_expr, bool sync_start,
+                              const std::vector<FunctionPtr>& callees, int total_vector, int total_cube,
+                              const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) {
     if (!core_num_expr) return;
     auto core_num_const = As<ConstInt>(core_num_expr);
     if (!core_num_const) return;  // dynamic launch count — cannot check statically
     const int64_t launched = core_num_const->value_;
     for (const auto& callee : callees) {
-      CheckLaunchedKernel(callee, launched, total_vector, total_cube, program, diagnostics);
+      CheckLaunchedKernel(callee, launched, sync_start, total_vector, total_cube, program, diagnostics);
     }
   }
 
-  static void CheckLaunchedKernel(const FunctionPtr& kernel, int64_t launched, int total_vector,
-                                  int total_cube, const ProgramPtr& program,
+  static void CheckLaunchedKernel(const FunctionPtr& kernel, int64_t launched, bool sync_start,
+                                  int total_vector, int total_cube, const ProgramPtr& program,
                                   std::vector<Diagnostic>& diagnostics) {
     if (!kernel) return;
 
@@ -206,12 +245,11 @@ class HardSyncallOccupancyVerifierImpl : public PropertyVerifier {
         if (hs.core_type != "aiv_only") {
           diagnostics.emplace_back(DiagnosticSeverity::Error, "HardSyncallOccupancy", 0,
                                    UnsatisfiableMessage(hs.core_type, "vector-only (AIV)", "CUBE"), hs.span);
-        } else if (launched != total_vector) {
-          diagnostics.emplace_back(DiagnosticSeverity::Error, "HardSyncallOccupancy", 0,
-                                   OccupancyMessage("(core_type=\"aiv_only\")", launched,
-                                                    "fill all " + std::to_string(total_vector) +
-                                                        " AIV cores (one block per physical core)"),
-                                   hs.span);
+        } else if (auto msg = OccupancyGateMessage(launched == total_vector, sync_start,
+                                                   "(core_type=\"aiv_only\")", launched,
+                                                   "fill all " + std::to_string(total_vector) +
+                                                       " AIV cores (one block per physical core)")) {
+          diagnostics.emplace_back(DiagnosticSeverity::Error, "HardSyncallOccupancy", 0, *msg, hs.span);
         }
       }
       return;
@@ -223,12 +261,11 @@ class HardSyncallOccupancyVerifierImpl : public PropertyVerifier {
         if (hs.core_type != "aic_only") {
           diagnostics.emplace_back(DiagnosticSeverity::Error, "HardSyncallOccupancy", 0,
                                    UnsatisfiableMessage(hs.core_type, "cube-only (AIC)", "VECTOR"), hs.span);
-        } else if (launched != total_cube) {
-          diagnostics.emplace_back(DiagnosticSeverity::Error, "HardSyncallOccupancy", 0,
-                                   OccupancyMessage("(core_type=\"aic_only\")", launched,
-                                                    "fill all " + std::to_string(total_cube) +
-                                                        " AIC cores (one block per physical core)"),
-                                   hs.span);
+        } else if (auto msg = OccupancyGateMessage(launched == total_cube, sync_start,
+                                                   "(core_type=\"aic_only\")", launched,
+                                                   "fill all " + std::to_string(total_cube) +
+                                                       " AIC cores (one block per physical core)")) {
+          diagnostics.emplace_back(DiagnosticSeverity::Error, "HardSyncallOccupancy", 0, *msg, hs.span);
         }
       }
       return;
@@ -240,18 +277,18 @@ class HardSyncallOccupancyVerifierImpl : public PropertyVerifier {
     // core_type (mix/aiv_only/aic_only). The hard syncall lives in the sub-kernels
     // (mix is duplicated into both AIC and AIV lanes) — report once per launch.
     if (kernel->func_type_ == FunctionType::Group) {
-      if (launched == total_cube) return;
+      auto msg = OccupancyGateMessage(
+          launched == total_cube, sync_start, " in mixed kernel '" + kernel->name_ + "'", launched,
+          "fill all " + std::to_string(total_cube) + " core-groups (one block per core-group, i.e. all " +
+              std::to_string(total_cube) + " AIC cores)");
+      if (!msg) return;  // both guarantees satisfied
       for (const auto& sub : DirectCallees(kernel, program)) {
         if (!sub || (sub->func_type_ != FunctionType::AIC && sub->func_type_ != FunctionType::AIV)) {
           continue;
         }
         auto hard_syncalls = CollectHardSyncalls(sub);
         if (!hard_syncalls.empty()) {
-          diagnostics.emplace_back(DiagnosticSeverity::Error, "HardSyncallOccupancy", 0,
-                                   OccupancyMessage(" in mixed kernel '" + kernel->name_ + "'", launched,
-                                                    "fill all " + std::to_string(total_cube) +
-                                                        " core-groups (one block per core-group, i.e. all " +
-                                                        std::to_string(total_cube) + " AIC cores)"),
+          diagnostics.emplace_back(DiagnosticSeverity::Error, "HardSyncallOccupancy", 0, *msg,
                                    hard_syncalls.front().span);
           return;
         }

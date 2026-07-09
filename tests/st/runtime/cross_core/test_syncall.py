@@ -12,16 +12,19 @@ Runtime test for the cross-core all-participant barrier ``pl.system.syncall``.
 
 ``pl.system.syncall(core_type="aiv_only")`` lowers to the hard/FFTS form of
 ``pto::SYNCALL``, which issues ``ffts_cross_core_sync(SYNC_AIV_ONLY_ALL)`` and
-waits for *every* AIV core in the FFTS group to arrive. This is a hard
-requirement: the hard form only terminates when the launch fills **all**
-physical AIV cores. A partial-occupancy launch (fewer blocks than cores) leaves
-some cores never reaching the barrier, so the FFTS wait never completes and the
-AICore times out (507018).
+waits for *every* AIV core in the FFTS group to arrive. This imposes two hard
+requirements on the launch: (1) **full occupancy** — it must fill **all**
+physical AIV cores, or the unlaunched cores never reach the barrier; and (2)
+**sync_start=True** — all blocks must be co-resident at once, or the scheduler
+may dispatch them in waves and the FFTS wait deadlocks even at full occupancy.
+Either gap leaves the FFTS wait unable to complete and the AICore times out
+(507018). The soft (GM-polling) form exists for partial occupancy.
 
 The kernel therefore runs a full-occupancy SPMD elementwise add: ``CORE_NUM``
-blocks, one per physical AIV core, with the barrier between the input loads and
-the compute. The barrier is a no-op for the numeric result (``out = a + b``) but
-exercises the full DSL -> pass pipeline -> codegen -> runtime path on device.
+blocks, one per physical AIV core, launched with ``sync_start=True``, with the
+barrier between the input loads and the compute. The barrier is a no-op for the
+numeric result (``out = a + b``) but exercises the full DSL -> pass pipeline ->
+codegen -> runtime path on device.
 
 ``CORE_NUM`` is derived from the Ascend910B backend's SoC model (the same core
 description the compiler targets), so the launch always fills the AIV grid the
@@ -133,7 +136,9 @@ class SPMDSyncAllProgram:
         b: pl.Tensor[[TOTAL_ROWS, TILE_COLS], pl.FP32],
         out: pl.Out[pl.Tensor[[TOTAL_ROWS, TILE_COLS], pl.FP32]],
     ) -> pl.Tensor[[TOTAL_ROWS, TILE_COLS], pl.FP32]:
-        with pl.spmd(CORE_NUM):
+        # sync_start=True: the hard/FFTS barrier needs all CORE_NUM blocks
+        # co-resident at once, not merely full occupancy (see module docstring).
+        with pl.spmd(CORE_NUM, sync_start=True):
             out = self.spmd_syncall_add(a, b, out)
         return out
 
