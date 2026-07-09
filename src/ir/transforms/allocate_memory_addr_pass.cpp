@@ -305,7 +305,7 @@ void MaybeConsultDsaSolver(const FunctionPtr& func, const MemoryAllocatorPolicy&
                            const std::vector<std::pair<const MemRef*, MemRefPtr>>& bump_pairs) {
   if (dsa::GetSolverMode() == dsa::SolverMode::Off) return;
 
-  auto plan = ComputeAllocationPlan(func->body_);
+  auto plan = ComputeAllocationPlan(func);
   if (plan.intervals.empty()) return;
 
   // Backend per-space capacities (0 == unbounded) as pool caps.

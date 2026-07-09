@@ -17,8 +17,8 @@
 #include <vector>
 
 #include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
 #include "pypto/ir/memory_space.h"
-#include "pypto/ir/stmt.h"
 
 namespace pypto {
 namespace ir {
@@ -46,10 +46,12 @@ struct LifetimeInterval {
  * collapsed via ``base_`` identity; opportunistic reuse is the solver's job).
  *
  * ``separations``: index pairs into ``intervals`` that must NOT share an address
- * even when lifetime-disjoint — pipeline double-buffer clones (same pipeline group,
- * different stage), so the stages ping-pong instead of serializing on one buffer.
- * Conservative full-depth separation: capacity shedding is left to the solver's
- * per-pool cap gate downstream, not decided here.
+ * even when lifetime-disjoint.  Three sources, the same constraints MemoryReuse
+ * honors: (1) pipeline double-buffer clones (same group, different stage) — so
+ * stages ping-pong instead of serializing; (2) the Ascend910B load+tpop_from_aic
+ * in-place hazard (backend-gated); (3) op-semantic forbid-alias (e.g. tile.sel's
+ * mask/tmp must not share the output's buffer).  Conservative full-depth pipeline
+ * separation: capacity shedding is left to the solver's per-pool cap gate.
  */
 struct AllocationPlan {
   std::vector<LifetimeInterval> intervals;
@@ -60,14 +62,13 @@ struct AllocationPlan {
  * @brief Compute the per-allocation lifetime + separation inputs for a DSA solve.
  *
  * Thin, IR-facing entry point over the reuse pass's (phi/loop-aware) lifetime
- * analysis, exposed so the DSA adapter can build a DsaProblem without duplicating
- * it.
+ * analysis + hazard/forbid-alias collectors, exposed so the DSA adapter can build
+ * a DsaProblem without duplicating them.
  *
- * @param func_body The function body to analyze.
- * @return Intervals (one per allocation) + pipeline-clone separations; empty if
- *         the body holds no tiles.
+ * @param func The function to analyze (needed for the backend-gated hazard guard).
+ * @return Intervals (one per allocation) + all separations; empty if no tiles.
  */
-[[nodiscard]] AllocationPlan ComputeAllocationPlan(const StmtPtr& func_body);
+[[nodiscard]] AllocationPlan ComputeAllocationPlan(const FunctionPtr& func);
 
 }  // namespace ir
 }  // namespace pypto

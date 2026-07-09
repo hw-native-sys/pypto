@@ -2975,26 +2975,72 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
 // exact per-allocation intervals + pipeline-clone separations this pass computes,
 // so both plan from identical liveness. ComputeLifetimes has internal linkage but
 // is visible in this TU; PipelineMembershipsConflict comes from utils/attrs.h.
-AllocationPlan ComputeAllocationPlan(const StmtPtr& func_body) {
-  auto analysis = ComputeLifetimes(func_body);
+AllocationPlan ComputeAllocationPlan(const FunctionPtr& func) {
+  auto analysis = ComputeLifetimes(func->body_);
   AllocationPlan plan;
   plan.intervals = std::move(analysis.lifetimes);
+  const auto& intervals = plan.intervals;
 
-  // Pipeline double-buffer separations: two allocations that share a pipeline
-  // group with different stages are ping-pong clones and must occupy distinct
-  // buffers. O(n^2) over allocations (n small, per function per pool); pairs are
-  // indices into `intervals`. Same-space only (cross-space pairs can't conflict).
+  // Allocation base_ Ptr -> interval index, for resolving forbid-alias operands.
+  std::unordered_map<const Var*, size_t> base_to_index;
+  for (size_t i = 0; i < intervals.size(); ++i) {
+    auto mr = GetTypeMemRef(intervals[i].variable->GetType());
+    if (mr.has_value() && mr.value()) base_to_index[mr.value()->base_.get()] = i;
+  }
+
+  // (1) Pipeline double-buffer separations: allocations sharing a pipeline group
+  // with different stages are ping-pong clones and must occupy distinct buffers.
+  // O(n^2) over allocations (n small, per function); same-space only.
   const auto& pm = analysis.pipeline_membership;
-  for (size_t i = 0; i < plan.intervals.size(); ++i) {
-    auto ii = pm.find(plan.intervals[i].variable.get());
+  for (size_t i = 0; i < intervals.size(); ++i) {
+    auto ii = pm.find(intervals[i].variable.get());
     if (ii == pm.end()) continue;
-    for (size_t j = i + 1; j < plan.intervals.size(); ++j) {
-      if (plan.intervals[i].memory_space != plan.intervals[j].memory_space) continue;
-      auto jj = pm.find(plan.intervals[j].variable.get());
+    for (size_t j = i + 1; j < intervals.size(); ++j) {
+      if (intervals[i].memory_space != intervals[j].memory_space) continue;
+      auto jj = pm.find(intervals[j].variable.get());
       if (jj == pm.end()) continue;
       if (PipelineMembershipsConflict(ii->second, jj->second)) plan.separations.emplace_back(i, j);
     }
   }
+
+  // (2) Ascend910B split-AIV load + tpop_from_aic in-place hazard (backend-gated;
+  // empty off-910B). Directional: a writer whose def coincides with a load-derived
+  // input's last use, and which consumes a tpop value, must not reuse that input.
+  if (NeedsLoadTpopHazardGuard(func)) {
+    HazardInputCollector collector;
+    collector.VisitStmt(func->body_);
+    const HazardInputs hazard = collector.Take();
+    auto hazard_pair = [&hazard](const LifetimeInterval& w, const LifetimeInterval& in) {
+      return w.def_point == in.last_use_point && hazard.reads_tpop.count(w.variable.get()) != 0 &&
+             hazard.load_derived.count(in.variable.get()) != 0;
+    };
+    for (size_t i = 0; i < intervals.size(); ++i) {
+      for (size_t j = i + 1; j < intervals.size(); ++j) {
+        if (hazard_pair(intervals[i], intervals[j]) || hazard_pair(intervals[j], intervals[i])) {
+          plan.separations.emplace_back(i, j);
+        }
+      }
+    }
+  }
+
+  // (3) Op-semantic forbid-alias (e.g. tile.sel mask/tmp vs output). The collector
+  // maps a writer's representative to the operand Vars its buffer must avoid; each
+  // operand resolves (via base_ identity — no reuse chain exists pre-solve) to an
+  // allocation, which is kept apart from the writer.
+  ForbidAliasCollector forbid_collector(analysis.var_sharing_groups);
+  forbid_collector.VisitStmt(func->body_);
+  const ForbidAliasMap forbid_alias = forbid_collector.Take();
+  for (size_t i = 0; i < intervals.size(); ++i) {
+    auto fa = forbid_alias.find(intervals[i].variable.get());
+    if (fa == forbid_alias.end()) continue;
+    for (const VarPtr& operand : fa->second) {
+      auto mr = GetTypeMemRef(operand->GetType());
+      if (!mr.has_value() || !mr.value()) continue;
+      auto bit = base_to_index.find(mr.value()->base_.get());
+      if (bit != base_to_index.end() && bit->second != i) plan.separations.emplace_back(i, bit->second);
+    }
+  }
+
   return plan;
 }
 
