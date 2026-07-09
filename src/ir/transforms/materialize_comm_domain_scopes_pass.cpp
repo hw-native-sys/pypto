@@ -315,18 +315,23 @@ class DispatchAnalyzer : public IRVisitor {
     }
 
     if (IsOp(op, "pld.tensor.allgather")) {
-      if (op->args_.size() == 2) {
+      INTERNAL_CHECK_SPAN(op->args_.size() == 3, op->span_)
+          << "MaterializeCommDomainScopes: pld.tensor.allgather expects 3 args (unified 3-arg)";
+
+      // Unified 3-arg: dispatch by arg[0] type.
+      // HOST builtin: args[0] is DistributedTensor (staged window), target=args[0], signal=args[1].
+      // InCore composite: args[0] is Tensor/Tile (rank's chunk), target=args[1], signal=args[2].
+      if (As<DistributedTensorType>(op->args_[0]->GetType())) {
+        // HOST builtin
         collective_consumers.push_back({ResolveWindowAlloc(op->args_[0], "pld.tensor.allgather", "target"),
                                         ResolveWindowAlloc(op->args_[1], "pld.tensor.allgather", "signal"),
                                         op->span_});
-        return;
+      } else {
+        // InCore composite
+        collective_consumers.push_back({ResolveWindowAlloc(op->args_[1], "pld.tensor.allgather", "target"),
+                                        ResolveWindowAlloc(op->args_[2], "pld.tensor.allgather", "signal"),
+                                        op->span_});
       }
-      INTERNAL_CHECK_SPAN(op->args_.size() == 4, op->span_)
-          << "MaterializeCommDomainScopes: pld.tensor.allgather expects 2 args (host builtin) or "
-             "4 args (InCore composite)";
-      collective_consumers.push_back({ResolveWindowAlloc(op->args_[1], "pld.tensor.allgather", "target"),
-                                      ResolveWindowAlloc(op->args_[2], "pld.tensor.allgather", "signal"),
-                                      op->span_});
     }
   }
 
