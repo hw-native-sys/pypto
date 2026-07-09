@@ -201,7 +201,7 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
     const std::string one = codegen.GetOrEmitConstant(static_cast<int64_t>(1), DataType::INDEX);
     const std::string view2d = codegen.NewNamedTemp(tensor->name_hint_ + "_view2d");
     std::ostringstream mtv;
-    mtv << view2d << " = pto.make_tensor_view " << codegen.GetVarName(tensor) << ", shape = ["
+    mtv << view2d << " = pto.make_tensor_view " << codegen.GetTensorBasePtr(tensor) << ", shape = ["
         << view_shape[0] << ", " << view_shape[1] << "], strides = [" << view_shape[1] << ", " << one
         << "] {layout = #pto.layout<nd>}: !pto.tensor_view<?x?x" << dtype_str << ">";
     codegen.Emit(mtv.str());

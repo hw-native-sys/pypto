@@ -134,9 +134,7 @@ namespace {
  */
 using SplitIncoreOrchVerifier = outline_utils::ScopeKindAbsenceVerifier<ScopeKind::InCore>;
 
-static bool IsComputeTensorOp(const std::string& op_name) {
-  return transform_utils::IsComputeTensorOp(op_name);
-}
+static bool IsComputeTensorOp(const OpPtr& op) { return transform_utils::IsComputeTensorOp(op); }
 
 /// Checks Orchestration functions for compute tensor ops that should be in InCore.
 class OrchComputeTensorOpVerifier : public IRVisitor {
@@ -144,7 +142,7 @@ class OrchComputeTensorOpVerifier : public IRVisitor {
   explicit OrchComputeTensorOpVerifier(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
 
   void VisitExpr_(const CallPtr& op) override {
-    if (op && op->op_ && IsComputeTensorOp(op->op_->name_)) {
+    if (op && op->op_ && IsComputeTensorOp(op->op_)) {
       diagnostics_.emplace_back(DiagnosticSeverity::Warning, "SplitIncoreOrch", 0,
                                 "Compute tensor op '" + op->op_->name_ +
                                     "' found in Orchestration function (should be inside InCore)",

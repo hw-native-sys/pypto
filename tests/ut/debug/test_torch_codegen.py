@@ -85,6 +85,73 @@ def test_tensor_add():
     assert "torch.add(a, b)" in code
 
 
+def test_tensor_view_codegen_and_execution():
+    """tensor.view should preserve logical shape and layout semantics."""
+    src = _tensor_var("src", [2, 4])
+    reshaped = _tensor_var("reshaped", [4, 2])
+    transposed = ir.Var(
+        "transposed",
+        ir.op.tensor.view(src, layout=ir.TensorLayout.DN).type,
+        _span(),
+    )
+    shape_call = ir.op.tensor.view(src, [4, 2])
+    layout_call = ir.op.tensor.view(src, layout=ir.TensorLayout.DN)
+    body = ir.SeqStmts(
+        [
+            ir.AssignStmt(reshaped, shape_call, _span()),
+            ir.AssignStmt(transposed, layout_call, _span()),
+            ir.ReturnStmt([reshaped, transposed], _span()),
+        ],
+        _span(),
+    )
+    func = _simple_function("view_main", [src], body, [reshaped.type, transposed.type])
+
+    code = torch_codegen(func)
+    assert "_tensor_view(src, (4, 2), False)" in code
+    assert "src.mT" in code
+
+    ns: dict = {}
+    exec(code, ns)  # noqa: S102
+    value = torch.arange(8, dtype=torch.float32).reshape(2, 4)
+    actual_reshape, actual_transpose = ns["view_main"](value)
+    assert torch.equal(actual_reshape, value.reshape(4, 2))
+    assert torch.equal(actual_transpose, value.mT)
+
+
+def test_tensor_view_shape_and_layout_uses_target_stride():
+    """A combined shape/layout view should use the target canonical stride."""
+    src = _tensor_var("src", [2, 4])
+    result = ir.op.tensor.view(src, [4, 2], layout=ir.TensorLayout.DN)
+    out = ir.Var("out", result.type, _span())
+    body = ir.SeqStmts(
+        [ir.AssignStmt(out, result, _span()), ir.ReturnStmt([out], _span())],
+        _span(),
+    )
+    func = _simple_function("combined_view", [src], body, [out.type])
+
+    code = torch_codegen(func)
+    assert "_tensor_view(src, (4, 2), True)" in code
+
+    ns: dict = {}
+    exec(code, ns)  # noqa: S102
+    value = torch.arange(8, dtype=torch.float32).reshape(2, 4)
+    actual = ns["combined_view"](value)
+    expected = torch.as_strided(value, (4, 2), (1, 4))
+    assert torch.equal(actual, expected)
+    assert actual.stride() == (1, 4)
+
+
+def test_tensor_view_same_layout_is_identity():
+    """A layout-only view targeting the current layout should be an identity."""
+    src = _tensor_var("src", [2, 4])
+    result = ir.op.tensor.view(src, layout=ir.TensorLayout.ND)
+    out = ir.Var("out", result.type, _span())
+    func = _simple_function("same_layout", [src], ir.AssignStmt(out, result, _span()))
+
+    code = torch_codegen(func)
+    assert "out = src" in code
+
+
 def test_tensor_scalar_add():
     """tensor.adds should emit (a + scalar)."""
     a = _tensor_var("a", [64])

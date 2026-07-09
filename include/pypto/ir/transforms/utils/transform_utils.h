@@ -16,11 +16,11 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/utils/attrs.h"
@@ -114,13 +114,11 @@ inline std::vector<VarPtr> CollectDefVars(const StmtPtr& stmt) {
 ///
 /// Host-side ops are memory allocation/transfer (create, read, write, slice, assemble, dim)
 /// and metadata-only transforms (reshape, transpose at tensor level).
-inline bool IsComputeTensorOp(const std::string& op_name) {
-  if (op_name.compare(0, 7, "tensor.") != 0) return false;
-  static const std::unordered_set<std::string> kHostSideOps = {
-      "tensor.create", "tensor.read",    "tensor.write",     "tensor.slice", "tensor.assemble",
-      "tensor.dim",    "tensor.reshape", "tensor.transpose", "tensor.view",
-  };
-  return kHostSideOps.count(op_name) == 0;
+inline bool IsComputeTensorOp(const OpPtr& op) {
+  if (!op || op->name_.compare(0, 7, "tensor.") != 0) return false;
+  return !(IsOp(op, "tensor.create") || IsOp(op, "tensor.read") || IsOp(op, "tensor.write") ||
+           IsOp(op, "tensor.slice") || IsOp(op, "tensor.assemble") || IsOp(op, "tensor.dim") ||
+           IsOp(op, "tensor.reshape") || IsOp(op, "tensor.transpose") || IsOp(op, "tensor.view"));
 }
 
 // ============================================================================

@@ -21,6 +21,8 @@ Simplify-pass identity-elimination rule is covered in
 
 import pytest
 from pypto import DataType, ir
+from pypto.language.distributed import DistributedTensor
+from pypto.language.op import tensor_ops as dsl_tensor_ops
 
 
 def _span():
@@ -166,19 +168,48 @@ def test_shape_reinterpret_rejects_strided_source():
         ir.op.tensor.view(src, [32])
 
 
+@pytest.mark.parametrize("shape", ([0, 32], [-1, 32]))
+def test_shape_reinterpret_rejects_non_positive_static_dimension(shape):
+    """Static view dimensions must be positive."""
+    src = _tensor_var([4, 8])
+    with pytest.raises(ValueError, match="must be positive"):
+        ir.op.tensor.view(src, shape)
+
+
+def test_shape_reinterpret_rejects_zero_sized_source_product_mismatch():
+    """A known zero-sized source must still preserve the element count."""
+    src = _tensor_var([0, 8])
+    with pytest.raises(ValueError, match="cannot reinterpret"):
+        ir.op.tensor.view(src, [1])
+
+
 def test_distributed_tensor_kind_is_preserved():
-    """A view of a DistributedTensorType remains distributed."""
+    """A distributed view preserves both its type kind and window binding."""
     span = _span()
-    src_type = ir.DistributedTensorType([_const(2), _const(16)], DataType.FP32)
+    base = ir.Var("buffer", ir.PtrType(), span)
+    window = ir.WindowBuffer(base, _const(32), span=span)
+    src_type = ir.DistributedTensorType([_const(2), _const(16)], DataType.FP32, window)
     src = ir.Var("dt", src_type, span)
     call = ir.op.tensor.view(src, [32])
 
     out = call.type
     assert isinstance(out, ir.DistributedTensorType)
+    assert out.window_buffer is window
     assert _values_of(out.shape) == [32]
     view = _result_view(call)
     assert view is not None
     assert _values_of(view.stride) == [1]
+
+
+def test_dsl_view_preserves_distributed_tensor_wrapper():
+    """The DSL wrapper retains the concrete DistributedTensor class."""
+    span = _span()
+    src = ir.Var("dt", ir.DistributedTensorType([_const(2), _const(16)], DataType.FP32), span)
+
+    viewed = dsl_tensor_ops.view(DistributedTensor(expr=src), [32])
+
+    assert isinstance(viewed, DistributedTensor)
+    assert isinstance(viewed.unwrap().type, ir.DistributedTensorType)
 
 
 # ============================================================================
@@ -198,6 +229,21 @@ def test_cross_layout_flip_below_rank_2_rejected():
     src = _tensor_var([8])
     with pytest.raises(ValueError, match="rank >= 2"):
         ir.op.tensor.view(src, layout=ir.TensorLayout.DN)
+
+
+def test_shape_reinterpret_rejects_rank_zero_view():
+    """Rank-zero tensor views are not representable by either codegen backend."""
+    src = _tensor_var([1])
+    with pytest.raises(ValueError, match="target shape must have rank >= 1"):
+        ir.op.tensor.view(src, [])
+
+
+def test_unknown_view_kwarg_is_rejected():
+    """The op schema must reject misspelled metadata instead of ignoring it."""
+    src = _tensor_var([1])
+    shape = ir.MakeTuple([_const(1)], _span())
+    with pytest.raises(ValueError, match="Unknown kwarg 'layuot'"):
+        ir.create_op_call("tensor.view", [src, shape], {"layuot": 0}, _span())
 
 
 def test_strided_source_flips_inheriting_stride():
@@ -256,6 +302,116 @@ def test_symbolic_shape_flips():
     view = _result_view(call)
     assert view is not None
     assert view.layout == ir.TensorLayout.DN
+
+
+def test_symbolic_shape_reinterpret_accepted():
+    """Symbolic dimensions where product can't be proven are accepted.
+
+    When ``src == [N, M]`` and ``view(src, [N, M, 1])``, the shape products
+    are unprovable (one or both <= 0) so the product-equality check is skipped
+    and the view is accepted."""
+    span = _span()
+    n_var = ir.Var("N", ir.ScalarType(DataType.INDEX), span)
+    m_var = ir.Var("M", ir.ScalarType(DataType.INDEX), span)
+    src = _tensor_var([n_var, m_var])
+    # Symbolic shape reinterpret: [N, M] -> [N, M, 1].  Product can't be
+    # proven so the check at transform.cpp:361 bails early.
+    call = ir.op.tensor.view(src, [n_var, m_var, _const(1)])
+
+    out = call.type
+    assert isinstance(out, ir.TensorType)
+    assert len(out.shape) == 3
+    assert out.shape[0] is n_var
+    assert out.shape[1] is m_var
+    view = _result_view(call)
+    assert view is not None
+    assert view.layout == ir.TensorLayout.ND
+
+
+def test_layout_view_preserves_valid_shape():
+    """Layout-only view (no shape arg) preserves ``valid_shape`` metadata,
+    swapping the trailing pair for cross-layout flips."""
+    src_view = ir.TensorView(
+        [_const(8), _const(1)],
+        ir.TensorLayout.ND,
+        valid_shape=[_const(6), _const(4)],
+        pad=ir.PadValue.zero,
+    )
+    src = _tensor_var([8, 4], view=src_view)
+    # DN flip: valid_shape trailing pair swaps too.
+    call = ir.op.tensor.view(src, layout=ir.TensorLayout.DN)
+
+    out = call.type
+    assert isinstance(out, ir.TensorType)
+    view = _result_view(call)
+    assert view is not None
+    # valid_shape is preserved and trailing-pair swapped.
+    assert _values_of(view.valid_shape) == [4, 6]
+    # pad is unconditionally preserved.
+    assert view.pad == ir.PadValue.zero
+
+
+def test_shape_reinterpret_rejects_partial_valid_shape():
+    """A rectangular partial-valid region cannot be safely reshaped."""
+    src_view = ir.TensorView(
+        [_const(8), _const(1)],
+        ir.TensorLayout.ND,
+        valid_shape=[_const(6), _const(4)],
+        pad=ir.PadValue.zero,
+    )
+    src = _tensor_var([4, 8], view=src_view)
+    with pytest.raises(ValueError, match="partial valid_shape"):
+        ir.op.tensor.view(src, [32])
+
+
+def test_shape_reinterpret_clears_inert_full_valid_padding():
+    """A full valid region may be reshaped; its padding metadata is inert."""
+    src_view = ir.TensorView(
+        [_const(8), _const(1)],
+        ir.TensorLayout.ND,
+        valid_shape=[_const(4), _const(8)],
+        pad=ir.PadValue.zero,
+    )
+    src = _tensor_var([4, 8], view=src_view)
+
+    view = _result_view(ir.op.tensor.view(src, [32]))
+
+    assert view is not None
+    assert len(view.valid_shape) == 0
+    assert view.pad == ir.PadValue.null
+
+
+def test_shape_reinterpret_clears_pad_without_valid_shape():
+    """Padding metadata is not carried across a shape reinterpret."""
+    src_view = ir.TensorView(
+        [_const(8), _const(1)],
+        ir.TensorLayout.ND,
+        pad=ir.PadValue.zero,
+    )
+    src = _tensor_var([4, 8], view=src_view)
+
+    view = _result_view(ir.op.tensor.view(src, [32]))
+
+    assert view is not None
+    assert len(view.valid_shape) == 0
+    assert view.pad == ir.PadValue.null
+
+
+def test_layout_view_preserves_pad_on_bare_tensor():
+    """pad is preserved even when valid_shape is empty (bare tensor)."""
+    src_view = ir.TensorView(
+        [_const(8), _const(1)],
+        ir.TensorLayout.ND,
+        pad=ir.PadValue.zero,
+    )
+    src = _tensor_var([4, 8], view=src_view)
+    call = ir.op.tensor.view(src, layout=ir.TensorLayout.DN)
+
+    out = call.type
+    assert isinstance(out, ir.TensorType)
+    view = _result_view(call)
+    assert view is not None
+    assert view.pad == ir.PadValue.zero
 
 
 # ============================================================================

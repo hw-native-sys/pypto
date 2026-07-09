@@ -1632,22 +1632,41 @@ def view(
     canonical strides for the requested shape; ``layout`` derives the canonical
     ND/DN layout view and preserves the legacy layout-only behavior.
 
-    Validity (enforced by ``DeduceTensorViewType``):
+    Type validity enforced by ``DeduceTensorViewType``:
 
-    1. If both ``shape`` and ``layout`` are omitted, raises ``ValueError``.
-    2. ``layout`` must not be ``NZ`` (NZ is tile-only and fractal).
-    3. If the source has an explicit stride, shape reinterpret requires a
-       packed source (strided sub-views are rejected).
-    4. Cross-layout flips require rank >= 2.
+    1. The target shape must have rank at least 1. A DN target must have rank
+       at least 2 (RFC #1300 section 4.2 trailing-pair layout).
+    2. When ``shape`` is provided, the total element count must be
+       product-preserving (new product == old product), except for symbolic
+       dimensions where equality is unprovable and accepted optimistically.
+       Static target dimensions must be positive. A source with a partial
+       ``valid_shape`` cannot be shape-reinterpreted.
+    Combining ``shape`` with a layout change is valid for type deduction and
+    PTO in-core lowering. Orchestration lowering only supports shape
+    reinterpret for ND-layout tensors because the runtime ``Tensor::reshape``
+    cannot express an arbitrary-layout view.
 
     Args:
-        tensor: Source tensor.
-        shape: Optional target shape. Product must match source product.
-        layout: Optional target ``TensorLayout`` (must not be ``NZ``).
-        span: Optional source span.
+        tensor: Input tensor expression.
+        shape: New shape for the view. Must be product-preserving unless
+            symbolic dimensions are present. May introduce or remove unit
+            dimensions (RFC #1300 P4). Must be a sequence of ints or
+            Expr values, or a ``MakeTuple``. In an InCore function, the source
+            must remain a GM Tensor through tensor-to-tile conversion.
+        layout: Target ``TensorLayout`` (ND or DN). Must not be ``NZ``.
+            When provided without ``shape``, performs a layout-only flip.
+            When combined with ``shape``, layout changes are supported in-core
+            but not by orchestration lowering. Orchestration shape reinterpret
+            is limited to ND-layout tensors.
+        span: Optional source span for debugging (auto-captured if not
+            provided).
 
     Returns:
-        ``Call`` expression carrying the reinterpreted TensorType.
+        ``Call`` expression for the ``tensor.view`` operation.
+
+    Raises:
+        ValueError: If the requested shape/layout is missing, unsupported, or
+            inconsistent with the source tensor metadata.
     """
     if shape is None and layout is None:
         raise ValueError("tensor.view requires at least one of shape or layout")

@@ -56,6 +56,7 @@ Operate on `Tensor` objects (DDR memory).
 | `dim` | `(tensor: Tensor, axis: int) -> Scalar` | Get dimension size (supports negative indexing) |
 | `slice` | `(tensor: Tensor, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> Tensor` | Slice. Sugar: `A[0:16, :]` |
 | `reshape` | `(tensor: Tensor, shape: Sequence[IntLike]) -> Tensor` | Reshape |
+| `view` | `(tensor: Tensor, shape: Sequence[IntLike] \| None = None, *, layout: TensorLayout \| None = None) -> Tensor` | Zero-copy reinterpret over the same storage; target rank must be at least 1 and DN requires rank at least 2. Orchestration shape reinterpret is ND-only and cannot also change layout |
 | `transpose` | `(tensor: Tensor, axis1: int, axis2: int) -> Tensor` | Swap two axes |
 | `assemble` | `(target: Tensor, source: Tensor, offset: Sequence[IntLike], *, atomic: AtomicType = AtomicType.None_) -> Tensor` | Write source into target at offset. Sugar (pre-SSA only): `target[i:i+H, j:j+W] = source`. `atomic=AtomicType.Add` accumulates instead of overwriting (split-K) — only valid when the target is a function output (global memory); non-deterministic FP, target must be pre-zeroed, dtypes fp32/bf16/fp16/int32/int16/int8 (bf16 requires the Ascend910B/A2/A3 profile) |
 | `scatter_update` | `(input: Tensor, dim: int, index: Tensor, src: Tensor) -> Tensor` | Update rows of `input` at sparse positions given by `index` with values from `src`. `input`/`src`: 2D `[rows, d]` or 4D `[B, S, 1, d]`; `index`: 2D `[b, s]` integer. Only `dim=-2` is supported |

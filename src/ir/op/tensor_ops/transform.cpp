@@ -354,9 +354,16 @@ TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args,
       }
     }
 
+    for (size_t i = 0; i < new_shape.size(); ++i) {
+      if (auto dim = As<ConstInt>(new_shape[i])) {
+        CHECK(dim->value_ > 0) << "tensor.view shape dimension " << i << " must be positive, got "
+                               << dim->value_;
+      }
+    }
+
     int64_t old_product = ComputeShapeProduct(src_type->shape_);
     int64_t new_product = ComputeShapeProduct(new_shape);
-    if (old_product > 0 && new_product > 0) {
+    if (old_product >= 0 && new_product >= 0) {
       CHECK(old_product == new_product) << "tensor.view: cannot reinterpret tensor of size " << old_product
                                         << " as shape with size " << new_product;
     }
@@ -368,6 +375,10 @@ TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args,
       std::swap(new_shape[new_shape.size() - 2], new_shape[new_shape.size() - 1]);
     }
   }
+
+  CHECK(!new_shape.empty()) << "tensor.view: target shape must have rank >= 1";
+  CHECK(new_layout != TensorLayout::DN || new_shape.size() >= 2)
+      << "tensor.view: DN layout requires rank >= 2, got " << new_shape.size();
 
   TensorView new_view;
   if (!has_shape && src_type->tensor_view_.has_value() && !src_type->tensor_view_->stride.empty()) {
@@ -382,6 +393,16 @@ TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args,
 
   if (src_type->tensor_view_.has_value()) {
     const auto& src_view = src_type->tensor_view_.value();
+    if (has_shape && !src_view.valid_shape.empty()) {
+      bool is_fully_valid =
+          src_view.valid_shape.size() == src_type->shape_.size() &&
+          std::equal(src_view.valid_shape.begin(), src_view.valid_shape.end(), src_type->shape_.begin(),
+                     [](const ExprPtr& valid_dim, const ExprPtr& shape_dim) {
+                       return structural_equal(valid_dim, shape_dim);
+                     });
+      CHECK(is_fully_valid)
+          << "tensor.view: shape reinterpret does not support a source with a partial valid_shape";
+    }
     // valid_shape is only meaningful when the logical dimensions are unchanged;
     // when the shape is reinterpreted the old valid_shape is semantically stale
     // and intentionally dropped rather than silently carried forward.
@@ -392,9 +413,12 @@ TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args,
       }
       new_view.valid_shape = std::move(new_valid_shape);
     }
-    // Pad describes physical memory padding independent of logical shape,
-    // so it carries over even when the shape is reinterpreted.
-    new_view.pad = src_view.pad;
+    // Layout-only views preserve padding metadata. Shape reinterpret does not
+    // carry padding forward because the old padded region has no well-defined
+    // mapping in the new logical shape.
+    if (!has_shape) {
+      new_view.pad = src_view.pad;
+    }
   }
 
   if (auto dt = As<DistributedTensorType>(args[0]->GetType())) {
@@ -441,6 +465,7 @@ REGISTER_OP("tensor.view")
         "Pure metadata: in-core codegen emits a new make_tensor_view over the input buffer.")
     .add_argument("input", "Input tensor (TensorType or DistributedTensorType, packed canonical or bare)")
     .add_argument("shape", "Optional target shape dimensions (TupleType of integer scalars)")
+    .set_attr<TensorLayout>("layout")
     .set_output_memory_inherit_input()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {

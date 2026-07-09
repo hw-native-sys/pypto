@@ -13,6 +13,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "pypto/codegen/pto/pto_codegen.h"
@@ -86,7 +87,7 @@ void PTOCodegen::VisitStmt_(const YieldStmtPtr& op) {
     // return_var binding — see a consistent SSA across branches that aliases
     // the same concrete make_tensor_view (issue #1533). For/While loops keep
     // only scalar yields, so this does not affect their lowering.
-    if (As<TensorType>(expr->GetType())) {
+    if (ir::AsTensorTypeLike(expr->GetType())) {
       if (auto tensor_var = ir::AsVarLike(expr)) {
         // Only normalize when a tensor_view is actually registered. Some
         // tensors (e.g. return-value / loop phis without a make_tensor_view)
@@ -98,6 +99,9 @@ void PTOCodegen::VisitStmt_(const YieldStmtPtr& op) {
           // GetTensorBasePtr would fall back to the view SSA). Both branches
           // yield the same backing, so the recorded base ptr is consistent.
           fs_.view_ssa_to_base_ptr[view] = GetTensorBasePtr(tensor_var);
+          if (std::string comm_ctx = GetCommCtxSSAFor(tensor_var.get()); !comm_ctx.empty()) {
+            fs_.view_ssa_to_comm_ctx[view] = std::move(comm_ctx);
+          }
           yielded_values.push_back(view);
           continue;
         }
@@ -271,7 +275,7 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
           if (!emit_tile_addr_) fs_.emitted_tile_alloc_names.insert(ret_name);
         }
         BindVarToMlir(return_var, ret_name);
-      } else if (As<TensorType>(return_var->GetType()) || As<ir::ArrayType>(return_var->GetType())) {
+      } else if (ir::AsTensorTypeLike(return_var->GetType()) || As<ir::ArrayType>(return_var->GetType())) {
         // Tensors and on-core arrays are mutable references mutated in place
         // (pl.assemble lowers to a tile store into the backing memref; arrays
         // write the same backing `pto.declare_local_array`). Both branches yield
@@ -341,7 +345,7 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
         if (returns_via_scf[i]) {
           scalar_yields.push_back(branch_yields[i]);
         } else if (As<ir::ArrayType>(op->return_vars_[i]->GetType()) ||
-                   As<TensorType>(op->return_vars_[i]->GetType())) {
+                   ir::AsTensorTypeLike(op->return_vars_[i]->GetType())) {
           // In-place backing SSA (array or tensor); bound to the return var
           // after the branches. Both branches must agree on the same storage SSA
           // (every array.update_element / pl.assemble aliases the one backing
@@ -422,7 +426,7 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
     for (size_t i = 0; i < op->return_vars_.size(); ++i) {
       const auto& return_var = op->return_vars_[i];
       const bool is_array = As<ir::ArrayType>(return_var->GetType()) != nullptr;
-      const bool is_tensor = As<TensorType>(return_var->GetType()) != nullptr;
+      const bool is_tensor = ir::AsTensorTypeLike(return_var->GetType()) != nullptr;
       if (!is_array && !is_tensor) continue;
       INTERNAL_CHECK_SPAN(!inplace_return_ssa[i].empty(), op->span_)
           << "Internal error: in-place IfStmt return_var '" << return_var->name_hint_
@@ -435,6 +439,10 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
         auto base_it = fs_.view_ssa_to_base_ptr.find(inplace_return_ssa[i]);
         if (base_it != fs_.view_ssa_to_base_ptr.end()) {
           RegisterBasePtr(return_var, base_it->second);
+        }
+        auto comm_ctx_it = fs_.view_ssa_to_comm_ctx.find(inplace_return_ssa[i]);
+        if (comm_ctx_it != fs_.view_ssa_to_comm_ctx.end()) {
+          RegisterCommCtxFor(return_var, comm_ctx_it->second);
         }
       }
     }
@@ -501,10 +509,10 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
     const auto& return_var = op->return_vars_[i];
 
     std::string init_mlir_name;
-    auto tensor_type = As<TensorType>(iter_arg->GetType());
+    auto tensor_type = ir::AsTensorTypeLike(iter_arg->GetType());
+    auto init_var = AsVarLike(iter_arg->initValue_);
     if (tensor_type) {
-      auto init_var = std::dynamic_pointer_cast<const ir::Var>(iter_arg->initValue_);
-      INTERNAL_CHECK_SPAN(init_var, op->span_) << "TensorType iter_arg init value must be a Var or IterArg";
+      INTERNAL_CHECK_SPAN(init_var, op->span_) << "Tensor-like iter_arg init value must be a Var or IterArg";
       init_mlir_name = GetOrCreateTensorView(init_var);
     } else {
       VisitExpr(iter_arg->initValue_);
@@ -518,6 +526,12 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
     if (tensor_type) {
       BindTensorView(iter_arg, init_mlir_name);
       BindTensorView(return_var, init_mlir_name);
+      const auto base_ptr = GetTensorBasePtr(init_var);
+      RegisterBasePtr(iter_arg, base_ptr);
+      RegisterBasePtr(return_var, base_ptr);
+      const auto comm_ctx = GetCommCtxSSAFor(init_var.get());
+      RegisterCommCtxFor(iter_arg, comm_ctx);
+      RegisterCommCtxFor(return_var, comm_ctx);
     } else if (auto tile_type = ir::GetTileTypeWithMemRef(iter_arg->GetType())) {
       const auto memref = ir::GetDefinedMemRef(tile_type);
       BindVarToMemRef(iter_arg, memref->base_.get());
@@ -640,10 +654,10 @@ void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
     const auto& return_var = op->return_vars_[i];
 
     std::string init_mlir_name;
-    auto tensor_type = As<TensorType>(iter_arg->GetType());
+    auto tensor_type = ir::AsTensorTypeLike(iter_arg->GetType());
+    auto init_var = AsVarLike(iter_arg->initValue_);
     if (tensor_type) {
-      auto init_var = std::dynamic_pointer_cast<const ir::Var>(iter_arg->initValue_);
-      INTERNAL_CHECK_SPAN(init_var, op->span_) << "TensorType iter_arg init value must be a Var or IterArg";
+      INTERNAL_CHECK_SPAN(init_var, op->span_) << "Tensor-like iter_arg init value must be a Var or IterArg";
       init_mlir_name = GetOrCreateTensorView(init_var);
     } else {
       VisitExpr(iter_arg->initValue_);
@@ -657,6 +671,12 @@ void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
     if (tensor_type) {
       BindTensorView(iter_arg, init_mlir_name);
       BindTensorView(return_var, init_mlir_name);
+      const auto base_ptr = GetTensorBasePtr(init_var);
+      RegisterBasePtr(iter_arg, base_ptr);
+      RegisterBasePtr(return_var, base_ptr);
+      const auto comm_ctx = GetCommCtxSSAFor(init_var.get());
+      RegisterCommCtxFor(iter_arg, comm_ctx);
+      RegisterCommCtxFor(return_var, comm_ctx);
     } else if (auto tile_type = ir::GetTileTypeWithMemRef(iter_arg->GetType())) {
       const auto memref = ir::GetDefinedMemRef(tile_type);
       BindVarToMemRef(iter_arg, memref->base_.get());

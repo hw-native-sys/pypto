@@ -415,6 +415,68 @@ def test_get_comm_ctx_emits_no_mlir_aliases_ctx_arg():
     assert "!pto.ptr<i64>" in header, header
 
 
+def test_tensor_view_preserves_loop_carried_distributed_metadata():
+    """Post-loop views keep the distributed tensor's base pointer and ctx."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, data: pld.DistributedTensor[[16, 16], pl.INT32]):
+            for _i, (carried,) in pl.range(1, init_values=(data,)):
+                result = pl.yield_(carried)
+            viewed = pl.tensor.view(result, [16, 16])
+            pld.system.wait(viewed, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Eq)
+
+    mlir = _generate_mlir(P)
+    body = mlir.split("func.func @kernel", 1)[1]
+    assert body.count("pto.make_tensor_view %arg0") >= 2, body
+    assert "pto.comm.twait" in body, body
+
+
+def test_tensor_view_preserves_while_carried_distributed_metadata():
+    """The while-loop return alias keeps the distributed base pointer and ctx."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, data: pld.DistributedTensor[[16, 16], pl.INT32]):
+            limit: pl.Scalar[pl.INT64] = 1
+            for (carried,) in pl.while_(init_values=(data,)):
+                pl.cond(limit > 0)
+                result = pl.yield_(carried)
+            viewed = pl.tensor.view(result, [16, 16])
+            pld.system.wait(viewed, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Eq)
+
+    mlir = _generate_mlir(P)
+    body = mlir.split("func.func @kernel", 1)[1]
+    assert body.count("pto.make_tensor_view %arg0") >= 2, body
+    assert "pto.comm.twait" in body, body
+
+
+def test_tensor_view_preserves_if_merged_distributed_metadata():
+    """A distributed tensor merged by an if keeps its base pointer and ctx."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            data: pld.DistributedTensor[[16, 16], pl.INT32],
+            cond: pl.Scalar[pl.BOOL],
+        ):
+            result = data
+            if cond:
+                result = data
+            viewed = pl.tensor.view(result, [16, 16])
+            pld.system.wait(viewed, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Eq)
+
+    mlir = _generate_mlir(P)
+    body = mlir.split("func.func @kernel", 1)[1]
+    assert "scf.if" in body, body
+    assert body.count("pto.make_tensor_view %arg0") >= 2, body
+    assert "pto.comm.twait" in body, body
+
+
 def test_rank_emits_pto_load_scalar_at_slot_2_plus_trunci():
     """``pld.system.rank(ctx)`` reads slot 2 (= kRankIdOffset /
     kWindowSlotStride = 16/8) then truncates to signless ``i32`` for PTOAS.

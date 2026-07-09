@@ -453,6 +453,34 @@ class TestConvertTensorToTileOps:
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Before)
 
+    def test_tensor_view_passes_through_incore(self):
+        """``tensor.view`` remains a GM metadata op in an InCore function."""
+        ib = IRBuilder()
+        with ib.function("kernel", type=ir.FunctionType.InCore) as f:
+            x = f.param("x", ir.TensorType([2, 16], DataType.FP32))
+            viewed = ib.let("viewed", tensor_ops.view(x, [32]))
+            f.return_type(viewed.type)
+            ib.return_stmt(viewed)
+        before = ir.Program([f.get_result()], "TensorViewPassThrough", ir.Span.unknown())
+
+        after = passes.convert_tensor_to_tile_ops()(before)
+
+        ir.assert_structural_equal(after, before)
+
+    def test_tensor_view_rejects_input_converted_to_tile(self):
+        """A GM view cannot consume a producer that pass 12 lowers to Tile."""
+        ib = IRBuilder()
+        with ib.function("kernel", type=ir.FunctionType.InCore) as f:
+            x = f.param("x", ir.TensorType([4, 8], DataType.FP32))
+            f.return_type(ir.TensorType([32], DataType.FP32))
+            sliced = ib.let("sliced", tensor_ops.slice(x, [4, 8], [0, 0]))
+            viewed = ib.let("viewed", tensor_ops.view(sliced, [32]))
+            ib.return_stmt(viewed)
+        program = ir.Program([f.get_result()], "TensorViewConvertedInput", ir.Span.unknown())
+
+        with pytest.raises(ValueError, match="result of an op lowered to Tile"):
+            passes.convert_tensor_to_tile_ops()(program)
+
     def test_2d_tensor(self):
         """2D tensor -> correct offsets and shapes for load/store."""
         before, expected = _make_pair(

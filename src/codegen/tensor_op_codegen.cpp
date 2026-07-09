@@ -421,8 +421,8 @@ REGISTER_ORCHESTRATION_OP(tensor_view, ("tensor.view")) {
   // tensor.view(input[, shape], layout=...) is a metadata reinterpret over the
   // same physical buffer. Runtime Tensor has no layout tag or arbitrary-stride
   // constructor, so shape-changing orchestration views lower to reshape only
-  // when the layout stays unchanged. Layout-only keeps the legacy ND/DN
-  // alias/transpose behavior.
+  // for ND layouts. Layout-only keeps the legacy ND/DN alias/transpose
+  // behavior.
   INTERNAL_CHECK_SPAN(op->args_.size() == 1 || op->args_.size() == 2, op->span_)
       << "tensor.view requires 1 or 2 args (input[, shape])";
 
@@ -452,6 +452,10 @@ REGISTER_ORCHESTRATION_OP(tensor_view, ("tensor.view")) {
         << "tensor.view orchestration lowering cannot combine shape reinterpret with layout change: "
         << "runtime Tensor::reshape has no arbitrary-stride layout view; pass only a shape argument "
         << "(no layout change) in orchestration code or lower the view through PTO in-core codegen";
+    CHECK_SPAN(src_layout == TensorLayout::ND && target_layout == TensorLayout::ND, op->span_)
+        << "tensor.view orchestration lowering only supports shape reinterpret for ND layout tensors: "
+        << "runtime Tensor::reshape assumes row-major contiguous storage; lower non-ND views through "
+        << "PTO in-core codegen";
     auto shape_tuple = As<MakeTuple>(op->args_[1]);
     auto tuple_type = As<TupleType>(op->args_[1]->GetType());
     INTERNAL_CHECK_SPAN(tuple_type, op->span_) << "tensor.view shape must be TupleType";

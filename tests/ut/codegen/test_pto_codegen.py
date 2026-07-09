@@ -2622,5 +2622,147 @@ def test_pto_codegen_tensor_view_aliases_input_base_ptr():
     )
 
 
+def test_pto_codegen_rank3_tensor_view_mat_load_uses_input_base_ptr():
+    """The NZ/Mat 2D collapse remains rooted at the view's raw GM pointer."""
+    span = ir.Span.unknown()
+    src_type = ir.TensorType([2, 16, 32], DataType.FP32)
+    src = ir.Var("src", src_type, span)
+
+    view_call = ir.op.tensor.view(src, [2, 16, 32])
+    view_var = ir.Var("src_view", view_call.type, span)
+    load_call = ir.op.tile.load(
+        view_var,
+        [0, 0, 0],
+        [2, 16, 32],
+        target_memory=pl.MemorySpace.Mat,
+    )
+    tile_var = ir.Var("tile", load_call.type, span)
+
+    body = ir.SeqStmts(
+        [
+            ir.AssignStmt(view_var, view_call, span),
+            ir.AssignStmt(tile_var, load_call, span),
+            ir.ReturnStmt([], span),
+        ],
+        span,
+    )
+    func = ir.Function("kernel", [src], [], body, span, ir.FunctionType.InCore)
+    program = ir.Program([func], "TensorViewRank3MatLoadTest", span)
+
+    lines = _get_mlir_lines(_generate_mlir(program))
+    collapsed_view = _single_line(lines, "src_view_view2d = pto.make_tensor_view")
+    assert "pto.make_tensor_view %arg0" in collapsed_view, collapsed_view
+
+
+def test_pto_codegen_tensor_view_default_pipeline_variants():
+    """Default pipeline preserves tensor.view metadata through PTO codegen."""
+
+    @pl.program
+    class TensorViewDefaultPipeline:
+        @pl.function(type=pl.FunctionType.InCore)
+        def shape_only(
+            self,
+            src: pl.Tensor[[2, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[4, 8], pl.FP32]],
+        ) -> pl.Tensor[[4, 8], pl.FP32]:
+            viewed: pl.Tensor[[4, 8], pl.FP32, pl.TensorView(stride=[8, 1], layout=pl.TensorLayout.ND)] = (
+                pl.tensor.view(src, [4, 8])
+            )
+            tile = pl.load(viewed, [0, 0], [4, 8])
+            return pl.store(tile, [0, 0], out)
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def layout_only(
+            self,
+            src: pl.Tensor[[8, 4], pl.FP32],
+            out: pl.Out[pl.Tensor[[4, 8], pl.FP32]],
+        ) -> pl.Tensor[[4, 8], pl.FP32]:
+            viewed: pl.Tensor[[4, 8], pl.FP32, pl.TensorView(stride=[1, 4], layout=pl.TensorLayout.DN)] = (
+                pl.tensor.view(src, layout=pl.TensorLayout.DN)
+            )
+            tile = pl.load(viewed, [0, 0], [4, 8])
+            return pl.store(tile, [0, 0], out)
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def shape_and_layout(
+            self,
+            src: pl.Tensor[[2, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[4, 8], pl.FP32]],
+        ) -> pl.Tensor[[4, 8], pl.FP32]:
+            viewed: pl.Tensor[[4, 8], pl.FP32, pl.TensorView(stride=[1, 4], layout=pl.TensorLayout.DN)] = (
+                pl.tensor.view(src, [4, 8], layout=pl.TensorLayout.DN)
+            )
+            tile = pl.load(viewed, [0, 0], [4, 8])
+            return pl.store(tile, [0, 0], out)
+
+    def function_body(mlir: str, name: str) -> str:
+        start = mlir.index(f"func.func @{name}(")
+        end = mlir.find("\n  func.func @", start + 1)
+        return mlir[start:] if end == -1 else mlir[start:end]
+
+    def target_view_line(body: str, layout: str) -> str:
+        matched = [
+            line
+            for line in _get_mlir_lines(body)
+            if "pto.make_tensor_view %arg0" in line
+            and "shape = [%c4_index, %c8_index]" in line
+            and f"{{layout = #pto.layout<{layout}>}}" in line
+        ]
+        assert len(matched) == 1, f"Expected one target tensor view, got: {matched}"
+        return matched[0]
+
+    mlir_code = _generate_default_mlir(TensorViewDefaultPipeline)
+
+    shape_body = function_body(mlir_code, "shape_only")
+    shape_view = target_view_line(shape_body, "nd")
+    assert "shape = [%c4_index, %c8_index]" in shape_view
+    assert "strides = [%c8_index, %c1_index]" in shape_view
+    assert "{layout = #pto.layout<nd>}" in shape_view
+
+    for func_name in ("layout_only", "shape_and_layout"):
+        body = function_body(mlir_code, func_name)
+        view_line = target_view_line(body, "dn")
+        assert "shape = [%c4_index, %c8_index]" in view_line
+        assert "strides = [%c1_index, %c4_index]" in view_line
+        assert "{layout = #pto.layout<dn>}" in view_line
+        view_ssa = view_line.split(" = ", 1)[0].strip()
+        assert any(f"pto.partition_view {view_ssa}" in line for line in _get_mlir_lines(body))
+
+
+def test_pto_codegen_tensor_view_shape_and_layout():
+    """In-core tensor.view emits the deduced shape and layout strides."""
+    span = ir.Span.unknown()
+    src = ir.Var("src", ir.TensorType([2, 16], DataType.FP32), span)
+    out = ir.Var("out", ir.TensorType([4, 8], DataType.FP32), span)
+
+    view_call = ir.op.tensor.view(src, [4, 8], layout=ir.TensorLayout.DN)
+    view_var = ir.Var("src_view", view_call.type, span)
+    tile_call = ir.op.tile.load(view_var, [0, 0], [4, 8])
+    tile_var = ir.Var("tile", tile_call.type, span)
+    store_call = ir.op.tile.store(tile_var, [0, 0], out)
+    result_var = ir.Var("result", store_call.type, span)
+
+    body = ir.SeqStmts(
+        [
+            ir.AssignStmt(view_var, view_call, span),
+            ir.AssignStmt(tile_var, tile_call, span),
+            ir.AssignStmt(result_var, store_call, span),
+            ir.ReturnStmt([result_var], span),
+        ],
+        span,
+    )
+    func = ir.Function("kernel", [src, out], [result_var.type], body, span, ir.FunctionType.InCore)
+    program = ir.Program([func], "TensorViewShapeLayoutTest", span)
+
+    mlir_code = _generate_mlir(program)
+    lines = _get_mlir_lines(mlir_code)
+    view_line = _single_line(lines, "pto.make_tensor_view %arg0, shape = [%c4_index, %c8_index]")
+    assert "strides = [%c1_index, %c4_index]" in view_line
+    assert "{layout = #pto.layout<dn>}" in view_line
+
+    view_ssa = view_line.split(" = ", 1)[0].strip()
+    assert any(f"pto.partition_view {view_ssa}" in line for line in lines)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

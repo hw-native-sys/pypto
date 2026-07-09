@@ -588,7 +588,7 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
   /// Returns the original TypePtr if nothing changed.
   TypePtr SimplifyType(const TypePtr& type) {
     if (!type) return type;
-    if (auto t = As<TensorType>(type)) {
+    if (auto t = AsTensorTypeLike(type)) {
       bool changed = false;
       auto new_shape = SimplifyExprVec(t->shape_, &changed);
       std::optional<TensorView> new_tv = t->tensor_view_;
@@ -603,6 +603,10 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
         }
       }
       if (!changed) return type;
+      if (auto distributed = As<DistributedTensorType>(type)) {
+        return std::make_shared<DistributedTensorType>(std::move(new_shape), t->dtype_, t->memref_,
+                                                       std::move(new_tv), distributed->window_buffer_);
+      }
       return std::make_shared<TensorType>(std::move(new_shape), t->dtype_, t->memref_, std::move(new_tv));
     }
     if (auto t = As<TileType>(type)) {

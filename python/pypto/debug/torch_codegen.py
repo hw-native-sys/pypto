@@ -504,6 +504,21 @@ def _tensor_slice(tensor, offsets, shapes, valid_shapes=None):
         sliced._pypto_full_shape = shapes_t
     return sliced
 
+def _tensor_view(tensor, shape, is_dn):
+    shape = _coerce_shape(shape)
+    strides = [1] * len(shape)
+    if is_dn:
+        strides[-2] = 1
+        strides[-1] = shape[-2]
+        running = shape[-2] * shape[-1]
+        for i in range(len(shape) - 3, -1, -1):
+            strides[i] = running
+            running *= shape[i]
+    else:
+        for i in range(len(shape) - 2, -1, -1):
+            strides[i] = strides[i + 1] * shape[i + 1]
+    return torch.as_strided(tensor, shape, strides)
+
 def _fillpad(tensor, pad_mode="zero"):
     valid_shape = getattr(tensor, "_pypto_valid_shape", None)
     full_shape = getattr(tensor, "_pypto_full_shape", tuple(tensor.shape))
@@ -1307,7 +1322,20 @@ class TorchCodegen(_ir.IRVisitor):
         arg_strs = [self._visit_expr_str(a) for a in op.args]
         kw = dict(op.kwargs) if op.kwargs else {}
 
-        if handler is not None:
+        if op_name == _ir.get_op("tensor.view").name:
+            if len(arg_strs) == 2:
+                result_view = getattr(op.type, "tensor_view", None)
+                is_dn = result_view is not None and result_view.layout == _ir.TensorLayout.DN
+                self._expr_result = f"_tensor_view({arg_strs[0]}, {arg_strs[1]}, {is_dn})"
+            else:
+                src_view = getattr(op.args[0].type, "tensor_view", None)
+                result_view = getattr(op.type, "tensor_view", None)
+                src_layout = src_view.layout if src_view is not None else _ir.TensorLayout.ND
+                if result_view is not None and result_view.layout != src_layout:
+                    self._expr_result = f"{arg_strs[0]}.mT"
+                else:
+                    self._expr_result = arg_strs[0]
+        elif handler is not None:
             self._expr_result = handler(arg_strs, kw)
         elif isinstance(op.op, _ir.GlobalVar):
             # Cross-function call

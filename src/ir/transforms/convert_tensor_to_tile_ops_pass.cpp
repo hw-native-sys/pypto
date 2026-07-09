@@ -65,6 +65,10 @@ std::string MakeStoreResultName(size_t index) {
   return auto_name::BuildName("ret" + std::to_string(index), "", "store");
 }
 
+bool IsPassthroughTensorOp(const CallPtr& call) {
+  return IsOp(call, "tensor.dim") || IsOp(call, "tensor.view");
+}
+
 /**
  * @brief Visitor that collects tensor-typed variable names used directly by converted ops.
  *
@@ -531,13 +535,16 @@ class TensorToTileMutator : public TypePropagatingMutator {
 
     const auto* entry = conv_registry_.Lookup(call->op_->name_);
     if (!entry) {
+      if (IsOp(call, "tensor.view")) {
+        CHECK_SPAN(!call->args_.empty() && AsTensorTypeLike(call->args_[0]->GetType()), call->span_)
+            << "tensor.view in an InCore function requires a GM Tensor input that remains tensor-like "
+               "through ConvertTensorToTileOps; viewing the result of an op lowered to Tile is not supported";
+      }
       // Verify unregistered TensorOps are expected passthroughs
       if (op_registry_.IsRegistered(call->op_->name_)) {
         const auto& op_entry = op_registry_.GetEntry(call->op_->name_);
-        static const std::unordered_set<std::string> kPassthroughTensorOps = {"tensor.dim"};
-        INTERNAL_CHECK_SPAN(
-            op_entry.GetOpCategory() != "TensorOp" || kPassthroughTensorOps.count(call->op_->name_),
-            call->span_)
+        INTERNAL_CHECK_SPAN(op_entry.GetOpCategory() != "TensorOp" || IsPassthroughTensorOp(call),
+                            call->span_)
             << "TensorOp \"" << call->op_->name_ << "\" has no registered tile conversion. "
             << "Add a conversion in src/ir/transforms/op_conversion_registry.cpp.";
       }

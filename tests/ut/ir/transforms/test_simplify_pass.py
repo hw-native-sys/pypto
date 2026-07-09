@@ -22,6 +22,7 @@ literals to pre-fold).
 """
 
 import pypto.language as pl
+import pypto.language.distributed as pld
 import pytest
 from pypto import ir, passes
 
@@ -712,6 +713,25 @@ class TestScalarConstantPropagation:
             @pl.function
             def main(self):
                 _t: pl.Tensor[[4, 8], pl.FP32] = pl.tensor.create([4, 8], dtype=pl.FP32)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_propagates_into_distributed_tensor_view_type(self):
+        """Simplified view shapes refresh DistributedTensorType metadata."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pld.DistributedTensor[[4, 8], pl.FP32]):
+                n: pl.Scalar[pl.INDEX] = 2
+                _viewed = pl.tensor.view(x, [n * 2, 8])
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pld.DistributedTensor[[4, 8], pl.FP32]):
+                _viewed = pl.tensor.view(x, [4, 8])
 
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)

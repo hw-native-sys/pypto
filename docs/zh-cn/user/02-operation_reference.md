@@ -53,6 +53,7 @@
 | `dim` | `(tensor: Tensor, axis: int) -> Scalar` | 获取维度大小（支持负索引） |
 | `slice` | `(tensor: Tensor, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> Tensor` | 切片。语法糖：`A[0:16, :]` |
 | `reshape` | `(tensor: Tensor, shape: Sequence[IntLike]) -> Tensor` | 变形 |
+| `view` | `(tensor: Tensor, shape: Sequence[IntLike] \| None = None, *, layout: TensorLayout \| None = None) -> Tensor` | 在同一存储上进行零拷贝重新解释；目标 rank 至少为 1，DN 至少为 2。编排层仅支持 ND shape 重新解释，且不能同时改变 layout |
 | `transpose` | `(tensor: Tensor, axis1: int, axis2: int) -> Tensor` | 交换两个轴 |
 | `assemble` | `(target: Tensor, source: Tensor, offset: Sequence[IntLike], *, atomic: AtomicType = AtomicType.None_) -> Tensor` | 将 source 写入 target 的指定偏移。语法糖（仅 SSA 前）：`target[i:i+H, j:j+W] = source`。`atomic=AtomicType.Add` 改为累加而非覆盖（split-K）——仅当 target 为函数输出（全局内存）时合法；浮点结果不确定，target 需预先清零，支持 dtype fp32/bf16/fp16/int32/int16/int8（bf16 仅在 Ascend910B/A2/A3 上支持） |
 | `scatter_update` | `(input: Tensor, dim: int, index: Tensor, src: Tensor) -> Tensor` | 按 `index` 指定的稀疏行位置，将 `src` 的行数据写入 `input`。`input`/`src`：2D `[rows, d]` 或 4D `[B, S, 1, d]`；`index`：2D `[b, s]` 整型。当前仅支持 `dim=-2` |

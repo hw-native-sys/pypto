@@ -1322,8 +1322,11 @@ std::string PTOCodegen::GetGMSlotBufferSSA() const { return fs_.gm_slot_buffer_s
 std::string PTOCodegen::GetCommCtxSSAFor(const ir::Var* dist_var) const {
   if (dist_var == nullptr) return "";
   auto it = fs_.dist_tensor_to_ctx.find(dist_var);
-  if (it == fs_.dist_tensor_to_ctx.end()) return "";
-  return it->second;
+  if (it != fs_.dist_tensor_to_ctx.end()) return it->second;
+  if (auto iter_arg = dynamic_cast<const ir::IterArg*>(dist_var)) {
+    if (auto init_var = AsVarLike(iter_arg->initValue_)) return GetCommCtxSSAFor(init_var.get());
+  }
+  return "";
 }
 
 void PTOCodegen::RegisterCommCtxFor(const ir::VarPtr& dist_var, const std::string& ctx_ssa) {
@@ -1518,6 +1521,7 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
         BindTensorView(op->var_, view);
         BindVarToMlir(op->var_, view);  // view name == SSA name, as in ForStmt
         RegisterBasePtr(op->var_, GetTensorBasePtr(rhs_var));
+        RegisterCommCtxFor(op->var_, GetCommCtxSSAFor(rhs_var.get()));
         return;
       }
     } else if (!emit_tile_addr_ && As<TileType>(op->var_->GetType())) {

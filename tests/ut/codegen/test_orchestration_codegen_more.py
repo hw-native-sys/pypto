@@ -350,6 +350,91 @@ class TestOrchestrationMore:
         assert "Tensor b_same = ext_b;" in code
         assert ".transpose(" not in code
 
+    def test_tensor_view_shape_reinterpret_runs_through_default_pipeline(self):
+        """ND shape-only views survive the default pipeline and emit reshape."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class ShapeViewProgram:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_view(
+                self,
+                data: pl.Tensor[[2, 16], pl.FP16],
+            ) -> pl.Tensor[[4, 8], pl.FP16]:
+                viewed: pl.Tensor[[4, 8], pl.FP16] = pl.tensor.view(data, [4, 8])
+                return viewed
+
+        program = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(ShapeViewProgram)
+        orch_func = next(
+            f for f in program.functions.values() if f.func_type == ir.FunctionType.Orchestration
+        )
+        code = codegen.generate_orchestration(program, orch_func).code
+
+        shape_decl = re.search(r"uint32_t (\w+)_shapes\[2\] = \{4, 8\};", code)
+        assert shape_decl is not None, code
+        viewed_name = shape_decl.group(1)
+        reshape_line = next(line for line in code.splitlines() if f"Tensor {viewed_name} =" in line)
+        assert f".reshape({viewed_name}_shapes, 2);" in reshape_line
+
+    def test_tensor_view_shape_layout_combination_rejected(self):
+        """Combining shape reinterpret with a layout change is rejected at
+        orchestration codegen time -- the runtime ``Tensor::reshape`` does not
+        support arbitrary-stride layout views. The error uses ``CHECK_SPAN``
+        and raises ``ValueError`` (not ``InternalError``).
+
+        See ``error-checking.md``: documented user-facing limitations inside
+        passes / lowering use ``CHECK`` / ``CHECK_SPAN``.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        ib = IRBuilder()
+        with ib.function("orch_view_bad", type=ir.FunctionType.Orchestration) as f:
+            b = f.param("b", ir.TensorType([8, 4], DataType.FP16))
+            f.return_type(ir.TensorType([4, 8], DataType.FP16))
+            # Combining shape=[4, 8] with layout=DN: the runtime has no
+            # reshape-with-stride primitive, so codegen must reject this.
+            bad = ib.let("bad", tensor_ops.view(b, [4, 8], layout=ir.TensorLayout.DN))
+            ib.return_stmt(bad)
+        orch = f.get_result()
+        program = ir.Program([orch], "test_view_bad_combine", ir.Span.unknown())
+
+        with pytest.raises(ValueError, match="cannot combine shape reinterpret"):
+            _generate_orch_code(program)
+
+    def test_tensor_view_shape_reinterpret_rejects_dn_source(self):
+        """Shape-only tensor.view on a DN source cannot lower to runtime reshape.
+
+        Even when the requested target layout equals the source layout, runtime
+        ``Tensor::reshape`` assumes ND/row-major contiguous storage and cannot
+        preserve a DN physical stride.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        span = ir.Span.unknown()
+        dn_view = ir.TensorView(
+            stride=[
+                ir.ConstInt(1, DataType.INDEX, span),
+                ir.ConstInt(8, DataType.INDEX, span),
+            ],
+            layout=ir.TensorLayout.DN,
+        )
+        dn_type = ir.TensorType([8, 4], DataType.FP16, memref=None, tensor_view=dn_view)
+
+        ib = IRBuilder()
+        with ib.function("orch_view_bad_dn", type=ir.FunctionType.Orchestration) as f:
+            b = f.param("b", dn_type)
+            bad = ib.let("bad", tensor_ops.view(b, [4, 8]))
+            f.return_type(bad.type)
+            ib.return_stmt(bad)
+        orch = f.get_result()
+        program = ir.Program([orch], "test_view_bad_dn_shape", span)
+
+        with pytest.raises(ValueError, match="only supports shape reinterpret for ND layout"):
+            _generate_orch_code(program)
+
     def test_if_statement(self):
         """Test if/else codegen with conditional scalar values."""
         backend.reset_for_testing()
