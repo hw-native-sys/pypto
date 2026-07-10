@@ -80,12 +80,12 @@ void VerifyOrchestrationCodegenPreconditions(const ProgramPtr& program, const Fu
   // instead of tracing SSA lineage. Without it, an SSA-aliased return would
   // silently alias a result to the wrong buffer rather than raise.
   //
-  // TODO: CallDirectionsResolved belongs here too — codegen equally trusts
-  // `callee->param_directions_`, which DeriveCallDirections materializes on
-  // Group/Spmd wrappers. It is not listed yet because two existing tests feed
-  // orchestration codegen IR that deliberately violates it (an `Input` arg
-  // direction on an `Out` param, and a convert_to_ssa-only program), so wiring
-  // it needs those tests reworked.
+  // TODO(call-directions-precondition): CallDirectionsResolved belongs here
+  // too — codegen equally trusts `callee->param_directions_`, which
+  // DeriveCallDirections materializes on Group/Spmd wrappers. It is not listed
+  // yet because two existing tests feed orchestration codegen IR that
+  // deliberately violates it (an `Input` arg direction on an `Out` param, and a
+  // convert_to_ssa-only program), so wiring it needs those tests reworked.
   pass::VerifyProperties(
       IRPropertySet{IRProperty::SplitIncoreOrch, IRProperty::OrchestrationReferencesResolved,
                     IRProperty::RuntimeScopesMaterialized, IRProperty::IterArgCarryClassified,
