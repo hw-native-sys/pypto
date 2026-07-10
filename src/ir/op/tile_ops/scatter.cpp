@@ -44,6 +44,7 @@
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -84,10 +85,12 @@ void CheckScatterDtypeSizing(const DataType& dst_dtype, const DataType& idx_dtyp
 // alias of `dst` so downstream passes that consume the result see the post-
 // scatter buffer with the right tile_view / memory space.
 TypePtr MakeScatterResultType(const std::shared_ptr<const TileType>& dst_type) {
-  TileView tile_view;
-  if (dst_type->tile_view_.has_value()) {
-    tile_view = *dst_type->tile_view_;
-  }
+  // Seed from the EFFECTIVE view: a source that leaves `tile_view_` implicit still
+  // has a layout — the one its shape and memory space imply (a [M, 1] tile is
+  // col_major, an Acc tile is col_major / row_major / fractal=1024, ...). Default-
+  // constructing here would pin the raw row_major / none_box / fractal=512 defaults
+  // onto an alias of `dst`. See DeduceTileSetValidShapeType for the same rule.
+  TileView tile_view = tile_view_semantics::GetEffectiveTileView(*dst_type);
   if (tile_view.valid_shape.empty()) {
     tile_view.valid_shape = dst_type->shape_;
   }

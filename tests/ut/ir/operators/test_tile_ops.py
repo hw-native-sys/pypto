@@ -3404,6 +3404,24 @@ class TestTileScatterUpdateOps:
         assert len(const_dims) == len(result_type.shape)
         assert [dim.value for dim in const_dims] == input_shape
 
+    def test_tile_scatter_update_keeps_implicit_column_vector_layout(self):
+        """Same alias rule as tile.scatter: a `[M, 1]` input is implicitly col_major,
+        so the result must stay implicit rather than pin the raw TileView defaults."""
+        span = ir.Span.unknown()
+        colvec = ir.TileType(_const_dims(span, 64, 1), DataType.FP32)
+        idx_type = ir.TileType(_const_dims(span, 64, 1), DataType.INT32)
+        assert colvec.tile_view is None, "input leaves the view implicit"
+
+        result_type = tile.scatter_update(
+            ir.Var("inp", colvec, span),
+            -2,
+            ir.Var("idx", idx_type, span),
+            ir.Var("src", colvec, span),
+        ).type
+
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is None
+
     @pytest.mark.parametrize(
         ("src_dtype", "dim", "match"),
         [
@@ -3637,6 +3655,30 @@ class TestTileScatterOps:
         assert result_type.dtype == dtype
         const_dims = [dim.value for dim in result_type.shape if isinstance(dim, ir.ConstInt)]
         assert const_dims == [16, 32]
+
+    def test_tile_scatter_keeps_implicit_column_vector_layout(self):
+        """The result aliases `dst`, so it must not pin the raw TileView defaults.
+
+        A `[M, 1]` tile that leaves `tile_view` implicit is col_major (see
+        `InferImplicitTileLayoutFromShape`). Seeding the alias's TileView from a
+        default-constructed one would stamp an explicit row_major / none_box /
+        fractal=512 view onto a buffer whose own `pto.alloc_tile` declares
+        col_major. Staying implicit (`tile_view is None`) is the canonical form:
+        `TileType` collapses a view equal to the implicit one back to None.
+        """
+        span = ir.Span.unknown()
+        colvec = ir.TileType(_const_dims(span, 64, 1), DataType.FP32)
+        idx_type = ir.TileType(_const_dims(span, 64, 1), DataType.INT32)
+        assert colvec.tile_view is None, "source leaves the view implicit"
+
+        result_type = tile.scatter(
+            ir.Var("dst", colvec, span),
+            ir.Var("src", colvec, span),
+            ir.Var("idx", idx_type, span),
+        ).type
+
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is None
 
     def test_tile_scatter_rejects_dtype_mismatch(self):
         """tile.scatter requires dst dtype to match src dtype."""

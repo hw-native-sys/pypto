@@ -690,10 +690,10 @@ TypePtr DeduceTileScatterUpdateType(const std::vector<ExprPtr>& args,
 
   // Inherit tile_view (with valid_shape = input shape) and memory_space from input,
   // same pattern as tile.assemble — ensures tile.store can read valid_shape downstream.
-  TileView tile_view;
-  if (input_type->tile_view_.has_value()) {
-    tile_view = *input_type->tile_view_;
-  }
+  // Seed from the EFFECTIVE view so an input that leaves `tile_view_` implicit keeps
+  // the layout its shape and memory space imply, rather than acquiring the raw
+  // TileView defaults. See DeduceTileSetValidShapeType for the same rule.
+  TileView tile_view = tile_view_semantics::GetEffectiveTileView(*input_type);
   if (tile_view.valid_shape.empty()) {
     tile_view.valid_shape = input_type->shape_;
   }
