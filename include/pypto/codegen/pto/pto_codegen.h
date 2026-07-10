@@ -312,6 +312,17 @@ class PTOCodegen : public CodegenBase {
   std::string GetTileBufTypeStringFromTileType(const std::shared_ptr<const ir::TileType>& tile_type) const;
 
   /**
+   * @brief tile_buf type string for a VIEW result (`pto.treshape`).
+   *
+   * Same as GetTileBufTypeStringFromTileType but renders STATIC valid dims when
+   * they are statically known. A view op takes no `valid_row` / `valid_col`
+   * operands, so ptoas builds its destination tile from the result type alone; a
+   * `v_row=?, v_col=?` result would leave the tile's valid extent at zero.
+   */
+  std::string GetViewTileBufTypeStringFromTileType(
+      const std::shared_ptr<const ir::TileType>& tile_type) const;
+
+  /**
    * @brief Allocate a new tile buffer for codegen (emitted at function scope)
    *
    * Used when an operation needs a distinct output buffer (e.g., reshape where
@@ -772,6 +783,15 @@ class PTOCodegen : public CodegenBase {
     /// PlanMemory keeps them one buffer. Views (same base, different
     /// offset/size) get distinct keys and are never merged.
     std::map<std::string, std::string> memref_identity_to_mlir;
+    /// MemRef-identity key -> the tile_buf type of the first var bound to it.
+    std::map<std::string, std::string> memref_identity_type;
+    /// MemRef-identity keys whose vars do NOT all share one tile_buf type — e.g.
+    /// a `[1, N]` row-major op result and its `[N, 1]` col-major reshape view,
+    /// which occupy the same bytes. Their shared handle carries exactly one type
+    /// (differently-typed reads become `pto.treshape` views of it), so it must
+    /// never be re-typed to suit another var. `TryGetSharedTileBufHandle` refuses
+    /// these identities.
+    std::set<std::string> memref_identity_mixed_types;
     /// alloc_tile SSA handles already emitted — dedups the alloc when several
     /// vars share one handle (PTOAS in-place aliasing).
     std::set<std::string> emitted_tile_alloc_names;
@@ -834,6 +854,8 @@ class PTOCodegen : public CodegenBase {
       tile_var_allocs.clear();
       emitted_tile_alloc_vars.clear();
       memref_identity_to_mlir.clear();
+      memref_identity_type.clear();
+      memref_identity_mixed_types.clear();
       emitted_tile_alloc_names.clear();
 
       current_function.reset();

@@ -2397,6 +2397,16 @@ class AlignLoopCarriesToInitMutator : public IRMutator {
  */
 class YieldFixupMutator : public IRMutator {
  public:
+  YieldFixupMutator() = default;
+
+  /// `fixup_if_stmts=false` reconciles only ForStmt carries. Used under
+  /// memory_planner=PtoAS, where PTO codegen already re-points a branch-local
+  /// producer at the phi handle (#1956/#1985) and copies in anything it declines
+  /// to re-point — a copy-free path that an IR-level `tile.move` would displace
+  /// with an extra buffer plus a `pto.tmov`. Loop carries have no such codegen
+  /// path, so they still need the move.
+  explicit YieldFixupMutator(bool fixup_if_stmts) : fixup_if_stmts_(fixup_if_stmts) {}
+
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
     // First recurse into nested control flow
     auto result = IRMutator::VisitStmt_(op);
@@ -2464,6 +2474,7 @@ class YieldFixupMutator : public IRMutator {
   StmtPtr VisitStmt_(const IfStmtPtr& op) override {
     // First recurse into nested control flow
     auto result = IRMutator::VisitStmt_(op);
+    if (!fixup_if_stmts_) return result;
     auto if_stmt = As<IfStmt>(result);
     if (!if_stmt || if_stmt->return_vars_.empty()) return result;
 
@@ -2542,6 +2553,7 @@ class YieldFixupMutator : public IRMutator {
   }
 
  private:
+  bool fixup_if_stmts_ = true;
   // Create a tile.move operation that copies source into target_memref's buffer.
   // Returns (moved_var, move_assign_stmt).
   std::pair<VarPtr, StmtPtr> CreateTileMove(const VarPtr& source, const MemRefPtr& target_memref,
@@ -2811,9 +2823,35 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
   StmtPtr new_body = func->body_;
   TopDownRetargeter retargeter;
   auto rewrites = retargeter.Compute(new_body);
-  if (rewrites.empty()) return func;
-  RetypeApplier applier(std::move(rewrites));
-  new_body = applier.VisitStmt(new_body);
+  if (!rewrites.empty()) {
+    RetypeApplier applier(std::move(rewrites));
+    new_body = applier.VisitStmt(new_body);
+  }
+
+  // Under memory_planner=PtoAS the whole MemoryReuse pass is skipped, and with it
+  // YieldFixupMutator (its Step 4). That mutator is not an optimization: when a
+  // loop yields a value living in a different buffer than its iter_arg/return_var,
+  // it inserts the `tile.move` that writes the result back into the carry. Without
+  // it the carry is never updated and the loop silently becomes a no-op — the
+  // `[N, 1]` col-vector carry of an online softmax is the shape that hits this,
+  // because its branch producer runs on a `[1, N]` view in its own buffer.
+  //
+  // Run it here so both planners reconcile carries by the same mechanism. Under
+  // PyPTO it stays where it is: Step 4 must run *after* the reuse decisions, which
+  // can themselves create fresh mismatches.
+  //
+  // Only the ForStmt half: PTO codegen already re-points a branch-local producer
+  // at the if-phi handle, and copies in whatever it declines to re-point
+  // (#1956/#1985). An IR-level `tile.move` there would displace that copy-free
+  // path with an extra buffer plus a `pto.tmov`. Loop carries have no such
+  // codegen path, so they still need the move.
+  const auto* ctx = PassContext::Current();
+  if (ctx != nullptr && ctx->GetMemoryPlanner() == MemoryPlanner::PtoAS) {
+    YieldFixupMutator yield_fixup(/*fixup_if_stmts=*/false);
+    new_body = yield_fixup.VisitStmt(new_body);
+  }
+
+  if (new_body == func->body_) return func;
 
   return std::make_shared<const Function>(func->name_, func->params_, func->param_directions_,
                                           func->return_types_, new_body, func->span_, func->func_type_,

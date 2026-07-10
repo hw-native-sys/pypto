@@ -43,6 +43,7 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/utils/core_affinity.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
@@ -609,6 +610,8 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   for (const auto& [tile_var, tile_type] : fs_.tile_var_allocs) {
     auto memref = ir::GetDefinedMemRef(tile_type);
 
+    std::string type_str = GetTileBufTypeStringFromTileType(tile_type);
+
     std::string ssa_name;
     if (!emit_tile_addr_) {
       const std::string ident = MemRefIdentityKey(memref);
@@ -619,6 +622,16 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
         ssa_name = NewNamedTemp(tile_var->name_hint_);
         fs_.memref_identity_to_mlir[ident] = ssa_name;
       }
+      // Same bytes does not mean same tile_buf type: a [1, N] row-major op result
+      // and its [N, 1] col-major reshape view share base+offset+size. They still
+      // share one handle (differently-typed reads become `pto.treshape` views of
+      // it), but an MLIR SSA value has exactly one type, so callers that want to
+      // *re-type* the handle — the IfStmt phi head-declaration — must not touch a
+      // mixed-type identity. Record which identities are uniform.
+      auto [type_it, fresh] = fs_.memref_identity_type.emplace(ident, type_str);
+      if (!fresh && type_it->second != type_str) {
+        fs_.memref_identity_mixed_types.insert(ident);
+      }
     } else {
       ssa_name = NewNamedTemp(tile_var->name_hint_);
     }
@@ -626,7 +639,6 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
 
     // Pre-populate type so body visitors (e.g., tile.reshape no-op check)
     // can query it before per-variable alloc_tile emission runs.
-    std::string type_str = GetTileBufTypeStringFromTileType(tile_type);
     fs_.ssa_to_tile_buf_type[ssa_name] = type_str;
 
     // Also maintain fs_.memref_to_mlir for compatibility (first var per allocation)
@@ -1251,7 +1263,13 @@ std::string PTOCodegen::TryGetSharedTileBufHandle(const ir::MemRefPtr& memref) c
   if (emit_tile_addr_ || !memref) {
     return "";
   }
-  auto it = fs_.memref_identity_to_mlir.find(MemRefIdentityKey(memref));
+  const std::string ident = MemRefIdentityKey(memref);
+  // A mixed-type identity's handle already carries another var's type; re-typing
+  // it would make one SSA value have two types and ptoas would reject the module.
+  if (fs_.memref_identity_mixed_types.count(ident) != 0) {
+    return "";
+  }
+  auto it = fs_.memref_identity_to_mlir.find(ident);
   return it != fs_.memref_identity_to_mlir.end() ? it->second : std::string{};
 }
 
@@ -1740,6 +1758,37 @@ std::string PTOCodegen::GetTileBufTypeStringFromTileType(
   auto c = ExtractTileTypeInfo(*tile_type, GetTypeString(tile_type->dtype_));
   return FormatTileBufTypeString(loc, c.dtype_str, c.rows, c.cols, c.blayout, c.slayout, c.fractal, c.pad,
                                  c.v_row, c.v_col, c.v_row_dynamic, c.v_col_dynamic);
+}
+
+std::string PTOCodegen::GetViewTileBufTypeStringFromTileType(
+    const std::shared_ptr<const ir::TileType>& tile_type) const {
+  INTERNAL_CHECK(tile_type) << "Internal error: tile_type must not be null";
+  auto memory_space = tile_type->GetMemorySpace();
+  INTERNAL_CHECK(memory_space.has_value()) << "Internal error: tile_type must have memory_space";
+
+  auto c = ExtractTileTypeInfo(*tile_type, GetTypeString(tile_type->dtype_));
+
+  // `pto.alloc_tile` conveys the valid extent through `valid_row` / `valid_col`
+  // operands, so ExtractTileTypeInfo always renders `v_row=?, v_col=?`. A view op
+  // that takes NO such operands — `pto.treshape` — cannot: ptoas default-
+  // constructs its destination tile from the result type alone, so a dynamic
+  // valid leaves the tile's valid extent at zero and every consumer silently
+  // becomes a no-op. Render static valid dims whenever the view's effective
+  // valid_shape is statically known.
+  const auto view = ir::tile_view_semantics::GetEffectiveTileView(*tile_type);
+  if (view.valid_shape.size() >= 2) {
+    auto v_row = As<ir::ConstInt>(view.valid_shape[0]);
+    auto v_col = As<ir::ConstInt>(view.valid_shape[1]);
+    if (v_row && v_col) {
+      c.v_row = v_row->value_;
+      c.v_col = v_col->value_;
+      c.v_row_dynamic = false;
+      c.v_col_dynamic = false;
+    }
+  }
+  return FormatTileBufTypeString(MemorySpaceToMLIR(*memory_space), c.dtype_str, c.rows, c.cols, c.blayout,
+                                 c.slayout, c.fractal, c.pad, c.v_row, c.v_col, c.v_row_dynamic,
+                                 c.v_col_dynamic);
 }
 
 std::string PTOCodegen::GetExprTypeAnnotation(const ir::ExprPtr& expr) {

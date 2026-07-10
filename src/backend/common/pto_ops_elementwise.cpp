@@ -502,6 +502,20 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
     auto& codegen = AsPto(codegen_base);
     CHECK(op->args_.size() == 1) << "tile.move requires 1 argument, got " << op->args_.size();
 
+    // Under memory_planner=PtoAS there is no baked address: AllocateMemoryAddr is
+    // skipped and every `byte_offset_` is still the -1 sentinel, so the offset
+    // comparison below would see `-1 == -1` and elide EVERY move — including the
+    // loop-carry write-back YieldFixupMutator inserts. There, two vars denote one
+    // buffer exactly when they collapsed onto the same tile_buf handle.
+    if (!codegen.EmitTileAddr()) {
+      std::string src_ssa = codegen.GetExprAsCode(op->args_[0]);
+      if (!src_ssa.empty() && src_ssa == codegen.GetCurrentResultTarget()) {
+        return std::string("");  // no-op: one handle, the op already wrote in place
+      }
+      codegen.Emit("pto.tmov " + GenerateInsOutsClause(op, codegen));
+      return std::string("");
+    }
+
     auto src_var = AsVarLike(op->args_[0]);
     auto dst_var = codegen.GetCurrentResultVar();
     if (src_var && dst_var) {

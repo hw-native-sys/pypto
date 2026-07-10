@@ -1077,20 +1077,27 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     // per-var alloc model pre-declared it with the reshaped type at a shared
     // addr); a MemRef-less result has no alloc, so it must emit pto.treshape.
     std::string result_type;
+    // The emitted `pto.treshape` result carries STATIC valid dims: the op takes no
+    // valid_row / valid_col operands, so ptoas builds the destination tile from the
+    // result type alone and a `v_row=?` would leave its valid extent at zero.
+    std::string view_type;
     bool result_has_memref = false;
     if (auto result_var = codegen.GetCurrentResultVar()) {
       if (auto result_tile = ir::As<ir::TileType>(result_var->GetType())) {
         result_type = codegen.GetTileBufTypeStringFromTileType(result_tile);
+        view_type = codegen.GetViewTileBufTypeStringFromTileType(result_tile);
         result_has_memref = result_tile->memref_.has_value();
       }
     }
+    // The no-op check compares against the pre-declared alloc_tile, whose type is
+    // always the dynamic-valid form — so it must use `result_type`, not `view_type`.
     auto existing_type = codegen.GetSSATileBufType(result_target);
     if (result_has_memref && !existing_type.empty() && existing_type == result_type) {
       return std::string("");
     }
 
     // Fallback: emit pto.treshape reading the source SSA.
-    EmitTreshapeView(codegen, op->args_[0], result_target, result_type, "reshape_buf");
+    EmitTreshapeView(codegen, op->args_[0], result_target, view_type, "reshape_buf");
     return std::string("");
   });
 
@@ -1113,10 +1120,12 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     std::string result_target = codegen.GetCurrentResultTarget();
 
     std::string result_type;
+    std::string view_type;  // static valid dims — see tile.reshape above
     bool result_has_memref = false;
     if (auto result_var = codegen.GetCurrentResultVar()) {
       if (auto result_tile = ir::As<ir::TileType>(result_var->GetType())) {
         result_type = codegen.GetTileBufTypeStringFromTileType(result_tile);
+        view_type = codegen.GetViewTileBufTypeStringFromTileType(result_tile);
         result_has_memref = result_tile->memref_.has_value();
       }
     }
@@ -1129,7 +1138,7 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
 
     // No declaration carries the transposed type — reinterpret the source in
     // place via pto.treshape reading its SSA, exactly like tile.reshape.
-    EmitTreshapeView(codegen, op->args_[0], result_target, result_type, "transpose_view_buf");
+    EmitTreshapeView(codegen, op->args_[0], result_target, view_type, "transpose_view_buf");
     return std::string("");
   });
 

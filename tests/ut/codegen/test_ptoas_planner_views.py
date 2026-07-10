@@ -20,6 +20,8 @@ default PyPTO planner hides then have to be emitted correctly:
   `pto.subview` + `pto.treshape` pair whose def/use type strings must agree.
 """
 
+import re
+
 import pypto.language as pl
 import pytest
 from pypto import ir as _ir
@@ -242,6 +244,80 @@ def test_transposed_matmul_operand_is_a_re_view_under_pypto_planner():
     src = right_mov.split("ins(", 1)[1].split(" ", 1)[0]
     decl = _sole_line(mlir, f"{src} = pto.alloc_tile")
     assert "blayout=row_major, slayout=col_major" in decl, decl
+
+
+# ── pto.treshape results must carry STATIC valid dims ────────────────────────
+
+COLVEC_ROWS = 16
+
+
+@pl.program
+class ColVectorMulProgram:
+    """`[N, 1]` elementwise. pypto lowers it on the `[1, N]` row-major view, so both
+    operands reach `tile.mul` through a reshape."""
+
+    @pl.function
+    def kernel(
+        self,
+        x: pl.Tensor[[COLVEC_ROWS, 1], pl.FP32],
+        y: pl.Tensor[[COLVEC_ROWS, 1], pl.FP32],
+        out: pl.Out[pl.Tensor[[COLVEC_ROWS, 1], pl.FP32]],
+    ) -> pl.Tensor[[COLVEC_ROWS, 1], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP, name_hint="colvec_mul"):
+            out[:, :] = pl.mul(x[:, :], y[:, :])
+        return out
+
+
+def _rows_cols(type_str: str) -> tuple[int, int]:
+    """Extract (rows, cols) from a tile_buf type string."""
+    m = re.search(r"rows=(\d+), cols=(\d+)", type_str)
+    assert m is not None, f"no rows/cols in {type_str}"
+    return int(m.group(1)), int(m.group(2))
+
+
+def test_treshape_result_carries_static_valid_dims():
+    """`pto.treshape` takes no valid_row / valid_col operands.
+
+    ptoas builds the destination tile from the result type alone (an empty EmitC
+    initializer) and `TRESHAPE_IMPL` only copies the address, never the valid
+    extent. A `v_row=?, v_col=?` result therefore default-constructs to a valid
+    extent of ZERO and every consumer silently writes nothing — this made a plain
+    `[16, 1]` elementwise multiply return all zeros on device. A view result must
+    render its valid dims statically, unlike `alloc_tile`, whose dynamic type is
+    fine precisely because it passes explicit valid_row / valid_col operands.
+    """
+    mlir = _emit_incore_pto(ColVectorMulProgram, passes.MemoryPlanner.PTOAS)
+
+    treshapes = [ln for ln in mlir.splitlines() if "pto.treshape" in ln]
+    assert treshapes, f"the [N, 1] lowering must reshape onto the row-major view:\n{mlir}"
+    # Both directions appear: [N, 1] -> [1, N] for the operands, [1, N] -> [N, 1]
+    # for the result. Each view's valid extent must equal its own shape.
+    seen_shapes = set()
+    for ln in treshapes:
+        result = _result_type(ln)
+        assert "v_row=?" not in result and "v_col=?" not in result, (
+            f"treshape result must carry static valid dims, got {result}\n{ln}"
+        )
+        rows, cols = _rows_cols(result)
+        assert f"v_row={rows}, v_col={cols}" in result, (
+            f"a [{rows}, {cols}] view must declare v_row={rows}, v_col={cols}:\n{ln}"
+        )
+        seen_shapes.add((rows, cols))
+    assert (1, COLVEC_ROWS) in seen_shapes, f"expected the [1, N] row-major view:\n{mlir}"
+
+    # alloc_tile handles keep the dynamic form — they carry explicit valid operands.
+    for ln in mlir.splitlines():
+        if "= pto.alloc_tile" in ln:
+            assert "v_row=?, v_col=?" in ln, f"alloc_tile stays dynamic-valid:\n{ln}"
+            assert "valid_row = " in ln and "valid_col = " in ln, ln
+
+
+def test_colvec_reshape_folds_away_under_pypto_planner():
+    """Default planner: the `[1, N]` view is a second alloc_tile at the source's
+    baked address, so no `pto.treshape` is emitted at all."""
+    mlir = _emit_incore_pto(ColVectorMulProgram, passes.MemoryPlanner.PYPTO)
+    assert "pto.treshape" not in mlir, mlir
+    assert "= pto.alloc_tile addr = " in mlir, mlir
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/type.h"
@@ -150,7 +151,21 @@ bool IsDefinedInBranch(const ir::Var* var, const StmtPtr& body) {
     // A bare-var alias (`r = a`) or a view writes nothing at its own handle, so
     // re-pointing it would leave the phi buffer unwritten — the tmov fallback in
     // emit_branch copies those into the phi handle instead.
-    return assign->var_.get() == var && As<ir::Call>(assign->value_) != nullptr;
+    if (assign->var_.get() != var) return false;
+    auto call = As<ir::Call>(assign->value_);
+    if (!call || !call->op_) return false;
+    // A zero-copy view (inherit-input: tile.reshape, tile.slice, ...) IS the
+    // "view" the comment above excludes. Its codegen emits nothing when the target
+    // handle already carries the result type, so re-pointing it at the phi handle
+    // leaves the phi buffer unwritten. `[N, 1]` col-vector carries always hit this:
+    // their elementwise ops run on a `[1, N]` row-major view and the branch yields
+    // the reshape back, not the op result.
+    auto& registry = ir::OpRegistry::GetInstance();
+    if (registry.IsRegistered(call->op_->name_) &&
+        registry.GetEntry(call->op_->name_).OutputMemoryInheritsInput()) {
+      return false;
+    }
+    return true;
   }
   if (auto seq = As<ir::SeqStmts>(body)) {
     for (const auto& s : seq->stmts_)
@@ -352,15 +367,23 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
           if (phi_it != fs_.var_to_mlir.end() && !branch_yields[i].empty() &&
               branch_yields[i] != phi_it->second) {
             const std::string& phi = phi_it->second;
-            std::string ty;
-            if (auto tit = fs_.ssa_to_tile_buf_type.find(phi); tit != fs_.ssa_to_tile_buf_type.end()) {
-              ty = tit->second;
-            }
+            // Annotate each operand with the type its own SSA value was defined
+            // with. They can differ: a `pto.treshape` view carries static valid
+            // dims (the op takes no valid operands) while an `alloc_tile` handle
+            // is always dynamic-valid.
+            auto type_of = [&](const std::string& ssa) -> std::string {
+              auto it = fs_.ssa_to_tile_buf_type.find(ssa);
+              return it != fs_.ssa_to_tile_buf_type.end() ? it->second : std::string{};
+            };
+            std::string src_ty = type_of(branch_yields[i]);
+            std::string dst_ty = type_of(phi);
+            if (src_ty.empty()) src_ty = dst_ty;
+            if (dst_ty.empty()) dst_ty = src_ty;
             std::ostringstream mov;
             mov << "pto.tmov ins(" << branch_yields[i];
-            if (!ty.empty()) mov << " : " << ty;
+            if (!src_ty.empty()) mov << " : " << src_ty;
             mov << ") outs(" << phi;
-            if (!ty.empty()) mov << " : " << ty;
+            if (!dst_ty.empty()) mov << " : " << dst_ty;
             mov << ")";
             Emit(mov.str());
           }
