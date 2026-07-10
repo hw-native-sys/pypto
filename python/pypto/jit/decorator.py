@@ -63,6 +63,7 @@ from collections.abc import Callable
 from typing import Any, NamedTuple
 
 from pypto.pypto_core import DataType
+from pypto.pypto_core import passes as _passes
 
 from .cache import CacheKey, compute_source_hash, make_cache_key
 from .specializer import (
@@ -1117,6 +1118,10 @@ def _run_config_compile_kwargs(run_config: Any) -> dict[str, Any]:
 
     ``analyze_auto_scopes_for_deps`` is forwarded because it changes the pass
     pipeline's dependency derivation and therefore the generated orchestration.
+
+    ``memory_planner`` is forwarded only when set: ``ir.compile()`` rejects an
+    explicit planner while a ``PassContext`` is active, and an unset value must
+    defer to that context (or to the ``PYPTO`` default when there is none).
     """
     kwargs: dict[str, Any] = {
         "strategy": run_config.strategy,
@@ -1130,7 +1135,27 @@ def _run_config_compile_kwargs(run_config: Any) -> dict[str, Any]:
         kwargs["output_dir"] = run_config.save_kernels_dir
     if run_config.distributed_config is not None:
         kwargs["distributed_config"] = run_config.distributed_config
+    if run_config.memory_planner is not None:
+        kwargs["memory_planner"] = run_config.memory_planner
     return kwargs
+
+
+def _resolve_memory_planner(run_config: Any) -> _passes.MemoryPlanner:
+    """Resolve the planner a compile would actually use, for the cache key.
+
+    Mirrors ``ir.compile()``'s own precedence — explicit argument, then the
+    active ``PassContext``, then ``PYPTO``. Reading the context matters: the
+    planner is most often selected by wrapping a call in
+    ``with PassContext([], memory_planner=...)``, which never reaches
+    ``RunConfig`` at all. Keying only on the ``RunConfig`` field would let a
+    PTOAS-wrapped call reuse a PYPTO-compiled artifact.
+    """
+    if run_config is not None and run_config.memory_planner is not None:
+        return run_config.memory_planner
+    ctx = _passes.PassContext.current()
+    if ctx is not None:
+        return ctx.get_memory_planner()
+    return _passes.MemoryPlanner.PYPTO
 
 
 # ---------------------------------------------------------------------------
@@ -1458,6 +1483,10 @@ class JITFunction:
         analyze_auto_scopes_for_deps = (
             run_config.analyze_auto_scopes_for_deps if run_config is not None else False
         )
+        # The planner decides whether physical addresses are baked into the
+        # artifact, so it must split the cache: compiling one kernel under both
+        # planners must not hand the second call the first one's artifact.
+        memory_planner = _resolve_memory_planner(run_config)
         key = make_cache_key(
             source_hash=self._get_source_hash(),
             param_names=param_names,
@@ -1469,6 +1498,7 @@ class JITFunction:
             strategy=strategy,
             distributed_config=distributed_config,
             analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
+            memory_planner=memory_planner,
         )
 
         # L1 cache lookup
@@ -1785,6 +1815,9 @@ class JITFunction:
             scalar_values=scalar_values,
             platform=None,  # compile_for_test is platform-agnostic (testing only)
             strategy=OptimizationStrategy.Default,  # _compile() uses the default strategy
+            # compile_for_test takes no RunConfig, so the planner can only come
+            # from an ambient PassContext — which still changes the artifact.
+            memory_planner=_resolve_memory_planner(None),
         )
 
         # Populate cache via ir.compile() (codegen included) as a best-effort

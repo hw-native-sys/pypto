@@ -32,6 +32,7 @@ from pypto.pypto_core import DataType
 
 if TYPE_CHECKING:
     from pypto.ir.pass_manager import OptimizationStrategy
+    from pypto.pypto_core.passes import MemoryPlanner
 
 # Stable PyPTO version stamp included in every cache key so that upgrading
 # PyPTO (which may change the pass pipeline or codegen) automatically
@@ -123,7 +124,7 @@ def compute_source_hash(sources: list[str]) -> str:
     return h.hexdigest()[:16]
 
 
-def make_cache_key(
+def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per cache dimension
     source_hash: str,
     param_names: list[str],
     tensor_shapes: dict[str, tuple[int, ...]],
@@ -134,6 +135,7 @@ def make_cache_key(
     strategy: "OptimizationStrategy | None" = None,
     distributed_config: Any = None,
     analyze_auto_scopes_for_deps: bool = False,
+    memory_planner: "MemoryPlanner | None" = None,
 ) -> CacheKey:
     """Build a cache key for a JIT call site.
 
@@ -166,6 +168,12 @@ def make_cache_key(
         analyze_auto_scopes_for_deps: Compile-side switch for deriving explicit
             task dependencies from AUTO runtime scopes. Included in the key
             because it changes generated orchestration dependencies.
+        memory_planner: Effective on-chip memory planner (``PYPTO`` or
+            ``PTOAS``) as resolved from the ``RunConfig`` field and any active
+            ``PassContext``. Included in the key because it decides whether
+            physical addresses are baked into the artifact (``--pto-level``
+            level3 vs level2); without it, compiling one kernel under both
+            planners would hand the second call the first one's artifact.
 
     Returns:
         Hashable CacheKey tuple.
@@ -187,7 +195,10 @@ def make_cache_key(
         scalar_infos.append(ScalarCacheInfo(name=name, value=scalar_values[name]))
 
     dist_key = _freeze(distributed_config) if distributed_config is not None else None
-    compile_opts = (("analyze_auto_scopes_for_deps", analyze_auto_scopes_for_deps),)
+    compile_opts = (
+        ("analyze_auto_scopes_for_deps", analyze_auto_scopes_for_deps),
+        ("memory_planner", None if memory_planner is None else str(memory_planner)),
+    )
     return (
         source_hash,
         platform,

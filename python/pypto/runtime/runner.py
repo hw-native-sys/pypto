@@ -207,6 +207,14 @@ class RunConfig:
             dependency analysis for AUTO runtime scopes during compilation.
             Defaults to ``False`` so existing runs keep using TensorMap fallback
             unless this behavior is explicitly requested.
+        memory_planner: Who plans on-chip buffer memory —
+            :attr:`~pypto.pypto_core.passes.MemoryPlanner.PYPTO` (PyPTO runs
+            ``MemoryReuse`` + ``AllocateMemoryAddr`` and bakes physical
+            addresses) or ``PTOAS`` (those passes are skipped and ptoas
+            ``PlanMemory`` owns reuse and addressing). ``None`` (default) defers
+            to the active ``PassContext``, or to ``PYPTO`` when none is active.
+            Forwarded to ``ir.compile()``, which rejects it when a
+            ``PassContext`` is already active — set it on that context instead.
     """
 
     __test__ = False  # Not a pytest test class
@@ -242,6 +250,7 @@ class RunConfig:
     ring_dep_pool: int | list[int] | tuple[int, ...] | None = None
     distributed_config: "DistributedConfig | None" = None
     analyze_auto_scopes_for_deps: bool = False
+    memory_planner: MemoryPlanner | None = None
 
     def __post_init__(self) -> None:
         if self.platform not in ("a2a3sim", "a2a3", "a5sim", "a5"):
