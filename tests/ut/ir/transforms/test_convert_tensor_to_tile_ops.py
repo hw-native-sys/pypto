@@ -2061,7 +2061,13 @@ class TestGmLocalTensorConversion:
                 "s",
                 tensor_ops.slice(t, [8, 32], [0, 0], valid_shape=[8, 8], pad_value=PadValue.min),
             )
-            return ib.let("y", tensor_ops.add(s, ins[0]))
+            # Under 4e/Q2 an elementwise add requires both operands to AGREE on their
+            # valid region (valid_shape never broadcasts); the sliced ``s`` is valid
+            # over [8, 8], so narrow ``x`` to the same extent before adding rather than
+            # combining a partially-valid slice with a fully-valid input (a provable
+            # valid-extent mismatch that 4e rejects).
+            xv = ib.let("xv", tensor_ops.set_validshape(ins[0], 8, 8))
+            return ib.let("y", tensor_ops.add(s, xv))
 
         def expected_body(ib, tiles):
             t_tile = ib.let("t_tile", tile_ops.create([16, 64], DataType.FP32))
@@ -2069,7 +2075,8 @@ class TestGmLocalTensorConversion:
                 "s_tile",
                 tile_ops.slice(t_tile, [8, 32], [0, 0], valid_shape=[8, 8], pad_value=PadValue.min),
             )
-            return ib.let("y_tile", tile_ops.add(s_tile, tiles[0]))
+            xv_tile = ib.let("xv_tile", tile_ops.set_validshape(tiles[0], 8, 8))
+            return ib.let("y_tile", tile_ops.add(s_tile, xv_tile))
 
         before = _make_before(in_specs=in_specs, out_shape=[8, 32], out_dtype=DataType.FP32, body=before_body)
         expected = _make_expected(

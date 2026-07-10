@@ -62,7 +62,7 @@
 | 规则名称 | IRProperty | 用途 |
 | -------- | ---------- | ---- |
 | **SSAVerify** | SSAForm | 无多重赋值、无名称遮蔽、无缺失 yield、作用域违规、基数检查 |
-| **TypeCheck** | TypeChecked | 类型种类/数据类型/形状/大小一致性 |
+| **TypeCheck** | TypeChecked | 类型种类/数据类型/形状/大小一致性,外加对每个 Tile/Tensor 类型的常驻 `valid_shape` 边界（`rank(valid_shape) == rank(shape)`、常量维上 `0 <= valid_shape[i] <= shape[i]`） |
 | **NoNestedCall** | NoNestedCalls | 参数、条件、范围中无嵌套调用表达式 |
 | **BreakContinueCheck** | BreakContinueValid | break/continue 仅在顺序/while 循环中 |
 | **UseAfterDefCheck** | UseAfterDef | 每个 Var 使用均由定义支配（参数、AssignStmt、循环变量、iter_arg、return_var） |
@@ -111,6 +111,15 @@
 | 106 | `IF_CONDITION_MUST_BE_SCALAR` | IfStmt/WhileStmt 条件必须是 ScalarType |
 | 107 | `FOR_RANGE_MUST_BE_SCALAR` | ForStmt 范围必须是 ScalarType |
 | 108 | `CONDITION_MUST_BE_BOOL` | IfStmt/WhileStmt 条件 dtype 必须是 BOOL |
+
+**`valid_shape` 良构性（常驻不变式）。** 除上述控制流汇合点检查外,TypeCheck 还遍历每一个
+TileType/TensorType（函数参数、返回类型、函数体 Var/Call,以及嵌套在 TupleType 中的类型）,对任何携带
+显式非空 `valid_shape` 的 view 强制:`rank(valid_shape) == rank(shape)`（复用
+`SHAPE_DIMENSION_MISMATCH`),且对两侧都是编译期常量的维强制 `0 <= valid_shape[i] <= shape[i]`（复用
+`SHAPE_VALUE_MISMATCH`）。符号（动态）有效范围被跳过 —— 动态 `valid_shape` 是受支持的特性。空
+`valid_shape` 表示"完全有效"（`== shape`）,不做检查。由于 `TypeChecked` 是结构性属性,该边界在每个 Pass
+前后都会强制,因此非法的 `valid_shape`（例如 `[128, 128]` tile 上的 `[999, 999]`）会在产生它的最早那个
+Pass 处被捕获。
 
 ### NoNestedCall
 

@@ -33,6 +33,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -80,17 +81,25 @@ TypePtr DeduceTensorReductionType(const std::vector<ExprPtr>& args,
   // Extract keep_dim flag from kwargs (default: true)
   bool keep_dim = GetKwarg<bool>(kwargs, "keep_dim", true);
 
-  // Build output shape
+  // Build output shape and, in lockstep, the output valid_shape: the reduced axis
+  // collapses (to 1 under keep_dim, else dropped); every other axis keeps the input's
+  // valid extent (mirrors tile_ops/reduction.cpp). A fully-valid
+  // input yields out_valid == output_shape, which TensorType canonicalizes to a bare
+  // result.
+  const std::vector<ExprPtr> input_valid = GetValidShape(tensor_type);
   std::vector<ExprPtr> output_shape;
+  std::vector<ExprPtr> output_valid;
   for (int64_t i = 0; i < input_ndim; ++i) {
     if (i == axis) {
       if (keep_dim) {
         // Keep dimension as 1
         output_shape.push_back(std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown()));
+        output_valid.push_back(std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown()));
       }
       // Otherwise, skip this dimension (reduce it out)
     } else {
       output_shape.push_back(input_shape[i]);
+      output_valid.push_back(input_valid[i]);
     }
   }
 
@@ -99,7 +108,10 @@ TypePtr DeduceTensorReductionType(const std::vector<ExprPtr>& args,
     return std::make_shared<ScalarType>(out_dtype.value_or(tensor_type->dtype_));
   }
 
-  return std::make_shared<TensorType>(output_shape, out_dtype.value_or(tensor_type->dtype_));
+  TensorView view;
+  view.valid_shape = std::move(output_valid);
+  return std::make_shared<TensorType>(output_shape, out_dtype.value_or(tensor_type->dtype_), std::nullopt,
+                                      std::make_optional(std::move(view)));
 }
 
 // ============================================================================
@@ -179,21 +191,30 @@ TypePtr DeduceTensorColReductionType(const std::vector<ExprPtr>& args,
 
   bool keep_dim = GetKwarg<bool>(kwargs, "keep_dim", true);
 
+  // Drop the reduced axis, keep the others' valid extents (mirrors
+  // tile_ops/reduction.cpp). A fully-valid input canonicalizes back to a bare result.
+  const std::vector<ExprPtr> input_valid = GetValidShape(tensor_type);
   std::vector<ExprPtr> output_shape;
+  std::vector<ExprPtr> output_valid;
   for (int64_t i = 0; i < input_ndim; ++i) {
     if (i == axis) {
       if (keep_dim) {
         output_shape.push_back(std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown()));
+        output_valid.push_back(std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown()));
       }
     } else {
       output_shape.push_back(input_shape[i]);
+      output_valid.push_back(input_valid[i]);
     }
   }
 
   if (output_shape.empty()) {
     return std::make_shared<ScalarType>(out_dtype.value_or(tensor_type->dtype_));
   }
-  return std::make_shared<TensorType>(output_shape, out_dtype.value_or(tensor_type->dtype_));
+  TensorView view;
+  view.valid_shape = std::move(output_valid);
+  return std::make_shared<TensorType>(output_shape, out_dtype.value_or(tensor_type->dtype_), std::nullopt,
+                                      std::make_optional(std::move(view)));
 }
 
 REGISTER_OP("tensor.col_sum")

@@ -1111,5 +1111,121 @@ class TestLeadingCommentsRoundTrip:
         assert ["body"] in _collect(func.body)
 
 
+class TestValidShapeRoundTrip:
+    """Round-trip IR that carries a ``valid_shape`` on a TileView or TensorView.
+
+    Two independent serialization defects are covered:
+
+    - **Defect A** — ``SerializeTileView`` dereferenced ``TileView.start_offset``
+      unconditionally, but ``tile.load`` builds its view by setting only
+      ``valid_shape`` and leaves ``start_offset`` null. Any tile that used
+      ``valid_shape`` (static or dynamic) therefore aborted ``ir.serialize``.
+    - **Defect B** — ``SerializeTensorView`` emitted ``stride``/``layout``/``pad``
+      but never ``valid_shape``, so a ``TensorView``'s valid region was silently
+      dropped on round-trip and widened back to the full physical shape.
+
+    Assertions are on ``assert_structural_equal`` (per the unified semantics,
+    ``valid_shape == shape`` canonicalizes to empty, so the field-level form is the
+    meaningful one to compare)."""
+
+    def test_static_load_valid_shapes_program_round_trips(self):
+        """``pl.load(..., valid_shapes=[64, 64])`` (static) — the loaded tile's
+        TileView carries valid_shape with a null start_offset, the exact shape that
+        used to abort serialization (Defect A)."""
+
+        @pl.program
+        class StaticProg:
+            @pl.function(type=pl.FunctionType.InCore)
+            def k(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                at = pl.load(a, [0, 0], [128, 128], valid_shapes=[64, 64])
+                r = pl.exp(at)
+                out = pl.store(r, [0, 0], out)
+                return out
+
+        restored = ir.deserialize(ir.serialize(StaticProg))
+        ir.assert_structural_equal(StaticProg, restored, enable_auto_mapping=True)
+
+    def test_dynamic_load_valid_shapes_program_round_trips(self):
+        """``pl.load(..., valid_shapes=[m, n])`` with runtime ``pl.Scalar[pl.INDEX]``
+        extents. The valid_shape entries are Var references that must resolve back to
+        the same scalar params — structural equality validates that cross-reference
+        identity as well as the round-trip (Defect A, dynamic)."""
+
+        @pl.program
+        class DynProg:
+            @pl.function(type=pl.FunctionType.InCore)
+            def k(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                m: pl.Scalar[pl.INDEX],
+                n: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                at = pl.load(a, [0, 0], [128, 128], valid_shapes=[m, n])
+                r = pl.exp(at)
+                out = pl.store(r, [0, 0], out)
+                return out
+
+        restored = ir.deserialize(ir.serialize(DynProg))
+        ir.assert_structural_equal(DynProg, restored, enable_auto_mapping=True)
+
+    def test_tensorview_valid_shape_survives_round_trip(self):
+        """A ``TensorType`` whose ``TensorView`` carries a narrowed valid_shape (from
+        ``pl.slice(..., valid_shape=[...])``) keeps it on round-trip. Before
+        ``SerializeTensorView`` emitted valid_shape, the restored view silently
+        widened back to the full shape (Defect B)."""
+        span = ir.Span.unknown()
+        src = ir.Var(
+            "t",
+            ir.TensorType(
+                [ir.ConstInt(16, DataType.INT32, span), ir.ConstInt(32, DataType.INT32, span)],
+                DataType.FP16,
+            ),
+            span,
+        )
+        # pl.slice lowers to tensor.slice; the result type carries TensorView.valid_shape.
+        sliced = ir.op.tensor.slice(src, [8, 16], [0, 0], valid_shape=[4, 8])
+        sliced_type = sliced.type
+        assert isinstance(sliced_type, ir.TensorType)
+        assert sliced_type.tensor_view is not None
+        assert [cast(ir.ConstInt, d).value for d in sliced_type.tensor_view.valid_shape] == [4, 8]
+
+        holder = ir.Var("s", sliced_type, span)
+        restored = cast(ir.Var, ir.deserialize(ir.serialize(holder)))
+        ir.assert_structural_equal(holder, restored, enable_auto_mapping=True)
+
+        restored_type = restored.type
+        assert isinstance(restored_type, ir.TensorType)
+        assert restored_type.tensor_view is not None
+        # The narrowed valid region [4, 8] must survive, not widen to full [8, 16].
+        assert [cast(ir.ConstInt, d).value for d in restored_type.tensor_view.valid_shape] == [4, 8]
+
+    def test_tileview_non_null_start_offset_round_trips(self):
+        """A ``TileView`` with a non-null ``start_offset`` still round-trips — the
+        null-guard added for the load case must not over-correct and drop a real
+        start_offset."""
+        span = ir.Span.unknown()
+        tile_view = ir.TileView(
+            valid_shape=[64, 64],
+            stride=[128, 1],
+            start_offset=ir.ConstInt(7, DataType.INT64, span),
+        )
+        tile_type = ir.TileType([128, 128], DataType.FP32, None, tile_view)
+        var = ir.Var("tile_var", tile_type, span)
+
+        restored = cast(ir.Var, ir.deserialize(ir.serialize(var)))
+        ir.assert_structural_equal(var, restored, enable_auto_mapping=True)
+
+        restored_type = restored.type
+        assert isinstance(restored_type, ir.TileType)
+        assert restored_type.tile_view is not None
+        assert restored_type.tile_view.start_offset is not None
+        assert cast(ir.ConstInt, restored_type.tile_view.start_offset).value == 7
+
+
 if __name__ == "__main__":
     pytest.main(["-v", __file__])

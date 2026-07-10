@@ -168,6 +168,24 @@ leading dims of `valid_shape` the same way `ComputeMergedShape` merges the physi
 dynamic entries, so the runtime tail survives the flatten instead of being reset to the full physical
 shape. The loop itself is the user's; the pass does **not** synthesize it.
 
+**Soundness precondition.** The merge is only valid when the ND valid region maps to a *contiguous*
+prefix of the flattened rows — the only thing `(valid_row, valid_col)` can express. Reading the row
+dims (all but the innermost) most-significant first, this holds when there is a single partially-valid
+"free" row dim: every row dim before it is unit (`1`, so its index is pinned to 0) and every row dim
+after it is fully valid (`valid == shape`). The strip-mine case above satisfies it — the leading `1`
+pins its index and the middle `CHUNK` dim is the free dim. A partially-valid *middle* dim sitting below
+a non-unit outer dim (e.g. physical `[2, 4, 8]` with valid `[2, 2, 8]`) yields a strided region and is
+rejected with a `ValueError`; the product fold would otherwise silently mark batch-0 padding valid and
+real batch-1 data invalid.
+
+**Empty-region carve-out.** An *empty* valid region — any dim provably `0`, e.g. the
+`pl.create_tile(valid_shape=[0, 0, 0])` accumulator (D2's "nothing valid yet") — denotes the empty set,
+which is trivially a contiguous length-0 prefix. The pinning check above reasons about which dims are
+*pinned* (`valid == 1`) and would otherwise mistake a `0` dim for a partially-valid middle dim and reject
+with a misleading message, so it is skipped when any dim is `0`. The product fold then handles the empty
+region on its own: a zero row dim folds to `valid_row = 0` and a zero column dim to `valid_col = 0` —
+either way, zero valid elements.
+
 > The chunk must fit on-chip Vec (UB) memory (`CHUNK * <kept dims> * <live tile bytes> <= UB capacity`),
 > otherwise `AllocateMemoryAddr` rejects the kernel with a "Vec buffer usage exceeds platform limit"
 > error. Picking the chunk is the user's responsibility.

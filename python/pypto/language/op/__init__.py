@@ -176,6 +176,7 @@ from .unified_ops import (
     sqrt,
     sub,
     transpose,
+    valid_dim,
     write,
 )
 
@@ -260,6 +261,7 @@ __all__ = [
     "cmp",
     "cmps",
     "set_validshape",
+    "valid_dim",
     "rem",
     "rems",
     "fmod",

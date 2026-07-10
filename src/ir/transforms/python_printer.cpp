@@ -966,21 +966,32 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
     return;
   }
 
-  // Print positional arguments
-  for (size_t i = 0; i < op->args_.size(); ++i) {
-    if (i > 0) stream_ << ", ";
+  // tile.create's optional 2nd positional arg is a valid_shape tuple. The DSL
+  // create(shape, dtype, ..., valid_shape=None) reserves positional slot 1 for
+  // dtype, so print shape positionally and valid_shape as a keyword; the generic
+  // kwargs (dtype / target_memory) then follow. Always emit it when present so
+  // the reparsed call keeps the same arg count (structural round-trip).
+  if (IsOp(op, "tile.create") && op->args_.size() == 2) {
+    VisitExpr(op->args_[0]);  // shape (positional)
+    stream_ << ", valid_shape=";
+    VisitExpr(op->args_[1]);  // valid_shape tuple -> prints as [v0, v1, ...]
+  } else {
+    // Print positional arguments
+    for (size_t i = 0; i < op->args_.size(); ++i) {
+      if (i > 0) stream_ << ", ";
 
-    // Special handling for tile.alloc/tensor.alloc first argument (memory_space)
-    if ((IsOp(op, "tile.alloc") || IsOp(op, "tensor.alloc")) && i == 0) {
-      // Try to extract the integer value and convert it to MemorySpace enum
-      if (auto const_int = std::dynamic_pointer_cast<const ConstInt>(op->args_[i])) {
-        int space_value = static_cast<int>(const_int->value_);
-        stream_ << prefix_ << ".Mem." << MemorySpaceToString(static_cast<MemorySpace>(space_value));
+      // Special handling for tile.alloc/tensor.alloc first argument (memory_space)
+      if ((IsOp(op, "tile.alloc") || IsOp(op, "tensor.alloc")) && i == 0) {
+        // Try to extract the integer value and convert it to MemorySpace enum
+        if (auto const_int = std::dynamic_pointer_cast<const ConstInt>(op->args_[i])) {
+          int space_value = static_cast<int>(const_int->value_);
+          stream_ << prefix_ << ".Mem." << MemorySpaceToString(static_cast<MemorySpace>(space_value));
+        } else {
+          VisitExpr(op->args_[i]);
+        }
       } else {
         VisitExpr(op->args_[i]);
       }
-    } else {
-      VisitExpr(op->args_[i]);
     }
   }
 

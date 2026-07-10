@@ -220,6 +220,7 @@ from .op.unified_ops import (
     sqrt,
     sub,
     transpose,
+    valid_dim,
     write,
 )
 from .optimizations import split
@@ -386,6 +387,7 @@ __all__ = [
     "cmp",
     "cmps",
     "set_validshape",
+    "valid_dim",
     "rem",
     "rems",
     "fmod",

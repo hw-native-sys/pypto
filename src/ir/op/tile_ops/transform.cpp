@@ -34,6 +34,7 @@
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
@@ -110,6 +111,137 @@ void ValidateIndexTupleElements(const TupleTypePtr& tuple_type, const std::strin
         << op_name << " " << arg_name << " tuple element " << i
         << " must have dtype INT64, UINT64, or INDEX, but got " << scalar_type->dtype_.ToString();
   }
+}
+
+/**
+ * @brief Map a partially-valid tile's valid region through a reshape.
+ *
+ * Reshape reinterprets the flat buffer, so a partially-valid input maps to a
+ * representable (rectangular) output ONLY when its valid region is a contiguous
+ * flat prefix ``[0, P)`` AND that prefix is itself a box under the new shape — the
+ * same soundness precondition as ``FlattenTileNdTo2d``'s ND->2D fold
+ * (``ComputeMergedValidShape``). When it does not hold we ``CHECK_SPAN``-reject
+ * rather than widen (``valid_shape`` North Star). A fully-valid input never reaches
+ * here (the caller takes the trivial ``new_shape`` path).
+ *
+ * Precondition, input side: reading dims most-significant first, skip leading dims
+ * pinned to a unit valid extent (index forced to 0), take the first non-pinned dim
+ * as the free dim ``f``, then require every dim after ``f`` to be fully valid
+ * (``valid == shape``, incl. the last dim). Then the valid flat prefix length is
+ * ``P = valid[f] * prod(shape[f+1..])``. Output side: place ``[0, P)`` as a box in
+ * the (static) target shape — pinned leading dims, one free dim, full trailing
+ * dims — or reject if it does not align.
+ *
+ * @param src_valid Input effective valid_shape (``GetValidShape(input)``).
+ * @param in_shape  Input physical shape (all ``ConstInt``).
+ * @param new_shape Target physical shape.
+ * @param span      Source location for CHECK_SPAN diagnostics.
+ * @return The reshaped valid_shape, rank == ``new_shape.size()``.
+ */
+std::vector<ExprPtr> ComputeReshapeValidShape(const std::vector<ExprPtr>& src_valid,
+                                              const std::vector<ExprPtr>& in_shape,
+                                              const std::vector<ExprPtr>& new_shape, const Span& span) {
+  const size_t k = src_valid.size();
+  // Find the free dim: skip leading dims pinned to a unit valid extent.
+  size_t f = 0;
+  while (f + 1 < k) {
+    auto ci = As<ConstInt>(src_valid[f]);
+    if (ci && ci->value_ == 1) {
+      ++f;
+    } else {
+      break;
+    }
+  }
+  // Every dim after the free one must be fully valid, else the valid region is not a
+  // contiguous flat prefix and cannot become a rectangle after reshape.
+  for (size_t i = f + 1; i < k; ++i) {
+    CHECK_SPAN(AreExprsEqual(src_valid[i], in_shape[i]), span)
+        << "tile.reshape: input dim " << i << " is partially valid (valid_shape[" << i << "] != shape[" << i
+        << "]) below the free dim " << f
+        << "; the valid region is not a contiguous prefix of the flattened buffer, so reshaping it would "
+           "mark padding as valid. Reshape the tile while fully valid, or keep the valid boundary on the "
+           "outermost non-unit dimension.";
+  }
+
+  const ExprPtr& free_extent = src_valid[f];
+  // Constant trailing sub-volume B = prod(shape[f+1..]); physical dims are ConstInt.
+  int64_t B = 1;
+  for (size_t i = f + 1; i < k; ++i) {
+    auto c = As<ConstInt>(in_shape[i]);
+    INTERNAL_CHECK_SPAN(c, span) << "tile.reshape: input physical dim " << i << " must be a static constant";
+    B *= c->value_;
+  }
+  auto s_f_const = As<ConstInt>(in_shape[f]);
+  INTERNAL_CHECK_SPAN(s_f_const, span) << "tile.reshape: input physical free dim must be a static constant";
+  const int64_t s_f = s_f_const->value_;
+
+  // The target shape must be fully static to place the prefix as a box.
+  std::vector<int64_t> t(new_shape.size());
+  for (size_t i = 0; i < new_shape.size(); ++i) {
+    auto c = As<ConstInt>(new_shape[i]);
+    CHECK_SPAN(c, span) << "tile.reshape: cannot map a partially-valid tile onto a target whose shape "
+                           "dim "
+                        << i << " is not a compile-time constant; reshape the tile while fully valid.";
+    t[i] = c->value_;
+  }
+  const size_t m = t.size();
+  // Suffix products D[g] = prod(t[g+1..m-1]); D[m-1] = 1.
+  std::vector<int64_t> suffix(m, 1);
+  for (size_t g = m; g-- > 0;) {
+    suffix[g] = (g + 1 < m) ? suffix[g + 1] * t[g + 1] : 1;
+  }
+
+  // Build the output box: leading dims pinned to 1, free dim g = w_g, trailing full.
+  auto build_box = [&](size_t g, ExprPtr w_g) {
+    std::vector<ExprPtr> out(m);
+    for (size_t i = 0; i < m; ++i) {
+      if (i < g) {
+        out[i] = std::make_shared<ConstInt>(1, DataType::INDEX, span);
+      } else if (i == g) {
+        out[i] = std::move(w_g);
+      } else {
+        out[i] = new_shape[i];
+      }
+    }
+    return out;
+  };
+
+  if (auto fe = As<ConstInt>(free_extent)) {
+    // Fully static: P is a known integer; find the unique split dim.
+    const int64_t P = fe->value_ * B;
+    if (P == 0) {
+      return std::vector<ExprPtr>(m, std::make_shared<ConstInt>(0, DataType::INDEX, span));
+    }
+    for (size_t g = 0; g < m; ++g) {
+      if (P % suffix[g] == 0) {
+        int64_t w = P / suffix[g];
+        if (w >= 1 && w <= t[g]) {
+          return build_box(g, std::make_shared<ConstInt>(w, DataType::INDEX, span));
+        }
+      }
+    }
+    CHECK_SPAN(false, span)
+        << "tile.reshape: the input's valid prefix of " << P
+        << " elements does not align to a "
+           "rectangular sub-region of the target shape "
+        << FormatShape(new_shape)
+        << "; reshaping it would mark padding as valid. Reshape the tile while fully valid, or keep the "
+           "valid boundary on a dimension the reshape preserves.";
+  }
+
+  // Symbolic free extent: match the constant trailing sub-volume B against a suffix
+  // product of the target so the split is exact (w_g = free_extent). Require the
+  // free dim's physical ceiling to fit the target dim so valid (<= s_f) <= t[g].
+  for (size_t g = 0; g < m; ++g) {
+    if (suffix[g] == B && s_f <= t[g]) {
+      return build_box(g, free_extent);
+    }
+  }
+  CHECK_SPAN(false, span)
+      << "tile.reshape: cannot prove the dynamic valid region reshapes to a representable rectangle (no "
+         "target dimension preserves the trailing sub-volume of "
+      << B << " elements with room for the free extent); reshape the tile while fully valid.";
+  return {};  // unreachable (CHECK_SPAN above always throws)
 }
 
 }  // anonymous namespace
@@ -192,6 +324,59 @@ TypePtr DeduceTileSliceType(const std::vector<ExprPtr>& args,
               std::make_shared<TupleGetItemExpr>(args[3], static_cast<int>(i), args[3]->span_));
         }
       }
+    }
+  }
+
+  // clamp=True: DERIVE the ragged tail by clipping the window to
+  // the source's valid region even for a fully-valid source. clamp composes with
+  // the 4d intersect below — the shared ``IntersectWindowValidDim`` already folds
+  // both the source's valid region AND the physical edge into a single
+  // ``min(valid_arg, clamp(src_valid - offset, 0, window))`` (``src_valid`` is the
+  // physical shape for a fully-valid source), so there is no double-narrowing.
+  const bool clamp = GetKwargOr<bool>(kwargs, "clamp", false);
+
+  // Intersect the window's valid region with the SOURCE tile's own valid region
+  // (identical to tile.load): a slice at ``offset`` sees
+  // clamp(valid(src) - offset, 0, new_shape) valid elements, further clipped by any
+  // explicit ``valid_shape=`` request above. Applied when the source carries an
+  // explicit valid region OR ``clamp=True`` — a fully-valid source's window is
+  // entirely real data, so absent clamp valid_shape is left untouched (no IR churn,
+  // matching load). Done in the full pre-``drop_dims`` coordinate space so
+  // offsets/valid align dim-for-dim.
+  if (clamp || (tile_type->tile_view_.has_value() && !tile_type->tile_view_->valid_shape.empty())) {
+    const std::vector<ExprPtr> src_valid = GetValidShape(tile_type);
+    std::vector<ExprPtr> offset;
+    if (auto off_tuple = As<MakeTuple>(args[2])) {
+      offset = off_tuple->elements_;
+    } else {
+      offset.reserve(offset_tuple_type->types_.size());
+      for (size_t i = 0; i < offset_tuple_type->types_.size(); ++i) {
+        offset.emplace_back(std::make_shared<TupleGetItemExpr>(args[2], static_cast<int>(i), args[2]->span_));
+      }
+    }
+    // When clamp is requested we MUST clip the valid region dim-for-dim; a rank
+    // mismatch yields a region a per-dim valid_shape cannot represent, so reject
+    // rather than fall through to the full-window valid_shape (North Star: never
+    // default to the full shape). Mirrors the sister tensor.slice discipline. The
+    // non-clamp source-region intersect keeps the silent size guard below to
+    // preserve the existing no-churn 4d behavior on a rank-mismatched slice.
+    if (clamp) {
+      CHECK_SPAN(src_valid.size() == new_shape.size() && offset.size() == new_shape.size() &&
+                     valid_shape.size() == new_shape.size(),
+                 args[0]->span_)
+          << "tile.slice: clamp=True requires the source valid_shape (" << src_valid.size() << "), offset ("
+          << offset.size() << "), window (" << new_shape.size() << ") and valid_shape (" << valid_shape.size()
+          << ") to share a rank so the valid region can be clipped dim-for-dim";
+    }
+    if (src_valid.size() == new_shape.size() && offset.size() == new_shape.size() &&
+        valid_shape.size() == new_shape.size()) {
+      std::vector<ExprPtr> intersected;
+      intersected.reserve(new_shape.size());
+      for (size_t i = 0; i < new_shape.size(); ++i) {
+        intersected.push_back(
+            IntersectWindowValidDim(src_valid[i], offset[i], new_shape[i], valid_shape[i], args[0]->span_));
+      }
+      valid_shape = std::move(intersected);
     }
   }
 
@@ -307,9 +492,21 @@ TypePtr DeduceTileReshapeType(const std::vector<ExprPtr>& args,
                                       << " into shape with size " << new_product;
   }
 
+  // Map the input's valid region through the reshape. A fully-valid input reshapes
+  // to a fully-valid output (new_shape); a partially-valid input must have a valid
+  // region that stays a rectangle after the reshape, else ComputeReshapeValidShape
+  // rejects it (never widened to the full shape — valid_shape North Star).
+  const std::vector<ExprPtr> src_valid = GetValidShape(tile_type);
+  std::vector<ExprPtr> valid_shape;
+  if (AreExprVectorsEqual(src_valid, tile_type->shape_)) {
+    valid_shape = new_shape;
+  } else {
+    valid_shape = ComputeReshapeValidShape(src_valid, tile_type->shape_, new_shape, args[0]->span_);
+  }
+
   // Return new TileType with reshaped dimensions and same dtype
   TileView tile_view;
-  tile_view.valid_shape = new_shape;
+  tile_view.valid_shape = std::move(valid_shape);
 
   tile_view.blayout = InferTileLayoutFromShape(new_shape);
 
@@ -363,8 +560,16 @@ TypePtr DeduceTileTransposeType(const std::vector<ExprPtr>& args,
   std::vector<ExprPtr> new_shape = input_shape;
   std::swap(new_shape[axis1], new_shape[axis2]);
 
+  // Permute the input's valid region the same way as the physical shape (mirroring
+  // transpose_view below): the result's valid extent along a swapped axis is the
+  // input's valid extent along the other axis — never the full transposed shape,
+  // which would claim padding is real data. A fully-valid input permutes to the full
+  // transposed shape and canonicalizes to no view.
+  std::vector<ExprPtr> valid_shape = GetValidShape(input_type);
+  std::swap(valid_shape[axis1], valid_shape[axis2]);
+
   TileView tile_view;
-  tile_view.valid_shape = new_shape;
+  tile_view.valid_shape = std::move(valid_shape);
   return std::make_shared<TileType>(new_shape, input_type->dtype_, std::nullopt, tile_view);
 }
 
@@ -438,6 +643,7 @@ REGISTER_OP("tile.slice")
                   "clamped to 2D if reduction would take it below 2D")
     .set_output_memory_inherit_input()
     .set_attr<PadValue>("pad_value")
+    .set_attr<bool>("clamp")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileSliceType(args, kwargs);
@@ -524,16 +730,29 @@ TypePtr DeduceTileAssembleType(const std::vector<ExprPtr>& args,
          "Acc->Mat FIXPIPE downcast to bf16/f16), but got "
       << target_type->dtype_.ToString() << " and " << source_type->dtype_.ToString();
 
+  // The written region is [offset, offset + valid(source)); the result's valid
+  // region is the per-dim bounding box with the target's existing one (never the
+  // full physical shape — that would claim padding is real data). Compute it
+  // unconditionally so an out-of-bounds write is rejected even into a fully-valid
+  // target; ComputeAssembleUnionValidShape also range/rank-checks the operands.
+  const std::vector<ExprPtr>& offset = As<MakeTuple>(args[2])->elements_;  // literal (checked above)
+  std::vector<ExprPtr> out_valid =
+      ComputeAssembleUnionValidShape(GetValidShape(target_type), GetValidShape(source_type), offset,
+                                     target_type->shape_, args[0]->span_, "tile.assemble");
+
   // Inherit the target's TileView *and its optionality*.  When the target carries
   // an implicit view (``tile_view_ == nullopt`` — e.g. a tile.create'd Mat scratch,
   // whose effective layout is the Mat NZ implicit col_major/row_major), the result
   // must stay implicit too, so its effective layout matches the target's rather than
   // collapsing to the raw struct default (row_major/none_box — the VEC layout, not a
   // Mat operand's).  An in-place Acc->Mat assemble chain then shares one consistent
-  // layout (see GetEffectiveTileView, which only honors an *explicit* view).
+  // layout (see GetEffectiveTileView, which only honors an *explicit* view). A
+  // fully-valid target has a nullopt view and out_valid == shape, so leaving it
+  // implicit loses nothing; the union only narrows a target that already carries an
+  // explicit (e.g. accumulator) valid region.
   std::optional<TileView> tile_view = target_type->tile_view_;
   if (tile_view.has_value()) {
-    tile_view->valid_shape = target_type->shape_;
+    tile_view->valid_shape = std::move(out_valid);
   }
   return std::make_shared<TileType>(target_type->shape_, target_type->dtype_, std::nullopt, tile_view,
                                     target_type->memory_space_);
@@ -611,8 +830,24 @@ TypePtr DeduceTileExtractType(const std::vector<ExprPtr>& args,
   check_axis(0, "row", args[1]);
   check_axis(1, "col", args[2]);
 
+  // Clip the extracted window to the source's own valid region: the window
+  // [offset, offset + dst_shape) of a source valid to valid(src) sees
+  // clamp(valid(src) - offset, 0, dst_shape) valid elements. Applied ONLY when the
+  // source carries an explicit valid region — a fully-valid source's window is
+  // entirely real data (the ISA bounds check keeps it within the source), so the
+  // result is fully valid (dst_shape) exactly as before, no churn.
+  std::vector<ExprPtr> valid_shape = dst_shape;
+  if (src_type->tile_view_.has_value() && !src_type->tile_view_->valid_shape.empty()) {
+    const std::vector<ExprPtr> src_valid = GetValidShape(src_type);  // rank 2 (checked above)
+    if (src_valid.size() == 2) {
+      valid_shape = {
+          IntersectWindowValidDim(src_valid[0], args[1], dst_shape[0], dst_shape[0], args[0]->span_),
+          IntersectWindowValidDim(src_valid[1], args[2], dst_shape[1], dst_shape[1], args[0]->span_)};
+    }
+  }
+
   TileView tile_view;
-  tile_view.valid_shape = dst_shape;
+  tile_view.valid_shape = std::move(valid_shape);
   tile_view.blayout = InferTileLayoutFromShape(dst_shape);
 
   // Override blayout/slayout for L0-resident destinations to match the
@@ -750,8 +985,43 @@ TypePtr DeduceTileConcatType(const std::vector<ExprPtr>& args,
     out_shape.push_back(std::make_shared<Add>(t0->shape_[1], t1->shape_[1], DataType::INDEX, args[0]->span_));
   }
 
+  // Concat lays src0 into columns [0, cols0) and src1 into [cols0, cols0 + cols1).
+  // The union of their valid rectangles is a single origin-anchored rectangle — the
+  // only thing a valid_shape can express — ONLY when (a) both operands agree on the
+  // valid ROW extent (else the union is an L-shape) and (b) src0 is fully valid along
+  // the concat (column) dimension (else src1's data begins at src0's *physical*
+  // boundary, leaving a padding gap between the two valid blocks). Either failure is
+  // unrepresentable and REJECTED rather than widened to the full shape (valid_shape
+  // North Star). src1 (the final operand) may be partially valid in columns — its
+  // padding is a trailing suffix, so the union stays a prefix rectangle. Fully-valid
+  // operands satisfy both trivially and yield out_valid == out_shape (canonicalizes).
+  const std::vector<ExprPtr> va = GetValidShape(t0);  // [rows, cols0]
+  const std::vector<ExprPtr> vb = GetValidShape(t1);  // [rows, cols1]
+  CHECK_SPAN(AreExprsEqual(va[0], vb[0]), args[0]->span_)
+      << "tile.concat: operands disagree on the valid row extent (src0 valid " << FormatShape(va)
+      << ", src1 valid " << FormatShape(vb)
+      << "); the concatenated valid region would be an L-shape, not a rectangle. Make both operands "
+         "share the same valid row count.";
+  CHECK_SPAN(AreExprsEqual(va[1], t0->shape_[1]), args[0]->span_)
+      << "tile.concat: the first operand is only partially valid along the concatenation (column) "
+         "dimension (src0 valid "
+      << FormatShape(va) << ", physical shape " << FormatShape(t0->shape_)
+      << "); the second operand's data begins at src0's physical boundary, leaving a padding gap the "
+         "result rectangle cannot represent. Only the final operand may be partially valid in the "
+         "concat dimension.";
+  // out_valid columns = cols0 + valid(src1)[1]; fold constants like out_shape.
+  ExprPtr out_valid_cols;
+  auto vb1_const = As<ConstInt>(vb[1]);
+  if (c0 && vb1_const) {
+    out_valid_cols =
+        std::make_shared<ConstInt>(c0->value_ + vb1_const->value_, DataType::INDEX, args[0]->span_);
+  } else {
+    out_valid_cols = MakeAdd(t0->shape_[1], vb[1], args[0]->span_);
+  }
+  std::vector<ExprPtr> out_valid = {va[0], std::move(out_valid_cols)};
+
   TileView tile_view;
-  tile_view.valid_shape = out_shape;
+  tile_view.valid_shape = std::move(out_valid);
   return std::make_shared<TileType>(out_shape, t0->dtype_, std::nullopt, tile_view);
 }
 

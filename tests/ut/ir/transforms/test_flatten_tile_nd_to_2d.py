@@ -614,6 +614,108 @@ class TestFlattenTileNdTo2DDynamicValid:
         assert "pl.parallel" in message
         assert "reshap" in message
 
+    def test_partial_middle_dim_rejected(self):
+        """A partially-valid MIDDLE dim below a non-unit outer dim is rejected (B2).
+
+        phys ``[2, 4, 8]`` with valid ``[2, 2, 8]``: the outer dim (2) is non-unit
+        and the middle dim is partial (valid 2 < shape 4). The flattened valid rows
+        would be ``{0, 1, 4, 5}`` (batch 0 rows 0-1, batch 1 rows 4-5) — a *strided*
+        set that ``(valid_row, valid_col)`` cannot express. The product fold would
+        emit ``valid_row = 2*2 = 4`` (rows 0-3), silently marking batch-0 padding
+        valid and batch-1 real data invalid. The pass must reject, not approximate.
+        """
+        before = _incore_cast_chain(shapes=[2, 4, 8], valid=[2, 2, 8], tensor_shape=[2, 4, 8])
+        with pytest.raises(ValueError, match="contiguous row range"):
+            passes.flatten_tile_nd_to_2d()(before)
+
+    def test_empty_valid_region_folds_not_rejected(self):
+        """An ND *empty* valid region folds to zero rows instead of being rejected.
+
+        phys ``[4, 8, 16]`` with valid ``[0, 0, 0]`` is the ND empty accumulator
+        produced by ``pl.create_tile(shape, dtype, valid_shape=[0, 0, 0])``. The empty
+        set is trivially a contiguous prefix (of length 0), so the fold applies. The
+        pinned-dim scan keys on ``valid == 1`` and would otherwise mistake the ``0``
+        middle dim for a partially-valid one and reject with a misleading
+        "contiguous row range" message.
+        """
+        before = _incore_cast_chain(shapes=[4, 8, 16], valid=[0, 0, 0], tensor_shape=[4, 8, 16])
+        after = passes.flatten_tile_nd_to_2d()(before)
+        after_func = after.get_function("cast_incore")
+        assert after_func is not None
+        loads = [c for c in _tile_calls(after_func.body) if c.op.name == "tile.load"]
+        assert loads, "expected a tile.load in the flattened body"
+        tile_type = loads[0].type
+        assert isinstance(tile_type, ir.TileType)
+        assert tile_type.tile_view is not None
+        valid = tile_type.tile_view.valid_shape
+        assert len(valid) == 2, f"expected a 2D valid_shape after flatten, got {len(valid)}"
+        # Zero rows: the empty region survives the ND -> 2D merge.
+        assert isinstance(valid[0], ir.ConstInt) and valid[0].value == 0
+
+    def test_partial_middle_dim_with_zero_outer_folds(self):
+        """A zero outer dim makes the region empty, so a partial middle dim is fine.
+
+        phys ``[4, 8, 16]`` with valid ``[0, 3, 16]``: dim 1 is partially valid, which
+        would normally be rejected, but dim 0 being ``0`` means the region is empty and
+        the product fold yields ``valid_row = 0`` regardless.
+        """
+        before = _incore_cast_chain(shapes=[4, 8, 16], valid=[0, 3, 16], tensor_shape=[4, 8, 16])
+        after = passes.flatten_tile_nd_to_2d()(before)
+        after_func = after.get_function("cast_incore")
+        assert after_func is not None
+        loads = [c for c in _tile_calls(after_func.body) if c.op.name == "tile.load"]
+        assert loads
+        tile_type = loads[0].type
+        assert isinstance(tile_type, ir.TileType)
+        assert tile_type.tile_view is not None
+        assert isinstance(tile_type.tile_view.valid_shape[0], ir.ConstInt)
+        assert tile_type.tile_view.valid_shape[0].value == 0
+
+    def test_stripmine_dynamic_outer_folds(self):
+        """Strip-mine ``[min(CHUNK, D-c), full, full]`` STILL folds (regression guard).
+
+        phys ``[16, 8, 512]`` with valid ``[S, 8, 512]``: the dynamic dim is the
+        outermost (the free row dim) and every following row dim is fully valid, so
+        the region is a contiguous row prefix. It merges to a 2D valid_shape whose
+        row extent stays dynamic (``S * 8``) and column stays 512.
+        """
+        s = _dyn("S")
+        # The dynamic outer dim ``s`` must appear in the tensor param shape so the
+        # hand-built free Var is a bound symbolic dimension (SSA-valid), mirroring
+        # test_static_physical_dynamic_valid_preserved.
+        before = _incore_cast_chain(shapes=[16, 8, 512], valid=[s, 8, 512], tensor_shape=[s, 8, 512])
+        after = passes.flatten_tile_nd_to_2d()(before)
+        after_func = after.get_function("cast_incore")
+        assert after_func is not None
+        loads = [c for c in _tile_calls(after_func.body) if c.op.name == "tile.load"]
+        assert loads, "expected a tile.load in the flattened body"
+        load_type = cast(ir.TileType, loads[0].type)
+        assert [cast(ir.ConstInt, d).value for d in load_type.shape] == [128, 512]
+        assert load_type.tile_view is not None
+        valid = load_type.tile_view.valid_shape
+        assert len(valid) == 2
+        # Row extent stays dynamic (S-derived), not reset to the physical 128.
+        assert not isinstance(valid[0], ir.ConstInt), f"merged valid row must stay dynamic, got {valid[0]}"
+        assert isinstance(valid[1], ir.ConstInt) and valid[1].value == 512
+
+    def test_fully_valid_nd_folds_to_full_2d(self):
+        """A fully-valid ND valid_shape folds to the full 2-D shape (regression guard).
+
+        phys ``[2, 3, 4]`` with valid ``[2, 3, 4]`` (fully valid) flattens to a 2D
+        ``[6, 4]`` tile that is still fully valid.
+        """
+        before = _incore_cast_chain(shapes=[2, 3, 4], valid=[2, 3, 4], tensor_shape=[2, 3, 4])
+        after = passes.flatten_tile_nd_to_2d()(before)
+        after_func = after.get_function("cast_incore")
+        assert after_func is not None
+        loads = [c for c in _tile_calls(after_func.body) if c.op.name == "tile.load"]
+        assert loads, "expected a tile.load in the flattened body"
+        load_type = cast(ir.TileType, loads[0].type)
+        assert [cast(ir.ConstInt, d).value for d in load_type.shape] == [6, 4]
+        # Fully valid: the effective valid extent equals the physical 2D shape.
+        eff_valid = load_type.get_effective_tile_view().valid_shape
+        assert [cast(ir.ConstInt, d).value for d in eff_valid] == [6, 4]
+
 
 # ----------------------------------------------------------------------------
 # Chained / multi-step bodies that exercise more than one tile op

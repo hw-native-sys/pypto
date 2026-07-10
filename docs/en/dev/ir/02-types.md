@@ -120,10 +120,10 @@ tensor_with_both = ir.TensorType([128, 256], DataType.FP16, memref=memref, tenso
 
 - `stride`: stride for each dimension
 - `layout`: `TensorLayout.ND` / `DN` / `NZ`
-- `valid_shape`: optional valid-region dimensions (empty means use full shape)
-- `pad`: `PadValue.null` (default) / `zero` / `max` / `min` — padding mode used
-  when loads/slices read outside the `valid_shape`. Peer of `TileView.pad`;
-  `tensor.slice(..., pad_value=PadValue.zero)` writes this field.
+- `valid_shape`: optional valid-region dimensions (empty means fully valid); see
+  [`08-valid_shape.md`](08-valid_shape.md) for the shared tensor/tile semantics
+- `pad`: `PadValue.null` (default) / `zero` / `max` / `min` — padding mode for reads
+  outside `valid_shape`; `tensor.slice(..., pad_value=...)` writes this field.
 
 #### Canonical TensorView form (RFC #1300)
 

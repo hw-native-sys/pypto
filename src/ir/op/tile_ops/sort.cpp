@@ -30,6 +30,7 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
@@ -56,6 +57,23 @@ static T GetKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs, c
   throw ValueError("Missing kwarg: " + key);
 }
 
+// Reject a partially-valid sort input. Hardware sort ops compare over the full
+// physical block, so any padding participates in the comparison and can migrate
+// into the valid region — the sorted output's valid region is then NOT the input's.
+// Only a fully-valid input has a well-defined (fully-valid) sorted output, so a
+// partial valid_shape is rejected rather than silently propagated/widened
+// (valid_shape North Star). CHECK_SPAN (user error): the tile is user-authored via
+// pl.load(valid_shapes=)/pl.slice. A canonicalized full valid_shape is nullopt, so
+// GetValidShape == shape here whenever the input is truly full.
+static void CheckSortInputFullyValid(const std::shared_ptr<const TileType>& t, const std::string& op_name,
+                                     const std::string& arg_desc, const Span& span) {
+  CHECK_SPAN(AreExprVectorsEqual(GetValidShape(t), t->shape_), span)
+      << op_name << ": " << arg_desc << " carries a partial valid_shape " << FormatShape(GetValidShape(t))
+      << " (physical shape " << FormatShape(t->shape_)
+      << "). Sorting mixes padding into the valid region, so a partially-valid sort input is not "
+         "supported — sort a fully-valid tile (fill the padding first if needed).";
+}
+
 TypePtr DeduceTileSort32Type(const std::vector<ExprPtr>& args,
                              const std::vector<std::pair<std::string, std::any>>& kwargs,
                              const std::string& op_name) {
@@ -74,6 +92,11 @@ TypePtr DeduceTileSort32Type(const std::vector<ExprPtr>& args,
   auto idx_type = As<TileType>(args[1]->GetType());
   CHECK(idx_type) << "The operator " << op_name << " requires second argument to be a TileType, but got "
                   << args[1]->GetType()->TypeName();
+
+  // Sorting can migrate padding into the valid region; only a fully-valid input has a
+  // well-defined sorted output. Reject a partial src rather than propagate a widened
+  // region.
+  CheckSortInputFullyValid(src_type, op_name, "src", args[0]->span_);
 
   // Build output shape: double the last dimension for value-index pairs
   const auto& input_shape = src_type->shape_;
@@ -150,7 +173,10 @@ TypePtr DeduceTileMrgSortType(const std::vector<ExprPtr>& args,
     CHECK(src_type->dtype_ == src0_type->dtype_)
         << "The operator " << op_name << " requires all src tiles to have matching dtype, but argument " << i
         << " has " << src_type->dtype_.ToString() << " (expected " << src0_type->dtype_.ToString() << ")";
+    // A partially-valid merge input would migrate padding into the merged run.
+    CheckSortInputFullyValid(src_type, op_name, "src" + std::to_string(i), args[i]->span_);
   }
+  CheckSortInputFullyValid(src0_type, op_name, "src0", args[0]->span_);
 
   // tmp workspace tile (last arg)
   auto tmp_type = As<TileType>(args[n_srcs]->GetType());
@@ -224,6 +250,9 @@ TypePtr DeduceTileMrgSort1Type(const std::vector<ExprPtr>& args,
         << "The operator " << op_name << " requires block_len to be a positive multiple of 64, but got "
         << const_val->value_;
   }
+
+  // A partially-valid input would migrate padding into the merged run.
+  CheckSortInputFullyValid(src_type, op_name, "src", args[0]->span_);
 
   // Output shape matches src (merge destination has same dimensions as input)
   TileView tile_view;

@@ -61,6 +61,32 @@ void CanonicalizeTileViewInPlace(std::optional<TileView>& tile_view, const std::
   }
 }
 
+// Canonicalize the valid_shape encoding so exactly one in-memory form exists per
+// semantic state (unset means fully valid; see docs/en/dev/ir/08-valid_shape.md), matching TileView.
+//
+// Step 1: an explicit valid_shape equal to the physical shape carries no
+//   information — collapse it to empty ("unset" == "fully valid").
+// Step 2: unlike TileType we do NOT unconditionally reset the whole view, because
+//   stride / layout / pad stay meaningful. But when *every* field is at its
+//   default (empty stride, ND layout, now-empty valid_shape, null pad) the view is
+//   semantically identical to "no view" — which the no-view constructors store as
+//   nullopt. Leaving a present-yet-default view would give that one semantic state
+//   two in-memory forms, so structural_equal (which presence-checks tensor_view_)
+//   would wrongly separate them. Collapse to nullopt to keep the encoding unique.
+//   Non-default stride / layout / pad are preserved (only valid_shape was cleared).
+void CanonicalizeTensorViewInPlace(std::optional<TensorView>& view, const std::vector<ExprPtr>& shape) {
+  if (!view.has_value()) {
+    return;
+  }
+  if (!view->valid_shape.empty() && AreExprVectorsEqual(view->valid_shape, shape)) {
+    view->valid_shape.clear();
+  }
+  if (view->valid_shape.empty() && view->stride.empty() && view->layout == TensorLayout::ND &&
+      view->pad == PadValue::null) {
+    view.reset();
+  }
+}
+
 }  // namespace
 
 bool operator==(const TileView& lhs, const TileView& rhs) {
@@ -203,6 +229,23 @@ ShapedType::ShapedType(DataType dtype, std::vector<ExprPtr> shape, MemRefPtr mem
 
 ShapedType::ShapedType(DataType dtype, std::vector<ExprPtr> shape, std::optional<MemRefPtr> memref)
     : dtype_(dtype), shape_(std::move(shape)), memref_(std::move(memref)) {}
+
+// Out-of-line so the view-taking ctors can canonicalize valid_shape (mirrors
+// TileType). Note we canonicalize against the already-initialized base member
+// shape_ (the ShapedType base ctor ran first): the by-value `shape` parameter
+// has been std::move'd into the base, and for the int64 overload `shape_` is the
+// converted ConstInt vector that valid_shape (ExprPtr) must be compared against.
+TensorType::TensorType(std::vector<ExprPtr> shape, DataType dtype, std::optional<MemRefPtr> memref,
+                       std::optional<TensorView> tensor_view)
+    : ShapedType(dtype, std::move(shape), std::move(memref)), tensor_view_(std::move(tensor_view)) {
+  CanonicalizeTensorViewInPlace(tensor_view_, shape_);
+}
+
+TensorType::TensorType(const std::vector<int64_t>& shape, DataType dtype, std::optional<MemRefPtr> memref,
+                       std::optional<TensorView> tensor_view)
+    : ShapedType(dtype, shape, std::move(memref)), tensor_view_(std::move(tensor_view)) {
+  CanonicalizeTensorViewInPlace(tensor_view_, shape_);
+}
 
 TileType::TileType(const std::vector<int64_t>& shape, DataType dtype, std::optional<MemRefPtr> memref,
                    std::optional<TileView> tile_view, std::optional<MemorySpace> memory_space)

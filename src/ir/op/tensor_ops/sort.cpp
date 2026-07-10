@@ -77,6 +77,12 @@ TypePtr DeduceTensorSort32Type(const std::vector<ExprPtr>& args,
         << "The operator " << op_name << " requires idx shape to match src shape at axis " << i;
   }
 
+  // Sorting mixes padding into the valid region under comparison, so a partially-valid
+  // input has no well-defined sorted output — reject it rather than propagate a widened
+  // region (valid_shape North Star; mirrors tile_ops/sort.cpp). A fully-valid src
+  // produces a fully-valid (bare) output, byte-identical to before.
+  CheckTensorInputFullyValid(src_type, op_name, "src", args[0]->span_);
+
   std::vector<ExprPtr> output_shape(input_shape.begin(), input_shape.end() - 1);
   auto last_dim = input_shape.back();
   if (auto const_dim = As<ConstInt>(last_dim)) {
@@ -170,6 +176,14 @@ TypePtr DeduceTensorMrgSortType(const std::vector<ExprPtr>& args,
     }
   }
   out_shape.push_back(last_dim);
+
+  // A merge that folds a partially-valid run migrates padding into the merged output —
+  // reject any partial src rather than widen (valid_shape North Star; mirrors
+  // tile_ops/sort.cpp). All-full srcs give a fully-valid (bare) output.
+  for (size_t i = 0; i < src_types.size(); ++i) {
+    CheckTensorInputFullyValid(src_types[i], op_name, "src" + std::to_string(i), args[i]->span_);
+  }
+
   return std::make_shared<TensorType>(out_shape, src0_type->dtype_);
 }
 
@@ -220,6 +234,11 @@ TypePtr DeduceTensorMrgSort1Type(const std::vector<ExprPtr>& args,
         << "The operator " << op_name << " requires block_len to be a positive multiple of 64, but got "
         << const_val->value_;
   }
+
+  // A partially-valid input would migrate padding into the merged run — reject rather
+  // than widen (valid_shape North Star; mirrors tile_ops/sort.cpp). A fully-valid
+  // src produces a fully-valid (bare) output.
+  CheckTensorInputFullyValid(src_type, op_name, "src", args[0]->span_);
 
   return std::make_shared<TensorType>(src_type->shape_, src_type->dtype_);
 }

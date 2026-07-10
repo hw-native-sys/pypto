@@ -42,6 +42,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -162,6 +163,13 @@ TypePtr DeduceTensorPagedGatherType(const std::vector<ExprPtr>& args,
   } else {
     out_shape = {rows_expr, size_expr};
   }
+  // paged_gather reads scattered src rows via runtime indices/block_table, so a
+  // partially-valid operand makes the gathered buffer's valid region underivable —
+  // reject rather than widen (North Star). Fully-valid operands pass silently, so the
+  // current (bare) result is byte-identical.
+  CheckTensorInputFullyValid(src_type, op_name, "src", args[0]->span_);
+  CheckTensorInputFullyValid(idx_type, op_name, "indices", args[1]->span_);
+  CheckTensorInputFullyValid(bt_type, op_name, "block_table", args[2]->span_);
   return std::make_shared<TensorType>(out_shape, src_type->dtype_);
 }
 

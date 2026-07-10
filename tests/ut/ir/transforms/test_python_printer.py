@@ -325,11 +325,19 @@ class TestTileViewTensorViewPrinting:
         compile(printed, "<string>", "exec")  # must not raise SyntaxError
 
     def test_tensorview_always_emitted_when_present(self):
-        tensor_view = ir.TensorView()  # all-default fields
+        # A view that carries real information (a strictly-narrower valid_shape)
+        # survives canonicalization and must be emitted. An all-default view now
+        # collapses to the bare form under the unified valid_shape semantics
+        # (empty stride + ND + empty valid_shape + null pad == no view), so it is
+        # intentionally not distinguishable from a bare TensorType.
+        span = ir.Span.unknown()
+        tensor_view = ir.TensorView(
+            stride=[], layout=ir.TensorLayout.ND, valid_shape=[ir.ConstInt(32, DataType.INT64, span)]
+        )
         tensor_type = ir.TensorType([64], DataType.FP32, tensor_view=tensor_view)
 
         printed = ir.python_print_type(tensor_type)
-        assert "pl.TensorView()" in printed  # all-default fields must still be emitted
+        assert "pl.TensorView(" in printed  # a present (non-default) view is emitted
 
     def test_tileview_tensorview_parseable_by_type_resolver(self):
         span = ir.Span.unknown()

@@ -25,7 +25,8 @@ Auto-selects between tensor and tile implementation based on input type.
 | `cast` | `(input: T, target_type: int \| DataType, mode="round") -> T` | Type cast (`mode`: none, rint, round, floor, ceil, trunc, odd) |
 | `reshape` | `(input: T, shape: Sequence[IntLike]) -> T` | Reshape to new dimensions |
 | `transpose` | `(input: T, axis1: int, axis2: int) -> T` | Swap two axes |
-| `slice` | `(input: T, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> T` | Slice with offset |
+| `slice` | `(input: T, shape: Sequence[IntLike], offset: Sequence[IntLike], valid_shape: Sequence[IntLike] \| None = None, clamp: bool = False) -> T` | Slice with offset. `valid_shape` narrows the result's valid region; `clamp=True` DERIVES a ragged tail — clips the window to the source's valid region at `offset` (never widens, intersects an explicit `valid_shape`) and suppresses the static out-of-bounds check |
+| `valid_dim` | `(input: T, axis: int) -> Scalar` | Compile-time query of `valid_shape[axis]` as a `Scalar[INDEX]` (the physical extent when unset, per D2); `axis` must be in `[0, rank)`. Lets a kernel consume the ragged extent, e.g. divide a row-sum by the valid column count |
 | `matmul` | `(lhs: T, rhs: T, out_dtype=None, a_trans=False, b_trans=False, c_matrix_nz=False) -> T` | Matrix multiplication |
 | `matmul_acc` | `(acc: T, lhs: T, rhs: T, a_trans=False, b_trans=False) -> T` | Matrix multiply with accumulation: `acc += lhs @ rhs` |
 | `row_max` | `(input: T, tmp_tile: Tile \| None = None) -> T` | Row-wise max (tile path requires `tmp_tile`) |
@@ -40,7 +41,7 @@ Auto-selects between tensor and tile implementation based on input type.
 | `col_argmax` | `(input: T, tmp_tile: Tile \| None = None) -> T` | Column-wise argmax (row index of per-column max, int32 output; tile path requires `tmp_tile`) |
 | `col_argmin` | `(input: T, tmp_tile: Tile \| None = None) -> T` | Column-wise argmin (row index of per-column min, int32 output; tile path requires `tmp_tile`) |
 | `rsqrt` | `(input: T, high_precision: bool = False) -> T` | Reciprocal square root; `high_precision=True` selects the high-precision path (tensor input only — tile callers must use `pl.tile.rsqrt(src, tmp=...)`) |
-| `create` / `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: Mem) -> Tile` | Tile-only (promoted from `pl.tile.create`): create tile at specific memory space |
+| `create` / `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: Mem, valid_shape: Sequence[IntLike] \| None = None) -> Tile` | Tile-only (promoted from `pl.tile.create`): create tile at a specific memory space. `valid_shape` narrows the initially-valid region — `[0, 0]` makes an empty accumulator for `assemble` to grow into; unset = fully valid (D2) |
 | `read` | `(src: T, offset: IntLike \| Sequence[IntLike]) -> Scalar` | Read scalar at indices (dispatched by source type). Sugar: `A[i, j]` |
 | `write` | `(dst: T, offset: IntLike \| Sequence[IntLike], value: Scalar) -> None` | Write scalar at indices (dispatched by destination type). Sugar: `A[i, j] = v` |
 
@@ -54,7 +55,7 @@ Operate on `Tensor` objects (DDR memory).
 | `read` | `(tensor: Tensor, indices: IntLike \| Sequence[IntLike]) -> Scalar` | Read scalar at indices. Sugar: `A[i, j]` |
 | `write` | `(tensor: Tensor, indices: IntLike \| Sequence[IntLike], value: Scalar) -> None` | Write scalar at indices. Sugar: `A[i, j] = v` |
 | `dim` | `(tensor: Tensor, axis: int) -> Scalar` | Get dimension size (supports negative indexing) |
-| `slice` | `(tensor: Tensor, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> Tensor` | Slice. Sugar: `A[0:16, :]` |
+| `slice` | `(tensor: Tensor, shape: Sequence[IntLike], offset: Sequence[IntLike], valid_shape=None, clamp=False) -> Tensor` | Slice. Sugar: `A[0:16, :]`. `valid_shape` / `clamp` as in the unified `pl.slice` (a bare past-edge slice without `clamp` / `valid_shape` / `pad_value` is a static out-of-bounds error) |
 | `reshape` | `(tensor: Tensor, shape: Sequence[IntLike]) -> Tensor` | Reshape |
 | `transpose` | `(tensor: Tensor, axis1: int, axis2: int) -> Tensor` | Swap two axes |
 | `assemble` | `(target: Tensor, source: Tensor, offset: Sequence[IntLike], *, atomic: AtomicType = AtomicType.None_) -> Tensor` | Write source into target at offset. Sugar (pre-SSA only): `target[i:i+H, j:j+W] = source`. `atomic=AtomicType.Add` accumulates instead of overwriting (split-K) — only valid when the target is a function output (global memory); non-deterministic FP, target must be pre-zeroed, dtypes fp32/bf16/fp16/int32/int16/int8 (bf16 requires the Ascend910B/A2/A3 profile) |
@@ -98,14 +99,14 @@ Transfer data between memory hierarchy levels.
 
 | Name | Signature | Description |
 | ---- | --------- | ----------- |
-| `load` | `(tensor: Tensor, offsets: Sequence[IntLike], shapes: Sequence[IntLike], target_memory: Mem = Mem.Vec) -> Tile` | DDR → on-chip tile. Both `offsets` and `shapes` use the source tensor's coordinate system. For a transposed matmul operand, apply `transpose_view` to the loaded tile. |
+| `load` | `(tensor: Tensor, offsets: Sequence[IntLike], shapes: Sequence[IntLike], valid_shapes: Sequence[IntLike] \| None = None, target_memory: Mem = Mem.Vec) -> Tile` | DDR → on-chip tile. Both `offsets` and `shapes` use the source tensor's coordinate system. `valid_shapes` (each dim `<=` `shapes`; defaults to `shapes`) sets the tile's `valid_shape` — the runtime-valid sub-region for a ragged tail (may be a `Scalar[INDEX]`) — and INTERSECTS the source tensor's own valid region. For a transposed matmul operand, apply `transpose_view` to the loaded tile. |
 | `store` | `(tile: Tile, offsets: Sequence[IntLike], output_tensor: Tensor, *, atomic: AtomicType = AtomicType.None_) -> Tensor` | Tile → DDR (pipe inferred from source memory). `atomic=AtomicType.Add` accumulates the tile into existing DDR contents (split-K); non-deterministic FP, destination must be pre-zeroed, dtypes fp32/bf16/fp16/int32/int16/int8 (bf16 requires the Ascend910B/A2/A3 profile) |
 | `assemble` | `(target: Tile, source: Tile, offset: Sequence[IntLike]) -> Tile` | Write source tile into target at offset. Sugar (pre-SSA only): `target[i:i+H, j:j+W] = source` |
 | `scatter_update` | `(input: Tile, dim: int, index: Tile, src: Tile) -> Tile` | Update rows of `input` tile at sparse positions given by `index` tile with values from `src` tile. `input`/`src`: 2D `[rows, d]` or 4D `[B, S, 1, d]`; `index`: 2D `[b, s]` integer. Lowered to `tile.scatter` (pto.tscatter, whole-row flat indices). Only `dim=-2` is supported |
 | `read` | `(tile: Tile, indices: IntLike \| Sequence[IntLike]) -> Scalar` | Read scalar at indices. Sugar: `A[i, j]` |
 | `write` | `(tile: Tile, indices: IntLike \| Sequence[IntLike], value: Scalar) -> None` | Write scalar at indices. Sugar: `A[i, j] = v` |
 | `move` | `(tile: Tile, target_memory: Mem) -> Tile` | Move tile between memory levels (including Vec→Vec) |
-| `create` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: Mem = Mem.Vec) -> Tile` | Create tile at memory space |
+| `create` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: Mem = Mem.Vec, valid_shape: Sequence[IntLike] \| None = None) -> Tile` | Create tile at memory space. `valid_shape` narrows the initially-valid region (`[0, 0]` = empty accumulator); unset = fully valid (D2) |
 | `full` | `(shape: list[int], dtype: DataType, value: int \| float) -> Tile` | Create tile filled with constant |
 | `random` | `(key0, key1, counter0, counter1, counter2, counter3: int \| Scalar, shape: Sequence[int], valid_shape: Sequence[int] \| None = None, dtype: DataType = UINT32, rounds: int = 10) -> Tile` | Fill a tile with counter-based (Philox/ChaCha-style) pseudo-random values from a 64-bit key + 128-bit counter. Deterministic: same seeds → same tile. Optional `valid_shape` (each dim `<= shape`) writes only the valid rows/cols, leaving the rest untouched. `dtype` ∈ {INT32, UINT32}; `rounds` ∈ {7, 10}. 2D shape only. **A5 only** (`pto.trandom`) |
 | `fillpad` | `(input: Tensor \| Tile, pad_value: PadValue \| int \| float = PadValue.zero) -> Tensor \| Tile` | Fill invalid view elements using the requested pad value; accepts the `PadValue.zero/max/min` enum or the literal sugars `0`, `0.0`, `math.inf`, `-math.inf` (other values raise). Tensor inputs lower to tile fillpad in InCore code |
@@ -259,7 +260,7 @@ scratch tile to materialize numeric results on A2/A3.
 
 | Name | Signature | Description |
 | ---- | --------- | ----------- |
-| `slice` | `(tile: Tile, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> Tile` | Slice (at most 2D). Sugar: `A[0:16, :]` |
+| `slice` | `(tile: Tile, shape: Sequence[IntLike], offset: Sequence[IntLike], valid_shape=None, clamp=False) -> Tile` | Slice (at most 2D). Sugar: `A[0:16, :]`. `valid_shape` / `clamp` as in the unified `pl.slice` |
 | `reshape` | `(tile: Tile, shape: Sequence[IntLike]) -> Tile` | Reshape (at most 2D) |
 | `transpose` | `(tile: Tile, axis1: int, axis2: int) -> Tile` | Swap two axes |
 | `cast` | `(tile: Tile, target_type: DataType, mode="round") -> Tile` | Type cast |

@@ -128,7 +128,67 @@ std::vector<ExprPtr> Make2DShapeExprs(int64_t merged, int64_t last, const Span& 
 /// ``min(CHUNK, D - c)`` tail from the dynamic-tile strip-mine below) survive the
 /// flatten of the physical tile shape rather than being reset to the full static
 /// shape.
-std::vector<ExprPtr> ComputeMergedValidShape(const std::vector<ExprPtr>& valid, const Span& span) {
+///
+/// Soundness precondition (valid_shape B2): the ND valid region must map to a
+/// *contiguous* prefix of the flattened rows — the only thing
+/// ``(valid_row, valid_col)`` can express. For row dims ``valid[0 .. n-2]`` (the
+/// innermost dim ``n-1`` becomes the free column) read most-significant first,
+/// this holds iff there is a single "free" row dim: every row dim before it is
+/// unit (its index is pinned to 0, so it contributes no stride) and every row dim
+/// after it is fully valid (``valid == shape``). A partially-valid row dim that
+/// sits below a non-unit more-significant dim yields a *strided* region and is
+/// rejected here rather than approximated by the product fold (which would
+/// silently mark batch-0 padding valid and real batch-1 data invalid).
+///
+/// ``CHECK_SPAN`` (user error, not INTERNAL): the offending ND ``valid_shape`` is
+/// user-authored via ``pl.load(valid_shapes=...)``, so this is a documented
+/// user-facing limitation (see ``.claude/rules/error-checking.md`` carve-out).
+std::vector<ExprPtr> ComputeMergedValidShape(const std::vector<ExprPtr>& valid,
+                                             const std::vector<ExprPtr>& shape, const Span& span) {
+  INTERNAL_CHECK_SPAN(valid.size() == shape.size(), span)
+      << "FlattenTileNdTo2D: valid_shape rank (" << valid.size() << ") must match tile shape rank ("
+      << shape.size() << ") before merging";
+  // Row dims are ``valid[0 .. n-2]``; the innermost dim (``n-1``) is the free
+  // column. The most-significant row dim that is not pinned to a unit extent is
+  // the free row dim (it, together with any folded leading unit dims, becomes
+  // valid_row). Every row dim after it must be fully valid or the flattened valid
+  // rows are strided and cannot be expressed as a single valid_row extent.
+  //
+  // An EMPTY valid region (any dim provably 0 — e.g. the ``create_tile(valid_shape=
+  // [0, 0, 0])`` empty accumulator) denotes the empty set, which is trivially a
+  // contiguous prefix of length 0. The precondition below reasons about which dims
+  // are *pinned* (valid == 1) and would otherwise mistake a 0 dim for a partially
+  // valid middle dim and reject with a misleading message. The product fold handles
+  // it correctly on its own: a zero row dim folds to valid_row = 0, and a zero
+  // column dim yields valid_col = 0 — either way, zero elements.
+  const bool region_is_empty = std::any_of(valid.begin(), valid.end(), [](const ExprPtr& e) {
+    auto ci = As<ConstInt>(e);
+    return ci && ci->value_ == 0;
+  });
+
+  // A rank-0/1 valid_shape has no row dims: the fold below degenerates to the
+  // identity and there is nothing to check. Guard explicitly — ``valid.size() - 1``
+  // is unsigned and would wrap to SIZE_MAX on an empty vector.
+  if (!region_is_empty && valid.size() >= 2) {
+    const size_t num_row_dims = valid.size() - 1;
+    size_t free_dim = 0;
+    while (free_dim + 1 < num_row_dims) {
+      auto ci = As<ConstInt>(valid[free_dim]);
+      if (ci && ci->value_ == 1) {
+        ++free_dim;
+      } else {
+        break;
+      }
+    }
+    for (size_t i = free_dim + 1; i < num_row_dims; ++i) {
+      CHECK_SPAN(AreExprsEqual(valid[i], shape[i]), span)
+          << "tile dim " << i << " is partially valid (valid_shape[" << i << "] != shape[" << i
+          << "]) below a non-unit outer dim; an ND valid region with such a partial middle dim is not a "
+          << "contiguous row range and cannot be folded into (valid_row, valid_col). Only the outermost "
+          << "non-unit dim and the innermost dim may be partially valid.";
+    }
+  }
+
   int64_t const_prod = 1;
   ExprPtr dyn = nullptr;
   for (size_t i = 0; i + 1 < valid.size(); ++i) {
@@ -1984,7 +2044,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
           // tile is fully valid (valid_shape == physical 2D shape).
           std::vector<ExprPtr> flat_valid = flat_shape_exprs;
           if (orig_tv.valid_shape.size() == result_tile->shape_.size()) {
-            flat_valid = ComputeMergedValidShape(orig_tv.valid_shape, span);
+            flat_valid = ComputeMergedValidShape(orig_tv.valid_shape, result_tile->shape_, span);
           }
           flat_tile_view = TileView(flat_valid, /*stride=*/{}, /*start_offset=*/nullptr, orig_tv.blayout,
                                     orig_tv.slayout, orig_tv.fractal, orig_tv.pad);
@@ -2085,8 +2145,22 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         std::vector<ExprPtr> new_args;
         // First arg is the shape tuple
         new_args.push_back(new_shape_tuple);
-        // Remaining args (e.g., fill value for tile.full)
+        // Remaining args:
+        //  - tile.create's optional 2nd arg is a valid_shape tuple ranked like the
+        //    ND physical shape; merge it to 2D the same way (contiguous-prefix
+        //    precondition enforced by ComputeMergedValidShape) so the flattened
+        //    create keeps a rank-2 valid region instead of a rank-mismatched one.
+        //  - tile.full's 2nd arg is a scalar fill value — pass it through.
+        const bool is_create = IsOp(call, "tile.create");
         for (size_t i = 1; i < call->args_.size(); ++i) {
+          if (is_create) {
+            auto valid_tuple = As<MakeTuple>(call->args_[i]);
+            if (valid_tuple && valid_tuple->elements_.size() == result_tile->shape_.size()) {
+              auto merged_valid = ComputeMergedValidShape(valid_tuple->elements_, result_tile->shape_, span);
+              new_args.push_back(std::make_shared<MakeTuple>(merged_valid, span));
+              continue;
+            }
+          }
           new_args.push_back(Substitute(call->args_[i], ctx.var_map));
         }
 

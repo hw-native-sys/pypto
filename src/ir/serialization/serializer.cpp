@@ -289,8 +289,11 @@ class IRSerializer::Impl {
     }
     tv_map["stride"] = msgpack::object(stride_vec, zone);
 
-    // Serialize start_offset
-    tv_map["start_offset"] = SerializeNode(tile_view->start_offset, zone);
+    // Serialize start_offset. It is legitimately null — tile.load builds its
+    // view by setting only valid_shape and never sets start_offset — so emit a
+    // msgpack nil in that case, matching the null-optional idiom used elsewhere.
+    tv_map["start_offset"] =
+        tile_view->start_offset ? SerializeNode(tile_view->start_offset, zone) : msgpack::object();
 
     // Serialize blayout
     std::string blayout_str;
@@ -352,6 +355,15 @@ class IRSerializer::Impl {
     }
 
     std::map<std::string, msgpack::object> tv_map;
+
+    // Serialize valid_shape (empty when unset / fully valid — mirrors the
+    // TileView vector-of-nodes encoding). Omitting it drops the valid region on
+    // round-trip, silently widening a narrowed tensor back to its full shape.
+    std::vector<msgpack::object> valid_shape_vec;
+    for (const auto& dim : tensor_view->valid_shape) {
+      valid_shape_vec.push_back(SerializeNode(dim, zone));
+    }
+    tv_map["valid_shape"] = msgpack::object(valid_shape_vec, zone);
 
     // Serialize stride
     std::vector<msgpack::object> stride_vec;

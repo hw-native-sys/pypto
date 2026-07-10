@@ -456,10 +456,13 @@ class TensorType : public ShapedType {
    * @param dtype Element data type
    * @param memref Optional memory reference (shared pointer)
    * @param tensor_view Tensor view information
+   *
+   * @note Defined out-of-line in src/ir/type.cpp so it can canonicalize the view:
+   *       an explicit valid_shape equal to the physical shape collapses to empty,
+   *       matching TileView's "unset means fully valid" encoding.
    */
   TensorType(std::vector<ExprPtr> shape, DataType dtype, std::optional<MemRefPtr> memref,
-             std::optional<TensorView> tensor_view)
-      : ShapedType(dtype, std::move(shape), std::move(memref)), tensor_view_(std::move(tensor_view)) {}
+             std::optional<TensorView> tensor_view);
 
   /**
    * @brief Create a tensor type with constant shape and tensor view
@@ -468,10 +471,11 @@ class TensorType : public ShapedType {
    * @param dtype Element data type
    * @param memref Optional memory reference (shared pointer)
    * @param tensor_view Optional tensor view information
+   *
+   * @note Defined out-of-line in src/ir/type.cpp — see the ExprPtr-shape overload.
    */
   TensorType(const std::vector<int64_t>& shape, DataType dtype, std::optional<MemRefPtr> memref,
-             std::optional<TensorView> tensor_view)
-      : ShapedType(dtype, shape, std::move(memref)), tensor_view_(std::move(tensor_view)) {}
+             std::optional<TensorView> tensor_view);
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::TensorType; }
   [[nodiscard]] std::string TypeName() const override { return "TensorType"; }

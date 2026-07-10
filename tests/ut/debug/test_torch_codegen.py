@@ -1074,12 +1074,21 @@ def test_tensor_assemble_writes_source():
 
 
 def test_tensor_slice_out_of_bounds_is_padded():
-    """tensor.slice should pad to requested shape when slicing out of bounds."""
+    """A clamp=True slice past the input edge pads the ragged tail to the requested shape.
+
+    src [96,64] sliced [64,64] at offset [64,0] runs 32 rows past the input edge.
+    Under the unified valid_shape semantics an unclamped statically-out-of-bounds
+    slice is a user error (see
+    test_tensor_slice_static_oob_rejected in test_tensor_ops.py); ``clamp=True`` is
+    the sanctioned way to slice past the edge. It derives valid_shape [32,64], so
+    the ragged tail (rows 32..63) reads as zero padding here — identical output to
+    the pre-check accept-and-pad behavior, now expressed through the explicit API.
+    """
     src = _tensor_var("src", [96, 64], DataType.FP32)
     result = _tensor_var("result", [64, 64], DataType.FP32)
     shapes = _make_tuple(_int(64), _int(64))
     offsets = _make_tuple(_int(64), _int(0))
-    call = _op_call("tensor.slice", [src, shapes, offsets])
+    call = _op_call("tensor.slice", [src, shapes, offsets], {"clamp": True})
     assign = ir.AssignStmt(result, call, _span())
     ret = ir.ReturnStmt([result], _span())
     body = ir.SeqStmts([assign, ret], _span())

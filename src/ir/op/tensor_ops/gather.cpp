@@ -32,6 +32,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -91,6 +92,13 @@ TypePtr DeduceTensorGatherType(const std::vector<ExprPtr>& args,
           << ") <= input.shape[" << i << "] (" << inp_const->value_ << ") on non-gather axes";
     }
   }
+
+  // gather reads input[index] at runtime-computed positions, so a partially-valid
+  // input or index makes the output valid region underivable — reject rather than
+  // widen to the full shape (North Star). A fully-valid input passes silently, so the
+  // current (bare) result is byte-identical.
+  CheckTensorInputFullyValid(input_type, op_name, "input", args[0]->span_);
+  CheckTensorInputFullyValid(index_type, op_name, "index", args[1]->span_);
 
   return std::make_shared<TensorType>(index_type->shape_, input_type->dtype_);
 }

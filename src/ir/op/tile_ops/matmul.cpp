@@ -91,12 +91,21 @@ TypePtr DeduceTileMatMulType(const std::vector<ExprPtr>& args,
   // Output shape is [M, N]
   std::vector<ExprPtr> output_shape = {m_dim, n_dim};
 
+  // Propagate the valid region: for C[M,N] = A[M,K] @ B[K,N] the valid output is
+  // [valid(A)[M-axis], valid(B)[N-axis]] — NEVER the full physical [M, N], which would
+  // claim padding rows/cols carry real data when an operand is only partially valid.
+  // M is lhs axis 0, N is rhs axis 1 (see the m_dim/n_dim assignment above).
+  const std::vector<ExprPtr> lhs_valid = GetValidShape(lhs_type);
+  const std::vector<ExprPtr> rhs_valid = GetValidShape(rhs_type);
+  CheckMatMulValidKCompat(lhs_valid[1], rhs_valid[0], args[0]->span_, op_name);
+  std::vector<ExprPtr> output_valid = {lhs_valid[0], rhs_valid[1]};
+
   // Acc layout: Nz
   TileView tile_view;
   tile_view.blayout = TileLayout::col_major;
   tile_view.slayout = TileLayout::row_major;
   tile_view.fractal = 1024;
-  tile_view.valid_shape = output_shape;
+  tile_view.valid_shape = std::move(output_valid);
 
   return std::make_shared<TileType>(output_shape, result_dtype, std::nullopt, tile_view);
 }
@@ -180,12 +189,30 @@ TypePtr DeduceTileMatMulAccType(const std::vector<ExprPtr>& args,
   // Output shape is [M, N] (same as accumulator)
   std::vector<ExprPtr> output_shape = {m_dim_acc, n_dim_acc};
 
+  // acc[M,N] += lhs[M,K] @ rhs[K,N] writes the matmul result in place at the origin.
+  // The written region is [valid(lhs)[M-axis], valid(rhs)[N-axis]] (M is lhs axis 0,
+  // N is rhs axis 1); the result's valid region is the bounding box (union) of the
+  // accumulator's existing valid rectangle and that written rectangle — never the full
+  // physical shape. Reuse the assemble union rule at offset = origin, which clamps to
+  // the physical shape (valid_shape <= shape verifier invariant) and rejects a
+  // non-representable (L-shaped / gapped) union. A fully-valid accumulator (unset
+  // valid_shape == shape under D2) unions back to the full shape, so a caller that
+  // wants narrowing must seed the accumulator via create_tile(valid_shape=[0, 0]).
+  const std::vector<ExprPtr> lhs_valid = GetValidShape(lhs_type);
+  const std::vector<ExprPtr> rhs_valid = GetValidShape(rhs_type);
+  CheckMatMulValidKCompat(lhs_valid[1], rhs_valid[0], args[0]->span_, op_name);
+  const std::vector<ExprPtr> written_valid = {lhs_valid[0], rhs_valid[1]};
+  auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, args[0]->span_);
+  const std::vector<ExprPtr> zero_offset = {zero, zero};
+  std::vector<ExprPtr> output_valid = ComputeAssembleUnionValidShape(
+      GetValidShape(acc_type), written_valid, zero_offset, output_shape, args[0]->span_, op_name);
+
   // Acc layout: Nz
   TileView tile_view;
   tile_view.blayout = TileLayout::col_major;
   tile_view.slayout = TileLayout::row_major;
   tile_view.fractal = 1024;
-  tile_view.valid_shape = output_shape;
+  tile_view.valid_shape = std::move(output_valid);
 
   return std::make_shared<TileType>(output_shape, result_dtype, std::nullopt, tile_view);
 }
@@ -252,8 +279,20 @@ TypePtr DeduceTileMatMulBiasType(const std::vector<ExprPtr>& args,
   CHECK(result_dtype) << "The operator " << op_name << " requires compatible bias data type, but got "
                       << lhs_rhs_dtype->ToString() << " and " << bias_type->dtype_.ToString();
 
+  // Propagate the valid region. Rows come from valid(lhs)[M-axis] (M is lhs axis 0).
+  // Columns INTERSECT the matmul N (valid(rhs)[N-axis], N is rhs axis 1) with the bias's
+  // valid N: C[i,j] = A@B[i,j] + bias[0,j] is real only where the bias column j is real,
+  // so a bias narrower than the matmul N narrows the output — it must NOT be widened back
+  // to the full matmul N (the North Star forbids claiming the bias-padded columns valid).
+  const std::vector<ExprPtr> lhs_valid = GetValidShape(lhs_type);
+  const std::vector<ExprPtr> rhs_valid = GetValidShape(rhs_type);
+  const std::vector<ExprPtr> bias_valid = GetValidShape(bias_type);
+  CheckMatMulValidKCompat(lhs_valid[1], rhs_valid[0], args[0]->span_, op_name);
+  std::vector<ExprPtr> output_valid =
+      ComputeMatMulBiasValidShape(lhs_valid, rhs_valid, bias_valid, args[0]->span_);
+
   TileView tile_view;
-  tile_view.valid_shape = output_shape;
+  tile_view.valid_shape = std::move(output_valid);
   return std::make_shared<TileType>(output_shape, *result_dtype, std::nullopt, tile_view);
 }
 

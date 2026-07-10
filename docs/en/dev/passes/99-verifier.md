@@ -62,7 +62,7 @@ The `run_verifier()` utility creates a standalone `Pass` for ad-hoc use in custo
 | Rule Name | IRProperty | Purpose |
 | --------- | ---------- | ------- |
 | **SSAVerify** | SSAForm | No multiple assignment, no name shadowing, no missing yield, scope violations, cardinality checks |
-| **TypeCheck** | TypeChecked | Type kind/dtype/shape/size consistency |
+| **TypeCheck** | TypeChecked | Type kind/dtype/shape/size consistency, plus the standing `valid_shape` bound (`rank(valid_shape) == rank(shape)`, `0 <= valid_shape[i] <= shape[i]` for constant dims) on every Tile/Tensor type |
 | **NoNestedCall** | NoNestedCalls | No nested call expressions in args, conditions, ranges |
 | **BreakContinueCheck** | BreakContinueValid | Break/continue only in sequential/while loops |
 | **UseAfterDefCheck** | UseAfterDef | Every Var use dominated by a definition (param, AssignStmt, loop var, iter_arg, return_var) |
@@ -111,6 +111,16 @@ The `run_verifier()` utility creates a standalone `Pass` for ad-hoc use in custo
 | 106 | `IF_CONDITION_MUST_BE_SCALAR` | IfStmt/WhileStmt condition must be ScalarType |
 | 107 | `FOR_RANGE_MUST_BE_SCALAR` | ForStmt range must be ScalarType |
 | 108 | `CONDITION_MUST_BE_BOOL` | IfStmt/WhileStmt condition dtype must be BOOL |
+
+**`valid_shape` well-formedness (standing invariant).** Beyond the control-flow join checks above,
+TypeCheck walks every TileType/TensorType (function params, return types, body Vars/Calls, and types
+nested in TupleTypes) and enforces, for any view carrying an explicit non-empty `valid_shape`:
+`rank(valid_shape) == rank(shape)` (reusing `SHAPE_DIMENSION_MISMATCH`) and `0 <= valid_shape[i] <=
+shape[i]` for every dim where both extents are compile-time constants (reusing `SHAPE_VALUE_MISMATCH`).
+Symbolic (dynamic) valid extents are skipped — dynamic `valid_shape` is a supported feature. An empty
+`valid_shape` means "fully valid" (`== shape`) and is not checked. Because `TypeChecked` is structural,
+this bound is enforced before/after every pass, so a malformed `valid_shape` (e.g. `[999, 999]` on a
+`[128, 128]` tile) is caught at the earliest pass that produces it.
 
 ### NoNestedCall
 

@@ -88,8 +88,11 @@ TypePtr DeduceTensorRowExpandType(const std::vector<ExprPtr>& args,
   CHECK(result_dtype) << "The operator " << op_name << " requires compatible data types, but got "
                       << tensor_type->dtype_.ToString() << " and " << row_type->dtype_.ToString();
 
-  // Output has the same shape as the main tensor
-  return std::make_shared<TensorType>(tensor_shape, *result_dtype);
+  // Output has the same shape as the main tensor, and takes ITS valid region: the
+  // row vector (arg 1) is the broadcast operand, so only the main tensor's view bounds
+  // the result (mirrors tile_ops/broadcast.cpp, which propagates the
+  // main tile's valid_shape). A bare main tensor yields a bare result.
+  return std::make_shared<TensorType>(tensor_shape, *result_dtype, std::nullopt, tensor_type->tensor_view_);
 }
 
 TypePtr DeduceTensorColExpandType(const std::vector<ExprPtr>& args,
@@ -143,8 +146,10 @@ TypePtr DeduceTensorColExpandType(const std::vector<ExprPtr>& args,
   CHECK(result_dtype) << "The operator " << op_name << " requires compatible data types, but got "
                       << target_type->dtype_.ToString() << " and " << col_type->dtype_.ToString();
 
-  // Output has the same shape as the target tensor
-  return std::make_shared<TensorType>(tensor_shape, *result_dtype);
+  // Output has the same shape as the target tensor, and takes ITS valid region: the
+  // column vector (arg 1) is the broadcast operand (mirrors
+  // tile_ops/broadcast.cpp). A bare target tensor yields a bare result.
+  return std::make_shared<TensorType>(tensor_shape, *result_dtype, std::nullopt, target_type->tensor_view_);
 }
 
 TypePtr DeduceTensorExpandScalarType(const std::vector<ExprPtr>& args,
@@ -161,7 +166,10 @@ TypePtr DeduceTensorExpandScalarType(const std::vector<ExprPtr>& args,
   CHECK(scalar_type) << "The operator " << op_name << " requires second argument to be a ScalarType, but got "
                      << args[1]->GetType()->TypeName();
 
-  return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_);
+  // The scalar fills the target's shape; the result takes the target's valid region
+  // (mirrors tile.expands). A bare target yields a bare result.
+  return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_, std::nullopt,
+                                      tensor_type->tensor_view_);
 }
 
 TypePtr DeduceTensorExpandCloneType(const std::vector<ExprPtr>& args,
@@ -212,7 +220,34 @@ TypePtr DeduceTensorExpandCloneType(const std::vector<ExprPtr>& args,
   CHECK(result_dtype) << "The operator " << op_name << " requires compatible data types, but got "
                       << tensor_type->dtype_.ToString() << " and " << target_type->dtype_.ToString();
 
-  return std::make_shared<TensorType>(new_shape, *result_dtype);
+  // Derive the output valid region. expand_clone replicates a size-1
+  // source dim to the target extent by CLONING. A non-broadcast dim keeps the source's
+  // valid extent. A replicated (clone) dim is fully valid in the output ONLY when the
+  // single source element is valid (source fully valid there) — otherwise the cloned
+  // region is not an origin-anchored rectangle and is rejected rather than widened
+  // (valid_shape North Star). A fully-valid source yields a bare result.
+  const std::vector<ExprPtr> input_valid = GetValidShape(tensor_type);
+  std::vector<ExprPtr> out_valid;
+  out_valid.reserve(new_shape.size());
+  for (size_t i = 0; i < new_shape.size(); ++i) {
+    if (DimensionsEqual(input_shape[i], new_shape[i])) {
+      out_valid.push_back(input_valid[i]);
+    } else {
+      // Broadcast (clone) dim: input_shape[i] == 1 (checked above) replicates to
+      // new_shape[i].
+      CHECK_SPAN(AreExprsEqual(input_valid[i], input_shape[i]), args[0]->span_)
+          << op_name << ": broadcast (clone) dim " << i << " replicates a partially-valid source "
+          << "(valid_shape[" << i << "]=" << PythonPrint(input_valid[i]) << " != shape[" << i
+          << "]=" << PythonPrint(input_shape[i])
+          << "); the cloned region cannot be expressed as an origin-anchored valid_shape, so it is "
+             "rejected rather than widened. Provide a fully-valid source in the broadcast dim.";
+      out_valid.push_back(new_shape[i]);
+    }
+  }
+  TensorView view;
+  view.valid_shape = std::move(out_valid);
+  return std::make_shared<TensorType>(new_shape, *result_dtype, std::nullopt,
+                                      std::make_optional(std::move(view)));
 }
 
 // ============================================================================

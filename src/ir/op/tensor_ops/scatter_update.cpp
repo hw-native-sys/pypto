@@ -29,6 +29,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -72,6 +73,14 @@ TypePtr DeduceTensorScatterUpdateType(const std::vector<ExprPtr>& args,
       CHECK(dim_val == -2) << "tensor.scatter_update: only dim=-2 is currently supported, got " << dim_val;
     }
   }
+
+  // scatter_update writes src rows into input at runtime index positions, so a
+  // partially-valid operand makes the updated output's valid region underivable —
+  // reject rather than widen (North Star). Fully-valid operands pass silently, so the
+  // current (bare) result is byte-identical.
+  CheckTensorInputFullyValid(input_type, "tensor.scatter_update", "input", args[0]->span_);
+  CheckTensorInputFullyValid(index_type, "tensor.scatter_update", "index", args[1]->span_);
+  CheckTensorInputFullyValid(src_type, "tensor.scatter_update", "src", args[2]->span_);
 
   return std::make_shared<TensorType>(input_type->shape_, input_type->dtype_);
 }

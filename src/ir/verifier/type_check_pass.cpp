@@ -70,8 +70,22 @@ class TypeChecker : public IRVisitor {
   void VisitStmt_(const ForStmtPtr& op) override;
   void VisitStmt_(const WhileStmtPtr& op) override;
   void VisitStmt_(const IfStmtPtr& op) override;
+  void VisitVarLike_(const VarPtr& op) override;
+  void VisitExpr_(const CallPtr& op) override;
 
   [[nodiscard]] const std::vector<Diagnostic>& GetDiagnostics() const { return diagnostics_; }
+
+  /**
+   * @brief Enforce the standing valid_shape well-formedness invariant on a type.
+   *
+   * For a TileType/TensorType carrying an explicit (non-empty) ``valid_shape``:
+   * ``rank(valid_shape) == rank(shape)`` and, for every dim where both the valid
+   * extent and the physical extent are compile-time constants,
+   * ``0 <= valid_shape[i] <= shape[i]``. Symbolic (dynamic) valid extents are a
+   * supported feature and are skipped. Recurses into ``TupleType`` elements.
+   * Public so param/return types can be checked directly from ``Verify``.
+   */
+  void CheckValidShape(const TypePtr& type, const Span& span);
 
  private:
   std::vector<Diagnostic>& diagnostics_;
@@ -565,6 +579,77 @@ void TypeChecker::VisitStmt_(const IfStmtPtr& op) {
   IRVisitor::VisitStmt_(op);
 }
 
+void TypeChecker::VisitVarLike_(const VarPtr& op) {
+  // Every Var/IterArg carries a declared type — including the LHS bindings of
+  // Submit results — so checking Var-like nodes covers all typed values without a
+  // separate Submit override.
+  if (op) CheckValidShape(op->GetType(), op->span_);
+  IRVisitor::VisitVarLike_(op);
+}
+
+void TypeChecker::VisitExpr_(const CallPtr& op) {
+  if (op) CheckValidShape(op->GetType(), op->span_);
+  IRVisitor::VisitExpr_(op);
+}
+
+void TypeChecker::CheckValidShape(const TypePtr& type, const Span& span) {
+  if (!type) return;
+
+  // Recurse into tuple element types (multi-value binds, Submit returns).
+  if (auto tuple_type = As<TupleType>(type)) {
+    for (const auto& sub : tuple_type->types_) {
+      CheckValidShape(sub, span);
+    }
+    return;
+  }
+
+  // Extract (valid_shape, shape) for whichever shaped view carries an explicit,
+  // non-empty valid_shape. An empty/absent valid_shape means "fully valid"
+  // (== shape) and needs no check.
+  const std::vector<ExprPtr>* valid = nullptr;
+  const std::vector<ExprPtr>* shape = nullptr;
+  const char* kind = nullptr;
+  if (auto tile_type = As<TileType>(type)) {
+    if (tile_type->tile_view_.has_value() && !tile_type->tile_view_->valid_shape.empty()) {
+      valid = &tile_type->tile_view_->valid_shape;
+      shape = &tile_type->shape_;
+      kind = "TileType";
+    }
+  } else if (auto tensor_type = As<TensorType>(type)) {
+    if (tensor_type->tensor_view_.has_value() && !tensor_type->tensor_view_->valid_shape.empty()) {
+      valid = &tensor_type->tensor_view_->valid_shape;
+      shape = &tensor_type->shape_;
+      kind = "TensorType";
+    }
+  }
+  if (valid == nullptr) return;
+
+  // rank(valid_shape) must equal rank(shape).
+  if (valid->size() != shape->size()) {
+    std::ostringstream msg;
+    msg << kind << " valid_shape rank (" << valid->size() << ") does not match shape rank (" << shape->size()
+        << ")";
+    RecordError(typecheck::ErrorType::SHAPE_DIMENSION_MISMATCH, msg.str(), span);
+    return;
+  }
+
+  // Per-dim bound: 0 <= valid_shape[i] <= shape[i]. Only checked when BOTH the
+  // valid extent and the physical extent are compile-time constants; a symbolic
+  // (dynamic) valid extent is a supported feature and is skipped, not rejected.
+  for (size_t i = 0; i < valid->size(); ++i) {
+    auto v = As<ConstInt>((*valid)[i]);
+    auto s = As<ConstInt>((*shape)[i]);
+    if (!v || !s) continue;
+    if (v->value_ < 0 || v->value_ > s->value_) {
+      std::ostringstream msg;
+      msg << kind << " valid_shape[" << i << "] = " << v->value_
+          << " is out of bounds: it must satisfy 0 <= valid_shape[" << i << "] <= shape[" << i
+          << "] = " << s->value_;
+      RecordError(typecheck::ErrorType::SHAPE_VALUE_MISMATCH, msg.str(), span);
+    }
+  }
+}
+
 }  // namespace
 
 /**
@@ -586,6 +671,15 @@ class TypeCheckPropertyVerifierImpl : public PropertyVerifier {
 
       // Create type checker and run checking
       TypeChecker checker(diagnostics);
+
+      // Enforce the standing valid_shape invariant on parameter and return
+      // types too — the body walk below only reaches Var/Call types.
+      for (const auto& param : func->params_) {
+        if (param) checker.CheckValidShape(param->GetType(), param->span_);
+      }
+      for (const auto& rt : func->return_types_) {
+        checker.CheckValidShape(rt, func->span_);
+      }
 
       // Visit function body
       if (func->body_) {

@@ -214,6 +214,24 @@ TypePtr DeduceTensorSliceType(const std::vector<ExprPtr>& args,
     }
   }
 
+  // Extract the per-dim offsets (parallel to full_shape) for the bounds check and
+  // the clamp intersect below.
+  std::vector<ExprPtr> offset;
+  if (auto make_tuple = As<MakeTuple>(args[2])) {
+    offset = make_tuple->elements_;
+  } else {
+    offset.reserve(offset_tuple_type->types_.size());
+    for (size_t i = 0; i < offset_tuple_type->types_.size(); ++i) {
+      offset.emplace_back(std::make_shared<TupleGetItemExpr>(args[2], static_cast<int>(i), args[2]->span_));
+    }
+  }
+
+  // clamp=True: DERIVE the ragged tail from the source's valid
+  // region rather than have the user hand-thread a ``min(TILE, N - i*TILE)``
+  // extent. It also suppresses the static out-of-bounds check below — clamping is
+  // the sanctioned way to slice past the physical edge.
+  const bool clamp = GetKwargOr<bool>(kwargs, "clamp", false);
+
   // Optional drop_dims (5th arg): axes erased from the result type. Validated
   // against the full pre-reduction shape (each must be a static unit dim).
   const ExprPtr drop_dims_arg = args.size() == 5 ? args[4] : nullptr;
@@ -237,6 +255,7 @@ TypePtr DeduceTensorSliceType(const std::vector<ExprPtr>& args,
   // exists so callers can pass drop_dims (5th arg) without a custom valid_shape.
   bool has_valid_shape = false;
   std::vector<ExprPtr> valid_shape;
+  std::vector<ExprPtr> explicit_valid_full;  // full pre-drop_dims rank; empty if none
   if (args.size() >= 4) {
     auto valid_shape_tuple = As<MakeTuple>(args[3]);
     CHECK(valid_shape_tuple) << "tensor.slice valid_shape (4th argument) must be a MakeTuple";
@@ -251,7 +270,77 @@ TypePtr DeduceTensorSliceType(const std::vector<ExprPtr>& args,
             << " must match shape rank " << full_shape.size() << " when drop_dims is set";
         valid_shape = ApplyDropDims(valid_shape_tuple->elements_, drop_dims);
       }
+      // Retain the full-rank explicit request as the per-dim valid_arg for the
+      // clamp intersect below (which works in the pre-drop_dims coordinate space).
+      // Only usable when it aligns with the slice rank; a mismatched-rank explicit
+      // valid_shape on the no-drop_dims path keeps the existing (looser) behavior.
+      if (valid_shape_tuple->elements_.size() == full_shape.size()) {
+        explicit_valid_full = valid_shape_tuple->elements_;
+      }
     }
+  }
+
+  // Static ragged-tail overrun check. A slice window that FITS the input dimension
+  // (``shape[i] <= input[i]``) but is pushed past the end by the offset
+  // (``offset[i] + shape[i] > input[i]``) is a ragged tail — the loop-tiling
+  // last-block case. Only a provable (all-ConstInt) violation is rejected; symbolic
+  // dims cannot be proven and defer to runtime. The check polices a BARE slice that
+  // would silently read out of bounds; it is SKIPPED whenever the caller has already
+  // declared how the past-edge region is handled — otherwise a sound, fully-explicit
+  // ragged read would be a false rejection:
+  //   * ``clamp=True``            — the ragged tail is DERIVED (clipped to the source
+  //                                 valid region) below; the sanctioned past-edge form.
+  //   * an explicit ``valid_shape`` — the user already narrowed the valid region to
+  //                                 the real rows (the tail is declared padding).
+  //   * ``pad_value`` set         — the user acknowledged the past-edge read and named
+  //                                 the fill value.
+  // Two shapes are also NOT flagged even for a bare slice:
+  //   * A rank-changing slice (``full_shape`` rank != input rank) — shape / offset
+  //     live in different coordinate spaces, so a per-dim comparison is meaningless.
+  //   * A window intrinsically LARGER than the input dim (``shape[i] > input[i]``),
+  //     i.e. a super-window over-view of a larger backing allocation; the check
+  //     enforces that a claimed sub-window fits, it does not police over-views.
+  const size_t in_rank = tensor_type->shape_.size();
+  const bool tail_declared = clamp || has_valid_shape || pad_value != PadValue::null;
+  if (!tail_declared && full_shape.size() == in_rank && offset.size() == in_rank) {
+    for (size_t i = 0; i < in_rank; ++i) {
+      auto off_c = As<ConstInt>(offset[i]);
+      auto shp_c = As<ConstInt>(full_shape[i]);
+      auto in_c = As<ConstInt>(tensor_type->shape_[i]);
+      if (off_c && shp_c && in_c && shp_c->value_ <= in_c->value_) {
+        CHECK_SPAN(off_c->value_ + shp_c->value_ <= in_c->value_, args[0]->span_)
+            << "tensor.slice: dim " << i << " slice window [" << off_c->value_ << ", "
+            << (off_c->value_ + shp_c->value_) << ") runs past the input extent " << in_c->value_
+            << " (out-of-bounds slice — the window fits the dimension but the offset pushes it off "
+               "the end). Pass clamp=True to derive the ragged tail, or an explicit valid_shape= "
+               "to declare which rows are real.";
+      }
+    }
+  }
+
+  // clamp=True: intersect the slice window with the source tensor's valid region
+  // (physical shape when unset, per D2) clipped at ``offset`` — the same
+  // ``min(valid_arg, clamp(src_valid - offset, 0, window))`` rule as tile.load /
+  // tile.slice, so it NEVER widens. When an explicit valid_shape= is ALSO given it
+  // becomes the per-dim valid_arg, so the two INTERSECT. Computed in the full
+  // pre-drop_dims coordinate space, then reduced by drop_dims. A clamp that stays
+  // fully valid (an interior slice into a fully-valid source) records no view,
+  // matching a plain slice and the D2 "unset == fully valid" encoding.
+  if (clamp) {
+    const std::vector<ExprPtr> src_valid = GetValidShape(tensor_type);
+    CHECK_SPAN(src_valid.size() == full_shape.size() && offset.size() == full_shape.size(), args[0]->span_)
+        << "tensor.slice: clamp=True requires the slice shape (" << full_shape.size() << "), offset ("
+        << offset.size() << ") and input (" << src_valid.size()
+        << ") to share a rank so the valid region can be clipped dim-for-dim";
+    std::vector<ExprPtr> clamped_full(full_shape.size());
+    for (size_t i = 0; i < full_shape.size(); ++i) {
+      const ExprPtr valid_arg = explicit_valid_full.empty() ? full_shape[i] : explicit_valid_full[i];
+      clamped_full[i] =
+          IntersectWindowValidDim(src_valid[i], offset[i], full_shape[i], valid_arg, args[0]->span_);
+    }
+    valid_shape = ApplyDropDims(clamped_full, drop_dims);
+    has_valid_shape = !AreExprVectorsEqual(valid_shape, new_shape);
+    if (!has_valid_shape) valid_shape.clear();
   }
 
   // View preserves dtype but has new shape (which can have different rank than input).
@@ -415,15 +504,41 @@ TypePtr DeduceTensorAssembleType(const std::vector<ExprPtr>& args,
         << dt.ToString();
   }
 
-  // Assemble returns a new tensor type with the same shape and dtype as target.
+  // The assembled result IS the target buffer after the write, so it preserves the
+  // target's view (stride/layout/pad) and memref. Only the valid region changes:
+  // the written region [offset, offset + valid(source)) unions per-dim with the
+  // target's existing valid region (never the full physical shape — that would
+  // claim padding is real data). Compute the union only when the target already
+  // carries an explicit narrowing valid region; a fully-valid target's union clamps
+  // straight back to the full shape (TensorType canonicalizes that away), so it is
+  // left untouched — this also avoids forcing source/offset ranks to match the
+  // target, which the create+assemble fuse path violates by assembling a lower-rank
+  // source into a fully-valid parent.
+  std::optional<TensorView> tensor_view = target_type->tensor_view_;
+  if (tensor_view.has_value() && !tensor_view->valid_shape.empty()) {
+    std::vector<ExprPtr> offset;
+    if (auto mt = As<MakeTuple>(args[2])) {
+      offset = mt->elements_;
+    } else {
+      offset.reserve(offset_tuple_type->types_.size());
+      for (size_t i = 0; i < offset_tuple_type->types_.size(); ++i) {
+        offset.push_back(std::make_shared<TupleGetItemExpr>(args[2], static_cast<int>(i), args[2]->span_));
+      }
+    }
+    tensor_view->valid_shape =
+        ComputeAssembleUnionValidShape(GetValidShape(target_type), GetValidShape(source_type), offset,
+                                       target_type->shape_, args[0]->span_, "tensor.assemble");
+  }
+
   // When the target is a DistributedTensorType, the result preserves that kind
   // along with its window_buffer_ — the assembled result is still a view into
   // the same comm-group allocation. A fresh shared_ptr avoids type aliasing.
   if (auto dt = As<DistributedTensorType>(args[0]->GetType())) {
-    return std::make_shared<DistributedTensorType>(target_type->shape_, target_type->dtype_, std::nullopt,
-                                                   std::nullopt, dt->window_buffer_);
+    return std::make_shared<DistributedTensorType>(target_type->shape_, target_type->dtype_,
+                                                   target_type->memref_, tensor_view, dt->window_buffer_);
   }
-  return std::make_shared<TensorType>(target_type->shape_, target_type->dtype_);
+  return std::make_shared<TensorType>(target_type->shape_, target_type->dtype_, target_type->memref_,
+                                      tensor_view);
 }
 
 TypePtr DeduceTensorFullType(const std::vector<ExprPtr>& args,
@@ -514,6 +629,7 @@ REGISTER_OP("tensor.slice")
     .add_argument("drop_dims", "Optional axes (MakeTuple of ConstInt) erased from the result type")
     .set_output_memory_inherit_input()
     .set_attr<PadValue>("pad_value")
+    .set_attr<bool>("clamp")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorSliceType(args, kwargs);

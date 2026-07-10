@@ -18,6 +18,7 @@
 
 #include <any>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -42,7 +43,12 @@ TypePtr DeduceTensorNegType(const std::vector<ExprPtr>& args,
       << args[0]->GetType()->TypeName();
 
   // Negation preserves dtype (valid for both int and float)
-  return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_);
+  // Same-shape elementwise op: carry the input's view (valid_shape / stride / layout /
+  // pad) onto the result so a narrowed valid region survives the tensor↔tile boundary
+  //. A bare (viewless) input yields a bare result — TensorType's ctor
+  // canonicalizes a fully-valid / all-default view back to nullopt.
+  return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_, std::nullopt,
+                                      tensor_type->tensor_view_);
 }
 
 TypePtr DeduceTensorAbsType(const std::vector<ExprPtr>& args,
@@ -55,7 +61,12 @@ TypePtr DeduceTensorAbsType(const std::vector<ExprPtr>& args,
       << args[0]->GetType()->TypeName();
 
   // Absolute value preserves dtype (valid for both int and float)
-  return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_);
+  // Same-shape elementwise op: carry the input's view (valid_shape / stride / layout /
+  // pad) onto the result so a narrowed valid region survives the tensor↔tile boundary
+  //. A bare (viewless) input yields a bare result — TensorType's ctor
+  // canonicalizes a fully-valid / all-default view back to nullopt.
+  return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_, std::nullopt,
+                                      tensor_type->tensor_view_);
 }
 
 TypePtr DeduceTensorRecipType(const std::vector<ExprPtr>& args,
@@ -73,7 +84,11 @@ TypePtr DeduceTensorRecipType(const std::vector<ExprPtr>& args,
     out_dtype = DataType::FP32;
   }
 
-  return std::make_shared<TensorType>(tensor_type->shape_, out_dtype);
+  // Same-shape elementwise op: carry the input's view onto the result.
+  // Dtype may promote (e.g. int -> FP32); the view is element-indexed and dtype-
+  // independent, so it copies unchanged. A bare input yields a bare result.
+  return std::make_shared<TensorType>(tensor_type->shape_, out_dtype, std::nullopt,
+                                      tensor_type->tensor_view_);
 }
 
 TypePtr DeduceTensorExpType(const std::vector<ExprPtr>& args,
@@ -93,7 +108,11 @@ TypePtr DeduceTensorExpType(const std::vector<ExprPtr>& args,
     out_dtype = DataType::FP32;
   }
 
-  return std::make_shared<TensorType>(tensor_type->shape_, out_dtype);
+  // Same-shape elementwise op: carry the input's view onto the result.
+  // Dtype may promote (e.g. int -> FP32); the view is element-indexed and dtype-
+  // independent, so it copies unchanged. A bare input yields a bare result.
+  return std::make_shared<TensorType>(tensor_type->shape_, out_dtype, std::nullopt,
+                                      tensor_type->tensor_view_);
 }
 
 TypePtr DeduceTensorLogType(const std::vector<ExprPtr>& args,
@@ -112,7 +131,11 @@ TypePtr DeduceTensorLogType(const std::vector<ExprPtr>& args,
     out_dtype = DataType::FP32;
   }
 
-  return std::make_shared<TensorType>(tensor_type->shape_, out_dtype);
+  // Same-shape elementwise op: carry the input's view onto the result.
+  // Dtype may promote (e.g. int -> FP32); the view is element-indexed and dtype-
+  // independent, so it copies unchanged. A bare input yields a bare result.
+  return std::make_shared<TensorType>(tensor_type->shape_, out_dtype, std::nullopt,
+                                      tensor_type->tensor_view_);
 }
 
 TypePtr DeduceTensorSqrtType(const std::vector<ExprPtr>& args,
@@ -131,7 +154,11 @@ TypePtr DeduceTensorSqrtType(const std::vector<ExprPtr>& args,
     out_dtype = DataType::FP32;
   }
 
-  return std::make_shared<TensorType>(tensor_type->shape_, out_dtype);
+  // Same-shape elementwise op: carry the input's view onto the result.
+  // Dtype may promote (e.g. int -> FP32); the view is element-indexed and dtype-
+  // independent, so it copies unchanged. A bare input yields a bare result.
+  return std::make_shared<TensorType>(tensor_type->shape_, out_dtype, std::nullopt,
+                                      tensor_type->tensor_view_);
 }
 
 TypePtr DeduceTensorRsqrtType(const std::vector<ExprPtr>& args,
@@ -149,7 +176,11 @@ TypePtr DeduceTensorRsqrtType(const std::vector<ExprPtr>& args,
     out_dtype = DataType::FP32;
   }
 
-  return std::make_shared<TensorType>(tensor_type->shape_, out_dtype);
+  // Same-shape elementwise op: carry the input's view onto the result.
+  // Dtype may promote (e.g. int -> FP32); the view is element-indexed and dtype-
+  // independent, so it copies unchanged. A bare input yields a bare result.
+  return std::make_shared<TensorType>(tensor_type->shape_, out_dtype, std::nullopt,
+                                      tensor_type->tensor_view_);
 }
 
 // Shared FP32-only deducer for transcendental ops (tensor.sin, tensor.cos).
@@ -169,7 +200,12 @@ TypePtr DeduceTensorFP32OnlyType(const std::string& op_name, const std::vector<E
       << op_name << " is FP32-only, but got input with dtype " << tensor_type->dtype_.ToString()
       << ". Cast the input to FP32 explicitly via pl.cast(x, pl.FP32) before applying " << op_name << ".";
 
-  return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_);
+  // Same-shape elementwise op: carry the input's view (valid_shape / stride / layout /
+  // pad) onto the result so a narrowed valid region survives the tensor↔tile boundary
+  //. A bare (viewless) input yields a bare result — TensorType's ctor
+  // canonicalizes a fully-valid / all-default view back to nullopt.
+  return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_, std::nullopt,
+                                      tensor_type->tensor_view_);
 }
 
 TypePtr DeduceTensorCastType(const std::vector<ExprPtr>& args,
@@ -215,8 +251,10 @@ TypePtr DeduceTensorCastType(const std::vector<ExprPtr>& args,
 
   // mode kwarg is optional, not used in type deduction
 
-  // Cast preserves shape but changes dtype
-  return std::make_shared<TensorType>(tensor_type->shape_, target_dtype);
+  // Cast preserves shape and carries the input's view (valid_shape / stride / layout /
+  // pad); only dtype changes. A bare input yields a bare result.
+  return std::make_shared<TensorType>(tensor_type->shape_, target_dtype, std::nullopt,
+                                      tensor_type->tensor_view_);
 }
 
 // ============================================================================

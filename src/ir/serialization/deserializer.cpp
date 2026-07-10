@@ -213,7 +213,12 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
           }
         }
       } else if (key == "start_offset") {
-        tile_view.start_offset = std::static_pointer_cast<const Expr>(DeserializeNode(p->val, zone));
+        // start_offset is legitimately null (tile.load sets only valid_shape),
+        // serialized as a msgpack nil. Leave it null in that case rather than
+        // feeding nil to DeserializeNode, which expects a node map.
+        if (!p->val.is_nil()) {
+          tile_view.start_offset = std::static_pointer_cast<const Expr>(DeserializeNode(p->val, zone));
+        }
       } else if (key == "blayout") {
         std::string blayout_str;
         p->val.convert(blayout_str);
@@ -274,7 +279,14 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
     for (; p < pend; ++p) {
       std::string key;
       p->key.convert(key);
-      if (key == "stride") {
+      if (key == "valid_shape") {
+        if (p->val.type == msgpack::type::ARRAY) {
+          for (uint32_t i = 0; i < p->val.via.array.size; ++i) {
+            tensor_view.valid_shape.push_back(
+                std::static_pointer_cast<const Expr>(DeserializeNode(p->val.via.array.ptr[i], zone)));
+          }
+        }
+      } else if (key == "stride") {
         if (p->val.type == msgpack::type::ARRAY) {
           for (uint32_t i = 0; i < p->val.via.array.size; ++i) {
             tensor_view.stride.push_back(
@@ -308,7 +320,8 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
           CHECK(false) << "Unknown PadValue: " << pad_str;
         }
       }
-      // Older serialized IR may omit "pad"; default stays PadValue::null.
+      // Older serialized IR may omit "pad" / "valid_shape": pad defaults to
+      // PadValue::null and valid_shape stays empty (== fully valid).
     }
 
     return tensor_view;

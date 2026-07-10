@@ -135,12 +135,17 @@ def test_empty_dn_stride_filled_3d():
 
 def test_empty_nd_stride_filled():
     # An ND view with empty stride is also materialized to row-major packed.
+    # A strictly-narrower valid_shape keeps the view present through
+    # canonicalization (a fully-default ND view now collapses to the bare form,
+    # which the pass treats as implicitly ND-packed and leaves untouched).
     @pl.program
     class Before:
         @pl.function
         def f(
             self,
-            x: pl.Tensor[[8, 16], pl.FP32, pl.TensorView(stride=[], layout=pl.TensorLayout.ND)],
+            x: pl.Tensor[
+                [8, 16], pl.FP32, pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[4, 8])
+            ],
         ):
             pl.const(0, pl.INT64)
 
@@ -149,7 +154,9 @@ def test_empty_nd_stride_filled():
         @pl.function
         def f(
             self,
-            x: pl.Tensor[[8, 16], pl.FP32, pl.TensorView(stride=[16, 1], layout=pl.TensorLayout.ND)],
+            x: pl.Tensor[
+                [8, 16], pl.FP32, pl.TensorView(stride=[16, 1], layout=pl.TensorLayout.ND, valid_shape=[4, 8])
+            ],
         ):
             pl.const(0, pl.INT64)
 

@@ -44,6 +44,7 @@
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -161,6 +162,14 @@ static TypePtr DeduceTensorScatterType(const std::vector<ExprPtr>& args,
         << src_cols->value_ << " vs input cols " << inp_cols->value_;
   }
 
+  // Scatter writes src elements into input at runtime per-element indices, so the
+  // output valid region cannot be derived from a partially-valid operand — reject one
+  // rather than widen to the full shape (valid_shape North Star). A fully-valid
+  // input/index/src produces a fully-valid (bare) output, byte-identical to before.
+  CheckTensorInputFullyValid(input_type, op_name, "input", args[0]->span_);
+  CheckTensorInputFullyValid(index_type, op_name, "index", args[1]->span_);
+  CheckTensorInputFullyValid(src_type, op_name, "src", args[2]->span_);
+
   // Output shape/dtype mirror input (whole-tensor scatter, in-place semantics).
   return std::make_shared<TensorType>(input_type->shape_, input_type->dtype_);
 }
@@ -232,6 +241,11 @@ static TypePtr DeduceTensorScatterMaskType(const std::vector<ExprPtr>& args,
         << "The operator " << op_name << " with mask_pattern=" << pattern << " requires dst.shape[1] ("
         << dst_cols_const->value_ << ") == input.shape[1] (" << inp_cols_const->value_ << ") * " << stride;
   }
+
+  // A mask scatter rewrites dst columns from src rows; its output valid region cannot be
+  // derived from a partially-valid operand — reject one rather than widen (North Star).
+  CheckTensorInputFullyValid(input_type, op_name, "input", args[0]->span_);
+  CheckTensorInputFullyValid(dst_type, op_name, "dst", args[1]->span_);
 
   return std::make_shared<TensorType>(dst_type->shape_, dst_type->dtype_);
 }
