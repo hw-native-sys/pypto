@@ -38,7 +38,13 @@ class TestSpmdScopeTaskIdCodegen:
 
     @staticmethod
     def _codegen(program):
-        """Run DeriveCallDirections + MaterializeDistTensorCtx + runtime-scope materialization + codegen.
+        """Run the codegen-entry passes on a hand-built program, then codegen.
+
+        NormalizeReturnOrder first: orchestration codegen reads each callee's
+        return->param map straight off its ReturnStmt (IRProperty
+        ReturnParamsExplicit), which is a declared codegen precondition. It is a
+        no-op for programs that already went through the pass pipeline.
+
 
         Runs under the repo conftest's default ``PYPTO_VERIFY_LEVEL=roundtrip``
         instrument (print -> parse -> structural_equal after each pass):
@@ -46,6 +52,7 @@ class TestSpmdScopeTaskIdCodegen:
         Submit (printed as ``pl.submit(...)``), so it round-trips — no
         VerificationLevel.NONE bypass is needed.
         """
+        program = passes.normalize_return_order()(program)
         program = passes.derive_call_directions()(program)
         program = passes.materialize_dist_tensor_ctx()(program)
         program = passes.materialize_runtime_scopes()(program)

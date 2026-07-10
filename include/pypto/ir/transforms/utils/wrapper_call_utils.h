@@ -95,19 +95,25 @@ std::vector<WrapperCallInfo> CollectInnerCalls(const FunctionPtr& wrapper, const
  *
  * For each wrapper this walks its body's inner calls and merges each inner
  * callee's direction back onto the wrapper param the arg refers to, matching
- * by Var pointer identity. Merge lattice: `InOut` > `Out` > `In`. Nested
- * Group/Spmd callees resolve recursively, with a cycle guard that falls back
- * to the declared directions.
+ * by Var pointer identity. Merge lattice: `InOut` > `Out` > `In`.
  *
- * The merge is **monotone**: it starts from the wrapper's declared directions,
- * so it can only promote (`In` → `Out` → `InOut`), never weaken a declared
+ * The merge is **monotone**: it starts from each wrapper's declared directions
+ * and only ever promotes (`In` → `Out` → `InOut`), never weakens a declared
  * writer to read-only. A wrapper with no body, no inner calls, or a param
  * written through a builtin instead of an inner call therefore keeps what its
  * signature already says.
  *
+ * Nested and *mutually recursive* wrappers are resolved by iterating the
+ * monotone transfer to its least fixed point over a worklist, so the result
+ * does not depend on the order wrappers are visited: `A → B → A` converges to
+ * the same directions whichever of the two is seeded first. (A recursive walk
+ * with a cycle guard cannot promise that — the guard's fallback value leaks
+ * into whichever wrapper the walk happened to enter first.)
+ *
  * Whole-program rather than per-function because both callers iterate every
- * function: one shared memo visits each wrapper body once, keeping the cost
- * linear in total body size instead of O(wrappers x body size).
+ * function: each wrapper body is walked exactly once, and each promotion moves
+ * one param one step up the lattice, so the loop is bounded by twice the total
+ * wrapper param count.
  *
  * `DeriveCallDirections` calls this and writes each result back into
  * `Function::param_directions_`, so every consumer downstream of that pass

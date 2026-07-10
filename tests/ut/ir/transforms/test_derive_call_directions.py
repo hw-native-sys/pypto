@@ -2089,6 +2089,72 @@ class TestMaterializeWrapperDirections:
         assert self._dirs_of(After, "group") == [ir.ParamDirection.Out, ir.ParamDirection.Out]
         _verify_call_directions(After)
 
+    def test_mutually_recursive_wrappers_reach_a_fixed_point(self):
+        """A wrapper cycle must not lose a write dependency, whatever the visit order.
+
+        ``a`` forwards ``p`` to an Out kernel *and* to wrapper ``z``; ``z`` calls
+        back into ``a``. Wrappers are visited in program-map (name) order, so
+        ``a`` is seeded first. A recursive walk with a cycle guard would memoize
+        ``z`` from ``a``'s *declared* directions — before ``a`` itself is
+        promoted — leaving ``z.p`` as ``In`` and dropping its write dependency.
+        Iterating the monotone merge to a fixed point cannot.
+
+        Runs under an empty ``PassContext`` because the repo conftest's
+        roundtrip instrument cannot handle this program: the printer emits
+        functions in dependency order, which a wrapper cycle makes impossible,
+        so ``a`` is printed before ``z`` and the reparsed forward reference
+        drops the call's ``arg_directions`` attrs. That is a printer/parser
+        limitation, orthogonal to the direction analysis under test.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Group)
+            def a(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                p: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                _r0: pl.Tensor[[64], pl.FP32] = self.z(x, p)
+                r1: pl.Tensor[[64], pl.FP32] = self.kern(x, p)
+                return r1
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def kern(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                r: pl.Tensor[[64], pl.FP32] = pl.store(t, [0], out)
+                return r
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                d: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                r: pl.Tensor[[64], pl.FP32] = self.a(x, d)
+                return r
+
+            @pl.function(type=pl.FunctionType.Group)
+            def z(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                p: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                r: pl.Tensor[[64], pl.FP32] = self.a(x, p)
+                return r
+
+        with _core_passes.PassContext([]):
+            After = passes.derive_call_directions()(Before)
+        # `p` is written through the kernel, so it is Out on both wrappers.
+        assert self._dirs_of(After, "a") == [ir.ParamDirection.In, ir.ParamDirection.Out]
+        assert self._dirs_of(After, "z") == [ir.ParamDirection.In, ir.ParamDirection.Out]
+        # A stale wrapper signature would make the pass fail its own verifier.
+        _verify_call_directions(After)
+
 
 class TestVerifyWrapperDirections:
     """The CallDirectionsResolved verifier rejects a wrapper left with stale directions."""

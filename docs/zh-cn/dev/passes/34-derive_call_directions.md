@@ -56,7 +56,7 @@ program_with_dirs = derive_pass(program)
 
 Group/Spmd wrapper 把自己的形参 1:1 转发给内层 kernel 调用，但它自身的 `param_directions_` 对被内层 kernel 写入的形参仍可能标记为 `In`——scope outliner 只根据它抽取出的 body 推断方向，而后续 pass（`ExpandMixedKernel`、`SplitVectorKernel`）在围绕新拆分出的 callee 重建 wrapper body 时并不会回头修正签名。
 
-`MaterializeWrapperDirections` 对整个 program 调用一次 `ComputeWrapperEffectiveDirections`（`include/pypto/ir/transforms/utils/wrapper_call_utils.h`），再把每个结果写回 `Function::param_directions_`。对每个 wrapper，该辅助函数遍历其内层调用，用 `Var` 指针身份把每个实参匹配回 wrapper 形参，再按格 `InOut` > `Out` > `In` 归并内层 callee 的方向。嵌套的 Group→Group 链递归求解，并带环检测（成环时回退到声明方向）。全 program 共享一份 memo，使每个 wrapper body 只被访问一次，该阶段的开销因此与 body 总规模成线性。
+`MaterializeWrapperDirections` 对整个 program 调用一次 `ComputeWrapperEffectiveDirections`（`include/pypto/ir/transforms/utils/wrapper_call_utils.h`），再把每个结果写回 `Function::param_directions_`。对每个 wrapper，该辅助函数遍历其内层调用，用 `Var` 指针身份把每个实参匹配回 wrapper 形参，再按格 `InOut` > `Out` > `In` 归并内层 callee 的方向。归并从每个 wrapper 的声明方向起算且只会提升，因此绝不会削弱一个已声明的写者。嵌套乃至**相互递归**的 wrapper 通过对该单调传递函数在工作表上迭代求**最小不动点**来解决——因此结果不依赖 wrapper 的访问顺序（`A → B → A` 无论先从哪个起算都收敛到同一结果）。每个 wrapper body 只被遍历一次，且每次提升只让一个形参在格上上升一步，故循环次数被 wrapper 形参总数的两倍所界。
 
 每个 wrapper 都基于**阶段 0 之前的 program 快照**求解，因此结果不依赖函数 map 的遍历顺序。
 
