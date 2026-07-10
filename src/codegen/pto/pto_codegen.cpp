@@ -43,6 +43,7 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/core_affinity.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
@@ -1136,6 +1137,34 @@ void PTOCodegen::EmitAllocTileForVar(const ir::VarPtr& tile_var,
     return;
   }
 
+  // ptoas multi-buffer region (route-2): emit one addr-less `pto.alloc_multi_tile`
+  // (count=N). The N physical slots are fanned out by ptoas PlanMemory; the
+  // buffer-less slot views (get_slot / load_slot) emit their own
+  // `pto.multi_tile_get %mb[k]` picks.
+  //
+  // Multi-buffer is level2-only: the cross-iteration overlap requires ptoas
+  // PlanMemory (memory_planner=PtoAS, --pto-level=level2) to give the slots
+  // disjoint addresses, so `use_ptoas_multi_buffer` forces PtoAS. A region can
+  // therefore only appear with `emit_tile_addr_ == false` (no baked addr) — the
+  // check below encodes that invariant.
+  if (auto rc = fs_.mb_region_count.find(var_key); rc != fs_.mb_region_count.end()) {
+    int slots = rc->second;
+    INTERNAL_CHECK_SPAN(!emit_tile_addr_, tile_var->span_)
+        << "Internal error: multi-buffer region " << tile_var->name_hint_
+        << " reached level3 codegen (emit_tile_addr_); the switch must force memory_planner=PtoAS";
+    AllocTileFields fields = ComputeAllocTileFields(tile_type);
+    std::string mtb_type =
+        "!pto.multi_tile_buf<" + fields.type_str + ", count=" + std::to_string(slots) + ">";
+    std::ostringstream line;
+    line << tile_buf << " = pto.alloc_multi_tile";
+    if (!fields.valid_row_ssa.empty()) line << " valid_row = " << fields.valid_row_ssa;
+    if (!fields.valid_col_ssa.empty()) line << " valid_col = " << fields.valid_col_ssa;
+    line << " : " << mtb_type;
+    Emit(line.str());
+    fs_.mb_region[var_key] = {tile_buf, mtb_type, fields.type_str};
+    return;
+  }
+
   AllocTileFields fields = ComputeAllocTileFields(tile_type);
 
   std::ostringstream line;
@@ -1147,6 +1176,27 @@ void PTOCodegen::EmitAllocTileForVar(const ir::VarPtr& tile_var,
   Emit(line.str());
 
   fs_.ssa_to_tile_buf_type[tile_buf] = fields.type_str;
+}
+
+void PTOCodegen::EmitMultiTileGet(const ir::CallPtr& op) {
+  // Shared by the get_slot (consume) and load_slot (prefetch) emitters. The slot
+  // views are buffer-less, so `EmitAllocTileForVar` did not run for them — this
+  // emits their `pto.multi_tile_get %mb[k]` pick into the current result buffer.
+  auto region_var = ir::AsVarLike(op->args_[0]);
+  INTERNAL_CHECK_SPAN(region_var, op->span_)
+      << "Internal error: multi-buffer slot op first arg must be the region Var";
+  auto it = fs_.mb_region.find(region_var.get());
+  INTERNAL_CHECK_SPAN(it != fs_.mb_region.end(), op->span_)
+      << "Internal error: multi-buffer slot op region " << region_var->name_hint_
+      << " has no emitted pto.alloc_multi_tile (region alloc must dominate its slots)";
+  const auto& region = it->second;
+  std::string slot_ssa = GetExprAsCode(op->args_[1]);
+  const std::string& dst = fs_.current_result_buf;
+  INTERNAL_CHECK_SPAN(!dst.empty(), op->span_)
+      << "Internal error: multi-buffer slot op has no current result buffer";
+  Emit(dst + " = pto.multi_tile_get " + region.mb_ssa + "[" + slot_ssa + "] : " + region.mtb_type_str +
+       " -> " + region.tile_type_str);
+  fs_.ssa_to_tile_buf_type[dst] = region.tile_type_str;
 }
 
 // ========================================================================
@@ -1380,6 +1430,12 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   const bool is_set_validshape = ir::IsOp(call, "tile.set_validshape");
   const bool alias_scatter_result_to_input = ShouldAliasScatterResultToInput(op);
   const bool alias_array_update_to_input = ShouldAliasArrayUpdateResultToInput(op);
+
+  // Pre-register a ptoas multi-buffer region so EmitAllocTileForVar emits a
+  // `pto.alloc_multi_tile` (count=N) instead of an ordinary `pto.alloc_tile`.
+  if (ir::IsOp(call, "tile.multi_buffer_alloc")) {
+    fs_.mb_region_count[GetVarKey(op->var_)] = call->GetKwarg<int>("count", 0);
+  }
 
   if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
     if (!is_set_validshape && !alias_scatter_result_to_input) {

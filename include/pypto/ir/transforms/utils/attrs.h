@@ -144,6 +144,12 @@ inline bool PipelineMembershipsConflict(const std::vector<std::pair<int32_t, int
   return false;
 }
 
+// ptoas multi-buffer (route-2, `use_ptoas_multi_buffer`) no longer uses an attr:
+// `ConvertToPtoasMultiBuffer` emits first-class ops `tile.multi_buffer_alloc` /
+// `tile.multi_buffer_load_slot` (src/ir/op/tile_ops/memory.cpp), which the
+// allocator / MemoryReuse / codegen detect by op identity and which round-trip
+// generically. See docs/en/dev/passes/ptoas-multi-buffer.md.
+
 /// Return a copy of `attrs` with any entry matching `key` removed. The order of
 /// the remaining entries is preserved.
 inline std::vector<std::pair<std::string, std::any>> StripAttr(

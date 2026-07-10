@@ -272,8 +272,15 @@ class PassContext:
         diagnostic_phase: DiagnosticPhase = DiagnosticPhase.PRE_PIPELINE,
         disabled_diagnostics: DiagnosticCheckSet = ...,  # default: {UnusedControlFlowResult}
         memory_planner: MemoryPlanner = MemoryPlanner.PYPTO,
+        use_ptoas_multi_buffer: bool = False,
     ) -> None:
-        """Create a PassContext with instruments and pass configuration (incl. memory planner)."""
+        """Create a PassContext with instruments and pass config (memory planner + ptoas multi-buffer).
+
+        ``use_ptoas_multi_buffer=True`` forces ``memory_planner=PTOAS`` (overriding
+        the argument): the multi-buffer double-buffer overlap only materializes at
+        ``--pto-level=level2``, where ptoas PlanMemory assigns the N slots concrete
+        disjoint addresses. ``get_memory_planner()`` reflects the forced value.
+        """
         ...
 
     def __enter__(self) -> PassContext: ...
@@ -297,6 +304,10 @@ class PassContext:
 
     def get_memory_planner(self) -> MemoryPlanner:
         """Get the memory planner selection for this context."""
+        ...
+
+    def use_ptoas_multi_buffer(self) -> bool:
+        """Whether ptoas multi-buffer lowering is enabled for this context."""
         ...
 
     def get_instruments(self) -> list[PassInstrument]:
@@ -644,6 +655,17 @@ def stamp_tfree_split() -> Pass:
     AIC/AIV tfrees. Runs late, before codegen.
     """
 
+def convert_to_ptoas_multi_buffer() -> Pass:
+    """Convert ``pl.pipeline`` ping-pong loops to ptoas multi-buffer slots.
+
+    Gated by ``PassContext.use_ptoas_multi_buffer`` — a no-op when off. When on,
+    tags vec/mat tile-producing ``Call`` nodes in each same-core pipeline loop
+    with the slot count and downgrades ``pipeline_stages`` to 1 so
+    ``LowerPipelineLoops`` skips replication. Codegen then emits
+    ``pto.alloc_multi_tile`` / ``pto.multi_tile_get`` and ptoas owns slot
+    rotation + cross-iteration sync. Runs immediately before ``LowerPipelineLoops``.
+    """
+
 def materialize_runtime_scopes() -> Pass:
     """Materialize implicit orchestration scopes as explicit RuntimeScopeStmt nodes.
 
@@ -839,6 +861,7 @@ __all__ = [
     "fuse_create_assemble_to_slice",
     "fold_no_op_reshape",
     "stamp_tfree_split",
+    "convert_to_ptoas_multi_buffer",
     "VerificationError",
     "SSAErrorType",
     "TypeCheckErrorType",

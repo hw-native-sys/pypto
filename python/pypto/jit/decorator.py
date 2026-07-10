@@ -1125,6 +1125,7 @@ def _run_config_compile_kwargs(run_config: Any) -> dict[str, Any]:
         "diagnostic_phase": run_config.diagnostic_phase,
         "disabled_diagnostics": run_config.disabled_diagnostics,
         "analyze_auto_scopes_for_deps": run_config.analyze_auto_scopes_for_deps,
+        "use_ptoas_multi_buffer": run_config.use_ptoas_multi_buffer,
     }
     if run_config.save_kernels_dir is not None:
         kwargs["output_dir"] = run_config.save_kernels_dir
@@ -1458,6 +1459,7 @@ class JITFunction:
         analyze_auto_scopes_for_deps = (
             run_config.analyze_auto_scopes_for_deps if run_config is not None else False
         )
+        use_ptoas_multi_buffer = run_config.use_ptoas_multi_buffer if run_config is not None else None
         key = make_cache_key(
             source_hash=self._get_source_hash(),
             param_names=param_names,
@@ -1469,6 +1471,7 @@ class JITFunction:
             strategy=strategy,
             distributed_config=distributed_config,
             analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
+            use_ptoas_multi_buffer=use_ptoas_multi_buffer,
         )
 
         # L1 cache lookup
@@ -1771,10 +1774,20 @@ class JITFunction:
         """
         import pypto.language as pl  # noqa: PLC0415
         from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+        from pypto.pypto_core import passes as _passes  # noqa: PLC0415
 
         param_names, _, tensor_meta, scalar_values, scalar_dtypes, per_func_dyn = self._bind_args(
             args, kwargs
         )
+
+        # compile_for_test takes no RunConfig; it honors an ambient PassContext
+        # (e.g. ``with PassContext(use_ptoas_multi_buffer=True):``) — both the
+        # best-effort ``_compile()`` below (``ir.compile()`` resolves the switch from
+        # the outer context) and the returned ``run_passes()`` do. Fold the switch
+        # into the cache key so switch-on and switch-off compilations of the same
+        # kernel do not collide in ``_cache``.
+        ctx = _passes.PassContext.current()
+        use_ptoas_multi_buffer = ctx.use_ptoas_multi_buffer() if ctx is not None else None
 
         key = make_cache_key(
             source_hash=self._get_source_hash(),
@@ -1785,6 +1798,7 @@ class JITFunction:
             scalar_values=scalar_values,
             platform=None,  # compile_for_test is platform-agnostic (testing only)
             strategy=OptimizationStrategy.Default,  # _compile() uses the default strategy
+            use_ptoas_multi_buffer=use_ptoas_multi_buffer,
         )
 
         # Populate cache via ir.compile() (codegen included) as a best-effort

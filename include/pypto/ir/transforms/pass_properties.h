@@ -346,6 +346,20 @@ inline const PassProperties kFoldNoOpReshapeProperties{
 
 inline const PassProperties kStampTfreeSplitProperties{.required = {IRProperty::SplitIncoreOrch}};
 
+// -- Convert pl.pipeline ping-pong to ptoas multi-buffer ---------------------
+//
+// Gated by PassContext::UsePtoasMultiBuffer(); a no-op otherwise. Runs in
+// LowerPipelineLoops' slot (which the pass manager drops under the switch, so
+// only same-core Pipeline loops remain — cross-core ones were demoted by
+// SkewCrossCorePipeline). Rewrites the i-dependent load into a
+// tile.multi_buffer_alloc region + tile.multi_buffer_load_slot(region, i%N) and
+// demotes the loop to Sequential. Preserves all pipeline-stage properties.
+inline const PassProperties kConvertToPtoasMultiBufferProperties{
+    .required = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
+                 IRProperty::TileOps2D, IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure},
+    .produced = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
+                 IRProperty::TileOps2D, IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure}};
+
 }  // namespace pass
 }  // namespace ir
 }  // namespace pypto

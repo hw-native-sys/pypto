@@ -281,13 +281,14 @@ void BindPass(nb::module_& m) {
                           "verification and the diagnostic channel (warnings + performance\n"
                           "hints) for PassPipeline.")
       .def(nb::init<std::vector<PassInstrumentPtr>, VerificationLevel, DiagnosticPhase, DiagnosticCheckSet,
-                    MemoryPlanner>(),
+                    MemoryPlanner, bool>(),
            nb::arg("instruments"), nb::arg("verification_level") = VerificationLevel::Basic,
            nb::arg("diagnostic_phase") = DiagnosticPhase::PrePipeline,
            nb::arg("disabled_diagnostics") = DiagnosticCheckSet{DiagnosticCheck::UnusedControlFlowResult},
-           nb::arg("memory_planner") = MemoryPlanner::PyPTO,
+           nb::arg("memory_planner") = MemoryPlanner::PyPTO, nb::arg("use_ptoas_multi_buffer") = false,
            "Create a PassContext with instruments, verification level, diagnostic phase gate, "
-           "optional disabled diagnostic checks, and memory planner selection")
+           "optional disabled diagnostic checks, memory planner selection, and optional ptoas "
+           "multi-buffer lowering")
       .def("__enter__",
            [](PassContext& self) -> PassContext& {
              self.EnterContext();
@@ -300,6 +301,8 @@ void BindPass(nb::module_& m) {
            "Get the diagnostic phase gate for this context")
       .def("get_disabled_diagnostics", &PassContext::GetDisabledDiagnostics,
            "Get the diagnostic checks suppressed by this context")
+      .def("use_ptoas_multi_buffer", &PassContext::UsePtoasMultiBuffer,
+           "Whether ptoas multi-buffer lowering is enabled for this context")
       .def("get_instruments", &PassContext::GetInstruments, "Get the instruments registered on this context")
       .def("get_memory_planner", &PassContext::GetMemoryPlanner,
            "Get the memory planner selection for this context")
@@ -533,6 +536,11 @@ void BindPass(nb::module_& m) {
   passes.def("stamp_tfree_split", &pass::StampTfreeSplit,
              "Copy each cross-core tpop's split/pipe-id onto its matching tfree op so codegen\n"
              "reads them from the op directly. Covers mixed-kernel and explicit AIC/AIV tfrees.");
+  passes.def("convert_to_ptoas_multi_buffer", &pass::ConvertToPtoasMultiBuffer,
+             "Convert pl.pipeline ping-pong loops to ptoas multi-buffer slots (gated by\n"
+             "PassContext.use_ptoas_multi_buffer). Tags vec/mat tile Calls with the slot count\n"
+             "and downgrades pipeline_stages to 1 so codegen emits pto.alloc_multi_tile /\n"
+             "pto.multi_tile_get and ptoas owns slot rotation + sync. No-op when the switch is off.");
   passes.def("materialize_runtime_scopes", &pass::MaterializeRuntimeScopes,
              "Materialize implicit orchestration scopes as explicit RuntimeScopeStmt nodes.\n\n"
              "For every Orchestration function, inserts AUTO RuntimeScopeStmt (manual_=false)\n"

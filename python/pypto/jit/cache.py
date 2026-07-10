@@ -123,7 +123,7 @@ def compute_source_hash(sources: list[str]) -> str:
     return h.hexdigest()[:16]
 
 
-def make_cache_key(
+def make_cache_key(  # noqa: PLR0913
     source_hash: str,
     param_names: list[str],
     tensor_shapes: dict[str, tuple[int, ...]],
@@ -134,6 +134,7 @@ def make_cache_key(
     strategy: "OptimizationStrategy | None" = None,
     distributed_config: Any = None,
     analyze_auto_scopes_for_deps: bool = False,
+    use_ptoas_multi_buffer: bool | None = None,
 ) -> CacheKey:
     """Build a cache key for a JIT call site.
 
@@ -166,6 +167,10 @@ def make_cache_key(
         analyze_auto_scopes_for_deps: Compile-side switch for deriving explicit
             task dependencies from AUTO runtime scopes. Included in the key
             because it changes generated orchestration dependencies.
+        use_ptoas_multi_buffer: Compile-side switch for ptoas multi-buffer
+            lowering. Included in the key because it changes the emitted IR /
+            kernel (alloc_multi_tile vs replicated alloc_tile); without it the
+            same kernel compiled with the switch on and off would collide.
 
     Returns:
         Hashable CacheKey tuple.
@@ -187,7 +192,10 @@ def make_cache_key(
         scalar_infos.append(ScalarCacheInfo(name=name, value=scalar_values[name]))
 
     dist_key = _freeze(distributed_config) if distributed_config is not None else None
-    compile_opts = (("analyze_auto_scopes_for_deps", analyze_auto_scopes_for_deps),)
+    compile_opts = (
+        ("analyze_auto_scopes_for_deps", analyze_auto_scopes_for_deps),
+        ("use_ptoas_multi_buffer", use_ptoas_multi_buffer),
+    )
     return (
         source_hash,
         platform,

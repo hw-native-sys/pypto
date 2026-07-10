@@ -160,6 +160,98 @@ def create(
 create_tile = create
 
 
+def multi_buffer_alloc(
+    shape: Sequence[int | Expr] | _ir_core.MakeTuple,
+    dtype: DataType,
+    count: int,
+    target_memory: MemorySpace = MemorySpace.Vec,
+    span: Span | None = None,
+) -> Call:
+    """Allocate an N-slot ptoas multi-buffer region (route-2 prefetch lowering).
+
+    Pass-synthesized by ``ConvertToPtoasMultiBuffer``; not a user DSL surface.
+    Structurally a :func:`create` tile plus a ``count`` slot count. Consumed only
+    by :func:`multi_buffer_get_slot`; codegen lowers it to
+    ``pto.alloc_multi_tile ... count=N``.
+
+    Args:
+        shape: Per-slot tile shape, or a MakeTuple
+        dtype: Per-slot tile dtype
+        count: Number of slots N (2..16)
+        target_memory: Memory space of the region (Vec / Mat)
+        span: Optional source span
+
+    Returns:
+        Call expression returning the region TileType (per-slot shape)
+    """
+    actual_span = _get_span_or_capture(span)
+    shape_tuple = _to_make_tuple(shape, actual_span)
+    kwargs: dict[str, Any] = {"dtype": dtype, "target_memory": target_memory, "count": count}
+    return _ir_core.create_op_call("tile.multi_buffer_alloc", [shape_tuple], kwargs, actual_span)
+
+
+def multi_buffer_get_slot(
+    region: Expr,
+    slot_index: Expr,
+    span: Span | None = None,
+) -> Call:
+    """Select slot ``slot_index`` of a multi-buffer region (zero-copy view).
+
+    Pass-synthesized by ``ConvertToPtoasMultiBuffer``; not a user DSL surface.
+    The view inherits the region's per-slot tile and base (offset 0); the dynamic
+    ``slot_index`` is resolved at codegen (``pto.multi_tile_get %mb[k]``).
+
+    Args:
+        region: Region tile from :func:`multi_buffer_alloc`
+        slot_index: Slot to select (index scalar expression)
+        span: Optional source span
+
+    Returns:
+        Call expression returning the per-slot tile view
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.multi_buffer_get_slot", [region, slot_index], {}, actual_span)
+
+
+def multi_buffer_load_slot(
+    region: Expr,
+    slot_index: Expr,
+    tensor: Expr,
+    offsets: Sequence[int | Expr] | _ir_core.MakeTuple,
+    shapes: Sequence[int | Expr] | _ir_core.MakeTuple,
+    valid_shapes: Sequence[int | Expr] | _ir_core.MakeTuple,
+    span: Span | None = None,
+) -> Call:
+    """Select slot ``slot_index`` of a multi-buffer region and load into it.
+
+    Pass-synthesized by ``ConvertToPtoasMultiBuffer`` for the prologue/prefetch
+    fill; not a user DSL surface. Codegen emits ``pto.multi_tile_get %mb[k]``
+    followed by a ``pto.tload`` filling that slot (tail args mirror :func:`load`).
+
+    Args:
+        region: Region tile from :func:`multi_buffer_alloc`
+        slot_index: Slot to fill (index scalar expression)
+        tensor: Source tensor
+        offsets: Load offsets, or a MakeTuple
+        shapes: Load region shape, or a MakeTuple
+        valid_shapes: Valid tile shape, or a MakeTuple
+        span: Optional source span
+
+    Returns:
+        Call expression returning the filled per-slot tile view
+    """
+    actual_span = _get_span_or_capture(span)
+    offsets_tuple = _to_make_tuple(offsets, actual_span)
+    shapes_tuple = _to_make_tuple(shapes, actual_span)
+    valid_tuple = _to_make_tuple(valid_shapes, actual_span)
+    return _ir_core.create_op_call(
+        "tile.multi_buffer_load_slot",
+        [region, slot_index, tensor, offsets_tuple, shapes_tuple, valid_tuple],
+        {},
+        actual_span,
+    )
+
+
 def load(
     tensor: Expr,
     offsets: Sequence[int | Expr] | _ir_core.MakeTuple,

@@ -262,12 +262,22 @@ class PassContext {
    * @param memory_planner Who plans on-chip buffer memory (default: PyPTO).
    *        PtoAS makes the pipeline skip the pypto allocation passes so the
    *        ptoas PlanMemory pass owns allocation instead.
+   * @param use_ptoas_multi_buffer When true, `ConvertToPtoasMultiBuffer`
+   *        rewrites `pl.pipeline` double/multi-buffered loops to emit ptoas
+   *        `pto.alloc_multi_tile` / `pto.multi_tile_get` slot rotation instead
+   *        of pypto's own body-replication ping-pong (default: false).
+   *        **Forces `memory_planner = PtoAS`** (overriding the argument): the
+   *        cross-iteration overlap only materializes at `--pto-level=level2`,
+   *        where ptoas PlanMemory assigns the N slots concrete disjoint
+   *        addresses (level3's baked base + dynamic slot defeats MemAlias and
+   *        serializes). `GetMemoryPlanner()` returns the forced value.
    */
   explicit PassContext(std::vector<PassInstrumentPtr> instruments,
                        VerificationLevel verification_level = VerificationLevel::Basic,
                        DiagnosticPhase diagnostic_phase = DiagnosticPhase::PrePipeline,
                        DiagnosticCheckSet disabled_diagnostics = {DiagnosticCheck::UnusedControlFlowResult},
-                       MemoryPlanner memory_planner = MemoryPlanner::PyPTO);
+                       MemoryPlanner memory_planner = MemoryPlanner::PyPTO,
+                       bool use_ptoas_multi_buffer = false);
 
   /**
    * @brief Push this context onto the thread-local stack
@@ -316,6 +326,16 @@ class PassContext {
   [[nodiscard]] const DiagnosticCheckSet& GetDisabledDiagnostics() const;
 
   /**
+   * @brief Whether ptoas multi-buffer lowering is enabled for this context.
+   *
+   * When true, `ConvertToPtoasMultiBuffer` converts `pl.pipeline`
+   * double/multi-buffered loops into ptoas `pto.alloc_multi_tile` /
+   * `pto.multi_tile_get` slot rotation (delegating ping-pong + cross-iteration
+   * sync to ptoas) instead of pypto's body-replication ping-pong.
+   */
+  [[nodiscard]] bool UsePtoasMultiBuffer() const;
+
+  /**
    * @brief Get the instruments registered on this context
    */
   [[nodiscard]] const std::vector<PassInstrumentPtr>& GetInstruments() const;
@@ -350,6 +370,7 @@ class PassContext {
   DiagnosticPhase diagnostic_phase_;
   DiagnosticCheckSet disabled_diagnostics_;
   MemoryPlanner memory_planner_;
+  bool use_ptoas_multi_buffer_;
   PassContext* previous_;
 
   static thread_local PassContext* current_;

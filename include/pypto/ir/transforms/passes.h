@@ -808,6 +808,28 @@ Pass ClassifyIterArgCarry();
 Pass StampTfreeSplit();
 
 /**
+ * @brief Convert `pl.pipeline` ping-pong loops to ptoas multi-buffer slots
+ *
+ * Gated by `PassContext::UsePtoasMultiBuffer()` — a no-op when the switch is
+ * off, so the default pipeline is unchanged. When on, the pass manager also
+ * drops `LowerPipelineLoops` / `CanonicalizeIOOrder` and the switch forces
+ * `memory_planner = PtoAS`, so this pass owns pipeline lowering. For each
+ * same-core `ForKind::Pipeline` loop with `pipeline_stages >= 2` and exactly
+ * one i-dependent vec/mat load it:
+ *   - hoists `region = tile.multi_buffer_alloc(shape; count=N)` before the loop, and
+ *   - replaces `t = tile.load(args)` in place with
+ *     `t = tile.multi_buffer_load_slot(region, i%N, args)` (same tile var, so
+ *     consumers are unchanged), then demotes the loop to Sequential.
+ * Non-eligible loops are demoted to Sequential (no Pipeline loop survives).
+ *
+ * ptoas delivers the cross-iteration double-buffer overlap itself from this
+ * same-slot form (dyn-event WAR sync) — only under ptoas PlanMemory
+ * (`--pto-level=level2`), which is why the switch forces `PtoAS`. Runs in
+ * `LowerPipelineLoops`' slot. See docs/en/dev/passes/ptoas-multi-buffer.md.
+ */
+Pass ConvertToPtoasMultiBuffer();
+
+/**
  * @brief Verify properties on a program and throw on errors
  *
  * Uses PropertyVerifierRegistry to verify the given properties and throws

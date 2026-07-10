@@ -13,6 +13,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "pypto/codegen/pto/pto_codegen.h"
@@ -439,6 +440,12 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
   // Register loop variable
   std::string loop_var_name = NewNamedTemp(op->loop_var_->name_hint_);
   BindVarToMlir(op->loop_var_, loop_var_name);
+
+  // ptoas multi-buffer (route-2): the region `pto.alloc_multi_tile` is emitted
+  // inline at its own `tile.multi_buffer_alloc` AssignStmt (placed before this
+  // loop by ConvertToPtoasMultiBuffer), and the buffer-less slot views emit
+  // their `pto.multi_tile_get` in the get_slot / load_slot op codegen — so no
+  // per-loop hoist/rotation state is needed here.
 
   // In PTO, only scalar types (index, f32, bool, etc.) need iter_args/yield
   // for loop-carried value semantics. Non-scalar types (TileType, TensorType)

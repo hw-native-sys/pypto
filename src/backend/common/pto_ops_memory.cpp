@@ -39,6 +39,7 @@
 #include "pypto/ir/comm.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
@@ -678,6 +679,26 @@ static std::string EmitLocalArrayValue(codegen::PTOCodegen& codegen, const ir::E
   return out;
 }
 
+// tile.multi_buffer_get_slot (consume view): emit only the slot pick
+// `pto.multi_tile_get %mb[k]` into the current (buffer-less) result buffer.
+static std::string MakeMultiBufferGetSlotCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  codegen.EmitMultiTileGet(op);
+  return "";  // EmitMultiTileGet already emitted the line.
+}
+
+// tile.multi_buffer_load_slot (prefetch/prologue): select the slot, then reuse
+// tile.load's `pto.tload` emission over the tail args (tensor, offsets, shapes,
+// valid_shapes) to fill the selected slot in place.
+static std::string MakeMultiBufferLoadSlotCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  codegen.EmitMultiTileGet(op);  // %slot = pto.multi_tile_get %mb[k] (current result buffer)
+  std::vector<ir::ExprPtr> load_args(op->args_.begin() + 2, op->args_.end());
+  auto load_op = ir::OpRegistry::GetInstance().GetOp("tile.load");
+  auto load_call = std::make_shared<ir::Call>(load_op, load_args, op->GetType(), op->span_);
+  return MakeTileLoadCodegenPTO(load_call, codegen_base);  // pto.tload ins(...) outs(%slot)
+}
+
 void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& exclude_ops) {
   // Register ops with custom codegen logic
   auto reg = [&](const char* op_name, BackendCodegenFunc fn) {
@@ -875,6 +896,21 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
 
   reg("tile.alloc", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTileAllocCodegenPTO(op, codegen);
+  });
+
+  // ptoas multi-buffer. The region alloc emits its `pto.alloc_multi_tile` in
+  // EmitAllocTileForVar, so this emitter is a no-op; the buffer-less slot views
+  // emit `pto.multi_tile_get` (+ `pto.tload` for load_slot).
+  reg("tile.multi_buffer_alloc", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    (void)op;
+    (void)codegen;
+    return std::string("");
+  });
+  reg("tile.multi_buffer_get_slot", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeMultiBufferGetSlotCodegenPTO(op, codegen);
+  });
+  reg("tile.multi_buffer_load_slot", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeMultiBufferLoadSlotCodegenPTO(op, codegen);
   });
 
   reg("tile.create", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
