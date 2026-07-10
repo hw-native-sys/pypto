@@ -232,13 +232,30 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
         // deferred alloc emits a dynamic-validShape `pto.alloc_tile` with
         // explicit valid_row / valid_col operands.
         AllocTileFields fields = ComputeAllocTileFields(tile_type);
-        std::string ret_name = AllocNewTileBuf(fields.type_str, return_var->name_hint_, fields.addr_ssa,
-                                               fields.valid_row_ssa, fields.valid_col_ssa);
+        // Under PTOAS no `addr` is baked, so variables denoting the same buffer
+        // must share ONE tile_buf handle — two addr-less allocs are two
+        // independent buffers to ptoas PlanMemory. When the phi's MemRef is
+        // already bound to a handle (a loop-carried accumulator: the `pl.range`
+        // init, the iter_arg and the loop result all share the phi's MemRef),
+        // reuse it. Minting a second handle here would strand that buffer: the
+        // branch producers write the phi handle (they are re-bound to it below,
+        // fix #1956) while the loop result and every post-if read still resolve
+        // to the shared one, which no branch ever wrote.
+        std::string ret_name = TryGetSharedTileBufHandle(ir::GetDefinedMemRef(tile_type));
+        if (!ret_name.empty()) {
+          // The shared handle must dominate both branches and the post-if read.
+          // Hoist its declaration to the function head unless the body already
+          // emitted it before this region.
+          DeclareTileBufAtHead(ret_name, fields);
+        } else {
+          ret_name = AllocNewTileBuf(fields.type_str, return_var->name_hint_, fields.addr_ssa,
+                                     fields.valid_row_ssa, fields.valid_col_ssa);
+          // This head-declared handle is the phi buffer. Under PTOAS the branch
+          // producers are re-bound to it (see emit_branch, fix #1956); mark it
+          // emitted so their EmitAllocTileForVar dedups instead of re-declaring it.
+          if (!emit_tile_addr_) fs_.emitted_tile_alloc_names.insert(ret_name);
+        }
         BindVarToMlir(return_var, ret_name);
-        // This head-declared handle is the phi buffer. Under PTOAS the branch
-        // producers are re-bound to it (see emit_branch, fix #1956); mark it
-        // emitted so their EmitAllocTileForVar dedups instead of re-declaring it.
-        if (!emit_tile_addr_) fs_.emitted_tile_alloc_names.insert(ret_name);
       } else if (As<TensorType>(return_var->GetType()) || As<ir::ArrayType>(return_var->GetType())) {
         // Tensors and on-core arrays are mutable references mutated in place
         // (pl.assemble lowers to a tile store into the backing memref; arrays

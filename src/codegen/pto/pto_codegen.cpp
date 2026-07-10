@@ -1247,6 +1247,24 @@ std::string PTOCodegen::AllocNewTileBuf(const std::string& tile_buf_type_string,
   return name;
 }
 
+std::string PTOCodegen::TryGetSharedTileBufHandle(const ir::MemRefPtr& memref) const {
+  if (emit_tile_addr_ || !memref) {
+    return "";
+  }
+  auto it = fs_.memref_identity_to_mlir.find(MemRefIdentityKey(memref));
+  return it != fs_.memref_identity_to_mlir.end() ? it->second : std::string{};
+}
+
+bool PTOCodegen::DeclareTileBufAtHead(const std::string& ssa_name, const AllocTileFields& fields) {
+  if (!fs_.emitted_tile_alloc_names.insert(ssa_name).second) {
+    return false;  // already declared — in the head, or inline earlier in the body
+  }
+  fs_.extra_alloc_tiles.push_back(FunctionState::ExtraAllocTile{ssa_name, fields.type_str, fields.addr_ssa,
+                                                                fields.valid_row_ssa, fields.valid_col_ssa});
+  fs_.ssa_to_tile_buf_type[ssa_name] = fields.type_str;
+  return true;
+}
+
 void PTOCodegen::SetCurrentResultBuf(const std::string& buf) { fs_.current_result_buf = buf; }
 
 void PTOCodegen::RegisterTileBufType(const std::string& ssa_name, const std::string& type_string) {

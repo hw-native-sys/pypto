@@ -696,6 +696,26 @@ class PTOCodegen : public CodegenBase {
   AllocTileFields ComputeAllocTileFields(const std::shared_ptr<const ir::TileType>& tile_type);
 
   /**
+   * @brief The tile_buf handle already bound to the buffer `memref` denotes.
+   *
+   * Only meaningful under the PTOAS memory planner (`emit_tile_addr_ == false`),
+   * where variables denoting the same buffer must share one handle because
+   * there is no baked `addr` to alias through. Returns "" when addresses are
+   * baked, when `memref` is null, or when no handle is bound yet.
+   */
+  [[nodiscard]] std::string TryGetSharedTileBufHandle(const ir::MemRefPtr& memref) const;
+
+  /**
+   * @brief Declare `ssa_name`'s `pto.alloc_tile` in the function head.
+   *
+   * The head prologue is rendered after the body and prepended, so a handle
+   * declared here dominates every use — including uses inside `scf.if` branches
+   * and reads after the region. Returns false (and declares nothing) when the
+   * handle already has an `alloc_tile`.
+   */
+  bool DeclareTileBufAtHead(const std::string& ssa_name, const AllocTileFields& fields);
+
+  /**
    * @brief Emit alloc_tile for dynamically allocated tile buffers (e.g., reshape outputs)
    */
   void EmitExtraAllocTiles();
