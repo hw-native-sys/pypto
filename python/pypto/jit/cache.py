@@ -136,6 +136,7 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
     distributed_config: Any = None,
     analyze_auto_scopes_for_deps: bool = False,
     memory_planner: "MemoryPlanner | None" = None,
+    enable_pypto_l0c_double_buffer: bool = False,
 ) -> CacheKey:
     """Build a cache key for a JIT call site.
 
@@ -174,6 +175,11 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
             physical addresses are baked into the artifact (``--pto-level``
             level3 vs level2); without it, compiling one kernel under both
             planners would hand the second call the first one's artifact.
+        enable_pypto_l0c_double_buffer: Effective dbC=2 (L0C double-buffer) opt-in
+            under the PyPTO planner, resolved from the active ``PassContext``.
+            Included in the key because it changes the AutoTileMatmulL0 /
+            MemoryReuse output; without it a kernel first compiled with it off
+            would reuse that artifact when later called with it on (and vice versa).
 
     Returns:
         Hashable CacheKey tuple.
@@ -198,6 +204,7 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
     compile_opts = (
         ("analyze_auto_scopes_for_deps", analyze_auto_scopes_for_deps),
         ("memory_planner", None if memory_planner is None else str(memory_planner)),
+        ("enable_pypto_l0c_double_buffer", enable_pypto_l0c_double_buffer),
     )
     return (
         source_hash,

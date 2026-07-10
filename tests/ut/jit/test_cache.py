@@ -16,7 +16,7 @@ from pypto.jit.cache import (
     compute_source_hash,
     make_cache_key,
 )
-from pypto.jit.decorator import _resolve_memory_planner
+from pypto.jit.decorator import _resolve_enable_pypto_l0c_double_buffer, _resolve_memory_planner
 from pypto.pypto_core import DataType, passes
 from pypto.pypto_core.passes import MemoryPlanner
 from pypto.runtime import RunConfig
@@ -63,6 +63,7 @@ class TestMakeCacheKey:
         distributed_config=None,
         analyze_auto_scopes_for_deps=False,
         memory_planner=None,
+        enable_pypto_l0c_double_buffer=False,
     ):
         return make_cache_key(
             source_hash=source_hash,
@@ -76,6 +77,7 @@ class TestMakeCacheKey:
             distributed_config=distributed_config,
             analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
             memory_planner=memory_planner,
+            enable_pypto_l0c_double_buffer=enable_pypto_l0c_double_buffer,
         )
 
     def test_basic_key_structure(self):
@@ -96,6 +98,7 @@ class TestMakeCacheKey:
         assert compile_opts == (
             ("analyze_auto_scopes_for_deps", False),
             ("memory_planner", None),
+            ("enable_pypto_l0c_double_buffer", False),
         )
 
     def test_tensor_shape_in_key(self):
@@ -376,6 +379,24 @@ class TestMakeCacheKey:
         ]
         assert len(set(keys)) == len(keys), f"planner must split the cache key, got {keys}"
 
+    def test_dbc_double_buffer_flag_splits_key(self):
+        """The PyPTO dbC=2 opt-in changes the AutoTileMatmulL0/MemoryReuse output,
+        so a kernel compiled with it off must not reuse that artifact when later
+        called with it on."""
+        key_off = self._make_key(
+            param_names=["a"],
+            tensor_shapes={"a": (8, 8)},
+            tensor_dtypes={"a": DataType.FP32},
+            enable_pypto_l0c_double_buffer=False,
+        )
+        key_on = self._make_key(
+            param_names=["a"],
+            tensor_shapes={"a": (8, 8)},
+            tensor_dtypes={"a": DataType.FP32},
+            enable_pypto_l0c_double_buffer=True,
+        )
+        assert key_off != key_on, "dbC=2 opt-in must split the cache key"
+
 
 class TestResolveMemoryPlanner:
     """The planner the JIT keys on must match the one ``ir.compile()`` will use."""
@@ -390,6 +411,21 @@ class TestResolveMemoryPlanner:
         with passes.PassContext([], memory_planner=MemoryPlanner.PTOAS):
             assert _resolve_memory_planner(None) == MemoryPlanner.PTOAS
         assert _resolve_memory_planner(None) == MemoryPlanner.PYPTO
+
+
+class TestResolveEnablePyptoL0cDoubleBuffer:
+    """The dbC=2 opt-in the JIT keys on must match the one ``ir.compile()`` inherits."""
+
+    def test_defaults_to_off(self):
+        assert _resolve_enable_pypto_l0c_double_buffer() is False
+
+    def test_reads_the_active_pass_context(self):
+        """The flag is set by wrapping the call in a PassContext, which never
+        reaches RunConfig; keying only on RunConfig would let a flag-on call
+        reuse the flag-off artifact."""
+        with passes.PassContext([], enable_pypto_l0c_double_buffer=True):
+            assert _resolve_enable_pypto_l0c_double_buffer() is True
+        assert _resolve_enable_pypto_l0c_double_buffer() is False
 
     def test_run_config_field_wins_over_default(self):
         cfg = RunConfig(platform="a2a3", memory_planner=MemoryPlanner.PTOAS)

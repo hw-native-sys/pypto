@@ -1158,6 +1158,20 @@ def _resolve_memory_planner(run_config: Any) -> _passes.MemoryPlanner:
     return _passes.MemoryPlanner.PYPTO
 
 
+def _resolve_enable_pypto_l0c_double_buffer() -> bool:
+    """Resolve the effective dbC=2 (L0C double-buffer) opt-in for the cache key.
+
+    Like ``_resolve_memory_planner``, this flag is most often set by wrapping a
+    call in ``with PassContext([], enable_pypto_l0c_double_buffer=True)``, which
+    ``ir.compile()`` inherits. ``RunConfig`` does not carry this PassContext-only
+    flag, so the active context is the only source. Keying on it matters: without
+    it a JIT kernel first compiled with the flag off would be handed that dbC=1
+    artifact when later called under a context with the flag on (or vice versa).
+    """
+    ctx = _passes.PassContext.current()
+    return ctx.get_enable_pypto_l0c_double_buffer() if ctx is not None else False
+
+
 # ---------------------------------------------------------------------------
 
 
@@ -1499,6 +1513,7 @@ class JITFunction:
             distributed_config=distributed_config,
             analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
             memory_planner=memory_planner,
+            enable_pypto_l0c_double_buffer=_resolve_enable_pypto_l0c_double_buffer(),
         )
 
         # L1 cache lookup
@@ -1818,6 +1833,7 @@ class JITFunction:
             # compile_for_test takes no RunConfig, so the planner can only come
             # from an ambient PassContext — which still changes the artifact.
             memory_planner=_resolve_memory_planner(None),
+            enable_pypto_l0c_double_buffer=_resolve_enable_pypto_l0c_double_buffer(),
         )
 
         # Populate cache via ir.compile() (codegen included) as a best-effort
