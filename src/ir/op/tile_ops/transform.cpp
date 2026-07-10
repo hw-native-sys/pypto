@@ -806,10 +806,13 @@ TypePtr DeduceTileSetValidShapeType(const std::vector<ExprPtr>& args,
   check_const_bound("valid_rows", args[1], tile_type->shape_[0]);
   check_const_bound("valid_cols", args[2], tile_type->shape_[1]);
 
-  TileView tile_view;
-  if (tile_type->tile_view_.has_value()) {
-    tile_view = *tile_type->tile_view_;
-  }
+  // The result aliases the source buffer, so it must carry the source's layout.
+  // Seed from the EFFECTIVE view: when the source leaves `tile_view_` implicit,
+  // its layout is the one its memory space implies (an Acc tile is col_major /
+  // row_major / fractal=1024, a [M, 1] Vec tile is col_major, ...). Default-
+  // constructing a TileView here would pin the raw row_major / none_box /
+  // fractal=512 defaults onto an alias of, e.g., an Acc accumulator.
+  TileView tile_view = tile_view_semantics::GetEffectiveTileView(*tile_type);
   tile_view.valid_shape = {args[1], args[2]};
 
   return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt, tile_view);

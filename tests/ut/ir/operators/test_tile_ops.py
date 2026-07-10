@@ -2123,6 +2123,60 @@ class TestTileSliceReshapeOps:
         assert result_type.tile_view.valid_shape[0] is valid_rows
         assert result_type.tile_view.valid_shape[1] is valid_cols
 
+    def test_tile_set_validshape_keeps_implicit_acc_layout(self):
+        """The result aliases the source buffer, so it must keep the source's layout.
+
+        An Acc tile that leaves `tile_view` implicit still *has* a layout: the one
+        its memory space implies (col_major / row_major / fractal=1024). Seeding the
+        result's TileView from a default-constructed one would pin the raw
+        row_major / none_box / fractal=512 defaults onto an alias of an Acc
+        accumulator, and codegen would then annotate the shared tile_buf handle with
+        a layout its own `pto.alloc_tile` never declared.
+        """
+        span = ir.Span.unknown()
+        rows = ir.ConstInt(16, DataType.INT32, span)
+        cols = ir.ConstInt(128, DataType.INT32, span)
+
+        # Implicit tile_view (None) + Acc memory space.
+        acc_type = ir.TileType([rows, cols], DataType.FP32, None, None, ir.MemorySpace.Acc)
+        acc_var = ir.Var("acc", acc_type, span)
+        assert acc_type.tile_view is None
+
+        result_type = tile.set_validshape(acc_var, 5, 128).type
+
+        assert isinstance(result_type, ir.TileType)
+        # Narrowing valid_shape must not disturb the other metadata of the aliased buffer.
+        assert result_type.memory_space == ir.MemorySpace.Acc
+        view = result_type.tile_view
+        assert view is not None
+        assert view.blayout == ir.TileLayout.col_major
+        assert view.slayout == ir.TileLayout.row_major
+        assert view.fractal == 1024
+        assert _const_values(view.valid_shape) == [5, 128]
+
+    def test_tile_set_validshape_keeps_explicit_source_layout(self):
+        """An explicit source TileView is carried through unchanged but for valid_shape."""
+        span = ir.Span.unknown()
+        rows = ir.ConstInt(16, DataType.INT32, span)
+        cols = ir.ConstInt(128, DataType.INT32, span)
+
+        source_view = ir.TileView(
+            [rows, cols], [], None, ir.TileLayout.col_major, ir.TileLayout.col_major, 512
+        )
+        src_type = ir.TileType([rows, cols], DataType.FP32, None, source_view, ir.MemorySpace.Right)
+        src_var = ir.Var("rhs", src_type, span)
+
+        result_type = tile.set_validshape(src_var, 5, 128).type
+
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.memory_space == ir.MemorySpace.Right
+        view = result_type.tile_view
+        assert view is not None
+        assert view.blayout == ir.TileLayout.col_major
+        assert view.slayout == ir.TileLayout.col_major
+        assert view.fractal == 512
+        assert _const_values(view.valid_shape) == [5, 128]
+
     def test_tile_set_validshape_preserves_physical_shape(self):
         """Physical shape is unchanged; only valid_shape metadata is updated."""
         span = ir.Span.unknown()
@@ -2173,6 +2227,13 @@ class TestTileSliceReshapeOps:
 def _const_dims(span, *values):
     """Build a list of ConstInt dims (INT32) from Python ints."""
     return [ir.ConstInt(v, DataType.INT32, span) for v in values]
+
+
+def _const_values(dims):
+    """Extract the ints from a dim list, asserting every dim is a ConstInt."""
+    consts = [dim for dim in dims if isinstance(dim, ir.ConstInt)]
+    assert len(consts) == len(dims), f"expected all-constant dims, got {dims}"
+    return [dim.value for dim in consts]
 
 
 class TestTileBatchMatMulOps:
