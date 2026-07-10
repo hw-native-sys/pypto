@@ -221,9 +221,9 @@ void VarLineageCollector::VisitStmt_(const ForStmtPtr& for_stmt) {
       // Scalar carries (e.g. a loop counter ``idx = batch_base + inner``) are
       // value-typed: the body may overwrite them with a freshly computed value
       // that has no relationship to the init param.  Propagating param lineage
-      // to a Scalar return_var makes FindReturnedParamIndices incorrectly map
-      // a Scalar return element to a param index, causing EmitTensorAlias to
-      // emit ``const Tensor&`` for an int64_t variable (issue #1580).
+      // to a Scalar return_var would make the return->param map bind a Scalar
+      // return element to a param index, causing EmitTensorAlias to emit
+      // ``const Tensor&`` for an int64_t variable (issue #1580).
       if (i < for_stmt->return_vars_.size() && AsTensorTypeLike(for_stmt->return_vars_[i]->GetType())) {
         var_to_param[for_stmt->return_vars_[i].get()] = param;
       }
@@ -268,7 +268,7 @@ void VarLineageCollector::VisitStmt_(const AssignStmtPtr& assign) {
         // Prefer tracing through the Out/InOut arg the callee actually
         // returns (multi-Out kernels would otherwise be mis-traced to the
         // first Out, leaking scratch-buffer lineage onto the result Var).
-        std::optional<size_t> returned_idx = FindReturnedParamIndex(callee, program_);
+        std::optional<size_t> returned_idx = ir::return_lineage::ExplicitReturnedParamIndex(callee);
         for (size_t i = 0; i < effective_dirs.size() && i < call->args_.size(); ++i) {
           if (effective_dirs[i] != ParamDirection::Out && effective_dirs[i] != ParamDirection::InOut) {
             continue;
@@ -300,24 +300,6 @@ const Var* VarLineageCollector::ResolveExpr(const ExprPtr& expr) const {
     return ResolveVar(var.get());
   }
   return nullptr;
-}
-
-// ---------------------------------------------------------------------------
-// FindReturnedParamIndex
-// ---------------------------------------------------------------------------
-
-// Both functions delegate to the shared IR-level return-lineage utility,
-// which traces through SSA rebinds, loop carries, builtin writeback ops,
-// TupleGetItem of user calls, and Group/Spmd wrapper inner calls — with
-// per-function memoization and cycle protection. See return_lineage_utils.h.
-
-std::optional<size_t> FindReturnedParamIndex(const FunctionPtr& callee, const ProgramPtr& program) {
-  return ir::return_lineage::ReturnedParamIndex(callee, program);
-}
-
-std::vector<std::optional<size_t>> FindReturnedParamIndices(const FunctionPtr& callee,
-                                                            const ProgramPtr& program) {
-  return ir::return_lineage::ReturnedParamIndices(callee, program);
 }
 
 }  // namespace codegen

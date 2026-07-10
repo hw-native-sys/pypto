@@ -191,16 +191,20 @@ Arg params_t1;
 params_t1.add_input(ext_output);  // `result` -> ext_output (no alias decl)
 ```
 
-Which `Out`/`InOut` param a result aliases is a lookup, not a heuristic:
-pipeline IR satisfies the `ReturnParamsExplicit` property
-([`NormalizeReturnOrder`](../passes/23-normalize_return_order.md)),
-so `FindReturnedParamIndex` resolves each return value to a param by pointer
-identity via `ir::return_lineage`. The legacy lineage tracing (var-to-var
-aliases, loop carries, builtin writebacks, `TupleGetItem` of tuple calls,
-Group/Spmd wrappers) remains only for hand-parsed IR. When no param can be
-traced, single-return aliasing falls back to the sole `Out`/`InOut` param only
-when the callee has exactly one — multiple outputs with an untraceable return
-are an internal error, never a guess.
+Which `Out`/`InOut` param a result aliases is a lookup, not a heuristic — and
+not an analysis either. `ReturnParamsExplicit`
+([`NormalizeReturnOrder`](../passes/23-normalize_return_order.md)) guarantees
+that every tensor param-writeback return value *is* the param, by pointer
+identity. Codegen therefore reads the return-position → param-index map straight
+off the callee's `ReturnStmt` via `ir::return_lineage::ExplicitReturnedParamIndices`;
+no SSA walk, no callee recursion, no `Program`. The interprocedural lineage
+tracer (`ReturnedParamIndices`) stays behind in the IR layer for the passes that
+run *before* the property is established.
+
+The property is thus a codegen precondition. When a return position resolves to
+no param, single-return aliasing falls back to the sole `Out`/`InOut` param only
+when the callee has exactly one — a multi-output callee whose `ReturnStmt` does
+not reference a param directly is an internal error, never a guess.
 
 Excluded from remap: a phi/loop-carry reassignment (it rebinds an lvalue the
 enclosing `if`/loop owns) keeps its `<name> = <src>;` form; and a tensor whose

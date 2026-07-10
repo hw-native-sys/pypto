@@ -38,6 +38,18 @@ def assert_code_equal(actual: str, expected: str) -> None:
         raise AssertionError(f"Code mismatch:\n{diff}")
 
 
+def _ensure_return_params_explicit(program):
+    """Phase-5 invariant: codegen requires IRProperty.ReturnParamsExplicit.
+
+    Orchestration codegen reads each callee's return->param map straight off its
+    ReturnStmt (pointer identity). NormalizeReturnOrder establishes that form.
+    Tests that hand-build IR (without going through PassManager) need to invoke
+    it before codegen; it is a no-op when the program already went through the
+    pass pipeline.
+    """
+    return passes.normalize_return_order()(program)
+
+
 def _ensure_arg_directions(program):
     """Phase-5 invariant: codegen requires Call.arg_directions to be populated.
 
@@ -65,7 +77,7 @@ def _finalize_for_codegen(program):
 
 def _generate_orch_code(program) -> str:
     """Generate orchestration code using backend-agnostic codegen."""
-    program = _finalize_for_codegen(_ensure_arg_directions(program))
+    program = _finalize_for_codegen(_ensure_arg_directions(_ensure_return_params_explicit(program)))
     for func in program.functions.values():
         if func.func_type == ir.FunctionType.Orchestration:
             result = codegen.generate_orchestration(program, func)
@@ -75,7 +87,7 @@ def _generate_orch_code(program) -> str:
 
 def _generate_orch_result(program) -> "codegen.OrchestrationResult":
     """Generate orchestration result using backend-agnostic codegen."""
-    program = _finalize_for_codegen(_ensure_arg_directions(program))
+    program = _finalize_for_codegen(_ensure_arg_directions(_ensure_return_params_explicit(program)))
     for func in program.functions.values():
         if func.func_type == ir.FunctionType.Orchestration:
             return codegen.generate_orchestration(program, func)

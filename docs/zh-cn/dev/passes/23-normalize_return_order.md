@@ -76,6 +76,20 @@ builtin 回写、tuple 调用的 `TupleGetItem`，以及 Group/Spmd 包装函数
 把每个可追踪到参数的 tensor 返回值替换为参数 `Var` 本身。无法追踪的值
 （kernel 内部分配的输出）和标量保留原表达式。
 
+**正是这一步让"返回 → 参数"映射无需分析即可读出。** 它运行之后，返回位置 `j`
+写回参数 `i` 当且仅当 `ReturnStmt->value_[j]` 就**是** `params_[i]`（指针同一
+性）——这正是 `IRProperty::ReturnParamsExplicit` 所断言的。因此位于本 pass 及其
+之后的消费者（orchestration codegen、`ClassifyIterArgCarry`）调用
+`return_lineage::ExplicitReturnedParamIndices(func)` 这一"函数局部的结构性读
+取"，而不再重跑跨函数追踪器。`ReturnedParamIndices` 只保留给：在该属性建立**之
+前**运行的调用方（`ExpandMixedKernel`、scope outliner）、本 pass 自身，以及必须
+独立重新推导才能起到校验作用的属性验证器。
+
+由于它是 codegen 的前置条件，手工构造 IR 并直接调用 orchestration codegen 的测试
+必须先运行本 pass（见 `tests/ut/codegen/_orchestration_codegen_common.py`），正如
+它们必须先运行 `DeriveCallDirections`、`MaterializeRuntimeScopes` 和
+`ClassifyIterArgCarry` 一样。
+
 ### Step A —— 计算并应用每个函数的置换
 
 对每个 `InCore` 函数，`BuildReturnToParamMapping` 单次遍历函数体（不含末

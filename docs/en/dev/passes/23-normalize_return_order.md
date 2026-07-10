@@ -89,6 +89,22 @@ and Group/Spmd wrapper calls) and replaces every tensor return value that
 traces to a param with the param `Var` itself. Untraceable values
 (kernel-allocated outputs) and scalars keep their original expression.
 
+**This step is what makes the return→param map readable without an analysis.**
+Once it has run, return position `j` writes back param `i` exactly when
+`ReturnStmt->value_[j]` *is* `params_[i]` by pointer identity — which is what
+`IRProperty::ReturnParamsExplicit` asserts. Consumers at or after this pass
+(orchestration codegen, `ClassifyIterArgCarry`) therefore call
+`return_lineage::ExplicitReturnedParamIndices(func)`, a local structural read,
+rather than re-running the interprocedural tracer. Reserve
+`ReturnedParamIndices` for callers that run *before* the property exists
+(`ExpandMixedKernel`, the scope outliner), for this pass itself, and for the
+property verifier, which must re-derive independently to have anything to check.
+
+Because it is a codegen precondition, a test that hand-builds IR and calls
+orchestration codegen directly must run this pass first (see
+`tests/ut/codegen/_orchestration_codegen_common.py`), exactly as it must run
+`DeriveCallDirections`, `MaterializeRuntimeScopes` and `ClassifyIterArgCarry`.
+
 ### Step A — Compute and apply per-function permutations
 
 For each `InCore` function, `BuildReturnToParamMapping` walks the body

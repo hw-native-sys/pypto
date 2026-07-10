@@ -697,5 +697,81 @@ class TestNormalizeReturnOrderProperties:
         assert invalidated.empty()
 
 
+class TestReturnParamsAreStructurallyExplicit:
+    """The pass makes the return->param map readable off the ReturnStmt alone.
+
+    Consumers downstream of this pass (orchestration codegen, ClassifyIterArgCarry)
+    read return position `j` -> param `i` by pointer identity instead of tracing
+    SSA lineage across functions, so the canonical form is load-bearing.
+    """
+
+    def _return_values(self, program, func_name):
+        for _gv, func in program.functions.items():
+            if func.name != func_name:
+                continue
+            body = func.body
+            stmts = list(body.stmts) if isinstance(body, ir.SeqStmts) else [body]
+            ret = stmts[-1]
+            assert isinstance(ret, ir.ReturnStmt), f"'{func_name}' body does not end in a ReturnStmt"
+            return list(ret.value), list(func.params)
+        raise AssertionError(f"function '{func_name}' not found")
+
+    def test_multi_out_kernel_returns_reference_their_params(self):
+        """Each returned tensor IS the param object, not an SSA alias of it."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[64], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[64], pl.FP32]],
+                out_1: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]:
+                t: pl.Tile[[64], pl.FP32] = pl.load(a, [0], [64])
+                r0: pl.Tensor[[64], pl.FP32] = pl.store(t, [0], out_0)
+                r1: pl.Tensor[[64], pl.FP32] = pl.store(t, [0], out_1)
+                return r0, r1
+
+        values, params = self._return_values(Before, "kernel")
+        # Before: the returns are the SSA aliases r0 / r1, not the params.
+        before_vars = [v for v in values if isinstance(v, ir.Var)]
+        assert len(before_vars) == len(values)
+        assert [v.name_hint for v in before_vars] == ["r0", "r1"]
+
+        After = _run_normalize(Before)
+        values, params = self._return_values(After, "kernel")
+        # After: pointer identity with params_[1] and params_[2].
+        assert values[0] is params[1]
+        assert values[1] is params[2]
+
+    def test_unreturned_inout_param_does_not_shift_the_mapping(self):
+        """An InOut param written in place but not returned must not shift positions.
+
+        The naive "tail-align returns onto the trailing Out/InOut params"
+        heuristic mis-binds here (#1573); reading the ReturnStmt cannot.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                inout_t: pl.InOut[pl.Tensor[[64], pl.FP32]],
+                out_a: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t: pl.Tile[[64], pl.FP32] = pl.load(inout_t, [0], [64])
+                _w: pl.Tensor[[64], pl.FP32] = pl.store(t, [0], inout_t)
+                r: pl.Tensor[[64], pl.FP32] = pl.store(t, [0], out_a)
+                return r
+
+        After = _run_normalize(Before)
+        values, params = self._return_values(After, "kernel")
+        # The single return binds to out_a (index 1), not to the unreturned
+        # InOut param at index 0.
+        assert len(values) == 1
+        assert values[0] is params[1]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

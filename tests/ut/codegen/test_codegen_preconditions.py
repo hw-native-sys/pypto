@@ -10,7 +10,8 @@
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
-from pypto import codegen, passes
+from pypto import backend, codegen, passes
+from pypto.backend import BackendType
 
 
 @pytest.fixture(autouse=True)
@@ -89,3 +90,75 @@ def test_orchestration_codegen_precondition_entry_point_is_wired():
                 codegen.generate_orchestration(program, func)
             return
     pytest.fail("No orchestration function found in program")
+
+
+def _finalize(program):
+    """Run the codegen-entry passes, deliberately omitting NormalizeReturnOrder."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B)
+    return passes.classify_iter_arg_carry()(
+        passes.materialize_runtime_scopes()(passes.derive_call_directions()(program))
+    )
+
+
+def _orch_func(program):
+    for func in program.functions.values():
+        if func.func_type == pl.FunctionType.Orchestration:
+            return func
+    pytest.fail("No orchestration function found in program")
+    raise AssertionError  # unreachable, satisfies type checkers
+
+
+@pl.program
+class _MultiOutProgram:
+    """A kernel with two Out params that returns only one of them.
+
+    Aliasing the orchestration result to the wrong Out param would silently
+    route every downstream consumer into the scratch buffer (#1702/#1573).
+    """
+
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(
+        self,
+        a: pl.Tensor[[16, 16], pl.FP32],
+        scratch: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        t: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+        s: pl.Tensor[[16, 16], pl.FP32] = pl.store(t, [0, 0], scratch)
+        t2: pl.Tile[[16, 16], pl.FP32] = pl.load(s, [0, 0], [16, 16])
+        r: pl.Tensor[[16, 16], pl.FP32] = pl.store(t2, [0, 0], out)
+        return r
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orch(
+        self,
+        a: pl.Tensor[[16, 16], pl.FP32],
+        d: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        sc: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
+        d = self.kernel(a, sc, d)
+        return d
+
+
+def test_orchestration_codegen_requires_return_params_explicit_for_multi_out_callee():
+    """Codegen reads the return->param map off the ReturnStmt, so it needs the property.
+
+    Without NormalizeReturnOrder the kernel returns an SSA alias of `out` rather
+    than `out` itself. Codegen must refuse to guess which of the two Out params
+    the result aliases.
+    """
+    program = _finalize(_MultiOutProgram)
+    with pytest.raises(Exception, match="ReturnParamsExplicit"):
+        codegen.generate_orchestration(program, _orch_func(program))
+
+
+def test_orchestration_codegen_aliases_the_returned_out_param_not_the_scratch():
+    """With the property established, the result aliases `out`, never `scratch`."""
+    program = _finalize(passes.normalize_return_order()(_MultiOutProgram))
+    code = codegen.generate_orchestration(program, _orch_func(program)).code
+
+    # The task's outputs are (scratch, out) in param order; `d` is the real
+    # output and must be the one the orchestration result binds to.
+    add_outputs = [line.strip() for line in code.splitlines() if "add_output" in line]
+    assert add_outputs == ["params_t0.add_output(sc);", "params_t0.add_output(ext_d);"]

@@ -391,6 +391,53 @@ std::vector<std::optional<size_t>> ReturnedParamIndicesImpl(const FunctionPtr& f
 
 }  // namespace
 
+// Locate the topmost ReturnStmt. Fast path: a function body is normally a
+// SeqStmts whose last statement is the return. Split AIV kernels keep theirs
+// nested inside the split body, so fall back to a walk.
+ReturnStmtPtr FindFirstReturn(const StmtPtr& body) {
+  if (auto seq = As<SeqStmts>(body); seq && !seq->stmts_.empty()) {
+    if (auto ret = As<ReturnStmt>(seq->stmts_.back())) return ret;
+  }
+  class FirstReturnFinder : public IRVisitor {
+   public:
+    ReturnStmtPtr first_return;
+
+   protected:
+    void VisitStmt_(const ReturnStmtPtr& ret) override {
+      if (!first_return) first_return = ret;
+    }
+  };
+  FirstReturnFinder finder;
+  finder.VisitStmt(body);
+  return finder.first_return;
+}
+
+std::vector<std::optional<size_t>> ExplicitReturnedParamIndices(const FunctionPtr& func) {
+  if (!func || !func->body_) return {};
+  auto ret = FindFirstReturn(func->body_);
+  if (!ret || ret->value_.empty()) return {};
+
+  std::unordered_map<const Var*, size_t> param_to_index;
+  for (size_t i = 0; i < func->params_.size(); ++i) param_to_index.emplace(func->params_[i].get(), i);
+
+  std::vector<std::optional<size_t>> result;
+  result.reserve(ret->value_.size());
+  for (const auto& value : ret->value_) {
+    std::optional<size_t> idx;
+    if (auto var = AsVarLike(value)) {
+      auto it = param_to_index.find(var.get());
+      if (it != param_to_index.end()) idx = it->second;
+    }
+    result.push_back(idx);
+  }
+  return result;
+}
+
+std::optional<size_t> ExplicitReturnedParamIndex(const FunctionPtr& func) {
+  auto indices = ExplicitReturnedParamIndices(func);
+  return indices.empty() ? std::nullopt : indices[0];
+}
+
 std::optional<size_t> ReturnedParamIndex(const FunctionPtr& func, const ProgramPtr& program) {
   auto indices = ReturnedParamIndicesImpl(func, program);
   return indices.empty() ? std::nullopt : indices[0];

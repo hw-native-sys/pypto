@@ -49,6 +49,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
+#include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/transforms/utils/wrapper_call_utils.h"
@@ -3025,14 +3026,16 @@ class OrchestrationStmtCodegen : public CodegenBase {
     return out_indices;
   }
 
-  // Precise return-position -> callee param-index map, memoized per callee.
-  // Empty when the callee has no traceable top-level ReturnStmt (Group/Spmd
-  // wrappers) — callers then fall back to the direction-based tail heuristic.
+  // Return-position -> callee param-index map, read straight off the callee's
+  // ReturnStmt (pointer identity) and memoized per callee. Pipeline IR
+  // satisfies IRProperty::ReturnParamsExplicit, which is what makes this a
+  // lookup rather than an analysis. Empty when the callee has no ReturnStmt —
+  // callers then fall back to the direction-based tail heuristic.
   const std::vector<std::optional<size_t>>& GetReturnedParamIndices(const FunctionPtr& callee) {
     auto it = returned_param_indices_cache_.find(callee.get());
     if (it != returned_param_indices_cache_.end()) return it->second;
-    auto inserted =
-        returned_param_indices_cache_.emplace(callee.get(), FindReturnedParamIndices(callee, program_));
+    auto inserted = returned_param_indices_cache_.emplace(
+        callee.get(), ir::return_lineage::ExplicitReturnedParamIndices(callee));
     return inserted.first->second;
   }
 
@@ -3297,12 +3300,15 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // result plus per-block GM scratch tensors used by a pl.spmd-dispatched
     // mixed kernel), guessing wrong silently routes every downstream consumer
     // into the wrong buffer (#1702). Pipeline IR satisfies ReturnParamsExplicit
-    // so the trace is a pointer-identity lookup; the fallback is reachable
-    // only for parsed IR with a single output, where it is unambiguous.
-    auto returned_idx = FindReturnedParamIndex(callee, program_);
+    // so this is a pointer-identity lookup; the fallback is reachable only for
+    // IR with a single output, where it is unambiguous.
+    const auto& ret_map = GetReturnedParamIndices(callee);
+    auto returned_idx = ret_map.empty() ? std::nullopt : ret_map[0];
     INTERNAL_CHECK_SPAN(returned_idx.has_value() || out_indices.size() == 1, call->span_)
         << "Internal error: cannot map return of callee '" << callee->name_ << "' to one of its "
-        << out_indices.size() << " Out/InOut params (no traceable ReturnStmt); aliasing would be a guess";
+        << out_indices.size()
+        << " Out/InOut params; its ReturnStmt does not reference a param directly, so the IR violates "
+           "IRProperty::ReturnParamsExplicit (run NormalizeReturnOrder). Aliasing would be a guess";
     size_t param_idx = returned_idx.value_or(out_indices[0]);
     EmitTensorAlias(result_var, var_name, call, param_idx);
   }
@@ -3793,7 +3799,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::unordered_map<std::string, int64_t> gm_pipe_workspace_elements_by_callee_;
   std::unordered_map<std::string, std::string> tensor_create_size_expr_by_emit_name_;
   std::unordered_map<std::string, std::string> dist_param_to_ctx_param_;
-  /// Memoizes ``FindReturnedParamIndices`` per callee Function. Tuple/submit
+  /// Memoizes ``ExplicitReturnedParamIndices`` per callee Function. Tuple/submit
   /// alias generation runs once per call site, but distinct call sites may
   /// share a callee; caching the per-callee return→param map keeps the codegen
   /// from re-walking the same callee body and stays within the O(N log N) pass

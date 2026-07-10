@@ -12,7 +12,6 @@
 #ifndef PYPTO_CODEGEN_ORCHESTRATION_ORCHESTRATION_ANALYSIS_H_
 #define PYPTO_CODEGEN_ORCHESTRATION_ORCHESTRATION_ANALYSIS_H_
 
-#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <optional>
@@ -137,51 +136,6 @@ class VarLineageCollector : public ir::IRVisitor {
 
   ir::ProgramPtr program_;
 };
-
-/// Find which Out/InOut parameter index a callee function actually returns.
-///
-/// Walks the callee's body to locate the topmost ReturnStmt, then traces the
-/// returned value (the first element of ``ret.value_``) back through SSA
-/// rebinds (``var = pl.assemble(var, ...)`` chains, ForStmt iter args) to a
-/// source Param. The returned index points into ``callee->params_`` of the
-/// Param that the return ultimately came from.
-///
-/// Returns ``std::nullopt`` when:
-///   - callee is null or has no body
-///   - no ReturnStmt is reachable in the top-level body
-///   - the return value cannot be resolved to a single Param (e.g., a fresh
-///     value not derived from any parameter)
-///
-/// Use case: orchestration alias generation for kernels that declare multiple
-/// ``pl.Out[...]`` parameters (typically the real output + GM scratch
-/// passed-through) but expose only one return value at the Python call
-/// site. Without this trace, the codegen falls back to the *first* Out
-/// parameter, which silently aliases the kernel's result SSA to a scratch
-/// tensor.
-std::optional<size_t> FindReturnedParamIndex(const ir::FunctionPtr& callee, const ir::ProgramPtr& program);
-
-/// Per-position generalization of ``FindReturnedParamIndex`` for multi-output
-/// (tuple-returning) kernels.
-///
-/// Walks the callee's topmost ``ReturnStmt`` and traces *each* returned value
-/// back to its source ``callee->params_`` index. The returned vector is indexed
-/// by return-tuple position; entry ``j`` is the param index that tuple element
-/// ``j`` writes back, or ``std::nullopt`` when that position is not a param
-/// writeback (e.g. an auxiliary scalar such as an SPMD loop iv).
-///
-/// Returns an **empty vector** when the callee has no traceable top-level
-/// ``ReturnStmt`` (null/bodyless callee, or a Group/Spmd wrapper that ends in
-/// the inner kernel call). Callers should fall back to a direction-based
-/// heuristic in that case.
-///
-/// Use case: orchestration tuple/submit alias generation. The naive
-/// "tail-align return elements onto the trailing Out/InOut params" heuristic
-/// silently mis-maps when a kernel takes an ``InOut`` param that is written
-/// in place but *not* returned (issue #1573) — the unreturned param shifts the
-/// alignment and every carry binds to the wrong source tensor. This precise
-/// map removes that ambiguity by consulting the ReturnStmt directly.
-std::vector<std::optional<size_t>> FindReturnedParamIndices(const ir::FunctionPtr& callee,
-                                                            const ir::ProgramPtr& program);
 
 /// Peek through a leading AUTO ``RuntimeScopeStmt`` so structural analyses
 /// reach the original statements. Thin forward to

@@ -188,13 +188,18 @@ Arg params_t1;
 params_t1.add_input(ext_output);  // result -> ext_output（无别名声明）
 ```
 
-结果别名到哪个 `Out`/`InOut` 参数是查表而非启发式：流水线 IR 满足
+结果别名到哪个 `Out`/`InOut` 参数是查表而非启发式——也不是分析。
 `ReturnParamsExplicit` 属性
-（[`NormalizeReturnOrder`](../passes/23-normalize_return_order.md)），
-`FindReturnedParamIndex` 通过 `ir::return_lineage` 以指针同一性把每个返回值解析到参数。旧的血缘追踪（Var 到 Var 别名、循环 carry、builtin 回
-写、tuple 调用的 `TupleGetItem`、Group/Spmd 包装函数）仅保留给手工解析的
-IR。当追踪不到任何参数时，仅在被调用者恰好只有一个 `Out`/`InOut` 时单返回
-值才回退到该唯一参数——多输出且无法追踪是内部错误，绝不猜测。
+（[`NormalizeReturnOrder`](../passes/23-normalize_return_order.md)）保证：
+每个"写回参数"的张量返回值**就是**该参数本身（指针同一性）。因此 codegen 直接
+从被调用者的 `ReturnStmt` 上读取"返回位置 → 参数下标"映射
+（`ir::return_lineage::ExplicitReturnedParamIndices`）：无需 SSA 遍历、无需递归
+进入被调用者、无需 `Program`。跨函数的血缘追踪器（`ReturnedParamIndices`）留在
+IR 层，只服务于在该属性建立**之前**运行的那些 pass。
+
+因此该属性是 codegen 的前置条件。当某个返回位置解析不到参数时，仅在被调用者恰好
+只有一个 `Out`/`InOut` 时单返回值才回退到该唯一参数——多输出的被调用者若其
+`ReturnStmt` 未直接引用参数，则是内部错误，绝不猜测。
 
 不参与重映射的情形：phi/循环 carry 的重赋值（它重新绑定外层 `if`/循环所拥有的左值）
 保留 `<name> = <src>;` 形式；源在读取者的 C++ 作用域中无效的张量（manual scope 局部

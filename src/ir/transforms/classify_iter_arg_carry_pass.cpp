@@ -252,7 +252,7 @@ class AliasForest {
     auto call_dirs = call->GetArgDirections();
     if (call_dirs.size() != call->args_.size()) return nullptr;
     FunctionPtr callee = program ? program->GetFunction(call->op_->name_) : nullptr;
-    std::optional<size_t> returned_idx = return_lineage::ReturnedParamIndex(callee, program);
+    std::optional<size_t> returned_idx = return_lineage::ExplicitReturnedParamIndex(callee);
     for (size_t a = 0; a < call_dirs.size(); ++a) {
       if (call_dirs[a] != ArgDirection::OutputExisting && call_dirs[a] != ArgDirection::InOut) continue;
       if (returned_idx.has_value() && a != *returned_idx) continue;

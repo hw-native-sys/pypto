@@ -20,28 +20,11 @@
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/program.h"
-#include "pypto/ir/stmt.h"
-#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/verifier/verifier.h"
 
 namespace pypto {
 namespace ir {
-
-namespace {
-
-// Locate the topmost ReturnStmt in a function body.
-class FirstReturnFinder : public IRVisitor {
- public:
-  ReturnStmtPtr first_return;
-
- protected:
-  void VisitStmt_(const ReturnStmtPtr& ret) override {
-    if (!first_return) first_return = ret;
-  }
-};
-
-}  // namespace
 
 /// Verifies IRProperty::ReturnParamsExplicit: in every InCore/Group/Spmd
 /// function, each tensor return value that is a param writeback references
@@ -70,9 +53,8 @@ class ReturnParamsExplicitVerifierImpl : public PropertyVerifier {
       }
       if (!has_tensor_return) continue;
 
-      FirstReturnFinder finder;
-      finder.VisitStmt(func->body_);
-      if (!finder.first_return) {
+      auto first_return = return_lineage::FindFirstReturn(func->body_);
+      if (!first_return) {
         diagnostics.emplace_back(
             DiagnosticSeverity::Error, "ReturnParamsExplicit", 0,
             "Function '" + func->name_ + "' declares tensor return types but has no ReturnStmt", func->span_);
@@ -83,7 +65,7 @@ class ReturnParamsExplicitVerifierImpl : public PropertyVerifier {
       for (const auto& p : func->params_) param_set.insert(p.get());
 
       auto ret_to_param = return_lineage::ReturnedParamIndices(func, program);
-      const auto& values = finder.first_return->value_;
+      const auto& values = first_return->value_;
       for (size_t i = 0; i < values.size(); ++i) {
         if (i < func->return_types_.size() && !AsTensorTypeLike(func->return_types_[i])) continue;
         auto var = AsVarLike(values[i]);
@@ -98,7 +80,7 @@ class ReturnParamsExplicitVerifierImpl : public PropertyVerifier {
                                      " ('" + name + "') aliases param index " +
                                      std::to_string(ret_to_param[i].value()) +
                                      "; param-writeback returns must reference the param directly",
-                                 finder.first_return->span_);
+                                 first_return->span_);
       }
     }
   }
