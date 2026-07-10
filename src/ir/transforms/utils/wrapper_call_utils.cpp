@@ -11,7 +11,10 @@
 
 #include "pypto/ir/transforms/utils/wrapper_call_utils.h"
 
+#include <cstddef>
 #include <functional>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -113,6 +116,81 @@ std::vector<WrapperCallInfo> CollectInnerCalls(const FunctionPtr& wrapper, const
   });
   visitor.VisitStmt(wrapper->body_);
   return result;
+}
+
+namespace {
+
+/// The function's own `param_directions_`, padded to `params_.size()` so the
+/// result is always positionally indexable.
+std::vector<ParamDirection> DeclaredDirections(const FunctionPtr& func) {
+  std::vector<ParamDirection> declared = func->param_directions_;
+  declared.resize(func->params_.size(), ParamDirection::In);
+  return declared;
+}
+
+}  // namespace
+
+std::unordered_map<const Function*, std::vector<ParamDirection>> ComputeWrapperEffectiveDirections(
+    const ProgramPtr& program) {
+  std::unordered_map<const Function*, std::vector<ParamDirection>> memo;
+  if (!program) return memo;
+
+  std::unordered_set<const Function*> visiting;
+
+  std::function<std::vector<ParamDirection>(const FunctionPtr&)> compute_effective =
+      [&](const FunctionPtr& func) -> std::vector<ParamDirection> {
+    if (!func) return {};
+    auto memo_it = memo.find(func.get());
+    if (memo_it != memo.end()) return memo_it->second;
+
+    // Cycle guard: fall back to declared directions if a recursion cycle exists.
+    // Not memoized — the value is only valid for this in-progress recursion.
+    if (!visiting.insert(func.get()).second) {
+      return DeclaredDirections(func);
+    }
+
+    // Seed from the declaration so the merge below is monotone: an inner call
+    // can reveal that a param is written (In → Out → InOut), never that a
+    // declared writer is read-only. Without this a wrapper that writes a param
+    // through a builtin rather than an inner call — or that has no body / no
+    // inner calls at all — would infer a bogus all-In vector, and
+    // DeriveCallDirections would write that loss back into the signature.
+    std::vector<ParamDirection> directions = DeclaredDirections(func);
+
+    std::unordered_map<const Var*, size_t> param_to_index;
+    for (size_t i = 0; i < func->params_.size(); ++i) {
+      param_to_index[func->params_[i].get()] = i;
+    }
+
+    for (const auto& [inner_call, inner_callee] : CollectInnerCalls(func, program)) {
+      const auto& inner_args = inner_call->args_;
+      std::vector<ParamDirection> inner_dirs = IsWrapperType(inner_callee->func_type_)
+                                                   ? compute_effective(inner_callee)
+                                                   : inner_callee->param_directions_;
+      for (size_t arg_idx = 0; arg_idx < inner_args.size() && arg_idx < inner_dirs.size(); ++arg_idx) {
+        auto var = AsVarLike(inner_args[arg_idx]);
+        if (!var) continue;
+        auto it = param_to_index.find(var.get());
+        if (it == param_to_index.end()) continue;
+        ParamDirection d = inner_dirs[arg_idx];
+        ParamDirection& merged = directions[it->second];
+        if (d == ParamDirection::InOut || (d == ParamDirection::Out && merged == ParamDirection::In)) {
+          merged = d;
+        }
+      }
+    }
+
+    visiting.erase(func.get());
+    memo.emplace(func.get(), directions);
+    return directions;
+  };
+
+  for (const auto& [gvar, func] : program->functions_) {
+    if (func && IsWrapperType(func->func_type_)) compute_effective(func);
+  }
+  // compute_effective only ever runs on wrappers — seeded here, or reached via
+  // the nested Group/Spmd recursion — so every memo key is a Group/Spmd func.
+  return memo;
 }
 
 }  // namespace ir

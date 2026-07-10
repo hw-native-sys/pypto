@@ -2022,7 +2022,7 @@ Pass ConvertTensorToTileOps() {
     std::vector<FunctionPtr> functions_phase2a;
     functions_phase2a.reserve(functions_phase1.size());
     for (const auto& func : functions_phase1) {
-      if (func->func_type_ == FunctionType::Spmd || func->func_type_ == FunctionType::Group) {
+      if (IsWrapperType(func->func_type_)) {
         auto result = PropagateOutputsThroughWrapper(func, incore_added_outputs, transformed_incore_funcs);
         functions_phase2a.push_back(result.func);
         if (result.num_added_outputs > 0) {

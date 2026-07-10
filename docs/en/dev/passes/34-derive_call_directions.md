@@ -1,6 +1,6 @@
 # DeriveCallDirections Pass
 
-A single-phase pass over each `Function` body: it derives per-argument `ArgDirection` for every cross-function `Call` based on callee `ParamDirection` and buffer lineage, and writes the resolved vector to `Call.attrs["arg_directions"]`. It does **not** touch manual-scope dependency edges.
+A pass that first materializes the effective `ParamDirection` of every Group/Spmd wrapper into its signature, then walks each `Function` body deriving a per-argument `ArgDirection` for every cross-function `Call` from callee `ParamDirection` and buffer lineage, writing the resolved vector to `Call.attrs["arg_directions"]`. It does **not** touch manual-scope dependency edges.
 
 ## Overview
 
@@ -50,7 +50,17 @@ program_with_dirs = derive_pass(program)
 
 ## Algorithm
 
-The pass is a `ProgramPass`. For each `Function` body it runs three sub-passes.
+The pass is a `ProgramPass`. It first rewrites Group/Spmd wrapper signatures program-wide (phase 0), then runs three sub-passes over each `Function` body.
+
+### 0. Wrapper direction materialization
+
+A Group/Spmd wrapper forwards its params 1:1 to an inner kernel call, but its own `param_directions_` can still read `In` for a param the inner kernel writes — the scope outliners infer directions from the body they extract, and later passes (`ExpandMixedKernel`, `SplitVectorKernel`) rebuild wrapper bodies around freshly split callees without revisiting the signature.
+
+`MaterializeWrapperDirections` calls `ComputeWrapperEffectiveDirections` (`include/pypto/ir/transforms/utils/wrapper_call_utils.h`) once for the whole program, then writes each result back into `Function::param_directions_`. For each wrapper that helper walks the inner calls, matches each arg to a wrapper param by `Var` pointer identity, and merges the inner callee's direction with the lattice `InOut` > `Out` > `In`. Nested Group→Group chains resolve recursively, with a cycle guard that falls back to the declared directions. One shared memo across the whole program means each wrapper body is visited once, keeping the phase linear in total body size.
+
+Every wrapper is resolved against the *pre-phase-0 snapshot* of the program, so the result does not depend on function map iteration order.
+
+This establishes the invariant that **`callee->param_directions_` is the single source of truth for every callee kind**. The three sub-passes below, plus `AutoDeriveTaskDependencies`, the `CallDirectionsResolved` verifier, and orchestration codegen, all read that field directly instead of recomputing the effective view — which is what keeps codegen a strict 1-to-1 translation. The verifier re-checks the invariant on every program it inspects.
 
 ### 1. Buffer-root collection
 
@@ -65,7 +75,7 @@ The pass is a `ProgramPass`. For each `Function` body it runs three sub-passes.
 
 ### 3. Direction rewrite
 
-`CallDirectionMutator` walks every non-builtin `Call`. For Group/Spmd callees the effective per-position directions are recovered via `ComputeGroupEffectiveDirections` (`orchestration_analysis.h`); other callees use their declared `param_directions_`. A `sequential_depth_` counter is incremented on non-`Parallel` `For` and on `While`, driving the *R-seq* promotion below.
+`CallDirectionMutator` walks every non-builtin `Call`, reading the callee's `param_directions_` — correct for every callee kind, since phase 0 already materialized the Group/Spmd wrappers. A `sequential_depth_` counter is incremented on non-`Parallel` `For` and on `While`, driving the *R-seq* promotion below.
 
 For each positional argument the mutator picks a direction by this table. A callee `Out` is resolved by trying three promotion rules in order — R-seq → R-prior → R-enclosing; if none fires it stays `OutputExisting`:
 
@@ -140,9 +150,10 @@ inline const PassProperties kDeriveCallDirectionsProperties{
 
 **Implementation**: `src/ir/transforms/derive_call_directions_pass.cpp`
 
+- `MaterializeWrapperDirections` — phase 0: writes effective Group/Spmd directions into `Function::param_directions_`
 - `PriorWriterCollector` — per-scope first-writer analysis (bottom-up cache + top-down scan)
 - `CallDirectionMutator` — `IRMutator` that rewrites every non-builtin `Call` with the resolved `arg_directions` vector
-- Reuses `BufferRootCollector` and `ComputeGroupEffectiveDirections` from `include/pypto/codegen/orchestration/orchestration_analysis.h`
+- Reuses `ComputeWrapperEffectiveDirections` from `include/pypto/ir/transforms/utils/wrapper_call_utils.h` and `BufferRootCollector` from `include/pypto/codegen/orchestration/orchestration_analysis.h`
 
 **Property verifier**: `src/ir/verifier/verify_call_directions.cpp` (factory in `include/pypto/ir/verifier/verifier.h`)
 

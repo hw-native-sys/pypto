@@ -1880,5 +1880,289 @@ class TestNoDepOverride:
         _verify_call_directions(new_prog)
 
 
+class TestMaterializeWrapperDirections:
+    """Phase 0: Group/Spmd wrapper signatures are rewritten to their effective directions.
+
+    A wrapper forwards its params 1:1 to an inner kernel call, but its own
+    ``param_directions_`` can still read ``In`` for a param the inner kernel
+    writes. ``DeriveCallDirections`` recovers the true direction once and stores
+    it in the signature, so every downstream consumer reads
+    ``callee.param_directions`` instead of recomputing it.
+    """
+
+    def _dirs_of(self, program, func_name):
+        for _gv, func in program.functions.items():
+            if func.name == func_name:
+                return list(func.param_directions)
+        raise AssertionError(f"function '{func_name}' not found in program")
+
+    def test_group_wrapper_out_direction_materialized(self):
+        """A Group declaring both params In gains Out on the param its kernel writes."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                ret: pl.Tensor[[64], pl.FP32] = pl.store(t, [0], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Group)
+            def group(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                r: pl.Tensor[[64], pl.FP32] = self.kernel(x, out)
+                return r
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                dst: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                r: pl.Tensor[[64], pl.FP32] = self.group(x, dst)
+                return r
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec)
+                ret = pl.tile.store(t, [0], out)
+                return ret
+
+            # `out` is now declared Out: the pass wrote the effective direction back.
+            @pl.function(type=pl.FunctionType.Group, level=pl.Level.CORE_GROUP, role=pl.Role.SubWorker)
+            def group(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                r = self.kernel(x, out, attrs={"arg_directions": [pl.adir.input, pl.adir.output_existing]})
+                return r
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                dst: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                # `dst` resolves to OutputExisting because the Group's `out` is
+                # now Out; a stale `In` would have left this as Input.
+                r = self.group(x, dst, attrs={"arg_directions": [pl.adir.input, pl.adir.output_existing]})
+                return r
+
+        assert self._dirs_of(Before, "group") == [ir.ParamDirection.In, ir.ParamDirection.In]
+        After = passes.derive_call_directions()(Before)
+        assert self._dirs_of(After, "group") == [ir.ParamDirection.In, ir.ParamDirection.Out]
+        ir.assert_structural_equal(After, Expected)
+        _verify_call_directions(After)
+
+        # Re-running on already-materialized IR is a no-op.
+        ir.assert_structural_equal(passes.derive_call_directions()(After), After)
+
+    def test_spmd_wrapper_inout_direction_materialized(self):
+        """An Spmd wrapper param feeding an InOut kernel param becomes InOut, not In."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, acc: pl.InOut[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+                t: pl.Tile[[64], pl.FP32] = pl.load(acc, [0], [64])
+                t2: pl.Tile[[64], pl.FP32] = pl.tile.add(t, t)
+                ret: pl.Tensor[[64], pl.FP32] = pl.store(t2, [0], acc)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Spmd)
+            def shard(self, acc: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                r: pl.Tensor[[64], pl.FP32] = self.kernel(acc)
+                return r
+
+            @pl.function
+            def main(self, acc: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                r: pl.Tensor[[64], pl.FP32] = self.shard(acc)
+                return r
+
+        After = passes.derive_call_directions()(Before)
+        assert self._dirs_of(After, "shard") == [ir.ParamDirection.InOut]
+        _verify_call_directions(After)
+
+    def test_nested_group_chain_propagates_out(self):
+        """Group → Group → InCore: the Out direction reaches the outermost wrapper."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                ret: pl.Tensor[[64], pl.FP32] = pl.store(t, [0], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Group)
+            def inner(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                r: pl.Tensor[[64], pl.FP32] = self.kernel(x, out)
+                return r
+
+            @pl.function(type=pl.FunctionType.Group)
+            def outer(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                r: pl.Tensor[[64], pl.FP32] = self.inner(x, out)
+                return r
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                dst: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                r: pl.Tensor[[64], pl.FP32] = self.outer(x, dst)
+                return r
+
+        After = passes.derive_call_directions()(Before)
+        assert self._dirs_of(After, "inner") == [ir.ParamDirection.In, ir.ParamDirection.Out]
+        assert self._dirs_of(After, "outer") == [ir.ParamDirection.In, ir.ParamDirection.Out]
+        _verify_call_directions(After)
+
+    def test_declared_out_never_demoted_when_no_inner_call_writes_it(self):
+        """The merge is monotone: a declared Out survives even with no inner-call evidence.
+
+        ``scratch`` is declared Out but the wrapper's only inner call takes it
+        as In. A non-monotone merge would infer ``In`` and write that loss back
+        into the signature, silently dropping the write dependency at every
+        call site.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                ret: pl.Tensor[[64], pl.FP32] = pl.store(t, [0], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Group)
+            def group(
+                self,
+                scratch: pl.Out[pl.Tensor[[64], pl.FP32]],
+                out: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                # `scratch` is only ever read by the inner call.
+                r: pl.Tensor[[64], pl.FP32] = self.kernel(scratch, out)
+                return r
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[64], pl.FP32],
+                dst: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                r: pl.Tensor[[64], pl.FP32] = self.group(a, dst)
+                return r
+
+        After = passes.derive_call_directions()(Before)
+        # scratch keeps its declared Out; out is promoted In -> Out.
+        assert self._dirs_of(After, "group") == [ir.ParamDirection.Out, ir.ParamDirection.Out]
+        _verify_call_directions(After)
+
+
+class TestVerifyWrapperDirections:
+    """The CallDirectionsResolved verifier rejects a wrapper left with stale directions."""
+
+    def test_stale_group_directions_rejected(self):
+        # `group` declares `out` as In, but its kernel call writes it and the
+        # call sites already carry the matching arg_directions — exactly the
+        # inconsistency Phase 0 exists to prevent.
+        @pl.program
+        class Stale:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec)
+                ret = pl.tile.store(t, [0], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Group, level=pl.Level.CORE_GROUP, role=pl.Role.SubWorker)
+            def group(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                r = self.kernel(x, out, attrs={"arg_directions": [pl.adir.input, pl.adir.output_existing]})
+                return r
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                dst: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                r = self.group(x, dst, attrs={"arg_directions": [pl.adir.input, pl.adir.input]})
+                return r
+
+        with pytest.raises(Exception, match="stale param_directions_"):
+            _verify_call_directions(Stale)
+
+    def test_materialized_group_directions_accepted(self):
+        @pl.program
+        class Fresh:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec)
+                ret = pl.tile.store(t, [0], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Group, level=pl.Level.CORE_GROUP, role=pl.Role.SubWorker)
+            def group(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                r = self.kernel(x, out, attrs={"arg_directions": [pl.adir.input, pl.adir.output_existing]})
+                return r
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                dst: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                r = self.group(x, dst, attrs={"arg_directions": [pl.adir.input, pl.adir.output_existing]})
+                return r
+
+        _verify_call_directions(Fresh)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

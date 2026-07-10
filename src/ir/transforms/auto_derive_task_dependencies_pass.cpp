@@ -50,7 +50,6 @@ namespace ir {
 
 namespace {
 
-using ::pypto::codegen::ComputeGroupEffectiveDirections;
 using ::pypto::codegen::IsBuiltinOp;
 
 enum class AccessKind { Read, Write, ReadWrite };
@@ -348,15 +347,6 @@ bool HasTaskIdTail(const TypePtr& type) {
 bool HasTaskIdTail(const CallPtr& call) { return HasTaskIdTail(call ? call->GetType() : TypePtr{}); }
 
 bool HasTaskIdTail(const SubmitPtr& submit) { return HasTaskIdTail(submit ? submit->GetType() : TypePtr{}); }
-
-std::vector<ParamDirection> ResolveCalleeDirections(const ProgramPtr& program, const CallPtr& call,
-                                                    const FunctionPtr& callee) {
-  if (!callee) return {};
-  if (callee->func_type_ == FunctionType::Group || callee->func_type_ == FunctionType::Spmd) {
-    return ComputeGroupEffectiveDirections(callee, program);
-  }
-  return callee->param_directions_;
-}
 
 std::vector<VarPtr> GetDepAttr(const CallPtr& call, const char* key) {
   if (!call) return {};
@@ -874,7 +864,9 @@ class StorageRootAnalysis : public IRVisitor {
   std::vector<StorageLocation> CollectCallOutputLocations(const CallPtr& call) const {
     auto callee = program_ ? program_->GetFunction(call->op_->name_) : nullptr;
     if (!callee) return {};
-    auto dirs = ResolveCalleeDirections(program_, call, callee);
+    // Group/Spmd wrappers carry their effective directions in the signature:
+    // DeriveCallDirections (the immediately preceding pass) materialized them.
+    const auto& dirs = callee->param_directions_;
     std::vector<StorageLocation> locations;
     auto returned_locations = CollectReturnedLocations(call, callee);
     if (!returned_locations.empty()) return returned_locations;

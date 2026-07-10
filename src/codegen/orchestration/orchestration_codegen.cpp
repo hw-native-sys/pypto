@@ -3014,15 +3014,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   // --- Alias generation helpers ---
 
-  std::vector<ParamDirection> GetEffectiveDirections(const FunctionPtr& callee) {
-    if (callee->func_type_ == FunctionType::Group || callee->func_type_ == FunctionType::Spmd) {
-      return ComputeGroupEffectiveDirections(callee, program_);
-    }
-    return callee->param_directions_;
-  }
-
   std::vector<size_t> CollectOutIndices(const FunctionPtr& callee) {
-    const auto dirs = GetEffectiveDirections(callee);
+    const auto& dirs = callee->param_directions_;
     std::vector<size_t> out_indices;
     for (size_t i = 0; i < dirs.size(); ++i) {
       if (dirs[i] == ParamDirection::Out || dirs[i] == ParamDirection::InOut) {
@@ -3340,7 +3333,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     std::vector<size_t> out_indices;
     size_t tuple_out_base = 0;
     if (!precise) {
-      auto effective_dirs = GetEffectiveDirections(callee);
+      const auto& effective_dirs = callee->param_directions_;
       for (size_t i = 0; i < effective_dirs.size(); ++i) {
         if (effective_dirs[i] == ParamDirection::Out || effective_dirs[i] == ParamDirection::InOut) {
           out_indices.push_back(i);
@@ -3476,7 +3469,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     std::vector<size_t> out_indices;
     size_t tuple_out_base = 0;
     if (!precise) {
-      auto effective_dirs = GetEffectiveDirections(callee);
+      const auto& effective_dirs = callee->param_directions_;
       for (size_t i = 0; i < effective_dirs.size(); ++i) {
         if (effective_dirs[i] == ParamDirection::Out || effective_dirs[i] == ParamDirection::InOut) {
           out_indices.push_back(i);

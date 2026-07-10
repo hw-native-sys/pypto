@@ -407,8 +407,7 @@ Pass NormalizeReturnOrder() {
     bool modified = false;
 
     for (const auto& [gvar, func] : program->functions_) {
-      const bool is_wrapper =
-          func->func_type_ == FunctionType::Group || func->func_type_ == FunctionType::Spmd;
+      const bool is_wrapper = IsWrapperType(func->func_type_);
       if (IsInCoreType(func->func_type_) || is_wrapper) {
         // Step A0: make every tensor return an explicit param reference.
         FunctionPtr current = func;

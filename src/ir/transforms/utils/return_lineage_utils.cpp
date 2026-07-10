@@ -358,7 +358,7 @@ std::vector<std::optional<size_t>> ReturnedParamIndicesImpl(const FunctionPtr& f
   BodyIndexCollector index;
   index.VisitStmt(func->body_);
   if (!index.first_return || index.first_return->value_.empty()) {
-    if (func->func_type_ == FunctionType::Group || func->func_type_ == FunctionType::Spmd) {
+    if (IsWrapperType(func->func_type_)) {
       return record(MapWrapperReturnToParams(func, program));
     }
     return record({});

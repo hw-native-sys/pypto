@@ -220,7 +220,7 @@ class ClusterOutlinedPropertyVerifierImpl : public PropertyVerifier {
     for (const auto& [gv, func] : program->functions_) {
       if (!func || !func->body_) continue;
       // Group and Spmd functions are expected to contain cluster/spmd content
-      if (func->func_type_ == FunctionType::Group || func->func_type_ == FunctionType::Spmd) continue;
+      if (IsWrapperType(func->func_type_)) continue;
       ClusterOutlinedVerifier cluster_verifier(
           diagnostics, "ClusterOutlined",
           "Cluster ScopeStmt found in non-Group function (should have been outlined)");

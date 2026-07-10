@@ -292,6 +292,17 @@ inline bool IsInCoreType(FunctionType type) {
 }
 
 /**
+ * @brief Check if a FunctionType is a scope wrapper (Group or Spmd)
+ *
+ * Wrappers are synthesised by the scope outliners and forward their params 1:1
+ * to an inner kernel call, so passes routinely treat the two kinds alike
+ * (direction propagation, return lineage, return-order normalization).
+ */
+inline bool IsWrapperType(FunctionType type) {
+  return type == FunctionType::Group || type == FunctionType::Spmd;
+}
+
+/**
  * @brief Convert string to FunctionType
  * @param str String representation
  * @return FunctionType enum value

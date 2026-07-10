@@ -23,6 +23,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/utils/wrapper_call_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
 
@@ -30,7 +31,6 @@ namespace pypto {
 namespace ir {
 namespace {
 
-using ::pypto::codegen::ComputeGroupEffectiveDirections;
 using ::pypto::codegen::IsBuiltinOp;
 
 bool IsTensorTypedArg(const ExprPtr& arg) {
@@ -93,10 +93,11 @@ class CallDirectionChecker : public IRVisitor {
       return;
     }
 
-    std::vector<ParamDirection> effective = callee->param_directions_;
-    if (callee->func_type_ == FunctionType::Group || callee->func_type_ == FunctionType::Spmd) {
-      effective = ComputeGroupEffectiveDirections(callee, program_);
-    }
+    // Every callee kind — Group/Spmd wrappers included — carries its effective
+    // directions in the signature: DeriveCallDirections materializes them.
+    // ``VerifyWrapperDirectionsMaterialized`` (below) checks that invariant
+    // separately, so here we can read the field for any callee.
+    const auto& effective = callee->param_directions_;
 
     for (size_t i = 0; i < call->args_.size(); ++i) {
       ArgDirection d = arg_dirs[i];
@@ -184,14 +185,46 @@ class CallDirectionChecker : public IRVisitor {
   std::string func_name_;
 };
 
+std::string FormatDirections(const std::vector<ParamDirection>& dirs) {
+  std::ostringstream oss;
+  oss << "[";
+  for (size_t i = 0; i < dirs.size(); ++i) {
+    if (i > 0) oss << ", ";
+    oss << ParamDirectionToString(dirs[i]);
+  }
+  oss << "]";
+  return oss.str();
+}
+
+/// Check that every Group/Spmd wrapper's declared ``param_directions_`` already
+/// equals its effective directions. ``DeriveCallDirections`` establishes this
+/// so downstream consumers can read the field instead of recomputing; a stale
+/// ``In`` here would silently drop a write dependency at every call site.
+void VerifyWrapperDirectionsMaterialized(const FunctionPtr& func,
+                                         const std::vector<ParamDirection>& effective,
+                                         std::vector<Diagnostic>& diagnostics) {
+  if (effective == func->param_directions_) return;
+  std::ostringstream oss;
+  oss << "wrapper function '" << func->name_
+      << "' has stale param_directions_ after DeriveCallDirections; effective directions are "
+      << FormatDirections(effective) << " but the signature declares "
+      << FormatDirections(func->param_directions_);
+  diagnostics.emplace_back(DiagnosticSeverity::Error, "CallDirectionsResolved", 0, oss.str(), func->span_);
+}
+
 class CallDirectionsResolvedPropertyVerifierImpl : public PropertyVerifier {
  public:
   [[nodiscard]] std::string GetName() const override { return "CallDirectionsResolved"; }
 
   void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
     if (!program) return;
+    auto effective_by_func = ComputeWrapperEffectiveDirections(program);
     for (const auto& [gv, func] : program->functions_) {
       if (!func || !func->body_) continue;
+      auto it = effective_by_func.find(func.get());
+      if (it != effective_by_func.end()) {
+        VerifyWrapperDirectionsMaterialized(func, it->second, diagnostics);
+      }
       CallDirectionChecker checker(program, diagnostics, func->name_);
       checker.VisitStmt(func->body_);
     }

@@ -183,16 +183,6 @@ std::optional<size_t> FindReturnedParamIndex(const ir::FunctionPtr& callee, cons
 std::vector<std::optional<size_t>> FindReturnedParamIndices(const ir::FunctionPtr& callee,
                                                             const ir::ProgramPtr& program);
 
-/// Compute effective param directions for a Group function.
-///
-/// Group functions produced by the scope outliner have their parameters sorted
-/// alphabetically and all directions set to In. To recover the true
-/// Out/InOut direction, walk the Group body to find its inner kernel call and
-/// map the inner callee's directions back to the Group's parameter positions
-/// via pointer identity of the Var passed as the inner call argument.
-std::vector<ir::ParamDirection> ComputeGroupEffectiveDirections(const ir::FunctionPtr& group_func,
-                                                                const ir::ProgramPtr& program);
-
 /// Peek through a leading AUTO ``RuntimeScopeStmt`` so structural analyses
 /// reach the original statements. Thin forward to
 /// ``ir::transform_utils::UnwrapAutoScope``.
