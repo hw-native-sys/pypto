@@ -57,24 +57,19 @@ static TypePtr DeduceTileGatherType(const std::vector<ExprPtr>& args,
       << "The operator " << op_name << " requires src dtype to be FP16, FP32, INT16, or INT32, but got "
       << src_type->dtype_.ToString();
 
-  // Second arg: indices tile (must be i32)
+  // Second arg: indices tile (i32 on A2/A3; i32 or i16 on A5).
   auto idx_type = As<TileType>(args[1]->GetType());
   CHECK(idx_type) << "The operator " << op_name << " requires second argument to be a TileType, but got "
                   << args[1]->GetType()->TypeName();
-  CHECK(idx_type->dtype_ == DataType::INT32)
-      << "The operator " << op_name << " requires indices dtype to be INT32, but got "
+  CHECK(idx_type->dtype_ == DataType::INT32 || idx_type->dtype_ == DataType::INT16)
+      << "The operator " << op_name << " requires indices dtype to be INT32 (or INT16 on A5), but got "
       << idx_type->dtype_.ToString();
 
-  // Third arg: tmp workspace tile (must be i32, same shape as indices)
+  // Third arg: tmp workspace tile. The A5/A2A3 index form never reads tmp, so any
+  // Vec tile satisfies the contract; PTOAS only requires the operand to be present.
   auto tmp_type = As<TileType>(args[2]->GetType());
   CHECK(tmp_type) << "The operator " << op_name << " requires third argument to be a TileType, but got "
                   << args[2]->GetType()->TypeName();
-  CHECK(tmp_type->dtype_ == DataType::INT32)
-      << "The operator " << op_name << " requires tmp dtype to be INT32, but got "
-      << tmp_type->dtype_.ToString();
-  CHECK(tmp_type->shape_.size() == idx_type->shape_.size())
-      << "The operator " << op_name << " requires tmp shape rank to match indices rank ("
-      << idx_type->shape_.size() << "), but got " << tmp_type->shape_.size();
 
   // Output: shape from indices tile, dtype from src tile, propagate tile_view
   TileView tile_view;
@@ -91,8 +86,8 @@ REGISTER_OP("tile.gather")
     .set_op_category("TileOp")
     .set_description("Gather elements by index (maps to pto.tgather)")
     .add_argument("src", "Source tile (FP16, FP32, INT16, or INT32)")
-    .add_argument("indices", "Index tile (INT32)")
-    .add_argument("tmp", "Temporary workspace tile (INT32)")
+    .add_argument("indices", "Index tile (INT32, or INT16 on A5)")
+    .add_argument("tmp", "Temporary workspace tile (any dtype; not read by the A5/A2A3 index form)")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_input_memory(2, MemorySpace::Vec)
