@@ -4146,7 +4146,14 @@ class ASTParser:
         # through an intervening pl.range/pl.pipeline/if — emit the region in
         # place; it nests inside the open context. OutlineIncoreScopes outlines the
         # enclosing core function and the nested region survives.
-        if self._is_inside_scope(ir.ScopeKind.InCore):
+        #
+        # An ``@pl.function(type=pl.FunctionType.InCore)`` body is already a core
+        # function, so the region goes in place there too: there is nothing left for
+        # OutlineIncoreScopes to outline. This is the shape post-outline IR prints as
+        # (outlining consumes the InCoreScopeStmt and leaves the region directly in an
+        # InCore function body), so synthesizing a wrapper here would make print->parse
+        # lossy — the reparsed function would grow a spurious InCoreScopeStmt.
+        if self._is_inside_scope(ir.ScopeKind.InCore) or self._func_type == ir.FunctionType.InCore:
             self._emit_split_aiv_region(stmt, loop_var_name, split_mode)
             return
 
