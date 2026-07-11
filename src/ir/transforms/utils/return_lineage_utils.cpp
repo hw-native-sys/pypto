@@ -367,12 +367,22 @@ std::vector<std::optional<size_t>> ReturnedParamIndicesImpl(const FunctionPtr& f
   // inner call carries N return positions in ONE return expr. Expand it so the
   // map stays precise; fall through to the per-expr tracer when it is not that
   // shape, so this can only ever *add* precision.
+  //
+  // The expansion is only well-formed when the function really does declare N
+  // flat return positions (``return_types_.size() == N``). A function that
+  // declares a single ``pl.Tuple[T1, ..., TN]`` return has ONE return type -- a
+  // TupleType -- and returns the tuple as one value. Expanding that would hand
+  // every consumer an N-entry map for a 1-arity return, and CanonicalizeReturnValues
+  // would rewrite ``return t`` into N param returns that the one-entry
+  // ``return_types_`` cannot describe.
   const auto& rets = index.first_return->value_;
-  if (rets.size() == 1) {
+  const size_t declared_arity = func->return_types_.size();
+  if (rets.size() == 1 && declared_arity > 1) {
     if (auto tuple_var = AsVarLike(rets[0])) {
-      if (auto tuple_ty = As<TupleType>(tuple_var->GetType())) {
+      if (auto tuple_ty = As<TupleType>(tuple_var->GetType());
+          tuple_ty && tuple_ty->types_.size() == declared_arity) {
         auto expanded = ExpandForwardedTupleVar(tuple_var.get(), index, func->params_, program);
-        if (expanded.size() == tuple_ty->types_.size()) return record(expanded);
+        if (expanded.size() == declared_arity) return record(expanded);
       }
     }
   }

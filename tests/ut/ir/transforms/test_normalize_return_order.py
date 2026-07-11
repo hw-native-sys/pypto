@@ -162,6 +162,84 @@ class TestNormalizeReturnOrder:
         After = _run_normalize(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_group_wrapper_declaring_pl_tuple_return_stays_one_value(self):
+        """A Group wrapper declaring a single ``pl.Tuple[...]`` return keeps its ONE return value.
+
+        ``-> pl.Tuple[A, B]`` declares ONE return type (a TupleType); ``-> tuple[A, B]``
+        declares two. The forwarded-tuple expansion — which turns a wrapper's single
+        ``return packed`` into N explicit param returns — must therefore NOT fire here:
+        the wrapper has one declared return position, and expanding it would leave a
+        two-value ReturnStmt that its one-entry ``return_types_`` cannot describe.
+
+        Only ``kernel`` (which declares two flat positions) is canonicalized; the Group
+        wrapper is left exactly as written.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                x: pl.Tensor[[16], pl.FP32],
+                out_a: pl.Out[pl.Tensor[[16], pl.FP32]],
+                out_b: pl.Out[pl.Tensor[[16], pl.FP32]],
+            ) -> tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.FP32]]:
+                x_tile: pl.Tile[[16], pl.FP32] = pl.load(x, [0], [16])
+                a_tile: pl.Tile[[16], pl.FP32] = pl.tile.add(x_tile, x_tile)
+                b_tile: pl.Tile[[16], pl.FP32] = pl.tile.mul(x_tile, x_tile)
+                out_a_store: pl.Tensor[[16], pl.FP32] = pl.store(a_tile, [0], out_a)
+                out_b_store: pl.Tensor[[16], pl.FP32] = pl.store(b_tile, [0], out_b)
+                return (out_a_store, out_b_store)
+
+            @pl.function(type=pl.FunctionType.Group)
+            def group_func(
+                self,
+                x: pl.Tensor[[16], pl.FP32],
+                out_a: pl.Out[pl.Tensor[[16], pl.FP32]],
+                out_b: pl.Out[pl.Tensor[[16], pl.FP32]],
+            ) -> pl.Tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.FP32]]:
+                packed: tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.FP32]] = self.kernel(
+                    x, out_a, out_b
+                )
+                return packed
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                x: pl.Tensor[[16], pl.FP32],
+                out_a: pl.Out[pl.Tensor[[16], pl.FP32]],
+                out_b: pl.Out[pl.Tensor[[16], pl.FP32]],
+            ) -> tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.FP32]]:
+                x_tile: pl.Tile[[16], pl.FP32] = pl.load(x, [0], [16])
+                a_tile: pl.Tile[[16], pl.FP32] = pl.tile.add(x_tile, x_tile)
+                b_tile: pl.Tile[[16], pl.FP32] = pl.tile.mul(x_tile, x_tile)
+                out_a_store: pl.Tensor[[16], pl.FP32] = pl.store(a_tile, [0], out_a)  # noqa: F841
+                out_b_store: pl.Tensor[[16], pl.FP32] = pl.store(b_tile, [0], out_b)  # noqa: F841
+                return (out_a, out_b)
+
+            @pl.function(type=pl.FunctionType.Group)
+            def group_func(
+                self,
+                x: pl.Tensor[[16], pl.FP32],
+                out_a: pl.Out[pl.Tensor[[16], pl.FP32]],
+                out_b: pl.Out[pl.Tensor[[16], pl.FP32]],
+            ) -> pl.Tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.FP32]]:
+                packed: tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.FP32]] = self.kernel(
+                    x, out_a, out_b
+                )
+                return packed
+
+        After = _run_normalize(Before)
+        ir.assert_structural_equal(After, Expected)
+
+        # The wrapper's ReturnStmt arity must still match its ONE declared TupleType return.
+        group_func = After.get_function("group_func")
+        assert group_func is not None
+        assert len(group_func.return_types) == 1
+        assert isinstance(group_func.return_types[0], ir.TupleType)
+
     def test_single_return_noop(self):
         """Single Out param with single return → no reorder; return canonicalized to the param Var."""
 

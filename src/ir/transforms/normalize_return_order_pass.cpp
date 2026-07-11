@@ -159,6 +159,10 @@ FunctionPtr CanonicalizeReturnValues(const FunctionPtr& func, const ProgramPtr& 
       // #1573 resurfacing on exactly the wrappers its fix left on the
       // heuristic.
       if (op->value_.size() == 1 && ret_to_param_.size() > 1) {
+        // Only a function that declares N flat return positions may be given an
+        // N-value return. A single ``pl.Tuple[T1, ..., TN]`` return declares ONE
+        // (its ``return_types_`` is one TupleType) and stays one value.
+        if (func_->return_types_.size() != ret_to_param_.size()) return op;
         std::vector<ExprPtr> expanded;
         expanded.reserve(ret_to_param_.size());
         for (const auto& idx : ret_to_param_) {

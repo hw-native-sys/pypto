@@ -101,12 +101,8 @@ def _layer_guarded(
         pl.system.syncall(core_type="mix")
 
         mm = pl.matmul(pl.slice(q_pad, [ROWS_PER_CORE, HIDDEN], [pr0, 0]), wid, out_dtype=pl.FP32)
-        k_p = pl.cast(
-            pl.slice(k_cache, [ROWS_PER_CORE, HIDDEN], [cache_base + pr0, 0]), target_type=pl.FP32
-        )
-        v_p = pl.cast(
-            pl.slice(v_cache, [ROWS_PER_CORE, HIDDEN], [cache_base + pr0, 0]), target_type=pl.FP32
-        )
+        k_p = pl.cast(pl.slice(k_cache, [ROWS_PER_CORE, HIDDEN], [cache_base + pr0, 0]), target_type=pl.FP32)
+        v_p = pl.cast(pl.slice(v_cache, [ROWS_PER_CORE, HIDDEN], [cache_base + pr0, 0]), target_type=pl.FP32)
         oi = pl.sub(pl.add(mm, k_p), pl.mul(v_p, 0.5))
         attn_out = pl.assemble(attn_out, pl.cast(oi, target_type=pl.BF16), [r0, 0])
 
@@ -139,22 +135,14 @@ def _layer_unconditional(
         pr0 = ((c + 1) % NUM_CORES) * ROWS_PER_CORE
         cur_t = pl.slice(cur, [ROWS_PER_CORE, HIDDEN], [r0, 0])
         q_pad = pl.assemble(q_pad, pl.cast(pl.mul(cur_t, 2.0), target_type=pl.BF16), [r0, 0])
-        k_cache = pl.assemble(
-            k_cache, pl.cast(pl.mul(cur_t, 4.0), target_type=pl.BF16), [cache_base + r0, 0]
-        )
-        v_cache = pl.assemble(
-            v_cache, pl.cast(pl.mul(cur_t, 8.0), target_type=pl.BF16), [cache_base + r0, 0]
-        )
+        k_cache = pl.assemble(k_cache, pl.cast(pl.mul(cur_t, 4.0), target_type=pl.BF16), [cache_base + r0, 0])
+        v_cache = pl.assemble(v_cache, pl.cast(pl.mul(cur_t, 8.0), target_type=pl.BF16), [cache_base + r0, 0])
 
         pl.system.syncall(core_type="mix")
 
         mm = pl.matmul(pl.slice(q_pad, [ROWS_PER_CORE, HIDDEN], [pr0, 0]), wid, out_dtype=pl.FP32)
-        k_p = pl.cast(
-            pl.slice(k_cache, [ROWS_PER_CORE, HIDDEN], [cache_base + pr0, 0]), target_type=pl.FP32
-        )
-        v_p = pl.cast(
-            pl.slice(v_cache, [ROWS_PER_CORE, HIDDEN], [cache_base + pr0, 0]), target_type=pl.FP32
-        )
+        k_p = pl.cast(pl.slice(k_cache, [ROWS_PER_CORE, HIDDEN], [cache_base + pr0, 0]), target_type=pl.FP32)
+        v_p = pl.cast(pl.slice(v_cache, [ROWS_PER_CORE, HIDDEN], [cache_base + pr0, 0]), target_type=pl.FP32)
         oi = pl.sub(pl.add(mm, k_p), pl.mul(v_p, 0.5))
         attn_out = pl.assemble(attn_out, pl.cast(oi, target_type=pl.BF16), [r0, 0])
 
@@ -335,8 +323,7 @@ class TestReturnedParamMapBinding:
             carry, src = m.group(1), m.group(2)
             if carry in ("k_cache", "v_cache"):
                 assert src.startswith(("k_cache", "v_cache")), (
-                    f"GARBAGE LOOP CARRY: {carry!r} is yielded from {src!r} "
-                    f"(line: {m.group(0).strip()})"
+                    f"GARBAGE LOOP CARRY: {carry!r} is yielded from {src!r} (line: {m.group(0).strip()})"
                 )
 
     def test_unconditional_param_write_binds_consumer_correctly(self):
