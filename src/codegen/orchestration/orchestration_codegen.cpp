@@ -166,11 +166,10 @@ std::string GenerateConfigFunction(int expected_arg_count) {
   return oss.str();
 }
 
-// AIV functions whose body has been split across two vector cores carry the
-// `dual_aiv_dispatch` attribute. SplitVectorKernel is the single source of
-// truth: any non-None SplitMode on an AIV function ends up reflected in this
-// attribute on pass exit, so codegen reads the attribute directly without
-// re-deriving from SplitMode.
+// AIV functions that run on both vector sub-lanes carry `dual_aiv_dispatch`.
+// The post-pass attribute is the dispatch source of truth: DSL split passes
+// normalize it from SplitMode, while external declarations may set it directly
+// because their hand-written source owns sub-lane partitioning.
 bool RequiresDualAivDispatch(const FunctionPtr& aiv_func) {
   if (aiv_func == nullptr) return false;
   return aiv_func->HasAttr(kDualAivDispatchAttr) && aiv_func->GetAttr<bool>(kDualAivDispatchAttr, false);

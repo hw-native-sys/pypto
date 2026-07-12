@@ -44,6 +44,8 @@ from typing import Any
 
 import torch
 
+from pypto._external_source import kernel_binary_cache_path
+
 from .elf_parser import extract_text_section
 from .kernel_compiler import KernelCompiler
 from .task_interface import (
@@ -89,6 +91,35 @@ def _load_binary(path: Path) -> bytes | None:
         return path.read_bytes()
     except Exception:
         return None
+
+
+def _kernel_cache_file(
+    cache_dir: Path,
+    kernel: dict,
+    platform: str,
+    pto_isa_root: str,
+    runtime_name: str,
+    compiler: KernelCompiler,
+) -> Path:
+    """Return a collision-free cache path for one compiled kernel binary."""
+    include_dirs = []
+    if kernel.get("external", False):
+        include_dirs = [
+            *compiler.get_incore_include_dirs(),
+            *compiler.get_kernel_include_dirs(runtime_name),
+            *(kernel.get("extra_include_dirs") or ()),
+        ]
+    return kernel_binary_cache_path(
+        cache_dir,
+        source=kernel["source"],
+        core_type=kernel["core_type"],
+        func_id=kernel.get("func_id", "anon"),
+        platform=platform,
+        external=bool(kernel.get("external", False)),
+        pto_isa_root=pto_isa_root,
+        runtime_name=runtime_name,
+        include_dirs=include_dirs,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -286,18 +317,21 @@ def compile_single_kernel(
 ) -> tuple[bytes, bytes]:
     """Compile a single incore kernel with binary caching.
 
-    Checks for a cached ``.o``/``.so`` alongside the source file. On miss,
-    compiles via *compiler* and saves the result. For hardware platforms,
-    extracts the ``.text`` section to produce the final kernel binary.
+    Generated sources use a cached ``.o``/``.so`` alongside the artifact
+    source. External sources never use sidecars: their final binary cache key
+    includes source/include contents, core type, platform, and function id.
+    For hardware platforms, extracts the ``.text`` section to produce the
+    final kernel binary.
 
     When *cache_dir* is provided, the final (possibly stripped) binary is
-    additionally written to ``cache_dir/incore_{core_type}_{stem}.bin``.
-    This is the pre-build cache that :func:`compile_and_assemble` checks
-    before calling this function.
+    additionally written under that directory using the function/core identity
+    and, for external kernels, the content fingerprint. This is the pre-build
+    cache that :func:`compile_and_assemble` checks before calling this function.
 
     Args:
         kernel: Kernel descriptor dict with keys ``"source"``, ``"core_type"``,
-            and optionally ``"signature"``, ``"func_id"``.
+            and optionally ``"signature"``, ``"func_id"``, ``"external"``,
+            ``"extra_include_dirs"``.
         compiler: Configured :class:`KernelCompiler` instance.
         platform: Target execution platform.
         pto_isa_root: Resolved PTO-ISA root directory.
@@ -315,9 +349,10 @@ def compile_single_kernel(
     core_type = kernel["core_type"]
 
     ext = ".so" if platform.endswith("sim") else ".o"
-    output_file = source.with_suffix(ext)
+    is_external = bool(kernel.get("external", False))
+    output_file = None if is_external else source.with_suffix(ext)
 
-    raw = _load_binary(output_file)
+    raw = None if output_file is None else _load_binary(output_file)
     if raw is None:
         raw = compiler.compile_incore(
             kernel["source"],
@@ -326,12 +361,13 @@ def compile_single_kernel(
             runtime_name=runtime_name,
             extra_include_dirs=kernel.get("extra_include_dirs"),
         )
-        _save_binary(raw, output_file)
+        if output_file is not None:
+            _save_binary(raw, output_file)
 
     kernel_bin = raw if platform.endswith("sim") else extract_text_section(raw)
 
     if cache_dir is not None:
-        cache_file = cache_dir / f"incore_{core_type}_{source.stem}.bin"
+        cache_file = _kernel_cache_file(cache_dir, kernel, platform, pto_isa_root, runtime_name, compiler)
         _save_binary(kernel_bin, cache_file)
 
     return raw, kernel_bin
@@ -439,19 +475,31 @@ def compile_and_assemble(
 
     def _compile_one_kernel(kernel: dict) -> tuple[int, CoreCallable]:
         func_id = kernel["func_id"]
-        source = Path(kernel["source"])
-        core_type = kernel["core_type"]
 
         # Check cache/ for pre-stripped binary (written by prebuild_binaries)
         prebuild_cache = work_dir / "cache"
-        cache_file = prebuild_cache / f"incore_{core_type}_{source.stem}.bin"
+        cache_file = _kernel_cache_file(
+            prebuild_cache,
+            kernel,
+            platform,
+            pto_isa_root,
+            runtime_name,
+            compiler,
+        )
         cached_bin = _load_binary(cache_file)
         if cached_bin is not None:
             sig = kernel.get("signature", [])
             return (func_id, CoreCallable.build(signature=sig, binary=cached_bin))
 
-        # Compile via shared function; skip secondary prebuild cache write
-        _, kernel_bin = compile_single_kernel(kernel, compiler, platform, pto_isa_root, runtime_name)
+        # Compile via shared function and populate the content-addressed cache.
+        _, kernel_bin = compile_single_kernel(
+            kernel,
+            compiler,
+            platform,
+            pto_isa_root,
+            runtime_name,
+            cache_dir=prebuild_cache,
+        )
 
         sig = kernel.get("signature", [])
         return (func_id, CoreCallable.build(signature=sig, binary=kernel_bin))

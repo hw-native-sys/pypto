@@ -59,9 +59,10 @@ import os
 import re
 import shutil
 import textwrap
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any, NamedTuple
 
+from pypto._external_source import external_source_digest
 from pypto.pypto_core import DataType
 from pypto.pypto_core import passes as _passes
 
@@ -1205,6 +1206,8 @@ class JITFunction:
         external_core_type: str | None = None,
         external_aic_source: str | None = None,
         external_aiv_source: str | None = None,
+        external_dual_aiv_dispatch: bool = False,
+        external_include_dirs: tuple[str, ...] = (),
     ) -> None:
         self._func = func
         self._func_type = func_type or "orchestration"
@@ -1215,6 +1218,8 @@ class JITFunction:
         self._external_core_type = external_core_type
         self._external_aic_source = external_aic_source
         self._external_aiv_source = external_aiv_source
+        self._external_dual_aiv_dispatch = external_dual_aiv_dispatch
+        self._external_include_dirs = external_include_dirs
         self._dep_graph: (
             tuple[
                 list[JITFunction],
@@ -1350,12 +1355,22 @@ class JITFunction:
         sources = [inspect.getsource(self._func)]
         for dep in deps:
             if dep._func_type == "extern":
-                # The Python stub is just ``...``; the real implementation is
-                # the C++ file(s). Hash their content so editing a kernel
-                # invalidates the JIT cache (the stub source never changes).
-                for path in dep._external_source_paths():
-                    with open(path) as f:
-                        sources.append(f.read())
+                # The implementation and launch ABI both affect the artifact.
+                # Include the quoted-include closure so editing a sibling .cce
+                # invalidates the cache even when the entry .cpp is unchanged.
+                sources.append(
+                    external_source_digest(
+                        dep._external_source_paths(),
+                        metadata=(
+                            inspect.getsource(dep._func),
+                            dep.__name__,
+                            dep._external_core_type or "",
+                            str(dep._external_dual_aiv_dispatch),
+                            *(f"include_dir:{path}" for path in dep._external_include_dirs),
+                        ),
+                        include_dirs=dep._external_include_dirs,
+                    )
+                )
             else:
                 sources.append(inspect.getsource(dep._func))
         source_hash = compute_source_hash(sources)
@@ -1765,6 +1780,8 @@ class JITFunction:
                     external_core_type=dep._external_core_type,
                     external_aic_source=dep._external_aic_source,
                     external_aiv_source=dep._external_aiv_source,
+                    external_dual_aiv_dispatch=dep._external_dual_aiv_dispatch,
+                    external_include_dirs=dep._external_include_dirs,
                 )
             )
         dep_contexts.reverse()
@@ -1977,6 +1994,38 @@ def _resolve_extern_source(source: str | Any, func: Any) -> str:
     return path
 
 
+def _resolve_extern_include_dirs(
+    include_dirs: Sequence[str | os.PathLike[str]] | None,
+    func: Any,
+) -> tuple[str, ...]:
+    """Resolve external-kernel include directories relative to the stub file."""
+    if include_dirs is None:
+        return ()
+    if isinstance(include_dirs, (str, bytes, os.PathLike)):
+        raise TypeError(
+            f"@pl.jit.extern include_dirs must be a sequence of paths, got {type(include_dirs).__name__}"
+        )
+
+    src_file = inspect.getsourcefile(func)
+    base_dir = None
+    if src_file is not None and not src_file.startswith("<"):
+        base_dir = os.path.dirname(src_file)
+
+    resolved: list[str] = []
+    for include_dir in include_dirs:
+        path = os.fspath(include_dir)
+        if not os.path.isabs(path) and base_dir is not None:
+            path = os.path.join(base_dir, path)
+        path = os.path.abspath(path)
+        if not os.path.isdir(path):
+            raise ValueError(
+                f"@pl.jit.extern include directory not found: {path}. "
+                "Provide absolute paths, or paths relative to the file defining the kernel."
+            )
+        resolved.append(path)
+    return tuple(resolved)
+
+
 class _ExternKernelDecorator:
     """Sub-decorator for ``@pl.jit.extern`` — a hand-written C++ InCore kernel.
 
@@ -1987,9 +2036,18 @@ class _ExternKernelDecorator:
         @pl.jit.extern(source="k_aic.cpp", core_type="aic")
         @pl.jit.extern(core_type="mixed",                       # AIC+AIV pair
                        aic_source="k.cpp", aiv_source="k.cpp")
+        @pl.jit.extern(core_type="mixed",                       # AIC+2xAIV
+                       aic_source="k.cpp", aiv_source="k.cpp",
+                       dual_aiv_dispatch=True)
+        @pl.jit.extern(source="k.cpp", core_type="aiv",        # extra headers
+                       include_dirs=["include", "third_party/include"])
 
     A ``mixed`` kernel is dispatched as one ``MixedKernels`` submit: the
     specializer emits an AIC member, an AIV member, and a Group wrapper.
+    Set ``dual_aiv_dispatch=True`` only when the external implementation is
+    written for both AIV sub-lanes and uses the sub-block id to partition work.
+    Source and include paths may be absolute or relative to the Python file
+    defining the signature stub.
     """
 
     def __call__(
@@ -2000,9 +2058,13 @@ class _ExternKernelDecorator:
         source: str | Any = None,
         aic_source: str | Any = None,
         aiv_source: str | Any = None,
+        dual_aiv_dispatch: bool = False,
+        include_dirs: Sequence[str | os.PathLike[str]] | None = None,
     ) -> Any:
         if core_type not in ("aic", "aiv", "mixed"):
             raise ValueError(f"@pl.jit.extern core_type must be 'aic', 'aiv', or 'mixed', got {core_type!r}")
+        if dual_aiv_dispatch and core_type != "mixed":
+            raise ValueError("@pl.jit.extern dual_aiv_dispatch=True requires core_type='mixed'")
 
         def _make(f: Any) -> JITFunction:
             if core_type == "mixed":
@@ -2019,12 +2081,15 @@ class _ExternKernelDecorator:
                 resolved = _resolve_extern_source(single, f)
                 ext_aic = resolved if core_type == "aic" else None
                 ext_aiv = resolved if core_type == "aiv" else None
+            ext_include_dirs = _resolve_extern_include_dirs(include_dirs, f)
             return JITFunction(
                 f,
                 func_type="extern",
                 external_core_type=core_type,
                 external_aic_source=ext_aic,
                 external_aiv_source=ext_aiv,
+                external_dual_aiv_dispatch=dual_aiv_dispatch,
+                external_include_dirs=ext_include_dirs,
             )
 
         if func is None:

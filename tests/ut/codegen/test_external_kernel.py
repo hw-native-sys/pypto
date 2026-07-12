@@ -110,6 +110,7 @@ def test_external_mixed_kernel_codegen(tmp_path):
     assert '"func_id": 1, "name": "K_AIV"' in config
     assert '"core_type": "aic"' in config
     assert '"core_type": "aiv"' in config
+    assert config.count('"external": True') == 2
     # Both members reference the same original source at its absolute path.
     assert config.count(repr(str(cpp))) == 2
 
@@ -120,6 +121,18 @@ def test_external_mixed_kernel_codegen(tmp_path):
     assert "rt_submit_task(mixed_0" in orch
     assert "add_input(ext_a)" in orch
     assert "add_output(ext_out)" in orch
+
+
+def test_all_external_graph_emits_manifest_when_ptoas_is_skipped(tmp_path):
+    cpp = _write_kernel(tmp_path)
+    program = _build_mixed_program(cpp)
+    out_dir = tmp_path / "skip_ptoas"
+
+    ir_compile(program, skip_ptoas=True, platform="a2a3", output_dir=str(out_dir))
+
+    config = (out_dir / "kernel_config.py").read_text()
+    assert config.count('"external": True') == 2
+    assert not (out_dir / "kernels").exists()
 
 
 def test_external_source_requires_aic_or_aiv(tmp_path):

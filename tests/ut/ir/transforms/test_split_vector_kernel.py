@@ -119,6 +119,78 @@ class TestSplitVectorKernelNoSplitPassthrough:
 class TestSplitVectorKernelNoSplitA2A3:
     """Tests for Ascend910B no-split mixed-kernel dual-dispatch lowering."""
 
+    def test_external_dual_dispatch_keeps_signature_only_body(self, tmp_path):
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        source = tmp_path / "external.cpp"
+        source.write_text('extern "C" void kernel_entry(long long* args) { (void)args; }\n')
+
+        @pl.program
+        class Before:
+            @pl.function(
+                type=pl.FunctionType.AIV,
+                external_source=source,
+                attrs={"dual_aiv_dispatch": True},
+            )
+            def main_aiv(
+                self,
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]: ...
+
+        result = _run_split_vector_kernel(Before)
+        ir.assert_structural_equal(result, passes.convert_to_ssa()(Before))
+        printed = python_print(result)
+        assert "external_source" in printed
+        assert "get_subblock_idx" not in printed
+
+    def test_external_split_stamps_dual_dispatch_without_body_rewrite(self, tmp_path):
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        source = tmp_path / "external.cpp"
+        source.write_text('extern "C" void kernel_entry(long long* args) { (void)args; }\n')
+
+        @pl.program
+        class Before:
+            @pl.function(
+                type=pl.FunctionType.AIV,
+                external_source=source,
+                attrs={"split": pl.SplitMode.UP_DOWN},
+            )
+            def main_aiv(
+                self,
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]: ...
+
+        result = _run_split_vector_kernel(Before)
+        aiv = result.get_function("main_aiv")
+        assert aiv is not None
+        assert aiv.attrs.get("dual_aiv_dispatch") is True
+        assert "get_subblock_idx" not in python_print(result)
+
+    def test_external_split_aiv_overrides_false_dual_dispatch_attr(self, tmp_path):
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        source = tmp_path / "external.cpp"
+        source.write_text('extern "C" void kernel_entry(long long* args) { (void)args; }\n')
+
+        @pl.program
+        class Before:
+            @pl.function(
+                type=pl.FunctionType.AIV,
+                external_source=source,
+                attrs={"split_aiv": True, "dual_aiv_dispatch": False},
+            )
+            def main_aiv(
+                self,
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]: ...
+
+        result = _run_split_vector_kernel(Before)
+        aiv = result.get_function("main_aiv")
+        assert aiv is not None
+        assert aiv.attrs.get("dual_aiv_dispatch") is True
+        assert "get_subblock_idx" not in python_print(result)
+
     def test_no_split_dual_dispatch_producer_replays_compute_and_tpush_on_lane1(self):
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)

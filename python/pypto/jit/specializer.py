@@ -42,6 +42,7 @@ import warnings
 from dataclasses import dataclass, field
 from typing import Any, cast
 
+from pypto._external_source import EXTERNAL_INCLUDE_DIRS_ATTR, encode_external_include_dirs
 from pypto.language.typing.array import Array as _LangArray
 from pypto.pypto_core import DataType
 
@@ -157,6 +158,8 @@ class SpecializeContext:
     external_core_type: str | None = None
     external_aic_source: str | None = None
     external_aiv_source: str | None = None
+    external_dual_aiv_dispatch: bool = False
+    external_include_dirs: tuple[str, ...] = ()
 
     @property
     def dynamic_dims(self) -> set[tuple[str, int]]:
@@ -1672,9 +1675,22 @@ class Specializer:
         call_args = ", ".join(all_param_names)
         header = f"def {name}(self, {sig_params}){ret_ann}:"
 
-        def _member(member_name: str, core_upper: str, source: str) -> list[str]:
+        def _member(
+            member_name: str,
+            core_upper: str,
+            source: str,
+            *,
+            dual_aiv_dispatch: bool = False,
+        ) -> list[str]:
+            function_attrs: list[str] = []
+            if ctx.external_include_dirs:
+                encoded_include_dirs = encode_external_include_dirs(ctx.external_include_dirs)
+                function_attrs.append(f'"{EXTERNAL_INCLUDE_DIRS_ATTR}": {encoded_include_dirs!r}')
+            if dual_aiv_dispatch:
+                function_attrs.append('"dual_aiv_dispatch": True')
+            attrs = f", attrs={{{', '.join(function_attrs)}}}" if function_attrs else ""
             return [
-                f"@pl.function(type=pl.FunctionType.{core_upper}, external_source={source!r})",
+                f"@pl.function(type=pl.FunctionType.{core_upper}, external_source={source!r}{attrs})",
                 f"def {member_name}(self, {sig_params}){ret_ann}:",
                 "    ...",
             ]
@@ -1693,7 +1709,12 @@ class Specializer:
         # entry's ``self.<name>(...)`` call resolves to the group.
         assert ctx.external_aic_source is not None and ctx.external_aiv_source is not None
         lines = _member(f"{name}_aic", "AIC", ctx.external_aic_source)
-        lines += _member(f"{name}_aiv", "AIV", ctx.external_aiv_source)
+        lines += _member(
+            f"{name}_aiv",
+            "AIV",
+            ctx.external_aiv_source,
+            dual_aiv_dispatch=ctx.external_dual_aiv_dispatch,
+        )
         lines.append("@pl.function(type=pl.FunctionType.Group)")
         lines.append(header)
         # AIV lanes never capture a return; the AIC lane echoes the outputs, so
@@ -1843,6 +1864,8 @@ def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each 
     external_core_type: str | None = None,
     external_aic_source: str | None = None,
     external_aiv_source: str | None = None,
+    external_dual_aiv_dispatch: bool = False,
+    external_include_dirs: tuple[str, ...] = (),
 ) -> SpecializeContext:
     """Build a SpecializeContext from a Python function and call-site data.
 
@@ -1905,6 +1928,8 @@ def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each 
         external_core_type=external_core_type,
         external_aic_source=external_aic_source,
         external_aiv_source=external_aiv_source,
+        external_dual_aiv_dispatch=external_dual_aiv_dispatch,
+        external_include_dirs=external_include_dirs,
     )
 
 

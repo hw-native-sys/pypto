@@ -90,7 +90,9 @@ group）。
 ```python
 @pl.jit.extern(core_type="mixed",
                aic_source="kernels/aic/pa.cpp",
-               aiv_source="kernels/aic/pa.cpp")
+               aiv_source="kernels/aiv/pa.cpp",
+               include_dirs=["kernels/include", "third_party/attention/include"],
+               dual_aiv_dispatch=True)
 def pa(query: pl.Tensor[[B, H, D], pl.FP16], ...,
        out: pl.Out[pl.Tensor[[B, H, D], pl.FP16]], ...
        ) -> pl.Tensor[[B, H, D], pl.FP16]: ...
@@ -102,6 +104,26 @@ def decode(query: pl.Tensor, ..., out: pl.Out[pl.Tensor]):
 ```
 
 单核写法：`@pl.jit.extern(core_type="aic"|"aiv", source="k.cpp")`。
+
+对于无法通过入口源码相对引用找到的头文件，使用 `include_dirs=[...]`。与 `source`
+相同，每个目录既可以是绝对路径，也可以相对于定义 `@pl.jit.extern` stub 的 Python
+文件。解析后的目录会按给定顺序传给 CCEC；被引用头文件的内容和解析后的 include
+路径元数据都会参与 JIT cache key。
+
+默认情况下，mixed 外部 kernel 派发一个 AIC lane 和一个 AIV lane。手写 kernel 需要一个
+AIC lane 加**两个** AIV 子 lane 时，设置 `dual_aiv_dispatch=True`。此时每个逻辑 block
+会启动两次 AIV 入口；AIV 实现必须根据 sub-block id 切分工作，否则会产生重复写或写竞争。
+该参数只允许与 `core_type="mixed"` 一起使用。A2/A3 external wrapper 必须通过
+`intrinsic.h` 提供的 `get_sub_block_id(args)` 读取 runtime lane id；CCE 自身的 lane
+accessor 没有接入 PyPTO 逻辑任务 payload，两个派发都可能读到 lane 0。
+
+直接使用 `@pl.program` 声明时，在 AIV 成员上设置相同的派发约定：
+
+```python
+@pl.function(type=pl.FunctionType.AIV, external_source="kernels/aiv/pa.cpp",
+             attrs={"dual_aiv_dispatch": True})
+def pa_aiv(self, query: pl.Tensor, out: pl.Out[pl.Tensor]): ...
+```
 
 路径相对于定义该 kernel 的文件解析。修改所引用的 `.cpp` 会改变 JIT 缓存键，因此即使
 Python stub 未变，kernel 变更也会触发重新编译。

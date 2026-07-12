@@ -51,6 +51,7 @@ namespace ir {
 namespace {
 
 constexpr const char* kDualAivDispatchAttr = "dual_aiv_dispatch";
+constexpr const char* kExternalSourceAttr = "external_source";
 
 using split_axis::InjectSubblockIdx;
 using split_axis::ProcessStmts;
@@ -592,6 +593,36 @@ Pass SplitVectorKernel() {
     bool changed = false;
 
     for (const auto& [gvar, func] : program->functions_) {
+      // External kernels are signature-only declarations. Their hand-written
+      // source owns sub-lane partitioning, so preserve launch attrs but never
+      // synthesize a DSL body (which would violate the external-source contract).
+      if (func->HasAttr(kExternalSourceAttr)) {
+        if (func->func_type_ == FunctionType::AIV) {
+          auto explicit_mode = func->GetSplitMode();
+          bool split_aiv = func->HasAttr("split_aiv") && func->GetAttr<bool>("split_aiv", false);
+          if (explicit_mode.has_value() && explicit_mode.value() != SplitMode::None) {
+            auto external_func = MutableCopy(func);
+            external_func->attrs_ = WithSplitAttrs(func, explicit_mode.value(), /*is_aiv=*/true);
+            new_functions.push_back(external_func);
+            changed = true;
+            continue;
+          } else if (split_aiv && !func->GetAttr<bool>(kDualAivDispatchAttr, false)) {
+            auto external_func = MutableCopy(func);
+            auto attrs = external_func->attrs_;
+            attrs.erase(std::remove_if(attrs.begin(), attrs.end(),
+                                       [](const auto& kv) { return kv.first == kDualAivDispatchAttr; }),
+                        attrs.end());
+            attrs.emplace_back(kDualAivDispatchAttr, true);
+            external_func->attrs_ = std::move(attrs);
+            new_functions.push_back(external_func);
+            changed = true;
+            continue;
+          }
+        }
+        new_functions.push_back(func);
+        continue;
+      }
+
       // split_aiv kernels arrive here already in the explicit form: either
       // hand-written, or produced by LowerAutoVectorSplit from an AUTO pl.split
       // mixed InCore function. Their tile.aiv_shard / tile.aic_gather have been

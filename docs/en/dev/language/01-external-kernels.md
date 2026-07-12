@@ -95,7 +95,9 @@ kernel auto-expands to the AIC + AIV + Group form above:
 ```python
 @pl.jit.extern(core_type="mixed",
                aic_source="kernels/aic/pa.cpp",
-               aiv_source="kernels/aic/pa.cpp")
+               aiv_source="kernels/aiv/pa.cpp",
+               include_dirs=["kernels/include", "third_party/attention/include"],
+               dual_aiv_dispatch=True)
 def pa(query: pl.Tensor[[B, H, D], pl.FP16], ...,
        out: pl.Out[pl.Tensor[[B, H, D], pl.FP16]], ...
        ) -> pl.Tensor[[B, H, D], pl.FP16]: ...
@@ -107,6 +109,31 @@ def decode(query: pl.Tensor, ..., out: pl.Out[pl.Tensor]):
 ```
 
 Single-core form: `@pl.jit.extern(core_type="aic"|"aiv", source="k.cpp")`.
+
+Use `include_dirs=[...]` for headers that are not reachable through quoted
+includes relative to the entry source. Like `source`, each directory may be
+absolute or relative to the Python file defining the `@pl.jit.extern` stub.
+The resolved directories are passed to CCEC in order. Included header contents
+and the resolved include-path metadata participate in the JIT cache key.
+
+By default, a mixed external kernel dispatches one AIC lane and one AIV lane.
+Set `dual_aiv_dispatch=True` when the hand-written kernel requires the AIC lane
+and **both** AIV sub-lanes. The AIV entry is then launched twice for every
+logical block and must use its sub-block id to partition work; an entry that
+does not distinguish the lanes can race or duplicate writes. This option is
+valid only with `core_type="mixed"`. On A2/A3 external wrappers, read the
+runtime-provided lane id with `get_sub_block_id(args)` from `intrinsic.h`;
+the standalone CCE lane accessor is not wired to PyPTO's logical task payload
+and may report lane 0 for both dispatches.
+
+For a direct `@pl.program` declaration, put the same launch contract on the
+AIV member:
+
+```python
+@pl.function(type=pl.FunctionType.AIV, external_source="kernels/aiv/pa.cpp",
+             attrs={"dual_aiv_dispatch": True})
+def pa_aiv(self, query: pl.Tensor, out: pl.Out[pl.Tensor]): ...
+```
 
 Paths resolve relative to the file defining the kernel. Editing the referenced
 `.cpp` changes the JIT cache key, so a kernel change triggers recompilation even
