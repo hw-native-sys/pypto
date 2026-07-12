@@ -108,10 +108,20 @@ def test_none_region_dispatches_both_aiv_lanes(compiled):
     )
     code = orch[0].read_text()
 
-    assert re.search(r"MixedKernels \w+ = \{INVALID_KERNEL_ID, (\d+), \1\};", code), code
+    mixed = re.search(r"MixedKernels \w+ = \{INVALID_KERNEL_ID, (\d+), \1\};", code)
+    assert mixed, code
     assert "rt_submit_task(" in code, code
-    # The single-AIV submit would run one lane per block and drop the other.
-    assert "rt_submit_aiv_task" not in code, code
+
+    # The single-AIV submit would run one lane per block and drop the other. Scope the
+    # negative to *this* kernel id: a plain vector kernel in the same orchestration is
+    # entitled to rt_submit_aiv_task (it keeps its independent-AIV parallelism).
+    kernel_id = mixed.group(1)
+    single_aiv_submits = [
+        call
+        for call in re.findall(r"rt_submit_aiv_task\([^;]*\)", code)
+        if re.search(rf"\b{kernel_id}\b", call)
+    ]
+    assert not single_aiv_submits, single_aiv_submits
 
 
 if __name__ == "__main__":

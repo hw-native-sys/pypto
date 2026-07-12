@@ -224,21 +224,13 @@ must run on **both** vector lanes of a cluster — a `pl.split_aiv` region hands
 lane disjoint work selected by `aiv_id`. `rt_submit_aiv_task` fills only the AIV0
 slot, so the runtime schedules a *single-AIV* task: the second lane never launches,
 and the lone lane that does reads a `get_sub_block_id()` that the runtime leaves
-**undefined** for single-AIV tasks. Such a kernel is therefore submitted as a
-two-lane `MixedKernels` instead, whatever the dispatch path (direct call, `Spmd`
-wrapper, or AIV-only `Group`):
-
-```cpp
-// Spmd sa: both AIV lanes, no AIC
-MixedKernels mixed_0 = {INVALID_KERNEL_ID, aiv_id, aiv_id};
-params_t0.launch_spec.set_block_num(16);
-rt_submit_task(mixed_0, params_t0);
-```
-
-Two active AIV slots make it a MIX-shape task, so the scheduler places both lanes of
-one cluster under the same `block_idx` and gives them `sub_block_id` 0 and 1; the
-cluster's AIC core is simply unused. A plain (non-`dual_aiv_dispatch`) vector kernel
-keeps `rt_submit_aiv_task`, which dispatches across independent AIV cores.
+**undefined** for single-AIV tasks. Such a kernel is therefore submitted as a two-lane
+`MixedKernels` + `rt_submit_task` instead (see [Group Functions (Mixed Kernels)](#group-functions-mixed-kernels)),
+whatever the dispatch path (direct call, `Spmd` wrapper, or AIV-only `Group`). Two active
+AIV slots make it a MIX-shape task, so the scheduler places both lanes of one cluster under
+the same `block_idx` and gives them `sub_block_id` 0 and 1; the cluster's AIC core is simply
+unused. A plain (non-`dual_aiv_dispatch`) vector kernel keeps `rt_submit_aiv_task`, which
+dispatches across independent AIV cores.
 
 ### Tuple Handling
 

@@ -379,10 +379,49 @@ def test_roundtrip_incore_function_body():
                 out = pl.store(pl.add(tile_a, tile_a), [offset, 0], out)
             return out
 
-    body = Prog.get_function("core").body
+    core = Prog.get_function("core")
+    assert core is not None
+    body = core.body
     # The region sits directly in the InCore body — no synthesized wrapper scope.
     assert _count_descendants(body, ir.InCoreScopeStmt) == 0
     assert _count_descendants(body, ir.SplitAivScopeStmt) == 1
+
+    text = ir.python_print(Prog)
+    reparsed = pl.parse_program(text)
+    ir.assert_structural_equal(Prog, reparsed)
+
+
+def test_roundtrip_aiv_function_body():
+    """An ``AIV`` body is a core function too — no wrapper scope, same as InCore.
+
+    ``AIV`` (and ``AIC``) are specializations of ``InCore`` — the same set as the C++
+    ``IsInCoreType()`` — so an explicitly decorated kernel is already a core function.
+    Guarding on ``InCore`` alone made the parser synthesize a spurious
+    ``InCoreScopeStmt`` around a region in such a body: a scope the original does not
+    have, which OutlineIncoreScopes would then try to outline out of an
+    already-specialized kernel. ``AIV`` is the case that matters in practice — a
+    ``split_aiv`` region selects vector lanes — but the parser rule is structural and
+    covers every core function type.
+    """
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.AIV)
+        def core(
+            self,
+            a: pl.Tensor[[256, 128], pl.FP32],
+            out: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
+        ) -> pl.Tensor[[256, 128], pl.FP32]:
+            for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                offset = aiv_id * 128
+                tile_a: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
+                out = pl.store(pl.add(tile_a, tile_a), [offset, 0], out)
+            return out
+
+    core = Prog.get_function("core")
+    assert core is not None
+    assert _count_descendants(core.body, ir.InCoreScopeStmt) == 0
+    assert _count_descendants(core.body, ir.SplitAivScopeStmt) == 1
 
     text = ir.python_print(Prog)
     reparsed = pl.parse_program(text)
@@ -394,8 +433,9 @@ def test_roundtrip_split_none_attr_survives():
 
     The printer emits the attr, so the parser must store it. Dropping NONE made
     print->parse lossy for exactly the functions a task-parallel ``pl.split_aiv``
-    region produces (OutlineIncoreScopes derives a representative function-level
-    ``split`` mode of NONE from a single NONE region).
+    region produces (LowerAutoVectorSplit stamps a function-level ``split`` mode
+    onto each lowered core function, and is the only stamper that stores NONE —
+    SplitVectorKernel explicitly skips it).
 
     Storing it is behaviour-preserving: ``Function::GetSplitMode()`` maps
     ``split == 0`` to nullopt and is the sole reader of the attr, so a stored NONE
@@ -414,7 +454,9 @@ def test_roundtrip_split_none_attr_survives():
             out = pl.store(pl.add(tile_a, tile_a), [0, 0], out)
             return out
 
-    assert dict(Prog.get_function("core").attrs)["split"] == ir.SplitMode.NONE.value
+    core = Prog.get_function("core")
+    assert core is not None
+    assert dict(core.attrs)["split"] == ir.SplitMode.NONE.value
 
     text = ir.python_print(Prog)
     assert 'attrs={"split": pl.SplitMode.NONE}' in text, text
