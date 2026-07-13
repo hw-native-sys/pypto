@@ -318,7 +318,7 @@ def allgather(
     push-based: each rank pushes its chunk into every peer's window via
     ``pld.tile.put``, then notify/wait barrier; the window itself becomes
     the gathered [NR, SIZE] result (window-as-result). Lowered by
-    LowerCompositeOps into tile.load + pld.tile.put loop + notify/wait.
+    LowerCompositeOps into tile.create(stage) + pld.tile.put loop + notify/wait.
 
     Args:
         local_data: HOST: DistributedTensor [NR, SIZE] pre-staged window.

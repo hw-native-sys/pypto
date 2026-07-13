@@ -598,7 +598,7 @@ def allgather(
         :class:`pld.DistributedTensor` — the ``target`` window holding the
         gathered ``[NR, SIZE]`` result.
     """
-    if isinstance(local_data, DistributedTensor) and signal is None:
+    if isinstance(local_data, DistributedTensor) and isinstance(target, DistributedTensor) and signal is None:
         # 2-arg HOST builtin convenience: allgather(data, signal) — both positional
         # args are window-bound DistributedTensors.
         # Positional mapping: data→local_data, signal→target.

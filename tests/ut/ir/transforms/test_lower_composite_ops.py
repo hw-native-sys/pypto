@@ -1224,7 +1224,7 @@ def test_allgather_emits_for_and_if_control_flow():
     """Push-based allgather emits 3 ForStmts + 2 IfStmts: push loop, notify-all, wait-all.
 
     Phase 1 (push) uses a runtime ForStmt over nranks_idx — every peer gets a
-    remote_store (self-store via HCCL identity mapping, no per-rank IfStmt).
+    pld.tile.put (self-store via HCCL identity mapping, no per-rank IfStmt).
     Phase 2a/2b are the standard notify-all/wait-all loops with per-peer IfStmts."""
     Before = _build_allgather_before()
     After = passes.lower_composite_ops()(Before)

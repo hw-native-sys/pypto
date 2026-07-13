@@ -14,7 +14,7 @@ concatenation on every rank as the hand-written ``test_l3_allgather.py``.
 
 Push-based (3-arg): ``pld.tensor.allgather(local_data, target, signal)`` —
 each rank pushes its chunk to every peer's window slot via
-``pld.tile.remote_store``; after the notify/wait barrier, the window itself
+``pld.tile.put`` (TPUT-based); after the notify/wait barrier, the window itself
 holds the gathered ``[NR, SIZE]`` result (window-as-result).  The InCore
 function then reads from the window and writes into the output tensor for
 host-side verification.

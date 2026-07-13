@@ -1040,9 +1040,11 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
   const auto& target = args[1];
   const auto& signal = args[2];
 
-  // local_data must be TensorType at this point (ConvertTensorToTileOps runs later).
-  INTERNAL_CHECK_SPAN(As<TensorType>(local_data->GetType()), span)
-      << "pld.tensor.allgather local_data must be TensorType, got " << local_data->GetType()->TypeName();
+  // local_data may be a Tensor or Tile at this point — the default pass pipeline
+  // runs ConvertTensorToTileOps before LowerCompositeOps, so local_data may
+  // already be converted to a TileType.
+  INTERNAL_CHECK_SPAN(As<TensorType>(local_data->GetType()) || As<TileType>(local_data->GetType()), span)
+      << "pld.tensor.allgather local_data must be TensorType or TileType, got " << local_data->GetType()->TypeName();
   auto target_type = As<DistributedTensorType>(target->GetType());
   INTERNAL_CHECK_SPAN(target_type, span)
       << "pld.tensor.allgather target must be DistributedTensorType (deducer-rejected otherwise)";
@@ -1065,10 +1067,8 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
                                                        std::make_shared<ConstInt>(0, DataType::INDEX, span)},
                                   span);
 
-  // ---- Phase 0: tile.load removed — pld.tile.put handles tile load internally ----
-  // local_data is always a Tensor at this point in the pass pipeline
-  // (ConvertTensorToTileOps runs later).  pld.tile.put reads from the
-  // tensor source and auto-chunks into the stage tile.
+  // No explicit tile.load here: pld.tile.put can read from either a Tensor or
+  // Tile source and auto-chunks the transfer through the VEC staging tile.
 
   // ---- Phase 1: push — pld.tile.put this rank's chunk into every peer's window ----
   // Each peer receives this rank's chunk at target[my_rank, 0:SIZE].
