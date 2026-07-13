@@ -73,38 +73,17 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   using Global = pto::GlobalTensor<{{dtype_cpp}}, ShapeDyn, StrideDyn, pto::Layout::ND>;
   using TileData = pto::Tile<pto::TileType::Vec, {{dtype_cpp}}, 1, kTileCount, pto::BLayout::RowMajor, -1, -1>;
 
-  TileData stage_tile(1, kTileCount);
   TileData recv_tile(1, kTileCount);
-  TASSIGN(stage_tile, 0x0);
   TASSIGN(recv_tile, 0x10000);
 
   // ------------------------------------------------------------------
-  // Phase 1: fence — each rank does an identity TLOAD→TSTORE of its
-  // own chunk to ensure publish_step's CCU/SDMA writes are visible to
-  // the MTE2 pipeline that services remote TLOADs from peers.
-  // ------------------------------------------------------------------
-  for (int64_t base = 0; base < row_numel; base += kTileCount) {
-    int64_t chunk64 = row_numel - base;
-    if (chunk64 > kTileCount) chunk64 = kTileCount;
-    int chunk = static_cast<int>(chunk64);
-
-    ShapeDyn shape(1, 1, 1, 1, chunk);
-    StrideDyn stride(chunk, chunk, chunk, chunk, 1);
-    Global my_g(target + static_cast<int64_t>(my_rank) * row_numel + base, shape, stride);
-
-    TLOAD(stage_tile, my_g);
-    set_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0);
-    wait_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0);
-    TSTORE(my_g, stage_tile);
-    set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
-    wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
-  }
-  pipe_barrier(PIPE_ALL);
-
-  // ------------------------------------------------------------------
-  // Phase 2: per-tile barrier + gather — mirroring broadcast's proven
+  // Phase 1: per-tile barrier + gather — mirroring broadcast's proven
   // tile-by-tile signal protocol (AtomicAdd + incrementing threshold).
   // After each tile barrier every rank reads that tile from every peer.
+  // publish_step's CCU/SDMA TPUT writes are made visible by the
+  // TNOTIFY/TWAIT barrier itself — no separate fence is needed (a
+  // TLOAD→TSTORE identity copy in the same kernel would read stale
+  // content before the barrier and corrupt the window with zeros).
   // ------------------------------------------------------------------
   int32_t expected = 1;
   for (int64_t base = 0; base < row_numel; base += kTileCount) {
