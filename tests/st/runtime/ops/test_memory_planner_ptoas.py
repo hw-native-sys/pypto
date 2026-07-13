@@ -24,8 +24,10 @@ distinct ptoas buffers and the accumulation would be silently lost.
 
 from typing import Any
 
+import numpy as np
 import pypto.language as pl
 import pytest
+import torch
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
 from pypto.pypto_core.passes import MemoryPlanner
 
@@ -101,6 +103,69 @@ class LoopAccumProgram:
         return c
 
 
+_COLVEC_ROWS = 16
+_COLVEC_STEPS = 4
+
+
+@pl.program
+class ColVecIfPhiCarryProgram:
+    """Online-softmax-shaped ``[N, 1]`` col-vector loop-carried if-phi.
+
+    Two carries recur through an ``if``/``else`` inside a ``pl.range`` loop:
+
+    - ``s`` (the ``li`` accumulator) is yielded straight from ``pl.mul`` /
+      ``pl.add`` — its yield source is the ``[N, 1]`` reshape-back.
+    - ``m`` (the ``mi`` running max) is ``m = m_new`` where ``m_new`` is ALSO
+      consumed as a ``[1, N]`` intermediate (the ``exp(m - m_new)`` rescale),
+      so ``m``'s yield is an SSA bare alias of the reshape-back rather than the
+      reshape node itself.
+
+    Under ``memory_planner=PTOAS`` the ``m`` bare-alias must resolve to the
+    ``[N, 1]`` view SSA so its branch write-back ``pto.tmov`` gets matching
+    src/dst shapes; binding it to the shared ``[1, N]`` op-result handle emits a
+    ``[1, N] -> [N, 1]`` tmov that ptoas rejects. This is the regression case
+    for that codegen fix; ``s`` is the already-correct control.
+    """
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        x: pl.Tensor[[_COLVEC_ROWS, 1], pl.FP32],
+        y: pl.Tensor[[_COLVEC_ROWS, 1], pl.FP32],
+        out: pl.Out[pl.Tensor[[_COLVEC_ROWS, 1], pl.FP32]],
+        acc: pl.Out[pl.Tensor[[_COLVEC_ROWS, 1], pl.FP32]],
+    ) -> pl.Tensor[[_COLVEC_ROWS, 1], pl.FP32]:
+        m: pl.Tile[[_COLVEC_ROWS, 1], pl.FP32] = pl.load(x, [0, 0], [_COLVEC_ROWS, 1])
+        s: pl.Tile[[_COLVEC_ROWS, 1], pl.FP32] = pl.load(x, [0, 0], [_COLVEC_ROWS, 1])
+        for i in pl.range(_COLVEC_STEPS):
+            c: pl.Tile[[_COLVEC_ROWS, 1], pl.FP32] = pl.load(y, [0, 0], [_COLVEC_ROWS, 1])
+            if i == 0:
+                m_new = pl.maximum(m, c)
+                alpha = pl.exp(pl.sub(m, m_new))
+                s = pl.mul(s, alpha)
+                m = m_new
+            else:
+                m_new = pl.maximum(m, c)
+                alpha = pl.exp(pl.sub(m, m_new))
+                beta = pl.exp(pl.sub(c, m_new))
+                s = pl.add(pl.mul(s, alpha), beta)
+                m = m_new
+        out = pl.store(m, [0, 0], out)
+        acc = pl.store(s, [0, 0], acc)
+        return out
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrator(
+        self,
+        x: pl.Tensor[[_COLVEC_ROWS, 1], pl.FP32],
+        y: pl.Tensor[[_COLVEC_ROWS, 1], pl.FP32],
+        out: pl.Out[pl.Tensor[[_COLVEC_ROWS, 1], pl.FP32]],
+        acc: pl.Out[pl.Tensor[[_COLVEC_ROWS, 1], pl.FP32]],
+    ) -> pl.Tensor[[_COLVEC_ROWS, 1], pl.FP32]:
+        out = self.kernel(x, y, out, acc)
+        return out
+
+
 # ---------------------------------------------------------------------------
 # Test cases (parametrized by memory planner)
 # ---------------------------------------------------------------------------
@@ -153,6 +218,55 @@ class LoopAccumCase(PTOTestCase):
         tensors["c"][:] = 4 * 2.0
 
 
+def _colvec_inputs() -> tuple[torch.Tensor, torch.Tensor]:
+    """Distinct per-row non-zero inputs so a dropped carry / wrong row cannot
+    accidentally match the golden (a zero-input run would pass on a no-op)."""
+    x = torch.arange(_COLVEC_ROWS, dtype=torch.float32).reshape(_COLVEC_ROWS, 1) * 0.1 - 0.5
+    y = torch.arange(_COLVEC_ROWS, dtype=torch.float32).reshape(_COLVEC_ROWS, 1) * 0.05 + 0.25
+    return x, y
+
+
+class ColVecIfPhiCarryCase(PTOTestCase):
+    """``[N, 1]`` col-vector loop-carried if-phi, run under the given planner."""
+
+    def __init__(self, memory_planner: MemoryPlanner | None = None, *, platform=None, config=None):
+        super().__init__(config, platform=platform, memory_planner=memory_planner)
+        self._mp = memory_planner
+        self._x, self._y = _colvec_inputs()
+
+    def get_name(self) -> str:
+        return f"memplan_colvec_ifphi_carry_{_planner_tag(self._mp)}"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("x", [_COLVEC_ROWS, 1], DataType.FP32, init_value=self._x),
+            TensorSpec("y", [_COLVEC_ROWS, 1], DataType.FP32, init_value=self._y),
+            TensorSpec("out", [_COLVEC_ROWS, 1], DataType.FP32, is_output=True),
+            TensorSpec("acc", [_COLVEC_ROWS, 1], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return ColVecIfPhiCarryProgram
+
+    def compute_expected(self, tensors, params=None) -> None:
+        x = np.asarray(tensors["x"], dtype=np.float64)
+        y = np.asarray(tensors["y"], dtype=np.float64)
+        m = x.copy()
+        s = x.copy()
+        for i in range(_COLVEC_STEPS):
+            c = y
+            m_new = np.maximum(m, c)
+            alpha = np.exp(m - m_new)
+            if i == 0:
+                s = s * alpha
+            else:
+                beta = np.exp(c - m_new)
+                s = s * alpha + beta
+            m = m_new
+        tensors["out"][:] = torch.from_numpy(m.astype(np.float32))
+        tensors["acc"][:] = torch.from_numpy(s.astype(np.float32))
+
+
 # ---------------------------------------------------------------------------
 # pytest wrappers
 # ---------------------------------------------------------------------------
@@ -175,6 +289,15 @@ class TestMemoryPlannerPtoas:
         # one buffer even though MemoryReuse/AllocateMemoryAddr are skipped.
         result = test_runner.run(LoopAccumCase(planner))
         assert result.passed, f"loop accumulator ({_planner_tag(planner)}) failed: {result.error}"
+
+    @pytest.mark.parametrize("planner", _PLANNERS, ids=_planner_tag)
+    def test_colvec_ifphi_carry(self, test_runner, planner):
+        # PTOAS is the regression case: an ``[N, 1]`` col-vector loop-carried
+        # if-phi whose ``m = m_new`` yield is an SSA bare alias of the reshaped
+        # branch value. The branch write-back tmov must move the ``[N, 1]`` view,
+        # not the shared ``[1, N]`` op-result buffer.
+        result = test_runner.run(ColVecIfPhiCarryCase(planner))
+        assert result.passed, f"colvec if-phi carry ({_planner_tag(planner)}) failed: {result.error}"
 
 
 if __name__ == "__main__":

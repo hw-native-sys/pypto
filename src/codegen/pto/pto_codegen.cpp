@@ -1520,6 +1520,26 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
         RegisterBasePtr(op->var_, GetTensorBasePtr(rhs_var));
         return;
       }
+    } else if (!emit_tile_addr_ && As<TileType>(op->var_->GetType())) {
+      // Bare tile SSA alias (`lhs = rhs`) under memory_planner=PTOAS. `lhs` and
+      // `rhs` denote the identical tile value, so `lhs` must resolve to `rhs`'s
+      // CURRENT SSA binding. This matters when `rhs` is a view (tile.reshape /
+      // tile.transpose_view) that re-pointed itself at a typed view SSA of a
+      // shared buffer — e.g. the `[N, 1]` col-major reshape of a `[1, N]`
+      // row-major op result, which shares the op result's MemRef. `lhs` was
+      // pre-bound (GenerateFunction) to that shared handle, whose SSA is typed
+      // `[1, N]`; keeping it makes a later yield of `lhs` (an `m = m_new`
+      // online-softmax carry) emit a `[1, N] -> [N, 1]` write-back tmov that
+      // ptoas rejects for shape mismatch. Following `rhs` binds `lhs` to the
+      // `[N, 1]` view SSA so the write-back has matching src/dst shapes — the
+      // same shape the `s = pl.mul(...)`-style yield (no bare alias) already
+      // gets. Under PyPTO (emit_tile_addr_) the baked address already aliases
+      // the two allocs, so this is a no-op there and is left untouched.
+      const std::string rhs_ssa = GetVarName(rhs_var);
+      if (!rhs_ssa.empty()) {
+        BindVarToMlir(op->var_, rhs_ssa);
+        return;
+      }
     }
   }
 
