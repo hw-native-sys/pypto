@@ -17,11 +17,14 @@ lowers it to ``builtin.tensor.allgather`` per chip.  The exchange uses a
 push-based TPUT pattern with TWO DISTINCT windows (same constraint as
 ``all_to_all``):
 
-  1. **Publish** (``publish_step``): each rank writes its chunk into
-     ``stage_buf[my_rank, :]`` — a window used ONLY as a TPUT source.
-  2. **Allgather** (``builtin.tensor.allgather``): kernel pushes
-     ``stage_buf[my_rank, :]`` to each peer's ``data_buf`` window via
-     in-kernel TPUT and synchronises visibility.
+  1. **Publish** (``publish_step``): each rank replicates its chunk into
+     every row of ``stage_buf`` — a window used ONLY as a TPUT source.  The
+     replication matches the proven ``all_to_all`` TPUT schedule
+     (``input[dest]`` → peer ``target[my_rank]``) while remaining allgather
+     semantics (every peer receives the same chunk).
+  2. **Allgather** (``builtin.tensor.allgather``): kernel pushes each
+     ``stage_buf[dest, :]`` row to the corresponding peer's ``data_buf``
+     window via in-kernel TPUT and synchronises visibility.
   3. **Consume** (``consume_step``): each rank reads its own ``data_buf``
      window via ``pl.load`` (peers already placed their chunks there).
 
@@ -66,10 +69,11 @@ class HostTensorAllGather:
         stage: pl.InOut[pld.DistributedTensor[[NR, SIZE], pl.FP32]],
         my_rank: pl.Scalar[pl.INT32],
     ):
-        # Void publish matching all_to_all stage_step — returning the window
-        # DT is unused by host_orch and can confuse chip-arg directions.
+        # Replicate the local chunk into every stage row so the builtin can
+        # use the same per-dest TPUT schedule as all_to_all (NPU-proven).
         chunk = pl.load(inp, [0, 0], [1, SIZE])
-        stage = pl.store(chunk, [my_rank, 0], stage)
+        for dest in pl.range(NR):
+            stage = pl.store(chunk, [dest, 0], stage)
 
     @pl.function(type=pl.FunctionType.Orchestration)
     def publish_orch(
@@ -117,7 +121,8 @@ class HostTensorAllGather:
 
         stage = pld.window(stage_buf, [pld.world_size(), SIZE], dtype=pl.FP32)
         data = pld.window(data_buf, [pld.world_size(), SIZE], dtype=pl.FP32)
-        signal = pld.window(signal_buf, [pld.world_size(), 1], dtype=pl.INT32)
+        # 1-D signal matches the NPU-passing host all_to_all ST.
+        signal = pld.window(signal_buf, [pld.world_size()], dtype=pl.INT32)
         data = pld.tensor.allgather(stage, data, signal)
 
         for r in pl.range(pld.world_size()):
@@ -159,4 +164,4 @@ class TestL3HostTensorAllGather:
 
 
 if __name__ == "__main__":
-    pytest.main([__file__, "-v", *sys.argv[1:]])
+    sys.exit(pytest.main([__file__, "-v", "-s"] + sys.argv[1:]))

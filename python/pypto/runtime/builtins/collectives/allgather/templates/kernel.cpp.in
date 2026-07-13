@@ -64,11 +64,18 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     return;
   }
 
-  // `input` and `target` are two DISTINCT windows. `input` holds this rank's
-  // own chunk (populated by an earlier stage_step via pl.store — same MTE
-  // pipeline as TLOAD, so no coherency gap). `target` is write-only here
-  // (every incoming TPUT lands in it) plus the final result read back by
-  // the caller.
+  // `input` and `target` are two DISTINCT windows. `input` is read-only here
+  // (this rank's outgoing staging, populated by an earlier publish_step) and
+  // is NEVER the destination of any incoming TPUT. `target` is write-only
+  // here (every incoming push lands in it) plus the final result read back
+  // by the caller. Reusing one buffer for both roles is a genuine
+  // cross-process data race.
+  //
+  // Staging layout matches the proven all_to_all TPUT schedule: publish
+  // replicates this rank's single chunk into every `input[dest, :]` row so
+  // each remote push reads a distinct source row (`input[dest]` → peer
+  // `target[my_rank]`). Functionally that is allgather (every peer receives
+  // the same chunk at row my_rank).
   __gm__ {{dtype_cpp}} *input_local =
       reinterpret_cast<__gm__ {{dtype_cpp}} *>(input_tensor->buffer.addr) + input_tensor->start_offset;
   __gm__ {{dtype_cpp}} *target =
@@ -88,13 +95,11 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   // ==================================================================
   // Phase 1: in-kernel TPUT via pto::comm::TPUT macro.
   //
-  // publish_step placed each rank's chunk in `input[my_rank, :]` locally
-  // (via pl.store, same MTE pipeline). pto::comm::TPUT pushes this same
-  // chunk to every peer's `target[my_rank, :]` via the CCU/SDMA DMA
-  // engine — same path as pld.tile.remote_store.
+  // Data flow: input[dest,:] (local GM, staging window) → send_tile (UB)
+  //            → peer's target[my_rank,:] (remote GM, result window)
   //
-  // Self-rank: TPUT would be a no-op for our own window, so copy locally
-  // via TLOAD→TSTORE instead.
+  // Self-rank: no peer ever pushes into target[my_rank,:], so we copy our
+  // own chunk there directly instead of TPUT-ing to ourselves.
   // ==================================================================
   int64_t self_offset = static_cast<int64_t>(my_rank) * row_numel;
   for (int64_t base = 0; base < row_numel; base += kTileCount) {
@@ -120,11 +125,9 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   for (int dest = 0; dest < nranks; ++dest) {
     if (dest == my_rank) continue;
 
-    // Destination base: peer's result window at offset [my_rank, :]
-    __gm__ {{dtype_cpp}} *remote_row =
-        CommRemotePtr(comm_ctx, target + self_offset, dest);
+    int64_t src_offset = static_cast<int64_t>(dest) * row_numel;
+    __gm__ {{dtype_cpp}} *remote_row = CommRemotePtr(comm_ctx, target + self_offset, dest);
 
-    // Chunk to tile capacity (same loop as self-copy / ep_dispatch payloads).
     for (int64_t base = 0; base < row_numel; base += kTileCount) {
       int64_t chunk64 = row_numel - base;
       if (chunk64 > kTileCount) chunk64 = kTileCount;
@@ -132,9 +135,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
 
       ShapeDyn shape(1, 1, 1, 1, chunk);
       StrideDyn stride(chunk, chunk, chunk, chunk, 1);
-      // Source: our chunk at input[my_rank, :], in the local staging window
-      // (never a push destination, so no other rank ever writes into it).
-      Global src_g(input_local + self_offset + base, shape, stride);
+      Global src_g(input_local + src_offset + base, shape, stride);
       Global dst_g(remote_row + base, shape, stride);
 
       pto::comm::TPUT(dst_g, src_g, send_tile);
