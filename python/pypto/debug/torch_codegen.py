@@ -1060,6 +1060,7 @@ def _register_ops() -> None:  # noqa: PLR0915
         "system.bar_v",
         "system.bar_m",
         "system.bar_all",
+        "system.fence",
         "system.aic_initialize_pipe",
         "system.aiv_initialize_pipe",
         "system.reserve_buffer",

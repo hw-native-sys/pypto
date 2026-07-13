@@ -900,7 +900,8 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
 
   reg("system.fence", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
     auto& codegen = AsPto(codegen_base);
-    CHECK(op->args_.empty()) << "system.fence takes no arguments, got " << op->args_.size();
+    INTERNAL_CHECK_SPAN(op->args_.empty(), op->span_)
+        << "system.fence takes no arguments, got " << op->args_.size();
     codegen.Emit("pto.fence.barrier_all #pto.fence_scope<gm>");
     return std::string("");
   });
