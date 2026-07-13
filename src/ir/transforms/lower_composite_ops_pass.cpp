@@ -1517,9 +1517,14 @@ class LowerCompositeOpsMutator : public IRMutator {
  private:
   [[nodiscard]] static bool ShouldSkipHostCollective(const CallPtr& call) {
     if (!call || !call->op_) return false;
-    return IsOp(call, "pld.tensor.allgather") || IsOp(call, "pld.tensor.allreduce") ||
-           IsOp(call, "pld.tensor.barrier") || IsOp(call, "pld.tensor.broadcast") ||
-           IsOp(call, "pld.tensor.reduce_scatter");
+    // pld.tensor.allgather overloads: skip only the 3-arg HOST builtin form;
+    // the 4-arg InCore composite form must still be lowered by this pass.
+    if (IsOp(call, "pld.tensor.allgather")) {
+      return call->args_.size() == 3;
+    }
+    return IsOp(call, "pld.tensor.allreduce") || IsOp(call, "pld.tensor.barrier") ||
+           IsOp(call, "pld.tensor.broadcast") || IsOp(call, "pld.tensor.reduce_scatter") ||
+           IsOp(call, "pld.tensor.all_to_all");
   }
 
   [[nodiscard]] CompositeLoweringFn LookupRule(const CallPtr& call) const {

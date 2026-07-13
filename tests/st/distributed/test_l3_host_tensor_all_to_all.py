@@ -34,7 +34,7 @@ template's kernel.cpp.in for the full explanation).
 TPUT auto-chunks rows larger than the staging tile via the pto-isa DMA engine
 and works across chip-process boundaries in both simulation and real hardware.
 
-ST coverage: P=2 (default CI / 2-device hosts).
+ST coverage: P=2 and P=4 (skips when fewer devices are available).
 """
 
 import sys
@@ -152,9 +152,9 @@ class TestL3HostTensorAllToAll:
     separate ``stage_buf`` staging window into the ``data_buf`` result window.
     """
 
-    @pytest.mark.parametrize("n_ranks", [2])
+    @pytest.mark.parametrize("n_ranks", [2, 4])
     def test_host_tensor_all_to_all(self, test_config, device_ids, n_ranks):
-        """Compile and run host-level all-to-all for P=2."""
+        """Compile and run host-level all-to-all for P in {2, 4}."""
         if len(device_ids) < n_ranks:
             pytest.skip(f"host all-to-all P={n_ranks} needs {n_ranks} devices, got {device_ids}")
 

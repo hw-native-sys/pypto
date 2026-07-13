@@ -184,17 +184,32 @@ void CheckStaticSignalCapacity(const CallPtr& call, const ExprPtr& signal_expr, 
                                   std::move(attrs), {ArgDirection::InOut, ArgDirection::InOut});
 }
 
+[[nodiscard]] void CheckDistinctInputTargetWindows(const CallPtr& call, const char* op_name) {
+  // After MaterializeCommDomainScopes, window views carry WindowBuffer
+  // back-references. Same-expression aliasing is already rejected in the type
+  // deducers; this catches two distinct pld.window(...) views over one alloc.
+  auto input_wb = GetWindowBuffer(call->args_[0], "input");
+  auto target_wb = GetWindowBuffer(call->args_[1], "target");
+  CHECK_SPAN(input_wb.get() != target_wb.get(), call->span_)
+      << op_name
+      << " input and target must be different window allocations "
+         "(two pld.window views over the same alloc_window_buffer are a "
+         "cross-process data race under in-kernel TPUT)";
+}
+
 [[nodiscard]] CallPtr MakeBuiltinAllGather(const CallPtr& call, const ExprPtr& device) {
   // Emit namesake builtin: in-kernel TPUT push (this rank's chunk from the
   // `input` staging window into every peer's `target` window) + barrier
   // (TNOTIFY / TWAIT), all in a single AIV kernel. `input` and `target`
   // must be two DISTINCT windows. All chips must run concurrently — the
   // host orchestrator submits asynchronously.
+  CheckDistinctInputTargetWindows(call, "pld.tensor.allgather");
   auto target_type = As<DistributedTensorType>(call->args_[1]->GetType());
-  return MakeBuiltinCallWithAttrs("builtin.tensor.allgather", call,
-                                  {call->args_[0], call->args_[1], call->args_[2]},  // (input, target, signal)
-                                  {{"dtype", target_type->dtype_}}, device, {{"dtype", target_type->dtype_}},
-                                  {ArgDirection::Input, ArgDirection::InOut, ArgDirection::InOut});
+  return MakeBuiltinCallWithAttrs(
+      "builtin.tensor.allgather", call,
+      {call->args_[0], call->args_[1], call->args_[2]},  // (input, target, signal)
+      {{"dtype", target_type->dtype_}}, device, {{"dtype", target_type->dtype_}},
+      {ArgDirection::Input, ArgDirection::InOut, ArgDirection::InOut});
 }
 
 [[nodiscard]] CallPtr MakeBuiltinAllToAll(const CallPtr& call, const ExprPtr& device) {
@@ -203,6 +218,7 @@ void CheckStaticSignalCapacity(const CallPtr& call, const ExprPtr& signal_expr, 
   // (TNOTIFY / TWAIT), all in a single AIV kernel. `input` and `target` must
   // be two DISTINCT windows. All chips must run concurrently — the host
   // orchestrator submits asynchronously.
+  CheckDistinctInputTargetWindows(call, "pld.tensor.all_to_all");
   auto target_type = As<DistributedTensorType>(call->args_[1]->GetType());
   return MakeBuiltinCallWithAttrs(
       "builtin.tensor.all_to_all", call,

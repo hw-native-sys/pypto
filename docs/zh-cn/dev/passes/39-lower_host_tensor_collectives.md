@@ -4,7 +4,8 @@
 
 `LowerHostTensorCollectives` 将 host orchestrator 中的
 `pld.tensor.allreduce`、`pld.tensor.barrier`、`pld.tensor.broadcast`、
-`pld.tensor.reduce_scatter` 和 `pld.tensor.allgather` 调用改写为编译器内部的
+`pld.tensor.reduce_scatter`、`pld.tensor.allgather` 和
+`pld.tensor.all_to_all` 调用改写为编译器内部的
 builtin chip dispatch。它在 [`MaterializeCommDomainScopes`](38-materialize_comm_domain_scopes.md) 之后运行，
 因此 window 绑定的 data tensor 和用户显式传入或编译器合成的 signal tensor 已经带有
 `WindowBuffer` 反向引用，并属于推断出的通信域。
@@ -30,13 +31,17 @@ data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
 signal = pld.tensor.barrier(signal)
 data = pld.tensor.broadcast(data, signal, root=0)
 data = pld.tensor.reduce_scatter(data, signal, op=pld.ReduceOp.Sum)
-data = pld.tensor.allgather(data, signal)
+data = pld.tensor.allgather(stage, data, signal)
+data = pld.tensor.all_to_all(stage, data, signal)
 ```
+
+对于 `allgather` / `all_to_all`，`stage`（TPUT 源）与 `data`（结果）
+必须是两个不同的 window。
 
 本 pass 会为每个参与设备生成对应的 `builtin.tensor.*` 调用（如
 `builtin.tensor.allreduce`、`builtin.tensor.barrier`、
 `builtin.tensor.broadcast`、`builtin.tensor.reduce_scatter`、
-`builtin.tensor.allgather`）。若外层
+`builtin.tensor.allgather`、`builtin.tensor.all_to_all`）。若外层
 comm-domain scope 带有显式 device 列表，则生成 `SeqStmts`；否则生成顺序
 `for r in pld.system.world_size()` 循环。
 

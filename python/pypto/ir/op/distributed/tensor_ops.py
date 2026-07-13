@@ -307,7 +307,9 @@ def allgather(
 ) -> Call:
     """Build a ``pld.tensor.allgather(...)`` Call.
 
-    Unified 3-arg API for both HOST builtin and InCore composite paths.
+    **3-arg form (HOST builtin):** ``allgather(input, target, signal)`` —
+    distinct input/target windows; lowered to ``builtin.tensor.allgather``
+    per chip (in-kernel TPUT + barrier).
 
     Unified arg roles for both paths:
       arg[0] = local_data — Tensor [1, SIZE]
@@ -324,14 +326,25 @@ def allgather(
     the host lowering emits ``builtin.tensor.barrier`` per chip to synchronise.
 
     Args:
-        local_data: InCore: Tensor [1, SIZE] with this rank's chunk.
-            HOST: Tensor [1, SIZE].
-        target: DistributedTensor [NR, SIZE] staging window / result.
-        signal: INT32 DistributedTensor barrier.
+        local_data: For 3-arg: DistributedTensor [NR, SIZE] staging window.
+            For 4-arg: Tensor [1, SIZE] with this rank's chunk.
+        target: DistributedTensor [NR, SIZE] result (3-arg) or staging (4-arg) window.
+        signal: Window-bound INT32 barrier tensor.
+        out: For 4-arg: Tensor [1, NR*SIZE] output.
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    _args: list[Expr] = [local_data, target, signal]
-    return _ir_core.create_op_call("pld.tensor.allgather", _args, {}, actual_span)
+    if signal is not None and out is None:
+        # 3-arg HOST builtin form: allgather(input, target, signal)
+        _args: list[Expr] = [local_data, target, signal]  # type: ignore[assignment]
+        return _ir_core.create_op_call("pld.tensor.allgather", _args, {}, actual_span)
+    if out is not None:
+        # 4-arg InCore composite form
+        _args_4: list[Expr] = [local_data, target, signal, out]  # type: ignore[assignment]
+        return _ir_core.create_op_call("pld.tensor.allgather", _args_4, {}, actual_span)
+    raise ValueError(
+        "pld.tensor.allgather expects 3-arg HOST form (input, target, signal) "
+        "or 4-arg InCore form (local_data, target, signal, out)"
+    )
 
 
 def reduce_scatter(

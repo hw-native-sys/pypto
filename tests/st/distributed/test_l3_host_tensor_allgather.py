@@ -7,7 +7,29 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""L3 distributed ST: host-orchestrator ``pld.tensor.allgather`` builtin dispatch."""
+"""L3 distributed ST: host-orchestrator ``pld.tensor.allgather`` builtin dispatch.
+
+Validates the HOST-level allgather collective lowers through
+``LowerHostTensorCollectives`` and produces correct rank-ordered gathered data.
+
+The HOST lowering path detects ``pld.tensor.allgather`` in ``host_orch`` and
+lowers it to ``builtin.tensor.allgather`` per chip.  The exchange uses a
+push-based TPUT pattern with TWO DISTINCT windows (same constraint as
+``all_to_all``):
+
+  1. **Publish** (``publish_step``): each rank writes its chunk into
+     ``stage_buf[my_rank, :]`` — a window used ONLY as a TPUT source.
+  2. **Allgather** (``builtin.tensor.allgather``): kernel pushes
+     ``stage_buf[my_rank, :]`` to each peer's ``data_buf`` window via
+     in-kernel TPUT and synchronises visibility.
+  3. **Consume** (``consume_step``): each rank reads its own ``data_buf``
+     window via ``pl.load`` (peers already placed their chunks there).
+
+``stage_buf`` and ``data_buf`` must be separate windows — reusing one buffer
+for both roles is a genuine cross-process data race.
+
+ST coverage: P=2 and P=4 (skips when fewer devices are available).
+"""
 
 import sys
 
@@ -41,20 +63,20 @@ class HostTensorAllGather:
     def publish_step(
         self,
         inp: pl.Tensor[[1, SIZE], pl.FP32],
-        data: pl.InOut[pld.DistributedTensor[[NR, SIZE], pl.FP32]],
+        stage: pl.InOut[pld.DistributedTensor[[NR, SIZE], pl.FP32]],
         my_rank: pl.Scalar[pl.INT32],
     ) -> pld.DistributedTensor[[NR, SIZE], pl.FP32]:
         chunk = pl.load(inp, [0, 0], [1, SIZE])
-        return pl.store(chunk, [my_rank, 0], data)
+        return pl.store(chunk, [my_rank, 0], stage)
 
     @pl.function(type=pl.FunctionType.Orchestration)
     def publish_orch(
         self,
         inp: pl.Tensor[[1, SIZE], pl.FP32],
-        data: pl.InOut[pld.DistributedTensor[[NR, SIZE], pl.FP32]],
+        stage: pl.InOut[pld.DistributedTensor[[NR, SIZE], pl.FP32]],
         my_rank: pl.Scalar[pl.INT32],
     ) -> pld.DistributedTensor[[NR, SIZE], pl.FP32]:
-        return self.publish_step(inp, data, my_rank)
+        return self.publish_step(inp, stage, my_rank)
 
     @pl.function(type=pl.FunctionType.InCore)
     def consume_step(
@@ -63,11 +85,9 @@ class HostTensorAllGather:
         out: pl.Out[pl.Tensor[[1, NR, SIZE], pl.FP32]],
     ) -> pl.Tensor[[1, NR, SIZE], pl.FP32]:
         for j in pl.range(NR):
-            # Use remote_load so the TGET hardware channel transfers the data
-            # across chip-process boundaries in both simulation and real hardware.
-            # Direct pl.load (tile.load from local GM) only works on real hardware
-            # where the window buffer is at the same physical address for all chips.
-            row = pld.tile.remote_load(data, peer=j, offsets=[j, 0], shape=[1, SIZE])
+            # Local read — data was already pushed into our window by peers
+            # via in-kernel TPUT.  No TGET needed.
+            row = pl.load(data, [j, 0], [1, SIZE])
             out = pl.store(row, [0, j, 0], out)
         return out
 
@@ -85,16 +105,18 @@ class HostTensorAllGather:
         inputs: pl.Tensor[[NR, 1, SIZE], pl.FP32],
         outputs: pl.Out[pl.Tensor[[NR, 1, NR, SIZE], pl.FP32]],
     ) -> pl.Tensor[[NR, 1, NR, SIZE], pl.FP32]:
-        data_buf = pld.alloc_window_buffer(pld.world_size() * SIZE * pl.FP32.get_byte())
-        signal_buf = pld.alloc_window_buffer(pld.world_size() * pl.INT32.get_byte())
+        stage_buf = pld.alloc_window_buffer(pld.world_size() * SIZE * 4)
+        data_buf = pld.alloc_window_buffer(pld.world_size() * SIZE * 4)
+        signal_buf = pld.alloc_window_buffer(pld.world_size() * 4)
 
         for r in pl.range(pld.world_size()):
-            data = pld.window(data_buf, [pld.world_size(), SIZE], dtype=pl.FP32)
-            self.publish_orch(inputs[r], data, r, device=r)
+            stage = pld.window(stage_buf, [pld.world_size(), SIZE], dtype=pl.FP32)
+            self.publish_orch(inputs[r], stage, r, device=r)
 
+        stage = pld.window(stage_buf, [pld.world_size(), SIZE], dtype=pl.FP32)
         data = pld.window(data_buf, [pld.world_size(), SIZE], dtype=pl.FP32)
         signal = pld.window(signal_buf, [pld.world_size()], dtype=pl.INT32)
-        data = pld.tensor.allgather(data, data, signal)
+        data = pld.tensor.allgather(stage, data, signal)
 
         for r in pl.range(pld.world_size()):
             self.consume_orch(data, outputs[r], device=r)
@@ -103,7 +125,7 @@ class HostTensorAllGather:
 
 
 class TestL3HostTensorAllGather:
-    @pytest.mark.parametrize("n_ranks", [2])
+    @pytest.mark.parametrize("n_ranks", [2, 4])
     def test_host_tensor_allgather(self, test_config, device_ids, n_ranks):
         if len(device_ids) < n_ranks:
             pytest.skip(f"host allgather P={n_ranks} needs {n_ranks} devices, got {device_ids}")
@@ -118,8 +140,7 @@ class TestL3HostTensorAllGather:
         )
 
         # pld.tensor.allgather on HOST lowers to builtin.tensor.allgather
-        # per chip (concurrent cross-chip dispatch).  Data is pre-staged in
-        # the window by publish_step; the builtin gathers from all peers.
+        # per chip (concurrent cross-chip TPUT + barrier).
         variant_dir = compiled.output_dir / "next_levels" / "builtin.tensor.allgather__fp32"
         assert variant_dir.is_dir()
         assert (variant_dir / "kernel_config.py").is_file()

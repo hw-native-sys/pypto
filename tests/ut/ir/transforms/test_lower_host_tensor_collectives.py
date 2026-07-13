@@ -603,19 +603,27 @@ def test_host_allgather_lowers_to_namesake_builtin():
     class P:
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(
-            self, data: pld.DistributedTensor[[4, 256], pl.FP32], sig: pld.DistributedTensor[[4], pl.INT32]
+            self,
+            stage: pld.DistributedTensor[[4, 256], pl.FP32],
+            data: pld.DistributedTensor[[4, 256], pl.FP32],
+            sig: pld.DistributedTensor[[4], pl.INT32],
         ):
             return data
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
-            data_buf = pld.alloc_window_buffer(4 * 256 * pl.FP32.get_byte())
-            signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            # `stage_buf` (TPUT source) and `data_buf` (TPUT destination /
+            # result) must be two DISTINCT windows — same constraint as
+            # all_to_all (see allgather kernel.cpp.in).
+            stage_buf = pld.alloc_window_buffer(4096)
+            data_buf = pld.alloc_window_buffer(4096)
+            signal_buf = pld.alloc_window_buffer(16)
+            stage = pld.window(stage_buf, [4, 256], dtype=pl.FP32)
             data = pld.window(data_buf, [4, 256], dtype=pl.FP32)
             signal = pld.window(signal_buf, [4], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):
-                self.chip_orch(data, signal, device=r)
-            pld.tensor.allgather(data, data, signal)
+                self.chip_orch(stage, data, signal, device=r)
+            data = pld.tensor.allgather(stage, data, signal)
             return 0
 
     program = passes.materialize_comm_domain_scopes()(P)
@@ -634,8 +642,43 @@ def test_host_allgather_lowers_to_namesake_builtin():
     assert isinstance(body, ir.EvalStmt)
     call = body.expr
     assert isinstance(call, ir.Call)
-    assert list(call.arg_directions) == [ir.ArgDirection.InOut, ir.ArgDirection.InOut]
+    assert list(call.arg_directions) == [
+        ir.ArgDirection.Input,
+        ir.ArgDirection.InOut,
+        ir.ArgDirection.InOut,
+    ]
     assert call.kwargs["dtype"] == DataType.FP32
+
+
+def test_host_allgather_rejects_aliased_input_target_windows():
+    """Two pld.window views over one alloc must fail at host lowering."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self,
+            stage: pld.DistributedTensor[[4, 256], pl.FP32],
+            data: pld.DistributedTensor[[4, 256], pl.FP32],
+            sig: pld.DistributedTensor[[4], pl.INT32],
+        ):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            buf = pld.alloc_window_buffer(4096)
+            signal_buf = pld.alloc_window_buffer(16)
+            stage = pld.window(buf, [4, 256], dtype=pl.FP32)
+            data = pld.window(buf, [4, 256], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [4], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(stage, data, signal, device=r)
+            data = pld.tensor.allgather(stage, data, signal)
+            return 0
+
+    program = passes.materialize_comm_domain_scopes()(P)
+    with pytest.raises(Exception, match=r"different window allocations"):
+        passes.lower_host_tensor_collectives()(program)
 
 
 def test_host_all_to_all_lowers_to_namesake_builtin():

@@ -842,6 +842,7 @@ def test_backend_materializes_allgather_next_level_files(tmp_path):
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(
             self,
+            stage: pld.DistributedTensor[[4, SIZE], pl.FP32],
             data: pld.DistributedTensor[[4, SIZE], pl.FP32],
             sig: pld.DistributedTensor[[4], pl.INT32],
         ):
@@ -849,21 +850,57 @@ def test_backend_materializes_allgather_next_level_files(tmp_path):
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
-            data_buf = pld.alloc_window_buffer(4 * SIZE * pl.FP32.get_byte())
-            signal_buf = pld.alloc_window_buffer(SIZE * pl.INT32.get_byte())
+            stage_buf = pld.alloc_window_buffer(4 * SIZE * 4)
+            data_buf = pld.alloc_window_buffer(4 * SIZE * 4)
+            signal_buf = pld.alloc_window_buffer(4 * 4)
+            stage = pld.window(stage_buf, [4, SIZE], dtype=pl.FP32)
             data = pld.window(data_buf, [4, SIZE], dtype=pl.FP32)
             signal = pld.window(signal_buf, [4], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):
-                self.chip_orch(data, signal, device=r)
-            pld.tensor.allgather(data, data, signal)
+                self.chip_orch(stage, data, signal, device=r)
+            pld.tensor.allgather(stage, data, signal)
             return 0
 
     _assert_host_collective_next_level_files(
         Prog,
         tmp_path,
         variant="builtin.tensor.allgather__fp32",
-        signature='"signature": [_D.INOUT, _D.INOUT]',
-        kernel_snippet="TLOAD",
+        signature='"signature": [_D.IN, _D.INOUT, _D.INOUT]',
+        kernel_snippet="TPUT",
+    )
+
+
+def test_backend_materializes_all_to_all_next_level_files(tmp_path):
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self,
+            stage: pld.DistributedTensor[[4, SIZE], pl.FP32],
+            data: pld.DistributedTensor[[4, SIZE], pl.FP32],
+            sig: pld.DistributedTensor[[4], pl.INT32],
+        ):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            stage_buf = pld.alloc_window_buffer(4 * SIZE * 4)
+            data_buf = pld.alloc_window_buffer(4 * SIZE * 4)
+            signal_buf = pld.alloc_window_buffer(4 * 4)
+            stage = pld.window(stage_buf, [4, SIZE], dtype=pl.FP32)
+            data = pld.window(data_buf, [4, SIZE], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [4], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(stage, data, signal, device=r)
+            pld.tensor.all_to_all(stage, data, signal)
+            return 0
+
+    _assert_host_collective_next_level_files(
+        Prog,
+        tmp_path,
+        variant="builtin.tensor.all_to_all__fp32",
+        signature='"signature": [_D.IN, _D.INOUT, _D.INOUT]',
+        kernel_snippet="TPUT",
     )
 
 
@@ -893,6 +930,8 @@ def _assert_host_collective_next_level_files(program_cls, tmp_path, variant, sig
         ("barrier", "builtin.tensor.barrier__fp32"),
         ("broadcast", "builtin.tensor.broadcast__root0__fp32"),
         ("reduce_scatter", "builtin.tensor.reduce_scatter__sum__fp32"),
+        ("allgather", "builtin.tensor.allgather__fp32"),
+        ("all_to_all", "builtin.tensor.all_to_all__fp32"),
     ],
 )
 def test_host_collective_builtin_template_package_exists(package_name, variant):
