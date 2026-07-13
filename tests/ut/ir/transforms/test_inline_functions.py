@@ -753,6 +753,53 @@ class TestInlineReturnAndMultiReturn:
 
         ir.assert_structural_equal(After, Expected)
 
+    def test_tuple_unpack_inline_call_returning_tuple_temporary(self):
+        """A tuple temporary returned by an inline helper is expanded before
+        tuple-get-item substitution, so no MakeTuple reaches codegen."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def proj(
+                self,
+                x: pl.Tensor[[4], pl.FP32],
+                o0: pl.Out[pl.Tensor[[4], pl.FP32]],
+                o1: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> tuple[pl.Tensor[[4], pl.FP32], pl.Tensor[[4], pl.FP32]]:
+                o0 = pl.tensor.assemble(o0, x, [0])
+                o1 = pl.tensor.assemble(o1, x, [0])
+                tmp = (o0, o1)
+                return tmp
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[4], pl.FP32],
+                q: pl.Out[pl.Tensor[[4], pl.FP32]],
+                k: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> tuple[pl.Tensor[[4], pl.FP32], pl.Tensor[[4], pl.FP32]]:
+                y0, y1 = self.proj(a, q, k)
+                return y0, y1
+
+        After = passes.inline_functions()(Before)
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[4], pl.FP32],
+                q: pl.Out[pl.Tensor[[4], pl.FP32]],
+                k: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> tuple[pl.Tensor[[4], pl.FP32], pl.Tensor[[4], pl.FP32]]:
+                q = pl.tensor.assemble(q, a, [0])
+                k = pl.tensor.assemble(k, a, [0])
+                y0: pl.Tensor[[4], pl.FP32] = q
+                y1: pl.Tensor[[4], pl.FP32] = k
+                return y0, y1
+
+        ir.assert_structural_equal(After, Expected)
+
     def test_inline_with_bare_tensor_params_multi_return(self):
         """Bare `pl.Tensor` inline params (no `pl.Out` wrapper) splice the
         same way as `pl.Out`-annotated params: rebindings retarget the
