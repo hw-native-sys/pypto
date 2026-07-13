@@ -1,0 +1,55 @@
+/*
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * -----------------------------------------------------------------------------------------------------------
+ */
+
+// Generated from {{template_package}}.
+
+#include <cstdint>
+
+#include "pto_orchestration_api.h"
+
+namespace {
+
+template <typename DType>
+void submit_all_to_all_kernel(const L2TaskArgs &orch_args) {
+  const Tensor &input = orch_args.tensor(0).ref();
+  const Tensor &target = orch_args.tensor(1).ref();
+  const Tensor &signal = orch_args.tensor(2).ref();
+
+  L0TaskArgs params;
+  params.add_input(input);
+  params.add_inout(target);
+  params.add_inout(signal);
+  params.add_scalar(orch_args.scalar(0));  // nranks
+  params.add_scalar(orch_args.scalar(1));  // CommContext device pointer
+  rt_submit_aiv_task(0, params);
+}
+
+}  // namespace
+
+extern "C" {
+
+__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(
+    const L2TaskArgs &orch_args) {
+  (void)orch_args;
+  return PTO2OrchestrationConfig{
+      .expected_arg_count = 5,
+  };
+}
+
+__attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
+  submit_all_to_all_kernel<{{dtype_cpp}}>(orch_args);
+}
+
+__attribute__((visibility("default"))) void {{entry}}(const L2TaskArgs &orch_args) {
+  aicpu_orchestration_entry(orch_args);
+}
+
+}  // extern "C"

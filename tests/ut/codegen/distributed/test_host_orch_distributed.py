@@ -861,9 +861,9 @@ def test_backend_materializes_allgather_next_level_files(tmp_path):
     _assert_host_collective_next_level_files(
         Prog,
         tmp_path,
-        variant="builtin.tensor.barrier__fp32",
-        signature='"signature": [_D.INOUT]',
-        kernel_snippet="platform_comm/comm_context.h",
+        variant="builtin.tensor.allgather__fp32",
+        signature='"signature": [_D.INOUT, _D.INOUT]',
+        kernel_snippet="TLOAD",
     )
 
 
@@ -904,21 +904,6 @@ def test_host_collective_builtin_template_package_exists(package_name, variant):
         assert (templates / name).is_file(), f"missing {name} in {package_name}"
     assert (root / "__init__.py").is_file(), f"missing __init__.py in {package_name}"
     assert variant.startswith("builtin.tensor."), variant
-
-
-def test_allgather_builtin_template_package_reserved_for_future_use():
-    """allgather builtin template package exists but is NOT YET WIRED.
-
-    The HOST allgather path lowers to builtin.tensor.barrier (see
-    test_backend_materializes_allgather_next_level_files). The
-    builtin.tensor.allgather op/templates are reserved for future
-    concurrent-dispatch lowering and must carry a NOT YET WIRED marker.
-    """
-    root = resources.files("pypto.runtime.builtins.collectives") / "allgather"
-    init_content = (root / "__init__.py").read_text()
-    assert "NOT YET WIRED" in init_content, (
-        "allgather __init__.py must carry a NOT YET WIRED marker until the concurrent-dispatch lowering lands"
-    )
 
 
 if __name__ == "__main__":

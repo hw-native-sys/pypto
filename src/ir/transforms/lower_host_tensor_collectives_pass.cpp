@@ -185,15 +185,33 @@ void CheckStaticSignalCapacity(const CallPtr& call, const ExprPtr& signal_expr, 
 }
 
 [[nodiscard]] CallPtr MakeBuiltinAllGather(const CallPtr& call, const ExprPtr& device) {
-  // Staged allgather: each rank's chunk is pre-staged in the shared window by
-  // publish_step.  The allgather AIV kernel requires concurrent cross-chip
-  // dispatch (TNOTIFY / TWAIT / TLOAD), but LowerHostTensorCollectives emits
-  // per-device builtins sequentially in a world_size loop.  A barrier on the
-  // signal (arg[2]) suffices to synchronise visibility of the pre-staged data;
-  // consume_step uses pld.tile.remote_load to gather from all peers.
-  auto signal = call->args_[2];
-  return MakeBuiltinCallWithAttrs("builtin.tensor.barrier", call, {signal}, {}, device, {},
-                                  {ArgDirection::InOut});
+  // Emit namesake builtin: barrier (TNOTIFY / TWAIT) + cross-chip TLOAD
+  // from all peers in a single AIV kernel.  Data is pre-staged in the
+  // target window by publish_step; the kernel gathers from all peers via
+  // concurrent cross-chip remote reads.  All chips must run the kernel
+  // concurrently — the host orchestrator submits asynchronously via
+  // orch.submit_next_level.  simpler and pto-isa support the required
+  // concurrent cross-chip TLOAD.
+  auto target_type = As<DistributedTensorType>(call->args_[0]->GetType());
+  return MakeBuiltinCallWithAttrs("builtin.tensor.allgather", call,
+                                  {call->args_[0], call->args_[1]},  // (target, signal)
+                                  {{"dtype", target_type->dtype_}}, device, {{"dtype", target_type->dtype_}},
+                                  {ArgDirection::InOut, ArgDirection::InOut});
+}
+
+[[nodiscard]] CallPtr MakeBuiltinAllToAll(const CallPtr& call, const ExprPtr& device) {
+  // Emit namesake builtin: in-kernel TPUT push (this rank's chunks from the
+  // `input` staging window into every peer's `target` window) + barrier
+  // (TNOTIFY / TWAIT), all in a single AIV kernel. `input` and `target` must
+  // be two DISTINCT windows — see kernel.cpp.in for why aliasing them is a
+  // data race. All chips must run concurrently — the host orchestrator
+  // submits asynchronously.
+  auto target_type = As<DistributedTensorType>(call->args_[1]->GetType());
+  return MakeBuiltinCallWithAttrs(
+      "builtin.tensor.all_to_all", call,
+      {call->args_[0], call->args_[1], call->args_[2]},  // (input, target, signal)
+      {{"dtype", target_type->dtype_}}, device, {{"dtype", target_type->dtype_}},
+      {ArgDirection::Input, ArgDirection::InOut, ArgDirection::InOut});
 }
 
 struct HostCollectiveRule {
@@ -256,6 +274,19 @@ struct HostCollectiveRule {
             return std::vector<WindowBufferPtr>{
                 GetWindowBuffer(call->args_[1], "allgather target"),
                 GetWindowBuffer(call->args_[2], "allgather signal"),
+            };
+          },
+          [](const CallPtr& call) { return call->args_[2]; },
+          [](const CallPtr& call) -> std::optional<ExprPtr> { return call->args_[1]; },
+      },
+      {
+          "pld.tensor.all_to_all",
+          &MakeBuiltinAllToAll,
+          [](const CallPtr& call) {
+            return std::vector<WindowBufferPtr>{
+                GetWindowBuffer(call->args_[0], "all_to_all input"),
+                GetWindowBuffer(call->args_[1], "all_to_all target"),
+                GetWindowBuffer(call->args_[2], "all_to_all signal"),
             };
           },
           [](const CallPtr& call) { return call->args_[2]; },

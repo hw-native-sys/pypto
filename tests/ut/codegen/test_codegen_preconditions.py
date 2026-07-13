@@ -48,7 +48,7 @@ def test_distributed_codegen_requires_comm_domain_materialization_when_distribut
         cg.generate(program)
 
 
-def test_orchestration_codegen_precondition_entry_point_is_wired():
+def test_orchestration_codegen_precondition_entry_point():
     """Verify that GenerateOrchestration calls the precondition barrier.
 
     The precondition must be the first thing that runs in

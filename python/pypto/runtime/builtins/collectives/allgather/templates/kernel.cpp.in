@@ -68,40 +68,72 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   __gm__ int32_t *signal_base =
       reinterpret_cast<__gm__ int32_t *>(signal_tensor->buffer.addr) + signal_tensor->start_offset;
 
-  for (int peer = 0; peer < nranks; ++peer) {
-    if (peer == my_rank) continue;
-    __gm__ int32_t *remote_signal = CommRemotePtr(comm_ctx, signal_base + my_rank, peer);
-    pto::comm::Signal sig(remote_signal);
-    pto::comm::TNOTIFY(sig, static_cast<int32_t>(1), pto::comm::NotifyOp::AtomicAdd);
-  }
-  for (int peer = 0; peer < nranks; ++peer) {
-    if (peer == my_rank) continue;
-    pto::comm::Signal sig(signal_base + peer);
-    pto::comm::TWAIT(sig, static_cast<int32_t>(1), pto::comm::WaitCmp::GE);
-  }
-  pipe_barrier(PIPE_ALL);
-
   using ShapeDyn = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
   using StrideDyn = pto::Stride<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
   using Global = pto::GlobalTensor<{{dtype_cpp}}, ShapeDyn, StrideDyn, pto::Layout::ND>;
   using TileData = pto::Tile<pto::TileType::Vec, {{dtype_cpp}}, 1, kTileCount, pto::BLayout::RowMajor, -1, -1>;
 
+  TileData stage_tile(1, kTileCount);
   TileData recv_tile(1, kTileCount);
+  TASSIGN(stage_tile, 0x0);
   TASSIGN(recv_tile, 0x10000);
 
-  for (int r = 0; r < nranks; ++r) {
-    if (r == my_rank) continue;
-    __gm__ {{dtype_cpp}} *remote_row = CommRemotePtr(comm_ctx, target + static_cast<int64_t>(r) * row_numel, r);
+  // ------------------------------------------------------------------
+  // Phase 1: fence — each rank does an identity TLOAD→TSTORE of its
+  // own chunk to ensure publish_step's CCU/SDMA writes are visible to
+  // the MTE2 pipeline that services remote TLOADs from peers.
+  // ------------------------------------------------------------------
+  for (int64_t base = 0; base < row_numel; base += kTileCount) {
+    int64_t chunk64 = row_numel - base;
+    if (chunk64 > kTileCount) chunk64 = kTileCount;
+    int chunk = static_cast<int>(chunk64);
 
-    for (int64_t base = 0; base < row_numel; base += kTileCount) {
-      int64_t chunk64 = row_numel - base;
-      if (chunk64 > kTileCount) chunk64 = kTileCount;
-      int chunk = static_cast<int>(chunk64);
+    ShapeDyn shape(1, 1, 1, 1, chunk);
+    StrideDyn stride(chunk, chunk, chunk, chunk, 1);
+    Global my_g(target + static_cast<int64_t>(my_rank) * row_numel + base, shape, stride);
 
-      ShapeDyn shape(1, 1, 1, 1, chunk);
-      StrideDyn stride(chunk, chunk, chunk, chunk, 1);
+    TLOAD(stage_tile, my_g);
+    set_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0);
+    wait_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0);
+    TSTORE(my_g, stage_tile);
+    set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+    wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+  }
+  pipe_barrier(PIPE_ALL);
 
-      Global remote_g(remote_row + base, shape, stride);
+  // ------------------------------------------------------------------
+  // Phase 2: per-tile barrier + gather — mirroring broadcast's proven
+  // tile-by-tile signal protocol (AtomicAdd + incrementing threshold).
+  // After each tile barrier every rank reads that tile from every peer.
+  // ------------------------------------------------------------------
+  int32_t expected = 1;
+  for (int64_t base = 0; base < row_numel; base += kTileCount) {
+    int64_t chunk64 = row_numel - base;
+    if (chunk64 > kTileCount) chunk64 = kTileCount;
+    int chunk = static_cast<int>(chunk64);
+
+    ShapeDyn shape(1, 1, 1, 1, chunk);
+    StrideDyn stride(chunk, chunk, chunk, chunk, 1);
+
+    for (int peer = 0; peer < nranks; ++peer) {
+      if (peer == my_rank) continue;
+      __gm__ int32_t *remote_signal = CommRemotePtr(comm_ctx, signal_base + my_rank, peer);
+      pto::comm::Signal sig(remote_signal);
+      pto::comm::TNOTIFY(sig, static_cast<int32_t>(1), pto::comm::NotifyOp::AtomicAdd);
+    }
+    for (int peer = 0; peer < nranks; ++peer) {
+      if (peer == my_rank) continue;
+      pto::comm::Signal sig(signal_base + peer);
+      pto::comm::TWAIT(sig, expected, pto::comm::WaitCmp::GE);
+    }
+    ++expected;
+    pipe_barrier(PIPE_ALL);
+
+    for (int r = 0; r < nranks; ++r) {
+      if (r == my_rank) continue;
+      __gm__ {{dtype_cpp}} *remote_row =
+          CommRemotePtr(comm_ctx, target + static_cast<int64_t>(r) * row_numel + base, r);
+      Global remote_g(remote_row, shape, stride);
       Global target_g(target + static_cast<int64_t>(r) * row_numel + base, shape, stride);
       TLOAD(recv_tile, remote_g);
       set_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0);

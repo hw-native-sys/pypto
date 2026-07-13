@@ -117,11 +117,10 @@ class TestL3HostTensorAllGather:
             ),
         )
 
-        # pld.tensor.allgather on HOST lowers to builtin.tensor.barrier per chip
-        # (the allgather AIV kernel requires concurrent cross-chip dispatch;
-        # a barrier synchronises pre-staged window data; consume_step uses
-        # pld.tile.remote_load to gather from all peers).
-        variant_dir = compiled.output_dir / "next_levels" / "builtin.tensor.barrier__fp32"
+        # pld.tensor.allgather on HOST lowers to builtin.tensor.allgather
+        # per chip (concurrent cross-chip dispatch).  Data is pre-staged in
+        # the window by publish_step; the builtin gathers from all peers.
+        variant_dir = compiled.output_dir / "next_levels" / "builtin.tensor.allgather__fp32"
         assert variant_dir.is_dir()
         assert (variant_dir / "kernel_config.py").is_file()
 

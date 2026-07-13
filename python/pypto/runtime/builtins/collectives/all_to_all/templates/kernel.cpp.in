@@ -1,0 +1,160 @@
+/*
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * -----------------------------------------------------------------------------------------------------------
+ */
+
+// Generated from {{template_package}}.
+
+#include <cstdint>
+#include <pto/pto-inst.hpp>
+
+#include "platform_comm/comm_context.h"
+#include "pto/comm/comm_types.hpp"
+#include "pto/comm/pto_comm_inst.hpp"
+#include "tensor.h"
+
+#ifndef __gm__
+#define __gm__
+#endif
+
+#ifndef __aicore__
+#define __aicore__ [aicore]
+#endif
+
+namespace {
+
+static constexpr int64_t kTileCount = 256;
+static constexpr int kMaxSupportedRanks = 16;
+
+template <typename T>
+AICORE inline __gm__ T *CommRemotePtr(__gm__ CommContext *ctx, __gm__ T *local_ptr, int pe) {
+  uint64_t local_base = ctx->windowsIn[ctx->rankId];
+  uint64_t offset = reinterpret_cast<uint64_t>(local_ptr) - local_base;
+  return reinterpret_cast<__gm__ T *>(ctx->windowsIn[pe] + offset);
+}
+
+}  // namespace
+
+extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
+  __gm__ Tensor *input_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
+  __gm__ Tensor *target_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
+  __gm__ Tensor *signal_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
+  int nranks = static_cast<int>(args[3]);
+  __gm__ CommContext *comm_ctx = reinterpret_cast<__gm__ CommContext *>(args[4]);
+
+  if (nranks <= 0 || nranks > kMaxSupportedRanks) {
+    pipe_barrier(PIPE_ALL);
+    return;
+  }
+
+  int my_rank = static_cast<int>(comm_ctx->rankId);
+
+  int64_t row_numel = 1;
+  for (uint32_t dim = 1; dim < target_tensor->ndims; ++dim) {
+    row_numel *= static_cast<int64_t>(target_tensor->shapes[dim]);
+  }
+  if (row_numel <= 0) {
+    pipe_barrier(PIPE_ALL);
+    return;
+  }
+
+  // `input` and `target` are two DISTINCT windows. `input` is read-only here
+  // (this rank's own outgoing staging, populated by an earlier stage_step)
+  // and is NEVER the destination of any incoming TPUT. `target` is
+  // write-only here (every incoming push lands in it) plus the final result
+  // read back by the caller. Reusing one buffer for both roles is a genuine
+  // cross-process data race: this rank's own outgoing-source read of a row
+  // can race a peer's concurrent incoming write into that exact same row,
+  // with no happens-before edge between them until the barrier below —
+  // verified via a minimal fork+shm+TPUT repro (fails ~100% with one shared
+  // buffer, passes reliably once source and destination are split).
+  __gm__ {{dtype_cpp}} *input_local =
+      reinterpret_cast<__gm__ {{dtype_cpp}} *>(input_tensor->buffer.addr) + input_tensor->start_offset;
+  __gm__ {{dtype_cpp}} *target =
+      reinterpret_cast<__gm__ {{dtype_cpp}} *>(target_tensor->buffer.addr) + target_tensor->start_offset;
+  __gm__ int32_t *signal_base =
+      reinterpret_cast<__gm__ int32_t *>(signal_tensor->buffer.addr) + signal_tensor->start_offset;
+
+  using ShapeDyn = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
+  using StrideDyn = pto::Stride<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
+  using Global = pto::GlobalTensor<{{dtype_cpp}}, ShapeDyn, StrideDyn, pto::Layout::ND>;
+  using TileData = pto::Tile<pto::TileType::Vec, {{dtype_cpp}}, 1, kTileCount, pto::BLayout::RowMajor, -1, -1>;
+
+  TileData send_tile(1, kTileCount);
+  TASSIGN(send_tile, 0x0);
+
+  // ==================================================================
+  // Phase 1: in-kernel TPUT via pto::comm::TPUT macro.
+  //
+  // stage_step placed our chunks at input[dest, :] locally (the separate
+  // staging window — see the aliasing note above). pto::comm::TPUT pushes
+  // them to the peer's `target` window via the CCU/SDMA DMA engine — same
+  // path as pld.tile.remote_store.
+  //
+  // Data flow: input[dest,:] (local GM, staging window) → send_tile (UB)
+  //            → peer's target[my_rank,:] (remote GM, result window)
+  //
+  // Self-rank: no peer ever pushes into target[my_rank,:], so we copy our
+  // own chunk there directly instead of TPUT-ing to ourselves.
+  // ==================================================================
+  int64_t self_offset = static_cast<int64_t>(my_rank) * row_numel;
+  for (int64_t base = 0; base < row_numel; base += kTileCount) {
+    int64_t chunk64 = row_numel - base;
+    if (chunk64 > kTileCount) chunk64 = kTileCount;
+    int chunk = static_cast<int>(chunk64);
+
+    ShapeDyn shape(1, 1, 1, 1, chunk);
+    StrideDyn stride(chunk, chunk, chunk, chunk, 1);
+    Global src_g(input_local + self_offset + base, shape, stride);
+    Global dst_g(target + self_offset + base, shape, stride);
+
+    TLOAD(send_tile, src_g);
+    set_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0);
+    wait_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0);
+    TSTORE(dst_g, send_tile);
+    set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+    wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+  }
+
+  for (int dest = 0; dest < nranks; ++dest) {
+    if (dest == my_rank) continue;
+
+    ShapeDyn shape(1, 1, 1, 1, static_cast<int>(row_numel));
+    StrideDyn stride(static_cast<int>(row_numel), static_cast<int>(row_numel),
+                     static_cast<int>(row_numel), static_cast<int>(row_numel), 1);
+
+    // Source: our chunk for dest, in the local staging window (never a push
+    // destination, so no other rank ever writes into it).
+    Global src_g(input_local + static_cast<int64_t>(dest) * row_numel, shape, stride);
+
+    // Destination: peer's result window at offset [my_rank, :]
+    __gm__ {{dtype_cpp}} *remote_ptr =
+        CommRemotePtr(comm_ctx, target + static_cast<int64_t>(my_rank) * row_numel, dest);
+    Global dst_g(remote_ptr, shape, stride);
+
+    pto::comm::TPUT(dst_g, src_g, send_tile);
+  }
+
+  // ==================================================================
+  // Phase 2: barrier — notify peers and wait for all.
+  // ==================================================================
+  for (int peer = 0; peer < nranks; ++peer) {
+    if (peer == my_rank) continue;
+    __gm__ int32_t *remote_signal = CommRemotePtr(comm_ctx, signal_base + my_rank, peer);
+    pto::comm::Signal sig(remote_signal);
+    pto::comm::TNOTIFY(sig, static_cast<int32_t>(1), pto::comm::NotifyOp::Set);
+  }
+  for (int peer = 0; peer < nranks; ++peer) {
+    if (peer == my_rank) continue;
+    pto::comm::Signal sig(signal_base + peer);
+    pto::comm::TWAIT(sig, static_cast<int32_t>(1), pto::comm::WaitCmp::GE);
+  }
+
+  pipe_barrier(PIPE_ALL);
+}

@@ -277,15 +277,26 @@ REGISTER_DISTRIBUTED_OP(builtin_tensor_reduce_scatter, "builtin.tensor.reduce_sc
 
 // ============================================================================
 // builtin.tensor.allgather: compiler-generated chip dispatch for pld.tensor.allgather.
-//
-// NOT YET WIRED: reserved for future concurrent-dispatch use.
-// Not currently emitted by the HOST lowering pass (which uses builtin.tensor.barrier
-// for the pre-staged path). When the concurrent-dispatch lowering lands, this
-// handler and its template package will be wired in.
 // ============================================================================
 REGISTER_DISTRIBUTED_OP(builtin_tensor_allgather, "builtin.tensor.allgather") {
   auto* dist_codegen = dynamic_cast<DistributedCodegen*>(&codegen);
   INTERNAL_CHECK(dist_codegen) << "builtin.tensor.allgather codegen requires DistributedCodegen";
+  const auto dtype = op->GetAttr<DataType>("dtype");
+  const std::string variant = op->op_->name_ + "__" + Fp32VariantSuffix(dtype);
+
+  if (dist_codegen->MarkBuiltinEmitted(variant)) {
+    dist_codegen->RecordBuiltinNextLevel(op, variant, {{"dtype_cpp", Fp32TypeCpp(dtype)}});
+  }
+  EmitBuiltinWindowCollectiveDispatch(*dist_codegen, op, variant);
+  return "";
+}
+
+// ============================================================================
+// builtin.tensor.all_to_all: compiler-generated chip dispatch for pld.tensor.all_to_all.
+// ============================================================================
+REGISTER_DISTRIBUTED_OP(builtin_tensor_all_to_all, "builtin.tensor.all_to_all") {
+  auto* dist_codegen = dynamic_cast<DistributedCodegen*>(&codegen);
+  INTERNAL_CHECK(dist_codegen) << "builtin.tensor.all_to_all codegen requires DistributedCodegen";
   const auto dtype = op->GetAttr<DataType>("dtype");
   const std::string variant = op->op_->name_ + "__" + Fp32VariantSuffix(dtype);
 

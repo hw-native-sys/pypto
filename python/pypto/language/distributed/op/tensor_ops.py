@@ -631,21 +631,29 @@ def reduce_scatter(
 
 
 def all_to_all(
-    input: Tensor,
+    input: Tensor | DistributedTensor,
     target: DistributedTensor,
     signal: DistributedTensor,
 ) -> DistributedTensor:
     """All-to-all: symmetric personalized exchange (push-based).
 
-    3-arg InCore composite: ``pld.tensor.all_to_all(input, target, signal)``
+    3-arg form: ``pld.tensor.all_to_all(input, target, signal)``.
     Every rank pushes its per-destination chunks directly to every peer's
-    window via ``pld.tensor.put`` (TPUT), then synchronises with a notify/wait
+    ``target`` window via TPUT, then synchronises with a notify/wait
     barrier.  Returns ``target`` in-place (window-as-result — same idiom as
     ``reduce_scatter`` / ``broadcast``).
 
+    ``input`` must be a DIFFERENT buffer from ``target`` — never pass the same
+    window for both (see the kernel.cpp.in builtin template for why aliasing
+    them is a data race).  For the HOST-level builtin dispatch, ``input`` is
+    typically a second window (e.g. a :class:`pld.DistributedTensor` staged
+    by an earlier InCore step) rather than the InCore composite's plain
+    :class:`pl.Tensor` — both are accepted.
+
     Args:
-        input: :class:`pl.Tensor` [NR, SIZE] with per-destination chunks.
-            ``input[dest, :]`` is the chunk destined for rank ``dest``.
+        input: [NR, SIZE] Tensor or DistributedTensor with per-destination
+            chunks, distinct from ``target``.  ``input[dest, :]`` is the
+            chunk destined for rank ``dest``.
         target: :class:`pld.DistributedTensor` [NR, SIZE] window that receives
             the result in-place.  After the call,
             ``target[src, :]`` holds the chunk received from rank ``src``.

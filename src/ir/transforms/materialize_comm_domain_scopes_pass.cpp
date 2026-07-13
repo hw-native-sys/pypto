@@ -49,6 +49,17 @@ namespace {
   return call && call->op_ && IsOp(call, "pld.tensor.allreduce");
 }
 
+// pld.tensor.all_to_all(input, target, signal) returns `target` in-place
+// (args_[1]) — unlike allreduce, which aliases args_[0]. A window view
+// bound to an all_to_all call's result must resolve back through this arg
+// index so the target allocation's device coverage is inferred correctly
+// even when no dispatch site references the pre-call view directly (e.g.
+// when input and target are two distinct buffers, as they must be — see
+// kernel.cpp.in for why aliasing them is unsafe).
+[[nodiscard]] bool IsTensorAllToAll(const CallPtr& call) {
+  return call && call->op_ && IsOp(call, "pld.tensor.all_to_all");
+}
+
 /// Device coverage descriptor inferred from a dispatch ``device=`` expression.
 struct DeviceDescriptor {
   bool is_all = false;
@@ -326,6 +337,26 @@ class DispatchAnalyzer : public IRVisitor {
       collective_consumers.push_back({ResolveWindowAlloc(op->args_[1], "pld.tensor.allgather", "target"),
                                       ResolveWindowAlloc(op->args_[2], "pld.tensor.allgather", "signal"),
                                       op->span_});
+      return;
+    }
+
+    if (IsOp(op, "pld.tensor.all_to_all")) {
+      // 3-arg push-based form: pld.tensor.all_to_all(input, target, signal)
+      // args[0] = input  (Tensor or DistributedTensor — on HOST path this
+      //                    must be a DISTINCT window from args[1], never the
+      //                    same one; see kernel.cpp.in for why aliasing them
+      //                    is a data race. On InCore it is a plain Tensor.)
+      // args[1] = target (DistributedTensor, window-bound)
+      // args[2] = signal (DistributedTensor, window-bound)
+      INTERNAL_CHECK_SPAN(op->args_.size() == 3, op->span_)
+          << "MaterializeCommDomainScopes: pld.tensor.all_to_all expects exactly 3 args";
+      auto* data_alloc = ResolveWindowAlloc(op->args_[1], "pld.tensor.all_to_all", "target");
+      auto* signal_alloc = ResolveWindowAlloc(op->args_[2], "pld.tensor.all_to_all", "signal");
+      // Device-coverage inheritance from data to signal is handled generically
+      // in the Phase 3 loop below (every collective consumer with a data_alloc
+      // triggers the merge automatically).  No manual merge needed here.
+      collective_consumers.push_back({data_alloc, signal_alloc, op->span_});
+      return;
     }
   }
 
@@ -362,8 +393,13 @@ class DispatchAnalyzer : public IRVisitor {
       return ResolveWindowRecord(alias, visited);
     }
     auto call = As<Call>(def_it->second);
-    if (!IsTensorAllReduce(call) || call->args_.empty()) return nullptr;
-    return ResolveWindowRecord(As<Var>(call->args_[0]), visited);
+    if (call && IsTensorAllReduce(call) && !call->args_.empty()) {
+      return ResolveWindowRecord(As<Var>(call->args_[0]), visited);
+    }
+    if (call && IsTensorAllToAll(call) && call->args_.size() > 1) {
+      return ResolveWindowRecord(As<Var>(call->args_[1]), visited);
+    }
+    return nullptr;
   }
 
   const std::unordered_map<const Var*, WindowRecord>& view_to_window_;
@@ -458,7 +494,7 @@ FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string,
            "is consumed by a device-tagged chip dispatch";
   }
 
-  // Phase 3: each alloc must have at least one window AND at least one
+  // Phase 4: each alloc must have at least one window AND at least one
   // consuming dispatch — otherwise it is dead and downstream codegen has
   // nothing to point a CommDomain buffer slot at.
   std::unordered_map<const Var*, std::vector<const WindowRecord*>> allocs_with_windows;
