@@ -65,6 +65,7 @@ TENSOR_OPTIMIZATION_PASSES = [
     "Simplify",
     "MaterializeRuntimeScopes",
     "ClassifyIterArgCarry",
+    "HoistScopeLocalAllocs",
 ]
 
 DEBUG_TILE_OPTIMIZATION_PASSES = [
@@ -107,6 +108,7 @@ DEBUG_TILE_OPTIMIZATION_PASSES = [
     "Simplify",
     "MaterializeRuntimeScopes",
     "ClassifyIterArgCarry",
+    "HoistScopeLocalAllocs",
 ]
 
 

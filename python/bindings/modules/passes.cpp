@@ -115,7 +115,11 @@ void BindPass(nb::module_& m) {
       .value("IterArgCarryClassified", IRProperty::IterArgCarryClassified,
              "Every ForStmt with iter_args in an Orchestration function carries an "
              "attrs['iter_arg_rebind_<i>'] classification per slot (plus attrs['iter_arg_array_size_<i>'] "
-             "for TaskId array carries), so orchestration codegen reads the carry lowering");
+             "for TaskId array carries), so orchestration codegen reads the carry lowering")
+      .value("HoistableAllocsMarked", IRProperty::HoistableAllocsMarked,
+             "Every enclosing-scope-valid tensor.create sitting directly in a pl.manual_scope body "
+             "carries attrs['hoistable_alloc'], so orchestration codegen reads the allocation-hoist "
+             "set instead of re-deriving it from emit-time indent arithmetic (#1697)");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");
@@ -546,6 +550,13 @@ void BindPass(nb::module_& m) {
              "slot) and attrs['iter_arg_array_size_<i>'] (int, positive extents only) onto each\n"
              "ForStmt, so orchestration codegen reads the carry lowering instead of re-deriving\n"
              "it from an alias fixpoint. Runs last, after materialize_runtime_scopes.");
+  passes.def("hoist_scope_local_allocs", &pass::HoistScopeLocalAllocs,
+             "Mark manual-scope-local allocations that codegen must hoist (#1697).\n\n"
+             "For every Orchestration function, stamps attrs['hoistable_alloc']=True onto each\n"
+             "tensor.create that sits directly in a pl.manual_scope body and whose result shape\n"
+             "references no Var defined inside that body (enclosing-scope-valid). Orchestration\n"
+             "codegen reads this set instead of re-deriving it from emit-time indent arithmetic.\n"
+             "Runs after materialize_runtime_scopes.");
   passes.def("normalize_stmt_structure", &pass::NormalizeStmtStructure,
              "Create a pass that normalizes statement structure");
   passes.def("derive_call_directions", &pass::DeriveCallDirections,

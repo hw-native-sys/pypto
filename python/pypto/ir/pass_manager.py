@@ -210,6 +210,13 @@ class PassManager:
             # MaterializeRuntimeScopes so the classified IR is exactly the IR
             # orchestration codegen lowers.
             passes.classify_iter_arg_carry,
+            # Mark manual-scope-local allocations that codegen must hoist out of
+            # their pl.manual_scope into the enclosing scope (#1697), stamping the
+            # ``hoistable_alloc`` attr onto each enclosing-scope-valid tensor.create
+            # sitting directly in a manual-scope body. Runs after
+            # MaterializeRuntimeScopes so the manual-scope boundary is an explicit
+            # RuntimeScopeStmt(manual=True) edge, not an emit-time indent heuristic.
+            passes.hoist_scope_local_allocs,
         )
         if strategy == OptimizationStrategy.Default:
             return tensor_prefix_passes + tensor_only_passes + tile_pto_passes

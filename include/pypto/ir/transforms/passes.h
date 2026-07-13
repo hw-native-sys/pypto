@@ -797,6 +797,30 @@ Pass MaterializeRuntimeScopes();
 Pass ClassifyIterArgCarry();
 
 /**
+ * @brief Mark manual-scope-local allocations that codegen must hoist (#1697)
+ *
+ * A ``pl.manual_scope`` (``RuntimeScopeStmt`` with ``manual_ == true``) is a
+ * scheduling region, not a storage scope: a buffer it allocates via
+ * ``tensor.create`` may be read by a task placed AFTER the block, so the
+ * generated C++ declaration must live one level out to stay in scope at the
+ * after-scope reader. Otherwise the local dies at the block's closing brace and
+ * the reference fails to compile (issue #1697).
+ *
+ * Orchestration codegen used to recover the alloc-hoist set from emit-time
+ * indent arithmetic plus an on-the-fly shape-locality analysis. This pass moves
+ * that decision into the IR: it stamps the ``hoistable_alloc`` attr on every
+ * ``tensor.create`` that sits directly in a manual-scope body (not nested in a
+ * for/if within it) and whose result shape references no Var defined inside that
+ * body — i.e. is enclosing-scope-valid. The batched-alloc hoist gate then reads
+ * the attr instead of the indent heuristic. Nested manual scopes are handled;
+ * only ``FunctionType::Orchestration`` functions are touched.
+ *
+ * Runs after ``MaterializeRuntimeScopes``, so the manual-scope boundary is an
+ * explicit structural fact rather than a codegen indent heuristic.
+ */
+Pass HoistScopeLocalAllocs();
+
+/**
  * @brief Copy each cross-core tpop's split/pipe-id onto its matching tfree op
  *
  * A `system.tfree_to_ai{c,v}` carries no split/id of its own — those live on the

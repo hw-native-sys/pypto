@@ -90,6 +90,10 @@ enum class IRProperty : uint64_t {
                                     ///< ``iter_arg_array_size_<i>`` for TaskId array carries), so
                                     ///< orchestration codegen reads the carry lowering instead of
                                     ///< re-deriving it
+  HoistableAllocsMarked,            ///< Every enclosing-scope-valid ``tensor.create`` sitting directly in a
+                                    ///< ``pl.manual_scope`` body carries the ``hoistable_alloc`` attr, so
+                                    ///< orchestration codegen reads the manual-scope allocation-hoist set
+                                    ///< instead of re-deriving it from emit-time indent arithmetic (#1697)
   kCount                            ///< Sentinel (must be last)
 };
 

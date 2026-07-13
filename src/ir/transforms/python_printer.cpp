@@ -1102,12 +1102,17 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   // either duplicate that surface or expose an internal marker the round-trip
   // tests don't expect. ``pipeline_membership`` (set by LowerPipelineLoops, read
   // by MemoryReuse) has no such surface and MUST round-trip, else the structural
-  // equality check after those passes fails. The matching reader is
-  // ``ast_parser`` (``_parse_op_attrs`` -> ``set_call_attrs``).
+  // equality check after those passes fails. ``hoistable_alloc`` (set by
+  // HoistScopeLocalAllocs on a manual-scope ``tensor.create``, read by
+  // orchestration codegen) is the same shape of internal marker and MUST
+  // round-trip too. The matching reader is ``ast_parser`` (``_parse_op_attrs``
+  // -> ``set_call_attrs``).
   {
     std::vector<const std::pair<std::string, std::any>*> serialized_attrs;
     for (const auto& kv : op->attrs_) {
-      if (kv.first == kPipelineMembershipAttr) serialized_attrs.push_back(&kv);
+      if (kv.first == kPipelineMembershipAttr || kv.first == kAttrHoistableAlloc) {
+        serialized_attrs.push_back(&kv);
+      }
     }
     if (!serialized_attrs.empty()) {
       stream_ << (need_comma ? ", " : "") << "attrs={";

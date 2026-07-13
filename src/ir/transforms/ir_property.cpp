@@ -99,6 +99,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "HardSyncallOccupancyValid";
     case IRProperty::IterArgCarryClassified:
       return "IterArgCarryClassified";
+    case IRProperty::HoistableAllocsMarked:
+      return "HoistableAllocsMarked";
     default:
       return "Unknown";
   }

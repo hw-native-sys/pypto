@@ -215,6 +215,20 @@ inline std::string IterArgArraySizeAttrKey(size_t idx) {
   return std::string(kIterArgArraySizeAttrPrefix) + std::to_string(idx);
 }
 
+/// ``bool`` attr on a ``tensor.create`` ``Call`` marking it as a scope-local
+/// allocation that codegen must hoist out of its enclosing ``pl.manual_scope``
+/// (``RuntimeScopeStmt`` with ``manual_ == true``) into the enclosing scope.
+///
+/// Stamped by ``HoistScopeLocalAllocs`` on exactly the creates that sit directly
+/// in a manual-scope body (not nested in a for/if within it) and whose result
+/// shape does not reference any Var defined inside that body — i.e. the buffer
+/// is enclosing-scope-valid. A manual_scope is a scheduling region, not a
+/// storage scope: a buffer it allocates may be read by a task placed AFTER the
+/// block, so its C++ declaration must live one level out to stay in scope at the
+/// after-scope reader (issue #1697). Orchestration codegen reads this attr
+/// instead of re-deriving the hoist set from emit-time indent arithmetic.
+inline constexpr const char* kAttrHoistableAlloc = "hoistable_alloc";
+
 }  // namespace ir
 }  // namespace pypto
 

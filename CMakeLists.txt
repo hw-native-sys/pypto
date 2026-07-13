@@ -155,6 +155,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/stamp_tfree_split_pass.cpp
     src/ir/transforms/materialize_runtime_scopes_pass.cpp
     src/ir/transforms/classify_iter_arg_carry_pass.cpp
+    src/ir/transforms/hoist_scope_local_allocs_pass.cpp
     src/ir/transforms/fuse_create_assemble_to_slice_pass.cpp
     src/ir/transforms/memory_reuse_pass.cpp
     src/ir/transforms/normalize_return_order_pass.cpp
@@ -246,6 +247,7 @@ set(PYPTO_SOURCES
     src/ir/verifier/verify_pipeline_resolved.cpp
     src/ir/verifier/verify_unroll_resolved.cpp
     src/ir/verifier/verify_iter_arg_carry_classified.cpp
+    src/ir/verifier/verify_hoistable_allocs_marked.cpp
     src/ir/verifier/verify_call_directions.cpp
     src/ir/verifier/verify_tile_type_coherence.cpp
     src/ir/verifier/verify_assign_type_symmetry.cpp

@@ -339,6 +339,18 @@ PropertyVerifierPtr CreateUnrollResolvedPropertyVerifier();
 PropertyVerifierPtr CreateIterArgCarryClassifiedPropertyVerifier();
 
 /**
+ * @brief Factory function for creating HoistableAllocsMarked property verifier
+ *
+ * Verifies that every enclosing-scope-valid ``tensor.create`` sitting directly
+ * in a ``pl.manual_scope`` body of a ``FunctionType::Orchestration`` function
+ * carries the ``hoistable_alloc`` attr stamped by ``HoistScopeLocalAllocs``
+ * (issue #1697).
+ *
+ * @return Shared pointer to HoistableAllocsMarked PropertyVerifier
+ */
+PropertyVerifierPtr CreateHoistableAllocsMarkedPropertyVerifier();
+
+/**
  * @brief Factory function for creating CallDirectionsResolved property verifier
  *
  * Verifies that every non-builtin ``Call`` in the program carries a fully

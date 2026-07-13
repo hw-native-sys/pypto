@@ -48,6 +48,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
@@ -2828,15 +2829,28 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // deep block indent — so a buffer created inside the scope but read by a
     // task placed AFTER it stays in C++ scope. A manual_scope is a scheduling
     // region, not a storage scope: an ``alloc_tensors`` has no scheduling
-    // dependency, so emitting it one level out is semantically inert. The batch
-    // is enclosing-scope-valid by construction — ShapeDependsOnLocalVars already
-    // excluded any create whose shape references a scope-local value (those fall
-    // to the per-op path and stay put). The ``+ 4`` guard restricts this to the
-    // scope's own body, so a create nested in a for/if *within* the manual scope
-    // is left in place. Erasing the hoisted names from ``manual_local_names_``
-    // then lets a kernel output that aliases such a buffer remap to it
-    // (EmitTensorAlias / IsEnclosingScopeValid).
-    const bool hoist_batch = scope_hoist_sink_ != nullptr && IsAtManualScopeBodyIndent();
+    // dependency, so emitting it one level out is semantically inert.
+    //
+    // The alloc-hoist set is an explicit IR fact: HoistScopeLocalAllocs stamps
+    // ``hoistable_alloc`` on exactly the enclosing-scope-valid creates sitting
+    // directly in a manual-scope body (nested-in-for/if creates are not stamped).
+    // This gate reads that attr instead of recovering "direct manual-scope body"
+    // from ``IsAtManualScopeBodyIndent()`` (still used for the other hoist paths —
+    // mutable-carry decls, SSA-copy collapse). Every create that reaches
+    // ``creates`` inside a manual-scope body carries it (the pass's shape-locality
+    // gate and the collect-loop's ShapeDependsOnLocalVars gate agree), so the
+    // whole batch is hoisted iff its creates are stamped. Erasing the hoisted
+    // names from ``manual_local_names_`` then lets a kernel output that aliases
+    // such a buffer remap to it (EmitTensorAlias / IsEnclosingScopeValid).
+    const bool hoist_batch = scope_hoist_sink_ != nullptr && !creates.empty() &&
+                             creates.front().call->HasAttr(kAttrHoistableAlloc);
+    if (hoist_batch) {
+      for (const auto& c : creates) {
+        INTERNAL_CHECK_SPAN(c.call->HasAttr(kAttrHoistableAlloc), c.call->span_)
+            << "Internal error: manual-scope alloc batch mixes hoistable and non-hoistable creates; "
+               "HoistScopeLocalAllocs and EmitBatchedAllocTensors disagree on the hoist set";
+      }
+    }
     CodeEmitter batch_emitter;
     CodeEmitter* saved_active = active_emitter_;
     const int saved_indent_level = Active().GetIndentLevel();

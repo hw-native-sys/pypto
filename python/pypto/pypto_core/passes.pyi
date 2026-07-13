@@ -55,6 +55,7 @@ class IRProperty(Enum):
     ReturnParamsExplicit = ...
     AivSplitValid = ...
     IterArgCarryClassified = ...
+    HoistableAllocsMarked = ...
 
 class IRPropertySet:
     """A set of IR properties backed by a bitset."""
@@ -677,6 +678,24 @@ def classify_iter_arg_carry() -> Pass:
 
     Runs last, after :func:`materialize_runtime_scopes`, so the classified IR is
     exactly the IR codegen lowers.
+    """
+
+def hoist_scope_local_allocs() -> Pass:
+    """Mark manual-scope-local allocations that codegen must hoist (#1697).
+
+    For every ``FunctionType.Orchestration`` function, stamps
+    ``attrs['hoistable_alloc'] = True`` onto each ``tensor.create`` that sits
+    directly in a ``pl.manual_scope`` body (``RuntimeScopeStmt`` with
+    ``manual_ == True``) and whose result shape references no ``Var`` defined
+    inside that body — i.e. the buffer is enclosing-scope-valid.
+
+    A ``pl.manual_scope`` is a scheduling region, not a storage scope: a buffer
+    it allocates may be read by a task placed after the block, so its C++
+    declaration must live one level out. Orchestration codegen reads this set
+    instead of re-deriving it from emit-time indent arithmetic.
+
+    Runs after :func:`materialize_runtime_scopes`, so the manual-scope boundary
+    is an explicit structural fact.
     """
 
 class NestedCallErrorType(Enum):

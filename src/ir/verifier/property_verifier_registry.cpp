@@ -66,6 +66,7 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   Register(IRProperty::PipelineResolved, CreatePipelineResolvedPropertyVerifier);
   Register(IRProperty::UnrollResolved, CreateUnrollResolvedPropertyVerifier);
   Register(IRProperty::IterArgCarryClassified, CreateIterArgCarryClassifiedPropertyVerifier);
+  Register(IRProperty::HoistableAllocsMarked, CreateHoistableAllocsMarkedPropertyVerifier);
   Register(IRProperty::CallDirectionsResolved, CreateCallDirectionsResolvedPropertyVerifier);
   Register(IRProperty::TileTypeCoherence, CreateTileTypeCoherencePropertyVerifier);
   Register(IRProperty::InlineFunctionsEliminated, CreateInlineFunctionsEliminatedPropertyVerifier);

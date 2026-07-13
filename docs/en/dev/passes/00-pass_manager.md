@@ -93,6 +93,7 @@ struct PassProperties {
 | Simplify | — | — | — |
 | MaterializeRuntimeScopes | SplitIncoreOrch, CallDirectionsResolved | RuntimeScopesMaterialized | — |
 | ClassifyIterArgCarry | CallDirectionsResolved, RuntimeScopesMaterialized | IterArgCarryClassified, RuntimeScopesMaterialized | — |
+| HoistScopeLocalAllocs | CallDirectionsResolved, RuntimeScopesMaterialized | HoistableAllocsMarked, RuntimeScopesMaterialized | — |
 
 > **Note**: VerifySSA and TypeCheck are **PropertyVerifiers** (verification rules), not Passes. They run via `VerificationInstrument` or the `run_verifier()` utility — see [Verifier](99-verifier.md).
 
@@ -411,6 +412,7 @@ The PTO-oriented tile stage shared by `Default` and `DebugTileOptimization` is:
 30. `Simplify`
 31. [`MaterializeRuntimeScopes`](41-materialize_runtime_scopes.md) (inserts AUTO RuntimeScopeStmt so orchestration codegen emits PTO2_SCOPE 1:1)
 32. [`ClassifyIterArgCarry`](42-classify_iter_arg_carry.md) (stamps each ForStmt iter_arg as trivial alias / rebind carry, and sizes manual-scope TaskId fence arrays)
+33. [`HoistScopeLocalAllocs`](43-hoist_scope_local_allocs.md) (stamps each enclosing-scope-valid `tensor.create` in a manual-scope body with `hoistable_alloc` so codegen hoists its declaration out of the block, #1697)
 
 `DebugTileOptimization` is a debug-only strategy for inspecting this tile stage
 without the tensor-only prefix passes. Use `Default` for normal compilation and

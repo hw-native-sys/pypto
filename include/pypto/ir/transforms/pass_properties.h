@@ -69,6 +69,16 @@ inline const PassProperties kClassifyIterArgCarryProperties{
     .required = {IRProperty::CallDirectionsResolved, IRProperty::RuntimeScopesMaterialized},
     .produced = {IRProperty::IterArgCarryClassified, IRProperty::RuntimeScopesMaterialized}};
 
+// -- HoistScopeLocalAllocs pass (runs after MaterializeRuntimeScopes) ---------
+//    Marks each enclosing-scope-valid ``tensor.create`` sitting directly in a
+//    ``pl.manual_scope`` body with the ``hoistable_alloc`` attr, so
+//    orchestration codegen reads the allocation-hoist set instead of re-deriving
+//    it from emit-time indent arithmetic (issue #1697). Requires the explicit
+//    RuntimeScopeStmt wrappers so the manual-scope boundary is a structural fact.
+inline const PassProperties kHoistScopeLocalAllocsProperties{
+    .required = {IRProperty::CallDirectionsResolved, IRProperty::RuntimeScopesMaterialized},
+    .produced = {IRProperty::HoistableAllocsMarked, IRProperty::RuntimeScopesMaterialized}};
+
 // -- Loop unrolling pass (runs before SSA) ------------------------------------
 
 inline const PassProperties kUnrollLoopsProperties{.produced = {IRProperty::UnrollResolved}};

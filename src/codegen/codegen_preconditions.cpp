@@ -66,10 +66,12 @@ void VerifyOrchestrationCodegenPreconditions(const ProgramPtr& program, const Fu
       << "Internal error: GenerateOrchestration preconditions — function must not be null";
 
   // Codegen assumes hierarchy references resolved, explicit RuntimeScopeStmt
-  // materialization, and a stamped iter_arg carry plan on every ForStmt.
+  // materialization, a stamped iter_arg carry plan on every ForStmt, and the
+  // manual-scope allocation-hoist set marked on every hoistable tensor.create.
   pass::VerifyProperties(
       IRPropertySet{IRProperty::SplitIncoreOrch, IRProperty::OrchestrationReferencesResolved,
-                    IRProperty::RuntimeScopesMaterialized, IRProperty::IterArgCarryClassified},
+                    IRProperty::RuntimeScopesMaterialized, IRProperty::IterArgCarryClassified,
+                    IRProperty::HoistableAllocsMarked},
       program, "GenerateOrchestration preconditions");
 }
 
