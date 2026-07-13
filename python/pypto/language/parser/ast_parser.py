@@ -65,6 +65,14 @@ if TYPE_CHECKING:
 # / tile_ops); also surfaced as the hint in _parse_pld_category_op.
 _PLD_CATEGORIES: frozenset[str] = frozenset({"system", "tensor", "tile"})
 
+# Function types whose body is already a core function: InCore and its AIC / AIV
+# specializations. Mirrors the C++ IsInCoreType() (include/pypto/ir/function.h).
+# Such a body needs no synthesized InCoreScopeStmt wrapper — there is nothing left
+# for OutlineIncoreScopes to outline.
+_CORE_FUNCTION_TYPES: frozenset[ir.FunctionType] = frozenset(
+    {ir.FunctionType.InCore, ir.FunctionType.AIC, ir.FunctionType.AIV}
+)
+
 
 def _is_empty_body(body: list[ast.stmt]) -> bool:
     """True if a function body carries no statements beyond a signature marker.
@@ -4146,7 +4154,15 @@ class ASTParser:
         # through an intervening pl.range/pl.pipeline/if — emit the region in
         # place; it nests inside the open context. OutlineIncoreScopes outlines the
         # enclosing core function and the nested region survives.
-        if self._is_inside_scope(ir.ScopeKind.InCore):
+        #
+        # A core function body (InCore, or its AIC / AIV specializations — the same
+        # set as the C++ IsInCoreType()) is already a core function, so the region goes
+        # in place there too: there is nothing left for OutlineIncoreScopes to outline.
+        # This is the shape post-outline IR prints as (outlining consumes the
+        # InCoreScopeStmt and leaves the region directly in a core function body), so
+        # synthesizing a wrapper here would make print->parse lossy — the reparsed
+        # function would grow a spurious InCoreScopeStmt.
+        if self._is_inside_scope(ir.ScopeKind.InCore) or self._func_type in _CORE_FUNCTION_TYPES:
             self._emit_split_aiv_region(stmt, loop_var_name, split_mode)
             return
 

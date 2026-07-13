@@ -210,6 +210,18 @@ IR。当追踪不到任何参数时，仅在被调用者恰好只有一个 `Out`
 | `Left`、`Right`、`Acc`、`Mat` | CUBE (AIC) | `rt_submit_aic_task` |
 | `Vec`（默认） | VECTOR (AIV) | `rt_submit_aiv_task` |
 
+**例外 —— 双 AIV 核函数。** 带 `dual_aiv_dispatch` 标记的 AIV 核函数（即任何 `split_aiv`
+核函数，参见 [`SplitVectorKernel`](../passes/21-split_vector_kernel.md)）必须在一个 cluster 的
+**两个**向量核上同时运行 —— `pl.split_aiv` 区域通过 `aiv_id` 给每条 lane 分派互不相交的工作。
+而 `rt_submit_aiv_task` 只填 AIV0 槽位，运行时会把它调度为*单 AIV* 任务：第二条 lane 根本不会
+启动，而唯一启动的那条读到的 `get_sub_block_id()` 在单 AIV 任务下是运行时**未定义**的值。
+因此这类核函数一律改用双 lane 的 `MixedKernels` + `rt_submit_task` 提交（参见
+[Group 函数（混合核）](#group-函数混合核)），无论走哪条分派路径（直接调用、`Spmd` 包装器，
+还是纯 AIV 的 `Group`）。两个激活的 AIV 槽位使其成为 MIX 形状的任务，于是调度器把同一个 cluster
+的两条 lane 放在相同的 `block_idx` 下，并分别赋予 `sub_block_id` 0 和 1；该 cluster 的 AIC 核心
+闲置不用。普通（不带 `dual_aiv_dispatch`）的向量核函数仍走 `rt_submit_aiv_task`，在相互独立的
+AIV 核心上分派。
+
 ### 元组处理
 
 元组返回的调用使用唯一键（`_tc_N`）追踪元素：
@@ -241,6 +253,16 @@ Arg params_t0;
 MixedKernels mixed_0 = {aic_id, aiv_id, INVALID_KERNEL_ID};
 rt_submit_task(mixed_0, params_t0);
 ```
+
+三个槽位依次是 `{aic_kernel_id, aiv0_kernel_id, aiv1_kernel_id}`，`INVALID_KERNEL_ID` 表示该槽位
+未激活。当 AIV 函数带有 `dual_aiv_dispatch` 时，AIV1 槽位重复填入同一个 AIV kernel id —— 于是两条
+向量 lane 都会运行：
+
+| 核函数 | `MixedKernels` |
+| ------ | -------------- |
+| 混合核，单条 AIV lane | `{aic_id, aiv_id, INVALID_KERNEL_ID}` |
+| 混合核，`dual_aiv_dispatch` | `{aic_id, aiv_id, aiv_id}` |
+| 纯向量核，`dual_aiv_dispatch` | `{INVALID_KERNEL_ID, aiv_id, aiv_id}` |
 
 ## 操作映射
 

@@ -2451,46 +2451,82 @@ class OrchestrationStmtCodegen : public CodegenBase {
     return plan;
   }
 
+  /// A submit expression plus the lines that must precede it (emitted by
+  /// ``TaskDispatchPlan::Emit`` between the ``add_*`` params and the launch spec).
+  struct SubmitExpr {
+    std::string expr;
+    std::vector<std::string> pre_lines;
+  };
+
+  /// Build the submit for a task that dispatches ONE kernel function — a direct
+  /// call, a Spmd wrapper, or an AIV-only Group.
+  ///
+  /// An AIV kernel stamped `dual_aiv_dispatch` must run on BOTH vector lanes of a
+  /// cluster: a `pl.split_aiv` region hands each lane disjoint work selected by
+  /// `aiv_id`. `rt_submit_aiv_task` fills only the AIV0 slot, which the runtime
+  /// schedules as a single-AIV task — the second lane never launches, and the lone
+  /// lane that does reads a `get_sub_block_id()` the runtime leaves *undefined* for
+  /// single-AIV tasks (runtime `common/intrinsic.h`), so its `aiv_id` is really its
+  /// physical cluster position. Half the work is then silently dropped (issue #2006).
+  ///
+  /// Emit an explicit `MixedKernels{INVALID, id, id}` instead: two active AIV slots
+  /// make it a MIX-shape task, so the scheduler places both lanes of one cluster
+  /// under the same block_idx and gives them sub_block_id 0 and 1. The cluster's AIC
+  /// core is simply unused. Non-dual-AIV kernels keep `rt_submit_{aic,aiv}_task`,
+  /// which dispatches across independent cores.
+  SubmitExpr BuildSingleKernelSubmitExpr(CoreType core_type, const FunctionPtr& kernel_func, int func_id,
+                                         const std::string& task_var) {
+    if (core_type == CoreType::VECTOR && RequiresDualAivDispatch(kernel_func)) {
+      const std::string mixed_var = "mixed_" + std::to_string(task_counter_);
+      const std::string id = std::to_string(func_id);
+      return {"rt_submit_task(" + mixed_var + ", " + task_var + ")",
+              {"MixedKernels " + mixed_var + " = {INVALID_KERNEL_ID, " + id + ", " + id + "};"}};
+    }
+    return {CoreTypeToSubmitPrefix(core_type) + std::to_string(func_id) + ", " + task_var + ")", {}};
+  }
+
   TaskDispatchPlan BuildDirectCallDispatchPlan(const CallPtr& call, const FunctionPtr& callee_func,
                                                const std::string& callee_name, CoreType core_type,
                                                int func_id, std::vector<ParamEntry>&& params,
                                                bool capture_plain_task_id) {
     std::string task_var = CurrentTaskVarName();
-    std::string submit_expr =
-        CoreTypeToSubmitPrefix(core_type) + std::to_string(func_id) + ", " + task_var + ")";
+    auto submit = BuildSingleKernelSubmitExpr(core_type, callee_func, func_id, task_var);
     auto [launch_core_num, launch_sync_start] = EffectiveLaunchSpec(call, callee_func);
-    TaskDispatchPlan plan =
-        BuildTaskDispatchPlan("// Task " + std::to_string(task_counter_) + ": " + callee_name, call,
-                              std::move(params), launch_core_num, launch_sync_start, submit_expr,
-                              ShouldCaptureTaskOutputs(call, capture_plain_task_id));
+    TaskDispatchPlan plan = BuildTaskDispatchPlan(
+        "// Task " + std::to_string(task_counter_) + ": " + callee_name, call, std::move(params),
+        launch_core_num, launch_sync_start, submit.expr,
+        ShouldCaptureTaskOutputs(call, capture_plain_task_id), std::move(submit.pre_lines));
     // Direct calls historically emit set_dependencies before the launch spec.
     plan.deps_before_launch = true;
     return plan;
   }
 
+  /// ``kernel_func`` is the AIC/AIV kernel the wrapper dispatches (``spmd_func`` is
+  /// the Spmd wrapper itself, which carries the launch spec but no core attrs).
   TaskDispatchPlan BuildSpmdCallDispatchPlan(const CallPtr& call, const FunctionPtr& spmd_func,
-                                             const std::string& callee_name, CoreType core_type, int func_id,
+                                             const FunctionPtr& kernel_func, const std::string& callee_name,
+                                             CoreType core_type, int func_id,
                                              std::vector<ParamEntry>&& params, bool capture_plain_task_id) {
     std::string task_var = CurrentTaskVarName();
     auto [launch_core_num, launch_sync_start] = EffectiveLaunchSpec(call, spmd_func);
-    std::string submit_expr =
-        CoreTypeToSubmitPrefix(core_type) + std::to_string(func_id) + ", " + task_var + ")";
+    auto submit = BuildSingleKernelSubmitExpr(core_type, kernel_func, func_id, task_var);
     return BuildTaskDispatchPlan("// Spmd " + spmd_func->name_ + ": " + callee_name, call, std::move(params),
-                                 launch_core_num, launch_sync_start, submit_expr,
-                                 ShouldCaptureTaskOutputs(call, capture_plain_task_id));
+                                 launch_core_num, launch_sync_start, submit.expr,
+                                 ShouldCaptureTaskOutputs(call, capture_plain_task_id),
+                                 std::move(submit.pre_lines));
   }
 
   TaskDispatchPlan BuildAivOnlyGroupDispatchPlan(const CallPtr& call, const FunctionPtr& launch_func,
-                                                 const std::string& group_name, int aiv_id,
-                                                 std::vector<ParamEntry>&& params,
+                                                 const std::string& group_name, const FunctionPtr& aiv_func,
+                                                 int aiv_id, std::vector<ParamEntry>&& params,
                                                  bool capture_plain_task_id) {
     std::string task_var = CurrentTaskVarName();
     auto [launch_core_num, launch_sync_start] = EffectiveLaunchSpec(call, launch_func);
-    std::string submit_expr =
-        CoreTypeToSubmitPrefix(CoreType::VECTOR) + std::to_string(aiv_id) + ", " + task_var + ")";
+    auto submit = BuildSingleKernelSubmitExpr(CoreType::VECTOR, aiv_func, aiv_id, task_var);
     return BuildTaskDispatchPlan("// Group " + group_name + ": AIV-only SPMD", call, std::move(params),
-                                 launch_core_num, launch_sync_start, submit_expr,
-                                 ShouldCaptureTaskOutputs(call, capture_plain_task_id));
+                                 launch_core_num, launch_sync_start, submit.expr,
+                                 ShouldCaptureTaskOutputs(call, capture_plain_task_id),
+                                 std::move(submit.pre_lines));
   }
 
   TaskDispatchPlan BuildMixedGroupDispatchPlan(const CallPtr& call, const FunctionPtr& launch_func,
@@ -2946,8 +2982,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
     auto params = BuildWrapperReorderedParams(call, spmd_func, info.inner_call);
     RecordKernelSignature(callee_name, params);
 
-    BuildSpmdCallDispatchPlan(call, spmd_func, callee_name, core_type, func_id, std::move(params),
-                              capture_plain_task_id)
+    BuildSpmdCallDispatchPlan(call, spmd_func, info.inner_callee, callee_name, core_type, func_id,
+                              std::move(params), capture_plain_task_id)
         .Emit(*this);
   }
 
@@ -2958,10 +2994,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
     auto info = FindGroupCallees(group_func);
 
-    // AIV-only Group: pure vector SPMD kernel (no AIC callee).
-    // Dispatch as a single AIV task with core_num/sync_start from the Group.
-    // Use rt_submit_aiv_task which dispatches across independent AIV cores,
-    // unlike rt_submit_task (MixedKernels) which dispatches full clusters.
+    // AIV-only Group: pure vector SPMD kernel (no AIC callee), dispatched with
+    // core_num/sync_start from the Group. BuildSingleKernelSubmitExpr picks the
+    // submit: rt_submit_aiv_task (independent AIV cores) for a plain kernel, or a
+    // both-lanes MixedKernels for a `dual_aiv_dispatch` one.
     if (info.aic_name.empty() && !info.aiv_name.empty()) {
       FunctionPtr aiv_func = program_->GetFunction(info.aiv_name);
       INTERNAL_CHECK(aiv_func != nullptr) << "Internal error: AIV function '" << info.aiv_name
@@ -2976,7 +3012,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
       auto params = BuildWrapperReorderedParams(call, group_func, info.inner_call, bridge);
       RecordKernelSignature(info.aiv_name, params);
 
-      BuildAivOnlyGroupDispatchPlan(call, launch_func, group_name, aiv_id, std::move(params),
+      BuildAivOnlyGroupDispatchPlan(call, launch_func, group_name, aiv_func, aiv_id, std::move(params),
                                     capture_plain_task_id)
           .Emit(*this);
       return;

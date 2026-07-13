@@ -406,16 +406,16 @@ def _extract_function_auto_scope_from_decorator(node: ast.FunctionDef) -> bool |
 def _normalize_attrs(attrs: dict[str, Any]) -> dict[str, Any] | None:
     """Normalize function attrs: convert SplitMode enums to int values for C++ storage.
 
-    SplitMode.NONE entries are dropped (equivalent to no split).
-    Returns None if the result is empty.
+    Every mode is stored, ``SplitMode.NONE`` included — see the matching note in
+    :func:`_extract_function_attrs_from_decorator` (the AST entry point for the same
+    syntax). Returns None if the result is empty.
     """
     if not attrs:
         return None
     result: dict[str, Any] = {}
     for key, value in attrs.items():
         if isinstance(value, ir.SplitMode):
-            if value != ir.SplitMode.NONE:
-                result[key] = value.value
+            result[key] = value.value
         else:
             result[key] = value
     return result or None
@@ -495,9 +495,15 @@ def _extract_function_attrs_from_decorator(node: ast.FunctionDef) -> dict[str, A
                 )
             attr_key = k.value
             if attr_key == "split":
+                # Store every mode, NONE included. The printer emits an explicit
+                # `"split": pl.SplitMode.NONE` for a task-parallel `pl.split_aiv`
+                # region, so dropping NONE here made print->parse lossy and tripped
+                # the roundtrip verifier. Storing it is behaviour-preserving:
+                # `Function::GetSplitMode()` maps `split == 0` to nullopt and is the
+                # only reader of the attr, so a stored NONE and an absent `split`
+                # are indistinguishable to every consumer.
                 split_mode = extract_enum_value(v, SPLIT_MODE_MAP, "SplitMode", "pl.SplitMode")
-                if split_mode != ir.SplitMode.NONE:
-                    attrs["split"] = split_mode.value
+                attrs["split"] = split_mode.value
             elif isinstance(v, ast.Constant):
                 attrs[attr_key] = v.value
         return attrs

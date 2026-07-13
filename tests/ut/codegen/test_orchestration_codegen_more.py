@@ -1684,6 +1684,54 @@ class TestOrchestrationMore:
         assert l0_t0 < deps_t1, "L0TaskArgs must appear before set_dependencies"
         assert deps_t1 < submit_t1, "set_dependencies must appear before submit"
 
+    def test_dual_aiv_vector_kernel_dispatches_both_lanes(self):
+        """A pure-vector ``pl.split_aiv`` kernel must launch on BOTH AIV lanes.
+
+        A ``split_aiv`` region is task-parallel: each lane runs the full body on
+        disjoint work selected by ``aiv_id``. SplitVectorKernel stamps the kernel
+        ``dual_aiv_dispatch``, and dispatch must honour it.
+
+        ``rt_submit_aiv_task`` fills only the AIV0 slot, so the runtime schedules a
+        single-AIV task: the second lane never launches, and the lone lane that does
+        reads a ``get_sub_block_id()`` the runtime leaves undefined for single-AIV
+        tasks — silently dropping half the work (issue #2006). The submit must
+        therefore be a two-lane ``MixedKernels`` (AIV0 + AIV1, no AIC), which the
+        runtime schedules as a full cluster with sub_block_id 0 / 1 per lane.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class SplitAivNoneProgram:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[128, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[128, 64], pl.FP32]],
+            ) -> pl.Tensor[[128, 64], pl.FP32]:
+                # 2 blocks x 2 AIV lanes = 4 lanes, each owning a disjoint [32, 64] slice.
+                for blk in pl.spmd(2):
+                    for aiv in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+                        lane = blk * 2 + aiv
+                        t = pl.load(a, [lane * 32, 0], [32, 64])
+                        out = pl.store(pl.add(t, t), [lane * 32, 0], out)
+                return out
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(SplitAivNoneProgram)
+
+        aiv_funcs = [f for f in transformed.functions.values() if f.func_type == ir.FunctionType.AIV]
+        assert len(aiv_funcs) == 1, [f.name for f in transformed.functions.values()]
+        assert aiv_funcs[0].attrs.get("dual_aiv_dispatch") is True, dict(aiv_funcs[0].attrs)
+
+        code = _generate_orch_code(transformed)
+
+        # Both AIV slots carry the kernel id; the AIC slot is inactive.
+        assert "MixedKernels mixed_0 = {INVALID_KERNEL_ID, 0, 0};" in code, code
+        assert "rt_submit_task(mixed_0, params_t0);" in code, code
+        # The single-AIV submit would run one lane per block and drop the other.
+        assert "rt_submit_aiv_task" not in code, code
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

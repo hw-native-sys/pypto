@@ -218,6 +218,20 @@ The codegen determines whether to submit to AIC (CUBE) or AIV (VECTOR) based on 
 | `Left`, `Right`, `Acc`, `Mat` | CUBE (AIC) | `rt_submit_aic_task` |
 | `Vec` (default) | VECTOR (AIV) | `rt_submit_aiv_task` |
 
+**Exception — dual-AIV kernels.** An AIV kernel stamped `dual_aiv_dispatch` (any
+`split_aiv` kernel; see [`SplitVectorKernel`](../passes/21-split_vector_kernel.md))
+must run on **both** vector lanes of a cluster — a `pl.split_aiv` region hands each
+lane disjoint work selected by `aiv_id`. `rt_submit_aiv_task` fills only the AIV0
+slot, so the runtime schedules a *single-AIV* task: the second lane never launches,
+and the lone lane that does reads a `get_sub_block_id()` that the runtime leaves
+**undefined** for single-AIV tasks. Such a kernel is therefore submitted as a two-lane
+`MixedKernels` + `rt_submit_task` instead (see [Group Functions (Mixed Kernels)](#group-functions-mixed-kernels)),
+whatever the dispatch path (direct call, `Spmd` wrapper, or AIV-only `Group`). Two active
+AIV slots make it a MIX-shape task, so the scheduler places both lanes of one cluster under
+the same `block_idx` and gives them `sub_block_id` 0 and 1; the cluster's AIC core is simply
+unused. A plain (non-`dual_aiv_dispatch`) vector kernel keeps `rt_submit_aiv_task`, which
+dispatches across independent AIV cores.
+
 ### Tuple Handling
 
 Tuple-returning calls use unique keys (`_tc_N`) to track elements:
@@ -249,6 +263,16 @@ Arg params_t0;
 MixedKernels mixed_0 = {aic_id, aiv_id, INVALID_KERNEL_ID};
 rt_submit_task(mixed_0, params_t0);
 ```
+
+The three slots are `{aic_kernel_id, aiv0_kernel_id, aiv1_kernel_id}`; `INVALID_KERNEL_ID`
+marks a slot inactive. The AIV1 slot repeats the AIV kernel id when the AIV function
+carries `dual_aiv_dispatch` — so both vector lanes run:
+
+| Kernel | `MixedKernels` |
+| ------ | -------------- |
+| Mixed, single AIV lane | `{aic_id, aiv_id, INVALID_KERNEL_ID}` |
+| Mixed, `dual_aiv_dispatch` | `{aic_id, aiv_id, aiv_id}` |
+| Vector-only, `dual_aiv_dispatch` | `{INVALID_KERNEL_ID, aiv_id, aiv_id}` |
 
 ## Operation Mappings
 
