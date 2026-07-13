@@ -169,7 +169,7 @@ scaled: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.col_expand_mul(hi_ext, 
 | 喂给 `tile.col_expand_*` 的常量偏移**非连续** Vec `tile.slice`（多行 *且* 比基 tile 窄，如 `t[:, a:b]`） | 替换为 `tile.extract(target_memory=Vec)`；删除 slice（#2010——稠密重排会写在自己仍然存活的源上） |
 | 喂给 `tile.col_expand_*` 的常量偏移**连续** Vec `tile.slice`（单行，或覆盖源的全部列） | 保持原样（惰性 textract 是安全的恒等拷贝；继续共享源缓冲区） |
 | 链式 Mat `tile.slice`（slice 的 slice） | 剥离；累加偏移 |
-| 带 `valid_shape` / `drop_dims` 的 `tile.slice` | 跳过（不是普通窗口）。若这样的 slice 同时是非连续窗口并喂给 col-expand op，codegen 会以 `INTERNAL_CHECK` 直接报错，而不是生成会破坏源 tile 的代码 |
+| 带 `valid_shape` / `drop_dims` 的 `tile.slice` | 跳过（不是普通窗口）。若这样的 slice 同时不满足上述任一恒等拷贝条件——动态偏移（例如降秩的 `t[i]`）或非连续窗口——并喂给 col-expand op，codegen 会以 `INTERNAL_CHECK` 直接报错，而不是生成会破坏源 tile 的代码 |
 | 其他位于 Vec/Left/Right/Acc 的 `tile.slice` | 不处理（无匹配的消费者） |
 | 不含规范 `tile.slice` 的 function | 原样返回 |
 

@@ -169,7 +169,7 @@ Without the rewrite, `hi` allocates a dense `[16, 64]` buffer at `t + 256 B` —
 | Static-offset **non-contiguous** Vec `tile.slice` (multi-row *and* narrower than its base, e.g. `t[:, a:b]`) feeding a `tile.col_expand_*` op | Replaced by `tile.extract(target_memory=Vec)`; slice dropped (#2010 — the dense repack would run on top of its own live source) |
 | Static-offset **contiguous** Vec `tile.slice` (single row, or full source width) feeding a `tile.col_expand_*` op | Untouched (the lazy textract is a safe identity copy; keeps sharing the source buffer) |
 | Chained Mat `tile.slice` (slice of a slice) | Peeled; offsets accumulated |
-| `tile.slice` with `valid_shape` / `drop_dims` | Skipped (not a plain window). If such a slice is *also* a non-contiguous window feeding a col-expand op, codegen rejects it with an `INTERNAL_CHECK` rather than emitting the source-corrupting repack |
+| `tile.slice` with `valid_shape` / `drop_dims` | Skipped (not a plain window). If such a slice *also* fails either identity-copy condition above — a dynamic offset (e.g. a rank-reducing `t[i]`) or a non-contiguous window — while feeding a col-expand op, codegen rejects it with an `INTERNAL_CHECK` rather than emitting the source-corrupting materialization |
 | Other Vec/Left/Right/Acc-resident `tile.slice` | Untouched (no matching consumer) |
 | Functions with no canonical `tile.slice` | Returned unchanged |
 

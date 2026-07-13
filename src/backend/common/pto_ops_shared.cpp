@@ -407,13 +407,28 @@ std::string MaterializeSubviewOperandIfNeeded(const ir::ExprPtr& expr, codegen::
 
   // The materialize target is the slice's own buffer, which inherits — and sits
   // inside — the source allocation. The pto.textract therefore repacks in place
-  // over its own still-live input, and only survives that when the window is
-  // contiguous in the source: a single row, or one spanning every column. A
-  // column slice of a multi-row tile repacks strided -> dense on top of its
-  // source and destroys it (#2010). CanonicalizeTileSlice rewrites those into a
-  // tile.extract with a fresh buffer, so reaching here means the slice escaped
-  // that pass (e.g. it carries a valid_shape / drop_dims and is not a plain
-  // window). Fail loudly rather than emit silently-wrong data.
+  // over its own still-live input, and only survives that when it is an identity
+  // copy: the destination address must be right *and* its dense layout must
+  // match the source window's. CanonicalizeTileSlice rewrites every slice that
+  // fails either condition into a tile.extract with a fresh buffer, so reaching
+  // here with such a slice means it escaped that pass (e.g. it carries a
+  // valid_shape / drop_dims and is not a plain 3-arg window). Fail loudly rather
+  // than emit silently-wrong data.
+  //
+  // Address: a dynamic offset cannot be folded into the inherited buffer's
+  // ConstInt address, so the destination falls back to the bare source base and
+  // the extracted window lands on the source's row 0 (#1640).
+  INTERNAL_CHECK_SPAN(mat->const_offset, expr->span_)
+      << "Internal error: lazy pto.textract materialization of a dynamic-offset tile.slice would write the "
+         "extracted window onto its own live source's row 0 (the source-inherited destination buffer cannot "
+         "encode a dynamic offset and falls back to the source base). CanonicalizeTileSlice must rewrite this "
+         "slice into a tile.extract with a fresh buffer";
+
+  // Layout: the destination is dense (row pitch = view cols) while the source
+  // window is strided (row pitch = source cols). These coincide only for a
+  // contiguous window — a single row, or one spanning every column. A column
+  // slice of a multi-row tile repacks strided -> dense on top of its source and
+  // destroys it (#2010).
   //
   // Note the check reads the *immediate* source's cols; for a slice of a slice
   // the effective pitch is the root tile's. CanonicalizeTileSlice peels such

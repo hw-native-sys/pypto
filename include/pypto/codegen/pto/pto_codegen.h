@@ -386,6 +386,11 @@ class PTOCodegen : public CodegenBase {
     int64_t source_cols = 0;
     int64_t view_rows = 0;
     int64_t view_cols = 0;
+    /// Both slice offset components are ConstInt. A dynamic offset cannot be
+    /// folded into the inherited buffer's address, which then falls back to the
+    /// bare source base — so even a contiguous window would be extracted onto the
+    /// source's row 0. See MaterializeSubviewOperandIfNeeded (#1640).
+    bool const_offset = false;
     bool emitted = false;
   };
   void RegisterSubviewMaterialization(const std::string& subview_ssa, const SubviewMaterializationInfo& info);

@@ -1218,6 +1218,44 @@ class TestTileSliceCodegen:
             f"{addrs[src]} — the repack would corrupt its own source (#2010)"
         )
 
+    def test_dynamic_offset_slice_escaping_the_pass_into_col_expand_is_rejected(self):
+        """A dynamic-offset slice that ``CanonicalizeTileSlice`` cannot rewrite must be
+        rejected by codegen, not silently materialized onto its own source.
+
+        The pass only canonicalizes plain 3-arg windows, so a rank-reducing ``t[row]``
+        (a 5-arg slice carrying drop_dims) escapes it. Its window is a single row —
+        contiguous — but the offset is dynamic, and a dynamic offset cannot be folded
+        into the source-inherited buffer's address: the destination falls back to the
+        source base, so the lazy ``pto.textract`` would extract row ``row`` on top of
+        the source's row 0 while the source is still live (#1640). The contiguity
+        guard alone lets this through, so the offset must be checked too.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 32], pl.FP32],
+                gamma: pl.Tensor[[1, 32], pl.FP32],
+                row: pl.Scalar[pl.INDEX],
+                dst: pl.Tensor[[1, 32], pl.FP32],
+            ) -> pl.Tensor[[1, 32], pl.FP32]:
+                t: pl.Tile[[16, 32], pl.FP32] = pl.load(x, [0, 0], [16, 32])
+                gamma_t: pl.Tile[[1, 32], pl.FP32] = pl.load(gamma, [0, 0], [1, 32])
+                # Rank-reducing subscript -> tile.slice with drop_dims: not a plain
+                # 3-arg window, so CanonicalizeTileSlice leaves it alone.
+                row_tile: pl.Tile[[1, 32], pl.FP32] = t[row]
+                scaled: pl.Tile[[1, 32], pl.FP32] = pl.tile.col_expand_mul(row_tile, gamma_t)
+                # Keep the source live past the materialization.
+                out: pl.Tile[[1, 32], pl.FP32] = pl.tile.add(scaled, t[0])
+                return pl.store(out, [0, 0], dst)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with pytest.raises(RuntimeError, match="dynamic-offset tile.slice"):
+                self._generate_mlir(Prog)
+
     def test_tile_slice_codegen_rank_reducing(self):
         """A rank-reducing tile subscript `t[i]` (→ tile.slice with drop_dims) reaches
         PTO codegen and emits pto.subview — the result is clamped to 2D [1, N]."""

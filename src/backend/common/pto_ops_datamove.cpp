@@ -1004,16 +1004,20 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     mat_info.materialize_target_ssa = result_target;
     mat_info.materialize_target_type = result_type;
     mat_info.source_memory_space = source_tile_type->memory_space_;
-    // Shapes the materialization guard needs: the target buffer aliases the
-    // source, so the lazy pto.textract may only run when its repack is an
-    // identity copy (#2010).  source_cols stays 0 ("unknown") if the source rank
-    // or column count is not statically known, which makes the guard stand down
-    // rather than reject a shape it cannot reason about.
+    // Shapes and offset kind the materialization guard needs: the target buffer
+    // aliases the source, so the lazy pto.textract may only run when its repack
+    // is an identity copy — right destination address (const offset, #1640) and
+    // right destination layout (contiguous window, #2010).  source_cols stays 0
+    // ("unknown") if the source rank or column count is not statically known,
+    // which makes the shape half of the guard stand down rather than reject a
+    // shape it cannot reason about.
     auto source_cols_const =
         source_tile_type->shape_.size() == 2 ? ir::As<ir::ConstInt>(source_tile_type->shape_[1]) : nullptr;
     mat_info.source_cols = source_cols_const ? source_cols_const->value_ : 0;
     mat_info.view_rows = rows_const->value_;
     mat_info.view_cols = cols_const->value_;
+    mat_info.const_offset = ir::As<ir::ConstInt>(offset_tuple->elements_[0]) != nullptr &&
+                            ir::As<ir::ConstInt>(offset_tuple->elements_[1]) != nullptr;
     codegen.RegisterSubviewMaterialization(view_ssa, mat_info);
 
     // Bind the slice's result variable to the subview SSA; the pre-emitted
