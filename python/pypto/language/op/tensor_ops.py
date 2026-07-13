@@ -256,10 +256,10 @@ def dump_tag(tensor: Tensor) -> Tensor:
     declaration should stick across every subsequent consumer.
 
     Use this to keep tensor dump viable on large workloads (e.g.
-    paged-attention 64bat/8192ctx) where full dump (``enable_dump_tensor=2``)
+    paged-attention 64bat/8192ctx) where full dump (``enable_dump_args=2``)
     saturates the host-side dump collector (~42 MB/s drain rate) by dumping
     every binding, eventually triggering a STARS op-timeout kill on the AICPU
-    side. Run partial dump (``enable_dump_tensor=1``) and tag only the tensors
+    side. Run partial dump (``enable_dump_args=1``) and tag only the tensors
     of interest, so the runtime filters out large bindings (1 GB kv-cache,
     output buffers, etc.) from the collector queue.
 
@@ -270,7 +270,7 @@ def dump_tag(tensor: Tensor) -> Tensor:
       tagged value. Tracked by **Var identity**, never by name: reassigning
       ``q`` (e.g. ``q = self.foo(q)``) produces a new value that the prior
       tag does **not** cover — re-tag it if needed.
-    * Only effective under partial dump (``RunConfig.enable_dump_tensor == 1``)
+    * Only effective under partial dump (``RunConfig.enable_dump_args == 1``)
       — selective dump filters within the partial pipeline. A no-op when dump
       is off (``0``); under full dump (``2``) every binding is captured, so the
       tag has nothing to narrow.

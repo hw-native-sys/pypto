@@ -65,11 +65,11 @@ def test_dfx_to_cli_empty_for_default():
 
 
 def test_dfx_to_cli_emits_only_enabled_flags():
-    dfx = _DfxOpts(enable_l2_swimlane=True, enable_dump_tensor=2, enable_pmu=5, enable_dep_gen=True)
+    dfx = _DfxOpts(enable_l2_swimlane=True, enable_dump_args=2, enable_pmu=5, enable_dep_gen=True)
     argv = test_runner._dfx_to_cli(dfx)
     assert argv == [
         "--enable-l2-swimlane",
-        "--dump-tensor",
+        "--dump-args",
         "2",
         "--enable-pmu",
         "5",

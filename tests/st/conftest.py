@@ -242,14 +242,14 @@ def pytest_addoption(parser):
         "swimlane is skipped).",
     )
     parser.addoption(
-        "--dump-tensor",
+        "--dump-args",
         nargs="?",
         type=int,
         const=1,
         default=0,
-        help="Per-task tensor dump level into <work_dir>/dfx_outputs/args_dump/. "
+        help="Per-task argument dump level into <work_dir>/dfx_outputs/args_dump/. "
         "Bare flag = 1 (partial: only pl.dump_tag / dumps= marked tensors); "
-        "'--dump-tensor 2' = full (every task); absent = 0 (off).",
+        "'--dump-args 2' = full (every task); absent = 0 (off).",
     )
     parser.addoption(
         "--enable-dep-gen",
@@ -452,7 +452,7 @@ def test_config(request) -> RunConfig:
         codegen_only=request.config.getoption("--codegen-only"),
         pto_isa_commit=request.config.getoption("--pto-isa-commit"),
         enable_l2_swimlane=request.config.getoption("--enable-l2-swimlane"),
-        enable_dump_tensor=request.config.getoption("--dump-tensor"),
+        enable_dump_args=request.config.getoption("--dump-args"),
         enable_pmu=request.config.getoption("--enable-pmu"),
         enable_dep_gen=request.config.getoption("--enable-dep-gen"),
         enable_scope_stats=request.config.getoption("--enable-scope-stats"),
@@ -828,7 +828,7 @@ def pytest_collection_finish(session: pytest.Session) -> None:
     codegen_only: bool = session.config.getoption("--codegen-only")
     pto_isa_commit: str | None = session.config.getoption("--pto-isa-commit")
     enable_l2_swimlane: bool = session.config.getoption("--enable-l2-swimlane")
-    enable_dump_tensor: int = session.config.getoption("--dump-tensor")
+    enable_dump_args: int = session.config.getoption("--dump-args")
     enable_pmu: int = session.config.getoption("--enable-pmu")
     enable_dep_gen: bool = session.config.getoption("--enable-dep-gen")
     enable_scope_stats: bool = session.config.getoption("--enable-scope-stats")
@@ -893,7 +893,7 @@ def pytest_collection_finish(session: pytest.Session) -> None:
         compile_workers=max_workers,
         device_pool=device_pool,
         enable_l2_swimlane=enable_l2_swimlane,
-        enable_dump_tensor=enable_dump_tensor,
+        enable_dump_args=enable_dump_args,
         enable_pmu=enable_pmu,
         enable_dep_gen=enable_dep_gen,
         enable_scope_stats=enable_scope_stats,

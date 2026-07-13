@@ -139,7 +139,7 @@ calls (sub-microsecond on modern hardware).
 
 ## Related
 
-- **Runtime DFX** (`RunConfig.enable_l2_swimlane`, `enable_dump_tensor`,
+- **Runtime DFX** (`RunConfig.enable_l2_swimlane`, `enable_dump_args`,
   `enable_pmu`, `enable_dep_gen`) drives Simpler's per-task diagnostic
   artefacts — swimlane records, tensor I/O dumps, AICore PMU CSVs, and
   PTO2 dep_gen edges. The four flags are independent, share

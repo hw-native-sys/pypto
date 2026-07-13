@@ -296,11 +296,11 @@ def _build_parser() -> argparse.ArgumentParser:
     # (_dfx_to_cli) is symmetric.
     parser.add_argument("--enable-l2-swimlane", action="store_true", help="Capture L2 swimlane records")
     parser.add_argument(
-        "--dump-tensor",
+        "--dump-args",
         type=int,
         default=0,
         metavar="LEVEL",
-        help="Per-task tensor dump level (0=off, 1=partial, 2=full)",
+        help="Per-task argument dump level (0=off, 1=partial, 2=full)",
     )
     parser.add_argument(
         "--enable-pmu", type=int, default=0, metavar="EVENT", help="AICore PMU event type (0=off)"
@@ -328,7 +328,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     dfx = _DfxOpts(
         enable_l2_swimlane=args.enable_l2_swimlane,
-        enable_dump_tensor=args.dump_tensor,
+        enable_dump_args=args.dump_args,
         enable_pmu=args.enable_pmu,
         enable_dep_gen=args.enable_dep_gen,
         enable_scope_stats=args.enable_scope_stats,

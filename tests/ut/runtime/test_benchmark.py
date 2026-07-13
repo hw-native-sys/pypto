@@ -615,7 +615,7 @@ def test_benchmark_l3_capture_wraps_prepare(span_root):
 
 
 def test_benchmark_raises_when_no_markers_captured():
-    """A runtime built without SIMPLER_PROFILING emits no markers; the parser
+    """A runtime built without SIMPLER_HOST_STRACE emits no markers; the parser
     returns empty stats and ``benchmark`` surfaces a clear error rather than a
     silently-empty result (which callers could misread as 0 device timing)."""
     worker = _FakeWorker()

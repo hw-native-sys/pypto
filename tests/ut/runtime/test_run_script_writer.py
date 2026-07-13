@@ -178,7 +178,7 @@ def test_docstring_lists_common_cli_flags(tmp_path: Path) -> None:
         "--platform",
         "--pmu",
         "--swimlane",
-        "--dump-tensor",
+        "--dump-args",
         "--dep-gen",
         "--no-recompile",
         "--no-rebuild-from-pto",

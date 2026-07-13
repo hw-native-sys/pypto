@@ -137,7 +137,7 @@ with CompileProfiler() as prof:
 
 ## 相关功能
 
-- **运行时 DFX**（`RunConfig.enable_l2_swimlane` / `enable_dump_tensor` /
+- **运行时 DFX**（`RunConfig.enable_l2_swimlane` / `enable_dump_args` /
   `enable_pmu` / `enable_dep_gen`）驱动 Simpler 的每任务诊断产物 —— swimlane
   记录、tensor I/O dump、AICore PMU CSV、PTO2 dep_gen 边。四个 flag 互相
   独立，共用 `<work_dir>/dfx_outputs/` 作为输出根目录，与编译 profiling

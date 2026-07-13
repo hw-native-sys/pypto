@@ -100,7 +100,7 @@ def test_dfx_flags_parsed_into_dfx_opts(tmp_path):
             _argv(
                 tmp_path,
                 "--enable-l2-swimlane",
-                "--dump-tensor",
+                "--dump-args",
                 "2",
                 "--enable-pmu",
                 "5",
@@ -115,7 +115,7 @@ def test_dfx_flags_parsed_into_dfx_opts(tmp_path):
     assert kwargs["pto_isa_commit"] == "abc123"
     assert kwargs["dfx"] == _DfxOpts(
         enable_l2_swimlane=True,
-        enable_dump_tensor=2,
+        enable_dump_args=2,
         enable_pmu=5,
         enable_dep_gen=True,
         enable_scope_stats=True,

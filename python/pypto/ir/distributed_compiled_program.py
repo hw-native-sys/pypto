@@ -353,7 +353,7 @@ class DistributedCompiledProgram:
         ``config`` is an optional per-dispatch :class:`RunConfig`; its per-task
         ring-sizing overrides (``ring_task_window`` / ``ring_heap`` /
         ``ring_dep_pool``) size this dispatch's runtime ring buffers, and its
-        runtime-diagnostic DFX flags (``enable_dump_tensor`` / ``enable_pmu`` /
+        runtime-diagnostic DFX flags (``enable_dump_args`` / ``enable_pmu`` /
         ``enable_dep_gen`` / ``enable_scope_stats`` / ``enable_l2_swimlane``) are
         written per dispatch under ``<output_dir>/dfx_outputs/rank{r}/d{k}/``
         (``d{k}`` is the card's k-th dispatch, so multiple dispatches to one card

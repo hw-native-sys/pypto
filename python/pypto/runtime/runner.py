@@ -114,10 +114,10 @@ class RunConfig:
             is intentionally skipped because the simulator does not yet ship the
             task metadata the converter needs. Mirrors runtime's
             ``--enable-l2-swimlane`` flag.
-        enable_dump_tensor: Per-task tensor dump **level** written into
+        enable_dump_args: Per-task argument dump **level** written into
             ``<work_dir>/dfx_outputs/args_dump/``. Inspect with
             ``python -m simpler_setup.tools.dump_viewer``. Mirrors
-            ``--dump-tensor``:
+            ``--dump-args``:
 
             * ``0`` / ``False`` — off (no dump).
             * ``1`` / ``True`` — **partial**: only the tensors marked via the
@@ -231,7 +231,7 @@ class RunConfig:
     codegen_only: bool = False
     pto_isa_commit: str | None = None
     enable_l2_swimlane: bool = False
-    enable_dump_tensor: int = 0  # 0=off, 1=partial (dump_tag-marked), 2=full
+    enable_dump_args: int = 0  # 0=off, 1=partial (dump_tag-marked), 2=full
     enable_pmu: int = 0
     enable_dep_gen: bool = False
     enable_scope_stats: bool = False
@@ -342,12 +342,12 @@ class RunConfig:
 
         DFX (Design For X) covers the five runtime diagnostic sub-features
         carried on :class:`~simpler.task_interface.CallConfig`:
-        L2 swimlane, tensor dump, PMU, dep_gen and scope_stats. They are
+        L2 swimlane, argument dump, PMU, dep_gen and scope_stats. They are
         independent toggles that share an output directory.
         """
         return (
             self.enable_l2_swimlane
-            or self.enable_dump_tensor > 0
+            or self.enable_dump_args > 0
             or self.enable_pmu > 0
             or self.enable_dep_gen
             or self.enable_scope_stats
@@ -511,7 +511,7 @@ class _DfxOpts:
     """
 
     enable_l2_swimlane: bool = False
-    enable_dump_tensor: int = 0  # 0=off, 1=partial, 2=full
+    enable_dump_args: int = 0  # 0=off, 1=partial, 2=full
     enable_pmu: int = 0
     enable_dep_gen: bool = False
     enable_scope_stats: bool = False
@@ -519,7 +519,7 @@ class _DfxOpts:
     def any(self) -> bool:
         return (
             self.enable_l2_swimlane
-            or self.enable_dump_tensor > 0
+            or self.enable_dump_args > 0
             or self.enable_pmu > 0
             or self.enable_dep_gen
             or self.enable_scope_stats
@@ -529,7 +529,7 @@ class _DfxOpts:
     def from_run_config(cls, cfg: "RunConfig") -> "_DfxOpts":
         return cls(
             enable_l2_swimlane=cfg.enable_l2_swimlane,
-            enable_dump_tensor=cfg.enable_dump_tensor,
+            enable_dump_args=cfg.enable_dump_args,
             enable_pmu=cfg.enable_pmu,
             enable_dep_gen=cfg.enable_dep_gen,
             enable_scope_stats=cfg.enable_scope_stats,
@@ -820,7 +820,7 @@ def _build_call_config(
         cfg.aicpu_thread_num = at
 
     cfg.enable_l2_swimlane = run_config.enable_l2_swimlane
-    cfg.enable_dump_tensor = run_config.enable_dump_tensor
+    cfg.enable_dump_args = run_config.enable_dump_args
     cfg.enable_pmu = run_config.enable_pmu
     cfg.enable_dep_gen = run_config.enable_dep_gen
     cfg.enable_scope_stats = run_config.enable_scope_stats
@@ -903,7 +903,7 @@ def _execute_on_device(
             device_id,
             output_prefix=str(dfx_dir) if dfx_dir is not None else None,
             enable_l2_swimlane=pass_dfx.enable_l2_swimlane,
-            enable_dump_tensor=pass_dfx.enable_dump_tensor,
+            enable_dump_args=pass_dfx.enable_dump_args,
             enable_pmu=pass_dfx.enable_pmu,
             enable_dep_gen=pass_dfx.enable_dep_gen,
             enable_scope_stats=pass_dfx.enable_scope_stats,
@@ -996,7 +996,7 @@ def _collect_dfx_artifacts(
     The runtime writes each artefact directly into *dfx_dir* (the
     ``CallConfig.output_prefix`` passed at submit). Each branch below is
     independent and skips silently when its artefact is missing — a
-    partial DFX run (e.g. only ``enable_dump_tensor``) must not crash on
+    partial DFX run (e.g. only ``enable_dump_args``) must not crash on
     the swimlane converter looking for ``l2_swimlane_records.json``.
     """
     # Synthesise the func_id→name map the profiling tools need for readable
@@ -1043,7 +1043,7 @@ def _collect_dfx_artifacts(
             f"  # --engine choices: dot | sfdp | fdp | neato | circo | twopi"
         )
 
-    if dfx.enable_dump_tensor > 0 and (dfx_dir / "args_dump" / "args_dump.json").exists():
+    if dfx.enable_dump_args > 0 and (dfx_dir / "args_dump" / "args_dump.json").exists():
         # ``dump_viewer`` is interactive; leave the artefact in place and
         # point the user at the inspection command.
         print(
@@ -1336,7 +1336,7 @@ def execute_compiled(  # noqa: PLR0913
             aicpu_thread_num=effective_aicpu_thread_num,
             output_prefix=str(dfx_dir) if dfx_dir is not None else None,
             enable_l2_swimlane=pass_dfx.enable_l2_swimlane,
-            enable_dump_tensor=pass_dfx.enable_dump_tensor,
+            enable_dump_args=pass_dfx.enable_dump_args,
             enable_pmu=pass_dfx.enable_pmu,
             enable_dep_gen=pass_dfx.enable_dep_gen,
             enable_scope_stats=pass_dfx.enable_scope_stats,

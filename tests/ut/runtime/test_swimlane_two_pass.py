@@ -65,12 +65,12 @@ def test_onboard_swimlane_with_explicit_dep_gen_still_one_capture():
 
 
 def test_onboard_swimlane_timing_dfx_ride_the_in_process_pass():
-    # PMU / tensor-dump / scope-stats are timing-sensitive: they ride the clean
+    # PMU / args-dump / scope-stats are timing-sensitive: they ride the clean
     # in-process timing pass (the subprocess capture is dep_gen-only).
     dfx = _DfxOpts(
         enable_l2_swimlane=True,
         enable_pmu=2,
-        enable_dump_tensor=1,
+        enable_dump_args=1,
         enable_scope_stats=True,
     )
     seen, captures = _drive(dfx, "a2a3")
@@ -78,7 +78,7 @@ def test_onboard_swimlane_timing_dfx_ride_the_in_process_pass():
     assert len(seen) == 1
     timing = seen[0]
     assert timing.enable_pmu == 2
-    assert timing.enable_dump_tensor == 1
+    assert timing.enable_dump_args == 1
     assert timing.enable_scope_stats is True
 
 

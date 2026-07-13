@@ -10,7 +10,7 @@ pytest flag in `tests/st/conftest.py`, so the two surfaces stay aligned.
 | `RunConfig` field | pytest flag | `CallConfig` member | Artefact under `dfx_outputs/` | Post-run converter |
 | ----------------- | ----------- | ------------------- | ----------------------------- | ------------------ |
 | `enable_l2_swimlane: bool` | `--enable-l2-swimlane` | `enable_l2_swimlane` | `l2_swimlane_records.json` | `swimlane_converter` → `merged_swimlane_*.json` |
-| `enable_dump_tensor: int` | `--dump-tensor [LEVEL]` (bare = `1`) | `enable_dump_tensor` (`0` off, `1` partial, `2` full) | `tensor_dump/{tensor_dump.json,bin}` | `dump_viewer` (manual) |
+| `enable_dump_args: int` | `--dump-args [LEVEL]` (bare = `1`) | `enable_dump_args` (`0` off, `1` partial, `2` full) | `args_dump/{args_dump.json,bin}` | `dump_viewer` (manual) |
 | `enable_pmu: int` | `--enable-pmu [N]` (bare = `2`) | `enable_pmu` (`0` off, `>0` event type) | `pmu.csv` | — |
 | `enable_dep_gen: bool` | `--enable-dep-gen` | `enable_dep_gen` | `deps.json` | `deps_viewer` (manual) |
 | `enable_scope_stats: bool` | `--enable-scope-stats` | `enable_scope_stats` | `scope_stats/scope_stats.jsonl` | `scope_stats_plot` (manual) |
@@ -54,7 +54,7 @@ twice, transparently:
    if the subprocess fails, a warning is logged and the timing pass still runs
    (lanes degrade to anonymous `task(rXtY)`).
 2. **Timing pass** — swimlane (plus any other timing-sensitive DFX such as PMU /
-   tensor-dump / scope-stats), dep_gen forced off, producing the clean
+   args-dump / scope-stats), dep_gen forced off, producing the clean
    `l2_swimlane_records.json` whose timing is reported. Runs in-process.
 
 Both passes write into the same `dfx_outputs/`, so `swimlane_converter`
@@ -105,9 +105,9 @@ pytest tests/st/runtime/ \
 
 ## Selective tensor dump
 
-`enable_dump_tensor` is a **level** (`0`=off, `1`=partial, `2`=full;
+`enable_dump_args` is a **level** (`0`=off, `1`=partial, `2`=full;
 `True`→`1`, `False`→`0`). Level `2` writes every binding of every task to
-`tensor_dump/`. On large workloads that can saturate the host-side dump
+`args_dump/`. On large workloads that can saturate the host-side dump
 collector (~42 MB/s drain) and the AICPU will be killed by the STARS
 op-execute timeout — large bindings such as a 1 GB KV-cache fill the
 queue faster than it drains. Run **partial** dump (level `1`) and mark the
@@ -148,7 +148,7 @@ no `dumps=` surface; use `pl.dump_tag` to mark its inputs, or submit it with
 the consuming Call / `Submit`, tracked by **Var identity** — never by name. It
 rides through SSA, inlining, and codegen the same way `Submit::deps_` does,
 so no fuzzy name matching and no false positives. The marks only take effect
-under partial dump (`enable_dump_tensor == 1`); they are inert when dump is off
+under partial dump (`enable_dump_args == 1`); they are inert when dump is off
 (`0`) and irrelevant under full dump (`2`), which captures every binding.
 
 `pl.dump_tag` is also accepted inside an Inline helper
@@ -280,7 +280,7 @@ be removed in a future release. Migrate to the new names.
 
 To re-run a previously compiled `build_output/<jit_dir>/` after editing
 one or more kernel cpp files — typically to verify a hand-tuned change
-under PMU / swimlane / tensor-dump — use the debug-only
+under PMU / swimlane / args-dump — use the debug-only
 [`pypto.runtime.debug.replay`](../../../python/pypto/runtime/debug/replay.py)
 module. It reuses the same `execute_compiled` path as the normal
 `pypto.runtime.run` flow, so DFX flags behave identically.
@@ -434,7 +434,7 @@ by walking `next_levels/`; `platform` and `distributed_config` default to the
 values recorded at compile time and can be overridden to replay on a different
 target / device set.
 
-**Limitation:** DFX flags (`--pmu`, `--swimlane`, `--dump-tensor`, …) are **not
+**Limitation:** DFX flags (`--pmu`, `--swimlane`, `--dump-args`, …) are **not
 yet plumbed through the L3 dispatch path** — they apply to single-chip replay
 only. The L3 edit-and-rerun loop itself (correctness re-check after a `.pto`/cpp
 edit) is fully supported.
@@ -442,6 +442,6 @@ edit) is fully supported.
 ## Related
 
 - Simpler's runtime-side reference: `runtime/docs/dfx/{l2-swimlane,
-  tensor-dump,pmu-profiling,dep_gen,scope-stats}.md`.
+  args-dump,pmu-profiling,dep_gen,scope-stats}.md`.
 - Compile-time profiling (orthogonal, single PyPTO process):
   [01-compile-profiling.md](01-compile-profiling.md).

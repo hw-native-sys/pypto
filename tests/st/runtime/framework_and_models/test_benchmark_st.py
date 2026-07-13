@@ -17,7 +17,7 @@ to ``v9``, fd-level capturing the host runtime's ``[STRACE]`` stderr markers
 (simpler PR #1177), and parsing the *measured* per-launch ``device_wall_us``
 out of them.
 
-Timing semantics asserted here (L2 single-task, default ``SIMPLER_PROFILING``
+Timing semantics asserted here (L2 single-task, default ``SIMPLER_HOST_STRACE``
 build): every measured launch carries a real on-NPU ``device_wall_us > 0``, and
 the ``warmup`` launches are excluded from the sample count.
 """
@@ -74,7 +74,7 @@ def test_benchmark_register_once_surfaces_timing(test_config, tmp_path):
     One ``ChipWorker`` / one ``register``, then ``warmup + rounds`` cheap
     launches whose ``device_wall_us`` are read off the ``[STRACE]`` markers and
     aggregated. Asserts each measured sample is a real L2 device wall (default
-    ``SIMPLER_PROFILING`` build) and that warmup launches are excluded.
+    ``SIMPLER_HOST_STRACE`` build) and that warmup launches are excluded.
     """
     compiled = ir.compile(AddProgram, output_dir=str(tmp_path), platform=test_config.platform)
 
@@ -90,7 +90,7 @@ def test_benchmark_register_once_surfaces_timing(test_config, tmp_path):
         f"expected {rounds} measured samples (warmup excluded), got {len(stats.device_wall_us)}"
     )
     assert stats.rounds == rounds and stats.warmup == warmup
-    assert not stats.all_zero_device, "device_wall_us must be > 0 on the default SIMPLER_PROFILING build"
+    assert not stats.all_zero_device, "device_wall_us must be > 0 on the default SIMPLER_HOST_STRACE build"
     assert stats.device_us_min > 0.0
     assert stats.device_us_max >= stats.device_us_min
     assert stats.device_us_min <= stats.device_us_median <= stats.device_us_max
@@ -195,7 +195,7 @@ def test_benchmark_l3_surfaces_per_rank_timing(test_config, device_ids):
     for k in range(rounds):
         assert union[k] >= max(v[k] for v in rank_host.values()) - 1e-6
 
-    assert not stats.all_zero_device, "device_wall_us must be > 0 on the default SIMPLER_PROFILING build"
+    assert not stats.all_zero_device, "device_wall_us must be > 0 on the default SIMPLER_HOST_STRACE build"
     assert stats.device_us_min > 0.0
 
     # Per-card L2 Effective (orch union sched window): one series per rank, > 0, and

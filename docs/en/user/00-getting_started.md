@@ -332,7 +332,7 @@ See `examples/runtime/explicit_dispatch.py` for three end-to-end patterns
 `worker.run` / `handle(...)` return tensor outputs only and no longer surface
 a per-launch timing object. The runtime emits per-run host/device timing as
 `[STRACE]` log markers (simpler PR #1177, on by default under
-`PTO2_PROFILING`); parse them with simpler's `strace_timing` /
+`SIMPLER_DFX`); parse them with simpler's `strace_timing` /
 `device_log_timing` tools rather than reading a return value. For per-task
 device timing, enable the L2 swimlane DFX (`RunConfig(enable_l2_swimlane=True)`)
 and read `l2_swimlane_records.json`.
@@ -362,7 +362,7 @@ raises the runtime log level to `v9` for the worker's lifetime and captures
 `stderr` at the fd level around the measured loop, so stderr emitted during the
 loop is diverted into a temp file rather than shown live. `device_wall_us` is a
 real on-NPU wall for L2 single-chip runs (see the L3 note below for distributed
-programs); it is `0` on runtimes built without `SIMPLER_PROFILING` or on `*sim`
+programs); it is `0` on runtimes built without `SIMPLER_HOST_STRACE` or on `*sim`
 platforms (check `stats.all_zero_device`).
 
 Beyond the aggregates, each measured launch keeps its full `[STRACE]` span tree

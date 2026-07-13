@@ -64,7 +64,7 @@ class TestManualScopeCodegen:
 
         # No orch-body toggle (simpler#953): the runtime latches the dump level
         # (off / partial / full) host-side; codegen only emits ``.dump(...)``.
-        assert "enable_dump_tensor_selective" not in code
+        assert "enable_dump_args_selective" not in code
 
         # Only task 0 dumps ext_x; task 1 dumps nothing.
         assert code.count("params_t0.dump(ext_x);") == 1
@@ -1543,7 +1543,7 @@ class TestManualScopeCodegen:
         transformed = pm.run_passes(Prog)
         code = _generate_orch_code(transformed)
 
-        assert "enable_dump_tensor_selective" not in code, code
+        assert "enable_dump_args_selective" not in code, code
         dump_lines = [ln for ln in code.split("\n") if ".dump(" in ln]
         assert dump_lines, code
         assert any("ext_x" in ln for ln in dump_lines), code

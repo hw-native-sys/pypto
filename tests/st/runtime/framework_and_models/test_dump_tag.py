@@ -33,13 +33,13 @@ exercises two of them on-board:
    used here because ``@pl.jit`` has no ``pl.submit`` / ``pl.manual_scope``.
    A 2-stage submit pipeline tags only stage1, so stage2 must be filtered out.
 
-In both scenarios, with ``--dump-tensor`` the runtime's selective-dump filter
+In both scenarios, with ``--dump-args`` the runtime's selective-dump filter
 retains only the tagged bindings in the manifest, so each test asserts both the
 positive (tagged present) and negative (untagged filtered) paths in one pass.
 
 Correctness always runs. Manifest validation (parsing the JSON, and for the
 dump_tag case decoding sample bytes via ``simpler_setup.tools.dump_viewer``) is
-gated behind ``--dump-tensor`` and ``not codegen_only``.
+gated behind ``--dump-args`` and ``not codegen_only``.
 """
 
 import dataclasses
@@ -153,11 +153,11 @@ def dump_manifest(dump_tag_run, test_config) -> tuple[list[dict], Path, Path]:
     top-level is a dict with ``args`` (entry list) and ``bin_file``
     (bin filename relative to the manifest directory).
 
-    Skips when ``--dump-tensor`` is not set or when ``--codegen-only`` is
+    Skips when ``--dump-args`` is not set or when ``--codegen-only`` is
     set (no device execution means no manifest is written).
     """
-    if not test_config.enable_dump_tensor:
-        pytest.skip("pass --dump-tensor to exercise the dump pipeline")
+    if not test_config.enable_dump_args:
+        pytest.skip("pass --dump-args to exercise the dump pipeline")
     if test_config.codegen_only:
         pytest.skip("--codegen-only skips device execution; no manifest is written")
 
@@ -180,7 +180,7 @@ def dump_manifest(dump_tag_run, test_config) -> tuple[list[dict], Path, Path]:
 
 
 class TestDumpTagCorrectness:
-    """Correctness check — always runs regardless of ``--dump-tensor``."""
+    """Correctness check — always runs regardless of ``--dump-args``."""
 
     def test_add_mul_matches_torch_reference(self, dump_tag_run):
         _, c, expected = dump_tag_run
@@ -190,7 +190,7 @@ class TestDumpTagCorrectness:
 
 
 class TestDumpTagManifest:
-    """Manifest validation — only runs when ``--dump-tensor`` is enabled."""
+    """Manifest validation — only runs when ``--dump-args`` is enabled."""
 
     def test_entries_have_required_fields(self, dump_manifest):
         entries, manifest_path, _ = dump_manifest
@@ -386,9 +386,9 @@ class TestSubmitDumpsCorrectness:
 
 @pytest.fixture(scope="module")
 def submit_dumps_manifest_file(test_runner) -> Path:
-    """Run the submit pipeline once with --dump-tensor and return the manifest path."""
-    if not test_runner.config.enable_dump_tensor:
-        pytest.skip("pass --dump-tensor to validate the submit dumps= manifest")
+    """Run the submit pipeline once with --dump-args and return the manifest path."""
+    if not test_runner.config.enable_dump_args:
+        pytest.skip("pass --dump-args to validate the submit dumps= manifest")
     if test_runner.config.codegen_only:
         pytest.skip("--codegen-only skips device execution; no manifest is written")
 
@@ -418,7 +418,7 @@ def submit_dumps_manifest(submit_dumps_manifest_file: Path) -> list[dict]:
 
 
 class TestSubmitDumpsManifest:
-    """Manifest validation for ``dumps=`` — only runs when ``--dump-tensor`` is enabled."""
+    """Manifest validation for ``dumps=`` — only runs when ``--dump-args`` is enabled."""
 
     def test_only_dumped_submit_appears(self, submit_dumps_manifest):
         """Selective dump must drop stage2 entirely.

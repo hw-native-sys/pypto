@@ -570,6 +570,8 @@ def test_compiler_derived_deps_for_dynamic_parallel_tensor_carriers_share_phase_
     assert ".push_back(" not in code
     assert code.count(f"{buffer_name}[{count_name}++] =") == 3, code
     assert code.count("rt_orch_profile_add_dynamic_dep_vector") == 4, code
+    assert "#if SIMPLER_ORCH_PROFILING" in code, code
+    assert "PTO2_ORCH_PROFILING" not in code, code
     assert code.count("Dynamic compiler-dependency barrier") == 1, code
     assert code.count("rt_submit_dummy_task") == 1, code
     assert f".set_dependencies({buffer_name}.data(), {count_name});" in code, code

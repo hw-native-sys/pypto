@@ -22,7 +22,7 @@ Timing source (simpler PR #1177)
 ``Worker.run`` no longer returns a ``RunTiming``. The host runtime instead
 emits one ``[STRACE]`` marker line per stage to **stderr** on every launch
 (``fprintf(stderr, ...)`` from the C++ host logger, gated by the compile-time
-``SIMPLER_PROFILING`` macro and emitted at the ``LOG_INFO_V9`` tier). This
+``SIMPLER_HOST_STRACE`` macro and emitted at the ``LOG_INFO_V9`` tier). This
 module therefore:
 
 1. raises the simpler runtime log level to ``v9`` so the markers print (the
@@ -433,7 +433,7 @@ class BenchmarkStats:
             us: Show durations in microseconds (default) or nanoseconds.
         """
         if not self.invocations:
-            return "BenchmarkStats: no span tree captured (non-SIMPLER_PROFILING build or *sim platform)"
+            return "BenchmarkStats: no span tree captured (non-SIMPLER_HOST_STRACE build or *sim platform)"
         selected = (
             list(enumerate(self.invocations)) if launch is None else [(launch, self.invocations[launch])]
         )
@@ -495,7 +495,7 @@ class BenchmarkStats:
         """
         mean_inv = self.mean_invocation()
         if mean_inv is None:
-            return "BenchmarkStats: no span tree captured (non-SIMPLER_PROFILING build or *sim platform)"
+            return "BenchmarkStats: no span tree captured (non-SIMPLER_HOST_STRACE build or *sim platform)"
 
         durs: dict[str, list[int]] = defaultdict(list)
         for inv in self.invocations:
@@ -579,7 +579,7 @@ class BenchmarkStats:
     def all_zero_device(self) -> bool:
         """``True`` if no real device wall was measured.
 
-        Happens on a runtime built without ``SIMPLER_PROFILING`` or on a
+        Happens on a runtime built without ``SIMPLER_HOST_STRACE`` or on a
         ``*sim`` platform, where the device-domain ``[STRACE]`` spans are not
         captured (``device_wall_us`` reads ``0``, not absent) — benchmark
         callers should then fall back to ``host_wall_us`` or rebuild with
@@ -593,7 +593,7 @@ class BenchmarkStats:
         if self.all_zero_device:
             return (
                 f"BenchmarkStats(rounds={self.rounds}): device_wall_us all 0 — runtime "
-                f"built without SIMPLER_PROFILING or sim platform (use host_wall_us)"
+                f"built without SIMPLER_HOST_STRACE or sim platform (use host_wall_us)"
             )
         suffix = ""
         if self.rounds_dispatches:
@@ -904,7 +904,7 @@ def benchmark(
             passed for an L3 program.
         RuntimeError: No ``[STRACE]`` markers were captured at all, so no timing
             could be read. The markers are gated by the runtime's compile-time
-            ``SIMPLER_PROFILING`` macro; a runtime built without it emits none.
+            ``SIMPLER_HOST_STRACE`` macro; a runtime built without it emits none.
 
     Note:
         On a ``*sim`` platform the host ``<root>`` span is still emitted but the
@@ -1001,13 +1001,13 @@ def benchmark(
     stats = _parse_stats_from_strace(log_text, rounds=rounds, warmup=warmup, distributed=distributed)
     # We dispatched warmup + rounds launches, so a marker-emitting runtime always
     # yields at least one host span. Zero markers means the runtime emitted none
-    # (built without SIMPLER_PROFILING) — surface that rather than returning a
+    # (built without SIMPLER_HOST_STRACE) — surface that rather than returning a
     # silently-empty result a caller could misread as "0 device timing".
     if not stats.host_wall_us:
         raise RuntimeError(
             f"benchmark(): no [STRACE] markers captured across {warmup + rounds} launches. "
             "The runtime emits per-launch timing markers only when built with the "
-            "SIMPLER_PROFILING macro (LOG_INFO_V9 tier); this runtime emitted none. "
-            "Rebuild the runtime with SIMPLER_PROFILING enabled to read benchmark timing."
+            "SIMPLER_HOST_STRACE macro (LOG_INFO_V9 tier); this runtime emitted none. "
+            "Rebuild the runtime with SIMPLER_HOST_STRACE enabled to read benchmark timing."
         )
     return stats

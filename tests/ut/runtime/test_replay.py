@@ -131,7 +131,7 @@ def test_replay_forwards_dfx_flags(tmp_path: Path) -> None:
         platform="a2a3sim",
         enable_l2_swimlane=True,
         enable_pmu=2,
-        enable_dump_tensor=True,
+        enable_dump_args=True,
         enable_dep_gen=True,
         enable_scope_stats=True,
     )
@@ -140,7 +140,7 @@ def test_replay_forwards_dfx_flags(tmp_path: Path) -> None:
     dfx = ec.call_args.kwargs["dfx"]
     assert dfx.enable_l2_swimlane is True
     assert dfx.enable_pmu == 2
-    assert dfx.enable_dump_tensor is True
+    assert dfx.enable_dump_args is True
     assert dfx.enable_dep_gen is True
     assert dfx.enable_scope_stats is True
 

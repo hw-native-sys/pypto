@@ -149,7 +149,7 @@ def submit(*args: Any, **kwargs: Any) -> Any:
     positionally to the submitted kernel. ``dumps=`` is the explicit dump
     surface on a submit; the declarative ``pl.dump_tag(t)`` statement feeds the
     same ``dump_vars`` set. These marks only take effect under partial dump
-    (``RunConfig.enable_dump_tensor == 1``); they are a no-op when dump is off
+    (``RunConfig.enable_dump_args == 1``); they are a no-op when dump is off
     (``0``) and irrelevant under full dump (``2``), which captures every
     binding regardless.
 

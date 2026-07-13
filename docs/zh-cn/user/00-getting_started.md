@@ -319,7 +319,7 @@ compiled = prefill_fwd.compile()
 
 `worker.run` / `handle(...)` 只返回张量输出，不再暴露单次 launch 的计时对象。
 runtime 以 `[STRACE]` 日志标记的形式输出每次运行的 host/device 计时（simpler
-PR #1177，在 `PTO2_PROFILING` 下默认开启）；用 simpler 的 `strace_timing` /
+PR #1177，在 `SIMPLER_DFX` 下默认开启）；用 simpler 的 `strace_timing` /
 `device_log_timing` 工具解析这些标记，而不是读取返回值。需要 per-task 的 device
 计时时，开启 L2 swimlane DFX（`RunConfig(enable_l2_swimlane=True)`）并读取
 `l2_swimlane_records.json`。
@@ -346,7 +346,7 @@ print(stats.device_wall_us_median, stats.device_wall_us_min, len(stats.samples))
 `benchmark` 从 `[STRACE]` 标记读取计时（simpler PR #1177）：它在 worker 生命周期内
 将 runtime 日志级别提升到 `v9`，并在测量循环期间以 fd 级别捕获 `stderr`，因此循环
 期间产生的 stderr 会被转存到临时文件，而非实时打印。`device_wall_us` 在 L2 单芯片
-运行时是真实的 NPU 墙钟（分布式见下方 L3 说明）；在未开启 `SIMPLER_PROFILING` 的
+运行时是真实的 NPU 墙钟（分布式见下方 L3 说明）；在未开启 `SIMPLER_HOST_STRACE` 的
 runtime 上或 `*sim` 平台上为 `0`（用 `stats.all_zero_device` 判断）。
 
 除聚合值外，每次测量 launch 的完整 `[STRACE]` span 树保存在 `stats.invocations`

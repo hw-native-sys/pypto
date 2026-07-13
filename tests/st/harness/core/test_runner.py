@@ -421,8 +421,8 @@ def _dfx_to_cli(dfx: "_DfxOpts") -> list[str]:
     argv: list[str] = []
     if dfx.enable_l2_swimlane:
         argv.append("--enable-l2-swimlane")
-    if dfx.enable_dump_tensor:
-        argv += ["--dump-tensor", str(dfx.enable_dump_tensor)]
+    if dfx.enable_dump_args:
+        argv += ["--dump-args", str(dfx.enable_dump_args)]
     if dfx.enable_pmu:
         argv += ["--enable-pmu", str(dfx.enable_pmu)]
     if dfx.enable_dep_gen:
@@ -960,7 +960,7 @@ def start_pipeline(  # noqa: PLR0913
     device_pool: "queue.Queue[int]",
     analyze_auto_scopes_for_deps: bool = False,
     enable_l2_swimlane: bool = False,
-    enable_dump_tensor: int = 0,
+    enable_dump_args: int = 0,
     enable_pmu: int = 0,
     enable_dep_gen: bool = False,
     enable_scope_stats: bool = False,
@@ -1009,7 +1009,7 @@ def start_pipeline(  # noqa: PLR0913
         "analyze_auto_scopes_for_deps": analyze_auto_scopes_for_deps,
         "dfx": _DfxOpts(
             enable_l2_swimlane=enable_l2_swimlane,
-            enable_dump_tensor=enable_dump_tensor,
+            enable_dump_args=enable_dump_args,
             enable_pmu=enable_pmu,
             enable_dep_gen=enable_dep_gen,
             enable_scope_stats=enable_scope_stats,

@@ -745,7 +745,7 @@ class TestCompiledProgramExtraction:
             cp.build_call_config(
                 RunConfig(
                     enable_l2_swimlane=True,
-                    enable_dump_tensor=True,
+                    enable_dump_args=True,
                     enable_pmu=2,
                     enable_dep_gen=True,
                 ),
@@ -753,7 +753,7 @@ class TestCompiledProgramExtraction:
             )
 
         assert fake_call_config.enable_l2_swimlane is True
-        assert fake_call_config.enable_dump_tensor is True
+        assert fake_call_config.enable_dump_args is True
         assert fake_call_config.enable_pmu == 2
         assert fake_call_config.enable_dep_gen is True
         assert fake_call_config.output_prefix == str(tmp_path / "dfx")
@@ -769,7 +769,7 @@ class TestCompiledProgramExtraction:
                 "block_dim",
                 "aicpu_thread_num",
                 "enable_l2_swimlane",
-                "enable_dump_tensor",
+                "enable_dump_args",
                 "enable_pmu",
                 "enable_dep_gen",
             ]

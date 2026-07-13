@@ -253,7 +253,7 @@ class TestCrossCoreGroupedTpopTfree:
                     aicpu_thread_num=runtime_cfg.get("aicpu_thread_num", 4),
                     output_prefix=output_prefix,
                     enable_l2_swimlane=test_config.enable_l2_swimlane,
-                    enable_dump_tensor=test_config.enable_dump_tensor,
+                    enable_dump_args=test_config.enable_dump_args,
                     enable_pmu=test_config.enable_pmu,
                     enable_dep_gen=test_config.enable_dep_gen,
                     enable_scope_stats=test_config.enable_scope_stats,

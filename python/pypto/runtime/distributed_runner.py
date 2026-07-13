@@ -379,7 +379,7 @@ def _make_call_config(
     config. ``None`` (the default) leaves the baseline untouched and the runtime
     applies its own ``PTO2_RING_*`` env var / compile-time fallback.
 
-    DFX diagnostics (``enable_dump_tensor`` / ``enable_pmu`` / ``enable_dep_gen``
+    DFX diagnostics (``enable_dump_args`` / ``enable_pmu`` / ``enable_dep_gen``
     / ``enable_scope_stats`` / ``enable_l2_swimlane``) are likewise read from
     *run_config* and written to the shared ``config`` the host_orch chip dispatch
     forwards to every ``orch.submit_next_level``; their artifacts land under
@@ -419,7 +419,7 @@ def _make_call_config(
             if dfx_base is None:
                 raise ValueError("_make_call_config: dfx_base is required when a DFX flag is enabled on L3")
             dfx_base.mkdir(parents=True, exist_ok=True)
-            call_config.enable_dump_tensor = dfx.enable_dump_tensor
+            call_config.enable_dump_args = dfx.enable_dump_args
             call_config.enable_pmu = dfx.enable_pmu
             # Swimlane needs ``deps.json`` so the converter can resolve task
             # arrows / kernel names. The one-shot path runs a clean two-pass
@@ -670,7 +670,7 @@ def execute_distributed(
             ring-sizing overrides (``ring_task_window`` / ``ring_heap`` /
             ``ring_dep_pool``, each a scalar or a per-ring list of 4 ints) size
             this dispatch's runtime ring buffers, and its
-            runtime-diagnostic DFX flags (``enable_dump_tensor`` / ``enable_pmu``
+            runtime-diagnostic DFX flags (``enable_dump_args`` / ``enable_pmu``
             / ``enable_dep_gen`` / ``enable_scope_stats`` / ``enable_l2_swimlane``)
             are written per dispatch under
             ``<output_dir>/dfx_outputs/rank{r}/d{k}/`` (``d{k}`` is the card's
@@ -774,7 +774,7 @@ def execute_distributed(
             enable_dep_gen=True,
             enable_pmu=0,
             enable_scope_stats=False,
-            enable_dump_tensor=0,
+            enable_dump_args=0,
         )
         _run_once(_make_call_config(dc, deps_cfg, dfx_base=dfx_base))
 
@@ -822,7 +822,7 @@ def execute_distributed_compiled(
         config: Optional per-dispatch :class:`RunConfig`, forwarded to
             ``__call__``. Its per-task ring-sizing overrides size this dispatch's
             runtime ring buffers, and its runtime-diagnostic DFX flags
-            (``enable_dump_tensor`` / ``enable_pmu`` / ``enable_dep_gen`` /
+            (``enable_dump_args`` / ``enable_pmu`` / ``enable_dep_gen`` /
             ``enable_scope_stats`` / ``enable_l2_swimlane``) are written per
             dispatch under ``<output_dir>/dfx_outputs/rank{r}/d{k}/``. Other
             compile-side fields are not consumed on the dispatch path.

@@ -554,7 +554,7 @@ def execute_on_device(  # noqa: PLR0913
     aicpu_thread_num: int | None = None,
     output_prefix: str | None = None,
     enable_l2_swimlane: bool = False,
-    enable_dump_tensor: int = 0,
+    enable_dump_args: int = 0,
     enable_pmu: int = 0,
     enable_dep_gen: bool = False,
     enable_scope_stats: bool = False,
@@ -603,10 +603,10 @@ def execute_on_device(  # noqa: PLR0913
         enable_l2_swimlane: Capture per-task L2 perf records
             (``l2_swimlane_records.json``). Mirrors runtime's
             ``--enable-l2-swimlane`` pytest flag.
-        enable_dump_tensor: Per-task tensor dump level into
+        enable_dump_args: Per-task argument dump level into
             ``<output_prefix>/args_dump/``. ``0`` off; ``1`` partial
             (only ``pl.dump_tag`` / ``dumps=`` marked tensors); ``2`` full
-            (every task). Mirrors ``--dump-tensor``.
+            (every task). Mirrors ``--dump-args``.
         enable_pmu: AICore PMU event type. ``0`` disables; ``>0`` selects
             an event type (``2`` = PIPE_UTILIZATION, ``4`` = MEMORY).
             Mirrors ``--enable-pmu N``.
@@ -639,12 +639,12 @@ def execute_on_device(  # noqa: PLR0913
         )
 
     any_dfx = (
-        enable_l2_swimlane or enable_dump_tensor > 0 or enable_pmu > 0 or enable_dep_gen or enable_scope_stats
+        enable_l2_swimlane or enable_dump_args > 0 or enable_pmu > 0 or enable_dep_gen or enable_scope_stats
     )
     if any_dfx and not output_prefix:
         raise ValueError(
             "execute_on_device: output_prefix is required when any DFX flag "
-            "(enable_l2_swimlane / enable_dump_tensor / enable_pmu / enable_dep_gen / "
+            "(enable_l2_swimlane / enable_dump_args / enable_pmu / enable_dep_gen / "
             "enable_scope_stats) is enabled — runtime CallConfig::validate() would "
             "otherwise reject the call."
         )
@@ -658,10 +658,10 @@ def execute_on_device(  # noqa: PLR0913
         cfg.aicpu_thread_num = aicpu_thread_num
     # CallConfig nanobind setters: ``enable_l2_swimlane`` / ``enable_dep_gen``
     # take `bool`; ``enable_pmu`` is a raw ``int32_t`` (0 disabled, >0 event
-    # type); ``enable_dump_tensor`` is a dump level (0 off, 1 partial, 2 full)
+    # type); ``enable_dump_args`` is a dump level (0 off, 1 partial, 2 full)
     # — the setter also accepts a bool (True→1 partial, False→0).
     cfg.enable_l2_swimlane = enable_l2_swimlane
-    cfg.enable_dump_tensor = enable_dump_tensor
+    cfg.enable_dump_args = enable_dump_args
     cfg.enable_pmu = enable_pmu
     cfg.enable_dep_gen = enable_dep_gen
     cfg.enable_scope_stats = enable_scope_stats

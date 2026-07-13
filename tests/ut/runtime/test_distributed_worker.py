@@ -1178,7 +1178,7 @@ class _BoolStrictCallConfig:
     def __init__(self) -> None:
         self.block_dim: Any = None
         self.aicpu_thread_num = 0
-        self.enable_dump_tensor = 0
+        self.enable_dump_args = 0
         self.enable_pmu = 0
         self.enable_scope_stats = False
         self.enable_l2_swimlane: Any = 0
@@ -1240,7 +1240,7 @@ class TestMakeCallConfigDepGenType:
     def test_int_zero_swimlane_yields_bool_false_dep_gen(self, tmp_path, fake_simpler_task_interface):
         # Another DFX flag opens the block while swimlane is the int ``0``; the
         # ``and``/``or`` chain would otherwise assign int ``0`` and still crash.
-        run_config = RunConfig(enable_dump_tensor=1, enable_l2_swimlane=0)  # pyright: ignore[reportArgumentType]
+        run_config = RunConfig(enable_dump_args=1, enable_l2_swimlane=0)  # pyright: ignore[reportArgumentType]
         cfg = _make_call_config(DistributedConfig(), run_config, dfx_base=tmp_path / "dfx")
         assert cfg.enable_dep_gen is False
 

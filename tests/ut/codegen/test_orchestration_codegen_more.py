@@ -1306,7 +1306,7 @@ class TestOrchestrationMore:
 
         # No orch-body toggle (simpler#953): the runtime latches the dump level
         # (off / partial / full) host-side; codegen only emits ``.dump(...)``.
-        assert "enable_dump_tensor_selective" not in code
+        assert "enable_dump_args_selective" not in code
 
         # Both tasks dump only the tagged arg (ext_a), never ext_b.
         assert code.count("params_t0.dump(ext_a);") == 1
@@ -1319,7 +1319,7 @@ class TestOrchestrationMore:
 
     def test_no_dump_tag_emits_no_toggle_or_dump(self):
         """Without any ``pl.dump_tag`` no ``.dump(...)`` calls are emitted. The
-        runtime's ``CallConfig::enable_dump_tensor`` level then drives the dump
+        runtime's ``CallConfig::enable_dump_args`` level then drives the dump
         behaviour: level 2 (full) dumps every tensor of every task; level 1
         (partial) dumps only ``.dump(...)``-marked tensors (here: none).
         """
@@ -1353,7 +1353,7 @@ class TestOrchestrationMore:
 
         code = _generate_orch_code(NoDumpTagProgram)
 
-        assert "enable_dump_tensor_selective" not in code
+        assert "enable_dump_args_selective" not in code
         for line in code.split("\n"):
             assert ".dump(" not in line, f"Plain orch should not emit any dump call: {line!r}"
 
@@ -1394,7 +1394,7 @@ class TestOrchestrationMore:
 
         code = _generate_orch_code(StrayTagProgram)
 
-        assert "enable_dump_tensor_selective" not in code
+        assert "enable_dump_args_selective" not in code
         for line in code.split("\n"):
             assert ".dump(" not in line, f"Stray tag should not emit any dump call: {line!r}"
 
@@ -1448,7 +1448,7 @@ class TestOrchestrationMore:
         transformed = pm.run_passes(InlineDumpTagProgram)
         code = _generate_orch_code(transformed)
 
-        assert "enable_dump_tensor_selective" not in code
+        assert "enable_dump_args_selective" not in code
         assert code.count("params_t0.dump(ext_a);") == 1
         for line in code.split("\n"):
             if ".dump(" in line:
@@ -1506,7 +1506,7 @@ class TestOrchestrationMore:
         transformed = pm.run_passes(InlineBodyVarDumpTagProgram)
         code = _generate_orch_code(transformed)
 
-        assert "enable_dump_tensor_selective" not in code
+        assert "enable_dump_args_selective" not in code
         # The dump rides on the call's ``dump_vars`` Var ref, which follows the
         # FreshName rename (e.g. ``tmp_inline0``) and SSA versioning, so the
         # emitted dump references the renamed local — at least one
@@ -1597,7 +1597,7 @@ class TestOrchestrationMore:
         # level stack happened at all), then assert the dump emit picks it up
         # via the Var ref riding through the renames.
         assert "_inline" in code, "expected at least one inline-renamed Var in the code"
-        assert "enable_dump_tensor_selective" not in code
+        assert "enable_dump_args_selective" not in code
         dump_lines = [line for line in code.split("\n") if ".dump(" in line]
         assert dump_lines, f"expected dump calls after multi-level inline, got code:\n{code}"
         assert any("tmp" in line for line in dump_lines), (
@@ -1663,7 +1663,7 @@ class TestOrchestrationMore:
         transformed = pm.run_passes(TwoLevelInlineDumpTagProgram)
         code = _generate_orch_code(transformed)
 
-        assert "enable_dump_tensor_selective" not in code
+        assert "enable_dump_args_selective" not in code
         assert code.count("params_t0.dump(ext_a);") == 1
 
     def test_mixed_group_emission_order(self):

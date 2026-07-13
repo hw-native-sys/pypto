@@ -56,7 +56,7 @@ class TestRunConfigDfxFlags:
         "kwargs",
         [
             {"enable_l2_swimlane": True},
-            {"enable_dump_tensor": True},
+            {"enable_dump_args": True},
             {"enable_pmu": 2},
             {"enable_dep_gen": True},
             {"enable_scope_stats": True},
@@ -84,30 +84,30 @@ class TestRunConfigDfxFlags:
         assert cfg.enable_pmu == 4
         assert cfg.save_kernels is True
 
-    def test_dump_tensor_level_enables_dfx(self):
-        # enable_dump_tensor is a level: 0=off, 1=partial, 2=full. Any
+    def test_dump_args_level_enables_dfx(self):
+        # enable_dump_args is a level: 0=off, 1=partial, 2=full. Any
         # positive level enables DFX and forces save_kernels (artefact dir).
-        off = RunConfig(platform="a5", enable_dump_tensor=0)
+        off = RunConfig(platform="a5", enable_dump_args=0)
         assert off.any_dfx_enabled() is False
         for level in (1, 2):
-            cfg = RunConfig(platform="a5", enable_dump_tensor=level)
-            assert cfg.enable_dump_tensor == level
+            cfg = RunConfig(platform="a5", enable_dump_args=level)
+            assert cfg.enable_dump_args == level
             assert cfg.any_dfx_enabled() is True
             assert cfg.save_kernels is True
 
-    def test_dump_tensor_bool_maps_to_level(self):
+    def test_dump_args_bool_maps_to_level(self):
         # Back-compat: True is the partial level (1), False is off (0). bool is
         # an int subtype so `> 0` truthiness and pass-through to CallConfig hold.
-        assert RunConfig(platform="a5", enable_dump_tensor=True).enable_dump_tensor == 1
-        assert RunConfig(platform="a5", enable_dump_tensor=False).enable_dump_tensor == 0
-        assert RunConfig(platform="a5", enable_dump_tensor=True).any_dfx_enabled() is True
+        assert RunConfig(platform="a5", enable_dump_args=True).enable_dump_args == 1
+        assert RunConfig(platform="a5", enable_dump_args=False).enable_dump_args == 0
+        assert RunConfig(platform="a5", enable_dump_args=True).any_dfx_enabled() is True
 
     def test_dfx_flags_are_independent(self):
         # Enabling one flag must not implicitly enable another.
         cfg = RunConfig(platform="a5", enable_dep_gen=True)
         assert cfg.enable_dep_gen is True
         assert cfg.enable_l2_swimlane is False
-        assert cfg.enable_dump_tensor == 0
+        assert cfg.enable_dump_args == 0
         assert cfg.enable_pmu == 0
         assert cfg.enable_scope_stats is False
 
@@ -119,7 +119,7 @@ class TestRunConfigDfxFlags:
         assert cfg.any_dfx_enabled() is True
         assert cfg.save_kernels is True
         assert cfg.enable_l2_swimlane is False
-        assert cfg.enable_dump_tensor == 0
+        assert cfg.enable_dump_args == 0
         assert cfg.enable_pmu == 0
         assert cfg.enable_dep_gen is False
 
@@ -127,14 +127,14 @@ class TestRunConfigDfxFlags:
         cfg = RunConfig(
             platform="a5",
             enable_l2_swimlane=True,
-            enable_dump_tensor=2,
+            enable_dump_args=2,
             enable_pmu=2,
             enable_dep_gen=True,
             enable_scope_stats=True,
         )
         opts = _DfxOpts.from_run_config(cfg)
         assert opts.enable_l2_swimlane is True
-        assert opts.enable_dump_tensor == 2
+        assert opts.enable_dump_args == 2
         assert opts.enable_pmu == 2
         assert opts.enable_dep_gen is True
         assert opts.enable_scope_stats is True
@@ -307,7 +307,7 @@ class _SpyCallConfig:
     def __init__(self) -> None:
         self.runtime_env = _SpyRuntimeEnv()
         self.enable_l2_swimlane = False
-        self.enable_dump_tensor = 0
+        self.enable_dump_args = 0
         self.enable_pmu = 0
         self.enable_dep_gen = False
         self.enable_scope_stats = False
@@ -445,7 +445,7 @@ class TestMakeCallConfigRing:
 class TestMakeCallConfigDfx:
     """Verify L3 ``_make_call_config`` wires the runtime DFX diagnostics.
 
-    The runtime-diagnostic flags (``enable_dump_tensor`` / ``enable_pmu`` /
+    The runtime-diagnostic flags (``enable_dump_args`` / ``enable_pmu`` /
     ``enable_dep_gen`` / ``enable_scope_stats`` / ``enable_l2_swimlane``) are
     transcribed onto the shared ``CallConfig`` and their artifacts rooted at
     ``dfx_base``. ``enable_l2_swimlane`` additionally co-enables ``dep_gen`` so
@@ -458,7 +458,7 @@ class TestMakeCallConfigDfx:
         dfx_base = tmp_path / "dfx_outputs"
         run_config = RunConfig(
             platform="a2a3sim",
-            enable_dump_tensor=2,
+            enable_dump_args=2,
             enable_pmu=1,
             enable_dep_gen=True,
             enable_scope_stats=True,
@@ -466,7 +466,7 @@ class TestMakeCallConfigDfx:
         cfg = _make_dist_call_config_with_fake(
             DistributedConfig(), run_config, monkeypatch, dfx_base=dfx_base
         )
-        assert cfg.enable_dump_tensor == 2
+        assert cfg.enable_dump_args == 2
         assert cfg.enable_pmu == 1
         assert cfg.enable_dep_gen is True
         assert cfg.enable_scope_stats is True
@@ -642,7 +642,7 @@ class TestExecuteOnDeviceDfxValidation:
 
         for flag in [
             {"enable_l2_swimlane": True},
-            {"enable_dump_tensor": True},
+            {"enable_dump_args": True},
             {"enable_pmu": 2},
             {"enable_dep_gen": True},
             {"enable_scope_stats": True},

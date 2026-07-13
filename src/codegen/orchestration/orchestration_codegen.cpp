@@ -833,13 +833,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
                            std::to_string(dynamic_compiler_dep_slots_per_iter) + ");");
           const std::string profile_start_name =
               ReserveSyntheticEmitName(collection.data_name + "_profile_start");
-          EmitIndentedLine("#if PTO2_ORCH_PROFILING");
+          EmitIndentedLine("#if SIMPLER_ORCH_PROFILING");
           EmitIndentedLine("uint64_t " + profile_start_name + " = rt_orch_profile_now();");
           EmitIndentedLine("#endif");
           EmitIndentedLine("std::vector<PTO2TaskId> " + collection.data_name + "(static_cast<size_t>(" +
                            capacity_name + "));");
           EmitIndentedLine("uint32_t " + collection.count_name + " = 0;");
-          EmitIndentedLine("#if PTO2_ORCH_PROFILING");
+          EmitIndentedLine("#if SIMPLER_ORCH_PROFILING");
           EmitIndentedLine("rt_orch_profile_add_dynamic_dep_vector(rt_orch_profile_now() - " +
                            profile_start_name + ", 0);");
           EmitIndentedLine("#endif");
@@ -1376,7 +1376,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         }
         const std::string profile_start_name =
             ReserveSyntheticEmitName(dyn_it->second.data_name + "_write_profile_start");
-        EmitIndentedLine("#if PTO2_ORCH_PROFILING");
+        EmitIndentedLine("#if SIMPLER_ORCH_PROFILING");
         EmitIndentedLine("uint64_t " + profile_start_name + " = rt_orch_profile_now();");
         EmitIndentedLine("#endif");
         // A fresh direct-producer yield is statically valid, so skip the
@@ -1389,7 +1389,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         }
         EmitIndentedLine(dyn_it->second.data_name + "[" + dyn_it->second.count_name +
                          "++] = " + *scalar_name + ";");
-        EmitIndentedLine("#if PTO2_ORCH_PROFILING");
+        EmitIndentedLine("#if SIMPLER_ORCH_PROFILING");
         EmitIndentedLine("rt_orch_profile_add_dynamic_dep_vector(rt_orch_profile_now() - " +
                          profile_start_name + ", 1);");
         EmitIndentedLine("#endif");
@@ -3917,11 +3917,11 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   // Selective vs. full tensor dump is no longer requested from the orch body.
   // simpler#953 removed the ``enable_dump_tensor_selective()`` toggle: the
   // runtime now latches the dump level (off / partial / full) host-side at
-  // ``dump_tensor_init`` from ``DumpDataHeader`` (driven by
-  // ``CallConfig.enable_dump_tensor``), race-free regardless of submit order.
+  // ``dump_args_init`` from ``DumpDataHeader`` (driven by
+  // ``CallConfig.enable_dump_args``), race-free regardless of submit order.
   // Codegen only emits the per-task ``Arg::dump(...)`` markers (see
   // ``EmitSelectiveDumpCall``); partial mode selecting exactly those marked
-  // tensors is enabled by ``enable_dump_tensor == 1``.
+  // tensors is enabled by ``enable_dump_args == 1``.
 
   oss << "    // External tensors\n";
   int orch_idx = 0;

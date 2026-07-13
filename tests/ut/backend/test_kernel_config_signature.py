@@ -12,7 +12,7 @@
 Covers the issue #1458 fix: codegen now emits each kernel's runtime
 ``ArgDirection`` signature so the tensormap_and_ringbuffer tensor dump builds a
 non-empty CoreCallable signature and its per-subtask tensor-arg count matches
-the task payload ``tensor_count``. Without this, ``--dump-tensor`` captured
+the task payload ``tensor_count``. Without this, ``--dump-args`` captured
 nothing for a codegen matmul (signature was empty -> count 0 != payload 3).
 
 These tests exercise the codegen-side helper ``_generate_config_file`` directly
