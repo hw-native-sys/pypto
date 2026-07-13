@@ -137,7 +137,7 @@ print(pto_code)
 | --------------- | ----------------- |
 | `tile.load(tensor, [row, col], [h, w])` | `pto.partition_view` + `pto.tload` |
 | `tile.store(tile, [row, col], tensor)` | `pto.partition_view` + `pto.tstore` |
-| `tile.slice(tile, [h, w], [row, col][, valid_shape=...])` | `pto.subview` (zero-copy view; `valid [...]` clause emitted only when `valid_shape` is supplied) |
+| `tile.slice(tile, [h, w], [row, col][, valid_shape=...])` | `pto.subview` (zero-copy view; `valid [...]` is emitted for an explicit or result-derived partial `valid_shape`) |
 | `tile.assemble(target, source, [row, col])` | (optional) `pto.tmov target -> dst` + `pto.subview dst[row, col] sizes [src.rows, src.cols]` + `pto.tmov src -> dst_view` |
 | `tile.mul(lhs, rhs)` | `pto.tmul` |
 | `tile.add(a, b, c)` | `pto.taddc` (3-operand add) |
@@ -153,7 +153,8 @@ those four `TileView` fields from the source so the produced `TileType`
 satisfies the constraints by construction.  Backend codegen also runs a
 `CheckSubviewTileCompat` guard at lowering time:
 
-- Source and result must both carry an explicit `TileView`.
+- The source and result effective `TileView` configurations must be compatible;
+  an implicit default view is accepted.
 - `dtype`, `blayout`, `slayout`, `fractal`, and `pad` must match exactly.
 - `pad` must be `PadValue::null` — `pto.subview` is a view, not a fillpad,
   so use `tile.fillpad` on the slice result if zero/min/max padding is

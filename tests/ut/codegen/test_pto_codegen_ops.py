@@ -982,7 +982,8 @@ class TestTileSliceCodegen:
     tile.slice lowers to pto.subview — a pure view alias of the source tile —
     rather than the historical pto.textract data-movement op.  The result tile
     inherits the source's tile_buf configuration (loc/dtype/blayout/slayout/
-    fractal/pad) and only the shape/valid_shape change.
+    fractal/pad) except for an explicit slice pad override; shape/valid_shape
+    are derived from the result contract.
     """
 
     def _generate_mlir(self, program_cls) -> str:
@@ -1230,6 +1231,30 @@ class TestTileSliceCodegen:
             + "\n".join(set_vs_lines)
         )
 
+    def test_tile_slice_codegen_rejects_result_pad_override(self):
+        """A pure subview cannot change pad policy; users must fill the slice."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[32, 32], pl.FP32],
+                dst: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                src_tile: pl.Tile[[32, 32], pl.FP32] = pl.load(src, [0, 0], [32, 32])
+                sliced: pl.Tile[[16, 16], pl.FP32] = pl.tile.slice(
+                    src_tile,
+                    [16, 16],
+                    [0, 0],
+                    valid_shape=[8, 16],
+                    pad_value=pl.PadValue.min,
+                )
+                return pl.store(sliced, [0, 0], dst)
+
+        with pytest.raises(Exception, match=r"tile\.slice.*pto\.subview.*pad"):
+            self._generate_mlir(Prog)
+
     def test_tile_slice_mixed_dynamic_static_valid_shape_per_dim_type(self):
         """tile.slice(valid_shape=[dynamic_row, static_col]) must keep the static
         col dim static in the result tile_buf type.
@@ -1383,16 +1408,12 @@ class TestTileSliceCodegen:
             f"v_row=6, v_col=6 (min(size, valid - offset)) on the subview result; got:\n{subview_lines[0]}"
         )
 
-    def test_tile_slice_with_zero_valid_sentinel_parent_does_not_emit_zero_result_valid(self):
-        """Regression for issue #1507: subview must not emit static v_row=0, v_col=0
-        when the parent's IR carries the lane1 [0, 0] valid_shape sentinel.
+    def test_tile_slice_with_zero_valid_parent_emits_zero_result_valid(self):
+        """A zero valid_shape denotes a genuinely empty tile, not a sentinel.
 
-        The parent's static type string always renders v_row=?, v_col=? (per
-        ExtractTileTypeInfo in pto_type_utils.cpp), so PTOAS infers the
-        subview's result valid from the slice's `sizes`. Our inference must
-        align — reading the parent's tile_view_.valid_shape (which can be the
-        sentinel [0, 0] after SplitVectorKernel's WithZeroValidShape) would
-        produce v_row=0, v_col=0 that PTOAS rejects.
+        The subview's explicit ``valid`` operand and static result type must
+        therefore preserve [0, 0] so downstream codegen observes the same
+        effective validity as the IR result type.
         """
 
         @pl.program
@@ -1411,10 +1432,14 @@ class TestTileSliceCodegen:
         mlir = self._generate_mlir(Prog)
         subview_lines = [line for line in mlir.splitlines() if "pto.subview" in line]
         assert subview_lines, f"no pto.subview line emitted; got:\n{mlir}"
+        assert " valid [%c0_index, %c0_index]" in subview_lines[0], (
+            "Empty [0, 0] result validity must be emitted explicitly on the subview; "
+            f"got:\n{subview_lines[0]}"
+        )
         result_type = subview_lines[0].split("->", 1)[-1]
-        assert "v_row=0" not in result_type and "v_col=0" not in result_type, (
-            "Sentinel [0, 0] parent valid_shape must NOT propagate to a static v_row=0/v_col=0 "
-            f"on the subview result (ptoas would reject); got:\n{subview_lines[0]}"
+        assert "v_row=0" in result_type and "v_col=0" in result_type, (
+            "Empty [0, 0] result validity must remain authoritative in the subview result type; "
+            f"got:\n{subview_lines[0]}"
         )
 
     def _generate_mlir_all_incore(self, program_cls) -> str:
@@ -2306,6 +2331,111 @@ class TestTileMoveAccNoopElision:
         assert not self._has_acc_to_acc_tmov(mlir), (
             f"Generated MLIR contains invalid pto.tmov acc→acc (regression #1352):\n{mlir}"
         )
+
+
+class TestRankOneValidShapeCodegen:
+    """Logical rank-1 validity maps to PTO's physical column extent."""
+
+    def _generate_mlir(self, program_cls) -> str:
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program_cls)
+        target = next(f for f in optimized.functions.values() if ir.is_incore_type(f.func_type))
+        return codegen.PTOCodegen().generate(ir.Program([target], target.name, optimized.span))
+
+    def test_static_partial_rank1_load_store_uses_v_col(self):
+        @pl.program
+        class RankOneStatic:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[64], pl.FP32],
+                dst: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                local = pl.load(src, [0], [64], valid_shapes=[32])
+                return pl.store(local, [0], dst)
+
+        mlir = self._generate_mlir(RankOneStatic)
+        lines = [line for line in mlir.splitlines() if "pto.tload" in line or "pto.tstore" in line]
+        allocs = [line for line in mlir.splitlines() if "pto.alloc_tile" in line]
+        assert any("pto.tload" in line for line in lines)
+        assert any("pto.tstore" in line for line in lines)
+        assert len(allocs) == 1
+        assert "valid_row = %c1_index" in allocs[0] and "valid_col = %c32_index" in allocs[0], (
+            f"logical valid [32] must map to alloc operands [1,32], got:\n{allocs[0]}"
+        )
+        assert all("partition_tensor_view<32xf32>" in line for line in lines)
+
+    def test_dynamic_partial_rank1_load_store_uses_dynamic_v_col(self):
+        @pl.program
+        class RankOneDynamic:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[64], pl.FP32],
+                dst: pl.Out[pl.Tensor[[64], pl.FP32]],
+                n: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                local = pl.load(src, [0], [64], valid_shapes=[n])
+                return pl.store(local, [0], dst)
+
+        mlir = self._generate_mlir(RankOneDynamic)
+        lines = [line for line in mlir.splitlines() if "pto.tload" in line or "pto.tstore" in line]
+        allocs = [line for line in mlir.splitlines() if "pto.alloc_tile" in line]
+        assert lines
+        assert len(allocs) == 1
+        assert "valid_row = %c1_index" in allocs[0] and "valid_col =" in allocs[0], (
+            f"logical dynamic valid [n] must map to alloc operands [1,n], got:\n{allocs[0]}"
+        )
+        assert all("partition_tensor_view<?xf32>" in line for line in lines)
+
+    def test_rank1_slice_normalizes_subview_coordinates_and_validity(self):
+        """A logical rank-1 slice lowers to PTO's physical [1, N] subview."""
+
+        @pl.program
+        class RankOneSlice:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[8], pl.FP32],
+                dst: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                local = pl.load(src, [0], [8], valid_shapes=[3])
+                sliced = pl.tile.slice(local, [4], [1])
+                return pl.store(sliced, [0], dst)
+
+        mlir = self._generate_mlir(RankOneSlice)
+        subview = next(line for line in mlir.splitlines() if "pto.subview" in line)
+        assert "sizes [1, 4]" in subview
+        assert " valid [" in subview
+        result_type = subview.split("->", 1)[-1]
+        assert "rows=1" in result_type and "cols=4" in result_type
+        assert "v_row=1" in result_type and "v_col=2" in result_type
+
+    def test_rank1_assemble_normalizes_subview_coordinates_and_validity(self):
+        """A logical rank-1 assemble writes through a physical [1, N] subview."""
+
+        @pl.program
+        class RankOneAssemble:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                base: pl.Tensor[[8], pl.FP32],
+                src: pl.Tensor[[4], pl.FP32],
+                dst: pl.Out[pl.Tensor[[8], pl.FP32]],
+            ) -> pl.Tensor[[8], pl.FP32]:
+                target = pl.load(base, [0], [8])
+                chunk = pl.load(src, [0], [4], valid_shapes=[3])
+                assembled = pl.tile.assemble(target, chunk, [2])
+                return pl.store(assembled, [0], dst)
+
+        mlir = self._generate_mlir(RankOneAssemble)
+        subview = next(line for line in mlir.splitlines() if "pto.subview" in line)
+        assert "sizes [1, 4]" in subview
+        assert " valid [" in subview
+        result_type = subview.split("->", 1)[-1]
+        assert "rows=1" in result_type and "cols=4" in result_type
+        assert "v_row=1" in result_type and "v_col=3" in result_type
 
 
 class TestTileStoreAtomicCodegen:

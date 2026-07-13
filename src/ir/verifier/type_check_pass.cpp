@@ -24,7 +24,9 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 #include "pypto/ir/verifier/verification_error.h"
 #include "pypto/ir/verifier/verifier.h"
 
@@ -70,8 +72,22 @@ class TypeChecker : public IRVisitor {
   void VisitStmt_(const ForStmtPtr& op) override;
   void VisitStmt_(const WhileStmtPtr& op) override;
   void VisitStmt_(const IfStmtPtr& op) override;
+  void VisitVarLike_(const VarPtr& op) override;
+  void VisitExpr_(const CallPtr& op) override;
 
   [[nodiscard]] const std::vector<Diagnostic>& GetDiagnostics() const { return diagnostics_; }
+
+  /**
+   * @brief Enforce the standing valid_shape well-formedness invariant on a type.
+   *
+   * For a TileType/TensorType carrying an explicit (non-empty) ``valid_shape``:
+   * ``rank(valid_shape) == rank(shape)`` and, for every dim where both the valid
+   * extent and the physical extent are compile-time constants,
+   * ``0 <= valid_shape[i] <= shape[i]``. Symbolic (dynamic) valid extents are a
+   * supported feature and are skipped. Recurses into ``TupleType`` elements.
+   * Public so param/return types can be checked directly from ``Verify``.
+   */
+  void CheckValidShape(const TypePtr& type, const Span& span);
 
  private:
   std::vector<Diagnostic>& diagnostics_;
@@ -91,6 +107,13 @@ class TypeChecker : public IRVisitor {
    */
   void CheckTypeEquality(const TypePtr& type1, const TypePtr& type2, const std::string& context,
                          const std::string& desc1, const std::string& desc2, const Span& span);
+
+  /**
+   * @brief Require effective valid extents to be provably equal at a control-flow join.
+   */
+  void CheckEffectiveValidShapeEquality(const std::vector<ExprPtr>& valid1,
+                                        const std::vector<ExprPtr>& valid2, const std::string& context,
+                                        const std::string& desc1, const std::string& desc2, const Span& span);
 
   /**
    * @brief Check if two ExprPtr represent the same constant value
@@ -152,8 +175,35 @@ void TypeChecker::CheckTypeEquality(const TypePtr& type1, const TypePtr& type2, 
     return;
   }
 
-  // For TensorType and TileType, check dtype and shape
-  if (type1->GetKind() == ObjectKind::TensorType || type1->GetKind() == ObjectKind::TileType) {
+  // Tuple values cross a control-flow boundary as a single carrier, but every
+  // element still participates in the join's type contract. Recurse so shaped
+  // element semantics (including effective valid_shape) cannot be hidden
+  // inside a tuple.
+  if (const auto tuple1 = As<TupleType>(type1)) {
+    const auto tuple2 = As<TupleType>(type2);
+    if (tuple1->types_.size() != tuple2->types_.size()) {
+      std::ostringstream msg;
+      msg << "Tuple arity mismatch in " << context << ": " << desc1 << " has " << tuple1->types_.size()
+          << " elements, but " << desc2 << " has " << tuple2->types_.size() << " elements";
+      RecordError(typecheck::ErrorType::SIZE_MISMATCH, msg.str(), span);
+      return;
+    }
+
+    for (size_t i = 0; i < tuple1->types_.size(); ++i) {
+      CheckTypeEquality(tuple1->types_[i], tuple2->types_[i], context,
+                        desc1 + " element[" + std::to_string(i) + "]",
+                        desc2 + " element[" + std::to_string(i) + "]", span);
+    }
+    return;
+  }
+
+  // For tensor-like types (including DistributedTensorType) and TileType, check
+  // dtype, physical shape, and the effective validity carried across the join.
+  const auto tensor1 = AsTensorTypeLike(type1);
+  const auto tensor2 = AsTensorTypeLike(type2);
+  const auto tile1 = As<TileType>(type1);
+  const auto tile2 = As<TileType>(type2);
+  if ((tensor1 && tensor2) || (tile1 && tile2)) {
     auto shaped1 = std::dynamic_pointer_cast<const ShapedType>(type1);
     auto shaped2 = std::dynamic_pointer_cast<const ShapedType>(type2);
 
@@ -199,13 +249,52 @@ void TypeChecker::CheckTypeEquality(const TypePtr& type1, const TypePtr& type2, 
         // A more sophisticated analysis would be needed for symbolic shape verification
       }
     }
+
+    if (tile1 && tile2) {
+      CheckEffectiveValidShapeEquality(GetValidShape(tile1), GetValidShape(tile2), context, desc1, desc2,
+                                       span);
+    } else {
+      CheckEffectiveValidShapeEquality(GetValidShape(tensor1), GetValidShape(tensor2), context, desc1, desc2,
+                                       span);
+
+      // Padding determines the value observed outside a partial valid box, so
+      // two tensor values cannot share a control-flow result type when their
+      // padding policies differ. An absent TensorView has the default null pad.
+      const PadValue pad1 = tensor1->tensor_view_.has_value() ? tensor1->tensor_view_->pad : PadValue::null;
+      const PadValue pad2 = tensor2->tensor_view_.has_value() ? tensor2->tensor_view_->pad : PadValue::null;
+      if (pad1 != pad2) {
+        std::ostringstream msg;
+        msg << "TensorView pad mismatch in " << context << ": " << desc1 << " pad != " << desc2 << " pad";
+        RecordError(typecheck::ErrorType::TYPE_KIND_MISMATCH, msg.str(), span);
+      }
+
+      // A distributed tensor is tied to a concrete WindowBuffer allocation.
+      // Match structural type equality's default (non-auto-mapped) semantics:
+      // presence must agree and a materialized back-reference must identify the
+      // very same WindowBuffer Var.
+      const auto distributed1 = As<DistributedTensorType>(type1);
+      const auto distributed2 = As<DistributedTensorType>(type2);
+      if (distributed1 && distributed2) {
+        if (distributed1->window_buffer_.has_value() != distributed2->window_buffer_.has_value()) {
+          std::ostringstream msg;
+          msg << "DistributedTensorType window_buffer presence mismatch in " << context << ": " << desc1
+              << (distributed1->window_buffer_.has_value() ? " has" : " doesn't have")
+              << " a window_buffer, but " << desc2
+              << (distributed2->window_buffer_.has_value() ? " has" : " doesn't have") << " a window_buffer";
+          RecordError(typecheck::ErrorType::TYPE_KIND_MISMATCH, msg.str(), span);
+        } else if (distributed1->window_buffer_.has_value() &&
+                   *distributed1->window_buffer_ != *distributed2->window_buffer_) {
+          std::ostringstream msg;
+          msg << "DistributedTensorType window_buffer identity mismatch in " << context << ": " << desc1
+              << " and " << desc2 << " refer to different window buffers";
+          RecordError(typecheck::ErrorType::TYPE_KIND_MISMATCH, msg.str(), span);
+        }
+      }
+    }
   }
 
   // For TileType, also check tile_view
   if (type1->GetKind() == ObjectKind::TileType) {
-    auto tile1 = std::dynamic_pointer_cast<const TileType>(type1);
-    auto tile2 = std::dynamic_pointer_cast<const TileType>(type2);
-
     // Check if both have tile_view or both don't
     if (tile1->tile_view_.has_value() != tile2->tile_view_.has_value()) {
       std::ostringstream msg;
@@ -221,39 +310,7 @@ void TypeChecker::CheckTypeEquality(const TypePtr& type1, const TypePtr& type2, 
       const auto& view1 = tile1->tile_view_.value();
       const auto& view2 = tile2->tile_view_.value();
 
-      // Check valid_shape dimensions count
-      if (view1.valid_shape.size() != view2.valid_shape.size()) {
-        std::ostringstream msg;
-        msg << "TileView valid_shape dimension count mismatch in " << context << ": " << desc1 << " has "
-            << view1.valid_shape.size() << " dimensions, but " << desc2 << " has " << view2.valid_shape.size()
-            << " dimensions";
-        RecordError(typecheck::ErrorType::SHAPE_DIMENSION_MISMATCH, msg.str(), span);
-        return;
-      }
-
-      // Check each valid_shape dimension
-      for (size_t i = 0; i < view1.valid_shape.size(); ++i) {
-        const auto& dim1 = view1.valid_shape[i];
-        const auto& dim2 = view2.valid_shape[i];
-
-        if (!dim1 || !dim2) continue;
-
-        // Try to compare as constants
-        if (!IsSameConstant(dim1, dim2)) {
-          // Check if both are ConstInt but different values
-          auto const_int1 = As<ConstInt>(dim1);
-          auto const_int2 = As<ConstInt>(dim2);
-          if (const_int1 && const_int2) {
-            std::ostringstream msg;
-            msg << "TileView valid_shape dimension mismatch in " << context << ": " << desc1
-                << " valid_shape[" << i << "] = " << const_int1->value_ << ", but " << desc2
-                << " valid_shape[" << i << "] = " << const_int2->value_;
-            RecordError(typecheck::ErrorType::SHAPE_VALUE_MISMATCH, msg.str(), span);
-          }
-          // For symbolic dimensions, we skip detailed checking
-          // A more sophisticated analysis would be needed for symbolic shape verification
-        }
-      }
+      // valid_shape was compared above in its effective form (unset == shape).
 
       // Check stride dimensions count
       if (view1.stride.size() != view2.stride.size()) {
@@ -337,6 +394,31 @@ void TypeChecker::CheckTypeEquality(const TypePtr& type1, const TypePtr& type2, 
         RecordError(typecheck::ErrorType::TYPE_KIND_MISMATCH, msg.str(), span);
       }
     }
+  }
+}
+
+void TypeChecker::CheckEffectiveValidShapeEquality(const std::vector<ExprPtr>& valid1,
+                                                   const std::vector<ExprPtr>& valid2,
+                                                   const std::string& context, const std::string& desc1,
+                                                   const std::string& desc2, const Span& span) {
+  if (valid1.size() != valid2.size()) {
+    std::ostringstream msg;
+    msg << "Effective valid_shape rank mismatch in " << context << ": " << desc1 << " has " << valid1.size()
+        << " dimensions, but " << desc2 << " has " << valid2.size() << " dimensions";
+    RecordError(typecheck::ErrorType::SHAPE_DIMENSION_MISMATCH, msg.str(), span);
+    return;
+  }
+
+  for (size_t i = 0; i < valid1.size(); ++i) {
+    const ProofResult proof = ProveValidExtentEqual(valid1[i], valid2[i]);
+    if (proof == ProofResult::kTrue) continue;
+
+    std::ostringstream msg;
+    msg << "Effective valid_shape mismatch in " << context << " at dimension " << i << ": " << desc1
+        << " and " << desc2 << " must carry provably equal valid extents. "
+        << (proof == ProofResult::kFalse ? "The extents are provably different."
+                                         : "Their symbolic equality cannot be proven.");
+    RecordError(typecheck::ErrorType::SHAPE_VALUE_MISMATCH, msg.str(), span);
   }
 }
 
@@ -425,10 +507,24 @@ void TypeChecker::VisitStmt_(const ForStmtPtr& op) {
           if (!iter_arg || !iter_arg->initValue_ || !yield_value || !return_var) continue;
 
           auto init_type = iter_arg->initValue_->GetType();
+          auto iter_type = iter_arg->GetType();
           auto yield_type = yield_value->GetType();
           auto return_type = return_var->GetType();
 
-          if (!init_type || !yield_type || !return_type) continue;
+          if (!init_type || !iter_type || !yield_type || !return_type) continue;
+
+          // The IterArg's declared type is the type visible to every use in the
+          // loop body. It must therefore agree with every boundary carrier, not
+          // merely rely on init/yield/return agreeing with one another.
+          CheckTypeEquality(iter_type, init_type, "ForStmt",
+                            "iter_arg[" + std::to_string(i) + "] declared type",
+                            "iter_arg[" + std::to_string(i) + "] initValue", op->span_);
+          CheckTypeEquality(iter_type, yield_type, "ForStmt",
+                            "iter_arg[" + std::to_string(i) + "] declared type",
+                            "yield value[" + std::to_string(i) + "]", op->span_);
+          CheckTypeEquality(iter_type, return_type, "ForStmt",
+                            "iter_arg[" + std::to_string(i) + "] declared type",
+                            "return_var[" + std::to_string(i) + "]", op->span_);
 
           // Check initValue type == yield type
           CheckTypeEquality(init_type, yield_type, "ForStmt", "iter_arg[" + std::to_string(i) + "] initValue",
@@ -486,10 +582,24 @@ void TypeChecker::VisitStmt_(const WhileStmtPtr& op) {
           if (!iter_arg || !iter_arg->initValue_ || !yield_value || !return_var) continue;
 
           auto init_type = iter_arg->initValue_->GetType();
+          auto iter_type = iter_arg->GetType();
           auto yield_type = yield_value->GetType();
           auto return_type = return_var->GetType();
 
-          if (!init_type || !yield_type || !return_type) continue;
+          if (!init_type || !iter_type || !yield_type || !return_type) continue;
+
+          // The IterArg's declared type is the type visible to every use in the
+          // loop body. It must therefore agree with every boundary carrier, not
+          // merely rely on init/yield/return agreeing with one another.
+          CheckTypeEquality(iter_type, init_type, "WhileStmt",
+                            "iter_arg[" + std::to_string(i) + "] declared type",
+                            "iter_arg[" + std::to_string(i) + "] initValue", op->span_);
+          CheckTypeEquality(iter_type, yield_type, "WhileStmt",
+                            "iter_arg[" + std::to_string(i) + "] declared type",
+                            "yield value[" + std::to_string(i) + "]", op->span_);
+          CheckTypeEquality(iter_type, return_type, "WhileStmt",
+                            "iter_arg[" + std::to_string(i) + "] declared type",
+                            "return_var[" + std::to_string(i) + "]", op->span_);
 
           // Check initValue type == yield type
           CheckTypeEquality(init_type, yield_type, "WhileStmt",
@@ -546,16 +656,22 @@ void TypeChecker::VisitStmt_(const IfStmtPtr& op) {
         for (size_t i = 0; i < num_then_values; ++i) {
           const auto& then_value = then_yield->value_[i];
           const auto& else_value = else_yield->value_[i];
+          const auto& return_var = op->return_vars_[i];
 
-          if (!then_value || !else_value) continue;
+          if (!then_value || !else_value || !return_var) continue;
 
           auto then_type = then_value->GetType();
           auto else_type = else_value->GetType();
+          auto return_type = return_var->GetType();
 
-          if (!then_type || !else_type) continue;
+          if (!then_type || !else_type || !return_type) continue;
 
           CheckTypeEquality(then_type, else_type, "IfStmt", "then yield value[" + std::to_string(i) + "]",
                             "else yield value[" + std::to_string(i) + "]", op->span_);
+          CheckTypeEquality(then_type, return_type, "IfStmt", "then yield value[" + std::to_string(i) + "]",
+                            "return_var[" + std::to_string(i) + "]", op->span_);
+          CheckTypeEquality(else_type, return_type, "IfStmt", "else yield value[" + std::to_string(i) + "]",
+                            "return_var[" + std::to_string(i) + "]", op->span_);
         }
       }
     }
@@ -563,6 +679,77 @@ void TypeChecker::VisitStmt_(const IfStmtPtr& op) {
 
   // Continue with default traversal
   IRVisitor::VisitStmt_(op);
+}
+
+void TypeChecker::VisitVarLike_(const VarPtr& op) {
+  // Every Var/IterArg carries a declared type — including the LHS bindings of
+  // Submit results — so checking Var-like nodes covers all typed values without a
+  // separate Submit override.
+  if (op) CheckValidShape(op->GetType(), op->span_);
+  IRVisitor::VisitVarLike_(op);
+}
+
+void TypeChecker::VisitExpr_(const CallPtr& op) {
+  if (op) CheckValidShape(op->GetType(), op->span_);
+  IRVisitor::VisitExpr_(op);
+}
+
+void TypeChecker::CheckValidShape(const TypePtr& type, const Span& span) {
+  if (!type) return;
+
+  // Recurse into tuple element types (multi-value binds, Submit returns).
+  if (auto tuple_type = As<TupleType>(type)) {
+    for (const auto& sub : tuple_type->types_) {
+      CheckValidShape(sub, span);
+    }
+    return;
+  }
+
+  // Extract (valid_shape, shape) for whichever shaped view carries an explicit,
+  // non-empty valid_shape. An empty/absent valid_shape means "fully valid"
+  // (== shape) and needs no check.
+  const std::vector<ExprPtr>* valid = nullptr;
+  const std::vector<ExprPtr>* shape = nullptr;
+  const char* kind = nullptr;
+  if (auto tile_type = As<TileType>(type)) {
+    if (tile_type->tile_view_.has_value() && !tile_type->tile_view_->valid_shape.empty()) {
+      valid = &tile_type->tile_view_->valid_shape;
+      shape = &tile_type->shape_;
+      kind = "TileType";
+    }
+  } else if (auto tensor_type = AsTensorTypeLike(type)) {
+    if (tensor_type->tensor_view_.has_value() && !tensor_type->tensor_view_->valid_shape.empty()) {
+      valid = &tensor_type->tensor_view_->valid_shape;
+      shape = &tensor_type->shape_;
+      kind = type->GetKind() == ObjectKind::DistributedTensorType ? "DistributedTensorType" : "TensorType";
+    }
+  }
+  if (valid == nullptr) return;
+
+  // rank(valid_shape) must equal rank(shape).
+  if (valid->size() != shape->size()) {
+    std::ostringstream msg;
+    msg << kind << " valid_shape rank (" << valid->size() << ") does not match shape rank (" << shape->size()
+        << ")";
+    RecordError(typecheck::ErrorType::SHAPE_DIMENSION_MISMATCH, msg.str(), span);
+    return;
+  }
+
+  // Per-dim bound: 0 <= valid_shape[i] <= shape[i]. Reject every relation the
+  // shared arithmetic analyzer can disprove; genuinely unknown symbolic bounds
+  // remain supported and defer to runtime.
+  auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, span);
+  for (size_t i = 0; i < valid->size(); ++i) {
+    const ProofResult non_negative = ProveValidExtentLessEqual(zero, (*valid)[i]);
+    const ProofResult within_shape = ProveValidExtentLessEqual((*valid)[i], (*shape)[i]);
+    if (non_negative == ProofResult::kFalse || within_shape == ProofResult::kFalse) {
+      std::ostringstream msg;
+      msg << kind << " valid_shape[" << i
+          << "] is provably out of bounds: it must satisfy 0 <= " << PythonPrint((*valid)[i])
+          << " <= " << PythonPrint((*shape)[i]);
+      RecordError(typecheck::ErrorType::SHAPE_VALUE_MISMATCH, msg.str(), span);
+    }
+  }
 }
 
 }  // namespace
@@ -586,6 +773,15 @@ class TypeCheckPropertyVerifierImpl : public PropertyVerifier {
 
       // Create type checker and run checking
       TypeChecker checker(diagnostics);
+
+      // Enforce the standing valid_shape invariant on parameter and return
+      // types too — the body walk below only reaches Var/Call types.
+      for (const auto& param : func->params_) {
+        if (param) checker.CheckValidShape(param->GetType(), param->span_);
+      }
+      for (const auto& rt : func->return_types_) {
+        checker.CheckValidShape(rt, func->span_);
+      }
 
       // Visit function body
       if (func->body_) {

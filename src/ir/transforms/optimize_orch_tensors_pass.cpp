@@ -9,12 +9,9 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include <algorithm>
-#include <any>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -23,10 +20,8 @@
 #include <utility>
 #include <vector>
 
-#include "pypto/codegen/orchestration/orchestration_analysis.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
-#include "pypto/ir/arith/analyzer.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -39,10 +34,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
-#include "pypto/ir/transforms/structural_comparison.h"
-#include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
-#include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/transforms/utils/window_externalization.h"
@@ -1264,7 +1256,9 @@ class AssembleParentStridesOptimizer {
         std::vector<ExprPtr> strides(full_strides.end() - static_cast<std::ptrdiff_t>(out_rank),
                                      full_strides.end());
 
-        TensorView view(std::move(strides), TensorLayout::ND);
+        TensorView view = tensor_type->tensor_view_.value_or(TensorView{});
+        view.stride = std::move(strides);
+        view.layout = TensorLayout::ND;
         auto new_type = std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_,
                                                      tensor_type->memref_, std::move(view));
         auto new_param = std::make_shared<Var>(func->params_[opm.param_index]->name_hint_, new_type,
@@ -1830,7 +1824,9 @@ class SliceInputStridesOptimizer {
         std::vector<ExprPtr> strides(full_strides.end() - static_cast<std::ptrdiff_t>(in_rank),
                                      full_strides.end());
 
-        TensorView view(std::move(strides), TensorLayout::ND);
+        TensorView view = tensor_type->tensor_view_.value_or(TensorView{});
+        view.stride = std::move(strides);
+        view.layout = TensorLayout::ND;
         auto new_type = std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_,
                                                      tensor_type->memref_, std::move(view));
         auto new_param = std::make_shared<Var>(func->params_[param_idx]->name_hint_, new_type,

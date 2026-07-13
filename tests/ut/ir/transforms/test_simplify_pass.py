@@ -802,6 +802,77 @@ class TestScalarConstantPropagation:
 
 
 # ============================================================================
+# DistributedTensorType metadata
+# ============================================================================
+
+
+def test_simplify_distributed_tensor_metadata_preserves_dtt_only_fields():
+    """DTT metadata expressions simplify without degrading the type to TensorType."""
+    span = ir.Span.unknown()
+
+    def const(value: int) -> ir.ConstInt:
+        return ir.ConstInt(value, ir.DataType.INDEX, span)
+
+    def plus_zero(value: int) -> ir.Expr:
+        return ir.Add(const(value), const(0), ir.DataType.INDEX, span)
+
+    def const_values(exprs: list[ir.Expr]) -> list[int]:
+        assert all(isinstance(expr, ir.ConstInt) for expr in exprs)
+        return [expr.value for expr in exprs if isinstance(expr, ir.ConstInt)]
+
+    mem_base = ir.Var("mem", ir.PtrType(), span)
+    memref = ir.MemRef(mem_base, 0, 128, span)
+    tensor_view = ir.TensorView(
+        stride=[plus_zero(1), plus_zero(4)],
+        layout=ir.TensorLayout.DN,
+        valid_shape=[plus_zero(3), plus_zero(8)],
+        pad=ir.PadValue.min,
+    )
+    viewed_type = ir.DistributedTensorType(
+        [plus_zero(4), plus_zero(8)], ir.DataType.FP32, memref, tensor_view
+    )
+
+    window_base = ir.Var("window", ir.PtrType(), span)
+    window = ir.WindowBuffer(window_base, const(256), span=span)
+    window_type = ir.DistributedTensorType([plus_zero(16)], ir.DataType.FP16, window)
+
+    viewed_call = ir.Call(ir.Op("test.viewed_dtt"), [], viewed_type, span)
+    window_call = ir.Call(ir.Op("test.window_dtt"), [], window_type, span)
+    body = ir.SeqStmts([ir.EvalStmt(viewed_call, span), ir.EvalStmt(window_call, span)], span)
+    before = ir.Program([ir.Function("main", [], [], body, span)], "SimplifyDTT", span)
+
+    # A concrete WindowBuffer is deliberately not representable in source type
+    # annotations. Keep structural pass verification, but omit the printer
+    # roundtrip instrument for this post-materialization IR state.
+    with passes.PassContext([], passes.VerificationLevel.BASIC):
+        after = passes.simplify()(before)
+
+    func_after = after.get_function("main")
+    assert func_after is not None
+    assert isinstance(func_after.body, ir.SeqStmts)
+    viewed_stmt = func_after.body.stmts[0]
+    window_stmt = func_after.body.stmts[1]
+    assert isinstance(viewed_stmt, ir.EvalStmt)
+    assert isinstance(window_stmt, ir.EvalStmt)
+    viewed_after = viewed_stmt.expr.type
+    window_after = window_stmt.expr.type
+
+    assert isinstance(viewed_after, ir.DistributedTensorType)
+    assert const_values(list(viewed_after.shape)) == [4, 8]
+    assert viewed_after.memref is memref
+    assert viewed_after.window_buffer is None
+    assert viewed_after.tensor_view is not None
+    assert const_values(list(viewed_after.tensor_view.valid_shape)) == [3, 8]
+    assert const_values(list(viewed_after.tensor_view.stride)) == [1, 4]
+    assert viewed_after.tensor_view.layout == ir.TensorLayout.DN
+    assert viewed_after.tensor_view.pad == ir.PadValue.min
+
+    assert isinstance(window_after, ir.DistributedTensorType)
+    assert const_values(list(window_after.shape)) == [16]
+    assert window_after.window_buffer is window
+
+
+# ============================================================================
 # Scalar dead-code elimination (conservative — preserves Call-RHS assigns)
 # ============================================================================
 

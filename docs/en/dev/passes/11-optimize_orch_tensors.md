@@ -101,6 +101,8 @@ inside the loop body are not folded this way.
 
 This pass intentionally keeps window eligibility conservative. It does not special-case operator names such as `topk`; a tensor is windowed only when the callee body proves the access pattern below.
 
+A parameter with an explicit partial `valid_shape` stays on the full-tensor baseline. Localizing that origin-anchored box requires the call-site window offset (`clamp(parent_valid - offset, 0, window)`); the current cloned-callee type rewrite has only the window shape, so it must not replace a partial contract with a fully-valid window.
+
 Supported rewrite shapes:
 
 - `FinalStore`: the callee returns the result of a final `tile.store(...)` into one local window

@@ -2765,12 +2765,22 @@ class TestTopDownRetargeter:
                     seed: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.tile.fillpad(
                         base, pad_value=pl.PadValue.max
                     )
-                    phi: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.yield_(seed)
+                    phi: pl.Tile[
+                        [64, 64],
+                        pl.FP32,
+                        pl.Mem.Vec,
+                        pl.TileView(pad=pl.PadValue.max),
+                    ] = pl.yield_(seed)
                 else:
                     acc: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.tile.fillpad_inplace(
                         prev, pad_value=pl.PadValue.max
                     )
-                    phi: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.yield_(acc)
+                    phi: pl.Tile[
+                        [64, 64],
+                        pl.FP32,
+                        pl.Mem.Vec,
+                        pl.TileView(pad=pl.PadValue.max),
+                    ] = pl.yield_(acc)
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(phi, [0, 0], out)
                 return result
 
@@ -3258,12 +3268,24 @@ class TestStructuralShapeEquality:
 
         tile_a = ir.Var(
             "tile_a",
-            ir.TileType([add_1, c64], DataType.FP32, memref_a, memory_space=ir.MemorySpace.Vec),
+            ir.TileType(
+                [c64, c64],
+                DataType.FP32,
+                memref_a,
+                ir.TileView(valid_shape=[add_1, c64]),
+                ir.MemorySpace.Vec,
+            ),
             span,
         )
         tile_b = ir.Var(
             "tile_b",
-            ir.TileType([add_2, c64], DataType.FP32, memref_b, memory_space=ir.MemorySpace.Vec),
+            ir.TileType(
+                [c64, c64],
+                DataType.FP32,
+                memref_b,
+                ir.TileView(valid_shape=[add_2, c64]),
+                ir.MemorySpace.Vec,
+            ),
             span,
         )
         store_a = ir.Var("store_a", ir.TensorType([64, 64], DataType.FP32), span)
@@ -3271,13 +3293,21 @@ class TestStructuralShapeEquality:
 
         body = ir.SeqStmts(
             [
-                ir.AssignStmt(tile_a, tile.load(input_x, offsets=[0, 0], shapes=[64, 64]), span),
+                ir.AssignStmt(
+                    tile_a,
+                    tile.load(input_x, offsets=[0, 0], shapes=[64, 64], valid_shapes=[add_1, c64]),
+                    span,
+                ),
                 ir.AssignStmt(
                     store_a,
                     tile.store(tile_a, offsets=[0, 0], output_tensor=output_x),
                     span,
                 ),
-                ir.AssignStmt(tile_b, tile.load(input_x, offsets=[0, 0], shapes=[64, 64]), span),
+                ir.AssignStmt(
+                    tile_b,
+                    tile.load(input_x, offsets=[0, 0], shapes=[64, 64], valid_shapes=[add_2, c64]),
+                    span,
+                ),
                 ir.AssignStmt(
                     store_b,
                     tile.store(tile_b, offsets=[0, 0], output_tensor=output_x),

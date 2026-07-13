@@ -96,7 +96,15 @@ struct TileBufSignature {
       sig.slayout = tv.slayout;
       sig.fractal = tv.fractal;
       sig.pad = tv.pad;
-      if (tv.valid_shape.size() >= 1) {
+      if (tile_type.shape_.size() == 1 && tv.valid_shape.size() == 1) {
+        // Logical [N] tiles are PTO-physical [1, N]. The sole logical valid
+        // extent is therefore v_col, never v_row.
+        if (auto c0 = ir::As<ir::ConstInt>(tv.valid_shape[0])) {
+          sig.v_col = c0->value_;
+        } else if (tv.valid_shape[0]) {
+          sig.v_col_dynamic = true;
+        }
+      } else if (tv.valid_shape.size() >= 1) {
         if (auto c0 = ir::As<ir::ConstInt>(tv.valid_shape[0])) {
           sig.v_row = c0->value_;
         } else if (tv.valid_shape[0]) {
@@ -104,7 +112,7 @@ struct TileBufSignature {
           sig.v_row_dynamic = true;
         }
       }
-      if (tv.valid_shape.size() >= 2) {
+      if (tile_type.shape_.size() != 1 && tv.valid_shape.size() >= 2) {
         if (auto c1 = ir::As<ir::ConstInt>(tv.valid_shape[1])) {
           sig.v_col = c1->value_;
         } else if (tv.valid_shape[1]) {

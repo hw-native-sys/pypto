@@ -85,11 +85,10 @@ TypePtr DeduceTileRowExpandType(const std::vector<ExprPtr>& args,
   CHECK(result_dtype) << "The operator " << op_name << " requires compatible data types, but got "
                       << tile_type->dtype_.ToString() << " and " << row_type->dtype_.ToString();
 
-  // Output has the same shape as the main tile, inheriting pad and blayout from src0.
-  // Broadcast ops preserve the main tile's valid_shape (issue #1450; same class as #1370 for unary ops).
-  TileView tile_view;
-  tile_view.valid_shape = GetValidShape(tile_type);
-  InheritTileViewLayout(tile_view, tile_type);
+  // This is a true binary elementwise op: the vector's non-broadcast valid axis
+  // must agree with the target, and its explicit singleton must be provably valid.
+  TileView tile_view =
+      DeduceBroadcastElementwiseTileView(tile_shape, {tile_type, row_type}, args[0]->span_, op_name);
   return std::make_shared<TileType>(tile_shape, *result_dtype, std::nullopt, tile_view);
 }
 
@@ -114,10 +113,8 @@ TypePtr DeduceTileColExpandType(const std::vector<ExprPtr>& args,
   auto result_dtype = PromoteDataTypes(target_type->dtype_, col_type->dtype_);
   CHECK(result_dtype) << "The operator " << op_name << " requires compatible data types";
 
-  // Broadcast ops preserve the target tile's valid_shape (issue #1450; same class as #1370 for unary ops).
-  TileView tile_view;
-  tile_view.valid_shape = GetValidShape(target_type);
-  InheritTileViewLayout(tile_view, target_type);
+  TileView tile_view = DeduceBroadcastElementwiseTileView(target_type->shape_, {target_type, col_type},
+                                                          args[0]->span_, op_name);
   return std::make_shared<TileType>(target_type->shape_, *result_dtype, std::nullopt, tile_view);
 }
 
@@ -145,7 +142,7 @@ TypePtr DeduceTileExpandScalarType(const std::vector<ExprPtr>& args,
   // Broadcast ops preserve the target tile's valid_shape (issue #1450; same class as #1370 for unary ops).
   TileView tile_view;
   tile_view.valid_shape = GetValidShape(tile_type);
-  InheritTileViewLayout(tile_view, tile_type);
+  InheritFreshTileComputeLayout(tile_view, tile_type);
   return std::make_shared<TileType>(tile_type->shape_, *result_dtype, std::nullopt, tile_view);
 }
 

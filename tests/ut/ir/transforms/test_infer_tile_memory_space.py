@@ -81,6 +81,57 @@ class TestInferTileMemorySpaceKwargOps:
         After = passes.infer_tile_memory_space()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_load_default_vec_preserves_valid_shape(self):
+        """Adding the inferred target_memory must not widen a ragged load."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                x_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16], valid_shapes=[8, 12])
+                out_0: pl.Tensor[[16, 16], pl.FP32] = pl.store(x_tile, [0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(self, x: pl.Tensor[[16, 16], pl.FP32]) -> pl.Tensor[[16, 16], pl.FP32]:
+                out_0: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
+                return self.main_incore_0(x, out_0)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                x_tile: pl.Tile[
+                    [16, 16],
+                    pl.FP32,
+                    pl.MemorySpace.Vec,
+                    pl.TileView(valid_shape=[8, 12]),
+                ] = pl.load(
+                    x,
+                    [0, 0],
+                    [16, 16],
+                    valid_shapes=[8, 12],
+                    target_memory=pl.MemorySpace.Vec,
+                )
+                out_0: pl.Tensor[[16, 16], pl.FP32] = pl.store(x_tile, [0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(self, x: pl.Tensor[[16, 16], pl.FP32]) -> pl.Tensor[[16, 16], pl.FP32]:
+                out_0: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
+                return self.main_incore_0(x, out_0)
+
+        After = passes.infer_tile_memory_space()(Before)
+        ir.assert_structural_equal(After, Expected)
+
     def test_load_with_mat_kwarg(self):
         """tile.load(target_memory=Mat) -> Mat."""
 
@@ -952,20 +1003,20 @@ class TestInferTileMemorySpaceInheritOps:
             def main_incore_0(
                 self,
                 x: pl.Tensor[[16, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 64], pl.BF16]],
-            ) -> pl.Tensor[[16, 64], pl.BF16]:
+                out_0: pl.Out[pl.Tensor[[1, 1024], pl.BF16]],
+            ) -> pl.Tensor[[1, 1024], pl.BF16]:
                 x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(
                     x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
                 )
                 sliced: pl.Tile[[16, 64], pl.BF16] = pl.tile.slice(x_tile, [16, 64], [0, 0])
                 reshaped: pl.Tile[[1024], pl.BF16] = pl.tile.reshape(sliced, [1024])
-                out_0: pl.Tensor[[16, 64], pl.BF16] = pl.store(reshaped, [0, 0], out_0)
+                out_0: pl.Tensor[[1, 1024], pl.BF16] = pl.store(reshaped, [0, 0], out_0)
                 return out_0
 
             @pl.function
-            def main(self, x: pl.Tensor[[16, 128], pl.BF16]) -> pl.Tensor[[16, 64], pl.BF16]:
-                out_0: pl.Tensor[[16, 64], pl.BF16] = pl.create_tensor([16, 64], dtype=pl.BF16)
-                y: pl.Tensor[[16, 64], pl.BF16] = self.main_incore_0(x, out_0)
+            def main(self, x: pl.Tensor[[16, 128], pl.BF16]) -> pl.Tensor[[1, 1024], pl.BF16]:
+                out_0: pl.Tensor[[1, 1024], pl.BF16] = pl.create_tensor([1, 1024], dtype=pl.BF16)
+                y: pl.Tensor[[1, 1024], pl.BF16] = self.main_incore_0(x, out_0)
                 return y
 
         @pl.program
@@ -974,8 +1025,8 @@ class TestInferTileMemorySpaceInheritOps:
             def main_incore_0(
                 self,
                 x: pl.Tensor[[16, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 64], pl.BF16]],
-            ) -> pl.Tensor[[16, 64], pl.BF16]:
+                out_0: pl.Out[pl.Tensor[[1, 1024], pl.BF16]],
+            ) -> pl.Tensor[[1, 1024], pl.BF16]:
                 x_tile: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Mat] = pl.load(
                     x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
                 )
@@ -991,13 +1042,13 @@ class TestInferTileMemorySpaceInheritOps:
                     pl.MemorySpace.Vec,
                     pl.TileView(blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.row_major),
                 ] = pl.move(reshaped, target_memory=pl.MemorySpace.Vec)
-                out_0: pl.Tensor[[16, 64], pl.BF16] = pl.store(reshaped_V, [0, 0], out_0)
+                out_0: pl.Tensor[[1, 1024], pl.BF16] = pl.store(reshaped_V, [0, 0], out_0)
                 return out_0
 
             @pl.function
-            def main(self, x: pl.Tensor[[16, 128], pl.BF16]) -> pl.Tensor[[16, 64], pl.BF16]:
-                out_0: pl.Tensor[[16, 64], pl.BF16] = pl.create_tensor([16, 64], dtype=pl.BF16)
-                y: pl.Tensor[[16, 64], pl.BF16] = self.main_incore_0(x, out_0)
+            def main(self, x: pl.Tensor[[16, 128], pl.BF16]) -> pl.Tensor[[1, 1024], pl.BF16]:
+                out_0: pl.Tensor[[1, 1024], pl.BF16] = pl.create_tensor([1, 1024], dtype=pl.BF16)
+                y: pl.Tensor[[1, 1024], pl.BF16] = self.main_incore_0(x, out_0)
                 return y
 
         After = passes.infer_tile_memory_space()(Before)

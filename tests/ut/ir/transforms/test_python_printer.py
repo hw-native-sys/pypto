@@ -325,11 +325,19 @@ class TestTileViewTensorViewPrinting:
         compile(printed, "<string>", "exec")  # must not raise SyntaxError
 
     def test_tensorview_always_emitted_when_present(self):
-        tensor_view = ir.TensorView()  # all-default fields
+        # A view that carries real information (a strictly-narrower valid_shape)
+        # survives canonicalization and must be emitted. An all-default view now
+        # collapses to the bare form under the unified valid_shape semantics
+        # (empty stride + ND + empty valid_shape + null pad == no view), so it is
+        # intentionally not distinguishable from a bare TensorType.
+        span = ir.Span.unknown()
+        tensor_view = ir.TensorView(
+            stride=[], layout=ir.TensorLayout.ND, valid_shape=[ir.ConstInt(32, DataType.INT64, span)]
+        )
         tensor_type = ir.TensorType([64], DataType.FP32, tensor_view=tensor_view)
 
         printed = ir.python_print_type(tensor_type)
-        assert "pl.TensorView()" in printed  # all-default fields must still be emitted
+        assert "pl.TensorView(" in printed  # a present (non-default) view is emitted
 
     def test_tileview_tensorview_parseable_by_type_resolver(self):
         span = ir.Span.unknown()
@@ -408,6 +416,32 @@ class TestDynVarAndSSARename:
         # No suffixed names
         assert "M_1" not in src
         assert "N_1" not in src
+
+    def test_dynamic_distributed_tensor_metadata_declared_and_roundtrips(self):
+        """DTT shape and TensorView metadata contribute free dynamic declarations."""
+        span = ir.Span.unknown()
+        shape_dim = ir.Var("DTT_SHAPE", ir.ScalarType(DataType.INDEX), span)
+        valid_dim = ir.Var("DTT_VALID", ir.ScalarType(DataType.INDEX), span)
+        stride_dim = ir.Var("DTT_STRIDE", ir.ScalarType(DataType.INDEX), span)
+        tensor_view = ir.TensorView(
+            stride=[stride_dim],
+            layout=ir.TensorLayout.ND,
+            valid_shape=[valid_dim],
+            pad=ir.PadValue.min,
+        )
+        distributed_type = ir.DistributedTensorType([shape_dim], DataType.FP32, None, tensor_view)
+        assert distributed_type.window_buffer is None
+        value = ir.Var("value", distributed_type, span)
+        func = ir.Function("main", [value], [distributed_type], ir.ReturnStmt([value], span), span)
+        program = ir.Program([func], "DynamicDTT", span)
+
+        src = program.as_python()
+
+        assert 'DTT_SHAPE = pl.dynamic("DTT_SHAPE")' in src
+        assert 'DTT_VALID = pl.dynamic("DTT_VALID")' in src
+        assert 'DTT_STRIDE = pl.dynamic("DTT_STRIDE")' in src
+        reparsed = pl.parse_program(src)
+        ir.assert_structural_equal(reparsed, program)
 
     def test_ssa_shadowed_vars_get_unique_names(self):
         @pl.program

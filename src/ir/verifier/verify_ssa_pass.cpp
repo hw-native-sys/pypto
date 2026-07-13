@@ -82,8 +82,8 @@ class SSAVerifier : public IRVisitor {
   /**
    * @brief Register function parameters and their type-embedded vars in the outermost scope
    *
-   * This includes dynamic shape variables referenced in parameter TensorType shapes
-   * (e.g., pl.Tensor[[M, N], pl.FP32] where M, N are pl.dynamic vars).
+   * This includes dynamic variables referenced in TensorType or
+   * DistributedTensorType shapes and tensor-view metadata.
    */
   void RegisterParams(const std::vector<VarPtr>& params) {
     for (const auto& param : params) {
@@ -118,13 +118,21 @@ class SSAVerifier : public IRVisitor {
   std::vector<std::unordered_set<const Var*>> scope_stack_ = {{}};
 
   /**
-   * @brief Register Var references found in a type (e.g., dynamic shape vars in TensorType)
+   * @brief Register Var references found in tensor-like shape and view metadata
    */
   void RegisterTypeVars(const TypePtr& type) {
     if (!type) return;
-    if (auto tensor_type = As<TensorType>(type)) {
+    if (auto tensor_type = AsTensorTypeLike(type)) {
       for (const auto& dim : tensor_type->shape_) {
         RegisterShapeExprVars(dim);
+      }
+      if (tensor_type->tensor_view_.has_value()) {
+        for (const auto& dim : tensor_type->tensor_view_->valid_shape) {
+          RegisterShapeExprVars(dim);
+        }
+        for (const auto& dim : tensor_type->tensor_view_->stride) {
+          RegisterShapeExprVars(dim);
+        }
       }
     }
   }

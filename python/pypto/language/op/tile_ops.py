@@ -305,6 +305,7 @@ def create(
     transpose: bool | None = None,
     *,
     flat_layout: bool | None = None,
+    valid_shape: Sequence[IntLike] | None = None,
 ) -> Tile:
     """Create a tile from a shape.
 
@@ -320,6 +321,10 @@ def create(
             than the boxed NZ layout Mat tiles normally carry. Requires
             ``target_memory=Mat`` and is mutually exclusive with ``transpose``.
             Default ``None`` keeps the canonical layout.
+        valid_shape: Keyword-only. Optional initially-valid sub-region of the tile
+            (each dim in ``[0, shape]``; ``0`` is allowed for an empty accumulator
+            whose valid region a later ``assemble`` union grows). When omitted, the
+            tile is fully valid (``valid_shape == shape``).
 
     Returns:
         Tile wrapping the create operation
@@ -332,6 +337,7 @@ def create(
         target_memory,
         transpose,
         flat_layout=flat_layout,
+        valid_shape=None if valid_shape is None else _normalize_intlike(valid_shape),
     )
     return Tile(expr=call_expr)
 
@@ -579,6 +585,10 @@ def aiv_shard(x: _SplitOperandT, span: Span | None = None) -> _SplitOperandT:
     lowered 1:1 to ``tile.aiv_shard`` at ConvertTensorToTileOps). The Tensor form
     is region-only. Distributed tensors are not supported.
 
+    The selected split axis must be provably fully valid. Partial validity may
+    be carried only on the non-split axis because one shared boundary type
+    cannot encode different lane-local prefix lengths.
+
     Args:
         x: Input operand (2D Tile or Tensor)
         span: Optional source span
@@ -604,6 +614,10 @@ def aic_gather(x: _SplitOperandT, span: Span | None = None) -> _SplitOperandT:
     or a high-level ``Tensor`` (``@pl.jit`` / ``pl.spmd`` form -> ``tensor.aic_gather``,
     lowered 1:1 to ``tile.aic_gather`` at ConvertTensorToTileOps). The Tensor form
     is region-only. Distributed tensors are not supported.
+
+    The selected split axis must be provably fully valid. Partial validity may
+    be carried only on the non-split axis because one shared boundary type
+    cannot encode different lane-local prefix lengths.
 
     Args:
         x: Input operand (2D Tile or Tensor)
@@ -1687,7 +1701,15 @@ def max(tile: Tile, axis: int, keepdim: bool = False) -> Tile: ...
 def max(tile: Scalar, axis: Scalar | int, keepdim: bool = False) -> Scalar: ...
 
 
-def max(tile: Tile | Scalar, axis: int | Scalar | Expr = 0, keepdim: bool = False) -> Tile | Scalar:
+@overload
+def max(tile: int, axis: Scalar | int, keepdim: bool = False) -> Scalar: ...
+
+
+def max(
+    tile: Tile | Scalar | int | Expr,
+    axis: int | Scalar | Expr = 0,
+    keepdim: bool = False,
+) -> Tile | Scalar:
     """Max reduction along specified axis, or scalar max of two values.
 
     Args:
@@ -1698,8 +1720,17 @@ def max(tile: Tile | Scalar, axis: int | Scalar | Expr = 0, keepdim: bool = Fals
     Returns:
         Tile or Scalar wrapping the max operation
     """
-    if isinstance(tile, Scalar):
-        return Scalar(expr=_ir_core.max_(tile.unwrap(), _scalar_operand_to_expr(axis)))
+    # Mirror ``min`` exactly: a scalar-max first operand may be a ``Scalar``, a
+    # bare ``int``, or a raw ``Expr`` (e.g. a ``ConstInt`` that the type-annotation
+    # printer emits for an assemble-union / clamp ``valid_shape`` such as
+    # ``pl.max(pl.const(0, pl.INDEX), tail)``). Restricting this to ``Scalar`` sent
+    # a ``ConstInt``-first ``max`` down the tile-reduction path, whose ``tile.unwrap()``
+    # then failed on the raw ``ConstInt`` — breaking DSL round-trip of a dynamic tile
+    # ``valid_shape``.
+    if isinstance(tile, (Scalar, int, Expr)):
+        lhs = _scalar_operand_to_expr(tile)
+        rhs = _scalar_operand_to_expr(axis)
+        return Scalar(expr=_ir_core.max_(lhs, rhs))
     call_expr = _ir_ops.max(tile.unwrap(), _axis_to_int(axis), keepdim)
     return Tile(expr=call_expr)
 
@@ -1746,6 +1777,8 @@ def slice(
     valid_shape: Sequence[IntLike] | None = None,
     drop_dims: Sequence[int | Expr] | None = None,
     pad_value: PadValue | int | float | None = None,
+    *,
+    clamp: bool = False,
 ) -> Tile:
     """Create a slice of a tile with static shape and optional valid shape.
 
@@ -1766,6 +1799,11 @@ def slice(
             the literal sugars ``0``, ``math.inf``, ``-math.inf`` (same
             spelling as :func:`tile.fillpad`). Only meaningful when
             ``valid_shape`` is smaller than ``shape``.
+        clamp: Keyword-only. When ``True``, clip the window to the source tile's valid region
+            (its physical shape when unset) at ``offset`` even for a fully-valid
+            source, deriving a ragged tail past the physical edge instead of
+            hand-threading it. Composes with the source-region intersect (single
+            ``min``); intersects an explicit ``valid_shape``.
 
     Returns:
         Tile wrapping the slice operation
@@ -1789,6 +1827,7 @@ def slice(
         normalized_valid_shape,
         drop_dims,
         pad_value=pad_value,
+        clamp=clamp,
     )
     return Tile(expr=call_expr)
 

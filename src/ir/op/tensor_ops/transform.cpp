@@ -33,8 +33,10 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -125,16 +127,31 @@ TypePtr DeduceTensorReshapeType(const std::vector<ExprPtr>& args,
                                       << " into shape with size " << new_product;
   }
 
-  // Return new TensorType with reshaped dimensions and same dtype
-  // If valid_shape is provided as 3rd argument, store it in TensorView
+  std::vector<ExprPtr> mapped_valid = ComputeReshapeValidShape(
+      GetValidShape(tensor_type), tensor_type->shape_, new_shape, args[0]->span_, "tensor.reshape");
+
+  // An explicit result valid_shape may narrow the mapped source region but may
+  // never claim data outside it. Validate both its physical bounds and the
+  // no-widening relation; unknown symbolic inequalities reject because reshape
+  // emits no runtime guard.
+  std::vector<ExprPtr> output_valid = mapped_valid;
   if (args.size() == 3) {
     auto valid_shape_tuple = As<MakeTuple>(args[2]);
     CHECK(valid_shape_tuple) << "tensor.reshape valid_shape (3rd argument) must be a MakeTuple";
-    TensorView tensor_view({}, TensorLayout::ND, valid_shape_tuple->elements_);
-    return std::make_shared<TensorType>(new_shape, tensor_type->dtype_, std::nullopt,
-                                        std::make_optional(std::move(tensor_view)));
+    output_valid = valid_shape_tuple->elements_;
+    ValidateValidShapeBounds(output_valid, new_shape, args[2]->span_, "tensor.reshape");
+    for (size_t i = 0; i < output_valid.size(); ++i) {
+      const ProofResult within_source = ProveValidExtentLessEqual(output_valid[i], mapped_valid[i]);
+      CHECK_SPAN(within_source == ProofResult::kTrue, args[2]->span_)
+          << "tensor.reshape: explicit valid_shape[" << i << "]=" << PythonPrint(output_valid[i])
+          << " is not provably within the source-derived extent " << PythonPrint(mapped_valid[i]);
+    }
   }
-  return std::make_shared<TensorType>(new_shape, tensor_type->dtype_);
+  const PadValue pad =
+      tensor_type->tensor_view_.has_value() ? tensor_type->tensor_view_->pad : PadValue::null;
+  TensorView tensor_view({}, TensorLayout::ND, std::move(output_valid), pad);
+  return std::make_shared<TensorType>(new_shape, tensor_type->dtype_, std::nullopt,
+                                      std::make_optional(std::move(tensor_view)));
 }
 
 TypePtr DeduceTensorTransposeType(const std::vector<ExprPtr>& args,
@@ -203,12 +220,10 @@ TypePtr DeduceTensorTransposeType(const std::vector<ExprPtr>& args,
 
   TensorLayout in_layout = TensorLayout::ND;
   PadValue pad = PadValue::null;
-  std::vector<ExprPtr> in_valid_shape;
   std::vector<ExprPtr> in_stride;
   if (tensor_type->tensor_view_.has_value()) {
     in_layout = tensor_type->tensor_view_->layout;
     pad = tensor_type->tensor_view_->pad;
-    in_valid_shape = tensor_type->tensor_view_->valid_shape;
     in_stride = tensor_type->tensor_view_->stride;
   }
   TensorLayout out_layout = in_layout;
@@ -226,22 +241,25 @@ TypePtr DeduceTensorTransposeType(const std::vector<ExprPtr>& args,
     std::swap(result_stride[axis1], result_stride[axis2]);
   }
 
-  // Carry forward valid_shape. Two cases differ in coordinate system:
-  //   - explicit 4th arg: already in the OUTPUT's coordinate system (user
-  //     supplies it for the transposed tensor), so use as-is. We also CHECK
-  //     that its rank matches the tensor rank to catch user errors early.
-  //   - inherited from input's tensor_view_: in the INPUT's coordinate system,
-  //     so swap at (axis1, axis2) to match the output shape.
-  std::vector<ExprPtr> valid_shape;
+  // Derive the maximum sound output valid box by swapping the input's effective
+  // valid_shape into output coordinates. An explicit 4th argument may narrow
+  // that box, but cannot widen it or exceed the physical output shape.
+  std::vector<ExprPtr> source_derived_valid = GetValidShape(tensor_type);
+  ValidateValidShapeBounds(source_derived_valid, input_shape, args[0]->span_, "tensor.transpose");
+  std::swap(source_derived_valid[axis1], source_derived_valid[axis2]);
+
+  std::vector<ExprPtr> valid_shape = source_derived_valid;
   if (args.size() == 4) {
     auto valid_shape_tuple = As<MakeTuple>(args[3]);
     CHECK(valid_shape_tuple) << "tensor.transpose valid_shape (4th argument) must be a MakeTuple";
     valid_shape = valid_shape_tuple->elements_;
-    CHECK(valid_shape.size() == ndim) << "tensor.transpose: valid_shape rank (" << valid_shape.size()
-                                      << ") must match tensor rank (" << ndim << ")";
-  } else if (!in_valid_shape.empty()) {
-    valid_shape = std::move(in_valid_shape);
-    std::swap(valid_shape[axis1], valid_shape[axis2]);
+    ValidateValidShapeBounds(valid_shape, new_shape, args[3]->span_, "tensor.transpose");
+    for (size_t i = 0; i < valid_shape.size(); ++i) {
+      const ProofResult within_source = ProveValidExtentLessEqual(valid_shape[i], source_derived_valid[i]);
+      CHECK_SPAN(within_source == ProofResult::kTrue, args[3]->span_)
+          << "tensor.transpose: explicit valid_shape[" << i << "]=" << PythonPrint(valid_shape[i])
+          << " is not provably within the source-derived extent " << PythonPrint(source_derived_valid[i]);
+    }
   }
 
   // Attach a TensorView whenever any non-default field needs to travel with
@@ -458,7 +476,10 @@ TypePtr DeduceTensorConcatType(const std::vector<ExprPtr>& args,
     out_shape.push_back(std::make_shared<Add>(t0->shape_[1], t1->shape_[1], DataType::INDEX, args[0]->span_));
   }
 
-  return std::make_shared<TensorType>(out_shape, t0->dtype_);
+  std::vector<ExprPtr> out_valid = ComputeConcatValidShape(
+      t0->shape_, GetValidShape(t0), t1->shape_, GetValidShape(t1), args[0]->span_, "tensor.concat");
+  return std::make_shared<TensorType>(out_shape, t0->dtype_, std::nullopt,
+                                      MakeFreshTensorResultView(std::move(out_valid)));
 }
 
 REGISTER_OP("tensor.concat")

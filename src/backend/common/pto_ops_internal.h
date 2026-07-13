@@ -22,6 +22,7 @@
  * (defined in pto_ops_shared.cpp).
  */
 
+#include <cstddef>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -32,7 +33,6 @@
 #include "pypto/codegen/codegen_base.h"
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/codegen/pto/pto_type_utils.h"
-#include "pypto/core/dtype.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/type.h"
 
@@ -64,10 +64,8 @@ std::vector<std::string> GetIndexOffsetCodes(const std::vector<ir::ExprPtr>& exp
                                              codegen::PTOCodegen& codegen);
 std::vector<std::string> GetDimStrings(const std::vector<ir::ExprPtr>& exprs);
 std::vector<std::string> GetSizeCodes(const std::vector<ir::ExprPtr>& exprs, codegen::PTOCodegen& codegen);
-bool ExprsEquivalentForSubview(const ir::ExprPtr& lhs, const ir::ExprPtr& rhs);
-codegen::TileTypeComponents InferSubviewTileTypeComponents(const ir::TileType& source_tile_type,
+codegen::TileTypeComponents InferSubviewTileTypeComponents(const ir::TileType& result_tile_type,
                                                            const ir::MakeTuple& shape_tuple,
-                                                           const ir::MakeTuple& offset_tuple,
                                                            const std::string& dtype_str);
 std::string EmitPartitionViewPTO(const std::string& name_hint, const std::string& tensor_view,
                                  const std::string& tensor_view_type, const std::string& partition_type,

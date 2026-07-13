@@ -176,14 +176,8 @@ def test_aiv_shard_rejects_odd_split_axis():
         ir.create_op_call("tile.aiv_shard", [tile_var], {"split": 1}, span)
 
 
-def test_aiv_shard_allows_even_physical_with_odd_valid_shape():
-    """The even-extent guard applies to the physical split axis, not a partial valid_shape.
-
-    A tile whose physical split extent is even (16) but whose valid_shape is an odd
-    partial (15) must be accepted; the result valid_shape is ceil-halved (8) and stays
-    consistent with the halved physical extent (8). Per-lane valid localization happens
-    later at lowering time, which knows the subblock index.
-    """
+def test_aiv_shard_rejects_partial_split_axis_valid_shape():
+    """A shared boundary type cannot encode different lane-local valid extents."""
     span = ir.Span.unknown()
     tile_view = ir.TileView(
         valid_shape=[ir.ConstInt(13, DataType.INDEX, span), ir.ConstInt(128, DataType.INDEX, span)]
@@ -191,19 +185,27 @@ def test_aiv_shard_allows_even_physical_with_odd_valid_shape():
     tile_type = ir.TileType([16, 128], DataType.FP32, memref=None, tile_view=tile_view, memory_space=None)
     tile_var = ir.Var("t", tile_type, span)
 
-    # Physical extent 16 is even, so the shard is accepted even though valid (13) is odd.
+    with pytest.raises(ValueError, match="split-axis valid extent must be provably equal"):
+        ir.create_op_call("tile.aiv_shard", [tile_var], {"split": 1}, span)
+
+
+def test_split_reshape_preserves_partial_non_split_axis():
+    """Validity on an axis replicated identically across both lanes remains representable."""
+    span = ir.Span.unknown()
+    tile_view = ir.TileView(
+        valid_shape=[ir.ConstInt(16, DataType.INDEX, span), ir.ConstInt(80, DataType.INDEX, span)]
+    )
+    tile_var = ir.Var(
+        "t",
+        ir.TileType([16, 128], DataType.FP32, memref=None, tile_view=tile_view, memory_space=None),
+        span,
+    )
+
     sharded = ir.create_op_call("tile.aiv_shard", [tile_var], {"split": 1}, span)
-    sharded_type = sharded.type
-    assert isinstance(sharded_type, ir.TileType)
-    assert sharded_type.shape == [8, 128]
-    # Result valid (7 = ceil(13/2)) differs from the halved physical (8), so the view is observable.
-    assert sharded_type.tile_view is not None
-    valid_0 = sharded_type.tile_view.valid_shape[0]
-    valid_1 = sharded_type.tile_view.valid_shape[1]
-    assert isinstance(valid_0, ir.ConstInt)
-    assert isinstance(valid_1, ir.ConstInt)
-    assert valid_0.value == 7  # ceil(13 / 2)
-    assert valid_1.value == 128
+    assert isinstance(sharded.type, ir.TileType)
+    assert sharded.type.shape == [8, 128]
+    assert sharded.type.tile_view is not None
+    assert sharded.type.tile_view.valid_shape == [8, 80]
 
 
 def test_split_reshape_halves_dynamic_physical_extent_symbolically():
@@ -225,22 +227,32 @@ def test_split_reshape_halves_dynamic_physical_extent_symbolically():
     assert gathered.type.shape[0] is not n  # symbolic n * 2
 
 
-def test_split_reshape_halves_dynamic_valid_shape_symbolically():
-    """A dynamic split-axis valid_shape is reshaped symbolically instead of
-    passing through unchanged (the static physical extent is still halved)."""
+def test_split_reshape_rejects_unknown_dynamic_split_axis_valid_shape():
+    """Unknown equality is rejected because no runtime lane-local guard is emitted."""
     span = ir.Span.unknown()
     valid_n = ir.Var("valid_n", ir.ScalarType(DataType.INDEX), span)
     tile_view = ir.TileView(valid_shape=[valid_n, ir.ConstInt(128, DataType.INDEX, span)])
     tile_type = ir.TileType([16, 128], DataType.FP32, memref=None, tile_view=tile_view, memory_space=None)
     tile_var = ir.Var("t", tile_type, span)
 
-    sharded = ir.create_op_call("tile.aiv_shard", [tile_var], {"split": 1}, span)
-    assert isinstance(sharded.type, ir.TileType)
-    assert sharded.type.shape == [8, 128]  # static physical still halved
-    assert sharded.type.tile_view is not None
-    valid_0 = sharded.type.tile_view.valid_shape[0]
-    assert not isinstance(valid_0, ir.ConstInt)  # symbolic ceil-div
-    assert valid_0 is not valid_n  # transformed, not an identity passthrough
+    with pytest.raises(ValueError, match="symbolic equality cannot be proven"):
+        ir.create_op_call("tile.aiv_shard", [tile_var], {"split": 1}, span)
+
+
+def test_aic_gather_rejects_partial_split_axis_valid_shape():
+    """Gather cannot recover one global prefix from one shared partial-half type."""
+    span = ir.Span.unknown()
+    tile_view = ir.TileView(
+        valid_shape=[ir.ConstInt(5, DataType.INDEX, span), ir.ConstInt(128, DataType.INDEX, span)]
+    )
+    tile_var = ir.Var(
+        "t",
+        ir.TileType([8, 128], DataType.FP32, memref=None, tile_view=tile_view, memory_space=None),
+        span,
+    )
+
+    with pytest.raises(ValueError, match="split-axis valid extent must be provably equal"):
+        ir.create_op_call("tile.aic_gather", [tile_var], {"split": 1}, span)
 
 
 def test_aic_gather_allows_odd_split_axis():
@@ -340,11 +352,8 @@ def test_tensor_aiv_shard_rejects_odd_split_axis():
         ir.create_op_call("tensor.aiv_shard", [tensor_var], {"split": 1}, span)
 
 
-def test_tensor_aiv_shard_allows_even_physical_with_odd_valid_shape():
-    """The even-extent guard applies to the physical split axis, not a partial valid_shape.
-
-    Mirrors the tile behavior: physical extent 16 (even) is accepted even though the
-    valid_shape (13) is odd; the result valid is ceil-halved (7)."""
+def test_tensor_aiv_shard_rejects_partial_split_axis_valid_shape():
+    """Tensor and tile split boundaries share the same fail-closed contract."""
     span = ir.Span.unknown()
     tensor_view = ir.TensorView(
         [],
@@ -354,16 +363,22 @@ def test_tensor_aiv_shard_allows_even_physical_with_odd_valid_shape():
     tensor_type = ir.TensorType([16, 128], DataType.FP32, None, tensor_view)
     tensor_var = ir.Var("t", tensor_type, span)
 
-    sharded = ir.create_op_call("tensor.aiv_shard", [tensor_var], {"split": 1}, span)
-    assert isinstance(sharded.type, ir.TensorType)
-    assert sharded.type.shape == [8, 128]
-    assert sharded.type.tensor_view is not None
-    valid_0 = sharded.type.tensor_view.valid_shape[0]
-    valid_1 = sharded.type.tensor_view.valid_shape[1]
-    assert isinstance(valid_0, ir.ConstInt)
-    assert isinstance(valid_1, ir.ConstInt)
-    assert valid_0.value == 7  # ceil(13 / 2)
-    assert valid_1.value == 128
+    with pytest.raises(ValueError, match="split-axis valid extent must be provably equal"):
+        ir.create_op_call("tensor.aiv_shard", [tensor_var], {"split": 1}, span)
+
+
+def test_tensor_aic_gather_rejects_partial_split_axis_valid_shape():
+    """Tensor gather also rejects an unrepresentable partial half."""
+    span = ir.Span.unknown()
+    tensor_view = ir.TensorView(
+        [],
+        ir.TensorLayout.ND,
+        [ir.ConstInt(5, DataType.INDEX, span), ir.ConstInt(128, DataType.INDEX, span)],
+    )
+    tensor_var = ir.Var("t", ir.TensorType([8, 128], DataType.FP32, None, tensor_view), span)
+
+    with pytest.raises(ValueError, match="split-axis valid extent must be provably equal"):
+        ir.create_op_call("tensor.aic_gather", [tensor_var], {"split": 1}, span)
 
 
 def test_tensor_split_reshape_halves_dynamic_extent_symbolically():

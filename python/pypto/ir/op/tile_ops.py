@@ -121,6 +121,7 @@ def create(
     span: Span | None = None,
     *,
     flat_layout: bool | None = None,
+    valid_shape: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
 ) -> Call:
     """Create a tile from a shape.
 
@@ -143,6 +144,10 @@ def create(
             counter slots must be contiguous. Default ``None`` keeps the
             canonical layout. Kept keyword-only so it does not shift ``span``'s
             positional slot for existing callers.
+        valid_shape: Keyword-only. Optional initially-valid sub-region of the tile
+            (each dim in ``[0, shape]``; ``0`` is allowed for an empty accumulator).
+            When omitted, the tile is fully valid (``valid_shape == shape``). Passed
+            as the op's optional 2nd positional argument.
 
     Returns:
         Call expression that returns a TileType with the created tile
@@ -154,7 +159,10 @@ def create(
         kwargs["transpose"] = transpose
     if flat_layout is not None:
         kwargs["flat_layout"] = flat_layout
-    return _ir_core.create_op_call("tile.create", [shape_tuple], kwargs, actual_span)
+    op_args: list[Expr] = [shape_tuple]
+    if valid_shape is not None:
+        op_args.append(_to_make_tuple(valid_shape, actual_span))
+    return _ir_core.create_op_call("tile.create", op_args, kwargs, actual_span)
 
 
 create_tile = create
@@ -2532,6 +2540,8 @@ def slice(
     drop_dims: Sequence[int | Expr] | None = None,
     pad_value: PadValue | int | float | None = None,
     span: Span | None = None,
+    *,
+    clamp: bool = False,
 ) -> Call:
     """Create a slice of a tile with static shape and optional valid shape.
 
@@ -2556,6 +2566,11 @@ def slice(
             the kwarg is not forwarded — the deducer defaults to
             ``PadValue.null``.
         span: Optional source span for debugging (auto-captured if not provided)
+        clamp: Keyword-only. When ``True``, clip the window to the source tile's valid region
+            (its physical shape when unset) at ``offset`` even for a fully-valid
+            source, so a ragged tail past the physical edge is derived rather than
+            hand-threaded. Composes with the source-region intersect (single
+            ``min``, no double-narrowing); intersects an explicit ``valid_shape``.
 
     Returns:
         Call expression creating a tile slice
@@ -2597,6 +2612,10 @@ def slice(
         # normalize the rest via the shared helper so numeric sugar and
         # validation match tile.fillpad exactly.
         kwargs["pad_value"] = pad_value if pad_value is PadValue.null else normalize_pad_value(pad_value)
+    # Only forward clamp when set, so a plain slice's IR stays byte-identical
+    # (the deducer defaults clamp to False).
+    if clamp:
+        kwargs["clamp"] = True
 
     return _ir_core.create_op_call("tile.slice", args, kwargs, actual_span)
 
@@ -2794,7 +2813,8 @@ def tpush_to_aic(tile: Expr, *, split: int, id: int | None = None, span: Span | 
 def aiv_shard(tile: Expr, *, split: int, span: Span | None = None) -> Call:
     """Shard a 2D tile into half along the split axis (full -> half).
 
-    The result is a TileType with the split axis halved.
+    The result is a TileType with the split axis halved. The split axis must be
+    provably fully valid; partial validity is supported only on the other axis.
 
     Args:
         tile: Input tile (TileType, 2D)
@@ -2808,7 +2828,9 @@ def aiv_shard(tile: Expr, *, split: int, span: Span | None = None) -> Call:
 def aic_gather(tile: Expr, *, split: int, span: Span | None = None) -> Call:
     """Gather a 2D tile into full along the split axis (half -> full).
 
-    Inverse of :func:`aiv_shard`: the result is a TileType with the split axis doubled.
+    Inverse of :func:`aiv_shard`: the result is a TileType with the split axis
+    doubled. The split axis must be provably fully valid; partial validity is
+    supported only on the other axis.
 
     Args:
         tile: Input tile (TileType, 2D)

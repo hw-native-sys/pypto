@@ -26,6 +26,7 @@
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
@@ -49,6 +50,12 @@ struct ConversionResult {
       : prologue{std::move(stmts)}, result{std::move(expr)} {}
 };
 
+/** Semantic context supplied by ConvertTensorToTileOps. */
+struct ConversionContext {
+  TypePtr expected_result_type;
+  std::optional<MemorySpace> requested_output_memory;
+};
+
 /**
  * @brief Signature for custom conversion functions
  *
@@ -60,6 +67,10 @@ struct ConversionResult {
 using ConversionFunc = std::function<ConversionResult(
     const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
     const Span& span)>;
+
+using ContextualConversionFunc = std::function<ConversionResult(
+    const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+    const ConversionContext& context, const Span& span)>;
 
 /**
  * @brief Per-input memory space requirement for a converter.
@@ -78,6 +89,7 @@ struct InputSpaceReq {
  */
 struct ConversionEntry {
   ConversionFunc func;
+  ContextualConversionFunc contextual_func;
   std::unordered_map<size_t, InputSpaceReq> input_reqs;  ///< Per-input space requirements (key = arg index)
 };
 
@@ -124,6 +136,10 @@ class OpConversionRegistry {
    */
   void RegisterCustom(const std::string& from_op, ConversionFunc func,
                       std::unordered_map<size_t, InputSpaceReq> input_reqs = {});
+
+  /** Register a conversion that consumes the source result contract. */
+  void RegisterContextual(const std::string& from_op, ContextualConversionFunc func,
+                          std::unordered_map<size_t, InputSpaceReq> input_reqs = {});
 
   /**
    * @brief Look up a conversion entry for an op

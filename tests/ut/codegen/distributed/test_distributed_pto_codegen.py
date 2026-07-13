@@ -43,8 +43,9 @@ import re
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
-from pypto import backend, codegen, ir
+from pypto import DataType, backend, codegen, ir
 from pypto.backend import BackendType
+from pypto.ir.builder import IRBuilder
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
 
@@ -819,6 +820,144 @@ def test_get_rank1_transfer_uses_full_slice_partition_view():
     assert "pto.comm.tget(" in mlir
     assert "!pto.partition_tensor_view<128xf32>" in mlir
     assert "func.call @CommRemoteOffset_f32" in mlir
+
+
+def test_mscatter_accepts_distributed_tensor_and_preserves_comm_context():
+    """``tile.mscatter`` accepts a DTT target and keeps its communication identity."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            src: pl.Tensor[[1, 16], pl.FP32],
+            indices: pl.Tensor[[1, 16], pl.INT32],
+            data: pld.DistributedTensor[[16, 64], pl.FP32],
+            out: pl.Tensor[[16, 64], pl.FP32],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            src_tile = pl.load(src, [0, 0], [1, 16])
+            index_tile = pl.load(indices, [0, 0], [1, 16])
+            data = pl.tile.mscatter(src_tile, index_tile, data)
+            remote = pld.tile.remote_load(data, peer=peer, offsets=[0, 0], shape=[16, 64])
+            pl.store(remote, [0, 0], out)
+
+    mlir = _generate_mlir(P)
+    assert "pto.mscatter" in mlir, mlir
+    assert "!pto.partition_tensor_view<16x64xf32>" in mlir, mlir
+    assert "func.call @CommRemoteOffset_f32" in mlir, mlir
+
+
+def test_if_carries_distributed_tensor_view_pointer_and_comm_context():
+    """A DTT merged by ``if`` remains usable by a cross-rank operation."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            src: pl.Tensor[[16, 64], pl.FP32],
+            data: pld.DistributedTensor[[16, 64], pl.FP32],
+            out: pl.Tensor[[16, 64], pl.FP32],
+            peer: pl.Scalar[pl.INT32],
+            cond: pl.Scalar[pl.BOOL],
+        ):
+            src_tile = pl.load(src, [0, 0], [16, 64])
+            if cond:
+                data = pl.store(src_tile, [0, 0], data)
+            remote = pld.tile.remote_load(data, peer=peer, offsets=[0, 0], shape=[16, 64])
+            pl.store(remote, [0, 0], out)
+
+    mlir = _generate_mlir(P)
+    assert "scf.if" in mlir, mlir
+    assert "pto.tstore" in mlir, mlir
+    assert "func.call @CommRemoteOffset_f32" in mlir, mlir
+
+
+def test_for_carries_distributed_tensor_view_pointer_and_comm_context():
+    """A DTT loop iter-arg/result remains usable by a cross-rank operation."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            src: pl.Tensor[[16, 64], pl.FP32],
+            data: pld.DistributedTensor[[16, 64], pl.FP32],
+            out: pl.Tensor[[16, 64], pl.FP32],
+            peer: pl.Scalar[pl.INT32],
+            count: pl.Scalar[pl.INDEX],
+        ):
+            src_tile = pl.load(src, [0, 0], [16, 64])
+            for _i, (data_iter,) in pl.range(count, init_values=(data,)):
+                updated = pl.store(src_tile, [0, 0], data_iter)
+                data_result: pld.DistributedTensor[[16, 64], pl.FP32] = pl.yield_(updated)
+            remote = pld.tile.remote_load(data_result, peer=peer, offsets=[0, 0], shape=[16, 64])
+            pl.store(remote, [0, 0], out)
+
+    mlir = _generate_mlir(P)
+    for_line = next(line for line in mlir.splitlines() if "scf.for" in line)
+    assert "iter_args(" not in for_line, for_line
+    assert "pto.tstore" in mlir, mlir
+    assert "func.call @CommRemoteOffset_f32" in mlir, mlir
+
+
+def test_zero_trip_for_alias_preserves_distributed_comm_context():
+    """Simplifying an empty DTT loop to a plain alias keeps its CommContext."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            data: pld.DistributedTensor[[16, 64], pl.FP32],
+            out: pl.Tensor[[16, 64], pl.FP32],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            for _i, (data_iter,) in pl.range(0, init_values=(data,)):
+                data_result: pld.DistributedTensor[[16, 64], pl.FP32] = pl.yield_(data_iter)
+            remote = pld.tile.remote_load(data_result, peer=peer, offsets=[0, 0], shape=[16, 64])
+            pl.store(remote, [0, 0], out)
+
+    mlir = _generate_mlir(P)
+    assert "scf.for" not in mlir, mlir
+    assert "func.call @CommRemoteOffset_f32" in mlir, mlir
+
+
+def test_while_carries_distributed_tensor_view_pointer_and_comm_context():
+    """A DTT while iter-arg/result remains usable by a cross-rank operation."""
+
+    # Build the already-lowered control-flow shape directly. This isolates the
+    # PTO WhileStmt binding from the unrelated Simplify/UseAfterDef pipeline.
+    span = ir.Span.unknown()
+    dist_type = ir.DistributedTensorType([16, 64], DataType.FP32)
+    ib = IRBuilder()
+    with ib.function("dtt_while", type=ir.FunctionType.InCore) as f:
+        data = f.param("data", dist_type)
+        _data_ctx = f.param("data_ctx", ir.CommCtxType.get())
+
+        data_iter = ir.IterArg("data_iter", dist_type, data, span)
+        data_result = ir.Var("data_result", dist_type, span)
+        ib.emit(
+            ir.WhileStmt(
+                ir.ConstBool(False, span),
+                [data_iter],
+                ir.YieldStmt([data_iter], span),
+                [data_result],
+                span,
+            )
+        )
+
+        ctx = ib.let("ctx", ir.create_op_call("pld.system.get_comm_ctx", [data_result], {}, span))
+        rank = ib.let("rank", ir.create_op_call("pld.system.rank", [ctx], {}, span))
+        f.return_type(ir.ScalarType(DataType.INT32))
+        ib.return_stmt(rank)
+
+    func = f.get_result()
+    mlir = codegen.PTOCodegen().generate(ir.Program([func], func.name, span))
+    assert "scf.while" in mlir, mlir
+    assert "pto.load_scalar" in mlir, mlir
+    assert "!pto.ptr<i64>" in mlir, mlir
 
 
 if __name__ == "__main__":

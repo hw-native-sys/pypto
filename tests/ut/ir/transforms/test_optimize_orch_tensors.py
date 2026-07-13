@@ -888,6 +888,64 @@ class TestSliceInputStrides:
         After = passes.optimize_orch_tensors()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_in_param_parent_stride_preserves_valid_shape(self):
+        """Parent-stride materialization must retain the sliced validity box."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                a: pl.Tensor[
+                    [32, 32],
+                    pl.FP32,
+                    pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[16, 24]),
+                ],
+                ret0__out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                a__tile: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
+                ret0__store: pl.Tensor[[32, 32], pl.FP32] = pl.store(a__tile, [0, 0], ret0__out)
+                return ret0__store
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                data: pl.Tensor[[128, 128], pl.FP32],
+                ret0__out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                chunk = pl.slice(data, [32, 32], [0, 0], valid_shape=[16, 24])
+                result: pl.Tensor[[32, 32], pl.FP32] = self.main_incore_0(chunk, ret0__out)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                a: pl.Tensor[
+                    [32, 32],
+                    pl.FP32,
+                    pl.TensorView(stride=[128, 1], layout=pl.TensorLayout.ND, valid_shape=[16, 24]),
+                ],
+                ret0__out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                a__tile: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
+                ret0__store: pl.Tensor[[32, 32], pl.FP32] = pl.store(a__tile, [0, 0], ret0__out)
+                return ret0__store
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                data: pl.Tensor[[128, 128], pl.FP32],
+                ret0__out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                chunk = pl.slice(data, [32, 32], [0, 0], valid_shape=[16, 24])
+                result: pl.Tensor[[32, 32], pl.FP32] = self.main_incore_0(chunk, ret0__out)
+                return result
+
+        After = passes.optimize_orch_tensors()(Before)
+        ir.assert_structural_equal(After, Expected)
+
     def test_3d_parent_in_param_gets_trailing_stride(self):
         """When parent tensor is 3D and input slice is 2D, only trailing strides are applied."""
 
@@ -908,7 +966,7 @@ class TestSliceInputStrides:
                 self,
                 data: pl.Tensor[[4, 128, 5120], pl.FP32],
             ) -> pl.Tensor[[16, 64], pl.FP32]:
-                chunk: pl.Tensor[[16, 64], pl.FP32] = pl.slice(data, [16, 64], [0, 0, 0])
+                chunk: pl.Tensor[[16, 64], pl.FP32] = pl.slice(data, [1, 16, 64], [0, 0, 0], drop_dims=[0])
                 ret0__out: pl.Tensor[[16, 64], pl.FP32] = pl.create_tensor([16, 64], dtype=pl.FP32)
                 result: pl.Tensor[[16, 64], pl.FP32] = self.proj_incore_0(chunk, ret0__out)
                 return result
@@ -935,7 +993,7 @@ class TestSliceInputStrides:
                 self,
                 data: pl.Tensor[[4, 128, 5120], pl.FP32],
             ) -> pl.Tensor[[16, 64], pl.FP32]:
-                chunk = pl.slice(data, [16, 64], [0, 0, 0])
+                chunk = pl.slice(data, [1, 16, 64], [0, 0, 0], drop_dims=[0])
                 ret0__out = pl.create_tensor(
                     [16, 64], dtype=pl.FP32
                 )
@@ -1338,6 +1396,48 @@ class Program:
             ) -> tuple[pl.Tensor[[32, 64], pl.FP32], pl.Tensor[[64, 128], pl.FP32]]:
                 row: pl.Scalar[pl.INDEX] = 32
                 return self.consume(score, row)
+
+        After = _run_windowized_to_optimize_orch_tensors(Before)
+
+        _assert_matches_non_windowized_baseline(Before, After)
+        assert After.get_function("consume__windowed") is None
+
+    def test_partial_input_validity_blocks_offset_blind_window_rewrite(self):
+        """A cloned window parameter must not be widened past its parent view."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(
+                self,
+                score: pl.Tensor[
+                    [64, 128],
+                    pl.FP32,
+                    pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[48, 128]),
+                ],
+            ) -> pl.Tensor[
+                [32, 64],
+                pl.FP32,
+                pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[16, 64]),
+            ]:
+                block = pl.tensor.slice(score, [32, 64], [32, 0])
+                return block
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                score: pl.Tensor[
+                    [64, 128],
+                    pl.FP32,
+                    pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[48, 128]),
+                ],
+            ) -> pl.Tensor[
+                [32, 64],
+                pl.FP32,
+                pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[16, 64]),
+            ]:
+                result = self.consume(score)
+                return result
 
         After = _run_windowized_to_optimize_orch_tensors(Before)
 

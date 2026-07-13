@@ -46,6 +46,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -179,6 +180,12 @@ static TypePtr DeduceTileScatterType(const std::vector<ExprPtr>& args,
         << src_cols->value_ << " vs indexes cols " << idx_cols->value_;
   }
 
+  // Indirect writes can touch arbitrary destination cells. A partial dst,
+  // source, or index tile cannot be mapped to a sound rectangular result.
+  CheckTileInputFullyValid(dst_type, op_name, "dst", args[0]->span_);
+  CheckTileInputFullyValid(src_type, op_name, "src", args[1]->span_);
+  CheckTileInputFullyValid(idx_type, op_name, "indexes", args[2]->span_);
+
   return MakeScatterResultType(dst_type);
 }
 
@@ -272,6 +279,9 @@ static TypePtr DeduceTileScatterMaskType(const std::vector<ExprPtr>& args,
         << "The operator " << op_name << " with mask_pattern=" << pattern << " requires dst.shape[1] ("
         << dst_cols_const->value_ << ") == src.shape[1] (" << src_cols_const->value_ << ") * " << stride;
   }
+
+  CheckTileInputFullyValid(dst_type, op_name, "dst", args[0]->span_);
+  CheckTileInputFullyValid(src_type, op_name, "src", args[1]->span_);
 
   return MakeScatterResultType(dst_type);
 }

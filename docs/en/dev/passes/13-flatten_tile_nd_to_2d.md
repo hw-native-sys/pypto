@@ -4,7 +4,7 @@ Flattens ND tile operations (3D+) to 2D in InCore functions by merging all dimen
 
 ## Overview
 
-PTO-ISA only accepts 2D tiles. After `ConvertTensorToTileOps`, tiles may have rank > 2 (matching tensor shapes). This pass flattens all >2D tile operations to 2D by merging higher axes into one dimension and keeping the last axis unchanged. For example, a tile `[2, 3, 4]` becomes `[6, 4]`.
+PTO-ISA tile buffers are exactly 2D. After `ConvertTensorToTileOps`, logical tiles may have rank > 2 (matching tensor shapes). This pass flattens all >2D tile operations to 2D by merging higher axes into one dimension and keeping the last axis unchanged. For example, a tile `[2, 3, 4]` becomes `[6, 4]`. Logical rank-1 tiles remain rank-1 in IR and codegen normalizes them to physical `[1, N]` buffers.
 
 For batched matrix multiplication, `ConvertTensorToTileOps` first preserves the
 high-level intent as `tile.batch_matmul` (or `tile.batch_matmul_acc` when an
@@ -20,6 +20,8 @@ legalization point that expands them into broadcast-aware per-batch
   and is preserved through the flatten (see [Dynamic valid_shape](#dynamic-tile-dimensions-issue-1578))
 - All tile reduce ops must reduce along the last axis
 - All tile memory must be contiguous
+- An N-D `tile.transpose_view` must be consumed exclusively as a batch-matmul operand;
+  a standalone zero-copy view cannot represent the required flattened permutation
 
 **When to use**: Run after `ConvertTensorToTileOps` and before `ExpandMixedKernel` / `InitMemRef`.
 
@@ -50,11 +52,12 @@ Per-statement handling:
 | Tile op | Transformation |
 | ------- | -------------- |
 | `tile.load` (>2D) | Change result type to 2D directly (load produces a 2D tile from a rank>2 tensor window) |
-| `tile.store` (rank>2 tensor) | Inject the original tensor-rank partition `shapes` as an extra 4th operand in the transformed IR so backend codegen can reconstruct the `partition_view`; the DSL source is unchanged. If the tile operand itself is still rank>2 (e.g. a user-written `tile.reshape` to 3D feeding `pl.assemble` into an N-D tensor view), insert a `tile.reshape` to flatten the tile operand to 2D first — the codegen requires a 2D tile while the original tile shape still flows through as the `shapes` partition operand |
+| `tile.store` (rank>2 tensor) | Inject an original-rank **valid partition** as an extra 4th operand in transformed IR so backend codegen can reconstruct `partition_view`; this is not the original physical `shapes`. It preserves the tile's effective validity from before flattening and prepends singleton axes only when that original tile rank is lower than the tensor rank. The DSL source is unchanged. If the tile operand itself is still rank>2 (for example, a user `tile.reshape` to 3D feeding `pl.assemble` into an N-D tensor view), first insert `tile.reshape` to flatten it to 2D |
 | `tile.store` (2D tensor) | Pass through unchanged |
 | `tile.create`/`tile.full` (>2D) | Rebuild with flattened 2D shape directly |
 | `tile.sum`/`tile.max`/`tile.min` (>2D) | Remap axis to 1 (last axis of 2D) |
 | `tile.transpose` | Sole owner of `pto.ttrans` scratch materialization. Arrives 3-arg (input, axis1, axis2). **2D**: create one scratch tile (shape = SOURCE page, in the input's memory space) and emit the codegen-ready 4-arg `tile.transpose(in, a1, a2, scratch)`. **>2D** (last-two-axes swap): unroll into per-batch 2D transposes, each a 4-arg form with scratch sliced from a flat `[batch*A, B]` pool, assembled into the merged 2D output. A batch-axis swap is a user error |
+| `tile.transpose_view` | A 2D view is unchanged. An N-D view is legal only on a chain consumed exclusively by `tile.batch_matmul[_acc]`, whose page extractor understands its column-batched representation; every standalone N-D use is rejected because a single 2D zero-copy transpose would change the logical permutation |
 | `tile.batch_matmul` | Expand to per-batch 2D `tile.matmul`, honoring batch broadcast. A b_trans/a_trans operand arrives as a zero-copy `tile.transpose_view` over a natural load (no transpose-at-load, no copy); the tile-level op carries no transpose semantic. Each operand is handled identically (see operand handling below) |
 | `tile.batch_matmul_acc` | Expand to per-batch 2D `tile.matmul_acc`, slicing the (already-flattened) accumulator per batch index. Memory-space decisions on the accumulator (Vec/Acc round-trips, retargetable producer promotion of an upstream `tile.create`, TileView refresh) are deferred to `InferTileMemorySpace` (pass 17) — flatten emits no inline `tile.move` |
 | Other tile ops (>2D) | Substitute vars, re-create with 2D types |
@@ -88,6 +91,19 @@ a capacity gate) **and** this operand's whole load collapses contiguously
     ND2NZ load; per batch each page is `[1, K0, N]` (contiguous) and collapses
     cleanly. This routing keeps the codegen contiguity guard from ever firing on
     a batch_matmul operand.
+
+Validity remains authoritative across staging: batch-matmul and transpose staging
+pools carry the flattened effective validity, and per-batch reloads/slices derive
+their page validity from the source window. A dynamic tail is therefore preserved
+instead of being reset to a full staged tile.
+
+The normal batch-matmul result still has to be representable as one contiguous
+flattened rectangle. There is one deliberate exception: when the immediately
+following statement stores that result, direct-store fusion emits one independent
+original-rank partition per batch page. Thus logical `[B, m<M, N]` is safely written
+as `B` partitions `[1, m, N]`, even though `[B, m, N]` would be strided and rejected
+as a single `[B*M, N]` tile. Each partition uses the page's effective M/N validity,
+never its physical capacity.
 
 **Dead-load elimination (per-batch only).** When an operand re-emits per-batch
 loads (capacity !fit or non-contiguous), the original whole load/view becomes
@@ -132,15 +148,17 @@ class After:
                       out_0: pl.Out[pl.Tensor[[2, 3, 4], pl.FP32]]) -> pl.Tensor[[2, 3, 4], pl.FP32]:
         x_tile: pl.Tile[[6, 4], pl.FP32] = pl.load(x, [0, 0, 0], [2, 3, 4])
         y_tile: pl.Tile[[6, 4], pl.FP32] = pl.tile.add(x_tile, x_tile)
-        out_0 = pl.store(y_tile, [0, 0, 0], out_0)
+        out_0 = pl.store(y_tile, [0, 0, 0], out_0, (2, 3, 4))
         return out_0
 ```
 
 The 3D tile `[2, 3, 4]` is flattened to `[6, 4]`. `tile.load` directly produces a 2D tile —
-no `tile.reshape` is inserted. `tile.store` accepts the 2D tile and writes to the original rank>2 tensor. For
-rank>2 tensors, the pass injects the original partition `shapes` as an extra 4th operand into the
-transformed IR (e.g. `pl.store(y_tile, [0, 0, 0], out_0, (2, 3, 4))`); this operand is only
-present in the transformed IR and is not part of the source DSL.
+no `tile.reshape` is inserted. `tile.store` accepts the 2D tile and writes to the original rank>2 tensor.
+For a rank>2 tensor, the pass injects an original-rank valid partition as a fourth operand. Here the
+tile's pre-flatten effective validity is `[2, 3, 4]`, so the partition remains `(2, 3, 4)`. Only a tile
+whose original rank is lower than the tensor rank is left-padded with singleton axes. This operand is
+transformed-IR metadata, not source DSL syntax; it happens to match the physical shape here because
+the original tile is fully valid.
 
 ## Dynamic tile dimensions (issue #1578)
 
@@ -167,6 +185,27 @@ Each per-chunk tile is physically `[1, CHUNK, 512]` (static) with a dynamic `val
 leading dims of `valid_shape` the same way `ComputeMergedShape` merges the physical shape, but tolerates
 dynamic entries, so the runtime tail survives the flatten instead of being reset to the full physical
 shape. The loop itself is the user's; the pass does **not** synthesize it.
+
+**Soundness precondition.** The merge is only valid when the ND valid region maps to a *contiguous*
+prefix of the flattened rows — the only thing `(valid_row, valid_col)` can express. Reading the row
+dims (all but the innermost) most-significant first, this holds when there is a single partially-valid
+"free" row dim: every row dim before it is pinned either by `valid == 1` or by
+`shape == 1`, and every row dim after it is fully valid (`valid == shape`). A
+physical unit axis with symbolic validity is safe: the standing bounds invariant
+restricts it to 0 or 1, so it only gates empty versus non-empty. The strip-mine
+case above satisfies the rule — the leading physical `1` pins its index and the
+middle `CHUNK` dim is free. A partially-valid *middle* dim below a non-unit outer
+dim (for example, physical `[2, 4, 8]` with valid `[2, 2, 8]`) yields a strided
+region and is rejected with `ValueError`; otherwise the product fold would mark
+batch-0 padding valid and real batch-1 data invalid.
+
+**Empty-region carve-out.** An *empty* valid region — any dim provably `0`, e.g. the
+`pl.create_tile(valid_shape=[0, 0, 0])` accumulator (D2's "nothing valid yet") — denotes the empty set,
+which is trivially a contiguous length-0 prefix. The pinning check above would otherwise mistake a
+provably empty dim for a partially-valid middle dim and reject with a misleading message, so it is
+skipped when any dim is `0`. The product fold then handles the empty
+region on its own: a zero row dim folds to `valid_row = 0` and a zero column dim to `valid_col = 0` —
+either way, zero valid elements.
 
 > The chunk must fit on-chip Vec (UB) memory (`CHUNK * <kept dims> * <live tile bytes> <= UB capacity`),
 > otherwise `AllocateMemoryAddr` rejects the kernel with a "Vec buffer usage exceeds platform limit"

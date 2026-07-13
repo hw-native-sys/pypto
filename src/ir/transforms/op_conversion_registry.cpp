@@ -35,6 +35,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/transforms/utils/tile_conversion_utils.h"
 #include "pypto/ir/type.h"
@@ -64,6 +65,98 @@ std::pair<int, int> DetectRowBroadcast(const std::vector<ExprPtr>& args) {
   if (rhs_is_col_vec) return {0, 1};
   if (lhs_is_col_vec) return {1, 0};
   return {-1, -1};
+}
+
+std::pair<std::vector<ExprPtr>, std::vector<ExprPtr>> GetExpectedTileShapeAndValid(
+    const ConversionContext& context, bool enforce_tile_rank_floor, const Span& span,
+    const std::string& op_name) {
+  auto expected = AsTensorTypeLike(context.expected_result_type);
+  INTERNAL_CHECK_SPAN(expected, span)
+      << op_name << " conversion requires a tensor-shaped expected result type";
+
+  std::vector<ExprPtr> shape = expected->shape_;
+  std::vector<ExprPtr> valid = GetValidShape(expected);
+  INTERNAL_CHECK_SPAN(valid.size() == shape.size(), span)
+      << op_name << " conversion: expected valid_shape rank " << valid.size()
+      << " does not match expected physical rank " << shape.size();
+
+  if (enforce_tile_rank_floor && shape.size() < 2) {
+    const size_t pad = 2 - shape.size();
+    for (size_t i = 0; i < pad; ++i) {
+      auto one = std::make_shared<ConstInt>(1, DataType::INDEX, span);
+      shape.insert(shape.begin(), one);
+      valid.insert(valid.begin(), one);
+    }
+  }
+  return {std::move(shape), std::move(valid)};
+}
+
+CallPtr RetypeTileCallFromExpectedTensor(const CallPtr& call, const ConversionContext& context,
+                                         bool enforce_tile_rank_floor, const Span& span,
+                                         const std::string& op_name) {
+  auto tile_type = As<TileType>(call->GetType());
+  INTERNAL_CHECK_SPAN(tile_type, span) << op_name << " conversion must produce a TileType";
+  auto expected = AsTensorTypeLike(context.expected_result_type);
+  INTERNAL_CHECK_SPAN(expected, span)
+      << op_name << " conversion requires a tensor-shaped expected result type";
+  auto [shape, valid] = GetExpectedTileShapeAndValid(context, enforce_tile_rank_floor, span, op_name);
+  INTERNAL_CHECK_SPAN(AreExprVectorsEqual(tile_type->shape_, shape), span)
+      << op_name << " conversion changed physical shape: expected " << FormatShape(shape) << ", got "
+      << FormatShape(tile_type->shape_);
+  INTERNAL_CHECK_SPAN(tile_type->dtype_ == expected->dtype_, span)
+      << op_name << " conversion changed dtype: expected " << expected->dtype_.ToString() << ", got "
+      << tile_type->dtype_.ToString();
+
+  TileView view = tile_view_semantics::GetEffectiveTileView(*tile_type);
+  view.valid_shape = std::move(valid);
+  view.pad = expected->tensor_view_.has_value() ? expected->tensor_view_->pad : PadValue::null;
+  auto expected_tile_type = std::make_shared<TileType>(std::move(shape), tile_type->dtype_, std::nullopt,
+                                                       std::move(view), tile_type->memory_space_);
+  return std::make_shared<Call>(call->op_, call->args_, call->kwargs_, call->attrs_, expected_tile_type,
+                                call->span_);
+}
+
+CallPtr RetypeTensorCallFromExpected(const CallPtr& call, const ConversionContext& context, const Span& span,
+                                     const std::string& op_name) {
+  auto inferred = AsTensorTypeLike(call->GetType());
+  INTERNAL_CHECK_SPAN(inferred, span) << op_name << " conversion must produce a tensor-shaped result";
+  auto expected = AsTensorTypeLike(context.expected_result_type);
+  INTERNAL_CHECK_SPAN(expected, span)
+      << op_name << " conversion requires a tensor-shaped expected result type";
+  INTERNAL_CHECK_SPAN(call->GetType()->GetKind() == context.expected_result_type->GetKind(), span)
+      << op_name << " conversion changed tensor kind: expected " << context.expected_result_type->TypeName()
+      << ", got " << call->GetType()->TypeName();
+  INTERNAL_CHECK_SPAN(AreExprVectorsEqual(inferred->shape_, expected->shape_), span)
+      << op_name << " conversion changed physical shape: expected " << FormatShape(expected->shape_)
+      << ", got " << FormatShape(inferred->shape_);
+  INTERNAL_CHECK_SPAN(inferred->dtype_ == expected->dtype_, span)
+      << op_name << " conversion changed dtype: expected " << expected->dtype_.ToString() << ", got "
+      << inferred->dtype_.ToString();
+
+  // A destination-preserving TensorOp may change value-semantic metadata even
+  // when its lower-level memory op returns the destination operand's old type.
+  // Keep the source TensorOp's already-verified result contract authoritative;
+  // this also retains DistributedTensor window identity and TensorView metadata.
+  return std::make_shared<Call>(call->op_, call->args_, call->kwargs_, call->attrs_,
+                                context.expected_result_type, call->span_);
+}
+
+std::vector<ExprPtr> RestoreDroppedUnitDims(const std::vector<ExprPtr>& result_valid,
+                                            const std::vector<int64_t>& drop_dims,
+                                            const std::vector<ExprPtr>& full_shape, const Span& span) {
+  INTERNAL_CHECK_SPAN(result_valid.size() + drop_dims.size() == full_shape.size(), span)
+      << "tensor.slice conversion: result valid_shape rank " << result_valid.size() << " plus "
+      << drop_dims.size() << " dropped dimensions does not match window rank " << full_shape.size();
+  std::vector<bool> dropped(full_shape.size(), false);
+  for (int64_t dim : drop_dims) dropped[static_cast<size_t>(dim)] = true;
+
+  std::vector<ExprPtr> restored;
+  restored.reserve(full_shape.size());
+  size_t result_index = 0;
+  for (size_t i = 0; i < full_shape.size(); ++i) {
+    restored.push_back(dropped[i] ? full_shape[i] : result_valid[result_index++]);
+  }
+  return restored;
 }
 
 }  // namespace
@@ -171,17 +264,27 @@ void OpConversionRegistry::RegisterBroadcastAndTransformOps() {
   RegisterSimple("tensor.col_expand_expdif", "tile.col_expand_expdif");
   RegisterSimple("tensor.expands", "tile.expands");
 
-  RegisterSimple("tensor.reshape", "tile.reshape");
+  RegisterContextual(
+      "tensor.reshape",
+      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+         const ConversionContext& context, const Span& span) -> ConversionResult {
+        INTERNAL_CHECK_SPAN(args.size() == 2 || args.size() == 3, span)
+            << "tensor.reshape conversion expects 2 or 3 args (input, shape[, valid_shape]), got "
+            << args.size();
+        auto& op_reg = OpRegistry::GetInstance();
+        auto reshape = op_reg.Create("tile.reshape", {args[0], args[1]}, kwargs, span);
+        return ConversionResult{
+            RetypeTileCallFromExpectedTensor(reshape, context, false, span, "tensor.reshape")};
+      });
 
   // tensor.transpose → tile.transpose(input, axis1, axis2). The pto.ttrans scratch is a pure
   // codegen detail, not a semantic operand: FlattenTileNdTo2D is the sole owner of scratch
   // materialization (it emits the codegen-ready 4-arg form for both 2D and per-page >2D
   // transposes, before the memory allocator runs). So the conversion emits no tmp here.
-  RegisterCustom(
+  RegisterContextual(
       "tensor.transpose",
       [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
-         const Span& span) -> ConversionResult {
-        // The optional 4th tensor-level arg is valid_shape; it has no tile-level equivalent.
+         const ConversionContext& context, const Span& span) -> ConversionResult {
         INTERNAL_CHECK_SPAN(args.size() == 3 || args.size() == 4, span)
             << "tensor.transpose conversion expects 3 or 4 args (input, axis1, axis2[, valid_shape]), got "
             << args.size();
@@ -192,8 +295,9 @@ void OpConversionRegistry::RegisterBroadcastAndTransformOps() {
             << "tensor.transpose conversion: input must be TileType after memory promotion, got "
             << input->GetType()->TypeName();
 
-        auto transpose_call = op_reg.Create("tile.transpose", {input, args[1], args[2]}, span);
-        return ConversionResult{{}, transpose_call};
+        auto transpose_call = op_reg.Create("tile.transpose", {input, args[1], args[2]}, kwargs, span);
+        return ConversionResult{
+            {}, RetypeTileCallFromExpectedTensor(transpose_call, context, false, span, "tensor.transpose")};
       });
 
   RegisterSimple("tensor.concat", "tile.concat");
@@ -269,25 +373,17 @@ void OpConversionRegistry::RegisterElementwiseBinaryOps() {
 
 void OpConversionRegistry::RegisterMemoryOps() {
   // tensor.slice → tile.load (gm_tensor) or tile.slice (local_tensor)
-  RegisterCustom(
+  RegisterContextual(
       "tensor.slice",
       [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
-         const Span& span) -> ConversionResult {
-        INTERNAL_CHECK_SPAN(args.size() == 3 || args.size() == 4, span)
-            << "tensor.slice conversion expects 3 or 4 args (tensor, shape, offset[, valid_shape])";
+         const ConversionContext& context, const Span& span) -> ConversionResult {
+        INTERNAL_CHECK_SPAN(args.size() >= 3 && args.size() <= 5, span)
+            << "tensor.slice conversion expects 3-5 args "
+               "(tensor, shape, offset[, valid_shape[, drop_dims]])";
         auto& op_reg = OpRegistry::GetInstance();
         const auto& input = args[0];
         const auto& shape = args[1];
         const auto& offset = args[2];
-
-        // Extract pad_value kwarg (if any) to forward to the emitted tile.slice.
-        std::vector<std::pair<std::string, std::any>> forward_kwargs;
-        for (const auto& kv : kwargs) {
-          if (kv.first == "pad_value") {
-            forward_kwargs.push_back(kv);
-            break;
-          }
-        }
 
         // ``AsTensorTypeLike`` matches both ``TensorType`` and
         // ``DistributedTensorType`` (issue #1694): inside an InCore scope a
@@ -299,24 +395,46 @@ void OpConversionRegistry::RegisterMemoryOps() {
         auto tile_type = As<TileType>(input->GetType());
 
         if (tensor_type) {
-          // The tile.load path does not currently accept pad_value. If the user set
-          // pad_value on a tensor.slice over a TensorType input, the pad intent is
-          // lost here — a follow-up tile.fillpad is the workaround until tile.load
-          // grows its own pad_value kwarg.
-          auto valid_shapes = (args.size() == 4) ? args[3] : shape;
-          std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec}};
+          auto shape_tuple = As<MakeTuple>(shape);
+          INTERNAL_CHECK_SPAN(shape_tuple, span) << "tensor.slice conversion requires a literal shape tuple";
+          auto expected = AsTensorTypeLike(context.expected_result_type);
+          INTERNAL_CHECK_SPAN(expected, span)
+              << "tensor.slice conversion requires a tensor-shaped expected result";
+
+          std::vector<int64_t> drop_dims;
+          if (args.size() == 5) {
+            drop_dims = ParseSliceDropDims(args[4], shape_tuple->elements_, "tensor.slice conversion");
+          }
+          auto load_valid =
+              RestoreDroppedUnitDims(GetValidShape(expected), drop_dims, shape_tuple->elements_, span);
+          auto valid_shapes = MakeShapeTuple(load_valid, span);
+          const MemorySpace target_memory = context.requested_output_memory.value_or(MemorySpace::Vec);
+          std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", target_memory}};
           auto load_call =
               op_reg.Create("tile.load", {input, offset, shape, valid_shapes}, load_kwargs, span);
-          return ConversionResult{load_call};
+
+          if (drop_dims.empty()) {
+            return ConversionResult{
+                RetypeTileCallFromExpectedTensor(load_call, context, false, span, "tensor.slice")};
+          }
+
+          auto load_var = std::make_shared<Var>("slice_full_rank", load_call->GetType(), span);
+          std::vector<StmtPtr> prologue = {std::make_shared<AssignStmt>(load_var, load_call, span)};
+          auto expected_shape_and_valid = GetExpectedTileShapeAndValid(context, true, span, "tensor.slice");
+          auto reshape_shape = MakeShapeTuple(expected_shape_and_valid.first, span);
+          auto reshape_call = op_reg.Create("tile.reshape", {load_var, reshape_shape}, span);
+          return ConversionResult{
+              std::move(prologue),
+              RetypeTileCallFromExpectedTensor(reshape_call, context, true, span, "tensor.slice")};
         }
 
         if (tile_type) {
-          std::vector<ExprPtr> slice_args = {input, shape, offset};
-          if (args.size() == 4) {
-            slice_args.push_back(args[3]);
-          }
-          auto slice_call = op_reg.Create("tile.slice", slice_args, forward_kwargs, span);
-          return ConversionResult{slice_call};
+          std::vector<ExprPtr> slice_args(args.begin(), args.end());
+          auto slice_call = op_reg.Create("tile.slice", slice_args, kwargs, span);
+          const bool drops_dimensions =
+              args.size() == 5 && As<MakeTuple>(args[4]) && !As<MakeTuple>(args[4])->elements_.empty();
+          return ConversionResult{
+              RetypeTileCallFromExpectedTensor(slice_call, context, drops_dimensions, span, "tensor.slice")};
         }
 
         INTERNAL_UNREACHABLE_SPAN(span)
@@ -325,10 +443,10 @@ void OpConversionRegistry::RegisterMemoryOps() {
       });
 
   // tensor.assemble → tile.store or tile.assemble depending on types
-  RegisterCustom(
+  RegisterContextual(
       "tensor.assemble",
       [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
-         const Span& span) -> ConversionResult {
+         const ConversionContext& context, const Span& span) -> ConversionResult {
         INTERNAL_CHECK_SPAN(args.size() == 3, span)
             << "tensor.assemble conversion expects 3 args (target, source, offset)";
         auto& op_reg = OpRegistry::GetInstance();
@@ -356,11 +474,14 @@ void OpConversionRegistry::RegisterMemoryOps() {
             "(a function output tensor), but this assemble targets an on-chip tile";
 
         if (source_tile_type && target_tensor_type) {
+          CallPtr store_call;
           if (atomic_add) {
             std::vector<std::pair<std::string, std::any>> store_kw = {{"atomic", atomic}};
-            return ConversionResult{op_reg.Create("tile.store", {source, offset, target}, store_kw, span)};
+            store_call = op_reg.Create("tile.store", {source, offset, target}, store_kw, span);
+          } else {
+            store_call = op_reg.Create("tile.store", {source, offset, target}, span);
           }
-          return ConversionResult{op_reg.Create("tile.store", {source, offset, target}, span)};
+          return ConversionResult{RetypeTensorCallFromExpected(store_call, context, span, "tensor.assemble")};
         }
 
         if (source_tile_type && target_tile_type) {
@@ -377,15 +498,118 @@ void OpConversionRegistry::RegisterMemoryOps() {
           INTERNAL_CHECK_SPAN(source_tensor_type, span)
               << "tensor.assemble: source must be TensorType, DistributedTensorType or TileType, but got "
               << source->GetType()->TypeName();
+          auto offset_tuple = As<MakeTuple>(offset);
+          INTERNAL_CHECK_SPAN(offset_tuple, span)
+              << "tensor.assemble conversion requires a literal offset tuple for tile staging";
+          const size_t target_rank = target_tile_type->shape_.size();
+          const size_t source_rank = source_tensor_type->shape_.size();
+          INTERNAL_CHECK_SPAN(source_rank <= target_rank && offset_tuple->elements_.size() == target_rank,
+                              span)
+              << "tensor.assemble conversion requires right-alignable source/target/offset ranks";
+
+          const std::vector<ExprPtr> source_valid = GetValidShape(source_tensor_type);
+          if (std::any_of(source_valid.begin(), source_valid.end(), [](const ExprPtr& extent) {
+                auto value = As<ConstInt>(extent);
+                return value && value->value_ == 0;
+              })) {
+            // A provably empty source writes nothing. Avoid manufacturing a
+            // zero-capacity staging tile merely to return the target unchanged.
+            return ConversionResult{target};
+          }
+
+          const size_t leading_dims = target_rank - source_rank;
+          std::vector<ExprPtr> aligned_source_shape;
+          std::vector<ExprPtr> aligned_source_valid;
+          aligned_source_shape.reserve(target_rank);
+          aligned_source_valid.reserve(target_rank);
+          for (size_t i = 0; i < leading_dims; ++i) {
+            auto one = std::make_shared<ConstInt>(1, DataType::INDEX, span);
+            aligned_source_shape.push_back(one);
+            aligned_source_valid.push_back(one);
+          }
+          aligned_source_shape.insert(aligned_source_shape.end(), source_tensor_type->shape_.begin(),
+                                      source_tensor_type->shape_.end());
+          aligned_source_valid.insert(aligned_source_valid.end(), source_valid.begin(), source_valid.end());
+
+          // A tile-to-tile assemble must fit the source's PHYSICAL subview. If
+          // the tensor allocation is larger than the destination window, stage
+          // only the remaining capacity while proving the tensor-valid transfer
+          // fits that smaller tile. This preserves tensor.assemble's valid-only
+          // transfer semantics without weakening tile.assemble's memory safety.
+          std::vector<ExprPtr> stage_shape = aligned_source_shape;
+          for (size_t i = 0; i < target_rank; ++i) {
+            ExprPtr physical_end = MakeAdd(offset_tuple->elements_[i], aligned_source_shape[i], span);
+            if (ProveValidExtentLessEqual(physical_end, target_tile_type->shape_[i]) == ProofResult::kTrue) {
+              continue;
+            }
+
+            auto target_extent = As<ConstInt>(target_tile_type->shape_[i]);
+            auto source_extent = As<ConstInt>(aligned_source_shape[i]);
+            auto offset_extent = As<ConstInt>(offset_tuple->elements_[i]);
+            CHECK_SPAN(target_extent && source_extent && offset_extent, span)
+                << "tensor.assemble conversion cannot derive a static staging capacity on dim " << i
+                << "; make the physical source window fit the tile target or use statically-known extents";
+            const int64_t available = target_extent->value_ - offset_extent->value_;
+            CHECK_SPAN(available > 0, span)
+                << "tensor.assemble conversion has no positive staging capacity on dim " << i;
+            const int64_t staged = std::min(source_extent->value_, available);
+            stage_shape[i] = std::make_shared<ConstInt>(staged, DataType::INDEX, span);
+            const ProofResult valid_fits = ProveValidExtentLessEqual(aligned_source_valid[i], stage_shape[i]);
+            CHECK_SPAN(valid_fits == ProofResult::kTrue, span)
+                << "tensor.assemble conversion cannot prove source valid extent "
+                << PythonPrint(aligned_source_valid[i]) << " fits staged capacity " << staged << " on dim "
+                << i;
+          }
+
+          std::vector<ExprPtr> load_shape(stage_shape.begin() + static_cast<std::ptrdiff_t>(leading_dims),
+                                          stage_shape.end());
           std::vector<StmtPtr> prologue;
-          auto offsets_load = MakeZeroOffsets(source_tensor_type->shape_.size(), span);
-          auto shapes = MakeShapeTuple(source_tensor_type->shape_, span);
-          std::vector<std::pair<std::string, std::any>> load_kw = {{"target_memory", MemorySpace::Vec}};
-          auto load_call = op_reg.Create("tile.load", {source, offsets_load, shapes, shapes}, load_kw, span);
+          auto offsets_load = MakeZeroOffsets(source_rank, span);
+          auto shapes = MakeShapeTuple(load_shape, span);
+          auto valid_shapes = MakeShapeTuple(source_valid, span);
+          const MemorySpace staging_space = target_tile_type->memory_space_.value_or(MemorySpace::Vec);
+          std::vector<std::pair<std::string, std::any>> load_kw = {{"target_memory", staging_space}};
+          auto load_call =
+              op_reg.Create("tile.load", {source, offsets_load, shapes, valid_shapes}, load_kw, span);
+
+          // Staging is contextual to the destination tile: configure the fresh
+          // loaded buffer exactly like that destination, while retaining only
+          // the source's effective validity. Invalid source padding is never
+          // transferred by the subsequent assemble and needs no pad policy.
+          auto load_type = As<TileType>(load_call->GetType());
+          INTERNAL_CHECK_SPAN(load_type, span) << "tensor.assemble staging load must produce a TileType";
+          TileView staging_view = tile_view_semantics::GetEffectiveTileView(*target_tile_type);
+          staging_view.valid_shape = source_valid;
+          staging_view.stride.clear();
+          staging_view.start_offset = nullptr;
+          staging_view.pad = PadValue::null;
+          auto staging_type = std::make_shared<TileType>(load_shape, load_type->dtype_, std::nullopt,
+                                                         staging_view, staging_space);
+          load_call = std::make_shared<Call>(load_call->op_, load_call->args_, load_call->kwargs_,
+                                             load_call->attrs_, staging_type, load_call->span_);
           auto source_tile_var = std::make_shared<Var>("assemble_src", load_call->GetType(), span);
           prologue.push_back(std::make_shared<AssignStmt>(source_tile_var, load_call, span));
 
-          auto assemble_call = op_reg.Create("tile.assemble", {target, source_tile_var, offset}, span);
+          ExprPtr staged_source = source_tile_var;
+          if (leading_dims > 0) {
+            auto aligned_shape = MakeShapeTuple(stage_shape, span);
+            auto reshape_call = op_reg.Create("tile.reshape", {source_tile_var, aligned_shape}, span);
+            TileView aligned_view = tile_view_semantics::GetEffectiveTileView(*target_tile_type);
+            aligned_view.valid_shape = aligned_source_valid;
+            aligned_view.stride.clear();
+            aligned_view.start_offset = nullptr;
+            aligned_view.pad = PadValue::null;
+            auto aligned_type = std::make_shared<TileType>(stage_shape, load_type->dtype_, std::nullopt,
+                                                           aligned_view, staging_space);
+            reshape_call =
+                std::make_shared<Call>(reshape_call->op_, reshape_call->args_, reshape_call->kwargs_,
+                                       reshape_call->attrs_, aligned_type, reshape_call->span_);
+            auto reshape_var = std::make_shared<Var>("assemble_src_aligned", reshape_call->GetType(), span);
+            prologue.push_back(std::make_shared<AssignStmt>(reshape_var, reshape_call, span));
+            staged_source = reshape_var;
+          }
+
+          auto assemble_call = op_reg.Create("tile.assemble", {target, staged_source, offset}, span);
           return ConversionResult{std::move(prologue), assemble_call};
         }
 
@@ -723,10 +947,10 @@ void OpConversionRegistry::RegisterMemoryOps() {
   RegisterSimple("tensor.get_subblock_idx", "tile.get_subblock_idx");
   RegisterSimple("tensor.get_block_num", "tile.get_block_num");
 
-  RegisterCustom(
+  RegisterContextual(
       "tensor.expand_clone",
       [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
-         const Span& span) -> ConversionResult {
+         const ConversionContext& context, const Span& span) -> ConversionResult {
         INTERNAL_CHECK_SPAN(args.size() == 2, span)
             << "tensor.expand_clone conversion expects 2 args (input, target)";
 
@@ -743,6 +967,9 @@ void OpConversionRegistry::RegisterMemoryOps() {
         INTERNAL_CHECK_SPAN(target_tensor_type, span)
             << "tensor.expand_clone conversion: target must be TensorType, but got "
             << target->GetType()->TypeName();
+        auto expected_type = As<TensorType>(context.expected_result_type);
+        INTERNAL_CHECK_SPAN(expected_type, span)
+            << "tensor.expand_clone conversion requires a TensorType result contract";
 
         const auto& input_shape = input_tensor_type->shape_;
         const auto& target_shape = target_tensor_type->shape_;
@@ -752,6 +979,10 @@ void OpConversionRegistry::RegisterMemoryOps() {
         INTERNAL_CHECK_SPAN(target_shape.size() == input_shape.size(), span)
             << "tensor.expand_clone conversion: input rank (" << input_shape.size()
             << ") must match target rank (" << target_shape.size() << ")";
+        INTERNAL_CHECK_SPAN(AreExprVectorsEqual(expected_type->shape_, target_shape), span)
+            << "tensor.expand_clone conversion: expected result shape must match target allocation shape";
+        INTERNAL_CHECK_SPAN(expected_type->dtype_ == target_tensor_type->dtype_, span)
+            << "tensor.expand_clone conversion: expected result dtype must match target allocation dtype";
 
         int broadcast_dim = -1;
         for (size_t i = 0; i < input_shape.size(); ++i) {
@@ -767,129 +998,114 @@ void OpConversionRegistry::RegisterMemoryOps() {
           broadcast_dim = static_cast<int>(i);
         }
 
+        const std::vector<ExprPtr> input_valid = GetValidShape(input_tensor_type);
+        const std::vector<ExprPtr> expected_valid = GetValidShape(expected_type);
+        ValidateValidShapeBounds(expected_valid, target_shape, span, "tensor.expand_clone conversion");
+
         std::vector<StmtPtr> prologue;
-
-        auto make_index_const = [&](int64_t value) -> ExprPtr {
-          return std::make_shared<ConstInt>(value, DataType::INDEX, span);
-        };
-
-        auto make_tuple = [&](std::vector<ExprPtr> elems) -> ExprPtr {
-          return std::make_shared<MakeTuple>(std::move(elems), span);
-        };
-
-        auto load_tensor_tile = [&](const ExprPtr& tensor, const ExprPtr& offsets,
-                                    const std::vector<ExprPtr>& shape,
-                                    const std::vector<ExprPtr>& valid_shape, const std::string& name_hint,
-                                    std::vector<StmtPtr>& stmts) -> ExprPtr {
-          auto shapes = MakeShapeTuple(shape, span);
-          auto valid_shapes = MakeShapeTuple(valid_shape, span);
-          std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec}};
-          auto load_call =
-              op_reg.Create("tile.load", {tensor, offsets, shapes, valid_shapes}, load_kwargs, span);
-          auto load_var = std::make_shared<Var>(name_hint, load_call->GetType(), span);
-          stmts.push_back(std::make_shared<AssignStmt>(load_var, load_call, span));
-          return load_var;
-        };
-
-        DataType input_dtype = input_tensor_type->dtype_;
-
-        std::vector<ExprPtr> input_valid_shape = input_shape;
-        if (input_tensor_type && input_tensor_type->tensor_view_.has_value() &&
-            !input_tensor_type->tensor_view_->valid_shape.empty()) {
-          input_valid_shape = input_tensor_type->tensor_view_->valid_shape;
+        ExprPtr accumulator_init = target;
+        TypePtr accumulator_type = target_tensor_type;
+        if (!AreExprVectorsEqual(expected_valid, GetValidShape(target_tensor_type))) {
+          // The operation aliases/writes the supplied target allocation, but its
+          // logical result may be narrower than the target's previous contents.
+          // Materialize an SSA view alias carrying the expected validity so every
+          // loop join and tile.store result has the authoritative contract.
+          TensorView result_view = target_tensor_type->tensor_view_.value_or(TensorView{});
+          result_view.valid_shape = expected_valid;
+          result_view.pad =
+              expected_type->tensor_view_.has_value() ? expected_type->tensor_view_->pad : PadValue::null;
+          accumulator_type = std::make_shared<TensorType>(target_shape, target_tensor_type->dtype_,
+                                                          target_tensor_type->memref_, result_view);
+          auto target_view = std::make_shared<Var>("expand_clone_target_view", accumulator_type, span);
+          prologue.push_back(std::make_shared<AssignStmt>(target_view, target, span));
+          accumulator_init = target_view;
         }
 
-        ExprPtr zero = make_index_const(0);
-        ExprPtr one = make_index_const(1);
+        auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, span);
+        auto one = std::make_shared<ConstInt>(1, DataType::INDEX, span);
+        auto loop_var = std::make_shared<Var>("i", std::make_shared<ScalarType>(DataType::INDEX), span);
+        auto iter_arg =
+            std::make_shared<IterArg>("expand_clone_acc", accumulator_type, accumulator_init, span);
+        auto return_var = std::make_shared<Var>(
+            "expand_clone_d" + std::to_string(broadcast_dim < 0 ? 3 : broadcast_dim) + "_result",
+            accumulator_type, span);
 
-        if (broadcast_dim < 0) {
-          ExprPtr input_tile = input;
-          auto offsets = MakeZeroOffsets(input_shape.size(), span);
-          input_tile = load_tensor_tile(input, offsets, input_shape, input_valid_shape, "expand_clone_input",
-                                        prologue);
-          auto store_call = op_reg.Create("tile.store", {input_tile, offsets, target}, span);
-          return ConversionResult{std::move(prologue), store_call};
+        // Lower every form page-by-page along batch dim 0. This is required for
+        // a partial middle dimension: [B,m<M,N] is not one contiguous valid box
+        // after flattening, but each [1,m,N] page is exactly representable.
+        ExprPtr input_batch_offset = broadcast_dim == 0 ? ExprPtr(zero) : ExprPtr(loop_var);
+        auto input_offsets = MakeShapeTuple({input_batch_offset, zero, zero}, span);
+        auto output_offsets = MakeShapeTuple({loop_var, zero, zero}, span);
+        std::vector<ExprPtr> page_shape = {one, input_shape[1], input_shape[2]};
+        std::vector<ExprPtr> requested_page_valid = {one, input_valid[1], input_valid[2]};
+
+        std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec}};
+        auto load_call = op_reg.Create("tile.load",
+                                       {input, input_offsets, MakeShapeTuple(page_shape, span),
+                                        MakeShapeTuple(requested_page_valid, span)},
+                                       load_kwargs, span);
+        if (broadcast_dim != 0) {
+          // The loop stops at expected_valid[0], so every executed source batch
+          // index is real. The standalone load deducer cannot use that enclosing
+          // loop bound to prove `i < valid_batch`; refine just this guarded unit
+          // page extent and retain every other source-derived field. Without the
+          // refinement a conditional 0/1 gate becomes an unprovable singleton
+          // broadcast when a dim-1 clone is flattened to tile.col_expand.
+          auto page_type = As<TileType>(load_call->GetType());
+          INTERNAL_CHECK_SPAN(page_type, span)
+              << "tensor.expand_clone conversion page load must produce TileType";
+          TileView guarded_view = tile_view_semantics::GetEffectiveTileView(*page_type);
+          guarded_view.valid_shape[0] = one;
+          auto guarded_type = std::make_shared<TileType>(page_type->shape_, page_type->dtype_, std::nullopt,
+                                                         guarded_view, page_type->memory_space_);
+          load_call = std::make_shared<Call>(load_call->op_, load_call->args_, load_call->kwargs_,
+                                             load_call->attrs_, guarded_type, load_call->span_);
         }
+        auto input_tile = std::make_shared<Var>("expand_clone_input", load_call->GetType(), span);
+        std::vector<StmtPtr> body_stmts = {std::make_shared<AssignStmt>(input_tile, load_call, span)};
+        ExprPtr page_result = input_tile;
 
-        if (broadcast_dim == 0) {
-          ExprPtr input_tile = input;
-          auto offsets = MakeZeroOffsets(input_tensor_type->shape_.size(), span);
-          input_tile = load_tensor_tile(input, offsets, input_shape, input_valid_shape, "expand_clone_input",
-                                        prologue);
-
-          auto loop_var = std::make_shared<Var>("i", std::make_shared<ScalarType>(DataType::INDEX), span);
-          auto iter_arg = std::make_shared<IterArg>("expand_clone_acc", target_tensor_type, target, span);
-          auto return_var = std::make_shared<Var>("expand_clone_d0_result", target_tensor_type, span);
-
-          auto loop_offsets = make_tuple({loop_var, zero, zero});
-          auto store_call = op_reg.Create("tile.store", {input_tile, loop_offsets, iter_arg}, span);
-          auto store_var = std::make_shared<Var>("expand_clone_d0_store", store_call->GetType(), span);
-
-          std::vector<StmtPtr> body_stmts;
-          body_stmts.push_back(std::make_shared<AssignStmt>(store_var, store_call, span));
-          body_stmts.push_back(std::make_shared<YieldStmt>(std::vector<ExprPtr>{store_var}, span));
-
-          auto body = SeqStmts::Flatten(std::move(body_stmts), span);
-          auto for_stmt = std::make_shared<ForStmt>(loop_var, zero, target_shape[0], one,
-                                                    std::vector<IterArgPtr>{iter_arg}, body,
-                                                    std::vector<VarPtr>{return_var}, span);
-          prologue.push_back(for_stmt);
-          return ConversionResult{std::move(prologue), return_var};
-        }
-
-        if (broadcast_dim == 1) {
-          auto loop_var = std::make_shared<Var>("i", std::make_shared<ScalarType>(DataType::INDEX), span);
-          auto iter_arg = std::make_shared<IterArg>("expand_clone_acc", target_tensor_type, target, span);
-          auto return_var = std::make_shared<Var>("expand_clone_d1_result", target_tensor_type, span);
-
-          auto loop_offsets = make_tuple({loop_var, zero, zero});
-          std::vector<ExprPtr> slice_shape = {one, one, input_valid_shape[2]};
-
-          std::vector<StmtPtr> body_stmts;
-          auto input_tile = load_tensor_tile(input, loop_offsets, slice_shape, slice_shape,
-                                             "expand_clone_d1_input", body_stmts);
-
-          std::vector<std::pair<std::string, std::any>> create_kwargs = {{"dtype", input_dtype},
+        if (broadcast_dim == 1 || broadcast_dim == 2) {
+          const auto page_valid = GetValidShape(As<TileType>(input_tile->GetType()));
+          std::vector<ExprPtr> expanded_shape = {one, target_shape[1], target_shape[2]};
+          std::vector<ExprPtr> expanded_valid = page_valid;
+          expanded_valid[static_cast<size_t>(broadcast_dim)] =
+              target_shape[static_cast<size_t>(broadcast_dim)];
+          std::vector<std::pair<std::string, std::any>> create_kwargs = {{"dtype", expected_type->dtype_},
                                                                          {"target_memory", MemorySpace::Vec}};
-          auto create_shape = MakeShapeTuple({one, target_shape[1], target_shape[2]}, span);
-          auto create_call = op_reg.Create("tile.create", {create_shape}, create_kwargs, span);
-          auto create_var = std::make_shared<Var>("expand_clone_d1_target", create_call->GetType(), span);
+          auto create_call = op_reg.Create(
+              "tile.create", {MakeShapeTuple(expanded_shape, span), MakeShapeTuple(expanded_valid, span)},
+              create_kwargs, span);
+          auto create_var = std::make_shared<Var>("expand_clone_target", create_call->GetType(), span);
           body_stmts.push_back(std::make_shared<AssignStmt>(create_var, create_call, span));
 
-          auto col_expand_call = op_reg.Create("tile.col_expand", {create_var, input_tile}, span);
-          auto col_expand_var =
-              std::make_shared<Var>("expand_clone_d1_col", col_expand_call->GetType(), span);
-          body_stmts.push_back(std::make_shared<AssignStmt>(col_expand_var, col_expand_call, span));
-
-          auto store_call = op_reg.Create("tile.store", {col_expand_var, loop_offsets, iter_arg}, span);
-          auto store_var = std::make_shared<Var>("expand_clone_d1_store", store_call->GetType(), span);
-          body_stmts.push_back(std::make_shared<AssignStmt>(store_var, store_call, span));
-          body_stmts.push_back(std::make_shared<YieldStmt>(std::vector<ExprPtr>{store_var}, span));
-
-          auto body = SeqStmts::Flatten(std::move(body_stmts), span);
-          auto for_stmt = std::make_shared<ForStmt>(loop_var, zero, target_shape[0], one,
-                                                    std::vector<IterArgPtr>{iter_arg}, body,
-                                                    std::vector<VarPtr>{return_var}, span);
-          prologue.push_back(for_stmt);
-          return ConversionResult{std::move(prologue), return_var};
+          const char* expand_op = broadcast_dim == 1 ? "tile.col_expand" : "tile.row_expand";
+          auto expand_call = op_reg.Create(expand_op, {create_var, input_tile}, span);
+          auto expand_var = std::make_shared<Var>(
+              broadcast_dim == 1 ? "expand_clone_col" : "expand_clone_row", expand_call->GetType(), span);
+          body_stmts.push_back(std::make_shared<AssignStmt>(expand_var, expand_call, span));
+          page_result = expand_var;
+        } else if (input_tensor_type->dtype_ != expected_type->dtype_) {
+          std::vector<std::pair<std::string, std::any>> cast_kwargs = {{"target_type", expected_type->dtype_},
+                                                                       {"mode", 2}};
+          auto cast_call = op_reg.Create("tile.cast", {input_tile}, cast_kwargs, span);
+          auto cast_var = std::make_shared<Var>("expand_clone_cast", cast_call->GetType(), span);
+          body_stmts.push_back(std::make_shared<AssignStmt>(cast_var, cast_call, span));
+          page_result = cast_var;
         }
 
-        auto offsets = MakeZeroOffsets(target_shape.size(), span);
-        auto input_tile =
-            load_tensor_tile(input, offsets, input_shape, input_valid_shape, "expand_clone_input", prologue);
+        auto store_call = op_reg.Create("tile.store", {page_result, output_offsets, iter_arg}, span);
+        auto store_var = std::make_shared<Var>("expand_clone_store", store_call->GetType(), span);
+        body_stmts.push_back(std::make_shared<AssignStmt>(store_var, store_call, span));
+        body_stmts.push_back(std::make_shared<YieldStmt>(std::vector<ExprPtr>{store_var}, span));
 
-        std::vector<std::pair<std::string, std::any>> create_kwargs = {{"dtype", input_dtype},
-                                                                       {"target_memory", MemorySpace::Vec}};
-        auto create_shape = MakeShapeTuple(target_shape, span);
-        auto create_call = op_reg.Create("tile.create", {create_shape}, create_kwargs, span);
-        auto create_var = std::make_shared<Var>("expand_clone_d2_target", create_call->GetType(), span);
-        prologue.push_back(std::make_shared<AssignStmt>(create_var, create_call, span));
-
-        auto row_expand_call = op_reg.Create("tile.row_expand", {create_var, input_tile}, span);
-        auto row_expand_var = std::make_shared<Var>("expand_clone_d2_row", row_expand_call->GetType(), span);
-        prologue.push_back(std::make_shared<AssignStmt>(row_expand_var, row_expand_call, span));
-        auto store_call = op_reg.Create("tile.store", {row_expand_var, offsets, target}, span);
-        return ConversionResult{std::move(prologue), store_call};
+        auto body = SeqStmts::Flatten(std::move(body_stmts), span);
+        const ExprPtr loop_stop = broadcast_dim == 0 ? target_shape[0] : expected_valid[0];
+        auto for_stmt =
+            std::make_shared<ForStmt>(loop_var, zero, loop_stop, one, std::vector<IterArgPtr>{iter_arg}, body,
+                                      std::vector<VarPtr>{return_var}, span);
+        prologue.push_back(for_stmt);
+        return ConversionResult{std::move(prologue), return_var};
       });
 }
 
@@ -2380,12 +2596,17 @@ void OpConversionRegistry::RegisterSimple(const std::string& from_op, const std:
     }
     return ConversionResult{call};
   };
-  conversions_[from_op] = ConversionEntry{std::move(func), std::move(input_reqs)};
+  conversions_[from_op] = ConversionEntry{std::move(func), {}, std::move(input_reqs)};
 }
 
 void OpConversionRegistry::RegisterCustom(const std::string& from_op, ConversionFunc func,
                                           std::unordered_map<size_t, InputSpaceReq> input_reqs) {
-  conversions_[from_op] = ConversionEntry{std::move(func), std::move(input_reqs)};
+  conversions_[from_op] = ConversionEntry{std::move(func), {}, std::move(input_reqs)};
+}
+
+void OpConversionRegistry::RegisterContextual(const std::string& from_op, ContextualConversionFunc func,
+                                              std::unordered_map<size_t, InputSpaceReq> input_reqs) {
+  conversions_[from_op] = ConversionEntry{{}, std::move(func), std::move(input_reqs)};
 }
 
 const ConversionEntry* OpConversionRegistry::Lookup(const std::string& op_name) const {

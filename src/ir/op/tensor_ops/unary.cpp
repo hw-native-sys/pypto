@@ -18,6 +18,7 @@
 
 #include <any>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -29,6 +30,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 namespace pypto {
 namespace ir {
 
@@ -42,7 +44,10 @@ TypePtr DeduceTensorNegType(const std::vector<ExprPtr>& args,
       << args[0]->GetType()->TypeName();
 
   // Negation preserves dtype (valid for both int and float)
-  return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_);
+  // Preserve the effective valid box on the fresh result without copying source
+  // allocation metadata such as strides, layout, or padding policy.
+  return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_, std::nullopt,
+                                      MakeFreshTensorResultView(GetValidShape(tensor_type)));
 }
 
 TypePtr DeduceTensorAbsType(const std::vector<ExprPtr>& args,
@@ -55,7 +60,10 @@ TypePtr DeduceTensorAbsType(const std::vector<ExprPtr>& args,
       << args[0]->GetType()->TypeName();
 
   // Absolute value preserves dtype (valid for both int and float)
-  return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_);
+  // Preserve the effective valid box on the fresh result without copying source
+  // allocation metadata such as strides, layout, or padding policy.
+  return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_, std::nullopt,
+                                      MakeFreshTensorResultView(GetValidShape(tensor_type)));
 }
 
 TypePtr DeduceTensorRecipType(const std::vector<ExprPtr>& args,
@@ -73,7 +81,10 @@ TypePtr DeduceTensorRecipType(const std::vector<ExprPtr>& args,
     out_dtype = DataType::FP32;
   }
 
-  return std::make_shared<TensorType>(tensor_type->shape_, out_dtype);
+  // Dtype may promote (e.g. int -> FP32), but only the effective valid box is
+  // semantic for the fresh result; source allocation metadata is not inherited.
+  return std::make_shared<TensorType>(tensor_type->shape_, out_dtype, std::nullopt,
+                                      MakeFreshTensorResultView(GetValidShape(tensor_type)));
 }
 
 TypePtr DeduceTensorExpType(const std::vector<ExprPtr>& args,
@@ -93,7 +104,10 @@ TypePtr DeduceTensorExpType(const std::vector<ExprPtr>& args,
     out_dtype = DataType::FP32;
   }
 
-  return std::make_shared<TensorType>(tensor_type->shape_, out_dtype);
+  // Dtype may promote (e.g. int -> FP32), but only the effective valid box is
+  // semantic for the fresh result; source allocation metadata is not inherited.
+  return std::make_shared<TensorType>(tensor_type->shape_, out_dtype, std::nullopt,
+                                      MakeFreshTensorResultView(GetValidShape(tensor_type)));
 }
 
 TypePtr DeduceTensorLogType(const std::vector<ExprPtr>& args,
@@ -112,7 +126,10 @@ TypePtr DeduceTensorLogType(const std::vector<ExprPtr>& args,
     out_dtype = DataType::FP32;
   }
 
-  return std::make_shared<TensorType>(tensor_type->shape_, out_dtype);
+  // Dtype may promote (e.g. int -> FP32), but only the effective valid box is
+  // semantic for the fresh result; source allocation metadata is not inherited.
+  return std::make_shared<TensorType>(tensor_type->shape_, out_dtype, std::nullopt,
+                                      MakeFreshTensorResultView(GetValidShape(tensor_type)));
 }
 
 TypePtr DeduceTensorSqrtType(const std::vector<ExprPtr>& args,
@@ -131,7 +148,10 @@ TypePtr DeduceTensorSqrtType(const std::vector<ExprPtr>& args,
     out_dtype = DataType::FP32;
   }
 
-  return std::make_shared<TensorType>(tensor_type->shape_, out_dtype);
+  // Dtype may promote (e.g. int -> FP32), but only the effective valid box is
+  // semantic for the fresh result; source allocation metadata is not inherited.
+  return std::make_shared<TensorType>(tensor_type->shape_, out_dtype, std::nullopt,
+                                      MakeFreshTensorResultView(GetValidShape(tensor_type)));
 }
 
 TypePtr DeduceTensorRsqrtType(const std::vector<ExprPtr>& args,
@@ -149,7 +169,10 @@ TypePtr DeduceTensorRsqrtType(const std::vector<ExprPtr>& args,
     out_dtype = DataType::FP32;
   }
 
-  return std::make_shared<TensorType>(tensor_type->shape_, out_dtype);
+  // Dtype may promote (e.g. int -> FP32), but only the effective valid box is
+  // semantic for the fresh result; source allocation metadata is not inherited.
+  return std::make_shared<TensorType>(tensor_type->shape_, out_dtype, std::nullopt,
+                                      MakeFreshTensorResultView(GetValidShape(tensor_type)));
 }
 
 // Shared FP32-only deducer for transcendental ops (tensor.sin, tensor.cos).
@@ -169,7 +192,10 @@ TypePtr DeduceTensorFP32OnlyType(const std::string& op_name, const std::vector<E
       << op_name << " is FP32-only, but got input with dtype " << tensor_type->dtype_.ToString()
       << ". Cast the input to FP32 explicitly via pl.cast(x, pl.FP32) before applying " << op_name << ".";
 
-  return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_);
+  // Preserve the effective valid box on the fresh result without copying source
+  // allocation metadata such as strides, layout, or padding policy.
+  return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_, std::nullopt,
+                                      MakeFreshTensorResultView(GetValidShape(tensor_type)));
 }
 
 TypePtr DeduceTensorCastType(const std::vector<ExprPtr>& args,
@@ -215,8 +241,10 @@ TypePtr DeduceTensorCastType(const std::vector<ExprPtr>& args,
 
   // mode kwarg is optional, not used in type deduction
 
-  // Cast preserves shape but changes dtype
-  return std::make_shared<TensorType>(tensor_type->shape_, target_dtype);
+  // Cast preserves shape and effective valid extent, but it materializes fresh
+  // storage and therefore does not inherit source addressing or padding metadata.
+  return std::make_shared<TensorType>(tensor_type->shape_, target_dtype, std::nullopt,
+                                      MakeFreshTensorResultView(GetValidShape(tensor_type)));
 }
 
 // ============================================================================

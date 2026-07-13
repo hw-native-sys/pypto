@@ -125,11 +125,11 @@ assert len(restored.type.tile_view.valid_shape) == 2
 | ---- | ------ | -------------- |
 | **Span** | Map | `filename`, `begin_line`, `begin_column`, `end_line`, `end_column` |
 | **ScalarType** | Map | `type_kind: "ScalarType"`, `dtype: 19` |
-| **TensorType** | Map | `type_kind`, `dtype`, `shape`, optional `memref` |
+| **TensorType** | Map | `type_kind`, `dtype`, `shape`, optional `memref`, optional `tensor_view` |
 | **TileType** | Map | `type_kind`, `dtype`, `shape`, optional `memref`, optional `tile_view` |
 | **Op/GlobalVar** | Map | `name`, `is_global_var` |
 
-### MemRef and TileView Format
+### MemRef, TileView, and TensorView Format
 
 ```javascript
 // MemRef (optional field in TensorType/TileType)
@@ -144,12 +144,26 @@ assert len(restored.type.tile_view.valid_shape) == 2
 // TileView (optional field in TileType)
 {
   "tile_view": {
-    "valid_shape": [...], // Array of Expr nodes
+    "valid_shape": [...], // Array of Expr nodes (empty => fully valid)
     "stride": [...],      // Array of Expr nodes
-    "start_offset": {...} // Expr node
+    "start_offset": {...} // Expr node, or nil when unset (tile.load sets only valid_shape)
+    // ... blayout, slayout, fractal, pad
+  }
+}
+
+// TensorView (optional field in TensorType/DistributedTensorType)
+{
+  "tensor_view": {
+    "valid_shape": [...], // Array of Expr nodes (empty => fully valid)
+    "stride": [...],      // Array of Expr nodes
+    "layout": "ND",       // TensorLayout string
+    "pad": "null"         // PadValue string
   }
 }
 ```
+
+A `nil` `start_offset` and a missing `valid_shape` key both deserialize to their
+unset form (null / empty), so older `.pto` payloads remain readable.
 
 ### Call with Kwargs
 

@@ -229,6 +229,27 @@ def _find_first_call_to(func: ir.Function, op_name: str) -> ir.Call | None:
     return finder.found
 
 
+class _CallCollector(ir.IRVisitor):
+    """Collect every call to one operation in traversal order."""
+
+    def __init__(self, op_name: str) -> None:
+        super().__init__()
+        self.op_name = op_name
+        self.calls: list[ir.Call] = []
+
+    def visit_call(self, op: ir.Call) -> None:
+        if op.op.name == self.op_name:
+            self.calls.append(op)
+        super().visit_call(op)
+
+
+def _find_calls_to(func: ir.Function, op_name: str) -> list[ir.Call]:
+    """Return every call to ``op_name`` in ``func.body``."""
+    collector = _CallCollector(op_name)
+    collector.visit_stmt(func.body)
+    return collector.calls
+
+
 class _CallCounter(ir.IRVisitor):
     """Count Calls whose callee ``Op`` name appears in ``op_names``."""
 
@@ -319,6 +340,190 @@ class TestConvertTensorToTileOps:
             tile_op=tile_factory,
         )
         _assert_convert_equal(before, expected)
+
+    def test_parameter_preloads_preserve_effective_validity(self):
+        """Phase-1 Vec loads must not turn partial tensor parameters into full tiles."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                lhs: pl.Tensor[
+                    [16, 64],
+                    pl.FP32,
+                    pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[8, 48]),
+                ],
+                rhs: pl.Tensor[
+                    [16, 64],
+                    pl.FP32,
+                    pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[8, 48]),
+                ],
+            ) -> pl.Tensor[
+                [16, 64],
+                pl.FP32,
+                pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[8, 48]),
+            ]:
+                result = pl.add(lhs, rhs)
+                return result
+
+            @pl.function
+            def main(
+                self,
+                lhs: pl.Tensor[
+                    [16, 64],
+                    pl.FP32,
+                    pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[8, 48]),
+                ],
+                rhs: pl.Tensor[
+                    [16, 64],
+                    pl.FP32,
+                    pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[8, 48]),
+                ],
+            ) -> pl.Tensor[
+                [16, 64],
+                pl.FP32,
+                pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[8, 48]),
+            ]:
+                result = self.main_incore_0(lhs, rhs)
+                return result
+
+        after = passes.convert_tensor_to_tile_ops()(Before)
+        func = _require_function(after, "main_incore_0")
+        loads = _find_calls_to(func, "tile.load")
+        assert len(loads) == 2
+        for load in loads:
+            valid_arg = load.args[3]
+            assert isinstance(valid_arg, ir.MakeTuple)
+            assert [dim.value for dim in valid_arg.elements if isinstance(dim, ir.ConstInt)] == [8, 48]
+            assert isinstance(load.type, ir.TileType)
+            effective = load.type.get_effective_tile_view()
+            assert [dim.value for dim in effective.valid_shape if isinstance(dim, ir.ConstInt)] == [8, 48]
+
+        add = _find_first_call_to(func, "tile.add")
+        assert add is not None
+        assert isinstance(add.type, ir.TileType)
+        effective = add.type.get_effective_tile_view()
+        assert [dim.value for dim in effective.valid_shape if isinstance(dim, ir.ConstInt)] == [8, 48]
+
+    def test_matmul_auto_bridge_preserves_effective_validity(self):
+        """InputSpaceReq Mat loads must preserve each tensor operand's valid box."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                lhs: pl.Tensor[
+                    [16, 32],
+                    pl.FP32,
+                    pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[8, 16]),
+                ],
+                rhs: pl.Tensor[
+                    [32, 64],
+                    pl.FP32,
+                    pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[32, 48]),
+                ],
+            ) -> pl.Tensor[
+                [16, 64],
+                pl.FP32,
+                pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[8, 48]),
+            ]:
+                result = pl.matmul(lhs, rhs)
+                return result
+
+            @pl.function
+            def main(
+                self,
+                lhs: pl.Tensor[
+                    [16, 32],
+                    pl.FP32,
+                    pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[8, 16]),
+                ],
+                rhs: pl.Tensor[
+                    [32, 64],
+                    pl.FP32,
+                    pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[32, 48]),
+                ],
+            ) -> pl.Tensor[
+                [16, 64],
+                pl.FP32,
+                pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[8, 48]),
+            ]:
+                result = self.main_incore_0(lhs, rhs)
+                return result
+
+        after = passes.convert_tensor_to_tile_ops()(Before)
+        func = _require_function(after, "main_incore_0")
+        loads = _find_calls_to(func, "tile.load")
+        assert len(loads) == 2
+        load_valids = []
+        for load in loads:
+            valid_arg = load.args[3]
+            assert isinstance(valid_arg, ir.MakeTuple)
+            load_valids.append([dim.value for dim in valid_arg.elements if isinstance(dim, ir.ConstInt)])
+        assert load_valids == [[8, 16], [32, 48]]
+
+        matmul = _find_first_call_to(func, "tile.matmul")
+        assert matmul is not None
+        assert isinstance(matmul.type, ir.TileType)
+        effective = matmul.type.get_effective_tile_view()
+        assert [dim.value for dim in effective.valid_shape if isinstance(dim, ir.ConstInt)] == [8, 48]
+
+    def test_batch_matmul_conversion_preserves_partial_matrix_axes(self):
+        """ND tensor matmul and tile.batch_matmul share one M/N/K contract."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                lhs: pl.Tensor[
+                    [2, 16, 32],
+                    pl.FP32,
+                    pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[2, 8, 16]),
+                ],
+                rhs: pl.Tensor[
+                    [2, 32, 64],
+                    pl.FP32,
+                    pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[2, 32, 48]),
+                ],
+            ) -> pl.Tensor[
+                [2, 16, 64],
+                pl.FP32,
+                pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[2, 8, 48]),
+            ]:
+                result = pl.matmul(lhs, rhs)
+                return result
+
+            @pl.function
+            def main(
+                self,
+                lhs: pl.Tensor[
+                    [2, 16, 32],
+                    pl.FP32,
+                    pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[2, 8, 16]),
+                ],
+                rhs: pl.Tensor[
+                    [2, 32, 64],
+                    pl.FP32,
+                    pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[2, 32, 48]),
+                ],
+            ) -> pl.Tensor[
+                [2, 16, 64],
+                pl.FP32,
+                pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[2, 8, 48]),
+            ]:
+                result = self.main_incore_0(lhs, rhs)
+                return result
+
+        after = passes.convert_tensor_to_tile_ops()(Before)
+        func = _require_function(after, "main_incore_0")
+        bmm = _find_first_call_to(func, "tile.batch_matmul")
+        assert bmm is not None
+        assert isinstance(bmm.type, ir.TileType)
+        effective = bmm.type.get_effective_tile_view()
+        assert [dim.value for dim in effective.valid_shape if isinstance(dim, ir.ConstInt)] == [2, 8, 48]
 
     @pytest.mark.parametrize(
         ("rhs_kind", "tensor_factory", "tile_factory"),
@@ -484,6 +689,49 @@ class TestConvertTensorToTileOps:
             in_specs=in_specs, out_shape=[64, 32], out_dtype=DataType.FP16, body=expected_body
         )
         _assert_convert_equal(before, expected)
+
+    def test_reshape_drops_tensor_only_valid_operand_and_preserves_result_contract(self):
+        """The optional tensor valid_shape must become tile result metadata, not a third tile operand."""
+
+        before = _make_before(
+            in_specs=[("x", [4, 8], DataType.FP32)],
+            out_shape=[8, 4],
+            out_dtype=DataType.FP32,
+            body=lambda ib, ins: ib.let("y", tensor_ops.reshape(ins[0], [8, 4], valid_shape=[4, 4])),
+        )
+
+        after = passes.convert_tensor_to_tile_ops()(before)
+        reshape = _find_first_call_to(_require_function(after, "main_incore_0"), "tile.reshape")
+        assert reshape is not None
+        assert len(reshape.args) == 2
+        reshape_type = reshape.type
+        assert isinstance(reshape_type, ir.TileType)
+        assert reshape_type.tile_view is not None
+        assert [dim.value for dim in reshape_type.tile_view.valid_shape if isinstance(dim, ir.ConstInt)] == [
+            4,
+            4,
+        ]
+
+    def test_transpose_preserves_explicit_tensor_result_valid_shape(self):
+        """An explicit tensor transpose region must survive the tensor-to-tile boundary."""
+
+        before = _make_before(
+            in_specs=[("x", [32, 64], DataType.FP32)],
+            out_shape=[64, 32],
+            out_dtype=DataType.FP32,
+            body=lambda ib, ins: ib.let("y", tensor_ops.transpose(ins[0], 0, 1, valid_shape=[12, 4])),
+        )
+
+        after = passes.convert_tensor_to_tile_ops()(before)
+        transpose = _find_first_call_to(_require_function(after, "main_incore_0"), "tile.transpose")
+        assert transpose is not None
+        assert len(transpose.args) == 3
+        transpose_type = transpose.type
+        assert isinstance(transpose_type, ir.TileType)
+        assert transpose_type.tile_view is not None
+        assert [
+            dim.value for dim in transpose_type.tile_view.valid_shape if isinstance(dim, ir.ConstInt)
+        ] == [12, 4]
 
     def test_put_emits_tile_create_plus_tile_put(self):
         """pld.tensor.put lowers to tile.create(stage) + pld.tile.put(dst, peer, src, stage).
@@ -1402,6 +1650,183 @@ class TestConvertTensorToTileOps:
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_assemble_tensor_source_load_preserves_effective_validity(self):
+        """Tensor->tile staging for assemble must not widen a partial source."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                src: pl.Tensor[
+                    [1, 32],
+                    pl.FP32,
+                    pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[1, 16]),
+                ],
+            ) -> pl.Tensor[[1, 64], pl.FP32]:
+                target = pl.create_tensor([1, 64], dtype=pl.FP32)
+                result = pl.assemble(target, src, [0, 0])
+                return result
+
+            @pl.function
+            def main(
+                self,
+                src: pl.Tensor[
+                    [1, 32],
+                    pl.FP32,
+                    pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[1, 16]),
+                ],
+            ) -> pl.Tensor[[1, 64], pl.FP32]:
+                result = self.main_incore_0(src)
+                return result
+
+        after = passes.convert_tensor_to_tile_ops()(Before)
+        func = _require_function(after, "main_incore_0")
+        load = _find_first_call_to(func, "tile.load")
+        assert load is not None
+        assert len(load.args) == 4
+        valid_arg = load.args[3]
+        assert isinstance(valid_arg, ir.MakeTuple)
+        assert [elem.value for elem in valid_arg.elements if isinstance(elem, ir.ConstInt)] == [1, 16]
+        assert isinstance(load.type, ir.TileType)
+        effective = load.type.get_effective_tile_view()
+        assert [elem.value for elem in effective.valid_shape if isinstance(elem, ir.ConstInt)] == [1, 16]
+
+    def test_assemble_store_keeps_contextual_validity_union(self):
+        """Lowering to tile.store must retain each tensor.assemble validity union."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                head: pl.Tensor[[4, 8], pl.FP32],
+                tail: pl.Tensor[[2, 8], pl.FP32],
+                target: pl.InOut[
+                    pl.Tensor[
+                        [8, 8],
+                        pl.FP32,
+                        pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[0, 0]),
+                    ]
+                ],
+            ) -> pl.Tensor[
+                [8, 8],
+                pl.FP32,
+                pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[6, 8]),
+            ]:
+                head_tile = pl.tensor.slice(head, [4, 8], [0, 0])
+                acc: pl.Tensor[
+                    [8, 8],
+                    pl.FP32,
+                    pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[4, 8]),
+                ] = pl.assemble(target, head_tile, [0, 0])
+                tail_tile = pl.tensor.slice(tail, [2, 8], [0, 0])
+                result: pl.Tensor[
+                    [8, 8],
+                    pl.FP32,
+                    pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[6, 8]),
+                ] = pl.assemble(acc, tail_tile, [4, 0])
+                return result
+
+        after = passes.convert_tensor_to_tile_ops()(Before)
+        kernel = _require_function(after, "kernel")
+        stores = _find_calls_to(kernel, "tile.store")
+        assert len(stores) == 2
+        expected_valids = ([4, 8], [6, 8])
+        for store, expected_valid in zip(stores, expected_valids, strict=True):
+            assert isinstance(store.type, ir.TensorType)
+            assert store.type.tensor_view is not None
+            assert [
+                dim.value for dim in store.type.tensor_view.valid_shape if isinstance(dim, ir.ConstInt)
+            ] == list(expected_valid)
+
+    def test_assemble_tensor_source_stages_only_destination_capacity(self):
+        """A large allocation with a small valid prefix must fit tile physical bounds after conversion."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                src: pl.Tensor[
+                    [16, 16],
+                    pl.FP32,
+                    pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[4, 8]),
+                ],
+            ) -> pl.Tensor[[8, 8], pl.FP32]:
+                target = pl.create_tensor([8, 8], dtype=pl.FP32)
+                result = pl.assemble(target, src, [0, 0])
+                return result
+
+            @pl.function
+            def main(
+                self,
+                src: pl.Tensor[
+                    [16, 16],
+                    pl.FP32,
+                    pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[4, 8]),
+                ],
+            ) -> pl.Tensor[[8, 8], pl.FP32]:
+                result = self.main_incore_0(src)
+                return result
+
+        after = passes.convert_tensor_to_tile_ops()(Before)
+        func = _require_function(after, "main_incore_0")
+        load = _find_first_call_to(func, "tile.load")
+        assert load is not None
+        shape_arg = load.args[2]
+        valid_arg = load.args[3]
+        assert isinstance(shape_arg, ir.MakeTuple)
+        assert isinstance(valid_arg, ir.MakeTuple)
+        assert [dim.value for dim in shape_arg.elements if isinstance(dim, ir.ConstInt)] == [8, 8]
+        assert [dim.value for dim in valid_arg.elements if isinstance(dim, ir.ConstInt)] == [4, 8]
+        assemble = _find_first_call_to(func, "tile.assemble")
+        assert assemble is not None
+        assert isinstance(assemble.args[1].type, ir.TileType)
+        assert [dim.value for dim in assemble.args[1].type.shape if isinstance(dim, ir.ConstInt)] == [8, 8]
+
+    def test_assemble_tensor_source_right_aligns_rank_before_tile_assemble(self):
+        """A lower-rank tensor source stages at source rank, then gains explicit unit axes."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                src: pl.Tensor[
+                    [8],
+                    pl.FP32,
+                    pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[4]),
+                ],
+            ) -> pl.Tensor[[1, 8], pl.FP32]:
+                target = pl.create_tensor([1, 8], dtype=pl.FP32)
+                result = pl.assemble(target, src, [0, 0])
+                return result
+
+            @pl.function
+            def main(
+                self,
+                src: pl.Tensor[
+                    [8],
+                    pl.FP32,
+                    pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[4]),
+                ],
+            ) -> pl.Tensor[[1, 8], pl.FP32]:
+                result = self.main_incore_0(src)
+                return result
+
+        after = passes.convert_tensor_to_tile_ops()(Before)
+        func = _require_function(after, "main_incore_0")
+        load = _find_first_call_to(func, "tile.load")
+        reshape = _find_first_call_to(func, "tile.reshape")
+        assemble = _find_first_call_to(func, "tile.assemble")
+        assert load is not None and reshape is not None and assemble is not None
+        assert isinstance(load.type, ir.TileType) and len(load.type.shape) == 1
+        assert isinstance(reshape.type, ir.TileType)
+        assert [dim.value for dim in reshape.type.shape if isinstance(dim, ir.ConstInt)] == [1, 8]
+        effective = reshape.type.get_effective_tile_view()
+        assert [dim.value for dim in effective.valid_shape if isinstance(dim, ir.ConstInt)] == [1, 4]
+
     def test_returned_assemble_loop_naive_conversion(self):
         """ConvertTensorToTileOps rewrites assemble loop to store loop with Out param.
 
@@ -1567,10 +1992,10 @@ class TestConvertTensorToTileOps:
                 src: pl.Tensor[[1, 4, 8], pl.FP16],
                 target: pl.Out[pl.Tensor[[2, 4, 8], pl.FP16]],
             ) -> pl.Tensor[[2, 4, 8], pl.FP16]:
-                expand_clone_input = pl.load(src, [0, 0, 0], [1, 4, 8])
                 for i, (expand_clone_acc,) in pl.range(2, init_values=(target,)):
-                    expand_clone_d0_store = pl.store(expand_clone_input, [i, 0, 0], expand_clone_acc)
-                    expand_clone_d0_result = pl.yield_(expand_clone_d0_store)
+                    expand_clone_input = pl.load(src, [0, 0, 0], [1, 4, 8], valid_shapes=[1, 4, 8])
+                    expand_clone_store = pl.store(expand_clone_input, [i, 0, 0], expand_clone_acc)
+                    expand_clone_d0_result = pl.yield_(expand_clone_store)
                 y_tile: pl.Tensor[[2, 4, 8], pl.FP16] = expand_clone_d0_result
                 return y_tile
 
@@ -1618,11 +2043,11 @@ class TestConvertTensorToTileOps:
                 target: pl.Out[pl.Tensor[[2, 4, 8], pl.FP16]],
             ) -> pl.Tensor[[2, 4, 8], pl.FP16]:
                 for i, (expand_clone_acc,) in pl.range(2, init_values=(target,)):
-                    expand_clone_d1_input = pl.load(src, [i, 0, 0], [1, 1, 8])
-                    expand_clone_d1_target = pl.tile.create([1, 4, 8], dtype=pl.FP16)
-                    expand_clone_d1_col = pl.tile.col_expand(expand_clone_d1_target, expand_clone_d1_input)
-                    expand_clone_d1_store = pl.store(expand_clone_d1_col, [i, 0, 0], expand_clone_acc)
-                    expand_clone_d1_result = pl.yield_(expand_clone_d1_store)
+                    expand_clone_input = pl.load(src, [i, 0, 0], [1, 1, 8], valid_shapes=[1, 1, 8])
+                    expand_clone_target = pl.tile.create([1, 4, 8], dtype=pl.FP16, valid_shape=[1, 4, 8])
+                    expand_clone_col = pl.tile.col_expand(expand_clone_target, expand_clone_input)
+                    expand_clone_store = pl.store(expand_clone_col, [i, 0, 0], expand_clone_acc)
+                    expand_clone_d1_result = pl.yield_(expand_clone_store)
                 y_tile: pl.Tensor[[2, 4, 8], pl.FP16] = expand_clone_d1_result
                 return y_tile
 
@@ -1639,7 +2064,7 @@ class TestConvertTensorToTileOps:
         ir.assert_structural_equal(After, Expected)
 
     def test_expand_clone_dim2_conversion(self):
-        """tensor.expand_clone (dim2 broadcast) -> row_expand + store."""
+        """tensor.expand_clone (dim2 broadcast) -> per-batch row_expand + store."""
 
         @pl.program
         class Before:
@@ -1669,10 +2094,13 @@ class TestConvertTensorToTileOps:
                 src: pl.Tensor[[2, 4, 1], pl.FP16],
                 target: pl.Out[pl.Tensor[[2, 4, 8], pl.FP16]],
             ) -> pl.Tensor[[2, 4, 8], pl.FP16]:
-                expand_clone_input = pl.load(src, [0, 0, 0], [2, 4, 1])
-                expand_clone_d2_target = pl.tile.create([2, 4, 8], dtype=pl.FP16)
-                expand_clone_d2_row = pl.tile.row_expand(expand_clone_d2_target, expand_clone_input)
-                y_tile = pl.store(expand_clone_d2_row, [0, 0, 0], target)
+                for i, (expand_clone_acc,) in pl.range(2, init_values=(target,)):
+                    expand_clone_input = pl.load(src, [i, 0, 0], [1, 4, 1], valid_shapes=[1, 4, 1])
+                    expand_clone_target = pl.tile.create([1, 4, 8], dtype=pl.FP16, valid_shape=[1, 4, 8])
+                    expand_clone_row = pl.tile.row_expand(expand_clone_target, expand_clone_input)
+                    expand_clone_store = pl.store(expand_clone_row, [i, 0, 0], expand_clone_acc)
+                    expand_clone_d2_result = pl.yield_(expand_clone_store)
+                y_tile: pl.Tensor[[2, 4, 8], pl.FP16] = expand_clone_d2_result
                 return y_tile
 
             @pl.function
@@ -2009,6 +2437,73 @@ class TestNestedControlFlow:
 class TestGmLocalTensorConversion:
     """Test gm_tensor vs local_tensor differentiated conversion."""
 
+    def test_gm_tensor_slice_clamp_materializes_derived_valid_shape(self):
+        """A clamp-derived tensor result region must become tile.load's valid_shapes operand."""
+
+        before = _make_before(
+            in_specs=[("x", [100, 64], DataType.FP32)],
+            out_shape=[32, 64],
+            out_dtype=DataType.FP32,
+            body=lambda ib, ins: ib.let("tail", tensor_ops.slice(ins[0], [32, 64], [96, 0], clamp=True)),
+        )
+
+        after = passes.convert_tensor_to_tile_ops()(before)
+        load = _find_first_call_to(_require_function(after, "main_incore_0"), "tile.load")
+        assert load is not None
+        valid_shape = load.args[3]
+        assert isinstance(valid_shape, ir.MakeTuple)
+        assert [dim.value for dim in valid_shape.elements if isinstance(dim, ir.ConstInt)] == [4, 64]
+
+    def test_consumer_driven_slice_clamp_uses_same_valid_shape(self):
+        """The Mat-targeted slice path must preserve the same clamp result as the Vec path."""
+
+        def body(ib, ins):
+            lhs = ib.let("lhs_tail", tensor_ops.slice(ins[0], [32, 32], [96, 0], clamp=True))
+            return ib.let("result", tensor_ops.matmul(lhs, ins[1]))
+
+        before = _make_before(
+            in_specs=[
+                ("lhs", [100, 32], DataType.FP32),
+                ("rhs", [32, 64], DataType.FP32),
+            ],
+            out_shape=[32, 64],
+            out_dtype=DataType.FP32,
+            body=body,
+        )
+
+        after = passes.convert_tensor_to_tile_ops()(before)
+        load = _find_first_call_to(_require_function(after, "main_incore_0"), "tile.load")
+        assert load is not None
+        assert load.kwargs["target_memory"] == MemorySpace.Mat
+        valid_shape = load.args[3]
+        assert isinstance(valid_shape, ir.MakeTuple)
+        assert [dim.value for dim in valid_shape.elements if isinstance(dim, ir.ConstInt)] == [4, 32]
+
+    def test_gm_tensor_slice_drop_dims_loads_full_rank_then_reshapes(self):
+        """The five-operand slice form must survive conversion without losing rank semantics."""
+
+        before = _make_before(
+            in_specs=[("x", [4, 1, 8, 16], DataType.FP32)],
+            out_shape=[8, 16],
+            out_dtype=DataType.FP32,
+            body=lambda ib, ins: ib.let(
+                "plane",
+                tensor_ops.slice(ins[0], [1, 1, 8, 16], [3, 0, 0, 0], drop_dims=[0, 1]),
+            ),
+        )
+
+        after = passes.convert_tensor_to_tile_ops()(before)
+        incore = _require_function(after, "main_incore_0")
+        load = _find_first_call_to(incore, "tile.load")
+        reshape = _find_first_call_to(incore, "tile.reshape")
+        assert load is not None and reshape is not None
+        load_valid = load.args[3]
+        assert isinstance(load_valid, ir.MakeTuple)
+        assert [dim.value for dim in load_valid.elements if isinstance(dim, ir.ConstInt)] == [1, 1, 8, 16]
+        reshape_type = reshape.type
+        assert isinstance(reshape_type, ir.TileType)
+        assert [dim.value for dim in reshape_type.shape if isinstance(dim, ir.ConstInt)] == [8, 16]
+
     @pytest.mark.parametrize("with_valid_shape", [False, True], ids=["plain", "valid_shape"])
     def test_local_tensor_slice_to_tile_slice(self, with_valid_shape):
         """local_tensor.slice (tensor.create result) -> tile.slice (optionally with valid_shape)."""
@@ -2026,14 +2521,20 @@ class TestGmLocalTensorConversion:
         def before_body(ib, ins, extras=()):
             t = ib.let("t", tensor_ops.create([16, 64], DataType.FP32))
             s = ib.let("s", tensor_ops.slice(t, [8, 32], [0, 0], valid_shape=_valid_shape(extras)))
-            return ib.let("y", tensor_ops.add(s, ins[0]))
+            x = ins[0]
+            if with_valid_shape:
+                x = ib.let("xv", tensor_ops.set_validshape(x, 8, extras[0]))
+            return ib.let("y", tensor_ops.add(s, x))
 
         def expected_body(ib, tiles, extras=()):
             t_tile = ib.let("t_tile", tile_ops.create([16, 64], DataType.FP32))
             s_tile = ib.let(
                 "s_tile", tile_ops.slice(t_tile, [8, 32], [0, 0], valid_shape=_valid_shape(extras))
             )
-            return ib.let("y_tile", tile_ops.add(s_tile, tiles[0]))
+            x_tile = tiles[0]
+            if with_valid_shape:
+                x_tile = ib.let("xv_tile", tile_ops.set_validshape(x_tile, 8, extras[0]))
+            return ib.let("y_tile", tile_ops.add(s_tile, x_tile))
 
         before = _make_before(
             in_specs=in_specs,
@@ -2061,7 +2562,13 @@ class TestGmLocalTensorConversion:
                 "s",
                 tensor_ops.slice(t, [8, 32], [0, 0], valid_shape=[8, 8], pad_value=PadValue.min),
             )
-            return ib.let("y", tensor_ops.add(s, ins[0]))
+            # Under 4e/Q2 an elementwise add requires both operands to AGREE on their
+            # valid region (valid_shape never broadcasts); the sliced ``s`` is valid
+            # over [8, 8], so narrow ``x`` to the same extent before adding rather than
+            # combining a partially-valid slice with a fully-valid input (a provable
+            # valid-extent mismatch that 4e rejects).
+            xv = ib.let("xv", tensor_ops.set_validshape(ins[0], 8, 8))
+            return ib.let("y", tensor_ops.add(s, xv))
 
         def expected_body(ib, tiles):
             t_tile = ib.let("t_tile", tile_ops.create([16, 64], DataType.FP32))
@@ -2069,7 +2576,8 @@ class TestGmLocalTensorConversion:
                 "s_tile",
                 tile_ops.slice(t_tile, [8, 32], [0, 0], valid_shape=[8, 8], pad_value=PadValue.min),
             )
-            return ib.let("y_tile", tile_ops.add(s_tile, tiles[0]))
+            xv_tile = ib.let("xv_tile", tile_ops.set_validshape(tiles[0], 8, 8))
+            return ib.let("y_tile", tile_ops.add(s_tile, xv_tile))
 
         before = _make_before(in_specs=in_specs, out_shape=[8, 32], out_dtype=DataType.FP32, body=before_body)
         expected = _make_expected(
@@ -3615,6 +4123,62 @@ class TestWindowSliceIncoreConversion:
     ``ConvertTensorToTileOps`` (position 12) runs.
     """
 
+    def test_direct_window_unary_and_elementwise_compute(self):
+        """Direct window compute gets one validity-preserving preload per input.
+
+        A ``DistributedTensorType`` has its own exact IR kind, so the phase-1
+        collector and preload loop must use the tensor-like cast. Otherwise the
+        converter sends the GM window directly to ``tile.neg`` / ``tile.add``
+        instead of first materializing its local valid region as a Vec tile.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pld.DistributedTensor[
+                    [16, 64],
+                    pl.FP32,
+                    pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[8, 48]),
+                ],
+                rhs: pld.DistributedTensor[
+                    [16, 64],
+                    pl.FP32,
+                    pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[8, 48]),
+                ],
+            ) -> pl.Tensor[
+                [16, 64],
+                pl.FP32,
+                pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[8, 48]),
+            ]:
+                negated = pl.neg(lhs)
+                result = pl.add(negated, rhs)
+                return result
+
+        after = passes.convert_tensor_to_tile_ops()(Before)
+        kernel = _require_function(after, "kernel")
+
+        loads = _find_calls_to(kernel, "tile.load")
+        assert len(loads) == 2
+        for load in loads:
+            assert isinstance(load.args[0].type, ir.DistributedTensorType)
+            valid = load.args[3]
+            assert isinstance(valid, ir.MakeTuple)
+            assert [dim.value for dim in valid.elements if isinstance(dim, ir.ConstInt)] == [8, 48]
+
+        assert _find_first_call_to(kernel, "tile.neg") is not None
+        add = _find_first_call_to(kernel, "tile.add")
+        assert add is not None
+        assert isinstance(add.type, ir.TileType)
+        assert [
+            dim.value
+            for dim in add.type.get_effective_tile_view().valid_shape
+            if isinstance(dim, ir.ConstInt)
+        ] == [8, 48]
+        assert _find_first_call_to(kernel, "tensor.neg") is None
+        assert _find_first_call_to(kernel, "tensor.add") is None
+
     def test_window_source_slice_into_plain_tensor(self):
         """dispatch_ep idiom: read a window slice into a plain output.
 
@@ -3690,6 +4254,42 @@ class TestWindowSliceIncoreConversion:
         assert _find_first_call_to(kernel, "tensor.assemble") is None, (
             "tensor.assemble with a window target must be lowered, not left unconverted"
         )
+
+    def test_partial_window_store_keeps_contextual_validity_union(self):
+        """A lowered store keeps both DTT kind and tensor-level assemble validity."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[4, 8], pl.FP32],
+                win: pl.InOut[
+                    pld.DistributedTensor[
+                        [8, 8],
+                        pl.FP32,
+                        pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[0, 0]),
+                    ]
+                ],
+            ) -> pld.DistributedTensor[
+                [8, 8],
+                pl.FP32,
+                pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[4, 8]),
+            ]:
+                sub = pl.tensor.slice(src, [4, 8], [0, 0])
+                updated = pl.tensor.assemble(win, sub, [0, 0])
+                return updated
+
+        after = passes.convert_tensor_to_tile_ops()(Before)
+        kernel = _require_function(after, "kernel")
+        store = _find_first_call_to(kernel, "tile.store")
+        assert store is not None
+        assert isinstance(store.type, ir.DistributedTensorType)
+        assert store.type.tensor_view is not None
+        assert [dim.value for dim in store.type.tensor_view.valid_shape if isinstance(dim, ir.ConstInt)] == [
+            4,
+            8,
+        ]
 
     def test_direct_window_slice_then_store(self):
         """Minimal isolation of the crash: ``pl.tensor.slice`` directly on a

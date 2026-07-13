@@ -15,9 +15,11 @@
 #include <any>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -47,6 +49,7 @@
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -616,12 +619,26 @@ class OutWindowExternalizer {
     if (!tensor_type) return std::nullopt;
     if (tensor_type->tensor_view_.has_value()) {
       auto new_view = tensor_type->tensor_view_;
+      if (!new_view->valid_shape.empty()) {
+        // A window's origin-anchored validity depends on its offset:
+        // clamp(parent_valid - offset, 0, window). This type-only helper has no
+        // offset, so replacing a partial parent contract with `window_shape`
+        // would silently widen the cloned callee parameter. Until offsets are
+        // threaded through the ABI rewrite, externalize only provably-full
+        // parents and let the baseline call retain every partial contract.
+        if (new_view->valid_shape.size() != tensor_type->shape_.size()) return std::nullopt;
+        for (size_t i = 0; i < tensor_type->shape_.size(); ++i) {
+          if (ProveValidExtentEqual(new_view->valid_shape[i], tensor_type->shape_[i]) != ProofResult::kTrue) {
+            return std::nullopt;
+          }
+        }
+        new_view->valid_shape.clear();
+      }
       if (new_view->stride.empty()) {
         if (new_view->layout == TensorLayout::NZ) return std::nullopt;
         new_view->stride =
             tensor_view_semantics::BuildLogicalStridesFromLayout(tensor_type->shape_, new_view->layout);
       }
-      if (!new_view->valid_shape.empty()) new_view->valid_shape = window_shape;
       return new_view;
     }
 
@@ -702,19 +719,22 @@ class OutWindowExternalizer {
     if (!params || !return_types || !body || !subst || subst->empty()) return rebuilt_param_subst;
 
     std::unordered_map<const Var*, ExprPtr> body_rebuilt_param_subst;
+    std::vector<std::pair<const Var*, VarPtr>> rebuilt_params_in_order;
     for (auto& param : *params) {
       auto new_type = SubstituteTypeExprs(param->GetType(), *subst);
       if (new_type.get() == param->GetType().get()) continue;
 
+      const Var* old_param = param.get();
       auto rebuilt_param = std::make_shared<Var>(param->name_hint_, std::move(new_type), param->span_);
-      rebuilt_param_subst[param.get()] = rebuilt_param;
-      body_rebuilt_param_subst[param.get()] = rebuilt_param;
+      rebuilt_param_subst[old_param] = rebuilt_param;
+      body_rebuilt_param_subst[old_param] = rebuilt_param;
+      rebuilt_params_in_order.emplace_back(old_param, rebuilt_param);
       param = std::move(rebuilt_param);
     }
 
     if (!body_rebuilt_param_subst.empty()) {
       *body = transform_utils::Substitute(*body, body_rebuilt_param_subst);
-      for (const auto& [old_param, new_param] : body_rebuilt_param_subst) {
+      for (const auto& [old_param, new_param] : rebuilt_params_in_order) {
         (*subst)[old_param] = new_param;
       }
     }
@@ -1715,16 +1735,14 @@ class OutWindowExternalizer {
           const auto& piece = pieces[piece_index];
           std::vector<ExprPtr> shape_exprs;
           shape_exprs.reserve(piece.window_shape.size());
-          for (size_t dim_i = 0; dim_i < piece.window_shape.size(); ++dim_i) {
-            const auto& dim = piece.window_shape[dim_i];
+          for (const auto& dim : piece.window_shape) {
             auto shape_expr = transform_utils::Substitute(dim, callsite_subst);
             shape_exprs.push_back(
                 FlattenGeneratedScalarExpr(shape_expr, in_arg->name_hint_, call_assign->span_, &stmts));
           }
           std::vector<ExprPtr> offset_exprs;
           offset_exprs.reserve(piece.callsite_offsets.size());
-          for (size_t offset_i = 0; offset_i < piece.callsite_offsets.size(); ++offset_i) {
-            const auto& offset = piece.callsite_offsets[offset_i];
+          for (const auto& offset : piece.callsite_offsets) {
             auto offset_expr =
                 input_offset_analyzer.Simplify(transform_utils::Substitute(offset, callsite_subst));
             offset_exprs.push_back(
@@ -2026,7 +2044,7 @@ class OutWindowExternalizer {
       int add_output = 0;
       int add_scalar = 0;
 
-      int Total() const { return add_inout + add_input + add_output + add_scalar; }
+      [[nodiscard]] int Total() const { return add_inout + add_input + add_output + add_scalar; }
     };
 
     static ArgDirection ParamDirectionToArgDirection(ParamDirection direction) {
@@ -3572,11 +3590,15 @@ class OutWindowExternalizer {
     std::unordered_map<size_t, std::vector<AggregateUpdate>> reads_by_iter_arg_index;
     std::unordered_map<size_t, const Var*> update_tail_by_iter_arg_index;
     std::unordered_set<const Var*> carrier_vars;
+    std::vector<const Var*> carrier_vars_in_order;
+    auto record_carrier = [&](const Var* var) {
+      if (carrier_vars.insert(var).second) carrier_vars_in_order.push_back(var);
+    };
     std::unordered_set<const AssignStmt*> recognized_carrier_accesses;
     for (const auto& match : loop_matches) {
       if (match.iter_arg_index >= loop->iter_args_.size()) return std::nullopt;
       update_tail_by_iter_arg_index[match.iter_arg_index] = loop->iter_args_[match.iter_arg_index].get();
-      carrier_vars.insert(loop->iter_args_[match.iter_arg_index].get());
+      record_carrier(loop->iter_args_[match.iter_arg_index].get());
     }
     std::unordered_map<const Var*, ExprPtr> scalar_defs;
     constexpr int64_t kMaxNestedAccessTripCount = 32;
@@ -3655,7 +3677,7 @@ class OutWindowExternalizer {
               updates_by_iter_arg_index[iter_arg_index].push_back(
                   AggregateUpdate{assign, std::move(window_shape), std::move(offsets)});
               tail = assign->var_.get();
-              carrier_vars.insert(assign->var_.get());
+              record_carrier(assign->var_.get());
               recognized_carrier_accesses.insert(assign.get());
               return true;
             }
@@ -3682,7 +3704,7 @@ class OutWindowExternalizer {
       }
 
       if (auto nested_loop = As<ForStmt>(stmt)) {
-        std::unordered_map<size_t, size_t> nested_iter_by_outer_iter;
+        std::map<size_t, size_t> nested_iter_by_outer_iter;
         for (auto& [outer_iter_index, tail] : *tails) {
           for (size_t nested_i = 0; nested_i < nested_loop->iter_args_.size(); ++nested_i) {
             auto init_var = AsVarLike(nested_loop->iter_args_[nested_i]->initValue_);
@@ -3712,7 +3734,7 @@ class OutWindowExternalizer {
           std::unordered_map<size_t, const Var*> trip_tails;
           for (const auto& [outer_iter_index, nested_i] : nested_iter_by_outer_iter) {
             trip_tails[outer_iter_index] = nested_loop->iter_args_[nested_i].get();
-            carrier_vars.insert(nested_loop->iter_args_[nested_i].get());
+            record_carrier(nested_loop->iter_args_[nested_i].get());
           }
 
           YieldStmtPtr nested_yield;
@@ -3733,7 +3755,7 @@ class OutWindowExternalizer {
 
         for (const auto& [outer_iter_index, nested_i] : nested_iter_by_outer_iter) {
           (*tails)[outer_iter_index] = nested_loop->return_vars_[nested_i].get();
-          carrier_vars.insert(nested_loop->return_vars_[nested_i].get());
+          record_carrier(nested_loop->return_vars_[nested_i].get());
         }
         return true;
       }
@@ -3757,7 +3779,7 @@ class OutWindowExternalizer {
     const auto loop_use_index = BuildVarUseIndex(loop);
     const auto loop_body_use_index = BuildVarUseIndex(loop->body_);
     const auto return_use_index = BuildVarUseIndex(ret_stmt);
-    for (const auto* carrier_var : carrier_vars) {
+    for (const auto* carrier_var : carrier_vars_in_order) {
       auto users_it = loop_body_use_index.assign_users.find(carrier_var);
       if (users_it == loop_body_use_index.assign_users.end()) continue;
       for (const auto* user : users_it->second) {
@@ -4468,7 +4490,6 @@ class OutWindowExternalizer {
        protected:
         StmtPtr VisitStmt_(const ForStmtPtr& op) override {
           std::vector<const Var*> old_iter_args_to_erase;
-          bool changed = false;
           for (size_t i = 0; i < op->return_vars_.size() && i < op->iter_args_.size(); ++i) {
             auto it = narrowed_return_vars_.find(op->return_vars_[i].get());
             if (it == narrowed_return_vars_.end()) continue;
@@ -4480,7 +4501,6 @@ class OutWindowExternalizer {
             var_remap_[old_iter.get()] = new_iter;
             var_remap_[old_ret.get()] = new_ret;
             old_iter_args_to_erase.push_back(old_iter.get());
-            changed = true;
           }
           auto new_stmt = IRMutator::VisitStmt_(op);
           for (const auto* old_iter : old_iter_args_to_erase) {

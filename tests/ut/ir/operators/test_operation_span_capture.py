@@ -11,6 +11,7 @@
 
 import inspect
 
+import pypto.language as pl
 import pytest
 from pypto import DataType, ir
 from pypto.ir.op import tensor as tensor_ops
@@ -112,6 +113,17 @@ class TestTensorOperationSpanCapture:
 
         assert result.span.filename.endswith("test_operation_span_capture.py")
         assert result.span.is_valid()
+
+    def test_tensor_slice_preserves_positional_span_slot(self):
+        """The historical positional span remains immediately after pad_value."""
+        tensor = ir.Var("tensor", ir.TensorType([64, 32], DataType.FP32), ir.Span.unknown())
+        explicit_span = ir.Span("legacy_tensor_slice.py", 17, 4)
+
+        result = tensor_ops.slice(tensor, [32, 16], [0, 0], None, None, None, explicit_span)
+
+        assert result.span.filename == "legacy_tensor_slice.py"
+        assert result.span.begin_line == 17
+        assert result.span.begin_column == 4
 
     def test_tensor_cast_captures_span(self):
         """Test cast operation span capture."""
@@ -219,6 +231,30 @@ class TestTileOperationSpanCapture:
         assert result.span.filename == "tile_ops.py"
         assert result.span.begin_line == 42
         assert result.span.begin_column == 5
+
+    def test_tile_slice_preserves_positional_span_slot(self):
+        """The tile wrapper preserves the same historical positional span slot."""
+        tile = ir.Var("tile", ir.TileType([16, 16], DataType.FP16), ir.Span.unknown())
+        explicit_span = ir.Span("legacy_tile_slice.py", 23, 6)
+
+        result = tile_ops.slice(tile, [8, 8], [0, 0], None, None, None, explicit_span)
+
+        assert result.span.filename == "legacy_tile_slice.py"
+        assert result.span.begin_line == 23
+        assert result.span.begin_column == 6
+
+
+def test_slice_clamp_is_keyword_only_across_public_wrappers():
+    """New clamp behavior must not consume an existing or future positional slot."""
+    wrappers = (tensor_ops.slice, tile_ops.slice, pl.tensor.slice, pl.tile.slice, pl.slice)
+    for wrapper in wrappers:
+        signature = inspect.signature(wrapper)
+        assert signature.parameters["clamp"].kind == inspect.Parameter.KEYWORD_ONLY
+
+    for wrapper in (tensor_ops.slice, tile_ops.slice):
+        signature = inspect.signature(wrapper)
+        assert signature.parameters["span"].kind == inspect.Parameter.POSITIONAL_OR_KEYWORD
+        assert list(signature.parameters).index("span") < list(signature.parameters).index("clamp")
 
 
 class TestUtilityFunction:

@@ -38,6 +38,7 @@ from pypto.backend.pto_backend import (
 from pypto.ir import OptimizationStrategy, PassManager
 from pypto.ir.builder import IRBuilder
 from pypto.ir.op import tile
+from pypto.language.parser.diagnostics.exceptions import InvalidOperationError
 
 PTOCodegen = codegen.PTOCodegen
 
@@ -538,6 +539,58 @@ def test_pto_codegen_dynamic_valid_shape_scalar_defined_in_body():
     assert "pto.set_validshape" not in mlir_code
 
 
+def test_pto_codegen_broadcast_add_valid_shape_agreement_reaches_alloc():
+    """4e end-to-end: an elementwise add whose FIRST operand is a broadcast tile with
+    a narrow valid extent must NOT leak that narrow extent into the result — the
+    result takes the shaping (full-shaped) operand's valid extent, and this survives
+    to the alloc_tile.
+
+    ``bt`` is a [1, 128] row-broadcast operand valid over [1, 64]; ``at`` is the
+    full-shaped [128, 128] operand valid over [40, 64]. Before 4e, ``add(bt, at)``
+    took arg0's (bt's) valid region, so the result tile emitted ``valid_row = %c1``
+    (a store would write a single row instead of 40 — silent narrowing). After 4e,
+    bt is a broadcast source in the row dim (physical shape 1) and is exempt, so the
+    result's valid_row is at's 40 and valid_col is the agreed 64.
+    """
+
+    @pl.program
+    class BroadcastAddProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            a: pl.Tensor[[128, 128], pl.FP32],
+            b: pl.Tensor[[1, 128], pl.FP32],
+            output: pl.Tensor[[128, 128], pl.FP32],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            at: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [0, 0], [128, 128], valid_shapes=[40, 64])
+            bt: pl.Tile[[1, 128], pl.FP32] = pl.load(b, [0, 0], [1, 128], valid_shapes=[1, 64])
+            # arg0 is the narrow broadcast operand bt: its valid_row of 1 must NOT
+            # narrow the result; the result row comes from the shaping operand at.
+            r: pl.Tile[[128, 128], pl.FP32] = pl.add(bt, at)
+            result: pl.Tensor[[128, 128], pl.FP32] = pl.store(r, [0, 0], output)
+            return result
+
+    mlir_code = _generate_default_mlir(BroadcastAddProgram)
+    alloc_lines = _get_alloc_tile_lines(mlir_code)
+
+    def _alloc_for(stem: str) -> str:
+        matches = [ln for ln in alloc_lines if ln.lstrip("%").startswith(stem)]
+        assert len(matches) == 1, f"Expected exactly one alloc for '{stem}', got: {matches}"
+        return matches[0]
+
+    result_alloc = _alloc_for("r__")
+    bcast_alloc = _alloc_for("bt__")
+
+    # The broadcast operand carries the narrow valid_row = 1 ...
+    assert "valid_row = %c1_index" in bcast_alloc, f"bt should carry valid_row=1: {bcast_alloc}"
+    # ... but the result must NOT inherit it: result valid_row is the shaping
+    # operand at's 40, and valid_col is the agreed 64 (NOT narrowed to bt's region).
+    assert "valid_row = %c40_index" in result_alloc, (
+        f"Result valid_row must be 40 (shaping operand), not bt's 1: {result_alloc}"
+    )
+    assert "valid_col = %c64_index" in result_alloc, f"Result valid_col must be the agreed 64: {result_alloc}"
+
+
 def test_pto_codegen_dynamic_valid_shape_row_defined_in_body():
     """Dynamic valid_shape rows defined in-body should still reach alloc_tile."""
 
@@ -578,6 +631,446 @@ def test_pto_codegen_dynamic_valid_shape_row_defined_in_body():
     # alloc_tile already carries the runtime valid_row, so no separate
     # pto.set_validshape is emitted.
     assert "pto.set_validshape" not in mlir_code
+
+
+def test_pto_codegen_create_tile_zero_valid_shape():
+    """create_tile(valid_shape=[0, 0]) survives the pipeline and emits valid_row = 0.
+
+    Under D2 an unset valid_shape means fully valid, so an empty accumulator must
+    be created with an explicit ``valid_shape=[0, 0]``. That must reach codegen as
+    ``valid_row = %c0_index`` (FlattenTileNdTo2d folds it to valid_row=0), proving
+    the zero region is not silently widened to the physical shape.
+    """
+
+    @pl.program
+    class CreateAccProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(self, output: pl.Tensor[[64, 64], pl.FP32]) -> pl.Tensor[[64, 64], pl.FP32]:
+            acc: pl.Tile[[64, 64], pl.FP32] = pl.create_tile([64, 64], pl.FP32, valid_shape=[0, 0])
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.store(acc, [0, 0], output)
+            return result
+
+    alloc_lines = _get_alloc_tile_lines(_generate_default_mlir(CreateAccProgram))
+    assert len(alloc_lines) == 1, f"Expected one alloc_tile, got: {alloc_lines}"
+    alloc_line = alloc_lines[0]
+    assert "valid_row = %c0_index" in alloc_line, (
+        f"Expected valid_row = %c0_index for the empty accumulator, got: {alloc_line}"
+    )
+    assert "valid_col = %c0_index" in alloc_line, (
+        f"Expected valid_col = %c0_index for the empty accumulator, got: {alloc_line}"
+    )
+
+
+def test_pto_codegen_assemble_narrows_tstore_view():
+    """assemble into a [0,0] accumulator narrows the tstore's partition view.
+
+    load(valid=[32,64]) -> exp -> assemble into create_tile(valid_shape=[0,0]) ->
+    store. The assemble result's valid region is the union max(valid(acc),
+    offset + valid(src)) = [32,64], so the store must lower to a tstore whose
+    partition view is <32x64xf32> — the narrowed valid region. Before step 4b the
+    assemble result type claimed full validity, degrading the tstore to a static
+    <128x128xf32> partition view that writes the invalid rows.
+    """
+
+    @pl.program
+    class AssembleNarrowProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(
+            self,
+            a: pl.Tensor[[128, 128], pl.FP32],
+            output: pl.Tensor[[128, 128], pl.FP32],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            at: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [0, 0], [128, 128], valid_shapes=[32, 64])
+            r: pl.Tile[[128, 128], pl.FP32] = pl.exp(at)
+            tgt: pl.Tile[[128, 128], pl.FP32] = pl.create_tile([128, 128], pl.FP32, valid_shape=[0, 0])
+            asm: pl.Tile[[128, 128], pl.FP32] = pl.tile.assemble(tgt, r, [0, 0])
+            out: pl.Tensor[[128, 128], pl.FP32] = pl.tile.store(asm, [0, 0], output)
+            return out
+
+    mlir_code = _generate_default_mlir(AssembleNarrowProgram)
+    lines = _get_mlir_lines(mlir_code)
+
+    # The store lowers to a tstore feeding the narrowed partition view.
+    tstore_line = _single_line(lines, "pto.tstore", startswith=True)
+    assert "!pto.partition_tensor_view<32x64xf32>" in tstore_line, (
+        f"Expected tstore to write the narrowed <32x64xf32> valid region, got: {tstore_line}"
+    )
+    # The bug's signature — a static full-shape store view — must be gone.
+    assert "!pto.partition_tensor_view<128x128xf32>" not in mlir_code, (
+        "assemble result must not widen the store view back to the full 128x128 shape"
+    )
+
+
+def test_pto_codegen_clamp_ragged_tail_narrows_tstore():
+    """End-to-end: a clamped ragged-tail slice derives a DYNAMIC
+    valid region that reaches the store.
+
+    A [128,128] tile sliced [32,128] at a runtime ``row`` with ``clamp=True`` has
+    ``valid_row = min(32, max(0, 128 - row))``; storing it must lower to a tstore
+    whose output partition view is ``<?x128xf32>`` — the narrowed, runtime-sized
+    ragged tail. Without clamp the identical store widens to a static
+    ``<32x128xf32>``, writing 32 rows even past the physical edge (padding as data).
+    This is the load -> slice(clamp) -> store composition; the tstore's narrowed
+    output view is the observable end-to-end effect.
+    """
+
+    @pl.program
+    class ClampRaggedProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            a: pl.Tensor[[128, 128], pl.FP32],
+            row: pl.Scalar[pl.INDEX],
+            output: pl.Tensor[[128, 128], pl.FP32],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            full: pl.Tile[[128, 128], pl.FP32] = pl.load(
+                a, [0, 0], [128, 128], target_memory=pl.MemorySpace.Vec
+            )
+            rag: pl.Tile[[32, 128], pl.FP32] = pl.tile.slice(full, [32, 128], [row, 0], clamp=True)
+            result: pl.Tensor[[128, 128], pl.FP32] = pl.tile.store(rag, [row, 0], output)
+            return result
+
+    mlir_code = _generate_default_mlir(ClampRaggedProgram)
+    lines = _get_mlir_lines(mlir_code)
+    tstore_line = _single_line(lines, "pto.tstore", startswith=True)
+    subview_line = _single_line(lines, "pto.subview")
+    assert " valid [" in subview_line, (
+        "clamp-derived validity must be materialized on pto.subview even when "
+        f"tile.slice has no explicit valid_shape operand, got: {subview_line}"
+    )
+    subview_result_type = subview_line.split("->", 1)[-1]
+    assert "v_row=?" in subview_result_type and "v_col=128" in subview_result_type, (
+        f"pto.subview result typing must come from the slice result TileType; got: {subview_line}"
+    )
+    # The clamped ragged tail lowers to a dynamic <?x128xf32> store view.
+    assert "!pto.partition_tensor_view<?x128xf32>" in tstore_line, (
+        f"Expected the clamped ragged tail to lower to a dynamic <?x128xf32> tstore view, got: {tstore_line}"
+    )
+    # The bug's signature — a static full-row store view claiming all 32 rows valid.
+    assert "!pto.partition_tensor_view<32x128xf32>" not in mlir_code, (
+        "clamp must not widen the ragged-tail store back to the static 32-row region"
+    )
+
+
+def test_pto_codegen_ragged_tail_load_compute_assemble_store_end_to_end():
+    """End-to-end (the whole valid_shape feature): a fully dynamic ragged-tail
+    ``load -> compute -> assemble -> store`` chain threads the runtime valid region
+    from the load, through a compute op, an accumulator assemble, and out to the
+    store — narrowing every observable stage of the emitted PTO.
+
+    A tall ``[N, 128]`` source (``N`` a runtime ``pl.dynamic``, deliberately NOT a
+    multiple of the 128-row tile) is processed one physical ``[128, 128]`` tile at a
+    time; the last block is ragged — only ``tail = N - base < 128`` rows are real.
+    The tile's PHYSICAL shape stays the static ``[128, 128]`` (design D1: dynamism
+    rides on ``valid_shape``, never the physical tile), and the runtime ``tail``
+    flows as ``valid_row`` through the chain:
+    ``load(valid_shapes=[tail, 128])`` -> ``pl.exp`` (compute; the elementwise rule
+    carries the valid region) -> ``tile.assemble`` into a
+    ``create_tile(valid_shape=[0, 0])`` accumulator (4a + 4b) -> ``store``.
+
+    The output tensor is deliberately STATIC ``[128, 128]``, so the ``?`` row in the
+    tstore's partition view is UNAMBIGUOUSLY the runtime valid narrowing and not the
+    tensor shape (contrast: a full ``[128, 128]`` load stores the static
+    ``<128x128xf32>`` — see ``test_pto_codegen_assemble_narrows_tstore_view``).
+    Three emitted-PTO facts are asserted, each a place the pre-``valid_shape`` code
+    widened padding into real data:
+
+    1. the load AND compute tiles' ``pto.alloc_tile`` carry a DYNAMIC ``valid_row``
+       (an ``%arg`` SSA operand), not a static ``%c128_index`` — the compute step
+       PRESERVED the region rather than resetting it to the full physical shape;
+    2. the accumulator's ``pto.alloc_tile`` starts empty (``valid_row = %c0_index``);
+    3. the assemble lowers to ``pto.subview ... valid [<dyn>, %c128_index]`` and the
+       ``pto.tstore`` writes a narrowed ``<?x128xf32>`` partition view — never the
+       full static ``<128x128xf32>``.
+    """
+
+    _N = pl.dynamic("RaggedN")
+
+    @pl.program
+    class RaggedTailChain:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            a: pl.Tensor[[_N, 128], pl.FP32],
+            base: pl.Scalar[pl.INDEX],
+            tail: pl.Scalar[pl.INDEX],
+            output: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            at: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [base, 0], [128, 128], valid_shapes=[tail, 128])
+            r: pl.Tile[[128, 128], pl.FP32] = pl.exp(at)
+            acc: pl.Tile[[128, 128], pl.FP32] = pl.create_tile([128, 128], pl.FP32, valid_shape=[0, 0])
+            asm: pl.Tile[[128, 128], pl.FP32] = pl.tile.assemble(acc, r, [0, 0])
+            out: pl.Tensor[[128, 128], pl.FP32] = pl.tile.store(asm, [0, 0], output)
+            return out
+
+    mlir_code = _generate_default_mlir(RaggedTailChain)
+    lines = _get_mlir_lines(mlir_code)
+    alloc_lines = _get_alloc_tile_lines(mlir_code)
+
+    # (1) The load (at__) and compute (r__) tiles both carry a DYNAMIC valid_row
+    #     operand (the runtime `tail` %arg), not the static full 128 — the load set
+    #     the ragged region and `pl.exp` propagated it instead of widening.
+    for prefix in ("at__", "r__"):
+        matched = [ln for ln in alloc_lines if ln.lstrip("%").startswith(prefix)]
+        assert len(matched) == 1, f"Expected one alloc for {prefix!r}, got: {alloc_lines}"
+        alloc = matched[0]
+        assert "v_row=?" in alloc, f"Expected dynamic v_row=? tile_buf type for {prefix!r}: {alloc}"
+        assert "valid_row = %arg" in alloc, (
+            f"Expected the runtime ragged tail as a dynamic valid_row %arg operand for {prefix!r}: {alloc}"
+        )
+        assert "valid_row = %c128_index" not in alloc, (
+            f"ragged tail must not widen to a static full 128-row valid_row for {prefix!r}: {alloc}"
+        )
+        assert "valid_col = %c128_index" in alloc, f"Expected full valid_col = 128 for {prefix!r}: {alloc}"
+
+    # (2) The accumulator starts empty (create_tile(valid_shape=[0, 0]) -> 4a).
+    acc_allocs = [ln for ln in alloc_lines if ln.lstrip("%").startswith("acc__")]
+    assert len(acc_allocs) == 1, f"Expected one accumulator alloc, got: {alloc_lines}"
+    assert "valid_row = %c0_index" in acc_allocs[0], (
+        f"Expected the empty accumulator to carry valid_row = %c0_index, got: {acc_allocs[0]}"
+    )
+
+    # (3a) The assemble lowers to a pto.subview carrying the dynamic valid region.
+    subview_line = _single_line(lines, "pto.subview")
+    assert "valid [%arg" in subview_line, (
+        f"Expected the assemble subview to carry a dynamic valid_row %arg operand, got: {subview_line}"
+    )
+    assert "valid [%c128_index, %c128_index]" not in subview_line, (
+        f"assemble subview must not widen to the full static valid region, got: {subview_line}"
+    )
+
+    # (3b) The store lowers to a narrowed dynamic <?x128xf32> partition view; the
+    #      full static <128x128xf32> view (padding written as data) must be gone.
+    tstore_line = _single_line(lines, "pto.tstore", startswith=True)
+    assert "!pto.partition_tensor_view<?x128xf32>" in tstore_line, (
+        f"Expected the ragged tail to lower to a dynamic <?x128xf32> tstore view, got: {tstore_line}"
+    )
+    assert "!pto.partition_tensor_view<128x128xf32>" not in mlir_code, (
+        "the ragged-tail store must not widen back to the full static 128x128 partition view"
+    )
+
+
+def test_pto_codegen_clamp_negative_offset_rejected_front_door():
+    """End-to-end (adversary regression): a front-door ``pl.slice(..., clamp=True)`` at a
+    provably-negative constant offset must reject at type inference, never reach codegen.
+
+    Before the fix this compiled: the clamp intersect only clipped the HIGH edge, so a
+    ``-10`` offset widened the neg tile's valid region and the pipeline emitted a full
+    static ``valid_row = %c64_index`` (padding written as real data). A negative offset is
+    not origin-anchored, so per the North Star it is rejected rather than widened.
+    """
+    with pytest.raises(InvalidOperationError, match="offset is negative"):
+
+        @pl.program
+        class ClampNegOffsetProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                x: pl.Tensor[[128, 64], pl.FP32],
+                out: pl.Tensor[[64, 64], pl.FP32],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                xs = pl.slice(x, [64, 64], [-10, 0], clamp=True)
+                t = pl.load(xs, [0, 0], [64, 64], target_memory=pl.MemorySpace.Vec)
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(t, [0, 0], out)
+                return result
+
+
+def test_pto_codegen_tensor_unary_chain_delivers_valid_region():
+    """End-to-end: a tensor-programming chain
+    ``slice(valid=[vm, 64]) -> tensor-level neg -> assemble -> return`` delivers the
+    dynamic ragged region all the way to the emitted PTO.
+
+    This is an INTEGRATION test of the tensor-op path: ``pl.neg`` here dispatches to
+    ``tensor.neg`` (its operand is a GM tensor slice, not a tile), which under 4f carries
+    the slice's ``[vm, 64]`` valid region onto its result instead of dropping it. The
+    chain lowers through ``ConvertTensorToTileOps`` and the neg tile's ``alloc_tile`` must
+    carry a *dynamic* ``valid_row`` (the runtime ``vm``) with ``valid_col = %c64_index``
+    and ``v_row=?/v_col=?`` — not a static full ``valid_row = %c64_index``. (The 4f
+    type-propagation itself is isolated in ``test_tensor_ops.py``; here we confirm the
+    whole tensor-op chain composes and reaches codegen.)
+    """
+
+    @pl.program
+    class TensorUnaryChain:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            a: pl.Tensor[[64, 64], pl.FP32],
+            vm: pl.Scalar[pl.INDEX],
+            output: pl.Tensor[[64, 64], pl.FP32],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            s = pl.slice(a, [64, 64], [0, 0], valid_shape=[vm, 64])
+            n = pl.neg(s)
+            output = pl.assemble(output, n, [0, 0])
+            return output
+
+    mlir_code = _generate_default_mlir(TensorUnaryChain)
+    alloc_lines = _get_alloc_tile_lines(mlir_code)
+    neg_allocs = [ln for ln in alloc_lines if ln.lstrip("%").startswith("n__")]
+    assert len(neg_allocs) == 1, f"Expected one alloc for the neg tile, got: {alloc_lines}"
+    neg_alloc = neg_allocs[0]
+
+    # Dynamic valid extents: type carries v_row=?/v_col=? with explicit operands.
+    assert "v_row=?" in neg_alloc and "v_col=?" in neg_alloc, (
+        f"Expected dynamic v_row=?/v_col=? tile_buf type, got: {neg_alloc}"
+    )
+    assert "valid_col = %c64_index" in neg_alloc, f"Expected valid_col = 64, got: {neg_alloc}"
+    # The row extent is the runtime vm (a dynamic operand), NOT the full static 64 — the
+    # ragged region reached the emitted PTO rather than being widened away.
+    assert "valid_row = %c64_index" not in neg_alloc, (
+        f"neg tile valid_row must be the dynamic vm, not a static full 64: {neg_alloc}"
+    )
+    assert "valid_row = %arg" in neg_alloc, (
+        f"Expected a dynamic valid_row operand on the neg tile, got: {neg_alloc}"
+    )
+
+
+def test_pto_codegen_matmul_dynamic_m_valid_row():
+    """matmul propagates a dynamic valid M onto its Acc output tile.
+
+    lhs is loaded with a runtime valid_shape row extent ``m``; matmul's output valid
+    region is [valid(lhs)[M], valid(rhs)[N]], so the Acc (L0C) result tile's alloc_tile
+    must carry ``valid_row = %arg`` (the symbolic M) — NOT ``valid_row = %c128_index``.
+    Before step 4c the matmul overwrote valid_shape with the full physical [M, N],
+    which lowered to a static ``valid_row = %c128_index`` claiming all 128 rows valid.
+    """
+
+    @pl.program
+    class MatmulDynMProgram:
+        @pl.function(type=pl.FunctionType.AIC)
+        def cube(
+            self,
+            a: pl.Tensor[[128, 128], pl.BF16],
+            b: pl.Tensor[[128, 128], pl.BF16],
+            m: pl.Scalar[pl.INDEX],
+            out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            a_mat = pl.load(a, [0, 0], [128, 128], [m, 128], target_memory=pl.MemorySpace.Mat)
+            a_left = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
+            b_mat = pl.load(b, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+            b_right = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
+            c_tile = pl.matmul(a_left, b_right)
+            out: pl.Tensor[[128, 128], pl.FP32] = pl.store(c_tile, [0, 0], out)
+            return out
+
+    mlir_code = _generate_default_mlir(MatmulDynMProgram)
+    acc_allocs = [line for line in _get_alloc_tile_lines(mlir_code) if "loc=acc" in line]
+    assert len(acc_allocs) == 1, f"Expected one Acc alloc_tile (the matmul output), got: {acc_allocs}"
+    acc_line = acc_allocs[0]
+    # The matmul output's valid_row is the runtime M operand, not the physical extent.
+    assert "valid_row = %arg" in acc_line, (
+        f"Expected the Acc tile's valid_row to be the dynamic M operand, got: {acc_line}"
+    )
+    assert "valid_row = %c128_index" not in acc_line, (
+        f"matmul must not widen the Acc tile's valid_row back to the full physical 128: {acc_line}"
+    )
+    # N was fully valid, so valid_col stays the physical 128.
+    assert "valid_col = %c128_index" in acc_line, (
+        f"Expected valid_col = %c128_index (N fully valid) on the Acc tile, got: {acc_line}"
+    )
+
+
+def test_pto_codegen_slice_narrows_to_source_valid():
+    """slice INTERSECTS the window with the source tile's valid region (step 4d).
+
+    load(valid=[40,50]) -> slice([64,64] @ [0,0]). The window [64,64] is clipped to
+    the source's valid [40,50], so the sliced tile's alloc_tile must carry
+    ``valid_row = %c40_index`` / ``valid_col = %c50_index`` (NOT the full 64x64), and
+    the store lowers to a tstore feeding a narrowed <40x50xf32> partition view. Before
+    step 4d slice reset valid_shape to the full window, widening the store to
+    <64x64xf32> and writing rows/cols the source never loaded. This is the codegen
+    (emitted-PTO) witness that an op-specific 4d narrowing survives to the hardware.
+    """
+
+    @pl.program
+    class SliceNarrowProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(
+            self,
+            a: pl.Tensor[[128, 128], pl.FP32],
+            output: pl.Tensor[[64, 64], pl.FP32],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            at: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [0, 0], [128, 128], valid_shapes=[40, 50])
+            sl: pl.Tile[[64, 64], pl.FP32] = pl.tile.slice(at, [64, 64], [0, 0])
+            out: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(sl, [0, 0], output)
+            return out
+
+    mlir_code = _generate_default_mlir(SliceNarrowProgram)
+    lines = _get_mlir_lines(mlir_code)
+
+    # The sliced tile (physical rows=64) carries the narrowed valid extent clipped
+    # from the source's [40, 50] — not the full 64x64 window.
+    slice_alloc = [line for line in _get_alloc_tile_lines(mlir_code) if "rows=64" in line]
+    assert len(slice_alloc) == 1, f"Expected one rows=64 alloc_tile (the slice), got: {slice_alloc}"
+    assert "valid_row = %c40_index" in slice_alloc[0], (
+        f"Expected the slice tile's valid_row clipped to the source's 40, got: {slice_alloc[0]}"
+    )
+    assert "valid_col = %c50_index" in slice_alloc[0], (
+        f"Expected the slice tile's valid_col clipped to the source's 50, got: {slice_alloc[0]}"
+    )
+    assert "%c64_index" not in slice_alloc[0], (
+        f"slice must not widen the window back to the full 64 rows/cols: {slice_alloc[0]}"
+    )
+    # The store lowers to a tstore feeding the narrowed partition view.
+    tstore_line = _single_line(lines, "pto.tstore", startswith=True)
+    assert "!pto.partition_tensor_view<40x50xf32>" in tstore_line, (
+        f"Expected tstore to write the narrowed <40x50xf32> valid region, got: {tstore_line}"
+    )
+
+
+def test_pto_codegen_matmul_bias_narrows_valid_col_to_bias():
+    """matmul_bias intersects the output N with the bias's valid N.
+
+    The bias is loaded with a valid_shape N of 50 over a physical [1, 96]; the matmul
+    itself is fully valid over N=96. Because C[:,j] = A@B[:,j] + bias[0,j] is only real
+    where the bias column j is real, the Acc output tile's valid_col must be the bias's
+    50 — NOT the matmul's 96 — and the tstore must write only 64x50, not 64x96 (writing
+    the 46 bias-padded columns would corrupt the output). Before step 4c the bias valid
+    region was dropped and the Acc tile widened to valid_col = %c96_index.
+    """
+
+    @pl.program
+    class MatmulBiasNarrowProgram:
+        @pl.function(type=pl.FunctionType.AIC)
+        def cube(
+            self,
+            a: pl.Tensor[[64, 64], pl.BF16],
+            b: pl.Tensor[[64, 96], pl.BF16],
+            bias: pl.Tensor[[1, 96], pl.FP32],
+            out: pl.Out[pl.Tensor[[64, 96], pl.FP32]],
+        ) -> pl.Tensor[[64, 96], pl.FP32]:
+            a_mat = pl.load(a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+            a_left = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
+            b_mat = pl.load(b, [0, 0], [64, 96], target_memory=pl.MemorySpace.Mat)
+            b_right = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
+            # bias valid N = 50 over a physical [1, 96].
+            bias_mat = pl.load(bias, [0, 0], [1, 96], [1, 50], target_memory=pl.MemorySpace.Mat)
+            bias_bias = pl.move(bias_mat, target_memory=pl.MemorySpace.Bias)
+            c_tile = pl.matmul_bias(a_left, b_right, bias_bias)
+            out: pl.Tensor[[64, 96], pl.FP32] = pl.store(c_tile, [0, 0], out)
+            return out
+
+    mlir_code = _generate_default_mlir(MatmulBiasNarrowProgram)
+    acc_allocs = [line for line in _get_alloc_tile_lines(mlir_code) if "loc=acc" in line]
+    assert len(acc_allocs) == 1, f"Expected one Acc alloc_tile (the matmul_bias output), got: {acc_allocs}"
+    acc_line = acc_allocs[0]
+    # The Acc output's valid_col is the bias-narrowed 50, and M stays fully valid (64).
+    assert "valid_row = %c64_index" in acc_line, (
+        f"Expected valid_row = %c64_index (M fully valid) on the Acc tile, got: {acc_line}"
+    )
+    assert "valid_col = %c50_index" in acc_line, (
+        f"Expected the Acc tile's valid_col to be the bias-narrowed 50, got: {acc_line}"
+    )
+    assert "valid_col = %c96_index" not in acc_line, (
+        f"matmul_bias must not widen the Acc tile's valid_col back to the matmul N (96): {acc_line}"
+    )
+    # The store writes exactly the valid 64x50 region — not the padded 64x96.
+    tstore_lines = [line.strip() for line in mlir_code.splitlines() if "pto.tstore" in line]
+    assert len(tstore_lines) == 1, f"Expected one pto.tstore, got: {tstore_lines}"
+    store_pview = _single_line(_get_mlir_lines(mlir_code), "_pview = pto.partition_view %out")
+    assert "partition_tensor_view<64x50xf32>" in store_pview, (
+        f"tstore must write only the valid 64x50 region, got: {store_pview}"
+    )
 
 
 def test_pto_codegen_tile_load_lowering():
@@ -1033,8 +1526,8 @@ class TestGenerateArgUnpacking:
         with ib.function("dyn_multi_var", type=ir.FunctionType.InCore) as f:
             t = f.param("t", ty)
             out = f.param("out", ty)
-            tile_t = ib.let("tile_t", tile.load(t, [0, 0], [16, 64]))
-            ret = ib.let("ret", tile.store(tile_t, [0, 0], out))
+            tile_t = ib.let("tile_t", tile.load(t, [0, 0, 0], [1, 16, 64]))
+            ret = ib.let("ret", tile.store(tile_t, [0, 0, 0], out))
             f.return_type(ty)
             ib.return_stmt(ret)
         func = f.get_result()
@@ -1181,10 +1674,11 @@ class TestGenerateArgUnpacking:
         ib = IRBuilder()
         with ib.function("dyn_unary_func", type=ir.FunctionType.InCore) as f:
             a = f.param("a", ty)
-            t = ib.let("t", tile.load(a, [0, 0], [16, 64]))
-            ret = ib.let("ret", t)
             f.return_type(ty)
-            ib.return_stmt(ret)
+            # This test exercises wrapper argument inversion only.  Keeping the
+            # deliberately non-invertible extent out of a memory operation avoids
+            # conflating that contract with tile.load's physical-window bounds.
+            ib.return_stmt(a)
         func = f.get_result()
 
         with pytest.raises(ValueError, match="non-invertible"):
@@ -1638,8 +2132,8 @@ def test_compile_writes_orchestration_on_partial_codegen_failure(tmp_path):
         def bad_kernel(
             self,
             a: pl.Tensor[[16, 16], pl.FP32],
-            output: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
-        ) -> pl.Tensor[[16, 1], pl.FP32]:
+            output: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
+        ) -> pl.Tensor[[1, 16], pl.FP32]:
             tile = pl.load(a, offsets=[0, 0], shapes=[16, 16])
             result = pl.tile.sum(tile, axis=1)
             out = pl.store(result, offsets=[0, 0], output_tensor=output)

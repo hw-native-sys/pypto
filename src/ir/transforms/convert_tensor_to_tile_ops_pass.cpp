@@ -42,6 +42,7 @@
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 #include "pypto/ir/verifier/verifier.h"
 
 namespace pypto {
@@ -69,7 +70,7 @@ std::string MakeStoreResultName(size_t index) {
  * @brief Visitor that collects tensor-typed variable names used directly by converted ops.
  *
  * Traverses the IR tree via IRVisitor and records the name of every Var/IterArg argument
- * whose type is TensorType and that appears in a call to an op registered in
+ * whose type is TensorType or DistributedTensorType and that appears in a call to an op registered in
  * OpConversionRegistry (i.e. an op that will be converted from tensor.* to tile.*).
  *
  * Used by TransformIncoreFunction to decide which tensor parameters require a synthesised
@@ -101,7 +102,7 @@ class TensorArgsInConvertedOpsCollector : public IRVisitor {
       for (const auto& [iter_arg_ptr, init_expr] : iter_arg_to_init_) {
         if (used_.count(iter_arg_ptr) == 0) continue;
         if (auto var = As<Var>(init_expr)) {
-          if (As<TensorType>(var->GetType()) && used_.insert(var.get()).second) {
+          if (AsTensorTypeLike(var->GetType()) && used_.insert(var.get()).second) {
             changed = true;
           }
         }
@@ -135,9 +136,9 @@ class TensorArgsInConvertedOpsCollector : public IRVisitor {
         if (conv_entry->input_reqs.count(i)) continue;
         const auto& arg = call->args_[i];
         if (auto iter_arg = As<IterArg>(arg)) {
-          if (As<TensorType>(iter_arg->GetType())) used_.insert(iter_arg.get());
+          if (AsTensorTypeLike(iter_arg->GetType())) used_.insert(iter_arg.get());
         } else if (auto var = As<Var>(arg)) {
-          if (As<TensorType>(var->GetType())) used_.insert(var.get());
+          if (AsTensorTypeLike(var->GetType())) used_.insert(var.get());
         }
       }
     }
@@ -257,7 +258,7 @@ class ConsumerSpaceCollector : public IRVisitor {
  protected:
   void VisitStmt_(const AssignStmtPtr& op) override {
     if (!op) return;
-    auto is_shaped = [](const TypePtr& t) { return As<TensorType>(t) || As<TileType>(t); };
+    auto is_shaped = [](const TypePtr& t) { return AsTensorTypeLike(t) || As<TileType>(t); };
 
     // Record a propagation edge `dst -> src` in program order when the RHS is
     // either a plain SSA alias (both sides shaped) or an inherit-input Call
@@ -544,13 +545,13 @@ class TensorToTileMutator : public TypePropagatingMutator {
       return HandlePassThroughAssign(op, new_value);
     }
 
-    // Consumer-driven space override for load-like ops (e.g. tensor.slice
-    // feeding into tensor.matmul → load to Mat instead of default Vec).
-    if (IsOp(call, "tensor.slice")) {
-      auto consumer_req = consumer_collector_.GetConsumerReq(op->var_.get());
-      if (consumer_req) {
-        auto override_load = HandleConsumerDrivenLoad(op, call, *consumer_req);
-        if (override_load) return override_load;
+    ConversionContext conversion_context{call->GetType(), std::nullopt};
+    // A tensor-backed slice can target its consumer's requested memory directly.
+    // The contextual slice converter owns the lowering for both this path and
+    // the default Vec path, so clamp/drop_dims semantics cannot diverge.
+    if (IsOp(call, "tensor.slice") && !call->args_.empty() && AsTensorTypeLike(call->args_[0]->GetType())) {
+      if (auto consumer_req = consumer_collector_.GetConsumerReq(op->var_.get())) {
+        conversion_context.requested_output_memory = consumer_req->space;
       }
     }
 
@@ -558,7 +559,9 @@ class TensorToTileMutator : public TypePropagatingMutator {
     auto [bridged_args, bridge_stmts] = BridgeInputSpaces(call, entry->input_reqs);
 
     // Run the converter with bridged args
-    auto conv_result = entry->func(bridged_args, call->kwargs_, call->span_);
+    auto conv_result = entry->contextual_func ? entry->contextual_func(bridged_args, call->kwargs_,
+                                                                       conversion_context, call->span_)
+                                              : entry->func(bridged_args, call->kwargs_, call->span_);
 
     // Collect all statements: bridge prologue + converter prologue + final assignment
     std::vector<StmtPtr> stmts;
@@ -601,7 +604,10 @@ class TensorToTileMutator : public TypePropagatingMutator {
     if (!entry) return maybe_update();
 
     auto [bridged_args, bridge_stmts] = BridgeInputSpaces(call, entry->input_reqs);
-    auto conv_result = entry->func(bridged_args, call->kwargs_, call->span_);
+    ConversionContext conversion_context{call->GetType(), std::nullopt};
+    auto conv_result = entry->contextual_func ? entry->contextual_func(bridged_args, call->kwargs_,
+                                                                       conversion_context, call->span_)
+                                              : entry->func(bridged_args, call->kwargs_, call->span_);
 
     std::vector<StmtPtr> stmts;
     stmts.reserve(bridge_stmts.size() + conv_result.prologue.size() + 1);
@@ -615,32 +621,6 @@ class TensorToTileMutator : public TypePropagatingMutator {
   }
 
  private:
-  /// Handle tensor.slice whose consumer needs a specific memory space — produce tile.load with that space.
-  StmtPtr HandleConsumerDrivenLoad(const AssignStmtPtr& op, const CallPtr& call,
-                                   const ConsumerSpaceReq& req) {
-    const auto& input = call->args_[0];
-    auto tensor_type = As<TensorType>(input->GetType());
-    if (!tensor_type) return nullptr;
-
-    const auto& shape_arg = call->args_[1];
-    const auto& offset_arg = call->args_[2];
-    ExprPtr valid_shapes = (call->args_.size() == 4) ? call->args_[3] : shape_arg;
-
-    // The consumer-driven load is always natural; a transposed (b_trans/a_trans)
-    // operand gets a zero-copy tile.transpose_view at the matmul site instead.
-    std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", req.space}};
-    auto load_call = op_registry_.Create("tile.load", {input, offset_arg, shape_arg, valid_shapes},
-                                         load_kwargs, call->span_);
-
-    auto tile_name = MakeTileValueName(op->var_->name_hint_);
-    auto tile_var = std::make_shared<Var>(tile_name, load_call->GetType(), op->var_->span_);
-    var_remap_[op->var_.get()] = tile_var;
-    auto result = MutableCopy(op);
-    result->var_ = tile_var;
-    result->value_ = load_call;
-    return result;
-  }
-
   /// Auto-bridge TensorType args to the memory space required by input_reqs.
   /// Returns the (possibly modified) args and any load statements to prepend.
   std::pair<std::vector<ExprPtr>, std::vector<StmtPtr>> BridgeInputSpaces(
@@ -665,8 +645,10 @@ class TensorToTileMutator : public TypePropagatingMutator {
                          size_t idx) -> VarPtr {
       auto offsets = MakeZeroOffsets(tensor_type->shape_.size(), call->span_);
       auto shapes = MakeShapeTuple(tensor_type->shape_, call->span_);
+      auto valid_shapes = MakeShapeTuple(GetValidShape(tensor_type), call->span_);
       std::vector<std::pair<std::string, std::any>> load_kw = {{"target_memory", space}};
-      auto load = op_registry_.Create("tile.load", {arg, offsets, shapes, shapes}, load_kw, call->span_);
+      auto load =
+          op_registry_.Create("tile.load", {arg, offsets, shapes, valid_shapes}, load_kw, call->span_);
       std::string var_name;
       if (auto var = As<Var>(arg)) {
         auto space_str = MemorySpaceToString(space);
@@ -713,7 +695,7 @@ class TensorToTileMutator : public TypePropagatingMutator {
       const auto& req = input_reqs.at(idx);
       if (idx >= args.size()) continue;
       const bool use_view = req.trans_kwarg ? call->GetKwarg<bool>(*req.trans_kwarg, false) : false;
-      auto tensor_type = As<TensorType>(args[idx]->GetType());
+      auto tensor_type = AsTensorTypeLike(args[idx]->GetType());
 
       if (tensor_type) {
         // GM operand: load NATURAL (2D and ND alike), then reinterpret as its
@@ -1494,7 +1476,7 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   // New body statements (prefix tile.loads + mutated body)
   std::vector<StmtPtr> new_stmts;
 
-  // Phase 1: Insert tile.load for each TensorType parameter that is directly consumed
+  // Phase 1: Insert tile.load for each tensor-like parameter that is directly consumed
   // by a converted tensor op.  Parameters that are only referenced by non-converted ops
   // (e.g. tile.load, tile.move) already manage their own tile representation and must
   // NOT get an additional Vec-space load inserted here.
@@ -1504,15 +1486,16 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   const auto& params_used_by_converted_ops = collector.GetUsed();
 
   for (const auto& var : func->params_) {
-    auto tensor_type = As<TensorType>(var->GetType());
+    auto tensor_type = AsTensorTypeLike(var->GetType());
     if (!tensor_type) continue;
 
     if (params_used_by_converted_ops.find(var.get()) == params_used_by_converted_ops.end()) continue;
 
     auto offsets = MakeZeroOffsets(tensor_type->shape_.size(), span);
     auto shapes = MakeShapeTuple(tensor_type->shape_, span);
+    auto valid_shapes = MakeShapeTuple(GetValidShape(tensor_type), span);
     std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec}};
-    auto load_call = op_registry.Create("tile.load", {var, offsets, shapes, shapes}, load_kwargs, span);
+    auto load_call = op_registry.Create("tile.load", {var, offsets, shapes, valid_shapes}, load_kwargs, span);
 
     std::string tile_name = MakeTileValueName(var->name_hint_);
     auto tile_var = std::make_shared<Var>(tile_name, load_call->GetType(), span);

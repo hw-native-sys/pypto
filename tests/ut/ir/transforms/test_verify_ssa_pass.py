@@ -810,6 +810,35 @@ class TestCompositeShapeDimVerification:
         After = passes.convert_to_ssa()(Before)
         passes.run_verifier()(After)
 
+    def test_distributed_param_shape_and_view_vars_are_in_scope(self):
+        """SSA registration includes DTT shape, valid_shape, and stride Vars."""
+        span = ir.Span.unknown()
+        shape_var = ir.Var("shape_var", ir.ScalarType(DataType.INDEX), span)
+        valid_var = ir.Var("valid_var", ir.ScalarType(DataType.INDEX), span)
+        stride_var = ir.Var("stride_var", ir.ScalarType(DataType.INDEX), span)
+        dim64 = ir.ConstInt(64, DataType.INDEX, span)
+        composite_valid = ir.Sub(valid_var, ir.ConstInt(1, DataType.INDEX, span), DataType.INDEX, span)
+        view = ir.TensorView([stride_var, dim64], ir.TensorLayout.ND, [composite_valid, dim64])
+        dist_type = ir.DistributedTensorType([shape_var, dim64], DataType.FP32, None, view)
+        data = ir.Var("data", dist_type, span)
+
+        partial = ir.Add(shape_var, valid_var, DataType.INDEX, span)
+        result = ir.Add(partial, stride_var, DataType.INDEX, span)
+        func = ir.Function(
+            "dtt_metadata_scope",
+            [data],
+            [ir.ScalarType(DataType.INDEX)],
+            ir.ReturnStmt([result], span),
+            span,
+        )
+        program = ir.Program([func], "prog", span)
+        properties = passes.IRPropertySet()
+        properties.insert(passes.IRProperty.SSAForm)
+
+        diagnostics = passes.PropertyVerifierRegistry.verify(properties, program)
+        errors = [d for d in diagnostics if d.severity == passes.DiagnosticSeverity.Error]
+        assert errors == []
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

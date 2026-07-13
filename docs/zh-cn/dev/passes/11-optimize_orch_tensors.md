@@ -100,6 +100,8 @@ loop-carried iter-arg 不会被这样折叠。
 
 本 pass 有意保持保守的 window eligibility。它不会按 `topk` 等算子名字做特判；只有 callee 函数体能证明满足下面的访问模式时，才会 window 化。
 
+带显式部分有效 `valid_shape` 的参数保持 full-tensor baseline。要局部化这个原点锚定的有效框，必须使用调用点窗口 offset（`clamp(parent_valid - offset, 0, window)`）；当前克隆 callee 的类型改写只有 window shape，因此不能把部分有效契约替换成完全有效窗口。
+
 支持的改写形态：
 
 - `FinalStore`：callee 返回一次写入局部窗口的最终 `tile.store(...)` 结果

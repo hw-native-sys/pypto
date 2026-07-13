@@ -19,7 +19,6 @@ import pytest
 from pypto import backend, codegen, ir
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
-from pypto.pypto_core import passes as _core_passes
 
 NR = pl.dynamic("NR")
 
@@ -37,13 +36,10 @@ def _generate_mlir(func_name: str = "touch") -> str:
     assert func is not None
     program = ir.Program([func], "test_dist_dyn_signal", ir.Span.unknown())
     pm = PassManager.get_strategy(OptimizationStrategy.Default)
-    # DistributedTensor[[NR, …]] round-trips without a module-level NR decl today;
-    # skip RoundtripInstrument (see test_orchestration_misc tuple NoDep pattern).
-    ctx = _core_passes.PassContext(
-        [_core_passes.VerificationInstrument(_core_passes.VerificationMode.BEFORE_AND_AFTER)]
-    )
-    with ctx:
-        optimized = pm.run_passes(program)
+    # The default test context includes RoundtripInstrument. Dynamic variables
+    # referenced only by DistributedTensor metadata must therefore be declared
+    # by the printer after every pass, not merely carried to PTO codegen.
+    optimized = pm.run_passes(program)
     return codegen.PTOCodegen().generate(optimized)
 
 
@@ -121,11 +117,7 @@ def _generate_range_mlir() -> str:
     assert func is not None
     program = ir.Program([func], "test_nranks_range", ir.Span.unknown())
     pm = PassManager.get_strategy(OptimizationStrategy.Default)
-    ctx = _core_passes.PassContext(
-        [_core_passes.VerificationInstrument(_core_passes.VerificationMode.BEFORE_AND_AFTER)]
-    )
-    with ctx:
-        optimized = pm.run_passes(program)
+    optimized = pm.run_passes(program)
     return codegen.PTOCodegen().generate(optimized)
 
 

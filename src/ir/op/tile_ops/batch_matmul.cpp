@@ -31,11 +31,28 @@
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
+
+namespace {
+
+std::vector<ExprPtr> BroadcastBatchValidShape(const std::vector<ExprPtr>& lhs_batch_shape,
+                                              const std::vector<ExprPtr>& lhs_batch_valid,
+                                              const std::vector<ExprPtr>& rhs_batch_shape,
+                                              const std::vector<ExprPtr>& rhs_batch_valid, const Span& span,
+                                              const std::string& op_name) {
+  CheckBatchAxesFullyValid(lhs_batch_shape, lhs_batch_valid, span, op_name, "lhs");
+  CheckBatchAxesFullyValid(rhs_batch_shape, rhs_batch_valid, span, op_name, "rhs");
+  const BroadcastResult result = BroadcastShapes(lhs_batch_shape, rhs_batch_shape);
+  CHECK_SPAN(result.success, span) << op_name << ": cannot broadcast batch dimensions";
+  return result.shape;
+}
+
+}  // namespace
 
 /**
  * @brief Deduce type for batch matrix multiplication
@@ -127,6 +144,29 @@ TypePtr DeduceTileBatchMatMulType(const std::vector<ExprPtr>& args,
   auto result_dtype =
       (lhs_type->dtype_.IsFloat() && rhs_type->dtype_.IsFloat()) ? DataType::FP32 : DataType::INT32;
 
+  // Batch pages must be provably full because ND-to-2D flattening cannot preserve
+  // partial batch axes. M/K/N remain independently partial: output M comes from lhs,
+  // output N from rhs, and directional K compatibility is checked below.
+  const std::vector<ExprPtr> lhs_valid = GetValidShape(lhs_type);
+  const std::vector<ExprPtr> rhs_valid = GetValidShape(rhs_type);
+  CheckMatMulValidKCompat(lhs_valid[lhs_ndim - 1], rhs_valid[rhs_ndim - 2], args[0]->span_, op_name);
+  const ExprPtr& m_valid = lhs_valid[lhs_ndim - 2];
+  const ExprPtr& n_valid = rhs_valid[rhs_ndim - 1];
+
+  std::vector<ExprPtr> output_valid;
+  if (lhs_ndim == 2 && rhs_ndim == 2) {
+    output_valid = {m_valid, n_valid};
+  } else {
+    std::vector<ExprPtr> lhs_batch_shape(lhs_shape.begin(), lhs_shape.end() - 2);
+    std::vector<ExprPtr> rhs_batch_shape(rhs_shape.begin(), rhs_shape.end() - 2);
+    std::vector<ExprPtr> lhs_batch_valid(lhs_valid.begin(), lhs_valid.end() - 2);
+    std::vector<ExprPtr> rhs_batch_valid(rhs_valid.begin(), rhs_valid.end() - 2);
+    output_valid = BroadcastBatchValidShape(lhs_batch_shape, lhs_batch_valid, rhs_batch_shape,
+                                            rhs_batch_valid, args[0]->span_, op_name);
+    output_valid.push_back(m_valid);
+    output_valid.push_back(n_valid);
+  }
+
   // The matmul output tile uses the hardware's native accumulator layout:
   // - blayout=col_major, slayout=row_major: hardware's column-major block / row-major sub-block
   // - fractal=1024: 32x32 sub-tile fractal size (standard for this hardware's matrix unit)
@@ -134,7 +174,7 @@ TypePtr DeduceTileBatchMatMulType(const std::vector<ExprPtr>& args,
   tile_view.blayout = TileLayout::col_major;
   tile_view.slayout = TileLayout::row_major;
   tile_view.fractal = 1024;
-  tile_view.valid_shape = output_shape;
+  tile_view.valid_shape = std::move(output_valid);
   return std::make_shared<TileType>(output_shape, result_dtype, std::nullopt, tile_view);
 }
 
@@ -261,12 +301,40 @@ TypePtr DeduceTileBatchMatMulAccType(const std::vector<ExprPtr>& args,
   // Output shape = acc shape (in-place accumulation).
   std::vector<ExprPtr> output_shape = acc_shape;
 
+  // acc[..,M,N] += lhs[..,M,K] @ rhs[..,K,N] writes the matmul result in place at the
+  // origin. Batch pages of acc/lhs/rhs must be provably full before flattening; the
+  // written matrix region is [full broadcast batch.., valid(lhs)[M], valid(rhs)[N]]
+  // (M is lhs axis -2, N is rhs axis -1); the result's valid region is the bounding box
+  // (union) of the accumulator's existing region and that written rectangle — never the
+  // full physical shape. Reuse the assemble union rule at offset = origin, which clamps
+  // to the physical shape and rejects a non-representable union. A fully-valid
+  // accumulator unions back to the full shape (seed via create_tile(valid_shape=0) to
+  // narrow).
+  const std::vector<ExprPtr> acc_valid = GetValidShape(acc_type);
+  const std::vector<ExprPtr> lhs_valid = GetValidShape(lhs_type);
+  const std::vector<ExprPtr> rhs_valid = GetValidShape(rhs_type);
+  CheckMatMulValidKCompat(lhs_valid[lhs_ndim - 1], rhs_valid[rhs_ndim - 2], args[0]->span_, op_name);
+
+  std::vector<ExprPtr> acc_batch_valid(acc_valid.begin(), acc_valid.end() - 2);
+  CheckBatchAxesFullyValid(acc_batch, acc_batch_valid, args[0]->span_, op_name, "acc");
+  std::vector<ExprPtr> lhs_batch_valid(lhs_valid.begin(), lhs_valid.end() - 2);
+  std::vector<ExprPtr> rhs_batch_valid(rhs_valid.begin(), rhs_valid.end() - 2);
+  std::vector<ExprPtr> written_valid = BroadcastBatchValidShape(lhs_batch, lhs_batch_valid, rhs_batch,
+                                                                rhs_batch_valid, args[0]->span_, op_name);
+  written_valid.push_back(lhs_valid[lhs_ndim - 2]);  // M valid
+  written_valid.push_back(rhs_valid[rhs_ndim - 1]);  // N valid
+
+  auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, args[0]->span_);
+  std::vector<ExprPtr> zero_offset(acc_ndim, zero);
+  std::vector<ExprPtr> output_valid = ComputeAssembleUnionValidShape(acc_valid, written_valid, zero_offset,
+                                                                     acc_shape, args[0]->span_, op_name);
+
   // Acc layout (Nz) — same as 2D matmul_acc.
   TileView tile_view;
   tile_view.blayout = TileLayout::col_major;
   tile_view.slayout = TileLayout::row_major;
   tile_view.fractal = 1024;
-  tile_view.valid_shape = output_shape;
+  tile_view.valid_shape = std::move(output_valid);
   return std::make_shared<TileType>(output_shape, result_dtype, std::nullopt, tile_view);
 }
 

@@ -76,10 +76,17 @@ static TypePtr DeduceTileGatherType(const std::vector<ExprPtr>& args,
       << "The operator " << op_name << " requires tmp shape rank to match indices rank ("
       << idx_type->shape_.size() << "), but got " << tmp_type->shape_.size();
 
+  // Runtime indices can address any physical source element and the hardware
+  // consumes the whole index/workspace contract. A rectangular valid_shape for
+  // the result cannot be derived from a partial operand, so fail closed.
+  CheckTileInputFullyValid(src_type, op_name, "src", args[0]->span_);
+  CheckTileInputFullyValid(idx_type, op_name, "indices", args[1]->span_);
+  CheckTileInputFullyValid(tmp_type, op_name, "tmp", args[2]->span_);
+
   // Output: shape from indices tile, dtype from src tile, propagate tile_view
   TileView tile_view;
   tile_view.valid_shape = idx_type->shape_;
-  InheritTileViewLayout(tile_view, src_type);
+  InheritFreshTileComputeLayout(tile_view, src_type);
   return std::make_shared<TileType>(idx_type->shape_, src_type->dtype_, std::nullopt, tile_view);
 }
 
@@ -120,6 +127,7 @@ static TypePtr DeduceTileGatherMaskType(const std::vector<ExprPtr>& args,
         src_type->dtype_ == DataType::INT16 || src_type->dtype_ == DataType::INT32)
       << "The operator " << op_name << " requires src dtype to be FP16, FP32, INT16, or INT32, but got "
       << src_type->dtype_.ToString();
+  CheckTileInputFullyValid(src_type, op_name, "src", args[0]->span_);
 
   // Validate mask_pattern kwarg (values 1-7 per PTOAS MaskPattern enum)
   int pattern = -1;
@@ -161,7 +169,7 @@ static TypePtr DeduceTileGatherMaskType(const std::vector<ExprPtr>& args,
   std::vector<ExprPtr> out_shape = {src_shape[0], out_col_expr};
   TileView tile_view;
   tile_view.valid_shape = out_shape;
-  InheritTileViewLayout(tile_view, src_type);
+  InheritFreshTileComputeLayout(tile_view, src_type);
 
   // Read optional output_dtype kwarg for cross-type bit extraction (e.g. FP32→UINT32).
   // Hardware TGATHER mask form only requires sizeof(dst) == sizeof(src), not same type.
@@ -266,6 +274,11 @@ static TypePtr DeduceTileGatherCompareType(const std::vector<ExprPtr>& args,
   CHECK(tmp_type) << "The operator " << op_name << " requires tmp to be a TileType, but got "
                   << args[2]->GetType()->TypeName();
 
+  // Compare-gather scans the complete physical source and uses tmp as a full
+  // workspace. Partial inputs have no sound rectangular output contract.
+  CheckTileInputFullyValid(src_type, op_name, "src", args[0]->span_);
+  CheckTileInputFullyValid(tmp_type, op_name, "tmp", args[2]->span_);
+
   int cmp_mode = -1;
   bool cmp_mode_seen = false;
   int out_cols = -1;
@@ -302,7 +315,7 @@ static TypePtr DeduceTileGatherCompareType(const std::vector<ExprPtr>& args,
 
   TileView dst_view;
   dst_view.valid_shape = {rows_expr, out_cols_expr};
-  InheritTileViewLayout(dst_view, src_type);
+  InheritFreshTileComputeLayout(dst_view, src_type);
   std::vector<ExprPtr> dst_shape = {rows_expr, out_cols_expr};
   auto dst_type = std::make_shared<TileType>(dst_shape, DataType::INT32, std::nullopt, dst_view);
 

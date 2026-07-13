@@ -65,7 +65,7 @@ namespace {
 TypePtr MaterializeType(const TypePtr& type) {
   if (!type) return type;
 
-  if (auto tensor_type = As<TensorType>(type)) {
+  if (auto tensor_type = AsTensorTypeLike(type)) {
     if (!tensor_type->tensor_view_.has_value()) {
       // Bare tensor — no view to materialize.
       return type;
@@ -82,7 +82,12 @@ TypePtr MaterializeType(const TypePtr& type) {
     }
     auto materialized_stride =
         tensor_view_semantics::BuildLogicalStridesFromLayout(tensor_type->shape_, view.layout);
-    TensorView new_view(std::move(materialized_stride), view.layout, view.valid_shape);
+    TensorView new_view(std::move(materialized_stride), view.layout, view.valid_shape, view.pad);
+    if (auto distributed_type = As<DistributedTensorType>(type)) {
+      return std::make_shared<DistributedTensorType>(
+          tensor_type->shape_, tensor_type->dtype_, tensor_type->memref_,
+          std::make_optional(std::move(new_view)), distributed_type->window_buffer_);
+    }
     return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_, tensor_type->memref_,
                                         std::make_optional(std::move(new_view)));
   }

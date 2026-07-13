@@ -44,7 +44,7 @@ class TensorViewCanonicalVisitor : public IRVisitor {
 
   void CheckType(const TypePtr& type, const Span& span) {
     if (!type) return;
-    if (auto tensor_type = As<TensorType>(type)) {
+    if (auto tensor_type = AsTensorTypeLike(type)) {
       CheckTensorType(tensor_type, span);
     } else if (auto tuple_type = As<TupleType>(type)) {
       for (const auto& sub : tuple_type->types_) {

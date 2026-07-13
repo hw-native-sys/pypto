@@ -26,7 +26,7 @@
  */
 
 #include <any>
-#include <cstdint>
+#include <cstddef>
 #include <memory>
 #include <string>
 #include <utility>
@@ -42,6 +42,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -162,6 +163,13 @@ TypePtr DeduceTensorPagedGatherType(const std::vector<ExprPtr>& args,
   } else {
     out_shape = {rows_expr, size_expr};
   }
+  // paged_gather reads scattered src rows via runtime indices/block_table, so a
+  // partially-valid operand makes the gathered buffer's valid region underivable —
+  // reject rather than widen (North Star). Fully-valid operands pass silently, so the
+  // current (bare) result is byte-identical.
+  CheckTensorInputFullyValid(src_type, op_name, "src", args[0]->span_);
+  CheckTensorInputFullyValid(idx_type, op_name, "indices", args[1]->span_);
+  CheckTensorInputFullyValid(bt_type, op_name, "block_table", args[2]->span_);
   return std::make_shared<TensorType>(out_shape, src_type->dtype_);
 }
 
@@ -246,6 +254,11 @@ TypePtr DeduceTensorGatherRowType(const std::vector<ExprPtr>& args,
   CHECK(acc_type->dtype_ == src_type->dtype_)
       << "The operator " << op_name << " requires acc and src to share dtype, but got "
       << acc_type->dtype_.ToString() << " and " << src_type->dtype_.ToString();
+  // src_offset is runtime-computed (normally from a block-table lookup), so a
+  // partial source does not provide enough information to prove that the row
+  // window avoids padding. Fail closed instead of letting the DPS result hide
+  // an indirect read outside src's valid prefix.
+  CheckTensorInputFullyValid(src_type, op_name, "src", args[1]->span_);
   // DPS: result is the accumulator, written in place.
   return args[0]->GetType();
 }

@@ -80,6 +80,30 @@ function or a wrapper that absorbed output params in Phase 2a:
 InCore, Spmd, and Group functions are skipped from this phase — they were
 already rewritten in Phase 1 / 2a.
 
+## Validity Preservation Boundary
+
+The original tensor call's inferred result type is the semantic contract for
+conversion. `ConversionContext.expected_result_type` carries that contract into
+contextual converters; reshape, slice/rank reduction, and other shape-sensitive
+lowerings rebuild the tile result with the same dtype, physical shape, effective
+`valid_shape`, and semantic pad value (adding leading physical unit axes only for
+the tile rank-2 floor). A converter may not accept a tile deducer's accidental
+full-valid default when the tensor result is partial.
+
+Every generated load is also bounded by the source tensor's effective validity.
+Entry and matmul loads request the physical window and let `tile.load` intersect it
+with the source; tensor-source staging for `tensor.assemble` passes the effective
+valid extents explicitly. If that tensor allocation is physically larger than the
+remaining tile destination window, conversion stages only the destination capacity
+after proving the valid transfer fits; lower-rank sources are then right-aligned by
+inserting explicit unit axes before `tile.assemble`. Exit `tile.store` transfers
+exactly the tile's effective region. When `tensor.assemble` lowers directly to a
+GM `tile.store`, the converted call also keeps the tensor-level result contract,
+including the newly written validity union and any distributed-window identity;
+the store deducer's unchanged destination type is not allowed to narrow it. This
+makes Tensor → Tile → backend preservation a single end-to-end contract rather
+than three independent inferences.
+
 ## MatmulSlice Pattern
 
 When `tensor.slice` feeds into `tensor.matmul` or `tensor.matmul_acc`, the slice must produce a Mat-space tile instead of a Vec-space tile. The pass pre-scans for this pattern and emits a natural Mat `tile.load`; a transposed operand (`a_trans` for LHS, `b_trans` for RHS) gets a zero-copy `tile.transpose_view` at the matmul site.
@@ -193,6 +217,7 @@ This pass lowers each **1:1** to its tile op (`tensor.aiv_shard` → `tile.aiv_s
 **Constraints** (enforced by the tensor-level deducer and the DSL parser, not this pass):
 
 - **2D-only** — `UP_DOWN` / `LEFT_RIGHT` are only well-defined on the 2D physical tile view; an N-D operand is rejected with a `pl.reshape`-to-2D hint (an N-D tensor would flatten to `[product(leading), last]`, so a pre-flatten row split would not match the contiguous half the lowering physically takes).
+- **Split axis fully valid** — the selected axis must be provably valid through its full physical extent. A partial global prefix localizes to different extents on the two fixed halves, while the current boundary ABI carries one shared result type and no global-valid operand from which `aic_gather` could reconstruct that distinction. Partial or symbolically unknown split-axis validity is rejected; a non-split axis may remain partial.
 - **Region-only** — the `tensor.*` form is reachable solely through the `pl.split_aiv` region (which supplies the split mode). The outlined low-level `pl.tile.aiv_shard(t, split=N)` form stays tile-only; a Tensor operand there is rejected.
 - **Distributed rejected** — a `DistributedTensorType` operand is out of scope (AIV/AIC split only) and is rejected upstream.
 

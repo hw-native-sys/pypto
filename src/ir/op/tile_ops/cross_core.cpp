@@ -18,7 +18,6 @@
 #include <vector>
 
 #include "pypto/core/any_cast.h"
-#include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/core_affinity_kind.h"
 #include "pypto/ir/expr.h"
@@ -27,6 +26,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 
@@ -70,12 +70,14 @@ int ReadSplitAttr(const std::vector<std::pair<std::string, std::any>>& kwargs, c
 // gather) so the result type reflects the shard/gather along the split axis
 // rather than an identity reshape.
 //
-// The even-extent requirement applies to the PHYSICAL split-axis extent only;
-// the per-lane valid_shape is reshaped with ceil-div on halve (floordiv(dim + 1,
-// 2), keeping valid <= physical) since the true per-lane valid region is
-// localized later at lowering time, which knows the subblock (lane) index. This
-// avoids rejecting an input whose physical extent is even but whose partial
-// valid_shape happens to be odd.
+// The split axis must be provably fully valid. A single origin-anchored result
+// type is shared by both AIV lanes, but a partial global prefix localizes to
+// different per-lane extents (for example 80 over two physical halves of 64 is
+// 64 on lane 0 and 16 on lane 1). The current boundary ABI carries no explicit
+// global-valid contract from which gather could reconstruct that distinction,
+// so accepting a partial or symbolically-unknown split-axis extent would be an
+// unsound widening/narrowing. Non-split axes may remain partial and are carried
+// through unchanged.
 struct SplitReshaped {
   std::vector<ExprPtr> shape;
   std::vector<ExprPtr> valid;
@@ -83,6 +85,15 @@ struct SplitReshaped {
 
 SplitReshaped ReshapeSplitAxis(std::vector<ExprPtr> shape, std::vector<ExprPtr> valid, size_t axis,
                                bool halve, const std::string& op_name, const Span& span) {
+  CHECK_SPAN(valid.size() == shape.size(), span)
+      << op_name << ": valid_shape rank " << valid.size() << " must match physical rank " << shape.size();
+  const ProofResult split_axis_full = ProveValidExtentEqual(valid[axis], shape[axis]);
+  CHECK_SPAN(split_axis_full == ProofResult::kTrue, span)
+      << op_name << ": split-axis valid extent must be provably equal to its physical extent; got valid "
+      << PythonPrint(valid[axis]) << " and physical " << PythonPrint(shape[axis])
+      << ". Partial split-axis validity needs lane-local metadata that this boundary cannot represent"
+      << (split_axis_full == ProofResult::kUnknown ? "; symbolic equality cannot be proven" : "");
+
   if (auto c = As<ConstInt>(shape[axis])) {
     if (halve) {
       CHECK_SPAN(c->value_ % 2 == 0, span)
@@ -98,25 +109,10 @@ SplitReshaped ReshapeSplitAxis(std::vector<ExprPtr> shape, std::vector<ExprPtr> 
     shape[axis] = halve ? MakeFloorDiv(shape[axis], two, shape[axis]->span_)
                         : MakeMul(shape[axis], two, shape[axis]->span_);
   }
-  if (axis < valid.size()) {
-    if (auto vc = As<ConstInt>(valid[axis])) {
-      const auto new_extent = halve ? (vc->value_ + 1) / 2 : vc->value_ * 2;
-      valid[axis] = std::make_shared<ConstInt>(new_extent, vc->dtype(), valid[axis]->span_);
-    } else {
-      // Dynamic valid extent: ceil-div on halve (floordiv(dim + 1, 2)), double on
-      // gather — mirroring the physical reshape; the exact per-lane valid region
-      // is re-derived at lowering time.
-      auto vspan = valid[axis]->span_;
-      auto dt = GetScalarDtype(valid[axis]);
-      auto two = std::make_shared<ConstInt>(2, dt, vspan);
-      if (halve) {
-        auto one = std::make_shared<ConstInt>(1, dt, vspan);
-        valid[axis] = MakeFloorDiv(MakeAdd(valid[axis], one, vspan), two, vspan);
-      } else {
-        valid[axis] = MakeMul(valid[axis], two, vspan);
-      }
-    }
-  }
+  // The proof above establishes that the split axis is full, so its result
+  // validity is exactly the transformed physical extent. Reuse the expression
+  // to keep the canonical full-valid encoding stable.
+  valid[axis] = shape[axis];
   return {std::move(shape), std::move(valid)};
 }
 

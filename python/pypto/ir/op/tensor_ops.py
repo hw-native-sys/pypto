@@ -296,6 +296,8 @@ def slice(
     drop_dims: Sequence[int | Expr] | None = None,
     pad_value: PadValue | int | float | None = None,
     span: Span | None = None,
+    *,
+    clamp: bool = False,
 ) -> Call:
     """Create a slice of a tensor with new shape and offset.
 
@@ -317,6 +319,12 @@ def slice(
             the kwarg is not forwarded — the deducer defaults to
             ``PadValue.null``.
         span: Optional source span for debugging (auto-captured if not provided)
+        clamp: Keyword-only. When ``True``, DERIVE the result's ``valid_shape`` from the source
+            tensor's valid region (its physical shape when unset) clipped to the
+            slice window at ``offset`` — the ragged tail past the physical edge is
+            clamped rather than rejected. Never widens; intersects with an explicit
+            ``valid_shape`` when both are given. ``False`` (default) leaves the
+            static out-of-bounds check active.
 
     Returns:
         Call expression creating a tensor slice
@@ -345,6 +353,10 @@ def slice(
         # normalize the rest via the shared helper so numeric sugar and
         # validation match tensor.fillpad exactly.
         kwargs["pad_value"] = pad_value if pad_value is PadValue.null else normalize_pad_value(pad_value)
+    # Only forward clamp when set, so a plain slice's IR stays byte-identical
+    # (the deducer defaults clamp to False).
+    if clamp:
+        kwargs["clamp"] = True
 
     return _ir_core.create_op_call("tensor.slice", args, kwargs, actual_span)
 

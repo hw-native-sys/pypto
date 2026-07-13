@@ -38,10 +38,19 @@
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
+
+// tile.load's per-dim intersect with the source's own valid region is the
+// shared IntersectWindowValidDim in type_inference.h: the load window of
+// ``shapes[i]`` elements at ``offsets[i]`` into a tensor whose valid extent is
+// ``valid(tensor)[i]`` sees clamp(valid(tensor)[i] - offsets[i], 0, shapes[i]),
+// clipped by the explicit ``valid_shapes=`` argument. Never widens past the
+// tensor's real region.
 
 // Helper to get kwargs value with default (uses vector to preserve order)
 template <typename T>
@@ -133,6 +142,19 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
       << " shapes";
   CHECK(shapes_tuple->elements_.size() > 0)
       << "The operator " << op_name << " requires at least one dimension, but got empty shapes tuple";
+  CHECK(shapes_tuple->elements_.size() == tensor_type->shape_.size())
+      << "The operator " << op_name << " requires the load window rank (" << shapes_tuple->elements_.size()
+      << ") to match the source tensor rank (" << tensor_type->shape_.size() << ")";
+
+  // A negative source offset leaves leading padding before the first real
+  // element, which an origin-anchored valid_shape cannot represent. Reject it
+  // on every path, including a bare/full source where no intersection is needed.
+  auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, args[1]->span_);
+  for (size_t i = 0; i < offsets_tuple->elements_.size(); ++i) {
+    const ProofResult non_negative = ProveValidExtentLessEqual(zero, offsets_tuple->elements_[i]);
+    CHECK_SPAN(non_negative != ProofResult::kFalse, args[1]->span_)
+        << op_name << ": offset[" << i << "] must be >= 0, got " << PythonPrint(offsets_tuple->elements_[i]);
+  }
 
   // target_memory is optional: when absent, memory_space stays unresolved and
   // InferTileMemorySpace will pick it from consumer demand. Layout is deferred in
@@ -173,7 +195,56 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
   // Build tile shape from shapes tuple (always in source-tensor coordinates).
   std::vector<ExprPtr> tile_shape(shapes_tuple->elements_.begin(), shapes_tuple->elements_.end());
 
-  tile_view.valid_shape = valid_shapes_tuple->elements_;
+  // Q1 = INTERSECT: when the source tensor carries an EXPLICIT valid region, the
+  // tile's valid region is the load window clipped to that region and then
+  // intersected with the explicit ``valid_shapes=`` argument (never widening past
+  // the tensor's real valid extent). When the source has no explicit valid region
+  // (the overwhelmingly common case: valid == full shape), keep ``valid_shapes``
+  // verbatim — today's exact behavior and IR — so existing loads are untouched.
+  const auto& valid_shapes = valid_shapes_tuple->elements_;
+  // Validate the user-requested transfer before source intersection. Otherwise
+  // a narrow source view could hide malformed `valid_shapes` (for example 999
+  // on a 128-capacity tile), while codegen would still use the original tuple
+  // for its GM partition. Physical tile capacity may exceed a ragged transfer,
+  // but the transferred valid window itself must fit the source allocation.
+  ValidateValidShapeBounds(valid_shapes, tile_shape, args[0]->span_, op_name);
+  ValidatePhysicalWindowBounds(valid_shapes, offsets_tuple->elements_, tensor_type->shape_, args[0]->span_,
+                               op_name);
+  const bool tensor_has_valid_region =
+      tensor_type->tensor_view_.has_value() && !tensor_type->tensor_view_->valid_shape.empty();
+  if (tensor_has_valid_region) {
+    const std::vector<ExprPtr> tensor_valid = GetValidShape(tensor_type);
+    const auto& offsets = offsets_tuple->elements_;
+    // tensor_valid is ranked by the source tensor; offsets/shapes/valid_shapes are
+    // the per-tensor-dim load window. They coincide for an in-coordinate load; if a
+    // rank-reducing form ever diverges, fall back to verbatim rather than misalign.
+    if (tensor_valid.size() == valid_shapes.size() && offsets.size() == valid_shapes.size()) {
+      std::vector<ExprPtr> intersected;
+      intersected.reserve(valid_shapes.size());
+      for (size_t i = 0; i < valid_shapes.size(); ++i) {
+        intersected.push_back(IntersectWindowValidDim(tensor_valid[i], offsets[i], tile_shape[i],
+                                                      valid_shapes[i], args[0]->span_));
+      }
+      tile_view.valid_shape = std::move(intersected);
+    } else {
+      tile_view.valid_shape = valid_shapes;
+    }
+  } else {
+    tile_view.valid_shape = valid_shapes;
+  }
+
+  // Padding policy is independent of whether the source carries an explicit
+  // valid_shape. A fully-valid TensorView can still prescribe how padded
+  // accesses are materialized, so inherit it on both validity paths.
+  if (tensor_type->tensor_view_.has_value()) {
+    tile_view.pad = tensor_type->tensor_view_->pad;
+  }
+
+  // Validate the final inferred region, after intersecting with the source view.
+  // Symbolic extents remain supported; only rank mismatches and statically
+  // provable violations are rejected here so malformed TileTypes never escape
+  // op deduction when the verifier is disabled.
+  ValidateValidShapeBounds(tile_view.valid_shape, tile_shape, args[0]->span_, op_name);
 
   // Return TileType with same dtype as tensor and TileView containing valid_shape.
   // When target_memory is specified, write it into memory_space_ so the constructed
@@ -216,7 +287,9 @@ TypePtr DeduceTileStoreType(const std::vector<ExprPtr>& args,
       << " requires third argument to be a TensorType or DistributedTensorType, but got "
       << args[2]->GetType()->TypeName();
 
-  // Optional fourth argument (when 4 args total) must be a shapes tuple
+  // Optional fourth argument (when 4 args total) is the original-rank valid
+  // partition injected by FlattenTileNdTo2D.
+  std::vector<ExprPtr> transfer_shape;
   if (args.size() == 4) {
     auto shapes_tuple = As<MakeTuple>(args[3]);
     CHECK(shapes_tuple) << "The operator " << op_name
@@ -227,7 +300,25 @@ TypePtr DeduceTileStoreType(const std::vector<ExprPtr>& args,
         << "The operator " << op_name
         << " requires shapes and offsets to have the same number of dimensions, but got "
         << shapes_tuple->elements_.size() << " shapes and " << offsets_tuple->elements_.size() << " offsets";
+    transfer_shape = shapes_tuple->elements_;
+  } else {
+    const std::vector<ExprPtr> tile_valid = GetValidShape(tile_type);
+    CHECK_SPAN(tile_valid.size() <= output_tensor_type->shape_.size(), args[0]->span_)
+        << op_name << ": tile valid rank " << tile_valid.size() << " exceeds destination tensor rank "
+        << output_tensor_type->shape_.size();
+    transfer_shape.reserve(output_tensor_type->shape_.size());
+    const size_t leading_dims = output_tensor_type->shape_.size() - tile_valid.size();
+    for (size_t i = 0; i < leading_dims; ++i) {
+      transfer_shape.push_back(std::make_shared<ConstInt>(1, DataType::INDEX, args[0]->span_));
+    }
+    transfer_shape.insert(transfer_shape.end(), tile_valid.begin(), tile_valid.end());
   }
+
+  // Store writes exactly the valid partition, not the tile's physical padding.
+  // Still, that transferred window must be non-negative and fit the destination.
+  ValidateValidShapeBounds(transfer_shape, output_tensor_type->shape_, args[0]->span_, op_name);
+  ValidatePhysicalWindowBounds(transfer_shape, offsets_tuple->elements_, output_tensor_type->shape_,
+                               args[0]->span_, op_name);
 
   // Optional atomic-add combine mode (split-K accumulation into GM). Absent =
   // AtomicType::kNone (plain overwrite store).
@@ -317,10 +408,15 @@ TypePtr DeduceTileAllocType(const std::vector<ExprPtr>& args,
 TypePtr DeduceTileCreateTileType(const std::vector<ExprPtr>& args,
                                  const std::vector<std::pair<std::string, std::any>>& kwargs,
                                  const std::string& op_name) {
-  // create_tile signature: (shape)
-  // TileType requires static compile-time constant shapes
-  CHECK(args.size() == 1) << "The operator " << op_name << " requires exactly 1 argument, but got "
-                          << args.size();
+  // create_tile signature: (shape[, valid_shape])
+  // TileType requires static compile-time constant shapes. The optional 2nd arg
+  // is a MakeTuple valid_shape narrowing the initially-valid sub-region — needed
+  // for the accumulator pattern, e.g. create_tile(valid_shape=[0, 0]) ("nothing
+  // valid yet") so a later assemble union can grow the box (see "The empty
+  // accumulator" in docs/en/dev/ir/08-valid_shape.md).
+  CHECK(args.size() == 1 || args.size() == 2)
+      << "The operator " << op_name << " requires 1 or 2 arguments (shape[, valid_shape]), but got "
+      << args.size();
 
   // Extract dtype attribute
   DataType dtype = GetKwarg<DataType>(kwargs, "dtype");
@@ -347,6 +443,33 @@ TypePtr DeduceTileCreateTileType(const std::vector<ExprPtr>& args,
   }
 
   CHECK(!tile_shape.empty()) << "The operator " << op_name << " requires non-empty shape";
+
+  // Optional valid_shape (2nd arg): the initially-valid sub-region. Each element
+  // is a ConstInt in [0, shape[i]] (0 is allowed — the empty-accumulator case) or
+  // a symbolic expr (bounds unchecked, per the step-3 verifier convention). When
+  // absent, the tile is fully valid (valid_shape == shape).
+  std::vector<ExprPtr> valid_shape = tile_shape;
+  if (args.size() == 2) {
+    auto valid_tuple = As<MakeTuple>(args[1]);
+    CHECK(valid_tuple) << "The operator " << op_name
+                       << " requires the valid_shape argument to be a MakeTuple, but got "
+                       << args[1]->TypeName();
+    CHECK(valid_tuple->elements_.size() == tile_shape.size())
+        << "The operator " << op_name << " valid_shape rank (" << valid_tuple->elements_.size()
+        << ") must match shape rank (" << tile_shape.size() << ")";
+    valid_shape.clear();
+    valid_shape.reserve(valid_tuple->elements_.size());
+    for (size_t i = 0; i < valid_tuple->elements_.size(); ++i) {
+      auto v = As<ConstInt>(valid_tuple->elements_[i]);
+      if (v) {
+        auto dim = As<ConstInt>(tile_shape[i]);  // always ConstInt here
+        CHECK(v->value_ >= 0 && (!dim || v->value_ <= dim->value_))
+            << "The operator " << op_name << " valid_shape element " << i << " (" << v->value_
+            << ") must be in [0, shape dim " << (dim ? dim->value_ : -1) << "]";
+      }
+      valid_shape.push_back(valid_tuple->elements_[i]);
+    }
+  }
 
   // When target_memory is Acc, deduce the Nz TileView so the result type
   // matches what tile.matmul / tile.matmul_acc produce.  This keeps Acc-typed
@@ -412,7 +535,7 @@ TypePtr DeduceTileCreateTileType(const std::vector<ExprPtr>& args,
       tile_view.blayout = TileLayout::col_major;
     }
   }
-  tile_view.valid_shape = tile_shape;
+  tile_view.valid_shape = std::move(valid_shape);
   return std::make_shared<TileType>(tile_shape, dtype, std::nullopt, tile_view, creation_space);
 }
 
@@ -761,6 +884,8 @@ REGISTER_OP("tile.create")
     .set_description("Create a tile")
     .set_core_affinity(core_affinity::CoreAffinity::SHARED)
     .add_argument("shape", "Shape dimensions (TupleType of ScalarType(INT64))")
+    .add_argument("valid_shape",
+                  "Optional initially-valid sub-region (TupleType of ConstInt, each in [0, shape])")
     .set_attr<DataType>("dtype")
     .set_attr<MemorySpace>("target_memory")
     .set_attr<bool>("transpose")
@@ -864,6 +989,12 @@ TypePtr DeduceTileMscatterType(const std::vector<ExprPtr>& args,
   CHECK(tensor_type->dtype_ == src_type->dtype_)
       << "The operator " << op_name << " requires output_tensor dtype (" << tensor_type->dtype_.ToString()
       << ") to match src dtype (" << src_type->dtype_.ToString() << ")";
+
+  // Indirect addresses make a rectangular output region underivable from any
+  // partial operand. Fail closed until mscatter has an explicit guarded model.
+  CheckTileInputFullyValid(src_type, op_name, "src", args[0]->span_);
+  CheckTileInputFullyValid(idx_type, op_name, "idx", args[1]->span_);
+  CheckTensorInputFullyValid(tensor_type, op_name, "output_tensor", args[2]->span_);
 
   // mscatter returns the output tensor's type unchanged. Returning the original
   // GetType() (rather than the AsTensorTypeLike upcast) keeps the ObjectKind

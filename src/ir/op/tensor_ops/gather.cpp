@@ -32,6 +32,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -92,6 +93,13 @@ TypePtr DeduceTensorGatherType(const std::vector<ExprPtr>& args,
     }
   }
 
+  // gather reads input[index] at runtime-computed positions, so a partially-valid
+  // input or index makes the output valid region underivable — reject rather than
+  // widen to the full shape (North Star). A fully-valid input passes silently, so the
+  // current (bare) result is byte-identical.
+  CheckTensorInputFullyValid(input_type, op_name, "input", args[0]->span_);
+  CheckTensorInputFullyValid(index_type, op_name, "index", args[1]->span_);
+
   return std::make_shared<TensorType>(index_type->shape_, input_type->dtype_);
 }
 
@@ -130,6 +138,7 @@ TypePtr DeduceTensorGatherMaskType(const std::vector<ExprPtr>& args,
 
   CHECK(input_type->shape_.size() == 2)
       << "The operator " << op_name << " requires 2D input, but got rank " << input_type->shape_.size();
+  CheckTensorInputFullyValid(input_type, op_name, "input", args[0]->span_);
 
   int pattern = -1;
   for (const auto& [key, value] : kwargs) {
@@ -242,6 +251,7 @@ static TypePtr DeduceTensorGatherCompareType(const std::vector<ExprPtr>& args,
       << input_type->dtype_.ToString();
   CHECK(input_type->shape_.size() == 2)
       << "The operator " << op_name << " requires 2D input, but got rank " << input_type->shape_.size();
+  CheckTensorInputFullyValid(input_type, op_name, "input", args[0]->span_);
 
   auto kv_type = As<ScalarType>(args[1]->GetType());
   CHECK(kv_type) << "The operator " << op_name << " requires kvalue to be a ScalarType, but got "

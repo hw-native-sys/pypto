@@ -62,7 +62,7 @@
 | 规则名称 | IRProperty | 用途 |
 | -------- | ---------- | ---- |
 | **SSAVerify** | SSAForm | 无多重赋值、无名称遮蔽、无缺失 yield、作用域违规、基数检查 |
-| **TypeCheck** | TypeChecked | 类型种类/数据类型/形状/大小一致性 |
+| **TypeCheck** | TypeChecked | 类型种类/数据类型/形状/大小一致性、控制流汇合点上可证明的 effective `valid_shape` 相等，以及每个 Tile/Tensor/DistributedTensor 类型的常驻边界（`rank(valid_shape) == rank(shape)`、`0 <= valid_shape[i] <= shape[i]`） |
 | **NoNestedCall** | NoNestedCalls | 参数、条件、范围中无嵌套调用表达式 |
 | **BreakContinueCheck** | BreakContinueValid | break/continue 仅在顺序/while 循环中 |
 | **UseAfterDefCheck** | UseAfterDef | 每个 Var 使用均由定义支配（参数、AssignStmt、循环变量、iter_arg、return_var） |
@@ -111,6 +111,23 @@
 | 106 | `IF_CONDITION_MUST_BE_SCALAR` | IfStmt/WhileStmt 条件必须是 ScalarType |
 | 107 | `FOR_RANGE_MUST_BE_SCALAR` | ForStmt 范围必须是 ScalarType |
 | 108 | `CONDITION_MUST_BE_BOOL` | IfStmt/WhileStmt 条件 dtype 必须是 BOOL |
+
+**`valid_shape` 良构性（常驻不变式）。** 除上述控制流汇合点检查外，TypeCheck 还遍历每一个
+TileType/TensorType（包括 DistributedTensorType；函数参数、返回类型、函数体 Var/Call，以及嵌套在
+TupleType 中的类型），对任何携带显式非空 `valid_shape` 的 view 强制
+`rank(valid_shape) == rank(shape)`（复用 `SHAPE_DIMENSION_MISMATCH`），并在共享算术分析器能证明
+关系为假时强制 `0 <= valid_shape[i] <= shape[i]`（复用 `SHAPE_VALUE_MISMATCH`）。真正未知的符号边界
+会推迟处理，动态 `valid_shape` 仍受支持。空 `valid_shape` 表示"完全有效"（`== shape`），不做检查。
+由于 `TypeChecked` 是结构性属性，该边界在每个 Pass 前后都会强制，因此非法的 `valid_shape`（例如
+`[128, 128]` tile 上的 `[999, 999]`）会在产生它的最早那个 Pass 处被捕获。
+
+在 `if`、`for` 与 `while` 汇合点，shaped init/yield/return 值必须在 dtype、物理 shape 和
+**effective** validity（未设置时等于物理 shape）上相等，且该相等关系必须可证明；互不相关的符号
+表达式会被拒绝，因为汇合点不会生成运行时 guard。`IfStmt` 还会把两个分支分别与声明的
+`return_var` 比较；循环同样会把声明的 `IterArg` 与 init、yield、return carrier 逐一比较。
+Tuple carrier 会递归逐元素比较，不能通过嵌套隐藏 shaped 类型不一致。Tensor 汇合还要求 pad
+策略一致；`DistributedTensorType` 汇合必须引用同一个可选 `WindowBuffer` identity——相同 shape
+与 validity 并不能让两个不同的通信分配互换。
 
 ### NoNestedCall
 

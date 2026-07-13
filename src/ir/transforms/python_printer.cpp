@@ -940,10 +940,11 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
     std::string core_type = "mix";
     std::string mode = "soft";
     for (const auto& [key, val] : op->kwargs_) {
-      if (key == "core_type")
+      if (key == "core_type") {
         core_type = AnyCast<std::string>(val, "syncall core_type");
-      else if (key == "mode")
+      } else if (key == "mode") {
         mode = AnyCast<std::string>(val, "syncall mode");
+      }
     }
     const size_t used_idx = op->args_.size() - 1;
     stream_ << "mode=\"" << mode << "\", core_type=\"" << core_type << "\", gm_workspace=";
@@ -966,21 +967,32 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
     return;
   }
 
-  // Print positional arguments
-  for (size_t i = 0; i < op->args_.size(); ++i) {
-    if (i > 0) stream_ << ", ";
+  // tile.create's optional 2nd positional arg is a valid_shape tuple. The DSL
+  // create(shape, dtype, ..., valid_shape=None) reserves positional slot 1 for
+  // dtype, so print shape positionally and valid_shape as a keyword; the generic
+  // kwargs (dtype / target_memory) then follow. Always emit it when present so
+  // the reparsed call keeps the same arg count (structural round-trip).
+  if (IsOp(op, "tile.create") && op->args_.size() == 2) {
+    VisitExpr(op->args_[0]);  // shape (positional)
+    stream_ << ", valid_shape=";
+    VisitExpr(op->args_[1]);  // valid_shape tuple -> prints as [v0, v1, ...]
+  } else {
+    // Print positional arguments
+    for (size_t i = 0; i < op->args_.size(); ++i) {
+      if (i > 0) stream_ << ", ";
 
-    // Special handling for tile.alloc/tensor.alloc first argument (memory_space)
-    if ((IsOp(op, "tile.alloc") || IsOp(op, "tensor.alloc")) && i == 0) {
-      // Try to extract the integer value and convert it to MemorySpace enum
-      if (auto const_int = std::dynamic_pointer_cast<const ConstInt>(op->args_[i])) {
-        int space_value = static_cast<int>(const_int->value_);
-        stream_ << prefix_ << ".Mem." << MemorySpaceToString(static_cast<MemorySpace>(space_value));
+      // Special handling for tile.alloc/tensor.alloc first argument (memory_space)
+      if ((IsOp(op, "tile.alloc") || IsOp(op, "tensor.alloc")) && i == 0) {
+        // Try to extract the integer value and convert it to MemorySpace enum
+        if (auto const_int = std::dynamic_pointer_cast<const ConstInt>(op->args_[i])) {
+          int space_value = static_cast<int>(const_int->value_);
+          stream_ << prefix_ << ".Mem." << MemorySpaceToString(static_cast<MemorySpace>(space_value));
+        } else {
+          VisitExpr(op->args_[i]);
+        }
       } else {
         VisitExpr(op->args_[i]);
       }
-    } else {
-      VisitExpr(op->args_[i]);
     }
   }
 
@@ -2517,7 +2529,7 @@ static std::unordered_map<const Var*, std::string> CollectDynVarMapping(const Pr
   };
 
   std::function<void(const TypePtr&)> collect_from_type = [&](const TypePtr& type) {
-    if (auto tensor_type = As<TensorType>(type)) {
+    if (auto tensor_type = AsTensorTypeLike(type)) {
       for (const auto& dim : tensor_type->shape_) {
         collect_vars_from_expr(dim);
       }
@@ -2730,7 +2742,11 @@ std::string IRPythonPrinter::PrintTileView(const TileView& tile_view, const std:
 
   // valid_shape — omit if it matches the parent tile's shape
   bool valid_shape_matches = tile_view_semantics::ShapeExprListsEquivalent(tile_view.valid_shape, tile_shape);
-  if (!valid_shape_matches) {
+  // An empty field is the canonical spelling of fully valid (D2), even when
+  // the surrounding TileView survives for stride/layout metadata. Do not emit
+  // ``valid_shape=[]``: it is redundant and older parser/printer contracts
+  // intentionally omit default fields.
+  if (!valid_shape_matches && !tile_view.valid_shape.empty()) {
     maybe_comma();
     oss << "valid_shape=[";
     for (size_t i = 0; i < tile_view.valid_shape.size(); ++i) {

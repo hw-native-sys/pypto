@@ -27,12 +27,12 @@ namespace pypto {
 namespace codegen {
 
 using ir::As;
+using ir::AsTensorTypeLike;
 using ir::EvalStmtPtr;
 using ir::ForStmtPtr;
 using ir::IfStmtPtr;
 using ir::ScalarType;
 using ir::StmtPtr;
-using ir::TensorType;
 using ir::TileType;
 using ir::WhileStmtPtr;
 using ir::YieldStmtPtr;
@@ -85,7 +85,7 @@ void PTOCodegen::VisitStmt_(const YieldStmtPtr& op) {
     // return_var binding — see a consistent SSA across branches that aliases
     // the same concrete make_tensor_view (issue #1533). For/While loops keep
     // only scalar yields, so this does not affect their lowering.
-    if (As<TensorType>(expr->GetType())) {
+    if (AsTensorTypeLike(expr->GetType())) {
       if (auto tensor_var = ir::AsVarLike(expr)) {
         // Only normalize when a tensor_view is actually registered. Some
         // tensors (e.g. return-value / loop phis without a make_tensor_view)
@@ -153,27 +153,33 @@ bool IsDefinedInBranch(const ir::Var* var, const StmtPtr& body) {
     return assign->var_.get() == var && As<ir::Call>(assign->value_) != nullptr;
   }
   if (auto seq = As<ir::SeqStmts>(body)) {
-    for (const auto& s : seq->stmts_)
+    for (const auto& s : seq->stmts_) {
       if (IsDefinedInBranch(var, s)) return true;
+    }
     return false;
   }
   if (auto for_stmt = As<ir::ForStmt>(body)) {
-    for (const auto& ia : for_stmt->iter_args_)
+    for (const auto& ia : for_stmt->iter_args_) {
       if (ia.get() == var) return true;
-    for (const auto& rv : for_stmt->return_vars_)
+    }
+    for (const auto& rv : for_stmt->return_vars_) {
       if (rv.get() == var) return true;
+    }
     return IsDefinedInBranch(var, for_stmt->body_);
   }
   if (auto while_stmt = As<ir::WhileStmt>(body)) {
-    for (const auto& ia : while_stmt->iter_args_)
+    for (const auto& ia : while_stmt->iter_args_) {
       if (ia.get() == var) return true;
-    for (const auto& rv : while_stmt->return_vars_)
+    }
+    for (const auto& rv : while_stmt->return_vars_) {
       if (rv.get() == var) return true;
+    }
     return IsDefinedInBranch(var, while_stmt->body_);
   }
   if (auto if_stmt = As<ir::IfStmt>(body)) {
-    for (const auto& rv : if_stmt->return_vars_)
+    for (const auto& rv : if_stmt->return_vars_) {
       if (rv.get() == var) return true;
+    }
     if (IsDefinedInBranch(var, if_stmt->then_body_)) return true;
     return if_stmt->else_body_.has_value() && IsDefinedInBranch(var, *if_stmt->else_body_);
   }
@@ -239,7 +245,7 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
         // producers are re-bound to it (see emit_branch, fix #1956); mark it
         // emitted so their EmitAllocTileForVar dedups instead of re-declaring it.
         if (!emit_tile_addr_) fs_.emitted_tile_alloc_names.insert(ret_name);
-      } else if (As<TensorType>(return_var->GetType()) || As<ir::ArrayType>(return_var->GetType())) {
+      } else if (AsTensorTypeLike(return_var->GetType()) || As<ir::ArrayType>(return_var->GetType())) {
         // Tensors and on-core arrays are mutable references mutated in place
         // (pl.assemble lowers to a tile store into the backing memref; arrays
         // write the same backing `pto.declare_local_array`). Both branches yield
@@ -271,6 +277,7 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
     // yield the same SSA because every array.update_element / pl.assemble
     // aliases the one backing array / tensor.
     std::vector<std::string> inplace_return_ssa(op->return_vars_.size());
+    std::vector<std::string> inplace_return_ctx_ssa(op->return_vars_.size());
 
     auto emit_branch = [&](const StmtPtr& body, const char* branch_name) {
       // Fix #1956: under memory_planner=PTOAS, MemoryReuse (which would alias the
@@ -309,7 +316,7 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
         if (returns_via_scf[i]) {
           scalar_yields.push_back(branch_yields[i]);
         } else if (As<ir::ArrayType>(op->return_vars_[i]->GetType()) ||
-                   As<TensorType>(op->return_vars_[i]->GetType())) {
+                   AsTensorTypeLike(op->return_vars_[i]->GetType())) {
           // In-place backing SSA (array or tensor); bound to the return var
           // after the branches. Both branches must agree on the same storage SSA
           // (every array.update_element / pl.assemble aliases the one backing
@@ -322,6 +329,27 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
                 << "Internal error: IfStmt in-place return_var '" << op->return_vars_[i]->name_hint_
                 << "' yields different backing SSAs across branches: " << inplace_return_ssa[i] << " vs "
                 << branch_yields[i];
+          }
+          if (As<ir::DistributedTensorType>(op->return_vars_[i]->GetType())) {
+            auto branch_yield = FindBranchYield(body);
+            INTERNAL_CHECK_SPAN(branch_yield && i < branch_yield->value_.size(), op->span_)
+                << "Internal error: IfStmt DistributedTensor return_var '" << op->return_vars_[i]->name_hint_
+                << "' has no matching branch yield";
+            auto source = ir::AsVarLike(branch_yield->value_[i]);
+            INTERNAL_CHECK_SPAN(source, op->span_)
+                << "Internal error: IfStmt DistributedTensor branch yield must be Var-like";
+            const std::string ctx_ssa = GetCommCtxSSAFor(source.get());
+            INTERNAL_CHECK_SPAN(!ctx_ssa.empty(), op->span_)
+                << "Internal error: IfStmt DistributedTensor branch yield '" << source->name_hint_
+                << "' has no CommContext binding";
+            if (inplace_return_ctx_ssa[i].empty()) {
+              inplace_return_ctx_ssa[i] = ctx_ssa;
+            } else {
+              INTERNAL_CHECK_SPAN(inplace_return_ctx_ssa[i] == ctx_ssa, op->span_)
+                  << "Internal error: IfStmt DistributedTensor return_var '"
+                  << op->return_vars_[i]->name_hint_
+                  << "' yields different CommContext bindings across branches";
+            }
           }
         } else if (!emit_tile_addr_ && As<TileType>(op->return_vars_[i]->GetType())) {
           // Tile phi under PTOAS (fix #1956). A branch-local producer was already
@@ -382,7 +410,7 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
     for (size_t i = 0; i < op->return_vars_.size(); ++i) {
       const auto& return_var = op->return_vars_[i];
       const bool is_array = As<ir::ArrayType>(return_var->GetType()) != nullptr;
-      const bool is_tensor = As<TensorType>(return_var->GetType()) != nullptr;
+      const bool is_tensor = AsTensorTypeLike(return_var->GetType()) != nullptr;
       if (!is_array && !is_tensor) continue;
       INTERNAL_CHECK_SPAN(!inplace_return_ssa[i].empty(), op->span_)
           << "Internal error: in-place IfStmt return_var '" << return_var->name_hint_
@@ -395,6 +423,12 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
         auto base_it = fs_.view_ssa_to_base_ptr.find(inplace_return_ssa[i]);
         if (base_it != fs_.view_ssa_to_base_ptr.end()) {
           RegisterBasePtr(return_var, base_it->second);
+        }
+        if (As<ir::DistributedTensorType>(return_var->GetType())) {
+          INTERNAL_CHECK_SPAN(!inplace_return_ctx_ssa[i].empty(), op->span_)
+              << "Internal error: IfStmt DistributedTensor return_var '" << return_var->name_hint_
+              << "' has no merged CommContext binding";
+          RegisterCommCtxFor(return_var, inplace_return_ctx_ssa[i]);
         }
       }
     }
@@ -461,9 +495,9 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
     const auto& return_var = op->return_vars_[i];
 
     std::string init_mlir_name;
-    auto tensor_type = As<TensorType>(iter_arg->GetType());
+    auto tensor_type = AsTensorTypeLike(iter_arg->GetType());
     if (tensor_type) {
-      auto init_var = std::dynamic_pointer_cast<const ir::Var>(iter_arg->initValue_);
+      auto init_var = ir::AsVarLike(iter_arg->initValue_);
       INTERNAL_CHECK_SPAN(init_var, op->span_) << "TensorType iter_arg init value must be a Var or IterArg";
       init_mlir_name = GetOrCreateTensorView(init_var);
     } else {
@@ -478,6 +512,19 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
     if (tensor_type) {
       BindTensorView(iter_arg, init_mlir_name);
       BindTensorView(return_var, init_mlir_name);
+      auto init_var = ir::AsVarLike(iter_arg->initValue_);
+      INTERNAL_CHECK_SPAN(init_var, op->span_) << "TensorType iter_arg init value must be a Var or IterArg";
+      const std::string base_ptr = GetTensorBasePtr(init_var);
+      RegisterBasePtr(iter_arg, base_ptr);
+      RegisterBasePtr(return_var, base_ptr);
+      if (As<ir::DistributedTensorType>(iter_arg->GetType())) {
+        const std::string ctx_ssa = GetCommCtxSSAFor(init_var.get());
+        INTERNAL_CHECK_SPAN(!ctx_ssa.empty(), op->span_)
+            << "Internal error: DistributedTensor ForStmt iter_arg '" << iter_arg->name_hint_
+            << "' init value has no CommContext binding";
+        RegisterCommCtxFor(iter_arg, ctx_ssa);
+        RegisterCommCtxFor(return_var, ctx_ssa);
+      }
     } else if (auto tile_type = ir::GetTileTypeWithMemRef(iter_arg->GetType())) {
       const auto memref = ir::GetDefinedMemRef(tile_type);
       BindVarToMemRef(iter_arg, memref->base_.get());
@@ -600,9 +647,9 @@ void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
     const auto& return_var = op->return_vars_[i];
 
     std::string init_mlir_name;
-    auto tensor_type = As<TensorType>(iter_arg->GetType());
+    auto tensor_type = AsTensorTypeLike(iter_arg->GetType());
     if (tensor_type) {
-      auto init_var = std::dynamic_pointer_cast<const ir::Var>(iter_arg->initValue_);
+      auto init_var = ir::AsVarLike(iter_arg->initValue_);
       INTERNAL_CHECK_SPAN(init_var, op->span_) << "TensorType iter_arg init value must be a Var or IterArg";
       init_mlir_name = GetOrCreateTensorView(init_var);
     } else {
@@ -617,6 +664,19 @@ void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
     if (tensor_type) {
       BindTensorView(iter_arg, init_mlir_name);
       BindTensorView(return_var, init_mlir_name);
+      auto init_var = ir::AsVarLike(iter_arg->initValue_);
+      INTERNAL_CHECK_SPAN(init_var, op->span_) << "TensorType iter_arg init value must be a Var or IterArg";
+      const std::string base_ptr = GetTensorBasePtr(init_var);
+      RegisterBasePtr(iter_arg, base_ptr);
+      RegisterBasePtr(return_var, base_ptr);
+      if (As<ir::DistributedTensorType>(iter_arg->GetType())) {
+        const std::string ctx_ssa = GetCommCtxSSAFor(init_var.get());
+        INTERNAL_CHECK_SPAN(!ctx_ssa.empty(), op->span_)
+            << "Internal error: DistributedTensor WhileStmt iter_arg '" << iter_arg->name_hint_
+            << "' init value has no CommContext binding";
+        RegisterCommCtxFor(iter_arg, ctx_ssa);
+        RegisterCommCtxFor(return_var, ctx_ssa);
+      }
     } else if (auto tile_type = ir::GetTileTypeWithMemRef(iter_arg->GetType())) {
       const auto memref = ir::GetDefinedMemRef(tile_type);
       BindVarToMemRef(iter_arg, memref->base_.get());

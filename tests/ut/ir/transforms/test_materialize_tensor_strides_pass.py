@@ -24,6 +24,8 @@ Tests follow the Before/Expected ``@pl.program`` pattern: the pass runs on
 ``Before``.
 """
 
+from typing import cast
+
 import pypto.language as pl
 import pytest
 from pypto import DataType, ir
@@ -135,12 +137,17 @@ def test_empty_dn_stride_filled_3d():
 
 def test_empty_nd_stride_filled():
     # An ND view with empty stride is also materialized to row-major packed.
+    # A strictly-narrower valid_shape keeps the view present through
+    # canonicalization (a fully-default ND view now collapses to the bare form,
+    # which the pass treats as implicitly ND-packed and leaves untouched).
     @pl.program
     class Before:
         @pl.function
         def f(
             self,
-            x: pl.Tensor[[8, 16], pl.FP32, pl.TensorView(stride=[], layout=pl.TensorLayout.ND)],
+            x: pl.Tensor[
+                [8, 16], pl.FP32, pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[4, 8])
+            ],
         ):
             pl.const(0, pl.INT64)
 
@@ -149,12 +156,56 @@ def test_empty_nd_stride_filled():
         @pl.function
         def f(
             self,
-            x: pl.Tensor[[8, 16], pl.FP32, pl.TensorView(stride=[16, 1], layout=pl.TensorLayout.ND)],
+            x: pl.Tensor[
+                [8, 16], pl.FP32, pl.TensorView(stride=[16, 1], layout=pl.TensorLayout.ND, valid_shape=[4, 8])
+            ],
         ):
             pl.const(0, pl.INT64)
 
     After = _materialize(Before)
     ir.assert_structural_equal(After, Expected)
+
+
+def test_materialization_preserves_tensor_view_pad():
+    """Filling an implicit stride must not discard independent pad metadata."""
+
+    def build(stride):
+        view = ir.TensorView(
+            _dims(stride),
+            ir.TensorLayout.ND,
+            _dims([4, 8]),
+            ir.PadValue.zero,
+        )
+        tensor_type = ir.TensorType(_dims([8, 16]), DataType.FP32, None, view)
+        x = ir.Var("x", tensor_type, _SPAN)
+        function = ir.Function("f", [x], [tensor_type], ir.ReturnStmt([x], _SPAN), _SPAN)
+        return ir.Program([function], "p", _SPAN)
+
+    After = _materialize(build([]))
+    ir.assert_structural_equal(After, build([16, 1]))
+
+
+def test_distributed_tensor_view_materialized_and_strictly_verified():
+    """Distributed views obey the same materialized-stride verifier contract."""
+    view = ir.TensorView([], ir.TensorLayout.ND, _dims([3, 7]), ir.PadValue.zero)
+    distributed_type = ir.DistributedTensorType(_dims([4, 8]), DataType.FP32, None, view)
+    value = ir.Var("value", distributed_type, _SPAN)
+    function = ir.Function("f", [value], [distributed_type], ir.ReturnStmt([value], _SPAN), _SPAN)
+    before = ir.Program([function], "p", _SPAN)
+
+    assert any("TensorView.stride is empty" in d.message for d in _verify_strict(before))
+    after = _materialize(before)
+    assert _verify_strict(after) == []
+
+    after_function = after.get_function("f")
+    assert after_function is not None
+    after_type = after_function.params[0].type
+    assert isinstance(after_type, ir.DistributedTensorType)
+    assert after_type.window_buffer is None
+    assert after_type.tensor_view is not None
+    assert [cast(ir.ConstInt, dim).value for dim in after_type.tensor_view.stride] == [8, 1]
+    assert [cast(ir.ConstInt, dim).value for dim in after_type.tensor_view.valid_shape] == [3, 7]
+    assert after_type.tensor_view.pad == ir.PadValue.zero
 
 
 # ============================================================================

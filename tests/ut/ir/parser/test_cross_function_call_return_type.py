@@ -25,7 +25,7 @@ declares no annotation, so both the original build and the reparse agree.
 
 import pypto.language as pl
 import pytest
-from pypto import ir
+from pypto import DataType, ir
 
 
 def _user_call_types(program: ir.Program, callee_name: str) -> list[ir.Type]:
@@ -140,6 +140,76 @@ def test_annotationless_callee_dynamic_shape_is_substituted():
     assert isinstance(call_type, ir.TensorType)
     assert [str(d) for d in call_type.shape] == ["32", "16"]
     _assert_roundtrips(Prog)
+
+
+def test_distributed_return_substitution_preserves_metadata_and_window_identity():
+    """DTT call returns substitute composite metadata without losing DTT-only fields."""
+    span = ir.Span.unknown()
+    metadata_span = ir.Span("dynamic_return.py", 7, 3, 7, 12)
+    m = ir.Var("M", ir.ScalarType(DataType.INDEX), span)
+    n = ir.Var("N", ir.ScalarType(DataType.INDEX), span)
+    one = ir.ConstInt(1, DataType.INDEX, span)
+
+    callee_type = ir.DistributedTensorType([m, n], DataType.FP32)
+    callee_param = ir.Var("callee_data", callee_type, span)
+    actual_type = ir.DistributedTensorType([32, 64], DataType.FP32)
+    actual = ir.Var("actual_data", actual_type, span)
+
+    memref = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(4096, DataType.INT64, span), 8192, 17)
+    composite_stride = ir.Add(m, one, DataType.INDEX, metadata_span)
+    unary_stride = ir.Neg(n, DataType.INDEX, metadata_span)
+    composite_valid = ir.Sub(m, one, DataType.INDEX, metadata_span)
+    tensor_view = ir.TensorView(
+        [composite_stride, unary_stride],
+        ir.TensorLayout.DN,
+        [composite_valid, n],
+        ir.PadValue.zero,
+    )
+    viewed_return = ir.DistributedTensorType([m, n], DataType.FP32, memref, tensor_view)
+
+    window_base = ir.Var("window", ir.PtrType(), span)
+    window = ir.WindowBuffer(window_base, ir.ConstInt(8192, DataType.INT64, span), span=span)
+    windowed_return = ir.DistributedTensorType([m, n], DataType.FP32, window)
+
+    viewed_result, windowed_result = ir.deduce_call_return_type(
+        [callee_param], [actual], [viewed_return, windowed_return]
+    )
+
+    assert isinstance(viewed_result, ir.DistributedTensorType)
+    assert [str(dim) for dim in viewed_result.shape] == ["32", "64"]
+    assert viewed_result.memref is memref
+    assert viewed_result.window_buffer is None
+    assert viewed_result.tensor_view is not None
+    assert viewed_result.tensor_view.layout == ir.TensorLayout.DN
+    assert viewed_result.tensor_view.pad == ir.PadValue.zero
+
+    result_stride = viewed_result.tensor_view.stride
+    assert isinstance(result_stride[0], ir.Add)
+    assert isinstance(result_stride[0].left, ir.ConstInt)
+    assert result_stride[0].left.value == 32
+    assert isinstance(result_stride[0].type, ir.ScalarType)
+    assert result_stride[0].type.dtype == DataType.INDEX
+    assert (
+        result_stride[0].span.filename,
+        result_stride[0].span.begin_line,
+        result_stride[0].span.begin_column,
+        result_stride[0].span.end_line,
+        result_stride[0].span.end_column,
+    ) == ("dynamic_return.py", 7, 3, 7, 12)
+    assert isinstance(result_stride[1], ir.Neg)
+    assert isinstance(result_stride[1].operand, ir.ConstInt)
+    assert result_stride[1].operand.value == 64
+
+    result_valid = viewed_result.tensor_view.valid_shape
+    assert isinstance(result_valid[0], ir.Sub)
+    assert isinstance(result_valid[0].left, ir.ConstInt)
+    assert result_valid[0].left.value == 32
+    assert isinstance(result_valid[1], ir.ConstInt)
+    assert result_valid[1].value == 64
+
+    assert isinstance(windowed_result, ir.DistributedTensorType)
+    assert [str(dim) for dim in windowed_result.shape] == ["32", "64"]
+    assert windowed_result.window_buffer is window
 
 
 def test_explicit_return_annotation_still_roundtrips():

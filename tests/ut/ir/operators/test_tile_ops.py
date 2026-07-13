@@ -14,7 +14,62 @@ import math
 import pypto.language as pl
 import pytest
 from pypto import DataType, ir
-from pypto.ir.op import tile
+from pypto.ir.op import tensor, tile
+
+
+def _mk_tile(name, shape, valid=None, dtype=DataType.FP32, blayout=None):
+    """Build a tile-typed Var with an optional explicit per-axis ``valid_shape``.
+
+    ``shape`` entries are static ints. ``valid`` entries may be ints (static extents)
+    or ``Expr`` nodes (symbolic/dynamic extents); ``None`` builds a fully-valid tile
+    (no explicit ``TileView``, so ``GetValidShape`` falls back to the physical shape).
+    ``blayout`` optionally stamps the tile's block layout (used by the elementwise
+    valid-shape agreement tests to prove the result layout comes from the shaping
+    operand, not a shape-1 broadcast operand).
+    """
+    span = ir.Span.unknown()
+    shape_exprs = [ir.ConstInt(s, DataType.INT32, span) for s in shape]
+    if valid is None and blayout is None:
+        view = None
+    else:
+        kwargs = {}
+        if valid is not None:
+            kwargs["valid_shape"] = list(valid)
+        if blayout is not None:
+            kwargs["blayout"] = blayout
+        view = ir.TileView(**kwargs)
+    return ir.Var(name, ir.TileType(shape_exprs, dtype, None, view), span)
+
+
+def _index_scalar(name):
+    """A symbolic INDEX-typed scalar Var usable as a dynamic valid extent."""
+    return ir.Var(name, ir.ScalarType(DataType.INDEX), ir.Span.unknown())
+
+
+def _effective_valid(tile_type):
+    """Effective ``valid_shape`` of a tile type (physical shape when unset)."""
+    view = tile_type.tile_view
+    if view is None or len(view.valid_shape) == 0:
+        return list(tile_type.shape)
+    return list(view.valid_shape)
+
+
+def _valid_ints(tile_type):
+    """Effective ``valid_shape`` as a list of ints; asserts every extent is static."""
+    out = []
+    for extent in _effective_valid(tile_type):
+        assert isinstance(extent, ir.ConstInt), f"expected static valid extent, got {extent!r}"
+        out.append(extent.value)
+    return out
+
+
+def _const_ints(exprs) -> list[int]:
+    """Extract ``.value`` from a sequence of ConstInt exprs; asserts each is static."""
+    out = []
+    for e in exprs:
+        assert isinstance(e, ir.ConstInt)
+        out.append(e.value)
+    return out
 
 
 class TestTileElementwiseOps:
@@ -199,8 +254,214 @@ class TestTileElementwiseOps:
         assert "tile.cmps" in ir_str
 
 
+def _blayout(tile_type):
+    """Effective block layout of a tile type (resolves the canonicalized view)."""
+    return tile_type.get_effective_tile_view().blayout
+
+
+class TestTileElementwiseValidShapeAgreement:
+    """4e: multi-operand tile ops AGREE on their operands' valid regions instead of
+    blindly taking arg0's (valid_shape never broadcasts)."""
+
+    def test_add_commutative_valid_shape_and_layout(self):
+        """pl.add(at, bt) and pl.add(bt, at) infer the SAME valid_shape and SAME blayout.
+
+        This is the motivating r2 bug: arg-order used to change both the valid_shape
+        (narrowing to the [128,1] broadcast operand's 1 valid col) and the blayout
+        (leaking col_major from the shape-1 operand into the [128,128] result).
+        """
+        m = _index_scalar("M")
+        # at is the full-shaped [128,128] operand (row_major); bt is a [128,1]
+        # column-broadcast operand carrying col_major (as [N,1] tiles infer).
+        at = _mk_tile("at", [128, 128], [m, 64], blayout=ir.TileLayout.row_major)
+        bt = _mk_tile("bt", [128, 1], [m, 1], blayout=ir.TileLayout.col_major)
+
+        r1 = tile.add(at, bt).type
+        r2 = tile.add(bt, at).type
+        v1 = _effective_valid(r1)
+        v2 = _effective_valid(r2)
+        # Row valid is the shared dynamic M on both operands; col valid is at's 64
+        # (bt is broadcast in the col dim => exempt, contributes nothing).
+        assert v1[0] is m and v2[0] is m
+        assert isinstance(v1[1], ir.ConstInt) and v1[1].value == 64
+        assert isinstance(v2[1], ir.ConstInt) and v2[1].value == 64
+        # Commutativity: identical valid_shape and blayout regardless of arg order.
+        assert ir.structural_equal(r1, r2)
+        assert _blayout(r1) == _blayout(r2) == ir.TileLayout.row_major
+        # The result must NOT narrow to the broadcast operand's 1 valid col.
+        assert not (isinstance(v2[1], ir.ConstInt) and v2[1].value == 1)
+
+    def test_mutually_broadcasting_layout_is_output_derived_and_commutative(self):
+        """When neither operand owns [M,N], layout cannot come from arg order."""
+        col = _mk_tile("col", [8, 1], blayout=ir.TileLayout.col_major)
+        row = _mk_tile("row", [1, 16], blayout=ir.TileLayout.row_major)
+        lhs_first = tile.add(col, row).type
+        rhs_first = tile.add(row, col).type
+        assert ir.structural_equal(lhs_first, rhs_first)
+        assert _blayout(lhs_first) == _blayout(rhs_first) == ir.TileLayout.row_major
+
+    def test_fully_valid_broadcast_unchanged(self):
+        """Regression guard: a fully-valid [128,1] + [128,128] stays fully valid and
+        canonicalizes to no view — the overwhelmingly common case is byte-identical."""
+        rr = tile.add(_mk_tile("a", [128, 1]), _mk_tile("b", [128, 128])).type
+        assert isinstance(rr, ir.TileType)
+        assert _valid_ints(rr) == [128, 128]
+        assert rr.tile_view is None
+
+    def test_matching_shape_equal_partial_valid_propagates(self):
+        """Two same-shaped operands with the SAME partial valid propagate it."""
+        rr = tile.add(_mk_tile("a", [128, 128], [64, 32]), _mk_tile("b", [128, 128], [64, 32])).type
+        assert _valid_ints(rr) == [64, 32]
+
+    def test_matching_shape_provably_unequal_static_valid_rejects(self):
+        """A provable static valid mismatch (64 vs 32) on a non-broadcast dim is a
+        user error, rejected loudly (valid_shape never broadcasts)."""
+        m = _index_scalar("M")
+        a = _mk_tile("a", [128, 128], [m, 64])
+        b = _mk_tile("b", [128, 128], [m, 32])
+        with pytest.raises(ValueError, match="disagree on the valid extent along dim 1"):
+            tile.add(a, b)
+
+    def test_symbolic_valid_not_provably_equal_rejected(self):
+        """Distinct symbolic extents reject when equality has no proof or runtime guard."""
+        m = _index_scalar("M")
+        n = _index_scalar("N")
+        a = _mk_tile("a", [128, 128], [m, 64])
+        b = _mk_tile("b", [128, 128], [n, 64])
+        with pytest.raises(ValueError, match="symbolic equality cannot be proven"):
+            tile.add(a, b)
+
+    def test_broadcast_operand_valid_zero_rejected(self):
+        """An empty physical singleton cannot be broadcast as though it held data."""
+        m = _index_scalar("M")
+        bt = _mk_tile("bt", [128, 1], [m, 0])  # 0 valid in the (broadcast) col dim
+        at = _mk_tile("at", [128, 128], [m, 64])
+        with pytest.raises(ValueError, match="singleton value must be provably valid"):
+            tile.add(bt, at)
+
+    def test_shift_binary_agrees_on_valid(self):
+        """Shift (dst[i]=lhs[i]<<rhs[i]) requires lhs and the shift-amount rhs to agree."""
+        lhs = _mk_tile("lhs", [128, 128], [40, 64], dtype=DataType.INT32)
+        rhs = _mk_tile("rhs", [128, 128], [40, 64], dtype=DataType.INT32)
+        assert _valid_ints(tile.shl(lhs, rhs).type) == [40, 64]
+        # A provable shift-amount valid mismatch rejects.
+        bad = _mk_tile("bad", [128, 128], [40, 32], dtype=DataType.INT32)
+        with pytest.raises(ValueError, match="disagree on the valid extent"):
+            tile.shl(lhs, bad)
+
+    def test_ternary_agrees_on_value_operands_ignoring_tmp(self):
+        """rem (lhs, rhs, tmp): agreement over lhs/rhs; the scratch tmp is ignored."""
+        lhs = _mk_tile("lhs", [128, 128], [40, 64])
+        rhs = _mk_tile("rhs", [128, 128], [40, 64])
+        tmp = _mk_tile("tmp", [128, 128], [8, 8])  # a narrower scratch must NOT constrain
+        assert _valid_ints(tile.rem(lhs, rhs, tmp).type) == [40, 64]
+
+    def test_tri_tile_agrees_across_all_three(self):
+        """addc (lhs, rhs, rhs2): all three real value tiles must agree."""
+        a = _mk_tile("a", [128, 128], [40, 64])
+        b = _mk_tile("b", [128, 128], [40, 64])
+        c = _mk_tile("c", [128, 128], [40, 64])
+        assert _valid_ints(tile.addc(a, b, c).type) == [40, 64]
+        bad = _mk_tile("bad", [128, 128], [40, 32])
+        with pytest.raises(ValueError, match="disagree on the valid extent"):
+            tile.addc(a, b, bad)
+
+    def test_tile_scalar_tile_agrees_on_two_tiles(self):
+        """addsc (tile, scalar, tile): the two value tiles agree; the scalar has none."""
+        a = _mk_tile("a", [128, 128], [40, 64])
+        c = _mk_tile("c", [128, 128], [40, 64])
+        assert _valid_ints(tile.addsc(a, 3.0, c).type) == [40, 64]
+
+    def test_sel_agrees_on_value_tiles_ignoring_mask_and_tmp(self):
+        """sel (mask, lhs, rhs, tmp): agreement over lhs/rhs only — the ceil_div'd
+        mask and the scratch tmp are excluded."""
+        mask = _mk_tile("mask", [128, 128], dtype=DataType.UINT8)
+        lhs = _mk_tile("lhs", [128, 128], [40, 64])
+        rhs = _mk_tile("rhs", [128, 128], [40, 64])
+        tmp = _mk_tile("tmp", [1, 32], dtype=DataType.UINT8)
+        assert _valid_ints(tile.sel(mask, lhs, rhs, tmp).type) == [40, 64]
+        bad = _mk_tile("bad", [128, 128], [40, 32])
+        with pytest.raises(ValueError, match="disagree on the valid extent"):
+            tile.sel(mask, lhs, bad, tmp)
+
+    def test_sel_scalar_agrees_on_two_tiles(self):
+        """sels (lhs, rhs, mode): the two value tiles agree; the scalar mode has none."""
+        lhs = _mk_tile("lhs", [128, 128], [40, 64])
+        rhs = _mk_tile("rhs", [128, 128], [40, 64])
+        assert _valid_ints(tile.sels(lhs, rhs, 0).type) == [40, 64]
+
+    def test_cmp_mask_valid_cols_ceil_div_of_agreed_logical_valid(self):
+        """cmp (2 tiles): the packed mask's valid cols = ceil_div(agreed logical valid
+        cols, 8); the rhs valid region now participates in the agreement."""
+        lhs = _mk_tile("lhs", [128, 128], [40, 64])
+        rhs = _mk_tile("rhs", [128, 128], [40, 64])
+        mask_type = tile.cmp(lhs, rhs).type
+        valid = _valid_ints(mask_type)
+        # Rows carried through (40); cols packed: ceil_div(64, 8) = 8.
+        assert valid == [40, 8]
+
+    def test_cmp_rejects_rhs_valid_mismatch(self):
+        """cmp consults BOTH tiles' logical valid — a provable rhs mismatch rejects."""
+        lhs = _mk_tile("lhs", [128, 128], [40, 64])
+        rhs = _mk_tile("rhs", [128, 128], [40, 32])
+        with pytest.raises(ValueError, match="disagree on the valid extent"):
+            tile.cmp(lhs, rhs)
+
+    def test_cmps_mask_valid_cols_ceil_div_of_lhs_valid(self):
+        """cmps (tile, scalar): only lhs has a valid region; cols = ceil_div(lhs col, 8)."""
+        lhs = _mk_tile("lhs", [128, 128], [40, 64])
+        mask_type = tile.cmps(lhs, 1.0).type
+        assert _valid_ints(mask_type) == [40, 8]
+
+    def test_part_add_union_is_commutative(self):
+        """Partial-combine ops (valid where EITHER source is valid) use the origin-
+        anchored union, NOT strict agreement, so operand order does not matter."""
+        full = _mk_tile("full", [128, 128])  # fully valid [128,128]
+        narrow = _mk_tile("narrow", [128, 128], [64, 64])
+        u1 = tile.part_add(full, narrow).type
+        u2 = tile.part_add(narrow, full).type
+        # Union of [128,128] and [64,64] (nested) = [128,128], both orders.
+        assert _valid_ints(u1) == _valid_ints(u2) == [128, 128]
+
+    def test_part_add_lifts_lower_rank_operand_before_union(self):
+        """A lower-rank valid box is broadcast-lifted before the part_* union proof."""
+        lhs = _mk_tile("lhs", [4, 3], [4, 1])
+        rhs = _mk_tile("rhs", [3], [2])
+        assert _valid_ints(tile.part_add(lhs, rhs).type) == [4, 2]
+
+
 class TestTileUnaryOps:
     """Test suite for tile-level unary operators."""
+
+    def test_fresh_compute_results_drop_source_alias_and_pad_metadata(self):
+        """Fresh unary/scalar/binary tiles keep validity and required layout only."""
+        span = ir.Span.unknown()
+        shape = [ir.ConstInt(64, DataType.INT32, span), ir.ConstInt(64, DataType.INT32, span)]
+        view = ir.TileView(
+            valid_shape=[ir.ConstInt(16, DataType.INDEX, span), ir.ConstInt(32, DataType.INDEX, span)],
+            stride=[ir.ConstInt(64, DataType.INDEX, span), ir.ConstInt(1, DataType.INDEX, span)],
+            start_offset=ir.ConstInt(7, DataType.INDEX, span),
+            blayout=ir.TileLayout.col_major,
+            slayout=ir.TileLayout.row_major,
+            fractal=1024,
+            pad=ir.PadValue.zero,
+        )
+        src = ir.Var("src", ir.TileType(shape, DataType.FP32, None, view), span)
+
+        for spelling, result in {
+            "unary": tile.neg(src).type,
+            "scalar": tile.adds(src, 1.0).type,
+            "binary": tile.add(src, src).type,
+        }.items():
+            assert isinstance(result, ir.TileType), spelling
+            assert _valid_ints(result) == [16, 32], spelling
+            assert result.tile_view is not None, spelling
+            assert len(result.tile_view.stride) == 0, spelling
+            assert result.tile_view.start_offset is None, spelling
+            assert result.tile_view.pad == ir.PadValue.null, spelling
+            assert result.tile_view.blayout == ir.TileLayout.col_major, spelling
+            assert result.tile_view.slayout == ir.TileLayout.row_major, spelling
+            assert result.tile_view.fractal == 1024, spelling
 
     def test_tile_log(self):
         """Test tile.log operator - natural logarithm of all elements."""
@@ -1505,6 +1766,22 @@ class TestTileBroadcastOps:
         assert isinstance(valid_shape[0], ir.ConstInt) and valid_shape[0].value == 8
         assert isinstance(valid_shape[1], ir.ConstInt) and valid_shape[1].value == 4
 
+    def test_tile_row_expand_rejects_invalid_vector_region(self):
+        """Row validity must agree and the explicit singleton must contain data."""
+        main = _mk_tile("main", [8, 16], [8, 4])
+        with pytest.raises(ValueError, match="disagree on the valid extent"):
+            tile.row_expand_add(main, _mk_tile("rows", [8, 1], [7, 1]))
+        with pytest.raises(ValueError, match="singleton value must be provably valid"):
+            tile.row_expand_add(main, _mk_tile("rows", [8, 1], [8, 0]))
+
+    def test_tile_col_expand_rejects_invalid_vector_region(self):
+        """Column validity must agree and the explicit singleton must contain data."""
+        main = _mk_tile("main", [8, 16], [8, 4])
+        with pytest.raises(ValueError, match="disagree on the valid extent"):
+            tile.col_expand_add(main, _mk_tile("cols", [1, 16], [1, 3]))
+        with pytest.raises(ValueError, match="singleton value must be provably valid"):
+            tile.col_expand_add(main, _mk_tile("cols", [1, 16], [0, 4]))
+
     def test_tile_expands_preserves_input_valid_shape(self):
         """tile.expands must propagate the target tile's valid_shape (issue #1450)."""
         main = self._make_sliced_tile_with_valid_shape()
@@ -1657,6 +1934,193 @@ class TestTileMatMulOps:
         ir_str = str(Program)
         assert "tile.gemv_bias" in ir_str
 
+    # ------------------------------------------------------------------
+    # valid_shape propagation: matmul must propagate the
+    # M / N valid extents and validate the K contraction. The tile-level ops
+    # have NO transpose flag (pl.matmul's a_trans / b_trans apply only on the
+    # tensor path and are physically applied before lowering to tile.matmul),
+    # so M is always lhs axis 0 and N is always rhs axis 1 here.
+    # ------------------------------------------------------------------
+
+    def test_matmul_propagates_m_valid_keeps_dynamic(self):
+        """out valid = [valid(lhs)[M], valid(rhs)[N]] — never the full physical shape."""
+        m = _index_scalar("M")
+        lhs = _mk_tile("lhs", [128, 128], [m, 64])  # valid [M(dyn), K=64]
+        rhs = _mk_tile("rhs", [128, 128], [64, 128])  # valid [K=64, N=128]
+        result_type = tile.matmul(lhs, rhs).type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        valid_shape = result_type.tile_view.valid_shape
+        assert len(valid_shape) == 2
+        # M valid is the dynamic lhs row extent, carried through unchanged.
+        assert valid_shape[0] is m
+        # N valid comes from rhs axis 1.
+        assert isinstance(valid_shape[1], ir.ConstInt) and valid_shape[1].value == 128
+        # The M axis must NOT be widened to the full physical 128.
+        assert not (isinstance(valid_shape[0], ir.ConstInt) and valid_shape[0].value == 128)
+
+    def test_matmul_fully_valid_operands_canonicalize(self):
+        """Fully-valid operands => fully-valid output; the equal-to-shape view canonicalizes."""
+        lhs = _mk_tile("lhs", [128, 128])
+        rhs = _mk_tile("rhs", [128, 128])
+        result_type = tile.matmul(lhs, rhs).type
+        assert isinstance(result_type, ir.TileType)
+        # Effective valid == physical shape (nothing narrowed).
+        assert _valid_ints(result_type) == [128, 128]
+        # Under D2 an equal-to-shape valid_shape collapses: the Acc-stamped view is
+        # the implicit Acc view, so the whole view canonicalizes to None.
+        assert result_type.tile_view is None
+
+    def test_matmul_rejects_static_valid_k_mismatch(self):
+        """A provable valid-K disagreement (64 vs 32) is a user error, rejected loudly."""
+        lhs = _mk_tile("lhs", [128, 128], [128, 64])  # valid K = 64
+        rhs = _mk_tile("rhs", [128, 128], [32, 128])  # valid K = 32
+        with pytest.raises(ValueError, match="valid contraction length K"):
+            tile.matmul(lhs, rhs)
+
+    def test_matmul_accepts_symbolic_k_structurally_equal(self):
+        """The same symbolic K on both operands cannot be a mismatch — accept it."""
+        k = _index_scalar("K")
+        lhs = _mk_tile("lhs", [128, 128], [128, k])  # valid K = K
+        rhs = _mk_tile("rhs", [128, 128], [k, 128])  # valid K = K
+        result_type = tile.matmul(lhs, rhs).type  # must not raise
+        assert isinstance(result_type, ir.TileType)
+        assert _valid_ints(result_type) == [128, 128]
+
+    def test_matmul_rejects_unprovable_symbolic_k_relation(self):
+        """Unrelated symbolic K extents reject because no runtime <= guard is emitted."""
+        k1 = _index_scalar("K1")
+        k2 = _index_scalar("K2")
+        lhs = _mk_tile("lhs", [128, 128], [128, k1])
+        rhs = _mk_tile("rhs", [128, 128], [k2, 128])
+        with pytest.raises(ValueError, match="cannot prove lhs valid contraction length K"):
+            tile.matmul(lhs, rhs)
+
+    def test_matmul_accepts_rhs_valid_k_larger_than_lhs(self):
+        """PTO contracts over lhs.valid_K, so extra valid RHS rows are safe."""
+        lhs = _mk_tile("lhs", [128, 128], [128, 32])
+        rhs = _mk_tile("rhs", [128, 128], [64, 128])
+        result_type = tile.matmul(lhs, rhs).type
+        assert isinstance(result_type, ir.TileType)
+
+    def test_gemv_propagates_m_n_valid_axes(self):
+        """gemv [1,K] @ [K,N]: M is lhs axis 0 (=1), N is rhs axis 1."""
+        lhs = _mk_tile("lhs", [1, 128], [1, 64])  # valid [M=1, K=64]
+        rhs = _mk_tile("rhs", [128, 128], [64, 96])  # valid [K=64, N=96]
+        result_type = tile.gemv(lhs, rhs).type
+        assert _valid_ints(result_type) == [1, 96]
+
+    def test_matmul_bias_propagates_m_n_valid_axes(self):
+        """matmul_bias out valid = matmul valid [M, N]; bias does not change the region."""
+        lhs = _mk_tile("lhs", [128, 128], [40, 64])  # valid [M=40, K=64]
+        rhs = _mk_tile("rhs", [128, 128], [64, 96])  # valid [K=64, N=96]
+        bias = _mk_tile("bias", [1, 128])  # fully valid [1, 128]
+        result_type = tile.matmul_bias(lhs, rhs, bias).type
+        assert _valid_ints(result_type) == [40, 96]
+
+    def test_matmul_bias_rejects_static_valid_k_mismatch(self):
+        """matmul_bias still validates the contraction K on the valid extents."""
+        lhs = _mk_tile("lhs", [128, 128], [40, 64])  # valid K = 64
+        rhs = _mk_tile("rhs", [128, 128], [32, 96])  # valid K = 32
+        bias = _mk_tile("bias", [1, 128])
+        with pytest.raises(ValueError, match="valid contraction length K"):
+            tile.matmul_bias(lhs, rhs, bias)
+
+    def test_matmul_acc_empty_accumulator_narrows(self):
+        """acc += lhs @ rhs into a create_tile(valid=[0,0]) accumulator narrows to [M, N]."""
+        acc = _mk_tile("acc", [128, 128], [0, 0])  # empty accumulator
+        lhs = _mk_tile("lhs", [128, 128], [40, 64])  # valid [M=40, K=64]
+        rhs = _mk_tile("rhs", [128, 128], [64, 96])  # valid [K=64, N=96]
+        result_type = tile.matmul_acc(acc, lhs, rhs).type
+        # Union of the empty acc [0,0] with the written [40,96] rectangle at origin.
+        assert _valid_ints(result_type) == [40, 96]
+
+    def test_matmul_acc_full_accumulator_stays_full(self):
+        """A fully-valid accumulator unions back to the full shape (D2) — never narrows."""
+        acc = _mk_tile("acc", [128, 128])  # fully valid
+        lhs = _mk_tile("lhs", [128, 128], [40, 64])
+        rhs = _mk_tile("rhs", [128, 128], [64, 96])
+        result_type = tile.matmul_acc(acc, lhs, rhs).type
+        assert _valid_ints(result_type) == [128, 128]
+
+    def test_matmul_acc_grows_accumulator_valid_region(self):
+        """Two accumulations into one accumulator grow the valid region monotonically."""
+        acc = _mk_tile("acc", [128, 128], [40, 96])  # already valid over [40, 96]
+        lhs = _mk_tile("lhs", [128, 128], [72, 64])  # M = 72 grows rows
+        rhs = _mk_tile("rhs", [128, 128], [64, 96])  # N = 96 matches
+        result_type = tile.matmul_acc(acc, lhs, rhs).type
+        # Bounding box max([40,96], [72,96]) = [72, 96].
+        assert _valid_ints(result_type) == [72, 96]
+
+    def test_gemv_acc_empty_accumulator_narrows(self):
+        """gemv_acc into an empty [1,N] accumulator narrows to [1, N-valid]."""
+        acc = _mk_tile("acc", [1, 128], [0, 0])
+        lhs = _mk_tile("lhs", [1, 128], [1, 64])  # valid [M=1, K=64]
+        rhs = _mk_tile("rhs", [128, 128], [64, 96])  # valid [K=64, N=96]
+        result_type = tile.gemv_acc(acc, lhs, rhs).type
+        assert _valid_ints(result_type) == [1, 96]
+
+    def test_gemv_bias_propagates_m_n_valid_axes(self):
+        """gemv_bias out valid = [M=1, N] from lhs axis 0 / rhs axis 1."""
+        lhs = _mk_tile("lhs", [1, 128], [1, 64])
+        rhs = _mk_tile("rhs", [128, 128], [64, 96])
+        bias = _mk_tile("bias", [1, 128])
+        result_type = tile.gemv_bias(lhs, rhs, bias).type
+        assert _valid_ints(result_type) == [1, 96]
+
+    def test_matmul_bias_narrows_n_to_bias_valid(self):
+        """A bias valid over fewer N cols narrows the output N: C[:,j]=A@B+bias is real
+        only where bias[0,j] is real, so bias padding must NOT be claimed valid.
+        """
+        lhs = _mk_tile("lhs", [128, 128], [40, 64])  # valid [M=40, K=64]
+        rhs = _mk_tile("rhs", [128, 128], [64, 96])  # valid [K=64, N=96]
+        bias = _mk_tile("bias", [1, 128], [1, 50])  # bias valid over 50 cols only
+        result_type = tile.matmul_bias(lhs, rhs, bias).type
+        # N clamps to min(rhs N=96, bias N=50) = 50; the 46 bias-padded cols are invalid.
+        # NOT the pre-fix [40, 96], which widened the bias-padded columns to valid.
+        assert _valid_ints(result_type) == [40, 50]
+
+    def test_gemv_bias_narrows_n_to_bias_valid(self):
+        """gemv_bias narrows output N to the bias valid N, same rule as matmul_bias."""
+        lhs = _mk_tile("lhs", [1, 128], [1, 64])
+        rhs = _mk_tile("rhs", [128, 128], [64, 96])
+        bias = _mk_tile("bias", [1, 128], [1, 50])
+        result_type = tile.gemv_bias(lhs, rhs, bias).type
+        assert _valid_ints(result_type) == [1, 50]
+
+    def test_matmul_bias_rejects_padding_bias_row(self):
+        """The broadcast bias singleton must contain real data, not padding."""
+        lhs = _mk_tile("lhs", [128, 128], [40, 64])
+        rhs = _mk_tile("rhs", [128, 128], [64, 96])
+        bias = _mk_tile("bias", [1, 128], [0, 96])  # the single bias row is padding
+        with pytest.raises(ValueError, match="singleton row must be provably valid"):
+            tile.matmul_bias(lhs, rhs, bias)
+
+    def test_matmul_bias_rejects_symbolic_bias_row_validity(self):
+        """A runtime 0/1 bias-row extent needs a guard, which matmul_bias does not emit."""
+        br = _index_scalar("BR")
+        lhs = _mk_tile("lhs", [128, 128], [40, 64])
+        rhs = _mk_tile("rhs", [128, 128], [64, 96])
+        bias = _mk_tile("bias", [1, 128], [br, 96])
+        with pytest.raises(ValueError, match="symbolic equality cannot be proven"):
+            tile.matmul_bias(lhs, rhs, bias)
+
+    def test_matmul_bias_symbolic_bias_n_defers_to_min(self):
+        """A symbolic bias N cannot be folded: output N is min(rhs N, bias N) — a Min
+        node — never widened back to the raw matmul N. Dynamic-bias regression guard.
+        """
+        bn = _index_scalar("BN")
+        lhs = _mk_tile("lhs", [128, 128], [40, 64])
+        rhs = _mk_tile("rhs", [128, 128], [64, 96])
+        bias = _mk_tile("bias", [1, 128], [1, bn])
+        result_type = tile.matmul_bias(lhs, rhs, bias).type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        valid = result_type.tile_view.valid_shape
+        assert isinstance(valid[0], ir.ConstInt) and valid[0].value == 40
+        # N is a genuine min(96, BN): a Min node, NOT the widened ConstInt 96.
+        assert isinstance(valid[1], ir.Min)
+
 
 class TestTileTransformOps:
     """Test suite for tile-level transform operators."""
@@ -1679,6 +2143,36 @@ class TestTileTransformOps:
 
         ir_str = str(Program)
         assert "tile.transpose" in ir_str
+
+    # ------------------------------------------------------------------
+    # valid_shape propagation: transpose PERMUTES the input's
+    # valid region rather than resetting it to the full transposed shape.
+    # ------------------------------------------------------------------
+
+    def test_tile_transpose_fully_valid_canonicalizes(self):
+        """A fully-valid input transposes to a fully-valid output (no view)."""
+        result_type = tile.transpose(_mk_tile("a", [64, 128]), 0, 1).type
+        assert isinstance(result_type, ir.TileType)
+        assert _valid_ints(result_type) == [128, 64]
+        assert result_type.tile_view is None
+
+    def test_tile_transpose_partial_permutes(self):
+        """valid [32, 64] on shape [64, 128] -> valid [64, 32] on shape [128, 64]."""
+        result_type = tile.transpose(_mk_tile("a", [64, 128], [32, 64]), 0, 1).type
+        assert isinstance(result_type, ir.TileType)
+        assert _const_ints(result_type.shape) == [128, 64]
+        assert _valid_ints(result_type) == [64, 32]
+
+    def test_tile_transpose_dynamic_symbolic(self):
+        """A dynamic valid extent is carried through the permutation unchanged."""
+        m = _index_scalar("M")
+        result_type = tile.transpose(_mk_tile("a", [64, 128], [m, 64]), 0, 1).type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        valid = result_type.tile_view.valid_shape
+        # After swapping axes 0/1 the dynamic M lands on axis 1.
+        assert isinstance(valid[0], ir.ConstInt) and valid[0].value == 64
+        assert valid[1] is m
 
 
 class TestTileSliceReshapeOps:
@@ -1704,6 +2198,12 @@ class TestTileSliceReshapeOps:
         assert result_type.dtype == DataType.FP16
         assert len(result_type.shape) == 2
 
+    def test_tile_slice_inherits_implicit_source_layout(self):
+        """A narrow view keeps its parent's layout instead of re-inferring from its shape."""
+        result_type = tile.slice(_mk_tile("tile", [32, 32]), [16, 1], [0, 0]).type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.get_effective_tile_view().blayout == ir.TileLayout.row_major
+
     def test_tile_slice_with_dynamic_valid_shape(self):
         """tile.slice keeps static allocation shape and stores dynamic valid_shape in TileView."""
         span = ir.Span.unknown()
@@ -1724,6 +2224,143 @@ class TestTileSliceReshapeOps:
         assert len(result_type.shape) == 2
         assert isinstance(result_type.shape[1], ir.ConstInt)
         assert result_type.tile_view.valid_shape[1] is valid_n
+
+    def test_tile_slice_rejects_static_valid_shape_outside_result_shape(self):
+        """A malformed final valid_shape fails during op deduction."""
+        with pytest.raises(ValueError, match=r"valid_shape\[0\].*exceeds physical shape"):
+            tile.slice(_mk_tile("tile", [16, 32]), [8, 16], [0, 0], valid_shape=[9, 16])
+
+    # ------------------------------------------------------------------
+    # valid_shape propagation (INTERSECT): slice INTERSECTS
+    # the window with the SOURCE tile's own valid region, never widening past it.
+    # Gated on the source carrying an explicit region (a fully-valid source is
+    # untouched — the window is all real data).
+    # ------------------------------------------------------------------
+
+    def test_tile_slice_fully_valid_source_unchanged(self):
+        """A fully-valid source leaves the window's valid_shape as-is (no churn)."""
+        result_type = tile.slice(_mk_tile("s", [16, 32]), [8, 16], [0, 0]).type
+        assert _valid_ints(result_type) == [8, 16]
+
+    def test_tile_slice_intersects_partial_source(self):
+        """Partial src valid [6, 20] on [16, 32], slice [8, 16] @ [0, 0] ->
+        row clamp(6, 0, 8) = 6 (STRICTLY narrower than the window 8), col
+        clamp(20, 0, 16) = 16. The row < window makes this diverge from a
+        revert-to-``new_shape`` baseline (which would give the full [8, 16])."""
+        result_type = tile.slice(_mk_tile("s", [16, 32], [6, 20]), [8, 16], [0, 0]).type
+        assert _valid_ints(result_type) == [6, 16]
+
+    def test_tile_slice_intersects_partial_source_with_offset(self):
+        """Partial src valid [10, 20], slice [8, 16] @ [6, 10] ->
+        clamp(10 - 6, 0, 8) = 4, clamp(20 - 10, 0, 16) = 10."""
+        result_type = tile.slice(_mk_tile("s", [16, 32], [10, 20]), [8, 16], [6, 10]).type
+        assert _valid_ints(result_type) == [4, 10]
+
+    def test_tile_slice_explicit_valid_intersects_source(self):
+        """An explicit valid_shape= is intersected with the source region (min), never widened."""
+        # src valid [10, 20]; window [8, 16] @ 0; explicit valid [5, 16]
+        # -> col: min(16, clamp(20,0,16)=16) = 16 ; row: min(5, clamp(10,0,8)=8) = 5
+        result_type = tile.slice(_mk_tile("s", [16, 32], [10, 20]), [8, 16], [0, 0], valid_shape=[5, 16]).type
+        assert _valid_ints(result_type) == [5, 16]
+
+    def test_tile_slice_dynamic_source_symbolic(self):
+        """A dynamic offset into a partial source yields a symbolic (min/max) extent."""
+        span = ir.Span.unknown()
+        r = ir.Var("r", ir.ScalarType(DataType.INDEX), span)
+        result_type = tile.slice(_mk_tile("s", [16, 32], [10, 20]), [8, 16], [r, 0]).type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        valid = result_type.tile_view.valid_shape
+        # row = min(max(10 - r, 0), 8) — a symbolic Min node, not a folded ConstInt.
+        assert isinstance(valid[0], ir.Min) and not isinstance(valid[0], ir.ConstInt)
+        # col offset 0 folds: clamp(20, 0, 16) = 16.
+        assert isinstance(valid[1], ir.ConstInt) and valid[1].value == 16
+
+    # ------------------------------------------------------------------
+    # clamp=True: clip the window to the source tile's valid
+    # region (its physical shape when unset) at the offset, even for a fully-valid
+    # source. Composes with the 4d source-region intersect in a single min.
+    # ------------------------------------------------------------------
+
+    def test_tile_slice_clamp_fully_valid_source_clips_to_edge(self):
+        """clamp=True clips to the physical edge of a fully-valid source:
+        [16,32] slice [8,16] @ [12,0] -> row min(8, 16-12)=4, col 16."""
+        result_type = tile.slice(_mk_tile("s", [16, 32]), [8, 16], [12, 0], clamp=True).type
+        assert _valid_ints(result_type) == [4, 16]
+
+    def test_tile_slice_no_clamp_rejects_valid_window_past_source(self):
+        """Without clamp, the full valid window would read beyond the allocation."""
+        with pytest.raises(ValueError, match="physical window.*beyond target extent"):
+            tile.slice(_mk_tile("s", [16, 32]), [8, 16], [12, 0])
+
+    def test_tile_slice_explicit_tail_must_fit_source(self):
+        """An explicit tail is legal only when offset + valid stays in bounds."""
+        result_type = tile.slice(_mk_tile("s", [16, 32]), [8, 16], [12, 0], valid_shape=[4, 16]).type
+        assert _valid_ints(result_type) == [4, 16]
+
+        with pytest.raises(ValueError, match="physical window.*beyond target extent"):
+            tile.slice(_mk_tile("s", [16, 32]), [8, 16], [12, 0], valid_shape=[5, 16])
+
+    def test_tile_slice_clamp_clips_both_dims_to_edge(self):
+        """clamp=True clips BOTH dims of a fully-valid source at a two-dim offset.
+
+        [16,32] slice [8,16] @ [10,20]: row min(8, 16-10)=6, col min(16, 32-20)=12.
+        Unlike the single-row-dim edge test, the col offset is non-zero so this locks
+        clamp's col-dim clipping too, and it is revert-catching: without clamp a
+        fully-valid source is untouched -> the full window [8,16].
+        """
+        result_type = tile.slice(_mk_tile("s", [16, 32]), [8, 16], [10, 20], clamp=True).type
+        assert _valid_ints(result_type) == [6, 12]
+
+    def test_tile_slice_clamp_intersects_explicit_valid(self):
+        """clamp=True AND an explicit valid_shape intersect (min), with clamp BINDING.
+
+        fully-valid src, window [8,16] @ [12,0] clamps row to 16-12 = 4; the explicit
+        row 6 is LARGER, so the min is dominated by clamp's derived 4 -> the result is
+        [4,16], not the explicit [6,16]. This makes the test revert-catching: dropping
+        the clamp production would leave the explicit [6,16] verbatim (a fully-valid
+        source has no 4d source-region intersect), so it would fail here.
+        """
+        result_type = tile.slice(
+            _mk_tile("s", [16, 32]), [8, 16], [12, 0], valid_shape=[6, 16], clamp=True
+        ).type
+        assert _valid_ints(result_type) == [4, 16]
+
+    def test_tile_slice_clamp_dynamic_offset_symbolic(self):
+        """clamp=True with a dynamic offset into a fully-valid source is symbolic."""
+        span = ir.Span.unknown()
+        r = ir.Var("r", ir.ScalarType(DataType.INDEX), span)
+        result_type = tile.slice(_mk_tile("s", [16, 32]), [8, 16], [r, 0], clamp=True).type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        valid = result_type.tile_view.valid_shape
+        assert isinstance(valid[0], ir.Min) and not isinstance(valid[0], ir.ConstInt)
+        assert isinstance(valid[1], ir.ConstInt) and valid[1].value == 16
+
+    def test_tile_slice_clamp_negative_offset_rejected(self):
+        """A provably-negative constant offset is not origin-anchored -> reject, never widen.
+
+        Adversary regression: clamp only clipped the HIGH edge, so a negative offset
+        computed avail = src_valid - (-10) = src_valid + 10 and WIDENED the row extent
+        (rows [0,10) are pre-origin, out-of-bounds padding). Both a narrow-source and a
+        fully-valid source must reject rather than report a full/widened extent.
+        """
+        with pytest.raises(ValueError, match="must be >= 0"):
+            tile.slice(_mk_tile("s", [128, 128], [40, 50]), [64, 64], [-10, 0], clamp=True)
+        with pytest.raises(ValueError, match="must be >= 0"):
+            tile.slice(_mk_tile("s", [128, 128]), [64, 64], [-10, 0], clamp=True)
+
+    def test_tile_slice_negative_offset_rejected_without_clamp(self):
+        """The bare/full-source path enforces the same origin bound."""
+        with pytest.raises(ValueError, match=r"offset\[0\].*>= 0"):
+            tile.slice(_mk_tile("s", [128, 128]), [64, 64], [-1, 0])
+
+    def test_tile_slice_clamp_rank_mismatch_rejected(self):
+        """Every rank-mismatched slice rejects before reaching the 2-D backend."""
+        with pytest.raises(ValueError, match="window rank to match the source tile rank"):
+            tile.slice(_mk_tile("s", [128, 128]), [64], [64], clamp=True)
+        with pytest.raises(ValueError, match="window rank to match the source tile rank"):
+            tile.slice(_mk_tile("s", [128, 128]), [64], [64])
 
     def test_tile_slice_rejects_dynamic_shape(self):
         """tile.slice shape must stay static so InitMemRef can allocate memory."""
@@ -1766,6 +2403,20 @@ class TestTileSliceReshapeOps:
         tile_var = ir.Var("tile", ir.TileType([64, 64], DataType.FP16), span)
         with pytest.raises(ValueError, match="static unit dimension"):
             tile.slice(tile_var, [8, 64], [0, 0], drop_dims=[0])
+
+    @pytest.mark.parametrize("dropped_valid", [0, "symbolic"])
+    def test_tile_slice_drop_dims_requires_provably_valid_unit(self, dropped_valid):
+        """Rank reduction cannot erase an empty or unproven unit axis."""
+        span = ir.Span.unknown()
+        valid0 = (
+            ir.Var("v0", ir.ScalarType(DataType.INDEX), span)
+            if dropped_valid == "symbolic"
+            else ir.ConstInt(dropped_valid, DataType.INDEX, span)
+        )
+        src_view = ir.TileView(valid_shape=[valid0, ir.ConstInt(64, DataType.INDEX, span)])
+        src = ir.Var("src", ir.TileType([1, 64], DataType.FP32, None, src_view), span)
+        with pytest.raises(ValueError, match="cannot drop axis 0"):
+            tile.slice(src, [1, 64], [0, 0], drop_dims=[0])
 
     def test_tile_slice_empty_drop_dims_is_backward_compatible(self):
         """drop_dims=None / [] keeps the legacy 3-arg behavior."""
@@ -1937,6 +2588,98 @@ class TestTileSliceReshapeOps:
         assert result_type3.get_effective_tile_view().blayout == ir.TileLayout.row_major
         assert call3.kwargs == {}
 
+    # ------------------------------------------------------------------
+    # valid_shape propagation: reshape is only representable for a
+    # partially-valid input when the valid region is a contiguous flat prefix that
+    # stays a rectangle under the new shape (same precondition as FlattenTileNdTo2d).
+    # A fully-valid input always reshapes to a fully-valid output.
+    # ------------------------------------------------------------------
+
+    def test_tile_reshape_fully_valid_regression(self):
+        """Regression guard: a fully-valid reshape still works and stays fully valid."""
+        result_type = tile.reshape(_mk_tile("a", [4, 8]), [8, 4]).type
+        assert isinstance(result_type, ir.TileType)
+        assert _valid_ints(result_type) == [8, 4]
+        assert result_type.tile_view is None  # fully valid canonicalizes to no view
+
+    def test_tile_reshape_inserts_unit_axis_for_rectangular_partial_region(self):
+        """Adding a physical unit axis is an exact coordinate rank lift even
+        when the source rectangle is not a contiguous flat prefix."""
+        result_type = tile.reshape(_mk_tile("a", [16, 16], [8, 8]), [1, 16, 16]).type
+        assert _valid_ints(result_type) == [1, 8, 8]
+
+    def test_tile_reshape_partial_prefix_narrows(self):
+        """valid [2, 8] on [4, 8] is the flat prefix [0, 16); reshaped to [8, 4] -> [4, 4]."""
+        result_type = tile.reshape(_mk_tile("a", [4, 8], [2, 8]), [8, 4]).type
+        assert _valid_ints(result_type) == [4, 4]
+
+    def test_tile_reshape_preserves_pad_while_remapping_valid_shape(self):
+        """Reshape keeps the source padding policy while remapping validity."""
+        span = ir.Span.unknown()
+        source_view = ir.TileView(valid_shape=[2, 8], pad=ir.PadValue.zero)
+        source_type = ir.TileType([4, 8], DataType.FP32, None, source_view)
+        source = ir.Var("a", source_type, span)
+
+        result_type = tile.reshape(source, [8, 4]).type
+        assert isinstance(result_type, ir.TileType)
+        assert _valid_ints(result_type) == [4, 4]
+        assert result_type.tile_view is not None
+        assert result_type.tile_view.pad == ir.PadValue.zero
+
+    def test_tile_reshape_prefix_into_1d(self):
+        """valid [3, 4] on [4, 4] is the prefix [0, 12); reshaped to [16] -> [12]."""
+        result_type = tile.reshape(_mk_tile("a", [4, 4], [3, 4]), [16]).type
+        assert _valid_ints(result_type) == [12]
+
+    def test_tile_reshape_vector_repair_static(self):
+        """[N, 1] valid [5, 1] -> [1, N] valid [1, 5] (column<->row vector repair)."""
+        result_type = tile.reshape(_mk_tile("a", [8, 1], [5, 1]), [1, 8]).type
+        assert _valid_ints(result_type) == [1, 5]
+
+    def test_tile_reshape_vector_repair_dynamic(self):
+        """[N, 1] valid [vn, 1] -> [1, N] valid [1, vn] with a dynamic free extent."""
+        vn = _index_scalar("vn")
+        result_type = tile.reshape(_mk_tile("a", [8, 1], [vn, 1]), [1, 8]).type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        valid = result_type.tile_view.valid_shape
+        assert isinstance(valid[0], ir.ConstInt) and valid[0].value == 1
+        assert valid[1] is vn
+
+    def test_tile_reshape_rejects_non_prefix(self):
+        """valid [4, 2] on [4, 8] is a STRIDED region (dim1 partial below a non-unit dim);
+        it is not a contiguous flat prefix, so reshaping it is rejected, not widened."""
+        with pytest.raises(ValueError, match=r"not a contiguous.*prefix"):
+            tile.reshape(_mk_tile("a", [4, 8], [4, 2]), [8, 4])
+
+    def test_tile_reshape_rejects_unaligned_prefix(self):
+        """A valid prefix that does not align to a rectangular sub-region is rejected."""
+        # valid [3, 4] on [4, 4] -> prefix [0, 12); into [8, 2]: 12 -> [6, 2] is fine, but
+        # into [5, ...] would not divide. Use [4,4] valid [3,4] -> [16] is fine; craft a
+        # genuinely unaligned case: prefix 12 into shape [16] with a middle boundary.
+        # [8, 2] valid [3, 2] -> prefix [0, 6); into [4, 4]: 6 % 4 = 2, 6 % 1 = 0 -> w=6 > 4
+        # -> no aligned split -> reject.
+        with pytest.raises(ValueError, match="does not align to a rectangular sub-region"):
+            tile.reshape(_mk_tile("a", [8, 2], [3, 2]), [4, 4])
+
+    def test_tile_reshape_rejects_dynamic_target_dim(self):
+        """A partially-valid input cannot be reshaped onto a target with a non-const
+        shape dim: the prefix cannot be placed as a static box, so it is rejected
+        rather than widened. valid [2,8] on [4,8] (prefix [0,16)) into [N, 4]."""
+        span = ir.Span.unknown()
+        n = ir.Var("N", ir.ScalarType(DataType.INDEX), span)
+        with pytest.raises(ValueError, match="cannot map a partial"):
+            tile.reshape(_mk_tile("a", [4, 8], [2, 8]), [n, 4])
+
+    def test_tile_reshape_rejects_unprovable_dynamic_prefix(self):
+        """A symbolic free extent whose trailing sub-volume matches no target suffix
+        product cannot be proven to reshape to a rectangle: valid [vn,8] on [4,8]
+        (trailing sub-volume 8) into [8,4] — neither target suffix (1, 4) equals 8."""
+        span = ir.Span.unknown()
+        vn = ir.Var("vn", ir.ScalarType(DataType.INDEX), span)
+        with pytest.raises(ValueError, match="cannot prove the dynamic valid"):
+            tile.reshape(_mk_tile("a", [4, 8], [vn, 8]), [8, 4])
+
     def test_tile_fillpad_expand(self):
         """Test tile.fillpad_expand grows the tile and fills with pad_value."""
         span = ir.Span.unknown()
@@ -1975,6 +2718,35 @@ class TestTileSliceReshapeOps:
         max_type = call_max.type
         assert isinstance(max_type, ir.TileType)
         assert max_type.get_effective_tile_view().pad == ir.PadValue.max
+
+    def test_tile_fillpad_expand_drops_source_alias_metadata(self):
+        """A fresh expanded buffer keeps production layout, not source addressing."""
+        span = ir.Span.unknown()
+        memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INDEX, span), 4096, 23)
+        src_view = ir.TileView(
+            valid_shape=[8, 16],
+            stride=[32, 1],
+            start_offset=ir.ConstInt(7, DataType.INDEX, span),
+            blayout=ir.TileLayout.col_major,
+            slayout=ir.TileLayout.row_major,
+            fractal=256,
+            pad=ir.PadValue.max,
+        )
+        src = ir.Var(
+            "src",
+            ir.TileType([16, 32], DataType.FP32, memref, src_view, ir.MemorySpace.Vec),
+            span,
+        )
+        result = tile.fillpad_expand(src, [32, 64], pad_value=ir.PadValue.zero).type
+        assert isinstance(result, ir.TileType)
+        assert result.memref is None
+        view = result.get_effective_tile_view()
+        assert list(view.stride) == []
+        assert view.start_offset is None
+        assert view.blayout == ir.TileLayout.col_major
+        assert view.slayout == ir.TileLayout.row_major
+        assert view.fractal == 256
+        assert view.pad == ir.PadValue.zero
 
     def test_tile_fillpad_expand_same_shape(self):
         """tile.fillpad_expand permits a same-shape (non-strict) expansion."""
@@ -2409,6 +3181,97 @@ class TestTileBatchMatMulOps:
 
         with pytest.raises(ValueError, match="inner dimensions"):
             tile.batch_matmul_acc(acc, lhs, rhs, span)
+
+    # ------------------------------------------------------------------
+    # Batch axes must be fully valid before ND-to-2D flattening. The trailing
+    # matrix dims still carry partial M / N and directional K per the 2D rule.
+    # ------------------------------------------------------------------
+
+    def test_batch_matmul_propagates_batch_and_mn_valid(self):
+        """[2,M,K] @ [2,K,N]: batch valid + M (lhs axis -2) + N (rhs axis -1) propagate."""
+        lhs = _mk_tile("lhs", [2, 128, 128], [2, 40, 64])  # valid [B=2, M=40, K=64]
+        rhs = _mk_tile("rhs", [2, 128, 128], [2, 64, 96])  # valid [B=2, K=64, N=96]
+        result_type = tile.batch_matmul(lhs, rhs).type
+        assert _valid_ints(result_type) == [2, 40, 96]
+
+    def test_batch_matmul_rejects_narrowed_batch_axis(self):
+        """Flattening cannot safely execute only a prefix of physical batch pages."""
+        lhs = _mk_tile("lhs", [4, 128, 128], [3, 40, 64])  # only 3 of 4 batches valid
+        rhs = _mk_tile("rhs", [4, 128, 128], [3, 64, 96])
+        with pytest.raises(ValueError, match="batch axis 0 must be provably full"):
+            tile.batch_matmul(lhs, rhs)
+
+    def test_batch_matmul_broadcast_batch_valid(self):
+        """A size-1 (broadcast) batch operand contributes its counterpart's valid extent."""
+        lhs = _mk_tile("lhs", [1, 128, 128], [1, 40, 64])  # broadcasts across batch
+        rhs = _mk_tile("rhs", [3, 128, 128], [3, 64, 96])  # 3 valid batches
+        result_type = tile.batch_matmul(lhs, rhs).type
+        assert _valid_ints(result_type) == [3, 40, 96]
+
+    def test_batch_matmul_rejects_batch_valid_mismatch(self):
+        """A mismatch necessarily contains a non-full batch operand and is rejected."""
+        lhs = _mk_tile("lhs", [4, 128, 128], [3, 40, 64])  # 3 valid batches
+        rhs = _mk_tile("rhs", [4, 128, 128], [2, 64, 96])  # 2 valid batches
+        with pytest.raises(ValueError, match="batch axis 0 must be provably full"):
+            tile.batch_matmul(lhs, rhs)
+
+    def test_batch_matmul_rejects_static_valid_k_mismatch(self):
+        """batch_matmul validates the contraction K on the valid (trailing) extents."""
+        lhs = _mk_tile("lhs", [2, 128, 128], [2, 40, 64])  # valid K = 64
+        rhs = _mk_tile("rhs", [2, 128, 128], [2, 32, 96])  # valid K = 32
+        with pytest.raises(ValueError, match="valid contraction length K"):
+            tile.batch_matmul(lhs, rhs)
+
+    def test_batch_matmul_acc_empty_accumulator_narrows(self):
+        """Each batch page exists, while its M/N matrix region starts empty."""
+        acc = _mk_tile("acc", [2, 128, 128], [2, 0, 0])
+        lhs = _mk_tile("lhs", [2, 128, 128], [2, 40, 64])
+        rhs = _mk_tile("rhs", [2, 128, 128], [2, 64, 96])
+        result_type = tile.batch_matmul_acc(acc, lhs, rhs).type
+        assert _valid_ints(result_type) == [2, 40, 96]
+
+    def test_batch_matmul_rejects_empty_broadcast_batch_page(self):
+        """A singleton batch page must itself be valid before it can be replicated."""
+        lhs = _mk_tile("lhs", [1, 128, 128], [0, 40, 64])  # sole lhs batch is padding
+        rhs = _mk_tile("rhs", [3, 128, 128], [3, 64, 96])
+        with pytest.raises(ValueError, match="batch axis 0 must be provably full"):
+            tile.batch_matmul(lhs, rhs)
+
+    def test_batch_matmul_rejects_unproved_symbolic_batch_extent(self):
+        """No runtime equality guard exists for a symbolic partial batch page count."""
+        b = _index_scalar("B")
+        lhs = _mk_tile("lhs", [4, 128, 128], [b, 40, 64])
+        rhs = _mk_tile("rhs", [4, 128, 128], [b, 64, 96])
+        with pytest.raises(ValueError, match="symbolic equality cannot be proven"):
+            tile.batch_matmul(lhs, rhs)
+
+    def test_batch_matmul_acc_rejects_partial_acc_batch_axis(self):
+        """The in-place accumulator's batch page axis must also be fully valid."""
+        acc = _mk_tile("acc", [2, 128, 128], [1, 0, 0])
+        lhs = _mk_tile("lhs", [2, 128, 128], [2, 40, 64])
+        rhs = _mk_tile("rhs", [2, 128, 128], [2, 64, 96])
+        with pytest.raises(ValueError, match="acc batch axis 0 must be provably full"):
+            tile.batch_matmul_acc(acc, lhs, rhs)
+
+    def test_batch_matmul_differing_rank_takes_batch_from_rank_present_operand(self):
+        """Differing operand ranks: the batch valid extent is taken from whichever operand
+        carries the batch dim — covers both the rhs-only and lhs-only broadcast arms.
+        """
+        # 2D lhs @ 3D rhs: batch from rhs.
+        lhs2d = _mk_tile("lhs", [128, 128], [40, 64])  # 2D — no batch dim
+        rhs3d = _mk_tile("rhs", [3, 128, 128], [3, 64, 96])  # 3D — batch = 3
+        rt = tile.batch_matmul(lhs2d, rhs3d).type
+        assert isinstance(rt, ir.TileType)
+        assert _const_ints(rt.shape)[0] == 3  # output batch shape from rhs
+        assert _valid_ints(rt) == [3, 40, 96]
+
+        # 3D lhs @ 2D rhs: batch from lhs (the mirror arm).
+        lhs3d = _mk_tile("lhs", [3, 128, 128], [3, 40, 64])  # 3D — batch = 3
+        rhs2d = _mk_tile("rhs", [128, 128], [64, 96])  # 2D — no batch dim
+        rt = tile.batch_matmul(lhs3d, rhs2d).type
+        assert isinstance(rt, ir.TileType)
+        assert _const_ints(rt.shape)[0] == 3
+        assert _valid_ints(rt) == [3, 40, 96]
 
     """Tests for multi-dimensional TileType operations."""
 
@@ -3091,6 +3954,19 @@ class TestTileLoadOp:
         assert isinstance(tile_type, ir.TileType)
         assert len(tile_type.get_effective_tile_view().valid_shape) == 2
 
+    def test_load_inherits_pad_from_fully_valid_tensor_view(self):
+        """Pad inheritance does not depend on an explicit source valid_shape."""
+        span = ir.Span.unknown()
+        source_view = ir.TensorView([], ir.TensorLayout.ND, [], ir.PadValue.zero)
+        source_type = ir.TensorType([64, 128], DataType.FP32, None, source_view)
+        source = ir.Var("a", source_type, span)
+
+        result_type = tile.load(source, [0, 0], [64, 128]).type
+        assert isinstance(result_type, ir.TileType)
+        assert _valid_ints(result_type) == [64, 128]
+        assert result_type.tile_view is not None
+        assert result_type.tile_view.pad == ir.PadValue.zero
+
     def test_load_with_static_valid_shapes_sets_tileview(self):
         """When valid_shapes provided as static ints, TileView.valid_shape reflects it."""
         span = ir.Span.unknown()
@@ -3128,6 +4004,54 @@ class TestTileLoadOp:
         assert tile_type.tile_view.valid_shape[0] is M
         assert tile_type.tile_view.valid_shape[1] is N
 
+    def test_load_rejects_static_valid_shape_outside_tile_shape(self):
+        """tile.load rejects a statically invalid final valid region immediately."""
+        span = ir.Span.unknown()
+        tensor = ir.Var("a", ir.TensorType([128, 128], DataType.FP32), span)
+
+        with pytest.raises(ValueError, match=r"valid_shape\[0\].*exceeds physical shape"):
+            tile.load(tensor, [0, 0], [64, 64], valid_shapes=[65, 64])
+
+    def test_load_partial_source_cannot_hide_invalid_requested_valid_shape(self):
+        """Validate requested validity before intersecting it with a narrow source."""
+        span = ir.Span.unknown()
+        source_type = ir.TensorType(
+            [128, 128],
+            DataType.FP32,
+            None,
+            ir.TensorView([], ir.TensorLayout.ND, [4, 128]),
+        )
+        source = ir.Var("a", source_type, span)
+        with pytest.raises(ValueError, match=r"valid_shape\[0\].*exceeds physical shape"):
+            tile.load(source, [0, 0], [64, 128], valid_shapes=[65, 128])
+
+    def test_load_rejects_requested_transfer_past_source_allocation(self):
+        """Physical tile capacity may be ragged, but its requested GM transfer must fit."""
+        span = ir.Span.unknown()
+        source_type = ir.TensorType(
+            [32, 32],
+            DataType.FP32,
+            None,
+            ir.TensorView([], ir.TensorLayout.ND, [4, 32]),
+        )
+        source = ir.Var("a", source_type, span)
+        with pytest.raises(ValueError, match=r"physical window on dim 0.*beyond target extent"):
+            tile.load(source, [28, 0], [16, 32], valid_shapes=[16, 32])
+
+    def test_load_requires_window_rank_to_match_source_rank(self):
+        """A lower-rank load cannot silently reinterpret tensor coordinates."""
+        span = ir.Span.unknown()
+        source = ir.Var("a", ir.TensorType([2, 16, 32], DataType.FP32), span)
+        with pytest.raises(ValueError, match=r"window rank.*source tensor rank"):
+            tile.load(source, [0, 0], [16, 32])
+
+    def test_load_rejects_negative_offset_on_full_source(self):
+        """A bare/full source must not bypass origin-window validation."""
+        span = ir.Span.unknown()
+        tensor_var = ir.Var("a", ir.TensorType([128, 128], DataType.FP32), span)
+        with pytest.raises(ValueError, match=r"offset\[0\].*>= 0"):
+            tile.load(tensor_var, [-1, 0], [64, 64])
+
     def test_load_via_pl_load_with_valid_shapes(self):
         """pl.load with valid_shapes propagates TileView to the output tile."""
 
@@ -3145,6 +4069,110 @@ class TestTileLoadOp:
 
         # Just verifying it builds without error
         assert Prog is not None
+
+    # ------------------------------------------------------------------
+    # Q1 = INTERSECT: tile.load intersects the explicit valid_shapes= argument
+    # with the source tensor's own valid region, never widening past it. Only
+    # engaged when the source tensor carries an EXPLICIT valid region; a plain
+    # tensor keeps valid_shapes verbatim (today's exact IR).
+    # ------------------------------------------------------------------
+
+    def _slice_with_valid(self, shape, valid_shape):
+        """A tensor-typed slice Call whose result carries an explicit valid region."""
+        span = ir.Span.unknown()
+        base = ir.Var("a", ir.TensorType([128, 128], DataType.FP32), span)
+        return tensor.slice(base, shape, [0, 0], valid_shape=valid_shape)
+
+    def test_load_plain_tensor_keeps_valid_shapes_verbatim(self):
+        """A plain source tensor (no explicit valid region) leaves valid_shapes untouched."""
+        span = ir.Span.unknown()
+        base = ir.Var("a", ir.TensorType([128, 128], DataType.FP32), span)
+        m = ir.Var("M", ir.ScalarType(DataType.INDEX), span)
+        n = ir.Var("N", ir.ScalarType(DataType.INDEX), span)
+
+        call = tile.load(base, [0, 0], [64, 64], valid_shapes=[m, n])
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        valid_shape = result_type.tile_view.valid_shape
+
+        # Verbatim: the exact symbolic vars, no intersect / Min injected.
+        assert valid_shape[0] is m
+        assert valid_shape[1] is n
+        assert "min(" not in str(call).lower()
+
+    def test_load_inherits_tensor_valid_region_when_omitted(self):
+        """valid_shapes omitted -> tile inherits the source region (clipped to the window)."""
+        span = ir.Span.unknown()
+        vm = ir.Var("vm", ir.ScalarType(DataType.INDEX), span)
+        sliced = self._slice_with_valid([64, 64], [vm, 64])
+        src = ir.Var("s", sliced.type, span)
+
+        call = tile.load(src, [0, 0], [64, 64])  # valid_shapes omitted -> defaults to shapes
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        valid_shape = result_type.tile_view.valid_shape
+
+        # Row is the inherited vm capped at the tile height: min(vm, 64), not a bare 64.
+        assert isinstance(valid_shape[0], ir.Min)
+        assert valid_shape[0].left is vm
+        assert isinstance(valid_shape[0].right, ir.ConstInt) and valid_shape[0].right.value == 64
+        # Col: fully valid (64) and folds to a ConstInt.
+        assert isinstance(valid_shape[1], ir.ConstInt) and valid_shape[1].value == 64
+
+    def test_load_intersects_explicit_valid_shapes_with_tensor_region(self):
+        """valid_shapes=<full tile shape> does NOT widen past the tensor's narrower region."""
+        span = ir.Span.unknown()
+        vm = ir.Var("vm", ir.ScalarType(DataType.INDEX), span)
+        sliced = self._slice_with_valid([64, 64], [vm, 64])
+        src = ir.Var("s", sliced.type, span)
+
+        call = tile.load(src, [0, 0], [64, 64], valid_shapes=[64, 64])
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        valid_shape = result_type.tile_view.valid_shape
+
+        # The whole point of INTERSECT: row is min(vm, 64), NOT the bare 64 argument.
+        assert isinstance(valid_shape[0], ir.Min)
+        assert valid_shape[0].left is vm
+        assert not (isinstance(valid_shape[0], ir.ConstInt) and valid_shape[0].value == 64)
+        assert isinstance(valid_shape[1], ir.ConstInt) and valid_shape[1].value == 64
+
+    def test_load_clamps_valid_region_with_nonzero_offset(self):
+        """A non-zero offset past the valid region clamps the inherited extent to 0."""
+        span = ir.Span.unknown()
+        # Source valid region is only 4 rows; the window starts at row 8, wholly
+        # inside the padding, so no valid rows are visible: clamp(4 - 8, 0, 8) = 0.
+        sliced = self._slice_with_valid([16, 16], [4, 16])
+        src = ir.Var("s", sliced.type, span)
+
+        call = tile.load(src, [8, 0], [8, 16])
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        valid_shape = result_type.tile_view.valid_shape
+
+        assert isinstance(valid_shape[0], ir.ConstInt) and valid_shape[0].value == 0
+        assert isinstance(valid_shape[1], ir.ConstInt) and valid_shape[1].value == 16
+
+    def test_load_static_intersect_folds_to_constint(self):
+        """A fully static intersect yields a ConstInt, never a Min node."""
+        span = ir.Span.unknown()
+        sliced = self._slice_with_valid([64, 64], [40, 64])
+        src = ir.Var("s", sliced.type, span)
+
+        call = tile.load(src, [0, 0], [64, 64])
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        valid_shape = result_type.tile_view.valid_shape
+
+        # min(64, clamp(40 - 0, 0, 64)) = 40 — folded, no Min/Sub node.
+        assert isinstance(valid_shape[0], ir.ConstInt) and valid_shape[0].value == 40
+        assert isinstance(valid_shape[1], ir.ConstInt) and valid_shape[1].value == 64
+        assert "min(" not in str(call).lower()
 
 
 class TestTileCreateOp:
@@ -3167,6 +4195,56 @@ class TestTileCreateOp:
 
         assert isinstance(tile_type, ir.TileType)
         assert tile_type.get_effective_tile_view().blayout == ir.TileLayout.row_major
+
+    # ------------------------------------------------------------------
+    # create_tile(valid_shape=...) — the accumulator surface. Under D2 an
+    # unset valid_shape means "fully valid", so an empty-accumulator tile must
+    # be creatable with valid_shape=[0, 0] for the assemble union rule to narrow.
+    # ------------------------------------------------------------------
+
+    def test_create_with_valid_shape_zero_accumulator(self):
+        """create(valid_shape=[0, 0]) carries an explicit empty valid region."""
+        call = tile.create([128, 128], DataType.FP32, valid_shape=[0, 0])
+        tile_type = call.type
+
+        assert isinstance(tile_type, ir.TileType)
+        assert tile_type.tile_view is not None
+        valid_shape = tile_type.tile_view.valid_shape
+        assert len(valid_shape) == 2
+        assert isinstance(valid_shape[0], ir.ConstInt) and valid_shape[0].value == 0
+        assert isinstance(valid_shape[1], ir.ConstInt) and valid_shape[1].value == 0
+
+    def test_create_with_partial_valid_shape_preserved(self):
+        """A partial valid_shape (< shape) is preserved on the TileView."""
+        call = tile.create([128, 128], DataType.FP32, valid_shape=[64, 64])
+        tile_type = call.type
+
+        assert isinstance(tile_type, ir.TileType)
+        assert tile_type.tile_view is not None
+        valid_shape = tile_type.tile_view.valid_shape
+        assert isinstance(valid_shape[0], ir.ConstInt) and valid_shape[0].value == 64
+        assert isinstance(valid_shape[1], ir.ConstInt) and valid_shape[1].value == 64
+
+    def test_create_with_full_valid_shape_canonicalizes_to_no_view(self):
+        """valid_shape == shape carries no information and collapses to no view (D2)."""
+        call = tile.create([128, 128], DataType.FP32, valid_shape=[128, 128])
+        tile_type = call.type
+
+        assert isinstance(tile_type, ir.TileType)
+        # Whole-view canonicalization: identical to an unset (fully valid) create.
+        assert tile_type.tile_view is None
+        plain = tile.create([128, 128], DataType.FP32)
+        ir.assert_structural_equal(tile_type, plain.type)
+
+    def test_create_rejects_valid_shape_exceeding_shape(self):
+        """A ConstInt valid dim above the physical shape is rejected (never widen)."""
+        with pytest.raises(ValueError, match=r"must be in \[0, shape dim"):
+            tile.create([128, 128], DataType.FP32, valid_shape=[999, 1])
+
+    def test_create_rejects_valid_shape_rank_mismatch(self):
+        """A valid_shape whose rank differs from the shape is rejected."""
+        with pytest.raises(ValueError, match="valid_shape rank"):
+            tile.create([128, 128], DataType.FP32, valid_shape=[64])
 
 
 class TestTileScalarOps:
@@ -3254,6 +4332,282 @@ class TestTileAssembleOp:
         with pytest.raises(ValueError, match="same dtype"):
             tile.assemble(target_var, source_var, [0, 0])
 
+    # ------------------------------------------------------------------
+    # valid_shape union inference. assemble writes the source's
+    # valid region [offset, offset + valid(source)) into the target; the result's
+    # valid region is the UNION of that written rectangle with the target's existing
+    # valid rectangle. A per-dim valid_shape describes ONE origin-anchored rectangle,
+    # so the inference is the bounding box of the union ONLY when that union is itself
+    # such a rectangle; a non-rectangular union (a gap, or an L-shape) is REJECTED via
+    # CHECK_SPAN, never widened to the full physical shape.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _valid_ints(result_type):
+        """Return the result's valid_shape as ints; None if fully valid (no view)."""
+        assert isinstance(result_type, ir.TileType)
+        if result_type.tile_view is None or len(result_type.tile_view.valid_shape) == 0:
+            return None
+        out = []
+        for e in result_type.tile_view.valid_shape:
+            assert isinstance(e, ir.ConstInt), f"expected ConstInt valid dim, got {e}"
+            out.append(e.value)
+        return out
+
+    def test_tile_assemble_accumulator_narrows(self):
+        """assemble(create(valid_shape=[0,0]), src valid [32,64], [0,0]) -> [32,64]."""
+        acc = tile.create([128, 128], DataType.FP32, valid_shape=[0, 0])
+        src = tile.create([32, 64], DataType.FP32)
+        call = tile.assemble(acc, src, [0, 0])
+        assert self._valid_ints(call.type) == [32, 64]
+
+    def test_tile_assemble_offset_into_empty_rejected(self):
+        """The SAME source at offset [16,0] into an EMPTY accumulator is rejected.
+
+        The written region is rows [16,48) x cols [0,64): it does not start at the
+        origin, so the true valid set (== the written rectangle, since the target is
+        empty) is not an origin-anchored rectangle and is unrepresentable as a per-dim
+        valid_shape. The old bounding box max(0, 16+32)=48 widened rows [0,16) — never
+        written — to valid; per the North Star that must reject, not widen. (Contrast
+        ``test_tile_assemble_two_into_one_grows_monotonic``, where the same offset is
+        <= the target's valid extent, so the union IS a contiguous rectangle.)
+        """
+        acc = tile.create([128, 128], DataType.FP32, valid_shape=[0, 0])
+        src = tile.create([32, 64], DataType.FP32)
+        with pytest.raises(ValueError, match="not representable"):
+            tile.assemble(acc, src, [16, 0])
+
+    def test_tile_assemble_non_rectangular_union_rejected(self):
+        """A contiguous (no-gap) append whose union is an L-shape is rejected.
+
+        acc valid grows to [32,128] after the first assemble; the second source is
+        valid [64,16] at offset [32,0] — offset row 32 == acc valid row 32, so the
+        rows abut with NO gap. Yet the union rows[0,32)xcols[0,128) U rows[32,96)x
+        cols[0,16) is an L-shape (the corner rows[32,96)xcols[16,128) is written by
+        neither operand). Its per-dim bounding box [96,128] would mark that corner
+        valid, so the second assemble must reject even though the rows are contiguous.
+        """
+        acc = tile.create([128, 128], DataType.FP16, valid_shape=[0, 0])
+        ta = tile.create([32, 128], DataType.FP16)
+        tb = tile.create([64, 16], DataType.FP16)
+        acc1 = tile.assemble(acc, ta, [0, 0])
+        assert self._valid_ints(acc1.type) == [32, 128]
+        with pytest.raises(ValueError, match="not representable"):
+            tile.assemble(acc1, tb, [32, 0])
+
+    def test_tile_assemble_multi_dim_grow_from_origin(self):
+        """Overwriting a small valid region with a larger one at offset 0 grows both
+        dims (containment): union == the larger source rectangle, still origin-anchored."""
+        tgt = tile.create([128, 128], DataType.FP32, valid_shape=[16, 16])
+        src = tile.create([64, 64], DataType.FP32)
+        call = tile.assemble(tgt, src, [0, 0])
+        assert self._valid_ints(call.type) == [64, 64]
+
+    def test_tile_assemble_empty_source_is_noop(self):
+        """A provably-empty source (valid_shape=[.,0]) writes nothing: the target's
+        valid region is returned unchanged, never widened by the shifted offset."""
+        acc = tile.create([128, 128], DataType.FP32, valid_shape=[0, 0])
+        empty_src = tile.create([32, 64], DataType.FP32, valid_shape=[0, 0])
+        call = tile.assemble(acc, empty_src, [16, 0])
+        assert self._valid_ints(call.type) == [0, 0]
+
+    def test_tile_assemble_two_into_one_grows_monotonic(self):
+        """Two assembles into one accumulator grow the bounding box monotonically."""
+        acc = tile.create([128, 128], DataType.FP32, valid_shape=[0, 0])
+        src = tile.create([32, 64], DataType.FP32)
+        first = tile.assemble(acc, src, [0, 0])
+        assert self._valid_ints(first.type) == [32, 64]
+        # Second assemble targets the first result (valid [32,64]) at offset [16,0]:
+        # dim0 = max(32, 16+32) = 48, dim1 = max(64, 0+64) = 64. Box only grows.
+        second = tile.assemble(first, src, [16, 0])
+        assert self._valid_ints(second.type) == [48, 64]
+
+    def test_tile_assemble_partial_target_absorbs_smaller_source(self):
+        """A source fully inside the target's existing region leaves it unchanged."""
+        tgt = tile.create([128, 128], DataType.FP32, valid_shape=[64, 64])
+        src = tile.create([16, 16], DataType.FP32)
+        call = tile.assemble(tgt, src, [0, 0])
+        assert self._valid_ints(call.type) == [64, 64]
+
+    def test_tile_assemble_dynamic_source_symbolic(self):
+        """A dynamic source valid_shape yields a symbolic min/max box (compiles)."""
+        span = ir.Span.unknown()
+        vm = ir.Var("vm", ir.ScalarType(DataType.INDEX), span)
+        vn = ir.Var("vn", ir.ScalarType(DataType.INDEX), span)
+        acc = tile.create([128, 128], DataType.FP32, valid_shape=[0, 0])
+        src_type = ir.TileType([128, 128], DataType.FP32, None, ir.TileView([vm, vn], [], None))
+        src = ir.Var("src", src_type, span)
+        call = tile.assemble(acc, src, [0, 0])
+
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        valid = result_type.tile_view.valid_shape
+        assert len(valid) == 2
+        # Each dim is min(shape, max(target_valid, offset + source_valid)) — symbolic,
+        # not folded to a ConstInt.
+        assert isinstance(valid[0], ir.Min) and not isinstance(valid[0], ir.ConstInt)
+        assert isinstance(valid[1], ir.Min)
+
+    def test_tile_assemble_out_of_bounds_rejected(self):
+        """offset + physical(source) > shape is an out-of-bounds error."""
+        tgt = tile.create([128, 128], DataType.FP32)
+        src = tile.create([64, 64], DataType.FP32)
+        with pytest.raises(ValueError, match="physical window"):
+            tile.assemble(tgt, src, [80, 0])  # 80 + 64 = 144 > 128
+
+    def test_tile_assemble_rejects_negative_offset(self):
+        """A negative destination offset would write before the target allocation."""
+        tgt = tile.create([128, 128], DataType.FP32)
+        src = tile.create([8, 8], DataType.FP32)
+        with pytest.raises(ValueError, match=r"offset\[0\].*>= 0"):
+            tile.assemble(tgt, src, [-1, 0])
+
+    def test_tile_assemble_checks_physical_shape_not_only_valid_shape(self):
+        """A narrow valid box cannot legalize an out-of-allocation source window."""
+        tgt = tile.create([128, 128], DataType.FP32)
+        src = tile.create([64, 64], DataType.FP32, valid_shape=[8, 64])
+        # valid(source) ends at row 128, but its physical window ends at 184.
+        with pytest.raises(ValueError, match="physical window"):
+            tile.assemble(tgt, src, [120, 0])
+
+    def test_tile_assemble_full_into_full_canonicalizes(self):
+        """A fully-valid source into a fully-valid target stays fully valid (no view).
+
+        This guards D2 canonicalization (a whole-view valid_shape collapses to a
+        nullopt tile_view), not the 4b union: a fully-valid tile target is nullopt-view
+        by construction, so the ``tile_view.has_value()`` guard is false in both the
+        old and new code. The out-of-bounds rejection for a viewless target is covered
+        by ``test_tile_assemble_out_of_bounds_rejected``.
+        """
+        tgt = tile.create([128, 128], DataType.FP32)
+        src = tile.create([128, 128], DataType.FP32)
+        call = tile.assemble(tgt, src, [0, 0])
+        # union == full shape -> canonicalizes to no view.
+        assert self._valid_ints(call.type) is None
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is None
+
+    # ------------------------------------------------------------------
+    # Adversary regression: the representability proof is PER-DIM. A symbolic dim
+    # (a passenger, or a masking row) must NOT disable the rejection of a provable
+    # widening in the remaining static dims — the old global "all dims static" gate
+    # deferred the whole check to the widening box whenever any dim was dynamic.
+    # ------------------------------------------------------------------
+
+    def test_tile_assemble_symbolic_row_static_col_grow_rejected(self):
+        """target valid [m,32], source valid [4,128] at origin: dim1 provably grows
+        cols 32->128 while dim0's coverage (4 vs symbolic m) is unprovable, so for the
+        common runtime case m>4 the union is an L-shape. The old global gate saw m
+        symbolic and widened cols [32,128) to valid for rows the source never wrote
+        there — the North Star forbids it. Rejection must fire despite the symbolic m.
+        """
+        span = ir.Span.unknown()
+        m = ir.Var("m", ir.ScalarType(DataType.INDEX), span)
+        tgt = _mk_tile("tgt", [128, 128], [m, 32])
+        src = _mk_tile("src", [128, 128], [4, 128])
+        with pytest.raises(ValueError, match="not representable"):
+            tile.assemble(tgt, src, [0, 0])
+
+    def test_tile_assemble_symbolic_passenger_masks_static_lshape_rejected(self):
+        """3D adversary: a symbolic PASSENGER dim (dim2, equal on both operands) must
+        not disable rejection of a provably static L-shape in dims 0/1. target
+        [4,2,d2], source [2,4,d2] at origin form an L-shape in the (dim0,dim1) plane
+        for every d2; the old gate saw dim2 symbolic and widened dims 0/1 to the [4,4]
+        bounding box, marking cells written by neither operand as valid.
+        """
+        span = ir.Span.unknown()
+        d2 = ir.Var("d2", ir.ScalarType(DataType.INDEX), span)
+        tgt = _mk_tile("t", [8, 8, 8], [4, 2, d2])
+        src = _mk_tile("s", [8, 8, 8], [2, 4, d2])
+        with pytest.raises(ValueError, match="not representable"):
+            tile.assemble(tgt, src, [0, 0, 0])
+
+    def test_tile_assemble_static_lshape_all_const_rejected(self):
+        """The fully-static analog of the passenger-masked L-shape also rejects — the
+        symbolic passenger dim is not what makes it non-representable."""
+        tgt = _mk_tile("t", [8, 8, 8], [4, 2, 8])
+        src = _mk_tile("s", [8, 8, 8], [2, 4, 8])
+        with pytest.raises(ValueError, match="not representable"):
+            tile.assemble(tgt, src, [0, 0, 0])
+
+    def test_tile_assemble_symbolic_contiguous_append_accepted(self):
+        """A SYMBOLIC contiguous append is provable and must be accepted.
+
+        ``assemble(acc /*valid [v, 128]*/, src /*valid [32, 128]*/, offset=[v, 0])``
+        writes exactly at the target's current valid boundary, so the union stays an
+        origin-anchored rectangle even though neither extent is a ConstInt. The
+        ``no_gap`` predicate discharges it via structural equality of ``offset[0]``
+        and ``target_valid[0]`` — both are the same ``v`` node. Before that arm
+        existed the accumulator idiom was rejected merely for being dynamic.
+        """
+        span = ir.Span.unknown()
+        v = ir.Var("v", ir.ScalarType(DataType.INDEX), span)
+        tgt = _mk_tile("t", [128, 128], [v, 128])
+        src = _mk_tile("s", [128, 128], [32, 128])
+        call = tile.assemble(tgt, src, [v, 0])
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        out_valid = result_type.tile_view.valid_shape
+        # Row extent grows to max(v, v + 32) clamped to the physical 128; not widened
+        # to the full shape, and not collapsed to the source's 32.
+        assert not isinstance(out_valid[0], ir.ConstInt), "row extent must stay symbolic"
+        assert isinstance(out_valid[1], ir.ConstInt) and out_valid[1].value == 128
+
+    def test_tile_assemble_symbolic_offset_into_empty_target_rejected(self):
+        """A symbolic offset into an EMPTY target leaves a provable gap [0, off)."""
+        span = ir.Span.unknown()
+        v = ir.Var("v", ir.ScalarType(DataType.INDEX), span)
+        tgt = _mk_tile("t", [128, 128], [0, 128])
+        src = _mk_tile("s", [128, 128], [32, 128])
+        with pytest.raises(ValueError, match="not representable"):
+            tile.assemble(tgt, src, [v, 0])
+
+    def test_tile_assemble_distinct_symbolic_offset_rejected(self):
+        """Two DIFFERENT symbolic extents are not provably equal, so the append cannot
+        be shown gap-free. The structural-equality arm must not over-accept."""
+        span = ir.Span.unknown()
+        v = ir.Var("v", ir.ScalarType(DataType.INDEX), span)
+        w = ir.Var("w", ir.ScalarType(DataType.INDEX), span)
+        tgt = _mk_tile("t", [128, 128], [v, 128])
+        src = _mk_tile("s", [128, 128], [32, 128])
+        with pytest.raises(ValueError, match="not representable"):
+            tile.assemble(tgt, src, [w, 0])
+
+    def test_tile_assemble_static_contiguous_append_accepted(self):
+        """Regression guard: the all-static contiguous append still folds to [64, 128]."""
+        tgt = _mk_tile("t", [128, 128], [32, 128])
+        # The source allocation itself is the 32-row append window. A physical
+        # [128,128] source at offset 32 would overrun the target even if only its
+        # first 32 rows were valid.
+        src = _mk_tile("s", [32, 128])
+        call = tile.assemble(tgt, src, [32, 0])
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        out_valid = result_type.tile_view.valid_shape
+        assert isinstance(out_valid[0], ir.ConstInt) and out_valid[0].value == 64
+        assert isinstance(out_valid[1], ir.ConstInt) and out_valid[1].value == 128
+
+    def test_tile_assemble_dynamic_source_into_full_target_not_rejected(self):
+        """A symbolic source assembled into a FULLY-VALID target must NOT reject: the
+        box clamps to the physical shape, so the union is provably the full target
+        (Form target-full). Guards against over-rejecting the common
+        dynamic-source-into-full-accumulator pattern; the result stays fully valid.
+        """
+        span = ir.Span.unknown()
+        vm = ir.Var("vm", ir.ScalarType(DataType.INDEX), span)
+        vn = ir.Var("vn", ir.ScalarType(DataType.INDEX), span)
+        tgt = _mk_tile("tgt", [128, 128])  # fully valid (no explicit view)
+        src_type = ir.TileType([128, 128], DataType.FP32, None, ir.TileView([vm, vn], [], None))
+        src = ir.Var("src", src_type, span)
+        call = tile.assemble(tgt, src, [0, 0])  # must not raise
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is None  # full target -> full (viewless) result
+
 
 class TestTileExtractOp:
     """Tests for tile.extract operator (ISA TEXTRACT Variant 1)."""
@@ -3320,6 +4674,60 @@ class TestTileExtractOp:
         assert isinstance(rows, ir.ConstInt) and rows.value == 16
         assert isinstance(cols, ir.ConstInt) and cols.value == 16
 
+    # ------------------------------------------------------------------
+    # valid_shape propagation: extract CLIPS the window to the
+    # source's own valid region. A fully-valid source (bounds-checked in-window)
+    # yields a fully-valid dst; only an explicit partial source narrows the result.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _partial_src(rows, cols, valid, dtype=DataType.FP16):
+        span = ir.Span.unknown()
+        shape = [ir.ConstInt(rows, DataType.INT32, span), ir.ConstInt(cols, DataType.INT32, span)]
+        vs = [ir.ConstInt(v, DataType.INDEX, span) if isinstance(v, int) else v for v in valid]
+        view = ir.TileView(valid_shape=vs)
+        return ir.Var("src", ir.TileType(shape, dtype, None, view), span)
+
+    def test_tile_extract_fully_valid_source_unchanged(self):
+        """A fully-valid source extracts a fully-valid window (dst_shape)."""
+        result_type = tile.extract(
+            self._make_src_var(64, 256), 0, 0, shape=[32, 32], target_memory=ir.MemorySpace.Left
+        ).type
+        assert isinstance(result_type, ir.TileType)
+        vs = result_type.get_effective_tile_view().valid_shape
+        assert _const_ints(vs) == [32, 32]
+
+    def test_tile_extract_clips_partial_source(self):
+        """Partial src valid [40, 50], extract [32, 32] @ [20, 40] ->
+        clamp(40 - 20, 0, 32) = 20, clamp(50 - 40, 0, 32) = 10."""
+        result_type = tile.extract(
+            self._partial_src(64, 256, [40, 50]), 20, 40, shape=[32, 32], target_memory=ir.MemorySpace.Left
+        ).type
+        assert isinstance(result_type, ir.TileType)
+        vs = result_type.get_effective_tile_view().valid_shape
+        assert _const_ints(vs) == [20, 10]
+
+    def test_tile_extract_partial_source_window_fully_inside(self):
+        """When the window lies inside the valid region the whole dst is valid."""
+        result_type = tile.extract(
+            self._partial_src(64, 256, [40, 50]), 0, 0, shape=[32, 32], target_memory=ir.MemorySpace.Left
+        ).type
+        assert isinstance(result_type, ir.TileType)
+        vs = result_type.get_effective_tile_view().valid_shape
+        assert _const_ints(vs) == [32, 32]
+
+    def test_tile_extract_dynamic_offset_symbolic(self):
+        """A dynamic row offset into a partial source yields a symbolic (min/max) extent."""
+        span = ir.Span.unknown()
+        r = ir.Var("r", ir.ScalarType(DataType.INDEX), span)
+        result_type = tile.extract(
+            self._partial_src(64, 256, [40, 50]), r, 0, shape=[32, 32], target_memory=ir.MemorySpace.Left
+        ).type
+        assert isinstance(result_type, ir.TileType)
+        vs = result_type.get_effective_tile_view().valid_shape
+        assert isinstance(vs[0], ir.Min) and not isinstance(vs[0], ir.ConstInt)
+        assert isinstance(vs[1], ir.ConstInt) and vs[1].value == 32
+
     def test_tile_extract_shape_exceeds_src_static(self):
         """Static shape larger than src is rejected at deduction time."""
         src_var = self._make_src_var(64, 64)
@@ -3368,6 +4776,79 @@ class TestTileExtractOp:
             tile.extract(src_var, 0, 0, shape=[16, 16, 16], target_memory=ir.MemorySpace.Left)
 
 
+class TestTileIndirectOpValidShapeGuards:
+    """Indirect gather/scatter forms require every physically consumed tile to be full."""
+
+    @pytest.mark.parametrize("partial_slot", ["src", "indices", "tmp"])
+    def test_tile_gather_rejects_partial_operand(self, partial_slot):
+        args = {
+            "src": _mk_tile("src", [4, 16], dtype=DataType.FP32),
+            "indices": _mk_tile("indices", [4, 8], dtype=DataType.INT32),
+            "tmp": _mk_tile("tmp", [4, 8], dtype=DataType.INT32),
+        }
+        shape = [4, 16] if partial_slot == "src" else [4, 8]
+        dtype = DataType.FP32 if partial_slot == "src" else DataType.INT32
+        args[partial_slot] = _mk_tile(partial_slot, shape, [2, shape[1]], dtype=dtype)
+        with pytest.raises(ValueError, match="not provably fully valid"):
+            tile.gather(args["src"], args["indices"], args["tmp"])
+
+    def test_tile_gather_mask_rejects_partial_source(self):
+        with pytest.raises(ValueError, match="not provably fully valid"):
+            tile.gather_mask(_mk_tile("src", [4, 16], [2, 16]), 1)
+
+    def test_tile_gather_row_rejects_partial_runtime_indexed_source(self):
+        dst = _mk_tile("dst", [16, 128], dtype=DataType.FP16)
+        span = ir.Span.unknown()
+        src = ir.Var(
+            "src",
+            ir.TensorType(
+                [128, 128],
+                DataType.FP16,
+                None,
+                ir.TensorView([], ir.TensorLayout.ND, [64, 128]),
+            ),
+            span,
+        )
+        with pytest.raises(ValueError, match="not provably fully valid"):
+            tile.gather_row(dst, src, [0, 0], [0, 0], [1, 128])
+
+    @pytest.mark.parametrize("partial_slot", ["src", "tmp"])
+    def test_tile_gather_compare_rejects_partial_operand(self, partial_slot):
+        src = _mk_tile("src", [4, 16], dtype=DataType.FP32)
+        tmp = _mk_tile("tmp", [4, 16], dtype=DataType.UINT8)
+        if partial_slot == "src":
+            src = _mk_tile("src", [4, 16], [2, 16], dtype=DataType.FP32)
+        else:
+            tmp = _mk_tile("tmp", [4, 16], [2, 16], dtype=DataType.UINT8)
+        kvalue = ir.Var("k", ir.ScalarType(DataType.FP32), ir.Span.unknown())
+        with pytest.raises(ValueError, match="not provably fully valid"):
+            tile.gather_compare(src, kvalue, tmp, cmp_mode="eq", out_cols=4)
+
+    @pytest.mark.parametrize("partial_slot", ["dst", "src", "indexes"])
+    def test_tile_scatter_rejects_partial_operand(self, partial_slot):
+        args = {
+            "dst": _mk_tile("dst", [4, 16], dtype=DataType.FP32),
+            "src": _mk_tile("src", [4, 8], dtype=DataType.FP32),
+            "indexes": _mk_tile("indexes", [4, 8], dtype=DataType.INT32),
+        }
+        shape = [4, 16] if partial_slot == "dst" else [4, 8]
+        dtype = DataType.INT32 if partial_slot == "indexes" else DataType.FP32
+        args[partial_slot] = _mk_tile(partial_slot, shape, [2, shape[1]], dtype=dtype)
+        with pytest.raises(ValueError, match="not provably fully valid"):
+            tile.scatter(args["dst"], args["src"], args["indexes"])
+
+    @pytest.mark.parametrize("partial_slot", ["dst", "src"])
+    def test_tile_scatter_mask_rejects_partial_operand(self, partial_slot):
+        dst = _mk_tile("dst", [4, 16], dtype=DataType.FP32)
+        src = _mk_tile("src", [4, 8], dtype=DataType.FP32)
+        if partial_slot == "dst":
+            dst = _mk_tile("dst", [4, 16], [2, 16], dtype=DataType.FP32)
+        else:
+            src = _mk_tile("src", [4, 8], [2, 8], dtype=DataType.FP32)
+        with pytest.raises(ValueError, match="not provably fully valid"):
+            tile.scatter_mask(dst, src, 1)
+
+
 class TestTileScatterUpdateOps:
     """Test suite for tile.scatter_update operation."""
 
@@ -3403,6 +4884,23 @@ class TestTileScatterUpdateOps:
         const_dims = [dim for dim in result_type.shape if isinstance(dim, ir.ConstInt)]
         assert len(const_dims) == len(result_type.shape)
         assert [dim.value for dim in const_dims] == input_shape
+
+    @pytest.mark.parametrize("partial_slot", ["input", "index", "src"])
+    def test_tile_scatter_update_rejects_partial_operand(self, partial_slot):
+        args = {
+            "input": _mk_tile("input", [16, 64], dtype=DataType.FP16),
+            "index": _mk_tile("index", [2, 4], dtype=DataType.INT32),
+            "src": _mk_tile("src", [8, 64], dtype=DataType.FP16),
+        }
+        specs = {
+            "input": ([16, 64], [8, 64], DataType.FP16),
+            "index": ([2, 4], [1, 4], DataType.INT32),
+            "src": ([8, 64], [4, 64], DataType.FP16),
+        }
+        shape, valid, dtype = specs[partial_slot]
+        args[partial_slot] = _mk_tile(partial_slot, shape, valid, dtype=dtype)
+        with pytest.raises(ValueError, match="not provably fully valid"):
+            tile.scatter_update(args["input"], -2, args["index"], args["src"])
 
     def test_tile_scatter_update_keeps_implicit_column_vector_layout(self):
         """Same alias rule as tile.scatter: a `[M, 1]` input is implicitly col_major,
@@ -3564,6 +5062,27 @@ class TestTileMscatterOps:
 
         with pytest.raises(ValueError, match="output_tensor dtype"):
             tile.mscatter(src_var, idx_var, out_var)
+
+    @pytest.mark.parametrize("partial_slot", ["src", "idx", "output"])
+    def test_tile_mscatter_rejects_partial_operand(self, partial_slot):
+        """Indirect reads/writes require all physically consumed contracts to be full."""
+        span = ir.Span.unknown()
+        src = _mk_tile("src", [8, 16], dtype=DataType.FP32)
+        idx = _mk_tile("idx", [8, 16], dtype=DataType.INT32)
+        output_type = ir.TensorType([1024], DataType.FP32)
+        if partial_slot == "src":
+            src = _mk_tile("src", [8, 16], [4, 16], dtype=DataType.FP32)
+        elif partial_slot == "idx":
+            idx = _mk_tile("idx", [8, 16], [4, 16], dtype=DataType.INT32)
+        else:
+            output_type = ir.TensorType(
+                [1024],
+                DataType.FP32,
+                None,
+                ir.TensorView([], ir.TensorLayout.ND, [ir.ConstInt(512, DataType.INDEX, span)]),
+            )
+        with pytest.raises(ValueError, match="not provably fully valid"):
+            tile.mscatter(src, idx, ir.Var("out", output_type, span))
 
     def test_tile_mscatter_arg_count_error(self):
         """Test tile.mscatter rejects wrong number of arguments."""
@@ -3903,6 +5422,46 @@ class TestTileConcatOps:
         assert isinstance(result_type.shape[1], ir.ConstInt)
         assert result_type.shape[1].value == 32
 
+    # ------------------------------------------------------------------
+    # valid_shape propagation: concat's union is a rectangle only
+    # when both operands agree on valid rows AND src0 is fully valid in the concat
+    # (column) dimension. Otherwise it is REJECTED, never widened.
+    # ------------------------------------------------------------------
+
+    def test_tile_concat_fully_valid_canonicalizes(self):
+        """Two fully-valid operands -> fully-valid result (canonicalizes to no view)."""
+        result_type = tile.concat(_mk_tile("a", [32, 16]), _mk_tile("b", [32, 16])).type
+        assert isinstance(result_type, ir.TileType)
+        assert _valid_ints(result_type) == [32, 32]
+        assert result_type.tile_view is None
+
+    def test_tile_concat_partial_final_operand(self):
+        """The final operand may be partially valid in columns: A full [32, 16],
+        B valid [32, 8] -> valid [32, 16 + 8 = 24] (B's trailing padding is excluded)."""
+        result_type = tile.concat(_mk_tile("a", [32, 16]), _mk_tile("b", [32, 16], [32, 8])).type
+        assert _valid_ints(result_type) == [32, 24]
+
+    def test_tile_concat_dynamic_final_operand_symbolic(self):
+        """A dynamic valid col extent on the final operand yields a symbolic Add."""
+        vn = _index_scalar("vn")
+        result_type = tile.concat(_mk_tile("a", [32, 16]), _mk_tile("b", [32, 16], [32, vn])).type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        valid = result_type.tile_view.valid_shape
+        assert isinstance(valid[0], ir.ConstInt) and valid[0].value == 32
+        # cols = 16 + vn — a symbolic Add, not folded to a ConstInt.
+        assert isinstance(valid[1], ir.Add)
+
+    def test_tile_concat_rejects_partial_first_operand(self):
+        """src0 partially valid in the concat dim leaves a gap -> rejected."""
+        with pytest.raises(ValueError, match="partially valid along the concatenation"):
+            tile.concat(_mk_tile("a", [32, 16], [32, 8]), _mk_tile("b", [32, 16]))
+
+    def test_tile_concat_rejects_valid_row_mismatch(self):
+        """Operands disagreeing on the valid row extent -> L-shaped union -> rejected."""
+        with pytest.raises(ValueError, match="disagree on the valid row extent"):
+            tile.concat(_mk_tile("a", [32, 16], [20, 16]), _mk_tile("b", [32, 16], [10, 16]))
+
     @pytest.mark.parametrize(
         ("t0_shape", "t0_dtype", "t1_shape", "t1_dtype", "match"),
         [
@@ -4054,6 +5613,38 @@ class TestTileRandomOp:
             tile.random(1, 2, 3, 4, 5, 6, [4, 64], rounds=5)
 
 
+class TestTileStoreBounds:
+    """tile.store validates the exact valid transfer window against GM."""
+
+    def test_partial_transfer_past_destination_rejected(self):
+        span = ir.Span.unknown()
+        src = _mk_tile("src", [16, 16], [4, 8])
+        dst = ir.Var("dst", ir.TensorType([64, 64], DataType.FP32), span)
+        with pytest.raises(ValueError, match="physical window"):
+            tile.store(src, [61, 0], dst)
+        with pytest.raises(ValueError, match="physical window"):
+            tile.store(src, [0, 57], dst)
+
+    def test_negative_offset_rejected(self):
+        span = ir.Span.unknown()
+        dst = ir.Var("dst", ir.TensorType([64, 64], DataType.FP32), span)
+        with pytest.raises(ValueError, match=r"offset\[0\].*>= 0"):
+            tile.store(_mk_tile("src", [8, 8]), [-1, 0], dst)
+
+    def test_original_rank_partition_is_authoritative(self):
+        span = ir.Span.unknown()
+        dst = ir.Var("dst", ir.TensorType([2, 64, 64], DataType.FP32), span)
+        src = _mk_tile("src", [16, 16], [4, 8])
+        with pytest.raises(ValueError, match="physical window"):
+            tile.store(src, [0, 61, 0], dst, shapes=[1, 4, 8])
+
+    def test_symbolic_offset_defers_when_not_provably_invalid(self):
+        span = ir.Span.unknown()
+        row = ir.Var("row", ir.ScalarType(DataType.INDEX), span)
+        dst = ir.Var("dst", ir.TensorType([64, 64], DataType.FP32), span)
+        assert tile.store(_mk_tile("src", [8, 8], [4, 8]), [row, 0], dst).op.name == "tile.store"
+
+
 class TestTileStoreDistributedDest:
     """``tile.store`` accepts ``DistributedTensorType`` as the destination.
 
@@ -4190,6 +5781,111 @@ class TestTileTransposeView:
         src = ir.Var("src", ir.TileType([16], DataType.FP32), span)
         with pytest.raises(ValueError, match="at least 2 dimensions"):
             tile.transpose_view(src)
+
+
+class TestTileSortValidShape:
+    """valid_shape handling for sort ops.
+
+    Sorting mixes padding into the valid region, so a partially-valid sort input is
+    rejected rather than propagated. A fully-valid input keeps today's output shape.
+    """
+
+    def test_tile_sort32_fully_valid(self):
+        """A fully-valid sort32 input keeps the doubled-last-dim output valid_shape."""
+        result_type = tile.sort32(
+            _mk_tile("s", [4, 32], dtype=DataType.FP32),
+            _mk_tile("i", [4, 32], dtype=DataType.INT32),
+        ).type
+        assert isinstance(result_type, ir.TileType)
+        assert _valid_ints(result_type) == [4, 64]
+
+    def test_tile_sort32_rejects_partial_source(self):
+        """A partially-valid src is rejected — padding would migrate into the sorted run."""
+        with pytest.raises(ValueError, match="not provably fully valid"):
+            tile.sort32(
+                _mk_tile("s", [4, 32], [4, 16], dtype=DataType.FP32),
+                _mk_tile("i", [4, 32], dtype=DataType.INT32),
+            )
+
+    def test_tile_sort32_rejects_partial_index(self):
+        """The index run participates in the physical sort and must also be full."""
+        with pytest.raises(ValueError, match="not provably fully valid"):
+            tile.sort32(
+                _mk_tile("s", [4, 32], dtype=DataType.FP32),
+                _mk_tile("i", [4, 32], [4, 16], dtype=DataType.INT32),
+            )
+
+    def test_tile_mrgsort_format1_rejects_partial_source(self):
+        """mrgsort_format1 also rejects a partially-valid input."""
+        with pytest.raises(ValueError, match="not provably fully valid"):
+            tile.mrgsort_format1(_mk_tile("s", [4, 128], [4, 64], dtype=DataType.FP32), 64)
+
+    def test_tile_mrgsort_format2_rejects_partial_src0(self):
+        """mrgsort_format2 rejects a partially-valid src0 (the src0 arm, sort.cpp).
+
+        The 2-way form is (src0, src1, tmp); src0 is partial, src1 fully valid, so the
+        non-src0 loop passes and the dedicated src0 check must fire.
+        """
+        with pytest.raises(ValueError, match="not provably fully valid"):
+            tile.mrgsort_format2(
+                _mk_tile("s0", [4, 128], [4, 64], dtype=DataType.FP32),
+                _mk_tile("s1", [4, 128], dtype=DataType.FP32),
+                _mk_tile("tmp", [4, 256], dtype=DataType.FP32),
+            )
+
+    def test_tile_mrgsort_format2_rejects_partial_src1(self):
+        """mrgsort_format2 rejects a partially-valid non-src0 operand (the src1..N-1
+        loop arm, distinct from the src0 arm): src0 fully valid, src1 partial."""
+        with pytest.raises(ValueError, match="not provably fully valid"):
+            tile.mrgsort_format2(
+                _mk_tile("s0", [4, 128], dtype=DataType.FP32),
+                _mk_tile("s1", [4, 128], [4, 64], dtype=DataType.FP32),
+                _mk_tile("tmp", [4, 256], dtype=DataType.FP32),
+            )
+
+    def test_tile_mrgsort_format2_rejects_partial_tmp(self):
+        """The merge workspace is physically consumed and cannot be partial."""
+        with pytest.raises(ValueError, match="not provably fully valid"):
+            tile.mrgsort_format2(
+                _mk_tile("s0", [4, 128], dtype=DataType.FP32),
+                _mk_tile("s1", [4, 128], dtype=DataType.FP32),
+                _mk_tile("tmp", [4, 256], [4, 128], dtype=DataType.FP32),
+            )
+
+
+class TestValidDimTile:
+    """pl.valid_dim — compile-time type query on tile operands."""
+
+    def test_valid_dim_tile_explicit(self):
+        """pl.valid_dim on a tile with an explicit valid_shape returns that extent."""
+        tw = pl.Tile(expr=_mk_tile("t", [16, 32], [6, 20]))
+        d0 = pl.valid_dim(tw, 0).unwrap()
+        assert isinstance(d0, ir.ConstInt) and d0.value == 6
+        d1 = pl.valid_dim(tw, 1).unwrap()
+        assert isinstance(d1, ir.ConstInt) and d1.value == 20
+
+    def test_valid_dim_tile_unset_returns_physical(self):
+        """pl.valid_dim on a fully-valid tile returns the physical dim (design D2)."""
+        tw = pl.Tile(expr=_mk_tile("t", [16, 32]))
+        d0 = pl.valid_dim(tw, 0).unwrap()
+        assert isinstance(d0, ir.ConstInt) and d0.value == 16
+        d1 = pl.valid_dim(tw, 1).unwrap()
+        assert isinstance(d1, ir.ConstInt) and d1.value == 32
+
+    def test_valid_dim_tile_dynamic_returns_same_expr(self):
+        """pl.valid_dim returns the exact valid_shape Expr (a runtime scalar Var) as-is."""
+        span = ir.Span.unknown()
+        vm = ir.Var("vm", ir.ScalarType(DataType.INDEX), span)
+        tw = pl.Tile(expr=_mk_tile("t", [128, 128], [vm, 64]))
+        assert pl.valid_dim(tw, 0).unwrap() is vm
+
+    def test_valid_dim_tile_out_of_range_raises(self):
+        """A negative or out-of-range axis raises (no numpy-style wrap-around)."""
+        tw = pl.Tile(expr=_mk_tile("t", [16, 32]))
+        with pytest.raises(IndexError, match="out of range"):
+            pl.valid_dim(tw, 2)
+        with pytest.raises(IndexError, match="out of range"):
+            pl.valid_dim(tw, -1)
 
 
 if __name__ == "__main__":

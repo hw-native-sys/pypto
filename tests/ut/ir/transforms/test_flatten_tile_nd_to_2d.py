@@ -13,6 +13,7 @@ from collections.abc import Callable
 from typing import cast
 
 import pypto.language as pl
+import pypto.language.distributed as pld
 import pytest
 from pypto import DataType, ir, passes
 from pypto.ir import IRBuilder
@@ -476,6 +477,26 @@ class TestFlattenTileNdTo2DErrors:
         assert "pl.parallel" in message
         assert "reshap" in message
 
+    def test_dynamic_2d_physical_shape_error(self):
+        """The post-flatten static-capacity rule also covers rank-2 tiles.
+
+        PTO may carry runtime dynamism in valid_shape, but its allocation rows
+        and columns must be compile-time constants even when no ND merge occurs.
+        """
+        span = ir.Span.unknown()
+        n_var = ir.Var("n", ir.ScalarType(DataType.INDEX), span)
+        dim4 = ir.ConstInt(4, DataType.INDEX, span)
+        dyn_tile_type = ir.TileType([n_var, dim4], DataType.FP32)
+        x_tile = ir.Var("x_tile", dyn_tile_type, span)
+        add_call = ir.Call(ir.Op("tile.add"), [x_tile, x_tile], dyn_tile_type, span)
+        y_tile = ir.Var("y_tile", dyn_tile_type, span)
+        body = ir.AssignStmt(y_tile, add_call, span)
+        func = ir.Function("incore_func", [x_tile], [dyn_tile_type], body, span, type=ir.FunctionType.InCore)
+        program = ir.Program([func], "test_dyn_2d", span)
+
+        with pytest.raises(ValueError, match="cannot be flattened to 2D"):
+            passes.flatten_tile_nd_to_2d()(program)
+
 
 # ----------------------------------------------------------------------------
 # Dynamic valid_shape through the 3D->2D flatten (issue #1578)
@@ -594,6 +615,25 @@ class TestFlattenTileNdTo2DDynamicValid:
         )
         assert isinstance(valid[1], ir.ConstInt) and valid[1].value == 512
 
+        # The rank-restoring tile.store operand is a validity partition, not a
+        # physical-capacity tuple.  Otherwise codegen widens the dynamic tail
+        # back from [1, S, 512] to [1, 16, 512] at the final DDR write.
+        body = cast(ir.SeqStmts, after_func.body)
+        stores = [
+            cast(ir.Call, stmt.value)
+            for stmt in body.stmts
+            if isinstance(stmt, ir.AssignStmt)
+            and isinstance(stmt.value, ir.Call)
+            and stmt.value.op.name == "tile.store"
+        ]
+        assert len(stores) == 1
+        assert len(stores[0].args) == 4
+        partition_valid = cast(ir.MakeTuple, stores[0].args[3]).elements
+        assert len(partition_valid) == 3
+        assert isinstance(partition_valid[0], ir.ConstInt) and partition_valid[0].value == 1
+        assert not isinstance(partition_valid[1], ir.ConstInt)
+        assert isinstance(partition_valid[2], ir.ConstInt) and partition_valid[2].value == 512
+
     def test_static_3d_flattens(self):
         """A fully static 3D chain flattens to 2D normally."""
         before = _incore_cast_chain(shapes=[1, 8, 512], valid=[1, 8, 512], tensor_shape=[1, 8, 512])
@@ -613,6 +653,153 @@ class TestFlattenTileNdTo2DDynamicValid:
         message = str(excinfo.value)
         assert "pl.parallel" in message
         assert "reshap" in message
+
+    def test_partial_middle_dim_rejected(self):
+        """A partially-valid MIDDLE dim below a non-unit outer dim is rejected (B2).
+
+        phys ``[2, 4, 8]`` with valid ``[2, 2, 8]``: the outer dim (2) is non-unit
+        and the middle dim is partial (valid 2 < shape 4). The flattened valid rows
+        would be ``{0, 1, 4, 5}`` (batch 0 rows 0-1, batch 1 rows 4-5) — a *strided*
+        set that ``(valid_row, valid_col)`` cannot express. The product fold would
+        emit ``valid_row = 2*2 = 4`` (rows 0-3), silently marking batch-0 padding
+        valid and batch-1 real data invalid. The pass must reject, not approximate.
+        """
+        before = _incore_cast_chain(shapes=[2, 4, 8], valid=[2, 2, 8], tensor_shape=[2, 4, 8])
+        with pytest.raises(ValueError, match="contiguous row range"):
+            passes.flatten_tile_nd_to_2d()(before)
+
+    def test_empty_valid_region_folds_not_rejected(self):
+        """An ND *empty* valid region folds to zero rows instead of being rejected.
+
+        phys ``[4, 8, 16]`` with valid ``[0, 0, 0]`` is the ND empty accumulator
+        produced by ``pl.create_tile(shape, dtype, valid_shape=[0, 0, 0])``. The empty
+        set is trivially a contiguous prefix (of length 0), so the fold applies. The
+        pinned-dim scan keys on ``valid == 1`` and would otherwise mistake the ``0``
+        middle dim for a partially-valid one and reject with a misleading
+        "contiguous row range" message.
+        """
+        before = _incore_cast_chain(shapes=[4, 8, 16], valid=[0, 0, 0], tensor_shape=[4, 8, 16])
+        after = passes.flatten_tile_nd_to_2d()(before)
+        after_func = after.get_function("cast_incore")
+        assert after_func is not None
+        loads = [c for c in _tile_calls(after_func.body) if c.op.name == "tile.load"]
+        assert loads, "expected a tile.load in the flattened body"
+        tile_type = loads[0].type
+        assert isinstance(tile_type, ir.TileType)
+        assert tile_type.tile_view is not None
+        valid = tile_type.tile_view.valid_shape
+        assert len(valid) == 2, f"expected a 2D valid_shape after flatten, got {len(valid)}"
+        # Zero rows: the empty region survives the ND -> 2D merge.
+        assert isinstance(valid[0], ir.ConstInt) and valid[0].value == 0
+
+    def test_partial_middle_dim_with_zero_outer_folds(self):
+        """A zero outer dim makes the region empty, so a partial middle dim is fine.
+
+        phys ``[4, 8, 16]`` with valid ``[0, 3, 16]``: dim 1 is partially valid, which
+        would normally be rejected, but dim 0 being ``0`` means the region is empty and
+        the product fold yields ``valid_row = 0`` regardless.
+        """
+        before = _incore_cast_chain(shapes=[4, 8, 16], valid=[0, 3, 16], tensor_shape=[4, 8, 16])
+        after = passes.flatten_tile_nd_to_2d()(before)
+        after_func = after.get_function("cast_incore")
+        assert after_func is not None
+        loads = [c for c in _tile_calls(after_func.body) if c.op.name == "tile.load"]
+        assert loads
+        tile_type = loads[0].type
+        assert isinstance(tile_type, ir.TileType)
+        assert tile_type.tile_view is not None
+        assert isinstance(tile_type.tile_view.valid_shape[0], ir.ConstInt)
+        assert tile_type.tile_view.valid_shape[0].value == 0
+
+    def test_stripmine_dynamic_outer_folds(self):
+        """Strip-mine ``[min(CHUNK, D-c), full, full]`` STILL folds (regression guard).
+
+        phys ``[16, 8, 512]`` with valid ``[S, 8, 512]``: the dynamic dim is the
+        outermost (the free row dim) and every following row dim is fully valid, so
+        the region is a contiguous row prefix. It merges to a 2D valid_shape whose
+        row extent stays dynamic (``S * 8``) and column stays 512.
+        """
+        s = _dyn("S")
+        # The dynamic outer dim ``s`` must appear in the tensor param shape so the
+        # hand-built free Var is a bound symbolic dimension (SSA-valid), mirroring
+        # test_static_physical_dynamic_valid_preserved.
+        before = _incore_cast_chain(shapes=[16, 8, 512], valid=[s, 8, 512], tensor_shape=[s, 8, 512])
+        after = passes.flatten_tile_nd_to_2d()(before)
+        after_func = after.get_function("cast_incore")
+        assert after_func is not None
+        loads = [c for c in _tile_calls(after_func.body) if c.op.name == "tile.load"]
+        assert loads, "expected a tile.load in the flattened body"
+        load_type = cast(ir.TileType, loads[0].type)
+        assert [cast(ir.ConstInt, d).value for d in load_type.shape] == [128, 512]
+        assert load_type.tile_view is not None
+        valid = load_type.tile_view.valid_shape
+        assert len(valid) == 2
+        # Row extent stays dynamic (S-derived), not reset to the physical 128.
+        assert not isinstance(valid[0], ir.ConstInt), f"merged valid row must stay dynamic, got {valid[0]}"
+        assert isinstance(valid[1], ir.ConstInt) and valid[1].value == 512
+
+    def test_fully_valid_nd_folds_to_full_2d(self):
+        """A fully-valid ND valid_shape folds to the full 2-D shape (regression guard).
+
+        phys ``[2, 3, 4]`` with valid ``[2, 3, 4]`` (fully valid) flattens to a 2D
+        ``[6, 4]`` tile that is still fully valid.
+        """
+        before = _incore_cast_chain(shapes=[2, 3, 4], valid=[2, 3, 4], tensor_shape=[2, 3, 4])
+        after = passes.flatten_tile_nd_to_2d()(before)
+        after_func = after.get_function("cast_incore")
+        assert after_func is not None
+        loads = [c for c in _tile_calls(after_func.body) if c.op.name == "tile.load"]
+        assert loads, "expected a tile.load in the flattened body"
+        load_type = cast(ir.TileType, loads[0].type)
+        assert [cast(ir.ConstInt, d).value for d in load_type.shape] == [6, 4]
+        # Fully valid: the effective valid extent equals the physical 2D shape.
+        eff_valid = load_type.get_effective_tile_view().valid_shape
+        assert [cast(ir.ConstInt, d).value for d in eff_valid] == [6, 4]
+
+
+class TestFlattenTileNdTo2DDistributedTensor:
+    """Distributed tensor GM endpoints follow the ordinary tensor flatten contract."""
+
+    def test_rank3_load_store_preserves_valid_partition(self):
+        """A rank-3 window load flattens to 2D and restores its ND store partition."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pld.DistributedTensor[[2, 3, 8], pl.FP32],
+                dst: pl.Out[pld.DistributedTensor[[2, 3, 8], pl.FP32]],
+            ) -> pld.DistributedTensor[[2, 3, 8], pl.FP32]:
+                src_tile = pl.load(src, [0, 0, 0], [2, 3, 8], valid_shapes=[1, 3, 8])
+                stored = pl.store(src_tile, [0, 0, 0], dst)
+                return stored
+
+        after = passes.flatten_tile_nd_to_2d()(Before)
+        kernel = after.get_function("kernel")
+        assert kernel is not None
+        body = cast(ir.SeqStmts, kernel.body)
+        calls = [
+            stmt.value
+            for stmt in body.stmts
+            if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call)
+        ]
+
+        load = next(call for call in calls if call.op.name == "tile.load")
+        assert isinstance(load.args[0].type, ir.DistributedTensorType)
+        load_type = cast(ir.TileType, load.type)
+        assert [cast(ir.ConstInt, dim).value for dim in load_type.shape] == [6, 8]
+        assert [cast(ir.ConstInt, dim).value for dim in load_type.get_effective_tile_view().valid_shape] == [
+            3,
+            8,
+        ]
+
+        store = next(call for call in calls if call.op.name == "tile.store")
+        assert isinstance(store.args[2].type, ir.DistributedTensorType)
+        assert isinstance(store.type, ir.DistributedTensorType)
+        assert len(store.args) == 4
+        partition = cast(ir.MakeTuple, store.args[3])
+        assert [cast(ir.ConstInt, dim).value for dim in partition.elements] == [1, 3, 8]
 
 
 # ----------------------------------------------------------------------------
@@ -1067,13 +1254,12 @@ class TestFlattenTileNdTo2DReshapedStore:
             ) -> pl.Tensor[[B, S, D], pl.FP32]:
                 # 2D tile.load is unchanged by the pass.
                 x_tile = pl.tile.load(x, [0, 0], [B, D], [B, D], target_memory=pl.Mem.Vec)
-                # The user's explicit rank-raising reshape is preserved.
-                r3 = pl.tile.reshape(x_tile, [B, 1, D])
-                # The pass-inserted ``tile.reshape`` flattens the >2D tile operand of
-                # ``tile.store`` back to 2D; codegen requires a 2D tile while the
-                # original 3D shape flows through as the ``shapes`` partition operand.
-                flat_tile = pl.tile.reshape(r3, [B, D])
-                out_0_1 = pl.tile.store(flat_tile, [0, 0, 0], out_0, [B, 1, D])
+                # The logical rank-raising reshape is emitted directly in its
+                # equivalent 2D representation; no >2D intermediate survives.
+                r3 = pl.tile.reshape(x_tile, [B, D])
+                # The original 3D validity still flows through as the explicit
+                # tensor partition consumed by tile.store codegen.
+                out_0_1 = pl.tile.store(r3, [0, 0, 0], out_0, [B, 1, D])
                 return out_0_1
 
             @pl.function
@@ -1084,6 +1270,49 @@ class TestFlattenTileNdTo2DReshapedStore:
 
         After = passes.flatten_tile_nd_to_2d()(Before)
         ir.assert_structural_equal(After, Expected)
+
+
+class TestFlattenTileNdTo2DViewRepresentability:
+    """View operations must either lower exactly or fail before PTO."""
+
+    def test_rank_dropping_tile_slice_becomes_subview_plus_reshape(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[4, 8], pl.FP32],
+                dst: pl.Out[pl.Tensor[[1, 4], pl.FP32]],
+            ) -> pl.Tensor[[1, 4], pl.FP32]:
+                loaded = pl.load(src, [0, 0], [4, 8])
+                col = pl.tile.slice(loaded, [4, 1], [0, 2], drop_dims=[1])
+                return pl.store(col, [0, 0], dst)
+
+        after = passes.flatten_tile_nd_to_2d()(Before)
+        fn = after.get_function("kernel")
+        assert fn is not None
+        calls = _tile_calls(fn.body)
+        slices = [c for c in calls if c.op.name == "tile.slice"]
+        assert len(slices) == 1
+        assert len(slices[0].args) == 4  # drop_dims was consumed by the pass
+        assert any(c.op.name == "tile.reshape" for c in calls)
+        assert all(len(cast(ir.TileType, c.type).shape) <= 2 for c in calls)
+
+    def test_standalone_nd_transpose_view_is_rejected(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[2, 3, 4], pl.FP32],
+                dst: pl.Out[pl.Tensor[[2, 4, 3], pl.FP32]],
+            ) -> pl.Tensor[[2, 4, 3], pl.FP32]:
+                loaded = pl.load(src, [0, 0, 0], [2, 3, 4])
+                viewed = pl.tile.transpose_view(loaded)
+                return pl.store(viewed, [0, 0, 0], dst)
+
+        with pytest.raises(ValueError, match="standalone tile.transpose_view on an ND tile"):
+            passes.flatten_tile_nd_to_2d()(Before)
 
 
 # ----------------------------------------------------------------------------
@@ -1542,6 +1771,196 @@ class TestFlattenTileNdTo2DBatchMatmul:
         expected_func = Expected.get_function("main_incore_0")
         assert expected_func is not None
         ir.assert_structural_equal(after_func, expected_func)
+
+    def test_batch_matmul_direct_store_uses_logical_partition_validity(self):
+        """A one-page batch matmul must not widen its partial M tail at store.
+
+        The old direct-store lowering emitted the physical partition [1, 4, 4]
+        even though the logical result is valid only over [1, 2, 4].
+        """
+
+        @pl.program
+        class ProgBatchMatmulDirectStoreValid:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                lhs: pl.Tensor[[1, 4, 8], pl.FP16],
+                rhs: pl.Tensor[[1, 8, 4], pl.FP16],
+                out_0: pl.Out[pl.Tensor[[1, 4, 4], pl.FP32]],
+            ) -> pl.Tensor[[1, 4, 4], pl.FP32]:
+                lhs_tile = pl.load(
+                    lhs,
+                    [0, 0, 0],
+                    [1, 4, 8],
+                    valid_shapes=[1, 2, 8],
+                    target_memory=pl.MemorySpace.Mat,
+                )
+                rhs_tile = pl.load(rhs, [0, 0, 0], [1, 8, 4], target_memory=pl.MemorySpace.Mat)
+                result = pl.tile.batch_matmul(lhs_tile, rhs_tile)
+                out_0 = pl.store(result, [0, 0, 0], out_0)
+                return out_0
+
+        func = self._flattened_incore(ProgBatchMatmulDirectStoreValid)
+        stores = [c for c in self._top_level_calls(func) if c.op.name == "tile.store"]
+        assert len(stores) == 1
+        assert len(stores[0].args) == 4
+        assert self._tuple_const_values(stores[0].args[3]) == [1, 2, 4]
+
+    def test_batch_matmul_direct_store_represents_partial_m_per_batch(self):
+        """A multi-page [B,m<M,N] tail is legal when fused into B partitions."""
+
+        @pl.program
+        class ProgBatchMatmulMultiPageTail:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                lhs: pl.Tensor[[2, 4, 8], pl.FP16],
+                rhs: pl.Tensor[[2, 8, 4], pl.FP16],
+                out_0: pl.Out[pl.Tensor[[2, 4, 4], pl.FP32]],
+            ) -> pl.Tensor[[2, 4, 4], pl.FP32]:
+                lhs_tile = pl.load(
+                    lhs,
+                    [0, 0, 0],
+                    [2, 4, 8],
+                    valid_shapes=[2, 2, 8],
+                    target_memory=pl.MemorySpace.Mat,
+                )
+                rhs_tile = pl.load(rhs, [0, 0, 0], [2, 8, 4], target_memory=pl.MemorySpace.Mat)
+                result = pl.tile.batch_matmul(lhs_tile, rhs_tile)
+                out_0 = pl.store(result, [0, 0, 0], out_0)
+                return out_0
+
+        func = self._flattened_incore(ProgBatchMatmulMultiPageTail)
+        stores = [c for c in self._top_level_calls(func) if c.op.name == "tile.store"]
+        assert len(stores) == 2
+        assert [self._tuple_const_values(c.args[3]) for c in stores] == [
+            [1, 2, 4],
+            [1, 2, 4],
+        ]
+
+    def test_batch_matmul_staging_restores_partial_n_validity(self):
+        """The non-fused assembly path restores the logical partial-N result.
+
+        Per-page matmuls are assembled into a physical [batch*M, N] staging
+        tile. The published value must be narrowed back to [batch*M, valid_N]
+        before a later consumer sees it.
+        """
+
+        @pl.program
+        class ProgBatchMatmulStagingValid:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                lhs: pl.Tensor[[2, 4, 8], pl.FP16],
+                rhs: pl.Tensor[[2, 8, 4], pl.FP16],
+                out_0: pl.Out[pl.Tensor[[2, 4, 4], pl.FP32]],
+            ) -> pl.Tensor[[2, 4, 4], pl.FP32]:
+                lhs_tile = pl.load(lhs, [0, 0, 0], [2, 4, 8], target_memory=pl.MemorySpace.Mat)
+                rhs_tile = pl.load(
+                    rhs,
+                    [0, 0, 0],
+                    [2, 8, 4],
+                    valid_shapes=[2, 8, 2],
+                    target_memory=pl.MemorySpace.Mat,
+                )
+                result = pl.tile.batch_matmul(lhs_tile, rhs_tile)
+                moved = pl.tile.move(result, target_memory=pl.MemorySpace.Vec)
+                out_0 = pl.store(moved, [0, 0, 0], out_0)
+                return out_0
+
+        func = self._flattened_incore(ProgBatchMatmulStagingValid)
+        calls = self._top_level_calls(func)
+        set_valid = [c for c in calls if c.op.name == "tile.set_validshape"]
+        assert len(set_valid) == 1
+        assert isinstance(set_valid[0].args[1], ir.ConstInt) and set_valid[0].args[1].value == 8
+        assert isinstance(set_valid[0].args[2], ir.ConstInt) and set_valid[0].args[2].value == 2
+
+        moves = [c for c in calls if c.op.name == "tile.move"]
+        # Two per-page Acc->Vec moves plus the user-authored final move.
+        final_move = moves[-1]
+        input_type = cast(ir.TileType, final_move.args[0].type)
+        assert [cast(ir.ConstInt, d).value for d in input_type.get_effective_tile_view().valid_shape] == [
+            8,
+            2,
+        ]
+
+    def test_batch_matmul_per_batch_reload_preserves_partial_tail(self):
+        """The non-contiguous per-batch reload path keeps explicit validity.
+
+        The RHS window cuts its matrix-row axis out of a larger tensor, forcing
+        per-batch GM loads. Those synthesized loads previously used physical
+        shape as validity and widened N from 2 to 4 at each direct store.
+        """
+
+        @pl.program
+        class ProgBatchMatmulPerBatchReloadValid:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                lhs: pl.Tensor[[2, 3, 2], pl.FP16],
+                rhs: pl.Tensor[[2, 4, 4], pl.FP16],
+                out_0: pl.Out[pl.Tensor[[2, 3, 4], pl.FP32]],
+            ) -> pl.Tensor[[2, 3, 4], pl.FP32]:
+                lhs_tile = pl.load(lhs, [0, 0, 0], [2, 3, 2], target_memory=pl.MemorySpace.Mat)
+                rhs_tile = pl.load(
+                    rhs,
+                    [0, 0, 0],
+                    [2, 2, 4],
+                    valid_shapes=[2, 2, 2],
+                    target_memory=pl.MemorySpace.Mat,
+                )
+                result = pl.tile.batch_matmul(lhs_tile, rhs_tile)
+                out_0 = pl.store(result, [0, 0, 0], out_0)
+                return out_0
+
+        func = self._flattened_incore(ProgBatchMatmulPerBatchReloadValid)
+        calls = self._top_level_calls(func)
+        per_batch_loads = [c for c in calls if c.op.name == "tile.load" and len(c.args) == 4]
+        assert len(per_batch_loads) >= 2
+        stores = [c for c in calls if c.op.name == "tile.store"]
+        assert len(stores) == 2
+        assert all(self._tuple_const_values(c.args[3]) == [1, 3, 2] for c in stores)
+
+    def test_distributed_batch_matmul_reloads_and_direct_stores(self):
+        """DTT endpoints use per-batch loads and retain rank-3 store partitions.
+
+        The RHS cuts a non-contiguous K window from a larger distributed tensor,
+        exercising both tensor-like load checks in the per-batch path. The fused
+        output stores then exercise the direct-store tensor-like check and must
+        keep the distributed result kind.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                lhs: pld.DistributedTensor[[2, 3, 2], pl.FP16],
+                rhs: pld.DistributedTensor[[2, 4, 4], pl.FP16],
+                out_0: pl.Out[pld.DistributedTensor[[2, 3, 4], pl.FP32]],
+            ) -> pld.DistributedTensor[[2, 3, 4], pl.FP32]:
+                lhs_tile = pl.load(lhs, [0, 0, 0], [2, 3, 2], target_memory=pl.MemorySpace.Mat)
+                rhs_tile = pl.load(
+                    rhs,
+                    [0, 0, 0],
+                    [2, 2, 4],
+                    valid_shapes=[2, 2, 2],
+                    target_memory=pl.MemorySpace.Mat,
+                )
+                result = pl.tile.batch_matmul(lhs_tile, rhs_tile)
+                out_0 = pl.store(result, [0, 0, 0], out_0)
+                return out_0
+
+        func = self._flattened_incore(Before)
+        calls = self._top_level_calls(func)
+        per_batch_loads = [call for call in calls if call.op.name == "tile.load" and len(call.args) == 4]
+        assert len(per_batch_loads) >= 2
+        assert all(isinstance(call.args[0].type, ir.DistributedTensorType) for call in per_batch_loads)
+
+        stores = [call for call in calls if call.op.name == "tile.store"]
+        assert len(stores) == 2
+        assert all(isinstance(call.type, ir.DistributedTensorType) for call in stores)
+        assert all(self._tuple_const_values(call.args[3]) == [1, 3, 2] for call in stores)
 
     def test_batch_matmul_noncontiguous_operand_reemits_per_batch_load(self):
         """A multi-batch operand whose load also cuts the matrix-row dim is
@@ -2601,16 +3020,16 @@ class TestNdTensorMatmulConversion:
                 h = f.param("h", ir.TensorType([16, 256], DataType.BF16))
                 w = f.param("w", ir.TensorType([1, 64, 256], DataType.BF16))
                 out_p = f.param(
-                    "out_0", ir.TensorType([16, 64], DataType.FP32), direction=ir.ParamDirection.Out
+                    "out_0", ir.TensorType([1, 16, 64], DataType.FP32), direction=ir.ParamDirection.Out
                 )
-                f.return_type(ir.TensorType([16, 64], DataType.FP32))
+                f.return_type(ir.TensorType([1, 16, 64], DataType.FP32))
 
                 y_acc = ib.let(
                     "y_acc",
                     tensor_ops.matmul(h, w, b_trans=True, out_dtype=DataType.FP32),
                 )
-                # Squeeze batch=1 result via assemble into 2D out_0.
-                # Use tensor.assemble with [0, 0] offset; flatten lowers to per-batch store.
+                # Keep the rank-3 result/target contract; rank reduction must be
+                # explicit rather than smuggled through tensor.assemble.
                 out_r = ib.let("out_0", tensor_ops.assemble(out_p, y_acc, [0, 0, 0]))
                 ib.return_stmt(out_r)
             prog.add_function(f.get_result())
@@ -2696,6 +3115,170 @@ class TestNdTensorMatmulConversion:
         assert "tile.batch_matmul_acc" not in names_flatten
         assert names_flatten.count("tile.matmul") == 1
         assert names_flatten.count("tile.matmul_acc") == 1
+
+
+class TestValidShapeConversionThenFlatten:
+    """Contextual tensor validity remains authoritative through both boundaries."""
+
+    @staticmethod
+    def _assert_expand(program: ir.Program, expected_valid: list[int], expand_op: str | None) -> None:
+        converted = passes.convert_tensor_to_tile_ops()(program)
+        flattened = passes.flatten_tile_nd_to_2d()(converted)
+        fn = flattened.get_function("kernel")
+        assert fn is not None
+        calls = TestFlattenTileNdTo2DBatchMatmulAcc._collect_calls_recursive(fn.body)
+        assert all(
+            len(cast(ir.TileType, c.type).shape) <= 2 for c in calls if isinstance(c.type, ir.TileType)
+        )
+        assert all(c.op.name != "tensor.expand_clone" for c in calls)
+        if expand_op is not None:
+            assert any(c.op.name == expand_op for c in calls)
+        stores = [c for c in calls if c.op.name == "tile.store"]
+        assert len(stores) == 1 and len(stores[0].args) == 4
+        store_type = cast(ir.TensorType, stores[0].type)
+        actual_valid = store_type.tensor_view.valid_shape if store_type.tensor_view else store_type.shape
+        assert [cast(ir.ConstInt, d).value for d in actual_valid] == expected_valid
+
+    def test_expand_clone_dim0_partial_nonbroadcast_axes(self):
+        @pl.program
+        class ExpandCloneDim0Partial:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[
+                    [1, 4, 8],
+                    pl.FP16,
+                    pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[1, 3, 6]),
+                ],
+                target: pl.Tensor[[2, 4, 8], pl.FP16],
+            ) -> pl.Tensor[
+                [2, 4, 8],
+                pl.FP16,
+                pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[2, 3, 6]),
+            ]:
+                result = pl.expand_clone(src, target)
+                return result
+
+        self._assert_expand(ExpandCloneDim0Partial, [2, 3, 6], None)
+
+    def test_expand_clone_dim1_partial_nonbroadcast_axes(self):
+        @pl.program
+        class ExpandCloneDim1Partial:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[
+                    [2, 1, 8],
+                    pl.FP16,
+                    pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[1, 1, 6]),
+                ],
+                target: pl.Tensor[[2, 4, 8], pl.FP16],
+            ) -> pl.Tensor[
+                [2, 4, 8],
+                pl.FP16,
+                pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[1, 4, 6]),
+            ]:
+                result = pl.expand_clone(src, target)
+                return result
+
+        self._assert_expand(ExpandCloneDim1Partial, [1, 4, 6], "tile.col_expand")
+
+    def test_expand_clone_dim2_partial_nonbroadcast_axes(self):
+        @pl.program
+        class ExpandCloneDim2Partial:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[
+                    [2, 4, 1],
+                    pl.FP16,
+                    pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[1, 3, 1]),
+                ],
+                target: pl.Tensor[[2, 4, 8], pl.FP16],
+            ) -> pl.Tensor[
+                [2, 4, 8],
+                pl.FP16,
+                pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[1, 3, 8]),
+            ]:
+                result = pl.expand_clone(src, target)
+                return result
+
+        self._assert_expand(ExpandCloneDim2Partial, [1, 3, 8], "tile.row_expand")
+
+    def test_contextual_slice_and_reshape_survive_flatten_recreation(self):
+        @pl.program
+        class ContextualViews:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[4, 8], pl.FP32],
+            ) -> pl.Tensor[
+                [8, 4],
+                pl.FP32,
+                pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[6, 4]),
+            ]:
+                sliced = pl.tensor.slice(src, [4, 8], [0, 0], valid_shape=[3, 8], pad_value=pl.PadValue.min)
+                reshaped = pl.tensor.reshape(sliced, [8, 4])
+                return reshaped
+
+        flattened = passes.flatten_tile_nd_to_2d()(passes.convert_tensor_to_tile_ops()(ContextualViews))
+        fn = flattened.get_function("kernel")
+        assert fn is not None
+        calls = TestFlattenTileNdTo2DBatchMatmulAcc._collect_calls_recursive(fn.body)
+        load = next(c for c in calls if c.op.name == "tile.load")
+        reshape = next(c for c in calls if c.op.name == "tile.reshape")
+        load_view = cast(ir.TileType, load.type).get_effective_tile_view()
+        reshape_view = cast(ir.TileType, reshape.type).get_effective_tile_view()
+        assert [cast(ir.ConstInt, d).value for d in load_view.valid_shape] == [3, 8]
+        assert load_view.pad == ir.PadValue.min
+        assert [cast(ir.ConstInt, d).value for d in reshape_view.valid_shape] == [6, 4]
+
+    def test_store_keeps_post_write_validity_after_flatten(self):
+        """Flattening must not replace a store's post-write type with its destination's old type."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[4, 8], pl.FP32],
+                target: pl.InOut[
+                    pl.Tensor[
+                        [8, 8],
+                        pl.FP32,
+                        pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[0, 0]),
+                    ]
+                ],
+            ) -> pl.Tensor[
+                [8, 8],
+                pl.FP32,
+                pl.TensorView(stride=[], layout=pl.TensorLayout.ND, valid_shape=[4, 8]),
+            ]:
+                chunk = pl.tensor.slice(src, [4, 8], [0, 0])
+                result = pl.tensor.assemble(target, chunk, [0, 0])
+                return result
+
+        flattened = passes.flatten_tile_nd_to_2d()(passes.convert_tensor_to_tile_ops()(Before))
+        fn = flattened.get_function("kernel")
+        assert fn is not None
+        body = cast(ir.SeqStmts, fn.body)
+        store_assign = next(
+            stmt
+            for stmt in body.stmts
+            if isinstance(stmt, ir.AssignStmt)
+            and isinstance(stmt.value, ir.Call)
+            and stmt.value.op.name == "tile.store"
+        )
+        store = cast(ir.Call, store_assign.value)
+
+        def valid_shape(type_: ir.Type) -> list[int]:
+            tensor_type = cast(ir.TensorType, type_)
+            assert tensor_type.tensor_view is not None
+            return [cast(ir.ConstInt, dim).value for dim in tensor_type.tensor_view.valid_shape]
+
+        assert valid_shape(store.args[2].type) == [0, 0]
+        assert valid_shape(store.type) == [4, 8]
+        assert valid_shape(store_assign.var.type) == [4, 8]
 
 
 # ----------------------------------------------------------------------------
@@ -2899,6 +3482,52 @@ class TestFlattenTileNdTo2DStandaloneTranspose:
         final_out_type = cast(ir.TileType, assembles[-1].type)
         assert final_out_type.shape == [16, 3]
 
+    def test_nd_transpose_preserves_partial_batch_and_matches_scratch_validity(self):
+        """A partial leading batch remains partial through the page unroll.
+
+        The second physical page is outside the logical batch tail. Its source
+        and scratch subviews must therefore both carry [0, 8], and the assembled
+        [16, 3] staging tile must be narrowed to the flattened logical [8, 3]
+        before store.
+        """
+
+        @pl.program
+        class ProgNdTransposePartialBatch:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[2, 3, 8], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[2, 8, 3], pl.FP32]],
+            ) -> pl.Tensor[[2, 8, 3], pl.FP32]:
+                x_tile = pl.tile.load(x, [0, 0, 0], [2, 3, 8], valid_shapes=[1, 3, 8])
+                xt_tile = pl.transpose(x_tile, axis1=1, axis2=2)
+                out_0 = pl.tile.store(xt_tile, [0, 0, 0], out_0)
+                return out_0
+
+        after = passes.flatten_tile_nd_to_2d()(ProgNdTransposePartialBatch)
+        func = after.get_function("main_incore_0")
+        assert func is not None
+        calls = self._all_calls(func)
+
+        transposes = [c for c in calls if c.op.name == "tile.transpose"]
+        assert len(transposes) == 2
+        tail_src = cast(ir.TileType, transposes[1].args[0].type)
+        tail_tmp = cast(ir.TileType, transposes[1].args[3].type)
+        src_valid = tail_src.get_effective_tile_view().valid_shape
+        tmp_valid = tail_tmp.get_effective_tile_view().valid_shape
+        assert [cast(ir.ConstInt, d).value for d in src_valid] == [0, 8]
+        assert [cast(ir.ConstInt, d).value for d in tmp_valid] == [0, 8]
+
+        set_valid = [c for c in calls if c.op.name == "tile.set_validshape"]
+        assert len(set_valid) == 1
+        assert isinstance(set_valid[0].args[1], ir.ConstInt) and set_valid[0].args[1].value == 8
+        assert isinstance(set_valid[0].args[2], ir.ConstInt) and set_valid[0].args[2].value == 3
+
+        stores = [c for c in calls if c.op.name == "tile.store"]
+        assert len(stores) == 1 and len(stores[0].args) == 4
+        partition = cast(ir.MakeTuple, stores[0].args[3]).elements
+        assert [cast(ir.ConstInt, d).value for d in partition] == [1, 8, 3]
+
     def test_2d_transpose_materializes_scratch(self):
         """A 2D ``transpose([3,8], 0, 1) -> [8,3]`` gains its pto.ttrans scratch here.
 
@@ -2946,6 +3575,34 @@ class TestFlattenTileNdTo2DStandaloneTranspose:
         # The scratch is a freshly created tile (shape == source page).
         creates = [c for c in calls if c.op.name == "tile.create"]
         assert any(cast(ir.TileType, c.type).shape == [3, 8] for c in creates)
+
+    def test_2d_transpose_preserves_result_and_scratch_validity(self):
+        """Scratch matches the source contract; the result keeps the swapped box."""
+
+        @pl.program
+        class ProgTwoDTransPartial:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[3, 8], pl.FP32],
+                out: pl.Out[pl.Tensor[[8, 3], pl.FP32]],
+            ) -> pl.Tensor[[8, 3], pl.FP32]:
+                x_tile = pl.load(x, [0, 0], [3, 8], valid_shapes=[2, 6])
+                xt = pl.transpose(x_tile, axis1=0, axis2=1)
+                return pl.store(xt, [0, 0], out)
+
+        after = passes.flatten_tile_nd_to_2d()(ProgTwoDTransPartial)
+        fn = after.get_function("kernel")
+        assert fn is not None
+        transposes = [c for c in _tile_calls(fn.body) if c.op.name == "tile.transpose"]
+        assert len(transposes) == 1
+        trans = transposes[0]
+        src_valid = cast(ir.TileType, trans.args[0].type).get_effective_tile_view().valid_shape
+        tmp_valid = cast(ir.TileType, trans.args[3].type).get_effective_tile_view().valid_shape
+        out_valid = cast(ir.TileType, trans.type).get_effective_tile_view().valid_shape
+        assert [cast(ir.ConstInt, d).value for d in src_valid] == [2, 6]
+        assert [cast(ir.ConstInt, d).value for d in tmp_valid] == [2, 6]
+        assert [cast(ir.ConstInt, d).value for d in out_valid] == [6, 2]
 
     def test_batch_axis_transpose_rejected(self):
         """Transposing a batch axis (axes not {ndim-2, ndim-1}) is a clear user error."""

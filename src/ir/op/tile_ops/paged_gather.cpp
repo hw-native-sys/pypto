@@ -27,7 +27,6 @@
  */
 
 #include <any>
-#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -35,8 +34,8 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
-#include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -58,6 +57,9 @@ static TypePtr DeduceTileGatherRowType(const std::vector<ExprPtr>& args,
   CHECK(dst_type->dtype_ == src_type->dtype_)
       << "The operator " << op_name << " requires dst and src to share dtype, but got "
       << dst_type->dtype_.ToString() << " and " << src_type->dtype_.ToString();
+  // src_offset is runtime-computed. Without a proof tying it to the source's
+  // valid prefix, a partial GM source could expose padding through the load.
+  CheckTensorInputFullyValid(src_type, op_name, "src", args[1]->span_);
 
   // DPS: the result is the destination accumulator, written in place.
   return dst_type;

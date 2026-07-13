@@ -75,6 +75,23 @@ program_tiled = convert_pass(program)
 
 InCore、Spmd、Group 函数在本阶段被跳过 —— 它们已在阶段一 / 二a 中被改写。
 
+## 有效区域保留边界
+
+原 tensor call 已推导出的结果类型是转换的语义契约。`ConversionContext.expected_result_type`
+把该契约传入 contextual converter；reshape、slice/rank reduction 及其他 shape-sensitive
+下沉会用相同的 dtype、物理 shape、effective `valid_shape` 与语义 pad 值重建 tile 结果
+（仅为 tile 的最小 rank-2 要求补前导物理单位轴）。当 tensor 结果部分有效时，converter
+不能接受 tile deducer 意外产生的全有效默认值。
+
+所有生成的 load 也受源 tensor effective validity 约束。入口与 matmul load 请求物理窗口，
+由 `tile.load` 与源有效区域求交；`tensor.assemble` 的 tensor-source staging 则显式传递
+effective valid extent。若该 tensor 分配在物理上大于 tile 目标的剩余窗口，转换会先证明
+有效传输能够容纳，再只 staging 目标容量；低 rank 源则在 `tile.assemble` 前通过显式单位轴
+右对齐。出口 `tile.store` 最终只传输 tile 的 effective 区域。当 `tensor.assemble` 直接下沉为
+GM `tile.store` 时，转换后的 call 还必须保留 tensor 层的结果契约，包括写入后扩大的 validity
+并集与 distributed window identity；不能让 store deducer 返回的旧目标类型把它重新缩窄。
+因此 Tensor → Tile → backend 的有效性保留是一条端到端契约，而不是三次互不相干的推导。
+
 ## MatmulSlice 模式
 
 当 `tensor.slice` 的结果被 `tensor.matmul` 或 `tensor.matmul_acc` 使用时，slice 必须生成 Mat 空间的 tile 而非 Vec 空间。本 pass 预扫描此模式，生成自然的 Mat `tile.load`；转置操作数（LHS 用 `a_trans`，RHS 用 `b_trans`）在 matmul 处叠加零拷贝 `tile.transpose_view`。
@@ -184,6 +201,7 @@ oi = pl.matmul(full, v, out_dtype=pl.FP32)               # Tensor，位于区域
 **约束**（由张量级类型推导器与 DSL 解析器施加,而非本 pass）：
 
 - **仅 2D** —— `UP_DOWN` / `LEFT_RIGHT` 仅在 2D 物理 tile 视图上有良定义；N 维操作数会被拒绝并给出 `pl.reshape` 到 2D 的提示（N 维张量会被展平为 `[product(leading), last]`,因此展平前的按行切分不会匹配下降实际取用的连续半块）。
+- **切分轴必须完全有效** —— 被选中的轴必须可证明在整个物理长度上都有效。部分有效的全局前缀会在两个固定半块上局部化成不同长度，而当前边界 ABI 只有一个共享结果类型，也没有让 `aic_gather` 重建该差异的全局有效长度操作数。因此，切分轴部分有效或符号相等性未知时会被拒绝；非切分轴仍可保持部分有效。
 - **仅区域内** —— `tensor.*` 形式只能经由 `pl.split_aiv` 区域到达（该区域提供切分模式）。已外联的低层 `pl.tile.aiv_shard(t, split=N)` 形式保持 tile-only；在该形式下传入 Tensor 操作数会被拒绝。
 - **拒绝分布式** —— `DistributedTensorType` 操作数超出范围（仅支持 AIV/AIC 切分）,在上游即被拒绝。
 

@@ -167,7 +167,15 @@ inline std::vector<ExprPtr> GetPrintedValidShape(const std::optional<TileView>& 
 /// `tile_view_` directly would lose layout information for implicit-view tiles.
 inline TileView GetEffectiveTileView(const TileType& tile_type) {
   if (tile_type.tile_view_.has_value()) {
-    return *tile_type.tile_view_;
+    TileView effective = *tile_type.tile_view_;
+    // D2 applies independently of the optional view itself: canonicalization
+    // may clear a redundant full valid_shape while retaining non-default
+    // layout/stride/pad metadata. Consumers of an *effective* view must still
+    // observe the physical shape as the valid extent in that representation.
+    if (effective.valid_shape.empty()) {
+      effective.valid_shape = tile_type.shape_;
+    }
+    return effective;
   }
   return GetImplicitTileView(tile_type.shape_, tile_type.memory_space_);
 }

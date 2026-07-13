@@ -640,11 +640,44 @@ def _subscript_slice_meta(
     return TensorMeta(shape=tuple(dims), dtype=src_meta.dtype)
 
 
+def _statement_calls_named_dep(stmt: ast.stmt, dep_name: str | None) -> bool:
+    """Whether a statement expression invokes ``dep_name`` anywhere below it."""
+    if dep_name is None:
+        return False
+    expr = stmt.value if isinstance(stmt, (ast.Assign, ast.AnnAssign, ast.Expr, ast.Return)) else None
+    return expr is not None and any(
+        isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == dep_name
+        for node in ast.walk(expr)
+    )
+
+
+def _walk_assignments_before_dep(
+    stmts: list[ast.stmt],
+    dep_name: str | None,
+    visit_assignment: Callable[[ast.expr, ast.expr], None],
+) -> bool:
+    """Visit source-order assignments, stopping before the first dependency call."""
+    for stmt in stmts:
+        if _statement_calls_named_dep(stmt, dep_name):
+            return True
+        # Descend into nested DSL scopes first so producers precede consumers.
+        for attr in ("body", "orelse", "finalbody"):
+            nested = getattr(stmt, attr, None)
+            if isinstance(nested, list) and _walk_assignments_before_dep(nested, dep_name, visit_assignment):
+                return True
+        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+            visit_assignment(stmt.targets[0], stmt.value)
+        elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+            visit_assignment(stmt.target, stmt.value)
+    return False
+
+
 def _extract_local_tensor_metas(
     func: Any,
     seed_meta: dict[str, TensorMeta] | None = None,
     seed_scalars: dict[str, int | float | bool] | None = None,
     caller_func_type: str = "orchestration",
+    stop_before_dep: str | None = None,
 ) -> dict[str, TensorMeta]:
     """Infer ``TensorMeta`` for the local tensor variables in ``func``'s body.
 
@@ -684,7 +717,10 @@ def _extract_local_tensor_metas(
     ``seed_scalars`` lets compile-time-specialized scalar parameters appear
     as shape dimensions. Anything not statically resolvable is skipped
     silently — the clear ``ValueError`` in ``Specializer._build_params`` then
-    fires for that variable.
+    fires for that variable. When ``stop_before_dep`` is set, the source-order
+    walk stops immediately before the first statement that calls that dependency;
+    this preserves the point-in-time metadata of same-name rebindings such as
+    ``y = reshape(y); y = dep(..., y); y = reshape(y)``.
     """
     func_def = _get_func_def(func)
     local: dict[str, TensorMeta] = dict(seed_meta or {})
@@ -841,6 +877,7 @@ def _extract_local_tensor_metas(
             # consumes a narrowed view (see examples/models/04_paged_attention.py).
             # If the parent dim is itself a DynDim, it propagates through.
             dims.append(v if v is not None else parent_dim)
+
         return TensorMeta(shape=tuple(dims), dtype=src_meta.dtype)
 
     dep_io = _scan_dep_io(func, caller_func_type)
@@ -857,41 +894,25 @@ def _extract_local_tensor_metas(
         "reshape": _reshape_meta,
     }
 
-    def _walk(stmts: list[ast.stmt]) -> None:
-        for stmt in stmts:
-            # Descend into nested DSL scopes (for / if / with / while) first so
-            # producers always run before their (same-or-deeper) consumers.
-            for attr in ("body", "orelse", "finalbody"):
-                sub = getattr(stmt, attr, None)
-                if isinstance(sub, list):
-                    _walk(sub)
-            # Single-target ``v = ...`` and annotated ``v: T = ...`` both bind a
-            # name we want to track (the latter is the common DSL style).
-            if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
-                target: ast.expr = stmt.targets[0]
-            elif isinstance(stmt, ast.AnnAssign):
-                target = stmt.target
-            else:
-                continue
-            value = stmt.value
-            named = target if isinstance(target, ast.Name) else None
-            meta: TensorMeta | None = None
-            # Subscript-slice sugar ``v = src[a:b, ...]`` (an ast.Subscript, not a
-            # pl.slice Call) is the documented equivalent of pl.slice; a tracked
-            # ``pl.<attr>(...)`` call dispatches through the handler table.
-            if isinstance(value, ast.Subscript) and named is not None:
-                meta = _subscript_slice_meta(value, local, _resolve_int)
-            elif isinstance(value, ast.Call):  # AnnAssign.value may be None
-                fn = value.func
-                if isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Name) and named is not None:
-                    handler = _pl_attr_handlers.get(fn.attr)
-                    meta = handler(value) if handler is not None else None
-                elif isinstance(fn, ast.Name) and fn.id in dep_io:
-                    _record_dep_result_metas(value, fn.id, target)
-            if meta is not None and named is not None:
-                local[named.id] = meta
+    def _record_assignment(target: ast.expr, value: ast.expr) -> None:
+        named = target if isinstance(target, ast.Name) else None
+        meta: TensorMeta | None = None
+        # Subscript-slice sugar ``v = src[a:b, ...]`` (an ast.Subscript, not a
+        # pl.slice Call) is the documented equivalent of pl.slice; a tracked
+        # ``pl.<attr>(...)`` call dispatches through the handler table.
+        if isinstance(value, ast.Subscript) and named is not None:
+            meta = _subscript_slice_meta(value, local, _resolve_int)
+        elif isinstance(value, ast.Call):
+            fn = value.func
+            if isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Name) and named is not None:
+                handler = _pl_attr_handlers.get(fn.attr)
+                meta = handler(value) if handler is not None else None
+            elif isinstance(fn, ast.Name) and fn.id in dep_io:
+                _record_dep_result_metas(value, fn.id, target)
+        if meta is not None and named is not None:
+            local[named.id] = meta
 
-    _walk(func_def.body)
+    _walk_assignments_before_dep(func_def.body, stop_before_dep, _record_assignment)
     return local
 
 
@@ -1023,8 +1044,16 @@ def _resolve_dep_call_metadata(
         seed_meta=caller_tensor_meta,
         seed_scalars=caller_scalar_values,
         caller_func_type=caller_func_type,
+        stop_before_dep=dep.__name__,
     )
-    all_tensor_meta = {**intermediate_metas, **caller_tensor_meta}
+    # `_extract_local_tensor_metas` is seeded with the parameter metadata and
+    # then follows source-order rebindings such as `y = pl.reshape(y, ...)`.
+    # A local rebinding must therefore shadow the parameter's original shape at
+    # a subsequent inline/dependency call. Merging in the opposite order hid
+    # that reshape and specialized the callee against the backing tensor's old
+    # shape, which made an otherwise valid flattened store target the wrong
+    # physical dimensions.
+    all_tensor_meta = {**caller_tensor_meta, **intermediate_metas}
 
     dep_tensor_meta: dict[str, TensorMeta] = {}
     dep_scalar_values: dict[str, int | float | bool] = {}

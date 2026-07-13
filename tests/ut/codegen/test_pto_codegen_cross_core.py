@@ -494,6 +494,34 @@ class TestCrossCoreTpushTpopCodegen:
         assert "v_col=?" in tpop_line
         assert "pto.alloc_tile" not in mlir_code
 
+    def test_tpop_rank1_valid_extent_is_column_operand(self):
+        """Logical [N] maps to PTO [1, N], so valid N must be v_col."""
+        span = ir.Span.unknown()
+        valid_n = ir.Var("valid_n", ir.ScalarType(pl.INDEX), span)
+        tile_view = ir.TileView(valid_shape=[valid_n])
+        tile_type = ir.TileType([64], pl.FP32, None, tile_view, ir.MemorySpace.Vec)
+        recv_tile = ir.Var("recv_tile", tile_type, span)
+        tpop_call = ir.Call(ir.Op("tile.tpop_from_aic"), [], {"split": 0}, tile_type, span)
+        body = ir.SeqStmts([ir.AssignStmt(recv_tile, tpop_call, span)], span)
+        func = ir.Function(
+            "dynamic_rank1_tpop",
+            [(valid_n, ir.ParamDirection.In)],
+            [],
+            body,
+            span,
+            ir.FunctionType.AIV,
+        )
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        mlir_code = codegen.PTOCodegen().generate(ir.Program([func], "dynamic_rank1_tpop_program", span))
+        tpop_line = next(line.strip() for line in mlir_code.splitlines() if "pto.tpop_from_aic" in line)
+
+        assert "pto.tpop_from_aic(%c1_index, %arg0) {split = 0}" in tpop_line
+        assert "rows=1, cols=64" in tpop_line
+        assert "v_row=?" in tpop_line
+        assert "v_col=?" in tpop_line
+
     def test_tpop_dynamic_valid_shape_keeps_static_counterpart_operand(self):
         """If one tpop valid_shape dim is dynamic, the other dim is still passed explicitly."""
         span = ir.Span.unknown()

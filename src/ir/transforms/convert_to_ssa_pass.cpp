@@ -486,7 +486,14 @@ class SSAConverter {
   StmtPtr ConvertAssign(const AssignStmtPtr& op) {
     auto val = SubstExpr(op->value_);
     auto key = op->var_.get();
-    auto var = AllocVersion(key, op->var_->GetType(), op->var_->span_);
+    // A plain alias may carry a type expression cloned before this function's
+    // parameter Vars were SSA-versioned (for example a cross-function dynamic
+    // return materializes ``tensor.dim(old_param)`` in the LHS annotation).
+    // The substituted RHS is the authoritative value at this program point and
+    // already carries the in-scope Var identities.  Using its type keeps alias
+    // metadata synchronized instead of reviving an out-of-scope clone.
+    const TypePtr& assigned_type = AsVarLike(val) ? val->GetType() : op->var_->GetType();
+    auto var = AllocVersion(key, assigned_type, op->var_->span_);
     auto result = MutableCopy(op);
     result->var_ = var;
     result->value_ = val;

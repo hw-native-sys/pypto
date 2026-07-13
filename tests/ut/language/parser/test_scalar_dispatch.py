@@ -91,6 +91,36 @@ class TestScalarMax:
         assert "pl.max(a, b)" in printed
         ir.assert_structural_equal(Before, pl.parse_program(printed))
 
+    def test_scalar_max_const_first(self):
+        """pl.max with a leading pl.const() reparses (regression).
+
+        The type-annotation printer emits an assemble-union / clamp ``valid_shape``
+        as ``pl.max(pl.const(0, pl.INDEX), tail)`` — the constant FIRST. ``pl.max``
+        must dispatch that to the scalar path exactly like ``pl.min`` already does;
+        before the fix the ``ConstInt``-first form fell through to the tile-reduction
+        path and raised ``'ConstInt' object has no attribute 'unwrap'`` on round-trip,
+        so a dynamic tile ``valid_shape`` could not survive the DSL round-trip
+        verification instrument.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                config: pl.Tensor[[2], pl.INT64],
+                out: pl.Tensor[[2, 16, 128], pl.FP32],
+            ) -> pl.Tensor[[2, 16, 128], pl.FP32]:
+                a: pl.Scalar[pl.INT64] = pl.tensor.read(config, [0])
+                c: pl.Scalar[pl.INT64] = pl.max(pl.const(0, pl.INT64), a)
+                _ = c + 1
+                return out
+
+        assert isinstance(Before, ir.Program)
+        printed = Before.as_python()
+        assert "pl.max(pl.const(0" in printed
+        ir.assert_structural_equal(Before, pl.parse_program(printed))
+
 
 class TestScalarCast:
     """Tests for pl.cast dispatching to scalar ir.cast."""

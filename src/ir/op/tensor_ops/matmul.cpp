@@ -94,6 +94,10 @@ TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args,
   // With transpose: lhs [K, M]^T x rhs [N, K]^T -> [M, N]
 
   std::vector<ExprPtr> output_shape;
+  // Output valid region. Matrix and batched matrix cases derive M/N/K validity;
+  // vector/dot cases still require fully-valid operands because their scalarized
+  // contraction result has no valid_shape representation.
+  std::optional<TensorView> out_view;
 
   if (lhs_shape.size() == 1 && rhs_shape.size() == 1) {
     // Vector x vector (dot product): [K] x [K] -> scalar (0D tensor)
@@ -142,6 +146,22 @@ TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args,
     }
 
     output_shape = {m_dim, n_dim};
+
+    // Propagate the valid region (4c logic): out_valid = [valid(A)[M], valid(B)[N]],
+    // mapping the transpose flags to the valid indices the same way as the shape axes.
+    // NEVER the full [M, N] — that would claim padding rows/cols carry real data. The
+    // PTO takes the contraction length from lhs.valid_K, so rhs.valid_K must be at
+    // least as large; otherwise the missing RHS rows feed padding into accumulation.
+    const std::vector<ExprPtr> lhs_valid = GetValidShape(lhs_type);
+    const std::vector<ExprPtr> rhs_valid = GetValidShape(rhs_type);
+    ExprPtr m_valid = a_trans ? lhs_valid[1] : lhs_valid[0];
+    ExprPtr k_lhs_valid = a_trans ? lhs_valid[0] : lhs_valid[1];
+    ExprPtr k_rhs_valid = b_trans ? rhs_valid[1] : rhs_valid[0];
+    ExprPtr n_valid = b_trans ? rhs_valid[0] : rhs_valid[1];
+    CheckMatMulValidKCompat(k_lhs_valid, k_rhs_valid, args[0]->span_, "tensor.matmul");
+    TensorView view;
+    view.valid_shape = {m_valid, n_valid};
+    out_view = std::move(view);
   } else {
     // For higher-dimensional tensors (both must have at least 2 dimensions),
     // use batched matmul semantics
@@ -180,9 +200,36 @@ TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args,
 
     output_shape.push_back(m_dim);
     output_shape.push_back(n_dim);
+
+    // Match tile.batch_matmul exactly: every physical batch page must be real,
+    // while M/N remain partial and K follows PTO's directional lhs<=rhs rule.
+    const std::vector<ExprPtr> lhs_valid = GetValidShape(lhs_type);
+    const std::vector<ExprPtr> rhs_valid = GetValidShape(rhs_type);
+    std::vector<ExprPtr> lhs_batch_valid(lhs_valid.begin(), lhs_valid.end() - 2);
+    std::vector<ExprPtr> rhs_batch_valid(rhs_valid.begin(), rhs_valid.end() - 2);
+    CheckBatchAxesFullyValid(lhs_batch, lhs_batch_valid, args[0]->span_, "tensor.matmul", "lhs");
+    CheckBatchAxesFullyValid(rhs_batch, rhs_batch_valid, args[1]->span_, "tensor.matmul", "rhs");
+
+    ExprPtr m_valid = a_trans ? lhs_valid[lhs_ndim - 1] : lhs_valid[lhs_ndim - 2];
+    ExprPtr k_lhs_valid = a_trans ? lhs_valid[lhs_ndim - 2] : lhs_valid[lhs_ndim - 1];
+    ExprPtr k_rhs_valid = b_trans ? rhs_valid[rhs_ndim - 1] : rhs_valid[rhs_ndim - 2];
+    ExprPtr n_valid = b_trans ? rhs_valid[rhs_ndim - 2] : rhs_valid[rhs_ndim - 1];
+    CheckMatMulValidKCompat(k_lhs_valid, k_rhs_valid, args[0]->span_, "tensor.matmul");
+    TensorView view;
+    view.valid_shape = broadcast_result.shape;
+    view.valid_shape.push_back(m_valid);
+    view.valid_shape.push_back(n_valid);
+    out_view = std::move(view);
   }
 
-  return std::make_shared<TensorType>(output_shape, out_dtype);
+  // Vector/dot cases contract an axis into a rank-0/1 result whose partial
+  // contraction validity is not representable here. Reject rather than widen.
+  if (!out_view.has_value()) {
+    CheckTensorInputFullyValid(lhs_type, "tensor.matmul", "lhs", args[0]->span_);
+    CheckTensorInputFullyValid(rhs_type, "tensor.matmul", "rhs", args[1]->span_);
+  }
+
+  return std::make_shared<TensorType>(output_shape, out_dtype, std::nullopt, std::move(out_view));
 }
 
 // ============================================================================
@@ -299,7 +346,36 @@ TypePtr DeduceTensorMatMulAccType(const std::vector<ExprPtr>& args,
     }
   }
 
-  return std::make_shared<TensorType>(acc_shape, result_dtype);
+  // Match tile.batch_matmul_acc: batch pages are provably full, while the
+  // matrix write rectangle [valid(lhs).M, valid(rhs).N] unions with acc at the
+  // origin. The shared union rejects a gap/L-shape instead of widening it.
+  const std::vector<ExprPtr> acc_valid = GetValidShape(acc_type);
+  const std::vector<ExprPtr> lhs_valid = GetValidShape(lhs_type);
+  const std::vector<ExprPtr> rhs_valid = GetValidShape(rhs_type);
+  std::vector<ExprPtr> acc_batch_valid(acc_valid.begin(), acc_valid.end() - 2);
+  std::vector<ExprPtr> lhs_batch_valid(lhs_valid.begin(), lhs_valid.end() - 2);
+  std::vector<ExprPtr> rhs_batch_valid(rhs_valid.begin(), rhs_valid.end() - 2);
+  CheckBatchAxesFullyValid(acc_batch, acc_batch_valid, args[0]->span_, "tensor.matmul_acc", "acc");
+  CheckBatchAxesFullyValid(lhs_batch, lhs_batch_valid, args[1]->span_, "tensor.matmul_acc", "lhs");
+  CheckBatchAxesFullyValid(rhs_batch, rhs_batch_valid, args[2]->span_, "tensor.matmul_acc", "rhs");
+
+  ExprPtr m_valid = a_trans ? lhs_valid[lhs_ndim - 1] : lhs_valid[lhs_ndim - 2];
+  ExprPtr k_lhs_valid = a_trans ? lhs_valid[lhs_ndim - 2] : lhs_valid[lhs_ndim - 1];
+  ExprPtr k_rhs_valid = b_trans ? rhs_valid[rhs_ndim - 1] : rhs_valid[rhs_ndim - 2];
+  ExprPtr n_valid = b_trans ? rhs_valid[rhs_ndim - 2] : rhs_valid[rhs_ndim - 1];
+  CheckMatMulValidKCompat(k_lhs_valid, k_rhs_valid, args[0]->span_, "tensor.matmul_acc");
+  std::vector<ExprPtr> written_valid = broadcast_result.shape;
+  written_valid.push_back(m_valid);
+  written_valid.push_back(n_valid);
+  auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, args[0]->span_);
+  std::vector<ExprPtr> zero_offset(acc_ndim, zero);
+  std::vector<ExprPtr> out_valid = ComputeAssembleUnionValidShape(
+      acc_valid, written_valid, zero_offset, acc_shape, args[0]->span_, "tensor.matmul_acc");
+  TensorView view;
+  view.valid_shape = std::move(out_valid);
+  std::optional<TensorView> out_view = std::move(view);
+
+  return std::make_shared<TensorType>(acc_shape, result_dtype, std::nullopt, std::move(out_view));
 }
 
 REGISTER_OP("tensor.matmul_acc")

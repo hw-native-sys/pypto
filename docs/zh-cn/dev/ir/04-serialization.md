@@ -125,11 +125,11 @@ assert len(restored.type.tile_view.valid_shape) == 2
 | ---- | ---- | -------- |
 | **Span** | Map | `filename`, `begin_line`, `begin_column`, `end_line`, `end_column` |
 | **ScalarType** | Map | `type_kind: "ScalarType"`, `dtype: 19` |
-| **TensorType** | Map | `type_kind`, `dtype`, `shape`, 可选 `memref` |
+| **TensorType** | Map | `type_kind`, `dtype`, `shape`, 可选 `memref`, 可选 `tensor_view` |
 | **TileType** | Map | `type_kind`, `dtype`, `shape`, 可选 `memref`, 可选 `tile_view` |
 | **Op/GlobalVar** | Map | `name`, `is_global_var` |
 
-### MemRef 和 TileView 格式
+### MemRef、TileView 和 TensorView 格式
 
 ```javascript
 // MemRef (optional field in TensorType/TileType)
@@ -144,12 +144,26 @@ assert len(restored.type.tile_view.valid_shape) == 2
 // TileView (optional field in TileType)
 {
   "tile_view": {
-    "valid_shape": [...], // Array of Expr nodes
+    "valid_shape": [...], // Array of Expr nodes（空表示完全有效）
     "stride": [...],      // Array of Expr nodes
-    "start_offset": {...} // Expr node
+    "start_offset": {...} // Expr node，未设置时为 nil（tile.load 只设置 valid_shape）
+    // ... blayout, slayout, fractal, pad
+  }
+}
+
+// TensorView (optional field in TensorType/DistributedTensorType)
+{
+  "tensor_view": {
+    "valid_shape": [...], // Array of Expr nodes（空表示完全有效）
+    "stride": [...],      // Array of Expr nodes
+    "layout": "ND",       // TensorLayout string
+    "pad": "null"         // PadValue string
   }
 }
 ```
+
+`nil` 的 `start_offset` 和缺失的 `valid_shape` 键都会反序列化为各自的未设置形式
+（null / 空），因此旧的 `.pto` 数据仍可正常读取。
 
 ### 带 Kwargs 的 Call
 

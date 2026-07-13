@@ -210,6 +210,53 @@ def test_invalid_undefined_var_in_tensor_view_valid_shape():
     assert any("n" in d.message for d in errors)
 
 
+def test_invalid_undefined_var_in_distributed_tensor_view_metadata():
+    """Undefined Vars in DTT valid_shape/stride metadata are diagnosed."""
+    span = ir.Span.unknown()
+    dim16 = ir.ConstInt(16, DataType.INDEX, span)
+    source_type = ir.DistributedTensorType([dim16, dim16], DataType.FP32)
+    source = ir.Var("source", source_type, span)
+
+    stale_valid = ir.Var("stale_valid", ir.ScalarType(DataType.INDEX), span)
+    stale_stride = ir.Var("stale_stride", ir.ScalarType(DataType.INDEX), span)
+    view = ir.TensorView([stale_stride, dim16], ir.TensorLayout.ND, [stale_valid, dim16])
+    result_type = ir.DistributedTensorType([dim16, dim16], DataType.FP32, None, view)
+    result = ir.Var("result", result_type, span)
+
+    body = ir.SeqStmts([ir.AssignStmt(result, source, span), ir.ReturnStmt([result], span)], span)
+    func = ir.Function("bad_dtt_metadata", [source], [source_type], body, span)
+    program = ir.Program([func], "prog", span)
+
+    errors = _errors(passes.PropertyVerifierRegistry.verify(_use_after_def_props(), program))
+    assert any("stale_valid" in diagnostic.message for diagnostic in errors)
+    assert any("stale_stride" in diagnostic.message for diagnostic in errors)
+
+
+def test_valid_distributed_param_type_vars_are_in_scope():
+    """DTT shape, valid_shape, and stride Vars are implicit signature definitions."""
+    span = ir.Span.unknown()
+    shape_var = ir.Var("shape_var", ir.ScalarType(DataType.INDEX), span)
+    valid_var = ir.Var("valid_var", ir.ScalarType(DataType.INDEX), span)
+    stride_var = ir.Var("stride_var", ir.ScalarType(DataType.INDEX), span)
+    dim64 = ir.ConstInt(64, DataType.INDEX, span)
+    view = ir.TensorView([stride_var, dim64], ir.TensorLayout.ND, [valid_var, dim64])
+    dist_type = ir.DistributedTensorType([shape_var, dim64], DataType.FP32, None, view)
+    data = ir.Var("data", dist_type, span)
+
+    partial = ir.Add(shape_var, valid_var, DataType.INDEX, span)
+    result = ir.Add(partial, stride_var, DataType.INDEX, span)
+    func = ir.Function(
+        "valid_dtt_metadata",
+        [data],
+        [ir.ScalarType(DataType.INDEX)],
+        ir.ReturnStmt([result], span),
+        span,
+    )
+    program = ir.Program([func], "prog", span)
+
+    assert len(_errors(passes.PropertyVerifierRegistry.verify(_use_after_def_props(), program))) == 0
+
+
 def test_valid_type_dynamic_var_in_param_shape():
     """Var in parameter's TensorType shape should not be flagged (type-dynamic)."""
     span = ir.Span.unknown()

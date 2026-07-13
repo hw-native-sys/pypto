@@ -52,7 +52,7 @@ TypePtr DeduceTileUnaryType(const std::vector<ExprPtr>& args,
   // Unary operations preserve shape, dtype, and the source tile's valid_shape (issue #1370).
   TileView tile_view;
   tile_view.valid_shape = GetValidShape(tile_type);
-  InheritTileViewLayout(tile_view, tile_type);
+  InheritFreshTileComputeLayout(tile_view, tile_type);
   return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt, tile_view);
 }
 
@@ -87,7 +87,7 @@ TypePtr DeduceTileRsqrtType(const std::vector<ExprPtr>& args,
 
   TileView tile_view;
   tile_view.valid_shape = GetValidShape(tile_type);
-  InheritTileViewLayout(tile_view, tile_type);
+  InheritFreshTileComputeLayout(tile_view, tile_type);
   return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt, tile_view);
 }
 
@@ -151,7 +151,7 @@ TypePtr DeduceTileCastType(const std::vector<ExprPtr>& args,
   // Cast preserves shape and the source tile's valid_shape; only dtype changes.
   TileView tile_view;
   tile_view.valid_shape = GetValidShape(tile_type);
-  InheritTileViewLayout(tile_view, tile_type);
+  InheritFreshTileComputeLayout(tile_view, tile_type);
   return std::make_shared<TileType>(tile_type->shape_, target_dtype, std::nullopt, tile_view);
 }
 
@@ -310,7 +310,7 @@ REGISTER_OP("tile.not")
           << tile_type->dtype_.ToString();
       TileView tile_view;
       tile_view.valid_shape = GetValidShape(tile_type);
-      InheritTileViewLayout(tile_view, tile_type);
+      InheritFreshTileComputeLayout(tile_view, tile_type);
       return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt, tile_view);
     });
 

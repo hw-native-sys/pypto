@@ -14,35 +14,25 @@
  * @brief Definitions of the pto_ops_detail shared codegen helper toolkit.
  */
 
-#include <algorithm>
-#include <array>
 #include <cstddef>
-#include <cstdint>
 #include <memory>
 #include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "pypto/backend/common/backend.h"
-#include "pypto/backend/common/backend_handler.h"
-#include "pypto/backend/common/pto_ops_common.h"
 #include "pypto/codegen/codegen_base.h"
-#include "pypto/codegen/distributed/comm_layout.h"
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/codegen/pto/pto_type_utils.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
-#include "pypto/ir/comm.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/tile_view_semantics.h"
-#include "pypto/ir/transforms/utils/memref_utils.h"
-#include "pypto/ir/transforms/utils/tile_conversion_utils.h"
 #include "pypto/ir/type.h"
 #include "src/backend/common/pto_ops_internal.h"
 
@@ -157,98 +147,46 @@ std::vector<std::string> GetSizeCodes(const std::vector<ir::ExprPtr>& exprs, cod
   return codes;
 }
 
-bool ExprsEquivalentForSubview(const ir::ExprPtr& lhs, const ir::ExprPtr& rhs) {
-  if (lhs.get() == rhs.get()) return true;
-  auto lhs_const = As<ir::ConstInt>(lhs);
-  auto rhs_const = As<ir::ConstInt>(rhs);
-  return lhs_const && rhs_const && lhs_const->value_ == rhs_const->value_;
-}
-
-codegen::TileTypeComponents InferSubviewTileTypeComponents(const ir::TileType& source_tile_type,
+codegen::TileTypeComponents InferSubviewTileTypeComponents(const ir::TileType& result_tile_type,
                                                            const ir::MakeTuple& shape_tuple,
-                                                           const ir::MakeTuple& offset_tuple,
                                                            const std::string& dtype_str) {
   codegen::TileTypeComponents c;
   c.dtype_str = dtype_str;
 
-  auto rows_const = As<ir::ConstInt>(shape_tuple.elements_[0]);
-  auto cols_const = As<ir::ConstInt>(shape_tuple.elements_[1]);
-  INTERNAL_CHECK(rows_const && cols_const) << "Subview shape must be static for PTO type inference";
-  c.rows = rows_const->value_;
+  INTERNAL_CHECK(shape_tuple.elements_.size() == 1 || shape_tuple.elements_.size() == 2)
+      << "Subview shape must have logical rank 1 or 2 before PTO type inference";
+  const bool rank_one_window = shape_tuple.elements_.size() == 1;
+  auto rows_const = rank_one_window ? nullptr : As<ir::ConstInt>(shape_tuple.elements_[0]);
+  auto cols_const = As<ir::ConstInt>(shape_tuple.elements_.back());
+  if (rank_one_window) {
+    c.rows = 1;
+  }
+  INTERNAL_CHECK((rank_one_window || rows_const) && cols_const)
+      << "Subview shape must be static for PTO type inference";
+  if (!rank_one_window) c.rows = rows_const->value_;
   c.cols = cols_const->value_;
 
-  const auto tv = ir::tile_view_semantics::GetEffectiveTileView(source_tile_type);
-  c.blayout = tv.blayout;
-  c.slayout = tv.slayout;
-  c.fractal = tv.fractal;
-  c.pad = tv.pad;
-
-  c.v_row = c.rows;
-  c.v_col = c.cols;
-  c.v_row_dynamic = true;
-  c.v_col_dynamic = true;
-
-  // PTOAS infers the subview result's static valid from the slice's `sizes`
-  // whenever the parent's static type string carries `v_row=?, v_col=?`.
-  // Non-subview tile types always render that way (see ExtractTileTypeInfo in
-  // pto_type_utils.cpp) — even when the IR's `tile_view_.valid_shape` is set —
-  // so reading the parent's IR valid here can diverge from PTOAS. The case
-  // that surfaces in practice is SplitVectorKernel's lane1 [0, 0] sentinel
-  // (set by WithZeroValidShape on cloned lane1 ops): the parent prints as `?`
-  // but its IR valid is `[0, 0]`, producing a `v_row=0, v_col=0` result that
-  // PTOAS rejects (issue #1507).
-  //
-  // Special-case only the all-zero sentinel; for every other narrow valid
-  // (e.g., parent subviews whose deducer propagated a real `v_row/v_col`)
-  // keep the existing inference so nested subviews still type correctly.
-  std::vector<ir::ExprPtr> source_valid = source_tile_type.shape_;
-  if (source_tile_type.tile_view_.has_value() && source_tile_type.tile_view_->valid_shape.size() >= 2) {
-    const auto& parent_valid = source_tile_type.tile_view_->valid_shape;
-    const bool is_zero_sentinel =
-        std::all_of(parent_valid.begin(), parent_valid.end(), [](const ir::ExprPtr& e) {
-          auto c = As<ir::ConstInt>(e);
-          return c && c->value_ == 0;
-        });
-    if (!is_zero_sentinel) {
-      source_valid = parent_valid;
-    }
-  }
-
-  auto infer_dim = [&](size_t dim_idx, int64_t size, int64_t* out_value, bool* out_dynamic) {
-    auto offset_const = As<ir::ConstInt>(offset_tuple.elements_[dim_idx]);
-    auto valid_const = dim_idx < source_valid.size() ? As<ir::ConstInt>(source_valid[dim_idx]) : nullptr;
-    if (offset_const && valid_const) {
-      int64_t remain = valid_const->value_ - offset_const->value_;
-      if (remain < 0) remain = 0;
-      *out_value = std::min<int64_t>(size, remain);
-      *out_dynamic = false;
-      return;
-    }
-    // offset=0 and slice shape matches the full source valid extent
-    if (offset_const && offset_const->value_ == 0 && dim_idx < source_valid.size() &&
-        ExprsEquivalentForSubview(shape_tuple.elements_[dim_idx], source_valid[dim_idx])) {
-      *out_value = size;
-      *out_dynamic = false;
-      return;
-    }
-    // Any valid offset leaves exactly `size` valid elements in this dimension,
-    // so v_row/v_col is statically known regardless of the offset value.
-    if (valid_const && valid_const->value_ >= size) {
-      *out_value = size;
-      *out_dynamic = false;
-      return;
-    }
-  };
-
-  infer_dim(0, c.rows, &c.v_row, &c.v_row_dynamic);
-  infer_dim(1, c.cols, &c.v_col, &c.v_col_dynamic);
-
-  // Match ExtractTileTypeInfo: PTOAS rejects mixed static/dynamic valid dims
-  // on 2D tiles, so promote both to dynamic when either is dynamic.
-  if (c.v_row_dynamic || c.v_col_dynamic) {
-    c.v_row_dynamic = true;
-    c.v_col_dynamic = true;
-  }
+  // The IR result type is the semantic source of truth. In particular, a
+  // clamp-derived valid extent may exist only in the result TileType and not as
+  // an explicit tile.slice operand, and a slice-specific pad policy belongs to
+  // the result view rather than the parent allocation. Re-inferring either from
+  // the source/offset here can diverge after type deduction already established
+  // the authoritative subview contract.
+  const auto result_view = ir::tile_view_semantics::GetEffectiveTileView(result_tile_type);
+  c.blayout = result_view.blayout;
+  c.slayout = result_view.slayout;
+  c.fractal = result_view.fractal;
+  c.pad = result_view.pad;
+  INTERNAL_CHECK(result_view.valid_shape.size() == 1 || result_view.valid_shape.size() == 2)
+      << "tile.slice result valid_shape must have logical rank 1 or 2";
+  const bool rank_one_result = result_view.valid_shape.size() == 1;
+  auto valid_row = rank_one_result ? nullptr : As<ir::ConstInt>(result_view.valid_shape[0]);
+  auto valid_col = As<ir::ConstInt>(result_view.valid_shape.back());
+  c.v_row = valid_row ? valid_row->value_ : c.rows;
+  if (rank_one_result) c.v_row = 1;
+  c.v_col = valid_col ? valid_col->value_ : c.cols;
+  c.v_row_dynamic = !rank_one_result && valid_row == nullptr;
+  c.v_col_dynamic = valid_col == nullptr;
   return c;
 }
 

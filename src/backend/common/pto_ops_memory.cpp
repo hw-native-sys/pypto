@@ -14,8 +14,6 @@
  * @brief PTO codegen registration for memory / tensor / array / SPMD ops.
  */
 
-#include <algorithm>
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -29,9 +27,7 @@
 
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_handler.h"
-#include "pypto/backend/common/pto_ops_common.h"
 #include "pypto/codegen/codegen_base.h"
-#include "pypto/codegen/distributed/comm_layout.h"
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/codegen/pto/pto_type_utils.h"
 #include "pypto/core/dtype.h"
@@ -41,7 +37,6 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/tile_view_semantics.h"
-#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/tile_conversion_utils.h"
 #include "pypto/ir/type.h"
 #include "src/backend/common/pto_ops_internal.h"
@@ -241,10 +236,15 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
   INTERNAL_CHECK_SPAN(tile_type, op->span_) << "tile.store first argument must have TileType";
   const auto tile_view = ir::tile_view_semantics::GetEffectiveTileView(*tile_type);
   const auto& valid_shape = tile_view.valid_shape;
-  INTERNAL_CHECK_SPAN(valid_shape.size() == 2, op->span_) << "tile.store tile valid_shape must be 2D";
+  INTERNAL_CHECK_SPAN(valid_shape.size() == 1 || valid_shape.size() == 2, op->span_)
+      << "tile.store tile valid_shape must be logical rank 1 or 2";
 
-  auto height_code = codegen.GetExprAsCode(valid_shape[0]);
-  auto width_code = codegen.GetExprAsCode(valid_shape[1]);
+  // PTO tile_buf is always physical [rows, cols]. A logical rank-1 tile [N]
+  // maps to [1, N], while its destination tensor partition remains rank-1.
+  auto one = std::make_shared<ir::ConstInt>(1, DataType::INDEX, op->span_);
+  const ir::ExprPtr& logical_valid_n = valid_shape.back();
+  auto height_code = codegen.GetExprAsCode(valid_shape.size() == 1 ? one : valid_shape[0]);
+  auto width_code = codegen.GetExprAsCode(logical_valid_n);
 
   auto output_tensor = AsVarLike(op->args_[2]);
   INTERNAL_CHECK_SPAN(output_tensor, op->span_) << "tile.store output_tensor must be a Var or IterArg";
@@ -263,30 +263,48 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
   std::string partition_type;
   const size_t tensor_rank = tensor_type->shape_.size();
 
-  // RFC #1300 P7: the IR's offsets / shapes are already in canonical
+  // RFC #1300 P7: the IR's offsets / valid partition extents are already in canonical
   // coordinates (matching the source TensorType's shape). No implicit
   // dn_swap here — the IR-level lowering passes (P6 + canonical TensorView)
   // are responsible for ensuring all coordinate systems match before codegen.
 
-  // Check if FlattenTileNdTo2D injected an explicit shapes tuple as args[3].
-  ir::MakeTuplePtr shapes_tuple;
+  // Check if FlattenTileNdTo2D injected an explicit original-rank valid
+  // partition tuple as args[3]. It describes what may be written, not the
+  // flattened tile's physical allocation capacity.
+  ir::MakeTuplePtr partition_valid_tuple;
   if (tensor_rank > 2 && op->args_.size() > 3) {
-    shapes_tuple = As<ir::MakeTuple>(op->args_[3]);
+    partition_valid_tuple = As<ir::MakeTuple>(op->args_[3]);
   }
 
-  if (shapes_tuple) {
-    // N-rank partition path: use the explicit shapes tuple from FlattenTileNdTo2D.
-    const auto& shape_elems = shapes_tuple->elements_;
+  if (partition_valid_tuple) {
+    // N-rank partition path: use the authoritative valid tuple from
+    // FlattenTileNdTo2D so a ragged tail is never widened at the DDR write.
+    const auto& valid_elems = partition_valid_tuple->elements_;
     const auto& offset_elems = offsets_tuple->elements_;
-    partition_type = MakePartitionTensorViewType(GetDimStrings(shape_elems), dtype_str);
+    partition_type = MakePartitionTensorViewType(GetDimStrings(valid_elems), dtype_str);
     partition_view = EmitPartitionViewPTO(output_tensor->name_hint_, tensor_view, tensor_view_type,
                                           partition_type, GetIndexOffsetCodes(offset_elems, codegen),
-                                          GetSizeCodes(shape_elems, codegen), codegen);
+                                          GetSizeCodes(valid_elems, codegen), codegen);
+  } else if (tensor_rank == 1) {
+    INTERNAL_CHECK_SPAN(offsets_tuple->elements_.size() == 1 && valid_shape.size() == 1, op->span_)
+        << "rank-1 tile.store requires one offset and a logical rank-1 tile";
+    std::string n_dim = "?";
+    if (auto n = As<ir::ConstInt>(logical_valid_n)) n_dim = std::to_string(n->value_);
+    partition_type = MakePartitionTensorViewType({n_dim}, dtype_str);
+    partition_view =
+        EmitPartitionViewPTO(output_tensor->name_hint_, tensor_view, tensor_view_type, partition_type,
+                             GetIndexOffsetCodes(offsets_tuple->elements_, codegen), {width_code}, codegen);
   } else {
-    // Standard 1D/2D path
+    // Standard rank-2 path.
+    INTERNAL_CHECK_SPAN(tensor_rank == 2 && offsets_tuple->elements_.size() == 2, op->span_)
+        << "rank-2 tile.store requires two offsets";
     std::string height_dim = "?", width_dim = "?";
-    if (auto h = As<ir::ConstInt>(valid_shape[0])) height_dim = std::to_string(h->value_);
-    if (auto w = As<ir::ConstInt>(valid_shape[1])) width_dim = std::to_string(w->value_);
+    if (valid_shape.size() == 1) {
+      height_dim = "1";
+    } else if (auto h = As<ir::ConstInt>(valid_shape[0])) {
+      height_dim = std::to_string(h->value_);
+    }
+    if (auto w = As<ir::ConstInt>(logical_valid_n)) width_dim = std::to_string(w->value_);
     partition_type = MakePartitionTensorViewType({height_dim, width_dim}, dtype_str);
     partition_view = EmitPartitionViewPTO(
         output_tensor->name_hint_, tensor_view, tensor_view_type, partition_type,
@@ -359,8 +377,8 @@ static std::string MakeTileMscatterCodegenPTO(const CallPtr& op, codegen::Codege
   auto output_tensor = AsVarLike(op->args_[2]);
   INTERNAL_CHECK(output_tensor) << "tile.mscatter output_tensor must be a Var or IterArg";
 
-  auto tensor_type = As<TensorType>(output_tensor->GetType());
-  INTERNAL_CHECK(tensor_type) << "tile.mscatter output_tensor must have TensorType";
+  auto tensor_type = AsTensorTypeLike(output_tensor->GetType());
+  INTERNAL_CHECK(tensor_type) << "tile.mscatter output_tensor must have TensorType or DistributedTensorType";
 
   std::string src_name = codegen.GetVarName(src);
   std::string idx_name = codegen.GetVarName(idx);

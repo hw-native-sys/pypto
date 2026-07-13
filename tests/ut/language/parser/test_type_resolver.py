@@ -1407,8 +1407,14 @@ class TestLayoutResolution:
         assert isinstance(result, ir.TensorType)
         assert len(result.shape) == 2
         assert result.dtype == DataType.FP16
-        assert result.tensor_view is not None
-        assert result.tensor_view.layout == expected_layout
+        if expected_layout == ir.TensorLayout.ND:
+            # ND is the implicit default: an explicit ND marker carries no
+            # information and canonicalizes to the bare form (no tensor_view),
+            # matching pl.Tensor[...] written without a layout marker.
+            assert result.tensor_view is None
+        else:
+            assert result.tensor_view is not None
+            assert result.tensor_view.layout == expected_layout
 
     def test_resolve_tensor_with_dn_layout_warns(self):
         """``pl.Tensor[..., pl.DN]`` shorthand is deprecated (RFC #1300 supp. 1).
@@ -1609,8 +1615,12 @@ class TestLayoutIntegration:
 
         param_type = func.params[0].type
         assert isinstance(param_type, ir.TensorType)
-        assert param_type.tensor_view is not None
-        assert param_type.tensor_view.layout == expected
+        if expected == ir.TensorLayout.ND:
+            # Explicit ND == the implicit default: canonicalizes to a bare view.
+            assert param_type.tensor_view is None
+        else:
+            assert param_type.tensor_view is not None
+            assert param_type.tensor_view.layout == expected
 
     def test_function_with_dn_layout_warns(self):
         """@pl.function with ``pl.DN`` shorthand emits ``DeprecationWarning``.
@@ -1722,16 +1732,18 @@ class TestTensorViewResolution:
     """Tests for TensorView resolution in Tensor type annotations."""
 
     def test_resolve_tensor_with_empty_tensorview(self):
-        """Tensor with TensorView() (all defaults) creates TensorType with empty tensor_view."""
+        """Tensor with TensorView() (all defaults) canonicalizes to a bare TensorType.
+
+        Under the unified valid_shape semantics a fully-default view (empty
+        stride, ND layout, empty valid_shape, null pad) carries no information
+        and collapses to no view — the same form as pl.Tensor[...] with no view.
+        """
         resolver = _make_resolver()
         node = ast.parse("pl.Tensor[[64, 128], pl.FP32, pl.TensorView()]", mode="eval").body
         result = resolver.resolve_type(node)
 
         assert isinstance(result, ir.TensorType)
-        assert result.tensor_view is not None
-        assert len(result.tensor_view.stride) == 0
-        assert len(result.tensor_view.valid_shape) == 0
-        assert result.tensor_view.layout == ir.TensorLayout.ND
+        assert result.tensor_view is None
 
     def test_resolve_tensor_with_tensorview_valid_shape(self):
         """TensorView with valid_shape creates correct tensor_view."""
@@ -1861,8 +1873,9 @@ class TestTensorViewResolution:
         result = resolver.resolve_type(node)
 
         assert isinstance(result, ir.TensorType)
-        assert result.tensor_view is not None
-        assert result.tensor_view.layout == ir.TensorLayout.ND
+        # The fully-default view (stride=[], ND) canonicalizes away; the MemRef
+        # is on the TensorType (independent of the view) and is preserved.
+        assert result.tensor_view is None
         assert result.memref is not None
 
 

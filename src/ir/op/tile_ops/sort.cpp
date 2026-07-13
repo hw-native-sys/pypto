@@ -30,6 +30,7 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
@@ -75,6 +76,12 @@ TypePtr DeduceTileSort32Type(const std::vector<ExprPtr>& args,
   CHECK(idx_type) << "The operator " << op_name << " requires second argument to be a TileType, but got "
                   << args[1]->GetType()->TypeName();
 
+  // Sorting can migrate padding into the valid region; only a fully-valid input has a
+  // well-defined sorted output. Reject a partial src rather than propagate a widened
+  // region.
+  CheckTileInputFullyValid(src_type, op_name, "src", args[0]->span_);
+  CheckTileInputFullyValid(idx_type, op_name, "idx", args[1]->span_);
+
   // Build output shape: double the last dimension for value-index pairs
   const auto& input_shape = src_type->shape_;
   CHECK(!input_shape.empty()) << "The operator " << op_name << " requires non-empty input shape";
@@ -92,7 +99,7 @@ TypePtr DeduceTileSort32Type(const std::vector<ExprPtr>& args,
 
   TileView tile_view;
   tile_view.valid_shape = output_shape;
-  InheritTileViewLayout(tile_view, src_type);
+  InheritFreshTileComputeLayout(tile_view, src_type);
   return std::make_shared<TileType>(output_shape, src_type->dtype_, std::nullopt, tile_view);
 }
 
@@ -150,12 +157,16 @@ TypePtr DeduceTileMrgSortType(const std::vector<ExprPtr>& args,
     CHECK(src_type->dtype_ == src0_type->dtype_)
         << "The operator " << op_name << " requires all src tiles to have matching dtype, but argument " << i
         << " has " << src_type->dtype_.ToString() << " (expected " << src0_type->dtype_.ToString() << ")";
+    // A partially-valid merge input would migrate padding into the merged run.
+    CheckTileInputFullyValid(src_type, op_name, "src" + std::to_string(i), args[i]->span_);
   }
+  CheckTileInputFullyValid(src0_type, op_name, "src0", args[0]->span_);
 
   // tmp workspace tile (last arg)
   auto tmp_type = As<TileType>(args[n_srcs]->GetType());
   CHECK(tmp_type) << "The operator " << op_name << " requires argument " << n_srcs
                   << " (tmp) to be a TileType, but got " << args[n_srcs]->GetType()->TypeName();
+  CheckTileInputFullyValid(tmp_type, op_name, "tmp", args[n_srcs]->span_);
 
   // kwarg: exhausted (bool, default false)
   [[maybe_unused]] bool exhausted = GetKwarg<bool>(kwargs, "exhausted", false);
@@ -163,7 +174,7 @@ TypePtr DeduceTileMrgSortType(const std::vector<ExprPtr>& args,
   // Output shape matches tmp tile (the merge destination buffer)
   TileView tile_view;
   tile_view.valid_shape = tmp_type->shape_;
-  InheritTileViewLayout(tile_view, src0_type);
+  InheritFreshTileComputeLayout(tile_view, src0_type);
   return std::make_shared<TileType>(tmp_type->shape_, src0_type->dtype_, std::nullopt, tile_view);
 }
 
@@ -225,10 +236,13 @@ TypePtr DeduceTileMrgSort1Type(const std::vector<ExprPtr>& args,
         << const_val->value_;
   }
 
+  // A partially-valid input would migrate padding into the merged run.
+  CheckTileInputFullyValid(src_type, op_name, "src", args[0]->span_);
+
   // Output shape matches src (merge destination has same dimensions as input)
   TileView tile_view;
   tile_view.valid_shape = src_type->shape_;
-  InheritTileViewLayout(tile_view, src_type);
+  InheritFreshTileComputeLayout(tile_view, src_type);
   return std::make_shared<TileType>(src_type->shape_, src_type->dtype_, std::nullopt, tile_view);
 }
 

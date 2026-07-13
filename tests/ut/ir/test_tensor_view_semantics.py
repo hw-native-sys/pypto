@@ -283,5 +283,110 @@ def test_compute_shape_product_dynamic_returns_minus_one():
     assert tvs.compute_shape_product([K, _const(8)]) == -1
 
 
+# ============================================================================
+# TensorType valid_shape canonicalization (unset valid_shape means fully valid)
+# ============================================================================
+#
+# ``docs/en/dev/ir/08-valid_shape.md``: an explicit
+# ``valid_shape`` equal to the physical shape carries no information and must
+# canonicalize to empty, so "unset" and "fully valid" share one in-memory form —
+# matching ``TileView``. When nothing else in the view is meaningful, the whole
+# view collapses to ``None`` (one canonical form per semantic state). A narrower
+# or dynamic ``valid_shape``, or a meaningful stride/layout/pad, is preserved.
+
+
+def _tensor_view(stride, layout=ir.TensorLayout.ND, valid_shape=None, pad=ir.PadValue.null):
+    return ir.TensorView(
+        stride=stride,
+        layout=layout,
+        valid_shape=valid_shape if valid_shape is not None else [],
+        pad=pad,
+    )
+
+
+def test_tensor_valid_shape_equal_to_shape_canonicalizes_to_empty():
+    """valid_shape == physical shape carries no info: the fully-default residual view
+    collapses to None and compares structurally-equal to the no-view TensorType."""
+    view = _tensor_view(stride=[], valid_shape=_shape(128, 128))
+    t = ir.TensorType(_shape(128, 128), DataType.FP32, None, view)
+    # Only valid_shape was set, and it matched shape -> nothing meaningful remains,
+    # so the whole view collapses to None (one in-memory form per semantic state).
+    assert t.tensor_view is None
+    no_view = ir.TensorType(_shape(128, 128), DataType.FP32)
+    assert ir.structural_equal(t, no_view)
+    assert ir.structural_hash(t) == ir.structural_hash(no_view)
+
+
+def test_tensor_narrower_valid_shape_preserved():
+    """A strictly narrower static valid_shape is real information — preserved."""
+    view = _tensor_view(stride=[], valid_shape=_shape(64, 128))
+    t = ir.TensorType(_shape(128, 128), DataType.FP32, None, view)
+    assert t.tensor_view is not None
+    assert _values_of(t.tensor_view.valid_shape) == [64, 128]
+    # Distinct from the fully-valid (no-view) form.
+    assert not ir.structural_equal(t, ir.TensorType(_shape(128, 128), DataType.FP32))
+
+
+def test_tensor_dynamic_valid_shape_preserved():
+    """A symbolic valid_shape dim is not statically equal to shape — preserved."""
+    valid_len = _sym("valid_len")
+    view = _tensor_view(stride=[], valid_shape=[valid_len, _const(128)])
+    t = ir.TensorType(_shape(128, 128), DataType.FP32, None, view)
+    assert t.tensor_view is not None
+    assert len(t.tensor_view.valid_shape) == 2
+    assert t.tensor_view.valid_shape[0] is valid_len
+
+
+def test_tensor_valid_shape_cleared_preserves_stride_layout_pad():
+    """When valid_shape == shape is cleared, meaningful stride / layout / pad on the
+    same TensorView survive (the whole view is NOT reset, unlike TileType)."""
+    view = _tensor_view(
+        stride=_stride(128, 1),
+        layout=ir.TensorLayout.DN,
+        valid_shape=_shape(128, 128),
+        pad=ir.PadValue.zero,
+    )
+    t = ir.TensorType(_shape(128, 128), DataType.FP32, None, view)
+    assert t.tensor_view is not None
+    assert list(t.tensor_view.valid_shape) == []  # redundant valid_shape dropped
+    assert _values_of(t.tensor_view.stride) == [128, 1]  # stride preserved
+    assert t.tensor_view.layout == ir.TensorLayout.DN  # layout preserved
+    assert t.tensor_view.pad == ir.PadValue.zero  # pad preserved
+
+
+def test_tile_type_collapses_whole_view_when_full():
+    """TileType drops the whole view when every field matches implicit semantics."""
+    tile_view = ir.TileView(valid_shape=_shape(128, 128), stride=[], start_offset=None)
+    tile = ir.TileType(_shape(128, 128), DataType.FP32, None, tile_view)
+    assert tile.tile_view is None
+
+
+def test_tile_full_valid_shape_cleared_preserves_nondefault_view_fields():
+    """A redundant full valid_shape is independent of other TileView metadata."""
+    start_offset = _const(7)
+    tile_view = ir.TileView(
+        valid_shape=_shape(128, 128),
+        stride=_stride(128, 1),
+        start_offset=start_offset,
+        blayout=ir.TileLayout.col_major,
+        slayout=ir.TileLayout.row_major,
+        fractal=1024,
+        pad=ir.PadValue.zero,
+    )
+    tile = ir.TileType(_shape(128, 128), DataType.FP32, None, tile_view, ir.MemorySpace.Vec)
+
+    assert tile.tile_view is not None
+    assert list(tile.tile_view.valid_shape) == []
+    assert _values_of(tile.tile_view.stride) == [128, 1]
+    assert _const_value(tile.tile_view.start_offset) == 7
+    assert tile.tile_view.blayout == ir.TileLayout.col_major
+    assert tile.tile_view.slayout == ir.TileLayout.row_major
+    assert tile.tile_view.fractal == 1024
+    assert tile.tile_view.pad == ir.PadValue.zero
+    # The stored field is canonical-empty, but D2 still makes the effective view
+    # fully valid for every consumer.
+    assert _values_of(tile.get_effective_tile_view().valid_shape) == [128, 128]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

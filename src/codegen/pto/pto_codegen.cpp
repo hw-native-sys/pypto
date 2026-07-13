@@ -119,6 +119,14 @@ std::pair<ExprPtr, ExprPtr> GetTileValidShapeExprs(const std::shared_ptr<const i
   }
 
   const auto& tile_view = *optional_tile_view;
+  if (tile_type->shape_.size() == 1 && tile_view.valid_shape.size() == 1) {
+    // Logical [N] tiles are PTO-physical [1, N]. Their sole dynamic valid
+    // extent is a column extent; the row extent is the implicit constant 1.
+    if (tile_view.valid_shape[0] && !As<ir::ConstInt>(tile_view.valid_shape[0])) {
+      valid_col_expr = tile_view.valid_shape[0];
+    }
+    return {valid_row_expr, valid_col_expr};
+  }
   if (tile_view.valid_shape.size() >= 1 && tile_view.valid_shape[0] &&
       !As<ir::ConstInt>(tile_view.valid_shape[0])) {
     valid_row_expr = tile_view.valid_shape[0];
@@ -1472,7 +1480,8 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   // We additionally propagate the base-ptr mapping so element-wise alias
   // consumers (pl.read / pl.write / store_scalar) resolve to the backing
   // pointer rather than the view SSA — as the IfStmt in-place-return path
-  // (VisitStmt_(IfStmtPtr)) does for merged tensors.
+  // (VisitStmt_(IfStmtPtr)) does for merged tensors. DistributedTensor aliases
+  // additionally retain the CommContext binding required by later remote ops.
   // Non-fatal: if the RHS has no registered view, fall through to the generic
   // handling rather than throwing eagerly on a view that may never be consumed.
   if (auto rhs_var = AsVarLike(op->value_)) {
@@ -1482,6 +1491,13 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
         BindTensorView(op->var_, view);
         BindVarToMlir(op->var_, view);  // view name == SSA name, as in ForStmt
         RegisterBasePtr(op->var_, GetTensorBasePtr(rhs_var));
+        if (ir::As<ir::DistributedTensorType>(op->var_->GetType())) {
+          const std::string ctx_ssa = GetCommCtxSSAFor(rhs_var.get());
+          INTERNAL_CHECK_SPAN(!ctx_ssa.empty(), op->span_)
+              << "Internal error: DistributedTensor alias '" << op->var_->name_hint_
+              << "' source has no CommContext binding";
+          RegisterCommCtxFor(op->var_, ctx_ssa);
+        }
         return;
       }
     }
@@ -1827,11 +1843,15 @@ std::pair<std::string, std::string> PTOCodegen::GetCurrentResultTpopValidShapeOp
   ExprPtr valid_row_expr;
   ExprPtr valid_col_expr;
   bool has_dynamic_valid_shape = false;
-  if (valid_shape.size() >= 1 && valid_shape[0]) {
+  const bool logical_rank_one = fs_.current_result_tile_type->shape_.size() == 1;
+  if (logical_rank_one && valid_shape.size() == 1 && valid_shape[0]) {
+    valid_col_expr = valid_shape[0];
+    has_dynamic_valid_shape = !As<ir::ConstInt>(valid_col_expr);
+  } else if (valid_shape.size() >= 1 && valid_shape[0]) {
     valid_row_expr = valid_shape[0];
     has_dynamic_valid_shape = !As<ir::ConstInt>(valid_row_expr);
   }
-  if (valid_shape.size() >= 2 && valid_shape[1]) {
+  if (!logical_rank_one && valid_shape.size() >= 2 && valid_shape[1]) {
     valid_col_expr = valid_shape[1];
     has_dynamic_valid_shape = has_dynamic_valid_shape || !As<ir::ConstInt>(valid_col_expr);
   }

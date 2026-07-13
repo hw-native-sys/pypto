@@ -22,27 +22,22 @@
 #include <optional>
 #include <sstream>
 #include <string>
-#include <string_view>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "pypto/backend/common/backend.h"
-#include "pypto/backend/common/backend_handler.h"
-#include "pypto/backend/common/pto_ops_common.h"
 #include "pypto/codegen/codegen_base.h"
-#include "pypto/codegen/distributed/comm_layout.h"
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/codegen/pto/pto_type_utils.h"
+#include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
-#include "pypto/ir/comm.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
-#include "pypto/ir/transforms/utils/tile_conversion_utils.h"
 #include "pypto/ir/type.h"
 #include "src/backend/common/pto_ops_internal.h"
 
@@ -124,11 +119,12 @@ static std::string MakeTileAssembleCodegenPTO(const CallPtr& op, codegen::Codege
 
   auto offset_tuple = ir::As<ir::MakeTuple>(op->args_[2]);
   INTERNAL_CHECK_SPAN(offset_tuple, op->span_) << "tile.assemble third argument must be a tuple (offset)";
-  INTERNAL_CHECK_SPAN(offset_tuple->elements_.size() >= 2, op->span_)
-      << "tile.assemble offset tuple must have at least 2 elements (row, col), got "
-      << offset_tuple->elements_.size();
-  std::string row_off = codegen.GetExprAsCode(offset_tuple->elements_[0]);
-  std::string col_off = codegen.GetExprAsCode(offset_tuple->elements_[1]);
+  INTERNAL_CHECK_SPAN(offset_tuple->elements_.size() == 1 || offset_tuple->elements_.size() == 2, op->span_)
+      << "tile.assemble offset tuple must have logical rank 1 or 2, got " << offset_tuple->elements_.size();
+  const bool rank_one_window = offset_tuple->elements_.size() == 1;
+  std::string row_off = rank_one_window ? codegen.GetOrEmitConstant(static_cast<int64_t>(0), DataType::INDEX)
+                                        : codegen.GetExprAsCode(offset_tuple->elements_[0]);
+  std::string col_off = codegen.GetExprAsCode(offset_tuple->elements_.back());
 
   // pto.subview is a view, so writing into the dst_view only affects the
   // [row, col]+sizes window.  Data outside that window must already be present
@@ -144,10 +140,11 @@ static std::string MakeTileAssembleCodegenPTO(const CallPtr& op, codegen::Codege
   // window, so source valid_shape < physical does not retain target data (plain
   // replace — DeduceTileAssembleType sets the result valid to the target's full
   // shape). Dynamic dims fall through to the guard below.
-  auto off_row_c = ir::As<ir::ConstInt>(offset_tuple->elements_[0]);
-  auto off_col_c = ir::As<ir::ConstInt>(offset_tuple->elements_[1]);
-  bool full_window_acc_to_mat = cross_space_acc_to_mat && off_row_c && off_col_c && off_row_c->value_ == 0 &&
-                                off_col_c->value_ == 0 &&
+  auto off_row_c = rank_one_window ? nullptr : ir::As<ir::ConstInt>(offset_tuple->elements_[0]);
+  auto off_col_c = ir::As<ir::ConstInt>(offset_tuple->elements_.back());
+  const bool zero_offset =
+      (rank_one_window || (off_row_c && off_row_c->value_ == 0)) && off_col_c && off_col_c->value_ == 0;
+  bool full_window_acc_to_mat = cross_space_acc_to_mat && zero_offset &&
                                 source_tile_type->shape_.size() == result_tile_type->shape_.size();
   for (size_t i = 0; full_window_acc_to_mat && i < source_tile_type->shape_.size(); ++i) {
     auto s = ir::As<ir::ConstInt>(source_tile_type->shape_[i]);
@@ -205,18 +202,22 @@ static std::string MakeTileAssembleCodegenPTO(const CallPtr& op, codegen::Codege
   // must be static when source valid_shape is static, and dynamic only when the
   // source valid_shape itself is dynamic.
   const auto& src_shape = source_tile_type->shape_;
-  INTERNAL_CHECK_SPAN(src_shape.size() >= 2, op->span_)
-      << "tile.assemble source must have at least 2 dimensions for pto.subview";
-  auto rows_const = ir::As<ir::ConstInt>(src_shape[0]);
-  auto cols_const = ir::As<ir::ConstInt>(src_shape[1]);
-  INTERNAL_CHECK_SPAN(rows_const && cols_const, op->span_)
+  INTERNAL_CHECK_SPAN(src_shape.size() == offset_tuple->elements_.size(), op->span_)
+      << "tile.assemble source and offset must have the same logical rank";
+  auto rows_const = rank_one_window ? nullptr : ir::As<ir::ConstInt>(src_shape[0]);
+  auto cols_const = ir::As<ir::ConstInt>(src_shape.back());
+  INTERNAL_CHECK_SPAN((rank_one_window || rows_const) && cols_const, op->span_)
       << "tile.assemble source shape must be compile-time constant for pto.subview sizes attribute";
+  const int64_t rows = rank_one_window ? 1 : rows_const->value_;
 
-  ir::ExprPtr valid_row_expr = src_shape[0];
-  ir::ExprPtr valid_col_expr = src_shape[1];
+  ir::ExprPtr valid_row_expr =
+      rank_one_window ? std::make_shared<ir::ConstInt>(1, DataType::INDEX, op->span_) : src_shape[0];
+  ir::ExprPtr valid_col_expr = src_shape.back();
   const auto src_valid = ir::tile_view_semantics::GetEffectiveTileView(*source_tile_type).valid_shape;
-  if (src_valid.size() >= 1 && src_valid[0]) valid_row_expr = src_valid[0];
-  if (src_valid.size() >= 2 && src_valid[1]) valid_col_expr = src_valid[1];
+  INTERNAL_CHECK_SPAN(src_valid.size() == src_shape.size(), op->span_)
+      << "tile.assemble source valid_shape must match its logical rank";
+  if (!rank_one_window && src_valid[0]) valid_row_expr = src_valid[0];
+  if (src_valid.back()) valid_col_expr = src_valid.back();
 
   auto valid_row_const = ir::As<ir::ConstInt>(valid_row_expr);
   auto valid_col_const = ir::As<ir::ConstInt>(valid_col_expr);
@@ -244,13 +245,15 @@ static std::string MakeTileAssembleCodegenPTO(const CallPtr& op, codegen::Codege
       codegen::ExtractTileTypeInfo(*source_tile_type, codegen.GetTypeString(source_tile_type->dtype_));
   auto view_memory_space = source_tile_type->memory_space_.value();
   if (cross_space_acc_to_mat) {
+    INTERNAL_CHECK_SPAN(result_tile_type->memory_space_.has_value(), op->span_)
+        << "tile.assemble Acc-to-Mat result must carry a memory space for pto.subview result typing";
     const int64_t window_rows = view_type_info.rows;
     const int64_t window_cols = view_type_info.cols;
     view_type_info =
         codegen::ExtractTileTypeInfo(*result_tile_type, codegen.GetTypeString(result_tile_type->dtype_));
     view_type_info.rows = window_rows;
     view_type_info.cols = window_cols;
-    view_memory_space = result_tile_type->memory_space_.value();
+    view_memory_space = *result_tile_type->memory_space_;
   }
   if (valid_row_const) {
     view_type_info.v_row = valid_row_const->value_;
@@ -268,8 +271,8 @@ static std::string MakeTileAssembleCodegenPTO(const CallPtr& op, codegen::Codege
 
   std::string dst_view = codegen.NewNamedTemp("assemble_view");
   std::ostringstream sv;
-  sv << dst_view << " = pto.subview " << dst << "[" << row_off << ", " << col_off << "] sizes ["
-     << rows_const->value_ << ", " << cols_const->value_ << "]";
+  sv << dst_view << " = pto.subview " << dst << "[" << row_off << ", " << col_off << "] sizes [" << rows
+     << ", " << cols_const->value_ << "]";
   sv << " valid [" << valid_rows << ", " << valid_cols << "]";
   if (!dst_type.empty() && !view_type.empty()) {
     sv << " : " << dst_type << " -> " << view_type;
@@ -904,72 +907,80 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
 
     auto source_tile_type = ir::As<ir::TileType>(op->args_[0]->GetType());
     INTERNAL_CHECK_SPAN(source_tile_type, op->span_) << "tile.slice source must be TileType";
+    auto result_tile_type = ir::As<ir::TileType>(op->GetType());
+    INTERNAL_CHECK_SPAN(result_tile_type, op->span_) << "tile.slice result must be TileType";
+    // pto.subview is a pure alias and requires an identical, null-pad tile
+    // configuration. This also turns a slice-specific pad_value into the clear
+    // fail-closed diagnostic promised by the IR deducer instead of silently
+    // dropping it from the emitted result type.
+    CheckSubviewTileCompat(*source_tile_type, *result_tile_type, "tile.slice");
 
     std::string src = codegen.GetExprAsCode(op->args_[0]);
     std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
 
     auto offset_tuple = ir::As<ir::MakeTuple>(op->args_[2]);
     INTERNAL_CHECK_SPAN(offset_tuple, op->span_) << "tile.slice third argument must be a tuple (offset)";
-    INTERNAL_CHECK_SPAN(offset_tuple->elements_.size() >= 2, op->span_)
-        << "tile.slice offset tuple must have at least 2 elements (row, col), got "
-        << offset_tuple->elements_.size();
-    std::string row_off = codegen.GetExprAsCode(offset_tuple->elements_[0]);
-    std::string col_off = codegen.GetExprAsCode(offset_tuple->elements_[1]);
+    INTERNAL_CHECK_SPAN(offset_tuple->elements_.size() == 1 || offset_tuple->elements_.size() == 2, op->span_)
+        << "tile.slice offset tuple must have logical rank 1 or 2, got " << offset_tuple->elements_.size();
+    const bool rank_one_window = offset_tuple->elements_.size() == 1;
+    std::string row_off = rank_one_window
+                              ? codegen.GetOrEmitConstant(static_cast<int64_t>(0), DataType::INDEX)
+                              : codegen.GetExprAsCode(offset_tuple->elements_[0]);
+    std::string col_off = codegen.GetExprAsCode(offset_tuple->elements_.back());
 
     auto shape_tuple = ir::As<ir::MakeTuple>(op->args_[1]);
     INTERNAL_CHECK_SPAN(shape_tuple, op->span_) << "tile.slice shape must be a literal tuple";
-    INTERNAL_CHECK_SPAN(shape_tuple->elements_.size() >= 2, op->span_)
-        << "tile.slice shape must have at least 2 elements (rows, cols)";
-    auto rows_const = ir::As<ir::ConstInt>(shape_tuple->elements_[0]);
-    auto cols_const = ir::As<ir::ConstInt>(shape_tuple->elements_[1]);
-    INTERNAL_CHECK_SPAN(rows_const && cols_const, op->span_)
+    INTERNAL_CHECK_SPAN(shape_tuple->elements_.size() == offset_tuple->elements_.size(), op->span_)
+        << "tile.slice shape and offset must have the same logical rank";
+    auto rows_const = rank_one_window ? nullptr : ir::As<ir::ConstInt>(shape_tuple->elements_[0]);
+    auto cols_const = ir::As<ir::ConstInt>(shape_tuple->elements_.back());
+    INTERNAL_CHECK_SPAN((rank_one_window || rows_const) && cols_const, op->span_)
         << "tile.slice shape must be compile-time constant for pto.subview sizes attribute";
+    const int64_t rows = rank_one_window ? 1 : rows_const->value_;
 
-    std::string valid_row;
-    std::string valid_col;
     // valid_shape is the optional 4th operand; an empty MakeTuple means "none"
     // (the form used when only drop_dims is supplied).
     auto valid_tuple = op->args_.size() >= 4 ? ir::As<ir::MakeTuple>(op->args_[3]) : nullptr;
     bool has_explicit_valid_shape = valid_tuple != nullptr && !valid_tuple->elements_.empty();
     if (has_explicit_valid_shape) {
       INTERNAL_CHECK_SPAN(valid_tuple, op->span_) << "tile.slice valid_shape must be a literal tuple";
-      INTERNAL_CHECK_SPAN(valid_tuple->elements_.size() >= 2, op->span_)
-          << "tile.slice valid_shape must have at least 2 elements";
-      valid_row = codegen.GetExprAsCode(valid_tuple->elements_[0]);
-      valid_col = codegen.GetExprAsCode(valid_tuple->elements_[1]);
+      INTERNAL_CHECK_SPAN(valid_tuple->elements_.size() == shape_tuple->elements_.size(), op->span_)
+          << "tile.slice valid_shape must match the slice window rank";
+    }
+
+    // The result type is authoritative. clamp=True and source-region
+    // intersection can derive a partial valid_shape without an explicit fourth
+    // operand; consulting only that operand silently widens such subviews.
+    const auto result_view = ir::tile_view_semantics::GetEffectiveTileView(*result_tile_type);
+    INTERNAL_CHECK_SPAN(result_view.valid_shape.size() == 1 || result_view.valid_shape.size() == 2, op->span_)
+        << "tile.slice result valid_shape must have logical rank 1 or 2";
+    const bool result_is_partial =
+        !ir::tile_view_semantics::ShapeExprListsEquivalent(result_view.valid_shape, result_tile_type->shape_);
+    const bool emit_valid_shape = has_explicit_valid_shape || result_is_partial;
+    std::string valid_row;
+    std::string valid_col;
+    if (emit_valid_shape) {
+      const bool rank_one_result = result_view.valid_shape.size() == 1;
+      valid_row = rank_one_result ? codegen.GetOrEmitConstant(static_cast<int64_t>(1), DataType::INDEX)
+                                  : codegen.GetExprAsCode(result_view.valid_shape[0]);
+      valid_col = codegen.GetExprAsCode(result_view.valid_shape.back());
     }
 
     std::string result_target = codegen.GetCurrentResultTarget();
     std::string result_type = codegen.GetCurrentResultTileBufTypeString();
     INTERNAL_CHECK_SPAN(!result_target.empty(), op->span_) << "tile.slice requires assignment target";
 
-    // tile.slice is always a pure pto.subview view of its source. The 4-arg
-    // form (explicit valid_shape) encodes the result valid into pto.subview's
-    // `valid [...]` clause; no pto.tmov / pto.set_validshape is emitted. This
+    // tile.slice is always a pure pto.subview view of its source. A partial
+    // result encodes its effective valid_shape in pto.subview's `valid [...]`
+    // clause, whether the narrowing was explicit or derived; no pto.tmov /
+    // pto.set_validshape is emitted. This
     // keeps tile.slice consistent with its set_output_memory_inherit_input
     // contract (the result MemRef shares the source base by design) and
     // avoids the alias corruption seen in #1622 where the previous
     // materializing path's pto.tmov destination overlapped the source
     // allocation when the slice offset was dynamic.
-    auto view_type_info = InferSubviewTileTypeComponents(*source_tile_type, *shape_tuple, *offset_tuple,
+    auto view_type_info = InferSubviewTileTypeComponents(*result_tile_type, *shape_tuple,
                                                          codegen.GetTypeString(source_tile_type->dtype_));
-    if (has_explicit_valid_shape) {
-      // User-supplied valid_shape takes precedence over inference. Each dim is
-      // honored independently: a ConstInt valid operand yields a static result
-      // dim, a dynamic operand yields a dynamic one. Do NOT promote both dims
-      // to dynamic when one is — for the explicit `valid [...]` form PTOAS
-      // reads each valid operand directly and requires the result tile_buf
-      // type's v_row/v_col to match per-dim (a static `valid_col` operand with
-      // a `v_col=?` result type is rejected: 'pto.subview' op expects result
-      // valid_shape[1] to match inferred/explicit valid_col). This mirrors
-      // tile.assemble's per-dim handling.
-      auto valid_row_const = ir::As<ir::ConstInt>(valid_tuple->elements_[0]);
-      auto valid_col_const = ir::As<ir::ConstInt>(valid_tuple->elements_[1]);
-      view_type_info.v_row_dynamic = valid_row_const == nullptr;
-      view_type_info.v_col_dynamic = valid_col_const == nullptr;
-      if (valid_row_const) view_type_info.v_row = valid_row_const->value_;
-      if (valid_col_const) view_type_info.v_col = valid_col_const->value_;
-    }
 
     INTERNAL_CHECK_SPAN(source_tile_type->memory_space_.has_value(), op->span_)
         << "tile.slice source must carry a memory space for pto.subview result typing";
@@ -981,9 +992,9 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
 
     std::string view_ssa = codegen.NewNamedTemp("slice_view");
     std::ostringstream oss;
-    oss << view_ssa << " = pto.subview " << src << "[" << row_off << ", " << col_off << "] sizes ["
-        << rows_const->value_ << ", " << cols_const->value_ << "]";
-    if (has_explicit_valid_shape) {
+    oss << view_ssa << " = pto.subview " << src << "[" << row_off << ", " << col_off << "] sizes [" << rows
+        << ", " << cols_const->value_ << "]";
+    if (emit_valid_shape) {
       oss << " valid [" << valid_row << ", " << valid_col << "]";
     }
     if (!src_type.empty() && !view_type.empty()) {

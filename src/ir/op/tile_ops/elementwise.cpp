@@ -31,11 +31,13 @@
 
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 
@@ -62,8 +64,16 @@ static ExprPtr MakeRoundUpIndex(const ExprPtr& value, int64_t alignment) {
   return MakeMul(MakeCeilDivIndex(value, alignment), MakeIndexConst(alignment, value->span_), value->span_);
 }
 
-static std::shared_ptr<TileType> MakePackedPredicateTileType(
-    const std::vector<ExprPtr>& logical_shape, const std::shared_ptr<const TileType>& source_tile_type) {
+// Build the packed-predicate mask TileType for tile.cmp / tile.cmps. ``logical_view``
+// carries the LOGICAL valid_shape (already agreed across the value operands by
+// DeduceBroadcastElementwiseTileView) and the inherited layout; this function packs
+// the col axis (ceil_div by 8, aligned) on both the physical shape and the valid
+// extent. The col-axis valid packing is applied to the AGREED logical valid, so the
+// rhs valid region of a 2-tile cmp participates (issue: previously only lhs was
+// consulted). ``logical_view.valid_shape`` has rank == ``logical_shape.size()``
+// (helper guarantee), so indexing ``col_axis`` is safe.
+static std::shared_ptr<TileType> MakePackedPredicateTileType(const std::vector<ExprPtr>& logical_shape,
+                                                             const TileView& logical_view) {
   INTERNAL_CHECK(!logical_shape.empty())
       << "tile.cmp/tile.cmps require a non-empty tile shape for packed predicate mask inference";
 
@@ -75,12 +85,9 @@ static std::shared_ptr<TileType> MakePackedPredicateTileType(
   mask_shape[col_axis] = MakeRoundUpIndex(
       MakeCeilDivIndex(logical_shape[col_axis], kA2A3PredicateBitsPerByte), kA2A3PredicateColAlignment);
 
-  auto logical_valid_shape = GetValidShape(source_tile_type);
-  TileView tile_view;
-  tile_view.valid_shape = logical_valid_shape;
+  TileView tile_view = logical_view;  // agreed logical valid_shape + inherited layout
   tile_view.valid_shape[col_axis] =
-      MakeCeilDivIndex(logical_valid_shape[col_axis], kA2A3PredicateBitsPerByte);
-  InheritTileViewLayout(tile_view, source_tile_type);
+      MakeCeilDivIndex(tile_view.valid_shape[col_axis], kA2A3PredicateBitsPerByte);
   return std::make_shared<TileType>(mask_shape, DataType::UINT8, std::nullopt, tile_view);
 }
 
@@ -95,7 +102,8 @@ TypePtr DeduceTileOpTileScalarTileType(const std::vector<ExprPtr>& args,
 
 TypePtr DeduceTileOpElementwiseBinaryType(const std::vector<ExprPtr>& args,
                                           const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                          const std::string& op_name, bool require_int = false) {
+                                          const std::string& op_name, bool require_int = false,
+                                          bool partial_combine = false) {
   CHECK(args.size() == 2) << "The operator " << op_name << " requires exactly 2 arguments, but got "
                           << args.size();
 
@@ -127,11 +135,34 @@ TypePtr DeduceTileOpElementwiseBinaryType(const std::vector<ExprPtr>& args,
                                   << FormatShape(tile_type1->shape_) << " and "
                                   << FormatShape(tile_type2->shape_);
 
-  // TODO(YunjiQin): assumes both src tiles have the same valid_shape; may need refinement
-  // for cases where lhs and rhs have different valid_shapes (e.g. after broadcasting).
   TileView tile_view;
-  tile_view.valid_shape = GetValidShape(tile_type1);
-  InheritTileViewLayout(tile_view, tile_type1);
+  if (partial_combine) {
+    // Partial-combine ops (tile.part_add/part_mul/part_max/part_min) copy whichever
+    // source is valid where only one is, so the result is valid wherever EITHER
+    // source is — the origin-anchored UNION of the two valid regions, NOT the
+    // strict agreement of true elementwise ops. Reuse the assemble-union rule with a
+    // zero offset (it rejects a non-representable L-shaped union per the North Star,
+    // and is symmetric in the two operands so operand order does not matter).
+    const std::vector<ExprPtr> src0_valid = LiftValidShapeForBroadcast(
+        tile_type1->shape_, GetValidShape(tile_type1), broadcast_result.shape, args[0]->span_, op_name);
+    const std::vector<ExprPtr> src1_valid = LiftValidShapeForBroadcast(
+        tile_type2->shape_, GetValidShape(tile_type2), broadcast_result.shape, args[0]->span_, op_name);
+    const std::vector<ExprPtr> zero_offset(broadcast_result.shape.size(),
+                                           std::make_shared<ConstInt>(0, DataType::INDEX, args[0]->span_));
+    tile_view.valid_shape = ComputeAssembleUnionValidShape(src0_valid, src1_valid, zero_offset,
+                                                           broadcast_result.shape, args[0]->span_, op_name);
+    if (auto layout_source = PickElementwiseLayoutSource(broadcast_result.shape, {tile_type1, tile_type2})) {
+      InheritFreshTileComputeLayout(tile_view, layout_source);
+    } else {
+      tile_view.blayout = tile_view_semantics::InferImplicitTileLayoutFromShape(broadcast_result.shape);
+    }
+  } else {
+    // True elementwise binary: operands must AGREE on their valid regions (Q2 —
+    // valid_shape never broadcasts); a broadcast operand is exempt in its broadcast
+    // dim and the layout comes from the shaping operand, not blindly from arg0.
+    tile_view = DeduceBroadcastElementwiseTileView(broadcast_result.shape, {tile_type1, tile_type2},
+                                                   args[0]->span_, op_name);
+  }
   return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
 }
 
@@ -158,11 +189,11 @@ TypePtr DeduceTileOpShiftBinaryType(const std::vector<ExprPtr>& args,
   auto broadcast_result = BroadcastShapes(tile_type1->shape_, tile_type2->shape_);
   CHECK(broadcast_result.success) << "The operator " << op_name << " requires compatible shapes";
 
-  // TODO(YunjiQin): assumes both src tiles have the same valid_shape; may need refinement
-  // for cases where lhs and rhs have different valid_shapes (e.g. after broadcasting).
-  TileView tile_view;
-  tile_view.valid_shape = GetValidShape(tile_type1);
-  InheritTileViewLayout(tile_view, tile_type1);
+  // Shift is elementwise (dst[i] = lhs[i] << rhs[i]): lhs and the shift-amount rhs
+  // must agree on their valid regions (Q2 — valid_shape never broadcasts). Result
+  // dtype is the lhs tile dtype (see below).
+  TileView tile_view = DeduceBroadcastElementwiseTileView(broadcast_result.shape, {tile_type1, tile_type2},
+                                                          args[0]->span_, op_name);
   return std::make_shared<TileType>(broadcast_result.shape, tile_type1->dtype_, std::nullopt, tile_view);
 }
 
@@ -187,7 +218,7 @@ TypePtr DeduceTileOpScalarBinaryType(const std::vector<ExprPtr>& args,
   // scalar operand is implicitly narrowed to match the tile dtype at runtime.
   TileView tile_view;
   tile_view.valid_shape = GetValidShape(tile_type);
-  InheritTileViewLayout(tile_view, tile_type);
+  InheritFreshTileComputeLayout(tile_view, tile_type);
   return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt, tile_view);
 }
 
@@ -217,7 +248,7 @@ TypePtr DeduceTileOpIntScalarBinaryType(const std::vector<ExprPtr>& args,
   // Result has the same shape and dtype as the input tile; the shift amount does not change element type.
   TileView tile_view;
   tile_view.valid_shape = GetValidShape(tile_type);
-  InheritTileViewLayout(tile_view, tile_type);
+  InheritFreshTileComputeLayout(tile_view, tile_type);
   return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt, tile_view);
 }
 
@@ -332,7 +363,8 @@ REGISTER_OP("tile.part_add")
     .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.part_add");
+      return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.part_add", /*require_int=*/false,
+                                               /*partial_combine=*/true);
     });
 
 REGISTER_OP("tile.part_mul")
@@ -345,7 +377,8 @@ REGISTER_OP("tile.part_mul")
     .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.part_mul");
+      return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.part_mul", /*require_int=*/false,
+                                               /*partial_combine=*/true);
     });
 
 REGISTER_OP("tile.part_max")
@@ -358,7 +391,8 @@ REGISTER_OP("tile.part_max")
     .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.part_max");
+      return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.part_max", /*require_int=*/false,
+                                               /*partial_combine=*/true);
     });
 
 REGISTER_OP("tile.part_min")
@@ -371,7 +405,8 @@ REGISTER_OP("tile.part_min")
     .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.part_min");
+      return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.part_min", /*require_int=*/false,
+                                               /*partial_combine=*/true);
     });
 
 REGISTER_OP("tile.fmod")
@@ -626,11 +661,10 @@ TypePtr DeduceTileOpTernaryType(const std::vector<ExprPtr>& args,
   auto broadcast_result = BroadcastShapes(tile_type1->shape_, tile_type2->shape_);
   CHECK(broadcast_result.success) << "The operator " << op_name << " requires compatible shapes";
 
-  // TODO(YunjiQin): assumes both src tiles have the same valid_shape; may need refinement
-  // for cases where lhs and rhs have different valid_shapes (e.g. after broadcasting).
-  TileView tile_view;
-  tile_view.valid_shape = GetValidShape(tile_type1);
-  InheritTileViewLayout(tile_view, tile_type1);
+  // Only args 0 and 1 are value tiles (arg 2 is scratch tmp) — they must AGREE on
+  // their valid regions (Q2 — valid_shape never broadcasts).
+  TileView tile_view = DeduceBroadcastElementwiseTileView(broadcast_result.shape, {tile_type1, tile_type2},
+                                                          args[0]->span_, op_name);
   return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
 }
 
@@ -661,11 +695,10 @@ TypePtr DeduceTileOpTriTileType(const std::vector<ExprPtr>& args,
   auto broadcast_result = BroadcastShapes(broadcast12.shape, tile_type3->shape_);
   CHECK(broadcast_result.success) << "The operator " << op_name << " requires compatible shapes";
 
-  // TODO(YunjiQin): assumes all src tiles have the same valid_shape; may need refinement
-  // for cases where tiles have different valid_shapes (e.g. after broadcasting).
-  TileView tile_view;
-  tile_view.valid_shape = GetValidShape(tile_type1);
-  InheritTileViewLayout(tile_view, tile_type1);
+  // All three tiles are real inputs — they must AGREE on their valid regions (Q2 —
+  // valid_shape never broadcasts).
+  TileView tile_view = DeduceBroadcastElementwiseTileView(
+      broadcast_result.shape, {tile_type1, tile_type2, tile_type3}, args[0]->span_, op_name);
   return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
 }
 
@@ -696,11 +729,10 @@ TypePtr DeduceTileOpTileScalarTileType(const std::vector<ExprPtr>& args,
   auto broadcast_result = BroadcastShapes(tile_type1->shape_, tile_type2->shape_);
   CHECK(broadcast_result.success) << "The operator " << op_name << " requires compatible shapes";
 
-  // TODO(YunjiQin): assumes both src tiles have the same valid_shape; may need refinement
-  // for cases where lhs and rhs tiles have different valid_shapes (e.g. after broadcasting).
-  TileView tile_view;
-  tile_view.valid_shape = GetValidShape(tile_type1);
-  InheritTileViewLayout(tile_view, tile_type1);
+  // The two value tiles (args 0 and 2; arg 1 is a scalar with no valid region) must
+  // AGREE on their valid regions (Q2 — valid_shape never broadcasts).
+  TileView tile_view = DeduceBroadcastElementwiseTileView(broadcast_result.shape, {tile_type1, tile_type2},
+                                                          args[0]->span_, op_name);
   return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
 }
 
@@ -733,7 +765,7 @@ TypePtr DeduceTileOpXorScalarType(const std::vector<ExprPtr>& args,
   // Result has the same shape and dtype as the input tile; bitwise ops do not change element type.
   TileView tile_view;
   tile_view.valid_shape = GetValidShape(tile_type);
-  InheritTileViewLayout(tile_view, tile_type);
+  InheritFreshTileComputeLayout(tile_view, tile_type);
   return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt, tile_view);
 }
 
@@ -886,11 +918,12 @@ TypePtr DeduceTileSelType(const std::vector<ExprPtr>& args,
                                   << FormatShape(tile_type1->shape_) << " and "
                                   << FormatShape(tile_type2->shape_);
 
-  // TODO(YunjiQin): assumes both src tiles have the same valid_shape; may need refinement
-  // for cases where lhs and rhs have different valid_shapes (e.g. after broadcasting).
-  TileView tile_view;
-  tile_view.valid_shape = GetValidShape(tile_type1);
-  InheritTileViewLayout(tile_view, tile_type1);
+  // The two value tiles (args 1 and 2) must AGREE on their valid regions (Q2 —
+  // valid_shape never broadcasts). The predicate mask (arg 0) and tmp scratch
+  // (arg 3) are excluded — the mask's valid columns are ceil_div-packed and cannot
+  // agree with a value tile.
+  TileView tile_view = DeduceBroadcastElementwiseTileView(broadcast_result.shape, {tile_type1, tile_type2},
+                                                          args[1]->span_, op_name);
   return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
 }
 
@@ -949,11 +982,10 @@ TypePtr DeduceTileSelScalarType(const std::vector<ExprPtr>& args,
                                   << FormatShape(tile_type1->shape_) << " and "
                                   << FormatShape(tile_type2->shape_);
 
-  // TODO(YunjiQin): assumes both src tiles have the same valid_shape; may need refinement
-  // for cases where lhs and rhs have different valid_shapes (e.g. after broadcasting).
-  TileView tile_view;
-  tile_view.valid_shape = GetValidShape(tile_type1);
-  InheritTileViewLayout(tile_view, tile_type1);
+  // The two value tiles (args 0 and 1; arg 2 is the scalar select mode) must AGREE
+  // on their valid regions (Q2 — valid_shape never broadcasts).
+  TileView tile_view = DeduceBroadcastElementwiseTileView(broadcast_result.shape, {tile_type1, tile_type2},
+                                                          args[0]->span_, op_name);
   return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
 }
 
@@ -1000,7 +1032,11 @@ TypePtr DeduceTileCmpType(const std::vector<ExprPtr>& args,
                        << " requires second argument to be a ScalarType, but got "
                        << args[1]->GetType()->TypeName();
 
-    return MakePackedPredicateTileType(tile_type1->shape_, tile_type1);
+    // Only the lhs tile has a valid region (rhs is scalar); the logical view is just
+    // its own valid_shape + layout, packed on the col axis by MakePackedPredicateTileType.
+    TileView logical_view =
+        DeduceBroadcastElementwiseTileView(tile_type1->shape_, {tile_type1}, args[0]->span_, op_name);
+    return MakePackedPredicateTileType(tile_type1->shape_, logical_view);
   } else {
     // Second argument must be TileType
     auto tile_type2 = As<TileType>(args[1]->GetType());
@@ -1012,7 +1048,12 @@ TypePtr DeduceTileCmpType(const std::vector<ExprPtr>& args,
                                     << FormatShape(tile_type1->shape_) << " and "
                                     << FormatShape(tile_type2->shape_);
 
-    return MakePackedPredicateTileType(broadcast_result.shape, tile_type1);
+    // Agree on the LOGICAL valid region across BOTH tiles first (Q2 — valid_shape
+    // never broadcasts); MakePackedPredicateTileType then packs the col axis. The
+    // rhs valid region now participates (previously only lhs was consulted).
+    TileView logical_view = DeduceBroadcastElementwiseTileView(
+        broadcast_result.shape, {tile_type1, tile_type2}, args[0]->span_, op_name);
+    return MakePackedPredicateTileType(broadcast_result.shape, logical_view);
   }
 }
 
@@ -1176,13 +1217,14 @@ REGISTER_OP("tile.fillpad_expand")
       }
 
       // After expand the entire destination tile is valid (the padding region is
-      // filled). Inherit the source layout; only the shape and pad change.
+      // filled). This is a fresh allocation: retain only production
+      // layout/fractal constraints, never source addressing or alias identity.
       TileView tile_view;
       tile_view.valid_shape = new_shape;
-      InheritTileViewLayout(tile_view, tile_type);
+      InheritFreshTileComputeLayout(tile_view, tile_type);
       tile_view.pad = pad_value;
-      return std::make_shared<TileType>(new_shape, tile_type->dtype_, tile_type->memref_, tile_view,
-                                        tile_type->memory_space_);
+      return std::make_shared<TileType>(new_shape, tile_type->dtype_, std::nullopt, tile_view,
+                                        MemorySpace::Vec);
     });
 
 }  // namespace ir

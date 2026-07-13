@@ -44,6 +44,7 @@
 
 #include <algorithm>
 #include <any>
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <string>
@@ -52,8 +53,8 @@
 #include <utility>
 #include <vector>
 
-#include "pypto/core/dtype.h"
-#include "pypto/core/error.h"
+#include "pypto/core/logging.h"
+#include "pypto/ir/core_affinity_kind.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -136,7 +137,7 @@ std::optional<MemorySpace> TileMemory(const TypePtr& type) {
 CallPtr MakeReshapeOpCall(const std::string& op_name, const ExprPtr& source, int split_int,
                           const Span& span) {
   std::vector<std::pair<std::string, std::any>> kwargs{{"split", std::any(split_int)}};
-  return OpRegistry::GetInstance().Create(op_name, {source}, std::move(kwargs), span);
+  return OpRegistry::GetInstance().Create(op_name, {source}, kwargs, span);
 }
 
 // Whether a region body already carries a user-authored explicit boundary op

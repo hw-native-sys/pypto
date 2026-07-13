@@ -79,6 +79,7 @@ __all__ = [
     "cast",
     "cmp",
     "set_validshape",
+    "valid_dim",
     "create_tile",
     "read",
     "write",
@@ -633,18 +634,90 @@ def slice(
     offset: Sequence[IntLike],
     valid_shape: Sequence[IntLike] | None = None,
     drop_dims: Sequence[int | _ir_core.Expr] | None = None,
+    *,
+    clamp: bool = False,
 ) -> T:
     """Slice operation, dispatched by input type.
 
     ``drop_dims`` lists axes to erase from the result type (numpy-style rank
     reduction); each must be a static unit dim of ``shape``. ``None`` / ``[]``
     drops nothing.
+
+    ``clamp=True`` is keyword-only and DERIVES the result's ``valid_shape`` by clipping the window to
+    the source's valid region (its physical shape when unset) at ``offset``, so a
+    ragged tail past the physical edge is computed rather than hand-threaded. It
+    never widens, intersects with an explicit ``valid_shape``, and suppresses the
+    static out-of-bounds check (clamping is the sanctioned way to slice past the
+    edge).
     """
     if isinstance(input, Tensor):
-        return _tensor.slice(input, shape, offset, valid_shape, drop_dims)
+        return _tensor.slice(input, shape, offset, valid_shape, drop_dims, clamp=clamp)
     if isinstance(input, Tile):
-        return _tile.slice(input, shape, offset, valid_shape, drop_dims)
+        return _tile.slice(input, shape, offset, valid_shape, drop_dims, clamp=clamp)
     raise TypeError(f"pl.slice: expected Tensor or Tile, got {type(input).__name__}")
+
+
+def valid_dim(input: Tensor | Tile, axis: int | _ir_core.ConstInt) -> Scalar:
+    """Return the valid extent of ``input`` along ``axis`` as a ``Scalar[INDEX]``.
+
+    This is a compile-time TYPE QUERY — no new IR op, binding, or codegen. Each
+    ``valid_shape[axis]`` is already an ``Expr`` on the operand's type (a
+    ``ConstInt``, a ``Var``, or a ``Call`` such as a runtime ``pl.min(...)``), so
+    ``valid_dim`` simply returns that ``Expr`` wrapped as a ``Scalar``. It lets a
+    kernel consume the ragged extent as a value, e.g. to divide a row-sum by the
+    valid column count::
+
+        vd = pl.valid_dim(t, 1)
+        mean = pl.div(row_sum, pl.cast(vd, pl.FP32))
+
+    Works for both ``Tensor`` and ``Tile`` operands. When the operand's
+    ``valid_shape`` is unset the dimension is fully valid (design decision D2), so
+    the physical extent is returned.
+
+    Args:
+        input: A runtime ``Tensor`` or ``Tile`` value.
+        axis: The dimension to query. Must be in ``[0, rank)`` — a negative index
+            (no numpy-style wrap-around, which would silently alias another
+            dimension) or an out-of-range index raises.
+
+    Returns:
+        A ``Scalar`` wrapping the valid extent expression along ``axis``.
+
+    Raises:
+        IndexError: If ``axis`` is negative or ``>= rank``.
+        TypeError: If ``input`` is not a Tensor/Tile or ``axis`` is not an int.
+    """
+    # The DSL parser wraps an int literal as a dtype-preserving ``ConstInt``;
+    # accept both the direct-API ``int`` and the parser's ``ConstInt``.
+    if isinstance(axis, _ir_core.ConstInt):
+        axis = int(axis.value)
+    if isinstance(axis, bool) or not isinstance(axis, int):
+        raise TypeError(f"pl.valid_dim: axis must be a compile-time int, got {type(axis).__name__}")
+
+    if isinstance(input, Tensor):
+        tensor_type = input.unwrap().type
+        assert isinstance(tensor_type, _ir_core.TensorType)
+        shape = list(tensor_type.shape)
+        view = tensor_type.tensor_view
+    elif isinstance(input, Tile):
+        tile_type = input.unwrap().type
+        assert isinstance(tile_type, _ir_core.TileType)
+        shape = list(tile_type.shape)
+        view = tile_type.tile_view
+    else:
+        raise TypeError(f"pl.valid_dim: expected Tensor or Tile, got {type(input).__name__}")
+
+    rank = len(shape)
+    if axis < 0 or axis >= rank:
+        raise IndexError(f"pl.valid_dim: axis {axis} out of range for a rank-{rank} operand")
+
+    # Unset (or defensively rank-mismatched) valid_shape means fully valid (D2) —
+    # fall back to the physical extent.
+    if view is not None and len(view.valid_shape) == rank:
+        extent = view.valid_shape[axis]
+    else:
+        extent = shape[axis]
+    return Scalar(expr=extent)
 
 
 def fillpad(value: T, pad_value: PadValue | int | float = PadValue.zero) -> T:
@@ -1035,14 +1108,20 @@ def create_tile(
     shape: list[int],
     dtype: DataType,
     target_memory: MemorySpace = MemorySpace.Vec,
+    *,
+    valid_shape: Sequence[IntLike] | None = None,
 ) -> Tile:
     """Create a tile at specific memory space.
 
     ``target_memory`` defaults to ``Vec`` to match the underlying
     ``tile.create`` wrapper — direct callers like
     ``pl.create_tile(shape, dtype)`` (omitting target_memory) keep working.
+
+    ``valid_shape`` (keyword-only) optionally narrows the initially-valid
+    sub-region (each dim in ``[0, shape]``; ``0`` is allowed for an empty
+    accumulator). When omitted, the tile is fully valid.
     """
-    return _tile.create(shape, dtype, target_memory)
+    return _tile.create(shape, dtype, target_memory, valid_shape=valid_shape)
 
 
 # ---------------------------------------------------------------------------
