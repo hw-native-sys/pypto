@@ -297,10 +297,11 @@ class PassPipeline {
   void AddPass(Pass pass);
   ProgramPtr Run(const ProgramPtr& program) const;  // executes passes in order
   std::vector<std::string> GetPassNames() const;
+  std::vector<Pass> GetPasses() const;
 };
 ```
 
-`PassPipeline` is a simple ordered list of passes. Each pass's `operator()` checks the active `PassContext` for instruments.
+`PassPipeline` is the single source of truth for ordered pass objects and their names. `GetPasses()` returns lightweight copies of the pass handles for inspection or composing another pipeline. Each pass's `operator()` checks the active `PassContext` for instruments.
 
 ### Automatic Verification
 
@@ -357,6 +358,7 @@ ir.compile(program, verification_level=ir.VerificationLevel.NONE)
 | `get_strategy(strategy)` | Get PassManager configured for strategy |
 | `run_passes(program, dump_ir, output_dir, prefix)` | Execute passes via PassPipeline |
 | `get_pass_names()` | Get names of all passes |
+| `passes` / `pass_names` | Read-only snapshots derived from the underlying PassPipeline |
 
 ### Usage
 

@@ -860,6 +860,15 @@ class PassPipeline {
    */
   [[nodiscard]] std::vector<std::string> GetPassNames() const;
 
+  /**
+   * @brief Get copies of the passes in execution order
+   *
+   * Pass is a lightweight shared handle, so returning a vector by value keeps
+   * the pipeline's ordered storage private while allowing callers to inspect or
+   * compose a new pipeline without maintaining a second pass list.
+   */
+  [[nodiscard]] std::vector<Pass> GetPasses() const;
+
  private:
   std::vector<Pass> passes_;
 };

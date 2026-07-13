@@ -41,6 +41,10 @@ class TestPassPipeline:
         pipeline.add_pass(passes.convert_to_ssa())
         pipeline.add_pass(passes.flatten_call_expr())
         assert pipeline.get_pass_names() == ["ConvertToSSA", "FlattenCallExpr"]
+        assert [pass_obj.get_name() for pass_obj in pipeline.get_passes()] == [
+            "ConvertToSSA",
+            "FlattenCallExpr",
+        ]
 
     def test_run_empty_pipeline(self):
         """Test running an empty pipeline returns the same program."""

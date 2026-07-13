@@ -323,6 +323,9 @@ class PassPipeline:
     def get_pass_names(self) -> list[str]:
         """Get names of all passes."""
 
+    def get_passes(self) -> list[Pass]:
+        """Get copies of all passes in execution order."""
+
 # Factory functions
 
 def init_mem_ref() -> Pass:

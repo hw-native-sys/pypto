@@ -184,6 +184,27 @@ class TestPassManagerBasics:
 
         assert captured == [False, True]
 
+    def test_pipeline_is_single_source_of_passes_and_names(self):
+        """PassManager views follow the C++ pipeline and cannot drift independently."""
+        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
+        original_names = pm.pass_names
+
+        names_snapshot = pm.pass_names
+        names_snapshot.pop()
+        assert pm.pass_names == original_names
+
+        shortened_pipeline = passes.PassPipeline()
+        for pass_obj in pm.passes[:2]:
+            shortened_pipeline.add_pass(pass_obj)
+        pm._pipeline = shortened_pipeline
+
+        assert pm.pass_names == original_names[:2]
+        assert [pass_obj.get_name() for pass_obj in pm.passes] == original_names[:2]
+        with pytest.raises(AttributeError):
+            setattr(pm, "pass_names", original_names)
+        with pytest.raises(AttributeError):
+            setattr(pm, "passes", ())
+
 
 class TestPassManagerExecution:
     """Test PassManager execution functionality."""

@@ -311,7 +311,8 @@ void BindPass(nb::module_& m) {
       .def(nb::init<>(), "Create an empty pipeline")
       .def("add_pass", &PassPipeline::AddPass, nb::arg("pass_obj"), "Add a pass to the pipeline")
       .def("run", &PassPipeline::Run, nb::arg("program"), "Execute all passes in sequence")
-      .def("get_pass_names", &PassPipeline::GetPassNames, "Get names of all passes");
+      .def("get_pass_names", &PassPipeline::GetPassNames, "Get names of all passes")
+      .def("get_passes", &PassPipeline::GetPasses, "Get copies of all passes in execution order");
 
   // Factory functions with snake_case names
   passes.def("init_mem_ref", &pass::InitMemRef,
