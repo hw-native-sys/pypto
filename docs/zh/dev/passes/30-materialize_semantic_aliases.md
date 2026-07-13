@@ -15,7 +15,8 @@ carried 的 `iter_arg`/`initValue` MemRef 沿 yield/producer 链向下传播来�
 
 本 pass 只处理**强制别名**。它从 [`MemoryReuse`](31-memory_reuse.md) 中拆出
 （原来是那个 pass 的 "Step 0"），以便机会性的生命周期复用可以被独立跳过 ——
-例如 `compile(memory_planner=MemoryPlanner.PTOAS)` 下由 ptoas 接管生命周期复用时。
+`MemoryPlanner.PTOAS` 下由 ptoas 接管规划，或 `MemoryPlanner.DSA` 下由独立 solver
+联合选择复用与 offset。
 
 **使用时机**：在 [`InitMemRef`](29-init_memref.md)（创建 MemRef）之后、
 [`MemoryReuse`](31-memory_reuse.md) 之前运行。它总是运行；只有机会性复用可跳过。
