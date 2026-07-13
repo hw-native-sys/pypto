@@ -1178,7 +1178,7 @@ class _BoolStrictCallConfig:
     def __init__(self) -> None:
         self.block_dim: Any = None
         self.aicpu_thread_num = 0
-        self.enable_dump_tensor = 0
+        self.enable_dump_args = 0
         self.enable_pmu = 0
         self.enable_scope_stats = False
         self.enable_l2_swimlane: Any = 0
