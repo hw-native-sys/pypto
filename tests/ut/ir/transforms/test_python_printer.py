@@ -324,12 +324,13 @@ class TestTileViewTensorViewPrinting:
         printed = "import pypto.language as pl\nresult = " + ir.python_print_type(tile_type)
         compile(printed, "<string>", "exec")  # must not raise SyntaxError
 
-    def test_tensorview_always_emitted_when_present(self):
+    def test_default_tensorview_canonicalizes_to_absent(self):
         tensor_view = ir.TensorView()  # all-default fields
         tensor_type = ir.TensorType([64], DataType.FP32, tensor_view=tensor_view)
 
         printed = ir.python_print_type(tensor_type)
-        assert "pl.TensorView()" in printed  # all-default fields must still be emitted
+        assert tensor_type.tensor_view is None
+        assert "pl.TensorView()" not in printed
 
     def test_tileview_tensorview_parseable_by_type_resolver(self):
         span = ir.Span.unknown()

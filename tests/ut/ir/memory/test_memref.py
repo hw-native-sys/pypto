@@ -399,7 +399,8 @@ class TestTileTypeWithMemRef:
         tile_type = ir.TileType(shape, DataType.FP16, memref, tile_view, ir.MemorySpace.Vec)
         assert tile_type.memref is not None
         assert tile_type.tile_view is not None
-        assert len(tile_type.tile_view.valid_shape) == 2
+        assert len(tile_type.tile_view.valid_shape) == 0
+        assert len(tile_type.get_effective_tile_view().valid_shape) == 2
 
     def test_tile_type_1d_with_memref(self):
         """Test 1D TileType with MemRef."""
@@ -548,7 +549,8 @@ class TestMemRefSerialization:
         assert isinstance(restored.type, ir.TileType)
         assert restored.type.memref is not None
         assert restored.type.tile_view is not None
-        assert len(restored.type.tile_view.valid_shape) == 2
+        assert len(restored.type.tile_view.valid_shape) == 0
+        assert len(restored.type.get_effective_tile_view().valid_shape) == 2
 
     def test_serialize_tensor_with_tensorview(self):
         """Test serializing TensorType with TensorView."""

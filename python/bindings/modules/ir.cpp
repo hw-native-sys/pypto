@@ -497,9 +497,9 @@ void BindIR(nb::module_& m) {
   tile_type_class.def(
       "get_effective_tile_view",
       [](const TileType& self) { return tile_view_semantics::GetEffectiveTileView(self); },
-      "Return the effective TileView: the stored tile_view if present, else the implicit "
-      "view derived from (shape, memory_space). An implicit view is stored as None under "
-      "canonicalization, so callers that need to inspect layout fields should use this.");
+      "Return an effective TileView copy. A stored view keeps its metadata while an empty "
+      "valid_shape expands to shape; an absent view uses the implicit fields derived from "
+      "(shape, memory_space). Callers needing semantic fields should use this method.");
   BindFields<TileType>(tile_type_class);
 
   // ArrayType - on-core fixed-size 1-D homogeneous array (C-stack local)

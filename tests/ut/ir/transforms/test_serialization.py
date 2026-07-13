@@ -18,6 +18,28 @@ import pytest
 from pypto import DataType, ir
 
 
+def _drop_fixmap_entries(payload: bytes, map_field: str, entries: list[bytes]) -> bytes:
+    """Remove fixed-size entries to model payloads written by older serializers."""
+    data = bytearray(payload)
+    map_header_offset = data.index(map_field.encode()) + len(map_field)
+    map_header = data[map_header_offset]
+    assert 0x80 <= map_header <= 0x8F
+
+    for entry in entries:
+        entry_offset = data.index(entry, map_header_offset + 1)
+        del data[entry_offset : entry_offset + len(entry)]
+
+    data[map_header_offset] = map_header - len(entries)
+    return bytes(data)
+
+
+def _round_trip_type(type_: ir.Type) -> ir.Type:
+    var = ir.Var("value", type_, ir.Span.unknown())
+    restored = cast(ir.Var, ir.deserialize(ir.serialize(var)))
+    ir.assert_structural_equal(var, restored, enable_auto_mapping=True)
+    return restored.type
+
+
 class TestBasicSerialization:
     """Tests for basic serialization of simple IR nodes."""
 
@@ -1021,6 +1043,146 @@ class TestTypeSerialization:
         assert restored_tensor_type.tensor_view.pad == ir.PadValue.zero
 
         ir.assert_structural_equal(var, restored_var, enable_auto_mapping=True)
+
+    def test_tensortype_without_view_survives_round_trip(self):
+        restored = _round_trip_type(ir.TensorType([16, 32], DataType.FP32))
+
+        assert isinstance(restored, ir.TensorType)
+        assert restored.tensor_view is None
+
+    def test_tensortype_explicit_full_view_round_trip_is_canonical(self):
+        tensor_type = ir.TensorType(
+            [16, 32],
+            DataType.FP32,
+            tensor_view=ir.TensorView(layout=ir.TensorLayout.ND, valid_shape=[16, 32]),
+        )
+        assert tensor_type.tensor_view is None
+
+        restored = _round_trip_type(tensor_type)
+        assert isinstance(restored, ir.TensorType)
+        assert restored.tensor_view is None
+
+    def test_tensortype_full_valid_shape_preserves_strided_padded_view(self):
+        tensor_type = ir.TensorType(
+            [16, 32],
+            DataType.FP32,
+            tensor_view=ir.TensorView(
+                stride=[64, 1],
+                layout=ir.TensorLayout.ND,
+                valid_shape=[16, 32],
+                pad=ir.PadValue.zero,
+            ),
+        )
+        assert tensor_type.tensor_view is not None
+        assert list(tensor_type.tensor_view.valid_shape) == []
+
+        restored = _round_trip_type(tensor_type)
+        assert isinstance(restored, ir.TensorType)
+        assert restored.tensor_view is not None
+        assert list(restored.tensor_view.valid_shape) == []
+        assert [cast(ir.ConstInt, dim).value for dim in restored.tensor_view.stride] == [64, 1]
+        assert restored.tensor_view.pad == ir.PadValue.zero
+
+    def test_tensortype_partial_symbolic_valid_shape_survives_round_trip(self):
+        span = ir.Span.unknown()
+        valid_rows = ir.Var("valid_rows", ir.ScalarType(DataType.INDEX), span)
+        tensor_type = ir.TensorType(
+            [16, 32],
+            DataType.FP32,
+            tensor_view=ir.TensorView(
+                layout=ir.TensorLayout.ND,
+                valid_shape=[valid_rows, 32],
+            ),
+        )
+
+        restored = _round_trip_type(tensor_type)
+        assert isinstance(restored, ir.TensorType)
+        assert restored.tensor_view is not None
+        assert isinstance(restored.tensor_view.valid_shape[0], ir.Var)
+        assert restored.tensor_view.valid_shape[0].name_hint == "valid_rows"
+
+    def test_tensortype_legacy_view_without_valid_shape_or_pad_deserializes(self):
+        tensor_type = ir.TensorType(
+            [16, 32],
+            DataType.FP32,
+            tensor_view=ir.TensorView(stride=[32, 1], layout=ir.TensorLayout.ND),
+        )
+        var = ir.Var("value", tensor_type, ir.Span.unknown())
+        payload = ir.serialize(var)
+        legacy_payload = _drop_fixmap_entries(
+            payload,
+            "tensor_view",
+            [b"\xabvalid_shape\x90", b"\xa3pad\xa4null"],
+        )
+
+        restored = cast(ir.Var, ir.deserialize(legacy_payload)).type
+        assert isinstance(restored, ir.TensorType)
+        assert restored.tensor_view is not None
+        assert list(restored.tensor_view.valid_shape) == []
+        assert restored.tensor_view.pad == ir.PadValue.null
+        assert [cast(ir.ConstInt, dim).value for dim in restored.tensor_view.stride] == [32, 1]
+
+    def test_tiletype_explicit_full_view_round_trip_is_canonical(self):
+        tile_type = ir.TileType(
+            [16, 32],
+            DataType.FP32,
+            tile_view=ir.TileView(valid_shape=[16, 32]),
+        )
+        assert tile_type.tile_view is None
+
+        restored = _round_trip_type(tile_type)
+        assert isinstance(restored, ir.TileType)
+        assert restored.tile_view is None
+
+    def test_tiletype_without_view_survives_round_trip(self):
+        restored = _round_trip_type(ir.TileType([16, 32], DataType.FP32))
+
+        assert isinstance(restored, ir.TileType)
+        assert restored.tile_view is None
+
+    def test_tiletype_full_valid_shape_preserves_view_metadata(self):
+        tile_type = ir.TileType(
+            [16, 32],
+            DataType.FP32,
+            tile_view=ir.TileView(
+                valid_shape=[16, 32],
+                stride=[64, 2],
+                start_offset=3,
+                blayout=ir.TileLayout.col_major,
+                slayout=ir.TileLayout.row_major,
+                fractal=1024,
+                pad=ir.PadValue.max,
+            ),
+        )
+        assert tile_type.tile_view is not None
+        assert list(tile_type.tile_view.valid_shape) == []
+
+        restored = _round_trip_type(tile_type)
+        assert isinstance(restored, ir.TileType)
+        assert restored.tile_view is not None
+        assert list(restored.tile_view.valid_shape) == []
+        assert [cast(ir.ConstInt, dim).value for dim in restored.tile_view.stride] == [64, 2]
+        assert cast(ir.ConstInt, restored.tile_view.start_offset).value == 3
+        assert restored.tile_view.blayout == ir.TileLayout.col_major
+        assert restored.tile_view.slayout == ir.TileLayout.row_major
+        assert restored.tile_view.fractal == 1024
+        assert restored.tile_view.pad == ir.PadValue.max
+
+    def test_tiletype_partial_symbolic_valid_shape_with_null_offset_round_trip(self):
+        span = ir.Span.unknown()
+        valid_rows = ir.Var("valid_rows", ir.ScalarType(DataType.INDEX), span)
+        tile_type = ir.TileType(
+            [16, 32],
+            DataType.FP32,
+            tile_view=ir.TileView(valid_shape=[valid_rows, 32], start_offset=None),
+        )
+
+        restored = _round_trip_type(tile_type)
+        assert isinstance(restored, ir.TileType)
+        assert restored.tile_view is not None
+        assert restored.tile_view.start_offset is None
+        assert isinstance(restored.tile_view.valid_shape[0], ir.Var)
+        assert restored.tile_view.valid_shape[0].name_hint == "valid_rows"
 
     def test_tiletype_with_memref_and_memory_space(self):
         """TileType with both memref and memory_space preserves both."""

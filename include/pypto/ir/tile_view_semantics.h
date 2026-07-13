@@ -160,14 +160,17 @@ inline std::vector<ExprPtr> GetPrintedValidShape(const std::optional<TileView>& 
   return shape;
 }
 
-/// Return the effective TileView for a TileType: the stored explicit view if
-/// present, else the implicit view for (shape, memory_space). Callers that
-/// need a concrete TileView for layout reasoning should use this — under the
-/// canonical encoding, an implicit view is stored as nullopt, so reading
-/// `tile_view_` directly would lose layout information for implicit-view tiles.
+/// Return the effective TileView for a TileType. Empty valid_shape is expanded
+/// to the physical shape, and an absent view receives the implicit layout for
+/// (shape, memory_space). Callers that need semantic view fields should use
+/// this rather than inspecting the canonical sparse storage directly.
 inline TileView GetEffectiveTileView(const TileType& tile_type) {
   if (tile_type.tile_view_.has_value()) {
-    return *tile_type.tile_view_;
+    TileView effective = *tile_type.tile_view_;
+    if (effective.valid_shape.empty()) {
+      effective.valid_shape = tile_type.shape_;
+    }
+    return effective;
   }
   return GetImplicitTileView(tile_type.shape_, tile_type.memory_space_);
 }

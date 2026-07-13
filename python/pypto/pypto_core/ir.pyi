@@ -738,11 +738,11 @@ class TileType(ShapedType):
     def get_effective_tile_view(self) -> TileView:
         """Return the effective TileView for this tile.
 
-        If ``tile_view`` is set explicitly, returns that. Otherwise returns the
-        implicit view derived from ``(shape, memory_space)``. Under canonicalization
-        an implicit view is stored as ``None``, so callers that need to inspect
-        layout fields should use this method rather than reading ``tile_view``
-        directly.
+        Returns a copy of an explicit view with an empty ``valid_shape`` expanded
+        to ``shape`` while preserving all other metadata. If ``tile_view`` is
+        absent, returns the implicit view derived from ``(shape, memory_space)``.
+        Callers needing semantic fields should use this method rather than reading
+        the canonical sparse ``tile_view`` storage directly.
         """
 
 class ArrayType(ShapedType):

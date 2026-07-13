@@ -1667,7 +1667,7 @@ def test_tensor_transpose_explicit_valid_shape_not_swapped():
     rt = call.type
     assert isinstance(rt, ir.TensorType)
     assert rt.tensor_view is not None
-    assert _const_int_values(rt.tensor_view.valid_shape) == [16, 8]
+    assert list(rt.tensor_view.valid_shape) == []
     # Layout is still toggled to DN (trailing-two-dim transpose), and the
     # explicit-strides path also records swapped row-major strides.
     assert rt.tensor_view.layout == ir.TensorLayout.DN
@@ -1933,11 +1933,7 @@ def test_tensor_fillpad_clears_valid_shape():
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.FP32
-    assert result_type.tensor_view is not None
-    assert result_type.tensor_view.layout == ir.TensorLayout.ND
-    assert len(result_type.tensor_view.valid_shape) == 2
-    assert result_type.tensor_view.valid_shape[0] == dim8
-    assert result_type.tensor_view.valid_shape[1] == dim16
+    assert result_type.tensor_view is None
 
 
 def test_tensor_fillpad_expand():
@@ -1968,9 +1964,7 @@ def test_tensor_fillpad_expand():
     assert cols.value == 128
     assert result_type.tensor_view is not None
     assert result_type.tensor_view.pad == ir.PadValue.zero
-    vrows = result_type.tensor_view.valid_shape[0]
-    assert isinstance(vrows, ir.ConstInt)
-    assert vrows.value == 64
+    assert list(result_type.tensor_view.valid_shape) == []
 
 
 def test_tensor_fillpad_expand_shrink_raises():
@@ -2135,7 +2129,7 @@ def test_tensor_transpose_with_valid_shape():
     assert result_type.dtype == DataType.FP32
     assert len(call.args) == 4
     assert result_type.tensor_view is not None
-    assert len(result_type.tensor_view.valid_shape) == 2
+    assert len(result_type.tensor_view.valid_shape) == 0
 
 
 class TestTensorScalarMemoryOps:

@@ -289,8 +289,9 @@ class IRSerializer::Impl {
     }
     tv_map["stride"] = msgpack::object(stride_vec, zone);
 
-    // Serialize start_offset
-    tv_map["start_offset"] = SerializeNode(tile_view->start_offset, zone);
+    // Serialize a missing start_offset as MessagePack nil.
+    tv_map["start_offset"] =
+        tile_view->start_offset ? SerializeNode(tile_view->start_offset, zone) : msgpack::object();
 
     // Serialize blayout
     std::string blayout_str;
@@ -362,6 +363,13 @@ class IRSerializer::Impl {
 
     // Serialize layout enum
     tv_map["layout"] = msgpack::object(TensorLayoutToString(tensor_view->layout), zone);
+
+    // Serialize valid_shape
+    std::vector<msgpack::object> valid_shape_vec;
+    for (const auto& dim : tensor_view->valid_shape) {
+      valid_shape_vec.push_back(SerializeNode(dim, zone));
+    }
+    tv_map["valid_shape"] = msgpack::object(valid_shape_vec, zone);
 
     // Serialize pad enum (same string encoding as TileView::pad)
     std::string pad_str;

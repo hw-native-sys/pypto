@@ -133,8 +133,8 @@ def test_empty_dn_stride_filled_3d():
     assert _verify_strict(After) == []
 
 
-def test_empty_nd_stride_filled():
-    # An ND view with empty stride is also materialized to row-major packed.
+def test_empty_default_nd_view_canonicalizes_absent():
+    # Empty ND is the default TensorView and canonicalizes to no explicit view.
     @pl.program
     class Before:
         @pl.function
@@ -149,11 +149,12 @@ def test_empty_nd_stride_filled():
         @pl.function
         def f(
             self,
-            x: pl.Tensor[[8, 16], pl.FP32, pl.TensorView(stride=[16, 1], layout=pl.TensorLayout.ND)],
+            x: pl.Tensor[[8, 16], pl.FP32],
         ):
             pl.const(0, pl.INT64)
 
     After = _materialize(Before)
+    assert After is Before
     ir.assert_structural_equal(After, Expected)
 
 

@@ -50,13 +50,33 @@ std::optional<MemorySpace> ValidateTileMemorySpaceConsistency(const std::optiona
   return memory_space;
 }
 
-// Canonical encoding: an explicit TileView matching the implicit semantics for
-// (shape, memory_space) collapses to nullopt. One in-memory form per semantic
-// state — required for lossless print/parse round-trip.
+void ClearRedundantFullValidShape(std::vector<ExprPtr>& valid_shape, const std::vector<ExprPtr>& shape) {
+  if (!valid_shape.empty() && AreExprVectorsEqual(valid_shape, shape)) {
+    valid_shape.clear();
+  }
+}
+
+void CanonicalizeTensorViewInPlace(std::optional<TensorView>& tensor_view,
+                                   const std::vector<ExprPtr>& shape) {
+  if (!tensor_view.has_value()) {
+    return;
+  }
+
+  ClearRedundantFullValidShape(tensor_view->valid_shape, shape);
+  if (tensor_view->stride.empty() && tensor_view->layout == TensorLayout::ND &&
+      tensor_view->valid_shape.empty() && tensor_view->pad == PadValue::null) {
+    tensor_view.reset();
+  }
+}
+
 void CanonicalizeTileViewInPlace(std::optional<TileView>& tile_view, const std::vector<ExprPtr>& shape,
                                  const std::optional<MemorySpace>& memory_space) {
-  if (tile_view.has_value() &&
-      tile_view_semantics::IsImplicitPrintedTileView(*tile_view, shape, memory_space)) {
+  if (!tile_view.has_value()) {
+    return;
+  }
+
+  ClearRedundantFullValidShape(tile_view->valid_shape, shape);
+  if (tile_view_semantics::IsImplicitPrintedTileView(*tile_view, shape, memory_space)) {
     tile_view.reset();
   }
 }
@@ -203,6 +223,18 @@ ShapedType::ShapedType(DataType dtype, std::vector<ExprPtr> shape, MemRefPtr mem
 
 ShapedType::ShapedType(DataType dtype, std::vector<ExprPtr> shape, std::optional<MemRefPtr> memref)
     : dtype_(dtype), shape_(std::move(shape)), memref_(std::move(memref)) {}
+
+TensorType::TensorType(std::vector<ExprPtr> shape, DataType dtype, std::optional<MemRefPtr> memref,
+                       std::optional<TensorView> tensor_view)
+    : ShapedType(dtype, std::move(shape), std::move(memref)), tensor_view_(std::move(tensor_view)) {
+  CanonicalizeTensorViewInPlace(tensor_view_, shape_);
+}
+
+TensorType::TensorType(const std::vector<int64_t>& shape, DataType dtype, std::optional<MemRefPtr> memref,
+                       std::optional<TensorView> tensor_view)
+    : ShapedType(dtype, shape, std::move(memref)), tensor_view_(std::move(tensor_view)) {
+  CanonicalizeTensorViewInPlace(tensor_view_, shape_);
+}
 
 TileType::TileType(const std::vector<int64_t>& shape, DataType dtype, std::optional<MemRefPtr> memref,
                    std::optional<TileView> tile_view, std::optional<MemorySpace> memory_space)

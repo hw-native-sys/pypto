@@ -1289,7 +1289,10 @@ class TypeResolver:
             raise ParserTypeError(
                 f"Expected pl.TensorView(...) call, got: {ast.unparse(node)}",
                 span=self._get_span(node),
-                hint="Use pl.TensorView(valid_shape=[...], stride=[...], layout=pl.TensorLayout.NZ)",
+                hint=(
+                    "Use pl.TensorView(valid_shape=[...], stride=[...], "
+                    "layout=pl.TensorLayout.NZ, pad=pl.PadValue.zero)"
+                ),
             )
         if node.args:
             raise ParserTypeError(
@@ -1305,11 +1308,13 @@ class TypeResolver:
                 tv.stride = self._parse_tileview_expr_list(kw.value)
             elif kw.arg == "layout":
                 tv.layout = self.resolve_layout(kw.value)
+            elif kw.arg == "pad":
+                tv.pad = self._resolve_padvalue(kw.value)
             else:
                 raise ParserTypeError(
                     f"Unknown TensorView keyword argument: {kw.arg!r}",
                     span=self._get_span(kw),
-                    hint="Supported: valid_shape, stride, layout",
+                    hint="Supported: valid_shape, stride, layout, pad",
                 )
         return tv
 

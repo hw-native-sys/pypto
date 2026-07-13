@@ -16,8 +16,12 @@ to Python via ``ir.tensor_view_semantics``. They define the canonical
 materialization pass).
 """
 
+import ast
+
 import pytest
 from pypto import DataType, ir
+from pypto.language.parser.expr_evaluator import ExprEvaluator
+from pypto.language.parser.type_resolver import TypeResolver
 
 tvs = ir.tensor_view_semantics
 
@@ -46,6 +50,16 @@ def _const_value(expr):
 
 def _values_of(exprs):
     return [_const_value(e) for e in exprs]
+
+
+def _assert_type_print_round_trip(original):
+    printed = ir.python_print_type(original)
+    node = ast.parse(printed, mode="eval").body
+    restored = TypeResolver(expr_evaluator=ExprEvaluator(closure_vars={})).resolve_type(node)
+    assert isinstance(restored, ir.Type)
+    original_var = ir.Var("value", original, _span())
+    restored_var = ir.Var("value", restored, _span())
+    ir.assert_structural_equal(original_var, restored_var, enable_auto_mapping=True)
 
 
 # ============================================================================
@@ -263,6 +277,145 @@ def test_canonicalize_view_dn_2d():
     view = tvs.canonicalize_view(_shape(4, 8), ir.TensorLayout.DN)
     assert view.layout == ir.TensorLayout.DN
     assert _values_of(view.stride) == [1, 4]
+
+
+# ============================================================================
+# TensorType and TileType valid_shape canonicalization
+# ============================================================================
+
+
+def test_tensor_type_without_view_stays_without_view():
+    tensor_type = ir.TensorType([8, 16], DataType.FP32)
+    assert tensor_type.tensor_view is None
+
+
+def test_tensor_type_explicit_full_default_view_collapses():
+    view = ir.TensorView(layout=ir.TensorLayout.ND, valid_shape=[8, 16])
+    tensor_type = ir.TensorType([8, 16], DataType.FP32, tensor_view=view)
+    assert tensor_type.tensor_view is None
+
+
+def test_tensor_type_full_valid_shape_preserves_other_view_metadata():
+    view = ir.TensorView(
+        stride=[1, 8],
+        layout=ir.TensorLayout.DN,
+        valid_shape=[8, 16],
+        pad=ir.PadValue.max,
+    )
+    tensor_type = ir.TensorType([8, 16], DataType.FP32, tensor_view=view)
+
+    assert tensor_type.tensor_view is not None
+    assert list(tensor_type.tensor_view.valid_shape) == []
+    assert _values_of(tensor_type.tensor_view.stride) == [1, 8]
+    assert tensor_type.tensor_view.layout == ir.TensorLayout.DN
+    assert tensor_type.tensor_view.pad == ir.PadValue.max
+
+
+def test_tensor_type_partial_and_symbolic_valid_shapes_stay_explicit():
+    partial_type = ir.TensorType(
+        [8, 16],
+        DataType.FP32,
+        tensor_view=ir.TensorView(layout=ir.TensorLayout.ND, valid_shape=[4, 16]),
+    )
+    assert partial_type.tensor_view is not None
+    assert _values_of(partial_type.tensor_view.valid_shape) == [4, 16]
+
+    valid_rows = _sym("valid_rows")
+    symbolic_type = ir.TensorType(
+        [8, 16],
+        DataType.FP32,
+        tensor_view=ir.TensorView(layout=ir.TensorLayout.ND, valid_shape=[valid_rows, 16]),
+    )
+    assert symbolic_type.tensor_view is not None
+    assert symbolic_type.tensor_view.valid_shape[0] is valid_rows
+
+
+def test_tensor_type_symbolic_full_valid_shape_collapses():
+    rows = _sym("rows")
+    tensor_type = ir.TensorType(
+        [rows, _const(16)],
+        DataType.FP32,
+        tensor_view=ir.TensorView(
+            layout=ir.TensorLayout.ND,
+            valid_shape=[rows, _const(16)],
+        ),
+    )
+    assert tensor_type.tensor_view is None
+
+
+def test_tile_type_without_view_stays_without_view():
+    tile_type = ir.TileType([8, 16], DataType.FP32)
+    assert tile_type.tile_view is None
+
+
+def test_tile_type_explicit_full_default_view_collapses():
+    view = ir.TileView(valid_shape=[8, 16])
+    tile_type = ir.TileType([8, 16], DataType.FP32, tile_view=view)
+    assert tile_type.tile_view is None
+
+
+def test_tile_type_symbolic_full_valid_shape_collapses():
+    rows = _sym("rows")
+    tile_type = ir.TileType(
+        [rows, _const(16)],
+        DataType.FP32,
+        tile_view=ir.TileView(valid_shape=[rows, _const(16)]),
+    )
+    assert tile_type.tile_view is None
+
+
+def test_tile_type_full_valid_shape_preserves_other_view_metadata():
+    start_offset = _const(3)
+    view = ir.TileView(
+        valid_shape=[8, 16],
+        stride=[32, 2],
+        start_offset=start_offset,
+        blayout=ir.TileLayout.col_major,
+        slayout=ir.TileLayout.row_major,
+        fractal=1024,
+        pad=ir.PadValue.min,
+    )
+    tile_type = ir.TileType([8, 16], DataType.FP32, tile_view=view)
+
+    assert tile_type.tile_view is not None
+    assert list(tile_type.tile_view.valid_shape) == []
+    assert _values_of(tile_type.tile_view.stride) == [32, 2]
+    assert tile_type.tile_view.start_offset is start_offset
+    assert tile_type.tile_view.blayout == ir.TileLayout.col_major
+    assert tile_type.tile_view.slayout == ir.TileLayout.row_major
+    assert tile_type.tile_view.fractal == 1024
+    assert tile_type.tile_view.pad == ir.PadValue.min
+
+
+def test_tile_type_partial_and_symbolic_valid_shapes_stay_explicit():
+    partial_type = ir.TileType([8, 16], DataType.FP32, tile_view=ir.TileView(valid_shape=[4, 16]))
+    assert partial_type.tile_view is not None
+    assert _values_of(partial_type.tile_view.valid_shape) == [4, 16]
+
+    valid_rows = _sym("valid_rows")
+    symbolic_type = ir.TileType([8, 16], DataType.FP32, tile_view=ir.TileView(valid_shape=[valid_rows, 16]))
+    assert symbolic_type.tile_view is not None
+    assert symbolic_type.tile_view.valid_shape[0] is valid_rows
+
+
+def test_canonical_view_types_survive_print_parse_round_trip():
+    tensor_type = ir.TensorType(
+        [8, 16],
+        DataType.FP32,
+        tensor_view=ir.TensorView(
+            stride=[1, 8],
+            layout=ir.TensorLayout.DN,
+            valid_shape=[8, 16],
+        ),
+    )
+    tile_type = ir.TileType(
+        [8, 16],
+        DataType.FP32,
+        tile_view=ir.TileView(valid_shape=[4, 16]),
+    )
+
+    _assert_type_print_round_trip(tensor_type)
+    _assert_type_print_round_trip(tile_type)
 
 
 # ============================================================================

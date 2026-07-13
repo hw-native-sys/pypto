@@ -458,8 +458,7 @@ class TensorType : public ShapedType {
    * @param tensor_view Tensor view information
    */
   TensorType(std::vector<ExprPtr> shape, DataType dtype, std::optional<MemRefPtr> memref,
-             std::optional<TensorView> tensor_view)
-      : ShapedType(dtype, std::move(shape), std::move(memref)), tensor_view_(std::move(tensor_view)) {}
+             std::optional<TensorView> tensor_view);
 
   /**
    * @brief Create a tensor type with constant shape and tensor view
@@ -470,8 +469,7 @@ class TensorType : public ShapedType {
    * @param tensor_view Optional tensor view information
    */
   TensorType(const std::vector<int64_t>& shape, DataType dtype, std::optional<MemRefPtr> memref,
-             std::optional<TensorView> tensor_view)
-      : ShapedType(dtype, shape, std::move(memref)), tensor_view_(std::move(tensor_view)) {}
+             std::optional<TensorView> tensor_view);
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::TensorType; }
   [[nodiscard]] std::string TypeName() const override { return "TensorType"; }

@@ -1394,7 +1394,7 @@ class TestLayoutResolution:
         ],
     )
     def test_resolve_tensor_with_layout(self, layout_str, expected_layout):
-        """Tensor with various layouts creates TensorType with TensorView.
+        """Tensor layout syntax preserves non-default layouts and canonicalizes ND.
 
         ``pl.DN`` is covered separately by ``test_resolve_tensor_with_dn_layout_warns``
         — it emits a ``DeprecationWarning`` (RFC #1300 supplementary 1) so we
@@ -1407,8 +1407,11 @@ class TestLayoutResolution:
         assert isinstance(result, ir.TensorType)
         assert len(result.shape) == 2
         assert result.dtype == DataType.FP16
-        assert result.tensor_view is not None
-        assert result.tensor_view.layout == expected_layout
+        if expected_layout == ir.TensorLayout.ND:
+            assert result.tensor_view is None
+        else:
+            assert result.tensor_view is not None
+            assert result.tensor_view.layout == expected_layout
 
     def test_resolve_tensor_with_dn_layout_warns(self):
         """``pl.Tensor[..., pl.DN]`` shorthand is deprecated (RFC #1300 supp. 1).
@@ -1609,8 +1612,11 @@ class TestLayoutIntegration:
 
         param_type = func.params[0].type
         assert isinstance(param_type, ir.TensorType)
-        assert param_type.tensor_view is not None
-        assert param_type.tensor_view.layout == expected
+        if expected == ir.TensorLayout.ND:
+            assert param_type.tensor_view is None
+        else:
+            assert param_type.tensor_view is not None
+            assert param_type.tensor_view.layout == expected
 
     def test_function_with_dn_layout_warns(self):
         """@pl.function with ``pl.DN`` shorthand emits ``DeprecationWarning``.
@@ -1722,16 +1728,13 @@ class TestTensorViewResolution:
     """Tests for TensorView resolution in Tensor type annotations."""
 
     def test_resolve_tensor_with_empty_tensorview(self):
-        """Tensor with TensorView() (all defaults) creates TensorType with empty tensor_view."""
+        """TensorView() canonicalizes to the implicit fully valid tensor view."""
         resolver = _make_resolver()
         node = ast.parse("pl.Tensor[[64, 128], pl.FP32, pl.TensorView()]", mode="eval").body
         result = resolver.resolve_type(node)
 
         assert isinstance(result, ir.TensorType)
-        assert result.tensor_view is not None
-        assert len(result.tensor_view.stride) == 0
-        assert len(result.tensor_view.valid_shape) == 0
-        assert result.tensor_view.layout == ir.TensorLayout.ND
+        assert result.tensor_view is None
 
     def test_resolve_tensor_with_tensorview_valid_shape(self):
         """TensorView with valid_shape creates correct tensor_view."""
@@ -1850,6 +1853,45 @@ class TestTensorViewResolution:
         assert isinstance(tv.valid_shape[1], ir.ConstInt)
         assert tv.valid_shape[1].value == 32
 
+    @pytest.mark.parametrize(
+        ("pad", "printed_name"),
+        [
+            (ir.PadValue.zero, "zero"),
+            (ir.PadValue.max, "max"),
+            (ir.PadValue.min, "min"),
+        ],
+    )
+    def test_tensorview_padding_printer_roundtrip(self, pad, printed_name):
+        """Non-default TensorView padding survives Python print and parse."""
+        span = ir.Span.unknown()
+        original = ir.TensorType(
+            [8, 64],
+            DataType.FP32,
+            tensor_view=ir.TensorView(
+                stride=[
+                    ir.ConstInt(64, DataType.INDEX, span),
+                    ir.ConstInt(1, DataType.INDEX, span),
+                ],
+                layout=ir.TensorLayout.ND,
+                pad=pad,
+            ),
+        )
+
+        printed = ir.python_print_type(original)
+        assert f"pad=pl.PadValue.{printed_name}" in printed
+
+        node = ast.parse(printed, mode="eval").body
+        reparsed = _make_resolver().resolve_type(node)
+
+        assert isinstance(reparsed, ir.TensorType)
+        assert reparsed.tensor_view is not None
+        assert reparsed.tensor_view.pad == pad
+        ir.assert_structural_equal(
+            ir.Var("value", original, span),
+            ir.Var("value", reparsed, span),
+            enable_auto_mapping=True,
+        )
+
     def test_tensorview_with_memref_four_args(self):
         """Tensor with TensorView and MemRef as 4-arg form."""
         resolver = _make_resolver()
@@ -1861,8 +1903,7 @@ class TestTensorViewResolution:
         result = resolver.resolve_type(node)
 
         assert isinstance(result, ir.TensorType)
-        assert result.tensor_view is not None
-        assert result.tensor_view.layout == ir.TensorLayout.ND
+        assert result.tensor_view is None
         assert result.memref is not None
 
 

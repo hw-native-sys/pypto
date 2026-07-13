@@ -2729,7 +2729,8 @@ std::string IRPythonPrinter::PrintTileView(const TileView& tile_view, const std:
   TileView implicit_view = tile_view_semantics::GetImplicitTileView(tile_shape, memory_space);
 
   // valid_shape — omit if it matches the parent tile's shape
-  bool valid_shape_matches = tile_view_semantics::ShapeExprListsEquivalent(tile_view.valid_shape, tile_shape);
+  bool valid_shape_matches = tile_view.valid_shape.empty() ||
+                             tile_view_semantics::ShapeExprListsEquivalent(tile_view.valid_shape, tile_shape);
   if (!valid_shape_matches) {
     maybe_comma();
     oss << "valid_shape=[";
