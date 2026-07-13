@@ -1148,15 +1148,11 @@ def _infer_return_type(
     # Multi-return: `return a, b, ...` -> emit `tuple[T_a, T_b, ...]`.
     # Tensor elements are specialized from runtime metadata. Non-tensor elements
     # (for example a TASK_ID captured by ``with pl.spmd(...) as tid``) must be
-    # supplied by a matching explicit ``tuple[...]`` return annotation because
-    # they have no TensorMeta entry.
+    # supplied by a matching explicit tuple return annotation because they have
+    # no TensorMeta entry.
     if return_node is not None and isinstance(return_node.value, ast.Tuple):
         explicit_elements: list[ast.expr] | None = None
-        if (
-            isinstance(func_def.returns, ast.Subscript)
-            and isinstance(func_def.returns.value, ast.Name)
-            and func_def.returns.value.id == "tuple"
-        ):
+        if isinstance(func_def.returns, ast.Subscript) and _is_tuple_annotation(func_def.returns.value):
             annotation_slice = func_def.returns.slice
             explicit_elements = (
                 annotation_slice.elts if isinstance(annotation_slice, ast.Tuple) else [annotation_slice]
@@ -1181,11 +1177,11 @@ def _infer_return_type(
         return f"tuple[{', '.join(elt_annotations)}]"
 
     # A TASK_ID (or another explicit Scalar) has no TensorMeta entry. Preserve
-    # its declared type so an inline helper can return a scalar task id to its
-    # caller rather than being treated as a void function.
+    # its declared type for any scalar expression so an inline helper can
+    # return a task ID, constant, or computed scalar to its caller rather than
+    # being treated as a void function.
     if (
         return_node is not None
-        and isinstance(return_node.value, ast.Name)
         and isinstance(func_def.returns, ast.Subscript)
         and _is_scalar_annotation(func_def.returns.value)
     ):
@@ -1326,6 +1322,15 @@ def _is_scalar_annotation(node: ast.expr) -> bool:
         return node.id == "Scalar"
     if isinstance(node, ast.Attribute):
         return node.attr == "Scalar"
+    return False
+
+
+def _is_tuple_annotation(node: ast.expr) -> bool:
+    """Return True if the AST node represents tuple, Tuple, or typing.Tuple."""
+    if isinstance(node, ast.Name):
+        return node.id in ("tuple", "Tuple")
+    if isinstance(node, ast.Attribute):
+        return node.attr in ("tuple", "Tuple")
     return False
 
 

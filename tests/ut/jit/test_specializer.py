@@ -1486,6 +1486,30 @@ class TestInferReturnType:
         # `a_local` isn't in tensor_meta — can't infer it.
         assert _infer_return_type(func_def, meta, ["out"]) is None
 
+    @pytest.mark.parametrize("tuple_annotation", ["Tuple", "typing.Tuple"])
+    def test_tuple_return_with_typing_annotation_preserves_scalar_element(self, tuple_annotation):
+        """Explicit Tuple annotations provide metadata for non-tensor elements."""
+        func_def = _parse_func(
+            f"""
+            def f(out) -> {tuple_annotation}[pl.Tensor, pl.Scalar[pl.TASK_ID]]:
+                return out, tid
+            """
+        )
+        meta = {"out": self._meta()}
+        ann = _infer_return_type(func_def, meta, ["out"])
+        assert ann == "tuple[pl.Tensor[[32, 32], pl.FP32], pl.Scalar[pl.TASK_ID]]"
+
+    @pytest.mark.parametrize("return_expr", ["tid", "0", "tid + 1"])
+    def test_scalar_return_annotation_preserved_for_any_expression(self, return_expr):
+        """Explicit scalar returns do not require a TensorMeta-backed name."""
+        func_def = _parse_func(
+            f"""
+            def f() -> pl.Scalar[pl.TASK_ID]:
+                return {return_expr}
+            """
+        )
+        assert _infer_return_type(func_def, {}, []) == "pl.Scalar[pl.TASK_ID]"
+
     def test_return_call_drops_annotation(self):
         """`return f(...)` can't be inferred — caller may have multi-return."""
         func_def = _parse_func(
