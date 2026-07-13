@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -1341,6 +1342,10 @@ LifetimeAnalysisResult ComputeLifetimes(const StmtPtr& func_body) {
         << "TileType with MemRef must have memory_space for reuse analysis";
     interval.memory_space = *memory_space;
     interval.size = max_size;
+    interval.alias_members.reserve(sharing_group.size());
+    for (const auto& group_var : sharing_group) {
+      interval.alias_members.push_back(group_var->name_hint_);
+    }
     interval.live_ranges = std::move(live_ranges);
 
     lifetimes.push_back(interval);
@@ -2990,11 +2995,12 @@ AllocationPlan ComputeAllocationPlan(const FunctionPtr& func) {
   // The portable schema represents hard exclusions as explicit index pairs.
   // Build them through indices so the analysis is output-sensitive:
   // O(N log N + E log E), where E is the number of pairs emitted.
-  std::set<std::pair<size_t, size_t>> separation_indices;
-  auto add_separation = [&separation_indices](size_t first, size_t second) {
+  std::map<std::pair<size_t, size_t>, std::set<AllocationSeparationReason>> separation_reasons;
+  auto add_separation = [&separation_reasons](size_t first, size_t second,
+                                              AllocationSeparationReason reason) {
     if (first == second) return;
     if (second < first) std::swap(first, second);
-    separation_indices.emplace(first, second);
+    separation_reasons[{first, second}].insert(reason);
   };
 
   // Allocation base_ Ptr -> interval index, for resolving forbid-alias operands.
@@ -3031,6 +3037,8 @@ AllocationPlan ComputeAllocationPlan(const FunctionPtr& func) {
     }
 
     for (const auto& [key, members_by_stage] : group_members) {
+      INTERNAL_CHECK(members_by_stage.size() <= static_cast<size_t>(std::numeric_limits<int32_t>::max()))
+          << "Pipeline group has too many distinct stages for DSA export";
       const int32_t depth = static_cast<int32_t>(members_by_stage.size());
       const uint64_t cap = be != nullptr ? be->GetMemSize(key.first) : 0;
       const uint64_t slot = group_slot[key];
@@ -3040,13 +3048,22 @@ AllocationPlan ComputeAllocationPlan(const FunctionPtr& func) {
       }
 
       std::map<int32_t, std::vector<size_t>> members_by_residue;
+      PipelineAllocationGroup exported_group;
+      exported_group.memory_space = key.first;
+      exported_group.group = key.second;
+      exported_group.slot_size = slot;
+      exported_group.depth = static_cast<uint32_t>(depth);
+      exported_group.effective_depth = static_cast<uint32_t>(fg);
       int32_t ord = 0;
-      for (const auto& stage_members : members_by_stage) {
-        const auto& members = stage_members.second;
+      for (const auto& [stage, members] : members_by_stage) {
         const int32_t residue = ord++ % fg;
         auto& bucket = members_by_residue[residue];
         bucket.insert(bucket.end(), members.begin(), members.end());
+        for (size_t index : members) {
+          exported_group.members.push_back({index, stage, static_cast<uint32_t>(residue)});
+        }
       }
+      plan.pipeline_groups.push_back(std::move(exported_group));
 
       for (auto first_bucket = members_by_residue.begin(); first_bucket != members_by_residue.end();
            ++first_bucket) {
@@ -3054,7 +3071,9 @@ AllocationPlan ComputeAllocationPlan(const FunctionPtr& func) {
         ++second_bucket;
         for (; second_bucket != members_by_residue.end(); ++second_bucket) {
           for (size_t first : first_bucket->second) {
-            for (size_t second : second_bucket->second) add_separation(first, second);
+            for (size_t second : second_bucket->second) {
+              add_separation(first, second, AllocationSeparationReason::PipelineStage);
+            }
           }
         }
       }
@@ -3084,7 +3103,9 @@ AllocationPlan ComputeAllocationPlan(const FunctionPtr& func) {
       auto inputs = inputs_by_last_use.find(point);
       if (inputs == inputs_by_last_use.end()) continue;
       for (size_t writer : writers) {
-        for (size_t input : inputs->second) add_separation(writer, input);
+        for (size_t input : inputs->second) {
+          add_separation(writer, input, AllocationSeparationReason::TargetHazard);
+        }
       }
     }
   }
@@ -3103,11 +3124,20 @@ AllocationPlan ComputeAllocationPlan(const FunctionPtr& func) {
       auto mr = GetTypeMemRef(operand->GetType());
       if (!mr.has_value() || !mr.value()) continue;
       auto bit = base_to_index.find(mr.value()->base_.get());
-      if (bit != base_to_index.end()) add_separation(i, bit->second);
+      if (bit != base_to_index.end()) {
+        add_separation(i, bit->second, AllocationSeparationReason::SemanticNoAlias);
+      }
     }
   }
 
-  plan.separations.assign(separation_indices.begin(), separation_indices.end());
+  plan.separations.reserve(separation_reasons.size());
+  for (const auto& [indices, reasons] : separation_reasons) {
+    AllocationSeparation separation;
+    separation.first = indices.first;
+    separation.second = indices.second;
+    separation.reasons.assign(reasons.begin(), reasons.end());
+    plan.separations.push_back(std::move(separation));
+  }
   return plan;
 }
 

@@ -38,7 +38,7 @@ loop-carried values, and in-place operations retain their mandatory identities.
 | `MemoryPlanner.PTOAS` | None | This pass is skipped; ptoas `PlanMemory` owns placement | Deferred to ptoas |
 
 DSA support is an optional CMake dependency. Build and consume an installed
-`dsa-solver` 0.2 package as follows:
+`dsa-solver` 0.3 package as follows:
 
 ```bash
 cmake -S /path/to/dsa-solver -B /path/to/dsa-solver/build \
@@ -120,18 +120,24 @@ When `MemoryPlanner.DSA` is active, step 4 is replaced by this guarded path:
    read may share an address with the result written by that statement.
 4. Export fixed memory pools, backend capacities, a leading reserved range, and
    hard separation pairs for pipeline clones, backend hazards, and op-specific
-   no-alias rules.
-5. Validate the schema/profile, match solver capabilities, solve, and validate
+   no-alias rules. Each separation retains its typed source.
+5. Retain normalized alias-class members and pipeline group/stage/residue data.
+   Capacity-folded same-residue stages emit sparse chronological cross-pipe
+   reuse penalties; the generic constraints and cost model remain authoritative.
+6. Validate the schema/profile, match solver capabilities, solve, and validate
    every placement independently against sizes, alignment, lifetimes, pools,
    capacities, reserved ranges, and separations.
-6. Write each placement back while preserving every view's relative byte offset.
+7. Write each placement back while preserving every view's relative byte offset.
 
 The version-1 adapter intentionally keeps pool assignment fixed and uses the
-portable peak objective. The standalone model can represent temporal exclusions
-and reuse-cost overlays, but the PyPTO exporter does not infer those yet. Branch
-exclusivity that is not visible in the exported intervals is therefore
-conservative rather than unsound. Cost-aware objectives and richer PyPTO
-structure remain research extensions behind capability matching.
+portable peak objective. Its exported reuse costs are therefore benchmark data
+for cost-aware solvers and do not change the currently selected first-fit result.
+Branch exclusivity that is not visible in the exported intervals is still
+conservative rather than unsound. The buffers remain fixed-size allocations;
+subdivision comes from jointly assigning offsets after an earlier region expires,
+not from resizing a buffer during its lifetime. Cost-aware objectives and
+PyPTO-structured search moves remain research extensions behind capability
+matching.
 
 If `dsa_export_dir` is set, each InCore function is written as
 `pypto_<escaped-function-name>.dsa.json`. Serialization is deterministic and
@@ -224,6 +230,7 @@ passes.def("allocate_memory_addr", &pass::AllocateMemoryAddr,
 - Tests raw pointer uniqueness for MemRef deduplication
 - Tests default policy behavior without a backend configured
 - Tests DSA read-before-write reuse, reserved ranges, view-offset writeback, and deterministic export
+- Tests alias-class, typed separation, pipeline-group/residue, and sparse reuse-cost export
 - Replays the #1908 fragmentation shape through exporter, standalone solver, validator, and writeback
 
 ## Allocation Policy

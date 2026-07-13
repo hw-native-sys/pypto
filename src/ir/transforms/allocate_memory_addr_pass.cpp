@@ -386,7 +386,7 @@ FunctionPtr TransformAllocateMemoryAddr(const FunctionPtr& func) {
 #else
     CHECK_SPAN(false, func->span_)
         << "MemoryPlanner.DSA is unavailable in this build. Reconfigure PyPTO with "
-           "-DPYPTO_ENABLE_DSA_SOLVER=ON and a dsa-solver 0.2 CMake package.";
+           "-DPYPTO_ENABLE_DSA_SOLVER=ON and a dsa-solver 0.3 CMake package.";
 #endif
   } else {
     memref_pairs = AllocateMemoryAddresses(memrefs, reserve_resolution.reserved_end_by_space, *policy);

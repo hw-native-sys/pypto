@@ -33,7 +33,7 @@ MaterializeSemanticAliases，因此 view、循环 carry 值和原地操作的强
 | `MemoryPlanner.DSA` | MaterializeSemanticAliases 后未机会性合并的 MemRef | 独立 first-fit DSA solver，输入为 schema-v1 `pypto_structured` | 非法导出、能力不匹配、不可行或 validator 失败都会终止编译；不会静默回退 |
 | `MemoryPlanner.PTOAS` | 无 | 跳过本 Pass；ptoas `PlanMemory` 负责放置 | 交给 ptoas |
 
-DSA 支持是可选的 CMake 依赖。先构建并安装 `dsa-solver` 0.2 package，再让
+DSA 支持是可选的 CMake 依赖。先构建并安装 `dsa-solver` 0.3 package，再让
 PyPTO 使用它：
 
 ```bash
@@ -111,15 +111,21 @@ dsa_export_dir="build/dsa-corpus")`。
    `2 * def + 1` 开始，最后一次读在 `2 * last_use + 1` 结束；没有后续读取的值仍占用
    一个写 event。因此，一个输入的最后一次读取可以和同一语句写出的结果共用地址。
 4. 导出固定 memory pool、后端容量、前导 reserved range，以及 pipeline clone、后端
-   hazard 和算子专用 no-alias 规则产生的 hard separation pair。
-5. 验证 schema/profile、匹配 solver capability、求解，并针对大小、对齐、生命周期、
+   hazard 和算子专用 no-alias 规则产生的 hard separation pair；每条 separation 都保留
+   其类型化来源。
+5. 保留规范化的 alias class 成员和 pipeline group/stage/residue 数据。被容量折叠到同一
+   residue 的 stage 会导出稀疏的、按时间相邻的 cross-pipe reuse penalty；通用 constraint
+   与 cost model 仍是权威语义。
+6. 验证 schema/profile、匹配 solver capability、求解，并针对大小、对齐、生命周期、
    pool、容量、reserved range 和 separation 独立验证每个 placement。
-6. 写回 placement，同时保留每个 view 的相对 byte offset。
+7. 写回 placement，同时保留每个 view 的相对 byte offset。
 
-版本 1 adapter 刻意保持 pool assignment 固定，并使用可移植的 peak objective。独立模型
-可以表达 temporal exclusion 与 reuse-cost overlay，但 PyPTO exporter 尚未推导这些结构。
-因此，导出 interval 中不可见的 branch exclusivity 会保守处理，而不是产生不健全的复用。
-cost-aware objective 和更丰富的 PyPTO 结构仍是 capability matching 后的研究扩展。
+版本 1 adapter 刻意保持 pool assignment 固定，并使用可移植的 peak objective。因此，
+导出的 reuse cost 目前是供 cost-aware solver 使用的 benchmark 数据，不会改变当前选择的
+first-fit 结果。导出 interval 中不可见的 branch exclusivity 仍会保守处理，而不是产生
+不健全的复用。buffer 仍是固定大小的分配；所谓 subdivision 是在较早区域失效后联合分配
+offset，而不是在 buffer 生命周期中调整其大小。cost-aware objective 与 PyPTO 结构化搜索
+move 仍是 capability matching 后的研究扩展。
 
 设置 `dsa_export_dir` 后，每个 InCore 函数写成
 `pypto_<escaped-function-name>.dsa.json`。序列化是确定性的，不包含 IR pointer 或机器专用
@@ -211,6 +217,7 @@ passes.def("allocate_memory_addr", &pass::AllocateMemoryAddr,
 - 测试 MemRef 去重的原始指针唯一性
 - 测试无后端配置时的默认策略行为
 - 测试 DSA 读先于写的复用、reserved range、view offset 写回与确定性导出
+- 测试 alias class、类型化 separation、pipeline group/residue 与稀疏 reuse cost 的导出
 - 通过 exporter、独立 solver、validator 和 writeback 重放 #1908 fragmentation 形状
 
 ## 分配策略

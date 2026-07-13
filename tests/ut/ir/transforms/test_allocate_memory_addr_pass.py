@@ -672,7 +672,7 @@ def test_allocate_memory_addr_preserves_sibling_slice_offsets():
     ir.assert_structural_equal(After, Expected)
 
 
-def test_dsa_writeback_preserves_relative_view_offsets():
+def test_dsa_writeback_preserves_relative_view_offsets(tmp_path):
     """A standalone placement moves a base without collapsing its views."""
 
     @pl.program
@@ -691,8 +691,13 @@ def test_dsa_writeback_preserves_relative_view_offsets():
 
     initialized = passes.init_mem_ref()(Before)
     legacy = passes.allocate_memory_addr()(initialized)
-    planned = _allocate_with_dsa(initialized)
+    planned = _allocate_with_dsa(initialized, str(tmp_path))
     ir.assert_structural_equal(planned, legacy)
+
+    document = json.loads((tmp_path / "pypto_main.dsa.json").read_text())
+    assert document["problem"]["pypto_structure"]["alias_classes"] == [
+        {"buffer": 0, "members": ["tile_a", "row_1", "column"]}
+    ]
 
 
 def test_allocate_memory_addr_resolves_aic_reserve_buffer_in_mat_space():
@@ -930,6 +935,14 @@ def test_dsa_export_is_deterministic_pypto_structured(tmp_path):
     assert vec_pool["capacity"] > 0
     assert vec_pool["reserved_ranges"] == []
     assert all(buffer["alignment"] == 32 for buffer in document["problem"]["buffers"])
+    assert document["problem"]["pypto_structure"] == {
+        "alias_classes": [
+            {"buffer": 0, "members": ["tile_a"]},
+            {"buffer": 1, "members": ["tile_b"]},
+            {"buffer": 2, "members": ["tile_c"]},
+        ],
+        "pipeline_groups": [],
+    }
 
 
 def _dsa_pipeline_separation_program():
@@ -975,7 +988,133 @@ def test_dsa_export_and_solver_preserve_pipeline_stage_separation(tmp_path):
     corpus_file = tmp_path / "pypto_pipeline_stage_separation.dsa.json"
     document = json.loads(corpus_file.read_text())
     assert document["instance"] == "pipeline_stage_separation"
-    assert document["problem"]["constraints"]["separations"] == [{"first": 0, "second": 1}]
+    assert document["problem"]["constraints"]["separations"] == [
+        {"first": 0, "second": 1, "reasons": ["pipeline_stage"]}
+    ]
+    assert document["problem"]["pypto_structure"] == {
+        "alias_classes": [
+            {"buffer": 0, "members": ["stage_0"]},
+            {"buffer": 1, "members": ["stage_1"]},
+        ],
+        "pipeline_groups": [
+            {
+                "group": 7,
+                "pool": 1,
+                "slot_size": 16384,
+                "depth": 2,
+                "effective_depth": 2,
+                "members": [
+                    {"buffer": 0, "stage": 0, "residue": 0},
+                    {"buffer": 1, "stage": 1, "residue": 1},
+                ],
+            }
+        ],
+    }
+
+
+def _dsa_capacity_gated_pipeline_cost_program():
+    """Three sequential 240 KiB stages collapse to one capacity residue."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def capacity_gated_pipeline_cost(
+            self,
+            input_0: pl.Tensor[[128, 480], pl.FP32],
+            input_1: pl.Tensor[[128, 480], pl.FP32],
+            input_2: pl.Tensor[[128, 480], pl.FP32],
+            output_0: pl.Out[pl.Tensor[[128, 480], pl.FP32]],
+            output_1: pl.Out[pl.Tensor[[128, 480], pl.FP32]],
+            output_2: pl.Out[pl.Tensor[[128, 480], pl.FP32]],
+        ) -> pl.Tensor[[128, 480], pl.FP32]:
+            stage_0 = pl.tile.load(
+                input_0,
+                [0, 0],
+                [128, 480],
+                [128, 480],
+                target_memory=pl.Mem.Vec,
+                attrs={"pipeline_membership": "11:0"},
+            )
+            _stored_0 = pl.tile.store(stage_0, [0, 0], output_0)
+            stage_1 = pl.tile.load(
+                input_1,
+                [0, 0],
+                [128, 480],
+                [128, 480],
+                target_memory=pl.Mem.Vec,
+                attrs={"pipeline_membership": "11:1"},
+            )
+            _stored_1 = pl.tile.store(stage_1, [0, 0], output_1)
+            stage_2 = pl.tile.load(
+                input_2,
+                [0, 0],
+                [128, 480],
+                [128, 480],
+                target_memory=pl.Mem.Vec,
+                attrs={"pipeline_membership": "11:2"},
+            )
+            result = pl.tile.store(stage_2, [0, 0], output_2)
+            return result
+
+    return passes.init_mem_ref()(Before)
+
+
+def test_dsa_export_preserves_capacity_gated_pipeline_reuse_cost(tmp_path):
+    """Same-residue stage reuse is explicit, sparse, and does not alter v1 placement."""
+    planned = _allocate_with_dsa(_dsa_capacity_gated_pipeline_cost_program(), str(tmp_path))
+    assert _vec_peak(planned) == 240 * 1024
+
+    document = json.loads((tmp_path / "pypto_capacity_gated_pipeline_cost.dsa.json").read_text())
+    assert document["problem"]["constraints"]["separations"] == []
+    group = document["problem"]["pypto_structure"]["pipeline_groups"][0]
+    assert (group["depth"], group["effective_depth"], group["slot_size"]) == (3, 1, 240 * 1024)
+    assert [member["residue"] for member in group["members"]] == [0, 0, 0]
+    assert document["problem"]["cost_model"]["reuse_penalties"] == [
+        {"first": 0, "second": 1, "cost": 1, "reason": "cross_pipe"},
+        {"first": 1, "second": 2, "cost": 1, "reason": "cross_pipe"},
+    ]
+    assert document["metadata"]["reuse_cost_model"] == "pipeline_adjacent_antidependency_v1"
+
+
+def test_dsa_export_preserves_ascend910b_target_hazard_reason(tmp_path):
+    """The split-AIV load+tpop keep-apart edge remains identifiable offline."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+        def target_hazard(self, down: pl.InOut[pl.Tensor[[16, 128], pl.FP32]]):
+            mem_vec_0: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 4096)
+            mem_vec_1: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 4096)
+            mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 4096)
+            down_prev: pl.Tile[[8, 128], pl.FP32, pl.MemRef(mem_vec_0, 0, 4096), pl.Mem.Vec] = pl.tile.load(
+                down, [0, 0], [8, 128], [8, 128], target_memory=pl.Mem.Vec
+            )
+            pipe_chunk: pl.Tile[[8, 128], pl.FP32, pl.MemRef(mem_vec_1, 0, 4096), pl.Mem.Vec] = (
+                pl.tile.tpop_from_aic(split=1)
+            )
+            down_next: pl.Tile[[8, 128], pl.FP32, pl.MemRef(mem_vec_2, 0, 4096), pl.Mem.Vec] = pl.tile.add(
+                down_prev, pipe_chunk
+            )
+            result = pl.tile.store(down_next, [0, 0], down)
+            return result
+
+    was_configured = is_backend_configured()
+    prior_type = get_backend_type() if was_configured else None
+    if was_configured:
+        reset_for_testing()
+    try:
+        set_backend_type(BackendType.Ascend910B)
+        _allocate_with_dsa(Before, str(tmp_path))
+    finally:
+        reset_for_testing()
+        if prior_type is not None:
+            set_backend_type(prior_type)
+
+    document = json.loads((tmp_path / "pypto_target_hazard.dsa.json").read_text())
+    assert document["metadata"]["target"] == "Ascend910B"
+    assert document["problem"]["constraints"]["separations"] == [
+        {"first": 0, "second": 2, "reasons": ["target_hazard"]}
+    ]
 
 
 def _dsa_fragmentation_program():
