@@ -98,9 +98,14 @@ jobs:
     # silently.  Install the version clang_tidy.py requires, reading it from the
     # script so the pin has a single source of truth.
     - name: Install pinned clang-tidy
+      env:
+        # The job mounts the runner's pip cache at /root/.cache/pip, but Actions
+        # sets HOME=/github/home, so pip never looks there and re-fetches the
+        # 39 MB wheel on every run — which is what makes this step flaky.
+        PIP_CACHE_DIR: /root/.cache/pip
       run: |
         VERSION=$(python -c "import sys; sys.path.insert(0, 'tests/lint'); from clang_tidy import REQUIRED_VERSION; print(REQUIRED_VERSION)")
-        python -m pip install "clang-tidy==${VERSION}"
+        python -m pip install --retries 5 --timeout 60 "clang-tidy==${VERSION}"
         clang-tidy --version
 
     - name: Run clang-tidy

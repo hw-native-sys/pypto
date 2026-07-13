@@ -80,11 +80,18 @@ def get_clang_tidy_version() -> str | None:
 
 
 def check_version(version: str | None = None) -> str | None:
-    """Return a warning string if the clang-tidy version mismatches, else ``None``."""
+    """Return a warning string if the clang-tidy version cannot be confirmed, else ``None``."""
     if version is None:
         version = get_clang_tidy_version()
     if version is None:
-        return None  # Handled by the "not found" check in main()
+        # The binary is on PATH (main() checked) but did not report a version we
+        # recognise.  Unverified is not the same as correct: an older clang-tidy
+        # skips unknown checks silently, so say so rather than lint in the dark.
+        return (
+            f"[clang-tidy] WARNING: Could not determine the clang-tidy version; "
+            f"expected {REQUIRED_VERSION}. Checks it does not know are skipped silently. "
+            f"Install with: pip install clang-tidy=={REQUIRED_VERSION}"
+        )
     if version != REQUIRED_VERSION:
         return (
             f"[clang-tidy] WARNING: Version mismatch — "
