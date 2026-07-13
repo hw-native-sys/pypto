@@ -855,7 +855,7 @@ def test_backend_materializes_allgather_next_level_files(tmp_path):
             signal = pld.window(signal_buf, [SIZE], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):
                 self.chip_orch(data, signal, device=r)
-            pld.tensor.allgather(data, signal)
+            pld.tensor.allgather(data, signal, signal)
             return 0
 
     _assert_host_collective_next_level_files(
