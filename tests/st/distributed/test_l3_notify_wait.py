@@ -101,7 +101,7 @@ def _build_signal_handshake_program():
             self,
             outputs: pl.Out[pl.Tensor[[2, 1, 1], pl.INT32]],
         ) -> pl.Tensor[[2, 1, 1], pl.INT32]:
-            signal_buf = pld.alloc_window_buffer(4)  # 1×1 × INT32
+            signal_buf = pld.alloc_window_buffer(pl.INT32.get_byte())  # 1×1 × INT32
 
             for r in pl.range(pld.world_size()):
                 signal = pld.window(signal_buf, [1, 1], dtype=pl.INT32)

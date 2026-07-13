@@ -436,7 +436,7 @@ def host_orch(
     inputs: pl.Tensor[[2, 1, 256], pl.FP32],
     outputs: pl.Out[pl.Tensor[[2, 1, 256], pl.FP32]],
 ):
-    data_buf = pld.alloc_window_buffer(256 * 4)
+    data_buf = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
     for r in pl.range(pld.world_size()):
         data = pld.window(data_buf, [1, 256], dtype=pl.FP32)
         chip_orch(inputs[r], outputs[r], data, (r + 1) % pld.world_size(),

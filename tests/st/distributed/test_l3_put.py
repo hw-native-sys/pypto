@@ -112,9 +112,9 @@ def _build_ring_put_program():
             inputs: pl.Tensor[[2, 1, SIZE], pl.FP32],
             outputs: pl.Out[pl.Tensor[[2, 1, SIZE], pl.FP32]],
         ) -> pl.Tensor[[2, 1, SIZE], pl.FP32]:
-            src_buf = pld.alloc_window_buffer(SIZE * 4)  # 1×SIZE × FP32 (4 bytes)
-            dst_buf = pld.alloc_window_buffer(SIZE * 4)
-            signal_buf = pld.alloc_window_buffer(4)  # 1×1 × INT32
+            src_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+            dst_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(pl.INT32.get_byte())  # 1×1 × INT32
 
             for r in pl.range(pld.world_size()):
                 src = pld.window(src_buf, [1, SIZE], dtype=pl.FP32)
@@ -191,10 +191,10 @@ def _build_ring_put_pipeline_program():
             inputs: pl.Tensor[[2, PIPE_ROWS, PIPE_COLS], pl.FP32],
             outputs: pl.Out[pl.Tensor[[2, PIPE_ROWS, PIPE_COLS], pl.FP32]],
         ) -> pl.Tensor[[2, PIPE_ROWS, PIPE_COLS], pl.FP32]:
-            nbytes = PIPE_ROWS * PIPE_COLS * 4
+            nbytes = PIPE_ROWS * PIPE_COLS * pl.FP32.get_byte()
             src_buf = pld.alloc_window_buffer(nbytes)
             dst_buf = pld.alloc_window_buffer(nbytes)
-            signal_buf = pld.alloc_window_buffer(4)
+            signal_buf = pld.alloc_window_buffer(pl.INT32.get_byte())
 
             for r in pl.range(pld.world_size()):
                 src = pld.window(src_buf, [PIPE_ROWS, PIPE_COLS], dtype=pl.FP32)
@@ -283,9 +283,9 @@ def _build_atomic_add_program():
             inputs: pl.Tensor[[2, 16, 16], pl.INT32],
             outputs: pl.Out[pl.Tensor[[2, 16, 16], pl.INT32]],
         ) -> pl.Tensor[[2, 16, 16], pl.INT32]:
-            src_buf = pld.alloc_window_buffer(16 * 16 * 4)  # 16×16 × INT32
-            acc_buf = pld.alloc_window_buffer(16 * 16 * 4)
-            signal_buf = pld.alloc_window_buffer(4)
+            src_buf = pld.alloc_window_buffer(16 * 16 * pl.INT32.get_byte())
+            acc_buf = pld.alloc_window_buffer(16 * 16 * pl.INT32.get_byte())
+            signal_buf = pld.alloc_window_buffer(pl.INT32.get_byte())
 
             for r in pl.range(pld.world_size()):
                 src = pld.window(src_buf, [16, 16], dtype=pl.INT32)
@@ -454,9 +454,9 @@ def _build_row_put_program():
             inputs: pl.Tensor[[2, 2, SIZE], pl.FP32],
             outputs: pl.Out[pl.Tensor[[2, 1, SIZE], pl.FP32]],
         ) -> pl.Tensor[[2, 1, SIZE], pl.FP32]:
-            src_buf = pld.alloc_window_buffer(2 * SIZE * 4)
-            dst_buf = pld.alloc_window_buffer(2 * SIZE * 4)
-            signal_buf = pld.alloc_window_buffer(4)
+            src_buf = pld.alloc_window_buffer(2 * SIZE * pl.FP32.get_byte())
+            dst_buf = pld.alloc_window_buffer(2 * SIZE * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(pl.INT32.get_byte())
 
             for r in pl.range(pld.world_size()):
                 src = pld.window(src_buf, [2, SIZE], dtype=pl.FP32)
@@ -580,9 +580,9 @@ def _build_chunked_ring_put_program():
             inputs: pl.Tensor[[2, CHUNK_ROWS, CHUNK_COLS], pl.FP32],
             outputs: pl.Out[pl.Tensor[[2, CHUNK_ROWS, CHUNK_COLS], pl.FP32]],
         ) -> pl.Tensor[[2, CHUNK_ROWS, CHUNK_COLS], pl.FP32]:
-            src_buf = pld.alloc_window_buffer(CHUNK_ROWS * CHUNK_COLS * 4)
-            dst_buf = pld.alloc_window_buffer(CHUNK_ROWS * CHUNK_COLS * 4)
-            signal_buf = pld.alloc_window_buffer(4)
+            src_buf = pld.alloc_window_buffer(CHUNK_ROWS * CHUNK_COLS * pl.FP32.get_byte())
+            dst_buf = pld.alloc_window_buffer(CHUNK_ROWS * CHUNK_COLS * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(pl.INT32.get_byte())
 
             for r in pl.range(pld.world_size()):
                 src = pld.window(src_buf, [CHUNK_ROWS, CHUNK_COLS], dtype=pl.FP32)

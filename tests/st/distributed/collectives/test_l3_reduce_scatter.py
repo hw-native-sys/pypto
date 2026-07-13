@@ -136,8 +136,8 @@ class ReduceScatterMesh:
         outputs: pl.Out[pl.Tensor[[NR, 1, SIZE], pl.FP32]],
     ) -> pl.Tensor[[NR, 1, SIZE], pl.FP32]:
         """Launch one chip orchestration per rank with shared window buffers."""
-        scratch_buf = pld.alloc_window_buffer(pld.world_size() * SIZE * 4)  # NR x SIZE FP32
-        signal_buf = pld.alloc_window_buffer(pld.world_size() * 4)  # NR x 1 x INT32
+        scratch_buf = pld.alloc_window_buffer(pld.world_size() * SIZE * pl.FP32.get_byte())
+        signal_buf = pld.alloc_window_buffer(pld.world_size() * pl.INT32.get_byte())
 
         for r in pl.range(pld.world_size()):
             scratch = pld.window(scratch_buf, [1, pld.world_size() * SIZE], dtype=pl.FP32)

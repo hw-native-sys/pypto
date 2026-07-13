@@ -123,8 +123,8 @@ def test_host_allreduce_lowers_to_builtin_world_size_loop():
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
-            data_buf = pld.alloc_window_buffer(1024)
-            signal_buf = pld.alloc_window_buffer(16)
+            data_buf = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             data = pld.window(data_buf, [256], dtype=pl.FP32)
             signal = pld.window(signal_buf, [4], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):
@@ -167,7 +167,7 @@ def test_implicit_host_allreduce_synthesizes_signal_then_lowers():
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
-            data_buf = pld.alloc_window_buffer(1024)
+            data_buf = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
             data = pld.window(data_buf, [256], dtype=pl.FP32)
             for r in pl.range(pld.world_size()):
                 self.chip_orch(data, device=r)
@@ -204,7 +204,7 @@ def test_return_implicit_host_allreduce_synthesizes_signal_then_lowers():
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
-            data_buf = pld.alloc_window_buffer(1024)
+            data_buf = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
             data = pld.window(data_buf, [256], dtype=pl.FP32)
             for r in pl.range(pld.world_size()):
                 self.chip_orch(data, device=r)
@@ -252,8 +252,8 @@ def test_return_explicit_host_allreduce_lowers_with_user_signal():
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
-            data_buf = pld.alloc_window_buffer(1024)
-            signal_buf = pld.alloc_window_buffer(16)
+            data_buf = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             data = pld.window(data_buf, [256], dtype=pl.FP32)
             signal = pld.window(signal_buf, [pld.world_size(), 1], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):
@@ -302,8 +302,8 @@ def test_host_allreduce_assign_result_var_carries_window_buffer():
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
-            data_buf = pld.alloc_window_buffer(1024)
-            signal_buf = pld.alloc_window_buffer(16)
+            data_buf = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             data = pld.window(data_buf, [256], dtype=pl.FP32)
             signal = pld.window(signal_buf, [4], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):
@@ -337,9 +337,9 @@ def test_host_allreduce_chained_assign_uses_remapped_result_var():
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
-            data_buf = pld.alloc_window_buffer(1024)
-            signal_buf = pld.alloc_window_buffer(16)
-            signal_buf_1 = pld.alloc_window_buffer(16)
+            data_buf = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            signal_buf_1 = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             data = pld.window(data_buf, [256], dtype=pl.FP32)
             signal = pld.window(signal_buf, [4], dtype=pl.INT32)
             signal_1 = pld.window(signal_buf_1, [4], dtype=pl.INT32)
@@ -380,9 +380,9 @@ def test_host_allreduce_resolves_non_innermost_comm_domain_scope():
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
-            data_buf = pld.alloc_window_buffer(1024)
-            signal_buf = pld.alloc_window_buffer(16)
-            other_buf = pld.alloc_window_buffer(512)
+            data_buf = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            other_buf = pld.alloc_window_buffer(128 * pl.FP32.get_byte())
             data = pld.window(data_buf, [256], dtype=pl.FP32)
             signal = pld.window(signal_buf, [4], dtype=pl.INT32)
             other = pld.window(other_buf, [128], dtype=pl.FP32)
@@ -418,8 +418,8 @@ def test_host_allreduce_rejects_static_signal_smaller_than_explicit_device_count
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
-            data_buf = pld.alloc_window_buffer(1024)
-            signal_buf = pld.alloc_window_buffer(4)
+            data_buf = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(pl.INT32.get_byte())
             data = pld.window(data_buf, [256], dtype=pl.FP32)
             signal = pld.window(signal_buf, [1], dtype=pl.INT32)
             self.chip_orch(data, device=0)
@@ -441,8 +441,8 @@ def test_host_allreduce_rejects_rank2_signal_with_dynamic_second_extent():
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
-            data_buf = pld.alloc_window_buffer(1024)
-            signal_buf = pld.alloc_window_buffer(16)
+            data_buf = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             width = pld.world_size()
             data = pld.window(data_buf, [256], dtype=pl.FP32)
             signal = pld.window(signal_buf, [pld.world_size(), width], dtype=pl.INT32)
@@ -465,8 +465,8 @@ def test_host_allreduce_rejects_unsupported_builtin_dtype_variant():
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
-            data_buf = pld.alloc_window_buffer(512)
-            signal_buf = pld.alloc_window_buffer(16)
+            data_buf = pld.alloc_window_buffer(256 * pl.FP16.get_byte())
+            signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             data = pld.window(data_buf, [256], dtype=pl.FP16)
             signal = pld.window(signal_buf, [4], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):
@@ -490,8 +490,8 @@ def test_host_barrier_lowers_to_builtin_world_size_loop():
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
-            data_buf = pld.alloc_window_buffer(1024)
-            signal_buf = pld.alloc_window_buffer(16)
+            data_buf = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             data = pld.window(data_buf, [256], dtype=pl.FP32)
             signal = pld.window(signal_buf, [4], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):
@@ -529,8 +529,8 @@ def test_host_broadcast_lowers_to_builtin_world_size_loop():
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
-            data_buf = pld.alloc_window_buffer(1024)
-            signal_buf = pld.alloc_window_buffer(16)
+            data_buf = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             data = pld.window(data_buf, [256], dtype=pl.FP32)
             signal = pld.window(signal_buf, [4], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):
@@ -569,8 +569,8 @@ def test_host_reduce_scatter_lowers_to_builtin_world_size_loop():
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
-            data_buf = pld.alloc_window_buffer(4096)
-            signal_buf = pld.alloc_window_buffer(16)
+            data_buf = pld.alloc_window_buffer(4 * 256 * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             data = pld.window(data_buf, [4, 256], dtype=pl.FP32)
             signal = pld.window(signal_buf, [4], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):
@@ -609,8 +609,8 @@ def test_host_allgather_lowers_to_builtin_world_size_loop():
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
-            data_buf = pld.alloc_window_buffer(4096)
-            signal_buf = pld.alloc_window_buffer(16)
+            data_buf = pld.alloc_window_buffer(4 * 256 * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             data = pld.window(data_buf, [4, 256], dtype=pl.FP32)
             signal = pld.window(signal_buf, [4], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):

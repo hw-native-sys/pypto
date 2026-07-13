@@ -66,6 +66,15 @@ class DataType:
             The size in bits of the data type
         """
 
+    def get_byte(self) -> int:
+        """
+        Get the size in bytes of this data type (ceil(get_bit() / 8)).
+        Returns 1 for sub-byte types (e.g., INT4, BOOL).
+
+        Returns:
+            The size in bytes of the data type
+        """
+
     def __hash__(self) -> int: ...
     def to_string(self) -> str:
         """

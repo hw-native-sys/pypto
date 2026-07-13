@@ -90,8 +90,8 @@ def _build_allgather_program(n_ranks: int):
             inputs: pl.Tensor[[nr, 1, SIZE], pl.FP32],
             outputs: pl.Out[pl.Tensor[[nr, 1, nr * SIZE], pl.FP32]],
         ) -> pl.Tensor[[nr, 1, nr * SIZE], pl.FP32]:
-            data_buf = pld.alloc_window_buffer(nr * SIZE * 4)
-            signal_buf = pld.alloc_window_buffer(nr * 4)
+            data_buf = pld.alloc_window_buffer(nr * SIZE * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(nr * pl.INT32.get_byte())
 
             for r in pl.range(pld.world_size()):
                 data = pld.window(data_buf, [nr, SIZE], dtype=pl.FP32)

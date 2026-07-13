@@ -110,8 +110,8 @@ def _build_allreduce_program(n_ranks: int):
             does not synthesise it; this matches the established pattern in
             ``test_l3_allreduce.py``.
             """
-            data_buf = pld.alloc_window_buffer(SIZE * 4)  # 1xSIZE x FP32 (4 bytes)
-            signal_buf = pld.alloc_window_buffer(pld.world_size() * 4)  # nr x 1 x INT32
+            data_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(pld.world_size() * pl.INT32.get_byte())
 
             for r in pl.range(pld.world_size()):
                 data = pld.window(data_buf, [1, SIZE], dtype=pl.FP32)

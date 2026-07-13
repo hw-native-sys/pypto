@@ -107,9 +107,9 @@ def _build_ring_get_program():
             inputs: pl.Tensor[[2, 1, SIZE], pl.FP32],
             outputs: pl.Out[pl.Tensor[[2, 1, SIZE], pl.FP32]],
         ) -> pl.Tensor[[2, 1, SIZE], pl.FP32]:
-            src_buf = pld.alloc_window_buffer(SIZE * 4)  # 1xSIZE x FP32
-            dst_buf = pld.alloc_window_buffer(SIZE * 4)
-            signal_buf = pld.alloc_window_buffer(4)  # 1x1 x INT32
+            src_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+            dst_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(pl.INT32.get_byte())  # 1x1 x INT32
 
             for r in pl.range(pld.world_size()):
                 src = pld.window(src_buf, [1, SIZE], dtype=pl.FP32)
@@ -172,9 +172,9 @@ def _build_row_get_program():
             inputs: pl.Tensor[[2, 2, SIZE], pl.FP32],
             outputs: pl.Out[pl.Tensor[[2, 1, SIZE], pl.FP32]],
         ) -> pl.Tensor[[2, 1, SIZE], pl.FP32]:
-            src_buf = pld.alloc_window_buffer(2 * SIZE * 4)
-            dst_buf = pld.alloc_window_buffer(2 * SIZE * 4)
-            signal_buf = pld.alloc_window_buffer(4)
+            src_buf = pld.alloc_window_buffer(2 * SIZE * pl.FP32.get_byte())
+            dst_buf = pld.alloc_window_buffer(2 * SIZE * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(pl.INT32.get_byte())
 
             for r in pl.range(pld.world_size()):
                 src = pld.window(src_buf, [2, SIZE], dtype=pl.FP32)

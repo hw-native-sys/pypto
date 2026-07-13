@@ -104,8 +104,8 @@ def _build_ring_remote_store_program():
             inputs: pl.Tensor[[2, 1, SIZE], pl.FP32],
             outputs: pl.Out[pl.Tensor[[2, 1, SIZE], pl.FP32]],
         ) -> pl.Tensor[[2, 1, SIZE], pl.FP32]:
-            dst_buf = pld.alloc_window_buffer(SIZE * 4)
-            signal_buf = pld.alloc_window_buffer(4)
+            dst_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(pl.INT32.get_byte())
 
             for r in pl.range(pld.world_size()):
                 dst = pld.window(dst_buf, [1, SIZE], dtype=pl.FP32)
@@ -189,8 +189,8 @@ def _build_subview_remote_store_program():
             inputs_high: pl.Tensor[[2, 1, HALF], pl.FP32],
             outputs: pl.Out[pl.Tensor[[2, 1, SIZE], pl.FP32]],
         ) -> pl.Tensor[[2, 1, SIZE], pl.FP32]:
-            dst_buf = pld.alloc_window_buffer(SIZE * 4)
-            signal_buf = pld.alloc_window_buffer(4)
+            dst_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(pl.INT32.get_byte())
 
             for r in pl.range(pld.world_size()):
                 dst = pld.window(dst_buf, [1, SIZE], dtype=pl.FP32)

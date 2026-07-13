@@ -59,6 +59,9 @@ void BindCore(nb::module_& m) {
            "Get the size in bits of this data type. Returns the actual bit size for sub-byte types (e.g., 4 "
            "bits "
            "for INT4).")
+      .def("get_byte", &DataType::GetByte,
+           "Get the size in bytes of this data type (ceil(get_bit() / 8)). Returns 1 for sub-byte types "
+           "(e.g., INT4, BOOL).")
       .def("to_string", &DataType::ToString, "Get a human-readable string name for this data type.")
       .def("to_c_type_string", &DataType::ToCTypeString,
            "Get C style type string for code generation (e.g., 'float', 'half', 'int32_t').")

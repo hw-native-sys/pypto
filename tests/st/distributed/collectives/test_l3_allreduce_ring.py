@@ -201,8 +201,8 @@ def _build_ring_allreduce_program(n_ranks: int):
             outputs: pl.Out[pl.Tensor[[n_ranks, 1, SIZE], pl.FP32]],
         ) -> pl.Tensor[[n_ranks, 1, SIZE], pl.FP32]:
             """Launch one chip orchestration per rank with shared window buffers."""
-            scratch_buf = pld.alloc_window_buffer(SIZE * 4)  # NR × chunk × FP32
-            signal_buf = pld.alloc_window_buffer(total_rounds * n_ranks * 4)  # rounds × NR × INT32
+            scratch_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(total_rounds * n_ranks * pl.INT32.get_byte())
 
             chunk_elems = SIZE // n_ranks
             for r in pl.range(n_ranks):

@@ -79,8 +79,8 @@ class HostTensorBarrier:
         inputs: pl.Tensor[[NR, 1, SIZE], pl.FP32],
         outputs: pl.Out[pl.Tensor[[NR, 1, SIZE], pl.FP32]],
     ) -> pl.Tensor[[NR, 1, SIZE], pl.FP32]:
-        data_buf = pld.alloc_window_buffer(SIZE * 4)
-        signal_buf = pld.alloc_window_buffer(pld.world_size() * 4)
+        data_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+        signal_buf = pld.alloc_window_buffer(pld.world_size() * pl.INT32.get_byte())
         signal = pld.window(signal_buf, [pld.world_size()], dtype=pl.INT32)
 
         for r in pl.range(pld.world_size()):

@@ -121,10 +121,10 @@ def _build_two_group_swap_program():
         ) -> pl.Tensor[[3, 1, SIZE], pl.FP32]:
             # Per-group window buffers land in distinct CommGroups because
             # MaterializeCommDomainScopes clusters by dispatch device subset.
-            scratch_a_buf = pld.alloc_window_buffer(SIZE * 4)
-            signal_a_buf = pld.alloc_window_buffer(4)
-            scratch_b_buf = pld.alloc_window_buffer(SIZE * 4)
-            signal_b_buf = pld.alloc_window_buffer(4)
+            scratch_a_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+            signal_a_buf = pld.alloc_window_buffer(pl.INT32.get_byte())
+            scratch_b_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+            signal_b_buf = pld.alloc_window_buffer(pl.INT32.get_byte())
 
             # Group A: devices {0, 1}. Within-group rank == r, peer = 1 - r.
             for r in pl.range(2):

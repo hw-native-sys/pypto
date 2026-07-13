@@ -183,6 +183,16 @@ class DataType {
   }
 
   /**
+   * @brief Get the size in bytes of this data type
+   *
+   * Returns ceil(GetBit() / 8). For sub-byte types (INT4, UINT4, FP4, HF4, BOOL)
+   * this returns 1 since window buffers operate at byte granularity.
+   *
+   * @return Size in bytes
+   */
+  [[nodiscard]] size_t GetByte() const { return (GetBit() + 7) / 8; }
+
+  /**
    * @brief Get a human-readable string name for this data type
    *
    * @return String representation of the data type

@@ -126,8 +126,8 @@ class AllToAllMesh:
         inputs: pl.Tensor[[NR, NR, SIZE], pl.FP32],
         outputs: pl.Out[pl.Tensor[[NR, NR, SIZE], pl.FP32]],
     ) -> pl.Tensor[[NR, NR, SIZE], pl.FP32]:
-        data_buf = pld.alloc_window_buffer(NR * SIZE * 4)
-        signal_buf = pld.alloc_window_buffer(NR * 4)
+        data_buf = pld.alloc_window_buffer(NR * SIZE * pl.FP32.get_byte())
+        signal_buf = pld.alloc_window_buffer(NR * pl.INT32.get_byte())
 
         for r in pl.range(pld.world_size()):
             data = pld.window(data_buf, [NR, SIZE], dtype=pl.FP32)

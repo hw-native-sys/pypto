@@ -82,8 +82,8 @@ class HostTensorBroadcast:
         inputs: pl.Tensor[[NR, 1, SIZE], pl.FP32],
         outputs: pl.Out[pl.Tensor[[NR, 1, SIZE], pl.FP32]],
     ) -> pl.Tensor[[NR, 1, SIZE], pl.FP32]:
-        data_buf = pld.alloc_window_buffer(SIZE * 4)
-        signal_buf = pld.alloc_window_buffer(pld.world_size() * 4)
+        data_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+        signal_buf = pld.alloc_window_buffer(pld.world_size() * pl.INT32.get_byte())
 
         for r in pl.range(pld.world_size()):
             data = pld.window(data_buf, [1, SIZE], dtype=pl.FP32)

@@ -5286,6 +5286,14 @@ class ASTParser:
         if len(attrs) >= 2 and attrs[0] == "pl" and attrs[1] == "const":
             return self._parse_typed_constant(call)
 
+        # pl.<DataType>.get_byte() — fold into compile-time int constant.
+        # e.g. ``pl.FP32.get_byte()`` → 4, ``pl.INT32.get_byte()`` → 4.
+        # The call has no side effects (GetByte is a pure accessor) so folding
+        # at parse time is safe and lets it work directly inside traced bodies
+        # without a separate import of the _window_byte_constants module.
+        if len(attrs) == 3 and attrs[0] == "pl" and attrs[-1] == "get_byte":
+            return self._parse_dtype_get_byte(attrs[1], call)
+
         # pl.{operation} (2-segment, unified dispatch or promoted ops)
         if len(attrs) >= 2 and attrs[0] == "pl" and attrs[1] not in ("tensor", "tile", "system", "array"):
             op_name = attrs[1]
@@ -7279,6 +7287,50 @@ class ASTParser:
             return ir.ConstFloat(value, dtype, span)
         else:
             return ir.ConstInt(value, dtype, span)
+
+    def _parse_dtype_get_byte(self, dtype_name: str, call: ast.Call) -> ir.Expr:
+        """Parse ``pl.<DataType>.get_byte()`` as a compile-time int constant.
+
+        ``DataType.get_byte()`` is a pure accessor returning ``ceil(bit_width / 8)``
+        with no side effects, so folding at parse time is safe. This lets traced
+        ``@pl.function`` / ``@pl.jit.host`` bodies use the canonical API directly:
+        ``pld.alloc_window_buffer(256 * pl.FP32.get_byte())`` works without an
+        external import.
+
+        Args:
+            dtype_name: The DataType attribute name (e.g. "FP32", "INT32", "BF16").
+            call: The Call AST node (for span tracking).
+
+        Returns:
+            ``ir.ConstInt(nbytes, INDEX)`` with the byte-size of the data type.
+        """
+        span = self.span_tracker.get_span(call)
+
+        # Lazily build the mapping from dtype attribute name → get_byte() value.
+        # Module-level caching via a class attribute avoids re-scanning on every
+        # call site within a single parser instance (a function body may contain
+        # many alloc_window_buffer calls).
+        try:
+            cache = ASTParser._dtype_byte_cache  # type: ignore[attr-defined]
+        except AttributeError:
+            import pypto.language as _pl  # noqa: PLC0415 (lazy import of DataType constants)
+
+            cache: dict[str, int] = {}
+            for attr_name in dir(_pl):
+                val = getattr(_pl, attr_name)
+                if isinstance(val, DataType):
+                    cache[attr_name] = val.get_byte()
+            ASTParser._dtype_byte_cache = cache  # type: ignore[attr-defined]
+
+        if dtype_name not in cache:
+            known = ", ".join(sorted(cache.keys()))
+            raise ParserTypeError(
+                f"Unknown DataType '{dtype_name}' in pl.{dtype_name}.get_byte()",
+                span=span,
+                hint=f"Valid DataType names: {known}",
+            )
+
+        return ir.ConstInt(cache[dtype_name], DataType.INDEX, span)
 
     def parse_attribute(self, attr: ast.Attribute) -> ir.Expr:
         """Parse attribute access.

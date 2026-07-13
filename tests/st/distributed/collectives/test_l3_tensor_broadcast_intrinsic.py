@@ -95,8 +95,8 @@ def _build_broadcast_program(n_ranks: int):
             inputs: pl.Tensor[[nr, 1, SIZE], pl.FP32],
             outputs: pl.Out[pl.Tensor[[nr, 1, SIZE], pl.FP32]],
         ) -> pl.Tensor[[nr, 1, SIZE], pl.FP32]:
-            data_buf = pld.alloc_window_buffer(SIZE * 4)
-            signal_buf = pld.alloc_window_buffer(nr * 4)  # nr x 1 x INT32
+            data_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(nr * pl.INT32.get_byte())
 
             for r in pl.range(pld.world_size()):
                 data = pld.window(data_buf, [1, SIZE], dtype=pl.FP32)

@@ -94,7 +94,7 @@ def _build_window_source_slice_program():
             inputs: pl.Tensor[[2, N, W], pl.FP32],
             outputs: pl.Out[pl.Tensor[[2, HALF, W], pl.FP32]],
         ) -> pl.Tensor[[2, HALF, W], pl.FP32]:
-            win_buf = pld.alloc_window_buffer(N * W * 4)  # N x W x FP32
+            win_buf = pld.alloc_window_buffer(N * W * pl.FP32.get_byte())
 
             for r in pl.range(pld.world_size()):
                 win = pld.window(win_buf, [N, W], dtype=pl.FP32)
@@ -144,7 +144,7 @@ def _build_window_target_slice_program():
             inputs: pl.Tensor[[2, N, W], pl.FP32],
             outputs: pl.Out[pl.Tensor[[2, N, W], pl.FP32]],
         ) -> pl.Tensor[[2, N, W], pl.FP32]:
-            win_buf = pld.alloc_window_buffer(N * W * 4)
+            win_buf = pld.alloc_window_buffer(N * W * pl.FP32.get_byte())
 
             for r in pl.range(pld.world_size()):
                 win = pld.window(win_buf, [N, W], dtype=pl.FP32)
@@ -200,7 +200,7 @@ def _build_window_compute_reduce_program():
             routed_in: pl.Tensor[[2, N, W], pl.FP16],
             outputs: pl.Out[pl.Tensor[[2, N, W], pl.FP32]],
         ) -> pl.Tensor[[2, N, W], pl.FP32]:
-            win_buf = pld.alloc_window_buffer(N * W * 2)  # N x W x FP16
+            win_buf = pld.alloc_window_buffer(N * W * pl.FP16.get_byte())
 
             for r in pl.range(pld.world_size()):
                 win = pld.window(win_buf, [N, W], dtype=pl.FP16)

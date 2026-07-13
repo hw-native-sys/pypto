@@ -116,8 +116,8 @@ def _build_ring_allreduce_program(n_ranks: int):
             ``alloc_window_buffer`` zero-initialises so per-round
             ``AtomicAdd(0→1)`` / ``WaitGe(1)`` works without explicit reset.
             """
-            data_buf = pld.alloc_window_buffer(SIZE * 4)  # 1 x SIZE x FP32
-            signal_buf = pld.alloc_window_buffer(total_rounds * nr * 4)  # rounds × NR × INT32
+            data_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(total_rounds * nr * pl.INT32.get_byte())
 
             for r in pl.range(nr):
                 data = pld.window(data_buf, [1, SIZE], dtype=pl.FP32)

@@ -108,7 +108,7 @@ def _build_gemm_program():
             b: pl.Tensor[[K, N], pl.FP32],
             c: pl.Out[pl.Tensor[[2, M0, N], pl.FP32]],
         ) -> pl.Tensor[[2, M0, N], pl.FP32]:
-            scratch_buf = pld.alloc_window_buffer(COMM_ANCHOR_COLS * 4)  # 1x8 x INT32 (32 B)
+            scratch_buf = pld.alloc_window_buffer(COMM_ANCHOR_COLS * pl.INT32.get_byte())
             for r in pl.range(pld.world_size()):
                 scratch = pld.window(scratch_buf, [1, COMM_ANCHOR_COLS], dtype=pl.INT32)
                 self.chip_orch(a[r], b, c[r], scratch, device=r)

@@ -28,7 +28,7 @@ cross-rank synchronisation primitives:
 Typical use sites for ``world_size``:
 
 * loop bounds: ``for r in pl.range(pld.world_size()): ...``
-* allocation sizes (in bytes): ``pld.tensor.alloc_window_buffer(pld.world_size() * 4)``
+* allocation sizes (in bytes): ``pld.tensor.alloc_window_buffer(pld.world_size() * pl.INT32.get_byte())``
 * per-rank tensor shapes:
   ``pld.tensor.window(buf, [pld.world_size()], dtype=pl.INT32)``
 """

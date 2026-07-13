@@ -469,14 +469,14 @@ def _build_ep_dispatch_combine_program(n_ranks: int):
             # Window allocations — one buffer per cross-rank slot. Barrier
             # signals are sized [N_RANKS, 1] to host per-src cells, matching
             # count_done_sig[N] / data_done_sig[N] / combine_done_sig[N].
-            pub_counts_buf = pld.alloc_window_buffer(N_RANKS * N_RANKS * L * 4)  # INT32
-            count_done_buf = pld.alloc_window_buffer(N_RANKS * 4)
-            recv_x_buf = pld.alloc_window_buffer(L * R * D * 2)  # BF16
-            recv_w_buf = pld.alloc_window_buffer(L * R * W_PAD * 4)  # FP32
-            recv_idx_buf = pld.alloc_window_buffer(L * R * IDX_PAD * 4)  # INT32
-            data_done_buf = pld.alloc_window_buffer(N_RANKS * 4)
-            routed_y_buf_buf = pld.alloc_window_buffer(N_ROUTES * D * 2)  # BF16
-            combine_done_buf = pld.alloc_window_buffer(N_RANKS * 4)
+            pub_counts_buf = pld.alloc_window_buffer(N_RANKS * N_RANKS * L * pl.INT32.get_byte())
+            count_done_buf = pld.alloc_window_buffer(N_RANKS * pl.INT32.get_byte())
+            recv_x_buf = pld.alloc_window_buffer(L * R * D * pl.BF16.get_byte())
+            recv_w_buf = pld.alloc_window_buffer(L * R * W_PAD * pl.FP32.get_byte())
+            recv_idx_buf = pld.alloc_window_buffer(L * R * IDX_PAD * pl.INT32.get_byte())
+            data_done_buf = pld.alloc_window_buffer(N_RANKS * pl.INT32.get_byte())
+            routed_y_buf_buf = pld.alloc_window_buffer(N_ROUTES * D * pl.BF16.get_byte())
+            combine_done_buf = pld.alloc_window_buffer(N_RANKS * pl.INT32.get_byte())
 
             for r in pl.range(pld.world_size()):
                 pub_counts = pld.window(pub_counts_buf, [N_RANKS * N_RANKS, L], dtype=pl.INT32)

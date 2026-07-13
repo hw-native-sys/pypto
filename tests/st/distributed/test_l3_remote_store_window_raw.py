@@ -95,8 +95,8 @@ def _build_repro():
             srcs: pl.Tensor[[N_RANKS, N_RANKS, D], pl.BF16],
             outs: pl.Out[pl.Tensor[[N_RANKS, N_RANKS, D], pl.BF16]],
         ) -> pl.Tensor[[N_RANKS, N_RANKS, D], pl.BF16]:
-            win_buf = pld.alloc_window_buffer(N_RANKS * D * 2)  # BF16 bytes
-            done_buf = pld.alloc_window_buffer(N_RANKS * 4)  # INT32 slots
+            win_buf = pld.alloc_window_buffer(N_RANKS * D * pl.BF16.get_byte())
+            done_buf = pld.alloc_window_buffer(N_RANKS * pl.INT32.get_byte())
             for r in pl.range(pld.world_size()):
                 win = pld.window(win_buf, [N_RANKS, D], dtype=pl.BF16)
                 done = pld.window(done_buf, [N_RANKS, 1], dtype=pl.INT32)

@@ -42,7 +42,7 @@ For every host-orchestration function:
 
 ```python
 __allreduce_signal_world_size_0 = pld.system.world_size()
-__allreduce_signal_buf_0: pl.Ptr = pld.tensor.alloc_window_buffer(__allreduce_signal_world_size_0 * 4)
+__allreduce_signal_buf_0: pl.Ptr = pld.tensor.alloc_window_buffer(__allreduce_signal_world_size_0 * pl.INT32.get_byte())
 __allreduce_signal_0 = pld.tensor.window(
     __allreduce_signal_buf_0,
     [__allreduce_signal_world_size_0, 1],

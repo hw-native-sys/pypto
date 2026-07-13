@@ -109,7 +109,7 @@ def test_dist_tensor_formal_emits_continuous_tensor_make():
             inputs: pl.Tensor[[2, SIZE], pl.FP32],
             outputs: pl.Out[pl.Tensor[[2, SIZE], pl.FP32]],
         ) -> pl.Tensor[[2, SIZE], pl.FP32]:
-            data_buf = pld.alloc_window_buffer(SIZE * 4)
+            data_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
             data = pld.window(data_buf, [SIZE], dtype=pl.FP32)
             for r in pl.range(pld.world_size()):
                 # Manually hoist the per-rank slices so the tensor.slice
@@ -155,8 +155,8 @@ def test_two_dist_tensor_formals_emit_two_explicit_ctx_scalars():
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self) -> pl.Tensor[[1], pl.INT32]:
-            data_buf = pld.alloc_window_buffer(SIZE * 4)
-            signal_buf = pld.alloc_window_buffer(4)
+            data_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(pl.INT32.get_byte())
             data = pld.window(data_buf, [SIZE], dtype=pl.FP32)
             signal = pld.window(signal_buf, [1], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):
@@ -196,7 +196,7 @@ def test_wrapper_forwards_explicit_comm_ctx_param_as_scalar_name():
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self) -> pl.Tensor[[SIZE], pl.FP32]:
-            data_buf = pld.alloc_window_buffer(SIZE * 4)
+            data_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
             data = pld.window(data_buf, [SIZE], dtype=pl.FP32)
             for r in pl.range(pld.world_size()):
                 self.chip_wrapper(data, device=r)
@@ -230,7 +230,7 @@ def test_const_device_kwarg_renders_literal_worker():
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self, out: pl.Out[pl.Tensor[[SIZE], pl.FP32]]) -> pl.Tensor[[SIZE], pl.FP32]:
-            data_buf = pld.alloc_window_buffer(SIZE * 4)
+            data_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
             data = pld.window(data_buf, [SIZE], dtype=pl.FP32)
             result: pl.Tensor[[SIZE], pl.FP32] = self.chip_orch(out, data, device=0)
             return result
@@ -255,7 +255,7 @@ def test_comm_group_program_emits_allocate_domain_with_block():
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self) -> pl.Tensor[[SIZE], pl.FP32]:
-            data_buf = pld.alloc_window_buffer(SIZE * 4)
+            data_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
             data = pld.window(data_buf, [SIZE], dtype=pl.FP32)
             for r in pl.range(pld.world_size()):
                 self.chip_orch(data, device=r)
@@ -270,10 +270,11 @@ def test_comm_group_program_emits_allocate_domain_with_block():
     # orch_fn time against the runner-bound `world_size` kwarg.
     assert re.search(r"workers=\[\*range\(world_size\)\],", code), code
     # window_size is the sum of all slot nbytes expressions, each parenthesised.
-    # Single slot of 256 bytes → `window_size=(256),`.
-    assert re.search(r"window_size=\(256\),", code), code  # 64 * 4
+    # Single slot → `window_size=((64 * 4)),` (the inner parens come from the
+    # Mul expression the parser produces for ``SIZE * pl.FP32.get_byte()``).
+    assert re.search(r"window_size=\(\(64 \* 4\)\),", code), code
     assert re.search(
-        r'CommBufferSpec\(name="data_buf", dtype="opaque", count=256, nbytes=256\),',
+        r'CommBufferSpec\(name="data_buf", dtype="opaque", count=\(64 \* 4\), nbytes=\(64 \* 4\)\),',
         code,
     ), code
     assert "as __comm_d0:" in code, code
@@ -326,7 +327,7 @@ def test_world_size_lowers_to_kwarg_in_expression_context():
     """``pld.system.world_size()`` is recognised by the expression visitor
     regardless of where it appears (loop bound, allocation arg, etc.).
 
-    Both the alloc-size form (``alloc_window_buffer(pld.world_size() * 4)`` —
+    Both the alloc-size form (``alloc_window_buffer(pld.world_size() * pl.INT32.get_byte())`` —
     flows through ``EmitCommDomainAllocations``' per-slot ``VisitExpr``) and
     the loop-bound form (``pl.range(pld.world_size())``) must lower to a bare
     reference to the ``world_size`` kwarg in the emitted python.
@@ -341,7 +342,7 @@ def test_world_size_lowers_to_kwarg_in_expression_context():
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self) -> pl.Tensor[[1], pl.INT32]:
             # alloc size threading pld.world_size() — exercises the alloc-arg path.
-            buf = pld.alloc_window_buffer(pld.world_size() * 4)
+            buf = pld.alloc_window_buffer(pld.world_size() * pl.INT32.get_byte())
             signal = pld.window(buf, [1], dtype=pl.INT32)
             # loop bound — exercises the for-stop path.
             for r in pl.range(pld.world_size()):
@@ -380,7 +381,7 @@ def test_hoisted_world_size_temp_in_alloc_size_lowers_to_kwarg():
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self) -> pl.Tensor[[1], pl.INT32]:
             n = pld.world_size()
-            buf = pld.alloc_window_buffer(n * 4)
+            buf = pld.alloc_window_buffer(n * pl.INT32.get_byte())
             signal = pld.window(buf, [1], dtype=pl.INT32)
             for r in pl.range(n):
                 self.chip_orch(signal, device=r)
@@ -422,8 +423,8 @@ def test_two_groups_emit_nested_allocate_domain():
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
-            buf_a = pld.alloc_window_buffer(SIZE * 4)
-            buf_b = pld.alloc_window_buffer(SIZE * 4)
+            buf_a = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+            buf_b = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
             a = pld.window(buf_a, [SIZE], dtype=pl.FP32)
             b = pld.window(buf_b, [SIZE], dtype=pl.FP32)
             self.chip_orch_a(a, device=0)
@@ -493,8 +494,8 @@ def test_two_groups_handle_routing_is_per_dispatch_not_state_bleed():
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
-            buf_a = pld.alloc_window_buffer(SIZE * 4)
-            buf_b = pld.alloc_window_buffer(SIZE * 4)
+            buf_a = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+            buf_b = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
             a = pld.window(buf_a, [SIZE], dtype=pl.FP32)
             b = pld.window(buf_b, [SIZE], dtype=pl.FP32)
             # buf_a → group on {0}; buf_b → group on {2}. Distinct device
@@ -533,8 +534,8 @@ def test_host_allreduce_builtin_codegen_uses_next_level_callable_key():
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
-            data_buf = pld.alloc_window_buffer(SIZE * 4)
-            signal_buf = pld.alloc_window_buffer(pld.world_size() * 4)
+            data_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(pld.world_size() * pl.INT32.get_byte())
             data = pld.window(data_buf, [SIZE], dtype=pl.FP32)
             signal = pld.window(signal_buf, [pld.world_size()], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):
@@ -579,7 +580,7 @@ def test_implicit_host_allreduce_builtin_codegen_materializes_signal():
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
-            data_buf = pld.alloc_window_buffer(SIZE * 4)
+            data_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
             data = pld.window(data_buf, [SIZE], dtype=pl.FP32)
             for r in pl.range(pld.world_size()):
                 self.chip_orch(data, device=r)
@@ -611,9 +612,9 @@ def test_host_allreduce_builtin_variant_is_recorded_once():
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
-            data_buf = pld.alloc_window_buffer(SIZE * 4)
-            signal_buf = pld.alloc_window_buffer(pld.world_size() * 4)
-            signal_buf_1 = pld.alloc_window_buffer(pld.world_size() * 4)
+            data_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(pld.world_size() * pl.INT32.get_byte())
+            signal_buf_1 = pld.alloc_window_buffer(pld.world_size() * pl.INT32.get_byte())
             data = pld.window(data_buf, [SIZE], dtype=pl.FP32)
             signal = pld.window(signal_buf, [pld.world_size()], dtype=pl.INT32)
             signal_1 = pld.window(signal_buf_1, [pld.world_size()], dtype=pl.INT32)
@@ -638,8 +639,8 @@ def test_backend_materializes_builtin_next_level_files(tmp_path):
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
-            data_buf = pld.alloc_window_buffer(SIZE * 4)
-            signal_buf = pld.alloc_window_buffer(pld.world_size() * 4)
+            data_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(pld.world_size() * pl.INT32.get_byte())
             data = pld.window(data_buf, [SIZE], dtype=pl.FP32)
             signal = pld.window(signal_buf, [pld.world_size()], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):
@@ -757,8 +758,8 @@ def test_backend_materializes_barrier_next_level_files(tmp_path):
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
-            data_buf = pld.alloc_window_buffer(SIZE * 4)
-            signal_buf = pld.alloc_window_buffer(SIZE * 4)
+            data_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(SIZE * pl.INT32.get_byte())
             data = pld.window(data_buf, [SIZE], dtype=pl.FP32)
             signal = pld.window(signal_buf, [SIZE], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):
@@ -786,8 +787,8 @@ def test_backend_materializes_broadcast_next_level_files(tmp_path):
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
-            data_buf = pld.alloc_window_buffer(SIZE * 4)
-            signal_buf = pld.alloc_window_buffer(SIZE * 4)
+            data_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(SIZE * pl.INT32.get_byte())
             data = pld.window(data_buf, [SIZE], dtype=pl.FP32)
             signal = pld.window(signal_buf, [SIZE], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):
@@ -817,8 +818,8 @@ def test_backend_materializes_reduce_scatter_next_level_files(tmp_path):
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
-            data_buf = pld.alloc_window_buffer(4 * SIZE * 4)
-            signal_buf = pld.alloc_window_buffer(SIZE * 4)
+            data_buf = pld.alloc_window_buffer(4 * SIZE * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(SIZE * pl.INT32.get_byte())
             data = pld.window(data_buf, [4, SIZE], dtype=pl.FP32)
             signal = pld.window(signal_buf, [SIZE], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):
@@ -848,8 +849,8 @@ def test_backend_materializes_allgather_next_level_files(tmp_path):
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
-            data_buf = pld.alloc_window_buffer(4 * SIZE * 4)
-            signal_buf = pld.alloc_window_buffer(SIZE * 4)
+            data_buf = pld.alloc_window_buffer(4 * SIZE * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(SIZE * pl.INT32.get_byte())
             data = pld.window(data_buf, [4, SIZE], dtype=pl.FP32)
             signal = pld.window(signal_buf, [SIZE], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):
