@@ -1044,7 +1044,8 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
   // runs ConvertTensorToTileOps before LowerCompositeOps, so local_data may
   // already be converted to a TileType.
   INTERNAL_CHECK_SPAN(As<TensorType>(local_data->GetType()) || As<TileType>(local_data->GetType()), span)
-      << "pld.tensor.allgather local_data must be TensorType or TileType, got " << local_data->GetType()->TypeName();
+      << "pld.tensor.allgather local_data must be TensorType or TileType, got "
+      << local_data->GetType()->TypeName();
   auto target_type = As<DistributedTensorType>(target->GetType());
   INTERNAL_CHECK_SPAN(target_type, span)
       << "pld.tensor.allgather target must be DistributedTensorType (deducer-rejected otherwise)";
