@@ -299,7 +299,9 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> PlanWithStandaloneDsa(
     const FunctionPtr& func, const MemoryAllocatorPolicy& policy,
     const ReservedEndBySpace& reserved_end_by_space, const std::vector<MemRefWithSpace>& memrefs,
     const std::optional<std::string>& export_directory) {
-  const AllocationPlan allocation_plan = ComputeAllocationPlan(func);
+  const std::map<MemorySpace, uint64_t> reserved_end_by_space_ordered(reserved_end_by_space.begin(),
+                                                                      reserved_end_by_space.end());
+  const AllocationPlan allocation_plan = ComputeAllocationPlan(func, reserved_end_by_space_ordered);
   if (allocation_plan.intervals.empty()) return {};
 
   std::unordered_map<MemorySpace, uint64_t> pool_caps;

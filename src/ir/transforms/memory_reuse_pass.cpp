@@ -1674,7 +1674,8 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
     const std::map<const Var*, std::vector<std::pair<int32_t, int32_t>>>& pipeline_membership,
     const std::set<const Var*>& pipeline_load_tiles,
     const std::map<MemorySpace, uint64_t>& reserved_end_by_space, const FunctionPtr& func,
-    std::vector<Diagnostic>* out_hints) {
+    std::vector<Diagnostic>* out_hints,
+    std::map<std::pair<MemorySpace, int32_t>, int32_t>* out_pipeline_depths = nullptr) {
   std::map<VarPtr, VarPtr> reuse_map;
 
   // Members of a sharing group (the vars that already physically share one base).
@@ -2139,6 +2140,17 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
       }
       out_hints->emplace_back(DiagnosticSeverity::PerfHint, "MemoryReuse", 0, "PH-MR-001", msg.str(),
                               func ? func->span_ : Span::unknown());
+    }
+  }
+
+  if (out_pipeline_depths != nullptr) {
+    *out_pipeline_depths = group_depth;
+    // A pathological shed-budget exhaustion switches the whole space to the
+    // legacy predicate. That predicate has no single residue count, so export
+    // the conservative depth-one contract instead of claiming depths that the
+    // dry-run packer did not realize.
+    for (auto& [key, depth] : *out_pipeline_depths) {
+      if (force_legacy_spaces.count(key.first) != 0) depth = 1;
     }
   }
 
@@ -2986,7 +2998,8 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
 // exact per-allocation intervals + pipeline-clone separations this pass computes,
 // so both plan from identical liveness. ComputeLifetimes has internal linkage but
 // is visible in this TU; PipelineMembershipsConflict comes from utils/attrs.h.
-AllocationPlan ComputeAllocationPlan(const FunctionPtr& func) {
+AllocationPlan ComputeAllocationPlan(const FunctionPtr& func,
+                                     const std::map<MemorySpace, uint64_t>& reserved_end_by_space) {
   auto analysis = ComputeLifetimes(func->body_);
   AllocationPlan plan;
   plan.intervals = std::move(analysis.lifetimes);
@@ -3010,16 +3023,31 @@ AllocationPlan ComputeAllocationPlan(const FunctionPtr& func) {
     if (mr.has_value() && mr.value()) base_to_index[mr.value()->base_.get()] = i;
   }
 
-  // (1) Pipeline double-buffer separations, capacity-gated (#1949 core). Within a
-  // pipeline group, keep clones in distinct residues mod F_g apart, where
-  // F_g = max(1, min(depth, floor(cap/slot))) is the max affordable
-  // double-buffering depth. F_g == depth is exact double-buffering; F_g < depth
-  // means capacity forces some clones to share (the solver then reuses the
-  // lifetime-disjoint same-residue clones). Unknown cap (no backend) => full
-  // depth (no cap to overflow). Same-space only.
+  // Reuse the production packer's exact, reserved-aware whole-space shed.
+  // This is a dry run: only its achieved per-group residue counts are kept;
+  // opportunistic MemRef coalescing remains the standalone solver's job.
+  HazardInputs hazard;
+  if (NeedsLoadTpopHazardGuard(func)) {
+    HazardInputCollector collector;
+    collector.VisitStmt(func->body_);
+    hazard = collector.Take();
+  }
+  ForbidAliasCollector forbid_collector(analysis.var_sharing_groups);
+  forbid_collector.VisitStmt(func->body_);
+  const ForbidAliasMap forbid_alias = forbid_collector.Take();
+  std::map<std::pair<MemorySpace, int32_t>, int32_t> achieved_pipeline_depths;
+  static_cast<void>(IdentifyReuseOpportunities(
+      intervals, hazard, forbid_alias, analysis.phi_family_ids, analysis.var_sharing_groups,
+      analysis.var_liveness, analysis.pipeline_membership, analysis.pipeline_load_tiles,
+      reserved_end_by_space, func, nullptr, &achieved_pipeline_depths));
+
+  // (1) Pipeline double-buffer separations. Within a pipeline group, keep
+  // clones in distinct residues modulo the production MemoryReuse packer's
+  // achieved whole-space depth. Its dry run accounts for reservations,
+  // alignment, co-resident tiles, and other groups before DSA constraints are
+  // materialized. Same-space only.
   const auto& pm = analysis.pipeline_membership;
   {
-    const backend::Backend* be = backend::BackendConfig::IsConfigured() ? backend::GetBackend() : nullptr;
     using GroupKey = std::pair<MemorySpace, int32_t>;
     std::map<GroupKey, uint64_t> group_slot;  // (space, group) -> max member size
     // (space, group) -> stage -> interval indices. Bucketing by stage/residue
@@ -3040,12 +3068,11 @@ AllocationPlan ComputeAllocationPlan(const FunctionPtr& func) {
       INTERNAL_CHECK(members_by_stage.size() <= static_cast<size_t>(std::numeric_limits<int32_t>::max()))
           << "Pipeline group has too many distinct stages for DSA export";
       const int32_t depth = static_cast<int32_t>(members_by_stage.size());
-      const uint64_t cap = be != nullptr ? be->GetMemSize(key.first) : 0;
       const uint64_t slot = group_slot[key];
-      int32_t fg = depth;  // unknown cap => no gating
-      if (cap != 0 && slot != 0) {
-        fg = static_cast<int32_t>(std::max<uint64_t>(1, std::min<uint64_t>(depth, cap / slot)));
-      }
+      const auto achieved = achieved_pipeline_depths.find(key);
+      const int32_t fg = achieved == achieved_pipeline_depths.end()
+                             ? depth
+                             : std::max<int32_t>(1, std::min<int32_t>(depth, achieved->second));
 
       std::map<int32_t, std::vector<size_t>> members_by_residue;
       PipelineAllocationGroup exported_group;
@@ -3084,10 +3111,6 @@ AllocationPlan ComputeAllocationPlan(const FunctionPtr& func) {
   // empty off-910B). Directional: a writer whose def coincides with a load-derived
   // input's last use, and which consumes a tpop value, must not reuse that input.
   if (NeedsLoadTpopHazardGuard(func)) {
-    HazardInputCollector collector;
-    collector.VisitStmt(func->body_);
-    const HazardInputs hazard = collector.Take();
-
     std::map<int, std::vector<size_t>> writers_by_def;
     std::map<int, std::vector<size_t>> inputs_by_last_use;
     for (size_t i = 0; i < intervals.size(); ++i) {
@@ -3114,9 +3137,6 @@ AllocationPlan ComputeAllocationPlan(const FunctionPtr& func) {
   // maps a writer's representative to the operand Vars its buffer must avoid; each
   // operand resolves (via base_ identity — no reuse chain exists pre-solve) to an
   // allocation, which is kept apart from the writer.
-  ForbidAliasCollector forbid_collector(analysis.var_sharing_groups);
-  forbid_collector.VisitStmt(func->body_);
-  const ForbidAliasMap forbid_alias = forbid_collector.Take();
   for (size_t i = 0; i < intervals.size(); ++i) {
     auto fa = forbid_alias.find(intervals[i].variable.get());
     if (fa == forbid_alias.end()) continue;

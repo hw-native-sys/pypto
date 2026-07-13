@@ -52,6 +52,7 @@ from harness.core.test_runner import (  # noqa: E402
     start_pipeline,
 )
 from pypto import LogLevel, set_log_level  # noqa: E402
+from pypto.pypto_core import passes  # noqa: E402
 from pypto.runtime.runner import RunConfig  # noqa: E402
 
 # Temp directories created for pre-compilation (when --save-kernels is not set).
@@ -111,6 +112,33 @@ def pytest_addoption(parser):
         default="Default",
         choices=["Default"],
         help="Optimization strategy for PyPTO pass pipeline (default: Default)",
+    )
+    parser.addoption(
+        "--memory-planner",
+        action="store",
+        default="pypto",
+        choices=["pypto", "dsa", "ptoas"],
+        help="Suite-wide on-chip memory planner (default: pypto)",
+    )
+    parser.addoption(
+        "--dsa-export-dir",
+        action="store",
+        default=None,
+        help="Optional base directory for per-test schema-v1 DSA corpus exports",
+    )
+    parser.addoption(
+        "--fuzz-count",
+        action="store",
+        default=10,
+        type=int,
+        help="Number of fuzz test iterations (default: 10)",
+    )
+    parser.addoption(
+        "--fuzz-seed",
+        action="store",
+        default=None,
+        type=int,
+        help="Random seed for fuzz tests (default: random)",
     )
     parser.addoption(
         "--kernels-dir",
@@ -421,6 +449,15 @@ def test_config(request) -> RunConfig:
 
     platform_filter = _parse_platform_filter(request.config.getoption("--platform"))
     fallback_platform = platform_filter[0] if platform_filter else "a2a3"
+    memory_planner = {
+        "pypto": passes.MemoryPlanner.PYPTO,
+        "dsa": passes.MemoryPlanner.DSA,
+        "ptoas": passes.MemoryPlanner.PTOAS,
+    }[request.config.getoption("--memory-planner")]
+    if memory_planner == passes.MemoryPlanner.DSA and not passes.is_dsa_solver_available():
+        raise pytest.UsageError(
+            "--memory-planner=dsa requires a PyPTO build configured with PYPTO_ENABLE_DSA_SOLVER"
+        )
 
     return RunConfig(
         platform=fallback_platform,
@@ -435,6 +472,8 @@ def test_config(request) -> RunConfig:
         enable_dep_gen=request.config.getoption("--enable-dep-gen"),
         enable_scope_stats=request.config.getoption("--enable-scope-stats"),
         analyze_auto_scopes_for_deps=request.config.getoption("--analyze-auto-scopes-for-deps"),
+        memory_planner=memory_planner,
+        dsa_export_dir=request.config.getoption("--dsa-export-dir"),
     )
 
 
@@ -794,6 +833,16 @@ def pytest_collection_finish(session: pytest.Session) -> None:
     enable_dep_gen: bool = session.config.getoption("--enable-dep-gen")
     enable_scope_stats: bool = session.config.getoption("--enable-scope-stats")
     analyze_auto_scopes_for_deps: bool = session.config.getoption("--analyze-auto-scopes-for-deps")
+    memory_planner = {
+        "pypto": passes.MemoryPlanner.PYPTO,
+        "dsa": passes.MemoryPlanner.DSA,
+        "ptoas": passes.MemoryPlanner.PTOAS,
+    }[session.config.getoption("--memory-planner")]
+    dsa_export_dir: str | None = session.config.getoption("--dsa-export-dir")
+    if memory_planner == passes.MemoryPlanner.DSA and not passes.is_dsa_solver_available():
+        raise pytest.UsageError(
+            "--memory-planner=dsa requires a PyPTO build configured with PYPTO_ENABLE_DSA_SOLVER"
+        )
 
     # ── determine cache directory ─────────────────────────────────────────────
     save_kernels: bool = session.config.getoption("--save-kernels")
@@ -852,6 +901,8 @@ def pytest_collection_finish(session: pytest.Session) -> None:
         codegen_only=codegen_only,
         compile_workers=max_workers,
         device_pool=device_pool,
+        memory_planner=memory_planner,
+        dsa_export_dir=dsa_export_dir,
         enable_l2_swimlane=enable_l2_swimlane,
         enable_dump_args=enable_dump_args,
         enable_pmu=enable_pmu,

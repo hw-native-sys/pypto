@@ -455,13 +455,20 @@ class PassManager:
         mplan = ctx.get_memory_planner() if ctx else passes.MemoryPlanner.PYPTO
         dbc_flag = ctx.get_enable_pypto_l0c_double_buffer() if ctx else False
         outer_phase = ctx.get_diagnostic_phase() if ctx else passes.get_default_diagnostic_phase()
+        dsa_export_dir = ctx.get_dsa_export_dir() if ctx else None
         if outer_phase == passes.DiagnosticPhase.POST_PASS:
             inner_phase = passes.DiagnosticPhase.PRE_PIPELINE
         else:
             inner_phase = outer_phase
 
         with passes.PassContext(
-            [*outer_instruments, *extra_instruments], level, inner_phase, disabled, mplan, dbc_flag
+            [*outer_instruments, *extra_instruments],
+            level,
+            inner_phase,
+            disabled,
+            mplan,
+            dbc_flag,
+            dsa_export_dir,
         ):
             try:
                 return self._pipeline.run(input_ir)
@@ -498,6 +505,7 @@ class PassManager:
         mplan = ctx.get_memory_planner() if ctx else passes.MemoryPlanner.PYPTO
         dbc_flag = ctx.get_enable_pypto_l0c_double_buffer() if ctx else False
         dphase = ctx.get_diagnostic_phase() if ctx else passes.get_default_diagnostic_phase()
+        dsa_export_dir = ctx.get_dsa_export_dir() if ctx else None
         if ctx:
             disabled = ctx.get_disabled_diagnostics()
         else:
@@ -505,7 +513,13 @@ class PassManager:
             disabled.insert(passes.DiagnosticCheck.UnusedControlFlowResult)
 
         with passes.PassContext(
-            [*outer_instruments, timing_instrument], level, dphase, disabled, mplan, dbc_flag
+            [*outer_instruments, timing_instrument],
+            level,
+            dphase,
+            disabled,
+            mplan,
+            dbc_flag,
+            dsa_export_dir,
         ):
             try:
                 return self._pipeline.run(input_ir)

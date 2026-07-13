@@ -165,6 +165,47 @@ jobs:
     - name: Test unit tests (${{ matrix.ut_label }})
       run: pytest ${{ matrix.ut_paths }} -n auto --maxprocesses 8 -v
 
+  dsa-integration-tests:
+    # The normal wheel intentionally keeps the optional adapter disabled. This
+    # job builds the public solver package first, enables the adapter, and runs
+    # the exporter/solver/validator/writeback tests with bounded parallelism.
+    runs-on: ubuntu-latest
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
+    steps:
+    - name: Checkout PyPTO
+      uses: actions/checkout@v4
+      with:
+        submodules: true
+    - name: Checkout dsa-solver
+      uses: actions/checkout@v4
+      with:
+        repository: tonibohnlein/dsa-solver
+        ref: 2d079f3bd866479dc1d5e7dc8159bca8cf674cfe
+        path: dsa-solver
+        submodules: recursive
+    - name: Set up Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10"
+    - name: Build and install dsa-solver
+      run: |
+        cmake -S dsa-solver -B dsa-solver/build -DCMAKE_BUILD_TYPE=Release -DDSA_ENABLE_MINIMALLOC_BASELINE=OFF -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/dsa-install"
+        cmake --build dsa-solver/build --parallel 2
+        cmake --install dsa-solver/build
+    - name: Install DSA-enabled PyPTO
+      run: |
+        python -m pip install --upgrade pip
+        pip install torch --index-url https://download.pytorch.org/whl/cpu
+        CMAKE_ARGS="-DPYPTO_ENABLE_DSA_SOLVER=ON -DCMAKE_PREFIX_PATH=$RUNNER_TEMP/dsa-install" pip install -v .[dev]
+    - name: Test DSA adapter integration
+      run: >-
+        pytest tests/ut/codegen/test_memory_planner_switch.py
+        tests/ut/ir/transforms/test_allocate_memory_addr_pass.py
+        tests/ut/runtime/test_run_config.py::TestRunConfigCompileForwarding
+        tests/ut/jit/test_decorator.py::TestCompileKwargForwarding
+        -n 2 -v
+
   codegen-tests:
     # Codegen-only: verifies IR → kernel/orch C++ generation without going
     # on-board. --codegen-only skips assembly (ptoas), pto-isa, simpler and

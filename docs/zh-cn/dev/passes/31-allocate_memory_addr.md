@@ -49,6 +49,8 @@ cmake --build build --parallel 2
 
 默认构建保持 `PYPTO_ENABLE_DSA_SOLVER=OFF`。它仍暴露 planner enum，以便配置保持
 一致；若执行时选择 DSA，则会得到明确的重新配置依赖提示。
+`passes.is_dsa_solver_available()` 可查询当前构建是否包含 adapter，供可选测试和应用在
+选择 DSA 前显式判断。
 
 ## API
 
@@ -87,6 +89,9 @@ with passes.PassContext(
 完整编译接受相同的选择：
 `ir.compile(..., memory_planner=passes.MemoryPlanner.DSA,
 dsa_export_dir="build/dsa-corpus")`。
+`RunConfig` 也暴露 `memory_planner` 和 `dsa_export_dir` 字段。system-test harness
+支持 `--memory-planner=dsa` 与 `--dsa-export-dir=...`，可对整套 device test
+启用 DSA 并采集 corpus。
 
 ## 算法
 
@@ -111,8 +116,10 @@ dsa_export_dir="build/dsa-corpus")`。
    `2 * def + 1` 开始，最后一次读在 `2 * last_use + 1` 结束；没有后续读取的值仍占用
    一个写 event。因此，一个输入的最后一次读取可以和同一语句写出的结果共用地址。
 4. 导出固定 memory pool、后端容量、前导 reserved range，以及 pipeline clone、后端
-   hazard 和算子专用 no-alias 规则产生的 hard separation pair；每条 separation 都保留
-   其类型化来源。
+   hazard 和算子专用 no-alias 规则产生的 hard separation pair。pipeline residue 数来自
+   MemoryReuse 精确 whole-space packer 的 dry run，因此 depth shedding 会考虑 alignment、
+   reserved memory、共存 tile 与其他 pipeline group，而不只使用
+   `capacity / largest_stage`；每条 separation 都保留其类型化来源。
 5. 保留规范化的 alias class 成员和 pipeline group/stage/residue 数据。被容量折叠到同一
    residue 的 stage 会导出稀疏的、按时间相邻的 cross-pipe reuse penalty；通用 constraint
    与 cost model 仍是权威语义。

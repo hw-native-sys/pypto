@@ -32,8 +32,13 @@ import pypto.language as pl
 import pytest
 from pypto import backend, ir
 from pypto.backend import BackendType
+from pypto.compile_profiling import CompileProfiler
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import codegen, passes
+
+requires_dsa = pytest.mark.skipif(
+    not passes.is_dsa_solver_available(), reason="PyPTO was built without PYPTO_ENABLE_DSA_SOLVER"
+)
 
 
 @pl.program
@@ -146,12 +151,45 @@ def test_ptoas_pipeline_skips_reuse_keeps_semantic_aliases():
     assert "AllocateMemoryAddr" not in pass_names
 
 
+@requires_dsa
 def test_dsa_pipeline_skips_reuse_but_runs_writeback():
     _, pass_names = _run_pipeline(passes.MemoryPlanner.DSA)
     assert "InitMemRef" in pass_names
     assert "MaterializeSemanticAliases" in pass_names
     assert "MemoryReuse" not in pass_names
     assert "AllocateMemoryAddr" in pass_names
+
+
+@requires_dsa
+def test_dsa_context_survives_dump_pipeline_and_exports(tmp_path):
+    """The dump wrapper must preserve DSA selection and corpus destination."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B)
+    export_dir = tmp_path / "corpus"
+    dump_dir = tmp_path / "ir"
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.DSA, dsa_export_dir=str(export_dir)):
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        optimized = pm.run_passes(ElementwiseAdd, dump_ir=True, output_dir=str(dump_dir))
+
+    assert list(export_dir.glob("*.dsa.json"))
+    mlir = _codegen(optimized, emit_tile_addr=True)
+    assert "pto.alloc_tile" in mlir and "addr =" in mlir
+
+
+@requires_dsa
+def test_dsa_context_survives_profiled_pipeline_and_exports(tmp_path):
+    """The profiling wrapper must preserve DSA selection and corpus destination."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B)
+    export_dir = tmp_path / "corpus"
+    with (
+        passes.PassContext([], memory_planner=passes.MemoryPlanner.DSA, dsa_export_dir=str(export_dir)),
+        CompileProfiler(),
+    ):
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        pm.run_passes(ElementwiseAdd)
+
+    assert list(export_dir.glob("*.dsa.json"))
 
 
 # ---------------------------------------------------------------------------
@@ -179,6 +217,7 @@ def test_ptoas_codegen_omits_alloc_tile_addr():
     )
 
 
+@requires_dsa
 def test_dsa_codegen_emits_validated_alloc_tile_addr():
     optimized, _ = _run_pipeline(passes.MemoryPlanner.DSA)
     mlir = _codegen(optimized, emit_tile_addr=True)

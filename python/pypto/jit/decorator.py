@@ -1266,6 +1266,8 @@ def _run_config_compile_kwargs(run_config: Any) -> dict[str, Any]:
         "diagnostic_phase": run_config.diagnostic_phase,
         "disabled_diagnostics": run_config.disabled_diagnostics,
         "analyze_auto_scopes_for_deps": run_config.analyze_auto_scopes_for_deps,
+        "memory_planner": run_config.memory_planner,
+        "dsa_export_dir": run_config.dsa_export_dir,
     }
     if run_config.save_kernels_dir is not None:
         kwargs["output_dir"] = run_config.save_kernels_dir

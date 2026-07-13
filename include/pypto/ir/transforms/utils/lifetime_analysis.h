@@ -14,6 +14,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -131,9 +132,12 @@ struct AllocationPlan {
  * a DsaProblem without duplicating them.
  *
  * @param func The function to analyze (needed for the backend-gated hazard guard).
+ * @param reserved_end_by_space Leading reserved extent per memory space. The
+ *        shared packer's whole-space dry run uses it when shedding pipeline depth.
  * @return Intervals (one per allocation) + all separations; empty if no tiles.
  */
-[[nodiscard]] AllocationPlan ComputeAllocationPlan(const FunctionPtr& func);
+[[nodiscard]] AllocationPlan ComputeAllocationPlan(
+    const FunctionPtr& func, const std::map<MemorySpace, uint64_t>& reserved_end_by_space = {});
 
 }  // namespace ir
 }  // namespace pypto

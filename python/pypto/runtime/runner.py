@@ -208,11 +208,14 @@ class RunConfig:
         memory_planner: Who plans on-chip buffer memory —
             :attr:`~pypto.pypto_core.passes.MemoryPlanner.PYPTO` (PyPTO runs
             ``MemoryReuse`` + ``AllocateMemoryAddr`` and bakes physical
-            addresses) or ``PTOAS`` (those passes are skipped and ptoas
+            addresses), ``DSA`` (the standalone solver jointly selects reuse
+            and offsets), or ``PTOAS`` (those passes are skipped and ptoas
             ``PlanMemory`` owns reuse and addressing). ``None`` (default) defers
             to the active ``PassContext``, or to ``PYPTO`` when none is active.
             Forwarded to ``ir.compile()``, which rejects it when a
             ``PassContext`` is already active — set it on that context instead.
+        dsa_export_dir: Optional directory for schema-v1 DSA instances exported
+            during compilation. Used only with ``memory_planner=MemoryPlanner.DSA``.
     """
 
     __test__ = False  # Not a pytest test class
@@ -248,6 +251,7 @@ class RunConfig:
     distributed_config: "DistributedConfig | None" = None
     analyze_auto_scopes_for_deps: bool = False
     memory_planner: MemoryPlanner | None = None
+    dsa_export_dir: str | None = None
 
     def __post_init__(self) -> None:
         if self.platform not in ("a2a3sim", "a2a3", "a5sim", "a5"):
@@ -406,6 +410,7 @@ def compile_program(  # noqa: PLR0913
     memory_planner: MemoryPlanner | None = None,
     enable_pypto_l0c_double_buffer: bool | None = None,
     dsa_export_dir: str | None = None,
+    skip_ptoas: bool = False,
 ) -> None:
     """Compile *program* to *work_dir* and patch orchestration headers.
 
@@ -426,6 +431,7 @@ def compile_program(  # noqa: PLR0913
         memory_planner: Optional on-chip memory planner override.
         enable_pypto_l0c_double_buffer: Optional PyPTO-planner L0C double-buffer opt-in.
         dsa_export_dir: Optional schema-v1 corpus directory for the DSA planner.
+        skip_ptoas: If ``True``, stop after PTO source generation without invoking ptoas.
     """
     from pypto import ir  # noqa: PLC0415
 
@@ -442,6 +448,7 @@ def compile_program(  # noqa: PLR0913
         memory_planner=memory_planner,
         enable_pypto_l0c_double_buffer=enable_pypto_l0c_double_buffer,
         dsa_export_dir=dsa_export_dir,
+        skip_ptoas=skip_ptoas,
     )
     _patch_orchestration_headers(work_dir)
 
@@ -493,6 +500,9 @@ def run(
         platform=config.platform,
         profiling=config.compile_profiling,
         analyze_auto_scopes_for_deps=config.analyze_auto_scopes_for_deps,
+        memory_planner=config.memory_planner,
+        dsa_export_dir=config.dsa_export_dir,
+        skip_ptoas=config.codegen_only,
     )
 
     if tensors and not config.codegen_only:

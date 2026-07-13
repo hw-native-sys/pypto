@@ -21,6 +21,10 @@ from pypto.backend import (
     set_backend_type,
 )
 
+requires_dsa = pytest.mark.skipif(
+    not passes.is_dsa_solver_available(), reason="PyPTO was built without PYPTO_ENABLE_DSA_SOLVER"
+)
+
 
 def test_allocate_memory_addr_simple():
     """Simple function: Vec tiles get 32-byte aligned addresses at offsets 0 and 16384."""
@@ -672,6 +676,7 @@ def test_allocate_memory_addr_preserves_sibling_slice_offsets():
     ir.assert_structural_equal(After, Expected)
 
 
+@requires_dsa
 def test_dsa_writeback_preserves_relative_view_offsets(tmp_path):
     """A standalone placement moves a base without collapsing its views."""
 
@@ -883,6 +888,7 @@ def _allocate_with_dsa(base, export_dir: str | None = None):
         return passes.allocate_memory_addr()(base)
 
 
+@requires_dsa
 def test_dsa_planner_reuses_at_read_before_write_boundary():
     """The standalone planner jointly reuses and places unmerged buffers."""
     base = _dsa_chain_program()
@@ -897,6 +903,7 @@ def test_dsa_planner_reuses_at_read_before_write_boundary():
     assert plan_peak == 16384
 
 
+@requires_dsa
 def test_dsa_export_is_deterministic_pypto_structured(tmp_path):
     """A real IR function exports a stable schema-v1 benchmark document."""
     base = _dsa_chain_program()
@@ -980,6 +987,7 @@ def _dsa_pipeline_separation_program():
     return passes.init_mem_ref()(Before)
 
 
+@requires_dsa
 def test_dsa_export_and_solver_preserve_pipeline_stage_separation(tmp_path):
     """PyPTO pipeline provenance becomes a checked standalone separation."""
     planned = _allocate_with_dsa(_dsa_pipeline_separation_program(), str(tmp_path))
@@ -1059,6 +1067,7 @@ def _dsa_capacity_gated_pipeline_cost_program():
     return passes.init_mem_ref()(Before)
 
 
+@requires_dsa
 def test_dsa_export_preserves_capacity_gated_pipeline_reuse_cost(tmp_path):
     """Same-residue stage reuse is explicit, sparse, and does not alter v1 placement."""
     planned = _allocate_with_dsa(_dsa_capacity_gated_pipeline_cost_program(), str(tmp_path))
@@ -1076,6 +1085,52 @@ def test_dsa_export_preserves_capacity_gated_pipeline_reuse_cost(tmp_path):
     assert document["metadata"]["reuse_cost_model"] == "pipeline_adjacent_antidependency_v1"
 
 
+@requires_dsa
+def test_dsa_pipeline_depth_shed_accounts_for_reserved_space(tmp_path):
+    """The DSA export uses the production packer's whole-space depth, not cap/slot."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def reserved_pipeline_depth(
+            self,
+            input_0: pl.Tensor[[128, 240], pl.FP32],
+            input_1: pl.Tensor[[128, 240], pl.FP32],
+            output_0: pl.Out[pl.Tensor[[128, 240], pl.FP32]],
+            output_1: pl.Out[pl.Tensor[[128, 240], pl.FP32]],
+        ) -> pl.Tensor[[128, 240], pl.FP32]:
+            _ = pl.reserve_buffer(name="runtime_window", size=32768)
+            stage_0 = pl.tile.load(
+                input_0,
+                [0, 0],
+                [128, 240],
+                [128, 240],
+                target_memory=pl.Mem.Vec,
+                attrs={"pipeline_membership": "17:0"},
+            )
+            _stored_0 = pl.tile.store(stage_0, [0, 0], output_0)
+            stage_1 = pl.tile.load(
+                input_1,
+                [0, 0],
+                [128, 240],
+                [128, 240],
+                target_memory=pl.Mem.Vec,
+                attrs={"pipeline_membership": "17:1"},
+            )
+            result = pl.tile.store(stage_1, [0, 0], output_1)
+            return result
+
+    planned = _allocate_with_dsa(passes.init_mem_ref()(Before), str(tmp_path))
+    assert _vec_peak(planned) == (32 + 120) * 1024
+
+    document = json.loads((tmp_path / "pypto_reserved_pipeline_depth.dsa.json").read_text())
+    group = document["problem"]["pypto_structure"]["pipeline_groups"][0]
+    assert (group["depth"], group["effective_depth"]) == (2, 1)
+    assert document["problem"]["constraints"]["separations"] == []
+    assert document["problem"]["pools"][0]["reserved_ranges"] == [{"begin": 0, "end": 32 * 1024}]
+
+
+@requires_dsa
 def test_dsa_export_preserves_ascend910b_target_hazard_reason(tmp_path):
     """The split-AIV load+tpop keep-apart edge remains identifiable offline."""
 
@@ -1142,6 +1197,7 @@ def _dsa_fragmentation_program():
     return passes.init_mem_ref()(Before)
 
 
+@requires_dsa
 def test_dsa_planner_subdivides_a_freed_larger_region(tmp_path):
     """Joint placement fixes the group-bump fragmentation shape from #1908."""
     base = _dsa_fragmentation_program()

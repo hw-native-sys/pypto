@@ -100,6 +100,9 @@ class MemoryPlanner(Enum):
     DSA = ...
     PTOAS = ...
 
+def is_dsa_solver_available() -> bool:
+    """Return whether this build includes the standalone DSA solver adapter."""
+
 class DiagnosticPhase(Enum):
     """Controls when DiagnosticInstrument runs registered checks (warnings + perf hints)."""
 
@@ -840,6 +843,7 @@ __all__ = [
     "VerificationMode",
     "VerificationLevel",
     "MemoryPlanner",
+    "is_dsa_solver_available",
     "DiagnosticPhase",
     "DiagnosticCheck",
     "DiagnosticCheckSet",

@@ -38,6 +38,7 @@ from pypto.jit.decorator import (
 from pypto.jit.specializer import TensorMeta
 from pypto.language.parser.diagnostics.exceptions import ParserTypeError
 from pypto.pypto_core import DataType, ir
+from pypto.pypto_core.passes import MemoryPlanner
 from pypto.runtime.runner import RunConfig
 
 # ---------------------------------------------------------------------------
@@ -2254,6 +2255,8 @@ class TestCompileKwargForwarding:
             save_kernels_dir=str(artifacts_dir),
             block_dim=8,
             analyze_auto_scopes_for_deps=True,
+            memory_planner=MemoryPlanner.PTOAS,
+            dsa_export_dir=str(tmp_path / "dsa-corpus"),
         )
         kwargs = _run_config_compile_kwargs(cfg)
         assert kwargs["strategy"] == OptimizationStrategy.DebugTileOptimization
@@ -2261,6 +2264,8 @@ class TestCompileKwargForwarding:
         assert kwargs["profiling"] is True  # mapped from RunConfig.compile_profiling
         assert kwargs["output_dir"] == str(artifacts_dir)  # from RunConfig.save_kernels_dir
         assert kwargs["analyze_auto_scopes_for_deps"] is True
+        assert kwargs["memory_planner"] == MemoryPlanner.PTOAS
+        assert kwargs["dsa_export_dir"] == str(tmp_path / "dsa-corpus")
         assert "diagnostic_phase" in kwargs
         assert "disabled_diagnostics" in kwargs
         # backend_type is derived from `platform` by ir.compile(); not forwarded.

@@ -165,6 +165,17 @@ void BindPass(nb::module_& m) {
       .value("PTOAS", MemoryPlanner::PtoAS,
              "Skip pypto allocation passes; ptoas PlanMemory allocates (--pto-level=level2)");
 
+  passes.def(
+      "is_dsa_solver_available",
+      []() {
+#ifdef PYPTO_ENABLE_DSA_SOLVER
+        return true;
+#else
+        return false;
+#endif
+      },
+      "Return whether this PyPTO build includes the standalone DSA solver adapter");
+
   // Bind DiagnosticPhase enum
   nb::enum_<DiagnosticPhase>(passes, "DiagnosticPhase",
                              "Controls when DiagnosticInstrument runs registered checks "
