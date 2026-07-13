@@ -185,13 +185,12 @@ void CheckStaticSignalCapacity(const CallPtr& call, const ExprPtr& signal_expr, 
 }
 
 [[nodiscard]] CallPtr MakeBuiltinAllGather(const CallPtr& call, const ExprPtr& device) {
-  // Emit namesake builtin: barrier (TNOTIFY / TWAIT) + cross-chip TLOAD
-  // from all peers in a single AIV kernel.  Data is pre-staged in the
-  // target window by publish_step; the kernel gathers from all peers via
-  // concurrent cross-chip remote reads.  All chips must run the kernel
-  // concurrently — the host orchestrator submits asynchronously via
-  // orch.submit_next_level.  simpler and pto-isa support the required
-  // concurrent cross-chip TLOAD.
+  // Emit namesake builtin: barrier (TNOTIFY / TWAIT) in a single AIV
+  // kernel.  publish_step already placed each rank's data in every peer's
+  // window via in-kernel TPUT (same pattern as all_to_all).  The barrier
+  // synchronises visibility; consume_step reads locally — no in-kernel
+  // TLOAD from peers needed (CCU/SDMA → MTE2 within the same kernel is
+  // not guaranteed on hardware).
   auto target_type = As<DistributedTensorType>(call->args_[0]->GetType());
   return MakeBuiltinCallWithAttrs("builtin.tensor.allgather", call,
                                   {call->args_[0], call->args_[1]},  // (target, signal)
