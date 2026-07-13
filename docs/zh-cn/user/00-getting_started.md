@@ -278,6 +278,40 @@ for batch in stream:
     handle(batch.a, batch.b, batch.out)
 ```
 
+`compile()` 只读取每个张量参数的 shape/dtype —— 从不触碰内容 —— 所以这些样例
+张量纯粹是元数据载体。
+
+### 从签名编译（无需样例张量）
+
+当每个张量参数都**完整注解**了 shape 和 dtype 时，`compile()` 可以直接从签名
+读出整个 shape 契约 —— **不传任何位置参数**即可，样例张量全部省掉：
+
+```python
+HIDDEN, VOCAB = 4096, 152064
+M = pl.dynamic("M")          # 运行期动态维
+
+@pl.jit
+def prefill_fwd(
+    hidden: pl.Tensor[[M, HIDDEN], pl.BF16],
+    lm_head: pl.Tensor[[VOCAB, HIDDEN], pl.BF16],
+    out: pl.Out[pl.Tensor[[M, VOCAB], pl.FP32]],
+): ...
+
+# 没有 torch.empty(...) 占位张量 —— shape 全部来自注解。
+compiled = prefill_fwd.compile()
+```
+
+对于签名很大的内核，这是更符合直觉的路径：shape 契约只在签名一处声明，而不是
+再写成一长串一次性的 `torch.empty(...)`。细节：
+
+- **静态维**（`HIDDEN`、`VOCAB` …）来自注解常量。
+- **动态维**（`pl.dynamic` / `bind_dynamic`）无需给值 —— 编译产物与具体 extent
+  无关，`compile()` 与等价的 `compile(sample_tensors)` 共享同一 cache 条目。
+- **标量参数**在签名里没有值 —— 用关键字参数传入，例如
+  `kernel.compile(num_tokens=128)`。
+- **bare `pl.Tensor`**（无 shape）无从读取，会给出明确报错；请补全
+  `pl.Tensor[[...], dtype]` 注解，或回退到 `compile(*sample_tensors)`。
+
 完整三种使用模式（推理服务、训练循环、register/dispatch 开销验证）见
 `examples/runtime/explicit_dispatch.py`。
 

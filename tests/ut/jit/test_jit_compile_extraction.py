@@ -18,6 +18,7 @@ import pypto.language as pl
 import pytest
 from pypto.ir.compiled_program import CompiledProgram
 from pypto.jit.decorator import jit
+from pypto.pypto_core import ir
 from pypto.runtime.runner import RunConfig
 
 
@@ -153,6 +154,97 @@ class TestCompileExposesExtractionSurface:
             "output_indices",
         ):
             assert hasattr(cls, name), f"CompiledProgram missing {name!r}"
+
+
+# Fully-annotated kernels for signature-mode compile() (issue #1996).
+_SIG_M = pl.dynamic("M")
+
+
+@jit.incore
+def _sig_copy_incore(a: pl.Tensor[[_SIG_M, 128], pl.FP32], c: pl.Out[pl.Tensor[[_SIG_M, 128], pl.FP32]]):
+    tile = pl.load(a, [0, 0], [128, 128])
+    pl.store(tile, [0, 0], c)
+    return c
+
+
+@jit
+def sig_kernel(a: pl.Tensor[[_SIG_M, 128], pl.FP32], c: pl.Out[pl.Tensor[[_SIG_M, 128], pl.FP32]]):
+    c = _sig_copy_incore(a, c)
+    return c
+
+
+class TestCompileFromSignature:
+    """``compile()`` with no positional args reads the shape/dtype contract
+    straight from the kernel's own annotations — no throwaway ``torch.empty``
+    dummies (issue #1996). Requires fully-annotated tensor params."""
+
+    def test_compile_from_signature_returns_compiled_program(self):
+        # No torch tensors involved — pure metadata + compile pipeline.
+        compiled = sig_kernel.compile()
+        assert isinstance(compiled, CompiledProgram)
+
+    def test_signature_and_tensor_share_cache(self):
+        """``compile()`` (signature) and ``compile(sample_tensors)`` produce the
+        same cached artifact — dynamic dims collapse to None in the cache key."""
+        torch = pytest.importorskip("torch")
+
+        from_sig = sig_kernel.compile()
+        t = torch.zeros(256, 128, dtype=torch.float32)
+        from_tensor = sig_kernel.compile(t, t)
+        assert from_tensor is from_sig
+
+    def test_signature_meta_matches_tensor_meta(self):
+        """Metadata derived from the signature equals metadata from a tensor of
+        any concrete extent (dynamic dim marked, static dim/dtype identical)."""
+        torch = pytest.importorskip("torch")
+
+        _, _, meta_sig, _, _, _ = sig_kernel._bind_args_from_signature({})
+        t = torch.zeros(512, 128, dtype=torch.float32)
+        _, _, meta_tensor, _, _, _ = sig_kernel._bind_args((t, t), {})
+        for name in ("a", "c"):
+            assert meta_sig[name].dynamic_dim_indices() == meta_tensor[name].dynamic_dim_indices() == {0}
+            assert meta_sig[name].static_shape()[1] == meta_tensor[name].static_shape()[1] == 128
+            assert meta_sig[name].dtype == meta_tensor[name].dtype == pl.FP32
+
+    def test_signature_program_equals_tensor_program(self):
+        """Specializing from the signature yields the same IR as from tensors."""
+        torch = pytest.importorskip("torch")
+
+        _, _, tm_s, sv_s, sd_s, dyn_s = sig_kernel._bind_args_from_signature({})
+        prog_sig = sig_kernel._compile_to_program(tm_s, sv_s, sd_s, dyn_s, pl)
+
+        t = torch.zeros(64, 128, dtype=torch.float32)
+        _, _, tm_t, sv_t, sd_t, dyn_t = sig_kernel._bind_args((t, t), {})
+        prog_tensor = sig_kernel._compile_to_program(tm_t, sv_t, sd_t, dyn_t, pl)
+
+        ir.assert_structural_equal(prog_sig, prog_tensor)
+
+    def test_bare_tensor_annotation_raises(self):
+        """A bare ``pl.Tensor`` param has no shape to read — clear error."""
+        # add_kernel's params are bare ``pl.Tensor`` (no subscript).
+        with pytest.raises(TypeError, match="bare 'pl.Tensor'"):
+            add_kernel.compile()
+
+    def test_scalar_param_needs_value(self):
+        """Scalar params carry no value in the signature; must be supplied."""
+
+        s_m = pl.dynamic("SM")
+
+        @jit
+        def scalar_sig_kernel(
+            a: pl.Tensor[[s_m, 64], pl.FP16],
+            n: pl.Scalar[pl.INT32],
+            c: pl.Out[pl.Tensor[[s_m, 64], pl.FP16]],
+        ):
+            c = a
+            return c
+
+        with pytest.raises(TypeError, match="scalar parameter 'n'"):
+            scalar_sig_kernel._bind_args_from_signature({})
+
+        # Supplied via keyword: value flows into scalar_values.
+        _, _, _, scalar_values, _, _ = scalar_sig_kernel._bind_args_from_signature({"n": 7})
+        assert scalar_values == {"n": 7}
 
 
 if __name__ == "__main__":

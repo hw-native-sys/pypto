@@ -286,6 +286,44 @@ for batch in stream:
     handle(batch.a, batch.b, batch.out)
 ```
 
+`compile()` only reads each tensor argument's shape/dtype — contents are never
+touched — so the sample tensors are pure metadata carriers.
+
+### Compiling from the signature (no sample tensors)
+
+When every tensor parameter is **fully annotated** with its shape and dtype,
+`compile()` can read the whole shape contract straight from the signature — call
+it with **no positional arguments** and skip the sample tensors entirely:
+
+```python
+HIDDEN, VOCAB = 4096, 152064
+M = pl.dynamic("M")          # runtime-dynamic dim
+
+@pl.jit
+def prefill_fwd(
+    hidden: pl.Tensor[[M, HIDDEN], pl.BF16],
+    lm_head: pl.Tensor[[VOCAB, HIDDEN], pl.BF16],
+    out: pl.Out[pl.Tensor[[M, VOCAB], pl.FP32]],
+): ...
+
+# No torch.empty(...) dummies — shapes come from the annotations.
+compiled = prefill_fwd.compile()
+```
+
+This is the ergonomic path for kernels with large signatures: the shape contract
+lives in one place (the signature) instead of being re-declared as a list of
+throwaway `torch.empty(...)` buffers. Details:
+
+- **Static dims** (`HIDDEN`, `VOCAB`, …) come from the annotation constants.
+- **Dynamic dims** (`pl.dynamic` / `bind_dynamic`) need no value — the compiled
+  artifact is extent-independent, and `compile()` shares one cache entry with an
+  equivalent `compile(sample_tensors)` call.
+- **Scalar parameters** carry no value in the signature — pass them as keyword
+  args, e.g. `kernel.compile(num_tokens=128)`.
+- A **bare `pl.Tensor`** parameter (no shape) has nothing to read and raises a
+  clear error; give it a full `pl.Tensor[[...], dtype]` annotation, or fall back
+  to `compile(*sample_tensors)`.
+
 See `examples/runtime/explicit_dispatch.py` for three end-to-end patterns
 (inference service, training loop, register/dispatch overhead check).
 
