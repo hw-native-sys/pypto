@@ -24,6 +24,7 @@
 #include "pypto/ir/function.h"
 #include "pypto/ir/reflection/field_traits.h"
 #include "pypto/ir/span.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {

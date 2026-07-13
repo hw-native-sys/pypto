@@ -22,6 +22,8 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/ir/type.h"
+
 // Forward-declare Level and Role from function.h to avoid circular include.
 // ScopeStmt uses these as optional fields; the full definitions are in function.h.
 namespace pypto {

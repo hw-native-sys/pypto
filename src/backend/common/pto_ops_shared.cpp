@@ -15,7 +15,6 @@
  */
 
 #include <algorithm>
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -23,26 +22,19 @@
 #include <sstream>
 #include <string>
 #include <string_view>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "pypto/backend/common/backend.h"
-#include "pypto/backend/common/backend_handler.h"
-#include "pypto/backend/common/pto_ops_common.h"
 #include "pypto/codegen/codegen_base.h"
-#include "pypto/codegen/distributed/comm_layout.h"
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/codegen/pto/pto_type_utils.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
-#include "pypto/ir/comm.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/tile_view_semantics.h"
-#include "pypto/ir/transforms/utils/memref_utils.h"
-#include "pypto/ir/transforms/utils/tile_conversion_utils.h"
 #include "pypto/ir/type.h"
 #include "src/backend/common/pto_ops_internal.h"
 

@@ -17,6 +17,7 @@ Usage:
     python tests/lint/clang_tidy.py -B my-build              # persistent build dir
     python tests/lint/clang_tidy.py --fix                    # apply fixes in-place
     python tests/lint/clang_tidy.py --diff-base origin/main  # only changed files
+    python tests/lint/clang_tidy.py --strict-version         # fail on version mismatch (CI)
     python tests/lint/clang_tidy.py -v                       # verbose debug output
 """
 
@@ -42,6 +43,10 @@ SOURCE_EXTENSIONS = (".c", ".cc", ".cpp", ".cxx")
 HEADER_EXTENSIONS = (".h", ".hpp", ".hxx")
 DEFAULT_SOURCE_DIRS = ("src", "include")
 SELF_PATH = "tests/lint/clang_tidy.py"
+# Bound the *default* worker count: one clang-tidy process per core is wasteful on
+# a many-core dev box (each process holds a full TU in memory).  CI passes --jobs
+# explicitly and is not affected by this cap.
+MAX_DEFAULT_JOBS = 8
 
 _verbose = False
 
@@ -621,7 +626,7 @@ def parse_args(argv: Sequence[str]) -> Namespace:
         "--jobs",
         "-j",
         type=int,
-        default=max(1, os.cpu_count() or 1),
+        default=min(MAX_DEFAULT_JOBS, max(1, os.cpu_count() or 1)),
         help="Maximum parallel clang-tidy processes.",
     )
     parser.add_argument(
@@ -633,6 +638,11 @@ def parse_args(argv: Sequence[str]) -> Namespace:
         "--diff-base",
         default=None,
         help="Only lint files changed relative to this git ref (e.g. origin/main).",
+    )
+    parser.add_argument(
+        "--strict-version",
+        action="store_true",
+        help="Fail instead of warning when the clang-tidy version is not the required one.",
     )
     parser.add_argument(
         "--verbose",
@@ -676,9 +686,29 @@ def main(argv: list[str] | None = None) -> int:
     # 2. Version check — print warning at the beginning
     version = get_clang_tidy_version()
     _vprint(f"[clang-tidy] clang-tidy version: {version}")
+    if args.strict_version and version is None:
+        # An unparseable --version is not proof of the right clang-tidy; treating
+        # it as "fine" would reopen the very hole --strict-version exists to close.
+        print(
+            "[clang-tidy] ERROR: --strict-version could not determine the clang-tidy version.",
+            file=sys.stderr,
+        )
+        return 1
     version_warning = check_version(version)
     if version_warning:
         print(version_warning, file=sys.stderr)
+        # An older clang-tidy silently ignores checks it does not know
+        # (misc-include-cleaner only exists from LLVM 17 on), so a mismatched
+        # version reports success while enforcing far less than .clang-tidy asks
+        # for.  CI passes --strict-version so that drift fails loudly instead.
+        if args.strict_version:
+            print(
+                f"[clang-tidy] ERROR: --strict-version requires clang-tidy {REQUIRED_VERSION}; "
+                f"found {version}. Checks missing from that version would be skipped silently, "
+                f"so the result cannot be trusted.",
+                file=sys.stderr,
+            )
+            return 1
 
     # 3. Collect source and header files (optionally filtered by diff)
     files = collect_source_files()

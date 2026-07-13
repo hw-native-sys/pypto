@@ -28,6 +28,7 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/reporter/report.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/type.h"

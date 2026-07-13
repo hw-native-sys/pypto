@@ -18,7 +18,6 @@
 #include <vector>
 
 #include "pypto/core/any_cast.h"
-#include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/core_affinity_kind.h"
 #include "pypto/ir/expr.h"

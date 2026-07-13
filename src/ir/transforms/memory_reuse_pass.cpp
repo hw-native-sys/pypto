@@ -485,8 +485,9 @@ class TopDownRetargeter {
       const bool in_branch = std::any_of(seed_anc.begin(), seed_anc.end(),
                                          [&](const StmtPtr& a) { return a.get() == if_stmt.get(); });
       if (!in_branch) continue;
-      if (!IsTargetDeadAtAssign(seed_def->second, acc_memref->base_.get(), /*stop_at=*/if_stmt.get()))
+      if (!IsTargetDeadAtAssign(seed_def->second, acc_memref->base_.get(), /*stop_at=*/if_stmt.get())) {
         continue;
+      }
 
       // Now safe: (a)+(b) plus exclusivity cover every read of acc_memref, so we
       // bypass the global liveness (which would false-decline on the legitimate

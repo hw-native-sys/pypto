@@ -26,6 +26,7 @@
 #include <string>
 #include <unordered_set>
 
+#include "pypto/backend/common/backend.h"
 #include "src/backend/common/pto_ops_internal.h"
 
 namespace pypto {

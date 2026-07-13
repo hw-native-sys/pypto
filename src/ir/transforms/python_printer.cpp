@@ -940,10 +940,11 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
     std::string core_type = "mix";
     std::string mode = "soft";
     for (const auto& [key, val] : op->kwargs_) {
-      if (key == "core_type")
+      if (key == "core_type") {
         core_type = AnyCast<std::string>(val, "syncall core_type");
-      else if (key == "mode")
+      } else if (key == "mode") {
         mode = AnyCast<std::string>(val, "syncall mode");
+      }
     }
     const size_t used_idx = op->args_.size() - 1;
     stream_ << "mode=\"" << mode << "\", core_type=\"" << core_type << "\", gm_workspace=";

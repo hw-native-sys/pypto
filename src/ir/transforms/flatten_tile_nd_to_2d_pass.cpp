@@ -1685,6 +1685,10 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       if (auto lv = As<Var>(c->args_[lhs_i])) MarkChain(lv.get(), lhs_fits);
       if (auto rv = As<Var>(c->args_[rhs_i])) MarkChain(rv.get(), rhs_fits);
     }
+    // Visit order does not escape: the loop only tests membership and inserts
+    // into a set that is itself consumed by lookup, so the result is identical
+    // for any traversal order.
+    // NOLINTNEXTLINE(bugprone-nondeterministic-pointer-iteration-order)
     for (const auto* v : batch_matmul_only_vars) {
       if (any_notfit.count(v) != 0 && any_fit.count(v) == 0) not_fit_drop_vars.insert(v);
     }

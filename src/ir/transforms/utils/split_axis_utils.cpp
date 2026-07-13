@@ -32,7 +32,6 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
-#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"

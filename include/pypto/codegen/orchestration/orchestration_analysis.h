@@ -13,6 +13,7 @@
 #define PYPTO_CODEGEN_ORCHESTRATION_ORCHESTRATION_ANALYSIS_H_
 
 #include <cstddef>
+#include <cstdint>
 #include <map>
 #include <optional>
 #include <string>

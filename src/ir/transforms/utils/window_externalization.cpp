@@ -15,6 +15,7 @@
 #include <any>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <iterator>
 #include <limits>
@@ -714,6 +715,9 @@ class OutWindowExternalizer {
 
     if (!body_rebuilt_param_subst.empty()) {
       *body = transform_utils::Substitute(*body, body_rebuilt_param_subst);
+      // Visit order does not escape: keys are unique, so copying the entries
+      // into `subst` yields the same map for any traversal order.
+      // NOLINTNEXTLINE(bugprone-nondeterministic-pointer-iteration-order)
       for (const auto& [old_param, new_param] : body_rebuilt_param_subst) {
         (*subst)[old_param] = new_param;
       }
@@ -1715,16 +1719,14 @@ class OutWindowExternalizer {
           const auto& piece = pieces[piece_index];
           std::vector<ExprPtr> shape_exprs;
           shape_exprs.reserve(piece.window_shape.size());
-          for (size_t dim_i = 0; dim_i < piece.window_shape.size(); ++dim_i) {
-            const auto& dim = piece.window_shape[dim_i];
+          for (const auto& dim : piece.window_shape) {
             auto shape_expr = transform_utils::Substitute(dim, callsite_subst);
             shape_exprs.push_back(
                 FlattenGeneratedScalarExpr(shape_expr, in_arg->name_hint_, call_assign->span_, &stmts));
           }
           std::vector<ExprPtr> offset_exprs;
           offset_exprs.reserve(piece.callsite_offsets.size());
-          for (size_t offset_i = 0; offset_i < piece.callsite_offsets.size(); ++offset_i) {
-            const auto& offset = piece.callsite_offsets[offset_i];
+          for (const auto& offset : piece.callsite_offsets) {
             auto offset_expr =
                 input_offset_analyzer.Simplify(transform_utils::Substitute(offset, callsite_subst));
             offset_exprs.push_back(
@@ -2026,7 +2028,7 @@ class OutWindowExternalizer {
       int add_output = 0;
       int add_scalar = 0;
 
-      int Total() const { return add_inout + add_input + add_output + add_scalar; }
+      [[nodiscard]] int Total() const { return add_inout + add_input + add_output + add_scalar; }
     };
 
     static ArgDirection ParamDirectionToArgDirection(ParamDirection direction) {
@@ -3757,6 +3759,9 @@ class OutWindowExternalizer {
     const auto loop_use_index = BuildVarUseIndex(loop);
     const auto loop_body_use_index = BuildVarUseIndex(loop->body_);
     const auto return_use_index = BuildVarUseIndex(ret_stmt);
+    // Visit order does not escape: the loop bails out when *any* carrier has an
+    // unrecognized user, which is order-independent.
+    // NOLINTNEXTLINE(bugprone-nondeterministic-pointer-iteration-order)
     for (const auto* carrier_var : carrier_vars) {
       auto users_it = loop_body_use_index.assign_users.find(carrier_var);
       if (users_it == loop_body_use_index.assign_users.end()) continue;
@@ -4468,7 +4473,6 @@ class OutWindowExternalizer {
        protected:
         StmtPtr VisitStmt_(const ForStmtPtr& op) override {
           std::vector<const Var*> old_iter_args_to_erase;
-          bool changed = false;
           for (size_t i = 0; i < op->return_vars_.size() && i < op->iter_args_.size(); ++i) {
             auto it = narrowed_return_vars_.find(op->return_vars_[i].get());
             if (it == narrowed_return_vars_.end()) continue;
@@ -4480,7 +4484,6 @@ class OutWindowExternalizer {
             var_remap_[old_iter.get()] = new_iter;
             var_remap_[old_ret.get()] = new_ret;
             old_iter_args_to_erase.push_back(old_iter.get());
-            changed = true;
           }
           auto new_stmt = IRMutator::VisitStmt_(op);
           for (const auto* old_iter : old_iter_args_to_erase) {

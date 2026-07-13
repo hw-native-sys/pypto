@@ -22,27 +22,22 @@
 #include <optional>
 #include <sstream>
 #include <string>
-#include <string_view>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "pypto/backend/common/backend.h"
-#include "pypto/backend/common/backend_handler.h"
-#include "pypto/backend/common/pto_ops_common.h"
 #include "pypto/codegen/codegen_base.h"
-#include "pypto/codegen/distributed/comm_layout.h"
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/codegen/pto/pto_type_utils.h"
+#include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
-#include "pypto/ir/comm.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
-#include "pypto/ir/transforms/utils/tile_conversion_utils.h"
 #include "pypto/ir/type.h"
 #include "src/backend/common/pto_ops_internal.h"
 
@@ -244,6 +239,9 @@ static std::string MakeTileAssembleCodegenPTO(const CallPtr& op, codegen::Codege
       codegen::ExtractTileTypeInfo(*source_tile_type, codegen.GetTypeString(source_tile_type->dtype_));
   auto view_memory_space = source_tile_type->memory_space_.value();
   if (cross_space_acc_to_mat) {
+    INTERNAL_CHECK_SPAN(result_tile_type->memory_space_.has_value(), op->span_)
+        << "tile.assemble cross-space Acc->Mat result must carry a memory space for pto.subview result "
+           "typing";
     const int64_t window_rows = view_type_info.rows;
     const int64_t window_cols = view_type_info.cols;
     view_type_info =

@@ -18,6 +18,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "pypto/codegen/code_emitter.h"
@@ -27,6 +28,7 @@
 #include "pypto/ir/function.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/type.h"
 

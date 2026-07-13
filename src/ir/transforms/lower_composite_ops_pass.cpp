@@ -11,12 +11,12 @@
 
 #include <any>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -591,7 +591,7 @@ ExprPtr LowerTensorAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>
   // it explicitly instead of silently defaulting to mesh.
   auto mode = GetKwargOr<std::string>(call->kwargs_, "mode", std::string("mesh"));
   CHECK_SPAN(mode == "ring" || mode == "mesh", span)
-      << "pld.tensor.allreduce mode must be \"ring\" or \"mesh\", got \"" << mode << "\"";
+      << R"(pld.tensor.allreduce mode must be "ring" or "mesh", got ")" << mode << "\"";
   if (mode == "ring") {
     return LowerTensorRingAllReduceRule(call, args, b);
   }

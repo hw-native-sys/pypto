@@ -35,7 +35,6 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
-#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"

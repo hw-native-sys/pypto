@@ -17,7 +17,6 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -25,6 +24,7 @@
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"

@@ -219,14 +219,14 @@ class TileMemorySpaceAnalyzer : public IRVisitor {
     // (e.g. an IfStmt return var), it is absent from var_memory_ but still carries a
     // memory_space_ in its TileType — fall back to that so the seed resolves
     // regardless of the init's statement shape (mirrors the yield_memory lookup).
-    for (size_t i = 0; i < op->iter_args_.size(); ++i) {
-      if (!As<TileType>(op->iter_args_[i]->GetType())) continue;
-      if (auto init_var = AsVarLike(op->iter_args_[i]->initValue_)) {
+    for (const auto& iter_arg : op->iter_args_) {
+      if (!As<TileType>(iter_arg->GetType())) continue;
+      if (auto init_var = AsVarLike(iter_arg->initValue_)) {
         if (auto it = var_memory_.find(init_var); it != var_memory_.end()) {
-          var_memory_[op->iter_args_[i]] = it->second;
+          var_memory_[iter_arg] = it->second;
         } else if (auto init_tile_type = As<TileType>(init_var->GetType());
                    init_tile_type && init_tile_type->memory_space_.has_value()) {
-          var_memory_[op->iter_args_[i]] = *init_tile_type->memory_space_;
+          var_memory_[iter_arg] = *init_tile_type->memory_space_;
         }
       }
     }

@@ -21,7 +21,7 @@
 #include "pypto/codegen/distributed/distributed_codegen.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
-#include "pypto/ir/expr.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
 

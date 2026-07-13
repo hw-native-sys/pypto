@@ -12,6 +12,7 @@
 #ifndef PYPTO_IR_TRANSFORMS_UTILS_TRANSFORM_UTILS_H_
 #define PYPTO_IR_TRANSFORMS_UTILS_TRANSFORM_UTILS_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>

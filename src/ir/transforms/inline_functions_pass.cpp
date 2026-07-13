@@ -358,7 +358,7 @@ std::vector<StmtPtr> SpliceInlineCallAsTupleSub(const FunctionPtr& callee, const
       if (assign && assign->var_.get() == returned_var.get()) {
         if (auto tuple = As<MakeTuple>(assign->value_)) {
           out_substitution = tuple->elements_;
-          body.stmts.erase(body.stmts.begin() + i);
+          body.stmts.erase(body.stmts.begin() + static_cast<std::ptrdiff_t>(i));
           return std::move(body.stmts);
         }
       }

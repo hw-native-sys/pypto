@@ -31,7 +31,6 @@
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
-#include "pypto/ir/comm.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -573,7 +572,7 @@ void DistributedCodegen::VisitStmt_(const ir::CommDomainScopeStmtPtr& op) {
     // intentionally dtype-agnostic (the field is unused by simpler). count is
     // also in opaque bytes so it shares the same expression as nbytes.
     emitter_.EmitLine(std::string("CommBufferSpec(name=\"") + SanitizeName(slot->name_hint_) +
-                      "\", dtype=\"opaque\", count=" + nbytes + ", nbytes=" + nbytes + "),");
+                      R"(", dtype="opaque", count=)" + nbytes + ", nbytes=" + nbytes + "),");
   }
   emitter_.DecreaseIndent();
   emitter_.EmitLine("],");
@@ -1364,9 +1363,12 @@ std::string DistributedCodegen::ResolveCommCtxArg(const ir::ExprPtr& arg, const 
   INTERNAL_CHECK_SPAN(get_ctx->args_.size() == 1, get_ctx->span_)
       << "pld.system.get_comm_ctx expects exactly one DistributedTensor arg";
   auto dist_type = ir::As<ir::DistributedTensorType>(get_ctx->args_[0]->GetType());
-  INTERNAL_CHECK_SPAN(dist_type && dist_type->window_buffer_.has_value(), get_ctx->span_)
+  INTERNAL_CHECK_SPAN(dist_type, get_ctx->span_)
+      << "pld.system.get_comm_ctx host lowering requires a DistributedTensor arg";
+  const auto& window_buffer = dist_type->window_buffer_;
+  INTERNAL_CHECK_SPAN(window_buffer.has_value(), get_ctx->span_)
       << "pld.system.get_comm_ctx host lowering requires a window-bound DistributedTensor";
-  const std::string handle_var = HandleVarForScope(ScopeForWindowBuffer(dist_type->window_buffer_.value()));
+  const std::string handle_var = HandleVarForScope(ScopeForWindowBuffer(*window_buffer));
   return handle_var + "[" + rank_expr + "].device_ctx";
 }
 

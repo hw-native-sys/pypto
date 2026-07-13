@@ -10,6 +10,8 @@
  */
 
 #include <any>
+#include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
@@ -21,7 +23,6 @@
 
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
-#include "pypto/ir/comm.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -63,9 +64,9 @@ namespace {
   auto src_type = As<DistributedTensorType>(src->GetType());
   INTERNAL_CHECK_SPAN(src_type && src_type->window_buffer_.has_value(), old_var->span_)
       << "LowerHostTensorCollectives: collective alias source must carry a materialized WindowBuffer";
-  auto new_type = std::make_shared<const DistributedTensorType>(
-      lhs_type->shape_, lhs_type->dtype_, lhs_type->memref_, lhs_type->tensor_view_,
-      std::make_optional(src_type->window_buffer_.value()));
+  auto new_type =
+      std::make_shared<const DistributedTensorType>(lhs_type->shape_, lhs_type->dtype_, lhs_type->memref_,
+                                                    lhs_type->tensor_view_, src_type->window_buffer_);
   return std::make_shared<Var>(old_var->name_hint_, new_type, old_var->span_);
 }
 
@@ -118,7 +119,7 @@ void CheckStaticSignalCapacity(const CallPtr& call, const ExprPtr& signal_expr, 
 
 [[nodiscard]] CallPtr MakeBuiltinCallWithAttrs(const std::string& builtin_name, const CallPtr& call,
                                                const std::vector<ExprPtr>& args,
-                                               std::vector<std::pair<std::string, std::any>> kwargs,
+                                               const std::vector<std::pair<std::string, std::any>>& kwargs,
                                                const ExprPtr& device,
                                                std::vector<std::pair<std::string, std::any>> attrs,
                                                std::vector<ArgDirection> arg_directions) {
@@ -142,7 +143,7 @@ void CheckStaticSignalCapacity(const CallPtr& call, const ExprPtr& signal_expr, 
       {"op", op_value},
       {"dtype", src_type->dtype_},
   };
-  return MakeBuiltinCallWithAttrs("builtin.tensor.allreduce", call, call->args_, std::move(kwargs), device,
+  return MakeBuiltinCallWithAttrs("builtin.tensor.allreduce", call, call->args_, kwargs, device,
                                   std::move(attrs), {ArgDirection::InOut, ArgDirection::InOut});
 }
 
@@ -162,7 +163,7 @@ void CheckStaticSignalCapacity(const CallPtr& call, const ExprPtr& signal_expr, 
       {"root", root_value},
       {"dtype", target_type->dtype_},
   };
-  return MakeBuiltinCallWithAttrs("builtin.tensor.broadcast", call, call->args_, std::move(kwargs), device,
+  return MakeBuiltinCallWithAttrs("builtin.tensor.broadcast", call, call->args_, kwargs, device,
                                   std::move(attrs), {ArgDirection::InOut, ArgDirection::InOut});
 }
 
@@ -179,8 +180,8 @@ void CheckStaticSignalCapacity(const CallPtr& call, const ExprPtr& signal_expr, 
       {"op", op_value},
       {"dtype", target_type->dtype_},
   };
-  return MakeBuiltinCallWithAttrs("builtin.tensor.reduce_scatter", call, call->args_, std::move(kwargs),
-                                  device, std::move(attrs), {ArgDirection::InOut, ArgDirection::InOut});
+  return MakeBuiltinCallWithAttrs("builtin.tensor.reduce_scatter", call, call->args_, kwargs, device,
+                                  std::move(attrs), {ArgDirection::InOut, ArgDirection::InOut});
 }
 
 [[nodiscard]] CallPtr MakeBuiltinAllGather(const CallPtr& call, const ExprPtr& device) {

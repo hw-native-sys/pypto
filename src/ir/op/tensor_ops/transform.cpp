@@ -27,6 +27,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"

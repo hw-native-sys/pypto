@@ -1116,11 +1116,14 @@ class SubmitTaskIdCollector : public IRVisitor {
     }
     for (const auto& [source_id, slots] : covered_source_slots) {
       auto source_it = array_lineage_by_var_id_.find(source_id);
-      if (source_it == array_lineage_by_var_id_.end() || !source_it->second.extent.has_value()) continue;
-      if (!HasCompleteDynamicCoverage(slots, source_it->second.extent.value())) continue;
+      if (source_it == array_lineage_by_var_id_.end()) continue;
+      const auto& source_extent = source_it->second.extent;
+      if (!source_extent.has_value()) continue;
+      if (!HasCompleteDynamicCoverage(slots, *source_extent)) continue;
       if (lineage.has_unknown_dynamic_update || !lineage.unknown_static_slots.empty()) continue;
-      if (source_it->second.has_unknown_dynamic_update || !source_it->second.unknown_static_slots.empty())
+      if (source_it->second.has_unknown_dynamic_update || !source_it->second.unknown_static_slots.empty()) {
         continue;
+      }
       AppendAllUnique(&out, source_it->second.full_array_task_ids);
     }
     return out;
@@ -1243,11 +1246,14 @@ class SubmitTaskIdCollector : public IRVisitor {
   void RecordTaskIdArrayExtent(const VarPtr& var) {
     if (!var) return;
     auto lineage_it = array_lineage_by_var_id_.find(var->UniqueId());
-    if (lineage_it != array_lineage_by_var_id_.end() && lineage_it->second.extent.has_value()) {
-      task_id_array_extent_by_var_id_[var->UniqueId()] = lineage_it->second.extent.value();
-    } else {
-      task_id_array_extent_by_var_id_.erase(var->UniqueId());
+    if (lineage_it != array_lineage_by_var_id_.end()) {
+      const auto& extent = lineage_it->second.extent;
+      if (extent.has_value()) {
+        task_id_array_extent_by_var_id_[var->UniqueId()] = *extent;
+        return;
+      }
     }
+    task_id_array_extent_by_var_id_.erase(var->UniqueId());
   }
 
   bool IsCompleteTaskIdArray(const VarPtr& var) const {

@@ -18,7 +18,6 @@
 #include <optional>
 #include <sstream>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include "pypto/core/dtype.h"

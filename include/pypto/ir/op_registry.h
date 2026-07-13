@@ -35,6 +35,7 @@
 
 #include "pypto/core/any_cast.h"
 #include "pypto/core/common.h"
+#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/core_affinity_kind.h"
 #include "pypto/ir/expr.h"

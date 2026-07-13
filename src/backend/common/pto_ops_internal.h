@@ -22,6 +22,7 @@
  * (defined in pto_ops_shared.cpp).
  */
 
+#include <cstddef>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -32,7 +33,6 @@
 #include "pypto/codegen/codegen_base.h"
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/codegen/pto/pto_type_utils.h"
-#include "pypto/core/dtype.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/type.h"
 

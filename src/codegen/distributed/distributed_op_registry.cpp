@@ -15,7 +15,7 @@
 #include <string>
 #include <utility>
 
-#include "pypto/core/error.h"
+#include "pypto/core/logging.h"
 
 namespace pypto {
 namespace codegen {

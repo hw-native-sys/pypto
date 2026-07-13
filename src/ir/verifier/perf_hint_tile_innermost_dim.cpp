@@ -182,7 +182,7 @@ class TileInnermostDimVisitor : public IRVisitor {
                               site.span);
   }
 
-  std::string BuildMessage(const Site& site) const {
+  [[nodiscard]] std::string BuildMessage(const Site& site) const {
     const TileTransferInfo& info = site.info;
     const std::string mem_str =
         info.memory.has_value() ? MemorySpaceToString(*info.memory) : std::string("unknown");

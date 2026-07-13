@@ -172,27 +172,33 @@ bool IsDefinedInBranch(const ir::Var* var, const StmtPtr& body) {
     return true;
   }
   if (auto seq = As<ir::SeqStmts>(body)) {
-    for (const auto& s : seq->stmts_)
+    for (const auto& s : seq->stmts_) {
       if (IsDefinedInBranch(var, s)) return true;
+    }
     return false;
   }
   if (auto for_stmt = As<ir::ForStmt>(body)) {
-    for (const auto& ia : for_stmt->iter_args_)
+    for (const auto& ia : for_stmt->iter_args_) {
       if (ia.get() == var) return true;
-    for (const auto& rv : for_stmt->return_vars_)
+    }
+    for (const auto& rv : for_stmt->return_vars_) {
       if (rv.get() == var) return true;
+    }
     return IsDefinedInBranch(var, for_stmt->body_);
   }
   if (auto while_stmt = As<ir::WhileStmt>(body)) {
-    for (const auto& ia : while_stmt->iter_args_)
+    for (const auto& ia : while_stmt->iter_args_) {
       if (ia.get() == var) return true;
-    for (const auto& rv : while_stmt->return_vars_)
+    }
+    for (const auto& rv : while_stmt->return_vars_) {
       if (rv.get() == var) return true;
+    }
     return IsDefinedInBranch(var, while_stmt->body_);
   }
   if (auto if_stmt = As<ir::IfStmt>(body)) {
-    for (const auto& rv : if_stmt->return_vars_)
+    for (const auto& rv : if_stmt->return_vars_) {
       if (rv.get() == var) return true;
+    }
     if (IsDefinedInBranch(var, if_stmt->then_body_)) return true;
     return if_stmt->else_body_.has_value() && IsDefinedInBranch(var, *if_stmt->else_body_);
   }
