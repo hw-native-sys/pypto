@@ -101,7 +101,7 @@ CLI flags (forwarded to ``pypto.runtime.debug.replay._main``)
   --device-id N            hardware device index (default: 0)
   --pmu LEVEL              enable PMU profiling at LEVEL
   --swimlane               enable L2 swimlane capture
-  --dump-args [LEVEL]    dump per-task arguments to disk (bare=1 partial, 2 full)
+  --dump-args [LEVEL]      dump per-task arguments to disk (bare=1 partial, 2 full)
   --dep-gen                enable dep_gen profiling
   --no-recompile           reuse cached .so/.bin (ignores cpp edits)
   --no-rebuild-from-pto    skip ptoas/*.pto -> kernels/*.cpp rebuild

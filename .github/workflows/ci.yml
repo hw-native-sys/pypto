@@ -274,7 +274,7 @@ jobs:
           #
           # Excluded from BOTH generic steps (run elsewhere): tests/st/distributed
           # (own multi-card job), tests/st/codegen (own CPU --codegen-only job),
-          # and the DFX tests below (own flagged steps: dump-tensor / swimlane).
+          # and the DFX tests below (own flagged steps: dump-args / swimlane).
           # test_dump_tag uses test_runner (would be batched here) so it is
           # --ignore'd; swimlane is direct-device and --ignore'd from the B step.
           python -m pytest tests/st -v -m device_batch \
@@ -338,11 +338,11 @@ jobs:
           task-submit --device "$DEVICE_ID" --timeout 1800 --max-time 600 \
             --run "cd $GITHUB_WORKSPACE/st-checkout && source activate.sh && python -m pytest tests/st/runtime/framework_and_models/test_perf_swimlane.py -v --device=\$TASK_DEVICE --platform=a2a3 --enable-l2-swimlane --forked --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }}"
 
-      - name: Test dump-tensor output
+      - name: Test dump-args output
         run: |
           source activate.sh
           task-submit --device "$DEVICE_ID" --timeout 1800 --max-time 600 \
-            --run "cd $GITHUB_WORKSPACE/st-checkout && source activate.sh && python -m pytest tests/st/runtime/framework_and_models/test_dump_tag.py -v --device=\$TASK_DEVICE --platform=a2a3 --dump-tensor --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }} --forked"
+            --run "cd $GITHUB_WORKSPACE/st-checkout && source activate.sh && python -m pytest tests/st/runtime/framework_and_models/test_dump_tag.py -v --device=\$TASK_DEVICE --platform=a2a3 --dump-args --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }} --forked"
 
       - name: Kill orphaned task-submit tasks
         if: always()

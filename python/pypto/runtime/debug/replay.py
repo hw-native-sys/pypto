@@ -10,7 +10,7 @@
 """Re-execute an existing ``build_output/<jit_dir>/`` directory.
 
 Debug-only entry point for the "I edited a kernel cpp by hand, now re-run
-with DFX (PMU / swimlane / dump_tensor / dep_gen / scope_stats) enabled" workflow.
+with DFX (PMU / swimlane / args_dump / dep_gen / scope_stats) enabled" workflow.
 
 Reuses :func:`pypto.runtime.runner.execute_compiled`, so the device-side
 execution path is identical to the normal :func:`pypto.runtime.run` flow.
