@@ -9,6 +9,8 @@
 
 """Tests for system operation DSL parsing and round-trip."""
 
+import re
+
 import pypto.language as pl
 import pytest
 from pypto import ir
@@ -116,7 +118,7 @@ class TestSystemOpsParsing:
                 return x
 
         printed = Before.as_python()
-        assert 'pl.system.syncall(core_type="aiv_only")' in printed
+        assert re.search(r"""pl\.system\.syncall\(core_type=(["'])aiv_only\1\)""", printed)
 
         reparsed = pl.parse_program(printed)
         assert isinstance(reparsed, ir.Program)
@@ -133,7 +135,7 @@ class TestSystemOpsParsing:
                 return x
 
         printed = Before.as_python()
-        assert 'pl.system.syncall(core_type="mix")' in printed
+        assert re.search(r"""pl\.system\.syncall\(core_type=(["'])mix\1\)""", printed)
 
         reparsed = pl.parse_program(printed)
         assert isinstance(reparsed, ir.Program)
