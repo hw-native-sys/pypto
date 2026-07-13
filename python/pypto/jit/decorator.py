@@ -1527,8 +1527,6 @@ class JITFunction:
             TypeError: if a tensor parameter has a bare ``pl.Tensor`` annotation
                 (no shape to read), or a scalar parameter has no supplied value.
         """
-        import typing  # noqa: PLC0415
-
         from pypto.language.typing.dynamic import DynVar  # noqa: PLC0415
         from pypto.language.typing.scalar import Scalar  # noqa: PLC0415
         from pypto.language.typing.tensor import Tensor  # noqa: PLC0415
@@ -1536,18 +1534,16 @@ class JITFunction:
         param_names = self._param_names()
         sig = inspect.signature(self._func)
 
-        # Resolve string annotations (``from __future__ import annotations``)
-        # once; fall back to the raw per-param annotation otherwise.
-        resolved_hints: dict[str, Any] | None = None
+        # Namespace for resolving string annotations (``from __future__ import
+        # annotations``): the function's globals merged with its closure free-vars,
+        # so an annotation referencing an enclosing scope (e.g. a ``pl.dynamic`` /
+        # constant defined in an outer function) resolves. We ``eval`` each string
+        # annotation directly rather than via ``typing.get_type_hints`` because the
+        # latter runs ``_type_check`` on the result, which rejects our custom
+        # ``Tensor`` / ``Scalar`` instance annotations on Python 3.10.
+        ann_ns: dict[str, Any] | None = None
         if any(isinstance(p.annotation, str) for n, p in sig.parameters.items() if n != "self"):
-            try:
-                # Pass globals merged with closure free-vars so annotations that
-                # reference an enclosing scope (e.g. a ``pl.dynamic`` / constant
-                # defined in an outer function) resolve for closure-defined
-                # kernels under ``from __future__ import annotations``.
-                resolved_hints = typing.get_type_hints(self._func, globalns=_func_name_lookup(self._func))
-            except Exception:  # noqa: BLE001 - best effort; fall back to raw annotations
-                resolved_hints = None
+            ann_ns = _func_name_lookup(self._func)
 
         deps, callers_by_id, _, call_args_cache = self._get_dep_graph()
         per_func_dyn_maps = _compute_per_func_dyndim_maps(
@@ -1562,8 +1558,13 @@ class JITFunction:
         for name in param_names:
             param = sig.parameters[name]
             annotation = param.annotation
-            if resolved_hints is not None and name in resolved_hints:
-                annotation = resolved_hints[name]
+            if isinstance(annotation, str) and ann_ns is not None:
+                try:
+                    # Trusted input: the kernel's own annotation source, evaluated
+                    # in its own globals+closure namespace (same as Python would).
+                    annotation = eval(annotation, ann_ns)  # noqa: S307
+                except Exception:  # noqa: BLE001 - leave as string; handled below as "cannot infer"
+                    pass
 
             # A bare ``pl.Tensor`` is the Tensor *class* itself (no shape);
             # ``pl.Tensor[[...], dtype]`` is a Tensor *instance* carrying
