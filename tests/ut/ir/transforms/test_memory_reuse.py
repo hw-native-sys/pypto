@@ -1198,16 +1198,7 @@ class TestInplaceOps:
                 return result
 
         After = _run_pipeline(Before)
-        func = After.get_function("main")
-        assert func is not None
-        body = func.body
-        assert isinstance(body, ir.SeqStmts)
-        bases = {}
-        for stmt in body.stmts:
-            if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.var.type, ir.TileType):
-                memref = stmt.var.type.memref
-                assert memref is not None
-                bases[stmt.var.name_hint] = memref.base_.name_hint
+        bases = _collect_tile_memref_bases(After)
 
         assert bases["tile_c"] != bases["tile_a"], (
             "concat output must not reuse src0's buffer (tile.concat is not in-place safe)"
