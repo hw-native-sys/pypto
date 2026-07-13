@@ -197,7 +197,7 @@ jobs:
           for i in $(seq 1 5); do
             echo "=== qwen3 decode perf sample $i/5 ==="
             task-submit --device "$DEVICE_ID" --timeout 1800 --max-time 1800 \
-              --run "source $GITHUB_WORKSPACE/perf-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/qwen3/14b/decode_layer.py -p a2a3 -d \$TASK_DEVICE --enable-l2-swimlane --max-seq --seed 1234" \
+              --run "source $GITHUB_WORKSPACE/perf-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/qwen3/14b/decode_fwd.py -p a2a3 -d \$TASK_DEVICE --enable-l2-swimlane --max-seq --seed 1234" \
               2>&1 | tee -a "$GITHUB_WORKSPACE/qwen3_perf.log" \
               || echo "WARN: perf sample $i exited non-zero"
           done
@@ -210,7 +210,7 @@ jobs:
           python .github/scripts/perf_guard.py
           --log "$GITHUB_WORKSPACE/qwen3_perf.log"
           --baseline .github/perf_baselines/qwen3_14b_decode.json
-          --name "qwen3-14b decode_layer"
+          --name "qwen3-14b decode_fwd"
           --metric makespan_us
 
       - name: Kill orphaned task-submit tasks

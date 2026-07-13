@@ -502,7 +502,7 @@ jobs:
         run: |
           source activate.sh
           task-submit --device "$DEVICE_ID" --timeout 1800 --max-time 1800 \
-            --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/qwen3/14b/decode_layer.py -p a2a3 -d \$TASK_DEVICE"
+            --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/qwen3/14b/decode_fwd.py -p a2a3 -d \$TASK_DEVICE"
 
       # NOTE: Qwen3-14B decode performance monitoring (L2-swimlane makespan +
       # perf_guard) lives in the daily_ci.yml `qwen3-perf` job, not here. Per-PR
