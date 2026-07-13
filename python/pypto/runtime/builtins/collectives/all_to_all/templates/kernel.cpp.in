@@ -148,12 +148,16 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   // ==================================================================
   // Phase 2: barrier — notify peers and wait for all.
   //
-  // pipe_barrier before TNOTIFY is load-bearing on hardware: TPUT drains
-  // through CCU/SDMA and TNOTIFY must not fire until those writes (and
-  // prior MTE events) are ordered — same pattern as ep_dispatch.
-  // AtomicAdd matches other data-moving collectives.
+  // Release before TNOTIFY (PTOAS#872 / #873): pipe_barrier drains the
+  // MTE3/CCU pipe so TPUT stores are issued; dsb(DSB_DDR) makes those
+  // writes DDR-observable to peers before the signal is published.
+  // pipe_barrier alone is not enough for cross-rank visibility.
+  // TNOTIFY_IMPL still fences after the signal write; this fence covers
+  // the preceding TPUT payload. AtomicAdd matches other data-moving
+  // collectives.
   // ==================================================================
   pipe_barrier(PIPE_ALL);
+  dsb(DSB_DDR);
   for (int peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) continue;
     __gm__ int32_t *remote_signal = CommRemotePtr(comm_ctx, signal_base + my_rank, peer);
