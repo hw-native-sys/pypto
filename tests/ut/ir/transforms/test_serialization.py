@@ -1054,7 +1054,7 @@ class TestTypeSerialization:
         tensor_type = ir.TensorType(
             [16, 32],
             DataType.FP32,
-            tensor_view=ir.TensorView(layout=ir.TensorLayout.ND, valid_shape=[16, 32]),
+            tensor_view=ir.TensorView(stride=[], layout=ir.TensorLayout.ND, valid_shape=[16, 32]),
         )
         assert tensor_type.tensor_view is None
 
@@ -1090,6 +1090,7 @@ class TestTypeSerialization:
             [16, 32],
             DataType.FP32,
             tensor_view=ir.TensorView(
+                stride=[],
                 layout=ir.TensorLayout.ND,
                 valid_shape=[valid_rows, 32],
             ),
