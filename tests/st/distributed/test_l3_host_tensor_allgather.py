@@ -65,9 +65,11 @@ class HostTensorAllGather:
         inp: pl.Tensor[[1, SIZE], pl.FP32],
         stage: pl.InOut[pld.DistributedTensor[[NR, SIZE], pl.FP32]],
         my_rank: pl.Scalar[pl.INT32],
-    ) -> pld.DistributedTensor[[NR, SIZE], pl.FP32]:
+    ):
+        # Void publish matching all_to_all stage_step — returning the window
+        # DT is unused by host_orch and can confuse chip-arg directions.
         chunk = pl.load(inp, [0, 0], [1, SIZE])
-        return pl.store(chunk, [my_rank, 0], stage)
+        stage = pl.store(chunk, [my_rank, 0], stage)
 
     @pl.function(type=pl.FunctionType.Orchestration)
     def publish_orch(
@@ -75,8 +77,8 @@ class HostTensorAllGather:
         inp: pl.Tensor[[1, SIZE], pl.FP32],
         stage: pl.InOut[pld.DistributedTensor[[NR, SIZE], pl.FP32]],
         my_rank: pl.Scalar[pl.INT32],
-    ) -> pld.DistributedTensor[[NR, SIZE], pl.FP32]:
-        return self.publish_step(inp, stage, my_rank)
+    ):
+        self.publish_step(inp, stage, my_rank)
 
     @pl.function(type=pl.FunctionType.InCore)
     def consume_step(
@@ -115,7 +117,7 @@ class HostTensorAllGather:
 
         stage = pld.window(stage_buf, [pld.world_size(), SIZE], dtype=pl.FP32)
         data = pld.window(data_buf, [pld.world_size(), SIZE], dtype=pl.FP32)
-        signal = pld.window(signal_buf, [pld.world_size()], dtype=pl.INT32)
+        signal = pld.window(signal_buf, [pld.world_size(), 1], dtype=pl.INT32)
         data = pld.tensor.allgather(stage, data, signal)
 
         for r in pl.range(pld.world_size()):

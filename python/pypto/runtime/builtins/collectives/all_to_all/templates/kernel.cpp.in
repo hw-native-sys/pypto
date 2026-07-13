@@ -84,8 +84,9 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   using Global = pto::GlobalTensor<{{dtype_cpp}}, ShapeDyn, StrideDyn, pto::Layout::ND>;
   using TileData = pto::Tile<pto::TileType::Vec, {{dtype_cpp}}, 1, kTileCount, pto::BLayout::RowMajor, -1, -1>;
 
+  // Match ep_dispatch / barrier-proven UB placement (avoid UB base 0).
   TileData send_tile(1, kTileCount);
-  TASSIGN(send_tile, 0x0);
+  TASSIGN(send_tile, 0x10000);
 
   // ==================================================================
   // Phase 1: in-kernel TPUT via pto::comm::TPUT macro.
@@ -119,34 +120,45 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
     wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
   }
+  // Drain local MTE before issuing remote TPUTs (shared EVENT_ID0 / tile).
+  pipe_barrier(PIPE_ALL);
 
   for (int dest = 0; dest < nranks; ++dest) {
     if (dest == my_rank) continue;
 
-    ShapeDyn shape(1, 1, 1, 1, static_cast<int>(row_numel));
-    StrideDyn stride(static_cast<int>(row_numel), static_cast<int>(row_numel),
-                     static_cast<int>(row_numel), static_cast<int>(row_numel), 1);
+    int64_t src_offset = static_cast<int64_t>(dest) * row_numel;
+    __gm__ {{dtype_cpp}} *remote_row = CommRemotePtr(comm_ctx, target + self_offset, dest);
 
-    // Source: our chunk for dest, in the local staging window (never a push
-    // destination, so no other rank ever writes into it).
-    Global src_g(input_local + static_cast<int64_t>(dest) * row_numel, shape, stride);
+    for (int64_t base = 0; base < row_numel; base += kTileCount) {
+      int64_t chunk64 = row_numel - base;
+      if (chunk64 > kTileCount) chunk64 = kTileCount;
+      int chunk = static_cast<int>(chunk64);
 
-    // Destination: peer's result window at offset [my_rank, :]
-    __gm__ {{dtype_cpp}} *remote_ptr =
-        CommRemotePtr(comm_ctx, target + static_cast<int64_t>(my_rank) * row_numel, dest);
-    Global dst_g(remote_ptr, shape, stride);
+      ShapeDyn shape(1, 1, 1, 1, chunk);
+      StrideDyn stride(chunk, chunk, chunk, chunk, 1);
+      // Source: our chunk for dest, in the local staging window (never a
+      // push destination, so no other rank ever writes into it).
+      Global src_g(input_local + src_offset + base, shape, stride);
+      Global dst_g(remote_row + base, shape, stride);
 
-    pto::comm::TPUT(dst_g, src_g, send_tile);
+      pto::comm::TPUT(dst_g, src_g, send_tile);
+    }
   }
 
   // ==================================================================
   // Phase 2: barrier — notify peers and wait for all.
+  //
+  // pipe_barrier before TNOTIFY is load-bearing on hardware: TPUT drains
+  // through CCU/SDMA and TNOTIFY must not fire until those writes (and
+  // prior MTE events) are ordered — same pattern as ep_dispatch.
+  // AtomicAdd matches other data-moving collectives.
   // ==================================================================
+  pipe_barrier(PIPE_ALL);
   for (int peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) continue;
     __gm__ int32_t *remote_signal = CommRemotePtr(comm_ctx, signal_base + my_rank, peer);
     pto::comm::Signal sig(remote_signal);
-    pto::comm::TNOTIFY(sig, static_cast<int32_t>(1), pto::comm::NotifyOp::Set);
+    pto::comm::TNOTIFY(sig, static_cast<int32_t>(1), pto::comm::NotifyOp::AtomicAdd);
   }
   for (int peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) continue;
