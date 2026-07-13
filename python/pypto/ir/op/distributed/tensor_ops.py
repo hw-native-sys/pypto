@@ -300,19 +300,21 @@ def broadcast(
 
 def allgather(
     local_data: Expr,
-    target: Expr | None = None,
-    signal: Expr | None = None,
+    target: Expr,
+    signal: Expr,
     *,
     span: Span | None = None,
 ) -> Call:
     """Build a ``pld.tensor.allgather(...)`` Call.
 
     Unified 3-arg API for both HOST builtin and InCore composite paths.
+    The C++ deducer dispatches by ``args[0]`` type:
+    ``DistributedTensor`` → HOST builtin, ``Tile``/``Tensor`` → InCore composite.
 
-    **HOST builtin:** ``allgather(local_data, target, signal=None)`` — each rank's
-    chunk is pre-staged in the window-bound ``local_data`` ([NR, SIZE]
-    DistributedTensor), ``target`` is the INT32 DistributedTensor signal.
-    The 2-arg convenience form expands to 3-arg IR internally.
+    **HOST builtin:** ``allgather(local_data, target, signal)`` —
+    ``local_data`` is the pre-staged DistributedTensor [NR, SIZE] window,
+    ``target`` is the INT32 DistributedTensor signal,
+    ``signal`` is unused (pass ``target`` again).
 
     **InCore composite:** ``allgather(local_data, target, signal)`` —
     push-based: each rank pushes its chunk into every peer's window via
@@ -325,23 +327,11 @@ def allgather(
             InCore: Tensor (or Tile) [1, SIZE] with this rank's chunk.
         target: HOST: DistributedTensor INT32 signal.
             InCore: DistributedTensor [NR, SIZE] staging window / result.
-        signal: InCore: INT32 DistributedTensor barrier (None for HOST).
+        signal: INT32 DistributedTensor barrier (InCore) or unused (HOST).
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    if signal is None:
-        # 2-arg HOST convenience form: expand to 3-arg IR.
-        # The C++ deducer detects HOST by args[0] being DistributedTensor;
-        # args[2] is unused for HOST — recycle target (the signal) as placeholder.
-        if target is None:
-            raise TypeError(
-                "pld.tensor.allgather 2-arg HOST form requires (data, signal); "
-                "the second positional argument (signal) must not be None"
-            )
-        _args: list[Expr] = [local_data, target, target]
-        return _ir_core.create_op_call("pld.tensor.allgather", _args, {}, actual_span)
-    # 3-arg InCore composite form
-    _args_3: list[Expr] = [local_data, target, signal]  # type: ignore[assignment]
-    return _ir_core.create_op_call("pld.tensor.allgather", _args_3, {}, actual_span)
+    _args: list[Expr] = [local_data, target, signal]
+    return _ir_core.create_op_call("pld.tensor.allgather", _args, {}, actual_span)
 
 
 def reduce_scatter(
