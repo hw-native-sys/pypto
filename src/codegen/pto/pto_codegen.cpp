@@ -1776,9 +1776,20 @@ std::string PTOCodegen::GetViewTileBufTypeStringFromTileType(
   // becomes a no-op. Render static valid dims whenever the view's effective
   // valid_shape is statically known.
   const auto view = ir::tile_view_semantics::GetEffectiveTileView(*tile_type);
-  if (view.valid_shape.size() >= 2) {
-    auto v_row = As<ir::ConstInt>(view.valid_shape[0]);
-    auto v_col = As<ir::ConstInt>(view.valid_shape[1]);
+  const auto& valid = view.valid_shape;
+  if (valid.size() == 1) {
+    // Match ComputeAllocTileFields / ExtractTileTypeInfo: a 1-D valid_shape
+    // maps to rows=1, cols=shape[0]. Without this a 1-D reshape view keeps the
+    // dynamic zero-valid extent and its consumers become silent no-ops.
+    if (auto v_col = As<ir::ConstInt>(valid[0])) {
+      c.v_row = 1;
+      c.v_col = v_col->value_;
+      c.v_row_dynamic = false;
+      c.v_col_dynamic = false;
+    }
+  } else if (valid.size() >= 2) {
+    auto v_row = As<ir::ConstInt>(valid[0]);
+    auto v_col = As<ir::ConstInt>(valid[1]);
     if (v_row && v_col) {
       c.v_row = v_row->value_;
       c.v_col = v_col->value_;
