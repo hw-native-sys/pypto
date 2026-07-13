@@ -360,6 +360,21 @@ std::vector<StmtPtr> SpliceInlineCallAsReturn(const FunctionPtr& callee, const s
   return std::move(body.stmts);
 }
 
+// Return arity must follow the IR ReturnStmt rather than Function::return_types_.
+// A Python ``tuple[...]`` annotation is represented as one TupleType in
+// return_types_, while the corresponding ReturnStmt still has one value per
+// tuple element.  Inlining operates on that ReturnStmt and must therefore use
+// its arity when choosing the single- or multi-return splice path.
+size_t InlineReturnArity(const FunctionPtr& callee) {
+  StmtPtr body = callee->body_;
+  if (auto seq = As<SeqStmts>(body)) {
+    if (seq->stmts_.empty()) return 0;
+    body = seq->stmts_.back();
+  }
+  if (auto ret = As<ReturnStmt>(body)) return ret->value_.size();
+  return 0;
+}
+
 // =============================================================================
 // Selective-dump carry-through across inlining (simpler#844)
 // =============================================================================
@@ -598,12 +613,14 @@ class InlineCallsMutator : public IRMutator {
     return spliced;
   }
 
-  // Dispatch on callee return arity: single-return → `LHS = value` AssignStmt;
-  // multi-return → record `LHS → values` for downstream TupleGetItemExpr
-  // substitution and emit no LHS assignment.
+  // Dispatch on the trailing ReturnStmt's arity: single-return → `LHS = value`
+  // AssignStmt; multi-return → record `LHS → values` for downstream
+  // TupleGetItemExpr substitution and emit no LHS assignment.  Do not use
+  // Function::return_types_ here: an annotation such as ``tuple[T, Scalar]``
+  // is one TupleType entry even though the IR ReturnStmt has two values.
   std::vector<StmtPtr> SpliceAssignCallSite(const FunctionPtr& callee, const std::vector<ExprPtr>& args,
                                             const VarPtr& lhs, const Span& span) {
-    if (callee->return_types_.size() > 1) {
+    if (InlineReturnArity(callee) > 1) {
       std::vector<ExprPtr> sub;
       auto stmts = SpliceInlineCallAsTupleSub(callee, args, sub);
       tuple_subs_[lhs.get()] = std::move(sub);

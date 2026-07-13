@@ -1767,6 +1767,37 @@ class TestInlineFuncIntegration:
         assert "two_returns" not in func_names
         assert "entry" in func_names
 
+    def test_inline_tensor_and_task_id_tuple_return(self):
+        """Inline multi-return preserves an explicitly typed TASK_ID element."""
+        torch = pytest.importorskip("torch")
+
+        @jit.inline
+        def produce(
+            a: pl.Tensor,
+            out: pl.Tensor,
+        ) -> tuple[pl.Tensor[[32, 32], pl.FP32], pl.Scalar[pl.TASK_ID]]:
+            with pl.at(level=pl.Level.CORE_GROUP) as producer_tid:
+                tile = pl.load(a, [0, 0], [32, 32])
+                out = pl.store(tile, [0, 0], out)
+            return out, producer_tid
+
+        @jit
+        def entry(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+            result = produce(a, out)
+            produced = result[0]
+            producer_tid = result[1]
+            with pl.at(level=pl.Level.CORE_GROUP, deps=[producer_tid]):
+                tile = pl.load(produced, [0, 0], [32, 32])
+                out = pl.store(tile, [0, 0], out)
+            return out
+
+        a = torch.randn(32, 32)
+        out = torch.empty(32, 32)
+        post_pass = entry.compile_for_test(a, out)
+        func_names = [f.name for f in post_pass.functions.values()]
+        assert "produce" not in func_names
+        assert "entry" in func_names
+
     def test_inline_multi_return_direct_return(self):
         """Multi-return @pl.jit.inline + ``return inline_call(...)`` (issue #1304).
 
