@@ -246,6 +246,38 @@ class TestCompileFromSignature:
         _, _, _, scalar_values, _, _ = scalar_sig_kernel._bind_args_from_signature({"n": 7})
         assert scalar_values == {"n": 7}
 
+    def test_keyword_tensor_samples_use_tensor_mode(self):
+        """Passing sample tensors by keyword (no positional args) must still bind
+        through the tensor path, not silently enter signature mode. add_kernel's
+        params are bare ``pl.Tensor`` — signature mode would raise; tensor mode
+        reads the sample shapes and compiles."""
+        torch = pytest.importorskip("torch")
+
+        t = torch.zeros(32, 32, dtype=torch.float32)
+        # All tensors by keyword: tensor mode binds them; no bare-Tensor error.
+        compiled = add_kernel.compile(a=t, b=t, c=t)
+        assert isinstance(compiled, CompiledProgram)
+
+    def test_closure_scope_future_annotations(self):
+        """A closure-defined kernel under ``from __future__ import annotations``
+        references a dynvar captured as a closure free var. Signature mode must
+        resolve it (via globals + closure free-vars), not fail to parse the
+        string annotation."""
+        import importlib.util  # noqa: PLC0415
+        from pathlib import Path  # noqa: PLC0415
+
+        fixture_path = Path(__file__).parent / "_sig_closure_fixture.py"
+        spec = importlib.util.spec_from_file_location("_sig_closure_fixture", fixture_path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        kernel = module.make_closure_kernel()
+        _, _, tensor_meta, _, _, _ = kernel._bind_args_from_signature({})
+        assert tensor_meta["a"].dynamic_dim_indices() == {0}
+        assert tensor_meta["a"].static_shape()[1] == 64
+        assert tensor_meta["a"].dtype == pl.FP32
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

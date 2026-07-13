@@ -1541,7 +1541,11 @@ class JITFunction:
         resolved_hints: dict[str, Any] | None = None
         if any(isinstance(p.annotation, str) for n, p in sig.parameters.items() if n != "self"):
             try:
-                resolved_hints = typing.get_type_hints(self._func)
+                # Pass globals merged with closure free-vars so annotations that
+                # reference an enclosing scope (e.g. a ``pl.dynamic`` / constant
+                # defined in an outer function) resolve for closure-defined
+                # kernels under ``from __future__ import annotations``.
+                resolved_hints = typing.get_type_hints(self._func, globalns=_func_name_lookup(self._func))
             except Exception:  # noqa: BLE001 - best effort; fall back to raw annotations
                 resolved_hints = None
 
@@ -1646,9 +1650,13 @@ class JITFunction:
         if "config" in kwargs:
             kwargs = {k: v for k, v in kwargs.items() if k != "config"}
 
-        # No positional args + compile() → derive shapes from the signature
-        # annotations; otherwise classify from the passed tensor/scalar args.
-        if allow_signature_mode and not args:
+        # Signature mode (compile() only) reads shapes from the annotations,
+        # but ONLY when no tensor values were supplied — positionally OR by
+        # keyword. Keyword tensor samples (``compile(a=x, b=y)``) must still bind
+        # through ``_bind_args``/``sig.bind`` as before; scalar/config kwargs do
+        # not block signature mode.
+        signature_mode = allow_signature_mode and not args and not any(_is_tensor(v) for v in kwargs.values())
+        if signature_mode:
             param_names, arguments, tensor_meta, scalar_values, scalar_dtypes, per_func_dyn = (
                 self._bind_args_from_signature(kwargs)
             )
@@ -1778,15 +1786,17 @@ class JITFunction:
         same specialization key hit the L1 cache and return the same
         ``CompiledProgram`` instance.
 
-        **Compiling without tensors.** When called with **no positional
-        arguments**, the shape/dtype contract is read directly from the
-        kernel's own parameter annotations — no throwaway ``torch.empty(...)``
-        dummies needed. This requires every tensor parameter to carry a full
-        ``pl.Tensor[[...], dtype]`` annotation (a bare ``pl.Tensor`` has no
-        shape to read and raises). Dynamic dims (``pl.dynamic`` / ``bind_dynamic``)
-        need no value — the artifact is extent-independent. Scalar parameters
-        have no value in the signature, so pass them as keyword args (or via a
-        signature default). This shares the same cache entry as an equivalent
+        **Compiling without tensors.** When called with **no tensor
+        arguments** — neither positional nor keyword — the shape/dtype contract
+        is read directly from the kernel's own parameter annotations, so no
+        throwaway ``torch.empty(...)`` dummies are needed. (Passing tensors by
+        keyword, e.g. ``compile(a=sample_a)``, still binds them normally.) This
+        requires every tensor parameter to carry a full ``pl.Tensor[[...],
+        dtype]`` annotation (a bare ``pl.Tensor`` has no shape to read and
+        raises). Dynamic dims (``pl.dynamic`` / ``bind_dynamic``) need no value —
+        the artifact is extent-independent. Scalar parameters have no value in
+        the signature, so pass them as keyword args (or via a signature
+        default). This shares the same cache entry as an equivalent
         ``compile(*sample_tensors)`` call.
 
         Example::
