@@ -297,10 +297,11 @@ class PassPipeline {
   void AddPass(Pass pass);
   ProgramPtr Run(const ProgramPtr& program) const;  // executes passes in order
   std::vector<std::string> GetPassNames() const;
+  std::vector<Pass> GetPasses() const;
 };
 ```
 
-`PassPipeline` 是简单的有序 Pass 列表。每个 Pass 的 `operator()` 检查活跃的 `PassContext` 以获取插桩。
+`PassPipeline` 是有序 Pass 对象及其名称的单一事实来源。`GetPasses()` 返回轻量的 Pass 句柄副本，用于检查或组合新的 pipeline。每个 Pass 的 `operator()` 检查活跃的 `PassContext` 以获取插桩。
 
 ### 自动验证
 
@@ -357,6 +358,7 @@ ir.compile(program, verification_level=ir.VerificationLevel.NONE)
 | `get_strategy(strategy)` | 获取按策略配置的 PassManager |
 | `run_passes(program, dump_ir, output_dir, prefix)` | 通过 PassPipeline 执行 Pass |
 | `get_pass_names()` | 获取所有 Pass 的名称 |
+| `passes` / `pass_names` | 从底层 PassPipeline 派生的只读快照 |
 
 ### 用法
 

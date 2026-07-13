@@ -4502,7 +4502,6 @@ class TestCapacityGatedReuse:
             for p in pm.passes[: idx + 1]:
                 pipe.add_pass(p)
             pm._pipeline = pipe
-            pm.pass_names = pm.pass_names[: idx + 1]
             return pm
 
         # Real LowerPipelineLoops tags reach MemoryReuse's input (they are stripped in

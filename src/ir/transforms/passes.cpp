@@ -302,5 +302,7 @@ std::vector<std::string> PassPipeline::GetPassNames() const {
   return names;
 }
 
+std::vector<Pass> PassPipeline::GetPasses() const { return passes_; }
+
 }  // namespace ir
 }  // namespace pypto
