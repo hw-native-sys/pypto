@@ -35,6 +35,7 @@ other_jit_func(a, b)              self.other_jit_func(a, b)  (multi-function onl
 from __future__ import annotations
 
 import ast
+import copy
 import functools
 import inspect
 import textwrap
@@ -1112,11 +1113,37 @@ class _BodyTransformer(ast.NodeTransformer):
 # ---------------------------------------------------------------------------
 
 
+def _fold_const_names(node: ast.expr, py_globals: dict[str, Any]) -> ast.expr:
+    """Replace ``Name`` nodes bound to module int/float/bool constants with literals.
+
+    An explicit tuple / scalar return annotation is copied into the generated
+    ``@pl.program`` source verbatim (the return element has no ``TensorMeta`` to
+    render from). Without folding, a symbolic shape dim (e.g.
+    ``pl.Tensor[[BATCH, VOCAB], pl.FP32]``) would reach the parser as an
+    unresolved name (``NameError: name 'BATCH' is not defined``). Fold the
+    function's own module constants — the same names the body transformer inlines
+    at use sites — so the emitted annotation carries concrete extents.
+
+    The input AST is left untouched (a deep copy is transformed) because
+    ``func_def`` is shared with the body specialization pass.
+    """
+
+    class _Folder(ast.NodeTransformer):
+        def visit_Name(self, name: ast.Name) -> ast.expr:
+            value = py_globals.get(name.id)
+            if isinstance(value, (int, float, bool)) and not isinstance(value, type):
+                return ast.copy_location(ast.Constant(value=value), name)
+            return name
+
+    return _Folder().visit(copy.deepcopy(node))
+
+
 def _infer_return_type(
     func_def: ast.FunctionDef,
     tensor_meta: dict[str, TensorMeta],
     out_params: list[str],
     distributed_params: set[str] | None = None,
+    py_globals: dict[str, Any] | None = None,
 ) -> str | None:
     """Infer the return type annotation string from the return statement.
 
@@ -1138,6 +1165,13 @@ def _infer_return_type(
     type is ``pld.DistributedTensor`` rather than ``pl.Tensor`` — propagated
     here so a function returning a window-bound view does not leak as plain
     ``pl.Tensor`` (the two kinds have distinct IR ``ObjectKind``).
+
+    ``py_globals`` are the originating function's module globals. When a return
+    element is filled from the explicit annotation (a local with no
+    ``TensorMeta``, e.g. ``logits`` unpacked from a dep call), any module int
+    constant in its shape (``pl.Tensor[[BATCH, VOCAB], pl.FP32]``) is folded to a
+    literal via :func:`_fold_const_names`; otherwise the symbolic name would
+    reach the parser unresolved.
     """
     dist_set = distributed_params or set()
 
@@ -1154,17 +1188,33 @@ def _infer_return_type(
     # supplied by a matching explicit tuple return annotation because they have
     # no TensorMeta entry.
     if return_node is not None and isinstance(return_node.value, ast.Tuple):
+        return_elts = return_node.value.elts
         explicit_elements: list[ast.expr] | None = None
         if isinstance(func_def.returns, ast.Subscript) and _is_tuple_annotation(func_def.returns.value):
             annotation_slice = func_def.returns.slice
             explicit_elements = (
                 annotation_slice.elts if isinstance(annotation_slice, ast.Tuple) else [annotation_slice]
             )
-            if len(explicit_elements) != len(return_node.value.elts):
+            if len(explicit_elements) != len(return_elts):
                 explicit_elements = None
 
+        def _element_uninferable(i: int) -> bool:
+            e = return_elts[i]
+            return not (isinstance(e, ast.Name) and e.id in tensor_meta)
+
+        # A *complete* (subscripted) explicit element for an un-inferrable return
+        # — e.g. ``pl.Scalar[pl.TASK_ID]`` — is one the parser cannot re-derive
+        # from a value, so the annotation is required and must not be dropped. A
+        # plain tensor local, in contrast, is re-inferable once the annotation is
+        # gone (the pre-#2016 behavior).
+        annotation_required = explicit_elements is not None and any(
+            _element_uninferable(i) and isinstance(explicit_elements[i], ast.Subscript)
+            for i in range(len(return_elts))
+        )
+
         elt_annotations: list[str] = []
-        for index, elt in enumerate(return_node.value.elts):
+        has_bare_element = False
+        for index, elt in enumerate(return_elts):
             if isinstance(elt, ast.Name) and elt.id in tensor_meta:
                 elt_annotations.append(
                     _build_tensor_annotation(
@@ -1173,10 +1223,25 @@ def _infer_return_type(
                         is_distributed=elt.id in dist_set,
                     )
                 )
+            elif explicit_elements is not None and isinstance(explicit_elements[index], ast.Subscript):
+                # Complete explicit element; fold module int constants in its shape
+                # to literals so the emitted source carries concrete extents.
+                folded = _fold_const_names(explicit_elements[index], py_globals or {})
+                elt_annotations.append(ast.unparse(folded))
             elif explicit_elements is not None:
+                # Un-inferrable element with a bare (shapeless) explicit annotation.
                 elt_annotations.append(ast.unparse(explicit_elements[index]))
+                has_bare_element = True
             else:
-                return None  # Can't infer this element — drop the annotation
+                return None  # no explicit annotation at all — drop (pre-#2016)
+
+        # Drop the annotation only when it is entirely dispensable: a bare element
+        # is present AND no sibling element requires the annotation. That keeps a
+        # bare tensor-local tuple parsing again without stripping a TASK_ID an
+        # adjacent element depends on (the bare element then surfaces as a clear
+        # ``Incomplete type annotation`` the author must shape).
+        if has_bare_element and not annotation_required:
+            return None
         return f"tuple[{', '.join(elt_annotations)}]"
 
     # A TASK_ID (or another explicit Scalar) has no TensorMeta entry. Preserve
@@ -1188,7 +1253,7 @@ def _infer_return_type(
         and isinstance(func_def.returns, ast.Subscript)
         and _is_scalar_annotation(func_def.returns.value)
     ):
-        return ast.unparse(func_def.returns)
+        return ast.unparse(_fold_const_names(func_def.returns, py_globals or {}))
 
     # `return f(...)`: the result type depends on f's declared return types,
     # which we don't have here. Emit no annotation rather than wrongly assuming
@@ -1604,7 +1669,9 @@ class Specializer:
         )
 
         # Infer return type
-        ret_type = _infer_return_type(func_def, ctx.tensor_meta, out_params, distributed_params)
+        ret_type = _infer_return_type(
+            func_def, ctx.tensor_meta, out_params, distributed_params, ctx.py_globals
+        )
         ret_ann = f" -> {ret_type}" if ret_type else ""
 
         # External C++ kernel: emit header-only declaration(s) backed by the

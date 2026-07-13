@@ -1499,6 +1499,69 @@ class TestInferReturnType:
         ann = _infer_return_type(func_def, meta, ["out"])
         assert ann == "tuple[pl.Tensor[[32, 32], pl.FP32], pl.Scalar[pl.TASK_ID]]"
 
+    def test_explicit_tuple_element_folds_module_constants(self):
+        """A local return element uses the explicit annotation; module int
+        constants in its shape are folded to literals so the emitted source
+        carries concrete extents rather than unresolved names (would otherwise
+        parse-fail with ``NameError: name 'BATCH' is not defined``)."""
+        func_def = _parse_func(
+            """
+            def f(out) -> tuple[pl.Tensor[[BATCH, VOCAB], pl.FP32], pl.Tensor]:
+                return logits, out
+            """
+        )
+        meta = {"out": self._meta()}
+        # `logits` (local) -> folded explicit annotation; `out` -> from meta.
+        ann = _infer_return_type(func_def, meta, ["out"], py_globals={"BATCH": 16, "VOCAB": 128})
+        assert ann == "tuple[pl.Tensor[[16, 128], pl.FP32], pl.Tensor[[32, 32], pl.FP32]]"
+
+    def test_bare_explicit_tuple_element_drops_annotation(self):
+        """A bare (shapeless) explicit element for an un-inferrable local drops the
+        whole annotation — the pre-#2016 behavior — instead of emitting an
+        incomplete ``pl.Tensor`` the parser rejects (``Incomplete type
+        annotation``). Regression for the qwen3 decode host wrapper."""
+        func_def = _parse_func(
+            """
+            def f(out) -> tuple[pl.Tensor, pl.Tensor]:
+                return logits, out
+            """
+        )
+        meta = {"out": self._meta()}
+        # `logits` is un-inferrable and its explicit element is a bare `pl.Tensor`.
+        assert _infer_return_type(func_def, meta, ["out"], py_globals={}) is None
+
+    def test_bare_element_alongside_task_id_keeps_annotation(self):
+        """A bare tensor element must NOT drop a sibling TASK_ID's annotation.
+
+        The parser cannot re-derive a TASK_ID from a value (that is why #2016
+        added the explicit-annotation copy). So when a bare, un-inferrable
+        element sits next to a subscripted one that needs the annotation, keep
+        the annotation — the bare element then surfaces as a clear
+        ``Incomplete type annotation`` instead of silently stripping the TASK_ID."""
+        func_def = _parse_func(
+            """
+            def f(out) -> tuple[pl.Tensor, pl.Scalar[pl.TASK_ID]]:
+                return local_tensor, tid
+            """
+        )
+        meta = {"out": self._meta()}
+        # `local_tensor` bare + un-inferrable, `tid` needs its Scalar annotation.
+        ann = _infer_return_type(func_def, meta, ["out"])
+        assert ann == "tuple[pl.Tensor, pl.Scalar[pl.TASK_ID]]"
+
+    def test_explicit_tuple_element_without_globals_stays_symbolic(self):
+        """No ``py_globals`` (or an unknown name) leaves the annotation as-is —
+        folding only substitutes names bound to module int/float/bool constants."""
+        func_def = _parse_func(
+            """
+            def f(out) -> tuple[pl.Tensor[[BATCH, 128], pl.FP32], pl.Tensor]:
+                return logits, out
+            """
+        )
+        meta = {"out": self._meta()}
+        ann = _infer_return_type(func_def, meta, ["out"])
+        assert ann == "tuple[pl.Tensor[[BATCH, 128], pl.FP32], pl.Tensor[[32, 32], pl.FP32]]"
+
     @pytest.mark.parametrize("return_expr", ["tid", "0", "tid + 1"])
     def test_scalar_return_annotation_preserved_for_any_expression(self, return_expr):
         """Explicit scalar returns do not require a TensorMeta-backed name."""
