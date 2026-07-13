@@ -549,14 +549,6 @@ def broadcast(
     return DistributedTensor(expr=call)
 
 
-@overload
-def allgather(
-    local_data: Tensor | DistributedTensor,
-    target: DistributedTensor,
-    signal: DistributedTensor,
-) -> DistributedTensor: ...
-
-
 def allgather(
     local_data: Tensor | DistributedTensor,
     target: DistributedTensor,
