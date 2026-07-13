@@ -420,9 +420,9 @@ std::string MaterializeSubviewOperandIfNeeded(const ir::ExprPtr& expr, codegen::
   // the extracted window lands on the source's row 0 (#1640).
   INTERNAL_CHECK_SPAN(mat->const_offset, expr->span_)
       << "Internal error: lazy pto.textract materialization of a dynamic-offset tile.slice would write the "
-         "extracted window onto its own live source's row 0 (the source-inherited destination buffer cannot "
-         "encode a dynamic offset and falls back to the source base). CanonicalizeTileSlice must rewrite this "
-         "slice into a tile.extract with a fresh buffer";
+         "extracted window onto its own live source's row 0: the source-inherited destination buffer cannot "
+         "encode a dynamic offset and falls back to the source base. CanonicalizeTileSlice must rewrite it "
+         "into a tile.extract with a fresh buffer";
 
   // Layout: the destination is dense (row pitch = view cols) while the source
   // window is strided (row pitch = source cols). These coincide only for a
