@@ -7,7 +7,13 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-# -clang-analyzer-unix.Malloc is disabled due to false positives
+# Disabled due to false positives:
+#   -clang-analyzer-unix.Malloc
+#   -clang-analyzer-cplusplus.NewDeleteLeaks reports the control block that
+#     libstdc++ allocates inside std::make_shared (the shared_ptr-internal
+#     `_M_pi`) as leaked, blaming the call sites it inlined the allocation into.
+#     The IR is shared_ptr-only — there is no raw new/delete to leak — so the
+#     reports track the libstdc++ version rather than the code.
 Checks: >
   bugprone-*,
   clang-analyzer-*,
@@ -18,6 +24,7 @@ Checks: >
   portability-*,
   misc-include-cleaner,
   -bugprone-easily-swappable-parameters,
+  -clang-analyzer-cplusplus.NewDeleteLeaks,
   -clang-analyzer-unix.Malloc,
   -google-build-using-namespace,
   -modernize-avoid-c-arrays,
