@@ -18,6 +18,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -213,9 +214,9 @@ class PTOTestCase(ABC):
                 value derived from ``platform`` wins.
             strategy: Override the optimization strategy.  If None, falls
                 back to the class-level ``get_strategy()`` default (Default).
-            memory_planner: Override the on-chip memory planner (PYPTO/PTOAS).
-                If None, falls back to ``get_memory_planner()`` (which returns
-                None, deferring to ir.compile's PYPTO default).
+            memory_planner: Override the on-chip memory planner
+                (PYPTO/DSA/PTOAS). If None, falls back to the suite-wide planner
+                stored in ``RunConfig``.
         """
         self.config = config or RunConfig()
         self._override_platform = platform
@@ -268,12 +269,28 @@ class PTOTestCase(ABC):
         """Return the on-chip memory planner for compilation.
 
         If *memory_planner* was passed to the constructor, that value takes
-        precedence. Otherwise returns None, deferring to ir.compile's default
-        (``MemoryPlanner.PYPTO``). Subclasses may override this method to opt a
-        test case into ``MemoryPlanner.PTOAS`` (ptoas owns lifetime reuse +
-        address assignment at ``--pto-level=level2``).
+        precedence. Otherwise returns the suite-wide ``RunConfig`` value.
+        Subclasses may override this method to opt a test case into a planner.
         """
-        return self._override_memory_planner
+        if self._override_memory_planner is not None:
+            return self._override_memory_planner
+        return self.config.memory_planner
+
+    def get_dsa_export_dir(self) -> str | None:
+        """Return a collision-free corpus directory for this test variant."""
+        if self.get_memory_planner() != MemoryPlanner.DSA or self.config.dsa_export_dir is None:
+            return None
+        platform = self.get_platform() or self.config.platform
+        return str(Path(self.config.dsa_export_dir) / self.get_name() / platform)
+
+    def inherit_session_compile_config(
+        self, memory_planner: MemoryPlanner | None, dsa_export_dir: str | None
+    ) -> None:
+        """Fill unset compile controls from the suite-wide configuration."""
+        if self._override_memory_planner is None and self.config.memory_planner is None:
+            self.config.memory_planner = memory_planner
+        if self.config.dsa_export_dir is None:
+            self.config.dsa_export_dir = dsa_export_dir
 
     def get_enable_pypto_l0c_double_buffer(self) -> bool | None:
         """Whether to opt in to L0C double-buffering (dbC=2) under the PyPTO planner.

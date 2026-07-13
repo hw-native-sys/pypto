@@ -54,6 +54,8 @@ cmake --build build --parallel 2
 The default build keeps `PYPTO_ENABLE_DSA_SOLVER=OFF`. It still exposes the
 planner enum so configuration can be serialized consistently, but selecting DSA
 at execution time produces an actionable error explaining how to reconfigure.
+`passes.is_dsa_solver_available()` reports whether the active build includes the
+adapter, allowing optional tests and applications to gate DSA selection.
 
 ## API
 
@@ -93,6 +95,9 @@ with passes.PassContext(
 Full compilation accepts the same selection as
 `ir.compile(..., memory_planner=passes.MemoryPlanner.DSA,
 dsa_export_dir="build/dsa-corpus")`.
+`RunConfig` exposes the same `memory_planner` and `dsa_export_dir` fields. The
+system-test harness additionally accepts `--memory-planner=dsa` and
+`--dsa-export-dir=...` for suite-wide device validation and corpus capture.
 
 ## Algorithm
 
@@ -120,7 +125,10 @@ When `MemoryPlanner.DSA` is active, step 4 is replaced by this guarded path:
    read may share an address with the result written by that statement.
 4. Export fixed memory pools, backend capacities, a leading reserved range, and
    hard separation pairs for pipeline clones, backend hazards, and op-specific
-   no-alias rules. Each separation retains its typed source.
+   no-alias rules. Pipeline residue counts come from a dry run of MemoryReuse's
+   exact whole-space packer, so depth shedding accounts for alignment, reserved
+   memory, co-resident tiles, and other pipeline groups rather than using only
+   `capacity / largest_stage`. Each separation retains its typed source.
 5. Retain normalized alias-class members and pipeline group/stage/residue data.
    Capacity-folded same-residue stages emit sparse chronological cross-pipe
    reuse penalties; the generic constraints and cost model remain authoritative.
