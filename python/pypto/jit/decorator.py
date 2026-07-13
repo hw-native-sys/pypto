@@ -672,12 +672,12 @@ def _extract_dim_alias(value: ast.expr | None) -> tuple[str, int] | None:
     return None
 
 
-def _assignment_parts(stmt: ast.stmt) -> tuple[ast.expr, ast.expr | None] | None:
-    """Return the target and value for a supported single-target assignment."""
-    if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
-        return stmt.targets[0], stmt.value
+def _assignment_parts(stmt: ast.stmt) -> tuple[list[ast.expr], ast.expr | None] | None:
+    """Return all targets and the value for a supported assignment."""
+    if isinstance(stmt, ast.Assign):
+        return stmt.targets, stmt.value
     if isinstance(stmt, ast.AnnAssign):
-        return stmt.target, stmt.value
+        return [stmt.target], stmt.value
     return None
 
 
@@ -713,50 +713,51 @@ def _update_local_tensor_meta(
     parts = _assignment_parts(stmt)
     if parts is None:
         return
-    target, value = parts
-    named = target if isinstance(target, ast.Name) else None
-    meta: TensorMeta | None = None
-    preserve_existing = False
+    targets, value = parts
+    for target in targets:
+        named = target if isinstance(target, ast.Name) else None
+        meta: TensorMeta | None = None
+        preserve_existing = False
 
-    if isinstance(value, ast.Subscript) and named is not None:
-        meta = _subscript_slice_meta(value, local, resolve_int)
-    elif isinstance(value, ast.Name) and named is not None:
-        meta = local.get(value.id)
-    elif isinstance(value, ast.Call):
-        fn = value.func
-        if isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Name) and named is not None:
-            handler = pl_attr_handlers.get(fn.attr)
-            if handler is not None:
-                meta = handler(value)
-            else:
-                # Keep the pre-existing behavior for pl operations whose
-                # result metadata this extractor does not model (for example,
-                # same-shaped pl.assemble rebindings).
+        if isinstance(value, ast.Subscript) and named is not None:
+            meta = _subscript_slice_meta(value, local, resolve_int)
+        elif isinstance(value, ast.Name) and named is not None:
+            meta = local.get(value.id)
+        elif isinstance(value, ast.Call):
+            fn = value.func
+            if isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Name) and named is not None:
+                handler = pl_attr_handlers.get(fn.attr)
+                if handler is not None:
+                    meta = handler(value)
+                else:
+                    # Keep the pre-existing behavior for pl operations whose
+                    # result metadata this extractor does not model (for example,
+                    # same-shaped pl.assemble rebindings).
+                    preserve_existing = True
+            elif isinstance(fn, ast.Name) and fn.id in dep_io:
+                _propagate_dep_out_metas(value, fn.id, target, dep_io, local)
+                # Preserve the existing dependency-result behavior when the
+                # callee has no explicit Out/InOut metadata: an already-known
+                # target keeps its metadata until a later supported rebinding can
+                # refine it. This is how bare inline helpers propagate same-shaped
+                # results today.
                 preserve_existing = True
-        elif isinstance(fn, ast.Name) and fn.id in dep_io:
-            _propagate_dep_out_metas(value, fn.id, target, dep_io, local)
-            # Preserve the existing dependency-result behavior when the
-            # callee has no explicit Out/InOut metadata: an already-known
-            # target keeps its metadata until a later supported rebinding can
-            # refine it. This is how bare inline helpers propagate same-shaped
-            # results today.
-            preserve_existing = True
 
-    if named is None:
-        return
-    if meta is not None:
-        local[named.id] = meta
-    elif value is not None and not preserve_existing:
-        # Any unsupported rebinding shadows an older parameter or local tensor
-        # rather than leaving stale metadata visible.
-        local.pop(named.id, None)
+        if named is None:
+            continue
+        if meta is not None:
+            local[named.id] = meta
+        elif value is not None and not preserve_existing:
+            # Any unsupported rebinding shadows an older parameter or local tensor
+            # rather than leaving stale metadata visible.
+            local.pop(named.id, None)
 
-    if value is not None:
-        alias = _extract_dim_alias(value)
-        if alias is None:
-            dim_aliases.pop(named.id, None)
-        else:
-            dim_aliases[named.id] = alias
+        if value is not None:
+            alias = _extract_dim_alias(value)
+            if alias is None:
+                dim_aliases.pop(named.id, None)
+            else:
+                dim_aliases[named.id] = alias
 
 
 def _walk_local_tensor_meta_stmts(

@@ -818,6 +818,12 @@ def _annotated_rebind_callsite(src: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Ten
     return out
 
 
+def _chained_rebind_callsite(src: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+    src = view = pl.reshape(src, [4, 8])
+    out = _callsite_metadata_kernel(view, out)
+    return out
+
+
 def _direct_callsite(src: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
     out = _callsite_metadata_kernel(src, out)
     return out
@@ -1115,6 +1121,11 @@ class TestSliceAndDepReturnMetadata:
     def test_dep_metadata_uses_annotated_rebinding_at_callsite(self):
         """Annotated and plain assignments expose the same point-in-time metadata."""
         metas = self._resolve_callsite_metadata(_annotated_rebind_callsite)
+        assert metas["x"] == TensorMeta(shape=(4, 8), dtype=DataType.FP32)
+
+    def test_dep_metadata_tracks_all_chained_assignment_targets(self):
+        """Every name in a chained assignment exposes the rebound metadata."""
+        metas = self._resolve_callsite_metadata(_chained_rebind_callsite)
         assert metas["x"] == TensorMeta(shape=(4, 8), dtype=DataType.FP32)
 
     def test_dep_metadata_direct_call_keeps_seed_metadata(self):
