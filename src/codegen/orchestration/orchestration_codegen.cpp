@@ -3918,10 +3918,10 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   // simpler#953 removed the ``enable_dump_tensor_selective()`` toggle: the
   // runtime now latches the dump level (off / partial / full) host-side at
   // ``dump_tensor_init`` from ``DumpDataHeader`` (driven by
-  // ``CallConfig.enable_dump_tensor``), race-free regardless of submit order.
+  // ``CallConfig.enable_dump_args``), race-free regardless of submit order.
   // Codegen only emits the per-task ``Arg::dump(...)`` markers (see
   // ``EmitSelectiveDumpCall``); partial mode selecting exactly those marked
-  // tensors is enabled by ``enable_dump_tensor == 1``.
+  // tensors is enabled by ``enable_dump_args == 1``.
 
   oss << "    // External tensors\n";
   int orch_idx = 0;

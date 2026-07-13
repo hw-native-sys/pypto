@@ -307,7 +307,7 @@ class _SpyCallConfig:
     def __init__(self) -> None:
         self.runtime_env = _SpyRuntimeEnv()
         self.enable_l2_swimlane = False
-        self.enable_dump_tensor = 0
+        self.enable_dump_args = 0
         self.enable_pmu = 0
         self.enable_dep_gen = False
         self.enable_scope_stats = False
@@ -466,7 +466,7 @@ class TestMakeCallConfigDfx:
         cfg = _make_dist_call_config_with_fake(
             DistributedConfig(), run_config, monkeypatch, dfx_base=dfx_base
         )
-        assert cfg.enable_dump_tensor == 2
+        assert cfg.enable_dump_args == 2
         assert cfg.enable_pmu == 1
         assert cfg.enable_dep_gen is True
         assert cfg.enable_scope_stats is True

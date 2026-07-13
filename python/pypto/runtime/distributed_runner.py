@@ -419,7 +419,9 @@ def _make_call_config(
             if dfx_base is None:
                 raise ValueError("_make_call_config: dfx_base is required when a DFX flag is enabled on L3")
             dfx_base.mkdir(parents=True, exist_ok=True)
-            call_config.enable_dump_tensor = dfx.enable_dump_tensor
+            # simpler's CallConfig calls this ``enable_dump_args``; retain the
+            # PyPTO-level ``enable_dump_tensor`` option for compatibility.
+            call_config.enable_dump_args = dfx.enable_dump_tensor
             call_config.enable_pmu = dfx.enable_pmu
             # Swimlane needs ``deps.json`` so the converter can resolve task
             # arrows / kernel names. The one-shot path runs a clean two-pass

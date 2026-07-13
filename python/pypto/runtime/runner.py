@@ -820,7 +820,9 @@ def _build_call_config(
         cfg.aicpu_thread_num = at
 
     cfg.enable_l2_swimlane = run_config.enable_l2_swimlane
-    cfg.enable_dump_tensor = run_config.enable_dump_tensor
+    # simpler renamed this CallConfig field to ``enable_dump_args``. Keep
+    # RunConfig.enable_dump_tensor as PyPTO's backwards-compatible public API.
+    cfg.enable_dump_args = run_config.enable_dump_tensor
     cfg.enable_pmu = run_config.enable_pmu
     cfg.enable_dep_gen = run_config.enable_dep_gen
     cfg.enable_scope_stats = run_config.enable_scope_stats
