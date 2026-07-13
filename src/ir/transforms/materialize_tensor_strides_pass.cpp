@@ -82,7 +82,7 @@ TypePtr MaterializeType(const TypePtr& type) {
     }
     auto materialized_stride =
         tensor_view_semantics::BuildLogicalStridesFromLayout(tensor_type->shape_, view.layout);
-    TensorView new_view(std::move(materialized_stride), view.layout, view.valid_shape);
+    TensorView new_view(std::move(materialized_stride), view.layout, view.valid_shape, view.pad);
     return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_, tensor_type->memref_,
                                         std::make_optional(std::move(new_view)));
   }
