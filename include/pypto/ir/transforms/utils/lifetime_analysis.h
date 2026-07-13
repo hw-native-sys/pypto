@@ -14,7 +14,7 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <utility>
+#include <string>
 #include <vector>
 
 #include "pypto/ir/expr.h"
@@ -51,6 +51,11 @@ struct LifetimeInterval {
   int last_use_point;        ///< Group's latest last-use point (topological order).
   MemorySpace memory_space;  ///< Memory space (== DSA pool).
   uint64_t size;             ///< Slot size in bytes (largest member).
+  /// Stable source-level names of every view/must-alias member collapsed into
+  /// this allocation identity. The representative is included for singleton
+  /// classes as well, so an exported corpus can reconstruct the normalized
+  /// alias classes without depending on IR pointer identity.
+  std::vector<std::string> alias_members;
   /// Per-variable ranges before the conservative group hull is formed. This
   /// lets a structured DSA solver preserve holes in a semantics-required
   /// allocation identity instead of treating the whole hull as continuously
@@ -59,25 +64,63 @@ struct LifetimeInterval {
   std::vector<VariableLifetime> live_ranges;
 };
 
+enum class AllocationSeparationReason : uint8_t {
+  Generic,
+  PipelineStage,
+  TargetHazard,
+  SemanticNoAlias,
+};
+
+struct AllocationSeparation {
+  size_t first;
+  size_t second;
+  std::vector<AllocationSeparationReason> reasons;
+};
+
+struct PipelineAllocationMember {
+  size_t interval_index;
+  int32_t stage;
+  uint32_t residue;
+};
+
+/**
+ * @brief One normalized pipeline-buffering group before DSA solving.
+ *
+ * ``depth`` is the number of distinct source stages. ``effective_depth`` is
+ * the capacity-gated number of physical residues; members in different
+ * residues receive hard separations, while same-residue chronological reuse
+ * is represented by a sparse cost overlay in the standalone document.
+ */
+struct PipelineAllocationGroup {
+  MemorySpace memory_space;
+  int32_t group;
+  uint64_t slot_size;
+  uint32_t depth;
+  uint32_t effective_depth;
+  std::vector<PipelineAllocationMember> members;
+};
+
 /**
  * @brief Per-allocation lifetimes + hard separations for a DSA solver.
  *
  * ``intervals``: one LifetimeInterval per allocation (must-aliases + views already
  * collapsed via ``base_`` identity; opportunistic reuse is the solver's job).
  *
- * ``separations``: index pairs into ``intervals`` that must NOT share an address
- * even when lifetime-disjoint.  Three sources, the same constraints MemoryReuse
+ * ``separations``: typed index pairs into ``intervals`` that must NOT share an
+ * address even when lifetime-disjoint. Three sources, the same constraints MemoryReuse
  * honors: (1) pipeline double-buffer clones (same group, different stage) — so
  * stages ping-pong instead of serializing; (2) the Ascend910B load+tpop_from_aic
  * in-place hazard (backend-gated); (3) op-semantic forbid-alias (e.g. tile.sel's
  * mask/tmp must not share the output's buffer). Pipeline separation is reduced
  * to the backend-capacity-gated stage residue count computed by the shared
  * analysis; the standalone solver still enforces the resulting pairs as hard
- * constraints.
+ * constraints. ``pipeline_groups`` retains the normalized depth/stage/residue
+ * relation used to derive those pairs and sparse reuse costs.
  */
 struct AllocationPlan {
   std::vector<LifetimeInterval> intervals;
-  std::vector<std::pair<size_t, size_t>> separations;
+  std::vector<AllocationSeparation> separations;
+  std::vector<PipelineAllocationGroup> pipeline_groups;
 };
 
 /**
