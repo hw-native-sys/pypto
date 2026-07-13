@@ -924,14 +924,20 @@ def _build_group_mapping(
     return groups, ungrouped
 
 
+def _pypto_emits_tile_addresses(memory_planner: _passes.MemoryPlanner) -> bool:
+    """Whether PyPTO writes physical tile addresses for this planner."""
+    return memory_planner != _passes.MemoryPlanner.PTOAS
+
+
 def _get_ptoas_flags(memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO) -> list[str]:
     """Build the common ptoas flag list for kernel compilation.
 
-    ``MemoryPlanner.PYPTO`` bakes physical addresses in PyPTO and trusts them
-    (``--pto-level=level3``); ``MemoryPlanner.PTOAS`` emits no addresses and
-    lets the ptoas PlanMemory pass allocate (``--pto-level=level2``).
+    ``MemoryPlanner.PYPTO`` and ``MemoryPlanner.DSA`` bake physical addresses
+    in PyPTO and trust them (``--pto-level=level3``);
+    ``MemoryPlanner.PTOAS`` emits no addresses and lets ptoas PlanMemory
+    allocate (``--pto-level=level2``).
     """
-    level = "level3" if memory_planner == _passes.MemoryPlanner.PYPTO else "level2"
+    level = "level3" if _pypto_emits_tile_addresses(memory_planner) else "level2"
     flags = [
         "--enable-insert-sync",
         f"--pto-level={level}",
@@ -1539,7 +1545,7 @@ def _generate_single_chip(
     # generation) and runs sequentially so that we don't contend on the GIL.
     # When ptoas owns memory planning, omit the physical `pto.alloc_tile addr`
     # so ptoas runs at --pto-level=level2 (which rejects any addr operand).
-    emit_tile_addr = memory_planner == _passes.MemoryPlanner.PYPTO
+    emit_tile_addr = _pypto_emits_tile_addresses(memory_planner)
     units: list[_CodegenUnit] = []
 
     # Grouped functions: one MLIR module per group

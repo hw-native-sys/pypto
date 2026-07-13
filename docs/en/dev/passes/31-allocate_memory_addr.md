@@ -4,17 +4,56 @@ Assigns real memory addresses to existing alloc operations.
 
 ## Overview
 
-This pass allocates concrete memory addresses for non-DDR MemRefs and updates the existing `tile.alloc` statements in place. It also resolves `system.reserve_buffer(base=AUTO)` to explicit base addresses before PTO code generation. Unlike creating new alloc operations, this pass only modifies the address field of alloc statements that were created by InitMemRef (with `addr=-1`).
+This pass is the physical-address boundary for non-DDR MemRefs. It resolves
+`system.reserve_buffer(base=AUTO)`, chooses placements, and updates the existing
+`tile.alloc` statements before PTO code generation. It never creates allocation
+operations: InitMemRef has already created them with unallocated addresses.
+
+The default `MemoryPlanner.PYPTO` path keeps the existing aligned bump placement
+after MemoryReuse. The optional `MemoryPlanner.DSA` path receives the unmerged
+allocation identities, exports the same structured problem used by the benchmark
+framework, invokes the standalone solver, independently validates its result, and
+writes the validated offsets back.
 
 **Key responsibilities**:
 
 - Collect unique MemRef objects from TileType variables
 - Resolve `system.reserve_buffer` bases to explicit addresses per function
 - Allocate sequential, 32-byte aligned addresses within each memory space
+- Or, in DSA mode, jointly choose lifetime reuse and offsets with the standalone solver
 - Update MemRef addresses in all variable types
 - Update `tile.alloc` statement arguments with the allocated addresses
 
-**When to use**: Run after MemoryReuse (to respect shared MemRefs) and before code generation. Final pass in memory management pipeline.
+**When to use**: Run before code generation as the final memory-management pass.
+The default pipeline runs it after MemoryReuse. The DSA pipeline deliberately
+skips MemoryReuse, but still runs MaterializeSemanticAliases first so views,
+loop-carried values, and in-place operations retain their mandatory identities.
+
+## Planner modes
+
+| Mode | Input to this pass | Placement | Failure behavior |
+| --- | --- | --- | --- |
+| `MemoryPlanner.PYPTO` | Opportunistically merged MemRefs from MemoryReuse | Backend-policy aligned bump allocation | Existing verifier reports invalid or over-capacity addresses |
+| `MemoryPlanner.DSA` | Unmerged MemRefs after MaterializeSemanticAliases | Standalone first-fit DSA solver over schema-v1 `pypto_structured` | Invalid export, capability mismatch, infeasibility, or validator failure stops compilation; no silent fallback |
+| `MemoryPlanner.PTOAS` | None | This pass is skipped; ptoas `PlanMemory` owns placement | Deferred to ptoas |
+
+DSA support is an optional CMake dependency. Build and consume an installed
+`dsa-solver` 0.2 package as follows:
+
+```bash
+cmake -S /path/to/dsa-solver -B /path/to/dsa-solver/build \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/path/to/dsa-install
+cmake --build /path/to/dsa-solver/build --parallel 2
+cmake --install /path/to/dsa-solver/build
+
+cmake -B build -DPYPTO_ENABLE_DSA_SOLVER=ON \
+  -DCMAKE_PREFIX_PATH=/path/to/dsa-install
+cmake --build build --parallel 2
+```
+
+The default build keeps `PYPTO_ENABLE_DSA_SOLVER=OFF`. It still exposes the
+planner enum so configuration can be serialized consistently, but selecting DSA
+at execution time produces an actionable error explaining how to reconfigure.
 
 ## API
 
@@ -37,6 +76,24 @@ alloc_pass = passes.allocate_memory_addr()
 program_with_addrs = alloc_pass(program)
 ```
 
+Select the standalone path and optionally emit deterministic corpus documents
+through PassContext-owned configuration:
+
+```python
+from pypto.pypto_core import passes
+
+with passes.PassContext(
+    [],
+    memory_planner=passes.MemoryPlanner.DSA,
+    dsa_export_dir="build/dsa-corpus",
+):
+    program_with_addrs = passes.allocate_memory_addr()(program)
+```
+
+Full compilation accepts the same selection as
+`ir.compile(..., memory_planner=passes.MemoryPlanner.DSA,
+dsa_export_dir="build/dsa-corpus")`.
+
 ## Algorithm
 
 1. **Collect MemRefs**: Traverse function body to find all unique MemRef objects from TileType variables
@@ -47,6 +104,39 @@ program_with_addrs = alloc_pass(program)
    - Replace old MemRef references in variable types (TileType/TensorType) with new MemRefs containing real addresses
    - Update existing `tile.alloc` `AssignStmt`s: replace LHS MemRef and update addr argument in the Call expression
    - Rewrite `system.reserve_buffer` kwargs with the resolved explicit `base`
+
+### Standalone DSA path
+
+When `MemoryPlanner.DSA` is active, step 4 is replaced by this guarded path:
+
+1. Reuse the phi/loop-aware lifetime analysis from MemoryReuse without running
+   its opportunistic coalescer.
+2. Export one buffer per mandatory `MemRef.base_` identity. The buffer size is
+   the largest member size, so differently sized values may occupy that identity
+   over its lifetime. Per-member live ranges remain a multi-interval union.
+3. Convert PyPTO statement points into half-open read/write events. A definition
+   starts at `2 * def + 1`; the final read ends at `2 * last_use + 1`. A value
+   with no later read receives one write event. Consequently, an input's final
+   read may share an address with the result written by that statement.
+4. Export fixed memory pools, backend capacities, a leading reserved range, and
+   hard separation pairs for pipeline clones, backend hazards, and op-specific
+   no-alias rules.
+5. Validate the schema/profile, match solver capabilities, solve, and validate
+   every placement independently against sizes, alignment, lifetimes, pools,
+   capacities, reserved ranges, and separations.
+6. Write each placement back while preserving every view's relative byte offset.
+
+The version-1 adapter intentionally keeps pool assignment fixed and uses the
+portable peak objective. The standalone model can represent temporal exclusions
+and reuse-cost overlays, but the PyPTO exporter does not infer those yet. Branch
+exclusivity that is not visible in the exported intervals is therefore
+conservative rather than unsound. Cost-aware objectives and richer PyPTO
+structure remain research extensions behind capability matching.
+
+If `dsa_export_dir` is set, each InCore function is written as
+`pypto_<escaped-function-name>.dsa.json`. Serialization is deterministic and
+contains no IR pointers or machine-specific paths, so the document can be copied
+directly into the standalone real-instance corpus.
 
 **Address allocation (default policy)**:
 
@@ -111,8 +201,11 @@ Pass AllocateMemoryAddr();
 
 **Implementation**: `src/ir/transforms/allocate_memory_addr_pass.cpp`
 
-- `MemRefCollectorVisitor` collects unique MemRefs from TileType variables
+- `memref_collectors::CollectMemRefsWithSpace` collects unique MemRefs and their memory spaces
 - `AllocateMemoryAddresses` assigns sequential aligned addresses per memory space using a `MemoryAllocatorPolicy`
+- `dsa_adapter::BuildStructuredProblem` exports the IR-free schema-v1 problem
+- `dsa_adapter::SolveWithFirstFit` capability-matches, solves, and independently validates
+- `dsa_adapter::BuildMemRefReplacements` performs view-aware writeback
 - `MemRefUpdateMutator` updates both variable types and `tile.alloc` statement arguments in a single traversal
 
 **Python binding**: `python/bindings/modules/passes.cpp`
@@ -130,6 +223,8 @@ passes.def("allocate_memory_addr", &pass::AllocateMemoryAddr,
 - Tests alloc statements are prepended to the function body's top-level `SeqStmts`
 - Tests raw pointer uniqueness for MemRef deduplication
 - Tests default policy behavior without a backend configured
+- Tests DSA read-before-write reuse, reserved ranges, view-offset writeback, and deterministic export
+- Replays the #1908 fragmentation shape through exporter, standalone solver, validator, and writeback
 
 ## Allocation Policy
 

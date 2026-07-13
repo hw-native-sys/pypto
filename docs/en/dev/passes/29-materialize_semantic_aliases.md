@@ -17,8 +17,9 @@ Memory planning distinguishes two kinds of buffer sharing:
 
 This pass handles only the **must-alias** case. It was split out of
 [`MemoryReuse`](30-memory_reuse.md) (it is that pass's former "Step 0") so that
-the opportunistic lifetime coalescing can be skipped independently — e.g. when
-ptoas owns lifetime reuse under `compile(memory_planner=MemoryPlanner.PTOAS)`.
+the opportunistic lifetime coalescing can be skipped independently — either
+when ptoas owns planning under `MemoryPlanner.PTOAS`, or when the standalone
+solver jointly chooses reuse and offsets under `MemoryPlanner.DSA`.
 
 **When to use**: Run after [`InitMemRef`](28-init_memref.md) (which creates the
 MemRefs) and before [`MemoryReuse`](30-memory_reuse.md). It always runs; only the

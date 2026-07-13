@@ -7,6 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
+import json
 import re
 
 import pypto.language as pl
@@ -149,9 +150,11 @@ def test_allocate_memory_addr_resolves_auto_reserve_buffer_before_tiles():
             )
             return result
 
-    After = passes.init_mem_ref()(Before)
-    After = passes.allocate_memory_addr()(After)
+    Initialized = passes.init_mem_ref()(Before)
+    After = passes.allocate_memory_addr()(Initialized)
+    DsaAfter = _allocate_with_dsa(Initialized)
     ir.assert_structural_equal(After, Expected)
+    assert _vec_peak(DsaAfter) == 4096 + 16384
 
 
 def test_allocate_memory_addr_rejects_overlapping_reserve_buffer_ranges():
@@ -504,7 +507,7 @@ def test_allocated_memory_addr_verifier_errors_when_vec_exceeds_safe_cap():
 
         @pl.program
         class Before:
-            @pl.function
+            @pl.function(type=pl.FunctionType.AIV)
             def main(
                 self,
                 input_a: pl.Tensor[[64, 752], pl.FP32],
@@ -517,6 +520,9 @@ def test_allocated_memory_addr_verifier_errors_when_vec_exceeds_safe_cap():
                 return result
 
         program = passes.init_mem_ref()(Before)
+        with pytest.raises(ValueError, match=r"standalone DSA solver could not fit"):
+            _allocate_with_dsa(program)
+
         pipeline = passes.PassPipeline()
         pipeline.add_pass(passes.allocate_memory_addr())
         with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
@@ -666,6 +672,29 @@ def test_allocate_memory_addr_preserves_sibling_slice_offsets():
     ir.assert_structural_equal(After, Expected)
 
 
+def test_dsa_writeback_preserves_relative_view_offsets():
+    """A standalone placement moves a base without collapsing its views."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(
+            self,
+            input_a: pl.Tensor[[8, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+        ) -> pl.Tensor[[16, 1], pl.FP32]:
+            tile_a: pl.Tile[[8, 16], pl.FP32] = pl.load(input_a, [0, 0], [8, 16])
+            row_1: pl.Tile[[1, 16], pl.FP32] = pl.tile.slice(tile_a, [1, 16], [1, 0])
+            column: pl.Tile[[16, 1], pl.FP32] = pl.tile.reshape(row_1, [16, 1])
+            result = pl.store(column, [0, 0], out)
+            return result
+
+    initialized = passes.init_mem_ref()(Before)
+    legacy = passes.allocate_memory_addr()(initialized)
+    planned = _allocate_with_dsa(initialized)
+    ir.assert_structural_equal(planned, legacy)
+
+
 def test_allocate_memory_addr_resolves_aic_reserve_buffer_in_mat_space():
     """AIC reserve_buffer reserves the Mat space (not Vec) before Mat tile allocation.
 
@@ -810,7 +839,9 @@ def _vec_peak(func) -> int:
     """Max (offset + size) over Vec-space MemRefs in a function's printed IR."""
     text = ir.python_print(func)
     peak = 0
-    for off, size in re.findall(r"MemRef\([^,]+,\s*pl\.const\((\d+),[^)]*\),\s*(\d+)\),\s*pl\.Mem\.Vec", text):
+    for off, size in re.findall(
+        r"MemRef\([^,]+,\s*pl\.const\((\d+),[^)]*\),\s*(\d+)\),\s*pl\.Mem\.Vec", text
+    ):
         peak = max(peak, int(off) + int(size))
     return peak
 
@@ -823,7 +854,7 @@ def _dsa_chain_program():
     @pl.program
     class Before:
         @pl.function(type=pl.FunctionType.AIV)
-        def main(
+        def read_before_write_chain(
             self,
             input_a: pl.Tensor[[64, 64], pl.FP32],
             output: pl.Tensor[[64, 64], pl.FP32],
@@ -837,44 +868,159 @@ def _dsa_chain_program():
     return passes.init_mem_ref()(Before)
 
 
-def _allocate_with_dsa(base, mode: str):
-    """Run allocate_memory_addr with PYPTO_DSA_SOLVER=<mode>, restoring the env."""
-    import os
-
-    prev = os.environ.get("PYPTO_DSA_SOLVER")
-    os.environ["PYPTO_DSA_SOLVER"] = mode
-    try:
+def _allocate_with_dsa(base, export_dir: str | None = None):
+    """Run the standalone planner through its PassContext-owned adapter."""
+    with passes.PassContext(
+        [],
+        memory_planner=passes.MemoryPlanner.DSA,
+        dsa_export_dir=export_dir,
+    ):
         return passes.allocate_memory_addr()(base)
-    finally:
-        if prev is None:
-            os.environ.pop("PYPTO_DSA_SOLVER", None)
-        else:
-            os.environ["PYPTO_DSA_SOLVER"] = prev
 
 
-def test_dsa_plan_mode_reuses_disjoint_lifetimes():
-    """Under PYPTO_DSA_SOLVER=plan the solver becomes authoritative and reuses
-    lifetime-disjoint buffers the bump keeps separate — so the Vec peak drops.
-    Proves the writeback produces a valid, tighter plan (RFC pypto#1980)."""
+def test_dsa_planner_reuses_at_read_before_write_boundary():
+    """The standalone planner jointly reuses and places unmerged buffers."""
     base = _dsa_chain_program()
     bump = passes.allocate_memory_addr()(base)
-    planned = _allocate_with_dsa(base, "plan")
+    planned = _allocate_with_dsa(base)
 
     bump_peak = _vec_peak(bump)
     plan_peak = _vec_peak(planned)
     assert bump_peak == 3 * 16384  # bump: three distinct 16 KB slots
-    assert plan_peak <= bump_peak  # gate guarantees never worse
-    assert plan_peak == 2 * 16384  # tile_c reused tile_a's freed slot
+    # Every producer's last read precedes its consumer's write at the same
+    # statement point, so all three buffers may use one physical slot.
+    assert plan_peak == 16384
 
 
-def test_dsa_consult_mode_keeps_bump_authoritative():
-    """PYPTO_DSA_SOLVER=1 (consult) runs the solver + logs but must NOT change
-    addresses — the bump stays authoritative even where reuse is possible."""
+def test_dsa_export_is_deterministic_pypto_structured(tmp_path):
+    """A real IR function exports a stable schema-v1 benchmark document."""
     base = _dsa_chain_program()
+    first_dir = tmp_path / "first"
+    second_dir = tmp_path / "second"
+    _allocate_with_dsa(base, str(first_dir))
+    _allocate_with_dsa(base, str(second_dir))
+
+    first = first_dir / "pypto_read_before_write_chain.dsa.json"
+    second = second_dir / "pypto_read_before_write_chain.dsa.json"
+    assert first.read_text() == second.read_text()
+
+    document = json.loads(first.read_text())
+    assert document["schema_version"] == 1
+    assert document["profile"] == "pypto_structured"
+    assert document["instance"] == "read_before_write_chain"
+    assert document["metadata"]["solver_input"] == "pre_memory_reuse"
+    buffers = document["problem"]["buffers"]
+    assert len(buffers) == 3
+    assert [buffer["size"] for buffer in buffers] == [16384, 16384, 16384]
+    assert [buffer["live_intervals"] for buffer in buffers] == [
+        [{"lower": 7, "upper": 9}],
+        [{"lower": 9, "upper": 11}],
+        [{"lower": 11, "upper": 13}],
+    ]
+    assert document["problem"]["constraints"] == {
+        "colocations": [],
+        "pinned_allocations": [],
+        "separations": [],
+        "temporal_exclusions": [],
+    }
+    assert len(document["problem"]["pools"]) == 1
+    vec_pool = document["problem"]["pools"][0]
+    assert vec_pool["id"] == 1
+    assert vec_pool["name"] == "Vec"
+    assert vec_pool["capacity"] > 0
+    assert vec_pool["reserved_ranges"] == []
+    assert all(buffer["alignment"] == 32 for buffer in document["problem"]["buffers"])
+
+
+def _dsa_pipeline_separation_program():
+    """Two disjoint pipeline clones whose stage provenance forbids one address."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def pipeline_stage_separation(
+            self,
+            input_0: pl.Tensor[[64, 64], pl.FP32],
+            input_1: pl.Tensor[[64, 64], pl.FP32],
+            output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            stage_0: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(
+                input_0,
+                [0, 0],
+                [64, 64],
+                [64, 64],
+                target_memory=pl.Mem.Vec,
+                attrs={"pipeline_membership": "7:0"},
+            )
+            _stored_0 = pl.tile.store(stage_0, [0, 0], output)
+            stage_1: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(
+                input_1,
+                [0, 0],
+                [64, 64],
+                [64, 64],
+                target_memory=pl.Mem.Vec,
+                attrs={"pipeline_membership": "7:1"},
+            )
+            result = pl.tile.store(stage_1, [0, 0], output)
+            return result
+
+    return passes.init_mem_ref()(Before)
+
+
+def test_dsa_export_and_solver_preserve_pipeline_stage_separation(tmp_path):
+    """PyPTO pipeline provenance becomes a checked standalone separation."""
+    planned = _allocate_with_dsa(_dsa_pipeline_separation_program(), str(tmp_path))
+    assert _vec_peak(planned) == 2 * 16384
+
+    corpus_file = tmp_path / "pypto_pipeline_stage_separation.dsa.json"
+    document = json.loads(corpus_file.read_text())
+    assert document["instance"] == "pipeline_stage_separation"
+    assert document["problem"]["constraints"]["separations"] == [{"first": 0, "second": 1}]
+
+
+def _dsa_fragmentation_program():
+    """Real IR form of #1908: a freed 64 KB region must hold two 32 KB tiles."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def issue_1908_fragmentation(
+            self,
+            large_input: pl.Tensor[[128, 128], pl.FP32],
+            left_input: pl.Tensor[[64, 128], pl.FP32],
+            right_input: pl.Tensor[[64, 128], pl.FP32],
+            large_output: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+            output: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+        ) -> pl.Tensor[[64, 128], pl.FP32]:
+            producer: pl.Tile[[128, 128], pl.FP32] = pl.load(large_input, [0, 0], [128, 128])
+            _stored = pl.store(producer, [0, 0], large_output)
+            left: pl.Tile[[64, 128], pl.FP32] = pl.load(left_input, [0, 0], [64, 128])
+            right: pl.Tile[[64, 128], pl.FP32] = pl.load(right_input, [0, 0], [64, 128])
+            combined: pl.Tile[[64, 128], pl.FP32] = pl.add(left, right)
+            result = pl.store(combined, [0, 0], output)
+            return result
+
+    return passes.init_mem_ref()(Before)
+
+
+def test_dsa_planner_subdivides_a_freed_larger_region(tmp_path):
+    """Joint placement fixes the group-bump fragmentation shape from #1908."""
+    base = _dsa_fragmentation_program()
     bump = passes.allocate_memory_addr()(base)
-    consulted = _allocate_with_dsa(base, "1")
-    ir.assert_structural_equal(consulted, bump)
-    assert _vec_peak(consulted) == _vec_peak(bump) == 3 * 16384  # unchanged
+    planned = _allocate_with_dsa(base, str(tmp_path))
+
+    assert _vec_peak(bump) == (64 + 32 + 32 + 32) * 1024
+    assert _vec_peak(planned) == 64 * 1024
+
+    corpus_file = tmp_path / "pypto_issue_1908_fragmentation.dsa.json"
+    document = json.loads(corpus_file.read_text())
+    assert document["instance"] == "issue_1908_fragmentation"
+    assert [buffer["size"] for buffer in document["problem"]["buffers"]] == [
+        64 * 1024,
+        32 * 1024,
+        32 * 1024,
+        32 * 1024,
+    ]
 
 
 if __name__ == "__main__":

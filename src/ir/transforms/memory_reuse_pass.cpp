@@ -21,6 +21,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -44,7 +45,6 @@
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
-#include "pypto/ir/transforms/dsa/memref_dsa_adapter.h"
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/lifetime_analysis.h"
 #include "pypto/ir/transforms/utils/memory_footprint.h"
@@ -1298,8 +1298,6 @@ LifetimeAnalysisResult ComputeLifetimes(const StmtPtr& func_body) {
       continue;
     }
 
-    const auto& memref = tile_type->memref_.value();
-
     std::vector<VarPtr> sharing_group;
     if (var_sharing_groups.count(var)) {
       sharing_group = var_sharing_groups[var];
@@ -1310,6 +1308,9 @@ LifetimeAnalysisResult ComputeLifetimes(const StmtPtr& func_body) {
     // Compute MERGED lifetime for all variables in the sharing group
     int min_def_point = INT_MAX;
     int max_last_use = INT_MIN;
+    uint64_t max_size = 0;
+    std::vector<VariableLifetime> live_ranges;
+    live_ranges.reserve(sharing_group.size());
 
     for (const auto& group_var : sharing_group) {
       int def_point = result.var_def_order.count(group_var) ? result.var_def_order.at(group_var) : 0;
@@ -1319,6 +1320,13 @@ LifetimeAnalysisResult ComputeLifetimes(const StmtPtr& func_body) {
 
       min_def_point = std::min(min_def_point, def_point);
       max_last_use = std::max(max_last_use, last_use);
+      live_ranges.push_back({def_point, last_use});
+
+      auto group_tile_type = As<TileType>(group_var->GetType());
+      INTERNAL_CHECK_SPAN(group_tile_type != nullptr && group_tile_type->memref_.has_value(),
+                          group_var->span_)
+          << "Expected every allocation sharing-group member to carry a MemRef";
+      max_size = std::max(max_size, group_tile_type->memref_.value()->size_);
     }
 
     LifetimeInterval interval;
@@ -1332,7 +1340,8 @@ LifetimeAnalysisResult ComputeLifetimes(const StmtPtr& func_body) {
     INTERNAL_CHECK_SPAN(memory_space.has_value(), sharing_group[0]->span_)
         << "TileType with MemRef must have memory_space for reuse analysis";
     interval.memory_space = *memory_space;
-    interval.size = memref->size_;
+    interval.size = max_size;
+    interval.live_ranges = std::move(live_ranges);
 
     lifetimes.push_back(interval);
 
@@ -2860,15 +2869,6 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   // so there is nothing for memory reuse to do — skip them silently.
   if (func->func_type_ == FunctionType::Orchestration) return func;
 
-  // NOTE (#1980, deferred): skipping this pass's opportunistic merge under
-  // PYPTO_DSA_SOLVER=plan (to hand the solver un-merged buffers for the #1908
-  // sub-region fix) is NOT safe yet — it removes MemoryReuse's capacity-gated
-  // shed loop, which the DSA adapter's optimistic F_g separation cannot fully
-  // replicate, so tight L0B kernels (e.g. expert_routed's matmuls) overflow and
-  // the gate falls back to an already-overflowing un-merged bump. For now =plan
-  // runs the solver on this pass's MERGED groups (safe, gate-bounded), so the
-  // #1908 sub-region case is not yet fixed by =plan. See PHASE3_PLAN.md 3.3.
-
   // Step 0 (semantic must-alias retarget) now runs in the preceding
   // MaterializeSemanticAliases pass, so the body here is already retargeted.
   StmtPtr new_body = func->body_;
@@ -2964,13 +2964,10 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   // downstream into later passes / codegen. It was only needed to carry stage
   // identity from LowerPipelineLoops to the reuse decision above.
   //
-  // Exception: when the DSA solver is engaged (PYPTO_DSA_SOLVER), keep the attr
-  // so AllocateMemoryAddr's adapter can reconstruct the pipeline-clone
-  // separations. Codegen already tolerates a surviving attr (it does under
-  // memory_planner=PTOAS, where MemoryReuse — and thus this strip — is skipped).
-  if (dsa::GetSolverMode() == dsa::SolverMode::Off) {
-    new_body = StripPipelineMembershipMutator().VisitStmt(new_body);
-  }
+  // MemoryPlanner::Dsa skips this pass entirely, so the adapter still sees the
+  // membership provenance. Every invocation that actually runs MemoryReuse has
+  // consumed the tag and strips it before downstream passes/codegen.
+  new_body = StripPipelineMembershipMutator().VisitStmt(new_body);
 
   auto result = std::make_shared<const Function>(func->name_, func->params_, func->param_directions_,
                                                  func->return_types_, new_body, func->span_, func->func_type_,
@@ -2990,6 +2987,16 @@ AllocationPlan ComputeAllocationPlan(const FunctionPtr& func) {
   plan.intervals = std::move(analysis.lifetimes);
   const auto& intervals = plan.intervals;
 
+  // The portable schema represents hard exclusions as explicit index pairs.
+  // Build them through indices so the analysis is output-sensitive:
+  // O(N log N + E log E), where E is the number of pairs emitted.
+  std::set<std::pair<size_t, size_t>> separation_indices;
+  auto add_separation = [&separation_indices](size_t first, size_t second) {
+    if (first == second) return;
+    if (second < first) std::swap(first, second);
+    separation_indices.emplace(first, second);
+  };
+
   // Allocation base_ Ptr -> interval index, for resolving forbid-alias operands.
   std::unordered_map<const Var*, size_t> base_to_index;
   for (size_t i = 0; i < intervals.size(); ++i) {
@@ -3003,56 +3010,53 @@ AllocationPlan ComputeAllocationPlan(const FunctionPtr& func) {
   // double-buffering depth. F_g == depth is exact double-buffering; F_g < depth
   // means capacity forces some clones to share (the solver then reuses the
   // lifetime-disjoint same-residue clones). Unknown cap (no backend) => full
-  // depth (no cap to overflow). Same-space only; O(n^2), n small.
+  // depth (no cap to overflow). Same-space only.
   const auto& pm = analysis.pipeline_membership;
   {
     const backend::Backend* be = backend::BackendConfig::IsConfigured() ? backend::GetBackend() : nullptr;
     using GroupKey = std::pair<MemorySpace, int32_t>;
-    std::map<GroupKey, uint64_t> group_slot;             // (space, group) -> max member size
-    std::map<GroupKey, std::set<int32_t>> group_stages;  // (space, group) -> distinct stages
-    for (const auto& iv : intervals) {
+    std::map<GroupKey, uint64_t> group_slot;  // (space, group) -> max member size
+    // (space, group) -> stage -> interval indices. Bucketing by stage/residue
+    // avoids scanning unrelated allocations or same-residue pairs.
+    std::map<GroupKey, std::map<int32_t, std::vector<size_t>>> group_members;
+    for (size_t index = 0; index < intervals.size(); ++index) {
+      const LifetimeInterval& iv = intervals[index];
       auto it = pm.find(iv.variable.get());
       if (it == pm.end()) continue;
       for (const auto& [g, st] : it->second) {
         const GroupKey key{iv.memory_space, g};
         group_slot[key] = std::max(group_slot[key], iv.size);
-        group_stages[key].insert(st);
+        group_members[key][st].push_back(index);
       }
     }
-    std::map<GroupKey, int32_t> group_fg;                        // (space, group) -> F_g
-    std::map<GroupKey, std::map<int32_t, int32_t>> group_ord;    // stage -> dense ordinal
-    for (const auto& [key, stages] : group_stages) {
-      const int32_t depth = static_cast<int32_t>(stages.size());
+
+    for (const auto& [key, members_by_stage] : group_members) {
+      const int32_t depth = static_cast<int32_t>(members_by_stage.size());
       const uint64_t cap = be != nullptr ? be->GetMemSize(key.first) : 0;
       const uint64_t slot = group_slot[key];
       int32_t fg = depth;  // unknown cap => no gating
       if (cap != 0 && slot != 0) {
         fg = static_cast<int32_t>(std::max<uint64_t>(1, std::min<uint64_t>(depth, cap / slot)));
       }
-      group_fg[key] = fg;
+
+      std::map<int32_t, std::vector<size_t>> members_by_residue;
       int32_t ord = 0;
-      for (const int32_t st : stages) group_ord[key][st] = ord++;
-    }
-    auto residue = [&](MemorySpace space, int32_t g, int32_t st) {
-      const GroupKey key{space, g};
-      const int32_t fg = group_fg.at(key);
-      return ((group_ord.at(key).at(st) % fg) + fg) % fg;
-    };
-    for (size_t i = 0; i < intervals.size(); ++i) {
-      auto ii = pm.find(intervals[i].variable.get());
-      if (ii == pm.end()) continue;
-      const MemorySpace space = intervals[i].memory_space;
-      for (size_t j = i + 1; j < intervals.size(); ++j) {
-        if (intervals[j].memory_space != space) continue;
-        auto jj = pm.find(intervals[j].variable.get());
-        if (jj == pm.end()) continue;
-        bool sep = false;
-        for (const auto& [ga, sa] : ii->second) {
-          for (const auto& [gb, sb] : jj->second) {
-            if (ga == gb && residue(space, ga, sa) != residue(space, gb, sb)) sep = true;
+      for (const auto& stage_members : members_by_stage) {
+        const auto& members = stage_members.second;
+        const int32_t residue = ord++ % fg;
+        auto& bucket = members_by_residue[residue];
+        bucket.insert(bucket.end(), members.begin(), members.end());
+      }
+
+      for (auto first_bucket = members_by_residue.begin(); first_bucket != members_by_residue.end();
+           ++first_bucket) {
+        auto second_bucket = first_bucket;
+        ++second_bucket;
+        for (; second_bucket != members_by_residue.end(); ++second_bucket) {
+          for (size_t first : first_bucket->second) {
+            for (size_t second : second_bucket->second) add_separation(first, second);
           }
         }
-        if (sep) plan.separations.emplace_back(i, j);
       }
     }
   }
@@ -3064,15 +3068,23 @@ AllocationPlan ComputeAllocationPlan(const FunctionPtr& func) {
     HazardInputCollector collector;
     collector.VisitStmt(func->body_);
     const HazardInputs hazard = collector.Take();
-    auto hazard_pair = [&hazard](const LifetimeInterval& w, const LifetimeInterval& in) {
-      return w.def_point == in.last_use_point && hazard.reads_tpop.count(w.variable.get()) != 0 &&
-             hazard.load_derived.count(in.variable.get()) != 0;
-    };
+
+    std::map<int, std::vector<size_t>> writers_by_def;
+    std::map<int, std::vector<size_t>> inputs_by_last_use;
     for (size_t i = 0; i < intervals.size(); ++i) {
-      for (size_t j = i + 1; j < intervals.size(); ++j) {
-        if (hazard_pair(intervals[i], intervals[j]) || hazard_pair(intervals[j], intervals[i])) {
-          plan.separations.emplace_back(i, j);
-        }
+      const LifetimeInterval& interval = intervals[i];
+      if (hazard.reads_tpop.count(interval.variable.get()) != 0) {
+        writers_by_def[interval.def_point].push_back(i);
+      }
+      if (hazard.load_derived.count(interval.variable.get()) != 0) {
+        inputs_by_last_use[interval.last_use_point].push_back(i);
+      }
+    }
+    for (const auto& [point, writers] : writers_by_def) {
+      auto inputs = inputs_by_last_use.find(point);
+      if (inputs == inputs_by_last_use.end()) continue;
+      for (size_t writer : writers) {
+        for (size_t input : inputs->second) add_separation(writer, input);
       }
     }
   }
@@ -3091,10 +3103,11 @@ AllocationPlan ComputeAllocationPlan(const FunctionPtr& func) {
       auto mr = GetTypeMemRef(operand->GetType());
       if (!mr.has_value() || !mr.value()) continue;
       auto bit = base_to_index.find(mr.value()->base_.get());
-      if (bit != base_to_index.end() && bit->second != i) plan.separations.emplace_back(i, bit->second);
+      if (bit != base_to_index.end()) add_separation(i, bit->second);
     }
   }
 
+  plan.separations.assign(separation_indices.begin(), separation_indices.end());
   return plan;
 }
 

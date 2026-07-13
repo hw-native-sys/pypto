@@ -14,6 +14,7 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -244,6 +245,7 @@ class DiagnosticInstrument : public PassInstrument {
 enum class MemoryPlanner {
   PyPTO,  ///< PyPTO allocates addresses (ptoas --pto-level=level3)
   PtoAS,  ///< ptoas PlanMemory allocates (ptoas --pto-level=level2)
+  Dsa,    ///< Standalone DSA solver allocates unmerged PyPTO buffers (level3)
 };
 
 class PassContext {
@@ -267,13 +269,16 @@ class PassContext {
    *        device validation). No effect under PtoAS, which already emits dbC=2
    *        unconditionally. When true, AutoTileMatmulL0 emits two co-live L0C
    *        accumulators and MemoryReuse's capacity gate allocates the ping-pong.
+   * @param dsa_export_dir Optional directory for deterministic schema-v1
+   *        ``pypto_structured`` problems emitted by MemoryPlanner::Dsa.
    */
   explicit PassContext(std::vector<PassInstrumentPtr> instruments,
                        VerificationLevel verification_level = VerificationLevel::Basic,
                        DiagnosticPhase diagnostic_phase = DiagnosticPhase::PrePipeline,
                        DiagnosticCheckSet disabled_diagnostics = {DiagnosticCheck::UnusedControlFlowResult},
                        MemoryPlanner memory_planner = MemoryPlanner::PyPTO,
-                       bool enable_pypto_l0c_double_buffer = false);
+                       bool enable_pypto_l0c_double_buffer = false,
+                       std::optional<std::string> dsa_export_dir = std::nullopt);
 
   /**
    * @brief Push this context onto the thread-local stack
@@ -338,6 +343,11 @@ class PassContext {
   [[nodiscard]] bool GetEnablePyptoL0cDoubleBuffer() const;
 
   /**
+   * @brief Get the optional standalone DSA corpus export directory
+   */
+  [[nodiscard]] const std::optional<std::string>& GetDsaExportDir() const;
+
+  /**
    * @brief Get the currently active context (top of thread-local stack)
    * @return Pointer to current context, or nullptr if none
    */
@@ -363,6 +373,7 @@ class PassContext {
   DiagnosticCheckSet disabled_diagnostics_;
   MemoryPlanner memory_planner_;
   bool enable_pypto_l0c_double_buffer_;
+  std::optional<std::string> dsa_export_dir_;
   PassContext* previous_;
 
   static thread_local PassContext* current_;

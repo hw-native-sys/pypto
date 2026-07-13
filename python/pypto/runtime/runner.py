@@ -405,6 +405,7 @@ def compile_program(  # noqa: PLR0913
     analyze_auto_scopes_for_deps: bool = False,
     memory_planner: MemoryPlanner | None = None,
     enable_pypto_l0c_double_buffer: bool | None = None,
+    dsa_export_dir: str | None = None,
 ) -> None:
     """Compile *program* to *work_dir* and patch orchestration headers.
 
@@ -422,6 +423,9 @@ def compile_program(  # noqa: PLR0913
         profiling: If ``True``, enable compile profiling.
         analyze_auto_scopes_for_deps: If ``True``, enable compiler-derived task
             dependency analysis for AUTO runtime scopes.
+        memory_planner: Optional on-chip memory planner override.
+        enable_pypto_l0c_double_buffer: Optional PyPTO-planner L0C double-buffer opt-in.
+        dsa_export_dir: Optional schema-v1 corpus directory for the DSA planner.
     """
     from pypto import ir  # noqa: PLC0415
 
@@ -437,6 +441,7 @@ def compile_program(  # noqa: PLR0913
         analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
         memory_planner=memory_planner,
         enable_pypto_l0c_double_buffer=enable_pypto_l0c_double_buffer,
+        dsa_export_dir=dsa_export_dir,
     )
     _patch_orchestration_headers(work_dir)
 

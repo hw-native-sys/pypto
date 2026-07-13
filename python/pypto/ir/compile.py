@@ -53,7 +53,7 @@ def _backend_type_for_platform(platform: str | None, fallback: BackendType) -> B
     raise ValueError(f"Invalid platform {platform!r}. Expected 'a2a3sim', 'a2a3', 'a5sim', or 'a5'.")
 
 
-def compile(  # noqa: PLR0913
+def compile(  # noqa: PLR0912, PLR0913
     program: _ir_core.Program,
     output_dir: str | None = None,
     strategy: OptimizationStrategy = OptimizationStrategy.Default,
@@ -70,6 +70,7 @@ def compile(  # noqa: PLR0913
     distributed_config: Any = None,
     block_dim: int | None = None,
     analyze_auto_scopes_for_deps: bool = False,
+    dsa_export_dir: str | None = None,
 ) -> "CompiledProgram | DistributedCompiledProgram":
     """Compile a Program through passes and codegen.
 
@@ -114,6 +115,13 @@ def compile(  # noqa: PLR0913
             inherits the setting from an active outer ``PassContext`` (else
             ``False``); has no effect under ``PTOAS``, which already emits dbC=2
             unconditionally.
+        dsa_export_dir: Optional directory for deterministic
+            ``pypto_structured`` schema-v1 JSON problems. This is valid only
+            with ``MemoryPlanner.DSA``.
+
+            ``MemoryPlanner.DSA`` skips only ``MemoryReuse`` and hands the
+            unmerged, semantics-normalized allocations to the standalone DSA
+            solver before validating and writing addresses back.
         profiling: If True, enable compile profiling that records per-stage
             wall-clock timings.  Results are written to ``output_dir/report/``.
         platform: Target execution platform.  One of ``"a2a3sim"``,
@@ -182,6 +190,11 @@ def compile(  # noqa: PLR0913
             "compile() was called with memory_planner while a PassContext is already active. "
             "Set the memory planner on the existing PassContext instead."
         )
+    if dsa_export_dir is not None and outer is not None:
+        raise RuntimeError(
+            "compile() was called with dsa_export_dir while a PassContext is already active. "
+            "Set the DSA export directory on the existing PassContext instead."
+        )
 
     # --- Compile profiling ---------------------------------------------------
     prof = get_active_profiler()
@@ -213,6 +226,7 @@ def compile(  # noqa: PLR0913
             if enable_pypto_l0c_double_buffer is not None
             else outer.get_enable_pypto_l0c_double_buffer()
         )
+        export_dir = dsa_export_dir if dsa_export_dir is not None else outer.get_dsa_export_dir()
     else:
         vlevel = (
             verification_level if verification_level is not None else _passes.get_default_verification_level()
@@ -221,7 +235,10 @@ def compile(  # noqa: PLR0913
         disabled = disabled_diagnostics if disabled_diagnostics is not None else default_disabled
         mplan = memory_planner if memory_planner is not None else _passes.MemoryPlanner.PYPTO
         dbc_flag = enable_pypto_l0c_double_buffer if enable_pypto_l0c_double_buffer is not None else False
-    ctx = _passes.PassContext(instruments, vlevel, dphase, disabled, mplan, dbc_flag)
+        export_dir = dsa_export_dir
+    if export_dir is not None and mplan != _passes.MemoryPlanner.DSA:
+        raise ValueError("dsa_export_dir requires memory_planner=MemoryPlanner.DSA")
+    ctx = _passes.PassContext(instruments, vlevel, dphase, disabled, mplan, dbc_flag, export_dir)
 
     if mplan == _passes.MemoryPlanner.PTOAS:
         logger.warning(
@@ -231,6 +248,11 @@ def compile(  # noqa: PLR0913
             "accumulators, in-place ops) is preserved as a shared tile_buf handle. The "
             "Ascend910B load + tpop_from_aic in-place hazard guard and reserve-buffer base "
             "resolution are deferred to ptoas — verify on-device."
+        )
+    elif mplan == _passes.MemoryPlanner.DSA:
+        logger.info(
+            "memory_planner=DSA: skipping opportunistic MemoryReuse; the standalone solver "
+            "jointly chooses reuse and offsets, then PyPTO validates and writes them back."
         )
 
     def _stage(name: str) -> AbstractContextManager[Any]:

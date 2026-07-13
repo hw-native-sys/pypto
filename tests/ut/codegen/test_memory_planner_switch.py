@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Unit tests for the ``memory_planner`` switch (PyPTO vs ptoas PlanMemory).
+"""Unit tests for the PyPTO, standalone DSA, and ptoas memory planners.
 
 Two coupled behaviours are exercised:
 
@@ -20,6 +20,9 @@ Two coupled behaviours are exercised:
 
 The default (``MemoryPlanner.PYPTO``) preserves the pre-existing behaviour:
 both passes run and codegen bakes ``addr`` for ``--pto-level=level3``.
+``MemoryPlanner.DSA`` skips only ``MemoryReuse``: ``AllocateMemoryAddr`` exports
+the unmerged problem, invokes the standalone solver, validates, and writes
+physical addresses for the same level3 codegen contract.
 """
 
 # DSL function bodies are parsed as AST, not executed — suppress pyright errors.
@@ -109,6 +112,16 @@ def test_pass_context_planner_round_trip():
     assert ctx.get_memory_planner() == passes.MemoryPlanner.PTOAS
 
 
+def test_pass_context_dsa_settings_round_trip(tmp_path):
+    ctx = passes.PassContext(
+        [],
+        memory_planner=passes.MemoryPlanner.DSA,
+        dsa_export_dir=str(tmp_path),
+    )
+    assert ctx.get_memory_planner() == passes.MemoryPlanner.DSA
+    assert ctx.get_dsa_export_dir() == str(tmp_path)
+
+
 # ---------------------------------------------------------------------------
 # Pipeline: PTOAS skips the allocation passes; PYPTO keeps them
 # ---------------------------------------------------------------------------
@@ -133,6 +146,14 @@ def test_ptoas_pipeline_skips_reuse_keeps_semantic_aliases():
     assert "AllocateMemoryAddr" not in pass_names
 
 
+def test_dsa_pipeline_skips_reuse_but_runs_writeback():
+    _, pass_names = _run_pipeline(passes.MemoryPlanner.DSA)
+    assert "InitMemRef" in pass_names
+    assert "MaterializeSemanticAliases" in pass_names
+    assert "MemoryReuse" not in pass_names
+    assert "AllocateMemoryAddr" in pass_names
+
+
 # ---------------------------------------------------------------------------
 # Codegen: emit_tile_addr controls the physical addr operand
 # ---------------------------------------------------------------------------
@@ -155,6 +176,16 @@ def test_ptoas_codegen_omits_alloc_tile_addr():
     assert alloc_lines, f"expected at least one pto.alloc_tile:\n{mlir}"
     assert all("addr =" not in line for line in alloc_lines), (
         f"PTOAS mode must not emit an addr operand (ptoas --pto-level=level2 rejects it):\n{mlir}"
+    )
+
+
+def test_dsa_codegen_emits_validated_alloc_tile_addr():
+    optimized, _ = _run_pipeline(passes.MemoryPlanner.DSA)
+    mlir = _codegen(optimized, emit_tile_addr=True)
+    alloc_lines = [line for line in mlir.splitlines() if "pto.alloc_tile" in line]
+    assert alloc_lines, f"expected at least one pto.alloc_tile:\n{mlir}"
+    assert all("addr =" in line for line in alloc_lines), (
+        f"DSA mode writes validated addresses for ptoas --pto-level=level3:\n{mlir}"
     )
 
 
