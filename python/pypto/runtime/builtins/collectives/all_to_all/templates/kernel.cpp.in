@@ -71,9 +71,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   // read back by the caller. Reusing one buffer for both roles is a genuine
   // cross-process data race: this rank's own outgoing-source read of a row
   // can race a peer's concurrent incoming write into that exact same row,
-  // with no happens-before edge between them until the barrier below —
-  // verified via a minimal fork+shm+TPUT repro (fails ~100% with one shared
-  // buffer, passes reliably once source and destination are split).
+  // with no happens-before edge between them until the barrier below.
   __gm__ {{dtype_cpp}} *input_local =
       reinterpret_cast<__gm__ {{dtype_cpp}} *>(input_tensor->buffer.addr) + input_tensor->start_offset;
   __gm__ {{dtype_cpp}} *target =

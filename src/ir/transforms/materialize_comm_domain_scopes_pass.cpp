@@ -344,8 +344,7 @@ class DispatchAnalyzer : public IRVisitor {
       // 3-arg push-based form: pld.tensor.all_to_all(input, target, signal)
       // args[0] = input  (Tensor or DistributedTensor — on HOST path this
       //                    must be a DISTINCT window from args[1], never the
-      //                    same one; see kernel.cpp.in for why aliasing them
-      //                    is a data race. On InCore it is a plain Tensor.)
+      //                    same one; on InCore it is a plain Tensor.)
       // args[1] = target (DistributedTensor, window-bound)
       // args[2] = signal (DistributedTensor, window-bound)
       INTERNAL_CHECK_SPAN(op->args_.size() == 3, op->span_)

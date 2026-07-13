@@ -644,8 +644,7 @@ def all_to_all(
     ``reduce_scatter`` / ``broadcast``).
 
     ``input`` must be a DIFFERENT buffer from ``target`` — never pass the same
-    window for both (see the kernel.cpp.in builtin template for why aliasing
-    them is a data race).  For the HOST-level builtin dispatch, ``input`` is
+    window for both.  For the HOST-level builtin dispatch, ``input`` is
     typically a second window (e.g. a :class:`pld.DistributedTensor` staged
     by an earlier InCore step) rather than the InCore composite's plain
     :class:`pl.Tensor` — both are accepted.

@@ -203,9 +203,8 @@ void CheckStaticSignalCapacity(const CallPtr& call, const ExprPtr& signal_expr, 
   // Emit namesake builtin: in-kernel TPUT push (this rank's chunks from the
   // `input` staging window into every peer's `target` window) + barrier
   // (TNOTIFY / TWAIT), all in a single AIV kernel. `input` and `target` must
-  // be two DISTINCT windows — see kernel.cpp.in for why aliasing them is a
-  // data race. All chips must run concurrently — the host orchestrator
-  // submits asynchronously.
+  // be two DISTINCT windows. All chips must run concurrently — the host
+  // orchestrator submits asynchronously.
   auto target_type = As<DistributedTensorType>(call->args_[1]->GetType());
   return MakeBuiltinCallWithAttrs(
       "builtin.tensor.all_to_all", call,

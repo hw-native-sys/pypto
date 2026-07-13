@@ -645,9 +645,8 @@ TypePtr DeduceBuiltinTensorAllToAllType(const std::vector<ExprPtr>& args,
   }
   // input: a SEPARATE window, distinct from target, holding this rank's
   // per-destination outgoing chunks. Never a destination for any incoming
-  // TPUT — see kernel.cpp.in for why aliasing input with target is unsafe.
-  // This catches the same-expression case; two distinct windows over the
-  // same underlying alloc aren't detectable here.
+  // TPUT. This catches the same-expression case; two distinct windows over
+  // the same underlying alloc aren't detectable here.
   CHECK(args[0].get() != args[1].get())
       << kOpName
       << " input and target must be different windows, but the same expression was "
