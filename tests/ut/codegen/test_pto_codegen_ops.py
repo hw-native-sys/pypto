@@ -2774,5 +2774,42 @@ class TestSyncAllCodegen:
         )
 
 
+class TestFenceCodegen:
+    """Tests that pl.system.fence lowers to pto.fence.barrier_all."""
+
+    def _generate_mlir(self, program_cls) -> str:
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        optimized = pm.run_passes(program_cls)
+        codegen_instance = codegen.PTOCodegen()
+        funcs = list(optimized.functions.values())
+        assert funcs, "Program has no functions"
+        single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
+        return codegen_instance.generate(single)
+
+    def test_fence_emits_barrier_all_gm(self):
+        """pl.system.fence() emits pto.fence.barrier_all #pto.fence_scope<gm>."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_fence(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                tile: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
+                pl.system.fence()
+                updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(tile, [0, 0], out)
+                return updated
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.fence.barrier_all #pto.fence_scope<gm>" in mlir, (
+            f"pto.fence.barrier_all not found in MLIR:\n{mlir}"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

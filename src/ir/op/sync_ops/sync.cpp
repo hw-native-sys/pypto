@@ -81,6 +81,14 @@ REGISTER_OP("system.bar_all")
     .no_argument()
     .f_deduce_type(DeduceUnknownType);
 
+// Register system.fence (Memory Barrier)
+// Attributes: None
+REGISTER_OP("system.fence")
+    .set_description("Memory barrier over global memory")
+    .set_op_category("SyncOp")
+    .no_argument()
+    .f_deduce_type(DeduceUnknownType);
+
 // Register system.syncall (Cross-core all-participant barrier). Models
 // pto::SYNCALL with two modes selected by the `mode` attribute:
 //   - "hard" (default): FFTS barrier, no operands. Codegen emits

@@ -24,6 +24,7 @@ from pypto.ir.op.system_ops import (
     bar_all,
     bar_m,
     bar_v,
+    fence,
     sync_dst,
     sync_src,
 )
@@ -43,6 +44,7 @@ __all__ = [
     "bar_v",
     "bar_m",
     "bar_all",
+    "fence",
     "syncall",
     "tpush_to_aiv",
     "tpush_to_aic",

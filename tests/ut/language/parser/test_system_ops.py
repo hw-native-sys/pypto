@@ -105,6 +105,23 @@ class TestSystemOpsParsing:
         assert isinstance(reparsed, ir.Program)
         ir.assert_structural_equal(Before, reparsed)
 
+    def test_fence_round_trip(self):
+        """Test round-trip for pl.system.fence."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                pl.system.fence()
+                return x
+
+        printed = Before.as_python()
+        assert "pl.system.fence()" in printed
+
+        reparsed = pl.parse_program(printed)
+        assert isinstance(reparsed, ir.Program)
+        ir.assert_structural_equal(Before, reparsed)
+
     def test_syncall_round_trip(self):
         """Test round-trip for pl.system.syncall with an explicit core_type."""
 

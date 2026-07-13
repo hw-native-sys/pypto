@@ -134,6 +134,14 @@ def bar_all(*, span: Span | None = None) -> Call:
     return _create_barrier_op("system.bar_all", span=span)
 
 
+def fence(*, span: Span | None = None) -> Call:
+    """Memory barrier over global memory.
+
+    Lowers to ``pto.fence.barrier_all #pto.fence_scope<gm>``.
+    """
+    return _create_barrier_op("system.fence", span=span)
+
+
 _SYNCALL_CORE_TYPES = ("aiv_only", "aic_only", "mix")
 
 
