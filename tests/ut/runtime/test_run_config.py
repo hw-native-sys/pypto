@@ -521,7 +521,7 @@ class TestMakeCallConfigDfx:
 class TestRunConfigCompileForwarding:
     """Compile-side RunConfig fields are forwarded into ``ir.compile``."""
 
-    def test_run_forwards_auto_scope_deps_switch(self, monkeypatch):
+    def test_run_forwards_compile_configuration(self, monkeypatch, tmp_path):
         captured: dict = {}
 
         class FakeCompiled:
@@ -536,9 +536,21 @@ class TestRunConfigCompileForwarding:
 
         monkeypatch.setattr(ir_mod, "compile", fake_compile)
 
-        run(object(), config=RunConfig(platform="a2a3sim", analyze_auto_scopes_for_deps=True))
+        run(
+            object(),
+            config=RunConfig(
+                platform="a2a3sim",
+                analyze_auto_scopes_for_deps=True,
+                memory_planner=MemoryPlanner.DSA,
+                dsa_export_dir=str(tmp_path),
+                codegen_only=True,
+            ),
+        )
 
         assert captured["analyze_auto_scopes_for_deps"] is True
+        assert captured["memory_planner"] == MemoryPlanner.DSA
+        assert captured["dsa_export_dir"] == str(tmp_path)
+        assert captured["skip_ptoas"] is True
 
     def test_run_forwards_memory_planner(self, monkeypatch):
         captured: dict = {}

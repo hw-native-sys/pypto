@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""End-to-end runtime tests for PyPTO's selectable memory planners.
+"""End-to-end runtime tests for every supported on-chip memory planner.
 
 Under ``PTOAS`` the pipeline skips PyPTO's opportunistic ``MemoryReuse`` and
 ``AllocateMemoryAddr`` and lets the ptoas ``PlanMemory`` pass own lifetime reuse
@@ -15,9 +15,9 @@ and address assignment at ``--pto-level=level2``. ``MaterializeSemanticAliases``
 still runs, so semantics-required aliasing (loop-carried accumulators, in-place
 ops) is preserved as a shared ``tile_buf`` handle.
 
-Each kernel is run under PYPTO, DSA-RP, and PTOAS against the same golden.
-Matching results prove that each planner preserves the required semantic
-aliases while assigning physical storage.
+Each kernel is run under all three planners against the same golden. Matching
+results exercise both the standalone DSA writeback path and the PTOAS must-alias
+handoff.
 The loop-carried accumulator is the regression case: without
 ``MaterializeSemanticAliases`` the addr-less allocs would be planned into
 distinct ptoas buffers and the accumulation would be silently lost.
@@ -49,15 +49,16 @@ from pypto import backend as _backend
 from pypto import ir
 from pypto.backend import BackendType
 from pypto.backend.pto_backend import PartialCodegenError
+from pypto.pypto_core import passes
 from pypto.pypto_core.passes import MemoryPlanner
 
 
-def _planner_tag(mp: MemoryPlanner) -> str:
-    return {
-        MemoryPlanner.PYPTO: "pypto",
-        MemoryPlanner.DSA_RP: "dsa_rp",
-        MemoryPlanner.PTOAS: "ptoas",
-    }[mp]
+def _planner_tag(mp: MemoryPlanner | None) -> str:
+    if mp == MemoryPlanner.PTOAS:
+        return "ptoas"
+    if mp == MemoryPlanner.DSA:
+        return "dsa"
+    return "pypto"
 
 
 # ---------------------------------------------------------------------------
@@ -577,16 +578,33 @@ class MultiBufferAccCase(PTOTestCase):
         tensors["out"][:] = tensors["a"] @ tensors["b"]
 
 
+class SuitePlannerElementwiseCase(ElementwiseAddCase):
+    """Elementwise case whose planner comes only from the session switch."""
+
+    def get_name(self) -> str:
+        return "memplan_elementwise_add_suite"
+
+
 # ---------------------------------------------------------------------------
 # pytest wrappers
 # ---------------------------------------------------------------------------
 
 
-_PLANNERS = [MemoryPlanner.PYPTO, MemoryPlanner.DSA_RP, MemoryPlanner.PTOAS]
+_PLANNERS = [
+    MemoryPlanner.PYPTO,
+    MemoryPlanner.PTOAS,
+    pytest.param(
+        MemoryPlanner.DSA,
+        marks=pytest.mark.skipif(
+            not passes.is_dsa_solver_available(),
+            reason="PyPTO was built without PYPTO_ENABLE_DSA_SOLVER",
+        ),
+    ),
+]
 
 
-class TestMemoryPlannerPtoas:
-    """Selectable memory planners produce matching on-device results."""
+class TestMemoryPlanners:
+    """Every memory planner produces correct on-device results."""
 
     @pytest.mark.parametrize("planner", _PLANNERS, ids=_planner_tag)
     def test_elementwise_add(self, test_runner, planner):
@@ -650,6 +668,13 @@ class TestMemoryPlannerPtoas:
         # The Acc (L0C) space of a region: MAD writes the slot, FIXPIPE drains it.
         result = test_runner.run(MultiBufferAccCase(planner))
         assert result.passed, f"multi-buffer acc ({_planner_tag(planner)}) failed: {result.error}"
+
+
+    def test_suite_wide_planner_switch(self, test_runner):
+        case = SuitePlannerElementwiseCase()
+        result = test_runner.run(case)
+        assert case.get_memory_planner() == test_runner.config.memory_planner
+        assert result.passed, f"suite-wide planner failed: {result.error}"
 
 
 if __name__ == "__main__":
