@@ -26,8 +26,8 @@ from typing import Any
 
 
 @cache
-def _bindings() -> tuple[Any, Any, Any, Any]:
-    """Resolve and cache the simpler symbols on first ``make_tensor_arg`` call.
+def _modules() -> tuple[Any, Any]:
+    """Import and cache the two runtime modules on first ``make_tensor_arg`` call.
 
     The imports stay inside this function so importing pypto never requires
     simpler (only available in the runtime environment). ``functools.cache``
@@ -36,19 +36,19 @@ def _bindings() -> tuple[Any, Any, Any, Any]:
     (~90 tensors × world_size), where per-call ``from ... import`` was pure
     overhead on the host dispatch loop.
 
-    Returns:
-        ``(Tensor, DeviceTensor, device_tensor_to_tensor, make_tensor_arg)``.
-    """
-    from .device_tensor import DeviceTensor  # noqa: PLC0415
-    from .task_interface import (  # noqa: PLC0415
-        Tensor,  # pyright: ignore[reportAttributeAccessIssue]
-        device_tensor_to_tensor,
-    )
-    from .task_interface import (  # noqa: PLC0415
-        make_tensor_arg as _impl,  # pyright: ignore[reportAttributeAccessIssue]
-    )
+    Only the *module objects* are cached; the individual symbols (``Tensor``,
+    ``DeviceTensor``, ``device_tensor_to_tensor``, ``make_tensor_arg``) are
+    resolved via attribute access on every call. Caching the module rather than
+    the bound symbols keeps ``make_tensor_arg`` responsive to test monkeypatches
+    of ``task_interface.make_tensor_arg`` (see ``tests/ut/runtime``), while still
+    paying the import cost only once.
 
-    return Tensor, DeviceTensor, device_tensor_to_tensor, _impl
+    Returns:
+        ``(task_interface, device_tensor)`` module objects.
+    """
+    from . import device_tensor, task_interface  # noqa: PLC0415
+
+    return task_interface, device_tensor
 
 
 def make_tensor_arg(arg: Any) -> Any:
@@ -66,10 +66,10 @@ def make_tensor_arg(arg: Any) -> Any:
     Returns:
         A simpler ``Tensor`` ready to add to ``TaskArgs``.
     """
-    tensor_cls, device_tensor_cls, to_tensor, impl = _bindings()
+    task_interface, device_tensor = _modules()
 
-    if isinstance(arg, tensor_cls):
+    if isinstance(arg, task_interface.Tensor):
         return arg
-    if isinstance(arg, device_tensor_cls):
-        return to_tensor(arg)
-    return impl(arg)
+    if isinstance(arg, device_tensor.DeviceTensor):
+        return task_interface.device_tensor_to_tensor(arg)
+    return task_interface.make_tensor_arg(arg)
