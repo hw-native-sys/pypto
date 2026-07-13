@@ -26,11 +26,14 @@ coalesced accumulator compiles, ptoas accepts it, and it computes correctly.
 Numerics use one f32-accumulated golden (bf16 operands, cube f32 accumulation).
 """
 
+import dataclasses
+
 import pytest
 
 torch = pytest.importorskip("torch")
 
 import pypto.language as pl  # noqa: E402
+from pypto.pypto_core.passes import MemoryPlanner  # noqa: E402
 
 M, N, K = 512, 512, 192
 
@@ -50,22 +53,38 @@ def matmul_512x512x192_bf16(a: pl.Tensor, b: pl.Tensor, out: pl.Out[pl.Tensor]):
 class TestMemoryReuseAccumulatorCoalesce:
     """End-to-end device check for the peeled-accumulator coalescing fix."""
 
-    def test_512x512x192_bf16_compiles_and_runs(self, test_config):
+    @pytest.mark.parametrize(
+        "memory_planner",
+        [MemoryPlanner.PYPTO, MemoryPlanner.PTOAS],
+        ids=["pypto", "ptoas"],
+    )
+    def test_512x512x192_bf16_compiles_and_runs(self, test_config, memory_planner):
         """The peeled ``176 x 176`` fp32 accumulator coalesces to one L0C buffer,
         so this shape compiles (no L0C overflow), ptoas accepts it (no Acc->Acc
-        ``tmov``), and the result matches the reference."""
+        ``tmov``), and the result matches the reference.
+
+        Run under BOTH memory planners. PYPTO exercises the ``MemoryReuse``
+        accumulator-coalescing fix; PTOAS is the regression guard for the L0C
+        matmul K-reduction loop-carry (the cb4181e8 must-alias handoff): under
+        ``memory_planner=PTOAS`` the reuse/allocation passes are skipped and
+        ``MaterializeSemanticAliases`` alone must keep the peeled accumulator
+        if-phi on one addr-less ``tile_buf`` handle, else ptoas plans two L0C
+        buffers and the K-reduction silently drops accumulation."""
         matmul_512x512x192_bf16._cache.clear()
         torch.manual_seed(0)
         a = torch.randn(M, K, dtype=torch.bfloat16)
         b = torch.randn(K, N, dtype=torch.bfloat16)
         out = torch.zeros((M, N), dtype=torch.float32)
 
-        matmul_512x512x192_bf16(a, b, out, config=test_config)
+        config = dataclasses.replace(test_config, memory_planner=memory_planner)
+        matmul_512x512x192_bf16(a, b, out, config=config)
 
         # bf16 operands, cube f32 accumulation -> f32 reference on the same bf16 inputs.
         expected = a.float() @ b.float()
         rel_err = ((out - expected).norm() / expected.norm()).item()
-        assert rel_err < 2e-2, f"512x512x192 bf16 matmul Frobenius rel_err = {rel_err:.3e} exceeds 2e-2"
+        assert rel_err < 2e-2, (
+            f"512x512x192 bf16 matmul ({memory_planner}) Frobenius rel_err = {rel_err:.3e} exceeds 2e-2"
+        )
 
 
 if __name__ == "__main__":
