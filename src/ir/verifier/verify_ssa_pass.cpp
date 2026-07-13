@@ -28,6 +28,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/printer.h"
+#include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verification_error.h"
 #include "pypto/ir/verifier/verifier.h"
@@ -117,28 +118,11 @@ class SSAVerifier : public IRVisitor {
   /// Scope stack: each entry is the set of Var pointers defined in that scope
   std::vector<std::unordered_set<const Var*>> scope_stack_ = {{}};
 
-  /**
-   * @brief Register Var references found in a type (e.g., dynamic shape vars in TensorType)
-   */
+  /// Register Var references found in all shaped and tuple type metadata.
   void RegisterTypeVars(const TypePtr& type) {
-    if (!type) return;
-    if (auto tensor_type = As<TensorType>(type)) {
-      for (const auto& dim : tensor_type->shape_) {
-        RegisterShapeExprVars(dim);
-      }
-    }
-  }
-
-  /// Register every Var leaf in a (possibly composite) shape dim expression.
-  void RegisterShapeExprVars(const ExprPtr& dim) {
-    if (!dim) return;
-    if (auto var = As<Var>(dim)) {
-      DefineVar(var);
-    } else if (auto binary = As<BinaryExpr>(dim)) {
-      RegisterShapeExprVars(binary->left_);
-      RegisterShapeExprVars(binary->right_);
-    } else if (auto unary = As<UnaryExpr>(dim)) {
-      RegisterShapeExprVars(unary->operand_);
+    if (!type || scope_stack_.empty()) return;
+    for (const auto* var : var_collectors::CollectTypeVars(type)) {
+      if (var) scope_stack_.back().insert(var);
     }
   }
 

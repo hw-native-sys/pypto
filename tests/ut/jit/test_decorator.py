@@ -798,6 +798,39 @@ def _reshape_body(src: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
     return out_flat
 
 
+@jit.incore
+def _callsite_metadata_kernel(x: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+    """Dependency used by point-in-time call-site metadata tests."""
+    return out
+
+
+def _plain_rebind_callsite(src: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+    src = pl.reshape(src, [4, 8])
+    out = _callsite_metadata_kernel(src, out)
+    src = pl.reshape(src, [2, 16])  # noqa: F841 — must not affect the earlier call
+    return out
+
+
+def _annotated_rebind_callsite(src: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+    view: pl.Tensor = pl.reshape(src, [4, 8])
+    out: pl.Tensor = _callsite_metadata_kernel(view, out)
+    view = pl.reshape(view, [2, 16])  # noqa: F841 — must not affect the earlier call
+    return out
+
+
+def _direct_callsite(src: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+    out = _callsite_metadata_kernel(src, out)
+    return out
+
+
+def _nested_rebind_callsite(src: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+    with pl.scope():
+        src = pl.reshape(src, [4, 8])
+        out = _callsite_metadata_kernel(src, out)
+        src = pl.reshape(src, [2, 16])  # noqa: F841 — after the nested call
+    return out
+
+
 def _subscript_slice_body(src: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
     """Plain function for _extract_local_tensor_metas unit test: subscript-slice
     sugar tracking (issue #1836). All locals are tracked by JIT AST metadata
@@ -1054,6 +1087,45 @@ class TestSliceAndDepReturnMetadata:
         # reshape changes rank but keeps element count; dtype inherited from src.
         assert metas["x_flat"] == TensorMeta(shape=(128, 128), dtype=DataType.BF16)
         assert metas["out_flat"] == TensorMeta(shape=(128, 128), dtype=DataType.BF16)
+
+    @staticmethod
+    def _resolve_callsite_metadata(caller):
+        seed = {
+            "src": TensorMeta(shape=(32,), dtype=DataType.FP32),
+            "out": TensorMeta(shape=(4, 8), dtype=DataType.FP32),
+        }
+        tensor_meta, scalar_values, scalar_dtypes = _resolve_dep_call_metadata(
+            _callsite_metadata_kernel,
+            caller,
+            seed,
+            {},
+            {},
+            {},
+        )
+        assert scalar_values == {}
+        assert scalar_dtypes == {}
+        return tensor_meta
+
+    def test_dep_metadata_uses_plain_rebinding_at_callsite(self):
+        """A plain assignment shadows the parameter only until the selected call."""
+        metas = self._resolve_callsite_metadata(_plain_rebind_callsite)
+        assert metas["x"] == TensorMeta(shape=(4, 8), dtype=DataType.FP32)
+        assert metas["out"] == TensorMeta(shape=(4, 8), dtype=DataType.FP32)
+
+    def test_dep_metadata_uses_annotated_rebinding_at_callsite(self):
+        """Annotated and plain assignments expose the same point-in-time metadata."""
+        metas = self._resolve_callsite_metadata(_annotated_rebind_callsite)
+        assert metas["x"] == TensorMeta(shape=(4, 8), dtype=DataType.FP32)
+
+    def test_dep_metadata_direct_call_keeps_seed_metadata(self):
+        """Direct dependency calls without local rebindings remain unchanged."""
+        metas = self._resolve_callsite_metadata(_direct_callsite)
+        assert metas["x"] == TensorMeta(shape=(32,), dtype=DataType.FP32)
+
+    def test_dep_metadata_nested_scope_preserves_source_order(self):
+        """Nested DSL scopes stop at their consumer after processing prior producers."""
+        metas = self._resolve_callsite_metadata(_nested_rebind_callsite)
+        assert metas["x"] == TensorMeta(shape=(4, 8), dtype=DataType.FP32)
 
     def test_extract_local_tensor_metas_subscript_slice(self):
         """``_extract_local_tensor_metas`` tracks subscript-slice sugar

@@ -210,6 +210,62 @@ def test_invalid_undefined_var_in_tensor_view_valid_shape():
     assert any("n" in d.message for d in errors)
 
 
+def test_invalid_undefined_var_in_distributed_tensor_view_valid_shape():
+    """Undefined valid-shape vars in DistributedTensorType are SSA uses."""
+    span = ir.Span.unknown()
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+    plain_type = ir.TensorType([dim16, dim16], DataType.FP32)
+    a = ir.Var("a", plain_type, span)
+    n = ir.Var("n", ir.ScalarType(DataType.INT64), span)
+    tensor_view = ir.TensorView([], ir.TensorLayout.ND, [n, dim16])
+    distributed_type = ir.DistributedTensorType([dim16, dim16], DataType.FP32, None, tensor_view)
+    t = ir.Var("t", distributed_type, span)
+
+    body = ir.SeqStmts([ir.AssignStmt(t, a, span), ir.ReturnStmt([t], span)], span)
+    func = ir.Function("bad_distributed_valid_shape", [a], [plain_type], body, span)
+    program = ir.Program([func], "prog", span)
+
+    errors = _errors(passes.PropertyVerifierRegistry.verify(_use_after_def_props(), program))
+    assert any("n" in d.message for d in errors)
+
+
+def test_invalid_undefined_var_in_distributed_tensor_view_stride():
+    """Undefined stride vars in DistributedTensorType are SSA uses."""
+    span = ir.Span.unknown()
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+    dim1 = ir.ConstInt(1, DataType.INT32, span)
+    plain_type = ir.TensorType([dim16, dim16], DataType.FP32)
+    a = ir.Var("a", plain_type, span)
+    stride = ir.Var("stride", ir.ScalarType(DataType.INT64), span)
+    tensor_view = ir.TensorView([stride, dim1], ir.TensorLayout.ND, [])
+    distributed_type = ir.DistributedTensorType([dim16, dim16], DataType.FP32, None, tensor_view)
+    t = ir.Var("t", distributed_type, span)
+
+    body = ir.SeqStmts([ir.AssignStmt(t, a, span), ir.ReturnStmt([t], span)], span)
+    func = ir.Function("bad_distributed_stride", [a], [plain_type], body, span)
+    program = ir.Program([func], "prog", span)
+
+    errors = _errors(passes.PropertyVerifierRegistry.verify(_use_after_def_props(), program))
+    assert any("stride" in d.message for d in errors)
+
+
+def test_valid_distributed_parameter_metadata_vars_are_signature_definitions():
+    """Distributed shape, valid-shape, and stride vars in params are in scope."""
+    span = ir.Span.unknown()
+    shape_dim = ir.Var("shape_dim", ir.ScalarType(DataType.INT64), span)
+    valid_dim = ir.Var("valid_dim", ir.ScalarType(DataType.INT64), span)
+    stride = ir.Var("stride", ir.ScalarType(DataType.INT64), span)
+    tensor_view = ir.TensorView([stride], ir.TensorLayout.ND, [valid_dim])
+    distributed_type = ir.DistributedTensorType([shape_dim], DataType.FP32, None, tensor_view)
+    t = ir.Var("t", distributed_type, span)
+
+    body = ir.ReturnStmt([t], span)
+    func = ir.Function("distributed_signature", [t], [ir.TensorType([1], DataType.FP32)], body, span)
+    program = ir.Program([func], "prog", span)
+
+    assert len(_errors(passes.PropertyVerifierRegistry.verify(_use_after_def_props(), program))) == 0
+
+
 def test_valid_type_dynamic_var_in_param_shape():
     """Var in parameter's TensorType shape should not be flagged (type-dynamic)."""
     span = ir.Span.unknown()
