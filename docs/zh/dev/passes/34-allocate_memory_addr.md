@@ -4,27 +4,51 @@
 
 ## 概述
 
-该 Pass 为非 DDR 的 MemRef 分配具体地址。`tile.alloc` 语句声明分配根和大小，
-因此其 Ptr 结果与 Call 参数保持不变；带地址的 MemRef 位于 tile 和 tensor 类型上。
-它还会在 PTO codegen 之前解析 `system.reserve_buffer(base=AUTO)`。地址放置由
-`MemoryPlanner` 选择：
+该 Pass 是非 DDR 内存引用 (MemRef) 的物理地址边界。它解析
+`system.reserve_buffer(base=AUTO)`、选择放置位置，并在 PTO codegen 前更新已有的
+`tile.alloc` 语句。它不会创建分配操作：InitMemRef 已经用未分配地址创建了这些操作。
 
-- `PYPTO` 在 `MemoryReuse` 之后使用确定性的顺序分配器。
-- `DSA_RP` 在进程内构建并求解带复用惩罚、受容量约束的动态存储分配问题。
-- `PTOAS` 跳过本 pass，把地址分配交给 ptoas。
+默认的 `MemoryPlanner.PYPTO` 路径在 MemoryReuse 之后保留现有的对齐 bump 放置。
+可选的 `MemoryPlanner.DSA` 路径接收尚未机会性合并的分配 identity，导出与 benchmark
+框架相同的 structured problem，调用独立 solver，独立验证结果，再把验证过的 offset 写回。
 
 **核心职责**：
 
 - 从 TileType 变量中收集唯一的 MemRef 对象
 - 在每个函数中把 `system.reserve_buffer` 的 base 解析成显式地址
-- 在每个独立内存空间内分配对齐地址
-- `DSA_RP` 在满足容量的放置中保持正确性约束并最小化已识别的高代价复用
+- 在每个内存空间内分配顺序的、32 字节对齐的地址
+- 或在 DSA 模式下，由独立 solver 联合选择生命周期复用与 offset
 - 更新所有变量类型 (Type) 中的 MemRef 地址
 - 保留 `tile.alloc` 指针声明，同时更新所有 MemRef 使用点
 
-**使用时机**：代码生成前的最后一个内存管理 pass。`PYPTO` 下它在
-`MemoryReuse` 之后运行；`DSA_RP` 下跳过 `MemoryReuse`，本 pass 直接消费
-`MaterializeSemanticAliases` 产生的分配身份。
+**使用时机**：在代码生成前运行，作为内存管理的最后一个 Pass。默认流水线在
+MemoryReuse 之后运行它。DSA 流水线会刻意跳过 MemoryReuse，但仍先运行
+MaterializeSemanticAliases，因此 view、循环 carry 值和原地操作的强制 identity 不变。
+
+## Planner 模式
+
+| 模式 | 本 Pass 的输入 | 放置方式 | 失败行为 |
+| --- | --- | --- | --- |
+| `MemoryPlanner.PYPTO` | MemoryReuse 机会性合并后的 MemRef | 后端策略控制的对齐 bump 分配 | 现有 verifier 报告非法地址或超容量 |
+| `MemoryPlanner.DSA` | MaterializeSemanticAliases 后未机会性合并的 MemRef | 独立 first-fit DSA solver，输入为 schema-v1 `pypto_structured` | 非法导出、能力不匹配、不可行或 validator 失败都会终止编译；不会静默回退 |
+| `MemoryPlanner.PTOAS` | 无 | 跳过本 Pass；ptoas `PlanMemory` 负责放置 | 交给 ptoas |
+
+DSA 支持是可选的 CMake 依赖。先构建并安装 `dsa-solver` 0.2 package，再让
+PyPTO 使用它：
+
+```bash
+cmake -S /path/to/dsa-solver -B /path/to/dsa-solver/build \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/path/to/dsa-install
+cmake --build /path/to/dsa-solver/build --parallel 2
+cmake --install /path/to/dsa-solver/build
+
+cmake -B build -DPYPTO_ENABLE_DSA_SOLVER=ON \
+  -DCMAKE_PREFIX_PATH=/path/to/dsa-install
+cmake --build build --parallel 2
+```
+
+默认构建保持 `PYPTO_ENABLE_DSA_SOLVER=OFF`。它仍暴露 planner enum，以便配置保持
+一致；若执行时选择 DSA，则会得到明确的重新配置依赖提示。
 
 ## API
 
@@ -47,14 +71,22 @@ alloc_pass = passes.allocate_memory_addr()
 program_with_addrs = alloc_pass(program)
 ```
 
-编译时显式选择 DSA-RP：
+通过 PassContext 配置独立路径，并可选择输出确定性的 corpus 文档：
 
 ```python
-from pypto.ir import compile
 from pypto.pypto_core import passes
 
-compile(program, memory_planner=passes.MemoryPlanner.DSA_RP)
+with passes.PassContext(
+    [],
+    memory_planner=passes.MemoryPlanner.DSA,
+    dsa_export_dir="build/dsa-corpus",
+):
+    program_with_addrs = passes.allocate_memory_addr()(program)
 ```
+
+完整编译接受相同的选择：
+`ir.compile(..., memory_planner=passes.MemoryPlanner.DSA,
+dsa_export_dir="build/dsa-corpus")`。
 
 ## 算法
 
@@ -68,53 +100,33 @@ compile(program, memory_planner=passes.MemoryPlanner.DSA_RP)
    - 将变量类型（TileType/TensorType）中的旧 MemRef 引用替换为包含实际地址的新 MemRef
    - 把 `system.reserve_buffer` 的 kwargs 改写为显式 `base`
 
-### DSA-RP 策略
+### 独立 DSA 路径
 
-每个片上内存空间都是独立的固定容量 arena。强制别名物化后的每个分配身份成为一个
-buffer，带有字节大小、对齐和保守的半开生命周期。问题包含：
+启用 `MemoryPlanner.DSA` 时，第 4 步替换为下面的受保护路径：
 
-- 生命周期干涉、预留范围、语义 no-alias、目标 hazard、不兼容的 Vec ND/NZ
-  存储布局和请求的流水线 stage 分离等**硬约束**；作者声明的 `pl.MemRef`
-  分配还会与同一内存空间中的其他所有分配建立硬分离。多 slot 声明会作为覆盖完整
-  声明范围的单个 buffer 放置，同时每个成员保留其常量或运行时选择的 slot 偏移；
-- 对生命周期兼容的物理复用，如果内置 recognizer 将其识别为跨 pipe WAR 或 WAW
-  handoff，则加入**单位权重软边**；
-- 硬 arena 容量。容量与正确性绝不会为了降低复用代价而放宽。
+1. 复用 MemoryReuse 中感知 phi/loop 的生命周期分析，但不运行其机会性 coalescer。
+2. 每个强制 `MemRef.base_` identity 导出一个 buffer。buffer 大小取成员最大值，因此
+   不同大小的值可以在生命周期不同阶段占用该 identity；每个成员的 live range 保留为
+   multi-interval union。
+3. 把 PyPTO statement point 转成半开区间的读/写 event。定义从
+   `2 * def + 1` 开始，最后一次读在 `2 * last_use + 1` 结束；没有后续读取的值仍占用
+   一个写 event。因此，一个输入的最后一次读取可以和同一语句写出的结果共用地址。
+4. 导出固定 memory pool、后端容量、前导 reserved range，以及 pipeline clone、后端
+   hazard 和算子专用 no-alias 规则产生的 hard separation pair。
+5. 验证 schema/profile、匹配 solver capability、求解，并针对大小、对齐、生命周期、
+   pool、容量、reserved range 和 separation 独立验证每个 placement。
+6. 写回 placement，同时保留每个 view 的相对 byte offset。
 
-识别规则是保守的：它要求完整访问信息、覆盖整个分配的 handoff 端点，以及经验证的
-首次写入。相同 pipe、部分 view 或不确定情形不加惩罚。当前 backend 根据算子、已解析的
-源/目标 memory space 和所选 SoC 的直接 memory graph，将每个受支持的可执行 call
-映射到硬件 pipe；不能唯一推导的 route 由算子专属的 backend hook 处理。不受支持或
-有歧义的 route 会被跳过。recognizer 只消费这些 backend 元数据，不在 IR
-transform 中重复维护架构 route 表，也不调用或模拟 ptoas 的同步 pass。
+版本 1 adapter 刻意保持 pool assignment 固定，并使用可移植的 peak objective。独立模型
+可以表达 temporal exclusion 与 reuse-cost overlay，但 PyPTO exporter 尚未推导这些结构。
+因此，导出 interval 中不可见的 branch exclusivity 会保守处理，而不是产生不健全的复用。
+cost-aware objective 和更丰富的 PyPTO 结构仍是 capability matching 后的研究扩展。
 
-显式 pair 模型是 output-sensitive 的：对于 `B` 个可复用 buffer，一个 kernel 最坏可包含
-`Theta(B^2)` 个生命周期冲突或候选 penalty pair，因此 recognizer 与 solver graph 构造
-最坏为二次复杂度。该复杂度例外仅限 opt-in 的 `DSA_RP` planner；默认 planner 不变。
+设置 `dsa_export_dir` 后，每个 InCore 函数写成
+`pypto_<escaped-function-name>.dsa.json`。序列化是确定性的，不包含 IR pointer 或机器专用
+路径，因此文档可以直接复制到独立仓库的真实实例 corpus 中。
 
-Canonical greedy 尝试偏移 `0`、预留范围末尾，以及已放置硬/软邻居的对齐顶部。
-每个 buffer 先选择增量惩罚最低的候选，再选最低地址。它评估多种确定性顺序，并保留
-一个可行的、惩罚盲的 first-fit 放置作为 incumbent。写回前由独立 validator
-检查最终放置。
-
-流水线意图采用先硬后软策略：
-
-1. 先在所有请求的跨 stage 分离均为硬约束时运行有界 canonical-greedy 搜索。
-2. 若该搜索未找到可放置方案——这并不证明严格数学问题不可行——则仅放宽唯一硬
-   理由为流水线意图的 pair，把它们改为单位复用惩罚后再次搜索。
-3. 若最终放置重叠了放宽的 pair，发出 `PH-DSA-001` 性能诊断。所有语义与目标
-   hazard 分离始终保持为硬约束。若放宽后的有界搜索仍未找到可放置方案，则报告
-   OOM/no-fit 编译错误；这仍表示搜索失败，并非不可行性证明。
-
-> **工具链要求：** `DSA_RP` 依赖 ptoas InsertSync 识别不同分配根之间的物理范围
-> 重叠。应使用包含 tile-native 内存规划器及其跨根本地范围重叠分析的现代 ptoas
->（PTOAS PR #913 及后续修复）。仅比较分配根身份、而不比较规划后物理范围的旧版本
-> 与 DSA-RP 放置不兼容。
-
-模型、recognizer、求解、验证和写回全部在进程内完成。`DSA_RP` 不提供问题导出、
-放置 replay、参考放置或 profiling 接口。
-
-### 顺序 `PYPTO` 策略
+**地址分配（默认策略）**：
 
 - 每个内存空间有独立的地址空间；如果该空间前面已有 `system.reserve_buffer` 保留窗口，则 tile 会从该窗口之后开始分配
 - 地址 32 字节对齐：`next_addr = align32(current_addr + size)`
@@ -177,15 +189,12 @@ Pass AllocateMemoryAddr();
 
 **实现文件**：`src/ir/transforms/allocate_memory_addr_pass.cpp`
 
-- `MemRefCollectorVisitor` 从 TileType 变量中收集唯一的 MemRef
+- `memref_collectors::CollectMemRefsWithSpace` 收集唯一的 MemRef 及其内存空间
 - `AllocateMemoryAddresses` 使用 `MemoryAllocatorPolicy` 在每个内存空间内分配顺序对齐的地址
-- `dsa_adapter::BuildDsaAllocationPlan` 在
-  `src/ir/transforms/dsa/allocation_plan.cpp` 中推导保守生命周期和强制 separation
-- `dsa_adapter::BuildProblem` 构建精简的进程内 DSA-RP 模型
-- `dsa::CanonicalGreedySolver` 搜索满足容量的放置，
-  `dsa::ValidateSolution` 独立验证结果
-- `MemRefUpdateMutator` 在一次遍历中更新变量与表达式类型中的 MemRef，并改写已解析的
-  `system.reserve_buffer` base；`tile.alloc` 保持为指针与大小声明
+- `dsa_adapter::BuildStructuredProblem` 导出与 IR 解耦的 schema-v1 problem
+- `dsa_adapter::SolveWithFirstFit` 做 capability matching、求解与独立验证
+- `dsa_adapter::BuildMemRefReplacements` 完成保留 view offset 的写回
+- `MemRefUpdateMutator` 在一次遍历中同时更新变量类型和 `tile.alloc` 语句参数
 
 **Python 绑定**：`python/bindings/modules/passes.cpp`
 
@@ -206,10 +215,8 @@ passes.def("allocate_memory_addr", &pass::AllocateMemoryAddr,
 - 测试 MemRef 去重的原始指针唯一性
 - 测试无后端配置时的默认策略行为
 - 测试容量诊断会归因跨核流水 ring 预留的字节数（见下文）
-- 测试 DSA-RP 几何、容量、硬约束、惩罚激活、确定性 canonical-greedy 放置、
-  以及独立验证
-- 直接测试 solver 之前的精确 recognizer edge 集合，并测试最终放置几何
-- 刻画 canonical-greedy `kNoFit` 只是有界搜索结果，而不是不可行性证明
+- 测试 DSA 读先于写的复用、reserved range、view offset 写回与确定性导出
+- 通过 exporter、独立 solver、validator 和 writeback 重放 #1908 fragmentation 形状
 
 ## 分配策略
 

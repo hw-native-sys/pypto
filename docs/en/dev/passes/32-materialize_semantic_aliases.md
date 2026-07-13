@@ -16,8 +16,10 @@ Memory planning distinguishes two kinds of buffer sharing:
   lifetimes *may* share storage to save memory. This is optimization.
 
 This pass handles only the **must-alias** case. It was split out of
-[`MemoryReuse`](33-memory_reuse.md) (it is that pass's former "Step 0") so that
-the opportunistic lifetime coalescing can be skipped independently:
+[`MemoryReuse`](31-memory_reuse.md) (it is that pass's former "Step 0") so that
+the opportunistic lifetime coalescing can be skipped independently — either
+when ptoas owns planning under `MemoryPlanner.PTOAS`, or when the standalone
+solver jointly chooses reuse and offsets under `MemoryPlanner.DSA`.
 
 - `MemoryPlanner.DSA_RP` keeps independent allocation identities for the
   in-process DSA-RP solver.

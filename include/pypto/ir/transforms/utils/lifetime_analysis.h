@@ -12,6 +12,7 @@
 #ifndef PYPTO_IR_TRANSFORMS_UTILS_LIFETIME_ANALYSIS_H_
 #define PYPTO_IR_TRANSFORMS_UTILS_LIFETIME_ANALYSIS_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <utility>
 #include <vector>
@@ -22,6 +23,19 @@
 
 namespace pypto {
 namespace ir {
+
+/**
+ * @brief Lifetime of one variable within an allocation sharing group.
+ *
+ * PyPTO orders reads before writes at the same statement point, so a variable
+ * whose last use is point ``p`` may share storage with a variable defined at
+ * point ``p``. The DSA adapter preserves that ordering when it converts these
+ * points to half-open standalone-solver intervals.
+ */
+struct VariableLifetime {
+  int def_point;
+  int last_use_point;
+};
 
 /**
  * @brief Lifetime interval for one allocation (a base-group of TileType vars).
@@ -37,6 +51,12 @@ struct LifetimeInterval {
   int last_use_point;        ///< Group's latest last-use point (topological order).
   MemorySpace memory_space;  ///< Memory space (== DSA pool).
   uint64_t size;             ///< Slot size in bytes (largest member).
+  /// Per-variable ranges before the conservative group hull is formed. This
+  /// lets a structured DSA solver preserve holes in a semantics-required
+  /// allocation identity instead of treating the whole hull as continuously
+  /// live. MemoryReuse continues to use def_point/last_use_point as its fast
+  /// group-level bound.
+  std::vector<VariableLifetime> live_ranges;
 };
 
 /**
@@ -50,8 +70,10 @@ struct LifetimeInterval {
  * honors: (1) pipeline double-buffer clones (same group, different stage) — so
  * stages ping-pong instead of serializing; (2) the Ascend910B load+tpop_from_aic
  * in-place hazard (backend-gated); (3) op-semantic forbid-alias (e.g. tile.sel's
- * mask/tmp must not share the output's buffer).  Conservative full-depth pipeline
- * separation: capacity shedding is left to the solver's per-pool cap gate.
+ * mask/tmp must not share the output's buffer). Pipeline separation is reduced
+ * to the backend-capacity-gated stage residue count computed by the shared
+ * analysis; the standalone solver still enforces the resulting pairs as hard
+ * constraints.
  */
 struct AllocationPlan {
   std::vector<LifetimeInterval> intervals;

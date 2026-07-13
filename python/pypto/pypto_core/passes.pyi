@@ -97,7 +97,7 @@ class MemoryPlanner(Enum):
     """Selects who plans on-chip buffer memory."""
 
     PYPTO = ...
-    DSA_RP = ...
+    DSA = ...
     PTOAS = ...
 
 class DiagnosticPhase(Enum):
@@ -264,12 +264,14 @@ class PassContext:
         disabled_diagnostics: DiagnosticCheckSet = ...,  # default: {UnusedControlFlowResult}
         memory_planner: MemoryPlanner = MemoryPlanner.PYPTO,
         enable_pypto_l0c_double_buffer: bool = False,
+        dsa_export_dir: str | None = None,
     ) -> None:
         """Create a PassContext with instruments and pass configuration (incl. memory planner).
 
         ``enable_pypto_l0c_double_buffer`` opts in to L0C double-buffering (dbC=2)
-        under the PyPTO-owned ``PYPTO`` and ``DSA_RP`` planners (experimental,
-        default off; no effect under ``PTOAS``, which already emits dbC=2).
+        under the PyPTO memory planner (experimental, default off; no effect under
+        PtoAS, which already emits dbC=2).
+        ``dsa_export_dir`` optionally retains schema-v1 inputs under the DSA planner.
         """
         ...
 
@@ -298,6 +300,10 @@ class PassContext:
 
     def get_enable_pypto_l0c_double_buffer(self) -> bool:
         """Whether L0C double-buffering (dbC=2) is enabled under the PyPTO memory planner."""
+        ...
+
+    def get_dsa_export_dir(self) -> str | None:
+        """Get the optional standalone DSA corpus export directory."""
         ...
 
     def get_instruments(self) -> list[PassInstrument]:
