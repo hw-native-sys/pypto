@@ -526,7 +526,7 @@ def _scan_dep_io(
     ``output_param_names`` covers both ``pl.Out[...]`` and ``pl.InOut[...]``
     params — a caller can capture either from ``v = dep(...)`` — and is kept in
     declaration order so it stays aligned with the callee's return order (the
-    positional target<->param zip in :func:`_propagate_dep_out_metas`).
+    positional target<->param zip in :func:`_dep_out_metas`).
 
     ``caller_func_type`` mirrors :func:`_discover_deps`'s gating: a host
     orchestrator also admits ``orchestration`` deps (its chip orchestrators).
@@ -544,16 +544,16 @@ def _scan_dep_io(
     return out
 
 
-def _propagate_dep_out_metas(
+def _dep_out_metas(
     call: ast.Call,
     dep_name: str,
     target: ast.expr,
     dep_io: dict[str, tuple[list[str], list[str]]],
     local: dict[str, TensorMeta],
-) -> None:
+) -> dict[str, TensorMeta]:
     """For ``v1, ..., vk = dep(args)`` where ``dep`` has ``k`` ``Out`` params,
-    bind each ``vi``'s meta to the caller arg passed to the matching ``Out``
-    parameter. The local meta table is mutated in place.
+    return each ``vi``'s meta from the caller arg passed to the matching ``Out``
+    parameter.
 
     Mapping handles both positional and keyword args. No-op when the dep has
     no ``Out`` params or when target/arity don't match.
@@ -564,9 +564,9 @@ def _propagate_dep_out_metas(
     elif isinstance(target, ast.Tuple) and all(isinstance(e, ast.Name) for e in target.elts):
         names = [e.id for e in target.elts if isinstance(e, ast.Name)]
     else:
-        return
+        return {}
     if not out_params or len(names) != len(out_params):
-        return
+        return {}
     mapping: dict[str, str | None] = {}
     for i, arg in enumerate(call.args):
         if i < len(dep_params):
@@ -574,10 +574,12 @@ def _propagate_dep_out_metas(
     for kw in call.keywords:
         if kw.arg is not None:
             mapping[kw.arg] = kw.value.id if isinstance(kw.value, ast.Name) else None
+    result: dict[str, TensorMeta] = {}
     for vname, out_param in zip(names, out_params, strict=True):
         caller_arg = mapping.get(out_param)
         if caller_arg is not None and caller_arg in local:
-            local[vname] = local[caller_arg]
+            result[vname] = local[caller_arg]
+    return result
 
 
 def _fold_int_arith(op: ast.operator, lhs: int, rhs: int) -> int | None:
@@ -714,34 +716,42 @@ def _update_local_tensor_meta(
     if parts is None:
         return
     targets, value = parts
-    for target in targets:
-        named = target if isinstance(target, ast.Name) else None
-        meta: TensorMeta | None = None
-        preserve_existing = False
+    has_named_target = any(isinstance(target, ast.Name) for target in targets)
+    meta: TensorMeta | None = None
+    preserve_existing = False
+    dep_target_metas: list[dict[str, TensorMeta]] = [{} for _ in targets]
 
-        if isinstance(value, ast.Subscript) and named is not None:
-            meta = _subscript_slice_meta(value, local, resolve_int)
-        elif isinstance(value, ast.Name) and named is not None:
-            meta = local.get(value.id)
-        elif isinstance(value, ast.Call):
-            fn = value.func
-            if isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Name) and named is not None:
-                handler = pl_attr_handlers.get(fn.attr)
-                if handler is not None:
-                    meta = handler(value)
-                else:
-                    # Keep the pre-existing behavior for pl operations whose
-                    # result metadata this extractor does not model (for example,
-                    # same-shaped pl.assemble rebindings).
-                    preserve_existing = True
-            elif isinstance(fn, ast.Name) and fn.id in dep_io:
-                _propagate_dep_out_metas(value, fn.id, target, dep_io, local)
-                # Preserve the existing dependency-result behavior when the
-                # callee has no explicit Out/InOut metadata: an already-known
-                # target keeps its metadata until a later supported rebinding can
-                # refine it. This is how bare inline helpers propagate same-shaped
-                # results today.
+    # Python evaluates the RHS once before assigning any target. Infer all RHS
+    # effects from the same pre-assignment state so a self-referential chained
+    # assignment cannot affect the metadata applied to later targets.
+    if isinstance(value, ast.Subscript) and has_named_target:
+        meta = _subscript_slice_meta(value, local, resolve_int)
+    elif isinstance(value, ast.Name) and has_named_target:
+        meta = local.get(value.id)
+    elif isinstance(value, ast.Call):
+        fn = value.func
+        if isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Name) and has_named_target:
+            handler = pl_attr_handlers.get(fn.attr)
+            if handler is not None:
+                meta = handler(value)
+            else:
+                # Keep the pre-existing behavior for pl operations whose
+                # result metadata this extractor does not model (for example,
+                # same-shaped pl.assemble rebindings).
                 preserve_existing = True
+        elif isinstance(fn, ast.Name) and fn.id in dep_io:
+            dep_target_metas = [_dep_out_metas(value, fn.id, target, dep_io, local) for target in targets]
+            # Preserve the existing dependency-result behavior when the
+            # callee has no explicit Out/InOut metadata: an already-known
+            # target keeps its metadata until a later supported rebinding can
+            # refine it. This is how bare inline helpers propagate same-shaped
+            # results today.
+            preserve_existing = True
+
+    alias = _extract_dim_alias(value)
+    for target, target_metas in zip(targets, dep_target_metas, strict=True):
+        local.update(target_metas)
+        named = target if isinstance(target, ast.Name) else None
 
         if named is None:
             continue
@@ -753,7 +763,6 @@ def _update_local_tensor_meta(
             local.pop(named.id, None)
 
         if value is not None:
-            alias = _extract_dim_alias(value)
             if alias is None:
                 dim_aliases.pop(named.id, None)
             else:
