@@ -42,10 +42,11 @@ AICORE inline __gm__ T *CommRemotePtr(__gm__ CommContext *ctx, __gm__ T *local_p
 }  // namespace
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
-  __gm__ Tensor *target_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
-  __gm__ Tensor *signal_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
-  int nranks = static_cast<int>(args[2]);
-  __gm__ CommContext *comm_ctx = reinterpret_cast<__gm__ CommContext *>(args[3]);
+  __gm__ Tensor *input_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
+  __gm__ Tensor *target_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
+  __gm__ Tensor *signal_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
+  int nranks = static_cast<int>(args[3]);
+  __gm__ CommContext *comm_ctx = reinterpret_cast<__gm__ CommContext *>(args[4]);
 
   if (nranks <= 0 || nranks > kMaxSupportedRanks) {
     pipe_barrier(PIPE_ALL);
@@ -63,6 +64,13 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     return;
   }
 
+  // `input` and `target` are two DISTINCT windows. `input` holds this rank's
+  // own chunk (populated by an earlier stage_step via pl.store — same MTE
+  // pipeline as TLOAD, so no coherency gap). `target` is write-only here
+  // (every incoming TPUT lands in it) plus the final result read back by
+  // the caller.
+  __gm__ {{dtype_cpp}} *input_local =
+      reinterpret_cast<__gm__ {{dtype_cpp}} *>(input_tensor->buffer.addr) + input_tensor->start_offset;
   __gm__ {{dtype_cpp}} *target =
       reinterpret_cast<__gm__ {{dtype_cpp}} *>(target_tensor->buffer.addr) + target_tensor->start_offset;
   __gm__ int32_t *signal_base =
@@ -73,19 +81,21 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   using Global = pto::GlobalTensor<{{dtype_cpp}}, ShapeDyn, StrideDyn, pto::Layout::ND>;
   using TileData = pto::Tile<pto::TileType::Vec, {{dtype_cpp}}, 1, kTileCount, pto::BLayout::RowMajor, -1, -1>;
 
-  TileData recv_tile(1, kTileCount);
-  TASSIGN(recv_tile, 0x10000);
+  TileData send_tile(1, kTileCount);
+  TASSIGN(send_tile, 0x0);
 
-  // ------------------------------------------------------------------
-  // Phase 1: per-tile barrier + gather — mirroring broadcast's proven
-  // tile-by-tile signal protocol (AtomicAdd + incrementing threshold).
-  // After each tile barrier every rank reads that tile from every peer.
-  // publish_step's CCU/SDMA TPUT writes are made visible by the
-  // TNOTIFY/TWAIT barrier itself — no separate fence is needed (a
-  // TLOAD→TSTORE identity copy in the same kernel would read stale
-  // content before the barrier and corrupt the window with zeros).
-  // ------------------------------------------------------------------
-  int32_t expected = 1;
+  // ==================================================================
+  // Phase 1: in-kernel TPUT via pto::comm::TPUT macro.
+  //
+  // stage_step placed each rank's chunk in `input[my_rank, :]` locally
+  // (via pl.store, same MTE pipeline). pto::comm::TPUT pushes this same
+  // chunk to every peer's `target[my_rank, :]` via the CCU/SDMA DMA
+  // engine — same path as pld.tile.remote_store.
+  //
+  // Self-rank: TPUT would be a no-op for our own window, so copy locally
+  // via TLOAD→TSTORE instead.
+  // ==================================================================
+  int64_t self_offset = static_cast<int64_t>(my_rank) * row_numel;
   for (int64_t base = 0; base < row_numel; base += kTileCount) {
     int64_t chunk64 = row_numel - base;
     if (chunk64 > kTileCount) chunk64 = kTileCount;
@@ -93,34 +103,49 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
 
     ShapeDyn shape(1, 1, 1, 1, chunk);
     StrideDyn stride(chunk, chunk, chunk, chunk, 1);
+    Global src_g(input_local + self_offset + base, shape, stride);
+    Global dst_g(target + self_offset + base, shape, stride);
 
-    for (int peer = 0; peer < nranks; ++peer) {
-      if (peer == my_rank) continue;
-      __gm__ int32_t *remote_signal = CommRemotePtr(comm_ctx, signal_base + my_rank, peer);
-      pto::comm::Signal sig(remote_signal);
-      pto::comm::TNOTIFY(sig, static_cast<int32_t>(1), pto::comm::NotifyOp::AtomicAdd);
-    }
-    for (int peer = 0; peer < nranks; ++peer) {
-      if (peer == my_rank) continue;
-      pto::comm::Signal sig(signal_base + peer);
-      pto::comm::TWAIT(sig, expected, pto::comm::WaitCmp::GE);
-    }
-    ++expected;
-    pipe_barrier(PIPE_ALL);
+    TLOAD(send_tile, src_g);
+    set_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0);
+    wait_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0);
+    TSTORE(dst_g, send_tile);
+    set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+    wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+  }
 
-    for (int r = 0; r < nranks; ++r) {
-      if (r == my_rank) continue;
-      __gm__ {{dtype_cpp}} *remote_row =
-          CommRemotePtr(comm_ctx, target + static_cast<int64_t>(r) * row_numel + base, r);
-      Global remote_g(remote_row, shape, stride);
-      Global target_g(target + static_cast<int64_t>(r) * row_numel + base, shape, stride);
-      TLOAD(recv_tile, remote_g);
-      set_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0);
-      wait_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0);
-      TSTORE(target_g, recv_tile);
-      set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
-      wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
-    }
+  for (int dest = 0; dest < nranks; ++dest) {
+    if (dest == my_rank) continue;
+
+    ShapeDyn shape(1, 1, 1, 1, static_cast<int>(row_numel));
+    StrideDyn stride(static_cast<int>(row_numel), static_cast<int>(row_numel),
+                     static_cast<int>(row_numel), static_cast<int>(row_numel), 1);
+
+    // Source: our chunk at input[my_rank, :], in the local staging window
+    // (never a push destination, so no other rank ever writes into it).
+    Global src_g(input_local + self_offset, shape, stride);
+
+    // Destination: peer's result window at offset [my_rank, :]
+    __gm__ {{dtype_cpp}} *remote_ptr =
+        CommRemotePtr(comm_ctx, target + static_cast<int64_t>(my_rank) * row_numel, dest);
+    Global dst_g(remote_ptr, shape, stride);
+
+    pto::comm::TPUT(dst_g, src_g, send_tile);
+  }
+
+  // ==================================================================
+  // Phase 2: barrier — notify peers and wait for all.
+  // ==================================================================
+  for (int peer = 0; peer < nranks; ++peer) {
+    if (peer == my_rank) continue;
+    __gm__ int32_t *remote_signal = CommRemotePtr(comm_ctx, signal_base + my_rank, peer);
+    pto::comm::Signal sig(remote_signal);
+    pto::comm::TNOTIFY(sig, static_cast<int32_t>(1), pto::comm::NotifyOp::Set);
+  }
+  for (int peer = 0; peer < nranks; ++peer) {
+    if (peer == my_rank) continue;
+    pto::comm::Signal sig(signal_base + peer);
+    pto::comm::TWAIT(sig, static_cast<int32_t>(1), pto::comm::WaitCmp::GE);
   }
 
   pipe_barrier(PIPE_ALL);
