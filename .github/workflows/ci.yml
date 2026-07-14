@@ -181,7 +181,7 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: tonibohnlein/dsa-solver
-        ref: 2d079f3bd866479dc1d5e7dc8159bca8cf674cfe
+        ref: b2c9e47e252acc4c7192b4bdf68e82dc33ae2e62
         path: dsa-solver
         submodules: recursive
     - name: Set up Python 3.10
