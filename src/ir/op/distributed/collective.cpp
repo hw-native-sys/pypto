@@ -244,14 +244,16 @@ TypePtr DeduceTensorAllGatherType(const std::vector<ExprPtr>& args,
   // local_data type is validated by the lowering passes per their context
   // (LowerCompositeOps for InCore, LowerHostTensorCollectives for HOST).
   auto target_type = As<DistributedTensorType>(args[1]->GetType());
-  CHECK(target_type) << "pld.tensor.allgather target (arg[1]) must be a DistributedTensor (window-bound), got "
-                     << args[1]->GetType()->TypeName();
+  CHECK(target_type)
+      << "pld.tensor.allgather target (arg[1]) must be a DistributedTensor (window-bound), got "
+      << args[1]->GetType()->TypeName();
   CHECK(target_type->shape_.size() == 2)
       << "pld.tensor.allgather target must be 2D [NR, SIZE], got " << target_type->shape_.size() << " dims";
 
   auto signal_type = As<DistributedTensorType>(args[2]->GetType());
-  CHECK(signal_type) << "pld.tensor.allgather signal (arg[2]) must be a DistributedTensor (window-bound), got "
-                     << args[2]->GetType()->TypeName();
+  CHECK(signal_type)
+      << "pld.tensor.allgather signal (arg[2]) must be a DistributedTensor (window-bound), got "
+      << args[2]->GetType()->TypeName();
   CHECK(signal_type->dtype_ == DataType::INT32)
       << "pld.tensor.allgather signal must have INT32 element type, got dtype "
       << signal_type->dtype_.ToString();
@@ -279,10 +281,10 @@ REGISTER_OP("pld.tensor.allgather")
         "pld.tile.put loop + notify-all/wait-all; "
         "this Call never survives past that pass.")
     .set_op_category("DistributedOp")
-    .add_argument("local_data",
-                  "InCore: Tile/Tensor [1, SIZE]; HOST: Tensor [1, SIZE] or DistributedTensor [NR, SIZE] (Input)")
-    .add_argument("target",
-                  "DistributedTensor [NR, SIZE] result window (InOut)")
+    .add_argument(
+        "local_data",
+        "InCore: Tile/Tensor [1, SIZE]; HOST: Tensor [1, SIZE] or DistributedTensor [NR, SIZE] (Input)")
+    .add_argument("target", "DistributedTensor [NR, SIZE] result window (InOut)")
     .add_argument("signal", "INT32 DistributedTensor barrier (InOut)")
     .no_memory_spec()
     .f_deduce_type(DeduceTensorAllGatherType);
