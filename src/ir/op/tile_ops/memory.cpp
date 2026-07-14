@@ -192,7 +192,7 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
         /*offsets=*/offsets_tuple->elements_,
         /*window=*/tile_shape,
         /*requested_valid=*/valid_shapes_tuple->elements_,
-        /*kind=*/WindowReadKind::kCopy,
+        /*kind=*/WindowReadKind::kClampedWindow,
         /*clamp=*/GetKwargOr<bool>(kwargs, "clamp", false),
         /*op_name=*/op_name,
         /*bounds_remedy=*/

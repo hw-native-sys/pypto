@@ -238,20 +238,31 @@ std::vector<ValidShapeBoundsError> ValidateValidShapeBounds(const std::vector<Ex
 std::vector<ExprPtr> ExtractTupleElements(const ExprPtr& tuple_expr, size_t rank);
 
 /**
- * @brief How a window read reaches the bytes of its source
+ * @brief Whether the substrate under a window read trims an over-extent window
  *
- * The two kinds differ only in which extent must lie inside the source
- * allocation, and therefore in what a non-clamping read is allowed to promise.
+ * This decides which extent has to lie inside the source, and therefore what a
+ * non-clamping read is allowed to promise. It is a property of the machinery
+ * beneath the operator, not of aliasing: what matters is whether an over-extent
+ * window is trimmed for us, or reaches the hardware as written.
  */
 enum class WindowReadKind {
-  /// The result aliases the source allocation (``tensor.slice``, ``tile.slice``,
-  /// ``tile.extract``). Every element of the window is addressable through the
-  /// result, so the whole window must lie inside the source.
-  kView,
-  /// The result is a fresh buffer filled by a transfer (``tile.load``). Only the
-  /// valid extent is actually read, so the destination window may deliberately
-  /// overhang the source; the bounds obligation covers the read extent instead.
-  kCopy,
+  /// The substrate trims the window, so it may deliberately overhang the source
+  /// and only the extent actually read has to fit.
+  ///
+  /// ``tensor.slice``: PTO codegen emits the view shape already clamped to
+  /// ``min(shape, parent - offset)``, because the strided-Tensor runtime enforces
+  /// ``offset + shape <= parent`` in ``Tensor::view``. A padded fixed-width window
+  /// with an explicit ``valid_shape`` naming the real extent is the standard idiom.
+  ///
+  /// ``tile.load``: the DMA fetches only the valid extent, so the destination tile
+  /// is free to be larger than the region that exists.
+  kClampedWindow,
+  /// Nothing trims the window, so all of it must lie inside the source.
+  ///
+  /// ``tile.slice`` lowers to ``pto.subview``, a pure view that does no bounds work,
+  /// and ``tile.extract`` lowers to ISA TEXTRACT, whose bounds are hard. An on-chip
+  /// window that overhangs is simply unrepresentable.
+  kExactWindow,
 };
 
 /**
@@ -268,7 +279,7 @@ struct WindowReadValidShapeParams {
   std::vector<ExprPtr> offsets;          ///< Window origin, in source coordinates
   std::vector<ExprPtr> window;           ///< Physical shape of the result window
   std::vector<ExprPtr> requested_valid;  ///< Explicit valid request; empty means "none"
-  WindowReadKind kind = WindowReadKind::kView;
+  WindowReadKind kind = WindowReadKind::kExactWindow;
   bool clamp = false;   ///< Sanction a ragged window that crosses the source edge
   std::string op_name;  ///< Operator name, used in diagnostics
   /// Way out, appended to a physical-bounds rejection. Reads that can clamp point
@@ -293,7 +304,8 @@ struct WindowReadValidShapeParams {
  *
  * **The non-clamping contract.** A read with ``clamp == false`` asserts that its
  * window lies inside the source: ``offset[i] + extent[i] <= source_physical[i]``,
- * where ``extent`` is the window for ``kView`` and the read extent for ``kCopy``.
+ * where ``extent`` is the whole window for ``kExactWindow``, and the extent actually
+ * read (the explicit valid request, when given) for ``kClampedWindow``.
  * Provable violations are rejected here; relations that stay symbolic are taken
  * on trust, because that inequality *is* the operator's precondition. Under it a
  * fully-valid source yields a fully-valid window, so the clamp collapses to the

@@ -4393,6 +4393,32 @@ class TestWindowReadValidRegion:
         assert isinstance(result_type, ir.TileType)
         assert [d.value for d in result_type.shape if isinstance(d, ir.ConstInt)] == [16, 64]
 
+    def test_load_keeps_the_request_when_the_source_extent_is_undecidable(self):
+        """An undecidable source extent is trusted, not folded into a runtime min.
+
+        A source valid extent lives in the *type*, and may name a symbol that has no
+        value in the reading function: a `pl.dynamic()` dim in a parameter's
+        valid_shape is bound at the call site, so a standalone (precompiled) kernel
+        never receives it. Folding it into a min would emit an operand that does not
+        exist. Since the relation to the request cannot be decided either way, the
+        request -- the only extent the operator can name -- stands.
+        """
+        span = ir.Span.unknown()
+        # `SRC_VALID` stands for the type-level symbol; `valid_len` for the value the
+        # kernel is actually handed. Nothing relates them.
+        src_valid = ir.Var("SRC_VALID", ir.ScalarType(DataType.INDEX), span)
+        valid_len = ir.Var("valid_len", ir.ScalarType(DataType.INDEX), span)
+        view = ir.TensorView(stride=[], layout=ir.TensorLayout.ND, valid_shape=[16, src_valid])
+        tensor_var = ir.Var("a", ir.TensorType([16, 128], DataType.FP32, tensor_view=view), span)
+
+        call = tile.load(tensor_var, [0, 0], [16, 128], valid_shapes=[16, valid_len])
+
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        # The request survives verbatim -- no min() wrapped around SRC_VALID.
+        assert result_type.tile_view.valid_shape[1] is valid_len
+
     def test_load_symbolic_valid_shapes_survive_unchanged(self):
         """A symbolic request is trusted: it is the caller's contract, not a guess."""
         span = ir.Span.unknown()

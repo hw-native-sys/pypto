@@ -250,7 +250,7 @@ TypePtr DeduceTensorSliceType(const std::vector<ExprPtr>& args,
         /*offsets=*/offsets,
         /*window=*/full_shape,
         /*requested_valid=*/requested_valid,
-        /*kind=*/WindowReadKind::kView,
+        /*kind=*/WindowReadKind::kClampedWindow,
         /*clamp=*/GetKwargOr<bool>(kwargs, "clamp", false),
         /*op_name=*/"tensor.slice",
         /*bounds_remedy=*/

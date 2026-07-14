@@ -424,16 +424,17 @@ ExprPtr ClampNonNegative(const ExprPtr& extent, const Span& span) {
 
 /// The extent of dimension `i` that a read must keep inside its source.
 ///
-/// A kView result aliases the source, so every element of the window is
-/// addressable through it — and the strided-Tensor runtime enforces
-/// `offset + shape <= parent shape` when it materializes the view. The whole
-/// window therefore has to fit, however small an explicit valid_shape may be.
+/// Under kExactWindow nothing trims the window, so all of it has to fit,
+/// however small an explicit valid_shape may be.
 ///
-/// A kCopy result is a fresh buffer, so only the valid extent is ever fetched
-/// and the destination window is free to overhang the source; the request (when
-/// the caller made one) is what has to fit.
+/// Under kClampedWindow the window is trimmed for us — codegen clamps a
+/// tensor.slice view to the parent, and a tile.load DMA fetches only the valid
+/// extent — so the window may deliberately overhang and what has to fit is the
+/// extent actually read: the explicit request when the caller made one (a padded
+/// fixed-width window with a declared valid_shape is the standard idiom), and the
+/// window itself when they did not, since then the read implicitly claims all of it.
 const ExprPtr& BoundsReach(const WindowReadValidShapeParams& p, size_t i) {
-  if (p.kind == WindowReadKind::kView || p.requested_valid.empty()) {
+  if (p.kind == WindowReadKind::kExactWindow || p.requested_valid.empty()) {
     return p.window[i];
   }
   return p.requested_valid[i];
@@ -527,16 +528,31 @@ std::vector<ExprPtr> InferWindowReadValidShape(const WindowReadValidShapeParams&
       available = MinExtent(ClampNonNegative(remaining, params.span), window, params.span);
     }
 
-    // result = min(requested, available). An explicit request already satisfies
-    // request <= window (the standing valid-shape bounds invariant), so when
-    // `available` is the window the request needs no further narrowing.
+    // result = min(requested, available).
+    //
+    // With no explicit request, the source's extent under the window *is* the
+    // answer, guard expression and all.
+    //
+    // With one, the request is narrowed to the source's extent only when that is
+    // provably the smaller of the two. An undecidable relation between them is
+    // taken on trust, exactly as the bounds obligation above is: the request is
+    // the caller's declared statement of what this read touches, and it is the
+    // only one of the two that the operator is sure it can name. A source valid
+    // extent is a *type-level* expression, and may legitimately mention a symbol
+    // that has no value in the reading function at all — a `pl.dynamic()` dim used
+    // in a parameter's `valid_shape` is bound at the call site, so a standalone
+    // (precompiled) kernel never receives it. Folding such a symbol into a runtime
+    // `min` would emit an operand that does not exist. Narrowing only on a proof
+    // keeps every real intersection — a partial source is still cut down to what it
+    // actually has — without inventing a guard over a name we cannot materialize.
     if (params.requested_valid.empty()) {
       result.push_back(available);
-    } else if (AreExprsEqual(available, window)) {
-      result.push_back(params.requested_valid[i]);
-    } else {
-      result.push_back(MinExtent(params.requested_valid[i], available, params.span));
+      continue;
     }
+    const ExprPtr& requested = params.requested_valid[i];
+    const bool source_is_narrower = !AreExprsEqual(available, window) &&
+                                    ProveValidExtentLessEqual(available, requested) == ProofResult::kTrue;
+    result.push_back(source_is_narrower ? available : requested);
   }
 
   return result;

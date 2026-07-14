@@ -2044,15 +2044,28 @@ def test_tensor_slice_rejects_static_out_of_bounds_window():
         ir.op.tensor.slice(tensor_var, [32, 64], [48, 0])
 
 
-def test_tensor_slice_rejects_out_of_bounds_window_even_with_a_small_valid_shape():
-    """A view exposes its whole window, so a narrow valid_shape cannot excuse it."""
+def test_tensor_slice_padded_window_with_a_declared_valid_shape_is_accepted():
+    """A padded fixed-width window is fine when the declared extent really fits.
+
+    PTO codegen emits the view shape already clamped to ``min(shape, parent -
+    offset)`` -- the strided-Tensor runtime enforces that bound -- so the window
+    never overhangs at runtime. What must fit is the extent actually read, which
+    is what ``valid_shape`` names. This is the standard padded-tile idiom.
+    """
     span = ir.Span.unknown()
     tensor_var = ir.Var("t", ir.TensorType([96, 64], DataType.FP32), span)
 
-    # Only 32 rows are declared valid, but all 64 rows of the window are
-    # addressable through the result -- and 32 of them lie past the source.
+    # A 64-row window at row 64 of a 96-row source, reading the 32 rows that exist.
+    call = ir.op.tensor.slice(tensor_var, [64, 64], [64, 0], valid_shape=[32, 64])
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert [d.value for d in result_type.shape if isinstance(d, ir.ConstInt)] == [64, 64]
+    assert _valid_of(result_type) == [32, 64]
+
+    # Reading more than exists is still rejected: 64 + 40 > 96.
     with pytest.raises(ValueError, match="reads past the end of dimension 0"):
-        ir.op.tensor.slice(tensor_var, [64, 64], [64, 0], valid_shape=[32, 64])
+        ir.op.tensor.slice(tensor_var, [64, 64], [64, 0], valid_shape=[40, 64])
 
 
 def test_tensor_slice_rejects_negative_offset():
