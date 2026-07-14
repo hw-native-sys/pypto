@@ -257,6 +257,28 @@ const ExprPtr& ZeroExtent() {
   static const ExprPtr zero = std::make_shared<ConstInt>(0, DataType::INDEX, Span::unknown());
   return zero;
 }
+
+// True when `extent` is provably zero, i.e. the region it bounds is empty.
+//
+// A constant is compared by value rather than routed through ProveValidExtentEqual. That helper
+// only decides extents of matching signedness, so an *unsigned* zero -- e.g. a UINT64 valid_rows
+// from set_validshape -- against the signed INDEX zero comes back kUnknown, which would let exactly
+// the empty region this predicate exists to catch through. Symbolic extents are compared against a
+// zero of their own dtype so the analyzer can decide them at all.
+bool IsProvablyEmptyExtent(const ExprPtr& extent) {
+  if (!extent) {
+    return false;
+  }
+  if (const auto constant = GetConstantDimension(extent)) {
+    return *constant == 0;
+  }
+  auto scalar_type = As<ScalarType>(extent->GetType());
+  if (!scalar_type || !scalar_type->dtype_.IsInt()) {
+    return false;
+  }
+  const auto zero = std::make_shared<ConstInt>(0, scalar_type->dtype_, Span::unknown());
+  return ProveValidExtentEqual(extent, zero) == ProofResult::kTrue;
+}
 }  // namespace
 
 ProofResult ProveValidExtentEqual(const ExprPtr& lhs, const ExprPtr& rhs) {
@@ -369,10 +391,9 @@ std::vector<ValidShapeBoundsError> ValidateValidShapeBounds(const std::vector<Ex
 
 void CheckReductionInputNonEmpty(const std::vector<ExprPtr>& valid, const std::string& op_name,
                                  const Span& span) {
-  const ExprPtr& zero = ZeroExtent();
   for (size_t i = 0; i < valid.size(); ++i) {
     // Only a *provable* zero rejects; an unproved symbolic extent is accepted.
-    CHECK_SPAN(ProveValidExtentEqual(valid[i], zero) != ProofResult::kTrue, span)
+    CHECK_SPAN(!IsProvablyEmptyExtent(valid[i]), span)
         << op_name << ": input valid extent on axis " << i << " is 0 (valid_shape " << FormatShape(valid)
         << "), so the reduction has no real data to consume. The backend reduction kernels require a "
            "non-empty valid region on every axis and assert on an empty one, and an empty region also "

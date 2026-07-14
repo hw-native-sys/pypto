@@ -1000,6 +1000,34 @@ class TestTileReductionOps:
         with pytest.raises(ValueError, match="valid extent on axis 0 is 0"):
             tile.col_sum(empty)
 
+    def test_tile_reduction_rejects_unsigned_empty_valid_extent(self):
+        """An empty extent is rejected whatever its dtype's signedness.
+
+        The extent proof only decides operands of matching signedness, so an unsigned zero
+        compared against a signed zero is merely "unknown". A constant zero must therefore be
+        recognised by value, or exactly the empty region this guard exists for slips through.
+        """
+        span = ir.Span.unknown()
+        src_var = ir.Var(
+            "src",
+            ir.TileType(
+                [ir.ConstInt(8, DataType.INT32, span), ir.ConstInt(32, DataType.INT32, span)],
+                DataType.FP32,
+                None,
+                ir.TileView(
+                    valid_shape=[
+                        ir.ConstInt(8, DataType.INDEX, span),
+                        ir.ConstInt(0, DataType.UINT64, span),  # unsigned zero
+                    ]
+                ),
+            ),
+            span,
+        )
+        tmp_var = self._make_row_tmp_var()
+
+        with pytest.raises(ValueError, match="valid extent on axis 1 is 0"):
+            tile.row_sum(src_var, tmp_var)
+
     def test_tile_reduction_rejects_rank_mismatched_valid_shape(self):
         """A valid_shape whose rank differs from the physical shape is rejected, not read past."""
         span = ir.Span.unknown()
