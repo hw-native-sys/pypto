@@ -314,7 +314,7 @@ jobs:
         # here collapses pytest's dir collection.)
         run: |
           source activate.sh
-          task-submit --device "$DEVICE_ID" --timeout 1800 --max-time 1800 \
+          task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 1800 \
             --run "cd $GITHUB_WORKSPACE/st-checkout && source activate.sh && python -m pytest \
               tests/st -v -m 'not device_batch' \
               --ignore=tests/st/distributed \
@@ -330,7 +330,7 @@ jobs:
         # via task-submit) because it lives under the --ignore'd tests/st/codegen.
         run: |
           source activate.sh
-          task-submit --device "$DEVICE_ID" --timeout 1800 --max-time 600 \
+          task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 600 \
             --run "cd $GITHUB_WORKSPACE/st-checkout && source activate.sh && python -m pytest \
               tests/st/codegen/torch/test_torch_codegen_paged_attention.py \
               -v --device=\$TASK_DEVICE --platform=a2a3 \
@@ -344,19 +344,19 @@ jobs:
         timeout-minutes: 5
         run: |
           source activate.sh
-          task-submit --device "$DEVICE_ID" --timeout 1800 --max-time 600 \
+          task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 600 \
             --run "cd $GITHUB_WORKSPACE/st-checkout && source activate.sh && python -m pytest tests/st/distributed/test_l2_multi_orch.py -v --device=\$TASK_DEVICE --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }}"
 
       - name: Test swimlane output
         run: |
           source activate.sh
-          task-submit --device "$DEVICE_ID" --timeout 1800 --max-time 600 \
+          task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 600 \
             --run "cd $GITHUB_WORKSPACE/st-checkout && source activate.sh && python -m pytest tests/st/runtime/framework_and_models/test_perf_swimlane.py -v --device=\$TASK_DEVICE --platform=a2a3 --enable-l2-swimlane --forked --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }}"
 
       - name: Test dump-args output
         run: |
           source activate.sh
-          task-submit --device "$DEVICE_ID" --timeout 1800 --max-time 600 \
+          task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 600 \
             --run "cd $GITHUB_WORKSPACE/st-checkout && source activate.sh && python -m pytest tests/st/runtime/framework_and_models/test_dump_tag.py -v --device=\$TASK_DEVICE --platform=a2a3 --dump-args --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }} --forked"
 
       - name: Kill orphaned task-submit tasks
@@ -430,7 +430,7 @@ jobs:
         # HCCL); task-submit preserves that env into the child.
         run: |
           source activate.sh
-          task-submit --device "$DEVICE_ID" --device-num 2 --timeout 1800 --max-time 900 \
+          task-submit --device "$DEVICE_ID" --device-num 2 --timeout 3600 --max-time 900 \
             --run "cd $GITHUB_WORKSPACE/dist-checkout && source activate.sh && python -m pytest tests/st/distributed -v --device=\$TASK_DEVICE --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }} --ignore=tests/st/distributed/test_l2_multi_orch.py"
 
       - name: Kill orphaned task-submit tasks
@@ -516,7 +516,7 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/pypto-lib
         run: |
           source activate.sh
-          task-submit --device "$DEVICE_ID" --timeout 1800 --max-time 1800 \
+          task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 1800 \
             --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/qwen3/14b/decode_fwd.py -p a2a3 -d \$TASK_DEVICE"
 
       # NOTE: Qwen3-14B decode performance monitoring (L2-swimlane makespan +
@@ -529,7 +529,7 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/pypto-lib
         run: |
           source activate.sh
-          task-submit --device "$DEVICE_ID" --timeout 1800 --max-time 1800 \
+          task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 1800 \
             --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/deepseek/v4/decode_attention_swa.py -p a2a3 -d \$TASK_DEVICE"
 
       - name: Run pypto-lib DeepSeek-V4 decode_attention_hca example
@@ -537,7 +537,7 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/pypto-lib
         run: |
           source activate.sh
-          task-submit --device "$DEVICE_ID" --timeout 1800 --max-time 1800 \
+          task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 1800 \
             --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/deepseek/v4/decode_attention_hca.py -p a2a3 -d \$TASK_DEVICE"
 
       - name: Run pypto-lib DeepSeek-V4 prefill_attention_csa example
@@ -545,7 +545,7 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/pypto-lib
         run: |
           source activate.sh
-          task-submit --device "$DEVICE_ID" --timeout 1800 --max-time 1800 \
+          task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 1800 \
             --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/deepseek/v4/prefill_attention_csa.py -p a2a3 -d \$TASK_DEVICE"
 
       - name: Run pypto-lib DeepSeek-V4 prefill_attention_hca example
@@ -553,7 +553,7 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/pypto-lib
         run: |
           source activate.sh
-          task-submit --device "$DEVICE_ID" --timeout 1800 --max-time 1800 \
+          task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 1800 \
             --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/deepseek/v4/prefill_attention_hca.py -p a2a3 -d \$TASK_DEVICE"
 
       - name: Run pypto-lib DeepSeek-V4 prefill_attention_swa example
@@ -561,7 +561,7 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/pypto-lib
         run: |
           source activate.sh
-          task-submit --device "$DEVICE_ID" --timeout 1800 --max-time 1800 \
+          task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 1800 \
             --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/deepseek/v4/prefill_attention_swa.py -p a2a3 -d \$TASK_DEVICE"
 
       - name: Kill orphaned task-submit tasks
