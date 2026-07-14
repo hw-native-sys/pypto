@@ -1769,6 +1769,65 @@ class TestOrchestrationMore:
         assert l0_t0 < deps_t1, "L0TaskArgs must appear before set_dependencies"
         assert deps_t1 < submit_t1, "set_dependencies must appear before submit"
 
+    def test_dyn_dim_symbol_is_defined_from_the_declaring_argument(self):
+        """A ``pl.dynamic()`` symbol used as a value must be defined in the emitted C++.
+
+        The symbol names the runtime extent of whatever argument declares it, so an
+        orchestration body may use it as a value — a loop bound, a
+        ``pl.create_tensor`` extent, or a folded ``pl.tensor.dim``. Without a
+        definition read from the task-arg descriptor, the emitted host code
+        references a bare ``M`` that does not exist in that scope and fails to
+        compile.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        m = pl.dynamic("M")
+        n = pl.dynamic("N")
+
+        @pl.program
+        class DynSymbolProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def add_kernel(
+                self,
+                a: pl.Tensor[[m, n], pl.FP32],
+                b: pl.Tensor[[m, n], pl.FP32],
+                c: pl.Out[pl.Tensor[[m, n], pl.FP32]],
+            ) -> pl.Tensor[[m, n], pl.FP32]:
+                a_tile = pl.load(a, [0, 0], [16, 16], target_memory=pl.MemorySpace.Vec)
+                b_tile = pl.load(b, [0, 0], [16, 16])
+                return pl.store(pl.add(a_tile, b_tile), [0, 0], c)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                a: pl.Tensor[[m, n], pl.FP32],
+                b: pl.Tensor[[m, n], pl.FP32],
+                c: pl.Out[pl.Tensor[[m, n], pl.FP32]],
+            ) -> pl.Tensor[[m, n], pl.FP32]:
+                rows = pl.tensor.dim(a, 0)  # folds to M
+                tmp = pl.create_tensor([rows, n], dtype=pl.FP32)
+                staged = self.add_kernel(a, b, tmp)
+                return self.add_kernel(staged, b, c)
+
+        program = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(DynSymbolProgram)
+        orch_func = next(
+            f for f in program.functions.values() if f.func_type == ir.FunctionType.Orchestration
+        )
+        code = codegen.generate_orchestration(program, orch_func).code
+
+        # Each symbol is read once, from the descriptor of the argument declaring it.
+        m_decl = re.search(r"int64_t M = \(int64_t\)orch_args\.tensor\(0\)\.ref\(\)\.shapes\[0\];", code)
+        n_decl = re.search(r"int64_t N = \(int64_t\)orch_args\.tensor\(0\)\.ref\(\)\.shapes\[1\];", code)
+        assert m_decl is not None, code
+        assert n_decl is not None, code
+
+        # The temp's extents are the symbols, and they are defined before that use.
+        tmp_shapes = re.search(r"uint32_t \w+_ci_shapes\[2\] = \{(.+?)\};", code)
+        assert tmp_shapes is not None, code
+        assert "M" in tmp_shapes.group(1) and "N" in tmp_shapes.group(1), tmp_shapes.group(1)
+        assert m_decl.start() < tmp_shapes.start(), code
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

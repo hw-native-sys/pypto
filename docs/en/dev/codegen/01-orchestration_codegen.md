@@ -263,7 +263,31 @@ rt_submit_task(mixed_0, params_t0);
 | `tensor.slice` | `make_tensor_external(ptr + byte_offset, ...)` | Create view into existing tensor |
 | `tensor.transpose` | `Tensor xt = ext_x.transpose(axis1, axis2)` | Zero-copy metadata swap of two axes (lowers to runtime `Tensor::transpose`) |
 | `tensor.dim` (static) | `int64_t d0 = 16` | Constant dimension value |
-| `tensor.dim` (dynamic) | `int64_t d0 = (int64_t)orch_args.tensor(N).shapes[axis]` | Runtime dimension from ChipStorageTaskArgs |
+| `tensor.dim` (dynamic) | `int64_t d0 = (int64_t)orch_args.tensor(N).shapes[axis]` | Runtime dimension from ChipStorageTaskArgs. In an Orchestration body the parser folds it onto the declared extent instead — see below |
+
+### Dynamic-dim symbols
+
+A `pl.dynamic("M")` symbol names the runtime extent of whatever tensor argument
+declares it. In a kernel it is a type-level placeholder, but an Orchestration body
+may use it as a **value** — a loop bound, a `pl.create_tensor` extent, or a folded
+`pl.tensor.dim` — so each symbol the body references is defined once at entry, read
+from the descriptor of the first parameter declaring it:
+
+```cpp
+    // Dynamic-dim symbols (extent of the declaring argument)
+    int64_t M = (int64_t)orch_args.tensor(0).ref().shapes[0];
+```
+
+Only symbols the emitted body mentions get a definition; a symbol appearing solely
+in a parameter's type produces none (external tensor shapes are never printed).
+
+Because the symbol **is** the extent, the parser folds `pl.tensor.dim(x, i)` in an
+Orchestration body onto the extent `x`'s type already names — one runtime extent,
+one IR name. Reading it back would mint a second scalar that no analyzer can prove
+equal to the symbol, and every shape built from that copy would then disagree
+structurally with shapes built from the symbol. The fold is **Orchestration-only**:
+an Inline/InCore callee may be reached with a differently-shaped actual, so there
+`tensor.dim` stays a genuine runtime read.
 
 ## Complete Example
 

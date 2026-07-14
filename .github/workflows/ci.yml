@@ -494,7 +494,7 @@ jobs:
           checkout-path: lib-checkout
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
 
-      - name: Clone pypto-lib (Qwen3-14B decode)
+      - name: Clone pypto-lib (Qwen3-14B + DeepSeek-V4 models)
         # $GITHUB_WORKSPACE/pypto-lib is a sibling of lib-checkout, so
         # actions/checkout won't clean it on a persistent self-hosted runner — a
         # leftover dir from a previous run makes `git clone` fail with
@@ -518,6 +518,19 @@ jobs:
           source activate.sh
           task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 1800 \
             --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/qwen3/14b/decode_fwd.py -p a2a3 -d \$TASK_DEVICE"
+
+      # Prefill exercises the dynamic-shape host path that decode does not: its
+      # token axis is a `pl.dynamic()` symbol, the per-layer temp is sized from
+      # `pl.tensor.dim(...)`, and the layer result is reassigned to the same
+      # loop-carried var. Regressions in cross-function dynamic-shape typing
+      # surface here (and only here) before they reach pypto-serving.
+      - name: Run pypto-lib Qwen3-14B prefill example
+        env:
+          PYTHONPATH: ${{ github.workspace }}/pypto-lib
+        run: |
+          source activate.sh
+          task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 1800 \
+            --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/qwen3/14b/prefill_fwd.py -p a2a3 -d \$TASK_DEVICE"
 
       # NOTE: Qwen3-14B decode performance monitoring (L2-swimlane makespan +
       # perf_guard) lives in the daily_ci.yml `qwen3-perf` job, not here. Per-PR

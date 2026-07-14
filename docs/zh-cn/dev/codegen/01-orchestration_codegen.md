@@ -256,7 +256,28 @@ rt_submit_task(mixed_0, params_t0);
 | `tensor.slice` | `make_tensor_external(ptr + byte_offset, ...)` | 创建现有张量的视图 |
 | `tensor.transpose` | `Tensor xt = ext_x.transpose(axis1, axis2)` | 零拷贝交换两个维度的元数据（lower 到运行时 `Tensor::transpose`） |
 | `tensor.dim`（静态） | `int64_t d0 = 16` | 编译时常量维度值 |
-| `tensor.dim`（动态） | `int64_t d0 = (int64_t)orch_args.tensor(N).shapes[axis]` | 从 ChipStorageTaskArgs 获取运行时维度 |
+| `tensor.dim`（动态） | `int64_t d0 = (int64_t)orch_args.tensor(N).shapes[axis]` | 从 ChipStorageTaskArgs 获取运行时维度。在编排（Orchestration）函数体内，解析器会将其折叠为已声明的 extent —— 见下文 |
+
+### 动态维度符号（Dynamic-dim symbols）
+
+`pl.dynamic("M")` 符号命名的是「声明它的那个张量实参」的运行时 extent。在 kernel 中它
+只是类型层面的占位符；但编排函数体可以把它当作**值**使用 —— 循环上界、`pl.create_tensor`
+的 extent，或折叠后的 `pl.tensor.dim`。因此函数体引用到的每个符号都会在入口处定义一次，
+从「首个声明该符号的参数」的描述符中读取：
+
+```cpp
+    // Dynamic-dim symbols (extent of the declaring argument)
+    int64_t M = (int64_t)orch_args.tensor(0).ref().shapes[0];
+```
+
+只有生成代码中真正出现的符号才会被定义；仅出现在参数类型中的符号不会产生定义
+（外部张量的 shape 从不会被打印）。
+
+由于符号**就是**该 extent，解析器会把编排函数体内的 `pl.tensor.dim(x, i)` 折叠为 `x`
+的类型已经命名的那个 extent —— 一个运行时 extent 只对应一个 IR 名字。若重新读取，会为
+同一个量再造出一个标量，而分析器无法证明它与该符号相等；由该副本构造出的所有 shape
+都会在结构上与由符号构造的 shape 不一致。该折叠**仅**适用于编排函数：Inline/InCore
+被调用方可能被传入形状不同的实参，因此在那里 `tensor.dim` 仍是真正的运行时读取。
 
 ## 完整示例
 

@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <any>
+#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -195,6 +196,20 @@ class CodegenEffectiveUseCollector : public var_collectors::VarDefUseCollector {
  protected:
   void VisitStmt_(const ReturnStmtPtr&) override {}
 };
+
+/// Whether `code` mentions `name` as a whole C++ identifier rather than as a
+/// substring of a longer one (`M` must not match inside `M_DYN` or `ext_M`).
+bool ReferencesIdentifier(const std::string& code, const std::string& name) {
+  if (name.empty()) return false;
+  auto is_ident_char = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_'; };
+  for (size_t pos = code.find(name); pos != std::string::npos; pos = code.find(name, pos + 1)) {
+    const size_t end = pos + name.size();
+    const bool left_ok = pos == 0 || !is_ident_char(code[pos - 1]);
+    const bool right_ok = end >= code.size() || !is_ident_char(code[end]);
+    if (left_ok && right_ok) return true;
+  }
+  return false;
+}
 
 }  // namespace
 
@@ -3942,10 +3957,49 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
     }
   }
 
+  // A ``pl.dynamic("M")`` symbol names the runtime extent of whatever tensor
+  // argument declares it. In a kernel it stays a type-level placeholder, but an
+  // orchestration body may use it as a *value* — a loop bound, a
+  // ``pl.create_tensor`` extent, or a folded ``pl.tensor.dim`` — so the emitted
+  // C++ needs a definition for it: read it from the task-arg descriptor of the
+  // first parameter declaring it, the signature being what guarantees every
+  // argument carrying the symbol has that same extent.
+  //
+  // Gate on the generated text, not on an IR walk: a symbol also reaches the IR
+  // through value *types* whose shapes are never printed (an external tensor's
+  // extents), and defining those emits dead code.
+  const std::string body_code = stmt_codegen.GetGeneratedCode();
+  // Dedup by emitted *name*, not by Var: a symbol carries no emit-name mapping, so
+  // it prints as its name hint, and the body cannot distinguish two symbols that
+  // share one. Seeding with the scalar params keeps a caller that already passes an
+  // extent as a scalar of the same name — whose definition the body's reference
+  // resolves to today — from getting a second, conflicting definition here.
+  std::unordered_set<std::string> defined_names;
+  for (const auto& scalar : scalar_params) defined_names.insert(scalar.emit_name);
+  std::vector<std::string> dyn_dim_defs;
+  for (const auto& var : func->params_) {
+    auto tensor_type = AsTensorTypeLike(var->GetType());
+    if (!tensor_type) continue;
+    const std::string param_name = auto_name::GetCompatibleBaseName(var->name_hint_);
+    for (size_t axis = 0; axis < tensor_type->shape_.size(); ++axis) {
+      auto extent = As<Var>(tensor_type->shape_[axis]);
+      if (!extent) continue;
+      const std::string symbol_name = stmt_codegen.GetVarName(extent);
+      if (!defined_names.insert(symbol_name).second) continue;
+      if (!ReferencesIdentifier(body_code, symbol_name)) continue;
+      dyn_dim_defs.push_back("    int64_t " + symbol_name + " = " +
+                             stmt_codegen.GetTensorShapeDim(param_name, static_cast<int64_t>(axis)) + ";\n");
+    }
+  }
+  if (!dyn_dim_defs.empty()) {
+    oss << "\n    // Dynamic-dim symbols (extent of the declaring argument)\n";
+    for (const auto& def : dyn_dim_defs) oss << def;
+  }
+
   // The outermost PTO2_SCOPE() is now an explicit RuntimeScopeStmt emitted by
   // stmt_codegen (see MaterializeRuntimeScopes); just splice its output in.
   oss << "\n";
-  oss << stmt_codegen.GetGeneratedCode();
+  oss << body_code;
 
   oss << "}\n\n";
   oss << "}  // extern \"C\"\n";

@@ -392,5 +392,151 @@ def test_distributed_return_kind_and_valid_shape_are_preserved():
     _assert_roundtrips(Prog)
 
 
+def test_tensor_dim_folds_onto_the_signature_dyn_symbol():
+    """``pl.tensor.dim(x, i)`` in an Orchestration body IS the extent x's type names.
+
+    Re-reading a declared extent at runtime would mint a second scalar for the
+    same quantity, and nothing downstream can prove the copy equal to the symbol
+    the tensor types carry. Fold instead: one runtime extent, one IR name.
+    """
+    tokens = pl.dynamic("TOKENS_DYN")
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, x: pl.Tensor[[tokens, 128], pl.FP32]):
+            n = pl.tensor.dim(x, 0)
+            return pl.create_tensor([n, 128], dtype=pl.FP32)
+
+    body = ir.python_print(Prog)
+    # The dim read folded away, and the temp is shaped by the symbol itself --
+    # not by a second scalar that happens to hold the same number.
+    assert "pl.tensor.dim(" not in body, body
+    assert "pl.tensor.create([TOKENS_DYN, 128]" in body, body
+    _assert_roundtrips(Prog)
+
+
+def test_dyn_symbol_survives_call_returning_into_a_loop_carried_var():
+    """The Qwen3-14B prefill shape: a shared dyn symbol + a `tensor.dim`-sized temp.
+
+    ``hidden_states`` is reassigned from a callee that declares the *same*
+    ``pl.dynamic`` symbol, while the callee's ``out`` argument is a temp the
+    caller sized from ``pl.tensor.dim(hidden_states, 0)``. Before the fold, that
+    temp carried a second name for the token extent, the call's deduced return
+    type came back in terms of that name, and reassigning ``hidden_states`` was
+    rejected as a type change (``was pl.Tensor[[TOKENS_DYN, ...]], got
+    pl.Tensor[[n, ...]]``).
+    """
+    tokens = pl.dynamic("TOKENS_DYN")
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Inline, auto_scope=False)
+        def layer(
+            self,
+            hidden_states: pl.Tensor[[tokens, 128], pl.BF16],
+            out: pl.Tensor[[tokens, 128], pl.BF16],
+        ) -> pl.Tensor[[tokens, 128], pl.BF16]:
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+        def main(self, hidden_states: pl.Tensor[[tokens, 128], pl.BF16]) -> pl.Tensor[[tokens, 128], pl.BF16]:
+            n = pl.tensor.dim(hidden_states, 0)
+            for _ in pl.range(2):
+                with pl.scope():
+                    nxt = pl.create_tensor([n, 128], dtype=pl.BF16)
+                    hidden_states = self.layer(hidden_states, nxt)
+            return hidden_states
+
+    # The call's return type keeps the caller's own symbol, so the reassignment
+    # of `hidden_states` type-checks against the parameter it was declared with.
+    (call_type,) = _user_call_types(Prog, "layer")
+    assert isinstance(call_type, ir.TensorType)
+    assert [str(dim) for dim in call_type.shape] == ["TOKENS_DYN", "128"]
+    _assert_roundtrips(Prog)
+
+
+def test_reassigning_a_folded_name_never_writes_into_the_symbol():
+    """Rebinding the folded name must not assign *through* it into the symbol.
+
+    The name is bound to the symbol, and the symbol names an argument's extent —
+    it is immutable. A non-leaking scope (an ``if`` with explicit yields) rebinds
+    ``n`` and then exits, restoring the outer ``n -> symbol`` binding, so the
+    guard has to test the Var the name is bound to rather than track names.
+    Writing to the symbol would corrupt the extent for every later use of it.
+    """
+    tokens = pl.dynamic("TOKENS_DYN")
+    cols = pl.dynamic("COLS_DYN")
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, x: pl.Tensor[[tokens, cols], pl.FP32], flag: pl.Scalar[pl.BOOL]):
+            n = pl.tensor.dim(x, 0)  # n -> TOKENS_DYN
+            if flag:
+                n = 3  # rebind inside a scope that does not leak its vars
+                k = pl.yield_(1)
+            else:
+                k = pl.yield_(2)
+            n = 5  # outer scope: n is bound to the symbol again
+            return pl.create_tensor([n, k], dtype=pl.FP32)
+
+    printed = ir.python_print(Prog)
+    # The symbol is never an assignment target -- it stays a pure extent name.
+    assert "TOKENS_DYN: pl.Scalar" not in printed, printed
+    assert "TOKENS_DYN = 5" not in printed, printed
+    _assert_roundtrips(Prog)
+
+
+def test_tensor_dim_folds_for_every_axis_spelling():
+    """``dim(x, axis=0)`` and a named-constant axis fold too.
+
+    The printer normalizes every spelling to ``pl.tensor.dim(x, 0)``, so a
+    spelling that did not fold would fold on reparse and break the round-trip --
+    and would quietly reintroduce the second-name-for-one-extent bug.
+    """
+    tokens = pl.dynamic("TOKENS_DYN")
+    row_axis = 0
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def keyword_axis(self, x: pl.Tensor[[tokens, 128], pl.FP32]):
+            n = pl.tensor.dim(x, axis=0)
+            return pl.create_tensor([n, 128], dtype=pl.FP32)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def named_const_axis(self, x: pl.Tensor[[tokens, 128], pl.FP32]):
+            n = pl.tensor.dim(x, row_axis)
+            return pl.create_tensor([n, 128], dtype=pl.FP32)
+
+    printed = ir.python_print(Prog)
+    assert "pl.tensor.dim(" not in printed, printed
+    assert printed.count("pl.tensor.create([TOKENS_DYN, 128]") == 2, printed
+    _assert_roundtrips(Prog)
+
+
+def test_tensor_dim_is_not_folded_in_an_inline_callee():
+    """An Inline callee's ``tensor.dim`` must stay a runtime read.
+
+    Its placeholder is not the caller's: the same callee can be inlined into a
+    caller that passes a statically-shaped tensor, and ``InlineFunctions`` does
+    not rewrite the callee's dyn symbols. Only an Orchestration body -- where
+    codegen defines the symbol from the task-arg descriptor -- may fold.
+    """
+    tokens = pl.dynamic("TOKENS_DYN")
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Inline)
+        def layer(self, x: pl.Tensor[[tokens, 128], pl.FP32]):
+            n = pl.tensor.dim(x, 0)
+            return pl.create_tensor([n, 128], dtype=pl.FP32)
+
+    body = ir.python_print(Prog)
+    assert "pl.tensor.dim(x, 0)" in body
+    _assert_roundtrips(Prog)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

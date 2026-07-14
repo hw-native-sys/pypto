@@ -591,6 +591,12 @@ class ASTParser:
         # ``pl.dump_tag`` only makes sense in Orchestration functions.
         self._func_type: ir.FunctionType = ir.FunctionType.Opaque
 
+        # Dyn-dim symbols (``pl.dynamic()`` Vars) the current signature declares as
+        # a bare extent of a tensor param, by ``Var.unique_id``; and the Python
+        # names bound directly to one of them rather than to a Let of their own
+        # (see ``_fold_tensor_dim``). Both are per-function; reset in parse_function.
+        self._param_dim_symbols: set[int] = set()
+
         # Current function's auto_scope flag (set during parse_function). When
         # True (default) the compiler owns AUTO scope placement, so a hand-placed
         # AUTO `with pl.scope()` is rejected; set False to take control. MANUAL
@@ -717,6 +723,7 @@ class ASTParser:
         # auto_scope rides in func_attrs (key "auto_scope"); absent ⇒ default True.
         self._func_auto_scope = bool((func_attrs or {}).get("auto_scope", True))
         self._func_type = func_type
+        self._param_dim_symbols = set()
         func_span = self.span_tracker.get_span(func_def)
 
         # Enter function scope
@@ -765,6 +772,15 @@ class ASTParser:
 
                 # Add parameter to function with direction
                 param_var = f.param(param_name, param_type, param_span, direction=param_direction)
+
+                # A bare ``pl.dynamic()`` Var in a tensor param's shape names that
+                # argument's runtime extent. Orchestration codegen defines exactly
+                # these symbols from the task-arg descriptors, which is what makes
+                # them usable as values — and what ``_fold_tensor_dim`` folds onto.
+                if isinstance(param_type, ir.TensorType):
+                    for extent in param_type.shape:
+                        if isinstance(extent, ir.Var):
+                            self._param_dim_symbols.add(extent.unique_id)
 
                 # Register in scope
                 self.scope_manager.define_var(param_name, param_var, allow_redef=True)
@@ -1353,6 +1369,28 @@ class ASTParser:
     ) -> ir.Var:
         """Assign to existing Var if possible, otherwise create a new let binding."""
         existing_var = self.scope_manager.lookup_var(var_name)
+
+        # ``n = pl.tensor.dim(x, 0)`` folded to a dyn-dim symbol (see
+        # ``_fold_tensor_dim``): bind the Python name straight to the symbol. A Let
+        # would copy it, and every shape later built from ``n`` would then carry the
+        # copy rather than the symbol — the aliasing the fold exists to remove.
+        # Both guards test the Var the name is bound to, never a parallel set of
+        # names: scopes are a stack, so a name-keyed alias set desyncs the moment a
+        # non-leaking scope rebinds the name and exits.
+        if (
+            override_type is None
+            and self._func_type == ir.FunctionType.Orchestration
+            and self._is_param_dim_symbol(value_expr)
+            and (existing_var is None or self._is_param_dim_symbol(existing_var))
+        ):
+            return value_expr
+
+        # The name is bound to a symbol, which is immutable — it names an argument's
+        # extent. Rebind the name to a fresh let rather than assigning *through* the
+        # alias into the symbol itself.
+        if self._is_param_dim_symbol(existing_var):
+            return self.builder.let(var_name, value_expr, type=override_type, span=span)
+
         if existing_var is not None and type(existing_var) is ir.Var and not self.scope_manager.strict_ssa:
             # Reject reassignment with a different type (#642).  Same Python
             # variable maps to the same Var node, so the type must match.
@@ -7019,12 +7057,92 @@ class ASTParser:
         """Parse tensor operation."""
         if op_name == "alloc":
             return self._parse_printed_alloc_call(call)
+        if op_name == "dim":
+            folded = self._fold_tensor_dim(call)
+            if folded is not None:
+                return folded
         # Prefer the DSL wrapper (owns type-checking + dispatch); fall back to
         # the IR-builder layer for pass-internal ops like ``gather_mask``
         # that are emitted by the printer but have no DSL wrapper.
         if hasattr(_dsl_tensor, op_name):
             return self._dispatch_op(_dsl_tensor, "pl.tensor", op_name, call)
         return self._dispatch_ir_builder_op(ir_op.tensor, "pl.tensor", op_name, call)
+
+    @staticmethod
+    def _static_int(node: ast.expr) -> int | None:
+        """Return the value of an integer literal AST node (``0``, ``-1``), else None."""
+        if isinstance(node, ast.Constant):
+            value = node.value
+            return value if isinstance(value, int) and not isinstance(value, bool) else None
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+            inner = ASTParser._static_int(node.operand)
+            return None if inner is None else -inner
+        return None
+
+    def _is_param_dim_symbol(self, expr: Any) -> TypeGuard[ir.Var]:
+        """Whether ``expr`` is a dyn-dim symbol this signature declares (see __init__).
+
+        Takes ``Any``: a scope lookup can yield ``None`` or a ``str`` placeholder
+        (loop yields), and both must simply answer "no".
+        """
+        return isinstance(expr, ir.Var) and expr.unique_id in self._param_dim_symbols
+
+    def _fold_tensor_dim(self, call: ast.Call) -> ir.Expr | None:
+        """Fold ``pl.tensor.dim(x, i)`` onto the extent ``x``'s type already names.
+
+        A tensor's declared extent *is* its runtime extent, so reading it back
+        mints a *second* scalar for the same quantity, which nothing downstream can
+        prove equal to the symbol the tensor types carry. Shapes built from the copy
+        then disagree structurally with shapes built from the symbol — breaking, for
+        one, calls into a callee that declares that same symbol. Fold instead: one
+        runtime extent, one IR name.
+
+        Orchestration bodies only. That is where the symbol is a value: codegen
+        defines it there from the declaring param's task-arg descriptor. An
+        Inline/InCore callee's placeholder is not the caller's (``InlineFunctions``
+        does not substitute callee symbols, and the callee may be reached with a
+        statically-shaped actual), so there ``tensor.dim`` stays a runtime read.
+
+        Returns the folded extent, or None to emit ``tensor.dim`` as usual.
+        """
+        if self._func_type != ir.FunctionType.Orchestration:
+            return None
+        # The *tensor* argument must be a bare name — the generic dispatch re-parses
+        # the AST, so parsing a non-trivial argument here would emit its statements
+        # twice. The axis carries no such restriction, and every spelling the DSL
+        # accepts must fold: the printer normalizes them all to ``dim(x, 0)``, so a
+        # spelling that did not fold would fold on reparse and break the round-trip.
+        if len(call.args) == 2 and not call.keywords:
+            tensor_arg, axis_arg = call.args
+        elif len(call.args) == 1 and len(call.keywords) == 1 and call.keywords[0].arg == "axis":
+            tensor_arg, axis_arg = call.args[0], call.keywords[0].value
+        else:
+            return None
+        if not isinstance(tensor_arg, ast.Name):
+            return None
+        axis = self._static_int(axis_arg)
+        if axis is None:
+            # A named constant (``pl.tensor.dim(x, ROWS)``) is still a static axis.
+            evaluated, value = self.expr_evaluator.try_eval_expr(axis_arg)
+            if not evaluated or not isinstance(value, int) or isinstance(value, bool):
+                return None
+            axis = value
+        tensor_var = self.scope_manager.lookup_var(tensor_arg.id)
+        tensor_type = getattr(tensor_var, "type", None)
+        if not isinstance(tensor_type, ir.TensorType):
+            return None
+        shape = tensor_type.shape
+        if axis < 0:
+            axis += len(shape)
+        # An out-of-range axis is the op's error to raise, not ours to fold.
+        if not 0 <= axis < len(shape):
+            return None
+        # Only a symbol this signature declares: those are the extents codegen
+        # materializes, so the folded value is sure to have a definition in the
+        # emitted host code. A local scalar in the shape may since have been
+        # reassigned, so it is left alone.
+        extent = shape[axis]
+        return extent if self._is_param_dim_symbol(extent) else None
 
     def _parse_tile_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse tile operation."""
