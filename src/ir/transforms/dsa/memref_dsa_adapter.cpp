@@ -150,6 +150,12 @@ ExportedProblem BuildStructuredProblem(const FunctionPtr& func, const Allocation
 
   std::map<MemorySpace, ::dsa::Pool> pools;
   ::dsa::PyptoStructure pypto_structure;
+  // PyPTO's current level3/PTOAS dependency contract recognizes reuse through
+  // equal allocation bases. It does not make arbitrary partial overlap between
+  // temporally disjoint buffers safe, so structured instances use whole slots.
+  // Standard DSA benchmark instances deliberately keep freed-region
+  // subdivision enabled.
+  pypto_structure.whole_slot_reuse = true;
   std::vector<std::optional<::dsa::BufferId>> buffer_id_by_interval(allocation_plan.intervals.size());
   std::unordered_map<::dsa::BufferId, size_t> interval_by_buffer_id;
   std::unordered_map<::dsa::BufferId, size_t> buffer_position_by_id;
@@ -217,6 +223,7 @@ ExportedProblem BuildStructuredProblem(const FunctionPtr& func, const Allocation
     if (!group.members.empty()) pypto_structure.pipeline_groups.push_back(std::move(group));
   }
   exported.document.problem.pypto_structure = std::move(pypto_structure);
+  exported.document.metadata["address_reuse_contract"] = "whole_slot_v1";
 
   using BufferPair = std::pair<::dsa::BufferId, ::dsa::BufferId>;
   std::map<BufferPair, std::set<::dsa::SeparationReason>> separations;
