@@ -23,29 +23,24 @@
 #include <utility>
 #include <vector>
 
+#include "internal.h"
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/core/dtype.h"
-#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
-#include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
-#include "pypto/ir/transforms/base/visitor.h"
-#include "pypto/ir/transforms/pass_properties.h"
-#include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/tile_conversion_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
-#include "pypto/ir/verifier/verifier.h"
 
 namespace pypto {
 namespace ir {
@@ -292,94 +287,6 @@ bool IsTrailingMatrixAxisSwap(int64_t axis1, int64_t axis2, size_t ndim) {
   return (axis1 == trailing_axis0 && axis2 == trailing_axis1) ||
          (axis1 == trailing_axis1 && axis2 == trailing_axis0);
 }
-
-// ============================================================================
-// Precondition validation
-// ============================================================================
-
-/**
- * @brief Visitor that validates preconditions for the FlattenTileNdTo2D pass.
- *
- * Checks:
- * 1. All tile shapes are static (ConstInt)
- * 2. All tile reduce ops (tile.sum/max/min) on >2D tiles reduce the last axis
- * 3. No tile.read/tile.write/tile.slice on >2D tiles
- */
-class PreconditionChecker : public IRVisitor {
- public:
-  void VisitStmt_(const AssignStmtPtr& op) override {
-    if (!op) return;
-    if (auto call = As<Call>(op->value_)) {
-      CheckCall(call);
-    }
-    IRVisitor::VisitStmt_(op);
-  }
-
-  void VisitStmt_(const EvalStmtPtr& op) override {
-    if (!op) return;
-    if (auto call = As<Call>(op->expr_)) {
-      CheckCall(call);
-    }
-    IRVisitor::VisitStmt_(op);
-  }
-
- private:
-  static void CheckStaticShape(const TileTypePtr& tile_type, const std::string& op_name) {
-    if (!tile_type || tile_type->shape_.size() <= 2) return;
-    for (size_t i = 0; i < tile_type->shape_.size(); ++i) {
-      CHECK(As<ConstInt>(tile_type->shape_[i]))
-          << "FlattenTileNdTo2D: tile op '" << op_name << "' has a dynamic (non-constant) "
-          << "dimension " << i << " in its >2D tile shape, which cannot be flattened to 2D. "
-          << "Hardware tiles map to fixed-size on-chip buffers, so every tile dimension must "
-          << "be a compile-time constant; a pl.dynamic dimension has no static bound and cannot "
-          << "back a tile dimension directly. Fix by either: (1) iterating/tiling the dynamic "
-          << "dimension with pl.range/pl.parallel so each per-iteration tile slice is static, or "
-          << "(2) reshaping the tensor to 2D before the InCore (pl.at) scope so the dynamic extent "
-          << "lands on the pl.parallel loop bound instead of inside the tile shape.";
-    }
-  }
-
-  void CheckCall(const CallPtr& call) {
-    if (!call || !call->op_) return;
-    auto gv = As<GlobalVar>(call->op_);
-    if (gv) return;  // Skip function calls
-
-    const auto& name = call->op_->name_;
-    if (name.substr(0, 5) != "tile.") return;
-
-    // Check static shapes on any tile-typed argument and result
-    for (const auto& arg : call->args_) {
-      CheckStaticShape(As<TileType>(arg->GetType()), name);
-    }
-    CheckStaticShape(As<TileType>(call->GetType()), name);
-
-    // Disallow tile.read/tile.write/tile.slice on >2D tiles
-    if (name == "tile.read" || name == "tile.write" || name == "tile.slice") {
-      if (!call->args_.empty()) {
-        auto input_tile = As<TileType>(call->args_[0]->GetType());
-        CHECK(!IsNdTile(input_tile)) << "FlattenTileNdTo2D: " << name << " is not supported on >2D tiles";
-      }
-    }
-
-    // Check reduce ops reduce the last axis
-    if (name == "tile.sum" || name == "tile.max" || name == "tile.min") {
-      if (!call->args_.empty()) {
-        auto input_tile = As<TileType>(call->args_[0]->GetType());
-        if (IsNdTile(input_tile)) {
-          int axis = call->GetKwarg<int>("axis", -1);
-          int last_axis = static_cast<int>(input_tile->shape_.size()) - 1;
-          CHECK(axis == last_axis) << "FlattenTileNdTo2D: tile reduce op '" << name
-                                   << "' must reduce along the last axis "
-                                   << "(axis=" << last_axis << "), but got axis=" << axis;
-          // keepdim must be True so the output stays 2D after flatten
-          bool keepdim = call->GetKwarg<bool>("keepdim", false);
-          CHECK(keepdim) << "FlattenTileNdTo2D: tile reduce op '" << name
-                         << "' on >2D tile must use keepdim=True to maintain 2D output shape";
-        }
-      }
-    }
-  }
-};
 
 // ============================================================================
 // Main transformation
@@ -1353,8 +1260,7 @@ NdTransposeResult LowerNdTranspose(const AssignStmtPtr& assign, const CallPtr& c
   auto operand_type = As<TileType>(operand->GetType());
   INTERNAL_CHECK_SPAN(operand_type, span)
       << "Internal error: tile.transpose input must be TileType in FlattenTileNdTo2D";
-  MemorySpace target_mem =
-      operand_type->memory_space_.has_value() ? *operand_type->memory_space_ : MemorySpace::Vec;
+  MemorySpace target_mem = operand_type->memory_space_.value_or(MemorySpace::Vec);
 
   if (operand_type->shape_.size() > 2) {
     auto [merged, last] = ComputeMergedShape(operand_type->shape_, "tile.transpose input");
@@ -2249,25 +2155,13 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
   return result;
 }
 
-/**
- * @brief Transform a single InCore function: flatten >2D tiles to 2D.
- *
- * This includes:
- * 1. Flattening >2D tile ops in the function body to 2D
- * 2. Preserving original tensor-rank offsets/shapes in tile.load/store for
- *    codegen to use with tensor_view + partition_view
- */
-FunctionPtr TransformFunction(const FunctionPtr& func) {
-  if (!IsInCoreType(func->func_type_)) {
-    return func;
-  }
+}  // namespace
 
+namespace flatten_tile_nd_to_2d {
+
+FunctionPtr Rewrite(const FunctionPtr& func) {
   const auto& span = func->span_;
   auto& op_registry = OpRegistry::GetInstance();
-
-  // Validate preconditions
-  PreconditionChecker checker;
-  checker.VisitStmt(func->body_);
 
   FlattenContext ctx;
 
@@ -2283,121 +2177,6 @@ FunctionPtr TransformFunction(const FunctionPtr& func) {
   return new_func;
 }
 
-// ============================================================================
-// Property Verifier
-// ============================================================================
-
-/**
- * @brief Visitor that checks all tile ops in InCore functions use ≤2D tiles.
- */
-class TileOps2DVerifier : public IRVisitor {
- public:
-  explicit TileOps2DVerifier(std::vector<Diagnostic>& diagnostics, std::string func_name)
-      : diagnostics_(diagnostics), func_name_(std::move(func_name)) {}
-
-  void VisitStmt_(const AssignStmtPtr& op) override {
-    if (!op) return;
-    if (auto call = As<Call>(op->value_)) {
-      CheckCall(call, op->span_);
-    }
-    IRVisitor::VisitStmt_(op);
-  }
-
-  void VisitStmt_(const EvalStmtPtr& op) override {
-    if (!op) return;
-    if (auto call = As<Call>(op->expr_)) {
-      CheckCall(call, op->span_);
-    }
-    IRVisitor::VisitStmt_(op);
-  }
-
- private:
-  void CheckCall(const CallPtr& call, const Span& stmt_span) {
-    if (!call || !call->op_) return;
-    auto gv = As<GlobalVar>(call->op_);
-    if (gv) return;
-
-    const auto& name = call->op_->name_;
-    if (name.substr(0, 5) != "tile.") return;
-
-    // tile.load/tile.store are permitted to have any tile rank:
-    // load produces 2D tiles from rank>2 tensors; store accepts 2D tiles and
-    // writes them back to rank>2 tensors.
-    if (name == "tile.load" || name == "tile.store" || name == "tile.reshape") return;
-
-    // Check result type
-    auto result_tile = As<TileType>(call->GetType());
-    if (result_tile && result_tile->shape_.size() > 2) {
-      diagnostics_.emplace_back(DiagnosticSeverity::Error, "TileOps2D", 0,
-                                "Tile op '" + name + "' in InCore function '" + func_name_ +
-                                    "' produces >2D tile (should have been flattened to 2D)",
-                                stmt_span);
-    }
-
-    // Post-pass, every tile.transpose must be the codegen-ready 4-arg form: this pass
-    // materializes the pto.ttrans scratch for both 2D and per-page >2D transposes, so a
-    // surviving 3-arg form means scratch was never allocated.
-    if (name == "tile.transpose" && call->args_.size() != 4) {
-      diagnostics_.emplace_back(DiagnosticSeverity::Error, "TileOps2D", 0,
-                                "tile.transpose in InCore function '" + func_name_ + "' has " +
-                                    std::to_string(call->args_.size()) +
-                                    " arguments (expected 4: input, axis1, axis2, scratch after "
-                                    "FlattenTileNdTo2D)",
-                                stmt_span);
-    }
-
-    // Check argument types
-    for (const auto& arg : call->args_) {
-      auto arg_tile = As<TileType>(arg->GetType());
-      if (arg_tile && arg_tile->shape_.size() > 2) {
-        diagnostics_.emplace_back(DiagnosticSeverity::Error, "TileOps2D", 0,
-                                  "Tile op '" + name + "' in InCore function '" + func_name_ +
-                                      "' has >2D tile argument (should have been flattened to 2D)",
-                                  stmt_span);
-        break;
-      }
-    }
-  }
-
-  std::vector<Diagnostic>& diagnostics_;
-  std::string func_name_;
-};
-
-}  // namespace
-
-// ============================================================================
-// Property Verifier Impl (public)
-// ============================================================================
-
-class TileOps2DPropertyVerifierImpl : public PropertyVerifier {
- public:
-  [[nodiscard]] std::string GetName() const override { return "TileOps2D"; }
-
-  void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
-    if (!program) return;
-    for (const auto& [gv, func] : program->functions_) {
-      if (!func || !func->body_) continue;
-      if (!IsInCoreType(func->func_type_)) continue;
-      TileOps2DVerifier verifier(diagnostics, func->name_);
-      verifier.VisitStmt(func->body_);
-    }
-  }
-};
-
-PropertyVerifierPtr CreateTileOps2DPropertyVerifier() {
-  return std::make_shared<TileOps2DPropertyVerifierImpl>();
-}
-
-// ============================================================================
-// Pass Factory
-// ============================================================================
-
-namespace pass {
-
-Pass FlattenTileNdTo2D() {
-  return CreateFunctionPass(TransformFunction, "FlattenTileNdTo2D", kFlattenTileNdTo2DProperties);
-}
-
-}  // namespace pass
+}  // namespace flatten_tile_nd_to_2d
 }  // namespace ir
 }  // namespace pypto

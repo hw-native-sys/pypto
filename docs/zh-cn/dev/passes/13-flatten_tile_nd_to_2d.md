@@ -43,6 +43,7 @@ program_2d = flatten_pass(program)
 
 1. **验证前置条件**：检查静态物理形状、最后轴归约、不允许对 >2D 使用 `tile.read`/`tile.write`/`tile.slice`
 2. **变换语句**：遍历函数体，将 >2D Tile 操作转换为 2D，并保留动态的 `valid_shape`（见[动态 valid_shape](#动态-tile-维度issue-1578)）
+3. **验证后置条件**：由独立的 `TileOps2D` 属性验证器 (property verifier) 检查改写后的 InCore IR 仅包含受支持的 Tile rank 与 codegen-ready transpose 形态
 
 按语句类型处理：
 
@@ -157,7 +158,16 @@ for c, (o,) in pl.range(0, s_dim, CHUNK, init_values=(out,)):
 
 **头文件**：`include/pypto/ir/transforms/passes.h`
 
-**实现文件**：`src/ir/transforms/flatten_tile_nd_to_2d_pass.cpp`
+实现按职责拆分：
+
+| 阶段 | 文件 | 职责 |
+| ---- | ---- | ---- |
+| 协调 | `src/ir/transforms/flatten_tile_nd_to_2d/pass.cpp` | 选择 InCore 函数，并按 analysis → rewrite 顺序执行 |
+| 分析 (analysis) | `src/ir/transforms/flatten_tile_nd_to_2d/analysis.cpp` | 只读的前置条件验证 |
+| 改写 (rewrite) | `src/ir/transforms/flatten_tile_nd_to_2d/rewrite.cpp` | ND 到 2D 的 IR 变换 |
+| 验证 (verification) | `src/ir/transforms/flatten_tile_nd_to_2d/verification.cpp` | 独立验证 `TileOps2D` 后置条件 |
+
+这些阶段入口仅供 transform 内部使用；公共 API 仍为 `pass::FlattenTileNdTo2D()`。
 
 **Python 绑定**：`python/bindings/modules/passes.cpp`
 
