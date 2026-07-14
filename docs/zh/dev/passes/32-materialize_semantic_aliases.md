@@ -50,6 +50,10 @@ program = passes.materialize_semantic_aliases()(program)
    yield。
 2. **应用重定型**（`RetypeApplier`）：就地改写收集到的变量类型，使生产者直接写入
    carried buffer。
+3. **协调 external planner 剩余 carry**（`YieldFixupMutator`）：跳过 `MemoryReuse`
+   时，为无法安全 retarget 的 producer/view shape 插入显式 move。PTOAS 在此物化
+   loop-carry move，并在不带地址的 codegen 中处理 if-phi copy；DSA 会发出显式地址，
+   因而必须在 lifetime export 前同时物化 if-phi 与 loop-carry move。
 
 当没有可重定向的内容时（`Compute` 返回空）本 pass 是 no-op，并跳过
 `Orchestration` 函数（无 TileType 变量）。
@@ -63,6 +67,10 @@ PTO codegen 把解析到*同一* MemRef 身份（`base` + `byte_offset` + `size`
 `memory_planner=PTOAS` 则让 codegen 不带物理地址发射该身份，交给 ptoas
 `PlanMemory`。
 参见 [PTO 代码生成 — 由谁规划内存](../codegen/00-pto_codegen.md)。
+
+DSA 不能使用 PTOAS 专用的 codegen repair，因为其 level-3 PTO 包含显式地址。因此，
+if-phi copy 会保留为普通 IR operation，参与 DSA lifetime analysis，并与 placement
+一起接受验证。
 
 ## 说明
 
