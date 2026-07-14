@@ -1044,8 +1044,7 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
   // Tensor/DistributedTensor for its src parameter; a TileType would crash
   // downstream in pld.tile.put's own deducer/codegen CHECKs.
   INTERNAL_CHECK_SPAN(As<TensorType>(local_data->GetType()), span)
-      << "pld.tensor.allgather local_data must be TensorType, got "
-      << local_data->GetType()->TypeName();
+      << "pld.tensor.allgather local_data must be TensorType, got " << local_data->GetType()->TypeName();
   auto target_type = As<DistributedTensorType>(target->GetType());
   INTERNAL_CHECK_SPAN(target_type, span)
       << "pld.tensor.allgather target must be DistributedTensorType (deducer-rejected otherwise)";

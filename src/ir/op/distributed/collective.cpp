@@ -278,9 +278,7 @@ REGISTER_OP("pld.tensor.allgather")
         "pld.tile.put loop + notify-all/wait-all; "
         "this Call never survives past that pass.")
     .set_op_category("DistributedOp")
-    .add_argument(
-        "local_data",
-        "InCore: Tensor [1, SIZE]; HOST: Tensor [1, SIZE] (Input)")
+    .add_argument("local_data", "InCore: Tensor [1, SIZE]; HOST: Tensor [1, SIZE] (Input)")
     .add_argument("target", "DistributedTensor [NR, SIZE] result window (InOut)")
     .add_argument("signal", "INT32 DistributedTensor barrier (InOut)")
     .no_memory_spec()
@@ -550,8 +548,8 @@ namespace {
 TypePtr DeduceBuiltinTensorAllGatherType(const std::vector<ExprPtr>& args,
                                          const std::vector<std::pair<std::string, std::any>>& kwargs) {
   constexpr const char* kOpName = "builtin.tensor.allgather";
-  CHECK(args.size() == 3)
-      << kOpName << " requires 3 args (local_data, target, signal), but got " << args.size();
+  CHECK(args.size() == 3) << kOpName << " requires 3 args (local_data, target, signal), but got "
+                          << args.size();
   for (size_t i = 0; i < args.size(); ++i) {
     CHECK(args[i]) << kOpName << " positional argument #" << i << " must not be null";
   }
