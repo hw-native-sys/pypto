@@ -184,7 +184,7 @@ void CheckStaticSignalCapacity(const CallPtr& call, const ExprPtr& signal_expr, 
                                   std::move(attrs), {ArgDirection::InOut, ArgDirection::InOut});
 }
 
-[[nodiscard]] void CheckDistinctInputTargetWindows(const CallPtr& call, const char* op_name) {
+void CheckDistinctInputTargetWindows(const CallPtr& call, const char* op_name) {
   // After MaterializeCommDomainScopes, window views carry WindowBuffer
   // back-references. Same-expression aliasing is already rejected in the type
   // deducers; this catches two distinct pld.window(...) views over one alloc.
