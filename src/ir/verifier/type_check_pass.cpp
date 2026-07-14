@@ -308,9 +308,7 @@ void TypeChecker::CheckTypeEquality(const TypePtr& type1, const TypePtr& type2, 
 
     if (auto dist1 = As<DistributedTensorType>(type1)) {
       auto dist2 = As<DistributedTensorType>(type2);
-      const bool same_window =
-          dist1->window_buffer_.has_value() == dist2->window_buffer_.has_value() &&
-          (!dist1->window_buffer_ || dist1->window_buffer_->get() == dist2->window_buffer_->get());
+      const bool same_window = dist1->window_buffer_ == dist2->window_buffer_;
       if (!same_window) {
         std::ostringstream msg;
         msg << "Distributed window-buffer identity mismatch in " << context << ": " << desc1 << " and "
