@@ -2849,16 +2849,16 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
     new_body = applier.VisitStmt(new_body);
   }
 
-  // Under memory_planner=PtoAS the whole MemoryReuse pass is skipped, and with it
-  // YieldFixupMutator (its Step 4). That mutator is not an optimization: when a
+  // Under memory_planner=PtoAS or Dsa the whole MemoryReuse pass is skipped, and
+  // with it YieldFixupMutator (its Step 4). That mutator is not an optimization: when a
   // loop yields a value living in a different buffer than its iter_arg/return_var,
   // it inserts the `tile.move` that writes the result back into the carry. Without
   // it the carry is never updated and the loop silently becomes a no-op — the
   // `[N, 1]` col-vector carry of an online softmax is the shape that hits this,
   // because its branch producer runs on a `[1, N]` view in its own buffer.
   //
-  // Run it here so both planners reconcile carries by the same mechanism. Under
-  // PyPTO it stays where it is: Step 4 must run *after* the reuse decisions, which
+  // Run it here so both external planners reconcile carries by the same mechanism.
+  // Under PyPTO it stays where it is: Step 4 must run *after* the reuse decisions, which
   // can themselves create fresh mismatches.
   //
   // Only the ForStmt half: PTO codegen already re-points a branch-local producer
@@ -2867,7 +2867,8 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
   // path with an extra buffer plus a `pto.tmov`. Loop carries have no such
   // codegen path, so they still need the move.
   const auto* ctx = PassContext::Current();
-  if (ctx != nullptr && ctx->GetMemoryPlanner() == MemoryPlanner::PtoAS) {
+  if (ctx != nullptr &&
+      (ctx->GetMemoryPlanner() == MemoryPlanner::PtoAS || ctx->GetMemoryPlanner() == MemoryPlanner::Dsa)) {
     YieldFixupMutator yield_fixup(/*fixup_if_stmts=*/false);
     new_body = yield_fixup.VisitStmt(new_body);
   }

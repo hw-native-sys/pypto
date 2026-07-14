@@ -81,6 +81,38 @@ class LoopCarriedAdd:
         return out
 
 
+@pl.program
+class ColVecIfPhiCarry:
+    """Col-vector if-phi whose loop carry needs an explicit write-back move."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        x: pl.Tensor[[16, 1], pl.FP32],
+        y: pl.Tensor[[16, 1], pl.FP32],
+        out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+        acc: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+    ) -> pl.Tensor[[16, 1], pl.FP32]:
+        m: pl.Tile[[16, 1], pl.FP32] = pl.load(x, [0, 0], [16, 1])
+        s: pl.Tile[[16, 1], pl.FP32] = pl.load(x, [0, 0], [16, 1])
+        for i in pl.range(4):
+            c: pl.Tile[[16, 1], pl.FP32] = pl.load(y, [0, 0], [16, 1])
+            if i == 0:
+                m_new = pl.maximum(m, c)
+                alpha = pl.exp(pl.sub(m, m_new))
+                s = pl.mul(s, alpha)
+                m = m_new
+            else:
+                m_new = pl.maximum(m, c)
+                alpha = pl.exp(pl.sub(m, m_new))
+                beta = pl.exp(pl.sub(c, m_new))
+                s = pl.add(pl.mul(s, alpha), beta)
+                m = m_new
+        out = pl.store(m, [0, 0], out)
+        acc = pl.store(s, [0, 0], acc)
+        return out
+
+
 def _run_pipeline(
     memory_planner: passes.MemoryPlanner, program: ir.Program = ElementwiseAdd
 ) -> tuple[ir.Program, list[str]]:
@@ -264,6 +296,23 @@ def test_pypto_loop_carry_uses_shared_addr():
     addrs = [ln.split("addr =")[1].split()[0] for ln in alloc_lines if "addr =" in ln]
     # In level3 the loop-carry aliasing is carried by two allocs sharing an addr.
     assert len(addrs) != len(set(addrs)), f"PYPTO mode must alias the accumulator via a shared addr:\n{mlir}"
+
+
+@requires_dsa
+def test_dsa_colvec_loop_carry_runs_external_planner_fixup():
+    """DSA must run the same correctness-only carry fixup as PTOAS."""
+    dsa_optimized, _ = _run_pipeline(passes.MemoryPlanner.DSA, ColVecIfPhiCarry)
+    ptoas_optimized, _ = _run_pipeline(passes.MemoryPlanner.PTOAS, ColVecIfPhiCarry)
+
+    dsa_ir = ir.python_print(dsa_optimized)
+    ptoas_ir = ir.python_print(ptoas_optimized)
+    dsa_moves = dsa_ir.count("tile.move")
+    ptoas_moves = ptoas_ir.count("tile.move")
+    assert ptoas_moves > 0, f"expected the col-vector carry to need a write-back move:\n{ptoas_ir}"
+    assert dsa_moves == ptoas_moves, (
+        "DSA skipped an external-planner loop-carry write-back: "
+        f"DSA={dsa_moves}, PTOAS={ptoas_moves}\n{dsa_ir}"
+    )
 
 
 if __name__ == "__main__":

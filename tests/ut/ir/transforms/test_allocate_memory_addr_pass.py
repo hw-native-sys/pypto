@@ -921,6 +921,7 @@ def test_dsa_export_is_deterministic_pypto_structured(tmp_path):
     assert document["profile"] == "pypto_structured"
     assert document["instance"] == "read_before_write_chain"
     assert document["metadata"]["solver_input"] == "pre_memory_reuse"
+    assert document["metadata"]["address_reuse_contract"] == "whole_slot_v1"
     buffers = document["problem"]["buffers"]
     assert len(buffers) == 3
     assert [buffer["size"] for buffer in buffers] == [16384, 16384, 16384]
@@ -943,6 +944,7 @@ def test_dsa_export_is_deterministic_pypto_structured(tmp_path):
     assert vec_pool["reserved_ranges"] == []
     assert all(buffer["alignment"] == 32 for buffer in document["problem"]["buffers"])
     assert document["problem"]["pypto_structure"] == {
+        "whole_slot_reuse": True,
         "alias_classes": [
             {"buffer": 0, "members": ["tile_a"]},
             {"buffer": 1, "members": ["tile_b"]},
@@ -1000,6 +1002,7 @@ def test_dsa_export_and_solver_preserve_pipeline_stage_separation(tmp_path):
         {"first": 0, "second": 1, "reasons": ["pipeline_stage"]}
     ]
     assert document["problem"]["pypto_structure"] == {
+        "whole_slot_reuse": True,
         "alias_classes": [
             {"buffer": 0, "members": ["stage_0"]},
             {"buffer": 1, "members": ["stage_1"]},
@@ -1198,18 +1201,25 @@ def _dsa_fragmentation_program():
 
 
 @requires_dsa
-def test_dsa_planner_subdivides_a_freed_larger_region(tmp_path):
-    """Joint placement fixes the group-bump fragmentation shape from #1908."""
+def test_dsa_pypto_profile_reuses_whole_freed_slots(tmp_path):
+    """PyPTO gates #1908 subdivision until partial-overlap dependencies are safe.
+
+    The portable standard-DSA profile still fits both 32 KiB consumers into the
+    expired 64 KiB range. Current PyPTO level3 codegen only tracks reuse safely
+    at equal base addresses, so its structured profile reuses one whole 64 KiB
+    slot and places the other simultaneous 32 KiB tile beside it.
+    """
     base = _dsa_fragmentation_program()
     bump = passes.allocate_memory_addr()(base)
     planned = _allocate_with_dsa(base, str(tmp_path))
 
     assert _vec_peak(bump) == (64 + 32 + 32 + 32) * 1024
-    assert _vec_peak(planned) == 64 * 1024
+    assert _vec_peak(planned) == 96 * 1024
 
     corpus_file = tmp_path / "pypto_issue_1908_fragmentation.dsa.json"
     document = json.loads(corpus_file.read_text())
     assert document["instance"] == "issue_1908_fragmentation"
+    assert document["problem"]["pypto_structure"]["whole_slot_reuse"] is True
     assert [buffer["size"] for buffer in document["problem"]["buffers"]] == [
         64 * 1024,
         32 * 1024,
