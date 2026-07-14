@@ -34,6 +34,7 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
@@ -70,6 +71,15 @@ static std::string BuildAutoNamedVersion(const std::string& name, const std::str
 // Var*, so no name-based canonicalization is needed.
 // ═══════════════════════════════════════════════════════════════════════════
 
+static TypePtr GetAuthoritativeAssignmentType(const TypePtr& lhs_type, const ExprPtr& value) {
+  auto value_type = value ? value->GetType() : nullptr;
+  const bool rhs_carries_authoritative_metadata = AsVarLike(value) ||
+                                                  std::dynamic_pointer_cast<const ShapedType>(value_type) ||
+                                                  As<TupleType>(value_type);
+  return value_type && !As<UnknownType>(value_type) && rhs_carries_authoritative_metadata ? value_type
+                                                                                          : lhs_type;
+}
+
 class TypeCollector : public IRVisitor {
  public:
   std::unordered_map<const Var*, TypePtr> types;
@@ -78,7 +88,9 @@ class TypeCollector : public IRVisitor {
   }
 
  protected:
-  void VisitStmt_(const AssignStmtPtr& op) override { types[op->var_.get()] = op->var_->GetType(); }
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    types[op->var_.get()] = GetAuthoritativeAssignmentType(op->var_->GetType(), op->value_);
+  }
   void VisitStmt_(const ForStmtPtr& op) override { VisitStmt(op->body_); }
   void VisitStmt_(const WhileStmtPtr& op) override { VisitStmt(op->body_); }
   void VisitStmt_(const IfStmtPtr& op) override {
@@ -310,19 +322,6 @@ class SSAConverter {
 
   ExprPtr SubstExpr(const ExprPtr& e) { return e ? ExprSubstituter(*this).VisitExpr(e) : e; }
 
-  /// Substitute all expressions in a vector, returning the new vector and whether anything changed.
-  std::pair<std::vector<ExprPtr>, bool> SubstExprVec(const std::vector<ExprPtr>& vec) {
-    std::vector<ExprPtr> out;
-    bool changed = false;
-    out.reserve(vec.size());
-    for (const auto& e : vec) {
-      auto ne = SubstExpr(e);
-      if (ne != e) changed = true;
-      out.push_back(ne);
-    }
-    return {std::move(out), changed};
-  }
-
   /// Substitute Var references stored in Call attrs. Currently covers:
   ///   * ``kAttrManualDepEdges`` — ``std::vector<VarPtr>`` (dep edges)
   ///   * ``kAttrDumpVars`` — ``std::vector<VarPtr>`` (selective dump
@@ -384,36 +383,21 @@ class SSAConverter {
 
   TypePtr SubstType(const TypePtr& type) {
     if (!type) return type;
-    if (auto t = AsTensorTypeLike(type)) {
-      auto [shape, changed] = SubstExprVec(t->shape_);
-      std::optional<TensorView> new_tv = t->tensor_view_;
-      if (t->tensor_view_.has_value()) {
-        const auto& tv = t->tensor_view_.value();
-        auto [vs, vs_changed] = SubstExprVec(tv.valid_shape);
-        auto [st, st_changed] = SubstExprVec(tv.stride);
-        if (vs_changed || st_changed) {
-          changed = true;
-          new_tv = TensorView(std::move(st), tv.layout, std::move(vs), tv.pad);
-        }
+    if (auto tuple = As<TupleType>(type)) {
+      std::vector<TypePtr> elements;
+      elements.reserve(tuple->types_.size());
+      bool changed = false;
+      for (const auto& element : tuple->types_) {
+        auto new_element = SubstType(element);
+        if (new_element.get() != element.get()) changed = true;
+        elements.push_back(std::move(new_element));
       }
       if (!changed) return type;
-      if (auto dt = As<DistributedTensorType>(type)) {
-        return std::make_shared<DistributedTensorType>(std::move(shape), t->dtype_, t->memref_,
-                                                       std::move(new_tv), dt->window_buffer_);
-      }
-      return std::make_shared<TensorType>(std::move(shape), t->dtype_, t->memref_, std::move(new_tv));
+      return std::make_shared<TupleType>(std::move(elements));
     }
-    if (auto t = As<TileType>(type)) {
-      if (!t->tile_view_.has_value()) return type;
-      const auto& tv = t->tile_view_.value();
-      auto [vs, changed] = SubstExprVec(tv.valid_shape);
-      if (!changed) return type;
-      TileView ntv = tv;
-      ntv.valid_shape = std::move(vs);
-      return std::make_shared<TileType>(t->shape_, t->dtype_, t->memref_, std::make_optional(std::move(ntv)),
-                                        t->memory_space_);
-    }
-    return type;
+
+    return CloneTypeWithMemRefAndRemapExprs(type, GetTypeMemRef(type),
+                                            [this](const ExprPtr& expr) { return SubstExpr(expr); });
   }
 
   // ── Version management ─────────────────────────────────────────────
@@ -459,6 +443,21 @@ class SSAConverter {
     }
   }
 
+  std::vector<VarPtr> RebuildExistingReturnVars(const std::vector<VarPtr>& rvs) {
+    std::vector<VarPtr> rebuilt;
+    rebuilt.reserve(rvs.size());
+    for (const auto& rv : rvs) {
+      if (!rv) {
+        rebuilt.push_back(rv);
+        continue;
+      }
+      auto new_rv = std::make_shared<Var>(rv->name_hint_, SubstType(rv->GetType()), rv->span_);
+      cur_[rv.get()] = new_rv;
+      rebuilt.push_back(std::move(new_rv));
+    }
+    return rebuilt;
+  }
+
   // ── Statement dispatch ─────────────────────────────────────────────
 
   StmtPtr ConvertStmt(const StmtPtr& s) {
@@ -486,7 +485,8 @@ class SSAConverter {
   StmtPtr ConvertAssign(const AssignStmtPtr& op) {
     auto val = SubstExpr(op->value_);
     auto key = op->var_.get();
-    auto var = AllocVersion(key, op->var_->GetType(), op->var_->span_);
+    auto authoritative_type = GetAuthoritativeAssignmentType(op->var_->GetType(), val);
+    auto var = AllocVersion(key, authoritative_type, op->var_->span_);
     auto result = MutableCopy(op);
     result->var_ = var;
     result->value_ = val;
@@ -540,8 +540,8 @@ class SSAConverter {
     std::vector<IterArgPtr> ias;
     std::unordered_map<const Var*, const Var*> ia_to_source;
     for (const auto& ia : op->iter_args_) {
-      auto new_ia =
-          std::make_shared<IterArg>(ia->name_hint_, ia->GetType(), SubstExpr(ia->initValue_), ia->span_);
+      auto new_ia = std::make_shared<IterArg>(ia->name_hint_, SubstType(ia->GetType()),
+                                              SubstExpr(ia->initValue_), ia->span_);
       ias.push_back(new_ia);
       // The original iter_arg IS the source variable for cur_ mapping
       ia_to_source[new_ia.get()] = ia.get();
@@ -613,7 +613,7 @@ class SSAConverter {
     for (const auto& key : escaping) {
       auto type_it = tc.types.find(key);
       if (type_it == tc.types.end()) continue;
-      auto type = type_it->second;
+      auto type = SubstType(type_it->second);
       auto init = FindInitValue(type, before);
       if (!init) {
         // Last resort: create a placeholder using any variable with matching type
@@ -649,11 +649,13 @@ class SSAConverter {
     cur_ = before;
     for (size_t i = 0; i < carried.size(); ++i) cur_[carried[i]] = carried_rvs[i];
     for (size_t i = 0; i < escaping.size() && i < esc_rvs.size(); ++i) cur_[escaping[i]] = esc_rvs[i];
-    RegisterExistingReturnVars(ias, op->return_vars_, ia_to_source);
+    auto existing_rvs = RebuildExistingReturnVars(op->return_vars_);
+    RegisterExistingReturnVars(ias, existing_rvs, ia_to_source);
 
     // Build return_vars in iter_arg order: existing + carried + escaping
     std::vector<VarPtr> all_rvs;
-    for (const auto& rv : op->return_vars_) all_rvs.push_back(rv);
+    all_rvs.reserve(existing_rvs.size() + carried_rvs.size() + esc_rvs.size());
+    for (const auto& rv : existing_rvs) all_rvs.push_back(rv);
     for (const auto& rv : carried_rvs) all_rvs.push_back(rv);
     for (const auto& rv : esc_rvs) all_rvs.push_back(rv);
 
@@ -692,8 +694,8 @@ class SSAConverter {
     std::vector<IterArgPtr> ias;
     std::unordered_map<const Var*, const Var*> ia_to_source;
     for (const auto& ia : op->iter_args_) {
-      auto new_ia =
-          std::make_shared<IterArg>(ia->name_hint_, ia->GetType(), SubstExpr(ia->initValue_), ia->span_);
+      auto new_ia = std::make_shared<IterArg>(ia->name_hint_, SubstType(ia->GetType()),
+                                              SubstExpr(ia->initValue_), ia->span_);
       ias.push_back(new_ia);
       ia_to_source[new_ia.get()] = ia.get();
     }
@@ -758,7 +760,7 @@ class SSAConverter {
     for (const auto& key : escaping) {
       auto type_it = tc.types.find(key);
       if (type_it == tc.types.end()) continue;
-      auto type = type_it->second;
+      auto type = SubstType(type_it->second);
       auto init = FindInitValue(type, before);
       if (!init) init = std::make_shared<Var>(key->name_hint_, type, op->span_);
       int iv = NextVersion(key);
@@ -785,11 +787,13 @@ class SSAConverter {
     cur_ = before;
     for (size_t i = 0; i < carried.size(); ++i) cur_[carried[i]] = carried_rvs[i];
     for (size_t i = 0; i < escaping.size() && i < esc_rvs.size(); ++i) cur_[escaping[i]] = esc_rvs[i];
-    RegisterExistingReturnVars(ias, op->return_vars_, ia_to_source);
+    auto existing_rvs = RebuildExistingReturnVars(op->return_vars_);
+    RegisterExistingReturnVars(ias, existing_rvs, ia_to_source);
 
     // Build return_vars: existing + carried + escaping
     std::vector<VarPtr> all_rvs;
-    for (const auto& rv : op->return_vars_) all_rvs.push_back(rv);
+    all_rvs.reserve(existing_rvs.size() + carried_rvs.size() + esc_rvs.size());
+    for (const auto& rv : existing_rvs) all_rvs.push_back(rv);
     for (const auto& rv : carried_rvs) all_rvs.push_back(rv);
     for (const auto& rv : esc_rvs) all_rvs.push_back(rv);
 
@@ -874,8 +878,8 @@ class SSAConverter {
       for (const auto& rv : op->return_vars_) {
         auto rv_key = rv.get();
         int v = NextVersion(rv_key);
-        auto nrv = std::make_shared<Var>(BuildAutoNamedVersion(rv_key->name_hint_, "rv", v), rv->GetType(),
-                                         rv->span_);
+        auto nrv = std::make_shared<Var>(BuildAutoNamedVersion(rv_key->name_hint_, "rv", v),
+                                         SubstType(rv->GetType()), rv->span_);
         return_vars.push_back(nrv);
         cur_[rv_key] = nrv;
       }
@@ -916,8 +920,8 @@ class SSAConverter {
       }
       if (!handled) {
         int v = NextVersion(rv_key);
-        auto nrv = std::make_shared<Var>(BuildAutoNamedVersion(rv_key->name_hint_, "rv", v), rv->GetType(),
-                                         rv->span_);
+        auto nrv = std::make_shared<Var>(BuildAutoNamedVersion(rv_key->name_hint_, "rv", v),
+                                         SubstType(rv->GetType()), rv->span_);
         return_vars.push_back(nrv);
         cur_[rv_key] = nrv;
       }

@@ -296,9 +296,10 @@ inline std::vector<ExprPtr> GetValidShape(const std::shared_ptr<const TileType>&
  *        the actual call arguments.
  *
  * Builds a mapping from Var dimensions in callee param types to the
- * corresponding dimensions in actual arg types, then substitutes those
- * Vars in each return type.  Handles TensorType (shape + tensor_view),
- * TileType (shape + tile_view), and TupleType (recursive).
+ * corresponding metadata expressions in actual arg types, then substitutes
+ * those Vars in each return type. Handles TensorType, DistributedTensorType,
+ * TileType, and TupleType recursively, including expressions nested in shapes
+ * and view metadata.
  *
  * @param callee_params  Callee function parameter variables
  * @param args           Actual call argument expressions

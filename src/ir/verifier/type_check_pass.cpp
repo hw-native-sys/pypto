@@ -24,7 +24,9 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 #include "pypto/ir/verifier/verification_error.h"
@@ -91,15 +93,10 @@ class TypeChecker : public IRVisitor {
   StmtPtr GetLastStmt(const StmtPtr& stmt);
 
   /**
-   * @brief Check type equality including shape for TensorType and TileType
+   * @brief Check strict type equality at a call/control-flow boundary
    */
   void CheckTypeEquality(const TypePtr& type1, const TypePtr& type2, const std::string& context,
                          const std::string& desc1, const std::string& desc2, const Span& span);
-
-  /**
-   * @brief Check if two ExprPtr represent the same constant value
-   */
-  [[nodiscard]] bool IsSameConstant(const ExprPtr& expr1, const ExprPtr& expr2) const;
 
   /**
    * @brief Check if expression type is ScalarType
@@ -215,7 +212,6 @@ void TypeChecker::CheckTypeEquality(const TypePtr& type1, const TypePtr& type2, 
                                     const std::string& desc1, const std::string& desc2, const Span& span) {
   if (!type1 || !type2) return;
 
-  // Check ObjectKind first
   if (type1->GetKind() != type2->GetKind()) {
     std::ostringstream msg;
     msg << "Type kind mismatch in " << context << ": " << desc1 << " type '" << type1->TypeName()
@@ -224,11 +220,27 @@ void TypeChecker::CheckTypeEquality(const TypePtr& type1, const TypePtr& type2, 
     return;
   }
 
-  // For ScalarType, check dtype
-  if (type1->GetKind() == ObjectKind::ScalarType) {
-    auto scalar1 = std::dynamic_pointer_cast<const ScalarType>(type1);
-    auto scalar2 = std::dynamic_pointer_cast<const ScalarType>(type2);
-    if (scalar1 && scalar2 && scalar1->dtype_ != scalar2->dtype_) {
+  if (auto tuple1 = As<TupleType>(type1)) {
+    auto tuple2 = As<TupleType>(type2);
+    if (tuple1->types_.size() != tuple2->types_.size()) {
+      std::ostringstream msg;
+      msg << "Tuple size mismatch in " << context << ": " << desc1 << " has " << tuple1->types_.size()
+          << " elements, but " << desc2 << " has " << tuple2->types_.size() << " elements";
+      RecordError(typecheck::ErrorType::SIZE_MISMATCH, msg.str(), span);
+      return;
+    }
+    for (size_t i = 0; i < tuple1->types_.size(); ++i) {
+      CheckTypeEquality(tuple1->types_[i], tuple2->types_[i], context,
+                        desc1 + " tuple element[" + std::to_string(i) + "]",
+                        desc2 + " tuple element[" + std::to_string(i) + "]", span);
+    }
+    return;
+  }
+
+  auto scalar1 = As<ScalarType>(type1);
+  if (scalar1) {
+    auto scalar2 = As<ScalarType>(type2);
+    if (scalar1->dtype_ != scalar2->dtype_) {
       std::ostringstream msg;
       msg << "Dtype mismatch in " << context << ": " << desc1 << " dtype != " << desc2 << " dtype";
       RecordError(typecheck::ErrorType::DTYPE_MISMATCH, msg.str(), span);
@@ -236,208 +248,87 @@ void TypeChecker::CheckTypeEquality(const TypePtr& type1, const TypePtr& type2, 
     return;
   }
 
-  // For TensorType and TileType, check dtype and shape
-  if (type1->GetKind() == ObjectKind::TensorType || type1->GetKind() == ObjectKind::TileType) {
-    auto shaped1 = std::dynamic_pointer_cast<const ShapedType>(type1);
-    auto shaped2 = std::dynamic_pointer_cast<const ShapedType>(type2);
+  auto shaped1 = std::dynamic_pointer_cast<const ShapedType>(type1);
+  auto shaped2 = std::dynamic_pointer_cast<const ShapedType>(type2);
+  if (!shaped1 || !shaped2) return;
 
-    if (!shaped1 || !shaped2) return;
-
-    // Check dtype
-    if (shaped1->dtype_ != shaped2->dtype_) {
-      std::ostringstream msg;
-      msg << "Dtype mismatch in " << context << ": " << desc1 << " dtype != " << desc2 << " dtype";
-      RecordError(typecheck::ErrorType::DTYPE_MISMATCH, msg.str(), span);
-    }
-
-    // Check shape dimensions count
-    if (shaped1->shape_.size() != shaped2->shape_.size()) {
-      std::ostringstream msg;
-      msg << "Shape dimension count mismatch in " << context << ": " << desc1 << " has "
-          << shaped1->shape_.size() << " dimensions, but " << desc2 << " has " << shaped2->shape_.size()
-          << " dimensions";
-      RecordError(typecheck::ErrorType::SHAPE_DIMENSION_MISMATCH, msg.str(), span);
-      return;
-    }
-
-    // Check each shape dimension
-    for (size_t i = 0; i < shaped1->shape_.size(); ++i) {
-      const auto& dim1 = shaped1->shape_[i];
-      const auto& dim2 = shaped2->shape_[i];
-
-      if (!dim1 || !dim2) continue;
-
-      // Try to compare as constants
-      if (!IsSameConstant(dim1, dim2)) {
-        // Check if both are ConstInt but different values
-        auto const_int1 = As<ConstInt>(dim1);
-        auto const_int2 = As<ConstInt>(dim2);
-        if (const_int1 && const_int2) {
-          std::ostringstream msg;
-          msg << "Shape dimension mismatch in " << context << ": " << desc1 << " dimension[" << i
-              << "] = " << const_int1->value_ << ", but " << desc2 << " dimension[" << i
-              << "] = " << const_int2->value_;
-          RecordError(typecheck::ErrorType::SHAPE_VALUE_MISMATCH, msg.str(), span);
-        }
-        // For symbolic dimensions, we skip detailed checking
-        // A more sophisticated analysis would be needed for symbolic shape verification
-      }
-    }
+  if (shaped1->dtype_ != shaped2->dtype_) {
+    std::ostringstream msg;
+    msg << "Dtype mismatch in " << context << ": " << desc1 << " dtype != " << desc2 << " dtype";
+    RecordError(typecheck::ErrorType::DTYPE_MISMATCH, msg.str(), span);
   }
 
-  // For TileType, also check tile_view
-  if (type1->GetKind() == ObjectKind::TileType) {
-    auto tile1 = std::dynamic_pointer_cast<const TileType>(type1);
-    auto tile2 = std::dynamic_pointer_cast<const TileType>(type2);
-
-    // Check if both have tile_view or both don't
-    if (tile1->tile_view_.has_value() != tile2->tile_view_.has_value()) {
+  auto check_shape = [&](const std::vector<ExprPtr>& shape1, const std::vector<ExprPtr>& shape2,
+                         const std::string& shape_name) {
+    if (shape1.size() != shape2.size()) {
       std::ostringstream msg;
-      msg << "TileView presence mismatch in " << context << ": " << desc1
-          << (tile1->tile_view_.has_value() ? " has" : " doesn't have") << " tile_view, but " << desc2
-          << (tile2->tile_view_.has_value() ? " has" : " doesn't have") << " tile_view";
-      RecordError(typecheck::ErrorType::TYPE_KIND_MISMATCH, msg.str(), span);
-      return;
+      msg << shape_name << " dimension count mismatch in " << context << ": " << desc1 << " has "
+          << shape1.size() << " dimensions, but " << desc2 << " has " << shape2.size() << " dimensions";
+      RecordError(typecheck::ErrorType::SHAPE_DIMENSION_MISMATCH, msg.str(), span);
+      return false;
     }
-
-    // If both have tile_view, compare the fields
-    if (tile1->tile_view_.has_value() && tile2->tile_view_.has_value()) {
-      const auto& view1 = tile1->tile_view_.value();
-      const auto& view2 = tile2->tile_view_.value();
-
-      // Check valid_shape dimensions count
-      if (view1.valid_shape.size() != view2.valid_shape.size()) {
+    for (size_t i = 0; i < shape1.size(); ++i) {
+      const auto& dim1 = shape1[i];
+      const auto& dim2 = shape2[i];
+      if (!dim1 || !dim2) continue;
+      auto proof = ProveValidExtentEqual(dim1, dim2);
+      if (proof != ProofResult::kTrue) {
         std::ostringstream msg;
-        msg << "TileView valid_shape dimension count mismatch in " << context << ": " << desc1 << " has "
-            << view1.valid_shape.size() << " dimensions, but " << desc2 << " has " << view2.valid_shape.size()
-            << " dimensions";
-        RecordError(typecheck::ErrorType::SHAPE_DIMENSION_MISMATCH, msg.str(), span);
-        return;
-      }
-
-      // Check each valid_shape dimension
-      for (size_t i = 0; i < view1.valid_shape.size(); ++i) {
-        const auto& dim1 = view1.valid_shape[i];
-        const auto& dim2 = view2.valid_shape[i];
-
-        if (!dim1 || !dim2) continue;
-
-        // Try to compare as constants
-        if (!IsSameConstant(dim1, dim2)) {
-          // Check if both are ConstInt but different values
-          auto const_int1 = As<ConstInt>(dim1);
-          auto const_int2 = As<ConstInt>(dim2);
-          if (const_int1 && const_int2) {
-            std::ostringstream msg;
-            msg << "TileView valid_shape dimension mismatch in " << context << ": " << desc1
-                << " valid_shape[" << i << "] = " << const_int1->value_ << ", but " << desc2
-                << " valid_shape[" << i << "] = " << const_int2->value_;
-            RecordError(typecheck::ErrorType::SHAPE_VALUE_MISMATCH, msg.str(), span);
-          }
-          // For symbolic dimensions, we skip detailed checking
-          // A more sophisticated analysis would be needed for symbolic shape verification
+        msg << shape_name << " dimension mismatch in " << context << ": " << desc1 << " dimension[" << i
+            << "] = " << PythonPrint(dim1) << ", but " << desc2 << " dimension[" << i
+            << "] = " << PythonPrint(dim2);
+        if (proof == ProofResult::kUnknown) {
+          msg << "; equality is not provable and this boundary has no runtime guard";
         }
-      }
-
-      // Check stride dimensions count
-      if (view1.stride.size() != view2.stride.size()) {
-        std::ostringstream msg;
-        msg << "TileView stride dimension count mismatch in " << context << ": " << desc1 << " has "
-            << view1.stride.size() << " dimensions, but " << desc2 << " has " << view2.stride.size()
-            << " dimensions";
-        RecordError(typecheck::ErrorType::SHAPE_DIMENSION_MISMATCH, msg.str(), span);
-        return;
-      }
-
-      // Check each stride dimension
-      for (size_t i = 0; i < view1.stride.size(); ++i) {
-        const auto& stride1 = view1.stride[i];
-        const auto& stride2 = view2.stride[i];
-
-        if (!stride1 || !stride2) continue;
-
-        if (!IsSameConstant(stride1, stride2)) {
-          auto const_int1 = As<ConstInt>(stride1);
-          auto const_int2 = As<ConstInt>(stride2);
-          if (const_int1 && const_int2) {
-            std::ostringstream msg;
-            msg << "TileView stride dimension mismatch in " << context << ": " << desc1 << " stride[" << i
-                << "] = " << const_int1->value_ << ", but " << desc2 << " stride[" << i
-                << "] = " << const_int2->value_;
-            RecordError(typecheck::ErrorType::SHAPE_VALUE_MISMATCH, msg.str(), span);
-          }
-        }
-      }
-
-      // Check start_offset presence
-      if (static_cast<bool>(view1.start_offset) != static_cast<bool>(view2.start_offset)) {
-        std::ostringstream msg;
-        msg << "TileView start_offset presence mismatch in " << context << ": " << desc1
-            << (view1.start_offset ? " has" : " doesn't have") << " start_offset, but " << desc2
-            << (view2.start_offset ? " has" : " doesn't have") << " start_offset";
-        RecordError(typecheck::ErrorType::TYPE_KIND_MISMATCH, msg.str(), span);
-      } else if (view1.start_offset && view2.start_offset) {
-        if (!IsSameConstant(view1.start_offset, view2.start_offset)) {
-          auto const_int1 = As<ConstInt>(view1.start_offset);
-          auto const_int2 = As<ConstInt>(view2.start_offset);
-          if (const_int1 && const_int2) {
-            std::ostringstream msg;
-            msg << "TileView start_offset mismatch in " << context << ": " << desc1
-                << " start_offset = " << const_int1->value_ << ", but " << desc2
-                << " start_offset = " << const_int2->value_;
-            RecordError(typecheck::ErrorType::SHAPE_VALUE_MISMATCH, msg.str(), span);
-          }
-        }
-      }
-
-      // Check blayout
-      if (view1.blayout != view2.blayout) {
-        std::ostringstream msg;
-        msg << "TileView blayout mismatch in " << context << ": " << desc1 << " blayout != " << desc2
-            << " blayout";
-        RecordError(typecheck::ErrorType::TYPE_KIND_MISMATCH, msg.str(), span);
-      }
-
-      // Check slayout
-      if (view1.slayout != view2.slayout) {
-        std::ostringstream msg;
-        msg << "TileView slayout mismatch in " << context << ": " << desc1 << " slayout != " << desc2
-            << " slayout";
-        RecordError(typecheck::ErrorType::TYPE_KIND_MISMATCH, msg.str(), span);
-      }
-
-      // Check fractal
-      if (view1.fractal != view2.fractal) {
-        std::ostringstream msg;
-        msg << "TileView fractal mismatch in " << context << ": " << desc1 << " fractal = " << view1.fractal
-            << ", but " << desc2 << " fractal = " << view2.fractal;
         RecordError(typecheck::ErrorType::SHAPE_VALUE_MISMATCH, msg.str(), span);
       }
+    }
+    return true;
+  };
 
-      // Check pad
-      if (view1.pad != view2.pad) {
+  if (!check_shape(shaped1->shape_, shaped2->shape_, "Shape")) return;
+
+  if (auto tensor1 = AsTensorTypeLike(type1)) {
+    auto tensor2 = AsTensorTypeLike(type2);
+    const auto& valid1 = tensor1->tensor_view_ && !tensor1->tensor_view_->valid_shape.empty()
+                             ? tensor1->tensor_view_->valid_shape
+                             : tensor1->shape_;
+    const auto& valid2 = tensor2->tensor_view_ && !tensor2->tensor_view_->valid_shape.empty()
+                             ? tensor2->tensor_view_->valid_shape
+                             : tensor2->shape_;
+    check_shape(valid1, valid2, "Valid shape");
+
+    const auto pad1 = tensor1->tensor_view_ ? tensor1->tensor_view_->pad : PadValue::null;
+    const auto pad2 = tensor2->tensor_view_ ? tensor2->tensor_view_->pad : PadValue::null;
+    if (pad1 != pad2) {
+      std::ostringstream msg;
+      msg << "Tensor padding mismatch in " << context << ": " << desc1 << " pad != " << desc2 << " pad";
+      RecordError(typecheck::ErrorType::TYPE_KIND_MISMATCH, msg.str(), span);
+    }
+
+    if (auto dist1 = As<DistributedTensorType>(type1)) {
+      auto dist2 = As<DistributedTensorType>(type2);
+      const bool same_window =
+          dist1->window_buffer_.has_value() == dist2->window_buffer_.has_value() &&
+          (!dist1->window_buffer_ || dist1->window_buffer_->get() == dist2->window_buffer_->get());
+      if (!same_window) {
         std::ostringstream msg;
-        msg << "TileView pad mismatch in " << context << ": " << desc1 << " pad != " << desc2 << " pad";
+        msg << "Distributed window-buffer identity mismatch in " << context << ": " << desc1 << " and "
+            << desc2 << " refer to different window buffers";
         RecordError(typecheck::ErrorType::TYPE_KIND_MISMATCH, msg.str(), span);
       }
     }
-  }
-}
-
-bool TypeChecker::IsSameConstant(const ExprPtr& expr1, const ExprPtr& expr2) const {
-  if (!expr1 || !expr2) return false;
-
-  // Check if both are ConstInt
-  auto const_int1 = As<ConstInt>(expr1);
-  auto const_int2 = As<ConstInt>(expr2);
-  if (const_int1 && const_int2) {
-    return const_int1->value_ == const_int2->value_;
+    return;
   }
 
-  // For symbolic expressions, we consider them potentially equal if they have the same structure
-  // A more sophisticated check would require symbolic comparison, but for type checking
-  // we primarily care about constant dimensions
-  return false;
+  auto tile1 = As<TileType>(type1);
+  auto tile2 = As<TileType>(type2);
+  if (!tile1 || !tile2) return;
+  const auto view1 = tile_view_semantics::GetEffectiveTileView(*tile1);
+  const auto view2 = tile_view_semantics::GetEffectiveTileView(*tile2);
+  const auto& valid1 = view1.valid_shape.empty() ? tile1->shape_ : view1.valid_shape;
+  const auto& valid2 = view2.valid_shape.empty() ? tile2->shape_ : view2.valid_shape;
+  check_shape(valid1, valid2, "Valid shape");
 }
 
 void TypeChecker::CheckIsScalarType(const ExprPtr& expr, const std::string& context, const Span& span) {
@@ -509,22 +400,22 @@ void TypeChecker::VisitStmt_(const ForStmtPtr& op) {
           if (!iter_arg || !iter_arg->initValue_ || !yield_value || !return_var) continue;
 
           auto init_type = iter_arg->initValue_->GetType();
+          auto declared_type = iter_arg->GetType();
           auto yield_type = yield_value->GetType();
           auto return_type = return_var->GetType();
 
-          if (!init_type || !yield_type || !return_type) continue;
+          if (!init_type || !declared_type || !yield_type || !return_type) continue;
 
-          // Check initValue type == yield type
-          CheckTypeEquality(init_type, yield_type, "ForStmt", "iter_arg[" + std::to_string(i) + "] initValue",
+          // Check every edge of the loop-carried type contract.
+          CheckTypeEquality(init_type, declared_type, "ForStmt",
+                            "iter_arg[" + std::to_string(i) + "] initValue",
+                            "declared iter_arg[" + std::to_string(i) + "]", op->span_);
+
+          CheckTypeEquality(declared_type, yield_type, "ForStmt",
+                            "declared iter_arg[" + std::to_string(i) + "]",
                             "yield value[" + std::to_string(i) + "]", op->span_);
 
-          // Check yield type == return_var type
           CheckTypeEquality(yield_type, return_type, "ForStmt", "yield value[" + std::to_string(i) + "]",
-                            "return_var[" + std::to_string(i) + "]", op->span_);
-
-          // Check initValue type == return_var type (for completeness)
-          CheckTypeEquality(init_type, return_type, "ForStmt",
-                            "iter_arg[" + std::to_string(i) + "] initValue",
                             "return_var[" + std::to_string(i) + "]", op->span_);
         }
       }
@@ -570,23 +461,22 @@ void TypeChecker::VisitStmt_(const WhileStmtPtr& op) {
           if (!iter_arg || !iter_arg->initValue_ || !yield_value || !return_var) continue;
 
           auto init_type = iter_arg->initValue_->GetType();
+          auto declared_type = iter_arg->GetType();
           auto yield_type = yield_value->GetType();
           auto return_type = return_var->GetType();
 
-          if (!init_type || !yield_type || !return_type) continue;
+          if (!init_type || !declared_type || !yield_type || !return_type) continue;
 
-          // Check initValue type == yield type
-          CheckTypeEquality(init_type, yield_type, "WhileStmt",
+          // Check every edge of the loop-carried type contract.
+          CheckTypeEquality(init_type, declared_type, "WhileStmt",
                             "iter_arg[" + std::to_string(i) + "] initValue",
+                            "declared iter_arg[" + std::to_string(i) + "]", op->span_);
+
+          CheckTypeEquality(declared_type, yield_type, "WhileStmt",
+                            "declared iter_arg[" + std::to_string(i) + "]",
                             "yield value[" + std::to_string(i) + "]", op->span_);
 
-          // Check yield type == return_var type
           CheckTypeEquality(yield_type, return_type, "WhileStmt", "yield value[" + std::to_string(i) + "]",
-                            "return_var[" + std::to_string(i) + "]", op->span_);
-
-          // Check initValue type == return_var type (for completeness)
-          CheckTypeEquality(init_type, return_type, "WhileStmt",
-                            "iter_arg[" + std::to_string(i) + "] initValue",
                             "return_var[" + std::to_string(i) + "]", op->span_);
         }
       }
@@ -630,16 +520,20 @@ void TypeChecker::VisitStmt_(const IfStmtPtr& op) {
         for (size_t i = 0; i < num_then_values; ++i) {
           const auto& then_value = then_yield->value_[i];
           const auto& else_value = else_yield->value_[i];
+          const auto& return_var = op->return_vars_[i];
 
-          if (!then_value || !else_value) continue;
+          if (!then_value || !else_value || !return_var) continue;
 
           auto then_type = then_value->GetType();
           auto else_type = else_value->GetType();
+          auto return_type = return_var->GetType();
 
-          if (!then_type || !else_type) continue;
+          if (!then_type || !else_type || !return_type) continue;
 
           CheckTypeEquality(then_type, else_type, "IfStmt", "then yield value[" + std::to_string(i) + "]",
                             "else yield value[" + std::to_string(i) + "]", op->span_);
+          CheckTypeEquality(then_type, return_type, "IfStmt", "then yield value[" + std::to_string(i) + "]",
+                            "return_var[" + std::to_string(i) + "]", op->span_);
         }
       }
     }

@@ -391,13 +391,13 @@ def build_paged_attention_multi_config_program(
                         oi_new = _pv(pij_buf, value_cache, oi_new, block_indices, n_blocks)
 
                         if bn == 0:
-                            is_first: pl.Scalar[pl.INT64] = pl.yield_(1)
+                            is_first: pl.Scalar[pl.INT64] = pl.yield_(pl.const(1, pl.INT64))
                         else:
-                            is_first: pl.Scalar[pl.INT64] = pl.yield_(0)
+                            is_first: pl.Scalar[pl.INT64] = pl.yield_(pl.const(0, pl.INT64))
                         if bn + n_blocks == max_bn:
-                            is_last: pl.Scalar[pl.INT64] = pl.yield_(1)
+                            is_last: pl.Scalar[pl.INT64] = pl.yield_(pl.const(1, pl.INT64))
                         else:
-                            is_last: pl.Scalar[pl.INT64] = pl.yield_(0)
+                            is_last: pl.Scalar[pl.INT64] = pl.yield_(pl.const(0, pl.INT64))
 
                         out_view: pl.Tensor[[q_tile, head_dim], pl.FP32] = pl.slice(
                             out,

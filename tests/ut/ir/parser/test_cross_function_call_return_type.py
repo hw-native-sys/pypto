@@ -24,6 +24,7 @@ declares no annotation, so both the original build and the reparse agree.
 """
 
 import pypto.language as pl
+import pypto.language.distributed as pld
 import pytest
 from pypto import ir
 
@@ -219,6 +220,94 @@ def test_submit_to_annotationless_callee_return_unchanged():
     assert len(submit_type.types) == 1
     assert isinstance(submit_type.types[0], ir.ScalarType)
 
+    _assert_roundtrips(Prog)
+
+
+def test_symbolic_valid_shape_and_composite_return_metadata_are_substituted():
+    """A DSL call rebuilds a composite valid-shape expression for the actual tensor shape."""
+    n = pl.dynamic("N")
+
+    @pl.program
+    class Prog:
+        @pl.function
+        def view(self, arg: pl.Tensor[[n, 64], pl.FP32]):
+            return pl.tensor.slice(arg, [n, 64], [0, 0], valid_shape=[n - 1, 64])
+
+        @pl.function
+        def main(self, actual: pl.Tensor[[32, 64], pl.FP32]):
+            return self.view(actual)
+
+    (deduced,) = _user_call_types(Prog, "view")
+    assert isinstance(deduced, ir.TensorType)
+    assert [str(dim) for dim in deduced.shape] == ["32", "64"]
+    assert deduced.tensor_view is not None
+    valid_expr = deduced.tensor_view.valid_shape[0]
+    assert isinstance(valid_expr, ir.Sub)
+    assert isinstance(valid_expr.left, ir.ConstInt) and valid_expr.left.value == 32
+    assert isinstance(valid_expr.right, ir.ConstInt) and valid_expr.right.value == 1
+    _assert_roundtrips(Prog)
+
+
+def test_recursive_tuple_and_tile_return_metadata_are_substituted():
+    """A DSL call recursively substitutes metadata on a Tile nested inside tuples."""
+    n = pl.dynamic("N")
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def load_tile(self, arg: pl.Tensor[[n, 64], pl.FP32]):
+            tile = pl.load(arg, [0, 0], [n, 64], valid_shapes=[n - 1, 64])
+            status = pl.const(0, pl.INT64)
+            return status, (tile,)
+
+        @pl.function
+        def main(self, actual: pl.Tensor[[32, 64], pl.FP32]):
+            return self.load_tile(actual)
+
+    (deduced,) = _user_call_types(Prog, "load_tile")
+    assert isinstance(deduced, ir.TupleType)
+    assert isinstance(deduced.types[1], ir.TupleType)
+    deduced_tile = deduced.types[1].types[0]
+    assert isinstance(deduced_tile, ir.TileType)
+    assert [str(dim) for dim in deduced_tile.shape] == ["32", "64"]
+    assert deduced_tile.tile_view is not None
+    valid_expr = deduced_tile.tile_view.valid_shape[0]
+    assert isinstance(valid_expr, ir.Sub)
+    assert isinstance(valid_expr.left, ir.ConstInt) and valid_expr.left.value == 32
+    assert isinstance(valid_expr.right, ir.ConstInt) and valid_expr.right.value == 1
+    _assert_roundtrips(Prog)
+
+
+def test_distributed_return_kind_and_valid_shape_are_preserved():
+    """A DSL call preserves DistributedTensorType while substituting its valid shape."""
+    n = pl.dynamic("N")
+
+    @pl.program
+    class Prog:
+        @pl.function
+        def view(
+            self,
+            shape_source: pl.Tensor[[n], pl.FP32],
+            arg: pld.DistributedTensor[[64, 64], pl.FP32],
+        ):
+            return pl.tensor.slice(arg, [64, 64], [0, 0], valid_shape=[n - 1, 64])
+
+        @pl.function
+        def main(
+            self,
+            actual_shape_source: pl.Tensor[[32], pl.FP32],
+            actual: pld.DistributedTensor[[64, 64], pl.FP32],
+        ):
+            return self.view(actual_shape_source, actual)
+
+    (deduced,) = _user_call_types(Prog, "view")
+    assert isinstance(deduced, ir.DistributedTensorType)
+    assert [str(dim) for dim in deduced.shape] == ["64", "64"]
+    assert deduced.tensor_view is not None
+    valid_expr = deduced.tensor_view.valid_shape[0]
+    assert isinstance(valid_expr, ir.Sub)
+    assert isinstance(valid_expr.left, ir.ConstInt) and valid_expr.left.value == 32
+    assert isinstance(valid_expr.right, ir.ConstInt) and valid_expr.right.value == 1
     _assert_roundtrips(Prog)
 
 

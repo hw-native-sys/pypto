@@ -13,7 +13,6 @@
 
 #include <algorithm>
 #include <cstddef>
-#include <functional>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -30,6 +29,8 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/transforms/printer.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -416,6 +417,137 @@ std::vector<ExprPtr> ApplyDropDims(const std::vector<ExprPtr>& shape, const std:
 // Cross-function call return type deduction
 // ============================================================================
 
+namespace {
+
+using TypeVarMap = std::unordered_map<const Var*, ExprPtr>;
+
+void BindCallTypeVar(const VarPtr& var, const ExprPtr& value, const std::string& context,
+                     TypeVarMap& var_map) {
+  auto [it, inserted] = var_map.emplace(var.get(), value);
+  if (inserted) return;
+
+  CHECK(ProveValidExtentEqual(it->second, value) == ProofResult::kTrue)
+      << "Dynamic type variable '" << var->name_hint_ << "' has conflicting bindings "
+      << PythonPrint(it->second) << " and " << PythonPrint(value) << " that are not provably equal at "
+      << context << "; cross-function calls do not emit a runtime shape guard";
+}
+
+void CollectCallExprBindings(const ExprPtr& pattern, const ExprPtr& value, const std::string& context,
+                             TypeVarMap& var_map) {
+  if (!pattern || !value) return;
+  if (auto var = As<Var>(pattern)) {
+    BindCallTypeVar(var, value, context, var_map);
+    return;
+  }
+
+  // Composite parameter metadata can bind variables when the actual metadata
+  // has the same expression structure. A direct binding discovered elsewhere
+  // still substitutes through differently-shaped composite return metadata.
+  if (pattern->GetKind() != value->GetKind()) return;
+  auto pattern_binary = std::dynamic_pointer_cast<const BinaryExpr>(pattern);
+  auto value_binary = std::dynamic_pointer_cast<const BinaryExpr>(value);
+  if (pattern_binary && value_binary) {
+    CollectCallExprBindings(pattern_binary->left_, value_binary->left_, context + " left operand", var_map);
+    CollectCallExprBindings(pattern_binary->right_, value_binary->right_, context + " right operand",
+                            var_map);
+    return;
+  }
+  auto pattern_unary = std::dynamic_pointer_cast<const UnaryExpr>(pattern);
+  auto value_unary = std::dynamic_pointer_cast<const UnaryExpr>(value);
+  if (pattern_unary && value_unary) {
+    CollectCallExprBindings(pattern_unary->operand_, value_unary->operand_, context + " operand", var_map);
+  }
+}
+
+void CollectCallExprVectorBindings(const std::vector<ExprPtr>& patterns, const std::vector<ExprPtr>& values,
+                                   const std::string& context, TypeVarMap& var_map) {
+  const size_t count = std::min(patterns.size(), values.size());
+  for (size_t i = 0; i < count; ++i) {
+    CollectCallExprBindings(patterns[i], values[i], context + "[" + std::to_string(i) + "]", var_map);
+  }
+}
+
+const std::vector<ExprPtr>& GetEffectiveTensorValidShape(const TensorType& type) {
+  if (type.tensor_view_ && !type.tensor_view_->valid_shape.empty()) {
+    return type.tensor_view_->valid_shape;
+  }
+  return type.shape_;
+}
+
+const std::vector<ExprPtr>& GetEffectiveTileValidShape(const TileType& type) {
+  if (type.tile_view_ && !type.tile_view_->valid_shape.empty()) {
+    return type.tile_view_->valid_shape;
+  }
+  return type.shape_;
+}
+
+void CollectCallTypeBindings(const TypePtr& pattern, const TypePtr& value, const std::string& context,
+                             TypeVarMap& var_map) {
+  if (!pattern || !value) return;
+
+  if (auto pattern_tuple = As<TupleType>(pattern)) {
+    auto value_tuple = As<TupleType>(value);
+    if (!value_tuple) return;
+    const size_t count = std::min(pattern_tuple->types_.size(), value_tuple->types_.size());
+    for (size_t i = 0; i < count; ++i) {
+      CollectCallTypeBindings(pattern_tuple->types_[i], value_tuple->types_[i],
+                              context + " tuple element[" + std::to_string(i) + "]", var_map);
+    }
+    return;
+  }
+
+  if (auto pattern_tensor = AsTensorTypeLike(pattern)) {
+    auto value_tensor = AsTensorTypeLike(value);
+    if (!value_tensor) return;
+    CollectCallExprVectorBindings(pattern_tensor->shape_, value_tensor->shape_, context + " physical shape",
+                                  var_map);
+    CollectCallExprVectorBindings(GetEffectiveTensorValidShape(*pattern_tensor),
+                                  GetEffectiveTensorValidShape(*value_tensor), context + " valid shape",
+                                  var_map);
+    if (pattern_tensor->tensor_view_ && value_tensor->tensor_view_) {
+      CollectCallExprVectorBindings(pattern_tensor->tensor_view_->stride, value_tensor->tensor_view_->stride,
+                                    context + " tensor stride", var_map);
+    }
+    return;
+  }
+
+  auto pattern_tile = As<TileType>(pattern);
+  auto value_tile = As<TileType>(value);
+  if (!pattern_tile || !value_tile) return;
+  CollectCallExprVectorBindings(pattern_tile->shape_, value_tile->shape_, context + " physical shape",
+                                var_map);
+  CollectCallExprVectorBindings(GetEffectiveTileValidShape(*pattern_tile),
+                                GetEffectiveTileValidShape(*value_tile), context + " valid shape", var_map);
+  if (pattern_tile->tile_view_ && value_tile->tile_view_) {
+    CollectCallExprVectorBindings(pattern_tile->tile_view_->stride, value_tile->tile_view_->stride,
+                                  context + " tile stride", var_map);
+    CollectCallExprBindings(pattern_tile->tile_view_->start_offset, value_tile->tile_view_->start_offset,
+                            context + " tile start_offset", var_map);
+  }
+}
+
+TypePtr SubstituteCallReturnType(const TypePtr& type, const TypeVarMap& var_map) {
+  if (!type) return type;
+  if (auto tuple = As<TupleType>(type)) {
+    std::vector<TypePtr> elements;
+    elements.reserve(tuple->types_.size());
+    bool changed = false;
+    for (const auto& element : tuple->types_) {
+      auto new_element = SubstituteCallReturnType(element, var_map);
+      if (new_element.get() != element.get()) changed = true;
+      elements.push_back(std::move(new_element));
+    }
+    if (!changed) return type;
+    return std::make_shared<TupleType>(std::move(elements));
+  }
+
+  const auto memref = GetTypeMemRef(type);
+  return CloneTypeWithMemRefAndRemapExprs(
+      type, memref, [&var_map](const ExprPtr& expr) { return transform_utils::Substitute(expr, var_map); });
+}
+
+}  // namespace
+
 std::vector<TypePtr> DeduceCallReturnType(const std::vector<VarPtr>& callee_params,
                                           const std::vector<ExprPtr>& args,
                                           const std::vector<TypePtr>& return_types) {
@@ -424,115 +556,18 @@ std::vector<TypePtr> DeduceCallReturnType(const std::vector<VarPtr>& callee_para
       << "DeduceCallReturnType: callee_params size (" << callee_params.size() << ") must match args size ("
       << args.size() << ")";
 
-  // 1. Build Var* -> ExprPtr mapping from param shapes vs arg shapes
-  std::unordered_map<const Var*, ExprPtr> var_map;
-  size_t n = callee_params.size();
-  for (size_t i = 0; i < n; ++i) {
-    auto param_type = callee_params[i]->GetType();
-    auto arg_type = args[i]->GetType();
-    if (!param_type || !arg_type) continue;
-    auto p_shaped = As<ShapedType>(param_type);
-    auto a_shaped = As<ShapedType>(arg_type);
-    if (!p_shaped || !a_shaped) continue;
-    size_t ndim = std::min(p_shaped->shape_.size(), a_shaped->shape_.size());
-    for (size_t d = 0; d < ndim; ++d) {
-      if (auto var = As<Var>(p_shaped->shape_[d])) {
-        auto [it, inserted] = var_map.emplace(var.get(), a_shaped->shape_[d]);
-        // Validate consistency only when both are statically known constants.
-        // Symbolic dims (Vars, exprs) may be equal at runtime — defer to runtime.
-        if (!inserted) {
-          auto existing_const = GetConstantDimension(it->second);
-          auto new_const = GetConstantDimension(a_shaped->shape_[d]);
-          if (existing_const && new_const) {
-            CHECK(*existing_const == *new_const)
-                << "Dynamic shape variable '" << var->name_hint_
-                << "' has conflicting bindings: " << FormatShape({it->second}) << " vs "
-                << FormatShape({a_shaped->shape_[d]}) << " (from argument " << i << ", dimension " << d
-                << ")";
-          }
-        }
-      }
-    }
+  TypeVarMap var_map;
+  for (size_t i = 0; i < callee_params.size(); ++i) {
+    if (!callee_params[i] || !args[i]) continue;
+    CollectCallTypeBindings(callee_params[i]->GetType(), args[i]->GetType(), "argument " + std::to_string(i),
+                            var_map);
   }
   if (var_map.empty()) return return_types;
 
-  // 2. Substitution helpers
-  auto subst_dim = [&](const ExprPtr& dim) -> ExprPtr {
-    if (auto var = As<Var>(dim)) {
-      auto it = var_map.find(var.get());
-      if (it != var_map.end()) return it->second;
-    }
-    return dim;
-  };
-
-  auto subst_dims = [&](const std::vector<ExprPtr>& dims) {
-    std::vector<ExprPtr> result;
-    result.reserve(dims.size());
-    bool changed = false;
-    for (const auto& d : dims) {
-      auto nd = subst_dim(d);
-      if (nd.get() != d.get()) changed = true;
-      result.push_back(nd);
-    }
-    return std::pair{std::move(result), changed};
-  };
-
-  std::function<TypePtr(const TypePtr&)> subst_type;
-  subst_type = [&](const TypePtr& type) -> TypePtr {
-    if (!type) return type;
-    if (auto t = As<TensorType>(type)) {
-      auto [new_shape, changed] = subst_dims(t->shape_);
-      std::optional<TensorView> new_tv = t->tensor_view_;
-      if (new_tv.has_value()) {
-        auto [new_stride, s_changed] = subst_dims(new_tv->stride);
-        auto [new_vs, vs_changed] = subst_dims(new_tv->valid_shape);
-        if (s_changed || vs_changed) {
-          new_tv->stride = std::move(new_stride);
-          new_tv->valid_shape = std::move(new_vs);
-          changed = true;
-        }
-      }
-      if (!changed) return type;
-      return std::make_shared<TensorType>(std::move(new_shape), t->dtype_, t->memref_, std::move(new_tv));
-    }
-    if (auto t = As<TileType>(type)) {
-      auto [new_shape, changed] = subst_dims(t->shape_);
-      std::optional<TileView> new_tv = t->tile_view_;
-      if (new_tv.has_value()) {
-        auto [new_vs, vs_changed] = subst_dims(new_tv->valid_shape);
-        auto [new_stride, s_changed] = subst_dims(new_tv->stride);
-        auto new_start = subst_dim(new_tv->start_offset);
-        bool so_changed = (new_start.get() != new_tv->start_offset.get());
-        if (vs_changed || s_changed || so_changed) {
-          new_tv->valid_shape = std::move(new_vs);
-          new_tv->stride = std::move(new_stride);
-          new_tv->start_offset = std::move(new_start);
-          changed = true;
-        }
-      }
-      if (!changed) return type;
-      return std::make_shared<TileType>(std::move(new_shape), t->dtype_, t->memref_, std::move(new_tv),
-                                        t->memory_space_);
-    }
-    if (auto t = As<TupleType>(type)) {
-      std::vector<TypePtr> new_types;
-      bool changed = false;
-      for (const auto& inner : t->types_) {
-        auto nt = subst_type(inner);
-        if (nt.get() != inner.get()) changed = true;
-        new_types.push_back(nt);
-      }
-      if (!changed) return type;
-      return std::make_shared<TupleType>(std::move(new_types));
-    }
-    return type;  // ScalarType, etc. — no shape dims
-  };
-
-  // 3. Apply to all return types
   std::vector<TypePtr> result;
   result.reserve(return_types.size());
   for (const auto& rt : return_types) {
-    result.push_back(subst_type(rt));
+    result.push_back(SubstituteCallReturnType(rt, var_map));
   }
   return result;
 }

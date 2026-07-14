@@ -460,9 +460,9 @@ class TestOrchestrationMore:
             ) -> pl.Tensor[[16, 16], pl.FP32]:
                 for i in pl.range(4):
                     if i == 0:
-                        is_first: pl.Scalar[pl.INT64] = pl.yield_(1)
+                        is_first: pl.Scalar[pl.INT64] = pl.yield_(pl.const(1, pl.INT64))
                     else:
-                        is_first: pl.Scalar[pl.INT64] = pl.yield_(0)
+                        is_first: pl.Scalar[pl.INT64] = pl.yield_(pl.const(0, pl.INT64))
                     result: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
                     result = self.kernel_process(a, is_first, result)
                 return result

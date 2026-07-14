@@ -181,6 +181,38 @@ class TestStraightLineCode:
         After = passes.convert_to_ssa()(Before)
         ir.assert_structural_equal(After, Before)
 
+    def test_alias_uses_rhs_type_metadata(self):
+        """A DSL alias keeps the SSA-renamed valid extent from its RHS."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[16, 64], pl.FP32],
+                n: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[8, 64], pl.FP32]:
+                valid_len = pl.min(n, 64)
+                source = pl.tensor.slice(x, [8, 64], [0, 0], valid_shape=[8, valid_len])
+                alias = source
+                return alias
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(
+                self,
+                x: pl.Tensor[[16, 64], pl.FP32],
+                n: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[8, 64], pl.FP32]:
+                valid_len_0 = pl.min(n, 64)
+                source_0 = pl.tensor.slice(x, [8, 64], [0, 0], valid_shape=[8, valid_len_0])
+                alias_0 = source_0
+                return alias_0
+
+        after = passes.convert_to_ssa()(Before)
+        ir.assert_structural_equal(after, Expected)
+
 
 # =============================================================================
 # Category 2: For Loops with Structural Equality

@@ -199,8 +199,9 @@ def test_checks_iter_arg_type():
     )
     diagnostics = _verify(_program(statements=[loop]))
 
-    assert len(diagnostics) == 1
-    assert "IterArg 'carry' has invalid TensorType" in diagnostics[0].message
+    bounds_diagnostics = [d for d in diagnostics if "has invalid" in d.message]
+    assert len(bounds_diagnostics) == 1
+    assert "IterArg 'carry' has invalid TensorType" in bounds_diagnostics[0].message
 
 
 def test_checks_call_result_type():
