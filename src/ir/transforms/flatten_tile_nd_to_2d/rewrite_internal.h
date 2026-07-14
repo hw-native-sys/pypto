@@ -9,8 +9,8 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef PYPTO_SRC_IR_TRANSFORMS_FLATTEN_TILE_ND_TO_2D_REWRITE_INTERNAL_H_
-#define PYPTO_SRC_IR_TRANSFORMS_FLATTEN_TILE_ND_TO_2D_REWRITE_INTERNAL_H_
+#ifndef SRC_IR_TRANSFORMS_FLATTEN_TILE_ND_TO_2D_REWRITE_INTERNAL_H_
+#define SRC_IR_TRANSFORMS_FLATTEN_TILE_ND_TO_2D_REWRITE_INTERNAL_H_
 
 #include <cstddef>
 #include <cstdint>
@@ -98,4 +98,4 @@ NdTransposeResult LowerNdTranspose(const AssignStmtPtr& assign, const CallPtr& c
 }  // namespace ir
 }  // namespace pypto
 
-#endif  // PYPTO_SRC_IR_TRANSFORMS_FLATTEN_TILE_ND_TO_2D_REWRITE_INTERNAL_H_
+#endif  // SRC_IR_TRANSFORMS_FLATTEN_TILE_ND_TO_2D_REWRITE_INTERNAL_H_

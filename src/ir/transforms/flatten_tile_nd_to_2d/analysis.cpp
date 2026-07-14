@@ -12,7 +12,6 @@
 #include <cstddef>
 #include <string>
 
-#include "internal.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -22,6 +21,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/type.h"
+#include "src/ir/transforms/flatten_tile_nd_to_2d/internal.h"
 
 namespace pypto {
 namespace ir {
@@ -86,7 +86,11 @@ class PreconditionAnalysis : public IRVisitor {
         auto input_tile = As<TileType>(call->args_[0]->GetType());
         if (IsNdTile(input_tile)) {
           int axis = call->GetKwarg<int>("axis", -1);
-          int last_axis = static_cast<int>(input_tile->shape_.size()) - 1;
+          int ndim = static_cast<int>(input_tile->shape_.size());
+          // Normalize Python-style negative axes (e.g. axis=-1 selects the last axis) so a
+          // valid last-axis reduction on a >2D tile is not rejected.
+          if (axis < 0) axis += ndim;
+          int last_axis = ndim - 1;
           CHECK(axis == last_axis) << "FlattenTileNdTo2D: tile reduce op '" << name
                                    << "' must reduce along the last axis "
                                    << "(axis=" << last_axis << "), but got axis=" << axis;

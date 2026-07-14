@@ -9,10 +9,10 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include "internal.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "src/ir/transforms/flatten_tile_nd_to_2d/internal.h"
 
 namespace pypto {
 namespace ir {

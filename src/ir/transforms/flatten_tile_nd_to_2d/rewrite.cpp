@@ -20,7 +20,6 @@
 #include <utility>
 #include <vector>
 
-#include "internal.h"
 #include "pypto/backend/common/backend.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
@@ -35,7 +34,8 @@
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
-#include "rewrite_internal.h"
+#include "src/ir/transforms/flatten_tile_nd_to_2d/internal.h"
+#include "src/ir/transforms/flatten_tile_nd_to_2d/rewrite_internal.h"
 
 namespace pypto {
 namespace ir {

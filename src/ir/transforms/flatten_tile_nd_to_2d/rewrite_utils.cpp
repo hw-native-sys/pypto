@@ -30,7 +30,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
-#include "rewrite_internal.h"
+#include "src/ir/transforms/flatten_tile_nd_to_2d/rewrite_internal.h"
 
 namespace pypto {
 namespace ir {

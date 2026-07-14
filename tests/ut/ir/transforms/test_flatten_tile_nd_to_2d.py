@@ -355,6 +355,32 @@ class TestFlattenTileNdTo2DReduceOps:
         After = passes.flatten_tile_nd_to_2d()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    @pytest.mark.parametrize(
+        "orig_shape, flat_shape, out_shape, reduce_op",
+        [
+            ([2, 3, 4], [6, 4], [2, 3, 1], tile_ops.sum),
+            ([2, 4, 8], [8, 8], [2, 4, 1], tile_ops.max),
+        ],
+        ids=["sum_3d_neg", "max_3d_neg"],
+    )
+    def test_reduce_negative_last_axis(self, orig_shape, flat_shape, out_shape, reduce_op):
+        """Python-style axis=-1 selects the last axis and must not be rejected."""
+        Before = _build_before_nd(
+            [("x", orig_shape)],
+            out_shape,
+            DataType.FP32,
+            lambda _ib, ts: reduce_op(ts[0], axis=-1, keepdim=True),
+        )
+        Expected = _build_expected_2d(
+            [("x", orig_shape)],
+            out_shape,
+            [flat_shape],
+            DataType.FP32,
+            lambda _ib, ts: reduce_op(ts[0], axis=1, keepdim=True),
+        )
+        After = passes.flatten_tile_nd_to_2d()(Before)
+        ir.assert_structural_equal(After, Expected)
+
 
 # ----------------------------------------------------------------------------
 # Programs that should be left unchanged by the pass
