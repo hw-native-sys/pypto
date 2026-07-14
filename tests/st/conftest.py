@@ -17,7 +17,6 @@ harness package (migrated from pto-testing-framework).
 import ast
 import inspect
 import queue
-import random
 import shutil
 import sys
 import tempfile
@@ -112,20 +111,6 @@ def pytest_addoption(parser):
         default="Default",
         choices=["Default"],
         help="Optimization strategy for PyPTO pass pipeline (default: Default)",
-    )
-    parser.addoption(
-        "--fuzz-count",
-        action="store",
-        default=10,
-        type=int,
-        help="Number of fuzz test iterations (default: 10)",
-    )
-    parser.addoption(
-        "--fuzz-seed",
-        action="store",
-        default=None,
-        type=int,
-        help="Random seed for fuzz tests (default: random)",
     )
     parser.addoption(
         "--kernels-dir",
@@ -486,21 +471,6 @@ def optimization_strategy(request) -> str:
     return request.config.getoption("--strategy")
 
 
-@pytest.fixture
-def fuzz_count(request) -> int:
-    """Fixture providing fuzz test iteration count."""
-    return request.config.getoption("--fuzz-count")
-
-
-@pytest.fixture
-def fuzz_seed(request) -> int:
-    """Fixture providing fuzz test seed."""
-    seed = request.config.getoption("--fuzz-seed")
-    if seed is None:
-        seed = random.randint(0, 2**31 - 1)
-    return seed
-
-
 # Standard test shapes for parameterized tests
 STANDARD_SHAPES = [
     (64, 64),
@@ -524,7 +494,6 @@ def pytest_configure(config):
         "(intersected with the --platform CLI filter)",
     )
     config.addinivalue_line("markers", "slow: mark test as slow")
-    config.addinivalue_line("markers", "fuzz: mark test as fuzz test")
     config.addinivalue_line(
         "markers",
         "device_batch: auto-applied to tests that execute via test_runner.run "

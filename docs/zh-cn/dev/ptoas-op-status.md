@@ -24,7 +24,7 @@
 - **PTOAS接口**：✅ = PTOAS"已对应"(pto-isa 有指令)；❌ = PTOAS未实现 / ISA_ONLY
 - **pypto-tile / -tensor 前端**：✅ = `REGISTER_OP("tile|tensor.<op>")` 已注册；
   `—` = 不适用（comm 通讯 op 不是 tile/tensor 级，由分布式/system API 提供）
-- **ST测试**：✅ = `tests/st/`（不含 `fuzz/` 规格清单）有直接引用该 op 的真实 ST；`—` = comm 走下一列
+- **ST测试**：✅ = `tests/st/` 有直接引用该 op 的真实 ST；`—` = comm 走下一列
 - **distribute ST测试**：仅对 comm op —— ✅+证据文件 = `tests/st/distributed/` 有覆盖；❌ = 无；非 comm 为 `—`
 - **备注**：`NEW`=本轮新增(PR #1824)；`MISSING`=PTOAS有但pypto未写(待补，见 add-op skill)；
   `codegen-incomplete`=IR/转换有但无codegen；`FP variant`/`internal`/`distributed`=变体/内部/分布式
