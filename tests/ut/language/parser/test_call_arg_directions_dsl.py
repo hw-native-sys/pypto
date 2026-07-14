@@ -378,6 +378,94 @@ class Prog:
 
 
 # ---------------------------------------------------------------------------
+# Forward-referenced callees
+# ---------------------------------------------------------------------------
+
+
+class TestForwardReferencedCallee:
+    """``attrs={...}`` survives a call to a function declared later in the class.
+
+    Regression: an annotated assignment whose call has a *more precise* annotated
+    type than the inferred one rebuilds the ``ir.Call`` to carry the annotation.
+    That rebuild used the ``Call(op, args, kwargs, type, span)`` overload, which
+    has no ``attrs`` slot — so every attr was silently dropped.
+
+    A forward-referenced callee hits this every time: the parser fills
+    ``gvar_to_func`` incrementally in declaration order, so a callee declared
+    *later* is still unknown, the call's return type infers to ``UnknownType``,
+    the annotation always overrides it, and the rebuild fired. The result was a
+    call with ``arg_directions`` / ``arg_direction_overrides`` silently missing —
+    which also broke print -> reparse for any program whose call graph cannot be
+    emitted in dependency order (e.g. mutually recursive Group wrappers).
+    """
+
+    @staticmethod
+    def _program(callee_first: bool) -> str:
+        kernel = """    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        x: pl.Tensor[[64], pl.FP32],
+        out: pl.Out[pl.Tensor[[64], pl.FP32]],
+    ) -> pl.Tensor[[64], pl.FP32]:
+        t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+        ret: pl.Tensor[[64], pl.FP32] = pl.store(t, [0], out)
+        return ret
+"""
+        main = """    @pl.function
+    def main(
+        self,
+        x: pl.Tensor[[64], pl.FP32],
+        dst: pl.Tensor[[64], pl.FP32],
+    ) -> pl.Tensor[[64], pl.FP32]:
+        r: pl.Tensor[[64], pl.FP32] = self.kernel(
+            x, dst, attrs={"arg_directions": [pl.adir.input, pl.adir.output_existing]}
+        )
+        return r
+"""
+        body = (kernel + "\n" + main) if callee_first else (main + "\n" + kernel)
+        return "import pypto.language as pl\n\n@pl.program\nclass Prog:\n" + body
+
+    @pytest.mark.parametrize("callee_first", [True, False], ids=["backward_ref", "forward_ref"])
+    def test_attrs_survive_regardless_of_declaration_order(self, callee_first: bool):
+        prog = pl.parse(self._program(callee_first))
+        call = _user_calls(prog, "kernel")[0]
+        assert list(call.arg_directions) == [
+            ir.ArgDirection.Input,
+            ir.ArgDirection.OutputExisting,
+        ]
+
+    def test_no_dep_override_attr_survives_forward_reference(self):
+        """The same rebuild must not drop the ``pl.no_dep`` marker attr either."""
+        code = """
+import pypto.language as pl
+
+@pl.program
+class Prog:
+    @pl.function
+    def main(
+        self,
+        x: pl.Tensor[[64], pl.FP32],
+        dst: pl.Tensor[[64], pl.FP32],
+    ) -> pl.Tensor[[64], pl.FP32]:
+        r: pl.Tensor[[64], pl.FP32] = self.kernel(x, pl.no_dep(dst))
+        return r
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        x: pl.Tensor[[64], pl.FP32],
+        out: pl.Out[pl.Tensor[[64], pl.FP32]],
+    ) -> pl.Tensor[[64], pl.FP32]:
+        t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+        ret: pl.Tensor[[64], pl.FP32] = pl.store(t, [0], out)
+        return ret
+"""
+        prog = pl.parse(code)
+        call = _user_calls(prog, "kernel")[0]
+        assert call.attrs["arg_direction_overrides"] == [1]
+
+
+# ---------------------------------------------------------------------------
 # End-to-end round-trip
 # ---------------------------------------------------------------------------
 

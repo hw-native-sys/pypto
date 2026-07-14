@@ -1319,8 +1319,17 @@ class ASTParser:
                 or not _types_match(value_expr.type, override_type)
             )
         ):
+            # Carry attrs through the rebuild: a forward-referenced callee has no
+            # known return type, so the annotation always overrides it and every
+            # call attr (arg_directions, arg_direction_overrides, dump_vars, ...)
+            # would otherwise be silently dropped.
             value_expr = ir.Call(
-                value_expr.op, value_expr.args, value_expr.kwargs, override_type, value_expr.span
+                value_expr.op,
+                value_expr.args,
+                value_expr.kwargs,
+                value_expr.attrs,
+                override_type,
+                value_expr.span,
             )
 
         # Reuse existing Var on reassignment (override_type is intentionally
