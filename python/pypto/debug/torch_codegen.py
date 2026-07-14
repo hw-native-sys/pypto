@@ -1241,6 +1241,35 @@ class TorchCodegen(_ir.IRVisitor):
         for _gv, func in program.functions.items():
             self.visit_function(func)
 
+    def _emit_dyn_dim_symbols(self, func: _ir.Function) -> None:
+        """Define the dyn-dim symbols this signature declares.
+
+        A ``pl.dynamic("M")`` symbol names the runtime extent of the argument
+        declaring it, and an Orchestration body may use it as a *value* — a folded
+        ``pl.tensor.dim``, a loop bound, a ``pl.create_tensor`` extent. Emitted as a
+        bare name it would simply be undefined at ``exec``, so read it from the
+        first parameter declaring it.
+
+        Orchestration only: a kernel is handed partial data for boundary tiles (see
+        the shape check above), so there a parameter's runtime shape is not the
+        extent its type declares.
+        """
+        if func.func_type != _ir.FunctionType.Orchestration:
+            return
+        defined: set[str] = set()
+        for param in func.params:
+            if not isinstance(param.type, _ir.TensorType):
+                continue
+            param_name = self._name_of(param)
+            for axis, extent in enumerate(param.type.shape):
+                if not isinstance(extent, _ir.Var):
+                    continue
+                name = self._name_of(extent)
+                if name == param_name or name in defined:
+                    continue
+                defined.add(name)
+                self._emit(f"{name} = {param_name}.shape[{axis}]")
+
     def visit_function(self, func: _ir.Function) -> None:
         # Keep names function-local. IR may reuse object ids across functions;
         # sharing maps at program scope can emit stale names.
@@ -1258,6 +1287,7 @@ class TorchCodegen(_ir.IRVisitor):
                 # InCore kernel params may receive partial data (boundary tiles),
                 # so only check dtype — not shape — for all function params.
                 self._emit_shape_dtype_check(self._name_of(p), p.type, shape=False)
+        self._emit_dyn_dim_symbols(func)
         n_before = len(self._lines)
         self.visit_stmt(func.body)
         if len(self._lines) == n_before:
