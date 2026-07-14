@@ -1539,7 +1539,13 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
         BindTensorView(op->var_, view);
         BindVarToMlir(op->var_, view);  // view name == SSA name, as in ForStmt
         RegisterBasePtr(op->var_, GetTensorBasePtr(rhs_var));
-        RegisterCommCtxFor(op->var_, GetCommCtxSSAFor(rhs_var.get()));
+        const std::string comm_ctx = GetCommCtxSSAFor(rhs_var.get());
+        if (As<ir::DistributedTensorType>(op->var_->GetType())) {
+          INTERNAL_CHECK_SPAN(!comm_ctx.empty(), op->span_)
+              << "Internal error: DistributedTensor alias '" << op->var_->name_hint_ << "' from source '"
+              << rhs_var->name_hint_ << "' has no CommContext binding";
+        }
+        RegisterCommCtxFor(op->var_, comm_ctx);
         return;
       }
     } else if (!emit_tile_addr_ && As<TileType>(op->var_->GetType())) {

@@ -43,8 +43,10 @@ import re
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
-from pypto import backend, codegen, ir
+from pypto import DataType, InternalError, backend, codegen, ir
 from pypto.backend import BackendType
+from pypto.ir.builder import IRBuilder
+from pypto.ir.op.distributed import system_ops as dist_system
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
 
@@ -449,6 +451,24 @@ def test_get_comm_ctx_emits_no_mlir_aliases_ctx_arg():
     assert "!pto.ptr<i64>" in header, header
 
 
+def test_plain_distributed_alias_preserves_comm_ctx():
+    """A direct AssignStmt alias keeps the source view, base pointer, and ctx."""
+    ty = ir.DistributedTensorType([16, 16], DataType.INT32)
+
+    ib = IRBuilder()
+    with ib.function("alias_wait", type=ir.FunctionType.InCore) as f:
+        data = f.param("data", ty)
+        f.param("data_ctx", ir.CommCtxType.get())
+        alias = ib.let("alias", data)
+        ib.eval_stmt(dist_system.wait(alias, [0, 0], 1, ir.WaitCmp.Eq))
+        ib.return_stmt()
+
+    program = ir.Program([f.get_result()], "alias_wait", ir.Span.unknown())
+    mlir = codegen.PTOCodegen().generate(program)
+    body = mlir.split("func.func @alias_wait", 1)[1]
+    assert "pto.comm.twait" in body, body
+
+
 def test_tensor_view_preserves_loop_carried_distributed_metadata():
     """Post-loop views keep the distributed tensor's base pointer and ctx."""
 
@@ -509,6 +529,30 @@ def test_tensor_view_preserves_if_merged_distributed_metadata():
     assert "scf.if" in body, body
     assert body.count("pto.make_tensor_view %arg0") >= 2, body
     assert "pto.comm.twait" in body, body
+
+
+def test_if_merged_distributed_metadata_rejects_conflicting_contexts():
+    """An in-place if cannot select data and context from different allocations."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            lhs: pld.DistributedTensor[[16, 16], pl.INT32],
+            rhs: pld.DistributedTensor[[16, 16], pl.INT32],
+            cond: pl.Scalar[pl.BOOL],
+        ):
+            result = lhs
+            if cond:
+                result = rhs
+            pld.system.wait(result, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Eq)
+
+    with pytest.raises(
+        InternalError,
+        match="dynamic DistributedTensor selection must merge its base pointer and CommContext together",
+    ):
+        _generate_mlir(P)
 
 
 def test_rank_emits_pto_load_scalar_at_slot_2_plus_trunci():
