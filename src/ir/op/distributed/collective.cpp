@@ -257,8 +257,6 @@ TypePtr DeduceTensorAllGatherType(const std::vector<ExprPtr>& args,
   CHECK(signal_type->dtype_ == DataType::INT32)
       << "pld.tensor.allgather signal must have INT32 element type, got dtype "
       << signal_type->dtype_.ToString();
-  CHECK(AreExprsEqual(signal_type->shape_[0], target_type->shape_[0]))
-      << "pld.tensor.allgather signal first dimension must equal target first dimension (NR)";
 
   // Both paths return target's DistributedTensorType (window-as-result).
   return target_type;
