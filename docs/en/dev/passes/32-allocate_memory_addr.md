@@ -147,6 +147,11 @@ not from resizing a buffer during its lifetime. Cost-aware objectives and
 PyPTO-structured search moves remain research extensions behind capability
 matching.
 
+Scheduling itself is also fixed before this pass, even though a different legal
+schedule would produce different lifetimes. See
+[Joint Scheduling and Local-Memory Planning](../proposals/joint_schedule_memory_cooptimization.md)
+for the PyPTO-owned, PTOAS-owned, and cross-layer co-optimization options.
+
 If `dsa_export_dir` is set, each InCore function is written as
 `pypto_<escaped-function-name>.dsa.json`. Serialization is deterministic and
 contains no IR pointers or machine-specific paths, so the document can be copied
