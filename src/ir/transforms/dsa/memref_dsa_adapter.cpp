@@ -72,40 +72,32 @@ namespace {
   return ::dsa::SeparationReason::kGeneric;
 }
 
-std::vector<::dsa::Interval> ConvertAndMergeIntervals(const LifetimeInterval& lifetime) {
-  std::vector<VariableLifetime> source = lifetime.live_ranges;
-  if (source.empty()) source.push_back({lifetime.def_point, lifetime.last_use_point});
+std::vector<::dsa::Interval> ConvertAllocationLifetime(const LifetimeInterval& lifetime) {
+  // A LifetimeInterval represents one physical allocation identity after
+  // views, loop carries, in-place results, and other mandatory aliases have
+  // already been coalesced by base_ identity. The individual SSA member ranges
+  // are not a proof that the stored value is dead between two members: control
+  // flow can carry the value through an untracked iter_arg/return_var and a
+  // later alias can read it again. Exposing those gaps let the standalone
+  // solver place foreign scratch in a live-through accumulator (#1980,
+  // DeepSeek-v4 ratio-4 softmax pool).
+  //
+  // Export the same conservative allocation hull that MemoryReuse uses for
+  // non-phi sharing. Safe multi-interval reuse requires an explicit physical-
+  // liveness proof; per-member SSA liveness alone is insufficient.
+  INTERNAL_CHECK(lifetime.def_point >= 0 && lifetime.last_use_point >= lifetime.def_point)
+      << "Invalid PyPTO allocation lifetime [" << lifetime.def_point << ", " << lifetime.last_use_point
+      << "]";
 
-  std::vector<::dsa::Interval> intervals;
-  intervals.reserve(source.size());
-  for (const VariableLifetime& range : source) {
-    INTERNAL_CHECK(range.def_point >= 0 && range.last_use_point >= range.def_point)
-        << "Invalid PyPTO variable lifetime [" << range.def_point << ", " << range.last_use_point << "]";
-
-    // Split each statement point into a read sub-point (2*p) and a write
-    // sub-point (2*p+1). An input last read at p ends exactly where an output
-    // defined at p begins, preserving PyPTO's read-before-write reuse rule.
-    const int64_t lower = 2 * static_cast<int64_t>(range.def_point) + 1;
-    const int64_t last_read_end = 2 * static_cast<int64_t>(range.last_use_point) + 1;
-    // A definition with no later use still occupies the write sub-point. All
-    // other ranges end immediately after their final read sub-point.
-    const int64_t upper = std::max(lower + 1, last_read_end);
-    intervals.push_back({lower, upper});
-  }
-
-  std::sort(intervals.begin(), intervals.end(),
-            [](const ::dsa::Interval& first, const ::dsa::Interval& second) {
-              return first.lower != second.lower ? first.lower < second.lower : first.upper < second.upper;
-            });
-  std::vector<::dsa::Interval> merged;
-  for (const ::dsa::Interval& interval : intervals) {
-    if (merged.empty() || interval.lower > merged.back().upper) {
-      merged.push_back(interval);
-    } else {
-      merged.back().upper = std::max(merged.back().upper, interval.upper);
-    }
-  }
-  return merged;
+  // Split each statement point into a read sub-point (2*p) and a write
+  // sub-point (2*p+1). An input last read at p ends exactly where an output
+  // defined at p begins, preserving PyPTO's read-before-write reuse rule.
+  const int64_t lower = 2 * static_cast<int64_t>(lifetime.def_point) + 1;
+  const int64_t last_read_end = 2 * static_cast<int64_t>(lifetime.last_use_point) + 1;
+  // A definition with no later use still occupies the write sub-point. All
+  // other ranges end immediately after their final read sub-point.
+  const int64_t upper = std::max(lower + 1, last_read_end);
+  return {{lower, upper}};
 }
 
 std::string CorpusFileStem(const std::string& instance) {
@@ -176,7 +168,7 @@ ExportedProblem BuildStructuredProblem(const FunctionPtr& func, const Allocation
     buffer.name = memref->base_->name_hint_;
     buffer.size = lifetime.size;
     buffer.alignment = std::max<uint64_t>(1, policy.AlignAddress(1, lifetime.memory_space));
-    buffer.live_intervals = ConvertAndMergeIntervals(lifetime);
+    buffer.live_intervals = ConvertAllocationLifetime(lifetime);
     buffer.allowed_pools = {ToPoolId(lifetime.memory_space)};
     buffer_position_by_id.emplace(id, exported.document.problem.buffers.size());
     exported.document.problem.buffers.push_back(std::move(buffer));

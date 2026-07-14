@@ -26,19 +26,6 @@ namespace pypto {
 namespace ir {
 
 /**
- * @brief Lifetime of one variable within an allocation sharing group.
- *
- * PyPTO orders reads before writes at the same statement point, so a variable
- * whose last use is point ``p`` may share storage with a variable defined at
- * point ``p``. The DSA adapter preserves that ordering when it converts these
- * points to half-open standalone-solver intervals.
- */
-struct VariableLifetime {
-  int def_point;
-  int last_use_point;
-};
-
-/**
  * @brief Lifetime interval for one allocation (a base-group of TileType vars).
  *
  * One interval per physical allocation: views and semantic must-aliases that
@@ -57,12 +44,6 @@ struct LifetimeInterval {
   /// classes as well, so an exported corpus can reconstruct the normalized
   /// alias classes without depending on IR pointer identity.
   std::vector<std::string> alias_members;
-  /// Per-variable ranges before the conservative group hull is formed. This
-  /// lets a structured DSA solver preserve holes in a semantics-required
-  /// allocation identity instead of treating the whole hull as continuously
-  /// live. MemoryReuse continues to use def_point/last_use_point as its fast
-  /// group-level bound.
-  std::vector<VariableLifetime> live_ranges;
 };
 
 enum class AllocationSeparationReason : uint8_t {

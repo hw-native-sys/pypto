@@ -1357,8 +1357,6 @@ LifetimeAnalysisResult AnalyzeAllocationLifetimesImpl(const StmtPtr& func_body,
     int min_def_point = INT_MAX;
     int max_last_use = INT_MIN;
     uint64_t max_size = 0;
-    std::vector<VariableLifetime> live_ranges;
-    live_ranges.reserve(sharing_group.size());
 
     for (const auto& group_var : sharing_group) {
       int def_point = result.var_def_order.count(group_var) ? result.var_def_order.at(group_var) : 0;
@@ -1368,7 +1366,6 @@ LifetimeAnalysisResult AnalyzeAllocationLifetimesImpl(const StmtPtr& func_body,
 
       min_def_point = std::min(min_def_point, def_point);
       max_last_use = std::max(max_last_use, last_use);
-      live_ranges.push_back({def_point, last_use});
 
       auto group_tile_type = As<TileType>(group_var->GetType());
       INTERNAL_CHECK_SPAN(group_tile_type != nullptr && group_tile_type->memref_.has_value(),
@@ -1393,7 +1390,6 @@ LifetimeAnalysisResult AnalyzeAllocationLifetimesImpl(const StmtPtr& func_body,
     for (const auto& group_var : sharing_group) {
       interval.alias_members.push_back(group_var->name_hint_);
     }
-    interval.live_ranges = std::move(live_ranges);
 
     lifetimes.push_back(interval);
 
