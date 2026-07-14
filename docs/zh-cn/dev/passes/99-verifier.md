@@ -111,6 +111,9 @@
 | 106 | `IF_CONDITION_MUST_BE_SCALAR` | IfStmt/WhileStmt 条件必须是 ScalarType |
 | 107 | `FOR_RANGE_MUST_BE_SCALAR` | ForStmt 范围必须是 ScalarType |
 | 108 | `CONDITION_MUST_BE_BOOL` | IfStmt/WhileStmt 条件 dtype 必须是 BOOL |
+| 109 | `TENSOR_PADDING_MISMATCH` | Tensor 填充元数据不匹配 |
+| 110 | `DISTRIBUTED_WINDOW_IDENTITY_MISMATCH` | DistributedTensor 引用了不同的窗口缓冲区 |
+| 111 | `TILE_VIEW_MISMATCH` | 有效 TileView 元数据不匹配 |
 
 ### NoNestedCall
 

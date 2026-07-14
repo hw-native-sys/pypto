@@ -51,14 +51,17 @@ namespace typecheck {
  * @brief Error types for type checking
  */
 enum class ErrorType : int {
-  TYPE_KIND_MISMATCH = 101,           // Type kind mismatch (e.g., ScalarType vs TensorType)
-  DTYPE_MISMATCH = 102,               // Data type mismatch
-  SHAPE_DIMENSION_MISMATCH = 103,     // Shape dimension count mismatch
-  SHAPE_VALUE_MISMATCH = 104,         // Shape dimension value mismatch
-  SIZE_MISMATCH = 105,                // Vector size mismatch in control flow
-  IF_CONDITION_MUST_BE_SCALAR = 106,  // IfStmt condition must be ScalarType
-  FOR_RANGE_MUST_BE_SCALAR = 107,     // ForStmt range must be ScalarType
-  CONDITION_MUST_BE_BOOL = 108        // IfStmt/WhileStmt condition dtype must be BOOL
+  TYPE_KIND_MISMATCH = 101,                    // Type kind mismatch (e.g., ScalarType vs TensorType)
+  DTYPE_MISMATCH = 102,                        // Data type mismatch
+  SHAPE_DIMENSION_MISMATCH = 103,              // Shape dimension count mismatch
+  SHAPE_VALUE_MISMATCH = 104,                  // Shape dimension value mismatch
+  SIZE_MISMATCH = 105,                         // Vector size mismatch in control flow
+  IF_CONDITION_MUST_BE_SCALAR = 106,           // IfStmt condition must be ScalarType
+  FOR_RANGE_MUST_BE_SCALAR = 107,              // ForStmt range must be ScalarType
+  CONDITION_MUST_BE_BOOL = 108,                // IfStmt/WhileStmt condition dtype must be BOOL
+  TENSOR_PADDING_MISMATCH = 109,               // Tensor pad metadata mismatch
+  DISTRIBUTED_WINDOW_IDENTITY_MISMATCH = 110,  // Distributed tensors refer to different window buffers
+  TILE_VIEW_MISMATCH = 111                     // Effective TileView metadata mismatch
 };
 
 /**

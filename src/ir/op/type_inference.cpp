@@ -442,6 +442,27 @@ void BindCallTypeVar(const VarPtr& var, const ExprPtr& value, const std::string&
   constraints.push_back({var, it->second, value, context});
 }
 
+bool CanDecomposeCallExprPattern(const ExprPtr& pattern, const ExprPtr& value) {
+  if (!pattern || !value) return false;
+  if (As<Var>(pattern)) return true;
+  if (structural_equal(pattern, value) || ProveValidExtentEqual(pattern, value) == ProofResult::kTrue) {
+    return true;
+  }
+  if (pattern->GetKind() != value->GetKind()) return false;
+
+  auto pattern_binary = std::dynamic_pointer_cast<const BinaryExpr>(pattern);
+  auto value_binary = std::dynamic_pointer_cast<const BinaryExpr>(value);
+  if (pattern_binary && value_binary) {
+    return CanDecomposeCallExprPattern(pattern_binary->left_, value_binary->left_) &&
+           CanDecomposeCallExprPattern(pattern_binary->right_, value_binary->right_);
+  }
+
+  auto pattern_unary = std::dynamic_pointer_cast<const UnaryExpr>(pattern);
+  auto value_unary = std::dynamic_pointer_cast<const UnaryExpr>(value);
+  return pattern_unary && value_unary &&
+         CanDecomposeCallExprPattern(pattern_unary->operand_, value_unary->operand_);
+}
+
 void CollectCallExprBindings(const ExprPtr& pattern, const ExprPtr& value, const std::string& context,
                              TypeVarMap& var_map, std::vector<CallTypeBindingConstraint>& constraints) {
   if (!pattern || !value) return;
@@ -451,9 +472,11 @@ void CollectCallExprBindings(const ExprPtr& pattern, const ExprPtr& value, const
   }
 
   // Composite parameter metadata can bind variables when the actual metadata
-  // has the same expression structure. A direct binding discovered elsewhere
-  // still substitutes through differently-shaped composite return metadata.
-  if (pattern->GetKind() != value->GetKind()) return;
+  // has a compatible expression structure. Check the whole pattern before
+  // recording any bindings so a mismatch in a non-variable operand cannot
+  // leave behind a partial, incorrect binding. A direct binding discovered
+  // elsewhere still substitutes through differently-shaped return metadata.
+  if (!CanDecomposeCallExprPattern(pattern, value)) return;
   auto pattern_binary = std::dynamic_pointer_cast<const BinaryExpr>(pattern);
   auto value_binary = std::dynamic_pointer_cast<const BinaryExpr>(value);
   if (pattern_binary && value_binary) {

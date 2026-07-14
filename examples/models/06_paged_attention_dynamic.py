@@ -109,8 +109,13 @@ def build_dynamic_paged_attention_program(
 
     @pl.function(type=pl.FunctionType.InCore)
     def dyn_kernel_softmax_prepare(
-        sij: pl.Tensor[[Q_HEADS, VALID_LEN_DYN], pl.FP32],
+        sij: pl.Tensor[
+            [Q_HEADS, BLOCK_SIZE_DYN],
+            pl.FP32,
+            pl.TensorView(valid_shape=[Q_HEADS, VALID_LEN_DYN], layout=pl.TensorLayout.ND),
+        ],
         scale: pl.Scalar[pl.FP32],
+        valid_len: pl.Scalar[pl.INDEX],
         out_pij: pl.Out[pl.Tensor[[Q_HEADS, BLOCK_SIZE_DYN], pl.BF16]],
         out_mi: pl.Out[pl.Tensor[[Q_HEADS, 1], pl.FP32]],
         out_li: pl.Out[pl.Tensor[[Q_HEADS, 1], pl.FP32]],
@@ -120,8 +125,15 @@ def build_dynamic_paged_attention_program(
         pl.Tensor[[Q_HEADS, 1], pl.FP32],
     ]:
         """Scale sij, compute row_max (mi), exp(sij-mi), cast to BF16, row_sum (li). VECTOR."""
-        s_tile = pl.load(sij, [0, 0], [_Q_TILE, _BLOCK_SIZE], target_memory=pl.MemorySpace.Vec)
-        scaled = pl.mul(s_tile, scale)
+        s_tile = pl.load(
+            sij,
+            [0, 0],
+            [_Q_TILE, _BLOCK_SIZE],
+            valid_shapes=[_Q_TILE, valid_len],
+            target_memory=pl.MemorySpace.Vec,
+        )
+        s_padded = pl.tile.fillpad(s_tile, pad_value=pl.PadValue.min)
+        scaled = pl.mul(s_padded, scale)
         tmp_tile = pl.create_tile([_Q_TILE, _BLOCK_SIZE], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
         mi_tile = pl.row_max(scaled, tmp_tile)
         sij_centered = pl.row_expand_sub(scaled, mi_tile)
@@ -318,7 +330,12 @@ def build_dynamic_paged_attention_program(
 
                         # Mask out padding columns beyond valid_len to avoid
                         # including out-of-range tokens in the softmax
-                        sij_valid = pl.slice(sij, [q_tile, valid_len], [0, 0])
+                        sij_valid = pl.slice(
+                            sij,
+                            [q_tile, block_size_cfg],
+                            [0, 0],
+                            valid_shape=[q_tile, valid_len],
+                        )
 
                         # Stage 2: softmax prepare — scale, row_max (mi), exp, row_sum (li)
                         pij_f16_buf = pl.create_tensor([q_tile, block_size_cfg], dtype=pl.BF16)
@@ -327,6 +344,7 @@ def build_dynamic_paged_attention_program(
                         pij_f16, mi, li = dyn_kernel_softmax_prepare(
                             sij_valid,
                             1.0,
+                            valid_len,
                             pij_f16_buf,
                             mi_sm_buf,
                             li_sm_buf,

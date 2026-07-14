@@ -300,6 +300,35 @@ def test_repeated_composite_binding_is_checked_after_transitive_substitution():
     _assert_roundtrips(Prog)
 
 
+def test_composite_binding_skips_mismatched_nonvariable_operands():
+    """A compatible call can bind from a later argument without a partial composite binding."""
+    n = pl.dynamic("N")
+    m = pl.dynamic("M")
+
+    @pl.program
+    class Prog:
+        @pl.function
+        def select(
+            self,
+            shifted: pl.Tensor[[n + 1], pl.FP32],
+            marker: pl.Tensor[[n], pl.FP32],
+        ):
+            return marker
+
+        @pl.function
+        def main(
+            self,
+            shifted: pl.Tensor[[m + 2], pl.FP32],
+            marker: pl.Tensor[[m + 1], pl.FP32],
+        ):
+            return self.select(shifted, marker)
+
+    (deduced,) = _user_call_types(Prog, "select")
+    assert isinstance(deduced, ir.TensorType)
+    assert [str(dim) for dim in deduced.shape] == ["M + 1"]
+    _assert_roundtrips(Prog)
+
+
 def test_recursive_tuple_and_tile_return_metadata_are_substituted():
     """A DSL call recursively substitutes metadata on a Tile nested inside tuples."""
     n = pl.dynamic("N")

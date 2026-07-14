@@ -55,6 +55,12 @@ std::string ErrorTypeToString(ErrorType type) {
       return "FOR_RANGE_MUST_BE_SCALAR";
     case ErrorType::CONDITION_MUST_BE_BOOL:
       return "CONDITION_MUST_BE_BOOL";
+    case ErrorType::TENSOR_PADDING_MISMATCH:
+      return "TENSOR_PADDING_MISMATCH";
+    case ErrorType::DISTRIBUTED_WINDOW_IDENTITY_MISMATCH:
+      return "DISTRIBUTED_WINDOW_IDENTITY_MISMATCH";
+    case ErrorType::TILE_VIEW_MISMATCH:
+      return "TILE_VIEW_MISMATCH";
     default:
       return "UNKNOWN";
   }
@@ -303,7 +309,7 @@ void TypeChecker::CheckTypeEquality(const TypePtr& type1, const TypePtr& type2, 
     if (pad1 != pad2) {
       std::ostringstream msg;
       msg << "Tensor padding mismatch in " << context << ": " << desc1 << " pad != " << desc2 << " pad";
-      RecordError(typecheck::ErrorType::TYPE_KIND_MISMATCH, msg.str(), span);
+      RecordError(typecheck::ErrorType::TENSOR_PADDING_MISMATCH, msg.str(), span);
     }
 
     if (auto dist1 = As<DistributedTensorType>(type1)) {
@@ -313,7 +319,7 @@ void TypeChecker::CheckTypeEquality(const TypePtr& type1, const TypePtr& type2, 
         std::ostringstream msg;
         msg << "Distributed window-buffer identity mismatch in " << context << ": " << desc1 << " and "
             << desc2 << " refer to different window buffers";
-        RecordError(typecheck::ErrorType::TYPE_KIND_MISMATCH, msg.str(), span);
+        RecordError(typecheck::ErrorType::DISTRIBUTED_WINDOW_IDENTITY_MISMATCH, msg.str(), span);
       }
     }
     return;
@@ -327,6 +333,24 @@ void TypeChecker::CheckTypeEquality(const TypePtr& type1, const TypePtr& type2, 
   const auto& valid1 = view1.valid_shape.empty() ? tile1->shape_ : view1.valid_shape;
   const auto& valid2 = view2.valid_shape.empty() ? tile2->shape_ : view2.valid_shape;
   check_shape(valid1, valid2, "Valid shape");
+
+  // Explicit views carry authoritative layout/access metadata. An omitted view
+  // is still provisional for operations whose memory space is inferred by a
+  // later pass, so only compare the remaining fields when both sides explicitly
+  // declare them. GetEffectiveTileView above canonicalizes sparse explicit
+  // views before the comparison.
+  if (!tile1->tile_view_ || !tile2->tile_view_) return;
+
+  auto metadata1 = view1;
+  auto metadata2 = view2;
+  metadata1.valid_shape.clear();
+  metadata2.valid_shape.clear();
+  if (metadata1 != metadata2) {
+    std::ostringstream msg;
+    msg << "Tile view metadata mismatch in " << context << ": " << desc1 << " and " << desc2
+        << " have different effective layout, stride, start offset, fractal, or padding metadata";
+    RecordError(typecheck::ErrorType::TILE_VIEW_MISMATCH, msg.str(), span);
+  }
 }
 
 void TypeChecker::CheckIsScalarType(const ExprPtr& expr, const std::string& context, const Span& span) {

@@ -359,6 +359,7 @@ def test_type_check_rejects_tensor_padding_disagreement():
     diagnostics = _typecheck_diagnostics(if_stmt)
 
     assert len(diagnostics) == 1
+    assert diagnostics[0].error_code == passes.TypeCheckErrorType.TENSOR_PADDING_MISMATCH.value
     assert "Tensor padding mismatch in IfStmt" in diagnostics[0].message
 
 
@@ -374,7 +375,22 @@ def test_type_check_rejects_distributed_window_buffer_identity_disagreement():
     diagnostics = _typecheck_diagnostics(if_stmt)
 
     assert len(diagnostics) == 1
+    assert diagnostics[0].error_code == passes.TypeCheckErrorType.DISTRIBUTED_WINDOW_IDENTITY_MISMATCH.value
     assert "Distributed window-buffer identity mismatch in IfStmt" in diagnostics[0].message
+
+
+def test_type_check_rejects_effective_tile_view_metadata_disagreement():
+    view_a = ir.TileView(valid_shape=[_idx(16), _idx(16)], stride=[_idx(16), _idx(1)])
+    view_b = ir.TileView(valid_shape=[_idx(16), _idx(16)], stride=[_idx(1), _idx(16)])
+    type_a = ir.TileType([_idx(16), _idx(16)], DataType.FP32, None, view_a, ir.MemorySpace.Vec)
+    type_b = ir.TileType([_idx(16), _idx(16)], DataType.FP32, None, view_b, ir.MemorySpace.Vec)
+    if_stmt = _if_with_types(type_a, type_b, type_a)
+
+    diagnostics = _typecheck_diagnostics(if_stmt)
+
+    assert len(diagnostics) == 1
+    assert diagnostics[0].error_code == passes.TypeCheckErrorType.TILE_VIEW_MISMATCH.value
+    assert "Tile view metadata mismatch in IfStmt" in diagnostics[0].message
 
 
 @pytest.mark.parametrize("loop_kind", ["for", "while"])

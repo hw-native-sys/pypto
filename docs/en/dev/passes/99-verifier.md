@@ -111,6 +111,9 @@ The `run_verifier()` utility creates a standalone `Pass` for ad-hoc use in custo
 | 106 | `IF_CONDITION_MUST_BE_SCALAR` | IfStmt/WhileStmt condition must be ScalarType |
 | 107 | `FOR_RANGE_MUST_BE_SCALAR` | ForStmt range must be ScalarType |
 | 108 | `CONDITION_MUST_BE_BOOL` | IfStmt/WhileStmt condition dtype must be BOOL |
+| 109 | `TENSOR_PADDING_MISMATCH` | Tensor pad metadata mismatch |
+| 110 | `DISTRIBUTED_WINDOW_IDENTITY_MISMATCH` | Distributed tensors refer to different window buffers |
+| 111 | `TILE_VIEW_MISMATCH` | Effective TileView metadata mismatch |
 
 ### NoNestedCall
 

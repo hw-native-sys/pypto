@@ -384,7 +384,14 @@ void BindPass(nb::module_& m) {
       .value("FOR_RANGE_MUST_BE_SCALAR", typecheck::ErrorType::FOR_RANGE_MUST_BE_SCALAR,
              "ForStmt range must be ScalarType")
       .value("CONDITION_MUST_BE_BOOL", typecheck::ErrorType::CONDITION_MUST_BE_BOOL,
-             "IfStmt/WhileStmt condition dtype must be BOOL");
+             "IfStmt/WhileStmt condition dtype must be BOOL")
+      .value("TENSOR_PADDING_MISMATCH", typecheck::ErrorType::TENSOR_PADDING_MISMATCH,
+             "Tensor pad metadata mismatch")
+      .value("DISTRIBUTED_WINDOW_IDENTITY_MISMATCH",
+             typecheck::ErrorType::DISTRIBUTED_WINDOW_IDENTITY_MISMATCH,
+             "Distributed tensors refer to different window buffers")
+      .value("TILE_VIEW_MISMATCH", typecheck::ErrorType::TILE_VIEW_MISMATCH,
+             "Effective TileView metadata mismatch");
 
   // Bind NestedCallErrorType enum
   nb::enum_<nested_call::ErrorType>(passes, "NestedCallErrorType", "Nested call verification error types")
