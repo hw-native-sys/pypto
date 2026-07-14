@@ -40,6 +40,7 @@ namespace {
 
 using ::pypto::codegen::ComputeGroupEffectiveDirections;
 using ::pypto::codegen::IsBuiltinOp;
+using ::pypto::ir::buffer_root::AmbiguousRootPolicy;
 using ::pypto::ir::buffer_root::BufferRootCollector;
 
 /// Decide whether an argument expression refers to a tensor (not a scalar/index).
@@ -524,7 +525,11 @@ Pass DeriveCallDirections() {
     for (auto& [gvar, func] : new_functions) {
       if (!func || !func->body_) continue;
 
-      BufferRootCollector br_collector(program);
+      // kFirstOutput: direction derivation must keep *some* root for an
+      // ambiguous single-return call, else a later write to the returned var
+      // skips the R-prior / enclosing-param InOut promotion and silently drops
+      // the WAW/InOut dependency. Preserves the naive pre-dedup behavior.
+      BufferRootCollector br_collector(program, AmbiguousRootPolicy::kFirstOutput);
       br_collector.Initialize(func->params_);
       br_collector.VisitStmt(func->body_);
 

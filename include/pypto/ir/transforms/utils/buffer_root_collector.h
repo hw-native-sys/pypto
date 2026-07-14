@@ -25,6 +25,20 @@ namespace pypto {
 namespace ir {
 namespace buffer_root {
 
+/// What SelectReturnRoot does for a single-return call when the owning buffer
+/// cannot be pinned to one Out/InOut arg by shape+dtype (no match, or two+
+/// distinct same-typed candidates). The right choice depends on the consumer:
+enum class AmbiguousRootPolicy {
+  /// Record no root. Safe for fusion / aliasing: never assert a false alias
+  /// that could corrupt a differently-typed buffer (issue #1564 / #1580).
+  kSkip,
+  /// Fall back to the first Out/InOut root. Dependency analysis
+  /// (DeriveCallDirections) must keep *some* root so a later write to the
+  /// returned var still promotes to InOut and the WAW/InOut dependency is not
+  /// dropped — a missing root silently degrades to OutputExisting.
+  kFirstOutput,
+};
+
 /**
  * @brief Determine the canonical buffer root for every Var in a function body.
  *
@@ -36,13 +50,14 @@ namespace buffer_root {
  * For a call's single (non-tuple) return value the owning root is selected by
  * matching the return type's shape+dtype against the callee's Out/InOut args
  * (see SelectReturnRoot), so a differently-typed InOut scratch is never
- * mistaken for the real output buffer (issue #1564 / #1580). When the match is
- * ambiguous no root is recorded — skipping an alias is always safe, whereas
- * guessing one can corrupt results.
+ * mistaken for the real output buffer (issue #1564 / #1580). When that match is
+ * ambiguous, the fallback is governed by @p ambiguous_policy (see
+ * AmbiguousRootPolicy).
  */
 class BufferRootCollector : public IRVisitor {
  public:
-  explicit BufferRootCollector(ProgramPtr program);
+  explicit BufferRootCollector(ProgramPtr program,
+                               AmbiguousRootPolicy ambiguous_policy = AmbiguousRootPolicy::kSkip);
 
   void Initialize(const std::vector<VarPtr>& params);
 
@@ -73,6 +88,7 @@ class BufferRootCollector : public IRVisitor {
   // necessarily the one the return aliases. Match on the return type instead.
   // Issue #1564: without this, the FP32 scratch was fused onto the BF16 output,
   // making tensor.create -> tensor.slice(output) alias and corrupt the result.
+  // When no unambiguous match exists, the fallback follows ambiguous_policy_.
   [[nodiscard]] const Var* SelectReturnRoot(const std::vector<OutputRoot>& out_roots,
                                             const TypePtr& return_type) const;
 
@@ -81,6 +97,7 @@ class BufferRootCollector : public IRVisitor {
   [[nodiscard]] static bool TypesMatchShapeDtype(const TypePtr& a, const TypePtr& b);
 
   ProgramPtr program_;
+  AmbiguousRootPolicy ambiguous_policy_;
   std::unordered_map<const Var*, std::vector<const Var*>> tuple_output_roots_;
 };
 

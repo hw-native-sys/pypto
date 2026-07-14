@@ -42,7 +42,8 @@ bool IsBuiltinOpName(const std::string& op_name) {
 
 }  // namespace
 
-BufferRootCollector::BufferRootCollector(ProgramPtr program) : program_(std::move(program)) {}
+BufferRootCollector::BufferRootCollector(ProgramPtr program, AmbiguousRootPolicy ambiguous_policy)
+    : program_(std::move(program)), ambiguous_policy_(ambiguous_policy) {}
 
 void BufferRootCollector::Initialize(const std::vector<VarPtr>& params) {
   for (const auto& param : params) {
@@ -172,10 +173,19 @@ const Var* BufferRootCollector::SelectReturnRoot(const std::vector<OutputRoot>& 
     }
   }
   if (match && !ambiguous) return match;
-  // Ambiguous (>1 distinct match) or no provable match: do not guess. Fusion /
-  // aliasing is an optimization, so skipping it (no root -> no aliasing) is
-  // always safe, whereas guessing out_roots[0] could re-alias a scratch onto
-  // the output.
+  // No provable unambiguous type match (0 matches, or >1 distinct candidates).
+  // The fallback depends on what the consumer needs when the owning buffer
+  // can't be pinned down:
+  //   kSkip        — record no root. Fusion / aliasing is an optimization, so
+  //                  skipping it (no root -> no aliasing) is always safe,
+  //                  whereas guessing could re-alias a scratch onto the output.
+  //   kFirstOutput — fall back to the first Out/InOut root, matching the naive
+  //                  pre-dedup behavior. DeriveCallDirections needs *some* root
+  //                  so a later write to the returned var still promotes to
+  //                  InOut; a null root would silently drop the WAW/InOut dep.
+  if (ambiguous_policy_ == AmbiguousRootPolicy::kFirstOutput) {
+    return out_roots[0].root;
+  }
   return nullptr;
 }
 

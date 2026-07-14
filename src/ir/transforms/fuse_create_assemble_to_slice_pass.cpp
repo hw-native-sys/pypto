@@ -379,7 +379,9 @@ ProgramPtr TransformFuseCreateAssembleToSlice(const ProgramPtr& program) {
       continue;
     }
 
-    BufferRootCollector root_collector(program);
+    // kSkip: fusion must never assert a false alias — an ambiguous match records
+    // no root rather than risk aliasing a scratch onto the output (issue #1564).
+    BufferRootCollector root_collector(program, buffer_root::AmbiguousRootPolicy::kSkip);
     root_collector.Initialize(func->params_);
     root_collector.VisitStmt(func->body_);
 
