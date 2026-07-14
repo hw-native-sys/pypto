@@ -419,11 +419,11 @@ compiled(x, weight, out)                       # weight：无 H2D/D2H 拷贝
 对反复 dispatch 同一程序的常驻服务（如 generate 循环），可调用一次 `compiled.prepare()` 得到
 一个 `DistributedWorker` 句柄：setup 只做一次，多次 dispatch 复用同一个 worker。
 
-per-call 的 IO buffer（输入**和**输出）是**在 `prepare()` 之前分配的共享内存 host 张量**，
-原地复用 —— fork 出的 chip worker 通过继承的映射读写它们，所以输出直接从该张量读回。大块静态
-权重则用 `rt.alloc_tensor` 一次性上传到 worker 常驻的 `DeviceTensor`（其 `init` 源同样必须是
-`prepare()` 之前共享的张量），混合传入。非共享的 host 张量（或 `prepare()` 之后才分配的）会被拒绝
-—— chip worker 看不到它。
+可变的 per-call IO buffer 是**在 `prepare()` 之前分配的共享内存 host 张量**并原地复用，这样子进程的写入
+对父进程可见。不可变输入也可以保留为普通的 CPU 连续张量：必须在 fork 前将同一个对象传给
+`DistributedWorker(..., inherited_host_tensors=[...])`，runtime 会保留其引用并通过继承的写时复制映射读取。
+该例外仅适用于输入；输出、原地修改张量以及未注册的非共享张量仍会被拒绝。大块静态权重也可以用
+`rt.alloc_tensor` 一次性上传，但其 `init` 源仍必须是 `prepare()` 之前分配的共享张量。
 
 ```python
 compiled = ir.compile(MyDistributedProgram)

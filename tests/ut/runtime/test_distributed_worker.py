@@ -202,9 +202,45 @@ class TestPerCallValidation:
     def test_rejects_non_shared_host_torch_tensor(self, patched_setup):
         compiled = _fake_compiled([_param("a", [128, 128]), _param("b", [128, 128])], [])
         rt = DistributedWorker(compiled)
-        with pytest.raises(TypeError, match="shared memory"):
+        with pytest.raises(TypeError, match="inherited_host_tensors"):
             rt(torch.zeros(128, 128), DeviceTensor(0x2000, (128, 128), torch.float32))
         rt.close()
+
+    def test_accepts_registered_prefork_input_tensor(self, patched_setup):
+        compiled = _fake_compiled([_param("weight", [128, 128])], [])
+        weight = torch.zeros(128, 128, dtype=torch.float32)
+
+        rt = DistributedWorker(compiled, inherited_host_tensors=[weight])
+        rt(weight)
+
+        tensors = patched_setup["dispatch"].call_args.args[2]
+        assert tensors["weight"] is weight
+        rt.close()
+
+    @pytest.mark.parametrize("direction", [ParamDirection.Out, ParamDirection.InOut])
+    def test_rejects_registered_prefork_mutable_tensor(self, patched_setup, direction):
+        compiled = _fake_compiled([_param("buffer", [128, 128], direction)], [])
+        buffer = torch.zeros(128, 128, dtype=torch.float32)
+        rt = DistributedWorker(compiled, inherited_host_tensors=[buffer])
+
+        with pytest.raises(TypeError, match="input-only"):
+            rt(buffer)
+
+        rt.close()
+
+    @pytest.mark.parametrize(
+        ("weight", "expected_exception"),
+        [
+            (object(), TypeError),
+            (torch.zeros(128, 128, dtype=torch.float32).t(), ValueError),
+            (torch.empty(1, device="meta"), ValueError),
+        ],
+    )
+    def test_rejects_invalid_prefork_tensor_registration(self, patched_setup, weight, expected_exception):
+        compiled = _fake_compiled([_param("weight", [128, 128])], [])
+
+        with pytest.raises(expected_exception, match="torch.Tensor|contiguous CPU"):
+            DistributedWorker(compiled, inherited_host_tensors=[weight])
 
     def test_scalar_param_forwarded_as_is(self, patched_setup):
         # Scalar params (shape=None, e.g. seq_len) bypass tensor validation and

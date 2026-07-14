@@ -446,13 +446,12 @@ dispatches the same program many times (e.g. a generate loop), call
 `compiled.prepare()` once to get a `DistributedWorker` handle that runs setup
 once and dispatches many times on the same worker.
 
-Per-call IO buffers (inputs **and** outputs) are **shared-memory host tensors
-allocated before `prepare()`** and reused in place — the forked chip worker
-reads/writes them through the inherited mapping, so you read the output straight
-back from the tensor. Large static weights are uploaded once to a worker-resident
-`DeviceTensor` via `rt.alloc_tensor` (its `init` source must also be a pre-`prepare`
-shared tensor) and mixed in. A non-shared host tensor (or one allocated after
-`prepare()`) is rejected — the chip worker would not see it.
+Mutable per-call IO buffers are **shared-memory host tensors allocated before `prepare()`** and reused
+in place, so child writes are visible to the parent. Immutable inputs may remain ordinary contiguous
+CPU tensors when the same objects are passed to `DistributedWorker(..., inherited_host_tensors=[...])`
+before fork; they are retained and read through inherited copy-on-write mappings. This exception is
+input-only: outputs, in-place tensors, and unregistered non-shared tensors are rejected. Large static
+weights may be uploaded once via `rt.alloc_tensor`; its `init` source must still be pre-`prepare()` shared.
 
 ```python
 compiled = ir.compile(MyDistributedProgram)

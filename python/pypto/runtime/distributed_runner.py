@@ -866,6 +866,12 @@ class DistributedWorker(Worker):
     (its ``init`` source must likewise be a pre-``prepare`` shared tensor) and
     mixed in. This mirrors the runtime's ``child_memory`` example.
 
+    Immutable input tensors may instead be supplied through
+    ``inherited_host_tensors``. They are retained before the chip workers fork
+    and subsequently read through their inherited copy-on-write mappings. This
+    path is input-only: outputs and in-place tensors still require shared memory
+    so child writes remain visible to the parent.
+
     ``callbacks`` binds a caller-supplied callable to a SubWorker by name — e.g.
     a real sampling closure. Abstract SubWorkers (declared with a ``...`` body)
     are runtime-bound callback points and MUST be supplied here; a missing
@@ -911,10 +917,25 @@ class DistributedWorker(Worker):
         *,
         callbacks: dict[str, Callable[..., Any]] | None = None,
         sub_worker_overrides: dict[str, Callable[..., Any]] | None = None,
+        inherited_host_tensors: Sequence[torch.Tensor] | None = None,
     ) -> None:
         super().__init__()  # initialize Worker ABC state (_owned_tensors)
         del config  # reserved for future per-runtime overrides
         callbacks = _coalesce_callbacks(callbacks, sub_worker_overrides)
+        inherited = tuple(inherited_host_tensors) if inherited_host_tensors is not None else ()
+        for tensor in inherited:
+            if not isinstance(tensor, torch.Tensor):
+                raise TypeError(
+                    "DistributedWorker inherited_host_tensors entries must be torch.Tensor objects, "
+                    f"got {type(tensor).__name__}."
+                )
+            if tensor.device.type != "cpu" or not tensor.is_contiguous():
+                raise ValueError(
+                    "DistributedWorker inherited_host_tensors must be contiguous CPU tensors; "
+                    f"got device={tensor.device} shape={tuple(tensor.shape)}."
+                )
+        self._inherited_host_tensors = inherited
+        self._inherited_host_tensor_ids = {id(tensor) for tensor in inherited}
 
         programs = list(compiled) if isinstance(compiled, Sequence) else [compiled]
         if not programs:
@@ -1358,12 +1379,16 @@ class DistributedWorker(Worker):
                 _validate_device_tensor(arg, info)
             elif isinstance(arg, torch.Tensor):
                 if not arg.is_shared():
-                    raise TypeError(
-                        f"Parameter {info.name!r}: a host torch.Tensor passed to a DistributedWorker "
-                        f"must be shared memory allocated BEFORE prepare() (call .share_memory_() and "
-                        f"reuse the same buffer across dispatches), so the forked chip worker can see "
-                        f"it. Got a non-shared tensor."
-                    )
+                    if id(arg) not in self._inherited_host_tensor_ids:
+                        raise TypeError(
+                            f"Parameter {info.name!r}: a non-shared host tensor must be registered "
+                            "through inherited_host_tensors before the chip workers fork."
+                        )
+                    if info.direction.name != "In":
+                        raise TypeError(
+                            f"Parameter {info.name!r}: inherited host tensors are input-only; "
+                            f"direction {info.direction.name} requires shared memory."
+                        )
             elif not _is_simpler_tensor(arg):
                 raise TypeError(
                     f"DistributedWorker parameter {info.name!r} got {type(arg).__name__}; expected a "
@@ -1417,6 +1442,8 @@ class DistributedWorker(Worker):
             handle._mark_closed()
         self._handles.clear()
         self._w.close()
+        self._inherited_host_tensors = ()
+        self._inherited_host_tensor_ids.clear()
 
     def __enter__(self) -> DistributedWorker:
         return self
