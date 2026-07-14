@@ -17,14 +17,11 @@ lowers it to ``builtin.tensor.allgather`` per chip.  The exchange uses a
 push-based TPUT pattern with TWO DISTINCT windows (same constraint as
 ``all_to_all``):
 
-  1. **Publish** (``publish_step``): each rank replicates its chunk into
-     every row of ``stage_buf`` — a window used ONLY as a TPUT source.  The
-     replication matches the proven ``all_to_all`` TPUT schedule
-     (``input[dest]`` → peer ``target[my_rank]``) while remaining allgather
-     semantics (every peer receives the same chunk).
-  2. **Allgather** (``builtin.tensor.allgather``): kernel pushes each
-     ``stage_buf[dest, :]`` row to the corresponding peer's ``data_buf``
-     window via in-kernel TPUT and synchronises visibility.
+  1. **Publish** (``publish_step``): each rank stores its chunk at
+     ``stage_buf[my_rank, :]`` — a window used ONLY as a TPUT source.
+  2. **Allgather** (``builtin.tensor.allgather``): kernel pushes
+     ``stage_buf[my_rank, :]`` to every peer's ``data_buf[my_rank, :]``
+     via in-kernel TPUT and synchronises visibility.
   3. **Consume** (``consume_step``): each rank reads its own ``data_buf``
      window via ``pl.load`` (peers already placed their chunks there).
 
@@ -70,13 +67,10 @@ class HostTensorAllGather:
         my_rank: pl.Scalar[pl.INT32],
         nranks: pl.Scalar[pl.INT32],
     ):
-        # Replicate the local chunk into every stage row so the builtin can
-        # use the same per-dest TPUT schedule as all_to_all (NPU-proven).
+        # Stage local chunk at my_rank only; kernel pushes input[my_rank,:]
+        # to every peer's target[my_rank,:].
         chunk = pl.load(inp, [0, 0], [1, SIZE])
-        # pl.dynamic("world_size") is not in scope for InCore loop bounds when
-        # inp is [1, SIZE]; pass nranks from HOST (see all_to_all stage_step).
-        for dest in pl.range(nranks):
-            stage = pl.store(chunk, [dest, 0], stage)
+        stage = pl.store(chunk, [my_rank, 0], stage)
 
     @pl.function(type=pl.FunctionType.Orchestration)
     def publish_orch(

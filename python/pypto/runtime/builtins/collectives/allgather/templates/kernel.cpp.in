@@ -71,11 +71,8 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   // by the caller. Reusing one buffer for both roles is a genuine
   // cross-process data race.
   //
-  // Staging layout matches the proven all_to_all TPUT schedule: publish
-  // replicates this rank's single chunk into every `input[dest, :]` row so
-  // each remote push reads a distinct source row (`input[dest]` → peer
-  // `target[my_rank]`). Functionally that is allgather (every peer receives
-  // the same chunk at row my_rank).
+  // Staging: each rank places its chunk at `input[my_rank, :]`. The kernel
+  // pushes that same row to every peer's `target[my_rank, :]` (allgather).
   __gm__ {{dtype_cpp}} *input_local =
       reinterpret_cast<__gm__ {{dtype_cpp}} *>(input_tensor->buffer.addr) + input_tensor->start_offset;
   __gm__ {{dtype_cpp}} *target =
@@ -98,11 +95,10 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   int64_t self_row_offset = static_cast<int64_t>(my_rank) * row_numel;
 
   // ==================================================================
-  // Phase 1: push — input[dest,:] → peer dest's target[my_rank,:].
+  // Phase 1: push — input[my_rank,:] → every peer's target[my_rank,:].
   // Include self (HCCL identity). Barriers match MakePutCodegenPTO / PTOAS#872.
   // ==================================================================
   for (int dest = 0; dest < nranks; ++dest) {
-    int64_t src_row_offset = static_cast<int64_t>(dest) * row_numel;
     __gm__ {{dtype_cpp}} *remote_row = CommRemotePtr(comm_ctx, target + self_row_offset, dest);
 
     for (int64_t base = 0; base < row_numel; base += tile_cols) {
@@ -113,7 +109,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
 
       ShapeDyn shape(1, 1, 1, 1, chunk);
       StrideDyn stride(chunk, chunk, chunk, chunk, 1);
-      Global src_g(input_local + src_row_offset + base, shape, stride);
+      Global src_g(input_local + self_row_offset + base, shape, stride);
       Global dst_g(remote_row + base, shape, stride);
 
       pipe_barrier(PIPE_ALL);
