@@ -256,7 +256,7 @@ rt_submit_task(mixed_0, params_t0);
 | `tensor.slice` | `make_tensor_external(ptr + byte_offset, ...)` | 创建现有张量的视图 |
 | `tensor.transpose` | `Tensor xt = ext_x.transpose(axis1, axis2)` | 零拷贝交换两个维度的元数据（lower 到运行时 `Tensor::transpose`） |
 | `tensor.dim`（静态） | `int64_t d0 = 16` | 编译时常量维度值 |
-| `tensor.dim`（动态） | `int64_t d0 = (int64_t)orch_args.tensor(N).shapes[axis]` | 从 ChipStorageTaskArgs 获取运行时维度。在编排（Orchestration）函数体内，解析器会将其折叠为已声明的 extent —— 见下文 |
+| `tensor.dim`（动态） | `int64_t d0 = (int64_t)orch_args.tensor(N).ref().shapes[axis]` | 从 ChipStorageTaskArgs 获取运行时维度。在编排（Orchestration）函数体内，解析器会将其折叠为已声明的 extent —— 见下文 |
 
 ### 动态维度符号（Dynamic-dim symbols）
 

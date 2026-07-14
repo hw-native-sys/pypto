@@ -263,7 +263,7 @@ rt_submit_task(mixed_0, params_t0);
 | `tensor.slice` | `make_tensor_external(ptr + byte_offset, ...)` | Create view into existing tensor |
 | `tensor.transpose` | `Tensor xt = ext_x.transpose(axis1, axis2)` | Zero-copy metadata swap of two axes (lowers to runtime `Tensor::transpose`) |
 | `tensor.dim` (static) | `int64_t d0 = 16` | Constant dimension value |
-| `tensor.dim` (dynamic) | `int64_t d0 = (int64_t)orch_args.tensor(N).shapes[axis]` | Runtime dimension from ChipStorageTaskArgs. In an Orchestration body the parser folds it onto the declared extent instead — see below |
+| `tensor.dim` (dynamic) | `int64_t d0 = (int64_t)orch_args.tensor(N).ref().shapes[axis]` | Runtime dimension from ChipStorageTaskArgs. In an Orchestration body the parser folds it onto the declared extent instead — see below |
 
 ### Dynamic-dim symbols
 

@@ -199,6 +199,9 @@ class CodegenEffectiveUseCollector : public var_collectors::VarDefUseCollector {
 
 /// Whether `code` mentions `name` as a whole C++ identifier rather than as a
 /// substring of a longer one (`M` must not match inside `M_DYN` or `ext_M`).
+///
+/// Occurrences inside a `//` comment do not count: they are not references, and
+/// defining a symbol for one would emit an unused variable (`-Wunused-variable`).
 bool ReferencesIdentifier(const std::string& code, const std::string& name) {
   if (name.empty()) return false;
   auto is_ident_char = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_'; };
@@ -206,7 +209,10 @@ bool ReferencesIdentifier(const std::string& code, const std::string& name) {
     const size_t end = pos + name.size();
     const bool left_ok = pos == 0 || !is_ident_char(code[pos - 1]);
     const bool right_ok = end >= code.size() || !is_ident_char(code[end]);
-    if (left_ok && right_ok) return true;
+    if (!left_ok || !right_ok) continue;
+    const size_t line_start = code.rfind('\n', pos) + 1;  // npos + 1 == 0 for the first line
+    const size_t comment = code.find("//", line_start);
+    if (comment == std::string::npos || comment > pos) return true;
   }
   return false;
 }
@@ -3970,12 +3976,16 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   // extents), and defining those emits dead code.
   const std::string body_code = stmt_codegen.GetGeneratedCode();
   // Dedup by emitted *name*, not by Var: a symbol carries no emit-name mapping, so
-  // it prints as its name hint, and the body cannot distinguish two symbols that
-  // share one. Seeding with the scalar params keeps a caller that already passes an
-  // extent as a scalar of the same name — whose definition the body's reference
-  // resolves to today — from getting a second, conflicting definition here.
+  // it prints as its name hint, and neither the body nor this scan can distinguish
+  // two Vars that share one. Seed with every name already spoken for at entry — a
+  // scalar param, or a local the body defines — because a symbol sharing one of
+  // those names is not what the body's occurrences refer to, and defining it would
+  // shadow the real one inside the scope.
   std::unordered_set<std::string> defined_names;
   for (const auto& scalar : scalar_params) defined_names.insert(scalar.emit_name);
+  CodegenEffectiveUseCollector body_vars;
+  body_vars.VisitStmt(func->body_);
+  for (const auto* def : body_vars.var_defs) defined_names.insert(GetSSABaseName(def->name_hint_));
   std::vector<std::string> dyn_dim_defs;
   for (const auto& var : func->params_) {
     auto tensor_type = AsTensorTypeLike(var->GetType());

@@ -488,12 +488,13 @@ def test_reassigning_a_folded_name_never_writes_into_the_symbol():
     _assert_roundtrips(Prog)
 
 
-def test_tensor_dim_folds_for_every_axis_spelling():
-    """``dim(x, axis=0)`` and a named-constant axis fold too.
+def test_tensor_dim_folds_for_every_call_spelling():
+    """Keyword args and an annotated LHS fold too.
 
-    The printer normalizes every spelling to ``pl.tensor.dim(x, 0)``, so a
-    spelling that did not fold would fold on reparse and break the round-trip --
-    and would quietly reintroduce the second-name-for-one-extent bug.
+    The printer normalizes every spelling to ``n: pl.Scalar[pl.INDEX] =
+    pl.tensor.dim(x, 0)``, so a spelling that did not fold would fold on reparse
+    and break the round-trip -- and would quietly reintroduce the
+    second-name-for-one-extent bug for the source that used it.
     """
     tokens = pl.dynamic("TOKENS_DYN")
     row_axis = 0
@@ -506,13 +507,23 @@ def test_tensor_dim_folds_for_every_axis_spelling():
             return pl.create_tensor([n, 128], dtype=pl.FP32)
 
         @pl.function(type=pl.FunctionType.Orchestration)
+        def keyword_tensor(self, x: pl.Tensor[[tokens, 128], pl.FP32]):
+            n = pl.tensor.dim(tensor=x, axis=0)
+            return pl.create_tensor([n, 128], dtype=pl.FP32)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
         def named_const_axis(self, x: pl.Tensor[[tokens, 128], pl.FP32]):
             n = pl.tensor.dim(x, row_axis)
             return pl.create_tensor([n, 128], dtype=pl.FP32)
 
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def annotated_target(self, x: pl.Tensor[[tokens, 128], pl.FP32]):
+            n: pl.Scalar[pl.INDEX] = pl.tensor.dim(x, 0)
+            return pl.create_tensor([n, 128], dtype=pl.FP32)
+
     printed = ir.python_print(Prog)
     assert "pl.tensor.dim(" not in printed, printed
-    assert printed.count("pl.tensor.create([TOKENS_DYN, 128]") == 2, printed
+    assert printed.count("pl.tensor.create([TOKENS_DYN, 128]") == 4, printed
     _assert_roundtrips(Prog)
 
 

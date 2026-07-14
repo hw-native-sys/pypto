@@ -591,10 +591,9 @@ class ASTParser:
         # ``pl.dump_tag`` only makes sense in Orchestration functions.
         self._func_type: ir.FunctionType = ir.FunctionType.Opaque
 
-        # Dyn-dim symbols (``pl.dynamic()`` Vars) the current signature declares as
-        # a bare extent of a tensor param, by ``Var.unique_id``; and the Python
-        # names bound directly to one of them rather than to a Let of their own
-        # (see ``_fold_tensor_dim``). Both are per-function; reset in parse_function.
+        # Dyn-dim symbols (``pl.dynamic()`` Vars) the current signature declares as a
+        # bare extent of a tensor param, keyed by ``Var.unique_id`` (see
+        # ``_fold_tensor_dim``). Per-function; reset in parse_function.
         self._param_dim_symbols: set[int] = set()
 
         # Current function's auto_scope flag (set during parse_function). When
@@ -1377,11 +1376,15 @@ class ASTParser:
         # Both guards test the Var the name is bound to, never a parallel set of
         # names: scopes are a stack, so a name-keyed alias set desyncs the moment a
         # non-leaking scope rebinds the name and exits.
+        # An LHS annotation that simply restates the symbol's own type (``n:
+        # pl.Scalar[pl.INDEX] = pl.tensor.dim(x, 0)`` — the form the printer emits)
+        # must not defeat the alias; only an annotation asking for a *different*
+        # type falls through to a Let of its own.
         if (
-            override_type is None
-            and self._func_type == ir.FunctionType.Orchestration
+            self._func_type == ir.FunctionType.Orchestration
             and self._is_param_dim_symbol(value_expr)
             and (existing_var is None or self._is_param_dim_symbol(existing_var))
+            and (override_type is None or _types_match(override_type, value_expr.type))
         ):
             return value_expr
 
@@ -7107,17 +7110,21 @@ class ASTParser:
         """
         if self._func_type != ir.FunctionType.Orchestration:
             return None
-        # The *tensor* argument must be a bare name — the generic dispatch re-parses
-        # the AST, so parsing a non-trivial argument here would emit its statements
-        # twice. The axis carries no such restriction, and every spelling the DSL
-        # accepts must fold: the printer normalizes them all to ``dim(x, 0)``, so a
-        # spelling that did not fold would fold on reparse and break the round-trip.
-        if len(call.args) == 2 and not call.keywords:
-            tensor_arg, axis_arg = call.args
-        elif len(call.args) == 1 and len(call.keywords) == 1 and call.keywords[0].arg == "axis":
-            tensor_arg, axis_arg = call.args[0], call.keywords[0].value
-        else:
+        # Every spelling the DSL accepts must fold. The printer normalizes them all
+        # to ``dim(x, 0)``, so a spelling that did not fold here would fold on
+        # reparse — breaking the round-trip, and leaving the original source with
+        # the second-name-for-one-extent bug this fold exists to remove.
+        by_keyword = {kw.arg: kw.value for kw in call.keywords}
+        if set(by_keyword) - {"tensor", "axis"}:
             return None
+        positional = list(call.args)
+        tensor_arg = by_keyword.get("tensor") or (positional.pop(0) if positional else None)
+        axis_arg = by_keyword.get("axis") or (positional.pop(0) if positional else None)
+        if tensor_arg is None or axis_arg is None or positional:
+            return None
+        # The *tensor* argument must be a bare name: the generic dispatch re-parses
+        # the AST, so parsing a non-trivial argument here would emit its statements
+        # twice. The axis is under no such constraint — resolving it parses nothing.
         if not isinstance(tensor_arg, ast.Name):
             return None
         axis = self._static_int(axis_arg)
