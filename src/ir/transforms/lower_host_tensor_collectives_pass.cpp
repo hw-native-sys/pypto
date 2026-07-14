@@ -189,9 +189,9 @@ void CheckStaticSignalCapacity(const CallPtr& call, const ExprPtr& signal_expr, 
   // publish_step.  The allgather AIV kernel requires concurrent cross-chip
   // dispatch (TNOTIFY / TWAIT / TLOAD), but LowerHostTensorCollectives emits
   // per-device builtins sequentially in a world_size loop.  A barrier on the
-  // signal suffices to synchronise visibility of the pre-staged data;
+  // signal (arg[2]) suffices to synchronise visibility of the pre-staged data;
   // consume_step uses pld.tile.remote_load to gather from all peers.
-  auto signal = call->args_[1];
+  auto signal = call->args_[2];
   return MakeBuiltinCallWithAttrs("builtin.tensor.barrier", call, {signal}, {}, device, {},
                                   {ArgDirection::InOut});
 }
@@ -254,12 +254,12 @@ struct HostCollectiveRule {
           &MakeBuiltinAllGather,
           [](const CallPtr& call) {
             return std::vector<WindowBufferPtr>{
-                GetWindowBuffer(call->args_[0], "allgather target"),
-                GetWindowBuffer(call->args_[1], "allgather signal"),
+                GetWindowBuffer(call->args_[1], "allgather target"),
+                GetWindowBuffer(call->args_[2], "allgather signal"),
             };
           },
-          [](const CallPtr& call) { return call->args_[1]; },
-          [](const CallPtr& call) -> std::optional<ExprPtr> { return call->args_[0]; },
+          [](const CallPtr& call) { return call->args_[2]; },
+          [](const CallPtr& call) -> std::optional<ExprPtr> { return call->args_[1]; },
       },
   };
   for (const auto& rule : kRules) {

@@ -237,40 +237,20 @@ TypePtr DeduceTensorAllGatherType(const std::vector<ExprPtr>& args,
     CHECK(args[i]) << "pld.tensor.allgather positional argument #" << i << " must not be null";
   }
 
-  // Dispatch by arg[0] type: DistributedTensor = HOST builtin, Tile/Tensor = InCore composite.
-  auto first_type = args[0]->GetType();
-  if (As<DistributedTensorType>(first_type)) {
-    // HOST builtin path: allgather(local_data, target, signal) where
-    // local_data is the pre-staged window-bound DistributedTensor ([NR, SIZE]),
-    // target is the INT32 DistributedTensor signal, and signal is unused.
-    auto target_type = As<DistributedTensorType>(first_type);
-    CHECK(target_type->shape_.size() == 2) << "pld.tensor.allgather HOST target must be 2D [NR, SIZE], got "
-                                           << target_type->shape_.size() << " dims";
-    auto signal_type = As<DistributedTensorType>(args[1]->GetType());
-    CHECK(signal_type)
-        << "pld.tensor.allgather HOST signal (arg[1]) must be a DistributedTensor (window-bound), got "
-        << args[1]->GetType()->TypeName();
-    CHECK(signal_type->dtype_ == DataType::INT32)
-        << "pld.tensor.allgather HOST signal must have INT32 element type, got dtype "
-        << signal_type->dtype_.ToString();
-    return args[0]->GetType();
-  }
-
-  // 3-arg InCore composite path (push-based).
-  // arg 0: local_data — Tile (or Tensor before ConvertTensorToTileOps) with this rank's chunk
-  CHECK(As<TileType>(first_type) || As<TensorType>(first_type))
-      << "pld.tensor.allgather local_data must be a Tile or Tensor, got " << first_type->TypeName();
-
-  // arg 1: target — DistributedTensor [NR, SIZE] staging window (also the result)
+  // Unified arg roles for both paths:
+  //   arg[0] = local_data — Tensor/Tile (InCore) or Tensor/DistributedTensor (HOST)
+  //   arg[1] = target     — DistributedTensor [NR, SIZE] result window (both paths)
+  //   arg[2] = signal     — DistributedTensor INT32 barrier (both paths)
+  // local_data type is validated by the lowering passes per their context
+  // (LowerCompositeOps for InCore, LowerHostTensorCollectives for HOST).
   auto target_type = As<DistributedTensorType>(args[1]->GetType());
-  CHECK(target_type) << "pld.tensor.allgather target must be a DistributedTensor (window-bound), got "
+  CHECK(target_type) << "pld.tensor.allgather target (arg[1]) must be a DistributedTensor (window-bound), got "
                      << args[1]->GetType()->TypeName();
   CHECK(target_type->shape_.size() == 2)
       << "pld.tensor.allgather target must be 2D [NR, SIZE], got " << target_type->shape_.size() << " dims";
 
-  // arg 2: signal — DistributedTensor INT32
   auto signal_type = As<DistributedTensorType>(args[2]->GetType());
-  CHECK(signal_type) << "pld.tensor.allgather signal must be a DistributedTensor (window-bound), got "
+  CHECK(signal_type) << "pld.tensor.allgather signal (arg[2]) must be a DistributedTensor (window-bound), got "
                      << args[2]->GetType()->TypeName();
   CHECK(signal_type->dtype_ == DataType::INT32)
       << "pld.tensor.allgather signal must have INT32 element type, got dtype "
@@ -278,9 +258,7 @@ TypePtr DeduceTensorAllGatherType(const std::vector<ExprPtr>& args,
   CHECK(AreExprsEqual(signal_type->shape_[0], target_type->shape_[0]))
       << "pld.tensor.allgather signal first dimension must equal target first dimension (NR)";
 
-  // Push-based: each rank remote_stores its chunk into every peer's window at
-  // row my_rank.  After the barrier the window itself holds the gathered
-  // [NR, SIZE] result.  Return target's DistributedTensorType (window-as-result).
+  // Both paths return target's DistributedTensorType (window-as-result).
   return target_type;
 }
 
@@ -290,8 +268,10 @@ REGISTER_OP("pld.tensor.allgather")
     .set_description(
         "All-gather: gather data from all ranks.  Unified 3-arg API: "
         "`pld.tensor.allgather(local_data, target, signal)` for both HOST builtin and InCore composite. "
-        "HOST builtin: `local_data` is the pre-staged window-bound DistributedTensor ([NR, SIZE]), "
-        "`target` is the INT32 DistributedTensor signal, `signal` is unused; lowered to "
+        "HOST builtin: `local_data` is the rank's chunk or pre-staged window "
+        "(Tensor [1, SIZE] or DistributedTensor [NR, SIZE]), "
+        "`target` is the DistributedTensor [NR, SIZE] result window, "
+        "`signal` is the INT32 DistributedTensor barrier; lowered to "
         "builtin.tensor.barrier per chip. "
         "InCore composite: `local_data` is the rank's chunk (Tile/Tensor [1, SIZE]), "
         "`target` is the window-bound DistributedTensor [NR, SIZE] staging area and result, "
@@ -300,11 +280,10 @@ REGISTER_OP("pld.tensor.allgather")
         "this Call never survives past that pass.")
     .set_op_category("DistributedOp")
     .add_argument("local_data",
-                  "HOST: pre-staged DistributedTensor [NR, SIZE]; InCore: Tile/Tensor [1, SIZE] (Input)")
+                  "InCore: Tile/Tensor [1, SIZE]; HOST: Tensor [1, SIZE] or DistributedTensor [NR, SIZE] (Input)")
     .add_argument("target",
-                  "HOST: INT32 DistributedTensor signal; InCore: DistributedTensor [NR, SIZE] push target "
-                  "and result (InOut)")
-    .add_argument("signal", "HOST: unused; InCore: INT32 DistributedTensor barrier (InOut)")
+                  "DistributedTensor [NR, SIZE] result window (InOut)")
+    .add_argument("signal", "INT32 DistributedTensor barrier (InOut)")
     .no_memory_spec()
     .f_deduce_type(DeduceTensorAllGatherType);
 

@@ -308,26 +308,26 @@ def allgather(
     """Build a ``pld.tensor.allgather(...)`` Call.
 
     Unified 3-arg API for both HOST builtin and InCore composite paths.
-    The C++ deducer dispatches by ``args[0]`` type:
-    ``DistributedTensor`` → HOST builtin, ``Tile``/``Tensor`` → InCore composite.
 
-    **HOST builtin:** ``allgather(local_data, target, signal)`` —
-    ``local_data`` is the pre-staged DistributedTensor [NR, SIZE] window,
-    ``target`` is the INT32 DistributedTensor signal,
-    ``signal`` is unused (pass ``target`` again).
+    Unified arg roles for both paths:
+      arg[0] = local_data — Tensor/Tile (InCore) or Tensor/DistributedTensor (HOST)
+      arg[1] = target     — DistributedTensor [NR, SIZE] result window
+      arg[2] = signal     — DistributedTensor INT32 barrier
 
-    **InCore composite:** ``allgather(local_data, target, signal)`` —
-    push-based: each rank pushes its chunk into every peer's window via
-    ``pld.tile.put``, then notify/wait barrier; the window itself becomes
-    the gathered [NR, SIZE] result (window-as-result). Lowered by
-    LowerCompositeOps into tile.create(stage) + pld.tile.put loop + notify/wait.
+    **InCore composite:** push-based: each rank pushes its chunk into every
+    peer's window via ``pld.tile.put``, then notify/wait barrier; the window
+    itself becomes the gathered [NR, SIZE] result (window-as-result). Lowered
+    by LowerCompositeOps into tile.create(stage) + pld.tile.put loop +
+    notify/wait.
+
+    **HOST builtin:** data is pre-staged in the window by per-chip dispatch;
+    the host lowering emits ``builtin.tensor.barrier`` per chip to synchronise.
 
     Args:
-        local_data: HOST: DistributedTensor [NR, SIZE] pre-staged window.
-            InCore: Tensor (or Tile) [1, SIZE] with this rank's chunk.
-        target: HOST: DistributedTensor INT32 signal.
-            InCore: DistributedTensor [NR, SIZE] staging window / result.
-        signal: INT32 DistributedTensor barrier (InCore) or unused (HOST).
+        local_data: InCore: Tensor (or Tile) [1, SIZE] with this rank's chunk.
+            HOST: Tensor [1, SIZE] or DistributedTensor [NR, SIZE].
+        target: DistributedTensor [NR, SIZE] staging window / result.
+        signal: INT32 DistributedTensor barrier.
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     _args: list[Expr] = [local_data, target, signal]

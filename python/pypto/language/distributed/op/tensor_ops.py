@@ -554,47 +554,38 @@ def allgather(
     target: DistributedTensor,
     signal: DistributedTensor,
 ) -> DistributedTensor:
-    """Gather data from all ranks, either as an InCore composite or HOST builtin.
+    """Gather data from all ranks (InCore composite or HOST builtin).
 
-    Unified 3-arg API for both paths.
+    Unified 3-arg API: ``pld.tensor.allgather(local_data, target, signal)``
+    with the same arg roles for both paths.
 
-    **InCore composite (3 args):** ``pld.tensor.allgather(local_data, target, signal)`` —
-    push-based: each rank pushes its chunk into every peer's window
-    slot at ``target[my_rank, :]`` via ``pld.tile.put``, then notify/wait
-    barrier; the window itself becomes the gathered ``[NR, SIZE]`` result
-    (window-as-result).  No separate output tensor — the window IS the result.
+    **InCore composite:** push-based: each rank pushes its chunk into every
+    peer's window slot at ``target[my_rank, :]`` via ``pld.tile.put``, then
+    notify/wait barrier; the window itself becomes the gathered ``[NR, SIZE]``
+    result (window-as-result).
 
-    **HOST builtin (3 args):** ``pld.tensor.allgather(data, signal, signal)`` —
-    ``data`` (:class:`pld.DistributedTensor` [NR, SIZE]) carries the pre-staged
-    chunks, ``signal`` is the INT32 barrier tensor; the third arg is unused.
-    The host lowering emits ``builtin.tensor.barrier`` per chip
-    (the allgather AIV kernel requires concurrent cross-chip dispatch;
-    a barrier synchronises pre-staged window data).
+    **HOST builtin:** ``local_data`` is the already-staged
+    :class:`pld.DistributedTensor` [NR, SIZE] window (staged by per-chip
+    dispatch before the call), ``target`` is the same (or aliased) DT window,
+    ``signal`` is the barrier.  The host lowering emits
+    ``builtin.tensor.barrier`` per chip to synchronise the pre-staged data.
+
+    The C++ deducer validates ``target`` and ``signal`` by type and
+    accepts ``Tile``, ``Tensor``, or ``DistributedTensor`` for ``local_data``;
+    the lowering passes handle path-specific validation per their context.
 
     Args:
-        local_data: For InCore: :class:`pl.Tensor` [1, SIZE].  For HOST:
-            window-bound :class:`pld.DistributedTensor` [NR, SIZE] with
-            pre-staged chunks.
-        target: For InCore: :class:`pld.DistributedTensor` [NR, SIZE] staging
-            window — also the result (window-as-result).  For HOST:
-            :class:`pld.DistributedTensor` INT32 signal barrier.
-        signal: INT32 :class:`pld.DistributedTensor` barrier tensor
-            (InCore) or unused (HOST; pass the signal again).
+        local_data: InCore: :class:`pl.Tensor` [1, SIZE] with this rank's
+            chunk.  HOST: :class:`pl.Tensor` [1, SIZE] or
+            :class:`pld.DistributedTensor` [NR, SIZE] pre-staged window.
+        target: :class:`pld.DistributedTensor` [NR, SIZE] result window
+            (window-as-result for both paths).
+        signal: INT32 :class:`pld.DistributedTensor` barrier tensor.
 
     Returns:
         :class:`pld.DistributedTensor` — the ``target`` window holding the
         gathered ``[NR, SIZE]`` result.
     """
-    # The C++ deducer dispatches by args[0] type:
-    #   DistributedTensor → HOST builtin (pre-staged window)
-    #   Tile/Tensor → InCore composite (push-based)
-    if isinstance(local_data, DistributedTensor) and isinstance(target, DistributedTensor):
-        # HOST builtin: allgather(data, signal, signal) — 3-arg for unified API.
-        data_expr, signal_expr = _unwrap_distributed_tensors(
-            "pld.tensor.allgather", target=local_data, signal=target
-        )
-        call = _ir_tensor.allgather(data_expr, signal_expr, signal_expr)
-        return DistributedTensor(expr=call)
     target_expr, signal_expr = _unwrap_distributed_tensors(
         "pld.tensor.allgather", target=target, signal=signal
     )

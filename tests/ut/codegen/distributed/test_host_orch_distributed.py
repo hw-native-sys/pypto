@@ -843,7 +843,7 @@ def test_backend_materializes_allgather_next_level_files(tmp_path):
         def chip_orch(
             self,
             data: pld.DistributedTensor[[4, SIZE], pl.FP32],
-            sig: pld.DistributedTensor[[SIZE], pl.INT32],
+            sig: pld.DistributedTensor[[4], pl.INT32],
         ):
             return data
 
@@ -852,10 +852,10 @@ def test_backend_materializes_allgather_next_level_files(tmp_path):
             data_buf = pld.alloc_window_buffer(4 * SIZE * pl.FP32.get_byte())
             signal_buf = pld.alloc_window_buffer(SIZE * pl.INT32.get_byte())
             data = pld.window(data_buf, [4, SIZE], dtype=pl.FP32)
-            signal = pld.window(signal_buf, [SIZE], dtype=pl.INT32)
+            signal = pld.window(signal_buf, [4], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):
                 self.chip_orch(data, signal, device=r)
-            pld.tensor.allgather(data, signal, signal)
+            pld.tensor.allgather(data, data, signal)
             return 0
 
     _assert_host_collective_next_level_files(

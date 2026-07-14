@@ -615,7 +615,7 @@ def test_host_allgather_lowers_to_builtin_world_size_loop():
             signal = pld.window(signal_buf, [4], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):
                 self.chip_orch(data, signal, device=r)
-            pld.tensor.allgather(data, signal, signal)
+            pld.tensor.allgather(data, data, signal)
             return 0
 
     program = passes.materialize_comm_domain_scopes()(P)

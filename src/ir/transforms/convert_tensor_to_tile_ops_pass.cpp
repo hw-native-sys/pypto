@@ -858,18 +858,11 @@ ExprPtr GetWriteTargetExpr(const CallPtr& call) {
     return call->args_[0];
   }
   // pld.tensor.allgather unified 3-arg API (see DeduceTensorAllGatherType):
-  //   HOST builtin (args[0] is DistributedTensor): allgather(local_data, target, signal)
-  //     — local_data is the pre-staged window, target is the signal.
-  //     The result aliases local_data (args_[0]).
-  //   InCore composite (args[0] is Tile/Tensor): allgather(local_data, target, signal)
-  //     — target (args_[1]) is the push target and result (window-as-result);
-  //     local_data (args_[0]) is read-only, signal (args_[2]) is barrier only.
+  //   arg[1] (target) is the result window for both HOST and InCore paths.
+  //   local_data (arg[0]) is read-only; signal (arg[2]) is barrier only.
   if (IsOp(call, "pld.tensor.allgather")) {
     if (call->args_.size() >= 3) {
-      if (As<DistributedTensorType>(call->args_[0]->GetType())) {
-        return call->args_[0];  // HOST: window is the write target
-      }
-      return call->args_[1];  // InCore: target is the write target
+      return call->args_[1];  // target is the write target (window-as-result)
     }
   }
   // pld.tensor.reduce_scatter(target, signal, *, op): writes the reduced
