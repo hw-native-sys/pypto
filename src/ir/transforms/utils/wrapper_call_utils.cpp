@@ -184,10 +184,11 @@ std::unordered_map<const Function*, std::vector<ParamDirection>> ComputeWrapperE
           if (wrapper->params_[p].get() != var.get()) continue;
           const ParamDirection d = inner_dirs[arg_idx];
           ParamDirection& merged = directions[p];
-          if (d == ParamDirection::InOut && merged != ParamDirection::InOut) {
-            merged = d;
-            promoted = true;
-          } else if (d == ParamDirection::Out && merged == ParamDirection::In) {
+          // Promote one step up the In < Out < InOut lattice: InOut over
+          // anything weaker, Out over In. Both promotions do the same thing.
+          const bool promote = (d == ParamDirection::InOut && merged != ParamDirection::InOut) ||
+                               (d == ParamDirection::Out && merged == ParamDirection::In);
+          if (promote) {
             merged = d;
             promoted = true;
           }

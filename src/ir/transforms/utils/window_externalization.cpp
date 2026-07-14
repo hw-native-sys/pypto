@@ -2955,8 +2955,6 @@ class OutWindowExternalizer {
     if (!ret_stmt) return std::nullopt;
 
     size_t total_out_refs = CountVarRefsInStmt(func->body_, func->params_[out_param_index].get());
-    std::optional<FinalStoreInfo> result;
-    size_t matched_refs = 0;
     for (size_t ret_i = 0; ret_i < ret_stmt->value_.size(); ++ret_i) {
       auto ret_var = AsVarLike(ret_stmt->value_[ret_i]);
       if (!ret_var) continue;
@@ -2971,17 +2969,15 @@ class OutWindowExternalizer {
       auto tile_type = As<TileType>(store_call->args_[0]->GetType());
       if (!offset_tuple || !tile_type) return std::nullopt;
 
-      matched_refs = CountVarRefsInStmt(def_it->second, func->params_[out_param_index].get());
+      size_t matched_refs = CountVarRefsInStmt(def_it->second, func->params_[out_param_index].get());
       if (total_out_refs != matched_refs &&
           !IsProvenSameRegionInOutAccess(func, out_param_index, def_it->second, tile_type->shape_,
                                          offset_tuple->elements_)) {
         return std::nullopt;
       }
 
-      result = FinalStoreInfo{ret_i, tile_type->shape_, offset_tuple->elements_};
-      break;
+      return FinalStoreInfo{ret_i, tile_type->shape_, offset_tuple->elements_};
     }
-    if (result.has_value()) return result;
 
     auto direct_return_index = FindReturnIndexForOutParam(func, out_param_index);
     if (!direct_return_index.has_value()) return std::nullopt;
@@ -2999,10 +2995,9 @@ class OutWindowExternalizer {
                                                    offset_tuple->elements_, ret_stmt)) {
         continue;
       }
-      result = FinalStoreInfo{*direct_return_index, tile_type->shape_, offset_tuple->elements_};
-      break;
+      return FinalStoreInfo{*direct_return_index, tile_type->shape_, offset_tuple->elements_};
     }
-    return result;
+    return std::nullopt;
   }
 
   static bool HasOnlyFullShapeZeroOffsetReturnOutputs(const FunctionPtr& func,
