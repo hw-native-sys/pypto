@@ -11,7 +11,7 @@
 
 Validates the HOST-level all-to-all collective lowers through
 ``LowerHostTensorCollectives`` and produces correct rank-ordered personalized
-exchange.
+exchange via the hand-written ``builtin.tensor.all_to_all`` kernel.
 
 The HOST lowering path detects ``pld.tensor.all_to_all`` in ``host_orch`` and
 lowers it to ``builtin.tensor.all_to_all`` per chip.  The exchange uses a
@@ -30,9 +30,6 @@ push-based TPUT pattern with TWO DISTINCT windows:
 ``stage_buf`` and ``data_buf`` must be separate windows — reusing one buffer
 for both roles is a genuine cross-process data race (see the builtin kernel
 template's kernel.cpp.in for the full explanation).
-
-TPUT auto-chunks rows larger than the staging tile via the pto-isa DMA engine
-and works across chip-process boundaries in both simulation and real hardware.
 
 ST coverage: P=2 and P=4 (skips when fewer devices are available).
 """
@@ -96,8 +93,6 @@ class HostTensorAllToAll:
         out: pl.Out[pl.Tensor[[NR, SIZE], pl.FP32]],
     ) -> pl.Tensor[[NR, SIZE], pl.FP32]:
         for src in pl.range(NR):
-            # Local read — data was already pushed into our window by peers
-            # via in-kernel TPUT in the builtin kernel.  No TGET needed.
             row = pl.load(data, [src, 0], [1, SIZE])
             out = pl.store(row, [src, 0], out)
         return out
@@ -120,23 +115,15 @@ class HostTensorAllToAll:
         data_buf = pld.alloc_window_buffer(pld.world_size() * SIZE * 4)
         signal_buf = pld.alloc_window_buffer(pld.world_size() * 4)
 
-        # Stage: each rank writes its per-destination chunks into stage_buf —
-        # a window used ONLY as a TPUT source, never an incoming-push
-        # destination (see module docstring for why this must be separate
-        # from data_buf).
         for r in pl.range(pld.world_size()):
             stage = pld.window(stage_buf, [pld.world_size(), SIZE], dtype=pl.FP32)
             self.stage_orch(inputs[r], stage, r, device=r)
 
-        # Builtin collective: pushes stage_buf[dest,:] into each peer's
-        # data_buf window, then synchronises visibility.
         stage = pld.window(stage_buf, [pld.world_size(), SIZE], dtype=pl.FP32)
         data = pld.window(data_buf, [pld.world_size(), SIZE], dtype=pl.FP32)
         signal = pld.window(signal_buf, [pld.world_size()], dtype=pl.INT32)
         data = pld.tensor.all_to_all(stage, data, signal)
 
-        # Consume: read back the result from the window (peers already placed
-        # their chunks in our window via TPUT).
         for r in pl.range(pld.world_size()):
             self.consume_orch(data, outputs[r], device=r)
 
@@ -144,13 +131,7 @@ class HostTensorAllToAll:
 
 
 class TestL3HostTensorAllToAll:
-    """L3 distributed runtime: HOST-level all-to-all via builtin dispatch.
-
-    Validates that ``pld.tensor.all_to_all`` in a HOST orchestrator lowers
-    through ``LowerHostTensorCollectives`` to ``builtin.tensor.all_to_all`` per
-    chip, with in-kernel TPUT (TSTORE via CommRemotePtr) pushing from the
-    separate ``stage_buf`` staging window into the ``data_buf`` result window.
-    """
+    """L3 distributed runtime: HOST-level all-to-all via builtin dispatch."""
 
     @pytest.mark.parametrize("n_ranks", [2, 4])
     def test_host_tensor_all_to_all(self, test_config, device_ids, n_ranks):
@@ -167,9 +148,6 @@ class TestL3HostTensorAllToAll:
             ),
         )
 
-        # pld.tensor.all_to_all on HOST lowers to builtin.tensor.all_to_all
-        # per chip.  The kernel pushes stage_buf chunks to peers via in-kernel
-        # TPUT (TSTORE to CommRemotePtr) and synchronises visibility.
         variant_dir = compiled.output_dir / "next_levels" / "builtin.tensor.all_to_all__fp32"
         assert variant_dir.is_dir(), f"expected {variant_dir}"
         assert (variant_dir / "kernel_config.py").is_file()

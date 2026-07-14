@@ -88,70 +88,42 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   using Global = pto::GlobalTensor<{{dtype_cpp}}, ShapeDyn, StrideDyn, pto::Layout::ND>;
   using TileData = pto::Tile<pto::TileType::Vec, {{dtype_cpp}}, 1, kTileCount, pto::BLayout::RowMajor, -1, -1>;
 
-  // Match ep_dispatch / barrier-proven UB placement (avoid UB base 0).
-  TileData send_tile(1, kTileCount);
+  // Cap the tile at the row width (and kTileCount). TPUT's single-shot path
+  // TLOADs/TSTOREs by Tile::GetValidCol(), NOT GlobalTensor shape — a 256-col
+  // tile with a 64-col transfer over-reads/overwrites adjacent window rows.
+  int tile_cols = static_cast<int>(row_numel < kTileCount ? row_numel : kTileCount);
+  TileData send_tile(1, tile_cols);
   TASSIGN(send_tile, 0x10000);
 
+  int64_t self_row_offset = static_cast<int64_t>(my_rank) * row_numel;
+
   // ==================================================================
-  // Phase 1: in-kernel TPUT via pto::comm::TPUT macro.
-  //
-  // Data flow: input[dest,:] (local GM, staging window) → send_tile (UB)
-  //            → peer's target[my_rank,:] (remote GM, result window)
-  //
-  // Self-rank: no peer ever pushes into target[my_rank,:], so we copy our
-  // own chunk there directly instead of TPUT-ing to ourselves.
+  // Phase 1: push — input[dest,:] → peer dest's target[my_rank,:].
+  // Include self (HCCL identity). Barriers match MakePutCodegenPTO / PTOAS#872.
   // ==================================================================
-  int64_t self_offset = static_cast<int64_t>(my_rank) * row_numel;
-  for (int64_t base = 0; base < row_numel; base += kTileCount) {
-    int64_t chunk64 = row_numel - base;
-    if (chunk64 > kTileCount) chunk64 = kTileCount;
-    int chunk = static_cast<int>(chunk64);
-
-    ShapeDyn shape(1, 1, 1, 1, chunk);
-    StrideDyn stride(chunk, chunk, chunk, chunk, 1);
-    Global src_g(input_local + self_offset + base, shape, stride);
-    Global dst_g(target + self_offset + base, shape, stride);
-
-    TLOAD(send_tile, src_g);
-    set_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0);
-    wait_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0);
-    TSTORE(dst_g, send_tile);
-    set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
-    wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
-  }
-  // Drain local MTE before issuing remote TPUTs (shared EVENT_ID0 / tile).
-  pipe_barrier(PIPE_ALL);
-
   for (int dest = 0; dest < nranks; ++dest) {
-    if (dest == my_rank) continue;
+    int64_t src_row_offset = static_cast<int64_t>(dest) * row_numel;
+    __gm__ {{dtype_cpp}} *remote_row = CommRemotePtr(comm_ctx, target + self_row_offset, dest);
 
-    int64_t src_offset = static_cast<int64_t>(dest) * row_numel;
-    __gm__ {{dtype_cpp}} *remote_row = CommRemotePtr(comm_ctx, target + self_offset, dest);
-
-    for (int64_t base = 0; base < row_numel; base += kTileCount) {
+    for (int64_t base = 0; base < row_numel; base += tile_cols) {
       int64_t chunk64 = row_numel - base;
-      if (chunk64 > kTileCount) chunk64 = kTileCount;
+      if (chunk64 > tile_cols) chunk64 = tile_cols;
       int chunk = static_cast<int>(chunk64);
+      send_tile.ColMaskInternal = chunk;
 
       ShapeDyn shape(1, 1, 1, 1, chunk);
       StrideDyn stride(chunk, chunk, chunk, chunk, 1);
-      Global src_g(input_local + src_offset + base, shape, stride);
+      Global src_g(input_local + src_row_offset + base, shape, stride);
       Global dst_g(remote_row + base, shape, stride);
 
+      pipe_barrier(PIPE_ALL);
       pto::comm::TPUT(dst_g, src_g, send_tile);
+      pipe_barrier(PIPE_ALL);
     }
   }
 
   // ==================================================================
-  // Phase 2: barrier — notify peers and wait for all.
-  //
-  // Release before TNOTIFY (PTOAS#872 / #873): pipe_barrier drains the
-  // MTE3/CCU pipe so TPUT stores are issued; dsb(DSB_DDR) makes those
-  // writes DDR-observable to peers before the signal is published.
-  // pipe_barrier alone is not enough for cross-rank visibility.
-  // TNOTIFY_IMPL still fences after the signal write; this fence covers
-  // the preceding TPUT payload. AtomicAdd matches other data-moving
-  // collectives.
+  // Phase 2: barrier — notify peers and wait for all (NotifyOp::Set).
   // ==================================================================
   pipe_barrier(PIPE_ALL);
   dsb(DSB_DDR);
@@ -159,7 +131,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     if (peer == my_rank) continue;
     __gm__ int32_t *remote_signal = CommRemotePtr(comm_ctx, signal_base + my_rank, peer);
     pto::comm::Signal sig(remote_signal);
-    pto::comm::TNOTIFY(sig, static_cast<int32_t>(1), pto::comm::NotifyOp::AtomicAdd);
+    pto::comm::TNOTIFY(sig, static_cast<int32_t>(1), pto::comm::NotifyOp::Set);
   }
   for (int peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) continue;

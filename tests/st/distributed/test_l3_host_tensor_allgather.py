@@ -68,11 +68,14 @@ class HostTensorAllGather:
         inp: pl.Tensor[[1, SIZE], pl.FP32],
         stage: pl.InOut[pld.DistributedTensor[[NR, SIZE], pl.FP32]],
         my_rank: pl.Scalar[pl.INT32],
+        nranks: pl.Scalar[pl.INT32],
     ):
         # Replicate the local chunk into every stage row so the builtin can
         # use the same per-dest TPUT schedule as all_to_all (NPU-proven).
         chunk = pl.load(inp, [0, 0], [1, SIZE])
-        for dest in pl.range(NR):
+        # pl.dynamic("world_size") is not in scope for InCore loop bounds when
+        # inp is [1, SIZE]; pass nranks from HOST (see all_to_all stage_step).
+        for dest in pl.range(nranks):
             stage = pl.store(chunk, [dest, 0], stage)
 
     @pl.function(type=pl.FunctionType.Orchestration)
@@ -81,16 +84,18 @@ class HostTensorAllGather:
         inp: pl.Tensor[[1, SIZE], pl.FP32],
         stage: pl.InOut[pld.DistributedTensor[[NR, SIZE], pl.FP32]],
         my_rank: pl.Scalar[pl.INT32],
+        nranks: pl.Scalar[pl.INT32],
     ):
-        self.publish_step(inp, stage, my_rank)
+        self.publish_step(inp, stage, my_rank, nranks)
 
     @pl.function(type=pl.FunctionType.InCore)
     def consume_step(
         self,
         data: pld.DistributedTensor[[NR, SIZE], pl.FP32],
         out: pl.Out[pl.Tensor[[1, NR, SIZE], pl.FP32]],
+        nranks: pl.Scalar[pl.INT32],
     ) -> pl.Tensor[[1, NR, SIZE], pl.FP32]:
-        for j in pl.range(NR):
+        for j in pl.range(nranks):
             # Local read — data was already pushed into our window by peers
             # via in-kernel TPUT.  No TGET needed.
             row = pl.load(data, [j, 0], [1, SIZE])
@@ -102,8 +107,9 @@ class HostTensorAllGather:
         self,
         data: pld.DistributedTensor[[NR, SIZE], pl.FP32],
         out: pl.Out[pl.Tensor[[1, NR, SIZE], pl.FP32]],
+        nranks: pl.Scalar[pl.INT32],
     ) -> pl.Tensor[[1, NR, SIZE], pl.FP32]:
-        return self.consume_step(data, out)
+        return self.consume_step(data, out, nranks)
 
     @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
     def host_orch(
@@ -117,7 +123,7 @@ class HostTensorAllGather:
 
         for r in pl.range(pld.world_size()):
             stage = pld.window(stage_buf, [pld.world_size(), SIZE], dtype=pl.FP32)
-            self.publish_orch(inputs[r], stage, r, device=r)
+            self.publish_orch(inputs[r], stage, r, pld.world_size(), device=r)
 
         stage = pld.window(stage_buf, [pld.world_size(), SIZE], dtype=pl.FP32)
         data = pld.window(data_buf, [pld.world_size(), SIZE], dtype=pl.FP32)
@@ -126,7 +132,7 @@ class HostTensorAllGather:
         data = pld.tensor.allgather(stage, data, signal)
 
         for r in pl.range(pld.world_size()):
-            self.consume_orch(data, outputs[r], device=r)
+            self.consume_orch(data, outputs[r], pld.world_size(), device=r)
 
         return outputs
 
