@@ -3133,19 +3133,17 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
     new_body = applier.VisitStmt(new_body);
   }
 
-  // Under memory_planner=PtoAS or DsaRP the whole MemoryReuse pass is skipped.
-  // DsaRP must therefore run the correctness normalizations from MemoryReuse
-  // Steps 3.75 through 4.5 in the same order. They are not optimizations: when a
-  // peeled accumulator if-phi or
+  // Under memory_planner=PtoAS or Dsa the whole MemoryReuse pass is skipped, and
+  // with it YieldFixupMutator (its Step 4). That mutator is not an optimization: when a
   // loop yields a value living in a different buffer than its iter_arg/return_var,
   // it inserts the `tile.move` that writes the result back into the carry. Without
   // it the carry is never updated and the loop silently becomes a no-op — the
   // `[N, 1]` col-vector carry of an online softmax is the shape that hits this,
   // because its branch producer runs on a `[1, N]` view in its own buffer.
   //
-  // Run it here so both alternative planners reconcile carries. Under the
-  // legacy PyPTO planner it stays where it is: Step 4 must run *after* reuse
-  // decisions, which can themselves create fresh mismatches.
+  // Run it here so both external planners reconcile carries by the same mechanism.
+  // Under PyPTO it stays where it is: Step 4 must run *after* the reuse decisions, which
+  // can themselves create fresh mismatches.
   //
   // PTOAS needs only the ForStmt YieldFixup half: addr-less codegen already
   // re-points a branch-local producer at the if-phi handle. DSA-RP emits
@@ -3153,18 +3151,8 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
   // then materialize both IfStmt and ForStmt fixups, and finally repair bare-Var
   // identity copies before lifetime analysis and placement.
   const auto* ctx = PassContext::Current();
-  if (ctx != nullptr && ctx->GetMemoryPlanner() == MemoryPlanner::DsaRP) {
-    TopDownRetargeter acc_coalescer;
-    auto acc_rewrites = acc_coalescer.CoalesceAccumulatorIfPhis(new_body);
-    if (!acc_rewrites.empty()) {
-      RetypeApplier applier(std::move(acc_rewrites));
-      new_body = applier.VisitStmt(new_body);
-    }
-
-    YieldFixupMutator yield_fixup(/*fixup_if_stmts=*/true);
-    new_body = yield_fixup.VisitStmt(new_body);
-    new_body = NormalizeIdentityCopyBuffersMutator().VisitStmt(new_body);
-  } else if (ctx != nullptr && ctx->GetMemoryPlanner() == MemoryPlanner::PtoAS) {
+  if (ctx != nullptr &&
+      (ctx->GetMemoryPlanner() == MemoryPlanner::PtoAS || ctx->GetMemoryPlanner() == MemoryPlanner::Dsa)) {
     YieldFixupMutator yield_fixup(/*fixup_if_stmts=*/false);
     new_body = yield_fixup.VisitStmt(new_body);
   }
