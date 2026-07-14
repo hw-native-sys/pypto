@@ -22,8 +22,7 @@
  *
  *   - pld.tensor.barrier(signal)                                  -> DistributedTensorType
  *   - pld.tensor.broadcast(target, signal, root)                   -> DistributedTensorType
- *   - pld.tensor.allgather(target, signal)          (2-arg HOST)   -> DistributedTensorType
- *   - pld.tensor.allgather(local_data, target, signal) (3-arg push)  -> DistributedTensorType
+ *   - pld.tensor.allgather(local_data, target, signal) (unified 3-arg)  -> DistributedTensorType
  *   - pld.tensor.reduce_scatter(target, signal, op)                -> DistributedTensorType
  *
  * The five builtin.tensor.* ops are internal chip-dispatch targets emitted by the
@@ -551,32 +550,33 @@ namespace {
 TypePtr DeduceBuiltinTensorAllGatherType(const std::vector<ExprPtr>& args,
                                          const std::vector<std::pair<std::string, std::any>>& kwargs) {
   constexpr const char* kOpName = "builtin.tensor.allgather";
-  CHECK(args.size() == 2 || args.size() == 3)
-      << kOpName << " requires 2 args (target, signal) or 3 args (local_data, target, signal), but got "
-      << args.size();
+  CHECK(args.size() == 3)
+      << kOpName << " requires 3 args (local_data, target, signal), but got " << args.size();
   for (size_t i = 0; i < args.size(); ++i) {
     CHECK(args[i]) << kOpName << " positional argument #" << i << " must not be null";
   }
-  const size_t target_idx = args.size() == 2 ? 0 : 1;
-  const size_t signal_idx = args.size() == 2 ? 1 : 2;
-  if (args.size() == 3) {
-    auto local_type = As<TileType>(args[0]->GetType());
-    CHECK(local_type) << kOpName << " local_data must be a Tile, got " << args[0]->GetType()->TypeName();
-  }
-  auto target_type = As<DistributedTensorType>(args[target_idx]->GetType());
-  CHECK(target_type) << kOpName << " target must be a DistributedTensor, got "
-                     << args[target_idx]->GetType()->TypeName();
+
+  // Unified 3-arg — mirrors pld.tensor.allgather.
+  //   arg[0] = local_data — Tile (InCore) or DistributedTensor (HOST)
+  //   arg[1] = target     — DistributedTensor [NR, SIZE] result window
+  //   arg[2] = signal     — DistributedTensor INT32 barrier
+  auto local_type = As<TileType>(args[0]->GetType());
+  CHECK(local_type) << kOpName << " local_data must be a Tile, got " << args[0]->GetType()->TypeName();
+
+  auto target_type = As<DistributedTensorType>(args[1]->GetType());
+  CHECK(target_type) << kOpName << " target (arg[1]) must be a DistributedTensor, got "
+                     << args[1]->GetType()->TypeName();
   CHECK(target_type->shape_.size() == 2)
       << kOpName << " target must be 2D [NR, SIZE], got " << target_type->shape_.size() << " dims";
-  CheckSignalDistributedTensor(As<DistributedTensorType>(args[signal_idx]->GetType()), kOpName);
+
+  CheckSignalDistributedTensor(As<DistributedTensorType>(args[2]->GetType()), kOpName);
+
   auto dtype = GetRequiredKwarg<DataType>(kwargs, "dtype", kOpName);
   CHECK(dtype == target_type->dtype_)
       << kOpName << " dtype kwarg (" << dtype.ToString() << ") must match target dtype ("
       << target_type->dtype_.ToString() << ")";
   CheckSupportedFp32BuiltinVariant(dtype, kOpName);
-  if (args.size() == 2) {
-    return args[target_idx]->GetType();
-  }
+
   return std::make_shared<TileType>(target_type->shape_, target_type->dtype_);
 }
 
