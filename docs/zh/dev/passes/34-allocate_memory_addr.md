@@ -135,6 +135,10 @@ first-fit 结果。导出 interval 中不可见的 branch exclusivity 仍会保�
 offset，而不是在 buffer 生命周期中调整其大小。cost-aware objective 与 PyPTO 结构化搜索
 move 仍是 capability matching 后的研究扩展。
 
+调度本身也会在本 Pass 前固定，尽管不同的合法调度会产生不同生命周期。有关 PyPTO
+负责、PTOAS 负责和跨层联合优化三种方案，请参阅
+[调度与片上内存规划联合优化](../proposals/joint_schedule_memory_cooptimization.md)。
+
 设置 `dsa_export_dir` 后，每个 InCore 函数写成
 `pypto_<escaped-function-name>.dsa.json`。序列化是确定性的，不包含 IR pointer 或机器专用
 路径，因此文档可以直接复制到独立仓库的真实实例 corpus 中。
