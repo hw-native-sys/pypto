@@ -33,6 +33,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -48,6 +49,52 @@ T GetKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs, const st
   }
   return default_value;
 }
+
+namespace {
+
+// Build the result type of a reduction over `axis`, given an already-validated input tensor.
+//
+// The reduction consumes the input's *valid* region on the reduced axis — the backend kernels bound
+// their loops by the source's valid extent — so every cell it reads is real data and the reduced
+// axis collapses to a fully valid output axis (extent 1 under keep_dim, dropped otherwise).
+// Validity on the surviving axes carries over unchanged: reducing one axis does not change which
+// rows/columns of the others hold real data.
+TypePtr MakeReductionResultType(const std::shared_ptr<const TensorType>& tensor_type, int64_t axis,
+                                bool keep_dim, const std::string& op_name, const Span& span,
+                                std::optional<DataType> out_dtype) {
+  // GetValidShape CHECKs that input_valid has the same rank as the physical shape, so indexing it
+  // by physical axis below stays in bounds.
+  const auto input_valid = GetValidShape(tensor_type);
+  CheckReductionInputNonEmpty(input_valid, op_name, span);
+
+  const auto& input_shape = tensor_type->shape_;
+  const auto input_ndim = static_cast<int64_t>(input_shape.size());
+  std::vector<ExprPtr> output_shape;
+  std::vector<ExprPtr> output_valid;
+  output_shape.reserve(input_shape.size());
+  output_valid.reserve(input_shape.size());
+  for (int64_t i = 0; i < input_ndim; ++i) {
+    if (i == axis) {
+      if (keep_dim) {
+        output_shape.push_back(std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown()));
+        output_valid.push_back(std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown()));
+      }
+      continue;  // keep_dim == false reduces the axis away entirely
+    }
+    output_shape.push_back(input_shape[i]);
+    output_valid.push_back(input_valid[i]);
+  }
+
+  const DataType dtype = out_dtype.value_or(tensor_type->dtype_);
+  // Every dimension reduced away (keep_dim=false): a scalar carries no view metadata, as there is
+  // no region for a valid shape to describe.
+  if (output_shape.empty()) {
+    return std::make_shared<ScalarType>(dtype);
+  }
+  return MakeFreshTensorType(std::move(output_shape), dtype, std::move(output_valid));
+}
+
+}  // namespace
 
 // `out_dtype` overrides the output element type — used by argmax/argmin index output (int32).
 TypePtr DeduceTensorReductionType(const std::vector<ExprPtr>& args,
@@ -80,26 +127,7 @@ TypePtr DeduceTensorReductionType(const std::vector<ExprPtr>& args,
   // Extract keep_dim flag from kwargs (default: true)
   bool keep_dim = GetKwarg<bool>(kwargs, "keep_dim", true);
 
-  // Build output shape
-  std::vector<ExprPtr> output_shape;
-  for (int64_t i = 0; i < input_ndim; ++i) {
-    if (i == axis) {
-      if (keep_dim) {
-        // Keep dimension as 1
-        output_shape.push_back(std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown()));
-      }
-      // Otherwise, skip this dimension (reduce it out)
-    } else {
-      output_shape.push_back(input_shape[i]);
-    }
-  }
-
-  // If output shape is empty (all dimensions reduced and keep_dim=false), return ScalarType
-  if (output_shape.empty()) {
-    return std::make_shared<ScalarType>(out_dtype.value_or(tensor_type->dtype_));
-  }
-
-  return std::make_shared<TensorType>(output_shape, out_dtype.value_or(tensor_type->dtype_));
+  return MakeReductionResultType(tensor_type, axis, keep_dim, op_name, args[0]->span_, out_dtype);
 }
 
 // ============================================================================
@@ -179,21 +207,7 @@ TypePtr DeduceTensorColReductionType(const std::vector<ExprPtr>& args,
 
   bool keep_dim = GetKwarg<bool>(kwargs, "keep_dim", true);
 
-  std::vector<ExprPtr> output_shape;
-  for (int64_t i = 0; i < input_ndim; ++i) {
-    if (i == axis) {
-      if (keep_dim) {
-        output_shape.push_back(std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown()));
-      }
-    } else {
-      output_shape.push_back(input_shape[i]);
-    }
-  }
-
-  if (output_shape.empty()) {
-    return std::make_shared<ScalarType>(out_dtype.value_or(tensor_type->dtype_));
-  }
-  return std::make_shared<TensorType>(output_shape, out_dtype.value_or(tensor_type->dtype_));
+  return MakeReductionResultType(tensor_type, axis, keep_dim, op_name, args[0]->span_, out_dtype);
 }
 
 REGISTER_OP("tensor.col_sum")

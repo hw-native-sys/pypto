@@ -506,6 +506,31 @@ class TestTileUnaryOps:
         valid_shape = result_type.tile_view.valid_shape
         assert isinstance(valid_shape[1], ir.ConstInt) and valid_shape[1].value == 4
 
+    def test_tile_unary_fully_valid_input_yields_no_explicit_view(self):
+        """A fully valid input produces a fully valid result — canonicalized to no valid_shape."""
+        span = ir.Span.unknown()
+        src_type = ir.TileType(
+            [ir.ConstInt(8, DataType.INT32, span), ir.ConstInt(16, DataType.INT32, span)],
+            DataType.FP32,
+        )
+        src_var = ir.Var("src", src_type, span)
+
+        result_type = tile.exp(src_var).type
+        assert isinstance(result_type, ir.TileType)
+        # Redundant full validity is canonicalized away, so there is nothing to print.
+        assert result_type.tile_view is None or len(result_type.tile_view.valid_shape) == 0
+
+    def test_tile_unary_result_carries_no_source_alias_metadata(self):
+        """A fresh result aliases no source allocation: no memref, stride, or start offset."""
+        sliced = self._make_sliced_tile_with_valid_shape()
+
+        result_type = tile.neg(sliced).type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.memref is None
+        assert result_type.tile_view is not None
+        assert len(result_type.tile_view.stride) == 0
+        assert result_type.tile_view.start_offset is None
+
 
 class TestTileReductionOps:
     """Test suite for tile-level reduction operators."""
@@ -844,6 +869,19 @@ class TestTileReductionOps:
         src_var = ir.Var("src", src_type, span)
         return tile.slice(src_var, [8, 32], [0, 0], valid_shape=[valid_rows, valid_cols])
 
+    def _make_row_tmp_var(self):
+        """Helper: the scratch tile the row reductions take as their second argument.
+
+        The PTO row-reduction instructions use it as full-size scratch, so it matches the
+        input's physical shape rather than the reduced output shape.
+        """
+        span = ir.Span.unknown()
+        tmp_type = ir.TileType(
+            [ir.ConstInt(8, DataType.INT32, span), ir.ConstInt(32, DataType.INT32, span)],
+            DataType.FP32,
+        )
+        return ir.Var("tmp", tmp_type, span)
+
     def test_tile_row_sum_inherits_input_valid_shape(self):
         """tile.row_sum output valid_shape must mirror input on the kept dim (issue #1401)."""
         sliced = self._make_sliced_tile_with_valid_shape(valid_rows=4, valid_cols=32)
@@ -905,6 +943,79 @@ class TestTileReductionOps:
         valid_shape = result_type.tile_view.valid_shape
         assert isinstance(valid_shape[0], ir.ConstInt) and valid_shape[0].value == 1
         assert isinstance(valid_shape[1], ir.ConstInt) and valid_shape[1].value == 16
+
+    # ------------------------------------------------------------------
+    # Reducing a partially valid axis is accepted: the backend reduction
+    # kernels bound their loop by the source's valid extent (TRowSum reads
+    # srcTile.GetValidCol(), TColSum reads GetValidRow()), so they fold exactly
+    # the real cells and never read padding. The reduced axis therefore
+    # collapses to a fully valid output axis. An *empty* valid extent is the one
+    # input those kernels reject, so it is caught here instead.
+    # ------------------------------------------------------------------
+
+    def test_tile_row_sum_partial_reduced_axis_collapses_to_valid(self):
+        """Reducing a partially valid axis folds only the real cells (16 of 32 cols)."""
+        # valid_cols=16 of 32: the *reduced* axis is partial.
+        sliced = self._make_sliced_tile_with_valid_shape(valid_rows=8, valid_cols=16)
+
+        result_type = tile.row_sum(sliced, self._make_row_tmp_var()).type
+        assert isinstance(result_type, ir.TileType)
+        assert _const_values(result_type.shape) == [8, 1]
+        # The kernel folded exactly the 16 real cells into one output cell, so the partial
+        # extent does not leak into the result: every cell of the [8, 1] output is real.
+        # Full validity is canonical, so no explicit valid_shape survives.
+        assert result_type.tile_view is None or len(result_type.tile_view.valid_shape) == 0
+
+    def test_tile_row_sum_symbolic_reduced_axis_accepted(self):
+        """A symbolic (unproved) valid extent on the reduced axis is accepted, not rejected."""
+        span = ir.Span.unknown()
+        vlen = ir.Var("vlen", ir.ScalarType(DataType.INDEX), span)
+        src_type = ir.TileType(
+            [ir.ConstInt(8, DataType.INT32, span), ir.ConstInt(32, DataType.INT32, span)],
+            DataType.FP32,
+            None,
+            ir.TileView(valid_shape=[ir.ConstInt(8, DataType.INDEX, span), vlen]),
+        )
+        src_var = ir.Var("src", src_type, span)
+
+        result_type = tile.row_sum(src_var, self._make_row_tmp_var()).type
+        assert isinstance(result_type, ir.TileType)
+        assert _const_values(result_type.shape) == [8, 1]
+        # `vlen` is never proved equal to 32, yet the reduction is still well defined: the
+        # kernel reduces whatever the runtime valid extent turns out to be. The result is
+        # fully valid either way, so no symbolic extent survives into the output type.
+        assert result_type.tile_view is None or len(result_type.tile_view.valid_shape) == 0
+
+    def test_tile_row_sum_rejects_empty_valid_extent(self):
+        """A provably zero valid extent has no real data to reduce and is rejected."""
+        empty = self._make_sliced_tile_with_valid_shape(valid_rows=8, valid_cols=0)
+
+        with pytest.raises(ValueError, match="valid extent on axis 1 is 0"):
+            tile.row_sum(empty, self._make_row_tmp_var())
+
+    def test_tile_col_sum_rejects_empty_valid_extent(self):
+        """The guard covers the reduced *row* axis of a column reduction too."""
+        empty = self._make_sliced_tile_with_valid_shape(valid_rows=0, valid_cols=32)
+
+        with pytest.raises(ValueError, match="valid extent on axis 0 is 0"):
+            tile.col_sum(empty)
+
+    def test_tile_reduction_rejects_rank_mismatched_valid_shape(self):
+        """A valid_shape whose rank differs from the physical shape is rejected, not read past."""
+        span = ir.Span.unknown()
+        bad = ir.Var(
+            "src",
+            ir.TileType(
+                [ir.ConstInt(8, DataType.INT32, span), ir.ConstInt(32, DataType.INT32, span)],
+                DataType.FP32,
+                None,
+                ir.TileView(valid_shape=[4]),  # rank 1 against a rank-2 tile
+            ),
+            span,
+        )
+
+        with pytest.raises(ValueError, match="valid_shape rank"):
+            tile.col_sum(bad)
 
 
 class TestTileBroadcastOps:

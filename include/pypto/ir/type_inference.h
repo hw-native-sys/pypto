@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "pypto/core/dtype.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/tile_view_semantics.h"
@@ -354,6 +355,25 @@ void ValidateDropDimsValidExtents(const std::vector<int64_t>& drop_dims,
                                   const Span& span);
 
 /**
+ * @brief Reject a reduction whose input is empty on some axis
+ *
+ * A reduction consumes its input's *valid* region: the backend kernels bound their loops by the
+ * source's valid_row / valid_col, so a partially valid axis reduces over exactly the real cells
+ * and never reads padding. The one input they cannot handle is an empty one — they assert that
+ * valid_row and valid_col are both non-zero — and an empty region also leaves max/min with no
+ * identity to return. Catching it here turns a hardware assert into a compile-time error.
+ *
+ * Only a provably zero extent rejects; an unproved symbolic extent is accepted, matching the
+ * standing verifier rule for unknown symbolic bounds.
+ *
+ * @param valid Effective valid shape of the reduction input
+ * @param op_name Operator name used in diagnostics
+ * @param span Source location of the reduction input, reported on failure
+ */
+void CheckReductionInputNonEmpty(const std::vector<ExprPtr>& valid, const std::string& op_name,
+                                 const Span& span);
+
+/**
  * @brief Check if a dimension is broadcastable to another
  *
  * A dimension is broadcastable if:
@@ -402,6 +422,29 @@ inline void InheritTileViewLayout(TileView& dst, const std::shared_ptr<const Til
   dst.pad = eff.pad;
 }
 
+namespace detail {
+
+/**
+ * @brief Resolve an effective valid shape: the explicit @p valid when set, else @p physical
+ *
+ * Callers index the result by physical axis, so a rank-mismatched valid_shape would read out of
+ * bounds. The bounds verifier reports this as kRankMismatch, but it only runs over an already-built
+ * program — the type is constructed long before that, so reject it here.
+ */
+inline std::vector<ExprPtr> ResolveValidShape(const std::vector<ExprPtr>& valid,
+                                              const std::vector<ExprPtr>& physical,
+                                              const std::string& type_kind) {
+  if (valid.empty()) {
+    return physical;
+  }
+  CHECK(valid.size() == physical.size())
+      << type_kind << " valid_shape rank (" << valid.size() << ") must match the physical shape rank ("
+      << physical.size() << "): valid_shape " << FormatShape(valid) << " vs shape " << FormatShape(physical);
+  return valid;
+}
+
+}  // namespace detail
+
 /**
  * @brief Return the source tile's effective valid_shape, falling back to its static shape.
  *
@@ -415,10 +458,49 @@ inline void InheritTileViewLayout(TileView& dst, const std::shared_ptr<const Til
  * @return The TileView::valid_shape if set, otherwise the static shape
  */
 inline std::vector<ExprPtr> GetValidShape(const std::shared_ptr<const TileType>& tile_type) {
-  if (tile_type->tile_view_ && !tile_type->tile_view_->valid_shape.empty()) {
-    return tile_type->tile_view_->valid_shape;
+  if (!tile_type->tile_view_) {
+    return tile_type->shape_;
   }
-  return tile_type->shape_;
+  return detail::ResolveValidShape(tile_type->tile_view_->valid_shape, tile_type->shape_, "TileType");
+}
+
+/**
+ * @brief Return the source tensor's effective valid_shape, falling back to its static shape.
+ *
+ * Tensor counterpart of the TileType overload above. An unset or empty valid_shape means
+ * "fully valid", so tensor ops resolve it to the physical shape before propagating it onto
+ * a result. A DistributedTensorType binds here too: an op that reads a window as this rank's
+ * local memory sees the same effective valid region.
+ *
+ * @param tensor_type Source TensorType
+ * @return The TensorView::valid_shape if set, otherwise the static shape
+ */
+inline std::vector<ExprPtr> GetValidShape(const std::shared_ptr<const TensorType>& tensor_type) {
+  if (!tensor_type->tensor_view_) {
+    return tensor_type->shape_;
+  }
+  return detail::ResolveValidShape(tensor_type->tensor_view_->valid_shape, tensor_type->shape_, "TensorType");
+}
+
+/**
+ * @brief Build the TensorType for a freshly computed (non-alias) tensor result.
+ *
+ * A computed tensor is a new allocation rather than a view of its source, so it carries only
+ * the metadata describing its own contents: the default layout, no stride, no padding, no
+ * source memref — and its own valid region. A valid_shape equal to the physical shape is fine:
+ * the TensorType constructor canonicalizes redundant full validity away, so a fully valid result
+ * ends up with no explicit view at all.
+ *
+ * @param shape Result physical shape
+ * @param dtype Result element type
+ * @param valid_shape Result effective valid shape
+ */
+inline TypePtr MakeFreshTensorType(std::vector<ExprPtr> shape, DataType dtype,
+                                   std::vector<ExprPtr> valid_shape) {
+  TensorView view;
+  view.valid_shape = std::move(valid_shape);
+  return std::make_shared<TensorType>(std::move(shape), dtype, std::nullopt,
+                                      std::make_optional(std::move(view)));
 }
 
 /**

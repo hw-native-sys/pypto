@@ -113,8 +113,10 @@ TypePtr DeduceTileRowReductionType(const std::vector<ExprPtr>& args,
 
   // Inherit valid_shape from the input along the non-reduced dims so that
   // downstream codegen emits trowsum with the correct valid_row (issue #1401).
-  // The reduced (last) dim collapses to 1 in the output.
+  // The reduced (last) dim collapses to 1 in the output: the kernel bounds its loop by the
+  // source's valid_col, so it folds exactly the real cells into a single valid output cell.
   const auto input_valid = GetValidShape(tile_type);
+  CheckReductionInputNonEmpty(input_valid, op_name, args[0]->span_);
   std::vector<ExprPtr> output_valid(input_valid.begin(), input_valid.end() - 1);
   output_valid.push_back(std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown()));
 
@@ -150,8 +152,10 @@ TypePtr DeduceTileColReductionType(const std::vector<ExprPtr>& args,
 
   // Inherit valid_shape from the input along the non-reduced dims so that
   // downstream codegen emits tcolsum with the correct valid_col (issue #1401).
-  // The reduced (first) dim is always 1 in the output.
+  // The reduced (first) dim is always 1 in the output: the kernel bounds its loop by the
+  // source's valid_row, so it folds exactly the real cells into a single valid output cell.
   const auto input_valid = GetValidShape(tile_type);
+  CheckReductionInputNonEmpty(input_valid, op_name, args[0]->span_);
   std::vector<ExprPtr> output_valid;
   output_valid.push_back(std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown()));
   output_valid.insert(output_valid.end(), input_valid.begin() + 1, input_valid.end());

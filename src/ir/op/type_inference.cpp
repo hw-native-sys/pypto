@@ -250,6 +250,13 @@ bool AreComparableIntegerScalarExprs(const ExprPtr& lhs, const ExprPtr& rhs) {
   }
   return lhs_type->dtype_.IsSignedInt() == rhs_type->dtype_.IsSignedInt();
 }
+
+// The zero extent every valid-shape bound is compared against. Cached because it is otherwise
+// rebuilt per dimension on a hot construction path; ConstInt is immutable, so sharing it is safe.
+const ExprPtr& ZeroExtent() {
+  static const ExprPtr zero = std::make_shared<ConstInt>(0, DataType::INDEX, Span::unknown());
+  return zero;
+}
 }  // namespace
 
 ProofResult ProveValidExtentEqual(const ExprPtr& lhs, const ExprPtr& rhs) {
@@ -341,7 +348,7 @@ std::vector<ValidShapeBoundsError> ValidateValidShapeBounds(const std::vector<Ex
   }
 
   std::vector<ValidShapeBoundsError> errors;
-  static const auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, Span::unknown());
+  const ExprPtr& zero = ZeroExtent();
   for (size_t i = 0; i < valid.size(); ++i) {
     if (ProveValidExtentLessEqual(zero, valid[i]) == ProofResult::kFalse) {
       std::ostringstream msg;
@@ -358,6 +365,20 @@ std::vector<ValidShapeBoundsError> ValidateValidShapeBounds(const std::vector<Ex
     }
   }
   return errors;
+}
+
+void CheckReductionInputNonEmpty(const std::vector<ExprPtr>& valid, const std::string& op_name,
+                                 const Span& span) {
+  const ExprPtr& zero = ZeroExtent();
+  for (size_t i = 0; i < valid.size(); ++i) {
+    // Only a *provable* zero rejects; an unproved symbolic extent is accepted.
+    CHECK_SPAN(ProveValidExtentEqual(valid[i], zero) != ProofResult::kTrue, span)
+        << op_name << ": input valid extent on axis " << i << " is 0 (valid_shape " << FormatShape(valid)
+        << "), so the reduction has no real data to consume. The backend reduction kernels require a "
+           "non-empty valid region on every axis and assert on an empty one, and an empty region also "
+           "leaves max/min with no value to return. Widen the valid region, or guard the reduction so "
+           "it does not run when the axis can be empty.";
+  }
 }
 
 // ============================================================================

@@ -29,8 +29,22 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 namespace pypto {
 namespace ir {
+
+namespace {
+
+// Unary ops rewrite each cell in place: they never move data between cells, so the set of
+// cells holding real data is exactly the input's. The result is a fresh allocation, so it
+// takes the input's effective valid region but none of its view/alias metadata — see
+// MakeFreshTensorType. A fully valid input yields a fully valid (view-less) result.
+TypePtr DeduceTensorUnaryResultType(const std::shared_ptr<const TensorType>& tensor_type,
+                                    DataType out_dtype) {
+  return MakeFreshTensorType(tensor_type->shape_, out_dtype, GetValidShape(tensor_type));
+}
+
+}  // namespace
 
 TypePtr DeduceTensorNegType(const std::vector<ExprPtr>& args,
                             const std::vector<std::pair<std::string, std::any>>& kwargs) {
@@ -42,7 +56,7 @@ TypePtr DeduceTensorNegType(const std::vector<ExprPtr>& args,
       << args[0]->GetType()->TypeName();
 
   // Negation preserves dtype (valid for both int and float)
-  return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_);
+  return DeduceTensorUnaryResultType(tensor_type, tensor_type->dtype_);
 }
 
 TypePtr DeduceTensorAbsType(const std::vector<ExprPtr>& args,
@@ -55,7 +69,7 @@ TypePtr DeduceTensorAbsType(const std::vector<ExprPtr>& args,
       << args[0]->GetType()->TypeName();
 
   // Absolute value preserves dtype (valid for both int and float)
-  return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_);
+  return DeduceTensorUnaryResultType(tensor_type, tensor_type->dtype_);
 }
 
 TypePtr DeduceTensorRecipType(const std::vector<ExprPtr>& args,
@@ -73,7 +87,7 @@ TypePtr DeduceTensorRecipType(const std::vector<ExprPtr>& args,
     out_dtype = DataType::FP32;
   }
 
-  return std::make_shared<TensorType>(tensor_type->shape_, out_dtype);
+  return DeduceTensorUnaryResultType(tensor_type, out_dtype);
 }
 
 TypePtr DeduceTensorExpType(const std::vector<ExprPtr>& args,
@@ -93,7 +107,7 @@ TypePtr DeduceTensorExpType(const std::vector<ExprPtr>& args,
     out_dtype = DataType::FP32;
   }
 
-  return std::make_shared<TensorType>(tensor_type->shape_, out_dtype);
+  return DeduceTensorUnaryResultType(tensor_type, out_dtype);
 }
 
 TypePtr DeduceTensorLogType(const std::vector<ExprPtr>& args,
@@ -112,7 +126,7 @@ TypePtr DeduceTensorLogType(const std::vector<ExprPtr>& args,
     out_dtype = DataType::FP32;
   }
 
-  return std::make_shared<TensorType>(tensor_type->shape_, out_dtype);
+  return DeduceTensorUnaryResultType(tensor_type, out_dtype);
 }
 
 TypePtr DeduceTensorSqrtType(const std::vector<ExprPtr>& args,
@@ -131,7 +145,7 @@ TypePtr DeduceTensorSqrtType(const std::vector<ExprPtr>& args,
     out_dtype = DataType::FP32;
   }
 
-  return std::make_shared<TensorType>(tensor_type->shape_, out_dtype);
+  return DeduceTensorUnaryResultType(tensor_type, out_dtype);
 }
 
 TypePtr DeduceTensorRsqrtType(const std::vector<ExprPtr>& args,
@@ -149,7 +163,7 @@ TypePtr DeduceTensorRsqrtType(const std::vector<ExprPtr>& args,
     out_dtype = DataType::FP32;
   }
 
-  return std::make_shared<TensorType>(tensor_type->shape_, out_dtype);
+  return DeduceTensorUnaryResultType(tensor_type, out_dtype);
 }
 
 // Shared FP32-only deducer for transcendental ops (tensor.sin, tensor.cos).
@@ -169,7 +183,7 @@ TypePtr DeduceTensorFP32OnlyType(const std::string& op_name, const std::vector<E
       << op_name << " is FP32-only, but got input with dtype " << tensor_type->dtype_.ToString()
       << ". Cast the input to FP32 explicitly via pl.cast(x, pl.FP32) before applying " << op_name << ".";
 
-  return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_);
+  return DeduceTensorUnaryResultType(tensor_type, tensor_type->dtype_);
 }
 
 TypePtr DeduceTensorCastType(const std::vector<ExprPtr>& args,
@@ -215,8 +229,8 @@ TypePtr DeduceTensorCastType(const std::vector<ExprPtr>& args,
 
   // mode kwarg is optional, not used in type deduction
 
-  // Cast preserves shape but changes dtype
-  return std::make_shared<TensorType>(tensor_type->shape_, target_dtype);
+  // Cast preserves shape and the input's valid region; only dtype changes.
+  return DeduceTensorUnaryResultType(tensor_type, target_dtype);
 }
 
 // ============================================================================

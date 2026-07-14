@@ -323,6 +323,170 @@ def test_tensor_col_prod():
     assert isinstance(result_type.shape[1], ir.ConstInt) and result_type.shape[1].value == 128
 
 
+# ---- valid_shape propagation through unary and reduction ops -------------------------------
+#
+# Unary ops rewrite each cell in place, so the result holds real data in exactly the cells the
+# input did. Reductions consume the input's *valid* region on the reduced axis — the backend
+# kernels bound their loops by the source's valid extent — so the reduced axis collapses to a
+# fully valid output axis while validity on the surviving axes carries over.
+
+
+def test_tensor_unary_preserves_partial_valid_shape():
+    """tensor.exp must carry the input's valid region onto its result."""
+    call = ir.op.tensor.exp(_partial_tensor_var([64, 128], [64, 40]))
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.tensor_view is not None
+    assert _const_int_values(result_type.tensor_view.valid_shape) == [64, 40]
+
+
+def test_tensor_unary_fully_valid_input_yields_no_explicit_view():
+    """A fully valid input yields a fully valid result, canonicalized to no explicit view."""
+    span = ir.Span.unknown()
+    dims = [ir.ConstInt(64, DataType.INT32, span), ir.ConstInt(128, DataType.INT32, span)]
+    tensor_var = ir.Var("t", ir.TensorType(dims, DataType.FP32), span)
+
+    result_type = ir.op.tensor.exp(tensor_var).type
+    assert isinstance(result_type, ir.TensorType)
+    # Redundant full validity is canonicalized away.
+    assert result_type.tensor_view is None or len(result_type.tensor_view.valid_shape) == 0
+
+
+def test_tensor_unary_preserves_symbolic_valid_shape():
+    """A runtime (symbolic) valid extent survives a unary op."""
+    span = ir.Span.unknown()
+    vlen = ir.Var("vlen", ir.ScalarType(DataType.INDEX), span)
+    dims = [ir.ConstInt(64, DataType.INT32, span), ir.ConstInt(128, DataType.INT32, span)]
+    view = ir.TensorView([], ir.TensorLayout.ND, valid_shape=[ir.ConstInt(64, DataType.INDEX, span), vlen])
+    tensor_var = ir.Var("t", ir.TensorType(dims, DataType.FP32, None, view), span)
+
+    result_type = ir.op.tensor.neg(tensor_var).type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.tensor_view is not None
+    valid = result_type.tensor_view.valid_shape
+    assert isinstance(valid[0], ir.ConstInt) and valid[0].value == 64
+    assert valid[1] == vlen  # the symbolic extent is carried through unchanged
+
+
+def test_tensor_cast_preserves_valid_shape_and_changes_dtype():
+    """tensor.cast changes only the element type; the valid region is untouched."""
+    call = ir.op.tensor.cast(_partial_tensor_var([64, 128], [64, 40]), target_type=DataType.FP16)
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP16
+    assert result_type.tensor_view is not None
+    assert _const_int_values(result_type.tensor_view.valid_shape) == [64, 40]
+
+
+def test_tensor_unary_result_carries_no_source_view_metadata():
+    """A fresh result takes the default layout and no stride/pad/memref from its source."""
+    span = ir.Span.unknown()
+    dims = [ir.ConstInt(64, DataType.INT32, span), ir.ConstInt(128, DataType.INT32, span)]
+    # A strided, DN-layout, zero-padded source: none of that describes the fresh result.
+    view = ir.TensorView([1, 64], ir.TensorLayout.DN, valid_shape=[64, 40], pad=ir.PadValue.zero)
+    tensor_var = ir.Var("t", ir.TensorType(dims, DataType.FP32, None, view), span)
+
+    result_type = ir.op.tensor.exp(tensor_var).type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.memref is None
+    assert result_type.tensor_view is not None
+    assert _const_int_values(result_type.tensor_view.valid_shape) == [64, 40]
+    assert len(result_type.tensor_view.stride) == 0
+    assert result_type.tensor_view.layout == ir.TensorLayout.ND
+    assert result_type.tensor_view.pad == ir.PadValue.null
+
+
+def test_tensor_row_sum_preserves_non_reduced_axis_validity():
+    """Reducing the last axis keeps the row axis's partial validity."""
+    # [64, 128] physical, valid [40, 128]: the *kept* row axis is partial.
+    call = ir.op.tensor.row_sum(_partial_tensor_var([64, 128], [40, 128]))
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert _const_int_values(result_type.shape) == [64, 1]
+    assert result_type.tensor_view is not None
+    # Rows stay partial (40 of 64); the reduced axis collapses to one valid cell.
+    assert _const_int_values(result_type.tensor_view.valid_shape) == [40, 1]
+
+
+def test_tensor_row_sum_partial_reduced_axis_collapses_to_valid():
+    """A partially valid *reduced* axis folds to a fully valid result, not a partial one."""
+    # valid [64, 40] of [64, 128]: row_sum reduces the partial column axis.
+    call = ir.op.tensor.row_sum(_partial_tensor_var([64, 128], [64, 40]))
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert _const_int_values(result_type.shape) == [64, 1]
+    # The reduction folded exactly the 40 real columns into one cell, so every cell of the
+    # [64, 1] result is real. Full validity is canonical, so no explicit view survives.
+    assert result_type.tensor_view is None or len(result_type.tensor_view.valid_shape) == 0
+
+
+def test_tensor_col_sum_preserves_non_reduced_axis_validity():
+    """col_sum reduces axis=-2; the surviving column axis keeps its partial validity."""
+    call = ir.op.tensor.col_sum(_partial_tensor_var([64, 128], [64, 40]))
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert _const_int_values(result_type.shape) == [1, 128]
+    assert result_type.tensor_view is not None
+    assert _const_int_values(result_type.tensor_view.valid_shape) == [1, 40]
+
+
+def test_tensor_reduction_rejects_empty_valid_extent():
+    """A provably zero valid extent has no real data to reduce."""
+    with pytest.raises(ValueError, match="valid extent on axis 1 is 0"):
+        ir.op.tensor.row_sum(_partial_tensor_var([64, 128], [64, 0]))
+
+
+def test_tensor_op_rejects_rank_mismatched_valid_shape():
+    """A valid_shape whose rank differs from the physical shape is rejected, not read past.
+
+    Consumers index the effective valid shape by physical axis, so a short valid_shape would
+    read out of bounds. The bounds verifier reports the same violation, but only over an
+    already-built program — this rejects at construction.
+    """
+    span = ir.Span.unknown()
+    dims = [ir.ConstInt(64, DataType.INT32, span), ir.ConstInt(128, DataType.INT32, span)]
+    bad = ir.Var(
+        "t",
+        ir.TensorType(dims, DataType.FP32, None, ir.TensorView([], ir.TensorLayout.ND, valid_shape=[40])),
+        span,
+    )
+
+    # col_sum reduces axis 0 and reads the (missing) axis-1 extent.
+    with pytest.raises(ValueError, match="valid_shape rank"):
+        ir.op.tensor.col_sum(bad)
+    # A unary op would otherwise forward the malformed region onto its result.
+    with pytest.raises(ValueError, match="valid_shape rank"):
+        ir.op.tensor.exp(bad)
+
+
+def test_tensor_reduction_no_keep_dim_returns_bare_scalar():
+    """A fully reduced tensor yields a ScalarType — no view metadata is manufactured.
+
+    ``ir.op.tensor.row_sum`` does not surface ``keep_dim``, so the op call is built directly to
+    reach the fully-reduced path.
+    """
+    span = ir.Span.unknown()
+    tensor_var = ir.Var(
+        "t",
+        ir.TensorType(
+            [ir.ConstInt(64, DataType.INT32, span)],
+            DataType.FP32,
+            None,
+            ir.TensorView([], ir.TensorLayout.ND, valid_shape=[40]),
+        ),
+        span,
+    )
+
+    call = ir.create_op_call("tensor.row_sum", [tensor_var], {"keep_dim": False}, span)
+    assert isinstance(call.type, ir.ScalarType)
+    assert call.type.dtype == DataType.FP32
+
+
 def test_tensor_row_argmax():
     """tensor.row_argmax reduces the last axis (keepdim) with an int32 index output."""
     span = ir.Span.unknown()
