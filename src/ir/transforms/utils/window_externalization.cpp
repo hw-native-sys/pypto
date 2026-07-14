@@ -2264,7 +2264,7 @@ class OutWindowExternalizer {
             if (source_root) rewriter_->RecordSiblingCarrierAliasRoot(source_root.get(), parent_root);
           }
 
-          if (!call || op_predicates::IsBuiltinOp(call->op_->name_)) {
+          if (!call || !call->op_ || op_predicates::IsBuiltinOp(call->op_->name_)) {
             IRVisitor::VisitStmt_(op);
             return;
           }
