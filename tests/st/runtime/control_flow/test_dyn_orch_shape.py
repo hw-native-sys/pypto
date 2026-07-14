@@ -661,13 +661,13 @@ class DynOrchPagedAttentionTestCase(PTOTestCase):
                             oi_tmp = kernel_pv_matmul(pij_f16, vj, oi_tmp_buf)
 
                             if bn == 0:
-                                is_first: pl.Scalar[pl.INT64] = pl.yield_(1)
+                                is_first: pl.Scalar[pl.INT64] = pl.yield_(pl.const(1, pl.INT64))
                             else:
-                                is_first: pl.Scalar[pl.INT64] = pl.yield_(0)
+                                is_first: pl.Scalar[pl.INT64] = pl.yield_(pl.const(0, pl.INT64))
                             if bn == bn_this_batch - 1:
-                                is_last: pl.Scalar[pl.INT64] = pl.yield_(1)
+                                is_last: pl.Scalar[pl.INT64] = pl.yield_(pl.const(1, pl.INT64))
                             else:
-                                is_last: pl.Scalar[pl.INT64] = pl.yield_(0)
+                                is_last: pl.Scalar[pl.INT64] = pl.yield_(pl.const(0, pl.INT64))
 
                             out_view_buf: pl.Tensor[[q_tile, head_dim_cfg], pl.FP32] = pl.slice(
                                 out, [q_tile, head_dim_cfg], [cur_offset, 0]

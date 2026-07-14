@@ -35,6 +35,7 @@ from pypto.runtime import RunConfig, run
 Q_HEADS = pl.dynamic("Q_HEADS")  # query tile rows   (e.g. 16)
 HEAD_DIM_DYN = pl.dynamic("HEAD_DIM_DYN")  # head dimension    (e.g. 128)
 BLOCK_SIZE_DYN = pl.dynamic("BLOCK_SIZE_DYN")  # KV block size     (e.g. 128)
+VALID_LEN_DYN = pl.dynamic("VALID_LEN_DYN")  # valid columns in the current KV block
 BATCH_DYN = pl.dynamic("BATCH_DYN")  # batch size (number of requests)
 QUERY_ROWS_DYN = pl.dynamic("QUERY_ROWS_DYN")  # batch * num_heads
 KEY_CACHE_ROWS_DYN = pl.dynamic("KEY_CACHE_ROWS_DYN")  # batch * max_num_blocks_per_req * block_size
@@ -108,7 +109,7 @@ def build_dynamic_paged_attention_program(
 
     @pl.function(type=pl.FunctionType.InCore)
     def dyn_kernel_softmax_prepare(
-        sij: pl.Tensor[[Q_HEADS, BLOCK_SIZE_DYN], pl.FP32],
+        sij: pl.Tensor[[Q_HEADS, VALID_LEN_DYN], pl.FP32],
         scale: pl.Scalar[pl.FP32],
         out_pij: pl.Out[pl.Tensor[[Q_HEADS, BLOCK_SIZE_DYN], pl.BF16]],
         out_mi: pl.Out[pl.Tensor[[Q_HEADS, 1], pl.FP32]],

@@ -248,6 +248,58 @@ def test_symbolic_valid_shape_and_composite_return_metadata_are_substituted():
     _assert_roundtrips(Prog)
 
 
+def test_self_binding_is_refined_by_later_concrete_argument():
+    """A shared placeholder does not hide a concrete binding from a later argument."""
+    n = pl.dynamic("N")
+
+    @pl.program
+    class Prog:
+        @pl.function
+        def select(self, symbolic: pl.Tensor[[n], pl.FP32], concrete: pl.Tensor[[n], pl.FP32]):
+            return concrete
+
+        @pl.function
+        def main(self, symbolic: pl.Tensor[[n], pl.FP32], concrete: pl.Tensor[[8], pl.FP32]):
+            return self.select(symbolic, concrete)
+
+    (deduced,) = _user_call_types(Prog, "select")
+    assert isinstance(deduced, ir.TensorType)
+    assert [str(dim) for dim in deduced.shape] == ["8"]
+    _assert_roundtrips(Prog)
+
+
+def test_repeated_composite_binding_is_checked_after_transitive_substitution():
+    """A repeated extent can be proved after a later parameter binds its nested variable."""
+    factor = pl.dynamic("FACTOR")
+    total = pl.dynamic("TOTAL")
+    actual_factor = pl.dynamic("ACTUAL_FACTOR")
+
+    @pl.program
+    class Prog:
+        @pl.function
+        def select(
+            self,
+            first: pl.Tensor[[total], pl.FP32],
+            second: pl.Tensor[[total], pl.FP32],
+            marker: pl.Tensor[[factor], pl.FP32],
+        ):
+            return first
+
+        @pl.function
+        def main(
+            self,
+            first: pl.Tensor[[factor * 64], pl.FP32],
+            second: pl.Tensor[[actual_factor * 64], pl.FP32],
+            marker: pl.Tensor[[actual_factor], pl.FP32],
+        ):
+            return self.select(first, second, marker)
+
+    (deduced,) = _user_call_types(Prog, "select")
+    assert isinstance(deduced, ir.TensorType)
+    assert [str(dim) for dim in deduced.shape] == ["ACTUAL_FACTOR * 64"]
+    _assert_roundtrips(Prog)
+
+
 def test_recursive_tuple_and_tile_return_metadata_are_substituted():
     """A DSL call recursively substitutes metadata on a Tile nested inside tuples."""
     n = pl.dynamic("N")

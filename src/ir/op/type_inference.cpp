@@ -29,6 +29,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/transforms/printer.h"
+#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
@@ -421,22 +422,31 @@ namespace {
 
 using TypeVarMap = std::unordered_map<const Var*, ExprPtr>;
 
-void BindCallTypeVar(const VarPtr& var, const ExprPtr& value, const std::string& context,
-                     TypeVarMap& var_map) {
+struct CallTypeBindingConstraint {
+  VarPtr var;
+  ExprPtr existing;
+  ExprPtr candidate;
+  std::string context;
+};
+
+void BindCallTypeVar(const VarPtr& var, const ExprPtr& value, const std::string& context, TypeVarMap& var_map,
+                     std::vector<CallTypeBindingConstraint>& constraints) {
+  // A callee placeholder can also appear verbatim in the caller's annotation.
+  // Treat that as an uninformative unification constraint so a later concrete
+  // actual can refine the placeholder.
+  if (var.get() == value.get()) return;
+
   auto [it, inserted] = var_map.emplace(var.get(), value);
   if (inserted) return;
 
-  CHECK(ProveValidExtentEqual(it->second, value) == ProofResult::kTrue)
-      << "Dynamic type variable '" << var->name_hint_ << "' has conflicting bindings "
-      << PythonPrint(it->second) << " and " << PythonPrint(value) << " that are not provably equal at "
-      << context << "; cross-function calls do not emit a runtime shape guard";
+  constraints.push_back({var, it->second, value, context});
 }
 
 void CollectCallExprBindings(const ExprPtr& pattern, const ExprPtr& value, const std::string& context,
-                             TypeVarMap& var_map) {
+                             TypeVarMap& var_map, std::vector<CallTypeBindingConstraint>& constraints) {
   if (!pattern || !value) return;
   if (auto var = As<Var>(pattern)) {
-    BindCallTypeVar(var, value, context, var_map);
+    BindCallTypeVar(var, value, context, var_map, constraints);
     return;
   }
 
@@ -447,23 +457,27 @@ void CollectCallExprBindings(const ExprPtr& pattern, const ExprPtr& value, const
   auto pattern_binary = std::dynamic_pointer_cast<const BinaryExpr>(pattern);
   auto value_binary = std::dynamic_pointer_cast<const BinaryExpr>(value);
   if (pattern_binary && value_binary) {
-    CollectCallExprBindings(pattern_binary->left_, value_binary->left_, context + " left operand", var_map);
-    CollectCallExprBindings(pattern_binary->right_, value_binary->right_, context + " right operand",
-                            var_map);
+    CollectCallExprBindings(pattern_binary->left_, value_binary->left_, context + " left operand", var_map,
+                            constraints);
+    CollectCallExprBindings(pattern_binary->right_, value_binary->right_, context + " right operand", var_map,
+                            constraints);
     return;
   }
   auto pattern_unary = std::dynamic_pointer_cast<const UnaryExpr>(pattern);
   auto value_unary = std::dynamic_pointer_cast<const UnaryExpr>(value);
   if (pattern_unary && value_unary) {
-    CollectCallExprBindings(pattern_unary->operand_, value_unary->operand_, context + " operand", var_map);
+    CollectCallExprBindings(pattern_unary->operand_, value_unary->operand_, context + " operand", var_map,
+                            constraints);
   }
 }
 
 void CollectCallExprVectorBindings(const std::vector<ExprPtr>& patterns, const std::vector<ExprPtr>& values,
-                                   const std::string& context, TypeVarMap& var_map) {
+                                   const std::string& context, TypeVarMap& var_map,
+                                   std::vector<CallTypeBindingConstraint>& constraints) {
   const size_t count = std::min(patterns.size(), values.size());
   for (size_t i = 0; i < count; ++i) {
-    CollectCallExprBindings(patterns[i], values[i], context + "[" + std::to_string(i) + "]", var_map);
+    CollectCallExprBindings(patterns[i], values[i], context + "[" + std::to_string(i) + "]", var_map,
+                            constraints);
   }
 }
 
@@ -482,7 +496,7 @@ const std::vector<ExprPtr>& GetEffectiveTileValidShape(const TileType& type) {
 }
 
 void CollectCallTypeBindings(const TypePtr& pattern, const TypePtr& value, const std::string& context,
-                             TypeVarMap& var_map) {
+                             TypeVarMap& var_map, std::vector<CallTypeBindingConstraint>& constraints) {
   if (!pattern || !value) return;
 
   if (auto pattern_tuple = As<TupleType>(pattern)) {
@@ -491,7 +505,7 @@ void CollectCallTypeBindings(const TypePtr& pattern, const TypePtr& value, const
     const size_t count = std::min(pattern_tuple->types_.size(), value_tuple->types_.size());
     for (size_t i = 0; i < count; ++i) {
       CollectCallTypeBindings(pattern_tuple->types_[i], value_tuple->types_[i],
-                              context + " tuple element[" + std::to_string(i) + "]", var_map);
+                              context + " tuple element[" + std::to_string(i) + "]", var_map, constraints);
     }
     return;
   }
@@ -500,13 +514,13 @@ void CollectCallTypeBindings(const TypePtr& pattern, const TypePtr& value, const
     auto value_tensor = AsTensorTypeLike(value);
     if (!value_tensor) return;
     CollectCallExprVectorBindings(pattern_tensor->shape_, value_tensor->shape_, context + " physical shape",
-                                  var_map);
+                                  var_map, constraints);
     CollectCallExprVectorBindings(GetEffectiveTensorValidShape(*pattern_tensor),
                                   GetEffectiveTensorValidShape(*value_tensor), context + " valid shape",
-                                  var_map);
+                                  var_map, constraints);
     if (pattern_tensor->tensor_view_ && value_tensor->tensor_view_) {
       CollectCallExprVectorBindings(pattern_tensor->tensor_view_->stride, value_tensor->tensor_view_->stride,
-                                    context + " tensor stride", var_map);
+                                    context + " tensor stride", var_map, constraints);
     }
     return;
   }
@@ -515,14 +529,15 @@ void CollectCallTypeBindings(const TypePtr& pattern, const TypePtr& value, const
   auto value_tile = As<TileType>(value);
   if (!pattern_tile || !value_tile) return;
   CollectCallExprVectorBindings(pattern_tile->shape_, value_tile->shape_, context + " physical shape",
-                                var_map);
+                                var_map, constraints);
   CollectCallExprVectorBindings(GetEffectiveTileValidShape(*pattern_tile),
-                                GetEffectiveTileValidShape(*value_tile), context + " valid shape", var_map);
+                                GetEffectiveTileValidShape(*value_tile), context + " valid shape", var_map,
+                                constraints);
   if (pattern_tile->tile_view_ && value_tile->tile_view_) {
     CollectCallExprVectorBindings(pattern_tile->tile_view_->stride, value_tile->tile_view_->stride,
-                                  context + " tile stride", var_map);
+                                  context + " tile stride", var_map, constraints);
     CollectCallExprBindings(pattern_tile->tile_view_->start_offset, value_tile->tile_view_->start_offset,
-                            context + " tile start_offset", var_map);
+                            context + " tile start_offset", var_map, constraints);
   }
 }
 
@@ -557,12 +572,27 @@ std::vector<TypePtr> DeduceCallReturnType(const std::vector<VarPtr>& callee_para
       << args.size() << ")";
 
   TypeVarMap var_map;
+  std::vector<CallTypeBindingConstraint> constraints;
   for (size_t i = 0; i < callee_params.size(); ++i) {
     if (!callee_params[i] || !args[i]) continue;
     CollectCallTypeBindings(callee_params[i]->GetType(), args[i]->GetType(), "argument " + std::to_string(i),
-                            var_map);
+                            var_map, constraints);
   }
   if (var_map.empty()) return return_types;
+
+  // Validate repeated bindings only after all arguments have contributed.
+  // A constraint may mention another callee placeholder that is bound by a
+  // later argument (for example STAGED = NR * 64, then NR = world_size()).
+  for (const auto& constraint : constraints) {
+    if (structural_equal(constraint.existing, constraint.candidate)) continue;
+    auto existing = transform_utils::Substitute(constraint.existing, var_map);
+    auto candidate = transform_utils::Substitute(constraint.candidate, var_map);
+    if (structural_equal(existing, candidate)) continue;
+    CHECK(ProveValidExtentEqual(existing, candidate) == ProofResult::kTrue)
+        << "Dynamic type variable '" << constraint.var->name_hint_ << "' has conflicting bindings "
+        << PythonPrint(existing) << " and " << PythonPrint(candidate) << " that are not provably equal at "
+        << constraint.context << "; cross-function calls do not emit a runtime shape guard";
+  }
 
   std::vector<TypePtr> result;
   result.reserve(return_types.size());
