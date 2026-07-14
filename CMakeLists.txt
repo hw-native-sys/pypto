@@ -187,8 +187,11 @@ set(PYPTO_SOURCES
     src/ir/transforms/split_vector_kernel_pass.cpp
     src/ir/transforms/auto_tile_matmul_l0_pass.cpp
     src/ir/transforms/flatten_tile_nd_to_2d/analysis.cpp
+    src/ir/transforms/flatten_tile_nd_to_2d/batch_matmul.cpp
     src/ir/transforms/flatten_tile_nd_to_2d/pass.cpp
     src/ir/transforms/flatten_tile_nd_to_2d/rewrite.cpp
+    src/ir/transforms/flatten_tile_nd_to_2d/rewrite_utils.cpp
+    src/ir/transforms/flatten_tile_nd_to_2d/transpose.cpp
     src/ir/transforms/flatten_tile_nd_to_2d/verification.cpp
     src/ir/transforms/pass_context.cpp
     src/ir/transforms/passes.cpp

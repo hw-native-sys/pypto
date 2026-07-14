@@ -164,10 +164,13 @@ for c, (o,) in pl.range(0, s_dim, CHUNK, init_values=(out,)):
 | ---- | ---- | ---- |
 | 协调 | `src/ir/transforms/flatten_tile_nd_to_2d/pass.cpp` | 选择 InCore 函数，并按 analysis → rewrite 顺序执行 |
 | 分析 (analysis) | `src/ir/transforms/flatten_tile_nd_to_2d/analysis.cpp` | 只读的前置条件验证 |
-| 改写 (rewrite) | `src/ir/transforms/flatten_tile_nd_to_2d/rewrite.cpp` | ND 到 2D 的 IR 变换 |
+| 改写协调 | `src/ir/transforms/flatten_tile_nd_to_2d/rewrite.cpp` | 递归遍历语句并分派算子改写 |
+| 改写工具 | `src/ir/transforms/flatten_tile_nd_to_2d/rewrite_utils.cpp` | 共享形状、索引和容量辅助逻辑 |
+| 批量矩阵乘改写 | `src/ir/transforms/flatten_tile_nd_to_2d/batch_matmul.cpp` | 批量矩阵乘与累加算子的分页降级 |
+| 转置改写 | `src/ir/transforms/flatten_tile_nd_to_2d/transpose.cpp` | 独立 N 维转置的降级 |
 | 验证 (verification) | `src/ir/transforms/flatten_tile_nd_to_2d/verification.cpp` | 独立验证 `TileOps2D` 后置条件 |
 
-这些阶段入口仅供 transform 内部使用；公共 API 仍为 `pass::FlattenTileNdTo2D()`。
+这些阶段入口和改写组件接口仅供 transform 内部使用；公共 API 仍为 `pass::FlattenTileNdTo2D()`。
 
 **Python 绑定**：`python/bindings/modules/passes.cpp`
 

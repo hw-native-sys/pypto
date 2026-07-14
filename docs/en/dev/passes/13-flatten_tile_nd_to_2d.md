@@ -187,10 +187,13 @@ The implementation is split by responsibility:
 | ----- | ---- | -------------- |
 | Coordination | `src/ir/transforms/flatten_tile_nd_to_2d/pass.cpp` | Select InCore functions and sequence analysis before rewrite |
 | Analysis | `src/ir/transforms/flatten_tile_nd_to_2d/analysis.cpp` | Read-only precondition validation |
-| Rewrite | `src/ir/transforms/flatten_tile_nd_to_2d/rewrite.cpp` | ND-to-2D IR transformation |
+| Rewrite orchestration | `src/ir/transforms/flatten_tile_nd_to_2d/rewrite.cpp` | Recursive statement traversal and operation dispatch |
+| Rewrite utilities | `src/ir/transforms/flatten_tile_nd_to_2d/rewrite_utils.cpp` | Shared shape, index, and capacity helpers |
+| Batched matmul rewrite | `src/ir/transforms/flatten_tile_nd_to_2d/batch_matmul.cpp` | Batched matmul and matmul-acc page lowering |
+| Transpose rewrite | `src/ir/transforms/flatten_tile_nd_to_2d/transpose.cpp` | Standalone N-D transpose lowering |
 | Verification | `src/ir/transforms/flatten_tile_nd_to_2d/verification.cpp` | Independent `TileOps2D` postcondition verification |
 
-The phase entry points are private to the transform implementation; the public API remains `pass::FlattenTileNdTo2D()`.
+The phase entry points and rewrite component interface are private to the transform implementation; the public API remains `pass::FlattenTileNdTo2D()`.
 
 **Python binding**: `python/bindings/modules/passes.cpp`
 
