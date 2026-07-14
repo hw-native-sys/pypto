@@ -577,7 +577,7 @@ def test_new_host_collectives_in_host_orchestrator_are_left_for_host_collective_
         ):
             pld.tensor.barrier(signal)
             data = pld.tensor.broadcast(data, signal, root=0)
-            pld.tensor.allgather(data, signal, signal)
+            pld.tensor.allgather(data, data, signal)
             data = pld.tensor.reduce_scatter(data, signal)
             return 0
 

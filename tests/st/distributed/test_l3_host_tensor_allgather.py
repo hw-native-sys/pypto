@@ -94,7 +94,7 @@ class HostTensorAllGather:
 
         data = pld.window(data_buf, [pld.world_size(), SIZE], dtype=pl.FP32)
         signal = pld.window(signal_buf, [pld.world_size()], dtype=pl.INT32)
-        data = pld.tensor.allgather(data, signal, signal)
+        data = pld.tensor.allgather(data, data, signal)
 
         for r in pl.range(pld.world_size()):
             self.consume_orch(data, outputs[r], device=r)
