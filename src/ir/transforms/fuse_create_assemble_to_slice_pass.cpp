@@ -31,6 +31,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/ir_property.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/buffer_root_collector.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
@@ -39,185 +40,7 @@ namespace pypto {
 namespace ir {
 namespace {
 
-// ---------------------------------------------------------------------------
-// Analysis: BufferRootCollector (local to this pass)
-// ---------------------------------------------------------------------------
-
-class BufferRootCollector : public IRVisitor {
- public:
-  explicit BufferRootCollector(ProgramPtr program) : program_(std::move(program)) {}
-
-  void Initialize(const std::vector<VarPtr>& params) {
-    for (const auto& param : params) {
-      buffer_roots_[param.get()] = param.get();
-    }
-  }
-
-  [[nodiscard]] const Var* ResolveVar(const Var* var) const {
-    auto it = buffer_roots_.find(var);
-    return it != buffer_roots_.end() ? it->second : nullptr;
-  }
-
-  [[nodiscard]] const Var* ResolveExpr(const ExprPtr& expr) const {
-    if (auto var = AsVarLike(expr)) {
-      return ResolveVar(var.get());
-    }
-    return nullptr;
-  }
-
-  std::unordered_map<const Var*, const Var*> buffer_roots_;
-
- protected:
-  void VisitStmt_(const ForStmtPtr& for_stmt) override {
-    for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
-      const auto& iter_arg = for_stmt->iter_args_[i];
-      const Var* root = ResolveExpr(iter_arg->initValue_);
-      if (root) {
-        buffer_roots_[iter_arg.get()] = root;
-        if (i < for_stmt->return_vars_.size()) {
-          buffer_roots_[for_stmt->return_vars_[i].get()] = root;
-        }
-      }
-    }
-    IRVisitor::VisitStmt_(for_stmt);
-  }
-
-  void VisitStmt_(const WhileStmtPtr& while_stmt) override {
-    for (size_t i = 0; i < while_stmt->iter_args_.size(); ++i) {
-      const auto& iter_arg = while_stmt->iter_args_[i];
-      const Var* root = ResolveExpr(iter_arg->initValue_);
-      if (root) {
-        buffer_roots_[iter_arg.get()] = root;
-        if (i < while_stmt->return_vars_.size()) {
-          buffer_roots_[while_stmt->return_vars_[i].get()] = root;
-        }
-      }
-    }
-    IRVisitor::VisitStmt_(while_stmt);
-  }
-
-  void VisitStmt_(const AssignStmtPtr& assign) override {
-    // Submit (pl.submit in pl.manual_scope) is a sibling call-like kind; route
-    // it through the same Out/InOut buffer-root analysis as Call via the
-    // augmented-Call view. The view preserves args_ and the TASK_ID-augmented
-    // return type, so the tuple path below maps the submit-result projections
-    // to the callee's Out roots and leaves the trailing TASK_ID element
-    // unmapped (see .claude/rules/pass-submit-awareness.md).
-    CallPtr call = As<Call>(assign->value_);
-    if (!call) {
-      if (auto submit = As<Submit>(assign->value_)) call = SubmitToCallView(submit);
-    }
-    if (call) {
-      const std::string& op_name = call->op_->name_;
-      if (IsOp(call, "tensor.create") || IsOp(call, "tensor.slice")) {
-        buffer_roots_[assign->var_.get()] = assign->var_.get();
-      } else if (IsOp(call, "tensor.assemble")) {
-        if (call->args_.size() == 3) {
-          if (const Var* target_root = ResolveExpr(call->args_[0])) {
-            buffer_roots_[assign->var_.get()] = target_root;
-          }
-        }
-      } else if (op_name.find("tile.") != 0 && op_name.find("tensor.") != 0 && op_name.find("system.") != 0) {
-        auto out_roots = CollectCallOutputRoots(call);
-        if (As<TupleType>(call->GetType())) {
-          std::vector<const Var*> roots;
-          roots.reserve(out_roots.size());
-          for (const auto& entry : out_roots) roots.push_back(entry.root);
-          tuple_output_roots_[assign->var_.get()] = std::move(roots);
-        } else if (const Var* root = SelectReturnRoot(out_roots, call->GetType())) {
-          buffer_roots_[assign->var_.get()] = root;
-        }
-      }
-    } else if (auto tuple_get = As<TupleGetItemExpr>(assign->value_)) {
-      if (auto tuple_var = AsVarLike(tuple_get->tuple_)) {
-        auto it = tuple_output_roots_.find(tuple_var.get());
-        if (it != tuple_output_roots_.end() && tuple_get->index_ < static_cast<int>(it->second.size()) &&
-            it->second[tuple_get->index_]) {
-          buffer_roots_[assign->var_.get()] = it->second[tuple_get->index_];
-        }
-      }
-    } else if (auto src_var = AsVarLike(assign->value_)) {
-      if (const Var* root = ResolveVar(src_var.get())) {
-        buffer_roots_[assign->var_.get()] = root;
-      }
-    }
-    IRVisitor::VisitStmt_(assign);
-  }
-
- private:
-  // A candidate output buffer: the resolved root of an Out/InOut arg, paired
-  // with that arg's type so a single return value can be matched to the param
-  // it actually aliases (see SelectReturnRoot).
-  struct OutputRoot {
-    const Var* root;
-    TypePtr type;
-  };
-
-  [[nodiscard]] std::vector<OutputRoot> CollectCallOutputRoots(const CallPtr& call) const {
-    auto callee = program_->GetFunction(call->op_->name_);
-    if (!callee) return {};
-
-    std::vector<OutputRoot> roots;
-    for (size_t i = 0; i < callee->param_directions_.size() && i < call->args_.size(); ++i) {
-      if (callee->param_directions_[i] != ParamDirection::Out &&
-          callee->param_directions_[i] != ParamDirection::InOut) {
-        continue;
-      }
-      const Var* root = nullptr;
-      if (auto arg_var = AsVarLike(call->args_[i])) {
-        root = ResolveVar(arg_var.get());
-      }
-      roots.push_back(OutputRoot{root, call->args_[i]->GetType()});
-    }
-    return roots;
-  }
-
-  // Pick the buffer root for a call's single (non-tuple) return value. A
-  // SubWorker group may take an InOut scratch (e.g. a matmul's kv_final)
-  // *before* its real Out param, so the first Out/InOut in param order is not
-  // necessarily the one the return aliases. Match on the return type instead.
-  // Issue #1564: without this, the FP32 scratch was fused onto the BF16 output,
-  // making tensor.create -> tensor.slice(output) alias and corrupt the result.
-  [[nodiscard]] const Var* SelectReturnRoot(const std::vector<OutputRoot>& out_roots,
-                                            const TypePtr& return_type) const {
-    if (out_roots.empty()) return nullptr;
-    if (out_roots.size() == 1) return out_roots[0].root;
-
-    const Var* match = nullptr;
-    bool ambiguous = false;
-    for (const auto& candidate : out_roots) {
-      if (candidate.root && TypesMatchShapeDtype(candidate.type, return_type)) {
-        if (match == nullptr) {
-          match = candidate.root;
-        } else if (match != candidate.root) {
-          ambiguous = true;
-        }
-      }
-    }
-    if (match && !ambiguous) return match;
-    // Ambiguous (>1 distinct match) or no provable match: do not guess. Fusion
-    // is an optimization, so skipping it (no root -> no aliasing) is always safe,
-    // whereas guessing out_roots[0] could re-alias a scratch onto the output.
-    return nullptr;
-  }
-
-  // Structural shape + dtype equality, ignoring memref / tensor_view: a return
-  // value aliases its source buffer with the same logical shape and dtype.
-  [[nodiscard]] static bool TypesMatchShapeDtype(const TypePtr& a, const TypePtr& b) {
-    auto ta = As<TensorType>(a);
-    auto tb = As<TensorType>(b);
-    if (!ta || !tb) return false;
-    if (ta->dtype_ != tb->dtype_) return false;
-    if (ta->shape_.size() != tb->shape_.size()) return false;
-    for (size_t i = 0; i < ta->shape_.size(); ++i) {
-      if (!AreExprsEqual(ta->shape_[i], tb->shape_[i])) return false;
-    }
-    return true;
-  }
-
-  ProgramPtr program_;
-  std::unordered_map<const Var*, std::vector<const Var*>> tuple_output_roots_;
-};
+using buffer_root::BufferRootCollector;
 
 // ---------------------------------------------------------------------------
 // Analysis: AssemblePatternCollector
@@ -560,7 +383,7 @@ ProgramPtr TransformFuseCreateAssembleToSlice(const ProgramPtr& program) {
     root_collector.Initialize(func->params_);
     root_collector.VisitStmt(func->body_);
 
-    AssemblePatternCollector pattern_collector(root_collector.buffer_roots_);
+    AssemblePatternCollector pattern_collector(root_collector.buffer_roots);
     pattern_collector.VisitStmt(func->body_);
 
     if (pattern_collector.fusible_roots.empty()) {
@@ -568,7 +391,7 @@ ProgramPtr TransformFuseCreateAssembleToSlice(const ProgramPtr& program) {
       continue;
     }
 
-    FuseCreateAssembleMutator mutator(pattern_collector.fusible_roots, root_collector.buffer_roots_);
+    FuseCreateAssembleMutator mutator(pattern_collector.fusible_roots, root_collector.buffer_roots);
     auto new_body = mutator.VisitStmt(func->body_);
 
     if (new_body.get() == func->body_.get()) {

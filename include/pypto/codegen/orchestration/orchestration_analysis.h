@@ -108,35 +108,6 @@ class OrchestrationInfoCollector : public ir::IRVisitor {
 };
 
 /**
- * @brief Determine the canonical buffer root for every Var in the function body
- *
- * Walks the IR and maps each Var* to the Var* that owns its underlying buffer.
- * Propagates root identity through assignments, loops, and function calls.
- * This is a pure structural analysis with no optimization logic.
- */
-class BufferRootCollector : public ir::IRVisitor {
- public:
-  explicit BufferRootCollector(ir::ProgramPtr program);
-
-  void Initialize(const std::vector<ir::VarPtr>& params);
-
-  std::unordered_map<const ir::Var*, const ir::Var*> buffer_roots;
-
- protected:
-  void VisitStmt_(const ir::ForStmtPtr& for_stmt) override;
-  void VisitStmt_(const ir::WhileStmtPtr& while_stmt) override;
-  void VisitStmt_(const ir::AssignStmtPtr& assign) override;
-
- private:
-  [[nodiscard]] const ir::Var* ResolveVar(const ir::Var* var) const;
-  [[nodiscard]] const ir::Var* ResolveExpr(const ir::ExprPtr& expr) const;
-  [[nodiscard]] std::vector<const ir::Var*> CollectCallOutputRoots(const ir::CallPtr& call) const;
-
-  ir::ProgramPtr program_;
-  std::unordered_map<const ir::Var*, std::vector<const ir::Var*>> tuple_output_roots_;
-};
-
-/**
  * @brief Trace variable lineage from body vars back to function parameters
  *
  * Walks the function body and builds a mapping from every body Var* (including

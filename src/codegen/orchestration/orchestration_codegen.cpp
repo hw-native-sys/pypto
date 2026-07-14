@@ -3825,10 +3825,6 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   lineage.Initialize(func->params_);
   lineage.VisitStmt(func->body_);
 
-  BufferRootCollector root_collector(program);
-  root_collector.Initialize(func->params_);
-  root_collector.VisitStmt(func->body_);
-
   CodegenEffectiveUseCollector use_collector;
   use_collector.VisitStmt(func->body_);
 

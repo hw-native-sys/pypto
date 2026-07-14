@@ -30,6 +30,7 @@
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/buffer_root_collector.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -37,9 +38,9 @@ namespace ir {
 
 namespace {
 
-using ::pypto::codegen::BufferRootCollector;
 using ::pypto::codegen::ComputeGroupEffectiveDirections;
 using ::pypto::codegen::IsBuiltinOp;
+using ::pypto::ir::buffer_root::BufferRootCollector;
 
 /// Decide whether an argument expression refers to a tensor (not a scalar/index).
 bool IsTensorTypedArg(const ExprPtr& arg) {
