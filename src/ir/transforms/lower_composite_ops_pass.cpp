@@ -1040,11 +1040,11 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
   const auto& target = args[1];
   const auto& signal = args[2];
 
-  // local_data may be a Tensor or Tile at this point — the default pass pipeline
-  // runs ConvertTensorToTileOps before LowerCompositeOps, so local_data may
-  // already be converted to a TileType.
-  INTERNAL_CHECK_SPAN(As<TensorType>(local_data->GetType()) || As<TileType>(local_data->GetType()), span)
-      << "pld.tensor.allgather local_data must be TensorType or TileType, got "
+  // local_data is always a Tensor at this point.  pld.tile.put only accepts
+  // Tensor/DistributedTensor for its src parameter; a TileType would crash
+  // downstream in pld.tile.put's own deducer/codegen CHECKs.
+  INTERNAL_CHECK_SPAN(As<TensorType>(local_data->GetType()), span)
+      << "pld.tensor.allgather local_data must be TensorType, got "
       << local_data->GetType()->TypeName();
   auto target_type = As<DistributedTensorType>(target->GetType());
   INTERNAL_CHECK_SPAN(target_type, span)
@@ -1068,8 +1068,8 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
                                                        std::make_shared<ConstInt>(0, DataType::INDEX, span)},
                                   span);
 
-  // No explicit tile.load here: pld.tile.put can read from either a Tensor or
-  // Tile source and auto-chunks the transfer through the VEC staging tile.
+  // No explicit tile.load here: pld.tile.put reads from a Tensor source and
+  // auto-chunks the transfer through the VEC staging tile.
 
   // ---- Phase 1: push — pld.tile.put this rank's chunk into every peer's window ----
   // Each peer receives this rank's chunk at target[my_rank, 0:SIZE].
@@ -1514,14 +1514,9 @@ class LowerCompositeOpsMutator : public IRMutator {
  private:
   [[nodiscard]] static bool ShouldSkipHostCollective(const CallPtr& call) {
     if (!call || !call->op_) return false;
-    // pld.tensor.allgather unified 3-arg: skip the HOST builtin path
-    // (args[0] is a DistributedTensor — pre-staged window); the InCore
-    // composite path (args[0] is Tile/Tensor) must still be lowered here.
-    if (IsOp(call, "pld.tensor.allgather")) {
-      return call->args_.size() == 3 && As<DistributedTensorType>(call->args_[0]->GetType()) != nullptr;
-    }
-    return IsOp(call, "pld.tensor.allreduce") || IsOp(call, "pld.tensor.barrier") ||
-           IsOp(call, "pld.tensor.broadcast") || IsOp(call, "pld.tensor.reduce_scatter");
+    return IsOp(call, "pld.tensor.allgather") || IsOp(call, "pld.tensor.allreduce") ||
+           IsOp(call, "pld.tensor.barrier") || IsOp(call, "pld.tensor.broadcast") ||
+           IsOp(call, "pld.tensor.reduce_scatter");
   }
 
   [[nodiscard]] CompositeLoweringFn LookupRule(const CallPtr& call) const {

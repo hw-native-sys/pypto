@@ -237,7 +237,7 @@ TypePtr DeduceTensorAllGatherType(const std::vector<ExprPtr>& args,
   }
 
   // Unified arg roles for both paths:
-  //   arg[0] = local_data — Tensor/Tile (InCore) or Tensor/DistributedTensor (HOST)
+  //   arg[0] = local_data — Tensor [1, SIZE]
   //   arg[1] = target     — DistributedTensor [NR, SIZE] result window (both paths)
   //   arg[2] = signal     — DistributedTensor INT32 barrier (both paths)
   // local_data type is validated by the lowering passes per their context
@@ -272,7 +272,7 @@ REGISTER_OP("pld.tensor.allgather")
         "`target` is the DistributedTensor [NR, SIZE] result window, "
         "`signal` is the INT32 DistributedTensor barrier; lowered to "
         "builtin.tensor.barrier per chip. "
-        "InCore composite: `local_data` is the rank's chunk (Tile/Tensor [1, SIZE]), "
+        "InCore composite: `local_data` is the rank's chunk (Tensor [1, SIZE]), "
         "`target` is the window-bound DistributedTensor [NR, SIZE] staging area and result, "
         "`signal` is the INT32 DistributedTensor barrier; push-based lowering: "
         "pld.tile.put loop + notify-all/wait-all; "
@@ -280,7 +280,7 @@ REGISTER_OP("pld.tensor.allgather")
     .set_op_category("DistributedOp")
     .add_argument(
         "local_data",
-        "InCore: Tile/Tensor [1, SIZE]; HOST: Tensor [1, SIZE] or DistributedTensor [NR, SIZE] (Input)")
+        "InCore: Tensor [1, SIZE]; HOST: Tensor [1, SIZE] (Input)")
     .add_argument("target", "DistributedTensor [NR, SIZE] result window (InOut)")
     .add_argument("signal", "INT32 DistributedTensor barrier (InOut)")
     .no_memory_spec()

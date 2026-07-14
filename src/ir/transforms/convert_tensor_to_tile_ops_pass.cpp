@@ -1037,32 +1037,17 @@ void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, st
   }
 
   if (IsOp(call, "pld.tensor.allgather")) {
-    // Unified 3-arg:
-    //   HOST (args[0] is DistributedTensor): args[0]=pre-staged window (InOut),
-    //     args[1]=signal (InOut), args[2]=unused.
-    //   InCore (args[0] is Tile/Tensor): args[0]=local_data (In, read-only),
-    //     args[1]=target window (InOut, push target and result),
-    //     args[2]=signal (InOut, barrier).
-    if (call->args_.size() >= 3) {
-      if (As<DistributedTensorType>(call->args_[0]->GetType())) {
-        // HOST: both args[0] (window) and args[1] (signal) are InOut.
-        for (size_t i = 0; i < 2; ++i) {
-          auto origins = CollectReferencedOrigins(call->args_[i], origin_map);
-          MarkAccess(origins, has_read);
-          MarkAccess(origins, has_write);
-        }
-        return;
-      }
-      // InCore: local_data (args_[0]) is In; target (args_[1]) and signal
-      // (args_[2]) are InOut.
-      if (call->args_.size() >= 1) {
-        MarkAccess(CollectReferencedOrigins(call->args_[0], origin_map), has_read);
-      }
-      for (size_t i = 1; i < call->args_.size(); ++i) {
-        auto origins = CollectReferencedOrigins(call->args_[i], origin_map);
-        MarkAccess(origins, has_read);
-        MarkAccess(origins, has_write);
-      }
+    // Unified 3-arg InCore (AnalyzeCallAccess only fires for InCore functions).
+    //   arg[0] = local_data — Tensor [1, SIZE] (In, read-only)
+    //   arg[1] = target     — DistributedTensor window (InOut, push target + result)
+    //   arg[2] = signal     — DistributedTensor INT32 barrier (InOut)
+    if (call->args_.size() >= 1) {
+      MarkAccess(CollectReferencedOrigins(call->args_[0], origin_map), has_read);
+    }
+    for (size_t i = 1; i < call->args_.size(); ++i) {
+      auto origins = CollectReferencedOrigins(call->args_[i], origin_map);
+      MarkAccess(origins, has_read);
+      MarkAccess(origins, has_write);
     }
     return;
   }

@@ -576,8 +576,7 @@ def allgather(
 
     Args:
         local_data: InCore: :class:`pl.Tensor` [1, SIZE] with this rank's
-            chunk.  HOST: :class:`pl.Tensor` [1, SIZE] or
-            :class:`pld.DistributedTensor` [NR, SIZE] pre-staged window.
+            chunk.  HOST: :class:`pl.Tensor` [1, SIZE].
         target: :class:`pld.DistributedTensor` [NR, SIZE] result window
             (window-as-result for both paths).
         signal: INT32 :class:`pld.DistributedTensor` barrier tensor.

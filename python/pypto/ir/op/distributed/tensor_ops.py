@@ -310,7 +310,7 @@ def allgather(
     Unified 3-arg API for both HOST builtin and InCore composite paths.
 
     Unified arg roles for both paths:
-      arg[0] = local_data — Tensor/Tile (InCore) or Tensor/DistributedTensor (HOST)
+      arg[0] = local_data — Tensor [1, SIZE]
       arg[1] = target     — DistributedTensor [NR, SIZE] result window
       arg[2] = signal     — DistributedTensor INT32 barrier
 
@@ -324,8 +324,8 @@ def allgather(
     the host lowering emits ``builtin.tensor.barrier`` per chip to synchronise.
 
     Args:
-        local_data: InCore: Tensor (or Tile) [1, SIZE] with this rank's chunk.
-            HOST: Tensor [1, SIZE] or DistributedTensor [NR, SIZE].
+        local_data: InCore: Tensor [1, SIZE] with this rank's chunk.
+            HOST: Tensor [1, SIZE].
         target: DistributedTensor [NR, SIZE] staging window / result.
         signal: INT32 DistributedTensor barrier.
     """
