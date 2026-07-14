@@ -9,17 +9,30 @@
 
 """Unit tests for the DeriveCallDirections pass and its CallDirectionsResolved verifier.
 
-Transform tests follow the project-standard Before/After/Expected pattern: the
-``Before`` program is run through ``passes.derive_call_directions()`` to produce
-``After``, and the result is compared with ``Expected`` via
-``ir.assert_structural_equal``. The derived ``Call.attrs['arg_directions']``
-vector is faithfully emitted by the python printer (as
-``attrs={"arg_directions": [pl.adir.<name>, ...]}``) and round-trips through the
-parser, so ``Expected`` can spell out the derived directions directly. The
-kernel bodies in ``Expected`` are written in their post-lowering form
+Every transform test follows the project-standard Before/After/Expected pattern:
+the ``Before`` program is run through ``passes.derive_call_directions()`` to
+produce ``After``, and the result is compared with ``Expected`` via
+``ir.assert_structural_equal``. Nothing the pass produces is asserted by poking
+at individual IR fields — each output is spelled out in an ``Expected`` program:
+
+* Derived call-site directions appear as ``attrs={"arg_directions":
+  [pl.adir.<name>, ...]}`` (the printer's own rendering, which round-trips
+  through the parser).
+* A ``pl.no_dep(arg)`` marker additionally appears as ``"arg_direction_overrides":
+  [<index>, ...]`` in the same attrs dict — the pass keeps the marker attr and
+  overwrites the derived direction at each listed slot with ``pl.adir.no_dep``.
+* Phase-0 wrapper materialization appears in the *signature*: a Group/Spmd
+  wrapper param that ``Before`` declares as a bare tensor carries ``pl.Out`` /
+  ``pl.InOut`` in ``Expected``.
+
+The kernel bodies in ``Expected`` are written in their post-lowering form
 (``pl.tile.load`` / ``pl.tensor.create`` / explicit ``level`` and ``role``)
 because the DSL frontend lowers ``pl.load`` / ``pl.create_tensor`` and infers
 the function ``level`` / ``role`` before the pass runs.
+
+The verifier tests (``TestVerify*``) are accept/reject tests over deliberately
+ill-formed IR, so they assert on the raised error rather than on an ``Expected``
+program.
 """
 
 import pypto.language as pl
@@ -1659,109 +1672,35 @@ class TestVerifyAutoDepsPositive:
 # ---------------------------------------------------------------------------
 # pl.no_dep override
 # ---------------------------------------------------------------------------
-#
-# These tests are NOT expressed with the Before/Expected + assert_structural_equal
-# pattern. Reason: ``pl.no_dep(arg)`` records its marker as a separate
-# ``Call.attrs['arg_direction_overrides']`` entry, and the python printer
-# (src/ir/transforms/python_printer.cpp:643-658) only emits the derived
-# ``arg_directions`` vector — it never emits ``arg_direction_overrides``.
-# After DeriveCallDirections the marked call therefore carries TWO attrs
-# (``arg_direction_overrides`` + ``arg_directions``), but any program written
-# from / round-tripped through the printer keeps only ONE, so
-# ``assert_structural_equal`` fails with "Kwargs size mismatch (2 != 1)" on the
-# call's ``attrs``. Until the printer round-trips ``arg_direction_overrides``,
-# these stay as direction-vector inspection tests, and the class overrides the
-# global verification fixture to property-verification-only (no print/parse
-# roundtrip).
-
-
-class _UserCallCollector(ir.IRVisitor):
-    """Collect every non-builtin Call from a Program for inspection."""
-
-    def __init__(self):
-        super().__init__()
-        self.calls: list = []
-
-    def visit_call(self, op):
-        name = op.op.name
-        if not (name.startswith("tile.") or name.startswith("tensor.") or name.startswith("system.")):
-            self.calls.append(op)
-        super().visit_call(op)
-
-
-def _user_calls(program):
-    collector = _UserCallCollector()
-    collector.visit_program(program)
-    return collector.calls
-
-
-def _dirs(call):
-    return list(call.arg_directions)
 
 
 class TestNoDepOverride:
-    """``pl.no_dep(arg)`` at a kernel call site sets ArgDirection.NoDep at that slot."""
+    """``pl.no_dep(arg)`` at a kernel call site sets ArgDirection.NoDep at that slot.
 
-    @pytest.fixture(autouse=True)
-    def _no_roundtrip(self):
-        """Override the global roundtrip fixture for this class only.
-
-        The ``arg_direction_overrides`` attr left by ``pl.no_dep`` now round-trips
-        cleanly (see ``TestOutlineNoDepArgs`` which runs under full roundtrip).
-        The remaining blocker for THESE fixtures is unrelated: their ``kernel``
-        functions declare no return-type annotation, so the printed kernel has
-        no ``-> ...`` and the reparsed call's return type degrades to
-        ``UnknownType`` (TensorType on the original) — a separate print/reparse
-        gap. Fall back to the lighter BEFORE_AND_AFTER property-verification mode.
-        """
-        instruments: list[_core_passes.PassInstrument] = [
-            _core_passes.VerificationInstrument(_core_passes.VerificationMode.BEFORE_AND_AFTER)
-        ]
-        with _core_passes.PassContext(instruments):
-            yield
-
-    @pl.program
-    class _Prog:
-        @pl.function(type=pl.FunctionType.InCore)
-        def kernel(
-            self,
-            a: pl.Tensor[[16, 16], pl.FP32],
-            b: pl.Tensor[[16, 16], pl.FP32],
-            c: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
-        ):
-            return c
-
-        @pl.function(type=pl.FunctionType.Orchestration)
-        def orch(
-            self,
-            a: pl.Tensor[[16, 16], pl.FP32],
-            shared: pl.Tensor[[16, 16], pl.FP32],
-            c: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
-        ):
-            c = self.kernel(a, pl.no_dep(shared), c)
-            return c
+    ``pl.no_dep(x)`` is a call-arg marker: the parser strips the wrapper and
+    records the marked positions in ``Call.attrs['arg_direction_overrides']``
+    (a ``vector<int32_t>`` of arg indices). ``DeriveCallDirections`` derives the
+    directions as usual, then overwrites each listed slot with ``NoDep``, and
+    leaves the ``arg_direction_overrides`` attr in place. So the post-pass call
+    carries BOTH attrs, which is exactly what ``Expected`` spells out: the plain
+    (unwrapped) args plus ``attrs={"arg_directions": [...],
+    "arg_direction_overrides": [...]}`` — the printer's own rendering of the
+    marked call (``arg_directions`` has a bespoke emitter,
+    ``arg_direction_overrides`` is emitted generically by ``PrintAttrValue``).
+    """
 
     def test_no_dep_at_marked_slot(self):
-        new_prog = passes.derive_call_directions()(self._Prog)
-        calls = _user_calls(new_prog)
-        assert len(calls) == 1
-        # 0=a (Input), 1=shared marked NoDep, 2=c (OutputExisting first writer at top level).
-        assert _dirs(calls[0]) == [
-            ir.ArgDirection.Input,
-            ir.ArgDirection.NoDep,
-            ir.ArgDirection.OutputExisting,
-        ]
+        """The marked slot becomes NoDep; the unmarked slots derive normally."""
 
-    def test_no_no_dep_keeps_input(self):
         @pl.program
-        class P:
+        class Before:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
                 a: pl.Tensor[[16, 16], pl.FP32],
                 b: pl.Tensor[[16, 16], pl.FP32],
                 c: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
-            ):
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
                 return c
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -1770,29 +1709,110 @@ class TestNoDepOverride:
                 a: pl.Tensor[[16, 16], pl.FP32],
                 shared: pl.Tensor[[16, 16], pl.FP32],
                 c: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
-            ):
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                c = self.kernel(a, pl.no_dep(shared), c)
+                return c
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def kernel(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                c: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                return c
+
+            @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+            def orch(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                shared: pl.Tensor[[16, 16], pl.FP32],
+                c: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                # 0=a Input, 1=shared marked NoDep, 2=c OutputExisting (first
+                # writer at top level). The override marker survives the pass.
+                c = self.kernel(
+                    a,
+                    shared,
+                    c,
+                    attrs={
+                        "arg_directions": [pl.adir.input, pl.adir.no_dep, pl.adir.output_existing],
+                        "arg_direction_overrides": [1],
+                    },
+                )
+                return c
+
+        After = passes.derive_call_directions()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_no_no_dep_keeps_input(self):
+        """Without a marker the same slot derives to ``Input`` — the control case."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                c: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                return c
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                shared: pl.Tensor[[16, 16], pl.FP32],
+                c: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
                 c = self.kernel(a, shared, c)
                 return c
 
-        new_prog = passes.derive_call_directions()(P)
-        calls = _user_calls(new_prog)
-        assert len(calls) == 1
-        assert _dirs(calls[0]) == [
-            ir.ArgDirection.Input,
-            ir.ArgDirection.Input,
-            ir.ArgDirection.OutputExisting,
-        ]
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def kernel(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                c: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                return c
+
+            @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+            def orch(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                shared: pl.Tensor[[16, 16], pl.FP32],
+                c: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                # No marker, so no ``arg_direction_overrides`` attr at all.
+                c = self.kernel(
+                    a,
+                    shared,
+                    c,
+                    attrs={"arg_directions": [pl.adir.input, pl.adir.input, pl.adir.output_existing]},
+                )
+                return c
+
+        After = passes.derive_call_directions()(Before)
+        ir.assert_structural_equal(After, Expected)
 
     def test_multiple_no_dep_slots(self):
+        """Every marked index is overridden — the marker list is not single-slot."""
+
         @pl.program
-        class P:
+        class Before:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
                 a: pl.Tensor[[16, 16], pl.FP32],
                 b: pl.Tensor[[16, 16], pl.FP32],
                 c: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
-            ):
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
                 return c
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -1801,33 +1821,61 @@ class TestNoDepOverride:
                 a: pl.Tensor[[16, 16], pl.FP32],
                 b: pl.Tensor[[16, 16], pl.FP32],
                 c: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
-            ):
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
                 c = self.kernel(pl.no_dep(a), pl.no_dep(b), c)
                 return c
 
-        new_prog = passes.derive_call_directions()(P)
-        calls = _user_calls(new_prog)
-        assert _dirs(calls[0]) == [
-            ir.ArgDirection.NoDep,
-            ir.ArgDirection.NoDep,
-            ir.ArgDirection.OutputExisting,
-        ]
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def kernel(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                c: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                return c
+
+            @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+            def orch(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                c: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                c = self.kernel(
+                    a,
+                    b,
+                    c,
+                    attrs={
+                        "arg_directions": [pl.adir.no_dep, pl.adir.no_dep, pl.adir.output_existing],
+                        "arg_direction_overrides": [0, 1],
+                    },
+                )
+                return c
+
+        After = passes.derive_call_directions()(Before)
+        ir.assert_structural_equal(After, Expected)
 
     def test_no_dep_on_inout_param_accepted(self):
-        # ``NoDep`` is legal on callee ``InOut`` params: the user opts the slot
-        # out of OverlapMap tracking for both the read and the write side,
-        # asserting out-of-band that there is no RaW / WaW conflict on the
-        # slot. Typical use: paged-attention writes whose offset is
-        # data-dependent (so the compiler cannot prove disjointness) but are
-        # guaranteed disjoint by the runtime allocation protocol.
+        """``NoDep`` overrides an auto-derived ``InOut`` on a callee ``InOut`` param.
+
+        ``NoDep`` is legal on callee ``InOut`` params: the user opts the slot out
+        of OverlapMap tracking for both the read and the write side, asserting
+        out-of-band that there is no RaW / WaW conflict on the slot. Typical use:
+        paged-attention writes whose offset is data-dependent (so the compiler
+        cannot prove disjointness) but are guaranteed disjoint by the runtime
+        allocation protocol.
+        """
+
         @pl.program
-        class P:
+        class Before:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
                 a: pl.Tensor[[16, 16], pl.FP32],
                 b: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
-            ):
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
                 return b
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -1835,31 +1883,58 @@ class TestNoDepOverride:
                 self,
                 a: pl.Tensor[[16, 16], pl.FP32],
                 b: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
-            ):
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
                 b = self.kernel(a, pl.no_dep(b))
                 return b
 
-        new_prog = passes.derive_call_directions()(P)
-        calls = _user_calls(new_prog)
-        assert len(calls) == 1
-        # 0=a (Input), 1=b marked NoDep (overrides the auto-derived InOut).
-        assert _dirs(calls[0]) == [ir.ArgDirection.Input, ir.ArgDirection.NoDep]
-        # The post-pass verifier must also accept the resulting IR.
-        _verify_call_directions(new_prog)
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def kernel(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                return b
+
+            @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+            def orch(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                # 0=a Input; 1=b marked NoDep, overriding the auto-derived InOut.
+                b = self.kernel(
+                    a,
+                    b,
+                    attrs={
+                        "arg_directions": [pl.adir.input, pl.adir.no_dep],
+                        "arg_direction_overrides": [1],
+                    },
+                )
+                return b
+
+        After = passes.derive_call_directions()(Before)
+        ir.assert_structural_equal(After, Expected)
+        # The post-pass verifier must also accept NoDep on an InOut param.
+        _verify_call_directions(After)
 
     def test_no_dep_on_out_param_accepted(self):
-        # ``NoDep`` is also legal on callee ``Out`` params (the write-side
-        # analogue of the InOut case). The auto-deriver would otherwise pick
-        # ``OutputExisting`` for a first writer at top level; the override
-        # forces ``NoDep`` and the verifier accepts it.
+        """``NoDep`` overrides an auto-derived ``OutputExisting`` on a callee ``Out`` param.
+
+        The write-side analogue of the InOut case: the auto-deriver would pick
+        ``OutputExisting`` for a first writer at top level; the override forces
+        ``NoDep`` and the verifier accepts it.
+        """
+
         @pl.program
-        class P:
+        class Before:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
                 a: pl.Tensor[[16, 16], pl.FP32],
                 b: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
-            ):
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
                 return b
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -1867,17 +1942,41 @@ class TestNoDepOverride:
                 self,
                 a: pl.Tensor[[16, 16], pl.FP32],
                 b: pl.Tensor[[16, 16], pl.FP32],
-            ):
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
                 b = self.kernel(a, pl.no_dep(b))
                 return b
 
-        new_prog = passes.derive_call_directions()(P)
-        calls = _user_calls(new_prog)
-        assert len(calls) == 1
-        # 0=a (Input), 1=b marked NoDep (overrides the auto-derived
-        # OutputExisting). The verifier must accept the resulting IR.
-        assert _dirs(calls[0]) == [ir.ArgDirection.Input, ir.ArgDirection.NoDep]
-        _verify_call_directions(new_prog)
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def kernel(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                return b
+
+            @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+            def orch(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                # 0=a Input; 1=b marked NoDep, overriding the auto-derived
+                # OutputExisting.
+                b = self.kernel(
+                    a,
+                    b,
+                    attrs={
+                        "arg_directions": [pl.adir.input, pl.adir.no_dep],
+                        "arg_direction_overrides": [1],
+                    },
+                )
+                return b
+
+        After = passes.derive_call_directions()(Before)
+        ir.assert_structural_equal(After, Expected)
+        _verify_call_directions(After)
 
 
 class TestMaterializeWrapperDirections:
@@ -1888,13 +1987,12 @@ class TestMaterializeWrapperDirections:
     writes. ``DeriveCallDirections`` recovers the true direction once and stores
     it in the signature, so every downstream consumer reads
     ``callee.param_directions`` instead of recomputing it.
-    """
 
-    def _dirs_of(self, program, func_name):
-        for _gv, func in program.functions.items():
-            if func.name == func_name:
-                return list(func.param_directions)
-        raise AssertionError(f"function '{func_name}' not found in program")
+    The materialized signature is spelled directly in each ``Expected`` (the
+    wrapper param carries ``pl.Out`` / ``pl.InOut`` where ``Before`` declared a
+    bare tensor), so the rewritten directions are checked structurally rather
+    than by inspecting ``func.param_directions``.
+    """
 
     def test_group_wrapper_out_direction_materialized(self):
         """A Group declaring both params In gains Out on the param its kernel writes."""
@@ -1962,9 +2060,7 @@ class TestMaterializeWrapperDirections:
                 r = self.group(x, dst, attrs={"arg_directions": [pl.adir.input, pl.adir.output_existing]})
                 return r
 
-        assert self._dirs_of(Before, "group") == [ir.ParamDirection.In, ir.ParamDirection.In]
         After = passes.derive_call_directions()(Before)
-        assert self._dirs_of(After, "group") == [ir.ParamDirection.In, ir.ParamDirection.Out]
         ir.assert_structural_equal(After, Expected)
         _verify_call_directions(After)
 
@@ -1993,8 +2089,29 @@ class TestMaterializeWrapperDirections:
                 r: pl.Tensor[[64], pl.FP32] = self.shard(acc)
                 return r
 
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def kernel(self, acc: pl.InOut[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+                t = pl.tile.load(acc, [0], [64], [64], target_memory=pl.Mem.Vec)
+                t2 = pl.tile.add(t, t)
+                ret = pl.tile.store(t2, [0], acc)
+                return ret
+
+            # `acc` is now declared InOut: the pass wrote the effective direction
+            # back. A stale `In` would have left both call sites as Input.
+            @pl.function(type=pl.FunctionType.Spmd)
+            def shard(self, acc: pl.InOut[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+                r = self.kernel(acc, attrs={"arg_directions": [pl.adir.inout]})
+                return r
+
+            @pl.function
+            def main(self, acc: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                r = self.shard(acc, attrs={"arg_directions": [pl.adir.inout]})
+                return r
+
         After = passes.derive_call_directions()(Before)
-        assert self._dirs_of(After, "shard") == [ir.ParamDirection.InOut]
+        ir.assert_structural_equal(After, Expected)
         _verify_call_directions(After)
 
     def test_nested_group_chain_propagates_out(self):
@@ -2039,9 +2156,49 @@ class TestMaterializeWrapperDirections:
                 r: pl.Tensor[[64], pl.FP32] = self.outer(x, dst)
                 return r
 
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec)
+                ret = pl.tile.store(t, [0], out)
+                return ret
+
+            # Both wrappers now declare `out` as Out — the direction propagated
+            # up the whole Group -> Group -> InCore chain.
+            @pl.function(type=pl.FunctionType.Group, level=pl.Level.CORE_GROUP, role=pl.Role.SubWorker)
+            def inner(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                r = self.kernel(x, out, attrs={"arg_directions": [pl.adir.input, pl.adir.output_existing]})
+                return r
+
+            @pl.function(type=pl.FunctionType.Group, level=pl.Level.CORE_GROUP, role=pl.Role.SubWorker)
+            def outer(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                r = self.inner(x, out, attrs={"arg_directions": [pl.adir.input, pl.adir.output_existing]})
+                return r
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                dst: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                r = self.outer(x, dst, attrs={"arg_directions": [pl.adir.input, pl.adir.output_existing]})
+                return r
+
         After = passes.derive_call_directions()(Before)
-        assert self._dirs_of(After, "inner") == [ir.ParamDirection.In, ir.ParamDirection.Out]
-        assert self._dirs_of(After, "outer") == [ir.ParamDirection.In, ir.ParamDirection.Out]
+        ir.assert_structural_equal(After, Expected)
         _verify_call_directions(After)
 
     def test_declared_out_never_demoted_when_no_inner_call_writes_it(self):
@@ -2050,7 +2207,8 @@ class TestMaterializeWrapperDirections:
         ``scratch`` is declared Out but the wrapper's only inner call takes it
         as In. A non-monotone merge would infer ``In`` and write that loss back
         into the signature, silently dropping the write dependency at every
-        call site.
+        call site — visible in ``Expected`` as ``main``'s first arg keeping
+        ``output_existing`` rather than degrading to ``input``.
         """
 
         @pl.program
@@ -2084,9 +2242,47 @@ class TestMaterializeWrapperDirections:
                 r: pl.Tensor[[64], pl.FP32] = self.group(a, dst)
                 return r
 
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec)
+                ret = pl.tile.store(t, [0], out)
+                return ret
+
+            # `scratch` keeps its declared Out (never demoted to In); `out` is
+            # promoted In -> Out from the inner call.
+            @pl.function(type=pl.FunctionType.Group, level=pl.Level.CORE_GROUP, role=pl.Role.SubWorker)
+            def group(
+                self,
+                scratch: pl.Out[pl.Tensor[[64], pl.FP32]],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                r = self.kernel(
+                    scratch, out, attrs={"arg_directions": [pl.adir.input, pl.adir.output_existing]}
+                )
+                return r
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[64], pl.FP32],
+                dst: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                # `a` resolves to OutputExisting *because* group's `scratch`
+                # survived as Out — the monotone-merge guarantee, observable at
+                # the call site.
+                r = self.group(
+                    a, dst, attrs={"arg_directions": [pl.adir.output_existing, pl.adir.output_existing]}
+                )
+                return r
+
         After = passes.derive_call_directions()(Before)
-        # scratch keeps its declared Out; out is promoted In -> Out.
-        assert self._dirs_of(After, "group") == [ir.ParamDirection.Out, ir.ParamDirection.Out]
+        ir.assert_structural_equal(After, Expected)
         _verify_call_directions(After)
 
     def test_mutually_recursive_wrappers_reach_a_fixed_point(self):
@@ -2099,12 +2295,10 @@ class TestMaterializeWrapperDirections:
         promoted — leaving ``z.p`` as ``In`` and dropping its write dependency.
         Iterating the monotone merge to a fixed point cannot.
 
-        Runs under an empty ``PassContext`` because the repo conftest's
-        roundtrip instrument cannot handle this program: the printer emits
-        functions in dependency order, which a wrapper cycle makes impossible,
-        so ``a`` is printed before ``z`` and the reparsed forward reference
-        drops the call's ``arg_directions`` attrs. That is a printer/parser
-        limitation, orthogonal to the direction analysis under test.
+        The cycle forces at least one call to reference a function declared later
+        in the class, so ``Expected`` (like ``Before``) contains a forward
+        reference — exercising the parser's attrs-preserving rebuild of an
+        annotated assignment whose callee return type is not yet known.
         """
 
         @pl.program
@@ -2147,11 +2341,57 @@ class TestMaterializeWrapperDirections:
                 r: pl.Tensor[[64], pl.FP32] = self.a(x, p)
                 return r
 
-        with _core_passes.PassContext([]):
-            After = passes.derive_call_directions()(Before)
-        # `p` is written through the kernel, so it is Out on both wrappers.
-        assert self._dirs_of(After, "a") == [ir.ParamDirection.In, ir.ParamDirection.Out]
-        assert self._dirs_of(After, "z") == [ir.ParamDirection.In, ir.ParamDirection.Out]
+        @pl.program
+        class Expected:
+            # `p` is written through the kernel, so it is Out on BOTH wrappers —
+            # the fixed point. A recursive walk with a cycle guard would leave
+            # `z.p` as In here.
+            @pl.function(type=pl.FunctionType.Group, level=pl.Level.CORE_GROUP, role=pl.Role.SubWorker)
+            def a(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                p: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                # `z` writes `p` first (OutputExisting); `kern` is then the second
+                # writer-unit in the same scope, so R-prior promotes it to InOut.
+                _r0: pl.Tensor[[64], pl.FP32] = self.z(
+                    x, p, attrs={"arg_directions": [pl.adir.input, pl.adir.output_existing]}
+                )
+                r1: pl.Tensor[[64], pl.FP32] = self.kern(
+                    x, p, attrs={"arg_directions": [pl.adir.input, pl.adir.inout]}
+                )
+                return r1
+
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def kern(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec)
+                r = pl.tile.store(t, [0], out)
+                return r
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                d: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                r = self.a(x, d, attrs={"arg_directions": [pl.adir.input, pl.adir.output_existing]})
+                return r
+
+            @pl.function(type=pl.FunctionType.Group, level=pl.Level.CORE_GROUP, role=pl.Role.SubWorker)
+            def z(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                p: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                r = self.a(x, p, attrs={"arg_directions": [pl.adir.input, pl.adir.output_existing]})
+                return r
+
+        After = passes.derive_call_directions()(Before)
+        ir.assert_structural_equal(After, Expected)
         # A stale wrapper signature would make the pass fail its own verifier.
         _verify_call_directions(After)
 

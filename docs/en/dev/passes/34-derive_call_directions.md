@@ -170,7 +170,12 @@ passes.def("derive_call_directions", &pass::DeriveCallDirections,
 
 **Tests**: `tests/ut/ir/transforms/test_derive_call_directions.py`
 
-- `TestDeriveDirectionMatrix` — one test per cell of the (callee_dir, origin) → ArgDirection mapping table, including R-seq (`pl.range`, `while`) and R-prior (top-level + branch / parallel-after-top-level) edge cases
+Every transform test uses the Before/After/Expected pattern — the derived output is spelled out in an `Expected` program and compared with `ir.assert_structural_equal`, never asserted by inspecting individual IR fields. Directions surface in `Expected` as `attrs={"arg_directions": [pl.adir.<name>, ...]}`, a `pl.no_dep` marker as the companion `"arg_direction_overrides": [<index>, ...]`, and phase-0 wrapper materialization as `pl.Out` / `pl.InOut` on the wrapper's own parameter.
+
+- `TestDeriveDirectionMatrix` — one test per cell of the (callee_dir, origin) → ArgDirection mapping table, including R-seq (`pl.range`, `while`), R-prior (top-level + branch / parallel-after-top-level) and R-enclosing edge cases
 - `TestDeriveIdempotent` — running the pass twice yields structurally equal IR
 - `TestDerivePreservesExplicit` — pre-populated `arg_directions` is not overwritten
-- `TestVerifyPositive` / `TestVerifyNegative` — the `CallDirectionsResolved` property verifier accepts the pass output and rejects ill-formed `arg_directions` assignments
+- `TestDeriveSubmit` / `TestDeriveSpmdSubmit` — `Submit`-ness, `deps_` and the SPMD launch spec survive; directions are derived only for the caller-supplied args prefix
+- `TestNoDepOverride` — `pl.no_dep(arg)` overrides the derived direction at the marked slot with `NoDep` (legal on callee `In`, `Out` and `InOut` params)
+- `TestMaterializeWrapperDirections` — phase 0 writes effective Group/Spmd directions into the signature, including the nested-chain, never-demote and mutually-recursive fixed-point cases
+- `TestVerifyPositive` / `TestVerifyNegative` / `TestVerifyWrapperDirections` — the `CallDirectionsResolved` property verifier accepts the pass output and rejects ill-formed `arg_directions` assignments and stale wrapper signatures

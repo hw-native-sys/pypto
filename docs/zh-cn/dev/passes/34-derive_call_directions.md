@@ -170,7 +170,12 @@ passes.def("derive_call_directions", &pass::DeriveCallDirections,
 
 **Tests**：`tests/ut/ir/transforms/test_derive_call_directions.py`
 
-- `TestDeriveDirectionMatrix` —— 对 (callee_dir, origin) → ArgDirection 映射表的每个单元各一个测试，包括 R-seq（`pl.range`、`while`）和 R-prior（顶层 + 分支 / 顶层之后的 parallel）边界情形
+所有 transform 测试都采用 Before/After/Expected 模式——推导结果完整写在 `Expected` 程序里，并用 `ir.assert_structural_equal` 比较，绝不通过检查单个 IR 字段来断言。在 `Expected` 中，方向以 `attrs={"arg_directions": [pl.adir.<name>, ...]}` 呈现；`pl.no_dep` 标记以配套的 `"arg_direction_overrides": [<index>, ...]` 呈现；phase 0 的 wrapper 方向固化则体现为 wrapper 自身参数上的 `pl.Out` / `pl.InOut`。
+
+- `TestDeriveDirectionMatrix` —— 对 (callee_dir, origin) → ArgDirection 映射表的每个单元各一个测试，包括 R-seq（`pl.range`、`while`）、R-prior（顶层 + 分支 / 顶层之后的 parallel）和 R-enclosing 边界情形
 - `TestDeriveIdempotent` —— 两次运行该 pass 得到结构相等的 IR
 - `TestDerivePreservesExplicit` —— 预填充的 `arg_directions` 不被覆盖
-- `TestVerifyPositive` / `TestVerifyNegative` —— `CallDirectionsResolved` property verifier 接受该 pass 的输出，并拒绝格式错误的 `arg_directions` 赋值
+- `TestDeriveSubmit` / `TestDeriveSpmdSubmit` —— `Submit` 类型、`deps_` 和 SPMD launch spec 均被保留；方向只对调用方提供的 args 前缀推导
+- `TestNoDepOverride` —— `pl.no_dep(arg)` 用 `NoDep` 覆盖被标记槽位上推导出的方向（在 callee 的 `In`、`Out`、`InOut` 参数上均合法）
+- `TestMaterializeWrapperDirections` —— phase 0 将 Group/Spmd 的有效方向写回签名，涵盖嵌套链、不降级以及互递归不动点等情形
+- `TestVerifyPositive` / `TestVerifyNegative` / `TestVerifyWrapperDirections` —— `CallDirectionsResolved` property verifier 接受该 pass 的输出，并拒绝格式错误的 `arg_directions` 赋值和陈旧的 wrapper 签名
