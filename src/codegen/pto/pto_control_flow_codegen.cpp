@@ -99,14 +99,10 @@ void PTOCodegen::VisitStmt_(const YieldStmtPtr& op) {
           // GetTensorBasePtr would fall back to the view SSA). Both branches
           // yield the same backing, so the recorded base ptr is consistent.
           fs_.view_ssa_to_base_ptr[view] = GetTensorBasePtr(tensor_var);
-          std::string comm_ctx = GetCommCtxSSAFor(tensor_var.get());
           if (As<ir::DistributedTensorType>(expr->GetType())) {
-            INTERNAL_CHECK_SPAN(!comm_ctx.empty(), op->span_)
+            INTERNAL_CHECK_SPAN(!GetCommCtxSSAFor(tensor_var.get()).empty(), op->span_)
                 << "Internal error: yielded DistributedTensor '" << tensor_var->name_hint_
                 << "' has no CommContext binding";
-          }
-          if (!comm_ctx.empty()) {
-            fs_.view_ssa_to_comm_ctx[view] = std::move(comm_ctx);
           }
           yielded_values.push_back(view);
           continue;
@@ -322,6 +318,7 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
     std::vector<std::string> inplace_return_comm_ctx(op->return_vars_.size());
 
     auto emit_branch = [&](const StmtPtr& body, const char* branch_name) {
+      const YieldStmtPtr yield = FindBranchYield(body);
       // Fix #1956: under memory_planner=PTOAS, MemoryReuse (which would alias the
       // branch yields onto the phi return_var's canonical MemRef via
       // YieldFixupMutator) is skipped. Without it, each branch's tile producer
@@ -330,19 +327,17 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
       // return_var's (head-declared) handle so this branch's producer writes it.
       // Under PYPTO (emit_tile_addr_) the IR-level aliasing already holds, so
       // leave the bindings untouched.
-      if (!emit_tile_addr_) {
-        if (auto yield = FindBranchYield(body)) {
-          for (size_t i = 0; i < op->return_vars_.size(); ++i) {
-            if (i >= yield->value_.size()) continue;
-            if (!As<TileType>(op->return_vars_[i]->GetType())) continue;
-            auto src = ir::AsVarLike(yield->value_[i]);
-            if (!src) continue;
-            // Only re-point a branch-local producer; an outer var yielded through
-            // the branch is read elsewhere and must keep its own handle.
-            if (!IsDefinedInBranch(src.get(), body)) continue;
-            auto phi_it = fs_.var_to_mlir.find(GetVarKey(op->return_vars_[i]));
-            if (phi_it != fs_.var_to_mlir.end()) BindVarToMlir(src, phi_it->second);
-          }
+      if (!emit_tile_addr_ && yield) {
+        for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+          if (i >= yield->value_.size()) continue;
+          if (!As<TileType>(op->return_vars_[i]->GetType())) continue;
+          auto src = ir::AsVarLike(yield->value_[i]);
+          if (!src) continue;
+          // Only re-point a branch-local producer; an outer var yielded through
+          // the branch is read elsewhere and must keep its own handle.
+          if (!IsDefinedInBranch(src.get(), body)) continue;
+          auto phi_it = fs_.var_to_mlir.find(GetVarKey(op->return_vars_[i]));
+          if (phi_it != fs_.var_to_mlir.end()) BindVarToMlir(src, phi_it->second);
         }
       }
       fs_.yield_buffer.clear();
@@ -360,13 +355,19 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
         } else if (As<ir::ArrayType>(op->return_vars_[i]->GetType()) ||
                    ir::AsTensorTypeLike(op->return_vars_[i]->GetType())) {
           if (As<ir::DistributedTensorType>(op->return_vars_[i]->GetType())) {
-            auto comm_ctx_it = fs_.view_ssa_to_comm_ctx.find(branch_yields[i]);
-            INTERNAL_CHECK_SPAN(comm_ctx_it != fs_.view_ssa_to_comm_ctx.end(), op->span_)
+            // Resolve the context from the yielded Var, as For/While do for their
+            // init values. A yield whose tensor has no registered tensor_view falls
+            // back to the plain expr lowering above, so keying off the yielded SSA
+            // would miss it.
+            std::string comm_ctx;
+            if (yield && i < yield->value_.size()) {
+              if (auto src = ir::AsVarLike(yield->value_[i])) comm_ctx = GetCommCtxSSAFor(src.get());
+            }
+            INTERNAL_CHECK_SPAN(!comm_ctx.empty(), op->span_)
                 << "Internal error: IfStmt " << branch_name << "-branch DistributedTensor return_var '"
-                << op->return_vars_[i]->name_hint_ << "' yielded SSA '" << branch_yields[i]
-                << "' without a CommContext binding";
+                << op->return_vars_[i]->name_hint_ << "' has no CommContext binding";
             if (inplace_return_comm_ctx[i].empty()) {
-              inplace_return_comm_ctx[i] = comm_ctx_it->second;
+              inplace_return_comm_ctx[i] = std::move(comm_ctx);
             } else {
               // This tensor result stays outside scf.if and aliases one backing
               // SSA. Choosing either branch's context here could pair the other
@@ -374,13 +375,12 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
               // Supporting that selection requires merging the base pointer and
               // CommContext together, then rebuilding the static tensor view;
               // tracked by GitHub issue #2027.
-              INTERNAL_CHECK_SPAN(inplace_return_comm_ctx[i] == comm_ctx_it->second, op->span_)
-                  << "Internal error: IfStmt DistributedTensor return_var '"
+              CHECK_SPAN(inplace_return_comm_ctx[i] == comm_ctx, op->span_)
+                  << "Assigning a different DistributedTensor in each branch of an `if` is not supported: '"
                   << op->return_vars_[i]->name_hint_
-                  << "' yields different CommContext SSAs across branches: " << inplace_return_comm_ctx[i]
-                  << " vs " << comm_ctx_it->second
-                  << "; dynamic DistributedTensor selection must merge its base pointer and CommContext "
-                     "together (not yet supported; see GitHub issue #2027)";
+                  << "' would take its data pointer from one allocation and its communication context from "
+                     "another. Assign a single DistributedTensor before the `if`, and branch on the data "
+                     "read from it instead (see GitHub issue #2027).";
             }
           }
           // In-place backing SSA (array or tensor); bound to the return var

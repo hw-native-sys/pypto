@@ -43,7 +43,7 @@ import re
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
-from pypto import DataType, InternalError, backend, codegen, ir
+from pypto import DataType, backend, codegen, ir
 from pypto.backend import BackendType
 from pypto.ir.builder import IRBuilder
 from pypto.ir.op.distributed import system_ops as dist_system
@@ -549,8 +549,8 @@ def test_if_merged_distributed_metadata_rejects_conflicting_contexts():
             pld.system.wait(result, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Eq)
 
     with pytest.raises(
-        InternalError,
-        match="dynamic DistributedTensor selection must merge its base pointer and CommContext together",
+        ValueError,
+        match="Assigning a different DistributedTensor in each branch of an `if` is not supported",
     ):
         _generate_mlir(P)
 
