@@ -1178,13 +1178,14 @@ class TestGenerateArgUnpacking:
         dim = ir.Neg(var, idx, span)
         ty = ir.TensorType([dim, ir.ConstInt(64, idx, span)], DataType.BF16)
 
+        # The param type alone drives the collector, so the body just hands it
+        # back: ``Neg(V_NEG)`` is provably non-positive, and any load out of it
+        # would be a read past the end of the tensor.
         ib = IRBuilder()
         with ib.function("dyn_unary_func", type=ir.FunctionType.InCore) as f:
             a = f.param("a", ty)
-            t = ib.let("t", tile.load(a, [0, 0], [16, 64]))
-            ret = ib.let("ret", t)
             f.return_type(ty)
-            ib.return_stmt(ret)
+            ib.return_stmt(a)
         func = f.get_result()
 
         with pytest.raises(ValueError, match="non-invertible"):

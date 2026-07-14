@@ -197,22 +197,9 @@ TypePtr DeduceTensorSliceType(const std::vector<ExprPtr>& args,
         << scalar_type->dtype_.ToString();
   }
 
-  // Extract the full (pre-reduction) shape dimensions.
-  // If args[1] is MakeTuple, extract elements directly to preserve constants
-  // Otherwise use TupleGetItemExpr for runtime tuples
-  std::vector<ExprPtr> full_shape;
-  full_shape.reserve(shape_tuple_type->types_.size());
-
-  if (auto make_tuple = As<MakeTuple>(args[1])) {
-    // MakeTuple: extract elements directly to preserve ConstInt
-    full_shape = make_tuple->elements_;
-  } else {
-    // Runtime tuple: use TupleGetItemExpr
-    for (size_t i = 0; i < shape_tuple_type->types_.size(); ++i) {
-      full_shape.emplace_back(
-          std::make_shared<TupleGetItemExpr>(args[1], static_cast<int>(i), args[1]->span_));
-    }
-  }
+  // The full (pre-reduction) window and its origin, both in source coordinates.
+  const std::vector<ExprPtr> full_shape = ExtractTupleElements(args[1], shape_tuple_type->types_.size());
+  const std::vector<ExprPtr> offsets = ExtractTupleElements(args[2], offset_tuple_type->types_.size());
 
   // Optional drop_dims (5th arg): axes erased from the result type. Validated
   // against the full pre-reduction shape (each must be a static unit dim).
@@ -220,50 +207,80 @@ TypePtr DeduceTensorSliceType(const std::vector<ExprPtr>& args,
   const std::vector<int64_t> drop_dims = ParseSliceDropDims(drop_dims_arg, full_shape, "tensor.slice");
   const std::vector<ExprPtr> new_shape = ApplyDropDims(full_shape, drop_dims);
 
-  // Read optional pad_value kwarg (default PadValue::null = no padding).
-  PadValue pad_value = PadValue::null;
+  // Optional pad_value kwarg. Absent means "not overridden": the source's pad
+  // mode carries through instead (see result_pad below).
+  std::optional<PadValue> pad_value;
   for (const auto& [k, v] : kwargs) {
     if (k != "pad_value") continue;
     CHECK(v.type() == typeid(PadValue))
         << "tensor.slice pad_value must be a PadValue enum, got " << v.type().name();
     pad_value = std::any_cast<PadValue>(v);
-    CHECK(pad_value == PadValue::null || pad_value == PadValue::zero || pad_value == PadValue::max ||
-          pad_value == PadValue::min)
-        << "tensor.slice pad_value has invalid enum value: " << static_cast<int>(pad_value);
+    CHECK(*pad_value == PadValue::null || *pad_value == PadValue::zero || *pad_value == PadValue::max ||
+          *pad_value == PadValue::min)
+        << "tensor.slice pad_value has invalid enum value: " << static_cast<int>(*pad_value);
     break;
   }
 
   // valid_shape (4th arg): an empty MakeTuple means "no valid_shape" — that form
   // exists so callers can pass drop_dims (5th arg) without a custom valid_shape.
-  bool has_valid_shape = false;
-  std::vector<ExprPtr> valid_shape;
+  // It is a *request*, given at the full pre-reduction rank; the rule below
+  // intersects it with what the source actually has under the window.
+  std::vector<ExprPtr> requested_valid;
   if (args.size() >= 4) {
     auto valid_shape_tuple = As<MakeTuple>(args[3]);
     CHECK(valid_shape_tuple) << "tensor.slice valid_shape (4th argument) must be a MakeTuple";
-    if (!valid_shape_tuple->elements_.empty()) {
-      has_valid_shape = true;
-      if (drop_dims.empty()) {
-        valid_shape = valid_shape_tuple->elements_;
-      } else {
-        // valid_shape is given over the full (pre-reduction) rank; drop the same axes.
-        CHECK(valid_shape_tuple->elements_.size() == full_shape.size())
-            << "tensor.slice valid_shape rank " << valid_shape_tuple->elements_.size()
-            << " must match shape rank " << full_shape.size() << " when drop_dims is set";
-        valid_shape = ApplyDropDims(valid_shape_tuple->elements_, drop_dims);
-      }
-    }
+    requested_valid = valid_shape_tuple->elements_;
   }
 
+  // A slice is a view into the source allocation, so the window must lie inside
+  // it and the result can never be valid where the source is not. clamp=True
+  // sanctions a ragged window and narrows the valid region to the source edge.
+  //
+  // The rule needs the window to be a rectangle in source coordinates, which
+  // holds whenever the window, the offsets, and the source share one rank. A
+  // lower-rank window is instead a reinterpreting view whose dim correspondence
+  // OptimizeOrchTensors materializes as strides (e.g. a 2D window over a 3D
+  // parent); that form is not a plain rectangle, so it keeps the validity it was
+  // given rather than being intersected against the wrong axes.
+  std::vector<ExprPtr> full_valid;
+  if (full_shape.size() == tensor_type->shape_.size() && offsets.size() == full_shape.size()) {
+    full_valid = InferWindowReadValidShape({
+        /*source_physical=*/tensor_type->shape_,
+        /*source_valid=*/GetEffectiveTensorValidShape(*tensor_type),
+        /*offsets=*/offsets,
+        /*window=*/full_shape,
+        /*requested_valid=*/requested_valid,
+        /*kind=*/WindowReadKind::kView,
+        /*clamp=*/GetKwargOr<bool>(kwargs, "clamp", false),
+        /*op_name=*/"tensor.slice",
+        /*bounds_remedy=*/
+        "Pass clamp=True -- pl.slice(x, shape, offset, clamp=True) -- to narrow the valid region to "
+        "the source edge instead",
+        /*span=*/args[0]->span_,
+    });
+  } else {
+    CHECK(requested_valid.empty() || requested_valid.size() == full_shape.size())
+        << "tensor.slice requires valid_shape to have the same rank as shape, but got valid_shape rank "
+        << requested_valid.size() << " and shape rank " << full_shape.size();
+    full_valid = requested_valid.empty() ? full_shape : requested_valid;
+  }
+  ValidateDropDimsValidExtents(drop_dims, full_valid, "tensor.slice", args[0]->span_);
+  const std::vector<ExprPtr> valid_shape = ApplyDropDims(full_valid, drop_dims);
+
+  // A read view over padded bytes has to keep saying they are padded, so the
+  // source pad mode carries through unless the caller overrides it. The
+  // TensorType constructor drops the view again when valid_shape turns out to be
+  // the full shape and no other view field is set.
+  const PadValue source_pad = tensor_type->tensor_view_ ? tensor_type->tensor_view_->pad : PadValue::null;
+  const PadValue result_pad = pad_value.value_or(source_pad);
+
   // View preserves dtype but has new shape (which can have different rank than input).
-  // If valid_shape is provided or pad_value is set, build a TensorView. When the
-  // source is a DistributedTensorType, the result keeps that kind and carries
-  // the same window_buffer_ — a slice is still a view into the same comm-group
-  // allocation.
+  // When the source is a DistributedTensorType, the result keeps that kind and
+  // carries the same window_buffer_ — a slice is still a view into the same
+  // comm-group allocation.
   std::optional<TensorView> result_tv;
-  if (has_valid_shape) {
-    result_tv = TensorView({}, TensorLayout::ND, valid_shape, pad_value);
-  } else if (pad_value != PadValue::null) {
-    result_tv = TensorView(std::vector<ExprPtr>{}, TensorLayout::ND, std::vector<ExprPtr>{}, pad_value);
+  if (!AreExprVectorsEqual(valid_shape, new_shape) || result_pad != PadValue::null) {
+    result_tv = TensorView({}, TensorLayout::ND, valid_shape, result_pad);
   }
   if (auto dt = As<DistributedTensorType>(args[0]->GetType())) {
     return std::make_shared<DistributedTensorType>(new_shape, tensor_type->dtype_, std::nullopt,
@@ -514,6 +531,7 @@ REGISTER_OP("tensor.slice")
     .add_argument("drop_dims", "Optional axes (MakeTuple of ConstInt) erased from the result type")
     .set_output_memory_inherit_input()
     .set_attr<PadValue>("pad_value")
+    .set_attr<bool>("clamp")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorSliceType(args, kwargs);

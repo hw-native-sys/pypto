@@ -31,6 +31,7 @@
 
 #include "pypto/core/dtype.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/printer.h"  // NOLINT(misc-include-cleaner) -- needed for operator<< on ExprPtr
 #include "pypto/ir/type.h"
@@ -221,6 +222,123 @@ struct ValidShapeBoundsError {
 std::vector<ValidShapeBoundsError> ValidateValidShapeBounds(const std::vector<ExprPtr>& valid,
                                                             const std::vector<ExprPtr>& physical,
                                                             const std::string& type_kind);
+
+/**
+ * @brief Read the elements of a tuple-typed operand
+ *
+ * A ``MakeTuple`` operand yields its elements directly, which preserves the
+ * ``ConstInt``s the arithmetic analyzer needs to fold. Any other tuple
+ * expression is only reachable element-wise, through a ``TupleGetItemExpr``
+ * projection.
+ *
+ * @param tuple_expr A tuple-typed operand
+ * @param rank Arity of the tuple; unused for a ``MakeTuple``, which knows its own
+ * @return One expression per tuple element
+ */
+std::vector<ExprPtr> ExtractTupleElements(const ExprPtr& tuple_expr, size_t rank);
+
+/**
+ * @brief How a window read reaches the bytes of its source
+ *
+ * The two kinds differ only in which extent must lie inside the source
+ * allocation, and therefore in what a non-clamping read is allowed to promise.
+ */
+enum class WindowReadKind {
+  /// The result aliases the source allocation (``tensor.slice``, ``tile.slice``,
+  /// ``tile.extract``). Every element of the window is addressable through the
+  /// result, so the whole window must lie inside the source.
+  kView,
+  /// The result is a fresh buffer filled by a transfer (``tile.load``). Only the
+  /// valid extent is actually read, so the destination window may deliberately
+  /// overhang the source; the bounds obligation covers the read extent instead.
+  kCopy,
+};
+
+/**
+ * @brief Inputs to the shared window-read valid-region rule
+ *
+ * All shape-like vectors are in source coordinates and must share one rank,
+ * except ``requested_valid`` which may be empty to mean "no explicit request".
+ */
+struct WindowReadValidShapeParams {
+  std::vector<ExprPtr> source_physical;  ///< Physical shape of the source
+  /// Source valid shape, already resolved to the source rank by ``GetValidShape``
+  /// / ``GetEffectiveTensorValidShape`` — never empty.
+  std::vector<ExprPtr> source_valid;
+  std::vector<ExprPtr> offsets;          ///< Window origin, in source coordinates
+  std::vector<ExprPtr> window;           ///< Physical shape of the result window
+  std::vector<ExprPtr> requested_valid;  ///< Explicit valid request; empty means "none"
+  WindowReadKind kind = WindowReadKind::kView;
+  bool clamp = false;   ///< Sanction a ragged window that crosses the source edge
+  std::string op_name;  ///< Operator name, used in diagnostics
+  /// Way out, appended to a physical-bounds rejection. Reads that can clamp point
+  /// the caller at ``clamp=True``; an on-chip tile window, which nothing can
+  /// clamp, has to say so instead of naming an option it does not have.
+  std::string bounds_remedy;
+  Span span = Span::unknown();
+};
+
+/**
+ * @brief Derive the valid region of a window read
+ *
+ * Implements the one rule shared by every window read, per dimension:
+ *
+ * ```text
+ * available    = clamp(source_valid - offset, 0, window)
+ * result_valid = min(requested_valid, available)
+ * ```
+ *
+ * so a read can never widen beyond the source valid region, the requested valid
+ * region, or the result window.
+ *
+ * **The non-clamping contract.** A read with ``clamp == false`` asserts that its
+ * window lies inside the source: ``offset[i] + extent[i] <= source_physical[i]``,
+ * where ``extent`` is the window for ``kView`` and the read extent for ``kCopy``.
+ * Provable violations are rejected here; relations that stay symbolic are taken
+ * on trust, because that inequality *is* the operator's precondition. Under it a
+ * fully-valid source yields a fully-valid window, so the clamp collapses to the
+ * window and no guard expression is built — an in-bounds read of an unpadded
+ * source keeps the shape it had before this rule existed. Pass ``clamp = true``
+ * to drop the assertion and clamp the valid region to the source edge instead,
+ * which is how a sanctioned ragged tail is expressed.
+ *
+ * Expressions are built proof-first: a term is emitted only when the arithmetic
+ * analyzer cannot already settle the comparison, and every term is simplified, so
+ * constant arithmetic folds and no redundant ``min`` / ``max`` nesting survives.
+ *
+ * @param params Window-read description; see WindowReadValidShapeParams
+ * @return The result valid shape, one extent per window dimension
+ * @throws pypto::ValueError on rank mismatch, provably negative offset, or a
+ *         provable physical-bounds violation of a non-clamping read
+ */
+std::vector<ExprPtr> InferWindowReadValidShape(const WindowReadValidShapeParams& params);
+
+/**
+ * @brief Return the effective valid shape of a tensor type
+ *
+ * Falls back to the physical shape when no explicit valid shape is set, matching
+ * ``GetValidShape`` for tiles.
+ */
+const std::vector<ExprPtr>& GetEffectiveTensorValidShape(const TensorType& type);
+
+/**
+ * @brief Reject ``drop_dims`` axes that do not carry provably unit validity
+ *
+ * Rank reduction erases an axis, so the axis must have nothing left to say: its
+ * post-intersection valid extent must be provably one. ``ParseSliceDropDims``
+ * already requires a static unit *physical* extent; this is the validity-side
+ * obligation, which only bites when a partial source or a clamp narrows the axis
+ * below its physical extent.
+ *
+ * @param drop_dims Validated axes, ascending, indexing into ``valid_shape``
+ * @param valid_shape Post-intersection valid shape, at full pre-reduction rank
+ * @param op_name Operator name, used in diagnostics
+ * @param span IR source location, reported when a dropped axis is rejected
+ * @throws pypto::ValueError when a dropped axis is not provably one
+ */
+void ValidateDropDimsValidExtents(const std::vector<int64_t>& drop_dims,
+                                  const std::vector<ExprPtr>& valid_shape, const std::string& op_name,
+                                  const Span& span);
 
 /**
  * @brief Check if a dimension is broadcastable to another

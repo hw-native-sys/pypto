@@ -351,10 +351,15 @@ def build_paged_attention_multi_config_program(
                         n_blocks = pl.min(n_unroll, max_bn - bn)
                         bt_offset = b_idx * max_num_blocks_per_req + bn
 
+                        # Fixed unroll-width read of the block table. Near the end
+                        # of the table the window deliberately runs off the edge;
+                        # only the first `n_blocks` entries are ever addressed, so
+                        # clamp the valid region to the table instead of rejecting.
                         block_indices: pl.Tensor[[n_unroll], pl.INT32] = pl.slice(
                             block_table,
                             [n_unroll],
                             [bt_offset],
+                            clamp=True,
                         )
 
                         sij_buf: pl.Tensor[[n_unroll_q, block_size], pl.FP32] = pl.create_tensor(

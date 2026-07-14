@@ -39,6 +39,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -173,7 +174,35 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
   // Build tile shape from shapes tuple (always in source-tensor coordinates).
   std::vector<ExprPtr> tile_shape(shapes_tuple->elements_.begin(), shapes_tuple->elements_.end());
 
-  tile_view.valid_shape = valid_shapes_tuple->elements_;
+  // A load copies the source into a fresh tile, so only the valid extent is read:
+  // the destination tile may deliberately overhang the source (that is what makes
+  // a ragged tail expressible), but the bytes actually read must exist and must
+  // be real data. Intersecting with the source valid region enforces both, and
+  // rejects a valid_shapes request that provably reads past the source. clamp=True
+  // narrows such a request to the source edge instead of rejecting it.
+  //
+  // As with tensor.slice, the rule needs the window to be a rectangle in source
+  // coordinates. A lower-rank window (e.g. a 2D tile out of a 3D tensor) is a
+  // reinterpreting read whose dim correspondence is not this rectangle, so it
+  // keeps the valid_shapes it was given.
+  if (tile_shape.size() == tensor_type->shape_.size()) {
+    tile_view.valid_shape = InferWindowReadValidShape({
+        /*source_physical=*/tensor_type->shape_,
+        /*source_valid=*/GetEffectiveTensorValidShape(*tensor_type),
+        /*offsets=*/offsets_tuple->elements_,
+        /*window=*/tile_shape,
+        /*requested_valid=*/valid_shapes_tuple->elements_,
+        /*kind=*/WindowReadKind::kCopy,
+        /*clamp=*/GetKwargOr<bool>(kwargs, "clamp", false),
+        /*op_name=*/op_name,
+        /*bounds_remedy=*/
+        "Pass clamp=True -- pl.load(x, offsets, shapes, clamp=True) -- to narrow the read to the "
+        "source edge instead",
+        /*span=*/args[0]->span_,
+    });
+  } else {
+    tile_view.valid_shape = valid_shapes_tuple->elements_;
+  }
 
   // Return TileType with same dtype as tensor and TileView containing valid_shape.
   // When target_memory is specified, write it into memory_space_ so the constructed
@@ -786,6 +815,7 @@ REGISTER_OP("tile.load")
         "valid_shapes",
         "Valid shape of tile in each dimension, in source tensor coordinates (TupleType of ScalarType). ")
     .set_attr<MemorySpace>("target_memory")
+    .set_attr<bool>("clamp")
     // No fallback: when target_memory is absent, memory_space stays unresolved and
     // InferTileMemorySpace picks the space from consumer demand.
     .set_output_memory_from_kwarg("target_memory")

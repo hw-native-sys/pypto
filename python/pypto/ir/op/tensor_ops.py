@@ -295,9 +295,13 @@ def slice(
     valid_shape: list[int | Expr] | _ir_core.MakeTuple | None = None,
     drop_dims: Sequence[int | Expr] | None = None,
     pad_value: PadValue | int | float | None = None,
+    clamp: bool = False,
     span: Span | None = None,
 ) -> Call:
     """Create a slice of a tensor with new shape and offset.
+
+    The result is never valid where the source is not: its valid region is the
+    source's valid region, shifted by ``offset`` and cut to the window.
 
     Args:
         tensor: Input tensor expression
@@ -305,17 +309,25 @@ def slice(
             scalar-indexed axis contributes a unit dim here and is listed in
             ``drop_dims`` to be erased from the result type.
         offset: Offset dimensions for the slice, or a MakeTuple
-        valid_shape: Valid shape dimensions (optional, defaults to empty)
+        valid_shape: Valid shape dimensions (optional, defaults to empty). This
+            is a *request*: it narrows the result, but cannot widen it past what
+            the source actually has under the window.
         drop_dims: Optional axes to erase from the result type (numpy-style rank
-            reduction). Each listed axis must be a static unit dim of ``shape``.
+            reduction). Each listed axis must be a static unit dim of ``shape``,
+            and must still be fully valid after the intersection above.
             ``None`` / ``[]`` is fully backward compatible (drops nothing).
         pad_value: Optional padding mode for out-of-valid-shape elements.
             Accepts ``PadValue.zero`` / ``PadValue.max`` / ``PadValue.min``, or
             the literal sugars ``0``, ``math.inf``, ``-math.inf`` (normalized
             via :func:`normalize_pad_value`). ``PadValue.null`` is passed
             through unchanged and means "no padding". When omitted (``None``),
-            the kwarg is not forwarded — the deducer defaults to
-            ``PadValue.null``.
+            the source's padding mode carries through.
+        clamp: Sanction a window that runs off the end of the source. By default
+            a slice asserts that ``offset + shape`` stays inside the source and
+            is rejected when that provably fails; with ``clamp=True`` the window
+            may overhang and the valid region is cut back to the source edge
+            instead. Use it for a fixed-width tail read whose overhang is never
+            addressed.
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -345,6 +357,8 @@ def slice(
         # normalize the rest via the shared helper so numeric sugar and
         # validation match tensor.fillpad exactly.
         kwargs["pad_value"] = pad_value if pad_value is PadValue.null else normalize_pad_value(pad_value)
+    if clamp:
+        kwargs["clamp"] = True
 
     return _ir_core.create_op_call("tensor.slice", args, kwargs, actual_span)
 

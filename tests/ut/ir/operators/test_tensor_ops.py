@@ -1913,6 +1913,288 @@ def test_tensor_slice_pad_without_valid_shape_warns():
         pl.tensor.slice(tensor_arg, [8, 16], [0, 0], pad_value=pl.PadValue.zero)
 
 
+# ---------------------------------------------------------------------------
+# tensor.slice window-read valid-region intersection
+#
+# available    = clamp(source_valid - offset, 0, window)
+# result_valid = min(requested_valid, available)
+# ---------------------------------------------------------------------------
+
+
+def _partial_tensor_var(shape, valid_shape, pad=ir.PadValue.null, name="t"):
+    """Build a tensor Var whose tensor_view narrows it to `valid_shape`."""
+    span = ir.Span.unknown()
+    view = ir.TensorView(stride=[], layout=ir.TensorLayout.ND, valid_shape=valid_shape, pad=pad)
+    return ir.Var(name, ir.TensorType(shape, DataType.FP32, tensor_view=view), span)
+
+
+def _valid_of(result_type):
+    """Effective valid extents: the explicit view when set, else the shape."""
+    view = result_type.tensor_view
+    if view is None or not view.valid_shape:
+        return [d.value for d in result_type.shape if isinstance(d, ir.ConstInt)]
+    return [d.value if isinstance(d, ir.ConstInt) else d for d in view.valid_shape]
+
+
+def test_tensor_slice_full_source_stays_fully_valid():
+    """A window inside a fully-valid source needs no valid_shape at all."""
+    span = ir.Span.unknown()
+    tensor_var = ir.Var("t", ir.TensorType([64, 64], DataType.FP32), span)
+
+    call = ir.op.tensor.slice(tensor_var, [16, 32], [8, 0])
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    # Full validity is the redundant encoding, so the view collapses away.
+    assert result_type.tensor_view is None
+
+
+def test_tensor_slice_partial_source_narrows_result():
+    """A window over padding inherits the source's narrower validity."""
+    # Source is 64x64 but only 40x50 is real data; take a 32x32 window at 0,0.
+    tensor_var = _partial_tensor_var([64, 64], [40, 50])
+
+    call = ir.op.tensor.slice(tensor_var, [32, 32], [0, 0])
+
+    # min(40, 32) = 32 and min(50, 32) = 32 -> the window is entirely real data.
+    assert _valid_of(call.type) == [32, 32]
+
+    # Push the window out to where the source runs out of real rows.
+    call2 = ir.op.tensor.slice(tensor_var, [32, 32], [24, 32])
+
+    # rows: clamp(40 - 24, 0, 32) = 16;  cols: clamp(50 - 32, 0, 32) = 18
+    assert _valid_of(call2.type) == [16, 18]
+
+
+def test_tensor_slice_window_past_valid_region_is_wholly_invalid():
+    """A window starting past the source's valid rows has zero valid rows."""
+    tensor_var = _partial_tensor_var([64, 64], [16, 64])
+
+    call = ir.op.tensor.slice(tensor_var, [16, 64], [32, 0])
+
+    # clamp(16 - 32, 0, 16) = 0 -- saturated at zero, never negative.
+    assert _valid_of(call.type) == [0, 64]
+
+
+def test_tensor_slice_intersects_rather_than_replaces_explicit_valid_shape():
+    """An explicit valid_shape narrows the result but cannot widen it."""
+    tensor_var = _partial_tensor_var([64, 64], [20, 64])
+
+    # Ask for more rows than the source has: the request cannot widen the result.
+    widening = ir.op.tensor.slice(tensor_var, [32, 32], [0, 0], valid_shape=[32, 32])
+    assert _valid_of(widening.type) == [20, 32]
+
+    # Ask for fewer: the request wins, because it is the smaller of the two.
+    narrowing = ir.op.tensor.slice(tensor_var, [32, 32], [0, 0], valid_shape=[8, 4])
+    assert _valid_of(narrowing.type) == [8, 4]
+
+
+def test_tensor_slice_folds_constants_without_min_max_nesting():
+    """Static intersections fold to a plain ConstInt, not a min/max tree."""
+    tensor_var = _partial_tensor_var([64, 64], [40, 64])
+
+    call = ir.op.tensor.slice(tensor_var, [32, 64], [16, 0], valid_shape=[32, 64])
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    view = result_type.tensor_view
+    assert view is not None
+    # clamp(40 - 16, 0, 32) = 24, intersected with the request 32 -> 24.
+    assert isinstance(view.valid_shape[0], ir.ConstInt)
+    assert view.valid_shape[0].value == 24
+
+
+def test_tensor_slice_symbolic_offset_keeps_the_in_bounds_contract():
+    """An unprovable in-bounds relation is the caller's contract, not a guess."""
+    span = ir.Span.unknown()
+    tensor_var = ir.Var("t", ir.TensorType([64, 64], DataType.FP32), span)
+    off = ir.Var("i", ir.ScalarType(DataType.INDEX), span)
+
+    call = ir.op.tensor.slice(tensor_var, [16, 64], [off, 0])
+
+    # A non-clamping slice asserts offset + shape <= source, so a fully-valid
+    # source yields a fully-valid window and no guard expression is built.
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.tensor_view is None
+
+
+def test_tensor_slice_symbolic_offset_still_intersects_a_partial_source():
+    """A partial source narrows even when the offset is symbolic."""
+    span = ir.Span.unknown()
+    tensor_var = _partial_tensor_var([64, 64], [40, 64])
+    off = ir.Var("i", ir.ScalarType(DataType.INDEX), span)
+
+    call = ir.op.tensor.slice(tensor_var, [16, 64], [off, 0])
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    view = result_type.tensor_view
+    assert view is not None
+    # Cannot be folded, so the runtime guard survives into the type.
+    assert not isinstance(view.valid_shape[0], ir.ConstInt)
+
+
+def test_tensor_slice_rejects_static_out_of_bounds_window():
+    """A non-clamping slice that provably reads past the source is rejected."""
+    span = ir.Span.unknown()
+    tensor_var = ir.Var("t", ir.TensorType([64, 64], DataType.FP32), span)
+
+    with pytest.raises(ValueError, match="reads past the end of dimension 0"):
+        ir.op.tensor.slice(tensor_var, [32, 64], [48, 0])
+
+
+def test_tensor_slice_rejects_out_of_bounds_window_even_with_a_small_valid_shape():
+    """A view exposes its whole window, so a narrow valid_shape cannot excuse it."""
+    span = ir.Span.unknown()
+    tensor_var = ir.Var("t", ir.TensorType([96, 64], DataType.FP32), span)
+
+    # Only 32 rows are declared valid, but all 64 rows of the window are
+    # addressable through the result -- and 32 of them lie past the source.
+    with pytest.raises(ValueError, match="reads past the end of dimension 0"):
+        ir.op.tensor.slice(tensor_var, [64, 64], [64, 0], valid_shape=[32, 64])
+
+
+def test_tensor_slice_rejects_negative_offset():
+    """A provably negative offset starts outside the source."""
+    span = ir.Span.unknown()
+    tensor_var = ir.Var("t", ir.TensorType([64, 64], DataType.FP32), span)
+    neg = ir.ConstInt(-8, DataType.INDEX, span)
+
+    with pytest.raises(ValueError, match="provably negative"):
+        ir.op.tensor.slice(tensor_var, [16, 64], [neg, 0])
+
+
+def test_tensor_slice_rejects_valid_shape_rank_mismatch():
+    """valid_shape must have one extent per window dimension."""
+    span = ir.Span.unknown()
+    tensor_var = ir.Var("t", ir.TensorType([64, 64], DataType.FP32), span)
+
+    with pytest.raises(ValueError, match="same rank"):
+        ir.op.tensor.slice(tensor_var, [16, 64], [0, 0], valid_shape=[16])
+
+
+def test_tensor_slice_clamp_narrows_at_the_row_edge():
+    """clamp=True sanctions a ragged window and cuts validity to the source."""
+    span = ir.Span.unknown()
+    tensor_var = ir.Var("t", ir.TensorType([96, 64], DataType.FP32), span)
+
+    call = ir.op.tensor.slice(tensor_var, [64, 64], [64, 0], clamp=True)
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    # clamp(96 - 64, 0, 64) = 32 real rows behind a 64-row window.
+    assert [d.value for d in result_type.shape if isinstance(d, ir.ConstInt)] == [64, 64]
+    assert _valid_of(result_type) == [32, 64]
+
+
+def test_tensor_slice_clamp_narrows_at_the_col_edge():
+    """The clamp applies per dimension, so the column edge behaves the same."""
+    span = ir.Span.unknown()
+    tensor_var = ir.Var("t", ir.TensorType([64, 40], DataType.FP32), span)
+
+    call = ir.op.tensor.slice(tensor_var, [64, 32], [0, 16], clamp=True)
+
+    # clamp(40 - 16, 0, 32) = 24 real columns behind a 32-column window.
+    assert _valid_of(call.type) == [64, 24]
+
+
+def test_tensor_slice_clamp_is_a_no_op_for_an_in_bounds_window():
+    """Clamping an in-bounds window changes nothing."""
+    span = ir.Span.unknown()
+    tensor_var = ir.Var("t", ir.TensorType([64, 64], DataType.FP32), span)
+
+    call = ir.op.tensor.slice(tensor_var, [16, 32], [8, 0], clamp=True)
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.tensor_view is None
+
+
+def test_tensor_slice_drop_dims_allowed_when_axis_stays_fully_valid():
+    """A unit axis that survives the intersection intact can still be dropped."""
+    span = ir.Span.unknown()
+    tensor_var = ir.Var("t", ir.TensorType([64, 64], DataType.FP32), span)
+    row = ir.Var("r", ir.ScalarType(DataType.INDEX), span)
+
+    # The canonical scalar-index read x[r, :]: a unit window on axis 0, erased.
+    call = ir.op.tensor.slice(tensor_var, [1, 64], [row, 0], drop_dims=[0])
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert [d.value for d in result_type.shape if isinstance(d, ir.ConstInt)] == [64]
+    assert result_type.tensor_view is None
+
+
+def test_tensor_slice_drop_dims_rejected_when_axis_is_not_provably_valid():
+    """Rank reduction erases an axis, so the axis must have nothing left to say."""
+    # Only 8 real rows, and the clamped window starts at row 8 -> zero valid rows.
+    tensor_var = _partial_tensor_var([64, 64], [8, 64])
+
+    with pytest.raises(ValueError, match="not provably 1"):
+        ir.op.tensor.slice(tensor_var, [1, 64], [16, 0], drop_dims=[0])
+
+
+def test_tensor_slice_inherits_source_pad_mode():
+    """A read view over padded bytes keeps saying they are padded."""
+    tensor_var = _partial_tensor_var([64, 64], [40, 64], pad=ir.PadValue.zero)
+
+    call = ir.op.tensor.slice(tensor_var, [32, 64], [0, 0])
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    view = result_type.tensor_view
+    assert view is not None
+    assert view.pad == ir.PadValue.zero
+
+
+def test_tensor_slice_explicit_pad_value_overrides_the_source():
+    """An explicit pad_value still wins over the inherited one."""
+    tensor_var = _partial_tensor_var([64, 64], [40, 64], pad=ir.PadValue.zero)
+
+    call = tensor.slice(tensor_var, [32, 64], [0, 0], valid_shape=[16, 64], pad_value=ir.PadValue.min)
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    view = result_type.tensor_view
+    assert view is not None
+    assert view.pad == ir.PadValue.min
+
+
+def test_tensor_slice_lower_rank_window_keeps_its_valid_shape():
+    """A 2D window over a 3D parent is a reinterpreting view, not a rectangle.
+
+    Its dim correspondence is materialized as strides by OptimizeOrchTensors, so
+    intersecting it here would target the wrong axes; it keeps what it was given.
+    """
+    span = ir.Span.unknown()
+    tensor_var = ir.Var("t", ir.TensorType([4, 128, 5120], DataType.FP32), span)
+
+    call = ir.op.tensor.slice(tensor_var, [16, 64], [0, 0, 0])
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert [d.value for d in result_type.shape if isinstance(d, ir.ConstInt)] == [16, 64]
+    assert result_type.tensor_view is None
+
+
+def test_tensor_slice_clamped_window_print_parse_roundtrip():
+    """A clamped ragged slice survives python_print -> pl.parse -> python_print."""
+    src = (
+        "import pypto.language as pl\n\n"
+        "@pl.program\n"
+        "class P:\n"
+        "    @pl.function\n"
+        "    def main(self, x: pl.Tensor[[96, 64], pl.FP32]) -> pl.Tensor[[64, 64], pl.FP32]:\n"
+        "        y: pl.Tensor[[64, 64], pl.FP32] = "
+        "pl.tensor.slice(x, [64, 64], [64, 0], clamp=True)\n"
+        "        return y\n"
+    )
+    prog = pl.parse(src)
+    reparsed = pl.parse(ir.python_print(prog))
+    ir.assert_structural_equal(reparsed, prog)
+
+
 def test_tensor_fillpad_clears_valid_shape():
     """Test tensor.fillpad materializes a full-valid tensor view."""
     span = ir.Span.unknown()

@@ -166,9 +166,15 @@ def load(
     shapes: Sequence[int | Expr] | _ir_core.MakeTuple,
     valid_shapes: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     target_memory: MemorySpace = MemorySpace.Vec,
+    clamp: bool = False,
     span: Span | None = None,
 ) -> Call:
     """Copy data from tensor to specified memory level.
+
+    Only the valid extent is read, so the destination tile may be larger than the
+    region that exists in the source. The tile's valid region is the source's
+    valid region, shifted by ``offsets`` and cut to the tile — a load can never
+    report as real data bytes the source does not have.
 
     Args:
         tensor: Source tensor (TensorType)
@@ -180,8 +186,13 @@ def load(
             MakeTuple. When provided, sets TileView.valid_shape in the output TileType.
             When omitted, shapes is used as valid_shape. Useful for dynamic shapes where
             the actual valid data region differs from the allocated tile size.
-            Uses the same coordinate convention as shapes.
+            Uses the same coordinate convention as shapes. This is a *request*: it
+            narrows the tile, but cannot widen it past what the source has.
         target_memory: Target memory space (MemorySpace.Vec default, or MemorySpace.Mat)
+        clamp: Sanction a read that runs off the end of the source. By default a
+            load asserts that ``offsets + valid_shapes`` stays inside the source
+            and is rejected when that provably fails; with ``clamp=True`` the
+            request is cut back to the source edge instead.
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -204,6 +215,8 @@ def load(
     _validate_offsets_shapes(offsets_tuple, shapes_tuple)
 
     kwargs: dict[str, Any] = {"target_memory": target_memory}
+    if clamp:
+        kwargs["clamp"] = True
 
     valid_shapes_tuple = shapes_tuple
     if valid_shapes is not None:
@@ -2535,6 +2548,9 @@ def slice(
 ) -> Call:
     """Create a slice of a tile with static shape and optional valid shape.
 
+    The result is never valid where the source tile is not: its valid region is
+    the source's valid region, shifted by ``offset`` and cut to the window.
+
     Args:
         tile: Input tile expression
         shape: Static shape dimensions, or a MakeTuple. Always full-rank — a
@@ -2542,9 +2558,11 @@ def slice(
             ``drop_dims`` to be erased from the result type.
         offset: Offset dimensions for the slice, or a MakeTuple
         valid_shape: Valid shape dimensions, or a MakeTuple. When omitted, shape
-            is reused as the valid shape.
+            is reused as the valid shape. This is a *request*: it narrows the
+            result, but cannot widen it past what the source has under the window.
         drop_dims: Optional axes to erase from the result type (numpy-style rank
-            reduction). Each listed axis must be a static unit dim of ``shape``.
+            reduction). Each listed axis must be a static unit dim of ``shape``,
+            and must still be fully valid after the intersection above.
             Because tiles are physically 2D, the result is clamped back to 2D
             (unit axes prepended) if reduction would take it below 2D.
             ``None`` / ``[]`` is fully backward compatible (drops nothing).
@@ -2553,12 +2571,16 @@ def slice(
             the literal sugars ``0``, ``math.inf``, ``-math.inf`` (normalized
             via :func:`normalize_pad_value`). ``PadValue.null`` is passed
             through unchanged and means "no padding". When omitted (``None``),
-            the kwarg is not forwarded — the deducer defaults to
-            ``PadValue.null``.
+            the source's padding mode carries through.
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression creating a tile slice
+
+    Note:
+        Unlike :func:`pypto.ir.op.tensor.slice`, there is no ``clamp`` option: an
+        on-chip window has nothing that could clamp it, so ``offset + shape`` must
+        stay inside the source tile.
     """
     actual_span = _get_span_or_capture(span)
 

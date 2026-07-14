@@ -633,16 +633,33 @@ def slice(
     offset: Sequence[IntLike],
     valid_shape: Sequence[IntLike] | None = None,
     drop_dims: Sequence[int | _ir_core.Expr] | None = None,
+    clamp: bool = False,
 ) -> T:
     """Slice operation, dispatched by input type.
 
+    The slice is never valid where the source is not: the source's valid region,
+    shifted by ``offset`` and cut to the window, bounds the result.
+
     ``drop_dims`` lists axes to erase from the result type (numpy-style rank
-    reduction); each must be a static unit dim of ``shape``. ``None`` / ``[]``
-    drops nothing.
+    reduction); each must be a static unit dim of ``shape`` that is still fully
+    valid after that intersection. ``None`` / ``[]`` drops nothing.
+
+    ``clamp`` sanctions a window that runs off the end of the source: by default
+    the slice asserts ``offset + shape`` stays inside the source and is rejected
+    when that provably fails, whereas ``clamp=True`` lets the window overhang and
+    cuts the valid region back to the source edge. It is only available on a
+    Tensor — an on-chip tile window has nothing that could clamp it.
     """
     if isinstance(input, Tensor):
-        return _tensor.slice(input, shape, offset, valid_shape, drop_dims)
+        return _tensor.slice(input, shape, offset, valid_shape, drop_dims, clamp=clamp)
     if isinstance(input, Tile):
+        if clamp:
+            raise ValueError(
+                "pl.slice: clamp=True is not supported for a Tile. An on-chip window has no "
+                "clamping mechanism, so offset + shape must stay inside the source tile. "
+                "Clamp the read at the tensor boundary instead — pl.load(..., clamp=True) or "
+                "pl.slice(tensor, ..., clamp=True) — and slice the resulting tile in bounds."
+            )
         return _tile.slice(input, shape, offset, valid_shape, drop_dims)
     raise TypeError(f"pl.slice: expected Tensor or Tile, got {type(input).__name__}")
 

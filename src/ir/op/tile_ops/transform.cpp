@@ -169,31 +169,52 @@ TypePtr DeduceTileSliceType(const std::vector<ExprPtr>& args,
     new_shape.push_back(shape_tuple->elements_[i]);
   }
 
-  std::vector<ExprPtr> valid_shape = new_shape;
+  // valid_shape (4th arg) is a *request*, given at the full pre-reduction rank.
+  // An empty tuple is the explicit "no valid_shape" form (so callers can pass
+  // drop_dims as the 5th arg without supplying a custom valid_shape).
+  std::vector<ExprPtr> requested_valid;
   if (args.size() >= 4) {
     auto valid_shape_tuple_type = As<TupleType>(args[3]->GetType());
     CHECK(valid_shape_tuple_type) << "tile.slice requires valid_shape to be TupleType, but got "
                                   << args[3]->GetType()->TypeName();
-    // An empty tuple is the explicit "no valid_shape" form (so callers can pass
-    // drop_dims as the 5th arg without supplying a custom valid_shape).
     if (!valid_shape_tuple_type->types_.empty()) {
       ValidateIndexTupleElements(valid_shape_tuple_type, "tile.slice", "valid_shape");
-      CHECK(valid_shape_tuple_type->types_.size() == shape_tuple_type->types_.size())
-          << "tile.slice requires valid_shape and shape to have the same rank, but got valid_shape rank "
-          << valid_shape_tuple_type->types_.size() << " and shape rank " << shape_tuple_type->types_.size();
-
-      valid_shape.clear();
-      valid_shape.reserve(valid_shape_tuple_type->types_.size());
-      if (auto valid_shape_tuple = As<MakeTuple>(args[3])) {
-        valid_shape = valid_shape_tuple->elements_;
-      } else {
-        for (size_t i = 0; i < valid_shape_tuple_type->types_.size(); ++i) {
-          valid_shape.emplace_back(
-              std::make_shared<TupleGetItemExpr>(args[3], static_cast<int>(i), args[3]->span_));
-        }
-      }
+      requested_valid = ExtractTupleElements(args[3], valid_shape_tuple_type->types_.size());
     }
   }
+
+  const std::vector<ExprPtr> offsets = ExtractTupleElements(args[2], offset_tuple_type->types_.size());
+
+  // A slice is a window into the source tile, so it can never be valid where the
+  // source is not, and its window must lie inside the source allocation.
+  //
+  // There is deliberately no `clamp` escape hatch here, unlike tensor.slice: an
+  // on-chip window has nothing that could clamp it. `pto.subview` is a pure view
+  // (CheckSubviewTileCompat does no bounds work) and the Mat/Vec fold in
+  // CanonicalizeTileSlice turns the window into a `tile.extract`, whose ISA
+  // TEXTRACT bounds are hard. A GM window can overhang because the emitted view
+  // shape is clamped and the strided-Tensor runtime enforces the bound; a tile
+  // window that overhangs is simply unrepresentable, so it stays an error.
+  //
+  // The window here is always full-rank: offset rank == shape rank is checked
+  // above, and a tile shape has the source's rank by construction. tensor.slice
+  // additionally guards for a lower-rank reinterpreting window, which tiles have
+  // no equivalent of.
+  std::vector<ExprPtr> valid_shape = InferWindowReadValidShape({
+      /*source_physical=*/tile_type->shape_,
+      /*source_valid=*/GetValidShape(tile_type),
+      /*offsets=*/offsets,
+      /*window=*/new_shape,
+      /*requested_valid=*/requested_valid,
+      /*kind=*/WindowReadKind::kView,
+      /*clamp=*/false,
+      /*op_name=*/"tile.slice",
+      /*bounds_remedy=*/
+      "An on-chip window has no clamping mechanism, so it must fit: keep offset + shape inside the "
+      "source tile, or clamp the read at the tensor boundary with pl.load(..., clamp=True) and slice "
+      "the resulting tile in bounds",
+      /*span=*/args[0]->span_,
+  });
 
   // Optional drop_dims (5th arg): axes erased from the result type, validated
   // against the full pre-reduction shape. Apply to both the static shape and the
@@ -202,6 +223,7 @@ TypePtr DeduceTileSliceType(const std::vector<ExprPtr>& args,
   const ExprPtr drop_dims_arg = args.size() == 5 ? args[4] : nullptr;
   const std::vector<int64_t> drop_dims = ParseSliceDropDims(drop_dims_arg, new_shape, "tile.slice");
   if (!drop_dims.empty()) {
+    ValidateDropDimsValidExtents(drop_dims, valid_shape, "tile.slice", args[0]->span_);
     new_shape = ApplyDropDims(new_shape, drop_dims);
     valid_shape = ApplyDropDims(valid_shape, drop_dims);
     if (new_shape.size() < 2) {
@@ -611,8 +633,23 @@ TypePtr DeduceTileExtractType(const std::vector<ExprPtr>& args,
   check_axis(0, "row", args[1]);
   check_axis(1, "col", args[2]);
 
+  // TEXTRACT repacks a window of src into a dense dst, so the window can only be
+  // valid where src is. A src carrying padding under the window narrows the
+  // result; a fully-valid src leaves dst fully valid and the view collapses away.
   TileView tile_view;
-  tile_view.valid_shape = dst_shape;
+  tile_view.valid_shape = InferWindowReadValidShape({
+      /*source_physical=*/src_type->shape_,
+      /*source_valid=*/GetValidShape(src_type),
+      /*offsets=*/{args[1], args[2]},
+      /*window=*/dst_shape,
+      /*requested_valid=*/{},
+      /*kind=*/WindowReadKind::kView,
+      /*clamp=*/false,
+      /*op_name=*/"tile.extract",
+      /*bounds_remedy=*/
+      "ISA TEXTRACT bounds are hard, so the window must fit inside the source tile",
+      /*span=*/args[0]->span_,
+  });
   tile_view.blayout = InferTileLayoutFromShape(dst_shape);
 
   // Override blayout/slayout for L0-resident destinations to match the

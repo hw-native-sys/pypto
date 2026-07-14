@@ -361,6 +361,205 @@ std::vector<ValidShapeBoundsError> ValidateValidShapeBounds(const std::vector<Ex
 }
 
 // ============================================================================
+// Tuple operand decoding
+// ============================================================================
+
+std::vector<ExprPtr> ExtractTupleElements(const ExprPtr& tuple_expr, size_t rank) {
+  if (auto make_tuple = As<MakeTuple>(tuple_expr)) {
+    return make_tuple->elements_;
+  }
+  std::vector<ExprPtr> elements;
+  elements.reserve(rank);
+  for (size_t i = 0; i < rank; ++i) {
+    elements.emplace_back(
+        std::make_shared<TupleGetItemExpr>(tuple_expr, static_cast<int>(i), tuple_expr->span_));
+  }
+  return elements;
+}
+
+// ============================================================================
+// Window-read valid-region intersection
+// ============================================================================
+
+const std::vector<ExprPtr>& GetEffectiveTensorValidShape(const TensorType& type) {
+  if (type.tensor_view_ && !type.tensor_view_->valid_shape.empty()) {
+    return type.tensor_view_->valid_shape;
+  }
+  return type.shape_;
+}
+
+namespace {
+
+/// Zero, in the dtype the analyzer compares extents in.
+ExprPtr IndexZero() {
+  static const ExprPtr zero = std::make_shared<ConstInt>(0, DataType::INDEX, Span::unknown());
+  return zero;
+}
+
+/// Fold an expression through the arithmetic analyzer so constants collapse.
+ExprPtr FoldExtent(const ExprPtr& expr) {
+  thread_local arith::Analyzer analyzer;
+  return analyzer.Simplify(expr);
+}
+
+/// Return `lhs` when it is provably the smaller of the two, `rhs` when it is
+/// provably the smaller, and a folded `min` only when neither is settled.
+ExprPtr MinExtent(const ExprPtr& lhs, const ExprPtr& rhs, const Span& span) {
+  if (ProveValidExtentLessEqual(lhs, rhs) == ProofResult::kTrue) {
+    return lhs;
+  }
+  if (ProveValidExtentLessEqual(rhs, lhs) == ProofResult::kTrue) {
+    return rhs;
+  }
+  return FoldExtent(MakeMin(lhs, rhs, span));
+}
+
+/// `max(extent, 0)`, elided when the extent is already provably non-negative.
+ExprPtr ClampNonNegative(const ExprPtr& extent, const Span& span) {
+  if (ProveValidExtentLessEqual(IndexZero(), extent) == ProofResult::kTrue) {
+    return extent;
+  }
+  return FoldExtent(MakeMax(extent, IndexZero(), span));
+}
+
+/// The extent of dimension `i` that a read must keep inside its source.
+///
+/// A kView result aliases the source, so every element of the window is
+/// addressable through it — and the strided-Tensor runtime enforces
+/// `offset + shape <= parent shape` when it materializes the view. The whole
+/// window therefore has to fit, however small an explicit valid_shape may be.
+///
+/// A kCopy result is a fresh buffer, so only the valid extent is ever fetched
+/// and the destination window is free to overhang the source; the request (when
+/// the caller made one) is what has to fit.
+const ExprPtr& BoundsReach(const WindowReadValidShapeParams& p, size_t i) {
+  if (p.kind == WindowReadKind::kView || p.requested_valid.empty()) {
+    return p.window[i];
+  }
+  return p.requested_valid[i];
+}
+
+/// Whether the analyzer can do integer arithmetic on this expression at all.
+/// Extents reaching an operator are normally integer scalars, but an operand may
+/// be an arbitrary expression (a tuple, say) that no proof obligation is defined
+/// over; such a dimension is simply undecidable rather than a bounds violation.
+bool IsIntegerScalarExpr(const ExprPtr& expr) {
+  if (!expr) {
+    return false;
+  }
+  auto scalar_type = As<ScalarType>(expr->GetType());
+  return scalar_type && scalar_type->dtype_.IsInt();
+}
+
+void CheckWindowReadRanks(const WindowReadValidShapeParams& p) {
+  const size_t rank = p.window.size();
+  CHECK_SPAN(p.source_physical.size() == rank, p.span)
+      << p.op_name << " requires the window and the source to have the same rank, but got window rank "
+      << rank << " " << FormatShape(p.window) << " and source rank " << p.source_physical.size() << " "
+      << FormatShape(p.source_physical);
+  CHECK_SPAN(p.offsets.size() == rank, p.span)
+      << p.op_name << " requires one offset per window dimension, but got " << p.offsets.size()
+      << " offsets for window rank " << rank;
+  CHECK_SPAN(p.source_valid.size() == rank, p.span)
+      << p.op_name << " source valid_shape rank " << p.source_valid.size()
+      << " does not match its shape rank " << rank;
+  CHECK_SPAN(p.requested_valid.empty() || p.requested_valid.size() == rank, p.span)
+      << p.op_name << " requires valid_shape to have the same rank as the window, but got valid_shape rank "
+      << p.requested_valid.size() << " " << FormatShape(p.requested_valid) << " and window rank " << rank;
+}
+
+/// Enforce what a window read promises about dimension `i` before its valid
+/// region is derived: the window starts inside the source, and — unless the read
+/// clamps — the extent it touches also ends inside the source.
+void CheckWindowReadDimBounds(const WindowReadValidShapeParams& p, size_t i) {
+  const ExprPtr& offset = p.offsets[i];
+  const ExprPtr& source = p.source_physical[i];
+
+  CHECK_SPAN(ProveValidExtentLessEqual(IndexZero(), offset) != ProofResult::kFalse, p.span)
+      << p.op_name << " offset " << i << " is provably negative (" << PythonPrint(offset)
+      << "); a window must start inside its source";
+
+  // A non-clamping read asserts that the extent it touches stays inside the
+  // source. Reject what we can disprove; trust what stays symbolic, because
+  // that inequality is the operator's precondition, not a guess.
+  const ExprPtr& reach = BoundsReach(p, i);
+  if (!p.clamp && IsIntegerScalarExpr(offset) && IsIntegerScalarExpr(reach) && IsIntegerScalarExpr(source)) {
+    const ExprPtr end = FoldExtent(MakeAdd(offset, reach, p.span));
+    CHECK_SPAN(ProveValidExtentLessEqual(end, source) != ProofResult::kFalse, p.span)
+        << p.op_name << " reads past the end of dimension " << i << ": offset " << PythonPrint(offset)
+        << " + extent " << PythonPrint(reach) << " exceeds the source extent " << PythonPrint(source) << ". "
+        << p.bounds_remedy;
+  }
+}
+
+}  // namespace
+
+std::vector<ExprPtr> InferWindowReadValidShape(const WindowReadValidShapeParams& params) {
+  CheckWindowReadRanks(params);
+
+  const size_t rank = params.window.size();
+  std::vector<ExprPtr> result;
+  result.reserve(rank);
+
+  for (size_t i = 0; i < rank; ++i) {
+    CheckWindowReadDimBounds(params, i);
+
+    const ExprPtr& offset = params.offsets[i];
+    const ExprPtr& window = params.window[i];
+    const ExprPtr& src_valid = params.source_valid[i];
+    const bool source_fully_valid = AreExprsEqual(src_valid, params.source_physical[i]);
+
+    // available = clamp(source_valid - offset, 0, window).
+    //
+    // When the source is fully valid and the read is non-clamping, the
+    // precondition checked above already gives window <= source_valid - offset,
+    // so the clamp is the window itself and no guard expression is built.
+    ExprPtr available;
+    if (source_fully_valid && !params.clamp) {
+      available = window;
+    } else {
+      CHECK_SPAN(IsIntegerScalarExpr(offset), params.span)
+          << params.op_name << " offset " << i << " must be an integer scalar to narrow dimension " << i
+          << " against a partial source, but got " << offset->GetType()->TypeName();
+      const ExprPtr remaining = ProveValidExtentEqual(offset, IndexZero()) == ProofResult::kTrue
+                                    ? src_valid
+                                    : FoldExtent(MakeSub(src_valid, offset, params.span));
+      available = MinExtent(ClampNonNegative(remaining, params.span), window, params.span);
+    }
+
+    // result = min(requested, available). An explicit request already satisfies
+    // request <= window (the standing valid-shape bounds invariant), so when
+    // `available` is the window the request needs no further narrowing.
+    if (params.requested_valid.empty()) {
+      result.push_back(available);
+    } else if (AreExprsEqual(available, window)) {
+      result.push_back(params.requested_valid[i]);
+    } else {
+      result.push_back(MinExtent(params.requested_valid[i], available, params.span));
+    }
+  }
+
+  return result;
+}
+
+void ValidateDropDimsValidExtents(const std::vector<int64_t>& drop_dims,
+                                  const std::vector<ExprPtr>& valid_shape, const std::string& op_name,
+                                  const Span& span) {
+  static const auto one = std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown());
+  for (int64_t axis : drop_dims) {
+    const auto index = static_cast<size_t>(axis);
+    INTERNAL_CHECK(index < valid_shape.size())
+        << "Internal error: " << op_name << " drop_dims axis " << axis
+        << " is out of range for valid_shape rank " << valid_shape.size();
+    const ExprPtr& extent = valid_shape[index];
+    CHECK_SPAN(ProveValidExtentEqual(extent, one) == ProofResult::kTrue, span)
+        << op_name << " cannot drop dimension " << axis << ": its valid extent is " << PythonPrint(extent)
+        << ", which is not provably 1. Rank reduction erases an axis, so the axis must be fully valid; "
+           "keep the dimension instead of dropping it";
+  }
+}
+
+// ============================================================================
 // Slice rank-reduction (drop_dims) helpers
 // ============================================================================
 
@@ -502,13 +701,6 @@ void CollectCallExprVectorBindings(const std::vector<ExprPtr>& patterns, const s
     CollectCallExprBindings(patterns[i], values[i], context + "[" + std::to_string(i) + "]", var_map,
                             constraints);
   }
-}
-
-const std::vector<ExprPtr>& GetEffectiveTensorValidShape(const TensorType& type) {
-  if (type.tensor_view_ && !type.tensor_view_->valid_shape.empty()) {
-    return type.tensor_view_->valid_shape;
-  }
-  return type.shape_;
 }
 
 const std::vector<ExprPtr>& GetEffectiveTileValidShape(const TileType& type) {

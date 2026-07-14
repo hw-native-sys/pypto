@@ -1170,12 +1170,17 @@ def test_tensor_assemble_writes_source():
 
 
 def test_tensor_slice_out_of_bounds_is_padded():
-    """tensor.slice should pad to requested shape when slicing out of bounds."""
+    """tensor.slice should pad to requested shape when slicing out of bounds.
+
+    The window (rows 64..128 of a 96-row source) deliberately overhangs the
+    source, so the slice must say so with clamp=True; its valid region is then
+    the 32 rows that actually exist and the tail is padded.
+    """
     src = _tensor_var("src", [96, 64], DataType.FP32)
     result = _tensor_var("result", [64, 64], DataType.FP32)
     shapes = _make_tuple(_int(64), _int(64))
     offsets = _make_tuple(_int(64), _int(0))
-    call = _op_call("tensor.slice", [src, shapes, offsets])
+    call = _op_call("tensor.slice", [src, shapes, offsets], {"clamp": True})
     assign = ir.AssignStmt(result, call, _span())
     ret = ir.ReturnStmt([result], _span())
     body = ir.SeqStmts([assign, ret], _span())

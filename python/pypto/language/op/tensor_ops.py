@@ -396,24 +396,35 @@ def slice(
     valid_shape: Sequence[IntLike] | None = None,
     drop_dims: Sequence[int | Expr] | None = None,
     pad_value: PadValue | int | float | None = None,
+    clamp: bool = False,
 ) -> _TensorT:
     """Create a slice of a tensor with new shape and optional valid shape.
+
+    The slice is never valid where the source is not: the source's valid region,
+    shifted by ``offset`` and cut to the window, bounds the result.
 
     Args:
         tensor: Input tensor
         shape: New shape dimensions. Always full-rank — a scalar-indexed axis
             contributes a unit dim here and is listed in ``drop_dims``.
         offset: Offset dimensions for the slice
-        valid_shape: Valid shape dimensions. When omitted, the full shape is valid.
+        valid_shape: Valid shape dimensions. When omitted, the source's validity
+            under the window is used. Narrows the result; cannot widen it.
         drop_dims: Optional axes to erase from the result type (numpy-style rank
-            reduction). Each listed axis must be a static unit dim of ``shape``.
+            reduction). Each listed axis must be a static unit dim of ``shape``
+            and must still be fully valid after the intersection above.
             ``None`` / ``[]`` drops nothing (fully backward compatible).
         pad_value: Optional padding mode for out-of-valid-shape elements.
-            ``None`` or ``PadValue.null`` means no padding (the default).
+            ``None`` means the source's padding mode carries through.
             Accepts ``PadValue.zero`` / ``PadValue.max`` / ``PadValue.min``, or
             the literal sugars ``0``, ``math.inf``, ``-math.inf`` (same
             spelling as :func:`tensor.fillpad`). Only meaningful when
             ``valid_shape`` is smaller than ``shape``.
+        clamp: Sanction a window that runs off the end of the source. By default
+            a slice asserts ``offset + shape`` stays inside the source and is
+            rejected when that provably fails; ``clamp=True`` lets the window
+            overhang and cuts the valid region back to the source edge. Use it
+            for a fixed-width tail read whose overhang is never addressed.
 
     Returns:
         Tensor wrapping the slice operation
@@ -437,6 +448,7 @@ def slice(
         normalized_valid_shape,
         drop_dims,
         pad_value=pad_value,
+        clamp=clamp,
     )
     return tensor.__class__(expr=call_expr)
 
