@@ -50,6 +50,11 @@ its own fresh MemRef. This pass closes that gap:
    view inputs). `IfStmt` return values are retargeted into both branch yields.
 2. **Apply retype** (`RetypeApplier`): rewrite the collected variable types in
    place so the producer writes directly into the carried buffer.
+3. **Reconcile remaining external-planner carries** (`YieldFixupMutator`): when
+   `MemoryReuse` is skipped, insert explicit moves for producer/view shapes that
+   cannot be retargeted safely. PTOAS materializes loop-carry moves here and
+   handles if-phi copies in its addr-less codegen. DSA emits explicit addresses,
+   so it materializes both if-phi and loop-carry moves before lifetime export.
 
 The pass is a no-op when there is nothing to retarget (`Compute` returns no
 rewrites), and skips `Orchestration` functions (no TileType variables).
@@ -64,6 +69,10 @@ outs(%acc)` rather than writing to a distinct `%acc_next` buffer. Under
 what lets ptoas `PlanMemory` keep the accumulator in one buffer while still
 doing the lifetime reuse and address assignment itself. See
 [PTO Codegen — Who plans memory](../codegen/00-pto_codegen.md).
+
+DSA cannot use the PTOAS-only codegen repair because its level-3 PTO contains
+explicit addresses. Its if-phi copies therefore remain ordinary IR operations,
+participate in DSA lifetime analysis, and are validated with the placement.
 
 ## Notes
 

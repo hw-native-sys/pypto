@@ -415,7 +415,7 @@ def test_nested_autotile_pipeline_allocates_safely(planner):
 
 @requires_dsa
 def test_dsa_colvec_loop_carry_runs_external_planner_fixup():
-    """DSA must run the same correctness-only carry fixup as PTOAS."""
+    """DSA must materialize both branch-phi and loop-carry write-backs."""
     dsa_optimized, _ = _run_pipeline(passes.MemoryPlanner.DSA, ColVecIfPhiCarry)
     ptoas_optimized, _ = _run_pipeline(passes.MemoryPlanner.PTOAS, ColVecIfPhiCarry)
 
@@ -424,9 +424,18 @@ def test_dsa_colvec_loop_carry_runs_external_planner_fixup():
     dsa_moves = dsa_ir.count("tile.move")
     ptoas_moves = ptoas_ir.count("tile.move")
     assert ptoas_moves > 0, f"expected the col-vector carry to need a write-back move:\n{ptoas_ir}"
-    assert dsa_moves == ptoas_moves, (
-        "DSA skipped an external-planner loop-carry write-back: "
-        f"DSA={dsa_moves}, PTOAS={ptoas_moves}\n{dsa_ir}"
+    # PTOAS materializes only the loop moves in IR; its addr-less codegen copies
+    # branch yields into the if-phi handle. DSA emits explicit addresses, so it
+    # must materialize those branch copies before lifetime export as additional
+    # tile.move operations.
+    assert dsa_moves > ptoas_moves, (
+        f"DSA skipped its explicit-address if-phi write-backs: DSA={dsa_moves}, PTOAS={ptoas_moves}\n{dsa_ir}"
+    )
+
+    dsa_pto = _codegen(dsa_optimized, emit_tile_addr=True)
+    assert dsa_pto.count("pto.tmov") == dsa_moves, (
+        "DSA codegen dropped an IR-level branch-phi or loop-carry write-back: "
+        f"IR tile.move={dsa_moves}, PTO pto.tmov={dsa_pto.count('pto.tmov')}\n{dsa_pto}"
     )
 
 

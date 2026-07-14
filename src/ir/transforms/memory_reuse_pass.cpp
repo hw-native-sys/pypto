@@ -3116,19 +3116,20 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
   // `[N, 1]` col-vector carry of an online softmax is the shape that hits this,
   // because its branch producer runs on a `[1, N]` view in its own buffer.
   //
-  // Run it here so both external planners reconcile carries by the same mechanism.
-  // Under PyPTO it stays where it is: Step 4 must run *after* the reuse decisions, which
-  // can themselves create fresh mismatches.
+  // Run it here so both external planners reconcile carries. Under PyPTO it stays
+  // where it is: Step 4 must run *after* the reuse decisions, which can themselves
+  // create fresh mismatches.
   //
-  // Only the ForStmt half: PTO codegen already re-points a branch-local producer
-  // at the if-phi handle, and copies in whatever it declines to re-point
-  // (#1956/#1985). An IR-level `tile.move` there would displace that copy-free
-  // path with an extra buffer plus a `pto.tmov`. Loop carries have no such
-  // codegen path, so they still need the move.
+  // PTOAS needs only the ForStmt half: its addr-less codegen re-points a
+  // branch-local producer at the if-phi handle and copies in whatever it declines
+  // to re-point (#1956/#1985). DSA emits explicit addresses, so that codegen path
+  // is disabled; DSA must materialize both IfStmt and ForStmt fixups in the IR
+  // before lifetime export and placement.
   const auto* ctx = PassContext::Current();
   if (ctx != nullptr &&
       (ctx->GetMemoryPlanner() == MemoryPlanner::PtoAS || ctx->GetMemoryPlanner() == MemoryPlanner::Dsa)) {
-    YieldFixupMutator yield_fixup(/*fixup_if_stmts=*/false);
+    const bool fixup_if_stmts = ctx->GetMemoryPlanner() == MemoryPlanner::Dsa;
+    YieldFixupMutator yield_fixup(fixup_if_stmts);
     new_body = yield_fixup.VisitStmt(new_body);
   }
 
