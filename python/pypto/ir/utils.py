@@ -182,12 +182,33 @@ def resolve_cast_mode(mode: str | int) -> int:
     return mode_val
 
 
+def has_partial_valid_region(expr: _ir.Expr) -> bool:
+    """Whether a tensor/tile value already declares less valid data than it can hold.
+
+    An explicit ``valid_shape`` survives type canonicalization only when it really
+    differs from the physical shape, so a non-empty one means the value carries
+    padding that a reader has to respect.
+
+    Args:
+        expr: A tensor- or tile-typed expression
+
+    Returns:
+        True when the expression's view narrows it below its physical shape
+    """
+    expr_type = expr.type
+    view = getattr(expr_type, "tensor_view", None)
+    if view is None:
+        view = getattr(expr_type, "tile_view", None)
+    return view is not None and bool(view.valid_shape)
+
+
 __all__ = [
     "CAST_MODE_NAMES",
     "_get_span_or_capture",
     "_normalize_expr",
     "_normalize_shape",
     "_to_make_tuple",
+    "has_partial_valid_region",
     "resolve_cast_mode",
     "use_parser_span",
 ]

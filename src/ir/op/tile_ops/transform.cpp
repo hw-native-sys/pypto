@@ -175,8 +175,8 @@ TypePtr DeduceTileSliceType(const std::vector<ExprPtr>& args,
   std::vector<ExprPtr> requested_valid;
   if (args.size() >= 4) {
     auto valid_shape_tuple_type = As<TupleType>(args[3]->GetType());
-    CHECK(valid_shape_tuple_type) << "tile.slice requires valid_shape to be TupleType, but got "
-                                  << args[3]->GetType()->TypeName();
+    CHECK_SPAN(valid_shape_tuple_type, args[3]->span_)
+        << "tile.slice requires valid_shape to be TupleType, but got " << args[3]->GetType()->TypeName();
     if (!valid_shape_tuple_type->types_.empty()) {
       ValidateIndexTupleElements(valid_shape_tuple_type, "tile.slice", "valid_shape");
       requested_valid = ExtractTupleElements(args[3], valid_shape_tuple_type->types_.size());

@@ -112,7 +112,7 @@ __all__ = [
 ]
 
 from pypto.ir.op import tensor_ops as _ir_ops
-from pypto.ir.utils import _normalize_expr
+from pypto.ir.utils import _normalize_expr, has_partial_valid_region
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import AtomicType, Expr, MemorySpace, PadValue, PtrType, TensorLayout
@@ -418,8 +418,10 @@ def slice(
             ``None`` means the source's padding mode carries through.
             Accepts ``PadValue.zero`` / ``PadValue.max`` / ``PadValue.min``, or
             the literal sugars ``0``, ``math.inf``, ``-math.inf`` (same
-            spelling as :func:`tensor.fillpad`). Only meaningful when
-            ``valid_shape`` is smaller than ``shape``.
+            spelling as :func:`tensor.fillpad`). Only meaningful when the
+            *effective* valid region is smaller than ``shape`` — which an explicit
+            ``valid_shape``, a partially-valid source, or ``clamp=True`` can each
+            bring about.
         clamp: Sanction a window that runs off the end of the source. By default
             a slice asserts ``offset + shape`` stays inside the source and is
             rejected when that provably fails; ``clamp=True`` lets the window
@@ -429,10 +431,22 @@ def slice(
     Returns:
         Tensor wrapping the slice operation
     """
-    if pad_value is not None and pad_value is not PadValue.null and valid_shape is None:
+    # pad_value paints whatever falls outside the *effective* valid region, which
+    # an explicit valid_shape is only one way to narrow: a partially-valid source
+    # narrows it on its own, and clamp=True cuts it back to the source edge. Warn
+    # only when none of those can apply, so the guidance does not contradict the
+    # very options the caller is using.
+    if (
+        pad_value is not None
+        and pad_value is not PadValue.null
+        and valid_shape is None
+        and not clamp
+        and not has_partial_valid_region(tensor.unwrap())
+    ):
         warnings.warn(
-            f"tensor.slice received pad_value={pad_value!r} but no valid_shape. "
-            f"pad_value has no effect unless valid_shape is smaller than shape. "
+            f"tensor.slice received pad_value={pad_value!r} but no valid_shape, "
+            f"clamp, or partially-valid source. "
+            f"pad_value has no effect unless the valid region is smaller than shape. "
             f"If you intend to narrow the valid region later via "
             f"tensor.set_validshape, you can ignore this warning; otherwise "
             f"pass valid_shape=... to tensor.slice.",

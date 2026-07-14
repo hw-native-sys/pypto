@@ -228,7 +228,8 @@ TypePtr DeduceTensorSliceType(const std::vector<ExprPtr>& args,
   std::vector<ExprPtr> requested_valid;
   if (args.size() >= 4) {
     auto valid_shape_tuple = As<MakeTuple>(args[3]);
-    CHECK(valid_shape_tuple) << "tensor.slice valid_shape (4th argument) must be a MakeTuple";
+    CHECK_SPAN(valid_shape_tuple, args[3]->span_)
+        << "tensor.slice valid_shape (4th argument) must be a MakeTuple";
     requested_valid = valid_shape_tuple->elements_;
   }
 
@@ -259,7 +260,7 @@ TypePtr DeduceTensorSliceType(const std::vector<ExprPtr>& args,
         /*span=*/args[0]->span_,
     });
   } else {
-    CHECK(requested_valid.empty() || requested_valid.size() == full_shape.size())
+    CHECK_SPAN(requested_valid.empty() || requested_valid.size() == full_shape.size(), args[0]->span_)
         << "tensor.slice requires valid_shape to have the same rank as shape, but got valid_shape rank "
         << requested_valid.size() << " and shape rank " << full_shape.size();
     full_valid = requested_valid.empty() ? full_shape : requested_valid;

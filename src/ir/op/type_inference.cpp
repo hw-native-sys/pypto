@@ -414,10 +414,15 @@ ExprPtr MinExtent(const ExprPtr& lhs, const ExprPtr& rhs, const Span& span) {
   return FoldExtent(MakeMin(lhs, rhs, span));
 }
 
-/// `max(extent, 0)`, elided when the extent is already provably non-negative.
+/// `max(extent, 0)`, elided whenever the sign of the extent is already settled: a
+/// non-negative extent is its own clamp, and a non-positive one clamps to a literal
+/// zero rather than a `max` node that only ever evaluates to zero.
 ExprPtr ClampNonNegative(const ExprPtr& extent, const Span& span) {
   if (ProveValidExtentLessEqual(IndexZero(), extent) == ProofResult::kTrue) {
     return extent;
+  }
+  if (ProveValidExtentLessEqual(extent, IndexZero()) == ProofResult::kTrue) {
+    return IndexZero();
   }
   return FoldExtent(MakeMax(extent, IndexZero(), span));
 }
@@ -470,8 +475,9 @@ void CheckWindowReadRanks(const WindowReadValidShapeParams& p) {
 }
 
 /// Enforce what a window read promises about dimension `i` before its valid
-/// region is derived: the window starts inside the source, and — unless the read
-/// clamps — the extent it touches also ends inside the source.
+/// region is derived: the window starts inside the source, the request fits in
+/// the window that holds it, and — unless the read clamps — the extent it touches
+/// also ends inside the source.
 void CheckWindowReadDimBounds(const WindowReadValidShapeParams& p, size_t i) {
   const ExprPtr& offset = p.offsets[i];
   const ExprPtr& source = p.source_physical[i];
@@ -479,6 +485,19 @@ void CheckWindowReadDimBounds(const WindowReadValidShapeParams& p, size_t i) {
   CHECK_SPAN(ProveValidExtentLessEqual(IndexZero(), offset) != ProofResult::kFalse, p.span)
       << p.op_name << " offset " << i << " is provably negative (" << PythonPrint(offset)
       << "); a window must start inside its source";
+
+  // An explicit request also has to fit the window that holds it: `valid <= shape`
+  // is the standing bounds invariant of the type this read produces. The request
+  // is returned as the result whenever the source cannot be proven narrower, so
+  // an oversized one would otherwise walk straight into the result type. Reject
+  // what we can disprove and trust the rest, as everywhere else here.
+  if (!p.requested_valid.empty()) {
+    const ExprPtr& requested = p.requested_valid[i];
+    CHECK_SPAN(ProveValidExtentLessEqual(requested, p.window[i]) != ProofResult::kFalse, p.span)
+        << p.op_name << " valid_shape " << i << " is " << PythonPrint(requested)
+        << ", which exceeds the window extent " << PythonPrint(p.window[i])
+        << "; a valid region cannot be larger than the shape that holds it";
+  }
 
   // A non-clamping read asserts that the extent it touches stays inside the
   // source. Reject what we can disprove; trust what stays symbolic, because
@@ -564,7 +583,7 @@ void ValidateDropDimsValidExtents(const std::vector<int64_t>& drop_dims,
   static const auto one = std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown());
   for (int64_t axis : drop_dims) {
     const auto index = static_cast<size_t>(axis);
-    INTERNAL_CHECK(index < valid_shape.size())
+    INTERNAL_CHECK_SPAN(index < valid_shape.size(), span)
         << "Internal error: " << op_name << " drop_dims axis " << axis
         << " is out of range for valid_shape rank " << valid_shape.size();
     const ExprPtr& extent = valid_shape[index];

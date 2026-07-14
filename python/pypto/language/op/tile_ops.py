@@ -158,7 +158,7 @@ __all__ = [
 ]
 
 from pypto.ir.op import tile_ops as _ir_ops
-from pypto.ir.utils import _get_span_or_capture, _normalize_expr
+from pypto.ir.utils import _get_span_or_capture, _normalize_expr, has_partial_valid_region
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import (
@@ -1780,8 +1780,9 @@ def slice(
             ``None`` means the source's padding mode carries through.
             Accepts ``PadValue.zero`` / ``PadValue.max`` / ``PadValue.min``, or
             the literal sugars ``0``, ``math.inf``, ``-math.inf`` (same
-            spelling as :func:`tile.fillpad`). Only meaningful when
-            ``valid_shape`` is smaller than ``shape``.
+            spelling as :func:`tile.fillpad`). Only meaningful when the
+            *effective* valid region is smaller than ``shape`` — which an explicit
+            ``valid_shape`` or a partially-valid source tile can each bring about.
 
     Returns:
         Tile wrapping the slice operation
@@ -1791,10 +1792,19 @@ def slice(
         option: an on-chip window has nothing that could clamp it, so
         ``offset + shape`` must stay inside the source tile.
     """
-    if pad_value is not None and pad_value is not PadValue.null and valid_shape is None:
+    # pad_value paints whatever falls outside the *effective* valid region, and an
+    # explicit valid_shape is only one way to narrow it — a partially-valid source
+    # tile narrows it on its own. Warn only when neither can apply.
+    if (
+        pad_value is not None
+        and pad_value is not PadValue.null
+        and valid_shape is None
+        and not has_partial_valid_region(tile.unwrap())
+    ):
         warnings.warn(
-            f"tile.slice received pad_value={pad_value!r} but no valid_shape. "
-            f"pad_value has no effect unless valid_shape is smaller than shape. "
+            f"tile.slice received pad_value={pad_value!r} but no valid_shape and a "
+            f"fully-valid source. "
+            f"pad_value has no effect unless the valid region is smaller than shape. "
             f"If you intend to narrow the valid region later via "
             f"tile.set_validshape, you can ignore this warning; otherwise "
             f"pass valid_shape=... to tile.slice.",

@@ -232,7 +232,8 @@ std::vector<ValidShapeBoundsError> ValidateValidShapeBounds(const std::vector<Ex
  * projection.
  *
  * @param tuple_expr A tuple-typed operand
- * @param rank Arity of the tuple; unused for a ``MakeTuple``, which knows its own
+ * @param rank Arity of the tuple. Used only for a runtime tuple, whose elements are
+ *             projected one by one; a ``MakeTuple`` already carries its own elements.
  * @return One expression per tuple element
  */
 std::vector<ExprPtr> ExtractTupleElements(const ExprPtr& tuple_expr, size_t rank);

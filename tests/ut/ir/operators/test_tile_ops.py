@@ -4393,6 +4393,19 @@ class TestWindowReadValidRegion:
         assert isinstance(result_type, ir.TileType)
         assert [d.value for d in result_type.shape if isinstance(d, ir.ConstInt)] == [16, 64]
 
+    def test_load_rejects_a_request_larger_than_the_tile_that_holds_it(self):
+        """valid <= shape is the standing invariant of the type the read produces.
+
+        The source is big enough that the read stays in bounds, so only the window
+        itself catches this: asking for 128 valid rows of a 64-row tile would put a
+        valid region into the result that is larger than the shape holding it.
+        """
+        span = ir.Span.unknown()
+        tensor_var = ir.Var("a", ir.TensorType([256, 128], DataType.FP32), span)
+
+        with pytest.raises(ValueError, match="exceeds the window extent"):
+            tile.load(tensor_var, [0, 0], [64, 128], valid_shapes=[128, 128])
+
     def test_load_keeps_the_request_when_the_source_extent_is_undecidable(self):
         """An undecidable source extent is trusted, not folded into a runtime min.
 
