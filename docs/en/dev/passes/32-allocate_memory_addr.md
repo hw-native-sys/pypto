@@ -118,7 +118,11 @@ When `MemoryPlanner.DSA` is active, step 4 is replaced by this guarded path:
    its opportunistic coalescer.
 2. Export one buffer per mandatory `MemRef.base_` identity. The buffer size is
    the largest member size, so differently sized values may occupy that identity
-   over its lifetime. Per-member live ranges remain a multi-interval union.
+   over its lifetime. The exported lifetime is the conservative allocation hull
+   from the earliest member definition through the latest member use. Individual
+   SSA-member gaps are not treated as physical dead time: loop carries, views,
+   and in-place aliases can preserve a value across such a gap. Multi-interval
+   reuse requires a separate proof that the physical value is dead in each hole.
 3. Convert PyPTO statement points into half-open read/write events. A definition
    starts at `2 * def + 1`; the final read ends at `2 * last_use + 1`. A value
    with no later read receives one write event. Consequently, an input's final

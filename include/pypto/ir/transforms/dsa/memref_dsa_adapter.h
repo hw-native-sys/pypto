@@ -63,10 +63,11 @@ struct SolverRun {
  * @brief Convert unmerged PyPTO allocation identities to schema-v1 structured DSA.
  *
  * Each MemRef ``base_`` becomes one fixed-pool buffer. Semantics-required aliases
- * remain one identity with multiple live intervals; opportunistic reuse remains
- * entirely for the standalone solver. PyPTO statement points are expanded into
- * read/write sub-points so an input's last read may share an address with an
- * output written by the same statement.
+ * remain one identity with a conservative allocation-level lifetime hull;
+ * per-member SSA gaps are not physical dead-time proofs. Opportunistic reuse
+ * remains entirely for the standalone solver. PyPTO statement points are
+ * expanded into read/write sub-points so an input's last read may share an
+ * address with an output written by the same statement.
  */
 [[nodiscard]] ExportedProblem BuildStructuredProblem(
     const FunctionPtr& func, const AllocationPlan& allocation_plan, const MemoryAllocatorPolicy& policy,

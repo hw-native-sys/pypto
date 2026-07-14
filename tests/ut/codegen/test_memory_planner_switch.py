@@ -28,6 +28,8 @@ physical addresses for the same level3 codegen contract.
 # DSL function bodies are parsed as AST, not executed — suppress pyright errors.
 # pyright: reportUndefinedVariable=false
 
+import json
+
 import pypto.language as pl
 import pytest
 from pypto import backend, ir
@@ -172,7 +174,10 @@ class ColVecIfPhiCarry:
 
 
 def _run_pipeline(
-    memory_planner: passes.MemoryPlanner, program: ir.Program = ElementwiseAdd
+    memory_planner: passes.MemoryPlanner,
+    program: ir.Program = ElementwiseAdd,
+    *,
+    dsa_export_dir: str | None = None,
 ) -> tuple[ir.Program, list[str]]:
     """Run the Default pipeline under a PassContext with the given planner.
 
@@ -180,7 +185,7 @@ def _run_pipeline(
     """
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.Ascend910B)
-    with passes.PassContext([], memory_planner=memory_planner):
+    with passes.PassContext([], memory_planner=memory_planner, dsa_export_dir=dsa_export_dir):
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
         optimized = pm.run_passes(program)
     return optimized, list(pm.pass_names)
@@ -437,6 +442,44 @@ def test_dsa_colvec_loop_carry_runs_external_planner_fixup():
         "DSA codegen dropped an IR-level branch-phi or loop-carry write-back: "
         f"IR tile.move={dsa_moves}, PTO pto.tmov={dsa_pto.count('pto.tmov')}\n{dsa_pto}"
     )
+
+
+@requires_dsa
+def test_dsa_mandatory_aliases_export_allocation_lifetime_hulls(tmp_path):
+    """SSA-member gaps must not become unproved physical dead regions.
+
+    Mandatory aliases share one physical allocation across loop carries and
+    branch phis. An individual SSA member can stop being referenced before a
+    later member reads the carried value, so only the allocation-level hull is
+    sound solver input. This guards the DeepSeek-v4 ratio-4 softmax-pool
+    regression where scratch occupied such a gap and corrupted the accumulator.
+    """
+    export_dir = tmp_path / "corpus"
+    _run_pipeline(
+        passes.MemoryPlanner.DSA,
+        ColVecIfPhiCarry,
+        dsa_export_dir=str(export_dir),
+    )
+
+    documents = [json.loads(path.read_text()) for path in export_dir.glob("*.dsa.json")]
+    assert documents, "expected the DSA pipeline to export a structured problem"
+
+    saw_mandatory_alias = False
+    for document in documents:
+        problem = document["problem"]
+        aliases = {
+            alias_class["buffer"]: alias_class["members"]
+            for alias_class in problem["pypto_structure"]["alias_classes"]
+        }
+        for buffer in problem["buffers"]:
+            if len(aliases[buffer["id"]]) > 1:
+                saw_mandatory_alias = True
+            assert len(buffer["live_intervals"]) == 1, (
+                "DSA exported an unproved hole inside allocation "
+                f"{buffer['name']}: {buffer['live_intervals']}"
+            )
+
+    assert saw_mandatory_alias, "test fixture no longer exercises mandatory alias classes"
 
 
 if __name__ == "__main__":

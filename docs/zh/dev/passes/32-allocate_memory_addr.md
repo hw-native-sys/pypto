@@ -110,8 +110,11 @@ dsa_export_dir="build/dsa-corpus")`。
 
 1. 复用 MemoryReuse 中感知 phi/loop 的生命周期分析，但不运行其机会性 coalescer。
 2. 每个强制 `MemRef.base_` identity 导出一个 buffer。buffer 大小取成员最大值，因此
-   不同大小的值可以在生命周期不同阶段占用该 identity；每个成员的 live range 保留为
-   multi-interval union。
+   不同大小的值可以在生命周期不同阶段占用该 identity。导出的生命周期采用保守的
+   allocation hull：从最早的成员定义一直延伸到最晚的成员使用。单个 SSA 成员之间的
+   gap 不会被视为物理内存已经失效，因为 loop carry、view 和原地 alias 可能让值跨越
+   该 gap 继续存活。只有单独证明每个 hole 中的物理值确实失效后，才能启用
+   multi-interval 复用。
 3. 把 PyPTO statement point 转成半开区间的读/写 event。定义从
    `2 * def + 1` 开始，最后一次读在 `2 * last_use + 1` 结束；没有后续读取的值仍占用
    一个写 event。因此，一个输入的最后一次读取可以和同一语句写出的结果共用地址。
