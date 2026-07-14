@@ -25,6 +25,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
@@ -36,7 +37,12 @@ namespace codegen {
 // ---------------------------------------------------------------------------
 
 std::string GetSSABaseName(const std::string& name);
-bool IsBuiltinOp(const std::string& op_name);
+
+/// Thin forward to ``ir::op_predicates::IsBuiltinOp`` so codegen call sites read
+/// unqualified. The canonical builtin-op classifier lives in the IR layer;
+/// codegen must not own a second copy.
+inline bool IsBuiltinOp(const std::string& op_name) { return ir::op_predicates::IsBuiltinOp(op_name); }
+
 bool IsTensorOp(const std::string& op_name);
 
 /// True for ops starting with ``array.`` (create / get_element / update_element).

@@ -16,13 +16,13 @@
 #include <utility>
 #include <vector>
 
-#include "pypto/codegen/orchestration/orchestration_analysis.h"
 #include "pypto/core/error.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/wrapper_call_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
@@ -31,7 +31,7 @@ namespace pypto {
 namespace ir {
 namespace {
 
-using ::pypto::codegen::IsBuiltinOp;
+using ::pypto::ir::op_predicates::IsBuiltinOp;
 
 bool IsTensorTypedArg(const ExprPtr& arg) {
   TypePtr ty = arg ? arg->GetType() : TypePtr{};

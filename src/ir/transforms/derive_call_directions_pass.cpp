@@ -21,7 +21,6 @@
 #include <utility>
 #include <vector>
 
-#include "pypto/codegen/orchestration/orchestration_analysis.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -33,6 +32,7 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/buffer_root_collector.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/wrapper_call_utils.h"
 #include "pypto/ir/type.h"
 
@@ -41,9 +41,9 @@ namespace ir {
 
 namespace {
 
-using ::pypto::codegen::IsBuiltinOp;
 using ::pypto::ir::buffer_root::AmbiguousRootPolicy;
 using ::pypto::ir::buffer_root::BufferRootCollector;
+using ::pypto::ir::op_predicates::IsBuiltinOp;
 
 /// Decide whether an argument expression refers to a tensor (not a scalar/index).
 bool IsTensorTypedArg(const ExprPtr& arg) {

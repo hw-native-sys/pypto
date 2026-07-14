@@ -50,10 +50,8 @@ using namespace pypto::ir;  // NOLINT(build/namespaces)
 
 std::string GetSSABaseName(const std::string& name) { return auto_name::GetCompatibleBaseName(name); }
 
-bool IsBuiltinOp(const std::string& op_name) {
-  return op_name.find("tile.") == 0 || op_name.find("tensor.") == 0 || op_name.find("system.") == 0 ||
-         op_name.find("array.") == 0;
-}
+// IsBuiltinOp now lives in ir::op_predicates and is thin-forwarded from the
+// header; codegen call sites still read unqualified via that forward.
 
 bool IsTensorOp(const std::string& op_name) { return op_name.find("tensor.") == 0; }
 

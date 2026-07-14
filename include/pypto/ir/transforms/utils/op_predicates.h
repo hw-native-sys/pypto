@@ -46,6 +46,18 @@ bool IsInitializePipe(const CallPtr& call);
 /// propagation and the tpop lifetime / tfree finalizer.
 bool IsBufferAliasingViewOp(const std::string& op_name);
 
+/// True for builtin ops whose name is namespaced `tile.` / `tensor.` /
+/// `system.` / `array.`. Builtin ops are never user Functions, so they carry
+/// no callee body and no Out/InOut params to trace.
+///
+/// This is a deliberate string-prefix *family* check, not a registry lookup:
+/// it must classify op names that may not be registered (e.g. during `.pto`
+/// deserialization or partway through a lowering pass). It matches an entire
+/// namespace, not a single operator, so `IsOp` / `GetOp` do not apply here
+/// (see `operator-identity-checks.md`). It is the single canonical home for a
+/// predicate that was previously copy-pasted across the IR and codegen layers.
+bool IsBuiltinOp(const std::string& op_name);
+
 }  // namespace op_predicates
 }  // namespace ir
 }  // namespace pypto

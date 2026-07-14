@@ -16,7 +16,6 @@
 #include <utility>
 #include <vector>
 
-#include "pypto/codegen/orchestration/orchestration_analysis.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -27,6 +26,7 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/op_predicates.h"
 
 namespace pypto {
 namespace ir {
@@ -34,7 +34,7 @@ namespace pass {
 
 namespace {
 
-using ::pypto::codegen::IsBuiltinOp;
+using ::pypto::ir::op_predicates::IsBuiltinOp;
 
 constexpr const char* kAttrCompilerAutoManualLayerCandidate = "__compiler_auto_manual_layer_candidate";
 

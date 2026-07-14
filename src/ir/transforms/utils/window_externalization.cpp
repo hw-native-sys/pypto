@@ -27,7 +27,6 @@
 #include <utility>
 #include <vector>
 
-#include "pypto/codegen/orchestration/orchestration_analysis.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/arith/analyzer.h"
@@ -44,6 +43,7 @@
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
@@ -2264,7 +2264,7 @@ class OutWindowExternalizer {
             if (source_root) rewriter_->RecordSiblingCarrierAliasRoot(source_root.get(), parent_root);
           }
 
-          if (!call || pypto::codegen::IsBuiltinOp(call->op_->name_)) {
+          if (!call || op_predicates::IsBuiltinOp(call->op_->name_)) {
             IRVisitor::VisitStmt_(op);
             return;
           }
@@ -4138,7 +4138,7 @@ class OutWindowExternalizer {
   AnalysisMap Analyze(const ProgramPtr& program) {
     AnalysisMap analyses;
     for (const auto& [gvar, func] : program->functions_) {
-      if (!func || pypto::codegen::IsBuiltinOp(func->name_) || !IsInCoreType(func->func_type_)) {
+      if (!func || op_predicates::IsBuiltinOp(func->name_) || !IsInCoreType(func->func_type_)) {
         continue;
       }
 

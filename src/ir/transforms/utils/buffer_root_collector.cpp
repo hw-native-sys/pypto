@@ -23,6 +23,7 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
@@ -31,14 +32,7 @@ namespace ir {
 namespace buffer_root {
 namespace {
 
-// Builtin ops (tile.* / tensor.* / system.* / array.*) are never user
-// functions, so they carry no callee Out/InOut params to trace. Mirrors the
-// canonical IsBuiltinOp predicate; kept file-local to avoid a cross-layer
-// dependency from this IR util onto the codegen module.
-bool IsBuiltinOpName(const std::string& op_name) {
-  return op_name.find("tile.") == 0 || op_name.find("tensor.") == 0 || op_name.find("system.") == 0 ||
-         op_name.find("array.") == 0;
-}
+using op_predicates::IsBuiltinOp;
 
 }  // namespace
 
@@ -97,7 +91,7 @@ void BufferRootCollector::VisitStmt_(const AssignStmtPtr& assign) {
           buffer_roots[assign->var_.get()] = target_root;
         }
       }
-    } else if (!IsBuiltinOpName(op_name)) {
+    } else if (!IsBuiltinOp(op_name)) {
       auto out_roots = CollectCallOutputRoots(call);
       if (As<TupleType>(call->GetType())) {
         std::vector<const Var*> roots;

@@ -26,7 +26,6 @@
 #include <utility>
 #include <vector>
 
-#include "pypto/codegen/orchestration/orchestration_analysis.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -42,6 +41,7 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/attrs.h"
+#include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/type.h"
 
@@ -50,7 +50,7 @@ namespace ir {
 
 namespace {
 
-using ::pypto::codegen::IsBuiltinOp;
+using ::pypto::ir::op_predicates::IsBuiltinOp;
 
 enum class AccessKind { Read, Write, ReadWrite };
 

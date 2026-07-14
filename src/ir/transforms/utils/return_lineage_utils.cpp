@@ -28,6 +28,7 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/wrapper_call_utils.h"
 #include "pypto/ir/type.h"
 
@@ -37,10 +38,7 @@ namespace return_lineage {
 
 namespace {
 
-bool IsBuiltinOp(const std::string& op_name) {
-  return op_name.find("tile.") == 0 || op_name.find("tensor.") == 0 || op_name.find("system.") == 0 ||
-         op_name.find("array.") == 0;
-}
+using op_predicates::IsBuiltinOp;
 
 CallPtr AsCallOrSubmitView(const ExprPtr& expr) {
   if (auto call = As<Call>(expr)) return call;
