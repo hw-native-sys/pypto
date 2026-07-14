@@ -236,15 +236,29 @@ bool DimensionsEqual(const ExprPtr& dim1, const ExprPtr& dim2) {
   return analyzer.CanProveEqual(dim1, dim2);
 }
 
-ProofResult ProveValidExtentEqual(const ExprPtr& lhs, const ExprPtr& rhs) {
+namespace {
+bool AreComparableIntegerScalarExprs(const ExprPtr& lhs, const ExprPtr& rhs) {
   if (!lhs || !rhs) {
+    return false;
+  }
+  auto lhs_type = As<ScalarType>(lhs->GetType());
+  auto rhs_type = As<ScalarType>(rhs->GetType());
+  if (!lhs_type || !rhs_type || !lhs_type->dtype_.IsInt() || !rhs_type->dtype_.IsInt()) {
+    return false;
+  }
+  return lhs_type->dtype_.IsSignedInt() == rhs_type->dtype_.IsSignedInt();
+}
+}  // namespace
+
+ProofResult ProveValidExtentEqual(const ExprPtr& lhs, const ExprPtr& rhs) {
+  if (!AreComparableIntegerScalarExprs(lhs, rhs)) {
     return ProofResult::kUnknown;
   }
   if (AreExprsEqual(lhs, rhs)) {
     return ProofResult::kTrue;
   }
 
-  arith::Analyzer analyzer;
+  thread_local arith::Analyzer analyzer;
   if (analyzer.CanProveEqual(lhs, rhs)) {
     return ProofResult::kTrue;
   }
@@ -255,14 +269,14 @@ ProofResult ProveValidExtentEqual(const ExprPtr& lhs, const ExprPtr& rhs) {
 }
 
 ProofResult ProveValidExtentLessEqual(const ExprPtr& lhs, const ExprPtr& rhs) {
-  if (!lhs || !rhs) {
+  if (!AreComparableIntegerScalarExprs(lhs, rhs)) {
     return ProofResult::kUnknown;
   }
   if (AreExprsEqual(lhs, rhs)) {
     return ProofResult::kTrue;
   }
 
-  arith::Analyzer analyzer;
+  thread_local arith::Analyzer analyzer;
   if (analyzer.CanProve(MakeLe(lhs, rhs))) {
     return ProofResult::kTrue;
   }
@@ -325,7 +339,7 @@ std::vector<ValidShapeBoundsError> ValidateValidShapeBounds(const std::vector<Ex
   }
 
   std::vector<ValidShapeBoundsError> errors;
-  const auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, Span::unknown());
+  static const auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, Span::unknown());
   for (size_t i = 0; i < valid.size(); ++i) {
     if (ProveValidExtentLessEqual(zero, valid[i]) == ProofResult::kFalse) {
       std::ostringstream msg;

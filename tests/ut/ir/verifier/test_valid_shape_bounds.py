@@ -114,6 +114,13 @@ def test_allows_genuinely_unknown_symbolic_bounds():
     assert _verify(_program(params=[ir.Var("x", symbolic_type, _SPAN)])) == []
 
 
+def test_allows_unsupported_extent_type_as_unknown():
+    float_extent = ir.ConstFloat(1.0, DataType.FP32, _SPAN)
+    unsupported_type = _tensor_type([_const(16)], [float_extent])
+
+    assert _verify(_program(params=[ir.Var("x", unsupported_type, _SPAN)])) == []
+
+
 def test_analyzer_proves_composite_extent_in_bounds():
     n = _sym("n")
     valid = _sub(_add(n, _const(64)), n)
@@ -176,23 +183,24 @@ def test_checks_local_variable_type():
 
 def test_checks_iter_arg_type():
     invalid_type = _tensor_type([_const(16)], [_const(17)])
-    initial = ir.Var("initial", ir.ScalarType(DataType.INT64), _SPAN)
+    scalar_type = ir.ScalarType(DataType.INT64)
+    initial = ir.Var("initial", scalar_type, _SPAN)
     carry = ir.IterArg("carry", invalid_type, initial, _SPAN)
+    result = ir.Var("result", scalar_type, _SPAN)
     loop = ir.ForStmt(
         ir.Var("i", ir.ScalarType(DataType.INDEX), _SPAN),
         _const(0),
         _const(1),
         _const(1),
         [carry],
-        ir.YieldStmt([], _SPAN),
-        [],
+        ir.YieldStmt([initial], _SPAN),
+        [result],
         _SPAN,
     )
     diagnostics = _verify(_program(statements=[loop]))
 
-    valid_shape_diagnostics = [d for d in diagnostics if "valid_shape" in d.message]
-    assert len(valid_shape_diagnostics) == 1
-    assert "IterArg 'carry' has invalid TensorType" in valid_shape_diagnostics[0].message
+    assert len(diagnostics) == 1
+    assert "IterArg 'carry' has invalid TensorType" in diagnostics[0].message
 
 
 def test_checks_call_result_type():
