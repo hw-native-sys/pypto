@@ -21,6 +21,7 @@
 #ifndef PYPTO_IR_TYPE_INFERENCE_H_
 #define PYPTO_IR_TYPE_INFERENCE_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -158,6 +159,68 @@ std::optional<int64_t> GetConstantDimension(const ExprPtr& dim);
  * @return true if dimensions are equal
  */
 bool DimensionsEqual(const ExprPtr& dim1, const ExprPtr& dim2);
+
+/**
+ * @brief Tri-state result for symbolic valid-extent proof obligations
+ *
+ * A relation is true or false only when the arithmetic analyzer can prove that
+ * result. Symbolic relations that cannot be decided remain unknown.
+ */
+enum class ProofResult {
+  kTrue,
+  kFalse,
+  kUnknown,
+};
+
+/**
+ * @brief Prove whether two valid-extent expressions are equal
+ *
+ * Recognizes structural identity, equal constants, and relations established
+ * by the arithmetic analyzer.
+ */
+ProofResult ProveValidExtentEqual(const ExprPtr& lhs, const ExprPtr& rhs);
+
+/**
+ * @brief Prove whether one valid-extent expression is less than or equal to another
+ *
+ * @return kTrue when lhs <= rhs is proven, kFalse when lhs > rhs is proven,
+ *         and kUnknown otherwise
+ */
+ProofResult ProveValidExtentLessEqual(const ExprPtr& lhs, const ExprPtr& rhs);
+
+/**
+ * @brief Kinds of malformed explicit valid shapes
+ */
+enum class ValidShapeBoundsViolation {
+  kRankMismatch,
+  kNegativeExtent,
+  kExceedsPhysicalExtent,
+};
+
+/**
+ * @brief A structured valid-shape validation failure
+ */
+struct ValidShapeBoundsError {
+  ValidShapeBoundsViolation violation;
+  std::optional<size_t> dimension;
+  std::string message;
+};
+
+/**
+ * @brief Validate the standing bounds invariant for an explicit valid shape
+ *
+ * Checks rank(valid) == rank(physical) and every provable violation of
+ * 0 <= valid[i] <= physical[i]. Unknown symbolic relations are accepted.
+ * An empty valid shape represents the full physical shape and is valid.
+ *
+ * @param valid Explicit valid shape, or empty for implicit full validity
+ * @param physical Physical shape
+ * @param type_kind Shaped type name used in diagnostics
+ * @return All provable violations
+ */
+std::vector<ValidShapeBoundsError> ValidateValidShapeBounds(const std::vector<ExprPtr>& valid,
+                                                            const std::vector<ExprPtr>& physical,
+                                                            const std::string& type_kind);
 
 /**
  * @brief Check if a dimension is broadcastable to another

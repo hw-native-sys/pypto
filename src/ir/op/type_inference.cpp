@@ -28,6 +28,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/type.h"
 
@@ -235,6 +236,42 @@ bool DimensionsEqual(const ExprPtr& dim1, const ExprPtr& dim2) {
   return analyzer.CanProveEqual(dim1, dim2);
 }
 
+ProofResult ProveValidExtentEqual(const ExprPtr& lhs, const ExprPtr& rhs) {
+  if (!lhs || !rhs) {
+    return ProofResult::kUnknown;
+  }
+  if (AreExprsEqual(lhs, rhs)) {
+    return ProofResult::kTrue;
+  }
+
+  arith::Analyzer analyzer;
+  if (analyzer.CanProveEqual(lhs, rhs)) {
+    return ProofResult::kTrue;
+  }
+  if (analyzer.CanProve(MakeNe(lhs, rhs))) {
+    return ProofResult::kFalse;
+  }
+  return ProofResult::kUnknown;
+}
+
+ProofResult ProveValidExtentLessEqual(const ExprPtr& lhs, const ExprPtr& rhs) {
+  if (!lhs || !rhs) {
+    return ProofResult::kUnknown;
+  }
+  if (AreExprsEqual(lhs, rhs)) {
+    return ProofResult::kTrue;
+  }
+
+  arith::Analyzer analyzer;
+  if (analyzer.CanProve(MakeLe(lhs, rhs))) {
+    return ProofResult::kTrue;
+  }
+  if (analyzer.CanProve(MakeGt(lhs, rhs))) {
+    return ProofResult::kFalse;
+  }
+  return ProofResult::kUnknown;
+}
+
 bool IsBroadcastable(const ExprPtr& source_dim, const ExprPtr& target_dim) {
   // If dimensions are equal, they're broadcastable
   if (DimensionsEqual(source_dim, target_dim)) {
@@ -271,6 +308,40 @@ std::string FormatShape(const std::vector<ExprPtr>& shape) {
   }
   oss << "]";
   return oss.str();
+}
+
+std::vector<ValidShapeBoundsError> ValidateValidShapeBounds(const std::vector<ExprPtr>& valid,
+                                                            const std::vector<ExprPtr>& physical,
+                                                            const std::string& type_kind) {
+  if (valid.empty()) {
+    return {};
+  }
+
+  if (valid.size() != physical.size()) {
+    std::ostringstream msg;
+    msg << type_kind << " valid_shape rank mismatch: got rank " << valid.size() << " " << FormatShape(valid)
+        << ", but physical shape has rank " << physical.size() << " " << FormatShape(physical);
+    return {{ValidShapeBoundsViolation::kRankMismatch, std::nullopt, msg.str()}};
+  }
+
+  std::vector<ValidShapeBoundsError> errors;
+  const auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, Span::unknown());
+  for (size_t i = 0; i < valid.size(); ++i) {
+    if (ProveValidExtentLessEqual(zero, valid[i]) == ProofResult::kFalse) {
+      std::ostringstream msg;
+      msg << type_kind << " valid_shape dimension " << i << " has provably negative extent "
+          << PythonPrint(valid[i]) << "; expected 0 <= valid_shape[" << i << "] <= shape[" << i << "] ("
+          << PythonPrint(physical[i]) << ")";
+      errors.push_back({ValidShapeBoundsViolation::kNegativeExtent, i, msg.str()});
+    }
+    if (ProveValidExtentLessEqual(valid[i], physical[i]) == ProofResult::kFalse) {
+      std::ostringstream msg;
+      msg << type_kind << " valid_shape dimension " << i << " extent " << PythonPrint(valid[i])
+          << " provably exceeds physical shape extent " << PythonPrint(physical[i]);
+      errors.push_back({ValidShapeBoundsViolation::kExceedsPhysicalExtent, i, msg.str()});
+    }
+  }
+  return errors;
 }
 
 // ============================================================================

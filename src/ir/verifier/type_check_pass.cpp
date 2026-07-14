@@ -18,6 +18,7 @@
 #include "pypto/core/error.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
@@ -25,6 +26,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 #include "pypto/ir/verifier/verification_error.h"
 #include "pypto/ir/verifier/verifier.h"
 
@@ -67,6 +69,8 @@ class TypeChecker : public IRVisitor {
  public:
   explicit TypeChecker(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
 
+  void VisitFunction(const FunctionPtr& func) override;
+  void VisitExpr(const ExprPtr& expr) override;
   void VisitStmt_(const ForStmtPtr& op) override;
   void VisitStmt_(const WhileStmtPtr& op) override;
   void VisitStmt_(const IfStmtPtr& op) override;
@@ -106,12 +110,92 @@ class TypeChecker : public IRVisitor {
    * @brief Check if expression is a ScalarType with BOOL dtype (for if/while conditions)
    */
   void CheckIsBoolCondition(const ExprPtr& expr, const std::string& context, const Span& span);
+
+  /**
+   * @brief Recursively validate explicit valid shapes carried by a type
+   */
+  void ValidateTypeValidShape(const TypePtr& type, const std::string& context, const Span& span);
 };
 
 // TypeChecker implementation
 
 void TypeChecker::RecordError(typecheck::ErrorType type, const std::string& message, const Span& span) {
   diagnostics_.emplace_back(DiagnosticSeverity::Error, "TypeCheck", static_cast<int>(type), message, span);
+}
+
+void TypeChecker::VisitFunction(const FunctionPtr& func) {
+  if (!func) return;
+
+  for (size_t i = 0; i < func->params_.size(); ++i) {
+    const auto& param = func->params_[i];
+    if (!param) continue;
+    ValidateTypeValidShape(
+        param->GetType(),
+        "Function '" + func->name_ + "' parameter[" + std::to_string(i) + "] '" + param->name_hint_ + "'",
+        param->span_);
+  }
+  for (size_t i = 0; i < func->return_types_.size(); ++i) {
+    ValidateTypeValidShape(func->return_types_[i],
+                           "Function '" + func->name_ + "' return type[" + std::to_string(i) + "]",
+                           func->span_);
+  }
+  if (func->body_) {
+    VisitStmt(func->body_);
+  }
+}
+
+void TypeChecker::VisitExpr(const ExprPtr& expr) {
+  if (!expr) return;
+
+  std::string context = expr->TypeName() + " expression";
+  if (auto var = AsVarLike(expr)) {
+    context = var->TypeName() + " '" + var->name_hint_ + "'";
+  } else if (As<Call>(expr)) {
+    context = "Call result";
+  } else if (As<Submit>(expr)) {
+    context = "Submit result";
+  }
+  ValidateTypeValidShape(expr->GetType(), context, expr->span_);
+  IRVisitor::VisitExpr(expr);
+}
+
+void TypeChecker::ValidateTypeValidShape(const TypePtr& type, const std::string& context, const Span& span) {
+  if (!type) return;
+
+  if (auto tuple_type = As<TupleType>(type)) {
+    for (size_t i = 0; i < tuple_type->types_.size(); ++i) {
+      ValidateTypeValidShape(tuple_type->types_[i], context + " TupleType element[" + std::to_string(i) + "]",
+                             span);
+    }
+    return;
+  }
+
+  const std::vector<ExprPtr>* valid_shape = nullptr;
+  const std::vector<ExprPtr>* physical_shape = nullptr;
+  if (auto distributed_type = As<DistributedTensorType>(type)) {
+    if (distributed_type->tensor_view_) {
+      valid_shape = &distributed_type->tensor_view_->valid_shape;
+    }
+    physical_shape = &distributed_type->shape_;
+  } else if (auto tensor_type = As<TensorType>(type)) {
+    if (tensor_type->tensor_view_) {
+      valid_shape = &tensor_type->tensor_view_->valid_shape;
+    }
+    physical_shape = &tensor_type->shape_;
+  } else if (auto tile_type = As<TileType>(type)) {
+    if (tile_type->tile_view_) {
+      valid_shape = &tile_type->tile_view_->valid_shape;
+    }
+    physical_shape = &tile_type->shape_;
+  }
+
+  if (!valid_shape || !physical_shape || valid_shape->empty()) return;
+  for (const auto& error : ValidateValidShapeBounds(*valid_shape, *physical_shape, type->TypeName())) {
+    auto error_type = error.violation == ValidShapeBoundsViolation::kRankMismatch
+                          ? typecheck::ErrorType::SHAPE_DIMENSION_MISMATCH
+                          : typecheck::ErrorType::SHAPE_VALUE_MISMATCH;
+    RecordError(error_type, context + " has invalid " + error.message, span);
+  }
 }
 
 StmtPtr TypeChecker::GetLastStmt(const StmtPtr& stmt) {
@@ -586,11 +670,7 @@ class TypeCheckPropertyVerifierImpl : public PropertyVerifier {
 
       // Create type checker and run checking
       TypeChecker checker(diagnostics);
-
-      // Visit function body
-      if (func->body_) {
-        checker.VisitStmt(func->body_);
-      }
+      checker.VisitFunction(func);
     }
   }
 };
