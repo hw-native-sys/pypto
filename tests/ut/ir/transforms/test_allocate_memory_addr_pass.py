@@ -157,9 +157,10 @@ def test_allocate_memory_addr_resolves_auto_reserve_buffer_before_tiles():
 
     Initialized = passes.init_mem_ref()(Before)
     After = passes.allocate_memory_addr()(Initialized)
-    DsaAfter = _allocate_with_dsa(Initialized)
     ir.assert_structural_equal(After, Expected)
-    assert _vec_peak(DsaAfter) == 4096 + 16384
+    if passes.is_dsa_solver_available():
+        DsaAfter = _allocate_with_dsa(Initialized)
+        assert _vec_peak(DsaAfter) == 4096 + 16384
 
 
 def test_allocate_memory_addr_rejects_overlapping_reserve_buffer_ranges():
@@ -526,8 +527,9 @@ def test_allocated_memory_addr_verifier_errors_when_vec_exceeds_safe_cap():
                 return result
 
         program = passes.init_mem_ref()(Before)
-        with pytest.raises(ValueError, match=r"standalone DSA solver could not fit"):
-            _allocate_with_dsa(program)
+        if passes.is_dsa_solver_available():
+            with pytest.raises(ValueError, match=r"standalone DSA solver could not fit"):
+                _allocate_with_dsa(program)
 
         pipeline = passes.PassPipeline()
         pipeline.add_pass(passes.allocate_memory_addr())

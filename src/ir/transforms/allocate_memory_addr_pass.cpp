@@ -12,7 +12,6 @@
 #include <algorithm>
 #include <any>
 #include <cstdint>
-#include <filesystem>
 #include <map>
 #include <memory>
 #include <optional>
@@ -490,7 +489,7 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> PlanWithStandaloneDsa(
       << "': " << run.problem_errors.front();
 
   if (export_directory) {
-    const std::filesystem::path output = dsa_adapter::WriteProblemJson(exported, *export_directory);
+    const std::string output = dsa_adapter::WriteProblemJson(exported, *export_directory);
     LOG_INFO << "[dsa] exported " << func->name_ << " to " << output;
   }
 

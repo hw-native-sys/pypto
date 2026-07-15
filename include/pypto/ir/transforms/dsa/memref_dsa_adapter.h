@@ -13,7 +13,6 @@
 #define PYPTO_IR_TRANSFORMS_DSA_MEMREF_DSA_ADAPTER_H_
 
 #include <cstdint>
-#include <filesystem>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -80,8 +79,7 @@ struct SolverRun {
  * External-library and filesystem exceptions are translated to PyPTO errors at
  * this boundary. The returned path is the exact file written.
  */
-[[nodiscard]] std::filesystem::path WriteProblemJson(const ExportedProblem& exported,
-                                                     const std::filesystem::path& directory);
+[[nodiscard]] std::string WriteProblemJson(const ExportedProblem& exported, const std::string& directory);
 
 /**
  * @brief Run the standalone deterministic baseline and independently validate it.

@@ -32,7 +32,7 @@ loop-carried values, and in-place operations retain their mandatory identities.
 ## Planner modes
 
 | Mode | Input to this pass | Placement | Failure behavior |
-| --- | --- | --- | --- |
+| ---- | ------------------ | --------- | ---------------- |
 | `MemoryPlanner.PYPTO` | Opportunistically merged MemRefs from MemoryReuse | Backend-policy aligned bump allocation | Existing verifier reports invalid or over-capacity addresses |
 | `MemoryPlanner.DSA` | Unmerged MemRefs after MaterializeSemanticAliases | Standalone first-fit DSA solver over schema-v1 `pypto_structured` | Invalid export, capability mismatch, infeasibility, or validator failure stops compilation; no silent fallback |
 | `MemoryPlanner.PTOAS` | None | This pass is skipped; ptoas `PlanMemory` owns placement | Deferred to ptoas |

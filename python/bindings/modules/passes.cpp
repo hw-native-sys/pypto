@@ -295,8 +295,7 @@ void BindPass(nb::module_& m) {
            nb::arg("diagnostic_phase") = DiagnosticPhase::PrePipeline,
            nb::arg("disabled_diagnostics") = DiagnosticCheckSet{DiagnosticCheck::UnusedControlFlowResult},
            nb::arg("memory_planner") = MemoryPlanner::PyPTO,
-           nb::arg("enable_pypto_l0c_double_buffer") = false,
-           nb::arg("dsa_export_dir") = nb::none(),
+           nb::arg("enable_pypto_l0c_double_buffer") = false, nb::arg("dsa_export_dir") = nb::none(),
            "Create a PassContext with instruments, verification level, diagnostic phase gate, "
            "optional disabled diagnostic checks, memory planner selection, the experimental "
            "PyPTO-planner L0C double-buffer opt-in, and DSA export directory")

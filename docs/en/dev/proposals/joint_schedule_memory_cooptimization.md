@@ -65,7 +65,7 @@ Joint optimization is possible in either compiler, but each boundary exposes a
 different search space.
 
 | Owner | Can vary | Strongest knowledge | Main limitation |
-| --- | --- | --- | --- |
+| ----- | -------- | ------------------- | --------------- |
 | PyPTO | Tiling, pipeline construction/depth, cross-core skew, operation order, reuse, offsets | Source semantics, loops, aliases, high-level alternatives | Must estimate final pipe, event, and instruction costs |
 | PTOAS | Lowered instruction order, pipe synchronization, multi-buffer slots, reuse, offsets | Concrete PTO operations, pipes, events, backend legality | Cannot recover high-level choices erased by lowering |
 | Cross-layer | PyPTO schedule alternatives plus PTOAS placement/backend cost | Semantic structure and backend truth | Needs a stable protocol and possibly iterative compilation |

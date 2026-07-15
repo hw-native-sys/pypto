@@ -59,7 +59,7 @@ sync/event 插入与最终 pipe 行为还会提供更低层的执行事实。
 两个 compiler 都能实现联合优化，但各自暴露的搜索空间不同。
 
 | 归属 | 可改变内容 | 最强信息 | 主要限制 |
-| --- | --- | --- | --- |
+| ---- | ---------- | -------- | -------- |
 | PyPTO | Tiling、pipeline 构造/depth、cross-core skew、operation order、复用和 offset | 源语义、loop、alias、高层候选 | 必须估计最终 pipe、event 和 instruction cost |
 | PTOAS | 降低后的 instruction order、pipe 同步、multi-buffer slot、复用和 offset | 具体 PTO operation、pipe、event、backend legality | 无法恢复 lowering 已删除的高层选择 |
 | 跨层 | PyPTO 调度候选加 PTOAS placement/backend cost | 语义结构与 backend truth | 需要稳定协议，并可能需要迭代编译 |
