@@ -202,11 +202,25 @@ def has_partial_valid_region(expr: _ir.Expr) -> bool:
     return view is not None and bool(view.valid_shape)
 
 
+def _to_int32_scalar(value: int | _ir.Expr, span: _ir.Span) -> _ir.Expr:
+    """Normalize a seed value to an INT32 scalar expression.
+
+    Shared by the counter-based ``random`` ops (tensor and tile), which coerce
+    every key/counter word to an INT32 scalar before building the call.
+    """
+    if isinstance(value, _ir.Expr):
+        if isinstance(value, _ir.ConstInt) and value.dtype != DataType.INT32:
+            return _ir.ConstInt(value.value, DataType.INT32, span)
+        return value
+    return _ir.ConstInt(value, DataType.INT32, span)
+
+
 __all__ = [
     "CAST_MODE_NAMES",
     "_get_span_or_capture",
     "_normalize_expr",
     "_normalize_shape",
+    "_to_int32_scalar",
     "_to_make_tuple",
     "has_partial_valid_region",
     "resolve_cast_mode",

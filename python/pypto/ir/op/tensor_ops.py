@@ -27,7 +27,7 @@ from pypto.pypto_core.ir import (
     TensorLayout,
 )
 
-from ..utils import _get_span_or_capture, _normalize_expr, _to_make_tuple, resolve_cast_mode
+from ..utils import _get_span_or_capture, _normalize_expr, _to_int32_scalar, _to_make_tuple, resolve_cast_mode
 from ._pad_value import normalize_pad_value
 from .tile_ops import resolve_gather_compare_cmp_mode
 
@@ -172,15 +172,6 @@ def ci(
 
 
 arange = ci
-
-
-def _to_int32_scalar(value: int | Expr, span: Span) -> Expr:
-    """Normalize a seed value to an INT32 scalar expression."""
-    if isinstance(value, Expr):
-        if isinstance(value, ConstInt) and value.dtype != DataType.INT32:
-            return ConstInt(value.value, DataType.INT32, span)
-        return value
-    return ConstInt(value, DataType.INT32, span)
 
 
 def random(
