@@ -294,7 +294,19 @@ jobs:
         repository: tonibohnlein/dsa-solver
         ref: f908eddbd63e37c8edbe1d3be37c213d429cbed7
         path: dsa-solver
-        submodules: recursive
+        submodules: false
+
+    - name: Checkout dsa-solver dependencies
+      working-directory: dsa-solver
+      run: |
+        for attempt in 1 2 3 4 5; do
+          if git -c http.version=HTTP/1.1 submodule update --init --recursive --depth 1; then
+            exit 0
+          fi
+          echo "Submodule checkout attempt ${attempt} failed; retrying"
+          sleep $((attempt * 5))
+        done
+        exit 1
 
     - name: Fetch base branch for diff
       if: github.event_name == 'pull_request'
@@ -472,7 +484,19 @@ jobs:
         repository: tonibohnlein/dsa-solver
         ref: f908eddbd63e37c8edbe1d3be37c213d429cbed7
         path: dsa-solver
-        submodules: recursive
+        submodules: false
+    - name: Checkout dsa-solver dependencies
+      working-directory: dsa-solver
+      run: |
+        for attempt in 1 2 3 4 5; do
+          if git -c http.version=HTTP/1.1 submodule update --init --recursive --depth 1; then
+            exit 0
+          fi
+          echo "Submodule checkout attempt ${attempt} failed; retrying"
+          sleep $((attempt * 5))
+        done
+        exit 1
+
     - name: Set up Python 3.10
       uses: actions/setup-python@v5
       with:
