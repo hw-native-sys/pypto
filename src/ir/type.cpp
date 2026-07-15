@@ -117,8 +117,7 @@ inline uint64_t HashExprForAreExprsEqual(const ExprPtr& e) {
     return hash_combine(h, HashExprForAreExprsEqual(b->right_));
   }
   if (auto call = As<Call>(e)) {
-    uint64_t h = hash_combine(kCallExprHashTag,
-                              std::hash<std::string>{}(call->op_ ? call->op_->name_ : ""));
+    uint64_t h = hash_combine(kCallExprHashTag, std::hash<std::string>{}(call->op_ ? call->op_->name_ : ""));
     for (const auto& arg : call->args_) {
       h = hash_combine(h, HashExprForAreExprsEqual(arg));
     }

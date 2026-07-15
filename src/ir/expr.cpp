@@ -73,8 +73,7 @@ bool AreExprsEqual(const ExprPtr& e1, const ExprPtr& e2) {
   // where two Ops share a name but are distinct objects.
   auto call1 = As<Call>(e1);
   auto call2 = As<Call>(e2);
-  if (call1 && call2 && call1->op_ && call2->op_ &&
-      call1->op_->name_ == call2->op_->name_) {
+  if (call1 && call2 && call1->op_ && call2->op_ && call1->op_->name_ == call2->op_->name_) {
     if (call1->args_.size() != call2->args_.size()) return false;
     for (size_t i = 0; i < call1->args_.size(); ++i) {
       if (!AreExprsEqual(call1->args_[i], call2->args_[i])) return false;
