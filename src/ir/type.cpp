@@ -100,10 +100,12 @@ namespace {
 constexpr uint64_t kConstIntHashTag = 1;
 constexpr uint64_t kExprPtrHashTag = 2;
 constexpr uint64_t kBinaryExprHashTag = 3;
+constexpr uint64_t kCallExprHashTag = 4;
 
-// Mirror AreExprsEqual: ConstInt nodes compare by value, binary ops compare
-// structurally (kind + operands), all others by pointer identity. The hash
-// must match this granularity.
+// Mirror AreExprsEqual: ConstInt nodes compare by value, binary ops and Call
+// nodes compare structurally (kind + operands / op + args), all others by
+// pointer identity.  The hash must match this granularity — any extension to
+// AreExprsEqual MUST get a corresponding branch here.
 inline uint64_t HashExprForAreExprsEqual(const ExprPtr& e) {
   if (!e) return 0;
   if (auto c = As<ConstInt>(e)) {
@@ -113,6 +115,13 @@ inline uint64_t HashExprForAreExprsEqual(const ExprPtr& e) {
     uint64_t h = hash_combine(kBinaryExprHashTag, static_cast<uint64_t>(e->GetKind()));
     h = hash_combine(h, HashExprForAreExprsEqual(b->left_));
     return hash_combine(h, HashExprForAreExprsEqual(b->right_));
+  }
+  if (auto call = As<Call>(e)) {
+    uint64_t h = hash_combine(kCallExprHashTag, std::hash<const void*>{}(call->op_.get()));
+    for (const auto& arg : call->args_) {
+      h = hash_combine(h, HashExprForAreExprsEqual(arg));
+    }
+    return h;
   }
   return hash_combine(kExprPtrHashTag, std::hash<const void*>{}(e.get()));
 }
