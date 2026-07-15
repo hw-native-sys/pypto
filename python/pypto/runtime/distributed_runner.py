@@ -26,6 +26,8 @@ from typing import TYPE_CHECKING, Any
 import numpy as np  # pyright: ignore[reportMissingImports]
 import torch
 
+from pypto.pypto_core.ir import ParamDirection
+
 from .device_tensor import DeviceTensor, StackedDeviceTensor
 from .runtime_base import Worker
 
@@ -1384,10 +1386,10 @@ class DistributedWorker(Worker):
                             f"Parameter {info.name!r}: a non-shared host tensor must be registered "
                             "through inherited_host_tensors before the chip workers fork."
                         )
-                    if info.direction.name != "In":
+                    if info.direction != ParamDirection.In:
                         raise TypeError(
                             f"Parameter {info.name!r}: inherited host tensors are input-only; "
-                            f"direction {info.direction.name} requires shared memory."
+                            f"direction {info.direction} requires shared memory."
                         )
             elif not _is_simpler_tensor(arg):
                 raise TypeError(

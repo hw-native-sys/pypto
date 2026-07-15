@@ -239,7 +239,7 @@ class TestPerCallValidation:
     def test_rejects_invalid_prefork_tensor_registration(self, patched_setup, weight, expected_exception):
         compiled = _fake_compiled([_param("weight", [128, 128])], [])
 
-        with pytest.raises(expected_exception, match="torch.Tensor|contiguous CPU"):
+        with pytest.raises(expected_exception, match=r"torch\.Tensor|contiguous CPU"):
             DistributedWorker(compiled, inherited_host_tensors=[weight])
 
     def test_scalar_param_forwarded_as_is(self, patched_setup):
@@ -986,10 +986,16 @@ class TestMultiProgram:
 
         primary = _fake_compiled([_param("a", [4])], [])
         extra = _fake_compiled([_param("b", [8])], [])
+        inherited = [torch.zeros(4)]
         with patch("pypto.runtime.distributed_runner.DistributedWorker") as fake_worker:
-            DistributedCompiledProgram.prepare(primary, extra_compiled=[extra])
+            DistributedCompiledProgram.prepare(
+                primary,
+                extra_compiled=[extra],
+                inherited_host_tensors=inherited,
+            )
         # prepare() delegates to DistributedWorker([primary, *extra_compiled], ...).
         assert fake_worker.call_args.args[0] == [primary, extra]
+        assert fake_worker.call_args.kwargs["inherited_host_tensors"] is inherited
 
     def test_empty_sequence_raises(self, patched_setup):
         with pytest.raises(ValueError, match="at least one compiled program"):
