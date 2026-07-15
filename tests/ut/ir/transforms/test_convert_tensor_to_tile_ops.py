@@ -2962,10 +2962,15 @@ class TestConvertSortOps:
 
 
 class TestConvertGatherOp:
-    """Test conversion of tensor.gather (MVP: 2D + dim=-1)."""
+    """Test conversion of tensor.gather (MVP: 2D + dim=-1).
+
+    UT transforms conftest pins Ascend950 (A5), so the default path is the
+    full-tile flat-index lowering. A separate test switches to Ascend910B to
+    lock the legacy per-row loop.
+    """
 
     def test_gather_conversion(self):
-        """tensor.gather -> per-row loop of tile.load + tile.gather + tile.store."""
+        """A5: tensor.gather -> full-tile load + flat index + one tile.gather."""
 
         @pl.program
         class Before:
@@ -2987,43 +2992,86 @@ class TestConvertGatherOp:
                 out: pl.Tensor[[4, 3], pl.FP32] = self.main_incore_0(inp, idx)
                 return out
 
-        # tensor.gather is fully lowered into a per-row loop: each iteration loads a
-        # [1, 16] input row and a [1, 3] index row, runs the index-form tile.gather
-        # (which needs a [1, 3] INT32 scratch tile), and assembles the row into the
-        # accumulator. Phase 3 adds the Out tensor param for the result.
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        after_src = After.as_python()
+
+        assert "tensor.gather" not in after_src
+        assert "pl.tile.gather(" in after_src
+        assert after_src.count("pl.tile.gather(") == 1
+        # Odd K (=3) uses row_expand_add fallback; still no per-row loop.
+        assert "tile.row_expand_add" in after_src or ("tile.divs" in after_src and "tile.add" in after_src)
+        assert "pl.range(" not in after_src
+        assert "pl.Out[pl.Tensor[[4, 3]" in after_src
+
+    def test_gather_conversion_expand(self):
+        """A5 expand gather (K > S1): flat uses src cols, not output cols."""
+
         @pl.program
-        class Expected:
+        class Before:
             @pl.function(type=pl.FunctionType.InCore)
             def main_incore_0(
                 self,
-                inp: pl.Tensor[[4, 16], pl.FP32],
-                idx: pl.Tensor[[4, 3], pl.INT32],
-                ret0__out: pl.Out[pl.Tensor[[4, 3], pl.FP32]],
-            ) -> pl.Tensor[[4, 3], pl.FP32]:
-                gather_acc_init = pl.tile.create([4, 3], dtype=pl.FP32, target_memory=pl.Mem.Vec)
-                for gather_lv, (gather_ia,) in pl.range(4, init_values=(gather_acc_init,)):
-                    gather_inp_row = pl.load(inp, [gather_lv, 0], [1, 16], [1, 16], target_memory=pl.Mem.Vec)
-                    gather_idx_row = pl.load(idx, [gather_lv, 0], [1, 3], [1, 3], target_memory=pl.Mem.Vec)
-                    gather_row_tmp = pl.tile.create([1, 3], dtype=pl.INT32, target_memory=pl.Mem.Vec)
-                    gather_row = pl.tile.gather(gather_inp_row, gather_idx_row, gather_row_tmp)
-                    gather_asmbl = pl.tile.assemble(gather_ia, gather_row, [gather_lv, 0])
-                    gather_rv = pl.yield_(gather_asmbl)
-                out__tile: pl.Tile[[4, 3], pl.FP32, pl.Mem.Vec] = gather_rv
-                ret0__store = pl.store(out__tile, [0, 0], ret0__out)
-                return ret0__store
+                inp: pl.Tensor[[4, 32], pl.FP32],
+                idx: pl.Tensor[[4, 64], pl.INT32],
+            ) -> pl.Tensor[[4, 64], pl.FP32]:
+                out: pl.Tensor[[4, 64], pl.FP32] = pl.tensor.gather(inp, dim=-1, index=idx)
+                return out
 
             @pl.function
             def main(
                 self,
-                inp: pl.Tensor[[4, 16], pl.FP32],
-                idx: pl.Tensor[[4, 3], pl.INT32],
-            ) -> pl.Tensor[[4, 3], pl.FP32]:
-                ret0__out = pl.create_tensor([4, 3], dtype=pl.FP32, layout=pl.TensorLayout.ND)
-                out = self.main_incore_0(inp, idx, ret0__out)
+                inp: pl.Tensor[[4, 32], pl.FP32],
+                idx: pl.Tensor[[4, 64], pl.INT32],
+            ) -> pl.Tensor[[4, 64], pl.FP32]:
+                out: pl.Tensor[[4, 64], pl.FP32] = self.main_incore_0(inp, idx)
                 return out
 
         After = passes.convert_tensor_to_tile_ops()(Before)
-        ir.assert_structural_equal(After, Expected)
+        after_src = After.as_python()
+
+        assert after_src.count("pl.tile.gather(") == 1
+        # Aligned K (=64): linear arange → divs → muls(src_cols=32) → add.
+        assert "tile.divs" in after_src
+        assert "tile.muls" in after_src
+        assert "pl.const(32," in after_src or "pl.const(32, " in after_src
+        assert "pl.range(" not in after_src
+    def test_gather_conversion_a2a3_per_row(self):
+        """Non-A5 keeps the legacy per-row single-row gather loop."""
+        from pypto import backend
+        from pypto.backend import BackendType
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        try:
+
+            @pl.program
+            class Before:
+                @pl.function(type=pl.FunctionType.InCore)
+                def main_incore_0(
+                    self,
+                    inp: pl.Tensor[[4, 16], pl.FP32],
+                    idx: pl.Tensor[[4, 3], pl.INT32],
+                ) -> pl.Tensor[[4, 3], pl.FP32]:
+                    out: pl.Tensor[[4, 3], pl.FP32] = pl.tensor.gather(inp, dim=-1, index=idx)
+                    return out
+
+                @pl.function
+                def main(
+                    self,
+                    inp: pl.Tensor[[4, 16], pl.FP32],
+                    idx: pl.Tensor[[4, 3], pl.INT32],
+                ) -> pl.Tensor[[4, 3], pl.FP32]:
+                    out: pl.Tensor[[4, 3], pl.FP32] = self.main_incore_0(inp, idx)
+                    return out
+
+            After = passes.convert_tensor_to_tile_ops()(Before)
+            after_src = After.as_python()
+            assert "pl.range(" in after_src
+            assert "pl.tile.gather(" in after_src
+            assert "tile.row_expand_add" not in after_src
+        finally:
+            backend.reset_for_testing()
+            backend.set_backend_type(BackendType.Ascend950)
 
     def test_gather_conversion_with_tile_input(self):
         """tensor.gather whose input was already demoted to a tile by an upstream conversion.
@@ -3031,8 +3079,7 @@ class TestConvertGatherOp:
         Regression test for the case the converter previously crashed with
         CHECK(input_tensor_type): a local tensor.create + tensor.assemble feeds
         tensor.gather, so by the time gather is visited its `input` arg is a
-        TileType. The converter now emits tile.slice per row for the tile input
-        and keeps tile.load for the tensor index in the same call.
+        TileType. On A5 the converter emits a full-tile slice + flat gather.
         """
 
         @pl.program
@@ -3057,42 +3104,14 @@ class TestConvertGatherOp:
                 out: pl.Tensor[[4, 3], pl.FP32] = self.main_incore_0(src, idx)
                 return out
 
-        @pl.program
-        class Expected:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                src: pl.Tensor[[4, 16], pl.FP32],
-                idx: pl.Tensor[[4, 3], pl.INT32],
-                ret0__out: pl.Out[pl.Tensor[[4, 3], pl.FP32]],
-            ) -> pl.Tensor[[4, 3], pl.FP32]:
-                tmp__tile = pl.tile.create([4, 16], dtype=pl.FP32, target_memory=pl.Mem.Vec)
-                assemble_src = pl.load(src, [0, 0], [4, 16], [4, 16], target_memory=pl.Mem.Vec)
-                tmp_1__tile = pl.tile.assemble(tmp__tile, assemble_src, [0, 0])
-                gather_acc_init = pl.tile.create([4, 3], dtype=pl.FP32, target_memory=pl.Mem.Vec)
-                for gather_lv, (gather_ia,) in pl.range(4, init_values=(gather_acc_init,)):
-                    gather_inp_row = pl.tile.slice(tmp_1__tile, [1, 16], [gather_lv, 0], [1, 16])
-                    gather_idx_row = pl.load(idx, [gather_lv, 0], [1, 3], [1, 3], target_memory=pl.Mem.Vec)
-                    gather_row_tmp = pl.tile.create([1, 3], dtype=pl.INT32, target_memory=pl.Mem.Vec)
-                    gather_row = pl.tile.gather(gather_inp_row, gather_idx_row, gather_row_tmp)
-                    gather_asmbl = pl.tile.assemble(gather_ia, gather_row, [gather_lv, 0])
-                    gather_rv = pl.yield_(gather_asmbl)
-                out__tile: pl.Tile[[4, 3], pl.FP32, pl.Mem.Vec] = gather_rv
-                ret0__store = pl.store(out__tile, [0, 0], ret0__out)
-                return ret0__store
-
-            @pl.function
-            def main(
-                self,
-                src: pl.Tensor[[4, 16], pl.FP32],
-                idx: pl.Tensor[[4, 3], pl.INT32],
-            ) -> pl.Tensor[[4, 3], pl.FP32]:
-                ret0__out = pl.create_tensor([4, 3], dtype=pl.FP32, layout=pl.TensorLayout.ND)
-                out = self.main_incore_0(src, idx, ret0__out)
-                return out
-
         After = passes.convert_tensor_to_tile_ops()(Before)
-        ir.assert_structural_equal(After, Expected)
+        after_src = After.as_python()
+
+        assert "pl.tile.gather(" in after_src
+        assert after_src.count("pl.tile.gather(") == 1
+        assert "tile.row_expand_add" in after_src or "tile.divs" in after_src
+        assert "pl.tile.slice(" in after_src
+        assert "pl.range(" not in after_src
 
     def test_gather_mask_conversion(self):
         """tensor.gather(mask_pattern=...) -> tile.load + tile.gather_mask + tile.store."""
