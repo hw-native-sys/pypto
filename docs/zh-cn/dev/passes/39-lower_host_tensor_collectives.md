@@ -36,7 +36,9 @@ data = pld.tensor.all_to_all(stage, data, signal)
 ```
 
 对于 `allgather` / `all_to_all`，`stage`（TPUT 源）与 `data`（结果）
-必须是两个不同的 window。
+必须是两个不同的 window。`allgather` 的 `stage` 只保存本 rank 的单个分片，
+形状为 `[1, SIZE]`；`all_to_all` 的 `stage` 每行携带一个按目的地划分的分片，
+形状为 `[NR, SIZE]`。两种情况下 `data` 都是 peer 推入的 `[NR, SIZE]` 结果窗口。
 
 本 pass 会为每个参与设备生成对应的 `builtin.tensor.*` 调用（如
 `builtin.tensor.allreduce`、`builtin.tensor.barrier`、

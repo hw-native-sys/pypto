@@ -604,7 +604,7 @@ def test_host_allgather_lowers_to_namesake_builtin():
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(
             self,
-            stage: pld.DistributedTensor[[4, 256], pl.FP32],
+            stage: pld.DistributedTensor[[1, 256], pl.FP32],
             data: pld.DistributedTensor[[4, 256], pl.FP32],
             sig: pld.DistributedTensor[[4], pl.INT32],
         ):
@@ -612,13 +612,14 @@ def test_host_allgather_lowers_to_namesake_builtin():
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
-            # `stage_buf` (TPUT source) and `data_buf` (TPUT destination /
-            # result) must be two DISTINCT windows — same constraint as
-            # all_to_all (see allgather kernel.cpp.in).
-            stage_buf = pld.alloc_window_buffer(4 * 256 * pl.FP32.get_byte())
+            # `stage_buf` ([1, SIZE] TPUT source, this rank's chunk) and
+            # `data_buf` ([NR, SIZE] TPUT destination / result) must be two
+            # DISTINCT windows — same constraint as all_to_all (see allgather
+            # kernel.cpp.in).
+            stage_buf = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
             data_buf = pld.alloc_window_buffer(4 * 256 * pl.FP32.get_byte())
             signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
-            stage = pld.window(stage_buf, [4, 256], dtype=pl.FP32)
+            stage = pld.window(stage_buf, [1, 256], dtype=pl.FP32)
             data = pld.window(data_buf, [4, 256], dtype=pl.FP32)
             signal = pld.window(signal_buf, [4], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):
@@ -658,7 +659,7 @@ def test_host_allgather_rejects_aliased_input_target_windows():
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(
             self,
-            stage: pld.DistributedTensor[[4, 256], pl.FP32],
+            stage: pld.DistributedTensor[[1, 256], pl.FP32],
             data: pld.DistributedTensor[[4, 256], pl.FP32],
             sig: pld.DistributedTensor[[4], pl.INT32],
         ):
@@ -668,7 +669,7 @@ def test_host_allgather_rejects_aliased_input_target_windows():
         def host_orch(self):
             buf = pld.alloc_window_buffer(4 * 256 * pl.FP32.get_byte())
             signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
-            stage = pld.window(buf, [4, 256], dtype=pl.FP32)
+            stage = pld.window(buf, [1, 256], dtype=pl.FP32)
             data = pld.window(buf, [4, 256], dtype=pl.FP32)
             signal = pld.window(signal_buf, [4], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):

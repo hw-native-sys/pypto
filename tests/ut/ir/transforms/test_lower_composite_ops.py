@@ -572,13 +572,14 @@ def test_new_host_collectives_in_host_orchestrator_are_left_for_host_collective_
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(
             self,
+            ag_stage: pld.DistributedTensor[[1, SIZE], pl.FP32],
             stage: pld.DistributedTensor[[NR, SIZE], pl.FP32],
             data: pld.DistributedTensor[[NR, SIZE], pl.FP32],
             signal: pld.DistributedTensor[[NR, 1], pl.INT32],
         ):
             pld.tensor.barrier(signal)
             data = pld.tensor.broadcast(data, signal, root=0)
-            data = pld.tensor.allgather(stage, data, signal)
+            data = pld.tensor.allgather(ag_stage, data, signal)
             data = pld.tensor.all_to_all(stage, data, signal)
             data = pld.tensor.reduce_scatter(data, signal)
             return 0

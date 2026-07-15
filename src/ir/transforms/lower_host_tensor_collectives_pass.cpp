@@ -285,10 +285,7 @@ struct HostCollectiveRule {
           &MakeBuiltinAllGather,
           [](const CallPtr& call) {
             return std::vector<WindowBufferPtr>{
-<<<<<<< HEAD
-=======
                 GetWindowBuffer(call->args_[0], "allgather input"),
->>>>>>> 0aa15eae (fix(allgather): in-kernel TPUT push matching all_to_all pattern)
                 GetWindowBuffer(call->args_[1], "allgather target"),
                 GetWindowBuffer(call->args_[2], "allgather signal"),
             };

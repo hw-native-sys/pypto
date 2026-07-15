@@ -37,7 +37,10 @@ data = pld.tensor.all_to_all(stage, data, signal)
 ```
 
 For `allgather` / `all_to_all`, `stage` (TPUT source) and `data` (result)
-must be two distinct windows.
+must be two distinct windows. For `allgather` the `stage` window holds only
+this rank's single chunk and is `[1, SIZE]`; for `all_to_all` it carries one
+per-destination chunk per row and is `[NR, SIZE]`. In both cases `data` is the
+`[NR, SIZE]` result window peers push into.
 the pass emits the corresponding `builtin.tensor.*` dispatch per participating
 device.  When the surrounding comm-domain scope has an explicit device list,
 the pass emits a `SeqStmts`; otherwise it emits a sequential `for r in

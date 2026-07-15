@@ -17,16 +17,18 @@ lowers it to ``builtin.tensor.allgather`` per chip.  The exchange uses a
 push-based TPUT pattern with TWO DISTINCT windows (same constraint as
 ``all_to_all``):
 
-  1. **Publish** (``publish_step``): each rank stores its chunk at
-     ``stage_buf[my_rank, :]`` — a window used ONLY as a TPUT source.
+  1. **Publish** (``publish_step``): each rank stores its single chunk at
+     ``stage_buf[0, :]`` — a per-rank ``[1, SIZE]`` window used ONLY as a
+     TPUT source.
   2. **Allgather** (``builtin.tensor.allgather``): kernel pushes
-     ``stage_buf[my_rank, :]`` to every peer's ``data_buf[my_rank, :]``
+     ``stage_buf[0, :]`` to every peer's ``data_buf[my_rank, :]``
      via in-kernel TPUT and synchronises visibility.
   3. **Consume** (``consume_step``): each rank reads its own ``data_buf``
      window via ``pl.load`` (peers already placed their chunks there).
 
-``stage_buf`` and ``data_buf`` must be separate windows — reusing one buffer
-for both roles is a genuine cross-process data race.
+``stage_buf`` (``[1, SIZE]``) and ``data_buf`` (``[NR, SIZE]``) must be
+separate windows — reusing one buffer for both roles is a genuine
+cross-process data race.
 
 ST coverage: P=2 and P=4 (skips when fewer devices are available).
 """
@@ -63,20 +65,20 @@ class HostTensorAllGather:
     def publish_step(
         self,
         inp: pl.Tensor[[1, SIZE], pl.FP32],
-        stage: pl.InOut[pld.DistributedTensor[[NR, SIZE], pl.FP32]],
+        stage: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
         my_rank: pl.Scalar[pl.INT32],
         nranks: pl.Scalar[pl.INT32],
     ):
-        # Stage local chunk at my_rank only; kernel pushes input[my_rank,:]
-        # to every peer's target[my_rank,:].
+        # Stage local chunk at row 0 of this rank's [1, SIZE] window; kernel
+        # pushes stage[0,:] to every peer's target[my_rank,:].
         chunk = pl.load(inp, [0, 0], [1, SIZE])
-        stage = pl.store(chunk, [my_rank, 0], stage)
+        stage = pl.store(chunk, [0, 0], stage)
 
     @pl.function(type=pl.FunctionType.Orchestration)
     def publish_orch(
         self,
         inp: pl.Tensor[[1, SIZE], pl.FP32],
-        stage: pl.InOut[pld.DistributedTensor[[NR, SIZE], pl.FP32]],
+        stage: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
         my_rank: pl.Scalar[pl.INT32],
         nranks: pl.Scalar[pl.INT32],
     ):
@@ -111,15 +113,17 @@ class HostTensorAllGather:
         inputs: pl.Tensor[[NR, 1, SIZE], pl.FP32],
         outputs: pl.Out[pl.Tensor[[NR, 1, NR, SIZE], pl.FP32]],
     ) -> pl.Tensor[[NR, 1, NR, SIZE], pl.FP32]:
-        stage_buf = pld.alloc_window_buffer(pld.world_size() * SIZE * pl.FP32.get_byte())
+        # stage is a per-rank [1, SIZE] staging window (this rank's chunk only);
+        # data is the [NR, SIZE] result window peers push into.
+        stage_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
         data_buf = pld.alloc_window_buffer(pld.world_size() * SIZE * pl.FP32.get_byte())
         signal_buf = pld.alloc_window_buffer(pld.world_size() * pl.INT32.get_byte())
 
         for r in pl.range(pld.world_size()):
-            stage = pld.window(stage_buf, [pld.world_size(), SIZE], dtype=pl.FP32)
+            stage = pld.window(stage_buf, [1, SIZE], dtype=pl.FP32)
             self.publish_orch(inputs[r], stage, r, pld.world_size(), device=r)
 
-        stage = pld.window(stage_buf, [pld.world_size(), SIZE], dtype=pl.FP32)
+        stage = pld.window(stage_buf, [1, SIZE], dtype=pl.FP32)
         data = pld.window(data_buf, [pld.world_size(), SIZE], dtype=pl.FP32)
         # 1-D signal matches the NPU-passing host all_to_all ST.
         signal = pld.window(signal_buf, [pld.world_size()], dtype=pl.INT32)
