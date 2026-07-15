@@ -144,12 +144,6 @@ ExportedProblem BuildStructuredProblem(const FunctionPtr& func, const Allocation
 
   std::map<MemorySpace, ::dsa::Pool> pools;
   ::dsa::PyptoStructure pypto_structure;
-  // PyPTO's current level3/PTOAS dependency contract recognizes reuse through
-  // equal allocation bases. It does not make arbitrary partial overlap between
-  // temporally disjoint buffers safe, so structured instances use whole slots.
-  // Standard DSA benchmark instances deliberately keep freed-region
-  // subdivision enabled.
-  pypto_structure.whole_slot_reuse = true;
   std::vector<std::optional<::dsa::BufferId>> buffer_id_by_interval(allocation_plan.intervals.size());
   std::unordered_map<::dsa::BufferId, size_t> interval_by_buffer_id;
   std::unordered_map<::dsa::BufferId, size_t> buffer_position_by_id;
@@ -217,7 +211,6 @@ ExportedProblem BuildStructuredProblem(const FunctionPtr& func, const Allocation
     if (!group.members.empty()) pypto_structure.pipeline_groups.push_back(std::move(group));
   }
   exported.document.problem.pypto_structure = std::move(pypto_structure);
-  exported.document.metadata["address_reuse_contract"] = "whole_slot_v1";
 
   using BufferPair = std::pair<::dsa::BufferId, ::dsa::BufferId>;
   std::map<BufferPair, std::set<::dsa::SeparationReason>> separations;
@@ -251,11 +244,13 @@ ExportedProblem BuildStructuredProblem(const FunctionPtr& func, const Allocation
     exported.document.problem.separations.push_back(std::move(separation));
   }
 
-  // A sparse, output-sensitive v1 cost proxy: within each capacity residue,
-  // charge one unit when two chronological neighbors from different pipeline
-  // stages reuse an address. Hard-separated or live-overlapping neighbors can
-  // never form a reuse edge and are omitted. This preserves the raw signal for
-  // PyPTO-aware search without changing the compiler's peak-only objective.
+  // PR #1949 identifies a concrete reuse cost: assigning the same address to
+  // pipeline stages that were intended to overlap introduces a false WAR and
+  // serializes them. Distinct effective residues remain hard-separated above.
+  // For stages collapsed into one capacity residue, record chronological
+  // reuse candidates so research solvers can trade memory for preserved
+  // overlap. This unit cost is intentionally not enabled in production until
+  // it is calibrated against emitted PTOAS dependencies and device latency.
   ::dsa::CostModel cost_model;
   for (const ::dsa::PyptoPipelineGroup& group : exported.document.problem.pypto_structure->pipeline_groups) {
     std::map<uint32_t, std::vector<::dsa::PyptoPipelineMember>> members_by_residue;
@@ -279,6 +274,7 @@ ExportedProblem BuildStructuredProblem(const FunctionPtr& func, const Allocation
                   return first.buffer < second.buffer;
                 });
       for (size_t index = 1; index < members.size(); ++index) {
+        if (members[index - 1].stage == members[index].stage) continue;
         auto first = members[index - 1].buffer;
         auto second = members[index].buffer;
         BufferPair pair{std::min(first, second), std::max(first, second)};
@@ -291,10 +287,8 @@ ExportedProblem BuildStructuredProblem(const FunctionPtr& func, const Allocation
         const ::dsa::Buffer& first_buffer = exported.document.problem.buffers[first_position->second];
         const ::dsa::Buffer& second_buffer = exported.document.problem.buffers[second_position->second];
         if (::dsa::LifetimesOverlap(first_buffer, second_buffer)) continue;
-        cost_model.reuse_penalties.push_back({first, second, 1,
-                                              members[index - 1].stage == members[index].stage
-                                                  ? ::dsa::ReusePenaltyReason::kGeneric
-                                                  : ::dsa::ReusePenaltyReason::kCrossPipe});
+        cost_model.reuse_penalties.push_back(
+            {first, second, 1, ::dsa::ReusePenaltyReason::kPipelineSerialization});
       }
     }
   }
