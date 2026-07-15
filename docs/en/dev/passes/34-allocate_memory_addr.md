@@ -34,7 +34,7 @@ loop-carried values, and in-place operations retain their mandatory identities.
 | Mode | Input to this pass | Placement | Failure behavior |
 | ---- | ------------------ | --------- | ---------------- |
 | `MemoryPlanner.PYPTO` | Opportunistically merged MemRefs from MemoryReuse | Backend-policy aligned bump allocation | Existing verifier reports invalid or over-capacity addresses |
-| `MemoryPlanner.DSA` | Unmerged MemRefs after MaterializeSemanticAliases | Standalone first-fit DSA solver over schema-v1 `pypto_structured` | Invalid export, capability mismatch, infeasibility, or validator failure stops compilation; no silent fallback |
+| `MemoryPlanner.DSA` | Unmerged MemRefs after MaterializeSemanticAliases | Standalone first-fit DSA solver over schema-v1 `pypto_hard_v1` or explicitly experimental `pypto_research_v1` | Invalid export, capability mismatch, infeasibility, or validator failure stops compilation; no silent fallback |
 | `MemoryPlanner.PTOAS` | None | This pass is skipped; ptoas `PlanMemory` owns placement | Deferred to ptoas |
 
 DSA support is an optional CMake dependency. Build and consume an installed
@@ -98,6 +98,14 @@ dsa_export_dir="build/dsa-corpus")`.
 `RunConfig` exposes the same `memory_planner` and `dsa_export_dir` fields. The
 system-test harness additionally accepts `--memory-planner=dsa` and
 `--dsa-export-dir=...` for suite-wide device validation and corpus capture.
+
+The default export is `pypto_hard_v1`: fixed memory spaces, one conservative
+allocation-lifetime hull, capacities/reservations, alignment, typed
+separations, and whole-slot reuse. If the adapter emits the current uncalibrated
+adjacent-pipeline reuse proxy, it upgrades that document to
+`pypto_research_v1`; the proxy is not a production constraint or objective.
+Legacy `pypto_structured` documents remain readable in the standalone tools but
+are no longer emitted.
 
 ## Algorithm
 

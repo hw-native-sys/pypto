@@ -30,7 +30,7 @@ MaterializeSemanticAliases，因此 view、循环 carry 值和原地操作的强
 | 模式 | 本 Pass 的输入 | 放置方式 | 失败行为 |
 | ---- | -------------- | -------- | -------- |
 | `MemoryPlanner.PYPTO` | MemoryReuse 机会性合并后的 MemRef | 后端策略控制的对齐 bump 分配 | 现有 verifier 报告非法地址或超容量 |
-| `MemoryPlanner.DSA` | MaterializeSemanticAliases 后未机会性合并的 MemRef | 独立 first-fit DSA solver，输入为 schema-v1 `pypto_structured` | 非法导出、能力不匹配、不可行或 validator 失败都会终止编译；不会静默回退 |
+| `MemoryPlanner.DSA` | MaterializeSemanticAliases 后未机会性合并的 MemRef | 独立 first-fit DSA solver，输入为 schema-v1 `pypto_hard_v1` 或显式实验性的 `pypto_research_v1` | 非法导出、能力不匹配、不可行或 validator 失败都会终止编译；不会静默回退 |
 | `MemoryPlanner.PTOAS` | 无 | 跳过本 Pass；ptoas `PlanMemory` 负责放置 | 交给 ptoas |
 
 DSA 支持是可选的 CMake 依赖。先构建并安装 `dsa-solver` 0.3 package，再让
@@ -92,6 +92,12 @@ dsa_export_dir="build/dsa-corpus")`。
 `RunConfig` 也暴露 `memory_planner` 和 `dsa_export_dir` 字段。system-test harness
 支持 `--memory-planner=dsa` 与 `--dsa-export-dir=...`，可对整套 device test
 启用 DSA 并采集 corpus。
+
+默认导出使用 `pypto_hard_v1`：固定内存空间、单个保守的分配生命周期包络、
+容量/保留区、对齐、带类型的 separation，以及 whole-slot reuse。若适配器导出
+当前尚未校准的相邻 pipeline reuse 代理，该文档会升级为
+`pypto_research_v1`；此代理不是生产约束或生产目标。独立工具仍可读取旧的
+`pypto_structured` 文档，但 PyPTO 不再生成该 profile。
 
 ## 算法
 

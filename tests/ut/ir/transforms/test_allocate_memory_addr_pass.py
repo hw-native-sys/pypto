@@ -1043,7 +1043,7 @@ def test_dsa_planner_reuses_at_read_before_write_boundary():
 
 
 @requires_dsa
-def test_dsa_export_is_deterministic_pypto_structured(tmp_path):
+def test_dsa_export_is_deterministic_pypto_hard_v1(tmp_path):
     """A real IR function exports a stable schema-v1 benchmark document."""
     base = _dsa_chain_program()
     first_dir = tmp_path / "first"
@@ -1057,7 +1057,7 @@ def test_dsa_export_is_deterministic_pypto_structured(tmp_path):
 
     document = json.loads(first.read_text())
     assert document["schema_version"] == 1
-    assert document["profile"] == "pypto_structured"
+    assert document["profile"] == "pypto_hard_v1"
     assert document["instance"] == "read_before_write_chain"
     assert document["metadata"]["solver_input"] == "pre_memory_reuse"
     assert document["metadata"]["address_reuse_contract"] == "whole_slot_v1"
@@ -1211,11 +1211,13 @@ def _dsa_capacity_gated_pipeline_cost_program():
 
 @requires_dsa
 def test_dsa_export_preserves_capacity_gated_pipeline_reuse_cost(tmp_path):
-    """Same-residue stage reuse is explicit, sparse, and does not alter v1 placement."""
+    """Uncalibrated same-residue reuse is explicitly research-only."""
     planned = _allocate_with_dsa(_dsa_capacity_gated_pipeline_cost_program(), str(tmp_path))
     assert _vec_peak(planned) == 240 * 1024
 
     document = json.loads((tmp_path / "pypto_capacity_gated_pipeline_cost.dsa.json").read_text())
+    assert document["profile"] == "pypto_research_v1"
+    assert document["metadata"]["experimental_features"] == "pipeline_adjacent_reuse_cost"
     assert document["problem"]["constraints"]["separations"] == []
     group = document["problem"]["pypto_structure"]["pipeline_groups"][0]
     assert (group["depth"], group["effective_depth"], group["slot_size"]) == (3, 1, 240 * 1024)
