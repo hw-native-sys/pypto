@@ -127,7 +127,7 @@ ExportedProblem BuildStructuredProblem(const FunctionPtr& func, const Allocation
   INTERNAL_CHECK(func != nullptr) << "BuildStructuredProblem cannot analyze a null function";
 
   ExportedProblem exported;
-  exported.document.profile = ::dsa::BenchmarkProfile::kPyptoStructured;
+  exported.document.profile = ::dsa::BenchmarkProfile::kPyptoHardV1;
   exported.document.instance = func->name_;
   exported.document.metadata = {
       {"lifetime_ordering", "pypto_read_before_write"},
@@ -299,7 +299,13 @@ ExportedProblem BuildStructuredProblem(const FunctionPtr& func, const Allocation
     }
   }
   if (!cost_model.reuse_penalties.empty()) {
+    // This unit-cost adjacency proxy has not been calibrated against device
+    // latency or PTOAS synchronization. Keep it available for research, but
+    // never claim that such a document satisfies the production hard-v1
+    // profile.
+    exported.document.profile = ::dsa::BenchmarkProfile::kPyptoResearchV1;
     exported.document.problem.cost_model = std::move(cost_model);
+    exported.document.metadata["experimental_features"] = "pipeline_adjacent_reuse_cost";
     exported.document.metadata["reuse_cost_model"] = "pipeline_adjacent_antidependency_v1";
   }
 

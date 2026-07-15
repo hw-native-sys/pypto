@@ -292,7 +292,7 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: tonibohnlein/dsa-solver
-        ref: f908eddbd63e37c8edbe1d3be37c213d429cbed7
+        ref: b14f3b94611043603a484e708dd5227108e66c1c
         path: dsa-solver
         submodules: false
 
@@ -482,7 +482,7 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: tonibohnlein/dsa-solver
-        ref: f908eddbd63e37c8edbe1d3be37c213d429cbed7
+        ref: b14f3b94611043603a484e708dd5227108e66c1c
         path: dsa-solver
         submodules: false
     - name: Checkout dsa-solver dependencies
