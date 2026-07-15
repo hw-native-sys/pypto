@@ -22,7 +22,7 @@ from typing import Protocol, runtime_checkable
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import Call, ConstInt, Expr, PipeType, Span
+from pypto.pypto_core.ir import Call, ConstInt, Expr, PipeType, ScalarType, Span
 
 from ..utils import _get_span_or_capture, _normalize_expr
 from .tile_ops import (  # noqa: F401
@@ -158,6 +158,11 @@ def cacheinvalid(tensor: Expr, offset: int | Expr = 0, *, span: Span | None = No
     """
     actual_span = _get_span_or_capture(span)
     offset_expr = _normalize_expr(offset, actual_span)
+    offset_type = offset_expr.type
+    if isinstance(offset_type, ScalarType) and offset_type.dtype.is_float():
+        raise TypeError(
+            f"system.cacheinvalid offset must be an integer scalar, got dtype {offset_type.dtype}"
+        )
     return _ir_core.create_op_call("system.cacheinvalid", [tensor, offset_expr], {}, actual_span)
 
 

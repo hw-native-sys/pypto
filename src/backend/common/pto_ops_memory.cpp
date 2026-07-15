@@ -822,7 +822,10 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
         << "system.cacheinvalid takes 2 arguments (tensor, offset), got " << op->args_.size();
     auto tensor_type = AsTensorTypeLike(op->args_[0]->GetType());
     INTERNAL_CHECK_SPAN(tensor_type, op->span_) << "system.cacheinvalid first argument must be a tensor";
-    const std::string base_ptr = codegen.GetTensorBasePtr(AsVarLike(op->args_[0]));
+    const auto tensor_var = AsVarLike(op->args_[0]);
+    INTERNAL_CHECK_SPAN(tensor_var, op->span_)
+        << "system.cacheinvalid first argument must be a tensor variable";
+    const std::string base_ptr = codegen.GetTensorBasePtr(tensor_var);
     const std::string ptr_type = "!pto.ptr<" + codegen.GetTypeString(tensor_type->dtype_) + ">";
     const std::string off = codegen.EmitCastToIndex(op->args_[1], codegen.GetExprAsCode(op->args_[1]));
     const std::string write_ptr = codegen.NewTemp();

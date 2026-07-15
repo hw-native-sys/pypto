@@ -14,6 +14,8 @@ import re
 import pypto.language as pl
 import pytest
 from pypto import ir
+from pypto.ir.op import system_ops
+from pypto.pypto_core import DataType
 
 
 class TestSystemOpsParsing:
@@ -140,6 +142,14 @@ class TestSystemOpsParsing:
         reparsed = pl.parse_program(printed)
         assert isinstance(reparsed, ir.Program)
         ir.assert_structural_equal(Before, reparsed)
+
+    def test_cacheinvalid_rejects_float_offset(self):
+        """A non-integer offset is rejected at the IR wrapper, not deep in codegen."""
+        span = ir.Span.unknown()
+        dim = ir.ConstInt(64, DataType.INT32, span)
+        tensor = ir.Var("x", ir.TensorType([dim], DataType.FP32), span)
+        with pytest.raises(TypeError, match="offset must be an integer"):
+            system_ops.cacheinvalid(tensor, 3.5)  # type: ignore[arg-type]  # intentionally wrong type
 
     def test_syncall_round_trip(self):
         """Test round-trip for pl.system.syncall with an explicit core_type."""
