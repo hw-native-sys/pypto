@@ -897,8 +897,46 @@ class FunctionBuilder:
         return self._result
 
 
-class ForLoopBuilder:
+class _ReturnVarsAccessor:
+    """Mixin: ``output()`` / ``outputs()`` over a completed statement's return vars.
+
+    Host builders (for / while / if) set the class attribute ``_result_kind``
+    (e.g. ``"for loop"``) and, once built, hold the statement in ``self._result``
+    with a ``return_vars`` sequence.
+    """
+
+    _result_kind: str
+    _result: "ir.ForStmt | ir.WhileStmt | ir.IfStmt | None"
+
+    def output(self, index: int = 0) -> ir.Var:
+        """Return a single return variable by index (default 0).
+
+        Raises:
+            AssertionError: If the statement is not yet complete.
+            IndexError: If ``index`` is out of range.
+        """
+        assert self._result is not None, f"{self._result_kind.capitalize()} not yet complete"
+        if index >= len(self._result.return_vars):
+            raise IndexError(
+                f"Return variable index {index} out of range "
+                f"({self._result_kind} has {len(self._result.return_vars)} return vars)"
+            )
+        return self._result.return_vars[index]
+
+    def outputs(self) -> list[ir.Var]:
+        """Return all return variables as a list.
+
+        Raises:
+            AssertionError: If the statement is not yet complete.
+        """
+        assert self._result is not None, f"{self._result_kind.capitalize()} not yet complete"
+        return list(self._result.return_vars)
+
+
+class ForLoopBuilder(_ReturnVarsAccessor):
     """Helper for building for loops within a loop context."""
+
+    _result_kind = "for loop"
 
     def __init__(self, builder: IRBuilder) -> None:
         """Initialize for loop builder.
@@ -1014,64 +1052,6 @@ class ForLoopBuilder:
         self._return_var_count += 1
         return var
 
-    def output(self, index: int = 0) -> ir.Var:
-        """Get a single output return variable from the for loop.
-
-        This is a convenience method to access the return variables after the for
-        loop is built. Use the index parameter to select which return variable.
-
-        Args:
-            index: Index of the return variable to get (default: 0)
-
-        Returns:
-            Var: The return variable at the specified index
-
-        Raises:
-            AssertionError: If called before for loop is complete
-            IndexError: If index is out of range
-
-        Example:
-            >>> with ib.for_loop(i, 0, 10, 1) as loop:
-            ...     sum_iter = loop.iter_arg("sum", 0)
-            ...     loop.return_var("sum_final")
-            ...     # ... loop body ...
-            >>> result = loop.output()  # Get the first return variable
-            >>> # Or for multiple return vars:
-            >>> result1 = loop.output(0)
-            >>> result2 = loop.output(1)
-        """
-        assert self._result is not None, "For loop not yet complete"
-        if index >= len(self._result.return_vars):
-            raise IndexError(
-                f"Return variable index {index} out of range "
-                f"(for loop has {len(self._result.return_vars)} return vars)"
-            )
-        return self._result.return_vars[index]
-
-    def outputs(self) -> list[ir.Var]:
-        """Get all output return variables from the for loop.
-
-        This is a convenience method to access all return variables at once after
-        the for loop is built.
-
-        Returns:
-            List of all return variables
-
-        Raises:
-            AssertionError: If called before for loop is complete
-
-        Example:
-            >>> with ib.for_loop(i, 0, 10, 1) as loop:
-            ...     sum_iter = loop.iter_arg("sum", 0)
-            ...     prod_iter = loop.iter_arg("prod", 1)
-            ...     loop.return_var("sum_final")
-            ...     loop.return_var("prod_final")
-            ...     # ... loop body ...
-            >>> sum_result, prod_result = loop.outputs()  # Get all return variables
-        """
-        assert self._result is not None, "For loop not yet complete"
-        return list(self._result.return_vars)
-
     def get_result(self) -> ir.ForStmt:
         """Get the built ForStmt.
 
@@ -1082,8 +1062,10 @@ class ForLoopBuilder:
         return self._result
 
 
-class WhileLoopBuilder:
+class WhileLoopBuilder(_ReturnVarsAccessor):
     """Helper for building while loops within a loop context."""
+
+    _result_kind = "while loop"
 
     def __init__(self, builder: IRBuilder) -> None:
         """Initialize while loop builder.
@@ -1217,61 +1199,6 @@ class WhileLoopBuilder:
         self._return_var_count += 1
         return var
 
-    def output(self, index: int = 0) -> ir.Var:
-        """Get a single output return variable from the while loop.
-
-        This is a convenience method to access the return variables after the while
-        loop is built. Use the index parameter to select which return variable.
-
-        Args:
-            index: Index of the return variable to get (default: 0)
-
-        Returns:
-            Var: The return variable at the specified index
-
-        Raises:
-            AssertionError: If called before while loop is complete
-            IndexError: If index is out of range
-
-        Example:
-            >>> with ib.while_loop(condition) as loop:
-            ...     x_iter = loop.iter_arg("x_iter", 0)
-            ...     loop.return_var("x_final")
-            ...     # ... loop body ...
-            >>> result = loop.output()  # Get the first return variable
-        """
-        assert self._result is not None, "While loop not yet complete"
-        if index >= len(self._result.return_vars):
-            raise IndexError(
-                f"Return variable index {index} out of range "
-                f"(while loop has {len(self._result.return_vars)} return vars)"
-            )
-        return self._result.return_vars[index]
-
-    def outputs(self) -> list[ir.Var]:
-        """Get all output return variables from the while loop.
-
-        This is a convenience method to access all return variables at once after
-        the while loop is built.
-
-        Returns:
-            List of all return variables
-
-        Raises:
-            AssertionError: If called before while loop is complete
-
-        Example:
-            >>> with ib.while_loop(condition) as loop:
-            ...     x_iter = loop.iter_arg("x_iter", 0)
-            ...     y_iter = loop.iter_arg("y_iter", 1)
-            ...     loop.return_var("x_final")
-            ...     loop.return_var("y_final")
-            ...     # ... loop body ...
-            >>> x_result, y_result = loop.outputs()  # Get all return variables
-        """
-        assert self._result is not None, "While loop not yet complete"
-        return list(self._result.return_vars)
-
     def get_result(self) -> ir.WhileStmt:
         """Get the built WhileStmt.
 
@@ -1304,8 +1231,10 @@ class ScopeBuilder:
         return self._result
 
 
-class IfStmtBuilder:
+class IfStmtBuilder(_ReturnVarsAccessor):
     """Helper for building if statements within an if context."""
+
+    _result_kind = "if statement"
 
     def __init__(self, builder: IRBuilder) -> None:
         """Initialize if statement builder.
@@ -1344,61 +1273,6 @@ class IfStmtBuilder:
         actual_span = span if span is not None else self._builder._capture_call_span()
         var = ir.Var(name, type, actual_span)
         self._builder._builder.add_if_return_var(var)
-
-    def output(self, index: int = 0) -> ir.Var:
-        """Get a single output return variable from the if statement.
-
-        This is a convenience method to access the return variables after the if
-        statement is built. Use the index parameter to select which return variable.
-
-        Args:
-            index: Index of the return variable to get (default: 0)
-
-        Returns:
-            Var: The return variable at the specified index
-
-        Raises:
-            AssertionError: If called before if statement is complete
-            IndexError: If index is out of range
-
-        Example:
-            >>> with ib.if_stmt(condition) as if_builder:
-            ...     if_builder.return_var("result", ir.ScalarType(DataType.INT64))
-            ...     # ... if/else branches ...
-            >>> result = if_builder.output()  # Get the first return variable
-            >>> # Or for multiple return vars:
-            >>> result1 = if_builder.output(0)
-            >>> result2 = if_builder.output(1)
-        """
-        assert self._result is not None, "If statement not yet complete"
-        if index >= len(self._result.return_vars):
-            raise IndexError(
-                f"Return variable index {index} out of range "
-                f"(if statement has {len(self._result.return_vars)} return vars)"
-            )
-        return self._result.return_vars[index]
-
-    def outputs(self) -> list[ir.Var]:
-        """Get all output return variables from the if statement.
-
-        This is a convenience method to access all return variables at once after
-        the if statement is built.
-
-        Returns:
-            List of all return variables
-
-        Raises:
-            AssertionError: If called before if statement is complete
-
-        Example:
-            >>> with ib.if_stmt(condition) as if_builder:
-            ...     if_builder.return_var("x", ir.ScalarType(DataType.INT64))
-            ...     if_builder.return_var("y", ir.ScalarType(DataType.INT64))
-            ...     # ... if/else branches ...
-            >>> x, y = if_builder.outputs()  # Get all return variables
-        """
-        assert self._result is not None, "If statement not yet complete"
-        return list(self._result.return_vars)
 
     def get_result(self) -> ir.IfStmt:
         """Get the built IfStmt.

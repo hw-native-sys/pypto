@@ -399,20 +399,6 @@ def _collect_annotation_dynamic_dims_cached(
     return dims, bindings, literals
 
 
-def _collect_dep_names(func_def: ast.FunctionDef, jit_func_names: set[str]) -> list[str]:
-    """Return names of @pl.jit.incore functions called in this function body."""
-    deps: list[str] = []
-    seen: set[str] = set()
-    for node in ast.walk(func_def):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        if isinstance(func, ast.Name) and func.id in jit_func_names and func.id not in seen:
-            deps.append(func.id)
-            seen.add(func.id)
-    return deps
-
-
 # ---------------------------------------------------------------------------
 # Build annotated type string for a parameter
 # ---------------------------------------------------------------------------
