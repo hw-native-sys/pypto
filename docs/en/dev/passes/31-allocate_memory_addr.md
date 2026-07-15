@@ -38,7 +38,7 @@ loop-carried values, and in-place operations retain their mandatory identities.
 | `MemoryPlanner.PTOAS` | None | This pass is skipped; ptoas `PlanMemory` owns placement | Deferred to ptoas |
 
 DSA support is an optional CMake dependency. Build and consume an installed
-`dsa-solver` 0.3 package as follows:
+`dsa-solver` 0.8 package as follows:
 
 ```bash
 cmake -S /path/to/dsa-solver -B /path/to/dsa-solver/build \
@@ -99,11 +99,12 @@ dsa_export_dir="build/dsa-corpus")`.
 system-test harness additionally accepts `--memory-planner=dsa` and
 `--dsa-export-dir=...` for suite-wide device validation and corpus capture.
 
-The default export is `pypto_hard_v1`: fixed memory spaces, one conservative
-allocation-lifetime hull, capacities/reservations, alignment, typed
-separations, and whole-slot reuse. If the adapter emits the current uncalibrated
-adjacent-pipeline reuse proxy, it upgrades that document to
-`pypto_research_v1`; the proxy is not a production constraint or objective.
+The default export is `pypto_hard_v1`: standard DSA geometry with fixed memory
+spaces, one conservative allocation-lifetime hull, capacities/reservations,
+alignment, and typed separations. Lifetime-disjoint buffers may partially reuse
+freed regions, including the subdivision required by #1908. If the adapter
+emits the uncalibrated pipeline-serialization proxy, it upgrades that document
+to `pypto_research_v1`; the proxy is not a production objective.
 Legacy `pypto_structured` documents remain readable in the standalone tools but
 are no longer emitted.
 
