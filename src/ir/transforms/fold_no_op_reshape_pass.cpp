@@ -12,7 +12,6 @@
 #include <memory>
 #include <string>
 
-#include "pypto/codegen/pto/tile_buf_signature.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -21,6 +20,7 @@
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/tile_buf_signature.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -59,8 +59,8 @@ bool IsNoOpReshape(const AssignStmtPtr& assign) {
   if (!lhs_memref || !rhs_memref || !lhs_memref->base_ || !rhs_memref->base_) return false;
   if (lhs_memref->base_.get() != rhs_memref->base_.get()) return false;
 
-  auto lhs_sig = codegen::TileBufSignature::FromTileType(*lhs_tile);
-  auto rhs_sig = codegen::TileBufSignature::FromTileType(*rhs_tile);
+  auto lhs_sig = TileBufSignature::FromTileType(*lhs_tile);
+  auto rhs_sig = TileBufSignature::FromTileType(*rhs_tile);
   return lhs_sig == rhs_sig;
 }
 

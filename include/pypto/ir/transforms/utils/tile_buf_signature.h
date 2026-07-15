@@ -9,8 +9,8 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef PYPTO_CODEGEN_PTO_TILE_BUF_SIGNATURE_H_
-#define PYPTO_CODEGEN_PTO_TILE_BUF_SIGNATURE_H_
+#ifndef PYPTO_IR_TRANSFORMS_UTILS_TILE_BUF_SIGNATURE_H_
+#define PYPTO_IR_TRANSFORMS_UTILS_TILE_BUF_SIGNATURE_H_
 
 #include <cstdint>
 
@@ -22,7 +22,7 @@
 #include "pypto/ir/type.h"
 
 namespace pypto {
-namespace codegen {
+namespace ir {
 
 /**
  * @brief PTO-visible typed buffer signature
@@ -177,7 +177,7 @@ struct TileBufSignature {
   }
 };
 
-}  // namespace codegen
+}  // namespace ir
 }  // namespace pypto
 
-#endif  // PYPTO_CODEGEN_PTO_TILE_BUF_SIGNATURE_H_
+#endif  // PYPTO_IR_TRANSFORMS_UTILS_TILE_BUF_SIGNATURE_H_
