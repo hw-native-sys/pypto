@@ -111,9 +111,9 @@ class HostTensorAllGather:
         inputs: pl.Tensor[[NR, 1, SIZE], pl.FP32],
         outputs: pl.Out[pl.Tensor[[NR, 1, NR, SIZE], pl.FP32]],
     ) -> pl.Tensor[[NR, 1, NR, SIZE], pl.FP32]:
-        stage_buf = pld.alloc_window_buffer(pld.world_size() * SIZE * 4)
-        data_buf = pld.alloc_window_buffer(pld.world_size() * SIZE * 4)
-        signal_buf = pld.alloc_window_buffer(pld.world_size() * 4)
+        stage_buf = pld.alloc_window_buffer(pld.world_size() * SIZE * pl.FP32.get_byte())
+        data_buf = pld.alloc_window_buffer(pld.world_size() * SIZE * pl.FP32.get_byte())
+        signal_buf = pld.alloc_window_buffer(pld.world_size() * pl.INT32.get_byte())
 
         for r in pl.range(pld.world_size()):
             stage = pld.window(stage_buf, [pld.world_size(), SIZE], dtype=pl.FP32)

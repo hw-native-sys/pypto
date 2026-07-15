@@ -850,9 +850,9 @@ def test_backend_materializes_allgather_next_level_files(tmp_path):
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
-            stage_buf = pld.alloc_window_buffer(4 * SIZE * 4)
-            data_buf = pld.alloc_window_buffer(4 * SIZE * 4)
-            signal_buf = pld.alloc_window_buffer(4 * 4)
+            stage_buf = pld.alloc_window_buffer(4 * SIZE * pl.FP32.get_byte())
+            data_buf = pld.alloc_window_buffer(4 * SIZE * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             stage = pld.window(stage_buf, [4, SIZE], dtype=pl.FP32)
             data = pld.window(data_buf, [4, SIZE], dtype=pl.FP32)
             signal = pld.window(signal_buf, [4], dtype=pl.INT32)
@@ -884,9 +884,9 @@ def test_backend_materializes_all_to_all_next_level_files(tmp_path):
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
-            stage_buf = pld.alloc_window_buffer(4 * SIZE * 4)
-            data_buf = pld.alloc_window_buffer(4 * SIZE * 4)
-            signal_buf = pld.alloc_window_buffer(4 * 4)
+            stage_buf = pld.alloc_window_buffer(4 * SIZE * pl.FP32.get_byte())
+            data_buf = pld.alloc_window_buffer(4 * SIZE * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             stage = pld.window(stage_buf, [4, SIZE], dtype=pl.FP32)
             data = pld.window(data_buf, [4, SIZE], dtype=pl.FP32)
             signal = pld.window(signal_buf, [4], dtype=pl.INT32)

@@ -615,9 +615,9 @@ def test_host_allgather_lowers_to_namesake_builtin():
             # `stage_buf` (TPUT source) and `data_buf` (TPUT destination /
             # result) must be two DISTINCT windows — same constraint as
             # all_to_all (see allgather kernel.cpp.in).
-            stage_buf = pld.alloc_window_buffer(4096)
-            data_buf = pld.alloc_window_buffer(4096)
-            signal_buf = pld.alloc_window_buffer(16)
+            stage_buf = pld.alloc_window_buffer(4 * 256 * pl.FP32.get_byte())
+            data_buf = pld.alloc_window_buffer(4 * 256 * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             stage = pld.window(stage_buf, [4, 256], dtype=pl.FP32)
             data = pld.window(data_buf, [4, 256], dtype=pl.FP32)
             signal = pld.window(signal_buf, [4], dtype=pl.INT32)
@@ -666,8 +666,8 @@ def test_host_allgather_rejects_aliased_input_target_windows():
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
-            buf = pld.alloc_window_buffer(4096)
-            signal_buf = pld.alloc_window_buffer(16)
+            buf = pld.alloc_window_buffer(4 * 256 * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             stage = pld.window(buf, [4, 256], dtype=pl.FP32)
             data = pld.window(buf, [4, 256], dtype=pl.FP32)
             signal = pld.window(signal_buf, [4], dtype=pl.INT32)
@@ -700,9 +700,9 @@ def test_host_all_to_all_lowers_to_namesake_builtin():
             # both is a genuine cross-process data race (see
             # python/pypto/runtime/builtins/collectives/all_to_all/templates
             # /kernel.cpp.in for the full explanation).
-            stage_buf = pld.alloc_window_buffer(4096)
-            data_buf = pld.alloc_window_buffer(4096)
-            signal_buf = pld.alloc_window_buffer(16)
+            stage_buf = pld.alloc_window_buffer(4 * 256 * pl.FP32.get_byte())
+            data_buf = pld.alloc_window_buffer(4 * 256 * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             stage = pld.window(stage_buf, [4, 256], dtype=pl.FP32)
             data = pld.window(data_buf, [4, 256], dtype=pl.FP32)
             signal = pld.window(signal_buf, [4], dtype=pl.INT32)
