@@ -598,6 +598,58 @@ class TileType : public ShapedType {
 using TileTypePtr = std::shared_ptr<const TileType>;
 
 /**
+ * @brief Low-level PTO tile-buffer handle type
+ *
+ * Unlike TileType, which represents an immutable logical tile value, this type
+ * describes a mutable destination buffer in PTO target IR. It deliberately
+ * carries no MemRef: allocation, aliasing, and view relationships are expressed
+ * by explicit PTO operations and SSA handles after lowering.
+ *
+ * The fields mirror the semantic components of ``!pto.tile_buf``. A missing
+ * valid extent represents ``?`` in the target type; the runtime value is then
+ * supplied as an operand of ``pto.alloc_tile``.
+ */
+class PTOTileBufType final : public Type {
+ public:
+  MemorySpace memory_space_;
+  DataType dtype_;
+  int64_t rows_;
+  int64_t cols_;
+  TileLayout blayout_;
+  TileLayout slayout_;
+  uint64_t fractal_;
+  PadValue pad_;
+  std::optional<int64_t> valid_rows_;
+  std::optional<int64_t> valid_cols_;
+
+  PTOTileBufType(MemorySpace memory_space, DataType dtype, int64_t rows, int64_t cols,
+                 TileLayout blayout = TileLayout::row_major, TileLayout slayout = TileLayout::none_box,
+                 uint64_t fractal = 512, PadValue pad = PadValue::null,
+                 std::optional<int64_t> valid_rows = std::nullopt,
+                 std::optional<int64_t> valid_cols = std::nullopt);
+
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::PTOTileBufType; }
+  [[nodiscard]] std::string TypeName() const override { return "PTOTileBufType"; }
+
+  static constexpr auto GetFieldDescriptors() {
+    return std::tuple_cat(
+        Type::GetFieldDescriptors(),
+        std::make_tuple(reflection::UsualField(&PTOTileBufType::memory_space_, "memory_space"),
+                        reflection::UsualField(&PTOTileBufType::dtype_, "dtype"),
+                        reflection::UsualField(&PTOTileBufType::rows_, "rows"),
+                        reflection::UsualField(&PTOTileBufType::cols_, "cols"),
+                        reflection::UsualField(&PTOTileBufType::blayout_, "blayout"),
+                        reflection::UsualField(&PTOTileBufType::slayout_, "slayout"),
+                        reflection::UsualField(&PTOTileBufType::fractal_, "fractal"),
+                        reflection::UsualField(&PTOTileBufType::pad_, "pad"),
+                        reflection::UsualField(&PTOTileBufType::valid_rows_, "valid_rows"),
+                        reflection::UsualField(&PTOTileBufType::valid_cols_, "valid_cols")));
+  }
+};
+
+using PTOTileBufTypePtr = std::shared_ptr<const PTOTileBufType>;
+
+/**
  * @brief Array type representation
  *
  * Represents a small fixed-size homogeneous 1-D array that lives on the

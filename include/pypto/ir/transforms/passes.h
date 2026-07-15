@@ -175,6 +175,18 @@ Pass MemoryReuse();
 Pass AllocateMemoryAddr();
 
 /**
+ * @brief Materialize explicit PTO tile-buffer handles for the Step-3 lowering slice
+ *
+ * Supports straight-line, static-2D ``tile.load``, ``tile.sqrt``, ``tile.add``,
+ * ``tile.mul``, and ``tile.store`` programs. Each Tile result gets a typed
+ * ``pto.alloc_tile`` definition, while compiler attrs record the exact
+ * Tile-value -> handle plan consumed by the subsequent target-op rewrite.
+ * Unsupported control flow, views, tuples, dynamic shapes, and in-place ops
+ * fail explicitly. This pass is experimental and is not in the default pipeline.
+ */
+Pass MaterializePTOTileHandles();
+
+/**
  * @brief Eliminate FunctionType::Inline functions by splicing their bodies
  *        into every call site.
  *

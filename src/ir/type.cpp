@@ -145,6 +145,28 @@ size_t Hash(const TileView& tv) {
 ShapedType::ShapedType(DataType dtype, std::vector<ExprPtr> shape)
     : dtype_(dtype), shape_(std::move(shape)), memref_(std::nullopt) {}
 
+PTOTileBufType::PTOTileBufType(MemorySpace memory_space, DataType dtype, int64_t rows, int64_t cols,
+                               TileLayout blayout, TileLayout slayout, uint64_t fractal, PadValue pad,
+                               std::optional<int64_t> valid_rows, std::optional<int64_t> valid_cols)
+    : memory_space_(memory_space),
+      dtype_(dtype),
+      rows_(rows),
+      cols_(cols),
+      blayout_(blayout),
+      slayout_(slayout),
+      fractal_(fractal),
+      pad_(pad),
+      valid_rows_(valid_rows),
+      valid_cols_(valid_cols) {
+  CHECK(rows > 0) << "PTOTileBufType rows must be positive, got " << rows;
+  CHECK(cols > 0) << "PTOTileBufType cols must be positive, got " << cols;
+  CHECK(fractal > 0) << "PTOTileBufType fractal must be positive, got " << fractal;
+  CHECK(!valid_rows.has_value() || (*valid_rows > 0 && *valid_rows <= rows))
+      << "PTOTileBufType valid_rows must be in [1, rows], got " << valid_rows.value_or(0);
+  CHECK(!valid_cols.has_value() || (*valid_cols > 0 && *valid_cols <= cols))
+      << "PTOTileBufType valid_cols must be in [1, cols], got " << valid_cols.value_or(0);
+}
+
 std::string TensorLayoutToString(TensorLayout layout) {
   switch (layout) {
     case TensorLayout::ND:

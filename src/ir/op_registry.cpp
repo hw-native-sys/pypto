@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <any>
+#include <cstddef>
 #include <exception>
 #include <memory>
 #include <optional>
@@ -32,6 +33,58 @@
 
 namespace pypto {
 namespace ir {
+
+void PTOOpSpec::ValidateDefinition(const std::string& op_name) const {
+  size_t variable_group_count = 0;
+  for (const auto& group : operand_groups) {
+    CHECK(group.min_count <= group.max_count)
+        << "Operator '" << op_name << "' PTO operand group has min_count > max_count";
+    if (group.min_count != group.max_count) ++variable_group_count;
+
+    if (group.role == PTOOperandRole::Output) {
+      CHECK(group.effect == PTOMemoryEffect::Write || group.effect == PTOMemoryEffect::ReadWrite)
+          << "Operator '" << op_name << "' PTO output group must have Write or ReadWrite effect";
+    }
+    CHECK(group.effect != PTOMemoryEffect::Allocate)
+        << "Operator '" << op_name << "' PTO Allocate effect belongs on the result, not an operand group";
+  }
+  CHECK(variable_group_count <= 1) << "Operator '" << op_name
+                                   << "' PTO schema may have at most one variable operand group";
+  if (result_kind == PTOResultKind::TileBuffer) {
+    CHECK(result_effect == PTOMemoryEffect::Allocate)
+        << "Operator '" << op_name << "' PTO tile-buffer result must have Allocate effect";
+  } else {
+    CHECK(result_effect == PTOMemoryEffect::None)
+        << "Operator '" << op_name << "' PTO result-less op cannot carry a result effect";
+  }
+}
+
+std::optional<std::vector<size_t>> PTOOpSpec::ResolveOperandSegments(size_t arg_count) const {
+  size_t min_total = 0;
+  size_t max_total = 0;
+  for (const auto& group : operand_groups) {
+    min_total += group.min_count;
+    max_total += group.max_count;
+  }
+  if (arg_count < min_total || arg_count > max_total) return std::nullopt;
+
+  std::vector<size_t> segments;
+  segments.reserve(operand_groups.size());
+  size_t remaining_extra = arg_count - min_total;
+  for (const auto& group : operand_groups) {
+    const size_t extra = std::min(remaining_extra, group.max_count - group.min_count);
+    segments.push_back(group.min_count + extra);
+    remaining_extra -= extra;
+  }
+  if (remaining_extra != 0) return std::nullopt;
+  return segments;
+}
+
+bool PTOOpSpec::IsPure() const {
+  if (result_effect != PTOMemoryEffect::None) return false;
+  return std::all_of(operand_groups.begin(), operand_groups.end(),
+                     [](const PTOOperandGroup& group) { return group.effect == PTOMemoryEffect::None; });
+}
 
 void ValidateKwargs(const std::vector<std::pair<std::string, std::any>>& kwargs,
                     const std::unordered_map<std::string, std::type_index>& allowed_kwargs,

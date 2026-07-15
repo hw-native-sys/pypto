@@ -592,6 +592,43 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
     return oss.str();
   }
 
+  if (auto pto_buf_type = As<PTOTileBufType>(type)) {
+    std::ostringstream oss;
+    oss << "PTOTileBufType<memory_space=" << MemorySpaceToString(pto_buf_type->memory_space_)
+        << ", dtype=" << DataTypeToString(pto_buf_type->dtype_) << ", rows=" << pto_buf_type->rows_
+        << ", cols=" << pto_buf_type->cols_ << ", blayout=" << TileLayoutToString(pto_buf_type->blayout_)
+        << ", slayout=" << TileLayoutToString(pto_buf_type->slayout_)
+        << ", fractal=" << pto_buf_type->fractal_ << ", pad=";
+    switch (pto_buf_type->pad_) {
+      case PadValue::null:
+        oss << "null";
+        break;
+      case PadValue::zero:
+        oss << "zero";
+        break;
+      case PadValue::max:
+        oss << "max";
+        break;
+      case PadValue::min:
+        oss << "min";
+        break;
+    }
+    oss << ", valid_rows=";
+    if (pto_buf_type->valid_rows_.has_value()) {
+      oss << pto_buf_type->valid_rows_.value_or(0);
+    } else {
+      oss << "?";
+    }
+    oss << ", valid_cols=";
+    if (pto_buf_type->valid_cols_.has_value()) {
+      oss << pto_buf_type->valid_cols_.value_or(0);
+    } else {
+      oss << "?";
+    }
+    oss << ">";
+    return oss.str();
+  }
+
   if (auto tuple_type = As<TupleType>(type)) {
     std::ostringstream oss;
     if (tuple_type->types_.empty()) {
@@ -1108,7 +1145,10 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   {
     std::vector<const std::pair<std::string, std::any>*> serialized_attrs;
     for (const auto& kv : op->attrs_) {
-      if (kv.first == kPipelineMembershipAttr) serialized_attrs.push_back(&kv);
+      if (kv.first == kPipelineMembershipAttr || kv.first == kAttrPTOInputHandles ||
+          kv.first == kAttrPTOOutputHandle) {
+        serialized_attrs.push_back(&kv);
+      }
     }
     if (!serialized_attrs.empty()) {
       stream_ << (need_comma ? ", " : "") << "attrs={";

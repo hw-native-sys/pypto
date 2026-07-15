@@ -90,6 +90,10 @@ enum class IRProperty : uint64_t {
                                     ///< ``iter_arg_array_size_<i>`` for TaskId array carries), so
                                     ///< orchestration codegen reads the carry lowering instead of
                                     ///< re-deriving it
+  PTOHandlesMaterialized,           ///< Supported high-level Tile ops have explicit, dominance-valid
+                                    ///< input/output PTO handle attrs and explicit pto.alloc_tile defs
+  PTOBufferized,                    ///< PTO target ops use explicit SSA tile-buffer handles, DPS outputs,
+                                    ///< and registry-declared memory effects
   kCount                            ///< Sentinel (must be last)
 };
 

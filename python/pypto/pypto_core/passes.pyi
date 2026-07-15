@@ -55,6 +55,8 @@ class IRProperty(Enum):
     ReturnParamsExplicit = ...
     AivSplitValid = ...
     IterArgCarryClassified = ...
+    PTOHandlesMaterialized = ...
+    PTOBufferized = ...
 
 class IRPropertySet:
     """A set of IR properties backed by a bitset."""
@@ -349,6 +351,9 @@ def memory_reuse() -> Pass:
 
 def allocate_memory_addr() -> Pass:
     """Create an allocate memory address pass."""
+
+def materialize_pto_tile_handles() -> Pass:
+    """Materialize explicit PTO handles for the static straight-line lowering slice."""
 
 def fuse_create_assemble_to_slice() -> Pass:
     """Fuse tensor.create + tensor.assemble into tensor.slice in Orchestration functions."""
@@ -856,6 +861,7 @@ __all__ = [
     "init_mem_ref",
     "memory_reuse",
     "allocate_memory_addr",
+    "materialize_pto_tile_handles",
     "fuse_create_assemble_to_slice",
     "fold_no_op_reshape",
     "stamp_tfree_split",

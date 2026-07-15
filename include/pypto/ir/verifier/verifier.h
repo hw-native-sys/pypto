@@ -252,6 +252,20 @@ PropertyVerifierPtr CreateOutParamNotShadowedPropertyVerifier();
 PropertyVerifierPtr CreateArrayNotEscapedPropertyVerifier();
 
 /**
+ * @brief Create the verifier for explicit PTO target-buffer IR.
+ *
+ * Checks registry operand segments/effects, PTOTileBufType constraints,
+ * allocation-vs-DPS statement placement, and the InCore-only boundary.
+ */
+PropertyVerifierPtr CreatePTOBufferizedPropertyVerifier();
+
+/**
+ * @brief Create the verifier for the transitional explicit PTO handle plan
+ * @return Shared pointer to PTOHandlesMaterialized PropertyVerifier
+ */
+PropertyVerifierPtr CreatePTOHandlesMaterializedPropertyVerifier();
+
+/**
  * @brief Factory function for creating NoNestedInCore property verifier
  *
  * Verifies that no ScopeStmt(InCore) is nested inside another ScopeStmt(InCore).

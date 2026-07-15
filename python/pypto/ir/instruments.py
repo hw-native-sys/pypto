@@ -63,6 +63,18 @@ def make_roundtrip_instrument() -> _passes.CallbackInstrument:
                 f"[RoundtripInstrument] Printer failed after pass '{pass_name}'.\n\nError: {first_line}"
             ) from exc
 
+        # PTO target IR intentionally has no user-facing Python DSL surface.
+        # PTOTileBufType prints in a diagnostic-only form, so parsing it as
+        # source would be meaningless. Structural serialization tests cover
+        # this internal stage instead.
+        if "PTOTileBufType<" in printed:
+            warnings.warn(
+                f"[RoundtripInstrument] internal PTO target IR after '{pass_name}' has no Python DSL "
+                "surface — skipping print/parse roundtrip",
+                stacklevel=2,
+            )
+            return
+
         # --- Step 2: parse ---
         try:
             reparsed = parse(printed, filename="<roundtrip>")

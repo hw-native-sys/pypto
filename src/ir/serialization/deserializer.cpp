@@ -336,11 +336,27 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
     msgpack::object tensor_view_obj;
     msgpack::object window_buffer_obj;
     uint8_t memory_space_code = 0;
+    int64_t rows = 0;
+    int64_t cols = 0;
+    uint8_t blayout_code = 0;
+    uint8_t slayout_code = 0;
+    uint64_t fractal = 0;
+    uint8_t pad_code = 0;
+    int64_t valid_rows = 0;
+    int64_t valid_cols = 0;
     bool has_memref = false;
     bool has_tile_view = false;
     bool has_tensor_view = false;
     bool has_window_buffer = false;
     bool has_memory_space = false;
+    bool has_rows = false;
+    bool has_cols = false;
+    bool has_blayout = false;
+    bool has_slayout = false;
+    bool has_fractal = false;
+    bool has_pad = false;
+    bool has_valid_rows = false;
+    bool has_valid_cols = false;
 
     msgpack::object_kv* p = obj.via.map.ptr;
     msgpack::object_kv* const pend = obj.via.map.ptr + obj.via.map.size;
@@ -379,6 +395,30 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
       } else if (key == "memory_space") {
         p->val.convert(memory_space_code);
         has_memory_space = true;
+      } else if (key == "rows") {
+        p->val.convert(rows);
+        has_rows = true;
+      } else if (key == "cols") {
+        p->val.convert(cols);
+        has_cols = true;
+      } else if (key == "blayout") {
+        p->val.convert(blayout_code);
+        has_blayout = true;
+      } else if (key == "slayout") {
+        p->val.convert(slayout_code);
+        has_slayout = true;
+      } else if (key == "fractal") {
+        p->val.convert(fractal);
+        has_fractal = true;
+      } else if (key == "pad") {
+        p->val.convert(pad_code);
+        has_pad = true;
+      } else if (key == "valid_rows") {
+        p->val.convert(valid_rows);
+        has_valid_rows = true;
+      } else if (key == "valid_cols") {
+        p->val.convert(valid_cols);
+        has_valid_cols = true;
       }
     }
 
@@ -428,6 +468,14 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
       }
 
       return std::make_shared<TileType>(shape, DataType(dtype_code), memref, tile_view, memory_space);
+    } else if (type_kind == "PTOTileBufType") {
+      CHECK(has_memory_space && has_rows && has_cols && has_blayout && has_slayout && has_fractal && has_pad)
+          << "PTOTileBufType is missing one or more required fields";
+      return std::make_shared<PTOTileBufType>(
+          static_cast<MemorySpace>(memory_space_code), DataType(dtype_code), rows, cols,
+          static_cast<TileLayout>(blayout_code), static_cast<TileLayout>(slayout_code), fractal,
+          static_cast<PadValue>(pad_code), has_valid_rows ? std::optional<int64_t>(valid_rows) : std::nullopt,
+          has_valid_cols ? std::optional<int64_t>(valid_cols) : std::nullopt);
     } else if (type_kind == "ArrayType") {
       CHECK(shape.size() == 1) << "ArrayType must have rank-1 shape, got " << shape.size();
       return std::make_shared<ArrayType>(DataType(dtype_code), shape[0]);

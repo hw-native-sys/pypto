@@ -745,6 +745,40 @@ class TileType(ShapedType):
         the canonical sparse ``tile_view`` storage directly.
         """
 
+class PTOTileBufType(Type):
+    """Low-level mutable tile-buffer handle type for PTO target IR.
+
+    This is an internal IR inspection API, not a ``pypto.language`` DSL type.
+    Unlike :class:`TileType`, it carries no :class:`MemRef`; allocation and
+    aliasing are represented by explicit PTO operations.
+    """
+
+    memory_space: Final[MemorySpace]
+    dtype: Final[DataType]
+    rows: Final[int]
+    cols: Final[int]
+    blayout: Final[TileLayout]
+    slayout: Final[TileLayout]
+    fractal: Final[int]
+    pad: Final[PadValue]
+    valid_rows: Final[int | None]
+    valid_cols: Final[int | None]
+
+    def __init__(
+        self,
+        memory_space: MemorySpace,
+        dtype: DataType,
+        rows: int,
+        cols: int,
+        blayout: TileLayout = TileLayout.row_major,
+        slayout: TileLayout = TileLayout.none_box,
+        fractal: int = 512,
+        pad: PadValue = PadValue.null,
+        valid_rows: int | None = None,
+        valid_cols: int | None = None,
+    ) -> None:
+        """Create an internal PTO tile-buffer handle type."""
+
 class ArrayType(ShapedType):
     """On-core array type (lives on scalar register file / C stack).
 
@@ -2993,6 +3027,9 @@ def get_op_memory_spec(op_name: str) -> dict[str, Any] | None:
           consumer demand (e.g. `tile.load`, `tile.create`).
         * ``None`` — no resolver registered for this op.
     """
+
+def get_pto_op_spec(op_name: str) -> dict[str, Any] | None:
+    """Get the explicit operand/effect schema for an internal PTO target op."""
 
 # ========== Op Conversion Registry ==========
 

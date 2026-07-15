@@ -520,6 +520,29 @@ StructuralHasher::result_type StructuralHasher::HashType(const TypePtr& type) {
     } else {
       h = hash_combine(h, static_cast<result_type>(0));  // indicate absence
     }
+  } else if (auto pto_buf_type = As<PTOTileBufType>(type)) {
+    h = hash_combine(h, static_cast<result_type>(pto_buf_type->memory_space_));
+    h = hash_combine(h, static_cast<result_type>(std::hash<uint8_t>{}(pto_buf_type->dtype_.Code())));
+    h = hash_combine(h, static_cast<result_type>(std::hash<int64_t>{}(pto_buf_type->rows_)));
+    h = hash_combine(h, static_cast<result_type>(std::hash<int64_t>{}(pto_buf_type->cols_)));
+    h = hash_combine(h, static_cast<result_type>(pto_buf_type->blayout_));
+    h = hash_combine(h, static_cast<result_type>(pto_buf_type->slayout_));
+    h = hash_combine(h, static_cast<result_type>(std::hash<uint64_t>{}(pto_buf_type->fractal_)));
+    h = hash_combine(h, static_cast<result_type>(pto_buf_type->pad_));
+    if (pto_buf_type->valid_rows_.has_value()) {
+      h = hash_combine(h, static_cast<result_type>(1));
+      h = hash_combine(h,
+                       static_cast<result_type>(std::hash<int64_t>{}(pto_buf_type->valid_rows_.value_or(0))));
+    } else {
+      h = hash_combine(h, static_cast<result_type>(0));
+    }
+    if (pto_buf_type->valid_cols_.has_value()) {
+      h = hash_combine(h, static_cast<result_type>(1));
+      h = hash_combine(h,
+                       static_cast<result_type>(std::hash<int64_t>{}(pto_buf_type->valid_cols_.value_or(0))));
+    } else {
+      h = hash_combine(h, static_cast<result_type>(0));
+    }
   } else if (auto tuple_type = As<TupleType>(type)) {
     h = hash_combine(h, static_cast<result_type>(tuple_type->types_.size()));
     for (const auto& t : tuple_type->types_) {

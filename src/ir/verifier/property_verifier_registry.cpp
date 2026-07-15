@@ -59,6 +59,8 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   Register(IRProperty::StructuredCtrlFlow, CreateStructuredCtrlFlowPropertyVerifier);
   Register(IRProperty::OutParamNotShadowed, CreateOutParamNotShadowedPropertyVerifier);
   Register(IRProperty::ArrayNotEscaped, CreateArrayNotEscapedPropertyVerifier);
+  Register(IRProperty::PTOHandlesMaterialized, CreatePTOHandlesMaterializedPropertyVerifier);
+  Register(IRProperty::PTOBufferized, CreatePTOBufferizedPropertyVerifier);
   Register(IRProperty::NoNestedInCore, CreateNoNestedIncorePropertyVerifier);
   Register(IRProperty::InOutUseValid, CreateInOutUseValidPropertyVerifier);
   Register(IRProperty::PipelineLoopValid, CreatePipelineLoopValidPropertyVerifier);

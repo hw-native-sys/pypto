@@ -23,6 +23,7 @@
 
 #include <any>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -74,6 +75,49 @@ struct OpMemorySpaceSpec {
   /// InferTileMemorySpace uses this for forward inheritance and backward-demand
   /// propagation through view-like ops; memory reuse uses it to skip retargeting.
   bool output_inherits_input = false;
+};
+
+/**
+ * @brief Operand role in the bufferized PTO target IR.
+ *
+ * Roles describe destination-passing structure independently from the C++/MLIR
+ * printer. Input and output groups are buffer dataflow edges; metadata operands
+ * carry scalar configuration such as valid extents or an optional address.
+ */
+enum class PTOOperandRole : uint8_t { Metadata, Input, Output };
+
+/// Memory effect attached to a PTO operand group or result.
+enum class PTOMemoryEffect : uint8_t { None, Read, Write, ReadWrite, Allocate };
+
+/// Type constraint for one PTO operand group.
+enum class PTOOperandTypeConstraint : uint8_t { Any, Scalar, TileBuffer };
+
+/// Result contract for a PTO target operation.
+enum class PTOResultKind : uint8_t { None, TileBuffer };
+
+struct PTOOperandGroup {
+  PTOOperandRole role;
+  PTOMemoryEffect effect;
+  PTOOperandTypeConstraint type_constraint;
+  size_t min_count;
+  size_t max_count;
+};
+
+/**
+ * @brief Explicit destination-passing and memory-effect schema for a PTO op.
+ *
+ * Groups are ordered and map directly onto Call::args_. At most one group may
+ * have a variable count, which keeps segment-size recovery deterministic and
+ * makes the schema suitable for both verification and printing.
+ */
+struct PTOOpSpec {
+  std::vector<PTOOperandGroup> operand_groups;
+  PTOResultKind result_kind{PTOResultKind::None};
+  PTOMemoryEffect result_effect{PTOMemoryEffect::None};
+
+  void ValidateDefinition(const std::string& op_name) const;
+  [[nodiscard]] std::optional<std::vector<size_t>> ResolveOperandSegments(size_t arg_count) const;
+  [[nodiscard]] bool IsPure() const;
 };
 
 /**
@@ -489,6 +533,15 @@ class OpRegistryEntry {
 
   [[nodiscard]] bool IsInternalOnly() const { return internal_only_; }
 
+  inline OpRegistryEntry& set_pto_op_spec(PTOOpSpec spec) {
+    CHECK(!pto_op_spec_.has_value()) << "Operator '" << name_ << "' PTO schema is already set";
+    spec.ValidateDefinition(name_);
+    pto_op_spec_ = std::move(spec);
+    return *this;
+  }
+
+  [[nodiscard]] const std::optional<PTOOpSpec>& GetPTOOpSpec() const { return pto_op_spec_; }
+
   inline OpRegistryEntry& set_template_dir(std::string template_dir) {
     CHECK(!template_dir_.has_value()) << "Operator '" << name_ << "' template_dir is already set";
     template_dir_ = std::move(template_dir);
@@ -535,6 +588,7 @@ class OpRegistryEntry {
   std::optional<core_affinity::CrossCoreRole> cross_core_role_;  ///< Cross-core role (for predicates)
   bool internal_only_{false};                                    ///< True for compiler-created ops only.
   std::optional<std::string> template_dir_;                      ///< Package resource for builtin templates.
+  std::optional<PTOOpSpec> pto_op_spec_;                         ///< PTO target operand/effect contract.
 };
 
 /**

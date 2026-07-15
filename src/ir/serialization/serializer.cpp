@@ -455,6 +455,21 @@ class IRSerializer::Impl {
       if (tile_type->memory_space_.has_value()) {
         type_map["memory_space"] = msgpack::object(static_cast<uint8_t>(*tile_type->memory_space_), zone);
       }
+    } else if (auto pto_buf_type = As<PTOTileBufType>(type)) {
+      type_map["memory_space"] = msgpack::object(static_cast<uint8_t>(pto_buf_type->memory_space_), zone);
+      type_map["dtype"] = msgpack::object(pto_buf_type->dtype_.Code(), zone);
+      type_map["rows"] = msgpack::object(pto_buf_type->rows_, zone);
+      type_map["cols"] = msgpack::object(pto_buf_type->cols_, zone);
+      type_map["blayout"] = msgpack::object(static_cast<uint8_t>(pto_buf_type->blayout_), zone);
+      type_map["slayout"] = msgpack::object(static_cast<uint8_t>(pto_buf_type->slayout_), zone);
+      type_map["fractal"] = msgpack::object(pto_buf_type->fractal_, zone);
+      type_map["pad"] = msgpack::object(static_cast<uint8_t>(pto_buf_type->pad_), zone);
+      if (pto_buf_type->valid_rows_.has_value()) {
+        type_map["valid_rows"] = msgpack::object(pto_buf_type->valid_rows_.value_or(0), zone);
+      }
+      if (pto_buf_type->valid_cols_.has_value()) {
+        type_map["valid_cols"] = msgpack::object(pto_buf_type->valid_cols_.value_or(0), zone);
+      }
     } else if (auto array_type = As<ArrayType>(type)) {
       type_map["dtype"] = msgpack::object(array_type->dtype_.Code(), zone);
       std::vector<msgpack::object> shape_vec;

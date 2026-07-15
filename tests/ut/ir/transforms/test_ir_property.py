@@ -235,6 +235,22 @@ class TestPassPropertyAccessors:
         assert p.get_required_properties().contains(passes.IRProperty.SSAForm)
         assert p.get_produced_properties().contains(passes.IRProperty.SSAForm)
 
+    def test_materialize_pto_tile_handles_properties(self):
+        """Test PTO handle materialization requires its normalized input contract."""
+        p = passes.materialize_pto_tile_handles()
+        assert p.get_name() == "MaterializePTOTileHandles"
+        assert p.get_required_properties().contains(passes.IRProperty.SSAForm)
+        assert p.get_required_properties().contains(passes.IRProperty.SplitIncoreOrch)
+        assert p.get_required_properties().contains(passes.IRProperty.HasMemRefs)
+        assert p.get_required_properties().contains(passes.IRProperty.AllocatedMemoryAddr)
+        assert p.get_required_properties().contains(passes.IRProperty.IncoreTileOps)
+        assert p.get_required_properties().contains(passes.IRProperty.TileOps2D)
+        assert p.get_required_properties().contains(passes.IRProperty.TileMemoryInferred)
+        assert p.get_required_properties().contains(passes.IRProperty.NormalizedStmtStructure)
+        assert p.get_produced_properties().contains(passes.IRProperty.SSAForm)
+        assert p.get_produced_properties().contains(passes.IRProperty.AllocatedMemoryAddr)
+        assert p.get_produced_properties().contains(passes.IRProperty.PTOHandlesMaterialized)
+
     def test_run_verifier_no_properties(self):
         """Test RunVerifier has no property declarations."""
         p = passes.run_verifier()
