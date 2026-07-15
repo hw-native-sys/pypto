@@ -257,6 +257,14 @@ TypePtr DeduceTensorAllGatherType(const std::vector<ExprPtr>& args,
       << "pld.tensor.allgather signal must have INT32 element type, got dtype "
       << signal_type->dtype_.ToString();
 
+  // The notify/wait barrier indexes `signal` per rank (0..NR-1), so its first
+  // dimension must equal target's NR.  Without this guard an undersized signal
+  // passes type deduction and only faults at runtime inside EmitNotifyAll /
+  // EmitWaitAll (InCore path has no other static check on the barrier size).
+  CHECK(AreExprsEqual(signal_type->shape_[0], target_type->shape_[0]))
+      << "pld.tensor.allgather signal first dimension must equal target first "
+         "dimension (NR)";
+
   // Both paths return target's DistributedTensorType (window-as-result).
   return target_type;
 }

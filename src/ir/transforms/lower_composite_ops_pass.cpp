@@ -1040,11 +1040,15 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
   const auto& target = args[1];
   const auto& signal = args[2];
 
-  // local_data is always a Tensor at this point.  pld.tile.put only accepts
-  // Tensor/DistributedTensor for its src parameter; a TileType would crash
-  // downstream in pld.tile.put's own deducer/codegen CHECKs.
-  INTERNAL_CHECK_SPAN(As<TensorType>(local_data->GetType()), span)
-      << "pld.tensor.allgather local_data must be TensorType, got " << local_data->GetType()->TypeName();
+  // local_data is user-provided (the DSL allows Tensor | DistributedTensor) and
+  // the deducer defers its validation to the lowering passes, so this is a
+  // user-facing contract check -> CHECK_SPAN.  The InCore push path only
+  // supports a plain Tensor source: pld.tile.put reads its `src` via
+  // AsTensorTypeLike; a DistributedTensor local_data would fault downstream.
+  CHECK_SPAN(As<TensorType>(local_data->GetType()), span)
+      << "pld.tensor.allgather local_data must be a plain Tensor [1, SIZE] on the "
+         "InCore path, got "
+      << local_data->GetType()->TypeName();
   auto target_type = As<DistributedTensorType>(target->GetType());
   INTERNAL_CHECK_SPAN(target_type, span)
       << "pld.tensor.allgather target must be DistributedTensorType (deducer-rejected otherwise)";

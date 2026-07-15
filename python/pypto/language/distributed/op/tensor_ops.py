@@ -570,9 +570,11 @@ def allgather(
     ``signal`` is the barrier.  The host lowering emits
     ``builtin.tensor.barrier`` per chip to synchronise the pre-staged data.
 
-    The C++ deducer validates ``target`` and ``signal`` by type and
-    accepts ``Tile``, ``Tensor``, or ``DistributedTensor`` for ``local_data``;
-    the lowering passes handle path-specific validation per their context.
+    The C++ deducer validates ``target`` and ``signal`` by type. The InCore
+    composite path requires ``local_data`` to be a plain ``Tensor [1, SIZE]``;
+    the HOST builtin path accepts either ``Tensor [1, SIZE]`` or
+    ``DistributedTensor [NR, SIZE]`` (pre-staged by per-chip dispatch). The
+    lowering passes handle this path-specific validation per their context.
 
     Args:
         local_data: InCore: :class:`pl.Tensor` [1, SIZE] with this rank's
