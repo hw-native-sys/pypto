@@ -140,27 +140,6 @@ class TestScalarCast:
         ir.assert_structural_equal(Before, pl.parse_program(printed))
 
 
-class TestTileDispatchUnaffected:
-    """Ensure tile ops still dispatch correctly when scalar dispatch is active."""
-
-    def test_tile_min_still_works(self):
-        """Ensure pl.min(tile, axis=...) still works as tile reduction."""
-
-        @pl.program
-        class Before:
-            @pl.function
-            def main(
-                self,
-                x: pl.Tensor[[32, 32], pl.FP32],
-            ) -> pl.Tensor[[32, 32], pl.FP32]:
-                tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(x, [0, 0], [32, 32])
-                tile_c: pl.Tile[[32], pl.FP32] = pl.min(tile_a, axis=0)
-                out: pl.Tensor[[32, 32], pl.FP32] = pl.store(tile_c, [0, 0], x)
-                return out
-
-        assert isinstance(Before, ir.Program)
-
-
 class TestScalarNot:
     """Tests for `not` and `~` unary operator dispatch."""
 

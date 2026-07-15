@@ -807,11 +807,14 @@ def test_loop_iter_arg_keeps_split_tracking():
 def test_reduce_on_split_axis_rejected():
     """A reduce that collapses the split axis (dim0 under UP_DOWN) raises ValueError —
     a partial per-lane reduction is a miscompile. NEGATIVE test: a rejected
-    transform produces no ``After`` IR, so Before-After-Expected does not apply."""
+    transform produces no ``After`` IR, so Before-After-Expected does not apply.
+
+    ``col_sum`` is the axis-0 reduction (``pto.tcolsum``), so under UP_DOWN it
+    collapses exactly the split axis."""
     span = ir.Span.unknown()
     src = ir.Var("src", _tile([128, 128], mem=MS.Vec), span)
     out_0 = ir.Var("out_0", _tensor([128, 128]), span)
-    reduced = T.sum(src, axis=0, keepdim=True, span=span)
+    reduced = T.col_sum(src, span=span)
     rv = ir.Var("rv", reduced.type, span)
     store = T.store(rv, [0, 0], out_0, span=span)
     out_store = ir.Var("out_store", store.type, span)

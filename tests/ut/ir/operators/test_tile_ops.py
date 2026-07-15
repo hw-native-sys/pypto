@@ -510,82 +510,6 @@ class TestTileUnaryOps:
 class TestTileReductionOps:
     """Test suite for tile-level reduction operators."""
 
-    def test_tile_sum_axis0(self):
-        """Test tile.sum operator - sum along axis 0 (column-wise)."""
-
-        @pl.program
-        class Program:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main(
-                self,
-                a: pl.Tensor[[128, 128], pl.FP32],
-                output: pl.Tensor[[128, 128], pl.FP32],
-            ) -> pl.Tensor[[128, 128], pl.FP32]:
-                tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
-                tile_c: pl.Tile[[32], pl.FP32] = pl.sum(tile_a, axis=0)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
-                return result
-
-        ir_str = str(Program)
-        assert "tile.sum" in ir_str
-
-    def test_tile_sum_axis1(self):
-        """Test tile.sum operator - sum along axis 1 (row-wise)."""
-
-        @pl.program
-        class Program:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main(
-                self,
-                a: pl.Tensor[[128, 128], pl.FP32],
-                output: pl.Tensor[[128, 128], pl.FP32],
-            ) -> pl.Tensor[[128, 128], pl.FP32]:
-                tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
-                tile_c: pl.Tile[[32], pl.FP32] = pl.sum(tile_a, axis=1)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
-                return result
-
-        ir_str = str(Program)
-        assert "tile.sum" in ir_str
-
-    def test_tile_max_axis0(self):
-        """Test tile.max operator - max along axis 0 (column-wise)."""
-
-        @pl.program
-        class Program:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main(
-                self,
-                a: pl.Tensor[[128, 128], pl.FP32],
-                output: pl.Tensor[[128, 128], pl.FP32],
-            ) -> pl.Tensor[[128, 128], pl.FP32]:
-                tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
-                tile_c: pl.Tile[[32], pl.FP32] = pl.max(tile_a, axis=0)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
-                return result
-
-        ir_str = str(Program)
-        assert "tile.max" in ir_str
-
-    def test_tile_max_axis1(self):
-        """Test tile.max operator - max along axis 1 (row-wise)."""
-
-        @pl.program
-        class Program:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main(
-                self,
-                a: pl.Tensor[[128, 128], pl.FP32],
-                output: pl.Tensor[[128, 128], pl.FP32],
-            ) -> pl.Tensor[[128, 128], pl.FP32]:
-                tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
-                tile_c: pl.Tile[[32], pl.FP32] = pl.max(tile_a, axis=1)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
-                return result
-
-        ir_str = str(Program)
-        assert "tile.max" in ir_str
-
     def test_tile_row_max(self, ascend_backend, default_pass_manager):
         """Test tile.row_max operation."""
 
@@ -841,44 +765,6 @@ class TestTileReductionOps:
         ir_str = str(Program)
         assert "tile.col_argmin" in ir_str
 
-    def test_tile_min_axis0(self):
-        """Test tile.min operator - min along axis 0 (column-wise)."""
-
-        @pl.program
-        class Program:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main(
-                self,
-                a: pl.Tensor[[128, 128], pl.FP32],
-                output: pl.Tensor[[128, 128], pl.FP32],
-            ) -> pl.Tensor[[128, 128], pl.FP32]:
-                tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
-                tile_c: pl.Tile[[32], pl.FP32] = pl.min(tile_a, axis=0)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
-                return result
-
-        ir_str = str(Program)
-        assert "tile.min" in ir_str
-
-    def test_tile_min_axis1(self):
-        """Test tile.min operator - min along axis 1 (row-wise)."""
-
-        @pl.program
-        class Program:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main(
-                self,
-                a: pl.Tensor[[128, 128], pl.FP32],
-                output: pl.Tensor[[128, 128], pl.FP32],
-            ) -> pl.Tensor[[128, 128], pl.FP32]:
-                tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
-                tile_c: pl.Tile[[32], pl.FP32] = pl.min(tile_a, axis=1)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
-                return result
-
-        ir_str = str(Program)
-        assert "tile.min" in ir_str
-
     # ------------------------------------------------------------------
     # Issue #1401: reduction tile ops must inherit TileView.valid_shape
     # from their input along non-reduced dims. Without this, chains like
@@ -959,31 +845,6 @@ class TestTileReductionOps:
         valid_shape = result_type.tile_view.valid_shape
         assert isinstance(valid_shape[0], ir.ConstInt) and valid_shape[0].value == 1
         assert isinstance(valid_shape[1], ir.ConstInt) and valid_shape[1].value == 16
-
-    def test_tile_sum_axis_keepdim_inherits_input_valid_shape(self):
-        """tile.sum(axis=1, keepdim=True) must inherit valid_shape (issue #1401)."""
-        sliced = self._make_sliced_tile_with_valid_shape(valid_rows=4, valid_cols=32)
-        call = tile.sum(sliced, axis=1, keepdim=True)
-        result_type = call.type
-        assert isinstance(result_type, ir.TileType)
-        assert result_type.tile_view is not None
-        valid_shape = result_type.tile_view.valid_shape
-        # Output: [rows=4 (kept), 1 (reduced with keepdim)]
-        assert len(valid_shape) == 2
-        assert isinstance(valid_shape[0], ir.ConstInt) and valid_shape[0].value == 4
-        assert isinstance(valid_shape[1], ir.ConstInt) and valid_shape[1].value == 1
-
-    def test_tile_sum_axis_no_keepdim_inherits_input_valid_shape(self):
-        """tile.sum(axis=1, keepdim=False) drops the reduced dim; kept dim inherits valid_shape."""
-        sliced = self._make_sliced_tile_with_valid_shape(valid_rows=4, valid_cols=32)
-        call = tile.sum(sliced, axis=1, keepdim=False)
-        result_type = call.type
-        assert isinstance(result_type, ir.TileType)
-        assert result_type.tile_view is not None
-        valid_shape = result_type.tile_view.valid_shape
-        # Output: [rows=4 (kept)] — reduced dim is dropped entirely
-        assert len(valid_shape) == 1
-        assert isinstance(valid_shape[0], ir.ConstInt) and valid_shape[0].value == 4
 
 
 class TestTileBroadcastOps:

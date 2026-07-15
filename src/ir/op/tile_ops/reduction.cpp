@@ -11,23 +11,25 @@
 
 /**
  * @file reduction.cpp
- * @brief Reduction tile operations (Sum, Max, Min)
+ * @brief Reduction tile operations (row_* and col_* families)
  *
  * This file implements reduction operations for tile-level programming.
- * Reduction operations can reduce a TileType along specified axes.
+ * Reductions are direction-specific: the ``row_*`` family collapses the last
+ * axis (TROWSUM/TROWMAX/...) and the ``col_*`` family collapses axis 0
+ * (TCOLSUM/TCOLMAX/...), matching the direction-specific PTO intrinsics. There
+ * is deliberately no axis-parameterized reduction — the ISA has no instruction
+ * to lower one to.
  */
 
 #include <any>
 #include <cstdint>
 #include <memory>
 #include <optional>
-#include <set>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "pypto/core/dtype.h"
-#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
@@ -39,94 +41,6 @@
 
 namespace pypto {
 namespace ir {
-
-// Helper to get kwargs value with default (uses vector to preserve order)
-template <typename T>
-T GetKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs, const std::string& key,
-           const std::optional<T>& default_value = std::nullopt) {
-  for (const auto& [k, v] : kwargs) {
-    if (k == key) {
-      return AnyCast<T>(v, "kwarg key: " + key);
-    }
-  }
-  if (default_value) {
-    return *default_value;
-  }
-  throw ValueError("Missing kwarg: " + key);
-}
-
-TypePtr DeduceTileReductionType(const std::vector<ExprPtr>& args,
-                                const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                const std::string& op_name) {
-  // tile.sum and tile.max require 1 argument (tile) and 2 attributes (axis, keepdim)
-  CHECK(args.size() == 1) << "The operator " << op_name << " requires 1 argument, but got " << args.size();
-
-  // First argument must be TileType
-  auto tile_type = As<TileType>(args[0]->GetType());
-  CHECK(tile_type) << "The operator " << op_name << " requires first argument to be a TileType, but got "
-                   << args[0]->GetType()->TypeName();
-
-  // Get the input shape
-  const auto& input_shape = tile_type->shape_;
-  int64_t input_ndim = static_cast<int64_t>(input_shape.size());
-
-  // Determine which axes to reduce
-  std::set<int64_t> reduce_axes;
-
-  // Extract axis from kwargs (required)
-  int axis_value = GetKwarg<int>(kwargs, "axis");
-  if (axis_value < 0) {
-    // Negative axis: convert to positive
-    axis_value = static_cast<int>(input_ndim) + axis_value;
-  }
-  CHECK(axis_value >= 0 && static_cast<int64_t>(axis_value) < input_ndim)
-      << "The operator " << op_name << " axis " << axis_value << " is out of range for shape with "
-      << input_ndim << " dimensions";
-  reduce_axes.insert(static_cast<int64_t>(axis_value));
-
-  // Extract keepdim from kwargs (optional, default to false)
-  bool keepdim = GetKwarg<bool>(kwargs, "keepdim", false);
-
-  // If all axes are reduced and keepdim is false, return ScalarType
-  if (static_cast<int64_t>(reduce_axes.size()) == input_ndim && !keepdim) {
-    return std::make_shared<ScalarType>(tile_type->dtype_);
-  }
-
-  // Source of truth for valid_shape — falls back to physical shape when the
-  // input has no TileView populated (issue #1401).
-  const auto input_valid = GetValidShape(tile_type);
-
-  // Build output shape and valid_shape together: the reduction rule applies
-  // identically to both — physical dims drive the static shape, the input's
-  // valid extents drive the output's valid extents.
-  std::vector<ExprPtr> output_shape;
-  std::vector<ExprPtr> output_valid;
-  output_shape.reserve(input_ndim);
-  output_valid.reserve(input_ndim);
-  for (int64_t i = 0; i < input_ndim; ++i) {
-    const bool is_reduced = reduce_axes.find(i) != reduce_axes.end();
-    if (is_reduced) {
-      if (keepdim) {
-        output_shape.push_back(std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown()));
-        output_valid.push_back(std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown()));
-      }
-    } else {
-      output_shape.push_back(input_shape[i]);
-      output_valid.push_back(input_valid[i]);
-    }
-  }
-
-  // If output shape is empty, return ScalarType
-  if (output_shape.empty()) {
-    return std::make_shared<ScalarType>(tile_type->dtype_);
-  }
-
-  // Return TileType with reduced shape
-  TileView tile_view;
-  tile_view.valid_shape = std::move(output_valid);
-  return std::make_shared<TileType>(std::move(output_shape), tile_type->dtype_, std::nullopt,
-                                    std::move(tile_view));
-}
 
 // Type deduction for row reduction operations (reduces along last axis with keepdim=True).
 // `out_dtype` overrides the output element type — used by argmax/argmin, whose index output
@@ -208,51 +122,7 @@ TypePtr DeduceTileColReductionType(const std::vector<ExprPtr>& args,
 }
 
 // ============================================================================
-// Registration Function for Block Reduction Operations
-// ============================================================================
-
-REGISTER_OP("tile.sum")
-    .set_op_category("TileOp")
-    .set_description("Sum reduction of a tile along specified axis")
-    .add_argument("tile", "Input tile (TileType)")
-    .add_argument("tmp_tile", "Temporary tile (TileType)")
-    .set_attr<int>("axis")
-    .set_attr<bool>("keepdim")
-    .set_input_memory(0, MemorySpace::Vec)
-    .set_input_memory(1, MemorySpace::Vec)
-    .set_output_memory(MemorySpace::Vec)
-    .f_deduce_type([](const std::vector<ExprPtr>& args,
-                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileReductionType(args, kwargs, "tile.sum");
-    });
-
-REGISTER_OP("tile.max")
-    .set_op_category("TileOp")
-    .set_description("Max reduction of a tile along specified axis")
-    .add_argument("tile", "Input tile (TileType)")
-    .set_attr<int>("axis")
-    .set_attr<bool>("keepdim")
-    .set_input_memory(0, MemorySpace::Vec)
-    .set_output_memory(MemorySpace::Vec)
-    .f_deduce_type([](const std::vector<ExprPtr>& args,
-                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileReductionType(args, kwargs, "tile.max");
-    });
-REGISTER_OP("tile.min")
-    .set_op_category("TileOp")
-    .set_description("Min reduction of a tile along specified axis")
-    .add_argument("tile", "Input tile (TileType)")
-    .set_attr<int>("axis")
-    .set_attr<bool>("keepdim")
-    .set_input_memory(0, MemorySpace::Vec)
-    .set_output_memory(MemorySpace::Vec)
-    .f_deduce_type([](const std::vector<ExprPtr>& args,
-                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileReductionType(args, kwargs, "tile.min");
-    });
-
-// ============================================================================
-// Row Reduction Operations (TROWSUM, TROWMAX, TROWMIN)
+// Row Reduction Operations (TROWSUM, TROWMAX, TROWMIN, TROWPROD)
 // ============================================================================
 
 REGISTER_OP("tile.row_sum")
@@ -320,7 +190,7 @@ REGISTER_OP("tile.row_prod")
     });
 
 // ============================================================================
-// Column Reduction Operations (TCOLSUM, TCOLMAX, TCOLMIN)
+// Column Reduction Operations (TCOLSUM, TCOLMAX, TCOLMIN, TCOLPROD)
 // ============================================================================
 
 REGISTER_OP("tile.col_sum")

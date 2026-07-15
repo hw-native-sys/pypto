@@ -24,7 +24,7 @@ import re
 import pypto.language as pl
 import pytest
 from pypto import DataType, backend, codegen, ir
-from pypto.backend import BackendType
+from pypto.backend import BackendType, pto_backend
 from pypto.backend.pto_backend import (
     _emit_group_output,
     _format_error_report,
@@ -1619,8 +1619,15 @@ class TestGenerateSkipPtoas:
             assert not key.endswith(".cpp"), f"Unexpected .cpp extension: {key}"
 
 
-def test_compile_writes_orchestration_on_partial_codegen_failure(tmp_path):
-    """compile() should preserve generated files when some InCore functions fail."""
+def test_compile_writes_orchestration_on_partial_codegen_failure(tmp_path, monkeypatch):
+    """compile() should preserve generated files when some InCore functions fail.
+
+    The failure is injected at the per-kernel emit seam rather than provoked by a
+    real kernel body: every DSL-reachable tile op lowers, so no source-level
+    kernel reliably fails codegen. Injecting here still exercises the real
+    per-function error collection, the error report, and the PartialCodegenError
+    path that writes the kernels which did succeed.
+    """
 
     @pl.program
     class PartialFailureProgram:
@@ -1638,11 +1645,10 @@ def test_compile_writes_orchestration_on_partial_codegen_failure(tmp_path):
         def bad_kernel(
             self,
             a: pl.Tensor[[16, 16], pl.FP32],
-            output: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
-        ) -> pl.Tensor[[16, 1], pl.FP32]:
+            output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
             tile = pl.load(a, offsets=[0, 0], shapes=[16, 16])
-            result = pl.tile.sum(tile, axis=1)
-            out = pl.store(result, offsets=[0, 0], output_tensor=output)
+            out = pl.store(tile, offsets=[0, 0], output_tensor=output)
             return out
 
         @pl.function(type=pl.FunctionType.Orchestration)
@@ -1650,6 +1656,15 @@ def test_compile_writes_orchestration_on_partial_codegen_failure(tmp_path):
             out = pl.create_tensor([16, 16], dtype=pl.FP32)
             out = self.good_kernel(a, out)
             return out
+
+    real_emit = pto_backend._emit_single_function_output
+
+    def emit_or_fail(result_files, func, *args, **kwargs):
+        if func.name == "bad_kernel":
+            raise RuntimeError("bad_kernel: injected codegen failure")
+        return real_emit(result_files, func, *args, **kwargs)
+
+    monkeypatch.setattr(pto_backend, "_emit_single_function_output", emit_or_fail)
 
     output_dir = tmp_path / "partial_codegen"
     with pytest.raises(RuntimeError, match="bad_kernel"):

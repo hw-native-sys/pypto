@@ -45,9 +45,7 @@ int SplitDimension(SplitMode mode);
  * over the split axis produces a partial result on each lane — a miscompile.
  * Recognizes the tile reduce ops:
  *   - ``tile.row_*`` (sum/max/min/prod) → reduces the last axis;
- *   - ``tile.col_*`` (sum/max/min/prod) → reduces axis 0;
- *   - ``tile.sum`` / ``tile.max`` / ``tile.min`` → reduces the ``axis`` kwarg
- *     (default ``-1``, normalized against the input rank).
+ *   - ``tile.col_*`` (sum/max/min/prod) → reduces axis 0.
  *
  * Returns ``true`` iff the reduced axis equals ``split_dim``. Non-reduce calls
  * (and Submits, which carry a GlobalVar callee and no ``op_``) return ``false``.

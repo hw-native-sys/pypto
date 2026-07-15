@@ -174,9 +174,8 @@ Transfer data between memory hierarchy levels.
 | `row_argmin` | `(tile: Tile, tmp_tile: Tile) -> Tile` | Row-wise argmin, column index of per-row min (requires tmp buffer, int32 output) |
 | `col_argmax` | `(tile: Tile, tmp_tile: Tile) -> Tile` | Column-wise argmax, row index of per-column max (requires tmp buffer, int32 output) |
 | `col_argmin` | `(tile: Tile, tmp_tile: Tile) -> Tile` | Column-wise argmin, row index of per-column min (requires tmp buffer, int32 output) |
-| `sum` | `(tile: Tile, axis: int, keepdim: bool = False) -> Tile` | Sum along axis |
-| `max` | `(tile: Tile \| Scalar, axis: int \| Scalar = 0, keepdim: bool = False) -> Tile \| Scalar` | Max along axis |
-| `min` | `(tile: Tile \| Scalar, axis: int \| Scalar = 0, keepdim: bool = False) -> Tile \| Scalar` | Min along axis |
+| `max` | `(lhs: Scalar \| int \| Expr, rhs: Scalar \| int \| Expr) -> Scalar` | Max of two **scalars** (not a tile reduction — use `row_max` / `col_max`) |
+| `min` | `(lhs: Scalar \| int \| Expr, rhs: Scalar \| int \| Expr) -> Scalar` | Min of two **scalars** (not a tile reduction — use `row_min` / `col_min`) |
 
 ## Linear Algebra (`pl.tile.*`)
 

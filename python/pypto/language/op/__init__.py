@@ -104,7 +104,6 @@ from .tile_ops import (
     store,
     subc,
     subsc,
-    sum,
     xor,
     xors,
 )
@@ -195,7 +194,6 @@ __all__ = [
     "part_min",
     "maximum",
     "min",
-    "sum",
     "max",
     "exp",
     "log",

@@ -274,7 +274,7 @@ with ib.function("tensor_example") as f:
 | - | `tile.transpose` | 交换 tile 的两个轴 |
 | - | `tile.set_validshape` | 更新 valid_shape 元数据，不搬移数据 |
 | - | `tile.ci` | 生成连续整数序列（升序 start+k 或降序 start-k）；dtype ∈ {INT16, INT32}；最内维 != 1 |
-| **规约** | `tile.sum` | 沿轴规约（axis, keepdim） |
+| **规约** | `tile.row_*` / `tile.col_*` | 方向特定的规约（`row_sum`/`row_max`/`row_min`/`row_prod` 折叠最后一轴；`col_*` 折叠第 0 轴）。不存在以 axis 参数化的规约算子 —— ISA 只提供方向特定的指令（`pto.trowsum`、`pto.tcolsum` 等） |
 | **散布** | `tile.scatter` | 按行索引把 `src` 散布到 `dst`（`pto.tscatter` 索引形式；DPS：`dst` 为 in/out，结果别名为 `dst`）。`src` / `dst` dtype ∈ {I8, I16, I32, FP16, FP32, BF16}；`indexes` dtype ∈ {I16, I32}；元素宽度匹配规则：4 字节 dst ↔ INT32，2 字节 dst ↔ INT16，1 字节 dst ↔ INT16。 |
 | - | `tile.scatter_mask` | 按掩码模式把 `src` 行写入 `dst` 中由掩码选中的列（DPS：`dst` 为 in/out）。这是 PyPTO codegen 层形式，下降为 `pto.tscatter` 掩码发射 —— **并非**独立的 pto-isa 指令（与 `tile.gather_mask` 不同）。掩码语义见[掩码模式](#掩码模式)。 |
 
@@ -313,7 +313,9 @@ with ib.function("tile_computation") as f:
     tile_b = ib.let("tile_b", tile.load(input_b, [0, 0], [32, 128]))
     tile_mul = ib.let("tile_mul", tile.mul(tile_a, tile_b))
     tile_sqrt = ib.let("tile_sqrt", tile.sqrt(tile_mul))
-    tile_sum = ib.let("tile_sum", tile.sum(tile_sqrt, axis=1, keepdim=True))
+    # row_sum 折叠最后一轴 -> [32, 1]；需要一块 scratch tile
+    tmp_tile = ib.let("tmp_tile", tile.create([32, 128], DataType.FP32))
+    tile_sum = ib.let("tile_sum", tile.row_sum(tile_sqrt, tmp_tile))
     result = ib.let("result", tile.store(tile_sum, [0, 0], output))
     ib.return_stmt(result)
 ```

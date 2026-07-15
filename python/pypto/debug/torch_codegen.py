@@ -661,17 +661,6 @@ def _handle_cmp(a: list[str], kw: dict[str, Any]) -> str:
     return f"({a[0]} {op_str} {a[1]})"
 
 
-def _handle_reduction(torch_fn: str) -> OpHandler:
-    def _handler(a: list[str], kw: dict[str, Any]) -> str:
-        axis = kw.get("axis")
-        keepdim = kw.get("keepdim", False)
-        if axis is not None:
-            return f"{a[0]}.{torch_fn}(dim={axis}, keepdim={keepdim})"
-        return f"{a[0]}.{torch_fn}()"
-
-    return _handler
-
-
 def _handle_slice(a: list[str], _kw: dict[str, Any]) -> str:
     # args: [tensor, shapes, offsets] or [tensor, shapes, offsets, valid_shapes]
     if len(a) >= 4:
@@ -1028,11 +1017,6 @@ def _register_ops() -> None:  # noqa: PLR0915
     m["tile.gemv"] = lambda a, _kw: f"torch.matmul({a[0]}, {a[1]}).float()"
     m["tile.gemv_acc"] = lambda a, _kw: f"({a[0]} + torch.matmul({a[1]}, {a[2]}).float())"
     m["tile.gemv_bias"] = lambda a, _kw: f"(torch.matmul({a[0]}, {a[1]}).float() + {a[2]})"
-
-    # tile reductions with axis kwarg
-    m["tile.sum"] = _handle_reduction("sum")
-    m["tile.max"] = _handle_reduction("amax")
-    m["tile.min"] = _handle_reduction("amin")
 
     # tile ternary ops (third arg is workspace/tmp, ignore it)
     m["tile.xor"] = lambda a, _kw: f"torch.bitwise_xor({a[0]}, {a[1]})"

@@ -280,7 +280,7 @@ with ib.function("tensor_example") as f:
 | - | `tile.transpose` | Swap two axes of a tile |
 | - | `tile.set_validshape` | Update valid-shape metadata without data movement |
 | - | `tile.ci` | Generate contiguous integer sequence (start + k / start - k); dtype ∈ {INT16, INT32}; innermost dim != 1 |
-| **Reduction** | `tile.sum` | Reduction along axis (axis, keepdim) |
+| **Reduction** | `tile.row_*` / `tile.col_*` | Direction-specific reduction (`row_sum`/`row_max`/`row_min`/`row_prod` collapse the last axis; `col_*` collapse axis 0). There is no axis-parameterized reduction — the ISA has only direction-specific intrinsics (`pto.trowsum`, `pto.tcolsum`, …) |
 | **Scatter** | `tile.scatter` | Row-scatter `src` into `dst` at per-row indices (`pto.tscatter` index form; DPS — `dst` is in/out, the result aliases `dst`). `src`/`dst` dtype ∈ {I8, I16, I32, FP16, FP32, BF16}; `indexes` dtype ∈ {I16, I32}; element-size matching rule: 4-byte dst ↔ INT32, 2-byte dst ↔ INT16, 1-byte dst ↔ INT16. |
 | - | `tile.scatter_mask` | Mask-pattern row-scatter: write each `src` row into the mask-marked columns of `dst` (DPS — `dst` is in/out). A PyPTO codegen form lowered to a `pto.tscatter` mask emission — **not** a distinct pto-isa instruction (unlike `tile.gather_mask`). See [Mask patterns](#mask-patterns). |
 
@@ -319,7 +319,9 @@ with ib.function("tile_computation") as f:
     tile_b = ib.let("tile_b", tile.load(input_b, [0, 0], [32, 128]))
     tile_mul = ib.let("tile_mul", tile.mul(tile_a, tile_b))
     tile_sqrt = ib.let("tile_sqrt", tile.sqrt(tile_mul))
-    tile_sum = ib.let("tile_sum", tile.sum(tile_sqrt, axis=1, keepdim=True))
+    # row_sum collapses the last axis -> [32, 1]; it needs a scratch tile
+    tmp_tile = ib.let("tmp_tile", tile.create([32, 128], DataType.FP32))
+    tile_sum = ib.let("tile_sum", tile.row_sum(tile_sqrt, tmp_tile))
     result = ib.let("result", tile.store(tile_sum, [0, 0], output))
     ib.return_stmt(result)
 ```

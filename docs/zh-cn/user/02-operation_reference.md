@@ -169,9 +169,8 @@
 | `row_argmin` | `(tile: Tile, tmp_tile: Tile) -> Tile` | 行 argmin，每行最小值的列索引（需要临时缓冲区，int32 输出） |
 | `col_argmax` | `(tile: Tile, tmp_tile: Tile) -> Tile` | 列 argmax，每列最大值的行索引（需要临时缓冲区，int32 输出） |
 | `col_argmin` | `(tile: Tile, tmp_tile: Tile) -> Tile` | 列 argmin，每列最小值的行索引（需要临时缓冲区，int32 输出） |
-| `sum` | `(tile: Tile, axis: int, keepdim: bool = False) -> Tile` | 沿轴求和 |
-| `max` | `(tile: Tile \| Scalar, axis: int \| Scalar = 0, keepdim: bool = False) -> Tile \| Scalar` | 沿轴取最大值 |
-| `min` | `(tile: Tile \| Scalar, axis: int \| Scalar = 0, keepdim: bool = False) -> Tile \| Scalar` | 沿轴取最小值 |
+| `max` | `(lhs: Scalar \| int \| Expr, rhs: Scalar \| int \| Expr) -> Scalar` | 两个**标量**取最大值（不是 tile 规约 —— 请用 `row_max` / `col_max`） |
+| `min` | `(lhs: Scalar \| int \| Expr, rhs: Scalar \| int \| Expr) -> Scalar` | 两个**标量**取最小值（不是 tile 规约 —— 请用 `row_min` / `col_min`） |
 
 ## 线性代数（`pl.tile.*`）
 

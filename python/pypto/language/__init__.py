@@ -152,7 +152,6 @@ from .op.tile_ops import (
     store,
     subc,
     subsc,
-    sum,
     xor,
     xors,
 )
@@ -381,7 +380,6 @@ __all__ = [
     "gemv_bias",
     "minimum",
     "min",
-    "sum",
     "max",
     "cmp",
     "cmps",

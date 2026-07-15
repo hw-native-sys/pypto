@@ -326,67 +326,6 @@ class TestFlattenTileNdTo2DTwoInput:
 
 
 # ----------------------------------------------------------------------------
-# Reduce ops along the last axis on ND tiles -> 2D
-# ----------------------------------------------------------------------------
-
-
-class TestFlattenTileNdTo2DReduceOps:
-    """Reduce ops along the last axis are remapped to axis=1 after flatten."""
-
-    @pytest.mark.parametrize(
-        "orig_shape, flat_shape, out_shape, reduce_op",
-        [
-            ([2, 3, 4], [6, 4], [2, 3, 1], tile_ops.sum),
-            ([2, 4, 8], [8, 8], [2, 4, 1], tile_ops.max),
-        ],
-        ids=["sum_3d", "max_3d"],
-    )
-    def test_reduce_last_axis(self, orig_shape, flat_shape, out_shape, reduce_op):
-        before_axis = len(orig_shape) - 1
-        Before = _build_before_nd(
-            [("x", orig_shape)],
-            out_shape,
-            DataType.FP32,
-            lambda _ib, ts: reduce_op(ts[0], axis=before_axis, keepdim=True),
-        )
-        Expected = _build_expected_2d(
-            [("x", orig_shape)],
-            out_shape,
-            [flat_shape],
-            DataType.FP32,
-            lambda _ib, ts: reduce_op(ts[0], axis=1, keepdim=True),
-        )
-        After = passes.flatten_tile_nd_to_2d()(Before)
-        ir.assert_structural_equal(After, Expected)
-
-    @pytest.mark.parametrize(
-        "orig_shape, flat_shape, out_shape, reduce_op",
-        [
-            ([2, 3, 4], [6, 4], [2, 3, 1], tile_ops.sum),
-            ([2, 4, 8], [8, 8], [2, 4, 1], tile_ops.max),
-        ],
-        ids=["sum_3d_neg", "max_3d_neg"],
-    )
-    def test_reduce_negative_last_axis(self, orig_shape, flat_shape, out_shape, reduce_op):
-        """Python-style axis=-1 selects the last axis and must not be rejected."""
-        Before = _build_before_nd(
-            [("x", orig_shape)],
-            out_shape,
-            DataType.FP32,
-            lambda _ib, ts: reduce_op(ts[0], axis=-1, keepdim=True),
-        )
-        Expected = _build_expected_2d(
-            [("x", orig_shape)],
-            out_shape,
-            [flat_shape],
-            DataType.FP32,
-            lambda _ib, ts: reduce_op(ts[0], axis=1, keepdim=True),
-        )
-        After = passes.flatten_tile_nd_to_2d()(Before)
-        ir.assert_structural_equal(After, Expected)
-
-
-# ----------------------------------------------------------------------------
 # Programs that should be left unchanged by the pass
 # ----------------------------------------------------------------------------
 
@@ -457,25 +396,6 @@ class TestFlattenTileNdTo2DUnchanged:
 
 class TestFlattenTileNdTo2DErrors:
     """Pass-level errors surface as ``ValueError`` from C++ ``CHECK`` macros."""
-
-    @pytest.mark.parametrize(
-        "orig_shape, out_shape, reduce_op, axis",
-        [
-            ([2, 3, 4], [1, 3, 4], tile_ops.sum, 0),
-            ([2, 3, 4], [2, 1, 4], tile_ops.min, 1),
-        ],
-        ids=["sum_axis_0", "min_axis_1"],
-    )
-    def test_reduce_non_last_axis_error(self, orig_shape, out_shape, reduce_op, axis):
-        """tile reduce ops must reduce the last axis on >2D tiles."""
-        Before = _build_before_nd(
-            [("x", orig_shape)],
-            out_shape,
-            DataType.FP32,
-            lambda _ib, ts: reduce_op(ts[0], axis=axis, keepdim=True),
-        )
-        with pytest.raises(ValueError, match="must reduce along the last axis"):
-            passes.flatten_tile_nd_to_2d()(Before)
 
     def test_dynamic_shape_error(self):
         """Dynamic (non-ConstInt) dimension on a >2D tile -> actionable CHECK error.
@@ -697,58 +617,6 @@ class TestFlattenTileNdTo2DChainedOps:
             @pl.function
             def main(self, x: pl.Tensor[[2, 3, 4], pl.FP32]) -> pl.Tensor[[2, 3, 4], pl.FP32]:
                 out_0 = pl.create_tensor([2, 3, 4], dtype=pl.FP32)
-                y = self.main_incore_0(x, out_0)
-                return y
-
-        After = passes.flatten_tile_nd_to_2d()(Before)
-        ir.assert_structural_equal(After, Expected)
-
-    def test_sum_then_add_3d(self):
-        """``load -> sum(keepdim=True, last axis) -> add -> store`` on a 3D tile."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[2, 3, 4], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[2, 3, 1], pl.FP32]],
-            ) -> pl.Tensor[[2, 3, 1], pl.FP32]:
-                x_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.tile.load(x, [0, 0, 0], [2, 3, 4])
-                s_tile: pl.Tile[[2, 3, 1], pl.FP32] = pl.tile.sum(x_tile, axis=2, keepdim=True)
-                r_tile: pl.Tile[[2, 3, 1], pl.FP32] = pl.tile.add(s_tile, s_tile)
-                out_0: pl.Tensor[[2, 3, 1], pl.FP32] = pl.tile.store(r_tile, [0, 0, 0], out_0)
-                return out_0
-
-            @pl.function
-            def main(self, x: pl.Tensor[[2, 3, 4], pl.FP32]) -> pl.Tensor[[2, 3, 1], pl.FP32]:
-                out_0: pl.Tensor[[2, 3, 1], pl.FP32] = pl.create_tensor([2, 3, 1], dtype=pl.FP32)
-                y: pl.Tensor[[2, 3, 1], pl.FP32] = self.main_incore_0(x, out_0)
-                return y
-
-        @pl.program
-        class Expected:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[2, 3, 4], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[2, 3, 1], pl.FP32]],
-            ) -> pl.Tensor[[2, 3, 1], pl.FP32]:
-                x_tile: pl.Tile[[6, 4], pl.FP32, pl.Mem.Vec] = pl.tile.load(
-                    x, [0, 0, 0], [2, 3, 4], [2, 3, 4], target_memory=pl.Mem.Vec
-                )
-                s_tile: pl.Tile[[6, 1], pl.FP32, pl.Mem.Vec, pl.TileView(blayout=pl.TileLayout.row_major)] = (
-                    pl.tile.sum(x_tile, axis=1, keepdim=True)
-                )
-                r_tile: pl.Tile[[6, 1], pl.FP32, pl.Mem.Vec, pl.TileView(blayout=pl.TileLayout.row_major)] = (
-                    pl.tile.add(s_tile, s_tile)
-                )
-                out_0_1 = pl.tile.store(r_tile, [0, 0, 0], out_0, [2, 3, 1])
-                return out_0_1
-
-            @pl.function
-            def main(self, x: pl.Tensor[[2, 3, 4], pl.FP32]) -> pl.Tensor[[2, 3, 1], pl.FP32]:
-                out_0 = pl.create_tensor([2, 3, 1], dtype=pl.FP32)
                 y = self.main_incore_0(x, out_0)
                 return y
 

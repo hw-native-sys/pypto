@@ -56,15 +56,17 @@ bool IsReduceOnSplitAxis(const CallPtr& call, int split_dim) {
   // SubmitPtr handling needed — see pass-submit-awareness.md).
   if (!call->op_) return false;
 
-  auto input_tile_type = [&]() -> std::shared_ptr<const TileType> {
-    if (call->args_.empty()) return nullptr;
-    return std::dynamic_pointer_cast<const TileType>(call->args_[0]->GetType());
-  };
-
+  // Row reductions collapse the last axis. Splitting on that axis
+  // (SplitMode::LeftRight for a 2D tile) would leave each lane with a partial
+  // reduction. Reduce ops always take the tile first, so a missing / non-Tile
+  // arg0 can only be malformed IR — assume the 2D last axis.
   if (IsOp(call, "tile.row_sum") || IsOp(call, "tile.row_max") || IsOp(call, "tile.row_min") ||
       IsOp(call, "tile.row_prod") || IsOp(call, "tile.row_argmax") || IsOp(call, "tile.row_argmin")) {
-    auto tt = input_tile_type();
-    int last_axis = tt ? static_cast<int>(tt->shape_.size()) - 1 : 1;
+    std::shared_ptr<const TileType> input_tile;
+    if (!call->args_.empty()) {
+      input_tile = std::dynamic_pointer_cast<const TileType>(call->args_[0]->GetType());
+    }
+    const int last_axis = input_tile ? static_cast<int>(input_tile->shape_.size()) - 1 : 1;
     return split_dim == last_axis;
   }
   // Column reductions collapse the first axis (axis 0). Splitting on that axis
@@ -72,14 +74,6 @@ bool IsReduceOnSplitAxis(const CallPtr& call, int split_dim) {
   if (IsOp(call, "tile.col_sum") || IsOp(call, "tile.col_max") || IsOp(call, "tile.col_min") ||
       IsOp(call, "tile.col_prod") || IsOp(call, "tile.col_argmax") || IsOp(call, "tile.col_argmin")) {
     return split_dim == 0;
-  }
-  if (IsOp(call, "tile.sum") || IsOp(call, "tile.max") || IsOp(call, "tile.min")) {
-    int axis = call->GetKwarg<int>("axis", -1);
-    auto tt = input_tile_type();
-    if (axis < 0 && tt) {
-      axis = static_cast<int>(tt->shape_.size()) + axis;
-    }
-    return axis == split_dim;
   }
   return false;
 }

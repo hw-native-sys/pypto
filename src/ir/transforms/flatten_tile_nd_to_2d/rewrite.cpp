@@ -789,38 +789,6 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       continue;
     }
 
-    // ---- tile.sum/tile.max/tile.min: remap axis to 1 (last axis of 2D) ----
-    if (IsOp(call, "tile.sum") || IsOp(call, "tile.max") || IsOp(call, "tile.min")) {
-      if (!call->args_.empty()) {
-        auto input_tile = As<TileType>(call->args_[0]->GetType());
-        if (IsNdTile(input_tile)) {
-          // Substitute args
-          std::vector<ExprPtr> new_args;
-          new_args.reserve(call->args_.size());
-          for (const auto& arg : call->args_) {
-            new_args.push_back(Substitute(arg, ctx.var_map));
-          }
-
-          // Update axis kwarg to 1 (last axis of 2D tile)
-          std::vector<std::pair<std::string, std::any>> new_kwargs;
-          for (const auto& [key, val] : call->kwargs_) {
-            if (key == "axis") {
-              new_kwargs.emplace_back("axis", 1);
-            } else {
-              new_kwargs.emplace_back(key, val);
-            }
-          }
-
-          auto new_call = op_registry.Create(op_name, new_args, new_kwargs, span);
-          auto new_var =
-              std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
-          result.push_back(std::make_shared<AssignStmt>(new_var, new_call, assign->span_));
-          ctx.Insert(assign->var_, new_var);
-          continue;
-        }
-      }
-    }
-
     // ---- tile.batch_matmul: delegate to LowerBatchMatmul ----
     if (IsOp(call, "tile.batch_matmul")) {
       auto lowering = LowerBatchMatmul(assign, call, stmts, stmt_index, ctx, op_registry, span);

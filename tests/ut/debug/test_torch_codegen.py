@@ -364,18 +364,6 @@ def test_tile_cmp():
     assert "(a < b)" in code
 
 
-def test_tile_reduction_with_axis():
-    """tile.sum with axis kwarg should emit .sum(dim=axis)."""
-    a = _tile_var("a", [64, 128])
-    out = _tile_var("out", [64, 1])
-
-    call = _op_call("tile.sum", [a], {"axis": -1, "keepdim": True})
-    assign = ir.AssignStmt(out, call, _span())
-    func = _simple_function("f", [a], assign)
-    code = torch_codegen(func)
-    assert ".sum(dim=-1, keepdim=True)" in code
-
-
 def test_tile_get_block_idx():
     """tile.get_block_idx should emit 0."""
     out = _scalar("idx", DataType.UINT64)

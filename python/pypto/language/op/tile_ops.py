@@ -105,7 +105,6 @@ __all__ = [
     "minimum",
     "cmp",
     "cmps",
-    "sum",
     "max",
     "min",
     "slice",
@@ -261,41 +260,19 @@ def _normalize_intlike(seq: Sequence[IntLike]) -> list[int | Expr]:
 def _scalar_operand_to_expr(value: int | Scalar | Expr) -> Expr:
     """Coerce a scalar-binary operand to an ``Expr``.
 
-    Used by the scalar-pair branches of ``tile.min`` / ``tile.max``: ``Scalar``
-    is unwrapped to its inner ``Expr``, raw ``Expr`` is forwarded as-is, and a
-    bare ``int`` is materialized as ``ConstInt(.., INDEX)`` with the span
-    pinned by the parser if any (so error messages and dumps point at the
-    user's source line, not this wrapper). ``INDEX`` matches the dtype the
-    parser uses for plain int literals, so round-tripped programs don't
-    sprout spurious casts on otherwise-equivalent constants.
+    Used by ``min`` / ``max``: ``Scalar`` is unwrapped to its inner ``Expr``, raw
+    ``Expr`` is forwarded as-is, and a bare ``int`` is materialized as
+    ``ConstInt(.., INDEX)`` with the span pinned by the parser if any (so error
+    messages and dumps point at the user's source line, not this wrapper).
+    ``INDEX`` matches the dtype the parser uses for plain int literals, so
+    round-tripped programs don't sprout spurious casts on otherwise-equivalent
+    constants.
     """
     if isinstance(value, Scalar):
         return value.unwrap()
     if isinstance(value, Expr):
         return value
     return _ir_core.ConstInt(value, DataType.INDEX, _get_span_or_capture())
-
-
-def _axis_to_int(axis: int | Scalar | Expr) -> int:
-    """Coerce a compile-time axis argument to a Python ``int``.
-
-    The parser passes integer literals through as raw ``ConstInt`` (to
-    preserve dtype) — accept that shape and unwrap. Direct callers can
-    still pass a bare ``int``.
-    """
-    if isinstance(axis, bool):  # bool is an int subclass; reject explicitly
-        raise TypeError(f"axis must be int, got bool ({axis!r})")
-    if isinstance(axis, int):
-        return axis
-    if isinstance(axis, _ir_core.ConstInt):
-        return int(axis.value)
-    if isinstance(axis, Scalar):
-        inner = axis.unwrap()
-        if isinstance(inner, _ir_core.ConstInt):
-            return int(inner.value)
-    raise TypeError(
-        f"axis must be a compile-time int (or ConstInt/Scalar wrapping one), got {type(axis).__name__}"
-    )
 
 
 def create(
@@ -1664,79 +1641,36 @@ def cmps(lhs: Tile, rhs: int | float | Expr | Scalar, cmp_type: int = 0) -> Tile
     return Tile(expr=call_expr)
 
 
-def sum(tile: Tile, axis: int, keepdim: bool = False) -> Tile:
-    """Sum reduction along specified axis.
+def max(lhs: Scalar | int | Expr, rhs: Scalar | int | Expr) -> Scalar:
+    """Scalar max of two values.
+
+    Tile reductions are direction-specific — use :func:`row_max` (collapses the
+    last axis) or :func:`col_max` (collapses axis 0).
 
     Args:
-        tile: Input tile
-        axis: Reduction axis (0 for rows, 1 for columns, -1 for last)
-        keepdim: Whether to keep the reduced dimension as 1
+        lhs: First scalar operand
+        rhs: Second scalar operand
 
     Returns:
-        Tile wrapping the sum operation
+        Scalar wrapping the max operation
     """
-    call_expr = _ir_ops.sum(tile.unwrap(), _axis_to_int(axis), keepdim)
-    return Tile(expr=call_expr)
+    return Scalar(expr=_ir_core.max_(_scalar_operand_to_expr(lhs), _scalar_operand_to_expr(rhs)))
 
 
-@overload
-def max(tile: Tile, axis: int, keepdim: bool = False) -> Tile: ...
+def min(lhs: Scalar | int | Expr, rhs: Scalar | int | Expr) -> Scalar:
+    """Scalar min of two values.
 
-
-@overload
-def max(tile: Scalar, axis: Scalar | int, keepdim: bool = False) -> Scalar: ...
-
-
-def max(tile: Tile | Scalar, axis: int | Scalar | Expr = 0, keepdim: bool = False) -> Tile | Scalar:
-    """Max reduction along specified axis, or scalar max of two values.
+    Tile reductions are direction-specific — use :func:`row_min` (collapses the
+    last axis) or :func:`col_min` (collapses axis 0).
 
     Args:
-        tile: Input tile or first scalar operand
-        axis: Reduction axis (for tiles) or second scalar operand
-        keepdim: Whether to keep the reduced dimension as 1 (tiles only)
+        lhs: First scalar operand
+        rhs: Second scalar operand
 
     Returns:
-        Tile or Scalar wrapping the max operation
+        Scalar wrapping the min operation
     """
-    if isinstance(tile, Scalar):
-        return Scalar(expr=_ir_core.max_(tile.unwrap(), _scalar_operand_to_expr(axis)))
-    call_expr = _ir_ops.max(tile.unwrap(), _axis_to_int(axis), keepdim)
-    return Tile(expr=call_expr)
-
-
-@overload
-def min(tile: Tile, axis: int, keepdim: bool = False) -> Tile: ...
-
-
-@overload
-def min(tile: Scalar, axis: Scalar | int, keepdim: bool = False) -> Scalar: ...
-
-
-@overload
-def min(tile: int, axis: Scalar | int, keepdim: bool = False) -> Scalar: ...
-
-
-def min(
-    tile: Tile | Scalar | int | Expr,
-    axis: int | Scalar | Expr = 0,
-    keepdim: bool = False,
-) -> Tile | Scalar:
-    """Min reduction along specified axis, or scalar min of two values.
-
-    Args:
-        tile: Input tile or first scalar operand
-        axis: Reduction axis (for tiles) or second scalar operand
-        keepdim: Whether to keep the reduced dimension as 1 (tiles only)
-
-    Returns:
-        Tile or Scalar wrapping the min operation
-    """
-    if isinstance(tile, (Scalar, int, Expr)):
-        lhs = _scalar_operand_to_expr(tile)
-        rhs = _scalar_operand_to_expr(axis)
-        return Scalar(expr=_ir_core.min_(lhs, rhs))
-    call_expr = _ir_ops.min(tile.unwrap(), _axis_to_int(axis), keepdim)
-    return Tile(expr=call_expr)
+    return Scalar(expr=_ir_core.min_(_scalar_operand_to_expr(lhs), _scalar_operand_to_expr(rhs)))
 
 
 def slice(

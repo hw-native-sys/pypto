@@ -80,26 +80,6 @@ class PreconditionAnalysis : public IRVisitor {
         CHECK(!IsNdTile(input_tile)) << "FlattenTileNdTo2D: " << name << " is not supported on >2D tiles";
       }
     }
-
-    if (IsOp(call, "tile.sum") || IsOp(call, "tile.max") || IsOp(call, "tile.min")) {
-      if (!call->args_.empty()) {
-        auto input_tile = As<TileType>(call->args_[0]->GetType());
-        if (IsNdTile(input_tile)) {
-          int axis = call->GetKwarg<int>("axis", -1);
-          int ndim = static_cast<int>(input_tile->shape_.size());
-          // Normalize Python-style negative axes (e.g. axis=-1 selects the last axis) so a
-          // valid last-axis reduction on a >2D tile is not rejected.
-          if (axis < 0) axis += ndim;
-          int last_axis = ndim - 1;
-          CHECK(axis == last_axis) << "FlattenTileNdTo2D: tile reduce op '" << name
-                                   << "' must reduce along the last axis "
-                                   << "(axis=" << last_axis << "), but got axis=" << axis;
-          bool keepdim = call->GetKwarg<bool>("keepdim", false);
-          CHECK(keepdim) << "FlattenTileNdTo2D: tile reduce op '" << name
-                         << "' on >2D tile must use keepdim=True to maintain 2D output shape";
-        }
-      }
-    }
   }
 };
 

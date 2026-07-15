@@ -144,10 +144,10 @@ working with tiles and supporting scalar broadcasting.
     - `tile.divs` - Element-wise division (tile / scalar)
 
 - **Reduction** (`tile_ops/reduction.cpp`):
-  - `tile.sum` - Sum reduction along specified axis
-    - Arguments: `(tile, axis, keepdim?)`
-    - When `keepdim=True`, reduced axis is kept as dimension 1
-    - When `keepdim=False` (default), reduced axis is removed
+  - `tile.row_sum` / `tile.row_max` / `tile.row_min` / `tile.row_prod` - Collapse the last axis (keepdim), output `[..., rows, 1]`
+    - Arguments: `(tile, tmp_tile)` - `tmp_tile` is the binary-tree reduction scratch
+  - `tile.col_sum` / `tile.col_max` / `tile.col_min` / `tile.col_prod` - Collapse axis 0 (keepdim), output `[1, ...]`
+  - Reductions are direction-specific: the ISA offers only `pto.trowsum` / `pto.tcolsum` / ... , so there is no axis-parameterized reduction op
 
 - **Unary** (`tile_ops/unary.cpp`):
   - `tile.sqrt` - Element-wise square root
