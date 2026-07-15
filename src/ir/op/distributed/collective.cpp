@@ -244,8 +244,8 @@ void CheckDimAgreesIfStatic(const ExprPtr& lhs, const ExprPtr& rhs, const std::s
 TypePtr DeduceTensorAllGatherType(const std::vector<ExprPtr>& args,
                                   const std::vector<std::pair<std::string, std::any>>& kwargs) {
   (void)kwargs;
-  CHECK(args.size() == 3)
-      << "pld.tensor.allgather requires exactly 3 args (input, target, signal), but got " << args.size();
+  CHECK(args.size() == 3) << "pld.tensor.allgather requires exactly 3 args (input, target, signal), but got "
+                          << args.size();
   for (size_t i = 0; i < args.size(); ++i) {
     CHECK(args[i]) << "pld.tensor.allgather positional argument #" << i << " must not be null";
   }
@@ -628,9 +628,9 @@ TypePtr DeduceBuiltinTensorAllGatherType(const std::vector<ExprPtr>& args,
       << kOpName << " input must be 2D [1, SIZE] (this rank's single chunk), got "
       << input_type->shape_.size() << " dims";
   if (auto input_rows = As<ConstInt>(input_type->shape_[0])) {
-    CHECK(input_rows->value_ == 1)
-        << kOpName << " input must be [1, SIZE] (this rank's single chunk), got first dim "
-        << input_rows->value_;
+    CHECK(input_rows->value_ == 1) << kOpName
+                                   << " input must be [1, SIZE] (this rank's single chunk), got first dim "
+                                   << input_rows->value_;
   }
   auto target_type = As<DistributedTensorType>(args[1]->GetType());
   CHECK(target_type) << kOpName << " target must be a DistributedTensor, got "
