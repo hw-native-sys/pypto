@@ -89,6 +89,15 @@ REGISTER_OP("system.fence")
     .no_argument()
     .f_deduce_type(DeduceUnknownType);
 
+// Register system.cacheinvalid (Cache Maintenance Operation)
+// Args: tensor (write pointer base), offset (element offset added to the base)
+REGISTER_OP("system.cacheinvalid")
+    .set_description("Invalidate a single cache line at (tensor base + offset)")
+    .set_op_category("SyncOp")
+    .add_argument("tensor", "Target tensor whose write pointer is invalidated")
+    .add_argument("offset", "Element offset added to the base pointer (integer scalar)")
+    .f_deduce_type(DeduceUnknownType);
+
 // Register system.syncall (Cross-core all-participant barrier). Models
 // pto::SYNCALL with two modes selected by the `mode` attribute:
 //   - "hard" (default): FFTS barrier, no operands. Codegen emits

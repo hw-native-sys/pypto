@@ -24,7 +24,7 @@ from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import Call, ConstInt, Expr, PipeType, Span
 
-from ..utils import _get_span_or_capture
+from ..utils import _get_span_or_capture, _normalize_expr
 from .tile_ops import (  # noqa: F401
     tpop_from_aic,
     tpop_from_aiv,
@@ -140,6 +140,25 @@ def fence(*, span: Span | None = None) -> Call:
     Lowers to ``pto.fence.barrier_all #pto.fence_scope<gm>``.
     """
     return _create_barrier_op("system.fence", span=span)
+
+
+def cacheinvalid(tensor: Expr, offset: int | Expr = 0, *, span: Span | None = None) -> Call:
+    """Invalidate a single cache line at ``tensor`` base pointer + ``offset``.
+
+    Lowers to ``pto.addptr`` (base + offset) followed by
+    ``pto.cmo.cacheinvalid %write_ptr single_cache_line``.
+
+    Args:
+        tensor: Target tensor whose write pointer is invalidated
+        offset: Element offset added to the base pointer (int or integer Expr)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for system.cacheinvalid
+    """
+    actual_span = _get_span_or_capture(span)
+    offset_expr = _normalize_expr(offset, actual_span)
+    return _ir_core.create_op_call("system.cacheinvalid", [tensor, offset_expr], {}, actual_span)
 
 
 _SYNCALL_CORE_TYPES = ("aiv_only", "aic_only", "mix")

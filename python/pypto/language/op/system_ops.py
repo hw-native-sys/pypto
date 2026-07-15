@@ -45,6 +45,7 @@ __all__ = [
     "bar_m",
     "bar_all",
     "fence",
+    "cacheinvalid",
     "syncall",
     "tpush_to_aiv",
     "tpush_to_aic",
@@ -169,6 +170,21 @@ def syncall(
         scratch_l1 = _l1_scratch(scratch_l1)
         args = [gm_workspace.unwrap(), scratch.unwrap(), scratch_l1.unwrap(), used_const]
     return _ir_ops.syncall_soft(core_type, args, span=actual_span)
+
+
+def cacheinvalid(tensor: Tensor, offset: int | Scalar = 0, *, span: Span | None = None) -> Call:
+    """Invalidate a single cache line at the tensor's write pointer + offset.
+
+    Lowers to ``pto.addptr`` (base + offset) followed by
+    ``pto.cmo.cacheinvalid %write_ptr single_cache_line``.
+
+    Args:
+        tensor: Target tensor whose write pointer is invalidated.
+        offset: Element offset added to the base pointer (compile-time int or Scalar).
+        span: Optional source span for debugging (auto-captured if not provided).
+    """
+    off = offset.unwrap() if isinstance(offset, Scalar) else offset
+    return _ir_ops.cacheinvalid(tensor.unwrap(), off, span=span)
 
 
 def tpush_to_aiv(tile: Tile, *, split: int, id: int | None = None, span: Span | None = None) -> Call:

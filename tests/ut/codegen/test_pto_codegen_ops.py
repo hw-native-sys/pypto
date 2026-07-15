@@ -2811,5 +2811,68 @@ class TestFenceCodegen:
         )
 
 
+class TestCacheInvalidCodegen:
+    """Tests that pl.system.cacheinvalid lowers to pto.addptr + pto.cmo.cacheinvalid."""
+
+    def _generate_mlir(self, program_cls) -> str:
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        optimized = pm.run_passes(program_cls)
+        codegen_instance = codegen.PTOCodegen()
+        funcs = list(optimized.functions.values())
+        assert funcs, "Program has no functions"
+        single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
+        return codegen_instance.generate(single)
+
+    def test_cacheinvalid_emits_cmo(self):
+        """pl.system.cacheinvalid(out, off) emits pto.addptr + pto.cmo.cacheinvalid."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_cacheinvalid(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                tile: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
+                updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(tile, [0, 0], out)
+                pl.system.cacheinvalid(updated, 8)
+                return updated
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.addptr" in mlir, f"pto.addptr not found in MLIR:\n{mlir}"
+        assert "pto.cmo.cacheinvalid" in mlir, f"pto.cmo.cacheinvalid not found in MLIR:\n{mlir}"
+        assert "single_cache_line" in mlir, f"single_cache_line not found in MLIR:\n{mlir}"
+
+    def test_cacheinvalid_dynamic_offset(self):
+        """A runtime offset expression (loop-var arithmetic) is fed to pto.addptr."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_cacheinvalid_dyn(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                tile: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
+                updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(tile, [0, 0], out)
+                for i in pl.range(4):
+                    # offset is computed at runtime from the loop index
+                    pl.system.cacheinvalid(updated, i * 16)
+                return updated
+
+        mlir = self._generate_mlir(Prog)
+        # The offset arithmetic (i * 16) is materialized as its own SSA value...
+        assert "arith.muli" in mlir, f"offset arithmetic not found in MLIR:\n{mlir}"
+        # ...and that dynamic SSA is the addptr offset, not a compile-time constant.
+        assert "pto.addptr" in mlir, f"pto.addptr not found in MLIR:\n{mlir}"
+        assert "pto.cmo.cacheinvalid" in mlir, f"pto.cmo.cacheinvalid not found in MLIR:\n{mlir}"
+        assert "single_cache_line" in mlir, f"single_cache_line not found in MLIR:\n{mlir}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

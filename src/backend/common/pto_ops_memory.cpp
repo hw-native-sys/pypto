@@ -815,6 +815,21 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
     codegen.Emit("pto.fence.barrier_all #pto.fence_scope<gm>");
     return std::string("");
   });
+
+  reg("system.cacheinvalid", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+    auto& codegen = AsPto(codegen_base);
+    INTERNAL_CHECK_SPAN(op->args_.size() == 2, op->span_)
+        << "system.cacheinvalid takes 2 arguments (tensor, offset), got " << op->args_.size();
+    auto tensor_type = AsTensorTypeLike(op->args_[0]->GetType());
+    INTERNAL_CHECK_SPAN(tensor_type, op->span_) << "system.cacheinvalid first argument must be a tensor";
+    const std::string base_ptr = codegen.GetTensorBasePtr(AsVarLike(op->args_[0]));
+    const std::string ptr_type = "!pto.ptr<" + codegen.GetTypeString(tensor_type->dtype_) + ">";
+    const std::string off = codegen.EmitCastToIndex(op->args_[1], codegen.GetExprAsCode(op->args_[1]));
+    const std::string write_ptr = codegen.NewTemp();
+    codegen.Emit(write_ptr + " = pto.addptr " + base_ptr + ", " + off + " : " + ptr_type + " -> " + ptr_type);
+    codegen.Emit("pto.cmo.cacheinvalid " + write_ptr + " single_cache_line");
+    return std::string("");
+  });
 }
 }  // namespace backend
 }  // namespace pypto
