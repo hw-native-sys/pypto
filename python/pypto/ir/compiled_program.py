@@ -463,11 +463,13 @@ def _write_debug_runner(
 
     from pypto.runtime.debug.run_script_writer import write_run_script  # noqa: PLC0415
 
+    # Best-effort: neither metadata extraction nor writing the replay script may
+    # crash the compile/execute pipeline, so any failure just skips the file.
     try:
         param_infos, _, _ = get_metadata()
-    except (ValueError, TypeError):
+        write_run_script(output_dir, param_infos, platform=platform)
+    except Exception:  # noqa: BLE001
         return
-    write_run_script(output_dir, param_infos, platform=platform)
 
 
 class _RuntimeFacade:
@@ -500,9 +502,11 @@ class _RuntimeFacade:
         from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
 
         cc, rn, rc = compile_and_assemble(self._output_dir, self._platform, pto_isa_commit)
-        self._chip_callable = cc
+        # Publish the "loaded" sentinel (_chip_callable) last so a reader can
+        # never observe it set while _runtime_name / _runtime_config are None.
         self._runtime_name = rn
         self._runtime_config = rc
+        self._chip_callable = cc
 
     def load(self, *, pto_isa_commit: str | None = None) -> None:
         """Eagerly compile-and-load the runtime artefacts.

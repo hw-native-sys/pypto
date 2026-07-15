@@ -912,10 +912,11 @@ class _ReturnVarsAccessor:
         """Return a single return variable by index (default 0).
 
         Raises:
-            AssertionError: If the statement is not yet complete.
+            RuntimeError: If the statement is not yet complete.
             IndexError: If ``index`` is out of range.
         """
-        assert self._result is not None, f"{self._result_kind.capitalize()} not yet complete"
+        if self._result is None:
+            raise RuntimeError(f"{self._result_kind.capitalize()} not yet complete")
         if index >= len(self._result.return_vars):
             raise IndexError(
                 f"Return variable index {index} out of range "
@@ -927,9 +928,10 @@ class _ReturnVarsAccessor:
         """Return all return variables as a list.
 
         Raises:
-            AssertionError: If the statement is not yet complete.
+            RuntimeError: If the statement is not yet complete.
         """
-        assert self._result is not None, f"{self._result_kind.capitalize()} not yet complete"
+        if self._result is None:
+            raise RuntimeError(f"{self._result_kind.capitalize()} not yet complete")
         return list(self._result.return_vars)
 
 
