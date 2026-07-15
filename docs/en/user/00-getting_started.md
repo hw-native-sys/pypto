@@ -448,8 +448,8 @@ once and dispatches many times on the same worker.
 
 Mutable per-call IO buffers are **shared-memory host tensors allocated before `prepare()`** and reused
 in place, so child writes are visible to the parent. Immutable inputs may remain ordinary contiguous
-CPU tensors when the same objects are passed to `compiled.prepare(inherited_host_tensors=[...])` before
-fork; they are retained and read through inherited copy-on-write mappings. This exception is
+CPU tensors when the same objects are passed to `DistributedWorker(..., inherited_host_tensors=[...])`
+before fork; they are retained and read through inherited copy-on-write mappings. This exception is
 input-only: outputs, in-place tensors, and unregistered non-shared tensors are rejected. Large static
 weights may be uploaded once via `rt.alloc_tensor`; its `init` source must still be pre-`prepare()` shared.
 

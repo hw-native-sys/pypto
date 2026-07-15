@@ -419,7 +419,6 @@ class DistributedCompiledProgram:
         extra_compiled: Sequence["DistributedCompiledProgram"] = (),
         callbacks: dict[str, Callable[..., Any]] | None = None,
         sub_worker_overrides: dict[str, Callable[..., Any]] | None = None,
-        inherited_host_tensors: Sequence[torch.Tensor] | None = None,
     ) -> "DistributedWorker":
         """Prepare a reusable L3 execution handle (setup once, dispatch many).
 
@@ -434,11 +433,10 @@ class DistributedCompiledProgram:
         Per-call inputs and outputs are reused-in-place **shared-memory** host
         ``torch.Tensor`` buffers (allocated before ``prepare()``) and/or
         worker-resident ``DeviceTensor`` / simpler ``Tensor`` arguments.
-        Immutable, contiguous CPU inputs may instead be registered through
-        ``inherited_host_tensors`` before the fork. Other non-shared host
-        tensors are rejected. The convenience host-to-device upload of
-        arbitrary host ``torch.Tensor`` inputs is only available on the
-        one-shot ``compile(...)(*args)`` / ``execute_distributed`` path.
+        Non-shared host tensors are rejected (the forked chip worker cannot see
+        a buffer allocated after the fork). The convenience host-to-device
+        upload of arbitrary host ``torch.Tensor`` inputs is only available on
+        the one-shot ``compile(...)(*args)`` / ``execute_distributed`` path.
 
         Args:
             config: Optional run configuration (reserved; currently unused).
@@ -458,10 +456,6 @@ class DistributedCompiledProgram:
                 raises ``ValueError``. In multi-program mode the callbacks apply
                 to every prepared program.
             sub_worker_overrides: Deprecated alias for ``callbacks``.
-            inherited_host_tensors: Immutable contiguous CPU tensors to retain
-                before the worker fork. Registered tensors may be dispatched
-                only as input parameters; outputs and in-place tensors still
-                require shared memory.
 
         Returns:
             A :class:`DistributedWorker`; use it as a context manager or call
@@ -474,7 +468,6 @@ class DistributedCompiledProgram:
             config,
             callbacks=callbacks,
             sub_worker_overrides=sub_worker_overrides,
-            inherited_host_tensors=inherited_host_tensors,
         )
 
     @staticmethod

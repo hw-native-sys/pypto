@@ -986,16 +986,10 @@ class TestMultiProgram:
 
         primary = _fake_compiled([_param("a", [4])], [])
         extra = _fake_compiled([_param("b", [8])], [])
-        inherited = [torch.zeros(4)]
         with patch("pypto.runtime.distributed_runner.DistributedWorker") as fake_worker:
-            DistributedCompiledProgram.prepare(
-                primary,
-                extra_compiled=[extra],
-                inherited_host_tensors=inherited,
-            )
+            DistributedCompiledProgram.prepare(primary, extra_compiled=[extra])
         # prepare() delegates to DistributedWorker([primary, *extra_compiled], ...).
         assert fake_worker.call_args.args[0] == [primary, extra]
-        assert fake_worker.call_args.kwargs["inherited_host_tensors"] is inherited
 
     def test_empty_sequence_raises(self, patched_setup):
         with pytest.raises(ValueError, match="at least one compiled program"):
