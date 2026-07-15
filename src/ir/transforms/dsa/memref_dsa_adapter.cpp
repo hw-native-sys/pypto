@@ -16,7 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
-#include <filesystem>
+#include <filesystem>  // NOLINT(build/c++17)
 #include <iomanip>
 #include <ios>
 #include <limits>
@@ -59,6 +59,8 @@ namespace {
 ::dsa::PoolId ToPoolId(MemorySpace space) { return static_cast<::dsa::PoolId>(space); }
 
 ::dsa::SeparationReason ToSeparationReason(AllocationSeparationReason reason) {
+  // clang-tidy mistakes the four distinct enum returns for cloned branches.
+  // NOLINTNEXTLINE(bugprone-branch-clone)
   switch (reason) {
     case AllocationSeparationReason::Generic:
       return ::dsa::SeparationReason::kGeneric;
@@ -304,24 +306,25 @@ ExportedProblem BuildStructuredProblem(const FunctionPtr& func, const Allocation
   return exported;
 }
 
-std::filesystem::path WriteProblemJson(const ExportedProblem& exported,
-                                       const std::filesystem::path& directory) {
+std::string WriteProblemJson(const ExportedProblem& exported, const std::string& directory) {
   CHECK(!directory.empty()) << "DSA export directory must not be empty";
+  const std::filesystem::path directory_path(directory);
   std::error_code error;
-  std::filesystem::create_directories(directory, error);
+  std::filesystem::create_directories(directory_path, error);
   if (error) {
-    throw pypto::RuntimeError("Failed to create DSA export directory '" + directory.string() +
+    throw pypto::RuntimeError("Failed to create DSA export directory '" + directory +
                               "': " + error.message());
   }
 
-  const std::filesystem::path output = directory / (CorpusFileStem(exported.document.instance) + ".dsa.json");
+  const std::filesystem::path output =
+      directory_path / (CorpusFileStem(exported.document.instance) + ".dsa.json");
   try {
     ::dsa::WriteStructuredProblemJsonFile(output, exported.document);
   } catch (const std::exception& exception) {
     throw pypto::RuntimeError("Failed to export DSA problem to '" + output.string() +
                               "': " + exception.what());
   }
-  return output;
+  return output.string();
 }
 
 SolverRun SolveWithFirstFit(const ExportedProblem& exported) {

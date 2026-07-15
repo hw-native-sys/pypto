@@ -55,7 +55,7 @@ no overlap for lifetime-overlapping buffers — recurs across systems; they diff
 solver *and* which extensions they model (so the core is common, not identical).
 
 | System | Problem object | Solver |
-| --- | --- | --- |
+| ------ | -------------- | ------ |
 | MiniMalloc (ASPLOS'23) | CSV `id,lower,upper,size` → `offset` | exact DFS over canonical solutions + pruning |
 | TelaMalloc (ASPLOS'22) | same | heuristic search + ILP/CP-SAT |
 | XLA | `BufferInterval{size,start,end,colocations}` → `Chunk` | `GlobalDecreasingSizeBestFitHeap` (heuristic, not optimal) + `NoFragmentationStatsHeap` (loose lower bound) |
@@ -79,7 +79,7 @@ the fragmentation as a byproduct (v1); evaluate vs MiniMalloc-optimal + the XLA 
 
 ### Core vs. overlay; constraint vs. cost
 
-```
+```text
 core DSA (portable)                overlay (pypto-specific, optional)
 buffers {intervals,size,align,     E1 multi-interval liveness  ← CONSTRAINT (changes feasibility)
 pool}, colocations, separations,   E2 reuse → sync cost        ← COST (re-ranks feasible set)
@@ -174,7 +174,7 @@ error.
 ### Adapter + pass order
 
 | Field | Source |
-| --- | --- |
+| ----- | ------ |
 | `Buffer{size,align,pool}` | each MemRef; `pool` = memory space |
 | `intervals` (E1) | `MemoryReuse` `var_liveness` — single hull today |
 | `colocations` | `MaterializeSemanticAliases` (pass 29) must-aliases |
@@ -240,8 +240,7 @@ secrets, no runtime I/O.
 Level3-first; **v1 is independent of and can land ahead of v2.**
 **v0** offline library + harness. **v1** the fragmentation fix + pipeline separation (flagged,
 core only, gate = peak ≤ bump AND clones distinct; falls back to the bump). **v2** overlay
-+ local search (gated on the model-vs-measured study and #913 coordination). Level2
-untouched.
+local search (gated on the model-vs-measured study and #913 coordination). Level2 untouched.
 
 ## Open Questions
 

@@ -28,7 +28,7 @@ MaterializeSemanticAliases，因此 view、循环 carry 值和原地操作的强
 ## Planner 模式
 
 | 模式 | 本 Pass 的输入 | 放置方式 | 失败行为 |
-| --- | --- | --- | --- |
+| ---- | -------------- | -------- | -------- |
 | `MemoryPlanner.PYPTO` | MemoryReuse 机会性合并后的 MemRef | 后端策略控制的对齐 bump 分配 | 现有 verifier 报告非法地址或超容量 |
 | `MemoryPlanner.DSA` | MaterializeSemanticAliases 后未机会性合并的 MemRef | 独立 first-fit DSA solver，输入为 schema-v1 `pypto_structured` | 非法导出、能力不匹配、不可行或 validator 失败都会终止编译；不会静默回退 |
 | `MemoryPlanner.PTOAS` | 无 | 跳过本 Pass；ptoas `PlanMemory` 负责放置 | 交给 ptoas |
