@@ -32,6 +32,7 @@ from pypto.runtime.device_tensor import DeviceTensor, StackedDeviceTensor
 from .compiled_program import (
     CallArg,
     _default_platform,
+    _extract_func_param_infos,
     _extract_param_infos,
     _param_info_from_dict,
     _param_info_to_dict,
@@ -39,6 +40,7 @@ from .compiled_program import (
     _to_torch_dtype,
     _validate_device_tensor,
     _validate_stacked_tensor,
+    _write_debug_runner,
 )
 
 # Filename of the small JSON sidecar persisted alongside the build artifacts so
@@ -50,34 +52,6 @@ _META_SCHEMA = 1
 if TYPE_CHECKING:
     from pypto.runtime.distributed_runner import DistributedWorker
     from pypto.runtime.runner import RunConfig
-
-
-def _extract_param_infos_from_func(func):
-    """Extract parameter metadata from a specific function."""
-    from pypto.pypto_core.ir import ConstInt, ParamDirection, ScalarType, ShapedType  # noqa: PLC0415
-
-    param_infos = []
-    output_indices = []
-
-    for i, (param, direction) in enumerate(zip(func.params, func.param_directions, strict=True)):
-        param_type = param.type
-        shape = None
-
-        if isinstance(param_type, ShapedType):
-            dtype = param_type.dtype
-            shape = [dim.value if isinstance(dim, ConstInt) else -1 for dim in param_type.shape]
-        elif isinstance(param_type, ScalarType):
-            dtype = param_type.dtype
-        else:
-            raise TypeError(
-                f"Unsupported parameter type for {param.name_hint!r}: {type(param_type).__name__}"
-            )
-
-        param_infos.append(_ParamInfo(name=param.name_hint, direction=direction, shape=shape, dtype=dtype))
-        if direction == ParamDirection.Out:
-            output_indices.append(i)
-
-    return param_infos, output_indices, list(func.return_types)
 
 
 @dataclass
@@ -151,27 +125,7 @@ class DistributedCompiledProgram:
         # already-present metadata file.
         if program is not None:
             self._persist_metadata()
-            self._emit_debug_runner()
-
-    def _emit_debug_runner(self) -> None:
-        """Write ``<output_dir>/debug/run.py`` for replaying this program.
-
-        Best-effort: distributed programs without a clean orchestration entry
-        will skip emission (the replay CLI is still usable directly).
-
-        Disable globally by setting ``PYPTO_EMIT_DEBUG_RUNNER=0`` (also accepts
-        ``false`` / ``no``).
-        """
-        if os.environ.get("PYPTO_EMIT_DEBUG_RUNNER", "").strip().lower() in ("0", "false", "no"):
-            return
-
-        from pypto.runtime.debug.run_script_writer import write_run_script  # noqa: PLC0415
-
-        try:
-            param_infos, _, _ = self._get_metadata()
-        except (ValueError, TypeError):
-            return
-        write_run_script(self._output_dir, param_infos, platform=self._platform)
+            _write_debug_runner(self._output_dir, self._platform, self._get_metadata)
 
     def _persist_metadata(self) -> None:
         """Write ``<output_dir>/distributed_meta.json`` for :meth:`from_dir`.
@@ -185,7 +139,7 @@ class DistributedCompiledProgram:
         layout and needs no persistence.
 
         Best-effort: a program without a resolvable orchestrator signature
-        skips emission (mirrors :meth:`_emit_debug_runner`); :meth:`from_dir`
+        skips emission (mirrors :func:`_write_debug_runner`); :meth:`from_dir`
         then reports the missing file with a recompile hint.
         """
         try:
@@ -327,7 +281,7 @@ class DistributedCompiledProgram:
                     break
 
             if host_orch is not None:
-                self._param_infos, self._output_indices, self._return_types = _extract_param_infos_from_func(
+                self._param_infos, self._output_indices, self._return_types = _extract_func_param_infos(
                     host_orch
                 )
             else:

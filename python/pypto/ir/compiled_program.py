@@ -20,6 +20,7 @@ torch tensors::
 
 import ctypes
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -438,7 +439,114 @@ def _default_platform(backend_type: BackendType) -> str:
     return _backend_core.get_backend_instance(backend_type).get_handler().get_default_sim_platform()
 
 
-class CompiledProgram:
+def _write_debug_runner(
+    output_dir: Path,
+    platform: str,
+    get_metadata: Callable[[], tuple[list[_ParamInfo], list[int], list[Any]]],
+) -> None:
+    """Write ``<output_dir>/debug/run.py`` so the kernel can be replayed via
+    ``python .../debug/run.py``.
+
+    Best-effort: programs that lack a clean orchestration entry (unusual shapes,
+    edge-case codegen) cannot have their param signature extracted, so the file
+    is skipped — the replay CLI is still usable directly against the output dir.
+
+    Shared by :class:`CompiledProgram` and
+    :class:`~pypto.ir.distributed_compiled_program.DistributedCompiledProgram`;
+    ``get_metadata`` is the caller's ``_get_metadata`` bound method.
+
+    Disable globally by setting ``PYPTO_EMIT_DEBUG_RUNNER=0`` (also accepts
+    ``false`` / ``no``).
+    """
+    if os.environ.get("PYPTO_EMIT_DEBUG_RUNNER", "").strip().lower() in ("0", "false", "no"):
+        return
+
+    from pypto.runtime.debug.run_script_writer import write_run_script  # noqa: PLC0415
+
+    try:
+        param_infos, _, _ = get_metadata()
+    except (ValueError, TypeError):
+        return
+    write_run_script(output_dir, param_infos, platform=platform)
+
+
+class _RuntimeFacade:
+    """Lazy compile-and-load of runtime artefacts.
+
+    Shared by :class:`CompiledProgram` and :class:`_SubChipCallable`. The host
+    class must define the backing fields ``_output_dir`` (Path), ``_platform``
+    (str), and the lazily-populated ``_chip_callable`` / ``_runtime_name`` /
+    ``_runtime_config`` (initialised to ``None``). A host may override
+    :meth:`_check_runtime_access` to forbid direct loading.
+    """
+
+    _output_dir: Path
+    _platform: str
+    _chip_callable: Any
+    _runtime_name: str | None
+    _runtime_config: dict[str, Any] | None
+
+    def _check_runtime_access(self) -> None:
+        """Hook run before the first compile-and-load. Default: allow.
+
+        Hosts that have no single canonical runtime (e.g. a multi-orch
+        :class:`CompiledProgram`) override this to redirect callers elsewhere.
+        """
+
+    def _ensure_runtime_loaded(self, pto_isa_commit: str | None = None) -> None:
+        if self._chip_callable is not None:
+            return
+        self._check_runtime_access()
+        from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
+
+        cc, rn, rc = compile_and_assemble(self._output_dir, self._platform, pto_isa_commit)
+        self._chip_callable = cc
+        self._runtime_name = rn
+        self._runtime_config = rc
+
+    def load(self, *, pto_isa_commit: str | None = None) -> None:
+        """Eagerly compile-and-load the runtime artefacts.
+
+        Optional — :attr:`chip_callable`, :attr:`runtime_name`, and
+        :attr:`runtime_config` all auto-load on first access. Use this only when
+        you need to pin a specific ``pto_isa_commit`` (which must happen before
+        any property access, since the result is cached).
+
+        Raises:
+            RuntimeError: When runtime artefacts are already loaded and a
+                non-None ``pto_isa_commit`` is supplied — the cached build
+                cannot be re-pinned.
+        """
+        if self._chip_callable is not None and pto_isa_commit is not None:
+            raise RuntimeError(
+                "Runtime artefacts already loaded; pto_isa_commit cannot change. "
+                "Call load(pto_isa_commit=...) before any chip_callable / "
+                "runtime_name / runtime_config access."
+            )
+        self._ensure_runtime_loaded(pto_isa_commit)
+
+    @property
+    def chip_callable(self) -> Any:
+        """Simpler ``ChipCallable`` — hand to ``simpler.worker.Worker.register``."""
+        self._ensure_runtime_loaded()
+        return self._chip_callable
+
+    @property
+    def runtime_name(self) -> str:
+        """Runtime ABI name baked into ``kernel_config.py`` (e.g. ``"tensormap_and_ringbuffer"``)."""
+        self._ensure_runtime_loaded()
+        assert self._runtime_name is not None
+        return self._runtime_name
+
+    @property
+    def runtime_config(self) -> dict[str, Any]:
+        """``RUNTIME_CONFIG`` dict from ``kernel_config.py`` (e.g. ``block_dim``, ``aicpu_thread_num``)."""
+        self._ensure_runtime_loaded()
+        assert self._runtime_config is not None
+        return self._runtime_config
+
+
+class CompiledProgram(_RuntimeFacade):
     """A compiled PyPTO program that can be called with torch tensors.
 
     Returned by :func:`ir.compile`.  ``CompiledProgram`` is a **compiled
@@ -519,30 +627,7 @@ class CompiledProgram:
         # point; multi-orch programs have one sub-build (and one debug script)
         # per orch, emitted by each sub-build's own pipeline.
         if not self._sub_chip_dirs:
-            self._emit_debug_runner()
-
-    def _emit_debug_runner(self) -> None:
-        """Write ``<output_dir>/debug/run.py`` so the kernel can be replayed via
-        ``python .../debug/run.py``.
-
-        Best-effort: programs that lack a clean orchestration entry (unusual
-        shapes, edge-case codegen) cannot have their param signature extracted
-        here. In that case the file is skipped — the replay CLI is still usable
-        directly against the output directory.
-
-        Disable globally by setting ``PYPTO_EMIT_DEBUG_RUNNER=0`` (also accepts
-        ``false`` / ``no``).
-        """
-        if os.environ.get("PYPTO_EMIT_DEBUG_RUNNER", "").strip().lower() in ("0", "false", "no"):
-            return
-
-        from pypto.runtime.debug.run_script_writer import write_run_script  # noqa: PLC0415
-
-        try:
-            param_infos, _, _ = self._get_metadata()
-        except (ValueError, TypeError):
-            return
-        write_run_script(self._output_dir, param_infos, platform=self._platform)
+            _write_debug_runner(self._output_dir, self._platform, self._get_metadata)
 
     # --- Properties -----------------------------------------------------------
 
@@ -615,73 +700,20 @@ class CompiledProgram:
             )
         validate_pass_ir_codegen_results(str(passes_dump), tensors, expected, rtol=rtol, atol=atol)
 
-    # --- Runtime artefacts (lazy) --------------------------------------------
+    # --- Runtime artefacts (lazy) — see _RuntimeFacade -----------------------
     #
-    # These three properties expose the simpler-side products of
-    # ``compile_and_assemble`` so callers that want to drive execution
-    # themselves (e.g. with a hand-constructed ``simpler.worker.Worker``)
-    # can pull them out of the CompiledProgram. First access triggers
-    # the assemble step; the result is cached for the lifetime of the
-    # CompiledProgram. For programs that need ``pto_isa_commit`` pinned,
-    # call :meth:`load` explicitly before accessing the properties.
+    # load() / chip_callable / runtime_name / runtime_config live on the shared
+    # _RuntimeFacade base. A single-orch program loads on first access; a
+    # multi-orch program has no single canonical runtime, so the override below
+    # steers callers to the per-orch sub-callable instead.
 
-    def _ensure_runtime_loaded(self, pto_isa_commit: str | None = None) -> None:
-        if self._chip_callable is not None:
-            return
+    def _check_runtime_access(self) -> None:
         if self._sub_chip_dirs:
             raise TypeError(
                 f"Multi-orch program has {len(self._sub_chip_dirs)} orchestrations "
                 f"{sorted(self._sub_chip_dirs)}; access runtime artefacts via "
                 f"compiled[<name>] instead."
             )
-        from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
-
-        cc, rn, rc = compile_and_assemble(self._output_dir, self._platform, pto_isa_commit)
-        self._chip_callable = cc
-        self._runtime_name = rn
-        self._runtime_config = rc
-
-    def load(self, *, pto_isa_commit: str | None = None) -> None:
-        """Eagerly compile-and-load the runtime artefacts.
-
-        Optional — :attr:`chip_callable`, :attr:`runtime_name`, and
-        :attr:`runtime_config` all auto-load on first access. Use this
-        only when you need to pin a specific ``pto_isa_commit`` (which
-        must happen before any property access, since the result is
-        cached).
-
-        Raises:
-            RuntimeError: When runtime artefacts are already loaded and
-                a non-None ``pto_isa_commit`` is supplied — the cached
-                build cannot be re-pinned.
-        """
-        if self._chip_callable is not None and pto_isa_commit is not None:
-            raise RuntimeError(
-                "Runtime artefacts already loaded; pto_isa_commit cannot change. "
-                "Call load(pto_isa_commit=...) before any chip_callable / "
-                "runtime_name / runtime_config access."
-            )
-        self._ensure_runtime_loaded(pto_isa_commit)
-
-    @property
-    def chip_callable(self) -> Any:
-        """Simpler ``ChipCallable`` — hand to ``simpler.worker.Worker.register``."""
-        self._ensure_runtime_loaded()
-        return self._chip_callable
-
-    @property
-    def runtime_name(self) -> str:
-        """Runtime ABI name baked into ``kernel_config.py`` (e.g. ``"tensormap_and_ringbuffer"``)."""
-        self._ensure_runtime_loaded()
-        assert self._runtime_name is not None
-        return self._runtime_name
-
-    @property
-    def runtime_config(self) -> dict[str, Any]:
-        """``RUNTIME_CONFIG`` dict from ``kernel_config.py`` (e.g. ``block_dim``, ``aicpu_thread_num``)."""
-        self._ensure_runtime_loaded()
-        assert self._runtime_config is not None
-        return self._runtime_config
 
     # --- Argument builders (for users driving a simpler.Worker directly) -----
 
@@ -890,7 +922,7 @@ class CompiledProgram:
         )
 
 
-class _SubChipCallable:
+class _SubChipCallable(_RuntimeFacade):
     """One L2 orchestration of a multi-orch :class:`CompiledProgram`.
 
     Returned by ``compiled[name]`` / ``compiled.<name>``. Self-contained:
@@ -930,47 +962,6 @@ class _SubChipCallable:
     @property
     def output_indices(self) -> list[int]:
         return list(self._output_indices)
-
-    # --- Runtime artefacts (lazy) — mirror CompiledProgram --------------------
-
-    def _ensure_runtime_loaded(self, pto_isa_commit: str | None = None) -> None:
-        if self._chip_callable is not None:
-            return
-        from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
-
-        cc, rn, rc = compile_and_assemble(self._output_dir, self._platform, pto_isa_commit)
-        self._chip_callable = cc
-        self._runtime_name = rn
-        self._runtime_config = rc
-
-    def load(self, *, pto_isa_commit: str | None = None) -> None:
-        """Eagerly compile-and-load the runtime artefacts. Mirrors
-        :meth:`CompiledProgram.load`; see that method for full semantics.
-        """
-        if self._chip_callable is not None and pto_isa_commit is not None:
-            raise RuntimeError(
-                "Runtime artefacts already loaded; pto_isa_commit cannot change. "
-                "Call load(pto_isa_commit=...) before any chip_callable / "
-                "runtime_name / runtime_config access."
-            )
-        self._ensure_runtime_loaded(pto_isa_commit)
-
-    @property
-    def chip_callable(self) -> Any:
-        self._ensure_runtime_loaded()
-        return self._chip_callable
-
-    @property
-    def runtime_name(self) -> str:
-        self._ensure_runtime_loaded()
-        assert self._runtime_name is not None
-        return self._runtime_name
-
-    @property
-    def runtime_config(self) -> dict[str, Any]:
-        self._ensure_runtime_loaded()
-        assert self._runtime_config is not None
-        return self._runtime_config
 
     def build_orch_args(
         self,
