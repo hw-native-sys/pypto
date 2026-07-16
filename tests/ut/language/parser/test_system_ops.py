@@ -133,11 +133,11 @@ class TestSystemOpsParsing:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                pl.system.cacheinvalid(x, [4], [1])
+                pl.system.cacheinvalid(x, [1], [4])
                 return x
 
         printed = Before.as_python()
-        assert "pl.system.cacheinvalid(x, [4], [1])" in printed
+        assert "pl.system.cacheinvalid(x, [1], [4])" in printed
 
         reparsed = pl.parse_program(printed)
         assert isinstance(reparsed, ir.Program)
@@ -150,11 +150,11 @@ class TestSystemOpsParsing:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[16, 16], pl.FP32]) -> pl.Tensor[[16, 16], pl.FP32]:
-                pl.system.cacheinvalid(x, [0, 0], [16, 16])
+                pl.system.cacheinvalid(x, [16, 16], [0, 0])
                 return x
 
         printed = Before.as_python()
-        assert "pl.system.cacheinvalid(x, [0, 0], [16, 16])" in printed
+        assert "pl.system.cacheinvalid(x, [16, 16], [0, 0])" in printed
 
         reparsed = pl.parse_program(printed)
         assert isinstance(reparsed, ir.Program)
@@ -166,7 +166,7 @@ class TestSystemOpsParsing:
         dim = ir.ConstInt(64, DataType.INT32, span)
         tensor = ir.Var("x", ir.TensorType([dim], DataType.FP32), span)
         with pytest.raises(TypeError, match="offsets must be integers"):
-            system_ops.cacheinvalid(tensor, [3.5], [1])  # type: ignore[list-item]  # intentionally wrong type
+            system_ops.cacheinvalid(tensor, [1], [3.5])  # type: ignore[list-item]  # intentionally wrong type
 
     def test_cacheinvalid_rejects_rank_mismatch(self):
         """offsets/shapes length must match the tensor rank."""
@@ -174,7 +174,7 @@ class TestSystemOpsParsing:
         dim = ir.ConstInt(16, DataType.INT32, span)
         tensor = ir.Var("x", ir.TensorType([dim, dim], DataType.FP32), span)
         with pytest.raises(ValueError, match="offsets must match tensor rank 2"):
-            system_ops.cacheinvalid(tensor, [0], [1, 1])
+            system_ops.cacheinvalid(tensor, [1, 1], [0])
 
     def test_syncall_round_trip(self):
         """Test round-trip for pl.system.syncall with an explicit core_type."""

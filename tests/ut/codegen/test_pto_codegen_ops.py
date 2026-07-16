@@ -2848,7 +2848,7 @@ class TestCacheInvalidCodegen:
             ) -> pl.Tensor[[16, 16], pl.FP32]:
                 tile: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
                 updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(tile, [0, 0], out)
-                pl.system.cacheinvalid(updated, [0, 8], [1, 1])
+                pl.system.cacheinvalid(updated, [1, 1], [0, 8])
                 return updated
 
         mlir = self._generate_mlir(Prog)
@@ -2871,7 +2871,7 @@ class TestCacheInvalidCodegen:
             ) -> pl.Tensor[[16, 16], pl.FP32]:
                 tile: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
                 updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(tile, [0, 0], out)
-                pl.system.cacheinvalid(updated, [0, 0], [16, 16])
+                pl.system.cacheinvalid(updated, [16, 16], [0, 0])
                 return updated
 
         mlir = self._generate_mlir(Prog)
@@ -2896,7 +2896,7 @@ class TestCacheInvalidCodegen:
                 updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(tile, [0, 0], out)
                 for i in pl.range(4):
                     # offset row is computed at runtime from the loop index
-                    pl.system.cacheinvalid(updated, [i, 0], [1, 1])
+                    pl.system.cacheinvalid(updated, [1, 1], [i, 0])
                 return updated
 
         mlir = self._generate_mlir(Prog)

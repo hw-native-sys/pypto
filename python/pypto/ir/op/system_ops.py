@@ -145,14 +145,14 @@ def fence(*, span: Span | None = None) -> Call:
 
 def cacheinvalid(
     tensor: Expr,
+    shapes: Sequence[int | Expr],
     offsets: Sequence[int | Expr],
-    shapes: Sequence[int | Expr] | None = None,
     *,
     span: Span | None = None,
 ) -> Call:
     """Invalidate the cache lines backing a tensor sub-region.
 
-    The op carries an N-D ``offsets`` and ``shapes`` (both matching the tensor
+    The op carries an N-D ``shapes`` and ``offsets`` (both matching the tensor
     rank). Codegen picks the lowering by the region size:
 
     - ``shapes`` all 1 (scalar write): flatten ``offsets`` and lower to
@@ -162,9 +162,9 @@ def cacheinvalid(
 
     Args:
         tensor: Target tensor whose sub-region is invalidated
+        shapes: Per-dimension region sizes; length must equal the tensor rank
+            (all 1 selects the scalar-write / ptr form)
         offsets: Per-dimension start offsets; length must equal the tensor rank
-        shapes: Per-dimension region sizes; length must equal the tensor rank.
-            Defaults to all-1 (the scalar-write / ptr form)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -177,22 +177,22 @@ def cacheinvalid(
         raise TypeError(f"system.cacheinvalid tensor must have TensorType, got {tensor_type}")
     rank = len(tensor_type.shape)
 
+    shapes = list(shapes)
+    if len(shapes) != rank:
+        raise ValueError(f"system.cacheinvalid shapes must match tensor rank {rank}, got {len(shapes)}")
     offsets = list(offsets)
     if len(offsets) != rank:
         raise ValueError(f"system.cacheinvalid offsets must match tensor rank {rank}, got {len(offsets)}")
-    shapes = [1] * rank if shapes is None else list(shapes)
-    if len(shapes) != rank:
-        raise ValueError(f"system.cacheinvalid shapes must match tensor rank {rank}, got {len(shapes)}")
 
-    offsets_tuple = _to_make_tuple(offsets, actual_span)
     shapes_tuple = _to_make_tuple(shapes, actual_span)
-    for name, elems in (("offsets", offsets_tuple.elements), ("shapes", shapes_tuple.elements)):
+    offsets_tuple = _to_make_tuple(offsets, actual_span)
+    for name, elems in (("shapes", shapes_tuple.elements), ("offsets", offsets_tuple.elements)):
         for elem in elems:
             elem_type = elem.type
             if isinstance(elem_type, ScalarType) and elem_type.dtype.is_float():
                 raise TypeError(f"system.cacheinvalid {name} must be integers, got dtype {elem_type.dtype}")
     return _ir_core.create_op_call(
-        "system.cacheinvalid", [tensor, offsets_tuple, shapes_tuple], {}, actual_span
+        "system.cacheinvalid", [tensor, shapes_tuple, offsets_tuple], {}, actual_span
     )
 
 

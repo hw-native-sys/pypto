@@ -825,10 +825,10 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
         << "system.cacheinvalid first argument must be a tensor variable";
     auto tensor_type = AsTensorTypeLike(tensor_var->GetType());
     INTERNAL_CHECK_SPAN(tensor_type, op->span_) << "system.cacheinvalid first argument must be a tensor";
-    auto offsets_tuple = As<ir::MakeTuple>(op->args_[1]);
-    INTERNAL_CHECK_SPAN(offsets_tuple, op->span_) << "system.cacheinvalid offsets must be a tuple";
-    auto shapes_tuple = As<ir::MakeTuple>(op->args_[2]);
+    auto shapes_tuple = As<ir::MakeTuple>(op->args_[1]);
     INTERNAL_CHECK_SPAN(shapes_tuple, op->span_) << "system.cacheinvalid shapes must be a tuple";
+    auto offsets_tuple = As<ir::MakeTuple>(op->args_[2]);
+    INTERNAL_CHECK_SPAN(offsets_tuple, op->span_) << "system.cacheinvalid offsets must be a tuple";
 
     const std::string dtype_str = codegen.GetTypeString(tensor_type->dtype_);
 

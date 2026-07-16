@@ -174,8 +174,8 @@ def syncall(
 
 def cacheinvalid(
     tensor: Tensor,
+    shapes: Sequence[int | Scalar],
     offsets: Sequence[int | Scalar],
-    shapes: Sequence[int | Scalar] | None = None,
     *,
     span: Span | None = None,
 ) -> Call:
@@ -190,14 +190,14 @@ def cacheinvalid(
 
     Args:
         tensor: Target tensor whose sub-region is invalidated.
+        shapes: Per-dimension region sizes; length must equal the tensor rank
+            (all 1 selects the scalar-write / ptr form).
         offsets: Per-dimension start offsets; length must equal the tensor rank.
-        shapes: Per-dimension region sizes; length must equal the tensor rank.
-            Defaults to all-1 (the scalar-write / ptr form).
         span: Optional source span for debugging (auto-captured if not provided).
     """
+    shp = [s.unwrap() if isinstance(s, Scalar) else s for s in shapes]
     off = [o.unwrap() if isinstance(o, Scalar) else o for o in offsets]
-    shp = None if shapes is None else [s.unwrap() if isinstance(s, Scalar) else s for s in shapes]
-    return _ir_ops.cacheinvalid(tensor.unwrap(), off, shp, span=span)
+    return _ir_ops.cacheinvalid(tensor.unwrap(), shp, off, span=span)
 
 
 def tpush_to_aiv(tile: Tile, *, split: int, id: int | None = None, span: Span | None = None) -> Call:

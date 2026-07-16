@@ -90,7 +90,7 @@ REGISTER_OP("system.fence")
     .f_deduce_type(DeduceUnknownType);
 
 // Register system.cacheinvalid (Cache Maintenance Operation)
-// Args: tensor, offsets (N-D start, matches tensor rank), shapes (N-D region size).
+// Args: tensor, shapes (N-D region size), offsets (N-D start); both match tensor rank.
 // Codegen dispatches on shapes: all-1 -> scalar-write ptr form (pto.addptr);
 // otherwise -> tile-store partition-view form (pto.partition_view).
 REGISTER_OP("system.cacheinvalid")
@@ -99,8 +99,8 @@ REGISTER_OP("system.cacheinvalid")
         "element, partition-view form otherwise)")
     .set_op_category("SyncOp")
     .add_argument("tensor", "Target tensor whose sub-region is invalidated")
-    .add_argument("offsets", "Per-dimension start offsets (N-D tuple matching tensor rank)")
     .add_argument("shapes", "Per-dimension region sizes (N-D tuple; all 1 selects the scalar/ptr form)")
+    .add_argument("offsets", "Per-dimension start offsets (N-D tuple matching tensor rank)")
     .f_deduce_type(DeduceUnknownType);
 
 // Register system.syncall (Cross-core all-participant barrier). Models
