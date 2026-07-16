@@ -89,7 +89,7 @@ class _ArgBase(PTOTestCase):
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("a", [self._m, self._n], self._dtype, init_value=_distinct(self._m, self._n)),
-            TensorSpec("out", self._out_shape(), DataType.INT32, is_output=True),
+            TensorSpec("out", self._out_shape(), DataType.INT32, is_output=True, init_value=torch.zeros),
         ]
 
     def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
@@ -125,7 +125,7 @@ class TileRowArgmax(_ArgBase):
         class RowArgmaxProgram:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
-                self, a: pl.Tensor[[m, n], dt], out: pl.Out[pl.Tensor[[m, 1], pl.INT32]]
+                self, a: pl.Tensor[[m, n], dt], out: pl.InOut[pl.Tensor[[m, 1], pl.INT32]]
             ) -> pl.Tensor[[m, 1], pl.INT32]:
                 t: pl.Tile[[m, n], dt] = pl.load(a, [0, 0], [m, n], valid_shapes=vshape)
                 tmp: pl.Tile[[m, n], dt] = pl.tile.create([m, n], dtype=dt, target_memory=pl.MemorySpace.Vec)
@@ -134,7 +134,7 @@ class TileRowArgmax(_ArgBase):
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
-                self, a: pl.Tensor[[m, n], dt], out: pl.Out[pl.Tensor[[m, 1], pl.INT32]]
+                self, a: pl.Tensor[[m, n], dt], out: pl.InOut[pl.Tensor[[m, 1], pl.INT32]]
             ) -> pl.Tensor[[m, 1], pl.INT32]:
                 return self.kernel(a, out)
 
@@ -155,7 +155,7 @@ class TileRowArgmin(_ArgBase):
         class RowArgminProgram:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
-                self, a: pl.Tensor[[m, n], dt], out: pl.Out[pl.Tensor[[m, 1], pl.INT32]]
+                self, a: pl.Tensor[[m, n], dt], out: pl.InOut[pl.Tensor[[m, 1], pl.INT32]]
             ) -> pl.Tensor[[m, 1], pl.INT32]:
                 t: pl.Tile[[m, n], dt] = pl.load(a, [0, 0], [m, n], valid_shapes=vshape)
                 tmp: pl.Tile[[m, n], dt] = pl.tile.create([m, n], dtype=dt, target_memory=pl.MemorySpace.Vec)
@@ -164,7 +164,7 @@ class TileRowArgmin(_ArgBase):
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
-                self, a: pl.Tensor[[m, n], dt], out: pl.Out[pl.Tensor[[m, 1], pl.INT32]]
+                self, a: pl.Tensor[[m, n], dt], out: pl.InOut[pl.Tensor[[m, 1], pl.INT32]]
             ) -> pl.Tensor[[m, 1], pl.INT32]:
                 return self.kernel(a, out)
 
@@ -185,7 +185,7 @@ class TileColArgmax(_ArgBase):
         class ColArgmaxProgram:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
-                self, a: pl.Tensor[[m, n], dt], out: pl.Out[pl.Tensor[[1, n], pl.INT32]]
+                self, a: pl.Tensor[[m, n], dt], out: pl.InOut[pl.Tensor[[1, n], pl.INT32]]
             ) -> pl.Tensor[[1, n], pl.INT32]:
                 t: pl.Tile[[m, n], dt] = pl.load(a, [0, 0], [m, n], valid_shapes=vshape)
                 tmp: pl.Tile[[m, n], dt] = pl.tile.create([m, n], dtype=dt, target_memory=pl.MemorySpace.Vec)
@@ -194,7 +194,7 @@ class TileColArgmax(_ArgBase):
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
-                self, a: pl.Tensor[[m, n], dt], out: pl.Out[pl.Tensor[[1, n], pl.INT32]]
+                self, a: pl.Tensor[[m, n], dt], out: pl.InOut[pl.Tensor[[1, n], pl.INT32]]
             ) -> pl.Tensor[[1, n], pl.INT32]:
                 return self.kernel(a, out)
 
@@ -215,7 +215,7 @@ class TileColArgmin(_ArgBase):
         class ColArgminProgram:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
-                self, a: pl.Tensor[[m, n], dt], out: pl.Out[pl.Tensor[[1, n], pl.INT32]]
+                self, a: pl.Tensor[[m, n], dt], out: pl.InOut[pl.Tensor[[1, n], pl.INT32]]
             ) -> pl.Tensor[[1, n], pl.INT32]:
                 t: pl.Tile[[m, n], dt] = pl.load(a, [0, 0], [m, n], valid_shapes=vshape)
                 tmp: pl.Tile[[m, n], dt] = pl.tile.create([m, n], dtype=dt, target_memory=pl.MemorySpace.Vec)
@@ -224,7 +224,7 @@ class TileColArgmin(_ArgBase):
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
-                self, a: pl.Tensor[[m, n], dt], out: pl.Out[pl.Tensor[[1, n], pl.INT32]]
+                self, a: pl.Tensor[[m, n], dt], out: pl.InOut[pl.Tensor[[1, n], pl.INT32]]
             ) -> pl.Tensor[[1, n], pl.INT32]:
                 return self.kernel(a, out)
 
@@ -250,14 +250,14 @@ class TensorRowArgmax(_ArgBase):
         class TensorRowArgmaxProgram:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
-                self, a: pl.Tensor[[32, 64], pl.FP32], out: pl.Out[pl.Tensor[[32, 1], pl.INT32]]
+                self, a: pl.Tensor[[32, 64], pl.FP32], out: pl.InOut[pl.Tensor[[32, 1], pl.INT32]]
             ) -> pl.Tensor[[32, 1], pl.INT32]:
                 r: pl.Tensor[[32, 1], pl.INT32] = pl.row_argmax(a)
                 return pl.assemble(out, r, [0, 0])
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
-                self, a: pl.Tensor[[32, 64], pl.FP32], out: pl.Out[pl.Tensor[[32, 1], pl.INT32]]
+                self, a: pl.Tensor[[32, 64], pl.FP32], out: pl.InOut[pl.Tensor[[32, 1], pl.INT32]]
             ) -> pl.Tensor[[32, 1], pl.INT32]:
                 return self.kernel(a, out)
 
@@ -277,14 +277,14 @@ class TensorColArgmax(_ArgBase):
         class TensorColArgmaxProgram:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
-                self, a: pl.Tensor[[32, 64], pl.FP32], out: pl.Out[pl.Tensor[[1, 64], pl.INT32]]
+                self, a: pl.Tensor[[32, 64], pl.FP32], out: pl.InOut[pl.Tensor[[1, 64], pl.INT32]]
             ) -> pl.Tensor[[1, 64], pl.INT32]:
                 r: pl.Tensor[[1, 64], pl.INT32] = pl.col_argmax(a)
                 return pl.assemble(out, r, [0, 0])
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
-                self, a: pl.Tensor[[32, 64], pl.FP32], out: pl.Out[pl.Tensor[[1, 64], pl.INT32]]
+                self, a: pl.Tensor[[32, 64], pl.FP32], out: pl.InOut[pl.Tensor[[1, 64], pl.INT32]]
             ) -> pl.Tensor[[1, 64], pl.INT32]:
                 return self.kernel(a, out)
 

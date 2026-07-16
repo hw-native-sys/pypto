@@ -73,9 +73,16 @@ class _ActBase(PTOTestCase):
         return f"tile_{self.op_name}_{self._m}x{self._n}_{self._dtype.value}{v}{o}"
 
     def define_tensors(self) -> list[TensorSpec]:
+        # The output's unwritten region (valid_shapes tail or the complement of an
+        # offset store) is compared against golden zeros, so declare the output
+        # InOut with a zero init: the runtime stages defined zeros (pure outputs
+        # are no longer device-zeroed). The offset complement doubles as the
+        # spill-detection oracle for the bounded store.
         return [
             TensorSpec("a", [self._m, self._n], self._dtype, init_value=lambda: _signed(self._m, self._n)),
-            TensorSpec("out", [self._out_m, self._out_n], self._dtype, is_output=True),
+            TensorSpec(
+                "out", [self._out_m, self._out_n], self._dtype, is_output=True, init_value=torch.zeros
+            ),
         ]
 
     def _ref(self, a):
@@ -110,7 +117,7 @@ class TileReluTestCase(_ActBase):
         class ReluProgram:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
-                self, a: pl.Tensor[[m, n], dt], out: pl.Out[pl.Tensor[[om, on], dt]]
+                self, a: pl.Tensor[[m, n], dt], out: pl.InOut[pl.Tensor[[om, on], dt]]
             ) -> pl.Tensor[[om, on], dt]:
                 a_tile = pl.load(a, [0, 0], [m, n], valid_shapes=vshape)
                 out = pl.store(pl.tile.relu(a_tile), off, out)
@@ -118,7 +125,7 @@ class TileReluTestCase(_ActBase):
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
-                self, a: pl.Tensor[[m, n], dt], out: pl.Out[pl.Tensor[[om, on], dt]]
+                self, a: pl.Tensor[[m, n], dt], out: pl.InOut[pl.Tensor[[om, on], dt]]
             ) -> pl.Tensor[[om, on], dt]:
                 out = self.kernel(a, out)
                 return out
@@ -151,7 +158,7 @@ class TileLreluTestCase(_ActBase):
         class LreluProgram:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
-                self, a: pl.Tensor[[m, n], dt], out: pl.Out[pl.Tensor[[om, on], dt]]
+                self, a: pl.Tensor[[m, n], dt], out: pl.InOut[pl.Tensor[[om, on], dt]]
             ) -> pl.Tensor[[om, on], dt]:
                 a_tile = pl.load(a, [0, 0], [m, n], valid_shapes=vshape)
                 out = pl.store(pl.tile.lrelu(a_tile, slope), off, out)
@@ -159,7 +166,7 @@ class TileLreluTestCase(_ActBase):
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
-                self, a: pl.Tensor[[m, n], dt], out: pl.Out[pl.Tensor[[om, on], dt]]
+                self, a: pl.Tensor[[m, n], dt], out: pl.InOut[pl.Tensor[[om, on], dt]]
             ) -> pl.Tensor[[om, on], dt]:
                 out = self.kernel(a, out)
                 return out

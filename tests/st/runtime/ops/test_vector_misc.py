@@ -77,7 +77,9 @@ class _ScalarOpBase(PTOTestCase):
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("a", [self._m, self._n], self._dtype, init_value=lambda: _randn(self._m, self._n)),
-            TensorSpec("out", [self._out_m, self._out_n], self._dtype, is_output=True),
+            TensorSpec(
+                "out", [self._out_m, self._out_n], self._dtype, is_output=True, init_value=torch.zeros
+            ),
         ]
 
     def _ref(self, a):
@@ -89,6 +91,7 @@ class _ScalarOpBase(PTOTestCase):
         r, c = self._off
         if self._valid:
             vm, vn = self._valid
+            # Region outside valid_shapes stays zero — matches the InOut zero-init staged to device.
             res = torch.zeros_like(a)
             res[:vm, :vn] = self._ref(a[:vm, :vn])
         else:
@@ -112,7 +115,7 @@ class TileMulsTestCase(_ScalarOpBase):
         class MulsProgram:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
-                self, a: pl.Tensor[[m, n], dt], out: pl.Out[pl.Tensor[[om, on], dt]]
+                self, a: pl.Tensor[[m, n], dt], out: pl.InOut[pl.Tensor[[om, on], dt]]
             ) -> pl.Tensor[[om, on], dt]:
                 a_tile = pl.load(a, [0, 0], [m, n], valid_shapes=vshape)
                 out = pl.store(pl.tile.muls(a_tile, rhs), off, out)
@@ -120,7 +123,7 @@ class TileMulsTestCase(_ScalarOpBase):
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
-                self, a: pl.Tensor[[m, n], dt], out: pl.Out[pl.Tensor[[om, on], dt]]
+                self, a: pl.Tensor[[m, n], dt], out: pl.InOut[pl.Tensor[[om, on], dt]]
             ) -> pl.Tensor[[om, on], dt]:
                 out = self.kernel(a, out)
                 return out
@@ -143,7 +146,7 @@ class TileDivsTestCase(_ScalarOpBase):
         class DivsProgram:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
-                self, a: pl.Tensor[[m, n], dt], out: pl.Out[pl.Tensor[[om, on], dt]]
+                self, a: pl.Tensor[[m, n], dt], out: pl.InOut[pl.Tensor[[om, on], dt]]
             ) -> pl.Tensor[[om, on], dt]:
                 a_tile = pl.load(a, [0, 0], [m, n], valid_shapes=vshape)
                 out = pl.store(pl.tile.divs(a_tile, rhs), off, out)
@@ -151,7 +154,7 @@ class TileDivsTestCase(_ScalarOpBase):
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
-                self, a: pl.Tensor[[m, n], dt], out: pl.Out[pl.Tensor[[om, on], dt]]
+                self, a: pl.Tensor[[m, n], dt], out: pl.InOut[pl.Tensor[[om, on], dt]]
             ) -> pl.Tensor[[om, on], dt]:
                 out = self.kernel(a, out)
                 return out
@@ -189,7 +192,9 @@ class ColExpandAddTestCase(PTOTestCase):
         return [
             TensorSpec("a", [self._m, self._n], self._dtype, init_value=lambda: _randn(self._m, self._n)),
             TensorSpec("col_vec", [1, self._n], self._dtype, init_value=lambda: _randn(1, self._n)),
-            TensorSpec("out", [self._out_m, self._out_n], self._dtype, is_output=True),
+            TensorSpec(
+                "out", [self._out_m, self._out_n], self._dtype, is_output=True, init_value=torch.zeros
+            ),
         ]
 
     def get_program(self) -> Any:
@@ -205,7 +210,7 @@ class ColExpandAddTestCase(PTOTestCase):
                 self,
                 a: pl.Tensor[[m, n], dt],
                 col_vec: pl.Tensor[[1, n], dt],
-                out: pl.Out[pl.Tensor[[om, on], dt]],
+                out: pl.InOut[pl.Tensor[[om, on], dt]],
             ) -> pl.Tensor[[om, on], dt]:
                 a_tile = pl.load(a, [0, 0], [m, n], valid_shapes=vshape)
                 col_tile = pl.load(col_vec, [0, 0], [1, n], valid_shapes=col_vshape)
@@ -217,7 +222,7 @@ class ColExpandAddTestCase(PTOTestCase):
                 self,
                 a: pl.Tensor[[m, n], dt],
                 col_vec: pl.Tensor[[1, n], dt],
-                out: pl.Out[pl.Tensor[[om, on], dt]],
+                out: pl.InOut[pl.Tensor[[om, on], dt]],
             ) -> pl.Tensor[[om, on], dt]:
                 out = self.kernel(a, col_vec, out)
                 return out
@@ -230,6 +235,7 @@ class ColExpandAddTestCase(PTOTestCase):
         r, c = self._off
         if self._valid:
             vm, vn = self._valid
+            # Region outside valid_shapes stays zero — matches the InOut zero-init staged to device.
             res = torch.zeros_like(a)
             res[:vm, :vn] = a[:vm, :vn] + col[:, :vn]
         else:

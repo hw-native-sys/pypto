@@ -74,7 +74,7 @@ class FusedMatmulScatterProgram:
         self,
         x: pl.Tensor[[B, H], pl.BF16],
         w: pl.Tensor[[H, H], pl.BF16],
-        cache: pl.Out[pl.Tensor[[B * CACHE, H], pl.BF16]],
+        cache: pl.InOut[pl.Tensor[[B * CACHE, H], pl.BF16]],
     ) -> pl.Tensor[[B * CACHE, H], pl.BF16]:
         kv_final = pl.create_tensor([B, H], dtype=pl.FP32)
         with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(pl.SplitMode.LEFT_RIGHT)]):
@@ -104,7 +104,7 @@ class FusedMatmulScatterNoSplitProgram:
         self,
         x: pl.Tensor[[B, H], pl.BF16],
         w: pl.Tensor[[H, H], pl.BF16],
-        cache: pl.Out[pl.Tensor[[B * CACHE, H], pl.BF16]],
+        cache: pl.InOut[pl.Tensor[[B * CACHE, H], pl.BF16]],
     ) -> pl.Tensor[[B * CACHE, H], pl.BF16]:
         kv_final = pl.create_tensor([B, H], dtype=pl.FP32)
         with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(pl.SplitMode.NONE)]):
@@ -127,7 +127,7 @@ class ScatterOnlyProgram:
     def fused(
         self,
         kv_final: pl.Tensor[[B, H], pl.FP32],
-        cache: pl.Out[pl.Tensor[[B * CACHE, H], pl.BF16]],
+        cache: pl.InOut[pl.Tensor[[B * CACHE, H], pl.BF16]],
     ) -> pl.Tensor[[B * CACHE, H], pl.BF16]:
         with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(pl.SplitMode.NONE)]):
             for b in pl.range(B):  # per-row scatter to distinct cache rows
@@ -153,7 +153,7 @@ class FusedMatmulScatterTestCase(PTOTestCase):
         return [
             TensorSpec("x", [B, H], DataType.BF16, init_value=_make_x),
             TensorSpec("w", [H, H], DataType.BF16, init_value=lambda: torch.ones(H, H, dtype=torch.bfloat16)),
-            TensorSpec("cache", [B * CACHE, H], DataType.BF16, is_output=True),
+            TensorSpec("cache", [B * CACHE, H], DataType.BF16, init_value=torch.zeros, is_output=True),
         ]
 
     def get_program(self) -> Any:
@@ -195,7 +195,7 @@ class ScatterOnlyTestCase(PTOTestCase):
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("kv_final", [B, H], DataType.FP32, init_value=_make_kv_final),
-            TensorSpec("cache", [B * CACHE, H], DataType.BF16, is_output=True),
+            TensorSpec("cache", [B * CACHE, H], DataType.BF16, init_value=torch.zeros, is_output=True),
         ]
 
     def get_program(self) -> Any:

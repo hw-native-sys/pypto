@@ -118,7 +118,9 @@ class _UnaryMathBase(PTOTestCase):
             TensorSpec(
                 "a", [self._m, self._n], self._dtype, init_value=lambda: self._input_fn(self._m, self._n)
             ),
-            TensorSpec("out", [self._out_m, self._out_n], self._dtype, is_output=True),
+            TensorSpec(
+                "out", [self._out_m, self._out_n], self._dtype, is_output=True, init_value=torch.zeros
+            ),
         ]
 
     def _ref(self, a: torch.Tensor) -> torch.Tensor:
@@ -130,6 +132,7 @@ class _UnaryMathBase(PTOTestCase):
         r, c = self._off
         if self._valid:
             vm, vn = self._valid
+            # Region outside valid_shapes stays zero — matches the InOut zero-init staged to device.
             res = torch.zeros_like(a)
             res[:vm, :vn] = self._ref(a[:vm, :vn])
         else:
@@ -153,7 +156,7 @@ class TileSinTestCase(_UnaryMathBase):
         class SinProgram:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
-                self, a: pl.Tensor[[m, n], dt], out: pl.Out[pl.Tensor[[om, on], dt]]
+                self, a: pl.Tensor[[m, n], dt], out: pl.InOut[pl.Tensor[[om, on], dt]]
             ) -> pl.Tensor[[om, on], dt]:
                 a_tile = pl.load(a, [0, 0], [m, n], valid_shapes=vshape)
                 out = pl.store(pl.tile.sin(a_tile), off, out)
@@ -161,7 +164,7 @@ class TileSinTestCase(_UnaryMathBase):
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
-                self, a: pl.Tensor[[m, n], dt], out: pl.Out[pl.Tensor[[om, on], dt]]
+                self, a: pl.Tensor[[m, n], dt], out: pl.InOut[pl.Tensor[[om, on], dt]]
             ) -> pl.Tensor[[om, on], dt]:
                 out = self.kernel(a, out)
                 return out
@@ -184,7 +187,7 @@ class TileCosTestCase(_UnaryMathBase):
         class CosProgram:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
-                self, a: pl.Tensor[[m, n], dt], out: pl.Out[pl.Tensor[[om, on], dt]]
+                self, a: pl.Tensor[[m, n], dt], out: pl.InOut[pl.Tensor[[om, on], dt]]
             ) -> pl.Tensor[[om, on], dt]:
                 a_tile = pl.load(a, [0, 0], [m, n], valid_shapes=vshape)
                 out = pl.store(pl.tile.cos(a_tile), off, out)
@@ -192,7 +195,7 @@ class TileCosTestCase(_UnaryMathBase):
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
-                self, a: pl.Tensor[[m, n], dt], out: pl.Out[pl.Tensor[[om, on], dt]]
+                self, a: pl.Tensor[[m, n], dt], out: pl.InOut[pl.Tensor[[om, on], dt]]
             ) -> pl.Tensor[[om, on], dt]:
                 out = self.kernel(a, out)
                 return out
@@ -215,7 +218,7 @@ class TileSqrtTestCase(_UnaryMathBase):
         class SqrtProgram:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
-                self, a: pl.Tensor[[m, n], dt], out: pl.Out[pl.Tensor[[om, on], dt]]
+                self, a: pl.Tensor[[m, n], dt], out: pl.InOut[pl.Tensor[[om, on], dt]]
             ) -> pl.Tensor[[om, on], dt]:
                 a_tile = pl.load(a, [0, 0], [m, n], valid_shapes=vshape)
                 out = pl.store(pl.tile.sqrt(a_tile), off, out)
@@ -223,7 +226,7 @@ class TileSqrtTestCase(_UnaryMathBase):
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
-                self, a: pl.Tensor[[m, n], dt], out: pl.Out[pl.Tensor[[om, on], dt]]
+                self, a: pl.Tensor[[m, n], dt], out: pl.InOut[pl.Tensor[[om, on], dt]]
             ) -> pl.Tensor[[om, on], dt]:
                 out = self.kernel(a, out)
                 return out

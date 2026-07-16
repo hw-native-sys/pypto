@@ -29,6 +29,7 @@ from typing import Any
 
 import pypto.language as pl
 import pytest
+import torch
 from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
 
 
@@ -522,7 +523,7 @@ class TestForLoopContinue(PTOTestCase):
         return [
             TensorSpec("a", [256, 64], DataType.FP32, init_value=2.0),
             TensorSpec("b", [256, 64], DataType.FP32, init_value=3.0),
-            TensorSpec("c", [256, 64], DataType.FP32, is_output=True),
+            TensorSpec("c", [256, 64], DataType.FP32, init_value=torch.zeros, is_output=True),
         ]
 
     def get_program(self) -> Any:
@@ -533,7 +534,7 @@ class TestForLoopContinue(PTOTestCase):
                 self,
                 a: pl.Tensor[[256, 64], pl.FP32],
                 b: pl.Tensor[[256, 64], pl.FP32],
-                c: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
+                c: pl.InOut[pl.Tensor[[256, 64], pl.FP32]],
             ) -> pl.Tensor[[256, 64], pl.FP32]:
                 for i in pl.range(4):
                     if i % 2 != 0:
@@ -550,7 +551,7 @@ class TestForLoopContinue(PTOTestCase):
                 self,
                 a: pl.Tensor[[256, 64], pl.FP32],
                 b: pl.Tensor[[256, 64], pl.FP32],
-                c: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
+                c: pl.InOut[pl.Tensor[[256, 64], pl.FP32]],
             ) -> pl.Tensor[[256, 64], pl.FP32]:
                 c = self.kernel_continue(a, b, c)
                 return c

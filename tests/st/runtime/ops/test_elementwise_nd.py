@@ -38,7 +38,7 @@ class Tile4DMulPartialProgram:
     def kernel(
         self,
         a: pl.Tensor[[4, 3, 8, 64], pl.FP32],
-        out: pl.Out[pl.Tensor[[4, 3, 8, 64], pl.FP32]],
+        out: pl.InOut[pl.Tensor[[4, 3, 8, 64], pl.FP32]],
     ) -> pl.Tensor[[4, 3, 8, 64], pl.FP32]:
         a_tile = pl.load(a, [0, 0, 0, 0], [2, 3, 8, 64])
         c_tile = pl.tile.mul(a_tile, a_tile)
@@ -49,7 +49,7 @@ class Tile4DMulPartialProgram:
     def orchestrator(
         self,
         a: pl.Tensor[[4, 3, 8, 64], pl.FP32],
-        out: pl.Out[pl.Tensor[[4, 3, 8, 64], pl.FP32]],
+        out: pl.InOut[pl.Tensor[[4, 3, 8, 64], pl.FP32]],
     ) -> pl.Tensor[[4, 3, 8, 64], pl.FP32]:
         out = self.kernel(a, out)
         return out
@@ -73,7 +73,7 @@ class Tile4DQuadrantProgram:
     def kernel(
         self,
         a: pl.Tensor[[2, 2, 8, 16], pl.FP32],
-        out: pl.Out[pl.Tensor[[2, 2, 8, 16], pl.FP32]],
+        out: pl.InOut[pl.Tensor[[2, 2, 8, 16], pl.FP32]],
     ) -> pl.Tensor[[2, 2, 8, 16], pl.FP32]:
         tile = pl.load(a, [0, 1, 0, 0], [1, 1, 8, 16])
         result_tile = pl.tile.mul(tile, tile)
@@ -84,7 +84,7 @@ class Tile4DQuadrantProgram:
     def orchestrator(
         self,
         a: pl.Tensor[[2, 2, 8, 16], pl.FP32],
-        out: pl.Out[pl.Tensor[[2, 2, 8, 16], pl.FP32]],
+        out: pl.InOut[pl.Tensor[[2, 2, 8, 16], pl.FP32]],
     ) -> pl.Tensor[[2, 2, 8, 16], pl.FP32]:
         out = self.kernel(a, out)
         return out
@@ -109,7 +109,7 @@ class Tile4DTopToBottomProgram:
         self,
         a: pl.Tensor[[2, 2, 8, 16], pl.FP32],
         b: pl.Tensor[[2, 2, 8, 16], pl.FP32],
-        out: pl.Out[pl.Tensor[[2, 2, 8, 16], pl.FP32]],
+        out: pl.InOut[pl.Tensor[[2, 2, 8, 16], pl.FP32]],
     ) -> pl.Tensor[[2, 2, 8, 16], pl.FP32]:
         a_tile = pl.load(a, [0, 0, 0, 0], [1, 2, 8, 16])
         b_tile = pl.load(b, [0, 0, 0, 0], [1, 2, 8, 16])
@@ -122,7 +122,7 @@ class Tile4DTopToBottomProgram:
         self,
         a: pl.Tensor[[2, 2, 8, 16], pl.FP32],
         b: pl.Tensor[[2, 2, 8, 16], pl.FP32],
-        out: pl.Out[pl.Tensor[[2, 2, 8, 16], pl.FP32]],
+        out: pl.InOut[pl.Tensor[[2, 2, 8, 16], pl.FP32]],
     ) -> pl.Tensor[[2, 2, 8, 16], pl.FP32]:
         out = self.kernel(a, b, out)
         return out
@@ -142,7 +142,7 @@ class Tile2DStoreTo3DProgram:
         self,
         a: pl.Tensor[[4, 16], pl.FP32],
         b: pl.Tensor[[4, 16], pl.FP32],
-        out: pl.Out[pl.Tensor[[2, 4, 16], pl.FP32]],
+        out: pl.InOut[pl.Tensor[[2, 4, 16], pl.FP32]],
     ) -> pl.Tensor[[2, 4, 16], pl.FP32]:
         a_tile = pl.load(a, [0, 0], [1, 16])
         b_tile = pl.load(b, [0, 0], [1, 16])
@@ -155,7 +155,7 @@ class Tile2DStoreTo3DProgram:
         self,
         a: pl.Tensor[[4, 16], pl.FP32],
         b: pl.Tensor[[4, 16], pl.FP32],
-        out: pl.Out[pl.Tensor[[2, 4, 16], pl.FP32]],
+        out: pl.InOut[pl.Tensor[[2, 4, 16], pl.FP32]],
     ) -> pl.Tensor[[2, 4, 16], pl.FP32]:
         out = self.kernel(a, b, out)
         return out
@@ -211,7 +211,7 @@ class Tile4DMulPartialTestCase(PTOTestCase):
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("a", [4, 3, 8, 64], DataType.FP32, init_value=torch.randn),
-            TensorSpec("out", [4, 3, 8, 64], DataType.FP32, is_output=True),
+            TensorSpec("out", [4, 3, 8, 64], DataType.FP32, init_value=torch.zeros, is_output=True),
         ]
 
     def get_program(self) -> Any:
@@ -236,7 +236,7 @@ class Tile4DTopToBottomTestCase(PTOTestCase):
         return [
             TensorSpec("a", [2, 2, 8, 16], DataType.FP32, init_value=torch.randn),
             TensorSpec("b", [2, 2, 8, 16], DataType.FP32, init_value=torch.randn),
-            TensorSpec("out", [2, 2, 8, 16], DataType.FP32, is_output=True),
+            TensorSpec("out", [2, 2, 8, 16], DataType.FP32, init_value=torch.zeros, is_output=True),
         ]
 
     def get_program(self) -> Any:
@@ -260,7 +260,7 @@ class Tile4DQuadrantTestCase(PTOTestCase):
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("a", [2, 2, 8, 16], DataType.FP32, init_value=torch.randn),
-            TensorSpec("out", [2, 2, 8, 16], DataType.FP32, is_output=True),
+            TensorSpec("out", [2, 2, 8, 16], DataType.FP32, init_value=torch.zeros, is_output=True),
         ]
 
     def get_program(self) -> Any:
@@ -291,7 +291,7 @@ class Tile2DStoreTo3DTestCase(PTOTestCase):
         return [
             TensorSpec("a", [4, 16], DataType.FP32, init_value=torch.randn),
             TensorSpec("b", [4, 16], DataType.FP32, init_value=torch.randn),
-            TensorSpec("out", [2, 4, 16], DataType.FP32, is_output=True),
+            TensorSpec("out", [2, 4, 16], DataType.FP32, init_value=torch.zeros, is_output=True),
         ]
 
     def get_program(self) -> Any:

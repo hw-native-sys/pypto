@@ -41,7 +41,7 @@ class IncoreArrayRoundTripProgram:
         self,
         index_t: pl.Tensor[[1, 8], pl.INT32],
         src_t: pl.Tensor[[1, 32], pl.FP32],
-        dst_t: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+        dst_t: pl.InOut[pl.Tensor[[32, 32], pl.FP32]],
     ) -> pl.Tensor[[32, 32], pl.FP32]:
         index_tile: pl.Tile[[1, 8], pl.INT32] = pl.load(index_t, [0, 0], [1, 8])
         src_tile: pl.Tile[[1, 32], pl.FP32] = pl.load(src_t, [0, 0], [1, 32])
@@ -61,7 +61,7 @@ class IncoreArrayRoundTripProgram:
         self,
         index_t: pl.Tensor[[1, 8], pl.INT32],
         src_t: pl.Tensor[[1, 32], pl.FP32],
-        dst_t: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+        dst_t: pl.InOut[pl.Tensor[[32, 32], pl.FP32]],
     ) -> pl.Tensor[[32, 32], pl.FP32]:
         dst_t = self.kernel(index_t, src_t, dst_t)
         return dst_t
@@ -117,7 +117,7 @@ class IncoreArrayConditionalProgram:
         self,
         cond_t: pl.Tensor[[1, 8], pl.INT32],
         src_t: pl.Tensor[[1, 32], pl.FP32],
-        dst_t: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+        dst_t: pl.InOut[pl.Tensor[[32, 32], pl.FP32]],
     ) -> pl.Tensor[[32, 32], pl.FP32]:
         cond_tile: pl.Tile[[1, 8], pl.INT32] = pl.load(cond_t, [0, 0], [1, 8])
         src_tile: pl.Tile[[1, 32], pl.FP32] = pl.load(src_t, [0, 0], [1, 32])
@@ -138,7 +138,7 @@ class IncoreArrayConditionalProgram:
         self,
         cond_t: pl.Tensor[[1, 8], pl.INT32],
         src_t: pl.Tensor[[1, 32], pl.FP32],
-        dst_t: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+        dst_t: pl.InOut[pl.Tensor[[32, 32], pl.FP32]],
     ) -> pl.Tensor[[32, 32], pl.FP32]:
         dst_t = self.kernel(cond_t, src_t, dst_t)
         return dst_t
