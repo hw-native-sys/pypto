@@ -552,7 +552,8 @@ class TestTileReductionOps:
         optimized_program = default_pass_manager.run_passes(RowSumKernel)
 
         assert optimized_program is not None
-        assert "tile.row_sum" in str(optimized_program)
+        assert "pto.trowsum" in str(optimized_program)
+        assert "tile.row_sum" not in str(optimized_program)
 
     def test_tile_row_min(self):
         """Test tile.row_min operation."""

@@ -51,8 +51,9 @@ void PTOOpSpec::ValidateDefinition(const std::string& op_name) const {
   CHECK(variable_group_count <= 1) << "Operator '" << op_name
                                    << "' PTO schema may have at most one variable operand group";
   if (result_kind == PTOResultKind::TileBuffer) {
-    CHECK(result_effect == PTOMemoryEffect::Allocate)
-        << "Operator '" << op_name << "' PTO tile-buffer result must have Allocate effect";
+    CHECK(result_effect == PTOMemoryEffect::Allocate || result_effect == PTOMemoryEffect::None)
+        << "Operator '" << op_name
+        << "' PTO tile-buffer result must allocate storage or define a metadata-only view";
   } else {
     CHECK(result_effect == PTOMemoryEffect::None)
         << "Operator '" << op_name << "' PTO result-less op cannot carry a result effect";

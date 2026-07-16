@@ -115,6 +115,7 @@ class PassManager:
         strategy: OptimizationStrategy,
         *,
         analyze_auto_scopes_for_deps: bool,
+        lower_to_pto_ir: bool,
     ) -> tuple[PassFactory, ...]:
         """Build the immutable pass-factory recipe for an optimization strategy."""
         tensor_prefix_passes: tuple[PassFactory, ...] = (
@@ -201,8 +202,8 @@ class PassManager:
             passes.simplify,
             # Insert explicit AUTO RuntimeScopeStmt nodes (function body + for/if
             # bodies) into Orchestration functions so codegen emits PTO2_SCOPE
-            # 1:1 from the IR. Runs dead last, after the final Simplify, so no
-            # other transform has to reason about the inserted scope wrappers.
+            # 1:1 from the IR. Runs after the final Simplify; later PTO target
+            # passes touch only InCore functions, not these scope wrappers.
             passes.materialize_runtime_scopes,
             # Classify each Orchestration ForStmt iter_arg as a trivial alias or a
             # materialised rebind carry (and size manual-scope TaskId array
@@ -211,6 +212,15 @@ class PassManager:
             # orchestration codegen lowers.
             passes.classify_iter_arg_carry,
         )
+        pto_target_passes: tuple[PassFactory, ...] = (
+            # Make PTO allocation/destination decisions explicit at the codegen
+            # boundary. These run last because Step 4 removes logical Tile/MemRef
+            # properties consumed by earlier tile passes.
+            passes.materialize_pto_tile_handles,
+            passes.lower_tile_to_pto_ir,
+        )
+        if lower_to_pto_ir:
+            tile_pto_passes += pto_target_passes
         if strategy == OptimizationStrategy.Default:
             return tensor_prefix_passes + tensor_only_passes + tile_pto_passes
         if strategy == OptimizationStrategy.DebugTileOptimization:
@@ -223,6 +233,7 @@ class PassManager:
         strategy: OptimizationStrategy = OptimizationStrategy.Default,
         *,
         analyze_auto_scopes_for_deps: bool = False,
+        lower_to_pto_ir: bool = True,
     ) -> "PassManager":
         """Get a PassManager configured for the specified strategy.
 
@@ -234,6 +245,10 @@ class PassManager:
                 dependency mechanism. User-written manual scopes are skipped:
                 they do not get compiler deps or automatic NoDep/OutputExisting
                 direction rewrites.
+            lower_to_pto_ir: Whether to run the final codegen-boundary passes
+                that replace logical Tile SSA with destination-passing PTO IR.
+                Defaults to True. Set to False only for analysis or debug
+                consumers that explicitly require logical Tile operations.
 
         Returns:
             A PassManager instance configured with the appropriate passes
@@ -241,6 +256,7 @@ class PassManager:
         return cls(
             strategy,
             analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
+            lower_to_pto_ir=lower_to_pto_ir,
         )
 
     def __init__(
@@ -248,6 +264,7 @@ class PassManager:
         strategy: OptimizationStrategy,
         *,
         analyze_auto_scopes_for_deps: bool = False,
+        lower_to_pto_ir: bool = True,
     ):
         """Initialize PassManager with a specific strategy.
 
@@ -255,9 +272,11 @@ class PassManager:
             strategy: The optimization strategy to use
             analyze_auto_scopes_for_deps: If True, enable compiler-derived task
                 dependency analysis for AUTO runtime scopes.
+            lower_to_pto_ir: Whether to include the final PTO target-IR passes.
         """
         self.strategy = strategy
         self.analyze_auto_scopes_for_deps = analyze_auto_scopes_for_deps
+        self.lower_to_pto_ir = lower_to_pto_ir
 
         # When the active PassContext selects ptoas as the memory planner, skip
         # the opportunistic lifetime reuse (MemoryReuse) and address assignment
@@ -287,6 +306,7 @@ class PassManager:
         pass_factories = self._get_pass_factories(
             strategy,
             analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
+            lower_to_pto_ir=lower_to_pto_ir,
         )
         for pass_factory in pass_factories:
             pass_obj = pass_factory()

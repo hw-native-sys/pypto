@@ -52,23 +52,36 @@ struct TileTransferInfo {
   std::optional<MemorySpace> memory;  ///< target_memory of the tile, if known.
 };
 
-/// Inspect a TileType and compute the innermost-dim transfer facts. Returns
-/// nullopt if the shape is symbolic, the dtype has unknown bit width, or the
-/// type is not a tile.
+/// Inspect a logical TileType or target PTOTileBufType and compute the
+/// innermost-dim transfer facts. Returns nullopt if the shape is symbolic, the
+/// dtype has unknown bit width, or the type is not a tile representation.
 ///
 /// We use the result type for tile.load (which produces a tile) and the first
 /// argument's type for tile.store (which consumes a tile) — see VisitExpr_.
 std::optional<TileTransferInfo> InspectTile(const TypePtr& type) {
   auto tile = std::dynamic_pointer_cast<const TileType>(type);
-  if (!tile) return std::nullopt;
-  if (tile->shape_.empty()) return std::nullopt;
+  auto buffer = std::dynamic_pointer_cast<const PTOTileBufType>(type);
+  int64_t innermost_elems = 0;
+  DataType dtype;
+  std::optional<MemorySpace> memory;
+  if (tile) {
+    if (tile->shape_.empty()) return std::nullopt;
+    // Logical Tile innermost dimensions may still be symbolic.
+    auto last = std::dynamic_pointer_cast<const ConstInt>(tile->shape_.back());
+    if (!last) return std::nullopt;
+    innermost_elems = last->value_;
+    dtype = tile->dtype_;
+    memory = tile->GetMemorySpace();
+  } else if (buffer) {
+    innermost_elems = buffer->cols_;
+    dtype = buffer->dtype_;
+    memory = buffer->memory_space_;
+  } else {
+    return std::nullopt;
+  }
+  if (innermost_elems <= 0) return std::nullopt;
 
-  // Innermost dimension must be a constant integer to compute byte size.
-  auto last = std::dynamic_pointer_cast<const ConstInt>(tile->shape_.back());
-  if (!last) return std::nullopt;
-  if (last->value_ <= 0) return std::nullopt;
-
-  size_t bits = tile->dtype_.GetBit();
+  size_t bits = dtype.GetBit();
   if (bits == 0) return std::nullopt;
 
   TileTransferInfo info;
@@ -76,10 +89,10 @@ std::optional<TileTransferInfo> InspectTile(const TypePtr& type) {
   // dtypes (int4, bool, ...) per-element rounding overestimates the row size
   // and would mask hints that should fire. Innermost-dim granularity is a
   // bus / cache concern measured in bytes.
-  info.innermost_bytes = (static_cast<uint64_t>(last->value_) * static_cast<uint64_t>(bits) + 7u) / 8u;
-  info.innermost_elems = last->value_;
-  info.dtype_name = tile->dtype_.ToString();
-  info.memory = tile->GetMemorySpace();
+  info.innermost_bytes = (static_cast<uint64_t>(innermost_elems) * static_cast<uint64_t>(bits) + 7u) / 8u;
+  info.innermost_elems = innermost_elems;
+  info.dtype_name = dtype.ToString();
+  info.memory = memory;
   return info;
 }
 
@@ -113,6 +126,14 @@ class TileInnermostDimVisitor : public IRVisitor {
       // tile.store's first arg is the source tile; innermost dim lives there.
       if (op->args_.empty() || !op->args_[0]) return;
       RecordIfBelowThreshold(name, op->args_[0]->GetType(), op->span_);
+    } else if (IsOp(op, "pto.tload")) {
+      // Target tload carries the destination tile buffer as its final operand.
+      if (op->args_.empty() || !op->args_.back()) return;
+      RecordIfBelowThreshold("tile.load", op->args_.back()->GetType(), op->span_);
+    } else if (IsOp(op, "pto.tstore")) {
+      // Target tstore keeps the source tile buffer as its first operand.
+      if (op->args_.empty() || !op->args_[0]) return;
+      RecordIfBelowThreshold("tile.store", op->args_[0]->GetType(), op->span_);
     }
   }
 

@@ -46,6 +46,7 @@
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/pto_target_lowering.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
@@ -1718,10 +1719,22 @@ class OrchestrationStmtCodegen : public CodegenBase {
     return out;
   }
 
+  size_t CountSyntheticPTOTargetParams(const FunctionPtr& callee_func) const {
+    size_t count = 0;
+    while (count < callee_func->params_.size() &&
+           IsSyntheticPTOTargetParamName(
+               callee_func->params_[callee_func->params_.size() - 1 - count]->name_hint_)) {
+      ++count;
+    }
+    return count;
+  }
+
   size_t CountTrailingCommCtxParams(const FunctionPtr& callee_func) const {
+    const size_t synthetic_count = CountSyntheticPTOTargetParams(callee_func);
+    const size_t public_param_count = callee_func->params_.size() - synthetic_count;
     size_t ctx_count = 0;
-    while (ctx_count < callee_func->params_.size() &&
-           IsA<CommCtxType>(callee_func->params_[callee_func->params_.size() - 1 - ctx_count]->GetType())) {
+    while (ctx_count < public_param_count &&
+           IsA<CommCtxType>(callee_func->params_[public_param_count - 1 - ctx_count]->GetType())) {
       ++ctx_count;
     }
     return ctx_count;
@@ -1874,7 +1887,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // VarPtr identity against each arg — never by name.
     std::set<const Var*> dump_var_set = CollectDumpVarSet(call);
 
-    params.reserve(callee_func->params_.size());
+    const size_t synthetic_param_count = CountSyntheticPTOTargetParams(callee_func);
+    const size_t public_param_count = callee_func->params_.size() - synthetic_param_count;
+    params.reserve(public_param_count);
     auto push_call_arg = [&](size_t arg_idx) {
       params.push_back(BuildOneArgParam(call, callee_name, call_arg_directions, arg_idx));
       if (!dump_var_set.empty()) {
@@ -1884,15 +1899,15 @@ class OrchestrationStmtCodegen : public CodegenBase {
       }
     };
     if (IsSubmitCall(call)) {
-      INTERNAL_CHECK_SPAN(call->args_.size() <= callee_func->params_.size(), call->span_)
+      INTERNAL_CHECK_SPAN(call->args_.size() <= public_param_count, call->span_)
           << "Submit to '" << callee_name << "' has args_ size " << call->args_.size()
-          << " but callee has only " << callee_func->params_.size() << " params.";
+          << " but callee has only " << public_param_count << " public params.";
       const size_t ctx_count = CountTrailingCommCtxParams(callee_func);
       INTERNAL_CHECK_SPAN(call->args_.size() >= ctx_count, call->span_)
           << "Submit to '" << callee_name << "' has " << call->args_.size()
           << " args, fewer than the materialized CommCtx suffix size " << ctx_count << ".";
       const size_t original_arg_count = call->args_.size() - ctx_count;
-      const size_t original_param_count = callee_func->params_.size() - ctx_count;
+      const size_t original_param_count = public_param_count - ctx_count;
       for (size_t arg_idx = 0; arg_idx < original_arg_count; ++arg_idx) {
         push_call_arg(arg_idx);
       }
@@ -1914,10 +1929,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
       // Plain Call: full coverage required (args.size() == callee params).
       // The trivial `params.size() == call->args_.size()` invariant holds by
       // construction; the meaningful invariant is callee-side coverage.
-      INTERNAL_CHECK_SPAN(call->args_.size() == callee_func->params_.size(), call->span_)
+      INTERNAL_CHECK_SPAN(call->args_.size() == public_param_count, call->span_)
           << "Call to '" << callee_name << "' has " << call->args_.size() << " args but callee declares "
-          << callee_func->params_.size()
-          << " params (Call requires full coverage; only Submit may be a prefix).";
+          << public_param_count
+          << " public params (Call requires full coverage; only Submit may be a prefix).";
     }
 
     // New PTOParam API: tensors must precede scalars (see check_add_tensor_valid() in pto_types.h)

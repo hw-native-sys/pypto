@@ -2,6 +2,13 @@
 
 PTO 代码生成 (CodeGen) (`PTOCodegen`) 从 PyPTO 中间表示 (IR) 生成 PTO-ISA 方言的 MLIR 代码。它将高层 PyPTO 程序转换为适合加速器执行的低层 PTO 指令。
 
+> 默认流水线现在会将受支持的逻辑 Tile 子集下沉为显式 buffer 目标 IR，再交给
+> 机械式 printer。详见[显式 PTO 目标 IR](02-explicit_pto_target_ir.md)。不受支持的
+> 函数会在修改前被标记，并保持整个函数走旧下沉路径。
+
+下文记录的 visitor 和辅助逻辑属于旧逻辑 Tile 入口，仍供直接调用 `PTOCodegen`
+和对比测试使用。默认 Pass 流水线产出的程序会改从 `PTOIRPrinter` 进入。
+
 ## 设计原则：严格的 1-to-1 映射
 
 代码生成必须是从 IR 到生成代码的**严格 1-to-1 转换**。每个 IR 节点直接映射到对应的输出代码结构——代码生成层不应执行优化、分析或间接转换。

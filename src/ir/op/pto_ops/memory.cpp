@@ -53,25 +53,47 @@ REGISTER_OP("pto.alloc_tile")
         PTOMemoryEffect::Allocate})
     .f_deduce_type(DeduceVoidTargetType);
 
+REGISTER_OP("pto.subview")
+    .set_op_category("PTOTargetOp")
+    .set_description("Create a typed SSA tile-buffer view over an existing PTO handle")
+    .add_argument("source", "Source PTO tile buffer")
+    .add_argument("shape", "Static physical subview shape")
+    .add_argument("offset", "Subview row and column offsets")
+    .add_argument("valid_shape", "Explicit subview valid row and column extents")
+    .set_internal_only()
+    .set_pto_op_spec(PTOOpSpec{
+        {Group(PTOOperandRole::Input, PTOMemoryEffect::None, PTOOperandTypeConstraint::TileBuffer, 1, 1),
+         Group(PTOOperandRole::Metadata, PTOMemoryEffect::None, PTOOperandTypeConstraint::Any, 3, 3)},
+        PTOResultKind::TileBuffer,
+        PTOMemoryEffect::None})
+    .f_deduce_type(DeduceVoidTargetType);
+
 REGISTER_OP("pto.tload")
     .set_op_category("PTOTargetOp")
-    .set_description("Load from a source view into an explicit PTO tile-buffer destination")
-    .add_argument("source", "Source tensor view")
+    .set_description("Load a tensor partition into an explicit PTO tile-buffer destination")
+    .add_argument("source", "Source tensor")
+    .add_argument("offsets", "Explicit source partition offsets")
+    .add_argument("valid_extents", "Explicit source partition sizes")
     .add_argument("output", "Destination PTO tile buffer")
     .set_internal_only()
     .set_pto_op_spec(PTOOpSpec{
         {Group(PTOOperandRole::Input, PTOMemoryEffect::Read, PTOOperandTypeConstraint::Any, 1, 1),
+         Group(PTOOperandRole::Metadata, PTOMemoryEffect::None, PTOOperandTypeConstraint::Any, 2, 2),
          Group(PTOOperandRole::Output, PTOMemoryEffect::Write, PTOOperandTypeConstraint::TileBuffer, 1, 1)}})
     .f_deduce_type(DeduceVoidTargetType);
 
 REGISTER_OP("pto.tstore")
     .set_op_category("PTOTargetOp")
-    .set_description("Store from a PTO tile buffer into an explicit destination view")
+    .set_description("Store from a PTO tile buffer into an explicit tensor partition")
     .add_argument("input", "Source PTO tile buffer")
-    .add_argument("destination", "Destination tensor view")
+    .add_argument("offsets", "Explicit destination partition offsets")
+    .add_argument("valid_extents", "Explicit destination partition sizes")
+    .add_argument("destination", "Destination tensor")
+    .set_attr<int>("atomic")
     .set_internal_only()
     .set_pto_op_spec(PTOOpSpec{
         {Group(PTOOperandRole::Input, PTOMemoryEffect::Read, PTOOperandTypeConstraint::TileBuffer, 1, 1),
+         Group(PTOOperandRole::Metadata, PTOMemoryEffect::None, PTOOperandTypeConstraint::Any, 2, 2),
          Group(PTOOperandRole::Output, PTOMemoryEffect::Write, PTOOperandTypeConstraint::Any, 1, 1)}})
     .f_deduce_type(DeduceVoidTargetType);
 

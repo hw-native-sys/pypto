@@ -177,14 +177,25 @@ Pass AllocateMemoryAddr();
 /**
  * @brief Materialize explicit PTO tile-buffer handles for the Step-3 lowering slice
  *
- * Supports straight-line, static-2D ``tile.load``, ``tile.sqrt``, ``tile.add``,
- * ``tile.mul``, and ``tile.store`` programs. Each Tile result gets a typed
- * ``pto.alloc_tile`` definition, while compiler attrs record the exact
- * Tile-value -> handle plan consumed by the subsequent target-op rewrite.
- * Unsupported control flow, views, tuples, dynamic shapes, and in-place ops
- * fail explicitly. This pass is experimental and is not in the default pipeline.
+ * Supports the registered static-2D Tile operation slice and structured
+ * ``ForStmt``/``IfStmt`` regions. Each logical Tile operand/result gets an
+ * explicit buffer handle plan while the logical SSA value remains for
+ * verification. Unsupported functions are marked for whole-function legacy
+ * codegen before this pass changes their body. This pass runs by default at the
+ * Tile codegen boundary.
  */
 Pass MaterializePTOTileHandles();
+
+/**
+ * @brief Rewrite the verified Step-3 handle plan to PTO destination-passing IR
+ *
+ * Eliminates logical Tile values for the supported static-2D slice. The
+ * resulting transfer operations carry explicit partition offsets and extents,
+ * and destination-passing operations carry explicit input and output buffer
+ * handles. Structured scalar/Tensor control flow remains in SSA form. This
+ * pass runs by default after MaterializePTOTileHandles.
+ */
+Pass LowerTileToPTOIR();
 
 /**
  * @brief Eliminate FunctionType::Inline functions by splicing their bodies

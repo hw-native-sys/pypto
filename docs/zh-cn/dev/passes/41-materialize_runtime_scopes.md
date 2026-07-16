@@ -35,9 +35,9 @@ parser 直接物化进 IR。这是控制 scope 粒度（ring 隔离）、MANUAL 
 `auto_scope=False` 下才能解析回来（parser 在默认模式下拒绝手写 AUTO scope，
 默认模式由编译器决定放置）。
 
-**何时使用**：在 `Default` 与 `DebugTileOptimization` 策略中作为最后一个 pass
-运行，位于最终的 `Simplify` 之后。放在最末意味着其它任何 transform 都无需处理
-被插入的 scope 包裹。
+**何时使用**：在 `Default` 与 `DebugTileOptimization` 策略中位于最终的
+`Simplify` 之后、`ClassifyIterArgCarry` 之前。后续 PTO 目标下沉只修改 InCore
+函数，无需处理这里插入的 Orchestration scope 包裹。
 
 **作用范围**：仅修改 `Orchestration` 函数。InCore / AIC / AIV / Group / Spmd
 的函数体从不会被 codegen 包裹 scope，因此原样返回。

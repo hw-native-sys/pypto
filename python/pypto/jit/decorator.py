@@ -2112,6 +2112,25 @@ class JITFunction:
             ``ir.Program`` after the full pass pipeline, suitable for
             ``ir.assert_structural_equal`` comparison.
         """
+        return self._compile_for_test(args, kwargs, lower_to_pto_ir=True)
+
+    def compile_logical_for_test(self, *args: Any, **kwargs: Any) -> Any:
+        """Compile for tests while preserving logical Tile operations.
+
+        This is the compatibility entrypoint for IR interpreters and analyses
+        that do not consume destination-passing PTO target IR. Device codegen
+        and :meth:`compile_for_test` keep target-IR lowering enabled.
+        """
+        return self._compile_for_test(args, kwargs, lower_to_pto_ir=False)
+
+    def _compile_for_test(
+        self,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        *,
+        lower_to_pto_ir: bool,
+    ) -> Any:
+        """Implementation shared by the target-IR and logical-IR test paths."""
         import pypto.language as pl  # noqa: PLC0415
         from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
 
@@ -2153,7 +2172,10 @@ class JITFunction:
         # Return the post-pass ir.Program via the lightweight path
         # (no codegen) for structural equality comparison.
         pre_pass = self._compile_to_program(tensor_meta, scalar_values, scalar_dtypes, per_func_dyn, pl)
-        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        pm = PassManager.get_strategy(
+            OptimizationStrategy.Default,
+            lower_to_pto_ir=lower_to_pto_ir,
+        )
         return pm.run_passes(pre_pass)
 
     def __repr__(self) -> str:

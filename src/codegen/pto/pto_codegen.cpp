@@ -32,6 +32,7 @@
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/codegen/distributed/comm_layout.h"
+#include "pypto/codegen/pto/pto_ir_printer.h"
 #include "pypto/codegen/pto/pto_type_utils.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
@@ -76,6 +77,25 @@ using ir::YieldStmtPtr;
 namespace transform_utils = ir::transform_utils;
 
 namespace {
+
+bool ContainsDestinationPassingPTOIR(const ProgramPtr& program) {
+  if (!program) return false;
+  for (const auto& [global_var, function] : program->functions_) {
+    (void)global_var;
+    if (!function || !function->body_) continue;
+    class Finder final : public ir::IRVisitor {
+     public:
+      void VisitExpr_(const CallPtr& call) override {
+        if (call->op_ && call->op_->name_.rfind("pto.", 0) == 0) found = true;
+        if (!found) IRVisitor::VisitExpr_(call);
+      }
+      bool found = false;
+    } finder;
+    finder.VisitStmt(function->body_);
+    if (finder.found) return true;
+  }
+  return false;
+}
 
 // Full-MemRef-identity key used by PTOAS memory-planner codegen to decide when
 // two tile variables denote the *same* buffer (and must share one tile_buf
@@ -403,6 +423,9 @@ const backend::BackendHandler* PTOCodegen::GetBackendHandler() const { return ba
 // ========================================================================
 
 std::string PTOCodegen::Generate(const ProgramPtr& program, bool emit_tile_addr) {
+  if (ContainsDestinationPassingPTOIR(program)) {
+    return PTOIRPrinter(backend_).Generate(program, emit_tile_addr);
+  }
   emit_tile_addr_ = emit_tile_addr;
   stream_.str("");
   stream_.clear();

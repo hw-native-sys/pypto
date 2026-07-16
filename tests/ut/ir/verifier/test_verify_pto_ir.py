@@ -82,6 +82,16 @@ def test_tadd_missing_output_is_rejected():
     assert any("invalid operand count 2" in message for message in messages)
 
 
+def test_target_handle_use_must_be_dominated_by_allocation():
+    lhs = ir.Var("lhs", _buf_type(), _span())
+    rhs, rhs_alloc = _alloc("rhs")
+    out, out_alloc = _alloc("out")
+    tadd = _call("pto.tadd", [lhs, rhs, out], ir.UnknownType.get())
+
+    messages = _messages(_program([rhs_alloc, out_alloc, ir.EvalStmt(tadd, _span())]))
+    assert any("has no dominating allocation" in message for message in messages)
+
+
 def test_tadd_output_must_be_tile_buffer():
     lhs = ir.Var("lhs", _buf_type(), _span())
     rhs = ir.Var("rhs", _buf_type(), _span())
@@ -90,6 +100,16 @@ def test_tadd_output_must_be_tile_buffer():
 
     messages = _messages(_program([ir.EvalStmt(tadd, _span())]))
     assert any("operand #2 must have PTOTileBufType" in message for message in messages)
+
+
+def test_tadds_scalar_operand_must_have_scalar_type():
+    source, source_alloc = _alloc("source")
+    not_scalar, not_scalar_alloc = _alloc("not_scalar")
+    out, out_alloc = _alloc("out")
+    tadds = _call("pto.tadds", [source, not_scalar, out], ir.UnknownType.get())
+
+    messages = _messages(_program([source_alloc, not_scalar_alloc, out_alloc, ir.EvalStmt(tadds, _span())]))
+    assert any("operand #1 must have ScalarType" in message for message in messages)
 
 
 def test_alloc_result_must_be_tile_buffer():

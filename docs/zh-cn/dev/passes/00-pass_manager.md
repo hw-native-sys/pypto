@@ -93,6 +93,8 @@ struct PassProperties {
 | Simplify | — | — | — |
 | MaterializeRuntimeScopes | SplitIncoreOrch, CallDirectionsResolved | RuntimeScopesMaterialized | — |
 | ClassifyIterArgCarry | CallDirectionsResolved, RuntimeScopesMaterialized | IterArgCarryClassified, RuntimeScopesMaterialized | — |
+| MaterializePTOTileHandles | SSAForm, SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D, TileMemoryInferred, NormalizedStmtStructure | 所需属性，以及 PTOHandlesMaterialized | — |
+| LowerTileToPTOIR | SSAForm, SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D, TileMemoryInferred, NormalizedStmtStructure, PTOHandlesMaterialized | SSAForm, SplitIncoreOrch, NormalizedStmtStructure, PTOBufferized | IncoreTileOps, HasMemRefs, AllocatedMemoryAddr, TileOps2D, TileMemoryInferred, PTOHandlesMaterialized |
 
 > **注意**：VerifySSA 和 TypeCheck 是**属性验证器 (PropertyVerifier)**（验证规则），不是 Pass。它们通过 `VerificationInstrument` 或 `run_verifier()` 工具函数运行——参见[验证器](99-verifier.md)。
 
@@ -355,7 +357,7 @@ ir.compile(program, verification_level=ir.VerificationLevel.NONE)
 
 | 方法 | 描述 |
 | ---- | ---- |
-| `get_strategy(strategy)` | 获取按策略配置的 PassManager |
+| `get_strategy(strategy, lower_to_pto_ir=True)` | 获取按策略配置的 PassManager；可选调试开关用于保留逻辑 Tile IR |
 | `run_passes(program, dump_ir, output_dir, prefix)` | 通过 PassPipeline 执行 Pass |
 | `get_pass_names()` | 获取所有 Pass 的名称 |
 | `passes` / `pass_names` | 从底层 PassPipeline 派生的只读快照 |
@@ -369,6 +371,12 @@ from pypto.pypto_core import passes
 # Default usage
 pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
 result = pm.run_passes(program)
+
+# 仅供逻辑 IR 分析/调试消费者使用；生产 codegen 保持默认值。
+logical_pm = ir.PassManager.get_strategy(
+    ir.OptimizationStrategy.Default,
+    lower_to_pto_ir=False,
+)
 
 # With verification via PassContext
 with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
@@ -411,10 +419,15 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 30. `Simplify`
 31. [`MaterializeRuntimeScopes`](41-materialize_runtime_scopes.md)（插入 AUTO RuntimeScopeStmt，使 orchestration codegen 1:1 emit PTO2_SCOPE）
 32. [`ClassifyIterArgCarry`](42-classify_iter_arg_carry.md)（把每个 ForStmt iter_arg 标注为平凡别名 / 重绑定 carry，并为 manual-scope TaskId fence 数组定尺）
+33. [`MaterializePTOTileHandles`](43-materialize_pto_tile_handles.md)（在保留逻辑 Tile SSA 的同时物化显式 PTO buffer handle）
+34. [`LowerTileToPTOIR`](44-lower_tile_to_pto_ir.md)（把受支持范围改写为目标传递 PTO 目标 IR）
 
 `DebugTileOptimization` 只是用于排查 PTO tile 阶段的调试策略，会跳过
 tensor-only 前缀 pass。正常编译和非 strategy 专项测试都应优先使用
 `Default`，以保证主维护流水线持续被覆盖。
+两种策略默认都会执行最后两个 PTO 目标 IR Pass。`lower_to_pto_ir=False`
+只移除 `MaterializePTOTileHandles` 和 `LowerTileToPTOIR`，用于仍需逻辑 Tile
+IR 的解释器和分析工具；生产 codegen 路径不得关闭它。
 
 [`ResolveBackendOpLayouts`](17-resolve_backend_op_layouts.md) 会根据
 backend 注册的 layout 元数据修复受约束的逐元素 tile 操作。对于当前 PTO

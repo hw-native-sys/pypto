@@ -1963,6 +1963,31 @@ def test_pto_codegen_keeps_loop_carried_tile_distinct_from_reshape_result():
     assert "rows=1, cols=16" in tadd_line, f"Expected row-vector operands in tadd, got: {tadd_line}"
 
 
+def test_pto_codegen_target_if_uses_float_comparison():
+    """The target printer must select cmpf predicates for floating conditions."""
+
+    @pl.program
+    class FloatConditionProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def repro(
+            self,
+            flag: pl.Scalar[pl.FP32],
+            input: pl.Tensor[[16, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            seed: pl.Tile[[16, 16], pl.FP32] = pl.load(input, [0, 0], [16, 16])
+            if flag == 1.0:
+                result = pl.add(seed, 1.0)
+            else:
+                result = pl.mul(seed, 2.0)
+            return pl.store(result, [0, 0], out)
+
+    lines = _get_mlir_lines(_generate_default_mlir(FloatConditionProgram))
+    comparison = _single_line(lines, "arith.cmpf")
+    assert "arith.cmpf oeq" in comparison, f"Expected ordered float comparison, got: {comparison}"
+    assert not _find_lines(lines, "arith.cmpi"), f"Float condition must not use cmpi: {lines}"
+
+
 def test_pto_codegen_if_stmt_only_returns_scalars_for_tile_phi():
     """IfStmt should materialize tile phi values via branch-local copies, not scf.if results."""
 

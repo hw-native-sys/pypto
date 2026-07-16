@@ -9,21 +9,34 @@
 
 """Tests for the staged logical-Tile to explicit-PTO-handle bridge pass."""
 
+import re
+
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
+from pypto.pypto_core import codegen
 
 
 def _run(program: ir.Program, planner: passes.MemoryPlanner) -> ir.Program:
-    # This experimental pass is intentionally outside the default pipeline.
-    # Disable the outer test fixture's pipeline-property checks and verify the
-    # new produced property directly below.
+    # Isolate Step 3 from its normal default-pipeline prerequisites; the tests
+    # construct the required Tile/MemRef state directly and verify the produced
+    # target property below.
     with passes.PassContext(
         [],
         passes.VerificationLevel.NONE,
         memory_planner=planner,
     ):
         return passes.materialize_pto_tile_handles()(program)
+
+
+def _lower(program: ir.Program, planner: passes.MemoryPlanner) -> ir.Program:
+    materialized = _run(program, planner)
+    with passes.PassContext(
+        [],
+        passes.VerificationLevel.NONE,
+        memory_planner=planner,
+    ):
+        return passes.lower_tile_to_pto_ir()(materialized)
 
 
 def _function(program: ir.Program) -> ir.Function:
@@ -54,6 +67,33 @@ def _verify_handle_property(program: ir.Program) -> None:
     props.insert(passes.IRProperty.PTOHandlesMaterialized)
     diagnostics = passes.PropertyVerifierRegistry.verify(props, program)
     assert diagnostics == []
+
+
+def _verify_bufferized_property(program: ir.Program) -> None:
+    props = passes.IRPropertySet()
+    props.insert(passes.IRProperty.PTOBufferized)
+    diagnostics = passes.PropertyVerifierRegistry.verify(props, program)
+    assert diagnostics == []
+
+
+def _normalized_codegen_contract(text: str) -> list[str]:
+    contract_ops = (
+        "pto.make_tensor_view",
+        "pto.alloc_tile",
+        "pto.partition_view",
+        "pto.tload",
+        "pto.tsqrt",
+        "pto.tadd",
+        "pto.tmul",
+        "pto.tstore",
+    )
+    normalized: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not any(op in stripped for op in contract_ops):
+            continue
+        normalized.append(re.sub(r"%[A-Za-z0-9_]+", "%ssa", stripped))
+    return normalized
 
 
 def _make_straight_line_program() -> ir.Program:
@@ -155,6 +195,8 @@ def test_materializes_unique_explicit_handle_plan(
             assert isinstance(alloc.value, ir.Call)
             address = alloc.value.args[0]
             assert isinstance(address, ir.ConstInt)
+            assert isinstance(address.type, ir.ScalarType)
+            assert address.type.dtype == pl.INT64
             addresses.append(address.value)
         assert addresses == [64, 128, 192, 256, 320]
 
@@ -186,6 +228,104 @@ def test_handle_plan_survives_binary_serialization() -> None:
     assert isinstance(restored, ir.Program)
     ir.assert_structural_equal(after, restored)
     _verify_handle_property(restored)
+
+
+@pytest.mark.parametrize(
+    ("planner", "emit_tile_addr"),
+    [
+        (passes.MemoryPlanner.PYPTO, True),
+        (passes.MemoryPlanner.PTOAS, False),
+    ],
+)
+def test_step4_eliminates_logical_tiles_and_matches_legacy_codegen(
+    planner: passes.MemoryPlanner,
+    emit_tile_addr: bool,
+) -> None:
+    logical = _make_straight_line_program()
+    lowered = _lower(logical, planner)
+    statements = _statements(lowered)
+
+    target_calls = [
+        stmt.expr for stmt in statements if isinstance(stmt, ir.EvalStmt) and isinstance(stmt.expr, ir.Call)
+    ]
+    assert [call.op.name for call in target_calls] == [
+        "pto.tload",
+        "pto.tload",
+        "pto.tsqrt",
+        "pto.tadd",
+        "pto.tmul",
+        "pto.tstore",
+    ]
+
+    for call in target_calls:
+        assert isinstance(call.type, ir.UnknownType)
+        assert all(not isinstance(arg.type, ir.TileType) for arg in call.args)
+        assert "pto_input_handles" not in call.attrs
+        assert "pto_output_handle" not in call.attrs
+
+    load = target_calls[0]
+    assert len(load.args) == 4
+    assert load.kwargs == {}
+    assert isinstance(load.args[1], ir.MakeTuple)
+    assert isinstance(load.args[2], ir.MakeTuple)
+    assert isinstance(load.args[3].type, ir.PTOTileBufType)
+
+    store = target_calls[-1]
+    assert len(store.args) == 4
+    assert isinstance(store.args[0].type, ir.PTOTileBufType)
+    assert isinstance(store.args[1], ir.MakeTuple)
+    assert isinstance(store.args[2], ir.MakeTuple)
+
+    tile_definitions = [
+        stmt
+        for stmt in statements
+        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.var.type, ir.TileType)
+    ]
+    assert tile_definitions == []
+    _verify_bufferized_property(lowered)
+
+    legacy_mlir = codegen.PTOCodegen().generate(logical, emit_tile_addr=emit_tile_addr)
+    target_mlir = codegen.PTOCodegen().generate(lowered, emit_tile_addr=emit_tile_addr)
+    assert _normalized_codegen_contract(target_mlir) == _normalized_codegen_contract(legacy_mlir)
+
+
+def test_step4_target_ir_survives_binary_serialization() -> None:
+    lowered = _lower(_make_straight_line_program(), passes.MemoryPlanner.PTOAS)
+    restored = ir.deserialize(ir.serialize(lowered))
+
+    assert isinstance(restored, ir.Program)
+    ir.assert_structural_equal(lowered, restored)
+    _verify_bufferized_property(restored)
+
+
+def test_step4_materializes_spmd_identity_as_explicit_target_parameters() -> None:
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(self):
+            _block_idx: pl.Scalar[pl.INDEX] = pl.tile.get_block_idx()
+            _block_num: pl.Scalar[pl.INDEX] = pl.tile.get_block_num()
+            _subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+
+    lowered = _lower(Program, passes.MemoryPlanner.PTOAS)
+    func = _function(lowered)
+
+    assert [param.name_hint for param in func.params] == [
+        "__pypto_spmd_block_idx",
+        "__pypto_spmd_block_num",
+        "__pypto_spmd_subblock_idx",
+    ]
+    assert all(isinstance(param.type, ir.ScalarType) for param in func.params)
+    assert all(param.type.dtype == pl.INT32 for param in func.params)
+    assert func.attrs["pto.uses_spmd_block_params"] is True
+    assert func.attrs["pto.uses_subblock_param"] is True
+
+    assignments = [stmt for stmt in _statements(lowered) if isinstance(stmt, ir.AssignStmt)]
+    assert len(assignments) == 3
+    assert all(isinstance(stmt.value, ir.Cast) for stmt in assignments)
+    assert all(stmt.value.type.dtype == pl.INDEX for stmt in assignments)
+    assert all(not isinstance(stmt.value, ir.Call) for stmt in assignments)
+    _verify_bufferized_property(lowered)
 
 
 def test_property_verifier_rejects_non_dominating_output_handle() -> None:
@@ -256,7 +396,7 @@ def test_property_verifier_rejects_malformed_allocation_metadata() -> None:
     assert any("must have two or three metadata operands" in diagnostic.message for diagnostic in diagnostics)
 
 
-def test_rejects_view_operation_explicitly() -> None:
+def test_materializes_reshape_as_a_distinct_typed_handle() -> None:
     @pl.program
     class Program:
         @pl.function(type=pl.FunctionType.InCore)
@@ -268,11 +408,31 @@ def test_rejects_view_operation_explicitly() -> None:
                 tile, [8, 32]
             )
 
-    with pytest.raises(ValueError, match="does not yet support Tile operation 'tile.reshape'"):
-        _run(Program, passes.MemoryPlanner.PYPTO)
+    after = _run(Program, passes.MemoryPlanner.PYPTO)
+    allocs = [
+        stmt
+        for stmt in _statements(after)
+        if isinstance(stmt, ir.AssignStmt)
+        and isinstance(stmt.value, ir.Call)
+        and stmt.value.op.name == "pto.alloc_tile"
+    ]
+    assert len(allocs) == 2
+    assert allocs[0].var.type != allocs[1].var.type
+    _verify_handle_property(after)
+
+    lowered = _lower(Program, passes.MemoryPlanner.PYPTO)
+    assert all(
+        not (
+            isinstance(stmt, ir.AssignStmt)
+            and isinstance(stmt.value, ir.Call)
+            and stmt.value.op.name == "tile.reshape"
+        )
+        for stmt in _statements(lowered)
+    )
+    _verify_bufferized_property(lowered)
 
 
-def test_rejects_dynamic_valid_shape_until_step_5() -> None:
+def test_materializes_dynamic_valid_shape_as_allocation_operands() -> None:
     @pl.program
     class Program:
         @pl.function(type=pl.FunctionType.InCore)
@@ -285,11 +445,23 @@ def test_rejects_dynamic_valid_shape_until_step_5() -> None:
                 pl.TileView(valid_shape=[valid_rows, 16]),
             ] = pl.load(x, [0, 0], [16, 16], [valid_rows, 16])
 
-    with pytest.raises(ValueError, match="does not support dynamic valid shape"):
-        _run(Program, passes.MemoryPlanner.PYPTO)
+    after = _run(Program, passes.MemoryPlanner.PYPTO)
+    func = _function(after)
+    alloc = next(
+        stmt
+        for stmt in _statements(after)
+        if isinstance(stmt, ir.AssignStmt)
+        and isinstance(stmt.value, ir.Call)
+        and stmt.value.op.name == "pto.alloc_tile"
+    )
+    assert isinstance(alloc.value, ir.Call)
+    assert alloc.value.args[-2] is func.params[1]
+    assert isinstance(alloc.value.args[-1], ir.ConstInt)
+    assert alloc.value.args[-1].value == 16
+    _verify_handle_property(after)
 
 
-def test_rejects_control_flow_explicitly() -> None:
+def test_materializes_handles_inside_structured_control_flow() -> None:
     @pl.program
     class Program:
         @pl.function(type=pl.FunctionType.InCore)
@@ -299,8 +471,27 @@ def test_rejects_control_flow_explicitly() -> None:
                     x, [0, 0], [16, 16]
                 )
 
-    with pytest.raises(ValueError, match="supports straight-line functions only"):
-        _run(Program, passes.MemoryPlanner.PYPTO)
+    after = _run(Program, passes.MemoryPlanner.PYPTO)
+    loop = next(stmt for stmt in _statements(after) if isinstance(stmt, ir.ForStmt))
+    loop_stmts = list(loop.body.stmts) if isinstance(loop.body, ir.SeqStmts) else [loop.body]
+    assert any(
+        isinstance(stmt, ir.AssignStmt)
+        and isinstance(stmt.value, ir.Call)
+        and stmt.value.op.name == "pto.alloc_tile"
+        for stmt in loop_stmts
+    )
+    _verify_handle_property(after)
+
+    lowered = _lower(Program, passes.MemoryPlanner.PYPTO)
+    lowered_loop = next(stmt for stmt in _statements(lowered) if isinstance(stmt, ir.ForStmt))
+    lowered_stmts = (
+        list(lowered_loop.body.stmts) if isinstance(lowered_loop.body, ir.SeqStmts) else [lowered_loop.body]
+    )
+    assert any(
+        isinstance(stmt, ir.EvalStmt) and isinstance(stmt.expr, ir.Call) and stmt.expr.op.name == "pto.tload"
+        for stmt in lowered_stmts
+    )
+    _verify_bufferized_property(lowered)
 
 
 if __name__ == "__main__":

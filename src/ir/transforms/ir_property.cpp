@@ -150,7 +150,9 @@ const IRPropertySet& GetVerifiedProperties() {
                                    IRProperty::ReturnParamsExplicit,
                                    IRProperty::AivSplitValid,
                                    IRProperty::HardSyncallOccupancyValid,
-                                   IRProperty::IterArgCarryClassified};
+                                   IRProperty::IterArgCarryClassified,
+                                   IRProperty::PTOHandlesMaterialized,
+                                   IRProperty::PTOBufferized};
   return props;
 }
 

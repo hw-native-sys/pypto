@@ -280,12 +280,25 @@ inline const PassProperties kAllocateMemoryAddrProperties{
 // consumes this verified bridge state when rewriting calls to DPS target ops.
 inline const PassProperties kMaterializePTOTileHandlesProperties{
     .required = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
-                 IRProperty::HasMemRefs, IRProperty::AllocatedMemoryAddr, IRProperty::TileOps2D,
-                 IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure},
+                 IRProperty::HasMemRefs, IRProperty::TileOps2D, IRProperty::TileMemoryInferred,
+                 IRProperty::NormalizedStmtStructure},
     .produced = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
-                 IRProperty::HasMemRefs, IRProperty::AllocatedMemoryAddr, IRProperty::TileOps2D,
-                 IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure,
-                 IRProperty::PTOHandlesMaterialized}};
+                 IRProperty::HasMemRefs, IRProperty::TileOps2D, IRProperty::TileMemoryInferred,
+                 IRProperty::NormalizedStmtStructure, IRProperty::PTOHandlesMaterialized}};
+
+// Step 4 consumes the verified logical-value -> buffer plan and removes all
+// logical Tile values in the supported slice. Allocation addresses and valid
+// extents are now explicit PTO operands, so Tile/MemRef properties no longer
+// describe the resulting target IR.
+inline const PassProperties kLowerTileToPTOIRProperties{
+    .required = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
+                 IRProperty::HasMemRefs, IRProperty::TileOps2D, IRProperty::TileMemoryInferred,
+                 IRProperty::NormalizedStmtStructure, IRProperty::PTOHandlesMaterialized},
+    .produced = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::NormalizedStmtStructure,
+                 IRProperty::PTOBufferized},
+    .invalidated = {IRProperty::IncoreTileOps, IRProperty::HasMemRefs, IRProperty::AllocatedMemoryAddr,
+                    IRProperty::TileOps2D, IRProperty::TileMemoryInferred,
+                    IRProperty::PTOHandlesMaterialized}};
 
 // -- Return order normalization pass ------------------------------------------
 

@@ -347,11 +347,16 @@ void BindPass(nb::module_& m) {
              "Updates MemRef addresses and alloc statement arguments in place.");
 
   passes.def("materialize_pto_tile_handles", &pass::MaterializePTOTileHandles,
-             "Materialize explicit PTO tile-buffer handles for the static straight-line lowering slice.\n\n"
-             "Supports tile.load/sqrt/add/mul/store, inserts typed pto.alloc_tile definitions, and "
-             "records the exact input/output handle plan on each high-level call. Unsupported control "
-             "flow, views, tuples, dynamic shapes, and in-place operations fail explicitly. Experimental; "
-             "not part of the default pipeline.");
+             "Materialize explicit PTO tile-buffer handles at the codegen boundary.\n\n"
+             "Preserves logical Tile SSA while recording verified input/output handles for the supported "
+             "static-2D operation and structured-control-flow slice. Unsupported functions are deferred "
+             "as whole units to legacy codegen. Runs in the default Tile pipelines.");
+
+  passes.def("lower_tile_to_pto_ir", &pass::LowerTileToPTOIR,
+             "Rewrite the verified PTO handle plan to destination-passing target IR.\n\n"
+             "Eliminates logical Tile values for the supported static-2D slice. Target calls carry "
+             "explicit PTO buffer handles, partition offsets, and valid extents while structured "
+             "scalar/Tensor control flow remains in SSA form. Runs in the default Tile pipelines.");
 
   passes.def("fuse_create_assemble_to_slice", &pass::FuseCreateAssembleToSlice,
              "Fuse tensor.create + tensor.assemble into tensor.slice in Orchestration functions\n\n"

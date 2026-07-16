@@ -17,7 +17,7 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 02 | `02-unroll_loops.md` | 2nd pass |
 | 03 | `03-ctrl_flow_transform.md` | 3rd pass |
 | 04 | `04-convert_to_ssa.md` | 4th pass |
-| 05 | `05-simplify.md` | 5th pass (also runs as the last pass of the tile pipeline) |
+| 05 | `05-simplify.md` | 5th pass (also runs near the end of the tile pipeline, before codegen-boundary passes) |
 | 06 | `06-flatten_call_expr.md` | 6th pass |
 | 07 | `07-outline_hierarchy_scopes.md` | 7th pass |
 | 08 | `08-outline_incore_scopes.md` | 8th pass |
@@ -53,7 +53,10 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 38 | `38-materialize_comm_domain_scopes.md` | 38th pass (distributed: WindowBuffer + CommDomainScopeStmt wrappers in each host_orch body; runs immediately before LowerHostTensorCollectives) |
 | 39 | `39-lower_host_tensor_collectives.md` | 39th pass (host-level tensor collectives -> internal builtin chip dispatches; runs after comm-domain scopes) |
 | 40 | `40-materialize_dist_tensor_ctx.md` | 40th pass (materializes explicit CommCtx params/args for DistributedTensor params; runs before the final Simplify) |
-| 41 | `41-materialize_runtime_scopes.md` | Last pass (after the final Simplify; inserts AUTO RuntimeScopeStmt so orchestration codegen emits PTO2_SCOPE 1:1) |
+| 41 | `41-materialize_runtime_scopes.md` | After the final Simplify; inserts AUTO RuntimeScopeStmt so orchestration codegen emits PTO2_SCOPE 1:1 |
+| 42 | `42-classify_iter_arg_carry.md` | Classifies Orchestration loop carries before PTO-only target lowering |
+| 43 | `43-materialize_pto_tile_handles.md` | Materializes the logical-Tile to PTO-handle bridge |
+| 44 | `44-lower_tile_to_pto_ir.md` | Last pass; produces destination-passing PTO target IR |
 | 91 | `91-utility_passes.md` | Not in Default strategy |
 | 99 | `99-verifier.md` | Infrastructure (not a pipeline pass) |
 

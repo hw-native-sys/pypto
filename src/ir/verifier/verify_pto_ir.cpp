@@ -16,6 +16,7 @@
 
 #include <any>
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -31,6 +32,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/pto_target_lowering.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
@@ -63,11 +65,6 @@ bool CallTouchesTile(const CallPtr& call) {
     if (arg && TypeContainsTile(arg->GetType())) return true;
   }
   return false;
-}
-
-bool IsSupportedHandlePlanOp(const CallPtr& call) {
-  return IsOp(call, "tile.load") || IsOp(call, "tile.sqrt") || IsOp(call, "tile.add") ||
-         IsOp(call, "tile.mul") || IsOp(call, "tile.store");
 }
 
 const std::any* FindAttr(const CallPtr& call, const std::string& key) {
@@ -109,6 +106,10 @@ class PTOCallVerifier final : public IRVisitor {
 
  protected:
   void VisitStmt_(const AssignStmtPtr& op) override {
+    if (TypeContainsTile(op->var_->GetType())) {
+      diagnostics_.emplace_back(DiagnosticSeverity::Error, "PTOBufferized", 0,
+                                "Logical Tile assignment remains in PTO target IR", op->span_);
+    }
     WithDirectCall(As<Call>(op->value_), op->var_, [&]() { IRVisitor::VisitStmt_(op); });
   }
 
@@ -116,8 +117,22 @@ class PTOCallVerifier final : public IRVisitor {
     WithDirectCall(As<Call>(op->expr_), std::nullopt, [&]() { IRVisitor::VisitStmt_(op); });
   }
 
+  void VisitStmt_(const ReturnStmtPtr& op) override {
+    for (const auto& value : op->value_) {
+      if (TypeContainsTile(value->GetType())) {
+        diagnostics_.emplace_back(DiagnosticSeverity::Error, "PTOBufferized", 0,
+                                  "Logical Tile return remains in PTO target IR", op->span_);
+      }
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
   void VisitExpr_(const CallPtr& call) override {
-    if (IsPTONamespaceOp(call->op_)) VerifyPTOCall(call);
+    if (IsPTONamespaceOp(call->op_)) {
+      VerifyPTOCall(call);
+    } else if (CallTouchesTile(call)) {
+      Error(call, "Logical Tile operation '" + call->op_->name_ + "' remains in PTO target IR");
+    }
     IRVisitor::VisitExpr_(call);
   }
 
@@ -155,16 +170,16 @@ class PTOCallVerifier final : public IRVisitor {
     if (function_type_ == FunctionType::Orchestration) {
       Error(call, "PTO target operation '" + op_name + "' cannot appear in an Orchestration function");
     }
-    if (spec.IsPure()) {
-      Error(call, "PTO target operation '" + op_name + "' is incorrectly marked pure");
-    }
-
     auto segments = spec.ResolveOperandSegments(call->args_.size());
     if (!segments.has_value()) {
       std::ostringstream msg;
       msg << "PTO target operation '" << op_name << "' has invalid operand count " << call->args_.size();
       Error(call, msg.str());
       return;
+    }
+
+    if (IsOp(call, "pto.tload") || IsOp(call, "pto.tstore")) {
+      VerifyPartitionTransfer(call);
     }
 
     size_t arg_index = 0;
@@ -184,7 +199,7 @@ class PTOCallVerifier final : public IRVisitor {
     const bool is_direct_statement_value = direct_call_ && direct_call_.get() == call.get();
     if (spec.result_kind == PTOResultKind::TileBuffer) {
       if (!is_direct_statement_value || !assigned_var_.has_value()) {
-        Error(call, "PTO allocating operation '" + op_name + "' must be the value of an AssignStmt");
+        Error(call, "PTO handle-defining operation '" + op_name + "' must be the value of an AssignStmt");
       }
       if (!IsA<PTOTileBufType>(call->GetType())) {
         Error(call, "PTO allocating operation '" + op_name + "' result must have PTOTileBufType");
@@ -207,6 +222,37 @@ class PTOCallVerifier final : public IRVisitor {
     }
   }
 
+  void VerifyPartitionTransfer(const CallPtr& call) {
+    if (call->args_.size() != 4) return;  // Generic schema diagnostic already reports the count.
+    const size_t tensor_index = IsOp(call, "pto.tload") ? 0 : 3;
+    auto tensor_type = AsTensorTypeLike(call->args_[tensor_index]->GetType());
+    if (!tensor_type) {
+      Error(call, "PTO partition transfer tensor operand must have TensorType");
+    }
+    std::optional<size_t> transfer_rank;
+    for (size_t tuple_index : {size_t{1}, size_t{2}}) {
+      auto tuple = As<MakeTuple>(call->args_[tuple_index]);
+      if (!tuple || tuple->elements_.empty()) {
+        Error(call, "PTO partition transfer offsets/extents must be non-empty MakeTuple operands");
+        continue;
+      }
+      if (!transfer_rank.has_value()) {
+        transfer_rank = tuple->elements_.size();
+      } else if (*transfer_rank != tuple->elements_.size()) {
+        Error(call, "PTO partition transfer offsets and extents must have the same rank");
+      }
+      for (const auto& element : tuple->elements_) {
+        if (!element || !IsA<ScalarType>(element->GetType())) {
+          Error(call, "PTO partition transfer offsets/extents must contain ScalarType values");
+          break;
+        }
+      }
+    }
+    if (tensor_type && transfer_rank.has_value() && *transfer_rank != tensor_type->shape_.size()) {
+      Error(call, "PTO partition transfer rank must match the tensor operand rank");
+    }
+  }
+
   FunctionType function_type_;
   std::vector<Diagnostic>& diagnostics_;
   CallPtr direct_call_;
@@ -221,9 +267,82 @@ class PTOBufferizedVerifier final : public PropertyVerifier {
     if (!program) return;
     for (const auto& [global_var, function] : program->functions_) {
       if (!function || !function->body_) continue;
+      if (function->GetAttr<bool>(kAttrPTOTargetLoweringDeferred, false)) continue;
       PTOCallVerifier visitor(function->func_type_, diagnostics);
+      if (!IsInCoreType(function->func_type_)) {
+        // Orchestration remains outside the Step-4 rewrite, but still reject
+        // target PTO calls that escaped into the wrong function layer.
+        visitor.VisitStmt(function->body_);
+        continue;
+      }
+      for (const auto& param : function->params_) {
+        if (TypeContainsTile(param->GetType())) {
+          diagnostics.emplace_back(DiagnosticSeverity::Error, "PTOBufferized", 0,
+                                   "Logical Tile parameter remains in PTO target IR", param->span_);
+        }
+      }
+      VerifyHandleDominance(function, diagnostics);
       visitor.VisitStmt(function->body_);
     }
+  }
+
+ private:
+  static void VerifyHandleDominance(const FunctionPtr& function, std::vector<Diagnostic>& diagnostics) {
+    std::unordered_set<const Var*> parameter_handles;
+    for (const auto& param : function->params_) {
+      if (IsA<PTOTileBufType>(param->GetType())) parameter_handles.insert(param.get());
+    }
+
+    const auto verify_operands = [&](const CallPtr& call,
+                                     const std::unordered_set<const Var*>& available_handles) {
+      if (!call || !IsPTONamespaceOp(call->op_)) return;
+      for (const auto& arg : call->args_) {
+        if (!arg || !IsA<PTOTileBufType>(arg->GetType())) continue;
+        auto handle = AsVarLike(arg);
+        if (!handle || available_handles.count(handle.get()) == 0) {
+          diagnostics.emplace_back(DiagnosticSeverity::Error, "PTOBufferized", 0,
+                                   "PTO tile-buffer operand has no dominating allocation or parameter",
+                                   call->span_);
+        }
+      }
+    };
+
+    std::function<void(const StmtPtr&, std::unordered_set<const Var*>)> verify_body;
+    verify_body = [&](const StmtPtr& body, std::unordered_set<const Var*> available_handles) {
+      for (const auto& stmt : transform_utils::FlattenToStmts(body)) {
+        if (auto assign = As<AssignStmt>(stmt)) {
+          auto call = As<Call>(assign->value_);
+          verify_operands(call, available_handles);
+          if (IsA<PTOTileBufType>(assign->var_->GetType())) {
+            const auto* spec = call && IsPTONamespaceOp(call->op_)
+                                   ? &OpRegistry::GetInstance().GetEntry(call->op_->name_).GetPTOOpSpec()
+                                   : nullptr;
+            const bool defines_handle =
+                spec && spec->has_value() && (*spec)->result_kind == PTOResultKind::TileBuffer;
+            if (!defines_handle) {
+              diagnostics.emplace_back(
+                  DiagnosticSeverity::Error, "PTOBufferized", 0,
+                  "PTO tile-buffer handles must be defined by a registered target handle op", assign->span_);
+            } else if (!available_handles.insert(assign->var_.get()).second) {
+              diagnostics.emplace_back(DiagnosticSeverity::Error, "PTOBufferized", 0,
+                                       "PTO tile-buffer handle is allocated more than once", assign->span_);
+            }
+          }
+        } else if (auto eval = As<EvalStmt>(stmt)) {
+          verify_operands(As<Call>(eval->expr_), available_handles);
+        } else if (auto loop = As<ForStmt>(stmt)) {
+          verify_body(loop->body_, available_handles);
+        } else if (auto branch = As<IfStmt>(stmt)) {
+          verify_body(branch->then_body_, available_handles);
+          if (branch->else_body_) verify_body(*branch->else_body_, available_handles);
+        } else if (!As<ReturnStmt>(stmt) && !As<YieldStmt>(stmt)) {
+          diagnostics.emplace_back(DiagnosticSeverity::Error, "PTOBufferized", 0,
+                                   "Step-4 PTO target IR contains an unsupported structured statement",
+                                   stmt->span_);
+        }
+      }
+    };
+    verify_body(function->body_, std::move(parameter_handles));
   }
 };
 
@@ -235,6 +354,7 @@ class PTOHandlesMaterializedVerifier final : public PropertyVerifier {
     if (!program) return;
     for (const auto& [global_var, function] : program->functions_) {
       if (!function || !function->body_ || !IsInCoreType(function->func_type_)) continue;
+      if (function->GetAttr<bool>(kAttrPTOTargetLoweringDeferred, false)) continue;
       VerifyFunction(function, diagnostics);
     }
   }
@@ -248,6 +368,20 @@ class PTOHandlesMaterializedVerifier final : public PropertyVerifier {
     std::unordered_set<const Var*> allocated;
     std::unordered_set<const Var*> claimed;
     std::unordered_map<const Var*, VarPtr> logical_to_handle;
+    std::unordered_set<const Var*> control_handles;
+
+    if (function->HasAttr(kAttrPTOControlFlowHandles)) {
+      const auto aliases =
+          function->GetAttr<std::vector<std::pair<VarPtr, VarPtr>>>(kAttrPTOControlFlowHandles, {});
+      for (const auto& [logical, handle] : aliases) {
+        if (!logical || !handle) {
+          Error(diagnostics, function->span_, "Control-flow PTO handle plan contains a null value");
+          continue;
+        }
+        logical_to_handle[logical.get()] = handle;
+        control_handles.insert(handle.get());
+      }
+    }
 
     for (const auto& param : function->params_) {
       if (TypeContainsTile(param->GetType())) {
@@ -256,70 +390,141 @@ class PTOHandlesMaterializedVerifier final : public PropertyVerifier {
       }
     }
 
-    const auto stmts = transform_utils::FlattenToStmts(function->body_);
-    for (const auto& stmt : stmts) {
-      if (auto assign = As<AssignStmt>(stmt)) {
-        auto call = As<Call>(assign->value_);
-        if (call && IsOp(call, "pto.alloc_tile")) {
-          if (!IsA<PTOTileBufType>(assign->var_->GetType()) || !IsA<PTOTileBufType>(call->GetType())) {
-            Error(diagnostics, assign->span_,
-                  "pto.alloc_tile definition and result must have PTOTileBufType");
-          } else if (!structural_equal(assign->var_->GetType(), call->GetType())) {
-            Error(diagnostics, assign->span_, "pto.alloc_tile definition and result types must match");
+    std::function<void(const StmtPtr&, std::unordered_set<const Var*>)> verify_body;
+    verify_body = [&](const StmtPtr& body, std::unordered_set<const Var*> available) {
+      for (const auto& stmt : transform_utils::FlattenToStmts(body)) {
+        if (auto assign = As<AssignStmt>(stmt)) {
+          auto call = As<Call>(assign->value_);
+          if (call && IsOp(call, "pto.alloc_tile")) {
+            if (!IsA<PTOTileBufType>(assign->var_->GetType()) || !IsA<PTOTileBufType>(call->GetType())) {
+              Error(diagnostics, assign->span_,
+                    "pto.alloc_tile definition and result must have PTOTileBufType");
+            } else if (!structural_equal(assign->var_->GetType(), call->GetType())) {
+              Error(diagnostics, assign->span_, "pto.alloc_tile definition and result types must match");
+            }
+            if (call->args_.size() < 2 || call->args_.size() > 3) {
+              Error(diagnostics, call->span_, "pto.alloc_tile must have two or three metadata operands");
+            }
+            for (const auto& arg : call->args_) {
+              if (!arg || !IsA<ScalarType>(arg->GetType())) {
+                Error(diagnostics, call->span_, "pto.alloc_tile metadata operands must have ScalarType");
+                break;
+              }
+            }
+            if (!allocated.insert(assign->var_.get()).second) {
+              Error(diagnostics, assign->span_, "PTO handle is allocated more than once");
+            }
+            available.insert(assign->var_.get());
+            continue;
           }
-          if (call->args_.size() < 2 || call->args_.size() > 3) {
-            Error(diagnostics, call->span_, "pto.alloc_tile must have two or three metadata operands");
+          if (call && IsOp(call, "pto.subview")) {
+            if (!IsA<PTOTileBufType>(assign->var_->GetType()) || !IsA<PTOTileBufType>(call->GetType()) ||
+                !structural_equal(assign->var_->GetType(), call->GetType())) {
+              Error(diagnostics, assign->span_,
+                    "pto.subview definition and result must have matching PTOTileBufType");
+            }
+            if (call->args_.size() != 4) {
+              Error(diagnostics, call->span_,
+                    "pto.subview must have source, shape, offset, and valid-shape operands");
+            } else {
+              auto source = AsVarLike(call->args_[0]);
+              if (!source || available.count(source.get()) == 0) {
+                Error(diagnostics, call->span_, "pto.subview source must name a dominating PTO handle");
+              }
+              for (size_t i = 1; i < call->args_.size(); ++i) {
+                auto tuple = As<MakeTuple>(call->args_[i]);
+                if (!tuple || tuple->elements_.size() != 2) {
+                  Error(diagnostics, call->span_,
+                        "pto.subview shape, offset, and valid-shape operands must be rank-2 tuples");
+                }
+              }
+            }
+            if (!allocated.insert(assign->var_.get()).second) {
+              Error(diagnostics, assign->span_, "PTO handle is defined more than once");
+            }
+            available.insert(assign->var_.get());
+            continue;
           }
-          for (const auto& arg : call->args_) {
-            if (!arg || !IsA<ScalarType>(arg->GetType())) {
-              Error(diagnostics, call->span_, "pto.alloc_tile metadata operands must have ScalarType");
-              break;
+          VerifyCall(call, assign->var_, stmt->span_, available, claimed, control_handles, logical_to_handle,
+                     diagnostics);
+        } else if (auto eval = As<EvalStmt>(stmt)) {
+          auto call = As<Call>(eval->expr_);
+          if (call && IsPTONamespaceOp(call->op_)) {
+            for (const auto& arg : call->args_) {
+              if (!IsA<PTOTileBufType>(arg->GetType())) continue;
+              auto handle = AsVarLike(arg);
+              if (!handle || available.count(handle.get()) == 0) {
+                Error(diagnostics, call->span_,
+                      "Structured PTO target operation uses a non-dominating tile-buffer handle");
+              }
+            }
+          } else {
+            VerifyCall(call, std::nullopt, stmt->span_, available, claimed, control_handles,
+                       logical_to_handle, diagnostics);
+          }
+        } else if (auto loop = As<ForStmt>(stmt)) {
+          verify_body(loop->body_, available);
+        } else if (auto branch = As<IfStmt>(stmt)) {
+          verify_body(branch->then_body_, available);
+          if (branch->else_body_) verify_body(*branch->else_body_, available);
+        } else if (auto yield = As<YieldStmt>(stmt)) {
+          for (const auto& value : yield->value_) {
+            if (!IsA<TileType>(value->GetType())) continue;
+            auto logical = AsVarLike(value);
+            if (!logical || logical_to_handle.count(logical.get()) == 0) {
+              Error(diagnostics, yield->span_, "Yielded Tile value has no explicit PTO handle plan");
             }
           }
-          if (!allocated.insert(assign->var_.get()).second) {
-            Error(diagnostics, assign->span_, "PTO handle is allocated more than once");
+        } else if (auto ret = As<ReturnStmt>(stmt)) {
+          for (const auto& value : ret->value_) {
+            if (TypeContainsTile(value->GetType())) {
+              Error(diagnostics, ret->span_, "Returning Tile values is not supported by the Step-3 plan");
+            }
           }
-          continue;
+        } else {
+          Error(diagnostics, stmt->span_, "PTO handle plan contains an unsupported structured statement");
         }
-        VerifyCall(call, assign->var_, stmt->span_, allocated, claimed, logical_to_handle, diagnostics);
-      } else if (auto eval = As<EvalStmt>(stmt)) {
-        VerifyCall(As<Call>(eval->expr_), std::nullopt, stmt->span_, allocated, claimed, logical_to_handle,
-                   diagnostics);
-      } else if (auto ret = As<ReturnStmt>(stmt)) {
-        for (const auto& value : ret->value_) {
-          if (TypeContainsTile(value->GetType())) {
-            Error(diagnostics, ret->span_, "Returning Tile values is not supported by the Step-3 plan");
-          }
-        }
-      } else {
-        Error(diagnostics, stmt->span_,
-              "PTO handle plan requires straight-line AssignStmt/EvalStmt/ReturnStmt structure");
+      }
+    };
+    verify_body(function->body_, {});
+
+    for (const auto* handle : allocated) {
+      if (claimed.count(handle) == 0 && control_handles.count(handle) == 0) {
+        Error(diagnostics, function->span_,
+              "Every PTO handle definition must be claimed by a Tile producer or control-flow result");
+        break;
       }
     }
-
-    if (allocated.size() != claimed.size()) {
-      Error(diagnostics, function->span_,
-            "Every pto.alloc_tile handle must be claimed by exactly one Tile producer");
+    for (const auto* handle : control_handles) {
+      if (allocated.count(handle) == 0) {
+        Error(diagnostics, function->span_,
+              "Control-flow PTO handle plan references a handle not defined in the function");
+        break;
+      }
     }
   }
 
   static void VerifyCall(const CallPtr& call, const std::optional<VarPtr>& result_var, const Span& span,
                          const std::unordered_set<const Var*>& allocated,
                          std::unordered_set<const Var*>& claimed,
+                         const std::unordered_set<const Var*>& control_handles,
                          std::unordered_map<const Var*, VarPtr>& logical_to_handle,
                          std::vector<Diagnostic>& diagnostics) {
     if (!call) {
       if (result_var.has_value() && TypeContainsTile((*result_var)->GetType())) {
-        Error(diagnostics, span, "Tile definitions in the Step-3 plan must be direct Calls");
+        if (logical_to_handle.count(result_var->get()) == 0) {
+          Error(diagnostics, span,
+                "Tile aliases in the Step-3 plan must have an explicit control-flow handle mapping");
+        }
       }
       return;
     }
     if (IsPTONamespaceOp(call->op_)) {
       Error(diagnostics, call->span_,
-            "Only pto.alloc_tile may appear before the PTO target-op rewrite stage");
+            "Only PTO handle definitions may appear before the target-op rewrite stage");
       return;
     }
-    if (!IsSupportedHandlePlanOp(call)) {
+    if (!IsPTOHandlePlanOp(call->op_->name_)) {
       if (CallTouchesTile(call)) {
         Error(diagnostics, call->span_,
               "Unsupported Tile operation in PTO handle plan: '" + call->op_->name_ + "'");
@@ -368,9 +573,9 @@ class PTOHandlesMaterializedVerifier final : public PropertyVerifier {
         return;
       }
       if (allocated.count(output_handle->get()) == 0) {
-        Error(diagnostics, call->span_, "pto_output_handle does not name a dominating pto.alloc_tile");
+        Error(diagnostics, call->span_, "pto_output_handle does not name a dominating PTO handle");
       }
-      if (!claimed.insert(output_handle->get()).second) {
+      if (!claimed.insert(output_handle->get()).second && control_handles.count(output_handle->get()) == 0) {
         Error(diagnostics, call->span_, "PTO handle is claimed by more than one logical Tile producer");
       }
       logical_to_handle[result_var->get()] = *output_handle;

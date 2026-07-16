@@ -40,9 +40,10 @@ lets the output round-trip: the inserted `with pl.scope()` blocks parse back onl
 under `auto_scope=False` (the parser rejects hand-placed AUTO scopes in the
 default mode, where the compiler owns placement).
 
-**When to use**: last pass in the `Default` and `DebugTileOptimization`
-strategies, after the final `Simplify`. Running dead last means no other
-transform has to reason about the inserted scope wrappers.
+**When to use**: after the final `Simplify` and immediately before
+`ClassifyIterArgCarry` in the `Default` and `DebugTileOptimization` strategies.
+The later PTO target-lowering passes modify only InCore functions, so they do
+not need to reason about the inserted Orchestration scope wrappers.
 
 **Scope**: only `Orchestration` functions are modified. InCore / AIC / AIV /
 Group / Spmd bodies are never scope-wrapped by codegen, so they are returned

@@ -92,7 +92,9 @@ enum class PTOMemoryEffect : uint8_t { None, Read, Write, ReadWrite, Allocate };
 /// Type constraint for one PTO operand group.
 enum class PTOOperandTypeConstraint : uint8_t { Any, Scalar, TileBuffer };
 
-/// Result contract for a PTO target operation.
+/// Result contract for a PTO target operation. TileBuffer results may either
+/// allocate storage or create an SSA view handle, as distinguished by
+/// PTOOpSpec::result_effect.
 enum class PTOResultKind : uint8_t { None, TileBuffer };
 
 struct PTOOperandGroup {

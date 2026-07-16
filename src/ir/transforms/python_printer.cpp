@@ -45,6 +45,7 @@
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/pto_target_lowering.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
@@ -2280,7 +2281,9 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
     // ``auto_scope`` rides in attrs_ but prints as a dedicated kwarg (and is
     // filtered from the attrs={...} dict). Absent ⇒ default True ⇒ not printed.
     bool auto_scope_off = !func->GetAttr<bool>("auto_scope", true);
-    auto is_filtered_attr_key = [](const std::string& k) { return k == "auto_scope"; };
+    auto is_filtered_attr_key = [](const std::string& k) {
+      return k == "auto_scope" || k == kAttrPTOControlFlowHandles;
+    };
     bool has_attrs = std::any_of(func->attrs_.begin(), func->attrs_.end(),
                                  [&](const auto& kv) { return !is_filtered_attr_key(kv.first); });
     auto print_func_attr_value = [&](const std::string& key, const std::any& value) {

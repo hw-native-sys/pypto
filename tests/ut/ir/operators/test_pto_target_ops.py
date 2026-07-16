@@ -14,7 +14,17 @@ from pypto.pypto_core import ir
 
 
 @pytest.mark.parametrize(
-    "op_name", ["pto.alloc_tile", "pto.tload", "pto.tsqrt", "pto.tadd", "pto.tmul", "pto.tstore"]
+    "op_name",
+    [
+        "pto.alloc_tile",
+        "pto.tload",
+        "pto.tsqrt",
+        "pto.tadd",
+        "pto.tmul",
+        "pto.tadds",
+        "pto.tmuls",
+        "pto.tstore",
+    ],
 )
 def test_minimal_pto_target_ops_are_registered_and_internal(op_name: str):
     assert ir.is_op_registered(op_name)
@@ -50,6 +60,19 @@ def test_tsqrt_schema_has_one_read_input_and_one_write_output():
     assert not spec["pure"]
 
 
+def test_tadds_schema_keeps_scalar_as_an_explicit_typed_input():
+    spec = ir.get_pto_op_spec("pto.tadds")
+
+    assert spec is not None
+    assert spec["operand_groups"] == [
+        {"role": "input", "effect": "read", "type": "tile_buffer", "min_count": 1, "max_count": 1},
+        {"role": "input", "effect": "none", "type": "scalar", "min_count": 1, "max_count": 1},
+        {"role": "output", "effect": "write", "type": "tile_buffer", "min_count": 1, "max_count": 1},
+    ]
+    assert spec["result_kind"] == "none"
+    assert not spec["pure"]
+
+
 def test_alloc_schema_models_optional_address_and_allocate_result():
     spec = ir.get_pto_op_spec("pto.alloc_tile")
 
@@ -61,6 +84,24 @@ def test_alloc_schema_models_optional_address_and_allocate_result():
     assert spec["result_kind"] == "tile_buffer"
     assert spec["result_effect"] == "allocate"
     assert not spec["pure"]
+
+
+def test_partition_transfer_schemas_make_offsets_and_extents_explicit():
+    load = ir.get_pto_op_spec("pto.tload")
+    store = ir.get_pto_op_spec("pto.tstore")
+
+    assert load is not None
+    assert load["operand_groups"] == [
+        {"role": "input", "effect": "read", "type": "any", "min_count": 1, "max_count": 1},
+        {"role": "metadata", "effect": "none", "type": "any", "min_count": 2, "max_count": 2},
+        {"role": "output", "effect": "write", "type": "tile_buffer", "min_count": 1, "max_count": 1},
+    ]
+    assert store is not None
+    assert store["operand_groups"] == [
+        {"role": "input", "effect": "read", "type": "tile_buffer", "min_count": 1, "max_count": 1},
+        {"role": "metadata", "effect": "none", "type": "any", "min_count": 2, "max_count": 2},
+        {"role": "output", "effect": "write", "type": "any", "min_count": 1, "max_count": 1},
+    ]
 
 
 def test_high_level_ops_have_no_pto_target_schema():
