@@ -1062,6 +1062,7 @@ def test_dsa_export_is_deterministic_pypto_hard_v1(tmp_path):
     assert document["metadata"]["solver_input"] == "pre_memory_reuse"
     buffers = document["problem"]["buffers"]
     assert len(buffers) == 3
+    assert [buffer["id"] for buffer in buffers] == [0, 1, 2]
     assert [buffer["size"] for buffer in buffers] == [16384, 16384, 16384]
     assert [buffer["live_intervals"] for buffer in buffers] == [
         [{"lower": 7, "upper": 9}],
