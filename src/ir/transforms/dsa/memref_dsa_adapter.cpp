@@ -150,7 +150,8 @@ ExportedProblem BuildStructuredProblem(const FunctionPtr& func, const Allocation
   for (size_t index = 0; index < allocation_plan.intervals.size(); ++index) {
     const LifetimeInterval& lifetime = allocation_plan.intervals[index];
     if (lifetime.memory_space == MemorySpace::DDR || !policy.ShouldAllocate(lifetime.memory_space)) continue;
-    INTERNAL_CHECK(index <= std::numeric_limits<::dsa::BufferId>::max())
+    const size_t next_id = exported.document.problem.buffers.size();
+    INTERNAL_CHECK(next_id <= std::numeric_limits<::dsa::BufferId>::max())
         << "Too many PyPTO allocations for the standalone DSA BufferId type";
 
     const auto tile_type = As<TileType>(lifetime.variable->GetType());
@@ -158,7 +159,7 @@ ExportedProblem BuildStructuredProblem(const FunctionPtr& func, const Allocation
         << "DSA export expected representative '" << lifetime.variable->name_hint_ << "' to carry a MemRef";
     const MemRefPtr memref = GetDefinedMemRef(tile_type);
 
-    const auto id = static_cast<::dsa::BufferId>(index);
+    const auto id = static_cast<::dsa::BufferId>(next_id);
     ::dsa::Buffer buffer;
     buffer.id = id;
     buffer.name = memref->base_->name_hint_;
