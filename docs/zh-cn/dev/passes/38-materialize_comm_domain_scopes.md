@@ -94,7 +94,9 @@ pass 运行之后：
 - 每个 `pld.tensor.window` 结果 Var 的类型是 `DistributedTensorType`，
   `window_buffer_` 字段指向对应的 `WindowBuffer`。
 - comm-domain 分析和 `LowerHostTensorCollectives` 看到的每个 host-level
-  `pld.tensor.allreduce` 都已经有两个位置参数。用户省略 signal 时，第二个参数是前置
+  `pld.tensor.allreduce` 都已经有两个位置参数（在
+  [`SynthesizeAllReduceSignals`](37-synthesize_allreduce_signals.md) 运行之后）。
+  用户省略 signal 时，第二个参数是前置
   `pld.tensor.window` 赋值语句产生的合成 Var。
 - 同一 alloc 的多个 view 共享同一 `shared_ptr<const WindowBuffer>`——指针
   相等是下游 codegen 的关键不变量。

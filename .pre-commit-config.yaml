@@ -27,6 +27,13 @@ repos:
           pass_filenames: false
           exclude: ^(3rdparty/|docs/zh-cn/|README\.zh-CN\.md)
 
+        - id: check-docs-en-zh-parity
+          name: check-docs-en-zh-parity
+          entry: python tests/lint/check_docs_en_zh_parity.py
+          language: python
+          language_version: python3
+          pass_filenames: false
+
     - repo: https://github.com/pre-commit/pre-commit-hooks
       rev: v4.6.0
       hooks:

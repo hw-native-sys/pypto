@@ -95,14 +95,14 @@ case the single function-level mode cannot. Region-local `tile_vars` /
 an out-of-region full-width op. Statements **outside** any region are emitted
 full-width. After all regions are lowered, the scope wrappers are dropped and the
 function is stamped `split_aiv` + `split_aiv_region_validated` (the latter signals
-[`ExpandMixedKernel`](21-expand_mixed_kernel.md) to skip its single-func-mode
+[`ExpandMixedKernel`](19-expand_mixed_kernel.md) to skip its single-func-mode
 transpose check — pass 21 validates each region's transpose hazard with the
 correct per-region split axis instead).
 
 A function-level AUTO split (`optimizations=[pl.split(mode)]`) and explicit
 `pl.split_aiv` regions are **mutually exclusive** — a scope carrying both is
 rejected. This is enforced earlier, at
-[`OutlineIncoreScopes`](10-outline_incore_scopes.md), where the scope's own
+[`OutlineIncoreScopes`](08-outline_incore_scopes.md), where the scope's own
 `split_` (the user's `pl.split`) and its regions are both still visible; the
 combination is rejected there because this region path would otherwise lower per
 region and silently drop the function-level split. (Post-outline the two merge
@@ -137,7 +137,7 @@ Three region body shapes are handled, selected by the region's `split_` mode:
   carries the lane). A `tile.aiv_shard` / `tile.aic_gather` inside a `None` region
   is rejected (nothing to shard without a split axis) — both by the `AivSplitValid`
   verifier and by an always-on guard here. The function is still stamped
-  `split_aiv`, so downstream [`ExpandMixedKernel`](21-expand_mixed_kernel.md) /
+  `split_aiv`, so downstream [`ExpandMixedKernel`](19-expand_mixed_kernel.md) /
   `SplitVectorKernel` dispatch it to **both** AIV lanes (via `dual_aiv_dispatch`)
   and **not** the lane-0-only no-split replay (which is only for non-`split_aiv`
   kernels) — so both lanes run the full body. Use this when the region's tiles

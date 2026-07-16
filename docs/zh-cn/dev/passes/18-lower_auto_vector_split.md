@@ -77,12 +77,12 @@ result = passes.lower_auto_vector_split()(program)
 的多模式情形。区域局部的 `tile_vars` / `var_replacements` 映射保证折半后的变量不会泄漏
 到同级区域或区域外的全宽算子。任何区域**之外**的语句以全宽发出。所有区域下降后，作用域
 包装被丢弃，函数被打上 `split_aiv` + `split_aiv_region_validated`（后者通知
-[`ExpandMixedKernel`](21-expand_mixed_kernel.md) 跳过其单一函数级模式的转置检查——
+[`ExpandMixedKernel`](19-expand_mixed_kernel.md) 跳过其单一函数级模式的转置检查——
 改由 pass 21 用每个区域正确的拆分轴校验各自的转置风险）。
 
 函数级 AUTO split（`optimizations=[pl.split(mode)]`）与显式 `pl.split_aiv` 区域是
 **互斥**的——同时携带二者的作用域会被拒绝。该检查在更早的
-[`OutlineIncoreScopes`](10-outline_incore_scopes.md) 中执行，那里作用域自身的 `split_`
+[`OutlineIncoreScopes`](08-outline_incore_scopes.md) 中执行，那里作用域自身的 `split_`
 （用户的 `pl.split`）与其区域都仍可见；否则本区域路径会按区域下降并静默丢弃函数级 split。
 （提取后二者会无法区分地合并：**单个** `pl.split_aiv` 区域会合法地派生出一个函数级代表
 `split` 模式，故此处无法再检测该冲突。）
@@ -104,7 +104,7 @@ result = passes.lower_auto_vector_split()(program)
   **原样透传区域体**（不折半、不本地化偏移、不注入 `subblock_idx`；作者的
   `aiv_id = get_subblock_idx()` 绑定已携带 lane 信息）。`None` 区域内的 `tile.aiv_shard` /
   `tile.aic_gather` 会被拒绝（无拆分轴可切分）——由 `AivSplitValid` 校验器与此处的常开保护
-  共同拦截。该函数仍会被标记 `split_aiv`，因此下游 [`ExpandMixedKernel`](21-expand_mixed_kernel.md) /
+  共同拦截。该函数仍会被标记 `split_aiv`，因此下游 [`ExpandMixedKernel`](19-expand_mixed_kernel.md) /
   `SplitVectorKernel` 会把它派发到**两个** AIV lane（经由 `dual_aiv_dispatch`），而**非**
   lane-0-only 的非拆分 replay（后者只针对非 `split_aiv` 核）——故两个 lane 都运行完整函数体。
   当区域的 tile 无法折半（单位维）或归约必须保持全宽时使用本模式。

@@ -650,6 +650,60 @@ for i, (sum,) in pl.range(10, init_values=(sum_init,)):
 sum_final: pl.INT64 = sum  # captures final value
 ```
 
+## 跨模块函数复用
+
+在 `@pl.program` 类之外定义的函数可通过两种机制复用。
+
+### 外部 `@pl.function` 调用
+
+在 `@pl.program` 内部可按名称调用外部定义的 `@pl.function`。该函数会自动加入 Program，
+并生成 `ir.Call(GlobalVar, args)`。
+
+```python
+@pl.function
+def softmax(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+    ...
+
+@pl.program
+class MyModel:
+    @pl.function
+    def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        y: pl.Tensor[[64], pl.FP32] = softmax(x)   # ir.Call(GlobalVar("softmax"), [x])
+        return y
+```
+
+**规则：**
+
+- 使用函数的 `.name` 作为 GlobalVar（别名透明）
+- 外部与内部函数名不得冲突
+- 两个不同的外部函数具有相同 `.name` 是错误
+- 同一外部函数从多个 method 调用时只加入一次
+
+### `@pl.inline` 装饰器
+
+`@pl.inline` 捕获函数以便在语句级内联。不会向 Program 添加函数——每次调用点展开函数体。
+
+```python
+@pl.inline
+def normalize(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+    result: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+    return result
+
+@pl.program
+class MyModel:
+    @pl.function
+    def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        y: pl.Tensor[[64], pl.FP32] = normalize(x)  # statements inlined in-place
+        return y
+```
+
+**规则：**
+
+- 实参个数必须与形参列表完全一致
+- 内联定义处的闭包变量可用
+- 内联函数可多次调用（每次展开相互独立）
+- 支持嵌套内联调用
+
 ## 打印 IR 节点
 
 对任意 IR 节点调用 `as_python()` 获取其 Python 表示：

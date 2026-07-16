@@ -134,6 +134,23 @@ tile_c: Tile[[64, 64], FP32, memref=mem_vec_0] = tile.load(...)
 # ]
 ```
 
+### 生产者-消费者复用
+
+当某个变量的最后一次使用恰好发生在定义另一个新变量的同一条语句上（生产者-消费者关系）时，
+新变量可以复用旧变量的内存，因为输入在输出写入之前被读取：
+
+```python
+# Before:
+tile_a: Tile[[64, 64], FP32, memref=mem_vec_0] = tile.create(...)
+tile_b: Tile[[64, 64], FP32, memref=mem_vec_1] = tile.muls(tile_a, 0.0)
+# tile_a.last_use == tile_b.def → reuse allowed
+
+# After:
+tile_a: Tile[[64, 64], FP32, memref=mem_vec_0] = tile.create(...)
+tile_b: Tile[[64, 64], FP32, memref=mem_vec_0] = tile.muls(tile_a, 0.0)
+# tile_b reuses mem_vec_0
+```
+
 ### 生命周期重叠（不可复用）
 
 **之前/之后**（无变化——alloc 语句保留）：

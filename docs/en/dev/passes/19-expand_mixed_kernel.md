@@ -49,7 +49,7 @@ non-`ConstInt` extent is treated as non-singleton and flagged conservatively).
 This whole-function check reads a **single** `func->GetSplitMode()`, so it cannot
 represent a multi-mode function. By the time `ExpandMixedKernel` runs, any
 first-class `SplitAivScopeStmt` regions have already been consumed and erased by
-[`LowerAutoVectorSplit`](20-lower_auto_vector_split.md) (pass 20), which validates
+[`LowerAutoVectorSplit`](18-lower_auto_vector_split.md) (pass 18), which validates
 **each region's** transpose hazard with that region's own split axis and stamps
 `split_aiv_region_validated` on the function. So this pass skips the single-func-mode
 transpose check for functions carrying `split_aiv_region_validated` (the AUTO
@@ -167,7 +167,7 @@ kernels while the secondary sync lane avoids real DMA/compute work.
 
 This replay path applies only to **non-`split_aiv`** mixed kernels. A function carrying a `pl.split_aiv` region — any
 mode, including the task-parallel `pl.SplitMode.NONE` — is stamped `split_aiv` by
-[`LowerAutoVectorSplit`](20-lower_auto_vector_split.md) (pass 20), so [`SplitVectorKernel`](23-split_vector_kernel.md)
+[`LowerAutoVectorSplit`](18-lower_auto_vector_split.md) (pass 18), so [`SplitVectorKernel`](21-split_vector_kernel.md)
 routes it through the split path (both AIV lanes dispatch via `dual_aiv_dispatch`) and never the lane-0-only replay
 above. For a `NONE` region this is exactly right: both lanes run the **full** body for disjoint, `aiv_id`-dispatched
 work — dropping lane-1 stores would be a miscompile.

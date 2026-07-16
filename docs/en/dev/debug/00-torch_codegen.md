@@ -263,7 +263,7 @@ References:
 ## Relation to Other Codegen Docs
 
 - This document: Python debug codegen (`torch_codegen`)
-- [00-pto_codegen.md](00-pto_codegen.md): PTO kernel codegen
-- [01-orchestration_codegen.md](01-orchestration_codegen.md): orchestration-side C++ codegen
+- [00-pto_codegen.md](../codegen/00-pto_codegen.md): PTO kernel codegen
+- [01-orchestration_codegen.md](../codegen/01-orchestration_codegen.md): orchestration-side C++ codegen
 
 They are complementary: `torch_codegen` provides executable semantic reference, while PTO/Orchestration target production generation.

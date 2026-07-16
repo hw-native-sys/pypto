@@ -262,7 +262,7 @@ split 维度定义：
 ## 与其它代码生成文档的关系
 
 - 本文档：Python 调试代码生成（`torch_codegen`）
-- [00-pto_codegen.md](00-pto_codegen.md)：PTO 内核代码生成
-- [01-orchestration_codegen.md](01-orchestration_codegen.md)：编排侧 C++ 代码生成
+- [00-pto_codegen.md](../codegen/00-pto_codegen.md)：PTO 内核代码生成
+- [01-orchestration_codegen.md](../codegen/01-orchestration_codegen.md)：编排侧 C++ 代码生成
 
 三者职责互补：`torch_codegen` 负责“可执行语义对照”，PTO/Orchestration 负责“生产链路生成”。

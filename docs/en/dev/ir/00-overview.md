@@ -257,7 +257,7 @@ assign = ir.AssignStmt(x, sum_expr, span)
 
 ## Related Documentation
 
-- [IR Node Hierarchy](01-ir_hierarchy.md) - Complete node type reference
+- [IR Node Hierarchy](01-hierarchy.md) - Complete node type reference
 - [IR Types and Examples](02-types.md) - Type system and usage examples
 - [Structural Comparison](03-structural_comparison.md) - Equality and hashing utilities
 

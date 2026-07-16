@@ -203,5 +203,5 @@ explicit `pl.split_aiv` regions (`SplitAivScopeStmt`) cannot coexist on one
 scope. This pass rejects the combination (it bridges a single region's mode into
 a function-level representative `split`, which would silently collide with the
 user's `pl.split`). See
-[`LowerAutoVectorSplit`](20-lower_auto_vector_split.md) for how the surviving
+[`LowerAutoVectorSplit`](18-lower_auto_vector_split.md) for how the surviving
 mechanism is lowered.

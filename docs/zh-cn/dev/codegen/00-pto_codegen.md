@@ -674,3 +674,4 @@ ptoas **内部** pipe-slot 偏移安装的 `get_subblockid()` 宏桥接
 - [Pass 管理器](../passes/00-pass_manager.md): 了解 Pass 流水线
 - [IR 构建器 (Builder)](../ir/06-builder.md): 以编程方式构造 IR
 - [操作符组织](../ir/05-operators.md): Tile 操作详情
+- [PTOAS Op 状态矩阵](../ptoas-op-status.md): 每个 PTOAS op 的前端 / ST 覆盖状态

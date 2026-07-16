@@ -30,7 +30,7 @@
 
 `split_axis::FindTransposeSplitHazard` 在 `ExpandMixedFunction` 开头检测:标记**第一个**在切分轴上非 singleton 的 `tile.transpose` 源(若源在切分轴上是 singleton,则不携带切分数据 —— 即广播 no-op 情形 —— 保持切分;动态的非 `ConstInt` extent 视为非 singleton,保守标记)。
 
-该整函数检查只读取**单个** `func->GetSplitMode()`,无法表达多模式函数。当 `ExpandMixedKernel` 运行时,任何一等公民 `SplitAivScopeStmt` 区域均已被 [`LowerAutoVectorSplit`](20-lower_auto_vector_split.md)(pass 20)消费并擦除,后者已用**每个区域**各自的切分轴校验其转置风险,并在函数上打 `split_aiv_region_validated`。因此本 pass 对携带 `split_aiv_region_validated` 的函数跳过单一函数级模式的转置检查(AUTO 整函数路径保持不变);作用域节点永不到达此处 —— 只剩逐算子的 `aiv_shard` / `aic_gather` 标记。
+该整函数检查只读取**单个** `func->GetSplitMode()`,无法表达多模式函数。当 `ExpandMixedKernel` 运行时,任何一等公民 `SplitAivScopeStmt` 区域均已被 [`LowerAutoVectorSplit`](18-lower_auto_vector_split.md)(pass 18)消费并擦除,后者已用**每个区域**各自的切分轴校验其转置风险,并在函数上打 `split_aiv_region_validated`。因此本 pass 对携带 `split_aiv_region_validated` 的函数跳过单一函数级模式的转置检查(AUTO 整函数路径保持不变);作用域节点永不到达此处 —— 只剩逐算子的 `aiv_shard` / `aic_gather` 标记。
 
 CV 边界的跨核心数据传输通过将显式 `tile.move` 操作拆分为 `tpush`/`tpop` 对来处理：
 
@@ -138,8 +138,8 @@ replay 路径强制为 `valid_shape=[0, 0]`，同时屏蔽可见的 `tile.store`
 握手对称，同时让第二个同步 lane 避免真实 DMA/计算工作。
 
 此 replay 路径仅适用于**非 `split_aiv`** 的 mixed kernel。携带 `pl.split_aiv` 区域的函数——任意模式，包括任务并行的
-`pl.SplitMode.NONE`——会被 [`LowerAutoVectorSplit`](20-lower_auto_vector_split.md)（pass 20）标记 `split_aiv`，因此
-[`SplitVectorKernel`](23-split_vector_kernel.md) 会将其走 split 路径（两个 AIV lane 经由 `dual_aiv_dispatch` 派发），
+`pl.SplitMode.NONE`——会被 [`LowerAutoVectorSplit`](18-lower_auto_vector_split.md)（pass 18）标记 `split_aiv`，因此
+[`SplitVectorKernel`](21-split_vector_kernel.md) 会将其走 split 路径（两个 AIV lane 经由 `dual_aiv_dispatch` 派发），
 而非上述 lane-0-only 的 replay。对 `NONE` 区域这正是所需：两个 lane 都运行**完整**函数体，处理由 `aiv_id` 分派的
 不相交工作——丢弃 lane-1 的 store 会导致误编译。
 

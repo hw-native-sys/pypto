@@ -196,4 +196,4 @@ passes.def("outline_incore_scopes", &pass::OutlineIncoreScopes, "Outline InCore 
 承载于作用域自身的 `split_`）与显式 `pl.split_aiv` 区域（`SplitAivScopeStmt`）不能在同一
 作用域共存。本 Pass 会拒绝该组合（它会把单个区域的模式桥接为函数级代表 `split`，从而与用户的
 `pl.split` 静默冲突）。幸存机制如何下降见
-[`LowerAutoVectorSplit`](20-lower_auto_vector_split.md)。
+[`LowerAutoVectorSplit`](18-lower_auto_vector_split.md)。

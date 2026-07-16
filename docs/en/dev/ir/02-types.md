@@ -517,7 +517,7 @@ if isinstance(type_obj, ir.TileType):
 ## Related Documentation
 
 - [IR Overview](00-overview.md) - Core concepts and design principles
-- [IR Node Hierarchy](01-ir_hierarchy.md) - Complete node type reference
+- [IR Node Hierarchy](01-hierarchy.md) - Complete node type reference
 - [Structural Comparison](03-structural_comparison.md) - Equality and hashing utilities
 
 ## Summary

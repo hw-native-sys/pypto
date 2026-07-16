@@ -689,3 +689,4 @@ Key functions:
 - [Pass Manager](../passes/00-pass_manager.md): Understanding pass pipeline
 - [IR Builder](../ir/06-builder.md): Constructing IR programmatically
 - [Operator Organization](../ir/05-operators.md): Block operation details
+- [PTOAS Op Status Matrix](../ptoas-op-status.md): Frontend / ST coverage per PTOAS op
