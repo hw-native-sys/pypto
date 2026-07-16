@@ -31,7 +31,7 @@ an ST will catch it on hardware; **ops without ST are incomplete**
 - **pypto-tile / -tensor frontend**: ✅ = `REGISTER_OP("tile|tensor.<op>")` registered;
   `—` = N/A (comm ops are not tile/tensor-level; provided by distributed/system APIs)
 - **ST**: ✅ = `tests/st/` has a real ST that directly exercises the op; `—` = for comm, see next column
-- **distribute ST**: comm ops only — ✅+evidence file = covered under `tests/st/distributed/`; ❌ = none; non-comm = `—`
+- **distributed ST**: comm ops only — ✅+evidence file = covered under `tests/st/distributed/`; ❌ = none; non-comm = `—`
 - **Notes**: `NEW`=added in this wave (PR #1824); `MISSING`=in PTOAS but not yet in pypto (see add-op skill);
   `codegen-incomplete`=IR/transforms exist but no codegen; `FP variant`/`internal`/`distributed`=variant/internal/distributed
 
@@ -39,7 +39,7 @@ an ST will catch it on hardware; **ops without ST are incomplete**
 > universe + name map embedded in the generator, temporarily under `temp/`). Day-to-day
 > updates are **manual per row**: after adding an op, flip that row's frontend/ST columns to ✅.
 
-| PTOAS op (pto.*) | pto-isa API | Level | PTOAS API | pypto-tile frontend | pypto-tensor frontend | ST | distribute ST | Notes |
+| PTOAS op (pto.*) | pto-isa API | Level | PTOAS API | pypto-tile frontend | pypto-tensor frontend | ST | distributed ST | Notes |
 |---|---|---|:---:|:---:|:---:|:---:|:---:|---|
 | **Elementwise (Tile-Tile)** |  |  |  |  |  |  |  |  |
 | pto.tabs | TABS | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
@@ -140,7 +140,7 @@ an ST will catch it on hardware; **ops without ST are incomplete**
 | pto.tsort32 | TSORT32 | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tmrgsort | TMRGSORT | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | reg as mrgsort_format1/2 |
 | pto.tfillpad | TFILLPAD | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
-| pto.tfillpad_inpace | TFILLPAD_INPLACE | tile | ✅ | ✅ | ❌ | ✅ | — |  |
+| pto.tfillpad_inplace | TFILLPAD_INPLACE | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.tfillpad_expand | TFILLPAD_EXPAND | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | NEW tile+tensor frontend+codegen+ST; tile a2a3 CI passed, tensor CI pending |
 | pto.tpartadd | TPARTADD | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | NEW frontend+codegen+ST; a2a3 hardware CI pending (watch ISA defects in irregular family) |
 | pto.tpartmul | TPARTMUL | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | NEW frontend+codegen+ST; a2a3 hardware CI pending (watch ISA defects in irregular family) |
@@ -202,4 +202,4 @@ an ST will catch it on hardware; **ops without ST are incomplete**
 | pto.comm.build_async_session | BuildAsyncSession | comm | ✅ | — | — | — | ❌ | distributed |
 | pto.tprefetch_async | TPREFETCH_ASYNC | comm | ❌ | — | — | — | — | ptoas not implemented (ISA_ONLY) |
 
-**Stats**: 148 PTOAS op rows; PTOAS provides 143 interfaces; pypto frontend registered 98; ST coverage 67.
+**Stats**: 148 PTOAS op rows; PTOAS provides 143 interfaces; pypto frontend registered 105; ST coverage 74 (8 distributed). Stats recomputed 2026-07-16.

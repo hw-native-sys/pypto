@@ -58,7 +58,7 @@ D = max(2, stage - 1)
 
 ## 约束
 
-- skew 仅支持静态边界（`start`、`stop`、`step` 为编译期常量）。动态边界的跨核循环回退到 unroll 路径。
+- skew 仅支持静态边界（`start`、`stop`、`step` 为编译期常量）。动态边界的跨核循环降级为 `ForKind::Sequential`。
 - 生产者 skew 的稳态区**保留为循环**（不完全展开），使 `AllocateMemoryAddr` 分配的 matmul `Acc` 双缓冲仍有循环可交替。
 - 有意**不**做消费者侧预取：它会破坏 codegen 的 `tpop → tfree` FIFO 槽位追踪（以 SSA 变量身份为键，无法跨 iter_arg），且提前整整一个迭代发出阻塞式 `tpop` 只会 stall。
 

@@ -42,7 +42,7 @@ Auto-selects between tensor and tile implementation based on input type.
 | `rsqrt` | `(input: T, high_precision: bool = False) -> T` | Reciprocal square root; `high_precision=True` selects the high-precision path (tensor input only — tile callers must use `pl.tile.rsqrt(src, tmp=...)`) |
 | `create` / `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: Mem) -> Tile` | Tile-only (promoted from `pl.tile.create`): create tile at specific memory space |
 | `read` | `(src: T, offset: IntLike \| Sequence[IntLike]) -> Scalar` | Read scalar at indices (dispatched by source type). Sugar: `A[i, j]` |
-| `write` | `(dst: T, offset: IntLike \| Sequence[IntLike], value: Scalar) -> None` | Write scalar at indices (dispatched by destination type). Sugar: `A[i, j] = v` |
+| `write` | `(dst: T, offset: IntLike \| Sequence[IntLike], value: Scalar) -> Expr` | Write scalar at indices (dispatched by destination type). Sugar: `A[i, j] = v` |
 
 ## Tensor-Only (`pl.tensor.*`)
 
@@ -52,7 +52,7 @@ Operate on `Tensor` objects (DDR memory).
 | ---- | --------- | ----------- |
 | `create` / `create_tensor` | `(shape: Sequence[IntLike], dtype: DataType, layout: TensorLayout = None, init_value: int \| float \| None = None) -> Tensor` | Create a new tensor (optional `layout`, e.g. `pl.DN`, `pl.NZ`; `init_value` AICPU-pre-fills the buffer — `0` zeroes any dtype, non-zero needs an int / 32-bit-or-wider float dtype) |
 | `read` | `(tensor: Tensor, indices: IntLike \| Sequence[IntLike]) -> Scalar` | Read scalar at indices. Sugar: `A[i, j]` |
-| `write` | `(tensor: Tensor, indices: IntLike \| Sequence[IntLike], value: Scalar) -> None` | Write scalar at indices. Sugar: `A[i, j] = v` |
+| `write` | `(tensor: Tensor, indices: IntLike \| Sequence[IntLike], value: Scalar \| Expr) -> Expr` | Write scalar at indices. Sugar: `A[i, j] = v` |
 | `dim` | `(tensor: Tensor, axis: int) -> Scalar` | Get dimension size (supports negative indexing) |
 | `slice` | `(tensor: Tensor, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> Tensor` | Slice. Sugar: `A[0:16, :]` |
 | `reshape` | `(tensor: Tensor, shape: Sequence[IntLike]) -> Tensor` | Reshape |
@@ -104,7 +104,7 @@ Transfer data between memory hierarchy levels.
 | `assemble` | `(target: Tile, source: Tile, offset: Sequence[IntLike]) -> Tile` | Write source tile into target at offset. Sugar (pre-SSA only): `target[i:i+H, j:j+W] = source` |
 | `scatter_update` | `(input: Tile, dim: int, index: Tile, src: Tile) -> Tile` | Update rows of `input` tile at sparse positions given by `index` tile with values from `src` tile. `input`/`src`: 2D `[rows, d]` or 4D `[B, S, 1, d]`; `index`: 2D `[b, s]` integer. Lowered to `tile.scatter` (pto.tscatter, whole-row flat indices). Only `dim=-2` is supported |
 | `read` | `(tile: Tile, indices: IntLike \| Sequence[IntLike]) -> Scalar` | Read scalar at indices. Sugar: `A[i, j]` |
-| `write` | `(tile: Tile, indices: IntLike \| Sequence[IntLike], value: Scalar) -> None` | Write scalar at indices. Sugar: `A[i, j] = v` |
+| `write` | `(tile: Tile, indices: IntLike \| Sequence[IntLike], value: Scalar \| Expr) -> Expr` | Write scalar at indices. Sugar: `A[i, j] = v` |
 | `move` | `(tile: Tile, target_memory: Mem) -> Tile` | Move tile between memory levels (including Vec→Vec) |
 | `create` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: Mem = Mem.Vec) -> Tile` | Create tile at memory space |
 | `full` | `(shape: list[int], dtype: DataType, value: int \| float) -> Tile` | Create tile filled with constant |

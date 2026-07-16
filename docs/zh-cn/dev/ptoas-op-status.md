@@ -25,14 +25,14 @@
 - **pypto-tile / -tensor 前端**：✅ = `REGISTER_OP("tile|tensor.<op>")` 已注册；
   `—` = 不适用（comm 通讯 op 不是 tile/tensor 级，由分布式/system API 提供）
 - **ST测试**：✅ = `tests/st/` 有直接引用该 op 的真实 ST；`—` = comm 走下一列
-- **distribute ST测试**：仅对 comm op —— ✅+证据文件 = `tests/st/distributed/` 有覆盖；❌ = 无；非 comm 为 `—`
+- **distributed ST测试**：仅对 comm op —— ✅+证据文件 = `tests/st/distributed/` 有覆盖；❌ = 无；非 comm 为 `—`
 - **备注**：`NEW`=本轮新增(PR #1824)；`MISSING`=PTOAS有但pypto未写(待补，见 add-op skill)；
   `codegen-incomplete`=IR/转换有但无codegen；`FP variant`/`internal`/`distributed`=变体/内部/分布式
 
 > 维护：本表初版由脚本对照源码生成（PTOAS op 全集 + name-map 内嵌于生成器，临时存于
 > `temp/`）。日常以**手工更新对应行**为主：加 op 后把该行的前端/ST 列改为 ✅。
 
-| PTOAS op (pto.*) | pto-isa API | 级别 | PTOAS接口 | pypto-tile前端 | pypto-tensor前端 | ST测试 | distribute ST测试 | 备注 |
+| PTOAS op (pto.*) | pto-isa API | 级别 | PTOAS接口 | pypto-tile前端 | pypto-tensor前端 | ST测试 | distributed ST测试 | 备注 |
 |---|---|---|:---:|:---:|:---:|:---:|:---:|---|
 | **逐元素 (Tile-Tile)** |  |  |  |  |  |  |  |  |
 | pto.tabs | TABS | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
@@ -133,7 +133,7 @@
 | pto.tsort32 | TSORT32 | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tmrgsort | TMRGSORT | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | reg as mrgsort_format1/2 |
 | pto.tfillpad | TFILLPAD | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
-| pto.tfillpad_inpace | TFILLPAD_INPLACE | tile | ✅ | ✅ | ❌ | ✅ | — |  |
+| pto.tfillpad_inplace | TFILLPAD_INPLACE | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.tfillpad_expand | TFILLPAD_EXPAND | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | NEW tile+tensor 前端+codegen+ST；tile a2a3 CI 通过，tensor 待 CI |
 | pto.tpartadd | TPARTADD | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | NEW 前端+codegen+ST；a2a3 真机待 CI（irregular 家族留意 ISA 缺陷） |
 | pto.tpartmul | TPARTMUL | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | NEW 前端+codegen+ST；a2a3 真机待 CI（irregular 家族留意 ISA 缺陷） |
@@ -195,4 +195,4 @@
 | pto.comm.build_async_session | BuildAsyncSession | comm | ✅ | — | — | — | ❌ | distributed |
 | pto.tprefetch_async | TPREFETCH_ASYNC | comm | ❌ | — | — | — | — | ptoas未实现 (ISA_ONLY) |
 
-**统计**：共 148 个 PTOAS op 行；PTOAS 提供接口 143；pypto 前端已写好 98；有 ST 测试 67。
+**统计**：共 148 个 PTOAS op 行；PTOAS 提供接口 143；pypto 前端已写好 105；有 ST 测试 74（distributed 8）。统计数字于 2026-07-16 重新计算。

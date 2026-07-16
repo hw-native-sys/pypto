@@ -58,7 +58,7 @@ The **effective** depth needs `trip % D == 0` and `trip >= 2·D`; when the reque
 
 ## Constraints
 
-- Static bounds only for the skew (`start`, `stop`, `step` compile-time). Dynamic-bound cross-core loops bail to the unroll path.
+- Static bounds only for the skew (`start`, `stop`, `step` compile-time). Dynamic-bound cross-core loops are demoted to `ForKind::Sequential`.
 - The producer-skew steady region is **kept as a loop** (not fully unrolled) so the matmul `Acc` double-buffering assigned by `AllocateMemoryAddr` still has a loop to alternate over.
 - A true consumer-side prefetch is intentionally **not** done: it would break codegen's `tpop → tfree` FIFO-slot tracking (keyed on SSA var identity, cannot cross an iter_arg) and a blocking `tpop` issued a full iteration early would simply stall.
 

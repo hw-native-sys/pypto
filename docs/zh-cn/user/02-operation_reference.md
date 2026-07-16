@@ -42,7 +42,7 @@
 | `rsqrt` | `(input: T, high_precision: bool = False) -> T` | 倒数平方根；`high_precision=True` 选择高精度路径（仅对 Tensor 输入生效，Tile 路径需要改用 `pl.tile.rsqrt(src, tmp=...)`） |
 | `create` / `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: Mem) -> Tile` | 在指定内存空间创建 tile（tile-only，对应 `pl.tile.create`） |
 | `read` | `(src: T, offset: IntLike \| Sequence[IntLike]) -> Scalar` | 读取指定索引的标量（按源类型分发）。语法糖：`A[i, j]` |
-| `write` | `(dst: T, offset: IntLike \| Sequence[IntLike], value: Scalar) -> None` | 写入指定索引的标量（按目标类型分发）。语法糖：`A[i, j] = v` |
+| `write` | `(dst: T, offset: IntLike \| Sequence[IntLike], value: Scalar) -> Expr` | 写入指定索引的标量（按目标类型分发）。语法糖：`A[i, j] = v` |
 
 ## 仅 Tensor（`pl.tensor.*`）
 
@@ -52,7 +52,7 @@
 | ---- | ---- | ---- |
 | `create` / `create_tensor` | `(shape: Sequence[IntLike], dtype: DataType, layout: TensorLayout = None, init_value: int \| float \| None = None) -> Tensor` | 创建新张量（可选 `layout` 参数，如 `pl.DN`、`pl.NZ`；`init_value` 由 AICPU 预填充缓冲区——`0` 对任意 dtype 清零，非零值需整型或 ≥32 位浮点 dtype） |
 | `read` | `(tensor: Tensor, indices: IntLike \| Sequence[IntLike]) -> Scalar` | 读取指定索引的标量。语法糖：`A[i, j]` |
-| `write` | `(tensor: Tensor, indices: IntLike \| Sequence[IntLike], value: Scalar) -> None` | 写入指定索引的标量。语法糖：`A[i, j] = v` |
+| `write` | `(tensor: Tensor, indices: IntLike \| Sequence[IntLike], value: Scalar \| Expr) -> Expr` | 写入指定索引的标量。语法糖：`A[i, j] = v` |
 | `dim` | `(tensor: Tensor, axis: int) -> Scalar` | 获取维度大小（支持负索引） |
 | `slice` | `(tensor: Tensor, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> Tensor` | 切片。语法糖：`A[0:16, :]` |
 | `reshape` | `(tensor: Tensor, shape: Sequence[IntLike]) -> Tensor` | 变形 |
@@ -104,7 +104,7 @@
 | `assemble` | `(target: Tile, source: Tile, offset: Sequence[IntLike]) -> Tile` | 将源 tile 写入目标 tile 的指定偏移处。语法糖（仅 SSA 前）：`target[i:i+H, j:j+W] = source` |
 | `scatter_update` | `(input: Tile, dim: int, index: Tile, src: Tile) -> Tile` | 按 `index` tile 指定的稀疏行位置，将 `src` tile 的行数据写入 `input` tile。`input`/`src`：2D `[rows, d]` 或 4D `[B, S, 1, d]`；`index`：2D `[b, s]` 整型。降级为 `tile.scatter`（pto.tscatter，整行 flat 索引）实现。当前仅支持 `dim=-2` |
 | `read` | `(tile: Tile, indices: IntLike \| Sequence[IntLike]) -> Scalar` | 读取指定索引的标量。语法糖：`A[i, j]` |
-| `write` | `(tile: Tile, indices: IntLike \| Sequence[IntLike], value: Scalar) -> None` | 写入指定索引的标量。语法糖：`A[i, j] = v` |
+| `write` | `(tile: Tile, indices: IntLike \| Sequence[IntLike], value: Scalar \| Expr) -> Expr` | 写入指定索引的标量。语法糖：`A[i, j] = v` |
 | `move` | `(tile: Tile, target_memory: Mem) -> Tile` | 在内存层级间移动 tile（包括 Vec→Vec 拷贝） |
 | `create` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: Mem = Mem.Vec) -> Tile` | 在指定内存空间创建 tile |
 | `full` | `(shape: list[int], dtype: DataType, value: int \| float) -> Tile` | 创建用常量填充的 tile |
