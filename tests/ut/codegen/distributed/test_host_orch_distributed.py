@@ -865,7 +865,7 @@ def test_backend_materializes_allgather_next_level_files(tmp_path):
         Prog,
         tmp_path,
         variant="builtin.tensor.allgather__fp32",
-        signature='"signature": [_D.IN, _D.INOUT, _D.INOUT]',
+        signature='"signature": [_D.IN, _D.OUT, _D.OUT]',
         kernel_snippet="TPUT",
     )
 
@@ -899,7 +899,7 @@ def test_backend_materializes_all_to_all_next_level_files(tmp_path):
         Prog,
         tmp_path,
         variant="builtin.tensor.all_to_all__fp32",
-        signature='"signature": [_D.IN, _D.INOUT, _D.INOUT]',
+        signature='"signature": [_D.IN, _D.OUT, _D.OUT]',
         kernel_snippet="TPUT",
     )
 

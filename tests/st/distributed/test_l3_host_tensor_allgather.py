@@ -65,7 +65,7 @@ class HostTensorAllGather:
     def publish_step(
         self,
         inp: pl.Tensor[[1, SIZE], pl.FP32],
-        stage: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+        stage: pl.Out[pld.DistributedTensor[[1, SIZE], pl.FP32]],
         my_rank: pl.Scalar[pl.INT32],
         nranks: pl.Scalar[pl.INT32],
     ):
@@ -78,7 +78,7 @@ class HostTensorAllGather:
     def publish_orch(
         self,
         inp: pl.Tensor[[1, SIZE], pl.FP32],
-        stage: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+        stage: pl.Out[pld.DistributedTensor[[1, SIZE], pl.FP32]],
         my_rank: pl.Scalar[pl.INT32],
         nranks: pl.Scalar[pl.INT32],
     ):

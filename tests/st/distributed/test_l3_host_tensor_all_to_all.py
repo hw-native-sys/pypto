@@ -70,7 +70,7 @@ class HostTensorAllToAll:
     def stage_step(
         self,
         inp: pl.Tensor[[NR, SIZE], pl.FP32],
-        stage: pl.InOut[pld.DistributedTensor[[NR, SIZE], pl.FP32]],
+        stage: pl.Out[pld.DistributedTensor[[NR, SIZE], pl.FP32]],
         my_rank: pl.Scalar[pl.INT32],
     ):
         for dest in pl.range(NR):
@@ -81,7 +81,7 @@ class HostTensorAllToAll:
     def stage_orch(
         self,
         inp: pl.Tensor[[NR, SIZE], pl.FP32],
-        stage: pl.InOut[pld.DistributedTensor[[NR, SIZE], pl.FP32]],
+        stage: pl.Out[pld.DistributedTensor[[NR, SIZE], pl.FP32]],
         my_rank: pl.Scalar[pl.INT32],
     ):
         self.stage_step(inp, stage, my_rank)
