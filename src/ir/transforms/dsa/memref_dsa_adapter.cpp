@@ -145,8 +145,6 @@ ExportedProblem BuildStructuredProblem(const FunctionPtr& func, const Allocation
   std::map<MemorySpace, ::dsa::Pool> pools;
   ::dsa::PyptoStructure pypto_structure;
   std::vector<std::optional<::dsa::BufferId>> buffer_id_by_interval(allocation_plan.intervals.size());
-  std::unordered_map<::dsa::BufferId, size_t> interval_by_buffer_id;
-  std::unordered_map<::dsa::BufferId, size_t> buffer_position_by_id;
   for (size_t index = 0; index < allocation_plan.intervals.size(); ++index) {
     const LifetimeInterval& lifetime = allocation_plan.intervals[index];
     if (lifetime.memory_space == MemorySpace::DDR || !policy.ShouldAllocate(lifetime.memory_space)) continue;
@@ -167,10 +165,8 @@ ExportedProblem BuildStructuredProblem(const FunctionPtr& func, const Allocation
     buffer.alignment = std::max<uint64_t>(1, policy.AlignAddress(1, lifetime.memory_space));
     buffer.live_intervals = ConvertAllocationLifetime(lifetime);
     buffer.allowed_pools = {ToPoolId(lifetime.memory_space)};
-    buffer_position_by_id.emplace(id, exported.document.problem.buffers.size());
     exported.document.problem.buffers.push_back(std::move(buffer));
     buffer_id_by_interval[index] = id;
-    interval_by_buffer_id.emplace(id, index);
     pypto_structure.alias_classes.push_back({id, lifetime.alias_members.empty()
                                                      ? std::vector<std::string>{lifetime.variable->name_hint_}
                                                      : lifetime.alias_members});
@@ -212,6 +208,9 @@ ExportedProblem BuildStructuredProblem(const FunctionPtr& func, const Allocation
     if (!group.members.empty()) pypto_structure.pipeline_groups.push_back(std::move(group));
   }
   exported.document.problem.pypto_structure = std::move(pypto_structure);
+  if (!exported.document.problem.pypto_structure->pipeline_groups.empty()) {
+    exported.document.metadata["pipeline_intent_policy"] = "hard_requested_depth";
+  }
 
   using BufferPair = std::pair<::dsa::BufferId, ::dsa::BufferId>;
   std::map<BufferPair, std::set<::dsa::SeparationReason>> separations;
@@ -245,65 +244,6 @@ ExportedProblem BuildStructuredProblem(const FunctionPtr& func, const Allocation
     exported.document.problem.separations.push_back(std::move(separation));
   }
 
-  // PR #1949 identifies a concrete reuse cost: assigning the same address to
-  // pipeline stages that were intended to overlap introduces a false WAR and
-  // serializes them. Distinct effective residues remain hard-separated above.
-  // For stages collapsed into one capacity residue, record chronological
-  // reuse candidates so research solvers can trade memory for preserved
-  // overlap. This unit cost is intentionally not enabled in production until
-  // it is calibrated against emitted PTOAS dependencies and device latency.
-  ::dsa::CostModel cost_model;
-  for (const ::dsa::PyptoPipelineGroup& group : exported.document.problem.pypto_structure->pipeline_groups) {
-    std::map<uint32_t, std::vector<::dsa::PyptoPipelineMember>> members_by_residue;
-    for (const ::dsa::PyptoPipelineMember& member : group.members) {
-      members_by_residue[member.residue].push_back(member);
-    }
-    for (auto& [residue, members] : members_by_residue) {
-      static_cast<void>(residue);
-      std::sort(members.begin(), members.end(),
-                [&allocation_plan, &interval_by_buffer_id](const auto& first, const auto& second) {
-                  const LifetimeInterval& first_interval =
-                      allocation_plan.intervals.at(interval_by_buffer_id.at(first.buffer));
-                  const LifetimeInterval& second_interval =
-                      allocation_plan.intervals.at(interval_by_buffer_id.at(second.buffer));
-                  if (first_interval.def_point != second_interval.def_point) {
-                    return first_interval.def_point < second_interval.def_point;
-                  }
-                  if (first_interval.last_use_point != second_interval.last_use_point) {
-                    return first_interval.last_use_point < second_interval.last_use_point;
-                  }
-                  return first.buffer < second.buffer;
-                });
-      for (size_t index = 1; index < members.size(); ++index) {
-        if (members[index - 1].stage == members[index].stage) continue;
-        auto first = members[index - 1].buffer;
-        auto second = members[index].buffer;
-        BufferPair pair{std::min(first, second), std::max(first, second)};
-        if (separations.count(pair) != 0) continue;
-        const auto first_position = buffer_position_by_id.find(first);
-        const auto second_position = buffer_position_by_id.find(second);
-        INTERNAL_CHECK(first_position != buffer_position_by_id.end() &&
-                       second_position != buffer_position_by_id.end())
-            << "DSA pipeline cost references an unknown exported buffer";
-        const ::dsa::Buffer& first_buffer = exported.document.problem.buffers[first_position->second];
-        const ::dsa::Buffer& second_buffer = exported.document.problem.buffers[second_position->second];
-        if (::dsa::LifetimesOverlap(first_buffer, second_buffer)) continue;
-        cost_model.reuse_penalties.push_back(
-            {first, second, 1, ::dsa::ReusePenaltyReason::kPipelineSerialization});
-      }
-    }
-  }
-  if (!cost_model.reuse_penalties.empty()) {
-    // This unit-cost adjacency proxy has not been calibrated against device
-    // latency or PTOAS synchronization. Keep it available for research, but
-    // never claim that such a document satisfies the production hard-v1
-    // profile.
-    exported.document.profile = ::dsa::BenchmarkProfile::kPyptoResearchV1;
-    exported.document.problem.cost_model = std::move(cost_model);
-    exported.document.metadata["experimental_features"] = "pipeline_adjacent_reuse_cost";
-    exported.document.metadata["reuse_cost_model"] = "pipeline_adjacent_antidependency_v1";
-  }
-
   return exported;
 }
 
@@ -328,7 +268,7 @@ std::string WriteProblemJson(const ExportedProblem& exported, const std::string&
   return output.string();
 }
 
-SolverRun SolveWithFirstFit(const ExportedProblem& exported) {
+SolverRun Solve(const ExportedProblem& exported, const ::dsa::DsaSolver& solver) {
   SolverRun run;
   run.problem_errors = ::dsa::ValidateStructuredProblemDocument(exported.document);
   if (!run.problem_errors.empty()) {
@@ -337,7 +277,6 @@ SolverRun SolveWithFirstFit(const ExportedProblem& exported) {
     return run;
   }
 
-  ::dsa::FirstFitSolver solver;
   run.compatibility = ::dsa::CheckSolverCompatibility(exported.document.problem, solver.Capabilities());
   if (!run.compatibility.Compatible()) {
     run.result.status = ::dsa::SolveStatus::kUnsupported;
@@ -353,6 +292,11 @@ SolverRun SolveWithFirstFit(const ExportedProblem& exported) {
     run.solution_errors = ::dsa::ValidateSolution(exported.document.problem, *run.result.solution);
   }
   return run;
+}
+
+SolverRun SolveWithFirstFit(const ExportedProblem& exported) {
+  ::dsa::FirstFitSolver solver;
+  return Solve(exported, solver);
 }
 
 std::vector<std::pair<const MemRef*, MemRefPtr>> BuildMemRefReplacements(

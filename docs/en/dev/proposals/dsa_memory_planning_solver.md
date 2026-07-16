@@ -48,34 +48,67 @@ order but intended to overlap on asynchronous hardware units. Reusing one
 address across concurrent stages introduces a false write-after-read dependency
 and serializes the ping-pong pipeline. PR #1949 demonstrates this mechanism.
 
-`pipeline_membership=(group,stage)` therefore survives to DSA collection.
-Distinct effective residues become hard separations. This is an ordinary extra
-conflict, not a whole-slot placement rule. It preserves the chosen pipeline
-depth while leaving all unrelated lifetime-disjoint buffers available to the
-standard DSA solver.
+`pipeline_membership=(group,stage)` therefore survives to DSA collection. The
+adapter first exports every distinct requested stage as a hard separation. This
+is an ordinary extra conflict, not a whole-slot placement rule. It preserves
+the requested pipeline depth while leaving all unrelated lifetime-disjoint
+buffers available to standard DSA.
+
+The solve policy is deliberately two-stage:
+
+1. solve standard DSA with capacity and all pipeline-stage separations hard;
+2. only when that search finds no fitting placement, remove the
+   `pipeline_stage` reason, keep every other hard reason, add sparse
+   `pipeline_serialization` reuse costs, and solve again.
+
+The fallback emits `PH-DSA-001`. It means compilation succeeded by allowing
+some intended pipeline copies to share physical ranges, so the generated
+program may serialize. Because the current solver is heuristic, a zero-cost
+fallback solution is revalidated against the strict problem and accepted
+without a warning.
+
+For pipeline-intent pairs \(P\), the strict problem adds:
+
+```text
+(i,j) in P  =>  address_range(i) does not intersect address_range(j)
+```
+
+The fallback removes only those extra edges and minimizes:
+
+```text
+lex(capacity_overflow, sum((i,j) in P) w_ij * reuse(i,j),
+    total_peak, max_peak)
+```
+
+`reuse(i,j)` is one only when lifetime-disjoint buffers overlap in physical
+address. Lifetime conflicts and all non-pipeline separations remain hard.
+The fallback document retains the requested stage/residue mapping as
+provenance; achieved depth is a placement measurement, not the
+`effective_depth` field.
 
 ## Research refinements
 
 A PyPTO-specific DSA refinement must change feasibility or the objective. The
 following candidates have distinct evidence requirements.
 
-### Pipeline-overlap-aware placement
+### 1. Pipeline-overlap-aware placement
 
-When capacity shedding maps several stages to one residue, assigning the same
-address to different stages can serialize work. Research captures therefore
-record sparse `pipeline_serialization` pairs. A fitting placement can minimize
-the number or measured cost of such reuse edges before using peak as a
-tie-break. PR #1949 grounds the mechanism; device A/B tests must calibrate the
-cost.
+The implemented fallback minimizes sparse cross-stage overlap costs
+lexicographically after capacity. Version 1 uses one unit per reused
+stage-member pair. PR #1949 grounds the mechanism, but pair counting may
+overweight groups with more members. Device A/B tests must compare it with a
+group-level lost-depth objective before either becomes a production cost model.
 
-### PTOAS-synchronization-aware placement
+### 2. PTOAS-synchronization-aware placement
 
 Other address reuse may make PTOAS add an anti-dependency, event, wait, or
 barrier. PyPTO does not know final hardware-pipe assignment at export time, so a
-static `cross_pipe` guess is not sufficient. This candidate requires PTOAS
-instrumentation or a bounded placement-to-PTOAS feedback pass.
+static `cross_pipe` guess is not sufficient. Candidate pair classes include
+MTE-to-vector/cube reuse and reuse that cancels an earlier load motion. This
+refinement requires PTOAS instrumentation or a bounded placement-to-PTOAS
+feedback pass before weights are trusted.
 
-### Critical-path and event-budget-aware placement
+### 3. Critical-path and event-budget-aware placement
 
 Synchronization is not generally an additive pair cost. A reuse edge already
 implied by dependencies can be free; several edges can form a new serial chain.
@@ -95,7 +128,7 @@ advertise capabilities; unsupported constraints or objective terms return
 `kUnsupported` and are never silently dropped. An independently named core
 relaxation may remove features only for lower-bound benchmarking.
 
-For production, the objective is peak-only. Research documents may use:
+The strict solve minimizes peak under capacity. The explicit fallback uses:
 
 ```text
 (capacity overflow, reuse/synchronization cost, total peak, max peak)

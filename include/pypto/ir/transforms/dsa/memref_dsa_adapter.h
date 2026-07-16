@@ -82,6 +82,11 @@ struct SolverRun {
 [[nodiscard]] std::string WriteProblemJson(const ExportedProblem& exported, const std::string& directory);
 
 /**
+ * @brief Run one standalone solver and independently validate its result.
+ */
+[[nodiscard]] SolverRun Solve(const ExportedProblem& exported, const ::dsa::DsaSolver& solver);
+
+/**
  * @brief Run the standalone deterministic baseline and independently validate it.
  */
 [[nodiscard]] SolverRun SolveWithFirstFit(const ExportedProblem& exported);

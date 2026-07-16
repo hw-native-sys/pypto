@@ -33,7 +33,7 @@ MaterializeSemanticAliases，因此 view、循环 carry 值和原地操作的强
 | `MemoryPlanner.DSA` | MaterializeSemanticAliases 后未机会性合并的 MemRef | 独立 first-fit DSA solver，输入为 schema-v1 `pypto_hard_v1` 或显式实验性的 `pypto_research_v1` | 非法导出、能力不匹配、不可行或 validator 失败都会终止编译；不会静默回退 |
 | `MemoryPlanner.PTOAS` | 无 | 跳过本 Pass；ptoas `PlanMemory` 负责放置 | 交给 ptoas |
 
-DSA 支持是可选的 CMake 依赖。先构建并安装 `dsa-solver` 0.8 package，再让
+DSA 支持是可选的 CMake 依赖。先构建并安装 `dsa-solver` 0.9 package，再让
 PyPTO 使用它：
 
 ```bash
@@ -218,7 +218,9 @@ Pass AllocateMemoryAddr();
 - `memref_collectors::CollectMemRefsWithSpace` 收集唯一的 MemRef 及其内存空间
 - `AllocateMemoryAddresses` 使用 `MemoryAllocatorPolicy` 在每个内存空间内分配顺序对齐的地址
 - `dsa_adapter::BuildStructuredProblem` 导出与 IR 解耦的 schema-v1 problem
-- `dsa_adapter::SolveWithFirstFit` 做 capability matching、求解与独立验证
+- `dsa_adapter::Solve` 对所选 standalone solver 做 capability matching，并独立验证结果
+- DSA 路径首先强制完整请求的 pipeline depth；若找不到可装入的 placement，则显式放松
+  仅带 `pipeline_stage` 的 separation，最小化对应 reuse cost，并发出 `PH-DSA-001`
 - `dsa_adapter::BuildMemRefReplacements` 完成保留 view offset 的写回
 - `MemRefUpdateMutator` 在一次遍历中同时更新变量类型和 `tile.alloc` 语句参数
 
@@ -239,7 +241,8 @@ passes.def("allocate_memory_addr", &pass::AllocateMemoryAddr,
 - 测试无后端配置时的默认策略行为
 - 测试容量诊断会归因跨核流水 ring 预留的字节数（见下文）
 - 测试 DSA 读先于写的复用、reserved range、view offset 写回与确定性导出
-- 测试 alias class、类型化 separation、pipeline group/residue 与稀疏 reuse cost 的导出
+- 测试 alias class、类型化 separation、strict pipeline intent、显式 reuse-cost fallback
+  及其性能提示
 - 通过 exporter、独立 solver、validator 和 writeback 重放 #1908 fragmentation 形状
 
 ## 分配策略

@@ -11,11 +11,13 @@
 
 #include <algorithm>
 #include <any>
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <memory>
 #include <optional>
 #include <set>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -42,6 +44,9 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #ifdef PYPTO_ENABLE_DSA_SOLVER
 #include "dsa/model.h"
+#include "dsa/pypto_structured_search_solver.h"
+#include "dsa/structured_problem.h"
+#include "dsa/validator.h"
 #include "pypto/ir/transforms/dsa/memref_dsa_adapter.h"
 #endif
 #include "pypto/ir/transforms/pass_context.h"
@@ -465,9 +470,7 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> PlanWithStandaloneDsa(
     const FunctionPtr& func, const MemoryAllocatorPolicy& policy,
     const ReservedEndBySpace& reserved_end_by_space, const std::vector<MemRefWithSpace>& memrefs,
     const std::optional<std::string>& export_directory) {
-  const std::map<MemorySpace, uint64_t> reserved_end_by_space_ordered(reserved_end_by_space.begin(),
-                                                                      reserved_end_by_space.end());
-  const AllocationPlan allocation_plan = ComputeAllocationPlan(func, reserved_end_by_space_ordered);
+  const AllocationPlan allocation_plan = ComputeAllocationPlan(func);
   if (allocation_plan.intervals.empty()) return {};
 
   std::unordered_map<MemorySpace, uint64_t> pool_caps;
@@ -480,21 +483,71 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> PlanWithStandaloneDsa(
     }
   }
 
-  const dsa_adapter::ExportedProblem exported =
+  const dsa_adapter::ExportedProblem strict_exported =
       dsa_adapter::BuildStructuredProblem(func, allocation_plan, policy, reserved_end_by_space, pool_caps);
-  if (exported.document.problem.buffers.empty()) return {};
-  const dsa_adapter::SolverRun run = dsa_adapter::SolveWithFirstFit(exported);
+  if (strict_exported.document.problem.buffers.empty()) return {};
+
+  ::dsa::PyptoStructuredSearchOptions search_options;
+  search_options.seed = 0;
+  search_options.max_iterations = 2'000;
+  search_options.restarts = 4;
+  search_options.stagnation_limit = 100;
+  const ::dsa::PyptoStructuredSearchSolver solver(search_options);
+
+  dsa_adapter::ExportedProblem solved_exported = strict_exported;
+  dsa_adapter::SolverRun run = dsa_adapter::SolveWithFirstFit(solved_exported);
+  if (run.result.status == ::dsa::SolveStatus::kBestEffortNoFit) {
+    // Keep the common compilation path cheap. Invoke bounded structured search
+    // only when deterministic first-fit cannot preserve the strict intent
+    // within capacity.
+    run = dsa_adapter::Solve(solved_exported, solver);
+  }
+  bool pipeline_intent_relaxed = false;
+  size_t relaxed_separation_count = 0;
+  if (run.result.status == ::dsa::SolveStatus::kBestEffortNoFit) {
+    const ::dsa::PipelineIntentRelaxation relaxation =
+        ::dsa::BuildPipelineIntentRelaxation(strict_exported.document);
+    if (relaxation.relaxed_separation_count != 0) {
+      solved_exported.document = relaxation.document;
+      relaxed_separation_count = relaxation.relaxed_separation_count;
+      run = dsa_adapter::Solve(solved_exported, solver);
+      if (run.result.status == ::dsa::SolveStatus::kFeasible && run.result.solution.has_value()) {
+        // The relaxed search can occasionally discover a strict-feasible
+        // ordering that the first search missed. In that case retain the hard
+        // contract and do not report a performance degradation.
+        const std::vector<std::string> strict_errors =
+            ::dsa::ValidateSolution(strict_exported.document.problem, *run.result.solution);
+        if (strict_errors.empty()) {
+          solved_exported.document = strict_exported.document;
+        } else {
+          pipeline_intent_relaxed = true;
+        }
+      }
+    }
+  }
   INTERNAL_CHECK_SPAN(run.problem_errors.empty(), func->span_)
       << "DSA exporter produced an invalid pypto_structured problem for '" << func->name_
       << "': " << run.problem_errors.front();
 
   if (export_directory) {
-    const std::string output = dsa_adapter::WriteProblemJson(exported, *export_directory);
+    const std::string output = dsa_adapter::WriteProblemJson(solved_exported, *export_directory);
     LOG_INFO << "[dsa] exported " << func->name_ << " to " << output;
   }
 
+  if (pipeline_intent_relaxed) {
+    std::ostringstream message;
+    message << "the DSA planner could not find a capacity-fitting placement that preserves all "
+            << relaxed_separation_count << " pipeline-stage separation(s) for '" << func->name_
+            << "'; it compiled with a soft pipeline-intent fallback that incurred reuse cost "
+            << run.result.objective.reuse_cost
+            << ". The generated program is correct, but software-pipeline overlap may be reduced.";
+    EmitDiagnostics({Diagnostic(DiagnosticSeverity::PerfHint, "AllocateMemoryAddr", 0, "PH-DSA-001",
+                                message.str(), func->span_)},
+                    "AllocateMemoryAddr");
+  }
+
   CHECK_SPAN(run.compatibility.Compatible(), func->span_)
-      << "The standalone first-fit DSA solver cannot handle exported function '" << func->name_
+      << "The selected standalone DSA solver cannot handle exported function '" << func->name_
       << "' (unsupported feature/objective: "
       << (!run.compatibility.unsupported_features.empty() ? run.compatibility.unsupported_features.front()
                                                           : run.compatibility.unsupported_objectives.front())
@@ -509,7 +562,7 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> PlanWithStandaloneDsa(
       << "Independent DSA validation rejected the solution for '" << func->name_
       << "': " << run.solution_errors.front();
 
-  return dsa_adapter::BuildMemRefReplacements(exported, *run.result.solution, memrefs, policy);
+  return dsa_adapter::BuildMemRefReplacements(solved_exported, *run.result.solution, memrefs, policy);
 }
 #endif
 
@@ -554,7 +607,7 @@ FunctionPtr TransformAllocateMemoryAddr(const FunctionPtr& func) {
 #else
     CHECK_SPAN(false, func->span_)
         << "MemoryPlanner.DSA is unavailable in this build. Reconfigure PyPTO with "
-           "-DPYPTO_ENABLE_DSA_SOLVER=ON and a dsa-solver 0.8 CMake package.";
+           "-DPYPTO_ENABLE_DSA_SOLVER=ON and a dsa-solver 0.9 CMake package.";
 #endif
   } else {
     // Declared allocations are the only ones that may take a dynamic address

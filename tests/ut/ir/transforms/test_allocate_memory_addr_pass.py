@@ -1117,6 +1117,8 @@ def test_dsa_export_and_solver_preserve_pipeline_stage_separation(tmp_path):
     corpus_file = tmp_path / "pypto_pipeline_stage_separation.dsa.json"
     document = json.loads(corpus_file.read_text())
     assert document["instance"] == "pipeline_stage_separation"
+    assert document["profile"] == "pypto_hard_v1"
+    assert document["metadata"]["pipeline_intent_policy"] == "hard_requested_depth"
     assert document["problem"]["constraints"]["separations"] == [
         {"first": 0, "second": 1, "reasons": ["pipeline_stage"]}
     ]
@@ -1189,28 +1191,42 @@ def _dsa_capacity_gated_pipeline_cost_program():
 
 
 @requires_dsa
-def test_dsa_export_preserves_capacity_gated_pipeline_reuse_cost(tmp_path):
-    """Uncalibrated same-residue reuse is explicitly research-only."""
-    planned = _allocate_with_dsa(_dsa_capacity_gated_pipeline_cost_program(), str(tmp_path))
+def test_dsa_pipeline_intent_falls_back_with_reuse_cost_and_warning(tmp_path):
+    """Full pipeline intent is tried first; capacity fallback is explicit and loud."""
+    report_dir = tmp_path / "report"
+    export_dir = tmp_path / "corpus"
+    report_dir.mkdir()
+    with passes.PassContext(
+        [passes.ReportInstrument(str(report_dir))],
+        memory_planner=passes.MemoryPlanner.DSA,
+        dsa_export_dir=str(export_dir),
+    ):
+        planned = passes.allocate_memory_addr()(_dsa_capacity_gated_pipeline_cost_program())
     assert _vec_peak(planned) == 240 * 1024
 
-    document = json.loads((tmp_path / "pypto_capacity_gated_pipeline_cost.dsa.json").read_text())
+    document = json.loads((export_dir / "pypto_capacity_gated_pipeline_cost.dsa.json").read_text())
     assert document["profile"] == "pypto_research_v1"
-    assert document["metadata"]["experimental_features"] == "pipeline_adjacent_reuse_cost"
+    assert document["metadata"]["experimental_features"] == "pipeline_intent_fallback"
+    assert document["metadata"]["pipeline_intent_policy"] == "soft_after_strict_no_fit"
     assert document["problem"]["constraints"]["separations"] == []
     group = document["problem"]["pypto_structure"]["pipeline_groups"][0]
-    assert (group["depth"], group["effective_depth"], group["slot_size"]) == (3, 1, 240 * 1024)
-    assert [member["residue"] for member in group["members"]] == [0, 0, 0]
+    assert (group["depth"], group["effective_depth"], group["slot_size"]) == (3, 3, 240 * 1024)
+    assert [member["residue"] for member in group["members"]] == [0, 1, 2]
     assert document["problem"]["cost_model"]["reuse_penalties"] == [
         {"first": 0, "second": 1, "cost": 1, "reason": "pipeline_serialization"},
+        {"first": 0, "second": 2, "cost": 1, "reason": "pipeline_serialization"},
         {"first": 1, "second": 2, "cost": 1, "reason": "pipeline_serialization"},
     ]
-    assert document["metadata"]["reuse_cost_model"] == "pipeline_adjacent_antidependency_v1"
+    assert document["metadata"]["reuse_cost_model"] == "pipeline_stage_overlap_pairs_v1"
+    hint = (report_dir / "perf_hints.log").read_text()
+    assert "PH-DSA-001" in hint
+    assert "could not find a capacity-fitting placement" in hint
+    assert "software-pipeline overlap may be reduced" in hint
 
 
 @requires_dsa
-def test_dsa_pipeline_depth_shed_accounts_for_reserved_space(tmp_path):
-    """The DSA export uses the production packer's whole-space depth, not cap/slot."""
+def test_dsa_pipeline_fallback_accounts_for_reserved_space(tmp_path):
+    """Reserved space participates in the strict-fit decision before fallback."""
 
     @pl.program
     class Before:
@@ -1248,8 +1264,12 @@ def test_dsa_pipeline_depth_shed_accounts_for_reserved_space(tmp_path):
 
     document = json.loads((tmp_path / "pypto_reserved_pipeline_depth.dsa.json").read_text())
     group = document["problem"]["pypto_structure"]["pipeline_groups"][0]
-    assert (group["depth"], group["effective_depth"]) == (2, 1)
+    assert document["profile"] == "pypto_research_v1"
+    assert (group["depth"], group["effective_depth"]) == (2, 2)
     assert document["problem"]["constraints"]["separations"] == []
+    assert document["problem"]["cost_model"]["reuse_penalties"] == [
+        {"first": 0, "second": 1, "cost": 1, "reason": "pipeline_serialization"}
+    ]
     assert document["problem"]["pools"][0]["reserved_ranges"] == [{"begin": 0, "end": 32 * 1024}]
 
 

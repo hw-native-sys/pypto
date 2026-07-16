@@ -2,8 +2,9 @@
 
 ## Status
 
-Research direction. This records the optimization boundary exposed by the DSA
-adapter; it is not an implementation contract for the current planner.
+Deferred research direction. The active work keeps the existing topological
+order fixed and studies placement-induced synchronization and pipeline
+serialization first.
 
 ## Motivation
 
@@ -119,15 +120,18 @@ standalone benchmark need not acquire a build-time PTOAS dependency.
 ## Recommended Research Staging
 
 1. Keep fixed-schedule DSA as the reproducible baseline.
-2. Export the pre-schedule dependency DAG and enough metadata to replay
+2. Evaluate the strict-then-soft pipeline-intent policy and reuse-cost models
+   against PTOAS output and device latency.
+3. Only after those fixed-schedule models are predictive, export the
+   pre-schedule dependency DAG and enough metadata to replay
    `CanonicalizeIOOrder` alternatives without changing solver behavior.
-3. Add bounded schedule moves to `pypto-structured-search`: ready-node swaps,
+4. Add bounded schedule moves to `pypto-structured-search`: ready-node swaps,
    load/store motion, pipeline-depth changes, and placement repair.
-4. Recompute lifetimes after each move and independently validate schedule and
+5. Recompute lifetimes after each move and independently validate schedule and
    placement.
-5. Compare predicted peak, synchronization, and latency with PTOAS output and
+6. Compare predicted peak, synchronization, and latency with PTOAS output and
    device traces.
-6. Then decide whether the production heuristic belongs in PyPTO, PTOAS, or is
+7. Then decide whether the production heuristic belongs in PyPTO, PTOAS, or is
    split between them.
 
 The likely production split is hierarchical: PyPTO chooses high-level schedule
