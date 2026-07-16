@@ -1214,10 +1214,12 @@ _AUTOL0_K_SPLIT_SHAPES = [
     (64, 256, 256, 32),
     (128, 384, 64, 64),
 ]
-# Tolerance for AutoL0 K-split: HW reduces K=64 chunks in a different order
-# than torch's BLAS reference, so the strict 1e-5 default is too tight.
+# Tolerance for AutoL0 K-split: HW reduces K chunks in a different order than
+# torch's BLAS reference. The resulting FP32 drift scales with K and reaches
+# ~1.6e-5 for the K=384 coverage near cancellation, where rtol contributes
+# little; keep a strict relative tolerance but allow the expected absolute drift.
 _AUTOL0_RTOL = 1e-4
-_AUTOL0_ATOL = 1e-5
+_AUTOL0_ATOL = 5e-5
 # BF16 matmul mirroring qwen3_decode kv_proj/q_proj per-matmul shape
 # (BATCH=16, K_CHUNK=128, OUT_CHUNK=256). Same 2-iter K-loop, BF16 inputs +
 # FP32 accumulator.
