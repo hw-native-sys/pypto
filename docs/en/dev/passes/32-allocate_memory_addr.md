@@ -95,9 +95,17 @@ with passes.PassContext(
 Full compilation accepts the same selection as
 `ir.compile(..., memory_planner=passes.MemoryPlanner.DSA,
 dsa_export_dir="build/dsa-corpus")`.
-`RunConfig` exposes the same `memory_planner` and `dsa_export_dir` fields. The
+`RunConfig` exposes the same `memory_planner` and `dsa_export_dir` fields. Set
+`dsa_solution_dir` to replay a recorded placement rather than invoking the
+solver. The placement is accepted only when its fingerprint matches the freshly
+exported problem and independent validation succeeds. The
 system-test harness additionally accepts `--memory-planner=dsa` and
-`--dsa-export-dir=...` for suite-wide device validation and corpus capture.
+`--dsa-export-dir=...` for suite-wide device validation and corpus capture, or
+`--dsa-solution-dir=...` for exact A/B placement replay. Add
+`--ptoas-sync-summary-dir=...` to retain one machine-readable PTOAS InsertSync
+summary per codegen unit, allowing two valid placements to be compared using
+the same downstream synchronization accounting. This option requires a PTOAS
+build containing the `--pto-insert-sync-summary` experiment flag.
 
 The default export is `pypto_hard_v1`: standard DSA geometry with fixed memory
 spaces, one conservative allocation-lifetime hull, capacities/reservations,
@@ -172,10 +180,17 @@ schedule would produce different lifetimes. See
 [Joint Scheduling and Local-Memory Planning](../proposals/joint_schedule_memory_cooptimization.md)
 for the PyPTO-owned, PTOAS-owned, and cross-layer co-optimization options.
 
-If `dsa_export_dir` is set, each InCore function is written as
-`pypto_<escaped-function-name>.dsa.json`. Serialization is deterministic and
-contains no IR pointers or machine-specific paths, so the document can be copied
-directly into the standalone real-instance corpus.
+If `dsa_export_dir` is set, each InCore function produces:
+
+- `pypto_<escaped-function-name>.dsa.json`: the deterministic problem;
+- `pypto_<escaped-function-name>.dsa.solution.json`: the selected placement,
+  its problem fingerprint, and solver metadata.
+
+The problem contains no IR pointers or machine-specific paths and can be copied
+into the standalone corpus. The solution artifact is the controlled seam for
+solver/PTOAS A/B experiments: edit neither the compiler IR nor the problem;
+generate a matching solution with `dsa-bench --solution-output`, then replay it
+through `dsa_solution_dir`.
 
 **Address allocation (default policy)**:
 

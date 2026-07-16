@@ -542,14 +542,17 @@ class TestRunConfigCompileForwarding:
                 analyze_auto_scopes_for_deps=True,
                 memory_planner=MemoryPlanner.DSA,
                 dsa_export_dir=str(tmp_path),
-                codegen_only=True,
+                dsa_solution_dir=str(tmp_path / "solutions"),
+                ptoas_sync_summary_dir=str(tmp_path / "sync"),
             ),
         )
 
         assert captured["analyze_auto_scopes_for_deps"] is True
         assert captured["memory_planner"] == MemoryPlanner.DSA
         assert captured["dsa_export_dir"] == str(tmp_path)
-        assert captured["skip_ptoas"] is True
+        assert captured["dsa_solution_dir"] == str(tmp_path / "solutions")
+        assert captured["ptoas_sync_summary_dir"] == str(tmp_path / "sync")
+        assert captured["skip_ptoas"] is False
 
     def test_execute_compiled_accepts_auto_scope_deps_switch(self, tmp_path, monkeypatch):
         captured: dict = {}

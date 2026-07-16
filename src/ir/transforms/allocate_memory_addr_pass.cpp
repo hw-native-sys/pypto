@@ -13,6 +13,7 @@
 #include <any>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <map>
 #include <memory>
 #include <optional>
@@ -469,7 +470,8 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
 std::vector<std::pair<const MemRef*, MemRefPtr>> PlanWithStandaloneDsa(
     const FunctionPtr& func, const MemoryAllocatorPolicy& policy,
     const ReservedEndBySpace& reserved_end_by_space, const std::vector<MemRefWithSpace>& memrefs,
-    const std::optional<std::string>& export_directory) {
+    const std::optional<std::string>& export_directory,
+    const std::optional<std::string>& solution_directory) {
   const AllocationPlan allocation_plan = ComputeAllocationPlan(func);
   if (allocation_plan.intervals.empty()) return {};
 
@@ -492,35 +494,73 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> PlanWithStandaloneDsa(
   search_options.max_iterations = 2'000;
   search_options.restarts = 4;
   search_options.stagnation_limit = 100;
-  const ::dsa::PyptoStructuredSearchSolver solver(search_options);
-
   dsa_adapter::ExportedProblem solved_exported = strict_exported;
-  dsa_adapter::SolverRun run = dsa_adapter::SolveWithFirstFit(solved_exported);
-  if (run.result.status == ::dsa::SolveStatus::kBestEffortNoFit) {
-    // Keep the common compilation path cheap. Invoke bounded structured search
-    // only when deterministic first-fit cannot preserve the strict intent
-    // within capacity.
-    run = dsa_adapter::Solve(solved_exported, solver);
-  }
+  dsa_adapter::SolverRun run;
   bool pipeline_intent_relaxed = false;
   size_t relaxed_separation_count = 0;
-  if (run.result.status == ::dsa::SolveStatus::kBestEffortNoFit) {
-    const ::dsa::PipelineIntentRelaxation relaxation =
-        ::dsa::BuildPipelineIntentRelaxation(strict_exported.document);
-    if (relaxation.relaxed_separation_count != 0) {
+  std::string solver_name;
+  if (solution_directory) {
+    const ::dsa::StructuredSolutionDocument replay =
+        dsa_adapter::ReadSolutionJson(strict_exported.document.instance, *solution_directory);
+    if (replay.profile == ::dsa::BenchmarkProfile::kPyptoResearchV1) {
+      const ::dsa::PipelineIntentRelaxation relaxation =
+          ::dsa::BuildPipelineIntentRelaxation(strict_exported.document);
       solved_exported.document = relaxation.document;
       relaxed_separation_count = relaxation.relaxed_separation_count;
+    } else {
+      CHECK_SPAN(replay.profile == ::dsa::BenchmarkProfile::kPyptoHardV1, func->span_)
+          << "DSA replay for '" << func->name_ << "' must use profile pypto_hard_v1 or pypto_research_v1";
+    }
+    try {
+      run.result.solution = ::dsa::ValidateAndExtractStructuredSolution(solved_exported.document, replay);
+    } catch (const std::exception& exception) {
+      CHECK_SPAN(false, func->span_) << "DSA replay rejected the placement for '" << func->name_
+                                     << "': " << exception.what();
+    }
+    run.problem_errors = ::dsa::ValidateStructuredProblemDocument(solved_exported.document);
+    run.solution_errors = ::dsa::ValidateSolution(solved_exported.document.problem, *run.result.solution);
+    run.result.objective = ::dsa::EvaluateObjective(solved_exported.document.problem, *run.result.solution);
+    run.result.status =
+        run.solution_errors.empty() &&
+                ::dsa::EvaluateObjectiveMetric(solved_exported.document.problem, run.result.objective,
+                                               ::dsa::ObjectiveMetric::kCapacityOverflow) == 0
+            ? ::dsa::SolveStatus::kFeasible
+            : ::dsa::SolveStatus::kBestEffortNoFit;
+    solver_name = "replay";
+    if (replay.profile == ::dsa::BenchmarkProfile::kPyptoResearchV1) {
+      pipeline_intent_relaxed =
+          !::dsa::ValidateSolution(strict_exported.document.problem, *run.result.solution).empty();
+    }
+  } else {
+    const ::dsa::PyptoStructuredSearchSolver solver(search_options);
+    run = dsa_adapter::SolveWithFirstFit(solved_exported);
+    solver_name = "first_fit";
+    if (run.result.status == ::dsa::SolveStatus::kBestEffortNoFit) {
+      // Keep the common compilation path cheap. Invoke bounded structured search
+      // only when deterministic first-fit cannot preserve the strict intent
+      // within capacity.
       run = dsa_adapter::Solve(solved_exported, solver);
-      if (run.result.status == ::dsa::SolveStatus::kFeasible && run.result.solution.has_value()) {
-        // The relaxed search can occasionally discover a strict-feasible
-        // ordering that the first search missed. In that case retain the hard
-        // contract and do not report a performance degradation.
-        const std::vector<std::string> strict_errors =
-            ::dsa::ValidateSolution(strict_exported.document.problem, *run.result.solution);
-        if (strict_errors.empty()) {
-          solved_exported.document = strict_exported.document;
-        } else {
-          pipeline_intent_relaxed = true;
+      solver_name = solver.Name();
+    }
+    if (run.result.status == ::dsa::SolveStatus::kBestEffortNoFit) {
+      const ::dsa::PipelineIntentRelaxation relaxation =
+          ::dsa::BuildPipelineIntentRelaxation(strict_exported.document);
+      if (relaxation.relaxed_separation_count != 0) {
+        solved_exported.document = relaxation.document;
+        relaxed_separation_count = relaxation.relaxed_separation_count;
+        run = dsa_adapter::Solve(solved_exported, solver);
+        solver_name = solver.Name();
+        if (run.result.status == ::dsa::SolveStatus::kFeasible && run.result.solution.has_value()) {
+          // The relaxed search can occasionally discover a strict-feasible
+          // ordering that the first search missed. In that case retain the hard
+          // contract and do not report a performance degradation.
+          const std::vector<std::string> strict_errors =
+              ::dsa::ValidateSolution(strict_exported.document.problem, *run.result.solution);
+          if (strict_errors.empty()) {
+            solved_exported.document = strict_exported.document;
+          } else {
+            pipeline_intent_relaxed = true;
+          }
         }
       }
     }
@@ -532,6 +572,12 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> PlanWithStandaloneDsa(
   if (export_directory) {
     const std::string output = dsa_adapter::WriteProblemJson(solved_exported, *export_directory);
     LOG_INFO << "[dsa] exported " << func->name_ << " to " << output;
+    if (run.result.status == ::dsa::SolveStatus::kFeasible && run.result.solution.has_value() &&
+        run.solution_errors.empty()) {
+      const std::string solution_output = dsa_adapter::WriteSolutionJson(
+          solved_exported, *run.result.solution, *export_directory, {{"solver", solver_name}});
+      LOG_INFO << "[dsa] exported selected placement for " << func->name_ << " to " << solution_output;
+    }
   }
 
   if (pipeline_intent_relaxed) {
@@ -602,12 +648,14 @@ FunctionPtr TransformAllocateMemoryAddr(const FunctionPtr& func) {
 #ifdef PYPTO_ENABLE_DSA_SOLVER
     const std::optional<std::string> export_directory =
         context == nullptr ? std::nullopt : context->GetDsaExportDir();
+    const std::optional<std::string> solution_directory =
+        context == nullptr ? std::nullopt : context->GetDsaSolutionDir();
     memref_pairs = PlanWithStandaloneDsa(func, *policy, reserve_resolution.reserved_end_by_space, memrefs,
-                                         export_directory);
+                                         export_directory, solution_directory);
 #else
     CHECK_SPAN(false, func->span_)
         << "MemoryPlanner.DSA is unavailable in this build. Reconfigure PyPTO with "
-           "-DPYPTO_ENABLE_DSA_SOLVER=ON and a dsa-solver 0.9 CMake package.";
+           "-DPYPTO_ENABLE_DSA_SOLVER=ON and a dsa-solver 0.10 CMake package.";
 #endif
   } else {
     // Declared allocations are the only ones that may take a dynamic address

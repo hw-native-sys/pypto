@@ -283,14 +283,36 @@ class PTOTestCase(ABC):
         platform = self.get_platform() or self.config.platform
         return str(Path(self.config.dsa_export_dir) / self.get_name() / platform)
 
+    def get_dsa_solution_dir(self) -> str | None:
+        """Return the matching per-test directory for placement replay."""
+        if self.get_memory_planner() != MemoryPlanner.DSA or self.config.dsa_solution_dir is None:
+            return None
+        platform = self.get_platform() or self.config.platform
+        return str(Path(self.config.dsa_solution_dir) / self.get_name() / platform)
+
+    def get_ptoas_sync_summary_dir(self) -> str | None:
+        """Return a collision-free directory for PTOAS synchronization summaries."""
+        if self.config.ptoas_sync_summary_dir is None:
+            return None
+        platform = self.get_platform() or self.config.platform
+        return str(Path(self.config.ptoas_sync_summary_dir) / self.get_name() / platform)
+
     def inherit_session_compile_config(
-        self, memory_planner: MemoryPlanner | None, dsa_export_dir: str | None
+        self,
+        memory_planner: MemoryPlanner | None,
+        dsa_export_dir: str | None,
+        dsa_solution_dir: str | None,
+        ptoas_sync_summary_dir: str | None,
     ) -> None:
         """Fill unset compile controls from the suite-wide configuration."""
         if self._override_memory_planner is None and self.config.memory_planner is None:
             self.config.memory_planner = memory_planner
         if self.config.dsa_export_dir is None:
             self.config.dsa_export_dir = dsa_export_dir
+        if self.config.dsa_solution_dir is None:
+            self.config.dsa_solution_dir = dsa_solution_dir
+        if self.config.ptoas_sync_summary_dir is None:
+            self.config.ptoas_sync_summary_dir = ptoas_sync_summary_dir
 
     def get_enable_pypto_l0c_double_buffer(self) -> bool | None:
         """Whether to opt in to L0C double-buffering (dbC=2) under the PyPTO planner.

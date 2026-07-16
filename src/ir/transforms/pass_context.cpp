@@ -281,7 +281,8 @@ std::string DiagnosticInstrument::GetName() const { return "DiagnosticInstrument
 PassContext::PassContext(std::vector<PassInstrumentPtr> instruments, VerificationLevel verification_level,
                          DiagnosticPhase diagnostic_phase, DiagnosticCheckSet disabled_diagnostics,
                          MemoryPlanner memory_planner, bool enable_pypto_l0c_double_buffer,
-                         std::optional<std::string> dsa_export_dir)
+                         std::optional<std::string> dsa_export_dir,
+                         std::optional<std::string> dsa_solution_dir)
     : instruments_(std::move(instruments)),
       verification_level_(verification_level),
       diagnostic_phase_(diagnostic_phase),
@@ -289,6 +290,7 @@ PassContext::PassContext(std::vector<PassInstrumentPtr> instruments, Verificatio
       memory_planner_(memory_planner),
       enable_pypto_l0c_double_buffer_(enable_pypto_l0c_double_buffer),
       dsa_export_dir_(std::move(dsa_export_dir)),
+      dsa_solution_dir_(std::move(dsa_solution_dir)),
       previous_(nullptr) {}
 
 VerificationLevel PassContext::GetVerificationLevel() const { return verification_level_; }
@@ -298,6 +300,8 @@ MemoryPlanner PassContext::GetMemoryPlanner() const { return memory_planner_; }
 bool PassContext::GetEnablePyptoL0cDoubleBuffer() const { return enable_pypto_l0c_double_buffer_; }
 
 const std::optional<std::string>& PassContext::GetDsaExportDir() const { return dsa_export_dir_; }
+
+const std::optional<std::string>& PassContext::GetDsaSolutionDir() const { return dsa_solution_dir_; }
 
 DiagnosticPhase PassContext::GetDiagnosticPhase() const { return diagnostic_phase_; }
 

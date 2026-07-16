@@ -89,9 +89,14 @@ with passes.PassContext(
 完整编译接受相同的选择：
 `ir.compile(..., memory_planner=passes.MemoryPlanner.DSA,
 dsa_export_dir="build/dsa-corpus")`。
-`RunConfig` 也暴露 `memory_planner` 和 `dsa_export_dir` 字段。system-test harness
-支持 `--memory-planner=dsa` 与 `--dsa-export-dir=...`，可对整套 device test
-启用 DSA 并采集 corpus。
+`RunConfig` 也暴露 `memory_planner` 和 `dsa_export_dir` 字段。设置
+`dsa_solution_dir` 可跳过求解并回放已记录的 placement；只有当 fingerprint
+与当前重新导出的问题完全匹配且独立验证通过时才会接受。system-test harness
+支持 `--memory-planner=dsa`、`--dsa-export-dir=...` 以及用于精确 A/B 回放的
+`--dsa-solution-dir=...`。使用 `--ptoas-sync-summary-dir=...` 可为每个代码
+生成单元保存一份机器可读的 PTOAS InsertSync JSONL 摘要，从而比较两个有效
+placement 的下游同步开销。该选项要求 PTOAS 构建包含实验性
+`--pto-insert-sync-summary` 参数。
 
 默认导出使用 `pypto_hard_v1`：标准 DSA 几何、固定内存空间、单个保守的分配
 生命周期包络、容量/保留区、对齐和带类型的 separation。生命周期不相交的
@@ -152,9 +157,16 @@ offset，而不是在 buffer 生命周期中调整其大小。
 负责、PTOAS 负责和跨层联合优化三种方案，请参阅
 [调度与片上内存规划联合优化](../proposals/joint_schedule_memory_cooptimization.md)。
 
-设置 `dsa_export_dir` 后，每个 InCore 函数写成
-`pypto_<escaped-function-name>.dsa.json`。序列化是确定性的，不包含 IR pointer 或机器专用
-路径，因此文档可以直接复制到独立仓库的真实实例 corpus 中。
+设置 `dsa_export_dir` 后，每个 InCore 函数会输出两个文件：
+
+- `pypto_<escaped-function-name>.dsa.json`：确定性问题；
+- `pypto_<escaped-function-name>.dsa.solution.json`：所选 placement、问题
+  fingerprint 和 solver 元数据。
+
+问题不包含 IR pointer 或机器专用路径，可直接复制到独立 corpus。solution
+artifact 是 solver/PTOAS A/B 实验的受控接口：不要编辑 IR 或 problem；使用
+`dsa-bench --solution-output` 生成匹配的 solution，再通过 `dsa_solution_dir`
+回放。
 
 **地址分配（默认策略）**：
 

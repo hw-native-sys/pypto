@@ -505,6 +505,7 @@ class PassManager:
         dbc_flag = ctx.get_enable_pypto_l0c_double_buffer() if ctx else False
         outer_phase = ctx.get_diagnostic_phase() if ctx else passes.get_default_diagnostic_phase()
         dsa_export_dir = ctx.get_dsa_export_dir() if ctx else None
+        dsa_solution_dir = ctx.get_dsa_solution_dir() if ctx else None
         if outer_phase == passes.DiagnosticPhase.POST_PASS:
             inner_phase = passes.DiagnosticPhase.PRE_PIPELINE
         else:
@@ -518,6 +519,7 @@ class PassManager:
             mplan,
             dbc_flag,
             dsa_export_dir,
+            dsa_solution_dir,
         ):
             try:
                 return self._pipeline.run(input_ir)
@@ -555,6 +557,7 @@ class PassManager:
         dbc_flag = ctx.get_enable_pypto_l0c_double_buffer() if ctx else False
         dphase = ctx.get_diagnostic_phase() if ctx else passes.get_default_diagnostic_phase()
         dsa_export_dir = ctx.get_dsa_export_dir() if ctx else None
+        dsa_solution_dir = ctx.get_dsa_solution_dir() if ctx else None
         if ctx:
             disabled = ctx.get_disabled_diagnostics()
         else:
@@ -569,6 +572,7 @@ class PassManager:
             mplan,
             dbc_flag,
             dsa_export_dir,
+            dsa_solution_dir,
         ):
             try:
                 return self._pipeline.run(input_ir)

@@ -268,6 +268,42 @@ std::string WriteProblemJson(const ExportedProblem& exported, const std::string&
   return output.string();
 }
 
+std::string WriteSolutionJson(const ExportedProblem& exported, const ::dsa::DsaSolution& solution,
+                              const std::string& directory, std::map<std::string, std::string> metadata) {
+  CHECK(!directory.empty()) << "DSA solution directory must not be empty";
+  const std::filesystem::path directory_path(directory);
+  std::error_code error;
+  std::filesystem::create_directories(directory_path, error);
+  if (error) {
+    throw pypto::RuntimeError("Failed to create DSA solution directory '" + directory +
+                              "': " + error.message());
+  }
+
+  const std::filesystem::path output =
+      directory_path / (CorpusFileStem(exported.document.instance) + ".dsa.solution.json");
+  try {
+    ::dsa::WriteStructuredSolutionJsonFile(
+        output, ::dsa::BuildStructuredSolutionDocument(exported.document, solution, std::move(metadata)));
+  } catch (const std::exception& exception) {
+    throw pypto::RuntimeError("Failed to export DSA solution to '" + output.string() +
+                              "': " + exception.what());
+  }
+  return output.string();
+}
+
+::dsa::StructuredSolutionDocument ReadSolutionJson(const std::string& instance,
+                                                   const std::string& directory) {
+  CHECK(!directory.empty()) << "DSA solution directory must not be empty";
+  const std::filesystem::path input =
+      std::filesystem::path(directory) / (CorpusFileStem(instance) + ".dsa.solution.json");
+  try {
+    return ::dsa::ReadStructuredSolutionJsonFile(input);
+  } catch (const std::exception& exception) {
+    throw pypto::RuntimeError("Failed to read DSA solution from '" + input.string() +
+                              "': " + exception.what());
+  }
+}
+
 SolverRun Solve(const ExportedProblem& exported, const ::dsa::DsaSolver& solver) {
   SolverRun run;
   run.problem_errors = ::dsa::ValidateStructuredProblemDocument(exported.document);

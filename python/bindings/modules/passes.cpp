@@ -290,15 +290,17 @@ void BindPass(nb::module_& m) {
                           "verification and the diagnostic channel (warnings + performance\n"
                           "hints) for PassPipeline.")
       .def(nb::init<std::vector<PassInstrumentPtr>, VerificationLevel, DiagnosticPhase, DiagnosticCheckSet,
-                    MemoryPlanner, bool, std::optional<std::string>>(),
+                    MemoryPlanner, bool, std::optional<std::string>, std::optional<std::string>>(),
            nb::arg("instruments"), nb::arg("verification_level") = VerificationLevel::Basic,
            nb::arg("diagnostic_phase") = DiagnosticPhase::PrePipeline,
            nb::arg("disabled_diagnostics") = DiagnosticCheckSet{DiagnosticCheck::UnusedControlFlowResult},
            nb::arg("memory_planner") = MemoryPlanner::PyPTO,
            nb::arg("enable_pypto_l0c_double_buffer") = false, nb::arg("dsa_export_dir") = nb::none(),
+           nb::arg("dsa_solution_dir") = nb::none(),
            "Create a PassContext with instruments, verification level, diagnostic phase gate, "
            "optional disabled diagnostic checks, memory planner selection, the experimental "
-           "PyPTO-planner L0C double-buffer opt-in, and DSA export directory")
+           "PyPTO-planner L0C double-buffer opt-in, DSA export directory, and DSA solution replay "
+           "directory")
       .def("__enter__",
            [](PassContext& self) -> PassContext& {
              self.EnterContext();
@@ -318,6 +320,8 @@ void BindPass(nb::module_& m) {
            "Whether L0C double-buffering (dbC=2) is enabled under the PyPTO memory planner")
       .def("get_dsa_export_dir", &PassContext::GetDsaExportDir,
            "Get the optional standalone DSA corpus export directory")
+      .def("get_dsa_solution_dir", &PassContext::GetDsaSolutionDir,
+           "Get the optional standalone DSA placement replay directory")
       .def_static("current", &PassContext::Current, nb::rv_policy::reference,
                   "Get the currently active context, or None if no context is active");
 

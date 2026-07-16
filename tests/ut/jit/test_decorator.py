@@ -2252,6 +2252,8 @@ class TestCompileKwargForwarding:
             analyze_auto_scopes_for_deps=True,
             memory_planner=MemoryPlanner.PTOAS,
             dsa_export_dir=str(tmp_path / "dsa-corpus"),
+            dsa_solution_dir=str(tmp_path / "dsa-solutions"),
+            ptoas_sync_summary_dir=str(tmp_path / "sync-summaries"),
         )
         kwargs = _run_config_compile_kwargs(cfg)
         assert kwargs["strategy"] == OptimizationStrategy.Default
@@ -2261,6 +2263,8 @@ class TestCompileKwargForwarding:
         assert kwargs["analyze_auto_scopes_for_deps"] is True
         assert kwargs["memory_planner"] == MemoryPlanner.PTOAS
         assert kwargs["dsa_export_dir"] == str(tmp_path / "dsa-corpus")
+        assert kwargs["dsa_solution_dir"] == str(tmp_path / "dsa-solutions")
+        assert kwargs["ptoas_sync_summary_dir"] == str(tmp_path / "sync-summaries")
         assert "diagnostic_phase" in kwargs
         assert "disabled_diagnostics" in kwargs
         # backend_type is derived from `platform` by ir.compile(); not forwarded.
