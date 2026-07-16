@@ -30,7 +30,7 @@ MaterializeSemanticAliases，因此 view、循环 carry 值和原地操作的强
 | 模式 | 本 Pass 的输入 | 放置方式 | 失败行为 |
 | ---- | -------------- | -------- | -------- |
 | `MemoryPlanner.PYPTO` | MemoryReuse 机会性合并后的 MemRef | 后端策略控制的对齐 bump 分配 | 现有 verifier 报告非法地址或超容量 |
-| `MemoryPlanner.DSA` | MaterializeSemanticAliases 后未机会性合并的 MemRef | 独立 first-fit DSA solver，输入为 schema-v1 `pypto_hard_v1` 或显式实验性的 `pypto_research_v1` | 非法导出、能力不匹配、不可行或 validator 失败都会终止编译；不会静默回退 |
+| `MemoryPlanner.DSA` | MaterializeSemanticAliases 后未机会性合并的 MemRef | 独立 schema-v1 DSA solver：first-fit 初始化、受限 structured search，并且仅在严格问题无法装入容量时显式放宽流水线意图 | 非法导出、能力不匹配、不可行或 validator 失败都会终止编译；不会静默回退 |
 | `MemoryPlanner.PTOAS` | 无 | 跳过本 Pass；ptoas `PlanMemory` 负责放置 | 交给 ptoas |
 
 DSA 支持是可选的 CMake 依赖。先构建并安装 `dsa-solver` 0.9 package，再让
@@ -95,10 +95,11 @@ dsa_export_dir="build/dsa-corpus")`。
 
 默认导出使用 `pypto_hard_v1`：标准 DSA 几何、固定内存空间、单个保守的分配
 生命周期包络、容量/保留区、对齐和带类型的 separation。生命周期不相交的
-缓冲可以部分复用已释放区域，包括 #1908 所需的区域细分。若适配器导出尚未
-校准的 pipeline-serialization 代理，该文档会升级为 `pypto_research_v1`；
-此代理不是生产目标。独立工具仍可读取旧的
-`pypto_structured` 文档，但 PyPTO 不再生成该 profile。
+缓冲可以部分复用已释放区域，包括 #1908 所需的区域细分。若 strict pipeline
+intent 无法 fit，adapter 会显式创建 cost-aware `pypto_research_v1` relaxation，
+并发出 `PH-DSA-001`。独立工具仍可读取旧的 `pypto_structured` 文档，但 PyPTO
+不再生成该 profile。完整问题与 objective 定义由独立 solver 维护，见
+[PyPTO 与动态存储分配](https://github.com/tonibohnlein/dsa-solver/blob/main/docs/pypto_dsa.md)。
 
 ## 算法
 
@@ -126,23 +127,26 @@ dsa_export_dir="build/dsa-corpus")`。
    `2 * def + 1` 开始，最后一次读在 `2 * last_use + 1` 结束；没有后续读取的值仍占用
    一个写 event。因此，一个输入的最后一次读取可以和同一语句写出的结果共用地址。
 4. 导出固定 memory pool、后端容量、前导 reserved range，以及 pipeline clone、后端
-   hazard 和算子专用 no-alias 规则产生的 hard separation pair。pipeline residue 数来自
-   MemoryReuse 精确 whole-space packer 的 dry run，因此 depth shedding 会考虑 alignment、
-   reserved memory、共存 tile 与其他 pipeline group，而不只使用
-   `capacity / largest_stage`；每条 separation 都保留其类型化来源。
-5. 保留规范化的 alias class 成员和 pipeline group/stage/residue 数据。被容量折叠到同一
-   residue 的 stage 会导出稀疏的、按时间相邻的 cross-pipe reuse penalty；通用 constraint
-   与 cost model 仍是权威语义。
-6. 验证 schema/profile、匹配 solver capability、求解，并针对大小、对齐、生命周期、
-   pool、容量、reserved range 和 separation 独立验证每个 placement。
-7. 写回 placement，同时保留每个 view 的相对 byte offset。
+   hazard 和算子专用 no-alias 规则产生的 hard separation pair。每个 requested
+   pipeline stage 首先获得独立 residue，所有 cross-stage member pair 都保持
+   hard-separated；每条 separation 都保留其类型化来源。
+5. 保留规范化的 alias class 成员和 pipeline group/stage/residue 数据。provenance
+   本身不改变 placement。
+6. 验证 strict schema/profile，先尝试 deterministic first-fit，再尝试 bounded
+   PyPTO-structured search。若未找到 capacity-fitting placement，则只删除
+   `pipeline_stage` reason，保留所有 correctness reason，增加单位
+   `pipeline_serialization` penalty，并求解显式 research relaxation。
+7. 针对大小、对齐、生命周期、pool、容量、reserved range 和 separation 独立验证
+   每个 placement。relaxed solution 还会依据 strict problem 再次验证，避免 relaxed
+   search 偶然找到 strict-valid placement 时产生 warning。
+8. 写回 placement，同时保留每个 view 的相对 byte offset。仅当最终 placement
+   确实放松 pipeline intent 时发出 `PH-DSA-001`。
 
-版本 1 adapter 刻意保持 pool assignment 固定，并使用可移植的 peak objective。因此，
-导出的 reuse cost 目前是供 cost-aware solver 使用的 benchmark 数据，不会改变当前选择的
-first-fit 结果。导出 interval 中不可见的 branch exclusivity 仍会保守处理，而不是产生
-不健全的复用。buffer 仍是固定大小的分配；所谓 subdivision 是在较早区域失效后联合分配
-offset，而不是在 buffer 生命周期中调整其大小。cost-aware objective 与 PyPTO 结构化搜索
-move 仍是 capability matching 后的研究扩展。
+版本 1 adapter 刻意保持 pool assignment 固定。strict problem 在 capacity 下最小化
+peak。显式 fallback 依次优先考虑 capacity、reuse cost、total peak 与 maximum pool
+peak。导出 interval 中不可见的 branch exclusivity 仍会保守处理，而不是产生不健全的
+复用。buffer 仍是固定大小的分配；所谓 subdivision 是在较早区域失效后联合分配
+offset，而不是在 buffer 生命周期中调整其大小。
 
 调度本身也会在本 Pass 前固定，尽管不同的合法调度会产生不同生命周期。有关 PyPTO
 负责、PTOAS 负责和跨层联合优化三种方案，请参阅

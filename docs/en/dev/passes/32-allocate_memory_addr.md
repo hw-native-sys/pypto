@@ -34,7 +34,7 @@ loop-carried values, and in-place operations retain their mandatory identities.
 | Mode | Input to this pass | Placement | Failure behavior |
 | ---- | ------------------ | --------- | ---------------- |
 | `MemoryPlanner.PYPTO` | Opportunistically merged MemRefs from MemoryReuse | Backend-policy aligned bump allocation | Existing verifier reports invalid or over-capacity addresses |
-| `MemoryPlanner.DSA` | Unmerged MemRefs after MaterializeSemanticAliases | Standalone first-fit DSA solver over schema-v1 `pypto_hard_v1` or explicitly experimental `pypto_research_v1` | Invalid export, capability mismatch, infeasibility, or validator failure stops compilation; no silent fallback |
+| `MemoryPlanner.DSA` | Unmerged MemRefs after MaterializeSemanticAliases | Standalone schema-v1 DSA solver: first-fit initialization, bounded structured search, and an explicit pipeline-intent relaxation only when the strict problem does not fit | Invalid export, capability mismatch, infeasibility, or validator failure stops compilation; no silent fallback |
 | `MemoryPlanner.PTOAS` | None | This pass is skipped; ptoas `PlanMemory` owns placement | Deferred to ptoas |
 
 DSA support is an optional CMake dependency. Build and consume an installed
@@ -102,11 +102,13 @@ system-test harness additionally accepts `--memory-planner=dsa` and
 The default export is `pypto_hard_v1`: standard DSA geometry with fixed memory
 spaces, one conservative allocation-lifetime hull, capacities/reservations,
 alignment, and typed separations. Lifetime-disjoint buffers may partially reuse
-freed regions, including the subdivision required by #1908. If the adapter
-emits the uncalibrated pipeline-serialization proxy, it upgrades that document
-to `pypto_research_v1`; the proxy is not a production objective.
-Legacy `pypto_structured` documents remain readable in the standalone tools but
-are no longer emitted.
+freed regions, including the subdivision required by #1908. If strict pipeline
+intent does not fit, the adapter explicitly creates a cost-aware
+`pypto_research_v1` relaxation and emits `PH-DSA-001`. Legacy
+`pypto_structured` documents remain readable in the standalone tools but are no
+longer emitted. The complete problem and objective definition is maintained by
+the standalone solver in
+[PyPTO and Dynamic Storage Allocation](https://github.com/tonibohnlein/dsa-solver/blob/main/docs/pypto_dsa.md).
 
 ## Algorithm
 
@@ -138,27 +140,32 @@ When `MemoryPlanner.DSA` is active, step 4 is replaced by this guarded path:
    read may share an address with the result written by that statement.
 4. Export fixed memory pools, backend capacities, a leading reserved range, and
    hard separation pairs for pipeline clones, backend hazards, and op-specific
-   no-alias rules. Pipeline residue counts come from a dry run of MemoryReuse's
-   exact whole-space packer, so depth shedding accounts for alignment, reserved
-   memory, co-resident tiles, and other pipeline groups rather than using only
-   `capacity / largest_stage`. Each separation retains its typed source.
+   no-alias rules. Every requested pipeline stage initially receives a distinct
+   residue, and every cross-stage member pair is hard-separated. Each
+   separation retains its typed source.
 5. Retain normalized alias-class members and pipeline group/stage/residue data.
-   Capacity-folded same-residue stages emit sparse chronological cross-pipe
-   reuse penalties; the generic constraints and cost model remain authoritative.
-6. Validate the schema/profile, match solver capabilities, solve, and validate
+   This provenance does not change placement by itself.
+6. Validate the strict schema/profile and try deterministic first-fit followed
+   by bounded PyPTO-structured search. If no capacity-fitting placement is
+   found, remove only the `pipeline_stage` reason, retain every correctness
+   reason, add unit `pipeline_serialization` penalties, and solve the explicit
+   research relaxation.
+7. Validate
    every placement independently against sizes, alignment, lifetimes, pools,
-   capacities, reserved ranges, and separations.
-7. Write each placement back while preserving every view's relative byte offset.
+   capacities, reserved ranges, and separations. Revalidate a relaxed solution
+   against the strict problem to avoid warning when relaxed search happens to
+   discover a strict-valid placement.
+8. Write each placement back while preserving every view's relative byte
+   offset. Emit `PH-DSA-001` when the final placement actually relaxes pipeline
+   intent.
 
-The version-1 adapter intentionally keeps pool assignment fixed and uses the
-portable peak objective. Its exported reuse costs are therefore benchmark data
-for cost-aware solvers and do not change the currently selected first-fit result.
-Branch exclusivity that is not visible in the exported intervals is still
-conservative rather than unsound. The buffers remain fixed-size allocations;
-subdivision comes from jointly assigning offsets after an earlier region expires,
-not from resizing a buffer during its lifetime. Cost-aware objectives and
-PyPTO-structured search moves remain research extensions behind capability
-matching.
+The version-1 adapter intentionally keeps pool assignment fixed. The strict
+problem minimizes peak under capacity. The explicit fallback prioritizes
+capacity, reuse cost, total peak, and maximum pool peak in that order. Branch
+exclusivity that is not visible in the exported intervals remains conservative
+rather than unsound. Buffers remain fixed-size allocations; subdivision comes
+from jointly assigning offsets after an earlier region expires, not from
+resizing a buffer during its lifetime.
 
 Scheduling itself is also fixed before this pass, even though a different legal
 schedule would produce different lifetimes. See
