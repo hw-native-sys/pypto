@@ -992,7 +992,10 @@ def _pypto_emits_tile_addresses(memory_planner: _passes.MemoryPlanner) -> bool:
     return memory_planner != _passes.MemoryPlanner.PTOAS
 
 
-def _get_ptoas_flags(memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO) -> list[str]:
+def _get_ptoas_flags(
+    memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
+    insert_sync_summary_path: str | None = None,
+) -> list[str]:
     """Build the common ptoas flag list for kernel compilation.
 
     ``MemoryPlanner.PYPTO`` and ``MemoryPlanner.DSA`` bake physical addresses
@@ -1005,6 +1008,8 @@ def _get_ptoas_flags(memory_planner: _passes.MemoryPlanner = _passes.MemoryPlann
         "--enable-insert-sync",
         f"--pto-level={level}",
     ]
+    if insert_sync_summary_path is not None:
+        flags.append(f"--pto-insert-sync-summary={insert_sync_summary_path}")
     flags.extend(_backend_core.get_handler().get_extra_ptoas_flags())
     return flags
 
@@ -1045,6 +1050,7 @@ def _compile_pto_module(
     unit_name: str,
     output_dir: str,
     memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
+    ptoas_sync_summary_dir: str | None = None,
 ) -> str:
     """Run ptoas for one MLIR module and return the generated C++."""
     ptoas_dir = os.path.join(output_dir, "ptoas")
@@ -1055,10 +1061,14 @@ def _compile_pto_module(
         f.write(pto_code)
 
     cpp_path = os.path.join(ptoas_dir, f"{unit_name}.cpp")
+    summary_path = None
+    if ptoas_sync_summary_dir is not None:
+        os.makedirs(ptoas_sync_summary_dir, exist_ok=True)
+        summary_path = os.path.join(ptoas_sync_summary_dir, f"{unit_name}.sync.jsonl")
     _run_ptoas(
         pto_path,
         cpp_path,
-        ptoas_flags=_get_ptoas_flags(memory_planner),
+        ptoas_flags=_get_ptoas_flags(memory_planner, summary_path),
     )
 
     with open(cpp_path) as f:
@@ -1072,6 +1082,7 @@ def _emit_single_function_output(
     output_dir: str,
     skip_ptoas: bool,
     memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
+    ptoas_sync_summary_dir: str | None = None,
 ) -> None:
     """Emit output files for one InCore function."""
     suffix = "pto" if skip_ptoas else "cpp"
@@ -1080,7 +1091,7 @@ def _emit_single_function_output(
         result_files[kernel_rel] = pto_code
         return
 
-    ptoas_cpp = _compile_pto_module(pto_code, func.name, output_dir, memory_planner)
+    ptoas_cpp = _compile_pto_module(pto_code, func.name, output_dir, memory_planner, ptoas_sync_summary_dir)
     result_files[kernel_rel] = _generate_kernel_wrapper(func, ptoas_cpp)
 
 
@@ -1092,13 +1103,14 @@ def _emit_group_output(
     output_dir: str,
     skip_ptoas: bool,
     memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
+    ptoas_sync_summary_dir: str | None = None,
 ) -> None:
     """Emit output files for one grouped MLIR module."""
     if skip_ptoas:
         result_files[os.path.join("kernels", f"{group_name}.pto")] = pto_code
         return
 
-    ptoas_cpp = _compile_pto_module(pto_code, group_name, output_dir, memory_planner)
+    ptoas_cpp = _compile_pto_module(pto_code, group_name, output_dir, memory_planner, ptoas_sync_summary_dir)
     group_uses_spmd = any(_uses_spmd_block_ops(f) for f in members)
     for func in members:
         result_files[_get_kernel_output_path(func, "cpp")] = _generate_kernel_wrapper(
@@ -1164,6 +1176,7 @@ def _emit_unit(
     output_dir: str,
     skip_ptoas: bool,
     memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
+    ptoas_sync_summary_dir: str | None = None,
 ) -> _EmitResult:
     """Run ptoas + wrapper generation for one codegen unit.
 
@@ -1175,11 +1188,24 @@ def _emit_unit(
     try:
         if unit.is_group:
             _emit_group_output(
-                local_files, unit.name, unit.funcs, unit.pto_code, output_dir, skip_ptoas, memory_planner
+                local_files,
+                unit.name,
+                unit.funcs,
+                unit.pto_code,
+                output_dir,
+                skip_ptoas,
+                memory_planner,
+                ptoas_sync_summary_dir,
             )
         else:
             _emit_single_function_output(
-                local_files, unit.funcs[0], unit.pto_code, output_dir, skip_ptoas, memory_planner
+                local_files,
+                unit.funcs[0],
+                unit.pto_code,
+                output_dir,
+                skip_ptoas,
+                memory_planner,
+                ptoas_sync_summary_dir,
             )
         ptoas_record.end = time.perf_counter()
         return _EmitResult(name=unit.name, files=local_files, ptoas_record=ptoas_record)
@@ -1223,18 +1249,27 @@ def _run_ptoas_phase(
     result_files: dict[str, str],
     errors: list[tuple[str, Exception]],
     memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
+    ptoas_sync_summary_dir: str | None = None,
 ) -> None:
     """Phase 2: run ptoas for all codegen units, sequentially or in parallel."""
     max_workers = _get_max_workers()
 
     if max_workers == 1 or len(units) <= 1:
         for unit in units:
-            result = _emit_unit(unit, output_dir, skip_ptoas, memory_planner)
+            result = _emit_unit(unit, output_dir, skip_ptoas, memory_planner, ptoas_sync_summary_dir)
             _collect_emit_result(result, unit, prof, result_files, errors)
     else:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
-                executor.submit(_emit_unit, unit, output_dir, skip_ptoas, memory_planner) for unit in units
+                executor.submit(
+                    _emit_unit,
+                    unit,
+                    output_dir,
+                    skip_ptoas,
+                    memory_planner,
+                    ptoas_sync_summary_dir,
+                )
+                for unit in units
             ]
             for unit, future in zip(units, futures):
                 result = future.result()  # exceptions caught inside _emit_unit
@@ -1247,6 +1282,7 @@ def generate(
     skip_ptoas: bool = False,
     *,
     memory_planner: _passes.MemoryPlanner | None = None,
+    ptoas_sync_summary_dir: str | None = None,
 ) -> dict[str, str]:
     """Generate all PTO backend output files (kernels + orchestration + config).
 
@@ -1264,6 +1300,10 @@ def generate(
         output_dir: Base output directory (used for ptoas intermediates when skip_ptoas=False)
         skip_ptoas: When True, skip the ptoas compilation step and return raw MLIR
             content in result_files with .pto extension instead of compiled .cpp wrappers.
+        memory_planner: Effective on-chip planner, used to select PTOAS level 2
+            or level 3 address handling.
+        ptoas_sync_summary_dir: Optional directory for one PTOAS InsertSync
+            JSONL summary per codegen unit.
 
     Returns:
         Dict mapping relative file paths to their content.
@@ -1279,7 +1319,11 @@ def generate(
 
     if has_distributed:
         return _generate_with_distributed(
-            transformed_program, output_dir, skip_ptoas, memory_planner=memory_planner
+            transformed_program,
+            output_dir,
+            skip_ptoas,
+            memory_planner=memory_planner,
+            ptoas_sync_summary_dir=ptoas_sync_summary_dir,
         )
 
     # L2-only program with multiple Orchestrations: emit each as a
@@ -1293,10 +1337,20 @@ def generate(
     )
     if orch_count > 1:
         return _generate_multi_chip(
-            transformed_program, output_dir, skip_ptoas, memory_planner=memory_planner
+            transformed_program,
+            output_dir,
+            skip_ptoas,
+            memory_planner=memory_planner,
+            ptoas_sync_summary_dir=ptoas_sync_summary_dir,
         )
 
-    return _generate_single_chip(transformed_program, output_dir, skip_ptoas, memory_planner=memory_planner)
+    return _generate_single_chip(
+        transformed_program,
+        output_dir,
+        skip_ptoas,
+        memory_planner=memory_planner,
+        ptoas_sync_summary_dir=ptoas_sync_summary_dir,
+    )
 
 
 def _generate_with_distributed(
@@ -1305,6 +1359,7 @@ def _generate_with_distributed(
     skip_ptoas: bool,
     *,
     memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
+    ptoas_sync_summary_dir: str | None = None,
 ) -> dict[str, str]:
     """Generate artifacts for a distributed (L3+) program.
 
@@ -1331,8 +1386,17 @@ def _generate_with_distributed(
             chip_funcs = _collect_chip_task_functions(func, transformed_program)
             chip_program = _ir_core.Program(chip_funcs, func.name, transformed_program.span)
             chip_subdir = os.path.join(output_dir, "next_levels", func.name)
+            chip_summary_dir = (
+                os.path.join(ptoas_sync_summary_dir, func.name)
+                if ptoas_sync_summary_dir is not None
+                else None
+            )
             chip_files = _generate_single_chip(
-                chip_program, chip_subdir, skip_ptoas, memory_planner=memory_planner
+                chip_program,
+                chip_subdir,
+                skip_ptoas,
+                memory_planner=memory_planner,
+                ptoas_sync_summary_dir=chip_summary_dir,
             )
             for path, content in chip_files.items():
                 result_files[f"next_levels/{func.name}/{path}"] = content
@@ -1524,6 +1588,7 @@ def _generate_multi_chip(
     skip_ptoas: bool = False,
     *,
     memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
+    ptoas_sync_summary_dir: str | None = None,
 ) -> dict[str, str]:
     """Generate artifacts for an L2-only program with multiple Orchestrations.
 
@@ -1541,8 +1606,15 @@ def _generate_multi_chip(
         chip_funcs = _collect_chip_task_functions(func, transformed_program)
         chip_program = _ir_core.Program(chip_funcs, func.name, transformed_program.span)
         chip_subdir = os.path.join(output_dir, "next_levels", func.name)
+        chip_summary_dir = (
+            os.path.join(ptoas_sync_summary_dir, func.name) if ptoas_sync_summary_dir is not None else None
+        )
         chip_files = _generate_single_chip(
-            chip_program, chip_subdir, skip_ptoas, memory_planner=memory_planner
+            chip_program,
+            chip_subdir,
+            skip_ptoas,
+            memory_planner=memory_planner,
+            ptoas_sync_summary_dir=chip_summary_dir,
         )
         for path, content in chip_files.items():
             result_files[f"next_levels/{func.name}/{path}"] = content
@@ -1555,6 +1627,7 @@ def _generate_single_chip(
     skip_ptoas: bool = False,
     *,
     memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
+    ptoas_sync_summary_dir: str | None = None,
 ) -> dict[str, str]:
     """Generate artifacts for a single-chip (L0-L2) program.
 
@@ -1660,7 +1733,16 @@ def _generate_single_chip(
     # Each _emit_unit call runs the ptoas subprocess and generates the
     # kernel wrapper.  These are data-independent and subprocess-heavy, so
     # a thread pool gives real parallelism (subprocess.run releases the GIL).
-    _run_ptoas_phase(units, output_dir, skip_ptoas, prof, result_files, errors, memory_planner)
+    _run_ptoas_phase(
+        units,
+        output_dir,
+        skip_ptoas,
+        prof,
+        result_files,
+        errors,
+        memory_planner,
+        ptoas_sync_summary_dir,
+    )
 
     # Orchestration + config
     if orch_func is not None:

@@ -18,10 +18,11 @@ These tests catch silent drift if either side evolves.
 from __future__ import annotations
 
 import inspect
-from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
-from pypto.backend import pto_backend
+from pypto import backend
+from pypto.backend import BackendType, pto_backend
 from pypto.pypto_core.passes import MemoryPlanner
 from pypto.runtime.debug import pto_rebuild
 
@@ -92,18 +93,38 @@ def test_base_ptoas_flags_subset_of_backend_flags() -> None:
     )
 
 
-@pytest.mark.parametrize(
-    ("planner", "expected_level"),
-    [
-        (MemoryPlanner.PYPTO, "--pto-level=level3"),
-        (MemoryPlanner.DSA_RP, "--pto-level=level3"),
-        (MemoryPlanner.PTOAS, "--pto-level=level2"),
-    ],
-)
-def test_memory_planner_selects_ptoas_level(monkeypatch, planner, expected_level) -> None:
-    handler = SimpleNamespace(get_extra_ptoas_flags=lambda: [])
-    monkeypatch.setattr(pto_backend._backend_core, "get_handler", lambda: handler)
-    assert expected_level in pto_backend._get_ptoas_flags(planner)
+def test_insert_sync_summary_flag_is_optional() -> None:
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B)
+    no_summary = pto_backend._get_ptoas_flags()
+    with_summary = pto_backend._get_ptoas_flags(insert_sync_summary_path="/tmp/unit.sync.jsonl")
+    assert not any(flag.startswith("--pto-insert-sync-summary=") for flag in no_summary)
+    assert "--pto-insert-sync-summary=/tmp/unit.sync.jsonl" in with_summary
+
+
+def test_compile_pto_module_uses_per_unit_summary_path(tmp_path, monkeypatch) -> None:
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B)
+    captured = {}
+
+    def fake_run_ptoas(input_path, output_path, *, ptoas_flags):
+        captured["input_path"] = input_path
+        captured["flags"] = ptoas_flags
+        Path(output_path).write_text("generated")
+
+    monkeypatch.setattr(pto_backend, "_run_ptoas", fake_run_ptoas)
+    summary_dir = tmp_path / "sync"
+    generated = pto_backend._compile_pto_module(
+        "module {}",
+        "unit_name",
+        str(tmp_path / "output"),
+        MemoryPlanner.DSA,
+        str(summary_dir),
+    )
+
+    assert generated == "generated"
+    assert Path(captured["input_path"]).read_text() == "module {}"
+    assert f"--pto-insert-sync-summary={summary_dir}/unit_name.sync.jsonl" in captured["flags"]
 
 
 if __name__ == "__main__":

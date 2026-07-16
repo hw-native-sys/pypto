@@ -1017,12 +1017,17 @@ def _dsa_chain_program():
     return passes.init_mem_ref()(Before)
 
 
-def _allocate_with_dsa(base, export_dir: str | None = None):
+def _allocate_with_dsa(
+    base,
+    export_dir: str | None = None,
+    solution_dir: str | None = None,
+):
     """Run the standalone planner through its PassContext-owned adapter."""
     with passes.PassContext(
         [],
         memory_planner=passes.MemoryPlanner.DSA,
         dsa_export_dir=export_dir,
+        dsa_solution_dir=solution_dir,
     ):
         return passes.allocate_memory_addr()(base)
 
@@ -1054,6 +1059,9 @@ def test_dsa_export_is_deterministic_pypto_hard_v1(tmp_path):
     first = first_dir / "pypto_read_before_write_chain.dsa.json"
     second = second_dir / "pypto_read_before_write_chain.dsa.json"
     assert first.read_text() == second.read_text()
+    first_solution = first_dir / "pypto_read_before_write_chain.dsa.solution.json"
+    second_solution = second_dir / "pypto_read_before_write_chain.dsa.solution.json"
+    assert first_solution.read_text() == second_solution.read_text()
 
     document = json.loads(first.read_text())
     assert document["schema_version"] == 1
@@ -1090,6 +1098,28 @@ def test_dsa_export_is_deterministic_pypto_hard_v1(tmp_path):
         ],
         "pipeline_groups": [],
     }
+
+
+@requires_dsa
+def test_dsa_replays_fingerprinted_solution(tmp_path):
+    """A saved placement is revalidated against a fresh export before writeback."""
+    base = _dsa_chain_program()
+    artifact_dir = tmp_path / "artifacts"
+    solved = _allocate_with_dsa(base, export_dir=str(artifact_dir))
+    replayed = _allocate_with_dsa(base, solution_dir=str(artifact_dir))
+
+    ir.assert_structural_equal(solved, replayed)
+    solution = json.loads((artifact_dir / "pypto_read_before_write_chain.dsa.solution.json").read_text())
+    assert solution["schema_version"] == 1
+    assert solution["profile"] == "pypto_hard_v1"
+    assert solution["instance"] == "read_before_write_chain"
+    assert solution["metadata"]["solver"] == "first_fit"
+    assert len(solution["problem_fingerprint"]) == 16
+    assert solution["placements"] == [
+        {"buffer": 0, "offset": 0, "pool": 1},
+        {"buffer": 1, "offset": 0, "pool": 1},
+        {"buffer": 2, "offset": 0, "pool": 1},
+    ]
 
 
 def _dsa_pipeline_separation_program():
@@ -1222,6 +1252,11 @@ def test_dsa_pipeline_intent_falls_back_with_reuse_cost_and_warning(tmp_path):
     ):
         planned = passes.allocate_memory_addr()(_dsa_capacity_gated_pipeline_cost_program())
     assert _vec_peak(planned) == 240 * 1024
+    replayed = _allocate_with_dsa(
+        _dsa_capacity_gated_pipeline_cost_program(),
+        solution_dir=str(export_dir),
+    )
+    ir.assert_structural_equal(planned, replayed)
 
     document = json.loads((export_dir / "pypto_capacity_gated_pipeline_cost.dsa.json").read_text())
     assert document["profile"] == "pypto_research_v1"

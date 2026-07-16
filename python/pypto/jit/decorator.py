@@ -1444,6 +1444,8 @@ def _run_config_compile_kwargs(run_config: Any) -> dict[str, Any]:
         "analyze_auto_scopes_for_deps": run_config.analyze_auto_scopes_for_deps,
         "memory_planner": run_config.memory_planner,
         "dsa_export_dir": run_config.dsa_export_dir,
+        "dsa_solution_dir": run_config.dsa_solution_dir,
+        "ptoas_sync_summary_dir": run_config.ptoas_sync_summary_dir,
     }
     if run_config.save_kernels_dir is not None:
         kwargs["output_dir"] = run_config.save_kernels_dir
@@ -1497,6 +1499,14 @@ def _resolve_enable_pypto_l0c_double_buffer() -> bool:
     """
     ctx = _passes.PassContext.current()
     return ctx.get_enable_pypto_l0c_double_buffer() if ctx is not None else False
+
+
+def _resolve_dsa_solution_dir(run_config: Any) -> str | None:
+    """Resolve the placement replay directory that changes generated addresses."""
+    if run_config is not None and run_config.dsa_solution_dir is not None:
+        return run_config.dsa_solution_dir
+    ctx = _passes.PassContext.current()
+    return ctx.get_dsa_solution_dir() if ctx is not None else None
 
 
 # ---------------------------------------------------------------------------
@@ -2078,6 +2088,8 @@ class JITFunction:
             analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
             memory_planner=memory_planner,
             enable_pypto_l0c_double_buffer=_resolve_enable_pypto_l0c_double_buffer(),
+            dsa_solution_dir=_resolve_dsa_solution_dir(run_config),
+            ptoas_sync_summary_dir=(run_config.ptoas_sync_summary_dir if run_config is not None else None),
         )
 
         # L1 cache lookup
@@ -2469,6 +2481,69 @@ class JITFunction:
             auto_scope=self._auto_scope,
         )
         return dep_contexts + [entry_ctx]
+
+    def compile_for_test(self, *args: Any, **kwargs: Any) -> Any:
+        """Specialize, compile, and return the post-pass ir.Program for testing.
+
+        Runs the full pass pipeline and populates ``_cache`` with a
+        ``CompiledProgram`` (via ``ir.compile()``), then returns the post-pass
+        ``ir.Program`` for structural equality comparison in unit tests.
+
+        Unlike ``__call__``, this method does not execute on device.
+
+        Args:
+            *args: Positional arguments matching the decorated function's params.
+            **kwargs: Keyword arguments.
+
+        Returns:
+            ``ir.Program`` after the full pass pipeline, suitable for
+            ``ir.assert_structural_equal`` comparison.
+        """
+        import pypto.language as pl  # noqa: PLC0415
+        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+
+        param_names, _, tensor_meta, scalar_values, scalar_dtypes, per_func_dyn = self._bind_args(
+            args, kwargs
+        )
+
+        key = make_cache_key(
+            source_hash=self._get_source_hash(),
+            param_names=param_names,
+            tensor_shapes={n: m.static_shape() for n, m in tensor_meta.items()},
+            tensor_dtypes={n: m.dtype for n, m in tensor_meta.items()},
+            dynamic_dims={(n, i) for n, m in tensor_meta.items() for i in m.dynamic_dim_indices()},
+            scalar_values=scalar_values,
+            platform=None,  # compile_for_test is platform-agnostic (testing only)
+            strategy=OptimizationStrategy.Default,  # _compile() uses the default strategy
+            # compile_for_test takes no RunConfig, so the planner can only come
+            # from an ambient PassContext — which still changes the artifact.
+            memory_planner=_resolve_memory_planner(None),
+            enable_pypto_l0c_double_buffer=_resolve_enable_pypto_l0c_double_buffer(),
+            dsa_solution_dir=_resolve_dsa_solution_dir(None),
+            ptoas_sync_summary_dir=None,
+        )
+
+        # Populate cache via ir.compile() (codegen included) as a best-effort
+        # side effect.  Two known failure modes are both acceptable here:
+        #   (1) Single-function programs with incore scopes fail at
+        #       OutlineIncoreScopes (the pass only handles Opaque functions).
+        #   (2) Some programs fail at ptoas due to hardware-specific constraints
+        #       (e.g. tinsert loc=acc/mat mismatch on assemble kernels).
+        # In both cases the cache entry is simply left empty; the actual return
+        # value of this method comes from _compile_to_program() below, which
+        # runs only through the pass pipeline (no codegen) and always succeeds
+        # for structurally valid IR.
+        if key not in self._cache:
+            try:
+                self._cache[key] = self._compile(tensor_meta, scalar_values, scalar_dtypes, per_func_dyn, pl)
+            except Exception:
+                pass
+
+        # Return the post-pass ir.Program via the lightweight path
+        # (no codegen) for structural equality comparison.
+        pre_pass = self._compile_to_program(tensor_meta, scalar_values, scalar_dtypes, per_func_dyn, pl)
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        return pm.run_passes(pre_pass)
 
     def __repr__(self) -> str:
         return f"JITFunction({self.__name__!r}, func_type={self._func_type!r})"

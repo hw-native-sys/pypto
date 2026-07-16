@@ -268,6 +268,7 @@ class PassContext:
         memory_planner: MemoryPlanner = MemoryPlanner.PYPTO,
         enable_pypto_l0c_double_buffer: bool = False,
         dsa_export_dir: str | None = None,
+        dsa_solution_dir: str | None = None,
     ) -> None:
         """Create a PassContext with instruments and pass configuration (incl. memory planner).
 
@@ -275,6 +276,7 @@ class PassContext:
         under the PyPTO memory planner (experimental, default off; no effect under
         PtoAS, which already emits dbC=2).
         ``dsa_export_dir`` optionally retains schema-v1 inputs under the DSA planner.
+        ``dsa_solution_dir`` replays fingerprinted placements instead of solving.
         """
         ...
 
@@ -307,6 +309,10 @@ class PassContext:
 
     def get_dsa_export_dir(self) -> str | None:
         """Get the optional standalone DSA corpus export directory."""
+        ...
+
+    def get_dsa_solution_dir(self) -> str | None:
+        """Get the optional standalone DSA placement replay directory."""
         ...
 
     def get_instruments(self) -> list[PassInstrument]:

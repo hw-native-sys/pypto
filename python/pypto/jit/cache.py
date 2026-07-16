@@ -146,6 +146,8 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
     enable_pypto_l0c_double_buffer: bool = False,
     tensor_layouts: dict[str, "TensorLayout | None"] | None = None,
     dep_layouts: tuple[tuple[str, str, str], ...] = (),
+    dsa_solution_dir: str | None = None,
+    ptoas_sync_summary_dir: str | None = None,
 ) -> CacheKey:
     """Build a cache key for a JIT call site.
 
@@ -195,11 +197,16 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
             into the artifact; without it, compiling one kernel under multiple
             planners would hand a later call the wrong artifact.
         enable_pypto_l0c_double_buffer: Effective dbC=2 (L0C double-buffer) opt-in
-            under the PyPTO-owned planners, resolved from the active
-            ``PassContext``. Included in the key because it changes the
-            AutoTileMatmulL0 output and selected allocation; without it a
-            kernel first compiled with it off would reuse that artifact when
-            later called with it on (and vice versa).
+            under the PyPTO planner, resolved from the active ``PassContext``.
+            Included in the key because it changes the AutoTileMatmulL0 /
+            MemoryReuse output; without it a kernel first compiled with it off
+            would reuse that artifact when later called with it on (and vice versa).
+        dsa_solution_dir: Optional fingerprinted DSA placement directory.
+            Included because different replay artifacts can produce different
+            physical addresses for the same kernel.
+        ptoas_sync_summary_dir: Optional PTOAS InsertSync summary directory.
+            Included because requesting a fresh summary must force PTOAS to run
+            instead of returning an artifact compiled without instrumentation.
 
     Returns:
         Hashable CacheKey tuple.
@@ -233,6 +240,8 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
         ("memory_planner", None if memory_planner is None else str(memory_planner)),
         ("enable_pypto_l0c_double_buffer", enable_pypto_l0c_double_buffer),
         ("dep_layouts", dep_layouts),
+        ("dsa_solution_dir", dsa_solution_dir),
+        ("ptoas_sync_summary_dir", ptoas_sync_summary_dir),
     )
     return (
         source_hash,

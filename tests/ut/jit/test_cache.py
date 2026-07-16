@@ -16,7 +16,11 @@ from pypto.jit.cache import (
     compute_source_hash,
     make_cache_key,
 )
-from pypto.jit.decorator import _resolve_enable_pypto_l0c_double_buffer, _resolve_memory_planner
+from pypto.jit.decorator import (
+    _resolve_dsa_solution_dir,
+    _resolve_enable_pypto_l0c_double_buffer,
+    _resolve_memory_planner,
+)
 from pypto.pypto_core import DataType, ir, passes
 from pypto.pypto_core.passes import MemoryPlanner
 from pypto.runtime import RunConfig
@@ -66,6 +70,8 @@ class TestMakeCacheKey:
         enable_pypto_l0c_double_buffer=False,
         tensor_layouts=None,
         dep_layouts=(),
+        dsa_solution_dir=None,
+        ptoas_sync_summary_dir=None,
     ):
         return make_cache_key(
             source_hash=source_hash,
@@ -82,6 +88,8 @@ class TestMakeCacheKey:
             enable_pypto_l0c_double_buffer=enable_pypto_l0c_double_buffer,
             tensor_layouts=tensor_layouts,
             dep_layouts=dep_layouts,
+            dsa_solution_dir=dsa_solution_dir,
+            ptoas_sync_summary_dir=ptoas_sync_summary_dir,
         )
 
     def test_basic_key_structure(self):
@@ -104,7 +112,16 @@ class TestMakeCacheKey:
             ("memory_planner", None),
             ("enable_pypto_l0c_double_buffer", False),
             ("dep_layouts", ()),
+            ("dsa_solution_dir", None),
+            ("ptoas_sync_summary_dir", None),
         )
+
+    def test_ptoas_sync_summary_directory_causes_miss(self):
+        without_summary = self._make_key()
+        with_summary = self._make_key(ptoas_sync_summary_dir="/tmp/sync-a")
+        other_summary = self._make_key(ptoas_sync_summary_dir="/tmp/sync-b")
+        assert without_summary != with_summary
+        assert with_summary != other_summary
 
     def test_tensor_shape_in_key(self):
         key = self._make_key(
@@ -404,6 +421,11 @@ class TestMakeCacheKey:
         )
         assert key_off != key_on, "dbC=2 opt-in must split the cache key"
 
+    def test_dsa_solution_directory_splits_key(self):
+        key_a = self._make_key(dsa_solution_dir="/tmp/placement-a")
+        key_b = self._make_key(dsa_solution_dir="/tmp/placement-b")
+        assert key_a != key_b
+
 
 class TestResolveMemoryPlanner:
     """The planner the JIT keys on must match the one ``ir.compile()`` will use."""
@@ -444,6 +466,14 @@ class TestResolveEnablePyptoL0cDoubleBuffer:
         assert cfg.memory_planner is None
         with passes.PassContext([], memory_planner=MemoryPlanner.PTOAS):
             assert _resolve_memory_planner(cfg) == MemoryPlanner.PTOAS
+
+
+class TestResolveDsaSolutionDir:
+    def test_reads_run_config_or_active_context(self):
+        cfg = RunConfig(dsa_solution_dir="/tmp/config-solutions")
+        assert _resolve_dsa_solution_dir(cfg) == "/tmp/config-solutions"
+        with passes.PassContext([], dsa_solution_dir="/tmp/context-solutions"):
+            assert _resolve_dsa_solution_dir(None) == "/tmp/context-solutions"
 
 
 if __name__ == "__main__":

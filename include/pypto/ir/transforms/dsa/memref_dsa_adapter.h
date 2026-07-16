@@ -13,6 +13,7 @@
 #define PYPTO_IR_TRANSFORMS_DSA_MEMREF_DSA_ADAPTER_H_
 
 #include <cstdint>
+#include <map>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -80,6 +81,23 @@ struct SolverRun {
  * this boundary. The returned path is the exact file written.
  */
 [[nodiscard]] std::string WriteProblemJson(const ExportedProblem& exported, const std::string& directory);
+
+/**
+ * @brief Write the validated placement selected for an exported problem.
+ *
+ * The solution artifact carries a fingerprint of the complete problem
+ * document. A later compilation can therefore reject stale or mismatched
+ * placements before any address is written back to PyPTO IR.
+ */
+[[nodiscard]] std::string WriteSolutionJson(const ExportedProblem& exported,
+                                            const ::dsa::DsaSolution& solution, const std::string& directory,
+                                            std::map<std::string, std::string> metadata = {});
+
+/**
+ * @brief Read the deterministic solution artifact for one function.
+ */
+[[nodiscard]] ::dsa::StructuredSolutionDocument ReadSolutionJson(const std::string& instance,
+                                                                 const std::string& directory);
 
 /**
  * @brief Run one standalone solver and independently validate its result.

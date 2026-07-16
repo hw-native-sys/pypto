@@ -131,6 +131,18 @@ def pytest_addoption(parser):
         help="Optional base directory for per-test schema-v1 DSA corpus exports",
     )
     parser.addoption(
+        "--dsa-solution-dir",
+        action="store",
+        default=None,
+        help="Optional base directory for per-test fingerprinted DSA placement replay",
+    )
+    parser.addoption(
+        "--ptoas-sync-summary-dir",
+        action="store",
+        default=None,
+        help="Optional base directory for per-test PTOAS InsertSync JSONL summaries",
+    )
+    parser.addoption(
         "--fuzz-count",
         action="store",
         default=10,
@@ -488,6 +500,8 @@ def test_config(request) -> RunConfig:
         analyze_auto_scopes_for_deps=request.config.getoption("--analyze-auto-scopes-for-deps"),
         memory_planner=memory_planner,
         dsa_export_dir=request.config.getoption("--dsa-export-dir"),
+        dsa_solution_dir=request.config.getoption("--dsa-solution-dir"),
+        ptoas_sync_summary_dir=request.config.getoption("--ptoas-sync-summary-dir"),
     )
 
 
@@ -873,6 +887,8 @@ def pytest_collection_finish(session: pytest.Session) -> None:
         "ptoas": passes.MemoryPlanner.PTOAS,
     }[session.config.getoption("--memory-planner")]
     dsa_export_dir: str | None = session.config.getoption("--dsa-export-dir")
+    dsa_solution_dir: str | None = session.config.getoption("--dsa-solution-dir")
+    ptoas_sync_summary_dir: str | None = session.config.getoption("--ptoas-sync-summary-dir")
     if memory_planner == passes.MemoryPlanner.DSA and not passes.is_dsa_solver_available():
         raise pytest.UsageError(
             "--memory-planner=dsa requires a PyPTO build configured with PYPTO_ENABLE_DSA_SOLVER"
@@ -941,6 +957,8 @@ def pytest_collection_finish(session: pytest.Session) -> None:
             device_pool=device_pool,
             memory_planner=memory_planner,
             dsa_export_dir=dsa_export_dir,
+            dsa_solution_dir=dsa_solution_dir,
+            ptoas_sync_summary_dir=ptoas_sync_summary_dir,
             enable_l2_swimlane=enable_l2_swimlane,
             enable_dump_args=enable_dump_args,
             enable_pmu=enable_pmu,

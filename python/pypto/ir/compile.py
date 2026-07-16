@@ -73,6 +73,7 @@ def _validate_pass_context_conflicts(
     diagnostic_phase: _passes.DiagnosticPhase | None,
     memory_planner: _passes.MemoryPlanner | None,
     dsa_export_dir: str | None,
+    dsa_solution_dir: str | None,
 ) -> _passes.PassContext | None:
     """Reject explicit pass settings that conflict with an active context."""
     outer = _passes.PassContext.current()
@@ -96,6 +97,11 @@ def _validate_pass_context_conflicts(
             f"{operation}() was called with dsa_export_dir while a PassContext is already active. "
             "Set the DSA export directory on the existing PassContext instead."
         )
+    if dsa_solution_dir is not None and outer is not None:
+        raise RuntimeError(
+            f"{operation}() was called with dsa_solution_dir while a PassContext is already active. "
+            "Set the DSA solution directory on the existing PassContext instead."
+        )
     return outer
 
 
@@ -111,6 +117,7 @@ def _run_pass_pipeline(  # noqa: PLR0913
     disabled_diagnostics: _passes.DiagnosticCheckSet | None = None,
     memory_planner: _passes.MemoryPlanner | None = None,
     dsa_export_dir: str | None = None,
+    dsa_solution_dir: str | None = None,
     enable_pypto_l0c_double_buffer: bool | None = None,
     analyze_auto_scopes_for_deps: bool = False,
     extra_instruments: tuple[_passes.PassInstrument, ...] = (),
@@ -126,6 +133,7 @@ def _run_pass_pipeline(  # noqa: PLR0913
         diagnostic_phase=diagnostic_phase,
         memory_planner=memory_planner,
         dsa_export_dir=dsa_export_dir,
+        dsa_solution_dir=dsa_solution_dir,
     )
 
     default_disabled = _passes.DiagnosticCheckSet()
@@ -151,6 +159,7 @@ def _run_pass_pipeline(  # noqa: PLR0913
             else outer.get_enable_pypto_l0c_double_buffer()
         )
         export_dir = dsa_export_dir if dsa_export_dir is not None else outer.get_dsa_export_dir()
+        solution_dir = dsa_solution_dir if dsa_solution_dir is not None else outer.get_dsa_solution_dir()
     else:
         instruments = list(extra_instruments)
         vlevel = (
@@ -161,9 +170,21 @@ def _run_pass_pipeline(  # noqa: PLR0913
         mplan = memory_planner if memory_planner is not None else _passes.MemoryPlanner.PYPTO
         dbc_flag = enable_pypto_l0c_double_buffer if enable_pypto_l0c_double_buffer is not None else False
         export_dir = dsa_export_dir
+        solution_dir = dsa_solution_dir
     if export_dir is not None and mplan != _passes.MemoryPlanner.DSA:
         raise ValueError("dsa_export_dir requires memory_planner=MemoryPlanner.DSA")
-    ctx = _passes.PassContext(instruments, vlevel, dphase, disabled, mplan, dbc_flag, export_dir)
+    if solution_dir is not None and mplan != _passes.MemoryPlanner.DSA:
+        raise ValueError("dsa_solution_dir requires memory_planner=MemoryPlanner.DSA")
+    ctx = _passes.PassContext(
+        instruments,
+        vlevel,
+        dphase,
+        disabled,
+        mplan,
+        dbc_flag,
+        export_dir,
+        solution_dir,
+    )
 
     if mplan == _passes.MemoryPlanner.PTOAS:
         logger.warning(
@@ -214,6 +235,8 @@ def compile(  # noqa: PLR0913
     distributed_config: Any = None,
     analyze_auto_scopes_for_deps: bool = False,
     dsa_export_dir: str | None = None,
+    dsa_solution_dir: str | None = None,
+    ptoas_sync_summary_dir: str | None = None,
 ) -> "CompiledProgram | DistributedCompiledProgram":
     """Compile a Program through passes and codegen.
 
@@ -260,6 +283,9 @@ def compile(  # noqa: PLR0913
             semantics-required aliasing (loop-carried accumulators, in-place ops)
             is preserved as a shared ``tile_buf`` handle that ptoas keeps as one
             buffer.
+            ``MemoryPlanner.DSA`` skips only ``MemoryReuse`` and hands the
+            unmerged, semantics-normalized allocations to the standalone DSA
+            solver before validating and writing addresses back.
         enable_pypto_l0c_double_buffer: Opt in to dbC=2 (L0C double-buffering)
             under the PyPTO memory planner (experimental, default off). ``None``
             inherits the setting from an active outer ``PassContext`` (else
@@ -268,10 +294,12 @@ def compile(  # noqa: PLR0913
         dsa_export_dir: Optional directory for deterministic
             ``pypto_structured`` schema-v1 JSON problems. This is valid only
             with ``MemoryPlanner.DSA``.
-
-            ``MemoryPlanner.DSA`` skips only ``MemoryReuse`` and hands the
-            unmerged, semantics-normalized allocations to the standalone DSA
-            solver before validating and writing addresses back.
+        dsa_solution_dir: Optional directory containing fingerprinted DSA
+            solution artifacts. When set, ``MemoryPlanner.DSA`` validates and
+            replays the recorded placement instead of invoking a solver.
+        ptoas_sync_summary_dir: Optional directory for one machine-readable
+            InsertSync JSONL summary per PTOAS codegen unit. This is
+            instrumentation only and does not change placement or codegen.
         profiling: If True, enable compile profiling that records per-stage
             wall-clock timings.  Results are written to ``output_dir/report/``.
         platform: Target execution platform.  One of ``"a2a3sim"``,
@@ -320,7 +348,10 @@ def compile(  # noqa: PLR0913
         diagnostic_phase=diagnostic_phase,
         memory_planner=memory_planner,
         dsa_export_dir=dsa_export_dir,
+        dsa_solution_dir=dsa_solution_dir,
     )
+    if ptoas_sync_summary_dir is not None and skip_ptoas:
+        raise ValueError("ptoas_sync_summary_dir requires PTOAS code generation (skip_ptoas=False)")
 
     # --- Compile profiling ---------------------------------------------------
     prof = get_active_profiler()
@@ -351,6 +382,7 @@ def compile(  # noqa: PLR0913
             disabled_diagnostics=disabled_diagnostics,
             memory_planner=memory_planner,
             dsa_export_dir=dsa_export_dir,
+            dsa_solution_dir=dsa_solution_dir,
             enable_pypto_l0c_double_buffer=enable_pypto_l0c_double_buffer,
             analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
             extra_instruments=(report_instrument,),
@@ -370,6 +402,7 @@ def compile(  # noqa: PLR0913
                     output_dir,
                     skip_ptoas=skip_ptoas,
                     memory_planner=mplan,
+                    ptoas_sync_summary_dir=ptoas_sync_summary_dir,
                 )
         except PartialCodegenError as exc:
             _write_files(exc.files, output_dir)

@@ -180,6 +180,7 @@ def _run_pipeline(
     program: ir.Program = ElementwiseAdd,
     *,
     dsa_export_dir: str | None = None,
+    dsa_solution_dir: str | None = None,
 ) -> tuple[ir.Program, list[str]]:
     """Run the Default pipeline under a PassContext with the given planner.
 
@@ -187,7 +188,12 @@ def _run_pipeline(
     """
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.Ascend910B)
-    with passes.PassContext([], memory_planner=memory_planner, dsa_export_dir=dsa_export_dir):
+    with passes.PassContext(
+        [],
+        memory_planner=memory_planner,
+        dsa_export_dir=dsa_export_dir,
+        dsa_solution_dir=dsa_solution_dir,
+    ):
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
         optimized = pm.run_passes(program)
     return optimized, list(pm.pass_names)
@@ -216,13 +222,16 @@ def test_pass_context_planner_round_trip(planner):
 
 
 def test_pass_context_dsa_settings_round_trip(tmp_path):
+    solution_dir = tmp_path / "solutions"
     ctx = passes.PassContext(
         [],
         memory_planner=passes.MemoryPlanner.DSA,
         dsa_export_dir=str(tmp_path),
+        dsa_solution_dir=str(solution_dir),
     )
     assert ctx.get_memory_planner() == passes.MemoryPlanner.DSA
     assert ctx.get_dsa_export_dir() == str(tmp_path)
+    assert ctx.get_dsa_solution_dir() == str(solution_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +305,30 @@ def test_dsa_context_survives_profiled_pipeline_and_exports(tmp_path):
         pm.run_passes(ElementwiseAdd)
 
     assert list(export_dir.glob("*.dsa.json"))
+
+
+@requires_dsa
+def test_dsa_solution_replay_survives_dump_pipeline_context(tmp_path):
+    """Nested dump contexts must preserve the selected replay directory."""
+    artifact_dir = tmp_path / "artifacts"
+    solved, _ = _run_pipeline(
+        passes.MemoryPlanner.DSA,
+        dsa_export_dir=str(artifact_dir),
+    )
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B)
+    with passes.PassContext(
+        [],
+        memory_planner=passes.MemoryPlanner.DSA,
+        dsa_solution_dir=str(artifact_dir),
+    ):
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        replayed = pm.run_passes(
+            ElementwiseAdd,
+            dump_ir=True,
+            output_dir=str(tmp_path / "ir"),
+        )
+    ir.assert_structural_equal(solved, replayed)
 
 
 # ---------------------------------------------------------------------------

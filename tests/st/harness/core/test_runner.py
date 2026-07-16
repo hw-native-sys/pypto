@@ -343,6 +343,8 @@ def _compile_for_cache(
         memory_planner=_resolve_case_memory_planner(test_case, session_memory_planner),
         enable_pypto_l0c_double_buffer=test_case.get_enable_pypto_l0c_double_buffer(),
         dsa_export_dir=test_case.get_dsa_export_dir(),
+        dsa_solution_dir=test_case.get_dsa_solution_dir(),
+        ptoas_sync_summary_dir=test_case.get_ptoas_sync_summary_dir(),
         skip_ptoas=codegen_only,
     )
     # External kernels are referenced in the manifest at their original path
@@ -996,6 +998,8 @@ def start_pipeline(  # noqa: PLR0913
     device_pool: "queue.Queue[int]",
     memory_planner: MemoryPlanner | None = None,
     dsa_export_dir: str | None = None,
+    dsa_solution_dir: str | None = None,
+    ptoas_sync_summary_dir: str | None = None,
     analyze_auto_scopes_for_deps: bool = False,
     enable_l2_swimlane: bool = False,
     enable_dump_args: int = 0,
@@ -1083,7 +1087,12 @@ def start_pipeline(  # noqa: PLR0913
 
     groups: dict[BackendType, list[PTOTestCase]] = {}
     for tc in test_cases:
-        tc.inherit_session_compile_config(memory_planner, dsa_export_dir)
+        tc.inherit_session_compile_config(
+            memory_planner,
+            dsa_export_dir,
+            dsa_solution_dir,
+            ptoas_sync_summary_dir,
+        )
         groups.setdefault(tc.get_backend_type(), []).append(tc)
 
     group_items = list(groups.items())
@@ -1245,7 +1254,12 @@ class TestRunner:
         Returns:
             RunResult with pass/fail status and details.
         """
-        test_case.inherit_session_compile_config(self.config.memory_planner, self.config.dsa_export_dir)
+        test_case.inherit_session_compile_config(
+            self.config.memory_planner,
+            self.config.dsa_export_dir,
+            self.config.dsa_solution_dir,
+            self.config.ptoas_sync_summary_dir,
+        )
         resolved_platform = _resolve_platform(self.config.platform, test_case)
         cache_k = _cache_key(test_case, resolved_platform, self.config.memory_planner)
         cfut = _compile_futures.get(cache_k)
@@ -1376,6 +1390,8 @@ class TestRunner:
                 memory_planner=_resolve_case_memory_planner(test_case, self.config.memory_planner),
                 enable_pypto_l0c_double_buffer=test_case.get_enable_pypto_l0c_double_buffer(),
                 dsa_export_dir=test_case.get_dsa_export_dir(),
+                dsa_solution_dir=test_case.get_dsa_solution_dir(),
+                ptoas_sync_summary_dir=test_case.get_ptoas_sync_summary_dir(),
                 skip_ptoas=self.config.codegen_only,
             )
 
