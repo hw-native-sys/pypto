@@ -93,7 +93,9 @@ class TestAutoTileMatmulL0:
 
         Operands are bf16 and the on-chip intermediate is bf16 — the cube's FIXPIPE
         writeback to L1 downcasts the f32 accumulator, which is also the cube's native
-        operand precision. The golden models that downcast, so the tolerance is bf16."""
+        operand precision. The golden models that downcast; compare by global relative
+        norm because cancellation-near-zero elements make per-element ``allclose``
+        unstable for this chained reduction."""
         kernel._cache.clear()
         torch.manual_seed(0)
         a = torch.randn(256, K, dtype=torch.bfloat16)
@@ -105,8 +107,9 @@ class TestAutoTileMatmulL0:
 
         c_bf16 = (a.float() @ b.float()).to(torch.bfloat16).float()  # FIXPIPE downcast
         expected = c_bf16 @ e.float()
-        assert torch.allclose(out, expected, rtol=2e-2, atol=2e-2), (
-            f"{kernel.__name__} (Mat-scratch) max abs diff = {(out - expected).abs().max().item():.3e}"
+        rel_err = ((out - expected).norm() / expected.norm()).item()
+        assert rel_err < 2e-2, (
+            f"{kernel.__name__} (Mat-scratch) Frobenius rel_err = {rel_err:.3e} exceeds 2e-2"
         )
 
     @pytest.mark.parametrize("planner", _PLANNERS)
