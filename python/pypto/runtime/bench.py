@@ -793,7 +793,17 @@ def _parse_stats_from_strace(
 
     names = _span_names()
     stats = BenchmarkStats(rounds=rounds, warmup=warmup)
-    invocations = group_invocations(parse_spans(log_text.splitlines()))
+    # L3 forks one chip worker per rank, all sharing the capture fd; their
+    # concurrent writes can interleave two complete ``[STRACE]`` records onto one
+    # physical line. simpler's ``parse_spans`` reads at most one record per line
+    # (``search`` + greedy ``attrs=.*``), silently dropping the 2nd — which loses
+    # that dispatch's orch/sched spans and makes the (round, rank) read as 0.
+    # Each record's payload is intact on the wire; only the line boundary was lost,
+    # so re-split on the ``[STRACE]`` marker to give every record its own line
+    # before handing the (unmodified) simpler parser the text. Prefix text left on a
+    # line with no marker simply fails the regex and is skipped, as before.
+    lines = log_text.replace("[STRACE]", "\n[STRACE]").splitlines()
+    invocations = group_invocations(parse_spans(lines))
     if not invocations:
         return stats
 

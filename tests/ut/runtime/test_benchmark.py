@@ -274,6 +274,30 @@ def test_parse_l3_two_ranks_per_round_max(span_root):
     assert stats.host_wall_us == [200.0, 300.0]
 
 
+def test_parse_l3_recovers_interleaved_records_on_one_line(span_root):
+    """Two ``[STRACE]`` records mashed onto one physical line are both recovered.
+
+    L3 forks one chip worker per rank sharing the capture fd; concurrent writes
+    can interleave two complete records onto a single physical line. The parser
+    must re-split on the ``[STRACE]`` marker and recover both — dropping the
+    second record would zero that (round, rank).
+    """
+    lines = _launch_lines(0, span_root, host_us=100, device_us=10, pid=100)
+    lines += _launch_lines(1, span_root, host_us=300, device_us=30, pid=100)
+    # Simulate the wire collision: inv0's device-wall record and inv1's host
+    # record land on the same physical line (no newline between them). Every
+    # other record keeps its own line.
+    mashed = "\n".join([lines[0], f"{lines[1]} {lines[2]}", lines[3]])
+
+    stats = _parse_stats_from_strace(mashed, rounds=2, warmup=0, distributed=True)
+
+    # Both invocations survive. Without the re-split, the second record on the
+    # mashed line is dropped, so inv1's host span reads 0 for round1.
+    assert stats.fallback_flattened is False
+    assert stats.per_rank("device") == {100: [10.0, 30.0]}
+    assert stats.per_rank("host") == {100: [100.0, 300.0]}
+
+
 def test_parse_l3_multi_dispatch_sums_within_round(span_root):
     """A rank dispatched multiple times per round (heterogeneous hids) sums within the round."""
     lines: list[str] = []
