@@ -195,6 +195,19 @@ jobs:
           --ignore=tests/st/codegen/torch/test_torch_codegen_paged_attention.py
 
   system-tests:
+    # Batched shard 1 (mechanism A): the HEAVY device_batch directories
+    # (runtime/ops + runtime/cross_core, ~68% of the batched load). The batched
+    # `Test system tests` step used to run ~7-15 min and dominated the whole job,
+    # so it is split by directory across two jobs that run in parallel:
+    #   - system-tests        (this job): device_batch on ops + cross_core
+    #   - system-tests-direct (sibling)  : device_batch on the REST + all the
+    #                                      direct-device (mechanism B) + DFX steps
+    # The two shards are balanced so the critical path ≈ the heavier of the two,
+    # not their sum. Coverage is preserved: shard-1 dirs ∪ shard-2 (rest) = the
+    # original batched scope, with no overlap (shard 2 --ignore's ops/cross_core).
+    # Both jobs do their own (ccache-shared) build; keep them in sync on setup and
+    # on the directory partition (a new heavy op dir may need re-balancing).
+    #
     # No container: compile + golden run card-free on this CPU host, and each
     # case's device run borrows an NPU from the host-level `task-submit --device
     # auto` queue (mechanism A; --execute-via-task-submit). The job therefore
@@ -257,7 +270,7 @@ jobs:
           checkout-path: st-checkout
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
 
-      - name: Test system tests
+      - name: Test system tests (batched shard 1 — ops + cross_core)
         timeout-minutes: 30
         # Mechanism A: compile + golden run card-free in the precompile pool;
         # each case's device run borrows an NPU via `task-submit --device auto`
@@ -265,11 +278,13 @@ jobs:
         # card. cache_dir auto-lands under the repo's build_output (host-visible
         # to the task-submit child), cleaned at session end.
         #
-        # tests/st/codegen is device-free and runs in the separate CPU
-        # codegen-tests job (--codegen-only). test_torch_codegen_paged_attention
-        # is passed explicitly so it still runs here despite the tests/st/codegen
-        # ignore: its numeric golden compare is unstable on a CPU torch/BLAS
-        # build, so it needs this environment.
+        # SHARD 1 = the heavy batched dirs only: runtime/ops + runtime/cross_core
+        # (~68% of the device_batch load). The remaining batched dirs run in the
+        # `system-tests-direct` job's own batched step. Selecting by directory (not
+        # by --ignore of everything else) keeps this list short and explicit; the
+        # complementary shard 2 --ignore's these two dirs so nothing double-runs.
+        # Neither dir contains distributed/codegen/dump_tag, so no --ignore is
+        # needed here.
         run: |
           source activate.sh
           # TEST MODE: --task-submit-device pins EVERY device run (batched + the
@@ -278,23 +293,108 @@ jobs:
           # --task-submit-device, use --device auto (borrow any free card).
           # DEVICE_ID must be non-empty, else task-submit would auto-borrow a
           # host card this runner does not own (halMemCtl EACCES).
-          echo "[device] DEVICE_ID=$DEVICE_ID DEVICE_ID=$DEVICE_ID"
+          echo "[device] DEVICE_ID=$DEVICE_ID"
           test -n "$DEVICE_ID" || { echo "DEVICE_ID is empty in the runner env"; exit 1; }
-          # Category A (`-m device_batch`, auto-applied to tests using
-          # test_runner.run): compile + golden card-free, device run BATCHED via
-          # task-submit. Everything else (`-m 'not device_batch'` — direct @pl.jit
-          # / config=test_config) runs in the in-process step below. The split is
-          # by fixture usage (conftest pytest_itemcollected), so NEW tests
-          # self-classify — no ci.yml edit, no per-file lists.
-          #
-          # Excluded from BOTH generic steps (run elsewhere): tests/st/distributed
-          # (own multi-card job), tests/st/codegen (own CPU --codegen-only job),
-          # and the DFX tests below (own flagged steps: dump-args / swimlane).
-          # test_dump_tag uses test_runner (would be batched here) so it is
-          # --ignore'd; swimlane is direct-device and --ignore'd from the B step.
+          # `-m device_batch` (auto-applied to tests using test_runner.run):
+          # compile + golden card-free, device run BATCHED via task-submit. The
+          # `not device_batch` (direct @pl.jit / config=test_config) tests for
+          # ALL dirs run in the `system-tests-direct` job — including the direct
+          # tests that live under ops/cross_core, which this marker excludes here.
+          python -m pytest tests/st/runtime/ops tests/st/runtime/cross_core \
+            -v -m device_batch \
+            --precompile-workers=32 --execute-via-task-submit --execute-batch-size=64 \
+            --task-queue-timeout=1800 --task-max-time=600 --task-submit-device="$DEVICE_ID" \
+            --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }}
+
+      - name: Kill orphaned task-submit tasks
+        if: always()
+        uses: ./.github/actions/kill-orphaned-tasks
+        with:
+          checkout-path: st-checkout
+
+  system-tests-direct:
+    # The complement of `system-tests`, sized to balance it:
+    #   1. Batched shard 2 (mechanism A): device_batch on the LIGHT dirs — all of
+    #      tests/st EXCEPT ops + cross_core (which are shard 1 in `system-tests`),
+    #      distributed, codegen, and dump_tag.
+    #   2. Direct-device (mechanism B): `-m 'not device_batch'` over ALL of
+    #      tests/st (the in-process @pl.jit / config=test_config tests, including
+    #      the direct tests under ops/cross_core that shard 1 skips).
+    #   3. DFX steps: paged-attention / multi-orch L2 / swimlane / dump-args.
+    # Shard 1's ~68% batched vs this job's ~32% batched + all direct + DFX makes
+    # the two jobs finish in about the same wall-clock. Setup is identical to
+    # `system-tests` (same composite action, same env) — keep the two in sync,
+    # including the shard partition (ops/cross_core here must match the dirs
+    # selected there). This job checks out under ./st-direct-checkout so it never
+    # collides with system-tests' ./st-checkout on the shared self-hosted host,
+    # and cleans up its own orphaned task-submit tasks.
+    needs: toolchain
+    # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
+    permissions:
+      contents: read
+    # TEST MODE: keep the device runner so DEVICE_ID exists and pin task-submit
+    # to that card. FLIP TO PROD: change this to
+    # `[self-hosted, linux, arm64, cpu]` and drop --task-submit-device / the
+    # explicit --device below so cases borrow any free card via `--device auto`.
+    runs-on: [self-hosted, linux, arm64, npu]
+    defaults:
+      run:
+        working-directory: st-direct-checkout
+    env:
+      ASCEND_HOME_PATH: /usr/local/Ascend/cann-9.0.0
+      PTOAS_ROOT: ${{ github.workspace }}/st-direct-checkout/ptoas-bin
+      PTO_ISA_ROOT: ${{ github.workspace }}/st-direct-checkout/pto-isa
+      PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
+      PTOAS_SHA256: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
+      CMAKE_BUILD_PARALLEL_LEVEL: 16
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CCACHE_DIR: /home/ci-runner/hw-native-sys-pypto/ci-cache/ccache
+      CCACHE_MAXSIZE: 30G
+      # Shared with the container codegen-tests job (root) via the same ci-cache
+      # dir; 000 keeps cache files mutually writable across root and ci-runner.
+      # CCACHE_NAMESPACE is set by the "Scope ccache to pto-isa version" step.
+      CCACHE_UMASK: '000'
+      # Per-job pip dir: pip has no shared-umask knob, so the root-owned
+      # codegen-tests pip mount can't be reused by this ci-runner host job.
+      PIP_CACHE_DIR: /home/ci-runner/hw-native-sys-pypto/ci-cache/pip-st-direct
+    steps:
+      - name: Fetch composite action definitions
+        # Local `uses: ./.github/actions/...` resolves against $GITHUB_WORKSPACE,
+        # but this job checks the repo out into ./st-direct-checkout — sparse-fetch
+        # just the action defs at the workspace root first (clean: false leaves
+        # sibling subdir checkouts on this persistent runner untouched).
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/actions
+          clean: false
+          # Bootstrap only fetches the public .github/actions tree; it doesn't
+          # need the token persisted into .git/config afterward (zizmor artipacked).
+          persist-credentials: false
+
+      - name: Setup NPU device job
+        uses: ./.github/actions/setup-npu-device-job
+        with:
+          checkout-path: st-direct-checkout
+          pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
+
+      - name: Test system tests (batched shard 2 — all but ops/cross_core)
+        timeout-minutes: 30
+        # Mechanism A, complement of system-tests' shard 1: device_batch on every
+        # dir EXCEPT ops + cross_core (run there), plus the standing exclusions —
+        # distributed (own multi-card job), codegen (own CPU --codegen-only job),
+        # and test_dump_tag (its own --dump-args DFX step below). The two shards'
+        # --ignore of each other's dirs is what prevents any batched test from
+        # running twice. Same precompile/task-submit flags as shard 1.
+        run: |
+          source activate.sh
+          echo "[device] DEVICE_ID=$DEVICE_ID"
+          test -n "$DEVICE_ID" || { echo "DEVICE_ID is empty in the runner env"; exit 1; }
           python -m pytest tests/st -v -m device_batch \
             --ignore=tests/st/distributed \
             --ignore=tests/st/codegen \
+            --ignore=tests/st/runtime/ops \
+            --ignore=tests/st/runtime/cross_core \
             --ignore=tests/st/runtime/framework_and_models/test_dump_tag.py \
             --precompile-workers=32 --execute-via-task-submit --execute-batch-size=64 \
             --task-queue-timeout=1800 --task-max-time=600 --task-submit-device="$DEVICE_ID" \
@@ -302,20 +402,22 @@ jobs:
 
       - name: Test direct-device (mechanism B — one card, in-process)
         timeout-minutes: 30
-        # Everything NOT batched above (`-m 'not device_batch'`): direct @pl.jit
-        # kernel calls / config=test_config (and no-fixture device tests), which
-        # execute the device synchronously in-process and cannot be batched. Wrap
-        # them whole in ONE task-submit card session and run in-process on the
-        # borrowed card (--device=$TASK_DEVICE, no --execute-via-task-submit): one
-        # device init for the step, pytest's native full capture on failure.
-        # Selection is by marker, so mixed files split per-test and new tests need
-        # no edit. swimlane is --ignore'd here — it runs in its own flagged step.
-        # (paged_attention has its own step below — passing it as an explicit path
-        # here collapses pytest's dir collection.)
+        # ALL `-m 'not device_batch'` tests across tests/st (both shards' dirs):
+        # direct @pl.jit kernel calls / config=test_config (and no-fixture device
+        # tests), which execute the device synchronously in-process and cannot be
+        # batched. Wrap them whole in ONE task-submit card session and run
+        # in-process on the borrowed card (--device=$TASK_DEVICE, no
+        # --execute-via-task-submit): one device init for the step, pytest's native
+        # full capture on failure. Selection is by marker, so mixed files split
+        # per-test and new tests need no edit. swimlane is --ignore'd here — it runs
+        # in its own flagged step. (paged_attention has its own step below — passing
+        # it as an explicit path here collapses pytest's dir collection.)
         run: |
           source activate.sh
+          echo "[device] DEVICE_ID=$DEVICE_ID"
+          test -n "$DEVICE_ID" || { echo "DEVICE_ID is empty in the runner env"; exit 1; }
           task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 1800 \
-            --run "cd $GITHUB_WORKSPACE/st-checkout && source activate.sh && python -m pytest \
+            --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest \
               tests/st -v -m 'not device_batch' \
               --ignore=tests/st/distributed \
               --ignore=tests/st/codegen \
@@ -331,7 +433,7 @@ jobs:
         run: |
           source activate.sh
           task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 600 \
-            --run "cd $GITHUB_WORKSPACE/st-checkout && source activate.sh && python -m pytest \
+            --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest \
               tests/st/codegen/torch/test_torch_codegen_paged_attention.py \
               -v --device=\$TASK_DEVICE --platform=a2a3 \
               --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }}"
@@ -345,25 +447,25 @@ jobs:
         run: |
           source activate.sh
           task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 600 \
-            --run "cd $GITHUB_WORKSPACE/st-checkout && source activate.sh && python -m pytest tests/st/distributed/test_l2_multi_orch.py -v --device=\$TASK_DEVICE --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }}"
+            --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest tests/st/distributed/test_l2_multi_orch.py -v --device=\$TASK_DEVICE --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }}"
 
       - name: Test swimlane output
         run: |
           source activate.sh
           task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 600 \
-            --run "cd $GITHUB_WORKSPACE/st-checkout && source activate.sh && python -m pytest tests/st/runtime/framework_and_models/test_perf_swimlane.py -v --device=\$TASK_DEVICE --platform=a2a3 --enable-l2-swimlane --forked --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }}"
+            --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest tests/st/runtime/framework_and_models/test_perf_swimlane.py -v --device=\$TASK_DEVICE --platform=a2a3 --enable-l2-swimlane --forked --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }}"
 
       - name: Test dump-args output
         run: |
           source activate.sh
           task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 600 \
-            --run "cd $GITHUB_WORKSPACE/st-checkout && source activate.sh && python -m pytest tests/st/runtime/framework_and_models/test_dump_tag.py -v --device=\$TASK_DEVICE --platform=a2a3 --dump-args --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }} --forked"
+            --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest tests/st/runtime/framework_and_models/test_dump_tag.py -v --device=\$TASK_DEVICE --platform=a2a3 --dump-args --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }} --forked"
 
       - name: Kill orphaned task-submit tasks
         if: always()
         uses: ./.github/actions/kill-orphaned-tasks
         with:
-          checkout-path: st-checkout
+          checkout-path: st-direct-checkout
 
   dist-system-tests:
     # No container: HCCL needs host-only env (HCCL_LOGIC_SUPERPOD_ID, plugin
