@@ -14,7 +14,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <map>
 #include <string>
 #include <vector>
 
@@ -68,10 +67,10 @@ struct PipelineAllocationMember {
 /**
  * @brief One normalized pipeline-buffering group before DSA solving.
  *
- * ``depth`` is the number of distinct source stages. ``effective_depth`` is
- * the capacity-gated number of physical residues; members in different
- * residues receive hard separations, while same-residue chronological reuse
- * is represented by a sparse cost overlay in the standalone document.
+ * ``depth`` is the number of distinct source stages. The strict DSA input sets
+ * ``effective_depth == depth`` and gives every stage its own residue. If that
+ * intent does not fit, the adapter explicitly builds a research relaxation;
+ * this base analysis never sheds pipeline depth in advance.
  */
 struct PipelineAllocationGroup {
   MemorySpace memory_space;
@@ -93,11 +92,10 @@ struct PipelineAllocationGroup {
  * honors: (1) pipeline double-buffer clones (same group, different stage) — so
  * stages ping-pong instead of serializing; (2) the Ascend910B load+tpop_from_aic
  * in-place hazard (backend-gated); (3) op-semantic forbid-alias (e.g. tile.sel's
- * mask/tmp must not share the output's buffer). Pipeline separation is reduced
- * to the backend-capacity-gated stage residue count computed by the shared
- * analysis; the standalone solver still enforces the resulting pairs as hard
- * constraints. ``pipeline_groups`` retains the normalized depth/stage/residue
- * relation used to derive those pairs and sparse reuse costs.
+ * mask/tmp must not share the output's buffer). Pipeline intent is exported at
+ * its full requested depth. ``pipeline_groups`` retains the normalized
+ * depth/stage/residue relation used to derive those pairs and any later,
+ * explicitly requested soft relaxation.
  */
 struct AllocationPlan {
   std::vector<LifetimeInterval> intervals;
@@ -113,12 +111,9 @@ struct AllocationPlan {
  * a DsaProblem without duplicating them.
  *
  * @param func The function to analyze (needed for the backend-gated hazard guard).
- * @param reserved_end_by_space Leading reserved extent per memory space. The
- *        shared packer's whole-space dry run uses it when shedding pipeline depth.
  * @return Intervals (one per allocation) + all separations; empty if no tiles.
  */
-[[nodiscard]] AllocationPlan ComputeAllocationPlan(
-    const FunctionPtr& func, const std::map<MemorySpace, uint64_t>& reserved_end_by_space = {});
+[[nodiscard]] AllocationPlan ComputeAllocationPlan(const FunctionPtr& func);
 
 }  // namespace ir
 }  // namespace pypto

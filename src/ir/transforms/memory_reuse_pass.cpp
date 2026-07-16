@@ -3284,8 +3284,7 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
 // exact per-allocation intervals + pipeline-clone separations this pass computes,
 // so both plan from identical liveness. ComputeLifetimes has internal linkage but
 // is visible in this TU; PipelineMembershipsConflict comes from utils/attrs.h.
-AllocationPlan ComputeAllocationPlan(const FunctionPtr& func,
-                                     const std::map<MemorySpace, uint64_t>& reserved_end_by_space) {
+AllocationPlan ComputeAllocationPlan(const FunctionPtr& func) {
   auto analysis = ComputeLifetimes(func->body_);
   const std::set<const Var*> pinned_bases =
       CollectPinnedAllocBases(func->body_, func->span_, "DSA");
@@ -3328,9 +3327,6 @@ AllocationPlan ComputeAllocationPlan(const FunctionPtr& func,
     }
   }
 
-  // Reuse the production packer's exact, reserved-aware whole-space shed.
-  // This is a dry run: only its achieved per-group residue counts are kept;
-  // opportunistic MemRef coalescing remains the standalone solver's job.
   HazardInputs hazard;
   if (NeedsLoadTpopHazardGuard(func)) {
     HazardInputCollector collector;
@@ -3340,17 +3336,10 @@ AllocationPlan ComputeAllocationPlan(const FunctionPtr& func,
   ForbidAliasCollector forbid_collector(analysis.var_sharing_groups);
   forbid_collector.VisitStmt(func->body_);
   const ForbidAliasMap forbid_alias = forbid_collector.Take();
-  std::map<std::pair<MemorySpace, int32_t>, int32_t> achieved_pipeline_depths;
-  static_cast<void>(IdentifyReuseOpportunities(
-      intervals, hazard, forbid_alias, analysis.phi_family_ids, analysis.var_sharing_groups,
-      analysis.var_liveness, analysis.pipeline_membership, analysis.pipeline_load_tiles,
-      reserved_end_by_space, pinned_bases, func, nullptr, &achieved_pipeline_depths));
-
-  // (1) Pipeline double-buffer separations. Within a pipeline group, keep
-  // clones in distinct residues modulo the production MemoryReuse packer's
-  // achieved whole-space depth. Its dry run accounts for reservations,
-  // alignment, co-resident tiles, and other groups before DSA constraints are
-  // materialized. Same-space only.
+  // (1) Pipeline double-buffer separations. Export the full requested pipeline
+  // intent first: every distinct source stage gets its own residue and remains
+  // hard-separated from every other stage in the group. Capacity pressure is
+  // handled by an explicit second solve that relaxes only these typed edges.
   const auto& pm = analysis.pipeline_membership;
   {
     using GroupKey = std::pair<MemorySpace, int32_t>;
@@ -3374,10 +3363,6 @@ AllocationPlan ComputeAllocationPlan(const FunctionPtr& func,
           << "Pipeline group has too many distinct stages for DSA export";
       const int32_t depth = static_cast<int32_t>(members_by_stage.size());
       const uint64_t slot = group_slot[key];
-      const auto achieved = achieved_pipeline_depths.find(key);
-      const int32_t fg = achieved == achieved_pipeline_depths.end()
-                             ? depth
-                             : std::max<int32_t>(1, std::min<int32_t>(depth, achieved->second));
 
       std::map<int32_t, std::vector<size_t>> members_by_residue;
       PipelineAllocationGroup exported_group;
@@ -3385,10 +3370,10 @@ AllocationPlan ComputeAllocationPlan(const FunctionPtr& func,
       exported_group.group = key.second;
       exported_group.slot_size = slot;
       exported_group.depth = static_cast<uint32_t>(depth);
-      exported_group.effective_depth = static_cast<uint32_t>(fg);
+      exported_group.effective_depth = static_cast<uint32_t>(depth);
       int32_t ord = 0;
       for (const auto& [stage, members] : members_by_stage) {
-        const int32_t residue = ord++ % fg;
+        const int32_t residue = ord++;
         auto& bucket = members_by_residue[residue];
         bucket.insert(bucket.end(), members.begin(), members.end());
         for (size_t index : members) {

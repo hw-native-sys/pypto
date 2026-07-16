@@ -38,7 +38,7 @@ loop-carried values, and in-place operations retain their mandatory identities.
 | `MemoryPlanner.PTOAS` | None | This pass is skipped; ptoas `PlanMemory` owns placement | Deferred to ptoas |
 
 DSA support is an optional CMake dependency. Build and consume an installed
-`dsa-solver` 0.8 package as follows:
+`dsa-solver` 0.9 package as follows:
 
 ```bash
 cmake -S /path/to/dsa-solver -B /path/to/dsa-solver/build \
@@ -239,7 +239,10 @@ Pass AllocateMemoryAddr();
 - `memref_collectors::CollectMemRefsWithSpace` collects unique MemRefs and their memory spaces
 - `AllocateMemoryAddresses` assigns sequential aligned addresses per memory space using a `MemoryAllocatorPolicy`
 - `dsa_adapter::BuildStructuredProblem` exports the IR-free schema-v1 problem
-- `dsa_adapter::SolveWithFirstFit` capability-matches, solves, and independently validates
+- `dsa_adapter::Solve` capability-matches a selected standalone solver and independently validates
+- the DSA path first enforces full requested pipeline depth; if no fitting
+  placement is found, it explicitly relaxes only `pipeline_stage` separations,
+  minimizes the resulting reuse costs, and emits `PH-DSA-001`
 - `dsa_adapter::BuildMemRefReplacements` performs view-aware writeback
 - `MemRefUpdateMutator` updates both variable types and `tile.alloc` statement arguments in a single traversal
 
@@ -263,7 +266,8 @@ passes.def("allocate_memory_addr", &pass::AllocateMemoryAddr,
 - Tests default policy behavior without a backend configured
 - Tests the capacity diagnostic attributes reserved cross-core pipe bytes (see below)
 - Tests DSA read-before-write reuse, reserved ranges, view-offset writeback, and deterministic export
-- Tests alias-class, typed separation, pipeline-group/residue, and sparse reuse-cost export
+- Tests alias-class, typed separation, strict pipeline intent, explicit
+  reuse-cost fallback, and its performance warning
 - Replays the #1908 fragmentation shape through exporter, standalone solver, validator, and writeback
 
 ## Allocation Policy

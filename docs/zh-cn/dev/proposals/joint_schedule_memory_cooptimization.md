@@ -2,7 +2,8 @@
 
 ## 状态
 
-研究方向。本文记录 DSA adapter 暴露出的优化边界；它不是当前 planner 的实现契约。
+暂缓的研究方向。当前工作保持现有拓扑序固定，优先研究 placement 引入的同步与
+pipeline 串行化。
 
 ## 动机
 
@@ -104,13 +105,16 @@ pipeline 构造或 cross-core decomposition 保留为候选或 metadata，PTOAS 
 ## 推荐研究阶段
 
 1. 保留固定调度 DSA，作为可复现 baseline。
-2. 导出调度前 dependency DAG 和足够 metadata，以便重放 `CanonicalizeIOOrder` 候选，但
+2. 先用 PTOAS 输出与 device latency 评估 strict-then-soft pipeline intent policy 和
+   reuse-cost model。
+3. 只有这些固定调度模型具备预测力后，才导出调度前 dependency DAG 和足够 metadata，
+   以便重放 `CanonicalizeIOOrder` 候选，但
    暂不改变 solver 行为。
-3. 为 `pypto-structured-search` 增加有界 schedule move：ready-node swap、load/store
+4. 为 `pypto-structured-search` 增加有界 schedule move：ready-node swap、load/store
    motion、pipeline-depth change 和 placement repair。
-4. 每次 move 后重新计算生命周期，并独立验证 schedule 与 placement。
-5. 将预测的 peak、同步和 latency 与 PTOAS 输出及 device trace 比较。
-6. 最后再决定 production heuristic 应位于 PyPTO、PTOAS，还是由二者分担。
+5. 每次 move 后重新计算生命周期，并独立验证 schedule 与 placement。
+6. 将预测的 peak、同步和 latency 与 PTOAS 输出及 device trace 比较。
+7. 最后再决定 production heuristic 应位于 PyPTO、PTOAS，还是由二者分担。
 
 可能的 production 划分是分层的：PyPTO 选择高层调度结构，PTOAS 细化低层
 instruction/event scheduling，每个 memory planner 在自己的抽象层消费调度。单体联合

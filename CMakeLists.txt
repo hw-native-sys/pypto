@@ -79,7 +79,7 @@ include(${CMAKE_SOURCE_DIR}/cmake/msgpack.cmake)
 
 option(PYPTO_ENABLE_DSA_SOLVER "Enable the standalone dsa-solver memory planner" OFF)
 if(PYPTO_ENABLE_DSA_SOLVER)
-    find_package(dsa-solver 0.8 CONFIG REQUIRED)
+    find_package(dsa-solver 0.9 CONFIG REQUIRED)
 endif()
 
 # PyPTO core sources
