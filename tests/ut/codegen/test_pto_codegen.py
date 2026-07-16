@@ -2406,6 +2406,27 @@ class TestColumnVectorCodegen:
         assert "strides = [%c128_index, %c1_index]" in a_view
         assert "layout = #pto.layout<nd>" in a_view
 
+    def test_rank4_derived_stride_constants_are_declared(self):
+        """Derived rank-4 strides are declared before make_tensor_view uses them."""
+
+        @pl.program
+        class Rank4Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[2, 8, 16, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[2, 8, 16, 128], pl.FP32]],
+            ) -> pl.Tensor[[2, 8, 16, 128], pl.FP32]:
+                t = pl.load(a, [0, 0, 0, 0], [2, 8, 16, 128])
+                return pl.store(t, [0, 0, 0, 0], out)
+
+        mlir_code = _generate_default_mlir(Rank4Program)
+        lines = _get_mlir_lines(mlir_code)
+        a_view = _single_line(lines, "pto.make_tensor_view %arg0")
+        assert "strides = [%c16384_index, %c2048_index, %c128_index, %c1_index]" in a_view
+        assert "%c16384_index = arith.constant 16384 : index" in mlir_code, mlir_code
+        assert "%c2048_index = arith.constant 2048 : index" in mlir_code, mlir_code
+
     def test_row_vector_stays_nd(self):
         """[1, N] row-vector tensor stays ND (only [M, 1] gets forced DN)."""
 

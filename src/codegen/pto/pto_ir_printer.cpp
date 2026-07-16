@@ -102,6 +102,26 @@ struct PrintedOperand {
   std::string type;
 };
 
+struct ResolvedLogicalTensorView {
+  TensorLayout layout;
+  std::vector<ExprPtr> strides;
+};
+
+ResolvedLogicalTensorView ResolveLogicalTensorView(const TensorType& tensor) {
+  const auto tensor_view = tensor.tensor_view_.value_or(ir::TensorView{});
+  TensorLayout layout = tensor_view.layout;
+  if (auto last = As<ConstInt>(tensor.shape_.back());
+      tensor.shape_.size() >= 2 && last && last->value_ == 1) {
+    layout = TensorLayout::DN;
+  }
+
+  std::vector<ExprPtr> strides = tensor_view.stride;
+  if (strides.empty()) {
+    strides = ir::tensor_view_semantics::BuildLogicalStridesFromLayout(tensor.shape_, layout);
+  }
+  return {layout, std::move(strides)};
+}
+
 uint64_t FloatBits(double value) {
   uint64_t bits;
   static_assert(sizeof(bits) == sizeof(value));
@@ -332,9 +352,8 @@ class FunctionPrinter final {
   void CollectTensorConstants(const TensorType& tensor) {
     INTERNAL_CHECK(!tensor.shape_.empty()) << "PTO tensor views require rank >= 1";
     for (const auto& dim : tensor.shape_) CollectExprConstants(dim);
-    if (tensor.tensor_view_) {
-      for (const auto& stride : tensor.tensor_view_->stride) CollectExprConstants(stride);
-    }
+    const auto tensor_view = ResolveLogicalTensorView(tensor);
+    for (const auto& stride : tensor_view.strides) CollectExprConstants(stride);
     constants_.emplace(ConstantKey{1, DataType::INDEX.Code()}, DataType::INDEX);
   }
 
@@ -522,30 +541,21 @@ class FunctionPrinter final {
     INTERNAL_CHECK_SPAN(tensor && !tensor->shape_.empty(), tensor_var->span_)
         << "PTO tensor view result must have rank >= 1 TensorType";
 
-    const auto tensor_view = tensor->tensor_view_.value_or(ir::TensorView{});
-    TensorLayout layout = tensor_view.layout;
-    if (auto last = As<ConstInt>(tensor->shape_.back());
-        tensor->shape_.size() >= 2 && last && last->value_ == 1) {
-      layout = TensorLayout::DN;
-    }
-    CHECK_SPAN(layout != TensorLayout::NZ, tensor_var->span_)
+    const auto tensor_view = ResolveLogicalTensorView(*tensor);
+    CHECK_SPAN(tensor_view.layout != TensorLayout::NZ, tensor_var->span_)
         << "PTO logical tensor views support only ND or DN layout";
 
-    std::vector<ExprPtr> strides = tensor_view.stride;
-    if (strides.empty()) {
-      strides = ir::tensor_view_semantics::BuildLogicalStridesFromLayout(tensor->shape_, layout);
-    }
-    INTERNAL_CHECK_SPAN(strides.size() == tensor->shape_.size(), tensor_var->span_)
+    INTERNAL_CHECK_SPAN(tensor_view.strides.size() == tensor->shape_.size(), tensor_var->span_)
         << "PTO tensor view stride rank must match shape rank";
 
     std::vector<std::string> shape_operands;
     std::vector<std::string> stride_operands;
     shape_operands.reserve(tensor->shape_.size());
-    stride_operands.reserve(strides.size());
+    stride_operands.reserve(tensor_view.strides.size());
     for (const auto& dim : tensor->shape_) {
       shape_operands.push_back(IndexOperand(dim, tensor_var->span_, "Tensor shape"));
     }
-    for (const auto& stride : strides) {
+    for (const auto& stride : tensor_view.strides) {
       stride_operands.push_back(IndexOperand(stride, tensor_var->span_, "Tensor stride"));
     }
 
@@ -561,7 +571,7 @@ class FunctionPrinter final {
       if (i > 0) stream_ << ", ";
       stream_ << stride_operands[i];
     }
-    stream_ << "] {layout = #pto.layout<" << (layout == TensorLayout::DN ? "dn" : "nd")
+    stream_ << "] {layout = #pto.layout<" << (tensor_view.layout == TensorLayout::DN ? "dn" : "nd")
             << ">}: " << TensorViewTypeString(*tensor) << "\n";
   }
 
