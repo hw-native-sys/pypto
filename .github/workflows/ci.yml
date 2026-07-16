@@ -195,18 +195,23 @@ jobs:
           --ignore=tests/st/codegen/torch/test_torch_codegen_paged_attention.py
 
   system-tests:
-    # Batched shard 1 (mechanism A): the HEAVY device_batch directories
-    # (runtime/ops + runtime/cross_core, ~68% of the batched load). The batched
-    # `Test system tests` step used to run ~7-15 min and dominated the whole job,
-    # so it is split by directory across two jobs that run in parallel:
-    #   - system-tests        (this job): device_batch on ops + cross_core
-    #   - system-tests-direct (sibling)  : device_batch on the REST + all the
-    #                                      direct-device (mechanism B) + DFX steps
-    # The two shards are balanced so the critical path ≈ the heavier of the two,
-    # not their sum. Coverage is preserved: shard-1 dirs ∪ shard-2 (rest) = the
-    # original batched scope, with no overlap (shard 2 --ignore's ops/cross_core).
-    # Both jobs do their own (ccache-shared) build; keep them in sync on setup and
-    # on the directory partition (a new heavy op dir may need re-balancing).
+    # Batched shard A (mechanism A): the HEAVY device_batch directories — all of
+    # tests/st EXCEPT runtime/ops + runtime/cross_core. The batched `Test system
+    # tests` step used to run ~7-15 min and dominated the whole job, so it is
+    # split by directory across two jobs that run in parallel:
+    #   - system-tests        (this job): device_batch on the heavy dirs (the
+    #                                      model tests in framework_and_models +
+    #                                      scheduling + control_flow dominate).
+    #   - system-tests-direct (sibling)  : device_batch on ops + cross_core (cheap
+    #                                      compiles) + all the direct-device
+    #                                      (mechanism B) + DFX steps.
+    # Measured on run 29468368196: this heavy batched shard ≈ 404s vs the light
+    # ops/cross_core shard ≈ 80s — ops/cross_core have MANY tests but cheap
+    # compiles, so the direct + DFX tail (~268s) is paired with them, not here.
+    # Coverage is preserved: heavy dirs ∪ ops/cross_core = the original batched
+    # scope, with no overlap (this shard --ignore's ops/cross_core). Both jobs do
+    # their own (ccache-shared) build; keep them in sync on setup and on the
+    # directory partition (re-check the balance if a heavy new dir is added).
     #
     # No container: compile + golden run card-free on this CPU host, and each
     # case's device run borrows an NPU from the host-level `task-submit --device
@@ -270,7 +275,7 @@ jobs:
           checkout-path: st-checkout
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
 
-      - name: Test system tests (batched shard 1 — ops + cross_core)
+      - name: Test system tests (batched shard A — heavy dirs, all but ops/cross_core)
         timeout-minutes: 30
         # Mechanism A: compile + golden run card-free in the precompile pool;
         # each case's device run borrows an NPU via `task-submit --device auto`
@@ -278,13 +283,12 @@ jobs:
         # card. cache_dir auto-lands under the repo's build_output (host-visible
         # to the task-submit child), cleaned at session end.
         #
-        # SHARD 1 = the heavy batched dirs only: runtime/ops + runtime/cross_core
-        # (~68% of the device_batch load). The remaining batched dirs run in the
-        # `system-tests-direct` job's own batched step. Selecting by directory (not
-        # by --ignore of everything else) keeps this list short and explicit; the
-        # complementary shard 2 --ignore's these two dirs so nothing double-runs.
-        # Neither dir contains distributed/codegen/dump_tag, so no --ignore is
-        # needed here.
+        # SHARD A = the HEAVY batched dirs: device_batch on every dir EXCEPT
+        # ops + cross_core (which are the cheap-compile shard, run in
+        # `system-tests-direct`), plus the standing exclusions — distributed
+        # (own multi-card job), codegen (own CPU --codegen-only job), and
+        # test_dump_tag (its own --dump-args DFX step in the sibling job). The two
+        # shards --ignore each other's dirs so no batched test runs twice.
         run: |
           source activate.sh
           # TEST MODE: --task-submit-device pins EVERY device run (batched + the
@@ -298,10 +302,13 @@ jobs:
           # `-m device_batch` (auto-applied to tests using test_runner.run):
           # compile + golden card-free, device run BATCHED via task-submit. The
           # `not device_batch` (direct @pl.jit / config=test_config) tests for
-          # ALL dirs run in the `system-tests-direct` job — including the direct
-          # tests that live under ops/cross_core, which this marker excludes here.
-          python -m pytest tests/st/runtime/ops tests/st/runtime/cross_core \
-            -v -m device_batch \
+          # ALL dirs run in the `system-tests-direct` job.
+          python -m pytest tests/st -v -m device_batch \
+            --ignore=tests/st/distributed \
+            --ignore=tests/st/codegen \
+            --ignore=tests/st/runtime/ops \
+            --ignore=tests/st/runtime/cross_core \
+            --ignore=tests/st/runtime/framework_and_models/test_dump_tag.py \
             --precompile-workers=32 --execute-via-task-submit --execute-batch-size=64 \
             --task-queue-timeout=1800 --task-max-time=600 --task-submit-device="$DEVICE_ID" \
             --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }}
@@ -314,18 +321,20 @@ jobs:
 
   system-tests-direct:
     # The complement of `system-tests`, sized to balance it:
-    #   1. Batched shard 2 (mechanism A): device_batch on the LIGHT dirs — all of
-    #      tests/st EXCEPT ops + cross_core (which are shard 1 in `system-tests`),
-    #      distributed, codegen, and dump_tag.
+    #   1. Batched shard B (mechanism A): device_batch on the LIGHT dirs — only
+    #      runtime/ops + runtime/cross_core. These have many tests but cheap
+    #      compiles (~80s measured vs ~404s for the heavy dirs in `system-tests`),
+    #      so they are paired here with the direct + DFX tail.
     #   2. Direct-device (mechanism B): `-m 'not device_batch'` over ALL of
     #      tests/st (the in-process @pl.jit / config=test_config tests, including
-    #      the direct tests under ops/cross_core that shard 1 skips).
+    #      the direct tests under the heavy dirs that `system-tests` skips).
     #   3. DFX steps: paged-attention / multi-orch L2 / swimlane / dump-args.
-    # Shard 1's ~68% batched vs this job's ~32% batched + all direct + DFX makes
-    # the two jobs finish in about the same wall-clock. Setup is identical to
-    # `system-tests` (same composite action, same env) — keep the two in sync,
-    # including the shard partition (ops/cross_core here must match the dirs
-    # selected there). This job checks out under ./st-direct-checkout so it never
+    # Balance (run 29468368196): heavy batched ≈ 404s alone in `system-tests`;
+    # here ≈ 80s batched + ~168s direct + ~100s DFX ≈ 348s, so the two jobs finish
+    # within ~1 min of each other. Setup is identical to `system-tests` (same
+    # composite action, same env) — keep the two in sync, including the shard
+    # partition (ops/cross_core here must be exactly the dirs `system-tests`
+    # --ignore's). This job checks out under ./st-direct-checkout so it never
     # collides with system-tests' ./st-checkout on the shared self-hosted host,
     # and cleans up its own orphaned task-submit tasks.
     needs: toolchain
@@ -378,24 +387,21 @@ jobs:
           checkout-path: st-direct-checkout
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
 
-      - name: Test system tests (batched shard 2 — all but ops/cross_core)
+      - name: Test system tests (batched shard B — ops + cross_core, cheap compiles)
         timeout-minutes: 30
-        # Mechanism A, complement of system-tests' shard 1: device_batch on every
-        # dir EXCEPT ops + cross_core (run there), plus the standing exclusions —
-        # distributed (own multi-card job), codegen (own CPU --codegen-only job),
-        # and test_dump_tag (its own --dump-args DFX step below). The two shards'
-        # --ignore of each other's dirs is what prevents any batched test from
-        # running twice. Same precompile/task-submit flags as shard 1.
+        # Mechanism A, complement of system-tests' heavy shard: device_batch on
+        # ONLY runtime/ops + runtime/cross_core (the cheap-compile dirs, ~80s
+        # measured). The heavy dirs run in `system-tests`. Selecting by directory
+        # (not by --ignore of everything else) keeps this list short and explicit;
+        # `system-tests` --ignore's these two dirs so nothing double-runs. Neither
+        # dir contains distributed/codegen/dump_tag, so no --ignore is needed here.
+        # Same precompile/task-submit flags as the heavy shard.
         run: |
           source activate.sh
           echo "[device] DEVICE_ID=$DEVICE_ID"
           test -n "$DEVICE_ID" || { echo "DEVICE_ID is empty in the runner env"; exit 1; }
-          python -m pytest tests/st -v -m device_batch \
-            --ignore=tests/st/distributed \
-            --ignore=tests/st/codegen \
-            --ignore=tests/st/runtime/ops \
-            --ignore=tests/st/runtime/cross_core \
-            --ignore=tests/st/runtime/framework_and_models/test_dump_tag.py \
+          python -m pytest tests/st/runtime/ops tests/st/runtime/cross_core \
+            -v -m device_batch \
             --precompile-workers=32 --execute-via-task-submit --execute-batch-size=64 \
             --task-queue-timeout=1800 --task-max-time=600 --task-submit-device="$DEVICE_ID" \
             --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }}
