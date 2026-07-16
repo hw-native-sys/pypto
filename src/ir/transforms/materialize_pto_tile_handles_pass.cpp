@@ -24,6 +24,7 @@
 
 #include <any>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -37,7 +38,6 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
-#include "pypto/ir/memref.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/pto_target_lowering.h"
 #include "pypto/ir/scalar_expr.h"
@@ -76,6 +76,10 @@ bool CallTouchesTile(const CallPtr& call) {
   return false;
 }
 
+bool IsPTOIRPrinterSupportedParameter(const TypePtr& type) {
+  return AsTensorTypeLike(type) || IsA<ScalarType>(type);
+}
+
 std::vector<std::pair<std::string, std::any>> WithHandlePlanAttrs(
     const std::vector<std::pair<std::string, std::any>>& attrs, std::vector<VarPtr> input_handles,
     const std::optional<VarPtr>& output_handle) {
@@ -99,6 +103,7 @@ class HandleMaterializer final {
 
   FunctionPtr Run(const FunctionPtr& func) {
     if (!func || !IsInCoreType(func->func_type_)) return func;
+    if (func->GetAttr<bool>(kAttrPTOTargetLoweringDeferred, false)) return func;
 
     class UnsupportedTileOpFinder final : public IRVisitor {
      public:
@@ -159,6 +164,11 @@ class HandleMaterializer final {
       bool found = false;
     } finder(planner_);
     for (const auto& param : func->params_) {
+      if (!param) {
+        finder.found = true;
+        continue;
+      }
+      if (!IsPTOIRPrinterSupportedParameter(param->GetType())) finder.found = true;
       if (IsA<ArrayType>(param->GetType())) finder.found = true;
       if (auto tensor = AsTensorTypeLike(param->GetType())) {
         for (const auto& dim : tensor->shape_) {
@@ -652,7 +662,7 @@ class HandleMaterializer final {
     auto alloc_call = std::make_shared<const Call>(OpRegistry::GetInstance().GetOp("pto.alloc_tile"),
                                                    std::move(alloc_args), buffer_type, span);
     rewritten.push_back(std::make_shared<const AssignStmt>(handle, alloc_call, span));
-    CHECK_SPAN(allocated_handles_.insert(handle.get()).second, span)
+    INTERNAL_CHECK_SPAN(allocated_handles_.insert(handle.get()).second, span)
         << "Internal error: duplicate PTO handle allocation";
     return handle;
   }

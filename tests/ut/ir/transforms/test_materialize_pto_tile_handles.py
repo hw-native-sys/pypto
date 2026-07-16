@@ -289,6 +289,33 @@ def test_step4_eliminates_logical_tiles_and_matches_legacy_codegen(
     assert _normalized_codegen_contract(target_mlir) == _normalized_codegen_contract(legacy_mlir)
 
 
+def test_codegen_dispatches_target_and_legacy_functions_independently() -> None:
+    """A deferred/legacy function must not force target functions back to inference."""
+
+    target = _function(_lower(_make_straight_line_program(), passes.MemoryPlanner.PYPTO))
+
+    @pl.program
+    class LegacyProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def scalar_io(
+            self,
+            source: pl.Tensor[[1], pl.INT32],
+            output: pl.Out[pl.Tensor[[1], pl.INT32]],
+        ) -> pl.Tensor[[1], pl.INT32]:
+            value: pl.Scalar[pl.INT32] = pl.tensor.read(source, [0])
+            result: pl.Tensor[[1], pl.INT32] = pl.tensor.write(output, [0], value)
+            return result
+
+    legacy = _function(LegacyProgram)
+    mixed = ir.Program([target, legacy], "mixed_target_legacy", ir.Span.unknown())
+
+    mlir = codegen.PTOCodegen().generate(mixed, emit_tile_addr=True)
+    assert "func.func @main" in mlir
+    assert "func.func @scalar_io" in mlir
+    assert "pto.tadd" in mlir
+    assert "pto.make_tensor_view" in mlir
+
+
 def test_step4_target_ir_survives_binary_serialization() -> None:
     lowered = _lower(_make_straight_line_program(), passes.MemoryPlanner.PTOAS)
     restored = ir.deserialize(ir.serialize(lowered))
@@ -316,14 +343,21 @@ def test_step4_materializes_spmd_identity_as_explicit_target_parameters() -> Non
         "__pypto_spmd_subblock_idx",
     ]
     assert all(isinstance(param.type, ir.ScalarType) for param in func.params)
-    assert all(param.type.dtype == pl.INT32 for param in func.params)
+    assert all(
+        isinstance(param.type, ir.ScalarType) and param.type.dtype == pl.INT32 for param in func.params
+    )
     assert func.attrs["pto.uses_spmd_block_params"] is True
     assert func.attrs["pto.uses_subblock_param"] is True
 
     assignments = [stmt for stmt in _statements(lowered) if isinstance(stmt, ir.AssignStmt)]
     assert len(assignments) == 3
     assert all(isinstance(stmt.value, ir.Cast) for stmt in assignments)
-    assert all(stmt.value.type.dtype == pl.INDEX for stmt in assignments)
+    assert all(
+        isinstance(stmt.value, ir.Cast)
+        and isinstance(stmt.value.type, ir.ScalarType)
+        and stmt.value.type.dtype == pl.INDEX
+        for stmt in assignments
+    )
     assert all(not isinstance(stmt.value, ir.Call) for stmt in assignments)
     _verify_bufferized_property(lowered)
 

@@ -167,8 +167,8 @@ class PTOCallVerifier final : public IRVisitor {
     }
     const auto& spec = *spec_opt;
 
-    if (function_type_ == FunctionType::Orchestration) {
-      Error(call, "PTO target operation '" + op_name + "' cannot appear in an Orchestration function");
+    if (!IsInCoreType(function_type_)) {
+      Error(call, "PTO target operation '" + op_name + "' can appear only in an InCore function");
     }
     auto segments = spec.ResolveOperandSegments(call->args_.size());
     if (!segments.has_value()) {
@@ -366,9 +366,11 @@ class PTOHandlesMaterializedVerifier final : public PropertyVerifier {
 
   static void VerifyFunction(const FunctionPtr& function, std::vector<Diagnostic>& diagnostics) {
     std::unordered_set<const Var*> allocated;
+    std::vector<const Var*> allocated_order;
     std::unordered_set<const Var*> claimed;
     std::unordered_map<const Var*, VarPtr> logical_to_handle;
     std::unordered_set<const Var*> control_handles;
+    std::vector<const Var*> control_handle_order;
 
     if (function->HasAttr(kAttrPTOControlFlowHandles)) {
       const auto aliases =
@@ -379,7 +381,7 @@ class PTOHandlesMaterializedVerifier final : public PropertyVerifier {
           continue;
         }
         logical_to_handle[logical.get()] = handle;
-        control_handles.insert(handle.get());
+        if (control_handles.insert(handle.get()).second) control_handle_order.push_back(handle.get());
       }
     }
 
@@ -413,6 +415,8 @@ class PTOHandlesMaterializedVerifier final : public PropertyVerifier {
             }
             if (!allocated.insert(assign->var_.get()).second) {
               Error(diagnostics, assign->span_, "PTO handle is allocated more than once");
+            } else {
+              allocated_order.push_back(assign->var_.get());
             }
             available.insert(assign->var_.get());
             continue;
@@ -441,6 +445,8 @@ class PTOHandlesMaterializedVerifier final : public PropertyVerifier {
             }
             if (!allocated.insert(assign->var_.get()).second) {
               Error(diagnostics, assign->span_, "PTO handle is defined more than once");
+            } else {
+              allocated_order.push_back(assign->var_.get());
             }
             available.insert(assign->var_.get());
             continue;
@@ -488,14 +494,14 @@ class PTOHandlesMaterializedVerifier final : public PropertyVerifier {
     };
     verify_body(function->body_, {});
 
-    for (const auto* handle : allocated) {
+    for (const auto* handle : allocated_order) {
       if (claimed.count(handle) == 0 && control_handles.count(handle) == 0) {
         Error(diagnostics, function->span_,
               "Every PTO handle definition must be claimed by a Tile producer or control-flow result");
         break;
       }
     }
-    for (const auto* handle : control_handles) {
+    for (const auto* handle : control_handle_order) {
       if (allocated.count(handle) == 0) {
         Error(diagnostics, function->span_,
               "Control-flow PTO handle plan references a handle not defined in the function");
@@ -534,7 +540,7 @@ class PTOHandlesMaterializedVerifier final : public PropertyVerifier {
 
     std::vector<VarPtr> expected_inputs;
     for (const auto& arg : call->args_) {
-      if (!IsA<TileType>(arg->GetType())) continue;
+      if (!arg || !IsA<TileType>(arg->GetType())) continue;
       auto logical_var = AsVarLike(arg);
       if (!logical_var) {
         Error(diagnostics, call->span_, "Tile operands in the PTO handle plan must be flattened Vars");

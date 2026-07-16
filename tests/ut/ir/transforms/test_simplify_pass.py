@@ -495,6 +495,24 @@ class TestControlFlow:
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
 
+    def test_while_simplification_preserves_ssa_iter_arg_identity(self):
+        """Simplifying an SSA WhileStmt must keep uses on its rebuilt IterArg."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, n: pl.Scalar[pl.INDEX]):
+                i: pl.Scalar[pl.INDEX] = 0
+                while i < n + 0:
+                    i = i + 1
+
+        ssa = passes.convert_to_ssa()(Before)
+        after = passes.simplify()(ssa)
+
+        properties = passes.IRPropertySet()
+        properties.insert(passes.IRProperty.SSAForm)
+        assert passes.PropertyVerifierRegistry.verify(properties, after) == []
+
     def test_sequential_stmts(self):
         """Multiple statements should all be simplified."""
 

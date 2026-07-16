@@ -202,9 +202,12 @@ before buffer handles may cross function boundaries.
 
 ## Printer Boundary
 
-`PTOCodegen::Generate` recursively detects target PTO calls and delegates a
-fully lowered function/program to `PTOIRPrinter`. A function carrying
-`pto.target_lowering_deferred` remains wholly on the legacy logical-Tile path.
+`PTOCodegen::Generate` selects the printer independently for each function.
+A function containing destination-passing PTO calls is emitted by
+`PTOIRPrinter`; a function carrying `pto.target_lowering_deferred` remains
+wholly on the legacy logical-Tile path. A multi-function program may therefore
+contain both fully lowered and deferred functions without sending the deferred
+functions through the target printer.
 
 For target IR, `PTOIRPrinter` may perform formatting and local expansion only:
 

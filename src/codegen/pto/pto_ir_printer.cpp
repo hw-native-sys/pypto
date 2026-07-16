@@ -16,9 +16,11 @@
 #include <cstdint>
 #include <cstring>
 #include <iomanip>
+#include <ios>
 #include <limits>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <string>
@@ -165,6 +167,11 @@ class FunctionPrinter final {
       PrintFunction(function);
     }
     stream_ << "}\n";
+    return stream_.str();
+  }
+
+  std::string PrintSingleFunction(const FunctionPtr& function) {
+    PrintFunction(function);
     return stream_.str();
   }
 
@@ -1059,6 +1066,11 @@ PTOIRPrinter::PTOIRPrinter(const backend::Backend* backend) : backend_(backend) 
 
 std::string PTOIRPrinter::Generate(const ProgramPtr& program, bool emit_tile_addr) {
   return FunctionPrinter(backend_->GetHandler()->GetPtoTargetArch(), emit_tile_addr).PrintProgram(program);
+}
+
+std::string PTOIRPrinter::GenerateFunction(const ir::FunctionPtr& function, bool emit_tile_addr) {
+  return FunctionPrinter(backend_->GetHandler()->GetPtoTargetArch(), emit_tile_addr)
+      .PrintSingleFunction(function);
 }
 
 }  // namespace codegen

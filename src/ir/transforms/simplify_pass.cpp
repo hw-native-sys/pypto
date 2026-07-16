@@ -472,13 +472,36 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
   }
 
   StmtPtr VisitStmt_(const WhileStmtPtr& op) override {
+    // Rebuild iter_args before visiting the condition/body so every use is
+    // remapped to the same definition identity. This mirrors the ForStmt path
+    // and is required when simplifying an already-SSA WhileStmt: simplifying
+    // an iter_arg init may mint a replacement IterArg, and leaving condition
+    // uses on the old pointer produces an out-of-scope free variable.
+    bool iter_args_changed = false;
+    auto new_iter_args = RebuildVec(
+        op->iter_args_, [this](const auto& ia) { return MaybeRebuildIterArg(ia); }, &iter_args_changed);
+
     auto new_condition = SimplifyExpr(op->condition_);
+
+    // Keep body-local remaps scoped to the loop. The iter_arg remaps above are
+    // part of the loop definition and remain in the baseline while its body
+    // is visited.
+    auto baseline_remap = var_remap_;
     auto new_body = VisitScopedBody(op->body_);
-    bool changed = (new_condition.get() != op->condition_.get()) || (new_body.get() != op->body_.get());
+    var_remap_ = std::move(baseline_remap);
+
+    bool return_vars_changed = false;
+    auto new_return_vars = RebuildVec(
+        op->return_vars_, [this](const auto& var) { return MaybeRebuildVar(var); }, &return_vars_changed);
+
+    bool changed = (new_condition.get() != op->condition_.get()) || (new_body.get() != op->body_.get()) ||
+                   iter_args_changed || return_vars_changed;
     if (!changed) return op;
     auto result = MutableCopy(op);
     result->condition_ = new_condition;
+    result->iter_args_ = std::move(new_iter_args);
     result->body_ = new_body;
+    result->return_vars_ = std::move(new_return_vars);
     return result;
   }
 

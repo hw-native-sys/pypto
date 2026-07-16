@@ -97,7 +97,10 @@ def _run_codegen_after_default_pass_and_check(
     reset_for_testing()
     set_backend_type(backend_type)
     try:
-        transformed = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+        transformed = PassManager.get_strategy(
+            OptimizationStrategy.Default,
+            lower_to_pto_ir=False,
+        ).run_passes(program)
         code = torch_codegen(transformed, check_shapes=True)
     finally:
         reset_for_testing()

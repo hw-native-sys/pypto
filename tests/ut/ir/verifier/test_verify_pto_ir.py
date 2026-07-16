@@ -149,11 +149,20 @@ def test_destination_passing_op_cannot_return_value():
     assert any("must not return a value" in message for message in messages)
 
 
-def test_pto_target_op_is_rejected_in_orchestration_function():
+@pytest.mark.parametrize(
+    "function_type",
+    [
+        ir.FunctionType.Opaque,
+        ir.FunctionType.Orchestration,
+        ir.FunctionType.Group,
+        ir.FunctionType.Spmd,
+    ],
+)
+def test_pto_target_op_is_rejected_outside_incore_function(function_type: ir.FunctionType):
     _, alloc = _alloc("buf")
 
-    messages = _messages(_program([alloc], function_type=ir.FunctionType.Orchestration))
-    assert any("cannot appear in an Orchestration function" in message for message in messages)
+    messages = _messages(_program([alloc], function_type=function_type))
+    assert any("can appear only in an InCore function" in message for message in messages)
 
 
 if __name__ == "__main__":
