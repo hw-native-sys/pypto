@@ -63,7 +63,7 @@ bool IsReduceOnSplitAxis(const CallPtr& call, int split_dim) {
   if (IsOp(call, "tile.row_sum") || IsOp(call, "tile.row_max") || IsOp(call, "tile.row_min") ||
       IsOp(call, "tile.row_prod") || IsOp(call, "tile.row_argmax") || IsOp(call, "tile.row_argmin")) {
     std::shared_ptr<const TileType> input_tile;
-    if (!call->args_.empty()) {
+    if (!call->args_.empty() && call->args_[0]) {
       input_tile = std::dynamic_pointer_cast<const TileType>(call->args_[0]->GetType());
     }
     const int last_axis = input_tile ? static_cast<int>(input_tile->shape_.size()) - 1 : 1;

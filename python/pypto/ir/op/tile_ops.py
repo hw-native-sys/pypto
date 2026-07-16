@@ -2186,9 +2186,10 @@ def minimums(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Ca
 
 
 def row_max(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
-    """Row-wise max reduction of a tile (reduces along axis=1, maps to TROWMAX).
+    """Row-wise max reduction of a tile (reduces along the last axis, maps to TROWMAX).
 
-    Reduces each row to a single value, producing output shape [rows, 1].
+    Reduces the last axis with keepdim, producing output shape
+    ``input_shape[:-1] + [1]`` (e.g. ``[rows, 1]`` for a 2D ``[rows, cols]`` input).
 
     Args:
         tile: Input tile (TileType)
@@ -2203,9 +2204,10 @@ def row_max(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
 
 
 def row_sum(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
-    """Row-wise sum reduction of a tile (reduces along axis=1, maps to TROWSUM).
+    """Row-wise sum reduction of a tile (reduces along the last axis, maps to TROWSUM).
 
-    Reduces each row to a single value, producing output shape [rows, 1].
+    Reduces the last axis with keepdim, producing output shape
+    ``input_shape[:-1] + [1]`` (e.g. ``[rows, 1]`` for a 2D ``[rows, cols]`` input).
 
     Args:
         tile: Input tile (TileType)
@@ -2220,34 +2222,36 @@ def row_sum(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
 
 
 def row_min(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
-    """Row-wise min reduction (reduces along axis=1, maps to TROWMIN).
+    """Row-wise min reduction (reduces along the last axis, maps to TROWMIN).
 
-    Reduces each row to a single value, producing output shape [rows, 1].
+    Reduces the last axis with keepdim, producing output shape
+    ``input_shape[:-1] + [1]`` (e.g. ``[rows, 1]`` for a 2D ``[rows, cols]`` input).
 
     Args:
-        tile: Input tile (TileType [M, N])
+        tile: Input tile (TileType, e.g. [M, N])
         tmp_tile: Temporary tile (TileType)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
-        Call expression for row-wise min reduction (TileType [M, 1])
+        Call expression for row-wise min reduction (TileType, e.g. [M, 1])
     """
     actual_span = _get_span_or_capture(span)
     return _ir_core.create_op_call("tile.row_min", [tile, tmp_tile], {}, actual_span)
 
 
 def row_prod(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
-    """Row-wise product reduction (reduces along axis=1, maps to TROWPROD).
+    """Row-wise product reduction (reduces along the last axis, maps to TROWPROD).
 
-    Reduces each row to a single value, producing output shape [rows, 1].
+    Reduces the last axis with keepdim, producing output shape
+    ``input_shape[:-1] + [1]`` (e.g. ``[rows, 1]`` for a 2D ``[rows, cols]`` input).
 
     Args:
-        tile: Input tile (TileType [M, N])
+        tile: Input tile (TileType, e.g. [M, N])
         tmp_tile: Temporary tile (TileType)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
-        Call expression for row-wise product reduction (TileType [M, 1])
+        Call expression for row-wise product reduction (TileType, e.g. [M, 1])
     """
     actual_span = _get_span_or_capture(span)
     return _ir_core.create_op_call("tile.row_prod", [tile, tmp_tile], {}, actual_span)

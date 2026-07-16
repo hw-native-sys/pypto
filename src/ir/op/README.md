@@ -13,7 +13,7 @@ src/ir/op/
 └── tile_ops/                   # Tile operator implementations
     ├── memory.cpp               # Memory operations (get_block_idx, load, store)
     ├── elementwise.cpp          # Element-wise ops (Add, Mul, Div)
-    ├── reduction.cpp            # Reduction ops (Sum with keepdim)
+    ├── reduction.cpp            # Directional reductions (row_*/col_* families)
     └── unary.cpp                # Unary ops (Sqrt)
 ```
 
