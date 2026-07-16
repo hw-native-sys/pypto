@@ -371,6 +371,9 @@ class DynOrchValidShapeAddTestCase(PTOTestCase):
     def compute_expected(self, tensors, params=None):
         vr = int(tensors["vs"][0])
         vc = int(tensors["vs"][1])
+        # Only c[:vr, :vc] is written (valid_shapes-bounded store); outside that
+        # region is undefined-by-design -> mark NaN so validate_golden skips it.
+        tensors["c"][:] = float("nan")
         tensors["c"][:vr, :vc] = tensors["a"][:vr, :vc] + tensors["b"][:vr, :vc]
 
 

@@ -183,6 +183,9 @@ class ValidShapeAddTestCase(PTOTestCase):
     def compute_expected(self, tensors, params=None):
         vr = tensors["valid_shape"][0]
         vc = tensors["valid_shape"][1]
+        # Only c[:vr, :vc] is written (valid_shapes-bounded store); outside that
+        # region is undefined-by-design -> mark NaN so validate_golden skips it.
+        tensors["c"][:] = float("nan")
         tensors["c"][:vr, :vc] = tensors["a"][:vr, :vc] + tensors["b"][:vr, :vc]
 
 

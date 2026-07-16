@@ -699,6 +699,14 @@ def validate_golden(
 ) -> None:
     """Compare actual outputs against golden reference using ``torch.allclose``.
 
+    Positions where the golden holds ``NaN`` are treated as *don't-care* and are
+    excluded from the comparison. Tests use this to mark output regions that the
+    kernel leaves undefined by contract — e.g. the area outside a tile's
+    ``valid_shapes``, or an oversized scratch buffer's unused tail. (The runtime
+    no longer zero-fills pure-output buffers, so such regions hold pooled-allocator
+    garbage rather than 0.) A golden with no ``NaN`` compares every element, so this
+    is fully backward-compatible.
+
     Raises:
         AssertionError: If any output tensor does not match within tolerances.
     """
@@ -707,8 +715,11 @@ def validate_golden(
         expected = golden[name].cpu()
         logger.info(f"Comparing {name}: shape={actual.shape}, dtype={actual.dtype}")
 
-        if not torch.allclose(actual, expected, rtol=rtol, atol=atol):
-            close_mask = torch.isclose(actual, expected, rtol=rtol, atol=atol)
+        care_mask = ~torch.isnan(expected)
+        # An element passes if it is close OR the golden marked it don't-care (NaN).
+        close_mask = torch.isclose(actual, expected, rtol=rtol, atol=atol) | ~care_mask
+
+        if not bool(close_mask.all()):
             mismatch_indices = torch.where(~close_mask.flatten())[0]
             flat_actual = actual.flatten()
             flat_expected = expected.flatten()
@@ -718,15 +729,18 @@ def validate_golden(
                 f"    [{i.item()}] actual={flat_actual[i].item()}, expected={flat_expected[i].item()}"
                 for i in idx
             ]
+            n_dont_care = int((~care_mask).sum().item())
+            skipped = f" ({n_dont_care} don't-care skipped)" if n_dont_care else ""
             raise AssertionError(
                 f"Output '{name}' does not match golden.\n"
-                f"Mismatched elements: {mismatch_indices.numel()}/{actual.numel()}\n"
+                f"Mismatched elements: {mismatch_indices.numel()}/{actual.numel()}{skipped}\n"
                 f"rtol={rtol}, atol={atol}\n"
                 f"First {n_show} mismatches:\n" + "\n".join(lines)
             )
 
-        matched = torch.isclose(actual, expected, rtol=rtol, atol=atol).sum().item()
-        logger.info(f"  {name}: PASS ({matched}/{actual.numel()} elements matched)")
+        n_compared = int(care_mask.sum().item())
+        matched = int((close_mask & care_mask).sum().item())
+        logger.info(f"  {name}: PASS ({matched}/{n_compared} compared elements matched)")
 
 
 # ---------------------------------------------------------------------------

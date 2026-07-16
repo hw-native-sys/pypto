@@ -151,6 +151,9 @@ class C2VDynamicTpopValidShapeTestCase(PTOTestCase):
         valid_rows = int(tensors["valid_shape"][0])
         valid_cols = int(tensors["valid_shape"][1])
         matmul = torch.matmul(tensors["a"].float(), tensors["b"].float())
+        # Only output[:valid_rows, :valid_cols] is written; outside that region
+        # is undefined-by-design -> mark NaN so validate_golden skips it.
+        tensors["output"][:] = float("nan")
         tensors["output"][:valid_rows, :valid_cols] = matmul[:valid_rows, :valid_cols] + 1.0
 
 
@@ -285,6 +288,9 @@ class C2VDynamicTpushValidShapeTestCase(PTOTestCase):
         valid_rows = int(tensors["valid_shape"][0])
         valid_cols = int(tensors["valid_shape"][1])
         matmul = torch.matmul(tensors["a"].float(), tensors["b"].float())
+        # Only output[:valid_rows, :valid_cols] is written; outside that region
+        # is undefined-by-design -> mark NaN so validate_golden skips it.
+        tensors["output"][:] = float("nan")
         tensors["output"][:valid_rows, :valid_cols] = matmul[:valid_rows, :valid_cols] + 1.0
 
 

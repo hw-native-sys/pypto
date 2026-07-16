@@ -149,6 +149,9 @@ class C2VTpushValidShapeTestCase(PTOTestCase):
         valid_rows = int(tensors["valid_shape"][0])
         valid_cols = int(tensors["valid_shape"][1])
         matmul = torch.matmul(tensors["a"].float(), tensors["b"].float())
+        # Only output[:valid_rows, :valid_cols] is written; rows >= valid_rows
+        # are never stored (localized store) -> mark NaN so validate_golden skips.
+        tensors["output"][:] = float("nan")
         tensors["output"][:valid_rows, :valid_cols] = matmul[:valid_rows, :valid_cols] + 1.0
 
 
@@ -264,7 +267,9 @@ class V2SetValidShapeOnVectorTestCase(PTOTestCase):
 
     def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
         matmul = torch.matmul(tensors["a"].float(), tensors["b"].float())
-        # Columns >= SV_VALID_COLS are invalid (not written) -> stay at init 0.
+        # Columns >= SV_VALID_COLS are invalid (not written) -> mark NaN so
+        # validate_golden skips them (runtime no longer zero-fills outputs).
+        tensors["output"][:] = float("nan")
         tensors["output"][:, :SV_VALID_COLS] = matmul[:, :SV_VALID_COLS] + 1.0
 
 

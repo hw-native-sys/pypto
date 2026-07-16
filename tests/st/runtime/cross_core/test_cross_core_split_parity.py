@@ -297,6 +297,9 @@ class _C2VValidShapeParityCase(PTOTestCase):
         vr = int(tensors["valid_shape"][0])
         vc = int(tensors["valid_shape"][1])
         matmul = torch.matmul(tensors["a"].float(), tensors["b"].float())
+        # Only output[:vr, :vc] is written (localized per-subblock store); the
+        # rest is undefined-by-design -> mark NaN so validate_golden skips it.
+        tensors["output"][:] = float("nan")
         tensors["output"][:vr, :vc] = matmul[:vr, :vc] + 1.0
 
 

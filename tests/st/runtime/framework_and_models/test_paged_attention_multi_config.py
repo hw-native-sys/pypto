@@ -135,7 +135,10 @@ class SoftmaxPrepareTestCase(PTOTestCase):
 
         # Pass 2: exp(scaled - global_max), cast to bf16, row_sum
         li_acc = None
-        pij_out = torch.zeros(n_unroll_q, block_size, dtype=torch.bfloat16)
+        # pij_buf is oversized unroll scratch; only rows [0, n_blocks*q_tile) are
+        # written by the kernel. NaN-mark the unused tail rows as don't-care so
+        # validate_golden skips them (the runtime no longer zero-fills the buffer).
+        pij_out = torch.full((n_unroll_q, block_size), float("nan"), dtype=torch.bfloat16)
         for i in range(n_blocks):
             s_tile = sij_buf[i * q_tile : (i + 1) * q_tile, :]
             scaled = s_tile * scale
@@ -222,7 +225,10 @@ class QKMatmulTestCase(PTOTestCase):
         block_indices = tensors["block_indices"]
         n_blocks = int(tensors["n_blocks_cfg"][0].item())
 
-        sij_buf = torch.zeros(n_unroll_q, block_size, dtype=torch.float32)
+        # sij_buf is oversized unroll scratch; only rows [0, n_blocks*q_tile) are
+        # written by the kernel. NaN-mark the unused tail rows as don't-care so
+        # validate_golden skips them (the runtime no longer zero-fills the buffer).
+        sij_buf = torch.full((n_unroll_q, block_size), float("nan"), dtype=torch.float32)
         for i in range(n_blocks):
             bidx = int(block_indices[i].item())
             kj = key_cache[bidx]  # [block_size, head_dim]

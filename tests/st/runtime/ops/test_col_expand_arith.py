@@ -87,9 +87,10 @@ class _TileColExpandBase(PTOTestCase):
 
     def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
         a, v = tensors["a"], tensors["v"]
-        res = torch.zeros_like(a)
         if self._valid:
             vm, vn = self._valid
+            # Region outside valid_shapes is undefined by contract — mark NaN so validate_golden skips it.
+            res = torch.full_like(a, float("nan"))
             res[:vm, :vn] = self._ref(a[:vm, :vn], v[:, :vn])
         else:
             res = self._ref(a, v)
