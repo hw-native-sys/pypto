@@ -682,6 +682,37 @@ def test_host_allgather_rejects_aliased_input_target_windows():
         passes.lower_host_tensor_collectives()(program)
 
 
+def test_host_all_to_all_rejects_aliased_input_target_windows():
+    """Two pld.window views over one alloc must fail at host lowering."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self,
+            stage: pld.DistributedTensor[[4, 256], pl.FP32],
+            data: pld.DistributedTensor[[4, 256], pl.FP32],
+            sig: pld.DistributedTensor[[4], pl.INT32],
+        ):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            buf = pld.alloc_window_buffer(4 * 256 * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            stage = pld.window(buf, [4, 256], dtype=pl.FP32)
+            data = pld.window(buf, [4, 256], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [4], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(stage, data, signal, device=r)
+            data = pld.tensor.all_to_all(stage, data, signal)
+            return 0
+
+    program = passes.materialize_comm_domain_scopes()(P)
+    with pytest.raises(Exception, match=r"different window allocations"):
+        passes.lower_host_tensor_collectives()(program)
+
+
 def test_host_all_to_all_lowers_to_namesake_builtin():
     @pl.program
     class P:
