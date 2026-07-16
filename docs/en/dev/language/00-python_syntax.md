@@ -370,8 +370,8 @@ shape (single kernel call, outlined `pl.at` region, or dependency-only fan-in).
 
 | Surface | Producer shape | Notes |
 | ------- | -------------- | ----- |
-| `result, tid = pl.submit(kernel, *args, deps=[...], allow_early_resolve=False)` | single kernel call | The trailing `tid` is the producer `pl.Scalar[pl.TASK_ID]`. A parser construct (like `pl.range`), not a runtime function. `allow_early_resolve=True` opts this task in as a speculative early-dispatch producer (lets the scheduler pre-stage its consumers; lowers to `Arg::set_allow_early_resolve(true)`). |
-| `result, tid = pl.spmd_submit(kernel, *args, core_num=N, sync_start=False, deps=[...])` | single SPMD task launch | The SPMD sibling of `pl.submit`: dispatches the kernel across `N` blocks (one orchestration task → one `tid`). `core_num` is a required keyword (positive int expr); `sync_start=True` forces atomic launch of all blocks. Callee may be InCore / AIC / AIV / Group. Records the launch spec on `Submit.core_num` / `Submit.sync_start`. Also accepts `allow_early_resolve=True` (same early-dispatch opt-in as `pl.submit`). |
+| `result, tid = pl.submit(kernel, *args, deps=[...], allow_early_resolve=False)` | single kernel call | The trailing `tid` is the producer `pl.Scalar[pl.TASK_ID]`. A parser construct (like `pl.range`), not a runtime function. `allow_early_resolve=True` opts this task in as a speculative early-dispatch producer (lets the scheduler pre-stage its consumers; lowers to `Arg::set_allow_early_resolve(true)`). Also accepts `predicate=pl.dispatch_pred(...)` — a dispatch predicate the scheduler evaluates at the dispatch point (see [Dispatch predicate](#dispatch-predicate-predicate)). |
+| `result, tid = pl.spmd_submit(kernel, *args, core_num=N, sync_start=False, deps=[...])` | single SPMD task launch | The SPMD sibling of `pl.submit`: dispatches the kernel across `N` blocks (one orchestration task → one `tid`). `core_num` is a required keyword (positive int expr); `sync_start=True` forces atomic launch of all blocks. Callee may be InCore / AIC / AIV / Group. Records the launch spec on `Submit.core_num` / `Submit.sync_start`. Also accepts `allow_early_resolve=True` (same early-dispatch opt-in as `pl.submit`) and `predicate=pl.dispatch_pred(...)` (see [Dispatch predicate](#dispatch-predicate-predicate)). |
 | `with pl.at(level=pl.Level.CORE_GROUP, deps=[...]) as tid:` | outlined `pl.at`-block | The whole block is outlined into an `InCore` kernel + `Submit`; `tid` captures the synthesized Submit's TaskId, usable as a dep for later `pl.submit` / `pl.at` sites. Without `as tid` the outliner synthesizes an unused TaskId Var — deps always travel on `Submit::deps_`. Also accepts `allow_early_resolve=True` (same early-dispatch opt-in as `pl.submit`); it forces the `Submit` shape even without `as tid` and lowers to `Arg::set_allow_early_resolve(true)`. |
 | `with pl.spmd(N, deps=[...]) as tid:` | outlined SPMD dispatch | The SPMD sibling of the `pl.at ... as tid` form. The inline body is auto-outlined into an `InCore` kernel and dispatched across `N` blocks; `tid` captures the grid-wide producer TaskId. `deps=` accepted only with `as tid`. `core_num` / `sync_start` ride on the outlined `Spmd` Function attrs (the lowered `Submit.core_num` is `None`); codegen reads them via the launch-function fallback. Also accepts `allow_early_resolve=True` (same early-dispatch opt-in as `pl.submit` / `pl.at`; valid on all three `pl.spmd` forms, forcing the `Submit` shape even without `as tid`). Cannot nest inside `pl.cluster()`. |
 | `barrier = pl.system.task_dummy(deps=[...])` | dependency-only barrier | Submits no kernel. The returned TaskId is a compact fan-in point for later `deps=[barrier]`. |
@@ -460,6 +460,62 @@ barriers for profitable full-array phase fences.
 
 `pl.no_dep(arg)` is an auto-scope primitive; inside `pl.manual_scope` it
 has no effect (the whole region already skips auto-tracking).
+
+#### Dispatch predicate (`predicate=`)
+
+`pl.submit` / `pl.spmd_submit` accept an optional
+`predicate=pl.dispatch_pred(tensor, indices, op, target)`. The scheduler
+evaluates `tensor[indices] <op> target` **at the dispatch point** — after the
+task's dependencies are satisfied, so the value is current without an
+orchestration-time `wait_for_tensor_ready` stall. When the comparison is
+**false** the task is **retired inline** (never dispatched to a core) while
+still settling fanin/fanout, so downstream consumers still unlock — it does not
+vanish from the task graph. When **true** it dispatches normally.
+
+The canonical use is MoE "skip empty experts": submit every expert statically,
+each carrying `predicate = row_count[e] > 0` and depending on the gather
+producer — the scheduler dispatches only the non-empty experts, without stalling
+orchestration to read the per-expert count.
+
+`pl.dispatch_pred(tensor, indices, op, target)`:
+
+| Arg | Meaning | Constraint |
+| --- | ------- | ---------- |
+| `tensor` | operand tensor read at the dispatch point | must be a tensor |
+| `indices` | element locator into `tensor` | a **list literal**; each element a `ConstInt` or loop `Var`; non-empty |
+| `op` | comparison spelling | a **string literal**, one of `==` `!=` `>` `<` `>=` `<=` |
+| `target` | right-hand side | an **integer literal** (may be negative) |
+
+Lowers to the runtime `L0TaskPredicate` + `Arg::set_predicate(...)` in
+orchestration codegen (operand → its `ext_<name>` reference, `op` →
+`PredicateOp::*`, `target` verbatim; `elem_size` is derived by the runtime from
+the tensor dtype).
+
+**Contract:** the predicate operand tensor's producer **must** be one of the
+submit's `deps=`, so the dispatch-point read observes the current value.
+Currently only structural well-formedness is verified at construction (operand
+present and a tensor, indices non-empty, `op` in range); the dataflow
+"producer ∈ deps" check is not yet enforced, so the author is responsible for
+`deps=`.
+
+**Expressiveness** is fixed to `tensor[indices] OP const` — one comparison,
+matching the runtime's single-comparison `DispatchPredicate`. Multiple
+conditions / boolean combination / arithmetic are not expressible; reduce them
+to a single gate value in a prior kernel and predicate on that.
+
+**Scope:** `predicate=` is on `pl.submit` / `pl.spmd_submit` only (the
+direct-`Submit` forms). The `with pl.spmd(predicate=...)` scope form is not yet
+supported.
+
+```python
+with pl.manual_scope():
+    rc, g_tid = pl.spmd_submit(self.gate, rc, core_num=1)       # producer of rc
+    out, _ = pl.spmd_submit(
+        self.expert, x, out, core_num=1,
+        deps=[g_tid],                                           # producer is a dep
+        predicate=pl.dispatch_pred(rc, [0, 0], ">", 0),         # rc[0, 0] > 0
+    )
+```
 
 #### `pl.parallel` under manual scope: array-carry fence
 

@@ -149,6 +149,32 @@ def _is_const_int(value: object) -> bool:
     return isinstance(value, ir.Neg) and isinstance(value.operand, ir.ConstInt)
 
 
+# DSL comparison spelling -> DispatchPredicateOp, for pl.dispatch_pred(...) op arg.
+# Built from the bound enum so each mapping validates the enumerator at import.
+_DISPATCH_PRED_OPS: dict[str, "ir.DispatchPredicateOp"] = {
+    "==": ir.DispatchPredicateOp.Eq,
+    "!=": ir.DispatchPredicateOp.Ne,
+    ">": ir.DispatchPredicateOp.Gt,
+    "<": ir.DispatchPredicateOp.Lt,
+    ">=": ir.DispatchPredicateOp.Ge,
+    "<=": ir.DispatchPredicateOp.Le,
+}
+
+
+def _ast_int_literal(node: ast.expr) -> int | None:
+    """Return the int value of an integer literal AST (``5`` / ``-5``), else None.
+
+    Rejects bools (``True`` is an ``int`` subclass in Python but not a valid
+    predicate target).
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, int) and not isinstance(node.value, bool):
+        return node.value
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        inner = _ast_int_literal(node.operand)
+        return None if inner is None else -inner
+    return None
+
+
 def _is_dep_var_type(type_: ir.Type | None) -> bool:
     """Return True if ``type_`` is acceptable as a ``pl.submit(...)`` ``deps=`` entry.
 
@@ -5520,6 +5546,7 @@ class ASTParser:
             allowed_kwargs.add("deps")
             allowed_kwargs.add("dumps")
             allowed_kwargs.add("allow_early_resolve")
+            allowed_kwargs.add("predicate")
         if as_spmd:
             allowed_kwargs.update({"core_num", "sync_start"})
         if func_obj is not None and func_obj.role == ir.Role.Orchestrator:
@@ -5719,8 +5746,10 @@ class ASTParser:
         # early-dispatch producer. Accepted on both pl.submit and pl.spmd_submit
         # (recorded on the Submit; no-op for a plain self.kernel(...) call).
         allow_early_resolve = False
+        predicate: tuple[ir.Expr, list[ir.Expr], int, int] | None = None
         if as_submit:
             allow_early_resolve = self._parse_submit_allow_early_resolve_kwarg(method_name, keywords)
+            predicate = self._parse_submit_predicate_kwarg(method_name, keywords, span)
         return_types = func_obj.return_types if func_obj else []
         # A callee that declares no ``-> `` annotation has empty ``return_types``
         # but may ``return <value>`` (e.g. an InCore kernel returning its
@@ -5757,6 +5786,7 @@ class ASTParser:
             core_num=core_num_expr,
             sync_start=sync_start,
             allow_early_resolve=allow_early_resolve,
+            predicate=predicate,
             extra_attrs=extra_attrs,
         )
 
@@ -6120,6 +6150,85 @@ class ASTParser:
             )
         return kw.value.value
 
+    def _parse_submit_predicate_kwarg(
+        self, method_name: str, keywords: list[ast.keyword], span: ir.Span
+    ) -> tuple[ir.Expr, list[ir.Expr], int, int] | None:
+        """Extract the optional ``predicate=pl.dispatch_pred(tensor, [i...], op, target)`` kwarg.
+
+        Accepted on ``pl.submit(...)`` and ``pl.spmd_submit(...)``. Encodes a
+        dispatch predicate the scheduler evaluates at the dispatch point
+        (``tensor[indices] <op> target``); a false result retires the task
+        inline without dispatching to a core, while still settling
+        fanin/fanout. Returns ``(operand, indices, op_int, target_int)`` or
+        ``None`` when absent.
+
+        The predicate ``op`` is a string spelling (one of ==, !=, >, <, >=, <=);
+        ``target`` is an integer literal. The operand tensor's producer MUST be
+        one of the submit's ``deps=`` — this is not checked here but by a
+        SubmitVerifier once directions/deps are resolved.
+        """
+        kw = next((k for k in keywords if k.arg == "predicate"), None)
+        if kw is None:
+            return None
+        hint = 'Use predicate=pl.dispatch_pred(tensor, [i0, ...], ">", 0).'
+        if not _is_pl_call(kw.value, "dispatch_pred"):
+            raise ParserSyntaxError(
+                f"'{method_name}' predicate must be a pl.dispatch_pred(...) call",
+                span=self.span_tracker.get_span(kw.value),
+                hint=hint,
+            )
+        pred_call = kw.value
+        if len(pred_call.args) != 4 or pred_call.keywords:
+            raise ParserSyntaxError(
+                "pl.dispatch_pred(...) takes exactly 4 positional args (tensor, indices, op, target)",
+                span=self.span_tracker.get_span(pred_call),
+                hint=hint,
+            )
+        operand_ast, indices_ast, op_ast, target_ast = pred_call.args
+        operand = self.parse_expression(operand_ast)
+        if not isinstance(operand.type, ir.TensorType):
+            raise ParserTypeError(
+                "pl.dispatch_pred(...) operand must be a tensor, got "
+                f"{python_print(operand.type, format=False)}",
+                span=self.span_tracker.get_span(operand_ast),
+                hint=hint,
+            )
+        if not isinstance(indices_ast, (ast.List, ast.Tuple)):
+            raise ParserSyntaxError(
+                "pl.dispatch_pred(...) indices must be a list literal, e.g. [e] or [0, j]",
+                span=self.span_tracker.get_span(indices_ast),
+                hint=hint,
+            )
+        indices = [self.parse_expression(elt) for elt in indices_ast.elts]
+        if not indices:
+            raise ParserSyntaxError(
+                "pl.dispatch_pred(...) indices must locate a single element (non-empty)",
+                span=self.span_tracker.get_span(indices_ast),
+                hint=hint,
+            )
+        if not isinstance(op_ast, ast.Constant) or not isinstance(op_ast.value, str):
+            raise ParserSyntaxError(
+                "pl.dispatch_pred(...) op must be a string literal (one of ==, !=, >, <, >=, <=)",
+                span=self.span_tracker.get_span(op_ast),
+                hint=hint,
+            )
+        op_enum = _DISPATCH_PRED_OPS.get(op_ast.value)
+        if op_enum is None:
+            raise ParserSyntaxError(
+                f"pl.dispatch_pred(...) op '{op_ast.value}' is not supported; use one of "
+                "==, !=, >, <, >=, <=",
+                span=self.span_tracker.get_span(op_ast),
+                hint=hint,
+            )
+        target_val = _ast_int_literal(target_ast)
+        if target_val is None:
+            raise ParserSyntaxError(
+                "pl.dispatch_pred(...) target must be an integer literal",
+                span=self.span_tracker.get_span(target_ast),
+                hint=hint,
+            )
+        return operand, indices, int(op_enum.value), target_val
+
     def _parse_dispatch_device_kwarg(
         self,
         keywords: list[ast.keyword],
@@ -6190,6 +6299,7 @@ class ASTParser:
         core_num: ir.Expr | None = None,
         sync_start: bool = False,
         allow_early_resolve: bool = False,
+        predicate: tuple[ir.Expr, list[ir.Expr], int, int] | None = None,
         extra_attrs: dict[str, Any] | None = None,
     ) -> ir.Expr:
         """Create an ir.Call, attaching the return type, optional call-site directions
@@ -6298,7 +6408,10 @@ class ASTParser:
             # opt-in; either requires the full ctor form even when there are no
             # attrs. A plain pl.submit with no attrs / hints keeps the minimal
             # form so existing golden output is byte-identical.
-            if submit_attrs is not None or core_num is not None or allow_early_resolve:
+            if submit_attrs is not None or core_num is not None or allow_early_resolve or predicate is not None:
+                pred_operand, pred_indices, pred_op, pred_target = (
+                    predicate if predicate is not None else (None, [], 0, 0)
+                )
                 return ir.Submit(
                     gvar,
                     args,
@@ -6310,6 +6423,10 @@ class ASTParser:
                     core_num=core_num,
                     sync_start=sync_start,
                     allow_early_resolve=allow_early_resolve,
+                    predicate_operand=pred_operand,
+                    predicate_indices=pred_indices,
+                    predicate_op=pred_op,
+                    predicate_target=pred_target,
                 )
             return ir.Submit(gvar, args, deps_list, return_type, span)
 

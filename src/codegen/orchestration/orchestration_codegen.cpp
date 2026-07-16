@@ -2255,6 +2255,56 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
   }
 
+  // Map the IR DispatchPredicateOp onto the runtime PredicateOp enumerator name.
+  static const char* RenderDispatchPredicateOp(DispatchPredicateOp op) {
+    switch (op) {
+      case DispatchPredicateOp::Eq:
+        return "EQ";
+      case DispatchPredicateOp::Ne:
+        return "NE";
+      case DispatchPredicateOp::Gt:
+        return "GT";
+      case DispatchPredicateOp::Lt:
+        return "LT";
+      case DispatchPredicateOp::Ge:
+        return "GE";
+      case DispatchPredicateOp::Le:
+        return "LE";
+      case DispatchPredicateOp::None:
+        return "NONE";
+    }
+    return "NONE";
+  }
+
+  // Dispatch predicate (pl.spmd(predicate=...)). Surfaced as the ``predicate``
+  // Call attr (a DispatchPredicateInit) by SubmitToCallView; a plain submit /
+  // call lacks it, so this is a no-op there. Emits an ``L0TaskPredicate`` on the
+  // task's ``L0TaskArgs`` and ``set_predicate`` before the rt_submit_*. The
+  // operand tensor resolves to its ``ext_<name>`` orchestration reference; the
+  // indices render as scalar C++ expressions (ConstInt / loop Var). ``elem_size``
+  // is intentionally left for the runtime to derive from the tensor dtype.
+  void EmitPredicateHint(const std::string& task_var, const CallPtr& call) {
+    if (!call->HasAttr("predicate")) return;
+    auto pred = call->GetAttr<DispatchPredicateInit>("predicate");
+    INTERNAL_CHECK_SPAN(pred.operand, call->span_) << "Submit dispatch predicate has a null operand tensor";
+    const std::string var_name = TryGetVarName(pred.operand);
+    INTERNAL_CHECK_SPAN(!var_name.empty(), call->span_)
+        << "Submit dispatch predicate operand must be a tensor Var, got kind="
+        << static_cast<int>(pred.operand->GetKind());
+    const std::string tname = GetExternalTensorName(var_name);
+    const std::string pv = task_var + "_pred";
+    EmitIndentedLine("L0TaskPredicate " + pv + ";");
+    EmitIndentedLine(pv + ".operand.tensor = &" + tname + ";");
+    EmitIndentedLine(pv + ".operand.ndims = " + std::to_string(pred.indices.size()) + ";");
+    for (size_t i = 0; i < pred.indices.size(); ++i) {
+      EmitIndentedLine(pv + ".operand.indices[" + std::to_string(i) + "] = " +
+                       GenerateExprString(pred.indices[i]) + ";");
+    }
+    EmitIndentedLine(pv + ".op = PredicateOp::" + RenderDispatchPredicateOp(pred.op) + ";");
+    EmitIndentedLine(pv + ".target = " + std::to_string(pred.target) + ";");
+    EmitIndentedLine(task_var + ".set_predicate(" + pv + ");");
+  }
+
   void EmitTaskSubmitAndBind(const std::string& submit_expr, bool capture_outputs) {
     if (capture_outputs) {
       // The caller will consume this task's producer TaskId — capture the
@@ -2444,10 +2494,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
         cg.EmitManualDeps(call, task_var);
         cg.EmitLaunchSpec(task_var, launch_core_num, launch_sync_start);
         cg.EmitEarlyResolveHint(task_var, call);
+        cg.EmitPredicateHint(task_var, call);
       } else {
         // Wrapper (Spmd/Group/Mixed) order: launch_spec -> early_resolve -> deps.
         cg.EmitLaunchSpec(task_var, launch_core_num, launch_sync_start);
         cg.EmitEarlyResolveHint(task_var, call);
+        cg.EmitPredicateHint(task_var, call);
         cg.EmitManualDeps(call, task_var);
       }
       cg.EmitTaskSubmitAndBind(submit_expr, capture_outputs);

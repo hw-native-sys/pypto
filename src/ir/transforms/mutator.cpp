@@ -465,6 +465,37 @@ ExprPtr IRMutator::VisitExpr_(const SubmitPtr& op) {
     }
   }
 
+  // Mutate the dispatch-predicate operand/indices (pl.spmd(predicate=...)) —
+  // first-class SSA-bearing fields, so substitution must rewrite them like
+  // args_/deps_/core_num_ (pass-submit-awareness.md rule 2). predicate_op_ /
+  // predicate_target_ are int64 leaves with no SSA value and pass through
+  // unchanged. Rebuild a DispatchPredicateInit only when the Submit carries a
+  // predicate; otherwise leave new_predicate empty.
+  std::optional<DispatchPredicateInit> new_predicate;
+  bool predicate_changed = false;
+  if (op->HasPredicate()) {
+    DispatchPredicateInit init;
+    init.op = op->GetPredicateOp();
+    init.target = op->predicate_target_;
+    if (op->predicate_operand_.has_value()) {
+      INTERNAL_CHECK_SPAN(*op->predicate_operand_, op->span_) << "Submit predicate operand is null";
+      auto remapped = ExprFunctor<ExprPtr>::VisitExpr(*op->predicate_operand_);
+      INTERNAL_CHECK_SPAN(remapped, op->span_) << "Submit predicate operand mutated to null";
+      if (remapped.get() != op->predicate_operand_->get()) predicate_changed = true;
+      init.operand = std::move(remapped);
+    }
+    init.indices.reserve(op->predicate_indices_.size());
+    for (size_t i = 0; i < op->predicate_indices_.size(); ++i) {
+      INTERNAL_CHECK_SPAN(op->predicate_indices_[i], op->span_)
+          << "Submit has null predicate index at index " << i;
+      auto remapped = ExprFunctor<ExprPtr>::VisitExpr(op->predicate_indices_[i]);
+      INTERNAL_CHECK_SPAN(remapped, op->span_) << "Submit predicate index at index " << i << " mutated to null";
+      if (remapped.get() != op->predicate_indices_[i].get()) predicate_changed = true;
+      init.indices.push_back(std::move(remapped));
+    }
+    new_predicate = std::move(init);
+  }
+
   auto new_type = RemapTypeViaVisitor(op->GetType());
   bool type_changed = (new_type.get() != op->GetType().get());
 
@@ -512,7 +543,9 @@ ExprPtr IRMutator::VisitExpr_(const SubmitPtr& op) {
     new_attrs.emplace_back(k, v);
   }
 
-  if (!args_changed && !deps_changed && !type_changed && !attrs_changed && !core_num_changed) return op;
+  if (!args_changed && !deps_changed && !type_changed && !attrs_changed && !core_num_changed &&
+      !predicate_changed)
+    return op;
   std::vector<std::pair<std::string, std::any>> attrs_to_use;
   if (attrs_changed) {
     attrs_to_use = std::move(new_attrs);
@@ -521,7 +554,8 @@ ExprPtr IRMutator::VisitExpr_(const SubmitPtr& op) {
   }
   return std::make_shared<const Submit>(op->op_, std::move(new_args), std::move(new_deps), op->kwargs_,
                                         std::move(attrs_to_use), std::move(new_type), op->span_,
-                                        std::move(new_core_num), op->sync_start_, op->allow_early_resolve_);
+                                        std::move(new_core_num), op->sync_start_, op->allow_early_resolve_,
+                                        std::move(new_predicate));
 }
 
 ExprPtr IRMutator::VisitExpr_(const MakeTuplePtr& op) {

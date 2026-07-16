@@ -1960,7 +1960,8 @@ class CallSiteUpdateMutator : public TypePropagatingMutator {
     // Note: 7-arg Submit ctor order is (op, args, deps, kwargs, attrs, type, span).
     auto new_submit = std::make_shared<Submit>(
         submit->op_, std::move(new_args), submit->deps_, submit->kwargs_, submit->attrs_, submit->GetType(),
-        submit->span_, submit->core_num_, submit->sync_start_, submit->allow_early_resolve_);
+        submit->span_, submit->core_num_, submit->sync_start_, submit->allow_early_resolve_,
+        submit->GetPredicateInit());
     auto new_assign = MutableCopy(op);
     new_assign->value_ = new_submit;
     stmts.push_back(std::move(new_assign));
