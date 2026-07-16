@@ -88,19 +88,129 @@ def _validate_pipeline(pipeline: bool, chunk_rows: int, chunk_cols: int, op_name
         )
 
 
-def alloc_window_buffer(size: IntLike, *, name: str = "") -> Ptr:
-    """Declare a per-rank HCCL window-buffer in a comm-domain scope slot of ``size`` bytes.
-
-    Mirrors ``tile.alloc(memory_space, size)``: pure allocation semantics, no
-    shape / dtype concept on the buffer itself. The result is the
-    allocation-identity token that ``pld.tensor.window`` consumes.
+def _validate_window_buffer_shape(shape: list[int | Expr]) -> None:
+    """Validate that a window-buffer shape is non-empty and static dims are positive.
 
     Args:
-        size: Per-rank allocation size in **bytes**. Accepts an ``int``
-            literal, a DSL ``Scalar``, or a raw :class:`ir.Expr`.
+        shape: Normalized shape — elements are ``int`` or :class:`ir.Expr`.
+
+    Raises:
+        ValueError: If ``shape`` is empty or any statically-known dimension
+            is non-positive.
+    """
+    if not shape:
+        raise ValueError("pld.tensor.alloc_window_buffer shape must be non-empty")
+    for i, d in enumerate(shape):
+        if isinstance(d, int):
+            if d <= 0:
+                raise ValueError(
+                    f"pld.tensor.alloc_window_buffer shape dimension[{i}] is {d}; "
+                    "all dimensions must be positive"
+                )
+        elif isinstance(d, _ir.ConstInt):
+            if d.value <= 0:
+                raise ValueError(
+                    f"pld.tensor.alloc_window_buffer shape dimension[{i}] is {d.value}; "
+                    "all dimensions must be positive"
+                )
+
+
+def _compute_window_buffer_bytes(shape: list[int | Expr], dtype: DataType) -> int | Expr:
+    """Compute byte size for a shape+dtype ``alloc_window_buffer`` call.
+
+    When all shape dimensions are statically known (Python ``int`` or
+    :class:`ir.ConstInt`) the product is computed eagerly as a Python
+    ``int`` (no IR nodes emitted).  Otherwise (any dimension is a dynamic
+    :class:`ir.Expr`) a chain of :class:`ir.Mul` nodes is emitted.
+
+    Args:
+        shape: Normalized shape — elements are ``int`` or :class:`ir.Expr`.
+        dtype: Element data type (byte size via ``dtype.get_byte()``).
+
+    Returns:
+        Byte size as ``int`` (static) or ``ir.Expr`` (dynamic).
+    """
+    _validate_window_buffer_shape(shape)
+
+    # Fold pure-static: Python ints AND ir.ConstInt — both are compile-time
+    # constants.  Per the parser, integer literals arrive as ConstInt(INDEX),
+    # not raw Python int, so we must check both.
+    static_total = 1
+    for d in shape:
+        if isinstance(d, int):
+            static_total *= d
+        elif isinstance(d, _ir.ConstInt):
+            static_total *= d.value
+        else:
+            break
+    else:
+        # All dims folded — return an eager Python int.
+        return static_total * dtype.get_byte()
+
+    # Dynamic path: at least one genuinely dynamic dim.
+    span = _ir.Span.unknown()
+    # Seed from the first dim instead of ConstInt(1) to avoid a redundant
+    # Mul(1, dim0) identity in the emitted IR.
+    first = shape[0]
+    if isinstance(first, int):
+        result: Expr = _ir.ConstInt(first, DataType.INT64, span)
+    elif isinstance(first, _ir.ConstInt):
+        result = _ir.ConstInt(first.value, DataType.INT64, span)
+    else:
+        result = first
+    for dim in shape[1:]:
+        if isinstance(dim, int):
+            dim_expr = _ir.ConstInt(dim, DataType.INT64, span)
+        elif isinstance(dim, _ir.ConstInt):
+            dim_expr = _ir.ConstInt(dim.value, DataType.INT64, span)
+        else:
+            dim_expr = dim
+        result = _ir.Mul(result, dim_expr, DataType.INT64, span)
+    byte_expr: Expr = _ir.ConstInt(dtype.get_byte(), DataType.INT64, span)
+    return _ir.Mul(result, byte_expr, DataType.INT64, span)
+
+
+@overload
+def alloc_window_buffer(size: IntLike, *, name: str = "") -> Ptr: ...
+
+
+@overload
+def alloc_window_buffer(shape: Sequence[IntLike], *, dtype: DataType, name: str = "") -> Ptr: ...
+
+
+def alloc_window_buffer(  # type: ignore[no-redef]
+    size: IntLike | Sequence[IntLike], *, dtype: DataType | None = None, name: str = ""
+) -> Ptr:
+    """Declare a per-rank HCCL window-buffer in a comm-domain scope slot.
+
+    Two forms:
+
+    * **Canonical byte form:**
+      ``alloc_window_buffer(size, *, name=...)`` — ``size`` is the per-rank
+      allocation size in **bytes**.  Accepts an ``int`` literal, a DSL
+      ``Scalar``, or a raw :class:`ir.Expr`.
+
+    * **Shape+dtype convenience overload:**
+      ``alloc_window_buffer(shape, *, dtype=..., name=...)`` — ``shape`` is a
+      list / tuple of per-rank dimensions.  The byte size is computed
+      automatically as ``product(shape) × dtype.get_byte()`` and the call
+      normalizes to the canonical byte form.  ``dtype`` is required when
+      ``shape`` is a sequence and rejected otherwise.
+
+    Both forms return the singleton :class:`ir.PtrType` allocation-identity
+    token that ``pld.tensor.window`` consumes.  The two-phase
+    ``alloc → window`` design is preserved — a single buffer can back multiple
+    ``window()`` views across loop iterations.
+
+    Args:
+        size: (Canonical form) Per-rank allocation size in **bytes**.
+        shape: (Convenience form) Per-rank shape as a sequence of per-dimension
+            sizes — ``int``, DSL ``Scalar``, or raw :class:`ir.Expr`.
+        dtype: (Convenience form, required) Element data type. Must be
+            ``None`` (default) in the canonical byte form.
         name: Unique buffer identifier. The parser injects this from the LHS
             of the surrounding assignment
-            (``buf = pld.tensor.alloc_window_buffer(N)``); users **must not**
+            (``buf = pld.tensor.alloc_window_buffer(...)``); users **must not**
             pass it explicitly.
 
     Returns:
@@ -112,16 +222,32 @@ def alloc_window_buffer(size: IntLike, *, name: str = "") -> Ptr:
 
     Raises:
         ValueError: If ``name`` is empty (the parser must have injected it).
+        ValueError: If ``shape`` is a sequence but ``dtype`` is not provided.
+        ValueError: If ``size`` is scalar but ``dtype`` is provided.
     """
     if not name:
         raise ValueError(
             "pld.tensor.alloc_window_buffer must appear as the RHS of a simple assignment "
             "(its result must be bound to a named variable)"
         )
+
     if isinstance(size, (list, tuple)):
+        if dtype is None:
+            raise ValueError(
+                "pld.tensor.alloc_window_buffer requires dtype= when the first argument is a shape "
+                "(list / tuple of per-rank dimensions)"
+            )
+        shape_normalized: list[int | Expr] = _normalize_intlike(size)
+        byte_size: int | Expr = _compute_window_buffer_bytes(shape_normalized, dtype)
+        call = _ir_tensor.alloc_window_buffer(_unwrap(byte_size), name=name)
+        return Ptr(expr=call)
+
+    if dtype is not None:
         raise ValueError(
-            "pld.tensor.alloc_window_buffer size must be a scalar (int / Expr in bytes), not a list/tuple"
+            "pld.tensor.alloc_window_buffer dtype= is only valid when the first argument is a shape "
+            "(list / tuple), not a scalar byte size"
         )
+
     call = _ir_tensor.alloc_window_buffer(_unwrap(size), name=name)
     return Ptr(expr=call)
 
