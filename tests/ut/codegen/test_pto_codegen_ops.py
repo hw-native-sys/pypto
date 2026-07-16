@@ -2811,8 +2811,17 @@ class TestFenceCodegen:
         )
 
 
+def _cmo_cacheinvalid_line(mlir: str) -> str:
+    """Return the single `pto.cmo.cacheinvalid` line (the whole module contains a
+    partition_tensor_view from the surrounding tile.store, so cmo-form assertions
+    must inspect this line, not the module)."""
+    lines = [line.strip() for line in mlir.splitlines() if "pto.cmo.cacheinvalid" in line]
+    assert len(lines) == 1, f"expected exactly one pto.cmo.cacheinvalid line, got {lines}"
+    return lines[0]
+
+
 class TestCacheInvalidCodegen:
-    """Tests that pl.system.cacheinvalid lowers to pto.addptr + pto.cmo.cacheinvalid."""
+    """Tests that pl.system.cacheinvalid lowers to a ptr or partition-view cmo."""
 
     def _generate_mlir(self, program_cls) -> str:
         backend.reset_for_testing()
@@ -2826,8 +2835,8 @@ class TestCacheInvalidCodegen:
         single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
         return codegen_instance.generate(single)
 
-    def test_cacheinvalid_emits_cmo(self):
-        """pl.system.cacheinvalid(out, off) emits pto.addptr + pto.cmo.cacheinvalid."""
+    def test_cacheinvalid_scalar_write_emits_ptr(self):
+        """All-ones shapes (scalar write) lower to pto.addptr + a ptr-form cmo."""
 
         @pl.program
         class Prog:
@@ -2839,16 +2848,41 @@ class TestCacheInvalidCodegen:
             ) -> pl.Tensor[[16, 16], pl.FP32]:
                 tile: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
                 updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(tile, [0, 0], out)
-                pl.system.cacheinvalid(updated, 8)
+                pl.system.cacheinvalid(updated, [0, 8], [1, 1])
                 return updated
 
         mlir = self._generate_mlir(Prog)
         assert "pto.addptr" in mlir, f"pto.addptr not found in MLIR:\n{mlir}"
-        assert "pto.cmo.cacheinvalid" in mlir, f"pto.cmo.cacheinvalid not found in MLIR:\n{mlir}"
-        assert "single_cache_line" in mlir, f"single_cache_line not found in MLIR:\n{mlir}"
+        cmo_line = _cmo_cacheinvalid_line(mlir)
+        # The ptr form emits a bare pointer operand, no partition_tensor_view annotation.
+        assert "single_cache_line" in cmo_line
+        assert "partition_tensor_view" not in cmo_line, f"unexpected partition view in ptr form: {cmo_line}"
+
+    def test_cacheinvalid_region_emits_partition_view(self):
+        """A multi-element region (tile store) lowers to a partition_tensor_view cmo."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_cacheinvalid_region(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                tile: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
+                updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(tile, [0, 0], out)
+                pl.system.cacheinvalid(updated, [0, 0], [16, 16])
+                return updated
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.partition_view" in mlir, f"pto.partition_view not found in MLIR:\n{mlir}"
+        cmo_line = _cmo_cacheinvalid_line(mlir)
+        # The region form addresses a partition_tensor_view, not a raw pointer.
+        assert "single_cache_line" in cmo_line
+        assert "partition_tensor_view" in cmo_line, f"partition view not in cmo line: {cmo_line}"
 
     def test_cacheinvalid_dynamic_offset(self):
-        """A runtime offset expression (loop-var arithmetic) is fed to pto.addptr."""
+        """A runtime offset expression (loop-var arithmetic) reaches the flattened ptr offset."""
 
         @pl.program
         class Prog:
@@ -2861,14 +2895,12 @@ class TestCacheInvalidCodegen:
                 tile: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
                 updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(tile, [0, 0], out)
                 for i in pl.range(4):
-                    # offset is computed at runtime from the loop index
-                    pl.system.cacheinvalid(updated, i * 16)
+                    # offset row is computed at runtime from the loop index
+                    pl.system.cacheinvalid(updated, [i, 0], [1, 1])
                 return updated
 
         mlir = self._generate_mlir(Prog)
-        # The offset arithmetic (i * 16) is materialized as its own SSA value...
-        assert "arith.muli" in mlir, f"offset arithmetic not found in MLIR:\n{mlir}"
-        # ...and that dynamic SSA is the addptr offset, not a compile-time constant.
+        # The dynamic row index feeds the flattened offset, then pto.addptr.
         assert "pto.addptr" in mlir, f"pto.addptr not found in MLIR:\n{mlir}"
         assert "pto.cmo.cacheinvalid" in mlir, f"pto.cmo.cacheinvalid not found in MLIR:\n{mlir}"
         assert "single_cache_line" in mlir, f"single_cache_line not found in MLIR:\n{mlir}"

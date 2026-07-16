@@ -331,7 +331,7 @@ with ib.function("tile_computation") as f:
 | `system.bar_v` | 向量屏障 | 无 |
 | `system.bar_m` | 矩阵屏障 | 无 |
 | `system.fence` | 全局内存屏障（下降为 `pto.fence.barrier_all #pto.fence_scope<gm>`） | 无 |
-| `system.cacheinvalid` | 使 `tensor` 基址 + `offset` 处的单个 cache line 失效（下降为 `pto.addptr` + `pto.cmo.cacheinvalid %write_ptr single_cache_line`）。参数：`tensor`、`offset` | 无 |
+| `system.cacheinvalid` | 使 tensor 某个子区域对应的 cache line 失效。参数：`tensor`、`offsets`（N 维）、`shapes`（N 维）。`shapes` 全为 1（标量写）时下降为 `pto.addptr` + `pto.cmo.cacheinvalid %write_ptr single_cache_line`；区域更大（TStore 写）时下降为 `pto.partition_view` + `pto.cmo.cacheinvalid %payload_view single_cache_line : !pto.partition_tensor_view<...>` | 无 |
 | `system.syncall` | 跨核全员屏障（`pto::SYNCALL`）。`mode="hard"`（FFTS，无 operand）或 `mode="soft"`（GM 轮询，带 operand） | `core_type`（`"aiv_only"` \| `"aic_only"` \| `"mix"`）、`mode`（`"hard"` \| `"soft"`） |
 | `system.sync_src` | 设置同步标志 | `set_pipe`, `wait_pipe`, `event_id` |
 | `system.sync_dst` | 等待同步标志 | `set_pipe`, `wait_pipe`, `event_id` |

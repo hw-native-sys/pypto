@@ -172,19 +172,32 @@ def syncall(
     return _ir_ops.syncall_soft(core_type, args, span=actual_span)
 
 
-def cacheinvalid(tensor: Tensor, offset: int | Scalar = 0, *, span: Span | None = None) -> Call:
-    """Invalidate a single cache line at the tensor's write pointer + offset.
+def cacheinvalid(
+    tensor: Tensor,
+    offsets: Sequence[int | Scalar],
+    shapes: Sequence[int | Scalar] | None = None,
+    *,
+    span: Span | None = None,
+) -> Call:
+    """Invalidate the cache lines backing a tensor sub-region.
 
-    Lowers to ``pto.addptr`` (base + offset) followed by
-    ``pto.cmo.cacheinvalid %write_ptr single_cache_line``.
+    Codegen picks the lowering by the region size:
+
+    - ``shapes`` all 1 (scalar write): ``pto.addptr`` +
+      ``pto.cmo.cacheinvalid %write_ptr single_cache_line``.
+    - otherwise (tile store): ``pto.partition_view`` +
+      ``pto.cmo.cacheinvalid %payload_view single_cache_line : !pto.partition_tensor_view<...>``.
 
     Args:
-        tensor: Target tensor whose write pointer is invalidated.
-        offset: Element offset added to the base pointer (compile-time int or Scalar).
+        tensor: Target tensor whose sub-region is invalidated.
+        offsets: Per-dimension start offsets; length must equal the tensor rank.
+        shapes: Per-dimension region sizes; length must equal the tensor rank.
+            Defaults to all-1 (the scalar-write / ptr form).
         span: Optional source span for debugging (auto-captured if not provided).
     """
-    off = offset.unwrap() if isinstance(offset, Scalar) else offset
-    return _ir_ops.cacheinvalid(tensor.unwrap(), off, span=span)
+    off = [o.unwrap() if isinstance(o, Scalar) else o for o in offsets]
+    shp = None if shapes is None else [s.unwrap() if isinstance(s, Scalar) else s for s in shapes]
+    return _ir_ops.cacheinvalid(tensor.unwrap(), off, shp, span=span)
 
 
 def tpush_to_aiv(tile: Tile, *, split: int, id: int | None = None, span: Span | None = None) -> Call:

@@ -337,7 +337,7 @@ with ib.function("tile_computation") as f:
 | `system.bar_v` | Vector barrier | None |
 | `system.bar_m` | Matrix barrier | None |
 | `system.fence` | Memory barrier over global memory (lowers to `pto.fence.barrier_all #pto.fence_scope<gm>`) | None |
-| `system.cacheinvalid` | Invalidate a single cache line at `tensor` base + `offset` (lowers to `pto.addptr` + `pto.cmo.cacheinvalid %write_ptr single_cache_line`). Args: `tensor`, `offset` | None |
+| `system.cacheinvalid` | Invalidate the cache lines backing a tensor sub-region. Args: `tensor`, `offsets` (N-D), `shapes` (N-D). All-1 `shapes` (scalar write) lowers to `pto.addptr` + `pto.cmo.cacheinvalid %write_ptr single_cache_line`; a larger region (tile store) lowers to `pto.partition_view` + `pto.cmo.cacheinvalid %payload_view single_cache_line : !pto.partition_tensor_view<...>` | None |
 | `system.syncall` | Cross-core all-participant barrier (`pto::SYNCALL`). `mode="hard"` (FFTS, no operands) or `mode="soft"` (GM-polling, operands) | `core_type` (`"aiv_only"` \| `"aic_only"` \| `"mix"`), `mode` (`"hard"` \| `"soft"`) |
 | `system.sync_src` | Set sync flag | `set_pipe`, `wait_pipe`, `event_id` |
 | `system.sync_dst` | Wait sync flag | `set_pipe`, `wait_pipe`, `event_id` |

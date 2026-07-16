@@ -18,13 +18,14 @@ System operations handle hardware synchronization and cross-core communication:
 - reserve_buffer / import_peer_buffer: Cross-core buffer management (i32 SSA results)
 """
 
+from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import Call, ConstInt, Expr, PipeType, ScalarType, Span
+from pypto.pypto_core.ir import Call, ConstInt, Expr, PipeType, ScalarType, Span, TensorType
 
-from ..utils import _get_span_or_capture, _normalize_expr
+from ..utils import _get_span_or_capture, _to_make_tuple
 from .tile_ops import (  # noqa: F401
     tpop_from_aic,
     tpop_from_aiv,
@@ -142,28 +143,57 @@ def fence(*, span: Span | None = None) -> Call:
     return _create_barrier_op("system.fence", span=span)
 
 
-def cacheinvalid(tensor: Expr, offset: int | Expr = 0, *, span: Span | None = None) -> Call:
-    """Invalidate a single cache line at ``tensor`` base pointer + ``offset``.
+def cacheinvalid(
+    tensor: Expr,
+    offsets: Sequence[int | Expr],
+    shapes: Sequence[int | Expr] | None = None,
+    *,
+    span: Span | None = None,
+) -> Call:
+    """Invalidate the cache lines backing a tensor sub-region.
 
-    Lowers to ``pto.addptr`` (base + offset) followed by
-    ``pto.cmo.cacheinvalid %write_ptr single_cache_line``.
+    The op carries an N-D ``offsets`` and ``shapes`` (both matching the tensor
+    rank). Codegen picks the lowering by the region size:
+
+    - ``shapes`` all 1 (scalar write): flatten ``offsets`` and lower to
+      ``pto.addptr`` + ``pto.cmo.cacheinvalid %write_ptr single_cache_line``.
+    - otherwise (tile store): lower to ``pto.partition_view`` +
+      ``pto.cmo.cacheinvalid %payload_view single_cache_line : !pto.partition_tensor_view<...>``.
 
     Args:
-        tensor: Target tensor whose write pointer is invalidated
-        offset: Element offset added to the base pointer (int or integer Expr)
+        tensor: Target tensor whose sub-region is invalidated
+        offsets: Per-dimension start offsets; length must equal the tensor rank
+        shapes: Per-dimension region sizes; length must equal the tensor rank.
+            Defaults to all-1 (the scalar-write / ptr form)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression for system.cacheinvalid
     """
     actual_span = _get_span_or_capture(span)
-    offset_expr = _normalize_expr(offset, actual_span)
-    offset_type = offset_expr.type
-    if isinstance(offset_type, ScalarType) and offset_type.dtype.is_float():
-        raise TypeError(
-            f"system.cacheinvalid offset must be an integer scalar, got dtype {offset_type.dtype}"
-        )
-    return _ir_core.create_op_call("system.cacheinvalid", [tensor, offset_expr], {}, actual_span)
+
+    tensor_type = tensor.type
+    if not isinstance(tensor_type, TensorType):
+        raise TypeError(f"system.cacheinvalid tensor must have TensorType, got {tensor_type}")
+    rank = len(tensor_type.shape)
+
+    offsets = list(offsets)
+    if len(offsets) != rank:
+        raise ValueError(f"system.cacheinvalid offsets must match tensor rank {rank}, got {len(offsets)}")
+    shapes = [1] * rank if shapes is None else list(shapes)
+    if len(shapes) != rank:
+        raise ValueError(f"system.cacheinvalid shapes must match tensor rank {rank}, got {len(shapes)}")
+
+    offsets_tuple = _to_make_tuple(offsets, actual_span)
+    shapes_tuple = _to_make_tuple(shapes, actual_span)
+    for name, elems in (("offsets", offsets_tuple.elements), ("shapes", shapes_tuple.elements)):
+        for elem in elems:
+            elem_type = elem.type
+            if isinstance(elem_type, ScalarType) and elem_type.dtype.is_float():
+                raise TypeError(f"system.cacheinvalid {name} must be integers, got dtype {elem_type.dtype}")
+    return _ir_core.create_op_call(
+        "system.cacheinvalid", [tensor, offsets_tuple, shapes_tuple], {}, actual_span
+    )
 
 
 _SYNCALL_CORE_TYPES = ("aiv_only", "aic_only", "mix")

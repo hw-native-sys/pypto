@@ -818,19 +818,52 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
 
   reg("system.cacheinvalid", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
     auto& codegen = AsPto(codegen_base);
-    INTERNAL_CHECK_SPAN(op->args_.size() == 2, op->span_)
-        << "system.cacheinvalid takes 2 arguments (tensor, offset), got " << op->args_.size();
-    auto tensor_type = AsTensorTypeLike(op->args_[0]->GetType());
-    INTERNAL_CHECK_SPAN(tensor_type, op->span_) << "system.cacheinvalid first argument must be a tensor";
+    INTERNAL_CHECK_SPAN(op->args_.size() == 3, op->span_)
+        << "system.cacheinvalid takes 3 arguments (tensor, offsets, shapes), got " << op->args_.size();
     const auto tensor_var = AsVarLike(op->args_[0]);
     INTERNAL_CHECK_SPAN(tensor_var, op->span_)
         << "system.cacheinvalid first argument must be a tensor variable";
-    const std::string base_ptr = codegen.GetTensorBasePtr(tensor_var);
-    const std::string ptr_type = "!pto.ptr<" + codegen.GetTypeString(tensor_type->dtype_) + ">";
-    const std::string off = codegen.EmitCastToIndex(op->args_[1], codegen.GetExprAsCode(op->args_[1]));
-    const std::string write_ptr = codegen.NewTemp();
-    codegen.Emit(write_ptr + " = pto.addptr " + base_ptr + ", " + off + " : " + ptr_type + " -> " + ptr_type);
-    codegen.Emit("pto.cmo.cacheinvalid " + write_ptr + " single_cache_line");
+    auto tensor_type = AsTensorTypeLike(tensor_var->GetType());
+    INTERNAL_CHECK_SPAN(tensor_type, op->span_) << "system.cacheinvalid first argument must be a tensor";
+    auto offsets_tuple = As<ir::MakeTuple>(op->args_[1]);
+    INTERNAL_CHECK_SPAN(offsets_tuple, op->span_) << "system.cacheinvalid offsets must be a tuple";
+    auto shapes_tuple = As<ir::MakeTuple>(op->args_[2]);
+    INTERNAL_CHECK_SPAN(shapes_tuple, op->span_) << "system.cacheinvalid shapes must be a tuple";
+
+    const std::string dtype_str = codegen.GetTypeString(tensor_type->dtype_);
+
+    // A region of all-ones sizes is a single element (scalar write): flatten the
+    // N-D offsets into a linear element offset and invalidate through a raw ptr.
+    // Any larger dimension (or a dynamic size) is a tile store: address the region
+    // through a partition_tensor_view, matching tile.store's outs() operand.
+    bool is_scalar_write = true;
+    for (const auto& size : shapes_tuple->elements_) {
+      auto size_const = As<ir::ConstInt>(size);
+      if (!size_const || size_const->value_ != 1) {
+        is_scalar_write = false;
+        break;
+      }
+    }
+
+    if (is_scalar_write) {
+      const std::string base_ptr = codegen.GetTensorBasePtr(tensor_var);
+      const std::string ptr_type = "!pto.ptr<" + dtype_str + ">";
+      const std::string off = GetFlatOffsetSSA(offsets_tuple, tensor_type->shape_, codegen);
+      const std::string write_ptr = codegen.NewTemp();
+      codegen.Emit(write_ptr + " = pto.addptr " + base_ptr + ", " + off + " : " + ptr_type + " -> " +
+                   ptr_type);
+      codegen.Emit("pto.cmo.cacheinvalid " + write_ptr + " single_cache_line");
+    } else {
+      const std::string tensor_view = codegen.GetOrCreateTensorView(tensor_var);
+      const std::string tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
+      const std::string partition_type =
+          MakePartitionTensorViewType(GetDimStrings(shapes_tuple->elements_), dtype_str);
+      const std::string payload_view =
+          EmitPartitionViewPTO(tensor_var->name_hint_, tensor_view, tensor_view_type, partition_type,
+                               GetIndexOffsetCodes(offsets_tuple->elements_, codegen),
+                               GetSizeCodes(shapes_tuple->elements_, codegen), codegen);
+      codegen.Emit("pto.cmo.cacheinvalid " + payload_view + " single_cache_line : " + partition_type);
+    }
     return std::string("");
   });
 }
