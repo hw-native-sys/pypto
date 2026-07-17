@@ -123,6 +123,24 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         python-version: ["3.10"]
+        # Linux runs the full unit-test suite; macOS runs only a small
+        # foundational smoke subset. The C++ extension's macOS compilation is
+        # already validated by the `pip install -v .[dev]` build step below, so
+        # macOS only needs to confirm the built module imports and executes —
+        # duplicating all ~6.7k cases on both OSes is wasted CI time. The `include`
+        # entries add a per-OS `ut_paths` without creating extra jobs, so the
+        # required-check names `unit-tests (<os>, 3.10)` are preserved.
+        include:
+          - os: ubuntu-latest
+            ut_paths: tests/ut
+            ut_label: full suite
+          - os: macos-latest
+            # Smoke: core object system (dtype/error/logging) + basic IR node
+            # construction — the layers where a macOS-specific binding or
+            # compile/execute break would surface. Widen this list if a macOS-only
+            # regression slips through.
+            ut_paths: tests/ut/core tests/ut/ir/core
+            ut_label: smoke subset (compile + execute check)
 
     steps:
     - name: Checkout
@@ -140,8 +158,8 @@ jobs:
         pip install torch --index-url https://download.pytorch.org/whl/cpu
         pip install -v .[dev]
 
-    - name: Test unit tests
-      run: pytest tests/ut -n auto --maxprocesses 8 -v
+    - name: Test unit tests (${{ matrix.ut_label }})
+      run: pytest ${{ matrix.ut_paths }} -n auto --maxprocesses 8 -v
 
   codegen-tests:
     # Codegen-only: verifies IR → kernel/orch C++ generation without going
