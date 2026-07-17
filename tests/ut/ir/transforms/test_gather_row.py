@@ -148,6 +148,35 @@ def test_gather_row_transpose_writes_column():
     assert "[0, 1], [1, 0], [1, 128], transpose=True)" in text
 
 
+def test_tile_gather_row_dsl_interface_roundtrips():
+    """The exposed ``pl.tile.gather_row`` DSL wrapper round-trips through the parser.
+
+    A hand-authored tile-level kernel writes GM rows straight into a Mat tile via
+    ``pl.tile.gather_row`` (no tensor-level ``create_l1`` / lowering involved).
+    Printing and re-parsing must reproduce the same IR, which exercises the
+    language wrapper dispatch path (``_dsl_tile.gather_row``) rather than the raw
+    IR-builder fallback the printer previously round-tripped through.
+    """
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, src: pl.Tensor[[256, 128], pl.BF16]) -> pl.Tile[[16, 128], pl.BF16, pl.Mem.Mat]:
+            kv0 = pl.tile.create([16, 128], dtype=pl.BF16, target_memory=pl.Mem.Mat)
+            kv1 = pl.tile.gather_row(kv0, src, [0, 0], [0, 0], [1, 128])
+            kv2 = pl.tile.gather_row(kv1, src, [1, 0], [1, 0], [1, 128], transpose=False)
+            return kv2
+
+        @pl.function
+        def main(self, src: pl.Tensor[[256, 128], pl.BF16]) -> pl.Tile[[16, 128], pl.BF16, pl.Mem.Mat]:
+            return self.kernel(src)
+
+    text = ir.python_print(Program, format=False)
+    assert "pl.tile.gather_row(" in text
+    reparsed = pl.parse(text)
+    ir.assert_structural_equal(Program, reparsed)
+
+
 def test_gather_row_rejects_dtype_mismatch():
     """acc and src must share dtype (matmul operand integrity)."""
     with pytest.raises(Exception, match="share dtype"):

@@ -29,6 +29,7 @@ __all__ = [
     "load",
     "store",
     "assemble",
+    "gather_row",
     "extract",
     "scatter_update",
     "concat",
@@ -461,6 +462,49 @@ def assemble(target: Tile, source: Tile, offset: Sequence[IntLike]) -> Tile:
         Tile wrapping the assemble operation
     """
     call_expr = _ir_ops.assemble(target.unwrap(), source.unwrap(), _normalize_intlike(offset))
+    return Tile(expr=call_expr)
+
+
+def gather_row(
+    dst: Tile,
+    src: Tensor,
+    dst_offset: Sequence[IntLike],
+    src_offset: Sequence[IntLike],
+    shapes: Sequence[IntLike],
+    transpose: bool = False,
+) -> Tile:
+    """Load one GM row directly into a sub-region of an on-chip tile (DPS).
+
+    Per-row primitive of the paged-gather lowering: DMAs one GM row window
+    straight into ``dst`` at ``dst_offset`` (``pto.subview`` of ``dst`` +
+    ``pto.tload``, ``GM -> on-chip``, no ``pto.tmov``). The caller computes the
+    physical ``src_offset`` (block-table lookup + bias) and the ``dst_offset``
+    slot itself, so arbitrary gather logic stays in the kernel. Writes ``dst``
+    in place, so a loop-carried accumulator is filled row by row and feeds
+    ``pl.matmul`` directly — the tile-level counterpart of
+    :func:`pypto.language.op.tensor_ops.gather_row`.
+
+    Args:
+        dst: Destination on-chip accumulator tile (Mat/L1 or Vec/UB).
+        src: Source pool in GM (a ``Tensor``).
+        dst_offset: ``[row, col]`` slot within ``dst`` to write.
+        src_offset: ``[row, col]`` physical offset within the GM ``src``.
+        shapes: GM row window shape ``[r, c]`` (typically ``[1, size]``).
+        transpose: Place the GM row ``[r, c]`` as an on-chip column ``[c, r]`` —
+            fills a matmul ``b_trans`` B-operand without a GM round-trip
+            (Mat/L1 only).
+
+    Returns:
+        Tile aliasing ``dst`` (written in place).
+    """
+    call_expr = _ir_ops.gather_row(
+        dst.unwrap(),
+        src.unwrap(),
+        _normalize_intlike(dst_offset),
+        _normalize_intlike(src_offset),
+        _normalize_intlike(shapes),
+        transpose,
+    )
     return Tile(expr=call_expr)
 
 
