@@ -99,6 +99,10 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     signal_cols = static_cast<int>(signal_tensor->shapes[0]);
   }
 
+  // Soft guards: on any unsupported shape the kernel drains its pipes and
+  // returns without touching data. The host lowering path validates these same
+  // bounds up front, so a well-formed program never hits these early returns;
+  // they exist only to keep the device kernel memory-safe if invoked directly.
   if (nranks <= 1 || nranks > kMaxSupportedRanks || numel <= 0 || (numel % nranks) != 0) {
     pipe_barrier(PIPE_ALL);
     return;

@@ -68,7 +68,10 @@ namespace {
 
 [[nodiscard]] bool ShouldLowerAllReduceAsRing(const CallPtr& call) {
   if (call->HasKwarg("mode") || call->HasAttr("mode")) {
-    return GetAllReduceMode(call) == "ring";
+    const auto mode = GetAllReduceMode(call);
+    CHECK_SPAN(mode == "ring" || mode == "mesh", call->span_)
+        << R"(pld.tensor.allreduce mode must be "ring" or "mesh", got ")" << mode << "\"";
+    return mode == "ring";
   }
 
   // Defensive fallback: some earlier passes may drop/canonicalize the mode
@@ -180,10 +183,13 @@ void CheckRingSignalCapacity(const CallPtr& call, const ExprPtr& signal_expr, si
         << ") must be at least the participating device count (" << world_size << ")";
   }
   if (sig_rounds && sig_nr && sig_nr->value_ > 0) {
+    // Exact match mirrors builtin.tensor.allreduce_ring's type deducer so an
+    // internally-inconsistent signal is rejected here with a clear message
+    // instead of failing later at builtin construction.
     const auto expected_rounds = 2 * (sig_nr->value_ - 1);
-    CHECK_SPAN(sig_rounds->value_ >= expected_rounds, call->span_)
+    CHECK_SPAN(sig_rounds->value_ == expected_rounds, call->span_)
         << "LowerHostTensorCollectives: ring allreduce signal shape[0] (" << sig_rounds->value_
-        << ") must be at least 2*(NR-1) = " << expected_rounds << " for NR = " << sig_nr->value_;
+        << ") must equal 2*(NR-1) = " << expected_rounds << " for NR = " << sig_nr->value_;
   }
 }
 
@@ -404,7 +410,7 @@ StmtPtr EmitPerDeviceBuiltinCalls(const CallPtr& call, const HostCollectiveRule&
                                   const CommDomainScopeStmtPtr& scope, const Span& span,
                                   const std::vector<std::string>& leading_comments) {
   if (!scope->devices_.empty()) {
-    if (call->op_->name_ == "pld.tensor.allreduce") {
+    if (IsOp(call, "pld.tensor.allreduce")) {
       CheckAllReduceSignalCapacity(call, rule.signal_expr(call), scope->devices_.size());
     } else {
       CheckStaticSignalCapacity(call, rule.signal_expr(call), scope->devices_.size());
@@ -443,11 +449,10 @@ class LowerHostTensorCollectivesMutator : public IRMutator {
   StmtPtr VisitStmt_(const EvalStmtPtr& op) override {
     auto call = As<Call>(op->expr_);
     if (IsHostTensorCollective(call)) {
-      // Do not VisitExpr(call) here: the generic Call visitor may rebuild the
-      // Call node and accidentally drop keyword arguments (notably `mode`).
-      // LowerCollective only needs the already-materialized window-bound
-      // arguments.
-      return LowerCollective(call, op->span_, op->leading_comments_);
+      auto visited_call = As<Call>(VisitExpr(op->expr_));
+      INTERNAL_CHECK_SPAN(IsHostTensorCollective(visited_call), op->span_)
+          << "LowerHostTensorCollectives: collective EvalStmt rewrote to a non-collective expression";
+      return LowerCollective(visited_call, op->span_, op->leading_comments_);
     }
     return IRMutator::VisitStmt_(op);
   }
@@ -457,8 +462,9 @@ class LowerHostTensorCollectivesMutator : public IRMutator {
     if (!IsHostTensorCollective(call)) {
       return IRMutator::VisitStmt_(op);
     }
-    // See EvalStmt path: do not VisitExpr(call) to preserve kwargs like `mode`.
-    auto visited_call = call;
+    auto visited_call = As<Call>(VisitExpr(op->value_));
+    INTERNAL_CHECK_SPAN(IsHostTensorCollective(visited_call), op->span_)
+        << "LowerHostTensorCollectives: collective AssignStmt rewrote to a non-collective expression";
     std::vector<StmtPtr> stmts;
     stmts.push_back(LowerCollective(visited_call, op->span_, op->leading_comments_));
     const auto* rule = LookupHostCollectiveRule(visited_call->op_->name_);

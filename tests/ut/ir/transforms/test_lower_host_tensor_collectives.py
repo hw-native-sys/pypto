@@ -804,3 +804,26 @@ def test_host_allreduce_ring_lowers_to_ring_builtin():
     assert call.kwargs["op"] == int(pld.ReduceOp.Sum)
     assert call.kwargs["dtype"] == pl.FP32
     assert list(call.arg_directions) == [ir.ArgDirection.InOut, ir.ArgDirection.InOut]
+
+
+def test_host_allreduce_rejects_unknown_mode():
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            data_buf = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(6 * 4 * pl.INT32.get_byte())
+            data = pld.window(data_buf, [256], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [6, 4], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(data, device=r)
+            pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, mode="star")
+            return 0
+
+    program = passes.materialize_comm_domain_scopes()(P)
+    with pytest.raises(Exception, match=r'mode must be "ring" or "mesh"'):
+        passes.lower_host_tensor_collectives()(program)
