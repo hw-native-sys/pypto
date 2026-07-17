@@ -1,0 +1,28 @@
+# Kernel and Orchestration Configuration
+from pathlib import Path
+
+from simpler.task_interface import ArgDirection as _D
+
+_ROOT_DIR = Path(__file__).parent
+
+RUNTIME_CONFIG = {
+    "runtime": "tensormap_and_ringbuffer",
+    "aicpu_thread_num": 4,
+    "block_dim": 1,
+}
+
+ORCHESTRATION = {
+    "source": str(_ROOT_DIR / "orchestration" / "{{entry}}.cpp"),
+    "function_name": "aicpu_orchestration_entry",
+    "signature": [_D.INOUT, _D.INOUT],
+}
+
+KERNELS = [
+    {
+        "func_id": 0,
+        "name": "{{kernel_name}}",
+        "source": str(_ROOT_DIR / "kernels" / "aiv" / "{{kernel_name}}.cpp"),
+        "core_type": "aiv",
+        "signature": [_D.INOUT, _D.INOUT],
+    },
+]

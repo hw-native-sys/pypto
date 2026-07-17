@@ -1,0 +1,197 @@
+/*
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * -----------------------------------------------------------------------------------------------------------
+ */
+
+// Generated from {{template_package}}.
+//
+// Host builtin ring allreduce — in-place chunked reduce-scatter + allgather.
+//
+// ABI (matches mesh host builtins):
+//   tensor(0) = data   window-bound FP32 buffer (InOut)
+//   tensor(1) = signal window-bound INT32 matrix [2*(NR-1), NR] (InOut)
+//   scalar(0) = nranks
+//   scalar(1) = CommContext device pointer
+//
+// Each rank's data buffer holds SIZE elements (product of tensor shapes). The
+// ring partitions data into NR contiguous chunks of chunk_elems = SIZE // NR
+// and performs RS+AG in-place on those chunk slots.
+
+#include <cstdint>
+#include <pto/pto-inst.hpp>
+
+#include "platform_comm/comm_context.h"
+#include "pto/comm/comm_types.hpp"
+#include "pto/comm/pto_comm_inst.hpp"
+#include "tensor.h"
+
+#ifndef __gm__
+#define __gm__
+#endif
+
+#ifndef __aicore__
+#define __aicore__ [aicore]
+#endif
+
+namespace {
+
+static constexpr int kMaxSupportedRanks = 16;
+static constexpr int64_t kMaxChunkElems = 256;
+
+template <typename T>
+AICORE inline __gm__ T *CommRemotePtr(__gm__ CommContext *ctx, __gm__ T *local_ptr, int pe) {
+  uint64_t local_base = ctx->windowsIn[ctx->rankId];
+  uint64_t offset = reinterpret_cast<uint64_t>(local_ptr) - local_base;
+  return reinterpret_cast<__gm__ T *>(ctx->windowsIn[pe] + offset);
+}
+
+// Per-round barrier row: AtomicAdd(0→1) / WaitGe(1), single-shot per row.
+AICORE inline void RoundBarrier(__gm__ CommContext *ctx, __gm__ int32_t *signal_row, int my_rank,
+                                int nranks) {
+  for (int peer = 0; peer < nranks; ++peer) {
+    if (peer == my_rank) {
+      continue;
+    }
+    __gm__ int32_t *remote_signal = CommRemotePtr(ctx, signal_row + my_rank, peer);
+    pto::comm::Signal sig(remote_signal);
+    pto::comm::TNOTIFY(sig, static_cast<int32_t>(1), pto::comm::NotifyOp::AtomicAdd);
+  }
+  for (int peer = 0; peer < nranks; ++peer) {
+    if (peer == my_rank) {
+      continue;
+    }
+    pto::comm::Signal sig(signal_row + peer);
+    pto::comm::TWAIT(sig, static_cast<int32_t>(1), pto::comm::WaitCmp::GE);
+  }
+  pipe_barrier(PIPE_ALL);
+}
+
+}  // namespace
+
+extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
+  __gm__ Tensor *data_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
+  __gm__ Tensor *signal_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
+  int nranks = static_cast<int>(args[2]);
+  __gm__ CommContext *comm_ctx = reinterpret_cast<__gm__ CommContext *>(args[3]);
+
+  int64_t numel = 1;
+  for (uint32_t dim = 0; dim < data_tensor->ndims; ++dim) {
+    numel *= static_cast<int64_t>(data_tensor->shapes[dim]);
+  }
+
+  __gm__ {{dtype_cpp}} *data =
+      reinterpret_cast<__gm__ {{dtype_cpp}} *>(data_tensor->buffer.addr) + data_tensor->start_offset;
+  __gm__ int32_t *signal_base =
+      reinterpret_cast<__gm__ int32_t *>(signal_tensor->buffer.addr) + signal_tensor->start_offset;
+
+  int signal_rows = 1;
+  int signal_cols = nranks;
+  if (signal_tensor->ndims >= 2) {
+    signal_rows = static_cast<int>(signal_tensor->shapes[0]);
+    signal_cols = static_cast<int>(signal_tensor->shapes[1]);
+  } else if (signal_tensor->ndims == 1) {
+    signal_cols = static_cast<int>(signal_tensor->shapes[0]);
+  }
+
+  if (nranks <= 1 || nranks > kMaxSupportedRanks || numel <= 0 || (numel % nranks) != 0) {
+    pipe_barrier(PIPE_ALL);
+    return;
+  }
+
+  const int chunk_elems = static_cast<int>(numel / nranks);
+  if (chunk_elems > kMaxChunkElems) {
+    pipe_barrier(PIPE_ALL);
+    return;
+  }
+
+  const int expected_rounds = 2 * (nranks - 1);
+  if (signal_rows < expected_rounds || signal_cols < nranks) {
+    pipe_barrier(PIPE_ALL);
+    return;
+  }
+
+  int my_rank = static_cast<int>(comm_ctx->rankId);
+  __gm__ {{dtype_cpp}} *chunks = data;
+
+  using ShapeDyn = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
+  using StrideDyn = pto::Stride<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
+  using Global = pto::GlobalTensor<{{dtype_cpp}}, ShapeDyn, StrideDyn, pto::Layout::ND>;
+  using TileData = pto::Tile<pto::TileType::Vec, {{dtype_cpp}}, 1, kMaxChunkElems, pto::BLayout::RowMajor, -1,
+                             -1>;
+
+  TileData chunk_tile(1, chunk_elems);
+  TileData recv_tile(1, chunk_elems);
+  TASSIGN(chunk_tile, 0x0);
+  TASSIGN(recv_tile, 0x10000);
+
+  ShapeDyn chunk_shape(1, 1, 1, 1, chunk_elems);
+  StrideDyn chunk_stride(chunk_elems, chunk_elems, chunk_elems, chunk_elems, 1);
+
+  int round = 0;
+
+  // Phase 1: reduce-scatter — (NR-1) ring steps.
+  for (int step = 1; step < nranks; ++step) {
+    const int recv_add_idx = (my_rank - step - 1 + nranks) % nranks;
+
+    RoundBarrier(comm_ctx, signal_base + round * signal_cols, my_rank, nranks);
+    ++round;
+
+    const int left = (my_rank - 1 + nranks) % nranks;
+    const int left_send_idx = (left - step + nranks) % nranks;
+    {
+      __gm__ {{dtype_cpp}} *remote_chunk =
+          CommRemotePtr(comm_ctx, chunks + static_cast<size_t>(left_send_idx * chunk_elems), left);
+      Global remote_g(remote_chunk, chunk_shape, chunk_stride);
+      TLOAD(recv_tile, remote_g);
+      set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+      wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+    }
+
+    Global acc_g(chunks + static_cast<size_t>(recv_add_idx * chunk_elems), chunk_shape, chunk_stride);
+    TLOAD(chunk_tile, acc_g);
+    set_flag(PIPE_MTE2, PIPE_V, EVENT_ID1);
+    wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID1);
+    TADD(chunk_tile, chunk_tile, recv_tile);
+    set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+    wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+    TSTORE(acc_g, chunk_tile);
+    set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+    wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+    pipe_barrier(PIPE_ALL);
+  }
+
+  // Phase 2: allgather — (NR-1) ring steps.
+  for (int step = 1; step < nranks; ++step) {
+    const int recv_idx = (my_rank - step + nranks) % nranks;
+
+    RoundBarrier(comm_ctx, signal_base + round * signal_cols, my_rank, nranks);
+    ++round;
+
+    const int left = (my_rank - 1 + nranks) % nranks;
+    const int left_send_idx = (left - step + 1 + nranks) % nranks;
+    {
+      __gm__ {{dtype_cpp}} *remote_chunk =
+          CommRemotePtr(comm_ctx, chunks + static_cast<size_t>(left_send_idx * chunk_elems), left);
+      Global remote_g(remote_chunk, chunk_shape, chunk_stride);
+      TLOAD(recv_tile, remote_g);
+      set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+      wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+    }
+
+    Global dst_g(chunks + static_cast<size_t>(recv_idx * chunk_elems), chunk_shape, chunk_stride);
+    set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+    wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+    TSTORE(dst_g, recv_tile);
+    set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+    wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+    pipe_barrier(PIPE_ALL);
+  }
+
+  pipe_barrier(PIPE_ALL);
+}

@@ -746,6 +746,7 @@ def test_host_all_to_all_lowers_to_namesake_builtin():
     program = passes.materialize_comm_domain_scopes()(P)
     result = passes.lower_host_tensor_collectives()(program)
     host = _get_func(result, "host_orch")
+
     loops = _collect_for_stmts(host.body)
     builtin_loops = [
         loop
@@ -765,3 +766,41 @@ def test_host_all_to_all_lowers_to_namesake_builtin():
         ir.ArgDirection.InOut,
     ]
     assert call.kwargs["dtype"] == DataType.FP32
+
+
+def test_host_allreduce_ring_lowers_to_ring_builtin():
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            data_buf = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(6 * 4 * pl.INT32.get_byte())
+            data = pld.window(data_buf, [256], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [6, 4], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(data, device=r)
+            pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, mode="ring")
+            return 0
+
+    program = cast(ir.Program, passes.materialize_comm_domain_scopes()(P))
+    result = cast(ir.Program, passes.lower_host_tensor_collectives()(program))
+    host = _get_func(result, "host_orch")
+
+    loops = _collect_for_stmts(host.body)
+    builtin_loops = [
+        loop
+        for loop in loops
+        if isinstance(loop.body, ir.EvalStmt)
+        and isinstance(loop.body.expr, ir.Call)
+        and loop.body.expr.op.name == "builtin.tensor.allreduce_ring"
+    ]
+    assert len(builtin_loops) == 1
+
+    call = _eval_call(builtin_loops[0].body)
+    assert call.kwargs["op"] == int(pld.ReduceOp.Sum)
+    assert call.kwargs["dtype"] == pl.FP32
+    assert list(call.arg_directions) == [ir.ArgDirection.InOut, ir.ArgDirection.InOut]
