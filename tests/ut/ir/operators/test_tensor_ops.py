@@ -3346,9 +3346,25 @@ def test_tensor_gather_rejects_bad_dim():
         ir.op.tensor.gather(inp, dim=2, index=idx)
 
 
-def test_tensor_gather_rejects_non_int32_index():
-    inp, idx = _make_gather_inputs(idx_dtype=DataType.INT16)
-    with pytest.raises(Exception, match=r"index dtype to be INT32"):
+def test_tensor_gather_accepts_int16_index_with_16bit_input():
+    """INT16 index is accepted when the input is a 16-bit dtype (FP16/INT16)."""
+    inp, idx = _make_gather_inputs(src_dtype=DataType.FP16, idx_dtype=DataType.INT16)
+    call = ir.op.tensor.gather(inp, dim=-1, index=idx)
+    assert call.op.name == "tensor.gather"
+    assert call.type.dtype == DataType.FP16
+
+
+def test_tensor_gather_rejects_int16_index_with_32bit_input():
+    """INT16 index with a 32-bit input is unsafe (tgather b32 reads it as u32)."""
+    inp, idx = _make_gather_inputs(src_dtype=DataType.FP32, idx_dtype=DataType.INT16)
+    with pytest.raises(Exception, match=r"16-bit input"):
+        ir.op.tensor.gather(inp, dim=-1, index=idx)
+
+
+def test_tensor_gather_rejects_non_int_index_dtype():
+    """A non-integer index dtype (FP32) is rejected outright."""
+    inp, idx = _make_gather_inputs(idx_dtype=DataType.FP32)
+    with pytest.raises(Exception, match=r"index dtype INT32"):
         ir.op.tensor.gather(inp, dim=-1, index=idx)
 
 

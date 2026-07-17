@@ -146,14 +146,15 @@ class GatherA5INT16IndexProgram:
     ``inp [4, 16] FP16``, ``idx [4, 16] INT16`` → ``output [4, 16] FP16``.
     INT16 indices are native to A5 but rejected by A2/A3 (the PTOAS verifier only
     permits i32 indices there), so this case is pinned to A5. It exercises the
-    relaxed ``tile.gather`` type deduction — INT16 indices plus the A5 index
-    form's unconstrained ``tmp`` — end-to-end on hardware.
+    ``tile.gather`` type deduction — INT16 indices (valid only with a 16-bit src)
+    plus the A5 index form's unconstrained ``tmp`` — end-to-end on hardware.
 
     FP16 src + INT16 indices selects the A5 ``TGather_b16`` path (2-byte src,
     2-byte indices), the hardware-supported INT16-index combination — mirroring
-    the scatter INT16 tests. (FP32/INT32 src + INT16 indices would route to
-    ``TGather_b32``, which reinterprets indices as u32 and is not INT16-safe in
-    this pto-isa revision.)
+    the scatter INT16 tests. INT16 indices with a 32-bit src (FP32/INT32) are
+    rejected outright by the ``tile.gather`` deducer: the only reachable form
+    would be ``TGather_b32``, which reinterprets the indices as u32 and is not
+    INT16-safe in this pto-isa revision.
 
     idx last-dim is 16 (16×2=32 bytes) to satisfy the hardware tile column
     alignment requirement (Cols * sizeof(dtype) % 32 == 0) for INT16.
@@ -481,7 +482,9 @@ class GatherA5INT16IndexTestCase(_GatherBaseTestCase):
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
-            TensorSpec("inp", [4, 16], DataType.FP16, init_value=lambda: torch.randn(4, 16).to(torch.float16)),
+            TensorSpec(
+                "inp", [4, 16], DataType.FP16, init_value=lambda: torch.randn(4, 16).to(torch.float16)
+            ),
             TensorSpec(
                 "idx",
                 [4, 16],

@@ -1,8 +1,8 @@
 # Copyright (c) PyPTO Contributors.
-# This program is free software; you can redistribute it and/or modify it under the terms and conditions of
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
 # CANN Open Software License Agreement Version 2.0 (the "License").
 # Please refer to the License for details. You may not use this file except in compliance with the License.
-# THIS FILE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
@@ -14,19 +14,22 @@ without depending on the DSL parser. The end-to-end behaviour (including the A5
 device path) is covered by the system tests in ``tests/st/runtime/ops/test_gather.py``.
 
 Type contract after the A5 (Ascend950) index-form alignment — the IR deducer is
-backend-agnostic and runs before arch selection, so it accepts the *union* of what
-any target permits and lets the PTOAS verifier narrow per arch (see the PTO IR
-manual, ``pto.tgather`` index-form checks):
+backend-agnostic, so it accepts the union of what any target permits *up to the
+universal index-width constraint* (PyPTO has no internal tgather verifier; the
+arch-specific A2/A3 i32-only rule is left to the external PTOAS assembler — see
+the PTO IR manual, ``pto.tgather`` index-form checks):
 
 * ``src`` dtype in {FP16, FP32, INT16, INT32}; tile lives in Vec.
-* ``indices`` dtype is INT32 everywhere, or INT16 additionally on A5.
+* ``indices`` dtype is INT32 (with any ``src``), or INT16 — but INT16 indices are
+  only valid with a 16-bit ``src`` (FP16/INT16): the tgather b32 form reads each
+  index as a u32, so an INT16 index with a 32-bit ``src`` is unsafe on every
+  target, not merely arch-gated. That universal rule is checked by the deducer.
 * ``tmp`` is a workspace operand required by the IR but not read by the A5 index
   form, so any Vec tile dtype is accepted (A2/A3 constrains it at PTOAS).
 * ``dst`` dtype equals ``src``; ``dst`` shape equals ``indices``.
 """
 
 import pytest
-
 from pypto import DataType, ir
 from pypto.ir.op import tile
 
@@ -48,12 +51,20 @@ class TestTileGatherIndexTypes:
         assert isinstance(call.type, ir.TileType)
         assert call.type.dtype == src_dtype  # dst dtype follows src
 
-    @pytest.mark.parametrize("idx_dtype", [DataType.INT32, DataType.INT16])
-    def test_valid_index_dtype(self, idx_dtype):
-        # INT16 indices pass IR deduction (A5 permits them); A2/A3 rejects later at PTOAS.
-        call = _gather(DataType.FP32, idx_dtype, DataType.INT32)
+    @pytest.mark.parametrize(
+        ("src_dtype", "idx_dtype"),
+        [
+            (DataType.FP32, DataType.INT32),
+            (DataType.INT32, DataType.INT32),
+            (DataType.FP16, DataType.INT16),  # INT16 indices require a 16-bit src.
+            (DataType.INT16, DataType.INT16),
+        ],
+    )
+    def test_valid_index_dtype(self, src_dtype, idx_dtype):
+        # INT32 indices are valid with any src; INT16 indices require a 16-bit src.
+        call = _gather(src_dtype, idx_dtype, DataType.INT32)
         assert isinstance(call.type, ir.TileType)
-        assert call.type.dtype == DataType.FP32
+        assert call.type.dtype == src_dtype  # dst dtype follows src
 
     @pytest.mark.parametrize("tmp_dtype", [DataType.FP32, DataType.FP16, DataType.INT32, DataType.INT16])
     def test_tmp_dtype_unconstrained(self, tmp_dtype):
@@ -69,8 +80,10 @@ class TestTileGatherIndexTypes:
         call = tile.gather(src, idx, tmp)
         assert isinstance(call.type, ir.TileType)
         assert call.type.dtype == DataType.FP16  # follows src
-        # dst shape follows indices, not src.
+        # dst shape follows indices [1, 16], not src [1, 128].
         assert len(call.type.shape) == 2
+        assert isinstance(call.type.shape[0], ir.ConstInt) and call.type.shape[0].value == 1
+        assert isinstance(call.type.shape[1], ir.ConstInt) and call.type.shape[1].value == 16
 
     def test_invalid_src_dtype_raises(self):
         with pytest.raises(Exception, match="src dtype"):
@@ -80,6 +93,13 @@ class TestTileGatherIndexTypes:
     def test_invalid_index_dtype_raises(self, bad_idx_dtype):
         with pytest.raises(Exception, match="indices dtype"):
             _gather(DataType.FP32, bad_idx_dtype, DataType.INT32)
+
+    @pytest.mark.parametrize("wide_src_dtype", [DataType.FP32, DataType.INT32])
+    def test_int16_index_requires_16bit_src(self, wide_src_dtype):
+        # INT16 indices with a 32-bit src are unsafe on every target (tgather b32
+        # reads them as u32), so the deducer rejects the combination outright.
+        with pytest.raises(Exception, match="16-bit src"):
+            _gather(wide_src_dtype, DataType.INT16, DataType.INT32)
 
     def test_non_tile_indices_raises(self):
         span = ir.Span.unknown()

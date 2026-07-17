@@ -2369,8 +2369,8 @@ def gather(src: Tile, indices: Tile, tmp: Tile) -> Tile:
 
     Args:
         src: Source tile (FP16, FP32, INT16, or INT32)
-        indices: Index tile (INT32, or INT16 on A5/Ascend950) — selects which
-            elements of ``src`` to gather
+        indices: Index tile (INT32 with any src, or INT16 with a 16-bit src — FP16/INT16);
+            selects which elements of ``src`` to gather
         tmp: Temporary workspace tile (any Vec dtype; required as an operand but
             not constrained by the A5 index form — A2/A3 narrows this at PTOAS)
 

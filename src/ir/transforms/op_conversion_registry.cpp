@@ -1376,6 +1376,18 @@ void OpConversionRegistry::RegisterGatherOps() {
         //   out_row  = gather(inp_flat, flat_idx) → [1, I2]
         // ================================================================
         if (rank == 3 && norm_dim == 0) {
+          // The flat-index lowering computes `idx_row * S2 + offset` in INT32 and
+          // feeds that INT32 flat index into tile.gather. That only matches the
+          // tgather b32 form (32-bit src, indices read as u32); a 2-byte src would
+          // require the b16 form with 2-byte indices, which the flat index cannot
+          // satisfy. Reject 16-bit src here rather than emit a width-mismatched
+          // (silently corrupt) gather. Full 16-bit-src support would mirror the
+          // scatter lowering (INT16 range tile + tile.cast narrow).
+          CHECK_SPAN(input_dtype == DataType::FP32 || input_dtype == DataType::INT32, span)
+              << "tensor.gather: rank-3 gather on dim 0 uses an INT32 flat index that only "
+                 "matches the tgather b32 form (32-bit src); 16-bit src is not yet supported "
+                 "on this axis. Got input dtype "
+              << input_dtype.ToString();
           int64_t S0 = get_const(input_shape[0], "input.shape[0]");
           int64_t S2 = get_const(input_shape[2], "input.shape[2]");
           int64_t I0 = get_const(index_shape[0], "index.shape[0]");
@@ -1436,6 +1448,14 @@ void OpConversionRegistry::RegisterGatherOps() {
         // ================================================================
         CHECK_SPAN(rank == 3 && norm_dim == 1, span) << "tensor.gather: unsupported (rank, dim) combination, "
                                                      << "got rank=" << rank << " norm_dim=" << norm_dim;
+
+        // Same flat-index/INT32 limitation as the dim==0 case above — only the
+        // tgather b32 form (32-bit src) is reachable. See that case for rationale.
+        CHECK_SPAN(input_dtype == DataType::FP32 || input_dtype == DataType::INT32, span)
+            << "tensor.gather: rank-3 gather on dim 1 uses an INT32 flat index that only "
+               "matches the tgather b32 form (32-bit src); 16-bit src is not yet supported "
+               "on this axis. Got input dtype "
+            << input_dtype.ToString();
 
         {
           int64_t I0 = get_const(index_shape[0], "index.shape[0]");

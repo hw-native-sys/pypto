@@ -53,13 +53,21 @@ TypePtr DeduceTensorGatherType(const std::vector<ExprPtr>& args,
   auto index_type = As<TensorType>(args[1]->GetType());
   CHECK(index_type) << "The operator " << op_name << " requires index to be a TensorType, but got "
                     << args[1]->GetType()->TypeName();
-  // Index dtype: i32 everywhere; i16 additionally permitted on A5 (Ascend950),
-  // matching tensor.scatter and the PTOAS tgather index-form spec. Deduction is
-  // backend-agnostic and runs before arch selection, so A2/A3's i32-only rule is
-  // left to the PTOAS verifier.
-  CHECK(index_type->dtype_ == DataType::INT32 || index_type->dtype_ == DataType::INT16)
-      << "The operator " << op_name << " requires index dtype to be INT32 (or INT16 on A5), but got "
-      << index_type->dtype_.ToString();
+  // Index dtype: i32 with any input; i16 only with a 16-bit input (FP16/INT16).
+  // The A5 (Ascend950) tgather b16 form pairs a 2-byte input with 2-byte indices;
+  // a 32-bit input uses the b32 form that reads each index as a u32, so INT16
+  // indices with a 32-bit input are unsafe on every target (not merely arch-gated).
+  // PyPTO has no internal tgather verifier, so this universal width constraint is
+  // checked in the deducer; the arch-specific A2/A3 i32-only rule is left to the
+  // external PTOAS assembler (PTO IR manual, tgather index-form checks).
+  const bool idx_is_i16 = index_type->dtype_ == DataType::INT16;
+  const bool input_is_16bit = input_type->dtype_ == DataType::FP16 || input_type->dtype_ == DataType::INT16;
+  CHECK(index_type->dtype_ == DataType::INT32 || (idx_is_i16 && input_is_16bit))
+      << "The operator " << op_name
+      << " requires index dtype INT32 (any input), or INT16 with a 16-bit input "
+         "(FP16/INT16); INT16 indices with a 32-bit input are unsafe (tgather b32 "
+         "reads them as u32). Got index "
+      << index_type->dtype_.ToString() << " with input " << input_type->dtype_.ToString();
 
   const int64_t rank = static_cast<int64_t>(input_type->shape_.size());
   CHECK(rank >= 2) << "The operator " << op_name << " requires rank >= 2, but got rank " << rank;
@@ -106,7 +114,7 @@ REGISTER_OP("tensor.gather")
         "(tensor-level). Supports rank>=2 and any dim; lowered via tile.transpose + "
         "tile.reshape + tile.gather by ConvertTensorToTileOps.")
     .add_argument("input", "Input tensor (TensorType; FP16, FP32, INT16, or INT32)")
-    .add_argument("index", "Index tensor (TensorType, INT32 or INT16 on A5, same shape as output)")
+    .add_argument("index", "Index tensor (TensorType; INT32 any input, or INT16 with a 16-bit input)")
     .set_attr<int>("dim")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {

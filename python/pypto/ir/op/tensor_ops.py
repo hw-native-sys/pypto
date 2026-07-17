@@ -1932,9 +1932,9 @@ def gather(  # noqa: PLR0913
         output[b, k] = input[b, index[b, k]]
 
         MVP limitation: only rank-2 inputs with ``dim == -1`` (or ``rank - 1``).
-        ``index`` must be an INT32 tensor (INT16 also accepted on A5/Ascend950)
-        whose shape matches ``input`` on every axis except ``dim``; output shape
-        == ``index.shape``, dtype == ``input.dtype``.
+        ``index`` must be an INT32 tensor, or INT16 when ``input`` is a 16-bit
+        dtype (FP16/INT16); its shape matches ``input`` on every axis except
+        ``dim``. output shape == ``index.shape``, dtype == ``input.dtype``.
 
     Mask form (``mask_pattern=<int>``) → ``tensor.gather_mask``: selects columns
         of each row by a fixed hardware mask. Last-dim shrinks by 2 (P0101/P1010)
