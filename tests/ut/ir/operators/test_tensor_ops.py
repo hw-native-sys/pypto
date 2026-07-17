@@ -3351,6 +3351,7 @@ def test_tensor_gather_accepts_int16_index_with_16bit_input():
     inp, idx = _make_gather_inputs(src_dtype=DataType.FP16, idx_dtype=DataType.INT16)
     call = ir.op.tensor.gather(inp, dim=-1, index=idx)
     assert call.op.name == "tensor.gather"
+    assert isinstance(call.type, ir.TensorType)
     assert call.type.dtype == DataType.FP16
 
 
