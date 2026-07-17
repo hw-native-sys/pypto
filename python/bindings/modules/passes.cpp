@@ -557,6 +557,12 @@ void BindPass(nb::module_& m) {
              "slot) and attrs['iter_arg_array_size_<i>'] (int, positive extents only) onto each\n"
              "ForStmt, so orchestration codegen reads the carry lowering instead of re-deriving\n"
              "it from an alias fixpoint. Runs last, after materialize_runtime_scopes.");
+  passes.def("insert_comm_fence", &pass::InsertCommFence,
+             "Insert a GM system.fence between a publishing write and the following\n"
+             "pld.system.notify (data-before-signal). Covers remote_store / put and local\n"
+             "stores into a window; hoists the fence before an enclosing if/for (barrier\n"
+             "idiom) and fences the loop back-edge (ring-allreduce). Idempotent. Runs last,\n"
+             "after all statement-reordering passes, so the fence stays adjacent to notify.");
   passes.def("normalize_stmt_structure", &pass::NormalizeStmtStructure,
              "Create a pass that normalizes statement structure");
   passes.def("derive_call_directions", &pass::DeriveCallDirections,

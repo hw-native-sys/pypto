@@ -808,6 +808,21 @@ Pass ClassifyIterArgCarry();
 Pass StampTfreeSplit();
 
 /**
+ * @brief Insert a GM `system.fence` between a publishing write and the
+ *        `pld.system.notify` that releases it (data-before-signal).
+ *
+ * The latest PTOAS requires the compiler to explicitly order a cross-rank write
+ * (or a local store into a window a peer reads) against the notify that signals
+ * its completion. This pass places a `system.fence` between the last unflushed
+ * publishing write and each following notify, hoisting the fence before an
+ * enclosing `if` / `for` where the notify lives (barrier idiom) and fencing the
+ * loop back-edge (ring-allreduce). Idempotent — an existing `system.fence`
+ * clears the pending state. Runs last, after all statement-reordering passes,
+ * so the fence stays adjacent to its notify through codegen.
+ */
+Pass InsertCommFence();
+
+/**
  * @brief Verify properties on a program and throw on errors
  *
  * Uses PropertyVerifierRegistry to verify the given properties and throws

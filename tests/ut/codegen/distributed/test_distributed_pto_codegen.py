@@ -366,6 +366,42 @@ def test_notify_emits_comm_tnotify_with_attr():
     assert "#pto<notify_op atomic_add>" in mlir_add
 
 
+def test_fence_inserted_before_notify_releasing_remote_store():
+    """The InsertCommFence pass runs in the Default pipeline, so a remote_store
+    followed by a notify lowers to a whole-tensor ``pto.cmo.cacheinvalid`` and a
+    GM ``pto.fence.barrier_all`` — both emitted, in that order, before the
+    ``pto.comm.tnotify`` that releases it (data-before-signal)."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            inp: pl.Tensor[[1, 32], pl.FP32],
+            dst: pld.DistributedTensor[[1, 32], pl.FP32],
+            signal: pld.DistributedTensor[[16, 16], pl.INT32],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            local = pl.load(inp, [0, 0], [1, 32])
+            pld.tile.remote_store(local, target=dst, peer=peer, offsets=[0, 0])
+            pld.system.notify(signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.Set)
+
+    mlir = _generate_mlir(P)
+    lines = mlir.splitlines()
+    store_idx = next(i for i, line in enumerate(lines) if "pto.tstore" in line)
+    cinv_idx = next(i for i, line in enumerate(lines) if "pto.cmo.cacheinvalid" in line)
+    fence_idx = next(i for i, line in enumerate(lines) if "pto.fence.barrier_all" in line)
+    tnotify_idx = next(i for i, line in enumerate(lines) if "pto.comm.tnotify(" in line)
+    # Order: publishing store -> cacheinvalid -> GM fence -> tnotify.
+    assert store_idx < cinv_idx < fence_idx < tnotify_idx, (
+        f"expected store({store_idx}) < cacheinvalid({cinv_idx}) < fence({fence_idx}) "
+        f"< tnotify({tnotify_idx})"
+    )
+    assert "#pto.fence_scope<gm>" in lines[fence_idx], lines[fence_idx]
+    # Whole-tensor cacheinvalid: the region form addresses the dst via a partition view.
+    assert "single_cache_line" in lines[cinv_idx], lines[cinv_idx]
+
+
 def test_wait_emits_comm_twait_with_attr():
     """wait codegen emits pto.comm.twait on the local signal slot."""
 
@@ -714,12 +750,15 @@ def test_put_chunk_shrinks_staging_tile_keeping_full_partition_view():
     assert "rows=4" in stage_alloc_line and "cols=32" in stage_alloc_line, (
         f"staging tile must be the [4, 32] chunk, got: {stage_alloc_line}"
     )
-    # A drain barrier is emitted immediately after the tput so a following
-    # cross-rank notify can't race the chunked stores (PTOAS#872 workaround).
+    # No codegen-emitted drain barrier after the tput anymore. The InsertCommFence
+    # pass inserts a GM `system.fence` (pto.fence.barrier_all) only before a
+    # following `pld.system.notify` — this kernel has none — so the
+    # data-before-signal ordering now lives in the IR, not in an unconditional
+    # per-tput `pto.barrier <PIPE_ALL>`.
     lines = mlir.splitlines()
     tput_idx = next(i for i, line in enumerate(lines) if "pto.comm.tput(" in line)
-    assert "pto.barrier <PIPE_ALL>" in lines[tput_idx + 1], (
-        f"expected a PIPE_ALL drain right after tput, got: {lines[tput_idx + 1]}"
+    assert "pto.barrier <PIPE_ALL>" not in lines[tput_idx + 1], (
+        f"unexpected PIPE_ALL drain right after tput: {lines[tput_idx + 1]}"
     )
 
 

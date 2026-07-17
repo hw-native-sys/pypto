@@ -242,6 +242,13 @@ class PassManager:
             # MaterializeRuntimeScopes so the classified IR is exactly the IR
             # orchestration codegen lowers.
             passes.classify_iter_arg_carry,
+            # Insert a whole-tensor system.cacheinvalid + GM system.fence between
+            # each publishing write and the pld.system.notify that releases it
+            # (data-before-signal, required by the latest PTOAS). Runs dead last,
+            # after every statement-reordering pass, so the inserted ops stay
+            # adjacent to their notify through codegen; additive InCore-only
+            # insertion that touches no property.
+            passes.insert_comm_fence,
         )
         if strategy == OptimizationStrategy.Default:
             return tensor_prefix_passes + tensor_only_passes + tile_pto_passes

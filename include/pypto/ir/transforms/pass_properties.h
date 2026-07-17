@@ -346,6 +346,12 @@ inline const PassProperties kFoldNoOpReshapeProperties{
 
 inline const PassProperties kStampTfreeSplitProperties{.required = {IRProperty::SplitIncoreOrch}};
 
+// -- Insert data-before-signal comm fences (runs last, before codegen) --------
+//    Inserts a GM system.fence between each publishing write and the following
+//    pld.system.notify. Additive statement insertion over already-lowered InCore
+//    IR; requires SplitIncoreOrch (held throughout) and touches no other property.
+inline const PassProperties kInsertCommFenceProperties{.required = {IRProperty::SplitIncoreOrch}};
+
 }  // namespace pass
 }  // namespace ir
 }  // namespace pypto

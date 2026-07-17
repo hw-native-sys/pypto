@@ -606,19 +606,12 @@ static std::string MakePutCodegenPTO(const CallPtr& op, codegen::CodegenBase& co
   tput << ") {atomicType = #pto<atomic_type " << atomic_attr << ">}";
   codegen.Emit(tput.str());
 
-  // Drain TPUT's writes before returning, so a following `pld.system.notify`
-  // (cross-rank signal that the data has landed) does not race ahead of them.
-  // Emitted unconditionally: the chunked sliding path strictly requires it (its
-  // last chunk's MTE3 store is otherwise still in-flight, a deterministic stale
-  // read), and the single-shot path — though self-draining for that store — has
-  // the same cross-rank data-before-signal obligation, so the extra barrier is
-  // harmless there.
-  //
-  // WORKAROUND for PTOAS#872: the proper fix drains prior stores inside
-  // TNOTIFY_IMPL (`pipe_barrier(PIPE_ALL); dsb(DSB_DDR)` before the signal),
-  // which also adds the DDR-observability fence a pipe barrier alone can't give.
-  // Remove this once that lands.
-  codegen.Emit("pto.barrier <PIPE_ALL>");
+  // No tail barrier here: the InsertCommFence pass now emits a GM system.fence
+  // (pto.fence.barrier_all #pto.fence_scope<gm>) before any pld.system.notify
+  // that releases this write. That fence is stronger than a pipe barrier — it
+  // adds the DDR-observability drain a `pto.barrier <PIPE_ALL>` alone cannot —
+  // and it only fires when a notify actually follows, so the data-before-signal
+  // ordering obligation is met without an unconditional per-TPUT barrier.
   return "";
 }
 

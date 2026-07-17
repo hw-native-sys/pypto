@@ -692,6 +692,28 @@ def classify_iter_arg_carry() -> Pass:
     exactly the IR codegen lowers.
     """
 
+def insert_comm_fence() -> Pass:
+    """Insert a GM ``system.fence`` before each data-releasing ``pld.system.notify``.
+
+    The latest PTOAS requires the compiler to explicitly order a publishing write
+    against the notify that signals its completion, so the written data is visible
+    to the peer before the signal arrives. A **publishing write** is a remote write
+    (``pld.tile.remote_store`` / ``pld.tile.put`` / ``pld.tensor.put``), a local
+    ``tile.store`` into a window-bound ``DistributedTensor`` (a peer can
+    ``remote_load`` it), or a ``pld.tile.get`` / ``pld.tensor.get`` into a
+    window-bound destination.
+
+    A single fence covers multiple preceding writes; the fence is hoisted before an
+    enclosing ``if`` / ``for`` when the notify lives inside it (the
+    ``for peer: if peer != me: notify`` barrier idiom), and the loop back-edge is
+    fenced so a write at the tail of one iteration is released before the notify at
+    the head of the next (ring-allreduce). Idempotent — an existing ``system.fence``
+    clears the pending state.
+
+    Runs last in the Default pipeline, after all statement-reordering passes, so the
+    inserted fence stays adjacent to its notify through codegen.
+    """
+
 class NestedCallErrorType(Enum):
     """Nested call verification error types."""
 
