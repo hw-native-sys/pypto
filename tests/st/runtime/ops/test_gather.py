@@ -140,6 +140,39 @@ class GatherRank2LastDimTopLevelProgram:
 
 
 @pl.program
+class GatherA5INT16IndexProgram:
+    """A5 (Ascend950) index-form gather with INT16 indices.
+
+    ``inp [4, 16] FP16``, ``idx [4, 16] INT16`` → ``output [4, 16] FP16``.
+    INT16 indices are native to A5 but rejected by A2/A3 (the PTOAS verifier only
+    permits i32 indices there), so this case is pinned to A5. It exercises the
+    relaxed ``tile.gather`` type deduction — INT16 indices plus the A5 index
+    form's unconstrained ``tmp`` — end-to-end on hardware.
+
+    FP16 src + INT16 indices selects the A5 ``TGather_b16`` path (2-byte src,
+    2-byte indices), the hardware-supported INT16-index combination — mirroring
+    the scatter INT16 tests. (FP32/INT32 src + INT16 indices would route to
+    ``TGather_b32``, which reinterprets indices as u32 and is not INT16-safe in
+    this pto-isa revision.)
+
+    idx last-dim is 16 (16×2=32 bytes) to satisfy the hardware tile column
+    alignment requirement (Cols * sizeof(dtype) % 32 == 0) for INT16.
+    """
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        inp: pl.Tensor[[4, 16], pl.FP16],
+        idx: pl.Tensor[[4, 16], pl.INT16],
+        output: pl.Out[pl.Tensor[[4, 16], pl.FP16]],
+    ) -> pl.Tensor[[4, 16], pl.FP16]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            out = pl.tensor.gather(inp, dim=-1, index=idx)
+            output = pl.assemble(output, out, [0, 0])
+        return output
+
+
+@pl.program
 class GatherRank2SmallerLeadingProgram:
     """Rank-2 + dim=-1 with ``index.shape[0] (=2) < input.shape[0] (=4)``."""
 
@@ -429,6 +462,41 @@ class GatherRank2LastDimTopLevelTestCase(_GatherBaseTestCase):
 
     def compute_expected(self, tensors, params=None):
         # torch.gather semantics: out[b, k] = inp[b, idx[b, k]]
+        inp = tensors["inp"]
+        idx = tensors["idx"].to(torch.int64)
+        tensors["output"][:] = torch.gather(inp, dim=-1, index=idx)
+
+
+class GatherA5INT16IndexTestCase(_GatherBaseTestCase):
+    """A5 index-form gather with INT16 indices (A5-native; A2/A3 rejects it)."""
+
+    def get_name(self) -> str:
+        return "gather_a5_int16_index"
+
+    def get_backend_type(self) -> BackendType:
+        # INT16 indices are an A5 feature. Pin the backend so the global
+        # ``set_backend_type`` matches the parametrized ``a5`` platform — the
+        # base class otherwise defaults to Ascend910B.
+        return BackendType.Ascend950
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("inp", [4, 16], DataType.FP16, init_value=lambda: torch.randn(4, 16).to(torch.float16)),
+            TensorSpec(
+                "idx",
+                [4, 16],
+                DataType.INT16,
+                init_value=lambda: torch.randint(0, 16, (4, 16), dtype=torch.int16),
+            ),
+            TensorSpec("output", [4, 16], DataType.FP16, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return GatherA5INT16IndexProgram
+
+    def compute_expected(self, tensors, params=None):
+        # torch.gather semantics: out[b, k] = inp[b, idx[b, k]] (exact in FP16:
+        # pure indexing, no arithmetic, so it matches the device bit-for-bit).
         inp = tensors["inp"]
         idx = tensors["idx"].to(torch.int64)
         tensors["output"][:] = torch.gather(inp, dim=-1, index=idx)
@@ -730,6 +798,19 @@ class TestGatherIndex:
         gather and asserts it is bit-identical to the input.
         """
         result = test_runner.run(GatherTileInputSourceUnchangedTestCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.platforms("a5", "a5sim")
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_gather_a5_int16_index(self, test_runner, platform):
+        """A5 index-form gather with INT16 indices (A5-native; A2/A3 rejects it).
+
+        INT16 indices are accepted by the relaxed ``tile.gather`` type deduction
+        and by the A5 (Ascend950) PTOAS verifier, then executed on hardware and
+        checked against ``torch.gather``. A2/A3 only permits i32 indices, so this
+        case is pinned to A5 via ``@pytest.mark.platforms``.
+        """
+        result = test_runner.run(GatherA5INT16IndexTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 
