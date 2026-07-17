@@ -57,24 +57,27 @@ static TypePtr DeduceTileGatherType(const std::vector<ExprPtr>& args,
       << "The operator " << op_name << " requires src dtype to be FP16, FP32, INT16, or INT32, but got "
       << src_type->dtype_.ToString();
 
-  // Second arg: indices tile (must be i32)
+  // Second arg: indices tile. i32 on every target; i16 additionally permitted
+  // on A5 (Ascend950). Type deduction is backend-agnostic and runs before arch
+  // selection, so it accepts the union {INT16, INT32}; A2/A3's i32-only rule is
+  // enforced later by the PTOAS verifier (PTO IR manual, tgather index-form
+  // checks — A2/A3 vs A5).
   auto idx_type = As<TileType>(args[1]->GetType());
   CHECK(idx_type) << "The operator " << op_name << " requires second argument to be a TileType, but got "
                   << args[1]->GetType()->TypeName();
-  CHECK(idx_type->dtype_ == DataType::INT32)
-      << "The operator " << op_name << " requires indices dtype to be INT32, but got "
+  CHECK(idx_type->dtype_ == DataType::INT32 || idx_type->dtype_ == DataType::INT16)
+      << "The operator " << op_name << " requires indices dtype to be INT32 (or INT16 on A5), but got "
       << idx_type->dtype_.ToString();
 
-  // Third arg: tmp workspace tile (must be i32, same shape as indices)
+  // Third arg: tmp workspace tile. A5 (Ascend950) does not read tmp in the
+  // index form and imposes no tmp dtype/shape relation; A2/A3 requires tmp to
+  // match the indices element type and valid shape. Deduction is backend-
+  // agnostic, so only the shared contract (tmp must be a Vec tile operand) is
+  // checked here — the arch-specific same-type/same-valid-shape rule runs in
+  // the PTOAS verifier (PTO IR manual, tgather index-form checks — A2/A3).
   auto tmp_type = As<TileType>(args[2]->GetType());
   CHECK(tmp_type) << "The operator " << op_name << " requires third argument to be a TileType, but got "
                   << args[2]->GetType()->TypeName();
-  CHECK(tmp_type->dtype_ == DataType::INT32)
-      << "The operator " << op_name << " requires tmp dtype to be INT32, but got "
-      << tmp_type->dtype_.ToString();
-  CHECK(tmp_type->shape_.size() == idx_type->shape_.size())
-      << "The operator " << op_name << " requires tmp shape rank to match indices rank ("
-      << idx_type->shape_.size() << "), but got " << tmp_type->shape_.size();
 
   // Output: shape from indices tile, dtype from src tile, propagate tile_view
   TileView tile_view;
@@ -91,8 +94,8 @@ REGISTER_OP("tile.gather")
     .set_op_category("TileOp")
     .set_description("Gather elements by index (maps to pto.tgather)")
     .add_argument("src", "Source tile (FP16, FP32, INT16, or INT32)")
-    .add_argument("indices", "Index tile (INT32)")
-    .add_argument("tmp", "Temporary workspace tile (INT32)")
+    .add_argument("indices", "Index tile (INT32, or INT16 on A5)")
+    .add_argument("tmp", "Temporary workspace tile (any Vec dtype; A2/A3 constrains at PTOAS)")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_input_memory(2, MemorySpace::Vec)

@@ -53,8 +53,12 @@ TypePtr DeduceTensorGatherType(const std::vector<ExprPtr>& args,
   auto index_type = As<TensorType>(args[1]->GetType());
   CHECK(index_type) << "The operator " << op_name << " requires index to be a TensorType, but got "
                     << args[1]->GetType()->TypeName();
-  CHECK(index_type->dtype_ == DataType::INT32)
-      << "The operator " << op_name << " requires index dtype to be INT32, but got "
+  // Index dtype: i32 everywhere; i16 additionally permitted on A5 (Ascend950),
+  // matching tensor.scatter and the PTOAS tgather index-form spec. Deduction is
+  // backend-agnostic and runs before arch selection, so A2/A3's i32-only rule is
+  // left to the PTOAS verifier.
+  CHECK(index_type->dtype_ == DataType::INT32 || index_type->dtype_ == DataType::INT16)
+      << "The operator " << op_name << " requires index dtype to be INT32 (or INT16 on A5), but got "
       << index_type->dtype_.ToString();
 
   const int64_t rank = static_cast<int64_t>(input_type->shape_.size());
@@ -102,7 +106,7 @@ REGISTER_OP("tensor.gather")
         "(tensor-level). Supports rank>=2 and any dim; lowered via tile.transpose + "
         "tile.reshape + tile.gather by ConvertTensorToTileOps.")
     .add_argument("input", "Input tensor (TensorType; FP16, FP32, INT16, or INT32)")
-    .add_argument("index", "Index tensor (TensorType, INT32, same shape as output)")
+    .add_argument("index", "Index tensor (TensorType, INT32 or INT16 on A5, same shape as output)")
     .set_attr<int>("dim")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {

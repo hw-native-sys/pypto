@@ -1843,8 +1843,8 @@ def gather(
         output[b, k] = input[b, index[b, k]]
 
         MVP: only rank-2 inputs with ``dim == -1`` (or ``rank - 1``).
-        ``index`` must be an INT32 tensor whose shape matches ``input`` on every
-        axis except ``dim``.
+        ``index`` must be an INT32 tensor (INT16 also accepted on A5/Ascend950)
+        whose shape matches ``input`` on every axis except ``dim``.
 
     Mask form (``mask_pattern=<int>``) → :func:`pl.tile.gather_mask`:
         Selects columns of each row by a fixed hardware mask pattern. Last-dim
@@ -1858,7 +1858,7 @@ def gather(
     Args:
         input: Source tensor (FP16/FP32/INT16/INT32).
         dim: (index form) Axis to gather along; only ``-1`` / ``rank - 1`` accepted in MVP.
-        index: (index form) Index tensor (INT32) with same rank as input.
+        index: (index form) Index tensor (INT32, or INT16 on A5/Ascend950) with same rank as input.
         mask_pattern: (mask form, keyword-only) Mask pattern selector (1-7).
             1=P0101, 2=P1010, 3=P0001, 4=P0010, 5=P0100, 6=P1000, 7=P1111.
         output_dtype: (mask form, keyword-only) Optional output dtype with the same
