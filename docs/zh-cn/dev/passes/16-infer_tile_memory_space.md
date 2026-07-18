@@ -36,7 +36,7 @@ program_inferred = infer_pass(program)
 
 ## 算法
 
-每个 InCore 函数依次经历五个阶段。所有阶段都是 IR Visitor / Mutator，相对函数体大小为 O(N log N) 复杂度。阶段 4 只构建一次自底向上的循环清单，不会为每个外层循环重复扫描完整的嵌套函数体。
+每个 InCore 函数依次经历五个阶段，均由 IR Visitor / Mutator 实现。阶段 4 只构建一次自底向上的循环清单和完整的语法使用关系，并且每个循环的原始直接循环体只分析一次。嵌套循环会独立重写，该阶段因此保持 O(N) 复杂度。每次 pass 调用中，一条链最多跨过一层词法循环，而不会反复沿新建 preheader 向外移动。
 
 ### 阶段 0 — 反向需求收集（`DemandCollector`）
 
@@ -98,7 +98,7 @@ program_inferred = infer_pass(program)
 
 所有 space 显式化后，一个独立的内部 transform 会识别形如 `tile.load(GM → Mat) → tile.transpose_view* → tile.move/tile.extract(Mat → Left/Right)` 的不变量前缀，并把该前缀移到循环 preheader。该链必须只有一个终止 `Left` / `Right` 值，并且只在一个 `tile.matmul`、`tile.matmul_bias` 或 `tile.matmul_acc` 的对应操作数位置使用。这样可将优化严格限定为驻留 matmul 操作数，而不是通用 tile LICM。对于这一受支持的单一使用形态，tensor-level matmul 的驻留操作数只加载一次，而依赖循环变量的另一操作数仍留在循环内正常流式加载。
 
-这是 issue #2077 所要求的更广泛驻留行为中的保守首个子集，并不是通用的 tensor-level residency contract。直接进入或由程序外部进入的 InCore 函数没有可分析的调用者证据，因此会拒绝该优化。当 `AutoTileMatmulL0` 将一个 Mat panel 展开为多个依赖 K 的 L0 extract 时，当前要求单一使用的链识别器同样会拒绝；此时整个 panel 的 GM→Mat load 仍位于外层用户循环内，而依赖 K 的 extract 会正确保留在内层 K 循环中。支持这种情况需要把 GM→Mat panel 驻留与可选的 Mat→L0 前缀移动分开分析。当前的调用者过滤器还会区分规范化的 IR root，但 PyPTO 尚未为不同的外部 tensor 参数定义运行时 `noalias` 契约；在此 draft 优化可合并之前，还需要解决这一契约问题。
+这是 issue #2077 所要求的更广泛驻留行为中的保守首个子集，并不是通用的 tensor-level residency contract。直接进入或由程序外部进入的 InCore 函数没有可分析的调用者证据，因此会拒绝该优化。不同的外部 tensor 参数同样会被拒绝：PyPTO 没有运行时 `noalias` 契约来保证其底层分配互不重叠。当前只有 root orchestration IR 内由 `tensor.create` 创建的存储能够提供正向调用者 provenance。若要覆盖外部操作数，必须增加可强制执行的 no-alias 契约或带非提升回退路径的运行时检查；本 transform 不会自行假设这一点。当 `AutoTileMatmulL0` 将一个 Mat panel 展开为多个依赖 K 的 L0 extract 时，当前要求单一使用的链识别器同样会拒绝；此时整个 panel 的 GM→Mat load 仍位于外层用户循环内，而依赖 K 的 extract 会正确保留在内层 K 循环中。支持这种情况需要把 GM→Mat panel 驻留与可选的 Mat→L0 前缀移动分开分析。
 
 候选资格首先依赖编译器私有的 provenance。`ConvertTensorToTileOps` 会标记其生成的所有 `GM → Mat` bridge load；该标记经过打印、flatten 和 L0 自动分块后一直保留到本阶段。阶段 4 随后证明带标记的 load 符合上文所述的精确静止 matmul 操作数链。用户手写的 `tile.load(..., target_memory=Mat)` 不带此标记，因此本优化绝不会提升它，从而保证显式 tile 程序仍由用户控制。
 
@@ -107,19 +107,20 @@ program_inferred = infer_pass(program)
 - 循环必须为 `Sequential`，边界是常量，step 为正，且至少执行一次；
 - 被移动的赋值必须是循环体顶层、无条件执行的语句；
 - GM 源必须是方向为 `ParamDirection::In` 的直接 tensor 参数，且 load 带有编译器生成的 Mat bridge 标记；
-- InCore 函数必须至少有一个来自 root orchestration 函数（即没有程序内调用者的 orchestration 函数）的直接调用点，并且该 InCore 函数的每个调用点都必须是这种 root-orchestration 直接调用；
-- 在每个 root-orchestration 直接调用点，候选 `Tensor In` 实参 root 与所有可写 `Tensor Out` / `Tensor InOut` 实参 root 都必须可解析，且候选 root 在语法上必须与每个可写 root 不同；InCore 函数自身也不能写入该 root，而无关 scalar 和其他只读 `Tensor In` root 不参与此过滤；
+- InCore 函数必须至少有一个来自 root orchestration 函数（即没有程序内调用者的 orchestration 函数）的直接 `Call`，并且该 InCore 函数的每个调用点都必须是这种 root-orchestration 直接 `Call`；`Submit` 调用点总会使候选失效，因为异步提交不能作为正向别名证据；
+- 在每个此类调用点，候选 `Tensor In` 实参必须解析到由 `tensor.create` 创建、归编译器所有的分配；普通别名以及 `tensor.slice` / `tensor.assemble` view 会规范化到该存储 root，所有可写 `Tensor Out` / `Tensor InOut` root 都必须已知且均不得与候选 root 重叠；InCore 函数自身也不能写入该 root，而无关 scalar 和其他只读 `Tensor In` root 不参与此过滤；
 - offset、shape 以及整个被移动的依赖前缀都必须是循环不变量；
 - candidate 之前出现直接控制流或有副作用语句时，会关闭可提升前缀；
+- 链中每个值只能有预期的单一语法使用；普通 SSA 别名、`Submit` 实参、嵌套表达式、循环初始值、yield、return 以及额外的 call 实参都计为使用，因此会使候选失效；
 - 被移动的结果不能是 loop-carried 值或 yield 值；
 - 函数中所有实际拥有分配的 `Mat`、`Left`、`Right` tile 都必须具有静态大小，且按分配器对齐后的全函数上界不得超过后端容量；
 - 函数中不得存在尚未表示为 tile 分配、因而无法计入容量的显式保留缓冲区区域。
 
-`InOut` / `Out` 源、手写 tile load、直接或从程序外进入的 InCore 函数、经过 InCore wrapper 或被调用的 orchestration helper 的调用、未知的候选或可写调用点 root、候选/写入别名、条件 load、动态或零次循环、容量未知的情形、被 yield 或循环携带的结果，以及依赖循环变量的 extract 都会安全拒绝并保持 IR 不变。即使其他调用安全，只要有一个调用点不安全或不是 root 调用也会使候选失效。首版实现有意不传播 wrapper 证据：语法上不同的 wrapper 参数仍可能在 wrapper 自身的调用者处发生别名。容量检查只统计实际拥有分配的值，而不重复统计零拷贝 view 或 SSA 别名；它采用与 `InitMemRef` / `AllocateMemoryAddr` 相同的字节大小和地址对齐规则，并包含循环外已存活的分配。若某个 memory space 中的分配可能被后续 pipeline lowering 复制，也会拒绝该 space 的驻留，除非被移动的前缀位于不受影响的 space。该全函数上界刻意强于任一规划器的生命周期复用，因此 residency 重写不会在 PyPTO 或 PTOAS 规划器下引入后续容量失败。嵌套循环中的不变量链会逐层移动到 preheader，直至到达最外层合法循环。本阶段不会全局重映射参数，也不会把依赖 K 的 L0 extract 移出 `AutoTileMatmulL0` 的 pipeline 循环。
+`InOut` / `Out` 源、外部输入分配、手写 tile load、直接或从程序外进入的 InCore 函数、`Submit` 调用点、经过 InCore wrapper 或被调用的 orchestration helper 的调用、未知的候选或可写调用点 root、候选/写入别名、额外语法使用、条件 load、动态或零次循环、容量未知的情形、被 yield 或循环携带的结果，以及依赖循环变量的 extract 都会安全拒绝并保持 IR 不变。即使其他调用安全，只要有一个调用点不安全或不是 root 调用也会使候选失效。首版实现有意不传播 wrapper 证据：语法上不同的 wrapper 参数仍可能在 wrapper 自身的调用者处发生别名。容量检查只统计实际拥有分配的值，而不重复统计零拷贝 view 或 SSA 别名；它采用与 `InitMemRef` / `AllocateMemoryAddr` 相同的字节大小和地址对齐规则，并包含循环外已存活的分配。若某个 memory space 中的分配可能被后续 pipeline lowering 复制，也会拒绝该 space 的驻留，除非被移动的前缀位于不受影响的 space。该全函数上界刻意强于任一规划器的生命周期复用，因此 residency 重写不会在 PyPTO 或 PTOAS 规划器下引入后续容量失败。嵌套循环会独立处理；一次 pass 调用只会将链移到其直接词法 preheader。本阶段不会全局重映射参数，也不会把依赖 K 的 L0 extract 移出 `AutoTileMatmulL0` 的 pipeline 循环。
 
 #### 驻留示例
 
-对于具有可分析调用者的 tensor 程序，静止 LHS 的 bridge 会移到用户循环之前，而依赖 N 的 RHS 仍在循环中流式加载：
+对于 root orchestration 函数先创建全新 LHS 存储、再调用 InCore kernel 的 tensor 程序，静止 LHS 的 bridge 会移到用户循环之前，而依赖 N 的 RHS 仍在循环中流式加载：
 
 ```python
 # Tensor 源程序
@@ -140,7 +141,7 @@ for n, (acc,) in pl.range(0, 256, 128, init_values=(out,)):
     result = pl.yield_(pl.tile.store(c_n, [0, n], acc))
 ```
 
-为便于阅读，上例省略了内部 provenance 属性。当前该转换要求来自 root orchestration 函数的直接调用，且候选 `lhs` root 在语法上与可写 `out` root 不同；另一个只读 `rhs` root 与此过滤无关。仅有不同的 IR root 并不能证明单独提供的运行时 buffer 不会 alias，因此这一调用者条件仍是 draft 中待解决的安全项。缺少所需的直接调用者证据时，仍保留原来的循环内放置方式。
+为便于阅读，上例省略了内部 provenance 属性和 root orchestration 调用。调用者先执行 `fresh_lhs = pl.create_tensor([16, 128], dtype=pl.BF16)`，再把它作为 `lhs` 传入；因此编译器能够证明该分配与外部可写 `out` 不同。仅仅传入不同的外部 `lhs` 与 `out` 参数并不充分。另一个只读 `rhs` root 与写别名过滤无关。缺少可信存储 provenance 时，仍保留原来的循环内放置方式。
 
 ## 通用 memory-space 推导示例
 

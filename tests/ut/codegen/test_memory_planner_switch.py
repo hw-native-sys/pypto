@@ -94,11 +94,11 @@ class StationaryMatmulLoop:
     @pl.function(type=pl.FunctionType.Orchestration)
     def main(
         self,
-        lhs: pl.Tensor[[16, 128], pl.BF16],
         rhs: pl.Tensor[[128, 256], pl.BF16],
         output: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
     ) -> pl.Tensor[[16, 256], pl.FP32]:
-        result = self.kernel(lhs, rhs, output)
+        fresh_lhs = pl.create_tensor([16, 128], dtype=pl.BF16)
+        result = self.kernel(fresh_lhs, rhs, output)
         return result
 
 
@@ -123,11 +123,11 @@ class StationaryMatmulPipelinedK:
     @pl.function(type=pl.FunctionType.Orchestration)
     def main(
         self,
-        lhs: pl.Tensor[[16, 512], pl.BF16],
         rhs: pl.Tensor[[512, 256], pl.BF16],
         output: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
     ) -> pl.Tensor[[16, 256], pl.FP32]:
-        result = self.kernel(lhs, rhs, output)
+        fresh_lhs = pl.create_tensor([16, 512], dtype=pl.BF16)
+        result = self.kernel(fresh_lhs, rhs, output)
         return result
 
 

@@ -509,10 +509,11 @@ Pass CanonicalizeTileSlice();
  * The pass also runs a focused internal transform that hoists a conservative
  * single-use subset of compiler-generated, loop-invariant GM->Mat matmul
  * operand chains across statically non-empty sequential loops.  The rewrite
- * requires direct root-orchestration caller evidence and a capacity-safe
- * whole-function Mat/Left/Right footprint.  Direct/external InCore entries and
- * Mat panels fanned out by K tiling currently decline.  Private bridge
- * provenance is consumed before the pass returns.
+ * requires a direct root-orchestration Call whose candidate storage was
+ * created by tensor.create, plus a capacity-safe whole-function
+ * Mat/Left/Right footprint.  External inputs, Submit sites, direct/external
+ * InCore entries, and Mat panels fanned out by K tiling currently decline.
+ * Private bridge provenance is consumed before the pass returns.
  *
  * Requirements:
  * - Input IR must have tile ops (run ConvertTensorToTileOps first)

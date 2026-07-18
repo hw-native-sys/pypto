@@ -27,13 +27,14 @@
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
-#include "pypto/core/error.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_allocator_policy.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
@@ -64,10 +65,12 @@ namespace {
 // chain and move the invariant prefix to the loop preheader. The rewrite is
 // intentionally conservative: only read-only function parameters, direct
 // top-level statements in a statically non-empty sequential loop, and static
-// capacity-safe Mat/Left/Right footprints are accepted. A nested invariant
-// chain bubbles outward one loop at a time because the mutator visits the inner
-// loop first. The inventory is computed once, bottom-up, so the transform stays
-// O(N log N) rather than rescanning every nested loop body.
+// capacity-safe Mat/Left/Right footprints are accepted. Each loop is analyzed
+// exactly once against its original direct body. Nested loops are rewritten
+// independently, so a chain moves across at most one lexical loop per pass
+// invocation instead of being repeatedly rescanned and bubbled through every
+// enclosing loop. Together with the one-time inventory and complete-use map,
+// the rewrite is O(N).
 
 class VarUseCollector : public IRVisitor {
  public:
@@ -80,6 +83,57 @@ class VarUseCollector : public IRVisitor {
 
  private:
   std::unordered_set<const Expr*> uses_;
+};
+
+/// Count every syntactic use while excluding SSA definition sites.  The
+/// residency recognizer intentionally accepts only an exact single-consumer
+/// chain, so an under-count is unsound: plain aliases, Submit arguments,
+/// nested expressions, loop initializers, yields, and returns must all count.
+class CompleteVarUseCollector : public IRVisitor {
+ public:
+  void Analyze(const StmtPtr& body) { VisitStmt(body); }
+
+  [[nodiscard]] size_t GetUseCount(const Expr* var) const {
+    auto it = use_counts_.find(var);
+    return it == use_counts_.end() ? 0 : it->second;
+  }
+
+ protected:
+  void VisitVarLike_(const VarPtr& op) override {
+    if (op) ++use_counts_[op.get()];
+    IRVisitor::VisitVarLike_(op);
+  }
+
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    if (op && op->value_) VisitExpr(op->value_);
+  }
+
+  void VisitStmt_(const IfStmtPtr& op) override {
+    if (op->condition_) VisitExpr(op->condition_);
+    if (op->then_body_) VisitStmt(op->then_body_);
+    if (op->else_body_.has_value() && *op->else_body_) VisitStmt(*op->else_body_);
+  }
+
+  void VisitStmt_(const ForStmtPtr& op) override {
+    if (op->start_) VisitExpr(op->start_);
+    if (op->stop_) VisitExpr(op->stop_);
+    if (op->step_) VisitExpr(op->step_);
+    for (const auto& iter_arg : op->iter_args_) {
+      if (iter_arg && iter_arg->initValue_) VisitExpr(iter_arg->initValue_);
+    }
+    if (op->body_) VisitStmt(op->body_);
+  }
+
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    if (op->condition_) VisitExpr(op->condition_);
+    for (const auto& iter_arg : op->iter_args_) {
+      if (iter_arg && iter_arg->initValue_) VisitExpr(iter_arg->initValue_);
+    }
+    if (op->body_) VisitStmt(op->body_);
+  }
+
+ private:
+  std::unordered_map<const Expr*, size_t> use_counts_;
 };
 
 struct LoopResidencyInfo {
@@ -105,6 +159,7 @@ std::optional<uint64_t> StaticTileBytes(const TileTypePtr& tile) {
 class LoopResidencyInventory : public IRVisitor {
  public:
   void Analyze(const StmtPtr& body) {
+    complete_uses_.Analyze(body);
     VisitStmt(body);
     BuildResidencyChains();
   }
@@ -237,6 +292,7 @@ class LoopResidencyInventory : public IRVisitor {
   std::unordered_map<const Expr*, CallDefinition> definitions_;
   std::unordered_map<const Expr*, std::vector<DirectCallUse>> direct_call_uses_;
   std::unordered_set<const Expr*> residency_chain_vars_;
+  CompleteVarUseCollector complete_uses_;
   bool has_explicit_reservation_{false};
   const ForStmt* current_loop_{nullptr};
   size_t pipeline_depth_{0};
@@ -303,7 +359,10 @@ class LoopResidencyInventory : public IRVisitor {
     auto tile = var ? As<TileType>(var->GetType()) : nullptr;
     if (!tile || !tile->memory_space_.has_value()) return false;
     auto use_it = direct_call_uses_.find(var.get());
-    if (use_it == direct_call_uses_.end() || use_it->second.size() != 1) return false;
+    if (complete_uses_.GetUseCount(var.get()) != 1 || use_it == direct_call_uses_.end() ||
+        use_it->second.size() != 1) {
+      return false;
+    }
     const auto& use = use_it->second.front();
     const auto operand_indices = MatmulOperandIndices(use.call);
     if (!operand_indices.has_value()) return false;
@@ -314,8 +373,8 @@ class LoopResidencyInventory : public IRVisitor {
 
   [[nodiscard]] bool HasOnlyUseBy(const VarPtr& var, const CallPtr& consumer) const {
     auto it = direct_call_uses_.find(var.get());
-    return it != direct_call_uses_.end() && it->second.size() == 1 &&
-           it->second.front().call.get() == consumer.get();
+    return complete_uses_.GetUseCount(var.get()) == 1 && it != direct_call_uses_.end() &&
+           it->second.size() == 1 && it->second.front().call.get() == consumer.get();
   }
 
   void BuildResidencyChains() {
@@ -362,6 +421,66 @@ std::vector<StmtPtr> DirectStatements(const StmtPtr& body) {
   return {body};
 }
 
+const Var* ResolveCanonicalRoot(const std::unordered_map<const Var*, const Var*>& roots, const Var* var) {
+  const Var* current = var;
+  std::unordered_set<const Var*> seen;
+  while (current && seen.insert(current).second) {
+    auto it = roots.find(current);
+    if (it == roots.end() || !it->second) return nullptr;
+    if (it->second == current) return current;
+    current = it->second;
+  }
+  return nullptr;
+}
+
+/// Refine BufferRootCollector's dependency-region roots into storage roots for
+/// the small set needed by residency.  In particular, tensor.slice is a view:
+/// it has its own dependency region but still aliases its source allocation.
+/// Only tensor.create is treated as a trusted fresh external-disjoint
+/// allocation; all other unknown producers remain untrusted.
+class CallerStorageProvenanceCollector : public IRVisitor {
+ public:
+  explicit CallerStorageProvenanceCollector(std::unordered_map<const Var*, const Var*> roots)
+      : storage_roots_(std::move(roots)) {}
+
+  [[nodiscard]] const std::unordered_map<const Var*, const Var*>& GetStorageRoots() const {
+    return storage_roots_;
+  }
+
+  [[nodiscard]] const std::unordered_set<const Var*>& GetFreshRoots() const { return fresh_roots_; }
+
+ protected:
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    if (op && op->var_) {
+      if (auto call = As<Call>(op->value_)) {
+        if (IsOp(call, "tensor.create")) {
+          storage_roots_[op->var_.get()] = op->var_.get();
+          fresh_roots_.insert(op->var_.get());
+        } else if ((IsOp(call, "tensor.slice") || IsOp(call, "tensor.assemble")) && !call->args_.empty()) {
+          SetAliasedRoot(op->var_.get(), call->args_[0]);
+        }
+      } else if (auto source = AsVarLike(op->value_)) {
+        SetAliasedRoot(op->var_.get(), source);
+      }
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
+ private:
+  std::unordered_map<const Var*, const Var*> storage_roots_;
+  std::unordered_set<const Var*> fresh_roots_;
+
+  void SetAliasedRoot(const Var* result, const ExprPtr& source_expr) {
+    auto source = AsVarLike(source_expr);
+    const Var* root = source ? ResolveCanonicalRoot(storage_roots_, source.get()) : nullptr;
+    if (root) {
+      storage_roots_[result] = root;
+    } else {
+      storage_roots_.erase(result);
+    }
+  }
+};
+
 class FunctionWriteRootCollector : public IRVisitor {
  public:
   FunctionWriteRootCollector(ProgramPtr program,
@@ -389,8 +508,7 @@ class FunctionWriteRootCollector : public IRVisitor {
   void RecordArgRoot(const ExprPtr& arg) {
     auto var = AsVarLike(arg);
     if (!var) return;
-    auto it = buffer_roots_.find(var.get());
-    if (it != buffer_roots_.end() && it->second) write_roots_.insert(it->second);
+    if (const Var* root = ResolveCanonicalRoot(buffer_roots_, var.get())) write_roots_.insert(root);
   }
 
   void RecordWrites(const CallPtr& call) {
@@ -450,10 +568,12 @@ class CallSiteReadSafetyCollector : public IRVisitor {
  public:
   CallSiteReadSafetyCollector(ProgramPtr program, bool caller_is_root_orchestration,
                               const std::unordered_map<const Var*, const Var*>& buffer_roots,
+                              const std::unordered_set<const Var*>& fresh_roots,
                               std::unordered_map<const Var*, ReadParamEvidence>* evidence)
       : program_(std::move(program)),
         caller_is_root_orchestration_(caller_is_root_orchestration),
         buffer_roots_(buffer_roots),
+        fresh_roots_(fresh_roots),
         evidence_(evidence) {}
 
  protected:
@@ -463,7 +583,7 @@ class CallSiteReadSafetyCollector : public IRVisitor {
   }
 
   void VisitExpr_(const SubmitPtr& op) override {
-    RecordEvidence(transform_utils::AsCallOrSubmitView(op));
+    PoisonEvidence(transform_utils::AsCallOrSubmitView(op));
     IRVisitor::VisitExpr_(op);
   }
 
@@ -471,13 +591,27 @@ class CallSiteReadSafetyCollector : public IRVisitor {
   ProgramPtr program_;
   bool caller_is_root_orchestration_;
   const std::unordered_map<const Var*, const Var*>& buffer_roots_;
+  const std::unordered_set<const Var*>& fresh_roots_;
   std::unordered_map<const Var*, ReadParamEvidence>* evidence_;
 
   [[nodiscard]] const Var* ResolveRoot(const ExprPtr& arg) const {
     auto var = AsVarLike(arg);
-    if (!var) return nullptr;
-    auto it = buffer_roots_.find(var.get());
-    return it == buffer_roots_.end() ? nullptr : it->second;
+    return var ? ResolveCanonicalRoot(buffer_roots_, var.get()) : nullptr;
+  }
+
+  void PoisonEvidence(const CallPtr& call) {
+    if (!call || !call->op_ || !program_) return;
+    auto callee = program_->GetFunction(call->op_->name_);
+    if (!callee || callee->func_type_ != FunctionType::InCore) return;
+    for (size_t i = 0; i < callee->param_directions_.size(); ++i) {
+      if (callee->param_directions_[i] != ParamDirection::In ||
+          !As<TensorType>(callee->params_[i]->GetType())) {
+        continue;
+      }
+      auto& evidence = (*evidence_)[callee->params_[i].get()];
+      ++evidence.call_sites;
+      evidence.all_sites_safe = false;
+    }
   }
 
   void RecordEvidence(const CallPtr& call) {
@@ -485,21 +619,11 @@ class CallSiteReadSafetyCollector : public IRVisitor {
     auto callee = program_->GetFunction(call->op_->name_);
     if (!callee || callee->func_type_ != FunctionType::InCore) return;
 
-    // Only a root orchestration call site is a trusted alias-proof boundary.
-    // Distinct helper/wrapper parameters may still alias at their unproven
-    // caller, so a non-root call must poison (not merely be ignored by) every
-    // Tensor In parameter it reaches. This deliberately declines transitive
-    // helper evidence until the pass has an explicit provenance analysis.
+    // Only a direct root-orchestration call may contribute evidence, and even
+    // there an external parameter is not a no-alias fact.  Non-root calls and
+    // Submit sites poison every Tensor In parameter they reach.
     if (!caller_is_root_orchestration_) {
-      for (size_t i = 0; i < callee->param_directions_.size(); ++i) {
-        if (callee->param_directions_[i] != ParamDirection::In ||
-            !As<TensorType>(callee->params_[i]->GetType())) {
-          continue;
-        }
-        auto& evidence = (*evidence_)[callee->params_[i].get()];
-        ++evidence.call_sites;
-        evidence.all_sites_safe = false;
-      }
+      PoisonEvidence(call);
       return;
     }
 
@@ -525,7 +649,8 @@ class CallSiteReadSafetyCollector : public IRVisitor {
       auto& evidence = (*evidence_)[callee->params_[i].get()];
       ++evidence.call_sites;
       const Var* read_root = i < call->args_.size() ? ResolveRoot(call->args_[i]) : nullptr;
-      if (!read_root || !all_write_roots_known || write_roots.count(read_root) != 0) {
+      if (!read_root || fresh_roots_.count(read_root) == 0 || !all_write_roots_known ||
+          write_roots.count(read_root) != 0) {
         evidence.all_sites_safe = false;
       }
     }
@@ -556,9 +681,12 @@ std::unordered_set<const Var*> CollectProvenSafeReadParams(const ProgramPtr& pro
     buffer_root::BufferRootCollector roots(program);
     roots.Initialize(func->params_);
     roots.VisitStmt(func->body_);
+    CallerStorageProvenanceCollector storage(roots.buffer_roots);
+    storage.VisitStmt(func->body_);
     const bool is_root_orchestration =
         func->func_type_ == FunctionType::Orchestration && called_functions.count(func.get()) == 0;
-    CallSiteReadSafetyCollector calls(program, is_root_orchestration, roots.buffer_roots, &evidence);
+    CallSiteReadSafetyCollector calls(program, is_root_orchestration, storage.GetStorageRoots(),
+                                      storage.GetFreshRoots(), &evidence);
     calls.VisitStmt(func->body_);
   }
   std::unordered_set<const Var*> safe;
@@ -590,7 +718,9 @@ class LoopInvariantTileLoadHoister : public IRMutator {
     buffer_root::BufferRootCollector roots(program);
     roots.Initialize(func->params_);
     roots.VisitStmt(func->body_);
-    buffer_roots_ = std::move(roots.buffer_roots);
+    CallerStorageProvenanceCollector storage(std::move(roots.buffer_roots));
+    storage.VisitStmt(func->body_);
+    buffer_roots_ = storage.GetStorageRoots();
     FunctionWriteRootCollector writes(program, buffer_roots_);
     writes.VisitStmt(func->body_);
     write_roots_ = writes.GetWriteRoots();
@@ -607,17 +737,16 @@ class LoopInvariantTileLoadHoister : public IRMutator {
 
  protected:
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
-    // Visit first so an invariant chain in a nested loop can bubble into this
-    // loop's direct body and, when legal here too, into this preheader.
-    auto visited = IRMutator::VisitStmt_(op);
-    auto loop = As<ForStmt>(visited);
-    INTERNAL_CHECK_SPAN(loop, op->span_) << "Internal error: ForStmt mutation returned a non-ForStmt";
-
-    if (!IsStaticNonEmptySequential(loop)) return visited;
+    // Decide from the original direct body before recursively rewriting child
+    // loops. This prevents a preheader produced for an inner loop from being
+    // rescanned and bubbled again at every enclosing level (O(N * depth)).
+    // Nested loops are still visited by the base mutator below and may each
+    // hoist their own original direct chain by one lexical level.
+    if (!IsStaticNonEmptySequential(op)) return IRMutator::VisitStmt_(op);
     const auto* loop_info = inventory_.GetLoopInfo(op);
-    if (!loop_info || !handler_) return visited;
+    if (!loop_info || !handler_) return IRMutator::VisitStmt_(op);
 
-    auto stmts = DirectStatements(loop->body_);
+    auto stmts = DirectStatements(op->body_);
     std::vector<bool> hoist(stmts.size(), false);
     std::unordered_set<const Expr*> invariant_chain;
     bool changed = false;
@@ -650,7 +779,7 @@ class LoopInvariantTileLoadHoister : public IRMutator {
       changed = true;
     }
 
-    if (!changed) return visited;
+    if (!changed) return IRMutator::VisitStmt_(op);
 
     std::vector<StmtPtr> preheader;
     std::vector<StmtPtr> body;
@@ -660,10 +789,14 @@ class LoopInvariantTileLoadHoister : public IRMutator {
       (hoist[i] ? preheader : body).push_back(stmts[i]);
     }
 
-    auto new_loop = MutableCopy(loop);
-    new_loop->body_ = SeqStmts::Flatten(std::move(body), loop->body_->span_);
-    preheader.push_back(new_loop);
-    return SeqStmts::Flatten(std::move(preheader), loop->span_);
+    auto new_loop = MutableCopy(op);
+    new_loop->body_ = SeqStmts::Flatten(std::move(body), op->body_->span_);
+    // Invoke the base implementation directly for this loop so only its
+    // remaining body is recursively rewritten; do not re-enter this override
+    // and reconsider the same direct statements.
+    ForStmtPtr rewritten_loop = new_loop;
+    preheader.push_back(IRMutator::VisitStmt_(rewritten_loop));
+    return SeqStmts::Flatten(std::move(preheader), op->span_);
   }
 
  private:

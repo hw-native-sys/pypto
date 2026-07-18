@@ -2366,11 +2366,11 @@ class MarkerOnlyScalarCall:
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(
                 self,
-                lhs: pl.Tensor[[16, 128], pl.BF16],
                 rhs: pl.Tensor[[128, 256], pl.BF16],
                 out: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
             ) -> pl.Tensor[[16, 256], pl.FP32]:
-                result = self.kernel(lhs, rhs, out)
+                fresh_lhs = pl.create_tensor([16, 128], dtype=pl.BF16)
+                result = self.kernel(fresh_lhs, rhs, out)
                 return result
 
         After = self._run_tensor_infer(Before)
@@ -2434,7 +2434,7 @@ result = self.wrapper(lhs, mutation, rhs, out)
         assert "__compiler_tensor_to_tile_mat_bridge" not in printed
 
     def test_called_orchestration_helper_does_not_seed_worker_residency(self):
-        """Only root orchestration functions establish a trusted alias boundary."""
+        """A called orchestration helper cannot establish trusted storage provenance."""
         before = self._parse_marked_wrapper_program(
             """
 result = self.wrapper(mutation, mutation, rhs, out)
@@ -2449,7 +2449,8 @@ result = self.wrapper(mutation, mutation, rhs, out)
         """One non-orchestration site invalidates otherwise-safe direct evidence."""
         before = self._parse_marked_wrapper_program(
             """
-result = self.worker(lhs, mutation, rhs, out)
+fresh_lhs = pl.create_tensor([16, 128], dtype=pl.BF16)
+result = self.worker(fresh_lhs, mutation, rhs, out)
 """
         )
         printed = ir.python_print(self._run_infer(before))
@@ -2481,14 +2482,14 @@ class MarkedSubmitResidency:
     @pl.function(type=pl.FunctionType.Orchestration)
     def main(
         self,
-        safe_lhs: pl.Tensor[[16, 128], pl.BF16],
         safe_mutation: pl.InOut[pl.Tensor[[16, 128], pl.BF16]],
         shared: pl.InOut[pl.Tensor[[16, 128], pl.BF16]],
         rhs: pl.Tensor[[128, 128], pl.BF16],
         safe_out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
         submit_out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
     ) -> pl.Tensor[[16, 128], pl.FP32]:
-        _safe = self.worker(safe_lhs, safe_mutation, rhs, safe_out)
+        fresh_safe_lhs = pl.create_tensor([16, 128], dtype=pl.BF16)
+        _safe = self.worker(fresh_safe_lhs, safe_mutation, rhs, safe_out)
         with pl.manual_scope():
             result, _tid = pl.submit(self.worker, shared, shared, rhs, submit_out)
         return result
@@ -2497,6 +2498,186 @@ class MarkedSubmitResidency:
         before = self._stamp_mat_bridge_loads(before)
         printed = ir.python_print(self._run_infer(before))
         assert self._line_index(printed, "tile.load(lhs") > self._line_index(printed, "for n")
+        assert "__compiler_tensor_to_tile_mat_bridge" not in printed
+
+    @pytest.mark.parametrize("include_direct_call", [False, True], ids=["submit-only", "direct-plus-submit"])
+    def test_distinct_root_submit_always_declines_worker_residency(self, include_direct_call):
+        """Submit is never positive storage-disjointness evidence."""
+        direct_call = (
+            "_safe = self.worker(fresh_safe_lhs, safe_mutation, rhs, safe_out)" if include_direct_call else ""
+        )
+        before = pl.parse_program(
+            f"""
+@pl.program
+class MarkedDistinctSubmitResidency:
+    @pl.function(type=pl.FunctionType.InCore)
+    def worker(
+        self,
+        lhs: pl.Tensor[[16, 128], pl.BF16],
+        mutation: pl.InOut[pl.Tensor[[16, 128], pl.BF16]],
+        rhs: pl.Tensor[[128, 128], pl.BF16],
+        out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+    ) -> pl.Tensor[[16, 128], pl.FP32]:
+        for n in pl.range(0, 2, 1):
+            lhs_mat = pl.tile.load(lhs, [0, 0], [16, 128], target_memory=pl.Mem.Mat)
+            rhs_mat = pl.tile.load(rhs, [0, 0], [128, 128], target_memory=pl.Mem.Mat)
+            lhs_left = pl.tile.move(lhs_mat, target_memory=pl.Mem.Left)
+            rhs_right = pl.tile.move(rhs_mat, target_memory=pl.Mem.Right)
+            c = pl.tile.matmul(lhs_left, rhs_right)
+        return out
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        safe_mutation: pl.InOut[pl.Tensor[[16, 128], pl.BF16]],
+        submit_lhs: pl.Tensor[[16, 128], pl.BF16],
+        submit_mutation: pl.InOut[pl.Tensor[[16, 128], pl.BF16]],
+        rhs: pl.Tensor[[128, 128], pl.BF16],
+        safe_out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+        submit_out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+    ) -> pl.Tensor[[16, 128], pl.FP32]:
+        fresh_safe_lhs = pl.create_tensor([16, 128], dtype=pl.BF16)
+        {direct_call}
+        with pl.manual_scope():
+            result, _tid = pl.submit(
+                self.worker,
+                submit_lhs,
+                submit_mutation,
+                rhs,
+                submit_out,
+            )
+        return result
+"""
+        )
+        before = self._stamp_mat_bridge_loads(before)
+        printed = ir.python_print(self._run_infer(before))
+        assert self._line_index(printed, "tile.load(lhs") > self._line_index(printed, "for n")
+        assert "__compiler_tensor_to_tile_mat_bridge" not in printed
+
+    def test_external_root_parameters_do_not_prove_noalias(self):
+        """Distinct external parameters may still overlap at runtime."""
+        before = pl.parse_program(
+            """
+@pl.program
+class MarkedExternalAliasUnknown:
+    @pl.function(type=pl.FunctionType.InCore)
+    def worker(
+        self,
+        lhs: pl.Tensor[[16, 128], pl.BF16],
+        mutation: pl.InOut[pl.Tensor[[16, 128], pl.BF16]],
+        rhs: pl.Tensor[[128, 128], pl.BF16],
+        out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+    ) -> pl.Tensor[[16, 128], pl.FP32]:
+        for n in pl.range(0, 2, 1):
+            lhs_mat = pl.tile.load(lhs, [0, 0], [16, 128], target_memory=pl.Mem.Mat)
+            rhs_mat = pl.tile.load(rhs, [0, 0], [128, 128], target_memory=pl.Mem.Mat)
+            lhs_left = pl.tile.move(lhs_mat, target_memory=pl.Mem.Left)
+            rhs_right = pl.tile.move(rhs_mat, target_memory=pl.Mem.Right)
+            c = pl.tile.matmul(lhs_left, rhs_right)
+        return out
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        lhs: pl.Tensor[[16, 128], pl.BF16],
+        mutation: pl.InOut[pl.Tensor[[16, 128], pl.BF16]],
+        rhs: pl.Tensor[[128, 128], pl.BF16],
+        out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+    ) -> pl.Tensor[[16, 128], pl.FP32]:
+        result = self.worker(lhs, mutation, rhs, out)
+        return result
+"""
+        )
+        before = self._stamp_mat_bridge_loads(before)
+        printed = ir.python_print(self._run_infer(before))
+        assert self._line_index(printed, "tile.load(lhs") > self._line_index(printed, "for n")
+        assert "__compiler_tensor_to_tile_mat_bridge" not in printed
+
+    def test_plain_alias_of_mat_panel_declines_residency(self):
+        """A plain SSA alias is an additional use of the shared Mat buffer."""
+        before = pl.parse_program(
+            """
+@pl.program
+class MarkedAliasedPanelResidency:
+    @pl.function(type=pl.FunctionType.InCore)
+    def worker(
+        self,
+        lhs: pl.Tensor[[16, 128], pl.BF16],
+        rhs: pl.Tensor[[128, 128], pl.BF16],
+        out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+    ) -> pl.Tensor[[16, 128], pl.FP32]:
+        for n in pl.range(0, 2, 1):
+            lhs_mat = pl.tile.load(lhs, [0, 0], [16, 128], target_memory=pl.Mem.Mat)
+            alias = lhs_mat
+            patch = pl.tile.create([16, 128], dtype=pl.BF16, target_memory=pl.Mem.Mat)
+            alias_after = pl.tile.assemble(alias, patch, [0, 0])
+            rhs_mat = pl.tile.load(rhs, [0, 0], [128, 128], target_memory=pl.Mem.Mat)
+            lhs_left = pl.tile.move(lhs_mat, target_memory=pl.Mem.Left)
+            mutated_left = pl.tile.move(alias_after, target_memory=pl.Mem.Left)
+            rhs_right = pl.tile.move(rhs_mat, target_memory=pl.Mem.Right)
+            c = pl.tile.matmul(lhs_left, rhs_right)
+            mutated_c = pl.tile.matmul(mutated_left, rhs_right)
+        return out
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        rhs: pl.Tensor[[128, 128], pl.BF16],
+        out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+    ) -> pl.Tensor[[16, 128], pl.FP32]:
+        fresh_lhs = pl.create_tensor([16, 128], dtype=pl.BF16)
+        result = self.worker(fresh_lhs, rhs, out)
+        return result
+"""
+        )
+        before = self._stamp_mat_bridge_loads(before)
+        printed = ir.python_print(self._run_infer(before))
+        loop = self._line_index(printed, "for n")
+        assert self._line_index(printed, "tile.load(lhs") > loop
+        assert self._line_index(printed, "lhs_left", "tile.move") > loop
+        assert "__compiler_tensor_to_tile_mat_bridge" not in printed
+
+    def test_nested_chain_moves_one_lexical_level(self):
+        """Nested loops are rewritten independently without repeated bubbling."""
+        before = pl.parse_program(
+            """
+@pl.program
+class MarkedNestedResidency:
+    @pl.function(type=pl.FunctionType.InCore)
+    def worker(
+        self,
+        lhs: pl.Tensor[[16, 128], pl.BF16],
+        rhs: pl.Tensor[[128, 128], pl.BF16],
+        out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+    ) -> pl.Tensor[[16, 128], pl.FP32]:
+        for outer in pl.range(0, 2, 1):
+            for inner in pl.range(0, 2, 1):
+                lhs_mat = pl.tile.load(lhs, [0, 0], [16, 128], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [128, 128], target_memory=pl.Mem.Mat)
+                lhs_left = pl.tile.move(lhs_mat, target_memory=pl.Mem.Left)
+                rhs_right = pl.tile.move(rhs_mat, target_memory=pl.Mem.Right)
+                c = pl.tile.matmul(lhs_left, rhs_right)
+        return out
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        rhs: pl.Tensor[[128, 128], pl.BF16],
+        out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+    ) -> pl.Tensor[[16, 128], pl.FP32]:
+        fresh_lhs = pl.create_tensor([16, 128], dtype=pl.BF16)
+        result = self.worker(fresh_lhs, rhs, out)
+        return result
+"""
+        )
+        before = self._stamp_mat_bridge_loads(before)
+        printed = ir.python_print(self._run_infer(before))
+        outer = self._line_index(printed, "for outer")
+        inner = self._line_index(printed, "for inner")
+        lhs_load = self._line_index(printed, "tile.load(lhs")
+        lhs_left = self._line_index(printed, "lhs_left", "tile.move")
+        assert outer < lhs_load < inner
+        assert outer < lhs_left < inner
         assert "__compiler_tensor_to_tile_mat_bridge" not in printed
 
     def test_multiple_proven_safe_call_sites_allow_residency(self):
@@ -2521,14 +2702,14 @@ class MarkedSubmitResidency:
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(
                 self,
-                lhs0: pl.Tensor[[16, 128], pl.BF16],
-                lhs1: pl.Tensor[[16, 128], pl.BF16],
                 rhs: pl.Tensor[[128, 256], pl.BF16],
                 out0: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
                 out1: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
             ) -> pl.Tensor[[16, 256], pl.FP32]:
-                _ignored = self.worker(lhs0, rhs, out0)
-                result = self.worker(lhs1, rhs, out1)
+                fresh_lhs0 = pl.create_tensor([16, 128], dtype=pl.BF16)
+                fresh_lhs1 = pl.create_tensor([16, 128], dtype=pl.BF16)
+                _ignored = self.worker(fresh_lhs0, rhs, out0)
+                result = self.worker(fresh_lhs1, rhs, out1)
                 return result
 
         printed = ir.python_print(self._run_tensor_infer(Before))
@@ -2557,12 +2738,12 @@ class MarkedSubmitResidency:
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(
                 self,
-                lhs: pl.Tensor[[16, 128], pl.BF16],
                 rhs: pl.Tensor[[128, 256], pl.BF16],
                 base: pl.Scalar[pl.INDEX],
                 out: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
             ) -> pl.Tensor[[16, 256], pl.FP32]:
-                result = self.worker(lhs, rhs, base + 1, out)
+                fresh_lhs = pl.create_tensor([16, 128], dtype=pl.BF16)
+                result = self.worker(fresh_lhs, rhs, base + 1, out)
                 return result
 
         printed = ir.python_print(self._run_tensor_infer(Before))
@@ -2590,11 +2771,11 @@ class MarkedSubmitResidency:
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(
                 self,
-                lhs: pl.Tensor[[16, 128], pl.BF16],
                 backing_rhs: pl.Tensor[[256, 256], pl.BF16],
                 out: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
             ) -> pl.Tensor[[16, 256], pl.FP32]:
-                result = self.worker(lhs, pl.slice(backing_rhs, [128, 256], [0, 0]), out)
+                fresh_lhs = pl.create_tensor([16, 128], dtype=pl.BF16)
+                result = self.worker(fresh_lhs, pl.slice(backing_rhs, [128, 256], [0, 0]), out)
                 return result
 
         printed = ir.python_print(self._run_tensor_infer(Before))
@@ -2623,11 +2804,11 @@ class MarkedSubmitResidency:
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(
                 self,
-                lhs: pl.Tensor[[16, 128], pl.BF16],
                 rhs: pl.Tensor[[128, 256], pl.BF16],
                 out: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
             ) -> pl.Tensor[[16, 256], pl.FP32]:
-                result = self.kernel(lhs, rhs, out)
+                fresh_lhs = pl.create_tensor([16, 128], dtype=pl.BF16)
+                result = self.kernel(fresh_lhs, rhs, out)
                 return result
 
         After = passes.expand_mixed_kernel()(self._run_tensor_infer(Before))
@@ -2710,7 +2891,7 @@ class MarkedSubmitResidency:
         assert self._line_index(printed, "tile.load(lhs") > self._line_index(printed, "for n")
 
     def test_one_aliasing_call_site_invalidates_safe_call_sites(self):
-        """All call sites must prove the In root distinct from every write root."""
+        """One aliasing site poisons otherwise-safe compiler-owned storage."""
 
         @pl.program
         class Before:
@@ -2732,15 +2913,16 @@ class MarkedSubmitResidency:
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(
                 self,
-                safe_lhs: pl.Tensor[[16, 128], pl.BF16],
                 safe_mutation: pl.InOut[pl.Tensor[[16, 128], pl.BF16]],
-                shared: pl.InOut[pl.Tensor[[16, 128], pl.BF16]],
                 rhs: pl.Tensor[[128, 256], pl.BF16],
                 out0: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
                 out1: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
             ) -> pl.Tensor[[16, 256], pl.FP32]:
-                _ignored = self.worker(safe_lhs, safe_mutation, rhs, out0)
-                result = self.worker(shared, shared, rhs, out1)
+                fresh_safe_lhs = pl.create_tensor([16, 128], dtype=pl.BF16)
+                _ignored = self.worker(fresh_safe_lhs, safe_mutation, rhs, out0)
+                fresh_shared = pl.create_tensor([16, 128], dtype=pl.BF16)
+                shared_alias = fresh_shared
+                result = self.worker(fresh_shared, shared_alias, rhs, out1)
                 return result
 
         printed = ir.python_print(self._run_tensor_infer(Before))

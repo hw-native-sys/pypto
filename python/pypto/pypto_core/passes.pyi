@@ -514,9 +514,11 @@ def infer_tile_memory_space() -> Pass:
     Besides assigning ``Vec``/``Mat``/``Left``/``Right``/``Acc`` and inserting
     required moves, the pass runs a focused internal transform for a
     conservative single-use subset of compiler-generated invariant GM→Mat
-    matmul operand chains. Direct/external InCore entries and Mat panels fanned
-    out by K tiling currently decline. User-authored tile loads are never
-    moved, and internal bridge provenance is consumed before the pass returns.
+    matmul operand chains. The candidate caller storage must be created by
+    ``tensor.create`` in root orchestration IR. External inputs, Submit sites,
+    direct/external InCore entries, and Mat panels fanned out by K tiling
+    currently decline. User-authored tile loads are never moved, and internal
+    bridge provenance is consumed before the pass returns.
     """
 
 def materialize_tensor_strides() -> Pass:
