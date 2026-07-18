@@ -26,6 +26,7 @@
 #include "pypto/ir/function.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/memref.h"
+#include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/utils/lifetime_analysis.h"
 
 namespace pypto {
@@ -72,7 +73,8 @@ struct SolverRun {
 [[nodiscard]] ExportedProblem BuildStructuredProblem(
     const FunctionPtr& func, const AllocationPlan& allocation_plan, const MemoryAllocatorPolicy& policy,
     const std::unordered_map<MemorySpace, uint64_t>& reserved_end_by_space,
-    const std::unordered_map<MemorySpace, uint64_t>& pool_caps);
+    const std::unordered_map<MemorySpace, uint64_t>& pool_caps,
+    DsaReusePenaltyRecognizer reuse_penalty_recognizer = DsaReusePenaltyRecognizer::Disabled);
 
 /**
  * @brief Write a deterministic ``<function>.dsa.json`` corpus artifact.

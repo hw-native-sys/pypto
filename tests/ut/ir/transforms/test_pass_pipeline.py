@@ -139,6 +139,19 @@ class TestPassContext:
         # Outer (conftest) context restored
         assert passes.PassContext.current() is outer_ctx
 
+    @pytest.mark.parametrize(
+        "recognizer",
+        [
+            passes.DsaReusePenaltyRecognizer.DISABLED,
+            passes.DsaReusePenaltyRecognizer.LINEAR,
+            passes.DsaReusePenaltyRecognizer.QUADRATIC,
+        ],
+    )
+    def test_dsa_reuse_penalty_recognizer_round_trip(self, recognizer):
+        """PassContext owns the experimental recognizer selection."""
+        context = passes.PassContext([], dsa_reuse_penalty_recognizer=recognizer)
+        assert context.get_dsa_reuse_penalty_recognizer() == recognizer
+
     def test_after_mode_succeeds_on_valid_pipeline(self):
         """AFTER mode succeeds when pass actually produces its claimed property."""
         with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):

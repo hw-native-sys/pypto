@@ -12,225 +12,235 @@
 #include "pypto/ir/transforms/dsa/reuse_penalty_recognizer.h"
 
 #include <algorithm>
-#include <array>
 #include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <map>
 #include <optional>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
-#include "pypto/backend/common/backend.h"
-#include "pypto/core/logging.h"
-#include "pypto/ir/expr.h"
-#include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
-#include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
-#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/visitor.h"
-#include "pypto/ir/transforms/dsa/allocation_plan.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
+#include "pypto/ir/transforms/utils/stmt_dependency_analysis.h"
 #include "pypto/ir/type.h"
-#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
 namespace dsa_adapter {
 namespace {
 
-// Complexity is O(N log N + E), where N is IR/allocation input size and E is
-// the number of cross-pipe candidate relations examined. Access collection
-// and summary construction are linear. Structured control paths receive
-// constant-size IDs during traversal, so sorting lifetimes and path-bucket
-// maintenance cost O(N log N). Candidate enumeration visits only
-// lifetime-compatible allocations in a different backend pipe bucket. E can be
-// quadratic in the number of reusable allocations. This output-sensitive
-// exception is inherent in the opt-in explicit pairwise DSA-RP model: a kernel
-// can genuinely produce Theta(B^2) penalty edges for B buffers. No access-pair
-// antichain or per-pair dependency walk is performed beyond materializing those
-// relations.
-
 enum class AccessKind : uint8_t {
   Read,
   Write,
 };
 
-constexpr size_t kResourceCount = static_cast<size_t>(PipeType::ALL) + 1;
-
-size_t ResourceIndex(PipeType resource) { return static_cast<size_t>(resource); }
-
-struct StructuredPath {
-  size_t id = 0;
-  bool in_loop = false;
-
-  bool operator==(const StructuredPath& other) const { return id == other.id; }
-
-  bool operator!=(const StructuredPath& other) const { return !(*this == other); }
-
-  bool operator<(const StructuredPath& other) const { return id < other.id; }
-};
-
 struct AccessEndpoint {
+  size_t region = 0;
+  size_t statement_index = 0;
   size_t global_order = 0;
-  PipeType resource = PipeType::S;
+  const Stmt* statement = nullptr;
+  PipeType pipe = PipeType::ALL;
   AccessKind access_kind = AccessKind::Read;
-  StructuredPath path;
-  bool full_allocation = false;
+  bool nested_control = false;
 };
 
 struct AllocationAccessSummary {
-  std::vector<AccessEndpoint> accesses;
-  bool has_unknown_access = false;
+  bool supported = true;
+  std::optional<AccessEndpoint> first_write;
+  std::optional<AccessEndpoint> last_access;
 };
 
-struct CompactAccessSummary {
-  StructuredPath path;
-  AccessEndpoint initial_write;
-  std::array<std::optional<AccessEndpoint>, kResourceCount> terminal_by_resource;
-};
-
-struct PairKey {
-  size_t first = 0;
-  size_t second = 0;
-
-  bool operator==(const PairKey& other) const { return first == other.first && second == other.second; }
-};
-
-struct PairKeyHash {
-  size_t operator()(const PairKey& pair) const {
-    const size_t first_hash = std::hash<size_t>{}(pair.first);
-    const size_t second_hash = std::hash<size_t>{}(pair.second);
-    return first_hash ^ (second_hash + 0x9e3779b9U + (first_hash << 6U) + (first_hash >> 2U));
-  }
-};
-
-PairKey NormalizePair(size_t first, size_t second) {
-  return first < second ? PairKey{first, second} : PairKey{second, first};
+bool IsVectorOperation(const CallPtr& call) {
+  return IsOp(call, "tile.add") || IsOp(call, "tile.sub") || IsOp(call, "tile.mul") ||
+         IsOp(call, "tile.div") || IsOp(call, "tile.exp") || IsOp(call, "tile.adds") ||
+         IsOp(call, "tile.subs") || IsOp(call, "tile.muls") || IsOp(call, "tile.divs") ||
+         IsOp(call, "tile.cast") || IsOp(call, "tile.row_expand_add") || IsOp(call, "tile.row_expand_sub") ||
+         IsOp(call, "tile.row_expand_mul") || IsOp(call, "tile.row_expand_div") || IsOp(call, "tile.full");
 }
 
-std::optional<MemorySpace> GetMemorySpace(const TypePtr& type) {
-  if (!type) return std::nullopt;
-  const auto shaped = As<ShapedType>(type);
-  return shaped ? shaped->GetMemorySpace() : std::nullopt;
+bool IsMatrixOperation(const CallPtr& call) {
+  return IsOp(call, "tile.matmul") || IsOp(call, "tile.matmul_acc") || IsOp(call, "tile.matmul_bias") ||
+         IsOp(call, "tile.gemv") || IsOp(call, "tile.gemv_acc") || IsOp(call, "tile.gemv_bias");
 }
 
 std::optional<MemorySpace> GetMemorySpace(const VarPtr& var) {
-  return var ? GetMemorySpace(var->GetType()) : std::nullopt;
+  if (!var) return std::nullopt;
+  const auto tile = As<TileType>(var->GetType());
+  return tile ? tile->GetMemorySpace() : std::nullopt;
 }
 
-bool SameAllocation(const VarPtr& first, const VarPtr& second) {
-  const auto first_tile = first ? As<TileType>(first->GetType()) : nullptr;
-  const auto second_tile = second ? As<TileType>(second->GetType()) : nullptr;
-  if (!first_tile || !second_tile || !first_tile->memref_ || !second_tile->memref_) return false;
-  return GetDefinedMemRef(first_tile)->base_.get() == GetDefinedMemRef(second_tile)->base_.get();
-}
-
-bool SameAllocationOffset(const VarPtr& first, const VarPtr& second) {
-  const auto first_tile = first ? As<TileType>(first->GetType()) : nullptr;
-  const auto second_tile = second ? As<TileType>(second->GetType()) : nullptr;
-  if (!first_tile || !second_tile || !first_tile->memref_ || !second_tile->memref_) return false;
-  const MemRefPtr first_memref = GetDefinedMemRef(first_tile);
-  const MemRefPtr second_memref = GetDefinedMemRef(second_tile);
-  return first_memref->base_.get() == second_memref->base_.get() &&
-         AreExprsEqual(first_memref->byte_offset_, second_memref->byte_offset_);
-}
-
-bool HasSameEffectiveLayout(const VarPtr& first, const VarPtr& second) {
-  const auto first_tile = first ? As<TileType>(first->GetType()) : nullptr;
-  const auto second_tile = second ? As<TileType>(second->GetType()) : nullptr;
-  if (!first_tile || !second_tile) return false;
-  const TileView first_view = tile_view_semantics::GetEffectiveTileView(*first_tile);
-  const TileView second_view = tile_view_semantics::GetEffectiveTileView(*second_tile);
-  return first_view.blayout == second_view.blayout && first_view.slayout == second_view.slayout &&
-         first_view.fractal == second_view.fractal;
-}
-
-using TupleResultElements = std::unordered_map<const Var*, std::map<int, VarPtr>>;
-
-class TupleResultCollector : public IRVisitor {
- public:
-  const TupleResultElements& Elements() const { return elements_; }
-
- protected:
-  void VisitStmt_(const AssignStmtPtr& op) override {
-    if (const auto get_item = As<TupleGetItemExpr>(op->value_)) {
-      if (const VarPtr tuple = AsVarLike(get_item->tuple_); tuple && get_item->index_ >= 0) {
-        elements_[tuple.get()][get_item->index_] = op->var_;
-      }
+std::optional<PipeType> ClassifyOperation(const CallPtr& call, const VarPtr& result) {
+  if (!call) return std::nullopt;
+  if (IsVectorOperation(call)) {
+    bool saw_tile = false;
+    for (const ExprPtr& argument : call->args_) {
+      const auto space = GetMemorySpace(AsVarLike(argument));
+      if (!space) continue;
+      saw_tile = true;
+      if (*space != MemorySpace::Vec) return std::nullopt;
     }
-    IRVisitor::VisitStmt_(op);
+    const auto result_space = GetMemorySpace(result);
+    if (result_space) {
+      saw_tile = true;
+      if (*result_space != MemorySpace::Vec) return std::nullopt;
+    }
+    return saw_tile ? std::optional<PipeType>(PipeType::V) : std::nullopt;
+  }
+  if (IsMatrixOperation(call)) {
+    const auto result_space = GetMemorySpace(result);
+    return result_space && *result_space == MemorySpace::Acc ? std::optional<PipeType>(PipeType::M)
+                                                             : std::nullopt;
   }
 
- private:
-  TupleResultElements elements_;
-};
+  if (IsOp(call, "tile.load") || IsOp(call, "tile.read")) {
+    const auto destination = GetMemorySpace(result);
+    if (!destination) return std::nullopt;
+    if (*destination == MemorySpace::Vec || *destination == MemorySpace::Mat) return PipeType::MTE2;
+    if (*destination == MemorySpace::Left || *destination == MemorySpace::Right) return PipeType::MTE1;
+    return std::nullopt;
+  }
+
+  if (IsOp(call, "tile.store") || IsOp(call, "tile.write")) {
+    for (const ExprPtr& argument : call->args_) {
+      const auto source = GetMemorySpace(AsVarLike(argument));
+      if (!source) continue;
+      if (*source == MemorySpace::Vec) return PipeType::MTE3;
+      if (*source == MemorySpace::Acc) return PipeType::FIX;
+    }
+    return std::nullopt;
+  }
+
+  if (IsOp(call, "tile.move")) {
+    if (call->args_.empty()) return std::nullopt;
+    const auto source = GetMemorySpace(AsVarLike(call->args_.front()));
+    const auto destination = GetMemorySpace(result);
+    if (!source || !destination) return std::nullopt;
+    if (*source == MemorySpace::Mat &&
+        (*destination == MemorySpace::Left || *destination == MemorySpace::Right)) {
+      return PipeType::MTE1;
+    }
+    if (*source == MemorySpace::Acc) return PipeType::FIX;
+    if (*source == MemorySpace::Vec && *destination == MemorySpace::Vec) return PipeType::V;
+  }
+  return std::nullopt;
+}
 
 class AccessCollector : public IRVisitor {
  public:
   AccessCollector(const AllocationPlan& plan, std::unordered_map<const Var*, size_t> interval_by_base,
-                  TupleResultElements tuple_results, const backend::Backend& backend)
+                  bool allow_nested_control)
       : plan_(plan),
         interval_by_base_(std::move(interval_by_base)),
-        tuple_results_(std::move(tuple_results)),
-        backend_(backend),
-        summaries_(plan.intervals.size()) {}
+        summaries_(plan.intervals.size()),
+        allow_nested_control_(allow_nested_control) {}
 
   void Collect(const StmtPtr& body) { VisitStmt(body); }
 
   const std::vector<AllocationAccessSummary>& Summaries() const { return summaries_; }
 
+  bool DirectlyOrdered(const Stmt* earlier, const Stmt* later) const {
+    const auto found = predecessors_.find(later);
+    return found != predecessors_.end() && found->second.count(earlier) != 0;
+  }
+
+  bool TransitivelyOrdered(const Stmt* earlier, const Stmt* later) {
+    auto cached = transitive_predecessors_.find(later);
+    if (cached == transitive_predecessors_.end()) {
+      std::unordered_set<const Stmt*> ancestors;
+      std::vector<const Stmt*> worklist{later};
+      while (!worklist.empty()) {
+        const Stmt* current = worklist.back();
+        worklist.pop_back();
+        const auto found = predecessors_.find(current);
+        if (found == predecessors_.end()) continue;
+        for (const Stmt* predecessor : found->second) {
+          if (ancestors.insert(predecessor).second) worklist.push_back(predecessor);
+        }
+      }
+      cached = transitive_predecessors_.emplace(later, std::move(ancestors)).first;
+    }
+    return cached->second.count(earlier) != 0;
+  }
+
  protected:
+  void VisitStmt_(const SeqStmtsPtr& op) override {
+    const size_t previous_region = current_region_;
+    const size_t previous_index = current_statement_index_;
+    const bool previous_region_supported = current_region_supported_;
+    current_region_ = next_region_++;
+    current_region_supported_ =
+        (allow_nested_control_ || control_depth_ == 0) &&
+        std::all_of(op->stmts_.begin(), op->stmts_.end(), [](const StmtPtr& stmt) {
+          return As<AssignStmt>(stmt) || As<EvalStmt>(stmt) || As<YieldStmt>(stmt) || As<ReturnStmt>(stmt);
+        });
+
+    if (current_region_supported_) {
+      const stmt_dep::StmtDependencyGraph graph = stmt_dep::BuildStmtDependencyGraph(op);
+      for (const auto& [statement, predecessors] : graph.predecessors) {
+        predecessors_[statement].insert(predecessors.begin(), predecessors.end());
+      }
+    }
+
+    for (size_t index = 0; index < op->stmts_.size(); ++index) {
+      current_statement_index_ = index;
+      VisitStmt(op->stmts_[index]);
+    }
+    current_region_ = previous_region;
+    current_statement_index_ = previous_index;
+    current_region_supported_ = previous_region_supported;
+  }
+
   void VisitStmt_(const AssignStmtPtr& op) override {
-    RecordCall(As<Call>(op->value_), op->var_);
+    const auto call = As<Call>(op->value_);
+    RecordCall(call, op->var_, op.get());
     ++global_order_;
   }
 
   void VisitStmt_(const EvalStmtPtr& op) override {
-    RecordCall(As<Call>(op->expr_), nullptr);
-    ++global_order_;
-  }
-
-  void VisitStmt_(const ReturnStmtPtr& op) override {
-    for (const ExprPtr& value : op->value_) {
-      RecordCall(As<Call>(value), nullptr);
-    }
+    RecordCall(As<Call>(op->expr_), nullptr, op.get());
     ++global_order_;
   }
 
   void VisitStmt_(const IfStmtPtr& op) override {
-    const StructuredPath parent = current_path_;
-    current_path_ = {next_path_id_++, parent.in_loop};
-    VisitStmt(op->then_body_);
-    current_path_ = parent;
-    if (op->else_body_) {
-      current_path_ = {next_path_id_++, parent.in_loop};
-      VisitStmt(*op->else_body_);
-      current_path_ = parent;
-    }
+    ++control_depth_;
+    IRVisitor::VisitStmt_(op);
+    --control_depth_;
   }
 
   void VisitStmt_(const ForStmtPtr& op) override {
-    const StructuredPath parent = current_path_;
-    current_path_ = {next_path_id_++, true};
-    VisitStmt(op->body_);
-    current_path_ = parent;
+    ++control_depth_;
+    IRVisitor::VisitStmt_(op);
+    --control_depth_;
   }
 
   void VisitStmt_(const WhileStmtPtr& op) override {
-    const StructuredPath parent = current_path_;
-    current_path_ = {next_path_id_++, true};
-    VisitStmt(op->body_);
-    current_path_ = parent;
+    ++control_depth_;
+    IRVisitor::VisitStmt_(op);
+    --control_depth_;
   }
 
  private:
+  const AllocationPlan& plan_;
+  std::unordered_map<const Var*, size_t> interval_by_base_;
+  std::vector<AllocationAccessSummary> summaries_;
+  std::unordered_map<const Stmt*, std::unordered_set<const Stmt*>> predecessors_;
+  std::unordered_map<const Stmt*, std::unordered_set<const Stmt*>> transitive_predecessors_;
+  size_t next_region_ = 0;
+  size_t current_region_ = 0;
+  size_t current_statement_index_ = 0;
+  size_t global_order_ = 0;
+  bool current_region_supported_ = false;
+  size_t control_depth_ = 0;
+  bool allow_nested_control_ = false;
+
   std::optional<size_t> FindInterval(const VarPtr& var) const {
     if (!var) return std::nullopt;
     const auto tile = As<TileType>(var->GetType());
@@ -240,227 +250,80 @@ class AccessCollector : public IRVisitor {
     return found == interval_by_base_.end() ? std::nullopt : std::optional<size_t>(found->second);
   }
 
-  std::vector<VarPtr> ResolveCallResults(const VarPtr& result) const {
-    if (!result) return {};
-    if (!As<TupleType>(result->GetType())) return {result};
-    const auto found = tuple_results_.find(result.get());
-    if (found == tuple_results_.end()) return {};
-    std::vector<VarPtr> results;
-    results.reserve(found->second.size());
-    for (const auto& [index, element] : found->second) {
-      static_cast<void>(index);
-      results.push_back(element);
-    }
-    return results;
-  }
-
   bool IsFullAllocationAccess(const VarPtr& var, size_t interval) const {
+    if (plan_.intervals[interval].alias_members.size() != 1) return false;
     const auto tile = As<TileType>(var->GetType());
     if (!tile || !tile->memref_) return false;
     const MemRefPtr memref = GetDefinedMemRef(tile);
     const auto offset = As<ConstInt>(memref->byte_offset_);
-    return offset && offset->value_ == 0 &&
-           memref->size_ == static_cast<uint64_t>(plan_.intervals[interval].size) &&
-           AreExprVectorsEqual(GetValidShape(tile), tile->shape_);
+    return memref->size_ == plan_.intervals[interval].size && offset && offset->value_ == 0;
   }
 
-  static bool IsFullyValidTile(const TileTypePtr& tile) {
-    return tile && AreExprVectorsEqual(GetValidShape(tile), tile->shape_);
-  }
-
-  static bool IsZeroOffsetTuple(const ExprPtr& expression, size_t expected_rank) {
-    const auto offsets = As<MakeTuple>(expression);
-    if (!offsets || offsets->elements_.size() != expected_rank) return false;
-    return std::all_of(offsets->elements_.begin(), offsets->elements_.end(), [](const ExprPtr& offset) {
-      const auto value = As<ConstInt>(offset);
-      return value && value->value_ == 0;
-    });
-  }
-
-  static bool IsProvablyWholeStore(const CallPtr& call) {
-    if (!IsOp(call, "tile.store") || call->args_.size() != 3) return false;
-    return IsFullyValidTile(As<TileType>(call->args_[0]->GetType()));
-  }
-
-  static bool IsProvablyWholeAssemble(const CallPtr& call, const std::vector<VarPtr>& results) {
-    if (!IsOp(call, "tile.assemble") || call->args_.size() != 3 || results.size() != 1) return false;
-
-    const VarPtr target_var = AsVarLike(call->args_[0]);
-    const VarPtr source_var = AsVarLike(call->args_[1]);
-    const VarPtr& result_var = results.front();
-    const auto target = target_var ? As<TileType>(target_var->GetType()) : nullptr;
-    const auto source = source_var ? As<TileType>(source_var->GetType()) : nullptr;
-    const auto result = result_var ? As<TileType>(result_var->GetType()) : nullptr;
-    if (!target || !source || !result || !target->memref_ || !source->memref_ || !result->memref_) {
-      return false;
+  void RecordAccess(size_t interval, const AccessEndpoint& endpoint) {
+    AllocationAccessSummary& summary = summaries_[interval];
+    const bool is_write = endpoint.access_kind == AccessKind::Write;
+    if (is_write && (!summary.first_write || endpoint.global_order < summary.first_write->global_order)) {
+      summary.first_write = endpoint;
     }
-    if (!AreExprVectorsEqual(target->shape_, source->shape_) ||
-        !AreExprVectorsEqual(target->shape_, result->shape_)) {
-      return false;
+    if (!summary.last_access || endpoint.global_order >= summary.last_access->global_order) {
+      summary.last_access = endpoint;
     }
-    if (!IsFullyValidTile(target) || !IsFullyValidTile(source) || !IsFullyValidTile(result)) return false;
-    if (!IsZeroOffsetTuple(call->args_[2], target->shape_.size())) return false;
-    return SameAllocation(target_var, result_var);
   }
 
-  static bool IsProvablyElidedTileMove(const CallPtr& call, const std::vector<VarPtr>& results) {
-    if (!IsOp(call, "tile.move") || call->args_.size() != 1 || results.size() != 1) return false;
-    const VarPtr source = AsVarLike(call->args_.front());
-    const VarPtr& destination = results.front();
-    return SameAllocationOffset(source, destination) && HasSameEffectiveLayout(source, destination);
-  }
-
-  static ExecutionMemoryAccessEvidence ResolveAccessEvidence(const CallPtr& call,
-                                                             const std::vector<VarPtr>& results) {
-    // Codegen aliases this result to its source and emits no pto.tmov. Treat
-    // only semantic same-allocation moves as no-access here: opportunistic
-    // address equality is a placement decision and cannot be assumed while
-    // recognizing candidate edges.
-    if (IsProvablyElidedTileMove(call, results)) return ExecutionMemoryAccessEvidence::NoAccess;
-
-    const auto& registry = OpRegistry::GetInstance();
-    if (!registry.IsRegistered(call->op_->name_)) return ExecutionMemoryAccessEvidence::Unknown;
-
-    const ExecutionMemoryAccessEvidence registered =
-        registry.GetEntry(call->op_->name_).GetExecutionMemoryAccessEvidence();
-    if (registered != ExecutionMemoryAccessEvidence::Unknown) return registered;
-
-    // Destination-passing and subrange operations remain Unknown by default.
-    // These two cases are promoted locally only when their operands prove an
-    // exact whole-window access.
-    if (IsProvablyWholeStore(call) || IsProvablyWholeAssemble(call, results)) {
-      return ExecutionMemoryAccessEvidence::Functional;
+  void RecordCall(const CallPtr& call, const VarPtr& result, const Stmt* statement) {
+    std::vector<std::pair<size_t, VarPtr>> reads;
+    if (call) {
+      for (const ExprPtr& argument : call->args_) {
+        const VarPtr var = AsVarLike(argument);
+        const auto interval = FindInterval(var);
+        if (interval) reads.emplace_back(*interval, var);
+      }
     }
-    return ExecutionMemoryAccessEvidence::Unknown;
-  }
+    const auto result_interval = FindInterval(result);
+    if (reads.empty() && !result_interval) return;
 
-  void Poison(const std::vector<std::pair<size_t, VarPtr>>& reads,
-              const std::vector<std::pair<size_t, VarPtr>>& writes) {
-    std::unordered_set<size_t> touched;
+    const std::optional<PipeType> pipe = ClassifyOperation(call, result);
+    bool supported = current_region_supported_ && pipe.has_value();
+    for (const auto& [interval, var] : reads) {
+      supported = supported && IsFullAllocationAccess(var, interval);
+    }
+    if (result_interval) supported = supported && IsFullAllocationAccess(result, *result_interval);
+
+    if (!supported) {
+      for (const auto& [interval, var] : reads) {
+        static_cast<void>(var);
+        summaries_[interval].supported = false;
+      }
+      if (result_interval) summaries_[*result_interval].supported = false;
+      return;
+    }
+
+    const AccessEndpoint read_endpoint{
+        current_region_, current_statement_index_, global_order_,      statement,
+        *pipe,           AccessKind::Read,         control_depth_ != 0};
+    const AccessEndpoint write_endpoint{
+        current_region_, current_statement_index_, global_order_,      statement,
+        *pipe,           AccessKind::Write,        control_depth_ != 0};
+    std::set<size_t> recorded_reads;
     for (const auto& [interval, var] : reads) {
       static_cast<void>(var);
-      touched.insert(interval);
+      if (recorded_reads.insert(interval).second) RecordAccess(interval, read_endpoint);
     }
-    for (const auto& [interval, var] : writes) {
-      static_cast<void>(var);
-      touched.insert(interval);
-    }
-    for (size_t interval : touched) summaries_[interval].has_unknown_access = true;
+    if (result_interval) RecordAccess(*result_interval, write_endpoint);
   }
-
-  void RecordAccess(size_t interval, AccessEndpoint endpoint, const VarPtr& var) {
-    const auto memory_space = GetMemorySpace(var);
-    if (!memory_space) {
-      summaries_[interval].has_unknown_access = true;
-      return;
-    }
-    endpoint.full_allocation = IsFullAllocationAccess(var, interval);
-    summaries_[interval].accesses.push_back(endpoint);
-  }
-
-  void RecordCall(const CallPtr& call, const VarPtr& result) {
-    if (!call || !call->op_) return;
-
-    const std::vector<VarPtr> results = ResolveCallResults(result);
-    const bool whole_assemble = IsProvablyWholeAssemble(call, results);
-    std::vector<std::pair<size_t, VarPtr>> reads;
-    for (size_t argument_index = 0; argument_index < call->args_.size(); ++argument_index) {
-      // A whole-window assemble overwrites the target. Its old contents are
-      // not an input access; partial assemble remains Unknown and is poisoned.
-      if (whole_assemble && argument_index == 0) continue;
-      const VarPtr var = AsVarLike(call->args_[argument_index]);
-      if (const auto interval = FindInterval(var)) reads.emplace_back(*interval, var);
-    }
-    std::vector<std::pair<size_t, VarPtr>> writes;
-    for (const VarPtr& output : results) {
-      if (const auto interval = FindInterval(output)) writes.emplace_back(*interval, output);
-    }
-    if (reads.empty() && writes.empty()) return;
-
-    const ExecutionMemoryAccessEvidence evidence = ResolveAccessEvidence(call, results);
-    if (evidence == ExecutionMemoryAccessEvidence::NoAccess) return;
-    if (evidence == ExecutionMemoryAccessEvidence::Unknown) {
-      Poison(reads, writes);
-      return;
-    }
-
-    const std::optional<PipeType> resource = backend_.TryInferPipe(call);
-    if (!resource) {
-      Poison(reads, writes);
-      return;
-    }
-
-    AccessEndpoint read_endpoint;
-    read_endpoint.global_order = global_order_;
-    read_endpoint.resource = *resource;
-    read_endpoint.access_kind = AccessKind::Read;
-    read_endpoint.path = current_path_;
-    AccessEndpoint write_endpoint = read_endpoint;
-    write_endpoint.access_kind = AccessKind::Write;
-    for (const auto& [interval, var] : reads) RecordAccess(interval, read_endpoint, var);
-    for (const auto& [interval, output] : writes) RecordAccess(interval, write_endpoint, output);
-  }
-
-  const AllocationPlan& plan_;
-  std::unordered_map<const Var*, size_t> interval_by_base_;
-  TupleResultElements tuple_results_;
-  const backend::Backend& backend_;
-  std::vector<AllocationAccessSummary> summaries_;
-  size_t global_order_ = 0;
-  size_t next_path_id_ = 1;
-  StructuredPath current_path_;
 };
 
-std::optional<CompactAccessSummary> CompactSummary(const AllocationAccessSummary& summary) {
-  if (summary.has_unknown_access || summary.accesses.empty()) return std::nullopt;
-
-  const StructuredPath& path = summary.accesses.front().path;
-  if (std::any_of(summary.accesses.begin(), summary.accesses.end(), [&](const AccessEndpoint& endpoint) {
-        return endpoint.path != path || !endpoint.full_allocation;
-      })) {
-    return std::nullopt;
-  }
-
-  const auto earliest = std::min_element(summary.accesses.begin(), summary.accesses.end(),
-                                         [](const AccessEndpoint& lhs, const AccessEndpoint& rhs) {
-                                           return lhs.global_order < rhs.global_order;
-                                         });
-  INTERNAL_CHECK(earliest != summary.accesses.end()) << "Non-empty access summary has no first access";
-  const size_t earliest_order = earliest->global_order;
-  std::optional<AccessEndpoint> initial_write;
-  for (const AccessEndpoint& endpoint : summary.accesses) {
-    if (endpoint.global_order != earliest_order) continue;
-    if (endpoint.access_kind != AccessKind::Write) return std::nullopt;
-    if (initial_write && initial_write->resource != endpoint.resource) return std::nullopt;
-    initial_write = endpoint;
-  }
-  if (!initial_write) return std::nullopt;
-
-  CompactAccessSummary compact;
-  compact.path = path;
-  compact.initial_write = *initial_write;
-  for (const AccessEndpoint& endpoint : summary.accesses) {
-    std::optional<AccessEndpoint>& terminal = compact.terminal_by_resource[ResourceIndex(endpoint.resource)];
-    if (!terminal || terminal->global_order < endpoint.global_order ||
-        (terminal->global_order == endpoint.global_order && terminal->access_kind == AccessKind::Read &&
-         endpoint.access_kind == AccessKind::Write)) {
-      terminal = endpoint;
-    }
-  }
-  return compact;
+bool LifetimesPermitReuse(const LifetimeInterval& first, const LifetimeInterval& second) {
+  return first.last_use_point <= second.def_point || second.last_use_point <= first.def_point;
 }
-
-struct ResourceBuckets {
-  std::array<std::vector<size_t>, kResourceCount> terminal;
-  std::array<std::vector<size_t>, kResourceCount> initial;
-};
 
 }  // namespace
 
-std::vector<RecognizedReusePenalty> RecognizeReusePenalties(const FunctionPtr& func,
-                                                            const AllocationPlan& allocation_plan,
-                                                            const backend::Backend& backend) {
-  if (!func || allocation_plan.intervals.empty()) return {};
+ReusePenaltyRecognition RecognizeReusePenaltyCandidates(const FunctionPtr& func,
+                                                        const AllocationPlan& allocation_plan,
+                                                        DsaReusePenaltyRecognizer recognizer) {
+  ReusePenaltyRecognition result;
+  if (recognizer == DsaReusePenaltyRecognizer::Disabled || !func) return result;
 
   std::unordered_map<const Var*, size_t> interval_by_base;
   for (size_t index = 0; index < allocation_plan.intervals.size(); ++index) {
@@ -468,107 +331,123 @@ std::vector<RecognizedReusePenalty> RecognizeReusePenalties(const FunctionPtr& f
     if (!tile || !tile->memref_) continue;
     interval_by_base.emplace(GetDefinedMemRef(tile)->base_.get(), index);
   }
-
-  TupleResultCollector tuple_result_collector;
-  tuple_result_collector.VisitStmt(func->body_);
-  AccessCollector collector(allocation_plan, std::move(interval_by_base), tuple_result_collector.Elements(),
-                            backend);
+  AccessCollector collector(allocation_plan, std::move(interval_by_base),
+                            recognizer == DsaReusePenaltyRecognizer::Quadratic);
   collector.Collect(func->body_);
+  const auto& summaries = collector.Summaries();
+  result.supported_allocations = static_cast<size_t>(
+      std::count_if(summaries.begin(), summaries.end(), [](const AllocationAccessSummary& summary) {
+        return summary.supported && summary.first_write && summary.last_access;
+      }));
 
-  std::vector<std::optional<CompactAccessSummary>> compact_summaries;
-  compact_summaries.reserve(collector.Summaries().size());
-  for (const AllocationAccessSummary& summary : collector.Summaries()) {
-    compact_summaries.push_back(CompactSummary(summary));
-  }
-
-  std::unordered_set<PairKey, PairKeyHash> separated;
-  separated.reserve(allocation_plan.separations.size());
+  std::set<std::pair<size_t, size_t>> separated;
   for (const AllocationSeparation& separation : allocation_plan.separations) {
-    separated.insert(NormalizePair(separation.first, separation.second));
+    separated.insert(std::minmax(separation.first, separation.second));
   }
 
-  std::vector<RecognizedReusePenalty> penalties;
-  std::unordered_set<PairKey, PairKeyHash> recognized;
-  auto emit = [&](size_t first, size_t second) {
-    if (first == second) return;
-    const PairKey pair = NormalizePair(first, second);
-    if (separated.count(pair) != 0 || !recognized.insert(pair).second) return;
-    penalties.push_back({pair.first, pair.second, 1});
+  auto consider = [&](size_t first, size_t second, bool require_adjacent) {
+    if (first == second || separated.count(std::minmax(first, second)) != 0) return;
+    const LifetimeInterval& first_lifetime = allocation_plan.intervals[first];
+    const LifetimeInterval& second_lifetime = allocation_plan.intervals[second];
+    if (first_lifetime.memory_space != second_lifetime.memory_space ||
+        !LifetimesPermitReuse(first_lifetime, second_lifetime)) {
+      return;
+    }
+
+    size_t earlier = first;
+    size_t later = second;
+    if (second_lifetime.last_use_point <= first_lifetime.def_point) std::swap(earlier, later);
+    const AllocationAccessSummary& earlier_summary = summaries[earlier];
+    const AllocationAccessSummary& later_summary = summaries[later];
+    if (!earlier_summary.supported || !later_summary.supported || !earlier_summary.last_access ||
+        !later_summary.first_write) {
+      return;
+    }
+    const AccessEndpoint& terminal = *earlier_summary.last_access;
+    const AccessEndpoint& initial = *later_summary.first_write;
+    if (terminal.region != initial.region || terminal.statement_index >= initial.statement_index) return;
+    if (require_adjacent && terminal.statement_index + 1 != initial.statement_index) return;
+
+    ++result.candidate_pairs;
+    const bool ordered = require_adjacent
+                             ? collector.DirectlyOrdered(terminal.statement, initial.statement)
+                             : collector.TransitivelyOrdered(terminal.statement, initial.statement);
+    if (ordered) {
+      ++result.already_ordered_pairs;
+      return;
+    }
+    const RecognizedReuseHazard hazard =
+        terminal.pipe == initial.pipe ? RecognizedReuseHazard::SamePipe : RecognizedReuseHazard::CrossPipe;
+    const RecognizedReuseDependence dependence = terminal.access_kind == AccessKind::Read
+                                                     ? RecognizedReuseDependence::WriteAfterRead
+                                                     : RecognizedReuseDependence::WriteAfterWrite;
+    const RecognizedReuseCandidate candidate{std::min(first, second), std::max(first, second), hazard,
+                                             dependence, terminal.nested_control};
+    result.candidates.push_back(candidate);
   };
 
-  std::map<MemorySpace, std::vector<size_t>> intervals_by_space;
-  for (size_t index = 0; index < allocation_plan.intervals.size(); ++index) {
-    intervals_by_space[allocation_plan.intervals[index].memory_space].push_back(index);
-  }
-
-  for (auto& [space, indices] : intervals_by_space) {
-    static_cast<void>(space);
-    std::vector<size_t> by_definition = indices;
-    std::vector<size_t> by_end = std::move(indices);
-    const auto def_key = [&](size_t index) {
-      return std::pair{allocation_plan.intervals[index].def_point, index};
-    };
-    const auto end_key = [&](size_t index) {
-      return std::pair{allocation_plan.intervals[index].last_use_point, index};
-    };
-    std::sort(by_definition.begin(), by_definition.end(),
-              [&](size_t lhs, size_t rhs) { return def_key(lhs) < def_key(rhs); });
-    std::sort(by_end.begin(), by_end.end(),
-              [&](size_t lhs, size_t rhs) { return end_key(lhs) < end_key(rhs); });
-
-    size_t end_cursor = 0;
-    std::map<StructuredPath, ResourceBuckets> buckets_by_path;
-    for (size_t current : by_definition) {
-      const int current_definition = allocation_plan.intervals[current].def_point;
-      while (end_cursor < by_end.size() &&
-             allocation_plan.intervals[by_end[end_cursor]].last_use_point <= current_definition) {
-        const size_t reusable = by_end[end_cursor++];
-        if (!compact_summaries[reusable]) continue;
-        const CompactAccessSummary& summary = *compact_summaries[reusable];
-        ResourceBuckets& buckets = buckets_by_path[summary.path];
-        buckets.initial[ResourceIndex(summary.initial_write.resource)].push_back(reusable);
-        for (size_t resource = 0; resource < kResourceCount; ++resource) {
-          if (summary.terminal_by_resource[resource]) buckets.terminal[resource].push_back(reusable);
-        }
-      }
-
-      if (!compact_summaries[current]) continue;
-      const CompactAccessSummary& current_summary = *compact_summaries[current];
-      const auto path_buckets = buckets_by_path.find(current_summary.path);
-      if (path_buckets == buckets_by_path.end()) continue;
-      const ResourceBuckets& buckets = path_buckets->second;
-
-      const size_t initial_resource = ResourceIndex(current_summary.initial_write.resource);
-      for (size_t terminal_resource = 0; terminal_resource < kResourceCount; ++terminal_resource) {
-        if (terminal_resource == initial_resource) continue;
-        for (size_t prior : buckets.terminal[terminal_resource]) {
-          if (prior == current || !compact_summaries[prior]) continue;
-          const AccessEndpoint& terminal = *compact_summaries[prior]->terminal_by_resource[terminal_resource];
-          if (terminal.global_order <= current_summary.initial_write.global_order) emit(prior, current);
-        }
-      }
-
-      // A later value in iteration k can hand storage back to an earlier value
-      // in iteration k+1. Exact structured-path equality is a conservative,
-      // deterministic proof that both endpoints cross the same loop backedge.
-      if (!current_summary.path.in_loop) continue;
-      for (size_t terminal_resource = 0; terminal_resource < kResourceCount; ++terminal_resource) {
-        const std::optional<AccessEndpoint>& terminal =
-            current_summary.terminal_by_resource[terminal_resource];
-        if (!terminal) continue;
-        for (size_t prior_initial_resource = 0; prior_initial_resource < kResourceCount;
-             ++prior_initial_resource) {
-          if (terminal_resource == prior_initial_resource) continue;
-          for (size_t prior : buckets.initial[prior_initial_resource]) {
-            if (prior == current || !compact_summaries[prior]) continue;
-            const AccessEndpoint& initial = compact_summaries[prior]->initial_write;
-            if (terminal->global_order > initial.global_order) emit(prior, current);
-          }
-        }
+  if (recognizer == DsaReusePenaltyRecognizer::Linear) {
+    std::map<std::pair<size_t, size_t>, std::vector<size_t>> terminal_by_location;
+    for (size_t index = 0; index < summaries.size(); ++index) {
+      const auto& summary = summaries[index];
+      if (!summary.supported || !summary.last_access) continue;
+      terminal_by_location[{summary.last_access->region, summary.last_access->statement_index}].push_back(
+          index);
+    }
+    for (size_t later = 0; later < summaries.size(); ++later) {
+      const auto& summary = summaries[later];
+      if (!summary.supported || !summary.first_write || summary.first_write->statement_index == 0) continue;
+      const auto found =
+          terminal_by_location.find({summary.first_write->region, summary.first_write->statement_index - 1});
+      if (found == terminal_by_location.end()) continue;
+      for (size_t earlier : found->second) consider(earlier, later, true);
+    }
+  } else {
+    // Explicitly approved research mode: compare all allocation pairs. This is
+    // intentionally not the default compiler path.
+    for (size_t first = 0; first < summaries.size(); ++first) {
+      for (size_t second = first + 1; second < summaries.size(); ++second) {
+        consider(first, second, false);
       }
     }
   }
-  return penalties;
+
+  std::sort(result.candidates.begin(), result.candidates.end(),
+            [](const RecognizedReuseCandidate& lhs, const RecognizedReuseCandidate& rhs) {
+              return std::tie(lhs.first_interval, lhs.second_interval) <
+                     std::tie(rhs.first_interval, rhs.second_interval);
+            });
+  result.candidates.erase(
+      std::unique(result.candidates.begin(), result.candidates.end(),
+                  [](const RecognizedReuseCandidate& lhs, const RecognizedReuseCandidate& rhs) {
+                    return lhs.first_interval == rhs.first_interval &&
+                           lhs.second_interval == rhs.second_interval;
+                  }),
+      result.candidates.end());
+  for (const RecognizedReuseCandidate& candidate : result.candidates) {
+    if (candidate.hazard == RecognizedReuseHazard::CrossPipe) {
+      ++result.cross_pipe_candidates;
+    } else {
+      ++result.same_pipe_candidates;
+    }
+    if (candidate.dependence == RecognizedReuseDependence::WriteAfterRead) {
+      ++result.write_after_read_candidates;
+    } else {
+      ++result.write_after_write_candidates;
+    }
+    if (candidate.nested_control) ++result.nested_control_candidates;
+  }
+  return result;
+}
+
+void ApplyExperimentalUnitPenaltyPolicy(ReusePenaltyRecognition* recognition) {
+  if (recognition == nullptr) return;
+  recognition->penalties.clear();
+  for (const RecognizedReuseCandidate& candidate : recognition->candidates) {
+    if (candidate.hazard != RecognizedReuseHazard::CrossPipe || candidate.nested_control) continue;
+    recognition->penalties.push_back(
+        {candidate.first_interval, candidate.second_interval, 1, candidate.hazard});
+  }
 }
 
 }  // namespace dsa_adapter

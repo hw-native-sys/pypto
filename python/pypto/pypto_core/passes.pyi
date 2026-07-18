@@ -100,6 +100,13 @@ class MemoryPlanner(Enum):
     DSA = ...
     PTOAS = ...
 
+class DsaReusePenaltyRecognizer(Enum):
+    """Selects experimental DSA soft-edge recognition."""
+
+    DISABLED = ...
+    LINEAR = ...
+    QUADRATIC = ...
+
 def is_dsa_solver_available() -> bool:
     """Return whether this build includes the standalone DSA solver adapter."""
 
@@ -269,6 +276,7 @@ class PassContext:
         enable_pypto_l0c_double_buffer: bool = False,
         dsa_export_dir: str | None = None,
         dsa_solution_dir: str | None = None,
+        dsa_reuse_penalty_recognizer: DsaReusePenaltyRecognizer = DsaReusePenaltyRecognizer.DISABLED,
     ) -> None:
         """Create a PassContext with instruments and pass configuration (incl. memory planner).
 
@@ -313,6 +321,10 @@ class PassContext:
 
     def get_dsa_solution_dir(self) -> str | None:
         """Get the optional standalone DSA placement replay directory."""
+        ...
+
+    def get_dsa_reuse_penalty_recognizer(self) -> DsaReusePenaltyRecognizer:
+        """Get the experimental DSA soft-edge recognizer."""
         ...
 
     def get_instruments(self) -> list[PassInstrument]:
@@ -933,6 +945,7 @@ __all__ = [
     "VerificationMode",
     "VerificationLevel",
     "MemoryPlanner",
+    "DsaReusePenaltyRecognizer",
     "is_dsa_solver_available",
     "DiagnosticPhase",
     "DiagnosticCheck",

@@ -504,8 +504,8 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
 std::vector<std::pair<const MemRef*, MemRefPtr>> PlanWithStandaloneDsa(
     const FunctionPtr& func, const MemoryAllocatorPolicy& policy,
     const ReservedEndBySpace& reserved_end_by_space, const std::vector<MemRefWithSpace>& memrefs,
-    const std::optional<std::string>& export_directory,
-    const std::optional<std::string>& solution_directory) {
+    const std::optional<std::string>& export_directory, const std::optional<std::string>& solution_directory,
+    DsaReusePenaltyRecognizer reuse_penalty_recognizer) {
   const AllocationPlan allocation_plan = ComputeAllocationPlan(func);
   if (allocation_plan.intervals.empty()) return {};
 
@@ -519,8 +519,8 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> PlanWithStandaloneDsa(
     }
   }
 
-  const dsa_adapter::ExportedProblem strict_exported =
-      dsa_adapter::BuildStructuredProblem(func, allocation_plan, policy, reserved_end_by_space, pool_caps);
+  const dsa_adapter::ExportedProblem strict_exported = dsa_adapter::BuildStructuredProblem(
+      func, allocation_plan, policy, reserved_end_by_space, pool_caps, reuse_penalty_recognizer);
   if (strict_exported.document.problem.buffers.empty()) return {};
 
   ::dsa::PyptoStructuredSearchOptions search_options;
@@ -536,14 +536,17 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> PlanWithStandaloneDsa(
   if (solution_directory) {
     const ::dsa::StructuredSolutionDocument replay =
         dsa_adapter::ReadSolutionJson(strict_exported.document.instance, *solution_directory);
-    if (replay.profile == ::dsa::BenchmarkProfile::kPyptoResearchV1) {
+    if (replay.problem_fingerprint == ::dsa::FingerprintStructuredProblem(strict_exported.document)) {
+      solved_exported.document = strict_exported.document;
+    } else {
       const ::dsa::PipelineIntentRelaxation relaxation =
           ::dsa::BuildPipelineIntentRelaxation(strict_exported.document);
+      CHECK_SPAN(replay.problem_fingerprint == ::dsa::FingerprintStructuredProblem(relaxation.document),
+                 func->span_)
+          << "DSA replay for '" << func->name_
+          << "' matches neither the strict recognized problem nor its pipeline-intent relaxation";
       solved_exported.document = relaxation.document;
       relaxed_separation_count = relaxation.relaxed_separation_count;
-    } else {
-      CHECK_SPAN(replay.profile == ::dsa::BenchmarkProfile::kPyptoHardV1, func->span_)
-          << "DSA replay for '" << func->name_ << "' must use profile pypto_hard_v1 or pypto_research_v1";
     }
     try {
       run.result.solution = ::dsa::ValidateAndExtractStructuredSolution(solved_exported.document, replay);
@@ -561,7 +564,8 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> PlanWithStandaloneDsa(
             ? ::dsa::SolveStatus::kFeasible
             : ::dsa::SolveStatus::kBestEffortNoFit;
     solver_name = "replay";
-    if (replay.profile == ::dsa::BenchmarkProfile::kPyptoResearchV1) {
+    if (solved_exported.document.metadata.count("pipeline_intent_policy") != 0 &&
+        solved_exported.document.metadata.at("pipeline_intent_policy") == "soft_after_strict_no_fit") {
       pipeline_intent_relaxed =
           !::dsa::ValidateSolution(strict_exported.document.problem, *run.result.solution).empty();
     }
@@ -569,10 +573,11 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> PlanWithStandaloneDsa(
     const ::dsa::PyptoStructuredSearchSolver solver(search_options);
     run = dsa_adapter::SolveWithFirstFit(solved_exported);
     solver_name = "first_fit";
-    if (run.result.status == ::dsa::SolveStatus::kBestEffortNoFit) {
-      // Keep the common compilation path cheap. Invoke bounded structured search
-      // only when deterministic first-fit cannot preserve the strict intent
-      // within capacity.
+    const bool has_reuse_cost = solved_exported.document.problem.cost_model &&
+                                !solved_exported.document.problem.cost_model->reuse_penalties.empty();
+    if (run.result.status == ::dsa::SolveStatus::kBestEffortNoFit || has_reuse_cost) {
+      // Invoke bounded structured search when first-fit cannot fit or when the
+      // objective contains costs that first-fit does not optimize.
       run = dsa_adapter::Solve(solved_exported, solver);
       solver_name = solver.Name();
     }
@@ -684,8 +689,10 @@ FunctionPtr TransformAllocateMemoryAddr(const FunctionPtr& func) {
         context == nullptr ? std::nullopt : context->GetDsaExportDir();
     const std::optional<std::string> solution_directory =
         context == nullptr ? std::nullopt : context->GetDsaSolutionDir();
+    const DsaReusePenaltyRecognizer reuse_penalty_recognizer =
+        context == nullptr ? DsaReusePenaltyRecognizer::Disabled : context->GetDsaReusePenaltyRecognizer();
     memref_pairs = PlanWithStandaloneDsa(func, *policy, reserve_resolution.reserved_end_by_space, memrefs,
-                                         export_directory, solution_directory);
+                                         export_directory, solution_directory, reuse_penalty_recognizer);
 #else
     CHECK_SPAN(false, func->span_)
         << "MemoryPlanner.DSA is unavailable in this build. Reconfigure PyPTO with "

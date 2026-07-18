@@ -17,43 +17,71 @@
 #include <vector>
 
 #include "pypto/ir/function.h"
-#include "pypto/ir/transforms/dsa/allocation_plan.h"
+#include "pypto/ir/transforms/pass_context.h"
+#include "pypto/ir/transforms/utils/lifetime_analysis.h"
 
 namespace pypto {
-namespace backend {
-class Backend;
-}
 namespace ir {
 namespace dsa_adapter {
 
-/**
- * @brief A legal but potentially costly physical-overlap relation.
- *
- * The interval indices refer to AllocationPlan::intervals. Cost is an abstract,
- * non-negative optimization priority; it is not a cycle estimate.
- */
+enum class RecognizedReuseHazard : uint8_t {
+  SamePipe,
+  CrossPipe,
+};
+
+enum class RecognizedReuseDependence : uint8_t {
+  WriteAfterRead,
+  WriteAfterWrite,
+};
+
+struct RecognizedReuseCandidate {
+  size_t first_interval;
+  size_t second_interval;
+  RecognizedReuseHazard hazard;
+  RecognizedReuseDependence dependence;
+  bool nested_control = false;
+};
+
 struct RecognizedReusePenalty {
   size_t first_interval;
   size_t second_interval;
   uint64_t cost;
+  RecognizedReuseHazard hazard;
+};
+
+struct ReusePenaltyRecognition {
+  std::vector<RecognizedReuseCandidate> candidates;
+  std::vector<RecognizedReusePenalty> penalties;
+  size_t supported_allocations = 0;
+  size_t candidate_pairs = 0;
+  size_t already_ordered_pairs = 0;
+  size_t same_pipe_candidates = 0;
+  size_t cross_pipe_candidates = 0;
+  size_t write_after_read_candidates = 0;
+  size_t write_after_write_candidates = 0;
+  size_t nested_control_candidates = 0;
 };
 
 /**
- * @brief Recognize the compiler's built-in DSA reuse-penalty policy.
+ * @brief Recognize candidate physical-reuse hazards from PyPTO access order.
  *
- * The recognizer emits one unit-weight relation per buffer pair for which
- * physical reuse can introduce a cross-pipe WAR or WAW handoff. It requires
- * a complete access set, full-allocation handoff endpoints, and a verified
- * initial write. Same-pipe, partial-view, structurally ambiguous, and
- * uncertain handoffs remain unpenalized.
- *
- * The active backend supplies execution-pipe classification for supported
- * operation and direct-memory-route combinations. The recognizer does not
- * invoke or simulate ptoas, and skips calls whose backend pipe or physical
- * access contract is unknown.
+ * Linear mode considers only adjacent statement handoffs and runs in
+ * O(N log N). Quadratic mode is an explicitly approved research reference that
+ * scans all lifetime-compatible allocation pairs; its cached reachability
+ * queries cost O(B*(N+E) + B^2) in the worst case.
  */
-[[nodiscard]] std::vector<RecognizedReusePenalty> RecognizeReusePenalties(
-    const FunctionPtr& func, const AllocationPlan& allocation_plan, const backend::Backend& backend);
+[[nodiscard]] ReusePenaltyRecognition RecognizeReusePenaltyCandidates(const FunctionPtr& func,
+                                                                      const AllocationPlan& allocation_plan,
+                                                                      DsaReusePenaltyRecognizer recognizer);
+
+/**
+ * @brief Promote the experimental v1 subset to unit-weight pair penalties.
+ *
+ * Candidate recognition records mechanism evidence. This separate policy
+ * promotes flat cross-pipe candidates only; same-pipe and nested candidates
+ * remain observable but unpriced until their behavior is better characterized.
+ */
+void ApplyExperimentalUnitPenaltyPolicy(ReusePenaltyRecognition* recognition);
 
 }  // namespace dsa_adapter
 }  // namespace ir

@@ -42,7 +42,12 @@ import torch
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassDumpLevel
 from pypto.pypto_core import backend as _backend_core
-from pypto.pypto_core.passes import DiagnosticCheckSet, DiagnosticPhase, MemoryPlanner
+from pypto.pypto_core.passes import (
+    DiagnosticCheckSet,
+    DiagnosticPhase,
+    DsaReusePenaltyRecognizer,
+    MemoryPlanner,
+)
 
 from .device_tensor import DeviceTensor
 
@@ -228,6 +233,8 @@ class RunConfig:
         dsa_solution_dir: Optional directory containing fingerprinted DSA
             placements replayed during compilation. Used only with
             ``memory_planner=MemoryPlanner.DSA``.
+        dsa_reuse_penalty_recognizer: Experimental DSA soft-edge recognizer.
+            Disabled by default; used only with ``MemoryPlanner.DSA``.
         ptoas_sync_summary_dir: Optional directory for machine-readable PTOAS
             InsertSync JSONL summaries. Each codegen unit writes a separate file.
     """
@@ -266,6 +273,7 @@ class RunConfig:
     memory_planner: MemoryPlanner | None = None
     dsa_export_dir: str | None = None
     dsa_solution_dir: str | None = None
+    dsa_reuse_penalty_recognizer: DsaReusePenaltyRecognizer | None = None
     ptoas_sync_summary_dir: str | None = None
 
     def __post_init__(self) -> None:
@@ -426,6 +434,7 @@ def compile_program(  # noqa: PLR0913
     enable_pypto_l0c_double_buffer: bool | None = None,
     dsa_export_dir: str | None = None,
     dsa_solution_dir: str | None = None,
+    dsa_reuse_penalty_recognizer: DsaReusePenaltyRecognizer | None = None,
     ptoas_sync_summary_dir: str | None = None,
     skip_ptoas: bool = False,
 ) -> None:
@@ -450,6 +459,7 @@ def compile_program(  # noqa: PLR0913
         enable_pypto_l0c_double_buffer: Optional PyPTO-planner L0C double-buffer opt-in.
         dsa_export_dir: Optional schema-v1 corpus directory for the DSA planner.
         dsa_solution_dir: Optional fingerprinted placement replay directory.
+        dsa_reuse_penalty_recognizer: Optional experimental soft-edge recognizer.
         ptoas_sync_summary_dir: Optional directory for PTOAS InsertSync summaries.
         skip_ptoas: If ``True``, stop after PTO source generation without invoking ptoas.
     """
@@ -469,6 +479,7 @@ def compile_program(  # noqa: PLR0913
         enable_pypto_l0c_double_buffer=enable_pypto_l0c_double_buffer,
         dsa_export_dir=dsa_export_dir,
         dsa_solution_dir=dsa_solution_dir,
+        dsa_reuse_penalty_recognizer=dsa_reuse_penalty_recognizer,
         ptoas_sync_summary_dir=ptoas_sync_summary_dir,
         skip_ptoas=skip_ptoas,
     )
@@ -525,6 +536,7 @@ def run(
         memory_planner=config.memory_planner,
         dsa_export_dir=config.dsa_export_dir,
         dsa_solution_dir=config.dsa_solution_dir,
+        dsa_reuse_penalty_recognizer=config.dsa_reuse_penalty_recognizer,
         ptoas_sync_summary_dir=config.ptoas_sync_summary_dir,
         skip_ptoas=config.codegen_only,
     )

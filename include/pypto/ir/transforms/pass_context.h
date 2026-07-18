@@ -236,6 +236,19 @@ enum class MemoryPlanner {
   DsaRP = 2,  ///< In-tree DSA with automatically recognized reuse penalties.
 };
 
+/**
+ * @brief Experimental recognizer used to derive DSA soft reuse edges.
+ *
+ * Disabled is the production default. Linear recognizes only adjacent
+ * allocation handoffs and is O(N log N). Quadratic is a research reference
+ * that scans every lifetime-compatible allocation pair.
+ */
+enum class DsaReusePenaltyRecognizer {
+  Disabled,
+  Linear,
+  Quadratic,
+};
+
 class PassContext {
  public:
   /**
@@ -261,15 +274,18 @@ class PassContext {
    *        ``pypto_structured`` problems emitted by MemoryPlanner::Dsa.
    * @param dsa_solution_dir Optional directory containing versioned DSA
    *        solution artifacts to replay instead of invoking a solver.
+   * @param dsa_reuse_penalty_recognizer Experimental recognizer used to derive
+   *        soft reuse edges. Disabled by default; Quadratic is research-only.
    */
-  explicit PassContext(std::vector<PassInstrumentPtr> instruments,
-                       VerificationLevel verification_level = VerificationLevel::Basic,
-                       DiagnosticPhase diagnostic_phase = DiagnosticPhase::PrePipeline,
-                       DiagnosticCheckSet disabled_diagnostics = {DiagnosticCheck::UnusedControlFlowResult},
-                       MemoryPlanner memory_planner = MemoryPlanner::PyPTO,
-                       bool enable_pypto_l0c_double_buffer = false,
-                       std::optional<std::string> dsa_export_dir = std::nullopt,
-                       std::optional<std::string> dsa_solution_dir = std::nullopt);
+  explicit PassContext(
+      std::vector<PassInstrumentPtr> instruments,
+      VerificationLevel verification_level = VerificationLevel::Basic,
+      DiagnosticPhase diagnostic_phase = DiagnosticPhase::PrePipeline,
+      DiagnosticCheckSet disabled_diagnostics = {DiagnosticCheck::UnusedControlFlowResult},
+      MemoryPlanner memory_planner = MemoryPlanner::PyPTO, bool enable_pypto_l0c_double_buffer = false,
+      std::optional<std::string> dsa_export_dir = std::nullopt,
+      std::optional<std::string> dsa_solution_dir = std::nullopt,
+      DsaReusePenaltyRecognizer dsa_reuse_penalty_recognizer = DsaReusePenaltyRecognizer::Disabled);
 
   /**
    * @brief Push this context onto the thread-local stack
@@ -344,6 +360,11 @@ class PassContext {
   [[nodiscard]] const std::optional<std::string>& GetDsaSolutionDir() const;
 
   /**
+   * @brief Get the experimental DSA reuse-penalty recognizer.
+   */
+  [[nodiscard]] DsaReusePenaltyRecognizer GetDsaReusePenaltyRecognizer() const;
+
+  /**
    * @brief Get the currently active context (top of thread-local stack)
    * @return Pointer to current context, or nullptr if none
    */
@@ -371,6 +392,7 @@ class PassContext {
   bool enable_pypto_l0c_double_buffer_;
   std::optional<std::string> dsa_export_dir_;
   std::optional<std::string> dsa_solution_dir_;
+  DsaReusePenaltyRecognizer dsa_reuse_penalty_recognizer_;
   PassContext* previous_;
 
   static thread_local PassContext* current_;

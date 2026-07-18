@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from pypto.backend import BackendType
-from pypto.pypto_core.passes import MemoryPlanner
+from pypto.pypto_core.passes import DsaReusePenaltyRecognizer, MemoryPlanner
 from pypto.runtime.runner import RunConfig, _DfxOpts, compile_program, execute_compiled, run
 
 
@@ -544,6 +544,7 @@ class TestRunConfigCompileForwarding:
                 memory_planner=MemoryPlanner.DSA,
                 dsa_export_dir=str(tmp_path),
                 dsa_solution_dir=str(tmp_path / "solutions"),
+                dsa_reuse_penalty_recognizer=DsaReusePenaltyRecognizer.LINEAR,
                 ptoas_sync_summary_dir=str(tmp_path / "sync"),
             ),
         )
@@ -552,6 +553,7 @@ class TestRunConfigCompileForwarding:
         assert captured["memory_planner"] == MemoryPlanner.DSA
         assert captured["dsa_export_dir"] == str(tmp_path)
         assert captured["dsa_solution_dir"] == str(tmp_path / "solutions")
+        assert captured["dsa_reuse_penalty_recognizer"] == DsaReusePenaltyRecognizer.LINEAR
         assert captured["ptoas_sync_summary_dir"] == str(tmp_path / "sync")
         assert captured["skip_ptoas"] is False
 
