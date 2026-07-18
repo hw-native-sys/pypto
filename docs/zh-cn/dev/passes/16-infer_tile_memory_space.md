@@ -94,9 +94,11 @@ program_inferred = infer_pass(program)
 4. **Retargetable 生产者 kwarg 重写（`VisitStmt_(AssignStmt)`）** —— 对注册了 `HasRetargetableMemoryKwarg()` 的算子，若阶段 1 把输出解析到与 kwarg 不同的 space（或 kwarg 缺失），则重写 `Call` 的 `target_memory` kwarg 与结果 `TileType`，使之匹配。这让 codegen 与赋值左侧 `Var` 的注解保持一致；这是必要的，因为阶段 1 可能基于反向需求做出解析，而 kwarg 永远看不到这些需求。
 5. **LHS / RHS 类型同步** —— 当 `VisitExpr_(Call)` 在替换被 move 后的参数后，借由 `OpRegistry` 重建 `Call`，结果类型可能与 LHS `Var` 的原类型不同（重建的 call 会看到布局变化后的输入）。Mutator 把 LHS `Var` 的 `TileType` 同步到重建 call 的 shape / dtype / memref / view，同时保留变量重写阶段选定的 `memory_space_`，保证 roundtrip 等价。
 
-### 阶段 4 — 循环不变量 Mat 驻留（`LoopInvariantTileLoadHoister`）
+### 阶段 4 — 循环不变量 Mat 驻留（`loop_invariant_mat_residency`）
 
-所有 space 显式化后，本 pass 识别形如 `tile.load(GM → Mat) → tile.transpose_view* → tile.move/tile.extract(Mat → Left/Right)` 的不变量前缀，并把该前缀移到循环 preheader。该链必须只有一个终止 `Left` / `Right` 值，并且只在一个 `tile.matmul`、`tile.matmul_bias` 或 `tile.matmul_acc` 的对应操作数位置使用。这样可将优化严格限定为驻留 matmul 操作数，而不是通用 tile LICM。tensor-level matmul 的驻留操作数只加载一次，而依赖循环变量的另一操作数仍留在循环内正常流式加载。
+所有 space 显式化后，一个独立的内部 transform 会识别形如 `tile.load(GM → Mat) → tile.transpose_view* → tile.move/tile.extract(Mat → Left/Right)` 的不变量前缀，并把该前缀移到循环 preheader。该链必须只有一个终止 `Left` / `Right` 值，并且只在一个 `tile.matmul`、`tile.matmul_bias` 或 `tile.matmul_acc` 的对应操作数位置使用。这样可将优化严格限定为驻留 matmul 操作数，而不是通用 tile LICM。对于这一受支持的单一使用形态，tensor-level matmul 的驻留操作数只加载一次，而依赖循环变量的另一操作数仍留在循环内正常流式加载。
+
+这是 issue #2077 所要求的更广泛驻留行为中的保守首个子集，并不是通用的 tensor-level residency contract。直接进入或由程序外部进入的 InCore 函数没有可分析的调用者证据，因此会拒绝该优化。当 `AutoTileMatmulL0` 将一个 Mat panel 展开为多个依赖 K 的 L0 extract 时，当前要求单一使用的链识别器同样会拒绝；此时整个 panel 的 GM→Mat load 仍位于外层用户循环内，而依赖 K 的 extract 会正确保留在内层 K 循环中。支持这种情况需要把 GM→Mat panel 驻留与可选的 Mat→L0 前缀移动分开分析。当前的调用者过滤器还会区分规范化的 IR root，但 PyPTO 尚未为不同的外部 tensor 参数定义运行时 `noalias` 契约；在此 draft 优化可合并之前，还需要解决这一契约问题。
 
 候选资格首先依赖编译器私有的 provenance。`ConvertTensorToTileOps` 会标记其生成的所有 `GM → Mat` bridge load；该标记经过打印、flatten 和 L0 自动分块后一直保留到本阶段。阶段 4 随后证明带标记的 load 符合上文所述的精确静止 matmul 操作数链。用户手写的 `tile.load(..., target_memory=Mat)` 不带此标记，因此本优化绝不会提升它，从而保证显式 tile 程序仍由用户控制。
 
@@ -106,7 +108,7 @@ program_inferred = infer_pass(program)
 - 被移动的赋值必须是循环体顶层、无条件执行的语句；
 - GM 源必须是方向为 `ParamDirection::In` 的直接 tensor 参数，且 load 带有编译器生成的 Mat bridge 标记；
 - InCore 函数必须至少有一个来自 root orchestration 函数（即没有程序内调用者的 orchestration 函数）的直接调用点，并且该 InCore 函数的每个调用点都必须是这种 root-orchestration 直接调用；
-- 在每个 root-orchestration 直接调用点，候选 `Tensor In` 实参 root 与所有可写 `Tensor Out` / `Tensor InOut` 实参 root 都必须可解析，且候选 root 必须与每个可写 root 不同；InCore 函数自身也不能写入该 root，而无关 scalar 和其他只读 `Tensor In` root 不参与该证明；
+- 在每个 root-orchestration 直接调用点，候选 `Tensor In` 实参 root 与所有可写 `Tensor Out` / `Tensor InOut` 实参 root 都必须可解析，且候选 root 在语法上必须与每个可写 root 不同；InCore 函数自身也不能写入该 root，而无关 scalar 和其他只读 `Tensor In` root 不参与此过滤；
 - offset、shape 以及整个被移动的依赖前缀都必须是循环不变量；
 - candidate 之前出现直接控制流或有副作用语句时，会关闭可提升前缀；
 - 被移动的结果不能是 loop-carried 值或 yield 值；
@@ -138,7 +140,7 @@ for n, (acc,) in pl.range(0, 256, 128, init_values=(out,)):
     result = pl.yield_(pl.tile.store(c_n, [0, n], acc))
 ```
 
-为便于阅读，上例省略了内部 provenance 属性。该转换需要来自 root orchestration 函数的直接调用证明候选 `lhs` root 与可写 `out` root 不同；另一个只读 `rhs` root 与该证明无关。缺少所需的直接调用者证据时，仍保留原来的循环内放置方式。
+为便于阅读，上例省略了内部 provenance 属性。当前该转换要求来自 root orchestration 函数的直接调用，且候选 `lhs` root 在语法上与可写 `out` root 不同；另一个只读 `rhs` root 与此过滤无关。仅有不同的 IR root 并不能证明单独提供的运行时 buffer 不会 alias，因此这一调用者条件仍是 draft 中待解决的安全项。缺少所需的直接调用者证据时，仍保留原来的循环内放置方式。
 
 ## 通用 memory-space 推导示例
 

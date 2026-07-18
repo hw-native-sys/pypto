@@ -512,10 +512,11 @@ def infer_tile_memory_space() -> Pass:
     """Infer TileType memory spaces and safe stationary matmul residency.
 
     Besides assigning ``Vec``/``Mat``/``Left``/``Right``/``Acc`` and inserting
-    required moves, the pass hoists compiler-generated invariant GM→Mat matmul
-    operand chains across statically non-empty sequential loops. Hoisting is
-    caller- and alias-proven, capacity-gated, and never applies to user-authored
-    tile loads. Internal bridge provenance is consumed before the pass returns.
+    required moves, the pass runs a focused internal transform for a
+    conservative single-use subset of compiler-generated invariant GM→Mat
+    matmul operand chains. Direct/external InCore entries and Mat panels fanned
+    out by K tiling currently decline. User-authored tile loads are never
+    moved, and internal bridge provenance is consumed before the pass returns.
     """
 
 def materialize_tensor_strides() -> Pass:
