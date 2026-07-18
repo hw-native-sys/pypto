@@ -2077,8 +2077,21 @@ class TestLoopInvariantMatResidency:
         return passes.infer_tile_memory_space()(program)
 
     @staticmethod
-    def _parse_marked_program(params: str, call_args: str, body: str):
-        """Build a caller-backed InCore fixture with an arbitrary marked body."""
+    def _parse_marked_program(
+        params: str,
+        call_args: str,
+        body: str,
+        *,
+        fresh_param: str,
+        fresh_expr: str,
+    ):
+        """Build a marked fixture whose candidate actual is compiler-owned."""
+        param_lines = textwrap.dedent(params).strip().splitlines()
+        fresh_declarations = [line for line in param_lines if line.strip().startswith(f"{fresh_param}:")]
+        assert len(fresh_declarations) == 1, fresh_param
+        main_params = "\n".join(
+            line for line in param_lines if not line.strip().startswith(f"{fresh_param}:")
+        )
         source = f"""
 @pl.program
 class MarkedResidencyGate:
@@ -2093,8 +2106,9 @@ class MarkedResidencyGate:
     @pl.function(type=pl.FunctionType.Orchestration)
     def main(
         self,
-{textwrap.indent(textwrap.dedent(params).strip(), "        ")}
+{textwrap.indent(main_params, "        ")}
     ) -> pl.Tensor[[16, 128], pl.FP32]:
+        {fresh_param} = {fresh_expr}
         result = self.kernel({call_args})
         return result
 """
@@ -2870,67 +2884,70 @@ class MarkedAssignedEffectResidency:
 
     def test_variant_offset_stays_inside_loop(self):
         """A load whose offset uses the loop variable is not invariant."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                lhs: pl.Tensor[[16, 256], pl.BF16],
-                out: pl.Out[pl.Tensor[[16, 128], pl.BF16]],
-            ) -> pl.Tensor[[16, 128], pl.BF16]:
-                for n in pl.range(0, 256, 128):
-                    lhs_mat = pl.load(lhs, [0, n], [16, 128], target_memory=pl.Mem.Mat)
-                    lhs_vec = pl.move(lhs_mat, target_memory=pl.Mem.Vec)
-                    out = pl.store(lhs_vec, [0, 0], out)
-                return out
-
-        printed = ir.python_print(self._run_infer(Before))
+        params = """
+lhs: pl.Tensor[[16, 256], pl.BF16],
+rhs: pl.Tensor[[128, 128], pl.BF16],
+out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+"""
+        body = """
+for n in pl.range(0, 256, 128):
+    lhs_mat = pl.tile.load(lhs, [0, n], [16, 128], target_memory=pl.Mem.Mat)
+    rhs_mat = pl.tile.load(rhs, [0, 0], [128, 128], target_memory=pl.Mem.Mat)
+    lhs_left = pl.tile.move(lhs_mat, target_memory=pl.Mem.Left)
+    rhs_right = pl.tile.move(rhs_mat, target_memory=pl.Mem.Right)
+    c = pl.tile.matmul(lhs_left, rhs_right)
+"""
+        before = self._parse_marked_program(
+            params,
+            "lhs, rhs, out",
+            body,
+            fresh_param="lhs",
+            fresh_expr="pl.create_tensor([16, 256], dtype=pl.BF16)",
+        )
+        printed = ir.python_print(self._run_infer(before))
         assert self._line_index(printed, "tile.load(lhs") > self._line_index(printed, "for n")
+        assert "__compiler_tensor_to_tile_mat_bridge" not in printed
 
     def test_non_matmul_chain_is_not_a_residency_candidate(self):
         """Residency is restricted to a stationary matmul operand role."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                lhs: pl.Tensor[[16, 128], pl.BF16],
-                out: pl.Out[pl.Tensor[[16, 128], pl.BF16]],
-            ) -> pl.Tensor[[16, 128], pl.BF16]:
-                for n in pl.range(0, 2):
-                    lhs_mat = pl.load(lhs, [0, 0], [16, 128], target_memory=pl.Mem.Mat)
-                    lhs_vec = pl.move(lhs_mat, target_memory=pl.Mem.Vec)
-                    out = pl.store(lhs_vec, [0, 0], out)
-                return out
-
-        printed = ir.python_print(self._run_infer(Before))
+        params = """
+lhs: pl.Tensor[[16, 128], pl.BF16],
+out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+"""
+        body = """
+for n in pl.range(0, 2):
+    lhs_mat = pl.tile.load(lhs, [0, 0], [16, 128], target_memory=pl.Mem.Mat)
+    lhs_vec = pl.tile.move(lhs_mat, target_memory=pl.Mem.Vec)
+"""
+        before = self._parse_marked_program(
+            params,
+            "lhs, out",
+            body,
+            fresh_param="lhs",
+            fresh_expr="pl.create_tensor([16, 128], dtype=pl.BF16)",
+        )
+        printed = ir.python_print(self._run_infer(before))
         assert self._line_index(printed, "tile.load(lhs") > self._line_index(printed, "for n")
+        assert "__compiler_tensor_to_tile_mat_bridge" not in printed
 
     def test_inout_source_stays_inside_loop(self):
         """An InOut tensor may alias a write and is never considered resident."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                lhs: pl.InOut[pl.Tensor[[16, 128], pl.BF16]],
-                rhs: pl.Tensor[[128, 128], pl.BF16],
-                out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                for n in pl.range(0, 2):
-                    lhs_mat = pl.load(lhs, [0, 0], [16, 128], target_memory=pl.Mem.Mat)
-                    rhs_mat = pl.load(rhs, [0, 0], [128, 128], target_memory=pl.Mem.Mat)
-                    lhs_left = pl.move(lhs_mat, target_memory=pl.Mem.Left)
-                    rhs_right = pl.move(rhs_mat, target_memory=pl.Mem.Right)
-                    c = pl.matmul(lhs_left, rhs_right)
-                    out = pl.store(c, [0, 0], out)
-                return out
-
-        printed = ir.python_print(self._run_infer(Before))
+        params = """
+lhs: pl.InOut[pl.Tensor[[16, 128], pl.BF16]],
+rhs: pl.Tensor[[128, 128], pl.BF16],
+out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+"""
+        body = "for n in pl.range(0, 2):\n" + textwrap.indent(self._marked_matmul_chain(), "    ")
+        before = self._parse_marked_program(
+            params,
+            "lhs, rhs, out",
+            body,
+            fresh_param="lhs",
+            fresh_expr="pl.create_tensor([16, 128], dtype=pl.BF16)",
+        )
+        printed = ir.python_print(self._run_infer(before))
         assert self._line_index(printed, "tile.load(lhs") > self._line_index(printed, "for n")
+        assert "__compiler_tensor_to_tile_mat_bridge" not in printed
 
     def test_one_aliasing_call_site_invalidates_safe_call_sites(self):
         """One aliasing site poisons otherwise-safe compiler-owned storage."""
@@ -3002,6 +3019,22 @@ class MarkedAssignedEffectResidency:
         printed = ir.python_print(self._run_tensor_infer(Before))
         assert self._line_index(printed, "lhs__ssa_v0_mat", "tile.load") > self._line_index(printed, "for n")
 
+    def test_marked_gate_fixture_positive_control(self):
+        """The shared decline fixture hoists when no tested blocker is present."""
+        body = "for n in pl.range(0, 2, 1):\n" + textwrap.indent(self._marked_matmul_chain(), "    ")
+        before = self._parse_marked_program(
+            self._basic_marked_params(),
+            "lhs, rhs, trips, out",
+            body,
+            fresh_param="lhs",
+            fresh_expr="pl.create_tensor([16, 128], dtype=pl.BF16)",
+        )
+        printed = ir.python_print(self._run_infer(before))
+        loop = self._line_index(printed, "for n")
+        assert self._line_index(printed, "tile.load(lhs") < loop
+        assert self._line_index(printed, "lhs_left", "tile.move") < loop
+        assert "__compiler_tensor_to_tile_mat_bridge" not in printed
+
     @pytest.mark.parametrize(
         ("name", "body", "control_needle"),
         [
@@ -3038,7 +3071,13 @@ class MarkedAssignedEffectResidency:
     )
     def test_marked_chain_declines_control_flow_gates(self, name, body, control_needle):
         """Provenance-backed candidates still obey speculation/control-flow gates."""
-        before = self._parse_marked_program(self._basic_marked_params(), "lhs, rhs, trips, out", body)
+        before = self._parse_marked_program(
+            self._basic_marked_params(),
+            "lhs, rhs, trips, out",
+            body,
+            fresh_param="lhs",
+            fresh_expr="pl.create_tensor([16, 128], dtype=pl.BF16)",
+        )
         printed = ir.python_print(self._run_infer(before))
         assert self._line_index(printed, "tile.load(lhs") > self._line_index(printed, control_needle), name
         assert "__compiler_tensor_to_tile_mat_bridge" not in printed
@@ -3052,7 +3091,13 @@ class MarkedAssignedEffectResidency:
             + textwrap.indent(chain, "    ")
             + "    carried = pl.yield_(lhs_left)\n"
         )
-        before = self._parse_marked_program(self._basic_marked_params(), "lhs, rhs, trips, out", body)
+        before = self._parse_marked_program(
+            self._basic_marked_params(),
+            "lhs, rhs, trips, out",
+            body,
+            fresh_param="lhs",
+            fresh_expr="pl.create_tensor([16, 128], dtype=pl.BF16)",
+        )
         printed = ir.python_print(self._run_infer(before))
         loop = self._line_index(printed, "for n")
         # The independent GM->Mat prefix may still become resident, but the
@@ -3067,7 +3112,13 @@ class MarkedAssignedEffectResidency:
             + textwrap.indent(self._marked_matmul_chain(), "    ")
             + "    pl.tile.tpush_to_aiv(lhs_left, split=0)\n"
         )
-        before = self._parse_marked_program(self._basic_marked_params(), "lhs, rhs, trips, out", body)
+        before = self._parse_marked_program(
+            self._basic_marked_params(),
+            "lhs, rhs, trips, out",
+            body,
+            fresh_param="lhs",
+            fresh_expr="pl.create_tensor([16, 128], dtype=pl.BF16)",
+        )
         printed = ir.python_print(self._run_infer(before))
         loop = self._line_index(printed, "for n")
         assert self._line_index(printed, "tile.load(lhs") > loop
@@ -3093,14 +3144,28 @@ for n in pl.range(0, 2, 1):
     rhs_right = pl.tile.move(rhs_mat, target_memory=pl.Mem.Right)
     c = pl.tile.matmul(lhs_left, rhs_right)
 """
-        before = self._parse_marked_program(params, "lhs, rhs, out", body)
+        before = self._parse_marked_program(
+            params,
+            "lhs, rhs, out",
+            body,
+            fresh_param="lhs",
+            fresh_expr="pl.create_tensor([16, 256], dtype=pl.BF16)",
+        )
         printed = ir.python_print(self._run_infer(before))
         loop = self._line_index(printed, "for n")
         assert self._line_index(printed, "tile.load(lhs") > loop
         assert "__compiler_tensor_to_tile_mat_bridge" not in printed
 
     @pytest.mark.parametrize(
-        ("name", "params", "call_args", "body", "resident_needle"),
+        (
+            "name",
+            "params",
+            "call_args",
+            "body",
+            "resident_needle",
+            "fresh_param",
+            "fresh_expr",
+        ),
         [
             (
                 "l1",
@@ -3121,8 +3186,10 @@ for n in pl.range(0, 2, 1):
     rhs_right = pl.tile.move(rhs_mat, target_memory=pl.Mem.Right)
     ca = pl.tile.matmul(a_left, rhs_right)
     cb = pl.tile.matmul(b_left, rhs_right)
-""",
+                """,
                 "tile.load(a",
+                "a",
+                "pl.create_tensor([512, 256], dtype=pl.BF16)",
             ),
             (
                 "l0a",
@@ -3143,8 +3210,10 @@ for n in pl.range(0, 2, 1):
     rhs_right = pl.tile.move(rhs_mat, target_memory=pl.Mem.Right)
     ca = pl.tile.matmul(a_left, rhs_right)
     cb = pl.tile.matmul(b_left, rhs_right)
-""",
+                """,
                 "a_left",
+                "a",
+                "pl.create_tensor([256, 128], dtype=pl.BF16)",
             ),
             (
                 "l0b",
@@ -3165,8 +3234,10 @@ for n in pl.range(0, 2, 1):
     rhs1_right = pl.tile.move(rhs1_mat, target_memory=pl.Mem.Right)
     c0 = pl.tile.matmul(lhs_left, rhs0_right)
     c1 = pl.tile.matmul(lhs_left, rhs1_right)
-""",
+                """,
                 "rhs0_right",
+                "rhs0",
+                "pl.create_tensor([128, 256], dtype=pl.BF16)",
             ),
             (
                 "outer-live",
@@ -3185,8 +3256,10 @@ for n in pl.range(0, 2, 1):
     lhs_left = pl.tile.move(lhs_mat, target_memory=pl.Mem.Left)
     rhs_right = pl.tile.move(rhs_mat, target_memory=pl.Mem.Right)
     c = pl.tile.matmul(lhs_left, rhs_right)
-""",
+                """,
                 "tile.load(lhs",
+                "lhs",
+                "pl.create_tensor([16, 128], dtype=pl.BF16)",
             ),
             (
                 "explicit-reserve",
@@ -3204,186 +3277,35 @@ for n in pl.range(0, 2, 1):
     lhs_left = pl.tile.move(lhs_mat, target_memory=pl.Mem.Left)
     rhs_right = pl.tile.move(rhs_mat, target_memory=pl.Mem.Right)
     c = pl.tile.matmul(lhs_left, rhs_right)
-""",
+                """,
                 "tile.load(lhs",
+                "lhs",
+                "pl.create_tensor([16, 128], dtype=pl.BF16)",
             ),
         ],
     )
     def test_marked_chain_declines_capacity_and_reserve_gates(
-        self, name, params, call_args, body, resident_needle
+        self,
+        name,
+        params,
+        call_args,
+        body,
+        resident_needle,
+        fresh_param,
+        fresh_expr,
     ):
         """Real marked candidates exercise every capacity/reservation gate."""
-        before = self._parse_marked_program(params, call_args, body)
+        before = self._parse_marked_program(
+            params,
+            call_args,
+            body,
+            fresh_param=fresh_param,
+            fresh_expr=fresh_expr,
+        )
         printed = ir.python_print(self._run_infer(before))
         loop = self._line_index(printed, "for n")
         assert self._line_index(printed, resident_needle) > loop, name
         assert "__compiler_tensor_to_tile_mat_bridge" not in printed
-
-    def test_zero_trip_loop_does_not_speculate_load(self):
-        """Hoisting from a zero-trip loop would introduce a new GM read."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                lhs: pl.Tensor[[16, 128], pl.BF16],
-                rhs: pl.Tensor[[128, 128], pl.BF16],
-                out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                for n in pl.range(0, 0, 1):
-                    lhs_mat = pl.load(lhs, [0, 0], [16, 128], target_memory=pl.Mem.Mat)
-                    rhs_mat = pl.load(rhs, [0, 0], [128, 128], target_memory=pl.Mem.Mat)
-                    lhs_left = pl.move(lhs_mat, target_memory=pl.Mem.Left)
-                    rhs_right = pl.move(rhs_mat, target_memory=pl.Mem.Right)
-                    c = pl.matmul(lhs_left, rhs_right)
-                    out = pl.store(c, [0, 0], out)
-                return out
-
-        printed = ir.python_print(self._run_infer(Before))
-        assert self._line_index(printed, "tile.load(lhs") > self._line_index(printed, "for n")
-
-    def test_dynamic_trip_loop_does_not_speculate_load(self):
-        """A dynamic trip count cannot prove that the original load executes."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                lhs: pl.Tensor[[16, 128], pl.BF16],
-                trips: pl.Scalar[pl.INDEX],
-                rhs: pl.Tensor[[128, 128], pl.BF16],
-                out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                for n in pl.range(0, trips, 1):
-                    lhs_mat = pl.load(lhs, [0, 0], [16, 128], target_memory=pl.Mem.Mat)
-                    rhs_mat = pl.load(rhs, [0, 0], [128, 128], target_memory=pl.Mem.Mat)
-                    lhs_left = pl.move(lhs_mat, target_memory=pl.Mem.Left)
-                    rhs_right = pl.move(rhs_mat, target_memory=pl.Mem.Right)
-                    c = pl.matmul(lhs_left, rhs_right)
-                    out = pl.store(c, [0, 0], out)
-                return out
-
-        printed = ir.python_print(self._run_infer(Before))
-        assert self._line_index(printed, "tile.load(lhs") > self._line_index(printed, "for n")
-
-    def test_pipeline_loop_does_not_hoist(self):
-        """Pipeline stage ownership must remain local to the pipeline loop."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                lhs: pl.Tensor[[16, 128], pl.BF16],
-                rhs: pl.Tensor[[128, 128], pl.BF16],
-                out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                for n in pl.pipeline(0, 2, 1, stage=2):
-                    lhs_mat = pl.load(lhs, [0, 0], [16, 128], target_memory=pl.Mem.Mat)
-                    rhs_mat = pl.load(rhs, [0, 0], [128, 128], target_memory=pl.Mem.Mat)
-                    lhs_left = pl.move(lhs_mat, target_memory=pl.Mem.Left)
-                    rhs_right = pl.move(rhs_mat, target_memory=pl.Mem.Right)
-                    c = pl.matmul(lhs_left, rhs_right)
-                    out = pl.store(c, [0, 0], out)
-                return out
-
-        printed = ir.python_print(self._run_infer(Before))
-        assert self._line_index(printed, "tile.load(lhs") > self._line_index(printed, "pl.pipeline")
-
-    def test_conditional_load_does_not_hoist(self):
-        """A conditionally executed load must not become unconditional."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                lhs: pl.Tensor[[16, 128], pl.BF16],
-                out: pl.Out[pl.Tensor[[16, 128], pl.BF16]],
-            ) -> pl.Tensor[[16, 128], pl.BF16]:
-                for n in pl.range(0, 2):
-                    if n < 1:
-                        lhs_mat = pl.load(lhs, [0, 0], [16, 128], target_memory=pl.Mem.Mat)
-                        lhs_vec = pl.move(lhs_mat, target_memory=pl.Mem.Vec)
-                        out = pl.store(lhs_vec, [0, 0], out)
-                return out
-
-        printed = ir.python_print(self._run_infer(Before))
-        assert self._line_index(printed, "tile.load(lhs") > self._line_index(printed, "if ")
-
-    def test_preceding_continue_blocks_later_hoist(self):
-        """A load after a possible continue is not unconditionally executed."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                lhs: pl.Tensor[[16, 128], pl.BF16],
-                rhs: pl.Tensor[[128, 128], pl.BF16],
-                out: pl.InOut[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                for n in pl.range(0, 2):
-                    if n < 1:
-                        continue
-                    lhs_mat = pl.load(lhs, [0, 0], [16, 128], target_memory=pl.Mem.Mat)
-                    rhs_mat = pl.load(rhs, [0, 0], [128, 128], target_memory=pl.Mem.Mat)
-                    lhs_left = pl.move(lhs_mat, target_memory=pl.Mem.Left)
-                    rhs_right = pl.move(rhs_mat, target_memory=pl.Mem.Right)
-                    c = pl.matmul(lhs_left, rhs_right)
-                    out = pl.store(c, [0, 0], out)
-                return out
-
-        printed = ir.python_print(self._run_infer(Before))
-        assert self._line_index(printed, "tile.load(lhs") > self._line_index(printed, "continue")
-
-    def test_loop_local_if_return_offset_is_not_invariant(self):
-        """An IfStmt return Var is a loop-local definition, not an invariant."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                lhs: pl.Tensor[[16, 256], pl.BF16],
-                out: pl.Out[pl.Tensor[[16, 128], pl.BF16]],
-            ) -> pl.Tensor[[16, 128], pl.BF16]:
-                for n in pl.range(0, 2):
-                    if n < 1:
-                        offset = 0
-                    else:
-                        offset = 128
-                    lhs_mat = pl.load(lhs, [0, offset], [16, 128], target_memory=pl.Mem.Mat)
-                    lhs_vec = pl.move(lhs_mat, target_memory=pl.Mem.Vec)
-                    out = pl.store(lhs_vec, [0, 0], out)
-                return out
-
-        printed = ir.python_print(self._run_infer(Before))
-        assert self._line_index(printed, "tile.load(lhs") > self._line_index(printed, "for n")
-
-    def test_yielded_load_does_not_hoist(self):
-        """A tile carried out of the loop keeps its definition in the loop."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                lhs: pl.Tensor[[16, 128], pl.BF16],
-                out: pl.Out[pl.Tensor[[16, 128], pl.BF16]],
-            ) -> pl.Tensor[[16, 128], pl.BF16]:
-                seed = pl.tile.create([16, 128], dtype=pl.BF16, target_memory=pl.Mem.Mat)
-                for n, (carry,) in pl.range(0, 2, init_values=(seed,)):
-                    lhs_mat = pl.load(lhs, [0, 0], [16, 128], target_memory=pl.Mem.Mat)
-                    result = pl.yield_(lhs_mat)
-                result_vec = pl.move(result, target_memory=pl.Mem.Vec)
-                out = pl.store(result_vec, [0, 0], out)
-                return out
-
-        printed = ir.python_print(self._run_infer(Before))
-        assert self._line_index(printed, "tile.load(lhs") > self._line_index(printed, "for n")
 
     def test_manual_tile_load_is_not_hoisted(self):
         """Hand-authored tile loads do not carry Tensor-to-Tile provenance."""
@@ -3410,11 +3332,11 @@ for n in pl.range(0, 2, 1):
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(
                 self,
-                lhs: pl.Tensor[[16, 128], pl.BF16],
                 rhs: pl.Tensor[[128, 256], pl.BF16],
                 out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
-                result = self.kernel(lhs, rhs, out)
+                fresh_lhs = pl.create_tensor([16, 128], dtype=pl.BF16)
+                result = self.kernel(fresh_lhs, rhs, out)
                 return result
 
         printed = ir.python_print(self._run_infer(Before))
@@ -3445,72 +3367,21 @@ for n in pl.range(0, 2, 1):
                     out = pl.store(c, [0, 0], out)
                 return out
 
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                rhs: pl.Tensor[[128, 128], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                fresh_lhs = pl.create_tensor([128, 16], dtype=pl.BF16)
+                result = self.kernel(fresh_lhs, rhs, out)
+                return result
+
         printed = ir.python_print(self._run_infer(Before))
         loop = self._line_index(printed, "for n")
         assert self._line_index(printed, "tile.load(lhs") > loop
         assert self._line_index(printed, "transpose_view") > loop
         assert self._line_index(printed, "lhs_left", "tile.move") > loop
-
-    def test_capacity_upper_bound_declines_hoist(self):
-        """The pass does not create a resident Mat set larger than L1."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                a: pl.Tensor[[512, 256], pl.BF16],
-                b: pl.Tensor[[512, 256], pl.BF16],
-                rhs: pl.Tensor[[128, 128], pl.BF16],
-                out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                for n in pl.range(0, 2):
-                    a_mat = pl.load(a, [0, 0], [512, 256], target_memory=pl.Mem.Mat)
-                    b_mat = pl.load(b, [0, 0], [512, 256], target_memory=pl.Mem.Mat)
-                    rhs_mat = pl.load(rhs, [0, 0], [128, 128], target_memory=pl.Mem.Mat)
-                    a_left = pl.tile.extract(a_mat, 0, 0, [16, 128], target_memory=pl.Mem.Left)
-                    b_left = pl.tile.extract(b_mat, 0, 0, [16, 128], target_memory=pl.Mem.Left)
-                    rhs_right = pl.move(rhs_mat, target_memory=pl.Mem.Right)
-                    ca = pl.matmul(a_left, rhs_right)
-                    cb = pl.matmul(b_left, rhs_right)
-                    out = pl.store(ca, [0, 0], out)
-                    out = pl.store(cb, [0, 0], out)
-                return out
-
-        printed = ir.python_print(self._run_infer(Before))
-        loop = self._line_index(printed, "for n")
-        assert self._line_index(printed, "tile.load(a") > loop
-        assert self._line_index(printed, "tile.load(b") > loop
-        assert self._line_index(printed, "tile.load(rhs") > loop
-
-    def test_outer_live_mat_capacity_declines_hoist(self):
-        """Already-live outer Mat allocations participate in the capacity gate."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                outer: pl.Tensor[[320, 384], pl.FP32],
-                lhs: pl.Tensor[[16, 128], pl.BF16],
-                rhs: pl.Tensor[[128, 128], pl.BF16],
-                out: pl.Out[pl.Tensor[[320, 384], pl.FP32]],
-            ) -> pl.Tensor[[320, 384], pl.FP32]:
-                outer_mat = pl.load(outer, [0, 0], [320, 384], target_memory=pl.Mem.Mat)
-                for n in pl.range(0, 2):
-                    lhs_mat = pl.load(lhs, [0, 0], [16, 128], target_memory=pl.Mem.Mat)
-                    rhs_mat = pl.load(rhs, [0, 0], [128, 128], target_memory=pl.Mem.Mat)
-                    lhs_left = pl.move(lhs_mat, target_memory=pl.Mem.Left)
-                    rhs_right = pl.move(rhs_mat, target_memory=pl.Mem.Right)
-                    c = pl.matmul(lhs_left, rhs_right)
-                    out = pl.store(c, [0, 0], out)
-                outer_vec = pl.move(outer_mat, target_memory=pl.Mem.Vec)
-                out = pl.store(outer_vec, [0, 0], out)
-                return out
-
-        printed = ir.python_print(self._run_infer(Before))
-        loop = self._line_index(printed, "for n")
-        assert self._line_index(printed, "tile.load(lhs") > loop
 
 
 if __name__ == "__main__":
