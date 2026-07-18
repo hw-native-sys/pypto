@@ -42,6 +42,7 @@
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/buffer_root_collector.h"
+#include "pypto/ir/transforms/utils/dead_code_elimination.h"
 #include "pypto/ir/transforms/utils/memory_footprint.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/normalize_stmt_structure.h"
@@ -759,6 +760,14 @@ class LoopInvariantTileLoadHoister : public IRMutator {
       if (!assign) break;
       if (!assign->var_ || !inventory_.IsResidencyChainVar(assign->var_.get()) ||
           inventory_.IsYieldedFromLoopSubtree(op, assign->var_.get())) {
+        // An assigned store, cross-core synchronization op, Submit, or call to
+        // another function is still an effect boundary. Do not move a later
+        // load ahead of it merely because its result is assigned to a Var.
+        auto preceding_call = assign->value_ ? As<Call>(assign->value_) : nullptr;
+        if (dce::IsSideEffectOp(stmts[i]) || (preceding_call && preceding_call->op_ &&
+                                              !op_predicates::IsBuiltinOp(preceding_call->op_->name_))) {
+          break;
+        }
         continue;
       }
       auto call = As<Call>(assign->value_);
