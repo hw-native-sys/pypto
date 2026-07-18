@@ -2125,10 +2125,18 @@ class TestAutoTileMatmulL0FitsL0cCastFold:
                 out: pl.Out[pl.Tensor[[128, 64], pl.FP32]],
             ) -> pl.Tensor[[128, 64], pl.FP32]:
                 a_mat: pl.Tile[[128, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
-                    a, [0, 0], [128, 64], target_memory=pl.Mem.Mat
+                    a,
+                    [0, 0],
+                    [128, 64],
+                    target_memory=pl.Mem.Mat,
+                    attrs={"__compiler_tensor_to_tile_mat_bridge": True},
                 )
                 b_mat: pl.Tile[[64, 128], pl.BF16, pl.Mem.Mat] = pl.tile.load(
-                    b, [0, 0], [64, 128], target_memory=pl.Mem.Mat
+                    b,
+                    [0, 0],
+                    [64, 128],
+                    target_memory=pl.Mem.Mat,
+                    attrs={"__compiler_tensor_to_tile_mat_bridge": True},
                 )
                 c: pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(a_mat, b_mat)
                 # Folded downcast: a bf16 Mat scratch + one full-window Acc->Mat
@@ -2138,7 +2146,11 @@ class TestAutoTileMatmulL0FitsL0cCastFold:
                 )
                 c_scratch: pl.Tile[[128, 128], pl.BF16, pl.Mem.Mat] = pl.tile.assemble(c_mat, c, [0, 0])
                 e_mat: pl.Tile[[128, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
-                    e, [0, 0], [128, 64], target_memory=pl.Mem.Mat
+                    e,
+                    [0, 0],
+                    [128, 64],
+                    target_memory=pl.Mem.Mat,
+                    attrs={"__compiler_tensor_to_tile_mat_bridge": True},
                 )
                 d: pl.Tile[[128, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(c_scratch, e_mat)
                 out_st: pl.Tensor[[128, 64], pl.FP32] = pl.store(d, [0, 0], out)
@@ -2166,10 +2178,18 @@ class TestAutoTileMatmulL0FitsL0cCastFold:
                 out: pl.Out[pl.Tensor[[128, 64], pl.FP32]],
             ) -> pl.Tensor[[128, 64], pl.FP32]:
                 a_mat: pl.Tile[[128, 512], pl.BF16, pl.Mem.Mat] = pl.tile.load(
-                    a, [0, 0], [128, 512], target_memory=pl.Mem.Mat
+                    a,
+                    [0, 0],
+                    [128, 512],
+                    target_memory=pl.Mem.Mat,
+                    attrs={"__compiler_tensor_to_tile_mat_bridge": True},
                 )
                 b_mat: pl.Tile[[512, 128], pl.BF16, pl.Mem.Mat] = pl.tile.load(
-                    b, [0, 0], [512, 128], target_memory=pl.Mem.Mat
+                    b,
+                    [0, 0],
+                    [512, 128],
+                    target_memory=pl.Mem.Mat,
+                    attrs={"__compiler_tensor_to_tile_mat_bridge": True},
                 )
                 c_init: pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc] = pl.tile.create(
                     [128, 128], dtype=pl.FP32, target_memory=pl.Mem.Acc
@@ -2196,7 +2216,11 @@ class TestAutoTileMatmulL0FitsL0cCastFold:
                 )
                 c_scratch: pl.Tile[[128, 128], pl.BF16, pl.Mem.Mat] = pl.tile.assemble(c_mat, c, [0, 0])
                 e_mat: pl.Tile[[128, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
-                    e, [0, 0], [128, 64], target_memory=pl.Mem.Mat
+                    e,
+                    [0, 0],
+                    [128, 64],
+                    target_memory=pl.Mem.Mat,
+                    attrs={"__compiler_tensor_to_tile_mat_bridge": True},
                 )
                 d: pl.Tile[[128, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(c_scratch, e_mat)
                 out_st: pl.Tensor[[128, 64], pl.FP32] = pl.store(d, [0, 0], out)

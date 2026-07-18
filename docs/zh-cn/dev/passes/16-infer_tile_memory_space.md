@@ -1,6 +1,6 @@
 # InferTileMemorySpace Pass
 
-为 InCore 函数中每个 `TileType` 变量推导片上 `MemorySpace`，并插入 `tile.move` 来弥合生产者与消费者约束之间残留的不匹配。
+为 InCore 函数中每个 `TileType` 变量推导片上 `MemorySpace`，插入 `tile.move` 来弥合生产者与消费者约束之间残留的不匹配，并让可证明为循环不变量的 Mat 操作数跨顺序循环保持驻留。
 
 ## 概述
 
@@ -36,7 +36,7 @@ program_inferred = infer_pass(program)
 
 ## 算法
 
-每个 InCore 函数依次经历四个阶段。所有阶段都是 IR Visitor / Mutator，相对函数体大小为 O(N log N) 复杂度（查找通过有序 map 完成）。
+每个 InCore 函数依次经历五个阶段。所有阶段都是 IR Visitor / Mutator，相对函数体大小为 O(N log N) 复杂度。阶段 4 只构建一次自底向上的循环清单，不会为每个外层循环重复扫描完整的嵌套函数体。
 
 ### 阶段 0 — 反向需求收集（`DemandCollector`）
 
@@ -94,7 +94,53 @@ program_inferred = infer_pass(program)
 4. **Retargetable 生产者 kwarg 重写（`VisitStmt_(AssignStmt)`）** —— 对注册了 `HasRetargetableMemoryKwarg()` 的算子，若阶段 1 把输出解析到与 kwarg 不同的 space（或 kwarg 缺失），则重写 `Call` 的 `target_memory` kwarg 与结果 `TileType`，使之匹配。这让 codegen 与赋值左侧 `Var` 的注解保持一致；这是必要的，因为阶段 1 可能基于反向需求做出解析，而 kwarg 永远看不到这些需求。
 5. **LHS / RHS 类型同步** —— 当 `VisitExpr_(Call)` 在替换被 move 后的参数后，借由 `OpRegistry` 重建 `Call`，结果类型可能与 LHS `Var` 的原类型不同（重建的 call 会看到布局变化后的输入）。Mutator 把 LHS `Var` 的 `TileType` 同步到重建 call 的 shape / dtype / memref / view，同时保留变量重写阶段选定的 `memory_space_`，保证 roundtrip 等价。
 
-## 示例
+### 阶段 4 — 循环不变量 Mat 驻留（`LoopInvariantTileLoadHoister`）
+
+所有 space 显式化后，本 pass 识别形如 `tile.load(GM → Mat) → tile.transpose_view* → tile.move/tile.extract(Mat → Left/Right)` 的不变量前缀，并把该前缀移到循环 preheader。该链必须只有一个终止 `Left` / `Right` 值，并且只在一个 `tile.matmul`、`tile.matmul_bias` 或 `tile.matmul_acc` 的对应操作数位置使用。这样可将优化严格限定为驻留 matmul 操作数，而不是通用 tile LICM。tensor-level matmul 的驻留操作数只加载一次，而依赖循环变量的另一操作数仍留在循环内正常流式加载。
+
+候选资格首先依赖编译器私有的 provenance。`ConvertTensorToTileOps` 会标记其生成的所有 `GM → Mat` bridge load；该标记经过打印、flatten 和 L0 自动分块后一直保留到本阶段。阶段 4 随后证明带标记的 load 符合上文所述的精确静止 matmul 操作数链。用户手写的 `tile.load(..., target_memory=Mat)` 不带此标记，因此本优化绝不会提升它，从而保证显式 tile 程序仍由用户控制。
+
+首版合法性规则有意保持严格：
+
+- 循环必须为 `Sequential`，边界是常量，step 为正，且至少执行一次；
+- 被移动的赋值必须是循环体顶层、无条件执行的语句；
+- GM 源必须是方向为 `ParamDirection::In` 的直接 tensor 参数，且 load 带有编译器生成的 Mat bridge 标记；
+- InCore 函数必须至少有一个可分析的程序内调用点，并且每个调用点的候选 `Tensor In` 实参 root 与所有可写 `Tensor Out` / `Tensor InOut` 实参 root 都可解析；
+- 每个调用点的候选 root 都必须与所有可写 root 不同，InCore 函数自身也不能写入该 root；无关 scalar 和其他只读 `Tensor In` root 不参与该证明；
+- offset、shape 以及整个被移动的依赖前缀都必须是循环不变量；
+- candidate 之前出现直接控制流或有副作用语句时，会关闭可提升前缀；
+- 被移动的结果不能是 loop-carried 值或 yield 值；
+- 函数中所有实际拥有分配的 `Mat`、`Left`、`Right` tile 都必须具有静态大小，且按分配器对齐后的全函数上界不得超过后端容量；
+- 函数中不得存在尚未表示为 tile 分配、因而无法计入容量的显式保留缓冲区区域。
+
+`InOut` / `Out` 源、手写 tile load、直接或从程序外进入的 InCore 函数、未知的候选或可写调用点 root、候选/写入别名、条件 load、动态或零次循环、容量未知的情形、被 yield 或循环携带的结果，以及依赖循环变量的 extract 都会安全拒绝并保持 IR 不变。即使其他调用安全，只要有一个调用点不安全也会使候选失效。容量检查只统计实际拥有分配的值，而不重复统计零拷贝 view 或 SSA 别名；它采用与 `InitMemRef` / `AllocateMemoryAddr` 相同的字节大小和地址对齐规则，并包含循环外已存活的分配。若某个 memory space 中的分配可能被后续 pipeline lowering 复制，也会拒绝该 space 的驻留，除非被移动的前缀位于不受影响的 space。该全函数上界刻意强于任一规划器的生命周期复用，因此 residency 重写不会在 PyPTO 或 PTOAS 规划器下引入后续容量失败。嵌套循环中的不变量链会逐层移动到 preheader，直至到达最外层合法循环。本阶段不会全局重映射参数，也不会把依赖 K 的 L0 extract 移出 `AutoTileMatmulL0` 的 pipeline 循环。
+
+#### 驻留示例
+
+对于具有可分析调用者的 tensor 程序，静止 LHS 的 bridge 会移到用户循环之前，而依赖 N 的 RHS 仍在循环中流式加载：
+
+```python
+# Tensor 源程序
+for n, (acc,) in pl.range(0, 256, 128, init_values=(out,)):
+    rhs_n = pl.slice(rhs, [128, 128], [0, n])
+    c_n = pl.matmul(lhs, rhs_n, out_dtype=pl.FP32)
+    result = pl.yield_(pl.assemble(acc, c_n, [0, n]))
+```
+
+```python
+# ConvertTensorToTileOps、L0 自动分块和 InferTileMemorySpace 之后
+lhs_mat = pl.tile.load(lhs, [0, 0], [16, 128], target_memory=pl.Mem.Mat)
+lhs_left = pl.tile.move(lhs_mat, target_memory=pl.Mem.Left)
+for n, (acc,) in pl.range(0, 256, 128, init_values=(out,)):
+    rhs_mat = pl.tile.load(rhs, [0, n], [128, 128], target_memory=pl.Mem.Mat)
+    rhs_right = pl.tile.move(rhs_mat, target_memory=pl.Mem.Right)
+    c_n = pl.tile.matmul(lhs_left, rhs_right)
+    result = pl.yield_(pl.tile.store(c_n, [0, n], acc))
+```
+
+为便于阅读，上例省略了内部 provenance 属性。该转换需要 orchestration 调用者证明候选 `lhs` root 与可写 `out` root 不同；另一个只读 `rhs` root 与该证明无关。缺少所需调用者证据时，仍保留原来的循环内放置方式。
+
+## 通用 memory-space 推导示例
 
 来源：`tests/ut/ir/transforms/test_infer_tile_memory_space.py::test_matmul_gets_acc`。
 

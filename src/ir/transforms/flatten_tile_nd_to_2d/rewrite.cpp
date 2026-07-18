@@ -686,15 +686,17 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         if (pending_batch_matmul_mat) {
           flat_kwargs.emplace_back("target_memory", MemorySpace::Mat);
         }
-        auto flat_call =
-            std::make_shared<Call>(call->op_, sub_args, flat_kwargs, flat_tile_type, call->span_);
+        auto flat_call = std::make_shared<Call>(call->op_, sub_args, flat_kwargs, call->attrs_,
+                                                flat_tile_type, call->span_);
         auto flat_var = std::make_shared<Var>(assign->var_->name_hint_, flat_tile_type, assign->var_->span_);
         result.push_back(std::make_shared<AssignStmt>(flat_var, flat_call, assign->span_));
         ctx.Insert(assign->var_, flat_var);
         continue;
       }
       // ≤2D tile.load: honor any pending var_map substitutions
-      auto new_call = op_registry.Create(op_name, sub_args, call->kwargs_, span);
+      auto deduced_call = op_registry.Create(op_name, sub_args, call->kwargs_, span);
+      auto new_call = std::make_shared<Call>(deduced_call->op_, deduced_call->args_, deduced_call->kwargs_,
+                                             call->attrs_, deduced_call->GetType(), deduced_call->span_);
       auto new_var =
           std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
       result.push_back(std::make_shared<AssignStmt>(new_var, new_call, assign->span_));

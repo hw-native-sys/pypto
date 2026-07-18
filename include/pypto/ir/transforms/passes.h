@@ -506,6 +506,13 @@ Pass CanonicalizeTileSlice();
  * - tile.reshape: inherit from first tile-typed input
  * - Other tile ops: Vec (default)
  *
+ * The pass also hoists compiler-generated, loop-invariant GM->Mat matmul
+ * operand chains across statically non-empty sequential loops when in-program
+ * caller evidence proves the candidate Tensor In buffer is distinct from all
+ * writable Tensor buffers and whole-function Mat/Left/Right capacity remains
+ * safe.  The private bridge provenance used by this proof is consumed before
+ * the pass returns and never becomes downstream IR state.
+ *
  * Requirements:
  * - Input IR must have tile ops (run ConvertTensorToTileOps first)
  */

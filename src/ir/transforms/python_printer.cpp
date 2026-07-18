@@ -941,13 +941,16 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
 
   // Serialize ONLY op-call attrs that genuinely need to survive print -> parse,
   // via an explicit allowlist. Most attrs are re-derived by the parser or have
-  // bespoke syntax. ``pipeline_membership`` has neither and must survive until
-  // MemoryReuse consumes it. Keep this helper available to special call forms
-  // below so an early return cannot silently drop the attr.
+  // bespoke syntax. ``pipeline_membership`` and the compiler-generated
+  // Tensor-to-Mat bridge provenance have neither and must survive until their
+  // downstream passes consume them. Keep this helper available to special call
+  // forms below so an early return cannot silently drop either attr.
   auto print_serialized_attrs = [&](bool need_comma) {
     std::vector<const std::pair<std::string, std::any>*> serialized_attrs;
     for (const auto& kv : op->attrs_) {
-      if (kv.first == kPipelineMembershipAttr) serialized_attrs.push_back(&kv);
+      if (kv.first == kPipelineMembershipAttr || kv.first == kCompilerTensorToTileMatBridgeAttr) {
+        serialized_attrs.push_back(&kv);
+      }
     }
     if (serialized_attrs.empty()) return;
 

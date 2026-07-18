@@ -196,10 +196,39 @@ def _make_pair(
     return before, expected
 
 
+_MAT_BRIDGE_ATTR = "__compiler_tensor_to_tile_mat_bridge"
+
+
+class _StampExpectedMatBridgeLoads(ir.IRMutator):
+    """Mirror ConvertTensorToTileOps' private provenance in expected IR.
+
+    The marker is intentionally absent from the public tile-load builder.  It
+    is compiler evidence consumed by InferTileMemorySpace, so expected programs
+    in this conversion-specific suite attach it only to Mat bridge loads.
+    """
+
+    def visit_call(self, op: ir.Call) -> ir.Expr:
+        expr = super().visit_call(op)
+        call = expr if isinstance(expr, ir.Call) else op
+        if (
+            call.op.name == "tile.load"
+            and isinstance(call.type, ir.TileType)
+            and call.type.memory_space == MemorySpace.Mat
+        ):
+            attrs = dict(call.attrs)
+            attrs[_MAT_BRIDGE_ATTR] = True
+            return ir.Call(call.op, list(call.args), dict(call.kwargs), attrs, call.type, call.span)
+        return expr
+
+
+def _assert_convert_output_equal(after: ir.Program, expected: ir.Program) -> None:
+    """Compare converted IR after stamping expected compiler Mat bridges."""
+    ir.assert_structural_equal(after, _StampExpectedMatBridgeLoads().visit_program(expected))
+
+
 def _assert_convert_equal(before: ir.Program, expected: ir.Program) -> None:
     """Run ConvertTensorToTileOps on ``before`` and assert the result matches ``expected``."""
-    after = passes.convert_tensor_to_tile_ops()(before)
-    ir.assert_structural_equal(after, expected)
+    _assert_convert_output_equal(passes.convert_tensor_to_tile_ops()(before), expected)
 
 
 class _FirstCallFinder(ir.IRVisitor):
@@ -1035,7 +1064,7 @@ class TestConvertTensorToTileOps:
                 return y
 
         After = passes.convert_tensor_to_tile_ops()(Before)
-        ir.assert_structural_equal(After, Expected)
+        _assert_convert_output_equal(After, Expected)
 
     def test_shared_kv_one_load_two_matmuls_b_trans(self):
         """A single sliced KV feeding a b_trans=True and a b_trans=False matmul lowers
@@ -1113,7 +1142,7 @@ class TestConvertTensorToTileOps:
                 return out
 
         After = passes.convert_tensor_to_tile_ops()(Before)
-        ir.assert_structural_equal(After, Expected)
+        _assert_convert_output_equal(After, Expected)
 
     def test_matmul_acc_conversion(self):
         """tensor.matmul + tensor.matmul_acc -> tile.matmul + tile.matmul_acc.
@@ -1172,7 +1201,7 @@ class TestConvertTensorToTileOps:
                 return result
 
         After = passes.convert_tensor_to_tile_ops()(Before)
-        ir.assert_structural_equal(After, Expected)
+        _assert_convert_output_equal(After, Expected)
 
     def test_dump_vars_attr_preserved_through_call_site_update(self):
         """Regression: ``pl.dump_tag`` on an orchestration call must survive the
@@ -1289,7 +1318,7 @@ class TestConvertTensorToTileOps:
                 return result
 
         After = passes.convert_tensor_to_tile_ops()(Before)
-        ir.assert_structural_equal(After, Expected)
+        _assert_convert_output_equal(After, Expected)
 
     def test_nd_batch_matmul_b_trans_slice_uses_transpose_view(self):
         """A SLICE of a 3D tensor fed to a b_trans matmul (-> tile.batch_matmul) lowers
@@ -1417,7 +1446,7 @@ class TestConvertTensorToTileOps:
                 return result
 
         After = passes.convert_tensor_to_tile_ops()(Before)
-        ir.assert_structural_equal(After, Expected)
+        _assert_convert_output_equal(After, Expected)
 
     def test_assemble_tile_tile_then_cast_conversion(self):
         """tensor.create + tensor.assemble(tile,tile) + tensor.cast must not crash.
@@ -2566,7 +2595,7 @@ class TestSliceMatmulConversion:
                 return self.main_incore_0(a, b, out_0)
 
         After = passes.convert_tensor_to_tile_ops()(Before)
-        ir.assert_structural_equal(After, Expected)
+        _assert_convert_output_equal(After, Expected)
 
     def test_slice_chain_of_aliases_then_matmul(self):
         """Demand propagates through a chain of SSA aliases, not just one hop.
@@ -2628,7 +2657,7 @@ class TestSliceMatmulConversion:
                 return self.main_incore_0(a, b, out_0)
 
         After = passes.convert_tensor_to_tile_ops()(Before)
-        ir.assert_structural_equal(After, Expected)
+        _assert_convert_output_equal(After, Expected)
 
 
 class TestScatterUpdateConversion:
@@ -4316,7 +4345,7 @@ class TestConvertCrossCoreSplitOps:
                 return ret0__store
 
         After = passes.convert_tensor_to_tile_ops()(Before)
-        ir.assert_structural_equal(After, Expected)
+        _assert_convert_output_equal(After, Expected)
 
     def test_aiv_shard_left_right_lowers_to_tile_aiv_shard(self):
         """``pl.aiv_shard(cube_tensor)`` in a LEFT_RIGHT ``split_aiv`` region lowers to
@@ -4359,7 +4388,7 @@ class TestConvertCrossCoreSplitOps:
                 return ret0__store
 
         After = passes.convert_tensor_to_tile_ops()(Before)
-        ir.assert_structural_equal(After, Expected)
+        _assert_convert_output_equal(After, Expected)
 
     def test_aic_gather_up_down_lowers_to_tile_aic_gather(self):
         """``pl.aic_gather(vec_tensor)`` in an UP_DOWN ``split_aiv`` region lowers to

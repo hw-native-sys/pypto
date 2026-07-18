@@ -509,7 +509,14 @@ def canonicalize_tile_slice() -> Pass:
     """
 
 def infer_tile_memory_space() -> Pass:
-    """Create a pass that infers memory_space for TileType variables in InCore functions."""
+    """Infer TileType memory spaces and safe stationary matmul residency.
+
+    Besides assigning ``Vec``/``Mat``/``Left``/``Right``/``Acc`` and inserting
+    required moves, the pass hoists compiler-generated invariant GM→Mat matmul
+    operand chains across statically non-empty sequential loops. Hoisting is
+    caller- and alias-proven, capacity-gated, and never applies to user-authored
+    tile loads. Internal bridge provenance is consumed before the pass returns.
+    """
 
 def materialize_tensor_strides() -> Pass:
     """Create the MaterializeTensorStrides pass (RFC #1300 §2.4).

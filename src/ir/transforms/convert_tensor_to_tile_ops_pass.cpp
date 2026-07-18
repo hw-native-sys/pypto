@@ -36,6 +36,7 @@
 #include "pypto/ir/transforms/op_conversion_registry.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/tile_conversion_utils.h"
@@ -63,6 +64,13 @@ std::string MakeOutParamName(size_t index) {
 
 std::string MakeStoreResultName(size_t index) {
   return auto_name::BuildName("ret" + std::to_string(index), "", "store");
+}
+
+CallPtr MarkCompilerMatBridge(const CallPtr& call, MemorySpace space) {
+  if (!call || space != MemorySpace::Mat) return call;
+  auto marked = MutableCopy(call);
+  marked->attrs_.emplace_back(kCompilerTensorToTileMatBridgeAttr, true);
+  return marked;
 }
 
 bool IsPassthroughTensorOp(const CallPtr& call) {
@@ -654,8 +662,10 @@ class TensorToTileMutator : public TypePropagatingMutator {
     // The consumer-driven load is always natural; a transposed (b_trans/a_trans)
     // operand gets a zero-copy tile.transpose_view at the matmul site instead.
     std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", req.space}};
-    auto load_call = op_registry_.Create("tile.load", {input, offset_arg, shape_arg, valid_shapes},
-                                         load_kwargs, call->span_);
+    auto load_call =
+        MarkCompilerMatBridge(op_registry_.Create("tile.load", {input, offset_arg, shape_arg, valid_shapes},
+                                                  load_kwargs, call->span_),
+                              req.space);
 
     auto tile_name = MakeTileValueName(op->var_->name_hint_);
     auto tile_var = std::make_shared<Var>(tile_name, load_call->GetType(), op->var_->span_);
@@ -691,7 +701,8 @@ class TensorToTileMutator : public TypePropagatingMutator {
       auto offsets = MakeZeroOffsets(tensor_type->shape_.size(), call->span_);
       auto shapes = MakeShapeTuple(tensor_type->shape_, call->span_);
       std::vector<std::pair<std::string, std::any>> load_kw = {{"target_memory", space}};
-      auto load = op_registry_.Create("tile.load", {arg, offsets, shapes, shapes}, load_kw, call->span_);
+      auto load = MarkCompilerMatBridge(
+          op_registry_.Create("tile.load", {arg, offsets, shapes, shapes}, load_kw, call->span_), space);
       std::string var_name;
       if (auto var = As<Var>(arg)) {
         auto space_str = MemorySpaceToString(space);

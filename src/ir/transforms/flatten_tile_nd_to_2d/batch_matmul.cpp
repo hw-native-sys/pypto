@@ -407,7 +407,10 @@ BatchPageResult ExtractBatchPage(const BatchOperandInfo& info, const std::vector
     load_args.push_back(load_2d_offsets);
     load_args.push_back(load_2d_shape_tuple);
     load_args.push_back(load_2d_shape_tuple);
-    auto load_2d = op_registry.Create("tile.load", load_args, info.base_load->kwargs_, span);
+    auto deduced_load = op_registry.Create("tile.load", load_args, info.base_load->kwargs_, span);
+    auto load_2d =
+        std::make_shared<Call>(deduced_load->op_, deduced_load->args_, deduced_load->kwargs_,
+                               info.base_load->attrs_, deduced_load->GetType(), deduced_load->span_);
 
     // The source tensor view and load window are both collapsed to 2D here, so
     // codegen sees a regular 2D ND2NZ Mat load instead of a rank>2 source view.

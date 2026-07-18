@@ -73,6 +73,64 @@ class LoopCarriedAdd:
         return out
 
 
+@pl.program
+class StationaryMatmulLoop:
+    """Tensor-level QK loop whose LHS should become one resident Mat panel."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        lhs: pl.Tensor[[16, 128], pl.BF16],
+        rhs: pl.Tensor[[128, 256], pl.BF16],
+        output: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
+    ) -> pl.Tensor[[16, 256], pl.FP32]:
+        for n, (acc,) in pl.range(0, 256, 128, init_values=(output,)):
+            rhs_n: pl.Tensor[[128, 128], pl.BF16] = pl.slice(rhs, [128, 128], [0, n])
+            c_n: pl.Tensor[[16, 128], pl.FP32] = pl.matmul(lhs, rhs_n, out_dtype=pl.FP32)
+            acc_next: pl.Tensor[[16, 256], pl.FP32] = pl.assemble(acc, c_n, [0, n])
+            result = pl.yield_(acc_next)
+        return result
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        lhs: pl.Tensor[[16, 128], pl.BF16],
+        rhs: pl.Tensor[[128, 256], pl.BF16],
+        output: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
+    ) -> pl.Tensor[[16, 256], pl.FP32]:
+        result = self.kernel(lhs, rhs, output)
+        return result
+
+
+@pl.program
+class StationaryMatmulPipelinedK:
+    """A larger K creates a nested AutoTile pipeline under the user loop."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        lhs: pl.Tensor[[16, 512], pl.BF16],
+        rhs: pl.Tensor[[512, 256], pl.BF16],
+        output: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
+    ) -> pl.Tensor[[16, 256], pl.FP32]:
+        for n, (acc,) in pl.range(0, 256, 128, init_values=(output,)):
+            rhs_n: pl.Tensor[[512, 128], pl.BF16] = pl.slice(rhs, [512, 128], [0, n])
+            c_n: pl.Tensor[[16, 128], pl.FP32] = pl.matmul(lhs, rhs_n, out_dtype=pl.FP32)
+            acc_next: pl.Tensor[[16, 256], pl.FP32] = pl.assemble(acc, c_n, [0, n])
+            result = pl.yield_(acc_next)
+        return result
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        lhs: pl.Tensor[[16, 512], pl.BF16],
+        rhs: pl.Tensor[[512, 256], pl.BF16],
+        output: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
+    ) -> pl.Tensor[[16, 256], pl.FP32]:
+        result = self.kernel(lhs, rhs, output)
+        return result
+
+
 def _run_pipeline(
     memory_planner: passes.MemoryPlanner, program: ir.Program = ElementwiseAdd
 ) -> tuple[ir.Program, list[str]]:
@@ -194,6 +252,63 @@ def test_pypto_loop_carry_uses_shared_addr():
     addrs = [ln.split("addr =")[1].split()[0] for ln in alloc_lines if "addr =" in ln]
     # In level3 the loop-carry aliasing is carried by two allocs sharing an addr.
     assert len(addrs) != len(set(addrs)), f"PYPTO mode must alias the accumulator via a shared addr:\n{mlir}"
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+def test_stationary_matmul_loop_allocates_with_one_lhs_load(planner):
+    """Both planners accept the extended Mat/L0A lifetime and emit one LHS load."""
+    optimized, _ = _run_pipeline(planner, StationaryMatmulLoop)
+    printed = ir.python_print(optimized)
+    lines = printed.splitlines()
+    loop_line = next(i for i, line in enumerate(lines) if "for n" in line)
+    lhs_loads = [i for i, line in enumerate(lines) if "lhs__ssa_v0_mat" in line and "tile.load" in line]
+    lhs_left_moves = [
+        i for i, line in enumerate(lines) if "lhs__ssa_v0_mat_Left" in line and "tile.move" in line
+    ]
+    rhs_loads = [i for i, line in enumerate(lines) if "rhs_n__tile" in line and "tile.load" in line]
+
+    assert len(lhs_loads) == 1
+    assert len(lhs_left_moves) == 1
+    assert len(rhs_loads) == 1
+    assert lhs_loads[0] < loop_line
+    assert lhs_left_moves[0] < loop_line
+    assert rhs_loads[0] > loop_line
+
+    # Codegen is the end-to-end allocation gate. PyPTO must emit resolved
+    # addresses; PTOAS must retain auto-placement allocs for PlanMemory.
+    mlir = _codegen(optimized, emit_tile_addr=planner == passes.MemoryPlanner.PYPTO)
+    alloc_lines = [line for line in mlir.splitlines() if "pto.alloc_tile" in line]
+    assert alloc_lines
+    if planner == passes.MemoryPlanner.PYPTO:
+        assert all("addr =" in line for line in alloc_lines)
+    else:
+        assert all("addr =" not in line for line in alloc_lines)
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+def test_nested_autotile_pipeline_allocates_safely(planner):
+    """Future ping/pong expansion remains allocation-safe under either planner."""
+    optimized, _ = _run_pipeline(planner, StationaryMatmulPipelinedK)
+    printed = ir.python_print(optimized)
+    lines = printed.splitlines()
+    lhs_loads = [
+        index for index, line in enumerate(lines) if "lhs__ssa_v0_mat" in line and "tile.load" in line
+    ]
+    assert len(lhs_loads) == 1
+    user_loop = next(i for i, line in enumerate(lines) if "for n__idx" in line)
+    k_loop = next(i for i, line in enumerate(lines) if "for c_n__tile_l0_ko" in line)
+    lhs_extracts = [i for i, line in enumerate(lines) if "c_n__tile_l0_a" in line and "tile.extract" in line]
+    assert user_loop < lhs_loads[0] < k_loop
+    assert len(lhs_extracts) == 2
+    assert all(index > k_loop for index in lhs_extracts)
+
+    mlir = _codegen(optimized, emit_tile_addr=planner == passes.MemoryPlanner.PYPTO)
+    alloc_lines = [line for line in mlir.splitlines() if "pto.alloc_tile" in line]
+    assert alloc_lines
+    if planner == passes.MemoryPlanner.PYPTO:
+        assert all("addr =" in line for line in alloc_lines)
+    else:
+        assert all("addr =" not in line for line in alloc_lines)
 
 
 if __name__ == "__main__":

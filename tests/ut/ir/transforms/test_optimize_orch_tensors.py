@@ -2815,9 +2815,15 @@ class Program:
                             [16, 128],
                             [16, 128],
                             target_memory=pl.Mem.Mat,
+                            attrs={"__compiler_tensor_to_tile_mat_bridge": True},
                         )
                         tile_wk: pl.Tile[[128, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
-                            wk, [0, kv0], [128, 64], [128, 64], target_memory=pl.Mem.Mat
+                            wk,
+                            [0, kv0],
+                            [128, 64],
+                            [128, 64],
+                            target_memory=pl.Mem.Mat,
+                            attrs={"__compiler_tensor_to_tile_mat_bridge": True},
                         )
                         k_acc: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(tile_a, tile_wk)
                         for kb, (k_acc_iter,) in pl.range(1, 4, init_values=(k_acc,)):
@@ -2828,9 +2834,15 @@ class Program:
                                 [16, 128],
                                 [16, 128],
                                 target_memory=pl.Mem.Mat,
+                                attrs={"__compiler_tensor_to_tile_mat_bridge": True},
                             )
                             tile_wk_i: pl.Tile[[128, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
-                                wk, [k0, kv0], [128, 64], [128, 64], target_memory=pl.Mem.Mat
+                                wk,
+                                [k0, kv0],
+                                [128, 64],
+                                [128, 64],
+                                target_memory=pl.Mem.Mat,
+                                attrs={"__compiler_tensor_to_tile_mat_bridge": True},
                             )
                             k_acc_next: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(
                                 k_acc_iter, tile_a_i, tile_wk_i
@@ -2843,9 +2855,15 @@ class Program:
                             [16, 128],
                             [16, 128],
                             target_memory=pl.Mem.Mat,
+                            attrs={"__compiler_tensor_to_tile_mat_bridge": True},
                         )
                         tile_wv: pl.Tile[[128, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
-                            wv, [0, kv0], [128, 64], [128, 64], target_memory=pl.Mem.Mat
+                            wv,
+                            [0, kv0],
+                            [128, 64],
+                            [128, 64],
+                            target_memory=pl.Mem.Mat,
+                            attrs={"__compiler_tensor_to_tile_mat_bridge": True},
                         )
                         v_acc: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(tile_a_2, tile_wv)
                         for kb2, (v_acc_iter,) in pl.range(1, 4, init_values=(v_acc,)):
@@ -2856,6 +2874,7 @@ class Program:
                                 [16, 128],
                                 [16, 128],
                                 target_memory=pl.Mem.Mat,
+                                attrs={"__compiler_tensor_to_tile_mat_bridge": True},
                             )
                             tile_wv_i: pl.Tile[[128, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
                                 wv,
@@ -2863,6 +2882,7 @@ class Program:
                                 [128, 64],
                                 [128, 64],
                                 target_memory=pl.Mem.Mat,
+                                attrs={"__compiler_tensor_to_tile_mat_bridge": True},
                             )
                             v_acc_next: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(
                                 v_acc_iter, tile_a_i_2, tile_wv_i

@@ -24,6 +24,13 @@
 namespace pypto {
 namespace ir {
 
+/// Private provenance on every compiler-generated ``tile.load(GM -> Mat)``
+/// call introduced while bridging a Tensor operand to tile IR.
+/// ``InferTileMemorySpace`` consumes this evidence when deciding whether a
+/// stationary operand is eligible for loop residency; user-authored tile loads
+/// deliberately do not carry it.
+inline constexpr const char* kCompilerTensorToTileMatBridgeAttr = "__compiler_tensor_to_tile_mat_bridge";
+
 /// Attribute key for ``pl.pipeline(N, stage=F)`` — appears on ``ForStmt.attrs_``
 /// if and only if ``ForStmt.kind_ == ForKind::Pipeline`` (bidirectional invariant
 /// enforced by the structural verifier ``PipelineLoopValid``).
