@@ -2805,6 +2805,26 @@ class MarkedAssignedSyncResidency:
         assert self._line_index(printed, "lhs_left", "tile.move") > loop
         assert "__compiler_tensor_to_tile_mat_bridge" not in printed
 
+    def test_following_cross_core_op_keeps_residency_chain_inside_loop(self):
+        """Residency cannot cross a later iteration's cross-core transfer."""
+        body = (
+            "for n in pl.range(0, 2, 1):\n"
+            + textwrap.indent(self._marked_matmul_chain(), "    ")
+            + "    pl.tile.tpush_to_aiv(c, split=0)\n"
+        )
+        before = self._parse_marked_program(
+            self._basic_marked_params(),
+            "lhs, rhs, trips, out",
+            body,
+            fresh_param="lhs",
+            fresh_expr="pl.create_tensor([16, 128], dtype=pl.BF16)",
+        )
+        printed = ir.python_print(self._run_infer(before))
+        loop = self._line_index(printed, "for n")
+        assert self._line_index(printed, "tile.load(lhs") > loop
+        assert self._line_index(printed, "lhs_left", "tile.move") > loop
+        assert "__compiler_tensor_to_tile_mat_bridge" not in printed
+
     def test_following_helper_call_keeps_residency_chain_inside_loop(self):
         """A helper may hide synchronization and is an ordering boundary."""
         before = pl.parse_program(

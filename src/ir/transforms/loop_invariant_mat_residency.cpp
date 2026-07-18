@@ -145,7 +145,12 @@ bool IsLoopOrderingBoundaryCall(const CallPtr& call) {
   // speculative even when its declared writable roots are disjoint.
   if (!op_predicates::IsBuiltinOp(op_name)) return true;
   const auto& registry = OpRegistry::GetInstance();
-  return !registry.IsRegistered(op_name) || registry.GetEntry(op_name).GetOpCategory() == "SyncOp";
+  if (!registry.IsRegistered(op_name)) return true;
+  const auto& category = registry.GetEntry(op_name).GetOpCategory();
+  // Cross-core communication has iteration-ordering semantics just like an
+  // explicit fence.  A trailing tpush/tpop/tfree would otherwise let a load
+  // move across the previous iteration's FIFO handshake.
+  return category == "SyncOp" || category == "CrossCoreOp";
 }
 
 struct LoopResidencyInfo {
