@@ -105,15 +105,15 @@ The initial legality rules are intentionally strict:
 - the loop is `Sequential`, has constant bounds, positive step, and at least one iteration;
 - every moved assignment is an unconditional top-level loop-body statement;
 - the GM source is a direct `ParamDirection::In` tensor parameter on a compiler-marked Mat bridge load;
-- the InCore function has at least one analyzable in-program call site, and at every call site the candidate `Tensor In` actual root and every writable `Tensor Out` / `Tensor InOut` actual root are known;
-- at every call site, the candidate root is distinct from every writable root, and the InCore function does not write that root locally; unrelated scalars and peer read-only `Tensor In` roots do not participate in this proof;
+- the InCore function has at least one direct call site in a root orchestration function (an orchestration function with no in-program caller), and every call site to that InCore function is such a direct root-orchestration call;
+- at every direct root-orchestration call site, the candidate `Tensor In` actual root and every writable `Tensor Out` / `Tensor InOut` actual root are known and the candidate root is distinct from every writable root; the InCore function also does not write that root locally, while unrelated scalars and peer read-only `Tensor In` roots do not participate in this proof;
 - offsets, shapes, and the complete moved dependency prefix are loop invariant;
 - a direct control-flow or effect statement before the candidate closes the hoistable prefix;
 - no moved result is loop-carried or yielded;
 - all allocation-owning `Mat`, `Left`, and `Right` tiles in the function have static sizes, with their allocator-aligned whole-function upper bound no larger than the backend capacity; and
 - the function has no explicit reserved-buffer region whose capacity contribution is not represented as a tile allocation.
 
-`InOut` / `Out` sources, manual tile loads, direct or externally-entered InCore functions, unknown candidate or writable call-site roots, candidate/write aliases, conditional loads, dynamic or zero-trip loops, capacity-unknown cases, yielded or loop-carried results, and loop-dependent extracts decline without changing the IR. One unsafe call site invalidates the candidate even when other calls are safe. The capacity test counts allocation owners rather than zero-copy views or SSA aliases, uses the same byte sizing and address alignment as `InitMemRef` / `AllocateMemoryAddr`, and includes allocations already live outside the loop. A memory space containing allocations that later pipeline lowering may replicate is also declined unless the moved prefix stays in an unaffected space. This whole-function bound is deliberately stronger than either planner's lifetime reuse, so a residency rewrite cannot introduce a later capacity failure under the PyPTO or PTOAS planner. Nested invariant chains move one preheader at a time and can reach the outermost legal loop. This phase does not globally remap parameters and does not move K-dependent L0 extracts out of `AutoTileMatmulL0` pipeline loops.
+`InOut` / `Out` sources, manual tile loads, direct or externally-entered InCore functions, calls through InCore wrappers or called orchestration helpers, unknown candidate or writable call-site roots, candidate/write aliases, conditional loads, dynamic or zero-trip loops, capacity-unknown cases, yielded or loop-carried results, and loop-dependent extracts decline without changing the IR. One unsafe or non-root call site invalidates the candidate even when other calls are safe. Wrapper evidence is deliberately not propagated in this initial implementation: syntactically distinct wrapper parameters may alias at the wrapper's own caller. The capacity test counts allocation owners rather than zero-copy views or SSA aliases, uses the same byte sizing and address alignment as `InitMemRef` / `AllocateMemoryAddr`, and includes allocations already live outside the loop. A memory space containing allocations that later pipeline lowering may replicate is also declined unless the moved prefix stays in an unaffected space. This whole-function bound is deliberately stronger than either planner's lifetime reuse, so a residency rewrite cannot introduce a later capacity failure under the PyPTO or PTOAS planner. Nested invariant chains move one preheader at a time and can reach the outermost legal loop. This phase does not globally remap parameters and does not move K-dependent L0 extracts out of `AutoTileMatmulL0` pipeline loops.
 
 #### Residency example
 
@@ -138,7 +138,7 @@ for n, (acc,) in pl.range(0, 256, 128, init_values=(out,)):
     result = pl.yield_(pl.tile.store(c_n, [0, n], acc))
 ```
 
-The internal provenance attribute is omitted above for readability. The transformation requires an orchestration caller that proves the candidate `lhs` root is distinct from the writable `out` root. The peer read-only `rhs` root is irrelevant to that proof. Without the required caller evidence, the original loop-local placement is retained.
+The internal provenance attribute is omitted above for readability. The transformation requires a direct call from a root orchestration function that proves the candidate `lhs` root is distinct from the writable `out` root. The peer read-only `rhs` root is irrelevant to that proof. Without the required direct caller evidence, the original loop-local placement is retained.
 
 ## General memory-space inference example
 

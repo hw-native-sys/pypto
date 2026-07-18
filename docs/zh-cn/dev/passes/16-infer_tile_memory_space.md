@@ -105,15 +105,15 @@ program_inferred = infer_pass(program)
 - 循环必须为 `Sequential`，边界是常量，step 为正，且至少执行一次；
 - 被移动的赋值必须是循环体顶层、无条件执行的语句；
 - GM 源必须是方向为 `ParamDirection::In` 的直接 tensor 参数，且 load 带有编译器生成的 Mat bridge 标记；
-- InCore 函数必须至少有一个可分析的程序内调用点，并且每个调用点的候选 `Tensor In` 实参 root 与所有可写 `Tensor Out` / `Tensor InOut` 实参 root 都可解析；
-- 每个调用点的候选 root 都必须与所有可写 root 不同，InCore 函数自身也不能写入该 root；无关 scalar 和其他只读 `Tensor In` root 不参与该证明；
+- InCore 函数必须至少有一个来自 root orchestration 函数（即没有程序内调用者的 orchestration 函数）的直接调用点，并且该 InCore 函数的每个调用点都必须是这种 root-orchestration 直接调用；
+- 在每个 root-orchestration 直接调用点，候选 `Tensor In` 实参 root 与所有可写 `Tensor Out` / `Tensor InOut` 实参 root 都必须可解析，且候选 root 必须与每个可写 root 不同；InCore 函数自身也不能写入该 root，而无关 scalar 和其他只读 `Tensor In` root 不参与该证明；
 - offset、shape 以及整个被移动的依赖前缀都必须是循环不变量；
 - candidate 之前出现直接控制流或有副作用语句时，会关闭可提升前缀；
 - 被移动的结果不能是 loop-carried 值或 yield 值；
 - 函数中所有实际拥有分配的 `Mat`、`Left`、`Right` tile 都必须具有静态大小，且按分配器对齐后的全函数上界不得超过后端容量；
 - 函数中不得存在尚未表示为 tile 分配、因而无法计入容量的显式保留缓冲区区域。
 
-`InOut` / `Out` 源、手写 tile load、直接或从程序外进入的 InCore 函数、未知的候选或可写调用点 root、候选/写入别名、条件 load、动态或零次循环、容量未知的情形、被 yield 或循环携带的结果，以及依赖循环变量的 extract 都会安全拒绝并保持 IR 不变。即使其他调用安全，只要有一个调用点不安全也会使候选失效。容量检查只统计实际拥有分配的值，而不重复统计零拷贝 view 或 SSA 别名；它采用与 `InitMemRef` / `AllocateMemoryAddr` 相同的字节大小和地址对齐规则，并包含循环外已存活的分配。若某个 memory space 中的分配可能被后续 pipeline lowering 复制，也会拒绝该 space 的驻留，除非被移动的前缀位于不受影响的 space。该全函数上界刻意强于任一规划器的生命周期复用，因此 residency 重写不会在 PyPTO 或 PTOAS 规划器下引入后续容量失败。嵌套循环中的不变量链会逐层移动到 preheader，直至到达最外层合法循环。本阶段不会全局重映射参数，也不会把依赖 K 的 L0 extract 移出 `AutoTileMatmulL0` 的 pipeline 循环。
+`InOut` / `Out` 源、手写 tile load、直接或从程序外进入的 InCore 函数、经过 InCore wrapper 或被调用的 orchestration helper 的调用、未知的候选或可写调用点 root、候选/写入别名、条件 load、动态或零次循环、容量未知的情形、被 yield 或循环携带的结果，以及依赖循环变量的 extract 都会安全拒绝并保持 IR 不变。即使其他调用安全，只要有一个调用点不安全或不是 root 调用也会使候选失效。首版实现有意不传播 wrapper 证据：语法上不同的 wrapper 参数仍可能在 wrapper 自身的调用者处发生别名。容量检查只统计实际拥有分配的值，而不重复统计零拷贝 view 或 SSA 别名；它采用与 `InitMemRef` / `AllocateMemoryAddr` 相同的字节大小和地址对齐规则，并包含循环外已存活的分配。若某个 memory space 中的分配可能被后续 pipeline lowering 复制，也会拒绝该 space 的驻留，除非被移动的前缀位于不受影响的 space。该全函数上界刻意强于任一规划器的生命周期复用，因此 residency 重写不会在 PyPTO 或 PTOAS 规划器下引入后续容量失败。嵌套循环中的不变量链会逐层移动到 preheader，直至到达最外层合法循环。本阶段不会全局重映射参数，也不会把依赖 K 的 L0 extract 移出 `AutoTileMatmulL0` 的 pipeline 循环。
 
 #### 驻留示例
 
@@ -138,7 +138,7 @@ for n, (acc,) in pl.range(0, 256, 128, init_values=(out,)):
     result = pl.yield_(pl.tile.store(c_n, [0, n], acc))
 ```
 
-为便于阅读，上例省略了内部 provenance 属性。该转换需要 orchestration 调用者证明候选 `lhs` root 与可写 `out` root 不同；另一个只读 `rhs` root 与该证明无关。缺少所需调用者证据时，仍保留原来的循环内放置方式。
+为便于阅读，上例省略了内部 provenance 属性。该转换需要来自 root orchestration 函数的直接调用证明候选 `lhs` root 与可写 `out` root 不同；另一个只读 `rhs` root 与该证明无关。缺少所需的直接调用者证据时，仍保留原来的循环内放置方式。
 
 ## 通用 memory-space 推导示例
 

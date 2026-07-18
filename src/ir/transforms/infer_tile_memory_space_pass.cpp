@@ -1135,12 +1135,45 @@ struct ReadParamEvidence {
   bool all_sites_safe{true};
 };
 
+class InProgramCallTargetCollector : public IRVisitor {
+ public:
+  explicit InProgramCallTargetCollector(ProgramPtr program) : program_(std::move(program)) {}
+
+  [[nodiscard]] const std::unordered_set<const Function*>& GetCalledFunctions() const {
+    return called_functions_;
+  }
+
+ protected:
+  void VisitExpr_(const CallPtr& op) override {
+    RecordCallTarget(op);
+    IRVisitor::VisitExpr_(op);
+  }
+
+  void VisitExpr_(const SubmitPtr& op) override {
+    RecordCallTarget(transform_utils::AsCallOrSubmitView(op));
+    IRVisitor::VisitExpr_(op);
+  }
+
+ private:
+  ProgramPtr program_;
+  std::unordered_set<const Function*> called_functions_;
+
+  void RecordCallTarget(const CallPtr& call) {
+    if (!call || !call->op_ || !program_) return;
+    auto callee = program_->GetFunction(call->op_->name_);
+    if (callee) called_functions_.insert(callee.get());
+  }
+};
+
 class CallSiteReadSafetyCollector : public IRVisitor {
  public:
-  CallSiteReadSafetyCollector(ProgramPtr program,
+  CallSiteReadSafetyCollector(ProgramPtr program, bool caller_is_root_orchestration,
                               const std::unordered_map<const Var*, const Var*>& buffer_roots,
                               std::unordered_map<const Var*, ReadParamEvidence>* evidence)
-      : program_(std::move(program)), buffer_roots_(buffer_roots), evidence_(evidence) {}
+      : program_(std::move(program)),
+        caller_is_root_orchestration_(caller_is_root_orchestration),
+        buffer_roots_(buffer_roots),
+        evidence_(evidence) {}
 
  protected:
   void VisitExpr_(const CallPtr& op) override {
@@ -1155,6 +1188,7 @@ class CallSiteReadSafetyCollector : public IRVisitor {
 
  private:
   ProgramPtr program_;
+  bool caller_is_root_orchestration_;
   const std::unordered_map<const Var*, const Var*>& buffer_roots_;
   std::unordered_map<const Var*, ReadParamEvidence>* evidence_;
 
@@ -1169,6 +1203,24 @@ class CallSiteReadSafetyCollector : public IRVisitor {
     if (!call || !call->op_ || !program_) return;
     auto callee = program_->GetFunction(call->op_->name_);
     if (!callee || callee->func_type_ != FunctionType::InCore) return;
+
+    // Only a root orchestration call site is a trusted alias-proof boundary.
+    // Distinct helper/wrapper parameters may still alias at their unproven
+    // caller, so a non-root call must poison (not merely be ignored by) every
+    // Tensor In parameter it reaches.  This deliberately declines transitive
+    // helper evidence until the pass has an explicit provenance analysis.
+    if (!caller_is_root_orchestration_) {
+      for (size_t i = 0; i < callee->param_directions_.size(); ++i) {
+        if (callee->param_directions_[i] != ParamDirection::In ||
+            !As<TensorType>(callee->params_[i]->GetType())) {
+          continue;
+        }
+        auto& evidence = (*evidence_)[callee->params_[i].get()];
+        ++evidence.call_sites;
+        evidence.all_sites_safe = false;
+      }
+      return;
+    }
 
     std::unordered_set<const Var*> write_roots;
     bool all_write_roots_known = true;
@@ -1202,6 +1254,7 @@ class CallSiteReadSafetyCollector : public IRVisitor {
 std::unordered_set<const Var*> CollectProvenSafeReadParams(const ProgramPtr& program) {
   std::unordered_map<const Var*, ReadParamEvidence> evidence;
   for (const auto& [_, func] : program->functions_) {
+    if (!func || !func->body_) continue;
     if (func->func_type_ != FunctionType::InCore) continue;
     for (size_t i = 0; i < func->params_.size(); ++i) {
       if (func->param_directions_[i] == ParamDirection::In && As<TensorType>(func->params_[i]->GetType())) {
@@ -1209,15 +1262,27 @@ std::unordered_set<const Var*> CollectProvenSafeReadParams(const ProgramPtr& pro
       }
     }
   }
+
+  InProgramCallTargetCollector call_targets(program);
   for (const auto& [_, func] : program->functions_) {
+    if (!func || !func->body_) continue;
+    call_targets.VisitStmt(func->body_);
+  }
+  const auto& called_functions = call_targets.GetCalledFunctions();
+
+  for (const auto& [_, func] : program->functions_) {
+    if (!func || !func->body_) continue;
     buffer_root::BufferRootCollector roots(program);
     roots.Initialize(func->params_);
     roots.VisitStmt(func->body_);
-    CallSiteReadSafetyCollector calls(program, roots.buffer_roots, &evidence);
+    const bool is_root_orchestration =
+        func->func_type_ == FunctionType::Orchestration && called_functions.count(func.get()) == 0;
+    CallSiteReadSafetyCollector calls(program, is_root_orchestration, roots.buffer_roots, &evidence);
     calls.VisitStmt(func->body_);
   }
   std::unordered_set<const Var*> safe;
   for (const auto& [_, func] : program->functions_) {
+    if (!func || !func->body_) continue;
     if (func->func_type_ != FunctionType::InCore) continue;
     for (const auto& func_param : func->params_) {
       const auto* param = func_param.get();

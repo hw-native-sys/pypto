@@ -2079,7 +2079,6 @@ class TestLoopInvariantMatResidency:
     @staticmethod
     def _parse_marked_program(params: str, call_args: str, body: str):
         """Build a caller-backed InCore fixture with an arbitrary marked body."""
-        marker = "__compiler_tensor_to_tile_mat_bridge"
         source = f"""
 @pl.program
 class MarkedResidencyGate:
@@ -2101,9 +2100,14 @@ class MarkedResidencyGate:
 """
         program = pl.parse_program(source)
 
-        class _StampMatBridgeLoads(ir.IRMutator):
-            """Mirror ConvertTensorToTileOps: provenance-stamp every GM→Mat bridge."""
+        return TestLoopInvariantMatResidency._stamp_mat_bridge_loads(program)
 
+    @staticmethod
+    def _stamp_mat_bridge_loads(program):
+        """Mirror ConvertTensorToTileOps provenance on every GM-to-Mat bridge."""
+        marker = "__compiler_tensor_to_tile_mat_bridge"
+
+        class _StampMatBridgeLoads(ir.IRMutator):
             def visit_call(self, op):
                 expr = super().visit_call(op)
                 call = expr if isinstance(expr, ir.Call) else op
@@ -2125,6 +2129,59 @@ class MarkedResidencyGate:
                 return expr
 
         return _StampMatBridgeLoads().visit_program(program)
+
+    @staticmethod
+    def _parse_marked_wrapper_program(main_body: str | None, wrapper_type: str = "pl.FunctionType.InCore"):
+        """Build worker and wrapper call sites, optionally with an orchestration root."""
+        main = ""
+        if main_body is not None:
+            main = f"""
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        lhs: pl.Tensor[[16, 128], pl.BF16],
+        mutation: pl.InOut[pl.Tensor[[16, 128], pl.BF16]],
+        rhs: pl.Tensor[[128, 128], pl.BF16],
+        out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+    ) -> pl.Tensor[[16, 128], pl.FP32]:
+{textwrap.indent(textwrap.dedent(main_body).strip(), "        ")}
+        return result
+"""
+        program = pl.parse_program(
+            f"""
+@pl.program
+class MarkedWrapperResidency:
+    @pl.function(type=pl.FunctionType.InCore)
+    def worker(
+        self,
+        lhs: pl.Tensor[[16, 128], pl.BF16],
+        mutation: pl.InOut[pl.Tensor[[16, 128], pl.BF16]],
+        rhs: pl.Tensor[[128, 128], pl.BF16],
+        out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+    ) -> pl.Tensor[[16, 128], pl.FP32]:
+        for n in pl.range(0, 2, 1):
+            lhs_mat = pl.tile.load(lhs, [0, 0], [16, 128], target_memory=pl.Mem.Mat)
+            rhs_mat = pl.tile.load(rhs, [0, 0], [128, 128], target_memory=pl.Mem.Mat)
+            lhs_left = pl.tile.move(lhs_mat, target_memory=pl.Mem.Left)
+            rhs_right = pl.tile.move(rhs_mat, target_memory=pl.Mem.Right)
+            c = pl.tile.matmul(lhs_left, rhs_right)
+        return out
+
+    @pl.function(type={wrapper_type})
+    def wrapper(
+        self,
+        lhs: pl.Tensor[[16, 128], pl.BF16],
+        mutation: pl.InOut[pl.Tensor[[16, 128], pl.BF16]],
+        rhs: pl.Tensor[[128, 128], pl.BF16],
+        out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+    ) -> pl.Tensor[[16, 128], pl.FP32]:
+        result = self.worker(lhs, mutation, rhs, out)
+        return result
+{main}
+"""
+        )
+        return TestLoopInvariantMatResidency._stamp_mat_bridge_loads(program)
 
     @staticmethod
     def _marked_matmul_chain() -> str:
@@ -2351,6 +2408,96 @@ class MarkerOnlyScalarCall:
 
         printed = ir.python_print(self._run_tensor_infer(Before))
         assert self._line_index(printed, "lhs__ssa_v0_mat", "tile.load") > self._line_index(printed, "for n")
+
+    def test_direct_incore_wrapper_does_not_seed_worker_residency(self):
+        """Distinct wrapper parameters are not an external no-alias proof.
+
+        A direct caller may pass the same allocation for ``wrapper.lhs`` and
+        ``wrapper.mutation``.  The wrapper-to-worker call must therefore poison the
+        worker's read-parameter evidence instead of treating the two wrapper
+        parameter roots as proven distinct.
+        """
+        before = self._parse_marked_wrapper_program(main_body=None)
+        printed = ir.python_print(self._run_infer(before))
+        assert self._line_index(printed, "tile.load(lhs") > self._line_index(printed, "for n")
+        assert "__compiler_tensor_to_tile_mat_bridge" not in printed
+
+    def test_orchestration_through_incore_wrapper_declines_worker_residency(self):
+        """Alias evidence is intentionally direct, not propagated through wrappers."""
+        before = self._parse_marked_wrapper_program(
+            """
+result = self.wrapper(lhs, mutation, rhs, out)
+"""
+        )
+        printed = ir.python_print(self._run_infer(before))
+        assert self._line_index(printed, "tile.load(lhs") > self._line_index(printed, "for n")
+        assert "__compiler_tensor_to_tile_mat_bridge" not in printed
+
+    def test_called_orchestration_helper_does_not_seed_worker_residency(self):
+        """Only root orchestration functions establish a trusted alias boundary."""
+        before = self._parse_marked_wrapper_program(
+            """
+result = self.wrapper(mutation, mutation, rhs, out)
+""",
+            wrapper_type="pl.FunctionType.Orchestration",
+        )
+        printed = ir.python_print(self._run_infer(before))
+        assert self._line_index(printed, "tile.load(lhs") > self._line_index(printed, "for n")
+        assert "__compiler_tensor_to_tile_mat_bridge" not in printed
+
+    def test_safe_direct_call_and_incore_wrapper_call_decline_worker_residency(self):
+        """One non-orchestration site invalidates otherwise-safe direct evidence."""
+        before = self._parse_marked_wrapper_program(
+            """
+result = self.worker(lhs, mutation, rhs, out)
+"""
+        )
+        printed = ir.python_print(self._run_infer(before))
+        assert self._line_index(printed, "tile.load(lhs") > self._line_index(printed, "for n")
+        assert "__compiler_tensor_to_tile_mat_bridge" not in printed
+
+    def test_safe_call_and_aliasing_submit_decline_worker_residency(self):
+        """An unsafe Submit poisons otherwise-safe direct Call evidence."""
+        before = pl.parse_program(
+            """
+@pl.program
+class MarkedSubmitResidency:
+    @pl.function(type=pl.FunctionType.InCore)
+    def worker(
+        self,
+        lhs: pl.Tensor[[16, 128], pl.BF16],
+        mutation: pl.InOut[pl.Tensor[[16, 128], pl.BF16]],
+        rhs: pl.Tensor[[128, 128], pl.BF16],
+        out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+    ) -> pl.Tensor[[16, 128], pl.FP32]:
+        for n in pl.range(0, 2, 1):
+            lhs_mat = pl.tile.load(lhs, [0, 0], [16, 128], target_memory=pl.Mem.Mat)
+            rhs_mat = pl.tile.load(rhs, [0, 0], [128, 128], target_memory=pl.Mem.Mat)
+            lhs_left = pl.tile.move(lhs_mat, target_memory=pl.Mem.Left)
+            rhs_right = pl.tile.move(rhs_mat, target_memory=pl.Mem.Right)
+            c = pl.tile.matmul(lhs_left, rhs_right)
+        return out
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        safe_lhs: pl.Tensor[[16, 128], pl.BF16],
+        safe_mutation: pl.InOut[pl.Tensor[[16, 128], pl.BF16]],
+        shared: pl.InOut[pl.Tensor[[16, 128], pl.BF16]],
+        rhs: pl.Tensor[[128, 128], pl.BF16],
+        safe_out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+        submit_out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+    ) -> pl.Tensor[[16, 128], pl.FP32]:
+        _safe = self.worker(safe_lhs, safe_mutation, rhs, safe_out)
+        with pl.manual_scope():
+            result, _tid = pl.submit(self.worker, shared, shared, rhs, submit_out)
+        return result
+"""
+        )
+        before = self._stamp_mat_bridge_loads(before)
+        printed = ir.python_print(self._run_infer(before))
+        assert self._line_index(printed, "tile.load(lhs") > self._line_index(printed, "for n")
+        assert "__compiler_tensor_to_tile_mat_bridge" not in printed
 
     def test_multiple_proven_safe_call_sites_allow_residency(self):
         """Every caller may use different roots as long as each is provably disjoint."""
