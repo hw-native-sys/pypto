@@ -1430,6 +1430,7 @@ def _run_config_compile_kwargs(run_config: Any) -> dict[str, Any]:
         "memory_planner": run_config.memory_planner,
         "dsa_export_dir": run_config.dsa_export_dir,
         "dsa_solution_dir": run_config.dsa_solution_dir,
+        "dsa_reuse_penalty_recognizer": run_config.dsa_reuse_penalty_recognizer,
         "ptoas_sync_summary_dir": run_config.ptoas_sync_summary_dir,
     }
     if run_config.save_kernels_dir is not None:
@@ -1492,6 +1493,16 @@ def _resolve_dsa_solution_dir(run_config: Any) -> str | None:
         return run_config.dsa_solution_dir
     ctx = _passes.PassContext.current()
     return ctx.get_dsa_solution_dir() if ctx is not None else None
+
+
+def _resolve_dsa_reuse_penalty_recognizer(run_config: Any) -> _passes.DsaReusePenaltyRecognizer:
+    """Resolve the recognizer because it changes exported costs and placement."""
+    if run_config is not None and run_config.dsa_reuse_penalty_recognizer is not None:
+        return run_config.dsa_reuse_penalty_recognizer
+    ctx = _passes.PassContext.current()
+    if ctx is not None:
+        return ctx.get_dsa_reuse_penalty_recognizer()
+    return _passes.DsaReusePenaltyRecognizer.DISABLED
 
 
 # ---------------------------------------------------------------------------
@@ -2046,6 +2057,7 @@ class JITFunction:
             memory_planner=memory_planner,
             enable_pypto_l0c_double_buffer=_resolve_enable_pypto_l0c_double_buffer(),
             dsa_solution_dir=_resolve_dsa_solution_dir(run_config),
+            dsa_reuse_penalty_recognizer=_resolve_dsa_reuse_penalty_recognizer(run_config),
             ptoas_sync_summary_dir=(run_config.ptoas_sync_summary_dir if run_config is not None else None),
         )
 
@@ -2456,6 +2468,7 @@ class JITFunction:
             memory_planner=_resolve_memory_planner(None),
             enable_pypto_l0c_double_buffer=_resolve_enable_pypto_l0c_double_buffer(),
             dsa_solution_dir=_resolve_dsa_solution_dir(None),
+            dsa_reuse_penalty_recognizer=_resolve_dsa_reuse_penalty_recognizer(None),
             ptoas_sync_summary_dir=None,
         )
 

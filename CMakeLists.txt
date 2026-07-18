@@ -314,7 +314,9 @@ set(PYPTO_SOURCES
 )
 
 if(PYPTO_ENABLE_DSA_SOLVER)
-    list(APPEND PYPTO_SOURCES src/ir/transforms/dsa/memref_dsa_adapter.cpp)
+    list(APPEND PYPTO_SOURCES
+        src/ir/transforms/dsa/memref_dsa_adapter.cpp
+        src/ir/transforms/dsa/reuse_penalty_recognizer.cpp)
 endif()
 
 # Include Python bindings

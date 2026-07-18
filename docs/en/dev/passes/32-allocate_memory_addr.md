@@ -88,6 +88,7 @@ with passes.PassContext(
     [],
     memory_planner=passes.MemoryPlanner.DSA,
     dsa_export_dir="build/dsa-corpus",
+    dsa_reuse_penalty_recognizer=passes.DsaReusePenaltyRecognizer.LINEAR,
 ):
     program_with_addrs = passes.allocate_memory_addr()(program)
 ```
@@ -99,6 +100,18 @@ dsa_export_dir="build/dsa-corpus")`.
 `dsa_solution_dir` to replay a recorded placement rather than invoking the
 solver. The placement is accepted only when its fingerprint matches the freshly
 exported problem and independent validation succeeds. The
+experimental `dsa_reuse_penalty_recognizer` is disabled by default. `LINEAR`
+recognizes only adjacent, full-allocation handoffs in one flat region;
+`QUADRATIC` scans compatible pairs within each simple region, including nested
+regions, as a research reference. Both
+use the same provisional PTO operation classification and record whether the
+physical handoff is WAR or WAW. The experimental v1 promotion policy turns
+cross-pipe candidates into unit-weight pair edges; same-pipe candidates remain
+report-only. Nested candidates are also report-only. Weight calibration remains
+a separate modeling step. Unsupported operations, views, aliases, and
+control-flow-crossing handoffs are left unpriced.
+
+The
 system-test harness additionally accepts `--memory-planner=dsa` and
 `--dsa-export-dir=...` for suite-wide device validation and corpus capture, or
 `--dsa-solution-dir=...` for exact A/B placement replay. Add
@@ -153,17 +166,25 @@ When `MemoryPlanner.DSA` is active, step 4 is replaced by this guarded path:
    separation retains its typed source.
 5. Retain normalized alias-class members and pipeline group/stage/residue data.
    This provenance does not change placement by itself.
-6. Validate the strict schema/profile and try deterministic first-fit followed
+6. When explicitly enabled, recognize potential false physical dependencies.
+   The near-linear mode indexes terminal accesses by `(region, statement)` and
+   checks only the next statement. The quadratic reference checks all
+   lifetime-compatible pairs and removes pairs already ordered by transitive SSA
+   dependence. A supported terminal read or write followed by an unordered
+   initial write becomes a WAR or WAW candidate. The separate experimental v1
+   policy promotes cross-pipe candidates to unit `cross_pipe` edges and records
+   same-pipe candidates without pricing them.
+7. Validate the strict schema/profile and try deterministic first-fit followed
    by bounded PyPTO-structured search. If no capacity-fitting placement is
    found, remove only the `pipeline_stage` reason, retain every correctness
    reason, add unit `pipeline_serialization` penalties, and solve the explicit
    research relaxation.
-7. Validate
+8. Validate
    every placement independently against sizes, alignment, lifetimes, pools,
    capacities, reserved ranges, and separations. Revalidate a relaxed solution
    against the strict problem to avoid warning when relaxed search happens to
    discover a strict-valid placement.
-8. Write each placement back while preserving every view's relative byte
+9. Write each placement back while preserving every view's relative byte
    offset. Emit `PH-DSA-001` when the final placement actually relaxes pipeline
    intent.
 

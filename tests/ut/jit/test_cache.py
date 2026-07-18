@@ -17,12 +17,13 @@ from pypto.jit.cache import (
     make_cache_key,
 )
 from pypto.jit.decorator import (
+    _resolve_dsa_reuse_penalty_recognizer,
     _resolve_dsa_solution_dir,
     _resolve_enable_pypto_l0c_double_buffer,
     _resolve_memory_planner,
 )
 from pypto.pypto_core import DataType, ir, passes
-from pypto.pypto_core.passes import MemoryPlanner
+from pypto.pypto_core.passes import DsaReusePenaltyRecognizer, MemoryPlanner
 from pypto.runtime import RunConfig
 
 
@@ -71,6 +72,7 @@ class TestMakeCacheKey:
         tensor_layouts=None,
         dep_layouts=(),
         dsa_solution_dir=None,
+        dsa_reuse_penalty_recognizer=None,
         ptoas_sync_summary_dir=None,
     ):
         return make_cache_key(
@@ -89,6 +91,7 @@ class TestMakeCacheKey:
             tensor_layouts=tensor_layouts,
             dep_layouts=dep_layouts,
             dsa_solution_dir=dsa_solution_dir,
+            dsa_reuse_penalty_recognizer=dsa_reuse_penalty_recognizer,
             ptoas_sync_summary_dir=ptoas_sync_summary_dir,
         )
 
@@ -113,6 +116,7 @@ class TestMakeCacheKey:
             ("enable_pypto_l0c_double_buffer", False),
             ("dep_layouts", ()),
             ("dsa_solution_dir", None),
+            ("dsa_reuse_penalty_recognizer", None),
             ("ptoas_sync_summary_dir", None),
         )
 
@@ -421,6 +425,11 @@ class TestMakeCacheKey:
         key_b = self._make_key(dsa_solution_dir="/tmp/placement-b")
         assert key_a != key_b
 
+    def test_dsa_reuse_recognizer_splits_key(self):
+        key_linear = self._make_key(dsa_reuse_penalty_recognizer=DsaReusePenaltyRecognizer.LINEAR)
+        key_quadratic = self._make_key(dsa_reuse_penalty_recognizer=DsaReusePenaltyRecognizer.QUADRATIC)
+        assert key_linear != key_quadratic
+
 
 class TestResolveMemoryPlanner:
     """The planner the JIT keys on must match the one ``ir.compile()`` will use."""
@@ -468,6 +477,18 @@ class TestResolveDsaSolutionDir:
         assert _resolve_dsa_solution_dir(cfg) == "/tmp/config-solutions"
         with passes.PassContext([], dsa_solution_dir="/tmp/context-solutions"):
             assert _resolve_dsa_solution_dir(None) == "/tmp/context-solutions"
+
+
+class TestResolveDsaReusePenaltyRecognizer:
+    def test_defaults_to_disabled(self):
+        assert _resolve_dsa_reuse_penalty_recognizer(None) == DsaReusePenaltyRecognizer.DISABLED
+
+    def test_run_config_wins_and_unset_config_defers_to_context(self):
+        explicit = RunConfig(dsa_reuse_penalty_recognizer=DsaReusePenaltyRecognizer.LINEAR)
+        unset = RunConfig()
+        with passes.PassContext([], dsa_reuse_penalty_recognizer=DsaReusePenaltyRecognizer.QUADRATIC):
+            assert _resolve_dsa_reuse_penalty_recognizer(explicit) == DsaReusePenaltyRecognizer.LINEAR
+            assert _resolve_dsa_reuse_penalty_recognizer(unset) == DsaReusePenaltyRecognizer.QUADRATIC
 
 
 if __name__ == "__main__":

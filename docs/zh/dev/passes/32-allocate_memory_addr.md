@@ -82,6 +82,7 @@ with passes.PassContext(
     [],
     memory_planner=passes.MemoryPlanner.DSA,
     dsa_export_dir="build/dsa-corpus",
+    dsa_reuse_penalty_recognizer=passes.DsaReusePenaltyRecognizer.LINEAR,
 ):
     program_with_addrs = passes.allocate_memory_addr()(program)
 ```
@@ -91,7 +92,15 @@ with passes.PassContext(
 dsa_export_dir="build/dsa-corpus")`。
 `RunConfig` 也暴露 `memory_planner` 和 `dsa_export_dir` 字段。设置
 `dsa_solution_dir` 可跳过求解并回放已记录的 placement；只有当 fingerprint
-与当前重新导出的问题完全匹配且独立验证通过时才会接受。system-test harness
+与当前重新导出的问题完全匹配且独立验证通过时才会接受。实验性的
+`dsa_reuse_penalty_recognizer` 默认关闭。`LINEAR` 只识别同一平坦区域中相邻的
+完整分配交接；`QUADRATIC` 作为研究基线，在每个简单 region 内扫描可复用 buffer
+对，包括嵌套 region。两者共享临时的
+PTO 操作分类，并记录物理交接属于 WAR 还是 WAW。实验性的 v1 promotion policy 只把
+cross-pipe candidate 转换成单位权重 pair edge；same-pipe 和嵌套 candidate 仅记录
+而不定价。
+权重标定属于独立建模问题。不支持的操作、view、alias 和跨控制流交接不会被猜测
+定价。system-test harness
 支持 `--memory-planner=dsa`、`--dsa-export-dir=...` 以及用于精确 A/B 回放的
 `--dsa-solution-dir=...`。使用 `--ptoas-sync-summary-dir=...` 可为每个代码
 生成单元保存一份机器可读的 PTOAS InsertSync JSONL 摘要，从而比较两个有效
@@ -137,14 +146,19 @@ intent 无法 fit，adapter 会显式创建 cost-aware `pypto_research_v1` relax
    hard-separated；每条 separation 都保留其类型化来源。
 5. 保留规范化的 alias class 成员和 pipeline group/stage/residue 数据。provenance
    本身不改变 placement。
-6. 验证 strict schema/profile，先尝试 deterministic first-fit，再尝试 bounded
+6. 显式启用时识别潜在的错误物理依赖。近线性模式按 `(region, statement)` 索引
+   末次访问并只检查下一条语句；二次参考模式检查所有 lifetime 可复用对，并删除
+   已被传递 SSA 依赖排序的 pair。受支持的末次读写后若出现未排序的首次写入，就
+   记录 WAR 或 WAW candidate。独立的实验性 v1 policy 只把 cross-pipe candidate
+   转换成单位权重 `cross_pipe` edge；same-pipe candidate 仅记录而不定价。
+7. 验证 strict schema/profile，先尝试 deterministic first-fit，再尝试 bounded
    PyPTO-structured search。若未找到 capacity-fitting placement，则只删除
    `pipeline_stage` reason，保留所有 correctness reason，增加单位
    `pipeline_serialization` penalty，并求解显式 research relaxation。
-7. 针对大小、对齐、生命周期、pool、容量、reserved range 和 separation 独立验证
+8. 针对大小、对齐、生命周期、pool、容量、reserved range 和 separation 独立验证
    每个 placement。relaxed solution 还会依据 strict problem 再次验证，避免 relaxed
    search 偶然找到 strict-valid placement 时产生 warning。
-8. 写回 placement，同时保留每个 view 的相对 byte offset。仅当最终 placement
+9. 写回 placement，同时保留每个 view 的相对 byte offset。仅当最终 placement
    确实放松 pipeline intent 时发出 `PH-DSA-001`。
 
 版本 1 adapter 刻意保持 pool assignment 固定。strict problem 在 capacity 下最小化

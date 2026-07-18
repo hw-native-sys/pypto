@@ -164,6 +164,14 @@ void BindPass(nb::module_& m) {
       .value("PTOAS", MemoryPlanner::PtoAS,
              "Skip pypto allocation passes; ptoas PlanMemory allocates (--pto-level=level2)");
 
+  nb::enum_<DsaReusePenaltyRecognizer>(passes, "DsaReusePenaltyRecognizer",
+                                       "Selects experimental DSA soft-edge recognition")
+      .value("DISABLED", DsaReusePenaltyRecognizer::Disabled, "Do not recognize soft reuse edges")
+      .value("LINEAR", DsaReusePenaltyRecognizer::Linear,
+             "Recognize adjacent supported allocation handoffs in O(N log N)")
+      .value("QUADRATIC", DsaReusePenaltyRecognizer::Quadratic,
+             "Research reference over all lifetime-compatible allocation pairs");
+
   passes.def(
       "is_dsa_solver_available",
       []() {
@@ -290,13 +298,15 @@ void BindPass(nb::module_& m) {
                           "verification and the diagnostic channel (warnings + performance\n"
                           "hints) for PassPipeline.")
       .def(nb::init<std::vector<PassInstrumentPtr>, VerificationLevel, DiagnosticPhase, DiagnosticCheckSet,
-                    MemoryPlanner, bool, std::optional<std::string>, std::optional<std::string>>(),
+                    MemoryPlanner, bool, std::optional<std::string>, std::optional<std::string>,
+                    DsaReusePenaltyRecognizer>(),
            nb::arg("instruments"), nb::arg("verification_level") = VerificationLevel::Basic,
            nb::arg("diagnostic_phase") = DiagnosticPhase::PrePipeline,
            nb::arg("disabled_diagnostics") = DiagnosticCheckSet{DiagnosticCheck::UnusedControlFlowResult},
            nb::arg("memory_planner") = MemoryPlanner::PyPTO,
            nb::arg("enable_pypto_l0c_double_buffer") = false, nb::arg("dsa_export_dir") = nb::none(),
            nb::arg("dsa_solution_dir") = nb::none(),
+           nb::arg("dsa_reuse_penalty_recognizer") = DsaReusePenaltyRecognizer::Disabled,
            "Create a PassContext with instruments, verification level, diagnostic phase gate, "
            "optional disabled diagnostic checks, memory planner selection, the experimental "
            "PyPTO-planner L0C double-buffer opt-in, DSA export directory, and DSA solution replay "
@@ -322,6 +332,8 @@ void BindPass(nb::module_& m) {
            "Get the optional standalone DSA corpus export directory")
       .def("get_dsa_solution_dir", &PassContext::GetDsaSolutionDir,
            "Get the optional standalone DSA placement replay directory")
+      .def("get_dsa_reuse_penalty_recognizer", &PassContext::GetDsaReusePenaltyRecognizer,
+           "Get the experimental DSA soft-edge recognizer")
       .def_static("current", &PassContext::Current, nb::rv_policy::reference,
                   "Get the currently active context, or None if no context is active");
 
