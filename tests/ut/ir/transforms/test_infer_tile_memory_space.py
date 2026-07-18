@@ -2825,6 +2825,54 @@ class MarkedAssignedSyncResidency:
         assert self._line_index(printed, "lhs_left", "tile.move") > loop
         assert "__compiler_tensor_to_tile_mat_bridge" not in printed
 
+    def test_iter_initializer_helper_keeps_residency_chain_inside_loop(self):
+        """Residency cannot move before an ordering effect in a loop initializer."""
+        before = pl.parse_program(
+            """
+@pl.program
+class MarkedIterInitializerResidency:
+    @pl.function(type=pl.FunctionType.InCore)
+    def barrier(
+        self,
+        seed: pl.Tensor[[16, 128], pl.FP32],
+    ) -> pl.Tensor[[16, 128], pl.FP32]:
+        fence = pl.system.fence()
+        return seed
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def worker(
+        self,
+        lhs: pl.Tensor[[16, 128], pl.BF16],
+        rhs: pl.Tensor[[128, 128], pl.BF16],
+        seed: pl.Tensor[[16, 128], pl.FP32],
+    ) -> pl.Tensor[[16, 128], pl.FP32]:
+        for n, (carry,) in pl.range(0, 2, 1, init_values=(self.barrier(seed),)):
+            lhs_mat = pl.tile.load(lhs, [0, 0], [16, 128], target_memory=pl.Mem.Mat)
+            rhs_mat = pl.tile.load(rhs, [0, 0], [128, 128], target_memory=pl.Mem.Mat)
+            lhs_left = pl.tile.move(lhs_mat, target_memory=pl.Mem.Left)
+            rhs_right = pl.tile.move(rhs_mat, target_memory=pl.Mem.Right)
+            c = pl.tile.matmul(lhs_left, rhs_right)
+            result = pl.yield_(seed)
+        return result
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        rhs: pl.Tensor[[128, 128], pl.BF16],
+        seed: pl.Tensor[[16, 128], pl.FP32],
+    ) -> pl.Tensor[[16, 128], pl.FP32]:
+        fresh_lhs = pl.create_tensor([16, 128], dtype=pl.BF16)
+        result = self.worker(fresh_lhs, rhs, seed)
+        return result
+"""
+        )
+        before = self._stamp_mat_bridge_loads(before)
+        printed = ir.python_print(self._run_infer(before))
+        loop = self._line_index(printed, "for n")
+        assert self._line_index(printed, "tile.load(lhs") > loop
+        assert self._line_index(printed, "lhs_left", "tile.move") > loop
+        assert "__compiler_tensor_to_tile_mat_bridge" not in printed
+
     def test_following_helper_call_keeps_residency_chain_inside_loop(self):
         """A helper may hide synchronization and is an ordering boundary."""
         before = pl.parse_program(

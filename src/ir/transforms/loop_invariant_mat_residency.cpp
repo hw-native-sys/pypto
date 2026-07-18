@@ -293,12 +293,20 @@ class LoopResidencyInventory : public IRVisitor {
     info.preorder = next_order_++;
 
     current_loop_ = op.get();
+    // This visitor replaces the base ForStmt traversal, so visit the header
+    // expressions explicitly while the child loop is current.  Otherwise an
+    // effectful iter-arg initializer (or a nested loop bound) is invisible to
+    // the ordering analysis and a body load could move ahead of it.
+    if (op->start_) VisitExpr(op->start_);
+    if (op->stop_) VisitExpr(op->stop_);
+    if (op->step_) VisitExpr(op->step_);
     const bool is_pipeline = op->kind_ == ForKind::Pipeline;
     if (is_pipeline) ++pipeline_depth_;
     if (op->loop_var_) defining_loop_[op->loop_var_.get()] = op.get();
     for (const auto& iter_arg : op->iter_args_) {
       if (!iter_arg) continue;
       defining_loop_[iter_arg.get()] = op.get();
+      if (iter_arg->initValue_) VisitExpr(iter_arg->initValue_);
     }
     VisitStmt(op->body_);
     if (is_pipeline) --pipeline_depth_;

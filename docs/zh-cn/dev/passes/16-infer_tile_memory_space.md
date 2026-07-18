@@ -110,7 +110,7 @@ program_inferred = infer_pass(program)
 - InCore 函数必须至少有一个来自 root orchestration 函数（即没有程序内调用者的 orchestration 函数）的直接 `Call`，并且该 InCore 函数的每个调用点都必须是这种 root-orchestration 直接 `Call`；`Submit` 调用点总会使候选失效，因为异步提交不能作为正向别名证据；
 - 在每个此类调用点，候选 `Tensor In` 实参必须解析到由 `tensor.create` 创建、归编译器所有的分配；普通别名以及 `tensor.slice` / `tensor.assemble` / `tensor.view` 别名会规范化到该存储 root，所有可写 `Tensor Out` / `Tensor InOut` root 都必须已知且均不得与候选 root 重叠；InCore 函数自身也不能写入该 root，而无关 scalar 和其他只读 `Tensor In` root 不参与此过滤；
 - offset、shape 以及整个被移动的依赖前缀都必须是循环不变量；
-- 循环子树内出现任何函数调用、任务提交、跨核操作、同步、缓存维护或未知 builtin 时都会拒绝驻留，因为移动到 preheader 可能使 load 在迭代之间越过未知或隐藏的顺序效应；其他直接控制流或有副作用语句若出现在 candidate 之前，则会关闭可提升前缀；
+- 循环头（边界或 loop-carried 初始值）或循环体子树内出现任何函数调用、任务提交、跨核操作、同步、缓存维护或未知 builtin 时都会拒绝驻留，因为移动到 preheader 可能使 load 在迭代之间越过未知或隐藏的顺序效应；其他直接控制流或有副作用语句若出现在 candidate 之前，则会关闭可提升前缀；
 - 链中每个值只能有预期的单一语法使用；普通 SSA 别名、`Submit` 实参、嵌套表达式、循环初始值、yield、return 以及额外的 call 实参都计为使用，因此会使候选失效；
 - 被移动的结果不能是 loop-carried 值或 yield 值；
 - 函数中所有实际拥有分配的 `Mat`、`Left`、`Right` tile 都必须具有静态大小，且按分配器对齐后的全函数上界不得超过后端容量；
