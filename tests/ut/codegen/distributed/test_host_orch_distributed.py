@@ -739,7 +739,7 @@ def test_backend_materializes_ring_allreduce_builtin_next_level_files(tmp_path):
     assert "submit_allreduce_ring_kernel<ReduceOp::kSum, float>" in entry_cpp
 
     kernel_cpp = files[f"{base}/kernels/aiv/builtin_tensor_allreduce_ring__sum__fp32_kernel.cpp"]
-    assert "RoundBarrier" in kernel_cpp
+    assert "NeighborBarrier" in kernel_cpp
     assert "signal_rows" in kernel_cpp
 
 
@@ -998,6 +998,8 @@ def _assert_host_collective_next_level_files(program_cls, tmp_path, variant, sig
 @pytest.mark.parametrize(
     ("package_name", "variant"),
     [
+        ("allreduce", "builtin.tensor.allreduce__sum__fp32"),
+        ("allreduce_ring", "builtin.tensor.allreduce_ring__sum__fp32"),
         ("barrier", "builtin.tensor.barrier__fp32"),
         ("broadcast", "builtin.tensor.broadcast__root0__fp32"),
         ("reduce_scatter", "builtin.tensor.reduce_scatter__sum__fp32"),

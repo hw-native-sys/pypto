@@ -42,7 +42,7 @@
 namespace {
 
 static constexpr int kMaxSupportedRanks = 16;
-static constexpr int64_t kMaxChunkElems = 256;
+static constexpr int64_t kTileCount = 256;
 
 template <typename T>
 AICORE inline __gm__ T *CommRemotePtr(__gm__ CommContext *ctx, __gm__ T *local_ptr, int pe) {
@@ -51,24 +51,21 @@ AICORE inline __gm__ T *CommRemotePtr(__gm__ CommContext *ctx, __gm__ T *local_p
   return reinterpret_cast<__gm__ T *>(ctx->windowsIn[pe] + offset);
 }
 
-// Per-round barrier row: AtomicAdd(0→1) / WaitGe(1), single-shot per row.
-AICORE inline void RoundBarrier(__gm__ CommContext *ctx, __gm__ int32_t *signal_row, int my_rank,
-                                int nranks) {
-  for (int peer = 0; peer < nranks; ++peer) {
-    if (peer == my_rank) {
-      continue;
-    }
-    __gm__ int32_t *remote_signal = CommRemotePtr(ctx, signal_row + my_rank, peer);
-    pto::comm::Signal sig(remote_signal);
-    pto::comm::TNOTIFY(sig, static_cast<int32_t>(1), pto::comm::NotifyOp::AtomicAdd);
-  }
-  for (int peer = 0; peer < nranks; ++peer) {
-    if (peer == my_rank) {
-      continue;
-    }
-    pto::comm::Signal sig(signal_row + peer);
-    pto::comm::TWAIT(sig, static_cast<int32_t>(1), pto::comm::WaitCmp::GE);
-  }
+// Per-round neighbor barrier for ring topology.
+// Rank r TLOADs from left = (r-1)%P; right = (r+1)%P TLOADs from r.
+// Each rank notifies its right neighbor (who reads from this rank's chunks)
+// and waits on its left neighbor (whose chunks this rank reads from).
+// Signal rows used exactly once (AtomicAdd 0→1, TWAIT GE 1).
+AICORE inline void
+NeighborBarrier(__gm__ CommContext *ctx, __gm__ int32_t *signal_row, int my_rank, int left, int nranks) {
+  int right = (my_rank + 1) % nranks;
+  // Notify right neighbor: "my chunks are ready for your TLOAD."
+  __gm__ int32_t *remote_signal = CommRemotePtr(ctx, signal_row + my_rank, right);
+  pto::comm::Signal sig_out(remote_signal);
+  pto::comm::TNOTIFY(sig_out, static_cast<int32_t>(1), pto::comm::NotifyOp::AtomicAdd);
+  // Wait on left neighbor: "I need your chunks for my TLOAD."
+  pto::comm::Signal sig_in(signal_row + left);
+  pto::comm::TWAIT(sig_in, static_cast<int32_t>(1), pto::comm::WaitCmp::GE);
   pipe_barrier(PIPE_ALL);
 }
 
@@ -100,19 +97,16 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   }
 
   // Soft guards: on any unsupported shape the kernel drains its pipes and
-  // returns without touching data. The host lowering path validates these same
-  // bounds up front, so a well-formed program never hits these early returns;
-  // they exist only to keep the device kernel memory-safe if invoked directly.
+  // returns without touching data. The host lowering pass and the builtin
+  // type deducer validate divisibility at compile time, so a well-formed
+  // program never hits these early returns; they exist only to keep the
+  // device kernel memory-safe if invoked directly.
   if (nranks <= 1 || nranks > kMaxSupportedRanks || numel <= 0 || (numel % nranks) != 0) {
     pipe_barrier(PIPE_ALL);
     return;
   }
 
   const int chunk_elems = static_cast<int>(numel / nranks);
-  if (chunk_elems > kMaxChunkElems) {
-    pipe_barrier(PIPE_ALL);
-    return;
-  }
 
   const int expected_rounds = 2 * (nranks - 1);
   if (signal_rows < expected_rounds || signal_cols < nranks) {
@@ -126,16 +120,15 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   using ShapeDyn = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
   using StrideDyn = pto::Stride<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
   using Global = pto::GlobalTensor<{{dtype_cpp}}, ShapeDyn, StrideDyn, pto::Layout::ND>;
-  using TileData = pto::Tile<pto::TileType::Vec, {{dtype_cpp}}, 1, kMaxChunkElems, pto::BLayout::RowMajor, -1,
+  using TileData = pto::Tile<pto::TileType::Vec, {{dtype_cpp}}, 1, kTileCount, pto::BLayout::RowMajor, -1,
                              -1>;
 
-  TileData chunk_tile(1, chunk_elems);
-  TileData recv_tile(1, chunk_elems);
+  TileData chunk_tile(1, kTileCount);
+  TileData recv_tile(1, kTileCount);
   TASSIGN(chunk_tile, 0x0);
   TASSIGN(recv_tile, 0x10000);
 
-  ShapeDyn chunk_shape(1, 1, 1, 1, chunk_elems);
-  StrideDyn chunk_stride(chunk_elems, chunk_elems, chunk_elems, chunk_elems, 1);
+  const int tile_cols = static_cast<int>(chunk_elems < kTileCount ? chunk_elems : kTileCount);
 
   int round = 0;
 
@@ -143,30 +136,39 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   for (int step = 1; step < nranks; ++step) {
     const int recv_add_idx = (my_rank - step - 1 + nranks) % nranks;
 
-    RoundBarrier(comm_ctx, signal_base + round * signal_cols, my_rank, nranks);
+    const int left = (my_rank - 1 + nranks) % nranks;
+    NeighborBarrier(comm_ctx, signal_base + round * signal_cols, my_rank, left, nranks);
     ++round;
 
-    const int left = (my_rank - 1 + nranks) % nranks;
     const int left_send_idx = (left - step + nranks) % nranks;
-    {
-      __gm__ {{dtype_cpp}} *remote_chunk =
-          CommRemotePtr(comm_ctx, chunks + static_cast<size_t>(left_send_idx * chunk_elems), left);
-      Global remote_g(remote_chunk, chunk_shape, chunk_stride);
-      TLOAD(recv_tile, remote_g);
-      set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
-      wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
-    }
 
-    Global acc_g(chunks + static_cast<size_t>(recv_add_idx * chunk_elems), chunk_shape, chunk_stride);
-    TLOAD(chunk_tile, acc_g);
-    set_flag(PIPE_MTE2, PIPE_V, EVENT_ID1);
-    wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID1);
-    TADD(chunk_tile, chunk_tile, recv_tile);
-    set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-    wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-    TSTORE(acc_g, chunk_tile);
-    set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
-    wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+    for (int tile_off = 0; tile_off < chunk_elems; tile_off += tile_cols) {
+      int64_t remain64 = chunk_elems - tile_off;
+      int tile_elems = static_cast<int>(remain64 < tile_cols ? remain64 : tile_cols);
+
+      ShapeDyn tile_shape(1, 1, 1, 1, tile_elems);
+      StrideDyn tile_stride(tile_elems, tile_elems, tile_elems, tile_elems, 1);
+
+      {
+        __gm__ {{dtype_cpp}} *remote_chunk =
+            CommRemotePtr(comm_ctx, chunks + static_cast<size_t>(left_send_idx * chunk_elems + tile_off), left);
+        Global remote_g(remote_chunk, tile_shape, tile_stride);
+        TLOAD(recv_tile, remote_g);
+        set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+        wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+      }
+
+      Global acc_g(chunks + static_cast<size_t>(recv_add_idx * chunk_elems + tile_off), tile_shape, tile_stride);
+      TLOAD(chunk_tile, acc_g);
+      set_flag(PIPE_MTE2, PIPE_V, EVENT_ID1);
+      wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID1);
+      TADD(chunk_tile, chunk_tile, recv_tile);
+      set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+      wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+      TSTORE(acc_g, chunk_tile);
+      set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+      wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+    }
     pipe_barrier(PIPE_ALL);
   }
 
@@ -174,26 +176,35 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   for (int step = 1; step < nranks; ++step) {
     const int recv_idx = (my_rank - step + nranks) % nranks;
 
-    RoundBarrier(comm_ctx, signal_base + round * signal_cols, my_rank, nranks);
+    const int left = (my_rank - 1 + nranks) % nranks;
+    NeighborBarrier(comm_ctx, signal_base + round * signal_cols, my_rank, left, nranks);
     ++round;
 
-    const int left = (my_rank - 1 + nranks) % nranks;
     const int left_send_idx = (left - step + 1 + nranks) % nranks;
-    {
-      __gm__ {{dtype_cpp}} *remote_chunk =
-          CommRemotePtr(comm_ctx, chunks + static_cast<size_t>(left_send_idx * chunk_elems), left);
-      Global remote_g(remote_chunk, chunk_shape, chunk_stride);
-      TLOAD(recv_tile, remote_g);
-      set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
-      wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
-    }
 
-    Global dst_g(chunks + static_cast<size_t>(recv_idx * chunk_elems), chunk_shape, chunk_stride);
-    set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-    wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-    TSTORE(dst_g, recv_tile);
-    set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
-    wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+    for (int tile_off = 0; tile_off < chunk_elems; tile_off += tile_cols) {
+      int64_t remain64 = chunk_elems - tile_off;
+      int tile_elems = static_cast<int>(remain64 < tile_cols ? remain64 : tile_cols);
+
+      ShapeDyn tile_shape(1, 1, 1, 1, tile_elems);
+      StrideDyn tile_stride(tile_elems, tile_elems, tile_elems, tile_elems, 1);
+
+      {
+        __gm__ {{dtype_cpp}} *remote_chunk =
+            CommRemotePtr(comm_ctx, chunks + static_cast<size_t>(left_send_idx * chunk_elems + tile_off), left);
+        Global remote_g(remote_chunk, tile_shape, tile_stride);
+        TLOAD(recv_tile, remote_g);
+        set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+        wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+      }
+
+      Global dst_g(chunks + static_cast<size_t>(recv_idx * chunk_elems + tile_off), tile_shape, tile_stride);
+      set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+      wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+      TSTORE(dst_g, recv_tile);
+      set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+      wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+    }
     pipe_barrier(PIPE_ALL);
   }
 

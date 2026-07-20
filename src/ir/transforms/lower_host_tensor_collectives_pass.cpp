@@ -157,6 +157,35 @@ void CheckStaticSignalCapacity(const CallPtr& call, const ExprPtr& signal_expr, 
       << ") must be at least the participating device count (" << required_slots << ")";
 }
 
+void CheckRingChunkConstraints(const CallPtr& call, const ExprPtr& src_expr, const ExprPtr& signal_expr,
+                               size_t world_size) {
+  auto src_type = As<DistributedTensorType>(src_expr->GetType());
+  INTERNAL_CHECK_SPAN(src_type, call->span_)
+      << "LowerHostTensorCollectives: ring allreduce src must be DistributedTensorType";
+  if (src_type->shape_.empty()) return;
+
+  // Compute static numel when every extent is a compile-time constant.
+  int64_t src_numel = 1;
+  for (const auto& dim : src_type->shape_) {
+    auto extent = As<ConstInt>(dim);
+    if (!extent) return;  // dynamic dim — skip static checks
+    src_numel *= extent->value_;
+  }
+
+  auto sig_type = As<DistributedTensorType>(signal_expr->GetType());
+  auto sig_nr = sig_type && sig_type->shape_.size() == 2 ? As<ConstInt>(sig_type->shape_[1]) : nullptr;
+  int64_t nr = static_cast<int64_t>(world_size);
+  if (sig_nr && sig_nr->value_ > 0) nr = sig_nr->value_;
+
+  // Divisibility: the host builtin ring schedule partitions data into NR
+  // contiguous chunks of chunk_elems = numel // NR.  A non-divisible numel
+  // would produce a trailing partial chunk that the kernel cannot handle.
+  CHECK_SPAN(src_numel % nr == 0, call->span_)
+      << "LowerHostTensorCollectives: ring allreduce requires the per-rank data size (product of src shape = "
+      << src_numel << ") to be an exact multiple of the rank count (" << nr << "); got a remainder of "
+      << (src_numel % nr);
+}
+
 void CheckRingSignalCapacity(const CallPtr& call, const ExprPtr& signal_expr, size_t world_size) {
   auto signal_type = As<DistributedTensorType>(signal_expr->GetType());
   INTERNAL_CHECK_SPAN(signal_type, call->span_)
@@ -196,6 +225,9 @@ void CheckRingSignalCapacity(const CallPtr& call, const ExprPtr& signal_expr, si
 void CheckAllReduceSignalCapacity(const CallPtr& call, const ExprPtr& signal_expr, size_t world_size) {
   if (ShouldLowerAllReduceAsRing(call)) {
     CheckRingSignalCapacity(call, signal_expr, world_size);
+    INTERNAL_CHECK_SPAN(call->args_.size() >= 1, call->span_)
+        << "LowerHostTensorCollectives: ring allreduce requires a src arg";
+    CheckRingChunkConstraints(call, call->args_[0], signal_expr, world_size);
     return;
   }
   CheckStaticSignalCapacity(call, signal_expr, world_size);

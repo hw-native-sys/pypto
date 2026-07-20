@@ -26,9 +26,9 @@
  *   - pld.tensor.reduce_scatter(target, signal, op)                -> DistributedTensorType
  *   - pld.tensor.all_to_all(input, target, signal)                 -> DistributedTensorType
  *
- * The six builtin.tensor.* ops are internal chip-dispatch targets emitted by the
+ * The seven builtin.tensor.* ops are internal chip-dispatch targets emitted by the
  * host-orchestrator lowering pass (LowerHostTensorCollectives):
- * builtin.tensor.{allreduce,barrier,broadcast,reduce_scatter,allgather}.
+ * builtin.tensor.{allreduce,allreduce_ring,barrier,broadcast,reduce_scatter,allgather}.
  */
 
 #include <any>
@@ -139,6 +139,27 @@ TypePtr DeduceBuiltinTensorAllReduceRingType(const std::vector<ExprPtr>& args,
         << kOpName << " signal shape[0] (" << sig_shape0_const->value_
         << ") must equal 2*(NR-1) = " << 2 * (sig_shape1_const->value_ - 1)
         << " for NR = " << sig_shape1_const->value_;
+  }
+
+  // Compile-time divisibility check: the host builtin ring kernel partitions
+  // data into NR contiguous chunks.  A non-divisible numel would produce a
+  // trailing partial chunk the schedule cannot handle.
+  if (sig_shape1_const && sig_shape1_const->value_ > 0) {
+    int64_t src_numel = 1;
+    for (const auto& dim : src_type->shape_) {
+      auto extent = As<ConstInt>(dim);
+      if (!extent) {
+        src_numel = -1;
+        break;
+      }
+      src_numel *= extent->value_;
+    }
+    if (src_numel > 0) {
+      const int64_t nr = sig_shape1_const->value_;
+      CHECK(src_numel % nr == 0) << kOpName << " requires the src data size (product of shape = " << src_numel
+                                 << ") to be an exact multiple of the rank count (" << nr
+                                 << "); got a remainder of " << (src_numel % nr);
+    }
   }
 
   auto op_value = GetRequiredKwarg<int>(kwargs, "op", kOpName);

@@ -72,9 +72,11 @@ the same `CommDomainScopeStmt`. The current host builtin path supports only
 `ReduceOp.Sum` over FP32 data and an INT32 signal tensor. Mesh allreduce
 (`mode="mesh"`) uses a signal shaped rank-1 `[world_size]` or rank-2
 `[world_size, 1]`; ring allreduce (`mode="ring"`) uses a rank-2 signal shaped
-`[2 * (NR - 1), NR]`, whose `shape[0]` must equal `2 * (NR - 1)` exactly. When
-the participating device count is statically known, the signal must have enough
-static capacity.
+`[2 * (NR - 1), NR]`, whose `shape[0]` must equal `2 * (NR - 1)` when both
+signal dimensions are compile-time constants (at least `2 * (NR - 1)`
+otherwise). When the participating device count is statically known, the signal
+must have enough static capacity. Ring allreduce additionally checks that `numel(src) // NR` is
+an even division (matching the ring schedule's chunk partitioning).
 
 ## Pass properties
 

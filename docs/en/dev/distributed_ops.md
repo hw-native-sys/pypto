@@ -281,11 +281,11 @@ views, and non-representable partial boxes are rejected explicitly.
   (Set 1) / wait-all (Ge 1) / remote_load+accumulate / store-back with a
   post-reduce WAR-guard barrier (AtomicAdd 1 → Ge 2).
 - **`"ring"`** — NCCL-style chunked reduce-scatter + allgather schedule with
-  O(1) HCCL windows.  Signal shape `[2 * (NR − 1), NR]` (one row per ring
-  round, one cell per rank).  2(P−1) ring steps with per-round barriers
+  O(1) HCCL windows.  Signal shape `[2 * (NR - 1), NR]` (one row per ring
+  round, one cell per rank).  2(P-1) ring steps with per-round barriers
   (AtomicAdd 1 → Ge 1).  Chunk size = `SIZE // NR`, and `SIZE` must be an exact
-  multiple of `NR`; `LowerCompositeOps` constant-folds the chunk size when both
-  `SIZE` and `NR` are compile-time constants.
+  multiple of `NR`.  `LowerCompositeOps` constant-folds the chunk size when
+  both `SIZE` and `NR` are compile-time constants.
 
 Host-orchestrator user code may omit `signal` outside `for` and `while` loops;
 the [`SynthesizeAllReduceSignals`](passes/37-synthesize_allreduce_signals.md)
@@ -304,7 +304,7 @@ FP32 variant. Mesh mode (`mode="mesh"`, default) lowers to
 `builtin.tensor.allreduce` and accepts either a rank-1 `[world_size]` signal or
 the synthesized rank-2 `[world_size, 1]` signal. Ring mode (`mode="ring"`)
 lowers to `builtin.tensor.allreduce_ring` and requires an explicit rank-2
-`[2 * (NR − 1), NR]` INT32 signal (same shape as the InCore ring composite).
+`[2 * (NR - 1), NR]` INT32 signal (same shape as the InCore ring composite).
 
 ### `pld.system.notify` (TNOTIFY)
 
