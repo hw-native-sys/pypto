@@ -121,8 +121,9 @@ The cache holds exactly **one** sizing vector per worker, and every arena build
 overwrites that slot. So:
 
 - Pass the dispatch `RunConfig` to `prepare(...)`. It is used for the prewarm
-  only — it is not stored, so every dispatch still needs its own `config=`
-  (as above: `prefill_cfg` goes to both).
+  only — it is not stored, so every dispatch still needs its own `config=`.
+  In the example above, pass `prefill_cfg` to both `prepare(...)` and the first
+  prefill dispatch; the decode dispatch uses `decode_cfg`.
 - The prewarm only removes the cold build from the **first** dispatch, and only
   when that dispatch's sizing matches the prewarmed one — so prewarm the sizing
   your *first* dispatch uses, not the most frequent one. Any first dispatch with

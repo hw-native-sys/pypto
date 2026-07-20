@@ -98,9 +98,8 @@ class TestSetupOnce:
         m["construct"].assert_called_once()
         m["register"].assert_called_once()
         m["worker"].init.assert_called_once()
-        # Hierarchy is forked eagerly so the device-memory API works before the
-        # first dispatch (comm-less programs otherwise defer the fork to run()).
-        m["worker"]._start_hierarchical.assert_called_once()
+        # Simpler's public init owns eager hierarchy startup.
+        m["worker"]._start_hierarchical.assert_not_called()
 
         a = DeviceTensor(0x1000, (128, 128), torch.float32)
         b = DeviceTensor(0x2000, (128, 128), torch.float32)

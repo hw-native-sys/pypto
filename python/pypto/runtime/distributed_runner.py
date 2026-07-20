@@ -1030,16 +1030,6 @@ class DistributedWorker(Worker):
                     primary._distributed_config, config, dfx_base=primary.output_dir / "dfx_outputs"
                 )
             self._w.init(prewarm_config=prewarm_cc)
-
-            # Fork the chip/sub workers now (rather than lazily on the first
-            # ``run()``) so the device-memory API — ``malloc`` / ``copy_to`` /
-            # ``alloc_tensor`` — is usable before the first dispatch: those route
-            # through the orchestrator, which only exists after the hierarchy is
-            # started. ``_start_hierarchical`` is idempotent and is the same fork
-            # the first ``run()`` would trigger; the comm path already runs it from
-            # ``init()``. Intermediates are allocated above (pre-fork) so forked
-            # children inherit their shared-memory mappings.
-            self._w._start_hierarchical()
         except Exception:
             if self._w is not None:
                 try:
