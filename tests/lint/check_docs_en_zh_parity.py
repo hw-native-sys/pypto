@@ -12,8 +12,6 @@ English docs are ground truth; zh-CN must mirror the same relative file tree.
 This check does not compare file contents or translation freshness.
 """
 
-from __future__ import annotations
-
 import sys
 from pathlib import Path
 
