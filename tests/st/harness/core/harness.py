@@ -25,7 +25,7 @@ import pytest
 import torch
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
-from pypto.pypto_core.passes import MemoryPlanner
+from pypto.pypto_core.passes import DsaReusePenaltyRecognizer, MemoryPlanner
 from pypto.runtime.runner import RunConfig
 from pypto.runtime.tensor_spec import ScalarSpec
 
@@ -290,6 +290,12 @@ class PTOTestCase(ABC):
         platform = self.get_platform() or self.config.platform
         return str(Path(self.config.dsa_solution_dir) / self.get_name() / platform)
 
+    def get_dsa_reuse_penalty_recognizer(self) -> DsaReusePenaltyRecognizer | None:
+        """Return the experimental DSA reuse-hazard recognizer."""
+        if self.get_memory_planner() != MemoryPlanner.DSA:
+            return None
+        return self.config.dsa_reuse_penalty_recognizer
+
     def get_ptoas_sync_summary_dir(self) -> str | None:
         """Return a collision-free directory for PTOAS synchronization summaries."""
         if self.config.ptoas_sync_summary_dir is None:
@@ -302,6 +308,7 @@ class PTOTestCase(ABC):
         memory_planner: MemoryPlanner | None,
         dsa_export_dir: str | None,
         dsa_solution_dir: str | None,
+        dsa_reuse_penalty_recognizer: DsaReusePenaltyRecognizer | None,
         ptoas_sync_summary_dir: str | None,
     ) -> None:
         """Fill unset compile controls from the suite-wide configuration."""
@@ -311,6 +318,8 @@ class PTOTestCase(ABC):
             self.config.dsa_export_dir = dsa_export_dir
         if self.config.dsa_solution_dir is None:
             self.config.dsa_solution_dir = dsa_solution_dir
+        if self.config.dsa_reuse_penalty_recognizer is None:
+            self.config.dsa_reuse_penalty_recognizer = dsa_reuse_penalty_recognizer
         if self.config.ptoas_sync_summary_dir is None:
             self.config.ptoas_sync_summary_dir = ptoas_sync_summary_dir
 
