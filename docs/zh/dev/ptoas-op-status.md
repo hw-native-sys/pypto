@@ -51,7 +51,7 @@ lowering/compiler plumbing 使用的额外内部 op 未纳入，也不列 VPTO�
 | **DMA 数据搬运（10）** |  |  |  |  |  |  |  |  |
 | pto.tload | TLOAD | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.tprefetch | TPREFETCH | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING：缺完整前端/codegen/ST 链路 |
-| pto.tprefetch_async | TPREFETCH_ASYNC | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING：缺完整前端/codegen/ST 链路 |
+| pto.tprefetch_async | TPREFETCH_ASYNC | tile | ✅ | ❌ | ❌ | ✅ | — | 由 `pl.prefetch.*`（`make_context` / `async_prefetch` / `session` / `wait`）发射；非 tile/tensor 前端。仅 A3/A5 生效，其他平台 PTOAS 退化为 no-op |
 | pto.make_prefetch_async_context | pto::PrefetchAsyncContext | internal | ✅ | — | — | — | — | 随 async prefetch 集成验证 |
 | pto.get_prefetch_async_session | .session | internal | ✅ | — | — | — | — | 随 async prefetch 集成验证 |
 | pto.tstore | TSTORE | tile | ✅ | ✅ | ❌ | ✅ | — |  |
@@ -259,6 +259,7 @@ lowering/compiler plumbing 使用的额外内部 op 未纳入，也不列 VPTO�
 | **源码兼容 / 手动模式（1）** |  |  |  |  |  |  |  |  |
 | pto.tassign | TASSIGN | internal | ✅ | — | — | — | — | 失活 backend hook，不独立建 ST |
 
-**统计**：共 204 个 PTOAS 公共/兼容 op；pypto tile 前端 113 个，tensor 前端 75 个；
-同名 ST 覆盖 110 个（普通 ST 106，distributed ST 4）；无同名 ST 62 个
-（普通 52，distributed 10）；这 204 个中另有 32 个 op 不适合独立 ST。
+**统计**：共 204 个 PTOAS 公共/兼容 op；pypto tile 前端 113 个，tensor 前端 75 个
+（另有 `pl.prefetch.*` 一族 4 个非 tile/tensor op）；同名 ST 覆盖 111 个
+（普通 ST 107，distributed ST 4）；无同名 ST 61 个（普通 51，distributed 10）；
+这 204 个中另有 32 个 op 不适合独立 ST。

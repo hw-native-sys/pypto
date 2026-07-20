@@ -117,6 +117,9 @@ enum class ObjectKind {
   TupleType,
   WindowBufferType,
   CommCtxType,
+  PrefetchAsyncContextType,
+  AsyncEventType,
+  AsyncSessionType,
 
   // Other IR node kinds
   Function,

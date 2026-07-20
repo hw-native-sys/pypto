@@ -118,6 +118,9 @@ DEFINE_KIND_TRAIT(MemRefType, ObjectKind::MemRefType)
 DEFINE_KIND_TRAIT(PtrType, ObjectKind::PtrType)
 DEFINE_KIND_TRAIT(WindowBufferType, ObjectKind::WindowBufferType)
 DEFINE_KIND_TRAIT(CommCtxType, ObjectKind::CommCtxType)
+DEFINE_KIND_TRAIT(PrefetchAsyncContextType, ObjectKind::PrefetchAsyncContextType)
+DEFINE_KIND_TRAIT(AsyncEventType, ObjectKind::AsyncEventType)
+DEFINE_KIND_TRAIT(AsyncSessionType, ObjectKind::AsyncSessionType)
 
 // Other IR node types
 DEFINE_KIND_TRAIT(Function, ObjectKind::Function)
@@ -219,7 +222,10 @@ struct KindTrait<Type> {
                                          ObjectKind::ArrayType,
                                          ObjectKind::TupleType,
                                          ObjectKind::WindowBufferType,
-                                         ObjectKind::CommCtxType};
+                                         ObjectKind::CommCtxType,
+                                         ObjectKind::PrefetchAsyncContextType,
+                                         ObjectKind::AsyncEventType,
+                                         ObjectKind::AsyncSessionType};
   static constexpr size_t count = sizeof(kinds) / sizeof(ObjectKind);
 };
 

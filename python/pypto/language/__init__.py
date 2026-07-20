@@ -74,6 +74,7 @@ from .dsl_api import (
     yield_,
 )
 from .op import array_ops as array
+from .op import prefetch_ops as prefetch
 from .op import system_ops as system
 from .op import tensor_ops as tensor
 from .op import tile_ops as tile
@@ -228,11 +229,14 @@ from .parser.text_parser import loads, loads_program, parse, parse_program
 from .scope import ScopeMode, manual_scope, scope, spmd_submit, submit
 from .typing import (
     Array,
+    AsyncEvent,
+    AsyncSession,
     DynVar,
     InOut,
     IntLike,
     MemRef,
     Out,
+    PrefetchAsyncContext,
     Scalar,
     Tensor,
     Tile,
@@ -320,6 +324,7 @@ __all__ = [
     "cross_core_slot",
     "adir",
     "array",
+    "prefetch",
     "tile",
     "system",
     "tensor",
@@ -478,6 +483,9 @@ __all__ = [
     "MemorySpace",
     "PipeType",
     "Ptr",
+    "PrefetchAsyncContext",
+    "AsyncEvent",
+    "AsyncSession",
     "PtrType",
     "TensorLayout",
     "TensorView",

@@ -555,6 +555,38 @@ void BindIR(nb::module_& m) {
   comm_ctx_type_class.def_static("get", &GetCommCtxType, "Get the shared singleton CommCtxType instance.");
   BindFields<CommCtxType>(comm_ctx_type_class);
 
+  // Async-prefetch handle types - singleton markers for the prefetch.* op family.
+  // All three are opaque: the workspace backing a context, the in-flight event and
+  // the session are runtime-side values with no compile-time payload.
+  auto prefetch_async_context_type_class = nb::class_<PrefetchAsyncContextType, Type>(
+      ir, "PrefetchAsyncContextType",
+      "Singleton marker type for prefetch.make_context outputs. Consumed by "
+      "prefetch.async_prefetch and prefetch.session; lowers to PTOAS "
+      "!pto.prefetch_async_context.");
+  prefetch_async_context_type_class.def(nb::init<>(),
+                                        "Create the singleton PrefetchAsyncContextType instance.");
+  prefetch_async_context_type_class.def_static("get", &GetPrefetchAsyncContextType,
+                                               "Get the shared singleton PrefetchAsyncContextType instance.");
+  BindFields<PrefetchAsyncContextType>(prefetch_async_context_type_class);
+
+  auto async_event_type_class = nb::class_<AsyncEventType, Type>(
+      ir, "AsyncEventType",
+      "Singleton marker type for prefetch.async_prefetch outputs. Paired with an "
+      "AsyncSession in prefetch.wait; lowers to PTOAS !pto.async_event.");
+  async_event_type_class.def(nb::init<>(), "Create the singleton AsyncEventType instance.");
+  async_event_type_class.def_static("get", &GetAsyncEventType,
+                                    "Get the shared singleton AsyncEventType instance.");
+  BindFields<AsyncEventType>(async_event_type_class);
+
+  auto async_session_type_class = nb::class_<AsyncSessionType, Type>(
+      ir, "AsyncSessionType",
+      "Singleton marker type for prefetch.session outputs. Paired with an AsyncEvent in "
+      "prefetch.wait; lowers to PTOAS !pto.async_session.");
+  async_session_type_class.def(nb::init<>(), "Create the singleton AsyncSessionType instance.");
+  async_session_type_class.def_static("get", &GetAsyncSessionType,
+                                      "Get the shared singleton AsyncSessionType instance.");
+  BindFields<AsyncSessionType>(async_session_type_class);
+
   // MemorySpace enum
   nb::enum_<MemorySpace>(ir, "MemorySpace", "Memory space enumeration")
       .value("DDR", MemorySpace::DDR, "DDR memory (off-chip)")
