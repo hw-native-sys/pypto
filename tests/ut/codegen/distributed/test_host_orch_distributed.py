@@ -739,7 +739,7 @@ def test_backend_materializes_ring_allreduce_builtin_next_level_files(tmp_path):
     assert "submit_allreduce_ring_kernel<ReduceOp::kSum, float>" in entry_cpp
 
     kernel_cpp = files[f"{base}/kernels/aiv/builtin_tensor_allreduce_ring__sum__fp32_kernel.cpp"]
-    assert "NeighborBarrier" in kernel_cpp
+    assert "RoundBarrier" in kernel_cpp
     assert "signal_rows" in kernel_cpp
 
 

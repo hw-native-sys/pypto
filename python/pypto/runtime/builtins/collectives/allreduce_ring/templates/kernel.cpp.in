@@ -51,21 +51,36 @@ AICORE inline __gm__ T *CommRemotePtr(__gm__ CommContext *ctx, __gm__ T *local_p
   return reinterpret_cast<__gm__ T *>(ctx->windowsIn[pe] + offset);
 }
 
-// Per-round neighbor barrier for ring topology.
-// Rank r TLOADs from left = (r-1)%P; right = (r+1)%P TLOADs from r.
-// Each rank notifies its right neighbor (who reads from this rank's chunks)
-// and waits on its left neighbor (whose chunks this rank reads from).
-// Signal rows used exactly once (AtomicAdd 0→1, TWAIT GE 1).
-AICORE inline void
-NeighborBarrier(__gm__ CommContext *ctx, __gm__ int32_t *signal_row, int my_rank, int left, int nranks) {
-  int right = (my_rank + 1) % nranks;
-  // Notify right neighbor: "my chunks are ready for your TLOAD."
-  __gm__ int32_t *remote_signal = CommRemotePtr(ctx, signal_row + my_rank, right);
-  pto::comm::Signal sig_out(remote_signal);
-  pto::comm::TNOTIFY(sig_out, static_cast<int32_t>(1), pto::comm::NotifyOp::AtomicAdd);
-  // Wait on left neighbor: "I need your chunks for my TLOAD."
-  pto::comm::Signal sig_in(signal_row + left);
-  pto::comm::TWAIT(sig_in, static_cast<int32_t>(1), pto::comm::WaitCmp::GE);
+// Per-round barrier row: AtomicAdd(0→1) / WaitGe(1), single-shot per row.
+//
+// The current ring kernel uses a pull model (TLOAD/TSTORE) where each rank
+// reads from the left neighbor via remote LDMA.  This requires every rank to
+// notify and wait on every other rank (O(P²) per round) so that all local
+// writes (TSTORE) are visible before the downstream TLOAD reads them.
+//
+// Future optimization: once the kernel is rewritten to use a push model
+// (remote write via TPUT instead of remote read via TLOAD), the barrier can
+// be relaxed to O(1) — each rank only needs to notify its right neighbor
+// and wait on its left neighbor.  TPUT's write pipeline ensures that data
+// produced by TPUT is visible to the receiver by the time the TNotify
+// arrives, making the all-to-all round unnecessary.
+AICORE inline void RoundBarrier(__gm__ CommContext *ctx, __gm__ int32_t *signal_row, int my_rank,
+                                int nranks) {
+  for (int peer = 0; peer < nranks; ++peer) {
+    if (peer == my_rank) {
+      continue;
+    }
+    __gm__ int32_t *remote_signal = CommRemotePtr(ctx, signal_row + my_rank, peer);
+    pto::comm::Signal sig(remote_signal);
+    pto::comm::TNOTIFY(sig, static_cast<int32_t>(1), pto::comm::NotifyOp::AtomicAdd);
+  }
+  for (int peer = 0; peer < nranks; ++peer) {
+    if (peer == my_rank) {
+      continue;
+    }
+    pto::comm::Signal sig(signal_row + peer);
+    pto::comm::TWAIT(sig, static_cast<int32_t>(1), pto::comm::WaitCmp::GE);
+  }
   pipe_barrier(PIPE_ALL);
 }
 
@@ -136,9 +151,10 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   for (int step = 1; step < nranks; ++step) {
     const int recv_add_idx = (my_rank - step - 1 + nranks) % nranks;
 
-    const int left = (my_rank - 1 + nranks) % nranks;
-    NeighborBarrier(comm_ctx, signal_base + round * signal_cols, my_rank, left, nranks);
+    RoundBarrier(comm_ctx, signal_base + round * signal_cols, my_rank, nranks);
     ++round;
+
+    const int left = (my_rank - 1 + nranks) % nranks;
 
     const int left_send_idx = (left - step + nranks) % nranks;
 
@@ -176,9 +192,10 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   for (int step = 1; step < nranks; ++step) {
     const int recv_idx = (my_rank - step + nranks) % nranks;
 
-    const int left = (my_rank - 1 + nranks) % nranks;
-    NeighborBarrier(comm_ctx, signal_base + round * signal_cols, my_rank, left, nranks);
+    RoundBarrier(comm_ctx, signal_base + round * signal_cols, my_rank, nranks);
     ++round;
+
+    const int left = (my_rank - 1 + nranks) % nranks;
 
     const int left_send_idx = (left - step + 1 + nranks) % nranks;
 
