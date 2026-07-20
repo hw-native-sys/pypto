@@ -358,38 +358,21 @@ The unified `mode=` keyword API (`mode="hard"` / `mode="soft"`) is the **DSL** s
 
 `system.task_invalid` returns [`ScalarType(DataType::TASK_ID)`](02-types.md#scalartype). It is the lowering target of the Python literal `None` when `None` appears in a TaskId position (a `deps=[None]` entry or a TaskId loop iter_arg seed) inside `with pl.manual_scope():` regions. There is no `system.task_id_of` op — producer task ids are obtained from the second tuple element returned by the `pl.submit(...)` parser construct, not from a builtin. Source: `src/ir/op/sync_ops/task.cpp`.
 
-**Python Example:**
-
-```python
-from pypto.ir.op import system
-ib.emit(system.bar_all())
-ib.emit(system.sync_src(set_pipe=2, wait_pipe=4, event_id=0))
-```
-
-**C++ Registration (`src/ir/op/sync_ops/sync.cpp`):**
-
-```cpp
-REGISTER_OP("system.bar_all")
-    .set_op_category("SyncOp")
-    .no_argument()
-    .f_deduce_type(DeduceUnknownType);
-
-REGISTER_OP("system.sync_src")
-    .set_op_category("SyncOp")
-    .no_argument()
-    .set_attr<int>("set_pipe")
-    .set_attr<int>("wait_pipe")
-    .set_attr<int>("event_id")
-    .no_argument()
-    .f_deduce_type(DeduceUnknownType);
-```
-
 ## CrossCoreOp: AIC↔AIV Communication
 
-**Purpose**: Cross-core data transfer and pipe management between AIC (Cube) and AIV (Vector) kernels
-**Type**: `UnknownType` (push/init/buffer/free ops) or `TileType` passthrough (pop ops)
-**Location**: `src/ir/op/tile_ops/cross_core.cpp` (tpush/tpop) and `src/ir/op/sync_ops/cross_core.cpp` (tfree/pipe init/buffers)
+**Purpose**: Cross-core synchronization, data transfer, and pipe management between AIC (Cube) and AIV (Vector) kernels
+**Type**: `UnknownType` (sync/push/init/buffer/free ops) or `TileType` passthrough (pop ops)
+**Location**: `src/ir/op/tile_ops/cross_core.cpp` (tpush/tpop) and `src/ir/op/sync_ops/cross_core.cpp` (sync/tfree/pipe init/buffers)
 **Python API**: `import pypto.language as pl` (promoted ops) or `from pypto.ir.op import tile, system`
+
+### Explicit Event Synchronization
+
+| Operation | Args | Description | Kwargs |
+| --------- | ---- | ----------- | ------ |
+| `system.sync_set` | 0 or 1 (`event_id_dyn`) | Emit `pto.sync.set` from one core type | `pipe`, static `event_id`, optional `ffts_mode` |
+| `system.sync_wait` | 0 or 1 (`event_id_dyn`) | Emit `pto.sync.wait` on the peer core type | `pipe`, static `event_id` |
+
+Use `pl.system.sync_set(event_id, pipe=..., ffts_mode=...)` and `pl.system.sync_wait(event_id, pipe=...)` in explicitly typed AIC/AIV kernels. `event_id` may be an integer in the user-available range 0–13 or a dynamic `pl.Scalar[pl.INDEX]`; IDs 14 and 15 are reserved. `ffts_mode`, when supplied to `sync_set`, must be 0, 1, or 2. The author of a manual cross-core protocol is responsible for pairing event IDs and pipes. PyPTO's normal automatic intra-core dependency insertion remains enabled and uses the separate `set_flag`/`wait_flag` mechanism, so it does not allocate from these explicit cross-core event IDs.
 
 ### Data Transfer Operations
 
@@ -512,12 +495,4 @@ See [TPUSH/TPOP ISA Reference](../../reference/pto-isa/01-tpush_tpop.md) and [Bu
 
 ## References
 
-- Common constants: `include/pypto/core/common.h`
-- Type definitions: `include/pypto/ir/type.h`
-- Operator registry: `include/pypto/ir/op_registry.h`
-- Type inference utilities: `include/pypto/ir/type_inference.h`
-- Type inference implementation: `src/ir/op/type_inference.cpp`
-- Operator registry implementation: `src/ir/op_registry.cpp`
-- Tensor operator implementations: `src/ir/op/tensor_ops/`
-- Tile operator implementations: `src/ir/op/tile_ops/`
-- Sync operator implementations: `src/ir/op/sync_ops/`
+Core definitions live in `include/pypto/core/common.h` and `include/pypto/ir/`; registry and type-inference implementations are in `src/ir/`, with operator implementations grouped under `src/ir/op/{tensor_ops,tile_ops,sync_ops}/`.

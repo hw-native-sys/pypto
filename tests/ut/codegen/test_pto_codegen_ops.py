@@ -2706,6 +2706,54 @@ class TestScatterCodegen:
         )
 
 
+class TestCrossCoreSyncCodegen:
+    """Tests for explicit pto.sync.set/wait emission."""
+
+    def _generate_mlir(self, program_cls) -> str:
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        optimized = pm.run_passes(program_cls)
+        codegen_instance = codegen.PTOCodegen()
+        funcs = list(optimized.functions.values())
+        assert funcs, "Program has no functions"
+        single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
+        return codegen_instance.generate(single)
+
+    def test_static_event_id_and_ffts_mode(self):
+        """Static DSL operands map to PTO attributes and literals."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(self, x: pl.Tensor[[16], pl.FP32]) -> pl.Tensor[[16], pl.FP32]:
+                pl.system.sync_set(event_id=3, pipe=pl.PipeType.MTE3, ffts_mode=1)
+                pl.system.sync_wait(event_id=3, pipe=pl.PipeType.MTE2)
+                return x
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.sync.set <PIPE_MTE3>, 3 {ffts_mode = 1 : i32}" in mlir
+        assert "pto.sync.wait <PIPE_MTE2>, 3" in mlir
+
+    def test_dynamic_event_id(self):
+        """An index scalar lowers to the PTO dynamic event-id operand."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self, x: pl.Tensor[[16], pl.FP32], event_id: pl.Scalar[pl.INDEX]
+            ) -> pl.Tensor[[16], pl.FP32]:
+                pl.system.sync_set(event_id, pipe=pl.PipeType.MTE3)
+                pl.system.sync_wait(event_id, pipe=pl.PipeType.MTE2)
+                return x
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.sync.set <PIPE_MTE3>, %" in mlir
+        assert "pto.sync.wait <PIPE_MTE2>, %" in mlir
+
+
 class TestSyncAllCodegen:
     """Tests that pl.system.syncall lowers to pto.syncall (hard/FFTS form)."""
 

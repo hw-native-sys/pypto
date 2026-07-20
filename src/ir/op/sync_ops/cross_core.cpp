@@ -15,10 +15,13 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/core_affinity_kind.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/pipe.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -39,12 +42,74 @@ TypePtr DeduceI32ScalarType(const std::vector<ExprPtr>& args,
   return std::make_shared<ScalarType>(DataType::INT32);
 }
 
+constexpr int kMaxUserCrossCoreEventId = 13;
+
+TypePtr DeduceCrossCoreSyncType(const std::vector<ExprPtr>& args,
+                                const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                const std::string& op_name, bool allow_ffts_mode) {
+  CHECK(args.size() <= 1) << op_name << " accepts at most one dynamic event-id operand, got " << args.size();
+
+  bool has_static_event_id = false;
+  bool has_pipe = false;
+  for (const auto& [key, value] : kwargs) {
+    if (key == "event_id") {
+      const int event_id = AnyCast<int>(value, "kwarg key: event_id");
+      CHECK(event_id >= 0 && event_id <= kMaxUserCrossCoreEventId)
+          << op_name << " event_id must be in the user-available range [0, "
+          << kMaxUserCrossCoreEventId << "], got " << event_id;
+      has_static_event_id = true;
+    } else if (key == "pipe") {
+      const int pipe = AnyCast<int>(value, "kwarg key: pipe");
+      CHECK(pipe >= static_cast<int>(PipeType::MTE1) && pipe <= static_cast<int>(PipeType::ALL))
+          << op_name << " pipe is invalid: " << pipe;
+      has_pipe = true;
+    } else if (key == "ffts_mode") {
+      CHECK(allow_ffts_mode) << op_name << " does not support ffts_mode";
+      const int ffts_mode = AnyCast<int>(value, "kwarg key: ffts_mode");
+      CHECK(ffts_mode >= 0 && ffts_mode <= 2)
+          << op_name << " ffts_mode must be in [0, 2], got " << ffts_mode;
+    }
+  }
+
+  CHECK(has_pipe) << op_name << " requires a pipe attribute";
+  const bool has_dynamic_event_id = args.size() == 1;
+  CHECK(has_static_event_id != has_dynamic_event_id)
+      << op_name << " requires exactly one static event_id attribute or dynamic event-id operand";
+  if (has_dynamic_event_id) {
+    auto event_type = std::dynamic_pointer_cast<const ScalarType>(args[0]->GetType());
+    CHECK(event_type && event_type->dtype_ == DataType::INDEX)
+        << op_name << " dynamic event id must have ScalarType(INDEX), got " << args[0]->GetType()->TypeName();
+  }
+  return GetUnknownType();
+}
+
 }  // namespace
 
 // ============================================================================
 // Registration Function for Cross-Core System Operations
 // (tile.tpush/tpop are registered in tile_ops/cross_core.cpp)
 // ============================================================================
+
+REGISTER_OP("system.sync_set")
+    .set_description("Set an explicit cross-core synchronization event")
+    .set_op_category("CrossCoreOp")
+    .add_argument("event_id_dyn", "Optional dynamic event id (ScalarType(INDEX))")
+    .set_attr<int>("pipe")
+    .set_attr<int>("event_id")
+    .set_attr<int>("ffts_mode")
+    .f_deduce_type([](const auto& args, const auto& kwargs) {
+      return DeduceCrossCoreSyncType(args, kwargs, "system.sync_set", true);
+    });
+
+REGISTER_OP("system.sync_wait")
+    .set_description("Wait for an explicit cross-core synchronization event")
+    .set_op_category("CrossCoreOp")
+    .add_argument("event_id_dyn", "Optional dynamic event id (ScalarType(INDEX))")
+    .set_attr<int>("pipe")
+    .set_attr<int>("event_id")
+    .f_deduce_type([](const auto& args, const auto& kwargs) {
+      return DeduceCrossCoreSyncType(args, kwargs, "system.sync_wait", false);
+    });
 
 // Release slot back to AIC producer (called by AIV consumer after tpop_from_aic)
 REGISTER_OP("system.tfree_to_aic")

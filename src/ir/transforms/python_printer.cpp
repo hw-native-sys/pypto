@@ -1038,7 +1038,8 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
     if (value.type() == typeid(int)) {
       int int_val = AnyCast<int>(value, "printing kwarg: " + key);
       // Print pipe kwargs as PipeType enum names for readability
-      if (key == "set_pipe" || key == "wait_pipe") {
+      if (key == "set_pipe" || key == "wait_pipe" ||
+          (key == "pipe" && (IsOp(op, "system.sync_set") || IsOp(op, "system.sync_wait")))) {
         stream_ << prefix_ << ".PipeType." << PipeTypeToString(static_cast<PipeType>(int_val));
       } else if (key == "mode") {
         stream_ << "'" << CastModeToString(int_val) << "'";

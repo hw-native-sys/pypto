@@ -12,6 +12,7 @@
 import pytest
 from pypto import DataType, ir, passes
 from pypto import language as pl
+from pypto.ir.op import system_ops
 from pypto.pypto_core.ir import ConstInt
 
 
@@ -108,9 +109,48 @@ def test_cross_core_ops_registered():
         "system.aiv_initialize_pipe",
         "system.reserve_buffer",
         "system.import_peer_buffer",
+        "system.sync_set",
+        "system.sync_wait",
     ]
     for name in op_names:
         assert ir.is_op_registered(name), f"{name} should be registered"
+
+
+def test_cross_core_sync_static_and_dynamic_event_ids():
+    """Cross-core sync accepts either a user event id or a dynamic index operand."""
+    span = ir.Span.unknown()
+
+    static_set = system_ops.sync_set(3, pipe=ir.PipeType.FIX, ffts_mode=1, span=span)
+    assert isinstance(static_set.type, ir.UnknownType)
+    assert static_set.args == []
+    assert static_set.kwargs == {"pipe": int(ir.PipeType.FIX), "event_id": 3, "ffts_mode": 1}
+
+    event_id = ir.Var("event_id", ir.ScalarType(DataType.INDEX), span)
+    dynamic_wait = system_ops.sync_wait(event_id, pipe=ir.PipeType.MTE3, span=span)
+    assert isinstance(dynamic_wait.type, ir.UnknownType)
+    assert dynamic_wait.args == [event_id]
+    assert "event_id" not in dynamic_wait.kwargs
+
+
+@pytest.mark.parametrize("event_id", [-1, 14])
+def test_cross_core_sync_rejects_reserved_or_out_of_range_event_ids(event_id):
+    """Only event ids 0..13 are available to user-authored cross-core sync."""
+    with pytest.raises(ValueError, match="event_id"):
+        system_ops.sync_set(event_id, pipe=ir.PipeType.FIX)
+
+
+def test_cross_core_sync_rejects_non_index_dynamic_event_id():
+    """PTO's dynamic event operand is index-typed."""
+    event_id = ir.Var("event_id", ir.ScalarType(DataType.INT32), ir.Span.unknown())
+    with pytest.raises(TypeError, match=r"ScalarType\(INDEX\)"):
+        system_ops.sync_wait(event_id, pipe=ir.PipeType.MTE3)
+
+
+@pytest.mark.parametrize("ffts_mode", [-1, 3])
+def test_cross_core_sync_rejects_invalid_ffts_mode(ffts_mode):
+    """PTO sync.set accepts FFTS modes 0, 1, and 2 only."""
+    with pytest.raises(ValueError, match="ffts_mode"):
+        system_ops.sync_set(0, pipe=ir.PipeType.FIX, ffts_mode=ffts_mode)
 
 
 def test_aiv_shard_halves_split_axis():

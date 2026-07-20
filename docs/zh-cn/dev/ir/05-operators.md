@@ -352,38 +352,21 @@ with ib.function("tile_computation") as f:
 
 `system.task_invalid` 返回类型为 [`ScalarType(DataType::TASK_ID)`](02-types.md#scalartype)。当 Python 字面量 `None` 出现在 TaskId 位置（`deps=[None]` 条目或 TaskId 循环 iter_arg 种子）时，它就是 `None` 在 `with pl.manual_scope():` 区域内的下沉目标。不存在 `system.task_id_of` op —— producer task id 由 `pl.submit(...)` parser construct 返回的二元组第二个元素获得，而非来自 builtin。源码：`src/ir/op/sync_ops/task.cpp`。
 
-**Python 示例：**
-
-```python
-from pypto.ir.op import system
-ib.emit(system.bar_all())
-ib.emit(system.sync_src(set_pipe=2, wait_pipe=4, event_id=0))
-```
-
-**C++ 注册 (`src/ir/op/sync_ops/sync.cpp`)：**
-
-```cpp
-REGISTER_OP("system.bar_all")
-    .set_op_category("SyncOp")
-    .no_argument()
-    .f_deduce_type(DeduceUnknownType);
-
-REGISTER_OP("system.sync_src")
-    .set_op_category("SyncOp")
-    .no_argument()
-    .set_attr<int>("set_pipe")
-    .set_attr<int>("wait_pipe")
-    .set_attr<int>("event_id")
-    .no_argument()
-    .f_deduce_type(DeduceUnknownType);
-```
-
 ## CrossCoreOp：AIC↔AIV 跨核通信
 
-**用途**：AIC (Cube) 和 AIV (Vector) 内核之间的跨核数据传输和管道管理
-**类型**：`UnknownType`（push/init/buffer/free 操作）或 `TileType` 透传（pop 操作）
-**位置**：`src/ir/op/tile_ops/cross_core.cpp`（tpush/tpop）和 `src/ir/op/sync_ops/cross_core.cpp`（tfree/管道初始化/缓冲区）
+**用途**：AIC (Cube) 和 AIV (Vector) 内核之间的跨核同步、数据传输和管道管理
+**类型**：`UnknownType`（sync/push/init/buffer/free 操作）或 `TileType` 透传（pop 操作）
+**位置**：`src/ir/op/tile_ops/cross_core.cpp`（tpush/tpop）和 `src/ir/op/sync_ops/cross_core.cpp`（sync/tfree/管道初始化/缓冲区）
 **Python API**：`import pypto.language as pl`（提升的操作）或 `from pypto.ir.op import tile, system`
+
+### 显式事件同步
+
+| 操作 | 参数 | 描述 | Kwargs |
+| ---- | ---- | ---- | ------ |
+| `system.sync_set` | 0 或 1（`event_id_dyn`） | 从一种核类型发出 `pto.sync.set` | `pipe`、静态 `event_id`、可选 `ffts_mode` |
+| `system.sync_wait` | 0 或 1（`event_id_dyn`） | 在对端核类型发出 `pto.sync.wait` | `pipe`、静态 `event_id` |
+
+在显式指定类型的 AIC/AIV kernel 中使用 `pl.system.sync_set(event_id, pipe=..., ffts_mode=...)` 和 `pl.system.sync_wait(event_id, pipe=...)`。`event_id` 可以是用户可用范围 0–13 内的整数，也可以是动态 `pl.Scalar[pl.INDEX]`；ID 14 和 15 为保留值。`sync_set` 的可选 `ffts_mode` 必须为 0、1 或 2。手写跨核协议的作者负责正确配对事件 ID 和 pipe。PyPTO 的常规核内自动依赖插入仍保持启用，并使用独立的 `set_flag`/`wait_flag` 机制，因此不会占用这些显式跨核事件 ID。
 
 ### 数据传输操作
 
@@ -506,12 +489,4 @@ class CrossCoreExample:
 
 ## 参考
 
-- 常用常量：`include/pypto/core/common.h`
-- 类型定义：`include/pypto/ir/type.h`
-- 算子注册表：`include/pypto/ir/op_registry.h`
-- 类型推断工具：`include/pypto/ir/type_inference.h`
-- 类型推断实现：`src/ir/op/type_inference.cpp`
-- 算子注册表实现：`src/ir/op_registry.cpp`
-- 张量算子实现：`src/ir/op/tensor_ops/`
-- Tile 算子实现：`src/ir/op/tile_ops/`
-- 同步算子实现：`src/ir/op/sync_ops/`
+核心定义位于 `include/pypto/core/common.h` 和 `include/pypto/ir/`；注册表与类型推断实现在 `src/ir/`，算子实现按类别位于 `src/ir/op/{tensor_ops,tile_ops,sync_ops}/`。

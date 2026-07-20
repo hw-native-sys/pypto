@@ -11,6 +11,7 @@
 
 System operations handle hardware synchronization and cross-core communication:
 - sync_src / sync_dst: Set/Wait flag-based synchronization between pipes
+- sync_set / sync_wait: Explicit Cube/Vector cross-core event synchronization
 - bar_v / bar_m / bar_all: Barrier synchronization for vector, matrix, or all units
 - tpush_to_aiv / tpush_to_aic: Push tile data across cores
 - tpop_from_aic / tpop_from_aiv: Pop tile data from cross-core pipe
@@ -19,7 +20,7 @@ System operations handle hardware synchronization and cross-core communication:
 """
 
 from collections.abc import Sequence
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
@@ -118,6 +119,72 @@ def sync_dst(
     return _create_sync_op(
         "system.sync_dst", set_pipe=set_pipe, wait_pipe=wait_pipe, event_id=event_id, span=span
     )
+
+
+_MAX_USER_CROSS_CORE_EVENT_ID = 13
+
+
+def _create_cross_core_sync_op(
+    op_name: str,
+    event_id: int | Expr,
+    *,
+    pipe: PipeType,
+    ffts_mode: int | None,
+    span: Span | None,
+) -> Call:
+    """Create a PTO cross-core sync set/wait operation."""
+    if not isinstance(pipe, PipeType):
+        raise TypeError(f"{op_name} pipe must be PipeType, got {type(pipe).__name__}")
+
+    args: list[Expr] = []
+    kwargs: dict[str, Any] = {"pipe": pipe}
+    if isinstance(event_id, bool):
+        raise TypeError(f"{op_name} event_id must be int or ScalarType(INDEX), got bool")
+    if isinstance(event_id, int):
+        if not 0 <= event_id <= _MAX_USER_CROSS_CORE_EVENT_ID:
+            raise ValueError(
+                f"{op_name} event_id must be in the user-available range "
+                f"[0, {_MAX_USER_CROSS_CORE_EVENT_ID}], got {event_id}"
+            )
+        kwargs["event_id"] = event_id
+    elif isinstance(event_id, Expr):
+        event_type = event_id.type
+        if not isinstance(event_type, ScalarType) or event_type.dtype != DataType.INDEX:
+            raise TypeError(f"{op_name} dynamic event_id must have ScalarType(INDEX), got {event_type}")
+        args.append(event_id)
+    else:
+        raise TypeError(f"{op_name} event_id must be int or ScalarType(INDEX), got {type(event_id).__name__}")
+
+    if ffts_mode is not None:
+        if isinstance(ffts_mode, bool) or not isinstance(ffts_mode, int):
+            raise TypeError(f"{op_name} ffts_mode must be int, got {type(ffts_mode).__name__}")
+        if not 0 <= ffts_mode <= 2:
+            raise ValueError(f"{op_name} ffts_mode must be in [0, 2], got {ffts_mode}")
+        kwargs["ffts_mode"] = ffts_mode
+
+    actual_span = _get_span_or_capture(span, frame_offset=2)
+    return _ir_core.create_op_call(op_name, args, kwargs, actual_span)
+
+
+def sync_set(
+    event_id: int | Expr,
+    *,
+    pipe: PipeType,
+    ffts_mode: int | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Set an explicit Cube/Vector cross-core synchronization event."""
+    return _create_cross_core_sync_op("system.sync_set", event_id, pipe=pipe, ffts_mode=ffts_mode, span=span)
+
+
+def sync_wait(
+    event_id: int | Expr,
+    *,
+    pipe: PipeType,
+    span: Span | None = None,
+) -> Call:
+    """Wait for an explicit Cube/Vector cross-core synchronization event."""
+    return _create_cross_core_sync_op("system.sync_wait", event_id, pipe=pipe, ffts_mode=None, span=span)
 
 
 def bar_v(*, span: Span | None = None) -> Call:
