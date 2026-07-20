@@ -18,12 +18,13 @@ implementations of:
 - :func:`validate_golden`: Compare actual outputs against golden reference.
 - :func:`ensure_pto_isa_root`: Manage PTO-ISA repository (clone/checkout).
 
-These functions eliminate all Python-level imports from Simpler. The only
-Simpler dependency remaining is:
+These functions keep orchestration in PyPTO while relying on the installed
+runtime packages for two integration surfaces:
 
-- ``pip install simpler`` → provides the ``_task_interface`` nanobind C++ module.
-- The ``runtime/`` git submodule at the repository root provides C++ headers and
-  pre-built runtime binaries.
+- ``simpler`` provides the ``_task_interface`` nanobind C++ module.
+- ``simpler_setup`` provides the kernel compiler plus packaged runtime sources,
+  binaries, and ``pto_isa.pin`` for non-source installs. In a source checkout,
+  those assets come from the ``runtime/`` git submodule instead.
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ import tempfile
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 
@@ -141,21 +143,31 @@ def _get_pto_isa_clone_path() -> Path:
     return _PROJECT_ROOT / "build_output" / "_deps" / "pto-isa"
 
 
+def _get_runtime_pto_isa_pin_path() -> Path:
+    """Locate the runtime pin in a source checkout or installed runtime package."""
+    if _PTO_ISA_PIN_PATH.parent.is_dir():
+        return _PTO_ISA_PIN_PATH
+
+    try:
+        runtime_root = getattr(import_module("simpler_setup.environment"), "PROJECT_ROOT")
+    except (ImportError, AttributeError):
+        return _PTO_ISA_PIN_PATH
+    return Path(runtime_root) / "pto_isa.pin"
+
+
 def _read_runtime_pto_isa_pin() -> str | None:
     """Return the runtime's pinned PTO-ISA commit, or ``None`` when unavailable."""
+    pin_path = _get_runtime_pto_isa_pin_path()
     try:
-        commit = _PTO_ISA_PIN_PATH.read_text(encoding="utf-8").strip()
+        commit = pin_path.read_text(encoding="utf-8").strip()
     except OSError as e:
         logger.warning(
-            f"Failed to read runtime PTO-ISA pin at {_PTO_ISA_PIN_PATH}: {e}; "
-            "falling back to the latest remote HEAD"
+            f"Failed to read runtime PTO-ISA pin at {pin_path}: {e}; falling back to the latest remote HEAD"
         )
         return None
 
     if not commit:
-        logger.warning(
-            f"Runtime PTO-ISA pin at {_PTO_ISA_PIN_PATH} is empty; falling back to the latest remote HEAD"
-        )
+        logger.warning(f"Runtime PTO-ISA pin at {pin_path} is empty; falling back to the latest remote HEAD")
         return None
     return commit
 

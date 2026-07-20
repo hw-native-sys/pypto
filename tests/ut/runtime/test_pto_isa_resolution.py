@@ -12,7 +12,7 @@
 import importlib
 import logging
 import sys
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -60,6 +60,23 @@ def _configure_existing_clone(device_runner, monkeypatch, tmp_path):
     monkeypatch.delenv("PTO_ISA_ROOT", raising=False)
     monkeypatch.setattr(device_runner, "_get_pto_isa_clone_path", lambda: clone_path)
     return clone_path
+
+
+def test_installed_layout_reads_pin_from_runtime_package(device_runner, monkeypatch, tmp_path):
+    installed_pin = tmp_path / "simpler_setup" / "_assets" / "pto_isa.pin"
+    installed_pin.parent.mkdir(parents=True)
+    installed_pin.write_text(f"{_RUNTIME_PIN}\n", encoding="utf-8")
+    source_pin = tmp_path / "site-packages" / "runtime" / "pto_isa.pin"
+    monkeypatch.setattr(device_runner, "_PTO_ISA_PIN_PATH", source_pin)
+
+    runtime_package = ModuleType("simpler_setup")
+    setattr(runtime_package, "__path__", [])
+    runtime_environment = ModuleType("simpler_setup.environment")
+    setattr(runtime_environment, "PROJECT_ROOT", installed_pin.parent)
+    monkeypatch.setitem(sys.modules, "simpler_setup", runtime_package)
+    monkeypatch.setitem(sys.modules, "simpler_setup.environment", runtime_environment)
+
+    assert device_runner._read_runtime_pto_isa_pin() == _RUNTIME_PIN
 
 
 def test_default_revision_uses_runtime_pin(device_runner, monkeypatch, tmp_path):
