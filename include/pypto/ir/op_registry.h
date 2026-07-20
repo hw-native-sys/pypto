@@ -452,26 +452,16 @@ class OpRegistryEntry {
   /// explicitly call not_inplace_safe() during registration.
   [[nodiscard]] bool IsInplaceSafe() const { return is_inplace_safe_; }
 
-  /// Mark an IR-only declaration or zero-copy view that emits no execution-time
+  /// Mark an IR-only declaration or metadata view that emits no execution-time
   /// memory access. This is distinct from output-memory inheritance: mutating
-  /// operations such as tile.assemble also inherit an input memory space.
+  /// operations such as tile.assemble also inherit an input's memory space.
   inline OpRegistryEntry& no_execution_memory_access() {
-    execution_memory_access_evidence_ = ExecutionMemoryAccessEvidence::NoAccess;
+    has_execution_memory_access_ = false;
     return *this;
   }
 
-  /// Mark an operation whose complete tile access contract is functional:
-  /// every tile operand is read and every tile-typed SSA result is written.
-  /// This annotation does not by itself prove a whole-allocation access.
-  inline OpRegistryEntry& functional_execution_memory_access() {
-    execution_memory_access_evidence_ = ExecutionMemoryAccessEvidence::Functional;
-    return *this;
-  }
-
-  /// Access evidence used by conservative physical-hazard analyses.
-  [[nodiscard]] ExecutionMemoryAccessEvidence GetExecutionMemoryAccessEvidence() const {
-    return execution_memory_access_evidence_;
-  }
+  /// Whether lowering this operation performs an execution-time memory access.
+  [[nodiscard]] bool HasExecutionMemoryAccess() const { return has_execution_memory_access_; }
 
   /// Mark input argument `arg_index` as one whose buffer must NOT be reused as
   /// this op's output buffer. Unlike not_inplace_safe() (which forbids the
@@ -567,7 +557,7 @@ class OpRegistryEntry {
       deduce_type_;                               ///< Type deduction function
   std::optional<OpMemorySpaceSpec> memory_spec_;  ///< Memory space specification
   bool is_inplace_safe_{true};  ///< Whether the op supports in-place execution (src == dst buffer)
-  ExecutionMemoryAccessEvidence execution_memory_access_evidence_{ExecutionMemoryAccessEvidence::Unknown};
+  bool has_execution_memory_access_{true};     ///< False for declarations and pure metadata views.
   std::set<size_t> forbid_output_alias_args_;  ///< Input args whose buffer the output must not reuse
   std::optional<core_affinity::CoreAffinity> core_affinity_;     ///< Explicit core-affinity override
   std::optional<core_affinity::CrossCoreRole> cross_core_role_;  ///< Cross-core role (for predicates)

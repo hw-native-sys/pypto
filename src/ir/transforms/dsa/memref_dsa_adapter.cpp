@@ -48,6 +48,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/transforms/dsa/reuse_penalty_recognizer.h"
+#include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/utils/lifetime_analysis.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/type.h"
@@ -250,26 +251,50 @@ ExportedProblem BuildStructuredProblem(const FunctionPtr& func, const Allocation
       RecognizeReusePenaltyCandidates(func, allocation_plan, reuse_penalty_recognizer);
   ApplyExperimentalUnitPenaltyPolicy(&recognition);
   if (reuse_penalty_recognizer != DsaReusePenaltyRecognizer::Disabled) {
-    exported.document.metadata["reuse_penalty_recognizer"] =
-        reuse_penalty_recognizer == DsaReusePenaltyRecognizer::Linear ? "linear_adjacent_v1"
-                                                                      : "quadratic_reference_v1";
+    exported.document.metadata["reuse_penalty_recognizer"] = "quadratic_route_frontier_v3";
     exported.document.metadata["reuse_penalty_supported_allocations"] =
         std::to_string(recognition.supported_allocations);
     exported.document.metadata["reuse_penalty_candidate_pairs"] = std::to_string(recognition.candidate_pairs);
     exported.document.metadata["reuse_penalty_already_ordered_pairs"] =
         std::to_string(recognition.already_ordered_pairs);
+    exported.document.metadata["reuse_penalty_partially_supported_allocations"] =
+        std::to_string(recognition.partially_supported_allocations);
+    std::ostringstream observed_routes;
+    for (size_t index = 0; index < recognition.observed_routes.size(); ++index) {
+      if (index != 0) observed_routes << ";";
+      observed_routes << RecognizedAccessRouteToString(recognition.observed_routes[index]);
+    }
+    exported.document.metadata["recognized_access_routes_v1"] = observed_routes.str();
     exported.document.metadata["recognized_reuse_candidates"] = std::to_string(recognition.candidates.size());
+    exported.document.metadata["recognized_cross_resource_candidates"] =
+        std::to_string(recognition.cross_resource_candidates);
+    exported.document.metadata["recognized_same_resource_candidates"] =
+        std::to_string(recognition.same_resource_candidates);
+    // Compatibility aliases for existing experiment readers. Candidate records
+    // v2 below carry the target-independent route/resource evidence.
     exported.document.metadata["recognized_cross_pipe_candidates"] =
-        std::to_string(recognition.cross_pipe_candidates);
+        std::to_string(recognition.cross_resource_candidates);
     exported.document.metadata["recognized_same_pipe_candidates"] =
-        std::to_string(recognition.same_pipe_candidates);
+        std::to_string(recognition.same_resource_candidates);
     exported.document.metadata["recognized_write_after_read_candidates"] =
         std::to_string(recognition.write_after_read_candidates);
     exported.document.metadata["recognized_write_after_write_candidates"] =
         std::to_string(recognition.write_after_write_candidates);
+    exported.document.metadata["recognized_ordered_evidence_candidates"] =
+        std::to_string(recognition.ordered_evidence_candidates);
+    exported.document.metadata["recognized_alias_contract_candidates"] =
+        std::to_string(recognition.alias_contract_candidates);
+    exported.document.metadata["recognized_partial_access_candidates"] =
+        std::to_string(recognition.partial_access_candidates);
+    exported.document.metadata["recognized_incomplete_access_candidates"] =
+        std::to_string(recognition.incomplete_access_candidates);
     exported.document.metadata["recognized_nested_control_candidates"] =
         std::to_string(recognition.nested_control_candidates);
-    exported.document.metadata["reuse_penalty_promotion_policy"] = "cross_pipe_unit_v1";
+    exported.document.metadata["recognized_in_loop_candidates"] =
+        std::to_string(recognition.in_loop_candidates);
+    exported.document.metadata["recognized_loop_carried_candidates"] =
+        std::to_string(recognition.loop_carried_candidates);
+    exported.document.metadata["reuse_penalty_promotion_policy"] = "cross_resource_unit_v3";
     std::ostringstream candidate_records;
     bool first_record = true;
     for (const RecognizedReuseCandidate& candidate : recognition.candidates) {
@@ -279,7 +304,8 @@ ExportedProblem BuildStructuredProblem(const FunctionPtr& func, const Allocation
       if (!first_record) candidate_records << ";";
       first_record = false;
       candidate_records << *first << "," << *second << ","
-                        << (candidate.hazard == RecognizedReuseHazard::CrossPipe ? "cross_pipe" : "same_pipe")
+                        << (candidate.hazard == RecognizedReuseHazard::CrossResource ? "cross_pipe"
+                                                                                     : "same_pipe")
                         << ","
                         << (candidate.dependence == RecognizedReuseDependence::WriteAfterRead
                                 ? "write_after_read"
@@ -287,6 +313,37 @@ ExportedProblem BuildStructuredProblem(const FunctionPtr& func, const Allocation
                         << "," << (candidate.nested_control ? "nested" : "flat");
     }
     exported.document.metadata["recognized_reuse_candidate_records_v1"] = candidate_records.str();
+
+    std::ostringstream detailed_records;
+    first_record = true;
+    for (const RecognizedReuseCandidate& candidate : recognition.candidates) {
+      const auto& first = buffer_id_by_interval[candidate.first_interval];
+      const auto& second = buffer_id_by_interval[candidate.second_interval];
+      const auto& prior = buffer_id_by_interval[candidate.prior_interval];
+      const auto& next = buffer_id_by_interval[candidate.next_interval];
+      if (!first || !second || !prior || !next) continue;
+      if (!first_record) detailed_records << ";";
+      first_record = false;
+      detailed_records << *first << "," << *second << "," << *prior << "->" << *next << ","
+                       << RecognizedAccessRouteToString(candidate.prior_route) << "=>"
+                       << RecognizedAccessRouteToString(candidate.next_route)
+                       << ",arenas=" << MemorySpaceToString(candidate.prior_memory_space) << "->"
+                       << MemorySpaceToString(candidate.next_memory_space) << ","
+                       << (candidate.dependence == RecognizedReuseDependence::WriteAfterRead
+                               ? "write_after_read"
+                               : "write_after_write")
+                       << "," << (candidate.ordered_by_logical_dag ? "logical_order" : "no_logical_order")
+                       << "," << (candidate.requires_alias_contract ? "same_operation" : "inter_operation")
+                       << "," << (candidate.partial_access ? "partial_or_unknown" : "full_allocation") << ","
+                       << (candidate.incomplete_access_set ? "incomplete_access_set" : "complete_access_set")
+                       << "," << (candidate.in_loop ? "in_loop" : "outside_loop") << ","
+                       << (candidate.loop_carried ? "distance_1" : "distance_0")
+                       << ",sites=" << candidate.prior_access_order << "->" << candidate.next_access_order
+                       << ",ranges=" << candidate.prior_byte_offset << "+" << candidate.prior_byte_size
+                       << "->" << candidate.next_byte_offset << "+" << candidate.next_byte_size;
+      if (candidate.loop_carried) detailed_records << ",loop=" << candidate.loop_id;
+    }
+    exported.document.metadata["recognized_reuse_candidate_records_v3"] = detailed_records.str();
   }
   for (const RecognizedReusePenalty& source : recognition.penalties) {
     INTERNAL_CHECK(source.first_interval < buffer_id_by_interval.size() &&
@@ -298,15 +355,15 @@ ExportedProblem BuildStructuredProblem(const FunctionPtr& func, const Allocation
     if (!exported.document.problem.cost_model) exported.document.problem.cost_model = ::dsa::CostModel{};
     exported.document.problem.cost_model->reuse_penalties.push_back(
         {*first, *second, source.cost,
-         source.hazard == RecognizedReuseHazard::CrossPipe ? ::dsa::ReusePenaltyReason::kCrossPipe
-                                                           : ::dsa::ReusePenaltyReason::kGeneric});
+         source.hazard == RecognizedReuseHazard::CrossResource ? ::dsa::ReusePenaltyReason::kCrossPipe
+                                                               : ::dsa::ReusePenaltyReason::kGeneric});
   }
   if (exported.document.problem.cost_model &&
       !exported.document.problem.cost_model->reuse_penalties.empty()) {
     exported.document.profile = ::dsa::BenchmarkProfile::kPyptoResearchV1;
     exported.document.problem.objective = ::dsa::FitThenMinimizeReuseCostObjective();
     exported.document.metadata["experimental_features"] = "recognized_reuse_penalties";
-    exported.document.metadata["reuse_cost_model"] = "cross_pipe_unit_candidate_v1";
+    exported.document.metadata["reuse_cost_model"] = "cross_resource_unit_candidate_v3";
     exported.document.metadata["recognized_reuse_penalties"] =
         std::to_string(exported.document.problem.cost_model->reuse_penalties.size());
   }

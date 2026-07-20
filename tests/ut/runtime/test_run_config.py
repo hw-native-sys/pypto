@@ -544,7 +544,7 @@ class TestRunConfigCompileForwarding:
                 memory_planner=MemoryPlanner.DSA,
                 dsa_export_dir=str(tmp_path),
                 dsa_solution_dir=str(tmp_path / "solutions"),
-                dsa_reuse_penalty_recognizer=DsaReusePenaltyRecognizer.LINEAR,
+                dsa_reuse_penalty_recognizer=DsaReusePenaltyRecognizer.QUADRATIC,
                 ptoas_sync_summary_dir=str(tmp_path / "sync"),
             ),
         )
@@ -553,7 +553,7 @@ class TestRunConfigCompileForwarding:
         assert captured["memory_planner"] == MemoryPlanner.DSA
         assert captured["dsa_export_dir"] == str(tmp_path)
         assert captured["dsa_solution_dir"] == str(tmp_path / "solutions")
-        assert captured["dsa_reuse_penalty_recognizer"] == DsaReusePenaltyRecognizer.LINEAR
+        assert captured["dsa_reuse_penalty_recognizer"] == DsaReusePenaltyRecognizer.QUADRATIC
         assert captured["ptoas_sync_summary_dir"] == str(tmp_path / "sync")
         assert captured["skip_ptoas"] is False
 
