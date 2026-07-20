@@ -33,7 +33,16 @@ from typing import Any
 from pypto.ir.utils import use_parser_span
 from pypto.language.distributed.typing import CommCtx
 from pypto.language.distributed.typing.distributed_tensor import DistributedTensor
-from pypto.language.typing import Array, Ptr, Scalar, Tensor, Tile
+from pypto.language.typing import (
+    Array,
+    AsyncEvent,
+    AsyncSession,
+    PrefetchAsyncContext,
+    Ptr,
+    Scalar,
+    Tensor,
+    Tile,
+)
 from pypto.pypto_core import ir
 
 
@@ -87,6 +96,12 @@ def _wrap_arg(arg: Any) -> Any:
         return Ptr(expr=arg)
     if isinstance(t, ir.CommCtxType):
         return CommCtx(expr=arg)
+    if isinstance(t, ir.PrefetchAsyncContextType):
+        return PrefetchAsyncContext(expr=arg)
+    if isinstance(t, ir.AsyncEventType):
+        return AsyncEvent(expr=arg)
+    if isinstance(t, ir.AsyncSessionType):
+        return AsyncSession(expr=arg)
     return arg
 
 
@@ -100,7 +115,9 @@ def _unwrap_result(value: Any) -> Any:
     expects the bare Call so it can rebind ``_tuple_tmp`` and re-emit the
     ``TupleGetItemExpr``s; here we recover that Call.
     """
-    if isinstance(value, (Tensor, Tile, Scalar, Array, Ptr, CommCtx)):
+    if isinstance(
+        value, (Tensor, Tile, Scalar, Array, Ptr, CommCtx, PrefetchAsyncContext, AsyncEvent, AsyncSession)
+    ):
         return value.unwrap()
     if isinstance(value, tuple) and value and all(isinstance(v, (Tensor, Tile, Scalar)) for v in value):
         unwrapped = tuple(v.unwrap() for v in value)

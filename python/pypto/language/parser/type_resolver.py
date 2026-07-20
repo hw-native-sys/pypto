@@ -102,6 +102,19 @@ def _is_pl_yield_call(node: ast.expr) -> bool:
     return isinstance(func, ast.Name) and func.id == "yield_"
 
 
+# Async-prefetch handle annotations -> singleton IR type getter. Each handle is
+# reachable under two names: the IR type name the printer emits, and the DSL
+# wrapper class name users write in source.
+_OPAQUE_HANDLE_TYPE_GETTERS: dict[str, Callable[[], ir.Type]] = {
+    "PrefetchAsyncContextType": ir.PrefetchAsyncContextType.get,
+    "PrefetchAsyncContext": ir.PrefetchAsyncContextType.get,
+    "AsyncEventType": ir.AsyncEventType.get,
+    "AsyncEvent": ir.AsyncEventType.get,
+    "AsyncSessionType": ir.AsyncSessionType.get,
+    "AsyncSession": ir.AsyncSessionType.get,
+}
+
+
 _TYPE_KIND_NAMES: dict[type, str] = {
     ir.TensorType: "Tensor",
     ir.TileType: "Tile",
@@ -313,6 +326,13 @@ class TypeResolver:
         if self._is_comm_ctx_type_node(type_node):
             return ir.CommCtxType.get()
 
+        # Opaque async-prefetch handles — singleton markers with no subscript
+        # payload. Accepts both the printer's ``<prefix>.AsyncEventType`` form and
+        # the DSL wrapper name users write (``pl.AsyncEvent``).
+        opaque_handle = self._resolve_opaque_handle_type_node(type_node)
+        if opaque_handle is not None:
+            return opaque_handle
+
         # Handle attribute access like pl.Tensor
         if isinstance(type_node, ast.Attribute):
             raise ParserTypeError(
@@ -332,6 +352,24 @@ class TypeResolver:
         if isinstance(node, ast.Attribute):
             return isinstance(node.value, ast.Name) and node.value.id == "pld" and node.attr == "CommCtxType"
         return isinstance(node, ast.Name) and node.id == "CommCtxType"
+
+    @staticmethod
+    def _resolve_opaque_handle_type_node(node: ast.expr) -> ir.Type | None:
+        """Resolve an async-prefetch handle annotation, or None if not one.
+
+        Both spellings resolve to the same singleton: the IR type name emitted by
+        the printer (``AsyncEventType``) and the DSL wrapper class name a user
+        writes in source (``AsyncEvent``). A module prefix is optional so any
+        import alias (``pl.AsyncEvent``, ``lang.AsyncEvent``) works.
+        """
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            name = node.attr
+        elif isinstance(node, ast.Name):
+            name = node.id
+        else:
+            return None
+        getter = _OPAQUE_HANDLE_TYPE_GETTERS.get(name)
+        return getter() if getter is not None else None
 
     def _resolve_subscript_type(self, subscript_node: ast.Subscript) -> ir.Type:  # noqa: PLR0912
         """Resolve subscript type annotation.

@@ -527,7 +527,8 @@ StructuralHasher::result_type StructuralHasher::HashType(const TypePtr& type) {
       h = hash_combine(h, HashType(t));
     }
   } else if (IsA<MemRefType>(type) || IsA<UnknownType>(type) || IsA<PtrType>(type) ||
-             IsA<WindowBufferType>(type) || IsA<CommCtxType>(type)) {
+             IsA<WindowBufferType>(type) || IsA<CommCtxType>(type) || IsA<PrefetchAsyncContextType>(type) ||
+             IsA<AsyncEventType>(type) || IsA<AsyncSessionType>(type)) {
     // Singleton marker types (no fields beyond the type name hashed above).
   } else {
     INTERNAL_CHECK(false) << "HashType encountered unhandled Type: " << type->TypeName();

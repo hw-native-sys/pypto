@@ -234,6 +234,27 @@ class ChipWorker(Worker):
             raise ValueError(f"nbytes must be a positive int, got {nbytes!r}")
         return self._impl.malloc(nbytes, worker_id)
 
+    def sdma_prefetch_workspace_addr(self) -> int:
+        """Device address of the PTO-ISA async-SDMA scratch workspace, or 0 if unavailable.
+
+        Provisioned once per process and owned by the runtime — do **not** pair
+        this with :meth:`free`. Bind the result to the workspace parameter of a
+        kernel that uses ``pl.prefetch.*``, e.g.::
+
+            addr = worker.sdma_prefetch_workspace_addr()
+            ws = DeviceTensor(addr, (65536,), torch.int8)
+
+        Returns 0 when the workspace cannot be provisioned (a CANN without a
+        working ``aclnnShmemSdmaStarsQuery``, PTO-ISA compiled out, or the
+        simulator). 0 means the prefetch degrades to a no-op; it is not an error.
+
+        Never substitute a plain :meth:`malloc` buffer. The device-side session
+        init only rejects a *null* workspace, so an uninitialized non-null buffer
+        yields garbage SQ base addresses and hangs the kernel (AICore 507018).
+        """
+        self._require_initialized("sdma_prefetch_workspace_addr")
+        return int(self._impl.sdma_prefetch_workspace_addr())
+
     def free(self, ptr: int, *, worker_id: int = 0) -> None:
         """Release a pointer previously returned by :meth:`malloc`."""
         self._require_initialized("free")

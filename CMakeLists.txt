@@ -122,6 +122,7 @@ set(PYPTO_SOURCES
     src/ir/op/distributed/system.cpp
     src/ir/op/distributed/allreduce.cpp
     src/ir/op/distributed/intrinsics.cpp
+    src/ir/op/prefetch/prefetch_async.cpp
     src/ir/op/tensor_ops/broadcast.cpp
     src/ir/op/tensor_ops/elementwise.cpp
     src/ir/op/tensor_ops/matmul.cpp
@@ -303,6 +304,7 @@ set(PYPTO_SOURCES
     src/backend/common/pto_ops_memory.cpp
     src/backend/common/pto_ops_crosscore.cpp
     src/backend/common/pto_ops_distributed.cpp
+    src/backend/common/pto_ops_prefetch.cpp
     src/backend/common/soc.cpp
 )
 

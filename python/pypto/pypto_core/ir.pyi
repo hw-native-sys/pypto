@@ -1046,6 +1046,48 @@ class CommCtxType(Type):
         """Get the shared singleton CommCtxType instance."""
         ...
 
+class PrefetchAsyncContextType(Type):
+    """Singleton marker type for ``prefetch.make_context`` outputs.
+
+    Opaque handle to an asynchronous GM->L2 prefetch context, built from a GM
+    ``INT8`` scratch workspace. Consumed by ``prefetch.async_prefetch`` and
+    ``prefetch.session``; lowers to PTOAS ``!pto.prefetch_async_context``.
+    """
+
+    def __init__(self) -> None: ...
+    @staticmethod
+    def get() -> PrefetchAsyncContextType:
+        """Get the shared singleton PrefetchAsyncContextType instance."""
+        ...
+
+class AsyncEventType(Type):
+    """Singleton marker type for ``prefetch.async_prefetch`` outputs.
+
+    Opaque handle to an in-flight asynchronous DMA completion event. Paired
+    with an :class:`AsyncSessionType` in ``prefetch.wait``; lowers to PTOAS
+    ``!pto.async_event``.
+    """
+
+    def __init__(self) -> None: ...
+    @staticmethod
+    def get() -> AsyncEventType:
+        """Get the shared singleton AsyncEventType instance."""
+        ...
+
+class AsyncSessionType(Type):
+    """Singleton marker type for ``prefetch.session`` outputs.
+
+    Opaque handle to the asynchronous DMA session an event belongs to. Paired
+    with an :class:`AsyncEventType` in ``prefetch.wait``; lowers to PTOAS
+    ``!pto.async_session``.
+    """
+
+    def __init__(self) -> None: ...
+    @staticmethod
+    def get() -> AsyncSessionType:
+        """Get the shared singleton AsyncSessionType instance."""
+        ...
+
 class MemRef(Var):
     """Memory reference variable for shaped types (inherits from Var)."""
 

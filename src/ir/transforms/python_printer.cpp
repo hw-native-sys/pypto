@@ -626,6 +626,20 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
     return "pld.CommCtxType";
   }
 
+  // Async-prefetch handle markers — fieldless singletons, rendered as bare
+  // attributes on the main DSL namespace so they round-trip through the parser.
+  if (As<PrefetchAsyncContextType>(type)) {
+    return prefix_ + ".PrefetchAsyncContextType";
+  }
+
+  if (As<AsyncEventType>(type)) {
+    return prefix_ + ".AsyncEventType";
+  }
+
+  if (As<AsyncSessionType>(type)) {
+    return prefix_ + ".AsyncSessionType";
+  }
+
   return prefix_ + ".UnknownType";
 }
 

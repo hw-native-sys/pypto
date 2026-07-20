@@ -193,6 +193,6 @@
 | pto.comm.ttest | TTEST | comm | ✅ | — | — | — | ❌ | distributed |
 | pto.comm.twait | TWAIT | comm | ✅ | — | — | — | ✅ test_l3_notify_wait | distributed |
 | pto.comm.build_async_session | BuildAsyncSession | comm | ✅ | — | — | — | ❌ | distributed |
-| pto.tprefetch_async | TPREFETCH_ASYNC | comm | ❌ | — | — | — | — | ptoas未实现 (ISA_ONLY) |
+| pto.tprefetch_async | TPREFETCH_ASYNC | comm | ✅ | — | — | ❌ | — | GM→L2 异步预取；pypto 前端为 `pl.prefetch.*`（`make_context` / `async_prefetch` / `session` / `wait`），非 tile/tensor op。仅 A3/A5 生效，其他平台 PTOAS 退化为 no-op |
 
-**统计**：共 148 个 PTOAS op 行；PTOAS 提供接口 143；pypto 前端已写好 98；有 ST 测试 67。
+**统计**：共 148 个 PTOAS op 行；PTOAS 提供接口 144；pypto 前端已写好 98（另有 `pl.prefetch.*` 一族 4 个非 tile/tensor op）；有 ST 测试 67。
