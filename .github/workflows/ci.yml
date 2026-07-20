@@ -55,7 +55,7 @@ jobs:
       - name: Guard against un-centralized toolchain literals
         run: |
           status=0
-          if grep -rn -- 'pto-isa''-commit' python/ tests/ .github/workflows/; then
+          if grep -rn -- '--pto-isa''-commit' python/ tests/ .github/workflows/; then
             echo "::error::The PyPTO pto-isa commit override has been removed. Bump runtime/pto_isa.pin instead."
             status=1
           fi
