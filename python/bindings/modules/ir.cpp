@@ -142,7 +142,7 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
       kwargs.emplace_back(key, nb::cast<PadValue>(item.second));
     } else if (nb::isinstance<ArgDirection>(item.second)) {
       kwargs.emplace_back(key, nb::cast<ArgDirection>(item.second));
-    } else if (key == kAttrTaskIdVar && nb::isinstance<Var>(item.second)) {
+    } else if ((key == kAttrTaskIdVar || key == kAttrPTOOutputHandle) && nb::isinstance<Var>(item.second)) {
       // ``with pl.at(...) as tid:`` stashes the captured TaskId Var directly
       // (not wrapped as an Expr). Stored as ``VarPtr`` to match the C++ attr
       // reader in ``OutlineIncoreScopes``.
@@ -185,7 +185,7 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
         }
         kwargs.emplace_back(key, std::move(idxs));
       } else if (key == kAttrManualDepEdges || key == kAttrCompilerManualDepEdges ||
-                 key == kAttrArgDirOverrideVars || key == kAttrDumpVars) {
+                 key == kAttrArgDirOverrideVars || key == kAttrDumpVars || key == kAttrPTOInputHandles) {
         std::vector<VarPtr> vars;
         for (auto elem : seq) {
           if (!nb::isinstance<Var>(elem)) {
@@ -595,6 +595,21 @@ void BindIR(nb::module_& m) {
       .value("col_major", TileLayout::col_major, "Column-major layout")
       .export_values();
 
+  // PTOTileBufType - internal mutable destination-handle type for PTO target IR.
+  // Register it after its enum-valued fields so nanobind can materialize the
+  // constructor defaults. It remains absent from the pypto.language DSL.
+  auto pto_tile_buf_type_class =
+      nb::class_<PTOTileBufType, Type>(ir, "PTOTileBufType", "Low-level PTO mutable tile-buffer handle type");
+  pto_tile_buf_type_class.def(
+      nb::init<MemorySpace, DataType, int64_t, int64_t, TileLayout, TileLayout, uint64_t, PadValue,
+               std::optional<int64_t>, std::optional<int64_t>>(),
+      nb::arg("memory_space"), nb::arg("dtype"), nb::arg("rows"), nb::arg("cols"),
+      nb::arg("blayout") = TileLayout::row_major, nb::arg("slayout") = TileLayout::none_box,
+      nb::arg("fractal") = static_cast<uint64_t>(512), nb::arg("pad") = PadValue::null,
+      nb::arg("valid_rows") = nb::none(), nb::arg("valid_cols") = nb::none(),
+      "Create an internal PTO tile-buffer handle type");
+  BindFields<PTOTileBufType>(pto_tile_buf_type_class);
+
   // TileView - immutable struct for tile view information.
   //
   // Fields are read-only from Python so that hash and equality remain stable
@@ -736,6 +751,71 @@ void BindIR(nb::module_& m) {
         return result;
       },
       nb::arg("op_name"), "Get memory space specification for a registered operator");
+
+  ir.def(
+      "get_pto_op_spec",
+      [](const std::string& op_name) -> nb::object {
+        auto& registry = OpRegistry::GetInstance();
+        if (!registry.IsRegistered(op_name)) return nb::none();
+        const auto& spec = registry.GetEntry(op_name).GetPTOOpSpec();
+        if (!spec.has_value()) return nb::none();
+
+        auto role_name = [](PTOOperandRole role) {
+          switch (role) {
+            case PTOOperandRole::Metadata:
+              return "metadata";
+            case PTOOperandRole::Input:
+              return "input";
+            case PTOOperandRole::Output:
+              return "output";
+          }
+          return "unknown";
+        };
+        auto effect_name = [](PTOMemoryEffect effect) {
+          switch (effect) {
+            case PTOMemoryEffect::None:
+              return "none";
+            case PTOMemoryEffect::Read:
+              return "read";
+            case PTOMemoryEffect::Write:
+              return "write";
+            case PTOMemoryEffect::ReadWrite:
+              return "read_write";
+            case PTOMemoryEffect::Allocate:
+              return "allocate";
+          }
+          return "unknown";
+        };
+        auto constraint_name = [](PTOOperandTypeConstraint constraint) {
+          switch (constraint) {
+            case PTOOperandTypeConstraint::Any:
+              return "any";
+            case PTOOperandTypeConstraint::Scalar:
+              return "scalar";
+            case PTOOperandTypeConstraint::TileBuffer:
+              return "tile_buffer";
+          }
+          return "unknown";
+        };
+
+        nb::dict result;
+        nb::list groups;
+        for (const auto& group : spec->operand_groups) {
+          nb::dict item;
+          item["role"] = role_name(group.role);
+          item["effect"] = effect_name(group.effect);
+          item["type"] = constraint_name(group.type_constraint);
+          item["min_count"] = group.min_count;
+          item["max_count"] = group.max_count;
+          groups.append(item);
+        }
+        result["operand_groups"] = groups;
+        result["result_kind"] = spec->result_kind == PTOResultKind::TileBuffer ? "tile_buffer" : "none";
+        result["result_effect"] = effect_name(spec->result_effect);
+        result["pure"] = spec->IsPure();
+        return result;
+      },
+      nb::arg("op_name"), "Get the explicit operand/effect schema for an internal PTO target op");
 
   // Var - const shared_ptr
   auto var_class = nb::class_<Var, Expr>(ir, "Var", "Variable reference expression");

@@ -115,7 +115,12 @@ void BindPass(nb::module_& m) {
       .value("IterArgCarryClassified", IRProperty::IterArgCarryClassified,
              "Every ForStmt with iter_args in an Orchestration function carries an "
              "attrs['iter_arg_rebind_<i>'] classification per slot (plus attrs['iter_arg_array_size_<i>'] "
-             "for TaskId array carries), so orchestration codegen reads the carry lowering");
+             "for TaskId array carries), so orchestration codegen reads the carry lowering")
+      .value("PTOHandlesMaterialized", IRProperty::PTOHandlesMaterialized,
+             "Supported high-level Tile ops have explicit input/output PTO handle attrs and "
+             "dominance-valid pto.alloc_tile definitions")
+      .value("PTOBufferized", IRProperty::PTOBufferized,
+             "PTO target ops use explicit SSA tile-buffer handles, DPS outputs, and declared effects");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");
@@ -340,6 +345,18 @@ void BindPass(nb::module_& m) {
              "Create an allocate memory address pass\n\n"
              "Allocates real memory addresses for existing alloc operations.\n"
              "Updates MemRef addresses and alloc statement arguments in place.");
+
+  passes.def("materialize_pto_tile_handles", &pass::MaterializePTOTileHandles,
+             "Materialize explicit PTO tile-buffer handles at the codegen boundary.\n\n"
+             "Preserves logical Tile SSA while recording verified input/output handles for the supported "
+             "static-2D operation and structured-control-flow slice. Unsupported functions are deferred "
+             "as whole units to legacy codegen. Runs in the default Tile pipelines.");
+
+  passes.def("lower_tile_to_pto_ir", &pass::LowerTileToPTOIR,
+             "Rewrite the verified PTO handle plan to destination-passing target IR.\n\n"
+             "Eliminates logical Tile values for the supported static-2D slice. Target calls carry "
+             "explicit PTO buffer handles, partition offsets, and valid extents while structured "
+             "scalar/Tensor control flow remains in SSA form. Runs in the default Tile pipelines.");
 
   passes.def("fuse_create_assemble_to_slice", &pass::FuseCreateAssembleToSlice,
              "Fuse tensor.create + tensor.assemble into tensor.slice in Orchestration functions\n\n"

@@ -1963,6 +1963,31 @@ def test_pto_codegen_keeps_loop_carried_tile_distinct_from_reshape_result():
     assert "rows=1, cols=16" in tadd_line, f"Expected row-vector operands in tadd, got: {tadd_line}"
 
 
+def test_pto_codegen_target_if_uses_float_comparison():
+    """The target printer must select cmpf predicates for floating conditions."""
+
+    @pl.program
+    class FloatConditionProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def repro(
+            self,
+            flag: pl.Scalar[pl.FP32],
+            input: pl.Tensor[[16, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            seed: pl.Tile[[16, 16], pl.FP32] = pl.load(input, [0, 0], [16, 16])
+            if flag == 1.0:
+                result = pl.add(seed, 1.0)
+            else:
+                result = pl.mul(seed, 2.0)
+            return pl.store(result, [0, 0], out)
+
+    lines = _get_mlir_lines(_generate_default_mlir(FloatConditionProgram))
+    comparison = _single_line(lines, "arith.cmpf")
+    assert "arith.cmpf oeq" in comparison, f"Expected ordered float comparison, got: {comparison}"
+    assert not _find_lines(lines, "arith.cmpi"), f"Float condition must not use cmpi: {lines}"
+
+
 def test_pto_codegen_if_stmt_only_returns_scalars_for_tile_phi():
     """IfStmt should materialize tile phi values via branch-local copies, not scf.if results."""
 
@@ -2380,6 +2405,27 @@ class TestColumnVectorCodegen:
         assert "shape = [%c16_index, %c128_index]" in a_view
         assert "strides = [%c128_index, %c1_index]" in a_view
         assert "layout = #pto.layout<nd>" in a_view
+
+    def test_rank4_derived_stride_constants_are_declared(self):
+        """Derived rank-4 strides are declared before make_tensor_view uses them."""
+
+        @pl.program
+        class Rank4Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[2, 8, 16, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[2, 8, 16, 128], pl.FP32]],
+            ) -> pl.Tensor[[2, 8, 16, 128], pl.FP32]:
+                t = pl.load(a, [0, 0, 0, 0], [2, 8, 16, 128])
+                return pl.store(t, [0, 0, 0, 0], out)
+
+        mlir_code = _generate_default_mlir(Rank4Program)
+        lines = _get_mlir_lines(mlir_code)
+        a_view = _single_line(lines, "pto.make_tensor_view %arg0")
+        assert "strides = [%c16384_index, %c2048_index, %c128_index, %c1_index]" in a_view
+        assert "%c16384_index = arith.constant 16384 : index" in mlir_code, mlir_code
+        assert "%c2048_index = arith.constant 2048 : index" in mlir_code, mlir_code
 
     def test_row_vector_stays_nd(self):
         """[1, N] row-vector tensor stays ND (only [M, 1] gets forced DN)."""

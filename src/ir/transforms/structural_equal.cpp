@@ -1236,6 +1236,26 @@ bool StructuralEqualImpl<AssertMode>::EqualType(const TypePtr& lhs, const TypePt
       return false;
     }
     return true;
+  } else if (auto lhs_pto_buf = As<PTOTileBufType>(lhs)) {
+    auto rhs_pto_buf = As<PTOTileBufType>(rhs);
+    if (!rhs_pto_buf) {
+      if constexpr (AssertMode) {
+        ThrowMismatch("Type cast failed for PTOTileBufType", IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
+    if (lhs_pto_buf->memory_space_ != rhs_pto_buf->memory_space_ ||
+        lhs_pto_buf->dtype_ != rhs_pto_buf->dtype_ || lhs_pto_buf->rows_ != rhs_pto_buf->rows_ ||
+        lhs_pto_buf->cols_ != rhs_pto_buf->cols_ || lhs_pto_buf->blayout_ != rhs_pto_buf->blayout_ ||
+        lhs_pto_buf->slayout_ != rhs_pto_buf->slayout_ || lhs_pto_buf->fractal_ != rhs_pto_buf->fractal_ ||
+        lhs_pto_buf->pad_ != rhs_pto_buf->pad_ || lhs_pto_buf->valid_rows_ != rhs_pto_buf->valid_rows_ ||
+        lhs_pto_buf->valid_cols_ != rhs_pto_buf->valid_cols_) {
+      if constexpr (AssertMode) {
+        ThrowMismatch("PTOTileBufType field mismatch", IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
+    return true;
   } else if (auto lhs_tuple = As<TupleType>(lhs)) {
     auto rhs_tuple = As<TupleType>(rhs);
     if (!rhs_tuple) {

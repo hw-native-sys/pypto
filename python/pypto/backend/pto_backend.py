@@ -424,13 +424,14 @@ def _generate_arg_unpacking(func: _ir_core.Function, *, uses_spmd: bool = False)
     # Separate params into tensors and scalar-like values for tensors-first dispatch order.
     # CommCtxType is materialized as an explicit scalar payload by
     # MaterializeDistTensorCtx and lowered to a GM int64_t* in the wrapper.
-    tensor_params = [p for p in func.params if isinstance(p.type, _ir_core.TensorType)]
+    user_params = [p for p in func.params if p.name_hint not in _SYNTHETIC_SPMD_PARAMS]
+    tensor_params = [p for p in user_params if isinstance(p.type, _ir_core.TensorType)]
     scalar_params = [
-        p for p in func.params if isinstance(p.type, (_ir_core.ScalarType, _ir_core.CommCtxType))
+        p for p in user_params if isinstance(p.type, (_ir_core.ScalarType, _ir_core.CommCtxType))
     ]
     other_params = [
         p
-        for p in func.params
+        for p in user_params
         if not isinstance(p.type, (_ir_core.TensorType, _ir_core.ScalarType, _ir_core.CommCtxType))
     ]
     if other_params:
@@ -536,6 +537,9 @@ _SPMD_BLOCK_OPS = frozenset(
     {_ir_core.get_op("tile.get_block_idx").name, _ir_core.get_op("tile.get_block_num").name}
 )
 _SUBBLOCK_OPS = frozenset({_ir_core.get_op("tile.get_subblock_idx").name})
+_SYNTHETIC_SPMD_PARAMS = frozenset(
+    {"__pypto_spmd_block_idx", "__pypto_spmd_block_num", "__pypto_spmd_subblock_idx"}
+)
 
 
 def _function_uses_ops(func: _ir_core.Function, op_names: frozenset[str]) -> bool:
@@ -573,7 +577,9 @@ def _uses_dynamic_subblock_id(func: _ir_core.Function) -> bool:
     must detect ``tile.get_subblock_idx`` wherever it appears (including nested
     in larger expressions) to stay consistent with the C++ signature emission.
     """
-    return _function_uses_ops(func, _SUBBLOCK_OPS)
+    return bool(getattr(func, "attrs", {}).get("pto.uses_subblock_param", False)) or _function_uses_ops(
+        func, _SUBBLOCK_OPS
+    )
 
 
 def _requires_dual_aiv_dispatch(func: _ir_core.Function) -> bool:
@@ -592,7 +598,9 @@ def _uses_spmd_block_ops(func: _ir_core.Function) -> bool:
     read from the dispatch payload via ``get_block_idx(args)`` / ``get_block_num(args)``
     (defined in ``intrinsic.h``), so the wrapper needs a macro bridge.
     """
-    return _function_uses_ops(func, _SPMD_BLOCK_OPS)
+    return bool(getattr(func, "attrs", {}).get("pto.uses_spmd_block_params", False)) or _function_uses_ops(
+        func, _SPMD_BLOCK_OPS
+    )
 
 
 def _needs_runtime_subblock_bridge(func: _ir_core.Function) -> bool:

@@ -2,6 +2,16 @@
 
 The PTO Codegen (`PTOCodegen`) generates MLIR code in PTO-ISA dialect from PyPTO IR. It transforms high-level PyPTO programs into low-level PTO instructions suitable for accelerator execution.
 
+> The default pipeline now lowers the supported logical-Tile subset through an
+> explicit-buffer target IR and a mechanical printer. See
+> [Explicit PTO Target IR](02-explicit_pto_target_ir.md). Unsupported functions
+> are marked before mutation and remain wholly on the legacy lowering path.
+
+The visitor and helpers documented below describe the legacy logical-Tile entry,
+which remains available to direct `PTOCodegen` callers and for comparison tests.
+Programs produced by the default pass pipeline enter through `PTOIRPrinter`
+instead.
+
 ## Design Principle: Strict 1-to-1 Mapping
 
 Codegen must be a **strict 1-to-1 translation** from IR to generated code. Each IR node maps directly to its corresponding output construct — no optimization, analysis, or indirection transformation should occur in the codegen layer.

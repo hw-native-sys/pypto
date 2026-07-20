@@ -410,6 +410,19 @@ inline ArgDirection StringToArgDirection(const std::string& str) {
 inline constexpr const char* kAttrArgDirections = "arg_directions";
 
 /**
+ * @brief Reserved attrs for the transitional Tile-to-PTO handle plan
+ *
+ * ``MaterializePTOTileHandles`` attaches these attrs to supported high-level
+ * tile calls while inserting explicit ``pto.alloc_tile`` definitions. Input
+ * handles are ordered by the call's Tile-typed operands (non-Tile operands are
+ * omitted); the optional output handle names the destination buffer allocated
+ * for a Tile-typed result. ``LowerTileToPTOIR`` consumes both attrs and removes
+ * the high-level call in the next lowering stage.
+ */
+inline constexpr const char* kAttrPTOInputHandles = "pto_input_handles";
+inline constexpr const char* kAttrPTOOutputHandle = "pto_output_handle";
+
+/**
  * @brief Function call expression
  *
  * Represents a function call with an operation and arguments.

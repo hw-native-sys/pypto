@@ -352,7 +352,7 @@ ExprPtr IRMutator::VisitExpr_(const CallPtr& op) {
   new_attrs.reserve(op->attrs_.size());
   for (const auto& [k, v] : op->attrs_) {
     if (k == kAttrManualDepEdges || k == kAttrCompilerManualDepEdges || k == kAttrArgDirOverrideVars ||
-        k == kAttrDumpVars) {
+        k == kAttrDumpVars || k == kAttrPTOInputHandles) {
       const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
       if (edges) {
         std::vector<VarPtr> new_edges;
@@ -382,6 +382,17 @@ ExprPtr IRMutator::VisitExpr_(const CallPtr& op) {
         if (any_changed) {
           attrs_changed = true;
           new_attrs.emplace_back(k, std::any(std::move(new_edges)));
+          continue;
+        }
+      }
+    } else if (k == kAttrPTOOutputHandle) {
+      const auto* handle = std::any_cast<VarPtr>(&v);
+      if (handle && *handle) {
+        auto remapped = AsVarLike(ExprFunctor<ExprPtr>::VisitExpr(*handle));
+        INTERNAL_CHECK_SPAN(remapped, op->span_) << "PTO output handle attribute mutated to non-Var";
+        if (remapped.get() != handle->get()) {
+          attrs_changed = true;
+          new_attrs.emplace_back(k, std::any(std::move(remapped)));
           continue;
         }
       }

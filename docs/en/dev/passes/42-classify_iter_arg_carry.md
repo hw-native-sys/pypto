@@ -24,10 +24,11 @@ to a fixed-extent `PTO2TaskId[N]` fence array. `N` is the constant trip count of
 the `pl.parallel` loop that owns the array; a `Sequential` loop threading that
 array through an inner `pl.parallel` inherits the inner extent.
 
-**When to use**: last pass in the `Default` and `DebugTileOptimization`
-strategies, immediately after
-[`MaterializeRuntimeScopes`](41-materialize_runtime_scopes.md). Running last
-means the classified IR is exactly the IR codegen lowers.
+**When to use**: immediately after
+[`MaterializeRuntimeScopes`](41-materialize_runtime_scopes.md) in the `Default`
+and `DebugTileOptimization` strategies. PTO target lowering follows, but only
+modifies InCore functions, so the classified Orchestration IR is exactly the IR
+consumed by orchestration codegen.
 
 ## Alias classes
 

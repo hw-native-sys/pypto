@@ -32,6 +32,7 @@
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/codegen/distributed/comm_layout.h"
+#include "pypto/codegen/pto/pto_ir_printer.h"
 #include "pypto/codegen/pto/pto_type_utils.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
@@ -41,6 +42,7 @@
 #include "pypto/ir/memref.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/pto_target_lowering.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
@@ -76,6 +78,21 @@ using ir::YieldStmtPtr;
 namespace transform_utils = ir::transform_utils;
 
 namespace {
+
+bool ContainsDestinationPassingPTOIR(const FunctionPtr& function) {
+  if (!function || !function->body_) return false;
+  if (function->GetAttr<bool>(ir::kAttrPTOTargetLoweringDeferred, false)) return false;
+  class Finder final : public ir::IRVisitor {
+   public:
+    void VisitExpr_(const CallPtr& call) override {
+      if (call->op_ && call->op_->name_.rfind("pto.", 0) == 0) found = true;
+      if (!found) IRVisitor::VisitExpr_(call);
+    }
+    bool found = false;
+  } finder;
+  finder.VisitStmt(function->body_);
+  return finder.found;
+}
 
 // Full-MemRef-identity key used by PTOAS memory-planner codegen to decide when
 // two tile variables denote the *same* buffer (and must share one tile_buf
@@ -421,7 +438,11 @@ std::string PTOCodegen::Generate(const ProgramPtr& program, bool emit_tile_addr)
     INTERNAL_CHECK_SPAN(ir::IsInCoreType(func->func_type_), func->span_)
         << "PTO backend only supports InCore-variant functions (InCore, AIC, AIV), but function '"
         << func->name_ << "' has type " << ir::FunctionTypeToString(func->func_type_);
-    GenerateFunction(func);
+    if (ContainsDestinationPassingPTOIR(func)) {
+      stream_ << PTOIRPrinter(backend_).GenerateFunction(func, emit_tile_addr);
+    } else {
+      GenerateFunction(func);
+    }
   }
 
   // Emit `@CommRemoteOffset_<dtype>` helpers at module end. Dtypes were

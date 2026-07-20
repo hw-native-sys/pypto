@@ -108,6 +108,8 @@ set(PYPTO_SOURCES
     src/ir/op/tile_ops/gather.cpp
     src/ir/op/tile_ops/paged_gather.cpp
     src/ir/op/tile_ops/scatter.cpp
+    src/ir/op/pto_ops/memory.cpp
+    src/ir/op/pto_ops/elementwise.cpp
     src/ir/op/sync_ops/sync.cpp
     src/ir/op/sync_ops/cross_core.cpp
     src/ir/op/sync_ops/task.cpp
@@ -150,6 +152,8 @@ set(PYPTO_SOURCES
 
     # IR - Transforms
     src/ir/transforms/allocate_memory_addr_pass.cpp
+    src/ir/transforms/materialize_pto_tile_handles_pass.cpp
+    src/ir/transforms/lower_tile_to_pto_ir_pass.cpp
     src/ir/transforms/canonicalize_tile_slice_pass.cpp
     src/ir/transforms/fold_no_op_reshape_pass.cpp
     src/ir/transforms/stamp_tfree_split_pass.cpp
@@ -246,6 +250,7 @@ set(PYPTO_SOURCES
     src/ir/verifier/verify_structured_ctrl_flow_pass.cpp
     src/ir/verifier/verify_out_param_pass.cpp
     src/ir/verifier/verify_array_not_escaped.cpp
+    src/ir/verifier/verify_pto_ir.cpp
     src/ir/verifier/verify_inout_use.cpp
     src/ir/verifier/verify_return_params_explicit.cpp
     src/ir/verifier/verify_pipeline_loop_valid.cpp
@@ -276,6 +281,7 @@ set(PYPTO_SOURCES
     src/codegen/orchestration/orchestration_codegen.cpp
     src/codegen/orchestration_op_registry.cpp
     src/codegen/pto/pto_codegen.cpp
+    src/codegen/pto/pto_ir_printer.cpp
     src/codegen/pto/pto_control_flow_codegen.cpp
     src/codegen/pto/pto_scalar_expr_codegen.cpp
     src/codegen/pto/pto_type_utils.cpp

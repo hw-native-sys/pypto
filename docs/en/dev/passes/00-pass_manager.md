@@ -93,6 +93,8 @@ struct PassProperties {
 | Simplify | — | — | — |
 | MaterializeRuntimeScopes | SplitIncoreOrch, CallDirectionsResolved | RuntimeScopesMaterialized | — |
 | ClassifyIterArgCarry | CallDirectionsResolved, RuntimeScopesMaterialized | IterArgCarryClassified, RuntimeScopesMaterialized | — |
+| MaterializePTOTileHandles | SSAForm, SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D, TileMemoryInferred, NormalizedStmtStructure | required properties plus PTOHandlesMaterialized | — |
+| LowerTileToPTOIR | SSAForm, SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D, TileMemoryInferred, NormalizedStmtStructure, PTOHandlesMaterialized | SSAForm, SplitIncoreOrch, NormalizedStmtStructure, PTOBufferized | IncoreTileOps, HasMemRefs, AllocatedMemoryAddr, TileOps2D, TileMemoryInferred, PTOHandlesMaterialized |
 
 > **Note**: VerifySSA and TypeCheck are **PropertyVerifiers** (verification rules), not Passes. They run via `VerificationInstrument` or the `run_verifier()` utility — see [Verifier](99-verifier.md).
 
@@ -355,7 +357,7 @@ ir.compile(program, verification_level=ir.VerificationLevel.NONE)
 
 | Method | Description |
 | ------ | ----------- |
-| `get_strategy(strategy)` | Get PassManager configured for strategy |
+| `get_strategy(strategy, lower_to_pto_ir=True)` | Get PassManager configured for strategy; the optional debug switch preserves logical Tile IR |
 | `run_passes(program, dump_ir, output_dir, prefix)` | Execute passes via PassPipeline |
 | `get_pass_names()` | Get names of all passes |
 | `passes` / `pass_names` | Read-only snapshots derived from the underlying PassPipeline |
@@ -369,6 +371,12 @@ from pypto.pypto_core import passes
 # Default usage
 pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
 result = pm.run_passes(program)
+
+# Logical-IR analysis/debug consumers only; production codegen keeps the default.
+logical_pm = ir.PassManager.get_strategy(
+    ir.OptimizationStrategy.Default,
+    lower_to_pto_ir=False,
+)
 
 # With verification via PassContext
 with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
@@ -411,10 +419,16 @@ The PTO-oriented tile stage shared by `Default` and `DebugTileOptimization` is:
 30. `Simplify`
 31. [`MaterializeRuntimeScopes`](41-materialize_runtime_scopes.md) (inserts AUTO RuntimeScopeStmt so orchestration codegen emits PTO2_SCOPE 1:1)
 32. [`ClassifyIterArgCarry`](42-classify_iter_arg_carry.md) (stamps each ForStmt iter_arg as trivial alias / rebind carry, and sizes manual-scope TaskId fence arrays)
+33. [`MaterializePTOTileHandles`](43-materialize_pto_tile_handles.md) (materializes explicit PTO buffer handles while retaining logical Tile SSA)
+34. [`LowerTileToPTOIR`](44-lower_tile_to_pto_ir.md) (rewrites the supported slice to destination-passing PTO target IR)
 
 `DebugTileOptimization` is a debug-only strategy for inspecting this tile stage
 without the tensor-only prefix passes. Use `Default` for normal compilation and
 for non-strategy-specific tests so the maintained pipeline stays covered.
+Both strategies enable the final PTO target-IR passes by default. The
+`lower_to_pto_ir=False` option removes only `MaterializePTOTileHandles` and
+`LowerTileToPTOIR`; it exists for logical-IR interpreters and analyses and must
+not be used by the production codegen path.
 
 [`ResolveBackendOpLayouts`](17-resolve_backend_op_layouts.md) repairs
 backend-constrained elementwise tile ops using registered layout metadata.

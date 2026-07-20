@@ -65,6 +65,8 @@ TENSOR_OPTIMIZATION_PASSES = [
     "Simplify",
     "MaterializeRuntimeScopes",
     "ClassifyIterArgCarry",
+    "MaterializePTOTileHandles",
+    "LowerTileToPTOIR",
 ]
 
 DEBUG_TILE_OPTIMIZATION_PASSES = [
@@ -107,6 +109,8 @@ DEBUG_TILE_OPTIMIZATION_PASSES = [
     "Simplify",
     "MaterializeRuntimeScopes",
     "ClassifyIterArgCarry",
+    "MaterializePTOTileHandles",
+    "LowerTileToPTOIR",
 ]
 
 
@@ -163,6 +167,15 @@ class TestPassManagerBasics:
         assert pm.strategy == ir.OptimizationStrategy.DebugTileOptimization
         assert pm.pass_names == DEBUG_TILE_OPTIMIZATION_PASSES
         assert not set(TENSOR_ONLY_PASSES).intersection(pm.pass_names)
+
+    def test_pass_manager_can_preserve_logical_tile_ir_for_debug_consumers(self):
+        """The explicit opt-out removes only the codegen-boundary target passes."""
+        pm = ir.PassManager.get_strategy(
+            ir.OptimizationStrategy.Default,
+            lower_to_pto_ir=False,
+        )
+        assert pm.pass_names == TENSOR_OPTIMIZATION_PASSES[:-2]
+        assert pm.lower_to_pto_ir is False
 
     def test_auto_scope_deps_switch_forwarded_to_pass_factory(self, monkeypatch):
         """PassManager forwards the high-level AUTO-scope deps switch."""

@@ -284,7 +284,7 @@ def test_split_k_matmul_numerically_correct():
     b = torch.randn(_K, _N, dtype=torch.float32)
     c = torch.zeros(_M, _N, dtype=torch.float32)
 
-    post = _split_k_program().compile_for_test(a, b, c)
+    post = _split_k_program().compile_logical_for_test(a, b, c)
     code = torch_codegen(post)
     ns: dict = {}
     exec(code, ns)  # noqa: S102 — executing generated reference code is the point
@@ -334,7 +334,7 @@ def test_split_k_down_projection_pattern_numerically_correct():
     resid = torch.randn(_DM, _DN, dtype=torch.float32)
     out = torch.zeros(_DM, _DN, dtype=torch.bfloat16)
 
-    post = _down_proj_split_k_program().compile_for_test(mlp, w_down, resid, out)
+    post = _down_proj_split_k_program().compile_logical_for_test(mlp, w_down, resid, out)
     code = torch_codegen(post)
     ns: dict = {}
     exec(code, ns)  # noqa: S102 — executing generated reference code is the point

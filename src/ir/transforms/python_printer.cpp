@@ -45,6 +45,7 @@
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/pto_target_lowering.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
@@ -592,6 +593,43 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
     return oss.str();
   }
 
+  if (auto pto_buf_type = As<PTOTileBufType>(type)) {
+    std::ostringstream oss;
+    oss << "PTOTileBufType<memory_space=" << MemorySpaceToString(pto_buf_type->memory_space_)
+        << ", dtype=" << DataTypeToString(pto_buf_type->dtype_) << ", rows=" << pto_buf_type->rows_
+        << ", cols=" << pto_buf_type->cols_ << ", blayout=" << TileLayoutToString(pto_buf_type->blayout_)
+        << ", slayout=" << TileLayoutToString(pto_buf_type->slayout_)
+        << ", fractal=" << pto_buf_type->fractal_ << ", pad=";
+    switch (pto_buf_type->pad_) {
+      case PadValue::null:
+        oss << "null";
+        break;
+      case PadValue::zero:
+        oss << "zero";
+        break;
+      case PadValue::max:
+        oss << "max";
+        break;
+      case PadValue::min:
+        oss << "min";
+        break;
+    }
+    oss << ", valid_rows=";
+    if (pto_buf_type->valid_rows_.has_value()) {
+      oss << pto_buf_type->valid_rows_.value_or(0);
+    } else {
+      oss << "?";
+    }
+    oss << ", valid_cols=";
+    if (pto_buf_type->valid_cols_.has_value()) {
+      oss << pto_buf_type->valid_cols_.value_or(0);
+    } else {
+      oss << "?";
+    }
+    oss << ">";
+    return oss.str();
+  }
+
   if (auto tuple_type = As<TupleType>(type)) {
     std::ostringstream oss;
     if (tuple_type->types_.empty()) {
@@ -1108,7 +1146,10 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   {
     std::vector<const std::pair<std::string, std::any>*> serialized_attrs;
     for (const auto& kv : op->attrs_) {
-      if (kv.first == kPipelineMembershipAttr) serialized_attrs.push_back(&kv);
+      if (kv.first == kPipelineMembershipAttr || kv.first == kAttrPTOInputHandles ||
+          kv.first == kAttrPTOOutputHandle) {
+        serialized_attrs.push_back(&kv);
+      }
     }
     if (!serialized_attrs.empty()) {
       stream_ << (need_comma ? ", " : "") << "attrs={";
@@ -2240,7 +2281,9 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
     // ``auto_scope`` rides in attrs_ but prints as a dedicated kwarg (and is
     // filtered from the attrs={...} dict). Absent ⇒ default True ⇒ not printed.
     bool auto_scope_off = !func->GetAttr<bool>("auto_scope", true);
-    auto is_filtered_attr_key = [](const std::string& k) { return k == "auto_scope"; };
+    auto is_filtered_attr_key = [](const std::string& k) {
+      return k == "auto_scope" || k == kAttrPTOControlFlowHandles;
+    };
     bool has_attrs = std::any_of(func->attrs_.begin(), func->attrs_.end(),
                                  [&](const auto& kv) { return !is_filtered_attr_key(kv.first); });
     auto print_func_attr_value = [&](const std::string& key, const std::any& value) {
