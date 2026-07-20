@@ -149,48 +149,6 @@ def _is_const_int(value: object) -> bool:
     return isinstance(value, ir.Neg) and isinstance(value.operand, ir.ConstInt)
 
 
-# Python comparison AST node -> DispatchPredicateOp, for the ``predicate=`` surface
-# on pl.submit / pl.spmd_submit. Built from the bound enum so each mapping validates
-# the enumerator at import. Operators outside this map (``in``, ``is``, ...) are
-# rejected: the runtime predicate is a single arithmetic comparison.
-_AST_CMP_TO_PRED_OP: dict[type, "ir.DispatchPredicateOp"] = {
-    ast.Eq: ir.DispatchPredicateOp.Eq,
-    ast.NotEq: ir.DispatchPredicateOp.Ne,
-    ast.Gt: ir.DispatchPredicateOp.Gt,
-    ast.Lt: ir.DispatchPredicateOp.Lt,
-    ast.GtE: ir.DispatchPredicateOp.Ge,
-    ast.LtE: ir.DispatchPredicateOp.Le,
-}
-
-# Operand-order flip. The runtime predicate is `operand OP target` with the tensor
-# on the left, so a mirrored ``0 < rc[e]`` normalizes to ``rc[e] > 0``.
-_FLIPPED_PRED_OP: dict["ir.DispatchPredicateOp", "ir.DispatchPredicateOp"] = {
-    ir.DispatchPredicateOp.Eq: ir.DispatchPredicateOp.Eq,
-    ir.DispatchPredicateOp.Ne: ir.DispatchPredicateOp.Ne,
-    ir.DispatchPredicateOp.Gt: ir.DispatchPredicateOp.Lt,
-    ir.DispatchPredicateOp.Lt: ir.DispatchPredicateOp.Gt,
-    ir.DispatchPredicateOp.Ge: ir.DispatchPredicateOp.Le,
-    ir.DispatchPredicateOp.Le: ir.DispatchPredicateOp.Ge,
-}
-
-
-def _ast_int_literal(node: ast.expr) -> int | None:
-    """Return the int value of an integer literal AST (``5`` / ``-5`` / ``+5``), else None.
-
-    Rejects bools (``True`` is an ``int`` subclass in Python but not a valid
-    predicate target).
-    """
-    if isinstance(node, ast.Constant) and isinstance(node.value, int) and not isinstance(node.value, bool):
-        return node.value
-    if isinstance(node, ast.UnaryOp):
-        if isinstance(node.op, ast.USub):
-            inner = _ast_int_literal(node.operand)
-            return None if inner is None else -inner
-        if isinstance(node.op, ast.UAdd):
-            return _ast_int_literal(node.operand)
-    return None
-
-
 def _is_dep_var_type(type_: ir.Type | None) -> bool:
     """Return True if ``type_`` is acceptable as a ``pl.submit(...)`` ``deps=`` entry.
 
@@ -5777,12 +5735,12 @@ class ASTParser:
         # early-dispatch producer. Accepted on both pl.submit and pl.spmd_submit
         # (recorded on the Submit; no-op for a plain self.kernel(...) call).
         allow_early_resolve = False
-        predicate: tuple[ir.Expr, list[ir.Expr], int, int] | None = None
+        predicate: ir.Expr | None = None
         if as_submit:
             allow_early_resolve = self._parse_submit_allow_early_resolve_kwarg(method_name, keywords)
             predicate = self._parse_submit_predicate_kwarg(method_name, keywords, span)
             if predicate is not None:
-                self._validate_predicate_deps(method_name, predicate[0], user_dep_vars, span)
+                self._validate_predicate_deps(method_name, predicate, user_dep_vars, span)
         return_types = func_obj.return_types if func_obj else []
         # A callee that declares no ``-> `` annotation has empty ``return_types``
         # but may ``return <value>`` (e.g. an InCore kernel returning its
@@ -6185,109 +6143,132 @@ class ASTParser:
 
     def _parse_submit_predicate_kwarg(
         self, method_name: str, keywords: list[ast.keyword], span: ir.Span
-    ) -> tuple[ir.Expr, list[ir.Expr], int, int] | None:
-        """Extract the optional ``predicate=<tensor>[<indices>] <op> <int>`` kwarg.
+    ) -> ir.Expr | None:
+        """Extract the optional ``predicate=(<tensor>[<indices>] <op> <int>)`` kwarg.
 
         Accepted on ``pl.submit(...)`` and ``pl.spmd_submit(...)``. Encodes a
-        dispatch predicate the scheduler evaluates at the dispatch point
-        (``tensor[indices] <op> target``); a false result retires the task
-        inline without dispatching to a core, while still settling
-        fanin/fanout. Returns ``(operand, indices, op_int, target_int)`` or
+        dispatch predicate the scheduler evaluates at the dispatch point; a
+        false result retires the task inline without dispatching to a core,
+        while still settling fanin/fanout. Returns the comparison
+        :class:`ir.Expr` (e.g. ``Gt(Cast(tensor.read(rc, [0, 0])), 0)``) or
         ``None`` when absent.
 
-        The comparison is matched **syntactically and never evaluated**: in this
-        position ``rc[0, 0] > 0`` is a declarative spec (which tensor element,
-        which comparison) handed to the scheduler — NOT a ``tensor.read`` plus a
-        compare. Reading the value in orchestration is precisely what the
-        predicate exists to avoid (it would stall on ``wait_for_tensor_ready``).
+        The kwarg is parsed as an **ordinary expression** — ``rc[0, 0]`` is the
+        DSL's usual sugar for ``pl.read``, so it lowers to ``tensor.read`` and
+        the comparison to a ``Gt``/``Lt``/... node. No bespoke syntax and no
+        private representation: the predicate rides on ``Submit.predicate`` as
+        plain IR, and orchestration codegen decomposes it into the runtime's
+        ``operand OP target`` triple.
 
-        Only ``tensor[indices] OP int-literal`` is expressible, mirroring the
-        runtime's single-comparison ``DispatchPredicate``: no chained
-        comparisons, no arithmetic, no boolean combination, and the right-hand
-        side must be a literal. Reduce anything richer to a single gate value in
-        a prior kernel and predicate on that.
+        Note the Expr is stored on the Submit, never in a statement position, so
+        the ``tensor.read`` is never executed in orchestration — reading the
+        value there is exactly the ``wait_for_tensor_ready`` stall the predicate
+        exists to avoid.
 
-        The operand tensor's producer MUST be one of the submit's ``deps=`` —
-        see :meth:`_validate_predicate_deps`, which the caller runs once the
-        ``deps=`` list is also parsed.
+        Only what the runtime can express is accepted: a single comparison
+        between a tensor element and an integer literal. That shape is checked by
+        :meth:`_validate_predicate_shape`; the operand's producer must also be in
+        ``deps=`` (:meth:`_validate_predicate_deps`).
         """
         kw = next((k for k in keywords if k.arg == "predicate"), None)
         if kw is None:
             return None
+        predicate = self.parse_expression(kw.value)
+        self._validate_predicate_shape(method_name, predicate, kw.value)
+        return predicate
+
+    # Comparison IR node kinds the runtime's single-comparison DispatchPredicate
+    # can express. Reuses the IR's own comparison nodes — the runtime PredicateOp
+    # mapping lives in orchestration codegen, not here.
+    _PREDICATE_CMP_TYPES = (ir.Eq, ir.Ne, ir.Gt, ir.Lt, ir.Ge, ir.Le)
+
+    @staticmethod
+    def _predicate_read(predicate: ir.BinaryExpr) -> "ir.Call | None":
+        """Return the ``tensor.read`` Call of a well-shaped predicate, else None.
+
+        Accepts either operand order (``t[i] > 0`` / ``0 < t[i]``) and sees
+        through the Cast the DSL inserts when the read's dtype differs from the
+        compared literal's.
+        """
+
+        def strip_cast(e: ir.Expr) -> ir.Expr:
+            while isinstance(e, ir.Cast):
+                e = e.operand
+            return e
+
+        def is_read(e: ir.Expr) -> bool:
+            return isinstance(e, ir.Call) and e.op.name == ir.get_op("tensor.read").name
+
+        lhs, rhs = strip_cast(predicate.left), strip_cast(predicate.right)
+        if isinstance(lhs, ir.Call) and is_read(lhs) and isinstance(rhs, ir.ConstInt):
+            return lhs
+        if isinstance(rhs, ir.Call) and is_read(rhs) and isinstance(lhs, ir.ConstInt):
+            return rhs
+        return None
+
+    @staticmethod
+    def _read_indices(read: ir.Call) -> list[ir.Expr]:
+        """Per-axis indices of a ``tensor.read``.
+
+        The op takes ``(tensor, indices)`` where ``indices`` is a ``MakeTuple``
+        for a multi-axis read and a bare expression for a single axis.
+        """
+        if len(read.args) < 2:
+            return []
+        idx = read.args[1]
+        return list(idx.elements) if isinstance(idx, ir.MakeTuple) else [idx]
+
+    @classmethod
+    def _predicate_operand_tensor(cls, predicate: ir.BinaryExpr) -> "ir.Expr | None":
+        """Return the tensor a predicate reads, or None when not well-shaped."""
+        read = cls._predicate_read(predicate)
+        return read.args[0] if read is not None and read.args else None
+
+    def _validate_predicate_shape(self, method_name: str, predicate: ir.Expr, node: ast.expr) -> None:
+        """Reject predicates the runtime cannot express.
+
+        The runtime evaluates one comparison of one tensor element against one
+        constant, so only ``tensor[indices] OP int-literal`` (in either operand
+        order) is accepted. Chained comparisons, arithmetic on the element,
+        boolean combination, and non-literal right-hand sides are all rejected
+        here rather than surfacing as an opaque codegen failure.
+        """
         hint = "Use predicate=(tensor[i0, ...] > 0) — one comparison against an integer literal."
-        node = kw.value
-        if not isinstance(node, ast.Compare):
+        span = self.span_tracker.get_span(node)
+        if not isinstance(predicate, self._PREDICATE_CMP_TYPES):
             raise ParserSyntaxError(
-                f"'{method_name}' predicate must be a comparison expression",
-                span=self.span_tracker.get_span(node),
+                f"'{method_name}' predicate must be a single comparison (==, !=, >, <, >=, <=); "
+                f"got {type(predicate).__name__}",
+                span=span,
                 hint=hint,
             )
-        if len(node.ops) != 1 or len(node.comparators) != 1:
+
+        read = self._predicate_read(predicate)
+        if read is None:
             raise ParserSyntaxError(
-                f"'{method_name}' predicate must be a single comparison; chained comparisons "
-                "(e.g. 0 < t[i] < 8) are not supported — the runtime evaluates exactly one",
-                span=self.span_tracker.get_span(node),
+                f"'{method_name}' predicate must compare one tensor element (e.g. t[i]) against an "
+                "integer literal; the runtime evaluates a single element-vs-constant comparison",
+                span=span,
                 hint=hint,
             )
-        op_enum = _AST_CMP_TO_PRED_OP.get(type(node.ops[0]))
-        if op_enum is None:
-            raise ParserSyntaxError(
-                f"'{method_name}' predicate comparison operator is not supported; use one of "
-                "==, !=, >, <, >=, <=",
-                span=self.span_tracker.get_span(node),
-                hint=hint,
-            )
-        # Orientation: ``tensor[...] OP int``, or the mirrored ``int OP tensor[...]``
-        # normalized by flipping the operator — the runtime predicate always reads
-        # `operand OP target` with the tensor on the left.
-        left, right = node.left, node.comparators[0]
-        if isinstance(left, ast.Subscript):
-            subscript_ast, target_ast = left, right
-        elif isinstance(right, ast.Subscript):
-            subscript_ast, target_ast = right, left
-            op_enum = _FLIPPED_PRED_OP[op_enum]
-        else:
-            raise ParserSyntaxError(
-                f"'{method_name}' predicate must compare a tensor element (e.g. t[i]) against an "
-                "integer literal",
-                span=self.span_tracker.get_span(node),
-                hint=hint,
-            )
-        target_val = _ast_int_literal(target_ast)
-        if target_val is None:
-            raise ParserSyntaxError(
-                f"'{method_name}' predicate must compare against an integer literal",
-                span=self.span_tracker.get_span(target_ast),
-                hint=hint,
-            )
-        operand = self.parse_expression(subscript_ast.value)
-        operand_type = operand.type
+        # tensor.read(tensor, indices): arg 0 is the tensor, arg 1 the index list.
+        operand_type = read.args[0].type if read.args else None
         if not isinstance(operand_type, ir.TensorType):
+            got = python_print(operand_type, format=False) if operand_type is not None else "nothing"
             raise ParserTypeError(
-                f"predicate operand must be a tensor, got {python_print(operand_type, format=False)}",
-                span=self.span_tracker.get_span(subscript_ast.value),
+                f"predicate operand must be a tensor, got {got}",
+                span=span,
                 hint=hint,
             )
-        # ``t[i]`` -> one index; ``t[i, j]`` -> an ast.Tuple slice.
-        slice_ast = subscript_ast.slice
-        index_asts = list(slice_ast.elts) if isinstance(slice_ast, ast.Tuple) else [slice_ast]
-        indices = [self.parse_expression(a) for a in index_asts]
-        if not indices:
-            raise ParserSyntaxError(
-                "predicate indices must locate a single element (non-empty)",
-                span=self.span_tracker.get_span(subscript_ast),
-                hint=hint,
-            )
-        # Each index renders as a scalar C++ expression into the runtime
-        # predicate index array, so it must be an integer-typed scalar (a
-        # ConstInt or an int/index Var) — not, e.g., a tensor. Reject here
-        # rather than emit invalid C++ at orchestration codegen.
-        for idx_expr, idx_ast in zip(indices, index_asts):
-            idx_type = idx_expr.type
-            if not (isinstance(idx_type, ir.ScalarType) and idx_type.dtype in self._INTEGER_DTYPES):
+        # Each index renders as a scalar C++ expression into the runtime predicate
+        # index array, so it must be an integer scalar — not, e.g., a tensor.
+        indices = self._read_indices(read)
+        for idx_expr in indices:
+            if not (isinstance(idx_expr.type, ir.ScalarType) and idx_expr.type.dtype in self._INTEGER_DTYPES):
                 raise ParserTypeError(
-                    f"predicate indices must be integer scalars, got {python_print(idx_type, format=False)}",
-                    span=self.span_tracker.get_span(idx_ast),
+                    "predicate indices must be integer scalars, got "
+                    f"{python_print(idx_expr.type, format=False)}",
+                    span=span,
                     hint=hint,
                 )
         # The indices must locate exactly one element, so their count has to
@@ -6295,15 +6276,14 @@ class ASTParser:
         rank = len(operand_type.shape)
         if len(indices) != rank:
             raise ParserTypeError(
-                f"predicate needs {rank} index(es) to locate a single element of a "
-                f"rank-{rank} tensor, got {len(indices)}",
-                span=self.span_tracker.get_span(subscript_ast),
+                f"predicate needs {rank} index(es) to locate a single element of a rank-{rank} tensor, "
+                f"got {len(indices)}",
+                span=span,
                 hint=hint,
             )
-        return operand, indices, int(op_enum.value), target_val
 
     def _validate_predicate_deps(
-        self, method_name: str, operand: ir.Expr, dep_vars: list[ir.Var], span: ir.Span
+        self, method_name: str, predicate: ir.Expr, dep_vars: list[ir.Var], span: ir.Span
     ) -> None:
         """Enforce that a ``predicate=`` operand's producer is one of ``deps=``.
 
@@ -6320,6 +6300,9 @@ class ASTParser:
         dep entry does not name its producers individually — both are skipped
         rather than risk rejecting a correct program.
         """
+        if not isinstance(predicate, self._PREDICATE_CMP_TYPES):
+            return
+        operand = self._predicate_operand_tensor(predicate)
         if not isinstance(operand, ir.Var):
             return
         producer_tid = self._submit_producer_tid.get(operand.unique_id)
@@ -6410,7 +6393,7 @@ class ASTParser:
         core_num: ir.Expr | None = None,
         sync_start: bool = False,
         allow_early_resolve: bool = False,
-        predicate: tuple[ir.Expr, list[ir.Expr], int, int] | None = None,
+        predicate: ir.Expr | None = None,
         extra_attrs: dict[str, Any] | None = None,
     ) -> ir.Expr:
         """Create an ir.Call, attaching the return type, optional call-site directions
@@ -6525,9 +6508,6 @@ class ASTParser:
                 or allow_early_resolve
                 or predicate is not None
             ):
-                pred_operand, pred_indices, pred_op, pred_target = (
-                    predicate if predicate is not None else (None, [], 0, 0)
-                )
                 return ir.Submit(
                     gvar,
                     args,
@@ -6539,10 +6519,7 @@ class ASTParser:
                     core_num=core_num,
                     sync_start=sync_start,
                     allow_early_resolve=allow_early_resolve,
-                    predicate_operand=pred_operand,
-                    predicate_indices=pred_indices,
-                    predicate_op=pred_op,
-                    predicate_target=pred_target,
+                    predicate=predicate,
                 )
             return ir.Submit(gvar, args, deps_list, return_type, span)
 

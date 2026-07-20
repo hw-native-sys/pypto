@@ -844,37 +844,6 @@ inline std::vector<std::pair<std::string, std::any>> WithDumpVarsAttr(
 inline constexpr const char* kAttrDevice = "device";
 
 /**
- * @brief Comparison operator carried by a ``Submit`` dispatch predicate.
- *
- * Mirrors the runtime ``PredicateOp`` {NONE,EQ,NE,GT,LT,GE,LE}. The scheduler
- * evaluates ``operand OP target`` at the dispatch point; a false result retires
- * the task inline (never dispatched to a core) while still settling
- * fanin/fanout. ``None`` means "no predicate — always dispatch".
- *
- * The underlying integer values are the stable on-the-wire encoding: they are
- * stored on ``Submit`` as an ``int64_t`` leaf (``predicate_op_``) so the
- * reflection system needs no new leaf-type overloads, and orchestration codegen
- * maps them 1:1 onto the runtime enum. Do NOT renumber.
- */
-enum class DispatchPredicateOp : int64_t { None = 0, Eq, Ne, Gt, Lt, Ge, Le };
-
-/**
- * @brief Construction-only bundle for a ``Submit`` dispatch predicate.
- *
- * Passed to the ``Submit`` constructor and unpacked into the first-class
- * ``predicate_operand_`` / ``predicate_indices_`` / ``predicate_op_`` /
- * ``predicate_target_`` fields. Never reflected or stored as a unit — reflection
- * walks the unpacked fields (the SSA-bearing operand/indices as IR-node fields,
- * op/target as int64 leaves). See ``Submit`` for the full contract.
- */
-struct DispatchPredicateInit {
-  ExprPtr operand;               // tensor whose element is read at dispatch
-  std::vector<ExprPtr> indices;  // element locator (ConstInt or loop Var)
-  DispatchPredicateOp op = DispatchPredicateOp::None;
-  int64_t target = 0;
-};
-
-/**
  * @brief Task-launch expression — ``pl.submit(self.kernel, args, deps=[...])``
  *
  * Produced by ``pl.submit(...)`` inside a ``pl.manual_scope`` body.
@@ -924,25 +893,32 @@ class Submit : public Expr {
   // ``sync_start_``) because it is user-authored launch intent, not compiler
   // metadata; it carries no SSA value so passes need not walk it.
   bool allow_early_resolve_ = false;
-  // Dispatch predicate (``pl.spmd(predicate=...)``). The scheduler evaluates
-  // ``predicate_operand_[predicate_indices_] OP predicate_target_`` at the
-  // dispatch point; a false result retires this task inline (never dispatched to
-  // a core) while still settling fanin/fanout so consumers unlock. Lowers to
-  // ``Arg::set_predicate(...)`` in orchestration codegen via SubmitToCallView
-  // (attr ``"predicate"``). ``predicate_op_ == None`` means "no predicate".
+  // Dispatch predicate (``pl.spmd_submit(..., predicate=(t[i] > 0))``) — an
+  // ordinary comparison Expr, e.g. ``Gt(Cast(tensor.read(rc, [0, 0])), 0)``.
+  // The scheduler evaluates it at the dispatch point; a false result retires
+  // this task inline (never dispatched to a core) while still settling
+  // fanin/fanout so consumers unlock. ``std::nullopt`` means "no predicate".
   //
-  // ``predicate_operand_`` / ``predicate_indices_`` are first-class SSA-bearing
-  // fields (like ``deps_`` / ``core_num_``): passes that substitute / DCE /
-  // dominance-check Vars MUST walk them (see .claude/rules/pass-submit-awareness.md).
-  // ``predicate_op_`` (a DispatchPredicateOp value) / ``predicate_target_`` are
-  // plain int64 leaves carrying no SSA value.
+  // Deliberately stored as a plain Expr rather than a decomposed
+  // (operand, indices, op, target) bundle: the IR already has the comparison
+  // kinds (``ObjectKind::Gt`` etc.) and ``tensor.read``, so this reuses them
+  // instead of duplicating an enum, keeps the node's shape open for a future
+  // runtime that accepts richer predicates (``And``/``Or``), and needs no new
+  // reflection leaf type. Decomposition into the runtime's
+  // ``operand OP target`` triple is orchestration-codegen's job — the layer that
+  // owns the runtime ABI.
+  //
+  // A first-class SSA-bearing field (like ``deps_`` / ``core_num_``): passes
+  // that substitute / DCE / dominance-check Vars MUST walk it (see
+  // .claude/rules/pass-submit-awareness.md). Note it is NOT in a statement
+  // position, so FlattenCallExpr must not hoist its nested ``tensor.read`` into
+  // a temporary — that would both lose the operand/indices codegen needs and
+  // turn the read into a real orchestration-time load, the very
+  // ``wait_for_tensor_ready`` stall the predicate exists to avoid.
   //
   // Contract: the operand tensor's producer MUST be one of ``deps_`` so the
-  // dispatch-point read observes the current value (enforced by a SubmitVerifier).
-  std::optional<ExprPtr> predicate_operand_;
-  std::vector<ExprPtr> predicate_indices_;
-  int64_t predicate_op_ = static_cast<int64_t>(DispatchPredicateOp::None);
-  int64_t predicate_target_ = 0;
+  // dispatch-point read observes the current value (enforced by the parser).
+  std::optional<ExprPtr> predicate_;
   std::vector<std::pair<std::string, std::any>> attrs_;   // Compiler-internal metadata (ordered)
   std::vector<std::pair<std::string, std::any>> kwargs_;  // Keyword arguments (metadata, ordered)
 
@@ -972,7 +948,7 @@ class Submit : public Expr {
          std::vector<std::pair<std::string, std::any>> kwargs,
          std::vector<std::pair<std::string, std::any>> attrs, TypePtr type, Span span,
          std::optional<ExprPtr> core_num = std::nullopt, bool sync_start = false,
-         bool allow_early_resolve = false, std::optional<DispatchPredicateInit> predicate = std::nullopt)
+         bool allow_early_resolve = false, std::optional<ExprPtr> predicate = std::nullopt)
       : Expr(std::move(span), std::move(type)),
         op_(std::move(op)),
         args_(std::move(args)),
@@ -980,14 +956,9 @@ class Submit : public Expr {
         core_num_(std::move(core_num)),
         sync_start_(sync_start),
         allow_early_resolve_(allow_early_resolve),
+        predicate_(std::move(predicate)),
         attrs_(std::move(attrs)),
         kwargs_(std::move(kwargs)) {
-    if (predicate.has_value()) {
-      predicate_operand_ = std::move(predicate->operand);
-      predicate_indices_ = std::move(predicate->indices);
-      predicate_op_ = static_cast<int64_t>(predicate->op);
-      predicate_target_ = predicate->target;
-    }
     ValidateArgDirectionsAttr();
     ValidateLaunchSpec();
     ValidatePredicate();
@@ -1037,30 +1008,8 @@ class Submit : public Expr {
     return GetAttr<std::vector<ArgDirection>>(kAttrArgDirections);
   }
 
-  // True when this Submit carries a dispatch predicate (``predicate_op_`` is not
-  // ``None``). When false, the four ``predicate_*`` fields are inert defaults.
-  [[nodiscard]] bool HasPredicate() const {
-    return predicate_op_ != static_cast<int64_t>(DispatchPredicateOp::None);
-  }
-
-  // Typed view of ``predicate_op_``. Only meaningful when ``HasPredicate()``.
-  [[nodiscard]] DispatchPredicateOp GetPredicateOp() const {
-    return static_cast<DispatchPredicateOp>(predicate_op_);
-  }
-
-  // Bundle the current dispatch predicate back into a construction init
-  // (``std::nullopt`` when ``HasPredicate()`` is false). Passes that rebuild a
-  // Submit from an existing one pass this as the trailing constructor argument
-  // so the predicate survives the rewrite (see .claude/rules/pass-submit-awareness.md).
-  [[nodiscard]] std::optional<DispatchPredicateInit> GetPredicateInit() const {
-    if (!HasPredicate()) return std::nullopt;
-    DispatchPredicateInit init;
-    init.operand = predicate_operand_ ? *predicate_operand_ : nullptr;
-    init.indices = predicate_indices_;
-    init.op = GetPredicateOp();
-    init.target = predicate_target_;
-    return init;
-  }
+  // True when this Submit carries a dispatch predicate.
+  [[nodiscard]] bool HasPredicate() const { return predicate_.has_value(); }
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::Submit; }
   [[nodiscard]] std::string TypeName() const override { return "Submit"; }
@@ -1074,10 +1023,7 @@ class Submit : public Expr {
                         reflection::UsualField(&Submit::core_num_, "core_num"),
                         reflection::UsualField(&Submit::sync_start_, "sync_start"),
                         reflection::UsualField(&Submit::allow_early_resolve_, "allow_early_resolve"),
-                        reflection::UsualField(&Submit::predicate_operand_, "predicate_operand"),
-                        reflection::UsualField(&Submit::predicate_indices_, "predicate_indices"),
-                        reflection::UsualField(&Submit::predicate_op_, "predicate_op"),
-                        reflection::UsualField(&Submit::predicate_target_, "predicate_target"),
+                        reflection::UsualField(&Submit::predicate_, "predicate"),
                         reflection::UsualField(&Submit::attrs_, "attrs"),
                         reflection::UsualField(&Submit::kwargs_, "kwargs")));
   }
@@ -1105,37 +1051,17 @@ class Submit : public Expr {
     }
   }
 
-  // Structural well-formedness of the dispatch predicate (pl.spmd_submit(
-  // predicate=...)). Cheap, always-on invariants that hold at every point in the
-  // pipeline — deliberately NOT the dataflow "operand producer is a dep" contract
-  // (that needs cross-task use-def analysis; enforced separately once deps are
-  // final). Only the presence/shape is checked here, not operand types (those may
-  // be UnknownType mid-pipeline).
+  // The only invariant cheap enough to assert on every construction: a present
+  // predicate is a non-null Expr. Its *shape* (a single comparison of a
+  // tensor.read against a constant — what the runtime can actually express) is
+  // deliberately NOT checked here: mid-pipeline the operand types may still be
+  // UnknownType, and the constraint belongs to the layer that owns the runtime
+  // ABI, not to the IR node. The DSL parser rejects unsupported shapes at the
+  // source, and orchestration codegen fails loudly on anything that reaches it
+  // un-decomposable.
   void ValidatePredicate() const {
-    if (predicate_op_ < static_cast<int64_t>(DispatchPredicateOp::None) ||
-        predicate_op_ > static_cast<int64_t>(DispatchPredicateOp::Le)) {
-      throw pypto::ValueError(
-          "Submit predicate_op is out of range (expected a DispatchPredicateOp value 0..6), got " +
-          std::to_string(predicate_op_));
-    }
-    if (!HasPredicate()) {
-      return;
-    }
-    if (!predicate_operand_.has_value() || !*predicate_operand_) {
-      throw pypto::ValueError(
-          "Submit dispatch predicate requires a non-null operand tensor when "
-          "predicate_op is a comparison (op != None)");
-    }
-    if (predicate_indices_.empty()) {
-      throw pypto::ValueError(
-          "Submit dispatch predicate requires at least one index to locate the "
-          "operand element");
-    }
-    for (size_t i = 0; i < predicate_indices_.size(); ++i) {
-      if (!predicate_indices_[i]) {
-        throw pypto::ValueError("Submit dispatch predicate index at position " + std::to_string(i) +
-                                " must be a non-null Expr");
-      }
+    if (predicate_.has_value() && !*predicate_) {
+      throw pypto::ValueError("Submit predicate must be a non-null Expr when present");
     }
   }
 
@@ -1233,14 +1159,14 @@ inline CallPtr SubmitToCallView(const SubmitPtr& submit) {
   if (submit->allow_early_resolve_) {
     attrs.emplace_back("allow_early_resolve", std::any(true));
   }
-  // Dispatch predicate (pl.spmd(predicate=...)) — surface the operand/indices/op/
-  // target bundle as a transient Call-view attr so orchestration codegen emits
-  // ``Arg::set_predicate(...)``. Only present when the Submit carries a predicate;
-  // a plain submit's Call view is unchanged. The value is a DispatchPredicateInit
-  // (holds live ExprPtrs). This view Call is transient (codegen-only, never
-  // serialized/printed), so the std::any payload never reaches reflection.
-  if (auto pred_init = submit->GetPredicateInit(); pred_init.has_value()) {
-    attrs.emplace_back("predicate", std::any(*std::move(pred_init)));
+  // Dispatch predicate (pl.spmd_submit(..., predicate=(t[i] > 0))) — surface the
+  // comparison Expr as a transient Call-view attr so orchestration codegen can
+  // decompose it into ``Arg::set_predicate(...)``. Only present when the Submit
+  // carries a predicate; a plain submit's Call view is unchanged. This view Call
+  // is transient (codegen-only, never serialized/printed), so the std::any
+  // payload never reaches reflection.
+  if (submit->predicate_.has_value()) {
+    attrs.emplace_back("predicate", std::any(*submit->predicate_));
   }
   return std::make_shared<Call>(submit->op_, submit->args_, submit->kwargs_, std::move(attrs),
                                 submit->GetType(), submit->span_);

@@ -886,20 +886,6 @@ void BindIR(nb::module_& m) {
 
   BindFields<Call>(call_class);
 
-  // DispatchPredicateOp enum - comparison for a Submit dispatch predicate
-  // (pl.spmd_submit(predicate=...)). Integer values match the runtime PredicateOp.
-  // The None member (int 0 = "no predicate") is intentionally not exposed to
-  // Python — ``None`` is a Python keyword and cannot be an attribute name; the
-  // absent-predicate case is expressed by simply not passing a predicate.
-  nb::enum_<DispatchPredicateOp>(ir, "DispatchPredicateOp", "Dispatch-predicate comparison operator")
-      .value("Eq", DispatchPredicateOp::Eq, "operand == target")
-      .value("Ne", DispatchPredicateOp::Ne, "operand != target")
-      .value("Gt", DispatchPredicateOp::Gt, "operand > target")
-      .value("Lt", DispatchPredicateOp::Lt, "operand < target")
-      .value("Ge", DispatchPredicateOp::Ge, "operand >= target")
-      .value("Le", DispatchPredicateOp::Le, "operand <= target")
-      .export_values();
-
   // Submit - task-launch expression (see include/pypto/ir/expr.h Submit class)
   auto submit_class = nb::class_<Submit, Expr>(ir, "Submit", "Task-launch expression (pl.submit)");
 
@@ -913,35 +899,21 @@ void BindIR(nb::module_& m) {
       [](Submit* self, const OpPtr& op, const std::vector<ExprPtr>& args, const std::vector<ExprPtr>& deps,
          const nb::dict& kwargs_dict, const nb::object& attrs_or_none, const TypePtr& type, const Span& span,
          const std::optional<ExprPtr>& core_num, bool sync_start, bool allow_early_resolve,
-         const std::optional<ExprPtr>& predicate_operand, const std::vector<ExprPtr>& predicate_indices,
-         int64_t predicate_op, int64_t predicate_target) {
+         const std::optional<ExprPtr>& predicate) {
         auto kwargs = ConvertKwargsDict(kwargs_dict);
         auto attrs = ConvertAttrsFromPython(attrs_or_none);
-        // Build a dispatch predicate only when a real comparison is requested
-        // (predicate_op != None). Mirrors Submit::HasPredicate().
-        std::optional<DispatchPredicateInit> predicate;
-        if (predicate_op != static_cast<int64_t>(DispatchPredicateOp::None)) {
-          DispatchPredicateInit init;
-          init.operand = predicate_operand.has_value() ? *predicate_operand : nullptr;
-          init.indices = predicate_indices;
-          init.op = static_cast<DispatchPredicateOp>(predicate_op);
-          init.target = predicate_target;
-          predicate = std::move(init);
-        }
         new (self) Submit(op, args, deps, std::move(kwargs), std::move(attrs), type, span, core_num,
-                          sync_start, allow_early_resolve, std::move(predicate));
+                          sync_start, allow_early_resolve, predicate);
       },
       nb::arg("op"), nb::arg("args"), nb::arg("deps"), nb::arg("kwargs"), nb::arg("attrs").none(),
       nb::arg("type"), nb::arg("span"), nb::arg("core_num") = nb::none(), nb::arg("sync_start") = false,
-      nb::arg("allow_early_resolve") = false, nb::arg("predicate_operand") = nb::none(),
-      nb::arg("predicate_indices") = std::vector<ExprPtr>{}, nb::arg("predicate_op") = 0,
-      nb::arg("predicate_target") = 0,
+      nb::arg("allow_early_resolve") = false, nb::arg("predicate") = nb::none(),
       "Create a Submit expression with kwargs and explicit attrs map and type. "
       "The optional core_num (an INDEX/INT Expr) and sync_start carry the SPMD launch spec "
       "for pl.spmd_submit; omit them for a plain pl.submit. "
       "allow_early_resolve opts this task in as a speculative early-dispatch producer. "
-      "The predicate_* args carry an optional dispatch predicate "
-      "(operand[indices] <op> target, op per DispatchPredicateOp; op=0 means no predicate). "
+      "predicate is an optional comparison Expr (e.g. Gt(tensor.read(t, [i]), 0)) the scheduler "
+      "evaluates at the dispatch point; omit it for an unconditional dispatch. "
       "Reserved attrs keys: 'arg_directions' -> list[ArgDirection].");
 
   BindFields<Submit>(submit_class);

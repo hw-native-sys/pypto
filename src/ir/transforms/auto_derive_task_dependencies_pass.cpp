@@ -1612,7 +1612,7 @@ class AutoDepMutator : public IRMutator {
     return std::make_shared<const Submit>(submit->op_, submit->args_, submit->deps_, submit->kwargs_,
                                           rewritten_call->attrs_, submit->GetType(), submit->span_,
                                           submit->core_num_, submit->sync_start_,
-                                          submit->allow_early_resolve_, submit->GetPredicateInit());
+                                          submit->allow_early_resolve_, submit->predicate_);
   }
 
   ExprPtr AnalyzeCallLike(const CallPtr& call, const Expr* identity_key,
@@ -1874,7 +1874,7 @@ class AutoDepMutator : public IRMutator {
       return std::make_shared<const Submit>(submit->op_, submit->args_, submit->deps_, submit->kwargs_,
                                             std::move(stripped_attrs), submit->GetType(), submit->span_,
                                             submit->core_num_, submit->sync_start_,
-                                            submit->allow_early_resolve_, submit->GetPredicateInit());
+                                            submit->allow_early_resolve_, submit->predicate_);
     }
   };
 
@@ -1906,7 +1906,7 @@ class AutoDepMutator : public IRMutator {
       return std::make_shared<const Submit>(submit->op_, submit->args_, submit->deps_, submit->kwargs_,
                                             std::move(stripped_attrs), submit->GetType(), submit->span_,
                                             submit->core_num_, submit->sync_start_,
-                                            submit->allow_early_resolve_, submit->GetPredicateInit());
+                                            submit->allow_early_resolve_, submit->predicate_);
     }
   };
 
@@ -1938,7 +1938,7 @@ class AutoDepMutator : public IRMutator {
       return std::make_shared<const Submit>(submit->op_, submit->args_, submit->deps_, submit->kwargs_,
                                             std::move(*attrs), submit->GetType(), submit->span_,
                                             submit->core_num_, submit->sync_start_,
-                                            submit->allow_early_resolve_, submit->GetPredicateInit());
+                                            submit->allow_early_resolve_, submit->predicate_);
     }
 
    private:

@@ -91,6 +91,7 @@ class NoNestedCallVerifier : public IRVisitor {
   void VisitExpr_(const NotPtr& op) override { VisitUnaryExpr(op); }
   void VisitExpr_(const BitNotPtr& op) override { VisitUnaryExpr(op); }
   void VisitExpr_(const CastPtr& op) override { VisitUnaryExpr(op); }
+  void VisitExpr_(const SubmitPtr& op) override;
   void VisitStmt_(const IfStmtPtr& op) override;
   void VisitStmt_(const ForStmtPtr& op) override;
   void VisitStmt_(const WhileStmtPtr& op) override;
@@ -151,6 +152,36 @@ void NoNestedCallVerifier::VisitExpr_(const CallPtr& op) {
     }
     // Continue visiting to check deeper nesting
     VisitExpr(arg);
+  }
+}
+
+// A Submit's dispatch predicate is exempt from the three-address-code
+// invariant. ``predicate=(t[i] > 0)`` is a *declarative spec* the scheduler
+// evaluates at the dispatch point, not an expression this program evaluates, so
+// it is inherently nested: ``Gt(Cast(tensor.read(t, [i])), 0)``.
+//
+// The invariant exists so evaluated expressions are flattened into temporaries.
+// Flattening this one would be actively wrong: hoisting the ``tensor.read``
+// into an orchestration statement turns it into a real load that stalls on
+// ``wait_for_tensor_ready`` — precisely the stall the predicate exists to avoid
+// — and strips the operand/indices that orchestration codegen decomposes.
+// FlattenCallExpr likewise leaves the field alone (it only walks ``args_``).
+//
+// Everything else on the Submit is still checked by delegating to the base.
+void NoNestedCallVerifier::VisitExpr_(const SubmitPtr& op) {
+  if (!op) return;
+  for (const auto& arg : op->args_) {
+    if (As<Call>(arg)) {
+      RecordError(nested_call::ErrorType::CALL_IN_CALL_ARGS, "Submit expression has nested call in arguments",
+                  arg->span_);
+    }
+    VisitExpr(arg);
+  }
+  for (const auto& dep : op->deps_) {
+    if (dep) VisitExpr(dep);
+  }
+  if (op->core_num_.has_value() && *op->core_num_) {
+    VisitExpr(*op->core_num_);
   }
 }
 

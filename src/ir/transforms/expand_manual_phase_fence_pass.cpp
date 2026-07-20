@@ -255,7 +255,7 @@ static ExprPtr RewriteManualDepsToBarrier(const ExprPtr& node, const VarPtr& bar
   return std::make_shared<Submit>(submit->op_, submit->args_, std::vector<ExprPtr>{barrier_var},
                                   submit->kwargs_, submit->attrs_, submit->GetType(), submit->span_,
                                   submit->core_num_, submit->sync_start_, submit->allow_early_resolve_,
-                                  submit->GetPredicateInit());
+                                  submit->predicate_);
 }
 
 static StmtPtr MakeBarrierStmt(const VarPtr& source_var, VarPtr* barrier_var, const Span& span,

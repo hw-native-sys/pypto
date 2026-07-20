@@ -477,11 +477,14 @@ each carrying `predicate=(row_count[e] > 0)` and depending on the gather
 producer — the scheduler dispatches only the non-empty experts, without stalling
 orchestration to read the per-expert count.
 
-> **The comparison is matched syntactically, never evaluated.** In this position
-> `rc[0, 0] > 0` is a *declarative spec* (which tensor element, which
-> comparison) handed to the scheduler — **not** a `tensor.read` plus a compare.
-> Reading the value in orchestration is exactly what the predicate exists to
-> avoid. This is why only the shape below is accepted.
+> **The comparison is parsed as an ordinary expression, but never evaluated.**
+> `rc[0, 0]` is the usual sugar for `pl.read`, so the kwarg lowers to plain IR —
+> `Gt(Cast(tensor.read(rc, [0, 0])), 0)` — reusing the IR's existing comparison
+> nodes rather than any bespoke encoding. It is stored on `Submit.predicate`,
+> never in a statement position, so the `tensor.read` is **not** executed in
+> orchestration: doing so would stall on `wait_for_tensor_ready`, exactly what
+> the predicate exists to avoid. Orchestration codegen decomposes the Expr into
+> the runtime's `operand OP target` triple, so only the shape below is accepted.
 
 | Part | Meaning | Constraint |
 | ---- | ------- | ---------- |
@@ -490,8 +493,9 @@ orchestration to read the per-expert count.
 | `<op>` | comparison | one of `==` `!=` `>` `<` `>=` `<=` (a single, unchained comparison) |
 | `target` | right-hand side | an **integer literal** (may be negative) |
 
-The mirrored order is accepted and normalized — `0 < rc[e]` records the same
-predicate as `rc[e] > 0` (the operator is flipped so the tensor is the operand).
+The mirrored order is accepted — `0 < rc[e]` means the same as `rc[e] > 0`. The
+IR keeps the comparison as written; orchestration codegen flips the operator so
+the tensor is always the runtime's operand.
 
 Lowers to the runtime `L0TaskPredicate` + `Arg::set_predicate(...)` in
 orchestration codegen (operand → its `ext_<name>` reference, `op` →

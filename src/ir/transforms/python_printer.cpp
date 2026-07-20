@@ -1126,28 +1126,6 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   stream_ << ")";
 }
 
-// DSL comparison spelling for a dispatch-predicate op, symmetric with the
-// parser's ``_DISPATCH_PRED_OPS`` map, so print -> parse round-trips.
-static const char* DispatchPredicateOpSpelling(DispatchPredicateOp op) {
-  switch (op) {
-    case DispatchPredicateOp::Eq:
-      return "==";
-    case DispatchPredicateOp::Ne:
-      return "!=";
-    case DispatchPredicateOp::Gt:
-      return ">";
-    case DispatchPredicateOp::Lt:
-      return "<";
-    case DispatchPredicateOp::Ge:
-      return ">=";
-    case DispatchPredicateOp::Le:
-      return "<=";
-    case DispatchPredicateOp::None:
-      return "";
-  }
-  return "";
-}
-
 void IRPythonPrinter::VisitExpr_(const SubmitPtr& op) {
   INTERNAL_CHECK_SPAN(op->op_, op->span_) << "Submit has null op";
   // Submit normally appears inside a Program (manual_scope body of a
@@ -1236,24 +1214,14 @@ void IRPythonPrinter::VisitExpr_(const SubmitPtr& op) {
     stream_ << ", allow_early_resolve=True";
   }
 
-  // Dispatch predicate — emitted as ``predicate=(operand[indices] <op> target)``
-  // so the parser recovers it via the submit ``predicate=`` kwarg path, which
-  // matches the comparison syntactically (it is a declarative spec, never a
-  // tensor.read). Only present when a predicate is set.
-  if (op->HasPredicate()) {
-    INTERNAL_CHECK_SPAN(op->predicate_operand_.has_value() && *op->predicate_operand_, op->span_)
-        << "Submit predicate operand is null";
+  // Dispatch predicate — emitted as ``predicate=(<expr>)``; the comparison Expr
+  // prints itself, and the parser recovers it by parsing the kwarg as an
+  // ordinary expression, so the round trip needs no bespoke syntax.
+  if (op->predicate_.has_value()) {
+    INTERNAL_CHECK_SPAN(*op->predicate_, op->span_) << "Submit predicate is null";
     stream_ << ", predicate=(";
-    VisitExpr(*op->predicate_operand_);
-    stream_ << "[";
-    for (size_t i = 0; i < op->predicate_indices_.size(); ++i) {
-      if (i > 0) stream_ << ", ";
-      INTERNAL_CHECK_SPAN(op->predicate_indices_[i], op->span_)
-          << "Submit predicate index at index " << i << " is null";
-      VisitExpr(op->predicate_indices_[i]);
-    }
-    stream_ << "] " << DispatchPredicateOpSpelling(op->GetPredicateOp()) << " " << op->predicate_target_
-            << ")";
+    VisitExpr(*op->predicate_);
+    stream_ << ")";
   }
 
   // Surface the machine-only ``attrs={...}`` dict the same way Call does:

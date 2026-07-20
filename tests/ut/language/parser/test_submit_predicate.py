@@ -12,8 +12,10 @@
 evaluates ``tensor[indices] <op> target`` at the dispatch point and retires the
 task inline (never dispatched to a core) when the comparison is false, while
 still settling fanin/fanout. The predicate is stored on first-class
-``Submit.predicate_operand`` / ``predicate_indices`` / ``predicate_op`` /
-``predicate_target`` fields.
+the first-class ``Submit.predicate`` field as an ordinary comparison Expr —
+``Gt(Cast(tensor.read(rc, [0, 0])), 0)`` — reusing the IR's existing comparison
+nodes and ``tensor.read`` rather than a bespoke encoding. Decomposition into the
+runtime's ``operand OP target`` triple is orchestration-codegen's job.
 
 The comparison is matched syntactically, never evaluated — in this position
 ``rc[0, 0] > 0`` is a declarative spec, not a ``tensor.read`` plus a compare.
@@ -25,7 +27,11 @@ import pypto.language as pl
 import pytest
 from pypto import ir
 from pypto.ir import python_print
-from pypto.language.parser.diagnostics.exceptions import ParserSyntaxError, ParserTypeError
+from pypto.language.parser.diagnostics.exceptions import (
+    ParserSyntaxError,
+    ParserTypeError,
+    UnsupportedFeatureError,
+)
 
 
 def _flatten(stmt):
@@ -48,6 +54,48 @@ def _main_submits(prog):
 
 _FP32_T = "pl.Tensor[[512, 128], pl.FP32]"
 _INT32_T = "pl.Tensor[[512, 128], pl.INT32]"
+
+
+def _pred_read(p) -> ir.Call:
+    """Return the tensor.read Call inside a predicate Expr (either operand order)."""
+
+    def strip_cast(e):
+        while isinstance(e, ir.Cast):
+            e = e.operand
+        return e
+
+    def is_read(e):
+        return isinstance(e, ir.Call) and e.op.name == "tensor.read"
+
+    lhs, rhs = strip_cast(p.left), strip_cast(p.right)
+    read = lhs if is_read(lhs) else rhs
+    assert isinstance(read, ir.Call)
+    return read
+
+
+def _pred_indices(p) -> list:
+    """Per-axis indices of the predicate's tensor.read.
+
+    ``tensor.read`` takes ``(tensor, indices)`` where ``indices`` is a MakeTuple
+    for a multi-axis read and a bare expression for a single axis.
+    """
+    read = _pred_read(p)
+    idx = read.args[1]
+    return list(idx.elements) if isinstance(idx, ir.MakeTuple) else [idx]
+
+
+def _pred_const(p) -> ir.ConstInt:
+    """Return the ConstInt side of a predicate Expr."""
+
+    def strip_cast(e):
+        while isinstance(e, ir.Cast):
+            e = e.operand
+        return e
+
+    lhs, rhs = strip_cast(p.left), strip_cast(p.right)
+    konst = lhs if isinstance(lhs, ir.ConstInt) else rhs
+    assert isinstance(konst, ir.ConstInt)
+    return konst
 
 
 def _program(predicate_src: str, deps_src: str = "[g_tid]"):
@@ -74,7 +122,9 @@ class Prog:
         return g
 
     @pl.function(type=pl.FunctionType.Orchestration)
-    def main(self, x: {_FP32_T}, out: pl.Out[{_FP32_T}], rc: pl.Out[{_INT32_T}]) -> {_FP32_T}:
+    def main(
+        self, x: {_FP32_T}, out: pl.Out[{_FP32_T}], rc: pl.Out[{_INT32_T}], rc_in: {_INT32_T}
+    ) -> {_FP32_T}:
         with pl.manual_scope():
             rc, g_tid = pl.spmd_submit(self.gate, rc, core_num=1)
             out, _ = pl.spmd_submit(
@@ -90,13 +140,15 @@ def test_predicate_populates_submit_fields():
     submits = _main_submits(prog)
     # gate submit has no predicate; expert submit carries the predicate.
     gate_sub, expert_sub = submits[0], submits[1]
-    assert gate_sub.predicate_op == 0
-    assert gate_sub.predicate_operand is None
-    assert expert_sub.predicate_op == int(ir.DispatchPredicateOp.Gt.value)
-    assert expert_sub.predicate_target == 0
-    assert isinstance(expert_sub.predicate_operand, ir.Var)
-    assert len(expert_sub.predicate_indices) == 2
-    assert all(isinstance(i, ir.ConstInt) for i in expert_sub.predicate_indices)
+    assert gate_sub.predicate is None
+    # The predicate is a plain comparison Expr over a tensor.read — no bespoke encoding.
+    pred = expert_sub.predicate
+    assert isinstance(pred, ir.Gt)
+    read = _pred_read(pred)
+    assert read.op.name == "tensor.read"
+    assert isinstance(read.args[0], ir.Var)  # operand tensor
+    assert len(_pred_indices(pred)) == 2  # one index per rank-2 axis
+    assert _pred_const(pred).value == 0
     # Contract surface: the operand producer (gate) must be reachable via deps.
     assert len(expert_sub.deps) == 1
 
@@ -104,40 +156,40 @@ def test_predicate_populates_submit_fields():
 @pytest.mark.parametrize(
     "spelling,expected",
     [
-        ("==", ir.DispatchPredicateOp.Eq),
-        ("!=", ir.DispatchPredicateOp.Ne),
-        (">", ir.DispatchPredicateOp.Gt),
-        ("<", ir.DispatchPredicateOp.Lt),
-        (">=", ir.DispatchPredicateOp.Ge),
-        ("<=", ir.DispatchPredicateOp.Le),
+        ("==", ir.Eq),
+        ("!=", ir.Ne),
+        (">", ir.Gt),
+        ("<", ir.Lt),
+        (">=", ir.Ge),
+        ("<=", ir.Le),
     ],
 )
 def test_all_comparison_spellings(spelling, expected):
     prog = _program(f"rc[0, 0] {spelling} 3")
     expert_sub = _main_submits(prog)[1]
-    assert expert_sub.predicate_op == int(expected.value)
-    assert expert_sub.predicate_target == 3
+    assert isinstance(expert_sub.predicate, expected)
+    assert _pred_const(expert_sub.predicate).value == 3
 
 
 def test_negative_target_literal():
     prog = _program("rc[0, 0] >= -5")
-    assert _main_submits(prog)[1].predicate_target == -5
+    assert _pred_const(_main_submits(prog)[1].predicate).value == -5
 
 
 def test_explicitly_positive_target_literal():
     prog = _program("rc[0, 0] >= +5")
-    assert _main_submits(prog)[1].predicate_target == 5
+    assert _pred_const(_main_submits(prog)[1].predicate).value == 5
 
 
 def test_unsupported_comparison_operator_rejected():
-    # ``in`` is a Compare op the runtime predicate cannot express.
-    with pytest.raises(ParserSyntaxError, match="operator is not supported"):
+    # ``in`` is a Compare op the DSL has no IR node for.
+    with pytest.raises(UnsupportedFeatureError, match="Unsupported comparison"):
         _program("rc[0, 0] in x")
 
 
 def test_chained_comparison_rejected():
     # The runtime evaluates exactly one comparison.
-    with pytest.raises(ParserSyntaxError, match="single comparison"):
+    with pytest.raises(ParserSyntaxError, match="Only simple comparisons supported"):
         _program("0 < rc[0, 0] < 8")
 
 
@@ -146,41 +198,47 @@ def test_reversed_operand_order_is_normalized():
     # the operand and the operator is flipped to match.
     prog = _program("0 < rc[0, 0]")
     expert_sub = _main_submits(prog)[1]
-    assert expert_sub.predicate_op == int(ir.DispatchPredicateOp.Gt.value)
-    assert expert_sub.predicate_target == 0
-    assert isinstance(expert_sub.predicate_operand, ir.Var)
+    # `0 < rc[0,0]` keeps its written `Lt` kind in the IR; orchestration codegen
+    # flips it to the runtime's `operand OP target` orientation (GT).
+    assert isinstance(expert_sub.predicate, ir.Lt)
+    assert _pred_read(expert_sub.predicate).op.name == "tensor.read"
+    assert _pred_const(expert_sub.predicate).value == 0
 
 
 def test_reversed_operand_order_flips_asymmetric_op():
     # ``5 >= rc[e]`` normalizes to ``rc[e] <= 5``.
     prog = _program("5 >= rc[0, 0]")
     expert_sub = _main_submits(prog)[1]
-    assert expert_sub.predicate_op == int(ir.DispatchPredicateOp.Le.value)
-    assert expert_sub.predicate_target == 5
+    # `5 >= rc[0,0]` stays `Ge` in the IR; codegen flips it to LE.
+    assert isinstance(expert_sub.predicate, ir.Ge)
+    assert _pred_const(expert_sub.predicate).value == 5
 
 
 def test_non_tensor_operand_rejected():
-    # ``g_tid`` is a Scalar[TASK_ID], not a tensor.
-    with pytest.raises(ParserTypeError, match="operand must be a tensor"):
+    # ``g_tid`` is a Scalar[TASK_ID], not a tensor — rejected by the DSL's own
+    # subscript typing, before any predicate-specific check.
+    with pytest.raises(ParserTypeError, match="Subscript requires Tuple, Tensor, Tile, or Array"):
         _program("g_tid[0] > 0")
 
 
 def test_bare_tensor_operand_rejected():
-    # The predicate must locate one *element*; a bare tensor has no subscript.
-    with pytest.raises(ParserSyntaxError, match="compare a tensor element"):
+    # The predicate must locate one *element*; comparing a whole tensor is not a
+    # scalar comparison, so ordinary expression typing rejects it.
+    with pytest.raises(ParserSyntaxError, match="must be ScalarExpr or Var with ScalarType"):
         _program("rc > 0")
 
 
 def test_tensor_index_rejected():
     # ``x`` is a tensor param — it would otherwise render into the runtime
     # predicate index array as ``ext_x``, emitting invalid C++.
-    with pytest.raises(ParserTypeError, match="indices must be integer scalars"):
+    with pytest.raises(ParserSyntaxError, match="index element 0 must be ScalarType"):
         _program("rc[x, 0] > 0")
 
 
 def test_index_count_must_match_operand_rank():
-    # ``rc`` is rank-2; a single index does not locate one element.
-    with pytest.raises(ParserTypeError, match="rank-2 tensor, got 1"):
+    # ``rc`` is rank-2; a single index yields a rank-1 view, not an element, so
+    # the comparison is not scalar-vs-scalar.
+    with pytest.raises(ParserSyntaxError, match="must be ScalarExpr or Var with ScalarType"):
         _program("rc[0] > 0")
 
 
@@ -192,34 +250,34 @@ def test_predicate_operand_producer_must_be_in_deps():
 
 
 def test_predicate_operand_without_tracked_producer_allowed():
-    # ``x`` is a function parameter, not a submit result — nothing to prove, so
-    # the deps= contract check stays out of the way.
-    prog = _program("x[0, 0] > 0", deps_src="[]")
-    assert _main_submits(prog)[1].predicate_op == int(ir.DispatchPredicateOp.Gt.value)
+    # ``rc_in`` is a function parameter, not a submit result — nothing to prove,
+    # so the deps= contract check stays out of the way.
+    prog = _program("rc_in[0, 0] > 0", deps_src="[]")
+    assert isinstance(_main_submits(prog)[1].predicate, ir.Gt)
 
 
 def test_non_literal_target_rejected():
-    with pytest.raises(ParserSyntaxError, match="must compare against an integer literal"):
+    # int32 element vs a float literal — rejected by ordinary operand typing.
+    with pytest.raises(ParserSyntaxError, match="requires same numeric dtype category"):
         _program("rc[0, 0] > 1.5")
 
 
 def test_non_literal_tensor_rhs_rejected():
     # ``t[i] > u[j]`` — the runtime compares against a constant, not another
-    # tensor element.
-    with pytest.raises(ParserSyntaxError, match="must compare against an integer literal"):
+    # tensor element. Here the two elements also differ in dtype (int32 vs fp32).
+    with pytest.raises(ParserSyntaxError, match="requires same numeric dtype category"):
         _program("rc[0, 0] > x[0, 0]")
 
 
 def test_predicate_must_be_a_comparison():
-    with pytest.raises(ParserSyntaxError, match="must be a comparison expression"):
+    with pytest.raises(ParserSyntaxError, match="must be a single comparison"):
         _program("rc")
 
 
 def test_no_predicate_leaves_fields_default():
     prog = _program("rc[0, 0] > 0")
     gate_sub = _main_submits(prog)[0]
-    assert not gate_sub.predicate_op  # 0 == no predicate
-    assert gate_sub.predicate_indices == []
+    assert gate_sub.predicate is None
 
 
 def test_print_parse_round_trip():

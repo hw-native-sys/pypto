@@ -496,36 +496,12 @@ static IRNodePtr DeserializeSubmit(const msgpack::object& fields_obj, msgpack::z
     allow_early_resolve = allow_early_resolve_obj->as<bool>();
   }
 
-  // Dispatch predicate (pl.spmd(predicate=...)). Reflection serializes the four
-  // predicate_* fields unconditionally; reconstruct a DispatchPredicateInit only
-  // when predicate_op is a real comparison (non-zero == not None), mirroring
-  // Submit::HasPredicate(). predicate_operand is an optional Expr node,
-  // predicate_indices an array of Expr nodes, op/target are int64 leaves.
-  std::optional<DispatchPredicateInit> predicate;
-  auto predicate_op_obj = GetOptionalFieldObj(fields_obj, "predicate_op", ctx);
-  int64_t predicate_op = 0;
-  if (predicate_op_obj.has_value() && predicate_op_obj->type != msgpack::type::NIL) {
-    predicate_op = predicate_op_obj->as<int64_t>();
-  }
-  if (predicate_op != static_cast<int64_t>(DispatchPredicateOp::None)) {
-    DispatchPredicateInit init;
-    auto operand_opt = GetOptionalFieldObj(fields_obj, "predicate_operand", ctx);
-    if (operand_opt.has_value() && operand_opt->type != msgpack::type::NIL) {
-      init.operand = std::static_pointer_cast<const Expr>(ctx.DeserializeNode(*operand_opt, zone));
-    }
-    auto indices_obj = GetOptionalFieldObj(fields_obj, "predicate_indices", ctx);
-    if (indices_obj.has_value() && indices_obj->type == msgpack::type::ARRAY) {
-      for (uint32_t i = 0; i < indices_obj->via.array.size; ++i) {
-        init.indices.push_back(
-            std::static_pointer_cast<const Expr>(ctx.DeserializeNode(indices_obj->via.array.ptr[i], zone)));
-      }
-    }
-    init.op = static_cast<DispatchPredicateOp>(predicate_op);
-    auto target_obj = GetOptionalFieldObj(fields_obj, "predicate_target", ctx);
-    if (target_obj.has_value() && target_obj->type != msgpack::type::NIL) {
-      init.target = target_obj->as<int64_t>();
-    }
-    predicate = std::move(init);
+  // Dispatch predicate — an optional comparison Expr node (nullopt / NIL means
+  // an unconditional dispatch).
+  std::optional<ExprPtr> predicate;
+  auto predicate_obj = GetOptionalFieldObj(fields_obj, "predicate", ctx);
+  if (predicate_obj.has_value() && predicate_obj->type != msgpack::type::NIL) {
+    predicate = std::static_pointer_cast<const Expr>(ctx.DeserializeNode(*predicate_obj, zone));
   }
 
   // Generic attrs map. Submit never stores manual_dep_edges in attrs (deps_ is

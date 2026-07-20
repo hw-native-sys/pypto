@@ -2255,55 +2255,102 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
   }
 
-  // Map the IR DispatchPredicateOp onto the runtime PredicateOp enumerator name.
-  static const char* RenderDispatchPredicateOp(DispatchPredicateOp op) {
-    switch (op) {
-      case DispatchPredicateOp::Eq:
+  // Map an IR comparison node kind onto the runtime PredicateOp enumerator, and
+  // the flipped form used when the constant sits on the left (``0 < t[i]``).
+  // Returns nullptr for any other kind — the caller reports that as a user error.
+  static const char* RenderPredicateOp(ObjectKind kind, bool flipped) {
+    switch (kind) {
+      case ObjectKind::Eq:
         return "EQ";
-      case DispatchPredicateOp::Ne:
+      case ObjectKind::Ne:
         return "NE";
-      case DispatchPredicateOp::Gt:
-        return "GT";
-      case DispatchPredicateOp::Lt:
-        return "LT";
-      case DispatchPredicateOp::Ge:
-        return "GE";
-      case DispatchPredicateOp::Le:
-        return "LE";
-      case DispatchPredicateOp::None:
-        return "NONE";
+      case ObjectKind::Gt:
+        return flipped ? "LT" : "GT";
+      case ObjectKind::Lt:
+        return flipped ? "GT" : "LT";
+      case ObjectKind::Ge:
+        return flipped ? "LE" : "GE";
+      case ObjectKind::Le:
+        return flipped ? "GE" : "LE";
+      default:
+        return nullptr;
     }
-    return "NONE";
   }
 
-  // Dispatch predicate (pl.spmd(predicate=...)). Surfaced as the ``predicate``
-  // Call attr (a DispatchPredicateInit) by SubmitToCallView; a plain submit /
-  // call lacks it, so this is a no-op there. Emits an ``L0TaskPredicate`` on the
-  // task's ``L0TaskArgs`` and ``set_predicate`` before the rt_submit_*. The
-  // operand tensor resolves to its ``ext_<name>`` orchestration reference; the
-  // indices render as scalar C++ expressions (ConstInt / loop Var). ``elem_size``
-  // is intentionally left for the runtime to derive from the tensor dtype.
+  // Strip the type-promotion Cast the DSL inserts around a tensor.read whose
+  // dtype differs from the compared literal's (e.g. INT32 read vs an INDEX
+  // literal), so the pattern match sees the read itself.
+  [[nodiscard]] static ExprPtr StripCast(const ExprPtr& e) {
+    auto cur = e;
+    while (auto cast = As<Cast>(cur)) cur = cast->operand_;
+    return cur;
+  }
+
+  // Dispatch predicate (pl.spmd_submit(..., predicate=(t[i] > 0))). Surfaced as
+  // the ``predicate`` Call attr (the comparison Expr) by SubmitToCallView.
+  //
+  // This is where the IR's general comparison Expr is decomposed into the
+  // runtime's `operand OP target` triple — the runtime ABI is codegen's
+  // concern, so the IR keeps the predicate as an ordinary Expr rather than a
+  // pre-decomposed bundle. Only the shape the runtime can express is accepted:
+  // a single comparison between a `tensor.read(t, [indices])` and an integer
+  // constant, in either operand order. Anything else is a user error reported
+  // here (the DSL parser rejects it earlier with a better message; this is the
+  // backstop for IR built by other means).
   void EmitPredicateHint(const std::string& task_var, const CallPtr& call) {
     if (!call->HasAttr("predicate")) return;
-    auto pred = call->GetAttr<DispatchPredicateInit>("predicate");
-    INTERNAL_CHECK_SPAN(pred.operand, call->span_) << "Submit dispatch predicate has a null operand tensor";
-    const std::string var_name = TryGetVarName(pred.operand);
-    CHECK_SPAN(!var_name.empty(), call->span_)
+    auto pred = call->GetAttr<ExprPtr>("predicate", nullptr);
+    INTERNAL_CHECK_SPAN(pred, call->span_) << "Submit predicate attr is null";
+    auto cmp = std::dynamic_pointer_cast<const BinaryExpr>(pred);
+    CHECK_SPAN(cmp && RenderPredicateOp(pred->GetKind(), false) != nullptr, pred->span_)
+        << "Submit dispatch predicate must be a single comparison (==, !=, >, <, >=, <=) between a "
+           "tensor element and an integer literal, e.g. predicate=(t[i] > 0)";
+
+    // Orientation: `read OP const`, or the mirrored `const OP read` — the
+    // runtime always stores the tensor as the operand, so flip the operator.
+    auto lhs = StripCast(cmp->left_);
+    auto rhs = StripCast(cmp->right_);
+    auto read = As<Call>(lhs);
+    auto konst = As<ConstInt>(rhs);
+    bool flipped = false;
+    if (!(read && IsOp(read, "tensor.read") && konst)) {
+      read = As<Call>(rhs);
+      konst = As<ConstInt>(lhs);
+      flipped = true;
+    }
+    CHECK_SPAN(read && IsOp(read, "tensor.read") && konst, pred->span_)
+        << "Submit dispatch predicate must compare a tensor element (a tensor.read, e.g. t[i]) against "
+           "an integer literal; got neither side in that form";
+    CHECK_SPAN(read->args_.size() >= 2, read->span_)
+        << "tensor.read in a dispatch predicate must have a tensor and an index list";
+
+    // tensor.read(tensor, MakeTuple(i0, i1, ...)) — arg 0 is the tensor, arg 1
+    // is the per-axis index list (a MakeTuple, or a single index expression for
+    // a rank-1 read).
+    const auto& operand = read->args_[0];
+    std::vector<ExprPtr> indices;
+    if (auto idx_tuple = As<MakeTuple>(read->args_[1])) {
+      indices = idx_tuple->elements_;
+    } else {
+      indices.push_back(read->args_[1]);
+    }
+    const std::string var_name = TryGetVarName(operand);
+    CHECK_SPAN(!var_name.empty(), operand->span_)
         << "Submit dispatch-predicate operand must be a named tensor (a function parameter or a variable "
            "bound to a tensor), got an unnamed expression of kind "
-        << static_cast<int>(pred.operand->GetKind())
+        << static_cast<int>(operand->GetKind())
         << ". Bind the tensor to a variable first and pass that variable.";
     const std::string tname = GetExternalTensorName(var_name);
     const std::string pv = task_var + "_pred";
     EmitIndentedLine("L0TaskPredicate " + pv + ";");
     EmitIndentedLine(pv + ".operand.tensor = &" + tname + ";");
-    EmitIndentedLine(pv + ".operand.ndims = " + std::to_string(pred.indices.size()) + ";");
-    for (size_t i = 0; i < pred.indices.size(); ++i) {
+    EmitIndentedLine(pv + ".operand.ndims = " + std::to_string(indices.size()) + ";");
+    for (size_t i = 0; i < indices.size(); ++i) {
       EmitIndentedLine(pv + ".operand.indices[" + std::to_string(i) +
-                       "] = " + GenerateExprString(pred.indices[i]) + ";");
+                       "] = " + GenerateExprString(indices[i]) + ";");
     }
-    EmitIndentedLine(pv + ".op = PredicateOp::" + RenderDispatchPredicateOp(pred.op) + ";");
-    EmitIndentedLine(pv + ".target = " + std::to_string(pred.target) + ";");
+    EmitIndentedLine(pv + ".op = PredicateOp::" + RenderPredicateOp(pred->GetKind(), flipped) + ";");
+    EmitIndentedLine(pv + ".target = " + std::to_string(konst->value_) + ";");
     EmitIndentedLine(task_var + ".set_predicate(" + pv + ");");
   }
 
