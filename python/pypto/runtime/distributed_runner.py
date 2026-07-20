@@ -26,8 +26,6 @@ from typing import TYPE_CHECKING, Any
 import numpy as np  # pyright: ignore[reportMissingImports]
 import torch
 
-from pypto.pypto_core.ir import ParamDirection
-
 from .device_tensor import DeviceTensor, StackedDeviceTensor
 from .runtime_base import Worker
 
@@ -863,16 +861,14 @@ class DistributedWorker(Worker):
     ``torch.Tensor`` objects allocated **before** :meth:`prepare` and reused in
     place across dispatches — the forked chip worker reads/writes them through
     the inherited shared mapping, and outputs are read straight back from the
-    tensor (no ``copy_from``). Large static weights are uploaded once to a
-    worker-resident :class:`~pypto.runtime.DeviceTensor` via :meth:`alloc_tensor`
-    (its ``init`` source must likewise be a pre-``prepare`` shared tensor) and
-    mixed in. This mirrors the runtime's ``child_memory`` example.
-
-    Immutable input tensors may instead be supplied through
-    ``inherited_host_tensors``. They are retained before the chip workers fork
-    and subsequently read through their inherited copy-on-write mappings. This
-    path is input-only: outputs and in-place tensors still require shared memory
-    so child writes remain visible to the parent.
+    tensor (no ``copy_from``). Large static weights may remain ordinary
+    contiguous CPU tensors when registered through ``inherited_host_tensors``
+    before the worker forks. Registration retains their storage solely as a
+    read-only H2D source for :meth:`alloc_tensor` and
+    :meth:`alloc_stacked_tensor`; it does not allow direct dispatch. After the
+    final upload, :meth:`release_inherited_host_tensor_refs` releases the parent
+    worker's host references. Forked child mappings remain until the worker is
+    closed.
 
     ``callbacks`` binds a caller-supplied callable to a SubWorker by name — e.g.
     a real sampling closure. Abstract SubWorkers (declared with a ``...`` body)
@@ -937,7 +933,7 @@ class DistributedWorker(Worker):
                     f"got device={tensor.device} shape={tuple(tensor.shape)}."
                 )
         self._inherited_host_tensors = inherited
-        self._inherited_host_tensor_ids = {id(tensor) for tensor in inherited}
+        self._inherited_host_storage_ptrs = {tensor.untyped_storage().data_ptr() for tensor in inherited}
 
         programs = list(compiled) if isinstance(compiled, Sequence) else [compiled]
         if not programs:
@@ -1117,16 +1113,14 @@ class DistributedWorker(Worker):
         # Worker ABC hook: device-memory ops are valid until close().
         self._require_open(op)
 
-    @staticmethod
-    def _require_forked_host_buffer(tensor: torch.Tensor, api: str, access: str) -> None:
+    def _require_forked_host_buffer(self, tensor: torch.Tensor, api: str, access: str) -> None:
         """Validate *tensor* is a host buffer the forked chip worker can ``access``.
 
         Every H2D/D2H copy runs **inside the forked chip worker**, which can only
-        touch host memory it inherited at fork. So *tensor* must be a CPU,
-        contiguous, **shared-memory** tensor allocated **before**
-        :meth:`DistributedCompiledProgram.prepare` (call ``.share_memory_()``); a
-        buffer allocated after ``prepare()`` — or a non-shared one — is invisible
-        to the child.
+        touch host memory it inherited at fork. Writable buffers must therefore
+        be CPU, contiguous, shared-memory tensors allocated before
+        :meth:`DistributedCompiledProgram.prepare`. Read-only upload sources may
+        instead be views of storage registered through ``inherited_host_tensors``.
 
         Args:
             tensor: The host buffer to validate.
@@ -1136,20 +1130,28 @@ class DistributedWorker(Worker):
                 for read-backs.
 
         Raises:
-            ValueError: If *tensor* is not CPU, contiguous, and shared-memory.
+            ValueError: If *tensor* is not an accessible pre-fork host buffer.
         """
-        if not (tensor.is_shared() and tensor.is_contiguous() and tensor.device.type == "cpu"):
+        is_cpu_contiguous = tensor.device.type == "cpu" and tensor.is_contiguous()
+        is_shared = is_cpu_contiguous and tensor.is_shared()
+        is_inherited_read = (
+            access == "read"
+            and is_cpu_contiguous
+            and tensor.untyped_storage().data_ptr() in self._inherited_host_storage_ptrs
+        )
+        if not (is_shared or is_inherited_read):
             raise ValueError(
-                f"{api} requires a CPU, contiguous, shared-memory tensor allocated "
-                f"BEFORE prepare() (call .share_memory_()). The copy runs in the forked "
-                f"chip worker, which can only {access} host memory it inherited at fork."
+                f"{api} requires a CPU, contiguous, shared-memory tensor allocated BEFORE "
+                "prepare() (call .share_memory_()), or a read-only tensor registered through "
+                "inherited_host_tensors. The copy runs in the forked chip worker, which can "
+                f"only {access} host memory it inherited at fork."
             )
 
     def _prepare_init(self, init: torch.Tensor) -> torch.Tensor:
         # Worker ABC hook: the upload (``copy_to``) runs **inside the forked chip
-        # worker**, so ``init`` must be a CPU, contiguous, shared-memory tensor
-        # allocated **before** prepare() (see _require_forked_host_buffer). Unlike
-        # L2 we cannot make a defensive ``.cpu().contiguous()`` copy: that copy
+        # worker**, so ``init`` must be a CPU, contiguous tensor visible at fork:
+        # either shared memory or registered inherited storage. Unlike L2 we
+        # cannot make a defensive copy after the worker starts because that copy
         # would live only in the parent and be invisible to the child.
         self._require_forked_host_buffer(init, "DistributedWorker.alloc_tensor(init=...)", "read")
         return init
@@ -1174,10 +1176,11 @@ class DistributedWorker(Worker):
         uploaded once here and reused across every ``rt(...)`` dispatch.
 
         Args:
-            host: A CPU, contiguous, **shared-memory** ``[B, *tail]`` tensor
-                allocated BEFORE :meth:`~DistributedCompiledProgram.prepare`
-                (call ``.share_memory_()``); the upload runs in the forked chip
-                worker, which can only read host memory inherited at fork.
+            host: A CPU, contiguous ``[B, *tail]`` tensor visible before worker
+                creation. It must either use shared memory or be the same storage
+                registered through ``inherited_host_tensors``. The upload runs in
+                the forked chip worker, which can only read memory inherited at
+                fork.
             worker_ids: ``worker_ids[i]`` is the worker that holds shard ``i``
                 and whose task consumes ``x[i]``; it MUST equal the worker the
                 program submits ``x[i]``'s dispatch to (its ``device=``
@@ -1240,6 +1243,18 @@ class DistributedWorker(Worker):
         """Release every shard of *stacked* against its owning worker. Idempotent."""
         for shard, w in zip(stacked.shards, stacked.worker_ids, strict=True):
             self.free_tensor(shard, worker_id=w)
+
+    def release_inherited_host_tensor_refs(self) -> None:
+        """Release parent-process references after their last upload.
+
+        The forked worker may no longer upload from these tensors after this
+        call. Resident :class:`DeviceTensor` and :class:`StackedDeviceTensor`
+        allocations created from them remain valid. Existing forked child
+        mappings remain until this worker is closed.
+        """
+        self._require_open("release_inherited_host_tensor_refs")
+        self._inherited_host_tensors = ()
+        self._inherited_host_storage_ptrs.clear()
 
     def copy_stacked_from(self, stacked: StackedDeviceTensor, host: torch.Tensor) -> None:
         """Read every shard of *stacked* back to *host* (D2H) — the read-back
@@ -1381,16 +1396,11 @@ class DistributedWorker(Worker):
                 _validate_device_tensor(arg, info)
             elif isinstance(arg, torch.Tensor):
                 if not arg.is_shared():
-                    if id(arg) not in self._inherited_host_tensor_ids:
-                        raise TypeError(
-                            f"Parameter {info.name!r}: a non-shared host tensor must be registered "
-                            "through inherited_host_tensors before the chip workers fork."
-                        )
-                    if info.direction != ParamDirection.In:
-                        raise TypeError(
-                            f"Parameter {info.name!r}: inherited host tensors are input-only; "
-                            f"direction {info.direction} requires shared memory."
-                        )
+                    raise TypeError(
+                        f"Parameter {info.name!r}: a host torch.Tensor passed to a DistributedWorker "
+                        "must be shared memory allocated BEFORE prepare() (call .share_memory_() and "
+                        "reuse the same buffer across dispatches), so the forked chip worker can see it."
+                    )
             elif not _is_simpler_tensor(arg):
                 raise TypeError(
                     f"DistributedWorker parameter {info.name!r} got {type(arg).__name__}; expected a "
@@ -1443,9 +1453,11 @@ class DistributedWorker(Worker):
         for handle in list(self._handles):
             handle._mark_closed()
         self._handles.clear()
-        self._w.close()
-        self._inherited_host_tensors = ()
-        self._inherited_host_tensor_ids.clear()
+        try:
+            self._w.close()
+        finally:
+            self._inherited_host_tensors = ()
+            self._inherited_host_storage_ptrs.clear()
 
     def __enter__(self) -> DistributedWorker:
         return self

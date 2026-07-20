@@ -446,23 +446,28 @@ dispatches the same program many times (e.g. a generate loop), call
 `compiled.prepare()` once to get a `DistributedWorker` handle that runs setup
 once and dispatches many times on the same worker.
 
-Mutable per-call IO buffers are **shared-memory host tensors allocated before `prepare()`** and reused
-in place, so child writes are visible to the parent. Immutable inputs may remain ordinary contiguous
-CPU tensors when the same objects are passed to `DistributedWorker(..., inherited_host_tensors=[...])`
-before fork; they are retained and read through inherited copy-on-write mappings. This exception is
-input-only: outputs, in-place tensors, and unregistered non-shared tensors are rejected. Large static
-weights may be uploaded once via `rt.alloc_tensor`; its `init` source must still be pre-`prepare()` shared.
+Per-call IO buffers are **shared-memory host tensors allocated before `prepare()`** and reused in
+place, so child writes are visible to the parent. Large static weights may remain ordinary contiguous
+CPU tensors when registered through `DistributedWorker(..., inherited_host_tensors=[...])` before
+fork. Registration retains their storage only as a read-only H2D source for `rt.alloc_tensor` and
+`rt.alloc_stacked_tensor`; registered tensors cannot be passed directly to a dispatch. Call
+`release_inherited_host_tensor_refs()` after the final upload to drop the runtime's parent-process
+references. Existing forked child mappings remain until the worker closes.
 
 ```python
+from pypto.runtime import DistributedWorker
+
 compiled = ir.compile(MyDistributedProgram)
 
 # shared-memory host buffers — allocated BEFORE prepare()
 host_x = torch.zeros((seq, 4096), dtype=torch.float16).share_memory_()
 host_out = torch.zeros((seq, 4096), dtype=torch.float16).share_memory_()
-host_weight = load_weight().share_memory_()
+host_weight = load_weight().contiguous()           # immutable ordinary CPU tensor
 
-with compiled.prepare() as rt:                  # setup runs once
+with DistributedWorker(compiled, inherited_host_tensors=[host_weight]) as rt:
     weight = rt.alloc_tensor(host_weight.shape, host_weight.dtype, init=host_weight)
+    rt.release_inherited_host_tensor_refs()      # drop the runtime's parent-process Host reference
+    del host_weight                              # drop the caller's final parent-process reference
     for step in generate_steps:
         host_x.copy_(next_input(step))          # refresh input in place
         rt(host_x, weight, host_out)            # host shm IO + resident weight
@@ -481,12 +486,14 @@ each shard **once** and keep it resident on its card, build a
 `StackedDeviceTensor` with `rt.alloc_stacked_tensor`:
 
 ```python
-host_w = load_weight().share_memory_()           # [B, N, M], B == world_size
+host_w = load_weight().contiguous()              # [B, N, M], B == world_size
 host_a = torch.zeros((B, N, M), dtype=...).share_memory_()
 host_out = torch.zeros((B, N, M), dtype=...).share_memory_()
 
-with compiled.prepare() as rt:
+with DistributedWorker(compiled, inherited_host_tensors=[host_w]) as rt:
     w = rt.alloc_stacked_tensor(host_w)          # shard i uploaded to card i, once
+    rt.release_inherited_host_tensor_refs()
+    del host_w
     for step in steps:
         host_a.copy_(next_input(step))
         rt(host_a, w, host_out)                  # x[r] resolves to the resident shard r
@@ -503,7 +510,7 @@ automatically. To read the current device contents of every shard back to the
 host in one call — e.g. a resident KV cache at the end of a step — use
 `rt.copy_stacked_from(w, host_out)`, the read-back symmetric of
 `alloc_stacked_tensor`. `host_out` is filled in place (`host_out[i]` receives
-shard `i`) and, like the upload source, must be a CPU, contiguous, **shared-memory**
+shard `i`) and must be a CPU, contiguous, **shared-memory**
 `[B, *tail]` tensor matching the stack's shape and dtype, allocated before
 `prepare()` (call `.share_memory_()`): the D2H copy runs in the forked chip worker,
 which can only write host memory it inherited at fork.

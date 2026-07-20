@@ -17,10 +17,11 @@ IO and ``b`` is the stacked resident weight. ``b`` is uploaded **once** (shard
 like the single-card resident weight in ``test_l3_device_tensor.py`` but spread
 across cards.
 
-Residency is proven the same way as the single-card test: after uploading the
-stack, the host source buffer is zeroed, so a kernel re-reading host memory would
-compute ``a + 0``. Getting ``a + b`` on the second dispatch means the per-card
-buffers stayed resident.
+For the shared-memory source, residency is proven the same way as the single-card
+test: after uploading the stack, the host source buffer is zeroed, so a kernel
+re-reading host memory would compute ``a + 0``. For an ordinary inherited
+source, where parent writes are copy-on-write, the test instruments Host tensor
+conversion and rejects any dispatch-time read from the source storage.
 
 Two placements are covered:
 
@@ -40,7 +41,7 @@ import pytest
 import torch
 from pypto import ir
 from pypto.ir.distributed_compiled_program import DistributedConfig
-from pypto.runtime import StackedDeviceTensor
+from pypto.runtime import DistributedWorker, StackedDeviceTensor, task_interface
 
 N_RANKS = 2
 DIM = 128
@@ -125,7 +126,7 @@ def _build_permuted_program():
     return StackedPermuted
 
 
-def _run_stacked(test_config, device_ids, program, worker_ids):
+def _run_stacked(test_config, device_ids, program, worker_ids, *, inherited_source=False, monkeypatch=None):
     """Upload a [N_RANKS, DIM, DIM] weight once via alloc_stacked_tensor, dispatch
     twice with different per-call inputs, and assert ``f == a + b`` each time."""
     compiled = ir.compile(
@@ -137,24 +138,44 @@ def _run_stacked(test_config, device_ids, program, worker_ids):
         ),
     )
 
-    # Shared-memory IO + weight source, allocated BEFORE prepare() so the forked
-    # chip workers inherit the mappings.
+    # Shared-memory IO, allocated before worker creation so the forked chip
+    # workers inherit the mappings.
     host_a = torch.zeros((N_RANKS, DIM, DIM), dtype=torch.float32).share_memory_()
     host_f = torch.zeros((N_RANKS, DIM, DIM), dtype=torch.float32).share_memory_()
     # Distinct per-shard weight so a wrong shard->card placement is caught.
-    host_b = torch.empty((N_RANKS, DIM, DIM), dtype=torch.float32).share_memory_()
+    host_b = torch.empty((N_RANKS, DIM, DIM), dtype=torch.float32)
+    if not inherited_source:
+        host_b.share_memory_()
     for i in range(N_RANKS):
         host_b[i].fill_(10.0 + i)  # shard i holds 10 + i
     # D2H read-back destination — like every host buffer the forked worker writes,
     # it must be shared memory allocated BEFORE prepare() (see copy_stacked_from).
     host_readback = torch.zeros((N_RANKS, DIM, DIM), dtype=torch.float32).share_memory_()
 
-    with compiled.prepare() as rt:
+    worker = (
+        DistributedWorker(compiled, inherited_host_tensors=[host_b])
+        if inherited_source
+        else compiled.prepare()
+    )
+    with worker as rt:
         weight = rt.alloc_stacked_tensor(host_b, worker_ids=worker_ids)
         assert isinstance(weight, StackedDeviceTensor)  # fail fast if the API contract changes
-        # Prove residency: scribble over the upload source. A kernel that re-read
-        # host memory would now compute a + 0 instead of a + b.
-        host_b.zero_()
+        if inherited_source:
+            rt.release_inherited_host_tensor_refs()
+        else:
+            # Shared-memory writes are visible to the forked workers, so this
+            # detects any dispatch-time re-read of the upload source.
+            host_b.zero_()
+        host_tensor_args = []
+        if inherited_source:
+            assert monkeypatch is not None
+            make_tensor_arg = task_interface.make_tensor_arg
+
+            def record_host_tensor_arg(arg):
+                host_tensor_args.append(arg)
+                return make_tensor_arg(arg)
+
+            monkeypatch.setattr(task_interface, "make_tensor_arg", record_host_tensor_arg)
         try:
             for host_a_val in (2.0, 7.0):
                 host_a.fill_(host_a_val)
@@ -166,9 +187,18 @@ def _run_stacked(test_config, device_ids, program, worker_ids):
                     expected[i].fill_(host_a_val + 10.0 + i)  # a + (10 + i)
                 torch.testing.assert_close(host_f, expected, rtol=1e-5, atol=1e-5)
 
+            if inherited_source:
+                expected_host_storage_ptrs = {
+                    host_a.untyped_storage().data_ptr(),
+                    host_f.untyped_storage().data_ptr(),
+                }
+                assert host_tensor_args
+                for arg in host_tensor_args:
+                    assert isinstance(arg, torch.Tensor)
+                    assert arg.untyped_storage().data_ptr() in expected_host_storage_ptrs
+
             # Read the resident stack back to the host (D2H). The kernel only
-            # reads ``b``, so each shard still holds ``10 + i`` even though the
-            # host source was zeroed after upload — a clean copy_stacked_from proof.
+            # reads ``b``, so each shard still holds ``10 + i`` after dispatch.
             host_readback.zero_()
             rt.copy_stacked_from(weight, host_readback)
             for i in range(N_RANKS):
@@ -187,6 +217,19 @@ class TestL3StackedDeviceTensor:
         if len(device_ids) < N_RANKS:
             pytest.skip(f"stacked-device-tensor identity needs {N_RANKS} devices, got {device_ids}")
         _run_stacked(test_config, device_ids, _build_identity_program(), worker_ids=None)
+
+    def test_identity_inherited_source(self, test_config, device_ids, monkeypatch):
+        """Upload from registered ordinary CPU storage, then release its parent reference."""
+        if len(device_ids) < N_RANKS:
+            pytest.skip(f"stacked-device-tensor identity needs {N_RANKS} devices, got {device_ids}")
+        _run_stacked(
+            test_config,
+            device_ids,
+            _build_identity_program(),
+            worker_ids=None,
+            inherited_source=True,
+            monkeypatch=monkeypatch,
+        )
 
     def test_permuted(self, test_config, device_ids):
         """Non-identity ``worker_ids=[1, 0]`` matching a permuted ``device=`` dispatch."""
