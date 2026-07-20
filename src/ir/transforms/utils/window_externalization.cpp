@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <any>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -1873,14 +1874,32 @@ class OutWindowExternalizer {
         // Preserve Submit-ness and deps_ (the canonical encoding); drop the
         // view's synthesised manual_dep_edges attr so deps aren't duplicated.
         // new_return_type already carries the trailing TASK_ID (is_submit_call).
+        // Drop the keys SubmitToCallView *synthesises* from first-class Submit
+        // fields. RewriteCallAttrs copies every attr off the transient Call
+        // view, so without this filter the rebuilt Submit would carry both the
+        // real field and a stale attr copy of it — duplicated state that the
+        // printer emits twice and that structural_hash cannot encode (its attr
+        // codec has no ExprPtr branch). The fields themselves are threaded
+        // explicitly through the constructor below.
+        static const std::array<const char*, 4> kViewSynthesizedKeys = {"predicate", "core_num", "sync_start",
+                                                                        "allow_early_resolve"};
         std::vector<std::pair<std::string, std::any>> submit_attrs;
         submit_attrs.reserve(new_attrs.size());
-        for (const auto& [k, v] : new_attrs) {
-          if (k != kAttrManualDepEdges) submit_attrs.emplace_back(k, v);
+        for (const auto& attr : new_attrs) {
+          // Bind the key to a plain local: capturing a structured binding in the
+          // lambda below is a C++20 extension and this target builds as C++17.
+          const std::string& key = attr.first;
+          if (key == kAttrManualDepEdges) continue;
+          if (std::any_of(kViewSynthesizedKeys.begin(), kViewSynthesizedKeys.end(),
+                          [&key](const char* synth) { return key == synth; })) {
+            continue;
+          }
+          submit_attrs.emplace_back(attr.first, attr.second);
         }
-        new_call = std::make_shared<Submit>(
-            cloned_gvar, new_args, submit->deps_, submit->kwargs_, std::move(submit_attrs), new_return_type,
-            submit->span_, submit->core_num_, submit->sync_start_, submit->allow_early_resolve_);
+        new_call = std::make_shared<Submit>(cloned_gvar, new_args, submit->deps_, submit->kwargs_,
+                                            std::move(submit_attrs), new_return_type, submit->span_,
+                                            submit->core_num_, submit->sync_start_,
+                                            submit->allow_early_resolve_, submit->predicate_);
       } else {
         new_call = std::make_shared<Call>(cloned_gvar, new_args, call->kwargs_, new_attrs, new_return_type,
                                           call->span_);

@@ -496,6 +496,14 @@ static IRNodePtr DeserializeSubmit(const msgpack::object& fields_obj, msgpack::z
     allow_early_resolve = allow_early_resolve_obj->as<bool>();
   }
 
+  // Dispatch predicate — an optional comparison Expr node (nullopt / NIL means
+  // an unconditional dispatch).
+  std::optional<ExprPtr> predicate;
+  auto predicate_obj = GetOptionalFieldObj(fields_obj, "predicate", ctx);
+  if (predicate_obj.has_value() && predicate_obj->type != msgpack::type::NIL) {
+    predicate = std::static_pointer_cast<const Expr>(ctx.DeserializeNode(*predicate_obj, zone));
+  }
+
   // Generic attrs map. Submit never stores manual_dep_edges in attrs (deps_ is
   // the source of truth), so no legacy top-level arg_directions lifting is
   // needed — arg_directions, when present, round-trips through the attrs map.
@@ -509,7 +517,7 @@ static IRNodePtr DeserializeSubmit(const msgpack::object& fields_obj, msgpack::z
   std::vector<std::pair<std::string, std::any>> kwargs = DeserializeKwargs(kwargs_obj, "kwargs", ctx, zone);
 
   return std::make_shared<Submit>(op, args, deps, std::move(kwargs), std::move(attrs), type, span,
-                                  std::move(core_num), sync_start, allow_early_resolve);
+                                  std::move(core_num), sync_start, allow_early_resolve, std::move(predicate));
 }
 
 // Macro for binary expressions

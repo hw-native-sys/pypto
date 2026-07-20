@@ -1395,6 +1395,17 @@ class Submit(Expr):
     ``pl.submit`` and on ``pl.spmd_submit``. Lowers to
     ``Arg::set_allow_early_resolve(true)`` in orchestration codegen."""
 
+    predicate: Final[Expr | None]
+    """Dispatch predicate (``pl.spmd_submit(..., predicate=(t[i] > 0))``) — an
+    ordinary comparison Expr, e.g. ``Gt(Cast(tensor.read(rc, [0, 0])), 0)``. The
+    scheduler evaluates it at the dispatch point; a false result retires the task
+    inline (never dispatched to a core) while still settling fanin/fanout.
+    ``None`` for an unconditional dispatch.
+
+    Stored as a plain Expr rather than a decomposed bundle: the IR already has the
+    comparison kinds and ``tensor.read``, so decomposition into the runtime's
+    ``operand OP target`` triple is orchestration-codegen's job."""
+
     @property
     def arg_directions(self) -> Sequence[ArgDirection]:
         """Resolved per-argument call-site directions (see :attr:`Call.arg_directions`)."""
@@ -1439,6 +1450,7 @@ class Submit(Expr):
         core_num: Expr | None = None,
         sync_start: bool = False,
         allow_early_resolve: bool = False,
+        predicate: Expr | None = None,
     ) -> None:
         """Create a Submit expression with kwargs and explicit attrs and type.
 
@@ -1457,6 +1469,9 @@ class Submit(Expr):
                 ``core_num`` to be set.
             allow_early_resolve: Opt this task in as a speculative early-dispatch
                 producer (independent of the SPMD launch spec).
+            predicate: Optional dispatch-predicate comparison Expr (e.g.
+                ``Gt(tensor.read(t, [i]), 0)``); omit for an unconditional
+                dispatch.
         """
         ...
 

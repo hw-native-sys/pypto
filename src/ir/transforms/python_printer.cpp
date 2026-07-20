@@ -1214,6 +1214,16 @@ void IRPythonPrinter::VisitExpr_(const SubmitPtr& op) {
     stream_ << ", allow_early_resolve=True";
   }
 
+  // Dispatch predicate — emitted as ``predicate=(<expr>)``; the comparison Expr
+  // prints itself, and the parser recovers it by parsing the kwarg as an
+  // ordinary expression, so the round trip needs no bespoke syntax.
+  if (op->predicate_.has_value()) {
+    INTERNAL_CHECK_SPAN(*op->predicate_, op->span_) << "Submit predicate is null";
+    stream_ << ", predicate=(";
+    VisitExpr(*op->predicate_);
+    stream_ << ")";
+  }
+
   // Surface the machine-only ``attrs={...}`` dict the same way Call does:
   // ``arg_directions`` keeps a bespoke emitter; every other attr (e.g.
   // ``arg_direction_overrides``) is rendered generically by ``PrintAttrValue``

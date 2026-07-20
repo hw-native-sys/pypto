@@ -465,6 +465,21 @@ ExprPtr IRMutator::VisitExpr_(const SubmitPtr& op) {
     }
   }
 
+  // Mutate the dispatch predicate (pl.spmd_submit(..., predicate=(t[i] > 0))) —
+  // a first-class SSA-bearing Expr, so substitution must rewrite it like
+  // args_/deps_/core_num_ (pass-submit-awareness.md rule 2).
+  std::optional<ExprPtr> new_predicate = op->predicate_;
+  bool predicate_changed = false;
+  if (op->predicate_.has_value()) {
+    INTERNAL_CHECK_SPAN(*op->predicate_, op->span_) << "Submit predicate is null";
+    auto remapped = ExprFunctor<ExprPtr>::VisitExpr(*op->predicate_);
+    INTERNAL_CHECK_SPAN(remapped, op->span_) << "Submit predicate mutated to null";
+    if (remapped.get() != op->predicate_->get()) {
+      new_predicate = remapped;
+      predicate_changed = true;
+    }
+  }
+
   auto new_type = RemapTypeViaVisitor(op->GetType());
   bool type_changed = (new_type.get() != op->GetType().get());
 
@@ -512,7 +527,10 @@ ExprPtr IRMutator::VisitExpr_(const SubmitPtr& op) {
     new_attrs.emplace_back(k, v);
   }
 
-  if (!args_changed && !deps_changed && !type_changed && !attrs_changed && !core_num_changed) return op;
+  if (!args_changed && !deps_changed && !type_changed && !attrs_changed && !core_num_changed &&
+      !predicate_changed) {
+    return op;
+  }
   std::vector<std::pair<std::string, std::any>> attrs_to_use;
   if (attrs_changed) {
     attrs_to_use = std::move(new_attrs);
@@ -521,7 +539,8 @@ ExprPtr IRMutator::VisitExpr_(const SubmitPtr& op) {
   }
   return std::make_shared<const Submit>(op->op_, std::move(new_args), std::move(new_deps), op->kwargs_,
                                         std::move(attrs_to_use), std::move(new_type), op->span_,
-                                        std::move(new_core_num), op->sync_start_, op->allow_early_resolve_);
+                                        std::move(new_core_num), op->sync_start_, op->allow_early_resolve_,
+                                        std::move(new_predicate));
 }
 
 ExprPtr IRMutator::VisitExpr_(const MakeTuplePtr& op) {

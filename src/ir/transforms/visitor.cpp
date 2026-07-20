@@ -111,6 +111,14 @@ void IRVisitor::VisitExpr_(const SubmitPtr& op) {
     INTERNAL_CHECK_SPAN(*op->core_num_, op->span_) << "Submit core_num is null";
     VisitExpr(*op->core_num_);
   }
+  // The dispatch predicate (pl.spmd_submit(..., predicate=(t[i] > 0))) is a
+  // first-class Expr operand — a comparison over a tensor.read and a constant.
+  // Visit it so unused-var / def-use / SSA-liveness analyses see the tensor and
+  // index Vars it references (mirrors the deps_ / core_num_ rationale).
+  if (op->predicate_.has_value()) {
+    INTERNAL_CHECK_SPAN(*op->predicate_, op->span_) << "Submit predicate is null";
+    VisitExpr(*op->predicate_);
+  }
   // Var-typed attrs reference Vars defined elsewhere in the IR.
   // IRMutator::VisitExpr_(SubmitPtr) already rewrites those Vars on
   // substitution; the visitor must walk them too so unused-var / def-use /

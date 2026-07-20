@@ -163,6 +163,30 @@ def submit(*args: Any, **kwargs: Any) -> Any:
     pure scheduling optimisation (no effect on results). Pays off on critical
     paths built from many short tasks; harmless otherwise.
 
+    The optional ``predicate=(...)`` kwarg attaches a **dispatch predicate** the
+    scheduler evaluates at this task's dispatch point — after its dependencies
+    are satisfied, so the value is current without an orchestration-time wait.
+    When the comparison is false the task is retired inline (never dispatched to
+    a core) while its fanin/fanout still settle, so downstream consumers still
+    unlock. Use it to skip work whose need is only known at runtime (e.g. an MoE
+    expert with an empty row count)::
+
+        out, tid = pl.spmd_submit(self.expert_ffn, tokens, out, core_num=N,
+                                  deps=[gather_tid],
+                                  predicate=(row_count[e] > 0))
+
+    The comparison is matched **syntactically, never evaluated**: in this
+    position ``row_count[e] > 0`` is a declarative spec handed to the scheduler,
+    not a ``tensor.read`` plus a compare. Only ``tensor[indices] OP
+    int-literal`` is expressible (one comparison; ``==`` ``!=`` ``>`` ``<``
+    ``>=`` ``<=``), mirroring the runtime's single-comparison predicate — no
+    chained comparisons, arithmetic, or boolean combination. Reduce anything
+    richer to a single gate value in a prior kernel and predicate on that.
+
+    **Contract:** the operand tensor's producer must be one of this submit's
+    ``deps=`` (the parser enforces this where statically provable), so the
+    dispatch-point read observes the current value.
+
     The return annotation is ``Any`` (not ``NoReturn``) because the parser
     intercepts the call and binds a 2-tuple to the LHS — downstream code
     that does ``out, tid = pl.submit(...)`` would not type-check under
@@ -198,10 +222,11 @@ def spmd_submit(*args: Any, **kwargs: Any) -> Any:
     ``core_num`` is a **required keyword argument** (a positive integer
     expression) — the positional slots are the kernel's own arguments.
     ``sync_start`` (default ``False``) requires all blocks to launch atomically.
-    ``deps=[...]`` and ``allow_early_resolve=True`` work exactly as on
-    :func:`submit` (note: a ``sync_start`` task cannot itself be block-by-block
-    pre-staged, but it can still be flagged to let its consumers pre-stage). The
-    callee may be an InCore / AIC / AIV kernel or a co-scheduled Group.
+    ``deps=[...]``, ``allow_early_resolve=True`` and ``predicate=(...)`` work
+    exactly as on :func:`submit` (note: a ``sync_start`` task cannot itself be
+    block-by-block pre-staged, but it can still be flagged to let its consumers
+    pre-stage). The callee may be an InCore / AIC / AIV kernel or a co-scheduled
+    Group.
 
     Like :func:`submit`, it works in both auto and manual scope; its primary use
     is explicit dependency wiring inside ``pl.manual_scope()``.

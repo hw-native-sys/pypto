@@ -893,6 +893,32 @@ class Submit : public Expr {
   // ``sync_start_``) because it is user-authored launch intent, not compiler
   // metadata; it carries no SSA value so passes need not walk it.
   bool allow_early_resolve_ = false;
+  // Dispatch predicate (``pl.spmd_submit(..., predicate=(t[i] > 0))``) — an
+  // ordinary comparison Expr, e.g. ``Gt(Cast(tensor.read(rc, [0, 0])), 0)``.
+  // The scheduler evaluates it at the dispatch point; a false result retires
+  // this task inline (never dispatched to a core) while still settling
+  // fanin/fanout so consumers unlock. ``std::nullopt`` means "no predicate".
+  //
+  // Deliberately stored as a plain Expr rather than a decomposed
+  // (operand, indices, op, target) bundle: the IR already has the comparison
+  // kinds (``ObjectKind::Gt`` etc.) and ``tensor.read``, so this reuses them
+  // instead of duplicating an enum, keeps the node's shape open for a future
+  // runtime that accepts richer predicates (``And``/``Or``), and needs no new
+  // reflection leaf type. Decomposition into the runtime's
+  // ``operand OP target`` triple is orchestration-codegen's job — the layer that
+  // owns the runtime ABI.
+  //
+  // A first-class SSA-bearing field (like ``deps_`` / ``core_num_``): passes
+  // that substitute / DCE / dominance-check Vars MUST walk it (see
+  // .claude/rules/pass-submit-awareness.md). Note it is NOT in a statement
+  // position, so FlattenCallExpr must not hoist its nested ``tensor.read`` into
+  // a temporary — that would both lose the operand/indices codegen needs and
+  // turn the read into a real orchestration-time load, the very
+  // ``wait_for_tensor_ready`` stall the predicate exists to avoid.
+  //
+  // Contract: the operand tensor's producer MUST be one of ``deps_`` so the
+  // dispatch-point read observes the current value (enforced by the parser).
+  std::optional<ExprPtr> predicate_;
   std::vector<std::pair<std::string, std::any>> attrs_;   // Compiler-internal metadata (ordered)
   std::vector<std::pair<std::string, std::any>> kwargs_;  // Keyword arguments (metadata, ordered)
 
@@ -922,7 +948,7 @@ class Submit : public Expr {
          std::vector<std::pair<std::string, std::any>> kwargs,
          std::vector<std::pair<std::string, std::any>> attrs, TypePtr type, Span span,
          std::optional<ExprPtr> core_num = std::nullopt, bool sync_start = false,
-         bool allow_early_resolve = false)
+         bool allow_early_resolve = false, std::optional<ExprPtr> predicate = std::nullopt)
       : Expr(std::move(span), std::move(type)),
         op_(std::move(op)),
         args_(std::move(args)),
@@ -930,10 +956,12 @@ class Submit : public Expr {
         core_num_(std::move(core_num)),
         sync_start_(sync_start),
         allow_early_resolve_(allow_early_resolve),
+        predicate_(std::move(predicate)),
         attrs_(std::move(attrs)),
         kwargs_(std::move(kwargs)) {
     ValidateArgDirectionsAttr();
     ValidateLaunchSpec();
+    ValidatePredicate();
   }
 
   template <typename T>
@@ -980,6 +1008,9 @@ class Submit : public Expr {
     return GetAttr<std::vector<ArgDirection>>(kAttrArgDirections);
   }
 
+  // True when this Submit carries a dispatch predicate.
+  [[nodiscard]] bool HasPredicate() const { return predicate_.has_value(); }
+
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::Submit; }
   [[nodiscard]] std::string TypeName() const override { return "Submit"; }
 
@@ -992,6 +1023,7 @@ class Submit : public Expr {
                         reflection::UsualField(&Submit::core_num_, "core_num"),
                         reflection::UsualField(&Submit::sync_start_, "sync_start"),
                         reflection::UsualField(&Submit::allow_early_resolve_, "allow_early_resolve"),
+                        reflection::UsualField(&Submit::predicate_, "predicate"),
                         reflection::UsualField(&Submit::attrs_, "attrs"),
                         reflection::UsualField(&Submit::kwargs_, "kwargs")));
   }
@@ -1016,6 +1048,20 @@ class Submit : public Expr {
           throw pypto::TypeError("Submit core_num must be an integer/index expression (SPMD block count)");
         }
       }
+    }
+  }
+
+  // The only invariant cheap enough to assert on every construction: a present
+  // predicate is a non-null Expr. Its *shape* (a single comparison of a
+  // tensor.read against a constant — what the runtime can actually express) is
+  // deliberately NOT checked here: mid-pipeline the operand types may still be
+  // UnknownType, and the constraint belongs to the layer that owns the runtime
+  // ABI, not to the IR node. The DSL parser rejects unsupported shapes at the
+  // source, and orchestration codegen fails loudly on anything that reaches it
+  // un-decomposable.
+  void ValidatePredicate() const {
+    if (predicate_.has_value() && !*predicate_) {
+      throw pypto::ValueError("Submit predicate must be a non-null Expr when present");
     }
   }
 
@@ -1067,7 +1113,8 @@ inline CallPtr SubmitToCallView(const SubmitPtr& submit) {
     // re-emitted below from core_num_ / sync_start_. Drop any stray attr of
     // the same key so the field stays the single source of truth (Call::GetAttr
     // returns the first match, so a stale attr would otherwise shadow it).
-    if (k != kAttrManualDepEdges && k != "core_num" && k != "sync_start" && k != "allow_early_resolve") {
+    if (k != kAttrManualDepEdges && k != "core_num" && k != "sync_start" && k != "allow_early_resolve" &&
+        k != "predicate") {
       attrs.emplace_back(k, v);
     }
   }
@@ -1111,6 +1158,21 @@ inline CallPtr SubmitToCallView(const SubmitPtr& submit) {
   // emit when set so a plain submit's Call view keeps its existing attrs.
   if (submit->allow_early_resolve_) {
     attrs.emplace_back("allow_early_resolve", std::any(true));
+  }
+  // Dispatch predicate (pl.spmd_submit(..., predicate=(t[i] > 0))) — surface the
+  // comparison Expr as a Call-view attr so orchestration codegen can decompose
+  // it into ``Arg::set_predicate(...)``. Only present when the Submit carries a
+  // predicate; a plain submit's Call view is unchanged.
+  //
+  // The view is *intended* to be transient (codegen-only), but a pass that
+  // rewrites a Submit through this view and rebuilds it must drop the keys
+  // synthesised here — otherwise the rebuilt Submit carries both the field and a
+  // stale attr copy, which the printer emits twice and structural_hash cannot
+  // encode (its attr codec has no ExprPtr branch). ``WindowExternalization``
+  // filters them explicitly; ``core_num`` / ``sync_start`` /
+  // ``allow_early_resolve`` need the same care.
+  if (submit->predicate_.has_value()) {
+    attrs.emplace_back("predicate", std::any(*submit->predicate_));
   }
   return std::make_shared<Call>(submit->op_, submit->args_, submit->kwargs_, std::move(attrs),
                                 submit->GetType(), submit->span_);
