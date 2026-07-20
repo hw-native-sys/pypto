@@ -112,10 +112,9 @@ def main(argv: list[str]) -> int:
     platform = spec["platform"]
     device_id = int(spec["device_id"])
     dfx_dir = Path(spec["dfx_dir"])
-    pto_isa_commit = spec.get("pto_isa_commit")
     level = int(spec.get("level", 2))
 
-    chip_callable, runtime_name, runtime_config = compile_and_assemble(work_dir, platform, pto_isa_commit)
+    chip_callable, runtime_name, runtime_config = compile_and_assemble(work_dir, platform)
 
     if spec["mode"] == "golden":
         orch_args, _keepalive = _build_golden_orch_args(Path(spec["golden_path"]))

@@ -144,7 +144,7 @@ def _get_pto_isa_clone_path() -> Path:
 def _read_runtime_pto_isa_pin() -> str | None:
     """Return the runtime's pinned PTO-ISA commit, or ``None`` when unavailable."""
     try:
-        commit = _PTO_ISA_PIN_PATH.read_text().strip()
+        commit = _PTO_ISA_PIN_PATH.read_text(encoding="utf-8").strip()
     except OSError as e:
         logger.warning(
             f"Failed to read runtime PTO-ISA pin at {_PTO_ISA_PIN_PATH}: {e}; "
@@ -205,24 +205,20 @@ def _clone_pto_isa(clone_path: Path, primary_url: str, fallback_url: str) -> boo
     return True
 
 
-def ensure_pto_isa_root(commit: str | None = None, clone_protocol: str = "https") -> str | None:
+def ensure_pto_isa_root(clone_protocol: str = "https") -> str | None:
     """Ensure ``PTO_ISA_ROOT`` is available, either from env or by cloning.
 
     Args:
-        commit: Commit to checkout. Defaults to the revision in
-            ``runtime/pto_isa.pin`` when that file is available.
         clone_protocol: ``"https"`` or ``"ssh"``.
 
     Returns:
         PTO-ISA root path if successful, ``None`` otherwise.
     """
-    resolved_commit = commit or _read_runtime_pto_isa_pin()
     existing_root = os.environ.get("PTO_ISA_ROOT")
     if existing_root:
-        if resolved_commit:
-            _checkout_pto_isa_commit(Path(existing_root), resolved_commit)
         return existing_root
 
+    resolved_commit = _read_runtime_pto_isa_pin()
     clone_path = _get_pto_isa_clone_path()
     include_dir = clone_path / "include"
 
@@ -233,10 +229,11 @@ def ensure_pto_isa_root(commit: str | None = None, clone_protocol: str = "https"
             primary_url, fallback_url = _PTO_ISA_SSH, _PTO_ISA_SSH_FALLBACK
         if not _clone_pto_isa(clone_path, primary_url, fallback_url):
             return None
-        if resolved_commit:
-            _checkout_pto_isa_commit(clone_path, resolved_commit)
+        if resolved_commit and not _checkout_pto_isa_commit(clone_path, resolved_commit):
+            return None
     elif resolved_commit:
-        _checkout_pto_isa_commit(clone_path, resolved_commit)
+        if not _checkout_pto_isa_commit(clone_path, resolved_commit):
+            return None
     else:
         _update_pto_isa_to_latest(clone_path)
 
@@ -248,19 +245,28 @@ def ensure_pto_isa_root(commit: str | None = None, clone_protocol: str = "https"
     return resolved
 
 
-def _checkout_pto_isa_commit(clone_path: Path, commit: str) -> None:
-    """Checkout the specified commit if the existing clone is at a different revision."""
+def _checkout_pto_isa_commit(clone_path: Path, commit: str) -> bool:
+    """Checkout *commit* and verify that the managed clone resolves to it."""
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
+            ["git", "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            cwd=str(clone_path),
+            timeout=5,
+        )
+        current = result.stdout.strip()
+        target = subprocess.run(
+            ["git", "rev-parse", f"{commit}^{{commit}}"],
             check=False,
             capture_output=True,
             text=True,
             cwd=str(clone_path),
             timeout=5,
         )
-        current = result.stdout.strip() if result.returncode == 0 else ""
-        if current and not commit.startswith(current) and not current.startswith(commit):
+        target_revision = target.stdout.strip() if target.returncode == 0 else ""
+        if not target_revision or current != target_revision:
             subprocess.run(
                 ["git", "fetch", "origin"],
                 capture_output=True,
@@ -277,8 +283,29 @@ def _checkout_pto_isa_commit(clone_path: Path, commit: str) -> None:
                 timeout=30,
                 check=True,
             )
-    except Exception as e:
+            target_revision = subprocess.run(
+                ["git", "rev-parse", f"{commit}^{{commit}}"],
+                check=True,
+                capture_output=True,
+                text=True,
+                cwd=str(clone_path),
+                timeout=5,
+            ).stdout.strip()
+        checked_out = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            cwd=str(clone_path),
+            timeout=5,
+        ).stdout.strip()
+        if checked_out != target_revision:
+            logger.warning(f"Failed to verify pto-isa commit {commit}: HEAD is {checked_out or 'unknown'}")
+            return False
+        return True
+    except (OSError, subprocess.SubprocessError) as e:
         logger.warning(f"Failed to checkout pto-isa commit {commit}: {e}")
+        return False
 
 
 def _update_pto_isa_to_latest(clone_path: Path) -> None:
@@ -442,7 +469,6 @@ def compile_single_orchestration(
 def compile_and_assemble(
     work_dir: Path,
     platform: str,
-    pto_isa_commit: str | None = None,
 ) -> tuple[ChipCallable, str, dict[str, Any]]:
     """Compile kernels + orchestration from *work_dir*, assemble ``ChipCallable``.
 
@@ -453,7 +479,6 @@ def compile_and_assemble(
         work_dir: Root output directory containing ``kernels/``, ``orchestration/``,
             and ``kernel_config.py`` (produced by :func:`compile_program`).
         platform: Target execution platform.
-        pto_isa_commit: If set, pin the pto-isa clone to this commit.
 
     Returns:
         ``(chip_callable, runtime_name, runtime_config)`` — the assembled
@@ -483,7 +508,7 @@ def compile_and_assemble(
     runtime_name = runtime_config.get("runtime", "tensormap_and_ringbuffer")
 
     # Ensure PTO-ISA root
-    pto_isa_root = ensure_pto_isa_root(commit=pto_isa_commit, clone_protocol="https")
+    pto_isa_root = ensure_pto_isa_root(clone_protocol="https")
     if pto_isa_root is None:
         raise OSError(
             "PTO_ISA_ROOT could not be resolved.\n"

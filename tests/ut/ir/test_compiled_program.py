@@ -574,7 +574,7 @@ class TestCompiledProgramExtraction:
         cc, _, patcher = self._patch_assemble()
         with patcher as mock:
             assert cp.chip_callable is cc
-            mock.assert_called_once_with(tmp_path.resolve(), cp.platform, None)
+            mock.assert_called_once_with(tmp_path.resolve(), cp.platform)
 
     def test_runtime_name_triggers_assemble(self, tmp_path):
         prog = _make_program_with_orchestration()
@@ -605,33 +605,23 @@ class TestCompiledProgramExtraction:
             _ = cp.chip_callable  # repeat
             assert mock.call_count == 1
 
-    def test_load_passes_pto_isa_commit(self, tmp_path):
+    def test_load_eagerly_assembles(self, tmp_path):
         prog = _make_program_with_orchestration()
         cp = CompiledProgram(prog, str(tmp_path))
 
         _, _, patcher = self._patch_assemble()
         with patcher as mock:
-            cp.load(pto_isa_commit="abc1234")
-            mock.assert_called_once_with(tmp_path.resolve(), cp.platform, "abc1234")
+            cp.load()
+            mock.assert_called_once_with(tmp_path.resolve(), cp.platform)
 
-    def test_load_after_first_access_with_commit_raises(self, tmp_path):
-        prog = _make_program_with_orchestration()
-        cp = CompiledProgram(prog, str(tmp_path))
-
-        _, _, patcher = self._patch_assemble()
-        with patcher:
-            _ = cp.chip_callable  # cache warmed
-            with pytest.raises(RuntimeError, match="already loaded"):
-                cp.load(pto_isa_commit="abc1234")
-
-    def test_load_after_first_access_without_commit_is_noop(self, tmp_path):
+    def test_load_after_first_access_is_noop(self, tmp_path):
         prog = _make_program_with_orchestration()
         cp = CompiledProgram(prog, str(tmp_path))
 
         _, _, patcher = self._patch_assemble()
         with patcher as mock:
             _ = cp.chip_callable
-            cp.load()  # no commit override → idempotent
+            cp.load()
             assert mock.call_count == 1
 
     def test_build_orch_args_inplace_returns_full_list(self, tmp_path):
@@ -844,7 +834,7 @@ class TestSubChipCallableExtraction:
         cc = MagicMock(name="sub_chip_callable")
         with _fake_compile_and_assemble((cc, "host_build_graph", {})) as mock:
             assert sub.chip_callable is cc
-            mock.assert_called_once_with(sub.output_dir, sub.platform, None)
+            mock.assert_called_once_with(sub.output_dir, sub.platform)
 
     def test_build_orch_args_routes_through_helper(self, tmp_path):
         sub = self._make_subchip(tmp_path)
@@ -859,14 +849,13 @@ class TestSubChipCallableExtraction:
         assert coerced == [a, b, c]
         assert return_style is False
 
-    def test_load_after_first_access_with_commit_raises(self, tmp_path):
-        """Same guard as on CompiledProgram: cannot re-pin once cached."""
+    def test_load_after_first_access_is_noop(self, tmp_path):
         sub = self._make_subchip(tmp_path)
         cc = MagicMock(name="sub_chip_callable")
-        with _fake_compile_and_assemble((cc, "host_build_graph", {})):
+        with _fake_compile_and_assemble((cc, "host_build_graph", {})) as mock:
             _ = sub.chip_callable  # cache warmed
-            with pytest.raises(RuntimeError, match="already loaded"):
-                sub.load(pto_isa_commit="abc1234")
+            sub.load()
+            assert mock.call_count == 1
 
 
 class TestValidateIr:

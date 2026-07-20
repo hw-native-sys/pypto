@@ -72,7 +72,6 @@ def execute_artifact_dir(
     platform: str,
     device_id: int,
     *,
-    pto_isa_commit: str | None = None,
     dfx: _DfxOpts = _DfxOpts(),
     validate: bool = True,
 ) -> None:
@@ -89,7 +88,6 @@ def execute_artifact_dir(
             ``kernels/``, ``orchestration/``, ``golden.py``, ``data/``).
         platform: Target execution platform (e.g. ``"a2a3"``).
         device_id: Hardware device index to run on.
-        pto_isa_commit: If set, pin the pto-isa clone to this commit.
         dfx: Runtime DFX toggles; artefacts land under ``work_dir/dfx_outputs``.
         validate: When ``True`` (manual repro default), compare outputs against
             the golden in-process using ``golden.py``'s tolerances. When
@@ -104,11 +102,11 @@ def execute_artifact_dir(
         Exception: Any device / validation error is propagated to the caller
             (``main`` turns it into ``PYPTO_EXEC_RESULT=FAIL`` + exit ``1``).
     """
-    chip_callable, runtime_name = _reconstruct_artifact(work_dir, platform, pto_isa_commit=pto_isa_commit)
+    chip_callable, runtime_name = _reconstruct_artifact(work_dir, platform)
     _run_on_device(work_dir, platform, device_id, chip_callable, runtime_name, dfx=dfx, validate=validate)
 
 
-def _reconstruct_artifact(work_dir: Path, platform: str, *, pto_isa_commit: str | None) -> tuple[Any, str]:
+def _reconstruct_artifact(work_dir: Path, platform: str) -> tuple[Any, str]:
     """Rebuild the cached artifact, reclassifying any failure as infra.
 
     ``compile_and_assemble`` reuses the cached ``.o``/``.so`` next to each kernel
@@ -119,9 +117,7 @@ def _reconstruct_artifact(work_dir: Path, platform: str, *, pto_isa_commit: str 
     from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
 
     try:
-        chip_callable, runtime_name, _ = compile_and_assemble(
-            work_dir, platform, pto_isa_commit=pto_isa_commit
-        )
+        chip_callable, runtime_name, _ = compile_and_assemble(work_dir, platform)
     except Exception as exc:  # noqa: BLE001 — reclassified as infra, re-raised below
         raise ArtifactSetupError(f"artifact reconstruction failed for {work_dir}: {exc}") from exc
     return chip_callable, runtime_name
@@ -161,7 +157,6 @@ def execute_batch_manifest(
     manifest_path: Path,
     device_id: int,
     *,
-    pto_isa_commit: str | None = None,
     dfx: _DfxOpts = _DfxOpts(),
     validate: bool = False,
 ) -> bool:
@@ -204,7 +199,7 @@ def execute_batch_manifest(
 
     def _rebind(work_dir: Path, platform: str) -> tuple[Any, str]:
         # _reconstruct_artifact already wraps a compile failure as ArtifactSetupError.
-        chip_callable, runtime_name = _reconstruct_artifact(work_dir, platform, pto_isa_commit=pto_isa_commit)
+        chip_callable, runtime_name = _reconstruct_artifact(work_dir, platform)
         live_callables.append(chip_callable)
         return chip_callable, runtime_name
 
@@ -291,11 +286,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "init for the whole batch). Mutually exclusive with --work-dir.",
     )
     parser.add_argument("--device-id", type=int, required=True, help="Hardware device index")
-    parser.add_argument(
-        "--pto-isa-commit",
-        default=None,
-        help="Override runtime/pto_isa.pin with this pto-isa commit",
-    )
     # DFX toggles — names mirror tests/st/conftest.py so the harness round-trip
     # (_dfx_to_cli) is symmetric.
     parser.add_argument("--enable-l2-swimlane", action="store_true", help="Capture L2 swimlane records")
@@ -345,7 +335,6 @@ def main(argv: list[str] | None = None) -> int:
             all_ok = execute_batch_manifest(
                 args.batch_manifest,
                 args.device_id,
-                pto_isa_commit=args.pto_isa_commit,
                 dfx=dfx,
                 validate=not args.no_validate,
             )
@@ -365,7 +354,6 @@ def main(argv: list[str] | None = None) -> int:
             args.work_dir,
             args.platform,
             args.device_id,
-            pto_isa_commit=args.pto_isa_commit,
             dfx=dfx,
             validate=not args.no_validate,
         )

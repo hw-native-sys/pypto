@@ -55,7 +55,11 @@ jobs:
       - name: Guard against un-centralized toolchain literals
         run: |
           status=0
-          if grep -rnE 'pto-isa-commit=[0-9a-f]{7,}|git checkout [0-9a-f]{40}' .github/workflows/; then
+          if grep -rn -- 'pto-isa''-commit' python/ tests/ .github/workflows/; then
+            echo "::error::The PyPTO pto-isa commit override has been removed. Bump runtime/pto_isa.pin instead."
+            status=1
+          fi
+          if grep -rnE 'git checkout [0-9a-f]{40}' .github/workflows/; then
             echo "::error::Hardcoded pto-isa commit found in a workflow. Use \${{ needs.toolchain.outputs.pto_isa_commit }}; pto-isa is bumped via the runtime submodule (runtime/pto_isa.pin)."
             status=1
           fi
@@ -328,8 +332,7 @@ jobs:
             --ignore=tests/st/runtime/cross_core \
             --ignore=tests/st/runtime/framework_and_models/test_dump_tag.py \
             --precompile-workers=32 --execute-via-task-submit --execute-batch-size=64 \
-            --task-queue-timeout=1800 --task-max-time=600 --task-submit-device="$DEVICE_ID" \
-            --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }}
+            --task-queue-timeout=1800 --task-max-time=600 --task-submit-device="$DEVICE_ID"
 
       - name: Kill orphaned task-submit tasks
         if: always()
@@ -421,8 +424,7 @@ jobs:
           python -m pytest tests/st/runtime/ops tests/st/runtime/cross_core \
             -v -m device_batch \
             --precompile-workers=32 --execute-via-task-submit --execute-batch-size=64 \
-            --task-queue-timeout=1800 --task-max-time=600 --task-submit-device="$DEVICE_ID" \
-            --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }}
+            --task-queue-timeout=1800 --task-max-time=600 --task-submit-device="$DEVICE_ID"
 
       - name: Test direct-device (mechanism B — one card, in-process)
         timeout-minutes: 30
@@ -446,8 +448,7 @@ jobs:
               --ignore=tests/st/distributed \
               --ignore=tests/st/codegen \
               --ignore=tests/st/runtime/framework_and_models/test_perf_swimlane.py \
-              --device=\$TASK_DEVICE --platform=a2a3 \
-              --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }}"
+              --device=\$TASK_DEVICE --platform=a2a3"
 
       - name: Test paged-attention codegen (numeric compare, in device env)
         # tests/st/codegen runs device-free in the CPU codegen-tests job, but this
@@ -459,8 +460,7 @@ jobs:
           task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 600 \
             --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest \
               tests/st/codegen/torch/test_torch_codegen_paged_attention.py \
-              -v --device=\$TASK_DEVICE --platform=a2a3 \
-              --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }}"
+              -v --device=\$TASK_DEVICE --platform=a2a3"
 
       - name: Test multi-orch L2 (isolated pytest invocation)
         # Mechanism B: a single forked pytest wrapped whole in task-submit (no
@@ -471,19 +471,19 @@ jobs:
         run: |
           source activate.sh
           task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 600 \
-            --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest tests/st/distributed/test_l2_multi_orch.py -v --device=\$TASK_DEVICE --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }}"
+            --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest tests/st/distributed/test_l2_multi_orch.py -v --device=\$TASK_DEVICE"
 
       - name: Test swimlane output
         run: |
           source activate.sh
           task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 600 \
-            --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest tests/st/runtime/framework_and_models/test_perf_swimlane.py -v --device=\$TASK_DEVICE --platform=a2a3 --enable-l2-swimlane --forked --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }}"
+            --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest tests/st/runtime/framework_and_models/test_perf_swimlane.py -v --device=\$TASK_DEVICE --platform=a2a3 --enable-l2-swimlane --forked"
 
       - name: Test dump-args output
         run: |
           source activate.sh
           task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 600 \
-            --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest tests/st/runtime/framework_and_models/test_dump_tag.py -v --device=\$TASK_DEVICE --platform=a2a3 --dump-args --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }} --forked"
+            --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest tests/st/runtime/framework_and_models/test_dump_tag.py -v --device=\$TASK_DEVICE --platform=a2a3 --dump-args --forked"
 
       - name: Kill orphaned task-submit tasks
         if: always()
@@ -557,7 +557,7 @@ jobs:
         run: |
           source activate.sh
           task-submit --device "$DEVICE_ID" --device-num 2 --timeout 3600 --max-time 900 \
-            --run "cd $GITHUB_WORKSPACE/dist-checkout && source activate.sh && python -m pytest tests/st/distributed -v --device=\$TASK_DEVICE --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }} --ignore=tests/st/distributed/test_l2_multi_orch.py"
+            --run "cd $GITHUB_WORKSPACE/dist-checkout && source activate.sh && python -m pytest tests/st/distributed -v --device=\$TASK_DEVICE --ignore=tests/st/distributed/test_l2_multi_orch.py"
 
       - name: Kill orphaned task-submit tasks
         if: always()
@@ -757,10 +757,10 @@ jobs:
         # against the runtime's bundled pto-isa, which still clones from the
         # stale PTO-ISA/pto-isa mirror (lacks pto::Coalesce) until the runtime
         # submodule is bumped past simpler #806. Re-enable once that lands.
-        run: pytest tests/st/runtime/ops/test_assemble.py tests/st/runtime/ops/test_mscatter.py tests/st/runtime/ops/test_random.py tests/st/runtime/framework_and_models/test_qwen3_decode_scope3_mixed.py tests/st/runtime/control_flow/test_dyn_orch_shape.py::TestDynOrchShapeOperations::test_dyn_orch_paged_attention -v --platform=a5sim --forked --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }} -k "not TestMscatter"
+        run: pytest tests/st/runtime/ops/test_assemble.py tests/st/runtime/ops/test_mscatter.py tests/st/runtime/ops/test_random.py tests/st/runtime/framework_and_models/test_qwen3_decode_scope3_mixed.py tests/st/runtime/control_flow/test_dyn_orch_shape.py::TestDynOrchShapeOperations::test_dyn_orch_paged_attention -v --platform=a5sim --forked -k "not TestMscatter"
 
       - name: Test A5 cross-core system tests (simulator)
-        run: pytest tests/st/runtime/cross_core/test_cross_core.py -v --forked --platform=a5sim --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }}
+        run: pytest tests/st/runtime/cross_core/test_cross_core.py -v --forked --platform=a5sim
 
       - name: Test A2A3 cross-core system tests (simulator)
-        run: pytest tests/st/runtime/cross_core/test_cross_core.py -v --forked --platform=a2a3sim --pto-isa-commit=${{ needs.toolchain.outputs.pto_isa_commit }}
+        run: pytest tests/st/runtime/cross_core/test_cross_core.py -v --forked --platform=a2a3sim

@@ -136,9 +136,10 @@ Defines the tile-level instruction set for the target hardware. Provides C++ hea
 **Interface:** C++ header library defining the instruction API. Downstream consumers `#include` pto-isa headers; the hardware vendor provides the target-specific implementations that back these headers.
 
 PyPTO's managed checkout under `build_output/_deps/pto-isa` uses the commit in
-`runtime/pto_isa.pin` by default, matching the runtime submodule's build. Pass
-`--pto-isa-commit` to override that revision for a test run. If the pin file is
-unavailable, PyPTO falls back to the pto-isa remote's default branch tip.
+`runtime/pto_isa.pin`, matching the runtime submodule's build. To change the
+revision, update the runtime-side pin. If the pin file is unavailable, PyPTO
+falls back to the pto-isa remote's default branch tip. A caller-provided
+`PTO_ISA_ROOT` is used as-is and remains under the caller's control.
 
 ### simpler — Task Runtime
 

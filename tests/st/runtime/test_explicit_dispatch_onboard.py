@@ -120,7 +120,7 @@ def _pto_isa_root(test_config):
     """
     if str(test_config.platform).endswith("sim"):
         return
-    ensure_pto_isa_root(commit=test_config.pto_isa_commit, clone_protocol="https")
+    ensure_pto_isa_root(clone_protocol="https")
 
 
 @pytest.fixture

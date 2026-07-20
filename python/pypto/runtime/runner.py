@@ -97,8 +97,6 @@ class RunConfig:
             ``build_output/<program_name>_<timestamp>``.
         codegen_only: If ``True``, stop after code generation without executing
             on device.  Useful for validating compilation output.
-        pto_isa_commit: If set, pin the pto-isa clone to this specific git
-            commit (hash or tag).  ``None`` means use the latest remote HEAD.
         enable_l2_swimlane: Capture per-task L2 perf records into
             ``<work_dir>/dfx_outputs/l2_swimlane_records.json``. On onboard
             platforms, ``swimlane_converter`` then produces
@@ -229,7 +227,6 @@ class RunConfig:
     save_kernels: bool = False
     save_kernels_dir: str | None = None
     codegen_only: bool = False
-    pto_isa_commit: str | None = None
     enable_l2_swimlane: bool = False
     enable_dump_args: int = 0  # 0=off, 1=partial (dump_tag-marked), 2=full
     enable_pmu: int = 0
@@ -924,7 +921,6 @@ def _execute_on_device(
                 "platform": platform,
                 "device_id": device_id,
                 "dfx_dir": str(dfx_dir),
-                "pto_isa_commit": None,
                 "level": 2,
             },
             dfx_dir,
@@ -1247,7 +1243,6 @@ def execute_compiled(  # noqa: PLR0913
     *,
     platform: str,
     device_id: int,
-    pto_isa_commit: str | None = None,
     dfx: _DfxOpts = _DfxOpts(),
     level: int = 2,
     block_dim: int | None = None,
@@ -1272,7 +1267,6 @@ def execute_compiled(  # noqa: PLR0913
             orchestration function's parameter order.
         platform: Target execution platform.
         device_id: Hardware device index.
-        pto_isa_commit: Optional git commit to pin pto-isa clone.
         dfx: Runtime DFX toggles. When any flag is enabled the artefacts
             land under ``<work_dir>/dfx_outputs/`` and the matching
             post-run converter is invoked.
@@ -1308,7 +1302,7 @@ def execute_compiled(  # noqa: PLR0913
         execute_on_device,
     )
 
-    chip_callable, runtime_name, runtime_config = compile_and_assemble(work_dir, platform, pto_isa_commit)
+    chip_callable, runtime_name, runtime_config = compile_and_assemble(work_dir, platform)
 
     # Caller-supplied values take precedence over the RUNTIME_CONFIG baked
     # into kernel_config.py. When neither is provided, the simpler runtime's
@@ -1358,7 +1352,6 @@ def execute_compiled(  # noqa: PLR0913
                 "platform": platform,
                 "device_id": device_id,
                 "dfx_dir": str(dfx_dir),
-                "pto_isa_commit": pto_isa_commit,
                 "level": level,
                 "block_dim": effective_block_dim,
                 "aicpu_thread_num": effective_aicpu_thread_num,

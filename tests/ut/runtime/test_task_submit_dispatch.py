@@ -100,7 +100,7 @@ def test_task_submit_argv_and_pass(tmp_path):
         return_value=_proc(0, "PYPTO_EXEC_RESULT=PASS device=4\n"),
     ) as run:
         passed, error, device = test_runner._run_artifact_via_task_submit(
-            tmp_path, "a2a3", dfx, "abc123", max_time=600, queue_timeout=1800
+            tmp_path, "a2a3", dfx, max_time=600, queue_timeout=1800
         )
     assert (passed, error, device) == (True, None, 4)
     argv = run.call_args.args[0]
@@ -116,7 +116,6 @@ def test_task_submit_argv_and_pass(tmp_path):
     assert "pypto.runtime.execute_artifact" in run_cmd
     assert "--device-id $TASK_DEVICE" in run_cmd
     assert "--enable-l2-swimlane" in run_cmd
-    assert "--pto-isa-commit abc123" in run_cmd
     # Device run only; the harness validates with the real tolerance afterwards.
     assert "--no-validate" in run_cmd
     # full child output persisted next to the artifact
@@ -129,7 +128,7 @@ def test_task_submit_pins_device_when_requested(tmp_path):
         test_runner.subprocess, "run", return_value=_proc(0, "PYPTO_EXEC_RESULT=PASS device=2\n")
     ) as run:
         passed, _, device = test_runner._run_artifact_via_task_submit(
-            tmp_path, "a2a3", _DfxOpts(), None, 600, 1800, device="2"
+            tmp_path, "a2a3", _DfxOpts(), 600, 1800, device="2"
         )
     assert passed is True
     assert device == 2
@@ -142,7 +141,7 @@ def test_task_submit_real_failure(tmp_path):
         test_runner.subprocess, "run", return_value=_proc(1, "PYPTO_EXEC_RESULT=FAIL\n", "Traceback: boom")
     ):
         passed, error, device = test_runner._run_artifact_via_task_submit(
-            tmp_path, "a2a3", _DfxOpts(), None, 600, 1800
+            tmp_path, "a2a3", _DfxOpts(), 600, 1800
         )
     assert passed is False
     assert device is None
@@ -152,18 +151,14 @@ def test_task_submit_real_failure(tmp_path):
 
 def test_task_submit_queue_timeout_is_distinguished(tmp_path):
     with patch.object(test_runner.subprocess, "run", return_value=_proc(1, "", "")):
-        passed, error, _ = test_runner._run_artifact_via_task_submit(
-            tmp_path, "a2a3", _DfxOpts(), None, 600, 1800
-        )
+        passed, error, _ = test_runner._run_artifact_via_task_submit(tmp_path, "a2a3", _DfxOpts(), 600, 1800)
     assert passed is False
     assert "queue wait timed out" in error
 
 
 def test_task_submit_watchdog_kill_is_distinguished(tmp_path):
     with patch.object(test_runner.subprocess, "run", return_value=_proc(137, "", "")):
-        passed, error, _ = test_runner._run_artifact_via_task_submit(
-            tmp_path, "a2a3", _DfxOpts(), None, 600, 1800
-        )
+        passed, error, _ = test_runner._run_artifact_via_task_submit(tmp_path, "a2a3", _DfxOpts(), 600, 1800)
     assert passed is False
     assert "--max-time" in error
 
@@ -174,9 +169,7 @@ def test_task_submit_exec_failure(tmp_path, exc):
     # not a device test failure — with the "do not pass --execute-via-task-submit"
     # hint so the operator knows to drop the flag on this host.
     with patch.object(test_runner.subprocess, "run", side_effect=exc):
-        passed, error, _ = test_runner._run_artifact_via_task_submit(
-            tmp_path, "a2a3", _DfxOpts(), None, 600, 1800
-        )
+        passed, error, _ = test_runner._run_artifact_via_task_submit(tmp_path, "a2a3", _DfxOpts(), 600, 1800)
     assert passed is False
     assert "do not pass --execute-via-task-submit" in error
 
@@ -229,9 +222,7 @@ def test_batch_argv_and_per_artifact_results(tmp_path):
     # wd2 fails, wd3 has no marker (process died before reaching it).
     stdout = f"PYPTO_EXEC_RESULT=PASS work_dir={wd1} device=2\nPYPTO_EXEC_RESULT=FAIL work_dir={wd2}\n"
     with patch.object(test_runner.subprocess, "run", return_value=_proc(1, stdout, "boom")) as run:
-        results = test_runner._run_batch_via_task_submit(
-            entries, manifest, "auto", _DfxOpts(), "abc123", 600, 1800
-        )
+        results = test_runner._run_batch_via_task_submit(entries, manifest, "auto", _DfxOpts(), 600, 1800)
     # manifest written + batch command shape
     assert json.loads(manifest.read_text()) == [
         {"work_dir": str(wd1), "platform": "a2a3"},
@@ -241,7 +232,6 @@ def test_batch_argv_and_per_artifact_results(tmp_path):
     run_cmd = run.call_args.args[0][-1]
     assert "--batch-manifest" in run_cmd
     assert "--no-validate" in run_cmd
-    assert "--pto-isa-commit abc123" in run_cmd
     # per-artifact verdicts
     assert results[str(wd1)] == (True, None, 2)
     assert results[str(wd2)][0] is False  # FAIL marker
@@ -253,7 +243,7 @@ def test_batch_missing_task_submit(tmp_path):
     entries = [(tmp_path / "a@a2a3", "a2a3")]
     with patch.object(test_runner.subprocess, "run", side_effect=FileNotFoundError):
         results = test_runner._run_batch_via_task_submit(
-            entries, tmp_path / "b.json", "auto", _DfxOpts(), None, 600, 1800
+            entries, tmp_path / "b.json", "auto", _DfxOpts(), 600, 1800
         )
     ok, error, _ = results[str(tmp_path / "a@a2a3")]
     assert ok is False

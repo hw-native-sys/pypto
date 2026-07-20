@@ -227,7 +227,6 @@ def replay(
             list(tensors),
             platform=config.platform,
             device_id=config.device_id,
-            pto_isa_commit=config.pto_isa_commit,
             dfx=_DfxOpts.from_run_config(config),
         )
 

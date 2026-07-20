@@ -416,7 +416,6 @@ def _invoke_compiled(
         coerced,
         platform=platform,
         device_id=config.device_id,
-        pto_isa_commit=config.pto_isa_commit,
         dfx=_DfxOpts.from_run_config(config),
         block_dim=config.block_dim,
         aicpu_thread_num=config.aicpu_thread_num,
@@ -495,39 +494,26 @@ class _RuntimeFacade:
         :class:`CompiledProgram`) override this to redirect callers elsewhere.
         """
 
-    def _ensure_runtime_loaded(self, pto_isa_commit: str | None = None) -> None:
+    def _ensure_runtime_loaded(self) -> None:
         if self._chip_callable is not None:
             return
         self._check_runtime_access()
         from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
 
-        cc, rn, rc = compile_and_assemble(self._output_dir, self._platform, pto_isa_commit)
+        cc, rn, rc = compile_and_assemble(self._output_dir, self._platform)
         # Publish the "loaded" sentinel (_chip_callable) last so a reader can
         # never observe it set while _runtime_name / _runtime_config are None.
         self._runtime_name = rn
         self._runtime_config = rc
         self._chip_callable = cc
 
-    def load(self, *, pto_isa_commit: str | None = None) -> None:
+    def load(self) -> None:
         """Eagerly compile-and-load the runtime artefacts.
 
         Optional — :attr:`chip_callable`, :attr:`runtime_name`, and
-        :attr:`runtime_config` all auto-load on first access. Use this only when
-        you need to pin a specific ``pto_isa_commit`` (which must happen before
-        any property access, since the result is cached).
-
-        Raises:
-            RuntimeError: When runtime artefacts are already loaded and a
-                non-None ``pto_isa_commit`` is supplied — the cached build
-                cannot be re-pinned.
+        :attr:`runtime_config` all auto-load on first access.
         """
-        if self._chip_callable is not None and pto_isa_commit is not None:
-            raise RuntimeError(
-                "Runtime artefacts already loaded; pto_isa_commit cannot change. "
-                "Call load(pto_isa_commit=...) before any chip_callable / "
-                "runtime_name / runtime_config access."
-            )
-        self._ensure_runtime_loaded(pto_isa_commit)
+        self._ensure_runtime_loaded()
 
     @property
     def chip_callable(self) -> Any:

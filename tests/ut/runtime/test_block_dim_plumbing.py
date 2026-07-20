@@ -141,7 +141,7 @@ def patched_execute_compiled(tmp_path):
 
     chip_args = MagicMock(name="ChipStorageTaskArgs_instance")
 
-    def _compile_and_assemble(_work_dir, _platform, _commit=None):
+    def _compile_and_assemble(_work_dir, _platform):
         # The third element is the freshly-loaded RUNTIME_CONFIG dict; tests
         # parametrize it via ``patched_execute_compiled_runtime_config``.
         return (

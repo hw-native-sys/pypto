@@ -894,7 +894,7 @@ def benchmark(
             Mutually exclusive with *config*. **L2 only** — not accepted for L3
             (device set comes from ``distributed_config.device_ids``).
         config: Optional :class:`~pypto.runtime.RunConfig`. L2: full control
-            (``block_dim`` / ``aicpu_thread_num`` / ``pto_isa_commit``); pass this
+            (``block_dim`` / ``aicpu_thread_num``); pass this
             *or* *platform*/*device_id*, not both. L3: forwarded per dispatch for
             ring-sizing overrides (``ring_task_window`` / ``ring_heap`` /
             ``ring_dep_pool``); ``None`` reuses the prepared baseline.

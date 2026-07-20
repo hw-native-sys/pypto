@@ -23,6 +23,8 @@ _RUNTIME_PIN = "83d01313d9bfc247c4b7c8bcf969d1019f0d106f"
 @pytest.fixture
 def device_runner(monkeypatch):
     """Import ``device_runner`` without requiring the optional simpler package."""
+    import pypto.runtime as runtime_package  # noqa: PLC0415
+
     fake_kernel_compiler = SimpleNamespace(KernelCompiler=object)
     fake_task_interface = SimpleNamespace(
         CallConfig=object,
@@ -38,6 +40,7 @@ def device_runner(monkeypatch):
 
     module_name = "pypto.runtime.device_runner"
     previous = sys.modules.pop(module_name, None)
+    previous_attribute = getattr(runtime_package, "device_runner", None)
     try:
         module = importlib.import_module(module_name)
         yield module
@@ -45,6 +48,10 @@ def device_runner(monkeypatch):
         sys.modules.pop(module_name, None)
         if previous is not None:
             sys.modules[module_name] = previous
+        if previous_attribute is not None:
+            setattr(runtime_package, "device_runner", previous_attribute)
+        elif hasattr(runtime_package, "device_runner"):
+            delattr(runtime_package, "device_runner")
 
 
 def _configure_existing_clone(device_runner, monkeypatch, tmp_path):
@@ -71,31 +78,18 @@ def test_default_revision_uses_runtime_pin(device_runner, monkeypatch, tmp_path)
     update_latest.assert_not_called()
 
 
-def test_explicit_revision_overrides_runtime_pin(device_runner, monkeypatch, tmp_path):
-    clone_path = _configure_existing_clone(device_runner, monkeypatch, tmp_path)
-    pin_path = tmp_path / "pto_isa.pin"
-    pin_path.write_text(f"{_RUNTIME_PIN}\n")
-    monkeypatch.setattr(device_runner, "_PTO_ISA_PIN_PATH", pin_path)
-    checkout = Mock()
-    monkeypatch.setattr(device_runner, "_checkout_pto_isa_commit", checkout)
-
-    device_runner.ensure_pto_isa_root(commit="explicit-revision")
-
-    checkout.assert_called_once_with(clone_path, "explicit-revision")
-
-
-def test_environment_root_is_checked_out_at_runtime_pin(device_runner, monkeypatch, tmp_path):
+def test_environment_root_is_used_without_checkout(device_runner, monkeypatch, tmp_path):
     pto_isa_root = tmp_path / "external-pto-isa"
-    pin_path = tmp_path / "pto_isa.pin"
-    pin_path.write_text(f"{_RUNTIME_PIN}\n")
     monkeypatch.setenv("PTO_ISA_ROOT", str(pto_isa_root))
-    monkeypatch.setattr(device_runner, "_PTO_ISA_PIN_PATH", pin_path)
     checkout = Mock()
+    read_pin = Mock()
     monkeypatch.setattr(device_runner, "_checkout_pto_isa_commit", checkout)
+    monkeypatch.setattr(device_runner, "_read_runtime_pto_isa_pin", read_pin)
 
     assert device_runner.ensure_pto_isa_root() == str(pto_isa_root)
 
-    checkout.assert_called_once_with(pto_isa_root, _RUNTIME_PIN)
+    checkout.assert_not_called()
+    read_pin.assert_not_called()
 
 
 def test_fresh_clone_checks_out_runtime_pin(device_runner, monkeypatch, tmp_path):
@@ -117,6 +111,17 @@ def test_fresh_clone_checks_out_runtime_pin(device_runner, monkeypatch, tmp_path
     assert device_runner.ensure_pto_isa_root() == str(clone_path.resolve())
 
     checkout.assert_called_once_with(clone_path, _RUNTIME_PIN)
+
+
+def test_checkout_failure_does_not_return_unpinned_managed_clone(device_runner, monkeypatch, tmp_path):
+    _configure_existing_clone(device_runner, monkeypatch, tmp_path)
+    pin_path = tmp_path / "pto_isa.pin"
+    pin_path.write_text(f"{_RUNTIME_PIN}\n", encoding="utf-8")
+    monkeypatch.setattr(device_runner, "_PTO_ISA_PIN_PATH", pin_path)
+    monkeypatch.setattr(device_runner, "_checkout_pto_isa_commit", Mock(return_value=False))
+
+    assert device_runner.ensure_pto_isa_root() is None
+    assert "PTO_ISA_ROOT" not in device_runner.os.environ
 
 
 @pytest.mark.parametrize("pin_contents", [None, ""])

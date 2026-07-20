@@ -106,13 +106,10 @@ def test_dfx_flags_parsed_into_dfx_opts(tmp_path):
                 "5",
                 "--enable-dep-gen",
                 "--enable-scope-stats",
-                "--pto-isa-commit",
-                "abc123",
             )
         )
     assert rc == 0
     _, kwargs = run.call_args
-    assert kwargs["pto_isa_commit"] == "abc123"
     assert kwargs["dfx"] == _DfxOpts(
         enable_l2_swimlane=True,
         enable_dump_args=2,
@@ -127,7 +124,6 @@ def test_plain_run_has_default_dfx(tmp_path):
         main(_argv(tmp_path))
     _, kwargs = run.call_args
     assert kwargs["dfx"] == _DfxOpts()
-    assert kwargs["pto_isa_commit"] is None
     # Default (manual repro): validate in-process.
     assert kwargs["validate"] is True
 
@@ -145,8 +141,8 @@ def test_execute_artifact_dir_wires_compile_then_execute(tmp_path, stub_compile_
     chip = object()
     stub_compile_and_assemble.return_value = (chip, "tensormap_and_ringbuffer", {})
     with patch.object(execute_artifact, "_execute_on_device") as exec_on_dev:
-        execute_artifact_dir(tmp_path, "a2a3", 1, pto_isa_commit="deadbeef")
-    stub_compile_and_assemble.assert_called_once_with(tmp_path, "a2a3", pto_isa_commit="deadbeef")
+        execute_artifact_dir(tmp_path, "a2a3", 1)
+    stub_compile_and_assemble.assert_called_once_with(tmp_path, "a2a3")
     args, _ = exec_on_dev.call_args
     # work_dir, golden_path, chip_callable, runtime_name, platform, device_id
     assert args[0] == tmp_path

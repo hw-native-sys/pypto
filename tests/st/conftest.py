@@ -199,12 +199,6 @@ def pytest_addoption(parser):
         "Default: leave the runtime logger at its V5/INFO default.",
     )
     parser.addoption(
-        "--pto-isa-commit",
-        action="store",
-        default=None,
-        help="Override runtime/pto_isa.pin with a specific pto-isa commit (hash or tag).",
-    )
-    parser.addoption(
         "--analyze-auto-scopes-for-deps",
         action="store_true",
         default=False,
@@ -435,7 +429,6 @@ def test_config(request) -> RunConfig:
         save_kernels_dir=save_kernels_dir,
         dump_passes=request.config.getoption("--dump-passes"),
         codegen_only=request.config.getoption("--codegen-only"),
-        pto_isa_commit=request.config.getoption("--pto-isa-commit"),
         enable_l2_swimlane=request.config.getoption("--enable-l2-swimlane"),
         enable_dump_args=request.config.getoption("--dump-args"),
         enable_pmu=request.config.getoption("--enable-pmu"),
@@ -795,7 +788,6 @@ def pytest_collection_finish(session: pytest.Session) -> None:
 
     dump_passes: bool = session.config.getoption("--dump-passes")
     codegen_only: bool = session.config.getoption("--codegen-only")
-    pto_isa_commit: str | None = session.config.getoption("--pto-isa-commit")
     enable_l2_swimlane: bool = session.config.getoption("--enable-l2-swimlane")
     enable_dump_args: int = session.config.getoption("--dump-args")
     enable_pmu: int = session.config.getoption("--enable-pmu")
@@ -858,7 +850,6 @@ def pytest_collection_finish(session: pytest.Session) -> None:
         session_platform=session_platform,
         dump_passes=dump_passes,
         codegen_only=codegen_only,
-        pto_isa_commit=pto_isa_commit,
         compile_workers=max_workers,
         device_pool=device_pool,
         enable_l2_swimlane=enable_l2_swimlane,
