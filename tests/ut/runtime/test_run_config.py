@@ -11,6 +11,7 @@
 
 import sys
 import types
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -556,6 +557,56 @@ class TestRunConfigCompileForwarding:
         assert captured["dsa_reuse_penalty_recognizer"] == DsaReusePenaltyRecognizer.QUADRATIC
         assert captured["ptoas_sync_summary_dir"] == str(tmp_path / "sync")
         assert captured["skip_ptoas"] is False
+
+    def test_system_harness_forwards_dsa_reuse_recognizer(self, monkeypatch, tmp_path):
+        st_root = Path(__file__).resolve().parents[2] / "st"
+        monkeypatch.syspath_prepend(str(st_root))
+
+        from harness.core import test_runner as test_runner_mod  # noqa: PLC0415
+        from harness.core.harness import PTOTestCase  # noqa: PLC0415
+
+        captured: dict = {}
+
+        class Case(PTOTestCase):
+            def get_name(self):
+                return "dsa_recognizer_forwarding"
+
+            def define_tensors(self):
+                return []
+
+            def get_program(self):
+                return object()
+
+            def compute_expected(self, tensors, params=None):
+                del tensors, params
+
+        def fake_compile(_program, work_dir, **kwargs):
+            captured.update(kwargs)
+            (work_dir / "kernels").mkdir()
+            (work_dir / "kernels" / "kernel.pto").write_text("")
+            (work_dir / "orchestration").mkdir()
+            (work_dir / "orchestration" / "orchestration.cpp").write_text("")
+
+        monkeypatch.setattr(test_runner_mod, "compile_program", fake_compile)
+        case = Case()
+        case.inherit_session_compile_config(
+            MemoryPlanner.DSA,
+            None,
+            None,
+            DsaReusePenaltyRecognizer.QUADRATIC,
+            None,
+        )
+
+        test_runner_mod._compile_for_cache(
+            case,
+            tmp_path,
+            dump_passes=False,
+            analyze_auto_scopes_for_deps=False,
+            codegen_only=True,
+        )
+
+        assert captured["memory_planner"] == MemoryPlanner.DSA
+        assert captured["dsa_reuse_penalty_recognizer"] == DsaReusePenaltyRecognizer.QUADRATIC
 
     def test_execute_compiled_accepts_auto_scope_deps_switch(self, tmp_path, monkeypatch):
         captured: dict = {}

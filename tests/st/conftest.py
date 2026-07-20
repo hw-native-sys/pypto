@@ -133,6 +133,13 @@ def pytest_addoption(parser):
         help="Optional base directory for per-test fingerprinted DSA placement replay",
     )
     parser.addoption(
+        "--dsa-reuse-penalty-recognizer",
+        action="store",
+        choices=["disabled", "quadratic"],
+        default="disabled",
+        help="Experimental DSA reuse-hazard recognizer (default: disabled).",
+    )
+    parser.addoption(
         "--ptoas-sync-summary-dir",
         action="store",
         default=None,
@@ -487,6 +494,10 @@ def test_config(request) -> RunConfig:
         memory_planner=memory_planner,
         dsa_export_dir=request.config.getoption("--dsa-export-dir"),
         dsa_solution_dir=request.config.getoption("--dsa-solution-dir"),
+        dsa_reuse_penalty_recognizer={
+            "disabled": passes.DsaReusePenaltyRecognizer.DISABLED,
+            "quadratic": passes.DsaReusePenaltyRecognizer.QUADRATIC,
+        }[request.config.getoption("--dsa-reuse-penalty-recognizer")],
         ptoas_sync_summary_dir=request.config.getoption("--ptoas-sync-summary-dir"),
     )
 
@@ -854,6 +865,10 @@ def pytest_collection_finish(session: pytest.Session) -> None:
     }[session.config.getoption("--memory-planner")]
     dsa_export_dir: str | None = session.config.getoption("--dsa-export-dir")
     dsa_solution_dir: str | None = session.config.getoption("--dsa-solution-dir")
+    dsa_reuse_penalty_recognizer = {
+        "disabled": passes.DsaReusePenaltyRecognizer.DISABLED,
+        "quadratic": passes.DsaReusePenaltyRecognizer.QUADRATIC,
+    }[session.config.getoption("--dsa-reuse-penalty-recognizer")]
     ptoas_sync_summary_dir: str | None = session.config.getoption("--ptoas-sync-summary-dir")
     if memory_planner == passes.MemoryPlanner.DSA and not passes.is_dsa_solver_available():
         raise pytest.UsageError(
@@ -920,6 +935,7 @@ def pytest_collection_finish(session: pytest.Session) -> None:
         memory_planner=memory_planner,
         dsa_export_dir=dsa_export_dir,
         dsa_solution_dir=dsa_solution_dir,
+        dsa_reuse_penalty_recognizer=dsa_reuse_penalty_recognizer,
         ptoas_sync_summary_dir=ptoas_sync_summary_dir,
         enable_l2_swimlane=enable_l2_swimlane,
         enable_dump_args=enable_dump_args,
